@@ -321,8 +321,10 @@ pub(crate) mod constants {
     pub(crate) const CURL_VERSION_SSL: i64 = 4;
     pub(crate) const CURL_VERSION_SSPI: i64 = 2048;
     pub(crate) const CURLOPT_HTTPAUTH: i64 = 107;
-    pub(crate) const CURLAUTH_ANY: i64 = 4294967279;
-    pub(crate) const CURLAUTH_ANYSAFE: i64 = 4294967278;
+    // The keg's libcurl 8.23 headers, which the oracle compiled against,
+    // leave `CURLAUTH_HTTPSIG` (bit 8) out of both, as `@cvalue` reads them.
+    pub(crate) const CURLAUTH_ANY: i64 = 4294967023;
+    pub(crate) const CURLAUTH_ANYSAFE: i64 = 4294967022;
     pub(crate) const CURLAUTH_BASIC: i64 = 1;
     pub(crate) const CURLAUTH_DIGEST: i64 = 2;
     pub(crate) const CURLAUTH_GSSNEGOTIATE: i64 = 4;
