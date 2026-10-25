@@ -523,11 +523,13 @@ impl FileHandles {
     }
 }
 
-/// A body write the host could not make, php's hosts'
+/// A write the host could not make. For the body, php's hosts'
 /// `php_handle_aborted_connection` (`Z/main/main.c:2722`): the client
 /// went away, or the process's fd 1 refused it; with what the host sets
 /// `EG(exit_status)` to first, php's CLI 255 (`sapi_cli_ub_write`), and
-/// nothing for a host that sets none, as the built-in server.
+/// nothing for a host that sets none, as the built-in server. For the
+/// header block, `SAPI_HEADER_SEND_FAILED`, which sets no status
+/// ([`OutputSink::send_headers`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Aborted {
     pub exit_status: Option<i32>,
