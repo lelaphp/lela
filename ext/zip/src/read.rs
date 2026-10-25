@@ -1561,6 +1561,12 @@ impl Reader {
         }
     }
 
+    /// Whether the entry is read from the archive's own file, as an
+    /// unchanged entry is, where an added one is read from its source.
+    pub(crate) fn reads_archive(&mut self) -> bool {
+        self.window_mut().is_some_and(|w| w.archive)
+    }
+
     /// `zip_fread` through `file`, the archive's `FILE`, which its data
     /// is read through where an added file's is read through its own: it
     /// is lent to the window for the read and taken back.

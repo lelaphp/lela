@@ -7,7 +7,7 @@
 
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::archive::{
     AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE, AFL_IS_TORRENTZIP, Archive, CM_BZIP2, CM_DEFAULT,
@@ -21,50 +21,83 @@ use crate::dostime::TORRENTZIP;
 use crate::error::{Detail, Done, Er, Failed, Status};
 use crate::strings::{Enc, ZStr};
 
-/// What a running `close` asks the program: the progress callback with
-/// how far it is, and the cancel callback, whose `true` cancels.
-pub(crate) trait Hooks {
+/// What a running close reaches beside what it writes: the archive, live
+/// in its holder between the callbacks as libzip's `za` stays live under
+/// `zip_close` (php's `archive->za`), and the progress and cancel
+/// callbacks, which may reach the archive in turn. The close reaches it
+/// afresh past each callback, so no borrow of it is held across one.
+pub(crate) trait Program {
+    /// The archive under its close; `None` once it has no holder.
+    fn archive(&mut self) -> Option<&mut Archive>;
+    /// The progress callback, told how far the close is.
     fn progress(&mut self, current: f64);
+    /// The cancel callback, whose `true` cancels.
     fn cancel(&mut self) -> bool;
+    /// `open_count > 1` at `zip_source_commit_write`: whether a
+    /// `zip_file_t` besides the close's own reads the archive's file.
+    fn in_use(&mut self) -> bool;
 }
 
-/// `zip_progress_t`.
-struct Progress<'h> {
-    hooks: &'h mut dyn Hooks,
-    precision: Option<f64>,
-    cancel: bool,
+/// The archive under its close, or `ZIP_ER_INTERNAL` where it has none.
+fn live(program: &mut dyn Program) -> Result<&mut Archive, Status> {
+    program.archive().ok_or(Status::of(Er::Internal, 0))
+}
+
+/// What the archive has registered, read at each point as libzip reads
+/// `za->progress`: the progress callback's precision, and whether a
+/// cancel callback is there.
+fn registered(program: &mut dyn Program) -> (Option<f64>, bool) {
+    program
+        .archive()
+        .map_or((None, false), |za| (za.progress, za.cancel))
+}
+
+/// `ZIP_ER_CANCELLED` set on the archive, and what it holds then.
+fn cancelled(program: &mut dyn Program) -> Status {
+    match program.archive() {
+        Some(za) => {
+            za.error.set(Er::Cancelled, 0);
+            za.error
+        }
+        None => Status::of(Er::Cancelled, 0),
+    }
+}
+
+/// `zip_progress_t`'s state: the last value the progress callback was
+/// told, and the share of the close the entry being written spans.
+struct Progress {
     last: f64,
     start: f64,
     end: f64,
 }
 
-impl Progress<'_> {
+impl Progress {
     /// `_zip_progress_start`: `true` where the program cancelled.
-    fn start(&mut self) -> bool {
-        if self.precision.is_some() {
+    fn start(&mut self, program: &mut dyn Program) -> bool {
+        if registered(program).0.is_some() {
             self.last = 0.0;
-            self.hooks.progress(0.0);
+            program.progress(0.0);
         }
-        self.cancel && self.hooks.cancel()
+        registered(program).1 && program.cancel()
     }
 
     /// `_zip_progress_subrange`.
-    fn subrange(&mut self, start: f64, end: f64) -> bool {
+    fn subrange(&mut self, program: &mut dyn Program, start: f64, end: f64) -> bool {
         self.start = start;
         self.end = end;
-        self.update(0.0)
+        self.update(program, 0.0)
     }
 
     /// `_zip_progress_update`.
-    fn update(&mut self, sub: f64) -> bool {
-        if let Some(precision) = self.precision {
+    fn update(&mut self, program: &mut dyn Program, sub: f64) -> bool {
+        if let Some(precision) = registered(program).0 {
             let current = sub.clamp(0.0, 1.0) * (self.end - self.start) + self.start;
             if current - self.last > precision || (self.last < 1.0 && current >= 1.0) {
-                self.hooks.progress(current);
+                program.progress(current);
                 self.last = current;
             }
         }
-        self.cancel && self.hooks.cancel()
+        registered(program).1 && program.cancel()
     }
 }
 
@@ -364,75 +397,304 @@ fn torrentzip_normalize(de: &mut Dirent) {
     de.ext_attrib = 0;
 }
 
+/// `zip_close`: the changes written, or nothing where nothing changed;
+/// `umask` is the one a new file is created under. The archive is
+/// `program`'s, reached past each callback afresh, so a callback reads
+/// and changes the archive being written as libzip lets it: an entry it
+/// adds is not written, and a stream of the archive's own data open at
+/// the commit fails it.
+pub(crate) fn close(program: &mut dyn Program, umask: u32) -> Done {
+    let Some(za) = program.archive() else {
+        return Err(Failed);
+    };
+    let (changed, survivors) = za.changed();
+    if survivors == 0 && za.ch_flags & AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE == 0 {
+        if (za.open_flags & TRUNCATE != 0 || changed)
+            && let Err(e) = std::fs::remove_file(&za.path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            za.error = Status::of(Er::Remove, e.raw_os_error().unwrap_or(0));
+            return Err(Failed);
+        }
+        return Ok(());
+    }
+    if !changed && survivors > 0 {
+        return Ok(());
+    }
+    let torrentzip = za.want_torrentzip();
+    let mut list: Vec<(usize, Option<Vec<u8>>)> = Vec::new();
+    for i in 0..za.entries.len() {
+        if !za.entries[i].deleted {
+            let name = za.get_name(i, 0).ok();
+            list.push((i, name));
+        }
+    }
+    if torrentzip {
+        list.sort_by(|a, b| torrentzip_order(a.1.as_ref(), b.1.as_ref()));
+    }
+    let unchanged = if torrentzip {
+        0
+    } else {
+        za.unchanged_offset()?
+    };
+    let (tmp, file) = za.temp_output(umask)?;
+    let mut out = Out {
+        file: BufWriter::new(file),
+        pos: 0,
+        crc: None,
+    };
+    let mut progress = Progress {
+        last: 0.0,
+        start: 0.0,
+        end: 1.0,
+    };
+    let committed = match write_all(
+        program,
+        &mut out,
+        &list,
+        unchanged,
+        &mut progress,
+        torrentzip,
+    ) {
+        Ok(()) => {
+            let committed = commit(program, out, &tmp);
+            // `_zip_progress_end`, past the commit whether it took or not.
+            progress.update(program, 1.0);
+            committed
+        }
+        Err(status) => {
+            drop(out);
+            Err(status)
+        }
+    };
+    let Err(status) = committed else {
+        return Ok(());
+    };
+    std::fs::remove_file(&tmp).ok();
+    if status != Status::default()
+        && let Some(za) = program.archive()
+    {
+        za.error = status;
+    }
+    Err(Failed)
+}
+
+/// `zip_source_commit_write`: `ZIP_ER_INUSE` while a `zip_file_t`
+/// besides the close's own reads the archive's file, then the temporary
+/// file flushed and renamed over the archive.
+fn commit(program: &mut dyn Program, mut out: Out, tmp: &Path) -> Result<(), Status> {
+    if program.in_use() {
+        return Err(Status::of(Er::Inuse, 0));
+    }
+    out.file
+        .flush()
+        .map_err(|e| Status::of(Er::Write, e.raw_os_error().unwrap_or(0)))?;
+    drop(out);
+    let path = live(program)?.path.clone();
+    std::fs::rename(tmp, &path).map_err(|e| Status::of(Er::Rename, e.raw_os_error().unwrap_or(0)))
+}
+
+/// The body of `zip_close` past `zip_source_begin_write`: the kept part
+/// of the old file, each surviving entry, and the central directory.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "zip_close's progress as libzip's doubles"
+)]
+fn write_all(
+    program: &mut dyn Program,
+    out: &mut Out,
+    list: &[(usize, Option<Vec<u8>>)],
+    unchanged: u64,
+    progress: &mut Progress,
+    torrentzip: bool,
+) -> Result<(), Status> {
+    if unchanged > 0
+        && let Some(d) = &mut live(program)?.data
+    {
+        let sys = |e: std::io::Error| Status::of(Er::Read, e.raw_os_error().unwrap_or(0));
+        d.file.seek(SeekFrom::Start(0)).map_err(sys)?;
+        let mut prefix = Vec::new();
+        Read::by_ref(&mut d.file)
+            .take(unchanged)
+            .read_to_end(&mut prefix)
+            .map_err(sys)?;
+        // The clone of a file cut short is extended with zeros
+        // (`create_temp_output_cloning`'s `ftruncate`).
+        prefix.resize(usize::try_from(unchanged).unwrap_or(prefix.len()), 0);
+        out.write(&prefix)?;
+    }
+    if progress.start(program) {
+        return Err(cancelled(program));
+    }
+    let survivors = list.len() as f64;
+    for (j, (i, _)) in list.iter().enumerate() {
+        if progress.subrange(program, j as f64 / survivors, (j + 1) as f64 / survivors) {
+            return Err(cancelled(program));
+        }
+        let Some(entry) = live(program)?.entry(*i, out.pos, unchanged, torrentzip)? else {
+            continue;
+        };
+        out.write(&entry.header)?;
+        let total = entry.data.len() as f64;
+        let chunks = entry.data.chunks(8192).count();
+        let mut done = 0usize;
+        for (n, chunk) in entry.data.chunks(8192).enumerate() {
+            out.write(chunk)?;
+            done += chunk.len();
+            let at = match entry.pace {
+                Pace::Copy => Some(done as f64 / total),
+                Pace::Add { size } => {
+                    (chunk.len() == 8192 && n + 1 < chunks).then(|| done as f64 / size)
+                }
+            };
+            if at.is_some_and(|at| progress.update(program, at)) {
+                return Err(cancelled(program));
+            }
+        }
+        if let Some(descriptor) = &entry.descriptor {
+            out.write(descriptor)?;
+        }
+    }
+    live(program)?.write_cdir(out, list, torrentzip)
+}
+
+/// One surviving entry as `zip_close`'s loop writes it: its local header,
+/// its data and the `write_data_descriptor` record after them.
+struct Written {
+    header: Vec<u8>,
+    data: Vec<u8>,
+    pace: Pace,
+    descriptor: Option<Vec<u8>>,
+}
+
+/// When the progress callback hears of an entry's data written.
+#[derive(Clone, Copy)]
+enum Pace {
+    /// `copy_data`: after each buffer, as the share of the data written.
+    Copy,
+    /// `add_data`: after each full buffer but the last, as the share of
+    /// the uncompressed `size` the buffers so far make.
+    Add { size: f64 },
+}
+
 impl Archive {
-    /// `zip_close`: the changes written, or nothing where nothing
-    /// changed; `umask` is the one a new file is created under.
-    pub(crate) fn close(&mut self, hooks: &mut dyn Hooks, umask: u32) -> Done {
-        let (changed, survivors) = self.changed();
-        if survivors == 0 && self.ch_flags & AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE == 0 {
-            if (self.open_flags & TRUNCATE != 0 || changed)
-                && let Err(e) = std::fs::remove_file(&self.path)
-                && e.kind() != std::io::ErrorKind::NotFound
-            {
-                self.error = Status::of(Er::Remove, e.raw_os_error().unwrap_or(0));
-                return Err(Failed);
+    /// One turn of `zip_close`'s loop for entry `i`, written at `offset`:
+    /// its dirent made of its changes and its original, kept as its
+    /// changes before its data is written, so a callback that changes the
+    /// entry meanwhile changes what the central directory says of it;
+    /// `None` for an entry the kept part of the old file holds.
+    fn entry(
+        &mut self,
+        i: usize,
+        offset: u64,
+        unchanged: u64,
+        torrentzip: bool,
+    ) -> Result<Option<Written>, Status> {
+        let Some(entry) = self.entries.get(i) else {
+            self.error.set(Er::Internal, 0);
+            return Err(self.error);
+        };
+        if entry.orig.as_ref().is_some_and(|o| o.offset < unchanged) {
+            return Ok(None);
+        }
+        if entry.orig.is_none() && entry.source.is_none() {
+            self.error.set(Er::Internal, 0);
+            return Err(self.error);
+        }
+        let new_data = entry.source.is_some()
+            || entry.changed(D_COMP_METHOD)
+            || entry.changed(D_ENCRYPTION_METHOD)
+            || (torrentzip && self.flags & AFL_IS_TORRENTZIP == 0);
+        let replacing = entry.source.is_some();
+        if self.read_local_ef(i).is_err() {
+            return Err(self.error);
+        }
+        let e = &mut self.entries[i];
+        let mut de = match (e.changes.take(), &e.orig) {
+            (None, orig) => {
+                let mut de = orig.clone().unwrap_or_default();
+                de.changed = 0;
+                de
             }
-            return Ok(());
-        }
-        if !changed && survivors > 0 {
-            return Ok(());
-        }
-        let torrentzip = self.want_torrentzip();
-        let mut list: Vec<(usize, Option<Vec<u8>>)> = Vec::new();
-        for i in 0..self.entries.len() {
-            if !self.entries[i].deleted {
-                let name = self.get_name(i, 0).ok();
-                list.push((i, name));
-            }
-        }
+            (Some(c), None) => c,
+            (Some(c), Some(o)) => merge(c, o, replacing),
+        };
         if torrentzip {
-            list.sort_by(|a, b| torrentzip_order(a.1.as_ref(), b.1.as_ref()));
+            torrentzip_normalize(&mut de);
         }
-        let unchanged = if torrentzip {
-            0
+        de.offset = offset;
+        let written = if new_data {
+            self.add_data(i, &mut de, torrentzip)
         } else {
-            self.unchanged_offset()?
+            self.copied(i, &mut de, torrentzip)
         };
-        let (tmp, file) = self.temp_output(umask)?;
-        let mut out = Out {
-            file: BufWriter::new(file),
-            pos: 0,
-            crc: None,
-        };
-        let mut progress = Progress {
-            hooks,
-            precision: self.progress,
-            cancel: self.cancel,
-            last: 0.0,
-            start: 0.0,
-            end: 1.0,
-        };
-        let written = self.write_all(&mut out, &list, unchanged, &mut progress, torrentzip);
-        let flushed = written.and_then(|()| {
-            out.file
-                .flush()
-                .map_err(|e| Status::of(Er::Write, e.raw_os_error().unwrap_or(0)))
-        });
-        drop(out);
-        if let Err(status) = flushed {
-            std::fs::remove_file(&tmp).ok();
-            if status != Status::default() {
-                self.error = status;
-            }
-            return Err(Failed);
+        self.entries[i].changes = Some(de);
+        written.map(Some)
+    }
+
+    /// An entry whose data is copied as it stands: its local header
+    /// written anew, with the sizes after the data dropped but under
+    /// PKWARE's encryption, whose check reads them.
+    fn copied(&mut self, i: usize, de: &mut Dirent, torrentzip: bool) -> Result<Written, Status> {
+        if de.encryption_method != EM_TRAD_PKWARE {
+            de.bitflags &= !GPBF_DATA_DESCRIPTOR;
         }
-        if let Err(e) = std::fs::rename(&tmp, &self.path) {
-            std::fs::remove_file(&tmp).ok();
-            self.error = Status::of(Er::Rename, e.raw_os_error().unwrap_or(0));
-            return Err(Failed);
+        let header = dirent_bytes(de, false, torrentzip)?;
+        let data = self.raw_data(i).inspect_err(|s| self.error = *s)?;
+        Ok(Written {
+            header,
+            data,
+            pace: Pace::Copy,
+            descriptor: (de.bitflags & GPBF_DATA_DESCRIPTOR != 0).then(|| data_descriptor(de)),
+        })
+    }
+
+    /// `write_cdir`: the central directory, then the Zip64 end records
+    /// where they are needed, then the end record with the comment, or
+    /// torrentzip's in its place.
+    fn write_cdir(
+        &mut self,
+        out: &mut Out,
+        list: &[(usize, Option<Vec<u8>>)],
+        torrentzip: bool,
+    ) -> Result<(), Status> {
+        let offset = out.pos;
+        if torrentzip {
+            out.crc = Some(crc32fast::Hasher::new());
         }
-        progress.update(1.0);
-        Ok(())
+        for (i, _) in list {
+            let Some(e) = self.entries.get_mut(*i) else {
+                continue;
+            };
+            let ((Some(de), _) | (None, Some(de))) = (&mut e.changes, &mut e.orig) else {
+                continue;
+            };
+            out.write(&dirent_bytes(de, true, torrentzip)?)?;
+        }
+        let cdir_crc = out.crc.take().map(crc32fast::Hasher::finalize);
+        let size = out.pos - offset;
+        let n = list.len() as u64;
+        let mut b = Vec::new();
+        if n > 0xffff || offset > 0xffff_ffff || size > 0xffff_ffff {
+            b.extend_from_slice(b"PK\x06\x06");
+            put!(b; 44u64, 45u16, 45u16, 0u64, n, n, size, offset);
+            b.extend_from_slice(b"PK\x06\x07");
+            put!(b; 0u32, offset + size, 1u32);
+        }
+        b.extend_from_slice(b"PK\x05\x06");
+        put!(b; 0u32, u16_of(n), u16_of(n), u32_of(size), u32_of(offset));
+        let comment = if self.comment_changed {
+            self.comment_changes.as_ref()
+        } else {
+            self.comment_orig.as_ref()
+        };
+        let comment: Vec<u8> = match cdir_crc {
+            Some(crc) => format!("TORRENTZIPPED-{crc:08X}").into_bytes(),
+            None => comment.map(|c| c.raw.clone()).unwrap_or_default(),
+        };
+        put!(b; u16_of(comment.len()));
+        b.extend_from_slice(&comment);
+        out.write(&b)
     }
 
     /// The offset up to which the old file is kept: the first changed
@@ -525,137 +787,6 @@ impl Archive {
         Err(Failed)
     }
 
-    /// The body of `zip_close` past `zip_source_begin_write`.
-    #[expect(
-        clippy::too_many_lines,
-        clippy::cast_precision_loss,
-        reason = "zip_close's one loop, and its progress as libzip's doubles"
-    )]
-    fn write_all(
-        &mut self,
-        out: &mut Out,
-        list: &[(usize, Option<Vec<u8>>)],
-        unchanged: u64,
-        progress: &mut Progress<'_>,
-        torrentzip: bool,
-    ) -> Result<(), Status> {
-        let fail = |a: &mut Archive, er: Er| -> Status {
-            a.error.set(er, 0);
-            a.error
-        };
-        if unchanged > 0
-            && let Some(d) = &mut self.data
-        {
-            let sys = |e: std::io::Error| Status::of(Er::Read, e.raw_os_error().unwrap_or(0));
-            d.file.seek(SeekFrom::Start(0)).map_err(sys)?;
-            let mut prefix = Vec::new();
-            Read::by_ref(&mut d.file)
-                .take(unchanged)
-                .read_to_end(&mut prefix)
-                .map_err(sys)?;
-            // The clone of a file cut short is extended with zeros
-            // (`create_temp_output_cloning`'s `ftruncate`).
-            prefix.resize(usize::try_from(unchanged).unwrap_or(prefix.len()), 0);
-            out.write(&prefix)?;
-        }
-        if progress.start() {
-            return Err(fail(self, Er::Cancelled));
-        }
-        let survivors = list.len() as f64;
-        for (j, (i, _)) in list.iter().enumerate() {
-            let i = *i;
-            if progress.subrange(j as f64 / survivors, (j + 1) as f64 / survivors) {
-                return Err(fail(self, Er::Cancelled));
-            }
-            let entry = &self.entries[i];
-            if entry.orig.as_ref().is_some_and(|o| o.offset < unchanged) {
-                continue;
-            }
-            if entry.orig.is_none() && entry.source.is_none() {
-                return Err(fail(self, Er::Internal));
-            }
-            let new_data = entry.source.is_some()
-                || entry.changed(D_COMP_METHOD)
-                || entry.changed(D_ENCRYPTION_METHOD)
-                || (torrentzip && self.flags & AFL_IS_TORRENTZIP == 0);
-            let replacing = entry.source.is_some();
-            if self.read_local_ef(i).is_err() {
-                return Err(self.error);
-            }
-            let e = &mut self.entries[i];
-            let mut de = match (e.changes.take(), &e.orig) {
-                (None, orig) => {
-                    let mut de = orig.clone().unwrap_or_default();
-                    de.changed = 0;
-                    de
-                }
-                (Some(c), None) => c,
-                (Some(c), Some(o)) => merge(c, o, replacing),
-            };
-            if torrentzip {
-                torrentzip_normalize(&mut de);
-            }
-            de.offset = out.pos;
-            if new_data {
-                self.add_data(i, &mut de, out, progress, torrentzip)?;
-            } else {
-                if de.encryption_method != EM_TRAD_PKWARE {
-                    de.bitflags &= !GPBF_DATA_DESCRIPTOR;
-                }
-                out.write(&dirent_bytes(&mut de, false, torrentzip)?)?;
-                let raw = self.raw_data(i).inspect_err(|s| self.error = *s)?;
-                let total = raw.len() as f64;
-                let mut done = 0usize;
-                for chunk in raw.chunks(8192) {
-                    out.write(chunk)?;
-                    done += chunk.len();
-                    if progress.update(done as f64 / total) {
-                        return Err(fail(self, Er::Cancelled));
-                    }
-                }
-                if de.bitflags & GPBF_DATA_DESCRIPTOR != 0 {
-                    out.write(&data_descriptor(&de))?;
-                }
-            }
-            self.entries[i].changes = Some(de);
-        }
-        let offset = out.pos;
-        if torrentzip {
-            out.crc = Some(crc32fast::Hasher::new());
-        }
-        for (i, _) in list {
-            let e = &mut self.entries[*i];
-            let ((Some(de), _) | (None, Some(de))) = (&mut e.changes, &mut e.orig) else {
-                continue;
-            };
-            out.write(&dirent_bytes(de, true, torrentzip)?)?;
-        }
-        let cdir_crc = out.crc.take().map(crc32fast::Hasher::finalize);
-        let size = out.pos - offset;
-        let n = list.len() as u64;
-        let mut b = Vec::new();
-        if n > 0xffff || offset > 0xffff_ffff || size > 0xffff_ffff {
-            b.extend_from_slice(b"PK\x06\x06");
-            put!(b; 44u64, 45u16, 45u16, 0u64, n, n, size, offset);
-            b.extend_from_slice(b"PK\x06\x07");
-            put!(b; 0u32, offset + size, 1u32);
-        }
-        b.extend_from_slice(b"PK\x05\x06");
-        put!(b; 0u32, u16_of(n), u16_of(n), u32_of(size), u32_of(offset));
-        let comment = if self.comment_changed {
-            self.comment_changes.as_ref()
-        } else {
-            self.comment_orig.as_ref()
-        };
-        let comment: Vec<u8> = match cdir_crc {
-            Some(crc) => format!("TORRENTZIPPED-{crc:08X}").into_bytes(),
-            None => comment.map(|c| c.raw.clone()).unwrap_or_default(),
-        };
-        put!(b; u16_of(comment.len()));
-        b.extend_from_slice(&comment);
-        out.write(&b)
-    }
-
     /// `add_data`: the entry's data from its source or its old self,
     /// decrypted, decompressed, compressed and encrypted as its dirent
     /// asks, the dirent written before it. An unchanged entry is read as
@@ -683,14 +814,7 @@ impl Archive {
         clippy::cast_precision_loss,
         reason = "add_data's progress as libzip's doubles"
     )]
-    fn add_data(
-        &mut self,
-        i: usize,
-        de: &mut Dirent,
-        out: &mut Out,
-        progress: &mut Progress<'_>,
-        torrentzip: bool,
-    ) -> Result<(), Status> {
+    fn add_data(&mut self, i: usize, de: &mut Dirent, torrentzip: bool) -> Result<Written, Status> {
         // The data as `add_data`'s source gives it: a new source's bytes,
         // or the unchanged entry through `zip_source_zip_file_create(za, i,
         // ZIP_FL_UNCHANGED, ...)`, decrypted with the default password,
@@ -768,23 +892,14 @@ impl Archive {
         if !torrentzip {
             apply_attributes(de, &attrs);
         }
-        out.write(&dirent_bytes(de, false, torrentzip)?)?;
-        let total = size.max(1) as f64;
-        let chunks = data.chunks(8192).count().max(1);
-        for (n, chunk) in data.chunks(8192).enumerate() {
-            out.write(chunk)?;
-            if chunk.len() == 8192
-                && n + 1 < chunks
-                && progress.update(((n + 1) * 8192) as f64 / total)
-            {
-                self.error.set(Er::Cancelled, 0);
-                return Err(self.error);
-            }
-        }
-        if de.bitflags & GPBF_DATA_DESCRIPTOR != 0 {
-            out.write(&data_descriptor(de))?;
-        }
-        Ok(())
+        Ok(Written {
+            header: dirent_bytes(de, false, torrentzip)?,
+            data,
+            pace: Pace::Add {
+                size: size.max(1) as f64,
+            },
+            descriptor: (de.bitflags & GPBF_DATA_DESCRIPTOR != 0).then(|| data_descriptor(de)),
+        })
     }
 }
 

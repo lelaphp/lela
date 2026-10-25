@@ -37,6 +37,7 @@ pub(crate) enum Er {
     Nopasswd = 26,
     Wrongpasswd = 27,
     Opnotsupp = 28,
+    Inuse = 29,
     CompressedData = 31,
     Cancelled = 32,
     DataLength = 33,

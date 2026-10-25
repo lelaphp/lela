@@ -62,18 +62,26 @@ fn entry_type(req: &mut Request) -> ResourceType {
     reason = "the resource destructor's shape, which a destructor that throws needs"
 )]
 fn free_dir(req: &mut Request, res: Resource) -> Result<(), Thrown> {
-    struct None_;
-    impl crate::write::Hooks for None_ {
+    /// A close no callback is registered for, of an archive no stream
+    /// reads.
+    struct Alone(Box<Archive>);
+    impl crate::write::Program for Alone {
+        fn archive(&mut self) -> Option<&mut Archive> {
+            Some(&mut self.0)
+        }
         fn progress(&mut self, _: f64) {}
         fn cancel(&mut self) -> bool {
             false
         }
+        fn in_use(&mut self) -> bool {
+            false
+        }
     }
-    let Some(mut za) = res.native_mut::<Dir>(req).and_then(|d| d.za.take()) else {
+    let Some(za) = res.native_mut::<Dir>(req).and_then(|d| d.za.take()) else {
         return Ok(());
     };
     let umask = req.environment().umask();
-    if za.close(&mut None_, umask).is_err() {
+    if crate::write::close(&mut Alone(za), umask).is_err() {
         docref(req, Level::Warning, "Cannot destroy the zip context");
     }
     Ok(())

@@ -6,8 +6,11 @@
 //! its own stream is garbage as php collects it. The holder keeps what
 //! libzip keeps for the archive besides: its stdio `FILE`, which the
 //! archive and its streams read through, the progress and cancel
-//! callbacks, and php's `close` member, which refuses a second close from
-//! a callback the first serves.
+//! callbacks, the count of streams reading the archive's own file, and
+//! php's `close` member, which refuses a second close from a callback the
+//! first serves. Under its close the archive stays in its holder, as
+//! php's `archive->za` stays live under `zip_close`, so a callback reaches
+//! it as it reaches an open one.
 
 use std::collections::HashMap;
 
@@ -23,7 +26,7 @@ use crate::archive::Archive;
 use crate::c;
 use crate::error::{Er, Status};
 use crate::read::{Reader, Stdio};
-use crate::write::Hooks;
+use crate::write::{self, Program};
 
 /// A callable kept past the call that registered it, `zend_fcc_dup`.
 pub(crate) type Kept = Box<Owner<Callable>>;
@@ -36,9 +39,9 @@ pub(crate) struct ArchiveId(u64);
 enum Za {
     /// Open, with its stdio `FILE`.
     Open(Box<Archive>, Option<Stdio>),
-    /// Out of the holder for the length of its close, under php's
-    /// `close` member.
-    Closing,
+    /// Under its close, php's `close` member set, with its `FILE` lent to
+    /// it for the close's length.
+    Closing(Box<Archive>),
     /// Closed under the streams that still hold it, whose reads fail as
     /// libzip's invalidated sources fail.
     Closed,
@@ -48,6 +51,9 @@ enum Za {
 struct Holder {
     za: Za,
     refcount: u32,
+    /// The streams whose `zip_file_t` reads the archive's own file, each
+    /// one of libzip's opens of `za->src` past the archive's own.
+    readers: u32,
     progress: Option<Kept>,
     cancel: Option<Kept>,
 }
@@ -99,6 +105,7 @@ pub(crate) fn create(req: &mut Request, mut za: Archive) -> ArchiveId {
     let holder = Holder {
         za: Za::Open(Box::new(za), file),
         refcount: 1,
+        readers: 0,
         progress: None,
         cancel: None,
     };
@@ -106,46 +113,75 @@ pub(crate) fn create(req: &mut Request, mut za: Archive) -> ArchiveId {
     id
 }
 
-/// `php_zip_archive_addref`.
-pub(crate) fn addref(req: &mut Request, id: ArchiveId) {
-    if let Some(h) = get(req, id) {
-        h.refcount += 1;
+/// A stream's count of archive `id` (`self->archive`), and whether its
+/// `zip_file_t` reads the archive's own file, which a close's commit is
+/// refused under: taken by [`hold`] once the stream is made, given back
+/// by [`Hold::let_go`].
+pub(crate) struct Hold {
+    pub(crate) id: ArchiveId,
+    reads_file: bool,
+}
+
+impl Hold {
+    pub(crate) fn new(id: ArchiveId, reads_file: bool) -> Hold {
+        Hold { id, reads_file }
+    }
+
+    /// The hold given back: the stream's `zip_fclose`, then its count
+    /// released.
+    pub(crate) fn let_go(self, req: &mut Request) {
+        if let Some(h) = get(req, self.id) {
+            h.readers -= u32::from(self.reads_file && h.readers > 0);
+        }
+        release(req, self.id);
     }
 }
 
-/// Archive `id` where it is open.
+/// `php_zip_archive_addref` for a stream of archive `id`, counted among
+/// its readers where it reads the archive's own file.
+pub(crate) fn hold(req: &mut Request, id: ArchiveId, reads_file: bool) {
+    if let Some(h) = get(req, id) {
+        h.refcount += 1;
+        h.readers += u32::from(reads_file);
+    }
+}
+
+/// Archive `id` where it is open, or under its close.
 pub(crate) fn archive(req: &mut Request, id: ArchiveId) -> Option<&mut Archive> {
     match &mut get(req, id)?.za {
-        Za::Open(za, _) => Some(za),
-        Za::Closing | Za::Closed => None,
+        Za::Open(za, _) | Za::Closing(za) => Some(za),
+        Za::Closed => None,
     }
 }
 
 /// php's `close` member: whether archive `id` is under its close.
 pub(crate) fn closing(req: &mut Request, id: ArchiveId) -> bool {
-    get(req, id).is_some_and(|h| matches!(h.za, Za::Closing))
+    get(req, id).is_some_and(|h| matches!(h.za, Za::Closing(_)))
 }
 
-/// `op` on archive `id` with its `FILE` lent to it; `None` where it is
-/// not open.
+/// `op` on archive `id` with its `FILE` lent to it, which it holds
+/// already under its close; `None` where it is closed.
 pub(crate) fn with_file<T>(
     req: &mut Request,
     id: ArchiveId,
     op: impl FnOnce(&mut Archive) -> T,
 ) -> Option<T> {
-    let Za::Open(za, file) = &mut get(req, id)?.za else {
-        return None;
-    };
-    za.lend(file);
-    let out = op(za);
-    za.lend(file);
-    Some(out)
+    match &mut get(req, id)?.za {
+        Za::Open(za, file) => {
+            za.lend(file);
+            let out = op(za);
+            za.lend(file);
+            Some(out)
+        }
+        Za::Closing(za) => Some(op(za)),
+        Za::Closed => None,
+    }
 }
 
 /// `zip_fread` on an entry of archive `id` through its `FILE`, which
-/// fails with `ZIP_ER_ZIPCLOSED` from the archive's close on. Under the
-/// close itself the `FILE` is the close's, and a read a callback makes
-/// meanwhile fails the same way, that once.
+/// fails with `ZIP_ER_ZIPCLOSED` once the archive is closed. Under its
+/// close the read is one a callback makes, through the `FILE` the close
+/// holds.
 pub(crate) fn read(
     req: &mut Request,
     id: ArchiveId,
@@ -154,7 +190,7 @@ pub(crate) fn read(
 ) -> Result<Vec<u8>, Status> {
     match get(req, id).map(|h| &mut h.za) {
         Some(Za::Open(_, file)) => zf.read_through(len, file),
-        Some(Za::Closing) => Err(Status::of(Er::Zipclosed, 0)),
+        Some(Za::Closing(za)) => za.read_entry(zf, len),
         Some(Za::Closed) | None => {
             *zf = Reader::closed();
             zf.read(len)
@@ -175,39 +211,74 @@ pub(crate) fn keep(req: &mut Request, id: ArchiveId, which: Callback, kept: Kept
     }
 }
 
-/// `zip_close` on archive `id` where it is open, with its callbacks
-/// served under php's `close` member and its `FILE` lent to it. Written
-/// or discarded, the archive is closed and libzip's callback state freed
-/// with it; under [`OnFailure::Keep`] one that failed to write stays
-/// open. `None` where the archive is not open.
+/// `zip_close` on archive `id` where it is open, its callbacks served
+/// under php's `close` member with the archive in its holder and its
+/// `FILE` lent to it. Written or discarded, the archive is closed and
+/// libzip's callback state freed with it; under [`OnFailure::Keep`] one
+/// that failed to write stays open. `None` where the archive is not open.
+///
+/// A callback reaches the archive being written, and a stream of the
+/// archive's own data open at the commit fails it, as libzip refuses
+/// `zip_source_commit_write` while another `zip_file_t` reads the file:
+///
+/// ```php
+/// $z = new ZipArchive; $z->open('live-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE); $z->addFromString('a', str_repeat('a', 9000)); $z->close();
+/// $z->open('live-witness.zip'); $z->addFromString('b', 'bee'); $s = $z->getStream('a');
+/// $z->registerProgressCallback(0.5, function ($r) use ($z, $s) { echo "progress $r\n"; static $d; if ($d) return; $d = 1;
+///   try { var_dump($z->numFiles, $z->count(), strlen($z->getFromName('a')), strlen(fread($s, 10))); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; } });
+/// var_dump($z->close(), $z->status); fclose($s);
+/// $z->open('live-witness.zip'); var_dump($z->numFiles); $z->addFromString('c', 'cee'); $s = $z->getStream('a');
+/// $z->registerProgressCallback(0.5, function ($r) use ($z, &$s) { if ($s) { fclose($s); $s = null; $z->addFromString('late', 'x'); echo "closed at $r\n"; } });
+/// var_dump($z->close()); $z->open('live-witness.zip'); var_dump($z->numFiles); $z->close(); unlink('live-witness.zip');
+/// ```
+/// ```expect
+/// progress 0
+/// int(2)
+/// int(2)
+/// int(9000)
+/// int(10)
+/// progress 1
+///
+/// Warning: ZipArchive::close(): Resource still in use in %s on line %d
+/// bool(false)
+/// int(29)
+/// int(1)
+/// closed at 0
+/// bool(true)
+/// int(2)
+/// ```
 pub(crate) fn close(req: &mut Request, id: ArchiveId, on_failure: OnFailure) -> Option<Closed> {
     let h = get(req, id)?;
-    let Za::Open(mut za, mut file) = std::mem::replace(&mut h.za, Za::Closing) else {
+    let Za::Open(mut za, mut file) = std::mem::replace(&mut h.za, Za::Closed) else {
         return None;
     };
-    let progress = h.progress.as_deref().map(|k| (**k).clone());
-    let cancel = h.cancel.as_deref().map(|k| (**k).clone());
-    let umask = req.environment().umask();
     za.lend(&mut file);
-    let mut hooks = PhpHooks {
+    h.za = Za::Closing(za);
+    let umask = req.environment().umask();
+    let mut serving = Serving {
         req,
-        progress,
-        cancel,
+        id,
         thrown: None,
     };
-    let error = za.close(&mut hooks, umask).err().map(|_| za.error);
-    let thrown = hooks.thrown;
+    let done = write::close(&mut serving, umask);
+    let thrown = serving.thrown;
+    let Some(h) = get(req, id) else {
+        let error = Some(Status::of(Er::Internal, 0));
+        return Some(Closed { error, thrown });
+    };
+    let Za::Closing(mut za) = std::mem::replace(&mut h.za, Za::Closed) else {
+        let error = Some(Status::of(Er::Internal, 0));
+        return Some(Closed { error, thrown });
+    };
+    let error = done.err().map(|_| za.error);
+    let mut file = None;
     za.lend(&mut file);
-    let kept = get(req, id).map(|h| {
-        if error.is_some() && on_failure == OnFailure::Keep {
-            h.za = Za::Open(za, file);
-            (None, None)
-        } else {
-            h.za = Za::Closed;
-            (h.progress.take(), h.cancel.take())
-        }
-    });
-    for k in kept.into_iter().flat_map(|(p, c)| [p, c]).flatten() {
+    if error.is_some() && on_failure == OnFailure::Keep {
+        h.za = Za::Open(za, file);
+        return Some(Closed { error, thrown });
+    }
+    let kept = [h.progress.take(), h.cancel.take()];
+    for k in kept.into_iter().flatten() {
         k.give_up(req);
     }
     Some(Closed { error, thrown })
@@ -285,22 +356,49 @@ pub(crate) fn release(req: &mut Request, id: ArchiveId) {
     }
 }
 
-/// The callbacks a close serves: the progress and cancel callables, and
-/// the first throwable either left.
-struct PhpHooks<'r> {
+/// A close under way on archive `id`: the request its callbacks are
+/// served with, each read from the holder as it is called, so one a
+/// callback registers serves the next point, and the first throwable
+/// either left.
+struct Serving<'r> {
     req: &'r mut Request,
-    progress: Option<Callable>,
-    cancel: Option<Callable>,
+    id: ArchiveId,
     thrown: Option<Thrown>,
 }
 
-impl Hooks for PhpHooks<'_> {
+impl Serving<'_> {
+    /// Callback `which` as the holder keeps it now.
+    fn callback(&mut self, which: Callback) -> Option<Callable> {
+        let h = get(self.req, self.id)?;
+        let kept = match which {
+            Callback::Progress => &h.progress,
+            Callback::Cancel => &h.cancel,
+        };
+        kept.as_deref().map(|k| (**k).clone())
+    }
+}
+
+impl Program for Serving<'_> {
+    fn archive(&mut self) -> Option<&mut Archive> {
+        match &mut get(self.req, self.id)?.za {
+            Za::Closing(za) => Some(za),
+            Za::Open(..) | Za::Closed => None,
+        }
+    }
+
+    fn in_use(&mut self) -> bool {
+        get(self.req, self.id).is_some_and(|h| h.readers > 0)
+    }
+
     /// `php_zip_progress_callback`.
     fn progress(&mut self, current: f64) {
-        let (Some(cb), None) = (&self.progress, &self.thrown) else {
+        if self.thrown.is_some() {
+            return;
+        }
+        let Some(cb) = self.callback(Callback::Progress) else {
             return;
         };
-        match call(self.req, cb, &[Value::float(current)]) {
+        match call(self.req, &cb, &[Value::float(current)]) {
             Ok(v) => v.give_up(self.req),
             Err(t) => self.thrown = Some(t),
         }
@@ -312,10 +410,10 @@ impl Hooks for PhpHooks<'_> {
         if self.thrown.is_some() {
             return true;
         }
-        let Some(cb) = &self.cancel else {
+        let Some(cb) = self.callback(Callback::Cancel) else {
             return false;
         };
-        let v = match call(self.req, cb, &[]) {
+        let v = match call(self.req, &cb, &[]) {
             Ok(v) => v,
             Err(t) => {
                 self.thrown = Some(t);
