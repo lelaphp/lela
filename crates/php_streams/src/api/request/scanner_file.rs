@@ -6,7 +6,7 @@ use crate::api::raising::Thrown;
 use crate::api::request::{OwnedStream, Request, Stream, StreamOption};
 use crate::api::values::{Emalloc, Owner, PhpString};
 use crate::streams::OpenOptions;
-use crate::streams::StreamLayer;
+use crate::streams::{Op, StreamLayer};
 
 /// `ZEND_MMAP_AHEAD`: the zero bytes `zend_stream_fixup` keeps past what
 /// it read, for the scanner's look-ahead.
@@ -118,9 +118,7 @@ impl ScannerFile {
     /// freed. The `Err` is the memory limit's fatal.
     pub fn load(&mut self, req: &mut Request) -> Result<Option<&[u8]>, Thrown> {
         let stream = *self.stream;
-        let file_size = req
-            .stream_op(stream, |req, s| s.zend_fsize(req))
-            .unwrap_or(0);
+        let file_size = req.stream_op(stream, Op::zend_fsize).unwrap_or(0);
         let (mut buf, len) = if file_size > 0 {
             let mut buf = Emalloc::new(req, file_size.saturating_add(ZEND_MMAP_AHEAD))?;
             let mut size = 0;

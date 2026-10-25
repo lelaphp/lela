@@ -779,9 +779,9 @@ fn error_reason(code: std::ffi::c_ulong) -> c_int {
 
 /// `php_openssl_set_blocking(sslsock, blocked)` at the handshake's end:
 /// the socket blocks again where it blocked before.
-fn restore_blocking(socket: &mut CryptoSocket<'_>, blocked: bool) {
+fn restore_blocking(req: &mut Request, socket: &mut CryptoSocket<'_>, blocked: bool) {
     if socket.blocked != blocked {
-        socket.set_blocking(blocked);
+        socket.set_blocking(req, blocked);
     }
 }
 
@@ -1513,7 +1513,7 @@ impl Layer {
             tls.set_state(self.is_client);
             self.phase = Phase::Begun;
         }
-        if socket.set_blocking(false) {
+        if socket.set_blocking(req, false) {
             tls.set_mode(SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
         }
         let timeout = if self.is_client {
@@ -1533,7 +1533,7 @@ impl Layer {
             {
                 // php 8.5.12 makes the socket block again where it did
                 // before the warning, which may run PHP code.
-                restore_blocking(socket, blocked);
+                restore_blocking(req, socket, blocked);
                 warn(req, "SSL: Handshake timed out");
                 return Ok(Handshake::Failed);
             }
@@ -1552,7 +1552,7 @@ impl Layer {
             };
             let _ready = socket.wait(want, limit.map(|l| l.saturating_sub(elapsed)));
         };
-        restore_blocking(socket, blocked);
+        restore_blocking(req, socket, blocked);
         let peer = tls.peer_certificate();
         if io.ret == 1 {
             if let (Some(peer), Some(context)) = (&peer, socket.ctx) {
@@ -1633,7 +1633,7 @@ impl Layer {
         let began_blocked = socket.blocked;
         let timeout = (began_blocked && !supplemental).then_some(socket.timeout);
         if timeout.is_some() || supplemental {
-            socket.set_blocking(false);
+            socket.set_blocking(req, false);
         }
         let limit = timeout
             .flatten()
@@ -1646,7 +1646,7 @@ impl Layer {
                 && elapsed > limit
             {
                 if began_blocked {
-                    socket.set_blocking(true);
+                    socket.set_blocking(req, true);
                 }
                 socket.timed_out = true;
                 return Ok(None);
@@ -1716,7 +1716,7 @@ impl Layer {
             }
         }
         if began_blocked {
-            socket.set_blocking(true);
+            socket.set_blocking(req, true);
         }
         Ok(Some(usize::try_from(nr_bytes).unwrap_or(0)))
     }
@@ -1974,7 +1974,7 @@ impl Crypto for Layer {
         };
         let began_blocked = socket.blocked;
         if began_blocked {
-            socket.set_blocking(false);
+            socket.set_blocking(req, false);
         }
         let io = tls.peek();
         let alive = io.ret > 0
@@ -1984,7 +1984,7 @@ impl Crypto for Layer {
                 _ => false,
             };
         if began_blocked && !socket.blocked {
-            socket.set_blocking(true);
+            socket.set_blocking(req, true);
         }
         alive
     }

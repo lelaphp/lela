@@ -70,7 +70,9 @@ pub enum Handshake {
 /// The socket a crypto layer runs over, lent for one call: the fields of
 /// `php_netstream_data_t` that `xp_ssl.c` reads and writes, which the
 /// engine takes back after the call. `blocked` is `is_blocked`, as
-/// [`CryptoSocket::set_blocking`] leaves it; `timeout` is the read
+/// [`CryptoSocket::set_blocking`] leaves it, which a handshake's
+/// `set_blocking` writes through to the stream at once, so PHP code a
+/// warning of the handshake serves reads the socket as php's does; `timeout` is the read
 /// timeout, `None` for php's `-1`; `timed_out` is `timeout_event`, which
 /// a read that ran out of time sets; `supplemental` is the stream's
 /// `has_buffered_data`, a read after the buffer already gave bytes, which
@@ -85,17 +87,24 @@ pub struct CryptoSocket<'a> {
     pub supplemental: bool,
     pub ctx: Option<StreamCtx>,
     pub stream: Option<Stream>,
+    /// The stream the socket stays in while the layer's call runs, which
+    /// [`CryptoSocket::set_blocking`] writes `is_blocked` through to;
+    /// `None` for a call the socket's own read or write makes.
+    pub(crate) live: Option<Stream>,
 }
 
 impl CryptoSocket<'_> {
     /// `php_set_sock_blocking`: `O_NONBLOCK` cleared for `true` and set
     /// for `false`, and `blocked` with it where the call took; whether it
     /// took.
-    pub fn set_blocking(&mut self, blocking: bool) -> bool {
+    pub fn set_blocking(&mut self, req: &mut Request, blocking: bool) -> bool {
         if crate::api::layer::set_fd_blocking(self.fd, blocking).is_err() {
             return false;
         }
         self.blocked = blocking;
+        if let Some(stream) = self.live {
+            crate::streams::sockets::show_blocking(req, stream, blocking);
+        }
         true
     }
 

@@ -26,9 +26,9 @@ mod scanner_file;
 pub use scanner_file::ScannerFile;
 
 use crate::state::Layer;
-use crate::streams::StreamLayer;
 use crate::streams::filters::FilterLayer;
 use crate::streams::sockets::Transports;
+use crate::streams::{Op, PhpStream, StreamLayer};
 use crate::supplied::Supplied;
 use crate::wrapper::PlainFiles;
 pub use crate::zend::STREAM_HOOKS;
@@ -371,34 +371,23 @@ impl Stream {
     /// many bytes were had, zero at the end, `None` for the read that
     /// failed before a byte was had. Nothing is allocated for the bytes.
     pub fn read_into(self, req: &mut Request, buf: &mut [u8]) -> Option<usize> {
-        req.stream_op(self, |req, stream| stream.read(req, buf))
-            .flatten()
+        req.stream_op(self, |op| op.read(buf)).flatten()
     }
 
     /// `php_stream_write`: how many bytes the stream took, `None` for
     /// php's `-1` (`fwrite` answers `false`).
     pub fn write(self, req: &mut Request, bytes: &[u8]) -> Option<usize> {
-        req.stream_op(self, |req, stream| stream.write(req, bytes))
-            .flatten()
+        req.stream_op(self, |op| op.write(bytes)).flatten()
     }
 
     /// `php_stream_seek`: `true` for php's `0`. A `whence` of `None` is
     /// a number that is none of the three, [`Whence::from_int`]'s
     /// `None`, which a stream that seeks refuses and one that cannot is
     /// php's warning for.
-    ///
-    /// Asked from inside a filter's call on the stream, while the stream
-    /// is out of its resource, the seek is taken when the call returns
-    /// ([`crate::streams::FilterCall`]).
     pub fn seek(self, req: &mut Request, offset: i64, whence: impl Into<Option<Whence>>) -> bool {
         let whence = whence.into();
-        if let Some(sought) = req.stream_op(self, |req, stream| stream.seek(req, offset, whence)) {
-            return sought;
-        }
-        req.streams()
-            .filtering
-            .as_mut()
-            .is_some_and(|call| call.defer_seek(self, offset, whence))
+        req.stream_op(self, |op| op.seek(offset, whence))
+            .unwrap_or(false)
     }
 
     /// `php_stream_get_line`: the next line with its `\n`, at most
@@ -423,9 +412,7 @@ impl Stream {
             let asked = PhpString::filled(req, len, |_| {})?;
             asked.give_up(req);
         }
-        Ok(req
-            .stream_op(self, |req, stream| stream.get_line(req, maxlen))
-            .flatten())
+        Ok(req.stream_op(self, |op| op.get_line(maxlen)).flatten())
     }
 
     /// `php_stream_get_record`, what `stream_get_line` answers: the bytes
@@ -455,7 +442,7 @@ impl Stream {
         delim: &[u8],
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
         match req
-            .stream_op(self, |req, stream| stream.get_record(req, maxlen, delim))
+            .stream_op(self, |op| op.get_record(maxlen, delim))
             .flatten()
         {
             Some(record) => Ok(Some(PhpString::new(req, &record)?)),
@@ -471,7 +458,7 @@ impl Stream {
         req: &mut Request,
         maxlen: Option<usize>,
     ) -> Result<Owner<PhpString>, Thrown> {
-        match req.stream_op(self, |req, stream| stream.copy_to_mem(req, maxlen)) {
+        match req.stream_op(self, |op| op.copy_to_mem(maxlen)) {
             Some(Ok(Some(read))) => Ok(read),
             Some(Err(thrown)) => Err(thrown),
             // php's `NULL`, nothing read, which its callers answer as
@@ -485,8 +472,7 @@ impl Stream {
     /// `ctime`, `blksize` and `blocks`, or `None` where the stream has
     /// no stat (`fstat` answers `false`).
     pub fn stat(self, req: &mut Request) -> Option<[i64; 13]> {
-        req.stream_op(self, |req, stream| stream.stat(req))
-            .flatten()
+        req.stream_op(self, Op::stat).flatten()
     }
 
     /// `php_stream_truncate_set_size` behind
@@ -507,9 +493,7 @@ impl Stream {
     /// Fatal error: Allowed memory size of %d bytes exhausted (tried to allocate 9223372036854775832 bytes) in %s on line 4
     /// ```
     pub fn truncate(self, req: &mut Request, size: usize) -> Result<Option<bool>, Thrown> {
-        let answer = req
-            .stream_op(self, |req, stream| stream.truncate(req, size))
-            .flatten();
+        let answer = req.stream_op(self, |op| op.truncate(size)).flatten();
         match req.diagnostics_mut().stream_thrown().take() {
             Some(thrown) => Err(thrown),
             None => Ok(answer),
@@ -520,7 +504,7 @@ impl Stream {
     /// `php_stream_supports_lock` guards: `false` where the stream has
     /// no `flock(2)` or `flock(2)` refused.
     pub fn flock(self, req: &mut Request, operation: i64) -> bool {
-        req.stream_op(self, |req, stream| stream.flock(req, operation))
+        req.stream_op(self, |op| op.flock(operation))
             .unwrap_or(false)
     }
 
@@ -528,8 +512,7 @@ impl Stream {
     /// plain file's, or one of the host's standard ones.
     #[must_use]
     pub fn is_stdio(self, req: &Request) -> bool {
-        req.stream_ref(self)
-            .is_some_and(crate::streams::PhpStream::is_stdio)
+        req.stream_ref(self).is_some_and(PhpStream::is_stdio)
     }
 
     /// `php_stream_set_option` (`Z/main/streams/streams.c:1447`): the
@@ -538,7 +521,7 @@ impl Stream {
     /// the read buffer is used. A stream that is closed answers
     /// [`OptionAnswer::Err`].
     pub fn set_option(self, req: &mut Request, option: StreamOption) -> OptionAnswer {
-        req.stream_op(self, |req, stream| stream.set_option(req, option))
+        req.stream_op(self, |op| op.set_option(option))
             .unwrap_or(OptionAnswer::Err)
     }
 
@@ -614,8 +597,7 @@ impl Stream {
     /// ```
     #[must_use]
     pub fn orig_path(self, req: &Request) -> Option<Vec<u8>> {
-        req.stream_ref(self)
-            .and_then(|stream| stream.orig_path().map(<[u8]>::to_vec))
+        req.stream_ref(self)?.orig_path().map(<[u8]>::to_vec)
     }
 
     /// `stream->orig_path = estrdup(path)` over a stream an extension
@@ -636,7 +618,7 @@ impl Stream {
     /// string(3) "abc"
     /// ```
     pub fn set_orig_path(self, req: &mut Request, path: &[u8]) -> Result<(), Thrown> {
-        req.stream_op(self, |req, s| s.set_orig_path(req, path))
+        req.stream_op(self, |op| op.set_orig_path(path))
             .transpose()
             .map(|_| ())
     }
@@ -656,7 +638,7 @@ impl Stream {
     /// "
     /// ```
     pub fn forbid_fclose(self, req: &mut Request) {
-        req.stream_op(self, |_, stream| stream.forbid_fclose());
+        req.stream_with(self, PhpStream::forbid_fclose);
     }
 
     /// Whether `fclose()` refuses the stream,
@@ -664,8 +646,7 @@ impl Stream {
     /// keeps ([`Stream::forbid_fclose`]).
     #[must_use]
     pub fn no_fclose(self, req: &Request) -> bool {
-        req.stream_ref(self)
-            .is_some_and(crate::streams::PhpStream::no_fclose)
+        req.stream_ref(self).is_some_and(PhpStream::no_fclose)
     }
 
     /// Whether `opendir` opened the stream, `PHP_STREAM_FLAG_IS_DIR`,
@@ -673,8 +654,7 @@ impl Stream {
     /// refuses.
     #[must_use]
     pub fn is_dir(self, req: &Request) -> bool {
-        req.stream_ref(self)
-            .is_some_and(crate::streams::PhpStream::is_dir)
+        req.stream_ref(self).is_some_and(PhpStream::is_dir)
     }
 
     /// `php_glob_stream_get_count` under `php_stream_is(stream,
@@ -703,31 +683,18 @@ impl Stream {
     /// give up, and one that hands a name to a program, as `readdir`
     /// does, makes the string.
     pub fn read_dir(self, req: &mut Request) -> Result<Option<Vec<u8>>, Thrown> {
-        Ok(req
-            .stream_op(self, |req, stream| stream.read_dir(req))
-            .flatten())
+        Ok(req.stream_op(self, Op::read_dir).flatten())
     }
 
     /// `php_stream_tell`: the position, `-1` for a stream that has none.
-    /// Asked from inside a filter's call on the stream, it is the
-    /// position the call was made at ([`crate::streams::FilterCall`]).
     #[must_use]
     pub fn tell(self, req: &Request) -> i64 {
-        match req.stream_ref(self) {
-            Some(stream) => stream.position(),
-            None => req
-                .streams_ref()
-                .and_then(|state| state.filtering.as_ref())
-                .and_then(|call| call.position_of(self))
-                .unwrap_or(-1),
-        }
+        req.stream_ref(self).map_or(-1, PhpStream::position)
     }
 
     /// `php_stream_eof`: no byte left in the read buffer, and the kind at
     /// eof or, asked `PHP_STREAM_OPTION_CHECK_LIVENESS`, found dead, which
-    /// a user-space stream answers from its `stream_eof`. Asked from
-    /// inside a filter's call on the stream, it is what it was when the
-    /// call was made ([`crate::streams::FilterCall`]).
+    /// a user-space stream answers from its `stream_eof`.
     ///
     /// ```php
     /// class W { public $context; public $n = 0;
@@ -751,20 +718,12 @@ impl Stream {
     /// bool(true)
     /// ```
     pub fn eof(self, req: &mut Request) -> bool {
-        if let Some(eof) = req.stream_op(self, |req, stream| stream.eof(req)) {
-            return eof;
-        }
-        req.streams()
-            .filtering
-            .as_ref()
-            .and_then(|call| call.eof_of(self))
-            .unwrap_or(false)
+        req.stream_op(self, Op::eof).unwrap_or(false)
     }
 
     /// `php_stream_flush`: `true` for php's `0`.
     pub fn flush(self, req: &mut Request) -> bool {
-        req.stream_op(self, |req, stream| stream.flush(req))
-            .unwrap_or(false)
+        req.stream_op(self, Op::flush).unwrap_or(false)
     }
 
     /// `php_stream_free(stream, PHP_STREAM_FREE_KEEP_RSRC |
@@ -809,7 +768,7 @@ impl Stream {
     /// or inside a call, it is closed at once.
     pub fn set_closer(self, req: &mut Request, closer: Box<dyn Closer>) -> Result<(), Thrown> {
         let mut closer = Some(closer);
-        req.stream_op(self, |_, stream| stream.set_closer(closer.take()));
+        req.stream_with(self, |stream| stream.set_closer(closer.take()));
         match closer {
             Some(left) => left.close(req),
             None => Ok(()),
@@ -823,7 +782,7 @@ impl Stream {
     pub fn set_wrapper_data(self, req: &mut Request, value: Owner<Value>) {
         let mut value = Some(value);
         let old = req
-            .stream_op(self, |_, stream| stream.set_wrapper_data(value.take()))
+            .stream_with(self, |stream| stream.set_wrapper_data(value.take()))
             .flatten();
         for left in [old, value].into_iter().flatten() {
             left.give_up(req);
@@ -835,7 +794,7 @@ impl Stream {
     /// concerned it is at its start, and `strlcpy(stream->mode, mode)`,
     /// the `mode` the program opened it with over the `transport`'s `r+`.
     pub fn rewind_as(self, req: &mut Request, mode: &[u8]) {
-        req.stream_op(self, |_, stream| stream.rewind_as(mode));
+        req.stream_with(self, |stream| stream.rewind_as(mode));
     }
 }
 
@@ -1150,6 +1109,20 @@ pub trait StreamFilter: Send {
     /// `zend_call_function` serves none under `EG(exception)`.
     fn close(&mut self, _req: &mut Request) -> Result<(), Thrown> {
         Ok(())
+    }
+
+    /// A second filter over this one's state for one call, closed after
+    /// it, where PHP code a call of this filter serves reads its own
+    /// stream and so calls the filter again. php has no such method: it
+    /// re-enters the same filter in place (`userfilter_filter`,
+    /// `Z/ext/standard/user_filters.c:124`, called again from the chain
+    /// walk of `Z/main/streams/filter.c`), where the chain here lends a
+    /// filter mutably for its call, so `share` is how a filter that can be
+    /// re-entered says so: `Some` for the user filter, whose state is the
+    /// PHP object, and `None` for a filter with native state, which a call
+    /// made inside its own finds in use.
+    fn share(&self, _req: &mut Request) -> Option<Box<dyn StreamFilter>> {
+        None
     }
 }
 

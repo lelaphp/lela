@@ -24,8 +24,9 @@ use crate::api::abi::Pool;
 use crate::api::layer::Face as _;
 use crate::state::EngineState;
 
+use super::held::Payload;
 use super::sockets::Socket;
-use super::{PhpStream, Request, Stream};
+use super::{Op, PhpStream, Request, Stream};
 use crate::api::raising::Thrown;
 use crate::api::request::{OptionAnswer, OwnedStream, StreamOption};
 use crate::api::values::{Owner, Resource};
@@ -121,7 +122,7 @@ impl Persistent for Request {
             return Ok(None);
         };
         let alive = self
-            .stream_op(*stream, |req, s| s.set_option(req, StreamOption::Liveness))
+            .stream_op(*stream, |op| op.set_option(StreamOption::Liveness))
             .is_some_and(|answer| answer == OptionAnswer::Ok);
         if alive {
             return Ok(Some(stream));
@@ -255,18 +256,17 @@ pub(crate) fn give_back(pool: &Pool<Vec<u8>, Entry>, held: Vec<Held>) {
 /// a socket's.
 pub(crate) fn keep(req: &mut Request, stream: Owner<Stream>) -> Option<Entry> {
     let res = stream.resource();
-    let socket = req.stream_op(*stream, |_, s| s.ops.as_socket().is_some());
+    let socket = req.stream_with(*stream, |s| s.ops.as_socket().is_some());
     if socket != Some(true) {
         stream.free(req);
         return None;
     }
-    req.stream_op(*stream, |req, s| s.flush_owed(req));
-    let taken = res
-        .native_mut::<Option<PhpStream>>(req)
-        .and_then(Option::take);
+    req.stream_op(*stream, Op::flush_owed);
+    let taken = res.native_mut::<Payload>(req).and_then(Option::take);
     res.close(req);
     req.drop_persistent(res);
-    let kept = taken.and_then(|mut taken| {
+    let kept = taken.and_then(|slot| {
+        let mut taken = slot.stream;
         let mut socket = taken.ops.as_socket()?.detach();
         socket.forget_request();
         let orig_path = taken.orig_path.take().map(|path| path.into_persistent(req));
@@ -304,22 +304,20 @@ pub(crate) fn keep(req: &mut Request, stream: Owner<Stream>) -> Option<Entry> {
 /// ```expect
 /// string(3) "ABC"
 /// ```
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the resource destructor's shape, which a destructor that throws needs"
-)]
 pub(crate) fn dtor(req: &mut Request, r: Resource) -> Result<(), Thrown> {
-    let Some(mut stream) = r
-        .native_mut::<Option<PhpStream>>(req)
-        .and_then(Option::take)
-    else {
-        return Ok(());
-    };
-    let held = req
-        .streams()
-        .persistent
-        .iter()
-        .position(|held| matches!(held.state, State::InResource(res) if res == r));
+    super::dtor(req, r)
+}
+
+/// [`dtor`]'s work on the stream once nothing holds it: a stream held
+/// under its key keeps its socket idle there, and every other is freed;
+/// what the kind's close answered.
+pub(crate) fn finish(req: &mut Request, mut stream: PhpStream) -> i32 {
+    let held = stream.res.and_then(|r| {
+        req.streams()
+            .persistent
+            .iter()
+            .position(|held| matches!(held.state, State::InResource(res) if res == r))
+    });
     if let Some(at) = held
         && stream.ops.as_socket().is_some()
     {
@@ -340,13 +338,15 @@ pub(crate) fn dtor(req: &mut Request, r: Resource) -> Result<(), Thrown> {
             req.streams().persistent[at].state = State::Idle(entry);
         }
     } else {
-        stream.flush_owed(req);
+        let Some(flushed) = super::held::owned(req, stream, Op::flush_owed) else {
+            return 0;
+        };
+        stream = flushed;
         if let Some(at) = held {
             req.streams().persistent.remove(at);
         }
     }
-    req.streams().pclose_ret = stream.release(req);
-    Ok(())
+    stream.release(req)
 }
 
 /// `zend_destroy_rsrc_list(&EG(persistent_list))`'s free of an entry

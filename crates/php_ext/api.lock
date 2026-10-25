@@ -991,6 +991,7 @@ request::StreamCtx::unset_option
 request::StreamFilter
 request::StreamFilter::close
 request::StreamFilter::filter
+request::StreamFilter::share
 request::StreamOps
 request::StreamOps::buffered
 request::StreamOps::close
