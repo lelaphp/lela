@@ -353,22 +353,20 @@ fn word(bytes: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
 }
 
+/// Mach-O stand-ins for the binaries a pin names, which the tests here
+/// and `api_check::binding`'s lay down.
 #[cfg(test)]
-pub(crate) mod tests {
-    use std::os::unix::fs::symlink;
+pub(crate) mod stand_in {
+    use super::{LOADS, MAGIC};
 
-    use super::*;
-    use crate::scratch::Tree;
-
-    /// A 64-bit Mach-O file whose load commands name `loads`, as a stand-in
-    /// for a binary of the pin's here and in `api_check::binding`.
+    /// A 64-bit Mach-O file whose load commands name `loads`.
     pub(crate) fn macho(loads: &[&str]) -> Vec<u8> {
         let loads: Vec<(u32, &str)> = loads.iter().map(|name| (LOADS[0], *name)).collect();
         commanded(&loads)
     }
 
     /// A 64-bit Mach-O file of `commands`, each a command and its string.
-    fn commanded(commands: &[(u32, &str)]) -> Vec<u8> {
+    pub(crate) fn commanded(commands: &[(u32, &str)]) -> Vec<u8> {
         let mut bytes = Vec::new();
         for (command, text) in commands {
             let mut body = text.as_bytes().to_vec();
@@ -388,6 +386,15 @@ pub(crate) mod tests {
         file.extend(bytes);
         file
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::symlink;
+
+    use super::stand_in::{commanded, macho};
+    use super::*;
+    use crate::scratch::Tree;
 
     /// A Homebrew prefix of the closure's shape: php loading zip by its
     /// `opt` link and the system library, zip loading zstd beside it by

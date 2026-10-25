@@ -76,6 +76,9 @@ fn main() {
 fn print_target_cfg() {
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let target = std::env::var("TARGET").expect("cargo names the target");
+    // The target's name, which a cargo configuration's `[env]` variable
+    // for one target carries (`api_check::binding`, #3458).
+    println!("cargo::rustc-env=XTASK_TARGET={target}");
     let mut command = std::process::Command::new(rustc);
     command.args(["--print", "cfg", "--target", &target]);
     if let Ok(flags) = std::env::var("CARGO_ENCODED_RUSTFLAGS") {
