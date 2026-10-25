@@ -70,8 +70,9 @@ impl Status {
     }
 
     /// `zip_error_strerror`: the sentence, then `: ` and the `errno`'s
-    /// text, or zlib's `zError`, for a code whose kind has one. No detail
-    /// is ever set here, so that kind has no system half.
+    /// text, zlib's `zError`, or libzip's detail, for a code whose kind
+    /// has one. The one detail set here is the CRC layer's, which names
+    /// no entry.
     pub(crate) fn text(self, req: &Request) -> String {
         let entry = usize::try_from(self.zip)
             .ok()
@@ -82,10 +83,26 @@ impl Status {
         match kind {
             "S" => format!("{sentence}: {}", req.environment().os_error_text(self.sys)),
             "Z" => format!("{sentence}: {}", z_error(self.sys)),
+            "L" if self.sys == DETAIL_INVALID_FILE_LENGTH => {
+                format!("{sentence}: file length in header doesn't match actual file length")
+            }
             _ => sentence.to_owned(),
         }
     }
 }
+
+/// `MAKE_DETAIL_WITH_INDEX(ZIP_ER_DETAIL_INVALID_FILE_LENGTH,
+/// MAX_DETAIL_INDEX)`: the detail `crc_read` sets where an entry's data
+/// ends short of or past its stated size, at the index that names no
+/// entry.
+pub(crate) const DETAIL_INVALID_FILE_LENGTH: i32 =
+    (MAX_DETAIL_INDEX << 8) | ER_DETAIL_INVALID_FILE_LENGTH;
+
+/// `ZIP_ER_DETAIL_INVALID_FILE_LENGTH`.
+const ER_DETAIL_INVALID_FILE_LENGTH: i32 = 19;
+
+/// `MAX_DETAIL_INDEX`, the index of a detail that names no entry.
+const MAX_DETAIL_INDEX: i32 = 0x7f_ffff;
 
 /// zlib's `zError`: the message for a zlib return code.
 fn z_error(code: i32) -> &'static str {

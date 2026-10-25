@@ -13,7 +13,7 @@ use std::io::{self, Read};
 use std::os::unix::fs::FileExt;
 
 use crate::codec::{PkwareKeys, WinzipAes};
-use crate::error::{Er, Status};
+use crate::error::{DETAIL_INVALID_FILE_LENGTH, Er, Status};
 
 /// `BUFSIZE`: what a decompressor reads from the layer below at once.
 const BUFSIZE: usize = 8192;
@@ -135,7 +135,9 @@ impl Stdio {
     /// ```
     /// ```expect
     /// 4064
-    /// int(968)
+    ///
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: Premature end of file in %s on line %d
+    /// int(0)
     /// ```
     pub(crate) fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         let held = (self.buffer.len() - self.at).min(out.len());
@@ -529,9 +531,11 @@ impl Decompressor {
     ///
     /// Warning: fread(): Zip stream error: Compressed data invalid in %s on line %d
     /// int(188416)
+    ///
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: Compressed data invalid in %s on line %d
     /// int(100)
     /// int(195000)
-    /// string(0) ""
+    /// bool(false)
     /// ```
     fn read_some(&mut self, out: &mut [u8]) -> Result<usize, Status> {
         if let Some(e) = self.error {
@@ -1089,7 +1093,8 @@ impl Pulled {
     /// `LZMA_FORMAT_ERROR` and every ZSTD error are libzip's `Internal error`
     /// (its `map_error` is handed `ZSTD_decompressStream`'s return, which no
     /// case matches); and libzstd reads on through damage to a frame without
-    /// a checksum, which the CRC then finds.
+    /// a checksum, which the CRC then finds. `getFromName` meets the same
+    /// errors, as php 8.5.12 reads an entry through to its end.
     ///
     /// ```php
     /// $z = base64_decode('UEsDBD8AAgAOAJIQQ10RaoskYwAAAPBVAAABAAAAbAkUBQBdAAAEAAAwiAmG1B9FuCOP9NI7P2QgG4TEbe+6YngwQwLuv8NzyJHDoCyOV1cqVIHHUAW6YehSADuHGILHHs/JY6H+MavdjihXb3j28THGD/KTQG+yO57q7P//xtxAAFBLAwQUAAAAXwCSEENdEWqLJJQAAADwVQAAAQAAAHj9N3pYWgAABObWtEYCACEBDAAAAI+YQZzgVe8AU10AMIgJhtQfRbgjj/TSOz9kIBuExG3vumJ4MEMC7r/Dc8iRw6AsjldXKlSBx1AFumHoUgA7hxiCxx7PyWOh/jGr3Y4oV2949vExxg/yk0Bvsjn6GAAAANpQsC7u8a+SAAFv8KsBAAA8zWvpscRn+wIAAAAABFlaUEsDBBQAAABdAJIQQ10RaoskJwAAAPBVAAABAAAAeii1L/0AWPUAALBhIGxpbmUgb2YgdGhlIHdpdG5lc3MKAQCuq9xnE1BLAQI/Az8AAgAOAJIQQ10RaoskYwAAAPBVAAABAAAAAAAAAAAAAAC2gQAAAABsUEsBAj8DFAAAAF8AkhBDXRFqiySUAAAA8FUAAAEAAAAAAAAAAAAAALaBggAAAHhQSwECPwMUAAAAXQCSEENdEWqLJCcAAADwVQAAAQAAAAAAAAAAAAAAtoE1AQAAelBLBQYAAAAAAwADAI0AAAB7AQAAAAA=');
@@ -1097,36 +1102,57 @@ impl Pulled {
     ///   $b = $z; $b[$s + $o] = chr(ord($b[$s + $o]) ^ 0x5a); file_put_contents('codec-witness.zip', $b);
     ///   $a = new ZipArchive; $a->open('codec-witness.zip'); $f = $a->getStream($n); $k = 0;
     ///   while (($r = fread($f, 4096)) !== false && $r !== '') { $k += strlen($r); }
-    ///   echo "$n+$o: $k ", strlen($a->getFromName($n)), ' ', strlen($a->getFromName($n, 100)), "\n"; $a->close();
+    ///   $g = [strlen($a->getFromName($n)), strlen($a->getFromName($n, 100))];
+    ///   echo "$n+$o: $k ", implode(' ', $g), "\n"; $a->close();
     /// }
     /// unlink('codec-witness.zip');
     /// ```
     /// ```expect
     ///
     /// Warning: fread(): Zip stream error: Internal error in %s on line %d
+    ///
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: Internal error in %s on line %d
+    ///
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: Internal error in %s on line %d
     /// l+4: 0 0 0
     ///
     /// Warning: fread(): Zip stream error: CRC error in %s on line %d
     ///
     /// Warning: fread(): Zip stream error: CRC error in %s on line %d
-    /// l+58: 5504 5504 100
+    ///
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: CRC error in %s on line %d
+    /// l+58: 5504 0 100
     ///
     /// Warning: fread(): Zip stream error: Compressed data invalid in %s on line %d
+    ///
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: Compressed data invalid in %s on line %d
     /// l+68: 8192 0 100
     ///
     /// Warning: fread(): Zip stream error: Internal error in %s on line %d
+    ///
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: Internal error in %s on line %d
+    ///
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: Internal error in %s on line %d
     /// x+5: 0 0 0
     ///
     /// Warning: fread(): Zip stream error: Compressed data invalid in %s on line %d
+    ///
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: Compressed data invalid in %s on line %d
     /// x+97: 8192 0 100
     ///
     /// Warning: fread(): Zip stream error: Internal error in %s on line %d
+    ///
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: Internal error in %s on line %d
+    ///
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: Internal error in %s on line %d
     /// z+3: 0 0 0
     ///
     /// Warning: fread(): Zip stream error: CRC error in %s on line %d
     ///
     /// Warning: fread(): Zip stream error: CRC error in %s on line %d
-    /// z+15: 22000 22000 100
+    ///
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: CRC error in %s on line %d
+    /// z+15: 22000 0 100
     /// ```
     ///
     /// Four damages read otherwise here than under liblzma and libzstd,
@@ -1147,9 +1173,12 @@ impl Pulled {
     /// echo "$k ", strlen($a->getFromName('x')), "\n"; $a->close();
     /// unlink('codec-xz-chunk.zip');
     /// ```
-    /// ```expect capture
-    /// Warning: fread(): Zip stream error: Compressed data invalid in %SCRATCH%/witness.php on line 5
-    /// 16384 0
+    /// ```expect
+    ///
+    /// Warning: fread(): Zip stream error: Compressed data invalid in %s on line %d
+    /// 16384%s
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: Compressed data invalid in %s on line %d
+    /// 0
     /// ```
     ///
     /// An LZMA entry's last byte damaged, after its end marker: liblzma's
@@ -1164,9 +1193,12 @@ impl Pulled {
     /// echo "$k ", strlen($a->getFromName('l')), "\n"; $a->close();
     /// unlink('codec-lzma-end.zip');
     /// ```
-    /// ```expect capture
-    /// Warning: fread(): Zip stream error: Compressed data invalid in %SCRATCH%/witness.php on line 5
-    /// 16384 0
+    /// ```expect
+    ///
+    /// Warning: fread(): Zip stream error: Compressed data invalid in %s on line %d
+    /// 16384%s
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: Compressed data invalid in %s on line %d
+    /// 0
     /// ```
     ///
     /// An LZMA entry (the oracle's, 15000 letters of `mt_srand(4)`) damaged
@@ -1183,9 +1215,12 @@ impl Pulled {
     /// echo "$k ", strlen($a->getFromName('l')), "\n"; $a->close();
     /// unlink('codec-lzma-boundary.zip');
     /// ```
-    /// ```expect capture
-    /// Warning: fread(): Zip stream error: Compressed data invalid in %SCRATCH%/witness.php on line 5
-    /// 13426 13426
+    /// ```expect
+    ///
+    /// Warning: fread(): Zip stream error: Compressed data invalid in %s on line %d
+    /// 13426%s
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: Compressed data invalid in %s on line %d
+    /// 0
     /// ```
     ///
     /// A ZSTD frame header's window byte damaged to a window of 1280 bytes,
@@ -1200,9 +1235,12 @@ impl Pulled {
     /// echo "$k ", strlen($a->getFromName('z')), "\n"; $a->close();
     /// unlink('codec-zstd-window.zip');
     /// ```
-    /// ```expect capture
-    /// Warning: fread(): Zip stream error: Internal error in %SCRATCH%/witness.php on line 5
-    /// 0 0
+    /// ```expect
+    ///
+    /// Warning: fread(): Zip stream error: Internal error in %s on line %d
+    /// 0%s
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: Internal error in %s on line %d
+    /// 0
     /// ```
     ///
     /// The same row's other half: a ZSTD entry (the oracle's, 3000 letters
@@ -1219,9 +1257,12 @@ impl Pulled {
     /// echo "$k ", strlen($a->getFromName('z')), "\n"; $a->close();
     /// unlink('codec-zstd-literals.zip');
     /// ```
-    /// ```expect capture
-    /// Warning: fread(): Zip stream error: CRC error in %SCRATCH%/witness.php on line 5
-    /// 3000 3000
+    /// ```expect
+    ///
+    /// Warning: fread(): Zip stream error: CRC error in %s on line %d
+    /// 3000%s
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: CRC error in %s on line %d
+    /// 0
     /// ```
     fn read_some(&mut self, out: &mut [u8]) -> Result<usize, Status> {
         if let Some(e) = self.error {
@@ -1547,7 +1588,7 @@ impl Reader {
                     return Err(Status::of(Er::Crc, 0));
                 }
                 if c.position != c.size {
-                    return Err(Status::of(Er::Incons, 0));
+                    return Err(Status::of(Er::Incons, DETAIL_INVALID_FILE_LENGTH));
                 }
             }
         } else if !c.complete && c.position <= c.hashed {

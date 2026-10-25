@@ -10,18 +10,20 @@ use php_ext::request::{
 };
 use php_ext::values::Owner;
 
-use crate::archive::{Archive, CREATE};
-use crate::object::{basedir_refuses, expand};
+use crate::archive::{Archive, CREATE, FL_NOCASE};
+use crate::holder::{self, ArchiveId};
+use crate::object::{basedir_refuses, expand, host};
 use crate::read::{Reader, Stdio};
 
 /// `struct php_zip_stream_data_t`: the opened entry, read as the
-/// stream is read, and the stat `php_zip_ops_stat` answers for a stream
-/// the wrapper opened.
+/// stream is read, and the path `php_zip_ops_stat` stats again for a
+/// stream the wrapper opened.
 struct ZipStream {
     zf: Reader,
-    stat: Option<(u64, i64, bool)>,
-    /// The archive a `getStream` stream reads, by its number.
-    archive: Option<u64>,
+    path: Option<Vec<u8>>,
+    /// The archive a `getStream` stream reads, one count of it held
+    /// (`self->archive`).
+    archive: Option<ArchiveId>,
     /// The `FILE` of the archive the wrapper opened, which the stream
     /// keeps (`self->za`).
     file: Option<Stdio>,
@@ -67,25 +69,16 @@ impl StreamOps for ZipStream {
     ///
     /// Warning: fread(): Zip stream error: CRC error in %s on line %d
     /// int(13099008)
+    ///
+    /// Warning: ZipArchive::getFromName(): Cannot read entry: CRC error in %s on line %d
     /// int(10)
-    /// int(13107200)
+    /// int(0)
     /// ```
     fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
-        if self
-            .archive
-            .is_some_and(|id| req.state::<crate::State>().closed.contains(&id))
-        {
-            self.zf = Reader::closed();
-        }
-        let mut file = match self.archive {
-            Some(id) => crate::object::file(req, id),
-            None => self.file.take(),
+        let got = match self.archive {
+            Some(id) => holder::read(req, id, &mut self.zf, buf.len()),
+            None => self.zf.read_through(buf.len(), &mut self.file),
         };
-        let got = self.zf.read_through(buf.len(), &mut file);
-        match self.archive {
-            Some(id) => crate::object::file_back(req, id, file),
-            None => self.file = file,
-        }
         match got {
             Ok(data) => {
                 let n = data.len();
@@ -104,7 +97,13 @@ impl StreamOps for ZipStream {
         }
     }
 
-    fn close(&mut self, _req: &mut Request) {}
+    /// `php_zip_ops_close`: the stream's count of its archive released,
+    /// which closes the archive where the stream held it last.
+    fn close(&mut self, req: &mut Request) {
+        if let Some(id) = self.archive.take() {
+            holder::release(req, id);
+        }
+    }
 
     /// `php_zip_ops_seek`: `zip_fseek` within the entry, the position
     /// `zip_ftell` then reads, `-1` once a seek has failed, after which
@@ -161,11 +160,52 @@ impl StreamOps for ZipStream {
         self.zf.seekable()
     }
 
-    /// `php_zip_ops_stat`: the entry's size and time, a file or, by a
-    /// path ending in `/`, a directory; nothing for a stream with no
-    /// `#` in its path.
-    fn stat(&mut self, _req: &mut Request) -> Option<[i64; 13]> {
-        let (size, mtime, dir) = self.stat?;
+    /// `php_zip_ops_stat`: the archive the stream's path names opened
+    /// again and the entry its fragment names stated, without case: its
+    /// size and time, a file or, by a path ending in `/`, a directory;
+    /// nothing for a path with no `#`, nor where the archive no longer
+    /// opens or holds the entry.
+    ///
+    /// ```php
+    /// $z = new ZipArchive; $z->open('fstat-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    /// $z->addFromString('Entry', 'hello'); $z->close();
+    /// $f = fopen('zip://fstat-witness.zip#Entry', 'rb'); $s = fstat($f);
+    /// var_dump($s['size'], $s['mode'], $s['nlink'], $s['blksize']);
+    /// $z->open('fstat-witness.zip'); $z->renameName('Entry', 'ENTRY'); $z->close();
+    /// var_dump(fstat($f)['size'], fstat($z->open('fstat-witness.zip') ? $z->getStream('ENTRY') : null));
+    /// file_put_contents('fstat-witness.zip', 'not a zip'); var_dump(fstat($f));
+    /// fclose($f); $z->close(); unlink('fstat-witness.zip');
+    /// ```
+    /// ```expect
+    /// int(5)
+    /// int(32768)
+    /// int(1)
+    /// int(-1)
+    /// int(5)
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    fn stat(&mut self, req: &mut Request) -> Option<[i64; 13]> {
+        let path = php_ext::coerce::c_str(self.path.as_deref()?);
+        let hash = path.iter().position(|b| *b == b'#')?;
+        let fragment_len = path.len() - hash;
+        let path = if path.len() >= 6 && path[..6].eq_ignore_ascii_case(b"zip://") {
+            &path[6..]
+        } else {
+            path
+        };
+        if path.len() >= MAXPATHLEN || path.len() < fragment_len {
+            return None;
+        }
+        let dirname = &path[..path.len() - fragment_len];
+        let fragment = &path[path.len() - fragment_len + 1..];
+        if basedir_refuses(req, dirname) {
+            return None;
+        }
+        let mut za = Archive::open(host(&expand(req, dirname)?), CREATE).ok()?;
+        let idx = za.name_locate(fragment, FL_NOCASE).ok()?;
+        let st = za.stat_index(idx, FL_NOCASE).ok()?;
+        let dir = path.last() == Some(&b'/');
         let mut sb = [0i64; 13];
         sb[1] = -1;
         sb[2] = if dir { 0o040_000 } else { 0o100_000 };
@@ -174,11 +214,11 @@ impl StreamOps for ZipStream {
         sb[7] = if dir {
             0
         } else {
-            i64::try_from(size).unwrap_or(i64::MAX)
+            i64::try_from(st.size).unwrap_or(i64::MAX)
         };
-        sb[8] = mtime;
-        sb[9] = mtime;
-        sb[10] = mtime;
+        sb[8] = st.mtime;
+        sb[9] = st.mtime;
+        sb[10] = st.mtime;
         sb[11] = -1;
         sb[12] = -1;
         Some(sb)
@@ -190,21 +230,25 @@ impl StreamOps for ZipStream {
 pub(crate) fn open_entry(
     req: &mut Request,
     zf: Reader,
-    orig: Option<(&[u8], u64)>,
+    orig: Option<(&[u8], ArchiveId)>,
     mode: &[u8],
-    stat: Option<(u64, i64, bool)>,
+    path: Option<Vec<u8>>,
     file: Option<Stdio>,
 ) -> Result<Option<Owner<Stream>>, Thrown> {
     if mode.first() != Some(&b'r') {
         return Ok(None);
     }
+    let archive = orig.map(|(_, id)| id);
     let kind = ZipStream {
         zf,
-        stat,
-        archive: orig.map(|(_, id)| id),
+        path: path.or_else(|| orig.map(|(name, _)| name.to_vec())),
+        archive,
         file,
     };
     let stream = req.new_stream(Box::new(kind), mode)?;
+    if let Some(id) = archive {
+        holder::addref(req, id);
+    }
     if let Some((name, _)) = orig
         && let Err(thrown) = stream.set_orig_path(req, name)
     {
@@ -225,6 +269,7 @@ fn open(
     let Some(hash) = path.iter().position(|b| *b == b'#') else {
         return Ok(None);
     };
+    let orig_path = path.to_vec();
     let fragment_len = path.len() - hash;
     let path = if path.len() >= 6 && path[..6].eq_ignore_ascii_case(b"zip://") {
         &path[6..]
@@ -242,11 +287,7 @@ fn open(
     let Some(resolved) = expand(req, dirname) else {
         return Ok(None);
     };
-    let host = {
-        use std::os::unix::ffi::OsStrExt;
-        std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&resolved))
-    };
-    let Ok(mut archive) = Archive::open(host, CREATE) else {
+    let Ok(mut archive) = Archive::open(host(&resolved), CREATE) else {
         return Ok(None);
     };
     if let Some(context) = req.stream_ctx()
@@ -264,15 +305,11 @@ fn open(
     let Ok(idx) = archive.name_locate(fragment, 0) else {
         return Ok(None);
     };
-    let Ok(st) = archive.stat_index(idx, 0) else {
-        return Ok(None);
-    };
     let Ok(zf) = archive.fopen(idx, 0, None) else {
         return Ok(None);
     };
-    let dir = path.last() == Some(&b'/');
     let file = archive.data.as_mut().and_then(|d| d.stdio.take());
-    open_entry(req, zf, None, mode, Some((st.size, st.mtime, dir)), file)
+    open_entry(req, zf, None, mode, Some(orig_path), file)
 }
 
 /// `php_stream_zip_wrapper`, `zip wrapper`: an opener and nothing else.

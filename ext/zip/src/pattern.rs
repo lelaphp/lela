@@ -9,7 +9,7 @@ use php_ext::raising::{Level, Thrown, arg_value_error, docref, type_error, value
 use php_ext::request::{MAXPATHLEN, OwnedStream as _, Request, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
-use crate::object::{Intern, basedir_refuses};
+use crate::object::{Intern, basedir_refuses, za};
 
 /// `PHP_GLOB_ONLYDIR`.
 const GLOB_ONLYDIR: i64 = 1 << 30;
@@ -24,7 +24,6 @@ pub(crate) enum Kind {
 }
 
 /// `zip_options`.
-#[derive(Default)]
 struct Options {
     remove_all_path: bool,
     remove_path: Option<Vec<u8>>,
@@ -36,15 +35,27 @@ struct Options {
     enc_password: Option<Vec<u8>>,
 }
 
+impl Default for Options {
+    /// `PHP_ZIP_DEFAULT_OPTIONS`: `ZIP_FL_OVERWRITE`, and the method and
+    /// the encryption left to libzip (`-1`), with options or without.
+    fn default() -> Options {
+        Options {
+            remove_all_path: false,
+            remove_path: None,
+            add_path: None,
+            flags: 8192,
+            comp_method: -1,
+            comp_flags: 0,
+            enc_method: -1,
+            enc_password: None,
+        }
+    }
+}
+
 /// `php_zip_parse_options`: php's warnings for a loose type, its errors
 /// for a path option that is not a non-empty string.
 fn parse_options(req: &mut Request, options: PhpArray) -> Result<Options, Thrown> {
-    let mut o = Options {
-        flags: 8192,
-        comp_method: -1,
-        enc_method: -1,
-        ..Options::default()
-    };
+    let mut o = Options::default();
     let find = |name: &str| options.find(name.as_bytes()).map(|v| v.deref());
     // `zval_get_long` after php's warning for a value of the wrong type.
     let long = |req: &mut Request, name: &str, v: Value| -> Result<i64, Thrown> {
@@ -265,8 +276,6 @@ pub(crate) fn add_from_pattern(
     if pattern.is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
     }
-    // `zip_options opts = {0}`: no options is method `0`, stored and in
-    // the clear, as php's zeroed struct reads.
     let opts = if options.is_empty() {
         Options::default()
     } else {
@@ -336,11 +345,11 @@ pub(crate) fn add_from_pattern(
 /// The compression and encryption the options ask of the entry added
 /// last.
 fn settle(req: &mut Request, object: PhpObject, opts: &Options) -> bool {
-    let Some(i) = object.native_mut::<Intern>(req) else {
+    let Some(i) = object.native::<Intern>(req) else {
         return false;
     };
     let idx = usize::try_from(i.last_id.0).unwrap_or(usize::MAX);
-    let Some(archive) = i.za.as_deref_mut() else {
+    let Some(archive) = za(req, object) else {
         return false;
     };
     if opts.comp_method >= 0
@@ -359,10 +368,7 @@ fn settle(req: &mut Request, object: PhpObject, opts: &Options) -> bool {
             docref(req, Level::Warning, "password reset failed");
             return false;
         }
-        let Some(archive) = object
-            .native_mut::<Intern>(req)
-            .and_then(|i| i.za.as_deref_mut())
-        else {
+        let Some(archive) = za(req, object) else {
             return false;
         };
         let password = opts.enc_password.as_deref().map(php_ext::coerce::c_str);

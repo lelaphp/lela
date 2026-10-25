@@ -3,7 +3,8 @@
 //! `php_zip.c` and `zip_stream.c` ported over libzip's behaviour,
 //! re-derived in Rust where php's tests read it (design §7.2, revision
 //! 70): the archive and its changes held until `close` ([`archive`],
-//! [`write`]), libzip's codes and sentences ([`error`]), its strings
+//! [`write`]) by the object and its entries' streams together
+//! ([`holder`]), libzip's codes and sentences ([`error`]), its strings
 //! ([`strings`]) and DOS times ([`dostime`]); the central directory
 //! found by the pure-Rust zip crate, every entry read as its stream is
 //! read through libzip's layers over the crate's codecs and ciphers
@@ -30,6 +31,7 @@ mod dostime;
 mod error;
 mod extract;
 mod ffi;
+mod holder;
 mod object;
 mod pattern;
 mod procedural;
@@ -83,30 +85,26 @@ const VERSION: &str = "1.22.8";
 /// against. This crate binds no libzip and re-derives its behaviour, so
 /// the two versions php reads are the oracle's, named here once each
 /// beside each other.
-const LIBZIP_HEADERS: &str = "1.11.4";
+const LIBZIP_HEADERS: &str = "1.12.1";
 
 /// `zip_libzip_version()`, the libzip the oracle's php loads: the
-/// closure frozen on 2026-10-11 carries 1.12 under headers of 1.11.4
-/// (#2654), which is what `ZipArchive::LIBZIP_VERSION` answers and what
-/// the information table compares the headers with.
-const LIBZIP_LIBRARY: &str = "1.12";
+/// closure frozen on 2026-10-24 carries 1.12.1 (oracle.toml `[closure]`),
+/// which is what `ZipArchive::LIBZIP_VERSION` answers and what the
+/// information table compares the headers with.
+const LIBZIP_LIBRARY: &str = "1.12.1";
 
 /// `zend_ce_countable`, which `ZipArchive` implements.
 #[php_class(extern)]
 pub(crate) struct Countable;
 
 /// Request-scoped (ADR-0005): the two resource types, registered on
-/// first use, and the archives `ZipArchive` opened by number, those
-/// closed since kept so a stream over one of their entries reads php's
-/// `ZIP_ER_ZIPCLOSED` (`_zip_source_invalidate`), and the open ones'
-/// stdio `FILE`, which the object and its entries' streams read through.
+/// first use, and the archives `ZipArchive` opened, each held by its
+/// object and its entries' streams ([`holder`]).
 #[derive(Default)]
 struct State {
     dir: Option<ResourceType>,
     entry: Option<ResourceType>,
-    archives: u64,
-    closed: std::collections::HashSet<u64>,
-    files: std::collections::HashMap<u64, read::Stdio>,
+    holders: holder::Holders,
 }
 
 /// The extension value (design §7.1): the ten procedural natives,
@@ -119,7 +117,7 @@ struct State {
 /// ```expect
 /// bool(true)
 /// bool(true)
-/// string(4) "1.12"
+/// string(6) "1.12.1"
 /// array(1) {
 ///   ["pcre"]=>
 ///   string(8) "Required"
@@ -177,8 +175,7 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
 ///
 /// Zip => enabled
 /// Zip version => 1.22.8
-/// Libzip headers version => 1.11.4
-/// Libzip library version => 1.12
+/// Libzip version => 1.12.1
 /// BZIP2 compression => Yes
 /// XZ compression => Yes
 /// ZSTD compression => Yes
