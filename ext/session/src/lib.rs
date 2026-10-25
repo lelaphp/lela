@@ -165,11 +165,32 @@ struct State {
     thrown: Option<Thrown>,
     /// `PS(rfc1867_progress)`: an upload's progress while its body is read.
     progress: Option<progress::Progress>,
+    /// Where the request stands for the upload progress.
+    phase: Phase,
     /// The strings `session_set_cookie_params` made for a key its array
     /// gave twice and overwrote with the second, which php's leaves held
     /// to the request's end (`memory_get_usage()` reads them), given up
     /// at `rshutdown` with the rest of the request's.
     overwritten: Vec<Owner<PhpString>>,
+}
+
+/// Where the request stands for the session's upload progress: the two
+/// words php keeps of it, `PS(in_rfc1867_update)` (8.5.12) and
+/// `PG(modules_activated)`, as the one state they make.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Phase {
+    /// The request is starting and its body may be read, the session's
+    /// `RINIT` not yet served.
+    #[default]
+    Startup,
+    /// `PS(in_rfc1867_update)`: the upload progress is reading and
+    /// writing the session before `RINIT`, when no user code may be
+    /// served, so the serializers keep every object incomplete.
+    ProgressUpdate,
+    /// `PG(modules_activated)` as the session sees it: its `RINIT` was
+    /// served, so a body read now is `request_parse_body()`'s, which the
+    /// upload progress leaves alone.
+    Activated,
 }
 
 /// The extension value (design §7.1): the natives `session.stub.php`

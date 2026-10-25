@@ -30,7 +30,7 @@ impl Request {
     #[inline(never)]
     pub(crate) fn locate_oom(&mut self) {
         if self.oom_unlocated() {
-            let (file, line) = self.executed_site();
+            let (file, line) = self.executed_site(Level::Error);
             self.heap.locate_oom(&file, line);
         }
     }
@@ -154,7 +154,7 @@ impl Request {
         if self.terminated() {
             return;
         }
-        let (file, line) = self.executed_site();
+        let (file, line) = self.executed_site(Level::Error);
         let said = format!(
             "Hard memory limit of {limit} bytes exhausted (tried to allocate {asked} bytes) in {} on line {line}\n",
             String::from_utf8_lossy(&file)

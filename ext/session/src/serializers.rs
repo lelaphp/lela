@@ -12,7 +12,7 @@ use php_ext::values::walk::{self, GiveUp, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, ValueRef};
 use php_ext_standard::{Serializer, Unserializer};
 
-use crate::{Format, absorb, bind_vars, session_array, session_array_mut, shown};
+use crate::{Format, Phase, State, absorb, bind_vars, session_array, session_array_mut, shown};
 
 /// `PS_SERIALIZER_ENCODE_FUNC`: the session's variables as the format
 /// writes them, `None` where `php` meets a name with `|` in it, and
@@ -57,6 +57,8 @@ pub(super) fn encode(req: &mut Request, format: Format) -> Result<Option<Vec<u8>
         return Ok(None);
     };
     let mut hash = Serializer::new(req);
+    // `php_session_serialize_init`.
+    hash.set_incomplete_classes_only(req.state::<State>().phase == Phase::ProgressUpdate);
     let encoded = encode_through(req, format, array, &mut hash);
     hash.finish(req);
     encoded
@@ -190,8 +192,10 @@ fn encode_through(
 /// ```
 pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<bool, Thrown> {
     let data = data.to_vec();
+    let incomplete_only = req.state::<State>().phase == Phase::ProgressUpdate;
     if format == Format::PhpSerialize {
         let mut reader = Unserializer::new(req, &data)?;
+        reader.set_incomplete_classes_only(incomplete_only);
         // The value is the var hash's until it is destroyed; the session
         // keeps an owner of its own, beside the read's outcome.
         let (held, read) = match reader.value(req) {
@@ -230,6 +234,8 @@ pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<b
         return Ok(true);
     };
     let mut reader = Unserializer::new(req, &data)?;
+    // `php_session_unserialize_init`.
+    reader.set_incomplete_classes_only(incomplete_only);
     let mut ok = true;
     let mut p = 0;
     while p < data.len() {

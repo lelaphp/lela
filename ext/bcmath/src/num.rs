@@ -170,6 +170,14 @@ impl Num {
         }
     }
 
+    /// A zero keeps no sign: php's `if (bc_is_zero(num)) num->n_sign =
+    /// PLUS;`, which 8.5.12 runs on a number computed and truncated to zero.
+    pub(crate) fn unsign_zero(&mut self) {
+        if self.is_zero() {
+            self.sign = Sign::Plus;
+        }
+    }
+
     /// Whether the integer part is the single digit zero, the shape of a
     /// number below one in magnitude.
     fn int_is_zero_digit(&self) -> bool {
@@ -696,6 +704,7 @@ pub(crate) fn divide(numerator: &Num, divisor: &Num, scale: usize) -> Option<Num
             digits: numerator.digits[..numerator.len + kept].to_vec(),
         };
         quot.digits.shrink_to_fit();
+        quot.unsign_zero();
         return Some(quot);
     }
     let readable_all = numerator.digits.len();
@@ -734,6 +743,7 @@ pub(crate) fn divide(numerator: &Num, divisor: &Num, scale: usize) -> Option<Num
     if divisor_size == 1 && divisor_digits[0] == 1 {
         divide_by_pow_10(from, readable, &mut quot, quot_size, scale);
         quot.sign = sign;
+        quot.unsign_zero();
         return Some(quot);
     }
     // The numerator's window, zeros past what it holds.
@@ -859,6 +869,7 @@ pub(crate) fn raise(base: &Num, exponent: i64, scale: usize) -> Result<Num, Rais
         return divide(&Num::one(), &power, rscale).ok_or(RaiseError::DivideByZero);
     }
     power.narrow(scale);
+    power.unsign_zero();
     Ok(power)
 }
 
