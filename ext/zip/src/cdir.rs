@@ -682,7 +682,7 @@ fn dirent(
 
 /// `_zip_ef_parse`'s refusals: a field longer than what is left, and
 /// bytes after the last field other than fewer than four NULs.
-fn check_extra_fields(ef: &[u8]) -> Result<(), Status> {
+pub(crate) fn check_extra_fields(ef: &[u8]) -> Result<(), Status> {
     let mut at = 0;
     while ef.len() - at >= 4 {
         let len = usize::from(u16_at(ef, at + 2).unwrap_or(0));

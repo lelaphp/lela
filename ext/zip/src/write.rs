@@ -18,7 +18,7 @@ use crate::archive::{
 };
 use crate::codec;
 use crate::dostime::TORRENTZIP;
-use crate::error::{Done, Er, Failed, Status};
+use crate::error::{Detail, Done, Er, Failed, Status};
 use crate::strings::{Enc, ZStr};
 
 /// What a running `close` asks the program: the progress callback with
@@ -454,7 +454,8 @@ impl Archive {
             return Ok(0);
         };
         let Ok((start, _)) = self.local_header(i) else {
-            return self.fail(Er::Incons);
+            self.error = Status::bare(Detail::CdirEntryInvalid);
+            return Err(Failed);
         };
         let Some(orig) = self.entries[i].orig.clone() else {
             return Ok(0);

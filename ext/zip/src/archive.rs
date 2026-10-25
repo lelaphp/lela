@@ -1229,17 +1229,63 @@ impl Archive {
         .ok_or(())?
     }
 
-    /// `_zip_read_local_ef`.
+    /// `_zip_read_local_ef`: the local header's extra fields, read from
+    /// its lengths with no look at its signature, which the copy of the
+    /// data holds it to after (`_zip_dirent_size`):
+    ///
+    /// ```php
+    /// $b = "XX\3\4" . pack('vvvvvVVVvv', 20, 0, 0, 0, 0x21, crc32('hello'), 5, 5, 1, 0) . 'ahello';
+    /// $cd = "PK\1\2" . pack('vvvvvvVVVvvvvvVV', 0x314, 20, 0, 0, 0, 0x21, crc32('hello'), 5, 5, 1, 0, 0, 0, 0, 0x81a40000, 0) . 'a';
+    /// file_put_contents('magic-witness.zip', $b . $cd . "PK\5\6" . pack('vvvvVVv', 0, 0, 1, 1, strlen($cd), strlen($b), 0));
+    /// $z = new ZipArchive; $z->open('magic-witness.zip'); $z->renameName('a', 'b');
+    /// var_dump(@$z->close(), $z->getStatusString()); unlink('magic-witness.zip');
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// string(57) "Zip archive inconsistent: entry 0: central header invalid"
+    /// ```
     pub(crate) fn read_local_ef(&mut self, idx: usize) -> Done {
-        if self.entries[idx]
+        let Some(offset) = self.entries[idx]
             .orig
             .as_ref()
-            .is_none_or(|o| o.extra_local.is_some())
-        {
+            .filter(|o| o.extra_local.is_none())
+            .map(|o| o.offset)
+        else {
             return Ok(());
-        }
-        let Ok((_, extra)) = self.local_header(idx) else {
-            return self.fail(Er::Incons);
+        };
+        let Some(data) = self.data.as_mut() else {
+            return self.fail(Er::Internal);
+        };
+        let read = data.through(|f| {
+            let mut lens = [0u8; 4];
+            f.seek(offset + 26);
+            if f.read(&mut lens)
+                .map_err(|e| Status::of(Er::Read, e.raw_os_error().unwrap_or(0)))?
+                != 4
+            {
+                return Err(Status::of(Er::Eof, 0));
+            }
+            let nlen = u64::from(u16::from_le_bytes([lens[0], lens[1]]));
+            let mut ef = vec![0u8; usize::from(u16::from_le_bytes([lens[2], lens[3]]))];
+            if !ef.is_empty() {
+                f.seek(offset + 30 + nlen);
+                if f.read(&mut ef)
+                    .map_err(|e| Status::of(Er::Read, e.raw_os_error().unwrap_or(0)))?
+                    != ef.len()
+                {
+                    return Err(Status::of(Er::Eof, 0));
+                }
+                cdir::check_extra_fields(&ef)?;
+            }
+            Ok(strip_internal(&ef))
+        });
+        let extra = match read {
+            Some(Ok(extra)) => extra,
+            Some(Err(status)) => {
+                self.error = status;
+                return Err(Failed);
+            }
+            None => return self.fail(Er::Open),
         };
         if let Some(o) = &mut self.entries[idx].orig {
             o.extra_local = Some(extra.clone());
