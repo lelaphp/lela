@@ -22398,12 +22398,21 @@ pub(crate) fn strlen<T: Tier>(
     unary(req, frame, code, op, crate::ops::strlen)
 }
 
-/// The inline path of `ZEND_STRLEN` (`Z/Zend/zend_vm_def.h:8788`): the
+/// The inline path of `ZEND_STRLEN` (`Z/Zend/zend_vm_def.h:8772`): the
 /// length [`inline::string_length`] reads of a string as it stands,
-/// into the temporary. `None`, with nothing touched, for a temporary
-/// holding the string's owner, which the opcode gives up (`FREE_OP1`),
-/// for everything the rule leaves to the kernel, and for a temporary
-/// for the answer holding an owner.
+/// into the temporary, and then a temporary's owner of the string given
+/// up as the handler's `zval_ptr_dtor_str` gives it up, so the string a
+/// conversion or a join made for the call is freed here. `None`, with
+/// nothing touched, for everything the rule leaves to the kernel and for
+/// a temporary for the answer holding an owner.
+///
+/// ```php
+/// $i = 1234; $s = "ab";
+/// echo strlen((string)$i), "|", strlen($s . $s), "|", strlen("x$i"), "|", strlen($s), "\n";
+/// ```
+/// ```expect
+/// 4|4|5|2
+/// ```
 #[inline(always)] // as `inline_arith`
 fn inline_strlen(
     req: &mut Request,
@@ -22414,11 +22423,20 @@ fn inline_strlen(
 ) -> Option<Edge> {
     let slots = req.slots_mut(frame);
     let z = a.read(slots, code, op.op1);
-    if matches!(a.kind(), OperandKind::Tmp | OperandKind::Var) && z.is_refcounted() {
-        return None;
-    }
     let length = inline::string_length(z)?;
+    let owner = match z.as_str() {
+        Some(s) if matches!(a.kind(), OperandKind::Tmp | OperandKind::Var) && z.is_refcounted() => {
+            Some((a.slot(op.op1)?, s))
+        }
+        _ => None,
+    };
     write_owning_nothing(slots, op, Zval::long(length))?;
+    if let Some((operand, s)) = owner {
+        if let Some(slot) = slots.get_mut(operand) {
+            *slot = Zval::UNDEF;
+        }
+        req.heap_mut().release_string(s);
+    }
     Some(Ok(advanced()))
 }
 
