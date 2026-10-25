@@ -179,6 +179,26 @@ impl Bindings {
 }
 
 #[cfg(test)]
+mod names {
+    use super::NATIVES;
+
+    /// A native's variable binds bare or after the name of the target the
+    /// harness is built for, the form `.cargo/config.toml` writes
+    /// (`AARCH64_APPLE_DARWIN_OPENSSL_DIR`), and not after another
+    /// target's name or any other prefix.
+    #[test]
+    fn a_variable_binds_bare_or_after_this_target_alone() {
+        let openssl = &NATIVES[0];
+        let host = env!("XTASK_TARGET").to_uppercase().replace('-', "_");
+        assert!(openssl.names("OPENSSL_DIR"));
+        assert!(openssl.names(&format!("{host}_OPENSSL_DIR")));
+        assert!(!openssl.names("POWERPC64_IBM_AIX_OPENSSL_DIR"));
+        assert!(!openssl.names("DEP_OPENSSL_DIR"));
+        assert!(!openssl.names(&format!("{host}_OPENSSL_LIB_DIR")));
+    }
+}
+
+#[cfg(test)]
 #[cfg(tracked)]
 mod tests {
     use std::fs;
