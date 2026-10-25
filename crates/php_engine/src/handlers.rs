@@ -25811,7 +25811,24 @@ fn fast_call_var(code: &OpArray, element: php_unit::TryCatch) -> Option<u32> {
 /// opcodes that build a structure to their live ranges, and the two
 /// whose `result` is a class rather than a value to nobody; a smart
 /// branch may never have written its temporary, which reads `UNDEF`
-/// here and is nobody's either.
+/// here and is nobody's either. A call whose body returned and then
+/// threw, from a local's destructor at its end, wrote its temporary:
+/// that is given up here, as [`Request::release_thrown_value`] gives up
+/// every value written under a pending throwable, so its destructor runs
+/// before the `catch`.
+///
+/// ```php
+/// class V { function __destruct() { echo "V::__destruct\n"; } }
+/// class T { function __destruct() { throw new Exception("t"); } }
+/// function f() { $l = new T; return new V; }
+/// try { $x = f(); } catch (Exception $e) { echo "caught\n"; }
+/// echo "done\n";
+/// ```
+/// ```expect
+/// V::__destruct
+/// caught
+/// done
+/// ```
 fn free_throwing_result(req: &mut Request, frame: FrameRef, op: &Opline) {
     if !matches!(op.out_type, OperandKind::Tmp | OperandKind::Var) {
         return;
@@ -25829,7 +25846,7 @@ fn free_throwing_result(req: &mut Request, frame: FrameRef, op: &Opline) {
     }
     let slot = op.out;
     let garbage = req.take_slot(frame, slot);
-    req.release(garbage);
+    req.release_thrown_value(garbage);
 }
 
 /// `ZEND_VM_JMP_EX(target, 0)`: the frame at `at`, with neither the

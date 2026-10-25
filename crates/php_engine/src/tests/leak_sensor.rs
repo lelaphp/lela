@@ -92,6 +92,52 @@ echo "done\n";
     served.assert_clean("node\ndone\n");
 }
 
+/// A user call the engine serves from inside a handler, a property hook
+/// and `__get`, whose body returned and then threw from a local's
+/// destructor: what it returned is given up before the `catch`, its
+/// destructor running there, and the heap is empty at the end, where it
+/// held the 40-byte object until the request's end before.
+#[test]
+fn a_call_that_returned_and_then_threw_leaves_nothing_behind() {
+    let engine = Engine::cli_builder().sense_leaks(LeakSensor::Armed).build();
+    let served = engine.serve_capture(
+        r#"<?php
+class V { function __destruct() { echo "V\n"; } }
+class T { function __destruct() { throw new Exception("t"); } }
+class C { public $h { get { $l = new T; return new V; } } }
+class M { function __get($n) { $l = new T; return new V; } }
+try { $x = (new C)->h; } catch (Exception $e) { echo "caught\n"; }
+try { $x = (new M)->m; } catch (Exception $e) { echo "caught\n"; }
+echo "done\n";
+"#,
+        Capture::default(),
+    );
+    served.assert_clean("V\ncaught\nV\ncaught\ndone\n");
+}
+
+/// `get_object_vars` over a hook that returned and then threw gives the
+/// hook's value up before the `catch`, as every other caller of a user
+/// call does. php 8.5.12 leaks it there (`RETURN_THROWS` at
+/// `Z/Zend/zend_builtin_functions.c:895` with the hook's `tmp` never
+/// `zval_ptr_dtor`'d), so its destructor runs only at the store's sweep
+/// at shutdown, after `done`: the divergence this test pins the engine's
+/// side of.
+#[test]
+fn get_object_vars_gives_up_a_hooks_value_that_returned_and_then_threw() {
+    let engine = Engine::cli_builder().sense_leaks(LeakSensor::Armed).build();
+    let served = engine.serve_capture(
+        r#"<?php
+class V { function __destruct() { echo "V\n"; } }
+class T { function __destruct() { throw new Exception("t"); } }
+class C { public $h { get { $l = new T; return new V; } } }
+try { get_object_vars(new C); } catch (Exception $e) { echo "caught\n"; }
+echo "done\n";
+"#,
+        Capture::default(),
+    );
+    served.assert_clean("V\ncaught\ndone\n");
+}
+
 /// The faulty native's dropped owner is the one block the heap holds
 /// where the request ends, and the sensor ends the request in the
 /// `InternalError` naming it and the extension whose native allocated

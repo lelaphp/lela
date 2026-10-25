@@ -747,7 +747,32 @@ impl Request {
     /// What the body returned is the caller's, one owner; what it left
     /// pending is the `Err`, the throwable's one owner with it, so a
     /// native reads a callback's raise the way it reads its own
-    /// ([`Request::leave_pending`] puts it back).
+    /// ([`Request::leave_pending`] puts it back). A body that returned
+    /// and then threw, from a local's destructor at its end, has its
+    /// value given up before the `Err` is handed back
+    /// ([`Request::release_thrown_value`]), so that value's destructor
+    /// runs before the `catch`, a property hook's and a callback's alike.
+    ///
+    /// ```php
+    /// class V { function __destruct() { echo "V::__destruct\n"; } }
+    /// class T { function __destruct() { throw new Exception("t"); } }
+    /// class C { public $h { get { $l = new T; return new V; } } }
+    /// class M { function __get($n) { $l = new T; return new V; } }
+    /// function f() { $l = new T; return new V; }
+    /// try { $x = (new C)->h; } catch (Exception $e) { echo "caught\n"; }
+    /// try { $x = (new M)->m; } catch (Exception $e) { echo "caught\n"; }
+    /// try { array_map('f', [1]); } catch (Exception $e) { echo "caught\n"; }
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// V::__destruct
+    /// caught
+    /// V::__destruct
+    /// caught
+    /// V::__destruct
+    /// caught
+    /// done
+    /// ```
     ///
     /// A callback with a declared parameter type is held to it here as
     /// it is held to it under `DO_UCALL`, since one
@@ -859,6 +884,13 @@ impl Request {
         let served = self.fatal_of(served);
         self.pop_frames_to(standing);
         served?;
+        if self.raised.is_some() {
+            // The body returned and then threw or exited, from a local's
+            // destructor at its end: what it returned is given up while
+            // what it raised is pending, before the native reads the `Err`.
+            let returned = self.take_returned();
+            self.release_thrown_value(returned);
+        }
         match self.take_pending_view() {
             Some(pending) => Err(Thrown::of(Some(pending))),
             // The callback exited: what the native reads is php's
