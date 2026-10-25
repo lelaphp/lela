@@ -499,9 +499,10 @@ pub(crate) enum Side {
 }
 
 /// Which of `paths` git reads as binary on `side`: `ls-files --eol`'s
-/// `-text`, git's own detection, the one a diff of the file prints as
-/// `Bin`. Each path is literal, never a pattern, and no path asks
-/// nothing, where an empty pathspec would ask of every file.
+/// `-text`, git's own detection over the file's bytes, which attributes
+/// do not move (a `binary` attribute marks a diff, not the bytes). Each
+/// path is literal, never a pattern, and no path asks nothing, where an
+/// empty pathspec would ask of every file.
 pub(crate) fn binary(root: &Path, side: Side, paths: &[&str]) -> Result<BTreeSet<String>> {
     if paths.is_empty() {
         return Ok(BTreeSet::new());
@@ -513,10 +514,11 @@ pub(crate) fn binary(root: &Path, side: Side, paths: &[&str]) -> Result<BTreeSet
             "w/-text",
         ),
     };
-    let mut args = vec!["--literal-pathspecs", "ls-files", "--eol", "-z"];
+    let literal: Vec<String> = paths.iter().map(|p| format!(":(literal){p}")).collect();
+    let mut args = vec!["ls-files", "--eol", "-z"];
     args.extend(sides);
     args.push("--");
-    args.extend(paths);
+    args.extend(literal.iter().map(String::as_str));
     // Each head is `i/<eol> w/<eol> attr/<attributes>`.
     let listed = entries(root, &args)?.into_iter();
     Ok(listed
