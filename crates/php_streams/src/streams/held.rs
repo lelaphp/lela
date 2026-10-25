@@ -188,21 +188,38 @@ impl<'r> StreamOp<'r> {
     /// The stream's kind lent out of the stream for `f` and put back
     /// after, so `f` may serve PHP code; `None` for a kind in use by a
     /// call further out, which PHP code that call served is asking of.
+    /// A kind that can be re-entered ([`Ops::share`]) is called through
+    /// a shared kind, the kind going back at once, so a call made inside
+    /// this one finds it, as php's finds the same `php_stream`; what the
+    /// shared call found of the kind's seeking stays on the stream.
     pub(crate) fn kind<R>(&mut self, f: impl FnOnce(&mut Request, &mut dyn Ops) -> R) -> Option<R> {
         let mut kind = self.with(|s| s.ops.lend())??;
-        let out = f(self.req, kind.as_mut());
+        let Some(mut shared) = kind.share(self.req) else {
+            let out = f(self.req, kind.as_mut());
+            self.put_kind(kind);
+            return Some(out);
+        };
+        self.put_kind(kind);
+        let out = f(self.req, shared.as_mut());
+        if shared.lost_seek() {
+            self.with(|s| s.flags.no_seek = true);
+        }
+        shared.close(self.req);
+        Some(out)
+    }
+
+    /// A kind back from its call; one with no stream left to go back to,
+    /// which a hold keeps from happening, closed rather than dropped.
+    fn put_kind(&mut self, kind: Box<dyn Ops>) {
         let mut back = Some(kind);
         self.with(|s| {
             if let Some(kind) = back.take() {
                 s.ops = Kind::In(kind);
             }
         });
-        // A kind with no stream left to go back to, which a hold keeps
-        // from happening, is closed rather than dropped.
         if let Some(mut unplaced) = back {
             unplaced.close(self.req);
         }
-        Some(out)
     }
 
     /// The operation's end: its hold given back ([`let_go`]).

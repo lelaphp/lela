@@ -280,6 +280,17 @@ pub(crate) trait Ops: Send {
         None
     }
 
+    /// A second kind over this one's state for one call, where PHP code a
+    /// call of this kind serves re-enters the same stream, as php runs
+    /// the operation again on the same `php_stream`: `Some` for a
+    /// user-space stream, whose state is its PHP object, and `None` for a
+    /// kind with native state, which such a call finds in use
+    /// ([`StreamOp::kind`]). The shared kind's close gives back what it
+    /// holds and calls nothing.
+    fn share(&self, _req: &mut Request) -> Option<Box<dyn Ops>> {
+        None
+    }
+
     /// `PHP_STREAM_OPTION_XPORT_API`: one operation of a `transport`,
     /// `None` for php's `PHP_STREAM_OPTION_RETURN_NOTIMPL`, a kind that
     /// is no socket.
