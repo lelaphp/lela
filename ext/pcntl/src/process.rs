@@ -806,7 +806,8 @@ pub(crate) fn pcntl_setcpuaffinity(
             }
         };
         if !(0..configured).contains(&cpu) {
-            let tail = format!("cpu id must be between 0 and {configured} ({cpu})");
+            let last = configured - 1;
+            let tail = format!("cpu id must be between 0 and {last} ({cpu})");
             return Err(argument_error(req, "ValueError", 2, &tail));
         }
         cpus.push(usize::try_from(cpu).unwrap_or(0));

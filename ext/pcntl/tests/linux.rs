@@ -32,7 +32,8 @@ fn served(source: &str) -> String {
 }
 
 /// `pcntl_getcpuaffinity`, `pcntl_setcpuaffinity` and `pcntl_getcpu`, with
-/// php's errors.
+/// php's errors: the bound a range error names is the last CPU id, which
+/// the check takes, as php 8.5.12 says it (`maxcpus - 1`).
 #[test]
 fn the_cpu_affinity_reads_and_writes_as_php_s_does() {
     let source = r#"<?php
@@ -44,6 +45,11 @@ try { pcntl_setcpuaffinity(null, []); } catch (ValueError $e) { echo $e->getMess
 try { pcntl_setcpuaffinity(null, ['x']); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 try { pcntl_setcpuaffinity(null, [1.5]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 try { pcntl_setcpuaffinity(null, [-1]); } catch (ValueError $e) { echo "out of range\n"; }
+$p = 'pcntl_setcpuaffinity(): Argument #2 ($cpu_ids) cpu id must be between 0 and ';
+for ($b = 0, $seen = null; $b < 65536; $b++) {
+    try { pcntl_setcpuaffinity(null, [$b, -1]); } catch (ValueError $e) { if ($seen !== null && $e->getMessage() !== $seen) break; $seen = $e->getMessage(); }
+}
+var_dump($seen === $p . ($b - 1) . ' (-1)', $e->getMessage() === $p . ($b - 1) . " ($b)");
 try { pcntl_getcpuaffinity(99999999); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 var_dump(pcntl_setcpuaffinity(null, $cpus));
 $cpu = pcntl_getcpu();
@@ -58,6 +64,8 @@ pcntl_setcpuaffinity(): Argument #2 ($cpu_ids) must not be empty
 pcntl_setcpuaffinity(): Argument #2 ($cpu_ids) cpu id invalid value (x)
 pcntl_setcpuaffinity(): Argument #2 ($cpu_ids) value must be of type int|string, float given
 out of range
+bool(true)
+bool(true)
 pcntl_getcpuaffinity(): Argument #1 ($process_id) invalid process (99999999)
 bool(true)
 bool(true)";
