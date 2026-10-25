@@ -21,6 +21,13 @@
 //! same stream meanwhile finds the stream there and the part in use,
 //! php's `in_free` answer for an operation it cannot take.
 //!
+//! The one shared count beside the resource's is a socket's `Arc<Sock>`:
+//! a crypto layer's call (`Op::with_crypto`) borrows the socket's fd for
+//! its length while the socket stays in the stream and PHP code reaches
+//! it, so the call holds its own clone of the socket, made as the layer
+//! sets up, enables, connects or reads its meta data, and never per read
+//! or write.
+//!
 //! ```php
 //! $s = stream_socket_server('tcp://127.0.0.1:0');
 //! $c = stream_socket_client('tcp://' . stream_socket_get_name($s, false), $e, $m, 0.2);
