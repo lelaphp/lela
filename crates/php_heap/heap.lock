@@ -115,6 +115,7 @@ Heap::array_lookup
 Heap::array_mixed
 Heap::array_next_entry
 Heap::array_packed
+Heap::array_singleton
 Heap::array_sized
 Heap::array_sort
 Heap::array_str_take

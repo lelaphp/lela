@@ -609,6 +609,14 @@ impl Request {
         self.fatal_of(allocated).map(PhpArray::of)
     }
 
+    /// An empty array whose first write makes room for one element,
+    /// php's `array_init_singleton` ([`php_heap::Heap::array_singleton`]),
+    /// one owner the caller's.
+    pub(crate) fn array_singleton(&mut self) -> Result<Owner<PhpArray>, Thrown> {
+        let allocated = self.heap.array_singleton();
+        adopted(self.fatal_of(allocated).map(PhpArray::of))
+    }
+
     /// `zend_new_array(size)`, what `INIT_ARRAY` lays down for the
     /// elements it was told to expect, and `zend_hash_real_init_mixed`
     /// over it where the opline says the array cannot be packed
