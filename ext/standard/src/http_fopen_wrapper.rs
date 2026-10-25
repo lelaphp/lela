@@ -1201,7 +1201,10 @@ fn next_header_line(bag: &[u8], mut at: usize) -> usize {
 /// blanks allowed before its colon, taken out of both bags with the
 /// folded lines that carry the rest of its value; where nothing follows
 /// it, the line breaks before it too, so the `\r\n` sent after the bag
-/// does not close the header block early.
+/// does not close the header block early. The first chain leaves its
+/// origin, the second stays on it, and the third comes back to its
+/// origin from another, withheld all the same, as every hop after the
+/// one that left keeps `HTTP_WRAPPER_STRIP_AUTH`:
 ///
 /// ```php
 /// $a = stream_socket_server('tcp://127.0.0.1:0');
@@ -1225,17 +1228,28 @@ fn next_header_line(bag: &[u8], mut at: usize) -> usize {
 ///     fwrite($c, "HTTP/1.0 302 Found\r\nLocation: /y\r\nContent-Length: 0\r\n\r\n");
 ///     fclose($c);
 ///     $echo(stream_socket_accept($a));
+///     $c = stream_socket_accept($a);
+///     fread($c, 4096);
+///     fwrite($c, "HTTP/1.0 302 Found\r\nLocation: http://$addrB/b\r\nContent-Length: 0\r\n\r\n");
+///     fclose($c);
+///     $c = stream_socket_accept($b);
+///     fread($c, 4096);
+///     fwrite($c, "HTTP/1.0 302 Found\r\nLocation: http://$addrA/back\r\nContent-Length: 0\r\n\r\n");
+///     fclose($c);
+///     $echo(stream_socket_accept($a));
 ///     exit(0);
 /// }
 /// $ctx = stream_context_create(['http' => ['header' => "Authorization: Bearer x\r\n"
 ///     . "Cookie : sid=1\r\n\tfolded\r\nX-Custom: 1\r\nProxy-Authorization: Basic eA=="]]);
 /// var_dump(file_get_contents("http://$addrA/", false, $ctx));
 /// var_dump(file_get_contents("http://$addrA/", false, $ctx));
+/// var_dump(file_get_contents("http://$addrA/z", false, $ctx));
 /// pcntl_wait($status);
 /// ```
 /// ```expect process
 /// string(24) "Host,Connection,X-Custom"
 /// string(65) "Host,Connection,Authorization,Cookie,X-Custom,Proxy-Authorization"
+/// string(24) "Host,Connection,X-Custom"
 /// ```
 fn strip_header(bag: &mut Vec<u8>, lower: &mut Vec<u8>, name: &[u8]) {
     let mut line = 0;
