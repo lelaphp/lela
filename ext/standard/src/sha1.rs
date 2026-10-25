@@ -209,6 +209,17 @@ fn sha1(
 /// string(40) "7d76d48d64d7ac5411d714a4bb83f37e3e5b8df6"
 /// bool(true)
 /// ```
+///
+/// A read that fails is `false`, after its notice, where `md5_file`
+/// answers what it read (`sha1_file_stream_error.phpt`):
+///
+/// ```php
+/// var_dump(@sha1_file(__DIR__), @md5_file(__DIR__));
+/// ```
+/// ```expect
+/// bool(false)
+/// string(32) "d41d8cd98f00b204e9800998ecf8427e"
+/// ```
 #[php_function]
 fn sha1_file(
     req: &mut Request,
@@ -216,7 +227,11 @@ fn sha1_file(
     #[php(default = false)] binary: bool,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let mut context = Sha1::new();
-    if !digest_file(req, filename.0, |read| context.update(read))? {
+    // php 8.5.12's `n < 0 || !php_stream_eof(stream)`: a read that
+    // failed is `false`, a directory's among them, where `md5_file`
+    // answers the digest of nothing.
+    let read = digest_file(req, filename.0, |read| context.update(read))?;
+    if !read.is_some_and(|read| read.at_end && !read.failed) {
         return Ok(OrFalse::False);
     }
     digest_value(req, &context.finish(), binary).map(OrFalse::Value)

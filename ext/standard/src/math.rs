@@ -333,6 +333,18 @@ fn whole(num: Number, apply: fn(f64) -> f64) -> f64 {
 ///   - Return [ float ]
 /// }
 /// ```
+///
+/// A whole value rounded to no places is itself (gh22410), so one past
+/// 2^53 is not moved by the pre-rounding:
+///
+/// ```php
+/// var_dump(round(1.0), round((float) 9003241321073828), round((float) -9003241321073828));
+/// ```
+/// ```expect
+/// float(1)
+/// float(9003241321073828)
+/// float(-9003241321073828)
+/// ```
 #[php_function]
 fn round(
     req: &mut Request,
@@ -1511,6 +1523,11 @@ fn round_helper(integral: f64, value: f64, exponent: f64, places: i32, mode: i32
 #[allow(clippy::float_cmp)]
 pub(crate) fn math_round(value: f64, places: i32, mode: i32) -> f64 {
     if !value.is_finite() || value == 0.0 {
+        return value;
+    }
+    // php 8.5.12 (gh22410): a whole value rounded to no places is itself,
+    // where the pre-rounding check could move a large one by one.
+    if places == 0 && value == value.trunc() {
         return value;
     }
     let places = places.max(i32::MIN + 1);

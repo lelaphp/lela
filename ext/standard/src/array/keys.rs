@@ -208,7 +208,20 @@ fn array_search(
 /// `array_keys(array $array, mixed $filter_value = UNKNOWN, bool $strict
 /// = false): array`, php's `PHP_FUNCTION(array_keys)`
 /// (`Z/ext/standard/array.c:4424`): every key in order, or with a filter
-/// value the keys of the elements that match it.
+/// value the keys of the elements that match it. An input with no
+/// element answers the empty array, not the input with its next free
+/// index (gh23576):
+///
+/// ```php
+/// $a = [123 => 123]; unset($a[123]);
+/// $b = array_keys($a); $b[] = 42; var_dump($b);
+/// ```
+/// ```expect
+/// array(1) {
+///   [0]=>
+///   int(42)
+/// }
+/// ```
 ///
 /// ```php
 /// var_dump(array_keys(["a" => 1, 2 => "x", "b" => "1"]), array_keys(["a" => 1, 2 => "x", "b" => "1"], 1), array_keys(["a" => 1, "b" => "1"], "1", true), array_keys([]));
@@ -246,8 +259,11 @@ fn array_keys(
         Passed::Given(filter) => Some(filter),
         Passed::Omitted => None,
     };
+    // php 8.5.12's `RETURN_EMPTY_ARRAY()` for an input with no element
+    // (gh23576), where 8.5.9 handed the input back with its next free
+    // index.
     if array.is_empty() {
-        return Ok(Owner::take(req, array));
+        return Ok(Owner::take(req, PhpArray::empty()));
     }
     let mut out = PhpArray::new(req)?;
     walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
