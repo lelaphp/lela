@@ -95,11 +95,11 @@ pub fn int_to_string(req: &mut Request, n: i64) -> Result<Owner<PhpString>, Thro
 /// `zend_gcvt(f, precision ? precision : 1, '.', exponent, buf)`, as
 /// `smart_str_append_double` and `zend_double_to_str` call it, the one
 /// [`php_heap::double_to_string`] through the face: `precision`
-/// significant digits, a `0` read as one, or with `-1` the shortest text that reads back as
-/// the same double, in the form php chooses, and not yet a string of the
-/// request's. The exponent character is the caller's, as it is at each
-/// of php's call sites: `Exponent::Upper` for `var_export`, `%G` and
-/// `%H`, `Exponent::Lower` for `json_encode`, `%g` and `%h`. A
+/// significant digits, a `0` read as one, or with `-1` the shortest
+/// text that reads back as the same double, in the form php chooses, and
+/// not yet a string of the request's. The exponent character is the
+/// caller's, as it is at each of php's call sites: `Exponent::Upper` for
+/// `var_export`, `%G` and `%H`, `Exponent::Lower` for `%g` and `%h`. A
 /// `zero_fraction` such as `smart_str_append_double` takes is the
 /// caller's too, since only `var_export` and `json_encode` ask for it.
 ///

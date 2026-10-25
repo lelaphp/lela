@@ -221,14 +221,15 @@ impl Exponent {
     }
 }
 
-/// `zend_double_to_str` and `smart_str_append_double`, which every float
-/// php converts to a string or appends goes through: [`gcvt`] at
-/// `precision ? precision : 1` (`Z/Zend/zend_operators.c:3621`,
-/// `Z/Zend/zend_smart_str.c:160`), so a `precision` of `0` prints as `1`
-/// does. `precision` significant digits when it is not negative, and the
-/// shortest text that reads back as the same double when it is, which is
-/// what `serialize_precision = -1` asks for, with the exponent character
-/// the caller passes, as php's callers each pass their own.
+/// `zend_double_to_str` and `smart_str_append_double`, which a float's
+/// conversion to a string, `echo`, `print_r` and `var_export` go
+/// through: [`gcvt`] at `precision ? precision : 1`
+/// (`Z/Zend/zend_operators.c:3621`, `Z/Zend/zend_smart_str.c:160`), so a
+/// `precision` of `0` prints as `1` does. `precision` significant digits
+/// when it is not negative, and the shortest text that reads back as the
+/// same double when it is, which is what `var_export` at its
+/// `serialize_precision = -1` asks for, with the exponent character the
+/// caller passes, as php's callers each pass their own.
 ///
 /// ```php
 /// echo 2.5, "|", 1.0, "|", 0.1 + 0.2, "|", 1e25, "|", 0.00001, "|", 1/3, "|", -0.0, "|", INF, "|", -INF, "|", 5e-324, "|", 0.001;
@@ -316,9 +317,9 @@ pub fn double_to_string(value: f64, precision: i32, exponent: Exponent) -> Strin
 /// the entry stands, where [`double_to_string`] hands it one for a zero.
 /// The digits are `zend_dtoa`'s: `ndigit` of them, a count under one
 /// read as one, or for a negative `ndigit` the shortest that reads back
-/// as the same double, the `ndigit` then read as 17. The form is php's: exponential when the decimal point
-/// stands past `ndigit` digits or more than three places before them,
-/// fixed otherwise. So at an `ndigit` of `0` the one digit is written
+/// as the same double, the `ndigit` then read as 17. The form is php's:
+/// exponential when the decimal point stands past `ndigit` digits or more
+/// than three places before them, fixed otherwise. So at an `ndigit` of `0` the one digit is written
 /// exponentially whenever the point stands past it, and `10/3` is
 /// `3.0E+0` where a precision of one prints `3`:
 ///
@@ -382,7 +383,7 @@ pub fn gcvt(value: f64, ndigit: i32, exponent: Exponent) -> String {
     // `zend_gcvt` asks `zend_dtoa` for the shortest digits when `ndigit`
     // is negative, and reads `ndigit` as 17 for the form it then chooses,
     // whatever those digits came to.
-    let form = if ndigit < 0 { 17 } else { ndigit };
+    let form_ndigit = if ndigit < 0 { 17 } else { ndigit };
     if !value.is_finite() {
         let word = if value.is_nan() {
             "NAN"
@@ -391,7 +392,7 @@ pub fn gcvt(value: f64, ndigit: i32, exponent: Exponent) -> String {
         } else {
             "-INF"
         };
-        let kept = usize::try_from(form).unwrap_or(0).min(word.len());
+        let kept = usize::try_from(form_ndigit).unwrap_or(0).min(word.len());
         return word[..kept].to_owned();
     }
     let (digits, point) = significant(value.abs(), ndigit);
@@ -399,7 +400,7 @@ pub fn gcvt(value: f64, ndigit: i32, exponent: Exponent) -> String {
     if value.is_sign_negative() {
         out.push('-');
     }
-    if (point >= 0 && point > form) || point < -3 {
+    if (point >= 0 && point > form_ndigit) || point < -3 {
         exponential(&mut out, &digits, point - 1, exponent);
     } else {
         fixed(&mut out, &digits, point);
