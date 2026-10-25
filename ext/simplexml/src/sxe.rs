@@ -1035,79 +1035,112 @@ pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Th
 
 /// `sxe_xmlNodeListGetString`'s string of a node list's text
 /// (`Z/ext/simplexml/simplexml.c:910`): `zend_string_finit` of what
-/// libxml gave back, whatever its length, and the empty string where it
-/// gave back nothing.
-fn list_value(req: &mut Request, text: Option<Vec<u8>>) -> Result<Owner<Value>, Thrown> {
-    Ok(match text {
-        Some(text) => PhpString::finit(req, &text)?,
-        None => PhpString::new(req, b"")?,
-    }
-    .into_value())
+/// libxml gave back, whatever its length, asked for fallibly since 8.5.12
+/// and `None` where the memory limit refused it, and the empty string
+/// where libxml gave back nothing.
+fn list_value(req: &mut Request, text: Option<Vec<u8>>) -> Result<Option<Owner<Value>>, Thrown> {
+    let made = match text {
+        Some(text) => req
+            .memory_mut()
+            .fallible(|req| PhpString::finit(req, &text))?,
+        None => Some(PhpString::new(req, b"")?),
+    };
+    Ok(made.map(Owner::into_value))
 }
 
 /// `get_base_node_value`: a node's text where its first child is text that
-/// is not blank, an object standing for it otherwise.
+/// is not blank, an object standing for it otherwise; `None` where the
+/// memory limit refused the text, php's `false` since 8.5.12.
 fn base_value(
     req: &mut Request,
     of: PhpObject,
     node: Node,
     ns: Option<&Ns>,
-) -> Result<Owner<Value>, Thrown> {
+) -> Result<Option<Owner<Value>>, Thrown> {
     if let Some(c) = node.children()
         && c.kind() == Kind::Text
         && !c.is_blank()
     {
         return list_value(req, node.list_string());
     }
-    Ok(wrap(req, of, node, Walk::Node, ns.cloned())?.into_value())
+    Ok(Some(
+        wrap(req, of, node, Walk::Node, ns.cloned())?.into_value(),
+    ))
 }
 
 /// `sxe_get_prop_hash`: the object's attributes under `@attributes`, then
 /// its children by name, or its text, as `var_dump` (`debug`) and the
 /// property readers see them.
+///
+/// Since 8.5.12 a text is asked for fallibly, and where the memory limit
+/// refused one or was met adding a row the table is emptied (`goto oom`,
+/// `zend_hash_clean(rv)`), the limit's fatal raised at the next check,
+/// the reader seeing the empty table until then:
+///
+/// ```php
+/// $x = simplexml_load_string('<r><a>' . str_repeat('x', 3 << 20) . '</a></r>', null, LIBXML_PARSEHUGE);
+/// ini_set('memory_limit', '2M');
+/// $p = get_object_vars($x);
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %s on line 4
+/// ```
+///
+/// ```php
+/// $x = simplexml_load_string('<r a="' . str_repeat('x', 3 << 20) . '"/>', null, LIBXML_PARSEHUGE);
+/// ini_set('memory_limit', '2M');
+/// $p = (array) $x; var_dump(count($p));
+/// ```
+/// ```expect exit=255
+/// int(0)
+///
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %s on line 4
+/// ```
 fn prop_hash(req: &mut Request, object: PhpObject, debug: bool) -> Result<Vec<Row>, Thrown> {
-    let view = View::of(req, object);
     let mut rows = Vec::new();
-    let base = view.node(req)?;
-    if debug || view.walk != Walk::Children {
-        let node = match view.walk {
-            Walk::Elements(_) => view.first(base),
-            Walk::Node | Walk::Children | Walk::Attributes(_) => Some(base),
-        };
-        if let Some(node) = node.filter(|n| n.kind() != Kind::EntityDecl) {
-            let mut attrs = Vec::new();
-            let mut at = node.properties();
-            while let Some(a) = at {
-                let named = match &view.walk {
-                    Walk::Attributes(Some(name)) => a.name() == *name,
-                    Walk::Attributes(None) | Walk::Node | Walk::Elements(_) | Walk::Children => {
-                        true
-                    }
-                };
-                if named && view.matches_ns(a) {
-                    attrs.push((a.name(), a.list_string()));
+    if prop_rows(req, object, debug, &mut rows)? {
+        return Ok(rows);
+    }
+    for row in rows {
+        match row {
+            Row::Named(_, values) => {
+                for value in values {
+                    value.give_up(req);
                 }
-                at = a.next();
             }
-            if !attrs.is_empty() {
-                let mut list = PhpArray::new(req)?;
-                for (name, value) in attrs {
-                    let value = list_value(req, value)?;
-                    list.set_str(req, &name, value)?;
-                }
-                add_row(&mut rows, b"@attributes", list.into_value());
-            }
+            Row::Next(value) => value.give_up(req),
         }
     }
+    Ok(Vec::new())
+}
+
+/// [`prop_hash`]'s rows into `rows`: `false` where the memory limit
+/// refused a text or was met adding a row.
+fn prop_rows(
+    req: &mut Request,
+    object: PhpObject,
+    debug: bool,
+    rows: &mut Vec<Row>,
+) -> Result<bool, Thrown> {
+    let view = View::of(req, object);
+    let base = view.node(req)?;
+    if (debug || view.walk != Walk::Children) && !attribute_rows(req, &view, base, rows)? {
+        return Ok(false);
+    }
     let Some(node) = view.first(base) else {
-        return Ok(rows);
+        return Ok(true);
     };
     if matches!(view.walk, Walk::Attributes(_)) {
-        return Ok(rows);
+        return Ok(true);
     }
     if node.kind() == Kind::Attribute {
-        rows.push(Row::Next(list_value(req, node.list_string())?));
-        return Ok(rows);
+        let Some(value) = list_value(req, node.list_string())? else {
+            return Ok(false);
+        };
+        rows.push(Row::Next(value));
+        return Ok(true);
     }
     let mut use_iter = false;
     let mut at = if view.walk == Walk::Children {
@@ -1131,18 +1164,29 @@ fn prop_hash(req: &mut Request, object: PhpObject, debug: bool) -> Result<Vec<Ro
                 n.kind() != Kind::Text
             } else if n.kind() == Kind::Text {
                 if n.content().is_some_and(|c| !c.is_empty()) {
-                    rows.push(Row::Next(list_value(req, n.content())?));
+                    let Some(value) = list_value(req, n.content())? else {
+                        return Ok(false);
+                    };
+                    rows.push(Row::Next(value));
+                    if req.memory().has_oom() {
+                        return Ok(false);
+                    }
                 }
                 false
             } else {
                 true
             };
         if taken && (n.kind() != Kind::Element || view.matches_ns(n)) && n.has_name() {
-            let value = base_value(req, object, n, view.ns.as_ref())?;
+            let Some(value) = base_value(req, object, n, view.ns.as_ref())? else {
+                return Ok(false);
+            };
             if use_iter {
                 rows.push(Row::Next(value));
             } else {
-                add_row(&mut rows, &n.name(), value);
+                add_row(rows, &n.name(), value);
+            }
+            if req.memory().has_oom() {
+                return Ok(false);
             }
         }
         if n.kind() == Kind::EntityDecl {
@@ -1154,7 +1198,51 @@ fn prop_hash(req: &mut Request, object: PhpObject, debug: bool) -> Result<Vec<Ro
             n.next()
         };
     }
-    Ok(rows)
+    Ok(true)
+}
+
+/// [`prop_rows`]' `@attributes` row: `false` where the memory limit
+/// refused a value or was met adding one.
+fn attribute_rows(
+    req: &mut Request,
+    view: &View,
+    base: Node,
+    rows: &mut Vec<Row>,
+) -> Result<bool, Thrown> {
+    let node = match view.walk {
+        Walk::Elements(_) => view.first(base),
+        Walk::Node | Walk::Children | Walk::Attributes(_) => Some(base),
+    };
+    if let Some(node) = node.filter(|n| n.kind() != Kind::EntityDecl) {
+        let mut attrs = Vec::new();
+        let mut at = node.properties();
+        while let Some(a) = at {
+            let named = match &view.walk {
+                Walk::Attributes(Some(name)) => a.name() == *name,
+                Walk::Attributes(None) | Walk::Node | Walk::Elements(_) | Walk::Children => true,
+            };
+            if named && view.matches_ns(a) {
+                attrs.push((a.name(), a.list_string()));
+            }
+            at = a.next();
+        }
+        if !attrs.is_empty() {
+            let mut list = PhpArray::new(req)?;
+            for (name, value) in attrs {
+                let Some(value) = list_value(req, value)? else {
+                    list.give_up(req);
+                    return Ok(false);
+                };
+                list.set_str(req, &name, value)?;
+                if req.memory().has_oom() {
+                    list.give_up(req);
+                    return Ok(false);
+                }
+            }
+            add_row(rows, b"@attributes", list.into_value());
+        }
+    }
+    Ok(true)
 }
 
 /// `sxe_prop_is_empty`: whether the object has no attribute and no child
