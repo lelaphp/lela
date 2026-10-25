@@ -94,15 +94,28 @@ impl Judged {
     }
 }
 
-/// One file of a diff: where it is, what it would carry there, and what
-/// the base carries at that path, which is what the write displaces.
+/// One file of a diff: where it is and what it would carry there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Diffed {
     pub path: String,
-    pub content: String,
-    /// What the base carries at the path, or in a merge what each parent
-    /// does.
-    pub displaced: Vec<String>,
+    pub content: Content,
+}
+
+/// What a file of a diff carries, as git reads it ([`git::binary`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Content {
+    /// Text, a byte that is not UTF-8 read as U+FFFD, beside what the
+    /// base carries at the path, or in a merge what each parent does,
+    /// which is what the write displaces.
+    Text {
+        text: String,
+        displaced: Vec<String>,
+    },
+    /// Bytes git reads as binary, judged by the path alone as the `Write`
+    /// of no text: what a rule reads is text, and a binary file read as
+    /// text, a stand-in build in a fixture, is bytes no rule describes
+    /// (#3458).
+    Binary,
 }
 
 /// Judge `files`, each a path relative to `root` and the content that
@@ -116,13 +129,12 @@ pub fn judge_files(manifest: &Manifest, root: &Path, files: &[Diffed]) -> Result
     let mut a_persons: Vec<String> = a_persons_of(manifest).collect();
     let mut nested: BTreeMap<PathBuf, Manifest> = BTreeMap::new();
     let mut judged = Vec::new();
-    for Diffed {
-        path,
-        content,
-        displaced,
-    } in files
-    {
-        let call = Call::diff_of(&root.join(path).to_string_lossy(), content, displaced);
+    for Diffed { path, content } in files {
+        let at = root.join(path).to_string_lossy().into_owned();
+        let call = match content {
+            Content::Text { text, displaced } => Call::diff_of(&at, text, displaced),
+            Content::Binary => Call::write_of(&at, None),
+        };
         let judgement = match call.nested(root) {
             None => judge(manifest, root, &call)?,
             Some(workspace) => {
@@ -168,10 +180,18 @@ fn a_persons_of(manifest: &Manifest) -> impl Iterator<Item = String> + '_ {
 /// an error is no evidence that a line stood there, and reading it as
 /// empty is the answer that denies rather than excuses.
 fn displaced(root: &Path, rev: &str, path: &str) -> String {
-    git::show(root, rev, path)
+    git::show_bytes(root, rev, path)
         .ok()
         .flatten()
+        .map(text)
         .unwrap_or_default()
+}
+
+/// Bytes as the judge reads them: text, a byte that is not UTF-8 as
+/// U+FFFD.
+fn text(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes)
+        .unwrap_or_else(|not| String::from_utf8_lossy(not.as_bytes()).into_owned())
 }
 
 /// The staged files with their staged content: what a commit would take,
@@ -183,50 +203,73 @@ fn displaced(root: &Path, rev: &str, path: &str) -> String {
 /// lines among them, whose lines the merge base may carry apart (#2783);
 /// and a file the merge takes whole from the merged parent is that
 /// parent's, judged at its own commits, so the merge is not asked of it.
-/// A hit neither parent carried as often is the merge's.
+/// A hit neither parent carried as often is the merge's. A file git
+/// reads as binary in the index is judged by its path alone.
 fn staged_files(root: &Path) -> Result<Vec<Diffed>> {
     let theirs = git::rev_parse(root, &["-q", "--verify", "MERGE_HEAD"]).ok();
+    let staged: Vec<git::Change> = (git::staged(root)?.into_iter())
+        .filter(|c| !c.deleted)
+        .collect();
+    let paths: Vec<&str> = staged.iter().map(|c| c.path.as_str()).collect();
+    let binary = git::binary(root, git::Side::Index, &paths)?;
     let mut files = Vec::new();
-    for change in git::staged(root)?.into_iter().filter(|c| !c.deleted) {
-        if let Some(content) = git::staged_content(root, &change.path)? {
-            let mut parents = vec![displaced(root, "HEAD", &change.path)];
-            if let Some(theirs) = &theirs {
-                let merged = displaced(root, theirs, &change.path);
-                if merged == content {
-                    continue;
-                }
-                parents.push(merged);
-            }
+    for git::Change { path, .. } in staged {
+        if binary.contains(&path) {
             files.push(Diffed {
-                path: change.path,
-                content,
-                displaced: parents,
+                path,
+                content: Content::Binary,
             });
+            continue;
         }
+        let Some(staged) = git::show_bytes(root, "", &path)?.map(text) else {
+            continue;
+        };
+        let mut parents = vec![displaced(root, "HEAD", &path)];
+        if let Some(theirs) = &theirs {
+            let merged = displaced(root, theirs, &path);
+            if merged == staged {
+                continue;
+            }
+            parents.push(merged);
+        }
+        let content = Content::Text {
+            text: staged,
+            displaced: parents,
+        };
+        files.push(Diffed { path, content });
     }
     Ok(files)
 }
 
 /// The changed files with their working-tree content, as `done` judges
 /// them, against what `base` carries; a deleted or vanished file has
-/// nothing to judge.
+/// nothing to judge, and one git reads as binary in the working tree is
+/// judged by its path alone.
 pub(crate) fn working_files(
     root: &Path,
     base: &str,
     changed: &[git::Change],
 ) -> Result<Vec<Diffed>> {
+    let changed: Vec<&str> = (changed.iter())
+        .filter(|c| !c.deleted && root.join(&c.path).is_file())
+        .map(|c| c.path.as_str())
+        .collect();
+    let binary = git::binary(root, git::Side::Worktree, &changed)?;
     let mut files = Vec::new();
-    for change in changed.iter().filter(|c| !c.deleted) {
-        let file = root.join(&change.path);
-        if !file.is_file() {
-            continue;
-        }
-        let bytes = fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
-        files.push(Diffed {
-            path: change.path.clone(),
-            content: String::from_utf8_lossy(&bytes).into_owned(),
-            displaced: vec![displaced(root, base, &change.path)],
-        });
+    for path in changed {
+        let content = if binary.contains(path) {
+            Content::Binary
+        } else {
+            let file = root.join(path);
+            let bytes = fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+            let displaced = vec![displaced(root, base, path)];
+            Content::Text {
+                text: text(bytes),
+                displaced,
+            }
+        };
+        let path = path.to_owned();
+        files.push(Diffed { path, content });
     }
     Ok(files)
 }

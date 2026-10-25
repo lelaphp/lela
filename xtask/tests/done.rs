@@ -1232,6 +1232,38 @@ fn permit_over_the_diff_denies_a_lock_in_an_extension_and_notes_the_harness_file
     assert!(out.contains("notes:\n- seams.toml is in the diff"), "{out}");
 }
 
+/// A binary file in the diff `done` judges is judged by its path alone,
+/// as `permit --diff` judges a staged one: one committed in the base and
+/// changed since, and one untracked, each spelling a lock in bytes git
+/// reads as binary, deny nothing, and one at a harness path is that
+/// path's note.
+#[test]
+fn permit_over_the_diff_judges_a_binary_file_by_its_path_alone() {
+    const BINARY: &[u8] = b"\xcf\xfa\xed\xfe\x00\xff php_ext::__private\n";
+    let root = scratch("binary");
+    let repo = Repo::at(&root);
+    repo.write("ext/pcre/src/committed.so", b"\x00\x01\x02")
+        .commit("a binary");
+    repo.write("ext/pcre/src/committed.so", BINARY)
+        .write("ext/pcre/src/untracked.so", BINARY)
+        .write(".claude/hooks/stand-in", BINARY);
+    let verdict = judge(&root);
+    assert!(
+        verdict
+            .unmet
+            .iter()
+            .all(|l| !l.starts_with("permit denies")),
+        "{verdict:#?}"
+    );
+    assert_eq!(
+        verdict.notes,
+        [
+            ".claude/hooks/stand-in is in the diff: changed by a person, or not; the hook cannot tell (harness.self)"
+        ],
+        "{verdict:#?}"
+    );
+}
+
 /// The `unless` qualifier over the diff (#105): a crate whose only `exit=`
 /// is the one `xtask witness --accept` wrote is done, and the same tree
 /// with no witness reading behind it is denied with the rule id. The

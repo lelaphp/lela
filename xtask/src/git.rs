@@ -7,6 +7,7 @@
 //! reading carries is the reading's own; the track and its base are
 //! `track`'s.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -472,11 +473,56 @@ pub fn staged_content(root: &Path, path: &str) -> Result<Option<String>> {
 /// The content of `path` at `rev`, or `None` when the commit has no such
 /// file.
 pub fn show(root: &Path, rev: &str, path: &str) -> Result<Option<String>> {
-    match git(root, &["show", &format!("{rev}:{path}")]) {
-        Ok(text) => Ok(Some(text)),
+    show_bytes(root, rev, path)?.map(utf8).transpose()
+}
+
+/// [`show`]'s bytes as git wrote them, UTF-8 or not.
+pub(crate) fn show_bytes(root: &Path, rev: &str, path: &str) -> Result<Option<Vec<u8>>> {
+    match run(
+        Command::new("git"),
+        root,
+        &["show", &format!("{rev}:{path}")],
+        None,
+    ) {
+        Ok(bytes) => Ok(Some(bytes)),
         Err(err) if err.to_string().contains("does not exist") => Ok(None),
         Err(err) => Err(err),
     }
+}
+
+/// Where [`binary`] reads a file: the index, or the working tree, where
+/// an untracked file stands too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Side {
+    Index,
+    Worktree,
+}
+
+/// Which of `paths` git reads as binary on `side`: `ls-files --eol`'s
+/// `-text`, git's own detection, the one a diff of the file prints as
+/// `Bin`. Each path is literal, never a pattern, and no path asks
+/// nothing, where an empty pathspec would ask of every file.
+pub(crate) fn binary(root: &Path, side: Side, paths: &[&str]) -> Result<BTreeSet<String>> {
+    if paths.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let (sides, column) = match side {
+        Side::Index => (&["--cached"][..], "i/-text"),
+        Side::Worktree => (
+            &["--cached", "--others", "--exclude-standard"][..],
+            "w/-text",
+        ),
+    };
+    let mut args = vec!["--literal-pathspecs", "ls-files", "--eol", "-z"];
+    args.extend(sides);
+    args.push("--");
+    args.extend(paths);
+    // Each head is `i/<eol> w/<eol> attr/<attributes>`.
+    let listed = entries(root, &args)?.into_iter();
+    Ok(listed
+        .filter(|(head, _)| head.split_whitespace().any(|field| field == column))
+        .map(|(_, path)| path)
+        .collect())
 }
 
 #[cfg(test)]

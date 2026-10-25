@@ -865,6 +865,45 @@ fn diff_judges_the_staged_files_and_refuses_a_denied_one_with_the_rule_id() {
     assert!(out.contains("harness.self"), "{out}");
 }
 
+/// A Mach-O header, a byte that is no UTF-8 anywhere, and the name
+/// `ext.no-private` denies in an extension's text: git reads it as binary
+/// (`ls-files --eol`'s `-text`), so no rule reads what it holds.
+const BINARY: &[u8] = b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01\xff php_ext::__private\n";
+
+/// A staged binary file is judged by its path alone: `permit --diff`
+/// read every staged file as UTF-8 and refused the whole diff on one,
+/// "git wrote something that is not UTF-8", which kept t3468's stand-in
+/// php builds out of its fixture (#3458). The name its bytes spell is no
+/// denial, a denied text file beside it still refuses the commit, and a
+/// binary at a harness path is that path's note.
+#[test]
+fn diff_judges_a_staged_binary_file_by_its_path_alone() {
+    let root = scratch("diff-binary");
+    let put = |path: &str| {
+        Repo::at(&root)
+            .write(path, BINARY)
+            .git(&["add", "--", path])
+    };
+    put("ext/pcre/src/stand-in.so");
+    let ran = permit(&root, "", &["--diff"]);
+    assert_eq!(ran.code(), 0, "a binary is judged by its path: {ran}");
+    assert!(!ran.stderr.contains("not UTF-8"), "{ran}");
+
+    let locked = "use std::sync::Mutex;\n\npub struct Cache(Mutex<Vec<u8>>);\n";
+    write(&root, "ext/pcre/src/cache.rs", locked);
+    Repo::at(&root).git(&["add", "ext/pcre/src/cache.rs"]);
+    let ran = permit(&root, "", &["--diff"]);
+    assert_eq!(ran.code(), 1, "the text file beside it is judged: {ran}");
+    assert!(ran.stdout.contains("deny ext/pcre/src/cache.rs"), "{ran}");
+    assert!(!ran.stdout.contains("stand-in.so"), "{ran}");
+    Repo::at(&root).git(&["rm", "--cached", "-q", "ext/pcre/src/cache.rs"]);
+
+    put(".claude/hooks/stand-in");
+    let out = permit(&root, "", &["--diff"]).ok();
+    assert!(out.contains("note .claude/hooks/stand-in"), "{out}");
+    assert!(out.contains("harness.self"), "{out}");
+}
+
 /// The hook's stdin carries `session_id`; a reading carries it, so the
 /// `permits` section can count denials per session (harness-design.md
 /// §4.6, §10 rule 6).
