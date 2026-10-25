@@ -11,11 +11,12 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::archive::{
     CHECKCONS, Dirent, EM_AES_128, EM_AES_192, EM_AES_256, EM_NONE, EM_TRAD_PKWARE, EM_UNKNOWN,
-    GPBF_DATA_DESCRIPTOR, GPBF_ENCODING_UTF_8, GPBF_ENCRYPTED, GPBF_STRONG_ENCRYPTION, find_ef,
-    strip_internal, u16_at, u32_at, u64_at,
+    Encryption, GPBF_DATA_DESCRIPTOR, GPBF_ENCODING_UTF_8, GPBF_ENCRYPTED, GPBF_STRONG_ENCRYPTION,
+    find_ef, strip_internal, u16_at, u32_at, u64_at,
 };
 use crate::dostime::DosTime;
 use crate::error::{Detail, Er, Status};
+use crate::read::Stdio;
 use crate::strings::{Enc, FL_ENC_UTF_8, ZStr};
 
 /// `EOCDLEN`, `EOCD64LOCLEN`, `EOCD64LEN`, `CDENTRYSIZE`, `LENTRYSIZE`.
@@ -96,31 +97,66 @@ enum Eocd64 {
 /// ```
 pub(crate) fn find(file: &mut File, len: u64, flags: u32) -> Result<Cdir, Status> {
     if len < EOCDLEN as u64 {
-        return Err(Status::of(Er::Nozip, 0));
+        return Err(Status::new(Er::Nozip));
     }
     let buflen = len.min(CDBUFSIZE);
-    let buf_offset = len - buflen;
-    let buf = read_at(file, buf_offset, usize::try_from(buflen).unwrap_or(0))?;
+    let offset = len - buflen;
+    let buf = read_at(file, offset, usize::try_from(buflen).unwrap_or(0))?;
     if buf.len() < usize::try_from(buflen).unwrap_or(0) {
-        return Err(Status::of(Er::Eof, 0));
+        return Err(Status::new(Er::Eof));
     }
-    let mut error = Status::of(Er::Nozip, 0);
+    let mut tail = Tail { file, buf, offset };
+    let mut error = Status::new(Er::Nozip);
     let mut last = None;
-    while let Some(at) = find_eocd(&buf, last) {
+    while let Some(at) = find_eocd(&tail.buf, last) {
         last = Some(at);
-        match read_cdir(file, &buf, buf_offset, at, flags) {
+        match read_cdir(&mut tail, at, flags) {
             Candidate::Passed(None) => {}
             Candidate::Passed(Some(e)) => error = e,
             Candidate::Taken(read) => {
                 let cd = read?;
                 if flags & CHECKCONS != 0 {
-                    return checkcons(file, cd);
+                    return checkcons(tail.file, cd);
                 }
                 return Ok(cd);
             }
         }
     }
     Err(error)
+}
+
+/// The archive's file and the tail of it `_zip_find_central_dir` read
+/// from `offset`, libzip's `buffer`: what an end record, the Zip64 end
+/// record and the directory are read from where the tail holds them,
+/// and the file is read for otherwise.
+struct Tail<'f> {
+    file: &'f mut File,
+    buf: Vec<u8>,
+    offset: u64,
+}
+
+impl Tail<'_> {
+    /// Where the tail ends in the file.
+    fn end(&self) -> u64 {
+        self.offset + self.buf.len() as u64
+    }
+
+    /// The tail's bytes from position `at` of the file to its end, where
+    /// the tail holds `at`.
+    fn from(&self, at: u64) -> Option<&[u8]> {
+        let start = usize::try_from(at.checked_sub(self.offset)?).ok()?;
+        self.buf.get(start..)
+    }
+
+    /// `check_magic`: whether `magic` stands at `offset`, read from the
+    /// tail where it holds the offset and from the file otherwise.
+    fn has_magic(&mut self, offset: u64, magic: [u8; 4]) -> bool {
+        if self.offset <= offset {
+            self.from(offset).and_then(|b| b.get(..4)) == Some(&magic[..])
+        } else {
+            read_at(self.file, offset, 4).is_ok_and(|r| r == magic)
+        }
+    }
 }
 
 /// `find_eocd`: the last `PK\5\6` of the tail before `last`.
@@ -135,11 +171,10 @@ fn find_eocd(buf: &[u8], last: Option<usize>) -> Option<usize> {
         .find(|&p| buf[p..].starts_with(b"PK\x05\x06"))
 }
 
-/// `_zip_read_cdir`, the end record at `at` of the tail read from
-/// `buf_offset`.
-fn read_cdir(file: &mut File, buf: &[u8], buf_offset: u64, at: usize, flags: u32) -> Candidate {
+/// `_zip_read_cdir`, the end record at `at` of the tail.
+fn read_cdir(tail: &mut Tail<'_>, at: usize, flags: u32) -> Candidate {
     use Candidate::{Passed, Taken};
-    let Some(eocd) = buf.get(at..at + EOCDLEN) else {
+    let Some(eocd) = tail.buf.get(at..at + EOCDLEN) else {
         return Passed(Some(Status::bare(Detail::EocdLengthInvalid)));
     };
     let field16 = |k| u16_at(eocd, k).unwrap_or(0);
@@ -151,12 +186,13 @@ fn read_cdir(file: &mut File, buf: &[u8], buf_offset: u64, at: usize, flags: u32
         num_entries: u64::from(field16(10)),
         size: u64::from(field32(12)),
         offset: u64::from(field32(16)),
-        eocd_offset: buf_offset + at as u64,
+        eocd_offset: tail.offset + at as u64,
         is_zip64: false,
     };
-    let eocd64_found = at >= EOCD64LOCLEN && buf[at - EOCD64LOCLEN..].starts_with(b"PK\x06\x07");
+    let eocd64_found =
+        at >= EOCD64LOCLEN && tail.buf[at - EOCD64LOCLEN..].starts_with(b"PK\x06\x07");
     if eocd64_found {
-        match eocd64(&mut cd, file, buf, buf_offset, at - EOCD64LOCLEN, flags) {
+        match eocd64(&mut cd, tail, at - EOCD64LOCLEN, flags) {
             Eocd64::Ok => {}
             Eocd64::Invalid(e) => return Taken(Err(e)),
             Eocd64::NotFound => return Passed(None),
@@ -175,51 +211,43 @@ fn read_cdir(file: &mut File, buf: &[u8], buf_offset: u64, at: usize, flags: u32
             && cd.eocd_offset == 0
             && cd.offset == 0
             && cd.num_entries == 0;
-        if !empty && !check_magic(cd.offset, buf, buf_offset, file, *b"PK\x01\x02") {
+        if !empty && !tail.has_magic(cd.offset, *b"PK\x01\x02") {
             return Passed(None);
         }
     }
     if let Err(e) = check_eocd(&cd, flags) {
         return Taken(Err(e));
     }
-    Taken(read_entries(file, buf, buf_offset, at, &cd, flags))
+    Taken(read_entries(tail, at, &cd, flags))
 }
 
 /// `_zip_read_cdir` past `check_eocd`: the comment, and the records of the
 /// directory `cd` names.
-fn read_entries(
-    file: &mut File,
-    buf: &[u8],
-    buf_offset: u64,
-    at: usize,
-    cd: &End,
-    flags: u32,
-) -> Result<Cdir, Status> {
-    let mut comment_len = usize::from(u16_at(buf, at + 20).unwrap_or(0));
-    if cd.offset.saturating_add(cd.size) > buf_offset + at as u64 {
+fn read_entries(tail: &mut Tail<'_>, at: usize, cd: &End, flags: u32) -> Result<Cdir, Status> {
+    let mut comment_len = usize::from(u16_at(&tail.buf, at + 20).unwrap_or(0));
+    if cd.offset.saturating_add(cd.size) > tail.offset + at as u64 {
         return Err(Status::bare(Detail::CdirOverlapsEocd));
     }
-    let tail = &buf[at + EOCDLEN..];
-    if (comment_len != 0 || flags & CHECKCONS != 0) && tail.len() != comment_len {
+    let after = &tail.buf[at + EOCDLEN..];
+    if (comment_len != 0 || flags & CHECKCONS != 0) && after.len() != comment_len {
         if flags & CHECKCONS != 0 {
             return Err(Status::bare(Detail::CommentLengthInvalid));
         }
-        comment_len = comment_len.min(tail.len());
+        comment_len = comment_len.min(after.len());
     }
-    let comment = tail[..comment_len].to_vec();
-    let size = usize::try_from(cd.size).map_err(|_| Status::of(Er::Memory, 0))?;
-    let (mut src, origin) = if cd.offset >= buf_offset {
-        let start = usize::try_from(cd.offset - buf_offset).unwrap_or(usize::MAX);
-        let Some(data) = buf.get(start..start.saturating_add(size)) else {
+    let comment = after[..comment_len].to_vec();
+    let size = usize::try_from(cd.size).map_err(|_| Status::new(Er::Memory))?;
+    let (mut src, origin) = if cd.offset >= tail.offset {
+        let Some(data) = tail.from(cd.offset).and_then(|b| b.get(..size)) else {
             return Err(Status::bare(Detail::CdirLengthInvalid));
         };
         (data.to_vec(), Origin::Directory)
     } else {
-        (read_at(file, cd.offset, size)?, Origin::File)
+        (read_at(tail.file, cd.offset, size)?, Origin::File)
     };
     // The file past the directory, read a record's most at a time where
     // the records are read from it, as libzip reads each from its source.
-    let file_end = buf_offset + buf.len() as u64;
+    let file_end = tail.end();
     let mut entries = Vec::with_capacity(
         usize::try_from(cd.num_entries.min(cd.size / CDENTRYSIZE as u64)).unwrap_or(0),
     );
@@ -245,12 +273,12 @@ fn read_entries(
             if src.len() < want && have < file_end {
                 let more =
                     usize::try_from(file_end - have).map_or(want, |m| m.min(want - src.len()));
-                src.extend(read_at(file, have, more)?);
+                src.extend(read_at(tail.file, have, more)?);
             }
         }
         let read = dirent(
             &src[pos.min(src.len())..],
-            false,
+            Kind::Central,
             cd.is_zip64,
             flags & CHECKCONS != 0,
             origin,
@@ -260,7 +288,7 @@ fn read_entries(
             Ok(r)
         })
         .map_err(|e| {
-            if grown && e.zip == Er::Nozip as i32 {
+            if grown && e.er == Er::Nozip {
                 Status::incons(Detail::CdirEntryInvalid, Some(index))
             } else {
                 e.at_entry(index)
@@ -309,39 +337,30 @@ fn read_entries(
 /// true 21
 /// true true
 /// ```
-fn eocd64(
-    cd: &mut End,
-    file: &mut File,
-    buf: &[u8],
-    buf_offset: u64,
-    loc: usize,
-    flags: u32,
-) -> Eocd64 {
-    let eocdloc_offset = buf_offset + loc as u64;
-    let eocd_disk = u32_at(buf, loc + 4).unwrap_or(0);
-    let eocd_offset = u64_at(buf, loc + 8).unwrap_or(0);
-    let num_disks = u32_at(buf, loc + 16).unwrap_or(0);
-    if !check_magic(eocd_offset, buf, buf_offset, file, *b"PK\x06\x06") {
+fn eocd64(cd: &mut End, tail: &mut Tail<'_>, loc: usize, flags: u32) -> Eocd64 {
+    let eocdloc_offset = tail.offset + loc as u64;
+    let eocd_disk = u32_at(&tail.buf, loc + 4).unwrap_or(0);
+    let eocd_offset = u64_at(&tail.buf, loc + 8).unwrap_or(0);
+    let num_disks = u32_at(&tail.buf, loc + 16).unwrap_or(0);
+    if !tail.has_magic(eocd_offset, *b"PK\x06\x06") {
         return Eocd64::NotFound;
     }
     if num_disks != 1 {
-        return Eocd64::Invalid(Status::of(Er::Multidisk, 0));
+        return Eocd64::Invalid(Status::new(Er::Multidisk));
     }
     if eocd_offset > INT64_MAX {
-        return Eocd64::Invalid(Status::of(Er::Seek, EFBIG));
+        return Eocd64::Invalid(Status::errno(Er::Seek, EFBIG));
     }
     if eocd_offset + EOCD64LEN as u64 > eocdloc_offset {
         return Eocd64::Invalid(Status::bare(Detail::Eocd64OverlapsEocd));
     }
-    let record = if eocd_offset >= buf_offset
-        && eocd_offset + EOCD64LEN as u64 <= buf_offset + buf.len() as u64
-    {
-        let start = usize::try_from(eocd_offset - buf_offset).unwrap_or(0);
-        buf[start..start + EOCD64LEN].to_vec()
+    let held = tail.from(eocd_offset).and_then(|b| b.get(..EOCD64LEN));
+    let record = if let Some(held) = held {
+        held.to_vec()
     } else {
-        match read_at(file, eocd_offset, EOCD64LEN) {
+        match read_at(tail.file, eocd_offset, EOCD64LEN) {
             Ok(r) if r.len() == EOCD64LEN => r,
-            Ok(_) => return Eocd64::Invalid(Status::of(Er::Eof, 0)),
+            Ok(_) => return Eocd64::Invalid(Status::new(Er::Eof)),
             Err(e) => return Eocd64::Invalid(e),
         }
     };
@@ -365,12 +384,12 @@ fn eocd64(
     let i = at64(24);
     let nentry = at64(32);
     if nentry != i {
-        return Eocd64::Invalid(Status::of(Er::Multidisk, 0));
+        return Eocd64::Invalid(Status::new(Er::Multidisk));
     }
     let size = at64(40);
     let offset = at64(48);
     if offset > INT64_MAX || offset.checked_add(size).is_none() {
-        return Eocd64::Invalid(Status::of(Er::Seek, EFBIG));
+        return Eocd64::Invalid(Status::errno(Er::Seek, EFBIG));
     }
     if nentry > size / CDENTRYSIZE as u64 {
         return Eocd64::Invalid(Status::bare(Detail::CdirInvalid));
@@ -401,28 +420,15 @@ fn eocd64(
 /// under `ZIP_CHECKCONS` one that ends where its end record starts.
 fn check_eocd(cd: &End, flags: u32) -> Result<(), Status> {
     if cd.disk_entries != cd.num_entries || cd.this_disk != 0 || cd.eocd_disk != 0 {
-        return Err(Status::of(Er::Multidisk, 0));
+        return Err(Status::new(Er::Multidisk));
     }
     let Some(end) = cd.offset.checked_add(cd.size) else {
-        return Err(Status::of(Er::Seek, EFBIG));
+        return Err(Status::errno(Er::Seek, EFBIG));
     };
     if flags & CHECKCONS != 0 && end != cd.eocd_offset {
         return Err(Status::bare(Detail::CdirOverlapsEocd));
     }
     Ok(())
-}
-
-/// `check_magic`: whether `magic` stands at `offset`, read from the tail
-/// where it holds the offset and from the file otherwise.
-fn check_magic(offset: u64, buf: &[u8], buf_offset: u64, file: &mut File, magic: [u8; 4]) -> bool {
-    if buf_offset <= offset {
-        usize::try_from(offset - buf_offset)
-            .ok()
-            .and_then(|at| buf.get(at..at.checked_add(4)?))
-            == Some(&magic[..])
-    } else {
-        read_at(file, offset, 4).is_ok_and(|r| r == magic)
-    }
 }
 
 /// `_zip_checkcons`: every entry's local header within the archive before
@@ -434,7 +440,7 @@ fn checkcons(file: &mut File, mut cd: Cdir) -> Result<Cdir, Status> {
     for (i, e) in cd.entries.iter_mut().enumerate() {
         min = min.min(e.offset);
         if min > cd.offset {
-            return Err(Status::of(Er::Nozip, 0));
+            return Err(Status::new(Er::Nozip));
         }
         let tail = e.filename.as_ref().map_or(0, |f| f.raw.len() as u64) + LENTRYSIZE as u64;
         let Some(end) = e
@@ -442,13 +448,15 @@ fn checkcons(file: &mut File, mut cd: Cdir) -> Result<Cdir, Status> {
             .checked_add(tail)
             .and_then(|s| s.checked_add(e.comp_size))
         else {
-            return Err(Status::of(Er::Nozip, 0));
+            return Err(Status::new(Er::Nozip));
         };
         max = max.max(end);
         if max > cd.offset {
-            return Err(Status::of(Er::Nozip, 0));
+            return Err(Status::new(Er::Nozip));
         }
-        let local = local_header(file, e, is_zip64).map_err(|s| s.at_entry(i))?;
+        let local = Local::at(file, e.offset)
+            .dirent(e, is_zip64)
+            .map_err(|s| s.at_entry(i))?;
         if !headers_match(e, &local) {
             return Err(Status::incons(Detail::EntryHeaderMismatch, Some(i)));
         }
@@ -460,53 +468,126 @@ fn checkcons(file: &mut File, mut cd: Cdir) -> Result<Cdir, Status> {
     Ok(cd)
 }
 
-/// `_zip_dirent_read` of the local header of `central`, the `PK\x07\x08`
-/// record after its data read where its bits say one follows.
-fn local_header(file: &mut File, central: &Dirent, is_zip64: bool) -> Result<Dirent, Status> {
-    let mut head = read_at(file, central.offset, LENTRYSIZE)?;
-    if let (Some(n), Some(m)) = (u16_at(&head, 26), u16_at(&head, 28)) {
-        let variable = usize::from(n) + usize::from(m);
-        head.extend(read_at(file, central.offset + LENTRYSIZE as u64, variable)?);
+/// Up to `n` bytes from `offset`, fewer only at the file's end: what a
+/// local header is read through, the archive's file as `zip_open` reads
+/// it or its stdio `FILE` after.
+pub(crate) trait ReadAt {
+    fn read_at(&mut self, offset: u64, n: usize) -> Result<Vec<u8>, Status>;
+}
+
+impl ReadAt for File {
+    fn read_at(&mut self, offset: u64, n: usize) -> Result<Vec<u8>, Status> {
+        read_at(self, offset, n)
     }
-    let mut read = dirent(&head, true, is_zip64, true, Origin::File)?;
-    let de = &mut read.de;
-    if de.bitflags & GPBF_DATA_DESCRIPTOR != 0 {
-        let at = central.offset + read.used as u64 + central.comp_size;
-        let desc = read_at(file, at, MAX_DATA_DESCRIPTOR_LENGTH)?;
-        if desc.len() < MAX_DATA_DESCRIPTOR_LENGTH {
-            return Err(Status::of(Er::Eof, 0));
+}
+
+impl ReadAt for Stdio {
+    fn read_at(&mut self, offset: u64, n: usize) -> Result<Vec<u8>, Status> {
+        self.seek(offset);
+        let mut out = vec![0u8; n];
+        let got = self.read(&mut out).map_err(|e| Status::os(Er::Read, &e))?;
+        out.truncate(got);
+        Ok(out)
+    }
+}
+
+/// An entry's local header at `offset` of the archive's file, read as
+/// each of libzip's three readers of it reads it.
+pub(crate) struct Local<'f> {
+    file: &'f mut dyn ReadAt,
+    offset: u64,
+}
+
+impl<'f> Local<'f> {
+    pub(crate) fn at(file: &'f mut dyn ReadAt, offset: u64) -> Local<'f> {
+        Local { file, offset }
+    }
+
+    /// `_zip_dirent_size` (libzip 1.12): the fixed part read whole and
+    /// held to its magic, where 1.11.4 read the two lengths alone; the
+    /// header's length with its name and extra fields.
+    pub(crate) fn size(&mut self) -> Result<u64, Status> {
+        let head = self.file.read_at(self.offset, LENTRYSIZE)?;
+        if head.len() < LENTRYSIZE {
+            return Err(Status::new(Er::Eof));
         }
-        let mut k = if desc.starts_with(b"PK\x07\x08") {
-            4
-        } else {
-            0
+        if !head.starts_with(Kind::Local.magic()) {
+            return Err(Status::bare(Detail::CdirEntryInvalid));
+        }
+        let field = |k| u64::from(u16_at(&head, k).unwrap_or(0));
+        Ok(LENTRYSIZE as u64 + field(26) + field(28))
+    }
+
+    /// `_zip_read_local_ef`: the two lengths alone, with no look at the
+    /// magic, then the extra fields, held to their own lengths, with
+    /// libzip's own taken out.
+    pub(crate) fn extra_fields(&mut self) -> Result<Vec<u8>, Status> {
+        let lens = self.file.read_at(self.offset + 26, 4)?;
+        let (Some(nlen), Some(elen)) = (u16_at(&lens, 0), u16_at(&lens, 2)) else {
+            return Err(Status::new(Er::Eof));
         };
-        let crc = u32_at(&desc, k).unwrap_or(0);
-        k += 4;
-        let mut size = || {
-            let v = if is_zip64 {
-                u64_at(&desc, k)
+        if elen == 0 {
+            return Ok(Vec::new());
+        }
+        let at = self.offset + LENTRYSIZE as u64 + u64::from(nlen);
+        let ef = self.file.read_at(at, usize::from(elen))?;
+        if ef.len() != usize::from(elen) {
+            return Err(Status::new(Er::Eof));
+        }
+        check_extra_fields(&ef)?;
+        Ok(strip_internal(&ef))
+    }
+
+    /// `_zip_dirent_read` of the header whole, as `_zip_checkcons` reads
+    /// it beside `central`, the `PK\x07\x08` record after the data read
+    /// where its bits say one follows.
+    fn dirent(&mut self, central: &Dirent, is_zip64: bool) -> Result<Dirent, Status> {
+        let mut head = self.file.read_at(self.offset, LENTRYSIZE)?;
+        if let (Some(n), Some(m)) = (u16_at(&head, 26), u16_at(&head, 28)) {
+            let variable = usize::from(n) + usize::from(m);
+            let at = self.offset + LENTRYSIZE as u64;
+            head.extend(self.file.read_at(at, variable)?);
+        }
+        let mut read = dirent(&head, Kind::Local, is_zip64, true, Origin::File)?;
+        let de = &mut read.de;
+        if de.bitflags & GPBF_DATA_DESCRIPTOR != 0 {
+            let at = self.offset + read.used as u64 + central.comp_size;
+            let desc = self.file.read_at(at, MAX_DATA_DESCRIPTOR_LENGTH)?;
+            if desc.len() < MAX_DATA_DESCRIPTOR_LENGTH {
+                return Err(Status::new(Er::Eof));
+            }
+            let mut k = if desc.starts_with(b"PK\x07\x08") {
+                4
             } else {
-                u32_at(&desc, k).map(u64::from)
+                0
             };
-            k += if is_zip64 { 8 } else { 4 };
-            v
-        };
-        let (Some(comp_size), Some(uncomp_size)) = (size(), size()) else {
-            return Err(Status::of(Er::Internal, 0));
-        };
-        if (de.crc != 0 && de.crc != crc)
-            || (de.comp_size != 0 && de.comp_size != comp_size)
-            || (de.uncomp_size != 0 && de.uncomp_size != uncomp_size)
-        {
-            return Err(Status::bare(Detail::DataDescriptorMismatch));
+            let crc = u32_at(&desc, k).unwrap_or(0);
+            k += 4;
+            let mut size = || {
+                let v = if is_zip64 {
+                    u64_at(&desc, k)
+                } else {
+                    u32_at(&desc, k).map(u64::from)
+                };
+                k += if is_zip64 { 8 } else { 4 };
+                v
+            };
+            let (Some(comp_size), Some(uncomp_size)) = (size(), size()) else {
+                return Err(Status::new(Er::Internal));
+            };
+            if (de.crc != 0 && de.crc != crc)
+                || (de.comp_size != 0 && de.comp_size != comp_size)
+                || (de.uncomp_size != 0 && de.uncomp_size != uncomp_size)
+            {
+                return Err(Status::bare(Detail::DataDescriptorMismatch));
+            }
+            de.crc = crc;
+            de.comp_size = comp_size;
+            de.uncomp_size = uncomp_size;
         }
-        de.crc = crc;
-        de.comp_size = comp_size;
-        de.uncomp_size = uncomp_size;
+        winzip_aes(&mut read.de, read.ef)?;
+        Ok(read.de)
     }
-    winzip_aes(&mut read.de, read.ef)?;
-    Ok(read.de)
 }
 
 /// `_zip_headercomp`: a local header that matches its central record,
@@ -542,14 +623,7 @@ fn check_consistency(de: &Dirent) -> Option<Detail> {
     if de.comp_method != 0 {
         return None;
     }
-    let header = match de.encryption_method {
-        EM_NONE => 0,
-        EM_TRAD_PKWARE => 12,
-        EM_AES_128 => 20,
-        EM_AES_192 => 24,
-        EM_AES_256 => 28,
-        _ => return None,
-    };
+    let header = Encryption::of(de.encryption_method).overhead()?;
     (de.uncomp_size.checked_add(header) != Some(de.comp_size)).then_some(Detail::StoredSizeMismatch)
 }
 
@@ -562,6 +636,41 @@ enum Origin {
     File,
 }
 
+/// Which record `_zip_dirent_read` reads, libzip's `local`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// A central directory record, `PK\x01\x02`.
+    Central,
+    /// A local header, `PK\x03\x04`.
+    Local,
+}
+
+impl Kind {
+    /// `CDENTRYSIZE` or `LENTRYSIZE`: the fixed part of the record.
+    fn size(self) -> usize {
+        match self {
+            Kind::Central => CDENTRYSIZE,
+            Kind::Local => LENTRYSIZE,
+        }
+    }
+
+    pub(crate) fn magic(self) -> &'static [u8; 4] {
+        match self {
+            Kind::Central => b"PK\x01\x02",
+            Kind::Local => b"PK\x03\x04",
+        }
+    }
+
+    /// Where the fields both records have start: past the magic, and in
+    /// a central record past `version made by`.
+    fn common(self) -> usize {
+        match self {
+            Kind::Central => 6,
+            Kind::Local => 4,
+        }
+    }
+}
+
 /// One header `_zip_dirent_read` read: the record, its raw extra fields
 /// and the bytes it took.
 struct Header<'a> {
@@ -570,8 +679,8 @@ struct Header<'a> {
     used: usize,
 }
 
-/// `_zip_dirent_read` up to its `WinZip` AES field: a central record, or a
-/// local header with `local`, read from `origin`. An inconsistency is set
+/// `_zip_dirent_read` up to its `WinZip` AES field: a record of `kind`,
+/// read from `origin`. An inconsistency is set
 /// without its entry, which the caller adds.
 ///
 /// A size Zip64 holds needs its extra field where the archive has a Zip64
@@ -600,39 +709,37 @@ struct Header<'a> {
 /// ```
 fn dirent(
     b: &[u8],
-    local: bool,
+    kind: Kind,
     is_zip64: bool,
     check: bool,
     origin: Origin,
 ) -> Result<Header<'_>, Status> {
     let short = || {
-        Status::of(
-            match origin {
-                Origin::Directory => Er::Nozip,
-                Origin::File => Er::Eof,
-            },
-            0,
-        )
+        Status::new(match origin {
+            Origin::Directory => Er::Nozip,
+            Origin::File => Er::Eof,
+        })
     };
-    let size = if local { LENTRYSIZE } else { CDENTRYSIZE };
+    let size = kind.size();
     if b.len() < size {
         return Err(short());
     }
-    let magic: &[u8; 4] = if local { b"PK\x03\x04" } else { b"PK\x01\x02" };
-    if !b.starts_with(magic) {
-        return Err(Status::of(Er::Nozip, 0));
+    if !b.starts_with(kind.magic()) {
+        return Err(Status::new(Er::Nozip));
     }
     // The fixed fields after the magic, which the local header has
     // without `version made by` and stops before the comment's length.
-    let k = if local { 4 } else { 6 };
+    let k = kind.common();
     let f16 = |at| u16_at(b, at).unwrap_or(0);
     let f32 = |at| u32_at(b, at).unwrap_or(0);
     let bitflags = f16(k + 2);
     let nlen = usize::from(f16(k + 22));
     let elen = usize::from(f16(k + 24));
-    let clen = if local { 0 } else { usize::from(f16(32)) };
+    let clen = match kind {
+        Kind::Central => usize::from(f16(32)),
+        Kind::Local => 0,
+    };
     let mut de = Dirent {
-        version_madeby: if local { 0 } else { f16(4) },
         version_needed: f16(k),
         bitflags,
         comp_method: i32::from(f16(k + 4)),
@@ -643,10 +750,6 @@ fn dirent(
         crc: f32(k + 10),
         comp_size: u64::from(f32(k + 14)),
         uncomp_size: u64::from(f32(k + 18)),
-        disk_number: if local { 0 } else { u32::from(f16(34)) },
-        int_attrib: if local { 0 } else { f16(36) },
-        ext_attrib: if local { 0 } else { f32(38) },
-        offset: if local { 0 } else { u64::from(f32(42)) },
         encryption_method: if bitflags & GPBF_ENCRYPTED == 0 {
             EM_NONE
         } else if bitflags & GPBF_STRONG_ENCRYPTION != 0 {
@@ -657,6 +760,13 @@ fn dirent(
         extra_local: None,
         ..Dirent::default()
     };
+    if kind == Kind::Central {
+        de.version_madeby = f16(4);
+        de.disk_number = u32::from(f16(34));
+        de.int_attrib = f16(36);
+        de.ext_attrib = f32(38);
+        de.offset = u64::from(f32(42));
+    }
     let used = size + nlen + elen + clen;
     let Some(variable) = b.get(size..used) else {
         return Err(match origin {
@@ -678,23 +788,22 @@ fn dirent(
     if check && de.filename.as_ref().is_some_and(|f| f.raw.contains(&0)) {
         return Err(Status::bare(Detail::NulInFilename));
     }
-    if !local {
+    if kind == Kind::Central {
         de.comment = utf8_field(ef, 0x6375, de.comment, check, Detail::Utf8CommentMismatch)?;
     }
     if de.uncomp_size == 0xffff_ffff || de.comp_size == 0xffff_ffff || de.offset == 0xffff_ffff {
         match find_ef(ef, 0x0001) {
-            Some(z64) => zip64_field(&mut de, z64, local)?,
+            Some(z64) => zip64_field(&mut de, z64, kind)?,
             None if is_zip64 => return Err(Status::bare(Detail::MissingZip64Ef)),
             None => {}
         }
     }
     if de.offset > INT64_MAX {
-        return Err(Status::of(Er::Seek, EFBIG));
+        return Err(Status::errno(Er::Seek, EFBIG));
     }
-    if local {
-        de.extra_local = Some(strip_internal(ef));
-    } else {
-        de.extra_central = strip_internal(ef);
+    match kind {
+        Kind::Central => de.extra_central = strip_internal(ef),
+        Kind::Local => de.extra_local = Some(strip_internal(ef)),
     }
     Ok(Header { de, ef, used })
 }
@@ -756,7 +865,7 @@ fn utf8_field(
 /// holds for those its record marks, the local header's two sizes always
 /// there, and a field of any other length refused unless it is the whole
 /// 24 or 28 bytes and agrees.
-fn zip64_field(de: &mut Dirent, z64: &[u8], local: bool) -> Result<(), Status> {
+fn zip64_field(de: &mut Dirent, z64: &[u8], kind: Kind) -> Result<(), Status> {
     let mut at = 0usize;
     let mut ok = true;
     let mut next = |width: usize| {
@@ -769,15 +878,15 @@ fn zip64_field(de: &mut Dirent, z64: &[u8], local: bool) -> Result<(), Status> {
     };
     if de.uncomp_size == 0xffff_ffff {
         de.uncomp_size = next(8);
-    } else if local {
+    } else if kind == Kind::Local {
         next(8);
     }
     if de.comp_size == 0xffff_ffff {
         de.comp_size = next(8);
-    } else if local {
+    } else if kind == Kind::Local {
         next(8);
     }
-    if !local {
+    if kind == Kind::Central {
         if de.offset == 0xffff_ffff {
             de.offset = next(8);
         }
@@ -820,16 +929,16 @@ fn winzip_aes(de: &mut Dirent, ef: &[u8]) -> Result<(), Status> {
     let crc_valid = match u16_at(aes, 0) {
         Some(1) => true,
         Some(2) => false,
-        _ => return Err(Status::of(Er::Encrnotsupp, 0)),
+        _ => return Err(Status::new(Er::Encrnotsupp)),
     };
     if &aes[2..4] != b"AE" {
-        return Err(Status::of(Er::Encrnotsupp, 0));
+        return Err(Status::new(Er::Encrnotsupp));
     }
     let method = match aes[4] {
         1 => EM_AES_128,
         2 => EM_AES_192,
         3 => EM_AES_256,
-        _ => return Err(Status::of(Er::Encrnotsupp, 0)),
+        _ => return Err(Status::new(Er::Encrnotsupp)),
     };
     if aes.len() != 7 {
         return Err(Status::bare(Detail::InvalidWinzipaesEf));
@@ -844,13 +953,12 @@ fn winzip_aes(de: &mut Dirent, ef: &[u8]) -> Result<(), Status> {
 /// `zip_open` makes through its source, a seek or read that fails being
 /// `ZIP_ER_SEEK` or `ZIP_ER_READ` with the `errno`.
 fn read_at(file: &mut File, offset: u64, n: usize) -> Result<Vec<u8>, Status> {
-    let sys = |e: &std::io::Error| e.raw_os_error().unwrap_or(0);
     file.seek(SeekFrom::Start(offset))
-        .map_err(|e| Status::of(Er::Seek, sys(&e)))?;
+        .map_err(|e| Status::os(Er::Seek, &e))?;
     let mut out = Vec::with_capacity(n);
     file.by_ref()
         .take(n as u64)
         .read_to_end(&mut out)
-        .map_err(|e| Status::of(Er::Read, sys(&e)))?;
+        .map_err(|e| Status::os(Er::Read, &e))?;
     Ok(out)
 }

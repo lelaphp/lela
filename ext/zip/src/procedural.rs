@@ -144,7 +144,7 @@ fn zip_open(req: &mut Request, filename: Path) -> Result<Untyped<Owner<Value>>, 
             };
             Ok(Untyped(Resource::new(req, kind, dir)?.into_value()))
         }
-        Err(status) => Ok(Untyped(Owner::int(i64::from(status.zip)))),
+        Err(status) => Ok(Untyped(Owner::int(status.er.code()))),
     }
 }
 

@@ -12,13 +12,13 @@ use std::path::{Path, PathBuf};
 use crate::archive::{
     AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE, AFL_IS_TORRENTZIP, Archive, CM_BZIP2, CM_DEFAULT,
     CM_DEFLATE, CM_LZMA, D_ATTRIBUTES, D_COMMENT, D_COMP_METHOD, D_ENCRYPTION_METHOD,
-    D_EXTRA_FIELD, D_FILENAME, D_LAST_MOD, D_PASSWORD, Dirent, EM_AES_128, EM_AES_192, EM_AES_256,
-    EM_NONE, EM_TRAD_PKWARE, GPBF_DATA_DESCRIPTOR, GPBF_ENCODING_UTF_8, GPBF_ENCRYPTED, TRUNCATE,
-    actual, is_default,
+    D_EXTRA_FIELD, D_FILENAME, D_LAST_MOD, D_PASSWORD, Dirent, EM_NONE, EM_TRAD_PKWARE, Encryption,
+    GPBF_DATA_DESCRIPTOR, GPBF_ENCODING_UTF_8, GPBF_ENCRYPTED, TRUNCATE, actual, is_default,
 };
+use crate::cdir::Kind;
 use crate::codec;
 use crate::dostime::TORRENTZIP;
-use crate::error::{Detail, Done, Er, Failed, Status};
+use crate::error::{Done, Er, Failed, Status};
 use crate::strings::{Enc, ZStr};
 
 /// What a running close reaches beside what it writes: the archive, live
@@ -40,7 +40,7 @@ pub(crate) trait Program {
 
 /// The archive under its close, or `ZIP_ER_INTERNAL` where it has none.
 fn live(program: &mut dyn Program) -> Result<&mut Archive, Status> {
-    program.archive().ok_or(Status::of(Er::Internal, 0))
+    program.archive().ok_or(Status::new(Er::Internal))
 }
 
 /// What the archive has registered, read at each point as libzip reads
@@ -56,10 +56,10 @@ fn registered(program: &mut dyn Program) -> (Option<f64>, bool) {
 fn cancelled(program: &mut dyn Program) -> Status {
     match program.archive() {
         Some(za) => {
-            za.error.set(Er::Cancelled, 0);
+            za.error.set(Er::Cancelled);
             za.error
         }
-        None => Status::of(Er::Cancelled, 0),
+        None => Status::new(Er::Cancelled),
     }
 }
 
@@ -113,7 +113,7 @@ impl Out {
     fn write(&mut self, bytes: &[u8]) -> Result<(), Status> {
         self.file
             .write_all(bytes)
-            .map_err(|e| Status::of(Er::Write, e.raw_os_error().unwrap_or(0)))?;
+            .map_err(|e| Status::os(Er::Write, &e))?;
         if let Some(crc) = &mut self.crc {
             crc.update(bytes);
         }
@@ -144,7 +144,7 @@ fn apply_attributes(de: &mut Dirent, a: &Attributes) {
     {
         de.ext_attrib = ext;
     }
-    let is_aes = matches!(de.encryption_method, EM_AES_128 | EM_AES_192 | EM_AES_256);
+    let is_aes = Encryption::of(de.encryption_method).aes().is_some();
     let dir = de
         .filename
         .as_ref()
@@ -155,7 +155,7 @@ fn apply_attributes(de: &mut Dirent, a: &Attributes) {
         51
     } else if de.comp_method == CM_BZIP2 {
         46
-    } else if needs_zip64(de, false) {
+    } else if needs_zip64(de, Kind::Local) {
         45
     } else if de.comp_method == CM_DEFLATE || de.encryption_method == EM_TRAD_PKWARE || dir {
         20
@@ -176,10 +176,10 @@ fn apply_attributes(de: &mut Dirent, a: &Attributes) {
 }
 
 /// `_zip_dirent_needs_zip64`.
-fn needs_zip64(de: &Dirent, central: bool) -> bool {
+fn needs_zip64(de: &Dirent, kind: Kind) -> bool {
     de.uncomp_size >= 0xffff_ffff
         || de.comp_size >= 0xffff_ffff
-        || (central && de.offset >= 0xffff_ffff)
+        || (kind == Kind::Central && de.offset >= 0xffff_ffff)
 }
 
 /// Each value's little-endian bytes onto the buffer, as `_zip_buffer_put_*`.
@@ -249,7 +249,8 @@ fn ef_utf8(id: u16, s: &ZStr) -> Vec<u8> {
 /// string(22) "Extra fields too large"
 /// ```
 #[expect(clippy::too_many_lines, reason = "_zip_dirent_write's one body")]
-fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Result<Vec<u8>, Status> {
+fn dirent_bytes(de: &mut Dirent, kind: Kind, torrentzip: bool) -> Result<Vec<u8>, Status> {
+    let central = kind == Kind::Central;
     let name_enc = de.filename.as_ref().map_or(Enc::Ascii, ZStr::guess);
     let com_enc = de.comment.as_ref().map_or(Enc::Ascii, ZStr::guess);
     let mut efs: Vec<Vec<u8>> = Vec::new();
@@ -278,7 +279,7 @@ fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Result<Vec<
     } else {
         de.bitflags |= GPBF_ENCRYPTED;
     }
-    let really_zip64 = needs_zip64(de, central);
+    let really_zip64 = needs_zip64(de, kind);
     if really_zip64 {
         let mut z = Vec::new();
         if !central && (de.comp_size > 0xffff_ffff || de.uncomp_size > 0xffff_ffff) {
@@ -294,22 +295,12 @@ fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Result<Vec<
         put!(ef; 1u16, u16_of(z.len()));
         efs.insert(0, [ef, z].concat());
     }
-    let aes = matches!(de.encryption_method, EM_AES_128 | EM_AES_192 | EM_AES_256);
-    if aes {
+    let aes = Encryption::of(de.encryption_method).aes();
+    if let Some(strength) = aes {
         // `winzip_aes_version` (libzip 1.12): AE-2, the CRC field zero,
         // below 20 bytes, and AE-1 from there.
         let version = if de.uncomp_size < 20 { 2 } else { 1 };
-        let mut ef = vec![
-            0x01,
-            0x99,
-            7,
-            0,
-            version,
-            0,
-            b'A',
-            b'E',
-            (de.encryption_method & 0xff) as u8,
-        ];
+        let mut ef = vec![0x01, 0x99, 7, 0, version, 0, b'A', b'E', strength];
         put!(ef; u16_of(de.comp_method & 0xffff));
         efs.insert(0, ef);
     }
@@ -320,16 +311,12 @@ fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Result<Vec<
     };
     let internal: Vec<u8> = efs.concat();
     let Ok(ef_len) = u16::try_from(internal.len() + own.len()) else {
-        return Err(Status::of(Er::EfTooLarge, 0));
+        return Err(Status::new(Er::EfTooLarge));
     };
     let name = de.filename.as_ref().map_or(&[][..], |f| f.raw.as_slice());
     let comment = de.comment.as_ref().map_or(&[][..], |c| c.raw.as_slice());
     let mut b = Vec::with_capacity(46 + name.len() + internal.len() + own.len());
-    b.extend_from_slice(if central {
-        b"PK\x01\x02"
-    } else {
-        b"PK\x03\x04"
-    });
+    b.extend_from_slice(kind.magic());
     if central {
         put!(b; de.version_madeby);
     }
@@ -338,9 +325,13 @@ fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Result<Vec<
     } else {
         de.version_needed
     };
-    let method = if aes { 99 } else { actual(de.comp_method) };
+    let method = if aes.is_some() {
+        99
+    } else {
+        actual(de.comp_method)
+    };
     let dostime = if torrentzip { TORRENTZIP } else { de.last_mod };
-    let crc = if aes && de.uncomp_size < 20 {
+    let crc = if aes.is_some() && de.uncomp_size < 20 {
         0
     } else {
         de.crc
@@ -369,7 +360,7 @@ fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Result<Vec<
 fn data_descriptor(de: &Dirent) -> Vec<u8> {
     let mut b = b"PK\x07\x08".to_vec();
     put!(b; de.crc);
-    if needs_zip64(de, false) {
+    if needs_zip64(de, Kind::Local) {
         put!(b; de.comp_size, de.uncomp_size);
     } else {
         put!(b; u32_of(de.comp_size), u32_of(de.uncomp_size));
@@ -413,7 +404,7 @@ pub(crate) fn close(program: &mut dyn Program, umask: u32) -> Done {
             && let Err(e) = std::fs::remove_file(&za.path)
             && e.kind() != std::io::ErrorKind::NotFound
         {
-            za.error = Status::of(Er::Remove, e.raw_os_error().unwrap_or(0));
+            za.error = Status::os(Er::Remove, &e);
             return Err(Failed);
         }
         return Ok(());
@@ -484,14 +475,12 @@ pub(crate) fn close(program: &mut dyn Program, umask: u32) -> Done {
 /// file flushed and renamed over the archive.
 fn commit(program: &mut dyn Program, mut out: Out, tmp: &Path) -> Result<(), Status> {
     if program.in_use() {
-        return Err(Status::of(Er::Inuse, 0));
+        return Err(Status::new(Er::Inuse));
     }
-    out.file
-        .flush()
-        .map_err(|e| Status::of(Er::Write, e.raw_os_error().unwrap_or(0)))?;
+    out.file.flush().map_err(|e| Status::os(Er::Write, &e))?;
     drop(out);
     let path = live(program)?.path.clone();
-    std::fs::rename(tmp, &path).map_err(|e| Status::of(Er::Rename, e.raw_os_error().unwrap_or(0)))
+    std::fs::rename(tmp, &path).map_err(|e| Status::os(Er::Rename, &e))
 }
 
 /// The body of `zip_close` past `zip_source_begin_write`: the kept part
@@ -511,7 +500,7 @@ fn write_all(
     if unchanged > 0
         && let Some(d) = &mut live(program)?.data
     {
-        let sys = |e: std::io::Error| Status::of(Er::Read, e.raw_os_error().unwrap_or(0));
+        let sys = |e: std::io::Error| Status::os(Er::Read, &e);
         d.file.seek(SeekFrom::Start(0)).map_err(sys)?;
         let mut prefix = Vec::new();
         Read::by_ref(&mut d.file)
@@ -591,14 +580,14 @@ impl Archive {
         torrentzip: bool,
     ) -> Result<Option<Written>, Status> {
         let Some(entry) = self.entries.get(i) else {
-            self.error.set(Er::Internal, 0);
+            self.error.set(Er::Internal);
             return Err(self.error);
         };
         if entry.orig.as_ref().is_some_and(|o| o.offset < unchanged) {
             return Ok(None);
         }
         if entry.orig.is_none() && entry.source.is_none() {
-            self.error.set(Er::Internal, 0);
+            self.error.set(Er::Internal);
             return Err(self.error);
         }
         let new_data = entry.source.is_some()
@@ -639,7 +628,7 @@ impl Archive {
         if de.encryption_method != EM_TRAD_PKWARE {
             de.bitflags &= !GPBF_DATA_DESCRIPTOR;
         }
-        let header = dirent_bytes(de, false, torrentzip)?;
+        let header = dirent_bytes(de, Kind::Local, torrentzip)?;
         let data = self.raw_data(i).inspect_err(|s| self.error = *s)?;
         Ok(Written {
             header,
@@ -669,7 +658,7 @@ impl Archive {
             let ((Some(de), _) | (None, Some(de))) = (&mut e.changes, &mut e.orig) else {
                 continue;
             };
-            out.write(&dirent_bytes(de, true, torrentzip)?)?;
+            out.write(&dirent_bytes(de, Kind::Central, torrentzip)?)?;
         }
         let cdir_crc = out.crc.take().map(crc32fast::Hasher::finalize);
         let size = out.pos - offset;
@@ -715,9 +704,12 @@ impl Archive {
         let Some((_, i)) = last else {
             return Ok(0);
         };
-        let Ok((start, _)) = self.local_header(i) else {
-            self.error = Status::bare(Detail::CdirEntryInvalid);
-            return Err(Failed);
+        let start = match self.data_offset(i) {
+            Ok(start) => start,
+            Err(status) => {
+                self.error = status;
+                return Err(Failed);
+            }
         };
         let Some(orig) = self.entries[i].orig.clone() else {
             return Ok(0);
@@ -734,7 +726,11 @@ impl Archive {
             if magic == Some(true) {
                 end += 4;
             }
-            end += if needs_zip64(&orig, false) { 20 } else { 12 };
+            end += if needs_zip64(&orig, Kind::Local) {
+                20
+            } else {
+                12
+            };
         }
         Ok(end)
     }
@@ -778,12 +774,12 @@ impl Archive {
                     last = e.raw_os_error().unwrap_or(0);
                 }
                 Err(e) => {
-                    self.error = Status::of(Er::Tmpopen, e.raw_os_error().unwrap_or(0));
+                    self.error = Status::os(Er::Tmpopen, &e);
                     return Err(Failed);
                 }
             }
         }
-        self.error = Status::of(Er::Tmpopen, last);
+        self.error = Status::errno(Er::Tmpopen, last);
         Err(Failed)
     }
 
@@ -826,7 +822,7 @@ impl Archive {
             (data, mtime, None, attr)
         } else {
             let Some(last_mod) = self.entries[i].orig.as_ref().map(|o| o.last_mod) else {
-                return Err(Status::of(Er::Internal, 0));
+                return Err(Status::new(Er::Internal));
             };
             let password = self.default_password.clone();
             let (data, fault) = self
@@ -872,17 +868,24 @@ impl Archive {
                 .clone()
                 .or_else(|| self.default_password.clone());
             let Some(password) = password else {
-                self.error.set(Er::Inval, 0);
+                self.error.set(Er::Inval);
                 return Err(self.error);
             };
-            if de.encryption_method == EM_TRAD_PKWARE {
-                de.bitflags |= GPBF_DATA_DESCRIPTOR;
-                data = codec::pkware(&data, &password, de.last_mod.time)?;
-                attrs.version_needed = Some(20);
-                attrs.bits = Some((GPBF_DATA_DESCRIPTOR, GPBF_DATA_DESCRIPTOR));
-            } else {
-                data = codec::winzip_aes(&data, &password, (de.encryption_method & 0xff) as u8)?;
-                attrs.version_needed = Some(51);
+            match Encryption::of(de.encryption_method) {
+                Encryption::Pkware => {
+                    de.bitflags |= GPBF_DATA_DESCRIPTOR;
+                    data = codec::pkware(&data, &password, de.last_mod.time)?;
+                    attrs.version_needed = Some(20);
+                    attrs.bits = Some((GPBF_DATA_DESCRIPTOR, GPBF_DATA_DESCRIPTOR));
+                }
+                Encryption::Aes(strength) => {
+                    data = codec::winzip_aes(&data, &password, strength)?;
+                    attrs.version_needed = Some(51);
+                }
+                Encryption::None | Encryption::Unknown => {
+                    self.error.set(Er::Encrnotsupp);
+                    return Err(self.error);
+                }
             }
         }
         de.comp_method = i32::from(method);
@@ -893,7 +896,7 @@ impl Archive {
             apply_attributes(de, &attrs);
         }
         Ok(Written {
-            header: dirent_bytes(de, false, torrentzip)?,
+            header: dirent_bytes(de, Kind::Local, torrentzip)?,
             data,
             pace: Pace::Add {
                 size: size.max(1) as f64,

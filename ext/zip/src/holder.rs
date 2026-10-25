@@ -263,11 +263,11 @@ pub(crate) fn close(req: &mut Request, id: ArchiveId, on_failure: OnFailure) -> 
     let done = write::close(&mut serving, umask);
     let thrown = serving.thrown;
     let Some(h) = get(req, id) else {
-        let error = Some(Status::of(Er::Internal, 0));
+        let error = Some(Status::new(Er::Internal));
         return Some(Closed { error, thrown });
     };
     let Za::Closing(mut za) = std::mem::replace(&mut h.za, Za::Closed) else {
-        let error = Some(Status::of(Er::Internal, 0));
+        let error = Some(Status::new(Er::Internal));
         return Some(Closed { error, thrown });
     };
     let error = done.err().map(|_| za.error);
