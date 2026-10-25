@@ -344,3 +344,52 @@ env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD =
 name = "hard-limit-sends-no-head"
 args = ["-n", "-d", "memory_limit=128M", "{dir}/t.php"]
 files = { "t.php" = "<?php\nob_start();\nheader('X-A: 1');\necho \"body\\n\";\nhash_pbkdf2('md5', 'p', 's', 1, PHP_INT_MAX);\n" }
+
+# A negative `CONTENT_LENGTH` is read to the body's end, stdin's under CGI
+# and `FCGI_STDIN`'s under FastCGI: `sapi_cgi_read_post` and
+# `sapi_fcgi_read_post` take what the length leaves as a `size_t`, which
+# wraps in the pinned release build, whose `assert` on it is compiled out
+# (`Z/sapi/cgi/cgi_main.c:483, 509`). The readers that pull it hold it to
+# `post_max_size`: the form reader stops a block past it with php's
+# warning (`Z/main/SAPI.c:287`) and `php://input` reads the rest, and the
+# multipart reader reads its fields as from a declared length (#3457).
+# Under FastCGI php's `fcgi_read` goes on past the empty record that ends
+# the body, to the next record's header, and so waits until the web server
+# shuts its half of the connection, as these requests do: the engine's
+# reads end at that record, and answer whether or not the server shuts it.
+[[line]]
+name = "a-negative-content-length-reads-the-body-to-its-end"
+args = ["-n", "-d", "html_errors=0"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "POST", SCRIPT_FILENAME = "{dir}/p.php", CONTENT_TYPE = "application/x-www-form-urlencoded", CONTENT_LENGTH = "-1" }
+files = { "p.php" = "<?php var_dump($_POST, file_get_contents('php://input'));\n" }
+stdin = "x=hello&y=world"
+
+[[line]]
+name = "a-negative-content-length-is-held-to-post-max-size"
+args = ["-n", "-d", "html_errors=0", "-d", "post_max_size=10"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "POST", SCRIPT_FILENAME = "{dir}/p.php", CONTENT_TYPE = "application/x-www-form-urlencoded", CONTENT_LENGTH = "-5" }
+files = { "p.php" = "<?php var_dump($_POST, file_get_contents('php://input'));\n" }
+stdin = "x=hello&y=world&z=12"
+
+[[line]]
+name = "a-negative-content-length-reads-a-multipart-body-to-its-end"
+args = ["-n", "-d", "html_errors=0"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "POST", SCRIPT_FILENAME = "{dir}/p.php", CONTENT_TYPE = "multipart/form-data; boundary=b", CONTENT_LENGTH = "-1" }
+files = { "p.php" = "<?php var_dump($_POST, file_get_contents('php://input'));\n" }
+stdin = "--b\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nhello\r\n--b--\r\n"
+
+[[line]]
+name = "fastcgi-a-negative-content-length-reads-fcgi-stdin-to-its-end"
+args = ["-n", "-d", "html_errors=0", "-b", "127.0.0.1:{port}"]
+files = { "p.php" = "<?php var_dump($_POST, file_get_contents('php://input'));\n" }
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/p.php"], ["REQUEST_METHOD", "POST"], ["CONTENT_TYPE", "application/x-www-form-urlencoded"], ["CONTENT_LENGTH", "-1"]]
+body = "x=hello&y=world"
+shut = true
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/p.php"], ["REQUEST_METHOD", "POST"], ["CONTENT_TYPE", "multipart/form-data; boundary=b"], ["CONTENT_LENGTH", "-1"]]
+body = "--b\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nhello\r\n--b--\r\n"
+shut = true

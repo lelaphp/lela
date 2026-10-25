@@ -523,3 +523,83 @@ fn padded_dir() -> String {
     std::fs::create_dir_all(&dir).expect("the upload directory");
     dir
 }
+
+/// An endless body: `head`, then `x` for ever, every read filled, each
+/// byte it hands out counted.
+struct Endless {
+    head: &'static [u8],
+    handed: Arc<AtomicUsize>,
+}
+
+impl Read for Endless {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let at = self.handed.load(Ordering::Relaxed);
+        for (offset, byte) in buf.iter_mut().enumerate() {
+            *byte = self.head.get(at + offset).copied().unwrap_or(b'x');
+        }
+        self.handed.fetch_add(buf.len(), Ordering::Relaxed);
+        Ok(buf.len())
+    }
+}
+
+/// A body whose host declares no length it keeps to, php-cgi's for a
+/// negative `CONTENT_LENGTH` (#3457), is pulled no further than one read
+/// past `post_max_size`, so nothing that holds it is larger: the form
+/// reader stops one `SAPI_POST_BLOCK_SIZE` block past the limit with
+/// php's warning, and the multipart reader one buffer past it, cutting
+/// its field there, each over a body that never ends. The lines are
+/// php-cgi 8.5.12's under `-n -d post_max_size=64K -d html_errors=0` for
+/// the same heads and a megabyte of `x` on its standard input with
+/// `CONTENT_LENGTH=-1`.
+#[test]
+fn an_endless_body_is_pulled_no_further_than_a_read_past_post_max_size() {
+    const POST_MAX_SIZE: usize = 64 * 1024;
+    const POST_BLOCK_SIZE: usize = 0x4000;
+    let engine = Engine::cli_builder()
+        .ini("post_max_size", "64K")
+        .extensions(&[input()])
+        .build();
+    let pulled = |content_type: &str, head: &'static [u8]| {
+        let handed = Arc::new(AtomicUsize::new(0));
+        let description = RequestDescription {
+            sapi_name: String::from("cgi-fcgi"),
+            script_name: Some(b"body.php".to_vec()),
+            source: Some(
+                b"<?php echo $_POST === [] ? 0 : 1, ' ', strlen($_POST['a'] ?? ''), \"\\n\";"
+                    .to_vec(),
+            ),
+            cwd: std::env::current_dir().expect("the working directory"),
+            web: Some(WebRequest {
+                method: Some(Method::Post),
+                content_type: Some(content_type.as_bytes().to_vec()),
+                content_length: -1,
+                body: Body::Stream(Box::new(Endless {
+                    head,
+                    handed: Arc::clone(&handed),
+                })),
+                response_code: 200,
+                ..WebRequest::default()
+            }),
+            ..RequestDescription::default()
+        };
+        let mut sink = Capture::default();
+        engine.serve_into(description, &mut sink);
+        let handed = handed.load(Ordering::Relaxed);
+        assert!(
+            handed <= POST_MAX_SIZE + POST_BLOCK_SIZE,
+            "{content_type}: {handed} bytes pulled"
+        );
+        String::from_utf8_lossy(&sink.stdout).into_owned()
+    };
+    assert_eq!(
+        pulled("application/x-www-form-urlencoded", b"a="),
+        "\nWarning: PHP Request Startup: Actual POST length does not match Content-Length, and exceeds 65536 bytes in Unknown on line 0\n0 0\n"
+    );
+    assert_eq!(
+        pulled(
+            "multipart/form-data; boundary=b",
+            b"--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n"
+        ),
+        "\nWarning: Actual POST length does not match Content-Length, and exceeds 65536 bytes in Unknown on line 0\n1 66548\n"
+    );
+}

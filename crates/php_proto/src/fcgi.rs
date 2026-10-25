@@ -363,18 +363,22 @@ fn answer(
 }
 
 /// `fcgi_read`'s state: what is left of the `FCGI_STDIN` record being
-/// read, and its padding.
+/// read, its padding, and whether the empty record that ends the body has
+/// been read.
 #[derive(Debug, Default)]
 pub struct Input {
     left: usize,
     padding: usize,
+    ended: bool,
 }
 
 impl Input {
     /// `fcgi_read` (`Z/main/fastcgi.c:1181`): up to `buf.len()` bytes of
     /// the body, reading the next `FCGI_STDIN` record where the last is
     /// used up; fewer where the stream ends, or an empty record ends the
-    /// body.
+    /// body, and nothing past that record. php's `fcgi_read` would read the
+    /// next record's header there, where no length bounds the body (#3457);
+    /// the end is the end.
     ///
     /// # Errors
     ///
@@ -383,13 +387,14 @@ impl Input {
     /// stream's own errors.
     pub fn read(&mut self, stream: &mut impl io::Read, buf: &mut [u8]) -> io::Result<usize> {
         let mut n = 0;
-        while n < buf.len() {
+        while n < buf.len() && !self.ended {
             if self.left == 0 {
                 match read_header(stream) {
                     Some(header) if header.kind == Kind::Stdin => {
                         self.left = usize::from(header.content_length);
                         self.padding = usize::from(header.padding_length);
                         if self.left == 0 {
+                            self.ended = true;
                             return Ok(n);
                         }
                     }
