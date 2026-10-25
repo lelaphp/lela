@@ -17,8 +17,6 @@ use php_ext::attr::php_class;
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, with_string};
 #[cfg(target_vendor = "apple")]
-use php_ext::raising::arity;
-#[cfg(target_vendor = "apple")]
 use php_ext::raising::throw_error;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref};
 use php_ext::request::{Forked, Request};
@@ -930,29 +928,29 @@ pub(crate) fn pcntl_getqos_class(req: &mut Request) -> Result<QosClass, Thrown> 
 }
 
 /// `pcntl_setqos_class(Pcntl\QosClass $qos_class =
-/// Pcntl\QosClass::Default): void`: the calling thread's class set. The
-/// stub shows a default the body's `ZEND_PARSE_PARAMETERS_START(1, 1)`
-/// refuses, so a call with none is php's `ArgumentCountError`.
+/// Pcntl\QosClass::Default): void`: the calling thread's class set,
+/// `Default` where none is given, as 8.5.12's
+/// `ZEND_PARSE_PARAMETERS_START(0, 1)` takes it.
 ///
 /// ```php
 /// pcntl_setqos_class(Pcntl\QosClass::UserInitiated);
 /// var_dump(pcntl_getqos_class());
-/// pcntl_setqos_class(Pcntl\QosClass::Default);
+/// pcntl_setqos_class(Pcntl\QosClass::Background);
 /// var_dump(pcntl_getqos_class());
-/// try { pcntl_setqos_class(); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// pcntl_setqos_class();
+/// var_dump(pcntl_getqos_class());
 /// ```
 /// ```expect process
 /// enum(Pcntl\QosClass::UserInitiated)
+/// enum(Pcntl\QosClass::Background)
 /// enum(Pcntl\QosClass::Default)
-/// pcntl_setqos_class() expects exactly 1 argument, 0 given
 /// ```
 #[cfg(target_vendor = "apple")]
-#[php_function(arity = manual)]
+#[php_function]
 pub(crate) fn pcntl_setqos_class(
     req: &mut Request,
     #[php(default = Pcntl::QosClass::Default)] qos_class: QosClass,
 ) -> Result<(), Thrown> {
-    arity(req, 1, Some(1))?;
     let class = match qos_class {
         QosClass::UserInteractive => ffi::qos::USER_INTERACTIVE,
         QosClass::UserInitiated => ffi::qos::USER_INITIATED,

@@ -5,7 +5,7 @@
 //! php's handler table, the dispatch that calls into it, and the switch
 //! that hands this request's interrupt to the record.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, sigprocmask};
 #[cfg(target_os = "linux")]
@@ -41,6 +41,11 @@ pub(crate) struct Table {
     /// `PCNTL_G(processing_signal_queue)`: a dispatch is running, so a
     /// handler's own safepoints do not start another.
     dispatching: bool,
+    /// What `PCNTL_G(head)` holds between two dispatches: the signals a
+    /// dispatch took and a throwing handler kept it from playing, put
+    /// back to be played first by the next one (8.5.12). The record
+    /// keeps the rest.
+    held: VecDeque<Siginfo>,
 }
 
 /// How the signals the record took reach this request's handlers.
@@ -229,8 +234,36 @@ pub(crate) fn pcntl_signal_dispatch(req: &mut Request) -> Result<bool, Thrown> {
 /// `siginfo_t` array where the table holds a callable; one the table
 /// holds `SIG_DFL` or `SIG_IGN` for is dropped. Every signal is blocked
 /// while the queue plays, as php blocks them, and a handler that throws
-/// ends the dispatch with what is left dropped. The engine's interrupt
-/// check serves it through [`interrupt`]. No fiber may
+/// ends the dispatch with what is left put back, played first by the
+/// next dispatch, which under `pcntl_async_signals(true)` the interrupt
+/// raised again asks for once the throwable is handled (8.5.12). The
+/// engine's interrupt check serves it through [`interrupt`].
+///
+/// ```php
+/// $called = [];
+/// pcntl_signal(SIGUSR1, function () use (&$called) { $called[] = 'USR1'; throw new Exception('thrown'); });
+/// pcntl_signal(SIGUSR2, function () use (&$called) { $called[] = 'USR2'; });
+/// pcntl_signal(SIGHUP, function () use (&$called) { $called[] = 'HUP'; });
+/// posix_kill(posix_getpid(), SIGUSR1); posix_kill(posix_getpid(), SIGUSR2); posix_kill(posix_getpid(), SIGHUP);
+/// try { pcntl_signal_dispatch(); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// echo implode(', ', $called), "\n";
+/// pcntl_signal_dispatch();
+/// echo implode(', ', $called), "\n";
+/// $called = [];
+/// posix_kill(posix_getpid(), SIGUSR1); posix_kill(posix_getpid(), SIGUSR2);
+/// pcntl_async_signals(true);
+/// try { posix_kill(posix_getpid(), SIGHUP); echo "not reached\n"; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// usleep(1000);
+/// echo implode(', ', $called), "\n";
+/// ```
+/// ```expect process
+/// thrown
+/// USR1
+/// USR1, USR2, HUP
+/// thrown
+/// USR1, USR2, HUP
+/// ```
+/// No fiber may
 /// switch while the handlers play, `zend_fiber_switch_block`, so a
 /// handler served inside a fiber cannot suspend it:
 ///
@@ -262,13 +295,14 @@ pub(crate) fn interrupt(
 }
 
 pub(crate) fn dispatch(req: &mut Request) -> Result<(), Thrown> {
-    let table = &req.state::<State>().signals;
+    let table = &mut req.state::<State>().signals;
     if table.dispatching || table.handlers.is_empty() {
         return Ok(());
     }
     let numbers: Vec<i32> = table.handlers.keys().copied().collect();
-    let taken = take_signals(|number| numbers.contains(&number));
-    if taken.is_empty() {
+    let mut queue = std::mem::take(&mut table.held);
+    queue.extend(take_signals(|number| numbers.contains(&number)));
+    if queue.is_empty() {
         return Ok(());
     }
     let mut unmasked = SigSet::empty();
@@ -282,7 +316,17 @@ pub(crate) fn dispatch(req: &mut Request) -> Result<(), Thrown> {
     // "Prevent switching fibers when handling signals".
     let played = req
         .code_mut()
-        .with_fiber_switch_blocked(|req| play(req, &taken));
+        .with_fiber_switch_blocked(|req| play(req, &mut queue));
+    let table = &mut req.state::<State>().signals;
+    if !queue.is_empty() {
+        // "Put back what the throwing handler did not get to, instead of
+        // dropping it, and ask the engine to come back once the
+        // exception has been handled."
+        table.held = queue;
+        if matches!(table.delivery, Delivery::Asynchronous { .. }) {
+            req.limits().interrupt().raise();
+        }
+    }
     req.state::<State>().signals.dispatching = false;
     if masked {
         sigprocmask(SigmaskHow::SIG_SETMASK, Some(&unmasked), None).ok();
@@ -290,9 +334,10 @@ pub(crate) fn dispatch(req: &mut Request) -> Result<(), Thrown> {
     played
 }
 
-/// Each signal's handler called in turn, until one throws.
-fn play(req: &mut Request, taken: &[Siginfo]) -> Result<(), Thrown> {
-    for posted in taken {
+/// Each signal's handler called in turn, each taken off the queue before
+/// its handler is called, until one throws; what is left stays queued.
+fn play(req: &mut Request, queue: &mut VecDeque<Siginfo>) -> Result<(), Thrown> {
+    while let Some(posted) = queue.pop_front() {
         let Some(handler) = req
             .state::<State>()
             .signals
@@ -307,7 +352,7 @@ fn play(req: &mut Request, taken: &[Siginfo]) -> Result<(), Thrown> {
         }
         // The handler may replace itself; the call holds its own owner.
         let held = Owner::take(req, handler);
-        let called = call_handler(req, *held, posted);
+        let called = call_handler(req, *held, &posted);
         held.give_up(req);
         called?;
     }
