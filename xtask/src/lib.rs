@@ -46,6 +46,7 @@ pub mod computed;
 pub mod crosscheck;
 pub mod divergence;
 pub mod done;
+mod fold;
 pub mod generated;
 mod git;
 mod glossary;
@@ -336,6 +337,7 @@ fn command_line() -> Result<()> {
         Command::PortMap { tree } => port_map::command(&root, &manifest, &store, tree.as_deref()),
         Command::CompileIdentity(ask) => compile_identity::command(&root, &manifest, &store, &ask),
         Command::TraceDump(ask) => trace_dump::command(&root, &manifest, &store, &ask),
+        Command::Fold(ask) => fold::command(&root, &manifest, &store, &ask),
         Command::Crosscheck { ext, staged } => {
             crosscheck_command(&root, &manifest, &store, ext, staged)
         }

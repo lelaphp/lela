@@ -45,6 +45,8 @@
 
 #[path = "src/api/request/build_defs/layout.rs"]
 mod layout;
+#[path = "build/rustflags.rs"]
+mod rustflags;
 
 use std::collections::BTreeMap;
 use std::env;
@@ -54,6 +56,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
+    // Design §10 Profiles: a release-like build without the LLVM option
+    // every profile passes is refused where the build asks (#3372).
+    rustflags::hold();
     build_defs();
     // Read when `build.rs` runs, not when it compiles: cargo runs one
     // compiled `build.rs` for every checkout sharing a target directory

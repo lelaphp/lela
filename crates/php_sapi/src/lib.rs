@@ -172,7 +172,9 @@ impl OutputSink for Starting {
         stdio::flush();
     }
 
-    fn send_headers(&mut self, _head: &ResponseHead) {}
+    fn send_headers(&mut self, _head: &ResponseHead) -> Result<(), Aborted> {
+        Ok(())
+    }
 
     fn log(&mut self, entry: &[u8]) {
         (self.0)(entry);

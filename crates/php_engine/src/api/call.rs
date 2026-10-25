@@ -16,7 +16,7 @@ use crate::api::raising::{
     Thrown, argument_error, class_not_found, error, non_static_method_call, type_error,
     undefined_function, undefined_method,
 };
-use crate::api::request::{Request, Strategy};
+use crate::api::request::{Callee, Family, Request, Retval, Strategy};
 use crate::api::values::{
     ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, adopted, adopted_some,
     walk,
@@ -267,17 +267,24 @@ impl Iter {
 fn serve(
     req: &mut Request,
     target: Target,
+    family: Family,
     arguments: &[Value],
     extra_named: &[(PhpString, Value)],
 ) -> Result<Value, Thrown> {
     let served = match target {
-        Target::Function(function) => req.serve_function(function, arguments, extra_named),
+        Target::Function(function) => req.serve_function(function, family, arguments, extra_named),
         Target::Method {
             function,
             scope,
             this,
-        } => req.serve_method_made(function, this, scope, arguments, extra_named),
-        Target::Closure(object) => req.serve_closure(object, arguments, extra_named),
+        } => req.serve_method_into(
+            Retval::Native,
+            family,
+            Callee::method(function, this, scope),
+            arguments,
+            extra_named,
+        ),
+        Target::Closure(object) => req.serve_closure(object, family, arguments, extra_named),
     };
     without_frame(req, served)
 }
@@ -421,7 +428,19 @@ pub(crate) fn call_made(
     callable: &Callable,
     arguments: &[Value],
 ) -> Result<Value, Thrown> {
-    serve(req, callable.target(), arguments, &[])
+    serve(req, callable.target(), callable.family(), arguments, &[])
+}
+
+/// [`call_made`] as `zend_call_known_fcc` calls it, which what
+/// `register_tick_function` and `register_shutdown_function` named and a
+/// lazy object's initializer are served through: once the memory limit was met, its refusal is
+/// `zend_call_known_function`'s ([`Family::Known`]).
+pub(crate) fn call_known_made(
+    req: &mut Request,
+    callable: &Callable,
+    arguments: &[Value],
+) -> Result<Value, Thrown> {
+    serve(req, callable.target(), Family::Known, arguments, &[])
 }
 
 /// [`call_made`] where php calls the callee's C directly rather than
@@ -436,7 +455,7 @@ pub(crate) fn call_made_from_c(
 ) -> Result<Value, Thrown> {
     let served = match callable.target() {
         Target::Function(function) => req.serve_function_from_c(function, arguments),
-        target => return serve(req, target, arguments, &[]),
+        target => return serve(req, target, callable.family(), arguments, &[]),
     };
     without_frame(req, served)
 }
@@ -473,10 +492,16 @@ pub(crate) fn call_named_made(
 ) -> Result<Value, Thrown> {
     let target = callable.target();
     let Some(function) = callee(req, target).filter(|_| !named.is_empty()) else {
-        return serve(req, target, arguments, &[]);
+        return serve(req, target, callable.family(), arguments, &[]);
     };
     let placement = placed(req, function, arguments, named)?;
-    serve(req, target, &placement.arguments, &placement.extra_named)
+    serve(
+        req,
+        target,
+        callable.family(),
+        &placement.arguments,
+        &placement.extra_named,
+    )
 }
 
 /// `zend_call_function`'s walk of `fci->named_params` over `function`:
@@ -545,7 +570,7 @@ pub(crate) fn call_array_made(
     // binds it, and the array's holder keeps the rest standing.
     let Some(function) = callee(req, target) else {
         let positional: Vec<Value> = walk::rows(req, array).map(|(_, v)| v).collect();
-        return serve(req, target, &positional, &[]);
+        return serve(req, target, callable.family(), &positional, &[]);
     };
     let mut placement = Placement::new(function, &[]);
     let mut have_named = false;
@@ -567,7 +592,13 @@ pub(crate) fn call_array_made(
         }
     }
     match refused {
-        None => serve(req, target, &placement.arguments, &placement.extra_named),
+        None => serve(
+            req,
+            target,
+            callable.family(),
+            &placement.arguments,
+            &placement.extra_named,
+        ),
         Some(None) => Err(error(
             req,
             "Cannot use positional argument after named argument",
@@ -1040,7 +1071,7 @@ pub(crate) fn call_method_made(
     let Some(function) = req.symbols().method_named(class, method) else {
         return Err(undefined_method(req, class, method));
     };
-    let served = req.serve_method_made(function, Some(*object), class, arguments, &[]);
+    let served = req.serve_known_method(function, *object, class, arguments);
     without_frame(req, served)
 }
 
@@ -1074,15 +1105,18 @@ pub fn known_method(
         req.symbols().class_name(class),
         String::from_utf8_lossy(&name.0)
     );
-    Some(Callable::of(
-        Value::null(),
-        spelled.as_bytes(),
-        Target::Method {
-            function,
-            scope: class,
-            this,
-        },
-    ))
+    Some(
+        Callable::of(
+            Value::null(),
+            spelled.as_bytes(),
+            Target::Method {
+                function,
+                scope: class,
+                this,
+            },
+        )
+        .known(),
+    )
 }
 
 /// A hook's name, `$name::get` or `$name::set` as
@@ -1349,10 +1383,10 @@ fn construct_object(
         return Ok(());
     };
     let served = placed(req, constructor, arguments, named).and_then(|placement| {
-        req.serve_method_made(
-            constructor,
-            Some(object),
-            object.class(),
+        req.serve_method_into(
+            Retval::Native,
+            Family::Known,
+            Callee::method(constructor, Some(object), object.class()),
             &placement.arguments,
             &placement.extra_named,
         )
@@ -2078,7 +2112,7 @@ fn autoload_as(req: &mut Request, name: &[u8], keyed: bool) -> Result<Option<Cla
             } else {
                 req.standing_string(bare)?
             };
-            let returned = serve(req, loader, &[Value::string(class)], &[]);
+            let returned = serve(req, loader, Family::Known, &[Value::string(class)], &[]);
             req.release(Value::string(class));
             req.release(returned?);
             if let Some(class) = req.class_named(key) {
@@ -2114,7 +2148,7 @@ pub fn perform_autoload(req: &mut Request, name: PhpString) -> Result<Option<Cla
     req.without_site_override(|req| {
         let mut at = 0;
         while let Some(loader) = req.autoloader(at) {
-            let returned = serve(req, loader, &[Value::string(name)], &[]);
+            let returned = serve(req, loader, Family::Known, &[Value::string(name)], &[]);
             req.release(returned?);
             if !lowered.starts_with(b"\\")
                 && let Some(class) = req.class_named(Bare::resolved(&lowered))

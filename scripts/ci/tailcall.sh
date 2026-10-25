@@ -30,7 +30,11 @@
 # engine is the nightly's.
 #
 # Every build is in target/tailcall, a target directory of its own, so the
-# cfg's RUSTFLAGS never invalidate the warm build of the shipped engine.
+# cfg never invalidates the warm build of the shipped engine. The cfg is
+# added to .cargo/config.toml's rustflags table with a --config line, which
+# cargo joins to the file's array, so the build keeps the LLVM option every
+# profile passes (design §10 Profiles, #3372); a RUSTFLAGS variable would
+# replace the table, so none is set and none is inherited.
 # A subset that fails fails the run once every subset has run; the
 # readings are the lane's alone, uploaded apart from what the dashboard
 # folds, and the runs `phpt` keeps are put back as they stood, so the
@@ -46,7 +50,8 @@ TOOLCHAIN=nightly-2026-10-15
 cd "$(dirname "$0")/../.."
 target=target/tailcall
 read -ra xtask <<<"${XTASK:-cargo xtask}"
-export RUSTFLAGS='--cfg dispatch="tailcall"'
+unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+cfg=(--config "target.'cfg(all())'.rustflags=['--cfg', 'dispatch=\"tailcall\"']")
 
 # `phpt` keeps a whole subset's run by the tree the engine is built from
 # (xtask/src/phpt/against.rs), which the threaded build shares with the
@@ -84,16 +89,14 @@ rustup toolchain install "$TOOLCHAIN" --profile minimal
 
 case $1 in
 check)
-    cargo "+$TOOLCHAIN" check -p php_engine --target-dir "$target"
+    cargo "+$TOOLCHAIN" check -p php_engine --target-dir "$target" "${cfg[@]}"
     ;;
 phpt)
     packages=()
     while read -r package; do packages+=(-p "$package"); done < <(jq -r '.hosts[].package' "$corpus")
     [ ${#packages[@]} -gt 0 ] || { echo "::error::xtask status --section corpus names no host"; exit 1; }
     echo "the hosts built under the cfg: ${packages[*]}"
-    cargo "+$TOOLCHAIN" build --profile release-da --target-dir "$target" "${packages[@]}"
-    # The harness is built on the pinned toolchain with no cfg.
-    unset RUSTFLAGS
+    cargo "+$TOOLCHAIN" build --profile release-da --target-dir "$target" "${packages[@]}" "${cfg[@]}"
     # A set-aside a killed run left behind is older than the runs the
     # shipped lane has kept since, so it is dropped, not put back.
     rm -rf "$aside"

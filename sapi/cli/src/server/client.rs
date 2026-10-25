@@ -370,6 +370,7 @@ fn dispatch(site: &Arc<Site>, client: Client) -> Connection {
             host: request.header(b"host").map(<[u8]>::to_vec),
         },
         site: Arc::clone(site),
+        headers_written: false,
     });
     let description = describe(site, &client, is_static);
     let (_, dispatched, _) = site
@@ -603,6 +604,9 @@ const SEND_WAIT: i32 = 10_000;
 struct WireSink {
     wire: Wire,
     site: Arc<Site>,
+    /// `client->headers_written`: the block was handed to the wire, sent
+    /// or not, so a later ask sends nothing.
+    headers_written: bool,
 }
 
 impl OutputSink for WireSink {
@@ -640,9 +644,20 @@ impl OutputSink for WireSink {
 
     fn flush(&mut self) {}
 
-    fn send_headers(&mut self, head: &ResponseHead) {
+    /// `sapi_cli_server_send_headers` (`Z/sapi/cli/php_cli_server.c:551-587`):
+    /// once, and [`Aborted`] where `send_through` sent fewer bytes than
+    /// the block holds, `SAPI_HEADER_SEND_FAILED`, as a client that reset
+    /// the connection leaves it (GH-23425).
+    fn send_headers(&mut self, head: &ResponseHead) -> Result<(), Aborted> {
+        if std::mem::replace(&mut self.headers_written, true) {
+            return Ok(());
+        }
         let bytes = self.wire.render(head);
-        let _ = self.wire.send(&bytes);
+        if self.wire.send(&bytes) {
+            Ok(())
+        } else {
+            Err(Aborted { exit_status: None })
+        }
     }
 
     /// `sapi_cli_server_log_message`: the entry on the server's log.
