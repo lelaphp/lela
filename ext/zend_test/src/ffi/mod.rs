@@ -1,5 +1,5 @@
-//! The one act of `test.c` this crate does in C's terms (`unsafe.homes`'
-//! `ext/*/src/ffi/`): `zend_test_crash`'s end of the process, the
+//! The acts of `test.c` this crate does in C's terms (`unsafe.homes`'
+//! `ext/*/src/ffi/`). The first is `zend_test_crash`'s end of the process, the
 //! `SIGSEGV` php's `php_printf("%s", (char *) 1)` takes when it reads
 //! the byte at address one (ruled on #2976).
 //!
@@ -8,8 +8,9 @@
 //! the default one, so the process ends as php's does and a shell
 //! reports the same status.
 //!
-//! [`exports`] is the other: the C symbols `test.c` exports for
-//! ext/ffi's tests, under php's names and layout.
+//! [`raise`] is `zend_test_raise_and_throw`'s `raise(3)`, and
+//! [`exports`] the C symbols `test.c` exports for ext/ffi's tests, under
+//! php's names and layout.
 #![allow(unsafe_code)]
 #![deny(
     clippy::undocumented_unsafe_blocks,

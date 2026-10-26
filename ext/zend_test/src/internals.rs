@@ -121,7 +121,7 @@ pub(crate) fn zend_delref(variable: Value) {
 /// ```
 #[php_function]
 pub(crate) fn zend_test_emalloc(req: &mut Request, size: i64) -> Result<(), Thrown> {
-    let size = usize::try_from(u64::from_ne_bytes(size.to_ne_bytes())).unwrap_or(usize::MAX);
+    let size = usize::try_from(size.cast_unsigned()).unwrap_or(usize::MAX);
     Emalloc::new(req, size)?.free(req);
     Ok(())
 }
