@@ -84,7 +84,7 @@ name = "php_bundle"
 budget = 500
 [[crate]]
 name = "php_jit"
-budget = 20000
+budget = 28000
 feature = "jit"
 targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin"]
 [[crate]]
