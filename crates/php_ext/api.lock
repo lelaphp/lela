@@ -852,6 +852,8 @@ request::PropertyInfoRow
 request::PropertyInfoRow::class
 request::PropertyInfoRow::declaring
 request::Raised
+request::ReadPost
+request::ReadPost::read_post
 request::Readiness
 request::RealpathEntry
 request::Receiving
@@ -1121,6 +1123,7 @@ request::Variables::is_uploaded_file
 request::Variables::made_superglobal
 request::Variables::parse_body
 request::Variables::parse_query
+request::Variables::read_post_body
 request::Variables::register_variable
 request::Variables::request_headers
 request::Variables::request_method

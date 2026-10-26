@@ -12,7 +12,7 @@ use std::os::unix::net::UnixListener;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use php_proto::cgi::{Environment, RequestInfo};
-use php_proto::fcgi::{self, Input, Kind, Outgoing};
+use php_proto::fcgi::{self, Kind, Outgoing};
 use php_sapi::cgi::{C_NUMBER, CachedDisk};
 use php_sapi::fcgi::{Conn, allowed, allowed_clients};
 use php_sapi::{
@@ -156,15 +156,29 @@ fn resolve(host: &[u8]) -> Option<std::net::Ipv4Addr> {
 }
 
 /// What one process serves through: the connection, the request's
-/// output records and its input records.
+/// output records and its body's input records.
 struct Wire {
     conn: Option<Conn>,
     out: Outgoing,
-    input: Input,
+    input: fcgi::Stdin,
     keep: bool,
 }
 
 impl Wire {
+    /// `sapi_fcgi_read_post`: up to `buf.len()` bytes of the body
+    /// ([`fcgi::Stdin::read`]); none past a read that fails, after which
+    /// the connection is not kept.
+    fn read_body(&mut self, buf: &mut [u8]) -> usize {
+        let Some(conn) = &mut self.conn else {
+            return 0;
+        };
+        let read = self.input.read(conn, buf);
+        if read.failed {
+            self.keep = false;
+        }
+        read.n
+    }
+
     /// `fcgi_write`: whether the bytes went, which a connection the web
     /// server closed refuses; none open takes them silently.
     fn write(&mut self, kind: Kind, bytes: &[u8]) -> bool {
@@ -203,7 +217,7 @@ struct Response {
 
 impl Response {
     fn wire(&self) -> MutexGuard<'_, Wire> {
-        self.wire.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.wire)
     }
 }
 
@@ -439,11 +453,11 @@ impl Accepting {
             let wire = Arc::new(Mutex::new(Wire {
                 conn: Some(conn),
                 out: Outgoing::new(begun.id),
-                input: Input::default(),
+                input: fcgi::Stdin::default(),
                 keep: begun.keep,
             }));
             let served = serve_one(engine, begun.params, &wire);
-            let mut w = wire.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut w = lock(&wire);
             let Some(code) = served else {
                 // `php_request_startup` failed: `fcgi_finish_request(request,
                 // 1)` and `main` returns `FAILURE`.
@@ -514,11 +528,8 @@ fn serve_one(engine: &Engine, params: Environment, wire: &Arc<Mutex<Wire>>) -> O
         let user = php_sapi::cgi::user_ini(engine, &dir, doc_root);
         ini.extend(user.into_iter().map(|(k, v)| (k, v, IniOrigin::PerDir)));
     }
-    let body = if info.content_length > 0 {
-        read_body(info.content_length, wire)
-    } else {
-        Body::default()
-    };
+    lock(wire).input = fcgi::Stdin::new(info.body_length());
+    let body = Body::Stream(Box::new(Stdin(Arc::clone(wire))));
     let rows = php_sapi::cgi::server_variables(&env, &info, settings);
     let process_env: Vec<(Vec<u8>, Vec<u8>)> = std::env::vars_os()
         .map(|(n, v)| (n.into_encoded_bytes(), v.into_encoded_bytes()))
@@ -553,6 +564,20 @@ fn serve_one(engine: &Engine, params: Environment, wire: &Arc<Mutex<Wire>>) -> O
     (!served.start_failed).then_some(served.exit_code)
 }
 
+/// The wire, held for one read or write.
+fn lock(wire: &Mutex<Wire>) -> MutexGuard<'_, Wire> {
+    wire.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The request's body as the request pulls it, [`Wire::read_body`].
+struct Stdin(Arc<Mutex<Wire>>);
+
+impl std::io::Read for Stdin {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        Ok(lock(&self.0).read_body(buf))
+    }
+}
+
 /// What the web server sent that the request did not read, its empty
 /// `FCGI_STDIN` among it, taken off the connection without waiting, so
 /// a close that follows the last answer sends the answer and no reset
@@ -576,30 +601,4 @@ fn drain(wire: &mut Wire) {
         Conn::Unix(s) => s.set_nonblocking(false),
     }
     .ok();
-}
-
-/// `sapi_cgi_read_post`: the body, up to its length, from the request's
-/// `FCGI_STDIN` records.
-fn read_body(length: i64, wire: &Arc<Mutex<Wire>>) -> Body {
-    let length = usize::try_from(length).unwrap_or(0);
-    let mut body = vec![0u8; length];
-    let mut read = 0;
-    let mut guard = wire.lock().unwrap_or_else(PoisonError::into_inner);
-    let Wire {
-        conn, input, keep, ..
-    } = &mut *guard;
-    if let Some(conn) = conn {
-        while read < length {
-            match input.read(conn, &mut body[read..]) {
-                Ok(n) if n > 0 => read += n,
-                Ok(_) => break,
-                Err(_) => {
-                    *keep = false;
-                    break;
-                }
-            }
-        }
-    }
-    body.truncate(read);
-    Body::from(body)
 }

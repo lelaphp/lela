@@ -694,6 +694,17 @@ fn run_in(
     // that wrote a fence line: what each crate's reading is stamped with.
     let mut snapshot = Snapshot::disk(root)?;
     let mut readings = Vec::new();
+    // Every reading is journaled as it is made, the ones said without a
+    // run among them: the watching run reads the journal alone, so a
+    // reading kept from it is one the run never wrote (#3457 found a host's
+    // lines that did not parse printing nothing and writing nothing).
+    let mut keep = |reading: Reading| -> Result<()> {
+        if let Some(journal) = journal {
+            journal.judged(&reading)?;
+        }
+        readings.push(reading);
+        Ok(())
+    };
     for slot in slots {
         let (one, tally) = match slot {
             Slot::Unrun(krate, why, failed) => {
@@ -702,22 +713,26 @@ fn run_in(
                 if failed {
                     unrun.status = Status::Fail;
                 }
-                readings.push(unrun);
+                keep(unrun)?;
                 continue;
             }
             Slot::Ready(at) => (&ready[at], finished[at].take()),
         };
         if let Some(why) = &full {
             let unrun = under_rule(one.krate, &snapshot, rule)?.under(manifest.pin()?);
-            readings.push(Full::skipped(unrun, &one.krate.name, why)?);
+            keep(Full::skipped(unrun, &one.krate.name, why)?)?;
             continue;
         }
         let Some(tally) = tally else { continue };
-        let reading = finished_reading(root, manifest, rule, one, &tally, &mut snapshot, ask)?;
-        if let Some(journal) = journal {
-            journal.judged(&reading)?;
-        }
-        readings.push(reading);
+        keep(finished_reading(
+            root,
+            manifest,
+            rule,
+            one,
+            &tally,
+            &mut snapshot,
+            ask,
+        )?)?;
     }
     if ask.scope != Scope::Crate && served == 0 && readings.iter().all(|r| r.status != Status::Fail)
     {
