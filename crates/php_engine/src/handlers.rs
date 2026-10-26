@@ -14294,7 +14294,7 @@ fn inline_assign_obj(
     }
     let z = data_value(req.slots_mut(frame), code, op, (at, data), ty, container)?;
     place.write(z);
-    Some(Ok(Next::jump(at.saturating_add(2))))
+    Some(Ok(Next::by(2)))
 }
 
 /// The `OP_DATA` value the inline path of `ASSIGN_OBJ` takes into a
@@ -16365,11 +16365,11 @@ fn inline_assign_dim(
     placed.entry.write(z);
     free_dim_operands(req, frame, op, (a, placed.free_dim));
     if !garbage.is_refcounted() {
-        return Some(Ok(Next::jump(at.saturating_add(2))));
+        return Some(Ok(Next::by(2)));
     }
     if let Some(text) = garbage.as_str() {
         req.heap_mut().release_string(text);
-        return Some(Ok(Next::jump(at.saturating_add(2))));
+        return Some(Ok(Next::by(2)));
     }
     req.vm_mut().stand(frame, at);
     req.release(Value::of_slot(garbage));
@@ -16958,7 +16958,7 @@ fn inline_assign_dim_op(
     if free_dim {
         exec::free_operand(req, frame, op.op2_type, op.op2);
     }
-    Some(Ok(Next::jump(at.saturating_add(2))))
+    Some(Ok(Next::by(2)))
 }
 
 /// `ASSIGN_DIM_OP` past its inline path: the container walked, the
