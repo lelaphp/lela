@@ -176,6 +176,7 @@ pub fn parse<'a>(arena: &'a Arena, source: &'a [u8], options: &Options) -> Parse
         ended.census,
         &mut scratch.stacks,
     );
+    arena.note_parsed(built.tree.elements().len());
     let tokens = arena.copy(&lexed.tokens);
     let diagnostics = in_php_order(tokens, lexed.diagnostics, ended.diagnostics);
     scratch.tokens = lexed.tokens;

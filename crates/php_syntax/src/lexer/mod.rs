@@ -98,7 +98,7 @@ pub struct Lexed {
 /// `INITIAL`, for a file, and [`State::Scripting`] after an open tag.
 #[must_use]
 pub fn lex(file: FileId, text: &[u8], options: &LexOptions) -> Lexed {
-    let arena = crate::Arena::new();
+    let arena = crate::Arena::default();
     lex_with_lines(
         file,
         text,

@@ -1514,6 +1514,7 @@ impl Request {
         if held.declared.lay() {
             return Ok(());
         }
+        declared_bytes::carve(self, unit)?;
         let laid = declared_bytes::of_unit(self, unit)?;
         match self.unit_strings.held_mut(unit_at) {
             Some(held) => held.declared.hold(laid),

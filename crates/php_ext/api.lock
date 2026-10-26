@@ -1158,7 +1158,7 @@ syntax::Arena
 syntax::Arena::concat
 syntax::Arena::copy
 syntax::Arena::lowercase
-syntax::Arena::new
+syntax::Arena::parsed
 syntax::Arena::reset
 syntax::Arena::vec
 syntax::Diagnostic
