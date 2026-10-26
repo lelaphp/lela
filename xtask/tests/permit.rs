@@ -898,6 +898,23 @@ fn diff_judges_a_staged_binary_file_by_its_path_alone() {
     assert!(!ran.stdout.contains("stand-in.so"), "{ran}");
     Repo::at(&root).git(&["rm", "--cached", "-q", "ext/pcre/src/cache.rs"]);
 
+    // A source file git reads as binary for a NUL or a lone CR in a
+    // comment, which rustc compiles, is text by its path: its content is
+    // judged, so the byte takes no rule out of reach (833e084b7).
+    for (file, byte) in [("nul.rs", "\0"), ("cr.rs", "\r")] {
+        let path = format!("ext/pcre/src/{file}");
+        write(
+            &root,
+            &path,
+            &format!("// {byte} a comment\nuse php_ext::__private;\n"),
+        );
+        Repo::at(&root).git(&["add", "--", &path]);
+        let ran = permit(&root, "", &["--diff"]);
+        assert_eq!(ran.code(), 1, "{file} is judged by its content: {ran}");
+        assert!(ran.stdout.contains(&format!("deny {path}")), "{ran}");
+        Repo::at(&root).git(&["rm", "--cached", "-q", &path]);
+    }
+
     put(".claude/hooks/stand-in");
     let out = permit(&root, "", &["--diff"]).ok();
     assert!(out.contains("note .claude/hooks/stand-in"), "{out}");

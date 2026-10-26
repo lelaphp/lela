@@ -16,6 +16,34 @@ fn fixture(name: &str) -> Run {
     serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap()
 }
 
+/// A run a later xtask kept, read by this one (the fixture's `newer.json`):
+/// the verdict and the miss it cannot name are left out, the test it holds
+/// no verdict for reading as one the run predates, and its field is
+/// ignored; a file that is no run is passed over, none rather than a
+/// refusal, so a branch's new shape stops no other branch's lane.
+#[test]
+fn a_newer_writers_run_is_read_with_what_this_reader_cannot_name_left_out() {
+    let dir = crate::package_dir().join("fixtures/phpt/against");
+    let run = read(&dir.join("newer.json")).unwrap().unwrap();
+    let id = |test: &str| format!("phpt:php-src/ext/fixture/tests/{test}");
+    let verdicts: Vec<(&str, Judgement)> = (run.verdicts.iter())
+        .map(|(id, j)| (id.as_str(), *j))
+        .collect();
+    let (kept, missed) = (id("kept.phpt"), id("missed.phpt"));
+    assert_eq!(
+        verdicts,
+        [
+            (kept.as_str(), Judgement::Pass),
+            (missed.as_str(), Judgement::Fail)
+        ]
+    );
+    assert!(run.misses.is_empty(), "{:?}", run.misses);
+    let root = Tree::new("against-newer").unwrap();
+    let garbage = root.join("garbage.json");
+    fs::write(&garbage, "not a run").unwrap();
+    assert_eq!(read(&garbage).unwrap(), None);
+}
+
 fn reading_of(diff: Result<Diff, String>) -> Reading {
     compared(
         Reading::new(INSTRUMENT, "ext/fixture@against"),

@@ -274,6 +274,14 @@ impl<'a> Adapter<'a> {
         phpt: &Phpt,
         (id, name): (&str, &str),
     ) -> Result<Result<Admitted, Judged>> {
+        if let Some(Some(why)) = subset.routed.gained.get(&subset.under(&test.file)) {
+            return Ok(Err(Judged::new(
+                id,
+                name,
+                Judgement::Unbuilt,
+                why.to_string(),
+            )));
+        }
         if let Some(why) = unhosted(phpt, &self.hosts) {
             return Ok(Err(Judged::new(id, name, Judgement::Skip, why)));
         }
@@ -612,7 +620,7 @@ pub(super) fn batch(apart: &[Apart], jobs: NonZeroUsize) -> NonZeroUsize {
 /// the answer is the host's and stands before the engine serves one
 /// native of `ext/standard` (#261). php reads `-m` off the line whatever
 /// follows it, so the recipe's program is written and not served.
-fn loaded_extensions(oracle: &Oracle<'_>, binary: &Path) -> Result<Vec<String>> {
+pub(super) fn loaded_extensions(oracle: &Oracle<'_>, binary: &Path) -> Result<Vec<String>> {
     let listing = [String::from("-m")];
     let out = oracle.run_under(&Invocation {
         flags: &listing,

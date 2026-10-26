@@ -129,7 +129,7 @@ pub(super) fn named(source: &Path, subset: &Subset, files: &[PathBuf]) -> Result
             if !(is_phpt(&path) && path.is_file()) {
                 bail!("--upstream {shown}: no .phpt file of the pinned tree at {}", source.display());
             }
-            if subset.found_in(&path).is_none() {
+            if !subset.holds_test(&path) {
                 bail!("--upstream {shown}: not a test of the subset {}", subset.scope);
             }
             Ok(under.to_path_buf())
@@ -231,10 +231,10 @@ mod tests {
             dirs: vec![Dir {
                 under: PathBuf::from("ext/a"),
                 path: tree.join("ext/a"),
-                needs: None,
             }],
             root: tree.to_path_buf(),
             holds: crate::phpt::Holds::Every,
+            routed: crate::phpt::route::Routed::default(),
         };
         let named = |files: &[&str]| {
             let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();

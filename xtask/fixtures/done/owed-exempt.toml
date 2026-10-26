@@ -1,0 +1,8 @@
+# A negative-control fixture (harness-design.md §4.1): an [[owed]] row the
+# reader must refuse, read after a manifest's least table. It narrows by
+# `exempt`, which left the grammar when #3278 ruled that a row narrows by
+# its `when` alone, and the refusal names the key (#3292).
+[[owed]]
+instrument = "witness"
+crates = "*"
+exempt = ["xtask"]
