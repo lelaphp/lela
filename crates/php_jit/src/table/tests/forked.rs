@@ -141,8 +141,8 @@ fn write_word(to: &mut impl Write, word: u64) -> Result<(), String> {
 /// published before the fork, publishes 30 as trace 2 and says where it
 /// placed it; once the parent has published 20 and 21 as its own traces 2
 /// and 3, it runs its trace 2, publishes 31 as trace 3 and runs it, and
-/// answers the three values and whether the file behind its arena holds
-/// the seals the arena's first file did.
+/// answers the three values, where it placed trace 3, and whether the
+/// file behind its arena holds the seals the arena's first file did.
 fn child(
     table: &Table,
     from_parent: &mut impl Read,
@@ -155,6 +155,7 @@ fn child(
     let own = ran(table, second).unwrap_or(0);
     let third = publish(table, 31)?;
     let last = ran(table, third).unwrap_or(0);
+    let placed = address(table, third)?;
     // A `MAP_PRIVATE` arena is copied by the fork and maps no file.
     #[cfg(not(target_os = "linux"))]
     let sealed = table.writer().arena.is_some();
@@ -167,14 +168,16 @@ fn child(
     for word in [before, own, last, u32::from(sealed)] {
         write_word(to_parent, u64::from(word))?;
     }
+    write_word(to_parent, placed)?;
     Ok(())
 }
 
 /// The parent's half: it waits for the child's trace 2, publishes 20 as
 /// its own trace 2, at the address the child placed its own, and 21 as
-/// trace 3, lets the child go on, and reads the child's answers; it then
-/// runs its three traces, the last after the child published 31 at the
-/// address of its trace 3.
+/// trace 3, lets the child go on, and reads the child's answers, among
+/// them where the child placed its trace 3, which must be where the
+/// parent placed its own; it then runs its three traces, the last after
+/// the child published 31 at that address.
 fn parent(
     table: &Table,
     from_child: &mut impl Read,
@@ -195,6 +198,12 @@ fn parent(
         *answer = read_word(from_child)?;
     }
     let [before, own, last, sealed] = answers;
+    let (placed, at) = (read_word(from_child)?, address(table, third)?);
+    if at != placed {
+        return Err(format!(
+            "the child placed trace 3 at {placed:#x} and the parent at {at:#x}"
+        ));
+    }
     let ours = [trace(1), second, third].map(|id| ran(table, id).unwrap_or(0));
     Ok(format!(
         "child {before} {own} {last} sealed {sealed}, parent {} {} {}",
@@ -212,8 +221,12 @@ fn parent(
 /// enter. The child's arena maps a file sealed as the first was.
 #[test]
 fn a_forks_child_runs_its_parents_code_and_neither_runs_what_the_other_publishes_after() {
-    const NAME: &str = "table::tests::forked::a_forks_child_runs_its_parents_code_and_neither_runs_what_the_other_publishes_after";
-    in_a_process_apart(NAME, "child 7 30 31 sealed 1, parent 7 20 21", || {
+    // The test's name as the harness takes it, the crate's name cut off.
+    let module = module_path!().split_once("::").map_or("", |(_, rest)| rest);
+    let name = format!(
+        "{module}::a_forks_child_runs_its_parents_code_and_neither_runs_what_the_other_publishes_after"
+    );
+    in_a_process_apart(&name, "child 7 30 31 sealed 1, parent 7 20 21", || {
         let engine = testing::engine::<Forking>(&[]);
         let scratch = testing::Scratch::new();
         let (_, came) = scratch.serve_kept::<Came>(&engine, "function f() {} f();");

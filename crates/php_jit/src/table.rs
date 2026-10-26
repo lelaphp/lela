@@ -46,6 +46,8 @@
 //! other runs: the one that asked writes only into chunks and tails that
 //! were free at the fork, which the child, publishing nothing, never
 //! enters, and no chunk of a standing table is freed before the table.
+//! The copy is the asking process's to pay, at each fork, for the chunks
+//! in use alone.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};

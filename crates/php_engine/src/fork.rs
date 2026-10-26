@@ -471,12 +471,12 @@ pub fn inherit(entry: Weak<dyn Inherited>) {
 
 /// What the process holds that a fork's child makes its own, as a fork
 /// finds it.
-struct Inheritance(Vec<Arc<dyn Inherited>>);
+struct Heritable(Vec<Arc<dyn Inherited>>);
 
-impl Inheritance {
+impl Heritable {
     /// Every entry that stands, in the order each was entered.
-    fn live() -> Inheritance {
-        Inheritance(
+    fn live() -> Heritable {
+        Heritable(
             living(&INHERITED)
                 .iter()
                 .filter_map(Weak::upgrade)
@@ -484,7 +484,7 @@ impl Inheritance {
         )
     }
 
-    /// Each one held, in [`Inheritance::live`]'s order, which is every
+    /// Each one held, in [`Heritable::live`]'s order, which is every
     /// fork's.
     fn hold(&self) -> Kept<'_> {
         Kept(self.0.iter().map(|entry| entry.hold()).collect())
@@ -656,8 +656,8 @@ fn fork_as(asker: Asker) -> io::Result<Forked> {
     let joined = workers.stop();
     let caches = RealpathCaches::live();
     let held = caches.hold();
-    let inheritance = Inheritance::live();
-    let kept = inheritance.hold();
+    let heritable = Heritable::live();
+    let kept = heritable.hold();
     let forked = alone.fork(asker);
     if matches!(forked, Ok(Forked::Child)) {
         kept.take();

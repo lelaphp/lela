@@ -84,9 +84,11 @@ pub(crate) trait Pages: Sized + Send + Sync {
     ///
     /// # Safety
     ///
-    /// `own` was made by [`Pages::own`] of this span, nothing has written
-    /// the span since, and no byte outside the ranges it was given is one
-    /// any thread executes or reads.
+    /// `own` was made by [`Pages::own`] of this span, no byte of the
+    /// ranges it was given has been written since, and no byte outside
+    /// them is one any thread of this process executes or reads: what
+    /// another process sharing the pages writes there meanwhile is never
+    /// entered.
     unsafe fn adopt(&self, own: Self::Own) -> io::Result<()>;
 }
 
@@ -341,9 +343,11 @@ impl<P: Pages> Arena<P> {
             ));
         }
         // SAFETY: `inheritance` was made by `own` of this arena's pages,
-        // and no body was written since; every byte a `Code` names is in
-        // a chunk that was filling or held a live `Code` then, which the
-        // copy holds, and a free chunk is executed by nobody.
+        // and this arena wrote no body since, so no byte of a chunk it
+        // copied changed; every byte a `Code` names is in a chunk that was
+        // filling or held a live `Code` then, which the copy holds, and a
+        // free chunk, which a process sharing the pages may have written
+        // since, is executed by nobody here.
         unsafe { self.region.pages.adopt(inheritance.own) }
     }
 
@@ -788,7 +792,10 @@ mod linux {
         /// more. A replaced page holds the byte the old held wherever code
         /// is, so a fetch through either sees one instruction, and Linux
         /// keeps a page's instruction and data caches coherent as it maps
-        /// the page executable.
+        /// the page executable. One refusal is not covered: a kernel that
+        /// unmaps the range before it refuses the executable view's
+        /// replacement leaves the code there unmapped, which only a kernel
+        /// out of memory for one mapping of the size it replaces does.
         unsafe fn adopt(&self, file: OwnedFd) -> io::Result<()> {
             // SAFETY: the caller hands a copy of every byte any thread
             // executes, and the executable view is this adapter's own
@@ -798,10 +805,9 @@ mod linux {
             // and only the arena's holder, the caller, writes.
             unsafe { over(&self.written, &file, ProtFlags::READ | ProtFlags::WRITE) }?;
             #[cfg(test)]
-            self.seals.store(
-                rustix::fs::fcntl_get_seals(&file)?.bits(),
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            if let Ok(seals) = rustix::fs::fcntl_get_seals(&file) {
+                (self.seals).store(seals.bits(), std::sync::atomic::Ordering::Relaxed);
+            }
             Ok(())
         }
     }
