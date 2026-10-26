@@ -594,6 +594,10 @@ mod linux {
     pub(crate) struct Memfd {
         written: Mapping,
         executed: Mapping,
+        /// The seals of the file the views map, read while it was still
+        /// open: what a test holds the arena's own file to.
+        #[cfg(test)]
+        seals: SealFlags,
     }
 
     impl Pages for Memfd {
@@ -602,6 +606,8 @@ mod linux {
             Ok(Memfd {
                 written: view(&file, len, ProtFlags::READ | ProtFlags::WRITE)?,
                 executed: view(&file, len, ProtFlags::READ | ProtFlags::EXEC)?,
+                #[cfg(test)]
+                seals: rustix::fs::fcntl_get_seals(&file)?,
             })
         }
 
@@ -636,6 +642,11 @@ mod linux {
         /// The write view's address of offset `at`.
         pub(super) fn written(&self, at: usize) -> NonNull<u8> {
             self.written.at(at)
+        }
+
+        /// The seals the file behind the views held as they were mapped.
+        pub(super) fn seals(&self) -> SealFlags {
+            self.seals
         }
     }
 
@@ -1107,15 +1118,19 @@ mod native {
         }
     }
 
-    /// On Linux the two views are two addresses of one sealed file: what
-    /// the write view holds the executable view reads, and
-    /// `/proc/self/maps` shows the one shared and writable and the other
-    /// shared and executable, both of the `memfd`. The arena's file is
-    /// closed by then, so the seals are held on another file `sealed`
-    /// makes as it makes the arena's: it refuses to shrink or grow.
+    /// On Linux the two views are two addresses of one sealed file: the
+    /// arena's own file held the seals against shrinking, growing and any
+    /// further seal as its views were mapped, what the write view holds
+    /// the executable view reads, and `/proc/self/maps` shows the one
+    /// shared and writable and the other shared and executable, both of
+    /// the `memfd`. That the seals hold, which the arena's closed file can
+    /// no longer be asked, is shown on a file `sealed` makes as it makes
+    /// the arena's: it refuses to shrink or grow.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_two_views_are_two_addresses_of_one_sealed_file() -> Result<(), String> {
+        use rustix::fs::SealFlags;
+
         use super::Pages;
         let sealed = super::linux::sealed(CHUNK).map_err(|e| e.to_string())?;
         let whole = u64::try_from(CHUNK).map_err(|e| e.to_string())?;
@@ -1124,6 +1139,12 @@ mod native {
         let mut arena = arena(1)?;
         let code = published(&mut arena, 7)?;
         let pages = &arena.region.pages;
+        let held = SealFlags::SHRINK | SealFlags::GROW | SealFlags::SEAL;
+        assert!(
+            pages.seals().contains(held),
+            "the arena's file held {:?}",
+            pages.seals()
+        );
         let at = code.entry().as_ptr().addr() - pages.rx(0).as_ptr().addr();
         let written = pages.written(at);
         assert_ne!(written, code.entry());
