@@ -668,7 +668,7 @@ impl<'a> Builder<'a> {
             (Opcode::InitMethodCall, _) if method.is_some() => Form::Inline,
             _ => form,
         };
-        if let Some((Some(object), plain)) = method.as_ref()
+        if let Some((object, plain)) = method.as_ref()
             && let Some(class) = plain.scope()
         {
             self.class_guard(idx, frame, at, (*object, class));
@@ -1115,8 +1115,8 @@ impl<'a> Builder<'a> {
                         Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName
                     )
                     // The leave kernel a variable that owns something
-                    // leaves through frees it, and a destructor may throw.
-                    // and so does the receiver's, which it gives up after them.
+                    // leaves through frees it, and a destructor may throw,
+                    // as may the receiver's, which it gives up after them.
                     || (matches!(in_place, Some(InPlace::Leave))
                         && (!self.uncounted(frame) || self.receives(frame)))
             }
@@ -1401,14 +1401,15 @@ impl<'a> Builder<'a> {
     /// the call kernel's, which serves the prologue, where such a
     /// parameter has no `RECV_INIT`, or its default names a constant
     /// expression, which php evaluates, or is counted. Defaults of each
-    /// kind are copied, a constant's and an expression's left to the
-    /// kernel:
+    /// kind are copied, a `float` parameter's integer default the double
+    /// the compiler made of it, a constant's and an expression's left to
+    /// the kernel:
     ///
     /// ```php
     /// const STEP = 3;
     /// function f($a, $b = 2, $c = 1.5, $d = "s", $e = [1], $f = null) { return $a + $b + $c + strlen($d) + count($e) + ($f ?? 0); }
     /// function g($a, $b = STEP) { return $a + $b; }
-    /// function h($a, int $b = 4) { return $a * $b; }
+    /// function h($a, int $b = 4, float $x = 1) { return var_export($x, true) === '1.0' ? $a * $b : 0; }
     /// function k($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += f($i) + f($i, 1) + g($i) + h($i); } return $s; }
     /// var_dump(k(10));
     /// ```
@@ -2485,8 +2486,8 @@ impl<'a> Builder<'a> {
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:8950-9213`): over a constant
     /// name, on `$this` or a variable that holds an object as it is, of a
     /// published class the recording took the call of
-    /// ([`UnitView::call`]), the object the guard holds of that class
-    /// and none for a static method's call.
+    /// ([`UnitView::calls_of`]), with the object the guard holds of that
+    /// class.
     fn method_at(
         &self,
         frame: Frame,
@@ -2494,7 +2495,7 @@ impl<'a> Builder<'a> {
         (op1, sample1): (Operand, Option<Sample>),
         seen: Seen,
         next: Option<&Event>,
-    ) -> Option<(Option<Object>, PlainCall)> {
+    ) -> Option<(Object, PlainCall)> {
         if op.opcode != Opcode::InitMethodCall || op.op2_type != OperandKind::Const {
             return None;
         }
@@ -2517,7 +2518,7 @@ impl<'a> Builder<'a> {
         };
         let plain = (self.view.calls_of(*callee, op.extended_value))
             .find(|plain| plain.scope() == Some(class))?;
-        Some((Some(object), plain.clone()))
+        Some((object, plain.clone()))
     }
 
     /// The call a stepped `NEW`, `INIT_STATIC_METHOD_CALL` or

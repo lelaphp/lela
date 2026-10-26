@@ -982,6 +982,9 @@ impl Emit<'_> {
         let none = self.b.ins().iconst(I32, 0);
         self.b.def_var(threw, none);
         let [_, opline] = self.served(line)?;
+        // The inline arms leave `EX(This)` and `RELEASE_THIS` as they
+        // stand, where the kernel clears them: the leave pops the frame
+        // before anything past it, an unwind among them, reads its header.
         let [held, owned, lent, fewer, kernel, next] = [(); 6].map(|()| self.b.create_block());
         self.b.set_cold_block(kernel);
         let this = self.b.ins().load(I64, trusted(), room, at(L.this()));
