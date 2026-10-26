@@ -1,0 +1,104 @@
+# What one job of a run hands a later one (#3554): a store, main's xtask,
+# the parity section, the built site. On the self-hosted pair it is kept on
+# `dax-build` by scripts/ci/stash.sh, which says where and for how long,
+# since GitHub counts artifact storage against the account and a run that
+# hit the quota failed at its first upload. On a GitHub-hosted runner, while
+# DAX_BUILD_RUNNER names an image (#2477), the jobs share no disk and reach
+# no server, so the hand-off is a GitHub artifact as before. A step names
+# `put` or `get`, never both.
+name: stash
+description: Keep a file or directory for a later job of this run, or lay down what an earlier job kept
+inputs:
+  put:
+    description: The name to keep `path` under
+    default: ""
+  get:
+    description: The names to lay at `path`, separated by spaces; several without `merge` are each laid under `path/<name>`
+    default: ""
+  path:
+    description: What `put` keeps, a file or a directory, or where `get` lays what it got
+    required: true
+  exclude:
+    description: Paths under `path` that `put` leaves out, one a line
+    default: ""
+  retention-days:
+    description: How long `put` keeps it
+    default: "7"
+  merge:
+    description: Whether `get` lays every name at `path` itself
+    default: "false"
+  optional:
+    description: Whether `get` goes on past a name this run kept none of
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: the stash on dax-build
+      if: runner.environment != 'github-hosted'
+      shell: bash
+      env:
+        PUT: ${{ inputs.put }}
+        GET: ${{ inputs.get }}
+        STASHED: ${{ inputs.path }}
+        EXCLUDE: ${{ inputs.exclude }}
+        DAYS: ${{ inputs.retention-days }}
+        MERGE: ${{ inputs.merge }}
+        OPTIONAL: ${{ inputs.optional }}
+      run: |
+        stash=$GITHUB_WORKSPACE/scripts/ci/stash.sh
+        if [ -n "$PUT" ]; then
+          set -- --days "$DAYS"
+          while IFS= read -r line; do [ -z "$line" ] || set -- "$@" --exclude "$line"; done <<<"$EXCLUDE"
+          "$stash" put "$PUT" "$STASHED" "$@"
+        else
+          set --
+          [ "$MERGE" != true ] || set -- --merge
+          [ "$OPTIONAL" != true ] || set -- "$@" --optional
+          # shellcheck disable=SC2086 # GET is the names, split on spaces
+          "$stash" get "$STASHED" $GET "$@"
+        fi
+
+    # A hosted runner's hand-off, as upload-artifact and download-artifact
+    # took it before #3554: each name its own artifact, the excluded paths
+    # `!` lines, several names one pattern.
+    - name: the artifact's paths and pattern
+      id: hosted
+      if: runner.environment == 'github-hosted'
+      shell: bash
+      env:
+        GET: ${{ inputs.get }}
+        STASHED: ${{ inputs.path }}
+        EXCLUDE: ${{ inputs.exclude }}
+      run: |
+        {
+          echo 'paths<<PATHS'
+          echo "$STASHED"
+          while IFS= read -r line; do [ -z "$line" ] || echo "!${STASHED%/}/$line"; done <<<"$EXCLUDE"
+          echo PATHS
+          read -ra names <<<"$GET"
+          if [ ${#names[@]} -gt 1 ]; then
+            echo "pattern={$(IFS=,; echo "${names[*]}")}"
+          else
+            echo "pattern=${names[0]:-}"
+          fi
+        } >> "$GITHUB_OUTPUT"
+    - if: runner.environment == 'github-hosted' && inputs.put != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.put }}
+        path: ${{ steps.hosted.outputs.paths }}
+        if-no-files-found: warn
+        retention-days: ${{ inputs.retention-days }}
+    # A pattern downloads nothing where it matches nothing, so `optional`
+    # is a pattern even for one name; one name otherwise must be there.
+    - if: runner.environment == 'github-hosted' && inputs.get != '' && inputs.optional != 'true' && !contains(inputs.get, ' ')
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.get }}
+        path: ${{ inputs.path }}
+    - if: runner.environment == 'github-hosted' && inputs.get != '' && (inputs.optional == 'true' || contains(inputs.get, ' '))
+      uses: actions/download-artifact@v4
+      with:
+        pattern: ${{ steps.hosted.outputs.pattern }}
+        merge-multiple: ${{ inputs.merge == 'true' || !contains(inputs.get, ' ') }}
+        path: ${{ inputs.path }}
