@@ -29,6 +29,9 @@
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+#[cfg(not(dispatch = "tailcall"))]
+use php_heap::Zval;
+
 /// What a tier declares its state with, as an extension does (design
 /// §4.4; `jit-design.md` §4, §5.3).
 pub use crate::api::abi::{Extension, ExtensionBuilder, Refusal, Start, StartupIni};
@@ -646,11 +649,13 @@ pub(crate) enum Way {
 impl Next {
     /// The high half of each way, written by the constructors below and
     /// read by [`Next::way`] and nowhere else.
+    /// A call and a return, the edges met most after going on, come
+    /// first, so the search of the high half finds each in two compares.
     const ON_WAY: u64 = 0;
-    const JUMP_WAY: u64 = 1;
-    const SAME_WAY: u64 = 2;
-    const PUSHED_WAY: u64 = 3;
-    const POPPED_WAY: u64 = 4;
+    const PUSHED_WAY: u64 = 1;
+    const POPPED_WAY: u64 = 2;
+    const JUMP_WAY: u64 = 3;
+    const SAME_WAY: u64 = 4;
     const MOVED_WAY: u64 = 5;
     const THREW_WAY: u64 = 6;
     const DONE_WAY: u64 = 7;
@@ -685,10 +690,10 @@ impl Next {
             return Way::On(low);
         }
         match self.0 >> 32 {
-            Next::JUMP_WAY => Way::Jump(low),
-            Next::SAME_WAY => Way::Left(Stepped::Same(FrameRef(low))),
             Next::PUSHED_WAY => Way::Left(Stepped::Pushed(FrameRef(low))),
             Next::POPPED_WAY => Way::Left(Stepped::Popped(FrameRef(low))),
+            Next::JUMP_WAY => Way::Jump(low),
+            Next::SAME_WAY => Way::Left(Stepped::Same(FrameRef(low))),
             Next::MOVED_WAY => Way::Left(Stepped::Moved(FrameRef(low))),
             Next::THREW_WAY => Way::Left(Stepped::Threw(FrameRef(low))),
             // `DONE_WAY`, the one high half left: the fields are private,
@@ -696,6 +701,52 @@ impl Next {
             _ => Way::Left(Stepped::Done),
         }
     }
+}
+
+/// What a handler's inline path answers (design §5.8): the way on in the
+/// frame and nothing else, since an inline path reads and writes the
+/// frame's slots and the op array alone, never the request. The loop,
+/// which holds the frame's slots across the oplines it serves, reads it
+/// with no request in hand; a handler reads it as an edge
+/// (`handlers::inlined`), where a back-edge's interrupt and safepoint
+/// are served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Inline {
+    /// On by so many places from the opline served, as [`Next::by`].
+    On(u32),
+    /// On by so many places over a back-edge, whose safepoint number is
+    /// the second: the interrupt is tested and a bound tier asked before
+    /// the loop goes on there.
+    Back(u32, u32),
+}
+
+impl Inline {
+    /// `ZEND_VM_NEXT_OPCODE`.
+    pub(crate) const ADVANCE: Inline = Inline::On(1);
+
+    /// The jump from `at` to `to`, a back-edge with the safepoint
+    /// `number` where `back` says it goes back.
+    #[inline(always)] // a select of two words, in the loop
+    pub(crate) const fn to(at: u32, to: u32, back: bool, number: u32) -> Inline {
+        let places = to.wrapping_sub(at);
+        if back {
+            Inline::Back(places, number)
+        } else {
+            Inline::On(places)
+        }
+    }
+}
+
+/// What one arm of the loop's dispatch did ([`dispatch::held`]): the
+/// opline served by its handler's inline path over the slots the loop
+/// holds, or by its handler with the request in hand, the slots let go
+/// for it, which the loop takes up again for the frame it goes on in.
+#[cfg(not(dispatch = "tailcall"))]
+pub(crate) enum Dispatched {
+    /// Served over the slots the loop holds, which still name the frame.
+    Inline(Inline),
+    /// Served with the request in hand: the handler's answer.
+    Cold(Result<Next, Fatal>),
 }
 
 impl From<Stepped> for Next {
@@ -739,13 +790,22 @@ mod dispatch {
 
     include!(concat!(env!("OUT_DIR"), "/dispatch.rs"));
 
+    /// The internal error of an opline no handler serves, `why` after its
+    /// opcode's name: out of line, so no arm of the loop reads the opcode
+    /// to build it.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn refused(op: &Opline, why: &str) -> Fatal {
+        Fatal::error(format!("InternalError: {} {why}", op.opcode.name()))
+    }
+
     /// The arm of a handler the loop does not hold in its body: `handler`
     /// called out of line, so what it holds live is its own and not the
     /// loop's. An arm whose handler does not take its opline's place
     /// stands the frame at `at` first, php's `SAVE_OPLINE()`.
     #[cold]
     #[inline(never)]
-    fn aside<F>(
+    pub(super) fn aside<F>(
         req: &mut Request,
         frame: FrameRef,
         code: &OpArray,
@@ -793,25 +853,6 @@ fn answered(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Stepped, F
         return Ok(Stepped::Threw(at));
     }
     Ok(Stepped::Same(at))
-}
-
-/// The activation of a frame serving `code`, its prologue having
-/// raised nothing (design §5.6, §4.3 seam 8): the interrupt check, then
-/// `Site::Entry`, then the frame the loop goes on in. Where `Nop`'s loop
-/// hands the frame to the tier's at the check ([`interrupted_at`]), the
-/// tier's activates it again, past its prologue, so its `Site::Entry` is
-/// the tier's.
-#[inline]
-fn activated<T: Tier>(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-) -> Result<Stepped, Fatal> {
-    if interrupt::raised(req) && interrupted_at::<T>(req, frame, Stepped::Pushed(frame))? {
-        return Ok(Stepped::Threw(frame));
-    }
-    let flow = T::safepoint(req, frame, Site::Entry, Held::of(code));
-    answered(req, flow, frame)
 }
 
 /// What a site of `T`'s loop, an activation or a back edge, does where
@@ -1246,6 +1287,10 @@ fn serve_held<'u, T: Tier, D: Telling>(
 ) -> Result<Option<Stepped>, Fatal> {
     let declared = D::of(req);
     scope.measured(req);
+    // The interrupt a back-edge tests, held apart from the request so the
+    // loop tests it with the frame's slots in hand.
+    #[cfg(not(dispatch = "tailcall"))]
+    let interrupt = req.limits().interrupt().clone();
     let mut kept = Kept::<'u>::default();
     let mut stepped = first;
     // Every way out of this loop is taken once a serving, a scope or a
@@ -1321,36 +1366,80 @@ fn serve_held<'u, T: Tier, D: Telling>(
                 None => return Err(no_frame(frame)),
             },
         };
-        if pushed {
-            let start = req.vm().opline(frame);
+        let start = req.vm().opline(frame);
+        let mut at = if pushed {
             let entry = exec::entry_of(body);
             match entered::<T, D>(req, frame, body, (start, entry), declared)? {
-                Stepped::Same(at) if at == frame => {}
-                other => {
+                Ok(at) => at,
+                Err(other) => {
                     stepped = other;
                     continue;
                 }
             }
-        }
+        } else {
+            start
+        };
         let mut oplines = &*body.oplines;
-        let mut at = req.vm().opline(frame);
+        // The frame's slots, held across the oplines the loop dispatches
+        // and served by their handlers' inline paths ([`dispatch::held`]):
+        // a borrow of the request, so every arm that takes the request
+        // ends it, and the borrow checker refuses a loop that reads the
+        // slots again before it takes them up for the frame it goes on in,
+        // as it does once such an arm is served.
+        #[cfg(not(dispatch = "tailcall"))]
+        let mut slots: &mut [Zval] = req.slots_mut(frame);
         stepped = loop {
             #[cfg(not(dispatch = "tailcall"))]
             let way = {
                 let Some(op) = oplines.get(at as usize) else {
                     return Err(past_the_end(frame, at));
                 };
-                declared.before(req, frame, at, op.opcode);
-                let next = dispatch::dispatch::<T>(req, frame, body, op, at)?;
-                #[cfg(debug_assertions)]
-                req.sensed_after(body, op)?;
-                next.way()
+                if declared.tells(op.opcode) {
+                    declared.before(req, frame, at, op.opcode);
+                    slots = req.slots_mut(frame);
+                }
+                match dispatch::held!(req, slots, frame, body, op, at) {
+                    Dispatched::Inline(Inline::On(places)) => {
+                        at = at.wrapping_add(places);
+                        continue;
+                    }
+                    Dispatched::Inline(Inline::Back(places, _))
+                        if interpreted::<T>() && !interrupt.raised().load(Ordering::Relaxed) =>
+                    {
+                        at = at.wrapping_add(places);
+                        continue;
+                    }
+                    // A back-edge whose interrupt is raised or whose tier is
+                    // bound: what the handler does past its path, the request
+                    // in hand.
+                    Dispatched::Inline(inline) => {
+                        crate::handlers::inline_path::served::<T>(req, frame, body, at, inline)?
+                            .way()
+                    }
+                    Dispatched::Cold(next) => {
+                        let next = next?;
+                        #[cfg(debug_assertions)]
+                        req.sensed_after(body, op)?;
+                        next.way()
+                    }
+                }
             };
             #[cfg(dispatch = "tailcall")]
             let way = tail::chain::<T, D>(req, frame, body, oplines, at, &declared)?.way();
-            match way {
-                Way::On(places) => at = at.wrapping_add(places),
-                Way::Jump(to) => at = to,
+            // Whether the edge went into another frame, where the loop
+            // takes its position up with its slots. One take-up where the
+            // arms meet: the two edges into a frame taking theirs up in
+            // their own arms and going on by `continue` measured the empty
+            // loop 72.9 -> 89.2 (#3345).
+            let into = match way {
+                Way::On(places) => {
+                    at = at.wrapping_add(places);
+                    false
+                }
+                Way::Jump(to) => {
+                    at = to;
+                    false
+                }
                 // A return to a frame the loop entered: its op array as
                 // the loop left it for the call.
                 Way::Left(stepped @ (Stepped::Popped(to) | Stepped::Moved(to))) => {
@@ -1360,7 +1449,7 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     frame = to;
                     body = code;
                     oplines = &*body.oplines;
-                    at = req.vm().opline(frame);
+                    true
                 }
                 // A call to a function the loop called before: its op
                 // array as the loop entered it then.
@@ -1372,25 +1461,37 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     else {
                         break stepped;
                     };
-                    let Some(callee_body) = kept.called(function) else {
+                    let Some(called) = kept.called(function) else {
                         break stepped;
                     };
-                    kept.keep(callee, callee_body);
-                    let entry = exec::entry_of(callee_body);
-                    match entered::<T, D>(req, callee, callee_body, (start, entry), declared)? {
-                        Stepped::Same(at) if at == callee => {}
-                        other => break other,
+                    kept.keep(callee, called.code);
+                    let entry = (start, called.entry);
+                    if let Err(other) = entered::<T, D>(req, callee, called.code, entry, declared)?
+                    {
+                        break other;
                     }
                     frame = callee;
-                    body = callee_body;
+                    body = called.code;
                     oplines = &*body.oplines;
-                    // Where the callee stands: a prologue served moved it
-                    // on, and so did a tier whose `Site::Entry` answered a
-                    // `Resume` of it, a trace entered there or a recording
-                    // (#3077); the push's `start` is neither's.
-                    at = req.vm().opline(frame);
+                    true
                 }
                 Way::Left(stepped) => break stepped,
+            };
+            // The slots taken up for the frame the loop goes on in, and
+            // its position with them, from one look at the frame table,
+            // where the edge went into another frame. Read off the frame,
+            // not taken from `entered`: the position in hand from there
+            // measured every dispatch of the bare loops 4% higher, by two
+            // moves the allocator added at the loop's head (#3320).
+            #[cfg(not(dispatch = "tailcall"))]
+            if into {
+                (at, slots) = req.standing(frame);
+            } else {
+                slots = req.slots_mut(frame);
+            }
+            #[cfg(dispatch = "tailcall")]
+            if into {
+                at = req.vm().opline(frame);
             }
         };
     }
@@ -1507,7 +1608,13 @@ fn serve_scope<T: Tier, D: Telling>(
 /// is left of its `RECV*` prologue served over `code`, the op array the
 /// loop holds for it (design §5.6), up to `entry`, its entry safepoint
 /// ([`exec::entry_of`]), and then its activation, the interrupt check
-/// and `Site::Entry`. `Threw` of the callee where a `RECV` raised.
+/// and `Site::Entry`. The answer is the opline the loop goes on at in
+/// the callee, as php's `ZEND_VM_ENTER` loads `opline` once it has
+/// entered: where the tier answered `Continue`, the one the prologue
+/// left it at, which the loop's first entry of a frame takes as it
+/// stands; read off the frame only where a prologue was served or a
+/// tier resumed the callee itself. Any other edge, `Threw` of the callee
+/// where a `RECV` raised, is the `Err`.
 #[inline(always)] // once per call edge, in the loop
 fn entered<T: Tier, D: Telling>(
     req: &mut Request,
@@ -1515,23 +1622,38 @@ fn entered<T: Tier, D: Telling>(
     code: &OpArray,
     (start, entry): (u32, u32),
     told: D,
-) -> Result<Stepped, Fatal> {
+) -> Result<Result<u32, Stepped>, Fatal> {
+    let mut at = start;
     if start < entry {
         // The parameters php's `RECV` passes on its first test, read off
         // the frame in one run where nothing observes the opcode; the
         // handlers serve the rest from the first that does not pass.
-        let at = if told.tells(php_unit::Opcode::Recv) {
-            start
-        } else {
-            exec::recv_passed(req, callee, code, (start, entry))
-        };
-        if at < entry
-            && let Some(threw) = exec::prologue(req, callee, code, told)?
-        {
-            return Ok(Stepped::Threw(threw));
+        if !told.tells(php_unit::Opcode::Recv) {
+            at = exec::recv_passed(req, callee, code, (start, entry));
+        }
+        if at < entry {
+            if let Some(threw) = exec::prologue(req, callee, code, told)? {
+                return Ok(Err(Stepped::Threw(threw)));
+            }
+            at = req.vm().opline(callee);
         }
     }
-    activated::<T>(req, callee, code)
+    // The activation's interrupt check (design §5.8): where `Nop`'s loop
+    // hands the frame to the tier's there ([`interrupted_at`]), the tier's
+    // activates it again, past its prologue, so its `Site::Entry` is the
+    // tier's.
+    if interrupt::raised(req) && interrupted_at::<T>(req, callee, Stepped::Pushed(callee))? {
+        return Ok(Err(Stepped::Threw(callee)));
+    }
+    match T::safepoint(req, callee, Site::Entry, Held::of(code)) {
+        Flow::Continue => Ok(Ok(at)),
+        flow => match answered(req, flow, callee)? {
+            // A tier that resumed the callee itself, at a trace's end or
+            // a recording's start (#3077), stood it where it goes on.
+            Stepped::Same(to) if to == callee => Ok(Ok(req.vm().opline(callee))),
+            other => Ok(Err(other)),
+        },
+    }
 }
 
 /// The internal error for a frame the loop was sent into that serves no
@@ -1709,7 +1831,7 @@ fn activated_over(req: &mut Request, callee: FrameRef, code: &OpArray) -> Result
     let start = req.vm().opline(callee);
     let entry = exec::entry_of(code);
     match entered::<Nop, Declared>(req, callee, code, (start, entry), told)? {
-        Stepped::Threw(at) => Ok(Stepped::Threw(at)),
+        Err(Stepped::Threw(at)) => Ok(Stepped::Threw(at)),
         _ => Ok(Stepped::Pushed(callee)),
     }
 }

@@ -193,6 +193,10 @@ fn indented(req: &mut Request, width: usize, rest: &[u8]) {
 /// `:288`): where the stack has passed `zend.max_allowed_stack_size`, the
 /// row is `nesting level too deep` after its indent, with no newline, in
 /// place of its key and value, and the walk goes on to the next row.
+/// The thread's floor, which php leaves unguarded, is asked at the same
+/// place after the limit, so where the two stand together (under detect)
+/// the row is php's text whatever depth its frames reach, and the row's
+/// value is dumped with no floor asked again ([`dumped`]).
 ///
 /// `var_dump_stack_limit.phpt`'s shape under the small-stack regime,
 /// the dump handed to an `ob_start` callback that answers only whether
@@ -214,12 +218,14 @@ fn indented(req: &mut Request, width: usize, rest: &[u8]) {
 /// guarded
 /// guarded
 /// ```
-fn too_deep(req: &mut Request, level: usize) -> bool {
+fn too_deep(req: &mut Request, level: usize) -> Result<bool, Thrown> {
     if !req.limits().stack_overflowed() {
-        return false;
+        // Unguarded in php, held to the thread's floor here.
+        call_stack_end(req)?;
+        return Ok(false);
     }
     indented(req, level + 1, b"nesting level too deep");
-    true
+    Ok(true)
 }
 
 /// `zval_object_property_dump`'s value: the row's value dumped, its
@@ -227,7 +233,7 @@ fn too_deep(req: &mut Request, level: usize) -> bool {
 /// written `uninitialized(T)` at the indent the value would take.
 fn dump_row(req: &mut Request, row: &Row, level: usize) -> Result<(), Thrown> {
     match row.uninitialized() {
-        None => dump(req, row.value(), level),
+        None => dumped(req, row.value(), level),
         Some(ty) => {
             indented(req, level - 1, format!("uninitialized({ty})\n").as_bytes());
             Ok(())
@@ -305,6 +311,12 @@ fn dump_row(req: &mut Request, row: &Row, level: usize) -> Result<(), Thrown> {
 fn dump(req: &mut Request, value: &Value, level: usize) -> Result<(), Thrown> {
     // Unguarded in php, held to the thread's floor here.
     call_stack_end(req)?;
+    dumped(req, value, level)
+}
+
+/// [`dump`] past its floor's test, for a row's value, whose row asked it
+/// ([`too_deep`]).
+fn dumped(req: &mut Request, value: &Value, level: usize) -> Result<(), Thrown> {
     indented(req, level - 1, b"");
     match value.as_ref() {
         ValueRef::Bool(false) => req.response_mut().write(b"bool(false)\n"),
@@ -385,7 +397,7 @@ fn dump_array(
     // `GC_DTOR_NO_REF(myht)` (`Z/ext/standard/var.c:347`, `:363`).
     let held = Hold::Owner(GiveUp::Dtor);
     let walked = walk::foreach_guarded(req, array, held, |req, row| -> walk::Step {
-        if too_deep(req, level) {
+        if too_deep(req, level)? {
             return Ok(ControlFlow::Continue(()));
         }
         match row.key() {
@@ -396,7 +408,7 @@ fn dump_array(
                 req.response_mut().write(b"\"]=>\n");
             }
         }
-        dump(req, row.value(), level + 2)?;
+        dumped(req, row.value(), level + 2)?;
         Ok(ControlFlow::Continue(()))
     })?;
     match walked {
@@ -456,7 +468,7 @@ fn dump_object(
     );
     req.response_mut().write(&header);
     let dumped = walk::properties(req, &held, Unwritten::Shown, |req, row| -> walk::Step {
-        if too_deep(req, level) {
+        if too_deep(req, level)? {
             return Ok(ControlFlow::Continue(()));
         }
         // An element a class shows among its properties is an integer

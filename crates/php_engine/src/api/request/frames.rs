@@ -891,19 +891,25 @@ impl Request {
         cvs: u32,
         operand: impl FnOnce(&[Zval]) -> Option<(Zval, Option<usize>)>,
     ) -> Option<Stepped> {
-        let (top, laid) = self.vm.stack.top()?;
+        // The frame and its caller below it lent together, one look at
+        // the frame table for both, as php's `zend_leave_helper` reaches
+        // `execute_data` and `EX(prev_execute_data)` off two registers.
+        let (top, laid, below) = self.vm.stack.top_over_mut()?;
         if top != frame {
             return None;
         }
         let header = laid.header();
-        let receiver = header.receiver();
-        let held = receiver.is_some() || header.closure.is_some();
+        // Each test evaluated, none short of the others, so the words are
+        // read side by side and folded, as php's leave tests one word of
+        // `ZEND_CALL_INFO`: a branch apiece measured 26 instructions.
+        let held = header.this().is_some() | header.closure.is_some();
         let plain = header.function.is_some()
-            && header.annex.is_none()
-            && !header.info.call()
-            && !header.info.extra_args()
-            && (!held || held_kept(receiver, header.closure));
-        let caller = header.caller().frame().filter(|_| plain)?;
+            & header.annex.is_none()
+            & (header.info.bits() & exec::CallInfo::LEAVES_BY_KERNEL == 0);
+        if !plain || held && !held_kept(header.receiver(), header.closure) {
+            return None;
+        }
+        let caller = header.caller().frame()?;
         let returns_to = header.returns_to();
         let slots = laid.slots();
         let (returned, moved) = operand(slots)?;
@@ -934,7 +940,7 @@ impl Request {
             };
             return self.leave_owning(leave, returned);
         }
-        let (_, into) = self.vm.stack.top_and_frame_mut(caller)?;
+        let into = below.get_mut(caller.0 as usize)?;
         match returns_to {
             Some(slot) => {
                 let slot = into.slots_mut().get_mut(slot as usize)?;
@@ -947,7 +953,7 @@ impl Request {
             None => {}
         }
         let header = into.header_mut();
-        header.opline = header.opline.saturating_add(1);
+        header.opline = header.opline.wrapping_add(1);
         self.vm.stack.pop_frame(&mut self.heap);
         Some(Stepped::Popped(caller))
     }
@@ -1093,6 +1099,17 @@ impl Request {
     #[inline]
     pub(crate) fn cached(&self, frame: FrameRef, slot: CacheSlot) -> exec::Cached {
         self.vm.cached(&self.map, frame, slot)
+    }
+
+    /// [`Request::cached`] read in place, none for a slot that reads
+    /// `Unprimed` for want of one ([`exec::Vm::cached_in_place`]).
+    #[inline]
+    pub(crate) fn cached_in_place(
+        &self,
+        frame: FrameRef,
+        slot: CacheSlot,
+    ) -> Option<&exec::Cached> {
+        self.vm.cached_in_place(&self.map, frame, slot)
     }
 
     /// `CACHE_PTR(num, ptr)`: `value` into the runtime cache of the op
@@ -1701,6 +1718,31 @@ impl Request {
         } = self;
         let (top, from) = vm.stack.top_and_frame_mut(caller)?;
         let header = top.header();
+        if header.info.laid_entry() {
+            // The `INIT` laid the activation's words: the frame is made
+            // with no row read, as php's `DO_UCALL` reads the op array it
+            // holds.
+            #[cfg(debug_assertions)]
+            debug_assert!(
+                laid_entry_holds(
+                    header,
+                    top.len(),
+                    user_in(user_functions, arena, header.function?),
+                    map
+                ),
+                "a call whose INIT laid its entry no longer holds what the activation would write"
+            );
+            let laid = top.header_mut();
+            laid.info.set_serving();
+            laid.info.set_return_used(returns_to.is_some());
+            laid.activate_laid();
+            laid.set_returns_to(returns_to);
+            laid.set_caller(exec::Caller::Opline(caller));
+            // The caller's opline last, so the callee's words are written
+            // through the one load of its room.
+            from.header_mut().opline = at;
+            return Some(self.entered_top());
+        }
         if !header.info.building() {
             return None;
         }
@@ -1717,14 +1759,20 @@ impl Request {
             return None;
         }
         entered_words((top, from), (caller, at), returns_to, shape, cache);
-        // The callee's place, the top's, which the lend found standing
-        // above its caller, so the length is at least two. A place past
-        // `u32::MAX` would be 2^32 frames of at least eighty bytes each,
-        // which the memory limit refuses long before.
+        Some(self.entered_top())
+    }
+
+    /// The call [`Request::enter_call`] made a frame of, the top, its
+    /// observer begin raised. The lend found it standing above its
+    /// caller, so the length is at least two; a place past `u32::MAX`
+    /// would be 2^32 frames of at least eighty bytes each, which the
+    /// memory limit refuses long before.
+    #[inline(always)] // in `enter_call`'s two arms
+    fn entered_top(&mut self) -> FrameRef {
         #[allow(clippy::cast_possible_truncation)] // 2^32 frames is no stack a request holds
         let call = FrameRef(self.vm.stack.len().wrapping_sub(1) as u32);
         crate::observer::call(self, call);
-        Some(call)
+        call
     }
 
     /// [`Request::enter_call`] over a call whose `INIT` found its entry
@@ -2102,6 +2150,22 @@ impl Request {
             .stack
             .frame_mut(frame)
             .map_or(&mut [], crate::exec::HeapFrame::slots_mut)
+    }
+
+    /// Where the loop stands in `frame` and the frame's slots, from one
+    /// look at the frame table: what the loop takes up on an edge into
+    /// another frame, a call it entered or a return to its caller, where
+    /// [`Vm::opline`](crate::exec::Vm::opline) and
+    /// [`Request::slots_mut`] would each look the frame up again. A
+    /// frame that does not stand is at 0 with no slots, as each of those
+    /// answers alone.
+    #[inline(always)] // the loop's edges into a frame
+    #[cfg(not(dispatch = "tailcall"))]
+    pub(crate) fn standing(&mut self, frame: FrameRef) -> (u32, &mut [Zval]) {
+        match self.vm.stack.frame_mut(frame) {
+            Some(f) => (f.header().opline, f.slots_mut()),
+            None => (0, &mut []),
+        }
     }
 
     /// The value out of a slot, the slot left `UNDEF`: what the slot
@@ -2612,6 +2676,30 @@ pub(crate) enum CodeFrom {
     /// `ZEND_CALL_NESTED_CODE`: nested in the frame, its value read into
     /// the temporary where one is.
     Nested(FrameRef, Option<(FrameRef, u32)>),
+}
+
+/// The sensor of [`exec::CallInfo::LAID_ENTRY`]: what the activation
+/// of the call `header` begins, in a room of `len` slots, would read off
+/// its function's row `user` and the request's caches `map`, held to what
+/// the `INIT` laid. A site that moves a call's count or callee and keeps
+/// the bit is caught here in a build with debug assertions.
+#[cfg(debug_assertions)]
+fn laid_entry_holds(
+    header: &exec::Header,
+    len: usize,
+    user: Option<&crate::api::request::UserFunction>,
+    map: &exec::RuntimeCaches,
+) -> bool {
+    let Some(shape) = user.map(|user| user.shape) else {
+        return false;
+    };
+    let opline = exec::skipped_recv(header.num_args, shape.parameters, shape.typed, shape.entry);
+    shape.sent.plain_entry()
+        && header.num_args <= shape.parameters
+        && len >= shape.slots as usize
+        && map.laid(shape.cache)
+        && header.runtime_cache() == shape.cache
+        && header.opline == opline.unwrap_or(0)
 }
 
 /// The words `i_init_func_execute_data` writes ([`Request::enter_call`]):

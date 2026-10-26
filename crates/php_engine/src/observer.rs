@@ -522,7 +522,7 @@ pub struct Removed<H> {
 /// an inline path that serves no home asks before it stands in for one.
 #[inline(always)] // as `call`
 pub(crate) fn observing(req: &Request) -> bool {
-    req.shared.observers != 0
+    req.observers() != 0
 }
 
 /// Whether a frameless call of `function` is served as a full call, a
@@ -541,7 +541,7 @@ pub(crate) fn frameless_observed(req: &Request, function: Function) -> bool {
 /// one compare while no observer is declared.
 #[inline(always)] // design §4.3 seam 9: the home pays the load and the branch, never a call
 pub(crate) fn call(req: &mut Request, frame: FrameRef) {
-    if req.shared.observers != 0 {
+    if req.observers() != 0 {
         begin(req, Observable::Code(frame));
     }
 }
@@ -551,7 +551,7 @@ pub(crate) fn call(req: &mut Request, frame: FrameRef) {
 /// observer is declared.
 #[inline(always)] // as `call`
 pub(crate) fn returned(req: &mut Request, frame: FrameRef, value: Option<&Value>) {
-    if req.shared.observers != 0 {
+    if req.observers() != 0 {
         end(req, Observable::Code(frame), value);
     }
 }
@@ -564,7 +564,7 @@ pub(crate) fn returned(req: &mut Request, frame: FrameRef, value: Option<&Value>
 /// or where nothing observes the call's end.
 #[inline(always)] // as `call`
 pub(crate) fn native_call(req: &mut Request, function: Function) -> Option<NativeCall> {
-    if req.shared.observers != 0 {
+    if req.observers() != 0 {
         begin_native(req, function)
     } else {
         None
@@ -617,7 +617,7 @@ fn begin(req: &mut Request, at: Observable) {
 /// observer is declared.
 #[inline(always)] // as `call`
 pub(crate) fn generator_resumed(req: &mut Request, frame: FrameRef) {
-    if req.shared.observers != 0 {
+    if req.observers() != 0 {
         begin_resumed(req, frame);
     }
 }
@@ -637,7 +637,7 @@ fn begin_resumed(req: &mut Request, frame: FrameRef) {
 /// [`call`] while no observer is declared.
 #[inline(always)] // as `call`
 pub(crate) fn generator_yielded(req: &mut Request, frame: FrameRef, generator: PhpObject) {
-    if req.shared.observers != 0 {
+    if req.observers() != 0 {
         end_yielded(req, frame, generator);
     }
 }
@@ -794,7 +794,7 @@ fn call_end_handlers(req: &mut Request, at: Handed<'_>, value: Option<&Value>) {
 #[inline]
 pub(crate) fn loop_left(req: &mut Request, outcome: &Result<(), Fatal>) {
     if let Err(fatal) = outcome
-        && req.shared.observers != 0
+        && req.observers() != 0
     {
         render_where_frames_stand(req, fatal);
     }
@@ -821,7 +821,7 @@ fn render_where_frames_stand(req: &mut Request, fatal: &Fatal) {
 /// step, leaves them open for good; a fiber's ends them at the switch
 /// out of it.
 pub(crate) fn bailed_out(req: &mut Request) {
-    if req.shared.observers != 0 {
+    if req.observers() != 0 {
         req.keep_observed();
     }
 }
@@ -835,7 +835,7 @@ pub(crate) fn bailed_out(req: &mut Request) {
 /// (`Z/Zend/zend_observer.c:415`, [`fiber_switched`]). A frame the fatal
 /// left that no longer stands is ended as it was kept ([`Left`]).
 pub(crate) fn end_all(req: &mut Request) {
-    if req.shared.observers == 0 {
+    if req.observers() == 0 {
         return;
     }
     for opened in req.take_observed() {

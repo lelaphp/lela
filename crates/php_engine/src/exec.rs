@@ -650,8 +650,36 @@ impl Header {
     pub(crate) fn activate(&mut self, run_time_cache: CacheAt, opline: u32, extra_args: bool) {
         self.run_time_cache = run_time_cache;
         self.opline = opline;
-        self.info.set(CallInfo::CALL | CallInfo::BUILDING, false);
+        self.info.set(
+            CallInfo::CALL | CallInfo::BUILDING | CallInfo::LAID_ENTRY,
+            false,
+        );
         self.info.set(CallInfo::EXTRA_ARGS, extra_args);
+    }
+
+    /// The header an `INIT_*` lays for a call to the user function its
+    /// slot keeps, `count` arguments passed: [`Header::call`] with the
+    /// record and the flags the slot made, and, where the flags say the
+    /// entry is laid ([`CallInfo::LAID_ENTRY`]), the runtime cache and
+    /// the opline the activation would write.
+    #[inline]
+    pub(crate) fn primed(call: PrimedCall, count: u32) -> Header {
+        let mut header = Header::call(call.function, count);
+        header.callee = call.callee;
+        header.info.join(call.sent);
+        header.run_time_cache = call.cache;
+        header.opline = call.opline;
+        header
+    }
+
+    /// A call whose `INIT` laid its entry ([`CallInfo::laid_entry`]) made
+    /// the frame it laid: its runtime cache and opline stand as written.
+    #[inline]
+    pub(crate) fn activate_laid(&mut self) {
+        self.info.set(
+            CallInfo::CALL | CallInfo::BUILDING | CallInfo::LAID_ENTRY,
+            false,
+        );
     }
 
     /// `EX(This)` as a receiver, with whether the frame owns it.
@@ -835,6 +863,25 @@ impl CallInfo {
     /// (`ZEND_ACC_HEAP_RT_CACHE`), which its activation reads in place
     /// of its function's: a [`CallInfo::PLAIN_ENTRY`] it overrides.
     const OWN_CACHE: u32 = 1 << 24;
+    /// The `INIT` wrote what the activation would read off the function,
+    /// as php's `i_init_func_execute_data` reads it off the op array it
+    /// holds: the call is a plain entry ([`CallInfo::PLAIN_ENTRY`]) passing
+    /// no more arguments than the function declares, into a room no
+    /// smaller than its frame, whose runtime cache the request has laid
+    /// down, and the header already holds that cache and the opline the
+    /// prologue's skip stands it at ([`PrimedCall`]). Set by
+    /// `INIT_FCALL`'s inline path alone (`handlers::inline_init_fcall`),
+    /// never by compiled code's pushes in place, whose images are made
+    /// without it. Cleared by every site that moves the count or the
+    /// callee of a call being built: a named argument placed past the
+    /// count (`handlers::reserve_named`), the next argument an unpack
+    /// reserves past it (`handlers::reserve_next`), and a call served
+    /// as another function over new arguments
+    /// (`Request::serve_instead`); and by the activation
+    /// ([`Header::activate`], [`Header::activate_laid`]). A build with
+    /// debug assertions holds each laid entry to the function's row as
+    /// `enter_call` takes it.
+    const LAID_ENTRY: u32 = 1 << 25;
 
     /// The flags as another process read them ([`crate::readable`]).
     pub(crate) fn of(bits: u32) -> CallInfo {
@@ -893,11 +940,6 @@ impl CallInfo {
 
     pub(crate) fn set_at_exception_op(&mut self, on: bool) {
         self.set(Self::AT_EXCEPTION_OP, on);
-    }
-
-    /// The frame holds arguments past its declared parameters.
-    pub(crate) fn extra_args(self) -> bool {
-        self.has(Self::EXTRA_ARGS)
     }
 
     /// The record is a call, being built or a native's being served.
@@ -979,6 +1021,15 @@ impl CallInfo {
         at < Self::QUICK && self.0 & 1 << (Self::BY_VALUE_AT + at) != 0
     }
 
+    /// [`CallInfo::sent`] with [`CallInfo::LAID_ENTRY`] where `laid`.
+    pub(crate) fn with_laid_entry(self, laid: bool) -> CallInfo {
+        CallInfo(if laid {
+            self.0 | Self::LAID_ENTRY
+        } else {
+            self.0
+        })
+    }
+
     /// [`CallInfo::sent`] with [`CallInfo::PLAIN_ENTRY`] where `plain`.
     pub(crate) fn with_plain_entry(self, plain: bool) -> CallInfo {
         CallInfo(if plain {
@@ -994,6 +1045,20 @@ impl CallInfo {
     #[inline]
     pub(crate) fn plain_entry(self) -> bool {
         self.0 & (Self::PLAIN_ENTRY | Self::OWN_CACHE) == Self::PLAIN_ENTRY
+    }
+
+    /// The `INIT` laid the activation's words ([`CallInfo::LAID_ENTRY`])
+    /// of a call still being built and reading its function's own cache.
+    #[inline]
+    pub(crate) fn laid_entry(self) -> bool {
+        self.0 & (Self::LAID_ENTRY | Self::OWN_CACHE | Self::BUILDING)
+            == Self::LAID_ENTRY | Self::BUILDING
+    }
+
+    /// The words [`CallInfo::LAID_ENTRY`] says were laid no longer hold:
+    /// the count or the callee moved.
+    pub(crate) fn unlay_entry(&mut self) {
+        self.set(Self::LAID_ENTRY, false);
     }
 
     pub(crate) fn set_own_cache(&mut self, on: bool) {
@@ -1415,11 +1480,19 @@ impl RuntimeCache {
     /// allocation.
     #[inline]
     pub(crate) fn get(&self, slot: CacheSlot) -> Cached {
+        self.slot(slot).copied().unwrap_or_default()
+    }
+
+    /// The slot at `slot` as it stands, read in place: what
+    /// [`RuntimeCache::get`] copies out, none where it reads `Unprimed`
+    /// for want of a slot. A handler that reads a few fields of a wide
+    /// variant reads them here, off the slot, where the copy would make
+    /// it whole on the stack first.
+    #[inline]
+    pub(crate) fn slot(&self, slot: CacheSlot) -> Option<&Cached> {
         self.slots
             .as_ref()
             .and_then(|slots| slots.get((slot.0 / SLOT_BYTES) as usize))
-            .copied()
-            .unwrap_or_default()
     }
 
     /// Where the slot at `slot` stands, which compiled code reads in
@@ -1428,8 +1501,7 @@ impl RuntimeCache {
     /// laid again or given back, which a function's never is while the
     /// request runs.
     pub(crate) fn place_of(&self, slot: CacheSlot) -> Option<std::ptr::NonNull<Cached>> {
-        let cell = self.slots.as_ref()?.get((slot.0 / SLOT_BYTES) as usize)?;
-        Some(std::ptr::NonNull::from(cell))
+        self.slot(slot).map(std::ptr::NonNull::from)
     }
 
     /// `CACHE_PTR(num, ptr)`: `value` into the slot at `slot`, where
@@ -1658,7 +1730,8 @@ pub(crate) enum Cached {
     /// is not deprecated (`zend_quick_get_constant`'s `CACHE_PTR`).
     Constant(crate::api::request::ConstantAt),
     /// The callee an `INIT_FCALL`, `INIT_FCALL_BY_NAME` or
-    /// `INIT_NS_FCALL_BY_NAME` resolved on its first pass.
+    /// `INIT_NS_FCALL_BY_NAME` resolved on its first pass, where it is
+    /// no user function.
     Function(Function),
     /// The class a `CATCH`, `NEW`, `INSTANCEOF` or
     /// `FETCH_CLASS_CONSTANT` resolved off its constant pair on its
@@ -1739,12 +1812,44 @@ pub(crate) enum Cached {
     /// fixes the scope, and for a frame of no function, an included or
     /// evaluated file's, only where its scope is `scope` too.
     Property(PropertyPlace) = PROPERTY,
+    /// The user function one of the same three resolved on its first
+    /// pass, with what each pass after pushes its call with.
+    Call(PrimedCall),
     /// `ZEND_JMP_FL_MISS`: the table has the name in the namespace, so
     /// the jump is not taken and the call by name after it runs.
     Miss,
     /// `ZEND_JMP_FL_HIT`: the table has not the name in the namespace,
     /// so the jump lands on the frameless call over the global one.
     Hit,
+}
+
+/// A call to a user function as an `INIT_*`'s slot keeps it, read off
+/// the function's row once where the slot is primed: php's `CACHED_PTR`
+/// gives `ZEND_INIT_FCALL` the `zend_function *` and its
+/// `zend_vm_stack_push_call_frame` reads what it pushes off that, where
+/// the engine's row stands behind a table and the room is a sum, so the
+/// slot holds them made. The room is the opline's own, the callee's
+/// frame and the arguments past its parameters the opline passes
+/// ([`crate::api::request::FrameShape::room`]); the record is the one a
+/// frame serving the function names ([`crate::readable::CalleeAt`]); the
+/// flags are what the push joins into the call's
+/// ([`crate::api::request::FrameShape::sent`]). A function's row never
+/// changes once declared, so the slot answers every pass of the request.
+///
+/// Where the call enters plainly, the flags say its entry is laid
+/// ([`CallInfo::LAID_ENTRY`]) and the slot keeps the runtime cache and
+/// the opline its activation would write, so `DO_UCALL` reads no row. The
+/// slot is made after the first pass's push, which lays the callee's
+/// runtime cache down where php lays it (`init_func_run_time_cache`), so
+/// every slot a plain entry primes keeps it laid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PrimedCall {
+    pub(crate) function: Function,
+    pub(crate) room: u32,
+    pub(crate) callee: crate::readable::CalleeAt,
+    pub(crate) sent: CallInfo,
+    pub(crate) cache: CacheAt,
+    pub(crate) opline: u32,
 }
 
 /// [`Cached::Unprimed`]'s tag, what a slot compiled code reads holds
@@ -1827,6 +1932,17 @@ const _: () = {
 };
 
 impl Cached {
+    /// The callee an `INIT_*` primed the slot with, of either kind.
+    #[inline]
+    pub(crate) fn function(self) -> Option<Function> {
+        match self {
+            Cached::Function(function) | Cached::Call(PrimedCall { function, .. }) => {
+                Some(function)
+            }
+            _ => None,
+        }
+    }
+
     /// The frame a slot whose answer the access rule decides was primed
     /// from; none for a slot that answers every scope alike.
     #[inline]
@@ -1838,6 +1954,7 @@ impl Cached {
             Cached::Unprimed
             | Cached::Constant(_)
             | Cached::Function(_)
+            | Cached::Call(_)
             | Cached::Class(_)
             | Cached::Property { .. }
             | Cached::Miss
@@ -2435,9 +2552,20 @@ impl Vm {
     /// (`EX(run_time_cache)`, [`RuntimeCache::get`]).
     #[inline]
     pub(crate) fn cached(&self, map: &RuntimeCaches, frame: FrameRef, slot: CacheSlot) -> Cached {
-        self.at(frame)
-            .and_then(|header| map.get(header.runtime_cache()))
-            .map_or(Cached::Unprimed, |cache| cache.get(slot))
+        self.cached_in_place(map, frame, slot)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// [`Vm::cached`] read in place ([`RuntimeCache::slot`]).
+    #[inline]
+    pub(crate) fn cached_in_place<'m>(
+        &self,
+        map: &'m RuntimeCaches,
+        frame: FrameRef,
+        slot: CacheSlot,
+    ) -> Option<&'m Cached> {
+        map.get(self.at(frame)?.runtime_cache())?.slot(slot)
     }
 
     /// `CACHE_PTR(num, ptr)`: `value` into the runtime cache of the op
