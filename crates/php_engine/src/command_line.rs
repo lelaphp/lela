@@ -12,8 +12,6 @@
 //! served where `do_cli` serves it, each block of its code through
 //! [`Code::eval_stringl`].
 
-use std::sync::Arc;
-
 use php_compile::SourceKind;
 
 use crate::api::raising::{Level, Thrown};
@@ -80,11 +78,7 @@ impl Engine {
             }
             CommandLine::Shell => {
                 if let Some((by, shell)) = self.shared.supplied.shell.entry() {
-                    crate::engine::auto_file(
-                        &mut req,
-                        b"auto_prepend_file",
-                        self.shared.loops.entry,
-                    );
+                    crate::engine::auto_file(&mut req, b"auto_prepend_file");
                     // `readline_shell` destroys the file's
                     // `zend_file_handle` once it has run, before the
                     // shell reads a line.
@@ -192,7 +186,6 @@ impl Code<&mut Request> {
 /// whether the request goes on, which a fatal, or a compile error other
 /// than a parse error, ends.
 fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) -> bool {
-    let shared = Arc::clone(&req.shared);
     let unit = match req.host_string(|req| {
         req.compile_string(code, name, php_compile::syntax::Position::AfterOpenTag)
     }) {
@@ -218,7 +211,10 @@ fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) ->
             return false;
         }
     };
-    let served = req.serve_host_string(|req| (shared.loops.entry)(req, frame));
+    let served = req.serve_host_string(|req| {
+        let entry = req.loops().entry;
+        entry(req, frame)
+    });
     // What a fatal left standing above the main frame, as
     // `serve_unit` pops it.
     req.leave_code(standing, frame);

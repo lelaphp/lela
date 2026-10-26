@@ -24,6 +24,7 @@ use php_ext_pdo_sqlite::ffi::{
 use crate::callbacks::serving;
 use crate::result::{self, Origin};
 use crate::stmt::{self, Step};
+use crate::throwables::Throwables;
 
 /// A statement's place in its connection's list, php's `free_list`
 /// entry: unique for the life of the `SQLite3` object, so a statement
@@ -120,7 +121,11 @@ impl Open {
 pub(crate) fn not_ready(req: &mut Request, class: &str) -> Thrown {
     let text =
         format!("The {class} object has not been correctly initialised or is already closed");
-    throw_error(req, "Error", &text)
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    throw_error(req, ce.error, &text)
 }
 
 /// `php_sqlite3_error` with no throwable pending: a `SQLite3Exception`
@@ -158,7 +163,10 @@ pub(crate) fn fail(
         docref(req, Level::Warning, message);
         return Ok(());
     }
-    let thrown = printed(req, message, |req| throw(req, "SQLite3Exception", message));
+    let ce = Throwables::of(req)?;
+    let thrown = printed(req, message, |req| {
+        throw(req, ce.sqlite3_exception, message)
+    });
     Err(with_code(req, thrown, code))
 }
 
@@ -190,9 +198,13 @@ pub(crate) fn fail_after(
     message: &str,
 ) -> Thrown {
     if exceptions {
+        let ce = match Throwables::of(req) {
+            Ok(ce) => ce,
+            Err(fatal) => return fatal,
+        };
         let thrown = match Emalloc::printf_buffer(req, message.len()) {
             Ok(buffer) => {
-                let thrown = throw_chained(req, pending, "SQLite3Exception", message);
+                let thrown = throw_chained(req, pending, ce.sqlite3_exception, message);
                 buffer.free(req);
                 thrown
             }
@@ -465,8 +477,9 @@ impl ObjectHandlers for Handlers {
 
 /// `SQLite3::open`'s body, `__construct`'s too.
 fn open(req: &mut Request, object: PhpObject, filename: &[u8], flags: i64) -> Result<(), Thrown> {
+    let ce = Throwables::of(req)?;
     if matches!(conn(req, object)?.link, Link::Open(_)) {
-        return Err(throw(req, "Exception", "Already initialised DB Object"));
+        return Err(throw(req, ce.exception, "Already initialised DB Object"));
     }
     let path = if filename.is_empty() || filename == b":memory:" {
         filename.to_vec()
@@ -480,7 +493,7 @@ fn open(req: &mut Request, object: PhpObject, filename: &[u8], flags: i64) -> Re
             .environment_mut()
             .virtual_file_ex(&cwd, filename, Resolve::FilePath)
         else {
-            return Err(throw(req, "Exception", "Unable to expand filepath"));
+            return Err(throw(req, ce.exception, "Unable to expand filepath"));
         };
         if req
             .environment_mut()
@@ -490,7 +503,7 @@ fn open(req: &mut Request, object: PhpObject, filename: &[u8], flags: i64) -> Re
             let shown = text(&full);
             return Err(throw_exception_ex(
                 req,
-                "Exception",
+                ce.exception,
                 &format!("open_basedir prohibits opening {shown}"),
             ));
         }
@@ -505,7 +518,7 @@ fn open(req: &mut Request, object: PhpObject, filename: &[u8], flags: i64) -> Re
         Err((_, message)) => {
             conn(req, object)?.link = Link::Closed;
             let message = format!("Unable to open database: {}", text(&message));
-            return Err(throw_exception_ex(req, "Exception", &message));
+            return Err(throw_exception_ex(req, ce.exception, &message));
         }
     };
     if req
@@ -719,7 +732,8 @@ fn load_extension(
         return Ok(false);
     }
     if name.is_empty() {
-        return Err(argument_error(req, "ValueError", 1, "must not be empty"));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 1, "must not be empty"));
     }
     let mut lib = dir.clone();
     if !dir.ends_with(b"/") {
@@ -973,7 +987,8 @@ impl SQLite3 {
         };
         if open.db().in_callback(req) {
             let text = "Cannot close SQLite3 database while inside a callback";
-            return Err(throw_error(req, "Error", text));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, text));
         }
         let conn = self::conn(req, object)?;
         let Link::Open(open) = std::mem::replace(&mut conn.link, Link::Closed) else {

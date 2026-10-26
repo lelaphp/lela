@@ -269,10 +269,11 @@ impl IntlBreakIterator {
 
     #[php(private)]
     fn __construct(req: &mut Request, this: This<Self>) -> Answer<()> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let _ = this;
         Err(throw(
             req,
-            "Exception",
+            ce.exception,
             "An object of this type cannot be created with the new operator",
         ))
     }
@@ -469,6 +470,7 @@ impl IntlRuleBasedBreakIterator {
         rules: PhpString,
         #[php(default = false)] compiled: bool,
     ) -> Answer<()> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let object = this.object();
         if object
             .native::<BreakObject>(req)
@@ -476,7 +478,7 @@ impl IntlRuleBasedBreakIterator {
         {
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "IntlRuleBasedBreakIterator object is already constructed",
             ));
         }
@@ -488,7 +490,7 @@ impl IntlRuleBasedBreakIterator {
             let Ok(text) = to_utf16(rules.as_bytes()) else {
                 return Err(throw(
                     req,
-                    "IntlException",
+                    ce.intl_exception,
                     &format!("{prefix}rules were not a valid UTF-8 string"),
                 ));
             };
@@ -510,7 +512,7 @@ impl IntlRuleBasedBreakIterator {
                 }
                 Ok(())
             }
-            Err(message) => Err(throw(req, "IntlException", &message)),
+            Err(message) => Err(throw(req, ce.intl_exception, &message)),
         }
     }
 
@@ -660,6 +662,7 @@ fn made_object(req: &mut Request, biter: Breaker) -> Answer<Owner<PhpObject>> {
 /// `BREAKITER_METHOD_FETCH_OBJECT`, then `f` over the iterator: the
 /// object's error reset, php's `Error` where it holds none.
 fn with<T>(req: &mut Request, object: PhpObject, f: impl FnOnce(&mut Breaker) -> T) -> Answer<T> {
+    let ce = crate::throwables::Throwables::of(req)?;
     error::reset_object::<BreakObject>(req, object);
     match object
         .native_mut::<BreakObject>(req)
@@ -668,7 +671,7 @@ fn with<T>(req: &mut Request, object: PhpObject, f: impl FnOnce(&mut Breaker) ->
         Some(biter) => Ok(f(biter)),
         None => Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Found unconstructed BreakIterator",
         )),
     }
@@ -681,6 +684,7 @@ fn with_taken<T>(
     object: PhpObject,
     f: impl FnOnce(&mut Request, &mut Breaker) -> T,
 ) -> Answer<T> {
+    let ce = crate::throwables::Throwables::of(req)?;
     error::reset_object::<BreakObject>(req, object);
     let taken = object
         .native_mut::<BreakObject>(req)
@@ -688,7 +692,7 @@ fn with_taken<T>(
     let Some(mut biter) = taken else {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Found unconstructed BreakIterator",
         ));
     };
@@ -975,10 +979,11 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         by_ref: bool,
     ) -> Answer<Option<Box<dyn ClassIterator>>> {
+        let ce = crate::throwables::Throwables::of(req)?;
         if by_ref {
             return Err(throw(
                 req,
-                "Exception",
+                ce.exception,
                 "Iteration by reference is not supported",
             ));
         }
@@ -988,7 +993,7 @@ impl ObjectHandlers for Handlers {
         {
             return Err(throw(
                 req,
-                "Exception",
+                ce.exception,
                 "The BreakIterator is not properly constructed",
             ));
         }
@@ -1004,18 +1009,19 @@ impl ObjectHandlers for Handlers {
 /// `BreakIterator_clone_obj`: a clone of ICU's iterator over the same
 /// text.
 fn clone_break(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject>> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let copy = match object.native::<BreakObject>(req) {
         Some(BreakObject { biter: Some(b), .. }) => b.try_clone(req),
         _ => {
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Cannot clone uninitialized BreakIterator",
             ));
         }
     };
     let Some(copy) = copy else {
-        return Err(throw_error(req, "Error", "Failed to clone BreakIterator"));
+        return Err(throw_error(req, ce.error, "Failed to clone BreakIterator"));
     };
     let payload = BreakObject {
         error: IntlError::default(),

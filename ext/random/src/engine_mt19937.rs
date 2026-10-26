@@ -11,6 +11,7 @@ use php_ext::raising::{Thrown, arg_value_error, deprecated, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpString};
 
+use crate::throwables::Throwables;
 use crate::{Algo, Failure, Field, Generated, Serial, constants, csprng};
 
 /// `php_random_mt19937_seed_default`'s seed: four bytes of the host's
@@ -366,7 +367,8 @@ impl Mt19937 {
     fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
         let Some(fields) = crate::with_serial(req, this, |s| s.serialize()) else {
-            return Err(throw(req, "Exception", "Engine serialize failed"));
+            let ce = Throwables::of(req)?;
+            return Err(throw(req, ce.exception, "Engine serialize failed"));
         };
         let mut out = PhpArray::new(req)?;
         let members = crate::members(req, this)?;

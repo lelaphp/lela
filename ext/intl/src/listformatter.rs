@@ -43,19 +43,20 @@ fn construct(
     kind: i64,
     width: i64,
 ) -> Result<(), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     if object
         .native::<ListFormatterObject>(req)
         .is_some_and(|o| o.format.is_some())
     {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "IntlListFormatter object is already constructed",
         ));
     }
     if locale.len() > MAX_LOCALE_LEN {
         let tail = format!("must be less than or equal to {MAX_LOCALE_LEN} characters");
-        return Err(argument_error(req, "ValueError", 1, &tail));
+        return Err(argument_error(req, ce.value_error, 1, &tail));
     }
     let locale = if locale.is_empty() {
         crate::default_locale(req)
@@ -68,15 +69,15 @@ fn construct(
             "\"{}\" is invalid",
             String::from_utf8_lossy(c_locale.to_bytes())
         );
-        return Err(argument_error(req, "ValueError", 1, &tail));
+        return Err(argument_error(req, ce.value_error, 1, &tail));
     }
     if !(0..=2).contains(&kind) {
         let tail = "must be one of IntlListFormatter::TYPE_AND, IntlListFormatter::TYPE_OR, or IntlListFormatter::TYPE_UNITS";
-        return Err(argument_error(req, "ValueError", 2, tail));
+        return Err(argument_error(req, ce.value_error, 2, tail));
     }
     if !(0..=2).contains(&width) {
         let tail = "must be one of IntlListFormatter::WIDTH_WIDE, IntlListFormatter::WIDTH_SHORT, or IntlListFormatter::WIDTH_NARROW";
-        return Err(argument_error(req, "ValueError", 3, tail));
+        return Err(argument_error(req, ce.value_error, 3, tail));
     }
     let mut status = Code::ZERO;
     #[allow(clippy::cast_possible_truncation)]
@@ -86,7 +87,7 @@ fn construct(
     }
     if status.is_failure() {
         error::set(req, status, "Constructor failed")?;
-        return Err(throw_error(req, "IntlException", "Constructor failed"));
+        return Err(throw_error(req, ce.intl_exception, "Constructor failed"));
     }
     Ok(())
 }
@@ -98,6 +99,7 @@ fn format(
     object: PhpObject,
     strings: PhpArray,
 ) -> Result<Option<Owner<PhpString>>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     error::errors_reset::<ListFormatterObject>(req, object);
     if strings.is_empty() {
         return PhpString::new(req, b"").map(Some);
@@ -125,7 +127,7 @@ fn format(
     let Some(list) = taken else {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Found unconstructed IntlListFormatter",
         ));
     };

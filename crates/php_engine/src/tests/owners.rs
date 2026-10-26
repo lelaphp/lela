@@ -5,6 +5,7 @@
 //! nowhere, and
 //! an owner returned from a native is the caller's.
 
+use crate::api::values::ClassId;
 use php_macros::php_function;
 
 use crate::api::abi::{Extension, ExtensionBuilder};
@@ -97,7 +98,11 @@ fn as_object(req: &mut Request, value: Value) -> Owner<Value> {
 fn filled_past_a_throw(req: &mut Request, value: Value) -> Result<Owner<PhpArray>, Thrown> {
     PhpArray::filled(req, |req, table| {
         table.append(req, Owner::take(req, value))?;
-        Err(crate::api::raising::throw_error(req, "Error", "thrown"))
+        Err(crate::api::raising::throw_error(
+            req,
+            ClassId::ERROR,
+            "thrown",
+        ))
     })
 }
 
@@ -109,7 +114,11 @@ const THROWN_AT: u32 = line!() + 6;
 #[php_function]
 fn held_past_a_throw(req: &mut Request, value: Value) -> Result<(), Thrown> {
     let _owner = Owner::take(req, value);
-    Err(crate::api::raising::throw_error(req, "Error", "thrown"))
+    Err(crate::api::raising::throw_error(
+        req,
+        ClassId::ERROR,
+        "thrown",
+    ))
 }
 
 /// `s($c)`: a string of the request's, counted, which the program builds.

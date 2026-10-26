@@ -34,6 +34,7 @@ mod fetch;
 mod parser;
 mod row;
 mod stmt;
+mod throwables;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, Untyped};
 use php_ext::attr::{php_class, php_function};
@@ -75,7 +76,12 @@ pub fn extension() -> Extension {
         .class::<PDORow>()
         .info(pdo_info)
         .request_state::<dbh::Persistent>()
-        .engine_state(|_| Ok(dbh::Pooled(php_ext::abi::Pool::new(dbh::POOLED))))
+        .engine_state(|start| {
+            Ok(dbh::Pooled {
+                pool: php_ext::abi::Pool::new(dbh::POOLED),
+                throwables: throwables::Throwables::start(start)?,
+            })
+        })
         .post_deactivate(dbh::post_deactivate)
         .engine_end(dbh::engine_end)
         .build("PDO")

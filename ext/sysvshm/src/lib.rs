@@ -26,8 +26,11 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod ffi;
+mod throwables;
 
-use php_ext::abi::{Extension, ExtensionBuilder, Instance, OrFalse, Refusals, Start, True};
+use php_ext::abi::{
+    Extension, ExtensionBuilder, Instance, OrFalse, Refusal, Refusals, Start, True,
+};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
@@ -36,6 +39,7 @@ use php_ext::values::{Owner, Value};
 use php_ext_standard::{Serializer, Unserializer};
 
 use crate::ffi::Segment;
+use crate::throwables::Throwables;
 
 /// `sizeof(sysvshm_chunk_head)`: the magic and four `size_t`s.
 const HEAD: usize = 40;
@@ -52,19 +56,23 @@ const MAGIC: &[u8; 7] = b"PHP_SM\0";
 /// startup configuration as `cfg_get_long` reads `sysvshm.init_mem`.
 struct Config {
     init_mem: i64,
+    throwables: Throwables,
 }
 
 impl Config {
     /// `PHP_MINIT(sysvshm)`: the entry's leading number, 10000 without
     /// one.
-    fn start(start: &Start) -> Config {
+    fn start(start: &Start) -> Result<Config, Refusal> {
         let init_mem = start
             .ini()
             .entries
             .iter()
             .find(|(name, _)| name.as_slice() == b"sysvshm.init_mem")
             .map_or(10000, |(_, value)| value.as_deref().map_or(0, leading_long));
-        Config { init_mem }
+        Ok(Config {
+            init_mem,
+            throwables: Throwables::start(start)?,
+        })
     }
 }
 
@@ -100,7 +108,7 @@ pub fn extension() -> Extension {
             shm_remove_var::declared(),
         ])
         .class::<SysvSharedMemory>()
-        .engine_state(|start| Ok(Config::start(start)))
+        .engine_state(Config::start)
         .info(sysvshm_info)
         .build("sysvshm")
 }
@@ -380,9 +388,10 @@ fn shm_attach(
         segment.set_word(32, word(len));
     }
     let Some(class) = lookup_class(req, b"SysvSharedMemory")? else {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Class \"SysvSharedMemory\" not found",
         ));
     };
@@ -398,9 +407,13 @@ fn shm_attach(
 /// The `Error` every native but `shm_attach` throws on a detached
 /// object.
 fn destroyed(req: &mut Request) -> Thrown {
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     throw_error(
         req,
-        "Error",
+        ce.error,
         "Shared memory block has already been destroyed",
     )
 }
@@ -531,7 +544,8 @@ fn shm_put_var(
     hash.finish(req);
     if shm.payload_mut(req)?.segment.is_none() {
         let text = "Shared memory block has been destroyed by the serialization function";
-        return Err(throw_error(req, "Error", text));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, text));
     }
     written?;
     let put = with(req, shm, |seg| {

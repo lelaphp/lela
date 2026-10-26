@@ -29,6 +29,7 @@ mod draw;
 mod ffi;
 mod image;
 mod io;
+mod throwables;
 mod transform;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
@@ -293,6 +294,7 @@ pub fn extension() -> Extension {
         .functions(functions)
         .class::<image::GdImage>()
         .class::<image::GdFont>()
+        .engine_state(throwables::Throwables::start)
         .rshutdown(rshutdown)
         .info(info)
         .build("gd")

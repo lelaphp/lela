@@ -202,7 +202,7 @@ fn serves_view(req: &Request, view: &FrameView<'_>) -> Serves {
         name: declared_name(req, function),
         class: view
             .function_scope()
-            .map(|class| req.symbols().class_name(class).into_bytes()),
+            .map(|class| req.symbols().class_name(class).to_vec()),
     }
 }
 
@@ -230,7 +230,7 @@ fn code_of(req: &Request, function: Function, class: Option<ClassId>) -> Option<
     let name = decl.name.0.to_vec();
     let params = u32::try_from(decl.parameters.len()).unwrap_or(u32::MAX);
     let args = decl.parameters.iter().filter(|p| !p.variadic).count();
-    let class = class.map(|class| req.symbols().class_name(class).into_bytes());
+    let class = class.map(|class| req.symbols().class_name(class).to_vec());
     let Some(code) = req.frames().op_array(function) else {
         return Some(Code {
             name,
@@ -384,7 +384,7 @@ fn class_of_id(req: &mut Request, id: ClassId) -> Option<Class> {
         .collect();
     let unlinked_parent = parent.filter(|parent| class_id(req, parent).is_none());
     Some(Class {
-        name: req.symbols().class_name(id).into_bytes(),
+        name: req.symbols().class_name(id).to_vec(),
         user: req.extensions().class_extension(id).is_none(),
         shape,
         file,
@@ -504,7 +504,7 @@ pub fn exiting(req: &Request) -> bool {
 pub fn class_of(req: &Request, value: Value) -> Option<Vec<u8>> {
     value
         .as_object()
-        .map(|object| req.symbols().class_name(object.class()).into_bytes())
+        .map(|object| req.symbols().class_name(object.class()).to_vec())
 }
 
 /// `PG(last_error_message)`, `last_error_file` and `last_error_lineno`,

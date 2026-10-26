@@ -74,6 +74,10 @@ fn fetch(req: &mut Request, object: PhpObject) -> bool {
 /// An unconstructed collator: where `noted`, the code and message set
 /// as `collator_compare` sets them, then php's `Error`.
 fn unconstructed(req: &mut Request, object: PhpObject, noted: bool) -> Thrown {
+    let ce = match crate::throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     if noted {
         let code = error::object_code::<CollatorObject>(req, object);
         error::set_code(req, code);
@@ -83,7 +87,7 @@ fn unconstructed(req: &mut Request, object: PhpObject, noted: bool) -> Thrown {
             return thrown;
         }
     }
-    throw_error(req, "Error", "Object not initialized")
+    throw_error(req, ce.error, "Object not initialized")
 }
 
 /// `fetch`, then [`unconstructed`] for an object with no collator.
@@ -114,6 +118,7 @@ fn check(
 /// `collator_ctor`: the collator opened for the locale, the default for
 /// the empty string; `Ok(false)` where it failed and nothing was thrown.
 fn ctor(req: &mut Request, object: PhpObject, locale: &[u8]) -> Result<bool, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     if locale.len() > 156 {
         error::set(
             req,
@@ -125,7 +130,7 @@ fn ctor(req: &mut Request, object: PhpObject, locale: &[u8]) -> Result<bool, Thr
     if fetch(req, object) {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Collator object is already constructed",
         ));
     }
@@ -533,8 +538,9 @@ fn sort(
     flags: i64,
     renumber: bool,
 ) -> Result<bool, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     if !fetch(req, object) {
-        return Err(throw_error(req, "Error", "Object not initialized"));
+        return Err(throw_error(req, ce.error, "Object not initialized"));
     }
     let Some(given) = array.get() else {
         return Ok(true);

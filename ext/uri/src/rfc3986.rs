@@ -10,6 +10,7 @@ use php_ext::request::Request;
 use php_ext::values::{Emalloc, Owner, PhpArray, PhpString};
 
 use crate::ffi::{self, Refusal};
+use crate::throwables::Throwables;
 use crate::{
     Handlers, Parsed, Read, ReadAs, Recomposition, Slot, Unreadable, UriComparisonMode, UriParser,
 };
@@ -71,9 +72,13 @@ fn port_value(text: &[u8]) -> Option<i64> {
 /// `InvalidUriException` for what the text got wrong, its `UriError` for
 /// what "should be unreachable in practice".
 fn refused(req: &mut Request, invalid: Option<&str>, other: &str) -> Thrown {
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     match invalid {
-        Some(message) => throw(req, "Uri\\InvalidUriException", message),
-        None => throw(req, "Uri\\UriError", other),
+        Some(message) => throw(req, ce.invalid_uri_exception, message),
+        None => throw(req, ce.uri_error, other),
     }
 }
 
@@ -1213,13 +1218,15 @@ fn user_info(
     mode: ReadAs,
 ) -> Result<Option<Owner<PhpString>>, Thrown> {
     let bytes = crate::read::<R, _>(req, this.object(), mode, |_, u| Ok(u.user_info(mode)))?;
-    match bytes {
-        Ok(bytes) => bytes.map(|bytes| PhpString::new(req, &bytes)).transpose(),
-        Err(Unreadable) => Err(throw_error(
+    if let Ok(bytes) = bytes {
+        bytes.map(|bytes| PhpString::new(req, &bytes)).transpose()
+    } else {
+        let ce = Throwables::of(req)?;
+        Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "The userinfo component cannot be retrieved",
-        )),
+        ))
     }
 }
 

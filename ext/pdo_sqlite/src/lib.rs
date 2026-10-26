@@ -32,6 +32,7 @@ pub mod ffi;
 
 pub use blob::BlobStream;
 mod sqlite;
+mod throwables;
 
 use php_ext::abi::{
     Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, Path, Raw, This, Untyped,
@@ -73,6 +74,7 @@ pub fn extension() -> Extension {
         }])
         .class::<Sqlite>()
         .class::<PDO>()
+        .engine_state(throwables::Throwables::start)
         .register::<&'static dyn Connector>(&sqlite::SQLITE)
         .info(pdo_sqlite_info)
         .build("pdo_sqlite")
@@ -240,8 +242,9 @@ impl Sqlite {
     /// ```
     fn loadExtension(req: &mut Request, this: This<Self>, name: Path) -> Result<(), Thrown> {
         let name = name.0.as_bytes().to_vec();
+        let ce = throwables::Throwables::of(req)?;
         if name.is_empty() {
-            return Err(argument_error(req, "ValueError", 1, "must not be empty"));
+            return Err(argument_error(req, ce.value_error, 1, "must not be empty"));
         }
         let this = this.object();
         php_ext_pdo::connector::with_connection(req, this, |req, conn| {
@@ -249,7 +252,7 @@ impl Sqlite {
             let Some(full) = req.environment_mut().realpath(&name) else {
                 return Err(throw_exception_ex(
                     req,
-                    "PDOException",
+                    ce.pdo_exception,
                     &format!("Unable to load extension \"{shown}\""),
                 ));
             };
@@ -267,7 +270,7 @@ impl Sqlite {
                     let text = String::from_utf8_lossy(&text).into_owned();
                     Err(throw_exception_ex(
                         req,
-                        "PDOException",
+                        ce.pdo_exception,
                         &format!("Unable to load extension \"{text}\""),
                     ))
                 }

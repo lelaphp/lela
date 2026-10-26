@@ -28,6 +28,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod ffi;
+mod throwables;
 
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
@@ -224,6 +225,7 @@ pub fn extension() -> Extension {
             posix_fpathconf::declared(),
         ])
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .info(posix_info)
         .build("posix")
 }
@@ -796,14 +798,19 @@ fn fd_of(req: &mut Request, given: &Value, reader: FdReader) -> Result<Option<i3
             },
             Err(thrown) => {
                 clear(req, thrown)?;
-                let tail = format!("be of type int|resource, {} given", value_name(req, &given));
+                let tail = [
+                    b"be of type int|resource, ".as_slice(),
+                    &value_name(req, &given),
+                    b" given",
+                ]
+                .concat();
                 if reader == FdReader::Fpathconf {
                     return Err(arg_type_error(req, 1, &tail));
                 }
                 docref(
                     req,
                     Level::Warning,
-                    &format!("Argument #1 ($file_descriptor) must {tail}"),
+                    &[b"Argument #1 ($file_descriptor) must ".as_slice(), &tail].concat(),
                 );
                 if reader == FdReader::Isatty {
                     return Ok(None);
@@ -1011,9 +1018,10 @@ fn posix_mknod(
     let mut dev = 0;
     if flags & device != 0 {
         if major == 0 {
+            let ce = throwables::Throwables::of(req)?;
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 3,
                 "cannot be 0 for the POSIX_S_IFCHR and POSIX_S_IFBLK modes",
             ));

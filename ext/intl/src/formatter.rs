@@ -48,6 +48,7 @@ impl ObjectHandlers for Handlers {
 /// `NumberFormatter_object_clone`: the members and `unum_clone`, or
 /// php's `Error` once the copy is made.
 fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let mut status = Code::ZERO;
     let copy = object
         .native::<FormatterObject>(req)
@@ -69,7 +70,7 @@ fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObje
         Some(()) => return Ok(new),
     };
     new.give_up(req);
-    Err(throw_error(req, "Error", message))
+    Err(throw_error(req, ce.error, message))
 }
 
 /// `INTL_METHOD_CHECK_STATUS`: the code on the object and the request;
@@ -90,6 +91,7 @@ fn with<T>(
     object: PhpObject,
     body: impl FnOnce(&mut Request, &mut NumberFormat) -> Answer<T>,
 ) -> Answer<T> {
+    let ce = crate::throwables::Throwables::of(req)?;
     error::reset_object::<FormatterObject>(req, object);
     let taken = object
         .native_mut::<FormatterObject>(req)
@@ -97,7 +99,7 @@ fn with<T>(
     let Some(mut unum) = taken else {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Found unconstructed NumberFormatter",
         ));
     };
@@ -203,6 +205,7 @@ fn construct(
     object: PhpObject,
     (locale, style, pattern): &(PhpString, i64, Option<PhpString>),
 ) -> Result<bool, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let (locale, style, pattern) = (
         locale.as_bytes(),
         *style,
@@ -218,7 +221,7 @@ fn construct(
     {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "NumberFormatter object is already constructed",
         ));
     }
@@ -242,7 +245,7 @@ fn construct(
             "\"{}\" is invalid",
             String::from_utf8_lossy(c_locale.to_bytes())
         );
-        return Err(argument_error(req, "ValueError", 1, &tail));
+        return Err(argument_error(req, ce.value_error, 1, &tail));
     }
     let canonical = ffi::canonicalize(c_locale.to_bytes()).map_or(c_locale, |c| ffi::c_string(&c));
     let mut status = Code::ZERO;
@@ -297,6 +300,7 @@ fn format(
     kind: i64,
     at: u32,
 ) -> Answer<Owner<PhpString>> {
+    let ce = crate::throwables::Throwables::of(req)?;
     with(req, object, |req, unum| {
         let kind = match (kind, &num) {
             (0, Union::A(_)) => 2,
@@ -319,7 +323,7 @@ fn format(
             _ => {
                 return Err(argument_error(
                     req,
-                    "ValueError",
+                    ce.value_error,
                     2 + at,
                     "must be a NumberFormatter::TYPE_* constant",
                 ));
@@ -333,6 +337,10 @@ fn format(
 /// `NumberFormatter::TYPE_CURRENCY` refused, as `numfmt_format` and
 /// `numfmt_parse` word it.
 fn currency_type(req: &mut Request, at: u32, verb: &str) -> Thrown {
+    let ce = match crate::throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     let tail = if at == 0 {
         format!(
             "cannot be NumberFormatter::TYPE_CURRENCY constant, use NumberFormatter::{verb}Currency() method instead"
@@ -342,7 +350,7 @@ fn currency_type(req: &mut Request, at: u32, verb: &str) -> Thrown {
             "cannot be NumberFormatter::TYPE_CURRENCY constant, use numfmt_{verb}_currency() function instead"
         )
     };
-    argument_error(req, "ValueError", 2 + at, &tail)
+    argument_error(req, ce.value_error, 2 + at, &tail)
 }
 
 /// The `&$offset` php reads: a given one not null, as `z!` holds it.
@@ -374,6 +382,7 @@ fn parse(
     at_offset: &Ref<Untyped<Value>>,
     at: u32,
 ) -> Answer<Union<i64, f64>> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let position = offset(req, at_offset)?;
     with(req, object, |req, unum| {
         let Some(units) = utf16(
@@ -401,7 +410,7 @@ fn parse(
             _ => {
                 return Err(argument_error(
                     req,
-                    "ValueError",
+                    ce.value_error,
                     2 + at,
                     "must be a NumberFormatter::TYPE_* constant",
                 ));

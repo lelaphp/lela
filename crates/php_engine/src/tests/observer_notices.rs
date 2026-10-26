@@ -10,6 +10,7 @@
 //! `observer_error_*.phpt`, and as `Z/Zend/zend_observer.c` lays out
 //! the slot.
 
+use crate::api::values::ClassId;
 use php_macros::php_function;
 use php_unit::decl::Bare;
 
@@ -297,7 +298,7 @@ fn declarations_on_one_line_are_told_in_the_order_written() {
 /// `EG(exception)` holds one raises it.
 #[php_function]
 fn fatal_while_thrown(req: &mut Request) -> Result<(), Thrown> {
-    let thrown = throw(req, "Exception", "pending");
+    let thrown = throw(req, ClassId::EXCEPTION, "pending");
     Err(fatal_while_pending(req, thrown, "after"))
 }
 

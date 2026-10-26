@@ -1,0 +1,6 @@
+#!/bin/sh
+# docker-php-ext-configure for dax-php: its extensions are compiled in
+# with what the image's libraries give (gd with freetype, jpeg and webp,
+# for instance), so there is nothing to configure. Succeeds, so the
+# docker-php-ext-install after it is the step that checks.
+echo "docker-php-ext-configure: dax-php's extensions are built in; ignoring: $*"

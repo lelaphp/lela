@@ -681,10 +681,12 @@ fn bzopen(
             open_stream(req, stream, mode)?
         }
         _ => {
-            let tail = format!(
-                "be of type string or file-resource, {} given",
-                value_name(req, &file)
-            );
+            let tail = [
+                b"be of type string or file-resource, ".as_slice(),
+                &value_name(req, &file),
+                b" given",
+            ]
+            .concat();
             return Err(arg_type_error(req, 1, &tail));
         }
     };

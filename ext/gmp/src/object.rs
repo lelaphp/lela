@@ -20,6 +20,7 @@ use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value
 use php_ext_standard::Unserializer;
 
 use crate::ffi::Mpz;
+use crate::throwables::Throwables;
 use crate::{from_text, initialized, operand, verify_base};
 
 /// `gmp_object_handlers`: `std_object_handlers` with php's `cast_object`,
@@ -149,7 +150,8 @@ impl GMP {
             return Ok(());
         };
         let Some(props) = props.as_array() else {
-            return Err(throw(req, "Exception", "Could not unserialize properties"));
+            let ce = Throwables::of(req)?;
+            return Err(throw(req, ce.exception, "Could not unserialize properties"));
         };
         // `object_properties_load`'s `ZEND_HASH_FOREACH_KEY_VAL(properties, …)`
         // (`Z/Zend/zend_API.c:1752`), no owner of the table taken: what
@@ -194,7 +196,8 @@ fn held<T>(req: &Request, object: PhpObject, f: impl FnOnce(&Mpz) -> T) -> T {
 fn set(req: &mut Request, object: PhpObject, text: Option<&[u8]>, base: i64) -> Result<(), Thrown> {
     let message = "Could not unserialize number";
     let Some(text) = text else {
-        return Err(throw(req, "Exception", message));
+        let ce = Throwables::of(req)?;
+        return Err(throw(req, ce.exception, message));
     };
     match from_text(req, text, base, 0) {
         Ok(n) => {
@@ -203,7 +206,10 @@ fn set(req: &mut Request, object: PhpObject, text: Option<&[u8]>, base: i64) -> 
             }
             Ok(())
         }
-        Err(thrown) => Err(throw_chained(req, thrown, "Exception", message)),
+        Err(thrown) => {
+            let ce = Throwables::of(req)?;
+            Err(throw_chained(req, thrown, ce.exception, message))
+        }
     }
 }
 
@@ -226,7 +232,12 @@ fn operator_operand(req: &mut Request, value: &Value, position: u32) -> Result<M
         return Ok(n);
     }
     let given = value_name(req, &value.deref());
-    let text = format!("Number must be of type GMP|string|int, {given} given");
+    let text = [
+        b"Number must be of type GMP|string|int, ".as_slice(),
+        given.as_slice(),
+        b" given".as_slice(),
+    ]
+    .concat();
     Err(type_error(req, &text))
 }
 
@@ -243,7 +254,8 @@ fn binop(
     if let Some(what) = zero
         && b.sign() == 0
     {
-        return Err(throw_error(req, "DivisionByZeroError", what));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.division_by_zero_error, what));
     }
     Ok((a, b))
 }
@@ -256,7 +268,15 @@ fn unsupported(req: &mut Request, op: BinaryOp, left: &Value, right: &Value) -> 
         _ => ">>",
     };
     let (l, r) = (type_name(req, left), type_name(req, right));
-    let text = format!("Unsupported operand types: {l} {sigil} {r}");
+    let text = [
+        b"Unsupported operand types: ".as_slice(),
+        &l,
+        b" ",
+        sigil.as_bytes(),
+        b" ",
+        &r,
+    ]
+    .concat();
     type_error(req, &text)
 }
 
@@ -530,7 +550,8 @@ fn read_custom(
         .and_then(|num| num.as_php_string().map(|text| text.as_bytes().to_vec()));
     set(req, object, text.as_deref(), 10)?;
     let Some(props) = reader.value(req)?.and_then(|props| props.as_array()) else {
-        return Err(throw(req, "Exception", "Could not unserialize properties"));
+        let ce = Throwables::of(req)?;
+        return Err(throw(req, ce.exception, "Could not unserialize properties"));
     };
     // `object_properties_load`'s `ZEND_HASH_FOREACH_KEY_VAL(properties, …)`
     // (`Z/Zend/zend_API.c:1752`), no owner of the table taken: what

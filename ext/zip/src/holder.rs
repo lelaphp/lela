@@ -512,9 +512,7 @@ impl Program for Serving<'_> {
         let Some(long) = long else {
             let name = value_name(self.req, &v);
             v.give_up(self.req);
-            let message = format!(
-                "Return value of callback provided to ZipArchive::registerCancelCallback() must be of type int, {name} returned"
-            );
+            let message = [b"Return value of callback provided to ZipArchive::registerCancelCallback() must be of type int, ".as_slice(), name.as_slice(), b" returned".as_slice()].concat();
             self.thrown = Some(type_error(self.req, &message));
             return true;
         };

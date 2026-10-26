@@ -31,6 +31,7 @@ mod info;
 mod multi;
 mod options;
 mod share;
+mod throwables;
 mod version;
 
 use php_ext::abi::{Extension, ExtensionBuilder, Lent, Pool, Refusal};
@@ -833,7 +834,12 @@ pub fn extension() -> Extension {
         }])
         .process_state(initialize)
         .request_state::<State>()
-        .engine_state(|_| Ok(share::Pooled(Pool::new(share::POOLED))))
+        .engine_state(|start| {
+            Ok(share::Pooled {
+                pool: Pool::new(share::POOLED),
+                throwables: throwables::Throwables::start(start)?,
+            })
+        })
         .post_deactivate(post_deactivate)
         .info(version::curl_info)
         .build("curl")

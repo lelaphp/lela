@@ -273,11 +273,15 @@ fn raise(
 /// php's `char *`, bytes: where they are not UTF-8 they are written over
 /// the empty one the throw laid.
 fn intl_exception(req: &mut Request, pending: Option<Thrown>, text: &[u8]) -> Thrown {
+    let ce = match crate::throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     let utf8 = std::str::from_utf8(text);
     let message = utf8.unwrap_or_default();
     let thrown = match pending {
-        Some(pending) => throw_chained(req, pending, "IntlException", message),
-        None => throw(req, "IntlException", message),
+        Some(pending) => throw_chained(req, pending, ce.intl_exception, message),
+        None => throw(req, ce.intl_exception, message),
     };
     let Some(object) = thrown.exception().copied().filter(|_| utf8.is_err()) else {
         return thrown;

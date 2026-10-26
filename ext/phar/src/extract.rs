@@ -15,6 +15,7 @@ use php_ext::values::{PhpArray, PhpString};
 use crate::archive::{ArchiveId, Content, ENT_COMPRESSION_MASK, ENT_PERM_MASK, archives, lossy};
 use crate::entry::{self, Target};
 use crate::path;
+use crate::throwables::Throwables;
 
 /// A path as the file system takes it, a relative one against the
 /// request's working directory, as `VCWD_*` resolves it.
@@ -223,23 +224,26 @@ pub(crate) fn extract_to(
         .unwrap_or_default();
     let shown = lossy(&fname).into_owned();
     if crate::archive::read_file(req, &fname, false)?.is_none() {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "InvalidArgumentException",
+            ce.invalid_argument_exception,
             &format!("Invalid argument, {shown} cannot be found"),
         ));
     }
     if dest.is_empty() {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "InvalidArgumentException",
+            ce.invalid_argument_exception,
             "Invalid argument, extraction path must be non-zero length",
         ));
     }
     if dest.len() >= MAXPATHLEN {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "InvalidArgumentException",
+            ce.invalid_argument_exception,
             &format!(
                 "Cannot extract to \"{}...\", destination directory is too long for filesystem",
                 lossy(&dest[..50])
@@ -249,17 +253,19 @@ pub(crate) fn extract_to(
     match req.url_stat(dest, false, false)?.found() {
         None => {
             if !mkdir_all(req, dest, 0o777) {
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "RuntimeException",
+                    ce.runtime_exception,
                     &format!("Unable to create path \"{}\" for extraction", lossy(dest)),
                 ));
             }
         }
         Some(sb) if sb[2] & 0o040_000 == 0 => {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "RuntimeException",
+                ce.runtime_exception,
                 &format!(
                     "Unable to use path \"{}\" for extraction, it is a file, must be a directory",
                     lossy(dest)
@@ -269,16 +275,18 @@ pub(crate) fn extract_to(
         Some(_) => {}
     }
     let fail = |req: &mut Request, error: String| {
+        let ce = Throwables::of(req)?;
         Err(throw_exception_ex(
             req,
-            "PharException",
+            ce.phar_exception,
             &format!("Extraction from phar \"{shown}\" failed: {error}"),
         ))
     };
     let missing = |req: &mut Request, name: &[u8]| {
+        let ce = Throwables::of(req)?;
         Err(throw_exception_ex(
             req,
-            "PharException",
+            ce.phar_exception,
             &format!(
                 "phar error: attempted to extract non-existent file or directory \"{}\" from phar \"{shown}\"",
                 lossy(name)
@@ -297,9 +305,10 @@ pub(crate) fn extract_to(
             let walked = walk::foreach(req, list, Hold::None, |req, row| -> walk::Step<bool> {
                 let value = row.value().deref();
                 let Some(name) = value.deref().as_str_bytes().map(<[u8]>::to_vec) else {
+                    let ce = Throwables::of(req)?;
                     return Err(throw_exception_ex(
                         req,
-                        "InvalidArgumentException",
+                        ce.invalid_argument_exception,
                         "Invalid argument, array of filenames to extract contains non-string value",
                     ));
                 };

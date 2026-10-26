@@ -43,6 +43,7 @@ type Reflected = (ClassId, Vec<u8>, Option<(ClassId, PropertyDecl)>);
 /// `GET_REFLECTION_OBJECT_PTR(ref)` for a property reflector, with the
 /// class that declared it.
 fn this_declared(req: &mut Request, this: PhpObject) -> Result<Reflected, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let name = this_name(req, this, "ReflectionProperty")?;
     let Some(class) = this
         .prop(req, b"class")
@@ -50,7 +51,7 @@ fn this_declared(req: &mut Request, this: PhpObject) -> Result<Reflected, Thrown
     else {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Typed property ReflectionProperty::$class must not be accessed before initialization",
         ));
     };
@@ -192,6 +193,7 @@ fn this_constant(
     req: &mut Request,
     this: PhpObject,
 ) -> Result<(Vec<u8>, ClassId, ClassConstDecl), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let name = this_name(req, this, "ReflectionClassConstant")?;
     let Some(class) = this
         .prop(req, b"class")
@@ -199,7 +201,7 @@ fn this_constant(
     else {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Typed property ReflectionClassConstant::$class must not be accessed before initialization",
         ));
     };
@@ -208,7 +210,7 @@ fn this_constant(
         let named = class_name_of(req, class);
         return Err(throw_exception_ex(
             req,
-            "ReflectionException",
+            ce.reflection_exception,
             &format!(
                 "Constant {}::{} does not exist",
                 String::from_utf8_lossy(&named),
@@ -457,6 +459,7 @@ impl ReflectionProperty {
         class: Union<PhpObject, PhpString>,
         property: PhpString,
     ) -> Result<(), Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let (class, object) = class_of(req, class)?;
         let name = property.as_bytes().to_vec();
         let declaring = match property_named(req, class, &name) {
@@ -471,7 +474,7 @@ impl ReflectionProperty {
                 let class = class_name_of(req, class);
                 return Err(throw_exception_ex(
                     req,
-                    "ReflectionException",
+                    ce.reflection_exception,
                     &format!(
                         "Property {}::${} does not exist",
                         String::from_utf8_lossy(&class),
@@ -947,6 +950,7 @@ impl ReflectionProperty {
         this: This<Self>,
         object: PhpObject,
     ) -> Result<Owner<Value>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let (class, name, declared) = this_property(req, this.object())?;
         let asked = asked_class(req, this.object(), class);
         held_to(req, object, asked)?;
@@ -955,7 +959,7 @@ impl ReflectionProperty {
         if prop.as_ref().is_some_and(|(_, decl)| !decl.is_instance) {
             return Err(throw(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 "May not use getRawValue on static properties",
             ));
         }
@@ -999,6 +1003,7 @@ impl ReflectionProperty {
         object: PhpObject,
         value: Value,
     ) -> Result<(), Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let (class, name, declared) = this_property(req, this.object())?;
         let asked = asked_class(req, this.object(), class);
         let reflected = declared.map(|decl| (class, decl));
@@ -1006,7 +1011,7 @@ impl ReflectionProperty {
         if prop.as_ref().is_some_and(|(_, decl)| !decl.is_instance) {
             return Err(throw(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 "May not use setRawValue on static properties",
             ));
         }
@@ -1952,13 +1957,14 @@ impl ReflectionClassConstant {
         class: Union<PhpObject, PhpString>,
         constant: PhpString,
     ) -> Result<(), Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let (class, _) = class_of(req, class)?;
         let name = constant.as_bytes().to_vec();
         let Some((declaring, _)) = class_constant_named(req, class, &name) else {
             let class = class_name_of(req, class);
             return Err(throw_exception_ex(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 &format!(
                     "Constant {}::{} does not exist",
                     String::from_utf8_lossy(&class),
@@ -2329,12 +2335,13 @@ impl ReflectionConstant {
     ///   thrown in %s on line 2
     /// ```
     fn __construct(req: &mut Request, this: This<Self>, name: PhpString) -> Result<(), Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let name = name.as_bytes().to_vec();
         let lowered = constant_key(&name);
         if constant(req, &lowered)?.is_none() {
             return Err(throw_exception_ex(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 &format!(
                     "Constant \"{}\" does not exist",
                     String::from_utf8_lossy(&name)

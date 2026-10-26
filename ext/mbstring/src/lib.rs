@@ -36,6 +36,7 @@ mod regex;
 mod settings;
 mod tables;
 mod text;
+mod throwables;
 mod zend;
 
 use ffi::mbfl::{Encoding, Language};
@@ -160,6 +161,7 @@ pub fn extension() -> Extension {
         .encodings(zend::bind)
         .process_state(|| Ok(regex::initialize()))
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .rinit(rinit)
         .rshutdown(rshutdown);
     for (name, handler) in settings::handlers() {

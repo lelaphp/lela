@@ -42,6 +42,7 @@ mod aead;
 mod ffi;
 mod hash;
 mod keys;
+mod throwables;
 
 use php_ext::abi::{
     Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers, Raw, Ref, Refusal,
@@ -441,6 +442,7 @@ pub fn extension() -> Extension {
             keys::sodium_crypto_scalarmult_base::declared(),
         ])
         .class::<SodiumException>()
+        .engine_state(throwables::Throwables::start)
         .info(sodium_info)
         .build("sodium")
 }
@@ -535,12 +537,20 @@ fn scrub(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
 
 /// `zend_throw_exception(sodium_exception_ce, message, 0)`.
 pub(crate) fn fail(req: &mut Request, message: &str) -> Thrown {
-    throw(req, "SodiumException", message)
+    let ce = match throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    throw(req, ce.sodium_exception, message)
 }
 
 /// `zend_argument_error(sodium_exception_ce, position, tail)`.
 pub(crate) fn bad_arg(req: &mut Request, position: u32, tail: &str) -> Thrown {
-    argument_error(req, "SodiumException", position, tail)
+    let ce = match throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    argument_error(req, ce.sodium_exception, position, tail)
 }
 
 /// `"internal error"`, what a libsodium call that fails past php's own

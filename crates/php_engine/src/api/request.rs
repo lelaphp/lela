@@ -256,11 +256,13 @@ pub enum Unresolved {
 #[allow(clippy::struct_excessive_bools)] // php's EG and PG flags, each its own global, read alone
 pub struct Request {
     pub(crate) shared: Arc<Shared>,
-    /// The tier's state, laid with the request and never written again:
-    /// private to `api::request`, where the request is made, and read
-    /// elsewhere through [`Request::tier_state`] alone, so a `&mut` of the
-    /// field or a write over it anywhere else fails to compile; a write
-    /// over the whole request does not ([`crate::tier::TierState`]).
+    /// The request's tier, its loops and its tier's state, laid with the
+    /// request and written again only by the hand-off
+    /// ([`Request::hand_off`]): private to `api::request`, where the
+    /// request is made, and read elsewhere through
+    /// [`Request::tier_state`] alone, so a `&mut` of the field or a write
+    /// over it anywhere else fails to compile; a write over the whole
+    /// request does not ([`crate::tier::TierState`]).
     tier: crate::tier::TierState,
     /// The units the loop's servings held, kept with their shares for the
     /// next serving ([`crate::tier::UnitsLeft`]).
@@ -282,6 +284,10 @@ pub struct Request {
     /// array's runtime cache stands in one of them
     /// ([`exec::RuntimeCaches`]) and nowhere else.
     map: crate::exec::RuntimeCaches,
+    /// How many observers the engine declared (`Shared::observers`),
+    /// held on the request, so the observer's homes test it with one load
+    /// (design §4.3 seam 9).
+    observers: u32,
     /// The extensions' request states ([`state::RequestState`]).
     state: state::RequestState,
     /// The entries the request changed, their bytes, the host's locks
@@ -1058,12 +1064,52 @@ fn user_function_decl(user: &UserFunction) -> Option<&FunctionDecl> {
 }
 
 impl Request {
+    /// How many observers the engine declared, the one load each of the
+    /// observer's homes tests (design §4.3 seam 9).
+    #[inline(always)] // every home's test
+    pub(crate) fn observers(&self) -> u32 {
+        self.observers
+    }
+
     /// The tier's state the request was laid with, shared: the one way to
     /// it outside `api::request`, so nothing there borrows it mutably or
     /// replaces it ([`crate::tier::state`]).
     #[inline]
     pub(crate) fn tier_state(&self) -> &crate::tier::TierState {
         &self.tier
+    }
+
+    /// The loops the request is served in, which every serving it
+    /// starts takes (#3362).
+    #[inline]
+    pub(crate) fn loops(&self) -> &crate::tier::Loops {
+        &self.tier.loops
+    }
+
+    /// The request published a unit whose words count (#3362): the
+    /// engine notes it, so every request starting after starts in the
+    /// tier's loop, and where this one is in `Nop`'s beside the tier's,
+    /// a hand-off is due and the interrupt raised for the check that
+    /// takes it, as publishing raises the publishing request's interrupt
+    /// (ADR-0006, amended on #3301).
+    pub(crate) fn published_counting(&self) {
+        self.shared.binding.published();
+        if self.tier.published_counting() {
+            self.limits().interrupt().raise();
+        }
+    }
+
+    /// The hand-off from `Nop`'s loop to the tier's, where one is due
+    /// (`crate::tier::interrupted_at`): the request's tier laid again
+    /// with the tier's loops and the state they lay, for the rest of the
+    /// request. Whether it was due. No tier lends its state in `Nop`'s
+    /// loop, so the old state drops with no lend standing.
+    pub(crate) fn hand_off(&mut self) -> bool {
+        let Some(handed) = self.tier.handed(&self.shared) else {
+            return false;
+        };
+        self.tier = handed;
+        true
     }
 
     /// A request no host lent a sink, which keeps what it writes in one
@@ -1115,6 +1161,7 @@ impl Request {
             .arena
             .enter(|arena| shared.units.restart(&arena.files));
         let typed_ini = shared.typed_ini;
+        let observers = shared.observers;
         let mut req = Box::new(Request {
             // Fields are made in the order written: the request stands
             // inside the engine before its deadlines are laid.
@@ -1130,6 +1177,7 @@ impl Request {
             vm,
             annexes: crate::exec::Annexes::default(),
             map: crate::exec::RuntimeCaches::default(),
+            observers,
             state: state::RequestState::default(),
             ini: ini::IniState::new(typed_ini),
             diagnostics: diagnostics::DiagnosticsState::default(),

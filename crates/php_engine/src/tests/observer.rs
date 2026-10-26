@@ -5,6 +5,7 @@
 //! and by a fatal. The sequences are php's, as `zend_test`'s observer
 //! prints them in `Z/ext/zend_test/tests/observer_*.phpt`.
 
+use crate::api::values::ClassId;
 use php_macros::php_function;
 
 use super::test_ext::{

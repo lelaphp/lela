@@ -51,6 +51,7 @@ mod msgformat;
 mod normalizer;
 mod resourcebundle;
 mod spoofchecker;
+mod throwables;
 mod timezone;
 mod transliterator;
 mod uchar;
@@ -368,6 +369,7 @@ pub fn extension() -> Extension {
         .class_constants(b"IntlChar", uchar::constants());
     builder
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .info(intl_info)
         .build("intl")
 }

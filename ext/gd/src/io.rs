@@ -714,7 +714,12 @@ fn sink(req: &mut Request, file: &Value, name: &str) -> Result<Option<Sink>, Thr
         }
         _ => {
             let name = value_name(req, file);
-            let text = format!("be a file name or a stream resource, {name} given");
+            let text = [
+                b"be a file name or a stream resource, ".as_slice(),
+                &name,
+                b" given",
+            ]
+            .concat();
             Err(arg_type_error(req, position, &text))
         }
     }

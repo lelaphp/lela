@@ -15,6 +15,7 @@ use php_ext::values::{Key, Owner, PhpArray, PhpObject, Value, ValueRef};
 use crate::constants as c;
 use crate::ffi::{CFile, EasyId, Hook, Slist};
 use crate::handle::{Curl, CurlHandle, Handler, HeaderTo, ReadFrom, WriteTo, easy_of};
+use crate::throwables::Throwables;
 
 /// The three transfer channels a callable can take over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -449,7 +450,8 @@ fn callable(
                 "must be a valid callback for option {}, {refusal}",
                 callable_name(option)
             );
-            Err(argument_error(req, "TypeError", position, &tail))
+            let ce = Throwables::of(req)?;
+            Err(argument_error(req, ce.type_error, position, &tail))
         }
     }
 }
@@ -716,7 +718,8 @@ pub(crate) fn setopt(
             "is not a valid cURL option"
         };
         payload(req, object)?.err = 48;
-        return Err(argument_error(req, "ValueError", 2, tail));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 2, tail));
     };
     let easy: EasyId = easy_of(req, object)?;
     match kind {
@@ -937,9 +940,10 @@ fn curl_setopt_array(
         let key = row.key().clone();
         let value = row.value().deref();
         let Key::Int(option) = key else {
+            let ce = Throwables::of(req)?;
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 2,
                 "contains an invalid cURL option",
             ));

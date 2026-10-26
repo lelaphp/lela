@@ -45,7 +45,7 @@ use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
 use crate::natives::StubPlace;
 use crate::supplied::{Keyed, Resolved, Suppliers};
-use crate::tier::{BindLoops, Loop, Loops, Nop, Tier};
+use crate::tier::{BindLoops, Binding, Nop, Tier};
 pub(crate) use crate::unit_cache::Cached;
 use crate::unit_cache::{Answers, CompileRefused, Fresh, UnitCache};
 use ini_table::{Directive, IniTable};
@@ -918,10 +918,12 @@ pub(crate) struct Shared {
     /// it traces allocations ([`EngineBuilder::sense_leaks`]).
     #[cfg(debug_assertions)]
     pub(crate) sense_leaks: LeakSensor,
-    /// The loop's entries, bound to the engine's tier and, once its
-    /// declared opcodes are fixed as it starts, to whether it tells
-    /// their observers ([`Shared::observe_opcodes`]).
-    pub(crate) loops: Loops,
+    /// The loops' entries, bound to the engine's tier and, once its
+    /// declared opcodes are fixed as it starts, to whether they tell
+    /// their observers, as the engine's start binds them: the ones a
+    /// request starts in, and the tier's beside them where a request may
+    /// switch it on ([`crate::tier::Binding`]).
+    pub(crate) binding: Binding,
     /// The observer word (design §4.3 seam 9): how many observers the
     /// bundle declared ([`crate::supplied::Resolved::observers`]), fixed
     /// at the engine's build and read at every call and return home
@@ -929,8 +931,7 @@ pub(crate) struct Shared {
     pub(crate) observers: u32,
     /// The opcodes the bundle observes (design §7.1, #1780), declared as
     /// the engine starts and fixed after it, which choose the loop the
-    /// engine binds ([`Shared::observe_opcodes`]); empty while none is
-    /// declared.
+    /// engine binds as it starts; empty while none is declared.
     pub(crate) opcodes: crate::observer::ObservedOpcodes,
     /// The unit cache (design §6.3): what a file compiled to, held for
     /// every request that asks for the same file unchanged. A source the
@@ -1252,6 +1253,27 @@ impl ClassKeys {
             Some(at) => u32::try_from(at).ok().map(ClassId),
             None => self.aliases.find(name).copied(),
         }
+    }
+}
+
+/// The linked classes as an extension's engine start reads them,
+/// `CG(class_table)` once `zend_startup_modules` has registered every
+/// extension's classes ([`Start::class`]).
+pub(crate) struct ClassTable<'e> {
+    classes: &'e [ClassDecl],
+    keys: &'e ClassKeys,
+}
+
+impl ClassTable<'_> {
+    /// The class `name` names, whatever its case.
+    pub(crate) fn find(&self, name: &[u8]) -> Option<ClassId> {
+        self.keys.find(self.classes, name)
+    }
+}
+
+impl std::fmt::Debug for ClassTable<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ClassTable({} classes)", self.classes.len())
     }
 }
 
@@ -1633,20 +1655,6 @@ impl Shared {
             .collect()
     }
 
-    /// The opcodes the bundle observes, asked of each extension once its
-    /// engine start is over, and the loop bound to them and to the tier
-    /// the engine started: the one that tells their observers where any
-    /// is declared and the one with no test where none is, as php
-    /// resolves an opline's handler when it compiles it (design §5.8,
-    /// §7.1), and `Nop`'s where the tier does not serve the engine
-    /// ([`crate::tier::Tier::asked`]).
-    fn observe_opcodes(&mut self, start: &Start, bind_loops: BindLoops) {
-        (self.supplied.observers).retain(|(_, registered)| registered.is_none_or(|r| r(start)));
-        self.observers = self.supplied.observers.count();
-        self.opcodes = crate::observer::ObservedOpcodes::start(&self.supplied.opcodes, start);
-        self.loops = bind_loops(self);
-    }
-
     /// The tables the compiler reads, as [`Declared`].
     pub(crate) fn declared(&self) -> Declared<'_> {
         Declared {
@@ -1982,6 +1990,8 @@ impl Shared {
     /// all, which is the `None` `serve` serves nothing for.
     pub(crate) fn cached(&self, path: &[u8], cwd: &Path, stack: StackLimit) -> Cached {
         let full = crate::unit_cache::full_path(path, cwd);
+        // Held for no request, so no request's loop follows it.
+        let held = std::cell::Cell::new(false);
         let asked = crate::unit_cache::Asked {
             path: &full,
             source: None,
@@ -1992,6 +2002,8 @@ impl Shared {
             now: crate::unit_cache::now(),
             levels: crate::unit_cache::Levels::Memory,
             optimizer: self.optimizer(),
+            laid: crate::tier::words_laid(self, None),
+            held: &held,
         };
         let arena = self.arena.current();
         let (compiled, _, _) = self.units.file(
@@ -3552,7 +3564,7 @@ impl EngineBuilder {
     /// (`jit-design.md` §4).
     #[must_use]
     pub fn tier<T: Tier>(mut self) -> EngineBuilder {
-        self.bind_loops = Loops::bound::<T>;
+        self.bind_loops = Binding::bound::<T>;
         self.tier_extension = T::extension().map(Extension::unlisted);
         self.hooked = T::HOOKED;
         self
@@ -3796,7 +3808,7 @@ impl EngineBuilder {
                 #[cfg(debug_assertions)]
                 sense_leaks: self.sense_leaks,
                 // No loop is bound until the extensions have started.
-                loops: Loops::unstarted(),
+                binding: Binding::unstarted(),
                 locked: Vec::new(),
                 script_encodings: Vec::new(),
                 units,
@@ -4626,7 +4638,7 @@ impl Engine {
             ini_defaults: Vec::new(),
             ini_files: crate::api::request::IniFiles::default(),
             ini_entries: Vec::new(),
-            bind_loops: Loops::bound::<Nop>,
+            bind_loops: Binding::bound::<Nop>,
             tier_extension: Nop::extension(),
             hooked: Nop::HOOKED,
             extended_info: false,
@@ -4744,6 +4756,10 @@ impl Engine {
             opcodes: (shared.supplied.opcodes.links().iter())
                 .map(|&(_, observer)| observer)
                 .collect(),
+            classes: ClassTable {
+                classes: &shared.classes,
+                keys: &shared.class_keys,
+            },
         };
         // `zend_startup_modules`: each `MINIT` in bundle order, its process
         // start (once for the process, ADR-0010) and then its engine
@@ -4770,8 +4786,19 @@ impl Engine {
         }
         shared.state_slots =
             crate::api::request::StateSlots::of(&shared.extensions, &shared.engine_states);
+        // The opcodes the bundle observes, asked of each extension once
+        // its engine start is over, and the loop bound to them and to the
+        // tier the engine started: the one that tells their observers
+        // where any is declared and the one with no test where none is,
+        // as php resolves an opline's handler when it compiles it (design
+        // §5.8, §7.1), and `Nop`'s where the tier does not serve the
+        // engine ([`crate::tier::Tier::bound`]).
         if shared.refused.is_none() {
-            shared.observe_opcodes(&start, bind_loops);
+            let supplied = &mut shared.supplied;
+            (supplied.observers).retain(|(_, registered)| registered.is_none_or(|r| r(&start)));
+            shared.observers = supplied.observers.count();
+            shared.opcodes = crate::observer::ObservedOpcodes::start(&supplied.opcodes, &start);
+            shared.binding = bind_loops(shared);
         }
         shared.startup_raised = raised;
     }
@@ -5569,7 +5596,7 @@ impl Engine {
         script: bool,
         written: Option<&[u8]>,
     ) -> bool {
-        if script && !auto_file(req, b"auto_prepend_file", self.shared.loops.entry) {
+        if script && !auto_file(req, b"auto_prepend_file") {
             return false;
         }
         let compiled = self.primary(req, source, written);
@@ -5579,7 +5606,7 @@ impl Engine {
             req.note_compiled_program();
         }
         let ran = match compiled {
-            Some(Ok(unit)) => serve_unit(req, &unit, self.shared.loops.entry),
+            Some(Ok(unit)) => serve_unit(req, &unit),
             // `php_error_cb` renders it where it renders every
             // diagnostic, at the level the compiler refused at, and the
             // request ends before a frame is pushed.
@@ -5594,7 +5621,7 @@ impl Engine {
             }
             None => false,
         };
-        ran && (!script || auto_file(req, b"auto_append_file", self.shared.loops.entry))
+        ran && (!script || auto_file(req, b"auto_append_file"))
     }
 
     /// The program compiled: the source the host handed over under the
@@ -5742,7 +5769,7 @@ impl Engine {
             Begun::Refused(refused, sink) => return (refused, dispatched, sink),
         };
         if let Some(router) = router {
-            dispatched.routed = self.execute_router(&mut req, router);
+            dispatched.routed = Engine::execute_router(&mut req, router);
         }
         if router.is_none() || dispatched.routed == Routed::Declined {
             match named {
@@ -5776,9 +5803,9 @@ impl Engine {
     /// (`Z/sapi/cli/php_cli_server.c:2269-2270`), which is restored after
     /// it whatever it moved to, as the server's `VCWD_CHDIR(old_cwd)`
     /// (`:2284-2286`).
-    fn execute_router(&self, req: &mut Request, router: &[u8]) -> Routed {
+    fn execute_router(req: &mut Request, router: &[u8]) -> Routed {
         let left = req.standing_dir();
-        let answered = self.execute_router_files(req, router);
+        let answered = Engine::execute_router_files(req, router);
         req.close_served_files();
         req.go_back(left);
         answered
@@ -5786,9 +5813,8 @@ impl Engine {
 
     /// [`Engine::execute_router`] with the files it opens held:
     /// `auto_prepend_file`, the router and `auto_append_file`.
-    fn execute_router_files(&self, req: &mut Request, router: &[u8]) -> Routed {
-        let entry = self.shared.loops.entry;
-        if !auto_file(req, b"auto_prepend_file", entry) {
+    fn execute_router_files(req: &mut Request, router: &[u8]) -> Routed {
+        if !auto_file(req, b"auto_prepend_file") {
             return Routed::Taken;
         }
         let path = req
@@ -5796,7 +5822,7 @@ impl Engine {
             .expand_filepath(router)
             .unwrap_or_else(|| router.to_vec());
         let ran = match Engine::compile_program(req, &path, router, HandlePath::Kept) {
-            Some(Ok(unit)) => serve_unit(req, &unit, entry),
+            Some(Ok(unit)) => serve_unit(req, &unit),
             Some(Err(refused)) => {
                 refused_program(req, &refused, &path);
                 false
@@ -5806,7 +5832,7 @@ impl Engine {
         let returned = req.take_returned();
         let declined = ran && returned.as_bool() == Some(false);
         req.release(returned);
-        if ran && !auto_file(req, b"auto_append_file", entry) {
+        if ran && !auto_file(req, b"auto_append_file") {
             return Routed::Taken;
         }
         if declined {
@@ -6380,13 +6406,13 @@ pub(crate) fn refusal_raised(req: &mut Request, refused: &CompileError, file: &[
 /// file held open until the program has been served
 /// ([`Request::require_kept`]), and served where the program is, and
 /// whether it ran to its end; an entry left empty is nothing to serve.
-pub(crate) fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
+pub(crate) fn auto_file(req: &mut Request, name: &[u8]) -> bool {
     let Some(file) = req.ini().get(name).filter(|file| !file.is_empty()) else {
         return true;
     };
     let file = file.to_vec();
     match req.require_kept(&file) {
-        Ok(crate::api::request::Opened::Unit(unit)) => serve_unit(req, &unit, entry),
+        Ok(crate::api::request::Opened::Unit(unit)) => serve_unit(req, &unit),
         Ok(_) => true,
         Err(thrown) => {
             req.leave_pending(&thrown);
@@ -6450,7 +6476,7 @@ pub(crate) fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
 /// Whether the program ran to its end: not a fatal, a refused
 /// declaration or an `exit`, each of which php leaves by `zend_bailout`,
 /// and not a throwable no handler took.
-pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit, entry: Loop) -> bool {
+pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit) -> bool {
     if !note_compiled(req, unit, SourceKind::File) {
         return false;
     }
@@ -6474,6 +6500,9 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit, entry: Loop) -
         req.leave_frame(frame);
         return false;
     }
+    // The request's loop as the serving starts: a file served before it
+    // that handed its frame to the tier's loop leaves this one there.
+    let entry = req.loops().entry;
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
     }

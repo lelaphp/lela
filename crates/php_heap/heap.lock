@@ -440,6 +440,7 @@ VmStack::set_aside
 VmStack::top
 VmStack::top_and_frame_mut
 VmStack::top_mut
+VmStack::top_over_mut
 VmStack::unlink_room
 Zval
 Zval::COUNT_AT

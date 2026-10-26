@@ -11,6 +11,7 @@ use crate::archive::{ArchiveId, archives, lossy};
 use crate::entry::{self, Dir, Found};
 use crate::open;
 use crate::path::{self, Create, Exec};
+use crate::throwables::Throwables;
 
 /// `PHAR_MUNG_*`: the `$_SERVER` entries `mungServer()` names, one bit
 /// each, kept for a web request.
@@ -56,9 +57,10 @@ pub(crate) fn mount(req: &mut Request, inner: &[u8], outer: &[u8]) -> Result<(),
         match path::split_fname(req, &file, Exec::Either, Create::No)? {
             Ok(split) => {
                 if inner.len() > 7 && inner.starts_with(b"phar://") {
+                    let ce = Throwables::of(req)?;
                     return Err(throw_exception_ex(
                         req,
-                        "PharException",
+                        ce.phar_exception,
                         &format!(
                             "Can only mount internal paths within a phar archive, use a relative path instead of \"{}\"",
                             lossy(inner)
@@ -85,9 +87,10 @@ fn fallback(req: &mut Request, file: &[u8], inner: &[u8], outer: &[u8]) -> Resul
     if let Ok(split) = path::split_fname(req, inner, Exec::Either, Create::No)? {
         return mount_in(req, &split.arch, Some(&split.arch), &split.entry, outer);
     }
+    let ce = Throwables::of(req)?;
     Err(throw_exception_ex(
         req,
-        "PharException",
+        ce.phar_exception,
         &format!("Mounting of {} to {} failed", lossy(inner), lossy(outer)),
     ))
 }
@@ -104,16 +107,18 @@ fn mount_in(
 ) -> Result<(), Thrown> {
     let shown = arch.map_or_else(|| "(null)".to_string(), |a| lossy(a).into_owned());
     let Some(id) = archives(req).by_fname(fname) else {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "PharException",
+            ce.phar_exception,
             &format!("{shown} is not a phar archive, cannot mount"),
         ));
     };
     if !entry::mount(req, id, outer, path)? {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "PharException",
+            ce.phar_exception,
             &format!(
                 "Mounting of {} to {} within phar {shown} failed",
                 lossy(path),
@@ -141,24 +146,27 @@ pub(crate) fn mung_server(req: &mut Request, names: PhpArray) -> Result<(), Thro
         })
         .collect();
     if bits.is_empty() {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "PharException",
+            ce.phar_exception,
             &format!("No values passed to Phar::mungServer(), {LIST}"),
         ));
     }
     if bits.len() > 4 {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "PharException",
+            ce.phar_exception,
             &format!("Too many values passed to Phar::mungServer(), {LIST}"),
         ));
     }
     for bit in bits {
         let Some(bit) = bit else {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "PharException",
+                ce.phar_exception,
                 &format!("Non-string value passed to Phar::mungServer(), {LIST}"),
             ));
         };
@@ -484,7 +492,10 @@ pub(crate) fn web_phar(
     match open::open_executed(req, alias.as_deref())? {
         Ok(()) => {}
         Err(None) => return Ok(()),
-        Err(Some(error)) => return Err(throw_exception_ex(req, "PharException", &error)),
+        Err(Some(error)) => {
+            let ce = Throwables::of(req)?;
+            return Err(throw_exception_ex(req, ce.phar_exception, &error));
+        }
     }
     let served = req
         .variables()
@@ -582,10 +593,14 @@ fn rewritten(req: &mut Request, rewrite: &Callable, entry: &[u8]) -> Result<Vec<
     // then, the thrown one its previous (`zend_throw_exception_ex` over a
     // pending one).
     let answered = answered.map_err(|thrown| {
+        let ce = match Throwables::of(req) {
+            Ok(ce) => ce,
+            Err(fatal) => return fatal,
+        };
         php_ext::raising::throw_chained(
             req,
             thrown,
-            "PharException",
+            ce.phar_exception,
             "phar error: rewrite callback must return a string or false",
         )
     })?;
@@ -598,9 +613,10 @@ fn rewritten(req: &mut Request, rewrite: &Callable, entry: &[u8]) -> Result<Vec<
         return Err(do_403(req));
     }
     answered.give_up(req);
+    let ce = Throwables::of(req)?;
     Err(throw_exception_ex(
         req,
-        "PharException",
+        ce.phar_exception,
         "phar error: rewrite callback must return a string or false",
     ))
 }
@@ -701,19 +717,23 @@ fn mime_of(req: &mut Request, entry: &[u8], mimes: PhpArray) -> Result<(Vec<u8>,
             return match code {
                 0 => Ok((Vec::new(), Mime::Php)),
                 1 => Ok((Vec::new(), Mime::Phps)),
-                _ => Err(throw_exception_ex(
-                    req,
-                    "PharException",
-                    "Unknown mime type specifier used, only Phar::PHP, Phar::PHPS and a mime type string are allowed",
-                )),
+                _ => {
+                    let ce = Throwables::of(req)?;
+                    Err(throw_exception_ex(
+                        req,
+                        ce.phar_exception,
+                        "Unknown mime type specifier used, only Phar::PHP, Phar::PHPS and a mime type string are allowed",
+                    ))
+                }
             };
         }
         if let Some(mime) = value.as_str_bytes() {
             return Ok((mime.to_vec(), Mime::Other));
         }
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "PharException",
+            ce.phar_exception,
             "Unknown mime type specifier used (not a string or int), only Phar::PHP, Phar::PHPS and a mime type string are allowed",
         ));
     }

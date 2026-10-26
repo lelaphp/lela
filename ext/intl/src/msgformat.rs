@@ -165,6 +165,7 @@ impl ObjectHandlers for Handlers {
 /// `tz_set` copied, as php 8.5.12 copies them, and `umsg_clone`, the
 /// cached types left behind, or php's `Error` once the copy is made.
 fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let mut status = Code::ZERO;
     let (copy, pattern, zoned) = match object.native::<MessageFormatterObject>(req) {
         Some(o) => (
@@ -190,7 +191,7 @@ fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObje
         return Ok(new);
     };
     new.give_up(req);
-    Err(throw_error(req, "Error", message))
+    Err(throw_error(req, ce.error, message))
 }
 
 /// `MSG_FORMAT_METHOD_FETCH_OBJECT`: the object's error reset, and
@@ -230,6 +231,7 @@ fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObje
 /// int(0)
 /// ```
 fn fetch(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     error::reset_object::<MessageFormatterObject>(req, object);
     let opened = object
         .native::<MessageFormatterObject>(req)
@@ -237,7 +239,7 @@ fn fetch(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
     if !opened {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Found unconstructed MessageFormatter",
         ));
     }
@@ -814,6 +816,7 @@ fn formatted(
     converting: &mut Converting,
     args: &[(Vec<u16>, Formattable)],
 ) -> Answer<Vec<u16>> {
+    let ce = crate::throwables::Throwables::of(req)?;
     if converting.code(req).is_failure() {
         return Ok(None);
     }
@@ -821,7 +824,7 @@ fn formatted(
     // an object that code left unconstructed is the `Error`.
     let Some(formatter) = converting.site.formatter(req) else {
         let message = "Found unconstructed MessageFormatter";
-        let thrown = throw_error(req, "Error", message);
+        let thrown = throw_error(req, ce.error, message);
         converting.keep(req, thrown);
         return Ok(None);
     };

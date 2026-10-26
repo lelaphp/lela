@@ -219,9 +219,11 @@ fn refused_call(_: &mut Request, _: On<'_, '_>, _: u32, _: u32) -> Result<Stood,
 kernels! { Request => mod refusing { refused(func: u32) -> Stood; refused_call(func: u32, callee: u32) -> Stood; } }
 
 /// `ir` compiled for the host, the kernels that serve an opline or a call
-/// whole refusing.
-fn compiled(ir: &TraceIr) -> Option<Compiled> {
+/// whole refusing, but for the step where `step` lets the trace step an
+/// opline through the interpreter's handler.
+fn compiled(ir: &TraceIr, step: bool) -> Option<Compiled> {
     let symbols = Symbols::new(|kernel| match kernel {
+        Kernel::Step if step => (super::super::super::wrapped::step as *const ()).addr(),
         Kernel::Step => (refusing::refused as *const ()).addr(),
         Kernel::Handle => (super::super::super::wrapped::handle as *const ()).addr(),
         Kernel::PushCall | Kernel::Call => (refusing::refused_call as *const ()).addr(),
@@ -252,7 +254,13 @@ fn compiled(ir: &TraceIr) -> Option<Compiled> {
 
 /// `ir` entered on `frame`, through its one exit.
 fn entered(req: &mut Request, frame: FrameRef, ir: &TraceIr) -> Option<FrameRef> {
-    let body = compiled(ir)?;
+    entered_over(req, frame, ir, false)
+}
+
+/// `ir` entered on `frame`, through its one exit, its step kernel the
+/// interpreter's where `step`.
+fn entered_over(req: &mut Request, frame: FrameRef, ir: &TraceIr, step: bool) -> Option<FrameRef> {
+    let body = compiled(ir, step)?;
     let policy = testing::policy(&[("opcache.jit_buffer_size", "64K")]);
     let epoch = table::holding(req, &policy, &Outputs::none());
     let table = table::of_epoch(&epoch)?;
@@ -391,6 +399,62 @@ fn make_in_place(req: &mut Request, f: FrameRef) -> Option<Read> {
     read(req, g)
 }
 
+/// `f`'s push made by the interpreter's handler, its sends and its call
+/// made in place, the trace leaving in `g` at its entry: the push a
+/// trace takes from a handler it steps, where the handler laid the
+/// entry (`CallInfo::LAID_ENTRY`).
+fn make_over_handled_push(req: &mut Request, f: FrameRef) -> Option<Read> {
+    let plain = req.state::<Parity>().plain.clone()?;
+    let entry = plain.activation()?.opline();
+    let (init, _) = named(req, f, Opcode::InitFcall)?;
+    let (call, returns) = named(req, f, Opcode::DoUcall)?;
+    let (callee, me) = (plain.callee()?, func(req, f)?);
+    let send = |at: u32, n: u32| {
+        Op::Line(line(
+            Frame::ROOT,
+            at,
+            Opcode::SendVal,
+            Operand::Constant(Constant::Long(i64::from(n))),
+            Imm::Arg(n),
+        ))
+    };
+    let mut pushed = line(
+        Frame::ROOT,
+        init,
+        Opcode::InitFcall,
+        Operand::Unused,
+        Imm::None,
+    );
+    pushed.form = Form::Step;
+    let mut made = line(
+        Frame::ROOT,
+        call,
+        Opcode::DoUcall,
+        Operand::Unused,
+        Imm::Make { returns },
+    );
+    made.unwind = Some(crate::types::UnwindId(0));
+    let ops = vec![
+        Op::Line(pushed),
+        Op::InitCall {
+            frame: Frame::ROOT,
+            callee: Callee::User(callee),
+            began: Began::Here,
+            plain: Some(plain),
+        },
+        send(init + 1, 1),
+        send(init + 2, 2),
+        Op::Line(made),
+        Op::Enter {
+            frame: Frame(1),
+            stores: Vec::new(),
+        },
+    ];
+    let ir = trace(frames(me, callee), ops, (Frame(1), entry));
+    let g = entered_over(req, f, &ir, true)?;
+    read(req, g)
+}
+
 /// What `g`'s `RETURN` at `ret` returns, as `types` names it: `7`, or the
 /// constant array it returns, copied as it is.
 fn returning(req: &Request, g: FrameRef, ret: u32) -> Option<(Operand, Returned)> {
@@ -522,6 +586,82 @@ impl Tier for Paired {
                 .build("parity"),
         )
     }
+}
+
+/// The tier that makes `f`'s call over the push the interpreter's
+/// handler makes once `g`'s runtime cache is laid down: the first call
+/// served as it stands, the second by the handlers, the third in place
+/// over the handler's push.
+struct LaidPaired;
+
+impl Tier for LaidPaired {
+    type State = ();
+
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
+        if site != Site::Entry || function_of(req, frame).as_deref() != Some(&b"f"[..]) {
+            return Flow::Continue;
+        }
+        let calls = req.state::<Parity>().calls;
+        req.state::<Parity>().calls += 1;
+        match calls {
+            1 => {
+                let Some(reads) = by_kernel(req, frame) else {
+                    return Flow::Bail(tier::Fatal::error("the call by the handlers"));
+                };
+                req.state::<Parity>().by_kernel = reads;
+                Flow::Resume(frame)
+            }
+            2 => {
+                let made = make_over_handled_push(req, frame);
+                req.state::<Parity>().in_place.made = made;
+                match tier::current(req) {
+                    Some(at) => Flow::Resume(at),
+                    None => Flow::Bail(tier::Fatal::error("no frame after the call")),
+                }
+            }
+            _ => Flow::Continue,
+        }
+    }
+
+    fn extension() -> Option<Extension> {
+        Some(
+            ExtensionBuilder::default()
+                .request_state::<Parity>()
+                .build("laid-parity"),
+        )
+    }
+}
+
+/// A call whose push the interpreter's `INIT_FCALL` made with its entry
+/// laid, the callee's runtime cache and first opline written as it
+/// pushed, made in place leaves the callee's frame and the stack as
+/// `enter_call` makes them over the same push.
+#[test]
+fn a_call_made_in_place_over_a_laid_push_enters_as_the_engines_own() {
+    let engine = testing::engine::<LaidPaired>(&[]);
+    let (served, parity) = Scratch::new().serve_kept::<Parity>(
+        &engine,
+        "function g($a, $b) { return 7; }
+        function f() { $r = g(1, 2); echo $r, \"\\n\"; }
+        f(); f(); f(); f();",
+    );
+    assert_eq!(stdout(&served), "7\n7\n7\n7\n", "{:?}", served.fatal);
+    let parity = parity.unwrap_or_default();
+    assert_eq!(parity.calls, 4);
+    let Reads { pushed, made, .. } = parity.by_kernel;
+    // The handler's push laid the entry: the callee's cache is in the
+    // header of the call still being built.
+    let cache = parity.plain.as_ref().and_then(PlainCall::activation);
+    let laid = pushed.as_ref().map(|read| {
+        let at = at(FRAME.cache());
+        let mut word = [0; 4];
+        word.copy_from_slice(&read.room[at..at + 4]);
+        u32::from_ne_bytes(word)
+    });
+    assert!(cache.is_some());
+    assert_eq!(laid, cache.map(|activation| activation.cache()));
+    assert!(made.is_some());
+    assert_eq!(parity.in_place.made, made, "the call");
 }
 
 /// The push, the call and the leave written in place leave the stack as

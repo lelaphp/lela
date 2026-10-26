@@ -212,6 +212,7 @@ pub(crate) fn convert_to_datetimezone(
     zone: &TimeZone,
     outside: &mut Outside,
 ) -> Result<Option<Owner<PhpObject>>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let Some(id) = tz::php_intl_tz_id(zone) else {
         outside.set(req, Code::ILLEGAL_ARGUMENT, "could not obtain TimeZone id")?;
         return Ok(None);
@@ -231,7 +232,7 @@ pub(crate) fn convert_to_datetimezone(
         return Err(fatal(req, "InternalError: DateTimeZone is not linked"));
     };
     let argument = PhpString::new(req, &id)?;
-    let made = instantiate(req, class, &[Value::string(*argument)]);
+    let made = instantiate(req, class, &[Value::string(*argument)], &[]);
     argument.give_up(req);
     match made {
         Ok(object) => Ok(Some(object)),
@@ -239,7 +240,7 @@ pub(crate) fn convert_to_datetimezone(
         // string.
         Err(thrown) => {
             let message = "DateTimeZone constructor threw exception";
-            Err(throw_chained(req, thrown, "IntlException", message))
+            Err(throw_chained(req, thrown, ce.intl_exception, message))
         }
     }
 }
@@ -282,8 +283,12 @@ pub(crate) fn zone_sorted<R>(
 /// `timezone_throw_exception_with_call_location`: an `IntlException`
 /// thrown as an error, its message prefixed with the native.
 fn throw_located(req: &mut Request, message: &str) -> Thrown {
+    let ce = match crate::throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     let text = format!("{}(): {message}", req.frames().active_function_name());
-    throw_error(req, "IntlException", &text)
+    throw_error(req, ce.intl_exception, &text)
 }
 
 /// `timezone_process_timezone_argument`: the zone a time zone argument

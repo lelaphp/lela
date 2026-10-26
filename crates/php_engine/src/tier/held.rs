@@ -215,40 +215,58 @@ impl<'u> Scope<'u> {
 /// its number modulo [`KEPT`].
 #[derive(Default)]
 pub(super) struct Kept<'u> {
-    frames: Places<'u>,
-    functions: Places<'u>,
+    frames: Places<&'u OpArray>,
+    functions: Places<Called<'u>>,
 }
 
-/// [`KEPT`] places, each a number and the op array kept for it: the
-/// numbers apart from the op arrays, so that a new one, and one
-/// forgotten, is written as zeroes end to end with no padding between,
-/// as a scope lays one down for each `eval` it serves. A place that
-/// keeps no op array keeps nothing, whatever its number.
-#[derive(Default)]
-struct Places<'u> {
+/// What the loop keeps of a function it called: the op array it serves
+/// and its entry safepoint ([`exec::entry_of`]), which php's compiler
+/// leaves the `RECV*` prologue's skip to and the loop reads at every
+/// call, as `i_init_func_execute_data` reads `op_array->num_args`.
+#[derive(Clone, Copy)]
+pub(super) struct Called<'u> {
+    pub(super) code: &'u OpArray,
+    pub(super) entry: u32,
+}
+
+/// [`KEPT`] places, each a number and what is kept for it: the numbers
+/// apart from the values, so that a new one, and one forgotten, is
+/// written as zeroes end to end with no padding between, as a scope
+/// lays one down for each `eval` it serves. A place that keeps nothing
+/// keeps nothing, whatever its number.
+struct Places<T> {
     numbers: [u32; KEPT],
-    codes: [Option<&'u OpArray>; KEPT],
+    kept: [Option<T>; KEPT],
 }
 
-impl<'u> Places<'u> {
-    /// The op array kept for `number`, where its place keeps one for it.
+impl<T> Default for Places<T> {
+    fn default() -> Places<T> {
+        Places {
+            numbers: [0; KEPT],
+            kept: [const { None }; KEPT],
+        }
+    }
+}
+
+impl<T: Copy> Places<T> {
+    /// What is kept for `number`, where its place keeps it.
     #[inline]
-    fn get(&self, number: u32) -> Option<&'u OpArray> {
+    fn get(&self, number: u32) -> Option<T> {
         let at = number as usize % KEPT;
         if *self.numbers.get(at)? == number {
-            *self.codes.get(at)?
+            *self.kept.get(at)?
         } else {
             None
         }
     }
 
-    /// `code` kept for `number`, in the place of whatever its place kept.
+    /// `value` kept for `number`, in the place of whatever its place kept.
     #[inline]
-    fn set(&mut self, number: u32, code: &'u OpArray) {
+    fn set(&mut self, number: u32, value: T) {
         let at = number as usize % KEPT;
-        if let (Some(kept), Some(place)) = (self.numbers.get_mut(at), self.codes.get_mut(at)) {
+        if let (Some(kept), Some(place)) = (self.numbers.get_mut(at), self.kept.get_mut(at)) {
             *kept = number;
-            *place = Some(code);
+            *place = Some(value);
         }
     }
 }
@@ -377,11 +395,11 @@ impl Units {
 }
 
 impl<'u> Kept<'u> {
-    /// The op array of a callee of `function`, pushed by a call to a
-    /// function the loop has called before; none otherwise, and the loop
-    /// enters it.
+    /// The op array of a callee of `function`, and its entry, pushed by
+    /// a call to a function the loop has called before; none otherwise,
+    /// and the loop enters it.
     #[inline]
-    pub(super) fn called(&self, function: Function) -> Option<&'u OpArray> {
+    pub(super) fn called(&self, function: Function) -> Option<Called<'u>> {
         self.functions.get(function.0)
     }
 
@@ -405,7 +423,8 @@ impl<'u> Kept<'u> {
 
     /// `function`, called and serving `code`: kept for the next call.
     fn keep_called(&mut self, function: Function, code: &'u OpArray) {
-        self.functions.set(function.0, code);
+        let entry = exec::entry_of(code);
+        self.functions.set(function.0, Called { code, entry });
     }
 
     /// Every frame the loop entered forgotten, where it goes on along an

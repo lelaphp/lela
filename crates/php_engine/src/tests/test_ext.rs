@@ -293,7 +293,10 @@ pub(crate) fn observed_name(observed: &Observed<'_>) -> String {
             .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
             .unwrap_or_default();
         return match observed.function_scope() {
-            Some(class) => format!("{}::{name}", observed.symbols().class_name(class)),
+            Some(class) => format!(
+                "{}::{name}",
+                String::from_utf8_lossy(observed.symbols().class_name(class))
+            ),
             None => name,
         };
     }

@@ -4,6 +4,7 @@
 //! handler table php installs on them (`sxe_object_handlers`), each slot
 //! the Rust of its C function.
 
+use crate::throwables::Throwables;
 use php_ext::abi::{
     ClassIterator, CloneObj, DimensionRead, GcTable, ObjectHandlers, PropertyPlace, PropertyRead,
     PropertyTest, Std,
@@ -114,9 +115,16 @@ impl View {
     /// `GET_NODE`: the node, or php's `Error` for an object nothing
     /// initialised.
     pub(crate) fn node(&self, req: &mut Request) -> Result<Node, Thrown> {
-        self.node.ok_or_else(|| {
-            throw_error(req, "Error", "SimpleXMLElement is not properly initialized")
-        })
+        if let Some(node) = self.node {
+            Ok(node)
+        } else {
+            let ce = Throwables::of(req)?;
+            Err(throw_error(
+                req,
+                ce.error,
+                "SimpleXMLElement is not properly initialized",
+            ))
+        }
     }
 
     /// `match_ns`.
@@ -448,7 +456,12 @@ fn prop_dim_read(
     let view = View::of(req, object);
     match member {
         Member::Append if matches!(view.walk, Walk::Attributes(_)) => {
-            return Err(throw_error(req, "Error", "Cannot create unnamed attribute"));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(
+                req,
+                ce.error,
+                "Cannot create unnamed attribute",
+            ));
         }
         Member::Append => access = Access::Elements,
         Member::Index(_) if !matches!(view.walk, Walk::Attributes(_)) => access = Access::Elements,
@@ -465,7 +478,12 @@ fn prop_dim_read(
                 .and_then(Node::parent)
                 .is_some_and(|p| p.kind() == Kind::Document)
         {
-            return Err(throw_error(req, "Error", "Cannot create unnamed attribute"));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(
+                req,
+                ce.error,
+                "Cannot create unnamed attribute",
+            ));
         }
         node = first;
         attr = first_attr;
@@ -545,7 +563,7 @@ fn text_of(req: &mut Request, value: &Value, access: Access) -> Result<Vec<u8>, 
 
 /// php's `TypeError` text for a value that has no text to assign, a
 /// complex type; `None` for one that has.
-fn complex(req: &mut Request, value: &Value, access: Access) -> Option<String> {
+fn complex(req: &mut Request, value: &Value, access: Access) -> Option<Vec<u8>> {
     let value = value.deref();
     let exact = match value.as_ref() {
         ValueRef::Object(o) => lookup_class(req, b"SimpleXMLElement")
@@ -568,9 +586,8 @@ fn complex(req: &mut Request, value: &Value, access: Access) -> Option<String> {
                 Access::Elements => "properties",
             };
             let given = value_name(req, &value);
-            Some(format!(
-                "It's not possible to assign a complex type to {target}, {given} given"
-            ))
+            let head = format!("It's not possible to assign a complex type to {target}, ");
+            Some([head.as_bytes(), &given, b" given"].concat())
         }
     }
 }
@@ -644,9 +661,10 @@ fn hits(
         (Access::Attributes, Member::Append) => None,
         (Access::Elements, Member::Append | Member::Index(_)) => {
             if mine.kind() == Kind::Attribute {
+                let ce = Throwables::of(req)?;
                 return Err(throw_error(
                     req,
-                    "Error",
+                    ce.error,
                     "Cannot create duplicate attribute",
                 ));
             }
@@ -697,11 +715,14 @@ fn write_access(
     access: Access,
 ) -> Result<Access, Thrown> {
     match member {
-        Member::Append if matches!(view.walk, Walk::Attributes(_)) => Err(throw_error(
-            req,
-            "Error",
-            "Cannot append to an attribute list",
-        )),
+        Member::Append if matches!(view.walk, Walk::Attributes(_)) => {
+            let ce = Throwables::of(req)?;
+            Err(throw_error(
+                req,
+                ce.error,
+                "Cannot append to an attribute list",
+            ))
+        }
         Member::Append | Member::Index(_) if !matches!(view.walk, Walk::Attributes(_)) => {
             Ok(Access::Elements)
         }
@@ -1843,9 +1864,10 @@ impl ObjectHandlers for Handlers {
         by_ref: bool,
     ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
         if by_ref {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "An iterator cannot be used with foreach by reference",
             ));
         }

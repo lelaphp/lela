@@ -71,7 +71,7 @@ impl Request {
         let frame = self.fatal_of(pushed)?;
         self.keep_file_statics(frame);
         crate::observer::call(self, frame);
-        let reenter = self.shared.loops.reenter;
+        let reenter = self.loops().reenter;
         let served = reenter(self, frame);
         let served = self.fatal_of(served);
         // `zend_detach_symbol_table` on the way out, so what the file

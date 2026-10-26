@@ -24,6 +24,7 @@ use super::constants::{
     EXTR_REFS, EXTR_SKIP,
 };
 use crate::string::KeyBytes;
+use crate::throwables::Throwables;
 
 /// `php_valid_var_name`: `[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*`.
 fn valid_var_name(name: &[u8]) -> bool {
@@ -71,7 +72,11 @@ fn assign(req: &mut Request, name: PhpString, value: Value) -> Result<(), Thrown
 }
 
 fn reassign_this(req: &mut Request) -> Thrown {
-    throw_error(req, "Error", "Cannot re-assign $this")
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    throw_error(req, ce.error, "Cannot re-assign $this")
 }
 
 /// `extract(array &$array, int $flags = EXTR_OVERWRITE, string $prefix = ""): int`,
@@ -386,9 +391,10 @@ fn checked(
         return Err(arg_value_error(req, 2, "be a valid extract type"));
     }
     if kind > EXTR_SKIP && kind <= EXTR_PREFIX_IF_EXISTS && !prefix_given {
+        let ce = Throwables::of(req)?;
         return Err(argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             3,
             "is required when using this extract type",
         ));
@@ -682,7 +688,8 @@ fn compact_var(
             // would run to the thread's end.
             call_stack_end(req)?;
             if array.is_recursive() {
-                return Err(throw_error(req, "Error", "Recursion detected"));
+                let ce = Throwables::of(req)?;
+                return Err(throw_error(req, ce.error, "Recursion detected"));
             }
             array.protect();
             // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(entry), value_ptr)`
@@ -701,7 +708,12 @@ fn compact_var(
             docref(
                 req,
                 Level::Warning,
-                &format!("Argument #{position} must be string or array of strings, {name} given"),
+                &[
+                    format!("Argument #{position} must be string or array of strings, ").as_bytes(),
+                    name.as_slice(),
+                    b" given".as_slice(),
+                ]
+                .concat(),
             );
         }
     }

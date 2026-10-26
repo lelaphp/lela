@@ -1274,6 +1274,7 @@ impl Callbacks for Served<'_> {
 /// callbacks told of each after (`UCNV_CLONE`), and the clone's error its
 /// own.
 fn clone_converter(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject>> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let (src, dest) = converters(req, object);
     let mut pending = Pending::default();
     let mut cloned = |req: &mut Request, converter: Option<ConverterId>| {
@@ -1292,7 +1293,7 @@ fn clone_converter(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObje
             for copy in [src, dest].into_iter().flatten() {
                 copy.close(req);
             }
-            let thrown = throw_error(req, "Error", "Failed to clone UConverter");
+            let thrown = throw_error(req, ce.error, "Failed to clone UConverter");
             return pending.answer(req, Err(thrown));
         }
     };

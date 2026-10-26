@@ -18,6 +18,7 @@ use crate::obj::{
     IntervalObj, PERIOD, PERIOD_FIELDS, PeriodObj, PeriodState, class_id, new_date, period_fields,
     period_interval, rows_array, std_rows, uninitialized, with_period, with_time,
 };
+use crate::throwables::Throwables;
 
 /// `INT_MAX - 8`, the most recurrences a period may have.
 const MAX_RECURRENCES: i64 = 2_147_483_647 - 8;
@@ -61,16 +62,20 @@ fn from_iso(req: &mut Request, func: &str, text: &[u8]) -> Result<Iso, Thrown> {
         })
     })?;
     let shown = String::from_utf8_lossy(text).into_owned();
-    match read {
-        Ok(iso) => Ok(iso),
-        Err(None) => Err(throw_exception_ex(
+    let what = match read {
+        Ok(iso) => return Ok(iso),
+        Err(what) => what,
+    };
+    let ce = Throwables::of(req)?;
+    match what {
+        None => Err(throw_exception_ex(
             req,
-            "DateMalformedPeriodStringException",
+            ce.date_malformed_period_string_exception,
             &format!("Unknown or bad format ({shown})"),
         )),
-        Err(Some(what)) => Err(throw_exception_ex(
+        Some(what) => Err(throw_exception_ex(
             req,
-            "DateMalformedPeriodStringException",
+            ce.date_malformed_period_string_exception,
             &format!("{func}(): ISO interval must contain {what}, \"{shown}\" given"),
         )),
     }
@@ -86,9 +91,10 @@ fn finish(
     recurrences: i64,
 ) -> Result<(), Thrown> {
     if period.end.is_none() && !(1..=MAX_RECURRENCES).contains(&recurrences) {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "DateMalformedPeriodStringException",
+            ce.date_malformed_period_string_exception,
             &format!(
                 "{func}(): Recurrence count must be greater or equal to 1 and lower than {}",
                 MAX_RECURRENCES + 1
@@ -100,9 +106,10 @@ fn finish(
     let total =
         recurrences + i64::from(period.include_start_date) + i64::from(period.include_end_date);
     if total > MAX_RECURRENCES {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "DateMalformedStringException",
+            ce.date_malformed_string_exception,
             &format!(
                 "{func}(): Recurrence count must be greater or equal to 1 and lower than {} (including options)",
                 MAX_RECURRENCES + 1
@@ -455,9 +462,13 @@ fn from_hash(req: &mut Request, hash: PhpArray, period: &mut PeriodObj) -> Resul
 
 /// php's refusal of a hash that is no period.
 fn invalid(req: &mut Request) -> Thrown {
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     throw_error(
         req,
-        "Error",
+        ce.error,
         "Invalid serialization data for DatePeriod object",
     )
 }

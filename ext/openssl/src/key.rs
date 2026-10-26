@@ -22,6 +22,7 @@ use crate::constants::{
 use crate::decode::{Arg, Origin, c_string, cert_from_str, check_path, defer, finish, raised};
 use crate::ffi::key::{KeyContext, Operation};
 use crate::ffi::{self, Bio, Cipher, KeyKind, PKey};
+use crate::throwables::Throwables;
 use crate::{config, errors_restore_mark, errors_set_mark, keydata, put, put_bytes, store_errors};
 
 /// A `php_openssl_pkey_object`: the key, and whether it was made as a
@@ -136,9 +137,10 @@ pub(crate) fn check_int_len(
 ) -> Result<(), Thrown> {
     if i32::try_from(len).is_err() {
         let tail = format!("{what} is too long");
+        let ce = Throwables::of(req)?;
         return Err(php_ext::raising::argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             arg,
             &tail,
         ));

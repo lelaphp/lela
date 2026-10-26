@@ -223,7 +223,7 @@ fn create_object(
 
 /// The class's name, as the warnings print it.
 fn class_name(req: &Request, object: PhpObject) -> String {
-    req.symbols().class_name(object.class())
+    String::from_utf8_lossy(req.symbols().class_name(object.class())).into_owned()
 }
 
 /// A method's `is not implemented!` warning.
@@ -720,10 +720,13 @@ impl UserStream {
             Some(false) => OptionAnswer::Ok,
             None => {
                 let name = crate::api::coerce::value_name(req, &value);
-                let text = format!(
-                    "{}::stream_eof value must be of type bool, {name} given",
-                    class_name(req, self.object)
-                );
+                let text = [
+                    req.symbols().class_name(self.object.class()),
+                    b"::stream_eof value must be of type bool, ",
+                    name.as_slice(),
+                    b" given",
+                ]
+                .concat();
                 docref(req, Level::Warning, &text);
                 OptionAnswer::Err
             }
@@ -929,10 +932,13 @@ impl Ops for UserStream {
                     return Some(b);
                 }
                 let name = crate::api::coerce::value_name(req, &value);
-                let text = format!(
-                    "{}::stream_truncate value must be of type bool, {name} given",
-                    class_name(req, self.object)
-                );
+                let text = [
+                    req.symbols().class_name(self.object.class()),
+                    b"::stream_truncate value must be of type bool, ",
+                    name.as_slice(),
+                    b" given",
+                ]
+                .concat();
                 docref(req, Level::Warning, &text);
                 value.give_up(req);
                 Some(false)

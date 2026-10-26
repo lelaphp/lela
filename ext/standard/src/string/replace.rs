@@ -15,6 +15,7 @@ use php_ext::values::{Key, Owner, PhpArray, PhpString, SmartStr, Value};
 
 use super::{KeyBytes, long, lower, memnstr};
 use crate::ffi::memchr;
+use crate::throwables::Throwables;
 
 /// `str_replace(array|string $search, array|string $replace,
 /// string|array $subject, &$count = null): string|array`: each search
@@ -1028,17 +1029,19 @@ pub(super) fn substr_replace(
     match string {
         Union::B(string) => {
             if matches!(from, Union::A(_)) {
+                let ce = Throwables::of(req)?;
                 return Err(argument_error(
                     req,
-                    "TypeError",
+                    ce.type_error,
                     3,
                     "cannot be an array when working on a single string",
                 ));
             }
             if matches!(length, Some(Union::A(_))) {
+                let ce = Throwables::of(req)?;
                 return Err(argument_error(
                     req,
-                    "TypeError",
+                    ce.type_error,
                     4,
                     "cannot be an array when working on a single string",
                 ));
