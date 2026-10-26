@@ -82,11 +82,11 @@ pub(crate) fn hook(req: &mut Request, beneath: Beneath<'_, chain::Upload>) -> Re
 /// Once the session's `RINIT` was served, `PG(modules_activated)`, a step
 /// is nothing (`Z/ext/session/session.c:3225-3228`): a body the program
 /// reads with `request_parse_body()` leaves the running session's id,
-/// status and variables alone and writes no progress into it, whatever
-/// the form names:
+/// status and variables alone, and writes no progress into it or into
+/// the session the form names:
 ///
 /// ```php
-/// $d = __DIR__; $sid = "rpbwitness"; $f = "$d/sess_$sid";
+/// $d = __DIR__; $f = "$d/sess_rpbwitness"; $g = "$d/sess_rpbform";
 /// file_put_contents("$d/w.php", <<<'PHP'
 /// <?php
 /// session_id("rpbwitness"); session_start(); $_SESSION["a"] = 1;
@@ -95,7 +95,7 @@ pub(crate) fn hook(req: &mut Request, beneath: Beneath<'_, chain::Upload>) -> Re
 /// session_write_close();
 /// PHP);
 /// $b = "XYZ";
-/// $body = "--$b\r\nContent-Disposition: form-data; name=\"PHPSESSID\"\r\n\r\n$sid\r\n"
+/// $body = "--$b\r\nContent-Disposition: form-data; name=\"PHPSESSID\"\r\n\r\nrpbform\r\n"
 ///     . "--$b\r\nContent-Disposition: form-data; name=\"PHP_SESSION_UPLOAD_PROGRESS\"\r\n\r\nk\r\n"
 ///     . "--$b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"f.txt\"\r\n\r\n1\r\n--$b--\r\n";
 /// $cmd = [dirname(PHP_BINARY) . "/php-cgi", "-n", "-q", "-d", "session.save_path=$d", "-d", "session.use_cookies=0",
@@ -108,8 +108,8 @@ pub(crate) fn hook(req: &mut Request, beneath: Beneath<'_, chain::Upload>) -> Re
 /// fwrite($pipes[0], $body); fclose($pipes[0]);
 /// echo str_replace($d, "D", stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]));
 /// proc_close($p);
-/// var_dump(@file_get_contents($f));
-/// @unlink($f); unlink("$d/w.php");
+/// var_dump(@file_get_contents($f), file_exists($g));
+/// @unlink($f); @unlink($g); unlink("$d/w.php");
 /// ```
 /// ```expect
 /// X-Powered-By: PHP/8.5.12
@@ -132,6 +132,7 @@ pub(crate) fn hook(req: &mut Request, beneath: Beneath<'_, chain::Upload>) -> Re
 ///   int(1)
 /// }
 /// string(6) "a|i:1;"
+/// bool(false)
 /// ```
 fn step(req: &mut Request, event: &Upload<'_>) -> Result<bool, Thrown> {
     if !ini_bool(req, b"session.upload_progress.enabled") {
