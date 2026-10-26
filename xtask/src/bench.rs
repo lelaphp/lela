@@ -1098,7 +1098,7 @@ pub fn run(
             log
         }
     };
-    each(
+    measure_bars(
         store,
         &snapshot,
         bars,
@@ -1113,7 +1113,7 @@ pub fn run(
 /// row of `tolerances` and its earlier nights in `log`, rendered and
 /// recorded, a regressed series's ticket left for the lane. The bars are
 /// handed in, so a test feeds the arms' timings from a stub.
-fn each(
+fn measure_bars(
     store: &Store,
     snapshot: &Snapshot,
     bars: Vec<Declared>,
@@ -1914,7 +1914,7 @@ mod tests {
             ("30ms", |r| 30.0 + f64::from(r % 2)),
         ];
         let bars = vec![stubbed("aa-differs", Held::Control, arms)];
-        super::each(
+        super::measure_bars(
             &store,
             &snapshot,
             bars,
@@ -1943,7 +1943,7 @@ mod tests {
             ("b", |r| 10.0 + f64::from((r + 1) % 2)),
         ];
         let bars = vec![stubbed("aa-same", Held::Control, same)];
-        super::each(
+        super::measure_bars(
             &store,
             &snapshot,
             bars,
@@ -1997,7 +1997,7 @@ mod tests {
         let run = |log: &[Reading]| {
             let bars = vec![stubbed(id, Held::Series, arms)];
             let ask = (super::Label::Smoke, "");
-            super::each(
+            super::measure_bars(
                 &store,
                 &snapshot,
                 bars,
