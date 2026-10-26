@@ -44,3 +44,11 @@ pub(crate) fn segfault() -> ! {
     // it to, the process still ends rather than run on past the fault.
     std::process::abort()
 }
+
+/// `raise(3)` of `signal` to this thread: whether it was sent, which a
+/// number that names no signal is not.
+pub(crate) fn raise(signal: libc::c_int) -> bool {
+    // SAFETY: `raise(3)` takes any number and refuses one that names no
+    // signal; a signal sent meets the disposition the process set.
+    unsafe { libc::raise(signal) == 0 }
+}

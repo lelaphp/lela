@@ -7,8 +7,8 @@
 //! at their places.
 
 use php_ext::abi::{
-    ExtensionBuilder, FromArgument, Instance, Iterable, NamedVariadic, Never, Passed, Path, Raw,
-    Ref, Union, Untyped, Variadic,
+    Callable, ExtensionBuilder, FromArgument, Instance, Iterable, NamedVariadic, Never, Passed,
+    Path, Raw, Ref, Union, Untyped, Variadic,
 };
 use php_ext::attr::php_function;
 use php_ext::call::{call, instantiate, known_method, lookup_class};
@@ -51,6 +51,8 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
         zend_leak_variable::declared(),
         internals::zend_leak_bytes::declared(),
         internals::zend_delref::declared(),
+        internals::zend_test_emalloc::declared(),
+        zend_test_callback::declared(),
         zend_string_or_object::declared(),
         zend_string_or_object_or_null::declared(),
         zend_string_or_stdclass::declared(),
@@ -76,6 +78,7 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
         zend_test_is_string_marked_as_valid_utf8::declared(),
         internals::zend_get_map_ptr_last::declared(),
         internals::zend_test_crash::declared(),
+        internals::zend_test_raise_and_throw::declared(),
         zend_test_fill_packed_array::declared(),
         zend_test_create_throwing_resource::declared(),
         get_open_basedir::declared(),
@@ -90,6 +93,7 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
         internals::zend_test_uri_parser::declared(),
         zend_test_gh19792::declared(),
         zend_test_handle_post_data::declared(),
+        zend_new_singleton_array::declared(),
         namespaced_func::declared(),
         alias(void(), &ns2("namespaced_deprecated_func"), true),
         alias(void(), &ns2("namespaced_aliased_func"), false),
@@ -395,6 +399,27 @@ fn zend_leak_variable(req: &mut Request, variable: Value) {
     }
     let leaked = Owner::take(req, variable);
     req.state::<crate::State>().leaked.push(leaked);
+}
+
+/// `zend_test_callback(callable $callback): void`: the callable called
+/// with no arguments and what it answers dropped, so a fatal or a throw
+/// inside it ends this call as it ends the callable
+/// (`Zend/tests/oom_soft_limit_in_callback.phpt`).
+///
+/// ```php
+/// zend_test_callback(function () { echo "called\n"; return 42; });
+/// try { zend_test_callback(function () { throw new Exception("thrown"); }); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// try { zend_test_callback('no_such_function'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// called
+/// thrown
+/// zend_test_callback(): Argument #1 ($callback) must be a valid callback, function "no_such_function" not found or invalid function name
+/// ```
+#[php_function]
+fn zend_test_callback(req: &mut Request, callback: Callable) -> Result<(), Thrown> {
+    call(req, &callback, &[])?.give_up(req);
+    Ok(())
 }
 
 /// `zend_string_or_object(object|string $param): object|string`,
@@ -1265,6 +1290,32 @@ impl ReadPost for PostStream {
     fn read_post(&mut self, req: &mut Request, buf: &mut [u8]) -> usize {
         self.0.read_into(req, buf).unwrap_or(0)
     }
+}
+
+/// `zend_new_singleton_array(): array`, `array_init_singleton`: an empty
+/// array that grows as any other.
+///
+/// ```php
+/// $a = zend_new_singleton_array();
+/// var_dump($a, count($a));
+/// $a[] = 'first';
+/// $a['key'] = 'second';
+/// var_dump($a);
+/// ```
+/// ```expect
+/// array(0) {
+/// }
+/// int(0)
+/// array(2) {
+///   [0]=>
+///   string(5) "first"
+///   ["key"]=>
+///   string(6) "second"
+/// }
+/// ```
+#[php_function]
+fn zend_new_singleton_array(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
+    PhpArray::new(req)
 }
 
 /// `zend_test_internal_dnf_arguments()`, taking and returning
