@@ -67,14 +67,14 @@ pub(crate) mod dump;
 mod tests;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
 use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::ir::SourceLoc;
 use cranelift_codegen::isa::{self, OwnedTargetIsa};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::{Context, Final, MachSrcLoc};
-use php_engine::tier::{FuncRef, MapPtrRaw, PlainCall};
+use php_engine::tier::{FuncRef, LandingIndex, MapPtrRaw, PlainCall};
 use php_unit::{MapPtrOffset, OplineIdx};
 
 use crate::policy::{Mode, Policy};
@@ -141,8 +141,6 @@ pub(crate) struct Compiled {
     /// jump to its side trace; the code holds their address, so they live
     /// as long as it.
     pub(crate) slots: EntrySlots,
-    /// Its landing slots, which the code reads where it escapes.
-    pub(crate) landings: LandingSlots,
     /// The plain calls the code pushes in place, in the order it reads
     /// their headers in, the request's, at [`IMAGES_AT`].
     pub(crate) calls: Box<[PlainCall]>,
@@ -300,97 +298,23 @@ impl EntrySlots {
     }
 }
 
-/// A trace's landing slots (`jit-design.md` §4.9): where a trace escapes,
-/// a return that leaves its lowest frame at an opline it does not go on at,
-/// php's `jit_stub_trace_escape`, which goes on into the handler of that
-/// opline, the trace compiled there where one is
-/// (`Z/ext/opcache/jit/zend_jit_ir.c:11188-11250`), its code compares where
-/// the frame stands, its op array and opline, with each slot and jumps to
-/// the trace the slot names where one holds it, and answers
-/// [`ESCAPED`] as before where none does. A slot is written once, its
-/// place before its trace with release, by the crossing the first time it
-/// enters a trace compiled at a landing the trace escaped to
-/// ([`LandingSlots::remember`]); a landing's word that reads compiled
-/// reads so for as long as the table stands, so the slot names what the
-/// interpreter would have entered there. [`LANDINGS`] of them, the
-/// landings first entered; an escape to another is answered as before.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct LandingSlots(Arc<[LandingSlot]>);
-
-/// One landing slot: the trace entered there, and where, as
-/// [`LandingSlots::key`] writes it, zero while the slot is free.
-#[repr(C)]
-#[derive(Debug, Default)]
-pub(crate) struct LandingSlot {
-    entrance: AtomicPtr<Entrance>,
-    key: AtomicU64,
-}
-
-/// How many landing slots a trace has.
-pub(crate) const LANDINGS: usize = 2;
-
-/// Where compiled code reads a landing slot's fields, and its stride.
-pub(crate) const LANDING_ENTRANCE: i32 = 0;
-pub(crate) const LANDING_KEY: i32 = 8;
-pub(crate) const LANDING_BYTES: usize = 16;
-const _: () = assert!(
-    std::mem::offset_of!(LandingSlot, entrance) == LANDING_ENTRANCE.unsigned_abs() as usize
-        && std::mem::offset_of!(LandingSlot, key) == LANDING_KEY.unsigned_abs() as usize
-        && size_of::<LandingSlot>() == LANDING_BYTES
-);
-
-/// The bit every written key carries, so no key is zero, a free slot's.
-pub(crate) const LANDING_TAG: u64 = 1 << 63;
-
-impl LandingSlots {
-    /// [`LANDINGS`] slots, none written.
-    pub(crate) fn new() -> LandingSlots {
-        LandingSlots((0..LANDINGS).map(|_| LandingSlot::default()).collect())
-    }
-
-    /// The address of the first slot, which the code reads past.
-    fn base(&self) -> usize {
-        self.0.as_ptr().addr()
-    }
-
-    /// The key of the landing where `stands` says: the word a `Stood`
-    /// holds it in, with [`LANDING_TAG`]. An op array's oplines are
-    /// numbered below `2^31`.
-    pub(crate) fn key(stands: Stands) -> u64 {
-        stands.word() | LANDING_TAG
-    }
-
-    /// `landed` remembered as the trace compiled at the landing `key`
-    /// names, in the first free slot, once: nothing where a slot holds the
-    /// landing already or none is free.
-    pub(crate) fn remember(&self, key: u64, landed: &Entrance) {
-        if self
-            .0
-            .iter()
-            .any(|slot| slot.key.load(Ordering::Relaxed) == key)
-        {
-            return;
-        }
-        let claimed = self.0.iter().find(|slot| {
-            slot.key
-                .compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-        });
-        if let Some(slot) = claimed {
-            slot.entrance
-                .store(std::ptr::from_ref(landed).cast_mut(), Ordering::Release);
-        }
-    }
-
-    /// The entrance the slot holding `key` names, none where no slot does.
-    #[cfg(test)]
-    pub(crate) fn landed(&self, key: u64) -> Option<usize> {
-        let slot = self
-            .0
-            .iter()
-            .find(|slot| slot.key.load(Ordering::Relaxed) == key)?;
-        Some(slot.entrance.load(Ordering::Acquire).addr())
-    }
+/// Where a trace's escape reads the landing it escaped to
+/// (`jit-design.md` §4.9, #3299's ruling): a return that leaves its
+/// lowest frame at an opline the trace does not go on at runs, as php's
+/// escape stub runs the handler of the opline the frame stands at
+/// (`zend_jit_trace_escape_stub`, `Z/ext/opcache/jit/zend_jit_ir.c:2488-2497`),
+/// which the root's publish wrote (`zend_jit_trace.c:7595`), the trace
+/// compiled there: its code reads the landing's word through the
+/// epoch's `landings` index, and where the word reads compiled, enters
+/// the trace it names through `entrances`, the table's entrance of each
+/// trace number below `traces`; it answers [`ESCAPED`] where either is
+/// not there. Both stand as long as the table, so a trace keeps no state
+/// of the landings it escapes to.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Escapes {
+    pub(crate) landings: LandingIndex,
+    pub(crate) entrances: usize,
+    pub(crate) traces: u32,
 }
 
 /// The trace a link jumps to (`jit-design.md` §4.3), published before the
@@ -470,7 +394,9 @@ pub(crate) const DECLINED: u32 = u32::MAX - 3;
 /// [`ABANDONED`], [`UNWOUND`], [`INTERRUPTED`] and [`DECLINED`]. Nothing is
 /// stored, since the trace knows nothing of the frame it returned into;
 /// `enter` hands back the frame that stands, at the opline the return
-/// left it, whose handler `dispatch` runs as php's interpreter does.
+/// left it, whose handler `dispatch` runs as php's interpreter does: where
+/// the code found no trace compiled there it could go on into
+/// ([`Escapes`]).
 pub(crate) const ESCAPED: u32 = u32::MAX - 4;
 
 /// What compiled code answers where the `RETURN` its trace ends at left
@@ -906,7 +832,8 @@ impl Backend {
     /// `ir` in final bytes, named `name`: the prologue, then the body
     /// [`clif::lower`] builds, compiled for the host, with a [`Mark`] per
     /// recorded opline, its link a jump to `linked` where it links to a
-    /// trace with code. Bytes that would need relocating are php's
+    /// trace with code, and its escape a jump to the trace compiled at
+    /// the landing, read through `escapes`, where it has them. Bytes that would need relocating are php's
     /// `COMPILER_ERROR`, as is any refusal of Cranelift's: kernel
     /// addresses, the entry slots' and a link's are constants, so a trace's
     /// bytes work wherever the arena places them.
@@ -915,14 +842,14 @@ impl Backend {
         ir: &TraceIr,
         name: TraceName,
         linked: Option<Linked>,
+        escapes: Option<Escapes>,
     ) -> Result<Compiled, Abort> {
         let config = self.isa.frontend_config();
         let (calls, callee_caches) = in_place(ir);
         let slots = EntrySlots::new(ir.exits.len());
-        let landings = LandingSlots::new();
         let joins = clif::Joins {
             slots: slots.base(),
-            landings: landings.base(),
+            escapes,
             linked,
         };
         // Under exit-fuzz a first pass counts the guards, one byte each.
@@ -967,7 +894,6 @@ impl Backend {
             name,
             fuzzed,
             slots,
-            landings,
             callee_caches,
             calls,
         })
@@ -985,7 +911,15 @@ impl Backend {
         let (calls, _) = in_place(ir);
         let joins = clif::Joins {
             slots: 0x6000_0000,
-            landings: 0x6100_0000,
+            escapes: Some(Escapes {
+                landings: LandingIndex {
+                    chunks: 0x6100_0000,
+                    first: 0x10,
+                    held: 1 << 23,
+                },
+                entrances: 0x6200_0000,
+                traces: 1024,
+            }),
             linked,
         };
         clif::lower(

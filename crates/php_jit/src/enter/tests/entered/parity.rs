@@ -250,6 +250,7 @@ fn compiled(ir: &TraceIr, step: bool) -> Option<Compiled> {
                 line: 1,
             },
             None,
+            None,
         )
         .ok()
 }

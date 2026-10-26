@@ -75,7 +75,6 @@ fn compiled(bytes: &[u8], exits: Vec<ExitSpec>) -> Compiled {
         body: None,
         fuzzed: crate::lower::Fuzzed::default(),
         slots,
-        landings: crate::lower::LandingSlots::new(),
         calls: Box::new([]),
         callee_caches: Box::new([]),
         map_ptrs: Box::new([]),
@@ -121,6 +120,30 @@ fn a_sides_publish_writes_its_exits_entry_slot_once() -> Result<(), String> {
         .map_err(|e| format!("{e:?}"))?;
     assert_ne!(second, first);
     assert_eq!(parent.slots.opened(ExitId(1)), Some(entrance));
+    Ok(())
+}
+
+/// A trace's entrance is named at its number once it is published, the
+/// one write an escape to a landing whose word names the trace reads
+/// (`lower::Escapes`, #3299's ruling): null before, one per number below
+/// `opcache.jit_max_root_traces`, and the escapes a trace compiled for the
+/// table reads name the epoch's landing index and these.
+#[test]
+fn a_publish_names_the_traces_entrance_at_its_number() -> Result<(), String> {
+    let table = table(&[("opcache.jit_max_root_traces", "100")]);
+    assert_eq!(table.entrances.len(), 100);
+    let named = |at: usize| table.entrances[at].load(Ordering::Acquire).addr();
+    assert_eq!(named(1), 0);
+    let root = (table.publish(compiled(&[0; 8], vec![exit(None)]), Start::Loop))
+        .map_err(|e| format!("{e:?}"))?;
+    let trace = table.get(root).ok_or("the root")?;
+    assert_eq!(named(1), std::ptr::from_ref(&trace.entrance).addr());
+    assert!((0..100).filter(|at| *at != 1).all(|at| named(at) == 0));
+    let (epoch, _) = php_engine::tier::Epoch::fixture(php_unit::Unit::default());
+    let escapes = table.escapes(&epoch);
+    assert_eq!(escapes.entrances, table.entrances.as_ptr().addr());
+    assert_eq!(escapes.traces, 100);
+    assert_eq!(escapes.landings, epoch.landing_index());
     Ok(())
 }
 

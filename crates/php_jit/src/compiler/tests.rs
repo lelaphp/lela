@@ -108,7 +108,6 @@ fn body(len: usize) -> Compiled {
         body: None,
         fuzzed: crate::lower::Fuzzed::default(),
         slots: crate::lower::EntrySlots::default(),
-        landings: crate::lower::LandingSlots::default(),
         calls: Box::new([]),
         callee_caches: Box::new([]),
         map_ptrs: Box::new([]),
@@ -148,7 +147,7 @@ fn piped(
 ) -> (Outcome, State, String) {
     let shared = &engine.shared;
     let mut lines = Lines::under(shared.policy.debug());
-    let compile = |ir: &TraceIr, name: TraceName, _| -> Result<Compiled, Abort> {
+    let compile = |ir: &TraceIr, name: TraceName, _, _| -> Result<Compiled, Abort> {
         match backend {
             Backend::Dump => {
                 let text = crate::lower::dump::render(ir);

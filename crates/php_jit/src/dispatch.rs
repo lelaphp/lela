@@ -76,6 +76,12 @@ pub struct JitRequest {
     pub(crate) epoch: std::cell::OnceCell<Epoch>,
     /// The trace table of that epoch, kept once a request of it made it.
     pub(crate) table: std::cell::OnceCell<Arc<table::Table>>,
+    /// How many times the crossing entered the trace compiled at a landing
+    /// a trace escaped to, which the escaping trace's code enters itself
+    /// once the request's row of it is laid: a test's count of the escapes
+    /// the code did not take.
+    #[cfg(test)]
+    pub(crate) escapes_crossed: Cell<u32>,
 }
 
 /// What a visit to a word decided.
@@ -710,13 +716,13 @@ fn followed<'t>(
             // php's escape stub: no exit, no line and no word; the
             // interpreter runs the handler of the opline the return left
             // the frame at, a landing's trace where one is compiled there.
-            Left::Escaped(frame) => match visit_landing(req, shared, frame, None) {
+            Left::Escaped(frame) => match visit_landing(req, shared, frame, Came::Escaped) {
                 Visited::Enter(id) => match table.get(id) {
                     Some(next) => {
-                        // The escaping trace's code goes on into it from
-                        // now on, as php's escape goes on into the
-                        // landing's handler.
-                        enter::remembered(req, frame, trace, next);
+                        #[cfg(test)]
+                        state
+                            .escapes_crossed
+                            .set(state.escapes_crossed.get().saturating_add(1));
                         trace = next;
                         entered = enter::enter(req, Some(state), frame, (epoch, trace), At::First);
                         continue;
@@ -777,7 +783,7 @@ fn followed<'t>(
             Some(next) => next,
             // Left for the interpreter, which runs the opline's handler:
             // where a return lands, the landing's.
-            None => match visit_landing(req, shared, frame, Some(trace.id)) {
+            None => match visit_landing(req, shared, frame, Came::Left(Some(trace.id))) {
                 Visited::Enter(id) => match table.get(id) {
                     Some(next) => next,
                     None => return Flow::Resume(frame),
@@ -796,26 +802,40 @@ fn followed<'t>(
     }
 }
 
+/// How the interpreter came to a landing ([`visit_landing`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Came {
+    /// A trace's escape, which php's stub hands to the handler of the
+    /// opline the frame stands at with nothing tested
+    /// (`zend_jit_trace_escape_stub`), as the escaping trace's own code
+    /// does where the trace compiled there is ready ([`crate::lower::Escapes`]).
+    Escaped,
+    /// A trace's exit, the trace that left, or a recording's stop, none,
+    /// which php's `zend_jit_trace_exit` hands on only while the
+    /// interrupt is not raised.
+    Left(Option<TraceId>),
+}
+
 /// The landing a trace or a recording left `frame` for the interpreter
 /// at, visited as php's interpreter runs the handler of the opline it
 /// goes on at (`zend_jit_trace_exit_stub`, `zend_jit_trace_return`), the
 /// word [`goes_on`] names: a trace compiled there is entered, and an
 /// armed landing's word bumped and claimed at `opcache.jit_hot_return`
 /// (`jit-design.md` §2.2, #3036), and a loop root's compiled trace
-/// entered (#3318). Nothing while the interrupt is raised or the request records,
-/// nor where the landing is the root of `left`, the trace that left the
-/// frame there, as php's `zend_jit_trace_exit` answers 1 at its own
-/// trace's first opline and the opline's own handler runs, not the trace
-/// again; a frame at an opline with a sealed word is left as it is.
-fn visit_landing(
-    req: &mut Request,
-    shared: &Shared,
-    frame: FrameRef,
-    left: Option<TraceId>,
-) -> Visited {
-    if req.limits().interrupt().raised().load(Ordering::Relaxed) {
+/// entered (#3318). Nothing while the request records, nor, but at an
+/// escape, while the interrupt is raised, nor where the landing is the
+/// root of the trace that left the frame there, as php's
+/// `zend_jit_trace_exit` answers 1 at its own trace's first opline and
+/// the opline's own handler runs, not the trace again; a frame at an
+/// opline with a sealed word is left as it is.
+fn visit_landing(req: &mut Request, shared: &Shared, frame: FrameRef, came: Came) -> Visited {
+    if came != Came::Escaped && req.limits().interrupt().raised().load(Ordering::Relaxed) {
         return Visited::Continue;
     }
+    let left = match came {
+        Came::Left(left) => left,
+        Came::Escaped => None,
+    };
     let req: &Request = req;
     let Some(state) = tier::state::<JitRequest>(req) else {
         return Visited::Continue;
@@ -1183,7 +1203,7 @@ fn went_on(
                 None => Flow::Continue,
             }
         }
-        (None, Flow::Resume(at)) => match visit_landing(req, shared, *at, None) {
+        (None, Flow::Resume(at)) => match visit_landing(req, shared, *at, Came::Left(None)) {
             Visited::Continue => Flow::Continue,
             Visited::Enter(id) => run_lent(req, *at, id),
             Visited::Hot(claim) => hot(req, *at, claim, shared),

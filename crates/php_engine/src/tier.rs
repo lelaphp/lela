@@ -61,6 +61,7 @@ mod frames;
 mod held;
 mod layout;
 pub(crate) mod published;
+pub use published::{LANDING_CHUNK_BITS, LandingIndex};
 mod sampled;
 mod strings;
 #[cfg(dispatch = "tailcall")]
@@ -514,13 +515,19 @@ pub fn state<S: Any>(req: &Request) -> Option<&S> {
 }
 
 /// One safepoint's word (`jit-design.md` §3.2): two atomics, zero at
-/// publication, all ones when sealed.
+/// publication, all ones when sealed, laid in that order, as compiled
+/// code reads a landing's ([`LandingIndex`]).
+#[repr(C)]
 #[derive(Debug, Default)]
 pub struct Word {
     halves: [AtomicU32; 2],
 }
 
 impl Word {
+    /// Where the second half stands in a word, which compiled code reads
+    /// a landing's state at ([`LandingIndex`]).
+    pub const STATE_AT: usize = std::mem::offset_of!(Word, halves) + size_of::<AtomicU32>();
+
     /// The one accessor; the meaning of the bits is the tier's.
     #[must_use]
     pub fn halves(&self) -> &[AtomicU32; 2] {

@@ -67,7 +67,18 @@ impl Epoch {
     /// past its last opline.
     #[must_use]
     pub fn lay_landing(&self, f: FuncRef, at: OplineIdx) -> Option<&Word> {
-        self.func(f)?.lay_landing(at)
+        match f.0 {
+            MapPtrOffset::Engine(offset) => self.0.lay_landing(offset, at),
+            MapPtrOffset::Request(_) => None,
+        }
+    }
+
+    /// Where compiled code finds the landing words of the op arrays this
+    /// epoch published (`jit-design.md` §4.9): what a trace's escape
+    /// reads, laid down where it was not.
+    #[must_use]
+    pub fn landing_index(&self) -> super::LandingIndex {
+        self.0.files.funcs.landing_index()
     }
 
     /// The op array `f` names, held by this epoch for as long as the

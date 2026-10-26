@@ -77,6 +77,9 @@ const SPAN: usize = 1 << SPAN_BITS;
 /// engine's start.
 const SPANS: usize = 1 << 6;
 
+/// The most rows a column holds.
+pub(crate) const COLUMN_ROWS: usize = SPANS * SPAN * CHUNK;
+
 /// One chunk of a column, laid down on first use and never moved: a
 /// fixed-length array, so a number's slot in it is its low bits with no
 /// bound to test.
@@ -382,6 +385,20 @@ impl Arena {
             .funcs
             .get(offset)
             .or_else(|| self.base()?.files.funcs.get(offset))
+    }
+
+    /// The landing word of opline `at` of the held op array at `offset`,
+    /// for a tier to arm, this epoch's or the preload's below it
+    /// ([`crate::tier::published::Funcs::lay_landing`]).
+    pub(crate) fn lay_landing(
+        &self,
+        offset: u32,
+        at: php_unit::OplineIdx,
+    ) -> Option<&crate::tier::Word> {
+        if self.files.funcs.get(offset).is_some() {
+            return self.files.funcs.lay_landing(offset, at);
+        }
+        self.base()?.files.funcs.lay_landing(offset, at)
     }
 
     /// The published user function or method `function` names; none for

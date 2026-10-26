@@ -91,7 +91,9 @@ tier::FuncRef::offset
 tier::Held
 tier::Hooked
 tier::Inherited
+tier::LANDING_CHUNK_BITS
 tier::Laid
+tier::LandingIndex
 tier::MapPtrRaw
 tier::PLACE
 tier::Parked
