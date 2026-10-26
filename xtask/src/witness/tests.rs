@@ -668,7 +668,8 @@ fn a_fence_a_trace_row_covers_is_held_to_the_engine_alone_and_one_it_does_not_bo
 
 /// A row naming the regime its cause is proven at runs each fence it
 /// covers again under the oracle in that regime (#3365, #3369): the
-/// fixture's fence the oracle agrees on there is covered, and the one it
+/// fixture's fence the oracle agrees on there is covered, as is the one
+/// whose pid its wildcard meets in both runs, and the one it
 /// still differs on, the engine carrying `zend_test` and the oracle not,
 /// fails naming its id and the regime, which is the negative control. The
 /// tracked pin carries no `optimizer-off` until a person adds it, so the
@@ -711,10 +712,11 @@ fn a_proven_rows_fences_run_again_under_its_regime_and_one_still_differing_fails
         .unwrap()
         .regime
         .insert("optimizer-off".to_owned(), off);
-    let [agreed, differs] = &judged(&fixture)[..] else {
+    let [agreed, moving, differs] = &judged(&fixture)[..] else {
         panic!()
     };
     assert_eq!(agreed.judgement, Judgement::Covered, "{agreed:#?}");
+    assert_eq!(moving.judgement, Judgement::Covered, "{moving:#?}");
     assert_eq!(differs.judgement, Judgement::Fail, "{differs:#?}");
     assert!(
         differs

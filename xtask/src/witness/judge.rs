@@ -244,7 +244,7 @@ fn both(
     }
     match on.registry.accepted(&witness.id()) {
         Some(row) if verdict.judgement == Judgement::Diverged => {
-            Ok(proven(on, witness, row, &ran, verdict))
+            Ok(proven(on, witness, row, (&ran, None), verdict))
         }
         _ => Ok(verdict),
     }
@@ -369,7 +369,7 @@ fn alone(
     );
     if verdict.judgement == Judgement::Pass {
         let covered = judged(witness, Judgement::Covered, recorded);
-        return Ok(proven(on, witness, row, &ran, covered));
+        return Ok(proven(on, witness, row, (&ran, Some(exit)), covered));
     }
     verdict.note = format!("{recorded}\n{}", verdict.note);
     Ok(verdict)
@@ -378,14 +378,16 @@ fn alone(
 /// `verdict` on a fence `row` holds, where the row names the regime its
 /// cause is proven at (#3365): the oracle's run of the snippet again under
 /// that regime beside the fence's own, held to the engine's run `ran`.
-/// The verdict stands where the two are one run's bytes, and the fence
+/// The verdict stands where the two are one run's bytes, or, for a fence
+/// pinning the engine's side under `exit`, where the run meets the fence
+/// as the engine's did, its wildcards over what moves; and the fence
 /// fails, naming its id and the regime, where they still differ (#3369);
 /// a request fence, whose host takes the fence's regime alone, fails so.
 fn proven(
     on: &On<'_>,
     witness: &Witness,
     row: &Divergence,
-    ran: &Observation,
+    (ran, pinned): (&Observation, Option<Exit>),
     verdict: Judged,
 ) -> Judged {
     let Some(regime) = &row.proven_at else {
@@ -404,9 +406,12 @@ fn proven(
             ..Invocation::new(&on.oracle.pin().oracle.path, snippet)
         }),
     };
-    let differs = match again.map(|again| (shown_of(&again), shown_of(ran))) {
-        Ok((theirs, ours)) if theirs == ours => return verdict,
-        Ok((theirs, ours)) => oracle::diff(&theirs, &ours),
+    let pin = on.oracle.pin();
+    let meets =
+        |again: &Observation| pinned.is_some_and(|e| met(pin, witness, e, again).unwrap_or(false));
+    let differs = match again.map(|again| (meets(&again), shown_of(&again), shown_of(ran))) {
+        Ok((meets, theirs, ours)) if meets || theirs == ours => return verdict,
+        Ok((_, theirs, ours)) => oracle::diff(&theirs, &ours),
         Err(trouble) => format!("{trouble:#}"),
     };
     let why = format!(

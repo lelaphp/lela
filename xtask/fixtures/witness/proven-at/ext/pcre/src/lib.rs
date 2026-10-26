@@ -1,10 +1,11 @@
 //! A negative control (harness-design.md §4.1, §4.3; #3365, #3369): an
-//! extension whose two witnesses a `trace:` row of the fixture's
+//! extension whose three witnesses a `trace:` row of the fixture's
 //! `docs/divergence.toml` covers, the row naming `proven_at =
 //! "optimizer-off"`. Each fence pins the linked engine's side and the
 //! engine meets it. The first prints what the engine prints whatever the
-//! oracle's optimizer does, so the oracle under the regime agrees and the
-//! fence is covered; the second prints `oracle` under any php without
+//! oracle's optimizer does, and the second a pid its fence's wildcard
+//! meets, so the oracle under the regime agrees and each is covered; the
+//! third prints `oracle` under any php without
 //! `zend_test`, which `php-linked`'s bundle carries and the oracle does
 //! not load, so the oracle under the regime still differs and the fence
 //! fails, naming its id.
@@ -21,6 +22,18 @@
 /// 1
 /// ```
 pub fn preg_quote() {}
+
+/// A native whose witness the proven row covers and whose bytes move with
+/// the process: the oracle's run under the regime meets the fence as the
+/// engine's does, its wildcard over the pid, so it is covered.
+///
+/// ```php
+/// echo getmypid();
+/// ```
+/// ```expect
+/// %d
+/// ```
+pub fn preg_split() {}
 
 /// A native whose witness the proven row covers and the oracle differs on
 /// under the regime too.
