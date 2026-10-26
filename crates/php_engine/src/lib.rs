@@ -36,13 +36,21 @@
 
 /// The bytes of each piece in turn, each anything `AsRef<[u8]>`: a
 /// message as php's `%s` prints the names in it, byte for byte, where
-/// `format!` would hold them to UTF-8 (#3428).
+/// `format!` would hold them to UTF-8 (#3428). The pieces are joined by
+/// [`message_bytes`], out of line, so a handler's refusal costs its arm
+/// one call, as `format!` cost it.
 macro_rules! bytes {
-    ($($piece:expr),+ $(,)?) => {{
-        let mut bytes: Vec<u8> = Vec::new();
-        $(bytes.extend_from_slice(::core::convert::AsRef::<[u8]>::as_ref(&$piece));)+
-        bytes
-    }};
+    ($($piece:expr),+ $(,)?) => {
+        $crate::message_bytes(&[$(::core::convert::AsRef::<[u8]>::as_ref(&$piece)),+])
+    };
+}
+
+/// [`bytes!`]'s join: a message is made where the engine refuses or
+/// warns, never on the path that serves.
+#[cold]
+#[inline(never)]
+pub(crate) fn message_bytes(pieces: &[&[u8]]) -> Vec<u8> {
+    pieces.concat()
 }
 
 pub mod api;
