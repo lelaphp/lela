@@ -3873,9 +3873,7 @@ pub(crate) fn include_or_eval<T: Tier>(
         Err(thrown) => Ok(Included::threw(req, frame, &thrown)),
     };
     let made = made?;
-    if let Included::Entered(callee) = made
-        && req.shared.declared().hooked.user
-    {
+    if let Included::Hooked(callee) = made {
         return included_under_hook(req, frame, op, callee, returns_to);
     }
     // `FREE_OP1()`: the operand stands while the file is opened and its
@@ -3887,7 +3885,7 @@ pub(crate) fn include_or_eval<T: Tier>(
     exec::free_operand(req, frame, op.op1_type, op.op1);
     Ok(match made {
         Included::Entered(callee) if req.is_pending() => Stepped::Threw(callee).into(),
-        Included::Entered(callee) => Stepped::Pushed(callee).into(),
+        Included::Entered(callee) | Included::Hooked(callee) => Stepped::Pushed(callee).into(),
         Included::Answered => advance(req, frame),
         Included::Threw(at) => Stepped::Threw(at).into(),
     })
@@ -3907,6 +3905,7 @@ pub(crate) fn include_or_eval<T: Tier>(
 /// class D { function __construct(public string $s) {} function __destruct() { throw new Exception("dtor"); } function __toString(): string { return $this->s; } }
 /// try { eval(new D("echo 'ran ';")); echo "after\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
 /// try { var_dump(eval(new D("try { echo 'ran '; } catch (Exception \$e) { echo 'inner '; } return 5;"))); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// var_dump(eval("return 5;"));
 /// ```
 /// ```request phpdbg
 /// r
@@ -3916,6 +3915,7 @@ pub(crate) fn include_or_eval<T: Tier>(
 /// [Successful compilation of %SCRATCH%/witness.php]
 /// prompt> ran caught dtor
 /// ran caught dtor
+/// int(5)
 /// [Script ended normally]
 /// prompt>
 /// ```
@@ -3928,7 +3928,8 @@ fn included_under_hook(
     callee: FrameRef,
     returns_to: Option<(FrameRef, u32)>,
 ) -> Edge {
-    let standing = req.vm().depth().saturating_sub(1);
+    // The depth below the frame `included` pushed, its place.
+    let standing = callee.0 as usize;
     let reenter = req.shared.loops.reenter;
     let served = reenter(req, callee);
     let served = req.fatal_of(served);
@@ -3940,10 +3941,13 @@ fn included_under_hook(
     }
     let returned = req.take_returned();
     if req.is_pending() {
+        // `zend_rethrow_exception`, `FREE_OP1()`, then `UNDEF_RESULT()`:
+        // the value is never written.
+        exec::free_operand(req, frame, op.op1_type, op.op1);
         req.release(returned);
-    } else {
-        answered(req, returns_to, returned);
+        return Ok(Stepped::Threw(frame).into());
     }
+    answered(req, returns_to, returned);
     exec::free_operand(req, frame, op.op1_type, op.op1);
     Ok(if req.is_pending() {
         Stepped::Threw(frame).into()
@@ -3961,6 +3965,9 @@ enum Included {
     Answered,
     /// The code frame pushed and current, its first opline next.
     Entered(FrameRef),
+    /// The code frame pushed where the bound tier hooks user op arrays,
+    /// which [`included_under_hook`] serves to its end.
+    Hooked(FrameRef),
     /// A throwable left pending on this frame.
     Threw(FrameRef),
 }
@@ -4053,7 +4060,8 @@ fn included(
         }
     };
     let main = exec::code_of(&unit);
-    if !req.shared.declared().hooked.user
+    let hooked = req.shared.declared().hooked.user;
+    if !hooked
         && let [only] = &main.oplines[..]
         && only.opcode == Opcode::Return
         && only.op1_type == OperandKind::Const
@@ -4070,7 +4078,11 @@ fn included(
     if let Err(thrown) = req.hold_op_array(callee, copy) {
         return Ok(Included::threw(req, callee, &thrown));
     }
-    Ok(Included::Entered(callee))
+    Ok(if hooked {
+        Included::Hooked(callee)
+    } else {
+        Included::Entered(callee)
+    })
 }
 
 /// The value an `INCLUDE_OR_EVAL` answers without a frame, into the
