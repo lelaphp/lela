@@ -337,7 +337,15 @@ impl CallbacksAt {
 pub type Proxy<'a> = dyn FnMut(&mut Request, Node) -> Result<Owner<Value>, Thrown> + 'a;
 
 /// The evaluator of `this`, where it has been constructed.
-fn state(req: &mut Request, this: PhpObject) -> Option<&mut XPathState> {
+fn state(req: &Request, this: PhpObject) -> Option<&XPathState> {
+    match &dom(req, this)?.extra {
+        Extra::XPath(state) => Some(state),
+        _ => None,
+    }
+}
+
+/// The evaluator of `this`, where it has been constructed, to change.
+fn state_mut(req: &mut Request, this: PhpObject) -> Option<&mut XPathState> {
     match &mut dom_mut(req, this)?.extra {
         Extra::XPath(state) => Some(state),
         _ => None,
@@ -346,7 +354,7 @@ fn state(req: &mut Request, this: PhpObject) -> Option<&mut XPathState> {
 
 /// The callbacks of `this`, as [`CallbacksAt`] reaches them.
 fn callbacks(req: &mut Request, this: PhpObject) -> Option<&mut XPathCallbacks> {
-    state(req, this).map(|state| &mut state.callbacks)
+    state_mut(req, this).map(|state| &mut state.callbacks)
 }
 
 /// The evaluator of `this` taken off it, as it is freed or constructed
@@ -372,9 +380,9 @@ fn registering<R>(
     this: PhpObject,
     f: impl FnOnce(&mut Request, &mut XPathCallbacks) -> R,
 ) -> Option<R> {
-    let mut taken = std::mem::take(&mut state(req, this)?.callbacks);
+    let mut taken = std::mem::take(&mut state_mut(req, this)?.callbacks);
     let answer = f(req, &mut taken);
-    match state(req, this) {
+    match state_mut(req, this) {
         Some(state) => std::mem::replace(&mut state.callbacks, taken).release(req),
         None => taken.release(req),
     }
@@ -396,10 +404,7 @@ fn document_read(req: &mut Request, object: PhpObject) -> Read {
 #[allow(clippy::unnecessary_wraps)] // the reader shape every row of a property table has
 fn register_node_ns_read(req: &mut Request, object: PhpObject) -> Read {
     // `dom_xpath_objects_new` sets it before any constructor runs.
-    let on = match dom(req, object).map(|d| &d.extra) {
-        Some(Extra::XPath(s)) => s.register_node_ns,
-        _ => true,
-    };
+    let on = state(req, object).is_none_or(|s| s.register_node_ns);
     Ok(Some(Owner::bool(on)))
 }
 
@@ -410,9 +415,7 @@ fn register_node_ns_write(
     value: &Value,
 ) -> Result<(), Thrown> {
     let on = value.as_bool().unwrap_or(false);
-    if let Some(d) = dom_mut(req, object)
-        && let Extra::XPath(state) = &mut d.extra
-    {
+    if let Some(state) = state_mut(req, object) {
         state.register_node_ns = on;
     }
     Ok(())
@@ -802,9 +805,7 @@ fn eval(
 ) -> Result<Owner<Value>, Thrown> {
     let register = match register {
         Passed::Given(on) => on,
-        Passed::Omitted => {
-            matches!(dom(req, this), Some(d) if matches!(&d.extra, Extra::XPath(s) if s.register_node_ns))
-        }
+        Passed::Omitted => state(req, this).is_some_and(|s| s.register_node_ns),
     };
     let modern = crate::modern::follows_spec(req, this);
     let Some(id) = state(req, this).map(|state| state.ctx.id()) else {
@@ -847,11 +848,11 @@ fn eval(
     let mut handler = |req: &mut Request, called: Called, operands: Vec<Operand>| {
         XPathCallbacks::call(req, at, called, operands, modern, &mut proxy)
     };
-    if let Some(state) = state(req, this) {
+    if let Some(state) = state_mut(req, this) {
         state.evaluation_depth += 1;
     }
     let evaluated = ffi::XPath::eval_held(req, id, expr, node, scope, &mut handler);
-    if let Some(state) = state(req, this) {
+    if let Some(state) = state_mut(req, this) {
         state.evaluation_depth = state.evaluation_depth.saturating_sub(1);
     }
     if let Some(in_scope) = in_scope {
@@ -1051,10 +1052,7 @@ fn intern_for_doc(req: &Request, this: PhpObject, doc: Option<Node>) -> PhpObjec
     if counts_doc(req, this, doc) {
         return this;
     }
-    let kept = match dom(req, this).map(|d| &d.extra) {
-        Some(Extra::XPath(state)) => &state.callbacks.node_list[..],
-        _ => &[],
-    };
+    let kept = state(req, this).map_or(&[][..], |state| &state.callbacks.node_list);
     kept.iter()
         .find_map(|value| intern_from_entry(req, value, doc))
         .unwrap_or(this)
@@ -1743,9 +1741,7 @@ impl php_ext::abi::ObjectHandlers for XPathHandlers {
         object: PhpObject,
         visit: &mut dyn FnMut(Value),
     ) -> GcTable {
-        if let Some(d) = dom(req, object)
-            && let Extra::XPath(state) = &d.extra
-        {
+        if let Some(state) = state(req, object) {
             state.callbacks.visit(visit);
         }
         GcTable::Properties
