@@ -63,15 +63,21 @@ enum Token {
 }
 
 /// A string token's `s->value` as `php_json_yylex` hands it to the
-/// grammar: the string the scanner made, or nothing under the
-/// validating methods, whose `yylex` gives each string up as it is
-/// scanned and hands on `UNDEF`.
-type Text = Option<Owner<PhpString>>;
+/// grammar.
+enum Text {
+    /// The string the scanner made.
+    Made(Owner<PhpString>),
+    /// `UNDEF`: the validating methods' `yylex` gives each string up as
+    /// it is scanned.
+    Scanned,
+}
 
-/// The string `text` holds given up, where it holds one.
-fn give_up_text(req: &mut Request, text: Text) {
-    if let Some(string) = text {
-        string.give_up(req);
+impl Text {
+    /// The string given up, where one was made.
+    fn give_up(self, req: &mut Request) {
+        if let Text::Made(string) = self {
+            string.give_up(req);
+        }
     }
 }
 
@@ -80,7 +86,7 @@ impl Token {
     /// string a string token holds given up.
     fn give_up(self, req: &mut Request) {
         if let Token::Str(text) = self {
-            give_up_text(req, text);
+            text.give_up(req);
         }
     }
 }
@@ -280,7 +286,7 @@ impl Scanner<'_> {
             ));
         }
         if self.options & JSON_BIGINT_AS_STRING != 0 {
-            return Ok(Token::Str(Some(PhpString::new(req, text)?)));
+            return Ok(Token::Str(Text::Made(PhpString::new(req, text)?)));
         }
         Ok(Token::Double(strtod(text)))
     }
@@ -389,12 +395,12 @@ impl Scanner<'_> {
         fill: impl FnOnce(&mut [u8]),
     ) -> Result<Token, Thrown> {
         if len == 0 {
-            return Ok(Token::Str(Some(PhpString::new(req, b"")?)));
+            return Ok(Token::Str(Text::Made(PhpString::new(req, b"")?)));
         }
         let made = req
             .memory_mut()
             .fallible(|req| PhpString::filled(req, len, fill))?;
-        Ok(made.map_or(Token::Error, |string| Token::Str(Some(string))))
+        Ok(made.map_or(Token::Error, |string| Token::Str(Text::Made(string))))
     }
 
     /// One escape at the cursor, which stands on the backslash: the
@@ -524,7 +530,9 @@ enum Holder {
 
 /// A bracket the walk is inside, its rule half reduced on bison's
 /// stack: the count of states the stack held before its bracket, what
-/// it is building, and for an object the key its next value goes under.
+/// it is building, and for an object the key its next value goes under,
+/// none where no key is held: before the first is read, and from the
+/// member a key named to the next key's read.
 enum Open {
     Array {
         at: usize,
@@ -533,7 +541,7 @@ enum Open {
     Object {
         at: usize,
         holder: Holder,
-        key: Text,
+        key: Option<Text>,
     },
 }
 
@@ -567,7 +575,9 @@ impl Open {
                 None => Owner::null(),
             },
             Open::Object { holder, key, .. } => {
-                give_up_text(req, key);
+                if let Some(key) = key {
+                    key.give_up(req);
+                }
                 holder.into_value()
             }
         }
@@ -582,7 +592,9 @@ impl Open {
                 }
             }
             Open::Object { holder, key, .. } => {
-                give_up_text(req, key);
+                if let Some(key) = key {
+                    key.give_up(req);
+                }
                 holder.give_up(req);
             }
         }
@@ -619,11 +631,8 @@ impl Parser<'_> {
     /// discarded.
     fn advance(&mut self, req: &mut Request) -> Result<(), Thrown> {
         let mut token = self.scanner.scan(req)?;
-        if self.validating
-            && let Token::Str(text) = &mut token
-            && let Some(string) = text.take()
-        {
-            string.give_up(req);
+        if self.validating && matches!(token, Token::Str(_)) {
+            std::mem::replace(&mut token, Token::Str(Text::Scanned)).give_up(req);
         }
         std::mem::replace(&mut self.token, token).give_up(req);
         Ok(())
@@ -755,7 +764,7 @@ impl Parser<'_> {
             Token::False => Owner::bool(false),
             Token::Int(n) => Owner::int(n),
             Token::Double(d) => Owner::float(d),
-            Token::Str(Some(string)) => string.into_value(),
+            Token::Str(Text::Made(string)) => string.into_value(),
             Token::ArrayOpen => {
                 self.advance(req)?;
                 // The array is made where its rule reduces, at its first
@@ -848,7 +857,7 @@ impl Parser<'_> {
         }
         if let Open::Object { key, .. } = &mut frame {
             match self.key(req) {
-                Ok(Some(read)) => *key = read,
+                Ok(Some(read)) => *key = Some(read),
                 Ok(None) => {
                     frame.give_up(req);
                     return Ok(Begun::Refused);
@@ -863,9 +872,9 @@ impl Parser<'_> {
         Ok(Begun::Opened)
     }
 
-    /// `key ':'` of a `member`, both shifted, the key's string answered
-    /// as the scanner made it; `None` where the parse was refused, the
-    /// key given up.
+    /// `key ':'` of a `member`, both shifted, the key answered as the
+    /// scanner made it; `None` where the parse was refused, the key given
+    /// up.
     fn key(&mut self, req: &mut Request) -> Result<Option<Text>, Thrown> {
         let key = match std::mem::replace(&mut self.token, Token::Eoi) {
             Token::Str(key) => key,
@@ -878,7 +887,7 @@ impl Parser<'_> {
         match self.colon(req) {
             Ok(true) => Ok(Some(key)),
             shifted => {
-                give_up_text(req, key);
+                key.give_up(req);
                 shifted.map(|_| None)
             }
         }
@@ -975,7 +984,7 @@ impl Parser<'_> {
                     };
                 }
                 match (holder, key.take()) {
-                    (Holder::Array(array), Some(name)) => {
+                    (Holder::Array(array), Some(Text::Made(name))) => {
                         let name = Key::from_string(req, name);
                         // `zend_symtable_fupdate` since 8.5.12.
                         if req
@@ -987,7 +996,7 @@ impl Parser<'_> {
                             return Ok(Attached::Refused);
                         }
                     }
-                    (Holder::Object(object), Some(name)) => {
+                    (Holder::Object(object), Some(Text::Made(name))) => {
                         if name.as_bytes().first() == Some(&0) {
                             // A name php mangles a private or protected
                             // property into; `zend_std_write_property`
@@ -1005,15 +1014,17 @@ impl Parser<'_> {
                             return Ok(Attached::Refused);
                         }
                     }
-                    (Holder::Nothing, name) => {
-                        give_up_text(req, name);
+                    // Nothing built: under the validating methods, or with
+                    // no `stdClass`.
+                    (Holder::Nothing, Some(name)) | (_, Some(name @ Text::Scanned)) => {
+                        name.give_up(req);
                         value.give_up(req);
                     }
-                    (Holder::Array(_) | Holder::Object(_), None) => {
+                    (_, None) => {
                         value.give_up(req);
                         return Err(fatal(
                             req,
-                            "InternalError: a JSON member's key was not made while its object was built",
+                            "InternalError: a JSON member's value came with no key",
                         ));
                     }
                 }
@@ -1033,7 +1044,7 @@ impl Parser<'_> {
             let Some(read) = self.key(req)? else {
                 return Ok(Attached::Refused);
             };
-            *key = read;
+            *key = Some(read);
         }
         Ok(Attached::Next)
     }
