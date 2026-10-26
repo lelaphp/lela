@@ -1,0 +1,241 @@
+filled:
+     ; (lines=11, args=1, vars=3, tmps=5, ssa_vars=14)
+     ; (JIT)
+     ; sieve.php:6-12
+     ; return  [rc1, rcn, [empty, packed, hash] array [long] of [true]]
+     ; #0.CV0($n) NOVAL [undef]
+     ; #1.CV1($a) NOVAL [undef]
+     ; #2.CV2($i) NOVAL [undef]
+BB0:
+     ; start lines=[0-0]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 #3.CV0($n) [rc1, rcn, any] = RECV 1
+
+BB1:
+     ; recv follow entry lines=[1-3]
+     ; from=(BB0)
+     ; to=(BB3)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB3)
+0001 ASSIGN #1.CV1($a) NOVAL [undef] -> #4.CV1($a) [rc1, rcn, empty array] array(...)
+0002 ASSIGN #2.CV2($i) NOVAL [undef] -> #5.CV2($i) [long] RANGE[0..0] int(0)
+0003 JMP BB3
+
+BB2:
+     ; target lines=[4-6]
+     ; from=(BB3)
+     ; to=(BB3)
+     ; idom=BB3
+     ; level=3
+     ; loop_header=3
+     #10.CV0($n) [rc1, rcn, any] RANGE[1..++] = Pi<BB3>(#6.CV0($n) [rc1, rcn, any] & RANGE[#8.CV2($i) [long, double] RANGE[0..++] + 1 .. ++])
+     #11.CV2($i) [long, double] RANGE[0..++] = Pi<BB3>(#8.CV2($i) [long, double] RANGE[0..++] & RANGE[-- .. #6.CV0($n) [rc1, rcn, any] - 1])
+0004 ASSIGN_DIM #7.CV1($a) [rc1, rcn, [empty, packed, hash] array [long] of [true]] -> #12.CV1($a) [rc1, [empty, packed, hash] array [long] of [true]] NEXT
+0005 OP_DATA bool(true)
+0006 PRE_INC #11.CV2($i) [long, double] RANGE[0..++] -> #13.CV2($i) [long, double] RANGE[1..++]
+
+BB3:
+     ; follow target loop_header lines=[7-8]
+     ; from=(BB1, BB2)
+     ; to=(BB2, BB4)
+     ; idom=BB1
+     ; level=2
+     ; children=(BB2, BB4)
+     #6.CV0($n) [rc1, rcn, any] = Phi(#3.CV0($n) [rc1, rcn, any], #10.CV0($n) [rc1, rcn, any] RANGE[1..++])
+     #7.CV1($a) [rc1, rcn, [empty, packed, hash] array [long] of [true]] = Phi(#4.CV1($a) [rc1, rcn, empty array], #12.CV1($a) [rc1, [empty, packed, hash] array [long] of [true]])
+     #8.CV2($i) [long, double] RANGE[0..++] = Phi(#5.CV2($i) [long] RANGE[0..0], #13.CV2($i) [long, double] RANGE[1..++])
+0007 #9.T7 [bool] = IS_SMALLER #8.CV2($i) [long, double] RANGE[0..++] #6.CV0($n) [rc1, rcn, any]
+0008 JMPNZ #9.T7 [bool] BB2
+
+BB4:
+     ; follow exit lines=[9-9]
+     ; from=(BB3)
+     ; idom=BB3
+     ; level=3
+0009 RETURN #7.CV1($a) [rc1, rcn, [empty, packed, hash] array [long] of [true]]
+
+k:
+     ; (lines=33, args=2, vars=5, tmps=18, ssa_vars=45)
+     ; (JIT)
+     ; sieve.php:13-30
+     ; return  [long, double] RANGE[0..++]
+     ; #0.CV0($a) NOVAL [undef]
+     ; #1.CV1($n) NOVAL [undef]
+     ; #2.CV2($i) NOVAL [undef]
+     ; #3.CV3($j) NOVAL [undef]
+     ; #4.CV4($c) NOVAL [undef]
+BB0:
+     ; start lines=[0-0]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 #5.CV0($a) [rc1, rcn, any] = RECV 1
+
+BB1:
+     ; recv follow entry lines=[1-1]
+     ; from=(BB0)
+     ; to=(BB2)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB2)
+0001 #6.CV1($n) [rc1, rcn, any] = RECV 2
+
+BB2:
+     ; recv follow entry lines=[2-7]
+     ; from=(BB1)
+     ; to=(BB8)
+     ; idom=BB1
+     ; level=2
+     ; children=(BB8)
+0002 ASSIGN_DIM #5.CV0($a) [rc1, rcn, any] -> #7.CV0($a) [rc1, rcn, true, long, double, string, array of [any, ref], object, resource] int(0)
+0003 OP_DATA bool(false)
+0004 ASSIGN_DIM #7.CV0($a) [rc1, rcn, true, long, double, string, array of [any, ref], object, resource] -> #8.CV0($a) [rc1, rcn, true, long, double, string, array of [any, ref], object, resource] int(1)
+0005 OP_DATA bool(false)
+0006 ASSIGN #2.CV2($i) NOVAL [undef] -> #9.CV2($i) [long] RANGE[2..2] int(2)
+0007 JMP BB8
+
+BB3:
+     ; target lines=[8-9]
+     ; from=(BB8)
+     ; to=(BB7, BB4)
+     ; idom=BB8
+     ; level=4
+     ; loop_header=8
+     ; children=(BB4, BB7)
+0008 #16.T8 [rc1, rcn, any] = FETCH_DIM_R #10.CV0($a) [rc1, rcn, true, long, double, string, array of [any, ref], object, resource] #12.CV2($i) [long, double] RANGE[2..++]
+0009 JMPZ #16.T8 [rc1, rcn, any] BB7
+
+BB4:
+     ; follow lines=[10-12]
+     ; from=(BB3)
+     ; to=(BB6)
+     ; idom=BB3
+     ; level=5
+     ; loop_header=8
+     ; children=(BB6)
+0010 #17.T9 [long, double] = MUL #12.CV2($i) [long, double] RANGE[2..++] #12.CV2($i) [long, double] RANGE[2..++]
+0011 ASSIGN #13.CV3($j) NOVAL [undef, long, double] -> #18.CV3($j) [long, double] #17.T9 [long, double]
+0012 JMP BB6
+
+BB5:
+     ; target lines=[13-15]
+     ; from=(BB6)
+     ; to=(BB6)
+     ; idom=BB6
+     ; level=7
+     ; loop_header=6
+     #23.CV1($n) [rc1, rcn, any] = Pi<BB6>(#20.CV1($n) [rc1, rcn, any] & RANGE[#21.CV3($j) [long, double] + 1 .. ++])
+     #24.CV3($j) [long, double] = Pi<BB6>(#21.CV3($j) [long, double] & RANGE[-- .. #20.CV1($n) [rc1, rcn, any] - 1])
+0013 ASSIGN_DIM #19.CV0($a) [rc1, rcn, true, long, double, string, array of [any, ref], object, resource] -> #27.CV0($a) [rc1, rcn, true, long, double, string, array of [any, ref], object, resource] #24.CV3($j) [long, double]
+0014 OP_DATA bool(false)
+0015 ASSIGN_OP (ADD) #24.CV3($j) [long, double] -> #28.CV3($j) [long, double] #12.CV2($i) [long, double] RANGE[2..++]
+
+BB6:
+     ; follow target loop_header lines=[16-17]
+     ; from=(BB4, BB5)
+     ; to=(BB5, BB7)
+     ; idom=BB4
+     ; level=6
+     ; loop_header=8
+     ; children=(BB5)
+     #19.CV0($a) [rc1, rcn, true, long, double, string, array of [any, ref], object, resource] = Phi(#10.CV0($a) [rc1, rcn, true, long, double, string, array of [any, ref], object, resource], #27.CV0($a) [rc1, rcn, true, long, double, string, array of [any, ref], object, resource])
+     #20.CV1($n) [rc1, rcn, any] = Phi(#11.CV1($n) [rc1, rcn, any], #23.CV1($n) [rc1, rcn, any])
+     #21.CV3($j) [long, double] = Phi(#18.CV3($j) [long, double], #28.CV3($j) [long, double])
+0016 #22.T13 [bool] = IS_SMALLER #21.CV3($j) [long, double] #20.CV1($n) [rc1, rcn, any]
+0017 JMPNZ #22.T13 [bool] BB5
+
+BB7:
+     ; follow target lines=[18-18]
+     ; from=(BB3, BB6)
+     ; to=(BB8)
+     ; idom=BB3
+     ; level=5
+     ; loop_header=8
+     #25.CV1($n) [rc1, rcn, any] = Pi<BB6>(#20.CV1($n) [rc1, rcn, any] & RANGE[-- .. #21.CV3($j) [long, double]])
+     #26.CV3($j) NOVAL [long, double] = Pi<BB6>(#21.CV3($j) [long, double] & RANGE[#20.CV1($n) [rc1, rcn, any] .. ++])
+     #29.CV0($a) [rc1, rcn, true, long, double, string, array of [any, ref], object, resource] = Phi(#10.CV0($a) [rc1, rcn, true, long, double, string, array of [any, ref], object, resource], #19.CV0($a) [rc1, rcn, true, long, double, string, array of [any, ref], object, resource])
+     #30.CV1($n) [rc1, rcn, any] = Phi(#11.CV1($n) [rc1, rcn, any], #25.CV1($n) [rc1, rcn, any])
+     #31.CV3($j) NOVAL [undef, long, double] = Phi(#13.CV3($j) NOVAL [undef, long, double], #26.CV3($j) NOVAL [long, double])
+0018 PRE_INC #12.CV2($i) [long, double] RANGE[2..++] -> #32.CV2($i) [long, double] RANGE[3..++]
+
+BB8:
+     ; follow target loop_header lines=[19-21]
+     ; from=(BB2, BB7)
+     ; to=(BB3, BB9)
+     ; idom=BB2
+     ; level=3
+     ; children=(BB3, BB9)
+     #10.CV0($a) [rc1, rcn, true, long, double, string, array of [any, ref], object, resource] = Phi(#8.CV0($a) [rc1, rcn, true, long, double, string, array of [any, ref], object, resource], #29.CV0($a) [rc1, rcn, true, long, double, string, array of [any, ref], object, resource])
+     #11.CV1($n) [rc1, rcn, any] = Phi(#6.CV1($n) [rc1, rcn, any], #30.CV1($n) [rc1, rcn, any])
+     #12.CV2($i) [long, double] RANGE[2..++] = Phi(#9.CV2($i) [long] RANGE[2..2], #32.CV2($i) [long, double] RANGE[3..++])
+     #13.CV3($j) NOVAL [undef, long, double] = Phi(#3.CV3($j) NOVAL [undef], #31.CV3($j) NOVAL [undef, long, double])
+0019 #14.T15 [long, double] = MUL #12.CV2($i) [long, double] RANGE[2..++] #12.CV2($i) [long, double] RANGE[2..++]
+0020 #15.T16 [bool] = IS_SMALLER #14.T15 [long, double] #11.CV1($n) [rc1, rcn, any]
+0021 JMPNZ #15.T16 [bool] BB3
+
+BB9:
+     ; follow lines=[22-24]
+     ; from=(BB8)
+     ; to=(BB13)
+     ; idom=BB8
+     ; level=4
+     ; children=(BB13)
+0022 ASSIGN #4.CV4($c) NOVAL [undef] -> #33.CV4($c) [long] RANGE[0..0] int(0)
+0023 ASSIGN #12.CV2($i) [long, double] RANGE[2..++] -> #34.CV2($i) [long] RANGE[0..0] int(0)
+0024 JMP BB13
+
+BB10:
+     ; target lines=[25-26]
+     ; from=(BB13)
+     ; to=(BB12, BB11)
+     ; idom=BB13
+     ; level=6
+     ; loop_header=13
+     ; children=(BB11, BB12)
+     #39.CV1($n) [rc1, rcn, any] RANGE[1..++] = Pi<BB13>(#35.CV1($n) [rc1, rcn, any] & RANGE[#36.CV2($i) [long, double] RANGE[0..++] + 1 .. ++])
+     #40.CV2($i) [long, double] RANGE[0..++] = Pi<BB13>(#36.CV2($i) [long, double] RANGE[0..++] & RANGE[-- .. #35.CV1($n) [rc1, rcn, any] - 1])
+0025 #41.T19 [rc1, rcn, any] = FETCH_DIM_R #10.CV0($a) [rc1, rcn, true, long, double, string, array of [any, ref], object, resource] #40.CV2($i) [long, double] RANGE[0..++]
+0026 JMPZ #41.T19 [rc1, rcn, any] BB12
+
+BB11:
+     ; follow lines=[27-27]
+     ; from=(BB10)
+     ; to=(BB12)
+     ; idom=BB10
+     ; level=7
+     ; loop_header=13
+0027 PRE_INC #37.CV4($c) [long, double] RANGE[0..++] -> #42.CV4($c) [long, double] RANGE[1..++]
+
+BB12:
+     ; follow target lines=[28-28]
+     ; from=(BB10, BB11)
+     ; to=(BB13)
+     ; idom=BB10
+     ; level=7
+     ; loop_header=13
+     #43.CV4($c) [long, double] RANGE[0..++] = Phi(#37.CV4($c) [long, double] RANGE[0..++], #42.CV4($c) [long, double] RANGE[1..++])
+0028 PRE_INC #40.CV2($i) [long, double] RANGE[0..++] -> #44.CV2($i) [long, double] RANGE[1..++]
+
+BB13:
+     ; follow target loop_header lines=[29-30]
+     ; from=(BB9, BB12)
+     ; to=(BB10, BB14)
+     ; idom=BB9
+     ; level=5
+     ; children=(BB10, BB14)
+     #35.CV1($n) [rc1, rcn, any] = Phi(#11.CV1($n) [rc1, rcn, any], #39.CV1($n) [rc1, rcn, any] RANGE[1..++])
+     #36.CV2($i) [long, double] RANGE[0..++] = Phi(#34.CV2($i) [long] RANGE[0..0], #44.CV2($i) [long, double] RANGE[1..++])
+     #37.CV4($c) [long, double] RANGE[0..++] = Phi(#33.CV4($c) [long] RANGE[0..0], #43.CV4($c) [long, double] RANGE[0..++])
+0029 #38.T22 [bool] = IS_SMALLER #36.CV2($i) [long, double] RANGE[0..++] #35.CV1($n) [rc1, rcn, any]
+0030 JMPNZ #38.T22 [bool] BB10
+
+BB14:
+     ; follow exit lines=[31-31]
+     ; from=(BB13)
+     ; idom=BB13
+     ; level=6
+0031 RETURN #37.CV4($c) [long, double] RANGE[0..++]
+

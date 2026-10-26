@@ -297,7 +297,15 @@ fn pipeline_with(
             }
             let start = claim.start();
             catch_unwind(AssertUnwindSafe(|| {
-                published(&recorded, name, &compile, table, claim.epoch(), start)
+                published(
+                    &recorded,
+                    name,
+                    &compile,
+                    table,
+                    claim.epoch(),
+                    start,
+                    lines,
+                )
             }))
             .unwrap_or(Outcome::Abort(Stop::CompilerError))
         }
@@ -345,12 +353,14 @@ fn arm_landings(recorded: &Recorded, epoch: &Epoch, policy: &Policy) {
     }
 }
 
-/// The pipeline's middle: the record built through its view, the trace
-/// compiled under `name`, its link a jump to the trace it links to where
-/// `table` holds that trace's code (`jit-design.md` §4.3) and its escape
-/// read through the landing index of `epoch`, the table's (§4.9), and the
-/// code published into `table`, or the failure of the first stage that
-/// failed.
+/// The pipeline's middle: php's analysis of each op array the record
+/// passes through, kept in `table` and dumped to `lines` where
+/// `opcache.jit_debug` asks ([`crate::analysis`]), the record built
+/// through its view, the trace compiled under `name`, its link a jump to
+/// the trace it links to where `table` holds that trace's code
+/// (`jit-design.md` §4.3) and its escape read through the landing index
+/// of `epoch`, the table's (§4.9), and the code published into `table`,
+/// or the failure of the first stage that failed.
 fn published(
     recorded: &Recorded,
     name: TraceName,
@@ -358,7 +368,9 @@ fn published(
     table: &Table,
     epoch: &Epoch,
     start: Start,
+    lines: &mut Lines,
 ) -> Outcome {
+    crate::analysis::build(&recorded.record, &recorded.view, table.analyses(), lines);
     let compiled = types::build(&recorded.record, &recorded.view).and_then(|ir| {
         let link = match ir.end {
             End::Leave(end) => ir.exits.get(usize::from(end.0)).and_then(|exit| exit.link),

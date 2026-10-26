@@ -1,0 +1,236 @@
+$_main:
+     ; (lines=102, args=0, vars=16, tmps=63, ssa_vars=0)
+     ; (JIT)
+     ; string_munge.php:1-54
+     ; return  [] RANGE[0..0]
+BB0:
+     ; start lines=[0-4]
+     ; to=(BB2)
+     ; level=0
+     ; children=(BB2)
+0000 ASSIGN CV0($N) int(200)
+0001 ASSIGN CV1($levels) array(...)
+0002 ASSIGN CV2($blob) string("")
+0003 ASSIGN CV3($i) int(0)
+0004 JMP BB2
+
+BB1:
+     ; target lines=[5-31]
+     ; from=(BB2)
+     ; to=(BB2)
+     ; idom=BB2
+     ; level=2
+     ; loop_header=2
+0005 T20 = MOD CV3($i) int(5)
+0006 T21 = FETCH_DIM_R CV1($levels) T20
+0007 ASSIGN CV4($level) T21
+0008 T23 = MUL CV3($i) int(2654435761)
+0009 T24 = MOD T23 int(100000)
+0010 ASSIGN CV5($code) T24
+0011 T26 = MOD CV3($i) int(997)
+0012 T27 = CONCAT string("/api/v1/resource/") T26
+0013 T28 = CONCAT T27 string("/item-")
+0014 T29 = MOD CV3($i) int(31)
+0015 T30 = CONCAT T28 T29
+0016 ASSIGN CV6($path) T30
+0017 T33 = ROPE_INIT 13 string("  ")
+0018 T33 = ROPE_ADD 1 T33 CV3($i)
+0019 T33 = ROPE_ADD 2 T33 string(" , ")
+0020 T33 = ROPE_ADD 3 T33 CV4($level)
+0021 T33 = ROPE_ADD 4 T33 string(" ,  GET ,")
+0022 T33 = ROPE_ADD 5 T33 CV6($path)
+0023 T33 = ROPE_ADD 6 T33 string(" , ")
+0024 T33 = ROPE_ADD 7 T33 CV5($code)
+0025 T33 = ROPE_ADD 8 T33 string(" , ok-")
+0026 T33 = ROPE_ADD 9 T33 CV4($level)
+0027 T33 = ROPE_ADD 10 T33 string("-")
+0028 T33 = ROPE_ADD 11 T33 CV5($code)
+0029 T32 = ROPE_END 12 T33 string("  \n")
+0030 ASSIGN_OP (CONCAT) CV2($blob) T32
+0031 PRE_INC CV3($i)
+
+BB2:
+     ; follow target loop_header lines=[32-33]
+     ; from=(BB0, BB1)
+     ; to=(BB1, BB3)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB1, BB3)
+0032 T42 = IS_SMALLER CV3($i) CV0($N)
+0033 JMPNZ T42 BB1
+
+BB3:
+     ; follow lines=[34-42]
+     ; from=(BB2)
+     ; to=(BB15, BB4)
+     ; idom=BB2
+     ; level=2
+     ; children=(BB4, BB15)
+0034 ASSIGN CV7($count) int(0)
+0035 ASSIGN CV8($totalLen) int(0)
+0036 ASSIGN CV9($crc) int(0)
+0037 ASSIGN CV10($hits) int(0)
+0038 INIT_FCALL 2 112 string("explode")
+0039 SEND_VAL string("\n") 1
+0040 SEND_VAR CV2($blob) 2
+0041 V47 = DO_ICALL
+0042 V48 = FE_RESET_R V47 BB15
+
+BB4:
+     ; follow target loop_header lines=[43-43]
+     ; from=(BB3, BB6, BB14)
+     ; to=(BB15, BB5)
+     ; idom=BB3
+     ; level=3
+     ; children=(BB5)
+0043 FE_FETCH_R V48 CV11($line) BB15
+
+BB5:
+     ; follow lines=[44-45]
+     ; from=(BB4)
+     ; to=(BB7, BB6)
+     ; idom=BB4
+     ; level=4
+     ; loop_header=4
+     ; children=(BB6, BB7)
+0044 T49 = IS_IDENTICAL CV11($line) string("")
+0045 JMPZ T49 BB7
+
+BB6:
+     ; follow lines=[46-46]
+     ; from=(BB5)
+     ; to=(BB4)
+     ; idom=BB5
+     ; level=5
+     ; loop_header=4
+0046 JMP BB4
+
+BB7:
+     ; target lines=[47-52]
+     ; from=(BB5)
+     ; to=(BB10, BB8)
+     ; idom=BB5
+     ; level=5
+     ; loop_header=4
+     ; children=(BB8, BB10)
+0047 INIT_FCALL 2 112 string("explode")
+0048 SEND_VAL string(",") 1
+0049 SEND_VAR CV11($line) 2
+0050 V50 = DO_ICALL
+0051 ASSIGN CV12($fields) V50
+0052 V52 = FE_RESET_R CV12($fields) BB10
+
+BB8:
+     ; follow target loop_header lines=[53-53]
+     ; from=(BB7, BB9)
+     ; to=(BB10, BB9)
+     ; idom=BB7
+     ; level=6
+     ; loop_header=4
+     ; children=(BB9)
+0053 T53 = FE_FETCH_R V52 CV13($f) BB10
+
+BB9:
+     ; follow lines=[54-58]
+     ; from=(BB8)
+     ; to=(BB8)
+     ; idom=BB8
+     ; level=7
+     ; loop_header=8
+0054 ASSIGN CV14($k) T53
+0055 T56 = FRAMELESS_ICALL_1(trim) CV13($f)
+0056 ASSIGN_DIM CV12($fields) CV14($k)
+0057 OP_DATA T56
+0058 JMP BB8
+
+BB10:
+     ; target lines=[59-75]
+     ; from=(BB7, BB8)
+     ; to=(BB12, BB11)
+     ; idom=BB7
+     ; level=6
+     ; loop_header=4
+     ; children=(BB11, BB12)
+0059 FE_FREE V52
+0060 INIT_FCALL 1 96 string("strtoupper")
+0061 T58 = FETCH_DIM_R CV12($fields) int(1)
+0062 SEND_VAL T58 1
+0063 V59 = DO_ICALL
+0064 ASSIGN_DIM CV12($fields) int(1)
+0065 OP_DATA V59
+0066 T61 = FETCH_DIM_R CV12($fields) int(3)
+0067 T62 = FRAMELESS_ICALL_3(str_replace) string("/api/v1/") string("/api/v2/")
+0068 OP_DATA T61
+0069 ASSIGN_DIM CV12($fields) int(3)
+0070 OP_DATA T62
+0071 T63 = FETCH_DIM_R CV12($fields) int(3)
+0072 T64 = FRAMELESS_ICALL_3(substr) T63 int(0)
+0073 OP_DATA int(8)
+0074 T65 = IS_IDENTICAL T64 string("/api/v2/")
+0075 T65 = JMPZ_EX T65 BB12
+
+BB11:
+     ; follow lines=[76-79]
+     ; from=(BB10)
+     ; to=(BB12)
+     ; idom=BB10
+     ; level=7
+     ; loop_header=4
+0076 T66 = FETCH_DIM_R CV12($fields) int(5)
+0077 T67 = FRAMELESS_ICALL_2(strpos) T66 string("ok-")
+0078 T68 = IS_IDENTICAL T67 int(0)
+0079 T65 = BOOL T68
+
+BB12:
+     ; follow target lines=[80-80]
+     ; from=(BB10, BB11)
+     ; to=(BB14, BB13)
+     ; idom=BB10
+     ; level=7
+     ; loop_header=4
+     ; children=(BB13, BB14)
+0080 JMPZ T65 BB14
+
+BB13:
+     ; follow lines=[81-81]
+     ; from=(BB12)
+     ; to=(BB14)
+     ; idom=BB12
+     ; level=8
+     ; loop_header=4
+0081 PRE_INC CV10($hits)
+
+BB14:
+     ; follow target lines=[82-92]
+     ; from=(BB12, BB13)
+     ; to=(BB4)
+     ; idom=BB12
+     ; level=8
+     ; loop_header=4
+0082 T70 = FRAMELESS_ICALL_2(implode) string("|") CV12($fields)
+0083 ASSIGN CV15($rebuilt) T70
+0084 T72 = STRLEN CV15($rebuilt)
+0085 ASSIGN_OP (ADD) CV8($totalLen) T72
+0086 INIT_FCALL 1 96 string("crc32")
+0087 T74 = CONCAT CV15($rebuilt) CV9($crc)
+0088 SEND_VAL T74 1
+0089 V75 = DO_ICALL
+0090 ASSIGN CV9($crc) V75
+0091 PRE_INC CV7($count)
+0092 JMP BB4
+
+BB15:
+     ; target exit lines=[93-101]
+     ; from=(BB3, BB4)
+     ; idom=BB3
+     ; level=3
+0093 FE_FREE V48
+0094 INIT_FCALL 5 160 string("printf")
+0095 SEND_VAL string("lines=%d hits=%d totalLen=%d crc=%d\n") 1
+0096 SEND_VAR CV7($count) 2
+0097 SEND_VAR CV10($hits) 3
+0098 SEND_VAR CV8($totalLen) 4
+0099 SEND_VAR CV9($crc) 5
+0100 DO_ICALL
+0101 RETURN int(1)
+

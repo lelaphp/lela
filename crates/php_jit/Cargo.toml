@@ -18,6 +18,7 @@ workspace = true
 php_engine = { path = "../php_engine" }
 php_unit = { path = "../php_unit" }       # the ini entries the tier declares (decl::IniDecl) and the op arrays the recorder reads, through unit.lock
 php_heap = { path = "../php_heap" }       # the type a sampled operand holds (ZvalType), through heap.lock
+php_ssa = { path = "../php_ssa" }         # php's CFG, DFG and SSA of each op array a trace passes through, built where zend_jit_trace_build_ssa builds them (ADR-0015), through ssa.lock
 libc = { workspace = true }               # the code arena's mapping and its cache maintenance on macOS, and the unmapping on both (jit-design.md §4.4), already in the lock
 cranelift-codegen = { workspace = true }  # lower: the one module that names a Cranelift type (jit-design.md §4.3)
 cranelift-frontend = { workspace = true }
