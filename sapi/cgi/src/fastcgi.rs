@@ -12,7 +12,7 @@ use std::os::unix::net::UnixListener;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use php_proto::cgi::{Environment, RequestInfo};
-use php_proto::fcgi::{self, Input, Kind, Outgoing};
+use php_proto::fcgi::{self, Kind, Outgoing};
 use php_sapi::cgi::{C_NUMBER, CachedDisk};
 use php_sapi::fcgi::{Conn, allowed, allowed_clients};
 use php_sapi::{
@@ -155,54 +155,28 @@ fn resolve(host: &[u8]) -> Option<std::net::Ipv4Addr> {
     found
 }
 
-/// `SAPI_POST_BLOCK_SIZE` (`Z/main/SAPI.h:28`): what the drain of a body
-/// asks for at a time.
-const POST_BLOCK_SIZE: usize = 0x4000;
-
 /// What one process serves through: the connection, the request's
-/// output records and its input records, and how much of its body the
-/// request may still be handed.
+/// output records and its body's input records.
 struct Wire {
     conn: Option<Conn>,
     out: Outgoing,
-    input: Input,
-    unread: u64,
+    input: fcgi::Stdin,
     keep: bool,
 }
 
 impl Wire {
-    /// `sapi_fcgi_read_post`: up to `buf.len()` bytes of the body, no more
-    /// than `CONTENT_LENGTH` leaves, from the request's `FCGI_STDIN`
-    /// records; fewer where they end, and none past a read that fails,
-    /// after which the connection is not kept.
+    /// `sapi_fcgi_read_post`: up to `buf.len()` bytes of the body
+    /// ([`fcgi::Stdin::read`]); none past a read that fails, after which
+    /// the connection is not kept.
     fn read_body(&mut self, buf: &mut [u8]) -> usize {
-        let want = usize::try_from(self.unread).map_or(buf.len(), |unread| unread.min(buf.len()));
         let Some(conn) = &mut self.conn else {
             return 0;
         };
-        let mut read = 0;
-        while read < want {
-            match self.input.read(conn, &mut buf[read..want]) {
-                Ok(n) if n > 0 => read += n,
-                Ok(_) => break,
-                Err(_) => {
-                    self.keep = false;
-                    break;
-                }
-            }
+        let read = self.input.read(conn, buf);
+        if read.failed {
+            self.keep = false;
         }
-        self.unread = self
-            .unread
-            .saturating_sub(u64::try_from(read).unwrap_or(u64::MAX));
-        read
-    }
-
-    /// `sapi_deactivate_module`'s read of what the request left of its
-    /// body (`Z/main/SAPI.c:508`), so the records that carry it are off
-    /// the connection before the next request is read from it.
-    fn drain_body(&mut self) {
-        let mut block = vec![0; POST_BLOCK_SIZE];
-        while self.read_body(&mut block) == POST_BLOCK_SIZE {}
+        read.n
     }
 
     /// `fcgi_write`: whether the bytes went, which a connection the web
@@ -479,8 +453,7 @@ impl Accepting {
             let wire = Arc::new(Mutex::new(Wire {
                 conn: Some(conn),
                 out: Outgoing::new(begun.id),
-                input: Input::default(),
-                unread: 0,
+                input: fcgi::Stdin::default(),
                 keep: begun.keep,
             }));
             let served = serve_one(engine, begun.params, &wire);
@@ -555,7 +528,7 @@ fn serve_one(engine: &Engine, params: Environment, wire: &Arc<Mutex<Wire>>) -> O
         let user = php_sapi::cgi::user_ini(engine, &dir, doc_root);
         ini.extend(user.into_iter().map(|(k, v)| (k, v, IniOrigin::PerDir)));
     }
-    lock(wire).unread = crate::unread(info.content_length);
+    lock(wire).input = fcgi::Stdin::new(info.body_length());
     let body = Body::Stream(Box::new(Stdin(Arc::clone(wire))));
     let rows = php_sapi::cgi::server_variables(&env, &info, settings);
     let process_env: Vec<(Vec<u8>, Vec<u8>)> = std::env::vars_os()
@@ -588,11 +561,7 @@ fn serve_one(engine: &Engine, params: Environment, wire: &Arc<Mutex<Wire>>) -> O
     let (served, _) = engine.serve(description, sink, |_| {
         refusal(path.as_deref()).map_or(HostServes::Program, HostServes::Page)
     });
-    if served.start_failed {
-        return None;
-    }
-    lock(wire).drain_body();
-    Some(served.exit_code)
+    (!served.start_failed).then_some(served.exit_code)
 }
 
 /// The wire, held for one read or write.

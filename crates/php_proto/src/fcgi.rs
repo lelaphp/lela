@@ -421,6 +421,61 @@ impl Input {
     }
 }
 
+/// A request's body as a `FastCGI` host's `read_post` hands it out
+/// (`sapi_fcgi_read_post`, `Z/sapi/cgi/cgi_main.c:504`, and php-fpm's
+/// `sapi_cgi_read_post`): its `FCGI_STDIN` records ([`Input`]) and what
+/// the request's length leaves of them
+/// ([`RequestInfo::body_length`](crate::cgi::RequestInfo::body_length)).
+#[derive(Debug, Default)]
+pub struct Stdin {
+    input: Input,
+    unread: u64,
+}
+
+/// What one [`Stdin::read`] handed out, and whether the stream failed,
+/// after which the connection is not kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Handed {
+    pub n: usize,
+    pub failed: bool,
+}
+
+impl Stdin {
+    /// The body of a request `body_length` long.
+    #[must_use]
+    pub fn new(body_length: u64) -> Stdin {
+        Stdin {
+            input: Input::default(),
+            unread: body_length,
+        }
+    }
+
+    /// Up to `buf.len()` bytes of the body, no more than the length leaves,
+    /// read until the buffer is full, the records end or the stream fails,
+    /// as the hosts' loops over `fcgi_read` read them.
+    pub fn read(&mut self, stream: &mut impl io::Read, buf: &mut [u8]) -> Handed {
+        let want = usize::try_from(self.unread).map_or(buf.len(), |unread| unread.min(buf.len()));
+        let mut read = Handed {
+            n: 0,
+            failed: false,
+        };
+        while read.n < want {
+            match self.input.read(stream, &mut buf[read.n..want]) {
+                Ok(0) => break,
+                Ok(n) => read.n += n,
+                Err(_) => {
+                    read.failed = true;
+                    break;
+                }
+            }
+        }
+        self.unread = self
+            .unread
+            .saturating_sub(u64::try_from(read.n).unwrap_or(u64::MAX));
+        read
+    }
+}
+
 /// `fcgi_request`'s half that writes: the buffer records are gathered in, the
 /// open record's header position and type, and whether
 /// `FCGI_END_REQUEST` went.

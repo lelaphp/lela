@@ -192,10 +192,13 @@ impl Request {
         let entry = PostEntry::of(&content_type);
         self.post.entry = entry;
         self.free_content_type();
-        self.post.content_type = Emalloc::new(self, dup.len() + 1).ok().map(|mut block| {
-            block.bytes_mut()[..dup.len()].copy_from_slice(&dup);
-            block
-        });
+        // `estrndup`: a copy past the memory limit has ended the request in
+        // its fatal, which reads no body.
+        let Ok(mut block) = Emalloc::new(self, dup.len() + 1) else {
+            return;
+        };
+        block.bytes_mut()[..dup.len()].copy_from_slice(&dup);
+        self.post.content_type = Some(block);
         if entry == Some(PostEntry::Form) {
             self.read_standard_form_data(limits);
         }
@@ -246,6 +249,7 @@ impl Request {
             // stream emptied; a spill into `upload_tmp_dir` that could not
             // be made has warned of it already.
             if !block.is_empty() && !self.append_request_body(&mut body, &block) {
+                self.discard_request_body(&mut body);
                 docref(
                     self,
                     Level::Warning,
@@ -406,8 +410,8 @@ impl Request {
         (hooks.body_open)(self, dir.as_deref()).map(RequestBody::Stream)
     }
 
-    /// A block written at the end of the request's body; `false`, and the
-    /// body emptied, where the stream did not take it whole.
+    /// A block written at the end of the request's body; `false` where the
+    /// stream did not take it whole.
     fn append_request_body(&mut self, body: &mut RequestBody, block: &[u8]) -> bool {
         match body {
             RequestBody::Bytes(bytes) => {
@@ -418,6 +422,19 @@ impl Request {
                 Some(hooks) => (hooks.body_append)(self, *stream, block),
                 None => false,
             },
+        }
+    }
+
+    /// The request's body emptied, as `php_stream_truncate_set_size` empties
+    /// it.
+    fn discard_request_body(&mut self, body: &mut RequestBody) {
+        match body {
+            RequestBody::Bytes(bytes) => bytes.clear(),
+            RequestBody::Stream(stream) => {
+                if let Some(hooks) = self.stream_hooks() {
+                    (hooks.body_discard)(self, *stream);
+                }
+            }
         }
     }
 
@@ -511,11 +528,16 @@ impl Request {
         let published = [AutoGlobal::Post, AutoGlobal::Files]
             .into_iter()
             .try_for_each(|global| self.publish_track(global));
-        // The request body the default reader kept closed, and the
-        // request's own description put back.
+        // The stream the parse buffered the body in closed, the content
+        // type's copy freed, and the request's own description put back.
         self.free_content_type();
         let parsed = std::mem::replace(&mut self.post, kept);
         self.post.uploaded = parsed.uploaded;
+        if let (Some(RequestBody::Stream(stream)), Some(hooks)) =
+            (parsed.request_body, self.stream_hooks())
+        {
+            (hooks.body_close)(self, stream);
+        }
         if described {
             if let Some(web) = self.description.web.as_mut() {
                 (web.body, web.method, web.content_type, web.content_length) = request_info;
@@ -523,7 +545,7 @@ impl Request {
         } else {
             self.description.web = None;
         }
-        published.and(handled)
+        handled.and(published)
     }
 
     /// `zend_test_publish_track_vars`: the auto-global's name in
@@ -533,9 +555,9 @@ impl Request {
         let Some(array) = self.http_globals.track(global).and_then(|t| *t) else {
             return Ok(());
         };
+        let name = self.declared_string(global.name())?;
         let value = Value::array(array);
         self.addref(&value);
-        let name = self.declared_string(global.name())?;
         self.symbol_update(TableId::GLOBAL, *name, value);
         name.give_up(self);
         Ok(())
@@ -549,10 +571,18 @@ impl Request {
     }
 
     /// `sapi_deactivate_module`'s and `sapi_deactivate_destroy`'s part
-    /// of the post state (`Z/main/SAPI.c:502-560`): the content type's
-    /// copy a handler did not free, then every uploaded file no
-    /// `move_uploaded_file()` moved.
+    /// of the post state (`Z/main/SAPI.c:502-560`): what the host has not
+    /// handed out of a body no reader buffered, read and dropped, the
+    /// content type's copy a handler did not free, then every uploaded
+    /// file no `move_uploaded_file()` moved.
     pub(crate) fn deactivate_post(&mut self) {
+        // "make sure we've consumed all request input data": a body no
+        // reader buffered, of a request of the web, read to its end a
+        // block at a time and kept by no one, so a FastCGI connection
+        // carries none of it into its next request.
+        if self.post.request_body.is_none() && !self.post.done && self.web().is_some() {
+            while self.read_post_block(POST_BLOCK_SIZE).len() == POST_BLOCK_SIZE {}
+        }
         self.free_content_type();
         self.destroy_uploaded_files();
     }
@@ -693,8 +723,9 @@ impl Variables<&mut Request> {
     /// of its body and what was read of it as they stood after. `read`
     /// stands in for the host's [`ReadPost`] meanwhile. What the
     /// handlers refuse is warned of, as at request start; a body no
-    /// handler takes is read and kept by no one. What php 8.5.12's
-    /// `zend_test` runs for `zend_test_handle_post_data()`
+    /// handler takes is read and kept by no one. php has no single call
+    /// for this; an extension that serves a body itself runs the sequence,
+    /// as 8.5.12's `zend_test_handle_post_data()` does
     /// (`Z/ext/zend_test/test.c:1121`). A fatal the parse raised ends the
     /// request after the arrays are published and the description is put
     /// back, as php's `zend_try` bails out again.

@@ -3784,10 +3784,12 @@ pub(crate) fn body_stream(
     req: &mut Request,
     tmpdir: Option<&[u8]>,
 ) -> Result<Owner<Stream>, Thrown> {
+    /// `SAPI_POST_BLOCK_SIZE` (`Z/main/SAPI.h:28`).
+    const POST_BLOCK_SIZE: usize = 0x4000;
     temp_stream(
         req,
         TempMode::Default,
-        0x4000,
+        POST_BLOCK_SIZE,
         "TEMP",
         Vec::new(),
         tmpdir.map(<[u8]>::to_vec),

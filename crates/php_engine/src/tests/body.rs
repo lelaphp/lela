@@ -38,9 +38,20 @@ fn parse_body(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     Ok(pair)
 }
 
+/// `body_read(): int`: how much of the body the host has handed out,
+/// `SG(read_post_bytes)`, as the program stands.
+#[php_function]
+fn body_read(req: &mut Request) -> i64 {
+    req.post_bytes_read()
+}
+
 fn input() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![body_input::declared(), parse_body::declared()])
+        .functions(vec![
+            body_input::declared(),
+            parse_body::declared(),
+            body_read::declared(),
+        ])
         .build("body")
 }
 
@@ -195,10 +206,11 @@ fn a_body_no_reader_takes_is_read_by_input_alone_as_it_arrives() {
 }
 
 /// A body declared over `post_max_size` gives php's warning at request
-/// startup and an empty `$_POST`, and the request never reads it
-/// (`sapi_read_standard_form_data`, `Z/main/SAPI.c:258`); php-cgi under
-/// `-d post_max_size=1K -d html_errors=0` writes the same warning before
-/// `array(0) {}`.
+/// startup and an empty `$_POST`, and the program runs with none of it
+/// read (`sapi_read_standard_form_data`, `Z/main/SAPI.c:258`); php-cgi
+/// under `-d post_max_size=1K -d html_errors=0` writes the same warning
+/// before `array(0) {}`. The request's end reads what no reader buffered
+/// and drops it, as `sapi_deactivate_module` does.
 #[test]
 fn a_body_declared_over_post_max_size_is_warned_of_and_never_read() {
     let engine = Engine::cli_builder()
@@ -209,13 +221,16 @@ fn a_body_declared_over_post_max_size_is_warned_of_and_never_read() {
         &engine,
         "application/x-www-form-urlencoded",
         &form(),
-        "<?php echo $_POST === [] ? \"empty\\n\" : \"full\\n\";",
+        "<?php echo $_POST === [] ? 'empty ' : 'full ', body_read(), \"\\n\";",
     );
     assert_eq!(
         stdout,
-        "\nWarning: PHP Request Startup: POST Content-Length of 20014 bytes exceeds the limit of 1024 bytes in Unknown on line 0\nempty\n"
+        "\nWarning: PHP Request Startup: POST Content-Length of 20014 bytes exceeds the limit of 1024 bytes in Unknown on line 0\nempty 0\n"
     );
-    assert_eq!(reads, 0);
+    assert!(
+        reads > 0,
+        "the request's end drained the body: {reads} reads"
+    );
 }
 
 /// A form whose parse takes the request past `memory_limit` ends it in
@@ -524,48 +539,50 @@ fn padded_dir() -> String {
     dir
 }
 
-/// An endless body: `head`, then `x` for ever, every read filled, each
-/// byte it hands out counted.
-struct Endless {
+/// A body of 64 MiB: `head`, then `x`, every read filled.
+struct Large {
     head: &'static [u8],
-    handed: Arc<AtomicUsize>,
+    at: usize,
 }
 
-impl Read for Endless {
+impl Read for Large {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let at = self.handed.load(Ordering::Relaxed);
-        for (offset, byte) in buf.iter_mut().enumerate() {
-            *byte = self.head.get(at + offset).copied().unwrap_or(b'x');
+        const LEN: usize = 64 << 20;
+        let n = buf.len().min(LEN - self.at);
+        for (offset, byte) in buf[..n].iter_mut().enumerate() {
+            *byte = self.head.get(self.at + offset).copied().unwrap_or(b'x');
         }
-        self.handed.fetch_add(buf.len(), Ordering::Relaxed);
-        Ok(buf.len())
+        self.at += n;
+        Ok(n)
     }
 }
 
 /// A body whose host declares no length it keeps to, php-cgi's for a
 /// negative `CONTENT_LENGTH` (#3457), is pulled no further than one read
-/// past `post_max_size`, so nothing that holds it is larger: the form
-/// reader stops one `SAPI_POST_BLOCK_SIZE` block past the limit with
-/// php's warning, and the multipart reader one buffer past it, cutting
-/// its field there, each over a body that never ends. The lines are
-/// php-cgi 8.5.12's under `-n -d post_max_size=64K -d html_errors=0` for
-/// the same heads and a megabyte of `x` on its standard input with
-/// `CONTENT_LENGTH=-1`.
+/// past `post_max_size` before the program runs, so nothing that holds it
+/// is larger: the form reader stops one `SAPI_POST_BLOCK_SIZE` block past
+/// the limit with php's warning, and the multipart reader one buffer past
+/// it, cutting its field there. What the program sees read of the body,
+/// `SG(read_post_bytes)`, says so; the request's end then reads the rest
+/// of the multipart body a block at a time and drops it, as
+/// `sapi_deactivate_module` drains a body no reader buffered. The
+/// warnings and the first two figures of each line are php-cgi 8.5.12's
+/// under `-n -d post_max_size=64K -d html_errors=0` for the same heads and
+/// a megabyte of `x` on its standard input with `CONTENT_LENGTH=-1`.
 #[test]
-fn an_endless_body_is_pulled_no_further_than_a_read_past_post_max_size() {
-    const POST_MAX_SIZE: usize = 64 * 1024;
-    const POST_BLOCK_SIZE: usize = 0x4000;
+fn a_body_of_no_declared_length_is_pulled_no_further_than_a_read_past_post_max_size() {
+    const POST_MAX_SIZE: i64 = 64 * 1024;
+    const POST_BLOCK_SIZE: i64 = 0x4000;
     let engine = Engine::cli_builder()
         .ini("post_max_size", "64K")
         .extensions(&[input()])
         .build();
     let pulled = |content_type: &str, head: &'static [u8]| {
-        let handed = Arc::new(AtomicUsize::new(0));
         let description = RequestDescription {
             sapi_name: String::from("cgi-fcgi"),
             script_name: Some(b"body.php".to_vec()),
             source: Some(
-                b"<?php echo $_POST === [] ? 0 : 1, ' ', strlen($_POST['a'] ?? ''), \"\\n\";"
+                b"<?php echo $_POST === [] ? 0 : 1, ' ', strlen($_POST['a'] ?? ''), ' ', body_read(), \"\\n\";"
                     .to_vec(),
             ),
             cwd: std::env::current_dir().expect("the working directory"),
@@ -573,10 +590,7 @@ fn an_endless_body_is_pulled_no_further_than_a_read_past_post_max_size() {
                 method: Some(Method::Post),
                 content_type: Some(content_type.as_bytes().to_vec()),
                 content_length: -1,
-                body: Body::Stream(Box::new(Endless {
-                    head,
-                    handed: Arc::clone(&handed),
-                })),
+                body: Body::Stream(Box::new(Large { head, at: 0 })),
                 response_code: 200,
                 ..WebRequest::default()
             }),
@@ -584,22 +598,28 @@ fn an_endless_body_is_pulled_no_further_than_a_read_past_post_max_size() {
         };
         let mut sink = Capture::default();
         engine.serve_into(description, &mut sink);
-        let handed = handed.load(Ordering::Relaxed);
+        let stdout = String::from_utf8_lossy(&sink.stdout).into_owned();
+        let read: i64 = stdout
+            .trim_end()
+            .rsplit(' ')
+            .next()
+            .and_then(|n| n.parse().ok())
+            .expect("body_read()'s figure");
         assert!(
-            handed <= POST_MAX_SIZE + POST_BLOCK_SIZE,
-            "{content_type}: {handed} bytes pulled"
+            read <= POST_MAX_SIZE + POST_BLOCK_SIZE,
+            "{content_type}: {read} bytes read before the program"
         );
-        String::from_utf8_lossy(&sink.stdout).into_owned()
+        stdout
     };
     assert_eq!(
         pulled("application/x-www-form-urlencoded", b"a="),
-        "\nWarning: PHP Request Startup: Actual POST length does not match Content-Length, and exceeds 65536 bytes in Unknown on line 0\n0 0\n"
+        "\nWarning: PHP Request Startup: Actual POST length does not match Content-Length, and exceeds 65536 bytes in Unknown on line 0\n0 0 81920\n"
     );
     assert_eq!(
         pulled(
             "multipart/form-data; boundary=b",
             b"--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n"
         ),
-        "\nWarning: Actual POST length does not match Content-Length, and exceeds 65536 bytes in Unknown on line 0\n1 66548\n"
+        "\nWarning: Actual POST length does not match Content-Length, and exceeds 65536 bytes in Unknown on line 0\n1 66548 66597\n"
     );
 }

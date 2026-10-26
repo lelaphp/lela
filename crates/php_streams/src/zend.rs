@@ -26,7 +26,9 @@ pub const STREAM_HOOKS: StreamHooks = StreamHooks {
     get_line,
     body_open,
     body_append,
+    body_discard,
     body_read,
+    body_close,
     state: crate::state::engine_state,
     engine_end: crate::state::engine_end,
 };
@@ -118,18 +120,20 @@ fn body_open(req: &mut Request, dir: Option<&[u8]>) -> Result<Resource, Thrown> 
     Ok(body)
 }
 
-/// [`StreamHooks::body_append`]: the block written at the stream's end,
-/// and the stream emptied where it took fewer.
+/// [`StreamHooks::body_append`]: the block written at the stream's end.
 fn body_append(req: &mut Request, body: Resource, bytes: &[u8]) -> bool {
     let Some(stream) = Stream::from_value(req, &body.as_value()) else {
         return false;
     };
     stream.seek(req, 0, Whence::End);
-    if stream.write(req, bytes) == Some(bytes.len()) {
-        return true;
+    stream.write(req, bytes) == Some(bytes.len())
+}
+
+/// [`StreamHooks::body_discard`]: the stream emptied.
+fn body_discard(req: &mut Request, body: Resource) {
+    if let Some(stream) = Stream::from_value(req, &body.as_value()) {
+        stream.truncate(req, 0).ok();
     }
-    stream.truncate(req, 0).ok();
-    false
 }
 
 /// [`StreamHooks::body_read`]: the stream read whole from its start.
@@ -144,6 +148,13 @@ fn body_read(req: &mut Request, body: Resource) -> Vec<u8> {
         bytes.extend_from_slice(&block[..n]);
     }
     bytes
+}
+
+/// [`StreamHooks::body_close`]: the stream closed.
+fn body_close(req: &mut Request, body: Resource) {
+    if let Some(stream) = Stream::from_value(req, &body.as_value()) {
+        stream.close(req);
+    }
 }
 
 /// The stream opcache's `zend_stream_open` of a file it holds opens and

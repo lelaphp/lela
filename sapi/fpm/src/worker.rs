@@ -15,7 +15,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
 use php_proto::cgi::{Environment, Proxy, Settings};
-use php_proto::fcgi::{self, Input, Kind, Outgoing};
+use php_proto::fcgi::{self, Kind, Outgoing};
 use php_sapi::cgi::{C_NUMBER, CachedDisk, ini_text};
 use php_sapi::fcgi::{Conn, allowed, client_ip};
 use php_sapi::{
@@ -34,18 +34,13 @@ use crate::{zlog, zlog_sys};
 /// `sapi_module.name`: what `php_sapi_name()` answers.
 pub(crate) const NAME: &str = "fpm-fcgi";
 
-/// `SAPI_POST_BLOCK_SIZE` (`Z/main/SAPI.h:28`): what the drain of a body
-/// asks for at a time.
-const POST_BLOCK_SIZE: usize = 0x4000;
-
 /// What a request writes through: the connection, the request's output
-/// buffer, how much of its body the request may still be handed, and
-/// what the access log reads of the response afterwards.
+/// buffer, its body's input records, and what the access log reads of the
+/// response afterwards.
 struct Wire {
     conn: Option<Conn>,
     out: Outgoing,
-    input: Input,
-    unread: u64,
+    input: fcgi::Stdin,
     keep: bool,
     /// `CGIG(fcgi_logging_request_started)`.
     stderr_started: bool,
@@ -54,38 +49,17 @@ struct Wire {
 
 impl Wire {
     /// `sapi_cgi_read_post`'s read of the request's `FCGI_STDIN` records
-    /// (`Z/sapi/fpm/fpm/fpm_main.c:429`): up to `buf.len()` bytes of the
-    /// body, no more than `CONTENT_LENGTH` leaves; fewer where they end,
-    /// and none past a read that fails, after which the connection is not
-    /// kept.
+    /// (`Z/sapi/fpm/fpm/fpm_main.c:429`, [`fcgi::Stdin::read`]); none past
+    /// a read that fails, after which the connection is not kept.
     fn read_body(&mut self, buf: &mut [u8]) -> usize {
-        let want = usize::try_from(self.unread).map_or(buf.len(), |unread| unread.min(buf.len()));
         let Some(conn) = &mut self.conn else {
             return 0;
         };
-        let mut read = 0;
-        while read < want {
-            match self.input.read(conn, &mut buf[read..want]) {
-                Ok(n) if n > 0 => read += n,
-                Ok(_) => break,
-                Err(_) => {
-                    self.keep = false;
-                    break;
-                }
-            }
+        let read = self.input.read(conn, buf);
+        if read.failed {
+            self.keep = false;
         }
-        self.unread = self
-            .unread
-            .saturating_sub(u64::try_from(read).unwrap_or(u64::MAX));
-        read
-    }
-
-    /// `sapi_deactivate_module`'s read of what the request left of its
-    /// body (`Z/main/SAPI.c:508`), so the records that carry it are off
-    /// the connection before the next request is read from it.
-    fn drain_body(&mut self) {
-        let mut block = vec![0; POST_BLOCK_SIZE];
-        while self.read_body(&mut block) == POST_BLOCK_SIZE {}
+        read.n
     }
 
     /// `fcgi_write`, the connection kept no longer where it fails.
@@ -593,8 +567,7 @@ impl Worker {
             let wire = Arc::new(Mutex::new(Wire {
                 conn: Some(conn),
                 out: Outgoing::new(begun.id),
-                input: Input::default(),
-                unread: 0,
+                input: fcgi::Stdin::default(),
                 keep: begun.keep,
                 stderr_started: false,
                 head: None,
@@ -612,17 +585,13 @@ impl Worker {
                 // `main` (`Z/sapi/fpm/fpm/fpm_main.c:1838-1843`): what the
                 // failure wrote ends the request, the connection is closed
                 // whatever the web server asked to keep, and the child ends.
-                wire.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .finish(true);
+                lock(&wire).finish(true);
                 crate::stdio::flush_child();
                 return EXIT_SOFTWARE;
             }
             requests += 1;
             let last = self.max_requests > 0 && requests == self.max_requests;
-            let mut w = wire
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut w = lock(&wire);
             if last {
                 w.keep = false;
             }
@@ -771,10 +740,7 @@ impl Worker {
         if served.start_failed {
             return Served::StartFailed;
         }
-        lock(wire).drain_body();
-        let (status, headers) = wire
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        let (status, headers) = lock(wire)
             .head
             .as_ref()
             .map_or((200, Vec::new()), |h| (h.code, h.lines.clone()));
@@ -1023,7 +989,7 @@ impl Worker {
                     .map(|(k, v)| (k, v, IniOrigin::PerDir)),
             );
         }
-        let body = body(env, info.content_length, wire);
+        let body = body(env, info.body_length(), wire);
         let settings_fix = self.flag(b"cgi.fix_pathinfo", true);
         let settings = Settings {
             fix_pathinfo: settings_fix,
@@ -1089,14 +1055,13 @@ impl Worker {
 /// string(0) ""
 /// string(82) "REQUEST_BODY_FILE: open('/nonexistent/body') failed: No such file or directory (2)"
 /// ```
-fn body(env: &Environment, content_length: i64, wire: &Arc<Mutex<Wire>>) -> Body {
-    let unread = content_length.cast_unsigned();
+fn body(env: &Environment, unread: u64, wire: &Arc<Mutex<Wire>>) -> Body {
     // Nothing to read opens no file and warns of none.
     if unread == 0 {
         return Body::default();
     }
     let Some(file) = env.get(b"REQUEST_BODY_FILE").filter(|f| !f.is_empty()) else {
-        lock(wire).unread = unread;
+        lock(wire).input = fcgi::Stdin::new(unread);
         return Body::Stream(Box::new(Stdin(Arc::clone(wire))));
     };
     match std::fs::File::open(crate::conf::path(file)) {

@@ -562,7 +562,7 @@ fn describe(
     let body = if matches!(primary, Primary::Stdin) {
         php_sapi::Body::default()
     } else {
-        php_sapi::Body::Stream(Box::new(std::io::stdin().take(unread(info.content_length))))
+        php_sapi::Body::Stream(Box::new(std::io::stdin().take(info.body_length())))
     };
     let web = WebRequest {
         query,
@@ -597,16 +597,6 @@ fn describe(
         },
         primary,
     ))
-}
-
-/// How much of a body the host may hand out, `sapi_cgi_read_post`'s and
-/// `sapi_fcgi_read_post`'s `remaining` before the first read:
-/// `CONTENT_LENGTH` as a `size_t` (`Z/sapi/cgi/cgi_main.c:483, 509`). A
-/// negative length wraps, as in the pinned release build, whose `assert`
-/// on it is compiled out, so the body is read to its end, held to
-/// `post_max_size` by the readers that pull it.
-fn unread(content_length: i64) -> u64 {
-    content_length.cast_unsigned()
 }
 
 /// The file a request serves, its `$argv` and its query string.

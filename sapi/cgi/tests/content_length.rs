@@ -46,16 +46,17 @@ fn a_content_length_opening_with_0xa0_is_read_past_it() {
 
 /// A negative `CONTENT_LENGTH` reads stdin to its end, as the pinned
 /// php-cgi's wrapped `size_t` does, but the host hands the body out only
-/// as the request pulls it, so a body far past `post_max_size` is read no
-/// further than the form reader's block past the limit (#3457): the
-/// request ends with php's warning while the client is still writing, its
-/// pipe refused after some few hundred kilobytes at most, where a host
-/// that read the body before the request would take all 64 MiB.
+/// as the request pulls it, so 256 MiB on stdin past a `post_max_size` of
+/// 64K never stand in the process's memory (#3457): the form reader stops
+/// a block past the limit with php's warning and the request reads no
+/// more of it. The process's peak resident set stays under half the body,
+/// where a host that read the body before the request would hold all of
+/// it.
 #[test]
 fn a_negative_content_length_is_read_no_further_than_the_request_pulls() {
     use std::io::Write as _;
 
-    const SENT_AT_MOST: usize = 64 << 20;
+    const SENT: usize = 256 << 20;
     let dir = std::env::temp_dir().join(format!("sapi-cgi-negative-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("t.php");
@@ -77,18 +78,20 @@ fn a_negative_content_length_is_read_no_further_than_the_request_pulls() {
     // The client, a thread of the test's own process, which forks nothing.
     #[allow(clippy::disallowed_methods)]
     let writer = std::thread::spawn(move || {
-        let chunk = [b'x'; 4096];
-        let mut sent = 0;
+        // The request stops reading once its reader stops; a pipe it
+        // closed refuses the rest.
+        let chunk = vec![b'x'; 1 << 16];
         if stdin.write_all(b"a=").is_err() {
-            return sent;
+            return;
         }
-        while sent < SENT_AT_MOST && stdin.write_all(&chunk).is_ok() {
-            sent += chunk.len();
+        for _ in 0..SENT / chunk.len() {
+            if stdin.write_all(&chunk).is_err() {
+                return;
+            }
         }
-        sent
     });
+    writer.join().unwrap();
     let out = child.wait_with_output().unwrap();
-    let sent = writer.join().unwrap();
     std::fs::remove_dir_all(&dir).ok();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -97,5 +100,16 @@ fn a_negative_content_length_is_read_no_further_than_the_request_pulls() {
         ),
         "{stdout:?}"
     );
-    assert!(sent < 1 << 20, "the host took {sent} bytes");
+    let usage =
+        nix::sys::resource::getrusage(nix::sys::resource::UsageWho::RUSAGE_CHILDREN).unwrap();
+    // `ru_maxrss` counts bytes on macOS and kilobytes on Linux.
+    let peak = if cfg!(target_os = "macos") {
+        usage.max_rss()
+    } else {
+        usage.max_rss() * 1024
+    };
+    assert!(
+        usize::try_from(peak).unwrap() < SENT / 2,
+        "php-cgi's peak resident set was {peak} bytes"
+    );
 }
