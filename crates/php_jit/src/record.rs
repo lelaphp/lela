@@ -1767,18 +1767,77 @@ pub(crate) fn counts(req: &Request, frame: FrameRef, header: SafepointIdx) -> bo
 }
 
 /// Whether php's CFG finds loop `header`: its root is [`reachable`] from
-/// the entry, and so is a jump back to where its back edge lands, as
-/// `zend_cfg_identify_loops` finds a loop by a back edge from a block the
-/// entry reaches, an unreached block drawing no edge
-/// (`Z/Zend/Optimizer/zend_cfg.c:607-617`, `:778-880`). A `foreach`
-/// whose body always returns has none: the `JMP` its compiler emits past
-/// the body is dead, and php's trace records through the `FE_FETCH_R` as
-/// through any other opline.
+/// the entry, and so is an edge back into the root from inside the loop,
+/// as `zend_cfg_identify_loops` finds a loop by a back edge from a block
+/// the entry reaches, an unreached block drawing no edge, and a header
+/// with one predecessor heading none (`Z/Zend/Optimizer/zend_cfg.c:607-617`,
+/// `:778-880`). A loop rooted where its back edge lands, a `foreach` or a
+/// `do`, has its back edge in a jump at or past that opline. A `for` or a
+/// `while`, rooted at its condition ([`rooted`]), has it in the body
+/// between the opline the back edge lands on and the condition: the
+/// body's last opline falling into the condition, or a `continue`'s jump
+/// to it. The condition's own jump into the body is no back edge, since
+/// the condition dominates the body.
+///
+/// A `foreach` whose body always returns has none: the `JMP` its
+/// compiler emits past the body is dead, and php's trace records through
+/// the `FE_FETCH_R` as through any other opline.
 ///
 /// ```php
 /// function first($a) { foreach ($a as $v) { return $v; } return 0; }
 /// $s = 0;
 /// for ($i = 0; $i < 3; $i++) { $s += first([$i, 9]); }
+/// echo $s, "\n";
+/// ```
+/// ```expect regime=jit-inline process capture
+/// 3
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:3
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) $main() %SCRATCH%/witness.php:4
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 2 $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 2 start (side trace 1/2) $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+/// ```
+///
+/// Nor has a `while` whose body always returns: nothing reaches its
+/// condition but the `JMP` that enters the loop, so the condition heads
+/// no loop, and the `JMPNZ` from it into the body is no back edge:
+///
+/// ```php
+/// function first($a, $n) { $k = $n - 2; while ($k < $n) { return $a[$k]; } return 0; }
+/// $s = 0;
+/// for ($i = 0; $i < 3; $i++) { $s += first([$i, 9], 2); }
+/// echo $s, "\n";
+/// ```
+/// ```expect regime=jit-inline process capture
+/// 3
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:3
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) $main() %SCRATCH%/witness.php:4
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 2 $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 2 start (side trace 1/2) $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+/// ```
+///
+/// and a `for` whose body always returns, its step never reached, has
+/// none either:
+///
+/// ```php
+/// function first($a, $n) { for ($k = $n - 2; $k < $n; $k++) { return $a[$k]; } return 0; }
+/// $s = 0;
+/// for ($i = 0; $i < 3; $i++) { $s += first([$i, 9], 2); }
 /// echo $s, "\n";
 /// ```
 /// ```expect regime=jit-inline process capture
@@ -1805,11 +1864,43 @@ pub(crate) fn found(code: &OpArray, header: SafepointIdx) -> bool {
     };
     let seen = reachable(code);
     let reaches = |at: OplineIdx| seen.get(at.0 as usize).copied().unwrap_or(false);
-    let end = u32::try_from(code.oplines.len()).unwrap_or(u32::MAX);
-    reaches(root)
-        && (site.0..end)
+    let jumps_to = |at: OplineIdx, to: OplineIdx| tier::jump_targets(code, at).any(|t| t == to);
+    if !reaches(root) {
+        return false;
+    }
+    if root == site {
+        let end = u32::try_from(code.oplines.len()).unwrap_or(u32::MAX);
+        return (site.0..end)
             .map(OplineIdx)
-            .any(|at| reaches(at) && tier::jump_targets(code, at).any(|to| to == site))
+            .any(|at| reaches(at) && jumps_to(at, site));
+    }
+    // The body, from where the back edge lands up to the condition.
+    (site.0..root.0).map(OplineIdx).any(|at| {
+        let falls = at.0 + 1 == root.0
+            && code
+                .oplines
+                .get(at.0 as usize)
+                .is_some_and(|op| !ends_block(op.opcode));
+        reaches(at) && (falls || jumps_to(at, root))
+    })
+}
+
+/// Whether no edge leaves the opline past one of `opcode`'s: a return, a
+/// throw, a `MATCH_ERROR`, a `VERIFY_NEVER_TYPE`, a `FAST_RET`, a `JMP`
+/// and a `MATCH` (`zend_build_cfg`, `Z/Zend/Optimizer/zend_cfg.c:496-587`).
+fn ends_block(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::Return
+            | Opcode::ReturnByRef
+            | Opcode::GeneratorReturn
+            | Opcode::Throw
+            | Opcode::MatchError
+            | Opcode::VerifyNeverType
+            | Opcode::FastRet
+            | Opcode::Jmp
+            | Opcode::Match
+    )
 }
 
 /// Per opline, whether it is reached from the op array's entry along
@@ -1840,19 +1931,7 @@ fn reachable(code: &OpArray) -> Vec<bool> {
             continue;
         }
         work.extend(tier::jump_targets(code, at));
-        let ends = matches!(
-            op.opcode,
-            Opcode::Return
-                | Opcode::ReturnByRef
-                | Opcode::GeneratorReturn
-                | Opcode::Throw
-                | Opcode::MatchError
-                | Opcode::VerifyNeverType
-                | Opcode::FastRet
-                | Opcode::Jmp
-                | Opcode::Match
-        );
-        if !ends {
+        if !ends_block(op.opcode) {
             work.extend(at.0.checked_add(1).map(OplineIdx));
         }
     }
