@@ -49,15 +49,15 @@ use crate::api::values::{ClassId, Emalloc, PhpArray, Value};
 pub(super) const OPLINE: usize = 32;
 /// `sizeof(zval)`.
 const ZVAL: usize = 16;
-/// `sizeof(zend_class_entry)`.
+/// `sizeof(zend_class_entry)`, carved at `Z/Zend/zend_compile.c:9253`.
 const CLASS_ENTRY: usize = 520;
-/// `sizeof(zend_property_info)`.
+/// `sizeof(zend_property_info)`, carved at `Z/Zend/zend_API.c:4525`.
 const PROPERTY_INFO: usize = 72;
-/// `sizeof(zend_class_constant)`.
+/// `sizeof(zend_class_constant)`, carved at `Z/Zend/zend_API.c:4888`.
 const CLASS_CONSTANT: usize = 56;
-/// A block of `CG(ast_arena)`, `1024 * 32` (`zend_compile`).
+/// A block of `CG(ast_arena)` (`Z/Zend/zend_language_scanner.l:599`).
 const AST_BLOCK: usize = 32 * 1024;
-/// `sizeof(zend_ast_zval)`, a `zend_ast` of two children's too.
+/// `sizeof(zend_ast_zval)`, and a two-child `zend_ast`'s (`Z/Zend/zend_ast.h`).
 const AST_NODE: usize = 24;
 /// `INITIAL_OP_ARRAY_SIZE` (`Z/Zend/zend_compile.h`).
 const INITIAL_OPLINES: usize = 64;
@@ -1499,17 +1499,28 @@ pub(super) fn carve(req: &mut Request, unit: &Unit) -> Result<(), Thrown> {
 /// 2359392 above
 /// ```
 pub(super) fn persisted(req: &mut Request, unit: &Unit, tree: usize) -> Result<(), Thrown> {
+    with_tree(req, tree, |req| {
+        carve(req, unit)?;
+        of_unit(req, unit)?.free(req);
+        Ok(())
+    })
+}
+
+/// `CG(ast_arena)` over a tree of `elements` laid on the heap while
+/// `then` runs, and given back after it, as `zend_compile` destroys it
+/// once the file's op arrays stand (`Z/Zend/zend_language_scanner.l:599`).
+pub(super) fn with_tree(
+    req: &mut Request,
+    elements: usize,
+    then: impl FnOnce(&mut Request) -> Result<(), Thrown>,
+) -> Result<(), Thrown> {
     let mut ast = Vec::new();
-    let charged = (0..(tree * AST_NODE).div_ceil(AST_BLOCK).max(1))
+    let charged = (0..(elements * AST_NODE).div_ceil(AST_BLOCK).max(1))
         .try_for_each(|_| {
             ast.push(Emalloc::new(req, AST_BLOCK)?);
             Ok(())
         })
-        .and_then(|()| {
-            carve(req, unit)?;
-            of_unit(req, unit)?.free(req);
-            Ok(())
-        });
+        .and_then(|()| then(req));
     for block in ast {
         block.free(req);
     }
