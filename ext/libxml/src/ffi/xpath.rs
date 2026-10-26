@@ -90,7 +90,9 @@ pub enum Called {
 /// What a registered function hands back to the expression.
 #[derive(Debug, Clone)]
 pub enum Returned {
-    Node(Node),
+    /// A node object: `xmlXPathNewNodeSet(nodep)`, a set of its node, or
+    /// the empty set where the object stands for no node.
+    NodeSet(Option<Node>),
     Bool(bool),
     Str(Vec<u8>),
     /// Nothing: the call threw or failed, so php pushes an empty string as
@@ -538,8 +540,12 @@ fn pop_args(ctxt: *mut sys::xmlXPathParserContext, n: usize, strings: bool) -> V
 
 fn push(ctxt: *mut sys::xmlXPathParserContext, value: Returned) {
     let obj = match value {
-        // SAFETY: a live node of the document being queried.
-        Returned::Node(node) => unsafe { sys::xmlXPathNewNodeSet(node.raw()) },
+        Returned::NodeSet(node) => {
+            let raw = node.map_or(std::ptr::null_mut(), Node::raw);
+            // SAFETY: a live node of the document being queried, or null,
+            // for which libxml makes the empty set.
+            unsafe { sys::xmlXPathNewNodeSet(raw) }
+        }
         // SAFETY: no pointer argument.
         Returned::Bool(b) => unsafe { sys::xmlXPathNewBoolean(c_int::from(b)) },
         Returned::Str(s) => {

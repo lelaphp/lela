@@ -700,8 +700,26 @@ fn dispatch(
 }
 
 /// What the function answered, as `php_dom_xpath_callback_dispatch` turns
-/// it into a value the evaluation reads: a node kept with the callbacks, a boolean, a
-/// string, and an object that is no node php's `TypeError`.
+/// it into a value the evaluation reads: a node object kept with the
+/// callbacks, the set of its node or the empty set where it stands for
+/// none, a boolean, a string, and an object that is no node php's
+/// `TypeError`. A node object with no node is kept as any other, so it
+/// lives as long as the evaluator:
+///
+/// ```php
+/// $d = new DOMDocument; $d->loadXML('<r><a/><a/></r>');
+/// $x = new DOMXPath($d);
+/// $x->registerNamespace('php', 'http://php.net/xpath');
+/// $x->registerPhpFunctions();
+/// function f() { echo "f"; return new class extends DOMElement { function __construct() {} function __destruct() { echo "d"; } }; }
+/// $n = $x->query('//a[php:function("f")]')->length;
+/// echo "|$n|";
+/// unset($x);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// ff|0|ddend
+/// ```
 fn returned(
     req: &mut Request,
     at: CallbacksAt,
@@ -711,13 +729,9 @@ fn returned(
     let node_class = if modern { "Dom\\Node" } else { "DOMNode" };
     let returned = match answer.as_ref() {
         ValueRef::Object(o) if crate::instance_of(req, o, node_class) => {
-            match crate::node_of(req, o) {
-                Some(node) => {
-                    at.keep(req, answer);
-                    return Ok(Returned::Node(node));
-                }
-                None => Ok(Returned::Sentinel),
-            }
+            let node = crate::node_of(req, o);
+            at.keep(req, answer);
+            return Ok(Returned::NodeSet(node));
         }
         ValueRef::Bool(b) => Ok(Returned::Bool(b)),
         ValueRef::Object(_) => {
