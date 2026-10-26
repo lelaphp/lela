@@ -67,9 +67,9 @@ enum Token {
 enum Text {
     /// The string the scanner made.
     Made(Owner<PhpString>),
-    /// `UNDEF`: the validating methods' `yylex` gives each string up as
-    /// it is scanned.
-    Scanned,
+    /// `UNDEF`: the string given up as it was scanned, as the validating
+    /// methods' `yylex` gives each up.
+    GivenUp,
 }
 
 impl Text {
@@ -298,14 +298,16 @@ impl Scanner<'_> {
     /// quote.
     fn scan_string(&mut self, req: &mut Request) -> Result<Token, Thrown> {
         let start = self.cursor;
-        let mut sized = Written { to: &mut [], at: 0 };
+        let mut sized = Written(None, 0);
         if let Some(code) = self.walk_string(&mut sized) {
             return Ok(self.refuse(code));
         }
-        let end = self.cursor;
-        let made = Scanner::string(req, sized.at, |to| {
+        let (end, len) = (self.cursor, sized.1);
+        let made = Scanner::string(req, len, |to| {
             self.cursor = start;
-            self.walk_string(&mut Written { to, at: 0 });
+            let mut written = Written(Some(to), 0);
+            let refused = self.walk_string(&mut written);
+            debug_assert!(refused.is_none() && written.1 == len);
         });
         self.cursor = end;
         made
@@ -483,19 +485,18 @@ fn push_utf8(out: &mut Written<'_>, code: u32) {
     }
 }
 
-/// Where a string's walk puts its bytes: `STR_P2`'s write into the
-/// string, or, over no room, `STR_P1`'s count of what it would write.
-struct Written<'b> {
-    to: &'b mut [u8],
-    at: usize,
-}
+/// Where a string's walk puts its bytes, and how many it has put: into
+/// the string `STR_P1`'s count sized, `STR_P2`'s write, or, with no
+/// string yet, nowhere, `STR_P1`'s count itself.
+struct Written<'b>(Option<&'b mut [u8]>, usize);
 
 impl Written<'_> {
     fn put(&mut self, bytes: &[u8]) {
-        if let Some(room) = self.to.get_mut(self.at..self.at + bytes.len()) {
+        let end = self.1 + bytes.len();
+        if let Some(room) = self.0.as_mut().and_then(|to| to.get_mut(self.1..end)) {
             room.copy_from_slice(bytes);
         }
-        self.at += bytes.len();
+        self.1 = end;
     }
 }
 
@@ -632,7 +633,7 @@ impl Parser<'_> {
     fn advance(&mut self, req: &mut Request) -> Result<(), Thrown> {
         let mut token = self.scanner.scan(req)?;
         if self.validating && matches!(token, Token::Str(_)) {
-            std::mem::replace(&mut token, Token::Str(Text::Scanned)).give_up(req);
+            std::mem::replace(&mut token, Token::Str(Text::GivenUp)).give_up(req);
         }
         std::mem::replace(&mut self.token, token).give_up(req);
         Ok(())
@@ -1016,7 +1017,7 @@ impl Parser<'_> {
                     }
                     // Nothing built: under the validating methods, or with
                     // no `stdClass`.
-                    (Holder::Nothing, Some(name)) | (_, Some(name @ Text::Scanned)) => {
+                    (Holder::Nothing, Some(name)) | (_, Some(name @ Text::GivenUp)) => {
                         name.give_up(req);
                         value.give_up(req);
                     }
