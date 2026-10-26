@@ -151,9 +151,11 @@ pub(crate) const METHOD_CALL: Fixture = Fixture {
     ],
 };
 
-/// A static method's call, as `static_call` drives it: pushed through its
-/// handler, the callee held by a guard after it, its sends, activation
-/// and leave in place (#3343).
+/// A static method's call, as `static_call` drives it: pushed in place
+/// under the guard on the pair its runtime-cache slot holds, its class the
+/// published one it names, and by its handler where the slot holds
+/// another, the callee held by a guard after it; its sends, activation
+/// and leave in place (#3343, #3557).
 pub(crate) const STATIC_CALL: Fixture = Fixture {
     name: "static_call",
     program: "method_call",
@@ -177,13 +179,27 @@ pub(crate) const NEW_CALL: Fixture = Fixture {
     ],
 };
 
-/// A method of a request-scoped class, an evaluated base's: its call
-/// pushed by its handler, with no class guard or callee held (#3343).
+/// A published method a request-scoped class inherits, called on a
+/// variable's object: pushed in place under the guard on the pair its
+/// runtime-cache slot holds, its class the receiver's (#3558).
 pub(crate) const METHOD_SCOPED: Fixture = Fixture {
     name: "method_scoped",
-    program: "method_call",
+    program: "scoped_calls",
     plan: &[
         ("record.function", "scoped"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A published static method called through a request-scoped class's
+/// name: pushed in place under the guard on the pair its runtime-cache
+/// slot holds, its called scope the class the pair names (#3557).
+pub(crate) const STATIC_SCOPED: Fixture = Fixture {
+    name: "static_scoped",
+    program: "scoped_calls",
+    plan: &[
+        ("record.function", "statics"),
         ("record.start", "loop"),
         ("record.headers", "0"),
     ],

@@ -24,19 +24,34 @@ use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
 use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, Value};
 use cranelift_frontend::Variable;
-use php_engine::tier::{FRAME, FrameLayout, FuncRef, PlainCall};
+use php_engine::tier::{self, FRAME, FrameLayout, FuncRef, PLACE, PlaceLayout, PlainCall};
 use php_heap::{Obj, Ref, Zval, ZvalType};
 use php_unit::Opcode;
 
 use super::{
-    COUNTED, Dtor, Emit, Kernel, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE, STOOD_ROOM,
-    Scalar, imm, leave_of, mismatch, trusted,
+    COUNTED, Dtor, Emit, Kernel, Refuse, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE,
+    STOOD_ROOM, Scalar, imm, leave_of, mismatch, trusted,
 };
 use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT, RETURNED, THREW};
 use crate::types::{
-    Abort, ArgChecks, Defaults, End, ExitId, Frame, Imm, Line, Object, OpId, Operand, Owners,
-    Returned, Vars,
+    Abort, ArgChecks, Check, Defaults, End, ExitId, Frame, Imm, Line, Object, OpId, Operand,
+    Owners, PairClass, Returned, Vars,
 };
+
+/// The receiver a method's call `line` pushes in place: `$this` of its
+/// frame, lent, or the object a variable holds, of which the call takes
+/// an owner.
+fn receiver_of(line: &Line) -> Result<(Object, bool), Abort> {
+    match line.op1 {
+        Operand::Unused => Ok((Object::This(line.frame), false)),
+        Operand::Value(value) => Ok((Object::Value(value), true)),
+        Operand::Constant(_) => Err(mismatch("a method called on a constant")),
+    }
+}
+
+/// The engine's runtime-cache slot layout, as the guard on a call's pair
+/// reads it.
+const P: PlaceLayout = PLACE;
 
 /// What a leave in place writes into the caller's slot: a scalar, or a
 /// zval's two words, copied from a constant or moved from a temporary.
@@ -230,7 +245,28 @@ impl Emit<'_> {
     /// full, the opline is stepped, which pushes the same call; php's own
     /// stack check, a guard before the push, leaves first where the page
     /// is short of what the trace pushes ([`crate::types::Check::Room`]).
-    pub(super) fn push_in_place(&mut self, line: &Line, plain: &PlainCall) -> Result<(), Abort> {
+    ///
+    /// A method's call held by the pair its runtime-cache slot holds
+    /// ([`Imm::Pair`]) is pushed where the slot holds the pair the trace
+    /// recorded ([`Emit::pair_guard`]), its called scope written where its
+    /// class is the request's own, and its handler pushes it otherwise,
+    /// which looks the class and the method up and may push another
+    /// callee, so the call it pushed is held to the one recorded after it
+    /// ([`Emit::callee_guard`]), as php's code calls
+    /// `zend_jit_find_method_helper` or `zend_jit_find_static_method_helper`
+    /// cold and holds the function after (`Z/ext/opcache/jit/zend_jit_ir.c:9047-9145`,
+    /// `:9243-9300`).
+    pub(super) fn push_in_place(
+        &mut self,
+        id: OpId,
+        line: &Line,
+        plain: &PlainCall,
+    ) -> Result<(), Abort> {
+        let (slow, join) = self.split();
+        let scope = match line.imm {
+            Imm::Pair { function, class } => self.pair_guard(line, (function, class), slow)?,
+            _ => None,
+        };
         let stack = self.stack()?;
         let header = self.header_of(plain)?;
         let unready = self.unready()?;
@@ -246,7 +282,6 @@ impl Emit<'_> {
             .icmp(IntCC::UnsignedGreaterThanOrEqual, len, cap);
         let refused = self.b.ins().bor(short, full);
         let refused = self.b.ins().bor(refused, unready);
-        let (slow, join) = self.split();
         self.divert_if(refused, slow);
         // The link, the room linked before this one, and the header.
         let below = self.b.ins().load(I64, trusted(), stack, INNERMOST);
@@ -265,6 +300,11 @@ impl Emit<'_> {
             let cell = L.room() + SLOT * slot;
             self.b.ins().store(trusted(), zero, top, at(cell));
             self.b.ins().store(trusted(), zero, top, at(cell + 8));
+        }
+        if let Some(class) = scope {
+            // `ScopeAt`'s half-word: the class's number inverted.
+            let word = self.b.ins().bnot(class);
+            (self.b.ins()).store(trusted(), word, top, at(L.called_scope()));
         }
         if line.opcode == Opcode::InitMethodCall {
             self.receive(line, top)?;
@@ -304,10 +344,99 @@ impl Emit<'_> {
         let func = self.func_of(line.frame)?;
         let stood = self.b.ins().stack_addr(I64, self.stood, 0);
         self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?;
+        for guard in self.within(id) {
+            match guard.check {
+                Check::Callee { func } => self.callee_guard(func, guard.exit)?,
+                _ => return Err(mismatch("a push in place holds a guard of another kind")),
+            }
+        }
         self.b.ins().jump(join, &[]);
         self.b.switch_to_block(join);
         self.b.seal_block(join);
         Ok(())
+    }
+
+    /// php's guard on the pair a method's call reads from its own
+    /// runtime-cache slot before it pushes the call in place
+    /// (`zend_jit_init_method_call`, `zend_jit_init_static_method_call`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:9025-9056`, `:9255-9265`): on to
+    /// `slow` unless the slot holds a pair whose callee is `function` and
+    /// whose class is the receiver's, or the published class the call
+    /// names; the class's number where the call's called scope is a
+    /// request-scoped class, which the push writes, none where its image
+    /// names it. The scope the slot was primed from is not compared:
+    /// [`tier::UnitView::hold_callee`] takes only a slot of an op array of
+    /// one scope that its own frame reads, so every frame primes it alike.
+    ///
+    /// `zend_lazy_class_load`'s copy of a class linked over one the request
+    /// evaluated, whose method and static method are pushed in place, then
+    /// an evaluated class whose method of the same name is another and a
+    /// published class's, a static call on a published class, and a static
+    /// call whose class a second request names as another, under force
+    /// and where every guard fails once:
+    ///
+    /// ```php
+    /// eval('class Base { public $b = 1; function get($v) { return $this->b + $v; } static function twice($v) { return 2 * $v; } }');
+    /// class Child extends Base { static function who() { return static::class; } }
+    /// eval('class Other { public $b = 100; function get($v) { return -$v; } }');
+    /// class Pub { public $b = 7; function get($v) { return $this->b * $v; } static function three($v) { return 3 * $v; } }
+    /// function f($o, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o->get($i); } return $t; }
+    /// function s($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += Child::twice($i) + Pub::three($i); $w = Child::who(); } return "$t $w"; }
+    /// echo f(new Child, 30), " ", f(new Other, 30), " ", f(new Pub, 30), " ", f(new Child, 5), "\n";
+    /// echo s(30), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 465 -435 3045 15
+    /// 2175 Child
+    /// ```
+    ///
+    /// ```php
+    /// eval('class Base { public $b = 1; function get($v) { return $this->b + $v; } static function twice($v) { return 2 * $v; } }');
+    /// class Child extends Base { static function who() { return static::class; } }
+    /// eval('class Other { public $b = 100; function get($v) { return -$v; } }');
+    /// class Pub { public $b = 7; function get($v) { return $this->b * $v; } static function three($v) { return 3 * $v; } }
+    /// function f($o, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o->get($i); } return $t; }
+    /// function s($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += Child::twice($i) + Pub::three($i); $w = Child::who(); } return "$t $w"; }
+    /// echo f(new Child, 30), " ", f(new Other, 30), " ", f(new Pub, 30), " ", f(new Child, 5), "\n";
+    /// echo s(30), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 465 -435 3045 15
+    /// 2175 Child
+    /// ```
+    fn pair_guard(
+        &mut self,
+        line: &Line,
+        (function, class): (u32, PairClass),
+        slow: Block,
+    ) -> Result<Option<Value>, Abort> {
+        let refuse = Refuse::To(slow);
+        let place = match class {
+            PairClass::Receiver => {
+                let (object, _) = receiver_of(line)?;
+                let obj = self.object(object)?;
+                self.cache_guard(line, (P.pair(), P.pair_class()), obj, refuse)?
+            }
+            PairClass::Published(_) | PairClass::Named => {
+                self.cached_slot(line, P.pair(), refuse)?
+            }
+        };
+        let callee = (self.b.ins()).load(I32, trusted(), place, at(P.pair_function()));
+        let other = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, callee, i64::from(function));
+        self.refuse_if(other, refuse)?;
+        let held = (self.b.ins()).load(I32, trusted(), place, at(P.pair_class()));
+        match class {
+            PairClass::Published(class) => {
+                let number = i64::from(tier::class_number(class));
+                let other = self.b.ins().icmp_imm_u(IntCC::NotEqual, held, number);
+                self.refuse_if(other, refuse)?;
+                Ok(None)
+            }
+            PairClass::Receiver | PairClass::Named => Ok(Some(held)),
+        }
     }
 
     /// The receiver of a method's call pushed in place at `top`, as
@@ -343,11 +472,7 @@ impl Emit<'_> {
     /// 1500 c c c 3
     /// ```
     fn receive(&mut self, line: &Line, top: Value) -> Result<(), Abort> {
-        let (object, owned) = match line.op1 {
-            Operand::Unused => (Object::This(line.frame), false),
-            Operand::Value(value) => (Object::Value(value), true),
-            Operand::Constant(_) => return Err(mismatch("a method called on a constant")),
-        };
+        let (object, owned) = receiver_of(line)?;
         let this = self.object(object)?;
         self.b.ins().store(trusted(), this, top, at(L.this()));
         if owned {

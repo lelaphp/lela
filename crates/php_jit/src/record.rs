@@ -1181,7 +1181,8 @@ impl<'p> Recorder<'p> {
     /// jump, or of the fused compare-and-branch the opline began,
     /// written on its `Op`, and a call an `INIT_*` began written down,
     /// a plain one taken into `view` for compiled code to write in place
-    /// ([`UnitView::hold_call`]).
+    /// ([`UnitView::hold_call`]), with the pair a method's call wrote into
+    /// its slot ([`UnitView::hold_callee`]).
     fn same(
         &mut self,
         req: &Request,
@@ -1218,6 +1219,15 @@ impl<'p> Recorder<'p> {
         }
         let callee = Callee::of(req, call);
         view.hold_call(req, call.call);
+        // The pair a method's call over constant names wrote into its
+        // slot, which compiled code holds the request's slot to before it
+        // pushes the call in place.
+        if matches!(
+            op.opcode,
+            Opcode::InitMethodCall | Opcode::InitStaticMethodCall
+        ) {
+            view.hold_callee(req, frame, at);
+        }
         self.events.push(Event::InitCall {
             callee,
             began: Began::Here,

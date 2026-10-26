@@ -2,13 +2,13 @@ start loop
 root e1
 op e1 12 long long - taken
 op e1 7 object#41 - - -
-init e5
+init e4
 op e1 8 long - - -
 op e1 9 - - - -
-enter e5
-op e5 1 object#41 - - -
-op e5 2 long long - -
-op e5 3 long - - -
+enter e4
+op e4 1 object#41 - - -
+op e4 2 long long - -
+op e4 3 long - - -
 back
 op e1 10 long long - -
 op e1 11 long - - -

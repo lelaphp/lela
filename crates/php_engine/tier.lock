@@ -41,6 +41,7 @@ tier::Bound
 tier::Building
 tier::CachedSlot
 tier::Called
+tier::CalleeSlot
 tier::ClassId
 tier::Compiled
 tier::Epoch
@@ -144,6 +145,7 @@ tier::call
 tier::call_image
 tier::catches
 tier::class_number
+tier::class_published
 tier::compile
 tier::current
 tier::dim_key

@@ -200,11 +200,32 @@ impl Emit<'_> {
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`, and a method's
     /// call, `zend_jit_init_method_call`, `:9025-9056`). The tag is tested
     /// before anything past it is read; the slot's address is answered.
-    fn cache_guard(
+    pub(super) fn cache_guard(
         &mut self,
         line: &Line,
         (tag, class_at): (u32, u32),
         obj: Value,
+        refuse: Refuse,
+    ) -> Result<Value, Abort> {
+        let place = self.cached_slot(line, tag, refuse)?;
+        let class = self
+            .b
+            .ins()
+            .load(I32, trusted(), place, imm(class_at as usize));
+        let of = self.b.ins().load(I32, trusted(), obj, imm(Obj::CLASS_AT));
+        let other = self.b.ins().icmp(IntCC::NotEqual, class, of);
+        self.refuse_if(other, refuse)?;
+        Ok(place)
+    }
+
+    /// The address of the slot of the request's own runtime cache `line`
+    /// reads ([`IMAGES_AT`]), refused to `refuse` unless its tag is `tag`,
+    /// which is tested before anything past it is read: a slot the touch
+    /// has not answered reads a tag that names nothing.
+    pub(super) fn cached_slot(
+        &mut self,
+        line: &Line,
+        tag: u32,
         refuse: Refuse,
     ) -> Result<Value, Abort> {
         let map = line
@@ -228,13 +249,6 @@ impl Emit<'_> {
             .b
             .ins()
             .icmp_imm_u(IntCC::NotEqual, held, i64::from(tag));
-        self.refuse_if(other, refuse)?;
-        let class = self
-            .b
-            .ins()
-            .load(I32, trusted(), place, imm(class_at as usize));
-        let of = self.b.ins().load(I32, trusted(), obj, imm(Obj::CLASS_AT));
-        let other = self.b.ins().icmp(IntCC::NotEqual, class, of);
         self.refuse_if(other, refuse)?;
         Ok(place)
     }

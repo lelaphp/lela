@@ -1,6 +1,6 @@
 trace loop e3, stop loop
 frame f0 e3 root, 4 cvs 9 temps
-frame f1 e7 callee of f0, 2 cvs 2 temps
+frame f1 e6 callee of f0, 2 cvs 2 temps
 entry
   #0 f0.CV1 [long]
   #2 f0.CV2 [long]
@@ -17,13 +17,13 @@ loop at 0, loop, interrupt exit 14
   checks direction taken -> exit 3
 0004 f0 NEW const#2 step unwinds -> unwind 0
   -> #7 f0.T2 [object]
-  checks callee e7 -> exit 4
-     f0 init e7 in-place
+  checks callee e6 -> exit 4
+     f0 init e6 in-place
 0005 f0 SEND_VAR #3 inline
 0006 f0 SEND_VAL_EX int(2) inline
 0007 f0 DO_FCALL inline in-place unwinds -> unwind 0
-  checks stands e7 0002 -> exit 5
-     f1 enter e7
+  checks stands e6 0002 -> exit 5
+     f1 enter e6
   -> #8 f1.CV0 [long]
   -> #9 f1.CV1 [long]
   guard f1.this class 42 -> exit 6

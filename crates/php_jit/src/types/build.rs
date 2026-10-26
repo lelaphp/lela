@@ -7,7 +7,9 @@
 use std::collections::{HashMap, HashSet};
 use std::num::{NonZeroU32, NonZeroUsize};
 
-use php_engine::tier::{ClassId, FuncRef, MapPtrRaw, PlainCall, PropertySlot, Sample, UnitView};
+use php_engine::tier::{
+    self, CalleeSlot, ClassId, FuncRef, MapPtrRaw, PlainCall, PropertySlot, Sample, UnitView,
+};
 use php_heap::ZvalType;
 use php_unit::decl::Parameter;
 use php_unit::{Effects, OpArray, Opcode, OperandKind, Opline, OplineIdx};
@@ -23,9 +25,9 @@ use super::opcodes::{
 use super::{
     Abort, ArgChecks, BodyEntry, Check, Constant, Def, Defaults, End, Entry, ExitId, ExitSpec,
     Form, Frame, FrameInfo, Frees, Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known,
-    Landing, Layout, Leave, Line, LoopHeader, Object, Op, OpId, Operand, Owners, Place, Read,
-    Repeat, Returned, Slot, Slotted, Store, Stored, TraceIr, Unwind, UnwindId, Value, ValueId,
-    Vars, on_declared_slot,
+    Landing, Layout, Leave, Line, LoopHeader, Object, Op, OpId, Operand, Owners, PairClass, Place,
+    Read, Repeat, Returned, Slot, Slotted, Store, Stored, TraceIr, Unwind, UnwindId, Value,
+    ValueId, Vars, on_declared_slot,
 };
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -218,6 +220,23 @@ enum InPlace {
     Send,
     Make(ArgChecks, Defaults),
     Leave,
+}
+
+/// The call a method's `INIT_*` pushes in place, and what holds the
+/// callee the trace recorded before it.
+struct PushAt {
+    plain: PlainCall,
+    held: HeldBy,
+}
+
+/// What holds a method's call pushed in place to the callee the trace
+/// recorded: the class guard before it on a receiver of a published class,
+/// whose table answers the one method in every request; or the pair the
+/// opline's runtime-cache slot holds, which compiled code reads in the
+/// request it runs in, and the class it is held to.
+enum HeldBy {
+    Class(Object, ClassId),
+    Pair(CalleeSlot, PairClass),
 }
 
 /// What a send wrote into a call's argument: the types of what it sent,
@@ -661,31 +680,45 @@ impl<'a> Builder<'a> {
             seen,
         );
         let form = self.form(frame, (&op, data_line.as_ref()), seen, (next, branch));
-        let method = self.method_at(frame, &op, (op1, samples[0]), seen, next);
+        let pushed = match op.opcode {
+            Opcode::InitMethodCall => {
+                self.method_at((frame, func, at), &op, (op1, samples[0]), seen, next)
+            }
+            Opcode::InitStaticMethodCall => self.static_at((func, at), &op, next),
+            _ => None,
+        };
         let form = match (op.opcode, property) {
             (opcode, Some(_)) if on_declared_slot(opcode) => Form::Inline,
             (opcode, None) if on_declared_slot(opcode) => Form::Step,
-            (Opcode::InitMethodCall, _) if method.is_some() => Form::Inline,
+            (Opcode::InitMethodCall | Opcode::InitStaticMethodCall, _) if pushed.is_some() => {
+                Form::Inline
+            }
             _ => form,
         };
-        if let Some((object, plain)) = method.as_ref()
-            && let Some(class) = plain.scope()
-        {
-            self.class_guard(idx, frame, at, (*object, class));
-        }
+        let pair = match pushed.as_ref().map(|pushed| &pushed.held) {
+            Some(HeldBy::Class(object, class)) => {
+                self.class_guard(idx, frame, at, (*object, *class));
+                None
+            }
+            Some(HeldBy::Pair(slot, class)) => Some((*slot, *class)),
+            None => None,
+        };
         if let (Form::Inline, Some(property)) = (form, property)
             && property.slot.cached().is_none()
         {
             self.class_guard(idx, frame, at, (property.object, property.class));
         }
-        let in_place = match method {
-            Some((_, plain)) => Some(InPlace::Push(plain)),
+        let pair_callee = pushed.as_ref().and_then(|pushed| pushed.plain.callee());
+        let in_place = match pushed {
+            Some(pushed) => Some(InPlace::Push(pushed.plain)),
             None => (form == Form::Inline)
                 .then(|| self.in_place(frame, &op, next))
                 .flatten(),
         };
         self.sampled.insert(idx, samples);
-        let map_ptr = match property.and_then(|property| property.slot.cached()) {
+        let cached = (property.and_then(|property| property.slot.cached()))
+            .or_else(|| pair.map(|(slot, _)| slot.cached()));
+        let map_ptr = match cached {
             Some(raw) if form == Form::Inline => Some(self.map_ptr_of(raw)),
             _ => None,
         };
@@ -748,6 +781,10 @@ impl<'a> Builder<'a> {
                     checks,
                     defaults,
                 },
+                _ if let Some((slot, class)) = pair => Imm::Pair {
+                    function: slot.function(),
+                    class,
+                },
                 _ if let Some(property) = property.filter(|_| form == Form::Inline) => {
                     Imm::Property {
                         slot: match property.slot.cached() {
@@ -776,6 +813,19 @@ impl<'a> Builder<'a> {
             self.pushing = Some(plain);
         }
         self.stands(idx, (frame, at), &op, after.as_ref(), ahead, t1);
+        // A call pushed in place under its slot's pair goes to its
+        // handler where the slot holds another, which may push another
+        // callee: held to the one the trace recorded after it, as a
+        // stepped `INIT_*`'s is.
+        if pair.is_some()
+            && let Some(func) = pair_callee
+        {
+            self.guards.push(Placed {
+                at: GuardAt::Within(idx),
+                check: Check::Callee { func },
+                exit: draft(Point::After(idx), frame, At::Stands),
+            });
+        }
         if form == Form::Step
             && let Some(plain) = self.handed_at(&op, next)
             && let Some(func) = plain.callee()
@@ -1119,6 +1169,10 @@ impl<'a> Builder<'a> {
                     // as may the receiver's, which it gives up after them.
                     || (matches!(in_place, Some(InPlace::Leave))
                         && (!self.uncounted(frame) || self.receives(frame)))
+                    // A call pushed under its slot's pair goes to its
+                    // handler where the slot holds another, which looks
+                    // the class and the method up and may throw.
+                    || matches!(line.imm, Imm::Pair { .. })
             }
             Form::Step => op.opcode.effects().contains(Effects::THROW),
         };
@@ -2482,21 +2536,25 @@ impl<'a> Builder<'a> {
     }
 
     /// The call a method's `INIT_METHOD_CALL` pushes in place, as php's
-    /// `zend_jit_init_method_call` pushes it under its class guard
-    /// (`Z/ext/opcache/jit/zend_jit_ir.c:8950-9213`): over a constant
-    /// name, on `$this` or a variable that holds an object as it is, of a
-    /// published class the recording took the call of
-    /// ([`UnitView::calls_of`]), with the object the guard holds of that
-    /// class.
+    /// `zend_jit_init_method_call` pushes it (`Z/ext/opcache/jit/zend_jit_ir.c:8950-9213`):
+    /// over a constant name, on `$this` or a variable that holds an object
+    /// as it is, whose class's call the recording took
+    /// ([`UnitView::calls_of`]). On a published class, under the class
+    /// guard on the object; on a request-scoped one (#3558), under the
+    /// guard on the pair the opline's runtime-cache slot holds, its class
+    /// the object's and its callee the method, as php compares
+    /// `CACHED_PTR(opline->result.num)` with `obj->ce` for a class that is
+    /// not immutable (`:9025-9056`), where the recording took the pair
+    /// ([`UnitView::callee_at`]).
     fn method_at(
         &self,
-        frame: Frame,
+        (frame, func, at): (Frame, FuncRef, OplineIdx),
         op: &Opline,
         (op1, sample1): (Operand, Option<Sample>),
         seen: Seen,
         next: Option<&Event>,
-    ) -> Option<(Object, PlainCall)> {
-        if op.opcode != Opcode::InitMethodCall || op.op2_type != OperandKind::Const {
+    ) -> Option<PushAt> {
+        if op.op2_type != OperandKind::Const {
             return None;
         }
         let Some(Event::InitCall {
@@ -2517,8 +2575,55 @@ impl<'a> Builder<'a> {
             _ => return None,
         };
         let plain = (self.view.calls_of(*callee, op.extended_value))
-            .find(|plain| plain.scope() == Some(class))?;
-        Some((object, plain.clone()))
+            .find(|plain| plain.scope() == Some(class))?
+            .clone();
+        let held = if tier::class_published(class) {
+            HeldBy::Class(object, class)
+        } else {
+            let pair = (self.view.callee_at(func, at))
+                .filter(|pair| pair.class() == class && pair.instance())?;
+            HeldBy::Pair(pair, PairClass::Receiver)
+        };
+        Some(PushAt { plain, held })
+    }
+
+    /// The call an `INIT_STATIC_METHOD_CALL` over a constant class and
+    /// method name pushes in place, as php's
+    /// `zend_jit_init_static_method_call` pushes it
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:9215-9330`): under the guard on
+    /// the pair its runtime-cache slot holds, the callee the static method
+    /// the recording took the call of, and its class the published one
+    /// the opline names, php's constant `ce`, or whichever class a
+    /// request-scoped name resolved to, which php reads from the slot.
+    fn static_at(
+        &self,
+        (func, at): (FuncRef, OplineIdx),
+        op: &Opline,
+        next: Option<&Event>,
+    ) -> Option<PushAt> {
+        if op.op1_type != OperandKind::Const || op.op2_type != OperandKind::Const {
+            return None;
+        }
+        let Some(Event::InitCall {
+            callee: Callee::User(callee),
+            began: Began::Here,
+        }) = next
+        else {
+            return None;
+        };
+        let pair = (self.view.callee_at(func, at)).filter(|pair| !pair.instance())?;
+        let plain = (self.view.calls_of(*callee, op.extended_value))
+            .find(|plain| plain.scope() == Some(pair.class()))?
+            .clone();
+        let class = if tier::class_published(pair.class()) {
+            PairClass::Published(pair.class())
+        } else {
+            PairClass::Named
+        };
+        Some(PushAt {
+            plain,
+            held: HeldBy::Pair(pair, class),
+        })
     }
 
     /// The call a stepped `NEW`, `INIT_STATIC_METHOD_CALL` or

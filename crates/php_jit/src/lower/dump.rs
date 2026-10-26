@@ -29,8 +29,8 @@ use php_heap::ZvalType;
 use crate::record::func_name as func;
 use crate::types::{
     Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Imm, Interrupt,
-    Landing, Layout, Object, Op, OpId, Operand, Owners, Place, Pointee, Read, Repeat, Returned,
-    Slot, Slotted, Store, Stored, TraceIr, Types, Unwind, ValueId,
+    Landing, Layout, Object, Op, OpId, Operand, Owners, PairClass, Place, Pointee, Read, Repeat,
+    Returned, Slot, Slotted, Store, Stored, TraceIr, Types, Unwind, ValueId,
 };
 
 /// The text of `ir`.
@@ -426,6 +426,16 @@ fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
             slot: Slotted::Cached,
             ..
         } => return write!(text, " cached"),
+        Imm::Pair { function, class } => {
+            return match class {
+                PairClass::Receiver => write!(text, " pair fn {function} of receiver"),
+                PairClass::Published(class) => {
+                    let number = tier::class_number(class);
+                    write!(text, " pair fn {function} of class {number}")
+                }
+                PairClass::Named => write!(text, " pair fn {function} of named"),
+            };
+        }
         Imm::Leave {
             value,
             owners,
