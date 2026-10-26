@@ -34,6 +34,7 @@ pub(crate) const AFL_WANT_TORRENTZIP: u32 = 8;
 pub(crate) const AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE: u32 = 16;
 // Compression methods.
 pub(crate) const CM_DEFAULT: i32 = -1;
+pub(crate) const CM_STORE: i32 = 0;
 pub(crate) const CM_DEFLATE: i32 = 8;
 pub(crate) const CM_BZIP2: i32 = 12;
 pub(crate) const CM_LZMA: i32 = 14;
@@ -1263,7 +1264,30 @@ impl Archive {
 
     /// `_zip_file_get_offset`: where entry `idx`'s data starts, past its
     /// local header as `_zip_dirent_size` reads it through the archive's
-    /// `FILE`.
+    /// `FILE`. A close that keeps every entry's data reads the last one's
+    /// header for where the kept part ends, so a header cut short by the
+    /// end of the file fails it, and one whose fixed part is whole but
+    /// not a local header's is inconsistent:
+    ///
+    /// ```php
+    /// function crafted($f, $back) {
+    ///     $local = "PK\3\4" . pack('vvvvvVVVvv', 20, 0, 0, 0, 0x21, crc32('hello'), 5, 5, 1, 0) . 'a' . 'hello';
+    ///     $cd = '';
+    ///     foreach (['a' => 0, 'b' => strlen($local) + 2 * 47 + 22 - $back] as $n => $off)
+    ///         $cd .= "PK\1\2" . pack('vvvvvvVVVvvvvvVV', 0x0314, 20, 0, 0, 0, 0x21, crc32('hello'), 5, 5, 1, 0, 0, 0, 0, 0x81a40000, $off) . $n;
+    ///     file_put_contents($f, $local . $cd . "PK\5\6" . pack('vvvvVVv', 0, 0, 2, 2, strlen($cd), strlen($local), 0));
+    /// }
+    /// foreach ([1, 29, 30] as $back) {
+    ///     crafted('end-witness.zip', $back); $z = new ZipArchive; $z->open('end-witness.zip'); $z->setArchiveComment('x');
+    ///     echo "$back from the end: ", var_export(@$z->close(), true), " $z->status ", $z->getStatusString(), "\n";
+    /// }
+    /// unlink('end-witness.zip');
+    /// ```
+    /// ```expect capture
+    /// 1 from the end: false 17 Premature end of file
+    /// 29 from the end: false 17 Premature end of file
+    /// 30 from the end: false 21 Zip archive inconsistent: entry 0: central header invalid
+    /// ```
     pub(crate) fn data_offset(&mut self, idx: usize) -> Result<u64, Status> {
         let offset = self.entries[idx]
             .orig
@@ -1271,8 +1295,9 @@ impl Archive {
             .ok_or(Status::new(Er::Internal))?
             .offset;
         let data = self.data.as_mut().ok_or(Status::new(Er::Internal))?;
+        let len = data.size;
         let size = data
-            .through(|f| Local::at(f, offset).size())
+            .through(|f| Local::at(f, offset, len).size())
             .unwrap_or(Err(Status::new(Er::Open)))?;
         Ok(offset + size)
     }
@@ -1292,6 +1317,31 @@ impl Archive {
     /// bool(false)
     /// string(57) "Zip archive inconsistent: entry 0: central header invalid"
     /// ```
+    ///
+    /// The two lengths are sought to, so a header that starts so near the
+    /// end of the file that they would lie past it is refused by the
+    /// seek, and one whose lengths are cut short by the end is short:
+    ///
+    /// ```php
+    /// function crafted($f, $back) {
+    ///     $local = "PK\3\4" . pack('vvvvvVVVvv', 20, 0, 0, 0, 0x21, crc32('hello'), 5, 5, 1, 0) . 'a' . 'hello';
+    ///     $cd = '';
+    ///     foreach (['a' => 0, 'b' => strlen($local) + 2 * 47 + 22 - $back] as $n => $off)
+    ///         $cd .= "PK\1\2" . pack('vvvvvvVVVvvvvvVV', 0x0314, 20, 0, 0, 0, 0x21, crc32('hello'), 5, 5, 1, 0, 0, 0, 0, 0x81a40000, $off) . $n;
+    ///     file_put_contents($f, $local . $cd . "PK\5\6" . pack('vvvvVVv', 0, 0, 2, 2, strlen($cd), strlen($local), 0));
+    /// }
+    /// foreach ([1, 22, 26, 29] as $back) {
+    ///     crafted('ef-end-witness.zip', $back); $z = new ZipArchive; $z->open('ef-end-witness.zip'); $z->renameName('a', 'c');
+    ///     echo "$back from the end: ", var_export(@$z->close(), true), " $z->status ", $z->getStatusString(), "\n";
+    /// }
+    /// unlink('ef-end-witness.zip');
+    /// ```
+    /// ```expect capture
+    /// 1 from the end: false 18 Invalid argument
+    /// 22 from the end: false 18 Invalid argument
+    /// 26 from the end: false 17 Premature end of file
+    /// 29 from the end: false 17 Premature end of file
+    /// ```
     pub(crate) fn read_local_ef(&mut self, idx: usize) -> Done {
         let Some(offset) = self.entries[idx]
             .orig
@@ -1304,7 +1354,8 @@ impl Archive {
         let Some(data) = self.data.as_mut() else {
             return self.fail(Er::Internal);
         };
-        let read = data.through(|f| Local::at(f, offset).extra_fields());
+        let len = data.size;
+        let read = data.through(|f| Local::at(f, offset, len).extra_fields());
         let extra = match read {
             Some(Ok(extra)) => extra,
             Some(Err(status)) => {
@@ -1416,7 +1467,7 @@ impl Archive {
             .map(Stdio::new)
             .map_err(|e| Status::os(Er::Open, &e))?;
         let f = data.stdio.as_mut().unwrap_or(&mut own);
-        let start = offset + Local::at(f, offset).size()?;
+        let start = offset + Local::at(f, offset, data.size).size()?;
         Ok(Window::new(own, start, size, true))
     }
 

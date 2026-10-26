@@ -143,6 +143,20 @@ pub struct RequestInfo {
     pub auth: Option<(Vec<u8>, Option<Vec<u8>>)>,
 }
 
+impl RequestInfo {
+    /// How much of the body a CGI host may hand out before its first read,
+    /// `sapi_cgi_read_post`'s and `sapi_fcgi_read_post`'s `remaining`:
+    /// `content_length` as a `size_t` (`Z/sapi/cgi/cgi_main.c:483, 509`,
+    /// `Z/sapi/fpm/fpm/fpm_main.c:433`). A negative length wraps, as in a
+    /// release build, whose `assert` on it is compiled out, so the body is
+    /// read to its end, held to `post_max_size` by the readers that pull
+    /// it (#3457).
+    #[must_use]
+    pub fn body_length(&self) -> u64 {
+        self.content_length.cast_unsigned()
+    }
+}
+
 /// `init_request_info` (`Z/sapi/cgi/cgi_main.c:1159`,
 /// `Z/sapi/fpm/fpm/fpm_main.c:971`) over `env`, which it rewrites as php's
 /// does: IIS's `PATH_INFO` cut past `SCRIPT_NAME`; under php-fpm a proxy

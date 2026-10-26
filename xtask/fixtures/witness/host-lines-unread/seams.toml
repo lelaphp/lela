@@ -1,0 +1,20 @@
+# A negative control (harness-design.md §4.1, §8): a workspace that must
+# fail the instrument named by the directory above it. A host crate whose
+# lines file is no host's lines (#3457): the crate's reading fails before
+# anything runs, and a watched run's journal carries it. The pin is the
+# real one, by path.
+[oracle]
+pin = "../../../../oracle.toml"
+[budget]
+total = 1000
+new = 1000
+docs = 1000
+harness = 1000
+lock_packages = 1000
+clean_build_release_s = 1000
+api_items = 1000
+bindings = 1000
+
+[[crate]]
+name = "sapi/cgi"
+budget = 1000

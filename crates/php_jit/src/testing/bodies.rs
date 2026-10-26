@@ -1,5 +1,5 @@
-//! Trace bodies assembled by hand for the one target whose arena maps
-//! code today, macOS aarch64: what `enter`'s and `dispatch`'s tests enter
+//! Trace bodies assembled by hand for an aarch64 target whose arena maps
+//! code, macOS or Linux: what `enter`'s and `dispatch`'s tests enter
 //! in place of what `lower` makes, so each asserts the crossing or the
 //! trace-to-trace loop alone.
 

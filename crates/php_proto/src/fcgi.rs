@@ -363,18 +363,22 @@ fn answer(
 }
 
 /// `fcgi_read`'s state: what is left of the `FCGI_STDIN` record being
-/// read, and its padding.
+/// read, its padding, and whether the empty record that ends the body has
+/// been read.
 #[derive(Debug, Default)]
 pub struct Input {
     left: usize,
     padding: usize,
+    ended: bool,
 }
 
 impl Input {
     /// `fcgi_read` (`Z/main/fastcgi.c:1181`): up to `buf.len()` bytes of
     /// the body, reading the next `FCGI_STDIN` record where the last is
     /// used up; fewer where the stream ends, or an empty record ends the
-    /// body.
+    /// body, and nothing past that record. php's `fcgi_read` would read the
+    /// next record's header there, where no length bounds the body (#3457);
+    /// the end is the end.
     ///
     /// # Errors
     ///
@@ -383,13 +387,14 @@ impl Input {
     /// stream's own errors.
     pub fn read(&mut self, stream: &mut impl io::Read, buf: &mut [u8]) -> io::Result<usize> {
         let mut n = 0;
-        while n < buf.len() {
+        while n < buf.len() && !self.ended {
             if self.left == 0 {
                 match read_header(stream) {
                     Some(header) if header.kind == Kind::Stdin => {
                         self.left = usize::from(header.content_length);
                         self.padding = usize::from(header.padding_length);
                         if self.left == 0 {
+                            self.ended = true;
                             return Ok(n);
                         }
                     }
@@ -413,6 +418,61 @@ impl Input {
             }
         }
         Ok(n)
+    }
+}
+
+/// A request's body as a `FastCGI` host's `read_post` hands it out
+/// (`sapi_fcgi_read_post`, `Z/sapi/cgi/cgi_main.c:504`, and php-fpm's
+/// `sapi_cgi_read_post`): its `FCGI_STDIN` records ([`Input`]) and what
+/// the request's length leaves of them
+/// ([`RequestInfo::body_length`](crate::cgi::RequestInfo::body_length)).
+#[derive(Debug, Default)]
+pub struct Stdin {
+    input: Input,
+    unread: u64,
+}
+
+/// What one [`Stdin::read`] handed out, and whether the stream failed,
+/// after which the connection is not kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Handed {
+    pub n: usize,
+    pub failed: bool,
+}
+
+impl Stdin {
+    /// The body of a request `body_length` long.
+    #[must_use]
+    pub fn new(body_length: u64) -> Stdin {
+        Stdin {
+            input: Input::default(),
+            unread: body_length,
+        }
+    }
+
+    /// Up to `buf.len()` bytes of the body, no more than the length leaves,
+    /// read until the buffer is full, the records end or the stream fails,
+    /// as the hosts' loops over `fcgi_read` read them.
+    pub fn read(&mut self, stream: &mut impl io::Read, buf: &mut [u8]) -> Handed {
+        let want = usize::try_from(self.unread).map_or(buf.len(), |unread| unread.min(buf.len()));
+        let mut read = Handed {
+            n: 0,
+            failed: false,
+        };
+        while read.n < want {
+            match self.input.read(stream, &mut buf[read.n..want]) {
+                Ok(0) => break,
+                Ok(n) => read.n += n,
+                Err(_) => {
+                    read.failed = true;
+                    break;
+                }
+            }
+        }
+        self.unread = self
+            .unread
+            .saturating_sub(u64::try_from(read.n).unwrap_or(u64::MAX));
+        read
     }
 }
 
