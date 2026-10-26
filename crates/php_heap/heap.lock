@@ -295,6 +295,8 @@ NumberText::as_str
 NumberText::push_str
 Obj
 Obj::CLASS_AT
+Obj::PINS
+Obj::PINS_AT
 Obj::SLOTS_AT
 Obj::addref
 Obj::class

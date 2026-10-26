@@ -571,6 +571,7 @@ kernels! {
         Lookup => lookup(array: u64, key: u64, key_info: u32, constant: u32) -> Zval = tier::lookup_element;
         Leave => leave(word: u64, type_info: u32) -> u64 = tier::return_entry;
         Native => native(func: u32) = tier::native_held;
+        FreeThis => free_this() = tier::free_this;
     }
 }
 
@@ -688,6 +689,16 @@ fn release(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Resu
 fn free_cv(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Result<(), Fatal> {
     let frame = standing(req, on.room, on.at)?;
     tier::free_cv(req, frame, zval(word, type_info));
+    Ok(())
+}
+
+/// The `free_this` kernel: the receiver of the method's frame a
+/// `RETURN` leaves in place, after its variables, where its owner or its
+/// pin is the last, that frame off the chain first
+/// ([`tier::free_this`]), a destructor's throw left pending.
+fn free_this(req: &mut Request, on: On<'_, '_>) -> Result<(), Fatal> {
+    let frame = standing(req, on.room, on.at)?;
+    tier::free_this(req, frame);
     Ok(())
 }
 

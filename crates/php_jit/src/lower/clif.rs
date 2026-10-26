@@ -1613,6 +1613,7 @@ impl<'a> Emit<'a> {
         let params: &[Type] = match kernel {
             Kernel::Step => &[I64, I64, I32, I32, I64],
             Kernel::Handle | Kernel::Native => &[I64, I64, I32, I32],
+            Kernel::FreeThis => &[I64, I64, I32],
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release | Kernel::FreeCv => &[I64, I64, I32, I64, I32],
             Kernel::Identical => &[I64, I64, I32, I64, I32, I64, I32, I64],

@@ -18,9 +18,9 @@ use crate::table::TraceName;
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
     DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FIB, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET,
-    HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, NATIVE_CALL, NBODY, NESTED_READ,
-    NESTED_WRITE, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_CALL, REF_WRITE,
-    SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
+    HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL, NATIVE_CALL, NBODY,
+    NESTED_READ, NESTED_WRITE, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_CALL,
+    REF_WRITE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -1178,5 +1178,23 @@ fn a_call_by_reference_lowers_its_sends_and_checks() -> Result<(), String> {
     assert_eq!(calls(Kernel::Call), 1, "{clif}");
     // The push's and the leave's cold arms, and no send stepped.
     assert_eq!(calls(Kernel::Step), 2, "{clif}");
+    Ok(())
+}
+
+/// A method's leave in place gives its receiver up after its variables:
+/// one owner fewer in place, and [`Kernel::FreeThis`] cold where that is
+/// the last or the collector may take the object as a root (#3343).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_methods_leave_gives_its_receiver_up() -> Result<(), String> {
+    lowered(METHOD_CALL)?;
+    let clif = std::fs::read_to_string(goldens_dir().join("method_call.clif"))
+        .map_err(|e| e.to_string())?;
+    let address =
+        format!("{:#x}", symbols().address(Kernel::FreeThis)).replace("0x7000", "0x7000_");
+    let freed = (clif.lines())
+        .filter(|line| line.contains("call_indirect") && line.contains(&address))
+        .count();
+    assert_eq!(freed, 1, "{clif}");
     Ok(())
 }

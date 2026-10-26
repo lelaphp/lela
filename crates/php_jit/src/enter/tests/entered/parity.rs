@@ -239,6 +239,7 @@ fn compiled(ir: &TraceIr, step: bool) -> Option<Compiled> {
         Kernel::Lookup => (super::super::super::wrapped::lookup as *const ()).addr(),
         Kernel::Leave => (super::super::super::wrapped::leave as *const ()).addr(),
         Kernel::Native => (super::super::super::wrapped::native as *const ()).addr(),
+        Kernel::FreeThis => (super::super::super::wrapped::free_this as *const ()).addr(),
     });
     let backend = Backend::new(&testing::policy(&[]), symbols).ok()?;
     backend
@@ -500,6 +501,7 @@ fn leave_in_place(req: &mut Request, g: FrameRef) -> Option<(FrameRef, Read)> {
         Imm::Leave {
             owners: Owners::Each(both),
             value,
+            receives: false,
         },
     );
     leave.unwind = Some(UnwindId(0));

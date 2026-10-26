@@ -763,6 +763,19 @@ impl UnitView {
         Some(self.epoch.func(f)?.is_main())
     }
 
+    /// Whether a frame that runs the op array `f` names may have a
+    /// receiver, `EX(This)`, which its leave gives up: a method's, a
+    /// closure's, a hook's and a file's own code's, which an include
+    /// from a method runs with its includer's; never a function's. None
+    /// unless [`UnitView::hold`] accepted it.
+    #[must_use]
+    pub fn receives(&self, f: FuncRef) -> Option<bool> {
+        if !self.funcs.contains(&f) {
+            return None;
+        }
+        Some(self.epoch.func(f)?.receives())
+    }
+
     /// The parameters the declaration of the op array `f` names lists,
     /// php's `arg_info`, with their types and whether each is passed by
     /// reference; none unless [`UnitView::hold`] accepted it, and an

@@ -728,6 +728,7 @@ impl<'a> Builder<'a> {
                 Some(InPlace::Leave) => Imm::Leave {
                     owners: self.owners(frame),
                     value: returned(&op, code, t1),
+                    receives: self.receives(frame),
                 },
                 Some(InPlace::Make(checks)) => Imm::Make {
                     returns: (op.out_type != OperandKind::Unused).then_some(op.out),
@@ -1090,7 +1091,9 @@ impl<'a> Builder<'a> {
                     )
                     // The leave kernel a variable that owns something
                     // leaves through frees it, and a destructor may throw.
-                    || (matches!(in_place, Some(InPlace::Leave)) && !self.uncounted(frame))
+                    // and so does the receiver's, which it gives up after them.
+                    || (matches!(in_place, Some(InPlace::Leave))
+                        && (!self.uncounted(frame) || self.receives(frame)))
             }
             Form::Step => op.opcode.effects().contains(Effects::THROW),
         };
@@ -2427,6 +2430,14 @@ impl<'a> Builder<'a> {
     fn leaves_in_place(&self, frame: Frame) -> bool {
         let func = self.frames[usize::from(frame.0)].func;
         self.view.is_main(func) == Some(false) && !self.view.observed()
+    }
+
+    /// Whether `frame` may have a receiver, which its leave gives up
+    /// ([`UnitView::receives`]); a frame of an op array the view does not
+    /// hold is taken to.
+    fn receives(&self, frame: Frame) -> bool {
+        let func = self.frames[usize::from(frame.0)].func;
+        self.view.receives(func) != Some(false)
     }
 
     /// Whether every variable of `frame` holds what no reference counts,

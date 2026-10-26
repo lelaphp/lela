@@ -420,7 +420,16 @@ fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
             slot: Slotted::Cached,
             ..
         } => return write!(text, " cached"),
-        Imm::Leave { value, owners } => (value, owners),
+        Imm::Leave {
+            value,
+            owners,
+            receives,
+        } => {
+            if receives {
+                write!(text, " receives")?;
+            }
+            (value, owners)
+        }
         _ => return Ok(()),
     };
     match value {

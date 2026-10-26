@@ -57,6 +57,13 @@ impl Func {
         matches!(self.body, Body::Main)
     }
 
+    /// Whether a frame that runs the op array may have a receiver,
+    /// `EX(This)` an object: every op array but a function's, whose frame
+    /// never has one.
+    pub(crate) fn receives(&self) -> bool {
+        !matches!(self.body, Body::Function(_))
+    }
+
     /// Whether every frame that runs the op array runs it in one scope:
     /// a function's, whose scope is none, and a method's or a property
     /// hook's of a class that is no trait, whose scope is its class. A

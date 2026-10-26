@@ -384,10 +384,13 @@ pub(crate) enum Imm {
     /// A `RETURN` compiled code leaves its frame by in place
     /// (`zend_jit_leave_func`, `Z/ext/opcache/jit/zend_jit_ir.c:11035-11263`):
     /// a function's frame, with no observer declared; what it hands its
-    /// caller, and the variables it gives up as it leaves ([`Owners`]).
+    /// caller, the variables it gives up as it leaves ([`Owners`]), and
+    /// whether its frame may have a receiver, which it gives up after
+    /// them ([`php_engine::tier::UnitView::receives`]).
     Leave {
         owners: Owners,
         value: Returned,
+        receives: bool,
     },
     /// The types a `TYPE_CHECK` asks for, its `extended_value`: one bit
     /// per type, `1 << IS_*`, php's `MAY_BE_*` mask.

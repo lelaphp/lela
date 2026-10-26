@@ -114,6 +114,19 @@ pub(crate) const REF_CALL: Fixture = Fixture {
     ],
 };
 
+/// A method called on an object a variable holds, as `method_call`
+/// drives it: the method's frame left in place, its receiver given up
+/// after its variables (#3343).
+pub(crate) const METHOD_CALL: Fixture = Fixture {
+    name: "method_call",
+    program: "method_call",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
 /// A loop whose callee's variables own an array and a string as it
 /// returns: the `RETURN` left in place, freeing each (#3313).
 pub(crate) const OWNING_LEAVE: Fixture = Fixture {

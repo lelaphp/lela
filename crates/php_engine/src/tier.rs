@@ -67,8 +67,8 @@ mod strings;
 mod tail;
 mod view;
 pub use crossing::{
-    at_room, current, free_cv, free_operands, laid, primed, release, return_entry, room, stack,
-    stack_room, stand,
+    at_room, current, free_cv, free_operands, free_this, laid, primed, release, return_entry, room,
+    stack, stack_room, stand,
 };
 pub use dims::{dim_key, lookup_element};
 pub use frames::{

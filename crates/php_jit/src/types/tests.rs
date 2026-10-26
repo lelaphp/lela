@@ -28,9 +28,9 @@ use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
     DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FANNKUCH, FIB, Fixture, HASH_FETCH_W, HASH_IS,
-    HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, NATIVE_CALL, NBODY,
-    NESTED_READ, NESTED_WRITE, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_CALL,
-    REF_WRITE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held, traced as built,
+    HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL, NATIVE_CALL,
+    NBODY, NESTED_READ, NESTED_WRITE, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE,
+    REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -1922,6 +1922,7 @@ fn a_trace_that_stops_at_a_return_leaves_the_frame_in_place() -> Result<(), Stri
         super::Imm::Leave {
             owners: super::Owners::Each(d),
             value: super::Returned::Scalar,
+            receives: false,
         },
         "{rendered}"
     );
@@ -2656,5 +2657,28 @@ fn a_call_by_reference_is_made_in_place_with_its_checks() -> Result<(), String> 
     assert_eq!(checked, [0, 1], "{rendered}");
     let sent = line(Opcode::SendRef).ok_or_else(|| format!("no SEND_REF in\n{rendered}"))?;
     assert_eq!(sent.form, Form::Inline, "{rendered}");
+    Ok(())
+}
+
+/// A method's frame is left in place, its receiver given up after its
+/// variables, as php's `zend_jit_leave_func` gives it up (#3343).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_methods_frame_is_left_in_place_with_its_receiver() -> Result<(), String> {
+    let ir = golden(METHOD_CALL)?;
+    let rendered = dump::render(&ir);
+    let leave = (ir.ops.iter())
+        .find_map(|op| match op {
+            Op::Line(line) if line.opcode == Opcode::Return && line.frame != Frame::ROOT => {
+                Some(line)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| format!("no RETURN of the method in\n{rendered}"))?;
+    assert!(
+        matches!(leave.imm, super::Imm::Leave { receives: true, .. }),
+        "{rendered}"
+    );
+    assert!(leave.unwind.is_some(), "{rendered}");
     Ok(())
 }

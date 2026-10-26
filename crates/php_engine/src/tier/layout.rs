@@ -57,6 +57,7 @@ pub struct FrameLayout {
     this: u32,
     closure: u32,
     leaves_by_kernel: u32,
+    release_this: u32,
     send_by_ref: u32,
     caller_loop: u32,
     numbered_from: u32,
@@ -90,6 +91,7 @@ pub const FRAME: FrameLayout = FrameLayout {
     this: word(HEADER_AT + Header::THIS_AT),
     closure: word(HEADER_AT + Header::CLOSURE_AT),
     leaves_by_kernel: CallInfo::LEAVES_BY_KERNEL,
+    release_this: CallInfo::RELEASE_THIS,
     send_by_ref: CallInfo::SEND_BY_REF,
     caller_loop: Header::CALLER_LOOP,
     numbered_from: Header::NUMBERED_FROM,
@@ -228,6 +230,14 @@ impl FrameLayout {
     #[must_use]
     pub const fn leaves_by_kernel(&self) -> u32 {
         self.leaves_by_kernel
+    }
+
+    /// `ZEND_CALL_RELEASE_THIS`: the frame owns one owner of its
+    /// receiver, [`FrameLayout::this`], which its leave gives up; with it
+    /// clear the receiver is pinned, and the leave lets the pin go.
+    #[must_use]
+    pub const fn release_this(&self) -> u32 {
+        self.release_this
     }
 
     /// The bit of a call being built that says the argument its last
