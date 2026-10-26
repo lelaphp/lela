@@ -328,7 +328,10 @@ fn quiet<R>(
 /// `php_xmlreader_string_arg`'s and the attribute getters' answer: the
 /// string libxml handed back as [`fstring`] makes it, `NULL` where it
 /// handed back none.
-fn string(req: &mut Request, bytes: Option<Vec<u8>>) -> Result<Option<Owner<PhpString>>, Thrown> {
+fn string_or_null(
+    req: &mut Request,
+    bytes: Option<Vec<u8>>,
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     bytes.map(|b| fstring(req, &b)).transpose()
 }
 
@@ -779,7 +782,7 @@ impl XMLReader {
     /// var_dump($r->getAttribute('a'), 'unreached');
     /// ```
     /// ```expect exit=255
-    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate %d bytes) in %s on line 7
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %SCRATCH%/witness.php on line 7
     /// ```
     #[php(tentative)]
     fn getAttribute(
@@ -789,7 +792,7 @@ impl XMLReader {
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
         not_empty(req, 1, name.as_bytes())?;
         let found = quiet(req, this.object(), |r| r.attribute(name.as_bytes())).flatten();
-        string(req, found)
+        string_or_null(req, found)
     }
 
     /// `getAttributeNo(int $index): ?string`, the value asked for
@@ -804,7 +807,7 @@ impl XMLReader {
     /// var_dump($r->getAttributeNo(0), 'unreached');
     /// ```
     /// ```expect exit=255
-    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate %d bytes) in %s on line 7
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %SCRATCH%/witness.php on line 7
     /// ```
     #[php(tentative)]
     fn getAttributeNo(
@@ -813,7 +816,7 @@ impl XMLReader {
         index: i64,
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
         let found = quiet(req, this.object(), |r| r.attribute_no(flags_int(index))).flatten();
-        string(req, found)
+        string_or_null(req, found)
     }
 
     /// `getAttributeNs(string $name, string $namespace): ?string`.
@@ -840,7 +843,7 @@ impl XMLReader {
     /// var_dump($r->getAttributeNs('a', 'urn:p'), 'unreached');
     /// ```
     /// ```expect exit=255
-    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate %d bytes) in %s on line 7
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %SCRATCH%/witness.php on line 7
     /// ```
     #[php(tentative)]
     fn getAttributeNs(
@@ -854,7 +857,7 @@ impl XMLReader {
         let found = quiet(req, this.object(), |r| {
             r.attribute_ns(name.as_bytes(), namespace.as_bytes())
         });
-        string(req, found.flatten())
+        string_or_null(req, found.flatten())
     }
 
     #[php(tentative)]
@@ -891,7 +894,7 @@ impl XMLReader {
     /// var_dump($r->lookupNamespace('p'), 'unreached');
     /// ```
     /// ```expect exit=255
-    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate %d bytes) in %s on line 7
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %SCRATCH%/witness.php on line 7
     /// ```
     #[php(tentative)]
     fn lookupNamespace(
@@ -904,7 +907,7 @@ impl XMLReader {
             r.lookup_namespace(prefix.as_bytes())
         })
         .flatten();
-        string(req, found)
+        string_or_null(req, found)
     }
 
     #[php(tentative)]
@@ -1141,7 +1144,7 @@ impl XMLReader {
     /// var_dump($r->readInnerXml(), 'unreached');
     /// ```
     /// ```expect exit=255
-    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate %d bytes) in %s on line 7
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %SCRATCH%/witness.php on line 7
     /// ```
     #[php(tentative)]
     fn readInnerXml(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
@@ -1161,7 +1164,7 @@ impl XMLReader {
     /// var_dump($r->readOuterXml(), 'unreached');
     /// ```
     /// ```expect exit=255
-    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate %d bytes) in %s on line 7
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %SCRATCH%/witness.php on line 7
     /// ```
     #[php(tentative)]
     fn readOuterXml(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
@@ -1181,7 +1184,7 @@ impl XMLReader {
     /// var_dump($r->readString(), 'unreached');
     /// ```
     /// ```expect exit=255
-    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate %d bytes) in %s on line 7
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %SCRATCH%/witness.php on line 7
     /// ```
     #[php(tentative)]
     fn readString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
