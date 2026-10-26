@@ -871,9 +871,15 @@ fn node_list(
                  Use Dom\\Element::getInScopeNamespaces() or Dom\\Element::getDescendantNamespaces() instead.",
             ));
         }
+        // A namespace node's parent is made over the evaluator's own
+        // object (`php_dom_create_object(nsparent, .., &intern->dom)`).
+        let parent = match &item {
+            Item::Node(node) => intern_for_doc(req, this, node.doc()),
+            Item::Namespace { .. } => this,
+        };
         let v = match item_object(
             req,
-            &mut |req, node| object_for(req, node, Some(this)),
+            &mut |req, node| object_for(req, node, Some(parent)),
             item,
         ) {
             Ok(v) => v,
@@ -897,6 +903,69 @@ fn node_list(
         "DOMNodeList"
     };
     crate::node_set(req, class, array)
+}
+
+/// `dom_xpath_intern_for_doc` (`Z/ext/dom/xpath.c:57`, GH-22077): the
+/// object a node of `doc` that an evaluation answers is made over, whose
+/// document it counts: the evaluator itself where `doc` is its document,
+/// otherwise the first value a php function was handed or handed back
+/// that counts `doc`, an array searched as `dom_xpath_intern_from_entry`
+/// searches it, so a node of a document a function made keeps that
+/// document alive; the evaluator where none does.
+///
+/// ```php
+/// $document = new DOMDocument;
+/// $xpath = new DOMXPath($document);
+/// $xpath->registerNamespace("my", "my.ns");
+/// $xpath->registerPHPFunctionNS('my.ns', 'include', function (): DOMElement {
+///     $included = new DOMDocument;
+///     $included->loadXML('<root><uaf/><node/><uaf/></root>');
+///     return $included->documentElement;
+/// });
+/// $nodeset = $xpath->query('my:include()/uaf');
+/// $node = $nodeset->item(0);
+/// var_dump($nodeset->length, $node->ownerDocument->saveXML($node), $node->ownerDocument === $document);
+/// unset($nodeset, $xpath, $document);
+/// var_dump($node->parentNode->nodeName, $node->ownerDocument->saveXML());
+/// ```
+/// ```expect
+/// int(2)
+/// string(6) "<uaf/>"
+/// bool(false)
+/// string(4) "root"
+/// string(55) "<?xml version="1.0"?>
+/// <root><uaf/><node/><uaf/></root>
+/// "
+/// ```
+fn intern_for_doc(req: &mut Request, this: PhpObject, doc: Option<Node>) -> PhpObject {
+    let Some(doc) = doc else {
+        return this;
+    };
+    if counts(req, this, doc) {
+        return this;
+    }
+    let kept: Vec<Value> = callbacks(req, this)
+        .map(|callbacks| callbacks.node_list.iter().map(|value| **value).collect())
+        .unwrap_or_default();
+    kept.iter()
+        .find_map(|value| intern_from_entry(req, value, doc))
+        .unwrap_or(this)
+}
+
+/// `dom_xpath_intern_from_entry`: the dom object `entry` is, or one of
+/// the array it is holds at any depth, that counts `doc`.
+fn intern_from_entry(req: &Request, entry: &Value, doc: Node) -> Option<PhpObject> {
+    if let Some(object) = entry.as_object() {
+        return counts(req, object, doc).then_some(object);
+    }
+    let array = entry.as_array()?;
+    walk::rows(req, array).find_map(|(_, inner)| intern_from_entry(req, &inner, doc))
+}
+
+/// Whether `object` is a dom object counting `doc`, `obj->document &&
+/// obj->document->ptr == doc`.
+fn counts(req: &Request, object: PhpObject, doc: Node) -> bool {
+    dom(req, object).and_then(|d| d.obj.document_node()) == Some(doc)
 }
 
 /// One callable the registration read, kept: `zend_fcc_dup`'s owners
