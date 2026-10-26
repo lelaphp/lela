@@ -1,0 +1,15 @@
+start loop
+root e4
+op e4 10 long long - taken
+op e4 5 object#2147483649 - - -
+init e8
+op e4 6 long - - -
+op e4 7 - - - -
+enter e8
+op e8 1 object#2147483649 - - -
+op e8 2 long long - -
+op e8 3 long - - -
+back
+op e4 8 long long - -
+op e4 9 long - - -
+stop loop

@@ -18,19 +18,25 @@
 //! or a caller's slot that holds a counted value. None takes an exit of
 //! its own: php's code takes none there.
 
+use std::num::NonZeroU32;
+
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
 use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, Value};
 use cranelift_frontend::Variable;
-use php_engine::tier::{FRAME, FrameLayout, PlainCall};
-use php_heap::{Zval, ZvalType};
+use php_engine::tier::{FRAME, FrameLayout, FuncRef, PlainCall};
+use php_heap::{Obj, Ref, Zval, ZvalType};
+use php_unit::Opcode;
 
 use super::{
     COUNTED, Dtor, Emit, Kernel, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE, STOOD_ROOM,
     Scalar, imm, leave_of, mismatch, trusted,
 };
 use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT, RETURNED, THREW};
-use crate::types::{Abort, End, ExitId, Frame, Imm, Line, OpId, Operand, Owners, Returned, Vars};
+use crate::types::{
+    Abort, ArgChecks, Defaults, End, ExitId, Frame, Imm, Line, Object, OpId, Operand, Owners,
+    Returned, Vars,
+};
 
 /// What a leave in place writes into the caller's slot: a scalar, or a
 /// zval's two words, copied from a constant or moved from a temporary.
@@ -51,6 +57,8 @@ const fn at(word: u32) -> i32 {
 
 /// Where a counted block keeps its count.
 const COUNT_AT: i32 = imm(Zval::COUNT_AT);
+/// Where an object counts the frames it was lent to ([`Obj::PINS_AT`]).
+const PINS_AT: i32 = imm(Obj::PINS_AT);
 
 /// Where variable `var` of a frame stands past its room.
 fn var_at(var: u32) -> Result<i32, Abort> {
@@ -149,6 +157,60 @@ impl Emit<'_> {
         i32::try_from(at * size_of::<usize>()).map_err(|_| mismatch("too many calls in place"))
     }
 
+    /// php's `zend_jit_func_guard` after a stepped `INIT_*`
+    /// ([`crate::types::Check::Callee`]): leave through `exit` unless the
+    /// call its handler pushed, the one the kernel stood, serves `func`,
+    /// its `EX(func)` the record word of the request's image of a held
+    /// call to it; and where no call was pushed, or the request is not
+    /// ready for the trace's calls in place. `static::f()` serves `B::f`
+    /// where the trace recorded `A::f`, and leaves at the guard; a
+    /// constructor made in place throws out of its call:
+    ///
+    /// ```php
+    /// class A { static function f($x) { return $x; } static function g($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += static::f($i); } return $t; } }
+    /// class B extends A { static function f($x) { return 2 * $x; } }
+    /// class C { public $v; function __construct($v) { if ($v == 7) { throw new Exception("seven"); } $this->v = $v; } }
+    /// function n($k) { $t = 0; for ($i = 0; $i < $k; $i++) { try { $c = new C($i); $t += $c->v; } catch (Exception $e) { echo $e->getMessage(), " "; } } return $t; }
+    /// echo A::g(30), " ", B::g(30), " ", n(12), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 435 870 seven 59
+    /// ```
+    ///
+    /// ```php
+    /// class A { static function f($x) { return $x; } static function g($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += static::f($i); } return $t; } }
+    /// class B extends A { static function f($x) { return 2 * $x; } }
+    /// class C { public $v; function __construct($v) { if ($v == 7) { throw new Exception("seven"); } $this->v = $v; } }
+    /// function n($k) { $t = 0; for ($i = 0; $i < $k; $i++) { try { $c = new C($i); $t += $c->v; } catch (Exception $e) { echo $e->getMessage(), " "; } } return $t; }
+    /// echo A::g(30), " ", B::g(30), " ", n(12), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 435 870 seven 59
+    /// ```
+    pub(super) fn callee_guard(&mut self, func: FuncRef, exit: ExitId) -> Result<(), Abort> {
+        let held = (self.held.iter())
+            .find(|held| held.callee() == Some(func))
+            .ok_or_else(|| mismatch("a callee guard on a call the trace does not hold"))?;
+        let header = self.header_of(held)?;
+        let call = self.stood_word(I64, STOOD_CALL);
+        let none = self.b.ins().icmp_imm_s(IntCC::Equal, call, 0);
+        let unready = self.unready()?;
+        let refused = self.b.ins().bor(none, unready);
+        self.leave_if(refused, exit)?;
+        let cx = self
+            .cx
+            .ok_or_else(|| mismatch("a callee guard before the entry"))?;
+        let images = self.b.ins().load(I64, trusted(), cx, IMAGES_AT);
+        let image = self.b.ins().load(I64, trusted(), images, header);
+        let expected = self
+            .b
+            .ins()
+            .load(I64, trusted(), image, at(L.callee() - L.header()));
+        let pushed = self.b.ins().load(I64, trusted(), call, at(L.callee()));
+        let other = self.b.ins().icmp(IntCC::NotEqual, pushed, expected);
+        self.leave_if(other, exit)
+    }
+
     /// Whether the request is not ready for the trace's calls in place,
     /// an `i8` ([`READY_AT`]).
     fn unready(&mut self) -> Result<Value, Abort> {
@@ -204,6 +266,9 @@ impl Emit<'_> {
             self.b.ins().store(trusted(), zero, top, at(cell));
             self.b.ins().store(trusted(), zero, top, at(cell + 8));
         }
+        if line.opcode == Opcode::InitMethodCall {
+            self.receive(line, top)?;
+        }
         self.b.ins().store(trusted(), top, stack, INNERMOST);
         // The record, then the table's length and the top.
         let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
@@ -245,6 +310,72 @@ impl Emit<'_> {
         Ok(())
     }
 
+    /// The receiver of a method's call pushed in place at `top`, as
+    /// `zend_jit_push_call_frame` writes it (`Z/ext/opcache/jit/zend_jit_ir.c:8657-8678`):
+    /// `Z_PTR(call->This)`, and over a variable one owner more of it with
+    /// `ZEND_CALL_RELEASE_THIS`; over `$this` the frame's receiver lent,
+    /// pinned as [`php_heap::Obj::pin`] pins it, which the leave lets go
+    /// ([`Emit::free_this`]). An object of another class leaves at the
+    /// class guard before the push; a receiver whose method gives up the
+    /// last other owner is destroyed as its frame leaves:
+    ///
+    /// ```php
+    /// class A { public $v = 1; function m($x) { return $this->v + $x + $this->n(); } function n() { return 10; } }
+    /// class B extends A { function m($x) { return 100; } }
+    /// function f($os, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $o = $os[$i % 3]; $t += $o->m($i); } return $t; }
+    /// class C { public $o; function m() { $this->o = null; return 1; } function __destruct() { echo "c "; } }
+    /// function g($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $c = new C; $c->o = $c; $t += $c->m(); unset($c); } return $t; }
+    /// echo f([new A, new A, new B], 30), " ", g(3), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 1500 c c c 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { public $v = 1; function m($x) { return $this->v + $x + $this->n(); } function n() { return 10; } }
+    /// class B extends A { function m($x) { return 100; } }
+    /// function f($os, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $o = $os[$i % 3]; $t += $o->m($i); } return $t; }
+    /// class C { public $o; function m() { $this->o = null; return 1; } function __destruct() { echo "c "; } }
+    /// function g($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $c = new C; $c->o = $c; $t += $c->m(); unset($c); } return $t; }
+    /// echo f([new A, new A, new B], 30), " ", g(3), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 1500 c c c 3
+    /// ```
+    fn receive(&mut self, line: &Line, top: Value) -> Result<(), Abort> {
+        let (object, owned) = match line.op1 {
+            Operand::Unused => (Object::This(line.frame), false),
+            Operand::Value(value) => (Object::Value(value), true),
+            Operand::Constant(_) => return Err(mismatch("a method called on a constant")),
+        };
+        let this = self.object(object)?;
+        self.b.ins().store(trusted(), this, top, at(L.this()));
+        if owned {
+            // `GC_ADDREF`, the count kept below the bit above it.
+            let count = self.b.ins().load(I32, trusted(), this, COUNT_AT);
+            let bits = self.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
+            let room =
+                (self.b.ins()).icmp_imm_u(IntCC::NotEqual, bits, i64::from(Zval::COUNT_BITS));
+            let room = self.b.ins().uextend(I32, room);
+            let more = self.b.ins().iadd(count, room);
+            self.b.ins().store(trusted(), more, this, COUNT_AT);
+            let info = self.b.ins().load(I32, trusted(), top, at(L.info()));
+            let info = self.b.ins().bor_imm_u(info, i64::from(L.release_this()));
+            self.b.ins().store(trusted(), info, top, at(L.info()));
+        } else {
+            let word = self.b.ins().load(I32, trusted(), this, PINS_AT);
+            let pins = self.b.ins().band_imm_u(word, i64::from(Obj::PINS));
+            let room = self
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::NotEqual, pins, i64::from(Obj::PINS));
+            let room = self.b.ins().uextend(I32, room);
+            let word = self.b.ins().iadd(word, room);
+            self.b.ins().store(trusted(), word, this, PINS_AT);
+        }
+        Ok(())
+    }
+
     /// A `DO_*CALL` of a call pushed in place made its callee's frame in
     /// place, as `zend_jit_do_fcall` makes it with
     /// `i_init_func_execute_data` inline and `Request::enter_call` writes
@@ -259,7 +390,7 @@ impl Emit<'_> {
         &mut self,
         id: OpId,
         line: &Line,
-        returns: Option<u32>,
+        (returns, checks, defaults): (Option<u32>, ArgChecks, Defaults),
     ) -> Result<(), Abort> {
         let (call, plain) = *self
             .calls
@@ -281,10 +412,16 @@ impl Emit<'_> {
         let raised = self.b.ins().load(I8, trusted(), interrupt, 0);
         let raised = self.b.ins().icmp_imm_s(IntCC::NotEqual, raised, 0);
         let unready = self.unready()?;
-        let refused = self.b.ins().bor(raised, unready);
+        let mut refused = self.b.ins().bor(raised, unready);
+        let room = self.b.use_var(var);
+        for (arg, mask) in checks.each() {
+            let taken = self.takes(room, arg, mask)?;
+            let other = self.b.ins().icmp_imm_s(IntCC::Equal, taken, 0);
+            refused = self.b.ins().bor(refused, other);
+        }
         let (slow, join) = self.split();
         self.divert_if(refused, slow);
-        let room = self.b.use_var(var);
+        self.copy_defaults(room, defaults)?;
         let flags = self.b.ins().load(I32, trusted(), room, at(L.info()));
         let kept = self.b.ins().band_imm_u(flags, i64::from(activation.keep()));
         let set = i64::from(activation.info(returns.is_some()));
@@ -324,6 +461,51 @@ impl Emit<'_> {
         self.b.switch_to_block(join);
         self.b.seal_block(join);
         self.after_step(id, line)
+    }
+
+    /// Copies each default `defaults` names into its parameter of the
+    /// call whose room is `room`, its two words as they stand among the
+    /// op array's constants, which no reference counts
+    /// (`jit_ZVAL_COPY_CONST`, `Z/ext/opcache/jit/zend_jit_ir.c:10886-10950`).
+    fn copy_defaults(&mut self, room: Value, defaults: Defaults) -> Result<(), Abort> {
+        for (arg, address) in defaults.each() {
+            let to = var_at(arg)?;
+            let address = i64::try_from(address.get())
+                .map_err(|_| mismatch("a constant past a 64-bit address"))?;
+            let zval = self.b.ins().iconst(I64, address);
+            let word = self.b.ins().load(I64, trusted(), zval, 0);
+            let info = self.b.ins().load(I32, trusted(), zval, super::TYPE_AT);
+            self.b.ins().store(trusted(), word, room, to);
+            self.b
+                .ins()
+                .store(trusted(), info, room, to + super::TYPE_AT);
+        }
+        Ok(())
+    }
+
+    /// Whether argument `arg` of the call whose room is `room`, from zero,
+    /// is of a type `mask` takes, `mask >> Z_TYPE_P(arg) & 1`, read
+    /// through the reference it is where it is one, as php's `RECV`
+    /// reads it (`ZVAL_DEREF`) and its trace's `zend_jit_recv` checks it
+    /// inline (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10873`): one where
+    /// the `RECV` would take it untouched, zero where it would coerce or
+    /// refuse it.
+    fn takes(&mut self, room: Value, arg: u32, mask: NonZeroU32) -> Result<Value, Abort> {
+        let at = var_at(arg)?;
+        let byte = self.b.ins().load(I8, trusted(), room, at + super::TYPE_AT);
+        let reference =
+            self.b
+                .ins()
+                .icmp_imm_u(IntCC::Equal, byte, i64::from(ZvalType::Reference as u8));
+        let word = self.b.ins().load(I64, trusted(), room, at);
+        let inner = self.b.ins().iadd_imm_s(word, i64::from(imm(Ref::VALUE_AT)));
+        let outer = self.b.ins().iadd_imm_s(room, i64::from(at));
+        let zval = self.b.ins().select(reference, inner, outer);
+        let byte = self.b.ins().load(I8, trusted(), zval, super::TYPE_AT);
+        let byte = self.b.ins().uextend(I32, byte);
+        let mask = self.b.ins().iconst(I32, i64::from(mask.get()));
+        let shifted = self.b.ins().ushr(mask, byte);
+        Ok(self.b.ins().band_imm_u(shifted, 1))
     }
 
     /// Whether a variable of `frame`, whose room is `room`, owns
@@ -422,7 +604,10 @@ impl Emit<'_> {
     /// 6765 338350
     /// ```
     pub(super) fn leave_in_place(&mut self, id: OpId, line: &Line) -> Result<(), Abort> {
-        let Imm::Leave { owners, .. } = line.imm else {
+        let Imm::Leave {
+            owners, receives, ..
+        } = line.imm
+        else {
             return Err(mismatch("a leave in place with no value named"));
         };
         let returned = self.returned(id, line)?;
@@ -470,15 +655,21 @@ impl Emit<'_> {
         // frame table, whose records are read again after each kernel
         // call alone ([`Reread`]), so a leave that calls none reads them
         // once.
-        let (threw, frames, callers, target) = match owners {
-            Owners::Each(vars) => {
-                let read = Reread::new(self, (stack, place, returns), [frames, callers, target]);
-                let threw = self.free_cvs(room, line, vars, &read)?;
-                let [frames, callers, target] = read.vars.map(|var| self.b.use_var(var));
-                (Some(threw), frames, callers, target)
-            }
-            Owners::Uncounted | Owners::Kernel => (None, frames, callers, target),
+        let read = Reread::new(self, (stack, place, returns), [frames, callers, target]);
+        let freed = match owners {
+            Owners::Each(vars) => Some(self.free_cvs(room, line, vars, &read)?),
+            Owners::Uncounted | Owners::Kernel => None,
         };
+        let let_go = if receives {
+            Some(self.free_this(room, line, &read)?)
+        } else {
+            None
+        };
+        let threw = match (freed, let_go) {
+            (Some(freed), Some(let_go)) => Some(self.b.ins().bor(freed, let_go)),
+            (threw, None) | (None, threw) => threw,
+        };
+        let [frames, callers, target] = read.vars.map(|var| self.b.use_var(var));
         self.when(reads, |emit| {
             match returned {
                 Out::Scalar(scalar) => emit.write(target, 0, scalar),
@@ -748,6 +939,130 @@ impl Emit<'_> {
         Ok(self.b.use_var(threw))
     }
 
+    /// The receiver of the frame in `room` given up after its variables,
+    /// as `zend_jit_leave_func` gives it up
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:11135-11160`): where the frame
+    /// owns it, `ZEND_CALL_RELEASE_THIS`, one owner fewer in place, and
+    /// [`Kernel::FreeThis`] where that is the last or the collector may
+    /// take the object as a possible root, `OBJ_RELEASE`; where it was
+    /// lent the receiver, the pin let go in place, and the kernel's where
+    /// that pin is the last over an object whose last owner went under
+    /// it, whose bytes the heap then frees. Whether a destructor the
+    /// kernel served threw, an `i32`. A temporary's object is the last
+    /// owner its method's frame gives up, its destructor served there,
+    /// one that throws thrown from the call; `$this->one()` lets its pin
+    /// go:
+    ///
+    /// ```php
+    /// class D { public $n; function __construct($n) { $this->n = $n; } function __destruct() { echo "d", $this->n, " "; } function get() { return $this->n + $this->one(); } function one() { return 1; } }
+    /// class E { function __destruct() { throw new Exception("e"); } function m() { return 3; } }
+    /// function f($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += (new D($i))->get(); } return $t; }
+    /// function g($n) { $t = 0; for ($i = 0; $i < $n; $i++) { try { $t += (new E)->m(); } catch (Exception $e) { $t += 100; } } return $t; }
+    /// echo f(4), "| ", g(5), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// d0 d1 d2 d3 10| 500
+    /// ```
+    ///
+    /// ```php
+    /// class D { public $n; function __construct($n) { $this->n = $n; } function __destruct() { echo "d", $this->n, " "; } function get() { return $this->n + $this->one(); } function one() { return 1; } }
+    /// class E { function __destruct() { throw new Exception("e"); } function m() { return 3; } }
+    /// function f($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += (new D($i))->get(); } return $t; }
+    /// function g($n) { $t = 0; for ($i = 0; $i < $n; $i++) { try { $t += (new E)->m(); } catch (Exception $e) { $t += 100; } } return $t; }
+    /// echo f(4), "| ", g(5), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// d0 d1 d2 d3 10| 500
+    /// ```
+    fn free_this(&mut self, room: Value, line: &Line, read: &Reread) -> Result<Value, Abort> {
+        let unwind = line
+            .unwind
+            .ok_or_else(|| mismatch("a leave that frees with no unwind"))?;
+        let threw = self.b.declare_var(I32);
+        let none = self.b.ins().iconst(I32, 0);
+        self.b.def_var(threw, none);
+        let [_, opline] = self.served(line)?;
+        // The inline arms leave `EX(This)` and `RELEASE_THIS` as they
+        // stand, where the kernel clears them: the leave pops the frame
+        // before anything past it, an unwind among them, reads its header.
+        let [held, owned, lent, fewer, kernel, next] = [(); 6].map(|()| self.b.create_block());
+        self.b.set_cold_block(kernel);
+        let this = self.b.ins().load(I64, trusted(), room, at(L.this()));
+        self.b.ins().brif(this, held, &[], next, &[]);
+        self.b.switch_to_block(held);
+        self.b.seal_block(held);
+        let info = self.b.ins().load(I32, trusted(), room, at(L.info()));
+        let release = self.b.ins().band_imm_u(info, i64::from(L.release_this()));
+        self.b.ins().brif(release, owned, &[], lent, &[]);
+        self.b.switch_to_block(owned);
+        self.b.seal_block(owned);
+        let count = self.b.ins().load(I32, trusted(), this, COUNT_AT);
+        let object = self.b.ins().iconst(I32, super::tag(ZvalType::Object));
+        let called = self.kernel_releases(this, object, count, Dtor::Gc);
+        let one_fewer = self.b.ins().iadd_imm_s(count, -1);
+        self.b.ins().brif(
+            called,
+            kernel,
+            &[],
+            fewer,
+            &[BlockArg::Value(one_fewer), BlockArg::Value(this)],
+        );
+        self.b.switch_to_block(lent);
+        self.b.seal_block(lent);
+        let word = self.b.ins().load(I32, trusted(), this, PINS_AT);
+        let pins = self.b.ins().band_imm_u(word, i64::from(Obj::PINS));
+        let count = self.b.ins().load(I32, trusted(), this, COUNT_AT);
+        let owners = self.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
+        let gone = self.b.ins().icmp_imm_u(IntCC::Equal, owners, 0);
+        let last = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, pins, 1);
+        let last = self.b.ins().band(gone, last);
+        let unpinned = self.b.ins().icmp_imm_u(IntCC::Equal, pins, 0);
+        let called = self.b.ins().bor(last, unpinned);
+        let one_fewer = self.b.ins().iadd_imm_s(word, -1);
+        let pinned = self.b.ins().iadd_imm_s(this, i64::from(PINS_AT - COUNT_AT));
+        self.b.ins().brif(
+            called,
+            kernel,
+            &[],
+            fewer,
+            &[BlockArg::Value(one_fewer), BlockArg::Value(pinned)],
+        );
+        // One owner or one pin fewer, the word at its own place.
+        self.b.append_block_param(fewer, I32);
+        self.b.append_block_param(fewer, I64);
+        self.b.switch_to_block(fewer);
+        self.b.seal_block(fewer);
+        let [remaining, place] = [0, 1].map(|n| self.b.block_params(fewer)[n]);
+        self.b.ins().store(trusted(), remaining, place, COUNT_AT);
+        self.b.ins().jump(next, &[]);
+        self.b.switch_to_block(kernel);
+        self.b.seal_block(kernel);
+        let status = self.call_status(Kernel::FreeThis, &[room, opline])?;
+        let unwinds = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedGreaterThan, status, i64::from(THREW));
+        let to = self.unwind_block(unwind)?;
+        let on = self.b.create_block();
+        self.b.ins().brif(unwinds, to, &[], on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
+        let thrown = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::Equal, status, i64::from(THREW));
+        let thrown = self.b.ins().uextend(I32, thrown);
+        self.b.def_var(threw, thrown);
+        read.again(self);
+        self.b.ins().jump(next, &[]);
+        self.b.switch_to_block(next);
+        self.b.seal_block(next);
+        Ok(self.b.use_var(threw))
+    }
+
     /// What a `RETURN` left in place hands its caller ([`Returned`]): a
     /// scalar, `null` for none; a constant's two words, read from the op
     /// array the trace's epoch holds; or a temporary's, moved. A tree's
@@ -791,19 +1106,24 @@ impl Emit<'_> {
     }
 
     /// What the header of the frame in `room`, which leaves to `caller`,
-    /// says the leave kernel serves: a receiver, a closure, an annex, a
+    /// says the leave kernel serves: a receiver of a frame the trace takes
+    /// to have none ([`Imm::Leave`]'s `receives`), a closure, an annex, a
     /// call not made a frame or arguments past the parameters, a caller
     /// that is none or the loop's, and, where the frame has more variables
     /// than the leave frees one by one ([`Owners::Kernel`]), a variable
     /// that owns something, every variable's type word tested at once.
-    /// The interpreter's owning leave gives up the receiver and the
-    /// closure after the variables; a frame that holds either is the leave
-    /// kernel's, so the variables are the last of what a leave in place
-    /// gives up.
+    /// The interpreter's owning leave gives up the receiver or the
+    /// closure after the variables; a frame that holds a closure is the
+    /// leave kernel's, and a receiver is the last of what a leave in
+    /// place gives up ([`Emit::free_this`]).
     fn leave_refused(&mut self, room: Value, caller: Value, line: &Line) -> Result<Value, Abort> {
-        let this = self.b.ins().load(I64, trusted(), room, at(L.this()));
+        let receives = matches!(line.imm, Imm::Leave { receives: true, .. });
+        let this = (!receives).then(|| self.b.ins().load(I64, trusted(), room, at(L.this())));
         let closure = self.b.ins().load(I64, trusted(), room, at(L.closure()));
-        let held = self.b.ins().bor(this, closure);
+        let held = match this {
+            Some(this) => self.b.ins().bor(this, closure),
+            None => closure,
+        };
         let mut refused = self.b.ins().icmp_imm_s(IntCC::NotEqual, held, 0);
         let annex = self.b.ins().load(I32, trusted(), room, at(L.annex()));
         let info = self.b.ins().load(I32, trusted(), room, at(L.info()));

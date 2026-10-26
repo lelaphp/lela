@@ -389,6 +389,7 @@ fn check(check: Check) -> String {
         }
         Check::Stands { func: f, opline } => format!("stands {} {:04}", func(f), opline.0),
         Check::Arm { opline } => format!("arm {:04}", opline.0),
+        Check::Callee { func: f } => format!("callee {}", func(f)),
         Check::Room { bytes } => format!("room {bytes}"),
         Check::Class { object, class } => {
             let of = match object {
@@ -405,7 +406,18 @@ fn check(check: Check) -> String {
 /// the variables it frees.
 fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
     let (value, owners) = match imm {
-        Imm::Make { .. } => return write!(text, " in-place"),
+        Imm::Make {
+            checks, defaults, ..
+        } => {
+            write!(text, " in-place")?;
+            for (at, mask) in checks.each() {
+                write!(text, " checks arg {} {mask:#x}", at + 1)?;
+            }
+            for (at, _) in defaults.each() {
+                write!(text, " copies arg {}", at + 1)?;
+            }
+            return Ok(());
+        }
         Imm::Property {
             slot: Slotted::Declared(slot),
             ..
@@ -414,7 +426,16 @@ fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
             slot: Slotted::Cached,
             ..
         } => return write!(text, " cached"),
-        Imm::Leave { value, owners } => (value, owners),
+        Imm::Leave {
+            value,
+            owners,
+            receives,
+        } => {
+            if receives {
+                write!(text, " receives")?;
+            }
+            (value, owners)
+        }
         _ => return Ok(()),
     };
     match value {

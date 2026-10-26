@@ -1,0 +1,64 @@
+trace loop e2, stop loop
+frame f0 e2 root, 5 cvs 10 temps
+frame f1 e1 callee of f0, 4 cvs 3 temps
+entry
+  #0 f0.CV1 [undef, ref, any]
+  #2 f0.CV2 [undef, ref, any]
+  #4 f0.CV4 [long]
+  #6 f0.CV0 [long]
+  #9 f0.CV3 [array]
+  guard room 192 -> exit 0
+  guard #6 long -> exit 1
+  guard #9 array -> exit 2
+  guard #4 long -> exit 3
+loop at 0, loop, interrupt exit 12
+  #1 f0.CV1 [undef, ref, any] = phi(#0, #7)
+  #3 f0.CV2 [undef, ref, any] = phi(#2, #8)
+  #5 f0.CV4 [long] reg = phi(#4, #17)
+0013 f0 IS_SMALLER #5, #6 fused inline
+  checks direction taken -> exit 4
+0006 f0 INIT_FCALL const#4 inline
+     f0 init e1 in-place
+0007 f0 SEND_REF #1 inline unwinds -> unwind 0
+  -> #7 f0.CV1 [undef, ref, any]
+0008 f0 SEND_REF #3 inline unwinds -> unwind 0
+  -> #8 f0.CV2 [undef, ref, any]
+0009 f0 SEND_VAR #9 inline
+0010 f0 SEND_VAL float(0.5) inline
+0011 f0 DO_UCALL inline in-place checks arg 1 0x80 checks arg 2 0x80 unwinds -> unwind 0
+     f1 enter e1
+  -> #10 f1.CV0 [ref, array]
+  -> #11 f1.CV1 [ref, array]
+  -> #12 f1.CV2 [packed array]
+  -> #13 f1.CV3 [double]
+  guard #10 ref to array -> exit 5
+0004 f1 ASSIGN_DIM_OP #10, int(0), #13 inline unwinds -> unwind 0
+  -> #14 f1.CV0 [ref, array]
+  guard #12 packed -> exit 7
+0006 f1 FETCH_DIM_R #12, int(0) inline leaves -> exit 6
+  -> #15 f1.T2 [double] reg
+  checks #15 double -> exit 8
+  checks #15 ref to double -> exit 9
+  guard #11 ref to array -> exit 10
+0007 f1 ASSIGN_DIM_OP #11, int(0), #15 inline unwinds -> unwind 0
+  -> #16 f1.CV1 [ref, array]
+0009 f1 RETURN null inline in-place frees CV0,CV1,CV2 unwinds -> unwind 0
+     f0 back
+0012 f0 PRE_INC #5 inline
+  -> #17 f0.CV4 [long] reg
+  checks #17 long -> exit 11
+end: back to 0
+exit 0: f0 0013 plain to vm
+exit 1: f0 0013 plain
+exit 2: f0 0013 plain f0.CV0:long
+exit 3: f0 0013 plain f0.CV0:long f0.CV3:array
+exit 4: f0 0015 plain f0.CV4=#5 f0.CV0:long f0.CV3:array f0.CV4:long
+exit 5: f1 0004 plain f0.CV4=#5 f1.CV2:array f1.CV3:double
+exit 6: f1 0006 plain f0.CV4=#5 f1.CV2:array f1.CV3:double to vm
+exit 7: f1 0006 plain f0.CV4=#5 f1.CV2:array f1.CV3:double packed guard
+exit 8: f1 0007 plain f0.CV4=#5 f1.T2=copied #15 f1.CV2:array f1.CV3:double
+exit 9: f1 0007 plain f0.CV4=#5 f1.T2=copied #15 through a reference f1.CV2:array f1.CV3:double
+exit 10: f1 0007 plain f0.CV4=#5 f1.T2=#15 f1.CV2:array f1.CV3:double f1.T2:double
+exit 11: f0 0012 plain f0.CV4=#5 f0.CV0:long f0.CV3:array f0.CV4:long
+exit 12: f0 0013 plain f0.CV4=#5 f0.CV0:long f0.CV3:array f0.CV4:long to vm
+unwind 0: f0.CV4=#5

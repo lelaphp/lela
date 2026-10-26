@@ -101,6 +101,94 @@ pub(crate) const NATIVE_CALL: Fixture = Fixture {
     ],
 };
 
+/// A call as nbody's main loop calls `advance`: two arrays sent by
+/// reference to typed parameters, an array and a float by value, made in
+/// place with each reference's `RECV` check inline (#3340).
+pub(crate) const REF_CALL: Fixture = Fixture {
+    name: "ref_call",
+    program: "ref_call",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A call passed fewer arguments than its callee has parameters, made in
+/// place with each default copied into its parameter (#3340).
+pub(crate) const DEFAULT_CALL: Fixture = Fixture {
+    name: "default_call",
+    program: "default_call",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A call whose default names a constant, its `RECV_INIT` served by the
+/// call kernel (#3340).
+pub(crate) const DEFAULT_CONSTANT: Fixture = Fixture {
+    name: "default_constant",
+    program: "default_call",
+    plan: &[
+        ("record.function", "c"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A method called on an object a variable holds, as `method_call`
+/// drives it: pushed in place under the class guard, the method's frame
+/// left in place, its receiver given up after its variables (#3343).
+pub(crate) const METHOD_CALL: Fixture = Fixture {
+    name: "method_call",
+    program: "method_call",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A static method's call, as `static_call` drives it: pushed through its
+/// handler, the callee held by a guard after it, its sends, activation
+/// and leave in place (#3343).
+pub(crate) const STATIC_CALL: Fixture = Fixture {
+    name: "static_call",
+    program: "method_call",
+    plan: &[
+        ("record.function", "s"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// `new` with a constructor, as `new_object` drives it: the object made
+/// and the constructor's call pushed by `NEW`'s handler, the callee held
+/// by a guard after it, the call made and left in place (#3343).
+pub(crate) const NEW_CALL: Fixture = Fixture {
+    name: "new_call",
+    program: "method_call",
+    plan: &[
+        ("record.function", "n"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A method of a request-scoped class, an evaluated base's: its call
+/// pushed by its handler, with no class guard or callee held (#3343).
+pub(crate) const METHOD_SCOPED: Fixture = Fixture {
+    name: "method_scoped",
+    program: "method_call",
+    plan: &[
+        ("record.function", "scoped"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
 /// A loop whose callee's variables own an array and a string as it
 /// returns: the `RETURN` left in place, freeing each (#3313).
 pub(crate) const OWNING_LEAVE: Fixture = Fixture {

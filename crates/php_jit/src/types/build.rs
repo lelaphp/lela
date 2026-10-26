@@ -5,6 +5,7 @@
 //! held where each leaves.
 
 use std::collections::{HashMap, HashSet};
+use std::num::{NonZeroU32, NonZeroUsize};
 
 use php_engine::tier::{ClassId, FuncRef, MapPtrRaw, PlainCall, PropertySlot, Sample, UnitView};
 use php_heap::ZvalType;
@@ -20,10 +21,11 @@ use super::opcodes::{
     slot_of, within, writes, written, written_after_entry, written_through,
 };
 use super::{
-    Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
-    Frees, Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known, Landing, Layout, Leave, Line,
-    LoopHeader, Object, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Slotted,
-    Store, Stored, TraceIr, Unwind, UnwindId, Value, ValueId, Vars, on_declared_slot,
+    Abort, ArgChecks, BodyEntry, Check, Constant, Def, Defaults, End, Entry, ExitId, ExitSpec,
+    Form, Frame, FrameInfo, Frees, Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known,
+    Landing, Layout, Leave, Line, LoopHeader, Object, Op, OpId, Operand, Owners, Place, Read,
+    Repeat, Returned, Slot, Slotted, Store, Stored, TraceIr, Unwind, UnwindId, Value, ValueId,
+    Vars, on_declared_slot,
 };
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -173,6 +175,9 @@ struct Call {
     /// How compiled code makes it, where it pushed it in place
     /// ([`Op::InitCall`]'s `plain`).
     pushed: Option<Pushed>,
+    /// How many arguments its `INIT_*` says are passed, where it pushed
+    /// it in place ([`PlainCall::count`]).
+    passed: u32,
     /// Whether a function's `INIT_*` by its name began it, so it serves
     /// the callee recorded.
     named: bool,
@@ -211,7 +216,7 @@ enum LastSend {
 enum InPlace {
     Push(PlainCall),
     Send,
-    Make,
+    Make(ArgChecks, Defaults),
     Leave,
 }
 
@@ -656,19 +661,29 @@ impl<'a> Builder<'a> {
             seen,
         );
         let form = self.form(frame, (&op, data_line.as_ref()), seen, (next, branch));
+        let method = self.method_at(frame, &op, (op1, samples[0]), seen, next);
         let form = match (op.opcode, property) {
             (opcode, Some(_)) if on_declared_slot(opcode) => Form::Inline,
             (opcode, None) if on_declared_slot(opcode) => Form::Step,
+            (Opcode::InitMethodCall, _) if method.is_some() => Form::Inline,
             _ => form,
         };
+        if let Some((object, plain)) = method.as_ref()
+            && let Some(class) = plain.scope()
+        {
+            self.class_guard(idx, frame, at, (*object, class));
+        }
         if let (Form::Inline, Some(property)) = (form, property)
             && property.slot.cached().is_none()
         {
-            self.class_guard(idx, frame, at, property);
+            self.class_guard(idx, frame, at, (property.object, property.class));
         }
-        let in_place = (form == Form::Inline)
-            .then(|| self.in_place(frame, &op, next))
-            .flatten();
+        let in_place = match method {
+            Some((_, plain)) => Some(InPlace::Push(plain)),
+            None => (form == Form::Inline)
+                .then(|| self.in_place(frame, &op, next))
+                .flatten(),
+        };
         self.sampled.insert(idx, samples);
         let map_ptr = match property.and_then(|property| property.slot.cached()) {
             Some(raw) if form == Form::Inline => Some(self.map_ptr_of(raw)),
@@ -726,9 +741,12 @@ impl<'a> Builder<'a> {
                 Some(InPlace::Leave) => Imm::Leave {
                     owners: self.owners(frame),
                     value: returned(&op, code, t1),
+                    receives: self.receives(frame),
                 },
-                Some(InPlace::Make) => Imm::Make {
+                Some(InPlace::Make(checks, defaults)) => Imm::Make {
                     returns: (op.out_type != OperandKind::Unused).then_some(op.out),
+                    checks,
+                    defaults,
                 },
                 _ if let Some(property) = property.filter(|_| form == Form::Inline) => {
                     Imm::Property {
@@ -758,6 +776,17 @@ impl<'a> Builder<'a> {
             self.pushing = Some(plain);
         }
         self.stands(idx, (frame, at), &op, after.as_ref(), ahead, t1);
+        if form == Form::Step
+            && let Some(plain) = self.handed_at(&op, next)
+            && let Some(func) = plain.callee()
+        {
+            self.guards.push(Placed {
+                at: GuardAt::Within(idx),
+                check: Check::Callee { func },
+                exit: draft(Point::After(idx), frame, At::Stands),
+            });
+            self.pushing = Some(plain);
+        }
         // An array's reset goes on whatever it holds, so php's code holds
         // no direction there.
         let one_way = op.opcode == Opcode::FeResetR && form == Form::Inline;
@@ -1054,7 +1083,10 @@ impl<'a> Builder<'a> {
                     ) && [op1, op2].into_iter().any(|operand| {
                         self.is_temp(operand) && !self.types_of(frame, operand).within(UNCOUNTED)
                     }))
-                    || op.opcode == Opcode::FeFree
+                    || matches!(op.opcode, Opcode::FeFree | Opcode::Free)
+                    // The handler that makes the reference may refuse at
+                    // the memory limit.
+                    || op.opcode == Opcode::SendRef
                     // The join may refuse, the memory limit or the string's
                     // size, and leave it pending.
                     || matches!(
@@ -1083,8 +1115,10 @@ impl<'a> Builder<'a> {
                         Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName
                     )
                     // The leave kernel a variable that owns something
-                    // leaves through frees it, and a destructor may throw.
-                    || (matches!(in_place, Some(InPlace::Leave)) && !self.uncounted(frame))
+                    // leaves through frees it, and a destructor may throw,
+                    // as may the receiver's, which it gives up after them.
+                    || (matches!(in_place, Some(InPlace::Leave))
+                        && (!self.uncounted(frame) || self.receives(frame)))
             }
             Form::Step => op.opcode.effects().contains(Effects::THROW),
         };
@@ -1113,14 +1147,15 @@ impl<'a> Builder<'a> {
         // unqualified call in a namespace one declared there after the
         // recording, which php's trace guards and this tier does not, so
         // how it takes its arguments is not known.
-        let named = began == Began::Here
-            && matches!(
-                self.ops.last(),
-                Some(Op::Line(line)) if matches!(
-                    line.opcode,
-                    Opcode::InitFcall | Opcode::InitFcallByName
-                )
-            );
+        let named = plain.as_ref().is_some_and(|plain| plain.scope().is_some())
+            || began == Began::Here
+                && matches!(
+                    self.ops.last(),
+                    Some(Op::Line(line)) if matches!(
+                        line.opcode,
+                        Opcode::InitFcall | Opcode::InitFcallByName
+                    )
+                );
         self.begin();
         self.calls.push(Call {
             inline,
@@ -1137,6 +1172,7 @@ impl<'a> Builder<'a> {
                     Pushed::Activates
                 }
             }),
+            passed: plain.as_ref().map_or(0, PlainCall::count),
             named,
             last_send: LastSend::Unknown,
         });
@@ -1242,7 +1278,8 @@ impl<'a> Builder<'a> {
                 let plain = match callee {
                     // A function named in full, or the frame's own.
                     Callee::User(callee) if op.opcode == Opcode::InitFcall || *callee == func => {
-                        self.view.call(*callee, op.extended_value)?
+                        (self.view.calls_of(*callee, op.extended_value))
+                            .find(|plain| plain.scope().is_none())?
                     }
                     // A native named in full, which php's trace pushes as
                     // it pushes a user function's call
@@ -1260,28 +1297,36 @@ impl<'a> Builder<'a> {
                 self.sends_by_value(op.op2)?.then_some(InPlace::Send)
             }
             Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName => {
-                let made = matches!(next, Some(Event::Enter { .. }))
-                    && self.calls.last().is_some_and(|call| match call.pushed {
-                        Some(Pushed::Activates) => true,
-                        Some(Pushed::Checks) => self.sent_as_declared(call),
-                        None => false,
-                    });
-                made.then_some(InPlace::Make)
+                if !matches!(next, Some(Event::Enter { .. })) {
+                    return None;
+                }
+                let call = self.calls.last()?;
+                let checks = match call.pushed? {
+                    Pushed::Activates => ArgChecks::default(),
+                    Pushed::Checks => self.arg_checks(call)?,
+                };
+                Some(InPlace::Make(checks, self.defaults(call)?))
             }
             Opcode::Return => self.leaves_in_place(frame).then_some(InPlace::Leave),
             _ => None,
         }
     }
 
-    /// Whether every argument of `call` is of a type its parameter
-    /// declares and holds as it is ([`held_as_is`]), so the callee's
-    /// `RECV` checks would pass each untouched, as the trace knows from
-    /// what each send wrote: where a call's activation passes over
-    /// checking `RECV`s ([`PlainCall::checks`]), it is made in place only
-    /// then, the checks php's trace makes in `zend_jit_recv`, each known to
-    /// pass. A long sent to an `int` is made in place; one sent to a
-    /// `float`, which the `RECV` coerces, and a string sent to an `int`
-    /// are the call kernel's, which serves the prologue:
+    /// What compiled code checks of `call`'s arguments where the call's
+    /// activation passes over checking `RECV`s ([`PlainCall::checks`]),
+    /// as php's trace compiles `zend_jit_recv`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10873`): nothing of an
+    /// argument the trace knows, from what its send wrote, of a type its
+    /// parameter declares and holds as it is ([`held_as_is`]); the
+    /// `RECV`'s own mask, held as the call is made, of one it knows nothing of, a
+    /// reference among them, whose value the check reads ([`ArgChecks`]).
+    /// None, the call kernel's, which serves the prologue, where a
+    /// parameter is variadic, declares a type no mask holds, a class, or
+    /// is sent an argument the trace knows its `RECV` coerces or refuses.
+    /// A long sent to an `int` is made in place; one sent to a `float`,
+    /// which the `RECV` coerces, and a string sent to an `int` are the
+    /// call kernel's; arrays by reference are checked in place, and a
+    /// string by reference to an `int` is coerced by the kernel:
     ///
     /// ```php
     /// function fib(int $n): int { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }
@@ -1289,38 +1334,108 @@ impl<'a> Builder<'a> {
     /// function halves($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += half($i); } return $s; }
     /// function twice(int $n) { return $n * 2; }
     /// function many($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += twice($i % 3 == 0 ? "4" : $i); } return $t; }
+    /// function grow(array &$a, int &$n) { $a[] = $n; $n += 1; }
+    /// function grows($k) { $a = []; $n = 0; for ($i = 0; $i < $k; $i++) { if ($i == 5) { $n = "5"; } grow($a, $n); } return [count($a), $n]; }
     /// var_dump(fib(15), halves(10), many(9));
+    /// echo json_encode(grows(9)), "\n";
     /// ```
     /// ```expect regime=jit-force process
     /// int(610)
     /// float(22.5)
     /// int(78)
+    /// [9,9]
     /// ```
-    fn sent_as_declared(&self, call: &Call) -> bool {
-        let Some(params) = call
-            .callee
-            .user()
-            .and_then(|callee| self.view.parameters(callee))
-        else {
-            return false;
-        };
-        params.iter().enumerate().all(|(at, param)| {
-            if param.variadic || param.by_ref {
-                return false;
+    ///
+    /// ```php
+    /// function grow(array &$a, int &$n) { $a[] = $n; $n += 1; }
+    /// function grows($k) { $a = []; $n = 0; for ($i = 0; $i < $k; $i++) { if ($i == 5) { $n = "5"; } grow($a, $n); } return [count($a), $n]; }
+    /// echo json_encode(grows(9)), "\n";
+    /// function strict(array &$a) { return count($a); }
+    /// function strictly($k) { $a = [1]; $t = 0; for ($i = 0; $i < $k; $i++) { if ($i == 6) { $a = 3; } $t += strict($a); } return $t; }
+    /// try { strictly(9); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [9,9]
+    /// strict(): Argument #1 ($a) must be of type array, int given, called in %s on line 6
+    /// ```
+    fn arg_checks(&self, call: &Call) -> Option<ArgChecks> {
+        let callee = call.callee.user()?;
+        let params = self.view.parameters(callee)?;
+        let code = self.view.op_array(callee)?;
+        let mut checks = ArgChecks::default();
+        for (at, param) in params.iter().enumerate() {
+            if param.variadic {
+                return None;
             }
-            let Some(ty) = param.ty.as_ref() else {
-                return true;
+            let Some(ty) = param.ty.as_ref().filter(|_| at < call.passed as usize) else {
+                continue;
             };
-            let sent = call.args.get(at).and_then(|sent| sent.types);
-            match (held_as_is(ty), sent) {
-                (Some(held), Some(sent)) => {
-                    sent.kinds() != Types::NONE
-                        && !sent.meets(Types::REF.or(Types::UNDEF))
-                        && sent.kinds().within(held)
-                }
-                _ => false,
+            let held = held_as_is(ty)?;
+            let sent = call
+                .args
+                .get(at)
+                .and_then(|sent| sent.types)
+                .filter(|sent| {
+                    sent.kinds() != Types::NONE && !sent.meets(Types::REF.or(Types::UNDEF))
+                });
+            match sent {
+                Some(sent) if !param.by_ref && sent.kinds().within(held) => continue,
+                Some(sent) if !sent.kinds().meets(held) => return None,
+                _ => {}
             }
-        })
+            let recv = code
+                .oplines
+                .get(at)
+                .filter(|op| op.opcode == Opcode::Recv && op.op1 as usize == at + 1)?;
+            checks = checks.with(at, NonZeroU32::new(recv.op2)?)?;
+        }
+        Some(checks)
+    }
+
+    /// What compiled code copies into the parameters of `call` it is
+    /// passed no argument for ([`Defaults`]), as php's trace compiles
+    /// `zend_jit_recv_init` past the arguments its frame knows were
+    /// passed, copying the default (`jit_ZVAL_COPY_CONST`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:10886-10950`), and checking no
+    /// type of what it copied, as php's `RECV_INIT` checks none. None,
+    /// the call kernel's, which serves the prologue, where such a
+    /// parameter has no `RECV_INIT`, or its default names a constant
+    /// expression, which php evaluates, or is counted. Defaults of each
+    /// kind are copied, a `float` parameter's integer default the double
+    /// the compiler made of it, a constant's and an expression's left to
+    /// the kernel:
+    ///
+    /// ```php
+    /// const STEP = 3;
+    /// function f($a, $b = 2, $c = 1.5, $d = "s", $e = [1], $f = null) { return $a + $b + $c + strlen($d) + count($e) + ($f ?? 0); }
+    /// function g($a, $b = STEP) { return $a + $b; }
+    /// function h($a, int $b = 4, float $x = 1) { return var_export($x, true) === '1.0' ? $a * $b : 0; }
+    /// function k($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += f($i) + f($i, 1) + g($i) + h($i); } return $s; }
+    /// var_dump(k(10));
+    /// ```
+    /// ```expect regime=jit-force process
+    /// float(445)
+    /// ```
+    fn defaults(&self, call: &Call) -> Option<Defaults> {
+        let Some(callee) = call.callee.user() else {
+            return Some(Defaults::default());
+        };
+        let params = self.view.parameters(callee)?;
+        let code = self.view.op_array(callee)?;
+        let mut defaults = Defaults::default();
+        for at in (call.passed as usize)..params.len() {
+            let recv = code
+                .oplines
+                .get(at)
+                .filter(|op| op.opcode == Opcode::RecvInit && op.op1 as usize == at + 1)?;
+            let literal = code
+                .literals
+                .get(recv.op2 as usize)
+                .filter(|literal| !literal.is_refcounted() && literal.as_const_expr().is_none())?;
+            let address = NonZeroUsize::new(std::ptr::from_ref(literal).addr())?;
+            defaults = defaults.with(at, address)?;
+        }
+        Some(defaults)
     }
 
     /// What a send wrote into the call under way, where it sends a value.
@@ -2239,6 +2354,12 @@ impl<'a> Builder<'a> {
                     && (scalar(t1) || copied(op.op1_type, op.op1, t1))
             }
             Opcode::TypeCheck => type_checked(op, t1, seen.read[0]),
+            // php's `zend_jit_send_ref` of a variable (`:9792-9860`): the
+            // reference it holds sent with an owner more, or made first.
+            Opcode::SendRef => op.op1_type == OperandKind::Cv && op.op2_type == OperandKind::Unused,
+            // php's `zend_jit_free` of a `FREE`: the temporary given up as
+            // `jit_FREE_OP` gives it up (`:11543-11580`).
+            Opcode::Free => matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var),
             // A check of an argument the trace knows the callee takes by
             // value, php's `zend_jit_check_func_arg` (`:9925-9960`).
             Opcode::CheckFuncArg => {
@@ -2360,19 +2481,89 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// The call a method's `INIT_METHOD_CALL` pushes in place, as php's
+    /// `zend_jit_init_method_call` pushes it under its class guard
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:8950-9213`): over a constant
+    /// name, on `$this` or a variable that holds an object as it is, of a
+    /// published class the recording took the call of
+    /// ([`UnitView::calls_of`]), with the object the guard holds of that
+    /// class.
+    fn method_at(
+        &self,
+        frame: Frame,
+        op: &Opline,
+        (op1, sample1): (Operand, Option<Sample>),
+        seen: Seen,
+        next: Option<&Event>,
+    ) -> Option<(Object, PlainCall)> {
+        if op.opcode != Opcode::InitMethodCall || op.op2_type != OperandKind::Const {
+            return None;
+        }
+        let Some(Event::InitCall {
+            callee: Callee::User(callee),
+            began: Began::Here,
+        }) = next
+        else {
+            return None;
+        };
+        let class = sample1?.class?;
+        let object = match (op.op1_type, op1) {
+            (OperandKind::Unused, _) => Object::This(frame),
+            (OperandKind::Cv, Operand::Value(value))
+                if seen.types[0] == Types::OBJECT && seen.read[0] == Read::InPlace =>
+            {
+                Object::Value(value)
+            }
+            _ => return None,
+        };
+        let plain = (self.view.calls_of(*callee, op.extended_value))
+            .find(|plain| plain.scope() == Some(class))?;
+        Some((object, plain.clone()))
+    }
+
+    /// The call a stepped `NEW`, `INIT_STATIC_METHOD_CALL` or
+    /// `INIT_METHOD_CALL` pushes through its handler, where the recording
+    /// took a plain call of a method to the callee it recorded: the
+    /// handler looks the method up, and a guard after it holds the call it
+    /// pushed to that callee ([`Check::Callee`]), as php's code holds
+    /// `call->func` with `zend_jit_func_guard` past the lookup
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:9283-9300`), so the call's sends,
+    /// its activation and its leave are compiled in place.
+    fn handed_at(&self, op: &Opline, next: Option<&Event>) -> Option<PlainCall> {
+        if !matches!(
+            op.opcode,
+            Opcode::New | Opcode::InitStaticMethodCall | Opcode::InitMethodCall
+        ) {
+            return None;
+        }
+        let Some(Event::InitCall {
+            callee: Callee::User(callee),
+            began: Began::Here,
+        }) = next
+        else {
+            return None;
+        };
+        (self.view.calls_of(*callee, op.extended_value))
+            .find(|plain| plain.scope().is_some())
+            .cloned()
+    }
+
     /// php's `zend_jit_class_guard` on the object a property opline at
     /// `here` reads, before it, where no guard held its class already.
-    fn class_guard(&mut self, idx: OpId, frame: Frame, here: OplineIdx, property: PropertyAt) {
-        if self.classed.get(&property.object) == Some(&property.class) {
+    fn class_guard(
+        &mut self,
+        idx: OpId,
+        frame: Frame,
+        here: OplineIdx,
+        (object, class): (Object, ClassId),
+    ) {
+        if self.classed.get(&object) == Some(&class) {
             return;
         }
-        self.classed.insert(property.object, property.class);
+        self.classed.insert(object, class);
         self.guards.push(Placed {
             at: GuardAt::Before(idx),
-            check: Check::Class {
-                object: property.object,
-                class: property.class,
-            },
+            check: Check::Class { object, class },
             exit: draft(Point::Before(idx), frame, At::Opline(here)),
         });
     }
@@ -2383,6 +2574,14 @@ impl<'a> Builder<'a> {
     fn leaves_in_place(&self, frame: Frame) -> bool {
         let func = self.frames[usize::from(frame.0)].func;
         self.view.is_main(func) == Some(false) && !self.view.observed()
+    }
+
+    /// Whether `frame` may have a receiver, which its leave gives up
+    /// ([`UnitView::receives`]); a frame of an op array the view does not
+    /// hold is taken to.
+    fn receives(&self, frame: Frame) -> bool {
+        let func = self.frames[usize::from(frame.0)].func;
+        self.view.receives(func) != Some(false)
     }
 
     /// Whether every variable of `frame` holds what no reference counts,
@@ -2799,6 +2998,7 @@ impl<'a> Builder<'a> {
             }
             | Check::Direction { .. }
             | Check::Stands { .. }
+            | Check::Callee { .. }
             | Check::Arm { .. }
             | Check::Room { .. } => None,
         }
@@ -3596,7 +3796,11 @@ fn returned(op: &Opline, code: &OpArray, t1: Types) -> Returned {
 /// What `op` names beside its operands that its inline form reads.
 fn imm(op: &Opline) -> Imm {
     match op.opcode {
-        Opcode::SendVal | Opcode::SendVar if op.op2_type == OperandKind::Unused => Imm::Arg(op.op2),
+        Opcode::SendVal | Opcode::SendVar | Opcode::SendRef
+            if op.op2_type == OperandKind::Unused =>
+        {
+            Imm::Arg(op.op2)
+        }
         Opcode::AssignOp | Opcode::AssignDimOp => {
             lattice::binary_of(op.extended_value).map_or(Imm::None, Imm::Binary)
         }
@@ -3884,6 +4088,7 @@ fn stack_type(check: Check) -> Option<(ValueId, ZvalType)> {
         | Check::Class { .. }
         | Check::Direction { .. }
         | Check::Stands { .. }
+        | Check::Callee { .. }
         | Check::Arm { .. }
         | Check::Room { .. } => None,
     }

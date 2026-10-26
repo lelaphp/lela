@@ -77,6 +77,8 @@ mod opcodes;
 #[cfg(test)]
 mod tests;
 
+use std::num::{NonZeroU32, NonZeroUsize};
+
 use php_engine::tier::{ClassId, FuncRef, MapPtrRaw, PlainCall, UnitView};
 use php_heap::ZvalType;
 use php_unit::{ConstIdx, Opcode, OplineIdx};
@@ -325,6 +327,67 @@ pub(crate) enum Fused {
     Jmpnz,
 }
 
+/// What a call made in place checks of its arguments before its
+/// activation passes over the `RECV`s that would check them, as php's
+/// trace compiles `zend_jit_recv` with the check inline where its stack
+/// map does not know the argument of a type the parameter takes
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10873`): per argument, from
+/// the first, the types its `RECV` takes untouched, php's `op2.num`, one
+/// bit per `IS_*` type, held to what the argument holds, through a
+/// reference where it is one; `None` where the trace knows the argument
+/// of such a type or the parameter checks none. A call with a check past
+/// [`ArgChecks::ARGS`] is the call kernel's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ArgChecks([Option<NonZeroU32>; ArgChecks::ARGS]);
+
+impl ArgChecks {
+    /// The arguments a call checks in place at most.
+    pub(crate) const ARGS: usize = 8;
+
+    /// These checks with argument `at`, from zero, held to `mask`; none
+    /// past [`ArgChecks::ARGS`].
+    pub(crate) fn with(mut self, at: usize, mask: NonZeroU32) -> Option<ArgChecks> {
+        *self.0.get_mut(at)? = Some(mask);
+        Some(self)
+    }
+
+    /// Each argument checked, from zero, and the mask it is held to.
+    pub(crate) fn each(self) -> impl Iterator<Item = (u32, NonZeroU32)> {
+        (0u32..)
+            .zip(self.0)
+            .filter_map(|(at, mask)| Some((at, mask?)))
+    }
+}
+
+/// What a call made in place copies into the parameters it is passed no
+/// argument for, as php's trace compiles `zend_jit_recv_init` past the
+/// arguments its frame knows were passed (`jit_ZVAL_COPY_CONST`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:10886-10950`): per parameter, from
+/// the first, the address of its `RECV_INIT`'s default among the op
+/// array's constants, which the trace's epoch holds, a constant no
+/// reference counts; `None` for one passed. A call with a default that
+/// names a constant expression, is counted, or stands past
+/// [`ArgChecks::ARGS`] is the call kernel's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Defaults([Option<NonZeroUsize>; ArgChecks::ARGS]);
+
+impl Defaults {
+    /// These defaults with parameter `at`, from zero, given the constant
+    /// at `address`; none past [`ArgChecks::ARGS`].
+    pub(crate) fn with(mut self, at: usize, address: NonZeroUsize) -> Option<Defaults> {
+        *self.0.get_mut(at)? = Some(address);
+        Some(self)
+    }
+
+    /// Each parameter given its default, from zero, and the address of
+    /// the constant copied into it.
+    pub(crate) fn each(self) -> impl Iterator<Item = (u32, NonZeroUsize)> {
+        (0u32..)
+            .zip(self.0)
+            .filter_map(|(at, address)| Some((at, address?)))
+    }
+}
+
 /// What an opline names beside its operands, where its inline form reads
 /// it: php's `op2.num` of a send, an `UNUSED` operand that is a number,
 /// and the operator an `ASSIGN_OP`'s `extended_value` names.
@@ -345,14 +408,19 @@ pub(crate) enum Imm {
     /// opline reads it.
     Make {
         returns: Option<u32>,
+        checks: ArgChecks,
+        defaults: Defaults,
     },
     /// A `RETURN` compiled code leaves its frame by in place
     /// (`zend_jit_leave_func`, `Z/ext/opcache/jit/zend_jit_ir.c:11035-11263`):
     /// a function's frame, with no observer declared; what it hands its
-    /// caller, and the variables it gives up as it leaves ([`Owners`]).
+    /// caller, the variables it gives up as it leaves ([`Owners`]), and
+    /// whether its frame may have a receiver, which it gives up after
+    /// them ([`php_engine::tier::UnitView::receives`]).
     Leave {
         owners: Owners,
         value: Returned,
+        receives: bool,
     },
     /// The types a `TYPE_CHECK` asks for, its `extended_value`: one bit
     /// per type, `1 << IS_*`, php's `MAY_BE_*` mask.
@@ -553,6 +621,12 @@ pub(crate) enum Check {
     /// a published class, whose id names the one linked class in every
     /// request of the trace's epoch.
     Class { object: Object, class: ClassId },
+    /// The call the stepped `INIT_*` before it pushed through its handler
+    /// serves this op array, php's `zend_jit_func_guard` on `call->func`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:9283-9300`), so the trace's
+    /// plain call of it is the call made. Its exit goes on where the
+    /// interpreter stands, the call pushed.
+    Callee { func: FuncRef },
     /// A table's jump went elsewhere than this opline: php's exit per
     /// target of `zend_jit_switch`, taken where the stepped jump went
     /// there and landing where it went, so exit-fuzz fails it never.

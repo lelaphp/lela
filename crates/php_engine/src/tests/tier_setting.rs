@@ -67,3 +67,27 @@ fn a_request_starts_from_the_starts_jit_g_and_keeps_its_own_change() {
         "the request's own change"
     );
 }
+
+/// A pool's `php_admin_value[opcache.jit]`, laid over the started engine
+/// as php-fpm's child lays it (`fpm_php_zend_ini_alter_master`): the
+/// handler's `JIT_G` is every later request's start, as the child's
+/// process-wide `JIT_G` is.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_pools_value_laid_over_the_start_is_every_requests_jit_g() {
+    let dir = std::env::temp_dir();
+    let on = |engine: &Engine| {
+        let (_, seen) = tier::serve_kept::<Seen>(engine, &dir, b"main.php", "<?php");
+        seen.unwrap_or_default().0
+    };
+    let mut engine = engine("disable");
+    assert!(!on(&engine), "the start's value");
+    let laid = engine.alter_master_ini(vec![(
+        b"opcache.jit".to_vec(),
+        b"tracing".to_vec(),
+        crate::engine::IniOrigin::Admin,
+    )]);
+    assert!(laid.is_ok(), "the engine stands alone");
+    assert!(on(&engine), "the pool's value");
+    assert!(on(&engine), "and the next request's");
+}

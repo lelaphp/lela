@@ -732,11 +732,25 @@ pub(crate) enum Kernel {
     /// (`php_engine::tier::return_entry`), `left` then one; zero, with
     /// nothing done, for any other frame.
     Leave,
+    /// `native(cx, frame, opline: u32, func: u32)`: a native's call, a
+    /// `DO_ICALL` or a `FRAMELESS_ICALL_*`, served by its handler with no
+    /// dispatch (`php_engine::tier::native_held`), as php's code calls
+    /// the native directly (`zend_jit_do_call`, `jit_frameless_icall`),
+    /// with no `Stood` written, as [`Kernel::Handle`]; its throw, and
+    /// what user code the native calls back throws, is answered as one.
+    Native,
+    /// `free_this(cx, frame, opline: u32)`: the receiver of the method's
+    /// frame a `RETURN` leaves in place, after its variables, where the
+    /// owner the frame holds or the pin it was lent is the last
+    /// (`php_engine::tier::free_this`), as `zend_jit_leave_func`'s
+    /// `OBJ_RELEASE(Z_OBJ(execute_data->This))` gives it up; its
+    /// destructor's throw is the status's.
+    FreeThis,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 15] = [
+    pub(crate) const ALL: [Kernel; 17] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
@@ -752,6 +766,8 @@ impl Kernel {
         Kernel::Find,
         Kernel::Lookup,
         Kernel::Leave,
+        Kernel::Native,
+        Kernel::FreeThis,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

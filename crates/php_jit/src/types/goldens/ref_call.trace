@@ -1,0 +1,18 @@
+start loop
+root e2
+op e2 13 long long - taken
+op e2 6 - - - -
+init e1
+op e2 7 array.packed - - -
+op e2 8 array.packed - - -
+op e2 9 array.packed - - -
+op e2 10 - - - -
+op e2 11 - - - -
+enter e1
+op e1 4 array.packed.reference - double -
+op e1 6 array.packed - - -
+op e1 7 array.packed.reference - double -
+op e1 9 - - - -
+back
+op e2 12 long - - -
+stop loop

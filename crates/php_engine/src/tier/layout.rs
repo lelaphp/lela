@@ -20,7 +20,8 @@ use php_heap::{FrameRef, HEADER_AT, HeaderImage, ROOM_BYTES, StackLayout, VmStac
 use php_unit::MapPtrOffset;
 use php_unit::decl::Bare;
 
-use super::FuncRef;
+use super::{ClassId, FuncRef};
+use crate::api::call::Function;
 use crate::api::request::Request;
 use crate::exec::{CallInfo, Header};
 
@@ -47,6 +48,7 @@ pub struct FrameLayout {
     link: u32,
     header: u32,
     header_bytes: u32,
+    callee: u32,
     opline: u32,
     info: u32,
     num_args: u32,
@@ -57,6 +59,7 @@ pub struct FrameLayout {
     this: u32,
     closure: u32,
     leaves_by_kernel: u32,
+    release_this: u32,
     send_by_ref: u32,
     caller_loop: u32,
     numbered_from: u32,
@@ -80,6 +83,7 @@ pub const FRAME: FrameLayout = FrameLayout {
     link: 0,
     header: word(HEADER_AT),
     header_bytes: word(size_of::<Header>()),
+    callee: word(HEADER_AT + Header::CALLEE_AT),
     opline: word(HEADER_AT + Header::OPLINE_AT),
     info: word(HEADER_AT + Header::INFO_AT),
     num_args: word(HEADER_AT + Header::NUM_ARGS_AT),
@@ -90,6 +94,7 @@ pub const FRAME: FrameLayout = FrameLayout {
     this: word(HEADER_AT + Header::THIS_AT),
     closure: word(HEADER_AT + Header::CLOSURE_AT),
     leaves_by_kernel: CallInfo::LEAVES_BY_KERNEL,
+    release_this: CallInfo::RELEASE_THIS,
     send_by_ref: CallInfo::SEND_BY_REF,
     caller_loop: Header::CALLER_LOOP,
     numbered_from: Header::NUMBERED_FROM,
@@ -210,6 +215,15 @@ impl FrameLayout {
         self.annex
     }
 
+    /// `EX(func)` as another process reads it, a word: the address of
+    /// the callee's record, one per function in a request, which a call
+    /// a handler pushed is held to as php's `zend_jit_func_guard` holds
+    /// `call->func`.
+    #[must_use]
+    pub const fn callee(&self) -> u32 {
+        self.callee
+    }
+
     /// `Z_OBJ(EX(This))`, a word: zero for none.
     #[must_use]
     pub const fn this(&self) -> u32 {
@@ -228,6 +242,14 @@ impl FrameLayout {
     #[must_use]
     pub const fn leaves_by_kernel(&self) -> u32 {
         self.leaves_by_kernel
+    }
+
+    /// `ZEND_CALL_RELEASE_THIS`: the frame owns one owner of its
+    /// receiver, [`FrameLayout::this`], which its leave gives up; with it
+    /// clear the receiver is pinned, and the leave lets the pin go.
+    #[must_use]
+    pub const fn release_this(&self) -> u32 {
+        self.release_this
     }
 
     /// The bit of a call being built that says the argument its last
@@ -460,13 +482,17 @@ pub struct PlainCall {
     slots: u32,
     activation: Option<Activation>,
     checks: bool,
+    /// A method's call: the class of its receiver, its called scope, and
+    /// the method its methods answered, both published.
+    method: Option<(ClassId, Function)>,
 }
 
-/// Two calls of one callee and one argument count are the same call: a
-/// user function by its op array, a native by its name.
+/// Two calls of one callee, one argument count and one called scope are
+/// the same call: a user function by its op array, a native by its name.
 impl PartialEq for PlainCall {
     fn eq(&self, other: &PlainCall) -> bool {
         (self.callee, self.count) == (other.callee, other.count)
+            && self.scope() == other.scope()
             && (self.callee.is_some() || self.name == other.name)
     }
 }
@@ -540,9 +566,11 @@ impl PlainCall {
     }
 
     /// What the call's activation writes, where a `DO_*CALL`'s inline
-    /// path makes it with no `RECV*` to serve, or with `RECV`s that only
-    /// check ([`PlainCall::checks`]); none where the callee's activation
-    /// serves its prologue or reads a cache of its own.
+    /// path makes it with no `RECV*` to serve, with `RECV`s that only
+    /// check ([`PlainCall::checks`]), or with the `RECV_INIT`s of the
+    /// parameters past [`PlainCall::count`], whose defaults compiled code
+    /// copies or leaves the call to its kernel; none where the callee's
+    /// activation serves its prologue or reads a cache of its own.
     #[must_use]
     pub fn activation(&self) -> Option<Activation> {
         self.activation
@@ -556,12 +584,23 @@ impl PlainCall {
     pub fn checks(&self) -> bool {
         self.checks
     }
+
+    /// A method's call: the class of the receiver it was pushed over,
+    /// which its called scope is and whose table answered the method;
+    /// none for a function's.
+    #[must_use]
+    pub fn scope(&self) -> Option<ClassId> {
+        self.method.map(|(class, _)| class)
+    }
 }
 
 /// The plain call `call` is, the record on top of the stack being built:
 /// a call to a user function whose `INIT_*` found its entry plain, or to a
 /// native of the engine's table, given no receiver, closure, scope or
-/// annex, with no observer declared; none for any other.
+/// annex, with no observer declared; or to a method of a published class
+/// a published method answered, over a receiver of that class or none,
+/// the class its called scope, as `INIT_METHOD_CALL`,
+/// `INIT_STATIC_METHOD_CALL` and `NEW` push it; none for any other.
 #[must_use]
 pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let (top, laid) = req.vm().stack.top()?;
@@ -569,19 +608,32 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let function = header.function?;
     let plain = top == call
         && header.info.building()
-        && header.this().is_none()
         && header.closure.is_none()
-        && header.called_scope().is_none()
         && header.annex.is_none()
         && !crate::observer::observing(req);
     if !plain {
         return None;
     }
+    let method = match (header.called_scope(), header.this()) {
+        (None, None) => None,
+        (Some(class), this)
+            if class.is_published()
+                && function.published_number().is_some()
+                && this.is_none_or(|this| this.class() == class) =>
+        {
+            Some((class, function))
+        }
+        _ => return None,
+    };
     let name = || {
         let decl = req.symbols().function_decl(function)?;
         Some(decl.name.0.to_ascii_lowercase().into_boxed_slice())
     };
-    let Some(user) = req.user_function(function) else {
+    let user = req.user_function(function);
+    if method.is_some() && user.is_none() {
+        return None;
+    }
+    let Some(user) = user else {
         // A native's call: its arguments' room and its record, as
         // `INIT_FCALL` pushes `fbc` (`init_native`).
         req.native_entry(function)?;
@@ -593,6 +645,7 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
             slots: u32::try_from(laid.len()).ok()?,
             activation: None,
             checks: false,
+            method: None,
         });
     };
     if !header.info.plain_entry() {
@@ -612,10 +665,17 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     // map knows the argument of a type the declaration holds
     // (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10873`, the skip in
     // `zend_jit_verify_arg_type` at `:10773-10781`).
-    let checks = shape.typed && count == shape.parameters && shape.entry == count;
+    // One `RECV*` per parameter: a function that declares a type keeps
+    // the passed ones' checks, and one passed fewer arguments than it has
+    // parameters keeps the `RECV_INIT`s of the rest, whose defaults
+    // compiled code copies where it can, as php's trace compiles
+    // `zend_jit_recv_init` (`Z/ext/opcache/jit/zend_jit_ir.c:10886-10950`).
+    let prologue = shape.entry == shape.parameters;
+    let checks = shape.typed && count <= shape.parameters && prologue;
+    let defaults = count < shape.parameters && prologue;
     let enters = count <= shape.parameters
         && slots >= shape.slots
-        && (opline == Some(shape.entry) || checks);
+        && (opline == Some(shape.entry) || checks || defaults);
     let activation = match shape.cache.offset() {
         MapPtrOffset::Engine(cache) if enters => {
             // What `enter_call` writes into the flags, applied to all of
@@ -646,6 +706,7 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
         slots,
         activation,
         checks,
+        method,
     })
 }
 
@@ -656,7 +717,10 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
 /// declared no such function yet, or its entry is no longer plain.
 #[must_use]
 pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
-    let function = req.function_named(Bare::resolved(&call.name))?;
+    let function = match call.method {
+        Some((_, method)) => method,
+        None => req.function_named(Bare::resolved(&call.name))?,
+    };
     let served = if let Some(user) = req.user_function(function) {
         let code = crate::exec::body_of(&user.unit, user.body)?;
         Some(FuncRef::at(code.runtime_cache))
@@ -667,7 +731,9 @@ pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
     if served != call.callee {
         return None;
     }
-    let (_, header) = req.laid_call(Header::call(function, call.count))?;
+    let mut header = Header::call(function, call.count);
+    header.set_called_scope(call.scope());
+    let (_, header) = req.laid_call(header)?;
     // A header with no record of its callee is one `push_call` completes
     // as it lays it down, and so not one to copy.
     let plain = call.callee.is_none() || header.info.plain_entry();

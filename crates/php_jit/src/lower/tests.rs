@@ -16,11 +16,12 @@ use cranelift_codegen::isa;
 use super::{Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupported};
 use crate::table::TraceName;
 use crate::testing::goldens::{
-    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
-    DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FIB, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET,
-    HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, NATIVE_CALL, NBODY, NESTED_READ,
-    NESTED_WRITE, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_WRITE, SIEVE,
-    SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
+    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DEFAULT_CALL, DIM_AND, DIM_CONCAT,
+    DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FIB, Fixture, HASH_FETCH_W, HASH_IS,
+    HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL, NATIVE_CALL,
+    NBODY, NESTED_READ, NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE,
+    OWNING_LEAVE, REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL, STRING_BUILD,
+    STRING_MATCH, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -59,15 +60,17 @@ fn named(fixture: Fixture) -> TraceName {
 /// holds what the code does with it.
 fn constants_named(ir: &TraceIr, clif: &str) -> String {
     let mut named = clif.to_owned();
-    let returned = ir.ops.iter().filter_map(|op| match op {
+    let returned = ir.ops.iter().flat_map(|op| match op {
         Op::Line(line) => match line.imm {
             Imm::Leave {
                 value: Returned::Constant(address),
                 ..
-            } => Some(address),
-            _ => None,
+            } => vec![address],
+            // The defaults a call made in place copies.
+            Imm::Make { defaults, .. } => defaults.each().map(|(_, at)| at.get()).collect(),
+            _ => Vec::new(),
         },
-        _ => None,
+        _ => Vec::new(),
     });
     // A constant no scalar is, which an inline form copies from its op
     // array's table.
@@ -503,7 +506,7 @@ fn a_link_answers_its_last_exit() -> Result<(), String> {
 
 /// A native's call is pushed in place, its sends of constants stepped,
 /// the operands they read stored first, and its `DO_ICALL` served by its
-/// handler through [`Kernel::Handle`] (#2963).
+/// handler through [`Kernel::Native`], with no dispatch (#2963, #3340).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_natives_call_is_served_by_its_handler() -> Result<(), String> {
@@ -517,7 +520,8 @@ fn a_natives_call_is_served_by_its_handler() -> Result<(), String> {
         $x = [1]; echo f($x, 3), \"\\n\";",
     )?;
     assert!(!calls_of(&clif, Kernel::Step).is_empty(), "{clif}");
-    assert!(!calls_of(&clif, Kernel::Handle).is_empty(), "{clif}");
+    assert!(!calls_of(&clif, Kernel::Native).is_empty(), "{clif}");
+    assert!(calls_of(&clif, Kernel::Handle).is_empty(), "{clif}");
     Ok(())
 }
 
@@ -1149,5 +1153,94 @@ fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_lowers_in_place()
             );
         }
     }
+    Ok(())
+}
+
+/// A call that sends arrays by reference is made in place: its
+/// `SEND_REF`s copy the references with an owner more, the reference's
+/// handler cold where the variable holds none, and the call's two checks
+/// read each reference's value before the activation, the call kernel
+/// cold where one fails (#3340).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_by_reference_lowers_its_sends_and_checks() -> Result<(), String> {
+    lowered(REF_CALL)?;
+    let clif =
+        std::fs::read_to_string(goldens_dir().join("ref_call.clif")).map_err(|e| e.to_string())?;
+    let calls = |kernel: Kernel| {
+        let address = format!("{:#x}", symbols().address(kernel)).replace("0x7000", "0x7000_");
+        (clif.lines())
+            .filter(|line| line.contains("call_indirect") && line.contains(&address))
+            .count()
+    };
+    // Each `SEND_REF`'s cold arm, and each `ASSIGN_DIM_OP`'s of the
+    // callee.
+    assert_eq!(calls(Kernel::Handle), 4, "{clif}");
+    // The made call's cold arm, where the interrupt is raised, the cache
+    // not laid down or a check fails.
+    assert_eq!(calls(Kernel::Call), 1, "{clif}");
+    // The push's and the leave's cold arms, and no send stepped.
+    assert_eq!(calls(Kernel::Step), 2, "{clif}");
+    Ok(())
+}
+
+/// A method's leave in place gives its receiver up after its variables:
+/// one owner fewer in place, and [`Kernel::FreeThis`] cold where that is
+/// the last or the collector may take the object as a root (#3343).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_methods_leave_gives_its_receiver_up() -> Result<(), String> {
+    lowered(METHOD_CALL)?;
+    let clif = std::fs::read_to_string(goldens_dir().join("method_call.clif"))
+        .map_err(|e| e.to_string())?;
+    let address =
+        format!("{:#x}", symbols().address(Kernel::FreeThis)).replace("0x7000", "0x7000_");
+    let freed = (clif.lines())
+        .filter(|line| line.contains("call_indirect") && line.contains(&address))
+        .count();
+    assert_eq!(freed, 1, "{clif}");
+    Ok(())
+}
+
+/// The calls `k`, `s` and `n` make: `k`'s method pushed in place with
+/// its receiver, and `s`'s and `n`'s held to their callee after the
+/// handler pushed them, each made in place with no send stepped, the
+/// call kernel cold (#3343).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn method_calls_lower_their_push_call_and_leave() -> Result<(), String> {
+    for fixture in [METHOD_CALL, STATIC_CALL, NEW_CALL] {
+        lowered(fixture)?;
+        let clif = std::fs::read_to_string(goldens_dir().join(format!("{}.clif", fixture.name)))
+            .map_err(|e| e.to_string())?;
+        let calls = |kernel: Kernel| {
+            let address = format!("{:#x}", symbols().address(kernel)).replace("0x7000", "0x7000_");
+            (clif.lines())
+                .filter(|line| line.contains("call_indirect") && line.contains(&address))
+                .count()
+        };
+        assert_eq!(calls(Kernel::Call), 1, "{}: {clif}", fixture.name);
+        assert_eq!(calls(Kernel::FreeThis), 1, "{}: {clif}", fixture.name);
+    }
+    Ok(())
+}
+
+/// A call passed fewer arguments than its callee has parameters lowers
+/// to its activation in place, each default copied from the op array's
+/// constants, the call kernel cold where the call is refused (#3340).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_passed_fewer_arguments_lowers_its_defaults() -> Result<(), String> {
+    lowered(DEFAULT_CALL)?;
+    let clif = std::fs::read_to_string(goldens_dir().join("default_call.clif"))
+        .map_err(|e| e.to_string())?;
+    let calls = |kernel: Kernel| {
+        let address = format!("{:#x}", symbols().address(kernel)).replace("0x7000", "0x7000_");
+        (clif.lines())
+            .filter(|line| line.contains("call_indirect") && line.contains(&address))
+            .count()
+    };
+    assert_eq!(calls(Kernel::Call), 1, "{clif}");
+    assert_eq!(calls(Kernel::Handle), 0, "{clif}");
     Ok(())
 }

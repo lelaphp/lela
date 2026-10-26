@@ -67,8 +67,8 @@ mod strings;
 mod tail;
 mod view;
 pub use crossing::{
-    at_room, current, free_cv, free_operands, laid, primed, release, return_entry, room, stack,
-    stack_room, stand,
+    at_room, current, free_cv, free_operands, free_this, laid, primed, release, return_entry, room,
+    stack, stack_room, stand,
 };
 pub use dims::{dim_key, lookup_element};
 pub use frames::{
@@ -934,8 +934,8 @@ pub(crate) type Loop = fn(&mut Request, FrameRef) -> Result<(), Fatal>;
 
 /// How an engine binds its tier's loops once its engine states are
 /// built and its declared opcodes fixed: [`Binding::bound`] for the
-/// tier.
-pub(crate) type BindLoops = fn(&crate::engine::Shared) -> Binding;
+/// tier, with `JIT_G` as the startup's handler of `opcache.jit` left it.
+pub(crate) type BindLoops = fn(&crate::engine::Shared, TierStatus) -> Binding;
 
 /// The loops an engine binds and what its tier answers whichever serves
 /// (ADR-0006, amended on #3301): the loops a request starts in, and
@@ -959,9 +959,9 @@ pub(crate) struct Binding {
     /// serves; read by the unit cache as it holds a unit.
     pub(crate) laid: fn(&Started<'_>, Option<&Request>) -> Laid,
     /// php's `JIT_G` as the engine's start left it, each request's to
-    /// start from ([`Tier::setting`]); before the tier binds, what
-    /// `opcache.jit`'s handler left it as the start served the host's
-    /// value.
+    /// start from ([`Tier::setting`]), and as a pool's value laid over the
+    /// started engine leaves it
+    /// ([`Engine::alter_master_ini`](crate::engine::Engine::alter_master_ini)).
     pub(crate) setting: TierStatus,
 }
 
@@ -969,8 +969,10 @@ impl Binding {
     /// `T`'s loops for the engine `shared` started, as `T` answers
     /// ([`Tier::bound`]), each told as the declared set says
     /// ([`Loops::told`]): a tier that holds a frame or hooks the compile
-    /// is bound from the start.
-    pub(crate) fn bound<T: Tier>(shared: &crate::engine::Shared) -> Binding {
+    /// is bound from the start. `setting` is `JIT_G` as the startup's
+    /// handler of `opcache.jit` left it, which `T` rewrites
+    /// ([`Tier::setting`]).
+    pub(crate) fn bound<T: Tier>(shared: &crate::engine::Shared, setting: TierStatus) -> Binding {
         let bound = if T::HOLDS || T::HOOKED != Hooked::NONE {
             Bound::On
         } else {
@@ -989,7 +991,7 @@ impl Binding {
             counting: AtomicBool::new(false),
             status: T::status,
             laid: T::laid,
-            setting: T::setting(&Started { shared }, shared.binding.setting),
+            setting: T::setting(&Started { shared }, setting),
         }
     }
 
@@ -1797,6 +1799,38 @@ pub fn dispatch_held(req: &mut Request, frame: FrameRef, held: Held<'_>) -> Resu
         Stepped::Same(went) | Stepped::Threw(went) if went == frame => Ok(()),
         _ => Err(Fatal::error(
             "InternalError: a handler compiled code serves in its frame went on elsewhere",
+        )),
+    }
+}
+
+/// The native's call at the opline `frame` stands at in `held`, a
+/// `DO_ICALL` or a `FRAMELESS_ICALL_*`, served by its handler with no
+/// dispatch, as php's compiled code calls the native directly
+/// (`zend_jit_do_call`'s internal arm, `jit_frameless_icall`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:10511-10600`, `:17780-17850`): the
+/// frame stood past it, the interrupt checked after a frameless call as
+/// the handler's `ZEND_VM_FCALL_INTERRUPT_CHECK` checks it, and a throw
+/// left pending. Any other opline is [`dispatch_held`]'s.
+pub fn native_held(req: &mut Request, frame: FrameRef, held: Held<'_>) -> Result<(), Fatal> {
+    use crate::handlers::{
+        do_icall, frameless_icall_0, frameless_icall_1, frameless_icall_2, frameless_icall_3,
+    };
+    use php_unit::Opcode;
+    let code = held.code();
+    let at = req.vm().opline(frame);
+    let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
+    let next = match op.opcode {
+        Opcode::DoIcall => do_icall::<Nop>(req, frame, code, op)?,
+        Opcode::FramelessIcall0 => frameless_icall_0::<Nop>(req, frame, code, op, at)?,
+        Opcode::FramelessIcall1 => frameless_icall_1::<Nop>(req, frame, code, op, at)?,
+        Opcode::FramelessIcall2 => frameless_icall_2::<Nop>(req, frame, code, op, at)?,
+        Opcode::FramelessIcall3 => frameless_icall_3::<Nop>(req, frame, code, op, at)?,
+        _ => return dispatch_held(req, frame, held),
+    };
+    match settled(req, frame, at, next) {
+        Stepped::Same(went) | Stepped::Threw(went) if went == frame => Ok(()),
+        _ => Err(Fatal::error(
+            "InternalError: a native's call compiled code makes went on elsewhere",
         )),
     }
 }

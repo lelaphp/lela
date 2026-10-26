@@ -28,7 +28,7 @@ const P: PlaceLayout = PLACE;
 impl Emit<'_> {
     /// The object `object` names, a `zend_object *`: `$this` of its frame,
     /// or what the value's slot holds, an object as its guard held it.
-    fn object(&mut self, object: Object) -> Result<Value, Abort> {
+    pub(super) fn object(&mut self, object: Object) -> Result<Value, Abort> {
         let (base, at) = match object {
             Object::This(frame) => (self.room(frame)?, imm(FRAME.this() as usize)),
             Object::Value(value) => self.place(self.value(value)?.slot)?,

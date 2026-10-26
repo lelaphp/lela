@@ -145,6 +145,26 @@ pub fn free_cv(req: &mut Request, frame: FrameRef, zval: Zval) {
     req.release(Value::of_slot(zval));
 }
 
+/// The receiver of `frame`, a method's frame a `RETURN` compiled code
+/// leaves by in place gives up, after its variables, where its owner or
+/// its pin is the last: `frame` off the chain a backtrace reads, as
+/// [`free_cv`] takes it, then `OBJ_RELEASE(Z_OBJ(execute_data->This))`
+/// under `ZEND_CALL_RELEASE_THIS`, as `zend_jit_leave_func` gives it up
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:11135-11160`), or the pin of a
+/// receiver the frame was lent let go ([`Request::give_up_receiver`]).
+/// A destructor it serves may leave a throwable pending.
+pub fn free_this(req: &mut Request, frame: FrameRef) {
+    let Some(header) = req.vm_mut().at_mut(frame) else {
+        return;
+    };
+    header.info.set_leaving(true);
+    let receiver = header.receiver();
+    header.set_receiver(None);
+    if let Some(receiver) = receiver {
+        req.give_up_receiver(receiver);
+    }
+}
+
 /// `FREE_OP1` and `FREE_OP2` of the opline at `at` of `frame`, as the
 /// handler would have freed them had it finished, each where it is
 /// asked and a temporary: php's exit with `ZEND_JIT_EXIT_FREE_OP1` or

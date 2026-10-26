@@ -725,13 +725,11 @@ impl UnitView {
             .and_then(|(_, returns)| returns.as_ref())
     }
 
-    /// The plain call to the op array `f` names with `count` arguments;
-    /// none unless [`UnitView::hold_call`] took one.
-    #[must_use]
-    pub fn call(&self, f: FuncRef, count: u32) -> Option<&super::PlainCall> {
-        self.calls
-            .iter()
-            .find(|call| call.callee() == Some(f) && call.count() == count)
+    /// The plain calls to the op array `f` names with `count` arguments
+    /// [`UnitView::hold_call`] took: a function's, and a method's of each
+    /// called scope ([`super::PlainCall::scope`]).
+    pub fn calls_of(&self, f: FuncRef, count: u32) -> impl Iterator<Item = &super::PlainCall> {
+        (self.calls.iter()).filter(move |call| call.callee() == Some(f) && call.count() == count)
     }
 
     /// The plain call to the native named `name`, lowered, with `count`
@@ -761,6 +759,19 @@ impl UnitView {
             return None;
         }
         Some(self.epoch.func(f)?.is_main())
+    }
+
+    /// Whether a frame that runs the op array `f` names may have a
+    /// receiver, `EX(This)`, which its leave gives up: a method's, a
+    /// closure's, a hook's and a file's own code's, which an include
+    /// from a method runs with its includer's; never a function's. None
+    /// unless [`UnitView::hold`] accepted it.
+    #[must_use]
+    pub fn receives(&self, f: FuncRef) -> Option<bool> {
+        if !self.funcs.contains(&f) {
+            return None;
+        }
+        Some(self.epoch.func(f)?.receives())
     }
 
     /// The parameters the declaration of the op array `f` names lists,

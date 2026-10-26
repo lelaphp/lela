@@ -791,7 +791,7 @@ pub(crate) struct CallInfo(u32);
 
 impl CallInfo {
     /// `ZEND_CALL_RELEASE_THIS`: the frame owns its receiver.
-    const RELEASE_THIS: u32 = 1 << 0;
+    pub(crate) const RELEASE_THIS: u32 = 1 << 0;
     /// The frame is being popped: `zend_leave_helper` has written
     /// `EG(current_execute_data) = EX(prev_execute_data)` ahead of
     /// `i_free_compiled_variables`, so a destructor what it gives up
