@@ -174,10 +174,19 @@ pub(crate) struct Run {
     /// [`UNDER_RECIPE`]: crate::reading::UNDER_RECIPE
     #[serde(default)]
     pub recipe: String,
+    /// Each test's verdict, a verdict this xtask cannot name, a newer
+    /// writer's, left out ([`known`]), so the test reads as one the run
+    /// holds none for.
+    #[serde(deserialize_with = "known")]
     pub verdicts: BTreeMap<String, Judgement>,
     /// What each test that missed keeps, by the same key: every fail,
-    /// bork and unread verdict has one.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// bork and unread verdict has one; one this xtask cannot read is left
+    /// out ([`known`]).
+    #[serde(
+        default,
+        deserialize_with = "known",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub misses: BTreeMap<String, Miss>,
     /// Why each test that skipped skipped, by the same key: the reason its
     /// `SKIPIF` or the runner gave, so the target names it beside each
@@ -624,14 +633,39 @@ pub(super) fn keep(file: &Path, run: &Run) -> Result<()> {
     crate::reading::replace(file, text.as_bytes())
 }
 
-/// The run kept at `file`, if one is: a subset's or a target's.
+/// The run kept at `file`, if one is: a subset's or a target's. Every
+/// worktree's xtask reads every worktree's runs ([`roots`]), so a run this
+/// one cannot read, a newer writer's, is none, said in a note and never a
+/// refusal: a branch's new shape cannot stop another's lane.
 pub(super) fn read(file: &Path) -> Result<Option<Run>> {
     let Some(text) = crate::read_if(file)? else {
         return Ok(None);
     };
-    let run =
-        serde_json::from_str(&text).with_context(|| format!("{} is not a run", file.display()))?;
-    Ok(Some(run))
+    match serde_json::from_str(&text) {
+        Ok(run) => Ok(Some(run)),
+        Err(why) => {
+            println!(
+                "phpt: {} is no run this xtask reads ({why}); passed over",
+                file.display()
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// A kept map by test, each value this xtask cannot read left out: the
+/// verdict or miss of a newer writer, a variant it has not got, is no
+/// value here rather than a run unread whole.
+fn known<'de, D, V>(map: D) -> Result<BTreeMap<String, V>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    V: serde::de::DeserializeOwned,
+{
+    let raw = BTreeMap::<String, serde_json::Value>::deserialize(map)?;
+    let read = raw
+        .into_iter()
+        .filter_map(|(id, v)| Some((id, serde_json::from_value(v).ok()?)));
+    Ok(read.collect())
 }
 
 /// Where the workspace `snapshot` stands in keeps the run of `scope` taken
