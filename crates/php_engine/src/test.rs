@@ -109,6 +109,9 @@ pub struct Served {
     pub log: Vec<u8>,
     pub exit_code: i32,
     pub fatal: Option<String>,
+    /// How php's process would have ended where its allocator ends it
+    /// ([`crate::Ending::Terminated`]).
+    pub terminated: Option<crate::ProcessEnd>,
     pub entered: Vec<Entered>,
 }
 
@@ -412,6 +415,10 @@ fn served(
         log: sink.log,
         exit_code: observables.exit_code,
         fatal: observables.fatal().map(str::to_owned),
+        terminated: match observables.ending {
+            Some(crate::Ending::Terminated(end)) => Some(end),
+            _ => None,
+        },
         entered,
     }
 }

@@ -33,6 +33,7 @@ PHP_SYSCONFDIR
 PHP_VERSION
 Pid
 Primary
+ProcessEnd
 ProcessTitle
 ProgramFile
 ProgramServed

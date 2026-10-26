@@ -1322,12 +1322,20 @@ impl Request {
             self.end_in_compile_time(error.level, &error.message, &file, line);
             return Thrown::of(None);
         }
-        // The compile met php 8.5.12's hard memory limit: `_exit(137)`
-        // where it asked, so nothing it declared stands and nothing it
-        // raised is rendered.
-        if let php_compile::Raise::HardLimit { limit, asked } = error.raise {
-            self.terminate_at_hard_limit(limit, asked);
-            return Thrown::of(None);
+        // The compile met php 8.5.12's hard memory limit, `_exit(137)`, or
+        // its allocator's panic, `abort()`, where it asked, so nothing it
+        // declared stands and nothing it raised is rendered.
+        match error.raise {
+            php_compile::Raise::HardLimit { limit, asked } => {
+                self.terminate_at_hard_limit(limit, asked);
+                return Thrown::of(None);
+            }
+            php_compile::Raise::Panic => {
+                self.terminate_in_panic(&error.message);
+                return Thrown::of(None);
+            }
+            php_compile::Raise::Fatal | php_compile::Raise::Thrown | php_compile::Raise::Unread => {
+            }
         }
         let raised = error.raised.iter();
         if !error.bailed() {

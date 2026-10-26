@@ -240,13 +240,23 @@ pub extern "C" fn emalloc(size: usize) -> *mut c_void {
     }
 }
 
-/// `ecalloc(count, size)`: [`emalloc`] of the product, zeroed; a product
-/// past the address space is the system's `calloc`'s to refuse.
+/// `ecalloc(count, size)`: [`emalloc`] of the product, zeroed. A product
+/// past the address space is `_ecalloc`'s `ZEND_MM_SAFE_ADDRESS_GUARDED`
+/// (`Z/Zend/zend_alloc.c:3004`): under a lend the heap's refusal or its
+/// end ([`crate::mm::Mm::overflow_refusal`]), which the lend answers, and
+/// null for C; outside one the system's `calloc`'s null.
 #[unsafe(no_mangle)]
 pub extern "C" fn ecalloc(count: usize, size: usize) -> *mut c_void {
     let Some(total) = count.checked_mul(size) else {
-        // SAFETY: `calloc` takes two sizes and answers null for this one.
-        return unsafe { libc::calloc(count, size) };
+        if let Some(lending) = lending() {
+            let message =
+                format!("Possible integer overflow in memory allocation ({count} * {size} + 0)");
+            let fatal = lending.mm().overflow_refusal(message);
+            if *fatal.reason() != crate::FatalReason::Refused {
+                lending.refuse(fatal);
+            }
+        }
+        return std::ptr::null_mut();
     };
     let at = emalloc(total);
     if !at.is_null() {

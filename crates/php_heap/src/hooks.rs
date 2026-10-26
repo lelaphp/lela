@@ -55,6 +55,12 @@ pub enum FatalReason {
         /// The bytes past what the chunks held.
         asked: usize,
     },
+    /// php 8.5.12's `zend_mm_panic` (`Z/Zend/zend_alloc.c:394-405`), where
+    /// `zend_mm_delayed_error_or_panic` sends an infallible ask whose size
+    /// overflows (`:454-468`): the message alone on the standard error,
+    /// and the process ends on `abort()`, with no shutdown of any kind. A
+    /// fallible ask's overflow is the delayed OOM's instead.
+    Panic(String),
     /// A fallible allocation the soft limit refused, php's `NULL` from
     /// `_femalloc` with the delayed OOM left pending: no end of the
     /// request, but the `Err` that carries the refusal out of the
@@ -85,6 +91,13 @@ impl Fatal {
     #[must_use]
     pub fn hard_limit(limit: usize, asked: usize) -> Fatal {
         Fatal(Box::new(FatalReason::HardLimit { limit, asked }))
+    }
+
+    /// The allocator's panic, with php's message ([`FatalReason::Panic`]).
+    #[cold]
+    #[must_use]
+    pub(crate) fn panic(message: String) -> Fatal {
+        Fatal(Box::new(FatalReason::Panic(message)))
     }
 
     /// A fallible allocation refused ([`FatalReason::Refused`]).

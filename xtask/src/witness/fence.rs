@@ -18,8 +18,10 @@
 //! The `php` fence is the program the oracle's recipe runs as `witness.php`,
 //! with `<?php` on line 1 and the snippet on line 2, so php's own error text
 //! matches. The `expect` fence's body is the pinned first stream; `exit=N`
-//! is the pinned status, an absent `exit` asserts zero, and a bare `exit` is
-//! the opt-in `xtask witness --accept` fills with the oracle's number. A
+//! is the pinned status, `signal=N` the signal pinned in its place where the
+//! oracle's run ends on one (#3545), an absent `exit` asserts zero, and a
+//! bare `exit` is the opt-in `xtask witness --accept` fills with how the
+//! oracle's run ended. A
 //! `wall=D` is disclosure and gates nothing. A `stderr` fence, when one
 //! follows, is the pinned second stream; without one, an empty stream is
 //! asserted.
@@ -96,6 +98,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::git;
+use crate::oracle::Ended;
 
 /// The info string of the fence that carries the program.
 const PHP: &str = "php";
@@ -124,19 +127,31 @@ pub enum Exit {
     Absent,
     /// `exit=N`: the number a run of `--accept` captured.
     Pinned(i32),
+    /// `signal=N`: the signal a run of `--accept` captured, where the run
+    /// ended on one and left no status, as php's `abort()` does (#3545).
+    Signal(i32),
     /// A bare `exit`: the opt-in that fails the run until `--accept` writes
-    /// the oracle's number in its place.
+    /// how the oracle's run ended in its place.
     Bare,
 }
 
 impl Exit {
-    /// The status the fence asserts; nothing for the bare opt-in, which
-    /// asserts none until the oracle's is captured.
-    pub fn asserted(self) -> Option<i32> {
+    /// How the fence asserts a run ends; nothing for the bare opt-in,
+    /// which asserts nothing until the oracle's is captured.
+    pub fn asserted(self) -> Option<Ended> {
         match self {
-            Exit::Absent => Some(0),
-            Exit::Pinned(status) => Some(status),
+            Exit::Absent => Some(Ended::Status(0)),
+            Exit::Pinned(status) => Some(Ended::Status(status)),
+            Exit::Signal(signal) => Some(Ended::Signal(signal)),
             Exit::Bare => None,
+        }
+    }
+
+    /// What the fence pins once `--accept` captured `ended`.
+    pub fn of(ended: Ended) -> Exit {
+        match ended {
+            Ended::Status(status) => Exit::Pinned(status),
+            Ended::Signal(signal) => Exit::Signal(signal),
         }
     }
 }
@@ -427,7 +442,7 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
             file,
             opened,
             format!(
-                "`{unknown}` on an expect fence; the attributes are `exit`, `exit=<status>`, `wall=<duration>`, `regime=<name>`, `locale=<name>`, `process`, `mysql` and `capture`, and the ini a regime carries is the pin's"
+                "`{unknown}` on an expect fence; the attributes are `exit`, `exit=<status>`, `signal=<n>`, `wall=<duration>`, `regime=<name>`, `locale=<name>`, `process`, `mysql` and `capture`, and the ini a regime carries is the pin's"
             ),
         ));
     }
@@ -589,6 +604,11 @@ impl Attributes {
                     Ok(status) => out.exit = Exit::Pinned(status),
                     Err(_) => out.unknown.push(word.to_owned()),
                 }
+            } else if let Some(signal) = word.strip_prefix("signal=") {
+                match signal.parse() {
+                    Ok(signal) => out.exit = Exit::Signal(signal),
+                    Err(_) => out.unknown.push(word.to_owned()),
+                }
             } else if let Some(wall) = word.strip_prefix("wall=") {
                 match duration(wall) {
                     Some(wall) => out.wall = Some(wall),
@@ -730,20 +750,24 @@ pub(super) fn identifier(text: &str) -> Option<&str> {
     (end > raw).then(|| &text[..end])
 }
 
-/// The `expect` fence line with `status` pinned on it: the one thing
-/// `--accept` writes, and the reason `exit=` is never authored (design §8).
-/// The line's own indentation, marker and other attributes stand.
-pub fn pinned(line: &str, status: i32) -> String {
+/// The `expect` fence line with how a run `ended` pinned on it, `exit=N`
+/// or `signal=N`: the one thing `--accept` writes, and the reason neither
+/// is ever authored (design §8). The line's own indentation, marker and
+/// other attributes stand.
+pub fn pinned(line: &str, ended: Ended) -> String {
     let Some(at) = line.find("```") else {
         return line.to_owned();
     };
     let (head, rest) = line.split_at(at);
     let info = rest.trim_start_matches('`');
     let mut words: Vec<String> = info.split_whitespace().map(str::to_owned).collect();
-    let pin = format!("exit={status}");
+    let pin = match ended {
+        Ended::Status(status) => format!("exit={status}"),
+        Ended::Signal(signal) => format!("signal={signal}"),
+    };
     match words
         .iter()
-        .position(|w| w == "exit" || w.starts_with("exit="))
+        .position(|w| w == "exit" || w.starts_with("exit=") || w.starts_with("signal="))
     {
         Some(at) => words[at] = pin,
         None => words.insert(1.min(words.len()), pin),
@@ -911,7 +935,21 @@ mod tests {
         };
         assert_eq!(witness.exit, Exit::Pinned(255));
         assert_eq!(witness.wall, Some(Duration::from_secs(1)));
-        assert_eq!(witness.exit.asserted(), Some(255));
+        assert_eq!(witness.exit.asserted(), Some(Ended::Status(255)));
+    }
+
+    /// `signal=N` pins a run that ended on a signal where a status would
+    /// stand, and a word after it that is no number is refused (#3545).
+    #[test]
+    fn a_signal_is_pinned_where_a_status_would_stand() {
+        let found =
+            php("/// ```php\n/// x\n/// ```\n/// ```expect signal=6\n/// ```\npub fn k() {}\n");
+        assert_eq!(found.witnesses[0].exit, Exit::Signal(6));
+        assert_eq!(found.witnesses[0].exit.asserted(), Some(Ended::Signal(6)));
+        assert_eq!(Exit::of(Ended::Signal(6)), Exit::Signal(6));
+        let refused =
+            php("/// ```php\n/// x\n/// ```\n/// ```expect signal=abrt\n/// ```\npub fn k() {}\n");
+        assert!(refused.witnesses.is_empty(), "{refused:#?}");
     }
 
     #[test]
@@ -919,7 +957,7 @@ mod tests {
         let found = php("/// ```php\n/// x\n/// ```\n/// ```expect exit\n/// ```\npub fn k() {}\n");
         assert_eq!(found.witnesses[0].exit, Exit::Bare);
         assert_eq!(found.witnesses[0].exit.asserted(), None);
-        assert_eq!(Exit::Absent.asserted(), Some(0));
+        assert_eq!(Exit::Absent.asserted(), Some(Ended::Status(0)));
     }
 
     #[test]
@@ -1012,7 +1050,7 @@ mod tests {
         assert_eq!(plain.witnesses[0].served, Served::Linked);
         assert_eq!(marked.witnesses[0].id(), plain.witnesses[0].id());
         assert_eq!(
-            pinned("/// ```expect exit process", 255),
+            pinned("/// ```expect exit process", Ended::Status(255)),
             "/// ```expect exit=255 process"
         );
     }
@@ -1195,11 +1233,31 @@ mod tests {
     #[test]
     fn accept_writes_the_status_onto_the_fence_line_and_leaves_the_rest() {
         assert_eq!(
-            pinned("/// ```expect exit wall=1s", 255),
+            pinned("/// ```expect exit wall=1s", Ended::Status(255)),
             "/// ```expect exit=255 wall=1s"
         );
-        assert_eq!(pinned("    /// ```expect", 3), "    /// ```expect exit=3");
-        assert_eq!(pinned("/// ```expect exit=1", 0), "/// ```expect exit=0");
+        let status = |code| Ended::Status(code);
+        assert_eq!(
+            pinned("    /// ```expect", status(3)),
+            "    /// ```expect exit=3"
+        );
+        assert_eq!(
+            pinned("/// ```expect exit=1", status(0)),
+            "/// ```expect exit=0"
+        );
+        let abort = Ended::Signal(6);
+        assert_eq!(
+            pinned("/// ```expect exit", abort),
+            "/// ```expect signal=6"
+        );
+        assert_eq!(
+            pinned("/// ```expect exit=255", abort),
+            "/// ```expect signal=6"
+        );
+        assert_eq!(
+            pinned("/// ```expect signal=6", status(255)),
+            "/// ```expect exit=255"
+        );
     }
 
     /// `capture` opts a fence into `--accept --streams` and is no part of

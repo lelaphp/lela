@@ -56,12 +56,40 @@ pub enum Ending {
     /// `E_PARSE`: the text is already on the stream `php_error_cb` put it
     /// on, and what is left is php's status, 255.
     Parse,
-    /// php 8.5.12's hard memory limit, `zend_mm_hard_limit_error`'s
-    /// `_exit(137)`: its line is on the error stream, and nothing more of
-    /// the request is served, no shutdown function, no destructor, no
-    /// `ob_start()` buffer flushed, no extension's `RSHUTDOWN`; the host ends on the
-    /// status ([`Request::terminate_at_hard_limit`]).
-    Terminated,
+    /// Where php 8.5.12's allocator ends its process, as the
+    /// [`ProcessEnd`] says: its line is on the error stream, and nothing
+    /// more of the request is served, no shutdown function, no destructor,
+    /// no `ob_start()` buffer flushed, no extension's `RSHUTDOWN`
+    /// ([`Request::terminate`]). A host that is one request's process ends
+    /// as php's does; one that serves many ends the request alone and
+    /// serves on (design §3.4).
+    Terminated(ProcessEnd),
+}
+
+/// How php 8.5.12's process ends where its allocator ends it, which a
+/// host that is one request's process copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessEnd {
+    /// `zend_mm_hard_limit_error`'s `_exit(137)` at the hard memory limit
+    /// (`Z/Zend/zend_alloc.c:162`), the status.
+    Exit(i32),
+    /// `zend_mm_panic`'s `abort()` (`Z/Zend/zend_alloc.c:394-405`), where
+    /// an infallible ask's size overflows (`:454-468`): the process ends
+    /// on `SIGABRT`.
+    Abort,
+}
+
+impl ProcessEnd {
+    /// The status a request ending so reports, php's `EG(exit_status)`
+    /// for a host that reads a number: the exit's own, and for the abort
+    /// what a shell reports of a process `SIGABRT` ended, 128 and 6.
+    #[must_use]
+    pub fn status(self) -> i32 {
+        match self {
+            ProcessEnd::Exit(status) => status,
+            ProcessEnd::Abort => 134,
+        }
+    }
 }
 
 /// Where the request stands, whose field no file but this one reads.
@@ -366,16 +394,28 @@ impl Request {
         self.bail_out();
     }
 
-    /// The request ended as php's process ends at the hard memory limit
-    /// ([`Ending::Terminated`]), whatever it was ending in before.
-    pub(super) fn end_as_terminated(&mut self) {
-        self.ending = Some(Ending::Terminated);
+    /// The request ended where php's allocator ends its process, as
+    /// `end` says ([`Ending::Terminated`]), whatever it was ending in
+    /// before: `said`, php's line, on the request's standard error, the
+    /// status `end` reports, no destructor served as the request's tables
+    /// are freed, and the request leaving what it serves. What the request
+    /// wrote before is the host's already. A request already ended so is
+    /// left as it stands.
+    pub(super) fn terminate(&mut self, end: ProcessEnd, said: &str) {
+        if self.terminated() {
+            return;
+        }
+        self.response_mut().write_stderr(said.as_bytes());
+        self.end_in_exit(end.status());
+        self.ending = Some(Ending::Terminated(end));
+        self.heap.mark_destructed();
+        self.bail_out();
     }
 
-    /// Whether the request ended at the hard memory limit, after which
-    /// nothing of it is served ([`Ending::Terminated`]).
+    /// Whether the request ended where php's allocator ends its process,
+    /// after which nothing of it is served ([`Ending::Terminated`]).
     pub(crate) fn terminated(&self) -> bool {
-        matches!(self.ending, Some(Ending::Terminated))
+        matches!(self.ending, Some(Ending::Terminated(_)))
     }
 
     /// `EG(exit_status) = status`, `ZEND_FUNCTION(exit)`'s int arm: the
@@ -492,6 +532,7 @@ impl Request {
             php_heap::FatalReason::HardLimit { limit, asked } => {
                 self.terminate_at_hard_limit(*limit, *asked);
             }
+            php_heap::FatalReason::Panic(message) => self.terminate_in_panic(message),
             // A fallible refusal is read by its scope ([`Memory::fallible`])
             // and never ends a request; one that reaches here left its scope.
             //

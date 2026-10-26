@@ -48,8 +48,8 @@ pub use php_engine::{
     EngineBuilder, FileHandles, Forked, HostPage, HostServes, HostThread, HostValue, IniEvent,
     IniFile, IniFiles, IniOrigin, IniValue, Method, NotAlone, Observables, OutputSink,
     PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX, PHP_SYSCONFDIR,
-    PHP_VERSION, Pid, Primary, ProcessTitle, ProgramFile, ProgramServed, RequestDescription,
-    ResponseHead, Routed, Uncaught, WebRequest, fork, host_thread, main_thread,
+    PHP_VERSION, Pid, Primary, ProcessEnd, ProcessTitle, ProgramFile, ProgramServed,
+    RequestDescription, ResponseHead, Routed, Uncaught, WebRequest, fork, host_thread, main_thread,
 };
 
 /// C's `strtol(s, NULL, 10)` and `atoi` as php's hosts call them on what
@@ -306,6 +306,20 @@ pub fn exit_code(status: i32) -> ExitCode {
 pub fn exit(status: i32) -> ! {
     stdio::flush();
     std::process::exit(status)
+}
+
+/// What a host that is one request's process, the CLI and plain CGI, does
+/// once `served` came back: where php's allocator would have ended php's
+/// process on `abort()` ([`ProcessEnd::Abort`]), C's `stdout` flushed and
+/// the process aborted, as php's ends on `SIGABRT`
+/// (`Z/Zend/zend_alloc.c:394-405`); after any other ending it returns. A
+/// host that serves many requests ends that request alone and serves on
+/// (design §3.4, #3515).
+pub fn abort_as_php(served: &Observables) {
+    if served.ending == Some(Ending::Terminated(ProcessEnd::Abort)) {
+        stdio::flush();
+        std::process::abort();
+    }
 }
 
 /// The stack a request is served on, by the CLI on the thread it moves

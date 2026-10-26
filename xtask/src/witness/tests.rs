@@ -21,7 +21,7 @@ use crate::cfg::Target;
 use crate::common::registry::{Row, registry, rows};
 use crate::divergence::Registry;
 use crate::manifest::Manifest;
-use crate::oracle::{Observation, Program, Promise};
+use crate::oracle::{Ended, Observation, Program, Promise};
 use crate::scratch::Tree;
 
 fn workspace() -> PathBuf {
@@ -527,13 +527,25 @@ fn held_over(
     engine: (&str, i32),
     accepted: bool,
 ) -> (Judgement, String) {
+    let status = |(stdout, exit)| (stdout, Ended::Status(exit));
+    held_ending(fences, status(oracle), status(engine), accepted)
+}
+
+/// [`held_over`] of runs that end as each [`Ended`] says, a signal among
+/// them.
+fn held_ending(
+    fences: &str,
+    oracle: (&str, Ended),
+    engine: (&str, Ended),
+    accepted: bool,
+) -> (Judgement, String) {
     let text = block(fences);
     let found = fence::extract(Path::new("ext/fixture/src/lib.rs"), &text);
     let witness = &found.witnesses[0];
-    let observed = |(stdout, exit): (&str, i32)| Observation {
+    let observed = |(stdout, exit): (&str, Ended)| Observation {
         stdout: stdout.as_bytes().to_vec(),
         stderr: Vec::new(),
-        exit: crate::oracle::Ended::Status(exit),
+        exit,
         wall: Duration::ZERO,
     };
     let (oracle, engine) = (observed(oracle), observed(engine));
@@ -584,6 +596,25 @@ fn a_fence_the_oracle_does_not_meet_fails_and_names_the_oracle() {
         held_over(fence, ("1", 0), ("1", 0), false).0,
         Judgement::Pass
     );
+}
+
+/// A fence pinning a signal is met by a run that ends on that signal, and
+/// missed by one that ends on another or on a status, the status
+/// `128 + 6` a shell reports of an abort among them (#3545).
+#[test]
+fn a_pinned_signal_is_met_by_that_signal_alone() {
+    let fence = "/// ```expect signal=6\n/// 1\n/// ```\n";
+    let abort = ("1", Ended::Signal(6));
+    assert_eq!(held_ending(fence, abort, abort, false).0, Judgement::Pass);
+    let (judgement, note) = held_ending(fence, abort, ("1", Ended::Signal(11)), false);
+    assert_eq!(judgement, Judgement::Fail, "{note}");
+    assert!(
+        note.contains("-signal 6") && note.contains("+signal 11"),
+        "{note}"
+    );
+    let (judgement, note) = held_ending(fence, abort, ("1", Ended::Status(134)), false);
+    assert_eq!(judgement, Judgement::Fail, "{note}");
+    assert!(note.contains("+status 134"), "{note}");
 }
 
 /// The negative control of the rule (harness §4.1, #783): the fixture's
@@ -645,7 +676,12 @@ fn a_fence_a_trace_row_covers_is_held_to_the_engine_alone_and_one_it_does_not_bo
         covered.note
     );
     assert_eq!(bare.judgement, Judgement::Bork, "{bare:#?}");
-    assert!(bare.note.contains("ended on a signal"), "{}", bare.note);
+    assert!(
+        bare.note
+            .contains("ended on signal 9, which the fence does not pin"),
+        "{}",
+        bare.note
+    );
 
     let without = judge(
         &fixture.pin().unwrap().oracle(),

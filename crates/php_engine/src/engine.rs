@@ -693,9 +693,12 @@ pub struct Observables {
     pub exit_code: i32,
     pub headers_sent: bool,
     /// How the request ended where it ended in no `exit` and no return
-    /// of its own: a fatal, a source that did not compile, or php's hard
-    /// memory limit, which a host that serves on answers as the web server
-    /// over a php-fpm worker that `_exit`ed there answers.
+    /// of its own: a fatal, a source that did not compile, or where php's
+    /// allocator ends its process, at the hard memory limit or its
+    /// overflow panic, which a host that serves on answers as the web
+    /// server over a php-fpm worker that `_exit`ed or `abort()`ed there
+    /// answers, and a host that is one request's process ends as php's
+    /// does ([`crate::ProcessEnd`]).
     pub ending: Option<Ending>,
     /// `zend_memory_peak_usage(1)`: the most memory the request held.
     pub memory_peak: usize,
@@ -6408,6 +6411,9 @@ pub(crate) fn refusal_raised(req: &mut Request, refused: &CompileError, file: &[
         }
         (php_compile::Stage::Compiling, php_compile::Raise::HardLimit { limit, asked }) => {
             req.terminate_at_hard_limit(limit, asked);
+        }
+        (php_compile::Stage::Compiling, php_compile::Raise::Panic) => {
+            req.terminate_in_panic(&refused.message);
         }
     }
 }

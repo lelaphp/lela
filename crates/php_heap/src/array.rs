@@ -82,6 +82,13 @@ pub(crate) trait Allocate {
     fn iterators(&mut self) -> Option<&mut Iterators> {
         None
     }
+    /// `zend_mm_delayed_error_or_panic` over a size `message` names as
+    /// overflowing: the request heap's refusal or end
+    /// ([`Mm::overflow_refusal`]), and the process's end for an
+    /// allocator that is never fallible.
+    fn overflow(&mut self, message: String) -> Fatal {
+        Fatal::panic(message)
+    }
 }
 
 /// The request's allocator and its iterator list together, which is
@@ -115,6 +122,10 @@ impl Allocate for Tables<'_> {
     fn iterators(&mut self) -> Option<&mut Iterators> {
         Some(self.iterators)
     }
+
+    fn overflow(&mut self, message: String) -> Fatal {
+        self.mm.overflow_refusal(message)
+    }
 }
 
 impl Allocate for Mm {
@@ -137,6 +148,10 @@ impl Allocate for Mm {
         // SAFETY: the caller's, handed on: the block is this heap's and
         // nothing names it.
         unsafe { Mm::free(self, at) };
+    }
+
+    fn overflow(&mut self, message: String) -> Fatal {
+        self.overflow_refusal(message)
     }
 }
 
@@ -216,7 +231,8 @@ pub(crate) fn persistent_array(entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
     if entries.is_empty() {
         return Ok(Arr::empty());
     }
-    let size = check_size(u32::try_from(entries.len()).unwrap_or(u32::MAX))?;
+    let size = check_size(u32::try_from(entries.len()).unwrap_or(u32::MAX))
+        .map_err(|said| System.overflow(said))?;
     let at = System.alloc(HEADER)?;
     // SAFETY: the allocation is the header's size and nothing else
     // holds it.
@@ -239,7 +255,7 @@ pub(crate) fn persistent_array(entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
 /// own. [`free_table_header`] gives the header back; the data goes with
 /// the heap whose allocator handed it out.
 pub(crate) fn table_header(size: u32) -> Result<Arr, Fatal> {
-    let size = check_size(size)?;
+    let size = check_size(size).map_err(|said| System.overflow(said))?;
     let at = System.alloc(HEADER)?;
     // SAFETY: the allocation is the header's size and nothing else
     // holds it.
@@ -1525,7 +1541,7 @@ impl Arr {
     fn packed_grow(self, mm: &mut dyn Allocate) -> Result<(), Fatal> {
         let size = self.table_size();
         if size >= MAX_SIZE {
-            return Err(overflow(size.wrapping_mul(2), BUCKET));
+            return Err(mm.overflow(overflow(size.wrapping_mul(2), BUCKET)));
         }
         let grown = size * 2;
         let used_bytes = Arr::hash_size(MIN_MASK) + self.num_used() as usize * SLOT;
@@ -1606,7 +1622,7 @@ impl Arr {
             }
             self.rehash(mm.iterators());
         } else {
-            return Err(overflow(size.wrapping_mul(2), BUCKET + HASH));
+            return Err(mm.overflow(overflow(size.wrapping_mul(2), BUCKET + HASH)));
         }
         Ok(())
     }
@@ -1782,8 +1798,8 @@ impl std::fmt::Debug for Arr {
 }
 
 /// `zend_hash_check_size`: eight at least, a power of two, and php's
-/// fatal past `HT_MAX_SIZE`.
-fn check_size(size: u32) -> Result<u32, Fatal> {
+/// overflow past `HT_MAX_SIZE`, its sentence the `Err`.
+fn check_size(size: u32) -> Result<u32, String> {
     if size <= MIN_SIZE {
         Ok(MIN_SIZE)
     } else if size > MAX_SIZE {
@@ -1794,11 +1810,10 @@ fn check_size(size: u32) -> Result<u32, Fatal> {
 }
 
 /// php's `Possible integer overflow in memory allocation (%u * %zu +
-/// %zu)`, the fatal the table's growth raises at `HT_MAX_SIZE`.
-fn overflow(size: u32, each: usize) -> Fatal {
-    Fatal::error(format!(
-        "Possible integer overflow in memory allocation ({size} * {each} + {BUCKET})"
-    ))
+/// %zu)`, the sentence `zend_hash_check_size` and the table's growth hand
+/// `zend_mm_delayed_error_or_panic` at `HT_MAX_SIZE` ([`Allocate::overflow`]).
+fn overflow(size: u32, each: usize) -> String {
+    format!("Possible integer overflow in memory allocation ({size} * {each} + {BUCKET})")
 }
 
 /// A position in an [`Arr`], walking the live elements in order.
@@ -1861,11 +1876,18 @@ impl crate::Heap {
         Ok(unsafe { Arr::init(at, 1) })
     }
 
+    /// `zend_hash_check_size(size, heap->fallible)` over this heap: the
+    /// table's size, and its overflow the heap's refusal or its end
+    /// ([`Mm::overflow_refusal`]).
+    fn table_size(&mut self, size: u32) -> Result<u32, Fatal> {
+        check_size(size).map_err(|said| self.mm.overflow_refusal(said))
+    }
+
     /// `zend_new_array(size)`, `array_init_size`: the header, with the
     /// first data allocation sized for `size` elements through
     /// `zend_hash_check_size`.
     pub fn array_sized(&mut self, size: u32) -> Result<Arr, Fatal> {
-        let size = check_size(size)?;
+        let size = self.table_size(size)?;
         let at = self.mm.alloc(HEADER)?;
         // SAFETY: the allocation is the header's size and nothing else
         // holds it.
@@ -1896,14 +1918,15 @@ impl crate::Heap {
         }
         if a.is_uninitialized() {
             if size > a.table_size() {
-                a.header().table_size.set(check_size(size)?);
+                let checked = self.table_size(size)?;
+                a.header().table_size.set(checked);
             }
             return a.real_init_mixed(&mut self.tables());
         }
         if size <= a.table_size() {
             return Ok(());
         }
-        let grown = check_size(size)?;
+        let grown = self.table_size(size)?;
         let mut tables = self.tables();
         let old = a.data_addr();
         if a.is_packed() {

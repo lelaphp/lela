@@ -197,6 +197,7 @@ pub fn serve(engine: &Engine, program: &Program, arguments: &[OsString]) -> i32 
 /// sets (`Z/sapi/cli/php_cli.c:919-922`, `:1188-1191`); otherwise the
 /// request's own.
 fn ended(served: &Observables, sink: &mut dyn OutputSink) -> i32 {
+    php_sapi::abort_as_php(served);
     if served.start_failed {
         sink.write(b"Could not startup.\n").ok();
         return 1;

@@ -40,7 +40,11 @@ const LOG_DEBUG: i32 = 7;
 
 /// `zend_leak_bytes(int $bytes = 3): void`: an `emalloc` the program
 /// never frees, which `memory_get_usage()` counts until the request's
-/// end; a size the heap's rounding overflows is php's fatal. php's leak
+/// end. A size the heap's rounding overflows is php 8.5.12's allocator
+/// panic, `zend_mm_panic`: its line alone on the standard error, with no
+/// `Fatal error:`, file or line, and php's process ends on `abort()`,
+/// which the CLI copies and a host that serves many requests ends the
+/// request alone for (`Ending::Terminated`, #3515). php's leak
 /// lasts until its heap is freed whole; here the request state keeps
 /// the block and frees it at `RSHUTDOWN`, as [`crate::functions`]'
 /// `zend_leak_variable` keeps its owner, so nothing the program sees
@@ -59,8 +63,25 @@ const LOG_DEBUG: i32 = 7;
 /// ```php
 /// zend_leak_bytes(-1);
 /// ```
-/// ```expect exit=255
-/// Fatal error: Possible integer overflow in memory allocation (18446744073709551615 + 16384) in %s on line 2
+/// ```expect signal=6
+/// ```
+/// ```stderr
+/// Possible integer overflow in memory allocation (18446744073709551615 + %d)
+/// ```
+///
+/// What the program wrote before stands, and nothing after it runs:
+///
+/// ```php
+/// register_shutdown_function(function () { echo "shutdown\n"; });
+/// echo "before\n";
+/// zend_leak_bytes(-1);
+/// echo "after\n";
+/// ```
+/// ```expect signal=6 process
+/// before
+/// ```
+/// ```stderr
+/// Possible integer overflow in memory allocation (18446744073709551615 + %d)
 /// ```
 #[php_function]
 pub(crate) fn zend_leak_bytes(

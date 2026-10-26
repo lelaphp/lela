@@ -185,6 +185,7 @@ impl Request {
             }
             php_heap::FatalReason::OutOfMemory(_)
             | php_heap::FatalReason::HardLimit { .. }
+            | php_heap::FatalReason::Panic(_)
             | php_heap::FatalReason::Refused => {
                 self.end_in(&sensed);
             }
