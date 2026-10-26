@@ -11,7 +11,7 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::coerce::truthy;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error, value_error};
-use php_ext::request::{Request, Streams as _};
+use php_ext::request::{Realpaths, Request, Streams as _};
 use php_ext::values::walk;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
@@ -979,7 +979,7 @@ impl ZipArchive {
             let text = error.text(req);
             holder::diagnose(req, closed.thrown.as_ref(), Level::Warning, &text);
         }
-        req.clear_stat_cache();
+        req.clear_stat_cache(Realpaths::Kept);
         if let Some(i) = object.native_mut::<Intern>(req) {
             i.err = closed.error.unwrap_or_default();
             i.filename = None;

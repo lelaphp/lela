@@ -79,7 +79,7 @@ use php_ext::abi::{False, OrFalse, Path, Ref, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::is_space;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, value_error};
-use php_ext::request::{Request, Streams as _};
+use php_ext::request::{Realpaths, Request, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi::locale::Mblen;
@@ -174,7 +174,7 @@ fn php_exec(
     let mut reader = BufReader::new(pipe);
     // `php_stdiop_read`'s `php_clear_stat_cache`, since the command may
     // have changed any file (`Z/main/streams/plain_wrapper.c:500`).
-    req.clear_stat_cache();
+    req.clear_stat_cache(Realpaths::Kept);
     if mode == Mode::Raw {
         let mut chunk = vec![0u8; 4096];
         while let Ok(read) = req.limits_mut().blocking(|| reader.read(&mut chunk)) {
@@ -594,7 +594,7 @@ fn shell_exec(
     pclose(req, child);
     // The pipe is read through php's plain stream, whose reads clear the
     // stat cache (`Z/main/streams/plain_wrapper.c:500`).
-    req.clear_stat_cache();
+    req.clear_stat_cache(Realpaths::Kept);
     if written.is_empty() {
         return Ok(None);
     }

@@ -27,22 +27,28 @@
 //!
 //! Two ways in, as the ruling has them, and one way through. pcntl asks
 //! through the request,
-//! [`Limits::fork`](crate::api::request::Limits::fork), and in the child
-//! what php's `php_child_init` restores is restored. A host asks through
+//! [`Limits::fork`](crate::api::request::Limits::fork). A host asks through
 //! the host face, [`fork`], with no request in flight, as php-fpm's master
 //! makes a child or daemonizes. Both fork through `fork_as`, which joins
 //! every engine's timer thread first, parked between requests as it is,
-//! and starts each again in the parent over the deadlines it had.
-//! Registering a timer counts as standing inside, so no fork copies the
-//! list of them held.
+//! and starts each again in the parent over the deadlines it had, and in
+//! the child restores what php's `php_child_init` restores, which php
+//! calls in the child of pcntl's forks, opcache's, php-fpm's, the CGI's,
+//! the CLI server's and every other host that forks.
+//! Registering a timer or a realpath cache counts as standing inside, so
+//! no fork copies the list of them held.
 //!
-//! What php's `php_child_init` (`Z/main/main.c:1865`) restores in the
-//! child is two things: `zend_max_execution_timer_init`, a timer of the
+//! What php's `php_child_init` (`Z/main/main.c:1897`) restores in the
+//! child is three things. `refresh_memory_manager`, a fresh key for the
+//! heap's shadow pointers, which this engine's heap does not have and no
+//! program can observe. `zend_max_execution_timer_init`, a timer of the
 //! child's own where a build times with POSIX timers, which here is the
 //! engine's timer forgetting every deadline, as a child inherits no
-//! interval timer; and `refresh_memory_manager`, a fresh key for the
-//! heap's shadow pointers, which this engine's heap does not have and no
-//! program can observe.
+//! interval timer. And `php_clear_stat_cache(true, NULL, 0)`, which here
+//! is every engine's realpath cache emptied, the engine's own, which the
+//! fork holds locked across the copy ([`RealpathCaches`]); the stat cache
+//! is the request's, above the engine in `php_streams`, and is emptied by
+//! the native that asked for the fork, as `pcntl_fork` does.
 
 use std::convert::Infallible;
 use std::io;
@@ -53,6 +59,7 @@ use std::thread::{self, JoinHandle, ThreadId};
 pub use php_process::{Forked, Pid};
 
 use crate::interrupt::Timers;
+use crate::virtual_cwd::RealpathCaches;
 
 /// How many things stand inside the engine in this process, each an
 /// [`Inside`], with [`FORKING`] set while an [`Alone`] is held.
@@ -305,7 +312,8 @@ impl std::fmt::Debug for Worker {
 static WORKERS: Mutex<Vec<Weak<Worker>>> = Mutex::new(Vec::new());
 
 /// One of the process's lists of what a fork stops first, held, with
-/// what has dropped let go: [`WORKERS`], and the timers.
+/// what has dropped let go: [`WORKERS`], the timers, and the realpath
+/// caches a fork's child empties ([`RealpathCaches`]).
 pub(crate) fn living<T>(list: &'static Mutex<Vec<Weak<T>>>) -> MutexGuard<'static, Vec<Weak<T>>> {
     let mut held = list.lock().unwrap_or_else(PoisonError::into_inner);
     held.retain(|entry| entry.strong_count() > 0);
@@ -537,6 +545,17 @@ fn busy() -> io::Error {
 /// [`Timer`](crate::interrupt::Timer)), and wakes a worker as it next
 /// has a job for it.
 ///
+/// Every engine's realpath cache is locked last, once the threads are
+/// joined, and held across the copy: let go unchanged in the process that
+/// asked, and emptied before it is let go in the child, as php's
+/// `php_child_init` empties the process's. Whatever holds one, a request
+/// still on its way out of the engine or a thread outside it as a test
+/// is, holds it for one lookup, entry or clean and lets it go without
+/// waiting on the fork ([`RealpathCaches::hold`]), so the fork waits for
+/// it and the child never copies one held; a request that still stands
+/// inside once it is let go refuses the fork at [`Alone::fork`]'s reading,
+/// and the caches are let go unchanged.
+///
 /// What stands inside is read before the threads are counted, and only
 /// falls while the fork is held: a count that covers the reading means
 /// nothing but those threads stood inside, so nothing holds a timer's
@@ -554,8 +573,13 @@ fn fork_as(asker: Asker) -> io::Result<Forked> {
     }
     let stopped = timers.stop();
     let joined = workers.stop();
+    let caches = RealpathCaches::live();
+    let held = caches.hold();
     let forked = alone.fork(asker);
-    if !matches!(forked, Ok(Forked::Child)) {
+    if matches!(forked, Ok(Forked::Child)) {
+        held.clean();
+    } else {
+        drop(held);
         stopped.resume();
         joined.resume();
     }
@@ -571,9 +595,15 @@ pub(crate) fn fork_request() -> io::Result<Forked> {
 /// `fork(2)` for a host (#1807): the process copied with no request in
 /// flight, as php-fpm's master makes a child (`fpm_children_make`) and
 /// daemonizes (`fpm_unix_init_main`), returning in both as
-/// [`Forked::Parent`] with the child's id and as [`Forked::Child`]. What
-/// php's `php_child_init` restores in the child is the request's, and no
-/// request is in flight, so the child goes on as the parent would.
+/// [`Forked::Parent`] with the child's id and as [`Forked::Child`]. In
+/// the child what php's `php_child_init` restores, which php-fpm calls in
+/// each child it makes (`fpm_php_init_child`, `Z/sapi/fpm/fpm/fpm_php.c:223`)
+/// and the CGI in each it forks (`Z/sapi/cgi/cgi_main.c:2044`), is
+/// restored as for a request's fork: the realpath cache is the engine's,
+/// not a request's, so the child starts with every engine's empty; the
+/// deadlines and the stat cache are a request's, and none is in flight.
+/// A daemonizing master's child, which php does not empty, is emptied
+/// too, and runs no program before the children it makes empty theirs.
 ///
 /// The engine's timer thread, which stays parked between requests once
 /// a request has set a deadline, the startup request's among them, is
