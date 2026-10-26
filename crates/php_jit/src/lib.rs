@@ -117,7 +117,27 @@ impl Tier for Jit {
     /// How a unit published now lays its words ([`policy::Policy::laid`]):
     /// as `JIT_G(on)` of `req` says ([`tier::setting`]), the start's
     /// where the engine publishes it for no request; sealed where the
-    /// engine built no [`JitEngine`].
+    /// engine built no [`JitEngine`]. The engine asks this of a unit it
+    /// compiled, and lays one the file cache read back sealed, as php
+    /// restores op arrays from its file cache with no counters:
+    ///
+    /// ```php
+    /// $dir = realpath(sys_get_temp_dir()) . '/jit-file-cache-' . getmypid(); mkdir($dir); mkdir("$dir/fc");
+    /// file_put_contents("$dir/main.php", '<?php if ($argv[1] === "switch") { ini_set("opcache.jit", "tracing"); } include __DIR__ . "/loop.php";');
+    /// file_put_contents("$dir/loop.php", '<?php $s = 0; for ($i = 0; $i < 4; $i++) { $s += $i; } echo $s, "\n";');
+    /// touch("$dir/main.php", time() - 60); touch("$dir/loop.php", time() - 60);
+    /// foreach (['keep', 'switch'] as $run) {
+    ///     $cmd = [PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.jit_debug=12288', '-d', "opcache.file_cache=$dir/fc", "$dir/main.php", $run];
+    ///     $p = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    ///     echo stream_get_contents($pipes[1]), str_replace($dir, 'DIR', stream_get_contents($pipes[2]));
+    ///     proc_close($p);
+    /// }
+    /// exec('rm -rf ' . escapeshellarg($dir));
+    /// ```
+    /// ```expect process
+    /// 6
+    /// 6
+    /// ```
     fn laid(started: &Started<'_>, req: Option<&Request>) -> Laid {
         let Some(engine) = started.engine::<JitEngine>() else {
             return Laid::Sealed;
