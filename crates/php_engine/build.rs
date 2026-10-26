@@ -354,6 +354,7 @@ fn held_macro(held: &str) -> String {
          /// [`dispatch`] calls it, and the loop takes them up again for the\n\
          /// frame it goes on in. The borrow checker refuses any other order:\n\
          /// no arm reads the slots after a handler that can move them.\n\
+         #[cfg(not(dispatch = \"tailcall\"))]\n\
          macro_rules! held {{\n\
          \x20   ($req:ident, $slots:ident, $frame:expr, $code:expr, $op:expr, $at:expr) => {{{{\n\
          \x20       let (frame, code, op, at): (php_heap::FrameRef, &php_unit::OpArray, &php_unit::Opline, u32) =\n\
@@ -363,6 +364,7 @@ fn held_macro(held: &str) -> String {
          \x20       }}\n\
          \x20   }}}};\n\
          }}\n\
+         #[cfg(not(dispatch = \"tailcall\"))]\n\
          pub(crate) use held;\n"
     )
 }
@@ -441,8 +443,6 @@ fn tails(calls: &[(String, Vec<String>)]) -> String {
          use crate::observer::Telling;\n\
          use crate::tier::tail::{{Tail, Table, onward}};\n\
          use crate::tier::{{Next, Tier}};\n\
-         \n\
-         use super::aside;\n\
          \n\
          /// How many `php_unit::Handler`s there are, one entry of the table\n\
          /// each.\n\

@@ -2160,6 +2160,7 @@ impl Request {
     /// frame that does not stand is at 0 with no slots, as each of those
     /// answers alone.
     #[inline(always)] // the loop's edges into a frame
+    #[cfg(not(dispatch = "tailcall"))]
     pub(crate) fn standing(&mut self, frame: FrameRef) -> (u32, &mut [Zval]) {
         match self.vm.stack.frame_mut(frame) {
             Some(f) => (f.header().opline, f.slots_mut()),

@@ -26526,18 +26526,25 @@ pub(crate) mod inline_path {
         inline_arith, inline_assign, inline_assign_op, inline_branch, inline_compare,
         inline_fetch_dim_r, inline_identical, inline_incdec, write_owning_nothing,
     };
+    #[cfg(not(dispatch = "tailcall"))]
     use php_heap::FrameRef;
 
+    #[cfg(not(dispatch = "tailcall"))]
     use crate::api::request::Request;
     use crate::operand::{ByKind, Operand, Retval};
-    use crate::ops::inline::{Arith, Binary};
-    use crate::tier::{Inline, Tier};
+    use crate::ops::inline::Arith;
+    #[cfg(not(dispatch = "tailcall"))]
+    use crate::ops::inline::Binary;
+    use crate::tier::Inline;
+    #[cfg(not(dispatch = "tailcall"))]
+    use crate::tier::Tier;
 
     /// An inline path's answer served with the request in hand, as its
     /// handler serves it ([`super::inlined`]): where the loop that holds
     /// the slots meets a back-edge whose interrupt is raised or whose tier
     /// is bound, or a string the path gave up.
     #[inline(never)]
+    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
     pub(crate) fn served<T: Tier>(
         req: &mut Request,
         frame: FrameRef,
@@ -26583,6 +26590,7 @@ pub(crate) mod inline_path {
 
     /// `ZEND_DIV` over the kinds its opline names.
     #[inline(always)] // in the loop and in the handler
+    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
     pub(crate) fn div(slots: &mut [Zval], code: &OpArray, op: &Opline, _: u32) -> Option<Inline> {
         let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
         inline_arith(slots, code, op, Binary::Div, kinds)
@@ -26737,6 +26745,7 @@ pub(crate) mod inline_path {
     /// `ZEND_JMP` to the opline in `op1`, a back-edge where it is at the
     /// jump or before it, whose safepoint number is in `result`.
     #[inline(always)] // in the loop and in the handler
+    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
     pub(crate) fn jmp(_: &mut [Zval], _: &OpArray, op: &Opline, at: u32) -> Option<Inline> {
         Some(super::jmp_way(op, at))
     }

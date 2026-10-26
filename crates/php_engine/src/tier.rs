@@ -27,8 +27,11 @@
 //! this face, so a host that binds a tier names none of `php_engine`.
 
 use std::any::Any;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::AtomicU32;
+#[cfg(not(dispatch = "tailcall"))]
+use std::sync::atomic::Ordering;
 
+#[cfg(not(dispatch = "tailcall"))]
 use php_heap::Zval;
 
 /// What a tier declares its state with, as an extension does (design
@@ -590,6 +593,7 @@ impl Inline {
 /// opline served by its handler's inline path over the slots the loop
 /// holds, or by its handler with the request in hand, the slots let go
 /// for it, which the loop takes up again for the frame it goes on in.
+#[cfg(not(dispatch = "tailcall"))]
 pub(crate) enum Dispatched {
     /// Served over the slots the loop holds, which still name the frame.
     Inline(Inline),
