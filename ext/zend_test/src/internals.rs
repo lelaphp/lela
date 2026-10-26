@@ -27,7 +27,7 @@
 
 use php_ext::abi::{FromArgument as _, Raw};
 use php_ext::attr::php_function;
-use php_ext::raising::{Thrown, argument_error, throw};
+use php_ext::raising::{Thrown, argument_error, throw, throw_error};
 use php_ext::request::{Request, StandaloneHeap};
 use php_ext::values::{Emalloc, Owner, PhpArray, PhpString, Value};
 use php_ext_standard::UriParser;
@@ -368,7 +368,7 @@ pub(crate) fn zend_test_raise_and_throw(req: &mut Request, signal: i64) -> Resul
     let [a, b, c, d, ..] = signal.to_le_bytes();
     let throwables = Throwables::of(req)?;
     if !crate::ffi::raise(i32::from_le_bytes([a, b, c, d])) {
-        return Err(throw(req, throwables.error, "raise() failed"));
+        return Err(throw_error(req, throwables.error, "raise() failed"));
     }
     Err(throw(req, throwables.exception, "Exception after raise()"))
 }
