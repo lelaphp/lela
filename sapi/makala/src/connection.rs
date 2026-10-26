@@ -636,10 +636,12 @@ async fn hand_over(
 }
 
 /// The status a request that ended without sending a head is answered
-/// with, read from how it ended: a 502 where php 8.5.12's hard memory
-/// limit ended it, as nginx answers Bad Gateway over the php-fpm worker
-/// that `_exit(137)`ed there (`Z/Zend/zend_alloc.c:519`) and wrote no
-/// head; a 500 for any other, which a panic contained at the request's
+/// with, read from how it ended: a 502 where php 8.5.12's allocator ended
+/// its process, at the hard memory limit or its overflow panic, as nginx
+/// answers Bad Gateway over the php-fpm worker that `_exit(137)`ed or
+/// `abort()`ed there (`Z/Zend/zend_alloc.c:162`, `:394-405`) and wrote no
+/// head, the request alone ended and the server serving on; a 500 for
+/// any other, which a panic contained at the request's
 /// edge leaves, its ending never sent. Neither the head the program set
 /// nor what its buffer held reaches the client:
 ///
@@ -660,7 +662,7 @@ async fn hand_over(
 #[allow(rustdoc::invalid_codeblock_attributes)]
 fn headless(ending: Option<&Ending>) -> StatusCode {
     match ending {
-        Some(Ending::Terminated) => StatusCode::BAD_GATEWAY,
+        Some(Ending::Terminated(_)) => StatusCode::BAD_GATEWAY,
         Some(Ending::Fatal(_) | Ending::Parse) | None => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

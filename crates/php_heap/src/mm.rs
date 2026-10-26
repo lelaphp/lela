@@ -717,16 +717,21 @@ impl Mm {
         }
     }
 
-    /// `ZEND_MM_SAFE_ADDRESS_GUARDED`'s overflow (`Z/Zend/zend_alloc.c:2960`
-    /// at 8.5.12), `message` its sentence: a fallible ask's refusal with
-    /// the delayed OOM recorded, and otherwise the request's end.
+    /// `zend_mm_delayed_error_or_panic(heap->fallible, ...)`
+    /// (`Z/Zend/zend_alloc.c:454-468` at 8.5.12), where every size php's
+    /// allocator and its tables find overflowing goes, `message` its
+    /// sentence: a fallible ask's refusal with the delayed OOM recorded,
+    /// and otherwise `zend_mm_panic`'s end of the process
+    /// ([`FatalReason::Panic`]).
+    ///
+    /// [`FatalReason::Panic`]: crate::FatalReason::Panic
     #[cold]
     pub(crate) fn overflow_refusal(&mut self, message: String) -> Fatal {
         if self.fallible == Asks::Fallibly {
             self.delay_message(message);
             return self.refusal(Refused::Fallible);
         }
-        Fatal::error(message)
+        Fatal::panic(message)
     }
 
     /// `_emalloc`: [`Mm::alloc_heap`], and the observers told of what it
@@ -1851,18 +1856,13 @@ impl Mm {
     /// A node the bin cannot give ends php's request there; here the
     /// mapping goes back and the fatal is the bin's. A size the rounding
     /// would carry past the top of memory is php's error before any of
-    /// that, the limit not consulted: a delayed OOM where the heap is
-    /// fallible, and the request's end where it is not.
+    /// that, the limit not consulted ([`Mm::overflow_refusal`]).
     fn alloc_huge(&mut self, size: usize) -> Result<NonNull<u8>, Refused> {
         let page = real_page_size();
         let Some(new_size) = size.checked_next_multiple_of(page) else {
             let message =
                 format!("Possible integer overflow in memory allocation ({size} + {page})");
-            if self.fallible == Asks::Fallibly {
-                self.delay_message(message);
-                return Err(Refused::Fallible);
-            }
-            return Err(Refused::Fatal(Fatal::error(message)));
+            return Err(Refused::Fatal(self.overflow_refusal(message)));
         };
         self.check_limit(new_size, true)?;
         let mapped = match huge_map(new_size) {

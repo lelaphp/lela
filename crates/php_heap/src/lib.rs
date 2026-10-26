@@ -458,7 +458,8 @@ impl Heap {
     /// [`Heap::string_finit`] [`Sizing::Finit`]'s. A sum that overflows is
     /// php's fatal, raised before anything is asked for.
     pub fn string_sized(&mut self, bytes: &[u8], sizing: Sizing) -> Result<Str, Fatal> {
-        let at = self.mm.alloc(sizing.bytes(bytes.len())?)?;
+        let size = self.sized(sizing, bytes.len())?;
+        let at = self.mm.alloc(size)?;
         // SAFETY: every sizing asks for at least the header, the bytes and
         // the NUL, which is what `init` writes, and nothing else holds the
         // allocation.
@@ -486,7 +487,8 @@ impl Heap {
     /// The limit, and the overflow fatal of a sum that overflows, are met
     /// before it exists.
     pub fn string_fresh(&mut self, len: usize, sizing: Sizing) -> Result<FreshStr, Fatal> {
-        let at = self.mm.alloc(sizing.bytes(len)?)?;
+        let size = self.sized(sizing, len)?;
+        let at = self.mm.alloc(size)?;
         // SAFETY: every sizing asks for at least the header, `len` bytes
         // and the NUL, which is what `init_with` writes, and nothing else
         // holds the allocation.
@@ -545,10 +547,20 @@ impl Heap {
                 "Possible integer overflow in memory allocation ({n} * {m} + {header})"
             )));
         };
-        let at = self.mm.alloc(Sizing::SafeAlloc { n, m }.bytes(len)?)?;
+        let size = self.sized(Sizing::SafeAlloc { n, m }, len)?;
+        let at = self.mm.alloc(size)?;
         // SAFETY: the allocation holds the header and `n * m + l` bytes
         // with the NUL after them, and nothing else holds it.
         Ok(unsafe { Str::init_with(at, len, 0, fill) })
+    }
+
+    /// The bytes a string of `len` laid at `sizing` asks for
+    /// ([`Sizing::bytes`]), a sum that overflows the heap's refusal or its
+    /// end ([`Mm::overflow_refusal`]).
+    fn sized(&mut self, sizing: Sizing, len: usize) -> Result<usize, Fatal> {
+        sizing
+            .bytes(len)
+            .map_err(|said| self.mm.overflow_refusal(said))
     }
 
     /// `zend_string_release`: one owner fewer, and the string is freed
@@ -1333,10 +1345,11 @@ mod tests {
         heap.free_block(served);
     }
 
-    /// A size the page rounding carries past the top of memory is php's
-    /// `E_ERROR`, with the size and the page in its words, before the
-    /// limit is asked (`zend_mm_alloc_huge`, `Z/Zend/zend_alloc.c:1929`),
-    /// and the heap is left as it was.
+    /// A size the page rounding carries past the top of memory is php
+    /// 8.5.12's allocator panic for an infallible ask, with the size and
+    /// the page in its words, before the limit is asked
+    /// (`zend_mm_alloc_huge`, `Z/Zend/zend_alloc.c:2080`), and the heap
+    /// is left as it was.
     #[test]
     fn a_size_the_rounding_overflows_is_php_s_integer_overflow() {
         let _alone = alone();
@@ -1349,7 +1362,7 @@ mod tests {
             usize::MAX
         );
         assert!(
-            matches!(refused.map(Fatal::into_reason), Some(FatalReason::Error(text)) if text == said)
+            matches!(refused.map(Fatal::into_reason), Some(FatalReason::Panic(text)) if text == said)
         );
         assert_eq!(heap.memory_usage(false), before);
         let small = heap.block(16).expect("the heap still allocates");

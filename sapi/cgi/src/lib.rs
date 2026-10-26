@@ -760,6 +760,7 @@ pub fn serve(engine: &Engine, invocation: &Invocation, env: Environment) -> i32 
     // `main` returns `FAILURE` where `php_request_startup` failed, an
     // extension's `rinit` having raised (#1775), and php-cgi ends there
     // (`Z/sapi/cgi/cgi_main.c:2460-2467`), or where the file did not open.
+    php_sapi::abort_as_php(&served);
     if refused || served.start_failed {
         255
     } else {

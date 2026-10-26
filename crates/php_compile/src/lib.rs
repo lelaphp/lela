@@ -559,7 +559,7 @@ impl Refused {
     pub fn bailed(&self) -> bool {
         match self.raise {
             Raise::Fatal => self.level != Level::Parse,
-            Raise::HardLimit { .. } => true,
+            Raise::HardLimit { .. } | Raise::Panic => true,
             Raise::Thrown | Raise::Unread => false,
         }
     }
@@ -596,6 +596,10 @@ pub enum Raise {
         /// The bytes asked for past what the chunks held.
         asked: usize,
     },
+    /// The heap met php 8.5.12's allocator panic as the compile asked for
+    /// a size that overflows (`zend_mm_panic`): [`Refused::message`]
+    /// alone on the standard error, and the process ends on `abort()`.
+    Panic,
 }
 
 /// What php's compile of a source had added to `CG(function_table)` and
@@ -1385,7 +1389,8 @@ fn level_of(level: php_syntax::Level) -> Level {
 
 /// How a compile the heap refused ends, and its sentence: the fatal's
 /// own message, php's `Out of memory` for the system's refusal, and the
-/// hard limit's end of the process, whose line the request writes.
+/// hard limit's and the allocator panic's ends of the process, whose
+/// line the request writes.
 pub(crate) fn fatal_refusal(fatal: Fatal) -> (Raise, String) {
     match fatal.into_reason() {
         FatalReason::Error(message) => (Raise::Fatal, message),
@@ -1397,6 +1402,7 @@ pub(crate) fn fatal_refusal(fatal: Fatal) -> (Raise, String) {
         FatalReason::HardLimit { limit, asked } => {
             (Raise::HardLimit { limit, asked }, String::new())
         }
+        FatalReason::Panic(message) => (Raise::Panic, message),
     }
 }
 

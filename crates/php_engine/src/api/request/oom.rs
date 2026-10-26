@@ -11,6 +11,7 @@ use php_heap::DelayedOom;
 
 use super::Request;
 use super::diagnostics::Message;
+use super::ending::ProcessEnd;
 use crate::api::raising::Level;
 
 impl Request {
@@ -159,11 +160,18 @@ impl Request {
             "Hard memory limit of {limit} bytes exhausted (tried to allocate {asked} bytes) in {} on line {line}\n",
             String::from_utf8_lossy(&file)
         );
-        self.response_mut().write_stderr(said.as_bytes());
-        self.end_in_exit(137);
-        self.end_as_terminated();
-        // No destructor is served as the request's tables are freed.
-        self.heap.mark_destructed();
-        self.bail_out();
+        self.terminate(ProcessEnd::Exit(137), &said);
+    }
+
+    /// `zend_mm_panic` (`Z/Zend/zend_alloc.c:394-405` at 8.5.12), where
+    /// `zend_mm_delayed_error_or_panic` sends an infallible ask whose size
+    /// overflows (`:454-468`): `message` alone on the request's standard
+    /// error, with no `Fatal error:`, file or line, and php's process ends
+    /// on `abort()` ([`ProcessEnd::Abort`]), with no shutdown of any kind,
+    /// as at the hard limit.
+    ///
+    /// [`ProcessEnd::Abort`]: super::ending::ProcessEnd::Abort
+    pub(crate) fn terminate_in_panic(&mut self, message: &str) {
+        self.terminate(ProcessEnd::Abort, &format!("{message}\n"));
     }
 }

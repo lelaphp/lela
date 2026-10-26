@@ -17,7 +17,9 @@
 //! bundle's `linked` set, the isolation a process of its own gave, and
 //! writes `stdout`, `stderr`, `exit` and `entered`, the natives the
 //! request entered one per line as the trace file holds them, into the
-//! same directory; then it answers `served` on a line of its own and
+//! same directory, and `abort` beside them where php's process would
+//! have ended on `abort()`, which this one, serving the next, does not
+//! (`php_sapi::abort_as_php`, #3515); then it answers `served` on a line of its own and
 //! reads the next. A request that panics leaves `panicked` instead, and
 //! the binary goes on to the next. End of input ends it. Before the
 //! first line it closes every fd beyond its three streams, so it
@@ -125,5 +127,8 @@ fn serve(dir: &Path) -> i32 {
     fs::write(dir.join("stderr"), &served.stderr).ok();
     fs::write(dir.join("entered"), entered).ok();
     fs::write(dir.join("exit"), served.exit_code.to_string()).ok();
+    if served.terminated == Some(php_sapi::ProcessEnd::Abort) {
+        fs::write(dir.join("abort"), "").ok();
+    }
     served.exit_code
 }

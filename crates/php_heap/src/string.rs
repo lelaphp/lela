@@ -802,10 +802,11 @@ impl Sizing {
     /// 1, 0)`, so it is [`Sizing::SafeAlloc`] of `len` and 1 through the
     /// same sum. A product past `len`, which includes one that overflows,
     /// and a sum that overflows are php's `Possible integer overflow in
-    /// memory allocation` fatal (`safe_address_guarded`), raised before
-    /// anything is asked for. Its third number is the aligned header the
-    /// product is added to, the empty string's where no `l` is left.
-    pub fn bytes(self, len: usize) -> Result<usize, Fatal> {
+    /// memory allocation` (`ZEND_MM_SAFE_ADDRESS_GUARDED`), the sentence
+    /// the `Err` carries for the heap to refuse or end on before anything
+    /// is asked for. Its third number is the aligned header the product is
+    /// added to, the empty string's where no `l` is left.
+    pub fn bytes(self, len: usize) -> Result<usize, String> {
         let (n, m) = match self {
             Sizing::Alloc => return Ok(Str::allocation_size(len)),
             Sizing::Finit => (len, 1),
@@ -816,9 +817,7 @@ impl Sizing {
         product
             .and_then(|product| product.checked_add(header))
             .ok_or_else(|| {
-                Fatal::error(format!(
-                    "Possible integer overflow in memory allocation ({n} * {m} + {header})"
-                ))
+                format!("Possible integer overflow in memory allocation ({n} * {m} + {header})")
             })
     }
 }
