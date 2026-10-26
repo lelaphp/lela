@@ -54,7 +54,7 @@ use php_ext::abi::{OrFalse, Passed, Path, Union};
 use php_ext::attr::php_function;
 use php_ext::process;
 use php_ext::raising::{Level, Thrown, argument_error, docref};
-use php_ext::request::{Request, Streams as _, UrlStat, WrapperOp};
+use php_ext::request::{Realpaths, Request, Streams as _, UrlStat, WrapperOp};
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi;
@@ -955,7 +955,7 @@ fn owner_change(
         docref(req, Level::Warning, &strerror(&error));
         return Ok(false);
     }
-    req.clear_stat_cache();
+    req.clear_stat_cache(Realpaths::Kept);
     Ok(true)
 }
 
@@ -1104,7 +1104,7 @@ fn chmod(req: &mut Request, filename: Path, permissions: i64) -> Result<bool, Th
         docref(req, Level::Warning, &strerror(&error));
         return Ok(false);
     }
-    req.clear_stat_cache();
+    req.clear_stat_cache(Realpaths::Kept);
     Ok(true)
 }
 
@@ -1197,16 +1197,17 @@ fn touch(
         docref(req, Level::Warning, &text);
         return Ok(false);
     }
-    req.clear_stat_cache();
+    req.clear_stat_cache(Realpaths::Kept);
     Ok(true)
 }
 
 /// `clearstatcache(bool $clear_realpath_cache = false, string $filename = ""): void`,
 /// `PHP_FUNCTION(clearstatcache)` (`Z/ext/standard/filestat.c:721`):
-/// both entries of the stat cache dropped, whatever is asked; the
-/// realpath cache is not modelled. Until it is cleared, a stat of a path
-/// answers what it answered last, though `mkdir` changed the directory
-/// under it since, as `mkdir` does not clear the cache.
+/// both entries of the stat cache dropped, whatever is asked, and with
+/// `$clear_realpath_cache` the realpath cache too, only `$filename`'s
+/// entry where one is named ([`Realpaths`]). Until it is cleared, a stat
+/// of a path answers what it answered last, though `mkdir` changed the
+/// directory under it since, as `mkdir` does not clear the cache.
 ///
 /// ```php
 /// $d = __DIR__; $n = stat($d)['nlink']; mkdir("$d/sub");
@@ -1218,19 +1219,50 @@ fn touch(
 /// bool(false)
 /// clearstatcache(): Argument #2 ($filename) must not contain any null bytes
 /// ```
+///
+/// A named file drops that path's entry alone, the directory above it
+/// kept; a `false` first argument keeps both, whatever is named; and with
+/// none named every entry goes.
+///
+/// ```php
+/// $dir = dirname(realpath(__FILE__)); $up = dirname($dir);
+/// $cached = fn () => [isset(realpath_cache_get()[$dir]), isset(realpath_cache_get()[$up])];
+/// var_dump($cached());
+/// clearstatcache(false, $dir); var_dump($cached());
+/// clearstatcache(true, $dir); var_dump($cached());
+/// clearstatcache(true); var_dump(realpath_cache_size());
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   bool(true)
+///   [1]=>
+///   bool(true)
+/// }
+/// array(2) {
+///   [0]=>
+///   bool(true)
+///   [1]=>
+///   bool(true)
+/// }
+/// array(2) {
+///   [0]=>
+///   bool(false)
+///   [1]=>
+///   bool(true)
+/// }
+/// int(0)
+/// ```
 #[php_function]
 fn clearstatcache(
     req: &mut Request,
     #[php(default = false)] clear_realpath_cache: bool,
     #[php(default = "")] filename: Passed<Path>,
 ) {
-    let filename = match filename {
-        Passed::Given(Path(filename)) => Some(filename),
-        Passed::Omitted => None,
+    let realpaths = match (clear_realpath_cache, &filename) {
+        (false, _) => Realpaths::Kept,
+        (true, Passed::Given(Path(filename))) => Realpaths::Of(filename.as_bytes()),
+        (true, Passed::Omitted) => Realpaths::All,
     };
-    req.clear_stat_cache();
-    if clear_realpath_cache {
-        req.environment_mut()
-            .realpath_cache_clear(filename.as_ref().map(PhpString::as_bytes));
-    }
+    req.clear_stat_cache(realpaths);
 }

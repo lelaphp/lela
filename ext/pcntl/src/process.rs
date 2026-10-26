@@ -18,7 +18,7 @@ use php_ext::coerce::{to_long, with_string};
 #[cfg(target_vendor = "apple")]
 use php_ext::raising::throw_error;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref};
-use php_ext::request::{Forked, Request, Streams as _};
+use php_ext::request::{Forked, Realpaths, Request, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
@@ -100,7 +100,7 @@ pub(crate) fn pcntl_fork(req: &mut Request) -> i64 {
     match req.limits_mut().fork() {
         Ok(Forked::Parent { child }) => child.as_raw().into(),
         Ok(Forked::Child) => {
-            req.clear_stat_cache();
+            req.clear_stat_cache(Realpaths::Kept);
             0
         }
         Err(error) => {

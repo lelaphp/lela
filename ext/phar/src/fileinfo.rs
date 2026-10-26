@@ -6,7 +6,7 @@
 use php_ext::abi::{Passed, Path as PathArg, This, True};
 use php_ext::attr::php_class;
 use php_ext::raising::{Thrown, throw_exception_ex};
-use php_ext::request::{Request, Streams as _};
+use php_ext::request::{Realpaths, Request, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_spl::directory::{self as spl, Other};
 
@@ -288,7 +288,7 @@ impl PharFileInfo {
             e.old_flags = e.flags;
             e.is_modified = true;
         }
-        req.clear_stat_cache();
+        req.clear_stat_cache(Realpaths::Kept);
         flushed(req, id)
     }
 

@@ -856,6 +856,7 @@ request::ReadPost
 request::ReadPost::read_post
 request::Readiness
 request::RealpathEntry
+request::Realpaths
 request::Receiving
 request::Reentry
 request::Reentry::defer

@@ -155,6 +155,25 @@ pub enum FdStream<'a> {
     },
 }
 
+/// What `php_clear_stat_cache(clear_realpath_cache, filename,
+/// filename_len)` (`Z/ext/standard/filestat.c:697`) does to the realpath
+/// cache beside the stat cache, which it empties in every case, since an
+/// entry of either path may be stale whatever file is named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Realpaths<'p> {
+    /// `clear_realpath_cache` false: the realpath cache kept, whatever
+    /// file is named, as every caller but `clearstatcache(true)` asks.
+    Kept,
+    /// `clear_realpath_cache` true and no `filename`:
+    /// `realpath_cache_clean`, every entry dropped, as `php_child_init`
+    /// and `clearstatcache(true)` ask.
+    All,
+    /// `clear_realpath_cache` true and a `filename`:
+    /// `realpath_cache_del` of that path as it was written, the entry of
+    /// no other path dropped, as `clearstatcache(true, $filename)` asks.
+    Of(&'p [u8]),
+}
+
 /// What a path's wrapper answers to its own `url_stat`, asked as
 /// [`Request::url_stat`] and [`Request::wrapper_url_stat`] ask it: the
 /// stat, laid out as `php_fstat` lays it out; `Failed` for the wrapper's
@@ -1352,8 +1371,9 @@ pub trait Streams {
     /// told apart from a stat that failed.
     fn wrapper_url_stat(&mut self, path: &[u8]) -> Result<UrlStat, Thrown>;
 
-    /// `php_clear_stat_cache`: the stat cache emptied, both entries.
-    fn clear_stat_cache(&mut self);
+    /// `php_clear_stat_cache`: the stat cache emptied, both entries, and
+    /// the realpath cache as `realpaths` says.
+    fn clear_stat_cache(&mut self, realpaths: Realpaths<'_>);
 
     /// What `chdir()` does to the stat cache past moving the working
     /// directory (`PHP_FUNCTION(chdir)`, `Z/ext/standard/dir.c:367`): an
@@ -1782,8 +1802,15 @@ impl Streams for Request {
         })
     }
 
-    fn clear_stat_cache(&mut self) {
-        self.forget_stats();
+    fn clear_stat_cache(&mut self, realpaths: Realpaths<'_>) {
+        match realpaths {
+            Realpaths::Kept => self.forget_stats(),
+            Realpaths::All => self.forget_stats_and_realpaths(),
+            Realpaths::Of(path) => {
+                self.forget_stats();
+                self.environment_mut().realpath_cache_clear(Some(path));
+            }
+        }
     }
 
     fn forget_relative_stats(&mut self) {
