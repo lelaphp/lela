@@ -213,8 +213,8 @@ fn mysqlnd_info(req: &mut Request) {
         |v| String::from_utf8_lossy(v).into_owned(),
     );
     let apis: Vec<&str> = req
-        .registered::<ReverseApi>()
-        .map(|api| api.extension)
+        .registered_by::<ReverseApi>()
+        .map(|(_, api)| api.extension)
         .collect();
     let apis = apis.join(",");
     req.extensions_mut().info_table(&[

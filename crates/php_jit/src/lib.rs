@@ -101,28 +101,63 @@ impl Tier for Jit {
         JitRequest::laid(*started)
     }
 
-    /// php's `zend_jit_status` ([`policy::Policy::status`]): `JIT_G` as
-    /// the directives set it at engine start and `req`'s `opcache.jit`
-    /// rewrites it, and the buffer less what the traces of `req`'s epoch
-    /// take ([`table::TraceTable::usage`]), none where no request of the
-    /// epoch made its table.
+    /// php's `zend_jit_status` ([`policy::Policy::status`]): `req`'s
+    /// `JIT_G` ([`tier::setting`]), and the buffer less what the
+    /// traces of `req`'s epoch take ([`table::TraceTable::usage`]), none
+    /// where no request of the epoch made its table.
     fn status(req: &Request) -> TierStatus {
-        let Some(engine) = req.engine::<JitEngine>() else {
+        if req.engine::<JitEngine>().is_none() {
             return TierStatus::default();
-        };
+        }
         let epoch = tier::epoch(req);
         let used = table::of_epoch(&epoch).map_or(0, |table| table.usage().bytes);
-        engine.shared.policy.status(used, jit_g(req))
+        policy::Policy::status(used, tier::setting(req))
     }
 
     /// How a unit published now lays its words ([`policy::Policy::laid`]):
-    /// as `req`'s `JIT_G` says, the startup's where the engine publishes
-    /// it for no request; sealed where the engine built no [`JitEngine`].
+    /// as `JIT_G(on)` of `req` says ([`tier::setting`]), the start's
+    /// where the engine publishes it for no request; sealed where the
+    /// engine built no [`JitEngine`]. The engine asks this of a unit it
+    /// compiled, and lays one the file cache read back sealed, as php
+    /// restores op arrays from its file cache with no counters:
+    ///
+    /// ```php
+    /// $dir = realpath(sys_get_temp_dir()) . '/jit-file-cache-' . getmypid(); mkdir($dir); mkdir("$dir/fc");
+    /// file_put_contents("$dir/main.php", '<?php if ($argv[1] === "switch") { ini_set("opcache.jit", "tracing"); } include __DIR__ . "/loop.php";');
+    /// file_put_contents("$dir/loop.php", '<?php $s = 0; for ($i = 0; $i < 4; $i++) { $s += $i; } echo $s, "\n";');
+    /// touch("$dir/main.php", time() - 60); touch("$dir/loop.php", time() - 60);
+    /// foreach (['keep', 'switch'] as $run) {
+    ///     $cmd = [PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.jit_debug=12288', '-d', "opcache.file_cache=$dir/fc", "$dir/main.php", $run];
+    ///     $p = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    ///     echo stream_get_contents($pipes[1]), str_replace($dir, 'DIR', stream_get_contents($pipes[2]));
+    ///     proc_close($p);
+    /// }
+    /// exec('rm -rf ' . escapeshellarg($dir));
+    /// ```
+    /// ```expect process
+    /// 6
+    /// 6
+    /// ```
     fn laid(started: &Started<'_>, req: Option<&Request>) -> Laid {
         let Some(engine) = started.engine::<JitEngine>() else {
             return Laid::Sealed;
         };
-        engine.shared.policy.laid(req.and_then(jit_g))
+        let policy = &engine.shared.policy;
+        let jit_g = req.map_or(policy.start_setting(), |req| *tier::setting(req));
+        policy.laid(jit_g.on)
+    }
+
+    /// php's `JIT_G` past its start ([`policy::Policy::start_setting`]):
+    /// the start's directives as the tier's `Policy` read them, folded as
+    /// `zend_jit_config` folds `opcache.jit` and rewritten as php's start
+    /// rewrites `JIT_G` past it, in place of `startup`, the opcache
+    /// extension's fold of the same host value, which knows nothing of
+    /// the tier's start; `startup` where the engine built no
+    /// [`JitEngine`].
+    fn setting(started: &Started<'_>, startup: TierStatus) -> TierStatus {
+        started
+            .engine::<JitEngine>()
+            .map_or(startup, |engine| engine.shared.policy.start_setting())
     }
 
     /// The tier's state (`jit-design.md` §4): its two directives and
@@ -141,13 +176,6 @@ impl Tier for Jit {
         let tier = tier.rshutdown(JitEngine::request_ended);
         Some(tier.build("jit"))
     }
-}
-
-/// php's `JIT_G` as `req` has it now, the one place the tier reads it:
-/// its `opcache.jit` as `zend_jit_config` decodes it after the request's
-/// last `ini_set`; none where no extension declares the directive.
-fn jit_g(req: &Request) -> Option<policy::Setting> {
-    req.ini().get(b"opcache.jit").map(policy::Setting::of)
 }
 
 impl JitRequest {
@@ -222,12 +250,89 @@ pub(crate) struct Shared {
     perf: table::Outputs,
 }
 
-impl Shared {
-    /// `event` as php's `jit_debug` line, where `opcache.jit_debug` asks for it,
-    /// added to `lines`.
-    fn dump(&self, lines: &mut Vec<u8>, event: &policy::TraceEvent<'_>) {
+/// The `TRACE` lines a request writes, under the `JIT_G(debug)` bits it
+/// has where it writes them, as php reads `JIT_G(debug)` at each
+/// line (`Z/ext/opcache/jit/zend_jit_trace.c:8152-8250`), so a request's
+/// `ini_set('opcache.jit_debug', ...)` changes the lines it writes from
+/// then on (#3297); the bits the start alone sets, `PERF` and its kin,
+/// a request cannot change ([`policy::Policy::debug`]). A recording whose
+/// bits ask for a root's end lines compiles on the request
+/// ([`policy::JitDebug::ends`]), and the worker writes none.
+///
+/// Under `opcache.jit=tracing` with the engine's `opcache.jit_debug` at
+/// zero, a request that asks for the `start` and `stop` lines writes them
+/// for a loop in a file it includes after:
+///
+/// ```php
+/// $dir = realpath(sys_get_temp_dir()) . '/jit-debug-' . getmypid(); mkdir($dir);
+/// file_put_contents("$dir/main.php", '<?php var_dump(ini_set("opcache.jit_debug", "12288")); include __DIR__ . "/loop.php";');
+/// file_put_contents("$dir/loop.php", '<?php $s = 0; for ($i = 0; $i < 4; $i++) { $s += $i; } echo $s, "\n";');
+/// touch("$dir/main.php", time() - 60); touch("$dir/loop.php", time() - 60);
+/// $cmd = [PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=tracing', '-d', 'opcache.jit_debug=0', '-d', 'opcache.jit_hot_loop=1', "$dir/main.php"];
+/// $p = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]), str_replace($dir, 'DIR', stream_get_contents($pipes[2]));
+/// proc_close($p); unlink("$dir/main.php"); unlink("$dir/loop.php"); rmdir($dir);
+/// ```
+/// ```expect process
+/// string(1) "0"
+/// 6
+/// ---- TRACE 1 start (loop) $main() DIR/loop.php:1
+/// ---- TRACE 1 stop (loop)
+///
+/// ```
+#[derive(Debug, Default)]
+pub(crate) struct Lines {
+    debug: policy::JitDebug,
+    written: Vec<u8>,
+}
+
+impl Lines {
+    /// The lines `req` writes now, under its `JIT_G(debug)`
+    /// ([`tier::setting`]), which the opcache extension's handler
+    /// rewrites at each `ini_set('opcache.jit_debug', ...)`; none for a
+    /// tier that runs `Off`, which reads no bit.
+    pub(crate) fn of(req: &Request, shared: &Shared) -> Lines {
+        let debug = if shared.policy.mode() == policy::Mode::Off {
+            policy::JitDebug::default()
+        } else {
+            policy::JitDebug::bits(i64::from(tier::setting(req).debug))
+        };
+        Lines::under(debug)
+    }
+
+    /// The lines written under `debug`.
+    pub(crate) fn under(debug: policy::JitDebug) -> Lines {
+        Lines {
+            debug,
+            written: Vec::new(),
+        }
+    }
+
+    /// The bits the lines are written under.
+    pub(crate) fn debug(&self) -> policy::JitDebug {
+        self.debug
+    }
+
+    /// `event`'s line added, where the bits ask for it.
+    pub(crate) fn dump(&mut self, event: &policy::TraceEvent<'_>) {
         // Writing to a `Vec` does not fail.
-        self.policy.dump(lines, event).unwrap_or_default();
+        self.debug
+            .dump(&mut self.written, event)
+            .unwrap_or_default();
+    }
+
+    /// The lines written to the request's error stream, where php's
+    /// `jit_debug` lines go.
+    pub(crate) fn write(self, req: &mut Request) {
+        if !self.written.is_empty() {
+            req.response_mut().write_stderr(&self.written);
+        }
+    }
+
+    /// What was written.
+    #[cfg(test)]
+    pub(crate) fn written(&self) -> &[u8] {
+        &self.written
     }
 }
 

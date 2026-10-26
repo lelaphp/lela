@@ -884,7 +884,6 @@ request::Request::limits
 request::Request::limits_mut
 request::Request::memory
 request::Request::memory_mut
-request::Request::registered
 request::Request::registered_by
 request::Request::response
 request::Request::response_mut
@@ -1112,6 +1111,7 @@ request::UnitCache::invalidate
 request::UnitCache::map_ptr_last
 request::UnitCache::reset
 request::UnitCache::status
+request::UnitCache::tier_setting
 request::Unresolved
 request::Upload
 request::UrlStat

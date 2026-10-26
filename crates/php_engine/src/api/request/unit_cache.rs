@@ -121,10 +121,12 @@ pub struct CacheStatus {
     pub tier: TierStatus,
 }
 
-/// `opcache_get_status()['jit']`, what php's `zend_jit_status` reports
-/// (`Z/ext/opcache/jit/zend_jit.c:825-842`): `JIT_G` as php's start left
-/// it, and the code buffer. A tier that compiles nothing reports every
-/// field zero, the default.
+/// php's `JIT_G` beside the code buffer: what `zend_jit_status` reports
+/// as `opcache_get_status()['jit']` (`Z/ext/opcache/jit/zend_jit.c:825-842`),
+/// and `JIT_G(debug)`, which it does not. A tier that compiles nothing
+/// reports every field zero, the default. A request holds its `JIT_G` as
+/// one of these ([`UnitCache::tier_setting`]), the buffer's fields as its
+/// engine's start laid them, before what any trace takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TierStatus {
     /// `JIT_G(enabled)`: `opcache.jit` set the tier up and php's start
@@ -144,6 +146,9 @@ pub struct TierStatus {
     pub buffer_size: u64,
     /// `dasm_end - *dasm_ptr`: what of it no code takes yet.
     pub buffer_free: u64,
+    /// `JIT_G(debug)`, `opcache.jit_debug`'s bits as its handler,
+    /// `OnUpdateJitDebug`, took them: the `TRACE` lines a request writes.
+    pub debug: u32,
 }
 
 /// `opcache_get_status()['preload_statistics']`: what the preload
@@ -1140,6 +1145,28 @@ impl<'r> Code<&'r mut Request> {
     }
 }
 
+impl<'r> UnitCache<'r> {
+    /// php's `JIT_G` as the request holds it, which the opcache
+    /// extension's handlers alone rewrite: `opcache.jit`'s, php's
+    /// `OnUpdateJit`, as `zend_jit_config` does, and
+    /// `opcache.jit_debug`'s, `OnUpdateJitDebug`. It is the engine's
+    /// start's ([`crate::tier::Tier::setting`]), and after each of the
+    /// request's `ini_set` what that setting left. The tier reads it where
+    /// it publishes a unit, where it writes a `TRACE` line and where it
+    /// reports its status ([`crate::tier::setting`]); the buffer's
+    /// fields are the start's, which no handler writes.
+    pub fn tier_setting(self) -> &'r mut TierStatus {
+        &mut self.req.tier_setting
+    }
+}
+
+impl Request {
+    /// The request's `JIT_G` ([`UnitCache::tier_setting`]), shared.
+    pub(crate) fn tier_setting_held(&self) -> &TierStatus {
+        &self.tier_setting
+    }
+}
+
 impl UnitCache<'_> {
     /// The cache's counters and scripts.
     #[must_use]
@@ -1581,5 +1608,66 @@ mod tests {
                 .manual_restarts,
             1
         );
+    }
+
+    /// A unit the cache holds for a request is held for it alone where
+    /// the cache built its entry, so that request alone owes the hand-off
+    /// its counting words raise (#3362): where another request held the
+    /// path's copy while this one compiled it, the race this one lost,
+    /// `cache_script_in_shared_memory` answers that copy
+    /// (`Filed::Existing`), and nothing is held for this request.
+    #[test]
+    fn a_copy_another_request_held_meanwhile_is_held_for_it_alone() {
+        use crate::unit_cache::{Asked, Filed, Levels};
+        let scratch = crate::test::Files::new("raced", &[("p.php", "<?php return 1;")]);
+        let file = scratch.path().join("p.php");
+        let resolved = std::fs::canonicalize(&file).unwrap_or_default();
+        let path = resolved.as_os_str().as_encoded_bytes().to_vec();
+        let source = std::fs::read(&file).unwrap_or_default();
+        let engine = Engine::builder().build();
+        let shared = Arc::clone(&engine.shared);
+        let mut first = Request::new(Arc::clone(&shared), RequestDescription::default());
+        let mut second = Request::new(Arc::clone(&shared), RequestDescription::default());
+        let asked = |held| Asked {
+            path: &path,
+            source: Some(&source),
+            written: None,
+            opened: true,
+            validation: crate::api::abi::Validation::Never,
+            protection: 0,
+            now: 0,
+            levels: Levels::Memory,
+            optimizer: shared.optimizer(),
+            laid: crate::tier::Laid::COLD,
+            held,
+        };
+        let (held_first, held_second) = (std::cell::Cell::new(false), std::cell::Cell::new(false));
+        let arena = Arc::clone(&second.arena);
+        let (_, filed, _) = shared.units.file(
+            &mut *second,
+            &arena.files,
+            asked(&held_second),
+            |second, source| {
+                // The first request holds the path while the second
+                // compiles it.
+                let (_, filed, _) = shared.units.file(
+                    &mut *first,
+                    &arena.files,
+                    asked(&held_first),
+                    |first, source| first.compile_for_cache(source, &path),
+                    |body| shared.decode_kept(body),
+                    |unit| shared.publish_compiled(unit),
+                    |first, unit| first.publish_unit(unit),
+                );
+                assert_eq!(filed, Filed::Held, "the first request holds it");
+                second.compile_for_cache(source, &path)
+            },
+            |body| shared.decode_kept(body),
+            |unit| shared.publish_compiled(unit),
+            |second, unit| second.publish_unit(unit),
+        );
+        assert_eq!(filed, Filed::Existing, "the second is answered the copy");
+        assert!(held_first.get(), "held for the first");
+        assert!(!held_second.get(), "and not for the second");
     }
 }

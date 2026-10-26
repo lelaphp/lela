@@ -266,7 +266,7 @@ fn log_date(req: &mut Request) -> Result<Vec<u8>, Thrown> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
-    let registered = req.registered::<FormatDate>().next().copied();
+    let registered = req.registered_by::<FormatDate>().next().map(|(_, f)| *f);
     match registered {
         Some(FormatDate(format)) => format(req, b"d-M-Y H:i:s e", now, true),
         None => Ok(Vec::new()),

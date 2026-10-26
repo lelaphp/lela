@@ -120,7 +120,7 @@ impl Tier for Records {
 
     fn extension() -> Option<Extension> {
         Some(
-            ExtensionBuilder::default()
+            testing::switched(ExtensionBuilder::default())
                 .ini(
                     testing::declared(&PLAN)
                         .into_iter()

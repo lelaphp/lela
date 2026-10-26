@@ -11,6 +11,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::Ordering;
 
+use php_engine::api::request::TierStatus;
 use php_engine::tier::{
     self, Epoch, Extension, ExtensionBuilder, Fatal, Flow, FrameRef, FuncRef, Request,
     SafepointIdx, Site, Tier, TraceNum, Word,
@@ -422,7 +423,7 @@ impl Tier for Panics {
         let mut ini = crate::policy::ini();
         ini.extend(testing::declared(&testing::OPCACHE));
         Some(
-            ExtensionBuilder::default()
+            testing::switched(ExtensionBuilder::default())
                 .ini(ini)
                 .engine_state(crate::JitEngine::new)
                 .request_state::<Unwound>()
@@ -531,7 +532,7 @@ impl Tier for Spy {
         let mut ini = crate::policy::ini();
         ini.extend(testing::declared(&testing::OPCACHE));
         Some(
-            ExtensionBuilder::default()
+            testing::switched(ExtensionBuilder::default())
                 .ini(ini)
                 .engine_state(crate::JitEngine::new)
                 .request_state::<Spied>()
@@ -610,11 +611,15 @@ impl Tier for Counted {
         <crate::Jit as Tier>::laid(started, req)
     }
 
+    fn setting(started: &tier::Started<'_>, startup: TierStatus) -> TierStatus {
+        <crate::Jit as Tier>::setting(started, startup)
+    }
+
     fn extension() -> Option<Extension> {
         let mut ini = crate::policy::ini();
         ini.extend(testing::declared(&testing::OPCACHE));
         Some(
-            ExtensionBuilder::default()
+            testing::switched(ExtensionBuilder::default())
                 .ini(ini)
                 .engine_state(crate::JitEngine::new)
                 .request_state::<Asked>()
@@ -958,7 +963,7 @@ mod ran {
             let mut ini = crate::policy::ini();
             ini.extend(testing::declared(&testing::OPCACHE));
             Some(
-                ExtensionBuilder::default()
+                testing::switched(ExtensionBuilder::default())
                     .ini(ini)
                     .engine_state(crate::JitEngine::new)
                     .request_state::<Ran>()
@@ -1090,7 +1095,7 @@ mod ran {
             let mut ini = crate::policy::ini();
             ini.extend(testing::declared(&testing::OPCACHE));
             Some(
-                ExtensionBuilder::default()
+                testing::switched(ExtensionBuilder::default())
                     .ini(ini)
                     .engine_state(crate::JitEngine::new)
                     .request_state::<Sided>()

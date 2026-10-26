@@ -157,7 +157,8 @@ pub fn extension() -> Extension {
 /// `accel_startup`'s verdict and `ZEND_RINIT_FUNCTION(zend_accelerator)`:
 /// the command line with `opcache.enable_cli` off fails to start, an
 /// `opcache.enable` that is off never starts, and a request caches where
-/// the cache started, is enabled, and is not the file cache alone.
+/// the cache started, is enabled, and is not the file cache alone; and
+/// the request's `JIT_G` as `accel_post_startup` leaves it.
 #[allow(
     clippy::unnecessary_wraps,
     reason = "the engine's `RINIT` shape, which a hook that can throw needs"
@@ -165,6 +166,15 @@ pub fn extension() -> Extension {
 fn rinit(req: &mut Request) -> Result<(), Thrown> {
     let startup = verdict(req);
     let enabled = startup == Startup::Ok && !flag(req, "opcache.file_cache_only");
+    // `accel_post_startup` drops `JIT_G(enabled)` and `JIT_G(on)` where
+    // the cache started without a buffer for the tier or with the file
+    // cache alone (`Z/ext/opcache/ZendAccelerator.c:3336-3360`), so the
+    // request's `JIT_G`, which starts as `opcache.jit`'s handler folded
+    // the host's value, refuses every change from then on.
+    if startup == Startup::Ok && !crate::ini::jit_kept(req) {
+        let jit = req.code_mut().unit_cache().tier_setting();
+        (jit.enabled, jit.on) = (false, false);
+    }
     let state = req.state::<State>();
     state.startup = startup;
     state.accelerator_enabled = enabled;

@@ -116,7 +116,8 @@ fn pdo_info(req: &mut Request) {
 /// `pdo_driver_hash`: the connectors the bundle's extensions registered,
 /// in `MINIT` order.
 fn drivers(req: &Request) -> impl Iterator<Item = &'static dyn Connector> + '_ {
-    req.registered::<&'static dyn Connector>().copied()
+    req.registered_by::<&'static dyn Connector>()
+        .map(|(_, connector)| *connector)
 }
 
 /// The extension that registered `driver`, as whose code its calls are

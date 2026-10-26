@@ -263,7 +263,7 @@ impl Tier for Racing {
         let mut ini = crate::policy::ini();
         ini.extend(testing::declared(&testing::OPCACHE));
         Some(
-            ExtensionBuilder::default()
+            testing::switched(ExtensionBuilder::default())
                 .ini(ini)
                 .engine_state(crate::JitEngine::new)
                 .rinit(crate::JitEngine::request_started)

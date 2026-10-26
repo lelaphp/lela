@@ -500,9 +500,11 @@ pub(crate) struct Asked<'a> {
     /// How the safepoint words of a unit held for this question are laid
     /// (`tier::Tier::laid`), as the tier answered for the request asking.
     pub(crate) laid: crate::tier::Laid,
-    /// Set where the cache held a unit it read or compiled for this
-    /// question, its words laid as `laid` says, and not where another
-    /// request held the path's copy meanwhile ([`Holding::Found`]).
+    /// Set where the cache held a unit it compiled for this question, its
+    /// words laid as `laid` says, and not where another request held the
+    /// path's copy meanwhile ([`Holding::Found`]), nor for a unit the file
+    /// cache read back, whose words are sealed as php's file cache
+    /// restores op arrays the tier never saw.
     pub(crate) held: &'a std::cell::Cell<bool>,
 }
 
@@ -1076,6 +1078,13 @@ impl UnitCache {
             }
             // Under its full path alone: `zend_file_cache_script_load`
             // files no key, which the next include adds after opening it.
+            // Its words are sealed whatever the request's tier says:
+            // `zend_file_cache_script_load_ex` restores each op array's
+            // handlers as the file keeps them and never reaches
+            // `zend_jit_op_array`, which only the persist after a compile
+            // calls (`Z/ext/opcache/zend_file_cache.c:1901-2115`,
+            // `Z/ext/opcache/zend_persist.c:771-775`, `:1524-1525`), so
+            // the unit counts nothing and hands nothing off (#3362, #3363).
             let unit = share(unit);
             let early = publish(caller, &unit);
             let read = Read {
@@ -1084,13 +1093,9 @@ impl UnitCache {
                 size: kept.size,
                 observed,
             };
-            let held = match self.hold(files, (path, laid), validation, now, read) {
-                Holding::Built(held) => {
-                    held_now.set(true);
-                    held
-                }
-                Holding::Found(held) => held,
-            };
+            let sealed = (path, crate::tier::Laid::Sealed);
+            let (Holding::Built(held) | Holding::Found(held)) =
+                self.hold(files, sealed, validation, now, read);
             files.hit(&held, validation, now);
             return answered_by(&held, Filed::Hit);
         }

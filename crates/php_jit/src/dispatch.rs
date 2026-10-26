@@ -40,7 +40,6 @@ use php_engine::tier::{
 };
 use php_unit::OplineIdx;
 
-use crate::Shared;
 use crate::compiler::{self, Job};
 use crate::enter::{self, Answered, At, Crossed as _, Exited, Left, Lent};
 use crate::policy::{
@@ -49,6 +48,7 @@ use crate::policy::{
 use crate::record::{self, Bailed, Ended, Headed, Landed, Start, Stop};
 use crate::table::{self, TraceId, TraceName};
 use crate::types::Grows;
+use crate::{Lines, Shared};
 
 #[cfg(test)]
 mod tests;
@@ -948,17 +948,17 @@ fn sided(
     if req.limits().interrupt().raised().load(Ordering::Relaxed) || quiet(req, None) {
         return Visited::Continue;
     }
-    if shared.policy.debug().any(JitDebug::TRACE_EXIT) {
-        let mut lines = Vec::new();
+    let mut lines = Lines::of(req, shared);
+    if lines.debug().any(JitDebug::TRACE_EXIT) {
         placed(req, exited.frame, Line::Stands, |at| {
             let event = TraceEvent::Exit {
                 trace,
                 exit: exited.exit,
                 at,
             };
-            shared.dump(&mut lines, &event);
+            lines.dump(&event);
         });
-        req.response_mut().write_stderr(&lines);
+        lines.write(req);
     }
     let start = Start::Side {
         parent: trace,
@@ -1206,9 +1206,9 @@ fn run_lent(req: &mut Request, frame: FrameRef, id: TraceId) -> Flow {
 /// `event`'s line, where `opcache.jit_debug` asks for it, written to the
 /// request's error stream.
 fn written(req: &mut Request, shared: &Shared, event: &TraceEvent<'_>) {
-    let mut lines = Vec::new();
-    shared.dump(&mut lines, event);
-    req.response_mut().write_stderr(&lines);
+    let mut lines = Lines::of(req, shared);
+    lines.dump(event);
+    lines.write(req);
 }
 
 /// Where a recording of `start` claimed at `at` on `frame` begins.
@@ -1325,7 +1325,7 @@ fn side_opened(
 /// php writes its abort before it records again. Its lines written;
 /// what it settled as, where it was settled here.
 fn settled(req: &mut Request, shared: &Shared, job: Job, goes_on: GoesOn) -> Option<Outcome> {
-    let mut lines = Vec::new();
+    let mut lines = Lines::of(req, shared);
     let outcome = if job.recorded.record.stop.compiles() {
         let word = job.claim.holder().clone();
         let state = tier::state::<JitRequest>(req);
@@ -1340,7 +1340,7 @@ fn settled(req: &mut Request, shared: &Shared, job: Job, goes_on: GoesOn) -> Opt
     } else {
         Some(compiler::pipeline(shared, job, &mut lines))
     };
-    req.response_mut().write_stderr(&lines);
+    lines.write(req);
     outcome
 }
 
@@ -1461,7 +1461,7 @@ fn started(
     start: Start,
     behind: Option<OplineIdx>,
 ) -> Option<TraceName> {
-    let mut lines = Vec::new();
+    let mut lines = Lines::of(req, shared);
     let line = match (start, behind) {
         (_, Some(at)) => Line::At(at),
         (Start::Enter, None) => Line::Prologue,
@@ -1469,11 +1469,11 @@ fn started(
     };
     let name = placed(req, frame, line, |at| {
         if let Some(trace) = trace {
-            shared.dump(&mut lines, &TraceEvent::Start { trace, start, at });
+            lines.dump(&TraceEvent::Start { trace, start, at });
         }
         TraceName::of(&at)
     });
-    req.response_mut().write_stderr(&lines);
+    lines.write(req);
     name
 }
 

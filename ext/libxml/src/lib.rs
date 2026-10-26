@@ -660,7 +660,8 @@ fn export_row(req: &mut Request, object: PhpObject) -> Option<(ExportNode, Optio
         return None;
     }
     let root = req.symbols().class_decl(class)?.name.0.clone();
-    req.registered::<Export>()
+    req.registered_by::<Export>()
+        .map(|(_, row)| row)
         .find(|row| row.class == &root[..])
         .map(|row| (row.answer, row.half))
 }
