@@ -716,13 +716,81 @@ impl Emit<'_> {
         }
     }
 
+    /// The checks of a call's arguments made in place, after its frame is
+    /// the callee's and before it stands past its `RECV`s, as php's trace
+    /// compiles `zend_jit_recv` and `zend_jit_verify_arg_type`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:10750-10873`): an argument whose
+    /// type its parameter's mask holds goes on; one it does not is handed,
+    /// cold, to its own `RECV`'s handler through [`Kernel::Handle`], php's
+    /// `zend_jit_verify_arg_slow`, which coerces it where it stands or
+    /// throws from the callee's frame, stood at that `RECV`, the caller at
+    /// its call; the call goes on in place either way it did not throw.
+    /// What the coercion runs, an error handler or `__toString`, writes
+    /// nothing the trace holds in a register, as no kernel's user code
+    /// does (`Builder::clobber`). A call whose argument its `RECV` coerces,
+    /// one whose `RECV_INIT`'s is checked, and one whose error handler
+    /// throws from the coercion and whose `TypeError` a caller catches,
+    /// with the caller's registers kept across them:
+    ///
+    /// ```php
+    /// function twice(int $n) { return $n * 2; }
+    /// function opt(int $n, int $m = 3) { return $n + $m; }
+    /// function f($k) { $t = 0; $x = 1.5; for ($i = 0; $i < $k; $i++) { $t += twice($i % 2 ? "4" : $i) + opt("1", $i) + $x; } return $t; }
+    /// function g($k) { $t = 0; $x = 2; for ($i = 0; $i < $k; $i++) { try { $t += twice($i == 3 ? [] : $i) + $x; } catch (TypeError $e) { $t += 100; } } return $t; }
+    /// set_error_handler(function ($no, $msg) { throw new Exception($msg); });
+    /// function h($k) { $t = 0; for ($i = 0; $i < $k; $i++) { try { $t += twice($i == 4 ? 1.5 : $i); } catch (Exception $e) { echo $e->getMessage(), "\n"; } } return $t; }
+    /// echo f(8), " ", g(6), "\n", h(6), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 104 134
+    /// Implicit conversion from float 1.5 to int loses precision
+    /// 22
+    /// ```
+    ///
+    /// ```php
+    /// function twice(int $n) { return $n * 2; }
+    /// function opt(int $n, int $m = 3) { return $n + $m; }
+    /// function f($k) { $t = 0; $x = 1.5; for ($i = 0; $i < $k; $i++) { $t += twice($i % 2 ? "4" : $i) + opt("1", $i) + $x; } return $t; }
+    /// function g($k) { $t = 0; $x = 2; for ($i = 0; $i < $k; $i++) { try { $t += twice($i == 3 ? [] : $i) + $x; } catch (TypeError $e) { $t += 100; } } return $t; }
+    /// set_error_handler(function ($no, $msg) { throw new Exception($msg); });
+    /// function h($k) { $t = 0; for ($i = 0; $i < $k; $i++) { try { $t += twice($i == 4 ? 1.5 : $i); } catch (Exception $e) { echo $e->getMessage(), "\n"; } } return $t; }
+    /// echo f(8), " ", g(6), "\n", h(6), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 104 134
+    /// Implicit conversion from float 1.5 to int loses precision
+    /// 22
+    /// ```
+    fn verify_args(
+        &mut self,
+        line: &Line,
+        (room, func): (Value, Value),
+        checks: ArgChecks,
+    ) -> Result<(), Abort> {
+        for (arg, mask) in checks.each() {
+            let taken = self.takes(room, arg, mask)?;
+            let (other, on) = (self.b.create_block(), self.b.create_block());
+            self.b.set_cold_block(other);
+            self.b.ins().brif(taken, on, &[], other, &[]);
+            self.b.switch_to_block(other);
+            self.b.seal_block(other);
+            let recv = self.b.ins().iconst(I32, i64::from(arg));
+            self.call(Kernel::Handle, &[room, recv, func], leave_of(line))?;
+            self.b.ins().jump(on, &[]);
+            self.b.switch_to_block(on);
+            self.b.seal_block(on);
+        }
+        Ok(())
+    }
+
     /// A `DO_*CALL` of a call pushed in place made its callee's frame in
     /// place, as `zend_jit_do_fcall` makes it with
     /// `i_init_func_execute_data` inline and `Request::enter_call` writes
     /// it: the flags, the opline past the prologue, the callee's own cache,
     /// the slot of the caller's that takes the return and the caller
-    /// written over the pushed header, and the caller stood at the call,
-    /// php's `SET_EX_OPLINE`. Where the interrupt is raised, which the
+    /// written over the pushed header, the caller stood at the call,
+    /// php's `SET_EX_OPLINE`, and the arguments checked before the opline
+    /// is written ([`Emit::verify_args`]). Where the interrupt is raised, which the
     /// callee's activation tests, or the callee's cache is not laid down,
     /// [`Kernel::Call`] makes the call; where the callee serves a prologue
     /// it does on every pass.
@@ -752,13 +820,8 @@ impl Emit<'_> {
         let raised = self.b.ins().load(I8, trusted(), interrupt, 0);
         let raised = self.b.ins().icmp_imm_s(IntCC::NotEqual, raised, 0);
         let unready = self.unready()?;
-        let mut refused = self.b.ins().bor(raised, unready);
+        let refused = self.b.ins().bor(raised, unready);
         let room = self.b.use_var(var);
-        for (arg, mask) in checks.each() {
-            let taken = self.takes(room, arg, mask)?;
-            let other = self.b.ins().icmp_imm_s(IntCC::Equal, taken, 0);
-            refused = self.b.ins().bor(refused, other);
-        }
         let (slow, join) = self.split();
         self.divert_if(refused, slow);
         self.copy_defaults(room, defaults)?;
@@ -768,7 +831,6 @@ impl Emit<'_> {
         let flags = self.b.ins().bor_imm_u(kept, set);
         self.b.ins().store(trusted(), flags, room, at(L.info()));
         let words = [
-            (L.opline(), activation.opline()),
             (L.cache(), activation.cache()),
             (
                 L.returns_to(),
@@ -786,10 +848,12 @@ impl Emit<'_> {
         let from = self.room(line.frame)?;
         let opline = self.b.ins().iconst(I32, i64::from(line.opline.0));
         self.b.ins().store(trusted(), opline, from, at(L.opline()));
+        let func = self.func_of(callee)?;
+        self.verify_args(line, (room, func), checks)?;
+        let entry = self.b.ins().iconst(I32, i64::from(activation.opline()));
+        self.b.ins().store(trusted(), entry, room, at(L.opline()));
         // Where the interpreter stands: in the callee, at its entry.
         let none = self.b.ins().iconst(I64, 0);
-        let func = self.func_of(callee)?;
-        let entry = self.b.ins().iconst(I32, i64::from(activation.opline()));
         let top = self.b.ins().load(I64, trusted(), stack, TOP);
         let left = self.left_past(stack, top);
         self.stand([room, none, func, entry, left]);

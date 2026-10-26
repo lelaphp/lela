@@ -1385,15 +1385,17 @@ impl<'a> Builder<'a> {
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10873`): nothing of an
     /// argument the trace knows, from what its send wrote, of a type its
     /// parameter declares and holds as it is ([`held_as_is`]); the
-    /// `RECV`'s own mask, held as the call is made, of one it knows nothing of, a
-    /// reference among them, whose value the check reads ([`ArgChecks`]).
-    /// None, the call kernel's, which serves the prologue, where a
-    /// parameter is variadic, declares a type no mask holds, a class, or
-    /// is sent an argument the trace knows its `RECV` coerces or refuses.
-    /// A long sent to an `int` is made in place; one sent to a `float`,
-    /// which the `RECV` coerces, and a string sent to an `int` are the
-    /// call kernel's; arrays by reference are checked in place, and a
-    /// string by reference to an `int` is coerced by the kernel:
+    /// declared type's mask, the `RECV`'s own `op2.num` or a passed
+    /// `RECV_INIT`'s, held as the call is made, of any other, a reference
+    /// among them, whose value the check reads ([`ArgChecks`]), an
+    /// argument it fails handed to its `RECV`'s handler alone
+    /// (`Emit::verify_args`). None, the call kernel's, which serves the
+    /// prologue, where a parameter is variadic or declares a type no mask
+    /// holds, a class. A long sent to an `int` is made in place with no
+    /// check; one sent to a `float`, and a string sent to an `int`, are
+    /// checked, the handler coercing them; arrays by reference are
+    /// checked in place, and a string by reference to an `int` is coerced
+    /// by the handler:
     ///
     /// ```php
     /// function fib(int $n): int { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }
@@ -1445,16 +1447,16 @@ impl<'a> Builder<'a> {
                 .filter(|sent| {
                     sent.kinds() != Types::NONE && !sent.meets(Types::REF.or(Types::UNDEF))
                 });
-            match sent {
-                Some(sent) if !param.by_ref && sent.kinds().within(held) => continue,
-                Some(sent) if !sent.kinds().meets(held) => return None,
-                _ => {}
+            if sent.is_some_and(|sent| !param.by_ref && sent.kinds().within(held)) {
+                continue;
             }
-            let recv = code
-                .oplines
-                .get(at)
-                .filter(|op| op.opcode == Opcode::Recv && op.op1 as usize == at + 1)?;
-            checks = checks.with(at, NonZeroU32::new(recv.op2)?)?;
+            // The `RECV`'s mask, its `op2.num`, or a passed `RECV_INIT`'s,
+            // which checks the declared type's as php's
+            // `zend_verify_recv_arg_type` does.
+            code.oplines.get(at).filter(|op| {
+                matches!(op.opcode, Opcode::Recv | Opcode::RecvInit) && op.op1 as usize == at + 1
+            })?;
+            checks = checks.with(at, NonZeroU32::new(ty.mask())?)?;
         }
         Some(checks)
     }

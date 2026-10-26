@@ -3073,27 +3073,52 @@ fn a_native_that_calls_back_reloads_what_a_reference_holds() -> Result<(), Strin
 }
 
 /// The clobber rule at a call whose `RECV` check fails in place: the
-/// call is made by the call kernel, which serves the prologue and its
-/// coercion, and may throw its `TypeError`, so the made call unwinds
-/// (#3340).
+/// call is made in place, the argument handed to its `RECV`'s handler,
+/// which coerces it, here a string the trace knows to an `int`, or may
+/// throw its `TypeError`, so the made call unwinds and clobbers nothing
+/// (#3340, #3560).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_call_whose_check_may_coerce_or_throw_unwinds() -> Result<(), String> {
-    let ir = built(
-        &IN_F,
-        "function g(int $v) { return $v; }
+    for (program, checked) in [
+        (
+            "function g(int $v) { return $v; }
         function f(array &$a, int $n) {
             $s = 0;
             for ($i = 0; $i < $n; $i++) { $s += g($a[0]); }
             return $s;
         }
         $x = [1]; echo f($x, 3), \"\\n\";",
-    )?;
-    let rendered = dump::render(&ir);
-    let made =
-        line_of(&ir, Opcode::DoUcall).ok_or_else(|| format!("no DO_UCALL in\n{rendered}"))?;
-    assert!(matches!(made.imm, super::Imm::Make { .. }), "{rendered}");
-    assert!(made.unwind.is_some(), "{rendered}");
+            0,
+        ),
+        (
+            "function g(int $v) { return $v; }
+        function f(array &$a, int $n) {
+            $s = 0;
+            for ($i = 0; $i < $n; $i++) { $s += g(\"4\" . $i); }
+            return $s;
+        }
+        $x = [1]; echo f($x, 3), \"\\n\";",
+            1,
+        ),
+    ] {
+        let ir = built(&IN_F, program)?;
+        let rendered = dump::render(&ir);
+        let made =
+            line_of(&ir, Opcode::DoUcall).ok_or_else(|| format!("no DO_UCALL in\n{rendered}"))?;
+        let super::Imm::Make { checks, .. } = made.imm else {
+            return Err(format!("no call made in place in\n{rendered}"));
+        };
+        assert_eq!(checks.each().count(), checked, "{rendered}");
+        assert!(made.unwind.is_some(), "{rendered}");
+        // The handler's coercion or throw reads nothing back.
+        let at = (ir.ops.iter())
+            .position(|op| matches!(op, Op::Line(line) if line.opcode == Opcode::DoUcall))
+            .and_then(|at| u32::try_from(at).ok())
+            .map(OpId)
+            .ok_or_else(|| format!("no DO_UCALL in\n{rendered}"))?;
+        assert_eq!(reloaded(&ir, at), Vec::<u32>::new(), "{rendered}");
+    }
     Ok(())
 }
 

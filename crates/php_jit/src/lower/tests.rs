@@ -1128,8 +1128,8 @@ fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_lowers_in_place()
 /// `SEND_REF`s copy the references with an owner more, the reference
 /// made in place where the variable holds none, its handler cold where
 /// the memory limit refuses it (#3560), and the call's two checks
-/// read each reference's value before the activation, the call kernel
-/// cold where one fails (#3340).
+/// read each reference's value as the frame is activated (#3340), the
+/// `RECV`'s handler cold where one fails (#3560).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_call_by_reference_lowers_its_sends_and_checks() -> Result<(), String> {
@@ -1142,12 +1142,13 @@ fn a_call_by_reference_lowers_its_sends_and_checks() -> Result<(), String> {
             .filter(|line| line.contains("call_indirect") && line.contains(&address))
             .count()
     };
-    // Each `SEND_REF`'s reference made in place, its refused arm, and
+    // Each `SEND_REF`'s reference made in place, its refused arm, each
+    // check's `RECV` handed to its handler where it fails (#3560), and
     // each `ASSIGN_DIM_OP`'s of the callee.
     assert_eq!(calls(Kernel::MakeRef), 2, "{clif}");
-    assert_eq!(calls(Kernel::Handle), 4, "{clif}");
-    // The made call's cold arm, where the interrupt is raised, the cache
-    // not laid down or a check fails.
+    assert_eq!(calls(Kernel::Handle), 6, "{clif}");
+    // The made call's cold arm, where the interrupt is raised or the
+    // cache not laid down.
     assert_eq!(calls(Kernel::Call), 1, "{clif}");
     // The push's and the leave's cold arms, and no send stepped.
     assert_eq!(calls(Kernel::Step), 2, "{clif}");
