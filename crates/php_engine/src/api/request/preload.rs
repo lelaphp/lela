@@ -683,10 +683,23 @@ impl Request {
 
     /// `zend_shared_alloc_save_state` after preloading: the arena the
     /// preload published into laid below every epoch from now on, so a
-    /// restart keeps its rows at their numbers
+    /// restart keeps its rows at their numbers, with the units it saved,
+    /// whose words every epoch lays its own of, counting where the tier
+    /// counts a unit the cache holds now, as php's `zend_jit_script`
+    /// gives the preload's units their counters
     /// ([`crate::arena::Epochs::lay_base`]).
     pub(crate) fn save_preload_state(&self) {
-        self.shared.arena.lay_base(&self.arena);
+        let units = (self.shared.units.preloaded())
+            .map(|preloaded| preloaded.scripts.iter())
+            .into_iter()
+            .flatten()
+            .map(|held| PublishedUnit::clone(&held.unit))
+            .collect();
+        let laid = crate::tier::words_laid(&self.shared, Some(self));
+        if laid.counts() {
+            self.shared.binding.published();
+        }
+        self.shared.arena.lay_base(&self.arena, units, laid);
     }
 
     /// The order the preload's classes are published in: each in the

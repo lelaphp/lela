@@ -239,6 +239,30 @@ impl Funcs {
         Funcs::numbered_from(self.first.saturating_add(self.rows.reserved()))
     }
 
+    /// The rows of the preload's op arrays as one epoch over it runs
+    /// them: one per op array of `units`, the preload's, laid as `laid`
+    /// says, numbered from the least offset among them. Laid afresh for
+    /// every epoch ([`crate::arena::Epochs::enter`]), so a restart's
+    /// epoch starts them as php's `zend_jit_restart` leaves a preloaded
+    /// op array (`zend_jit_restart_preloaded_script`,
+    /// `Z/ext/opcache/jit/zend_jit.c:4010-4034`): its entries and loops
+    /// counting again, no landing armed, nothing blacklisted, and no word
+    /// naming a trace of the table the restart dropped.
+    pub(crate) fn preloaded(units: &[PublishedUnit], laid: Laid) -> Funcs {
+        let offsets = units.iter().flat_map(bodies);
+        let least = offsets
+            .filter_map(|(_, code)| match code.runtime_cache {
+                MapPtrOffset::Engine(offset) => Some(offset),
+                MapPtrOffset::Request(_) => None,
+            })
+            .min();
+        let funcs = Funcs::numbered_from(least.unwrap_or(0));
+        for unit in units {
+            funcs.publish(unit, laid);
+        }
+        funcs
+    }
+
     /// One row per op array of `unit`, which the epoch's cache holds,
     /// each at its offset with a word per safepoint, laid as `laid`
     /// says: at the halves the tier gave where the unit's words count,
@@ -336,7 +360,7 @@ fn bodies(unit: &PublishedUnit) -> impl Iterator<Item = (Body, &OpArray)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::atomic::Ordering;
 
     use php_unit::{OpArray, Opline, OplineIdx, Unit};
@@ -346,7 +370,7 @@ mod tests {
 
     /// A unit whose main op array has `safepoints` safepoints and as many
     /// oplines, published at offset `first`.
-    fn published(first: u32, safepoints: u32) -> php_unit::PublishedUnit {
+    pub(crate) fn published(first: u32, safepoints: u32) -> php_unit::PublishedUnit {
         let mut unit = Unit {
             main: OpArray {
                 safepoints: (0..safepoints).map(OplineIdx).collect::<Vec<_>>().into(),

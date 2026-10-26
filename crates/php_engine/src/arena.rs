@@ -38,7 +38,10 @@
 //! numbers its own rows past it, so the preload's classes and functions
 //! keep their numbers across every restart, as php keeps what the
 //! preload put in shared memory (`zend_shared_alloc_save_state` after
-//! preloading, restored to by `accel_activate`'s restart).
+//! preloading, restored to by `accel_activate`'s restart). The tier's
+//! words for the preload's op arrays are not shared: each epoch lays its
+//! own, as php's restart resets them (`zend_jit_restart`), since the
+//! traces they name are the epoch's.
 //!
 //! Nothing here is `unsafe`: the slots are `OnceLock`s, so a row is
 //! `Sync` where its type is, and the chunks never reallocate, so a
@@ -50,7 +53,9 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use crate::api::call::{ClassNative, Function};
 use crate::api::request::{Declared, UserFunction};
 use crate::api::values::ClassId;
+use crate::tier::Laid;
 use php_link::LinkedClass;
+use php_unit::PublishedUnit;
 
 /// The rows of one chunk, `1 << CHUNK_BITS` of them: a number's low
 /// bits are its slot in the chunk.
@@ -191,10 +196,10 @@ impl<T> Column<T> {
 /// engine's own and the preload's, each numbered past what is numbered
 /// below them, with the caches that name them.
 pub(crate) struct Arena {
-    /// The preload's arena, which every epoch after it is laid over and
-    /// shares at the same numbers ([`Epochs::lay_base`]); none in the
-    /// preload's own and where nothing was preloaded.
-    below: Option<Arc<Arena>>,
+    /// The preload, which every epoch after it is laid over
+    /// ([`Epochs::lay_base`]); none in the preload's own arena and where
+    /// nothing was preloaded.
+    below: Option<Base>,
     classes: Column<Declared>,
     functions: Column<UserFunction>,
     class_natives: Column<(ClassId, ClassNative)>,
@@ -293,7 +298,7 @@ impl Arena {
     /// An empty arena numbered from `first` (its classes, functions and
     /// class natives) over `below`, holding `files`.
     fn numbered(
-        below: Option<Arc<Arena>>,
+        below: Option<Base>,
         first: [u32; 3],
         files: crate::unit_cache::Files,
         natives: Arc<[LinkedClass<ClassId>]>,
@@ -316,9 +321,10 @@ impl Arena {
         }
     }
 
-    /// An empty arena laid over `base`, which is laid over nothing,
-    /// numbered past every number it reserved.
-    fn over(base: Arc<Arena>) -> Arena {
+    /// An empty arena laid over `below`, whose arena is laid over
+    /// nothing, numbered past every number that arena reserved.
+    fn over(below: Base) -> Arena {
+        let base = &below.arena;
         let [classes, functions, class_natives] = base.counts();
         let first = [
             base.first_class.saturating_add(classes),
@@ -328,11 +334,12 @@ impl Arena {
         let files = base.files.emptied();
         let natives = Arc::clone(&base.natives);
         let interned = base.interned.clone();
-        Arena::numbered(Some(base), first, files, natives, interned)
+        Arena::numbered(Some(below), first, files, natives, interned)
     }
 
     /// The arena a restart hands on: empty, over what this one is laid
-    /// over and numbered as it is, which no request of this epoch sees.
+    /// over, with the preload's words laid afresh ([`Base::again`]), and
+    /// numbered as it is, which no request of this epoch sees.
     fn successor(&self) -> Arena {
         let first = [
             self.first_class,
@@ -342,7 +349,7 @@ impl Arena {
         let natives = Arc::clone(&self.natives);
         let interned = self.interned.clone();
         Arena::numbered(
-            self.below.clone(),
+            self.below.as_ref().map(Base::again),
             first,
             self.files.emptied(),
             natives,
@@ -354,7 +361,7 @@ impl Arena {
     /// base, which is laid over nothing ([`Epochs::lay_base`]), so a
     /// lookup goes down one arena at most.
     fn base(&self) -> Option<&Arena> {
-        self.below.as_deref()
+        Some(&self.below.as_ref()?.arena)
     }
 
     /// The published class `class` names; none for the engine's own and
@@ -379,12 +386,20 @@ impl Arena {
     }
 
     /// The held op array at engine map-pointer offset `offset`, this
-    /// epoch's or the preload's below it ([`crate::tier::published`]).
+    /// epoch's or the preload's below it, with this epoch's words for it
+    /// ([`crate::tier::published`]).
     pub(crate) fn func(&self, offset: u32) -> Option<&crate::tier::published::Func> {
-        self.files
-            .funcs
-            .get(offset)
-            .or_else(|| self.base()?.files.funcs.get(offset))
+        self.funcs_of(offset)?.get(offset)
+    }
+
+    /// The rows the op array at `offset` stands in: this epoch's own, or
+    /// this epoch's for the preload's below it.
+    fn funcs_of(&self, offset: u32) -> Option<&crate::tier::published::Funcs> {
+        let own = &self.files.funcs;
+        if own.get(offset).is_some() {
+            return Some(own);
+        }
+        Some(&self.below.as_ref()?.funcs)
     }
 
     /// The landing word of opline `at` of the held op array at `offset`,
@@ -395,10 +410,7 @@ impl Arena {
         offset: u32,
         at: php_unit::OplineIdx,
     ) -> Option<&crate::tier::Word> {
-        if self.files.funcs.get(offset).is_some() {
-            return self.files.funcs.lay_landing(offset, at);
-        }
-        self.base()?.files.funcs.lay_landing(offset, at)
+        self.funcs_of(offset)?.lay_landing(offset, at)
     }
 
     /// The published user function or method `function` names; none for
@@ -530,6 +542,53 @@ impl Epochs {
     /// restart scheduled for the current one (and counts it), a new
     /// arena in its place, both while no other request can start, so
     /// one restart replaces an epoch once.
+    ///
+    /// Served by the built-in server with a preload, whose function's
+    /// loop compiled as trace 1 before `opcache_reset()`: the restart's
+    /// epoch publishes its own trace 1 first, and the preloaded loop,
+    /// counting again, records as trace 2 rather than entering the new
+    /// table's trace 1, as php's `zend_jit_restart` resets a preloaded op
+    /// array (#3564):
+    ///
+    /// ```php
+    /// $dir = realpath(sys_get_temp_dir()) . '/jit-preload-' . getmypid(); mkdir($dir);
+    /// file_put_contents("$dir/preload.php", '<?php function hot() { $s = 0; for ($i = 0; $i < 4; $i++) { $s += $i; } return $s; }');
+    /// file_put_contents("$dir/index.php", '<?php if ($_GET["step"] == "a") { echo hot(), "\n"; var_dump(opcache_reset()); } else { $t = 0; for ($j = 0; $j < 3; $j++) { $t += $j; } echo $t, " ", hot(), "\n"; }');
+    /// touch("$dir/preload.php", time() - 60); touch("$dir/index.php", time() - 60);
+    /// $ini = ['opcache.enable=1', 'opcache.jit=tracing', 'opcache.jit_buffer_size=64M', 'opcache.jit_debug=28672', 'opcache.jit_hot_loop=1', 'opcache.jit_hot_func=1', 'opcache.jit_hot_return=1', 'opcache.jit_hot_side_exit=100', "opcache.preload=$dir/preload.php"];
+    /// $cmd = [PHP_BINARY, '-n']; foreach ($ini as $set) { $cmd[] = '-d'; $cmd[] = $set; }
+    /// $p = proc_open([...$cmd, '-S', '127.0.0.1:0', '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// $log = ''; $port = 0; $ready = [$pipes[2]]; $none = null;
+    /// while (!$port && stream_select($ready, $none, $none, 30) && ($line = fgets($pipes[2])) !== false) { if (preg_match('/:(\d+)\) started$/', rtrim($line), $m)) { $port = $m[1]; } else { $log .= $line; } $ready = [$pipes[2]]; }
+    /// foreach (['a', 'b', 'b'] as $step) { echo file_get_contents("http://127.0.0.1:$port/?step=$step"); }
+    /// proc_terminate($p); $log .= stream_get_contents($pipes[2]); proc_close($p);
+    /// foreach (explode("\n", $log) as $line) { if (str_contains($line, 'TRACE')) { echo str_replace($dir, 'DIR', $line), "\n"; } }
+    /// unlink("$dir/preload.php"); unlink("$dir/index.php"); rmdir($dir);
+    /// ```
+    /// ```expect regime=jit-tracing process
+    /// 6
+    /// bool(true)
+    /// 3 6
+    /// 3 6
+    /// ---- TRACE 1 start (enter) $main() DIR/index.php:1
+    /// ---- TRACE 1 start (loop) hot() DIR/preload.php:1
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    /// ---- TRACE 1 start (enter) $main() DIR/index.php:1
+    /// ---- TRACE 1 start (loop) $main() DIR/index.php:1
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    /// ---- TRACE 2 start (enter) hot() DIR/preload.php:1
+    /// ---- TRACE 2 start (loop) hot() DIR/preload.php:1
+    /// ---- TRACE 2 stop (loop)
+    /// ---- TRACE 2 compiled
+    /// ---- TRACE 3 start (enter) $main() DIR/index.php:1
+    /// ---- TRACE 3 stop (link to 1)
+    /// ---- TRACE 3 compiled
+    /// ---- TRACE 4 start (enter) hot() DIR/preload.php:1
+    /// ---- TRACE 4 stop (link to 2)
+    /// ---- TRACE 4 compiled
+    /// ```
     pub(crate) fn enter(&self, restart: impl FnOnce(&Arena) -> bool) -> Arc<Arena> {
         let mut current = self.lock();
         if restart(&current) {
@@ -541,16 +600,52 @@ impl Epochs {
 
     /// `zend_shared_alloc_save_state` after preloading: the preload's
     /// `arena`, which it has published into, laid below every epoch from
-    /// now on; the first laid stands, and an arena laid over one is never
-    /// laid. The preload is served before any other request, and
-    /// publishes nothing into it after; a row it did would be numbered
-    /// among the next epoch's own and reached by no request of it.
-    pub(crate) fn lay_base(&self, arena: &Arc<Arena>) {
+    /// now on, with `units`, the files it preloaded, whose words are laid
+    /// as `laid` says, as php's `zend_jit_script` gives the preload's
+    /// units their counters as it persists them; the first laid stands, and
+    /// an arena laid over one is never laid. The preload is served before
+    /// any other request, and publishes nothing into it after; a row it
+    /// did would be numbered among the next epoch's own and reached by no
+    /// request of it.
+    pub(crate) fn lay_base(&self, arena: &Arc<Arena>, units: Arc<[PublishedUnit]>, laid: Laid) {
         let mut current = self.lock();
         if arena.below.is_some() || current.below.is_some() {
             return;
         }
-        *current = Arc::new(Arena::over(Arc::clone(arena)));
+        let below = Base::of(Arc::clone(arena), units, laid);
+        *current = Arc::new(Arena::over(below));
+    }
+}
+
+/// The preload as an epoch laid over it holds it ([`Epochs::lay_base`]):
+/// its arena, whose rows every epoch shares at their numbers; the files
+/// it preloaded and how their words are laid; and the epoch's own words
+/// for their op arrays. A preloaded op array runs in every epoch, while
+/// the trace a word names is of one epoch's table and goes with it, so
+/// each epoch lays its own words for them, as php's restart resets every
+/// preloaded op array's (`zend_jit_restart`) and an epoch still served
+/// keeps its own.
+struct Base {
+    arena: Arc<Arena>,
+    units: Arc<[PublishedUnit]>,
+    laid: Laid,
+    funcs: crate::tier::published::Funcs,
+}
+
+impl Base {
+    fn of(arena: Arc<Arena>, units: Arc<[PublishedUnit]>, laid: Laid) -> Base {
+        let funcs = crate::tier::published::Funcs::preloaded(&units, laid);
+        Base {
+            arena,
+            units,
+            laid,
+            funcs,
+        }
+    }
+
+    /// The same preload for a restart's epoch, its words laid afresh.
+    fn again(&self) -> Base {
+        Base::of(Arc::clone(&self.arena), Arc::clone(&self.units), self.laid)
     }
 }
 
@@ -562,7 +657,7 @@ impl Epochs {
 mod tests {
     use std::sync::Arc;
 
-    use super::{Arena, CHUNK, Column, Epochs, SPAN, SPANS};
+    use super::{Arena, CHUNK, Column, Epochs, Laid, SPAN, SPANS};
     use crate::api::call::ClassNative;
     use crate::api::values::ClassId;
     use crate::enums::EnumMethod;
@@ -578,7 +673,7 @@ mod tests {
         let method = preload.reserve_class_native();
         let row = (ClassId(10), ClassNative::Enum(EnumMethod::Cases));
         assert!(method.is_some_and(|method| preload.publish_class_native(method, row)));
-        epochs.lay_base(&preload);
+        epochs.lay_base(&preload, Arc::from([]), Laid::COLD);
         let first = epochs.enter(|_| false);
         assert_eq!(
             first.reserve_class(),
@@ -606,6 +701,51 @@ mod tests {
         );
         assert_eq!(second.reserve_class(), Some(ClassId(11)));
         assert!(Arc::ptr_eq(&second, &epochs.enter(|_| false)));
+    }
+
+    /// A restart after a preloaded op array's trace compiled (#3564):
+    /// the restart's epoch reads that op array's words as php's
+    /// `zend_jit_restart` leaves them, counting from where they were laid
+    /// with no landing armed, never the number of a trace of the table
+    /// the restart dropped, while the epoch still served keeps its own;
+    /// the preload's own arena, which publishes no words of them, holds
+    /// none.
+    #[test]
+    fn a_restarts_epoch_lays_the_preloads_words_afresh() {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        use php_unit::OplineIdx;
+
+        use crate::tier::SafepointIdx;
+        let epochs = Epochs::of(Arena::past(0, 0, crate::unit_cache::Files::new(16)));
+        let preload = epochs.enter(|_| false);
+        let unit = crate::tier::published::tests::published(5, 2);
+        epochs.lay_base(&preload, Arc::from([unit]), Laid::Counting([3, 0]));
+        assert!(preload.func(5).is_none());
+        let first = epochs.enter(|_| false);
+        let halves = |epoch: &Arena| {
+            let word = epoch.func(5).map(|func| func.word(SafepointIdx(1)));
+            word.map(|word| word.halves().each_ref().map(|half| half.load(Relaxed)))
+        };
+        assert_eq!(halves(&first), Some([3, 0]), "laid as the preload said");
+        // The tier compiled trace 1 of the first epoch's table at the
+        // loop, and armed a landing that a return roots.
+        let word = first.func(5).map(|func| func.word(SafepointIdx(1)));
+        word.inspect(|word| word.halves()[1].store((1 << 8) | 2, Relaxed));
+        let landing = first.lay_landing(5, OplineIdx(1));
+        landing.inspect(|word| word.halves()[1].store(0, Relaxed));
+        let second = epochs.enter(|_| true);
+        assert_eq!(halves(&second), Some([3, 0]), "counting again");
+        let unarmed = second.func(5).map(|func| func.landing(OplineIdx(1)));
+        assert!(unarmed.is_some_and(|word| word.halves()[1].load(Relaxed) == u32::MAX));
+        assert_eq!(
+            halves(&first),
+            Some([3, (1 << 8) | 2]),
+            "the old epoch's own"
+        );
+        let armed = first.func(5).map(|func| func.landing(OplineIdx(1)));
+        assert!(armed.is_some_and(|word| word.halves()[1].load(Relaxed) == 0));
+        assert!(second.func(4).is_none() && second.func(6).is_none());
     }
 
     /// The tier's value is the epoch's (`jit-design.md` §4.5): what the
