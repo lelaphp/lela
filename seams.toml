@@ -297,8 +297,6 @@ feature = "gettext"
 name = "ext/xsl"
 budget = 1500     # php_xsl.c and xsltprocessor.c over the platform's libxslt and libexslt, beside ext/libxml's libxml2, bound in src/ffi/; 1,078 lines of C (#1166, #727's rule, #1540)
 feature = "xsl"
-# The port is partial: `crosscheck` is the meter, not a condition of done; the `phpt` subset is held to no regression (#383, #725).
-porting = true
 [[crate]]
 name = "ext/readline"
 budget = 2000     # readline.c and readline_cli.c over the platform's libedit, as the oracle links it, bound in src/ffi/, with the CLI's interactive shell where php puts it; 1,252 lines of C (#1166, #727's rule, #1540)
