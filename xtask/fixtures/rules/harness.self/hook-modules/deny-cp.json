@@ -1,1 +1,1 @@
-{"tool_name": "Bash", "tool_input": {"command": "cp /tmp/harness.ts harness-plugins/hooks/harness.ts", "description": "Copy a module over the hook's"}}
+{"tool_name": "Bash", "tool_input": {"command": "cp /tmp/harness.ts harness-plugins/harness/hooks/harness.ts", "description": "Copy a module over the hook's"}}

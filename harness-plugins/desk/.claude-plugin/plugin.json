@@ -1,0 +1,9 @@
+{
+  "name": "desk",
+  "version": "0.1.0",
+  "description": "The desk (#3490, harness-design.md \u00a76): the mods that draw what the harness keeps, such as the denials the harness plugin records in $.store, in a plugin of their own so the judging module stays small and the desk has its own switch. It registers nothing yet. Enabled by .claude/settings.json as desk@dax-php from the repository's own marketplace.",
+  "author": {
+    "name": "Mitchell van Wijngaarden"
+  },
+  "hooks": "./hooks/hooks.json"
+}

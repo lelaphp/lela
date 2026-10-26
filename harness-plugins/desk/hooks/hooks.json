@@ -1,0 +1,6 @@
+{
+  "description": "The desk's hooks, a person's file under harness.self: `modules` names the desk's one module.",
+  "modules": [
+    "./desk.ts"
+  ]
+}

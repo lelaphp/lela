@@ -11,7 +11,8 @@
     ]
   },
   "enabledPlugins": {
-    "harness@dax-php": true
+    "harness@dax-php": true,
+    "desk@dax-php": true
   },
   "extraKnownMarketplaces": {
     "dax-php": {

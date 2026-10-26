@@ -1,0 +1,17 @@
+{
+  "name": "harness",
+  "version": "0.1.0",
+  "description": "The harness's judging plugin, beside the desk (harness-design.md §4.4, §6; #3490): the shipped command hooks, PreToolUse → xtask permit, Stop → xtask done --hook, SessionStart wiring the clone and rendering the local file, in hooks/hooks.json, a person's file; and the function-hook module beside them, judging each Edit, Write and Bash through xtask permit before the command hook does, the map and the local facts as a context block that names this session, refreshed after a Bash call that ran an instrument; userConfig functionHook false leaves the command hooks alone. Enabled by .claude/settings.json as harness@dax-php from the repository's own marketplace.",
+  "author": {
+    "name": "Mitchell van Wijngaarden"
+  },
+  "hooks": "./hooks/hooks.json",
+  "userConfig": {
+    "functionHook": {
+      "type": "boolean",
+      "title": "Function hook",
+      "default": true,
+      "description": "Judge tool calls in-process and refresh the map after an instrument runs; false leaves the command hooks alone."
+    }
+  }
+}

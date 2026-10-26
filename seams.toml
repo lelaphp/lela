@@ -713,11 +713,13 @@ text = "`computed run --force` discards a hand edit; a person decides that."
 [[rule]]
 id = "harness.self"
 tool = ["Edit", "Write"]
-scope = [".claude/**", ".claude-plugin/marketplace.json", "harness-plugins/hooks/hooks.json", "harness-plugins/hooks/*.ts", "harness-plugins/hooks/*.tsx", "harness-plugins/.claude-plugin/plugin.json", "seams.toml", "oracle.toml", "docs/divergence.toml"]
+scope = [".claude/**", ".claude-plugin/marketplace.json", "harness-plugins/*/hooks/**", "harness-plugins/*/.claude-plugin/**", "seams.toml", "oracle.toml", "docs/divergence.toml"]
 # A skill is an ordinary file, held by review and the [budget] harness
 # ceiling (#626); a plugin laid inside one is not, since a project skill's
 # plugin loads for every session and its module could approve a call permit
-# blocked (#3470). The marketplace says where the harness plugin's source is.
+# blocked (#3470). The marketplace says where each plugin's source is, and
+# every plugin's hooks/ and .claude-plugin/ are held, so a later plugin is
+# covered with no edit here (#3490).
 exempt = [".claude/skills/**", "!.claude/skills/**/.claude-plugin/**", "!.claude/skills/**/hooks/**"]
 deny = true
 text = "Harness configuration, the oracle pin and the divergence registry are edited by a person."
@@ -732,21 +734,22 @@ where = "checkout"   # grammar: where, a checkout of this repository, the main o
 # destination, `git apply` or `patch` naming one, `git checkout` or
 # `git restore` of one. A path is the root's, bare or `./`, and under
 # `.claude/` anything but `skills/` (#626), less a skill's `.claude-plugin/`
-# or `hooks/` (#3470). Reading one (`cat`, `grep`,
+# or `hooks/` (#3470), and under `harness-plugins/` any plugin's
+# `hooks/` or `.claude-plugin/` (#3490). Reading one (`cat`, `grep`,
 # `head`, `diff`, `git show`) is none of these; `permit --after` holds
 # what a pattern cannot see (#1516).
 deny_pattern = '''(?x)
   [0-9&]?>>?\|?\s*['"]?
-    (?:(?:\./)?(?:seams\.toml|oracle\.toml|docs/divergence\.toml|harness-plugins/hooks/hooks\.json|harness-plugins/hooks/[^/\s'"|;&)<>]*\.tsx?|harness-plugins/\.claude-plugin/plugin\.json|\.claude-plugin/marketplace\.json)(?:$|[\s'"|;&)<>])|(?:\./)?\.claude/(?:[^s\s'"]|s[^k]|sk[^i]|ski[^l]|skil[^l]|skill[^s]|skills[^/]|skills/[^\s'"|;&)<>]*/(?:\.claude-plugin|hooks)/))
+    (?:(?:\./)?(?:seams\.toml|oracle\.toml|docs/divergence\.toml|harness-plugins/[^/\s'"|;&)<>]+/(?:hooks|\.claude-plugin)/[^\s'"|;&)<>]*|\.claude-plugin/marketplace\.json)(?:$|[\s'"|;&)<>])|(?:\./)?\.claude/(?:[^s\s'"]|s[^k]|sk[^i]|ski[^l]|skil[^l]|skill[^s]|skills[^/]|skills/[^\s'"|;&)<>]*/(?:\.claude-plugin|hooks)/))
 | \btee\b[^|;&\n]*[\s'"]
-    (?:(?:\./)?(?:seams\.toml|oracle\.toml|docs/divergence\.toml|harness-plugins/hooks/hooks\.json|harness-plugins/hooks/[^/\s'"|;&)<>]*\.tsx?|harness-plugins/\.claude-plugin/plugin\.json|\.claude-plugin/marketplace\.json)(?:$|[\s'"|;&)<>])|(?:\./)?\.claude/(?:[^s\s'"]|s[^k]|sk[^i]|ski[^l]|skil[^l]|skill[^s]|skills[^/]|skills/[^\s'"|;&)<>]*/(?:\.claude-plugin|hooks)/))
+    (?:(?:\./)?(?:seams\.toml|oracle\.toml|docs/divergence\.toml|harness-plugins/[^/\s'"|;&)<>]+/(?:hooks|\.claude-plugin)/[^\s'"|;&)<>]*|\.claude-plugin/marketplace\.json)(?:$|[\s'"|;&)<>])|(?:\./)?\.claude/(?:[^s\s'"]|s[^k]|sk[^i]|ski[^l]|skil[^l]|skill[^s]|skills[^/]|skills/[^\s'"|;&)<>]*/(?:\.claude-plugin|hooks)/))
 | \b(?:sed|perl)\b[^|;&\n]*\s(?:-[a-zA-Z]*i|--in-place)[^|;&\n]*[\s'"]
-    (?:(?:\./)?(?:seams\.toml|oracle\.toml|docs/divergence\.toml|harness-plugins/hooks/hooks\.json|harness-plugins/hooks/[^/\s'"|;&)<>]*\.tsx?|harness-plugins/\.claude-plugin/plugin\.json|\.claude-plugin/marketplace\.json)(?:$|[\s'"|;&)<>])|(?:\./)?\.claude/(?:[^s\s'"]|s[^k]|sk[^i]|ski[^l]|skil[^l]|skill[^s]|skills[^/]|skills/[^\s'"|;&)<>]*/(?:\.claude-plugin|hooks)/))
+    (?:(?:\./)?(?:seams\.toml|oracle\.toml|docs/divergence\.toml|harness-plugins/[^/\s'"|;&)<>]+/(?:hooks|\.claude-plugin)/[^\s'"|;&)<>]*|\.claude-plugin/marketplace\.json)(?:$|[\s'"|;&)<>])|(?:\./)?\.claude/(?:[^s\s'"]|s[^k]|sk[^i]|ski[^l]|skil[^l]|skill[^s]|skills[^/]|skills/[^\s'"|;&)<>]*/(?:\.claude-plugin|hooks)/))
 | \b(?:cp|mv|ln|install)\b[^|;&\n]*[\s'"]
-    (?:(?:\./)?(?:seams\.toml|oracle\.toml|docs/divergence\.toml|harness-plugins/hooks/hooks\.json|harness-plugins/hooks/[^/\s'"|;&)<>]*\.tsx?|harness-plugins/\.claude-plugin/plugin\.json|\.claude-plugin/marketplace\.json)|(?:\./)?\.claude/(?:[^s\s'"]|s[^k]|sk[^i]|ski[^l]|skil[^l]|skill[^s]|skills[^/]|skills/[^\s'"|;&)<>]*/(?:\.claude-plugin|hooks)/)[^\s'"|;&)<>]*)
+    (?:(?:\./)?(?:seams\.toml|oracle\.toml|docs/divergence\.toml|harness-plugins/[^/\s'"|;&)<>]+/(?:hooks|\.claude-plugin)/[^\s'"|;&)<>]*|\.claude-plugin/marketplace\.json)|(?:\./)?\.claude/(?:[^s\s'"]|s[^k]|sk[^i]|ski[^l]|skil[^l]|skill[^s]|skills[^/]|skills/[^\s'"|;&)<>]*/(?:\.claude-plugin|hooks)/)[^\s'"|;&)<>]*)
     ['"]?(?:\s+(?:-\S*|[0-9]*>&?\S*))*\s*(?:$|[|;&\n)])
 | \b(?:git\s+(?:-C\s+\S+\s+)?(?:apply|checkout|restore)|patch)\b[^|;&\n]*[\s'"=]
-    (?:(?:\./)?(?:seams\.toml|oracle\.toml|docs/divergence\.toml|harness-plugins/hooks/hooks\.json|harness-plugins/hooks/[^/\s'"|;&)<>]*\.tsx?|harness-plugins/\.claude-plugin/plugin\.json|\.claude-plugin/marketplace\.json)(?:$|[\s'"|;&)<>])|(?:\./)?\.claude/(?:[^s\s'"]|s[^k]|sk[^i]|ski[^l]|skil[^l]|skill[^s]|skills[^/]|skills/[^\s'"|;&)<>]*/(?:\.claude-plugin|hooks)/))
+    (?:(?:\./)?(?:seams\.toml|oracle\.toml|docs/divergence\.toml|harness-plugins/[^/\s'"|;&)<>]+/(?:hooks|\.claude-plugin)/[^\s'"|;&)<>]*|\.claude-plugin/marketplace\.json)(?:$|[\s'"|;&)<>])|(?:\./)?\.claude/(?:[^s\s'"]|s[^k]|sk[^i]|ski[^l]|skil[^l]|skill[^s]|skills[^/]|skills/[^\s'"|;&)<>]*/(?:\.claude-plugin|hooks)/))
 '''
 text = "Harness configuration, the oracle pin and the divergence registry are edited by a person, through a shell as through Edit and Write."
 

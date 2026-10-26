@@ -1,1 +1,1 @@
-{"tool_name": "Bash", "tool_input": {"command": "perl -pi -e 's/harness.ts/harness.js/' harness-plugins/hooks/hooks.json"}}
+{"tool_name": "Bash", "tool_input": {"command": "perl -pi -e 's/harness.ts/harness.js/' harness-plugins/harness/hooks/hooks.json"}}

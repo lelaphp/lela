@@ -4,8 +4,13 @@
   "plugins": [
     {
       "name": "harness",
-      "source": "./harness-plugins",
+      "source": "./harness-plugins/harness",
       "description": "The function-hook adapter of the harness (harness-design.md §4.4, §5)."
+    },
+    {
+      "name": "desk",
+      "source": "./harness-plugins/desk",
+      "description": "The desk of the harness: the mods that draw what the harness keeps (harness-design.md §6, #3490)."
     }
   ]
 }

@@ -17,7 +17,7 @@
 //! never run.
 //!
 //! One copy stays: the `SessionStart` line in
-//! `harness-plugins/hooks/hooks.json`, which is a person's file under
+//! `harness-plugins/harness/hooks/hooks.json`, which is a person's file under
 //! `harness.self` and runs before a built `xtask` is certain to be there;
 //! its three arms say what this module's variants say, in the hook's own
 //! words.
@@ -64,7 +64,7 @@ const INSTALL: &str = "computed did not run (cargo install computed)";
 /// `computed run <files>` from `root`, the files named relative to it,
 /// read once for `new-ext`, `worktree add` and, through `xtask regions`,
 /// pre-commit. The one reader not here is the `SessionStart` line of
-/// `harness-plugins/hooks/hooks.json`, a person's file.
+/// `harness-plugins/harness/hooks/hooks.json`, a person's file.
 pub(crate) fn render(root: &Path, files: &[String]) -> Result<Answer> {
     let out = match Command::new("computed")
         .arg("run")

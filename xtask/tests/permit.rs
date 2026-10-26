@@ -977,7 +977,8 @@ fn a_denial_carries_the_session_of_the_call() {
 /// matcher names.
 fn pre_tool_use_entries() -> Vec<(Vec<String>, serde_json::Value)> {
     let text =
-        std::fs::read_to_string(workspace().join("harness-plugins/hooks/hooks.json")).unwrap();
+        std::fs::read_to_string(workspace().join("harness-plugins/harness/hooks/hooks.json"))
+            .unwrap();
     let hooks: serde_json::Value = serde_json::from_str(&text).unwrap();
     let entries = hooks["hooks"]["PreToolUse"]
         .as_array()
@@ -1075,7 +1076,8 @@ fn the_two_adapters_do_not_walk_the_built_binaries_in_one_order() {
         .split_whitespace()
         .collect();
     let module =
-        std::fs::read_to_string(workspace().join("harness-plugins/hooks/harness.ts")).unwrap();
+        std::fs::read_to_string(workspace().join("harness-plugins/harness/hooks/harness.ts"))
+            .unwrap();
     let listed = module
         .split_once("const BUILT = [")
         .expect("the module lists the builds it walks")

@@ -37,9 +37,11 @@
 # harness-plugins/ is staged, the function-hook declarations are rewritten
 # first (#62): harness-plugins/types is a tracked generated file, written
 # by the committer's own Claude Code as `declarations` below says, and
-# staged; `tsc` then holds the module to it, `plugin validate --strict`
-# reads the manifest, hooks.json and the module, `plugin test` runs its
-# tests (#2247; `tsc` leaves them to the engine, whose kit types them).
+# staged; `tsc` then holds every plugin's modules to it, and for each
+# plugin under harness-plugins/ (the harness and the desk, #3490) `plugin
+# validate --strict` reads the manifest, hooks.json and the module and
+# `plugin test` runs its tests (#2247; `tsc` leaves them to the engine,
+# whose kit types them).
 # Without `claude` on PATH that step is skipped by name and the commit
 # goes on: CI holds the module to the committed file. A `claude` that is
 # not logged in, or whose run extracts no declarations, is named the same
@@ -213,8 +215,14 @@ if ! git diff --cached --quiet -- harness-plugins; then
             unwritten 'claude wrote no declarations'
         fi
         step buffered npx -y -p typescript@5.9.3 tsc -p harness-plugins
-        step buffered claude plugin validate harness-plugins --strict
-        step buffered claude plugin test harness-plugins
+        # Each plugin is a directory with a manifest (#3490), validated
+        # and tested on its own; the declarations and tsc are shared.
+        for manifest in harness-plugins/*/.claude-plugin/plugin.json; do
+            [ -f "$manifest" ] || continue
+            plugin=${manifest%/.claude-plugin/plugin.json}
+            step buffered claude plugin validate "$plugin" --strict
+            step buffered claude plugin test "$plugin"
+        done
     else
         echo "pre-commit: claude is not on PATH; skipped rewriting harness-plugins/types, tsc, plugin validate and plugin test" >&2
     fi
