@@ -1177,9 +1177,17 @@ fn serve_held<'u, T: Tier, D: Telling>(
             };
             #[cfg(dispatch = "tailcall")]
             let way = tail::chain::<T, D>(req, frame, body, oplines, at, &declared)?.way();
-            match way {
-                Way::On(places) => at = at.wrapping_add(places),
-                Way::Jump(to) => at = to,
+            // Whether the edge went into another frame, where the loop
+            // takes its position up with its slots.
+            let into = match way {
+                Way::On(places) => {
+                    at = at.wrapping_add(places);
+                    false
+                }
+                Way::Jump(to) => {
+                    at = to;
+                    false
+                }
                 // A return to a frame the loop entered: its op array as
                 // the loop left it for the call.
                 Way::Left(stepped @ (Stepped::Popped(to) | Stepped::Moved(to))) => {
@@ -1189,7 +1197,7 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     frame = to;
                     body = code;
                     oplines = &*body.oplines;
-                    at = req.vm().opline(frame);
+                    true
                 }
                 // A call to a function the loop called before: its op
                 // array as the loop entered it then.
@@ -1213,17 +1221,25 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     frame = callee;
                     body = called.code;
                     oplines = &*body.oplines;
-                    // Read off the frame, not taken from `entered`: the
-                    // position in hand from here measured every dispatch
-                    // of the bare loops 4% higher, by two moves the
-                    // allocator added at the loop's head (#3320).
-                    at = req.vm().opline(frame);
+                    true
                 }
                 Way::Left(stepped) => break stepped,
-            }
+            };
+            // The slots taken up for the frame the loop goes on in, and
+            // its position with them, from one look at the frame table,
+            // where the edge went into another frame. Read off the frame,
+            // not taken from `entered`: the position in hand from there
+            // measured every dispatch of the bare loops 4% higher, by two
+            // moves the allocator added at the loop's head (#3320).
             #[cfg(not(dispatch = "tailcall"))]
-            {
+            if into {
+                (at, slots) = req.standing(frame);
+            } else {
                 slots = req.slots_mut(frame);
+            }
+            #[cfg(dispatch = "tailcall")]
+            if into {
+                at = req.vm().opline(frame);
             }
         };
     }

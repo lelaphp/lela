@@ -2152,6 +2152,21 @@ impl Request {
             .map_or(&mut [], crate::exec::HeapFrame::slots_mut)
     }
 
+    /// Where the loop stands in `frame` and the frame's slots, from one
+    /// look at the frame table: what the loop takes up on an edge into
+    /// another frame, a call it entered or a return to its caller, where
+    /// [`Vm::opline`](crate::exec::Vm::opline) and
+    /// [`Request::slots_mut`] would each look the frame up again. A
+    /// frame that does not stand is at 0 with no slots, as each of those
+    /// answers alone.
+    #[inline(always)] // the loop's edges into a frame
+    pub(crate) fn standing(&mut self, frame: FrameRef) -> (u32, &mut [Zval]) {
+        match self.vm.stack.frame_mut(frame) {
+            Some(f) => (f.header().opline, f.slots_mut()),
+            None => (0, &mut []),
+        }
+    }
+
     /// The value out of a slot, the slot left `UNDEF`: what the slot
     /// owned is the caller's now, which is how a temporary is consumed.
     pub(crate) fn take_slot(&mut self, frame: FrameRef, at: u32) -> Value {
