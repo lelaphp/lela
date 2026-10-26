@@ -13,11 +13,10 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
 use cranelift_codegen::ir::{BlockArg, InstBuilder, Value};
-use php_engine::tier::FRAME;
 use php_heap::{Str, ZvalType};
 use php_unit::{Opcode, OperandKind};
 
-use super::{Emit, Kernel, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
+use super::{EX_OPLINE, Emit, Kernel, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
 use crate::types::{
     Abort, Check, Constant, Frame, Fused, GuardAt, Home, Leave, Line, OpId, Operand,
 };
@@ -257,9 +256,7 @@ impl Emit<'_> {
     fn save_opline(&mut self, line: &Line) -> Result<(), Abort> {
         let room = self.room(line.frame)?;
         let opline = self.b.ins().iconst(I32, i64::from(line.opline.0));
-        let at =
-            i32::try_from(FRAME.opline()).map_err(|_| mismatch("an opline past an immediate"))?;
-        self.b.ins().store(trusted(), opline, room, at);
+        self.b.ins().store(trusted(), opline, room, EX_OPLINE);
         Ok(())
     }
 

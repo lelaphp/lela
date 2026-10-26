@@ -28,12 +28,12 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I32, I64};
 use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, Value};
-use php_engine::tier::{FRAME, LANDING_CHUNK_BITS, LandingIndex, LandingRows, Word};
+use php_engine::tier::{LANDING_CHUNK_BITS, LandingIndex, LandingRows, Word};
 
 use super::calls::TOP;
 use super::{
-    CallRoom, Emit, Raised, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE, STOOD_ROOM,
-    body_signature, engine_offset, imm, mismatch, trusted,
+    CallRoom, EX_OPLINE, Emit, Raised, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE,
+    STOOD_ROOM, body_signature, engine_offset, imm, mismatch, trusted,
 };
 use crate::lower::{
     ENTRANCE_BODY, ENTRANCE_TRACE, ENTRY_AT, ESCAPED, Escapes, IMAGES_AT, Linked, READY_AT,
@@ -72,9 +72,6 @@ struct Leaving {
 
 /// A trace's number's place in its segment of rows, as a mask.
 const ROW_MASK: i32 = imm(ROW_SEGMENT - 1);
-
-/// Where the frame's opline is in its room, `EX(opline)`.
-const OPLINE: i32 = imm(FRAME.opline() as usize);
 
 /// An address's width, as the shift that scales a number of them.
 const ADDRESS_SHIFT: i64 = 3;
@@ -612,7 +609,7 @@ impl Emit<'_> {
         }
         // The frame stood where the exit lands it.
         if let Some(opline) = stand {
-            self.b.ins().store(trusted(), opline, room, OPLINE);
+            self.b.ins().store(trusted(), opline, room, EX_OPLINE);
         }
         let sig = self.b.import_signature(body_signature());
         self.b.ins().return_call_indirect(sig, body, &[cx, room]);

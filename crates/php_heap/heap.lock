@@ -3,6 +3,7 @@ Allocation
 AllocationObserverId
 Arr
 Arr::DATA_AT
+Arr::ELEMENTS_AT
 Arr::FLAGS_AT
 Arr::PACKED
 Arr::REFCOUNT_AT

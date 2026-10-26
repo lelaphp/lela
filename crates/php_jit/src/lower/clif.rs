@@ -41,7 +41,7 @@ use cranelift_codegen::ir::{
 use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use php_engine::tier::{FRAME, FuncRef, PlainCall};
-use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
+use php_heap::{Arr, ROOM_BYTES, Ref, Str, Zval, ZvalType};
 use php_unit::{ConstIdx, Opcode, OplineIdx};
 
 use super::{
@@ -95,6 +95,8 @@ const SLOT: i64 = 16;
 /// A `foreach` iterator's position in its slot, php's `Z_FE_POS`.
 const FE_POS_AT: i32 = imm(Zval::FE_POS_AT);
 const _: () = assert!(size_of::<Zval>() == 16);
+/// Where a frame's opline is in its room, `EX(opline)`.
+const EX_OPLINE: i32 = imm(FRAME.opline() as usize);
 const STOOD_FRAME: i32 = imm(offset_of!(Stood, frame));
 const STOOD_CALL: i32 = imm(offset_of!(Stood, call));
 const STOOD_FUNC: i32 = imm(offset_of!(Stood, func));
@@ -309,26 +311,38 @@ fn leave_of(line: &Line) -> Option<Leave> {
     (line.exit.map(Leave::Exit)).or_else(|| line.unwind.map(Leave::Unwind))
 }
 
-/// Where an opline's handler goes on: in its own frame, this many
-/// oplines past it, one or two past an `OP_DATA`, having done nothing
-/// else to the frame chain but pop a native's call it made, or thrown
-/// there. What [`Kernel::Handle`] serves, as php's code calls the
+/// Where an opline's handler goes on: in its own frame, having done
+/// nothing else to the frame chain but pop a native's call it made, or
+/// thrown there. What [`Kernel::Handle`] serves, as php's code calls the
 /// handler of each such opline it compiles no inline code for directly
-/// (`zend_jit_handler`, `Z/ext/opcache/jit/zend_jit_ir.c:4120-4157`) and
-/// goes on with no IP guard, which `zend_jit_trace_handler` takes only
-/// past an opline `zend_jit_trace_may_exit` names (`:17129-17236`;
-/// `Z/ext/opcache/jit/zend_jit_trace.c:261-330`). The kernel stands the
-/// frame at the opline before the handler runs, php's `SAVE_OPLINE()`,
-/// so what the handler raises, and the unwind of what it throws, see the
-/// frame where php's do, and compiled code writes where it stands past
-/// it, which the handler leaves no `Stood` of.
+/// (`zend_jit_handler`, `Z/ext/opcache/jit/zend_jit_ir.c:4120-4157`).
+/// The kernel stands the frame at the opline before the handler runs,
+/// php's `SAVE_OPLINE()`, so what the handler raises, and the unwind of
+/// what it throws, see the frame where php's do, and compiled code
+/// writes where it stands past it, which the handler leaves no `Stood`
+/// of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Onward(u32);
+enum Onward {
+    /// This many oplines past it, one or two past an `OP_DATA`, with no
+    /// IP guard, which `zend_jit_trace_handler` takes only past an
+    /// opline `zend_jit_trace_may_exit` names (`:17129-17236`;
+    /// `Z/ext/opcache/jit/zend_jit_trace.c:261-330`).
+    Past(u32),
+    /// Where its jump went, the frame's `EX(opline)` as the handler left
+    /// it, held by the opline's direction guards: php's
+    /// `zend_jit_trace_handler` past a branch `zend_jit_trace_may_exit`
+    /// names, its IP compared with the opline the trace recorded next
+    /// and its exit taken where they differ (`:17201-17271`).
+    Went,
+}
 
 impl Onward {
     /// Where `opcode`'s handler goes on, for the oplines whose handler
-    /// can neither leave its frame, push or replace one, enter the
-    /// loop with the frame unstood nor jump: building an array and
+    /// can neither leave its frame, push or replace one, nor enter the
+    /// loop with the frame unstood: the jumps php's code compiles no
+    /// inline form for, `?:`'s `JMP_SET`, `??`'s `COALESCE` and `?->`'s
+    /// `JMP_NULL`, which go where their handler went
+    /// ([`Onward::Went`]); and, past them, building an array and
     /// adding to it, a native's call, made and popped by its handler, a
     /// concatenation and a rope's pieces, whose string arms the handler
     /// holds as php's own functions over two strings hold them, an
@@ -342,8 +356,9 @@ impl Onward {
     /// serves so, and an increment or a decrement, of a `VAR` an inline
     /// fetch left indirect among them.
     /// None for every other
-    /// opline: a jump and a comparison, whose handler may take the jump
-    /// fused to it, a call's `INIT_*` and its `DO_*CALL` into user code,
+    /// opline: a `JMPZ` and its kin, which php's code compiles inline
+    /// whatever its value (`zend_jit_bool_jmpznz`), and a comparison,
+    /// whose handler may take the jump fused to it, a call's `INIT_*` and its `DO_*CALL` into user code,
     /// a return, an include or an `eval`, a generator's opcodes, a
     /// `finally`'s `FAST_CALL` and `FAST_RET`, and the two silence
     /// opcodes, whose observers a step tells. A property's `isset()` and
@@ -570,6 +585,7 @@ impl Onward {
     /// ```
     fn of(opcode: Opcode) -> Option<Onward> {
         match opcode {
+            Opcode::JmpSet | Opcode::Coalesce | Opcode::JmpNull => Some(Onward::Went),
             Opcode::InitArray
             | Opcode::AddArrayElement
             | Opcode::DoIcall
@@ -606,12 +622,48 @@ impl Onward {
             | Opcode::PreInc
             | Opcode::PreDec
             | Opcode::PostInc
-            | Opcode::PostDec => Some(Onward(1)),
+            | Opcode::PostDec => Some(Onward::Past(1)),
             Opcode::AssignDim
             | Opcode::AssignDimOp
             | Opcode::AssignObj
             | Opcode::AssignObjOp
-            | Opcode::FramelessIcall3 => Some(Onward(2)),
+            | Opcode::FramelessIcall3 => Some(Onward::Past(2)),
+            _ => None,
+        }
+    }
+
+    /// Whether the handler alone serves an opline that holds `guards`
+    /// within it: none past an opline that goes on past itself, and
+    /// past a jump its direction guards alone, which hold where it went.
+    fn serves(self, guards: &[Guard]) -> bool {
+        match self {
+            Onward::Past(_) => guards.is_empty(),
+            Onward::Went => guards
+                .iter()
+                .all(|guard| matches!(guard.check, Check::Direction { .. })),
+        }
+    }
+}
+
+/// What the handler of `?:`, `??` or `?->` tests of its operand, which
+/// [`Emit::tested`] tests in place where it can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Test {
+    /// `JMP_SET`: its truth, `zend_is_true`; the jump taken on true.
+    Truth,
+    /// `COALESCE`: that it is defined and not `null`; the jump taken so.
+    Defined,
+    /// `JMP_NULL`: that it is not `null`; the jump taken where it is.
+    NotNull,
+}
+
+impl Test {
+    /// The test `opcode`'s handler makes, for the three.
+    fn of(opcode: Opcode) -> Option<Test> {
+        match opcode {
+            Opcode::JmpSet => Some(Test::Truth),
+            Opcode::Coalesce => Some(Test::Defined),
+            Opcode::JmpNull => Some(Test::NotNull),
             _ => None,
         }
     }
@@ -1677,6 +1729,11 @@ impl<'a> Emit<'a> {
         if line.opcode == Opcode::Return {
             self.returns_to(line)?;
         }
+        if let Some(onward @ Onward::Went) = Onward::of(line.opcode)
+            && onward.serves(&self.within(at))
+        {
+            return self.branched(at, line);
+        }
 
         self.step_kernel(at, line)?;
         self.after_step(at, line)
@@ -1700,7 +1757,7 @@ impl<'a> Emit<'a> {
                 )?;
             }
             None if let Some(onward) = Onward::of(line.opcode)
-                && self.within(at).is_empty() =>
+                && onward.serves(&self.within(at)) =>
             {
                 self.handled(line, onward, [room, opline, func])?;
             }
@@ -1810,7 +1867,7 @@ impl<'a> Emit<'a> {
     fn handled(
         &mut self,
         line: &Line,
-        Onward(places): Onward,
+        onward: Onward,
         [room, opline, func]: [Value; 3],
     ) -> Result<(), Abort> {
         let kernel = if line.opcode == Opcode::DoIcall || line.opcode.is_frameless_icall() {
@@ -1819,7 +1876,10 @@ impl<'a> Emit<'a> {
             Kernel::Handle
         };
         self.call(kernel, &[room, opline, func], leave_of(line))?;
-        let next = self.b.ins().iconst(I32, i64::from(line.opline.0 + places));
+        let next = match onward {
+            Onward::Past(places) => self.b.ins().iconst(I32, i64::from(line.opline.0 + places)),
+            Onward::Went => self.b.ins().load(I32, trusted(), room, EX_OPLINE),
+        };
         self.b.ins().stack_store(I64, func, self.stood, STOOD_FUNC);
         self.b
             .ins()
@@ -1829,6 +1889,213 @@ impl<'a> Emit<'a> {
             self.b.ins().stack_store(I64, call, self.stood, STOOD_CALL);
         }
         Ok(())
+    }
+
+    /// `?:`'s `JMP_SET`, `??`'s `COALESCE` and `?->`'s `JMP_NULL`, which
+    /// php's code compiles no inline form for
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:261-330`), served as php's
+    /// code serves them: the handler called directly, `zend_jit_handler`, and
+    /// the way it went, `EX(opline)` as the handler left it, held to the
+    /// way the trace recorded by the opline's direction guards,
+    /// `zend_jit_trace_handler`'s IP guard
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:17201-17271`), so the trace
+    /// takes the exits php's takes and no other. Before the handler, a
+    /// variable's value whose test reads its type byte and at most one
+    /// word is tested in place ([`Emit::tested`]), as the handler tests
+    /// it, and goes on with no call.
+    ///
+    /// `?:`, `??` and `?->` over a variable each kind of value passes
+    /// through, in place and by the handler: an object, a reference, a temporary, a
+    /// double and an undefined variable among them, whose warning the
+    /// error handler turns into a throw caught outside the loop:
+    ///
+    /// ```php
+    /// class P { public $v = 7; }
+    /// function f($n) {
+    ///     $vs = [null, false, true, 0, 5, 0.0, 2.5, "", "0", "00", "a", [], [1], new P, null];
+    ///     $os = [null, new P, null]; $t = []; $r = 1; $ref = &$r;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $v = $vs[$i % 15]; $o = $os[$i % 3];
+    ///         $a = $v ?: "e"; $b = $v ?? "n"; $c = $o?->v; $d = $ref ?: 0; $e = $ref ?? 0;
+    ///         $g = ($i % 2 ? $v : null) ?? "t"; $h = ($i % 2 ? $v : 0) ?: "t";
+    ///         $t[] = json_encode([$a, $b, $c, $d, $e, $g, $h]);
+    ///     }
+    ///     return implode(",", $t);
+    /// }
+    /// echo f(30), "\n";
+    /// function g($n) { $s = 0; for ($i = 0; $i < $n; $i++) { if ($i == 5) { unset($u); } else { $u = $i; } $s += $u ?: 1; } return $s; }
+    /// set_error_handler(function ($no, $msg) { throw new Exception($msg); });
+    /// try { echo g(10), "\n"; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect regime=jit-force process
+    /// ["e","n",null,1,1,"t","t"],["e",false,7,1,1,false,"t"],[true,true,null,1,1,"t","t"],["e",0,null,1,1,0,"t"],[5,5,7,1,1,"t","t"],["e",0,null,1,1,0,"t"],[2.5,2.5,null,1,1,"t","t"],["e","",7,1,1,"","t"],["e","0",null,1,1,"t","t"],["00","00",null,1,1,"00","00"],["a","a",7,1,1,"t","t"],["e",[],null,1,1,[],"t"],[[1],[1],null,1,1,"t","t"],[{"v":7},{"v":7},7,1,1,{"v":7},{"v":7}],["e","n",null,1,1,"t","t"],["e","n",null,1,1,"t","t"],["e",false,7,1,1,"t","t"],[true,true,null,1,1,true,true],["e",0,null,1,1,"t","t"],[5,5,7,1,1,5,5],["e",0,null,1,1,"t","t"],[2.5,2.5,null,1,1,2.5,2.5],["e","",7,1,1,"t","t"],["e","0",null,1,1,"0","t"],["00","00",null,1,1,"t","t"],["a","a",7,1,1,"a","a"],["e",[],null,1,1,"t","t"],[[1],[1],null,1,1,[1],[1]],[{"v":7},{"v":7},7,1,1,"t","t"],["e","n",null,1,1,"t","t"]
+    /// Undefined variable $u
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// class P { public $v = 7; }
+    /// function f($n) {
+    ///     $vs = [null, false, true, 0, 5, 0.0, 2.5, "", "0", "00", "a", [], [1], new P, null];
+    ///     $os = [null, new P, null]; $t = []; $r = 1; $ref = &$r;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $v = $vs[$i % 15]; $o = $os[$i % 3];
+    ///         $a = $v ?: "e"; $b = $v ?? "n"; $c = $o?->v; $d = $ref ?: 0; $e = $ref ?? 0;
+    ///         $g = ($i % 2 ? $v : null) ?? "t"; $h = ($i % 2 ? $v : 0) ?: "t";
+    ///         $t[] = json_encode([$a, $b, $c, $d, $e, $g, $h]);
+    ///     }
+    ///     return implode(",", $t);
+    /// }
+    /// echo f(30), "\n";
+    /// function g($n) { $s = 0; for ($i = 0; $i < $n; $i++) { if ($i == 5) { unset($u); } else { $u = $i; } $s += $u ?: 1; } return $s; }
+    /// set_error_handler(function ($no, $msg) { throw new Exception($msg); });
+    /// try { echo g(10), "\n"; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// ["e","n",null,1,1,"t","t"],["e",false,7,1,1,false,"t"],[true,true,null,1,1,"t","t"],["e",0,null,1,1,0,"t"],[5,5,7,1,1,"t","t"],["e",0,null,1,1,0,"t"],[2.5,2.5,null,1,1,"t","t"],["e","",7,1,1,"","t"],["e","0",null,1,1,"t","t"],["00","00",null,1,1,"00","00"],["a","a",7,1,1,"t","t"],["e",[],null,1,1,[],"t"],[[1],[1],null,1,1,"t","t"],[{"v":7},{"v":7},7,1,1,{"v":7},{"v":7}],["e","n",null,1,1,"t","t"],["e","n",null,1,1,"t","t"],["e",false,7,1,1,"t","t"],[true,true,null,1,1,true,true],["e",0,null,1,1,"t","t"],[5,5,7,1,1,5,5],["e",0,null,1,1,"t","t"],[2.5,2.5,null,1,1,2.5,2.5],["e","",7,1,1,"t","t"],["e","0",null,1,1,"0","t"],["00","00",null,1,1,"t","t"],["a","a",7,1,1,"a","a"],["e",[],null,1,1,"t","t"],[[1],[1],null,1,1,[1],[1]],[{"v":7},{"v":7},7,1,1,"t","t"],["e","n",null,1,1,"t","t"]
+    /// Undefined variable $u
+    /// ```
+    fn branched(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        self.spill_operands(line)?;
+        let handler = self.b.create_block();
+        let done = self.b.create_block();
+        self.tested(at, line, handler, done)?;
+        self.b.switch_to_block(handler);
+        self.b.seal_block(handler);
+        let [room, opline] = self.served(line)?;
+        let func = self.func_of(line.frame)?;
+        self.handled(line, Onward::Went, [room, opline, func])?;
+        self.after_step(at, line)?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+        Ok(())
+    }
+
+    /// The test of `?:`'s `JMP_SET`, `??`'s `COALESCE` or `?->`'s
+    /// `JMP_NULL` on a variable, made in place where it reads the value's
+    /// type byte and its word, or the count or the length and first byte
+    /// that word points at, as the handler makes it (`ZEND_JMP_SET`,
+    /// `ZEND_COALESCE`, `ZEND_JMP_NULL`, `Z/Zend/zend_vm_def.h`):
+    /// [`Test`]'s three. A `?:` or `??` that jumps copies the value to
+    /// the opline's out slot with one owner more, as `ZVAL_COPY` copies a
+    /// variable; either way the direction guards are held on the way it
+    /// went, which is the way the recording names, as the jump's target is
+    /// never the opline after it: each of the three jumps past an operand
+    /// or a member the compiler lays down between. Then on to `done`.
+    /// Every other value, a temporary's among them, goes to `handler`,
+    /// which serves it whole.
+    fn tested(&mut self, at: OpId, line: &Line, handler: Block, done: Block) -> Result<(), Abort> {
+        let (Operand::Value(value), Some(test)) = (line.op1, Test::of(line.opcode)) else {
+            self.b.ins().jump(handler, &[]);
+            return Ok(());
+        };
+        let slot = self.value(value)?.slot;
+        if self.is_temporary(slot)? {
+            self.b.ins().jump(handler, &[]);
+            return Ok(());
+        }
+        let (room, from_at) = self.place(slot)?;
+        let info = self.b.ins().load(I32, trusted(), room, from_at + TYPE_AT);
+        let kind = self.b.ins().band_imm_u(info, KIND);
+        let goes_on = self.b.create_block();
+        let taken = self.b.create_block();
+        let is =
+            |emit: &mut Emit<'_>, t: ZvalType| emit.b.ins().icmp_imm_u(IntCC::Equal, kind, tag(t));
+        match test {
+            Test::Truth => {
+                let word = self.b.ins().load(I64, trusted(), room, from_at);
+                let null_or_false = self.b.ins().iadd_imm_s(kind, -tag(ZvalType::Null));
+                let null_or_false =
+                    self.b
+                        .ins()
+                        .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, null_or_false, 1);
+                self.divert_if(null_or_false, goes_on);
+                let true_ = is(self, ZvalType::True);
+                self.divert_if(true_, taken);
+                let long = is(self, ZvalType::Long);
+                self.when_else(long, |emit| {
+                    emit.b.ins().brif(word, taken, &[], goes_on, &[]);
+                });
+                let array = is(self, ZvalType::Array);
+                self.when_else(array, |emit| {
+                    let count = emit
+                        .b
+                        .ins()
+                        .load(I32, trusted(), word, imm(Arr::ELEMENTS_AT));
+                    emit.b.ins().brif(count, taken, &[], goes_on, &[]);
+                });
+                let string = is(self, ZvalType::String);
+                self.when_else(string, |emit| {
+                    // `zend_is_true`: longer than one byte, or one byte
+                    // that is not `"0"`.
+                    let len = emit.b.ins().load(I64, trusted(), word, imm(Str::LEN_AT));
+                    let byte = emit.b.ins().load(I8, trusted(), word, imm(Str::VAL_AT));
+                    let long = emit.b.ins().icmp_imm_u(IntCC::UnsignedGreaterThan, len, 1);
+                    let one = emit.b.ins().icmp_imm_u(IntCC::Equal, len, 1);
+                    let zero = emit
+                        .b
+                        .ins()
+                        .icmp_imm_u(IntCC::NotEqual, byte, i64::from(b'0'));
+                    let one = emit.b.ins().band(one, zero);
+                    let truth = emit.b.ins().bor(long, one);
+                    emit.b.ins().brif(truth, taken, &[], goes_on, &[]);
+                });
+                self.b.ins().jump(handler, &[]);
+            }
+            Test::Defined => {
+                let null = is(self, ZvalType::Null);
+                self.divert_if(null, goes_on);
+                let undef = is(self, ZvalType::Undef);
+                let reference = is(self, ZvalType::Reference);
+                let other = self.b.ins().bor(undef, reference);
+                self.b.ins().brif(other, handler, &[], taken, &[]);
+            }
+            Test::NotNull => {
+                let undef = is(self, ZvalType::Undef);
+                let null = is(self, ZvalType::Null);
+                let reference = is(self, ZvalType::Reference);
+                let other = self.b.ins().bor(undef, null);
+                let other = self.b.ins().bor(other, reference);
+                self.b.ins().brif(other, handler, &[], goes_on, &[]);
+            }
+        }
+        self.b.switch_to_block(goes_on);
+        self.b.seal_block(goes_on);
+        let no = self.b.ins().iconst(I8, 0);
+        self.direction(at, no)?;
+        self.b.ins().jump(done, &[]);
+        if test == Test::NotNull {
+            // `?->`'s jump writes the chain's value where its operand is
+            // `null`, which the handler serves.
+            return Ok(());
+        }
+        self.b.switch_to_block(taken);
+        self.b.seal_block(taken);
+        let out = line
+            .out
+            .ok_or_else(|| mismatch("a jump that copies its value to no slot"))?;
+        let out_at = self.place(self.value(out)?.slot)?;
+        let zval = self.b.ins().iadd_imm_s(room, i64::from(from_at));
+        self.copy_at(zval, info, out_at)?;
+        let yes = self.b.ins().iconst(I8, 1);
+        self.direction(at, yes)?;
+        self.b.ins().jump(done, &[]);
+        Ok(())
+    }
+
+    /// Where `cond` is not zero, `body`, which ends its block itself; on
+    /// in a fresh block otherwise.
+    fn when_else(&mut self, cond: Value, body: impl FnOnce(&mut Emit<'a>)) {
+        let then = self.b.create_block();
+        let on = self.b.create_block();
+        self.b.ins().brif(cond, then, &[], on, &[]);
+        self.b.switch_to_block(then);
+        self.b.seal_block(then);
+        body(self);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
     }
 
     /// What follows a stepped `line`: a call it made off the calls under
@@ -3167,7 +3434,7 @@ impl<'a> Emit<'a> {
             emit.spill_operands(line)?;
             let [room, opline] = emit.served(line)?;
             let func = emit.func_of(line.frame)?;
-            emit.handled(line, Onward(1), [room, opline, func])
+            emit.handled(line, Onward::Past(1), [room, opline, func])
         };
         if self.value(value)?.home == Home::Register {
             return handler(self);
