@@ -59,8 +59,9 @@ use crate::{State, failed, ffi};
 /// (`php_clear_stat_cache(true, NULL, 0)`, `main/main.c:1901`,
 /// GH-23986), so a file the parent stat'ed and a link it resolved, each
 /// since changed by another process, read as they are now, and
-/// `/proc/self` is the child's. Both caches are above the engine's fork,
-/// so they are emptied here.
+/// `/proc/self` is the child's. The realpath cache is the engine's, which
+/// its fork empties in every child it makes; the stat cache is the
+/// request's, above the engine, so it is emptied here.
 ///
 /// ```php
 /// $f = tempnam(sys_get_temp_dir(), 'fork');
@@ -100,7 +101,6 @@ pub(crate) fn pcntl_fork(req: &mut Request) -> i64 {
         Ok(Forked::Parent { child }) => child.as_raw().into(),
         Ok(Forked::Child) => {
             req.clear_stat_cache();
-            req.environment_mut().realpath_cache_clear(None);
             0
         }
         Err(error) => {

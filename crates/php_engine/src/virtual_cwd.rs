@@ -17,12 +17,17 @@
 //! itself alone, so no system call is made under it; an entry another
 //! request made between a lookup and its entry stands, and the second is
 //! not made, which php's one thread never meets.
+//!
+//! A fork's child starts with every engine's cache empty, as php's
+//! `php_child_init` empties the process's (`php_clear_stat_cache(true,
+//! NULL, 0)`, `Z/main/main.c:1901`): [`RealpathCaches`] is how the
+//! engine's one fork ([`crate::fork`]) finds them.
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 /// The compile's `MAXPATHLEN`, the one an extension reads as
 /// `request::MAXPATHLEN`, as php's extensions read the one of
@@ -86,7 +91,9 @@ fn len_of(n: usize) -> i64 {
 /// `realpath_cache_ttl`.
 #[derive(Debug)]
 pub(crate) struct RealpathCache {
-    buckets: Mutex<Buckets>,
+    /// Shared with [`CACHES`], which keeps only a reference that does
+    /// not keep it alive, so a fork finds it while its engine stands.
+    buckets: Arc<Mutex<Buckets>>,
     limit: AtomicI64,
     ttl: i64,
     /// The paths the resolutions through this cache asked the file
@@ -112,10 +119,10 @@ impl RealpathCache {
     /// [`RealpathCache::engine_startup`]).
     pub(crate) fn of<'a>(value: impl Fn(&[u8]) -> Option<&'a [u8]>) -> RealpathCache {
         let mut cache = RealpathCache {
-            buckets: Mutex::new(Buckets {
+            buckets: Arc::new(Mutex::new(Buckets {
                 slots: vec![Vec::new(); SLOTS],
                 size: 0,
-            }),
+            })),
             limit: AtomicI64::new(0),
             ttl: 0,
             #[cfg(test)]
@@ -125,6 +132,10 @@ impl RealpathCache {
             cache.update(name, value(name));
         }
         cache.engine_startup(value(b"open_basedir"));
+        // The entry stands inside the engine, so no fork copies the list
+        // held, as a timer's entry does.
+        let _inside = crate::fork::Inside::enter();
+        crate::fork::living(&CACHES).push(Arc::downgrade(&cache.buckets));
         cache
     }
 
@@ -155,10 +166,8 @@ impl RealpathCache {
         }
     }
 
-    fn buckets(&self) -> std::sync::MutexGuard<'_, Buckets> {
-        self.buckets
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn buckets(&self) -> MutexGuard<'_, Buckets> {
+        held(&self.buckets)
     }
 
     /// How many paths the resolutions through this cache asked the file
@@ -251,11 +260,7 @@ impl RealpathCache {
 
     /// `realpath_cache_clean`: every bucket dropped.
     pub(crate) fn clean(&self) {
-        let mut buckets = self.buckets();
-        for chain in &mut buckets.slots {
-            chain.clear();
-        }
-        buckets.size = 0;
+        self.buckets().clean();
     }
 
     /// Each bucket, as `shown`, in `realpath_cache_get()`'s order: slot by
@@ -514,6 +519,72 @@ impl Walk<'_> {
     }
 }
 
+impl Buckets {
+    /// `realpath_cache_clean`: every bucket dropped, and the bytes they
+    /// counted with them.
+    fn clean(&mut self) {
+        for chain in &mut self.slots {
+            chain.clear();
+        }
+        self.size = 0;
+    }
+}
+
+/// A cache's buckets, locked, by a lookup, an entry, a clean or a fork.
+fn held(buckets: &Mutex<Buckets>) -> MutexGuard<'_, Buckets> {
+    buckets.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Every engine's realpath cache in the process, by a reference that does
+/// not keep the engine alive: what a fork's child empties, whoever asks
+/// for the fork.
+static CACHES: Mutex<Vec<Weak<Mutex<Buckets>>>> = Mutex::new(Vec::new());
+
+/// Every engine's realpath cache in the process, as a fork finds them
+/// ([`crate::fork`]): each locked across the fork, and emptied in the
+/// child, as php's `php_child_init` empties the process's one.
+#[derive(Debug)]
+pub(crate) struct RealpathCaches(Vec<Arc<Mutex<Buckets>>>);
+
+impl RealpathCaches {
+    /// The caches of every engine that stands in the process, in the
+    /// order they were made.
+    pub(crate) fn live() -> RealpathCaches {
+        RealpathCaches(
+            crate::fork::living(&CACHES)
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect(),
+        )
+    }
+
+    /// Each one's mutex taken, in [`RealpathCaches::live`]'s order, which
+    /// is every fork's: a lookup, an entry or a clean holds one for itself
+    /// alone and makes no system call and takes no other mutex under it,
+    /// so a thread that holds one lets it go without waiting on the fork.
+    pub(crate) fn hold(&self) -> Held<'_> {
+        Held(self.0.iter().map(|buckets| held(buckets)).collect())
+    }
+}
+
+/// Every engine's realpath cache, locked for the length of a fork: let go
+/// unchanged in the process that asked, and in the child emptied first
+/// ([`Held::clean`]), so no copy is read half made.
+#[derive(Debug)]
+#[must_use]
+pub(crate) struct Held<'c>(Vec<MutexGuard<'c, Buckets>>);
+
+impl Held<'_> {
+    /// In a fork's child, every cache emptied and then let go: php's
+    /// `php_clear_stat_cache(true, NULL, 0)` in `php_child_init`, whose
+    /// `realpath_cache_clean` empties the process's cache.
+    pub(crate) fn clean(self) {
+        for mut buckets in self.0 {
+            buckets.clean();
+        }
+    }
+}
+
 /// `virtual_file_ex(state, path, NULL, how)` (`Z/Zend/zend_virtual_cwd.c:1007`)
 /// with `state` the directory `cwd`: the path resolved, or `None` where
 /// php answers `1`, an empty path or one of `MAXPATHLEN` or more among
@@ -568,7 +639,150 @@ pub(crate) fn virtual_file_ex(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test starts its own threads (seams.toml rule fork.threads)"
+)]
 mod tests {
+    use std::io::{Read as _, Write as _};
+    use std::sync::{Arc, mpsc};
+    use std::time::{Duration, Instant};
+
+    use super::{RealpathCache, Resolve, held, virtual_file_ex};
+    use crate::fork::{Forked, fork};
+
+    /// The variable that tells this binary, started again, that it is the
+    /// process a test started apart ([`apart`]).
+    const APART: &str = "PHP_ENGINE_TEST_APART";
+
+    /// The test `name` started again in a process of its own, with nothing
+    /// else of the binary's inside the engine, so a host's fork is not
+    /// refused for a sibling test's request; what it printed, once it
+    /// passed within half a minute.
+    fn apart(name: &str) -> String {
+        let mut run = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .args([name, "--exact", "--nocapture", "--test-threads=1"])
+            .env(APART, name)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("the test binary runs");
+        let started = Instant::now();
+        while run.try_wait().expect("the run is waited for").is_none() {
+            if started.elapsed() > Duration::from_secs(30) {
+                run.kill().ok();
+                panic!("{name} run apart did not end in 30s: its fork's child hung");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let out = run.wait_with_output().expect("the run's output");
+        assert!(
+            out.status.success(),
+            "{name} run apart failed: {}",
+            out.status
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// `body` in a process of its own ([`apart`]), which says what it
+    /// came to on its last line; the test holds that line to `came_to`.
+    fn in_a_process_apart(name: &str, came_to: &str, body: impl FnOnce() -> String) {
+        if std::env::var_os(APART).is_some() {
+            println!("{}", body());
+        } else {
+            let printed = apart(name);
+            assert!(printed.contains(came_to), "{name} apart printed {printed}");
+        }
+    }
+
+    /// A cache on, as the engine's defaults set it, with the entries a
+    /// resolution of the temporary directory makes.
+    fn filled() -> RealpathCache {
+        let cache = RealpathCache::of(|name| match name {
+            b"realpath_cache_size" => Some(&b"4096K"[..]),
+            b"realpath_cache_ttl" => Some(&b"120"[..]),
+            _ => None,
+        });
+        let dir = std::env::temp_dir();
+        let dir = dir.as_os_str().as_encoded_bytes();
+        assert!(virtual_file_ex(&cache, b"", dir, Resolve::RealPath).is_some());
+        assert!(!cache.listed(|_| ()).is_empty());
+        cache
+    }
+
+    /// How many entries the child of a host's fork finds in `cache`, sent
+    /// back over a pipe, and when the fork returned in the parent.
+    fn entries_in_child(cache: &RealpathCache) -> (usize, Instant) {
+        let (mut answer, mut writer) = std::io::pipe().expect("a pipe");
+        match fork().expect("nothing else stands inside the engine") {
+            Forked::Child => {
+                let entries = cache.listed(|_| ()).len();
+                writer.write_all(&entries.to_ne_bytes()).ok();
+                std::process::exit(0)
+            }
+            Forked::Parent { .. } => {
+                let forked = Instant::now();
+                drop(writer);
+                let mut read = Vec::new();
+                answer.read_to_end(&mut read).expect("the child's answer");
+                let entries = read.try_into().map(usize::from_ne_bytes);
+                (entries.expect("one word from the child"), forked)
+            }
+        }
+    }
+
+    /// php's `php_child_init` empties the realpath cache in each child
+    /// php-fpm and the CGI make (`fpm_php.c:223`, `cgi_main.c:2044`): the
+    /// host's fork, with no request in flight, leaves the child none of
+    /// the entries its parent made, and the parent keeps them.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
+    fn a_host_s_fork_leaves_its_child_no_realpath_entry() {
+        const NAME: &str = "virtual_cwd::tests::a_host_s_fork_leaves_its_child_no_realpath_entry";
+        in_a_process_apart(NAME, "child 0, parent kept", || {
+            let cache = filled();
+            let (entries, _) = entries_in_child(&cache);
+            assert_eq!(entries, 0, "the child kept its parent's entries");
+            assert!(
+                !cache.listed(|_| ()).is_empty(),
+                "the parent lost its entries"
+            );
+            format!("child {entries}, parent kept")
+        });
+    }
+
+    /// A thread outside the engine that holds a cache's mutex as the fork
+    /// is asked lets it go before the fork copies the process, which waits
+    /// for it, so the child neither copies the mutex held nor keeps an
+    /// entry.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
+    fn a_fork_waits_out_a_held_realpath_cache_and_its_child_empties_it() {
+        const NAME: &str =
+            "virtual_cwd::tests::a_fork_waits_out_a_held_realpath_cache_and_its_child_empties_it";
+        in_a_process_apart(NAME, "child 0, forked after the release", || {
+            let cache = filled();
+            let (locked, holds) = mpsc::channel();
+            let buckets = Arc::clone(&cache.buckets);
+            let holder = std::thread::spawn(move || {
+                let guard = held(&buckets);
+                locked.send(()).ok();
+                std::thread::sleep(Duration::from_millis(200));
+                let released = Instant::now();
+                drop(guard);
+                released
+            });
+            holds.recv().expect("the holder holds the mutex");
+            let (entries, forked) = entries_in_child(&cache);
+            let released = holder.join().expect("the holder ends");
+            assert!(
+                forked >= released,
+                "the fork returned before the mutex was let go"
+            );
+            assert_eq!(entries, 0, "the child kept its parent's entries");
+            format!("child {entries}, forked after the release")
+        });
+    }
+
     /// Linux's `PATH_MAX` is 4096, which php's `MAXPATHLEN` and so
     /// `PHP_MAXPATHLEN` are there; the macOS oracle, at 1024, cannot
     /// show it, so no witness holds it.
