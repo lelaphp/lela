@@ -242,18 +242,21 @@ impl Scanner<'_> {
     /// what `JSON_BIGINT_AS_STRING` chooses between. The string is
     /// `ZVAL_STRINGL`, `zend_string_init` asked for infallibly
     /// (`Z/ext/json/json_scanner.re:187`), where a string token's is
-    /// fallible ([`Scanner::string`]): one past the memory limit is the
-    /// limit's fatal where it is asked for, and never a refused parse.
+    /// fallible ([`Scanner::string`]): one past the hard memory limit is
+    /// its `_exit` where it is asked for, where a fallible one would be a
+    /// refused parse and the soft limit's fatal as the call returns.
     ///
     /// ```php
     /// ini_set('memory_limit', '16M');
+    /// ini_set('memory_hard_limit_percent', '100');
     /// $n = 10 * 1024 * 1024; $json = str_repeat('9', $n); $json[0] = '['; $json[$n - 1] = ']';
     /// try { var_dump(json_decode($json, false, 512, JSON_BIGINT_AS_STRING | JSON_THROW_ON_ERROR)); } catch (JsonException $e) { echo "caught\n"; }
     /// echo "unreached\n";
     /// ```
-    /// ```expect exit=255
-    ///
-    /// Fatal error: Allowed memory size of 16777216 bytes exhausted (tried to allocate 10502144 bytes) in %s on line 4
+    /// ```expect capture exit=137
+    /// ```
+    /// ```stderr
+    /// Hard memory limit of 16777216 bytes exhausted (tried to allocate 10502144 bytes) in %SCRATCH%/witness.php on line 5
     /// ```
     fn integer(
         &self,
@@ -866,7 +869,18 @@ impl Parser<'_> {
     /// `value` handed to the bracket it closes: appended as an `element`,
     /// or written under its key by `php_json_parser_object_update` as a
     /// `member`, the holder built at the first; then the next after a
-    /// comma, or the bracket to close.
+    /// comma, or the bracket to close. A member's key was made as it was
+    /// scanned, before its value ([`Scanner::string`]), so the string
+    /// made second is the one the memory limit refuses, the value's here:
+    ///
+    /// ```php
+    /// $json = '{"' . str_repeat('k', 6 << 20) . '":"' . str_repeat('v', 10 << 20) . '"}';
+    /// ini_set('memory_limit', '30M');
+    /// var_dump(json_decode($json, true));
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 31457280 bytes exhausted (tried to allocate 10502144 bytes) in %s on line 4
+    /// ```
     fn attach(
         &mut self,
         req: &mut Request,
