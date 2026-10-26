@@ -247,6 +247,23 @@ pub(crate) fn keep(req: &mut Request, id: ArchiveId, which: Callback, kept: Kept
 /// bool(true)
 /// int(2)
 /// ```
+///
+/// A stream counts from its open, as `zip_fopen` counts the archive's
+/// `open_count`, so one left unread fails the commit too:
+///
+/// ```php
+/// $z = new ZipArchive; $z->open('unread-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE); $z->addFromString('a', 'alpha'); $z->close();
+/// $z->open('unread-witness.zip'); $s = $z->getStream('a'); $z->addFromString('b', 'beta');
+/// var_dump($z->close(), $z->status, $z->getStatusString()); fclose($s);
+/// $z->open('unread-witness.zip'); var_dump($z->numFiles); $z->close(); unlink('unread-witness.zip');
+/// ```
+/// ```expect capture
+/// Warning: ZipArchive::close(): Resource still in use in %SCRATCH%/witness.php on line 4
+/// bool(false)
+/// int(29)
+/// string(21) "Resource still in use"
+/// int(1)
+/// ```
 pub(crate) fn close(req: &mut Request, id: ArchiveId, on_failure: OnFailure) -> Option<Closed> {
     let h = get(req, id)?;
     let Za::Open(mut za, mut file) = std::mem::replace(&mut h.za, Za::Closed) else {
@@ -366,7 +383,44 @@ struct Serving<'r> {
 }
 
 impl Serving<'_> {
-    /// Callback `which` as the holder keeps it now.
+    /// Callback `which` as the holder keeps it now, so one registered by a
+    /// callback serves the next point, at its own precision, and a cancel
+    /// callback registered by the progress callback is asked at the same
+    /// point, as `_zip_progress_update` reads `za->progress` after the
+    /// progress callback returns:
+    ///
+    /// ```php
+    /// $z = new ZipArchive; $z->open('register-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    /// foreach (range(1, 10) as $i) $z->addFromString("f$i", "data $i");
+    /// $z->registerProgressCallback(0.5, function ($r) use ($z) {
+    ///     echo "first ", round($r, 2), "\n";
+    ///     $z->registerProgressCallback(0.15, function ($r) { echo "second ", round($r, 2), "\n"; });
+    /// });
+    /// var_dump($z->close());
+    /// $z->open('register-witness.zip'); $z->setArchiveComment('again');
+    /// $z->registerProgressCallback(0.3, function ($r) use ($z) {
+    ///     echo "progress ", round($r, 2), "\n";
+    ///     if ($r > 0.5) $z->registerCancelCallback(function () { echo "cancel\n"; return 1; });
+    /// });
+    /// var_dump($z->close(), $z->getStatusString()); unlink('register-witness.zip');
+    /// ```
+    /// ```expect capture
+    /// first 0
+    /// second 0.2
+    /// second 0.4
+    /// second 0.6
+    /// second 0.8
+    /// second 1
+    /// bool(true)
+    /// progress 0
+    /// progress 0.4
+    /// progress 0.8
+    /// cancel
+    ///
+    /// Warning: ZipArchive::close(): Operation cancelled in %SCRATCH%/witness.php on line 14
+    /// bool(false)
+    /// string(19) "Operation cancelled"
+    /// ```
     fn callback(&mut self, which: Callback) -> Option<Callable> {
         let h = get(self.req, self.id)?;
         let kept = match which {
