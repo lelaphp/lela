@@ -719,24 +719,8 @@ fn object_for(
     node: Node,
     context: Option<PhpObject>,
 ) -> Result<Owner<Value>, Thrown> {
-    if let Some(existing) = node.object() {
-        return Ok(Owner::take(req, existing.as_value()));
-    }
-    let modern = context.is_some_and(|c| modern::follows_spec(req, c));
-    let Some(name) = class_for(node, modern) else {
-        let n = node.kind().number();
-        return Err(throw_error(
-            req,
-            "Error",
-            &format!("Unsupported node type: {n}"),
-        ));
-    };
-    let base = class(req, name)?;
-    let class = match context {
-        Some(ctx) => dom(req, ctx).map_or(base, |d| d.obj.mapped(base)),
-        None => base,
-    };
-    instantiate(req, class, node, context)
+    let parent = context.and_then(|c| libxml_half(req, c));
+    made_over(req, node, parent.as_deref())
 }
 
 /// `php_dom_create_object` as `xml_common.h` exports it (`PHP_DOM_EXPORT`)
@@ -777,10 +761,25 @@ pub fn create_object_in(
     node: Node,
     doc: &NodeObject,
 ) -> Result<Owner<Value>, Thrown> {
+    made_over(req, node, Some(doc))
+}
+
+/// `php_dom_create_object(obj, return_value, domobj)` over `domobj`'s
+/// libxml half, `parent`: the object standing for `node`, one more owner
+/// of it where one exists, otherwise a fresh one of the node's class,
+/// the modern family where `parent`'s document is modern, mapped by its
+/// `registerNodeClass` table and counting its document
+/// (`php_dom_instantiate_object_helper`).
+fn made_over(
+    req: &mut Request,
+    node: Node,
+    parent: Option<&NodeObject>,
+) -> Result<Owner<Value>, Thrown> {
     if let Some(existing) = node.object() {
         return Ok(Owner::take(req, existing.as_value()));
     }
-    let Some(name) = class_for(node, doc.class_type() == ClassType::Modern) else {
+    let modern = parent.is_some_and(|p| p.class_type() == ClassType::Modern);
+    let Some(name) = class_for(node, modern) else {
         let n = node.kind().number();
         return Err(throw_error(
             req,
@@ -788,10 +787,11 @@ pub fn create_object_in(
             &format!("Unsupported node type: {n}"),
         ));
     };
-    let class = doc.mapped(class(req, name)?);
+    let base = class(req, name)?;
+    let class = parent.map_or(base, |p| p.mapped(base));
     let object = new_object(req, class)?;
     if let Some(mut obj) = libxml_half(req, *object) {
-        obj.attach(req, node, doc.shared_doc());
+        obj.attach(req, node, parent.and_then(NodeObject::shared_doc));
     }
     Ok(object.into_value())
 }
