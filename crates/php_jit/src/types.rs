@@ -77,7 +77,7 @@ mod opcodes;
 #[cfg(test)]
 mod tests;
 
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 
 use php_engine::tier::{ClassId, FuncRef, MapPtrRaw, PlainCall, UnitView};
 use php_heap::ZvalType;
@@ -359,6 +359,35 @@ impl ArgChecks {
     }
 }
 
+/// What a call made in place copies into the parameters it is passed no
+/// argument for, as php's trace compiles `zend_jit_recv_init` past the
+/// arguments its frame knows were passed (`jit_ZVAL_COPY_CONST`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:10886-10950`): per parameter, from
+/// the first, the address of its `RECV_INIT`'s default among the op
+/// array's constants, which the trace's epoch holds, a constant no
+/// reference counts; `None` for one passed. A call with a default that
+/// names a constant expression, is counted, or stands past
+/// [`ArgChecks::ARGS`] is the call kernel's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Defaults([Option<NonZeroUsize>; ArgChecks::ARGS]);
+
+impl Defaults {
+    /// These defaults with parameter `at`, from zero, given the constant
+    /// at `address`; none past [`ArgChecks::ARGS`].
+    pub(crate) fn with(mut self, at: usize, address: NonZeroUsize) -> Option<Defaults> {
+        *self.0.get_mut(at)? = Some(address);
+        Some(self)
+    }
+
+    /// Each parameter given its default, from zero, and the address of
+    /// the constant copied into it.
+    pub(crate) fn each(self) -> impl Iterator<Item = (u32, NonZeroUsize)> {
+        (0u32..)
+            .zip(self.0)
+            .filter_map(|(at, address)| Some((at, address?)))
+    }
+}
+
 /// What an opline names beside its operands, where its inline form reads
 /// it: php's `op2.num` of a send, an `UNUSED` operand that is a number,
 /// and the operator an `ASSIGN_OP`'s `extended_value` names.
@@ -380,6 +409,7 @@ pub(crate) enum Imm {
     Make {
         returns: Option<u32>,
         checks: ArgChecks,
+        defaults: Defaults,
     },
     /// A `RETURN` compiled code leaves its frame by in place
     /// (`zend_jit_leave_func`, `Z/ext/opcache/jit/zend_jit_ir.c:11035-11263`):

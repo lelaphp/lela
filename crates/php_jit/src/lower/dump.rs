@@ -406,10 +406,15 @@ fn check(check: Check) -> String {
 /// the variables it frees.
 fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
     let (value, owners) = match imm {
-        Imm::Make { checks, .. } => {
+        Imm::Make {
+            checks, defaults, ..
+        } => {
             write!(text, " in-place")?;
             for (at, mask) in checks.each() {
                 write!(text, " checks arg {} {mask:#x}", at + 1)?;
+            }
+            for (at, _) in defaults.each() {
+                write!(text, " copies arg {}", at + 1)?;
             }
             return Ok(());
         }

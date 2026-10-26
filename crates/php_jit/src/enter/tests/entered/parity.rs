@@ -374,6 +374,7 @@ fn make_in_place(req: &mut Request, f: FrameRef) -> Option<Read> {
         Imm::Make {
             returns,
             checks: crate::types::ArgChecks::default(),
+            defaults: crate::types::Defaults::default(),
         },
     );
     made.unwind = Some(crate::types::UnwindId(0));
@@ -439,6 +440,7 @@ fn make_over_handled_push(req: &mut Request, f: FrameRef) -> Option<Read> {
         Imm::Make {
             returns,
             checks: crate::types::ArgChecks::default(),
+            defaults: crate::types::Defaults::default(),
         },
     );
     made.unwind = Some(crate::types::UnwindId(0));

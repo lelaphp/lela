@@ -5,7 +5,7 @@
 //! held where each leaves.
 
 use std::collections::{HashMap, HashSet};
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 
 use php_engine::tier::{ClassId, FuncRef, MapPtrRaw, PlainCall, PropertySlot, Sample, UnitView};
 use php_heap::ZvalType;
@@ -21,11 +21,11 @@ use super::opcodes::{
     slot_of, within, writes, written, written_after_entry, written_through,
 };
 use super::{
-    Abort, ArgChecks, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame,
-    FrameInfo, Frees, Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known, Landing, Layout,
-    Leave, Line, LoopHeader, Object, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned,
-    Slot, Slotted, Store, Stored, TraceIr, Unwind, UnwindId, Value, ValueId, Vars,
-    on_declared_slot,
+    Abort, ArgChecks, BodyEntry, Check, Constant, Def, Defaults, End, Entry, ExitId, ExitSpec,
+    Form, Frame, FrameInfo, Frees, Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known,
+    Landing, Layout, Leave, Line, LoopHeader, Object, Op, OpId, Operand, Owners, Place, Read,
+    Repeat, Returned, Slot, Slotted, Store, Stored, TraceIr, Unwind, UnwindId, Value, ValueId,
+    Vars, on_declared_slot,
 };
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -175,6 +175,9 @@ struct Call {
     /// How compiled code makes it, where it pushed it in place
     /// ([`Op::InitCall`]'s `plain`).
     pushed: Option<Pushed>,
+    /// How many arguments its `INIT_*` says are passed, where it pushed
+    /// it in place ([`PlainCall::count`]).
+    passed: u32,
     /// Whether a function's `INIT_*` by its name began it, so it serves
     /// the callee recorded.
     named: bool,
@@ -213,7 +216,7 @@ enum LastSend {
 enum InPlace {
     Push(PlainCall),
     Send,
-    Make(ArgChecks),
+    Make(ArgChecks, Defaults),
     Leave,
 }
 
@@ -740,9 +743,10 @@ impl<'a> Builder<'a> {
                     value: returned(&op, code, t1),
                     receives: self.receives(frame),
                 },
-                Some(InPlace::Make(checks)) => Imm::Make {
+                Some(InPlace::Make(checks, defaults)) => Imm::Make {
                     returns: (op.out_type != OperandKind::Unused).then_some(op.out),
                     checks,
+                    defaults,
                 },
                 _ if let Some(property) = property.filter(|_| form == Form::Inline) => {
                     Imm::Property {
@@ -1168,6 +1172,7 @@ impl<'a> Builder<'a> {
                     Pushed::Activates
                 }
             }),
+            passed: plain.as_ref().map_or(0, PlainCall::count),
             named,
             last_send: LastSend::Unknown,
         });
@@ -1300,7 +1305,7 @@ impl<'a> Builder<'a> {
                     Pushed::Activates => ArgChecks::default(),
                     Pushed::Checks => self.arg_checks(call)?,
                 };
-                Some(InPlace::Make(checks))
+                Some(InPlace::Make(checks, self.defaults(call)?))
             }
             Opcode::Return => self.leaves_in_place(frame).then_some(InPlace::Leave),
             _ => None,
@@ -1362,7 +1367,7 @@ impl<'a> Builder<'a> {
             if param.variadic {
                 return None;
             }
-            let Some(ty) = param.ty.as_ref() else {
+            let Some(ty) = param.ty.as_ref().filter(|_| at < call.passed as usize) else {
                 continue;
             };
             let held = held_as_is(ty)?;
@@ -1385,6 +1390,51 @@ impl<'a> Builder<'a> {
             checks = checks.with(at, NonZeroU32::new(recv.op2)?)?;
         }
         Some(checks)
+    }
+
+    /// What compiled code copies into the parameters of `call` it is
+    /// passed no argument for ([`Defaults`]), as php's trace compiles
+    /// `zend_jit_recv_init` past the arguments its frame knows were
+    /// passed, copying the default (`jit_ZVAL_COPY_CONST`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:10886-10950`), and checking no
+    /// type of what it copied, as php's `RECV_INIT` checks none. None,
+    /// the call kernel's, which serves the prologue, where such a
+    /// parameter has no `RECV_INIT`, or its default names a constant
+    /// expression, which php evaluates, or is counted. Defaults of each
+    /// kind are copied, a constant's and an expression's left to the
+    /// kernel:
+    ///
+    /// ```php
+    /// const STEP = 3;
+    /// function f($a, $b = 2, $c = 1.5, $d = "s", $e = [1], $f = null) { return $a + $b + $c + strlen($d) + count($e) + ($f ?? 0); }
+    /// function g($a, $b = STEP) { return $a + $b; }
+    /// function h($a, int $b = 4) { return $a * $b; }
+    /// function k($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += f($i) + f($i, 1) + g($i) + h($i); } return $s; }
+    /// var_dump(k(10));
+    /// ```
+    /// ```expect regime=jit-force process
+    /// float(445)
+    /// ```
+    fn defaults(&self, call: &Call) -> Option<Defaults> {
+        let Some(callee) = call.callee.user() else {
+            return Some(Defaults::default());
+        };
+        let params = self.view.parameters(callee)?;
+        let code = self.view.op_array(callee)?;
+        let mut defaults = Defaults::default();
+        for at in (call.passed as usize)..params.len() {
+            let recv = code
+                .oplines
+                .get(at)
+                .filter(|op| op.opcode == Opcode::RecvInit && op.op1 as usize == at + 1)?;
+            let literal = code
+                .literals
+                .get(recv.op2 as usize)
+                .filter(|literal| !literal.is_refcounted() && literal.as_const_expr().is_none())?;
+            let address = NonZeroUsize::new(std::ptr::from_ref(literal).addr())?;
+            defaults = defaults.with(at, address)?;
+        }
+        Some(defaults)
     }
 
     /// What a send wrote into the call under way, where it sends a value.

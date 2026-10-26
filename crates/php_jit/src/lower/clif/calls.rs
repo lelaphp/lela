@@ -34,7 +34,8 @@ use super::{
 };
 use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT, RETURNED, THREW};
 use crate::types::{
-    Abort, ArgChecks, End, ExitId, Frame, Imm, Line, Object, OpId, Operand, Owners, Returned, Vars,
+    Abort, ArgChecks, Defaults, End, ExitId, Frame, Imm, Line, Object, OpId, Operand, Owners,
+    Returned, Vars,
 };
 
 /// What a leave in place writes into the caller's slot: a scalar, or a
@@ -389,7 +390,7 @@ impl Emit<'_> {
         &mut self,
         id: OpId,
         line: &Line,
-        (returns, checks): (Option<u32>, ArgChecks),
+        (returns, checks, defaults): (Option<u32>, ArgChecks, Defaults),
     ) -> Result<(), Abort> {
         let (call, plain) = *self
             .calls
@@ -420,6 +421,7 @@ impl Emit<'_> {
         }
         let (slow, join) = self.split();
         self.divert_if(refused, slow);
+        self.copy_defaults(room, defaults)?;
         let flags = self.b.ins().load(I32, trusted(), room, at(L.info()));
         let kept = self.b.ins().band_imm_u(flags, i64::from(activation.keep()));
         let set = i64::from(activation.info(returns.is_some()));
@@ -459,6 +461,26 @@ impl Emit<'_> {
         self.b.switch_to_block(join);
         self.b.seal_block(join);
         self.after_step(id, line)
+    }
+
+    /// Copies each default `defaults` names into its parameter of the
+    /// call whose room is `room`, its two words as they stand among the
+    /// op array's constants, which no reference counts
+    /// (`jit_ZVAL_COPY_CONST`, `Z/ext/opcache/jit/zend_jit_ir.c:10886-10950`).
+    fn copy_defaults(&mut self, room: Value, defaults: Defaults) -> Result<(), Abort> {
+        for (arg, address) in defaults.each() {
+            let to = var_at(arg)?;
+            let address = i64::try_from(address.get())
+                .map_err(|_| mismatch("a constant past a 64-bit address"))?;
+            let zval = self.b.ins().iconst(I64, address);
+            let word = self.b.ins().load(I64, trusted(), zval, 0);
+            let info = self.b.ins().load(I32, trusted(), zval, super::TYPE_AT);
+            self.b.ins().store(trusted(), word, room, to);
+            self.b
+                .ins()
+                .store(trusted(), info, room, to + super::TYPE_AT);
+        }
+        Ok(())
     }
 
     /// Whether argument `arg` of the call whose room is `room`, from zero,

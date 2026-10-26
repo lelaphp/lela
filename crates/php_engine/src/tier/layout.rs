@@ -566,9 +566,11 @@ impl PlainCall {
     }
 
     /// What the call's activation writes, where a `DO_*CALL`'s inline
-    /// path makes it with no `RECV*` to serve, or with `RECV`s that only
-    /// check ([`PlainCall::checks`]); none where the callee's activation
-    /// serves its prologue or reads a cache of its own.
+    /// path makes it with no `RECV*` to serve, with `RECV`s that only
+    /// check ([`PlainCall::checks`]), or with the `RECV_INIT`s of the
+    /// parameters past [`PlainCall::count`], whose defaults compiled code
+    /// copies or leaves the call to its kernel; none where the callee's
+    /// activation serves its prologue or reads a cache of its own.
     #[must_use]
     pub fn activation(&self) -> Option<Activation> {
         self.activation
@@ -663,10 +665,17 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     // map knows the argument of a type the declaration holds
     // (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10873`, the skip in
     // `zend_jit_verify_arg_type` at `:10773-10781`).
-    let checks = shape.typed && count == shape.parameters && shape.entry == count;
+    // One `RECV*` per parameter: a function that declares a type keeps
+    // the passed ones' checks, and one passed fewer arguments than it has
+    // parameters keeps the `RECV_INIT`s of the rest, whose defaults
+    // compiled code copies where it can, as php's trace compiles
+    // `zend_jit_recv_init` (`Z/ext/opcache/jit/zend_jit_ir.c:10886-10950`).
+    let prologue = shape.entry == shape.parameters;
+    let checks = shape.typed && count <= shape.parameters && prologue;
+    let defaults = count < shape.parameters && prologue;
     let enters = count <= shape.parameters
         && slots >= shape.slots
-        && (opline == Some(shape.entry) || checks);
+        && (opline == Some(shape.entry) || checks || defaults);
     let activation = match shape.cache.offset() {
         MapPtrOffset::Engine(cache) if enters => {
             // What `enter_call` writes into the flags, applied to all of

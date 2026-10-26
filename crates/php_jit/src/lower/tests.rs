@@ -16,11 +16,12 @@ use cranelift_codegen::isa;
 use super::{Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupported};
 use crate::table::TraceName;
 use crate::testing::goldens::{
-    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
-    DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FIB, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET,
-    HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL, NATIVE_CALL, NBODY,
-    NESTED_READ, NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE,
-    REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL, STRING_BUILD, STRING_MATCH, held,
+    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DEFAULT_CALL, DIM_AND, DIM_CONCAT,
+    DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FIB, Fixture, HASH_FETCH_W, HASH_IS,
+    HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL, NATIVE_CALL,
+    NBODY, NESTED_READ, NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE,
+    OWNING_LEAVE, REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL, STRING_BUILD,
+    STRING_MATCH, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -59,15 +60,17 @@ fn named(fixture: Fixture) -> TraceName {
 /// holds what the code does with it.
 fn constants_named(ir: &TraceIr, clif: &str) -> String {
     let mut named = clif.to_owned();
-    let returned = ir.ops.iter().filter_map(|op| match op {
+    let returned = ir.ops.iter().flat_map(|op| match op {
         Op::Line(line) => match line.imm {
             Imm::Leave {
                 value: Returned::Constant(address),
                 ..
-            } => Some(address),
-            _ => None,
+            } => vec![address],
+            // The defaults a call made in place copies.
+            Imm::Make { defaults, .. } => defaults.each().map(|(_, at)| at.get()).collect(),
+            _ => Vec::new(),
         },
-        _ => None,
+        _ => Vec::new(),
     });
     // A constant no scalar is, which an inline form copies from its op
     // array's table.
@@ -1219,5 +1222,25 @@ fn method_calls_lower_their_push_call_and_leave() -> Result<(), String> {
         assert_eq!(calls(Kernel::Call), 1, "{}: {clif}", fixture.name);
         assert_eq!(calls(Kernel::FreeThis), 1, "{}: {clif}", fixture.name);
     }
+    Ok(())
+}
+
+/// A call passed fewer arguments than its callee has parameters lowers
+/// to its activation in place, each default copied from the op array's
+/// constants, the call kernel cold where the call is refused (#3340).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_passed_fewer_arguments_lowers_its_defaults() -> Result<(), String> {
+    lowered(DEFAULT_CALL)?;
+    let clif = std::fs::read_to_string(goldens_dir().join("default_call.clif"))
+        .map_err(|e| e.to_string())?;
+    let calls = |kernel: Kernel| {
+        let address = format!("{:#x}", symbols().address(kernel)).replace("0x7000", "0x7000_");
+        (clif.lines())
+            .filter(|line| line.contains("call_indirect") && line.contains(&address))
+            .count()
+    };
+    assert_eq!(calls(Kernel::Call), 1, "{clif}");
+    assert_eq!(calls(Kernel::Handle), 0, "{clif}");
     Ok(())
 }

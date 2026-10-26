@@ -114,6 +114,30 @@ pub(crate) const REF_CALL: Fixture = Fixture {
     ],
 };
 
+/// A call passed fewer arguments than its callee has parameters, made in
+/// place with each default copied into its parameter (#3340).
+pub(crate) const DEFAULT_CALL: Fixture = Fixture {
+    name: "default_call",
+    program: "default_call",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A call whose default names a constant, its `RECV_INIT` served by the
+/// call kernel (#3340).
+pub(crate) const DEFAULT_CONSTANT: Fixture = Fixture {
+    name: "default_constant",
+    program: "default_call",
+    plan: &[
+        ("record.function", "c"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
 /// A method called on an object a variable holds, as `method_call`
 /// drives it: pushed in place under the class guard, the method's frame
 /// left in place, its receiver given up after its variables (#3343).

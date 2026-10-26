@@ -26,12 +26,12 @@ use super::{
 use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
-    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
-    DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FANNKUCH, FIB, Fixture, HASH_FETCH_W, HASH_IS,
-    HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL, METHOD_SCOPED,
-    NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS,
-    OBJECT_VALUE, OWNING_LEAVE, REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL,
-    STRING_BUILD, STRING_MATCH, held, traced as built,
+    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DEFAULT_CALL, DEFAULT_CONSTANT,
+    DIM_AND, DIM_CONCAT, DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FANNKUCH, FIB, Fixture,
+    HASH_FETCH_W, HASH_IS, HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT,
+    METHOD_CALL, METHOD_SCOPED, NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE, NEW_CALL,
+    OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_CALL, REF_WRITE, SIEVE,
+    SPECTRALNORM, STATIC_CALL, STRING_BUILD, STRING_MATCH, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -2658,6 +2658,30 @@ fn a_call_by_reference_is_made_in_place_with_its_checks() -> Result<(), String> 
     assert_eq!(checked, [0, 1], "{rendered}");
     let sent = line(Opcode::SendRef).ok_or_else(|| format!("no SEND_REF in\n{rendered}"))?;
     assert_eq!(sent.form, Form::Inline, "{rendered}");
+    Ok(())
+}
+
+/// A call passed fewer arguments than its callee has parameters is made
+/// in place, each default copied into its parameter, as php's trace
+/// compiles `zend_jit_recv_init` past the arguments it knows were passed;
+/// one whose default names a constant is the call kernel's (#3340).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_passed_fewer_arguments_copies_its_defaults_in_place() -> Result<(), String> {
+    let ir = golden(DEFAULT_CALL)?;
+    let rendered = dump::render(&ir);
+    let made =
+        line_of(&ir, Opcode::DoUcall).ok_or_else(|| format!("no DO_UCALL in\n{rendered}"))?;
+    let copied: Vec<u32> = match made.imm {
+        super::Imm::Make { defaults, .. } => defaults.each().map(|(at, _)| at).collect(),
+        _ => return Err(format!("the call is not made in place\n{rendered}")),
+    };
+    assert_eq!(copied, [1, 2, 3], "{rendered}");
+    let ir = golden(DEFAULT_CONSTANT)?;
+    let rendered = dump::render(&ir);
+    let made =
+        line_of(&ir, Opcode::DoUcall).ok_or_else(|| format!("no DO_UCALL in\n{rendered}"))?;
+    assert!(!matches!(made.imm, super::Imm::Make { .. }), "{rendered}");
     Ok(())
 }
 

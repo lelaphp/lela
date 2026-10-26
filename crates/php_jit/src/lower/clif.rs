@@ -2071,7 +2071,11 @@ impl<'a> Emit<'a> {
             // A send to a callee that takes the argument by value.
             Opcode::SendValEx if matches!(line.imm, Imm::Arg(_)) => self.send(at, line),
             Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName => match line.imm {
-                Imm::Make { returns, checks } => self.make_in_place(at, line, (returns, checks)),
+                Imm::Make {
+                    returns,
+                    checks,
+                    defaults,
+                } => self.make_in_place(at, line, (returns, checks, defaults)),
                 _ => self.stepped(at, line),
             },
             Opcode::Return if matches!(line.imm, Imm::Leave { .. }) => {
