@@ -17,6 +17,7 @@ use crate::obj::{
     CIVIL, INTERVAL, IntervalObj, WALL, class_id, interval_fields, interval_of, new_interval,
     rows_array, set_diff, std_rows, write_fields,
 };
+use crate::throwables::Throwables;
 
 /// `date_interval_initialize(&rt, format, len)`: the period of an ISO
 /// 8601 duration, or the difference of its two dates, or php's
@@ -42,16 +43,17 @@ fn initialize(req: &mut Request, text: &[u8]) -> Result<RelTime, Thrown> {
         Ok(period) => return Ok(period),
         Err(unknown) => unknown,
     };
+    let ce = Throwables::of(req)?;
     if unknown {
         return Err(throw_exception_ex(
             req,
-            "DateMalformedIntervalStringException",
+            ce.date_malformed_interval_string_exception,
             &format!("Unknown or bad format ({shown})"),
         ));
     }
     Err(throw_exception_ex(
         req,
-        "DateMalformedIntervalStringException",
+        ce.date_malformed_interval_string_exception,
         &format!("Failed to parse interval ({shown})"),
     ))
 }
@@ -343,14 +345,17 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
         let text = date_string.as_bytes();
         let (parsed, error) = lent(req, |l| parse_relative(l, text))?;
         if let Some((position, c, message)) = error {
-            let thrown = throw_error(
-                req,
-                "Error",
-                &format!(
-                    "Unknown or bad format ({}) at position {position} ({c}) while unserializing: {message}",
-                    String::from_utf8_lossy(text),
+            let thrown = match Throwables::of(req) {
+                Ok(ce) => throw_error(
+                    req,
+                    ce.error,
+                    &format!(
+                        "Unknown or bad format ({}) at position {position} ({c}) while unserializing: {message}",
+                        String::from_utf8_lossy(text),
+                    ),
                 ),
-            );
+                Err(fatal) => fatal,
+            };
             release(req, parsed)?;
             return Err(thrown);
         }
@@ -604,11 +609,14 @@ impl DateInterval {
     ) -> Result<Owner<Instance<DateInterval>>, Thrown> {
         match from_date_string(req, datetime)? {
             Ok(interval) => Ok(interval),
-            Err(refusal) => Err(throw_error(
-                req,
-                "DateMalformedIntervalStringException",
-                &refusal,
-            )),
+            Err(refusal) => {
+                let ce = Throwables::of(req)?;
+                Err(throw_error(
+                    req,
+                    ce.date_malformed_interval_string_exception,
+                    &refusal,
+                ))
+            }
         }
     }
 

@@ -15,6 +15,7 @@ use php_ext::values::walk;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::stmt;
+use crate::throwables::Throwables;
 
 /// `pdo_row_t`: the statement read, an owner of it.
 #[derive(Default)]
@@ -196,7 +197,8 @@ impl ObjectHandlers for Handlers {
         read: DimensionRead,
     ) -> Result<Owner<Value>, Thrown> {
         let Some(offset) = offset else {
-            return Err(throw_error(req, "Error", "Cannot append to PDORow offset"));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, "Cannot append to PDORow offset"));
         };
         let Some(stmt) = statement(req, object) else {
             return Ok(Owner::null());
@@ -228,7 +230,12 @@ impl ObjectHandlers for Handlers {
         let _ = object;
         value.give_up(req);
         name.give_up(req);
-        Err(throw_error(req, "Error", "Cannot write to PDORow property"))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(
+            req,
+            ce.error,
+            "Cannot write to PDORow property",
+        ))
     }
 
     fn write_dimension(
@@ -245,7 +252,8 @@ impl ObjectHandlers for Handlers {
         } else {
             "Cannot append to PDORow offset"
         };
-        Err(throw_error(req, "Error", message))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, message))
     }
 
     fn get_property_ptr_ptr(
@@ -323,7 +331,8 @@ impl ObjectHandlers for Handlers {
         name: &[u8],
     ) -> Result<(), Thrown> {
         let _ = (object, name);
-        Err(throw_error(req, "Error", "Cannot unset PDORow property"))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, "Cannot unset PDORow property"))
     }
 
     fn unset_dimension(
@@ -333,7 +342,8 @@ impl ObjectHandlers for Handlers {
         offset: &Value,
     ) -> Result<(), Thrown> {
         let _ = (object, offset);
-        Err(throw_error(req, "Error", "Cannot unset PDORow offset"))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, "Cannot unset PDORow offset"))
     }
 
     /// What `var_dump` shows, the table `row_get_properties_for` builds
@@ -369,9 +379,10 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
         let _ = object;
+        let ce = Throwables::of(req)?;
         Err(throw_exception_ex(
             req,
-            "PDOException",
+            ce.pdo_exception,
             "You may not create a PDORow manually",
         ))
     }

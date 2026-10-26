@@ -1062,7 +1062,11 @@ mod tests {
             let source = String::from_utf8_lossy(beneath.source()).into_owned();
             record(6, Phase::CompileString(source));
             match beneath.source() {
-                b"refused;" => Err(crate::api::raising::throw(req, "Exception", "refused")),
+                b"refused;" => Err(crate::api::raising::throw(
+                    req,
+                    crate::api::values::ClassId::EXCEPTION,
+                    "refused",
+                )),
                 _ => beneath.with_source(b"echo 'b';").serve(req),
             }
         }

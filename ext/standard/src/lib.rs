@@ -85,6 +85,7 @@ mod streamsfuncs;
 mod string;
 mod strnatcmp;
 mod syslog;
+mod throwables;
 mod r#type;
 mod uniqid;
 mod url;
@@ -789,6 +790,7 @@ pub fn extension() -> Extension {
         .on_update_long(b"default_socket_timeout", LongHandler::Any)
         .on_update_long(b"unserialize_max_depth", LongHandler::Any)
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .stream_hooks(STREAM_HOOKS)
         .info(basic_functions::minfo)
         .rshutdown(rshutdown)

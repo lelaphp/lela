@@ -16,6 +16,7 @@ use crate::handle::{
     hand_out, made, verify_handlers,
 };
 use crate::info::Assoc;
+use crate::throwables::Throwables;
 
 /// `php_curlm` less its `zend_object`.
 #[derive(Default)]
@@ -157,9 +158,10 @@ fn curl_multi_init(req: &mut Request) -> Result<Owner<Instance<CurlMultiHandle>>
     let session = req.state::<State>().session.clone();
     let Some(multi) = Multi::init(req, session, *object) else {
         object.give_up(req);
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "curl_multi_init(): Could not initialize a new cURL multi handle",
         ));
     };
@@ -287,9 +289,10 @@ fn curl_multi_select(
 ) -> Result<i64, Thrown> {
     let most = f64::from(i32::MAX) / 1000.0;
     if !(0.0..=most).contains(&timeout) {
+        let ce = Throwables::of(req)?;
         return Err(argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             2,
             &format!("must be between 0 and {most:.6}"),
         ));
@@ -524,7 +527,8 @@ fn curl_multi_close(
             "{}(): Attempt to close cURL handle from a callback",
             req.frames().active_function_name()
         );
-        return Err(throw_error(req, "Error", &text));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, &text));
     }
     let multi = multi_of(req, multi_handle)?;
     let handles = std::mem::take(&mut mh(req, multi_handle)?.easy);
@@ -653,7 +657,8 @@ fn curl_multi_setopt(
                     let tail = format!(
                         "must be a valid callback for option CURLMOPT_PUSHFUNCTION, {refusal}"
                     );
-                    return Err(argument_error(req, "TypeError", 2, &tail));
+                    let ce = Throwables::of(req)?;
+                    return Err(argument_error(req, ce.type_error, 2, &tail));
                 }
             };
             mh(req, multi_handle)?.push = Some(Owner::take(req, callable));
@@ -665,9 +670,10 @@ fn curl_multi_setopt(
         }
         _ => {
             mh(req, multi_handle)?.err = 6;
+            let ce = Throwables::of(req)?;
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 2,
                 "is not a valid cURL multi option",
             ));

@@ -14,6 +14,7 @@ use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
 use crate::constants as c;
 use crate::ffi::{Cx, Hook};
 use crate::handle::{Curl, Handler, HeaderTo, ReadFrom, WriteTo, dup, verify_handlers};
+use crate::throwables::Throwables;
 
 /// The `CurlHandle`'s callable `pick` names, with `ch` first and `rest`
 /// after, through [`call_held`]; the value returned, the `CurlHandle`'s
@@ -374,11 +375,14 @@ pub(crate) fn ssh_hostkey(cx: &mut Cx<'_>, object: PhpObject, keytype: c_int, ke
         #[allow(clippy::cast_possible_truncation)]
         ValueRef::Int(n) if n == c::CURLKHMATCH_OK || n == c::CURLKHMATCH_MISMATCH => n as c_int,
         _ => {
-            let thrown = throw_error(
-                cx.req,
-                "Error",
-                "The CURLOPT_SSH_HOSTKEYFUNCTION callback must return either CURLKHMATCH_OK or CURLKHMATCH_MISMATCH",
-            );
+            let thrown = match Throwables::of(cx.req) {
+                Ok(ce) => throw_error(
+                    cx.req,
+                    ce.error,
+                    "The CURLOPT_SSH_HOSTKEYFUNCTION callback must return either CURLKHMATCH_OK or CURLKHMATCH_MISMATCH",
+                ),
+                Err(fatal) => fatal,
+            };
             cx.raise(thrown);
             MISMATCH
         }

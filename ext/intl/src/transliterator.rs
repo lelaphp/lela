@@ -108,9 +108,10 @@ impl Transliterator {
 
     #[php(private, final)]
     fn __construct(req: &mut Request, _: This<Self>) -> Answer<()> {
+        let ce = crate::throwables::Throwables::of(req)?;
         Err(throw(
             req,
-            "Exception",
+            ce.exception,
             "An object of this type cannot be created with the new operator.",
         ))
     }
@@ -580,6 +581,7 @@ fn made(req: &mut Request, utrans: Trans) -> Answer<Option<Owner<Instance<Transl
 /// transliterator: the object's error reset, php's `Error` where it
 /// holds none.
 fn with<T>(req: &mut Request, object: PhpObject, f: impl FnOnce(&Trans) -> T) -> Answer<T> {
+    let ce = crate::throwables::Throwables::of(req)?;
     error::reset_object::<TransObject>(req, object);
     match object
         .native::<TransObject>(req)
@@ -588,7 +590,7 @@ fn with<T>(req: &mut Request, object: PhpObject, f: impl FnOnce(&Trans) -> T) ->
         Some(utrans) => Ok(f(utrans)),
         None => Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Found unconstructed transliterator",
         )),
     }
@@ -596,6 +598,7 @@ fn with<T>(req: &mut Request, object: PhpObject, f: impl FnOnce(&Trans) -> T) ->
 
 /// `Transliterator_clone_obj`: a clone of ICU's transliterator.
 fn clone_trans(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject>> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let copy = match object.native::<TransObject>(req) {
         Some(TransObject {
             utrans: Some(utrans),
@@ -604,13 +607,13 @@ fn clone_trans(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject>>
         _ => {
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Cannot clone uninitialized Transliterator",
             ));
         }
     };
     let Ok(copy) = copy else {
-        return Err(throw_error(req, "Error", "Failed to clone Transliterator"));
+        return Err(throw_error(req, ce.error, "Failed to clone Transliterator"));
     };
     let payload = TransObject {
         error: IntlError::default(),

@@ -478,10 +478,10 @@ fn closure_rows(
     let written = String::from_utf8_lossy(&decl.name.0).into_owned();
     if closure.fake {
         let named = match closure.scope {
-            Some(scope) => format!("{}::{written}", req.symbols().class_name(scope)),
-            None => written,
+            Some(scope) => bytes!(req.symbols().class_name(scope), b"::", written),
+            None => written.into_bytes(),
         };
-        let named = PhpString::new(req, named.as_bytes())?.into_value();
+        let named = PhpString::new(req, &named)?.into_value();
         set_row(req, out, b"function", named)?;
     } else {
         let named = PhpString::new(req, written.as_bytes())?.into_value();
@@ -1177,7 +1177,7 @@ impl Closure {
             return Err(throw_over_pending(
                 req,
                 Printing::Buffered,
-                "TypeError",
+                ClassId::TYPE_ERROR,
                 "Failed to create closure from callable",
             ));
         }
@@ -1188,14 +1188,14 @@ impl Closure {
                 return Err(throw_over_pending(
                     req,
                     Printing::Buffered,
-                    "TypeError",
+                    ClassId::TYPE_ERROR,
                     "Failed to create closure from callable",
                 ));
             }
             Err(refusal) => {
                 return Err(refusal.across(req, |req| {
                     let message = format!("Failed to create closure from callable: {refusal}");
-                    throw_over_pending(req, Printing::Buffered, "TypeError", &message)
+                    throw_over_pending(req, Printing::Buffered, ClassId::TYPE_ERROR, &message)
                 }));
             }
         };
@@ -1556,7 +1556,7 @@ impl Exception {
         let _ = this;
         Err(throw(
             req,
-            "Exception",
+            ClassId::EXCEPTION,
             "Cannot clone object using __clone()",
         ))
     }
@@ -1832,7 +1832,7 @@ impl Exception {
     #[php(final)]
     fn getTraceAsString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let trace = req.trace_string_of(this.object());
-        PhpString::new(req, trace.as_bytes())
+        PhpString::new(req, &trace)
     }
 
     /// `ZEND_METHOD(Exception, __toString)`: the class, the message, the
@@ -2379,10 +2379,14 @@ fn valid_closure_binding(
             && !req.symbols().instance_of(this.class(), own)
         {
             let method = req.declared_name(info.function);
-            let message = format!(
-                "Cannot bind method {}::{method}() to object of class {}, this will be an error in PHP 9",
+            let message = bytes!(
+                b"Cannot bind method ",
                 req.symbols().class_name(own),
-                req.symbols().class_name(this.class())
+                b"::",
+                method,
+                b"() to object of class ",
+                req.symbols().class_name(this.class()),
+                b", this will be an error in PHP 9"
             );
             warning(req, &message);
             return false;
@@ -2404,9 +2408,10 @@ fn valid_closure_binding(
         && Some(scope) != info.scope
         && req.class_is_internal(scope)
     {
-        let message = format!(
-            "Cannot bind closure to scope of internal class {}, this will be an error in PHP 9",
-            req.symbols().class_name(scope)
+        let message = bytes!(
+            b"Cannot bind closure to scope of internal class ",
+            req.symbols().class_name(scope),
+            b", this will be an error in PHP 9"
         );
         warning(req, &message);
         return false;

@@ -39,6 +39,7 @@ mod flatfile;
 mod inifile;
 mod link;
 mod natives;
+mod throwables;
 
 use php_ext::abi::{Extension, ExtensionBuilder, Lent, ObjectHandlers, Pool, Refusals};
 use php_ext::attr::php_class;
@@ -83,7 +84,12 @@ pub fn extension() -> Extension {
         ])
         .class::<Connection>()
         .request_state::<State>()
-        .engine_state(|_| Ok(Pooled(Pool::new(POOLED))))
+        .engine_state(|start| {
+            Ok(Pooled {
+                pool: Pool::new(POOLED),
+                throwables: throwables::Throwables::start(start)?,
+            })
+        })
         .deactivate(deactivate)
         .engine_end(engine_end)
         .ini(vec![IniDecl {
@@ -185,7 +191,11 @@ struct State {
 }
 
 /// The engine's pool of `dba_popen` links, keyed as php keys them.
-struct Pooled(Pool<Vec<u8>, link::Kept>);
+struct Pooled {
+    pool: Pool<Vec<u8>, link::Kept>,
+    /// The classes the natives raise, resolved at the same start.
+    pub(crate) throwables: throwables::Throwables,
+}
 
 /// The idle persistent links the pool keeps; php bounds them by nothing
 /// but the process, and this is the engine's own streams' bound.
@@ -205,7 +215,7 @@ fn deactivate(req: &mut Request) {
         };
         let back = req
             .engine::<Pooled>()
-            .and_then(|Pooled(pool)| pool.give_back(key, kept));
+            .and_then(|Pooled { pool, .. }| pool.give_back(key, kept));
         if let Some(back) = back
             && let Ok(link) = back.take_up(req)
         {
@@ -228,7 +238,7 @@ fn deactivate(req: &mut Request) {
 fn engine_end(req: &mut Request) {
     let idle = req
         .engine::<Pooled>()
-        .map(|Pooled(pool)| pool.drain())
+        .map(|Pooled { pool, .. }| pool.drain())
         .unwrap_or_default();
     for (_, kept) in idle {
         if let Ok(link) = kept.take_up(req) {

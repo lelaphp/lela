@@ -223,8 +223,8 @@ fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
         .class_decl(class)
         .map_or(EnumBacking::Pure, |decl| decl.backing);
     if backing == EnumBacking::Pure {
-        let name = req.symbols().class_name(class);
-        return Err(error(req, &format!("Enum {name} is not backed")));
+        let message = bytes!(b"Enum ", req.symbols().class_name(class), b" is not backed");
+        return Err(error(req, &message));
     }
     let given = req.frames().argument(1).unwrap_or_default().deref();
     let wanted = backing_key(req, &given, backing)?;
@@ -280,7 +280,7 @@ fn not_backing(
         req.release(wanted);
         return Ok(Value::null());
     }
-    let class_name = req.symbols().class_name(class);
+    let class_name = req.symbols().class_name(class).to_vec();
     let shown = match wanted.as_int() {
         Some(n) => n.to_string(),
         None => format!(
@@ -291,6 +291,10 @@ fn not_backing(
     req.release(wanted);
     Err(value_error(
         req,
-        &format!("{shown} is not a valid backing value for enum {class_name}"),
+        &bytes!(
+            shown,
+            b" is not a valid backing value for enum ",
+            class_name
+        ),
     ))
 }

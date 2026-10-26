@@ -14,6 +14,7 @@ use crate::doc::{NODE, NodeAt, Obj, fixed};
 use crate::ffi::{
     self, NODE_ASP, NODE_COMMENT, NODE_DOCTYPE, NODE_JSTE, NODE_PHP, NODE_ROOT, NODE_TEXT, Step,
 };
+use crate::throwables::Throwables;
 use crate::{DocId, generation, retain, with_doc};
 
 /// `tidy_node_validate`: the node an object names and its document, or
@@ -47,16 +48,18 @@ fn of(req: &mut Request, object: PhpObject) -> Result<(DocId, ffi::Node), Thrown
         .native_mut::<Obj>(req)
         .and_then(|obj| Some((obj.doc?, obj.node?)));
     let Some((id, at)) = named else {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "tidyNode object is not initialized",
         ));
     };
     if generation(req, id) != Some(at.generation) {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "tidyNode object is no longer valid after its document was reparsed",
         ));
     }
@@ -257,9 +260,10 @@ impl tidyNode {
     #[php(private)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let _ = this;
+        let ce = Throwables::of(req)?;
         Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "You should not create a tidyNode manually",
         ))
     }

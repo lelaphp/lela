@@ -5,6 +5,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use crate::throwables::Throwables;
 use php_ext::abi::{OrFalse, Path, Union};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, argument_error, docref};
@@ -200,7 +201,8 @@ fn iptcembed(
         return Ok(Union::B(false));
     };
     if data.len() >= usize::MAX - PSHEADER.len() - 1026 {
-        return Err(argument_error(req, "ValueError", 1, "is too large"));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 1, "is too large"));
     }
     let Ok(mut fp) = std::fs::File::open(&jpeg) else {
         let text = format!(

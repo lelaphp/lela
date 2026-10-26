@@ -85,6 +85,7 @@
 use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 
+use crate::throwables::Throwables;
 use php_ext::abi::{OrFalse, Passed, Path, Raw, True, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{callable_checked, with_string};
@@ -482,7 +483,8 @@ fn stream_context_set_option(
         Passed::Omitted => None,
     };
     let refuse = |req: &mut Request, position: u32, tail: &str| {
-        Err(argument_error(req, "ValueError", position, tail))
+        let ce = Throwables::of(req)?;
+        Err(argument_error(req, ce.value_error, position, tail))
     };
     match wrapper_or_options {
         Union::A(options) => {

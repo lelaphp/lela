@@ -718,7 +718,7 @@ fn libxml_set_streams_context(req: &mut Request, context: Untyped<Value>) -> Res
         return Err(arg_type_error(
             req,
             1,
-            &format!("be of type resource, {name} given"),
+            &[b"be of type resource, ".as_slice(), &name, b" given"].concat(),
         ));
     };
     // `zend_fetch_resource_ex(arg, "Stream-Context", le_stream_context)`.

@@ -10,6 +10,7 @@ use php_ext_pdo_sqlite::ffi::{SQLITE_OK, Stmt};
 
 use crate::conn::{Taken, column_value, fail, give_back, not_ready, remove_stmt, take};
 use crate::stmt::{self, Step, last_error, place};
+use crate::throwables::Throwables;
 
 /// Where a `SQLite3Result`'s statement came from, `is_prepared_statement`: a
 /// `query()` finalizes its own statement, an `execute()` resets the
@@ -182,9 +183,10 @@ impl SQLite3Result {
     #[php(private)]
     fn __construct(req: &mut Request, this: This<Self>) -> Answer<()> {
         let _ = this;
+        let ce = Throwables::of(req)?;
         Err(throw(
             req,
-            "Exception",
+            ce.exception,
             "SQLite3Result cannot be directly instantiated",
         ))
     }

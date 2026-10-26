@@ -129,7 +129,12 @@ fn to_fd_set(
     match refused {
         None => Ok(Some(fds)),
         Some(Refused::Given(given)) => {
-            let tail = format!("only have elements of type Socket, {given} given");
+            let tail = [
+                b"only have elements of type Socket, ".as_slice(),
+                &given,
+                b" given",
+            ]
+            .concat();
             Err(arg_type_error(req, position, &tail))
         }
         Some(Refused::Closed) => Err(closed_in_set(req, position)),
@@ -139,14 +144,18 @@ fn to_fd_set(
 /// `php_sock_array_to_fd_set`'s `TypeError` for a closed socket in the
 /// array at argument `position`.
 fn closed_in_set(req: &mut Request, position: u32) -> Thrown {
-    argument_error(req, "TypeError", position, "contains a closed socket")
+    let ce = match crate::throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    argument_error(req, ce.type_error, position, "contains a closed socket")
 }
 
 /// Why [`to_fd_set`] refused an element, read in the walk and raised
 /// after it.
 enum Refused {
     /// An element that is no socket, by its type's name.
-    Given(String),
+    Given(Vec<u8>),
     /// A socket closed already.
     Closed,
 }
@@ -802,9 +811,10 @@ fn packet_name(
         .ok()
         .and_then(|i| nix::net::if_::if_indextoname(i).ok());
     let Some(name) = named else {
+        let ce = crate::throwables::Throwables::of(req)?;
         return Err(php_ext::raising::throw_error(
             req,
-            "Error",
+            ce.error,
             "invalid interface index",
         ));
     };
@@ -967,13 +977,14 @@ fn target(
     unix_at: u32,
     what: &str,
 ) -> Result<Option<Addr>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let object = socket.object();
     match family(req, socket)? {
         libc::AF_INET6 => {
             let Some(port) = port else {
                 return Err(argument_error(
                     req,
-                    "ValueError",
+                    ce.value_error,
                     port_at,
                     "cannot be null when the socket type is AF_INET6",
                 ));
@@ -985,7 +996,7 @@ fn target(
             let Some(port) = port else {
                 return Err(argument_error(
                     req,
-                    "ValueError",
+                    ce.value_error,
                     port_at,
                     "cannot be null when the socket type is AF_INET",
                 ));

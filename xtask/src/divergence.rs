@@ -16,7 +16,10 @@
 //! ([`Registry::pinning`]; harness §4.3, #1650). A row may name the
 //! [`Digests`] of both sides' lines it was ruled on, and accepts its
 //! difference only while both stand; a `trace:dump/` row must (#3291's
-//! ruling). A person
+//! ruling). A row may name the oracle regime that proves its cause,
+//! `proven_at`, and the witness lane runs each fence it holds again under
+//! the oracle in that regime, failing the fence where the oracle's run is
+//! still not the engine's (#3365's ruling, #3369). A person
 //! writes a row and its reason; `compare`'s caller or the fuzzer may propose
 //! one with status `open` and an empty reason; the `divergence-reason`
 //! instrument fails an accepted row without a reason, a `by-design` row
@@ -130,6 +133,11 @@ pub struct Divergence {
     /// Both sides' lines as the row was ruled on, where it names them:
     /// the difference it accepts is that one alone (#3291).
     pub digests: Option<Digests>,
+    /// The oracle regime its cause is proven at, an `oracle.toml`
+    /// `[regime.<name>]`, where it names one: each fence the row holds is
+    /// run again under the oracle in it beside the fence's own, and fails
+    /// where that run is not the engine's (#3365, #3369).
+    pub proven_at: Option<String>,
 }
 
 /// The two sides a comparison holds lines of.
@@ -275,6 +283,8 @@ struct Row {
     oracle: Option<Sha256>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     engine: Option<Sha256>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proven_at: Option<String>,
 }
 
 impl TryFrom<Row> for Divergence {
@@ -302,6 +312,20 @@ impl TryFrom<Row> for Divergence {
                 "the row {id} names one side's digest and not the other's; a row pins both, `oracle` and `engine`, or neither (#3291)"
             ),
         };
+        // The witness lane is the one that runs an id again under a
+        // regime, so a proven row holds fences alone: a witness row's own
+        // id, or a trace row's covered ones.
+        let witness = |id: &Id| id.0.starts_with(Kind::Witness.prefix());
+        let fences = if kind == Kind::Trace {
+            !covers.is_empty() && covers.iter().all(witness)
+        } else {
+            kind == Kind::Witness
+        };
+        if row.proven_at.is_some() && !fences {
+            bail!(
+                "the row {id} names `proven_at`, and an id it holds is no fence; the witness lane runs a fence again under a regime, and no lane runs another id so (#3369)"
+            );
+        }
         Ok(Divergence {
             id,
             kind,
@@ -312,6 +336,7 @@ impl TryFrom<Row> for Divergence {
             since: row.since,
             covers,
             digests,
+            proven_at: row.proven_at,
         })
     }
 }
@@ -329,6 +354,7 @@ impl From<Divergence> for Row {
             covers: row.covers.into_iter().map(|id| id.0).collect(),
             oracle: row.digests.map(|d| d.oracle),
             engine: row.digests.map(|d| d.engine),
+            proven_at: row.proven_at,
         }
     }
 }
@@ -692,6 +718,7 @@ impl Registry {
             since,
             covers: BTreeSet::new(),
             digests: None,
+            proven_at: None,
         };
         let text = toml::to_string(&Rows {
             divergence: std::slice::from_ref(&row),

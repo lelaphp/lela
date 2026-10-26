@@ -25,6 +25,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use crate::api::values::ClassId;
 use std::ops::ControlFlow;
 
 use php_macros::php_function;
@@ -985,7 +986,7 @@ fn define(
     if bytes.windows(2).any(|pair| pair == b"::") {
         return Err(argument_error(
             req,
-            "ValueError",
+            ClassId::VALUE_ERROR,
             1,
             "cannot be a class constant",
         ));
@@ -1002,7 +1003,7 @@ fn define(
         if !constant_array_is_acyclic(req, array)? {
             return Err(argument_error(
                 req,
-                "ValueError",
+                ClassId::VALUE_ERROR,
                 2,
                 "cannot be a recursive array",
             ));
@@ -1811,18 +1812,13 @@ fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize)
 /// case name, `zend_enum_fetch_case_name`, and none of its properties.
 #[inline(never)]
 fn dump_enum(req: &mut Request, common: &str, object: PhpObject) {
-    let class = req.symbols().class_name(object.class());
+    let class = req.symbols().class_name(object.class()).to_vec();
     let case = object
         .prop(req, b"name")
         .and_then(|name| name.as_str_bytes().map(<[u8]>::to_vec))
         .unwrap_or_default();
-    req.response_mut().write(
-        format!(
-            "{common}enum({class}::{})\n",
-            String::from_utf8_lossy(&case)
-        )
-        .as_bytes(),
-    );
+    req.response_mut()
+        .write(&bytes!(common, b"enum(", class, b"::", case, b")\n"));
 }
 
 /// `Z_OBJ_HANDLER_P(struc, get_class_name)`, then

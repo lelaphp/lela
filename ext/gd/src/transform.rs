@@ -19,6 +19,7 @@ use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi::{Ft, Im, Rect, affine_concat, affine_matrix};
 use crate::image::{GdImage, gd, im, int, wrap};
+use crate::throwables::Throwables;
 
 /// `imagerotate(GdImage $image, float $angle, int $background_color):
 /// GdImage|false`: libgd's interpolated rotation.
@@ -539,7 +540,8 @@ fn imagecrop(
         ),
     ];
     if let Some((_, text)) = checks.iter().find(|(bad, _)| *bad) {
-        return Err(argument_error(req, "ValueError", 2, text));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 2, text));
     }
     let cropped = gd(req, || im.crop(r))?;
     wrap(req, cropped)
@@ -687,12 +689,14 @@ fn matrix(
                     && (*slot < f64::from(i32::MIN) || *slot > f64::from(i32::MAX))
                 {
                     let text = format!("element {i} must be between {} and {}", i32::MIN, i32::MAX);
-                    return Err(argument_error(req, "ValueError", at, &text));
+                    let ce = Throwables::of(req)?;
+                    return Err(argument_error(req, ce.value_error, at, &text));
                 }
             }
             _ => {
                 let text = format!("contains invalid type for element {i}");
-                return Err(argument_error(req, "TypeError", position, &text));
+                let ce = Throwables::of(req)?;
+                return Err(argument_error(req, ce.type_error, position, &text));
             }
         }
     }
@@ -840,7 +844,8 @@ fn imageaffinematrixconcat(
                 ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Str(_)
             ) {
                 let text = format!("contains invalid type for element {i}");
-                return Err(argument_error(req, "TypeError", position, &text));
+                let ce = Throwables::of(req)?;
+                return Err(argument_error(req, ce.type_error, position, &text));
             }
             out[usize::try_from(i).unwrap_or(0)] = to_double(req, &value)?;
         }

@@ -19,6 +19,7 @@ use php_ext::values::{FreshString, Key, Owner, PhpObject, PhpString, Value, Valu
 use crate::constants::{ZLIB_ENCODING_DEFLATE, ZLIB_ENCODING_GZIP, ZLIB_ENCODING_RAW};
 use crate::encode::size_guess;
 use crate::ffi::{Deflate, Flush, Inflate, Status};
+use crate::throwables::Throwables;
 
 /// `CHUNK_SIZE` of `inflate_add`: its least buffer and its step.
 const CHUNK_SIZE: usize = 8192;
@@ -221,7 +222,12 @@ impl Options {
                 Err(arg_type_error(
                     req,
                     2,
-                    &format!("be of type zero-terminated string or array, {given} given"),
+                    &[
+                        b"be of type zero-terminated string or array, ".as_slice(),
+                        &given,
+                        b" given",
+                    ]
+                    .concat(),
                 ))
             }
         }
@@ -251,7 +257,8 @@ fn made<P: 'static + Send>(
 ) -> Result<Owner<PhpObject>, Thrown> {
     let Some(id) = lookup_class(req, class)? else {
         let text = format!("Class \"{}\" not found", String::from_utf8_lossy(class));
-        return Err(throw_error(req, "Error", &text));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, &text));
     };
     let object = new_object(req, id)?;
     if let Some(payload) = object.native_mut::<P>(req) {
@@ -430,7 +437,8 @@ fn deflate_add(
         return Ok(OrFalse::Value(PhpString::new(req, b"")?));
     }
     let Some(mut stream) = context.payload_mut(req)?.0.take() else {
-        return Err(throw_error(req, "Error", "DeflateContext has no stream"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "DeflateContext has no stream"));
     };
     let deflated = deflate_rounds(req, &mut stream, input, flush);
     context.payload_mut(req)?.0 = Some(stream);
@@ -670,7 +678,8 @@ fn inflate_add(
     let input = data.as_bytes();
     let payload = context.payload_mut(req)?;
     let Some(mut stream) = payload.stream.take() else {
-        return Err(throw_error(req, "Error", "InflateContext has no stream"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "InflateContext has no stream"));
     };
     let (mut dictionary, mut status) = (payload.dictionary.take(), payload.status);
     let inflated = (|| {

@@ -34,11 +34,13 @@ mod functions;
 mod heap;
 mod iterators;
 mod observer;
+mod throwables;
 
 pub(crate) use iterators::{RecursiveIterator, SeekableIterator};
 
 use std::ops::ControlFlow;
 
+use crate::throwables::Throwables;
 use php_ext::abi::{
     Dependency, DependencyKind, Extension, ExtensionBuilder, FromArgument, ObjectHandlers, Raw, Std,
 };
@@ -159,6 +161,7 @@ pub fn extension() -> Extension {
             version: None,
         }])
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .info(spl_info)
         .build("SPL")
 }
@@ -688,9 +691,10 @@ pub(crate) fn record_end(
     let Some(at) = broke_at else {
         return finished;
     };
+    let ce = Throwables::of(req)?;
     let broke = throw_exception_ex(
         req,
-        "UnexpectedValueException",
+        ce.unexpected_value_exception,
         &format!("Error at offset {at} of {len} bytes"),
     );
     Err(match finished {
@@ -712,7 +716,8 @@ fn integer_member(req: &mut Request, object: PhpObject, h: i64) -> Result<(), Th
         DynamicProperties::Allowed => {}
         DynamicProperties::Forbidden => {
             let message = format!("Cannot create dynamic property {class}::${h}");
-            return Err(throw_error(req, "Error", &message));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, &message));
         }
         DynamicProperties::Deprecated => {
             let message = format!("Creation of dynamic property {class}::${h} is deprecated");

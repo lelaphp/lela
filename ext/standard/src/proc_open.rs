@@ -631,7 +631,12 @@ fn redirect_descriptor(
     };
     let Some(target) = target.as_int() else {
         let name = value_name(req, &target);
-        let text = format!("Redirection target must be of type int, {name} given");
+        let text = [
+            b"Redirection target must be of type int, ".as_slice(),
+            name.as_slice(),
+            b" given".as_slice(),
+        ]
+        .concat();
         return Err(value_error(req, &text));
     };
     let found = done

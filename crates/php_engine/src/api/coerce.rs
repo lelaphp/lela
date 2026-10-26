@@ -380,7 +380,7 @@ pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown>
                 }
                 _ => None,
             };
-            let thrown = crate::api::raising::throw_error(req, "Error", &message);
+            let thrown = crate::api::raising::throw_error(req, ClassId::ERROR, &message);
             if let Some(made) = made {
                 made.give_up(req);
             }
@@ -494,7 +494,7 @@ pub fn is_type(value: &Value, tag: TypeTag) -> bool {
 /// so a native that words one by hand words it with this and not with
 /// [`type_name`], which says `bool` where php says `true`.
 #[must_use]
-pub fn value_name(req: &Request, value: &Value) -> String {
+pub fn value_name(req: &Request, value: &Value) -> Vec<u8> {
     crate::ops::value_name(req, value)
 }
 
@@ -524,7 +524,7 @@ pub fn value_name(req: &Request, value: &Value) -> String {
 /// bool(false)
 /// ```
 #[must_use]
-pub fn type_name(req: &Request, value: &Value) -> String {
+pub fn type_name(req: &Request, value: &Value) -> Vec<u8> {
     crate::ops::type_name(req, value)
 }
 
@@ -928,7 +928,7 @@ fn hold(req: &mut Request, value: &Value, ty: &Type, position: u32) -> Result<He
         return Err(arg_type_error(
             req,
             position,
-            &format!("be of type {declared}, {given} given"),
+            &bytes!("be of type ", declared, ", ", given, " given"),
         ));
     };
     if null {
@@ -1339,11 +1339,13 @@ pub(crate) fn resolved_type_name(req: &Request, scopes: Scopes, ty: &Type) -> St
     let Some(own) = scopes.own else {
         return php_unit::type_to_string(ty);
     };
-    let own_name = req.symbols().class_name(own);
+    // The type's text is a `String` here; a name no UTF-8 reads prints
+    // as it does in the type's other renderings.
+    let own_name = String::from_utf8_lossy(req.symbols().class_name(own));
     let parent_name = req
         .symbols()
         .class_parent(own)
-        .map(|parent| req.symbols().class_name(parent));
+        .map(|parent| String::from_utf8_lossy(req.symbols().class_name(parent)));
     let resolved = resolve_named(ty, &own_name, parent_name.as_deref());
     let called = scopes.called.map_or_else(
         || String::from("static"),

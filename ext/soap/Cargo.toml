@@ -39,3 +39,6 @@ php_ext = { path = "../../crates/php_ext", features = ["test"] }
 # `zend_startup_module_ex` refuses an extension whose required one is not
 # started (#1925).
 php_ext_lexbor = { path = "../lexbor" }
+# What standard's feature brings into every bundle soap is in, whose
+# `Random\RandomException` soap's engine start resolves.
+php_ext_random = { path = "../random" }

@@ -1385,3 +1385,26 @@ fn rmdir(req: &mut Request, url: &[u8]) -> Result<bool, Thrown> {
     }
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{MAXPATHLEN, entry_name};
+
+    #[test]
+    fn a_listed_line_loses_its_trailing_whitespace_and_keeps_its_last_byte() {
+        assert_eq!(entry_name(b"file \r\n"), b"file");
+        assert_eq!(entry_name(b"a\t\r\n"), b"a");
+        assert_eq!(entry_name(b"file\n"), b"file");
+    }
+
+    #[test]
+    fn a_listed_name_is_read_to_its_first_nul() {
+        assert_eq!(entry_name(b"ab\0cd\r\n"), b"ab");
+    }
+
+    #[test]
+    fn a_listed_name_is_held_to_the_bytes_d_name_keeps() {
+        let line = vec![b'a'; MAXPATHLEN];
+        assert_eq!(entry_name(&line), vec![b'a'; MAXPATHLEN - 1]);
+    }
+}

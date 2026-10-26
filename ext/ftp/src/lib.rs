@@ -27,6 +27,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod ftp;
+mod throwables;
 
 use php_ext::abi::{
     Extension, ExtensionBuilder, GcTable, Instance, ObjectHandlers, OrFalse, Path, Ref, Refusals,
@@ -42,6 +43,7 @@ use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::ftp::{Ftp, Kind, Progress, Verb};
+use crate::throwables::Throwables;
 
 /// The constants `register_ftp_symbols` registers.
 ///
@@ -131,6 +133,7 @@ pub fn extension() -> Extension {
             ftp_get_option::declared(),
         ])
         .class::<Connection>()
+        .engine_state(Throwables::start)
         .info(ftp_info)
         .build("ftp")
 }
@@ -260,7 +263,11 @@ impl ObjectHandlers for Handlers {
 
 /// `GET_FTPBUF`: the `ValueError` for a closed connection.
 fn closed(req: &mut Request) -> Thrown {
-    throw(req, "ValueError", "FTP\\Connection is already closed")
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    throw(req, ce.value_error, "FTP\\Connection is already closed")
 }
 
 /// What lending a session came to: `f`'s answer, or `None` where it is
@@ -388,9 +395,10 @@ fn bounded_timeout(req: &mut Request, timeout: i64, from: TimeoutFrom) -> Result
 fn connection(req: &mut Request, session: Ftp) -> Result<Owner<Instance<Connection>>, Thrown> {
     let Some(class) = lookup_class(req, b"FTP\\Connection")? else {
         session.close(req);
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Class \"FTP\\Connection\" not found",
         ));
     };
@@ -1771,9 +1779,10 @@ fn ftp_close(req: &mut Request, ftp: Instance<Connection>) -> Result<bool, Throw
         Conn::Closed => Ok(true),
         Conn::Lent => {
             **ftp.payload_mut(req)? = Conn::Lent;
+            let ce = Throwables::of(req)?;
             Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Cannot close FTP\\Connection while a transfer is in progress",
             ))
         }
@@ -1852,8 +1861,8 @@ fn ftp_set_option(
     let opt = Opt::of(req, option)?;
     let wrong = |req: &mut Request, ty: &str, name: &str| {
         let given = value_name(req, &value);
-        let tail = format!("be of type {ty} for the {name} option, {given} given");
-        arg_type_error(req, 3, &tail)
+        let tail = format!("be of type {ty} for the {name} option, ");
+        arg_type_error(req, 3, &[tail.as_bytes(), &given, b" given"].concat())
     };
     let setting = match (opt, value.as_ref()) {
         (Opt::Timeout, ValueRef::Int(n)) => {

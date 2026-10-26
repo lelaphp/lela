@@ -21,6 +21,7 @@ use super::sort::key_value;
 use super::stack::Stack;
 use super::{HT_MAX_SIZE, copied, give_up_rows, returned};
 use crate::math::math_round;
+use crate::throwables::Throwables;
 
 /// `string|int|float`, a bound of `range`.
 type RangeBound = Union<PhpString, Union<i64, f64>>;
@@ -227,7 +228,8 @@ fn merge_recursive(
             && dest_entry.as_php_ref().is_some()
             && dest_entry.refcount() % 2 == 1;
         if thash.is_some_and(|thash| thash.is_recursive()) || same_slot {
-            return Err(throw_error(req, "Error", "Recursion detected"));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, "Recursion detected"));
         }
         // `convert_to_array(dest_zval)` then `SEPARATE_ZVAL`: a `null` is
         // `[null]`, a scalar `[scalar]`, and an array a copy of its own.
@@ -423,7 +425,8 @@ fn replace_recursive(
             return Ok(ControlFlow::Continue(()));
         };
         if dest_array.is_recursive() || src_array.is_recursive() {
-            return Err(throw_error(req, "Error", "Recursion detected"));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, "Recursion detected"));
         }
         let mut nested = dest_array.copy(req)?;
         dest_array.protect();
@@ -529,17 +532,19 @@ fn range_input(
 
 fn finite(req: &mut Request, position: u32, d: f64) -> Result<f64, Thrown> {
     if d.is_infinite() {
+        let ce = Throwables::of(req)?;
         return Err(argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             position,
             "must be a finite number, INF provided",
         ));
     }
     if d.is_nan() {
+        let ce = Throwables::of(req)?;
         return Err(argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             position,
             "must be a finite number, NAN provided",
         ));
@@ -659,17 +664,19 @@ fn range(
         match given {
             Union::B(d) => {
                 if d.is_infinite() {
+                    let ce = Throwables::of(req)?;
                     return Err(argument_error(
                         req,
-                        "ValueError",
+                        ce.value_error,
                         3,
                         "must be a finite number, INF provided",
                     ));
                 }
                 if d.is_nan() {
+                    let ce = Throwables::of(req)?;
                     return Err(argument_error(
                         req,
-                        "ValueError",
+                        ce.value_error,
                         3,
                         "must be a finite number, NAN provided",
                     ));
@@ -689,9 +696,10 @@ fn range(
                 step = n;
                 if step < 0 {
                     if step == i64::MIN {
+                        let ce = Throwables::of(req)?;
                         return Err(argument_error(
                             req,
-                            "ValueError",
+                            ce.value_error,
                             3,
                             &format!("must be greater than {}", i64::MIN),
                         ));
@@ -707,7 +715,8 @@ fn range(
         }
         #[allow(clippy::float_cmp)]
         if step_double == 0.0 {
-            return Err(argument_error(req, "ValueError", 3, "cannot be 0"));
+            let ce = Throwables::of(req)?;
+            return Err(argument_error(req, ce.value_error, 3, "cannot be 0"));
         }
     }
     let (mut start, low) = range_input(req, user_start, 1, "start")?;
@@ -757,18 +766,26 @@ fn range(
 }
 
 fn boundary_error(req: &mut Request) -> Thrown {
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     argument_error(
         req,
-        "ValueError",
+        ce.value_error,
         3,
         "must be less than the range spanned by argument #1 ($start) and argument #2 ($end)",
     )
 }
 
 fn negative_step_error(req: &mut Request) -> Thrown {
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     argument_error(
         req,
-        "ValueError",
+        ce.value_error,
         3,
         "must be greater than 0 for increasing ranges",
     )

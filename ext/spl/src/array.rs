@@ -39,6 +39,7 @@ use php_ext::values::{
     Value, ValueRef,
 };
 
+use crate::throwables::Throwables;
 use crate::{
     ArrayAccess, Countable, Iterator, IteratorAggregate, Record, RecursiveIterator,
     SeekableIterator, Serializable,
@@ -414,9 +415,10 @@ impl ArrayObject {
         let this = this.object();
         if is_object(req, this)? {
             let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!("Cannot append properties to objects, use {class}::offsetSet() instead"),
             ));
         }
@@ -803,25 +805,28 @@ impl ArrayObject {
             stored,
             members.filter(|m| m.as_array().is_some()),
         ) else {
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "UnexpectedValueException",
+                ce.unexpected_value_exception,
                 "Incomplete or ill-typed serialization data",
             ));
         };
         if class.is_some_and(|c| !matches!(c.as_ref(), ValueRef::Null | ValueRef::Str(_))) {
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "UnexpectedValueException",
+                ce.unexpected_value_exception,
                 "Incomplete or ill-typed serialization data",
             ));
         }
         set_flags_and_self(req, this, flags)?;
         if flags & IS_SELF == 0 {
             if stored.as_array().is_none() && stored.as_object().is_none() {
+                let ce = Throwables::of(req)?;
                 return Err(throw(
                     req,
-                    "InvalidArgumentException",
+                    ce.invalid_argument_exception,
                     "Passed variable is not an array or object",
                 ));
             }
@@ -831,18 +836,20 @@ impl ArrayObject {
         if let Some(name) = class.and_then(|c| c.as_str_bytes().map(<[u8]>::to_vec)) {
             let shown = String::from_utf8_lossy(&name).into_owned();
             let Some(found) = autoload(req, &name)? else {
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "UnexpectedValueException",
+                    ce.unexpected_value_exception,
                     &format!(
                         "Cannot deserialize ArrayObject with iterator class '{shown}'; no such class exists"
                     ),
                 ));
             };
             if !crate::is_a(req, found, b"Iterator") {
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "UnexpectedValueException",
+                    ce.unexpected_value_exception,
                     &format!(
                         "Cannot deserialize ArrayObject with iterator class '{shown}'; this class does not implement the Iterator interface"
                     ),
@@ -1193,9 +1200,10 @@ impl ArrayIterator {
                 return Ok(());
             }
         }
+        let ce = Throwables::of(req)?;
         Err(throw_exception_ex(
             req,
-            "OutOfBoundsException",
+            ce.out_of_bounds_exception,
             &format!("Seek position {position} is out of range"),
         ))
     }
@@ -1296,7 +1304,7 @@ impl RecursiveArrayIterator {
                 return Ok(Some(Owner::take(req, object).into_instance()));
             }
         }
-        let child = instantiate(req, this.class(), &[value, Value::int(flags)])?;
+        let child = instantiate(req, this.class(), &[value, Value::int(flags)], &[])?;
         Ok(Some(child.into_instance()))
     }
 }
@@ -1695,15 +1703,16 @@ fn hash_key(req: &mut Request, offset: &Value) -> Result<Option<Key>, Thrown> {
 
 /// `zend_illegal_container_offset(object->ce->name, offset, read)`.
 fn illegal(req: &mut Request, object: PhpObject, offset: &Value, read: DimensionRead) -> Thrown {
-    let class = req.symbols().class_name(object.class());
+    let class = req.symbols().class_name(object.class()).to_vec();
     illegal_container_offset(req, &class, offset, read)
 }
 
 fn sorting_refused(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
     if payload(req, object)?.sorting > 0 {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Modification of ArrayObject during sorting is prohibited",
         ));
     }
@@ -1864,7 +1873,8 @@ fn refuse_readonly(req: &mut Request, backing: PhpObject, key: &Key) -> Result<(
                 String::from_utf8_lossy(&declaring),
                 String::from_utf8_lossy(&name)
             );
-            return Err(throw_error(req, "Error", &message));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, &message));
         }
         at = req.symbols().class_parent(class);
     }
@@ -2706,9 +2716,10 @@ fn set_array(
                     crate::class_name(req, other.class()),
                     crate::class_name(req, object.class()),
                 );
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "InvalidArgumentException",
+                    ce.invalid_argument_exception,
                     &format!(
                         "Overloaded object of type {} is not compatible with {}",
                         String::from_utf8_lossy(&of),
@@ -2719,9 +2730,10 @@ fn set_array(
             if crate::is_a(req, other.class(), b"UnitEnum") {
                 let class =
                     String::from_utf8_lossy(&crate::class_name(req, object.class())).into_owned();
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "InvalidArgumentException",
+                    ce.invalid_argument_exception,
                     &format!("Enums are not compatible with {class}"),
                 ));
             }
@@ -2748,7 +2760,7 @@ fn array_or_object(req: &mut Request, given: Value, position: u32) -> Result<Val
     Err(php_ext::raising::arg_type_error(
         req,
         position,
-        &format!("be of type array, {name} given"),
+        &[b"be of type array, ".as_slice(), &name, b" given"].concat(),
     ))
 }
 
@@ -2784,9 +2796,10 @@ fn sort_through(
     name.give_up(req);
     let Some(callable) = callable else {
         let shown = String::from_utf8_lossy(native).into_owned();
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             &format!("Cannot call method {shown} when function {shown} is disabled"),
         ));
     };

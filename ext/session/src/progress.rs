@@ -78,6 +78,62 @@ pub(crate) fn hook(req: &mut Request, beneath: Beneath<'_, chain::Upload>) -> Re
 
 /// The session's own work over one step of the upload; `false` once the
 /// session asked for the upload to be cancelled.
+///
+/// Once the session's `RINIT` was served, `PG(modules_activated)`, a step
+/// is nothing (`Z/ext/session/session.c:3225-3228`): a body the program
+/// reads with `request_parse_body()` leaves the running session's id,
+/// status and variables alone, and writes no progress into it or into
+/// the session the form names:
+///
+/// ```php
+/// $d = __DIR__; $f = "$d/sess_rpbwitness"; $g = "$d/sess_rpbform";
+/// file_put_contents("$d/w.php", <<<'PHP'
+/// <?php
+/// session_id("rpbwitness"); session_start(); $_SESSION["a"] = 1;
+/// [$post, $files] = request_parse_body();
+/// var_dump(array_keys($post), array_keys($files), session_id(), session_status() === PHP_SESSION_ACTIVE, $_SESSION);
+/// session_write_close();
+/// PHP);
+/// $b = "XYZ";
+/// $body = "--$b\r\nContent-Disposition: form-data; name=\"PHPSESSID\"\r\n\r\nrpbform\r\n"
+///     . "--$b\r\nContent-Disposition: form-data; name=\"PHP_SESSION_UPLOAD_PROGRESS\"\r\n\r\nk\r\n"
+///     . "--$b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"f.txt\"\r\n\r\n1\r\n--$b--\r\n";
+/// $cmd = [dirname(PHP_BINARY) . "/php-cgi", "-n", "-q", "-d", "session.save_path=$d", "-d", "session.use_cookies=0",
+///     "-d", "session.cache_limiter=", "-d", "enable_post_data_reading=0", "-d", "session.upload_progress.enabled=1",
+///     "-d", "session.upload_progress.cleanup=0", "-d", "session.upload_progress.freq=1%",
+///     "-d", "session.upload_progress.min_freq=0.000000001", "-d", "html_errors=0", "-f", "$d/w.php"];
+/// $env = ["REDIRECT_STATUS" => "1", "REQUEST_METHOD" => "POST", "CONTENT_TYPE" => "multipart/form-data; boundary=$b",
+///     "CONTENT_LENGTH" => (string) strlen($body), "SCRIPT_FILENAME" => "$d/w.php", "PATH_TRANSLATED" => "$d/w.php", "QUERY_STRING" => ""];
+/// $p = proc_open($cmd, [0 => ["pipe", "r"], 1 => ["pipe", "w"], 2 => ["pipe", "w"]], $pipes, $d, $env);
+/// fwrite($pipes[0], $body); fclose($pipes[0]);
+/// echo str_replace($d, "D", stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]));
+/// proc_close($p);
+/// var_dump(@file_get_contents($f), file_exists($g));
+/// @unlink($f); @unlink($g); unlink("$d/w.php");
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.12
+/// Content-type: text/html; charset=UTF-8
+///
+/// array(2) {
+///   [0]=>
+///   string(9) "PHPSESSID"
+///   [1]=>
+///   string(27) "PHP_SESSION_UPLOAD_PROGRESS"
+/// }
+/// array(1) {
+///   [0]=>
+///   string(1) "f"
+/// }
+/// string(10) "rpbwitness"
+/// bool(true)
+/// array(1) {
+///   ["a"]=>
+///   int(1)
+/// }
+/// string(6) "a|i:1;"
+/// bool(false)
+/// ```
 fn step(req: &mut Request, event: &Upload<'_>) -> Result<bool, Thrown> {
     if !ini_bool(req, b"session.upload_progress.enabled") {
         return Ok(true);

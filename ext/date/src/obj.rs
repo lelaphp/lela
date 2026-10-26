@@ -25,6 +25,7 @@ use crate::ffi::{
 use crate::format::date_format;
 use crate::interval::DateInterval;
 use crate::lent::{Lent, lent, release};
+use crate::throwables::Throwables;
 
 /// `PHP_DATE_CIVIL` and `PHP_DATE_WALL`, the values of
 /// `php_interval_obj`'s `int civil_or_wall`.
@@ -209,13 +210,15 @@ pub(super) fn offset_string(offset: i64) -> String {
 
 /// A class by name, the ones this crate declares.
 pub(super) fn class_id(req: &mut Request, name: &str) -> Result<ClassId, Thrown> {
-    match lookup_class(req, name.as_bytes())? {
-        Some(class) => Ok(class),
-        None => Err(throw_error(
+    if let Some(class) = lookup_class(req, name.as_bytes())? {
+        Ok(class)
+    } else {
+        let ce = Throwables::of(req)?;
+        Err(throw_error(
             req,
-            "Error",
+            ce.error,
             &format!("Class \"{name}\" not found"),
-        )),
+        ))
     }
 }
 
@@ -252,7 +255,11 @@ pub(super) fn uninitialized(req: &mut Request, class: ClassId) -> Thrown {
             format!("Object of type {name} not been {tail}")
         }
     };
-    throw_error(req, "DateObjectError", &message)
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    throw_error(req, ce.date_object_error, &message)
 }
 
 /// The object's time, taken out of its payload for the length of `call`
@@ -790,9 +797,10 @@ impl ObjectHandlers for DateHandlers {
             return Std.compare(req, left, right);
         };
         if da.time.is_none() || db.time.is_none() {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "DateObjectError",
+                ce.date_object_error,
                 "Trying to compare an incomplete DateTime or DateTimeImmutable object",
             ));
         }
@@ -910,16 +918,18 @@ impl ObjectHandlers for TzHandlers {
             return Std.compare(req, left, right);
         };
         let (Some(ka), Some(kb)) = (ta.tz.clone(), tb.tz.clone()) else {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "DateObjectError",
+                ce.date_object_error,
                 "Trying to compare uninitialized DateTimeZone objects",
             ));
         };
         if ka.zone_type() != kb.zone_type() {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "DateException",
+                ce.date_exception,
                 "Cannot compare two different kinds of DateTimeZone objects",
             ));
         }
@@ -1373,9 +1383,13 @@ pub(super) const PERIOD_FIELDS: [&[u8]; 7] = [
 /// (`BP_VAR_W`, `BP_VAR_RW`), whatever the object's class.
 fn readonly(req: &mut Request, name: &[u8]) -> Thrown {
     let field = String::from_utf8_lossy(name).into_owned();
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     throw_error(
         req,
-        "Error",
+        ce.error,
         &format!("Cannot modify readonly property DatePeriod::${field}"),
     )
 }
@@ -1517,9 +1531,10 @@ impl ObjectHandlers for PeriodHandlers {
         if PERIOD_FIELDS.contains(&name) {
             let class = class_name(req, object.class());
             let field = String::from_utf8_lossy(name).into_owned();
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!("Cannot unset {class}::${field}"),
             ));
         }

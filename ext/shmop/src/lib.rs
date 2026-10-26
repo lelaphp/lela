@@ -22,6 +22,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod ffi;
+mod throwables;
 
 use php_ext::abi::{Extension, ExtensionBuilder, Instance, OrFalse, Refusals};
 use php_ext::attr::{php_class, php_function};
@@ -33,6 +34,7 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpString};
 
 use crate::ffi::Segment;
+use crate::throwables::Throwables;
 
 /// The extension value (design §7.1): the six natives and the class.
 ///
@@ -53,6 +55,7 @@ pub fn extension() -> Extension {
             shmop_delete::declared(),
         ])
         .class::<Shmop>()
+        .engine_state(Throwables::start)
         .info(shmop_info)
         .build("shmop")
 }
@@ -235,7 +238,8 @@ fn shmop_open(
     // `object_init_ex` before the mode is read, so the object takes its
     // id before any `ValueError` does, as php's does.
     let Some(class) = lookup_class(req, b"Shmop")? else {
-        return Err(throw_error(req, "Error", "Class \"Shmop\" not found"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "Class \"Shmop\" not found"));
     };
     let shmop = new_object(req, class)?.into_instance::<Shmop>();
     let opened = open(req, key, mode.as_bytes(), permissions, size);
@@ -282,7 +286,8 @@ fn open(
         Err(errno) => return Ok(Step::Stat.failed(req, errno)),
     };
     if i64::try_from(len).is_err() {
-        return Err(argument_error(req, "ValueError", 4, "is too large"));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 4, "is too large"));
     }
     match Segment::attach(id, matches!(access, Access::Read), len) {
         Ok(segment) => Ok(Some(segment)),
@@ -338,7 +343,8 @@ fn shmop_read(
         return Err(arg_value_error(req, 2, "be between 0 and the segment size"));
     }
     if size < 0 || offset > i64::MAX - size || offset + size > len {
-        return Err(argument_error(req, "ValueError", 3, "is out of range"));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 3, "is out of range"));
     }
     let count = if size == 0 { len - offset } else { size };
     let (offset, count) = (
@@ -423,15 +429,16 @@ fn shmop_write(
     let (read_only, len) = with(req, shmop, |segment| {
         (segment.read_only(), long(segment.len()))
     })?;
+    let ce = Throwables::of(req)?;
     if read_only {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Read-only segment cannot be written",
         ));
     }
     if offset < 0 || offset > len {
-        return Err(argument_error(req, "ValueError", 3, "is out of range"));
+        return Err(argument_error(req, ce.value_error, 3, "is out of range"));
     }
     let offset = usize::try_from(offset).unwrap_or(0);
     let written = with(req, shmop, |segment| segment.write(offset, data.as_bytes()))?;

@@ -21,6 +21,7 @@
 
 mod ffi;
 mod object;
+mod throwables;
 
 use php_ext::abi::{Extension, ExtensionBuilder, Instance, OrFalse, Raw, Union};
 use php_ext::attr::{php_const, php_function};
@@ -32,6 +33,7 @@ use php_ext::raising::{
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
+use crate::throwables::Throwables;
 use ffi::{Mpz, RandState, Round};
 use object::{GMP, made};
 
@@ -164,6 +166,7 @@ pub fn extension() -> Extension {
         ])
         .class::<GMP>()
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .info(gmp_info)
         .build("gmp")
 }
@@ -230,7 +233,8 @@ pub(crate) fn from_text(
     Err(if position == 0 {
         php_ext::raising::value_error(req, "Number is not an integer string")
     } else {
-        argument_error(req, "ValueError", position, "is not an integer string")
+        let ce = Throwables::of(req)?;
+        argument_error(req, ce.value_error, position, "is not an integer string")
     })
 }
 
@@ -311,8 +315,14 @@ fn number(req: &mut Request, raw: &Number, position: u32) -> Result<Mpz, Thrown>
         return Ok(n);
     }
     let given = value_name(req, &value);
-    let tail = format!("must be of type GMP|string|int, {given} given");
-    Err(argument_error(req, "TypeError", position, &tail))
+    let tail = [
+        b"must be of type GMP|string|int, ".as_slice(),
+        &given,
+        b" given",
+    ]
+    .concat();
+    let ce = Throwables::of(req)?;
+    Err(argument_error(req, ce.type_error, position, &tail))
 }
 
 /// The two operands of a binary function, the first read first.
@@ -329,7 +339,11 @@ fn long(req: &mut Request, raw: &Raw<i64>) -> Result<i64, Thrown> {
 
 /// `zend_argument_value_error`.
 fn value_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
-    argument_error(req, "ValueError", position, tail)
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    argument_error(req, ce.value_error, position, tail)
 }
 
 /// `zend_new_pair` of two fresh numbers.
@@ -611,7 +625,8 @@ fn division(
         None => GMP_ROUND_ZERO,
     };
     if b.sign() == 0 {
-        return Err(argument_error(req, "DivisionByZeroError", 2, what));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.division_by_zero_error, 2, what));
     }
     Ok((a, b, round))
 }
@@ -967,7 +982,12 @@ fn gmp_powm(
         return Err(value_error(req, 2, "must be greater than or equal to 0"));
     }
     if modulus.sign() == 0 {
-        return Err(throw_error(req, "DivisionByZeroError", "Modulo by zero"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(
+            req,
+            ce.division_by_zero_error,
+            "Modulo by zero",
+        ));
     }
     made(req, base.powm(&exp, &modulus))
 }
@@ -1101,7 +1121,12 @@ fn gmp_invert(
 ) -> Result<OrFalse<Owner<Instance<GMP>>>, Thrown> {
     let (a, b) = numbers(req, &num1, &num2)?;
     if b.sign() == 0 {
-        return Err(throw_error(req, "DivisionByZeroError", "Division by zero"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(
+            req,
+            ce.division_by_zero_error,
+            "Division by zero",
+        ));
     }
     match a.invert(&b) {
         Some(r) => Ok(OrFalse::Value(made(req, r)?)),

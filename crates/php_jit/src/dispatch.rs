@@ -1502,7 +1502,7 @@ fn placed<T>(
     let name = decl.map(|decl| decl.name.0.to_vec());
     let scope = function
         .and(view.function_scope())
-        .map(|class| req.symbols().class_name(class).into_bytes());
+        .map(|class| req.symbols().class_name(class).to_vec());
     let typed = decl.is_some_and(|decl| decl.parameters.iter().any(|p| p.ty.is_some()));
     let at = match line {
         Line::Prologue if typed => Some(OplineIdx(0)),

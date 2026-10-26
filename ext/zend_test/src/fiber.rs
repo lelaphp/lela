@@ -18,6 +18,7 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject, PhpString, Value};
 
 use crate::State;
+use crate::throwables::Throwables;
 
 /// `zend_test_fiber_init`: the class and its handlers.
 pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
@@ -150,16 +151,18 @@ impl _ZendTestFiber {
         let this = this.object();
         let fiber = payload(req, this)?;
         if fiber.piped {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Cannot start a fiber that is the target of another fiber",
             ));
         }
         if fiber.coroutine.status() != CoroutineStatus::Init {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Cannot start a fiber that has already been started",
             ));
         }
@@ -201,9 +204,10 @@ impl _ZendTestFiber {
     ) -> Result<Owner<Value>, Thrown> {
         let this = this.object();
         if payload(req, this)?.coroutine.status() != CoroutineStatus::Suspended {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Cannot resume a fiber that is not suspended",
             ));
         }
@@ -522,9 +526,10 @@ impl _ZendTestFiber {
         #[php(default = null)] value: Value,
     ) -> Result<Owner<Value>, Thrown> {
         let Some(fiber) = req.state::<State>().active_fiber else {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Cannot suspend outside of a _ZendTestFiber",
             ));
         };
@@ -613,9 +618,10 @@ fn lay_down(
         .as_ref()
         .map(|(callable, _)| callable.clone())
     else {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Cannot start a fiber whose constructor was not called",
         ));
     };

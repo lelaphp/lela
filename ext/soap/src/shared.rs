@@ -12,6 +12,7 @@ use php_ext::values::{ClassId, Owner, PhpObject, Value, ValueRef};
 
 use crate::classes::{Fault, FaultSlot, SdlPayload, set_soap_fault};
 use crate::model::Sdl;
+use crate::throwables::Throwables;
 
 type R<T> = Result<T, Thrown>;
 
@@ -132,7 +133,7 @@ pub(crate) fn instance_of(req: &mut Request, object: PhpObject, name: &str) -> b
 /// `object_init_ex(soap_fault_class_entry)` and `set_soap_fault`: a
 /// fresh fault, the caller's one owner.
 pub(crate) fn new_fault(req: &mut Request, f: &Fault<'_>) -> R<Owner<PhpObject>> {
-    let class = class_id(req, "SoapFault")?;
+    let class = Throwables::of(req)?.soap_fault;
     let object = new_object(req, class)?;
     set_soap_fault(req, *object, f)?;
     Ok(object)

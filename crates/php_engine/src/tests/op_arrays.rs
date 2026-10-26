@@ -24,7 +24,7 @@ fn keyed(observed: &Observed<'_>) -> Option<String> {
     Some(match observed.function_scope() {
         Some(class) => format!(
             "{}::{name}",
-            observed.symbols().class_name(class).to_lowercase()
+            String::from_utf8_lossy(observed.symbols().class_name(class)).to_lowercase()
         ),
         None => name,
     })

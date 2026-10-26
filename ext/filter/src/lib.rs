@@ -36,6 +36,7 @@
 
 mod logical;
 mod sanitizing;
+mod throwables;
 
 use std::ops::ControlFlow;
 
@@ -526,6 +527,7 @@ pub fn extension() -> Extension {
         ])
         .class::<FilterException>()
         .class::<FilterFailedException>()
+        .engine_state(throwables::Throwables::start)
         .ini(vec![
             ini_entry(b"filter.default", Some(b"unsafe_raw")),
             ini_entry(b"filter.default_flags", None),
@@ -644,7 +646,7 @@ struct FilterException;
 impl FilterException {}
 
 #[php_class(namespace(Filter), extends(FilterException))]
-struct FilterFailedException;
+pub(crate) struct FilterFailedException;
 
 #[php_class]
 impl FilterFailedException {}
@@ -678,12 +680,20 @@ const BOTH_FAILURES: &str = "cannot use both FILTER_NULL_ON_FAILURE and FILTER_T
 /// with a sentence that does not open with `must`, which
 /// `arg_value_error` supplies.
 fn options_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
-    php_ext::raising::argument_error(req, "ValueError", position, tail)
+    let ce = match throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    php_ext::raising::argument_error(req, ce.value_error, position, tail)
 }
 
 /// `zend_throw_exception(php_filter_failed_exception_ce, message, 0)`.
-fn throw_failed(req: &mut Request, message: &str) -> Thrown {
-    match new_throwable(req, "Filter\\FilterFailedException", message) {
+fn throw_failed(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
+    let ce = match throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    match new_throwable(req, ce.filter_failed_exception, message) {
         Ok(value) => {
             let thrown = throw_value(req, &value);
             value.give_up(req);
@@ -1009,7 +1019,12 @@ fn filter_call(
         if flags & FILTER_THROW_ON_FAILURE != 0 {
             return Err(throw_failed(
                 req,
-                &format!("filter validation failed: not an array (got {name})"),
+                &[
+                    b"filter validation failed: not an array (got ".as_slice(),
+                    &name,
+                    b")",
+                ]
+                .concat(),
             ));
         }
         return Ok(Owner::take(req, failure(flags)));

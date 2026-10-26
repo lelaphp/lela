@@ -43,6 +43,7 @@ impl ObjectHandlers for Handlers {
 /// `IntlDatePatternGenerator_object_clone`: the members and the
 /// generator's clone, or php's `Error` once the copy is made.
 fn clone_generator(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let copy = object
         .native::<GeneratorObject>(req)
         .and_then(|o| o.dtpg.as_deref())
@@ -61,7 +62,7 @@ fn clone_generator(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObje
         return Ok(new);
     }
     new.give_up(req);
-    Err(throw_error(req, "Error", message))
+    Err(throw_error(req, ce.error, message))
 }
 
 /// `dtpg_ctor`: `Ok(false)` for php's `FAILURE` where nothing was thrown.
@@ -145,6 +146,7 @@ fn best_pattern(
     object: PhpObject,
     skeleton: &[u8],
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     error::reset_object::<GeneratorObject>(req, object);
     let units = ffi::to_utf16(skeleton);
     let taken = object
@@ -153,7 +155,7 @@ fn best_pattern(
     let Some(mut dtpg) = taken else {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Found unconstructed IntlDatePatternGenerator",
         ));
     };

@@ -30,6 +30,7 @@
 
 mod feedback;
 mod names;
+mod throwables;
 mod tokens;
 
 use std::collections::HashMap;
@@ -71,6 +72,7 @@ pub fn extension() -> Extension {
         .class::<PhpToken>()
         .constants(constants::declared())
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .info(tokenizer_info)
         .build("tokenizer")
 }
@@ -244,10 +246,11 @@ impl PhpToken {
         code: PhpString,
         #[php(default = 0)] flags: i64,
     ) -> Result<Owner<PhpArray>, Thrown> {
+        let ce = throwables::Throwables::of(req)?;
         let Some(token_class) = req.frames().called_scope() else {
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "PhpToken::tokenize() called with no class",
             ));
         };
@@ -590,11 +593,12 @@ fn fill_token(
 /// `php_token_get_id`: `id` off the receiver, and php's `Error` for a
 /// typed property nothing has written.
 fn token_id(req: &mut Request, this: PhpObject) -> Result<i64, Thrown> {
+    let ce = throwables::Throwables::of(req)?;
     match this.prop(req, b"id").and_then(|id| id.deref().as_int()) {
         Some(id) => Ok(id),
         None => Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Typed property PhpToken::$id must not be accessed before initialization",
         )),
     }
@@ -603,6 +607,7 @@ fn token_id(req: &mut Request, this: PhpObject) -> Result<i64, Thrown> {
 /// `php_token_get_text`: `text` off the receiver, a view of it, and
 /// php's `Error` for a typed property nothing has written.
 fn token_text(req: &mut Request, this: PhpObject) -> Result<PhpString, Thrown> {
+    let ce = throwables::Throwables::of(req)?;
     match this
         .prop(req, b"text")
         .and_then(|text| text.deref().as_php_string())
@@ -610,7 +615,7 @@ fn token_text(req: &mut Request, this: PhpObject) -> Result<PhpString, Thrown> {
         Some(text) => Ok(text),
         None => Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Typed property PhpToken::$text must not be accessed before initialization",
         )),
     }
@@ -1488,6 +1493,7 @@ fn tokenize_parse(
     code: &[u8],
     short_open_tag: bool,
 ) -> Result<Vec<php_ext::syntax::ScannedToken>, Thrown> {
+    let ce = throwables::Throwables::of(req)?;
     let options = syntax::Options {
         file: FileId(0),
         lex: LexOptions {
@@ -1502,7 +1508,7 @@ fn tokenize_parse(
             syntax::Level::Parse => {
                 return Err(throw_at(
                     req,
-                    "ParseError",
+                    ce.parse_error,
                     &raised.message,
                     b"",
                     raised.line,

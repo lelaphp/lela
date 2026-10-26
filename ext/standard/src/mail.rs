@@ -94,7 +94,12 @@ fn build_elem(
         ValueRef::Array(array) => build_elems(req, out, key, array),
         _ => {
             let given = value_name(req, &value.deref());
-            let message = format!("Header \"{name}\" must be of type array|string, {given} given");
+            let message = [
+                format!("Header \"{name}\" must be of type array|string, ").as_bytes(),
+                given.as_slice(),
+                b" given".as_slice(),
+            ]
+            .concat();
             Err(type_error(req, &message))
         }
     }
@@ -124,8 +129,12 @@ fn build_elems(
         let element = element.deref();
         if !matches!(element.as_ref(), ValueRef::Str(_)) {
             let given = value_name(req, &element);
-            let message =
-                format!("Header \"{name}\" must only contain values of type string, {given} found");
+            let message = [
+                format!("Header \"{name}\" must only contain values of type string, ").as_bytes(),
+                given.as_slice(),
+                b" found".as_slice(),
+            ]
+            .concat();
             return Err(type_error(req, &message));
         }
         build_elem(req, out, key, &element)?;

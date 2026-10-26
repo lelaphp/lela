@@ -263,21 +263,23 @@ impl Request {
             |req: &Request, at: ClassId| req.class_is_internal(at) && Some(at) != std_class;
         let name = self.symbols().class_name(class);
         if internal(self, class) {
-            return Some(error(
-                self,
-                &format!("Cannot make instance of internal class lazy: {name} is internal"),
-            ));
+            let message = bytes!(
+                b"Cannot make instance of internal class lazy: ",
+                name,
+                b" is internal"
+            );
+            return Some(error(self, &message));
         }
         let parent = self
             .ancestors(class)
             .find(|&parent| internal(self, parent))?;
-        let parent = self.symbols().class_name(parent);
-        Some(error(
-            self,
-            &format!(
-                "Cannot make instance of internal class lazy: {name} inherits internal class {parent}"
-            ),
-        ))
+        let message = bytes!(
+            b"Cannot make instance of internal class lazy: ",
+            name,
+            b" inherits internal class ",
+            self.symbols().class_name(parent)
+        );
+        Some(error(self, &message))
     }
 
     /// `zend_object_make_lazy` (`Z/Zend/zend_lazy_objects.c:225`): a new
@@ -738,26 +740,34 @@ impl Request {
         returned: Value,
     ) -> Result<PhpObject, Thrown> {
         let o = object.heap();
-        let class = self.symbols().class_name(object.class());
+        let class = self.symbols().class_name(object.class()).to_vec();
         let Some(instance) = returned.as_object() else {
             o.set_laziness(Laziness::Proxy);
             let shown = crate::ops::value_name(self, &returned);
             self.release(returned);
             return Err(type_error(
                 self,
-                &format!(
-                    "Lazy proxy factory must return an instance of a class compatible with {class}, {shown} returned"
+                &bytes!(
+                    b"Lazy proxy factory must return an instance of a class compatible with ",
+                    class,
+                    b", ",
+                    shown,
+                    b" returned"
                 ),
             ));
         };
         if !self.lazy_compatible(instance.class(), object.class()) {
             o.set_laziness(Laziness::Proxy);
-            let shown = self.symbols().class_name(instance.class());
+            let shown = self.symbols().class_name(instance.class()).to_vec();
             self.release(returned);
             return Err(type_error(
                 self,
-                &format!(
-                    "The real instance class {shown} is not compatible with the proxy class {class}. The proxy must be a instance of the same class as the real instance, or a sub-class with no additional properties, and no overrides of the __destructor or __clone methods."
+                &bytes!(
+                    b"The real instance class ",
+                    shown,
+                    b" is not compatible with the proxy class ",
+                    class,
+                    b". The proxy must be a instance of the same class as the real instance, or a sub-class with no additional properties, and no overrides of the __destructor or __clone methods."
                 ),
             ));
         }

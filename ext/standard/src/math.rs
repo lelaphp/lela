@@ -5,6 +5,7 @@
 //! `range` round with.
 
 use crate::string::Decimal;
+use crate::throwables::Throwables;
 use php_ext::abi::{Passed, Raw, Union};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::coerce::{BinaryOp, binary_op, coerce_param, is_space};
@@ -670,16 +671,18 @@ fn is_infinite(num: f64) -> bool {
 fn intdiv(req: &mut Request, num1: i64, num2: i64) -> Result<i64, Thrown> {
     let (dividend, divisor) = (num1, num2);
     if divisor == 0 {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "DivisionByZeroError",
+            ce.division_by_zero_error,
             "Division by zero",
         ));
     }
     if divisor == -1 && dividend == i64::MIN {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "ArithmeticError",
+            ce.arithmetic_error,
             "Division of PHP_INT_MIN by -1 is not an integer",
         ));
     }

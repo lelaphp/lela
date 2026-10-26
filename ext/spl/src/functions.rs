@@ -52,7 +52,7 @@ fn subject(req: &mut Request, given: Value, autoloading: bool) -> Result<Option<
             Err(arg_type_error(
                 req,
                 1,
-                &format!("be of type object|string, {name} given"),
+                &[b"be of type object|string, ".as_slice(), &name, b" given"].concat(),
             ))
         }
     }

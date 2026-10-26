@@ -88,7 +88,10 @@ fn stepped(req: &mut Request, frame: FrameRef, steps_leaving: bool, sees: bool) 
         if sees {
             let stood = match req.diagnostics().raised() {
                 Some(Raised::Throwable(object)) if unwinding => {
-                    format!("{line} threw {}", req.symbols().class_name(object.class()))
+                    format!(
+                        "{line} threw {}",
+                        String::from_utf8_lossy(req.symbols().class_name(object.class()))
+                    )
                 }
                 _ => format!("{line} {}", opcode.name()),
             };

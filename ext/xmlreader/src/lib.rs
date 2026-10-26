@@ -24,6 +24,7 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod throwables;
 mod trampoline;
 
 use php_ext::abi::{
@@ -41,6 +42,8 @@ use php_ext::values::{
 };
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{Expanded, Library, Raised, RelaxNg, TextReader};
+
+use throwables::Throwables;
 
 /// The extension value (design §7.1).
 ///
@@ -66,6 +69,7 @@ pub fn extension() -> Extension {
         .dependencies(vec![dependency("dom"), dependency("libxml")])
         .class::<XMLReader>()
         .class::<trampoline::XMLReader>()
+        .engine_state(Throwables::start)
         .info(|req| {
             req.extensions_mut()
                 .info_table(&[&["XMLReader", "enabled"]]);
@@ -146,7 +150,8 @@ impl ObjectHandlers for Handlers {
         value.give_up(req);
         let class = class_name(req, object.class());
         let message = format!("Cannot modify readonly property {class}::${shown}");
-        Err(throw_error(req, "Error", &message))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, &message))
     }
 
     fn get_property_ptr_ptr(
@@ -196,7 +201,8 @@ impl ObjectHandlers for Handlers {
         }
         let class = class_name(req, object.class());
         let message = format!("Cannot unset {class}::${}", String::from_utf8_lossy(name));
-        Err(throw_error(req, "Error", &message))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, &message))
     }
 
     /// `xmlreader_get_debug_info`: the object's own properties, then each
@@ -325,8 +331,41 @@ fn quiet<R>(
         .map(f)
 }
 
-fn string(req: &mut Request, bytes: Option<Vec<u8>>) -> Result<Option<Owner<PhpString>>, Thrown> {
-    bytes.map(|b| PhpString::new(req, &b)).transpose()
+/// `php_xmlreader_string_arg`'s and the attribute getters' answer: the
+/// string libxml handed back as [`fstring`] makes it, `NULL` where it
+/// handed back none.
+fn string_or_null(
+    req: &mut Request,
+    bytes: Option<Vec<u8>>,
+) -> Result<Option<Owner<PhpString>>, Thrown> {
+    bytes.map(|b| fstring(req, &b)).transpose()
+}
+
+/// `php_xmlreader_no_arg_string`'s answer: the string libxml handed
+/// back as [`fstring`] makes it, `RETVAL_EMPTY_STRING()` where it handed
+/// back none.
+fn string_or_empty(req: &mut Request, bytes: Option<Vec<u8>>) -> Result<Owner<PhpString>, Thrown> {
+    match bytes {
+        Some(bytes) => fstring(req, &bytes),
+        None => PhpString::new(req, b""),
+    }
+}
+
+/// `ZVAL_FSTRING`, which every string libxml hands the reader back
+/// through since php 8.5.12 (`Z/Zend/zend_API.h:1001`): the bytes copied
+/// into a `zend_string_finit` asked for fallibly, so a string past the
+/// memory limit is refused rather than served, the answer is the
+/// interned empty string `ZVAL_FSTRINGL` leaves in its place, and the
+/// soft limit's fatal is raised at the next safepoint, never the hard
+/// limit's.
+fn fstring(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+    match req
+        .memory_mut()
+        .fallible(|req| PhpString::finit(req, bytes))?
+    {
+        Some(made) => Ok(made),
+        None => PhpString::new(req, b""),
+    }
 }
 
 /// `zend_argument_must_not_be_empty_error`.
@@ -398,7 +437,7 @@ impl Target {
                 put(req, object, reader);
                 Ok(Owner::bool(true))
             }
-            Target::New(class) => match instantiate(req, class, &[]) {
+            Target::New(class) => match instantiate(req, class, &[], &[]) {
                 Ok(object) => {
                     put(req, *object, reader);
                     Ok(object.into_value())
@@ -420,7 +459,10 @@ fn refuse(req: &mut Request, failure: Failure, message: &str) -> Result<Owner<Va
             docref(req, Level::Warning, message);
             Ok(Owner::bool(false))
         }
-        Failure::Throw => Err(throw_error(req, "Error", message)),
+        Failure::Throw => {
+            let ce = Throwables::of(req)?;
+            Err(throw_error(req, ce.error, message))
+        }
     }
 }
 
@@ -551,7 +593,23 @@ impl Property {
 
     /// `xmlreader_property_reader`: the value off the reader as it
     /// stands, the empty one of the type where the object has none; a
-    /// number libxml answers `-1` for is php's `Error`.
+    /// number libxml answers `-1` for is php's `Error`. A string is
+    /// `ZVAL_FSTRING`'s, asked for fallibly ([`fstring`]):
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '2M');
+    /// $f = sys_get_temp_dir() . '/xmlreader-oom-value.xml'; $h = fopen($f, 'w'); fwrite($h, '<r a="');
+    /// for ($i = 0; $i < 6; $i++) fwrite($h, str_repeat('x', 512 * 1024));
+    /// fwrite($h, '"/>'); fclose($h); register_shutdown_function(fn() => unlink($f));
+    /// $r = XMLReader::open($f); $r->read(); $r->moveToAttribute('a');
+    /// var_dump($r->value, 'unreached');
+    /// ```
+    /// ```expect exit=255
+    /// string(0) ""
+    /// string(9) "unreached"
+    ///
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %SCRATCH%/witness.php on line 7
+    /// ```
     fn read(self, req: &mut Request, object: PhpObject) -> Result<Option<Owner<Value>>, Thrown> {
         let text =
             |f: fn(&TextReader) -> Option<Vec<u8>>| move |r: &mut TextReader| Read::Text(f(r));
@@ -586,17 +644,17 @@ impl Property {
                 | Property::IsEmptyElement
         );
         match read {
-            Some(Read::Number(-1, _)) => Err(throw_error(
-                req,
-                "Error",
-                "Failed to read property because no XML data has been read yet",
-            )),
+            Some(Read::Number(-1, _)) => {
+                let ce = Throwables::of(req)?;
+                Err(throw_error(
+                    req,
+                    ce.error,
+                    "Failed to read property because no XML data has been read yet",
+                ))
+            }
             Some(Read::Number(n, true)) => Ok(Some(Owner::bool(n != 0))),
             Some(Read::Number(n, false)) => Ok(Some(Owner::int(i64::from(n)))),
-            Some(Read::Text(t)) => {
-                let s = PhpString::new(req, t.as_deref().unwrap_or_default())?;
-                Ok(Some(s.into_value()))
-            }
+            Some(Read::Text(t)) => Ok(Some(string_or_empty(req, t)?.into_value())),
             None if boolean => Ok(Some(Owner::bool(false))),
             None => match self {
                 Property::AttributeCount | Property::Depth | Property::NodeType => {
@@ -723,6 +781,21 @@ impl XMLReader {
         php_ext::abi::True
     }
 
+    /// `getAttribute(string $name): ?string`, the value asked for
+    /// fallibly as php 8.5.12's `RETVAL_FSTRING` asks ([`fstring`]): one
+    /// past the memory limit ends the request at the soft limit's fatal.
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '2M');
+    /// $f = sys_get_temp_dir() . '/xmlreader-oom-getattribute.xml'; $h = fopen($f, 'w'); fwrite($h, '<r a="');
+    /// for ($i = 0; $i < 6; $i++) fwrite($h, str_repeat('x', 512 * 1024));
+    /// fwrite($h, '"/>'); fclose($h); register_shutdown_function(fn() => unlink($f));
+    /// $r = XMLReader::open($f); $r->read();
+    /// var_dump($r->getAttribute('a'), 'unreached');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %SCRATCH%/witness.php on line 7
+    /// ```
     #[php(tentative)]
     fn getAttribute(
         req: &mut Request,
@@ -731,9 +804,23 @@ impl XMLReader {
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
         not_empty(req, 1, name.as_bytes())?;
         let found = quiet(req, this.object(), |r| r.attribute(name.as_bytes())).flatten();
-        string(req, found)
+        string_or_null(req, found)
     }
 
+    /// `getAttributeNo(int $index): ?string`, the value asked for
+    /// fallibly ([`fstring`]):
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '2M');
+    /// $f = sys_get_temp_dir() . '/xmlreader-oom-getattributeno.xml'; $h = fopen($f, 'w'); fwrite($h, '<r a="');
+    /// for ($i = 0; $i < 6; $i++) fwrite($h, str_repeat('x', 512 * 1024));
+    /// fwrite($h, '"/>'); fclose($h); register_shutdown_function(fn() => unlink($f));
+    /// $r = XMLReader::open($f); $r->read();
+    /// var_dump($r->getAttributeNo(0), 'unreached');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %SCRATCH%/witness.php on line 7
+    /// ```
     #[php(tentative)]
     fn getAttributeNo(
         req: &mut Request,
@@ -741,7 +828,7 @@ impl XMLReader {
         index: i64,
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
         let found = quiet(req, this.object(), |r| r.attribute_no(flags_int(index))).flatten();
-        string(req, found)
+        string_or_null(req, found)
     }
 
     /// `getAttributeNs(string $name, string $namespace): ?string`.
@@ -756,6 +843,20 @@ impl XMLReader {
     /// NULL
     /// XMLReader::getAttributeNs(): Argument #2 ($namespace) must not be empty
     /// ```
+    ///
+    /// The value is asked for fallibly ([`fstring`]):
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '2M');
+    /// $f = sys_get_temp_dir() . '/xmlreader-oom-getattributens.xml'; $h = fopen($f, 'w'); fwrite($h, '<r xmlns:p="urn:p" p:a="');
+    /// for ($i = 0; $i < 6; $i++) fwrite($h, str_repeat('x', 512 * 1024));
+    /// fwrite($h, '"/>'); fclose($h); register_shutdown_function(fn() => unlink($f));
+    /// $r = XMLReader::open($f); $r->read();
+    /// var_dump($r->getAttributeNs('a', 'urn:p'), 'unreached');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %SCRATCH%/witness.php on line 7
+    /// ```
     #[php(tentative)]
     fn getAttributeNs(
         req: &mut Request,
@@ -768,7 +869,7 @@ impl XMLReader {
         let found = quiet(req, this.object(), |r| {
             r.attribute_ns(name.as_bytes(), namespace.as_bytes())
         });
-        string(req, found.flatten())
+        string_or_null(req, found.flatten())
     }
 
     #[php(tentative)]
@@ -778,11 +879,14 @@ impl XMLReader {
         property: i64,
     ) -> Result<bool, Thrown> {
         match quiet(req, this.object(), |r| r.parser_prop(flags_int(property))) {
-            None => Err(throw_error(
-                req,
-                "Error",
-                "Cannot access parser properties before loading data",
-            )),
+            None => {
+                let ce = Throwables::of(req)?;
+                Err(throw_error(
+                    req,
+                    ce.error,
+                    "Cannot access parser properties before loading data",
+                ))
+            }
             Some(-1) => Err(arg_value_error(req, 1, "be a valid parser property")),
             Some(n) => Ok(n != 0),
         }
@@ -793,6 +897,20 @@ impl XMLReader {
         quiet(req, this.object(), TextReader::is_valid) == Some(1)
     }
 
+    /// `lookupNamespace(string $prefix): ?string`, the namespace asked
+    /// for fallibly ([`fstring`]):
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '2M');
+    /// $f = sys_get_temp_dir() . '/xmlreader-oom-lookupnamespace.xml'; $h = fopen($f, 'w'); fwrite($h, '<r xmlns:p="');
+    /// for ($i = 0; $i < 6; $i++) fwrite($h, str_repeat('x', 512 * 1024));
+    /// fwrite($h, '"/>'); fclose($h); register_shutdown_function(fn() => unlink($f));
+    /// $r = XMLReader::open($f); $r->read();
+    /// var_dump($r->lookupNamespace('p'), 'unreached');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %SCRATCH%/witness.php on line 7
+    /// ```
     #[php(tentative)]
     fn lookupNamespace(
         req: &mut Request,
@@ -804,7 +922,7 @@ impl XMLReader {
             r.lookup_namespace(prefix.as_bytes())
         })
         .flatten();
-        string(req, found)
+        string_or_null(req, found)
     }
 
     #[php(tentative)]
@@ -881,11 +999,14 @@ impl XMLReader {
     #[php(tentative)]
     fn read(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         match with(req, this.object(), TextReader::read)? {
-            None => Err(throw_error(
-                req,
-                "Error",
-                "Data must be loaded before reading",
-            )),
+            None => {
+                let ce = Throwables::of(req)?;
+                Err(throw_error(
+                    req,
+                    ce.error,
+                    "Data must be loaded before reading",
+                ))
+            }
             Some(n) => Ok(n == 1),
         }
     }
@@ -913,9 +1034,10 @@ impl XMLReader {
     ) -> Result<bool, Thrown> {
         let object = this.object();
         let Some(mut n) = with(req, object, TextReader::next)? else {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Data must be loaded before reading",
             ));
         };
@@ -1018,9 +1140,10 @@ impl XMLReader {
         let (made, raised, thrown) = TextReader::stream(req, stream, u, e, flags_int(flags));
         Errors::settle(req, raised, thrown)?;
         let Some(reader) = made else {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Could not construct libxml reader",
             ));
         };
@@ -1029,22 +1152,64 @@ impl XMLReader {
         static_of(req, made)
     }
 
+    /// `readInnerXml(): string`, the markup asked for fallibly
+    /// ([`fstring`]):
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '2M');
+    /// $f = sys_get_temp_dir() . '/xmlreader-oom-readinnerxml.xml'; $h = fopen($f, 'w'); fwrite($h, '<r><a>');
+    /// for ($i = 0; $i < 6; $i++) fwrite($h, str_repeat('x', 512 * 1024));
+    /// fwrite($h, '</a></r>'); fclose($h); register_shutdown_function(fn() => unlink($f));
+    /// $r = XMLReader::open($f); $r->read();
+    /// var_dump($r->readInnerXml(), 'unreached');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %SCRATCH%/witness.php on line 7
+    /// ```
     #[php(tentative)]
     fn readInnerXml(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let read = with(req, this.object(), TextReader::read_inner_xml)?.flatten();
-        PhpString::new(req, read.as_deref().unwrap_or_default())
+        string_or_empty(req, read)
     }
 
+    /// `readOuterXml(): string`, the markup asked for fallibly
+    /// ([`fstring`]):
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '2M');
+    /// $f = sys_get_temp_dir() . '/xmlreader-oom-readouterxml.xml'; $h = fopen($f, 'w'); fwrite($h, '<r><a>');
+    /// for ($i = 0; $i < 6; $i++) fwrite($h, str_repeat('x', 512 * 1024));
+    /// fwrite($h, '</a></r>'); fclose($h); register_shutdown_function(fn() => unlink($f));
+    /// $r = XMLReader::open($f); $r->read();
+    /// var_dump($r->readOuterXml(), 'unreached');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %SCRATCH%/witness.php on line 7
+    /// ```
     #[php(tentative)]
     fn readOuterXml(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let read = with(req, this.object(), TextReader::read_outer_xml)?.flatten();
-        PhpString::new(req, read.as_deref().unwrap_or_default())
+        string_or_empty(req, read)
     }
 
+    /// `readString(): string`, the text asked for fallibly
+    /// ([`fstring`]):
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '2M');
+    /// $f = sys_get_temp_dir() . '/xmlreader-oom-readstring.xml'; $h = fopen($f, 'w'); fwrite($h, '<r>');
+    /// for ($i = 0; $i < 6; $i++) fwrite($h, str_repeat('x', 512 * 1024));
+    /// fwrite($h, '</r>'); fclose($h); register_shutdown_function(fn() => unlink($f));
+    /// $r = XMLReader::open($f); $r->read();
+    /// var_dump($r->readString(), 'unreached');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %SCRATCH%/witness.php on line 7
+    /// ```
     #[php(tentative)]
     fn readString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let read = with(req, this.object(), TextReader::read_string)?.flatten();
-        PhpString::new(req, read.as_deref().unwrap_or_default())
+        string_or_empty(req, read)
     }
 
     /// `setSchema(?string $filename): bool`: W3C XSD validation of what is read, set before the first read.
@@ -1071,11 +1236,14 @@ impl XMLReader {
         }
         let xsd = filename.as_ref().map(|f| f.0.as_bytes());
         match with(req, this.object(), |r, req| r.schema_validate(req, xsd))? {
-            None => Err(throw_error(
-                req,
-                "Error",
-                "Schema must be set prior to reading",
-            )),
+            None => {
+                let ce = Throwables::of(req)?;
+                Err(throw_error(
+                    req,
+                    ce.error,
+                    "Schema must be set prior to reading",
+                ))
+            }
             Some(0) => Ok(true),
             Some(_) => {
                 docref(req, Level::Warning, "Schema contains errors");
@@ -1094,11 +1262,14 @@ impl XMLReader {
         match quiet(req, this.object(), |r| {
             r.set_parser_prop(flags_int(property), value)
         }) {
-            None => Err(throw_error(
-                req,
-                "Error",
-                "Cannot access parser properties before loading data",
-            )),
+            None => {
+                let ce = Throwables::of(req)?;
+                Err(throw_error(
+                    req,
+                    ce.error,
+                    "Cannot access parser properties before loading data",
+                ))
+            }
             Some(-1) => Err(arg_value_error(req, 1, "be a valid parser property")),
             Some(_) => Ok(true),
         }
@@ -1229,9 +1400,10 @@ impl XMLReader {
             doc = node.doc();
         }
         let Some(expanded) = with(req, this.object(), |r, req| r.expand(req, doc))? else {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Data must be loaded before expanding",
             ));
         };
@@ -1294,11 +1466,14 @@ fn relaxng(
         Some(Some(bytes)) => r.relaxng(req, Some(RelaxNg::Source(bytes))),
     })?;
     match answer {
-        None => Err(throw_error(
-            req,
-            "Error",
-            "Schema must be set prior to reading",
-        )),
+        None => {
+            let ce = Throwables::of(req)?;
+            Err(throw_error(
+                req,
+                ce.error,
+                "Schema must be set prior to reading",
+            ))
+        }
         Some(0) => Ok(true),
         Some(_) => {
             docref(req, Level::Warning, "Schema contains errors");

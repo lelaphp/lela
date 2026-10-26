@@ -19,6 +19,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use crate::throwables::Throwables;
 use php_ext::abi::{IniStage, Instance, Passed, Raw, Union};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::call;
@@ -403,14 +404,15 @@ fn assert(
             let code = Owner::int(E_ERROR);
             php_ext::call::write_prop(req, object, b"code", code)
         };
+        let ce = Throwables::of(req)?;
         let thrown = if let Some(previous) = pending {
-            let thrown = throw_chained(req, previous, "AssertionError", message);
+            let thrown = throw_chained(req, previous, ce.assertion_error, message);
             if let Some(object) = thrown.exception() {
                 coded(req, object)?;
             }
             thrown
         } else {
-            let error = new_throwable(req, "AssertionError", message)?;
+            let error = new_throwable(req, ce.assertion_error, message)?;
             if let Some(object) = error.as_object() {
                 coded(req, &object)?;
             }

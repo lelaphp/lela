@@ -7,6 +7,7 @@
 
 use crate::api::abi::{Extension, ExtensionBuilder};
 use crate::api::request::Request;
+use crate::api::values::ClassId;
 use crate::attributes::{
     AllowDynamicProperties, Attribute, DelayedTargetValidation, Deprecated, NoDiscard, Override,
     ReturnTypeWillChange, SensitiveParameter, SensitiveParameterValue,
@@ -82,6 +83,31 @@ pub(crate) fn extension() -> Extension {
         .build("Core")
 }
 
+/// The throwables Zend raises by the global php keeps for each,
+/// `zend_ce_exception`, `zend_ce_error` and their kin: Core is linked
+/// first and in the order [`extension`] lists it, so each class's
+/// identity is its place in that list, the same in every engine, and a
+/// raise names the class without looking it up. An extension resolves
+/// the classes it raises once, as it starts ([`Start::class`]);
+/// `each_zend_class_stands_where_its_identity_says` holds these.
+///
+/// [`Start::class`]: crate::api::abi::Start::class
+impl ClassId {
+    pub(crate) const EXCEPTION: ClassId = ClassId(9);
+    pub(crate) const ERROR: ClassId = ClassId(11);
+    pub(crate) const COMPILE_ERROR: ClassId = ClassId(12);
+    pub(crate) const PARSE_ERROR: ClassId = ClassId(13);
+    pub(crate) const TYPE_ERROR: ClassId = ClassId(14);
+    pub(crate) const ARGUMENT_COUNT_ERROR: ClassId = ClassId(15);
+    pub(crate) const VALUE_ERROR: ClassId = ClassId(16);
+    pub(crate) const ARITHMETIC_ERROR: ClassId = ClassId(17);
+    pub(crate) const DIVISION_BY_ZERO_ERROR: ClassId = ClassId(18);
+    pub(crate) const UNHANDLED_MATCH_ERROR: ClassId = ClassId(19);
+    pub(crate) const REQUEST_PARSE_BODY_EXCEPTION: ClassId = ClassId(20);
+    pub(crate) const CLOSED_GENERATOR_EXCEPTION: ClassId = ClassId(24);
+    pub(crate) const FIBER_ERROR: ClassId = ClassId(39);
+}
+
 /// `PHP_MINFO_FUNCTION(php_core)` (`Z/main/main.c:2113-2118`), which
 /// `php_module_startup` makes Core's `info_func` (`Z/main/main.c:2374`):
 /// the `PHP Version` row, then `DISPLAY_INI_ENTRIES()`, the engine's own
@@ -120,4 +146,42 @@ fn info(req: &mut Request) {
     req.extensions_mut()
         .info_table(&[&["PHP Version", crate::api::request::PHP_VERSION]]);
     req.ini_mut().core_ini_info();
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::api::values::ClassId;
+
+    #[test]
+    fn each_zend_class_stands_where_its_identity_says() {
+        let req = crate::test::request();
+        let zend = [
+            (ClassId::EXCEPTION, "Exception"),
+            (ClassId::ERROR, "Error"),
+            (ClassId::COMPILE_ERROR, "CompileError"),
+            (ClassId::PARSE_ERROR, "ParseError"),
+            (ClassId::TYPE_ERROR, "TypeError"),
+            (ClassId::ARGUMENT_COUNT_ERROR, "ArgumentCountError"),
+            (ClassId::VALUE_ERROR, "ValueError"),
+            (ClassId::ARITHMETIC_ERROR, "ArithmeticError"),
+            (ClassId::DIVISION_BY_ZERO_ERROR, "DivisionByZeroError"),
+            (ClassId::UNHANDLED_MATCH_ERROR, "UnhandledMatchError"),
+            (
+                ClassId::REQUEST_PARSE_BODY_EXCEPTION,
+                "RequestParseBodyException",
+            ),
+            (
+                ClassId::CLOSED_GENERATOR_EXCEPTION,
+                "ClosedGeneratorException",
+            ),
+            (ClassId::FIBER_ERROR, "FiberError"),
+        ];
+        for (class, name) in zend {
+            assert_eq!(
+                req.symbols().class_name(class),
+                name.as_bytes(),
+                "{class:?}"
+            );
+        }
+    }
 }

@@ -8,6 +8,7 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::compat::Collected;
+use crate::throwables::Throwables;
 use crate::{
     Engine, Hook, Target, XMLParser, create, parse, parser_mut, set_element_handler, set_handler,
     set_object,
@@ -538,9 +539,10 @@ fn xml_parse(
 ) -> Result<i64, Thrown> {
     let object = parser.object();
     if parser_mut(req, object).is_some_and(|p| p.engine.parsing()) {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Parser must not be called recursively",
         ));
     }
@@ -762,8 +764,12 @@ fn xml_parser_set_option(
         ValueRef::Bool(_) | ValueRef::Int(_) | ValueRef::Str(_)
     ) {
         let given = type_name(req, &value);
-        let message =
-            format!("Argument #3 ($value) must be of type string|int|bool, {given} given");
+        let message = [
+            b"Argument #3 ($value) must be of type string|int|bool, ".as_slice(),
+            given.as_slice(),
+            b" given".as_slice(),
+        ]
+        .concat();
         docref(req, Level::Warning, &message);
     }
     let object = parser.object();
@@ -785,9 +791,10 @@ fn xml_parser_set_option(
         }
         Setting::ParseHuge => {
             if parser_mut(req, object).is_some_and(|p| p.engine.parsing()) {
+                let ce = Throwables::of(req)?;
                 return Err(throw_error(
                     req,
-                    "Error",
+                    ce.error,
                     "Cannot change option XML_OPTION_PARSE_HUGE while parsing",
                 ));
             }
@@ -809,9 +816,10 @@ fn xml_parser_set_option(
         }
         Setting::TargetEncoding => {
             let Some(target) = with_string(req, &value, Target::named)? else {
+                let ce = Throwables::of(req)?;
                 return Err(argument_error(
                     req,
-                    "ValueError",
+                    ce.value_error,
                     3,
                     "is not a supported target encoding",
                 ));

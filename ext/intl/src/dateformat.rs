@@ -92,6 +92,7 @@ impl ObjectHandlers for Handlers {
 /// 8.5.12 copies them, and `udat_clone`; php's `Error` once the copy is
 /// made.
 fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let mut status = Code::ZERO;
     let mut held = false;
     let payload = match object.native::<DateFormatObject>(req) {
@@ -116,7 +117,7 @@ fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObje
         true => return Ok(new),
     };
     new.give_up(req);
-    Err(throw_error(req, "Error", message))
+    Err(throw_error(req, ce.error, message))
 }
 
 /// `DATE_FORMAT_METHOD_FETCH_OBJECT`: the object's error reset, the
@@ -124,13 +125,14 @@ fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObje
 /// (`DATE_FORMAT_METHOD_INIT_VARS`, `before_args`), and php's `Error`
 /// for an object no constructor finished.
 fn fetch(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     error::reset_object::<DateFormatObject>(req, object);
     let held = object
         .native::<DateFormatObject>(req)
         .is_some_and(|o| o.udatf.is_some());
     if !held {
         let message = "Found unconstructed IntlDateFormatter";
-        return Err(throw_error(req, "Error", message));
+        return Err(throw_error(req, ce.error, message));
     }
     Ok(())
 }
@@ -142,13 +144,14 @@ fn with<T>(
     object: PhpObject,
     body: impl FnOnce(&mut Request, &mut DateFormat) -> Result<T, Thrown>,
 ) -> Result<T, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     fetch(req, object)?;
     let taken = object
         .native_mut::<DateFormatObject>(req)
         .and_then(|o| o.udatf.take());
     let Some(mut udatf) = taken else {
         let message = "Found unconstructed IntlDateFormatter";
-        return Err(throw_error(req, "Error", message));
+        return Err(throw_error(req, ce.error, message));
     };
     let answer = body(req, &mut udatf);
     if let Some(o) = object.native_mut::<DateFormatObject>(req) {
@@ -296,6 +299,7 @@ fn new_calendar(kind: i64, locale: &CString, status: &mut Code) -> Option<Cal> {
 /// `datefmt_ctor`'s checks of the styles and the locale: the locale
 /// canonicalized, or none where the request's error is set.
 fn styles_and_locale(req: &mut Request, a: &Args) -> Result<Option<CString>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let refused = if !style_ok(a.date_type) {
         "invalid date format style"
     } else if !style_ok(a.time_type) {
@@ -327,7 +331,7 @@ fn styles_and_locale(req: &mut Request, a: &Args) -> Result<Option<CString>, Thr
             "\"{}\" is invalid",
             String::from_utf8_lossy(asked.to_bytes())
         );
-        return Err(argument_error(req, "ValueError", 1, &tail));
+        return Err(argument_error(req, ce.value_error, 1, &tail));
     }
     Ok(Some(locale))
 }
@@ -764,12 +768,13 @@ fn with_held<T>(
     object: PhpObject,
     body: impl FnOnce(&mut Request, &mut DateFormat) -> Answer<T>,
 ) -> Answer<T> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let taken = object
         .native_mut::<DateFormatObject>(req)
         .and_then(|o| o.udatf.take());
     let Some(mut udatf) = taken else {
         let message = "Found unconstructed IntlDateFormatter";
-        return Err(throw_error(req, "Error", message));
+        return Err(throw_error(req, ce.error, message));
     };
     let answer = body(req, &mut udatf);
     if let Some(o) = object.native_mut::<DateFormatObject>(req) {
@@ -1041,11 +1046,17 @@ fn parse(
 /// int(5)
 /// ```
 fn try_long(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     if let Some(n) = coerce::try_long(req, value)? {
         return Ok(n);
     }
-    let tail = format!("must be of type int, {} given", value_name(req, value));
-    Err(argument_error(req, "TypeError", 2, &tail))
+    let tail = [
+        b"must be of type int, ".as_slice(),
+        &value_name(req, value),
+        b" given",
+    ]
+    .concat();
+    Err(argument_error(req, ce.type_error, 2, &tail))
 }
 
 /// `internal_parse_to_timestamp` and `internal_parse_to_localtime`.

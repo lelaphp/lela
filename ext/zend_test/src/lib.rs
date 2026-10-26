@@ -39,6 +39,7 @@ mod iterators;
 mod mm_custom_handlers;
 mod object_handlers;
 mod observer;
+mod throwables;
 mod weakmap;
 
 use std::io::Write as _;

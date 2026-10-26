@@ -11,6 +11,7 @@ use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::Owner;
 
 use crate::flatfile::gets;
+use crate::throwables::Throwables;
 
 /// `etrim`: the bytes without the blanks `" \t\r\n"` at either end.
 fn etrim(bytes: &[u8]) -> Vec<u8> {
@@ -455,9 +456,10 @@ impl Inifile {
                 rest.seek(req, 0, Whence::Set);
                 file.seek(req, 0, Whence::End);
                 if !copy(req, rest, file, None) {
+                    let ce = Throwables::of(req)?;
                     result = Err(throw_error(
                         req,
-                        "Error",
+                        ce.error,
                         "Could not copy from temporary stream - ini file truncated",
                     ));
                 }

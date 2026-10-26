@@ -7,6 +7,7 @@
 //! pending raises nothing over it (`zend_verify_property_type_error`)
 //! and answers it the same way.
 
+use crate::api::values::ClassId;
 use php_macros::php_function;
 
 use crate::api::abi::{Extension, ExtensionBuilder};
@@ -23,7 +24,7 @@ use crate::test::Capture;
 /// `"another"` where it answered another throwable.
 #[php_function]
 fn pending_conversion(req: &mut Request, o: Value) -> Result<Owner<PhpString>, Thrown> {
-    let thrown = throw(req, "Exception", "first");
+    let thrown = throw(req, ClassId::EXCEPTION, "first");
     let converted = while_pending(req, &thrown, |req| to_string(req, &o));
     match converted {
         Some(Err(answered)) if answered.exception() == thrown.exception() => Err(thrown),
@@ -44,7 +45,7 @@ fn pending_conversion(req: &mut Request, o: Value) -> Result<Owner<PhpString>, T
 /// where the refused write answered it, as [`pending_conversion`] does.
 #[php_function]
 fn pending_write(req: &mut Request, o: PhpObject) -> Result<Owner<PhpString>, Thrown> {
-    let thrown = throw(req, "Exception", "first");
+    let thrown = throw(req, ClassId::EXCEPTION, "first");
     let name = PhpString::new(req, b"n")?;
     let value = PhpString::new(req, b"x")?.into_value();
     let wrote = while_pending(req, &thrown, |req| {

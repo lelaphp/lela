@@ -128,7 +128,12 @@ pub fn long_attribute(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
     let given = value_name(req, &value);
     Err(type_error(
         req,
-        &format!("Attribute value must be of type int for selected attribute, {given} given"),
+        &[
+            b"Attribute value must be of type int for selected attribute, ".as_slice(),
+            given.as_slice(),
+            b" given".as_slice(),
+        ]
+        .concat(),
     ))
 }
 
@@ -950,9 +955,12 @@ pub fn bool_attribute(req: &mut Request, value: &Value) -> Result<bool, Thrown> 
             let given = value_name(req, &value);
             Err(type_error(
                 req,
-                &format!(
-                    "Attribute value must be of type bool for selected attribute, {given} given"
-                ),
+                &[
+                    b"Attribute value must be of type bool for selected attribute, ".as_slice(),
+                    given.as_slice(),
+                    b" given".as_slice(),
+                ]
+                .concat(),
             ))
         }
     }

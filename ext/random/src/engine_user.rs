@@ -9,6 +9,7 @@ use php_ext::raising::throw_error;
 use php_ext::request::Request;
 use php_ext::values::PhpObject;
 
+use crate::throwables::Throwables;
 use crate::{Algo, Failure, Generated};
 
 /// `php_random_status_state_user`: the engine object, with the request
@@ -56,11 +57,15 @@ impl Algo for User<'_> {
             .fold(0_u64, |acc, (i, b)| acc | (u64::from(*b) << (8 * i)));
         answered.give_up(self.req);
         if size == 0 {
-            return Err(Failure::Thrown(throw_error(
-                self.req,
-                "Random\\BrokenRandomEngineError",
-                "A random engine must return a non-empty string",
-            )));
+            let thrown = match Throwables::of(self.req) {
+                Ok(ce) => throw_error(
+                    self.req,
+                    ce.broken_random_engine_error,
+                    "A random engine must return a non-empty string",
+                ),
+                Err(fatal) => fatal,
+            };
+            return Err(Failure::Thrown(thrown));
         }
         Ok(Generated { result, size })
     }

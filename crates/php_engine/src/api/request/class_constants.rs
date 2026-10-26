@@ -92,7 +92,7 @@ impl Request {
         &mut self,
         class: ClassId,
         name: &[u8],
-        class_name: &str,
+        class_name: &[u8],
     ) -> Result<Value, Thrown> {
         let scope = self.executed_scope();
         self.class_constant_from(class, name, class_name, scope, ConstantFetch::Lookup)
@@ -119,7 +119,7 @@ impl Request {
         &mut self,
         class: ClassId,
         name: &[u8],
-        class_name: &str,
+        class_name: &[u8],
         scope: Option<ClassId>,
         fetch: ConstantFetch,
     ) -> Result<Value, Thrown> {
@@ -135,18 +135,17 @@ impl Request {
         &mut self,
         class: ClassId,
         name: &[u8],
-        class_name: Option<&str>,
+        class_name: Option<&[u8]>,
         scope: Option<ClassId>,
         fetch: ConstantFetch,
     ) -> Result<ConstantRead, Thrown> {
         let shown = |req: &Request| {
-            let class_name =
-                class_name.map_or_else(|| req.symbols().class_name(class), str::to_owned);
-            format!("{class_name}::{}", String::from_utf8_lossy(name))
+            let class_name = class_name.unwrap_or_else(|| req.symbols().class_name(class));
+            bytes!(class_name, b"::", name)
         };
         self.separate_constants(class)?;
         let Some((declaring, constant)) = self.symbols().class_constant_of(class, name) else {
-            let message = format!("Undefined constant {}", shown(self));
+            let message = bytes!(b"Undefined constant ", shown(self));
             return Err(crate::api::raising::error(self, &message));
         };
         let (visibility, is_case) = (constant.visibility, constant.is_case);
@@ -157,13 +156,13 @@ impl Request {
         let class = declaring;
         if !self.may_access_from(class, visibility, scope) {
             let word = super::methods::visibility_string(visibility);
-            let message = format!("Cannot access {word} constant {}", shown(self));
+            let message = bytes!(b"Cannot access ", word, b" constant ", shown(self));
             return Err(crate::api::raising::error(self, &message));
         }
         // A constant a trait declares is the composing class's to hand
         // out, never the trait's own.
         if self.class_is(asked, ClassKind::Trait) {
-            let message = format!("Cannot access trait constant {} directly", shown(self));
+            let message = bytes!(b"Cannot access trait constant ", shown(self), b" directly");
             return Err(crate::api::raising::error(self, &message));
         }
         let kept = deprecated.is_none();
@@ -192,7 +191,7 @@ impl Request {
                 }
                 ConstantFetch::Lookup => {
                     let class_name = class_name.map_or_else(
-                        || std::borrow::Cow::Owned(self.symbols().class_name(class)),
+                        || std::borrow::Cow::Owned(self.symbols().class_name(class).to_vec()),
                         std::borrow::Cow::Borrowed,
                     );
                     self.visited_class_constant((holder, class), name, &class_name)
@@ -510,14 +509,15 @@ impl Request {
             let earlier = values.get(..at).unwrap_or_default();
             if let Some((earlier, _, _)) = earlier.iter().find(|(_, _, held)| held == value) {
                 let enum_name = self.symbols().class_name(class);
-                return Err(crate::api::raising::error(
-                    self,
-                    &format!(
-                        "Duplicate value in enum {enum_name} for cases {} and {}",
-                        String::from_utf8_lossy(earlier),
-                        String::from_utf8_lossy(name)
-                    ),
-                ));
+                let message = bytes!(
+                    b"Duplicate value in enum ",
+                    enum_name,
+                    b" for cases ",
+                    earlier,
+                    b" and ",
+                    name
+                );
+                return Err(crate::api::raising::error(self, &message));
             }
         }
         Ok(())
@@ -691,14 +691,13 @@ impl Request {
 
     /// php's `Error` for a case `class` does not declare.
     pub(super) fn undefined_class_constant(&mut self, class: ClassId, name: &[u8]) -> Thrown {
-        let class = self.symbols().class_name(class);
-        crate::api::raising::error(
-            self,
-            &format!(
-                "Undefined constant {class}::{}",
-                String::from_utf8_lossy(name)
-            ),
-        )
+        let message = bytes!(
+            b"Undefined constant ",
+            self.symbols().class_name(class),
+            b"::",
+            name
+        );
+        crate::api::raising::error(self, &message)
     }
 }
 

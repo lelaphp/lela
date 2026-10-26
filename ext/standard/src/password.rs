@@ -8,6 +8,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use crate::throwables::Throwables;
 use php_ext::abi::Union;
 use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::to_long;
@@ -277,9 +278,10 @@ fn password_hash(
         }
     };
     let Some(digest) = digest else {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Password hashing failed for unknown reason",
         ));
     };

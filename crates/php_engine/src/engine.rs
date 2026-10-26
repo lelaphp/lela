@@ -920,9 +920,9 @@ pub(crate) struct Shared {
     pub(crate) sense_leaks: LeakSensor,
     /// The loops' entries, bound to the engine's tier and, once its
     /// declared opcodes are fixed as it starts, to whether they tell
-    /// their observers ([`Shared::observe_opcodes`]): the ones a request
-    /// starts in, and the tier's beside them where a request may switch
-    /// it on ([`crate::tier::Binding`]).
+    /// their observers, as the engine's start binds them: the ones a
+    /// request starts in, and the tier's beside them where a request may
+    /// switch it on ([`crate::tier::Binding`]).
     pub(crate) binding: Binding,
     /// The observer word (design §4.3 seam 9): how many observers the
     /// bundle declared ([`crate::supplied::Resolved::observers`]), fixed
@@ -931,8 +931,7 @@ pub(crate) struct Shared {
     pub(crate) observers: u32,
     /// The opcodes the bundle observes (design §7.1, #1780), declared as
     /// the engine starts and fixed after it, which choose the loop the
-    /// engine binds ([`Shared::observe_opcodes`]); empty while none is
-    /// declared.
+    /// engine binds as it starts; empty while none is declared.
     pub(crate) opcodes: crate::observer::ObservedOpcodes,
     /// The unit cache (design §6.3): what a file compiled to, held for
     /// every request that asks for the same file unchanged. A source the
@@ -1254,6 +1253,27 @@ impl ClassKeys {
             Some(at) => u32::try_from(at).ok().map(ClassId),
             None => self.aliases.find(name).copied(),
         }
+    }
+}
+
+/// The linked classes as an extension's engine start reads them,
+/// `CG(class_table)` once `zend_startup_modules` has registered every
+/// extension's classes ([`Start::class`]).
+pub(crate) struct ClassTable<'e> {
+    classes: &'e [ClassDecl],
+    keys: &'e ClassKeys,
+}
+
+impl ClassTable<'_> {
+    /// The class `name` names, whatever its case.
+    pub(crate) fn find(&self, name: &[u8]) -> Option<ClassId> {
+        self.keys.find(self.classes, name)
+    }
+}
+
+impl std::fmt::Debug for ClassTable<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ClassTable({} classes)", self.classes.len())
     }
 }
 
@@ -1633,20 +1653,6 @@ impl Shared {
                     .unwrap_or_default()
             })
             .collect()
-    }
-
-    /// The opcodes the bundle observes, asked of each extension once its
-    /// engine start is over, and the loop bound to them and to the tier
-    /// the engine started: the one that tells their observers where any
-    /// is declared and the one with no test where none is, as php
-    /// resolves an opline's handler when it compiles it (design §5.8,
-    /// §7.1), and `Nop`'s where the tier does not serve the engine
-    /// ([`crate::tier::Tier::bound`]).
-    fn observe_opcodes(&mut self, start: &Start, bind_loops: BindLoops) {
-        (self.supplied.observers).retain(|(_, registered)| registered.is_none_or(|r| r(start)));
-        self.observers = self.supplied.observers.count();
-        self.opcodes = crate::observer::ObservedOpcodes::start(&self.supplied.opcodes, start);
-        self.binding = bind_loops(self);
     }
 
     /// The tables the compiler reads, as [`Declared`].
@@ -4750,6 +4756,10 @@ impl Engine {
             opcodes: (shared.supplied.opcodes.links().iter())
                 .map(|&(_, observer)| observer)
                 .collect(),
+            classes: ClassTable {
+                classes: &shared.classes,
+                keys: &shared.class_keys,
+            },
         };
         // `zend_startup_modules`: each `MINIT` in bundle order, its process
         // start (once for the process, ADR-0010) and then its engine
@@ -4776,8 +4786,19 @@ impl Engine {
         }
         shared.state_slots =
             crate::api::request::StateSlots::of(&shared.extensions, &shared.engine_states);
+        // The opcodes the bundle observes, asked of each extension once
+        // its engine start is over, and the loop bound to them and to the
+        // tier the engine started: the one that tells their observers
+        // where any is declared and the one with no test where none is,
+        // as php resolves an opline's handler when it compiles it (design
+        // §5.8, §7.1), and `Nop`'s where the tier does not serve the
+        // engine ([`crate::tier::Tier::bound`]).
         if shared.refused.is_none() {
-            shared.observe_opcodes(&start, bind_loops);
+            let supplied = &mut shared.supplied;
+            (supplied.observers).retain(|(_, registered)| registered.is_none_or(|r| r(&start)));
+            shared.observers = supplied.observers.count();
+            shared.opcodes = crate::observer::ObservedOpcodes::start(&supplied.opcodes, &start);
+            shared.binding = bind_loops(shared);
         }
         shared.startup_raised = raised;
     }

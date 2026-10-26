@@ -37,6 +37,7 @@ mod ffi;
 mod filter;
 mod gz;
 mod output;
+mod throwables;
 
 /// The values php compiles in from `<zlib.h>`, read by `build.rs` off the
 /// header a C build finds, as php's `@cvalue` reads the macro at its build
@@ -180,6 +181,7 @@ pub fn extension() -> Extension {
         .class::<context::DeflateContext>()
         .register(output::OB_GZHANDLER)
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .rinit(rinit)
         .rshutdown(rshutdown)
         .info(info)

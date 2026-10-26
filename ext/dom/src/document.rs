@@ -21,6 +21,7 @@ use crate::map::MapKind;
 use crate::node::DOMNode;
 use crate::object::Code;
 use crate::props::Prop;
+use crate::throwables::Throwables;
 use crate::{
     Read, adopt, check_qname, dom_error, fetch, file_path, get_ns, get_ns_unchecked, instance_of,
     invalidate, nullable_object, object_for, or_false, passed, props_of, returned, strict, string,
@@ -698,6 +699,7 @@ fn schema_validate_as(
         Validate::schema(req, doc, schema, source, i32::try_from(flags).unwrap_or(0));
     drop(guard);
     Errors::settle(req, raised, thrown)?;
+    let ce = Throwables::of(req)?;
     match answer {
         Validated::InvalidSchema => {
             docref(req, Level::Warning, &format!("Invalid {label}"));
@@ -705,7 +707,7 @@ fn schema_validate_as(
         }
         Validated::Unusable => Err(throw_error(
             req,
-            "Error",
+            ce.error,
             &format!("Invalid {label} Validation Context"),
         )),
         Validated::Done(valid) => Ok(valid),
@@ -787,9 +789,10 @@ fn register_node_class_as(
         if !crate::class_extends(req, ext, base) {
             let base_shown = crate::class_name(req, base);
             let ext_shown = crate::class_name(req, ext);
+            let ce = Throwables::of(req)?;
             return Err(php_ext::raising::argument_error(
                 req,
-                "Error",
+                ce.error,
                 2,
                 &format!(
                     "must be a class name derived from {base_shown} or null, {ext_shown} given"
@@ -2519,9 +2522,10 @@ impl XMLDocument {
     ) -> Result<Owner<Instance<XMLDocument>>, Thrown> {
         let encoding = encoding.0.as_bytes();
         if !Library::known_encoding(encoding) {
+            let ce = Throwables::of(req)?;
             return Err(php_ext::raising::argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 2,
                 "is not a valid document encoding",
             ));
@@ -2626,9 +2630,10 @@ impl XMLDocument {
         #[php(default = 0)] options: i64,
     ) -> Result<i64, Thrown> {
         let Ok(flags) = i32::try_from(options) else {
+            let ce = Throwables::of(req)?;
             return Err(php_ext::raising::argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 1,
                 "is too large",
             ));
