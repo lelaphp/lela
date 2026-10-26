@@ -20,7 +20,7 @@
 pin = "oracle.toml"                        # the only statement of version, digest, recipe
 
 [budget]
-total = 520000                             # every counted line of the workspace plus `bindings`; the crate rows are ceilings each crate is held to, and do not sum to this
+total = 560000                             # every counted line of the workspace plus `bindings`; the crate rows are ceilings each crate is held to, and do not sum to this; 560000, the +40k step at the measured weekly rate, for php_ssa's 9,000 (#3174) and the tier's queue; #2971's dedupe freed 93 (#3565, 2026-10-26)
 new = 127500                               # design §0, §4.1: lines not on the inheritance manifest (§13)
 docs = 6500                                # design §10; `docs/**` plus the three living documents
 harness = 1600                             # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded, less the desk where `harness-desk` holds it; 1600 for the readiness-update skill (2026-10-24)
@@ -70,7 +70,7 @@ name = "php_compile"
 budget = 24000
 [[crate]]
 name = "php_engine"
-budget = 84000                             # 80k raised to 84k after #3287's dedupe, for #3343 and the call protocol (#3357, 2026-10-24)
+budget = 86000                             # 84k raised to 86k for the tier's queue, #3559-#3561 and #3479 (#3565, 2026-10-26)
 lock = ["api.lock", "sapi.lock", "tier.lock"]
 lock_from = { "api.lock" = "php_ext" }
 [[crate]]
