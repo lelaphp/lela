@@ -202,13 +202,14 @@ tier::unwind
 [kernels]
 tier::assign_concat
 tier::call_held
+tier::call_native
 tier::concat
 tier::dispatch_held
+tier::frameless_held
 tier::free_cv
 tier::free_this
 tier::lookup_element
 tier::make_ref
-tier::native_held
 tier::release
 tier::return_entry
 tier::rope_end

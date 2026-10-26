@@ -3644,7 +3644,21 @@ pub(crate) fn do_icall<T: Tier>(
     _: &OpArray,
     op: &Opline,
 ) -> Edge {
-    do_call(req, frame, op, "ZEND_DO_ICALL")
+    icall(req, frame, Made::of(op).into)
+}
+
+/// [`do_icall`] past its opline, where what the native returns goes into
+/// the temporary of `frame` that `into` names, none where the opline's
+/// `result` is `UNUSED`: the call compiled code makes knowing the opline
+/// it compiled (`crate::tier::call_native`), as php's trace calls the
+/// handler with the address of the return's slot it computed
+/// (`zend_jit_do_fcall`'s internal arm).
+pub(super) fn icall(req: &mut Request, frame: FrameRef, into: Option<u32>) -> Edge {
+    let made = Made {
+        flagged: false,
+        into,
+    };
+    do_call(req, frame, made, "ZEND_DO_ICALL")
 }
 
 /// `ZEND_DO_FCALL_BY_NAME`: serve the callee an `INIT_FCALL_BY_NAME`
@@ -3678,7 +3692,7 @@ pub(crate) fn do_fcall_by_name<T: Tier>(
         return edge;
     }
     req.vm_mut().stand(frame, at);
-    do_call(req, frame, op, "ZEND_DO_FCALL_BY_NAME")
+    do_call(req, frame, Made::of(op), "ZEND_DO_FCALL_BY_NAME")
 }
 
 /// `ZEND_DO_FCALL`: serve the callee an `INIT_STATIC_METHOD_CALL`, an
@@ -3712,7 +3726,7 @@ pub(crate) fn do_fcall<T: Tier>(
         return edge;
     }
     req.vm_mut().stand(frame, at);
-    do_call(req, frame, op, "ZEND_DO_FCALL")
+    do_call(req, frame, Made::of(op), "ZEND_DO_FCALL")
 }
 
 /// `ZEND_INCLUDE_OR_EVAL` (`Z/Zend/zend_vm_def.h:6545`), the four file
@@ -4202,7 +4216,7 @@ pub(crate) fn do_ucall<T: Tier>(
         return edge;
     }
     req.vm_mut().stand(frame, at);
-    do_call(req, frame, op, "ZEND_DO_UCALL")
+    do_call(req, frame, Made::of(op), "ZEND_DO_UCALL")
 }
 
 /// The inline path of `DO_UCALL`, and of `DO_FCALL` and
@@ -4243,12 +4257,11 @@ fn inline_enter(
 fn enter(
     req: &mut Request,
     frame: FrameRef,
-    op: &Opline,
+    made: Made,
     call: FrameRef,
     shape: crate::api::request::FrameShape,
 ) -> Edge {
-    let returns_to = (op.out_type != OperandKind::Unused).then_some(op.out);
-    let activated = req.activate_user(call, shape, returns_to, exec::Caller::Opline(frame))?;
+    let activated = req.activate_user(call, shape, made.into, exec::Caller::Opline(frame))?;
     Ok(Stepped::Pushed(activated.frame).into())
 }
 
@@ -12805,18 +12818,39 @@ fn threw(req: &mut Request, frame: FrameRef, thrown: &Thrown) -> Edge {
     Ok(Stepped::Threw(frame).into())
 }
 
+/// What a `DO_*CALL` opline says of the call it makes: whether the
+/// callee's flags are tested before it is entered, `DO_FCALL`'s and
+/// `DO_FCALL_BY_NAME`'s ([`flagged_call`]), and the temporary of the
+/// caller's frame that takes what it returns, none where `result` is
+/// `UNUSED`, php's `RETURN_VALUE_USED(opline)`.
+#[derive(Clone, Copy)]
+struct Made {
+    flagged: bool,
+    into: Option<u32>,
+}
+
+impl Made {
+    /// What the `DO_*CALL` `op` says of its call.
+    fn of(op: &Opline) -> Made {
+        Made {
+            flagged: matches!(op.opcode, Opcode::DoFcall | Opcode::DoFcallByName),
+            into: (op.out_type != OperandKind::Unused).then_some(op.out),
+        }
+    }
+}
+
 /// The body the `DO_*CALL` handlers share, `opcode` naming the one that
 /// found no call frame under it: the `ZEND_USER_FUNCTION` arm enters
 /// the callee's op array ([`enter`]), the `ZEND_INTERNAL_FUNCTION` arm
 /// serves the native on the call frame.
-fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edge {
-    if matches!(op.opcode, Opcode::DoFcall | Opcode::DoFcallByName)
-        && let Err(thrown) = flagged_call(req, op)
+fn do_call(req: &mut Request, frame: FrameRef, made: Made, opcode: &str) -> Edge {
+    if made.flagged
+        && let Err(thrown) = flagged_call(req, made)
     {
         req.pop_call();
         return threw(req, frame, &thrown);
     }
-    let Some((call, function)) = req.activate_call(op.out_type != OperandKind::Unused) else {
+    let Some((call, function)) = req.activate_call(made.into.is_some()) else {
         return Err(Fatal::error(format!(
             "InternalError: {opcode} with no call frame under it"
         )));
@@ -12829,7 +12863,7 @@ fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edg
         req.serve_entry(function, entry, OnThrow::Nothing)
     } else if let Some(user) = req.user_function(function) {
         let shape = user.shape;
-        return enter(req, frame, op, call, shape);
+        return enter(req, frame, made, call, shape);
     } else {
         let function = match crate::trampoline::hand_to_magic(req, function) {
             Ok(function) => function,
@@ -12840,7 +12874,7 @@ fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edg
         };
         if let Some(user) = req.user_function(function) {
             let shape = user.shape;
-            return enter(req, frame, op, call, shape);
+            return enter(req, frame, made, call, shape);
         }
         req.serve_native(function, OnThrow::Nothing)
     };
@@ -12874,7 +12908,7 @@ fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edg
                     return Err(fatal);
                 }
             };
-            let into = (op.out_type != OperandKind::Unused).then_some((frame, op.out));
+            let into = made.into.map(|slot| (frame, slot));
             if handed_back(req, into, value) || threw {
                 return Ok(Stepped::Threw(frame).into());
             }
@@ -12891,7 +12925,7 @@ fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edg
 /// yet entered, which is why `zend_get_call_op` keeps such a callee off
 /// `DO_UCALL` and `DO_ICALL`, the two that never test. What a handler
 /// threw is the `Err`, and the call is never made.
-fn flagged_call(req: &mut Request, op: &Opline) -> Result<(), Thrown> {
+fn flagged_call(req: &mut Request, made: Made) -> Result<(), Thrown> {
     let Some(function) = req.building_call_function() else {
         return Ok(());
     };
@@ -12899,7 +12933,7 @@ fn flagged_call(req: &mut Request, op: &Opline) -> Result<(), Thrown> {
     if flags.deprecated {
         crate::attributes::deprecated_function(req, function)?;
     }
-    if flags.no_discard && op.out_type == OperandKind::Unused {
+    if flags.no_discard && made.into.is_none() {
         crate::attributes::no_discard_function(req, function)?;
     }
     Ok(())

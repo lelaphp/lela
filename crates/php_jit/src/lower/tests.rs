@@ -508,7 +508,8 @@ fn a_link_answers_its_last_exit() -> Result<(), String> {
 
 /// A native's call is pushed in place, its sends of constants stepped,
 /// the operands they read stored first, and its `DO_ICALL` served by its
-/// handler through [`Kernel::Native`], with no dispatch (#2963, #3340).
+/// handler's internal arm through [`Kernel::CallNative`], with no
+/// opline read and no dispatch (#2963, #3340, #3560).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_natives_call_is_served_by_its_handler() -> Result<(), String> {
@@ -522,7 +523,7 @@ fn a_natives_call_is_served_by_its_handler() -> Result<(), String> {
         $x = [1]; echo f($x, 3), \"\\n\";",
     )?;
     assert!(!calls_of(&clif, Kernel::Step).is_empty(), "{clif}");
-    assert!(!calls_of(&clif, Kernel::Native).is_empty(), "{clif}");
+    assert!(!calls_of(&clif, Kernel::CallNative).is_empty(), "{clif}");
     assert!(calls_of(&clif, Kernel::Handle).is_empty(), "{clif}");
     Ok(())
 }

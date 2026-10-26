@@ -658,13 +658,14 @@ pub(crate) enum Kernel {
     /// (`php_engine::tier::return_entry`), `left` then one; zero, with
     /// nothing done, for any other frame.
     Leave,
-    /// `native(cx, frame, opline: u32, func: u32)`: a native's call, a
-    /// `DO_ICALL` or a `FRAMELESS_ICALL_*`, served by its handler with no
-    /// dispatch (`php_engine::tier::native_held`), as php's code calls
-    /// the native directly (`zend_jit_do_call`, `jit_frameless_icall`),
-    /// with no `Stood` written, as [`Kernel::Handle`]; its throw, and
-    /// what user code the native calls back throws, is answered as one.
-    Native,
+    /// `frameless(cx, frame, opline: u32, place: u32, func: u32)`: a
+    /// `FRAMELESS_ICALL_*` of the frame at `place` on the stack, served
+    /// by its handler with no dispatch
+    /// (`php_engine::tier::frameless_held`), as php's code calls the
+    /// native directly (`jit_frameless_icall`), with no `Stood` written,
+    /// as [`Kernel::Handle`]; its throw, and what user code the native
+    /// calls back throws, is answered as one.
+    Frameless,
     /// `free_this(cx, frame, opline: u32)`: the receiver of the method's
     /// frame a `RETURN` leaves in place, after its variables, where the
     /// owner the frame holds or the pin it was lent is the last
@@ -679,11 +680,19 @@ pub(crate) enum Kernel {
     /// where it made it, zero where the memory limit refused it, which
     /// the handler then serves.
     MakeRef,
+    /// `call_native(cx, frame, opline: u32, place: u32, into: u32)`: the
+    /// `DO_ICALL` of the frame at `place` on the stack, the call on top a
+    /// native's, made with no opline read (`php_engine::tier::call_native`),
+    /// as php's `zend_jit_do_fcall` calls a native's handler, what it
+    /// returns written into the temporary `into` numbers from one, given
+    /// up where `into` is zero; no `Stood` written, and its throw answered
+    /// as [`Kernel::Frameless`]'s.
+    CallNative,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 18] = [
+    pub(crate) const ALL: [Kernel; 19] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
@@ -699,9 +708,10 @@ impl Kernel {
         Kernel::Find,
         Kernel::Lookup,
         Kernel::Leave,
-        Kernel::Native,
+        Kernel::Frameless,
         Kernel::FreeThis,
         Kernel::MakeRef,
+        Kernel::CallNative,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

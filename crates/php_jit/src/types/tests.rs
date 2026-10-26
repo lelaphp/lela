@@ -3050,7 +3050,7 @@ fn a_new_whose_constructor_may_throw_reloads_nothing() -> Result<(), String> {
 }
 
 /// The clobber rule at a native that calls back into user code, served
-/// through the native kernel (`Kernel::Native`): `trigger_error` runs
+/// through the native kernel (`Kernel::CallNative`): `trigger_error` runs
 /// the error handler, PHP that writes through a global, so what a
 /// reference holds is read again after it, the trace's own longs kept
 /// (#3340).

@@ -1667,7 +1667,8 @@ impl<'a> Emit<'a> {
         // The `ExitCtx`, the frame's room and the opline come first.
         let params: &[Type] = match kernel {
             Kernel::Step => &[I64, I64, I32, I32, I64],
-            Kernel::Handle | Kernel::Native => &[I64, I64, I32, I32],
+            Kernel::Handle => &[I64, I64, I32, I32],
+            Kernel::Frameless | Kernel::CallNative => &[I64, I64, I32, I32, I32],
             Kernel::FreeThis => &[I64, I64, I32],
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release | Kernel::FreeCv => &[I64, I64, I32, I64, I32],
@@ -1839,10 +1840,12 @@ impl<'a> Emit<'a> {
     /// float(23.5)
     /// ```
     ///
-    /// A native's call and its frameless calls go through
-    /// [`Kernel::Native`], which calls the handler with no dispatch, as
-    /// php's code calls the native directly; one that refuses its
-    /// argument throws out of the loop:
+    /// A native's `DO_ICALL` goes through [`Kernel::CallNative`], which
+    /// makes the call with no opline read, as php's `zend_jit_do_fcall`
+    /// calls the native's handler, and a frameless call through
+    /// [`Kernel::Frameless`], which calls its handler with no dispatch;
+    /// each is handed the frame's place, so no frame is looked for by its
+    /// room. One that refuses its argument throws out of the loop:
     ///
     /// ```php
     /// function f($n) { $t = 0; for ($i = 1; $i < $n; $i++) { $t += max(10, min(200, $i & 255)) + strlen(substr("abcdef", $i % 4)); } return $t; }
@@ -1865,18 +1868,76 @@ impl<'a> Emit<'a> {
     /// 33490
     /// str_contains(): Argument #2 ($needle) must be of type string, array given
     /// ```
+    ///
+    /// The frame stood at the call before the native runs, so what a
+    /// native throws is raised at its line, what it returns given up where
+    /// nothing reads it, and a frameless call's at its own:
+    ///
+    /// ```php
+    /// function f($n) {
+    ///     $t = 0;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         str_repeat("ab", $i);
+    ///         $t += intdiv(100, 7 - $i);
+    ///     }
+    ///     return $t;
+    /// }
+    /// function g($n, $a) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += strlen(implode(",", $i < 7 ? [$i] : $a)); } return $t; }
+    /// try { f(10); } catch (DivisionByZeroError $e) { echo $e->getMessage(), " at ", $e->getLine(), "\n"; }
+    /// try { g(10, 1); } catch (TypeError $e) { echo $e->getMessage(), " at ", $e->getLine(), "\n"; }
+    /// ```
+    /// ```expect regime=jit-force process
+    /// Division by zero at 6
+    /// implode(): Argument #2 ($array) must be of type ?array, int given at 10
+    /// ```
+    ///
+    /// ```php
+    /// function f($n) {
+    ///     $t = 0;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         str_repeat("ab", $i);
+    ///         $t += intdiv(100, 7 - $i);
+    ///     }
+    ///     return $t;
+    /// }
+    /// function g($n, $a) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += strlen(implode(",", $i < 7 ? [$i] : $a)); } return $t; }
+    /// try { f(10); } catch (DivisionByZeroError $e) { echo $e->getMessage(), " at ", $e->getLine(), "\n"; }
+    /// try { g(10, 1); } catch (TypeError $e) { echo $e->getMessage(), " at ", $e->getLine(), "\n"; }
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// Division by zero at 6
+    /// implode(): Argument #2 ($array) must be of type ?array, int given at 10
+    /// ```
     fn handled(
         &mut self,
         line: &Line,
         onward: Onward,
         [room, opline, func]: [Value; 3],
     ) -> Result<(), Abort> {
-        let kernel = if line.opcode == Opcode::DoIcall || line.opcode.is_frameless_icall() {
-            Kernel::Native
+        if line.opcode == Opcode::DoIcall || line.opcode.is_frameless_icall() {
+            // php's `SET_EX_OPLINE` before the native's call, which the
+            // kernel serves the frame stood at, and the frame's place, so
+            // the kernel looks for no frame by its room.
+            self.b.ins().store(trusted(), opline, room, EX_OPLINE);
+            let place = self.frame_ref(line.frame)?;
+            let place = self.b.ins().ireduce(I32, place);
+            let (kernel, last) = if line.opcode == Opcode::DoIcall {
+                let into = match line.out {
+                    Some(out) => self.value(out)?.slot.var.checked_add(1),
+                    None => Some(0),
+                }
+                .ok_or_else(|| mismatch("a temporary past the slots a kernel numbers"))?;
+                (
+                    Kernel::CallNative,
+                    self.b.ins().iconst(I32, i64::from(into)),
+                )
+            } else {
+                (Kernel::Frameless, func)
+            };
+            self.call(kernel, &[room, opline, place, last], leave_of(line))?;
         } else {
-            Kernel::Handle
-        };
-        self.call(kernel, &[room, opline, func], leave_of(line))?;
+            self.call(Kernel::Handle, &[room, opline, func], leave_of(line))?;
+        }
         let next = match onward {
             Onward::Past(places) => self.b.ins().iconst(I32, i64::from(line.opline.0 + places)),
             Onward::Went => self.b.ins().load(I32, trusted(), room, EX_OPLINE),
