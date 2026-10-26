@@ -146,11 +146,12 @@ fn both(
     oracle_out: &Observation,
     kept: &mut Kept,
 ) -> Result<Judged> {
-    let status = oracle_out.exit;
-    if let Ended::Signal(_) = status
-        && let Exit::Absent | Exit::Pinned(_) = witness.exit
+    let ended = oracle_out.exit;
+    if let Ended::Signal(_) = ended
+        && witness.exit != Exit::Bare
+        && witness.exit.asserted() != Some(ended)
     {
-        let why = format!("the oracle ended on {status}, which the fence does not pin");
+        let why = format!("the oracle ended on {ended}, which the fence does not pin");
         return Ok(judged(witness, Judgement::Bork, why));
     }
     // The bare `exit` is the opt-in, and the only status `--accept` writes:
@@ -160,8 +161,8 @@ fn both(
     let mut exit = witness.exit;
     let mut head = witness.fences[0].clone();
     if on.ask.accept != Accept::Nothing && exit == Exit::Bare {
-        head = fence::pinned(&head, status);
-        exit = Exit::of(status);
+        head = fence::pinned(&head, ended);
+        exit = Exit::of(ended);
     }
     // A fence marked `capture` is written whole from the oracle's streams,
     // where a second run from a scratch tree apart prints them again
@@ -224,7 +225,7 @@ fn both(
             witness,
             Judgement::Unpinned,
             format!(
-                "the fence's `exit` is bare and the oracle ends on {status}; `xtask witness --accept` writes it, and nothing else does"
+                "the fence's `exit` is bare and the oracle ends on {ended}; `xtask witness --accept` writes it, and nothing else does"
             ),
         ));
     }
