@@ -2872,3 +2872,87 @@ fn a_new_whose_constructor_may_throw_reloads_nothing() -> Result<(), String> {
     assert!(made.unwind.is_some(), "{rendered}");
     Ok(())
 }
+
+/// The clobber rule at a native that calls back into user code, served
+/// through the native kernel (`Kernel::Native`): `trigger_error` runs
+/// the error handler, PHP that writes through a global, so what a
+/// reference holds is read again after it, the trace's own longs kept
+/// (#3340).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_native_that_calls_back_reloads_what_a_reference_holds() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function h($no, $text) { $GLOBALS['x'][0] += 1; return true; }
+        set_error_handler('h');
+        function f(array &$a, int $n) {
+            $s = 0;
+            for ($i = 0; $i < $n; $i++) { $s += $a[0]; trigger_error('t'); $s += $a[0]; }
+            return $s;
+        }
+        $x = [1]; echo f($x, 3), \"\\n\";",
+    )?;
+    // `$a` is CV0, `$n` CV1, `$s` CV2, `$i` CV3.
+    clobbers(&ir, Opcode::DoIcall, &[0], &[1, 2, 3])
+}
+
+/// The clobber rule at a call whose `RECV` check fails in place: the
+/// call is made by the call kernel, which serves the prologue and its
+/// coercion, and may throw its `TypeError`, so the made call unwinds
+/// (#3340).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_whose_check_may_coerce_or_throw_unwinds() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function g(int $v) { return $v; }
+        function f(array &$a, int $n) {
+            $s = 0;
+            for ($i = 0; $i < $n; $i++) { $s += g($a[0]); }
+            return $s;
+        }
+        $x = [1]; echo f($x, 3), \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let made =
+        line_of(&ir, Opcode::DoUcall).ok_or_else(|| format!("no DO_UCALL in\n{rendered}"))?;
+    assert!(matches!(made.imm, super::Imm::Make { .. }), "{rendered}");
+    assert!(made.unwind.is_some(), "{rendered}");
+    Ok(())
+}
+
+/// The clobber rule at a `SEND_REF` compiled in place whose callee
+/// destroys what the reference held, running its destructor: the send
+/// writes the reference with one owner more and runs no user code, its
+/// handler cold where the variable holds no reference, and the write in
+/// the callee that releases the object unwinds where the destructor
+/// throws (#3340).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_send_by_reference_whose_value_is_destroyed_runs_nothing() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "class D { function __destruct() { } }
+        function g(&$r) { $r = 0; }
+        function f(array &$a, int $n) {
+            $s = 0;
+            for ($i = 0; $i < $n; $i++) { $o = new D; $p = &$o; g($o); $s += $a[0] + $p; }
+            return $s;
+        }
+        $x = [1]; echo f($x, 3), \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let sent =
+        line_of(&ir, Opcode::SendRef).ok_or_else(|| format!("no SEND_REF in\n{rendered}"))?;
+    assert_eq!(sent.form, Form::Inline, "{rendered}");
+    let assign = (ir.ops.iter())
+        .find_map(|op| match op {
+            Op::Line(line) if line.opcode == Opcode::Assign && line.frame != Frame::ROOT => {
+                Some(line)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| format!("no ASSIGN in the callee in\n{rendered}"))?;
+    assert!(assign.unwind.is_some(), "{rendered}");
+    Ok(())
+}
