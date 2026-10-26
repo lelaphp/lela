@@ -942,11 +942,17 @@ fn node_list(
             Item::Node(node) => intern_for_doc(req, this, node.doc()),
             Item::Namespace { .. } => this,
         };
-        let v = match item_object(
+        // The object it is made over held while the node's is made, which
+        // can serve PHP code (an autoloader `new_object` runs) that lets
+        // every kept value go; php reads `parent->document` freed there.
+        let held = Owner::take(req, parent.as_value());
+        let made = item_object(
             req,
             &mut |req, node| object_for(req, node, Some(parent)),
             item,
-        ) {
+        );
+        held.give_up(req);
+        let v = match made {
             Ok(v) => v,
             Err(thrown) => {
                 array.give_up(req);
@@ -1004,7 +1010,7 @@ fn node_list(
 /// ```
 ///
 /// The kept values are read again for each node, as php reads
-/// `xpath_callbacks.node_list`, since making the node before it can serve
+/// `xpath_callbacks.node_list`, since making each node's object can serve
 /// PHP code: a class `registerNodeClass` mapped whose default names a
 /// class not loaded yet runs the autoloader on its first instance, and
 /// one that constructs the evaluator anew lets every kept value go. The
