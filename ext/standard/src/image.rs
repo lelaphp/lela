@@ -607,7 +607,7 @@ pub(crate) fn link_constants(
 /// The handler a number past the fixed types names, `zend_hash_index_find_ptr(&php_image_handlers, image_type)`.
 fn handler_of(req: &Request, image_type: i64) -> Option<ImageHandler> {
     let at = usize::try_from(image_type.checked_sub(TYPE_FIXED_COUNT)?).ok()?;
-    req.registered::<ImageHandler>().nth(at).copied()
+    req.registered_by::<ImageHandler>().nth(at).map(|(_, h)| *h)
 }
 
 /// `php_image_type_to_mime_type`, `Z/ext/standard/image.c:1220`. php passes
@@ -1744,7 +1744,10 @@ pub fn php_getimagetype(req: &mut Request, bytes: &[u8], input: &[u8]) -> i64 {
     let (itype, unmatched) = get_image_type(req, &mut s, &mut warnings);
     raise_all(req, &warnings, input);
     if unmatched {
-        let handlers: Vec<ImageHandler> = req.registered::<ImageHandler>().copied().collect();
+        let handlers: Vec<ImageHandler> = req
+            .registered_by::<ImageHandler>()
+            .map(|(_, h)| *h)
+            .collect();
         for (at, handler) in (TYPE_FIXED_COUNT..).zip(&handlers) {
             if (handler.read)(bytes).is_some() {
                 return at;
@@ -1772,7 +1775,10 @@ fn answer(
     image_info: Ref<Untyped<php::Value>>,
 ) -> Result<OrFalse<php::Owner<php::PhpArray>>, Thrown> {
     let want_info = image_info.is_given();
-    let handlers: Vec<ImageHandler> = req.registered::<ImageHandler>().copied().collect();
+    let handlers: Vec<ImageHandler> = req
+        .registered_by::<ImageHandler>()
+        .map(|(_, h)| *h)
+        .collect();
     let found = image_size(req, bytes, want_info, &handlers)?;
     raise_all(req, &found.warnings, shown);
     if want_info {

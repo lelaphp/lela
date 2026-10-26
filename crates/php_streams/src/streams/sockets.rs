@@ -1324,7 +1324,8 @@ impl Transports for Request {
     /// registration of the name, an extension's over the engine's.
     fn transport_named(&self, protocol: &[u8]) -> Option<Found> {
         if let Some(transport) = self
-            .registered::<XportFactory>()
+            .registered_by::<XportFactory>()
+            .map(|(_, t)| t)
             .filter(|t| t.name.as_bytes() == protocol)
             .last()
         {
@@ -1475,7 +1476,7 @@ impl Transports for Request {
 
     fn transports(&self) -> Vec<&'static str> {
         let mut names: Vec<&'static str> = TRANSPORTS.iter().map(|(name, _)| *name).collect();
-        for transport in self.registered::<XportFactory>() {
+        for (_, transport) in self.registered_by::<XportFactory>() {
             if !names.contains(&transport.name) {
                 names.push(transport.name);
             }

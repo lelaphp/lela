@@ -257,14 +257,9 @@ impl Request {
         (self.shared.state_slots).engine_state(&self.shared.engine_states)
     }
 
-    /// Every value of type `T` an extension of the bundle handed over
-    /// with [`ExtensionBuilder::register`], in bundle order: what
-    /// `pdo_driver_hash` holds after every `MINIT` of the bundle has
-    /// registered into it, immutable for the engine's life
-    /// (ADR-0005).
-    ///
-    /// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
-    pub fn registered<T: Send + Sync + 'static>(&self) -> impl Iterator<Item = &T> {
+    /// [`Request::registered_by`]'s values alone, for the engine's own
+    /// readers.
+    pub(crate) fn registered<T: Send + Sync + 'static>(&self) -> impl Iterator<Item = &T> {
         self.shared
             .supplied
             .registered
@@ -272,11 +267,18 @@ impl Request {
             .filter_map(|(_, value)| value.downcast_ref::<T>())
     }
 
-    /// [`Request::registered`], each value beside the [`Supplier`] of the
-    /// extension that registered it, for code of another extension's that
-    /// calls into the value to serve that call as its supplier's
-    /// ([`Code::serve_supplied`]), as ext/pdo serves a connector's
-    /// calls as the connector's extension (#2864).
+    /// Every value of type `T` an extension of the bundle handed over
+    /// with [`ExtensionBuilder::register`], in bundle order: what
+    /// `pdo_driver_hash` holds after every `MINIT` of the bundle has
+    /// registered into it, immutable for the engine's life
+    /// (ADR-0005). Each stands beside the [`Supplier`] of the extension
+    /// that registered it, for code of another extension's that calls
+    /// into the value to serve that call as its supplier's
+    /// ([`Code::serve_supplied`]), as ext/pdo serves a connector's calls
+    /// as the connector's extension (#2864); a reader that wants the
+    /// values alone maps the supplier away.
+    ///
+    /// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
     pub fn registered_by<T: Send + Sync + 'static>(&self) -> impl Iterator<Item = (Supplier, &T)> {
         self.shared
             .supplied

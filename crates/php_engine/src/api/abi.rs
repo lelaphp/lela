@@ -1904,7 +1904,7 @@ impl ExtensionBuilder {
     /// A value this extension hands at startup to the extension
     /// that reads every value of its type, php's `php_pdo_register_driver`
     /// into `pdo_driver_hash` from `pdo_sqlite`'s `MINIT`: immutable once the
-    /// engine is built, and answered by [`Request::registered`] in bundle
+    /// engine is built, and answered by [`Request::registered_by`] in bundle
     /// order, which is `MINIT` order (ADR-0005).
     #[must_use]
     pub fn register<T: Send + Sync + 'static>(mut self, value: T) -> ExtensionBuilder {
