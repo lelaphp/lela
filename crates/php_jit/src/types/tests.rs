@@ -27,12 +27,12 @@ use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DEFAULT_CALL, DEFAULT_CONSTANT,
-    DIM_AND, DIM_CONCAT, DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FANNKUCH, FIB, Fixture,
-    HASH_FETCH_W, HASH_IS, HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT,
-    METHOD_CALL, METHOD_SCOPED, NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE, NEW_CALL,
-    OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, PARENT_THIS, REF_CALL, REF_WRITE,
-    SIEVE, SPECTRALNORM, STATIC_CALL, STATIC_SCOPED, STATIC_SELF, STATIC_THIS, STRING_BUILD,
-    STRING_MATCH, held, traced as built,
+    DIM_AND, DIM_CONCAT, DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, ENUM_OWN, FANNKUCH,
+    FIB, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE,
+    MANDELBROT, METHOD_CALL, METHOD_OWN, METHOD_SCOPED, NATIVE_CALL, NBODY, NESTED_READ,
+    NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, PARENT_THIS,
+    REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL, STATIC_OWN, STATIC_SCOPED, STATIC_SELF,
+    STATIC_THIS, STRING_BUILD, STRING_MATCH, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -2946,28 +2946,35 @@ fn a_request_scoped_classs_method_is_pushed_under_its_slots_pair() -> Result<(),
 
 /// A method a request-scoped class declares itself is the request's,
 /// numbered for it alone, as php's `zend_lazy_class_load` copies it into
-/// the request: its call is pushed by its handler, with no class guard,
-/// pair or callee held, and its sends stay the handlers' (#3343, #3558).
+/// the request: its call, on an object, through the class's name and on
+/// an enum's case, is pushed in place under the pair its runtime-cache
+/// slot holds, the callee held by its record, as php's
+/// `zend_jit_func_guard` holds a function that is not immutable by its
+/// opcodes (#3561).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
-fn a_request_scoped_classs_own_method_is_pushed_by_its_handler() -> Result<(), String> {
-    let ir = built(
-        &IN_F,
-        "eval('class Base { public $b = 1; }');
-        class Child extends Base { public function get($v) { return $this->b + $v; } public static function twice($v) { return $v + $v; } }
-        function f($o, $n) { $s = 0; for ($i = 1; $i < $n; $i++) { $s += $o->get($i) + Child::twice($i); } return $s; }
-        echo f(new Child, 100), \"\\n\";",
-    )?;
-    let rendered = dump::render(&ir);
-    for opcode in [Opcode::InitMethodCall, Opcode::InitStaticMethodCall] {
+fn a_request_scoped_classs_own_method_is_pushed_under_its_slots_pair() -> Result<(), String> {
+    for (fixture, opcode) in [
+        (METHOD_OWN, Opcode::InitMethodCall),
+        (STATIC_OWN, Opcode::InitStaticMethodCall),
+        (ENUM_OWN, Opcode::InitMethodCall),
+    ] {
+        let ir = golden(fixture)?;
+        let rendered = pushed_under_its_pair(&ir, opcode, |class| {
+            matches!(class, super::PairClass::Receiver | super::PairClass::Named)
+        })?;
         let init = line_of(&ir, opcode).ok_or_else(|| format!("no {opcode:?} in\n{rendered}"))?;
-        assert_eq!(init.form, Form::Step, "{rendered}");
+        assert!(
+            matches!(
+                init.imm,
+                Imm::Pair {
+                    function: super::PairCallee::Record,
+                    ..
+                }
+            ),
+            "{rendered}"
+        );
     }
-    assert!(
-        (ir.guards.iter())
-            .all(|guard| !matches!(guard.check, Check::Class { .. } | Check::Callee { .. })),
-        "{rendered}"
-    );
     Ok(())
 }
 

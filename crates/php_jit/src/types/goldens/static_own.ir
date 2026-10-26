@@ -1,0 +1,47 @@
+trace loop e2, stop loop
+frame f0 e2 root, 3 cvs 6 temps
+frame f1 e5 callee of f0, 1 cvs 1 temps
+entry
+  #0 f0.CV1 [undef, any]
+  #2 f0.CV2 [long]
+  #4 f0.CV0 [long]
+  guard room 112 -> exit 0
+  guard #4 long -> exit 1
+  guard #2 long -> exit 2
+loop at 0, loop, interrupt exit 8
+  #1 f0.CV1 [undef, any] = phi(#0, #8)
+  #3 f0.CV2 [long] reg = phi(#2, #9)
+0009 f0 IS_SMALLER #3, #4 fused inline
+  checks direction taken -> exit 3
+0004 f0 INIT_STATIC_METHOD_CALL const#2, const#4 inline pair fn own of named map 0 unwinds -> unwind 0
+  checks callee e5 -> exit 4
+     f0 init e5 in-place
+0005 f0 SEND_VAR #3 inline
+0006 f0 DO_FCALL inline in-place unwinds -> unwind 0
+  checks stands e5 0001 -> exit 5
+     f1 enter e5
+  -> #5 f1.CV0 [long]
+0001 f1 ADD #5, #5 inline
+  -> #6 f1.T0 [long] reg
+  checks #6 long -> exit 6
+0002 f1 RETURN #6 inline receives in-place unwinds -> unwind 0
+     f0 back to #7
+  -> #7 f0.T2 [long]
+0007 f0 ASSIGN #1, #7 inline unwinds -> unwind 1
+  -> #8 f0.CV1 [long] reg
+0008 f0 PRE_INC #3 inline
+  -> #9 f0.CV2 [long] reg
+  checks #9 long -> exit 7
+end: back to 0
+exit 0: f0 0009 plain to vm
+exit 1: f0 0009 plain
+exit 2: f0 0009 plain f0.CV0:long
+exit 3: f0 0011 plain f0.CV2=#3 f0.CV0:long f0.CV2:long
+exit 4: f0 where it stands plain f0.CV2=#3 f0.CV0:long f0.CV2:long
+exit 5: f0 where it stands restore call f0.CV2=#3 f0.CV0:long f0.CV2:long
+exit 6: f1 0001 plain f0.CV2=#3 f1.CV0:long
+exit 7: f0 0008 plain f0.CV1=#8 f0.CV2=#3 f0.CV0:long f0.CV1:long f0.CV2:long
+exit 8: f0 0009 plain f0.CV2=#3 f0.CV0:long f0.CV2:long to vm
+unwind 0: f0.CV2=#3
+unwind 1: f0.CV1=#8 f0.CV2=#3
+map 0: offset 2 slot 0

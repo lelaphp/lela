@@ -29,8 +29,8 @@ use php_heap::ZvalType;
 use crate::record::func_name as func;
 use crate::types::{
     Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Imm, Interrupt,
-    Landing, Layout, Object, Op, OpId, Operand, Owners, PairClass, Place, Pointee, Read, Repeat,
-    Returned, Slot, Slotted, Store, Stored, TraceIr, Types, Unwind, ValueId,
+    Landing, Layout, Object, Op, OpId, Operand, Owners, PairCallee, PairClass, Place, Pointee,
+    Read, Repeat, Returned, Slot, Slotted, Store, Stored, TraceIr, Types, Unwind, ValueId,
 };
 
 /// The text of `ir`.
@@ -428,16 +428,18 @@ fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
             ..
         } => return write!(text, " cached"),
         Imm::Pair { function, class } => {
+            match function {
+                PairCallee::Number(function) => write!(text, " pair fn {function}")?,
+                PairCallee::Record => write!(text, " pair fn own")?,
+            }
             return match class {
-                PairClass::Receiver => write!(text, " pair fn {function} of receiver"),
+                PairClass::Receiver => write!(text, " of receiver"),
                 PairClass::Published(class) => {
-                    let number = tier::class_number(class);
-                    write!(text, " pair fn {function} of class {number}")
+                    write!(text, " of class {}", tier::class_number(class))
                 }
-                PairClass::Named => write!(text, " pair fn {function} of named"),
-                PairClass::Forwarded => write!(text, " pair fn {function} of scope"),
+                PairClass::Named => write!(text, " of named"),
+                PairClass::Forwarded => write!(text, " of scope"),
                 PairClass::This { named, receiver } => {
-                    write!(text, " pair fn {function}")?;
                     if let Some(named) = named {
                         write!(text, " of class {}", tier::class_number(named))?;
                     }

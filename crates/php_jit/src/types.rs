@@ -441,12 +441,27 @@ pub(crate) enum Imm {
     /// before it pushes (`zend_jit_init_method_call`,
     /// `zend_jit_init_static_method_call`,
     /// `Z/ext/opcache/jit/zend_jit_ir.c:9025-9056`, `:9255-9265`): the
-    /// callee's number the pair is held to, a published method's
-    /// ([`php_engine::tier::CalleeSlot::function`]), and the class.
+    /// callee the pair is held to, and the class.
     Pair {
-        function: u32,
+        function: PairCallee,
         class: PairClass,
     },
+}
+
+/// The callee the pair in a call's runtime-cache slot is held to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PairCallee {
+    /// A published method's number, the same in every request of the
+    /// epoch ([`php_engine::tier::CalleeSlot::function`]), compared as a
+    /// constant.
+    Number(u32),
+    /// A request-scoped class's own method, numbered by each request for
+    /// itself: the pair's record compared with the record of the header
+    /// the request laid out for the call, which names the method the
+    /// request found for the class's name over the op array the trace
+    /// recorded, as php's `zend_jit_func_guard` holds a function that is
+    /// not immutable by its opcodes (`Z/ext/opcache/jit/zend_jit_ir.c:8999-9024`).
+    Record,
 }
 
 /// The class the pair in a call's runtime-cache slot is held to, and so

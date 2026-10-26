@@ -242,6 +242,43 @@ pub(crate) const PARENT_THIS: Fixture = Fixture {
     ],
 };
 
+/// A request-scoped class's own method called on a variable's object: pushed
+/// in place under the pair its runtime-cache slot holds, the callee held
+/// by its record (#3561).
+pub(crate) const METHOD_OWN: Fixture = Fixture {
+    name: "method_own",
+    program: "own_calls",
+    plan: &[
+        ("record.function", "owns"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A request-scoped class's own static method called through its name:
+/// pushed in place under the pair, the callee held by its record (#3561).
+pub(crate) const STATIC_OWN: Fixture = Fixture {
+    name: "static_own",
+    program: "own_calls",
+    plan: &[
+        ("record.function", "statics"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// An enum's own method called on its case: pushed in place under the
+/// pair, the callee held by its record (#3561).
+pub(crate) const ENUM_OWN: Fixture = Fixture {
+    name: "enum_own",
+    program: "own_calls",
+    plan: &[
+        ("record.function", "cases"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
 /// A loop whose callee's variables own an array and a string as it
 /// returns: the `RETURN` left in place, freeing each (#3313).
 pub(crate) const OWNING_LEAVE: Fixture = Fixture {

@@ -35,7 +35,7 @@ use super::{
 use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT, RETURNED, THREW};
 use crate::types::{
     Abort, ArgChecks, Check, Defaults, End, ExitId, Frame, Imm, Line, Object, OpId, Operand,
-    Owners, PairClass, Returned, Vars,
+    Owners, PairCallee, PairClass, Returned, Vars,
 };
 
 /// The receiver a method's call `line` pushes in place: `$this` of its
@@ -282,7 +282,9 @@ impl Emit<'_> {
     ) -> Result<(), Abort> {
         let (slow, join) = self.split();
         let over = match line.imm {
-            Imm::Pair { function, class } => self.pair_guard(line, (function, class), slow)?,
+            Imm::Pair { function, class } => {
+                self.pair_guard(line, plain, (function, class), slow)?
+            }
             _ => Over::default(),
         };
         let stack = self.stack()?;
@@ -388,9 +390,11 @@ impl Emit<'_> {
     /// runtime-cache slot before it pushes the call in place
     /// (`zend_jit_init_method_call`, `zend_jit_init_static_method_call`,
     /// `Z/ext/opcache/jit/zend_jit_ir.c:9025-9056`, `:9255-9265`): on to
-    /// `slow` unless the slot holds a pair whose callee is `function` and
-    /// whose class is the receiver's, or the published class the call
-    /// names; through `self` or `parent`, whose class the op array's scope
+    /// `slow` unless the slot holds a pair whose callee is `function`, by
+    /// its number, or by its record where it is a request-scoped class's
+    /// own method, compared with the record of the header the request laid
+    /// out for the call ([`PairCallee::Record`]), and whose class is the
+    /// receiver's, or the published class the call names; through `self` or `parent`, whose class the op array's scope
     /// fixes, the class is not compared, as php reads `fbc` alone. What
     /// the push writes past the image ([`Over`]): the class's number where
     /// the call's called scope is a request-scoped class, the calling
@@ -405,6 +409,44 @@ impl Emit<'_> {
     /// from is not compared: [`tier::UnitView::hold_callee`] takes only a
     /// slot of an op array of one scope that its own frame reads, so
     /// every frame primes it alike.
+    ///
+    /// A request-scoped class's own method, held by its record: a lazy
+    /// copy's, on an object of the copy, of a subclass whose slot's pair
+    /// names another class, and of an evaluated class whose method of the
+    /// same name is another, its static method through its name, and an
+    /// enum's on two cases, under force and where every guard fails once:
+    ///
+    /// ```php
+    /// class Getter { public $b = 1; }
+    /// eval('class Base extends Getter { }');
+    /// class Child extends Base { function get($v) { return $this->b + $v; } static function twice($v) { return $v + $v; } }
+    /// class Grand extends Child { }
+    /// eval('class Other { public $b = 100; function get($v) { return -$v; } }');
+    /// enum Suit { case Hearts; case Spades; function weight($v) { return $this === Suit::Hearts ? $v * 2 : $v; } }
+    /// function f($o, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o->get($i); } return $t; }
+    /// function s($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += Child::twice($i); } return $t; }
+    /// function c($e, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += $e->weight($i); } return $t; }
+    /// echo f(new Child, 30), " ", f(new Grand, 30), " ", f(new Other, 30), " ", f(new Child, 5), " ", s(30), " ", c(Suit::Hearts, 30), " ", c(Suit::Spades, 30), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 465 465 -435 15 870 870 435
+    /// ```
+    ///
+    /// ```php
+    /// class Getter { public $b = 1; }
+    /// eval('class Base extends Getter { }');
+    /// class Child extends Base { function get($v) { return $this->b + $v; } static function twice($v) { return $v + $v; } }
+    /// class Grand extends Child { }
+    /// eval('class Other { public $b = 100; function get($v) { return -$v; } }');
+    /// enum Suit { case Hearts; case Spades; function weight($v) { return $this === Suit::Hearts ? $v * 2 : $v; } }
+    /// function f($o, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o->get($i); } return $t; }
+    /// function s($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += Child::twice($i); } return $t; }
+    /// function c($e, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += $e->weight($i); } return $t; }
+    /// echo f(new Child, 30), " ", f(new Grand, 30), " ", f(new Other, 30), " ", f(new Child, 5), " ", s(30), " ", c(Suit::Hearts, 30), " ", c(Suit::Spades, 30), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 465 465 -435 15 870 870 435
+    /// ```
     ///
     /// Through `self` a static method forwarding `static`, and a method
     /// taking `$this` through its class's name and through `parent`, from
@@ -478,7 +520,8 @@ impl Emit<'_> {
     fn pair_guard(
         &mut self,
         line: &Line,
-        (function, class): (u32, PairClass),
+        plain: &PlainCall,
+        (function, class): (PairCallee, PairClass),
         slow: Block,
     ) -> Result<Over, Abort> {
         let refuse = Refuse::To(slow);
@@ -493,12 +536,32 @@ impl Emit<'_> {
             | PairClass::Forwarded
             | PairClass::This { .. } => self.cached_slot(line, P.pair(), refuse)?,
         };
-        let callee = (self.b.ins()).load(I32, trusted(), place, at(P.pair_function()));
-        let other = self
-            .b
-            .ins()
-            .icmp_imm_u(IntCC::NotEqual, callee, i64::from(function));
-        self.refuse_if(other, refuse)?;
+        match function {
+            PairCallee::Number(function) => {
+                let callee = (self.b.ins()).load(I32, trusted(), place, at(P.pair_function()));
+                let other = self
+                    .b
+                    .ins()
+                    .icmp_imm_u(IntCC::NotEqual, callee, i64::from(function));
+                self.refuse_if(other, refuse)?;
+            }
+            PairCallee::Record => {
+                // The record of the header the request laid out for the
+                // call, read once the request is ready, so laid out.
+                let unready = self.unready()?;
+                self.refuse_if(unready, refuse)?;
+                let header = self.header_of(plain)?;
+                let cx = self
+                    .cx
+                    .ok_or_else(|| mismatch("a pair's record read before the entry"))?;
+                let images = self.b.ins().load(I64, trusted(), cx, IMAGES_AT);
+                let image = self.b.ins().load(I64, trusted(), images, header);
+                let laid = (self.b.ins()).load(I64, trusted(), image, at(L.callee() - L.header()));
+                let record = (self.b.ins()).load(I64, trusted(), place, at(P.pair_record()));
+                let other = self.b.ins().icmp(IntCC::NotEqual, record, laid);
+                self.refuse_if(other, refuse)?;
+            }
+        }
         let named = match class {
             PairClass::Published(class)
             | PairClass::This {

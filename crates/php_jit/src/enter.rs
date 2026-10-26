@@ -1562,10 +1562,12 @@ fn header_of(
     req: &Request,
     call: &tier::PlainCall,
 ) -> Option<usize> {
-    let named = if call.callee().is_none() {
-        call.name()
-    } else {
-        &[]
+    // A native's call by its name, and a request-scoped class's own
+    // method's by its class's, under which the request finds the function.
+    let named = match (call.callee(), call.own_class()) {
+        (None, _) => call.name(),
+        (Some(_), Some(class)) => class,
+        (Some(_), None) => &[],
     };
     let key = (
         call.callee(),

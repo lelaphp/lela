@@ -25,9 +25,9 @@ use super::opcodes::{
 use super::{
     Abort, ArgChecks, BodyEntry, Check, Constant, Def, Defaults, End, Entry, ExitId, ExitSpec,
     Form, Frame, FrameInfo, Frees, Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known,
-    Landing, Layout, Leave, Line, LoopHeader, Object, Op, OpId, Operand, Owners, PairClass, Place,
-    Read, Repeat, Returned, Slot, Slotted, Store, Stored, TraceIr, Unwind, UnwindId, Value,
-    ValueId, Vars, on_declared_slot,
+    Landing, Layout, Leave, Line, LoopHeader, Object, Op, OpId, Operand, Owners, PairCallee,
+    PairClass, Place, Read, Repeat, Returned, Slot, Slotted, Store, Stored, TraceIr, Unwind,
+    UnwindId, Value, ValueId, Vars, on_declared_slot,
 };
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -793,7 +793,9 @@ impl<'a> Builder<'a> {
                     defaults,
                 },
                 _ if let Some((slot, class)) = pair => Imm::Pair {
-                    function: slot.function(),
+                    function: slot
+                        .function()
+                        .map_or(PairCallee::Record, PairCallee::Number),
                     class,
                 },
                 _ if let Some(property) = property.filter(|_| form == Form::Inline) => {

@@ -379,6 +379,7 @@ pub struct PlaceLayout {
     pair: u32,
     pair_class: u32,
     pair_function: u32,
+    pair_record: u32,
     class: u32,
     offset_tag: u32,
     declared: u8,
@@ -398,6 +399,7 @@ pub const PLACE: PlaceLayout = {
         pair: crate::exec::CLASS_AND_CALLEE,
         pair_class: word(Cached::PAIR_CLASS_AT),
         pair_function: word(Cached::PAIR_FUNCTION_AT),
+        pair_record: word(Cached::PAIR_RECORD_AT),
         class: word(Cached::PLACE_AT + PropertyPlace::CLASS_AT),
         offset_tag: word(offset + PropertyOffset::TAG_AT),
         declared: PropertyOffset::DECLARED,
@@ -445,6 +447,16 @@ impl PlaceLayout {
     #[must_use]
     pub const fn pair_function(&self) -> u32 {
         self.pair_function
+    }
+
+    /// Where the pair keeps its callee's record, a word, the one a frame
+    /// serving the callee is pushed with
+    /// ([`FrameLayout::callee`](super::FrameLayout::callee)): how
+    /// compiled code holds the slot to a request's own method, whose
+    /// number is the request's alone.
+    #[must_use]
+    pub const fn pair_record(&self) -> u32 {
+        self.pair_record
     }
 
     /// Where a property's place keeps the class it was found on, a
@@ -502,6 +514,7 @@ const _: () = {
     assert!(PLACE.class.is_multiple_of(4) && PLACE.slot.is_multiple_of(4));
     assert!(PLACE.ty.is_multiple_of(2) && PLACE.unprimed != PLACE.property);
     assert!(PLACE.pair_class.is_multiple_of(4) && PLACE.pair_function.is_multiple_of(4));
+    assert!(PLACE.pair_record.is_multiple_of(8));
     assert!(PLACE.pair != PLACE.unprimed && PLACE.pair != PLACE.property);
 };
 
@@ -526,18 +539,34 @@ pub struct PlainCall {
     activation: Option<Activation>,
     checks: bool,
     /// A method's call: the class of its receiver, its called scope, and
-    /// the method its methods answered, a published one. The class is
-    /// published, or the request's own, whose number the recording's
-    /// request gave it and compiled code reads where it runs.
-    method: Option<(ClassId, Function)>,
+    /// the method its methods answered. The class is published, or the
+    /// request's own, whose number the recording's request gave it and
+    /// compiled code reads where it runs.
+    method: Option<(ClassId, Method)>,
+}
+
+/// The method a method's plain call serves, as a request that runs the
+/// code finds it ([`call_image`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Method {
+    /// A published method, the same number in every request of the epoch.
+    Published(Function),
+    /// A request-scoped class's own method, `zend_lazy_class_load`'s
+    /// copy's, an enum's: numbered by each request for itself, so found
+    /// in the request that runs the code under the name of the class that
+    /// answered it, lowered, and the call's own name, and held there to
+    /// the op array the call serves.
+    Own(Box<[u8]>),
 }
 
 /// Two calls of one callee, one argument count and one called scope are
-/// the same call: a user function by its op array, a native by its name.
+/// the same call: a user function by its op array, a native by its name,
+/// and a request-scoped class's own method by its class's name too.
 impl PartialEq for PlainCall {
     fn eq(&self, other: &PlainCall) -> bool {
         (self.callee, self.count) == (other.callee, other.count)
             && self.scope() == other.scope()
+            && self.own_class() == other.own_class()
             && (self.callee.is_some() || self.name == other.name)
     }
 }
@@ -640,7 +669,19 @@ impl PlainCall {
     /// lays out names none.
     #[must_use]
     pub fn scope(&self) -> Option<ClassId> {
-        self.method.map(|(class, _)| class)
+        self.method.as_ref().map(|(class, _)| *class)
+    }
+
+    /// The name, lowered, of the request-scoped class whose own method the
+    /// call serves, under which each request finds the method for itself
+    /// ([`call_image`]); none for a function's call and a published
+    /// method's.
+    #[must_use]
+    pub fn own_class(&self) -> Option<&[u8]> {
+        match &self.method {
+            Some((_, Method::Own(class))) => Some(class),
+            _ => None,
+        }
     }
 }
 
@@ -652,9 +693,9 @@ impl PlainCall {
 /// the class its called scope, as `INIT_METHOD_CALL`,
 /// `INIT_STATIC_METHOD_CALL` and `NEW` push it: a published class, or a
 /// request-scoped one whose method is published (#3558), one it inherits
-/// from a published class; none for any other. A request-scoped class's
-/// own methods are the request's, numbered for it alone, as php's
-/// `zend_lazy_class_load` copies each into the request.
+/// from a published class, or its own (#3561), the request's, numbered
+/// for it alone as php's `zend_lazy_class_load` copies each into the
+/// request ([`Method::Own`]); none for any other.
 #[must_use]
 pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let (top, laid) = req.vm().stack.top()?;
@@ -670,11 +711,14 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     }
     let method = match (header.called_scope(), header.this()) {
         (None, None) => None,
-        (Some(class), this)
-            if function.published_number().is_some()
-                && this.is_none_or(|this| this.class() == class) =>
-        {
-            Some((class, function))
+        (Some(class), this) if this.is_none_or(|this| this.class() == class) => {
+            let method = if function.published_number().is_some() {
+                Method::Published(function)
+            } else {
+                let name = req.symbols().class_name(class).to_ascii_lowercase();
+                Method::Own(name.into_boxed_slice())
+            };
+            Some((class, method))
         }
         _ => return None,
     };
@@ -771,8 +815,12 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
 /// declared no such function yet, or its entry is no longer plain.
 #[must_use]
 pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
-    let function = match call.method {
-        Some((_, method)) => method,
+    let function = match &call.method {
+        Some((_, Method::Published(method))) => *method,
+        Some((_, Method::Own(class))) => {
+            let class = req.class_named(Bare::resolved(class))?;
+            req.symbols().method_named(class, &call.name)?
+        }
         None => req.function_named(Bare::resolved(&call.name))?,
     };
     let served = if let Some(user) = req.user_function(function) {
