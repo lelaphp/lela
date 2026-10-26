@@ -7,6 +7,7 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::cdir::{self, Local};
 use crate::dostime::{DosTime, TORRENTZIP, Zone};
@@ -224,10 +225,7 @@ fn clone_of(orig: Option<&Dirent>) -> Dirent {
 /// makes: a string, or a file read at `close`.
 #[derive(Debug)]
 pub(crate) enum Source {
-    Buffer {
-        data: Vec<u8>,
-        mtime: i64,
-    },
+    Buffer(Buffer),
     File {
         path: PathBuf,
         /// The file `ZipArchive::FL_OPEN_FILE_NOW` opened.
@@ -239,10 +237,45 @@ pub(crate) enum Source {
     },
 }
 
+/// `zip_source_buffer`: its bytes, which the window of each stream over
+/// it shares and names it by, where its reading stands (`in->offset`),
+/// which a window's read seeks it to and moves on, and how many streams
+/// hold it open (`open_count`), under which the close's read does not
+/// rewind it.
+#[derive(Debug)]
+pub(crate) struct Buffer {
+    data: Arc<[u8]>,
+    mtime: i64,
+    offset: usize,
+    opens: u32,
+}
+
+/// The buffer source a window on an added entry reads: its entry, and
+/// its bytes, by which it is told from a source the entry is given since.
+#[derive(Clone)]
+pub(crate) struct BufferLink {
+    entry: usize,
+    data: Arc<[u8]>,
+}
+
+impl BufferLink {
+    pub(crate) fn new(entry: usize, data: &Arc<[u8]>) -> BufferLink {
+        BufferLink {
+            entry,
+            data: Arc::clone(data),
+        }
+    }
+}
+
 impl Source {
     /// `zip_source_buffer`, made now.
     pub(crate) fn buffer(data: Vec<u8>) -> Source {
-        Source::Buffer { data, mtime: now() }
+        Source::Buffer(Buffer {
+            data: data.into(),
+            mtime: now(),
+            offset: 0,
+            opens: 0,
+        })
     }
 
     /// `zip_source_file` and `zip_source_filep`: the file stated now, the
@@ -288,10 +321,10 @@ impl Source {
     /// The source's `ZIP_SOURCE_STAT`.
     pub(crate) fn stat(&self) -> Stat {
         match self {
-            Source::Buffer { data, mtime } => Stat {
-                size: data.len() as u64,
-                comp_size: data.len() as u64,
-                mtime: *mtime,
+            Source::Buffer(b) => Stat {
+                size: b.data.len() as u64,
+                comp_size: b.data.len() as u64,
+                mtime: b.mtime,
                 ..Stat::default()
             },
             Source::File { len, mtime, .. } => Stat {
@@ -306,38 +339,78 @@ impl Source {
     /// read-only bit where the owner may not write.
     pub(crate) fn attributes(&self) -> Option<(u8, u32)> {
         match self {
-            Source::Buffer { .. } => None,
+            Source::Buffer(_) => None,
             Source::File { mode, .. } => Some((3, (mode << 16) | u32::from(mode & 0o200 == 0))),
         }
     }
 
-    /// The source opened for reading (`ZIP_SOURCE_OPEN`): a string's
-    /// bytes, or a window on the file read as it is read.
-    pub(crate) fn reader(&self) -> Result<Reader, Status> {
-        match self {
-            Source::Buffer { data, .. } => Ok(Reader::bytes(data.clone())),
-            Source::File {
-                path,
-                file,
-                start,
-                len,
-                ..
-            } => {
-                let f = match file {
-                    Some(f) => f.try_clone(),
-                    None => File::open(path),
-                }
-                .map_err(|e| Status::os(Er::Open, &e))?;
-                let f = Stdio::new(f);
-                Ok(Reader::window(Window::new(f, *start, *len, false), None))
-            }
-        }
+    /// `zip_source_supports_reopen`: a buffer's, where libzip's file
+    /// source cannot be opened again, so an entry a file is given cannot
+    /// be read before the close writes it:
+    ///
+    /// ```php
+    /// file_put_contents('reopen-witness.txt', 'file data');
+    /// $z = new ZipArchive; $z->open('reopen-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE); $z->addFile('reopen-witness.txt', 'f');
+    /// var_dump($z->getFromName('f'), $z->getStatusString(), $z->getStream('f'), $z->close());
+    /// $z->open('reopen-witness.zip'); var_dump($z->getFromName('f')); $z->close(); unlink('reopen-witness.zip'); unlink('reopen-witness.txt');
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// string(22) "Entry has been changed"
+    /// bool(false)
+    /// bool(true)
+    /// string(9) "file data"
+    /// ```
+    pub(crate) fn supports_reopen(&self) -> bool {
+        matches!(self, Source::Buffer(_))
     }
 
-    /// Every byte of the source.
+    /// The bytes the close reads of the source, opened by it: a buffer's
+    /// from where its reading stands while a stream holds it open, since
+    /// `zip_source_open` of an open source does not rewind it, and from
+    /// its start otherwise, read on to its end; or the file's window. So
+    /// a stream that read, or a read past it, leaves the close short of
+    /// the data, until the stream is closed; a stream over a buffer the
+    /// entry has since been given in place of reads its own:
+    ///
+    /// ```php
+    /// function fresh() { $z = new ZipArchive; $z->open('share-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE); $z->addFromString('b', 'bee'); return $z; }
+    /// function done($z, $label) { $r = $z->close(); echo "$label: ", var_export($r, true), " $z->status\n"; if ($r) { $z->open('share-witness.zip'); echo '  ', var_export($z->getFromName('b'), true), "\n"; $z->close(); } }
+    /// $z = fresh(); $s = $z->getStream('b'); var_dump(fread($s, 1)); done($z, 'read, open'); fclose($s);
+    /// $z = fresh(); $s = $z->getStream('b'); done($z, 'unread'); fclose($s);
+    /// $z = fresh(); $s = $z->getStream('b'); fread($s, 1); fclose($s); done($z, 'read, closed');
+    /// $z = fresh(); $s = $z->getStream('b'); var_dump($z->getFromName('b')); done($z, 'unread, the entry read past it'); fclose($s);
+    /// $z = fresh(); $s1 = $z->getStream('b'); $s2 = $z->getStream('b'); echo fread($s1, 1), fread($s2, 2), "\n"; fclose($s1); fclose($s2); done($z, 'two read, closed');
+    /// $z = fresh(); $s = $z->getStream('b'); $z->addFromString('b', 'new data'); echo fread($s, 5), "\n"; done($z, 'given anew'); fclose($s);
+    /// unlink('share-witness.zip');
+    /// ```
+    /// ```expect
+    /// string(1) "b"
+    ///
+    /// Warning: ZipArchive::close(): Unexpected length of data in %SCRATCH%/witness.php on line 3
+    /// read, open: false 33
+    /// unread: true 0
+    ///   'bee'
+    /// read, closed: true 0
+    ///   'bee'
+    /// string(3) "bee"
+    ///
+    /// Warning: ZipArchive::close(): Unexpected length of data in %SCRATCH%/witness.php on line 3
+    /// unread, the entry read past it: false 33
+    /// bbe
+    /// two read, closed: true 0
+    ///   'bee'
+    /// bee
+    /// given anew: true 0
+    ///   'new data'
+    /// ```
     pub(crate) fn read_all(&mut self) -> Result<Vec<u8>, Status> {
         match self {
-            Source::Buffer { data, .. } => Ok(data.clone()),
+            Source::Buffer(b) => {
+                let start = if b.opens > 0 { b.offset } else { 0 };
+                b.offset = b.data.len();
+                Ok(b.data.get(start..).unwrap_or_default().to_vec())
+            }
             Source::File {
                 path,
                 file,
@@ -1468,7 +1541,7 @@ impl Archive {
             .map_err(|e| Status::os(Er::Open, &e))?;
         let f = data.stdio.as_mut().unwrap_or(&mut own);
         let start = offset + Local::at(f, offset, data.size).size()?;
-        Ok(Window::new(own, start, size, true))
+        Ok(Window::new(own, start, size))
     }
 
     /// An unchanged entry's data opened for reading whole: decrypted with
@@ -1571,11 +1644,43 @@ impl Archive {
         }
     }
 
-    /// `zip_fread` on an entry this archive opened, through its `FILE`.
+    /// `zip_fread` on an entry this archive opened, through its `FILE`,
+    /// or through the window on an added entry's buffer, which leaves the
+    /// buffer where the window's read ended.
     pub(crate) fn read_entry(&mut self, zf: &mut Reader, len: usize) -> Result<Vec<u8>, Status> {
-        match &mut self.data {
+        let read = match &mut self.data {
             Some(d) => zf.read_through(len, &mut d.stdio),
             None => zf.read(len),
+        };
+        if read.as_ref().is_ok_and(|chunk| !chunk.is_empty())
+            && let Some((link, at)) = zf.on_buffer()
+            && let Some(b) = self.buffer_of(&link)
+        {
+            b.offset = at;
+        }
+        read
+    }
+
+    /// The buffer source `link` names, where its entry still has it.
+    fn buffer_of(&mut self, link: &BufferLink) -> Option<&mut Buffer> {
+        match &mut self.entries.get_mut(link.entry)?.source {
+            Some(Source::Buffer(b)) if Arc::ptr_eq(&b.data, &link.data) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// `zip_source_open` (`open` true) and `zip_source_close` of the
+    /// buffer `link` names, as a stream over it opens and closes: a
+    /// stream holds its source open from `zip_fopen` to `zip_fclose`,
+    /// where a read made and done within one call leaves only where it
+    /// read to.
+    pub(crate) fn hold_buffer(&mut self, link: &BufferLink, open: bool) {
+        if let Some(b) = self.buffer_of(link) {
+            b.opens = if open {
+                b.opens + 1
+            } else {
+                b.opens.saturating_sub(1)
+            };
         }
     }
 
@@ -1601,6 +1706,7 @@ impl Archive {
         if flags & FL_UNCHANGED == 0
             && (if changed_data {
                 flags & FL_COMPRESSED != 0
+                    || !entry.source.as_ref().is_some_and(Source::supports_reopen)
             } else {
                 entry.deleted
             })
@@ -1626,8 +1732,10 @@ impl Archive {
         }
         let crc_valid = self.entries[idx].orig.as_ref().is_some_and(|o| o.crc_valid);
         let opened = if changed_data {
-            let opened = self.entries[idx].source.as_ref().map(Source::reader);
-            opened.unwrap_or(Err(Status::new(Er::Internal)))
+            match &self.entries[idx].source {
+                Some(Source::Buffer(b)) => Ok(Reader::over_buffer(idx, b.data.clone())),
+                _ => Err(Status::new(Er::Internal)),
+            }
         } else if flags & FL_COMPRESSED != 0 {
             let crc = (st.comp_method == 0 && crc_valid).then_some((st.crc, st.size));
             self.window(idx).map(|w| Reader::window(w, crc))

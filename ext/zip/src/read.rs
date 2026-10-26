@@ -11,8 +11,9 @@
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::fs::FileExt;
+use std::sync::Arc;
 
-use crate::archive::Encryption;
+use crate::archive::{BufferLink, Encryption};
 use crate::codec::{PkwareKeys, WinzipAes};
 use crate::error::{Detail, Er, Status};
 
@@ -174,27 +175,23 @@ impl Stdio {
     }
 }
 
-/// `_zip_source_window_new` over a file: `len` bytes from `start`, read
-/// through a stdio `FILE`, its own or the archive's it is lent.
+/// `_zip_source_window_new` over the archive's own data: `len` bytes
+/// from `start`, read through a stdio `FILE`, the archive's where it is
+/// lent, where libzip reads every failure as `ZIP_ER_EOF`.
 pub(crate) struct Window {
     file: Stdio,
     start: u64,
     len: u64,
     offset: u64,
-    /// The archive's own data, where libzip reads every failure as
-    /// `ZIP_ER_EOF` and reads through the archive's `FILE`; a file
-    /// source's otherwise, read through its own.
-    archive: bool,
 }
 
 impl Window {
-    pub(crate) fn new(file: Stdio, start: u64, len: u64, archive: bool) -> Window {
+    pub(crate) fn new(file: Stdio, start: u64, len: u64) -> Window {
         Window {
             file,
             start,
             len,
             offset: 0,
-            archive,
         }
     }
 
@@ -208,13 +205,11 @@ impl Window {
         }
         self.file.seek(self.start + self.offset);
         match self.file.read(&mut buf[..n]) {
-            Ok(0) | Err(_) if self.archive => Err(Status::new(Er::Eof)),
-            Ok(0) => Err(Status::new(Er::DataLength)),
+            Ok(0) | Err(_) => Err(Status::new(Er::Eof)),
             Ok(k) => {
                 self.offset += k as u64;
                 Ok(k)
             }
-            Err(e) => Err(Status::os(Er::Read, &e)),
         }
     }
 
@@ -1322,8 +1317,13 @@ impl Pulled {
 
 /// What a `zip_file_t` reads from below its CRC layer.
 enum Body {
-    /// Data held in memory: a string source, or none at all.
-    Bytes { data: Vec<u8>, offset: usize },
+    /// Data held in memory: none at all, or the window on entry `entry`'s
+    /// buffer source, whose bytes it shares.
+    Bytes {
+        data: Arc<[u8]>,
+        offset: usize,
+        entry: Option<usize>,
+    },
     /// A window read as it is: stored data, or the raw bytes
     /// `ZIP_FL_COMPRESSED` asks for.
     Window(Window),
@@ -1338,7 +1338,7 @@ enum Body {
 impl Body {
     fn read_some(&mut self, buf: &mut [u8]) -> Result<usize, Status> {
         match self {
-            Body::Bytes { data, offset } => {
+            Body::Bytes { data, offset, .. } => {
                 let rest = data.get(*offset..).unwrap_or_default();
                 let n = rest.len().min(buf.len());
                 buf[..n].copy_from_slice(&rest[..n]);
@@ -1355,7 +1355,7 @@ impl Body {
     /// The position and length of a seekable body.
     fn span(&self) -> Option<(u64, u64)> {
         match self {
-            Body::Bytes { data, offset } => Some((*offset as u64, data.len() as u64)),
+            Body::Bytes { data, offset, .. } => Some((*offset as u64, data.len() as u64)),
             Body::Window(w) => Some((w.offset, w.len)),
             Body::Decrypted(_) | Body::Compressed(_) | Body::Pulled(_) => None,
         }
@@ -1439,15 +1439,39 @@ impl Reader {
         }
     }
 
-    /// A string source's data.
-    pub(crate) fn bytes(data: Vec<u8>) -> Reader {
-        Reader::new(Body::Bytes { data, offset: 0 }, None, true)
+    /// The window `zip_source_zip_file_create` lays over entry `entry`'s
+    /// buffer source, whose bytes `data` are.
+    pub(crate) fn over_buffer(entry: usize, data: Arc<[u8]>) -> Reader {
+        let body = Body::Bytes {
+            data,
+            offset: 0,
+            entry: Some(entry),
+        };
+        Reader::new(body, None, true)
+    }
+
+    /// The buffer a window on an added entry's buffer reads, and where
+    /// the window stands.
+    pub(crate) fn on_buffer(&self) -> Option<(BufferLink, usize)> {
+        match &self.body {
+            Body::Bytes {
+                data,
+                offset,
+                entry: Some(entry),
+            } => Some((BufferLink::new(*entry, data), *offset)),
+            _ => None,
+        }
     }
 
     /// A file whose archive was closed under it: every read fails with
     /// `ZIP_ER_ZIPCLOSED`.
     pub(crate) fn closed() -> Reader {
-        let mut zf = Reader::bytes(Vec::new());
+        let body = Body::Bytes {
+            data: Arc::from([]),
+            offset: 0,
+            entry: None,
+        };
+        let mut zf = Reader::new(body, None, true);
         zf.source_error = Some(Status::new(Er::Zipclosed));
         zf
     }
@@ -1498,8 +1522,9 @@ impl Reader {
         if empty {
             return Ok(Reader::new(
                 Body::Bytes {
-                    data: Vec::new(),
+                    data: Arc::from([]),
                     offset: 0,
+                    entry: None,
                 },
                 crc,
                 false,
@@ -1567,12 +1592,12 @@ impl Reader {
     /// Whether the entry is read from the archive's own file, as an
     /// unchanged entry is, where an added one is read from its source.
     pub(crate) fn reads_archive(&mut self) -> bool {
-        self.window_mut().is_some_and(|w| w.archive)
+        self.window_mut().is_some()
     }
 
     /// `zip_fread` through `file`, the archive's `FILE`, which its data
-    /// is read through where an added file's is read through its own: it
-    /// is lent to the window for the read and taken back.
+    /// is read through: it is lent to the window for the read and taken
+    /// back.
     pub(crate) fn read_through(
         &mut self,
         len: usize,
@@ -1585,9 +1610,7 @@ impl Reader {
     }
 
     fn lend(&mut self, file: &mut Option<Stdio>) {
-        if let (Some(w), Some(f)) = (self.window_mut(), file.as_mut())
-            && w.archive
-        {
+        if let (Some(w), Some(f)) = (self.window_mut(), file.as_mut()) {
             std::mem::swap(&mut w.file, f);
         }
     }

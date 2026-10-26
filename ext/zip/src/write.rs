@@ -1171,11 +1171,14 @@ impl Archive {
                 },
             };
             let data = s.read_all().inspect_err(|s| self.error = *s)?;
-            Sourced {
-                data,
-                before,
-                end: Ok(()),
-            }
+            // `crc_read`'s stat past the data: a source whose read did not
+            // give its stat's size, a buffer a stream left part read.
+            let end = if data.len() as u64 == before.size {
+                Ok(())
+            } else {
+                Err(Status::new(Er::DataLength))
+            };
+            Sourced { data, before, end }
         } else {
             let password = self.default_password.clone();
             let (data, fault) = self
