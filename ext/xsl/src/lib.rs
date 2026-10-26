@@ -721,6 +721,30 @@ impl XSLTProcessor {
     /// <o:out xmlns:o="urn:o">modern</o:out>
     /// "
     /// ```
+    ///
+    /// The owner document a node stands for is made as php's
+    /// `php_dom_create_object(nodep->doc, &owner_zv, nodeobj)` makes it,
+    /// over the libxml half of the object handed in whatever extension
+    /// made it, so an ext/simplexml element's document is counted once more
+    /// and not freed under it (GH-21496):
+    ///
+    /// ```php
+    /// $sxe = simplexml_load_string('<container/>');
+    /// $p = new XSLTProcessor;
+    /// var_dump(@$p->importStylesheet($sxe), $sxe->getName());
+    /// unset($p);
+    /// var_dump($sxe->asXML());
+    /// unset($sxe);
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// string(9) "container"
+    /// string(35) "<?xml version="1.0"?>
+    /// <container/>
+    /// "
+    /// done
+    /// ```
     #[php(tentative)]
     fn importStylesheet(
         req: &mut Request,
@@ -745,7 +769,13 @@ impl XSLTProcessor {
             let Some(doc) = node.doc() else {
                 return Err(arg_value_error(req, 1, "be part of a document"));
             };
-            match php_ext_dom::create_object(req, doc, Some(stylesheet))?.into_object() {
+            // `dom_object *nodeobj`: the libxml half of the object handed
+            // in, a dom node's or a SimpleXML element's alike, whose
+            // document reference the owner document's object shares.
+            let Some(half) = php_ext_libxml::node_object(req, stylesheet) else {
+                return Err(arg_type_error(req, 1, "be a valid XML node"));
+            };
+            match php_ext_dom::create_object_in(req, doc, &half)?.into_object() {
                 Ok(owner) => Some(owner),
                 Err(value) => {
                     value.give_up(req);
