@@ -75,7 +75,7 @@ use crate::sources::Standing;
 use binding::Bindings;
 use inventory::{Inventory, Leaf, Written, kernels_named, uses};
 use lock::{Block, Diff, Lock, list};
-use surfaces::Surfaces;
+use surfaces::{Held, Surfaces};
 use target::Target;
 use workspace::{Crates, Present};
 
@@ -143,9 +143,7 @@ pub(crate) fn measure(
         surfaces::write(&crates, &mut inventory)?;
     }
     let snapshot = Snapshot::disk(root)?;
-    let surfaces = Surfaces::read(root, manifest.pin().map(|pin| &pin.source))?;
-    let bindings = Bindings::read(manifest, root)?;
-    let target = Target::read(manifest, root)?;
+    let holds = Holds::read(manifest, root)?;
     let mut readings = Vec::new();
     for seam in &manifest.seams {
         readings.push(seam_reading(
@@ -170,8 +168,7 @@ pub(crate) fn measure(
             &snapshot,
             &crates,
             &mut inventory,
-            &surfaces,
-            (&bindings, &target),
+            &holds,
             krate,
         )?);
     }
@@ -669,13 +666,51 @@ fn kernel_lines(crates: &Crates, seam: &Seam) -> Result<BTreeSet<String>> {
 
 // ---------------------------------------------------------------- crates
 
+/// The holds read once per run and asked of each crate, each making
+/// problems and notes of it ([`Held`]): an extension's links to others,
+/// each held to a row of design §4.10's list of surfaces, and its surface
+/// to its lock (#2251); a crate's links to a native library, each held to
+/// the keg the pinned php loads that library from (#3458); and a host's
+/// link, held to the macOS the pinned php is linked for (#3356).
+struct Holds {
+    surfaces: Surfaces,
+    bindings: Bindings,
+    target: Target,
+}
+
+impl Holds {
+    fn read(manifest: &Manifest, root: &Path) -> Result<Holds> {
+        Ok(Holds {
+            surfaces: Surfaces::read(root, manifest.pin().map(|pin| &pin.source))?,
+            bindings: Bindings::read(manifest, root)?,
+            target: Target::read(manifest, root)?,
+        })
+    }
+
+    /// What every hold makes of `krate`, in one: the surfaces' of an
+    /// extension alone.
+    fn hold(
+        &self,
+        crates: &Crates,
+        inventory: &mut Inventory<'_>,
+        krate: &Present,
+    ) -> Result<Held> {
+        let mut held = Held::default();
+        if krate.name.starts_with("ext/") {
+            held.absorb(self.surfaces.hold(crates, inventory, krate)?);
+        }
+        held.absorb(self.bindings.hold(krate));
+        held.absorb(self.target.hold(&krate.name));
+        Ok(held)
+    }
+}
+
 fn crate_reading(
     manifest: &Manifest,
     snapshot: &Snapshot,
     crates: &Crates,
     inventory: &mut Inventory<'_>,
-    surfaces: &Surfaces,
-    (bindings, target): (&Bindings, &Target),
+    holds: &Holds,
     krate: &Present,
 ) -> Result<Reading> {
     let mut reading = Reading::for_scope(INSTRUMENT, &krate.name, manifest, snapshot)?;
@@ -753,23 +788,12 @@ fn crate_reading(
         }
     }
 
-    // An extension's links to others, each held to a row of design §4.10's
-    // list of surfaces, and its surface to its lock (#2251).
+    // What the holds make of it ([`Holds`]), an extension's under the
+    // rule its surfaces are held by.
     if krate.name.starts_with("ext/") {
         reading.rule = String::from("ext.pub-beyond-extension");
-        let held = surfaces.hold(crates, inventory, krate)?;
-        problems.extend(held.problems);
-        notes.extend(held.notes);
     }
-
-    // Its links to a native library, each held to the keg the pinned php
-    // loads that library from (#3458).
-    let held = bindings.hold(krate);
-    problems.extend(held.problems);
-    notes.extend(held.notes);
-
-    // A host's link, held to the macOS the pinned php is linked for (#3356).
-    let held = target.hold(&krate.name);
+    let held = holds.hold(crates, inventory, krate)?;
     problems.extend(held.problems);
     notes.extend(held.notes);
 

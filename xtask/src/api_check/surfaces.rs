@@ -63,6 +63,14 @@ pub(crate) struct Held {
     pub(crate) notes: Vec<String>,
 }
 
+impl Held {
+    /// `other`'s problems and notes after these.
+    pub(crate) fn absorb(&mut self, other: Held) {
+        self.problems.extend(other.problems);
+        self.notes.extend(other.notes);
+    }
+}
+
 impl Surfaces {
     /// §4.10 of `root`'s [`DESIGN`], with the markers to be held against
     /// `source`, or none where the manifest names no pin; a workspace
