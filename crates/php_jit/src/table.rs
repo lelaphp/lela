@@ -75,8 +75,8 @@ use code::{Arena, Code, Pages};
 pub(crate) use perf::{Outputs, Perf, Usage, Used};
 
 /// The `Pages` adapter a trace's code is mapped through on this target
-/// (`jit-design.md` §4.4): `MAP_JIT` on macOS aarch64; one sealed `memfd`
-/// mapped twice on Linux x86-64 and aarch64; under Miri the heap adapter,
+/// (`jit-design.md` §4.4): `MAP_JIT` on macOS, one sealed `memfd` mapped
+/// twice on Linux, each on x86-64 and aarch64; under Miri the heap adapter,
 /// the only one it runs; elsewhere, where `build.rs` sets no
 /// `php_jit_arena`, none, so a table maps no arena and numbers each trace
 /// it publishes with no code.
