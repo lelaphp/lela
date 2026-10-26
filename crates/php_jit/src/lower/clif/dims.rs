@@ -248,11 +248,14 @@ impl Emit<'_> {
     /// `FETCH_DIM_IS`, the read an `isset()` chain, an `empty()` or a `??`
     /// makes, as php's `zend_jit_fetch_dim_read` compiles it over an array
     /// a variable or a temporary holds under `BP_VAR_IS`: the element
-    /// copied as `ZVAL_COPY_DEREF` copies it, and `null` where the array
-    /// has not got the key, or a packed array holds a hole there, with
-    /// nothing raised (`Z/ext/opcache/jit/zend_jit_ir.c:12101-12200`); a
-    /// temporary freed after, as the handler frees it, a destructor's throw
-    /// unwinding.
+    /// copied as `ZVAL_COPY_DEREF` copies it, or held to the type the next
+    /// opline holds it to ([`Emit::read_element`]), and `null` where the
+    /// array has not got the key, or a packed array holds a hole there,
+    /// with nothing raised (`Z/ext/opcache/jit/zend_jit_ir.c:12101-12200`),
+    /// leaving past the fetch through the opline's exit where its element
+    /// is held, php's `not_found_exit_addr` (`:12576-12610`), the one exit
+    /// `types` gives this opline; a temporary freed after, as the handler
+    /// frees it, a destructor's throw unwinding.
     ///
     /// A hash and a packed array read by `??` and in `isset()`'s chain, the
     /// key there and not, an element a reference and one `null`:

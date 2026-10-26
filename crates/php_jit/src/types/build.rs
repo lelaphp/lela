@@ -2215,7 +2215,9 @@ impl<'a> Builder<'a> {
     /// computed it for an arithmetic's overflow and a fetched element's
     /// type, as php's code generator holds a guarded value it writes, an
     /// element twice, read in place and through the reference it is, as
-    /// php's two reads of it each hold it, and an arithmetic only where
+    /// php's two reads of it each hold it, a `FETCH_DIM_IS`'s with the exit
+    /// an element it does not find leaves by before them
+    /// ([`Within::Fetched`]'s `missed`), and an arithmetic only where
     /// php's code generator serves it inline ([`Builder::over_aliased`]);
     /// before the op that reads it otherwise.
     fn place(
@@ -2231,7 +2233,8 @@ impl<'a> Builder<'a> {
             (Def::Op(def), Some(tag)) => match self.ops.get(def.index()) {
                 Some(Op::Line(line)) if line.form == Form::Inline => within(line.opcode, tag)
                     .filter(|kind| {
-                        *kind == Within::Fetched || !self.over_aliased(line.op1, line.op2)
+                        matches!(kind, Within::Fetched { .. })
+                            || !self.over_aliased(line.op1, line.op2)
                     })
                     .map(|kind| (def, line.frame, line.opline, kind, line.op1, line.op2)),
                 _ => None,
@@ -2258,9 +2261,9 @@ impl<'a> Builder<'a> {
                 };
                 let to = match kind {
                     Within::Rerun => At::Opline(opline),
-                    Within::Fetched => fetched(Left::Copied(Read::InPlace)),
+                    Within::Fetched { .. } => fetched(Left::Copied(Read::InPlace)),
                 };
-                if let (Within::Fetched, Some(tag)) = (kind, tag) {
+                if let (Within::Fetched { missed }, Some(tag)) = (kind, tag) {
                     then = Some(Placed {
                         at: GuardAt::Within(def),
                         check: Check::Deref { value, tag },
@@ -2270,17 +2273,9 @@ impl<'a> Builder<'a> {
                             fetched(Left::Copied(Read::Through)),
                         ),
                     });
-                    // An element `FETCH_DIM_IS` does not find leaves past
-                    // it `null`, where its guard holds another type, by an
-                    // exit php takes before the element's two
-                    // (`zend_jit_fetch_dim_read`'s `not_found_exit_addr`).
-                    let is = matches!(
-                        self.ops.get(def.index()),
-                        Some(Op::Line(line)) if line.opcode == Opcode::FetchDimIs
-                    );
-                    if is && tag != ZvalType::Null {
+                    if missed {
                         let missed = draft(Point::Before(def), frame, fetched(Left::Null));
-                        self.leaves.push((def, Leaves::Unfinished, missed));
+                        self.leaves.push((def, Leaves::Missed, missed));
                     }
                 }
                 if !self.aliased(held.slot) && self.val(value).types.scalar() {
@@ -2956,7 +2951,9 @@ impl<'a> Builder<'a> {
                 Source::Leave(at) => {
                     let (op, leaves, _) = self.leaves[at];
                     let leave = match leaves {
-                        Leaves::Unfinished => Leave::Exit(exits.take(spec, level.clone())?),
+                        Leaves::Unfinished | Leaves::Missed => {
+                            Leave::Exit(exits.take(spec, level.clone())?)
+                        }
                         Leaves::Thrown => {
                             let unwind = Unwind {
                                 stores: spec.stores,
@@ -3093,15 +3090,15 @@ impl<'a> Builder<'a> {
             order.push((key, Source::Guard(at)));
         }
         for (at, (op, leaves, _)) in self.leaves.iter().enumerate() {
-            let opens = matches!(leaves, Leaves::Unfinished)
-                && matches!(
+            let opens = match leaves {
+                Leaves::Missed => true,
+                Leaves::Unfinished => matches!(
                     self.ops.get(op.index()),
                     Some(Op::Line(line))
-                        if matches!(
-                            line.opcode,
-                            Opcode::FetchDimR | Opcode::FetchDimIs | Opcode::FetchObjR
-                        )
-                );
+                        if matches!(line.opcode, Opcode::FetchDimR | Opcode::FetchObjR)
+                ),
+                Leaves::Thrown => false,
+            };
             let stage = if opens { Stage::Opens } else { Stage::Leaves };
             order.push((Order::At(*op, stage), Source::Leave(at)));
         }
@@ -4143,7 +4140,8 @@ enum Order {
 /// `zend_jit_fe_fetch`, whose packed guard follows it,
 /// `Z/ext/opcache/jit/zend_jit_ir.c:13839-13843`); the exit an
 /// inline fetch opens its code with, php's `ZEND_JIT_EXIT_TO_VM` that
-/// `zend_jit_fetch_dim_read` takes first (`Z/ext/opcache/jit/zend_jit_ir.c:12540-12547`);
+/// `zend_jit_fetch_dim_read` takes first (`Z/ext/opcache/jit/zend_jit_ir.c:12540-12547`),
+/// or `FETCH_DIM_IS`'s `not_found_exit_addr` (`:12576-12610`);
 /// the layout guard php takes inside the op's code, after it
 /// (`zend_jit_fetch_dimension_address_inner`, `:11966-11980`); the
 /// guards the op holds on what it computes; then any other exit of its
@@ -4167,6 +4165,9 @@ enum Stage {
 enum Leaves {
     /// It cannot finish: through an exit.
     Unfinished,
+    /// A fetch found no element and wrote `null`: through an exit past
+    /// it ([`Within::Fetched`]'s `missed`).
+    Missed,
     /// A kernel it called threw, bailed out or panicked: through an
     /// unwind.
     Thrown,
