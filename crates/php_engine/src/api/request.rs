@@ -168,7 +168,7 @@ pub(crate) use unit_cache::HandlePath;
 mod variables;
 pub use variables::Variables;
 mod zone;
-pub use post::Upload;
+pub use post::{ReadPost, Upload};
 pub use variables::url_decode;
 pub use variables::{BodyLimits, Input};
 pub use zone::Zone;

@@ -8,15 +8,18 @@
 //! dropped, so a later body may reuse it.
 //!
 //! [`Pages`] is the seam under the arena, the one span and the cache
-//! maintenance between its two views, with two adapters: [`HeapPages`],
+//! maintenance between its two views, with three adapters: [`HeapPages`],
 //! the test adapter, one allocation of `UnsafeCell<u8>` with nothing to
-//! maintain, which tests the arena's bookkeeping under Miri; and
-//! `MapJit`, macOS on aarch64, one `MAP_JIT` anonymous mapping whose two
-//! views are one address and the per-thread `pthread_jit_write_protect_np`
-//! toggle around each write, with `sys_icache_invalidate` over the bytes
-//! written. Linux's `memfd` adapter, two mappings of one sealed file,
-//! joins when the Linux targets are measured; until then [`Unmapped`]
-//! maps nothing there, and a table over it compiles nothing.
+//! maintain, which tests the arena's bookkeeping under Miri; `MapJit`,
+//! macOS on aarch64, one `MAP_JIT` anonymous mapping whose two views are
+//! one address and the per-thread `pthread_jit_write_protect_np` toggle
+//! around each write, with `sys_icache_invalidate` over the bytes written;
+//! and `Memfd`, Linux on x86-64 and aarch64, one sealed `memfd` file
+//! mapped twice, written through the one view and executed through the
+//! other, with §4.4's cache maintenance over the executable addresses on
+//! aarch64. Where the build sets no `php_jit_arena` (`build.rs`),
+//! [`Unmapped`] maps nothing, and a table over it compiles nothing. Each
+//! mapping an adapter makes is one [`Mapping`], unmapped when it drops.
 //!
 //! Beside the arena, the system's page its size is rounded to, and the
 //! three calls the `PERF_DUMP` record needs that only `unsafe` reaches:
@@ -367,20 +370,23 @@ impl HeapPages {
     }
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(php_jit_arena, target_os = "macos"))]
 pub(crate) use mac::MapJit;
 
-/// The adapter of a target with none yet: it maps nothing, so an arena
-/// over it is never made.
-#[cfg(any(test, not(all(target_os = "macos", target_arch = "aarch64"))))]
+#[cfg(all(php_jit_arena, target_os = "linux"))]
+pub(crate) use linux::Memfd;
+
+/// The adapter of a target with none (`build.rs` sets no `php_jit_arena`):
+/// it maps nothing, so an arena over it is never made.
+#[cfg(any(test, not(php_jit_arena)))]
 pub(crate) struct Unmapped;
 
-#[cfg(any(test, not(all(target_os = "macos", target_arch = "aarch64"))))]
+#[cfg(any(test, not(php_jit_arena)))]
 impl Pages for Unmapped {
     fn map_pair(_: usize) -> io::Result<Self> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "no code arena on this target yet",
+            "no code arena on this target",
         ))
     }
 
@@ -393,29 +399,78 @@ impl Pages for Unmapped {
     }
 }
 
+/// One mapping an adapter owns, `len` bytes from `base`, unmapped when it
+/// drops: what `MapJit`'s one view, `Memfd`'s two and the jitdump's
+/// `mmap` event each are.
+#[cfg(unix)]
+struct Mapping {
+    base: NonNull<u8>,
+    len: usize,
+}
+
+// SAFETY: a mapping is the process's, valid on every thread, and a
+// `Mapping` hands out addresses only; what reads or writes through them
+// is the caller's `unsafe`, which the arena's one writer keeps.
+#[cfg(unix)]
+unsafe impl Send for Mapping {}
+// SAFETY: the same.
+#[cfg(unix)]
+unsafe impl Sync for Mapping {}
+
+#[cfg(unix)]
+impl Mapping {
+    /// `len` bytes mapped fresh, overlapping nothing, with `prot` and
+    /// `flags`: of `file` from its start, or anonymous where it is none.
+    fn new(
+        len: usize,
+        prot: libc::c_int,
+        flags: libc::c_int,
+        file: Option<std::os::fd::BorrowedFd<'_>>,
+    ) -> io::Result<Mapping> {
+        use std::os::fd::AsRawFd;
+        let fd = file.map_or(-1, |file| file.as_raw_fd());
+        // SAFETY: a fresh mapping at an address the system chooses, so it
+        // overlaps nothing; `fd` is open for the call or `-1` with
+        // `MAP_ANON`.
+        let base = unsafe { libc::mmap(std::ptr::null_mut(), len, prot, flags, fd, 0) };
+        if base == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        let base = NonNull::new(base.cast::<u8>()).ok_or_else(io::Error::last_os_error)?;
+        Ok(Mapping { base, len })
+    }
+
+    /// The address of offset `at`, which lies inside the mapping; an
+    /// address only, which reads and writes nothing.
+    fn at(&self, at: usize) -> NonNull<u8> {
+        self.base.map_addr(|addr| addr.saturating_add(at))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        // SAFETY: the mapping this owns, made by `new` or by the Linux
+        // adapter's `view`, whose addresses nothing uses past its owner: an
+        // arena's pages drop with their region, after the arena and the
+        // last `Code`, each of which holds the region.
+        unsafe { libc::munmap(self.base.as_ptr().cast(), self.len) };
+    }
+}
+
 /// `file` mapped once, readable and executable, and unmapped: the
 /// `mmap` event `perf inject` finds a jitdump by, which php's
 /// `ir_perf_jitdump_open` makes.
 #[cfg(unix)]
 pub(crate) fn map_once(file: &std::fs::File) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
-    // SAFETY: a fresh private mapping of an open file, overlapping
-    // nothing, read by nothing.
-    let at = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            page_size(),
-            libc::PROT_READ | libc::PROT_EXEC,
-            libc::MAP_PRIVATE,
-            file.as_raw_fd(),
-            0,
-        )
-    };
-    if at == libc::MAP_FAILED {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: the mapping just made, which nothing else names.
-    unsafe { libc::munmap(at, page_size()) };
+    use std::os::fd::AsFd;
+    let once = Mapping::new(
+        page_size(),
+        libc::PROT_READ | libc::PROT_EXEC,
+        libc::MAP_PRIVATE,
+        Some(file.as_fd()),
+    )?;
+    drop(once);
     Ok(())
 }
 
@@ -458,13 +513,13 @@ pub(crate) fn thread_id() -> u32 {
 /// `pthread_jit_write_protect_np(0)` and `(1)`; every other thread sees it
 /// executable throughout, so there is no process-wide protection change
 /// after `map_pair`.
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(php_jit_arena, target_os = "macos"))]
 mod mac {
     use std::io;
     use std::ops::Range;
     use std::ptr::NonNull;
 
-    use super::Pages;
+    use super::{Mapping, Pages};
 
     unsafe extern "C" {
         /// libSystem's cache maintenance over freshly written code:
@@ -473,36 +528,17 @@ mod mac {
     }
 
     /// One `MAP_JIT` anonymous mapping.
-    pub(crate) struct MapJit {
-        base: NonNull<u8>,
-        len: usize,
-    }
-
-    // SAFETY: the mapping is the process's, valid on every thread, and the
-    // arena writes a range only before any `Code` names it, from the one
-    // thread holding the arena mutably.
-    unsafe impl Send for MapJit {}
-    // SAFETY: the same.
-    unsafe impl Sync for MapJit {}
+    pub(crate) struct MapJit(Mapping);
 
     impl Pages for MapJit {
         fn map_pair(len: usize) -> io::Result<Self> {
-            // SAFETY: a fresh anonymous mapping, overlapping nothing.
-            let base = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    len,
-                    libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-                    libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_JIT,
-                    -1,
-                    0,
-                )
-            };
-            if base == libc::MAP_FAILED {
-                return Err(io::Error::last_os_error());
-            }
-            let base = NonNull::new(base.cast::<u8>()).ok_or_else(io::Error::last_os_error)?;
-            Ok(MapJit { base, len })
+            let map = Mapping::new(
+                len,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_JIT,
+                None,
+            )?;
+            Ok(MapJit(map))
         }
 
         unsafe fn write(&self, at: usize, bytes: &[u8]) {
@@ -526,15 +562,152 @@ mod mac {
         }
 
         fn rx(&self, at: usize) -> NonNull<u8> {
-            self.base.map_addr(|addr| addr.saturating_add(at))
+            self.0.at(at)
+        }
+    }
+}
+
+/// The Linux adapter (`jit-design.md` §4.4, (B)): one `memfd` file of the
+/// arena's length, sealed against shrinking and growing and against any
+/// further seal, mapped twice as a whole with `MAP_SHARED`, once
+/// `PROT_READ | PROT_WRITE`, written only by the thread holding the arena
+/// mutably and never executed, and once `PROT_READ | PROT_EXEC`, never remapped. The
+/// file is closed once both views stand; they keep its pages. The file,
+/// its seals and the two mappings go through `rustix`, as #2945 ruled; a
+/// view is a [`Mapping`], unmapped when it drops.
+#[cfg(all(php_jit_arena, target_os = "linux"))]
+mod linux {
+    use std::io;
+    use std::ops::Range;
+    use std::os::fd::OwnedFd;
+    use std::ptr::NonNull;
+
+    use rustix::fs::{MemfdFlags, SealFlags};
+    use rustix::mm::{MapFlags, ProtFlags};
+
+    use super::{Mapping, Pages};
+
+    /// One sealed `memfd`'s two views.
+    pub(crate) struct Memfd {
+        written: Mapping,
+        executed: Mapping,
+    }
+
+    impl Pages for Memfd {
+        fn map_pair(len: usize) -> io::Result<Self> {
+            let file = sealed(len)?;
+            Ok(Memfd {
+                written: view(&file, len, ProtFlags::READ | ProtFlags::WRITE)?,
+                executed: view(&file, len, ProtFlags::READ | ProtFlags::EXEC)?,
+            })
+        }
+
+        unsafe fn write(&self, at: usize, bytes: &[u8]) {
+            let to = self.written.at(at).as_ptr();
+            // SAFETY: the caller hands a range inside the mapping that no
+            // thread executes or reads, and `bytes` is not in it.
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), to, bytes.len()) };
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        unsafe fn sync(&self, range: Range<usize>) {
+            let start = self.rx(range.start);
+            // SAFETY: the caller hands a range inside the mapping, whose
+            // executable view lives as long as `self`.
+            unsafe { aarch64::synced(start, range.len()) };
+        }
+
+        /// Nothing: x86-64's instruction caches are coherent with stores,
+        /// snooped by physical address, so a store through either alias is
+        /// what the next fetch sees (`jit-design.md` §4.4).
+        #[cfg(not(target_arch = "aarch64"))]
+        unsafe fn sync(&self, _: Range<usize>) {}
+
+        fn rx(&self, at: usize) -> NonNull<u8> {
+            self.executed.at(at)
         }
     }
 
-    impl Drop for MapJit {
-        fn drop(&mut self) {
-            // SAFETY: the mapping `map_pair` made; the last `Code` and the
-            // arena are gone, since each holds the region that holds this.
-            unsafe { libc::munmap(self.base.as_ptr().cast(), self.len) };
+    #[cfg(test)]
+    impl Memfd {
+        /// The write view's address of offset `at`.
+        pub(super) fn written(&self, at: usize) -> NonNull<u8> {
+            self.written.at(at)
+        }
+    }
+
+    /// A `memfd` of `len` bytes, sealed against shrinking, growing and any
+    /// further seal; never an executable itself (`MFD_NOEXEC_SEAL`) where
+    /// the kernel knows it, as Linux 6.3 and later do and as
+    /// `vm.memfd_noexec=2` requires.
+    pub(super) fn sealed(len: usize) -> io::Result<OwnedFd> {
+        let flags = MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING;
+        let file = match rustix::fs::memfd_create("php_jit", flags | MemfdFlags::NOEXEC_SEAL) {
+            Err(rustix::io::Errno::INVAL) => rustix::fs::memfd_create("php_jit", flags)?,
+            made => made?,
+        };
+        let len = u64::try_from(len).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        rustix::fs::ftruncate(&file, len)?;
+        rustix::fs::fcntl_add_seals(&file, SealFlags::SHRINK | SealFlags::GROW | SealFlags::SEAL)?;
+        Ok(file)
+    }
+
+    /// The whole of `file`, `len` bytes, mapped shared with `prot`.
+    fn view(file: &OwnedFd, len: usize, prot: ProtFlags) -> io::Result<Mapping> {
+        // SAFETY: a fresh mapping at an address the system chooses, so it
+        // overlaps nothing, of a file open for the call.
+        let base = unsafe {
+            rustix::mm::mmap(std::ptr::null_mut(), len, prot, MapFlags::SHARED, file, 0)
+        }?;
+        let base =
+            NonNull::new(base.cast::<u8>()).ok_or_else(|| io::Error::other("a mapping at null"))?;
+        Ok(Mapping { base, len })
+    }
+
+    /// aarch64's cache maintenance after a write through the other alias
+    /// (`jit-design.md` §4.4): the data cache is physically tagged, so one
+    /// sequence over the executable view's addresses suffices, each line
+    /// as long as `CTR_EL0` says, which Linux lets user space read.
+    #[cfg(target_arch = "aarch64")]
+    mod aarch64 {
+        use std::arch::asm;
+        use std::ptr::NonNull;
+
+        /// `dc cvau` per data-cache line, `dsb ish`, `ic ivau` per
+        /// instruction-cache line, `dsb ish`, `isb`, over `len` bytes
+        /// from `start`.
+        ///
+        /// # Safety
+        ///
+        /// `start..start + len` lies inside a live readable mapping.
+        pub(super) unsafe fn synced(start: NonNull<u8>, len: usize) {
+            let ctr: u64;
+            // SAFETY: reads `CTR_EL0`, which touches no memory; Linux
+            // enables it at EL0, or traps and emulates it.
+            unsafe {
+                asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags));
+            }
+            // Each field is log2 of a line's 4-byte words.
+            let data = 4_usize << ((ctr >> 16) & 0xF);
+            let instruction = 4_usize << (ctr & 0xF);
+            let (start, end) = (start.as_ptr().addr(), start.as_ptr().addr() + len);
+            for line in (start & !(data - 1)..end).step_by(data) {
+                // SAFETY: cleans a line of the caller's mapping to the
+                // point of unification; it changes no byte.
+                unsafe { asm!("dc cvau, {}", in(reg) line, options(nostack, preserves_flags)) };
+            }
+            // SAFETY: a barrier, which touches no byte.
+            unsafe { asm!("dsb ish", options(nostack, preserves_flags)) };
+            for line in (start & !(instruction - 1)..end).step_by(instruction) {
+                // SAFETY: invalidates a line of the caller's mapping in
+                // every core's instruction cache; it changes no byte.
+                unsafe { asm!("ic ivau, {}", in(reg) line, options(nostack, preserves_flags)) };
+            }
+            // SAFETY: a barrier, which touches no byte.
+            unsafe { asm!("dsb ish", options(nostack, preserves_flags)) };
+            // SAFETY: this thread's instruction synchronisation barrier,
+            // which touches no byte.
+            unsafe { asm!("isb", options(nostack, preserves_flags)) };
         }
     }
 }
@@ -695,7 +868,7 @@ mod tests {
 /// The body at `entry` as a function of no arguments returning `u32`: a
 /// test's way into a `mov; ret` body it published, until `enter` names
 /// the `Entry` type.
-#[cfg(all(test, target_os = "macos", target_arch = "aarch64", not(miri)))]
+#[cfg(all(test, php_jit_arena, not(miri)))]
 pub(crate) fn callable(entry: NonNull<u8>) -> extern "C" fn() -> u32 {
     // SAFETY: every entry a test hands here is the first byte of a
     // complete `mov; ret` body in executable memory a live `Code` keeps,
@@ -704,39 +877,50 @@ pub(crate) fn callable(entry: NonNull<u8>) -> extern "C" fn() -> u32 {
     unsafe { std::mem::transmute::<*mut u8, extern "C" fn() -> u32>(entry.as_ptr()) }
 }
 
-/// The tests on the target itself (`jit-design.md` §4.4, §7's `table` row):
-/// a body published through `MAP_JIT` and entered, a chunk published into
-/// while another thread runs code in it, and a reused chunk entered from a
-/// thread that never ran code in it, with and without that thread's own
-/// `isb`. Every loop is bounded, so a failure cannot hang the binary.
-#[cfg(all(test, target_os = "macos", target_arch = "aarch64", not(miri)))]
+/// `mov w0, #value; ret`: a body that returns `value`, a 16-bit
+/// immediate, on aarch64.
+#[cfg(all(test, php_jit_arena, not(miri), target_arch = "aarch64"))]
+pub(crate) fn returning(value: u16) -> [u8; 8] {
+    let mov = 0x5280_0000_u32 | (u32::from(value) << 5);
+    let ret = 0xD65F_03C0_u32;
+    let mut bytes = [0; 8];
+    bytes[..4].copy_from_slice(&mov.to_le_bytes());
+    bytes[4..].copy_from_slice(&ret.to_le_bytes());
+    bytes
+}
+
+/// `mov eax, value; ret`: a body that returns `value` on x86-64.
+#[cfg(all(test, php_jit_arena, not(miri), target_arch = "x86_64"))]
+pub(crate) fn returning(value: u16) -> [u8; 6] {
+    let mut bytes = [0xB8, 0, 0, 0, 0, 0xC3];
+    bytes[1..5].copy_from_slice(&u32::from(value).to_le_bytes());
+    bytes
+}
+
+/// The tests on the target itself (`jit-design.md` §4.4, §7's `table` row),
+/// over the adapter the table maps code through: a body published
+/// through the write view and entered through the executable view, a
+/// chunk published into while another thread runs code in it, and on
+/// aarch64 a reused chunk entered from a thread that never ran code in
+/// it, with and without that thread's own `isb`; on Linux, that the two
+/// views are two addresses of one sealed file. Every loop is bounded, so
+/// a failure cannot hang the binary.
+#[cfg(all(test, php_jit_arena, not(miri)))]
 #[allow(
     clippy::disallowed_methods,
     reason = "a test starts its own threads (seams.toml rule fork.threads)"
 )]
 mod native {
-    use std::ptr::NonNull;
-    use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
-    use std::time::{Duration, Instant};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-    use super::{Arena, CHUNK, Code, Full, MapJit, callable};
+    use super::{Arena, CHUNK, Code, Full, callable, returning};
+    use crate::table::Native;
 
-    /// `mov w0, #value; ret`: a body that returns `value`, a 16-bit
-    /// immediate.
-    fn returning(value: u16) -> [u8; 8] {
-        let mov = 0x5280_0000_u32 | (u32::from(value) << 5);
-        let ret = 0xD65F_03C0_u32;
-        let mut bytes = [0; 8];
-        bytes[..4].copy_from_slice(&mov.to_le_bytes());
-        bytes[4..].copy_from_slice(&ret.to_le_bytes());
-        bytes
-    }
-
-    fn arena(chunks: usize) -> Result<Arena<MapJit>, String> {
+    fn arena(chunks: usize) -> Result<Arena<Native>, String> {
         Arena::new(chunks * CHUNK).map_err(|e| e.to_string())
     }
 
-    fn published(arena: &mut Arena<MapJit>, value: u16) -> Result<Code<MapJit>, String> {
+    fn published(arena: &mut Arena<Native>, value: u16) -> Result<Code<Native>, String> {
         arena
             .publish(&returning(value), 4)
             .map_err(|Full| format!("no room for the body returning {value}"))
@@ -744,19 +928,13 @@ mod native {
 
     /// The body as a function: what compiled code's caller does with an
     /// entry, until `enter` names the `Entry` type.
-    fn entered(code: &Code<MapJit>) -> extern "C" fn() -> u32 {
+    fn entered(code: &Code<Native>) -> extern "C" fn() -> u32 {
         callable(code.entry())
     }
 
-    /// This thread's own instruction synchronisation barrier, `isb`.
-    fn isb() {
-        // SAFETY: `isb` touches no memory and no register the compiler
-        // allocates.
-        unsafe { std::arch::asm!("isb", options(nostack, preserves_flags)) };
-    }
-
-    /// `mov w0, #7; ret` published through the write view and entered
-    /// through the executable view returns 7.
+    /// `mov w0, #7; ret` on aarch64, `mov eax, 7; ret` on x86-64,
+    /// published through the write view and entered through the
+    /// executable view, returns 7.
     #[test]
     fn mov_ret_published_and_entered_returns_seven() -> Result<(), String> {
         let mut arena = arena(1)?;
@@ -810,99 +988,170 @@ mod native {
         Ok(())
     }
 
-    /// The reused-chunk question of §4.4, over `ROUNDS` rounds: a body
-    /// entered on as many threads as the machine has cores, and dropped; a thread started that has
-    /// never entered the chunk, waiting on an atomic pointer; a different
-    /// body published at the same address of the reused chunk; and its
-    /// entry stored in the pointer, the waiting thread entering the new
-    /// body as soon as it sees it, with or without its own `isb` first,
-    /// and with no system call between the two. Answers how many entries
-    /// returned the old body's value.
-    fn stale_entries(own_isb: bool) -> Result<u32, String> {
-        const ROUNDS: u16 = 500;
-        // A core and not a thread holds instructions, and which core a
-        // thread runs on is the system's to choose: one warming thread per
-        // core, so the entering thread's core has likely run the old body.
-        let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
-        let mut arena = arena(1)?;
-        let mut stale = 0;
-        // Each round starts with the arena's one chunk full, or never
-        // taken, so its first body lands at the chunk's start.
-        let fill = |arena: &mut Arena<MapJit>| {
-            (arena.publish(&vec![0; CHUNK - 8], 1))
-                .map_err(|Full| "no room for the filler".to_owned())
-        };
-        for round in 0..ROUNDS {
-            let (old, new) = (2 * round, 2 * round + 1);
-            let first = published(&mut arena, old)?;
-            let filler = fill(&mut arena)?;
-            let address = first.entry();
-            let entry = AtomicPtr::new(std::ptr::null_mut());
-            let answer = std::thread::scope(|scope| -> Result<u32, String> {
-                let entering = scope.spawn(|| {
-                    let deadline = Instant::now() + Duration::from_secs(10);
-                    loop {
-                        let at = entry.load(Ordering::Acquire);
-                        if let Some(at) = NonNull::new(at) {
-                            if own_isb {
-                                isb();
+    /// The reused-chunk question of §4.4, aarch64's alone: whether a
+    /// thread that enters a reused chunk needs its own `isb`.
+    #[cfg(target_arch = "aarch64")]
+    mod reused {
+        use std::ptr::NonNull;
+        use std::sync::atomic::{AtomicPtr, Ordering};
+        use std::time::{Duration, Instant};
+
+        use super::super::{Arena, CHUNK, Full, callable};
+        use super::{Native, arena, entered, published};
+
+        /// This thread's own instruction synchronisation barrier, `isb`.
+        fn isb() {
+            // SAFETY: `isb` touches no memory and no register the compiler
+            // allocates.
+            unsafe { std::arch::asm!("isb", options(nostack, preserves_flags)) };
+        }
+
+        /// The reused-chunk question of §4.4, over `ROUNDS` rounds: a body
+        /// entered on as many threads as the machine has cores, and
+        /// dropped; a thread started that has never entered the chunk,
+        /// waiting on an atomic pointer; a different body published at the
+        /// same address of the reused chunk; and its entry stored in the
+        /// pointer, the waiting thread entering the new body as soon as it
+        /// sees it, with or without its own `isb` first, and with no system
+        /// call between the two. Answers how many entries returned the old
+        /// body's value.
+        fn stale_entries(own_isb: bool) -> Result<u32, String> {
+            const ROUNDS: u16 = 500;
+            // A core and not a thread holds instructions, and which core a
+            // thread runs on is the system's to choose: one warming thread per
+            // core, so the entering thread's core has likely run the old body.
+            let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+            let mut arena = arena(1)?;
+            let mut stale = 0;
+            // Each round starts with the arena's one chunk full, or never
+            // taken, so its first body lands at the chunk's start.
+            let fill = |arena: &mut Arena<Native>| {
+                (arena.publish(&vec![0; CHUNK - 8], 1))
+                    .map_err(|Full| "no room for the filler".to_owned())
+            };
+            for round in 0..ROUNDS {
+                let (old, new) = (2 * round, 2 * round + 1);
+                let first = published(&mut arena, old)?;
+                let filler = fill(&mut arena)?;
+                let address = first.entry();
+                let entry = AtomicPtr::new(std::ptr::null_mut());
+                let answer = std::thread::scope(|scope| -> Result<u32, String> {
+                    let entering = scope.spawn(|| {
+                        let deadline = Instant::now() + Duration::from_secs(10);
+                        loop {
+                            let at = entry.load(Ordering::Acquire);
+                            if let Some(at) = NonNull::new(at) {
+                                if own_isb {
+                                    isb();
+                                }
+                                return Some(callable(at)());
                             }
-                            return Some(callable(at)());
+                            if Instant::now() > deadline {
+                                return None;
+                            }
+                            std::hint::spin_loop();
                         }
-                        if Instant::now() > deadline {
-                            return None;
+                    });
+                    std::thread::scope(|warm| {
+                        for _ in 0..cores {
+                            warm.spawn(|| {
+                                assert!((0..10_000).all(|_| entered(&first)() == u32::from(old)));
+                            });
                         }
-                        std::hint::spin_loop();
+                    });
+                    drop((first, filler));
+                    let second = published(&mut arena, new)?;
+                    assert_eq!(
+                        second.entry(),
+                        address,
+                        "round {round}: the reused chunk's first body is at its start"
+                    );
+                    entry.store(second.entry().as_ptr(), Ordering::Release);
+                    let answer = entering
+                        .join()
+                        .map_err(|_| "the entering thread panicked".to_owned())?;
+                    drop(second);
+                    answer.ok_or_else(|| {
+                        format!("round {round}: the entering thread saw no body in ten seconds")
+                    })
+                })?;
+                drop(fill(&mut arena)?);
+                match answer {
+                    a if a == u32::from(new) => {}
+                    a if a == u32::from(old) => stale += 1,
+                    a => {
+                        return Err(format!(
+                            "round {round}: the reused chunk answered {a}, neither {old} nor {new}"
+                        ));
                     }
-                });
-                std::thread::scope(|warm| {
-                    for _ in 0..cores {
-                        warm.spawn(|| {
-                            assert!((0..10_000).all(|_| entered(&first)() == u32::from(old)));
-                        });
-                    }
-                });
-                drop((first, filler));
-                let second = published(&mut arena, new)?;
-                assert_eq!(
-                    second.entry(),
-                    address,
-                    "round {round}: the reused chunk's first body is at its start"
-                );
-                entry.store(second.entry().as_ptr(), Ordering::Release);
-                let answer = entering
-                    .join()
-                    .map_err(|_| "the entering thread panicked".to_owned())?;
-                drop(second);
-                answer.ok_or_else(|| {
-                    format!("round {round}: the entering thread saw no body in ten seconds")
-                })
-            })?;
-            drop(fill(&mut arena)?);
-            match answer {
-                a if a == u32::from(new) => {}
-                a if a == u32::from(old) => stale += 1,
-                a => {
-                    return Err(format!(
-                        "round {round}: the reused chunk answered {a}, neither {old} nor {new}"
-                    ));
                 }
             }
+            Ok(stale)
         }
-        Ok(stale)
+
+        #[test]
+        fn a_reused_chunk_entered_by_a_fresh_thread_with_its_own_isb_runs_the_new_body()
+        -> Result<(), String> {
+            assert_eq!(stale_entries(true)?, 0);
+            Ok(())
+        }
+
+        #[test]
+        fn a_reused_chunk_entered_by_a_fresh_thread_without_an_isb_runs_the_new_body()
+        -> Result<(), String> {
+            assert_eq!(stale_entries(false)?, 0);
+            Ok(())
+        }
     }
 
+    /// On Linux the two views are two addresses of one sealed file: what
+    /// the write view holds the executable view reads, and
+    /// `/proc/self/maps` shows the one shared and writable and the other
+    /// shared and executable, both of the `memfd`. The arena's file is
+    /// closed by then, so the seals are held on another file `sealed`
+    /// makes as it makes the arena's: it refuses to shrink or grow.
+    #[cfg(target_os = "linux")]
     #[test]
-    fn a_reused_chunk_entered_by_a_fresh_thread_with_its_own_isb_runs_the_new_body()
-    -> Result<(), String> {
-        assert_eq!(stale_entries(true)?, 0);
-        Ok(())
-    }
-
-    #[test]
-    fn a_reused_chunk_entered_by_a_fresh_thread_without_an_isb_runs_the_new_body()
-    -> Result<(), String> {
-        assert_eq!(stale_entries(false)?, 0);
+    fn the_two_views_are_two_addresses_of_one_sealed_file() -> Result<(), String> {
+        use super::Pages;
+        let sealed = super::linux::sealed(CHUNK).map_err(|e| e.to_string())?;
+        let whole = u64::try_from(CHUNK).map_err(|e| e.to_string())?;
+        assert!(rustix::fs::ftruncate(&sealed, whole + 1).is_err(), "grown");
+        assert!(rustix::fs::ftruncate(&sealed, whole - 1).is_err(), "shrunk");
+        let mut arena = arena(1)?;
+        let code = published(&mut arena, 7)?;
+        let pages = &arena.region.pages;
+        let at = code.entry().as_ptr().addr() - pages.rx(0).as_ptr().addr();
+        let written = pages.written(at);
+        assert_ne!(written, code.entry());
+        let body = returning(7);
+        // SAFETY: the write view's bytes of the body just published, which
+        // nothing writes while the arena is held here.
+        let seen = unsafe { std::slice::from_raw_parts(written.as_ptr(), body.len()) };
+        assert_eq!(seen, body);
+        let maps = std::fs::read_to_string("/proc/self/maps").map_err(|e| e.to_string())?;
+        let mapped = |address: usize| {
+            maps.lines().find_map(|line| {
+                let mut fields = line.split_whitespace();
+                let (low, high) = fields.next()?.split_once('-')?;
+                let range =
+                    usize::from_str_radix(low, 16).ok()?..usize::from_str_radix(high, 16).ok()?;
+                let perms = fields.next()?;
+                let file = fields.nth(3).unwrap_or("");
+                range
+                    .contains(&address)
+                    .then(|| (perms.to_owned(), file.to_owned()))
+            })
+        };
+        let file = "/memfd:php_jit".to_owned();
+        assert_eq!(
+            mapped(written.as_ptr().addr()),
+            Some(("rw-s".to_owned(), file.clone()))
+        );
+        assert_eq!(
+            mapped(code.entry().as_ptr().addr()),
+            Some(("r-xs".to_owned(), file))
+        );
         Ok(())
     }
 }

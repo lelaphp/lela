@@ -18,10 +18,16 @@ workspace = true
 php_engine = { path = "../php_engine" }
 php_unit = { path = "../php_unit" }       # the ini entries the tier declares (decl::IniDecl) and the op arrays the recorder reads, through unit.lock
 php_heap = { path = "../php_heap" }       # the type a sampled operand holds (ZvalType), through heap.lock
-libc = { workspace = true }               # the code arena's mapping and its cache maintenance on macOS (jit-design.md §4.4), already in the lock
+libc = { workspace = true }               # the code arena's mapping and its cache maintenance on macOS, and the unmapping on both (jit-design.md §4.4), already in the lock
 cranelift-codegen = { workspace = true }  # lower: the one module that names a Cranelift type (jit-design.md §4.3)
 cranelift-frontend = { workspace = true }
 cranelift-native = { workspace = true }
+
+# The targets `build.rs` sets `php_jit_arena` on that are Linux; Cargo
+# cannot gate a dependency on a build script's cfg, so the set is said
+# again here, and `build.rs` names this table.
+[target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
+rustix = { workspace = true }             # the code arena's memfd, its seals and its two mappings on Linux (jit-design.md §4.4, §6; #2945's ruling)
 
 [dev-dependencies]
 # `tier::Epoch::fixture`, an epoch over one unit, so policy's state machine

@@ -317,6 +317,17 @@ pub(super) fn round<'a>(
     pairs: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
     stdin: Option<&[u8]>,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
+    stream
+        .write_all(&request(pairs, stdin))
+        .context("writing the request")?;
+    answer(stream)
+}
+
+/// The records of request 1, [`round`]'s, as they are written.
+pub(super) fn request<'a>(
+    pairs: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
+    stdin: Option<&[u8]>,
+) -> Vec<u8> {
     let mut params = Vec::new();
     for (name, value) in pairs {
         pair(&mut params, name, value);
@@ -328,7 +339,12 @@ pub(super) fn round<'a>(
         out.extend(record(STDIN, body));
     }
     out.extend(record(STDIN, &[]));
-    stream.write_all(&out).context("writing the request")?;
+    out
+}
+
+/// What the server writes back on `FCGI_STDOUT` and `FCGI_STDERR` until
+/// `FCGI_END_REQUEST`, [`round`]'s.
+pub(super) fn answer(mut stream: impl Read) -> Result<(Vec<u8>, Vec<u8>)> {
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
     loop {
         let mut header = [0u8; 8];

@@ -93,6 +93,24 @@ pub struct StreamHooks {
     /// reads `STDIN` a line at a time for `-R`, `-F` and `-B`; `None` at
     /// its end, or where it names no stream.
     pub get_line: fn(&mut Request, &Value) -> Option<Vec<u8>>,
+    /// `SG(request_info).request_body` made, as the form reader and
+    /// `php://input` make it (`Z/main/SAPI.c:264`,
+    /// `Z/ext/standard/php_fopen_wrapper.c:225`):
+    /// `php_stream_temp_create_ex(TEMP_STREAM_DEFAULT, SAPI_POST_BLOCK_SIZE, dir)`,
+    /// `dir` `upload_tmp_dir`, among the request's resources to its end
+    /// and named by the view answered.
+    pub body_open: fn(&mut Request, Option<&[u8]>) -> Result<Resource, Thrown>,
+    /// `php_stream_write` of a block at the end of that stream; whether it
+    /// took the block whole.
+    pub body_append: fn(&mut Request, Resource, &[u8]) -> bool,
+    /// `php_stream_truncate_set_size(.., 0)` of that stream, the body lost
+    /// whole as `sapi_read_standard_form_data` loses it.
+    pub body_discard: fn(&mut Request, Resource),
+    /// What that stream holds, read from its start.
+    pub body_read: fn(&mut Request, Resource) -> Vec<u8>,
+    /// `php_stream_close` of that stream, as php's `zend_test` closes the
+    /// one its parse made.
+    pub body_close: fn(&mut Request, Resource),
     /// The layer's engine state, built once as the engine is
     /// ([`Face::layer_state`]): what streams keep across requests, php's
     /// `EG(persistent_list)` as `zend_startup`'s `zend_init_rsrc_plist`

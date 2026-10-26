@@ -331,11 +331,11 @@ mod touched {
 }
 
 /// Hand-assembled bodies entered through `enter` on real requests
-/// (`jit-design.md` §4.6 *Tested*), on the one target whose arena maps
-/// code today: a test tier enters, at a function's activation, the body
+/// (`jit-design.md` §4.6 *Tested*), on an aarch64 target whose arena
+/// maps code, the bodies' instruction set: a test tier enters, at a function's activation, the body
 /// its plan assembles for that function, publishes it into the epoch's
 /// table, and hands the loop the frame `enter` landed.
-#[cfg(all(target_os = "macos", target_arch = "aarch64", not(miri)))]
+#[cfg(all(php_jit_arena, target_arch = "aarch64", not(miri)))]
 pub(crate) mod entered {
     use std::marker::PhantomData;
     use std::panic::{AssertUnwindSafe, catch_unwind};

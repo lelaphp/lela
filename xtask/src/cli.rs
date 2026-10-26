@@ -546,6 +546,13 @@ pub(crate) struct Accepting {
     /// between two runs from two scratch directories (#801).
     #[arg(long, requires = "accept")]
     pub streams: bool,
+    /// With `--accept`, also write each plain fence the oracle does not
+    /// meet from the oracle's two runs, normalised, keeping each authored
+    /// line whose wildcards the oracle's line still matches, and refusing
+    /// a line the two runs differ on and a fence a `trace:` row covers
+    /// (#3455).
+    #[arg(long, requires = "accept", conflicts_with = "streams")]
+    pub bodies: bool,
 }
 
 /// What one `phpt` run is asked for, flattened onto the command so the

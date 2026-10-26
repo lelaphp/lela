@@ -1,0 +1,11 @@
+# The fixture's registry (harness-design.md §4.3; #3455): one accepted
+# `trace:` row whose `covers` names the one fence of ext/pcre/src/lib.rs,
+# which pins the engine's side of the row where the oracle prints another.
+
+[[divergence]]
+id = "trace:fixture-bodies-covered"
+kind = "trace"
+reason = "The oracle prints `oracle` where zend_test is not loaded; the engine's side is the fence (fixture)."
+status = "accepted"
+since = "2026-10-25"
+covers = ["witness:34804ef20b1a3e1a7d39b9790a01610bb5381690"]

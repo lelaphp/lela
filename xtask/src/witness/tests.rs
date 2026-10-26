@@ -737,6 +737,65 @@ fn a_capture_whose_two_runs_differ_names_the_line_and_captures_nothing() {
     );
 }
 
+/// The refusals of `--accept --bodies`, by the fixtures it must refuse
+/// (#3455): a plain fence whose two oracle runs print two `string(N)` and
+/// whose body has no wildcard meeting both is written nothing and fails,
+/// its note naming the line and each run's text of it; a fence a `trace:`
+/// row covers is written nothing and stays covered, its note naming the
+/// row.
+#[test]
+fn a_body_the_two_runs_differ_on_or_a_row_covers_is_written_nothing_and_named() {
+    if oracle().is_none() {
+        return;
+    }
+    let ask = Ask {
+        accept: Accept::Bodies,
+        ..Ask::default()
+    };
+    for (name, judged, said) in [
+        (
+            "bodies-moves",
+            Judgement::Fail,
+            "`--bodies` wrote nothing: stdout line 1 is `string(",
+        ),
+        (
+            "bodies-covered",
+            Judgement::Covered,
+            "`--bodies` wrote nothing: the fence pins the engine's side of trace:fixture-bodies-covered",
+        ),
+    ] {
+        let root = workspace().join("xtask/fixtures/witness").join(name);
+        let fixture = Manifest::load(&root).unwrap();
+        let found = super::extract(&root, &fixture.crates[0], None, Target::built()).unwrap();
+        let registry = Registry::load(&root).unwrap();
+        let oracle = fixture.pin().unwrap().oracle();
+        let tally = judge(&oracle, &binary(), &registry, &ask, &found, None).unwrap();
+        let (judgement, note) = only(&tally);
+        assert_eq!(judgement, judged, "{name}: {note}");
+        assert!(tally.captured.is_empty(), "{name}: {tally:#?}");
+        assert!(note.starts_with(said), "{name}: {note}");
+    }
+    // A status the fence pins and the oracle does not give is no body's
+    // to move: the fence is written nothing, and fails as it stands.
+    let text =
+        "/// ```php\n/// echo 2; exit(3);\n/// ```\n/// ```expect\n/// 1\n/// ```\npub fn k() {}\n";
+    let tally = judged(
+        Path::new("ext/fixture/src/lib.rs"),
+        text,
+        &registry(""),
+        Accept::Bodies,
+    );
+    let (judgement, note) = only(&tally);
+    assert_eq!(judgement, Judgement::Fail, "{note}");
+    assert!(tally.captured.is_empty(), "{tally:#?}");
+    assert!(
+        note.starts_with(
+            "`--bodies` wrote nothing: the oracle ends on status 3 and the fence pins status 0"
+        ),
+        "{note}"
+    );
+}
+
 /// An accepted row names one side of a difference, the oracle's or the
 /// engine's, so it accepts a fence one run misses and never one both miss.
 #[test]
@@ -1431,4 +1490,48 @@ fn the_fixture_whose_line_the_engine_s_host_answers_otherwise_fails() {
         cgi.path = hosts.join("absent");
     }
     read(&fixture);
+}
+
+/// A crate whose reading is said before anything runs is journaled as a
+/// judged one is (#3457): the watching run reads the journal alone, and a
+/// host's lines file that did not parse printed nothing, wrote no reading
+/// and exited 0. The fixture's `sapi/cgi` carries a `then` with a key no
+/// `then` takes.
+#[test]
+fn a_crate_unread_before_the_run_is_journaled_as_failed() {
+    use crate::reading::Status;
+    let root = workspace().join("xtask/fixtures/witness/host-lines-unread");
+    let fixture = Manifest::load(&root).unwrap();
+    let tree = Tree::new("host-lines-unread").unwrap();
+    let path = tree.join("journal");
+    let journal = super::watch::Journal::open(&path).unwrap();
+    let ask = Ask {
+        crates: vec!["sapi/cgi".to_owned()],
+        staged: false,
+        ..Ask::default()
+    };
+    let binary = Binary::of(&root);
+    let readings = super::run_in(
+        &root,
+        &fixture,
+        &registry(""),
+        &ask,
+        Some(&journal),
+        &binary,
+    )
+    .unwrap();
+    let [reading] = &readings[..] else {
+        panic!("{readings:#?}")
+    };
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert!(
+        reading.message.contains("is no host's lines"),
+        "{}",
+        reading.message
+    );
+    let journaled = fs::read_to_string(&path).unwrap();
+    assert!(
+        journaled.contains("is no host's lines"),
+        "the journal: {journaled}"
+    );
 }

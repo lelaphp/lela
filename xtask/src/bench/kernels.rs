@@ -12,8 +12,9 @@
 //! the same pair and control on the engine built with the tier's feature,
 //! what the engine's tier buys. G1 (#2947, [`door`]): the engine built
 //! with the tier's feature against the engine built without it over the
-//! seven kernels alone, [`KERNELS`], its geomean held to a bound, one
-//! plus the tolerance of its `[[bench]]` row in `seams.toml` (#3130).
+//! seven kernels alone, [`KERNELS`], each kernel's row held to a bound,
+//! one plus the tolerance of its `[[bench]]` row in `seams.toml` (#3130),
+//! and its geomean to nothing (#3280).
 //!
 //! **What every arm runs under.** The recipe, as the oracle's every run
 //! is, then the regimes, then [`INI`]: php.ini-production's values for the

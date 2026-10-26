@@ -35,6 +35,7 @@
 //! settled = ["fpm.log", '(?s)started.*started']  # matched once answered, before the stop
 //! [[line.serve.request]]
 //! http = "GET / HTTP/1.0\r\n\r\n"      # or `params` and `body`, as FastCGI records
+//! shut = true                         # the client's half shut once sent
 //! [[line.then]]                        # a command line run after it, in the same
 //! args = ["-n", "u.php"]               # directory and under its env with this one's
 //! env = { SCRIPT_FILENAME = "{dir}/u.php" }  # over it
@@ -159,13 +160,17 @@ struct Serve {
 }
 
 /// One request: the bytes of an HTTP one, or the parameters and body of a
-/// `FastCGI` one.
+/// `FastCGI` one, and whether the client shuts its half of the connection
+/// once the request is written, as a server that sends nothing more does
+/// (#3457).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
     http: Option<String>,
     params: Option<Vec<(String, String)>>,
     body: Option<String>,
+    #[serde(default)]
+    shut: bool,
 }
 
 /// One host crate's lines: the host they run, the file they stand in, and
@@ -633,20 +638,36 @@ fn answered(request: &Request, listen: &str, fill: &dyn Fn(&str) -> String) -> R
             let pairs = params.iter().map(|(n, v)| (n.as_bytes(), v.as_bytes()));
             let body = request.body.as_deref().map(fill);
             let body = body.as_deref().map(str::as_bytes);
+            let written = super::fpm::request(pairs, body);
             // A path is a Unix socket, and anything else `host:port`.
             let (stdout, stderr) = if listen.starts_with('/') {
                 let stream = UnixStream::connect(listen).map_err(Refused)?;
                 stream.set_read_timeout(wait)?;
-                super::fpm::round(stream, pairs, body)?
+                fastcgi_round(stream, &written, request.shut, UnixStream::shutdown)?
             } else {
                 let stream = TcpStream::connect(listen).map_err(Refused)?;
                 stream.set_read_timeout(wait)?;
-                super::fpm::round(stream, pairs, body)?
+                fastcgi_round(stream, &written, request.shut, TcpStream::shutdown)?
             };
             Ok(format!("{}\n-- stderr\n{}", shown(&stdout), shown(&stderr)))
         }
         (None, None) => bail!("a request is `http` or `params`"),
     }
+}
+
+/// One `FastCGI` request's records written to `stream`, the client's half
+/// shut after them where the line asks, and the answer read.
+fn fastcgi_round<S: Read + Write>(
+    mut stream: S,
+    written: &[u8],
+    shut: bool,
+    shutdown: fn(&S, std::net::Shutdown) -> std::io::Result<()>,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    stream.write_all(written).context("writing the request")?;
+    if shut {
+        shutdown(&stream, std::net::Shutdown::Write).context("shutting the request's half")?;
+    }
+    super::fpm::answer(stream)
 }
 
 #[cfg(test)]

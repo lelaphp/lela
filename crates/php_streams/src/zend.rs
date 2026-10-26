@@ -7,7 +7,7 @@
 use crate::api::layer::{Face as _, IncludeSource, StreamHooks, scheme_length};
 
 use crate::api::raising::Thrown;
-use crate::api::request::{Request, ScannerFile, Streams, Unresolved, UrlStat};
+use crate::api::request::{Request, ScannerFile, Stream, Streams, Unresolved, UrlStat, Whence};
 use crate::api::values::{PhpString, Resource, Value};
 use crate::state::Layer;
 use crate::streams::{Located, OpenOptions, StreamLayer};
@@ -24,6 +24,11 @@ pub const STREAM_HOOKS: StreamHooks = StreamHooks {
     close_primary,
     standard_handles: crate::streams::standard_handles,
     get_line,
+    body_open,
+    body_append,
+    body_discard,
+    body_read,
+    body_close,
     state: crate::state::engine_state,
     engine_end: crate::state::engine_end,
 };
@@ -103,6 +108,52 @@ fn timestamp(req: &mut Request, path: &[u8]) -> Option<[i64; 13]> {
         UrlStat::Found(sb) => Some(sb),
         UrlStat::Unsupported => Some(std::array::from_fn(|at| i64::from(at == 9))),
         UrlStat::Failed | UrlStat::Refused => None,
+    }
+}
+
+/// [`StreamHooks::body_open`]: the temp stream a request's body is
+/// buffered in, its owner the request's resource list's.
+fn body_open(req: &mut Request, dir: Option<&[u8]>) -> Result<Resource, Thrown> {
+    let stream = crate::streams::body_stream(req, dir)?;
+    let body = stream.resource();
+    req.keep_in_list(stream.into_resource());
+    Ok(body)
+}
+
+/// [`StreamHooks::body_append`]: the block written at the stream's end.
+fn body_append(req: &mut Request, body: Resource, bytes: &[u8]) -> bool {
+    let Some(stream) = Stream::from_value(req, &body.as_value()) else {
+        return false;
+    };
+    stream.seek(req, 0, Whence::End);
+    stream.write(req, bytes) == Some(bytes.len())
+}
+
+/// [`StreamHooks::body_discard`]: the stream emptied.
+fn body_discard(req: &mut Request, body: Resource) {
+    if let Some(stream) = Stream::from_value(req, &body.as_value()) {
+        stream.truncate(req, 0).ok();
+    }
+}
+
+/// [`StreamHooks::body_read`]: the stream read whole from its start.
+fn body_read(req: &mut Request, body: Resource) -> Vec<u8> {
+    let Some(stream) = Stream::from_value(req, &body.as_value()) else {
+        return Vec::new();
+    };
+    stream.seek(req, 0, Whence::Set);
+    let mut bytes = Vec::new();
+    let mut block = [0; 8192];
+    while let Some(n) = stream.read_into(req, &mut block).filter(|n| *n > 0) {
+        bytes.extend_from_slice(&block[..n]);
+    }
+    bytes
+}
+
+/// [`StreamHooks::body_close`]: the stream closed.
+fn body_close(req: &mut Request, body: Resource) {
+    if let Some(stream) = Stream::from_value(req, &body.as_value()) {
+        stream.close(req);
     }
 }
 

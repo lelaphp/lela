@@ -609,7 +609,15 @@ impl SessionHandler {
             Module::Files => files::create_sid(req),
             Module::User => session::create_id(req),
         };
-        let id = id.unwrap_or_default();
+        // An id the default handler could not make is php's `Error`
+        // since 8.5.12, where 8.5.9 handed back a null string.
+        let Some(id) = id else {
+            if let Some(thrown) = req.state::<State>().thrown.take() {
+                return Err(thrown);
+            }
+            let text = format!("Failed to create session ID: {}", module.name());
+            return Err(throw_error(req, "Error", &text));
+        };
         PhpString::new(req, &id)
     }
 }

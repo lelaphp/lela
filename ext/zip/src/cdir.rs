@@ -116,7 +116,7 @@ pub(crate) fn find(file: &mut File, len: u64, flags: u32) -> Result<Cdir, Status
             Candidate::Taken(read) => {
                 let cd = read?;
                 if flags & CHECKCONS != 0 {
-                    return checkcons(tail.file, cd);
+                    return checkcons(tail.file, cd, len);
                 }
                 return Ok(cd);
             }
@@ -433,7 +433,7 @@ fn check_eocd(cd: &End, flags: u32) -> Result<(), Status> {
 
 /// `_zip_checkcons`: every entry's local header within the archive before
 /// its central directory, read, and matching its central record.
-fn checkcons(file: &mut File, mut cd: Cdir) -> Result<Cdir, Status> {
+fn checkcons(file: &mut File, mut cd: Cdir, len: u64) -> Result<Cdir, Status> {
     let is_zip64 = cd.is_zip64;
     let first = cd.entries.first().map_or(0, |e| e.offset);
     let (mut min, mut max) = (first, first);
@@ -454,7 +454,7 @@ fn checkcons(file: &mut File, mut cd: Cdir) -> Result<Cdir, Status> {
         if max > cd.offset {
             return Err(Status::new(Er::Nozip));
         }
-        let local = Local::at(file, e.offset)
+        let local = Local::at(file, e.offset, len)
             .dirent(e, is_zip64)
             .map_err(|s| s.at_entry(i))?;
         if !headers_match(e, &local) {
@@ -492,22 +492,37 @@ impl ReadAt for Stdio {
 }
 
 /// An entry's local header at `offset` of the archive's file, read as
-/// each of libzip's three readers of it reads it.
+/// each of libzip's three readers of it reads it, through the archive's
+/// file source, whose length `len` is the file's at the open.
 pub(crate) struct Local<'f> {
     file: &'f mut dyn ReadAt,
     offset: u64,
+    len: u64,
 }
 
 impl<'f> Local<'f> {
-    pub(crate) fn at(file: &'f mut dyn ReadAt, offset: u64) -> Local<'f> {
-        Local { file, offset }
+    pub(crate) fn at(file: &'f mut dyn ReadAt, offset: u64, len: u64) -> Local<'f> {
+        Local { file, offset, len }
     }
 
-    /// `_zip_dirent_size` (libzip 1.12): the fixed part read whole and
-    /// held to its magic, where 1.11.4 read the two lengths alone; the
-    /// header's length with its name and extra fields.
+    /// `zip_source_seek(za->src, at, SEEK_SET)` before a read: refused
+    /// with `ZIP_ER_INVAL` past the source's length, as
+    /// `zip_source_seek_compute_offset` refuses it; a seek to the end
+    /// stands, and the read there is short.
+    fn seek(&self, at: u64) -> Result<u64, Status> {
+        if at > self.len {
+            return Err(Status::new(Er::Inval));
+        }
+        Ok(at)
+    }
+
+    /// `_zip_dirent_size` (libzip 1.12) after `_zip_file_get_offset`'s
+    /// seek: the fixed part read whole and held to its magic, where
+    /// 1.11.4 read the two lengths alone; the header's length with its
+    /// name and extra fields.
     pub(crate) fn size(&mut self) -> Result<u64, Status> {
-        let head = self.file.read_at(self.offset, LENTRYSIZE)?;
+        let at = self.seek(self.offset)?;
+        let head = self.file.read_at(at, LENTRYSIZE)?;
         if head.len() < LENTRYSIZE {
             return Err(Status::new(Er::Eof));
         }
@@ -518,11 +533,12 @@ impl<'f> Local<'f> {
         Ok(LENTRYSIZE as u64 + field(26) + field(28))
     }
 
-    /// `_zip_read_local_ef`: the two lengths alone, with no look at the
-    /// magic, then the extra fields, held to their own lengths, with
-    /// libzip's own taken out.
+    /// `_zip_read_local_ef`: the two lengths alone, sought to with no look
+    /// at the magic, then the extra fields, held to their own lengths,
+    /// with libzip's own taken out.
     pub(crate) fn extra_fields(&mut self) -> Result<Vec<u8>, Status> {
-        let lens = self.file.read_at(self.offset + 26, 4)?;
+        let at = self.seek(self.offset + 26)?;
+        let lens = self.file.read_at(at, 4)?;
         let (Some(nlen), Some(elen)) = (u16_at(&lens, 0), u16_at(&lens, 2)) else {
             return Err(Status::new(Er::Eof));
         };
@@ -542,7 +558,8 @@ impl<'f> Local<'f> {
     /// it beside `central`, the `PK\x07\x08` record after the data read
     /// where its bits say one follows.
     fn dirent(&mut self, central: &Dirent, is_zip64: bool) -> Result<Dirent, Status> {
-        let mut head = self.file.read_at(self.offset, LENTRYSIZE)?;
+        let at = self.seek(self.offset)?;
+        let mut head = self.file.read_at(at, LENTRYSIZE)?;
         if let (Some(n), Some(m)) = (u16_at(&head, 26), u16_at(&head, 28)) {
             let variable = usize::from(n) + usize::from(m);
             let at = self.offset + LENTRYSIZE as u64;
