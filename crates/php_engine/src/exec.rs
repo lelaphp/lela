@@ -2003,7 +2003,7 @@ impl Cached {
 /// (`zend_create_closure`, `Z/Zend/zend_closures.c:794`). Both read a
 /// cache of their own here too ([`init_runtime_cache`]), and the slot is
 /// still read back only from the scope that wrote it
-/// ([`crate::api::request::Request::cached_in_scope`]): a frame of the
+/// ([`Request::cached_in_scope`]): a frame of the
 /// function that wrote it without asking its scope, as
 /// [`Cached::Property`]'s `function` is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3969,6 +3969,27 @@ pub(crate) fn cached_class(
     }
     found
 }
+
+/// Whether the class operand `kind`/`at` names one class wherever a
+/// slot is read back: a constant, or `self` or `parent`, which the
+/// frame's scope fixes, and which a slot read back from the scope that
+/// wrote it ([`Request::cached_in_scope`]) needs not resolve again;
+/// `static` and a `FETCH_CLASS`'s are resolved on every pass.
+pub(crate) fn class_fixed(kind: php_unit::OperandKind, at: u32) -> bool {
+    kind == php_unit::OperandKind::Const
+        || kind == php_unit::OperandKind::Unused
+            && matches!(at & FETCH_CLASS_MASK, FETCH_CLASS_SELF | FETCH_CLASS_PARENT)
+}
+
+/// `ZEND_FETCH_CLASS_MASK` (`Z/Zend/zend_compile.h:1034`): the bits of a
+/// class operand's number that are its fetch type, the flags above them.
+pub(crate) const FETCH_CLASS_MASK: u32 = 0x0f;
+
+/// `ZEND_FETCH_CLASS_SELF` and `ZEND_FETCH_CLASS_PARENT`
+/// (`Z/Zend/zend_compile.h:1028`), the two fetch types a call on the class
+/// forwards the called scope through.
+pub(crate) const FETCH_CLASS_SELF: u32 = 1;
+pub(crate) const FETCH_CLASS_PARENT: u32 = 2;
 
 #[cfg(test)]
 mod tests {

@@ -30,8 +30,9 @@ use crate::testing::goldens::{
     DIM_AND, DIM_CONCAT, DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FANNKUCH, FIB, Fixture,
     HASH_FETCH_W, HASH_IS, HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT,
     METHOD_CALL, METHOD_SCOPED, NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE, NEW_CALL,
-    OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_CALL, REF_WRITE, SIEVE,
-    SPECTRALNORM, STATIC_CALL, STATIC_SCOPED, STRING_BUILD, STRING_MATCH, held, traced as built,
+    OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, PARENT_THIS, REF_CALL, REF_WRITE,
+    SIEVE, SPECTRALNORM, STATIC_CALL, STATIC_SCOPED, STATIC_SELF, STATIC_THIS, STRING_BUILD,
+    STRING_MATCH, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -2824,8 +2825,16 @@ fn pushed_under_its_pair(
                 && matches!(guard.check, Check::Callee { .. })),
         "{rendered}"
     );
+    // No class guard holds the receiver or the calling frame's `$this`:
+    // the pair's guard does; a callee's own property oplines hold its own.
+    let callers_own = |object: super::Object| match object {
+        super::Object::This(frame) => frame == init.frame,
+        super::Object::Value(_) => true,
+    };
     assert!(
-        (ir.guards.iter()).all(|guard| !matches!(guard.check, Check::Class { .. })),
+        (ir.guards.iter()).all(
+            |guard| !matches!(guard.check, Check::Class { object, .. } if callers_own(object))
+        ),
         "{rendered}"
     );
     made_in_place(ir, &rendered)?;
@@ -2848,6 +2857,31 @@ fn a_static_methods_call_is_pushed_in_place_under_its_slots_pair() -> Result<(),
     let ir = golden(STATIC_SCOPED)?;
     pushed_under_its_pair(&ir, Opcode::InitStaticMethodCall, |class| {
         class == super::PairClass::Named
+    })?;
+    let ir = golden(STATIC_SELF)?;
+    pushed_under_its_pair(&ir, Opcode::InitStaticMethodCall, |class| {
+        class == super::PairClass::Forwarded
+    })?;
+    Ok(())
+}
+
+/// A method that takes `$this` called by a static call's syntax, through
+/// its class's name or through `parent`, from an instance of the class,
+/// is pushed in place under the pair its runtime-cache slot holds with
+/// the calling frame's `$this`, as php's
+/// `zend_jit_push_this_method_call_frame` passes it: the pair's class
+/// held to the published class a name names, and to nothing through
+/// `parent` (#3561).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_static_call_to_a_method_with_this_is_pushed_in_place() -> Result<(), String> {
+    let ir = golden(STATIC_THIS)?;
+    pushed_under_its_pair(&ir, Opcode::InitStaticMethodCall, |class| {
+        matches!(class, super::PairClass::This { named: Some(_), .. })
+    })?;
+    let ir = golden(PARENT_THIS)?;
+    pushed_under_its_pair(&ir, Opcode::InitStaticMethodCall, |class| {
+        matches!(class, super::PairClass::This { named: None, .. })
     })?;
     Ok(())
 }

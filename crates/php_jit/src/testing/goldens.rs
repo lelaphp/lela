@@ -205,6 +205,43 @@ pub(crate) const STATIC_SCOPED: Fixture = Fixture {
     ],
 };
 
+/// A static method called through `self`: pushed in place under the
+/// guard on the pair its runtime-cache slot holds, the pair's class not
+/// compared and its called scope the calling frame's (#3561).
+pub(crate) const STATIC_SELF: Fixture = Fixture {
+    name: "static_self",
+    program: "scope_calls",
+    plan: &[
+        ("record.function", "selfs"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A method that takes `$this` called through its class's name from an
+/// instance of it: pushed in place under the pair, with the calling
+/// frame's `$this` held to its class (#3561).
+pub(crate) const STATIC_THIS: Fixture = Fixture {
+    name: "static_this",
+    program: "scope_calls",
+    plan: &[
+        ("record.function", "named"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A method that takes `$this` called through `parent` (#3561).
+pub(crate) const PARENT_THIS: Fixture = Fixture {
+    name: "parent_this",
+    program: "scope_calls",
+    plan: &[
+        ("record.function", "parents"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
 /// A loop whose callee's variables own an array and a string as it
 /// returns: the `RETURN` left in place, freeing each (#3313).
 pub(crate) const OWNING_LEAVE: Fixture = Fixture {

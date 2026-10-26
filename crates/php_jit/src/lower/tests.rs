@@ -20,8 +20,8 @@ use crate::testing::goldens::{
     DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FIB, Fixture, HASH_FETCH_W, HASH_IS,
     HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL, METHOD_SCOPED,
     NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS,
-    OBJECT_VALUE, OWNING_LEAVE, REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL,
-    STATIC_SCOPED, STRING_BUILD, STRING_MATCH, held,
+    OBJECT_VALUE, OWNING_LEAVE, PARENT_THIS, REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL,
+    STATIC_SCOPED, STATIC_SELF, STATIC_THIS, STRING_BUILD, STRING_MATCH, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -1199,7 +1199,14 @@ fn method_calls_lower_their_push_call_and_leave() -> Result<(), String> {
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_call_pushed_under_its_slots_pair_lowers_one_handler_arm() -> Result<(), String> {
-    for fixture in [STATIC_CALL, METHOD_SCOPED, STATIC_SCOPED] {
+    for fixture in [
+        STATIC_CALL,
+        METHOD_SCOPED,
+        STATIC_SCOPED,
+        STATIC_SELF,
+        STATIC_THIS,
+        PARENT_THIS,
+    ] {
         let ir = lowered(fixture)?;
         let clif = std::fs::read_to_string(goldens_dir().join(format!("{}.clif", fixture.name)))
             .map_err(|e| e.to_string())?;

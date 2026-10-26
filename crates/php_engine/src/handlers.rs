@@ -76,8 +76,9 @@ use crate::api::values::{
     ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
 };
 use crate::exec::{
-    self, Cached, E_FATAL_ERRORS, LAST_CATCH, cached_class, cleanup_live_vars,
-    cleanup_unfinished_calls, free_carried_value, has_only_fatal_errors, restore_silenced,
+    self, Cached, E_FATAL_ERRORS, FETCH_CLASS_MASK, FETCH_CLASS_PARENT, FETCH_CLASS_SELF,
+    LAST_CATCH, cached_class, class_fixed, cleanup_live_vars, cleanup_unfinished_calls,
+    free_carried_value, has_only_fatal_errors, restore_silenced,
 };
 use crate::observer::OnThrow;
 use crate::operand::{ByKind, Operand, Retval, RetvalByte, Var};
@@ -5820,6 +5821,27 @@ pub(crate) fn new<T: Tier>(
 /// Call to private method A::p() from global scope
 /// ```
 ///
+/// A class the scope names, `self`, `parent` or `static`, or one a
+/// `FETCH_CLASS` left, is resolved on every pass, and the pair answers
+/// where it holds that pass's class, php's `CACHED_PTR(opline->result.num)
+/// == ce`: `static` names another class on each call below, and a
+/// trait's `self` the class that uses it, each looked up again where the
+/// pair holds the other.
+///
+/// ```php
+/// class P { static function name() { return "P"; } }
+/// class A extends P { static function f() { return "A" . static::g(); } static function g() { return "a"; } static function run() { $s = ""; for ($i = 0; $i < 2; $i++) { $s .= self::f() . parent::name() . static::g(); } return $s; } }
+/// class B extends A { static function g() { return "b"; } }
+/// class C extends P { static function f() { return "C"; } static function run() { $s = ""; for ($i = 0; $i < 2; $i++) { $s .= self::f() . parent::name(); } return $s; } }
+/// trait T { static function h() { return self::name(); } }
+/// class D { use T; static function name() { return "D"; } }
+/// class E { use T; static function name() { return "E"; } }
+/// echo A::run(), " ", B::run(), " ", C::run(), " ", D::h(), E::h(), D::h(), "\n";
+/// ```
+/// ```expect
+/// AaPaAaPa AbPbAbPb CPCP DED
+/// ```
+///
 /// A method named on a trait itself, and never one a class took from
 /// it, is php's deprecation on every pass, since php caches no such
 /// callee, and an abstract one is `zend_abstract_method_call`'s `Error`
@@ -5883,9 +5905,14 @@ pub(crate) fn init_static_method_call<T: Tier>(
         }
     };
     // The pair answers where it holds this pass's class and was written
-    // from this frame's scope ([`Request::cached_callee`]).
-    let cached_callee = match (op.op2_type, primed) {
-        (OperandKind::Const, Cached::ClassAndCallee { .. }) => {
+    // from this frame's scope ([`Request::cached_callee`]): for a constant
+    // class, where the slot was found holding a pair; for any other,
+    // whichever pair it holds, php's `CACHED_PTR(opline->result.num) == ce`.
+    let cached_callee = match (op.op1_type, op.op2_type, primed) {
+        (OperandKind::Const, OperandKind::Const, Cached::ClassAndCallee { .. }) => {
+            req.cached_callee(frame, slot, class)
+        }
+        (op1, OperandKind::Const, _) if op1 != OperandKind::Const => {
             req.cached_callee(frame, slot, class)
         }
         _ => None,
@@ -5955,7 +5982,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // `ZEND_ACC_NEVER_CACHE` and one a trait declared, whose deprecation
     // is raised on every pass.
     let instance = looked_up.unwrap_or_else(|| req.takes_this(function));
-    if op.op1_type == OperandKind::Const && op.op2_type == OperandKind::Const && !uncached {
+    if op.op2_type == OperandKind::Const && !uncached {
         req.prime_callee(frame, slot, class, (function, instance));
     }
     static_call_frame(req, frame, op, class, (function, instance))
@@ -12528,31 +12555,10 @@ fn class_operand(
     ))
 }
 
-/// Whether the class operand `kind`/`at` names one class wherever a
-/// slot is read back: a constant, or `self` or `parent`, which the
-/// frame's scope fixes, and which a slot read back from the scope that
-/// wrote it ([`Request::cached_in_scope`]) needs not resolve again;
-/// `static` and a `FETCH_CLASS`'s are resolved on every pass.
-fn class_fixed(kind: OperandKind, at: u32) -> bool {
-    kind == OperandKind::Const
-        || kind == OperandKind::Unused
-            && matches!(at & FETCH_CLASS_MASK, FETCH_CLASS_SELF | FETCH_CLASS_PARENT)
-}
-
-/// `ZEND_FETCH_CLASS_MASK` (`Z/Zend/zend_compile.h:1034`): the bits of a
-/// class operand's number that are its fetch type, the flags above them.
-const FETCH_CLASS_MASK: u32 = 0x0f;
-
 /// `ZEND_FETCH_CLASS_NO_AUTOLOAD` and `ZEND_FETCH_CLASS_SILENT`
 /// (`Z/Zend/zend_compile.h:1035-1036`).
 const FETCH_CLASS_NO_AUTOLOAD: u32 = 0x80;
 const FETCH_CLASS_SILENT: u32 = 0x100;
-
-/// `ZEND_FETCH_CLASS_SELF` and `ZEND_FETCH_CLASS_PARENT`
-/// (`Z/Zend/zend_compile.h:1028`), the two fetch types a call on the class
-/// forwards the called scope through.
-const FETCH_CLASS_SELF: u32 = 1;
-const FETCH_CLASS_PARENT: u32 = 2;
 
 /// `zend_fetch_class(NULL, fetch_type)` (`Z/Zend/zend_execute_API.c:1712`)
 /// under `ZEND_FETCH_CLASS_EXCEPTION`, which every compiled reference

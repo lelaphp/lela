@@ -434,6 +434,14 @@ fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
                     write!(text, " pair fn {function} of class {number}")
                 }
                 PairClass::Named => write!(text, " pair fn {function} of named"),
+                PairClass::Forwarded => write!(text, " pair fn {function} of scope"),
+                PairClass::This { named, receiver } => {
+                    write!(text, " pair fn {function}")?;
+                    if let Some(named) = named {
+                        write!(text, " of class {}", tier::class_number(named))?;
+                    }
+                    write!(text, " this {}", tier::class_number(receiver))
+                }
             };
         }
         Imm::Leave {

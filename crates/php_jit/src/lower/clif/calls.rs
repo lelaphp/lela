@@ -53,6 +53,22 @@ fn receiver_of(line: &Line) -> Result<(Object, bool), Abort> {
 /// reads it.
 const P: PlaceLayout = PLACE;
 
+/// What a push in place under its pair's guard writes past the image it
+/// copies ([`Emit::pair_guard`]): the called scope where the image names
+/// none, and the receiver lent from the calling frame.
+#[derive(Default)]
+struct Over {
+    scope: Option<Scope>,
+    this: Option<Value>,
+}
+
+/// A called scope compiled code writes: a class's number, which the
+/// header keeps inverted, or the calling frame's word as it stands.
+enum Scope {
+    Number(Value),
+    Word(Value),
+}
+
 /// What a leave in place writes into the caller's slot: a scalar, or a
 /// zval's two words, copied from a constant or moved from a temporary.
 #[derive(Clone, Copy)]
@@ -249,7 +265,9 @@ impl Emit<'_> {
     /// A method's call held by the pair its runtime-cache slot holds
     /// ([`Imm::Pair`]) is pushed where the slot holds the pair the trace
     /// recorded ([`Emit::pair_guard`]), its called scope written where its
-    /// class is the request's own, and its handler pushes it otherwise,
+    /// class is the request's own or the calling frame forwards it, and
+    /// the calling frame's `$this` lent where a static call's syntax
+    /// calls a method that takes it, and its handler pushes it otherwise,
     /// which looks the class and the method up and may push another
     /// callee, so the call it pushed is held to the one recorded after it
     /// ([`Emit::callee_guard`]), as php's code calls
@@ -263,9 +281,9 @@ impl Emit<'_> {
         plain: &PlainCall,
     ) -> Result<(), Abort> {
         let (slow, join) = self.split();
-        let scope = match line.imm {
+        let over = match line.imm {
             Imm::Pair { function, class } => self.pair_guard(line, (function, class), slow)?,
-            _ => None,
+            _ => Over::default(),
         };
         let stack = self.stack()?;
         let header = self.header_of(plain)?;
@@ -301,13 +319,23 @@ impl Emit<'_> {
             self.b.ins().store(trusted(), zero, top, at(cell));
             self.b.ins().store(trusted(), zero, top, at(cell + 8));
         }
-        if let Some(class) = scope {
-            // `ScopeAt`'s half-word: the class's number inverted.
-            let word = self.b.ins().bnot(class);
-            (self.b.ins()).store(trusted(), word, top, at(L.called_scope()));
+        match over.scope {
+            Some(Scope::Number(class)) => {
+                // `ScopeAt`'s half-word: the class's number inverted.
+                let word = self.b.ins().bnot(class);
+                (self.b.ins()).store(trusted(), word, top, at(L.called_scope()));
+            }
+            Some(Scope::Word(word)) => {
+                (self.b.ins()).store(trusted(), word, top, at(L.called_scope()));
+            }
+            None => {}
         }
         if line.opcode == Opcode::InitMethodCall {
-            self.receive(line, top)?;
+            let (object, owned) = receiver_of(line)?;
+            let this = self.object(object)?;
+            self.receive(this, owned, top);
+        } else if let Some(this) = over.this {
+            self.receive(this, false, top);
         }
         self.b.ins().store(trusted(), top, stack, INNERMOST);
         // The record, then the table's length and the top.
@@ -362,11 +390,54 @@ impl Emit<'_> {
     /// `Z/ext/opcache/jit/zend_jit_ir.c:9025-9056`, `:9255-9265`): on to
     /// `slow` unless the slot holds a pair whose callee is `function` and
     /// whose class is the receiver's, or the published class the call
-    /// names; the class's number where the call's called scope is a
-    /// request-scoped class, which the push writes, none where its image
-    /// names it. The scope the slot was primed from is not compared:
-    /// [`tier::UnitView::hold_callee`] takes only a slot of an op array of
-    /// one scope that its own frame reads, so every frame primes it alike.
+    /// names; through `self` or `parent`, whose class the op array's scope
+    /// fixes, the class is not compared, as php reads `fbc` alone. What
+    /// the push writes past the image ([`Over`]): the class's number where
+    /// the call's called scope is a request-scoped class, the calling
+    /// frame's own called scope where `self` or `parent` forwards it, as
+    /// php takes `EX(This)`'s (`:9340-9358`), and the calling frame's
+    /// `$this` where the callee takes it, held to the class the trace
+    /// recorded, as php's `zend_jit_push_this_method_call_frame` holds it
+    /// to be an instance of the class named; nothing where the image
+    /// names it all. A frame with no called scope or no `$this`, and
+    /// `$this` of another class, are the handler's, which raises php's
+    /// `Error` where it is no instance. The scope the slot was primed
+    /// from is not compared: [`tier::UnitView::hold_callee`] takes only a
+    /// slot of an op array of one scope that its own frame reads, so
+    /// every frame primes it alike.
+    ///
+    /// Through `self` a static method forwarding `static`, and a method
+    /// taking `$this` through its class's name and through `parent`, from
+    /// an instance of the class the trace recorded, of a subclass, and of
+    /// no subclass, under force and where every guard fails once:
+    ///
+    /// ```php
+    /// class A { public $v = 1; static function f($x) { return static::class . $x; } function m($x) { return $this->v + $x; }
+    ///   static function selfs($n) { $s = ""; for ($i = 0; $i < $n; $i++) { $s = self::f($i); } return $s; }
+    ///   function named($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += A::m($i); } return $t; } }
+    /// class B extends A { public $v = 10; function p($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += parent::m($i); } return $t; } }
+    /// class X { function call($n) { $t = 0; for ($i = 0; $i < $n; $i++) { try { $t += A::m($i); } catch (Error $e) { return $e->getMessage(); } } return $t; } }
+    /// echo A::selfs(30), " ", B::selfs(30), " ", (new A)->named(30), " ", (new B)->named(30), " ", (new B)->p(30), "\n";
+    /// echo (new X)->call(3), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// A29 B29 465 735 735
+    /// Non-static method A::m() cannot be called statically
+    /// ```
+    ///
+    /// ```php
+    /// class A { public $v = 1; static function f($x) { return static::class . $x; } function m($x) { return $this->v + $x; }
+    ///   static function selfs($n) { $s = ""; for ($i = 0; $i < $n; $i++) { $s = self::f($i); } return $s; }
+    ///   function named($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += A::m($i); } return $t; } }
+    /// class B extends A { public $v = 10; function p($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += parent::m($i); } return $t; } }
+    /// class X { function call($n) { $t = 0; for ($i = 0; $i < $n; $i++) { try { $t += A::m($i); } catch (Error $e) { return $e->getMessage(); } } return $t; } }
+    /// echo A::selfs(30), " ", B::selfs(30), " ", (new A)->named(30), " ", (new B)->named(30), " ", (new B)->p(30), "\n";
+    /// echo (new X)->call(3), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// A29 B29 465 735 735
+    /// Non-static method A::m() cannot be called statically
+    /// ```
     ///
     /// `zend_lazy_class_load`'s copy of a class linked over one the request
     /// evaluated, whose method and static method are pushed in place, then
@@ -409,7 +480,7 @@ impl Emit<'_> {
         line: &Line,
         (function, class): (u32, PairClass),
         slow: Block,
-    ) -> Result<Option<Value>, Abort> {
+    ) -> Result<Over, Abort> {
         let refuse = Refuse::To(slow);
         let place = match class {
             PairClass::Receiver => {
@@ -417,9 +488,10 @@ impl Emit<'_> {
                 let obj = self.object(object)?;
                 self.cache_guard(line, (P.pair(), P.pair_class()), obj, refuse)?
             }
-            PairClass::Published(_) | PairClass::Named => {
-                self.cached_slot(line, P.pair(), refuse)?
-            }
+            PairClass::Published(_)
+            | PairClass::Named
+            | PairClass::Forwarded
+            | PairClass::This { .. } => self.cached_slot(line, P.pair(), refuse)?,
         };
         let callee = (self.b.ins()).load(I32, trusted(), place, at(P.pair_function()));
         let other = self
@@ -427,15 +499,58 @@ impl Emit<'_> {
             .ins()
             .icmp_imm_u(IntCC::NotEqual, callee, i64::from(function));
         self.refuse_if(other, refuse)?;
-        let held = (self.b.ins()).load(I32, trusted(), place, at(P.pair_class()));
+        let named = match class {
+            PairClass::Published(class)
+            | PairClass::This {
+                named: Some(class), ..
+            } => Some(class),
+            _ => None,
+        };
+        if let Some(class) = named {
+            let held = (self.b.ins()).load(I32, trusted(), place, at(P.pair_class()));
+            let number = i64::from(tier::class_number(class));
+            let other = self.b.ins().icmp_imm_u(IntCC::NotEqual, held, number);
+            self.refuse_if(other, refuse)?;
+        }
         match class {
-            PairClass::Published(class) => {
-                let number = i64::from(tier::class_number(class));
-                let other = self.b.ins().icmp_imm_u(IntCC::NotEqual, held, number);
-                self.refuse_if(other, refuse)?;
-                Ok(None)
+            PairClass::Published(_) => Ok(Over::default()),
+            PairClass::Receiver | PairClass::Named => {
+                let held = (self.b.ins()).load(I32, trusted(), place, at(P.pair_class()));
+                Ok(Over {
+                    scope: Some(Scope::Number(held)),
+                    this: None,
+                })
             }
-            PairClass::Receiver | PairClass::Named => Ok(Some(held)),
+            PairClass::Forwarded => {
+                // `static` of the calling frame, its `ScopeAt` as it
+                // stands; a frame with none is the handler's to refuse.
+                let room = self.room(line.frame)?;
+                let word = (self.b.ins()).load(I32, trusted(), room, at(L.called_scope()));
+                let none = self.b.ins().icmp_imm_u(IntCC::Equal, word, 0);
+                self.refuse_if(none, refuse)?;
+                Ok(Over {
+                    scope: Some(Scope::Word(word)),
+                    this: None,
+                })
+            }
+            PairClass::This { receiver, .. } => {
+                // `Z_TYPE(EX(This)) == IS_OBJECT` and of the class the
+                // trace recorded, which is an instance of the one named;
+                // any other `$this`, or none, is the handler's, which
+                // raises php's `Error` where it is no instance.
+                let room = self.room(line.frame)?;
+                let this = self.b.ins().load(I64, trusted(), room, at(L.this()));
+                let none = self.b.ins().icmp_imm_u(IntCC::Equal, this, 0);
+                self.refuse_if(none, refuse)?;
+                let of = self.b.ins().load(I32, trusted(), this, imm(Obj::CLASS_AT));
+                let number = i64::from(tier::class_number(receiver));
+                let other = self.b.ins().icmp_imm_u(IntCC::NotEqual, of, number);
+                self.refuse_if(other, refuse)?;
+                Ok(Over {
+                    scope: None,
+                    this: Some(this),
+                })
+            }
         }
     }
 
@@ -471,9 +586,7 @@ impl Emit<'_> {
     /// ```expect regime=jit-exit-fuzz process
     /// 1500 c c c 3
     /// ```
-    fn receive(&mut self, line: &Line, top: Value) -> Result<(), Abort> {
-        let (object, owned) = receiver_of(line)?;
-        let this = self.object(object)?;
+    fn receive(&mut self, this: Value, owned: bool, top: Value) {
         self.b.ins().store(trusted(), this, top, at(L.this()));
         if owned {
             // `GC_ADDREF`, the count kept below the bit above it.
@@ -498,7 +611,6 @@ impl Emit<'_> {
             let word = self.b.ins().iadd(word, room);
             self.b.ins().store(trusted(), word, this, PINS_AT);
         }
-        Ok(())
     }
 
     /// A `DO_*CALL` of a call pushed in place made its callee's frame in

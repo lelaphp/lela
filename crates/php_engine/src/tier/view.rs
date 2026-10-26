@@ -724,7 +724,7 @@ impl UnitView {
 
     /// Take the class and the callee the `INIT_METHOD_CALL` over a
     /// constant name, or the `INIT_STATIC_METHOD_CALL` over a constant
-    /// class and name, at `at` of the op array `frame` serves wrote into
+    /// name and a class a constant, `self` or `parent` names, at `at` of the op array `frame` serves wrote into
     /// its runtime-cache slot, as the handler wrote it on this pass
     /// ([`Request::cached_callee`]), so a trace that recorded the call
     /// pushes it in place where the slot of the request it runs in holds
@@ -743,7 +743,7 @@ impl UnitView {
         let named = match op.opcode {
             Opcode::InitMethodCall => op.op2_type == OperandKind::Const,
             Opcode::InitStaticMethodCall => {
-                op.op1_type == OperandKind::Const && op.op2_type == OperandKind::Const
+                op.op2_type == OperandKind::Const && crate::exec::class_fixed(op.op1_type, op.op1)
             }
             _ => false,
         };

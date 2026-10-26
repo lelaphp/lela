@@ -2587,21 +2587,30 @@ impl<'a> Builder<'a> {
         Some(PushAt { plain, held })
     }
 
-    /// The call an `INIT_STATIC_METHOD_CALL` over a constant class and
-    /// method name pushes in place, as php's
-    /// `zend_jit_init_static_method_call` pushes it
-    /// (`Z/ext/opcache/jit/zend_jit_ir.c:9215-9330`): under the guard on
-    /// the pair its runtime-cache slot holds, the callee the static method
-    /// the recording took the call of, and its class the published one
-    /// the opline names, php's constant `ce`, or whichever class a
-    /// request-scoped name resolved to, which php reads from the slot.
+    /// The call an `INIT_STATIC_METHOD_CALL` over a constant method name
+    /// pushes in place, as php's `zend_jit_init_static_method_call`
+    /// pushes it (`Z/ext/opcache/jit/zend_jit_ir.c:9215-9370`), over a
+    /// constant class, or `self` or `parent`, as php's trace compiles it
+    /// for those three alone (`Z/ext/opcache/jit/zend_jit_trace.c:6428-6442`):
+    /// under the guard on the pair its runtime-cache slot holds, the
+    /// callee the method the recording took the call of. A static callee
+    /// over a constant class is held to the published class the opline
+    /// names, php's constant `ce`, or to whichever class a request-scoped
+    /// name resolved to, which php reads from the slot; over `self` or
+    /// `parent` its called scope is the calling frame's ([`PairClass::Forwarded`]).
+    /// A callee that takes `$this` takes the calling frame's, of the
+    /// published class the recording saw it of ([`PairClass::This`]).
     fn static_at(
         &self,
         (func, at): (FuncRef, OplineIdx),
         op: &Opline,
         next: Option<&Event>,
     ) -> Option<PushAt> {
-        if op.op1_type != OperandKind::Const || op.op2_type != OperandKind::Const {
+        // An `UNUSED` class operand whose pair the view took is `self` or
+        // `parent` ([`UnitView::hold_callee`]).
+        let constant = op.op1_type == OperandKind::Const;
+        let scoped = op.op1_type == OperandKind::Unused;
+        if !(constant || scoped) || op.op2_type != OperandKind::Const {
             return None;
         }
         let Some(Event::InitCall {
@@ -2611,14 +2620,27 @@ impl<'a> Builder<'a> {
         else {
             return None;
         };
-        let pair = (self.view.callee_at(func, at)).filter(|pair| !pair.instance())?;
-        let plain = (self.view.calls_of(*callee, op.extended_value))
-            .find(|plain| plain.scope() == Some(pair.class()))?
-            .clone();
-        let class = if tier::class_published(pair.class()) {
-            PairClass::Published(pair.class())
+        let pair = self.view.callee_at(func, at)?;
+        let named = (constant && tier::class_published(pair.class())).then_some(pair.class());
+        let mut plains = self.view.calls_of(*callee, op.extended_value);
+        let (plain, class) = if pair.instance() {
+            // The receiver's class is the call's called scope, the one
+            // plain call to the callee whose scope is published.
+            let plain = plains
+                .find(|plain| plain.scope().is_some_and(tier::class_published))?
+                .clone();
+            let receiver = plain.scope()?;
+            (plain, PairClass::This { named, receiver })
+        } else if scoped {
+            (
+                plains.find(|plain| plain.scope().is_some())?.clone(),
+                PairClass::Forwarded,
+            )
         } else {
-            PairClass::Named
+            let plain = plains
+                .find(|plain| plain.scope() == Some(pair.class()))?
+                .clone();
+            (plain, named.map_or(PairClass::Named, PairClass::Published))
         };
         Some(PushAt {
             plain,
