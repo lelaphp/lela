@@ -17,7 +17,7 @@ use crate::archive::{
     GPBF_DATA_DESCRIPTOR, GPBF_ENCODING_UTF_8, GPBF_ENCRYPTED, TRUNCATE, actual, is_default,
 };
 use crate::cdir::Kind;
-use crate::codec::{BUFSIZE, Compressor, Sealer};
+use crate::codec::{Attributes, BITS_ALLOWED, BUFSIZE, Compressor, Method, Sealer};
 use crate::dostime::{DosTime, TORRENTZIP};
 use crate::error::{Done, Er, Failed, Status};
 use crate::pipe::Pipe;
@@ -140,51 +140,7 @@ impl Out {
     }
 }
 
-/// `zip_file_attributes_t` as one layer of a source gives it, or as the
-/// layers of a source give it together: the host and external
-/// attributes, the version needed, and general purpose bits under their
-/// mask. The ASCII bit is not kept: the one source that gives it, an
-/// unchanged entry's, gives the entry's own back.
-#[derive(Clone, Copy, Default)]
-struct Attributes {
-    host: Option<(u8, u32)>,
-    version_needed: Option<u16>,
-    bits: Option<(u16, u16)>,
-}
-
 impl Attributes {
-    /// `zip_source_get_file_attributes` of a layer that gives `self` over
-    /// a source that gives `lower`: what the layer leaves unsaid from
-    /// below, the larger version, and the bits below outside the layer's
-    /// mask.
-    fn over(self, lower: Attributes) -> Attributes {
-        Attributes {
-            host: self.host.or(lower.host),
-            version_needed: match (self.version_needed, lower.version_needed) {
-                (Some(v), Some(w)) => Some(v.max(w)),
-                (v, w) => v.or(w),
-            },
-            bits: match (self.bits, lower.bits) {
-                (Some((flags, mask)), Some((low_flags, low_mask))) => {
-                    let low_mask = low_mask & !mask;
-                    Some((flags | (low_flags & low_mask), mask | low_mask))
-                }
-                (b, c) => b.or(c),
-            },
-        }
-    }
-
-    /// A compression layer's, compressing or decompressing with
-    /// `method`: the algorithm's version and its `bits` under the whole
-    /// allowed mask (`compress_callback`'s).
-    fn codec(method: u16, bits: u16) -> Attributes {
-        Attributes {
-            host: None,
-            version_needed: Some(crate::codec::version_needed(method)),
-            bits: Some((bits, BITS_ALLOWED)),
-        }
-    }
-
     /// An unchanged entry's source, `zip_source_zip_file_create` over its
     /// original dirent `orig`: its window's, the entry's own host,
     /// attributes and bits (`_zip_file_attributes_from_dirent`), under
@@ -231,15 +187,12 @@ impl Attributes {
             version_needed: None,
             bits: Some((orig.bitflags, BITS_ALLOWED)),
         };
-        match actual(orig.comp_method) {
-            0 => window,
-            method => Attributes::codec(method, 0).over(window),
+        match Method::of(actual(orig.comp_method)) {
+            Some(method) => Attributes::codec(method, 0).over(window),
+            None => window,
         }
     }
 }
-
-/// `ZIP_FILE_ATTRIBUTES_GENERAL_PURPOSE_BIT_FLAGS_ALLOWED_MASK`.
-const BITS_ALLOWED: u16 = 0x083e;
 
 /// `_zip_dirent_apply_attributes`: whether it changed the dirent.
 fn apply_attributes(de: &mut Dirent, a: &Attributes) -> bool {
@@ -663,7 +616,7 @@ fn write_all(
                     }
                     out.write(&buf[..n])?;
                     if n == BUFSIZE
-                        && let Some(share) = added.pipe.share()
+                        && let Some(share) = added.pipe.share(program.live()?)
                         && progress.update(program, share)
                     {
                         return Err(program.cancelled());
@@ -695,44 +648,24 @@ enum Data {
     Add(Box<Added>),
 }
 
-/// What `add_data` copies from: its source under its layers, what the
-/// source gives below them, and how the source's end is held.
+/// What `add_data` copies from: its source under its layers, and how the
+/// source's end is held.
 struct Added {
     pipe: Pipe,
-    below: Attributes,
-    pkware: bool,
     end: End,
 }
 
 impl Added {
-    /// `zip_source_get_file_attributes` of `src_final`: the compression
-    /// layer's over the source's, and PKWARE's over both;
-    /// `zip_source_winzip_aes_encode` gives none.
-    fn attributes(&self) -> Attributes {
-        let mut a = self.below;
-        if let Some(c) = self.pipe.compressor() {
-            a = Attributes::codec(c.algorithm(), c.bits()).over(a);
-        }
-        if self.pkware {
-            let layer = Attributes {
-                host: None,
-                version_needed: Some(20),
-                bits: Some((GPBF_DATA_DESCRIPTOR, GPBF_DATA_DESCRIPTOR)),
-            };
-            a = layer.over(a);
-        }
-        a
-    }
-
-    /// `zip_source_stat` of `src_final` once the data is written.
+    /// `zip_source_stat` of `src_final` once the data is written, and the
+    /// attributes it gives then.
     fn settled(&self) -> Settled {
         let (crc, size) = self.pipe.crc_and_size();
         Settled {
-            method: self.pipe.compressor().map_or(0, Compressor::method),
+            method: self.pipe.method(),
             crc,
             size,
             comp_size: self.pipe.written(),
-            attributes: self.attributes(),
+            attributes: self.pipe.attributes(),
         }
     }
 }
@@ -924,20 +857,23 @@ impl Archive {
         at: u64,
         out: &mut Out,
     ) -> Result<(), Status> {
-        if let Data::Add(added) = &written.data {
-            let (crc, size) = added.pipe.crc_and_size();
-            if let Err(status) = data_end(&added.end, crc, size) {
-                self.error = status;
-                return Err(status);
+        let settled = match &written.data {
+            Data::Add(added) => {
+                let settled = added.settled();
+                if let Err(status) = data_end(&added.end, settled.crc, settled.size) {
+                    self.error = status;
+                    return Err(status);
+                }
+                Some(settled)
             }
-        }
+            Data::Copy(_) => None,
+        };
         let torrentzip = self.want_torrentzip();
         let Some(de) = self.entries.get_mut(i).and_then(|e| e.changes.as_mut()) else {
             self.error.set(Er::Internal);
             return Err(self.error);
         };
-        if let Data::Add(added) = &written.data {
-            let settled = added.settled();
+        if let Some(settled) = settled {
             let mut changed = settled.settle(de);
             if !torrentzip {
                 // `dirent_changed`'s mtime half never holds: a source
@@ -1127,7 +1063,7 @@ impl Archive {
     /// e 8 2837 132000
     /// ```
     fn add_data(&mut self, i: usize, de: &mut Dirent, torrentzip: bool) -> Result<Written, Status> {
-        let (before, input, end) = self.source(i, de.changed)?;
+        let Sourced { before, input, end } = self.source(i, de.changed & D_COMP_METHOD != 0)?;
         // The preliminary dirent, written before the data: what the stat
         // knows, a stored entry's compressed size its size, and what it
         // does not know as the dirent held it.
@@ -1149,12 +1085,18 @@ impl Archive {
         // method other than store is a recompression (`needs_recompress`).
         let compressor = match actual(de.comp_method) {
             0 => None,
-            method => Some(
-                Compressor::new(method, de.compression_level, is_default(de.comp_method))
-                    .inspect_err(|s| self.error = *s)?,
-            ),
+            code => {
+                let Some(method) = Method::of(code) else {
+                    self.error.set(Er::Compnotsupp);
+                    return Err(self.error);
+                };
+                let can_store = is_default(de.comp_method);
+                Some(
+                    Compressor::new(method, de.compression_level, can_store)
+                        .inspect_err(|s| self.error = *s)?,
+                )
+            }
         };
-        let mut pkware = false;
         let sealer = if de.encryption_method == EM_NONE {
             None
         } else {
@@ -1169,7 +1111,6 @@ impl Archive {
             Some(match Encryption::of(de.encryption_method) {
                 Encryption::Pkware => {
                     de.bitflags |= GPBF_DATA_DESCRIPTOR;
-                    pkware = true;
                     Sealer::pkware(&password, de.last_mod.time)?
                 }
                 Encryption::Aes(strength) => Sealer::aes(&password, strength)?,
@@ -1180,13 +1121,11 @@ impl Archive {
             })
         };
         let added = Added {
-            pipe: Pipe::new(input, before.size, compressor, sealer),
-            below: before.attributes,
-            pkware,
+            pipe: Pipe::new(input, before.size, before.attributes, compressor, sealer),
             end,
         };
         if !torrentzip {
-            apply_attributes(de, &added.attributes());
+            apply_attributes(de, &added.pipe.attributes());
         }
         Ok(Written {
             header: dirent_bytes(de, Kind::Local, torrentzip)?,
@@ -1197,10 +1136,10 @@ impl Archive {
     /// What `add_data` copies from entry `i`: a new source opened, or the
     /// unchanged entry through `zip_source_zip_file_create(za, i,
     /// ZIP_FL_UNCHANGED, ...)`, decrypted with the default password and
-    /// decompressed, its dirent changed in `changed`; the stat before the
+    /// decompressed, its method changed where `method_changed` says; the stat before the
     /// copy, which says either is stored and unencrypted, and how its end
     /// is held ([`data_end`]).
-    fn source(&mut self, i: usize, changed: u32) -> Result<(Before, Input, End), Status> {
+    fn source(&mut self, i: usize, method_changed: bool) -> Result<Sourced, Status> {
         if let Some(s) = &mut self.entries[i].source {
             let st = s.stat();
             let before = Before {
@@ -1213,28 +1152,41 @@ impl Archive {
                 },
             };
             let input = s.open(i).inspect_err(|s| self.error = *s)?;
-            return Ok((before, input, End::Size(st.size)));
+            return Ok(Sourced {
+                end: End::Size(before.size),
+                before,
+                input,
+            });
         }
         let password = self.default_password.clone();
         let input = self
-            .unchanged_input(i, password.as_deref(), changed)
+            .unchanged_input(i, password.as_deref(), method_changed)
             .inspect_err(|s| self.error = *s)?;
         let Some(o) = self.entries[i].orig.as_ref() else {
             return Err(Status::new(Er::Internal));
         };
-        let before = Before {
-            size: o.uncomp_size,
-            crc: o.crc_valid.then_some(o.crc),
-            time: Time::Dos(o.last_mod),
-            attributes: Attributes::unchanged(o),
-        };
+        let crc = o.crc_valid.then_some(o.crc);
         let end = End::Entry {
             stored: actual(o.comp_method) == 0,
             size: o.uncomp_size,
-            crc: o.crc_valid.then_some(o.crc),
+            crc,
         };
-        Ok((before, input, end))
+        let before = Before {
+            size: o.uncomp_size,
+            crc,
+            time: Time::Dos(o.last_mod),
+            attributes: Attributes::unchanged(o),
+        };
+        Ok(Sourced { before, input, end })
     }
+}
+
+/// What `add_data` copies from entry `i`: its source's stat before the
+/// copy, the source opened, and how its end is held.
+struct Sourced {
+    before: Before,
+    input: Input,
+    end: End,
 }
 
 /// What `add_data`'s `zip_source_stat` of its source says before the

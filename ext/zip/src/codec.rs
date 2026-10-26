@@ -2,22 +2,14 @@
 //! on the way out (`zip_algorithm_*.c`, `zip_source_compress.c`,
 //! `zip_source_pkware_encode.c`, `zip_source_winzip_aes_encode.c`), over
 //! the platform's zlib and pure-Rust codecs and ciphers, each fed and
-//! read a buffer at a time as libzip's layers are; and the ciphers' state
-//! on the way in, which [`crate::read`] decrypts with.
+//! read a buffer at a time as libzip's layers are, and the attributes
+//! each layer gives; and the ciphers' state on the way in, which
+//! [`crate::read`] decrypts with.
 
 use std::io::Write;
 
 use crate::error::{Er, Status};
-use crate::ffi::{Deflate, Deflated};
-
-/// The version an algorithm's layer reports needed, compressing or
-/// decompressing alike (`zip_compression_algorithm_t`'s
-/// `version_needed`): bzip2's 4.6, and 2.0 for deflate, LZMA, XZ and
-/// zstd, whose own versions `_zip_dirent_apply_attributes` raises by the
-/// method.
-pub(crate) fn version_needed(method: u16) -> u16 {
-    if method == 12 { 46 } else { 20 }
-}
+use crate::ffi::Deflate;
 
 /// `TORRENTZIP_COMPRESSION_FLAGS`, the level a torrentzip entry is
 /// written at ([`crate::write`]'s `zip_dirent_torrentzip_normalize`):
@@ -28,9 +20,125 @@ pub(crate) const TORRENTZIP_COMPRESSION_FLAGS: u32 = 0xffff;
 /// `copy_source` reads the layers over it in.
 pub(crate) const BUFSIZE: usize = 8192;
 
+/// `ZIP_FILE_ATTRIBUTES_GENERAL_PURPOSE_BIT_FLAGS_ALLOWED_MASK`.
+pub(crate) const BITS_ALLOWED: u16 = 0x083e;
+
+/// `ZIP_GPBF_DATA_DESCRIPTOR`.
+const DATA_DESCRIPTOR: u16 = 0x0008;
+
+/// A method ext/zip compresses with, decoded once from the entry's
+/// `ZIP_CM_ACTUAL` method (`zip_source_compress.c`'s `implementations`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Method {
+    Deflate,
+    Bzip2,
+    Lzma,
+    Xz,
+    Zstd,
+}
+
+impl Method {
+    /// The method `code` names, `None` for one libzip has no algorithm
+    /// for.
+    pub(crate) fn of(code: u16) -> Option<Method> {
+        Some(match code {
+            8 => Method::Deflate,
+            12 => Method::Bzip2,
+            14 => Method::Lzma,
+            95 => Method::Xz,
+            93 => Method::Zstd,
+            _ => return None,
+        })
+    }
+
+    /// Its `ZIP_CM_*` number.
+    pub(crate) fn code(self) -> u16 {
+        match self {
+            Method::Deflate => 8,
+            Method::Bzip2 => 12,
+            Method::Lzma => 14,
+            Method::Xz => 95,
+            Method::Zstd => 93,
+        }
+    }
+
+    /// The version its algorithm's layer reports needed, compressing or
+    /// decompressing alike (`zip_compression_algorithm_t`'s
+    /// `version_needed`): bzip2's 4.6, and 2.0 for the rest, whose own
+    /// versions `_zip_dirent_apply_attributes` raises by the method.
+    fn version_needed(self) -> u16 {
+        if self == Method::Bzip2 { 46 } else { 20 }
+    }
+
+    /// The general purpose bits its algorithm reports compressing at
+    /// `level`: deflate's level, and LZMA's end marker.
+    fn bits(self, level: u32) -> u16 {
+        match self {
+            Method::Deflate => match nine(level) {
+                ..3 => 4,
+                8.. => 2,
+                _ => 0,
+            },
+            Method::Lzma => 2,
+            Method::Bzip2 | Method::Xz | Method::Zstd => 0,
+        }
+    }
+}
+
+/// A level deflate and bzip2 read as given, `0` or past `9` as `9`.
+fn nine(level: u32) -> u32 {
+    if (1..=9).contains(&level) { level } else { 9 }
+}
+
+/// `zip_file_attributes_t` as one layer of a source gives it, or as the
+/// layers of a source give it together: the host and external
+/// attributes, the version needed, and general purpose bits under their
+/// mask. The ASCII bit is not kept: the one source that gives it, an
+/// unchanged entry's, gives the entry's own back.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Attributes {
+    pub(crate) host: Option<(u8, u32)>,
+    pub(crate) version_needed: Option<u16>,
+    pub(crate) bits: Option<(u16, u16)>,
+}
+
+impl Attributes {
+    /// `zip_source_get_file_attributes` of a layer that gives `self` over
+    /// a source that gives `lower`: what the layer leaves unsaid from
+    /// below, the larger version, and the bits below outside the layer's
+    /// mask.
+    pub(crate) fn over(self, lower: Attributes) -> Attributes {
+        Attributes {
+            host: self.host.or(lower.host),
+            version_needed: match (self.version_needed, lower.version_needed) {
+                (Some(v), Some(w)) => Some(v.max(w)),
+                (v, w) => v.or(w),
+            },
+            bits: match (self.bits, lower.bits) {
+                (Some((flags, mask)), Some((low_flags, low_mask))) => {
+                    let low_mask = low_mask & !mask;
+                    Some((flags | (low_flags & low_mask), mask | low_mask))
+                }
+                (b, c) => b.or(c),
+            },
+        }
+    }
+
+    /// A compression layer's, compressing or decompressing with
+    /// `method`: the algorithm's version and its `bits` under the whole
+    /// allowed mask (`compress_callback`'s).
+    pub(crate) fn codec(method: Method, bits: u16) -> Attributes {
+        Attributes {
+            host: None,
+            version_needed: Some(method.version_needed()),
+            bits: Some((bits, BITS_ALLOWED)),
+        }
+    }
+}
+
 /// What one turn of an algorithm's `process` came to, short of an error
 /// (`zip_compression_status_t`).
-enum Turn {
+pub(crate) enum Turn {
     /// More to do on the input it has.
     More,
     /// The next input is wanted.
@@ -50,9 +158,7 @@ struct Made {
 impl Made {
     /// As much as `out` takes, and how much that was.
     fn take(&mut self, out: &mut [u8]) -> usize {
-        let rest = self.bytes.get(self.at..).unwrap_or_default();
-        let n = rest.len().min(out.len());
-        out[..n].copy_from_slice(&rest[..n]);
+        let n = copy_from(&self.bytes, self.at, out);
         self.at += n;
         n
     }
@@ -71,6 +177,14 @@ impl Made {
     }
 }
 
+/// As much of `data` from `at` as `out` takes, and how much that was.
+pub(crate) fn copy_from(data: &[u8], at: usize, out: &mut [u8]) -> usize {
+    let rest = data.get(at..).unwrap_or_default();
+    let n = rest.len().min(out.len());
+    out[..n].copy_from_slice(&rest[..n]);
+    n
+}
+
 /// A pure-Rust encoder written to as its input comes: what it has made
 /// of its input so far, and the rest once its input ends.
 trait Encoder {
@@ -78,29 +192,27 @@ trait Encoder {
     fn finish(self: Box<Self>) -> Result<Vec<u8>, Status>;
 }
 
-impl Encoder for lzma_rust2::XzWriter<Vec<u8>> {
-    fn feed(&mut self, data: &[u8]) -> Result<Vec<u8>, Status> {
-        self.write_all(data)
-            .map_err(|_| Status::new(Er::Internal))?;
-        Ok(std::mem::take(self.inner_mut()))
-    }
+/// lzma-rust2's writers, each over a `Vec` its made bytes are taken from.
+macro_rules! lzma_encoder {
+    ($($writer:ty),*) => {$(
+        impl Encoder for $writer {
+            fn feed(&mut self, data: &[u8]) -> Result<Vec<u8>, Status> {
+                self.write_all(data)
+                    .map_err(|_| Status::new(Er::Internal))?;
+                Ok(std::mem::take(self.inner_mut()))
+            }
 
-    fn finish(self: Box<Self>) -> Result<Vec<u8>, Status> {
-        (*self).finish().map_err(|_| Status::new(Er::Internal))
-    }
+            fn finish(self: Box<Self>) -> Result<Vec<u8>, Status> {
+                (*self).finish().map_err(|_| Status::new(Er::Internal))
+            }
+        }
+    )*};
 }
 
-impl Encoder for lzma_rust2::LzmaWriter<Vec<u8>> {
-    fn feed(&mut self, data: &[u8]) -> Result<Vec<u8>, Status> {
-        self.write_all(data)
-            .map_err(|_| Status::new(Er::Internal))?;
-        Ok(std::mem::take(self.inner_mut()))
-    }
-
-    fn finish(self: Box<Self>) -> Result<Vec<u8>, Status> {
-        (*self).finish().map_err(|_| Status::new(Er::Internal))
-    }
-}
+lzma_encoder!(
+    lzma_rust2::XzWriter<Vec<u8>>,
+    lzma_rust2::LzmaWriter<Vec<u8>>
+);
 
 /// zstd, whose encoder here is ruzstd's one-shot frame: the input
 /// gathered, compressed as it ends.
@@ -131,7 +243,7 @@ enum Algorithm {
         input: Vec<u8>,
         at: usize,
     },
-    Written {
+    Streamed {
         encoder: Option<Box<dyn Encoder>>,
         made: Made,
     },
@@ -139,76 +251,48 @@ enum Algorithm {
 
 impl Algorithm {
     /// `allocate` and `start` for `method` at `level`.
-    fn start(method: u16, level: u32) -> Result<Algorithm, Status> {
+    fn start(method: Method, level: u32) -> Result<Algorithm, Status> {
         let fail = |_| Status::new(Er::Internal);
-        Ok(match method {
-            8 => {
-                // `zip_algorithm_deflate.c`'s `allocate`: level 0 or past 9
-                // is `Z_BEST_COMPRESSION`, and torrentzip's flags ask for
-                // `TORRENTZIP_MEM_LEVEL`, every other level `MAX_MEM_LEVEL`.
+        let preset = if level <= 9 { level } else { 6 };
+        let encoder: Box<dyn Encoder> = match method {
+            Method::Deflate => {
+                // `zip_algorithm_deflate.c`'s `allocate`: torrentzip's flags
+                // ask for `TORRENTZIP_MEM_LEVEL`, every other level
+                // `MAX_MEM_LEVEL`.
                 let mem_level = if level == TORRENTZIP_COMPRESSION_FLAGS {
                     8
                 } else {
                     9
                 };
-                let level = if (1..=9).contains(&level) { level } else { 9 };
-                Algorithm::Deflate(
-                    Deflate::new(level.cast_signed(), mem_level).map_err(Status::zlib)?,
-                )
+                let z = Deflate::new(nine(level).cast_signed(), mem_level).map_err(Status::zlib)?;
+                return Ok(Algorithm::Deflate(z));
             }
-            12 => {
-                let level = if (1..=9).contains(&level) { level } else { 9 };
-                Algorithm::Bzip2 {
-                    z: bzip2::Compress::new(bzip2::Compression::new(level), 30),
+            Method::Bzip2 => {
+                return Ok(Algorithm::Bzip2 {
+                    z: bzip2::Compress::new(bzip2::Compression::new(nine(level)), 30),
                     input: Vec::new(),
                     at: 0,
-                }
+                });
             }
-            14 | 95 | 93 => {
-                let preset = if level <= 9 { level } else { 6 };
-                let encoder: Box<dyn Encoder> = match method {
-                    95 => {
-                        let mut options = lzma_rust2::XzOptions::with_preset(preset);
-                        options.set_check_sum_type(lzma_rust2::CheckType::Crc64);
-                        Box::new(lzma_rust2::XzWriter::new(Vec::new(), options).map_err(fail)?)
-                    }
-                    14 => {
-                        let options = lzma_rust2::LzmaOptions::with_preset(preset);
-                        let mut out = vec![0x09, 0x14, 0x05, 0x00, options.get_props()];
-                        out.extend_from_slice(&options.dict_size.to_le_bytes());
-                        Box::new(
-                            lzma_rust2::LzmaWriter::new(out, &options, false, true, None)
-                                .map_err(fail)?,
-                        )
-                    }
-                    _ => Box::new(Zstd(Vec::new())),
-                };
-                Algorithm::Written {
-                    encoder: Some(encoder),
-                    made: Made::default(),
-                }
+            Method::Xz => {
+                let mut options = lzma_rust2::XzOptions::with_preset(preset);
+                options.set_check_sum_type(lzma_rust2::CheckType::Crc64);
+                Box::new(lzma_rust2::XzWriter::new(Vec::new(), options).map_err(fail)?)
             }
-            _ => return Err(Status::new(Er::Compnotsupp)),
+            Method::Lzma => {
+                let options = lzma_rust2::LzmaOptions::with_preset(preset);
+                let mut out = vec![0x09, 0x14, 0x05, 0x00, options.get_props()];
+                out.extend_from_slice(&options.dict_size.to_le_bytes());
+                Box::new(
+                    lzma_rust2::LzmaWriter::new(out, &options, false, true, None).map_err(fail)?,
+                )
+            }
+            Method::Zstd => Box::new(Zstd(Vec::new())),
+        };
+        Ok(Algorithm::Streamed {
+            encoder: Some(encoder),
+            made: Made::default(),
         })
-    }
-
-    /// The general purpose bits the algorithm reports: deflate's level,
-    /// and LZMA's end marker.
-    fn bits(method: u16, level: u32) -> u16 {
-        match method {
-            8 => {
-                let level = if (1..=9).contains(&level) { level } else { 9 };
-                if level < 3 {
-                    4
-                } else if level > 7 {
-                    2
-                } else {
-                    0
-                }
-            }
-            14 => 2,
-            _ => 0,
-        }
     }
 
     /// `input`: `data`, the next buffer of the source.
@@ -219,7 +303,7 @@ impl Algorithm {
                 *input = data.to_vec();
                 *at = 0;
             }
-            Algorithm::Written { encoder, made } => {
+            Algorithm::Streamed { encoder, made } => {
                 if let Some(e) = encoder {
                     made.extend(&e.feed(data)?);
                 }
@@ -232,15 +316,7 @@ impl Algorithm {
     /// input has ended.
     fn process(&mut self, out: &mut [u8], finish: bool) -> Result<(Turn, usize), Status> {
         match self {
-            Algorithm::Deflate(z) => {
-                let (turn, n) = z.process(out, finish).map_err(Status::zlib)?;
-                let turn = match turn {
-                    Deflated::More => Turn::More,
-                    Deflated::NeedData => Turn::NeedData,
-                    Deflated::End => Turn::End,
-                };
-                Ok((turn, n))
-            }
+            Algorithm::Deflate(z) => z.process(out, finish).map_err(Status::zlib),
             Algorithm::Bzip2 { z, input, at } => {
                 if *at >= input.len() && !finish {
                     return Ok((Turn::NeedData, 0));
@@ -263,7 +339,7 @@ impl Algorithm {
                 };
                 Ok((turn, n))
             }
-            Algorithm::Written { encoder, made } => {
+            Algorithm::Streamed { encoder, made } => {
                 if made.is_empty()
                     && finish
                     && let Some(e) = encoder.take()
@@ -273,14 +349,12 @@ impl Algorithm {
                 if !made.is_empty() {
                     return Ok((Turn::More, made.take(out)));
                 }
-                Ok((
-                    if encoder.is_some() {
-                        Turn::NeedData
-                    } else {
-                        Turn::End
-                    },
-                    0,
-                ))
+                let turn = if encoder.is_some() {
+                    Turn::NeedData
+                } else {
+                    Turn::End
+                };
+                Ok((turn, 0))
             }
         }
     }
@@ -336,7 +410,7 @@ impl Algorithm {
 /// ```
 pub(crate) struct Compressor {
     algorithm: Algorithm,
-    method: u16,
+    method: Method,
     bits: u16,
     /// `ctx->buffer`: the last buffer of input read.
     buffer: Box<[u8; BUFSIZE]>,
@@ -361,11 +435,11 @@ enum Phase {
 }
 
 impl Compressor {
-    pub(crate) fn new(method: u16, level: u32, can_store: bool) -> Result<Compressor, Status> {
+    pub(crate) fn new(method: Method, level: u32, can_store: bool) -> Result<Compressor, Status> {
         Ok(Compressor {
             algorithm: Algorithm::start(method, level)?,
             method,
-            bits: Algorithm::bits(method, level),
+            bits: method.bits(level),
             buffer: Box::new([0; BUFSIZE]),
             first_read: None,
             can_store,
@@ -373,21 +447,16 @@ impl Compressor {
         })
     }
 
-    /// The method its algorithm compresses with.
-    pub(crate) fn algorithm(&self) -> u16 {
-        self.method
-    }
-
     /// The method the data is in, once it has ended: store, where it was
     /// stored.
     pub(crate) fn method(&self) -> u16 {
-        if self.stored() { 0 } else { self.method }
+        if self.stored() { 0 } else { self.method.code() }
     }
 
-    /// The general purpose bits the layer reports
-    /// (`ZIP_SOURCE_GET_FILE_ATTRIBUTES`): none once stored.
-    pub(crate) fn bits(&self) -> u16 {
-        if self.stored() { 0 } else { self.bits }
+    /// `ZIP_SOURCE_GET_FILE_ATTRIBUTES`: its algorithm's version, and its
+    /// general purpose bits, none once stored.
+    pub(crate) fn attributes(&self) -> Attributes {
+        Attributes::codec(self.method, if self.stored() { 0 } else { self.bits })
     }
 
     fn stored(&self) -> bool {
@@ -532,50 +601,66 @@ fn random(buf: &mut [u8]) -> Result<(), Status> {
 /// the data under the cipher, and past the data's end AES's ten bytes of
 /// authentication code.
 pub(crate) struct Sealer {
-    seal: Seal,
+    /// The cipher, until the data below has ended.
+    seal: Option<Seal>,
     head: Made,
     tail: Made,
-    eof: bool,
+    attributes: Attributes,
 }
 
-/// What a [`Sealer`] encrypts under: PKWARE's keys, or `WinZip`
-/// AES's state until its code is made.
+/// What a [`Sealer`] encrypts under: PKWARE's keys, or `WinZip` AES's
+/// state.
 enum Seal {
     Pkware(Keys),
-    Aes(Option<Box<WinzipAes>>),
+    Aes(Box<WinzipAes>),
 }
 
 impl Sealer {
     /// `zip_source_pkware_encode` opened: a header of eleven random bytes
-    /// and the high byte of the DOS time, under the password's keys.
+    /// and the high byte of the DOS time, under the password's keys. It
+    /// needs version 2.0 and a data record after the data.
     pub(crate) fn pkware(password: &[u8], dostime: u16) -> Result<Sealer, Status> {
         let mut header = [0u8; 12];
         random(&mut header[..11])?;
         header[11] = (dostime >> 8) as u8;
         let mut keys = Keys::of(password);
         let head: Vec<u8> = header.iter().map(|b| keys.encrypt(*b)).collect();
-        Ok(Sealer::new(Seal::Pkware(keys), &head))
+        let attributes = Attributes {
+            host: None,
+            version_needed: Some(20),
+            bits: Some((DATA_DESCRIPTOR, DATA_DESCRIPTOR)),
+        };
+        Ok(Sealer::new(Seal::Pkware(keys), &head, attributes))
     }
 
     /// `zip_source_winzip_aes_encode` opened: the salt and the password
-    /// verifier, at `strength` 1, 2 or 3.
+    /// verifier, at `strength` 1, 2 or 3. It needs version 5.1.
     pub(crate) fn aes(password: &[u8], strength: u8) -> Result<Sealer, Status> {
         let mut salt = vec![0u8; 4 * usize::from(strength) + 4];
         random(&mut salt)?;
         let (ctx, verifier) = WinzipAes::new(password, &salt, strength)?;
         salt.extend_from_slice(&verifier);
-        Ok(Sealer::new(Seal::Aes(Some(Box::new(ctx))), &salt))
+        let attributes = Attributes {
+            version_needed: Some(51),
+            ..Attributes::default()
+        };
+        Ok(Sealer::new(Seal::Aes(Box::new(ctx)), &salt, attributes))
     }
 
-    fn new(seal: Seal, head: &[u8]) -> Sealer {
+    fn new(seal: Seal, head: &[u8], attributes: Attributes) -> Sealer {
         let mut sealer = Sealer {
-            seal,
+            seal: Some(seal),
             head: Made::default(),
             tail: Made::default(),
-            eof: false,
+            attributes,
         };
         sealer.head.extend(head);
         sealer
+    }
+
+    /// `ZIP_SOURCE_GET_FILE_ATTRIBUTES`.
+    pub(crate) fn attributes(&self) -> Attributes {
+        self.attributes
     }
 
     /// One `ZIP_SOURCE_READ` into `out`, the data read through `lower`.
@@ -585,26 +670,23 @@ impl Sealer {
         lower: &mut dyn FnMut(&mut [u8]) -> Result<usize, Status>,
     ) -> Result<usize, Status> {
         let mut n = self.head.take(out);
-        if self.eof {
+        let Some(seal) = &mut self.seal else {
             return Ok(n + self.tail.take(&mut out[n..]));
-        }
+        };
         let want = out.len() - n;
         let got = lower(&mut out[n..])?;
         let data = &mut out[n..n + got];
-        match &mut self.seal {
+        match seal {
             Seal::Pkware(keys) => data.iter_mut().for_each(|b| *b = keys.encrypt(*b)),
-            Seal::Aes(Some(ctx)) => ctx.encrypt(data),
-            Seal::Aes(None) => {}
+            Seal::Aes(ctx) => ctx.encrypt(data),
         }
         n += got;
-        if got < want {
-            self.eof = true;
-            if let Seal::Aes(ctx) = &mut self.seal
-                && let Some(ctx) = ctx.take()
-            {
-                self.tail.extend(&ctx.finish()[..10]);
-                n += self.tail.take(&mut out[n..]);
-            }
+        // The data below has ended: AES's code follows it.
+        if got < want
+            && let Some(Seal::Aes(ctx)) = self.seal.take()
+        {
+            self.tail.extend(&ctx.finish()[..10]);
+            n += self.tail.take(&mut out[n..]);
         }
         Ok(n)
     }

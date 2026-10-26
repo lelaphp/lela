@@ -11,10 +11,9 @@
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::fs::FileExt;
-use std::sync::Arc;
 
 use crate::archive::{BufferLink, Encryption};
-use crate::codec::{PkwareKeys, WinzipAes};
+use crate::codec::{PkwareKeys, WinzipAes, copy_from};
 use crate::error::{Detail, Er, Status};
 
 /// `BUFSIZE`: what a decompressor reads from the layer below at once.
@@ -1317,13 +1316,11 @@ impl Pulled {
 
 /// What a `zip_file_t` reads from below its CRC layer.
 enum Body {
-    /// Data held in memory: none at all, or the window on entry `entry`'s
-    /// buffer source, whose bytes it shares.
-    Bytes {
-        data: Arc<[u8]>,
-        offset: usize,
-        entry: Option<usize>,
-    },
+    /// No data at all.
+    Empty,
+    /// The window on an added entry's buffer source, whose bytes it
+    /// shares.
+    Buffer { link: BufferLink, offset: usize },
     /// A window read as it is: stored data, or the raw bytes
     /// `ZIP_FL_COMPRESSED` asks for.
     Window(Window),
@@ -1338,10 +1335,9 @@ enum Body {
 impl Body {
     fn read_some(&mut self, buf: &mut [u8]) -> Result<usize, Status> {
         match self {
-            Body::Bytes { data, offset, .. } => {
-                let rest = data.get(*offset..).unwrap_or_default();
-                let n = rest.len().min(buf.len());
-                buf[..n].copy_from_slice(&rest[..n]);
+            Body::Empty => Ok(0),
+            Body::Buffer { link, offset } => {
+                let n = copy_from(link.data(), *offset, buf);
                 *offset += n;
                 Ok(n)
             }
@@ -1355,7 +1351,8 @@ impl Body {
     /// The position and length of a seekable body.
     fn span(&self) -> Option<(u64, u64)> {
         match self {
-            Body::Bytes { data, offset, .. } => Some((*offset as u64, data.len() as u64)),
+            Body::Empty => Some((0, 0)),
+            Body::Buffer { link, offset } => Some((*offset as u64, link.data().len() as u64)),
             Body::Window(w) => Some((w.offset, w.len)),
             Body::Decrypted(_) | Body::Compressed(_) | Body::Pulled(_) => None,
         }
@@ -1363,9 +1360,9 @@ impl Body {
 
     fn set_offset(&mut self, to: u64) {
         match self {
-            Body::Bytes { offset, .. } => *offset = usize::try_from(to).unwrap_or(usize::MAX),
+            Body::Buffer { offset, .. } => *offset = usize::try_from(to).unwrap_or(usize::MAX),
             Body::Window(w) => w.offset = to,
-            Body::Decrypted(_) | Body::Compressed(_) | Body::Pulled(_) => {}
+            Body::Empty | Body::Decrypted(_) | Body::Compressed(_) | Body::Pulled(_) => {}
         }
     }
 }
@@ -1439,26 +1436,17 @@ impl Reader {
         }
     }
 
-    /// The window `zip_source_zip_file_create` lays over entry `entry`'s
-    /// buffer source, whose bytes `data` are.
-    pub(crate) fn over_buffer(entry: usize, data: Arc<[u8]>) -> Reader {
-        let body = Body::Bytes {
-            data,
-            offset: 0,
-            entry: Some(entry),
-        };
-        Reader::new(body, None, true)
+    /// The window `zip_source_zip_file_create` lays over the buffer
+    /// source `link` names.
+    pub(crate) fn over_buffer(link: BufferLink) -> Reader {
+        Reader::new(Body::Buffer { link, offset: 0 }, None, true)
     }
 
     /// The buffer a window on an added entry's buffer reads, and where
     /// the window stands.
     pub(crate) fn on_buffer(&self) -> Option<(BufferLink, usize)> {
         match &self.body {
-            Body::Bytes {
-                data,
-                offset,
-                entry: Some(entry),
-            } => Some((BufferLink::new(*entry, data), *offset)),
+            Body::Buffer { link, offset } => Some((link.clone(), *offset)),
             _ => None,
         }
     }
@@ -1466,12 +1454,7 @@ impl Reader {
     /// A file whose archive was closed under it: every read fails with
     /// `ZIP_ER_ZIPCLOSED`.
     pub(crate) fn closed() -> Reader {
-        let body = Body::Bytes {
-            data: Arc::from([]),
-            offset: 0,
-            entry: None,
-        };
-        let mut zf = Reader::new(body, None, true);
+        let mut zf = Reader::new(Body::Empty, None, true);
         zf.source_error = Some(Status::new(Er::Zipclosed));
         zf
     }
@@ -1520,15 +1503,7 @@ impl Reader {
             l.size == 0
         };
         if empty {
-            return Ok(Reader::new(
-                Body::Bytes {
-                    data: Arc::from([]),
-                    offset: 0,
-                    entry: None,
-                },
-                crc,
-                false,
-            ));
+            return Ok(Reader::new(Body::Empty, crc, false));
         }
         let window = window()?;
         let raw = match (key, encryption) {
@@ -1581,7 +1556,7 @@ impl Reader {
     /// The window the entry is read through, where it has one.
     fn window_mut(&mut self) -> Option<&mut Window> {
         match &mut self.body {
-            Body::Bytes { .. } => None,
+            Body::Empty | Body::Buffer { .. } => None,
             Body::Window(w) => Some(w),
             Body::Decrypted(raw) => Some(raw.window()),
             Body::Compressed(d) => Some(d.lower.window()),

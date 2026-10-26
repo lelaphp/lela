@@ -139,8 +139,8 @@ impl Hold {
     pub(crate) fn let_go(self, req: &mut Request) {
         if let Some(h) = get(req, self.id) {
             h.readers = h.readers.saturating_sub(u32::from(self.reads_file));
-            if let (Za::Open(za, _) | Za::Closing(za), Some(link)) = (&mut h.za, &self.buffer) {
-                za.hold_buffer(link, false);
+            if let (Some(za), Some(link)) = (h.za.live(), &self.buffer) {
+                za.close_buffer(link);
             }
         }
         release(req, self.id);
@@ -154,18 +154,25 @@ pub(crate) fn hold(req: &mut Request, hold: &Hold) {
     if let Some(h) = get(req, hold.id) {
         h.refcount += 1;
         h.readers += u32::from(hold.reads_file);
-        if let (Za::Open(za, _) | Za::Closing(za), Some(link)) = (&mut h.za, &hold.buffer) {
-            za.hold_buffer(link, true);
+        if let (Some(za), Some(link)) = (h.za.live(), &hold.buffer) {
+            za.open_buffer(link);
+        }
+    }
+}
+
+impl Za {
+    /// The archive where it is open, or under its close.
+    fn live(&mut self) -> Option<&mut Archive> {
+        match self {
+            Za::Open(za, _) | Za::Closing(za) => Some(za),
+            Za::Closed => None,
         }
     }
 }
 
 /// Archive `id` where it is open, or under its close.
 pub(crate) fn archive(req: &mut Request, id: ArchiveId) -> Option<&mut Archive> {
-    match &mut get(req, id)?.za {
-        Za::Open(za, _) | Za::Closing(za) => Some(za),
-        Za::Closed => None,
-    }
+    get(req, id)?.za.live()
 }
 
 /// php's `close` member: whether archive `id` is under its close.

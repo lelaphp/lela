@@ -15,6 +15,8 @@ use std::ffi::{c_char, c_int, c_uint, c_void};
 
 use libz_sys as z;
 
+use crate::codec::Turn;
+
 unsafe extern "C" {
     /// `ZLIB_VERSION` of the `zlib.h` this crate compiled against, the C
     /// constant `build.rs` compiles, NUL-terminated.
@@ -39,17 +41,6 @@ extern "C" fn alloc(_opaque: *mut c_void, items: c_uint, size: c_uint) -> *mut c
 extern "C" fn free(_opaque: *mut c_void, address: *mut c_void) {
     // SAFETY: `address` is one [`alloc`] answered, which zlib frees once.
     unsafe { libc::free(address) }
-}
-
-/// What one `deflate` call came to, as `zip_algorithm_deflate.c`'s
-/// `process` reads its return.
-pub(crate) enum Deflated {
-    /// `Z_OK`: more to do.
-    More,
-    /// `Z_BUF_ERROR` with no input left: the next input is wanted.
-    NeedData,
-    /// `Z_STREAM_END`.
-    End,
 }
 
 /// `zip_algorithm_deflate.c`'s compressing state: a `z_stream` after
@@ -130,12 +121,9 @@ impl Deflate {
     }
 
     /// `process`: one `deflate` into `out`, `Z_FINISH` once the input has
-    /// ended, and how much it wrote; the code of any other return.
-    pub(crate) fn process(
-        &mut self,
-        out: &mut [u8],
-        finish: bool,
-    ) -> Result<(Deflated, usize), c_int> {
+    /// ended, what it came to and how much it wrote; the code of any
+    /// other return.
+    pub(crate) fn process(&mut self, out: &mut [u8], finish: bool) -> Result<(Turn, usize), c_int> {
         let room = c_uint::try_from(out.len()).unwrap_or(c_uint::MAX);
         self.stream.next_out = out.as_mut_ptr();
         self.stream.avail_out = room;
@@ -148,9 +136,10 @@ impl Deflate {
         let written = (room - self.stream.avail_out) as usize;
         self.stream.next_out = std::ptr::null_mut();
         match code {
-            z::Z_OK => Ok((Deflated::More, written)),
-            z::Z_STREAM_END => Ok((Deflated::End, written)),
-            z::Z_BUF_ERROR if self.stream.avail_in == 0 => Ok((Deflated::NeedData, written)),
+            z::Z_OK => Ok((Turn::More, written)),
+            z::Z_STREAM_END => Ok((Turn::End, written)),
+            // `Z_BUF_ERROR` with no input left: the next input is wanted.
+            z::Z_BUF_ERROR if self.stream.avail_in == 0 => Ok((Turn::NeedData, written)),
             code => Err(code),
         }
     }

@@ -5,7 +5,7 @@
 //! buffer is full or the layer below has ended.
 
 use crate::archive::{Archive, Input};
-use crate::codec::{Compressor, Sealer};
+use crate::codec::{Attributes, Compressor, Sealer};
 use crate::error::Status;
 
 /// The source, read through `add_data`'s CRC layer, which hashes and
@@ -29,6 +29,8 @@ pub(crate) struct Pipe {
     written: u64,
     /// `data_length`: the source's stated size.
     size: u64,
+    /// What the source gives below the layers.
+    below: Attributes,
 }
 
 /// `zip_source_read` over one layer: `read` until `out` is full or the
@@ -52,6 +54,7 @@ impl Pipe {
     pub(crate) fn new(
         input: Input,
         size: u64,
+        below: Attributes,
         compressor: Option<Compressor>,
         sealer: Option<Sealer>,
     ) -> Pipe {
@@ -68,6 +71,7 @@ impl Pipe {
             eof: false,
             written: 0,
             size,
+            below,
         }
     }
 
@@ -109,18 +113,32 @@ impl Pipe {
     }
 
     /// `copy_source`'s progress at a full buffer: `zip_source_tell` of
-    /// the source over its stated size, `None` where it states none.
+    /// the source, asked of the archive then, over its stated size; `None`
+    /// where it states none.
     #[expect(
         clippy::cast_precision_loss,
         reason = "copy_source's progress as libzip's doubles"
     )]
-    pub(crate) fn share(&self) -> Option<f64> {
-        (self.size > 0).then(|| self.lower.input.position() as f64 / self.size as f64)
+    pub(crate) fn share(&self, za: &mut Archive) -> Option<f64> {
+        (self.size > 0).then(|| za.tell(&self.lower.input) as f64 / self.size as f64)
     }
 
-    /// The compression layer, where the entry is compressed.
-    pub(crate) fn compressor(&self) -> Option<&Compressor> {
-        self.compressor.as_ref()
+    /// `zip_source_get_file_attributes` of `src_final`: the compression
+    /// layer's over the source's, and the encryption layer's over both.
+    pub(crate) fn attributes(&self) -> Attributes {
+        let mut a = self.below;
+        if let Some(c) = &self.compressor {
+            a = c.attributes().over(a);
+        }
+        if let Some(s) = &self.sealer {
+            a = s.attributes().over(a);
+        }
+        a
+    }
+
+    /// The method the data is in, once it has ended.
+    pub(crate) fn method(&self) -> u16 {
+        self.compressor.as_ref().map_or(0, Compressor::method)
     }
 
     /// The CRC and the size of what the source gave.

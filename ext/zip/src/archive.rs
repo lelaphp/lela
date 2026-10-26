@@ -10,8 +10,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::cdir::{self, Local};
+use crate::codec::copy_from;
 use crate::dostime::{DosTime, TORRENTZIP, Zone};
-use crate::error::{Done, Er, Failed, Status};
+use crate::error::{Detail, Done, Er, Failed, Status};
 use crate::read::{Layers, Reader, Stdio, Window};
 use crate::strings::{self, Enc, FL_ENC_RAW, FL_ENC_STRICT, FL_ENC_UTF_8, ZStr};
 
@@ -234,6 +235,8 @@ pub(crate) enum Source {
         len: u64,
         mtime: i64,
         mode: u32,
+        /// Whether it is a regular file, whose source libzip seeks in.
+        regular: bool,
     },
 }
 
@@ -264,6 +267,11 @@ impl BufferLink {
             entry,
             data: Arc::clone(data),
         }
+    }
+
+    /// The buffer's bytes.
+    pub(crate) fn data(&self) -> &[u8] {
+        &self.data
     }
 }
 
@@ -315,6 +323,7 @@ impl Source {
             len: length,
             mtime: meta.mtime(),
             mode: meta.mode(),
+            regular: meta.is_file(),
         }))
     }
 
@@ -344,15 +353,22 @@ impl Source {
         }
     }
 
-    /// `zip_source_supports_reopen`: a buffer's, where libzip's file
-    /// source cannot be opened again, so an entry a file is given cannot
-    /// be read before the close writes it:
+    /// `zip_source_supports_reopen`: a buffer's, where libzip's source
+    /// over a regular file seeks in it and cannot be opened again, so an
+    /// entry a file is given cannot be read before the close writes it.
+    /// One over a device or a pipe can (zip_source_file_common.c:125-152),
+    /// though with no length given it states no size, so the window
+    /// `zip_source_zip_file_create` makes over it runs past its compressed
+    /// size; one given a length is not modelled, and reads as a regular
+    /// file's:
     ///
     /// ```php
     /// file_put_contents('reopen-witness.txt', 'file data');
     /// $z = new ZipArchive; $z->open('reopen-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE); $z->addFile('reopen-witness.txt', 'f');
     /// var_dump($z->getFromName('f'), $z->getStatusString(), $z->getStream('f'), $z->close());
-    /// $z->open('reopen-witness.zip'); var_dump($z->getFromName('f')); $z->close(); unlink('reopen-witness.zip'); unlink('reopen-witness.txt');
+    /// $z->open('reopen-witness.zip'); var_dump($z->getFromName('f')); $z->close();
+    /// $z->open('reopen-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE); $z->addFile('/dev/null', 'n');
+    /// var_dump($z->getStream('n'), $z->getStatusString(), $z->close()); unlink('reopen-witness.zip'); unlink('reopen-witness.txt');
     /// ```
     /// ```expect
     /// bool(false)
@@ -360,9 +376,15 @@ impl Source {
     /// bool(false)
     /// bool(true)
     /// string(9) "file data"
+    /// bool(false)
+    /// string(96) "Zip archive inconsistent: entry 0: compressed and uncompressed sizes don't match for stored file"
+    /// bool(true)
     /// ```
     pub(crate) fn supports_reopen(&self) -> bool {
-        matches!(self, Source::Buffer(_))
+        match self {
+            Source::Buffer(_) => true,
+            Source::File { regular, len, .. } => !regular && *len == 0,
+        }
     }
 
     /// The source of entry `entry` opened for the close to read
@@ -459,17 +481,6 @@ pub(crate) enum Input {
         reader: Reader,
         read: u64,
     },
-}
-
-impl Input {
-    /// `zip_source_tell`: where a buffer's reading stands, and how much
-    /// of any other has been read.
-    pub(crate) fn position(&self) -> u64 {
-        match self {
-            Input::Buffer { offset, .. } => *offset as u64,
-            Input::File { read, .. } | Input::Unchanged { read, .. } => *read,
-        }
-    }
 }
 
 /// `time(NULL)`.
@@ -1580,9 +1591,9 @@ impl Archive {
     /// `password` where one is given, decompressed, its CRC checked at
     /// the end where `stat` has one (`zip_source_zip_file_create`).
     /// `zip_stat_index` under `ZIP_FL_UNCHANGED` knows no compressed size
-    /// for an entry whose method is changed, as `changed`, the bits its
-    /// dirent's changes carry, say, so its decryption layer is refused,
-    /// though the stat still prints the size:
+    /// for an entry whose method is changed, as `method_changed` says
+    /// from the dirent's changes wherever they stand, so its decryption
+    /// layer is refused, though the stat still prints the size:
     ///
     /// ```php
     /// foreach ([ZipArchive::EM_TRAD_PKWARE, ZipArchive::EM_AES_256] as $em) {
@@ -1607,18 +1618,17 @@ impl Archive {
         password: Option<&[u8]>,
         st: &Stat,
         check_crc: bool,
-        changed: u32,
+        method_changed: bool,
     ) -> Result<Reader, Status> {
         let de = self.dirent(idx, flags).map_err(Status::new)?;
         let (dostime, bitflags) = (de.last_mod.time, de.bitflags);
         let crc_valid = self.entries[idx].orig.as_ref().is_some_and(|o| o.crc_valid);
-        let comp_size_known = changed & D_COMP_METHOD == 0;
         let layers = Layers {
             method: st.comp_method,
             encryption: st.encryption_method,
             password,
             size: st.size,
-            comp_size: comp_size_known.then_some(st.comp_size),
+            comp_size: (!method_changed).then_some(st.comp_size),
             crc: (check_crc && crc_valid).then_some(st.crc),
             dostime,
             bitflags,
@@ -1628,9 +1638,9 @@ impl Archive {
     }
 
     /// An unchanged entry's data opened for the close, decrypted with
-    /// `password` and decompressed, the entry's dirent changed in
-    /// `changed`. Each of
-    /// two entries under one name reads its own data.
+    /// `password` and decompressed, its method changed where
+    /// `method_changed` says. Each of two entries under one name reads its
+    /// own data.
     ///
     /// ```php
     /// $f = 'dup-witness.zip'; $z = new ZipArchive; $z->open($f, ZipArchive::CREATE);
@@ -1653,7 +1663,7 @@ impl Archive {
         &mut self,
         idx: usize,
         password: Option<&[u8]>,
-        changed: u32,
+        method_changed: bool,
     ) -> Result<Input, Status> {
         let st = self
             .stat_index(idx, FL_UNCHANGED)
@@ -1661,7 +1671,7 @@ impl Archive {
         if st.encryption_method != EM_NONE && password.is_none() {
             return Err(Status::new(Er::Nopasswd));
         }
-        let reader = self.decoder(idx, FL_UNCHANGED, password, &st, false, changed)?;
+        let reader = self.decoder(idx, FL_UNCHANGED, password, &st, false, method_changed)?;
         Ok(Input::Unchanged { reader, read: 0 })
     }
 
@@ -1698,21 +1708,15 @@ impl Archive {
         input: &mut Input,
         buf: &mut [u8],
     ) -> Result<usize, Status> {
-        let copy = |data: &[u8], at: usize, buf: &mut [u8]| {
-            let rest = data.get(at..).unwrap_or_default();
-            let n = rest.len().min(buf.len());
-            buf[..n].copy_from_slice(&rest[..n]);
-            n
-        };
         match input {
             Input::Buffer { link, offset } => {
                 if let Some(b) = self.buffer_of(link) {
-                    let n = copy(&b.data, b.offset, buf);
+                    let n = copy_from(&b.data, b.offset, buf);
                     b.offset += n;
                     *offset = b.offset;
                     Ok(n)
                 } else {
-                    let n = copy(&link.data, *offset, buf);
+                    let n = copy_from(&link.data, *offset, buf);
                     *offset += n;
                     Ok(n)
                 }
@@ -1751,6 +1755,34 @@ impl Archive {
         }
     }
 
+    /// `zip_source_tell` of `input`: where a buffer's reading stands now,
+    /// whoever moved it, and how much of any other has been read. So a
+    /// callback's read of the stream over the entry being written moves
+    /// the close's next point at once, while zlib still hands out what it
+    /// made of the input before, and the close then reads on from there:
+    ///
+    /// ```php
+    /// mt_srand(3); $rand = ''; for ($i = 0; $i < 100000; $i++) $rand .= chr(mt_rand(0, 255));
+    /// $z = new ZipArchive; $z->open('tell-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE); $z->addFromString('t', $rand);
+    /// $s = $z->getStream('t');
+    /// $p = []; $z->registerProgressCallback(0.0001, function ($r) use ($s, &$p) { static $d; $p[] = round($r, 4); if ($r > 0 && !$d) { $d = 1; fseek($s, 50000); $p[] = '[' . strlen(fread($s, 1)) . ']'; } });
+    /// $r = @$z->close(); echo implode(' ', $p), "\n"; var_dump($r, $z->getStatusString()); fclose($s); @unlink('tell-witness.zip');
+    /// ```
+    /// ```expect
+    /// 0 0.4096 [1] 0.5819 0.9096 1
+    /// bool(false)
+    /// string(25) "Unexpected length of data"
+    /// ```
+    pub(crate) fn tell(&mut self, input: &Input) -> u64 {
+        match input {
+            Input::Buffer { link, offset } => {
+                let at = self.buffer_of(link).map_or(*offset, |b| b.offset);
+                at as u64
+            }
+            Input::File { read, .. } | Input::Unchanged { read, .. } => *read,
+        }
+    }
+
     /// The buffer source `link` names, where its entry still has it.
     fn buffer_of(&mut self, link: &BufferLink) -> Option<&mut Buffer> {
         match &mut self.entries.get_mut(link.entry)?.source {
@@ -1759,18 +1791,21 @@ impl Archive {
         }
     }
 
-    /// `zip_source_open` (`open` true) and `zip_source_close` of the
-    /// buffer `link` names, as a stream over it opens and closes: a
-    /// stream holds its source open from `zip_fopen` to `zip_fclose`,
-    /// where a read made and done within one call leaves only where it
-    /// read to.
-    pub(crate) fn hold_buffer(&mut self, link: &BufferLink, open: bool) {
+    /// `zip_source_open` of the buffer `link` names, by a stream over it
+    /// as the stream opens: a stream holds its source open from
+    /// `zip_fopen` to `zip_fclose`, where a read made and done within one
+    /// call leaves only where it read to.
+    pub(crate) fn open_buffer(&mut self, link: &BufferLink) {
         if let Some(b) = self.buffer_of(link) {
-            b.opens = if open {
-                b.opens + 1
-            } else {
-                b.opens.saturating_sub(1)
-            };
+            b.opens += 1;
+        }
+    }
+
+    /// `zip_source_close` of the buffer `link` names, by a stream over it
+    /// as the stream closes.
+    pub(crate) fn close_buffer(&mut self, link: &BufferLink) {
+        if let Some(b) = self.buffer_of(link) {
+            b.opens = b.opens.saturating_sub(1);
         }
     }
 
@@ -1823,8 +1858,13 @@ impl Archive {
         let crc_valid = self.entries[idx].orig.as_ref().is_some_and(|o| o.crc_valid);
         let opened = if changed_data {
             match &self.entries[idx].source {
-                Some(Source::Buffer(b)) => Ok(Reader::over_buffer(idx, b.data.clone())),
-                _ => Err(Status::new(Er::Internal)),
+                Some(Source::Buffer(b)) => Ok(Reader::over_buffer(BufferLink::new(idx, &b.data))),
+                // `zip_source_zip_new.c:188`: a size it does not know is
+                // past any window's.
+                Some(Source::File { .. }) => {
+                    Err(Status::incons(Detail::StoredSizeMismatch, Some(idx)))
+                }
+                None => Err(Status::new(Er::Internal)),
             }
         } else if flags & FL_COMPRESSED != 0 {
             let crc = (st.comp_method == 0 && crc_valid).then_some((st.crc, st.size));
@@ -1835,8 +1875,8 @@ impl Archive {
             } else {
                 None
             };
-            let changed = self.entries[idx].changes.as_ref().map_or(0, |c| c.changed);
-            self.decoder(idx, flags, password, &st, true, changed)
+            let method_changed = self.entries[idx].changed(D_COMP_METHOD);
+            self.decoder(idx, flags, password, &st, true, method_changed)
         };
         opened.map_err(|status| {
             self.error = status;
