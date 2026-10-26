@@ -433,16 +433,23 @@ fn the_directives_take_phps_defaults_and_bounds_and_jit_mode_names_the_lane() {
         (policy.mode(), policy.compile()),
         (Mode::Tracing, Compile::Inline)
     );
-    // A root's end lines are written on its request, so asking for one
-    // compiles there; the start line or a `PERF` map alone does not.
-    for (debug, compile) in [
-        ("8192", Compile::Inline),
-        ("65536", Compile::Inline),
-        ("4096", Compile::Thread),
-        ("16", Compile::Thread),
+    // A root's end lines are written on its request, so bits that ask
+    // for one compile that request's recordings there
+    // (`compiler::Submitter::submit`); the start line or a `PERF` map
+    // alone does not, and the engine's worker stands whichever.
+    for (debug, ends) in [
+        ("8192", true),
+        ("65536", true),
+        ("4096", false),
+        ("16", false),
     ] {
         let (policy, _) = read_ini(&[("opcache.jit", "tracing"), ("opcache.jit_debug", debug)]);
-        assert_eq!(policy.compile(), compile, "jit_debug={debug}");
+        assert_eq!(policy.compile(), Compile::Thread, "jit_debug={debug}");
+        assert_eq!(
+            JitDebug::of(debug.as_bytes()).ends(),
+            ends,
+            "jit_debug={debug}"
+        );
     }
 }
 
@@ -686,8 +693,8 @@ fn the_dump_writes_phps_trace_lines_under_their_bits() {
     let mut written = Vec::new();
     let mut quiet = Vec::new();
     for event in &events {
-        all.dump(&mut written, event).ok();
-        none.dump(&mut quiet, event).ok();
+        all.debug().dump(&mut written, event).ok();
+        none.debug().dump(&mut quiet, event).ok();
     }
     assert_eq!(
         String::from_utf8_lossy(&written),

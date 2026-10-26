@@ -26,12 +26,12 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use php_engine::tier::{self, Epoch, Parked};
 
-use crate::Shared;
 use crate::lower::{Compiled, Linked};
 use crate::policy::{self, Claim, Compile, Mode, Outcome, State, TraceEvent};
 use crate::record::{self, Recorded, Start, Stop};
 use crate::table::{self, Table, TraceName, Unpublished};
 use crate::types::{self, Abort, End, TraceIr};
+use crate::{Lines, Shared};
 
 #[cfg(test)]
 #[allow(
@@ -86,10 +86,10 @@ struct Held {
 }
 
 impl Compiler {
-    /// A worker under `jit.compile=thread`, which `force`, `exit-fuzz`
-    /// and a `jit_debug` that asks for a trace's end lines make `inline`
-    /// (`Policy`); none under `Mode::Off`. Its thread starts with the
-    /// first job.
+    /// A worker under `jit.compile=thread`, which `force` and `exit-fuzz`
+    /// make `inline` (`Policy`); none under `Mode::Off`. Its thread
+    /// starts with the first job, which no recording whose request asks
+    /// for a trace's end lines submits ([`Submitter::submit`]).
     pub(crate) fn new(shared: &Arc<Shared>) -> Compiler {
         let threaded =
             shared.policy.mode() != Mode::Off && shared.policy.compile() == Compile::Thread;
@@ -135,13 +135,15 @@ impl Submitter {
     pub(crate) const INLINE: Submitter = Submitter(None);
 
     /// `job` through the [`pipeline`]: here, its lines added to `lines`,
-    /// and what it settled the claim with; or queued for the worker,
-    /// which writes no line (`Policy` compiles inline wherever a line is
-    /// asked), and none. Where the system refuses the worker a thread,
-    /// the queue is served here.
-    pub(crate) fn submit(&self, shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Option<Outcome> {
-        let Some(threaded) = &self.0 else {
-            return Some(pipeline(shared, job, lines));
+    /// and what it settled the claim with, where the request has no
+    /// worker or its bits ask for a root's end lines
+    /// ([`policy::JitDebug::ends`]); or queued for the worker, which
+    /// writes no line, and none. Where the system refuses the worker a
+    /// thread, the queue is served here.
+    pub(crate) fn submit(&self, shared: &Shared, job: Job, lines: &mut Lines) -> Option<Outcome> {
+        let threaded = match &self.0 {
+            Some(threaded) if !lines.debug().ends() => threaded,
+            _ => return Some(pipeline(shared, job, lines)),
         };
         threaded.queue.held().jobs.push_back(job);
         threaded.queue.changed.notify_all();
@@ -172,11 +174,11 @@ impl Queue {
     }
 
     /// `job` through the pipeline off any request, counted as served
-    /// until it is done however it ends. No line is written: `Policy`
-    /// compiles inline wherever `opcache.jit_debug` asks for one.
+    /// until it is done however it ends. No line is written: a request
+    /// whose `opcache.jit_debug` asks for one compiles inline.
     fn serve(&self, job: Job) {
         let _done = Served(self);
-        pipeline(&self.shared, job, &mut Vec::new());
+        pipeline(&self.shared, job, &mut Lines::default());
     }
 
     /// Every job served on this thread, and those under way elsewhere
@@ -260,7 +262,7 @@ impl Parked for Queue {
 /// blacklisted the word, `TRACE n blacklisted`, each added to `lines`. A
 /// stage that panics is caught here and is php's `COMPILER_ERROR`, as
 /// php reports a compile that failed. The claim is settled once, here.
-pub(crate) fn pipeline(shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Outcome {
+pub(crate) fn pipeline(shared: &Shared, job: Job, lines: &mut Lines) -> Outcome {
     match &shared.backend {
         Some(backend) => pipeline_with(
             shared,
@@ -278,7 +280,7 @@ fn pipeline_with(
     shared: &Shared,
     compile: impl Fn(&TraceIr, TraceName, Option<Linked>) -> Result<Compiled, Abort>,
     job: Job,
-    lines: &mut Vec<u8>,
+    lines: &mut Lines,
 ) -> Outcome {
     let Job {
         recorded,
@@ -291,7 +293,7 @@ fn pipeline_with(
     let outcome = match table {
         Some(table) if stop.compiles() => {
             if let Some(trace) = number {
-                shared.dump(lines, &TraceEvent::Stop { trace, stop });
+                lines.dump(&TraceEvent::Stop { trace, stop });
             }
             let start = claim.start();
             catch_unwind(AssertUnwindSafe(|| {
@@ -309,9 +311,9 @@ fn pipeline_with(
     let start = claim.start();
     let settled = policy::settle(claim, &outcome);
     match (outcome, number) {
-        (Outcome::Published(trace), _) => shared.dump(lines, &TraceEvent::Compiled { trace }),
+        (Outcome::Published(trace), _) => lines.dump(&TraceEvent::Compiled { trace }),
         (Outcome::Abort(stop) | Outcome::Blacklist(stop), Some(trace)) => {
-            shared.dump(lines, &TraceEvent::Abort { trace, stop });
+            lines.dump(&TraceEvent::Abort { trace, stop });
             // A side's exit is what php blacklists, by its parent's number.
             let blacklisted = match start.grew() {
                 Some((parent, exit)) => TraceEvent::ExitBlacklisted {
@@ -321,7 +323,7 @@ fn pipeline_with(
                 None => TraceEvent::Blacklisted { trace },
             };
             if settled == State::Blacklisted {
-                shared.dump(lines, &blacklisted);
+                lines.dump(&blacklisted);
             }
         }
         _ => {}

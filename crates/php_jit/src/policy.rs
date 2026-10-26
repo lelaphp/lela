@@ -2,7 +2,7 @@
 //! [`Policy`], php's `opcache.jit*` directives with the tier's two
 //! engine-only ones read once at engine start; [`read`], [`bump`],
 //! [`claim`] and [`settle`], the one state machine over a [`Word`]
-//! whichever home holds it; and [`Policy::dump`], php's `TRACE` lines.
+//! whichever home holds it; and [`JitDebug::dump`], php's `TRACE` lines.
 //! Nothing here touches a request, a frame, a `Mutex` or a table.
 //!
 //! The word's second half is the state and the first the heat
@@ -68,9 +68,10 @@ pub(crate) enum Mode {
 
 /// Where a trace compiles: on the engine's compile thread, or on the
 /// request's at the claim (`jit.compile`). `Force` and `ExitFuzz` imply
-/// `Inline`, and so does an `opcache.jit_debug` that asks for a root's
-/// `stop`, `compiled`, `abort` or `blacklisted` line, which php writes
-/// on the request in one order a worker could not keep.
+/// `Inline`; so does, for one recording, the request's `opcache.jit_debug`
+/// where it asks for a root's end lines ([`JitDebug::ends`]), which php
+/// writes on the request in one order a worker could not keep
+/// (`compiler::Submitter::submit`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Compile {
     Thread,
@@ -96,9 +97,86 @@ impl JitDebug {
     pub(crate) const TRACE_ABORT: u32 = 1 << 16;
     pub(crate) const TRACE_BLACKLIST: u32 = 1 << 17;
 
+    /// The bits a value of the directive sets, read as php's
+    /// `zend_ini_parse_quantity` reads it; none for a negative one.
+    pub(crate) fn of(value: &[u8]) -> JitDebug {
+        JitDebug(u32::try_from(Ini::parse_quantity(value).0).unwrap_or(0))
+    }
+
     /// Whether any of `bits` is set.
     pub(crate) fn any(self, bits: u32) -> bool {
         self.0 & bits != 0
+    }
+
+    /// Whether the bits ask for any of a root's lines after its start,
+    /// `stop`, `compiled`, `abort` or `blacklisted`, which php writes on
+    /// the request in the order it compiles: where they do, the
+    /// recording compiles on the request.
+    pub(crate) fn ends(self) -> bool {
+        self.any(
+            JitDebug::TRACE_STOP
+                | JitDebug::TRACE_COMPILED
+                | JitDebug::TRACE_ABORT
+                | JitDebug::TRACE_BLACKLIST,
+        )
+    }
+
+    /// One of php's `TRACE` lines for `event`, where the bits ask for it
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:8152-8250`).
+    pub(crate) fn dump(self, sink: &mut dyn Write, event: &TraceEvent<'_>) -> io::Result<()> {
+        let debug = self;
+        match *event {
+            TraceEvent::Start { trace, start, at } if debug.any(JitDebug::TRACE_START) => {
+                let n = trace.get();
+                match start {
+                    Start::Side { parent, exit } => write!(
+                        sink,
+                        "---- TRACE {n} start (side trace {}/{}) ",
+                        parent.get(),
+                        exit.0
+                    ),
+                    _ => write!(sink, "---- TRACE {n} start ({}) ", start.describe()),
+                }?;
+                write_place(sink, at)
+            }
+            TraceEvent::Exit { trace, exit, at } if debug.any(JitDebug::TRACE_EXIT) => {
+                write!(sink, "     TRACE {} exit {} ", trace.get(), exit.0)?;
+                write_place(sink, at)
+            }
+            TraceEvent::Stop { trace, stop } if debug.any(JitDebug::TRACE_STOP) => match stop {
+                Stop::Link(to) => writeln!(
+                    sink,
+                    "---- TRACE {} stop (link to {})",
+                    trace.get(),
+                    to.get()
+                ),
+                _ => writeln!(
+                    sink,
+                    "---- TRACE {} stop ({})",
+                    trace.get(),
+                    stop.describe()
+                ),
+            },
+            TraceEvent::Compiled { trace } if debug.any(JitDebug::TRACE_COMPILED) => {
+                writeln!(sink, "---- TRACE {} compiled", trace.get())
+            }
+            TraceEvent::Abort { trace, stop } if debug.any(JitDebug::TRACE_ABORT) => {
+                writeln!(
+                    sink,
+                    "---- TRACE {} abort ({})",
+                    trace.get(),
+                    stop.describe()
+                )
+            }
+            TraceEvent::Blacklisted { trace } if debug.any(JitDebug::TRACE_BLACKLIST) => {
+                writeln!(sink, "---- TRACE {} blacklisted", trace.get())
+            }
+            TraceEvent::ExitBlacklisted { trace, exit } if debug.any(JitDebug::TRACE_BLACKLIST) => {
+                writeln!(sink, "---- EXIT {}/{} blacklisted", trace.get(), exit.0)
+            }
+            TraceEvent::Done if debug.ends() => writeln!(sink),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -569,15 +647,7 @@ impl Policy {
         if matches!(mode, Mode::Force | Mode::ExitFuzz) {
             notes.push(Note::Lane(mode));
         }
-        let debug = JitDebug(u32::try_from(long(ini, "opcache.jit_debug", 0)).unwrap_or(0));
-        // A root's lines after its start are php's in the order its
-        // request writes them, which a worker could not keep.
-        let ends = debug.any(
-            JitDebug::TRACE_STOP
-                | JitDebug::TRACE_COMPILED
-                | JitDebug::TRACE_ABORT
-                | JitDebug::TRACE_BLACKLIST,
-        );
+        let debug = value(ini, "opcache.jit_debug").map_or(JitDebug::default(), JitDebug::of);
         let compile = match (mode, value(ini, "jit.compile").unwrap_or_default()) {
             (Mode::Force | Mode::ExitFuzz, _) | (_, b"inline") => Compile::Inline,
             (_, b"" | b"thread") => Compile::Thread,
@@ -589,7 +659,6 @@ impl Policy {
                 Compile::Thread
             }
         };
-        let compile = if ends { Compile::Inline } else { compile };
         let mut policy = Policy {
             mode,
             compile,
@@ -939,7 +1008,10 @@ impl Policy {
         self.buffer_size
     }
 
-    /// `opcache.jit_debug`'s bits.
+    /// `opcache.jit_debug`'s bits as the engine started with them, none
+    /// for a tier that runs `Off`: what the start's lines and the `PERF`
+    /// outputs read, whose bits a request cannot change. A request's
+    /// `TRACE` lines read its own ([`crate::Lines`]).
     pub(crate) fn debug(&self) -> JitDebug {
         self.debug
     }
@@ -968,73 +1040,6 @@ impl Policy {
     /// when the start's lines are written (`jit-design.md` §4).
     pub(crate) fn debugs(&self) -> bool {
         self.debug.0 != 0
-    }
-
-    /// One of php's `TRACE` lines for `event`, where `opcache.jit_debug`
-    /// asks for it (`Z/ext/opcache/jit/zend_jit_trace.c:8152-8250`).
-    pub(crate) fn dump(&self, sink: &mut dyn Write, event: &TraceEvent<'_>) -> io::Result<()> {
-        let debug = self.debug;
-        match *event {
-            TraceEvent::Start { trace, start, at } if debug.any(JitDebug::TRACE_START) => {
-                let n = trace.get();
-                match start {
-                    Start::Side { parent, exit } => write!(
-                        sink,
-                        "---- TRACE {n} start (side trace {}/{}) ",
-                        parent.get(),
-                        exit.0
-                    ),
-                    _ => write!(sink, "---- TRACE {n} start ({}) ", start.describe()),
-                }?;
-                write_place(sink, at)
-            }
-            TraceEvent::Exit { trace, exit, at } if debug.any(JitDebug::TRACE_EXIT) => {
-                write!(sink, "     TRACE {} exit {} ", trace.get(), exit.0)?;
-                write_place(sink, at)
-            }
-            TraceEvent::Stop { trace, stop } if debug.any(JitDebug::TRACE_STOP) => match stop {
-                Stop::Link(to) => writeln!(
-                    sink,
-                    "---- TRACE {} stop (link to {})",
-                    trace.get(),
-                    to.get()
-                ),
-                _ => writeln!(
-                    sink,
-                    "---- TRACE {} stop ({})",
-                    trace.get(),
-                    stop.describe()
-                ),
-            },
-            TraceEvent::Compiled { trace } if debug.any(JitDebug::TRACE_COMPILED) => {
-                writeln!(sink, "---- TRACE {} compiled", trace.get())
-            }
-            TraceEvent::Abort { trace, stop } if debug.any(JitDebug::TRACE_ABORT) => {
-                writeln!(
-                    sink,
-                    "---- TRACE {} abort ({})",
-                    trace.get(),
-                    stop.describe()
-                )
-            }
-            TraceEvent::Blacklisted { trace } if debug.any(JitDebug::TRACE_BLACKLIST) => {
-                writeln!(sink, "---- TRACE {} blacklisted", trace.get())
-            }
-            TraceEvent::ExitBlacklisted { trace, exit } if debug.any(JitDebug::TRACE_BLACKLIST) => {
-                writeln!(sink, "---- EXIT {}/{} blacklisted", trace.get(), exit.0)
-            }
-            TraceEvent::Done
-                if debug.any(
-                    JitDebug::TRACE_STOP
-                        | JitDebug::TRACE_ABORT
-                        | JitDebug::TRACE_COMPILED
-                        | JitDebug::TRACE_BLACKLIST,
-                ) =>
-            {
-                writeln!(sink)
-            }
-            _ => Ok(()),
-        }
     }
 }
 

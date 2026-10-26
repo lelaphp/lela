@@ -222,12 +222,89 @@ pub(crate) struct Shared {
     perf: table::Outputs,
 }
 
-impl Shared {
-    /// `event` as php's `jit_debug` line, where `opcache.jit_debug` asks for it,
-    /// added to `lines`.
-    fn dump(&self, lines: &mut Vec<u8>, event: &policy::TraceEvent<'_>) {
+/// The `TRACE` lines a request writes, under the `opcache.jit_debug`
+/// bits it has where it writes them, as php reads `JIT_G(debug)` at each
+/// line (`Z/ext/opcache/jit/zend_jit_trace.c:8152-8250`), so a request's
+/// `ini_set('opcache.jit_debug', ...)` changes the lines it writes from
+/// then on (#3297); the bits the start alone sets, `PERF` and its kin,
+/// a request cannot change ([`policy::Policy::debug`]). A recording whose
+/// bits ask for a root's end lines compiles on the request
+/// ([`policy::JitDebug::ends`]), and the worker writes none.
+///
+/// Under `opcache.jit=tracing` with the engine's `opcache.jit_debug` at
+/// zero, a request that asks for the `start` and `stop` lines writes them
+/// for a loop in a file it includes after:
+///
+/// ```php
+/// $dir = realpath(sys_get_temp_dir()) . '/jit-debug-' . getmypid(); mkdir($dir);
+/// file_put_contents("$dir/main.php", '<?php var_dump(ini_set("opcache.jit_debug", "12288")); include __DIR__ . "/loop.php";');
+/// file_put_contents("$dir/loop.php", '<?php $s = 0; for ($i = 0; $i < 4; $i++) { $s += $i; } echo $s, "\n";');
+/// touch("$dir/main.php", time() - 60); touch("$dir/loop.php", time() - 60);
+/// $cmd = [PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=tracing', '-d', 'opcache.jit_debug=0', '-d', 'opcache.jit_hot_loop=1', "$dir/main.php"];
+/// $p = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]), str_replace($dir, 'DIR', stream_get_contents($pipes[2]));
+/// proc_close($p); unlink("$dir/main.php"); unlink("$dir/loop.php"); rmdir($dir);
+/// ```
+/// ```expect process
+/// string(1) "0"
+/// 6
+/// ---- TRACE 1 start (loop) $main() DIR/loop.php:1
+/// ---- TRACE 1 stop (loop)
+///
+/// ```
+#[derive(Debug, Default)]
+pub(crate) struct Lines {
+    debug: policy::JitDebug,
+    written: Vec<u8>,
+}
+
+impl Lines {
+    /// The lines `req` writes now, under its `opcache.jit_debug`; none
+    /// for a tier that runs `Off`, which reads no bit, and the engine's
+    /// where no extension declares the directive.
+    pub(crate) fn of(req: &Request, shared: &Shared) -> Lines {
+        let debug = if shared.policy.mode() == policy::Mode::Off {
+            policy::JitDebug::default()
+        } else {
+            (req.ini().get(b"opcache.jit_debug"))
+                .map_or(shared.policy.debug(), policy::JitDebug::of)
+        };
+        Lines::under(debug)
+    }
+
+    /// The lines written under `debug`.
+    pub(crate) fn under(debug: policy::JitDebug) -> Lines {
+        Lines {
+            debug,
+            written: Vec::new(),
+        }
+    }
+
+    /// The bits the lines are written under.
+    pub(crate) fn debug(&self) -> policy::JitDebug {
+        self.debug
+    }
+
+    /// `event`'s line added, where the bits ask for it.
+    pub(crate) fn dump(&mut self, event: &policy::TraceEvent<'_>) {
         // Writing to a `Vec` does not fail.
-        self.policy.dump(lines, event).unwrap_or_default();
+        self.debug
+            .dump(&mut self.written, event)
+            .unwrap_or_default();
+    }
+
+    /// The lines written to the request's error stream, where php's
+    /// `jit_debug` lines go.
+    pub(crate) fn write(self, req: &mut Request) {
+        if !self.written.is_empty() {
+            req.response_mut().write_stderr(&self.written);
+        }
+    }
+
+    /// What was written.
+    #[cfg(test)]
+    pub(crate) fn written(&self) -> &[u8] {
+        &self.written
     }
 }
 

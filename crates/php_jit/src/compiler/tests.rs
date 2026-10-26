@@ -14,13 +14,13 @@ use php_engine::tier::FuncRef;
 use php_unit::MapPtrOffset;
 
 use super::{Job, pipeline, pipeline_with};
-use crate::JitEngine;
 use crate::lower::Compiled;
 use crate::policy::{self, Holder, Outcome, Place, State};
 use crate::record::{Recorded, Start, Stop};
 use crate::table::{self, TraceId, TraceName};
 use crate::testing::{self, records};
 use crate::types::{Abort, TraceIr};
+use crate::{JitEngine, Lines};
 
 /// The ini every fixture records and compiles under: the tracing tier
 /// with php's `jit_debug` lines, one chunk of code.
@@ -147,7 +147,7 @@ fn piped(
     holder: &Holder,
 ) -> (Outcome, State, String) {
     let shared = &engine.shared;
-    let mut lines = Vec::new();
+    let mut lines = Lines::under(shared.policy.debug());
     let compile = |ir: &TraceIr, name: TraceName, _| -> Result<Compiled, Abort> {
         match backend {
             Backend::Dump => {
@@ -180,7 +180,11 @@ fn piped(
         _ => pipeline_with(shared, compile, job, &mut lines),
     };
     let state = policy::read(holder.word());
-    (outcome, state, String::from_utf8_lossy(&lines).into_owned())
+    (
+        outcome,
+        state,
+        String::from_utf8_lossy(lines.written()).into_owned(),
+    )
 }
 
 /// The lines of trace `n` stopped at its return and ended as `end`.
@@ -336,7 +340,7 @@ fn a_held_units_strings_read_off_the_request_after_its_engine_dropped() -> Resul
             (code.literals.iter())
                 .any(|literal| literal.as_str().is_some_and(|s| s.bytes() == b"repeated"))
         });
-        let outcome = pipeline(&engine.shared, job, &mut Vec::new());
+        let outcome = pipeline(&engine.shared, job, &mut Lines::default());
         (named, outcome)
     })
     .join();
@@ -379,7 +383,7 @@ fn four_threads_submit_and_every_word_settles_once() -> Result<(), String> {
             scope.spawn(move || {
                 let submitter = engine.compiler.submitter();
                 for job in share {
-                    let queued = submitter.submit(&engine.shared, job, &mut Vec::new());
+                    let queued = submitter.submit(&engine.shared, job, &mut Lines::default());
                     assert!(queued.is_none(), "queued for the worker");
                 }
             });
@@ -425,9 +429,10 @@ fn the_queue_drops_with_the_engine_and_each_claim_settles() -> Result<(), String
     Ok(())
 }
 
-/// No worker where the tier is off, or where a lane or `jit_debug`'s
-/// lines ask for the compile on the request; there `submit` settles the
-/// job at once and adds its lines.
+/// No worker where the tier is off or a lane asks for the compile on
+/// the request; and a request whose `jit_debug` asks for a root's end
+/// lines compiles on the request beside a worker: there `submit`
+/// settles the job at once and adds its lines.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn inline_settles_on_the_request_and_off_runs_no_worker() -> Result<(), String> {
@@ -435,18 +440,19 @@ fn inline_settles_on_the_request_and_off_runs_no_worker() -> Result<(), String> 
     let forced = JitEngine::of(&testing::ini(&[("jit.mode", "force")]));
     assert!(forced.compiler.worker.is_none());
     let engine = engine(&[]);
-    assert!(
-        engine.compiler.worker.is_none(),
-        "jit_debug asks for the lines"
-    );
+    assert!(engine.compiler.worker.is_some(), "a thread compiles");
     let (job, holder) = job(&[])?;
-    let mut lines = Vec::new();
+    let mut lines = Lines::under(engine.shared.policy.debug());
+    assert!(lines.debug().ends(), "jit_debug asks for the lines");
     let outcome = engine
         .compiler
         .submitter()
         .submit(&engine.shared, job, &mut lines);
     assert_eq!(outcome, Some(Outcome::Published(trace(1))));
-    assert_eq!(String::from_utf8_lossy(&lines), stopped(1, "compiled"));
+    assert_eq!(
+        String::from_utf8_lossy(lines.written()),
+        stopped(1, "compiled")
+    );
     assert_eq!(policy::read(holder.word()), State::Compiled(trace(1)));
     let shared = Arc::clone(&engine.shared);
     drop(engine);
