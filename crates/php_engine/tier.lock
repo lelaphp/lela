@@ -4,6 +4,7 @@ api::abi::Beneath
 api::abi::Observed
 api::abi::ObserverHandlers
 api::abi::Opcodes
+api::abi::PostStartup
 api::abi::chain
 api::abi::chain::Opcode
 api::raising
@@ -95,6 +96,7 @@ tier::Inherited
 tier::LANDING_CHUNK_BITS
 tier::Laid
 tier::LandingIndex
+tier::LandingRows
 tier::MapPtrRaw
 tier::PLACE
 tier::Parked

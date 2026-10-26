@@ -19,9 +19,9 @@
 //!
 //! Compiled code reads the landing words too, where a trace escapes
 //! (`jit-design.md` §4.9): through the epoch's [`LandingIndex`], which
-//! names each op array's landing words by its offset, as php's escape
-//! reads the handler of the opline the frame stands at in the op array
-//! itself.
+//! names each op array's landing words by its offset, the epoch's own
+//! and the preload's alike ([`Landings`]), as php's escape reads the
+//! handler of the opline the frame stands at in the op array itself.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -145,9 +145,6 @@ impl Func {
 pub(crate) struct Funcs {
     first: u32,
     rows: Column<Func>,
-    /// Where compiled code finds the rows' landing words, laid down the
-    /// first time a tier arms a landing or asks for it ([`LandingIndex`]).
-    index: OnceLock<Index>,
 }
 
 /// How many op arrays one chunk of a [`LandingIndex`] names: a number
@@ -156,21 +153,18 @@ pub(crate) struct Funcs {
 pub const LANDING_CHUNK_BITS: u32 = 12;
 const LANDING_CHUNK: usize = 1 << LANDING_CHUNK_BITS;
 
-/// How many chunks a [`LandingIndex`] has: as many op arrays as a
-/// [`Column`] holds rows.
-const LANDING_CHUNKS: usize = crate::arena::COLUMN_ROWS >> LANDING_CHUNK_BITS;
-
 /// Where compiled code finds the landing words of an epoch's op arrays
 /// (`jit-design.md` §4.9), as php's escape finds the handler of the
 /// opline the frame stands at in the op array itself: at `chunks`, one
-/// address per chunk of [`LANDING_CHUNK_BITS`] op arrays, zero until a
-/// landing of one of them is laid down, and at that address two words
-/// per op array, the address of its landing words, one [`Word`] per
-/// opline, zero until a tier laid them down, and how many there are. An
-/// op array is named by its offset less `first`, below `held`, the most
-/// a [`Column`] numbers; one of the preload's, whose rows each epoch
-/// lays apart from its own (`crate::arena::Base`), and one a request
-/// compiled are named by none, and read as no compiled landing.
+/// address per chunk of [`LANDING_CHUNK_BITS`] places, zero until a
+/// landing of an op array named in it is laid down, and at that address
+/// two words per place, the address of the op array's landing words,
+/// one [`Word`] per opline, zero until a tier laid them down, and how
+/// many there are. An op array is named at a place by its offset, which
+/// [`LandingIndex::place`] says: the epoch's own rows first, then the
+/// rows the epoch lays for the preload's op arrays
+/// (`crate::arena::Base`), as `Arena::func` reads a row; one a request
+/// compiled is named by neither, and reads as no compiled landing.
 /// Each address is written once, with release, after what it names, and
 /// stands as long as the epoch, which every trace whose code reads it
 /// holds.
@@ -178,13 +172,123 @@ const LANDING_CHUNKS: usize = crate::arena::COLUMN_ROWS >> LANDING_CHUNK_BITS;
 pub struct LandingIndex {
     /// The address of the chunks' addresses.
     pub chunks: usize,
-    /// The offset the epoch's first op array stands at.
-    pub first: u32,
-    /// How many op arrays past `first` the index can name.
-    pub held: u32,
+    /// The epoch's own op arrays, named from the index's first place.
+    pub own: LandingRows,
+    /// The preload's op arrays, named past the epoch's own; none where
+    /// nothing was preloaded.
+    pub preloaded: Option<LandingRows>,
 }
 
-/// The index's own: each chunk, owned, two words per op array, and the
+/// One stretch of op arrays a [`LandingIndex`] names: the op array at offset
+/// `first + n`, for `n` below `held`, at place `place + n`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LandingRows {
+    /// The offset the stretch's first op array stands at.
+    pub first: u32,
+    /// How many op arrays past `first` the stretch names.
+    pub held: u32,
+    /// The place the stretch's first op array is named at.
+    pub place: u32,
+}
+
+impl LandingRows {
+    /// The place of the op array at `offset`, where the stretch names it.
+    fn place(self, offset: u32) -> Option<u32> {
+        let past = offset
+            .checked_sub(self.first)
+            .filter(|past| *past < self.held)?;
+        self.place.checked_add(past)
+    }
+}
+
+impl LandingIndex {
+    /// The place the op array at `offset` is named at: in the epoch's own
+    /// stretch where that names it, in the preload's otherwise, and none past
+    /// both; the one rule the escape's code follows too.
+    #[must_use]
+    pub fn place(&self, offset: u32) -> Option<u32> {
+        (self.own.place(offset)).or_else(|| self.preloaded?.place(offset))
+    }
+}
+
+/// An epoch's landing index ([`LandingIndex`]), over its own [`Funcs`]
+/// and the ones it lays for the preload's op arrays, laid down the
+/// first time a tier arms a landing or asks for it.
+pub(crate) struct Landings {
+    own: LandingRows,
+    preloaded: Option<LandingRows>,
+    index: OnceLock<Index>,
+}
+
+impl Landings {
+    /// The index over `own`, the epoch's own rows, which a [`Column`]
+    /// numbers at most [`crate::arena::COLUMN_ROWS`] of, and `preloaded`,
+    /// the epoch's rows of the preload's op arrays, every one of which
+    /// it laid as the epoch was made ([`Funcs::preloaded`]).
+    pub(crate) fn over(own: &Funcs, preloaded: Option<&Funcs>) -> Landings {
+        let held = u32::try_from(crate::arena::COLUMN_ROWS).unwrap_or(u32::MAX);
+        let own = LandingRows {
+            first: own.first,
+            held,
+            place: 0,
+        };
+        let preloaded = preloaded.map(|funcs| LandingRows {
+            first: funcs.first,
+            held: funcs.rows.reserved(),
+            place: held,
+        });
+        Landings {
+            own,
+            preloaded,
+            index: OnceLock::new(),
+        }
+    }
+
+    /// The index as compiled code reads it, laid down where it was not.
+    pub(crate) fn index(&self) -> LandingIndex {
+        LandingIndex {
+            chunks: self.laid().addresses.as_ptr().expose_provenance(),
+            own: self.own,
+            preloaded: self.preloaded,
+        }
+    }
+
+    /// The landing word of opline `at` of `row`, the op array at
+    /// `offset`, for a tier to arm ([`Func::lay_landing`]), its op
+    /// array's landing words named in the index; none past its last
+    /// opline.
+    pub(crate) fn lay<'f>(&self, row: &'f Func, offset: u32, at: OplineIdx) -> Option<&'f Word> {
+        let word = row.lay_landing(at)?;
+        let words = row.landings.get()?;
+        let place = self.index().place(offset)?;
+        self.laid().name(place, words);
+        Some(word)
+    }
+
+    /// The address of the landing words the index names the op array at
+    /// `offset` by, where it names any.
+    #[cfg(test)]
+    pub(crate) fn named(&self, offset: u32) -> Option<usize> {
+        let place = usize::try_from(self.index().place(offset)?).ok()?;
+        let chunk = self
+            .index
+            .get()?
+            .chunks
+            .get(place >> LANDING_CHUNK_BITS)?
+            .get()?;
+        let words = chunk.get(2 * (place & (LANDING_CHUNK - 1)))?;
+        Some(words.load(Ordering::Acquire)).filter(|words| *words != 0)
+    }
+
+    fn laid(&self) -> &Index {
+        let places =
+            (self.preloaded).map_or(self.own.held, |rows| rows.place.saturating_add(rows.held));
+        let chunks = places.div_ceil(1 << LANDING_CHUNK_BITS);
+        (self.index).get_or_init(|| Index::new(usize::try_from(chunks).unwrap_or(0)))
+    }
+}
+
+/// The index's own: each chunk, owned, two words per place, and the
 /// address of each chunk, which is what compiled code reads, as a
 /// request's rows of its traces are kept (`php_jit`'s `enter::Rows`).
 struct Index {
@@ -193,16 +297,17 @@ struct Index {
 }
 
 impl Index {
-    fn new() -> Index {
+    /// `chunks` chunks, none laid.
+    fn new(chunks: usize) -> Index {
         Index {
-            chunks: (0..LANDING_CHUNKS).map(|_| OnceLock::new()).collect(),
-            addresses: (0..LANDING_CHUNKS).map(|_| AtomicUsize::new(0)).collect(),
+            chunks: (0..chunks).map(|_| OnceLock::new()).collect(),
+            addresses: (0..chunks).map(|_| AtomicUsize::new(0)).collect(),
         }
     }
 
-    /// `words`, the landing words of the op array `at` past the first
-    /// offset, named in its chunk, the chunk laid down and named first
-    /// where it is not; nothing past the op arrays the index names.
+    /// `words`, the landing words of the op array named at place `at`,
+    /// named in its chunk, the chunk laid down and named first where it
+    /// is not; nothing past the places the index has.
     fn name(&self, at: u32, words: &[Word]) {
         let chunk = (at >> LANDING_CHUNK_BITS) as usize;
         let (Some(cell), Some(address)) = (self.chunks.get(chunk), self.addresses.get(chunk))
@@ -229,7 +334,6 @@ impl Funcs {
         Funcs {
             first,
             rows: Column::below(u32::MAX),
-            index: OnceLock::new(),
         }
     }
 
@@ -296,30 +400,6 @@ impl Funcs {
     /// epoch holds it.
     pub(crate) fn get(&self, offset: u32) -> Option<&Func> {
         self.rows.get(offset.checked_sub(self.first)?)
-    }
-
-    /// The landing word of opline `at` of the op array at `offset`, for
-    /// a tier to arm ([`Func::lay_landing`]), its op array's landing
-    /// words named in the index; none where this epoch holds no row
-    /// there, and past its last opline.
-    pub(crate) fn lay_landing(&self, offset: u32, at: OplineIdx) -> Option<&Word> {
-        let row = self.get(offset)?;
-        let word = row.lay_landing(at)?;
-        let words = row.landings.get()?;
-        let index = self.index.get_or_init(Index::new);
-        index.name(offset.checked_sub(self.first)?, words);
-        Some(word)
-    }
-
-    /// Where compiled code finds the rows' landing words, the index laid
-    /// down where it was not.
-    pub(crate) fn landing_index(&self) -> LandingIndex {
-        let index = self.index.get_or_init(Index::new);
-        LandingIndex {
-            chunks: index.addresses.as_ptr().expose_provenance(),
-            first: self.first,
-            held: u32::try_from(LANDING_CHUNKS << LANDING_CHUNK_BITS).unwrap_or(u32::MAX),
-        }
     }
 }
 
@@ -458,27 +538,32 @@ pub(crate) mod tests {
     }
 
     /// The landing index names an op array's landing words once a tier
-    /// lays them, at the address of its chunk, past the epoch's first
-    /// offset, and names none for an op array no landing of which is
-    /// laid: what a trace's escape reads in code.
+    /// lays them, at the address of its chunk, at its place past the
+    /// epoch's first offset, and names none for an op array no landing of
+    /// which is laid: what a trace's escape reads in code.
     #[test]
     fn the_landing_index_names_the_words_a_tier_laid() {
-        use super::{LANDING_CHUNK_BITS, LandingIndex};
+        use super::{LANDING_CHUNK_BITS, LandingIndex, LandingRows, Landings};
         let funcs = Funcs::numbered_from(4);
         funcs.publish(&published(4, 3), Laid::COLD);
+        let landings = Landings::over(&funcs, None);
         let LandingIndex {
             chunks,
-            first,
-            held,
-        } = funcs.landing_index();
-        assert_eq!(first, 4);
-        assert_eq!(held, 1 << 23);
-        let index = funcs.index.get().expect("asked for, so laid");
+            own,
+            preloaded,
+        } = landings.index();
+        let rows = LandingRows {
+            first: 4,
+            held: 1 << 23,
+            place: 0,
+        };
+        assert_eq!((own, preloaded), (rows, None));
+        let index = landings.index.get().expect("asked for, so laid");
+        assert_eq!(index.addresses.len(), 1 << (23 - LANDING_CHUNK_BITS));
         assert_eq!(chunks, index.addresses.as_ptr().addr());
         assert_eq!(index.addresses[0].load(Ordering::Acquire), 0);
-        let word = funcs
-            .lay_landing(4, OplineIdx(2))
-            .expect("a landing within the op array");
+        let main = funcs.get(4).expect("the main op array has a row");
+        let word = (landings.lay(main, 4, OplineIdx(2))).expect("a landing within the op array");
         let chunk = index.chunks[0]
             .get()
             .expect("the chunk laid with the words");
@@ -488,7 +573,6 @@ pub(crate) mod tests {
         );
         let words = chunk[0].load(Ordering::Acquire);
         assert_eq!(chunk[1].load(Ordering::Acquire), 3, "one word per opline");
-        let main = funcs.get(4).expect("the main op array has a row");
         assert!(std::ptr::addr_eq(main.landing(OplineIdx(2)), word));
         assert_eq!(
             words + 2 * size_of::<crate::tier::Word>(),
@@ -499,7 +583,29 @@ pub(crate) mod tests {
                 .iter()
                 .all(|slot| slot.load(Ordering::Acquire) == 0)
         );
-        assert!(funcs.lay_landing(3, OplineIdx(0)).is_none());
+        assert!(landings.index().place(3).is_none());
         assert_eq!(2usize << LANDING_CHUNK_BITS, chunk.len());
+    }
+
+    /// An index over the preload's rows names them past the epoch's own,
+    /// each by its offset in the stretch it is of, and an offset in
+    /// neither stretch at no place (#3568).
+    #[test]
+    fn the_landing_index_names_the_preloads_rows_past_the_epochs_own() {
+        use super::{LandingRows, Landings};
+        let preloaded = Funcs::preloaded(&[published(5, 2), published(6, 1)], Laid::COLD);
+        let own = Funcs::numbered_from(100);
+        let index = Landings::over(&own, Some(&preloaded)).index();
+        let rows = LandingRows {
+            first: 5,
+            held: 2,
+            place: 1 << 23,
+        };
+        assert_eq!(index.preloaded, Some(rows));
+        assert_eq!(index.place(100), Some(0));
+        assert_eq!(index.place(5), Some(1 << 23));
+        assert_eq!(index.place(6), Some((1 << 23) + 1));
+        assert_eq!((index.place(4), index.place(7)), (None, None));
+        assert_eq!(index.place(100 + (1 << 23)), None);
     }
 }
