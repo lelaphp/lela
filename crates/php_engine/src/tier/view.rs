@@ -565,6 +565,9 @@ pub struct UnitView {
     /// declare they return, by their row of the engine's frameless table
     /// ([`UnitView::hold_frameless`]).
     frameless: Vec<(u32, Option<Type>)>,
+    /// `zend_flf_functions` by name, the engine's frameless table, taken
+    /// when the view first holds an op array that calls through it.
+    frameless_names: Vec<Name>,
 }
 
 /// What [`UnitView::declaration`] reads of an op array: the declaration
@@ -599,6 +602,7 @@ impl UnitView {
             callees: Vec::new(),
             observed: crate::observer::observing(req),
             frameless: Vec::new(),
+            frameless_names: Vec::new(),
         }
     }
 
@@ -612,8 +616,21 @@ impl UnitView {
         }
         if !self.funcs.contains(&f) {
             self.funcs.push(f);
+            let frameless = (self.epoch.func(f).and_then(|func| func.op_array()))
+                .is_some_and(|body| body.oplines.iter().any(|op| op.opcode.is_frameless_icall()));
+            if frameless && self.frameless_names.is_empty() {
+                self.frameless_names = req.shared.frameless_names();
+            }
         }
         true
+    }
+
+    /// `zend_flf_functions` by name, as the dump of an op array the view
+    /// holds names the native a `FRAMELESS_ICALL_*` calls; empty until
+    /// [`UnitView::hold`] accepts an op array with such a call.
+    #[must_use]
+    pub fn frameless_names(&self) -> &[Name] {
+        &self.frameless_names
     }
 
     /// Accept class `c` where every request shares it, the engine's own

@@ -129,6 +129,7 @@ tier::UnitView::cache_slot
 tier::UnitView::call
 tier::UnitView::class
 tier::UnitView::declaration
+tier::UnitView::frameless_names
 tier::UnitView::hold
 tier::UnitView::hold_call
 tier::UnitView::hold_class
