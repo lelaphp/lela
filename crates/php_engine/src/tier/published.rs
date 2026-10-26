@@ -185,7 +185,9 @@ pub struct LandingIndex {
 pub struct LandingRows {
     /// The offset the stretch's first op array stands at.
     pub first: u32,
-    /// How many op arrays past `first` the stretch names.
+    /// How many op arrays past `first` the stretch can name: as many as
+    /// a [`Column`] numbers for the epoch's own, and as many as the epoch
+    /// laid rows for, all as it was made, for the preload's.
     pub held: u32,
     /// The place the stretch's first op array is named at.
     pub place: u32,
@@ -207,8 +209,13 @@ impl LandingIndex {
     /// both; the one rule the escape's code follows too.
     #[must_use]
     pub fn place(&self, offset: u32) -> Option<u32> {
-        (self.own.place(offset)).or_else(|| self.preloaded?.place(offset))
+        place_among(self.own, self.preloaded, offset)
     }
+}
+
+/// [`LandingIndex::place`] over the stretches `own` and `preloaded`.
+fn place_among(own: LandingRows, preloaded: Option<LandingRows>, offset: u32) -> Option<u32> {
+    own.place(offset).or_else(|| preloaded?.place(offset))
 }
 
 /// An epoch's landing index ([`LandingIndex`]), over its own [`Funcs`]
@@ -258,9 +265,9 @@ impl Landings {
     /// array's landing words named in the index; none past its last
     /// opline.
     pub(crate) fn lay<'f>(&self, row: &'f Func, offset: u32, at: OplineIdx) -> Option<&'f Word> {
+        let place = place_among(self.own, self.preloaded, offset)?;
         let word = row.lay_landing(at)?;
         let words = row.landings.get()?;
-        let place = self.index().place(offset)?;
         self.laid().name(place, words);
         Some(word)
     }
@@ -269,7 +276,8 @@ impl Landings {
     /// `offset` by, where it names any.
     #[cfg(test)]
     pub(crate) fn named(&self, offset: u32) -> Option<usize> {
-        let place = usize::try_from(self.index().place(offset)?).ok()?;
+        let place = place_among(self.own, self.preloaded, offset)?;
+        let place = usize::try_from(place).ok()?;
         let chunk = self
             .index
             .get()?
