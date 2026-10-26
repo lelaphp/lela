@@ -889,7 +889,7 @@ impl Request {
         let stack = self.stack_limit();
         let bound = crate::multibyte::bound(self, shared.compile_multibyte());
         let keys_before = self.keys_made();
-        self.compiling_for_cache(|heap, classes, cwd| {
+        let fresh = self.compiling_for_cache(|heap, classes, cwd| {
             // opcache compiles the file under
             // `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`, so it substitutes
             // none of the request's constants.
@@ -907,7 +907,13 @@ impl Request {
                 request,
                 CompileHeap::Request(heap),
             )
-        })
+        });
+        // What the compile laid on the heap before its persist; one that
+        // meets the hard limit has ended the request.
+        if let Ok(unit) = &fresh.unit {
+            super::declared_bytes::persisted(self, unit, fresh.tree).ok();
+        }
+        fresh
     }
 
     /// What `zend_accel_load_script` is told of a file the cache answered

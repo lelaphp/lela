@@ -568,7 +568,7 @@ mod tests {
 
     /// The build of `events` in an arena of its own, kept for the test.
     fn build_over(source: &[u8], tokens: &[Token], events: Vec<Event>) -> Built<'static> {
-        let arena: &'static Arena = Box::leak(Box::new(Arena::new()));
+        let arena: &'static Arena = Box::leak(Box::new(Arena::default()));
         build(arena, tokens, &LineIndex::new(arena, source), events)
     }
 

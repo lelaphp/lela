@@ -18,14 +18,15 @@
 //! the builder's frames, lent to each parse and taken back empty, so
 //! their room is reused too.
 
-use std::cell::{RefCell, RefMut};
+use std::cell::{Cell, RefCell, RefMut};
 
 use bumpalo::Bump;
 
 use crate::lexer::Token;
 
 /// One arena: memory that is bumped into and given up whole, and the
-/// room of the stacks a parse lends itself.
+/// room of the stacks a parse lends itself. A new one, its `default`,
+/// allocates nothing until it is first used.
 #[derive(Default)]
 pub struct Arena {
     bump: Bump,
@@ -33,6 +34,8 @@ pub struct Arena {
     /// stand for a parse, so a parse nested in another finds them taken
     /// and makes its own.
     scratch: RefCell<Scratch>,
+    /// The elements of the last tree parsed into it ([`Arena::parsed`]).
+    parsed: Cell<usize>,
 }
 
 impl std::fmt::Debug for Arena {
@@ -88,12 +91,6 @@ impl Scratch {
 const KEPT: usize = 256 * 1024;
 
 impl Arena {
-    /// An empty arena, which allocates nothing until it is first used.
-    #[must_use]
-    pub fn new() -> Arena {
-        Arena::default()
-    }
-
     /// Give up everything in the arena at once, keeping the room of its
     /// last chunk for what is bumped into it next, up to 256 KiB.
     pub fn reset(&mut self) {
@@ -101,6 +98,19 @@ impl Arena {
         if self.bump.allocated_bytes() > KEPT {
             self.bump = Bump::new();
         }
+    }
+
+    /// How many elements, nodes and significant tokens, the shape of
+    /// the last tree parsed into the arena holds
+    /// ([`crate::tree::Tree::elements`]), which a reset keeps.
+    #[must_use]
+    pub fn parsed(&self) -> usize {
+        self.parsed.get()
+    }
+
+    /// The shape of a tree parsed into the arena, `elements` long.
+    pub(crate) fn note_parsed(&self, elements: usize) {
+        self.parsed.set(elements);
     }
 
     /// The parse's stacks, borrowed where they stand; none while a parse
@@ -187,7 +197,7 @@ mod tests {
 
     #[test]
     fn a_reset_arena_keeps_its_room_and_what_it_held_is_given_up() {
-        let mut arena = Arena::new();
+        let mut arena = Arena::default();
         assert_eq!(arena.copy(b"abc"), b"abc");
         assert_eq!(arena.concat(&[b"a\\", b"b"]), b"a\\b");
         let mut grown = arena.vec(1);

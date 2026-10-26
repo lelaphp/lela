@@ -2030,13 +2030,18 @@ impl Request {
             made,
             interning: true,
         };
-        compile(
+        let compiled = compile(
             &mut strings,
             php_compile::RequestClasses::new(&holds).seeing(&decls),
             php_compile::RequestConstants::new(&defined, &class_constants),
             &mut self.compile_arena,
             &self.cwd,
-        )
+        );
+        // The tree's `CG(ast_arena)`, laid and given back as the compile
+        // ends; one that meets the hard limit has ended the request.
+        let tree = self.compile_arena.parsed();
+        super::declared_bytes::with_tree(self, tree, |_| Ok(())).ok();
+        compiled
     }
 
     /// What a compile of a file bound for the cache is handed for this

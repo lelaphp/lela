@@ -49,6 +49,16 @@ use crate::api::values::{ClassId, Emalloc, PhpArray, Value};
 pub(super) const OPLINE: usize = 32;
 /// `sizeof(zval)`.
 const ZVAL: usize = 16;
+/// `sizeof(zend_class_entry)`, carved at `Z/Zend/zend_compile.c:9253`.
+const CLASS_ENTRY: usize = 520;
+/// `sizeof(zend_property_info)`, carved at `Z/Zend/zend_API.c:4525`.
+const PROPERTY_INFO: usize = 72;
+/// `sizeof(zend_class_constant)`, carved at `Z/Zend/zend_API.c:4888`.
+const CLASS_CONSTANT: usize = 56;
+/// A block of `CG(ast_arena)` (`Z/Zend/zend_language_scanner.l:599`).
+const AST_BLOCK: usize = 32 * 1024;
+/// `sizeof(zend_ast_zval)`, and a two-child `zend_ast`'s (`Z/Zend/zend_ast.h`).
+const AST_NODE: usize = 24;
 /// `INITIAL_OP_ARRAY_SIZE` (`Z/Zend/zend_compile.h`).
 const INITIAL_OPLINES: usize = 64;
 /// `sizeof(zend_string *)`, an entry of `op_array->vars` and of
@@ -1433,6 +1443,88 @@ pub(super) fn of_unit(req: &mut Request, unit: &Unit) -> Result<Laid, Thrown> {
             Err(thrown)
         }
     }
+}
+
+/// What php's compile of `unit` carves from `CG(arena)`, which nothing
+/// gives back before `shutdown_compiler`, whether or not opcache
+/// persists the unit: a `zend_class_entry` for each class
+/// (`zend_compile_class_decl`), then a `zend_property_info` for each of
+/// its properties and a `zend_class_constant` for each of its constants
+/// and cases (`zend_declare_typed_property`,
+/// `zend_declare_typed_class_constant`), and a `zend_op_array` for each
+/// function, method, hook and closure (`zend_compile_func_decl`). A
+/// union type's list and a hooked property's table are not carved.
+pub(super) fn carve(req: &mut Request, unit: &Unit) -> Result<(), Thrown> {
+    let classes = unit.classes.iter().flat_map(|class| {
+        std::iter::once(CLASS_ENTRY)
+            .chain(std::iter::repeat_n(PROPERTY_INFO, class.properties.len()))
+            .chain(std::iter::repeat_n(CLASS_CONSTANT, class.constants.len()))
+    });
+    let op_arrays =
+        unit.functions.len() + unit.methods.len() + unit.hooks.len() + unit.dynamic.len();
+    let sizes = classes.chain(std::iter::repeat_n(crate::exec::OP_ARRAY_SIZE, op_arrays));
+    for size in sizes {
+        let carved = req.heap_mut().carve(size);
+        req.fatal_of(carved)?;
+    }
+    Ok(())
+}
+
+/// php's compile of a file opcache persists, charged to the request
+/// that includes it as it compiles (design §5.13, §6.3): its tree in
+/// `CG(ast_arena)`, `zend_arena_create(1024 * 32)` and a block of that
+/// size more each time it is full, here a `zend_ast` of two children or
+/// a `zend_ast_zval`, 24 bytes either, for each of the `tree` elements of
+/// the engine's tree, whose shape is not php's; its carves ([`carve`]), held to
+/// the request's end; and the op arrays' and the classes' blocks it
+/// `emalloc`s ([`of_unit`]), which `zend_persist` copies into shared
+/// memory before the request's copies are given back with the tree. So a
+/// file too large for the limit meets it in its compile, at the hard
+/// limit as php's does (`oom_hard_limit_exceeded_during_complilation.phpt`),
+/// and a large include leaves php's carves standing, its peak above
+/// them:
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/w3479-' . getmypid() . '.php';
+/// $src = "<?php\n";
+/// for ($i = 0; $i < 2000; $i++) { $src .= "class C$i { public \$a; public \$b; function f() {} function g() {} }\n"; }
+/// file_put_contents($f, $src);
+/// $p = memory_get_peak_usage(); $m = memory_get_usage();
+/// require $f;
+/// $held = memory_get_usage() - $m;
+/// echo $held, " ", memory_get_peak_usage() - $p > 2 * $held ? "above" : "within", "\n";
+/// unlink($f);
+/// ```
+/// ```expect regime=immutable-literals
+/// 2359392 above
+/// ```
+pub(super) fn persisted(req: &mut Request, unit: &Unit, tree: usize) -> Result<(), Thrown> {
+    with_tree(req, tree, |req| {
+        carve(req, unit)?;
+        of_unit(req, unit)?.free(req);
+        Ok(())
+    })
+}
+
+/// `CG(ast_arena)` over a tree of `elements` laid on the heap while
+/// `then` runs, and given back after it, as `zend_compile` destroys it
+/// once the file's op arrays stand (`Z/Zend/zend_language_scanner.l:599`).
+pub(super) fn with_tree(
+    req: &mut Request,
+    elements: usize,
+    then: impl FnOnce(&mut Request) -> Result<(), Thrown>,
+) -> Result<(), Thrown> {
+    let mut ast = Vec::new();
+    let charged = (0..(elements * AST_NODE).div_ceil(AST_BLOCK).max(1))
+        .try_for_each(|_| {
+            ast.push(Emalloc::new(req, AST_BLOCK)?);
+            Ok(())
+        })
+        .and_then(|()| then(req));
+    for block in ast {
+        block.free(req);
+    }
+    charged
 }
 
 /// [`of_unit`]'s blocks, laid into `laid` one by one.

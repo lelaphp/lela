@@ -121,7 +121,7 @@ mod tests {
             ..Options::default()
         };
         let unit = crate::compile_source(
-            &mut php_syntax::Arena::new(),
+            &mut php_syntax::Arena::default(),
             source,
             &options,
             &mut strings,

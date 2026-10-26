@@ -1797,6 +1797,9 @@ impl Shared {
     ) -> Fresh {
         let mut strings = self.interned.strings();
         let mut home = PermanentStrings::new(&self.interned.names, &mut strings, heap);
+        // A unit for every request is compiled on the thread that asked,
+        // no request's arena at hand, so it brings its own.
+        let mut arena = php_compile::syntax::Arena::default();
         let unit = compile(
             source,
             origin,
@@ -1804,10 +1807,8 @@ impl Shared {
             self.declared(),
             stack,
             &mut home,
-            // A unit for every request is compiled on the thread that
-            // asked, no request's arena at hand, so it brings its own.
             Laid {
-                arena: &mut php_compile::syntax::Arena::new(),
+                arena: &mut arena,
                 room: php_compile::Room::default(),
             },
         );
@@ -1816,7 +1817,12 @@ impl Shared {
             "a unit for every request holds a counted value"
         );
         let answers = home.settle(strings_kept(&unit));
-        Fresh { unit, answers }
+        let tree = arena.parsed();
+        Fresh {
+            unit,
+            answers,
+            tree,
+        }
     }
 
     /// `unit` published for every request: each op array given its
@@ -5538,6 +5544,11 @@ impl Engine {
         // failed, and the host ends with status 1 before any request.
         if self.show_startup_raised(&mut req) {
             return Begun::Refused(ended(1), req.release_sink());
+        }
+        // The memory limit's fatal as the body was read bailed out of
+        // `php_request_startup`, which failed: no program is compiled.
+        if req.diagnostics().bailing_out() {
+            return Begun::Failed(req);
         }
         if let Err(thrown) = serve_rinits(&mut req, &self.shared.extensions) {
             // `zend_throw_exception_internal` with no frame standing

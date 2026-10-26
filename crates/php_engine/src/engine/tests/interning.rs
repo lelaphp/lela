@@ -190,7 +190,7 @@ fn what_memory_get_usage_reads_starts_where_it_started_for_every_request() {
                 StackLimit::UNCHECKED,
                 strings,
                 Laid {
-                    arena: &mut php_compile::syntax::Arena::new(),
+                    arena: &mut php_compile::syntax::Arena::default(),
                     room: php_compile::Room::default(),
                 },
             )
