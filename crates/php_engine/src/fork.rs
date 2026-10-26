@@ -35,8 +35,8 @@
 //! the child restores what php's `php_child_init` restores, which php
 //! calls in the child of pcntl's forks, opcache's, php-fpm's, the CGI's,
 //! the CLI server's and every other host that forks.
-//! Registering a timer or a realpath cache counts as standing inside, so
-//! no fork copies the list of them held.
+//! Registering a timer, a realpath cache or an [`Inherited`] entry counts
+//! as standing inside, so no fork copies the list of them held.
 //!
 //! What php's `php_child_init` (`Z/main/main.c:1897`) restores in the
 //! child is three things. `refresh_memory_manager`, a fresh key for the
@@ -49,6 +49,15 @@
 //! fork holds locked across the copy ([`RealpathCaches`]); the stat cache
 //! is the request's, above the engine in `php_streams`, and is emptied by
 //! the native that asked for the fork, as `pcntl_fork` does.
+//!
+//! Beside what php restores, a child makes its own what it would
+//! otherwise share with its parent ([`Inherited`]): the compiled tier's
+//! code arena on Linux, whose pages one shared mapping of a `memfd`
+//! holds, so the two processes would write each other's code
+//! (`jit-design.md` §4.4). php keeps its one buffer shared by every
+//! process on one opcache segment, each allocation under
+//! `zend_shared_alloc_lock`; this engine shares an arena among one
+//! process's threads alone.
 
 use std::convert::Infallible;
 use std::io;
@@ -312,9 +321,12 @@ impl std::fmt::Debug for Worker {
 static WORKERS: Mutex<Vec<Weak<Worker>>> = Mutex::new(Vec::new());
 
 /// One of the process's lists of what a fork stops first, held, with
-/// what has dropped let go: [`WORKERS`], the timers, and the realpath
-/// caches a fork's child empties ([`RealpathCaches`]).
-pub(crate) fn living<T>(list: &'static Mutex<Vec<Weak<T>>>) -> MutexGuard<'static, Vec<Weak<T>>> {
+/// what has dropped let go: [`WORKERS`], the timers, the realpath
+/// caches a fork's child empties ([`RealpathCaches`]), and what it
+/// makes its own ([`INHERITED`]).
+pub(crate) fn living<T: ?Sized>(
+    list: &'static Mutex<Vec<Weak<T>>>,
+) -> MutexGuard<'static, Vec<Weak<T>>> {
     let mut held = list.lock().unwrap_or_else(PoisonError::into_inner);
     held.retain(|entry| entry.strong_count() > 0);
     held
@@ -425,6 +437,70 @@ impl Joined {
         let _inside = Inside::enter();
         for worker in self.0.iter().filter_map(Weak::upgrade) {
             worker.wake();
+        }
+    }
+}
+
+/// What a forked child would share with its parent and makes its own
+/// before anything else of it runs: the compiled tier's code arena on
+/// Linux, two views of one `memfd` mapped shared (`jit-design.md` §4.4).
+/// The engine owns the fork and its order; the tier owns what it holds
+/// and how its child takes it, as a [`Parked`] body is the tier's on an
+/// engine's thread.
+pub trait Inherited: Send + Sync + 'static {
+    /// Held for a fork, once every thread the engine started is joined
+    /// and before the process is copied: whatever the child will need is
+    /// taken and made here, so the child copies nothing half made and
+    /// takes nothing another thread may hold. What it answers runs in the
+    /// child alone, before the child does anything else, and is dropped
+    /// unrun in the process that asked, which lets the hold go unchanged.
+    fn hold(&self) -> Box<dyn FnOnce() + '_>;
+}
+
+/// Everything in the process a fork's child makes its own, by a
+/// reference that does not keep it: what a fork holds last, whoever asks.
+static INHERITED: Mutex<Vec<Weak<dyn Inherited>>> = Mutex::new(Vec::new());
+
+/// `entry` entered among what every fork holds and every fork's child
+/// makes its own ([`Inherited`]), until it drops. The entry stands inside
+/// the engine, so no fork copies the list held.
+pub fn inherit(entry: Weak<dyn Inherited>) {
+    let _inside = Inside::enter();
+    living(&INHERITED).push(entry);
+}
+
+/// What the process holds that a fork's child makes its own, as a fork
+/// finds it.
+struct Heritable(Vec<Arc<dyn Inherited>>);
+
+impl Heritable {
+    /// Every entry that stands, in the order each was entered.
+    fn live() -> Heritable {
+        Heritable(
+            living(&INHERITED)
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect(),
+        )
+    }
+
+    /// Each one held, in [`Heritable::live`]'s order, which is every
+    /// fork's.
+    fn hold(&self) -> Kept<'_> {
+        Kept(self.0.iter().map(|entry| entry.hold()).collect())
+    }
+}
+
+/// What a fork holds for its child to make its own: let go unchanged in
+/// the process that asked, taken by the child ([`Kept::take`]).
+#[must_use]
+struct Kept<'e>(Vec<Box<dyn FnOnce() + 'e>>);
+
+impl Kept<'_> {
+    /// In a fork's child, each entry made the child's own, in order.
+    fn take(self) {
+        for entry in self.0 {
+            entry();
         }
     }
 }
@@ -545,9 +621,9 @@ fn busy() -> io::Error {
 /// [`Timer`](crate::interrupt::Timer)), and wakes a worker as it next
 /// has a job for it.
 ///
-/// Every engine's realpath cache is locked last, once the threads are
-/// joined, and held across the copy: let go unchanged in the process that
-/// asked, and emptied before it is let go in the child, as php's
+/// Every engine's realpath cache is locked once the threads are joined,
+/// and held across the copy: let go unchanged in the process that asked,
+/// and emptied before it is let go in the child, as php's
 /// `php_child_init` empties the process's. Whatever holds one, a request
 /// still on its way out of the engine or a thread outside it as a test
 /// is, holds it for one lookup, entry or clean and lets it go without
@@ -555,6 +631,11 @@ fn busy() -> io::Error {
 /// it and the child never copies one held; a request that still stands
 /// inside once it is let go refuses the fork at [`Alone::fork`]'s reading,
 /// and the caches are let go unchanged.
+///
+/// Last, each [`Inherited`] entry is held, the tier's code arena among
+/// them, its compile mutex taken and a copy of its code made for the
+/// child; the child maps the copy over its arena before the caches are
+/// let go, and the process that asked lets both go unchanged.
 ///
 /// What stands inside is read before the threads are counted, and only
 /// falls while the fork is held: a count that covers the reading means
@@ -575,10 +656,14 @@ fn fork_as(asker: Asker) -> io::Result<Forked> {
     let joined = workers.stop();
     let caches = RealpathCaches::live();
     let held = caches.hold();
+    let heritable = Heritable::live();
+    let kept = heritable.hold();
     let forked = alone.fork(asker);
     if matches!(forked, Ok(Forked::Child)) {
+        kept.take();
         held.clean();
     } else {
+        drop(kept);
         drop(held);
         stopped.resume();
         joined.resume();

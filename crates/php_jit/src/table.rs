@@ -36,9 +36,21 @@
 //!
 //! **php's `PERF` and `PERF_DUMP` writers** ([`Perf`]) are the table's,
 //! written under the mutex by the publish that places the code.
+//!
+//! **A fork's child takes its own code** (`jit-design.md` §4.4): every
+//! table is entered among what a fork holds ([`tier::Inherited`]), which
+//! takes its compile mutex for the fork and copies its arena's chunks in
+//! use, and the child maps the copy over its arena at the same addresses.
+//! Where the copy or the mapping is refused, the child's table keeps no
+//! arena and publishes no more code, so neither process writes a page the
+//! other runs: the one that asked writes only into chunks and tails that
+//! were free at the fork, which the child, publishing nothing, never
+//! enters, and no chunk of a standing table is freed before the table.
+//! The copy is the asking process's to pay, at each fork, for the chunks
+//! in use alone.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use php_engine::tier::{self, Epoch, FuncRef, MapPtrRaw, PlainCall, Request, Word};
 use php_unit::OplineIdx;
@@ -841,12 +853,41 @@ impl<P: Pages> TraceTable<P> {
     }
 }
 
+impl<P: Pages + 'static> tier::Inherited for TraceTable<P> {
+    /// The compile mutex, held for the fork, and the arena's chunks in use
+    /// copied for the child ([`Arena::inheritance`]); in the child the copy
+    /// is mapped over the arena, or, where either was refused, the arena
+    /// let go, so the child writes no page its parent maps.
+    fn hold(&self) -> Box<dyn FnOnce() + '_> {
+        let mut writer = self.writer();
+        let inheritance = writer.arena.as_ref().map(Arena::inheritance);
+        Box::new(move || {
+            let adopted = match (writer.arena.as_mut(), inheritance) {
+                (Some(arena), Some(Ok(inheritance))) => arena.adopt(inheritance).is_ok(),
+                _ => false,
+            };
+            if !adopted {
+                writer.arena = None;
+            }
+        })
+    }
+}
+
+/// An epoch's table under `policy`, shared, and entered among what every
+/// fork holds and its child makes its own (`tier::inherit`).
+pub(crate) fn made(policy: &Policy, outputs: &Outputs) -> Arc<Table> {
+    let table = Arc::new(Table::new(policy, outputs));
+    let entry: Weak<Table> = Arc::downgrade(&table);
+    tier::inherit(entry);
+    table
+}
+
 /// The trace table of the epoch `req` started in, made the first time a
-/// request of it asks, over `policy`'s bounds; none only where the
-/// epoch's slot holds another tier's value. The slot holds it shared, so
-/// a request can keep it for as long as it serves (`enter::lent`).
+/// request of it asks, over `policy`'s bounds ([`made`]); none only where
+/// the epoch's slot holds another tier's value. The slot holds it shared,
+/// so a request can keep it for as long as it serves (`enter::lent`).
 pub(crate) fn of<'r>(req: &'r Request, policy: &Policy, outputs: &Outputs) -> Option<&'r Table> {
-    tier::epoch_state(req, || Arc::new(Table::new(policy, outputs))).map(Arc::as_ref)
+    tier::epoch_state(req, || made(policy, outputs)).map(Arc::as_ref)
 }
 
 /// A hold on the epoch `req` started in, its trace table made as [`of`]

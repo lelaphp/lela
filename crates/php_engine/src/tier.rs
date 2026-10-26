@@ -46,8 +46,9 @@ pub use crate::api::request::Request;
 use crate::api::request::TierStatus;
 /// The compiled tier's compile thread (`jit-design.md` §4.8), an engine's
 /// thread as ADR-0010's Threads has them: started through the engine's
-/// one home and joined before every fork.
-pub use crate::fork::{Parked, Worker};
+/// one home and joined before every fork; and what a fork's child makes
+/// its own, the tier's code arena (§4.4).
+pub use crate::fork::{Inherited, Parked, Worker, inherit};
 /// Whether the bundle observes an opcode, which the compiled tier's start
 /// asks before it runs (`jit-design.md` §4.3, *Observed opcodes*).
 pub use crate::observer::observes;

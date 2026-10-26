@@ -65,6 +65,31 @@ pub(crate) trait Pages: Sized + Send + Sync {
     /// The executable view's address of offset `at`, which lies inside the
     /// mapping; an address only, which reads and writes nothing.
     fn rx(&self, at: usize) -> NonNull<u8>;
+
+    /// What a fork's child maps over the span to hold its pages alone
+    /// (`jit-design.md` §4.4): nothing for an adapter whose pages a fork
+    /// already copies on write, a private mapping or the heap.
+    type Own;
+
+    /// The bytes at each range of `kept` copied into pages of their own,
+    /// every other byte zero, for a fork's child to take with
+    /// [`Pages::adopt`]; made before the fork, by the arena's one holder,
+    /// so no thread writes the span meanwhile.
+    fn own(&self, kept: &mut dyn Iterator<Item = Range<usize>>) -> io::Result<Self::Own>;
+
+    /// `own` mapped over both views at their addresses, the executable
+    /// view first: from then on this process runs and writes pages no
+    /// other process maps, and every address into the span still names
+    /// the byte it named.
+    ///
+    /// # Safety
+    ///
+    /// `own` was made by [`Pages::own`] of this span, no byte of the
+    /// ranges it was given has been written since, and no byte outside
+    /// them is one any thread of this process executes or reads: what
+    /// another process sharing the pages writes there meanwhile is never
+    /// entered.
+    unsafe fn adopt(&self, own: Self::Own) -> io::Result<()>;
 }
 
 /// Why a body was not published: it is larger than a chunk, or every
@@ -194,6 +219,18 @@ struct Filling<P: Pages> {
 pub(crate) struct Arena<P: Pages> {
     region: Arc<Region<P>>,
     filling: Option<Filling<P>>,
+    /// How many bodies it has written: what ties an [`Inheritance`] to
+    /// the bytes it copied.
+    written: u64,
+}
+
+/// An arena's code as a fork's child takes it ([`Arena::adopt`]): its
+/// pages' copy, the arena it was made of, and how many bodies that arena
+/// had written then.
+pub(crate) struct Inheritance<P: Pages> {
+    own: P::Own,
+    of: std::sync::Weak<Region<P>>,
+    written: u64,
 }
 
 impl<P: Pages> Arena<P> {
@@ -219,6 +256,7 @@ impl<P: Pages> Arena<P> {
                 free,
             }),
             filling: None,
+            written: 0,
         })
     }
 
@@ -253,6 +291,7 @@ impl<P: Pages> Arena<P> {
         // SAFETY: the same range, inside the mapping.
         unsafe { self.region.pages.sync(start..start + bytes.len()) };
         filling.cursor = at + bytes.len();
+        self.written = self.written.wrapping_add(1);
         let code = Code {
             entry: self.region.pages.rx(start),
             len: bytes.len(),
@@ -269,6 +308,54 @@ impl<P: Pages> Arena<P> {
         let cursor = self.region.pages.rx(base).as_ptr().addr() + filling.cursor;
         let at = cursor.checked_next_multiple_of(align)? - cursor + filling.cursor;
         (at.checked_add(len)? <= filling.chunk.index.len(self.region.len)).then_some(at)
+    }
+
+    /// The arena as a fork's child will take it (`jit-design.md` §4.4):
+    /// every chunk filling or holding a live `Code` copied by
+    /// [`Pages::own`], each free chunk left zero. A chunk is taken only by
+    /// a publish, which needs the arena held mutably, so a chunk free now
+    /// is free until the copy is taken or a publish is counted.
+    pub(crate) fn inheritance(&self) -> io::Result<Inheritance<P>> {
+        let region = &self.region;
+        let mut kept = (region.free.iter().enumerate())
+            .filter(|(_, free)| !free.load(Ordering::Acquire))
+            .map(|(index, _)| {
+                let start = ChunkIdx(index).start();
+                start..start + ChunkIdx(index).len(region.len)
+            });
+        Ok(Inheritance {
+            own: region.pages.own(&mut kept)?,
+            of: Arc::downgrade(region),
+            written: self.written,
+        })
+    }
+
+    /// In a fork's child, the copy `inheritance` holds mapped over the
+    /// arena's pages at their addresses: every `Code` still names its
+    /// bytes, and from here on this process writes and runs pages its
+    /// parent does not map. A copy of another arena, or of this one before
+    /// a later publish, is refused, and nothing is mapped.
+    pub(crate) fn adopt(&mut self, inheritance: Inheritance<P>) -> io::Result<()> {
+        let ours = std::ptr::eq(inheritance.of.as_ptr(), Arc::as_ptr(&self.region));
+        if !ours || inheritance.written != self.written {
+            return Err(io::Error::other(
+                "a copy of another arena, or of this one before its last publish",
+            ));
+        }
+        // SAFETY: `inheritance` was made by `own` of this arena's pages,
+        // and this arena wrote no body since, so no byte of a chunk it
+        // copied changed; every byte a `Code` names is in a chunk that was
+        // filling or held a live `Code` then, which the copy holds, and a
+        // free chunk, which a process sharing the pages may have written
+        // since, is executed by nobody here.
+        unsafe { self.region.pages.adopt(inheritance.own) }
+    }
+
+    /// The adapter the arena maps through, for a test that reads the
+    /// seals of the file behind it.
+    #[cfg(all(test, php_jit_arena, not(miri), target_os = "linux"))]
+    pub(crate) fn pages(&self) -> &P {
+        &self.region.pages
     }
 
     /// A free chunk, taken: its atomic cleared with an acquire that pairs
@@ -359,6 +446,16 @@ impl Pages for HeapPages {
     fn rx(&self, at: usize) -> NonNull<u8> {
         NonNull::from(&self.bytes[at]).cast()
     }
+
+    type Own = ();
+
+    fn own(&self, _: &mut dyn Iterator<Item = Range<usize>>) -> io::Result<()> {
+        Ok(())
+    }
+
+    unsafe fn adopt(&self, (): ()) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -396,6 +493,16 @@ impl Pages for Unmapped {
 
     fn rx(&self, _: usize) -> NonNull<u8> {
         NonNull::dangling()
+    }
+
+    type Own = ();
+
+    fn own(&self, _: &mut dyn Iterator<Item = Range<usize>>) -> io::Result<()> {
+        Ok(())
+    }
+
+    unsafe fn adopt(&self, (): ()) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -441,7 +548,10 @@ impl Mapping {
     }
 
     /// The address of offset `at`, which lies inside the mapping; an
-    /// address only, which reads and writes nothing.
+    /// address only, which reads and writes nothing. An adapter's alone:
+    /// the jitdump's mapping is made and unmapped, never addressed, so a
+    /// target with no adapter (`build.rs`) has no caller.
+    #[cfg(php_jit_arena)]
     fn at(&self, at: usize) -> NonNull<u8> {
         self.base.map_addr(|addr| addr.saturating_add(at))
     }
@@ -564,6 +674,17 @@ mod mac {
         fn rx(&self, at: usize) -> NonNull<u8> {
             self.0.at(at)
         }
+
+        /// Nothing: a `MAP_PRIVATE` mapping is copied on write by a fork.
+        type Own = ();
+
+        fn own(&self, _: &mut dyn Iterator<Item = Range<usize>>) -> io::Result<()> {
+            Ok(())
+        }
+
+        unsafe fn adopt(&self, (): ()) -> io::Result<()> {
+            Ok(())
+        }
     }
 }
 
@@ -571,10 +692,17 @@ mod mac {
 /// arena's length, sealed against shrinking and growing and against any
 /// further seal, mapped twice as a whole with `MAP_SHARED`, once
 /// `PROT_READ | PROT_WRITE`, written only by the thread holding the arena
-/// mutably and never executed, and once `PROT_READ | PROT_EXEC`, never remapped. The
+/// mutably and never executed, and once `PROT_READ | PROT_EXEC`. The
 /// file is closed once both views stand; they keep its pages. The file,
 /// its seals and the two mappings go through `rustix`, as #2945 ruled; a
 /// view is a [`Mapping`], unmapped when it drops.
+///
+/// A shared mapping is shared with a forked child too, so a fork's child
+/// takes a file of its own (`jit-design.md` §4.4): before the fork a
+/// second sealed `memfd` is made and the chunks in use written into it,
+/// and in the child it is mapped over both views with `MAP_FIXED`, the
+/// executable view first, at the addresses the views had. Neither view is
+/// remapped otherwise.
 #[cfg(all(php_jit_arena, target_os = "linux"))]
 mod linux {
     use std::io;
@@ -591,6 +719,11 @@ mod linux {
     pub(crate) struct Memfd {
         written: Mapping,
         executed: Mapping,
+        /// The seals of the file the views map, read while it was still
+        /// open, as `map_pair` and `adopt` lay the views over it: what a
+        /// test holds the arena's own file to.
+        #[cfg(test)]
+        seals: std::sync::atomic::AtomicU32,
     }
 
     impl Pages for Memfd {
@@ -599,6 +732,8 @@ mod linux {
             Ok(Memfd {
                 written: view(&file, len, ProtFlags::READ | ProtFlags::WRITE)?,
                 executed: view(&file, len, ProtFlags::READ | ProtFlags::EXEC)?,
+                #[cfg(test)]
+                seals: rustix::fs::fcntl_get_seals(&file)?.bits().into(),
             })
         }
 
@@ -626,6 +761,55 @@ mod linux {
         fn rx(&self, at: usize) -> NonNull<u8> {
             self.executed.at(at)
         }
+
+        /// A sealed `memfd` of the span's length.
+        type Own = OwnedFd;
+
+        fn own(&self, kept: &mut dyn Iterator<Item = Range<usize>>) -> io::Result<OwnedFd> {
+            let file = sealed(self.written.len)?;
+            for range in kept {
+                let from = self.written.at(range.start).as_ptr();
+                // SAFETY: the write view's bytes at `range`, inside the
+                // mapping, which no thread writes while the arena's holder
+                // copies them.
+                let bytes = unsafe { std::slice::from_raw_parts(from, range.len()) };
+                let mut done = 0;
+                while done < bytes.len() {
+                    let at = u64::try_from(range.start + done)
+                        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+                    match rustix::io::pwrite(&file, &bytes[done..], at)? {
+                        0 => return Err(io::ErrorKind::WriteZero.into()),
+                        wrote => done += wrote,
+                    }
+                }
+            }
+            Ok(file)
+        }
+
+        /// Each view replaced by the same length of `file` at its own
+        /// address, the executable view first, so that where the second
+        /// is refused the code stands on the copy and the caller writes no
+        /// more. A replaced page holds the byte the old held wherever code
+        /// is, so a fetch through either sees one instruction, and Linux
+        /// keeps a page's instruction and data caches coherent as it maps
+        /// the page executable. One refusal is not covered: a kernel that
+        /// unmaps the range before it refuses the executable view's
+        /// replacement leaves the code there unmapped, which only a kernel
+        /// out of memory for one mapping of the size it replaces does.
+        unsafe fn adopt(&self, file: OwnedFd) -> io::Result<()> {
+            // SAFETY: the caller hands a copy of every byte any thread
+            // executes, and the executable view is this adapter's own
+            // mapping, replaced over its own range.
+            unsafe { over(&self.executed, &file, ProtFlags::READ | ProtFlags::EXEC) }?;
+            // SAFETY: the same, for the write view, which nothing executes
+            // and only the arena's holder, the caller, writes.
+            unsafe { over(&self.written, &file, ProtFlags::READ | ProtFlags::WRITE) }?;
+            #[cfg(test)]
+            if let Ok(seals) = rustix::fs::fcntl_get_seals(&file) {
+                (self.seals).store(seals.bits(), std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(())
+        }
     }
 
     #[cfg(test)]
@@ -633,6 +817,11 @@ mod linux {
         /// The write view's address of offset `at`.
         pub(super) fn written(&self, at: usize) -> NonNull<u8> {
             self.written.at(at)
+        }
+
+        /// The seals the file behind the views held as they were mapped.
+        pub(crate) fn seals(&self) -> SealFlags {
+            SealFlags::from_bits_retain(self.seals.load(std::sync::atomic::Ordering::Relaxed))
         }
     }
 
@@ -650,6 +839,22 @@ mod linux {
         rustix::fs::ftruncate(&file, len)?;
         rustix::fs::fcntl_add_seals(&file, SealFlags::SHRINK | SealFlags::GROW | SealFlags::SEAL)?;
         Ok(file)
+    }
+
+    /// `file` mapped shared with `prot` over `view`, at its address and
+    /// for its length, replacing the pages behind it.
+    ///
+    /// # Safety
+    ///
+    /// `view` is a mapping of the adapter's, and wherever any thread reads
+    /// or executes it, `file` holds the bytes the view holds.
+    unsafe fn over(view: &Mapping, file: &OwnedFd, prot: ProtFlags) -> io::Result<()> {
+        let flags = MapFlags::SHARED | MapFlags::FIXED;
+        let at = view.base.as_ptr().cast();
+        // SAFETY: `MAP_FIXED` over exactly the range `view` owns, which the
+        // caller has said holds what `file` holds wherever it is used.
+        let mapped = unsafe { rustix::mm::mmap(at, view.len, prot, flags, file, 0) };
+        mapped.map(drop).map_err(io::Error::from)
     }
 
     /// The whole of `file`, `len` bytes, mapped shared with `prot`.
@@ -850,6 +1055,31 @@ mod tests {
         Ok(())
     }
 
+    /// A fork's child takes only the copy of its own arena made since its
+    /// last publish: a copy taken before a later publish, or of another
+    /// arena, is refused and maps nothing, and the current one is taken.
+    #[test]
+    fn an_arena_adopts_only_its_own_copy_since_its_last_publish() -> Result<(), String> {
+        let mut mine = arena(2)?;
+        let mut other = arena(1)?;
+        let first = published(&mut mine, &[1; 4], 1)?;
+        let stale = mine.inheritance().map_err(|e| e.to_string())?;
+        let second = published(&mut mine, &[2; 4], 1)?;
+        assert!(mine.adopt(stale).is_err(), "a copy from before a publish");
+        let foreign = other.inheritance().map_err(|e| e.to_string())?;
+        assert!(mine.adopt(foreign).is_err(), "another arena's copy");
+        let current = mine.inheritance().map_err(|e| e.to_string())?;
+        assert!(mine.adopt(current).is_ok());
+        let unused = other.inheritance().map_err(|e| e.to_string())?;
+        assert!(other.adopt(unused).is_ok(), "an arena never published into");
+        assert_eq!(
+            (mine.region.pages.read(0), mine.region.pages.read(4)),
+            (1, 2)
+        );
+        drop((first, second));
+        Ok(())
+    }
+
     /// The mapping outlives the arena while a `Code` holds it.
     #[test]
     fn a_code_keeps_its_region_past_the_arena() -> Result<(), String> {
@@ -988,6 +1218,28 @@ mod native {
         Ok(())
     }
 
+    /// An arena's copy taken over its own pages, as a fork's child takes
+    /// it: every body published before still runs at its address, and
+    /// the arena publishes into the copy after it, into the chunk in use
+    /// and into a chunk that was free, whose pages the copy left zero.
+    #[test]
+    fn an_arena_runs_its_code_from_its_copy_and_publishes_into_it() -> Result<(), String> {
+        let mut arena = arena(2)?;
+        let before = published(&mut arena, 7)?;
+        let inheritance = arena.inheritance().map_err(|e| e.to_string())?;
+        arena.adopt(inheritance).map_err(|e| e.to_string())?;
+        assert_eq!(entered(&before)(), 7);
+        let after = published(&mut arena, 8)?;
+        assert_eq!((after.chunk(), entered(&after)()), (before.chunk(), 8));
+        let filler = (arena.publish(&vec![0; CHUNK - 8], 1)).map_err(|Full| "no room")?;
+        let next = published(&mut arena, 9)?;
+        assert_ne!(filler.chunk(), before.chunk(), "the filler fits no tail");
+        assert_eq!(next.chunk(), filler.chunk());
+        assert_eq!((entered(&before)(), entered(&next)()), (7, 9));
+        drop(filler);
+        Ok(())
+    }
+
     /// The reused-chunk question of §4.4, aarch64's alone: whether a
     /// thread that enters a reused chunk needs its own `isb`.
     #[cfg(target_arch = "aarch64")]
@@ -1104,15 +1356,19 @@ mod native {
         }
     }
 
-    /// On Linux the two views are two addresses of one sealed file: what
-    /// the write view holds the executable view reads, and
-    /// `/proc/self/maps` shows the one shared and writable and the other
-    /// shared and executable, both of the `memfd`. The arena's file is
-    /// closed by then, so the seals are held on another file `sealed`
-    /// makes as it makes the arena's: it refuses to shrink or grow.
+    /// On Linux the two views are two addresses of one sealed file: the
+    /// arena's own file held the seals against shrinking, growing and any
+    /// further seal as its views were mapped, what the write view holds
+    /// the executable view reads, and `/proc/self/maps` shows the one
+    /// shared and writable and the other shared and executable, both of
+    /// the `memfd`. That the seals hold, which the arena's closed file can
+    /// no longer be asked, is shown on a file `sealed` makes as it makes
+    /// the arena's: it refuses to shrink or grow.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_two_views_are_two_addresses_of_one_sealed_file() -> Result<(), String> {
+        use rustix::fs::SealFlags;
+
         use super::Pages;
         let sealed = super::linux::sealed(CHUNK).map_err(|e| e.to_string())?;
         let whole = u64::try_from(CHUNK).map_err(|e| e.to_string())?;
@@ -1121,6 +1377,12 @@ mod native {
         let mut arena = arena(1)?;
         let code = published(&mut arena, 7)?;
         let pages = &arena.region.pages;
+        let held = SealFlags::SHRINK | SealFlags::GROW | SealFlags::SEAL;
+        assert!(
+            pages.seals().contains(held),
+            "the arena's file held {:?}",
+            pages.seals()
+        );
         let at = code.entry().as_ptr().addr() - pages.rx(0).as_ptr().addr();
         let written = pages.written(at);
         assert_ne!(written, code.entry());
