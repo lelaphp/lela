@@ -887,11 +887,6 @@ fn node_list(
     } else {
         PhpArray::new(req)?
     };
-    // The values the callbacks keep, read once: no PHP code is served
-    // while the node-set's objects are made, so none is added or let go.
-    let kept: Vec<Value> = callbacks(req, this)
-        .map(|callbacks| callbacks.node_list.iter().map(|value| **value).collect())
-        .unwrap_or_default();
     for item in items {
         if modern && matches!(item, Item::Namespace { .. }) {
             array.give_up(req);
@@ -905,7 +900,7 @@ fn node_list(
         // A namespace node's parent is made over the evaluator's own
         // object (`php_dom_create_object(nsparent, .., &intern->dom)`).
         let parent = match &item {
-            Item::Node(node) => intern_for_doc(req, this, &kept, node.doc()),
+            Item::Node(node) => intern_for_doc(req, this, node.doc()),
             Item::Namespace { .. } => this,
         };
         let v = match item_object(
@@ -939,10 +934,10 @@ fn node_list(
 /// `dom_xpath_intern_for_doc` (`Z/ext/dom/xpath.c:57`, GH-22077): the
 /// object a node of `doc` that an evaluation answers is made over, whose
 /// document it counts: the evaluator itself where `doc` is its document,
-/// otherwise the first of `kept`, the values a php function was handed
-/// or handed back, that counts `doc`, an array searched as `dom_xpath_intern_from_entry`
-/// searches it, so a node of a document a function made keeps that
-/// document alive; the evaluator where none does.
+/// otherwise the first value the callbacks keep, those a php function was
+/// handed or handed back, that counts `doc`, an array searched as
+/// `dom_xpath_intern_from_entry` searches it, so a node of a document a
+/// function made keeps that document alive; the evaluator where none does.
 ///
 /// ```php
 /// $document = new DOMDocument;
@@ -968,13 +963,53 @@ fn node_list(
 /// <root><uaf/><node/><uaf/></root>
 /// "
 /// ```
-fn intern_for_doc(req: &Request, this: PhpObject, kept: &[Value], doc: Option<Node>) -> PhpObject {
+///
+/// The kept values are read again for each node, as php reads
+/// `xpath_callbacks.node_list`, since making the node before it can serve
+/// PHP code: a class `registerNodeClass` mapped whose default names a
+/// class not loaded yet runs the autoloader on its first instance, and
+/// one that constructs the evaluator anew lets every kept value go. The
+/// nodes after it are made over the evaluator, which counts the new
+/// document and none of its classes. Every node is then made counting
+/// the evaluator's new document, not its own, as php makes them, so the
+/// list goes before the document its nodes are of:
+///
+/// ```php
+/// class MyEl extends DOMElement { public $x = Foo::BAR; }
+/// $d = new DOMDocument;
+/// $d->loadXML('<r><a id="1"/><a id="2"/><a id="3"/></r>');
+/// $d->registerNodeClass('DOMElement', 'MyEl');
+/// $xp = new DOMXPath($d);
+/// $xp->registerNamespace('php', 'http://php.net/xpath');
+/// $xp->registerPhpFunctions();
+/// spl_autoload_register(function ($c) {
+///     echo "autoload $c\n";
+///     $GLOBALS['xp']->__construct(new DOMDocument);
+///     class Foo { const BAR = 7; }
+/// });
+/// $l = $xp->query('//a[php:function("is_array", @id)]');
+/// foreach ($l as $a) echo get_class($a), ' ', $a->getAttribute('id'), "\n";
+/// unset($a, $l);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// autoload Foo
+/// MyEl 1
+/// DOMElement 2
+/// DOMElement 3
+/// end
+/// ```
+fn intern_for_doc(req: &Request, this: PhpObject, doc: Option<Node>) -> PhpObject {
     let Some(doc) = doc else {
         return this;
     };
     if counts_doc(req, this, doc) {
         return this;
     }
+    let kept = match dom(req, this).map(|d| &d.extra) {
+        Some(Extra::XPath(state)) => &state.callbacks.node_list[..],
+        _ => &[],
+    };
     kept.iter()
         .find_map(|value| intern_from_entry(req, value, doc))
         .unwrap_or(this)
