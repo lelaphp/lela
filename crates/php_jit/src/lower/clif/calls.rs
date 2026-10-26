@@ -364,7 +364,9 @@ impl Emit<'_> {
     /// whose class is the receiver's, or the published class the call
     /// names; the class's number where the call's called scope is a
     /// request-scoped class, which the push writes, none where its image
-    /// names it.
+    /// names it. The scope the slot was primed from is not compared:
+    /// [`tier::UnitView::hold_callee`] takes only a slot of an op array of
+    /// one scope that its own frame reads, so every frame primes it alike.
     ///
     /// `zend_lazy_class_load`'s copy of a class linked over one the request
     /// evaluated, whose method and static method are pushed in place, then

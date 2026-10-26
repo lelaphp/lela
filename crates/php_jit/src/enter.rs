@@ -1571,7 +1571,8 @@ fn header_of(
         call.callee(),
         Box::<[u8]>::from(named),
         call.count(),
-        call.scope(),
+        // The scope the image writes: a request-scoped class's is none.
+        call.scope().filter(|class| tier::class_published(*class)),
     );
     if let Some(image) = calls.get(&key) {
         return Some(image.address());

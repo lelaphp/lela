@@ -1283,6 +1283,11 @@ fn an_empty_slot_sends_a_static_call_to_its_handler() {
     let second = scratch.serve(&engine, program);
     assert_eq!(testing::stdout(&second), "950\n");
     let lines = String::from_utf8_lossy(&second.stderr);
+    // The second request links into the loop trace the first compiled,
+    // TRACE 2, whose first push finds its slot empty, and the cold arm's
+    // handler serves it: the loop never leaves through an exit of its own.
+    assert!(lines.contains("(link to 2)"), "{lines}");
+    assert!(!lines.contains("TRACE 2 exit"), "{lines}");
     let exits = lines.lines().filter(|line| line.contains(" exit ")).count();
     assert!(exits <= 2, "{lines}");
 }
