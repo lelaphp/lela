@@ -1655,7 +1655,7 @@ fn asked(root: &Path, manifest: &Manifest, source: &Path, ask: &Ask) -> Result<V
     let variants = manifest.variants();
     let oracles = Oracles::new(manifest.pin()?, &variants);
     let carried = Carried::binary(root)?;
-    route::route(root, manifest, (&oracles, &carried), source, &mut subsets)?;
+    route::route(root, manifest, &oracles, &carried, source, &mut subsets)?;
     Ok(subsets)
 }
 

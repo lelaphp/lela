@@ -91,12 +91,20 @@ impl<'m> Route<'m> {
 
 /// What routing reads of one test of the corpus whose `--EXTENSIONS--`
 /// names an extension: the names, and the host beside php it runs
-/// through, where it is one of the two its sections say.
+/// through, where its sections name one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Named {
     extensions: Vec<String>,
-    cgi: bool,
-    phpdbg: bool,
+    through: Option<Through>,
+}
+
+/// The host beside php a test's sections say it runs through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum Through {
+    /// `--CGI--`, or a section only php-cgi reads.
+    Cgi,
+    /// `--PHPDBG--`.
+    Phpdbg,
 }
 
 impl Named {
@@ -106,10 +114,14 @@ impl Named {
         let bytes = std::fs::read(path).ok()?;
         let section = bytes.windows(14).any(|w| w == b"--EXTENSIONS--");
         let phpt = section.then(|| Phpt::load(path).ok())??;
+        let through = if phpt.is_cgi() {
+            Some(Through::Cgi)
+        } else {
+            phpt.has("PHPDBG").then_some(Through::Phpdbg)
+        };
         Some(Named {
             extensions: phpt.extensions(),
-            cgi: phpt.is_cgi(),
-            phpdbg: phpt.has("PHPDBG"),
+            through,
         })
     }
 }
@@ -123,7 +135,8 @@ impl Named {
 pub(crate) fn route(
     root: &Path,
     manifest: &Manifest,
-    (oracles, carried): (&Oracles<'_>, &Carried),
+    oracles: &Oracles<'_>,
+    carried: &Carried,
     source: &Path,
     subsets: &mut [Subset],
 ) -> Result<()> {
@@ -141,13 +154,19 @@ pub(crate) fn route(
     Ok(())
 }
 
-/// [`walked`]'s, read once per pinned commit and kept under `root`'s
-/// target directory: the tree is held to its commit, and a walk reads
-/// every one of its 22,000 tests, seconds of every run.
+/// The shape [`Named`] is kept in, moved with any change to what a kept
+/// file holds or how [`walked`] reads it, so a file another shape wrote
+/// is walked again rather than read.
+const NAMED_SHAPE: u32 = 1;
+
+/// [`walked`]'s, read once per tree and kept under `root`'s target
+/// directory, by the tree's place, the commit it is held to
+/// (`Source::tree`) and the shape: a walk reads every one of its 22,000
+/// tests, seconds of every run.
 fn named(root: &Path, commit: &str, source: &Path) -> Result<BTreeMap<PathBuf, Named>> {
-    let kept = root
-        .join("target/phpt-routing")
-        .join(format!("{commit}-1.json"));
+    let said = format!("{commit}\n{}\n{NAMED_SHAPE}", source.display());
+    let id = crate::git::blob_id(said.as_bytes());
+    let kept = root.join("target/phpt-routing").join(format!("{id}.json"));
     let read = std::fs::read(&kept).ok();
     if let Some(named) = read.and_then(|bytes| serde_json::from_slice(&bytes).ok()) {
         return Ok(named);
@@ -262,12 +281,10 @@ fn unbuilt(
     under: &Path,
     test: &Named,
 ) -> Option<Unbuilt> {
-    let host = if test.cgi {
-        Some(CGI)
-    } else if test.phpdbg {
-        Some(PHPDBG)
-    } else {
-        under.starts_with(fpm::TESTS).then_some(FPM)
+    let host = match test.through {
+        Some(Through::Cgi) => Some(CGI),
+        Some(Through::Phpdbg) => Some(PHPDBG),
+        None => under.starts_with(fpm::TESTS).then_some(FPM),
     };
     if let Some(host) = host {
         return Some(Unbuilt::Host(host));

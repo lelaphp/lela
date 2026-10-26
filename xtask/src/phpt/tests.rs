@@ -1136,9 +1136,8 @@ fn a_variants_row_holds_the_tests_elsewhere_that_need_what_only_it_loads() {
 /// A row whose variant cannot be listed when the run routes, here one the
 /// pin does not carry, is refused in its own subset and in no other's:
 /// the run routes on, the row's subset fails its reading naming the
-/// variant, and every other subset runs as it would have (harness §4.3,
-/// #3312). With the main oracle's listing unread, every variant's row is
-/// refused and no other.
+/// variant, and every other subset runs as with no variant's row, leaving
+/// nothing to it (harness §4.3, #3312).
 #[test]
 fn a_variant_routing_cannot_list_refuses_its_own_subset_alone() {
     if oracle().is_none() {
@@ -1156,11 +1155,11 @@ fn a_variant_routing_cannot_list_refuses_its_own_subset_alone() {
         .into();
     let root = Tree::new("phpt-route-refused").unwrap();
     let carried = Carried::turning_on(&[]);
-    route::route(&root, &manifest, (&oracles, &carried), &tree, &mut subsets)
+    route::route(&root, &manifest, &oracles, &carried, &tree, &mut subsets)
         .expect("one row's variant refuses no run");
     let refused = subsets[0].routed.refused.clone().unwrap();
     assert!(refused.contains("zend-tset"), "{refused}");
-    assert_eq!(subsets[1].routed.refused, None);
+    assert_eq!(subsets[1].routed, route::Routed::default());
     let runners = Runners {
         main: Runner::Control(PathBuf::from("php")),
         variants: BTreeMap::new(),
