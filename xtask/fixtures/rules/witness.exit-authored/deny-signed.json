@@ -1,0 +1,1 @@
+{"tool_name":"Edit","tool_input":{"file_path":"ext/ctype/src/lib.rs","old_string":"/// ```php\n/// <?php exit(3);\n/// ```","new_string":"/// ```php\n/// <?php exit(3);\n/// ```\n/// ```expect exit=+3\n/// ```"}}

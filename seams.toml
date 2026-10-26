@@ -590,10 +590,10 @@ text = "api-check fails an ext crate's library dependency on another ext crate t
 [[rule]]
 id = "witness.exit-authored"
 scope = "**/*.rs"
-deny_pattern = '```expect[^\n]*\bexit=\d+'
+deny_pattern = '```expect[^\n]*\b(?:exit|signal)=[+-]?\d+'
 unless = "xtask witness --accept"
 exempt = ["xtask/src/witness/**", "xtask/tests/witness.rs"] # the parser of the fence grammar and its tests carry the shape they parse (#23)
-text = "exit= in a witness is captured by `xtask witness --accept`, never authored."
+text = "exit= and signal= in a witness are captured by `xtask witness --accept`, never authored."
 
 [[rule]]
 id = "witness.capture-authored"
