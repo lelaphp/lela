@@ -763,13 +763,15 @@ pub fn create_object(
     object_for(req, node, context)
 }
 
-/// `php_dom_create_object(node, rv, (dom_object *) doc)` as ext/xsl's
-/// `xsl_proxy_factory` calls it, with the libxml half it keeps for one
-/// transformation standing in for a dom object (`xml_common.h`,
-/// `PHP_DOM_EXPORT`, design §4.10): the object standing for `node`, one
-/// more owner of it where one exists, a fresh one of the node's class,
-/// mapped by `doc`'s `registerNodeClass` table, counting `doc`'s
-/// document otherwise.
+/// `php_dom_create_object(node, rv, (dom_object *) doc)` over a libxml
+/// half standing in for a dom object (`xml_common.h`, `PHP_DOM_EXPORT`,
+/// design §4.10), as ext/xsl calls it twice: `xsl_proxy_factory` over the
+/// half it keeps for one transformation, and `importStylesheet` over the
+/// half of the DOM or ext/simplexml object it is handed
+/// (`xsltprocessor.c`'s `php_dom_create_object(nodep->doc, ..)`). The
+/// object standing for `node`, one more owner of it where one exists, a
+/// fresh one of the node's class, mapped by `doc`'s `registerNodeClass`
+/// table, counting `doc`'s document otherwise.
 pub fn create_object_in(
     req: &mut Request,
     node: Node,
@@ -782,8 +784,7 @@ pub fn create_object_in(
 /// libxml half, `parent`: the object standing for `node`, one more owner
 /// of it where one exists, otherwise a fresh one of the node's class,
 /// the modern family where `parent`'s document is modern, mapped by its
-/// `registerNodeClass` table and counting its document
-/// (`php_dom_instantiate_object_helper`).
+/// `registerNodeClass` table, made by [`instantiate`].
 fn made_over(
     req: &mut Request,
     node: Node,
@@ -804,11 +805,7 @@ fn made_over(
     };
     let base = class(req, name)?;
     let class = parent.map_or(base, |p| p.mapped(base));
-    let object = new_object(req, class)?;
-    if let Some(mut obj) = libxml_half(req, *object) {
-        obj.attach(req, node, parent.and_then(NodeObject::shared_doc));
-    }
-    Ok(object.into_value())
+    instantiate(req, class, node, parent)
 }
 
 /// `php_dom_create_nullable_object`.
@@ -823,18 +820,20 @@ fn nullable_object(
     }
 }
 
-/// `php_dom_instantiate_object_helper`: an object of `class` for `node`,
-/// counting `parent`'s document where the node has one.
+/// `php_dom_instantiate_object_helper`: a fresh object of `class` over
+/// `node`, counting the document of `parent`, a dom object's libxml half,
+/// where one is given and the node has a document. `parent`'s document is
+/// read once the object is made, as php reads `parent->document` after
+/// `object_init_ex`.
 fn instantiate(
     req: &mut Request,
     class: ClassId,
     node: Node,
-    parent: Option<PhpObject>,
+    parent: Option<&NodeObject>,
 ) -> Result<Owner<Value>, Thrown> {
     let object = new_object(req, class)?;
-    let shared = parent.and_then(|p| shared_doc(req, p));
     if let Some(mut obj) = libxml_half(req, *object) {
-        obj.attach(req, node, shared);
+        obj.attach(req, node, parent.and_then(NodeObject::shared_doc));
     }
     Ok(object.into_value())
 }

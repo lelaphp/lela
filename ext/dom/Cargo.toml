@@ -30,3 +30,7 @@ php_ext = { path = "../../crates/php_ext", features = ["test"] }
 # started (#1925).
 php_ext_standard = { path = "../standard" }
 php_ext_uri = { path = "../uri" }
+# `spl_autoload_register`, for the test whose autoloader a node's class
+# runs, and json, which spl requires.
+php_ext_json = { path = "../json" }
+php_ext_spl = { path = "../spl" }

@@ -337,7 +337,15 @@ impl CallbacksAt {
 pub type Proxy<'a> = dyn FnMut(&mut Request, Node) -> Result<Owner<Value>, Thrown> + 'a;
 
 /// The evaluator of `this`, where it has been constructed.
-fn state(req: &mut Request, this: PhpObject) -> Option<&mut XPathState> {
+fn state(req: &Request, this: PhpObject) -> Option<&XPathState> {
+    match &dom(req, this)?.extra {
+        Extra::XPath(state) => Some(state),
+        _ => None,
+    }
+}
+
+/// The evaluator of `this`, where it has been constructed, to change.
+fn state_mut(req: &mut Request, this: PhpObject) -> Option<&mut XPathState> {
     match &mut dom_mut(req, this)?.extra {
         Extra::XPath(state) => Some(state),
         _ => None,
@@ -346,7 +354,7 @@ fn state(req: &mut Request, this: PhpObject) -> Option<&mut XPathState> {
 
 /// The callbacks of `this`, as [`CallbacksAt`] reaches them.
 fn callbacks(req: &mut Request, this: PhpObject) -> Option<&mut XPathCallbacks> {
-    state(req, this).map(|state| &mut state.callbacks)
+    state_mut(req, this).map(|state| &mut state.callbacks)
 }
 
 /// The evaluator of `this` taken off it, as it is freed or constructed
@@ -372,9 +380,9 @@ fn registering<R>(
     this: PhpObject,
     f: impl FnOnce(&mut Request, &mut XPathCallbacks) -> R,
 ) -> Option<R> {
-    let mut taken = std::mem::take(&mut state(req, this)?.callbacks);
+    let mut taken = std::mem::take(&mut state_mut(req, this)?.callbacks);
     let answer = f(req, &mut taken);
-    match state(req, this) {
+    match state_mut(req, this) {
         Some(state) => std::mem::replace(&mut state.callbacks, taken).release(req),
         None => taken.release(req),
     }
@@ -396,10 +404,7 @@ fn document_read(req: &mut Request, object: PhpObject) -> Read {
 #[allow(clippy::unnecessary_wraps)] // the reader shape every row of a property table has
 fn register_node_ns_read(req: &mut Request, object: PhpObject) -> Read {
     // `dom_xpath_objects_new` sets it before any constructor runs.
-    let on = match dom(req, object).map(|d| &d.extra) {
-        Some(Extra::XPath(s)) => s.register_node_ns,
-        _ => true,
-    };
+    let on = state(req, object).is_none_or(|s| s.register_node_ns);
     Ok(Some(Owner::bool(on)))
 }
 
@@ -410,9 +415,7 @@ fn register_node_ns_write(
     value: &Value,
 ) -> Result<(), Thrown> {
     let on = value.as_bool().unwrap_or(false);
-    if let Some(d) = dom_mut(req, object)
-        && let Extra::XPath(state) = &mut d.extra
-    {
+    if let Some(state) = state_mut(req, object) {
         state.register_node_ns = on;
     }
     Ok(())
@@ -622,6 +625,28 @@ impl Lookup {
 /// RuntimeException: boom / NULL
 /// Error: Invalid callback no_such_function, function "no_such_function" not found or invalid function name / NULL
 /// ```
+///
+/// The node the function answers is kept before the arguments it was
+/// handed, so the evaluator lets it go first:
+///
+/// ```php
+/// class E extends DOMElement { function __destruct() { echo "destruct ", $this->nodeName, "\n"; } }
+/// $d = new DOMDocument; $d->loadXML('<r><a/></r>');
+/// $d->registerNodeClass('DOMElement', 'E');
+/// $x = new DOMXPath($d);
+/// $x->registerNamespace('php', 'http://php.net/xpath');
+/// $x->registerPhpFunctions();
+/// function f($nodes) { global $d; return $d->createElement('ret'); }
+/// var_dump($x->evaluate("boolean(php:function('f', //a))"));
+/// unset($x);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// bool(true)
+/// destruct ret
+/// destruct a
+/// end
+/// ```
 fn dispatch(
     req: &mut Request,
     at: CallbacksAt,
@@ -700,8 +725,29 @@ fn dispatch(
 }
 
 /// What the function answered, as `php_dom_xpath_callback_dispatch` turns
-/// it into a value the evaluation reads: a node kept with the callbacks, a boolean, a
-/// string, and an object that is no node php's `TypeError`.
+/// it into a value the evaluation reads: a node object kept with the
+/// callbacks, the set of its node or the empty set where it stands for
+/// none, a boolean, a string, and an object that is no node php's
+/// `TypeError`. A node object with no node is kept as any other, so it
+/// lives as long as the evaluator, and answers the empty set, which
+/// `count()` takes as it takes no string:
+///
+/// ```php
+/// $d = new DOMDocument; $d->loadXML('<r><a/><a/></r>');
+/// $x = new DOMXPath($d);
+/// $x->registerNamespace('php', 'http://php.net/xpath');
+/// $x->registerPhpFunctions();
+/// function f() { echo "f"; return new class extends DOMElement { function __construct() {} function __destruct() { echo "d"; } }; }
+/// $n = $x->query('//a[php:function("f")]')->length;
+/// echo "|$n|";
+/// var_dump($x->evaluate('count(php:function("f"))'));
+/// unset($x);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// ff|0|ffloat(0)
+/// dddend
+/// ```
 fn returned(
     req: &mut Request,
     at: CallbacksAt,
@@ -711,13 +757,9 @@ fn returned(
     let node_class = if modern { "Dom\\Node" } else { "DOMNode" };
     let returned = match answer.as_ref() {
         ValueRef::Object(o) if crate::instance_of(req, o, node_class) => {
-            match crate::node_of(req, o) {
-                Some(node) => {
-                    at.keep(req, answer);
-                    return Ok(Returned::Node(node));
-                }
-                None => Ok(Returned::Sentinel),
-            }
+            let node = crate::node_of(req, o);
+            at.keep(req, answer);
+            return Ok(Returned::NodeSet(node));
         }
         ValueRef::Bool(b) => Ok(Returned::Bool(b)),
         ValueRef::Object(_) => {
@@ -763,9 +805,7 @@ fn eval(
 ) -> Result<Owner<Value>, Thrown> {
     let register = match register {
         Passed::Given(on) => on,
-        Passed::Omitted => {
-            matches!(dom(req, this), Some(d) if matches!(&d.extra, Extra::XPath(s) if s.register_node_ns))
-        }
+        Passed::Omitted => state(req, this).is_some_and(|s| s.register_node_ns),
     };
     let modern = crate::modern::follows_spec(req, this);
     let Some(id) = state(req, this).map(|state| state.ctx.id()) else {
@@ -808,11 +848,11 @@ fn eval(
     let mut handler = |req: &mut Request, called: Called, operands: Vec<Operand>| {
         XPathCallbacks::call(req, at, called, operands, modern, &mut proxy)
     };
-    if let Some(state) = state(req, this) {
+    if let Some(state) = state_mut(req, this) {
         state.evaluation_depth += 1;
     }
     let evaluated = ffi::XPath::eval_held(req, id, expr, node, scope, &mut handler);
-    if let Some(state) = state(req, this) {
+    if let Some(state) = state_mut(req, this) {
         state.evaluation_depth = state.evaluation_depth.saturating_sub(1);
     }
     if let Some(in_scope) = in_scope {
@@ -887,11 +927,6 @@ fn node_list(
     } else {
         PhpArray::new(req)?
     };
-    // The values the callbacks keep, read once: no PHP code is served
-    // while the node-set's objects are made, so none is added or let go.
-    let kept: Vec<Value> = callbacks(req, this)
-        .map(|callbacks| callbacks.node_list.iter().map(|value| **value).collect())
-        .unwrap_or_default();
     for item in items {
         if modern && matches!(item, Item::Namespace { .. }) {
             array.give_up(req);
@@ -905,14 +940,20 @@ fn node_list(
         // A namespace node's parent is made over the evaluator's own
         // object (`php_dom_create_object(nsparent, .., &intern->dom)`).
         let parent = match &item {
-            Item::Node(node) => intern_for_doc(req, this, &kept, node.doc()),
+            Item::Node(node) => intern_for_doc(req, this, node.doc()),
             Item::Namespace { .. } => this,
         };
-        let v = match item_object(
+        // The object it is made over held while the node's is made, which
+        // can serve PHP code (an autoloader `new_object` runs) that lets
+        // every kept value go; php reads `parent->document` freed there.
+        let held = Owner::take(req, parent.as_value());
+        let made = item_object(
             req,
             &mut |req, node| object_for(req, node, Some(parent)),
             item,
-        ) {
+        );
+        held.give_up(req);
+        let v = match made {
             Ok(v) => v,
             Err(thrown) => {
                 array.give_up(req);
@@ -939,10 +980,10 @@ fn node_list(
 /// `dom_xpath_intern_for_doc` (`Z/ext/dom/xpath.c:57`, GH-22077): the
 /// object a node of `doc` that an evaluation answers is made over, whose
 /// document it counts: the evaluator itself where `doc` is its document,
-/// otherwise the first of `kept`, the values a php function was handed
-/// or handed back, that counts `doc`, an array searched as `dom_xpath_intern_from_entry`
-/// searches it, so a node of a document a function made keeps that
-/// document alive; the evaluator where none does.
+/// otherwise the first value the callbacks keep, those a php function was
+/// handed or handed back, that counts `doc`, an array searched as
+/// `dom_xpath_intern_from_entry` searches it, so a node of a document a
+/// function made keeps that document alive; the evaluator where none does.
 ///
 /// ```php
 /// $document = new DOMDocument;
@@ -968,13 +1009,50 @@ fn node_list(
 /// <root><uaf/><node/><uaf/></root>
 /// "
 /// ```
-fn intern_for_doc(req: &Request, this: PhpObject, kept: &[Value], doc: Option<Node>) -> PhpObject {
+///
+/// The kept values are read again for each node, as php reads
+/// `xpath_callbacks.node_list`, since making each node's object can serve
+/// PHP code: a class `registerNodeClass` mapped whose default names a
+/// class not loaded yet runs the autoloader on its first instance, and
+/// one that constructs the evaluator anew lets every kept value go. The
+/// nodes after it are made over the evaluator, which counts the new
+/// document and none of its classes. Every node is then made counting
+/// the evaluator's new document, not its own, as php makes them, so the
+/// list goes before the document its nodes are of:
+///
+/// ```php
+/// class MyEl extends DOMElement { public $x = Foo::BAR; }
+/// $d = new DOMDocument;
+/// $d->loadXML('<r><a id="1"/><a id="2"/><a id="3"/></r>');
+/// $d->registerNodeClass('DOMElement', 'MyEl');
+/// $xp = new DOMXPath($d);
+/// $xp->registerNamespace('php', 'http://php.net/xpath');
+/// $xp->registerPhpFunctions();
+/// spl_autoload_register(function ($c) {
+///     echo "autoload $c\n";
+///     $GLOBALS['xp']->__construct(new DOMDocument);
+///     class Foo { const BAR = 7; }
+/// });
+/// $l = $xp->query('//a[php:function("is_array", @id)]');
+/// foreach ($l as $a) echo get_class($a), ' ', $a->getAttribute('id'), "\n";
+/// unset($a, $l);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// autoload Foo
+/// MyEl 1
+/// DOMElement 2
+/// DOMElement 3
+/// end
+/// ```
+fn intern_for_doc(req: &Request, this: PhpObject, doc: Option<Node>) -> PhpObject {
     let Some(doc) = doc else {
         return this;
     };
     if counts_doc(req, this, doc) {
         return this;
     }
+    let kept = state(req, this).map_or(&[][..], |state| &state.callbacks.node_list);
     kept.iter()
         .find_map(|value| intern_from_entry(req, value, doc))
         .unwrap_or(this)
@@ -1663,9 +1741,7 @@ impl php_ext::abi::ObjectHandlers for XPathHandlers {
         object: PhpObject,
         visit: &mut dyn FnMut(Value),
     ) -> GcTable {
-        if let Some(d) = dom(req, object)
-            && let Extra::XPath(state) = &d.extra
-        {
+        if let Some(state) = state(req, object) {
             state.callbacks.visit(visit);
         }
         GcTable::Properties

@@ -24,3 +24,15 @@ pub fn extensions() -> Vec<Extension> {
 pub fn engine() -> Engine {
     Engine::builder().extensions(extensions()).build()
 }
+
+/// An engine of [`extensions`] with spl and the json it requires, for a
+/// test that registers an autoloader.
+pub fn engine_with_spl() -> Engine {
+    let mut extensions = extensions();
+    let at = extensions.len() - 1;
+    extensions.splice(
+        at..at,
+        [php_ext_json::extension(), php_ext_spl::extension()],
+    );
+    Engine::builder().extensions(extensions).build()
+}
