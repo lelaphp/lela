@@ -641,30 +641,33 @@ fn answered(request: &Request, listen: &str, fill: &dyn Fn(&str) -> String) -> R
             let written = super::fpm::request(pairs, body);
             // A path is a Unix socket, and anything else `host:port`.
             let (stdout, stderr) = if listen.starts_with('/') {
-                let mut stream = UnixStream::connect(listen).map_err(Refused)?;
+                let stream = UnixStream::connect(listen).map_err(Refused)?;
                 stream.set_read_timeout(wait)?;
-                stream.write_all(&written).context("writing the request")?;
-                if request.shut {
-                    stream
-                        .shutdown(std::net::Shutdown::Write)
-                        .context("shutting the request's half")?;
-                }
-                super::fpm::answer(stream)?
+                fastcgi_round(stream, &written, request.shut, UnixStream::shutdown)?
             } else {
-                let mut stream = TcpStream::connect(listen).map_err(Refused)?;
+                let stream = TcpStream::connect(listen).map_err(Refused)?;
                 stream.set_read_timeout(wait)?;
-                stream.write_all(&written).context("writing the request")?;
-                if request.shut {
-                    stream
-                        .shutdown(std::net::Shutdown::Write)
-                        .context("shutting the request's half")?;
-                }
-                super::fpm::answer(stream)?
+                fastcgi_round(stream, &written, request.shut, TcpStream::shutdown)?
             };
             Ok(format!("{}\n-- stderr\n{}", shown(&stdout), shown(&stderr)))
         }
         (None, None) => bail!("a request is `http` or `params`"),
     }
+}
+
+/// One `FastCGI` request's records written to `stream`, the client's half
+/// shut after them where the line asks, and the answer read.
+fn fastcgi_round<S: Read + Write>(
+    mut stream: S,
+    written: &[u8],
+    shut: bool,
+    shutdown: fn(&S, std::net::Shutdown) -> std::io::Result<()>,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    stream.write_all(written).context("writing the request")?;
+    if shut {
+        shutdown(&stream, std::net::Shutdown::Write).context("shutting the request's half")?;
+    }
+    super::fpm::answer(stream)
 }
 
 #[cfg(test)]
