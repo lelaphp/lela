@@ -232,6 +232,71 @@ impl Served {
     }
 }
 
+/// The variable that tells a test binary, started again by
+/// [`in_a_process_apart`], which test it was started for.
+const APART: &str = "PHP_TEST_APART";
+
+/// `body` in a process of its own, for a test that forks through the
+/// engine: the test `name`, as the harness names it, started again with
+/// nothing else of the binary's inside the engine, so the fork is not
+/// refused for a sibling test's request. There `body` prints its line,
+/// or its failure before the process exits 1; here the test holds what
+/// that process printed to `came_to`, once it ends within half a minute.
+///
+/// # Panics
+///
+/// Where the process cannot start, fails, outlasts half a minute or did
+/// not print `came_to`, with what it printed in the message.
+pub fn in_a_process_apart(
+    name: &str,
+    came_to: &str,
+    body: impl FnOnce() -> Result<String, String>,
+) {
+    if std::env::var_os(APART).is_some_and(|apart| apart == name) {
+        let came = body();
+        let (Ok(line) | Err(line)) = &came;
+        println!("{line}");
+        if came.is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
+    let ran = run_apart(name);
+    let (Ok(said) | Err(said)) = &ran;
+    assert!(
+        ran.as_ref().is_ok_and(|printed| printed.contains(came_to)),
+        "{name} run apart: {said}"
+    );
+}
+
+/// What the test `name`, started again for itself alone, printed, where
+/// it passed within half a minute.
+fn run_apart(name: &str) -> Result<String, String> {
+    use std::time::{Duration, Instant};
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut run = std::process::Command::new(exe)
+        .args([name, "--exact", "--nocapture", "--test-threads=1"])
+        .env(APART, name)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let started = Instant::now();
+    while run.try_wait().map_err(|e| e.to_string())?.is_none() {
+        if started.elapsed() > Duration::from_secs(30) {
+            run.kill().ok();
+            return Err("it did not end in 30s: its fork's child hung".to_owned());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let out = run.wait_with_output().map_err(|e| e.to_string())?;
+    let printed = String::from_utf8_lossy(&out.stdout).into_owned();
+    if out.status.success() {
+        Ok(printed)
+    } else {
+        Err(format!("{}: {printed}", out.status))
+    }
+}
+
 impl Engine {
     /// Serve `source` as a CLI request into `sink` and hand back what it
     /// wrote, the shape every extension's capture test reads. The request
