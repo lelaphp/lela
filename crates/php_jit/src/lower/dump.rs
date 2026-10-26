@@ -389,6 +389,7 @@ fn check(check: Check) -> String {
         }
         Check::Stands { func: f, opline } => format!("stands {} {:04}", func(f), opline.0),
         Check::Arm { opline } => format!("arm {:04}", opline.0),
+        Check::Callee { func: f } => format!("callee {}", func(f)),
         Check::Room { bytes } => format!("room {bytes}"),
         Check::Class { object, class } => {
             let of = match object {

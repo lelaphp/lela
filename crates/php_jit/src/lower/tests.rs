@@ -19,8 +19,8 @@ use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
     DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FIB, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET,
     HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL, NATIVE_CALL, NBODY,
-    NESTED_READ, NESTED_WRITE, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_CALL,
-    REF_WRITE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
+    NESTED_READ, NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE,
+    REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL, STRING_BUILD, STRING_MATCH, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -1196,5 +1196,28 @@ fn a_methods_leave_gives_its_receiver_up() -> Result<(), String> {
         .filter(|line| line.contains("call_indirect") && line.contains(&address))
         .count();
     assert_eq!(freed, 1, "{clif}");
+    Ok(())
+}
+
+/// The calls `k`, `s` and `n` make: `k`'s method pushed in place with
+/// its receiver, and `s`'s and `n`'s held to their callee after the
+/// handler pushed them, each made in place with no send stepped, the
+/// call kernel cold (#3343).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn method_calls_lower_their_push_call_and_leave() -> Result<(), String> {
+    for fixture in [METHOD_CALL, STATIC_CALL, NEW_CALL] {
+        lowered(fixture)?;
+        let clif = std::fs::read_to_string(goldens_dir().join(format!("{}.clif", fixture.name)))
+            .map_err(|e| e.to_string())?;
+        let calls = |kernel: Kernel| {
+            let address = format!("{:#x}", symbols().address(kernel)).replace("0x7000", "0x7000_");
+            (clif.lines())
+                .filter(|line| line.contains("call_indirect") && line.contains(&address))
+                .count()
+        };
+        assert_eq!(calls(Kernel::Call), 1, "{}: {clif}", fixture.name);
+        assert_eq!(calls(Kernel::FreeThis), 1, "{}: {clif}", fixture.name);
+    }
     Ok(())
 }

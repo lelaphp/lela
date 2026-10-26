@@ -936,6 +936,7 @@ impl<'a> Emit<'a> {
                 }
                 Check::Direction { .. }
                 | Check::Stands { .. }
+                | Check::Callee { .. }
                 | Check::Arm { .. }
                 | Check::Class { .. } => {
                     return Err(mismatch("a body entry past a guard it cannot hold"));
@@ -1173,10 +1174,8 @@ impl<'a> Emit<'a> {
                 let held = self.value(value)?;
                 let (room, at) = self.place(held.slot)?;
                 let byte = self.b.ins().load(I8, trusted(), room, at + TYPE_AT);
-                let other =
-                    self.b
-                        .ins()
-                        .icmp_imm_s(IntCC::NotEqual, byte, tag(ZvalType::Reference));
+                let reference = tag(ZvalType::Reference);
+                let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, reference);
                 self.leave_if(other, guard.exit)?;
                 let reference = self.b.ins().load(I64, trusted(), room, at);
                 let inner =
@@ -1242,7 +1241,10 @@ impl<'a> Emit<'a> {
                 self.leave_if(short, guard.exit)?;
             }
             Check::Class { object, class } => self.class_guard(object, class, guard.exit)?,
-            Check::Direction { .. } | Check::Stands { .. } | Check::Arm { .. } => {
+            Check::Direction { .. }
+            | Check::Stands { .. }
+            | Check::Callee { .. }
+            | Check::Arm { .. } => {
                 return Err(mismatch("an op's own guard held before it"));
             }
         }
@@ -1860,6 +1862,7 @@ impl<'a> Emit<'a> {
                     self.leave_where(other, guard.exit)?;
                 }
                 Check::Stands { func, opline } => self.stands(func, opline, guard.exit)?,
+                Check::Callee { func } => self.callee_guard(func, guard.exit)?,
                 Check::Arm { opline } => {
                     let went = self.stood_word(I32, STOOD_OPLINE);
                     let there = self
@@ -2083,6 +2086,12 @@ impl<'a> Emit<'a> {
                     _ => self.push_call(at, line),
                 }
             }
+            Opcode::InitMethodCall => match self.ir.ops.get(at.index() + 1) {
+                Some(Op::InitCall {
+                    plain: Some(plain), ..
+                }) => self.push_in_place(line, plain),
+                _ => Err(mismatch("a method's call in place with no call held")),
+            },
             _ => Err(mismatch("an inline opline the lowering does not serve")),
         }
     }

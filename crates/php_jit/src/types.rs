@@ -591,6 +591,12 @@ pub(crate) enum Check {
     /// a published class, whose id names the one linked class in every
     /// request of the trace's epoch.
     Class { object: Object, class: ClassId },
+    /// The call the stepped `INIT_*` before it pushed through its handler
+    /// serves this op array, php's `zend_jit_func_guard` on `call->func`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:9283-9300`), so the trace's
+    /// plain call of it is the call made. Its exit goes on where the
+    /// interpreter stands, the call pushed.
+    Callee { func: FuncRef },
     /// A table's jump went elsewhere than this opline: php's exit per
     /// target of `zend_jit_switch`, taken where the stepped jump went
     /// there and landing where it went, so exit-fuzz fails it never.

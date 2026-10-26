@@ -115,13 +115,51 @@ pub(crate) const REF_CALL: Fixture = Fixture {
 };
 
 /// A method called on an object a variable holds, as `method_call`
-/// drives it: the method's frame left in place, its receiver given up
-/// after its variables (#3343).
+/// drives it: pushed in place under the class guard, the method's frame
+/// left in place, its receiver given up after its variables (#3343).
 pub(crate) const METHOD_CALL: Fixture = Fixture {
     name: "method_call",
     program: "method_call",
     plan: &[
         ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A static method's call, as `static_call` drives it: pushed through its
+/// handler, the callee held by a guard after it, its sends, activation
+/// and leave in place (#3343).
+pub(crate) const STATIC_CALL: Fixture = Fixture {
+    name: "static_call",
+    program: "method_call",
+    plan: &[
+        ("record.function", "s"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// `new` with a constructor, as `new_object` drives it: the object made
+/// and the constructor's call pushed by `NEW`'s handler, the callee held
+/// by a guard after it, the call made and left in place (#3343).
+pub(crate) const NEW_CALL: Fixture = Fixture {
+    name: "new_call",
+    program: "method_call",
+    plan: &[
+        ("record.function", "n"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A method of a request-scoped class, an evaluated base's: its call
+/// pushed by its handler, with no class guard or callee held (#3343).
+pub(crate) const METHOD_SCOPED: Fixture = Fixture {
+    name: "method_scoped",
+    program: "method_call",
+    plan: &[
+        ("record.function", "scoped"),
         ("record.start", "loop"),
         ("record.headers", "0"),
     ],

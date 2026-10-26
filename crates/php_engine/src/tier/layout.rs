@@ -20,7 +20,8 @@ use php_heap::{FrameRef, HEADER_AT, HeaderImage, ROOM_BYTES, StackLayout, VmStac
 use php_unit::MapPtrOffset;
 use php_unit::decl::Bare;
 
-use super::FuncRef;
+use super::{ClassId, FuncRef};
+use crate::api::call::Function;
 use crate::api::request::Request;
 use crate::exec::{CallInfo, Header};
 
@@ -47,6 +48,7 @@ pub struct FrameLayout {
     link: u32,
     header: u32,
     header_bytes: u32,
+    callee: u32,
     opline: u32,
     info: u32,
     num_args: u32,
@@ -81,6 +83,7 @@ pub const FRAME: FrameLayout = FrameLayout {
     link: 0,
     header: word(HEADER_AT),
     header_bytes: word(size_of::<Header>()),
+    callee: word(HEADER_AT + Header::CALLEE_AT),
     opline: word(HEADER_AT + Header::OPLINE_AT),
     info: word(HEADER_AT + Header::INFO_AT),
     num_args: word(HEADER_AT + Header::NUM_ARGS_AT),
@@ -210,6 +213,15 @@ impl FrameLayout {
     #[must_use]
     pub const fn annex(&self) -> u32 {
         self.annex
+    }
+
+    /// `EX(func)` as another process reads it, a word: the address of
+    /// the callee's record, one per function in a request, which a call
+    /// a handler pushed is held to as php's `zend_jit_func_guard` holds
+    /// `call->func`.
+    #[must_use]
+    pub const fn callee(&self) -> u32 {
+        self.callee
     }
 
     /// `Z_OBJ(EX(This))`, a word: zero for none.
@@ -470,13 +482,17 @@ pub struct PlainCall {
     slots: u32,
     activation: Option<Activation>,
     checks: bool,
+    /// A method's call: the class of its receiver, its called scope, and
+    /// the method its methods answered, both published.
+    method: Option<(ClassId, Function)>,
 }
 
-/// Two calls of one callee and one argument count are the same call: a
-/// user function by its op array, a native by its name.
+/// Two calls of one callee, one argument count and one called scope are
+/// the same call: a user function by its op array, a native by its name.
 impl PartialEq for PlainCall {
     fn eq(&self, other: &PlainCall) -> bool {
         (self.callee, self.count) == (other.callee, other.count)
+            && self.scope() == other.scope()
             && (self.callee.is_some() || self.name == other.name)
     }
 }
@@ -566,12 +582,23 @@ impl PlainCall {
     pub fn checks(&self) -> bool {
         self.checks
     }
+
+    /// A method's call: the class of the receiver it was pushed over,
+    /// which its called scope is and whose table answered the method;
+    /// none for a function's.
+    #[must_use]
+    pub fn scope(&self) -> Option<ClassId> {
+        self.method.map(|(class, _)| class)
+    }
 }
 
 /// The plain call `call` is, the record on top of the stack being built:
 /// a call to a user function whose `INIT_*` found its entry plain, or to a
 /// native of the engine's table, given no receiver, closure, scope or
-/// annex, with no observer declared; none for any other.
+/// annex, with no observer declared; or to a method of a published class
+/// a published method answered, over a receiver of that class or none,
+/// the class its called scope, as `INIT_METHOD_CALL`,
+/// `INIT_STATIC_METHOD_CALL` and `NEW` push it; none for any other.
 #[must_use]
 pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let (top, laid) = req.vm().stack.top()?;
@@ -579,19 +606,32 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let function = header.function?;
     let plain = top == call
         && header.info.building()
-        && header.this().is_none()
         && header.closure.is_none()
-        && header.called_scope().is_none()
         && header.annex.is_none()
         && !crate::observer::observing(req);
     if !plain {
         return None;
     }
+    let method = match (header.called_scope(), header.this()) {
+        (None, None) => None,
+        (Some(class), this)
+            if class.is_published()
+                && function.published_number().is_some()
+                && this.is_none_or(|this| this.class() == class) =>
+        {
+            Some((class, function))
+        }
+        _ => return None,
+    };
     let name = || {
         let decl = req.symbols().function_decl(function)?;
         Some(decl.name.0.to_ascii_lowercase().into_boxed_slice())
     };
-    let Some(user) = req.user_function(function) else {
+    let user = req.user_function(function);
+    if method.is_some() && user.is_none() {
+        return None;
+    }
+    let Some(user) = user else {
         // A native's call: its arguments' room and its record, as
         // `INIT_FCALL` pushes `fbc` (`init_native`).
         req.native_entry(function)?;
@@ -603,6 +643,7 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
             slots: u32::try_from(laid.len()).ok()?,
             activation: None,
             checks: false,
+            method: None,
         });
     };
     if !header.info.plain_entry() {
@@ -656,6 +697,7 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
         slots,
         activation,
         checks,
+        method,
     })
 }
 
@@ -666,7 +708,10 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
 /// declared no such function yet, or its entry is no longer plain.
 #[must_use]
 pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
-    let function = req.function_named(Bare::resolved(&call.name))?;
+    let function = match call.method {
+        Some((_, method)) => method,
+        None => req.function_named(Bare::resolved(&call.name))?,
+    };
     let served = if let Some(user) = req.user_function(function) {
         let code = crate::exec::body_of(&user.unit, user.body)?;
         Some(FuncRef::at(code.runtime_cache))
@@ -677,7 +722,9 @@ pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
     if served != call.callee {
         return None;
     }
-    let (_, header) = req.laid_call(Header::call(function, call.count))?;
+    let mut header = Header::call(function, call.count);
+    header.set_called_scope(call.scope());
+    let (_, header) = req.laid_call(header)?;
     // A header with no record of its callee is one `push_call` completes
     // as it lays it down, and so not one to copy.
     let plain = call.callee.is_none() || header.info.plain_entry();

@@ -725,13 +725,11 @@ impl UnitView {
             .and_then(|(_, returns)| returns.as_ref())
     }
 
-    /// The plain call to the op array `f` names with `count` arguments;
-    /// none unless [`UnitView::hold_call`] took one.
-    #[must_use]
-    pub fn call(&self, f: FuncRef, count: u32) -> Option<&super::PlainCall> {
-        self.calls
-            .iter()
-            .find(|call| call.callee() == Some(f) && call.count() == count)
+    /// The plain calls to the op array `f` names with `count` arguments
+    /// [`UnitView::hold_call`] took: a function's, and a method's of each
+    /// called scope ([`super::PlainCall::scope`]).
+    pub fn calls_of(&self, f: FuncRef, count: u32) -> impl Iterator<Item = &super::PlainCall> {
+        (self.calls.iter()).filter(move |call| call.callee() == Some(f) && call.count() == count)
     }
 
     /// The plain call to the native named `name`, lowered, with `count`

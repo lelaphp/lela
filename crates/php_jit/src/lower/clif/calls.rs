@@ -24,8 +24,9 @@ use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
 use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, Value};
 use cranelift_frontend::Variable;
-use php_engine::tier::{FRAME, FrameLayout, PlainCall};
+use php_engine::tier::{FRAME, FrameLayout, FuncRef, PlainCall};
 use php_heap::{Obj, Ref, Zval, ZvalType};
+use php_unit::Opcode;
 
 use super::{
     COUNTED, Dtor, Emit, Kernel, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE, STOOD_ROOM,
@@ -33,7 +34,7 @@ use super::{
 };
 use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT, RETURNED, THREW};
 use crate::types::{
-    Abort, ArgChecks, End, ExitId, Frame, Imm, Line, OpId, Operand, Owners, Returned, Vars,
+    Abort, ArgChecks, End, ExitId, Frame, Imm, Line, Object, OpId, Operand, Owners, Returned, Vars,
 };
 
 /// What a leave in place writes into the caller's slot: a scalar, or a
@@ -155,6 +156,60 @@ impl Emit<'_> {
         i32::try_from(at * size_of::<usize>()).map_err(|_| mismatch("too many calls in place"))
     }
 
+    /// php's `zend_jit_func_guard` after a stepped `INIT_*`
+    /// ([`crate::types::Check::Callee`]): leave through `exit` unless the
+    /// call its handler pushed, the one the kernel stood, serves `func`,
+    /// its `EX(func)` the record word of the request's image of a held
+    /// call to it; and where no call was pushed, or the request is not
+    /// ready for the trace's calls in place. `static::f()` serves `B::f`
+    /// where the trace recorded `A::f`, and leaves at the guard; a
+    /// constructor made in place throws out of its call:
+    ///
+    /// ```php
+    /// class A { static function f($x) { return $x; } static function g($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += static::f($i); } return $t; } }
+    /// class B extends A { static function f($x) { return 2 * $x; } }
+    /// class C { public $v; function __construct($v) { if ($v == 7) { throw new Exception("seven"); } $this->v = $v; } }
+    /// function n($k) { $t = 0; for ($i = 0; $i < $k; $i++) { try { $c = new C($i); $t += $c->v; } catch (Exception $e) { echo $e->getMessage(), " "; } } return $t; }
+    /// echo A::g(30), " ", B::g(30), " ", n(12), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 435 870 seven 59
+    /// ```
+    ///
+    /// ```php
+    /// class A { static function f($x) { return $x; } static function g($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += static::f($i); } return $t; } }
+    /// class B extends A { static function f($x) { return 2 * $x; } }
+    /// class C { public $v; function __construct($v) { if ($v == 7) { throw new Exception("seven"); } $this->v = $v; } }
+    /// function n($k) { $t = 0; for ($i = 0; $i < $k; $i++) { try { $c = new C($i); $t += $c->v; } catch (Exception $e) { echo $e->getMessage(), " "; } } return $t; }
+    /// echo A::g(30), " ", B::g(30), " ", n(12), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 435 870 seven 59
+    /// ```
+    pub(super) fn callee_guard(&mut self, func: FuncRef, exit: ExitId) -> Result<(), Abort> {
+        let held = (self.held.iter())
+            .find(|held| held.callee() == Some(func))
+            .ok_or_else(|| mismatch("a callee guard on a call the trace does not hold"))?;
+        let header = self.header_of(held)?;
+        let call = self.stood_word(I64, STOOD_CALL);
+        let none = self.b.ins().icmp_imm_s(IntCC::Equal, call, 0);
+        let unready = self.unready()?;
+        let refused = self.b.ins().bor(none, unready);
+        self.leave_if(refused, exit)?;
+        let cx = self
+            .cx
+            .ok_or_else(|| mismatch("a callee guard before the entry"))?;
+        let images = self.b.ins().load(I64, trusted(), cx, IMAGES_AT);
+        let image = self.b.ins().load(I64, trusted(), images, header);
+        let expected = self
+            .b
+            .ins()
+            .load(I64, trusted(), image, at(L.callee() - L.header()));
+        let pushed = self.b.ins().load(I64, trusted(), call, at(L.callee()));
+        let other = self.b.ins().icmp(IntCC::NotEqual, pushed, expected);
+        self.leave_if(other, exit)
+    }
+
     /// Whether the request is not ready for the trace's calls in place,
     /// an `i8` ([`READY_AT`]).
     fn unready(&mut self) -> Result<Value, Abort> {
@@ -210,6 +265,9 @@ impl Emit<'_> {
             self.b.ins().store(trusted(), zero, top, at(cell));
             self.b.ins().store(trusted(), zero, top, at(cell + 8));
         }
+        if line.opcode == Opcode::InitMethodCall {
+            self.receive(line, top)?;
+        }
         self.b.ins().store(trusted(), top, stack, INNERMOST);
         // The record, then the table's length and the top.
         let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
@@ -248,6 +306,72 @@ impl Emit<'_> {
         self.b.ins().jump(join, &[]);
         self.b.switch_to_block(join);
         self.b.seal_block(join);
+        Ok(())
+    }
+
+    /// The receiver of a method's call pushed in place at `top`, as
+    /// `zend_jit_push_call_frame` writes it (`Z/ext/opcache/jit/zend_jit_ir.c:8657-8678`):
+    /// `Z_PTR(call->This)`, and over a variable one owner more of it with
+    /// `ZEND_CALL_RELEASE_THIS`; over `$this` the frame's receiver lent,
+    /// pinned as [`php_heap::Obj::pin`] pins it, which the leave lets go
+    /// ([`Emit::free_this`]). An object of another class leaves at the
+    /// class guard before the push; a receiver whose method gives up the
+    /// last other owner is destroyed as its frame leaves:
+    ///
+    /// ```php
+    /// class A { public $v = 1; function m($x) { return $this->v + $x + $this->n(); } function n() { return 10; } }
+    /// class B extends A { function m($x) { return 100; } }
+    /// function f($os, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $o = $os[$i % 3]; $t += $o->m($i); } return $t; }
+    /// class C { public $o; function m() { $this->o = null; return 1; } function __destruct() { echo "c "; } }
+    /// function g($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $c = new C; $c->o = $c; $t += $c->m(); unset($c); } return $t; }
+    /// echo f([new A, new A, new B], 30), " ", g(3), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 1500 c c c 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { public $v = 1; function m($x) { return $this->v + $x + $this->n(); } function n() { return 10; } }
+    /// class B extends A { function m($x) { return 100; } }
+    /// function f($os, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $o = $os[$i % 3]; $t += $o->m($i); } return $t; }
+    /// class C { public $o; function m() { $this->o = null; return 1; } function __destruct() { echo "c "; } }
+    /// function g($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $c = new C; $c->o = $c; $t += $c->m(); unset($c); } return $t; }
+    /// echo f([new A, new A, new B], 30), " ", g(3), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 1500 c c c 3
+    /// ```
+    fn receive(&mut self, line: &Line, top: Value) -> Result<(), Abort> {
+        let (object, owned) = match line.op1 {
+            Operand::Unused => (Object::This(line.frame), false),
+            Operand::Value(value) => (Object::Value(value), true),
+            Operand::Constant(_) => return Err(mismatch("a method called on a constant")),
+        };
+        let this = self.object(object)?;
+        self.b.ins().store(trusted(), this, top, at(L.this()));
+        if owned {
+            // `GC_ADDREF`, the count kept below the bit above it.
+            let count = self.b.ins().load(I32, trusted(), this, COUNT_AT);
+            let bits = self.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
+            let room =
+                (self.b.ins()).icmp_imm_u(IntCC::NotEqual, bits, i64::from(Zval::COUNT_BITS));
+            let room = self.b.ins().uextend(I32, room);
+            let more = self.b.ins().iadd(count, room);
+            self.b.ins().store(trusted(), more, this, COUNT_AT);
+            let info = self.b.ins().load(I32, trusted(), top, at(L.info()));
+            let info = self.b.ins().bor_imm_u(info, i64::from(L.release_this()));
+            self.b.ins().store(trusted(), info, top, at(L.info()));
+        } else {
+            let word = self.b.ins().load(I32, trusted(), this, PINS_AT);
+            let pins = self.b.ins().band_imm_u(word, i64::from(Obj::PINS));
+            let room = self
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::NotEqual, pins, i64::from(Obj::PINS));
+            let room = self.b.ins().uextend(I32, room);
+            let word = self.b.ins().iadd(word, room);
+            self.b.ins().store(trusted(), word, this, PINS_AT);
+        }
         Ok(())
     }
 

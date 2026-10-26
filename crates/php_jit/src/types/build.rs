@@ -658,19 +658,29 @@ impl<'a> Builder<'a> {
             seen,
         );
         let form = self.form(frame, (&op, data_line.as_ref()), seen, (next, branch));
+        let method = self.method_at(frame, &op, (op1, samples[0]), seen, next);
         let form = match (op.opcode, property) {
             (opcode, Some(_)) if on_declared_slot(opcode) => Form::Inline,
             (opcode, None) if on_declared_slot(opcode) => Form::Step,
+            (Opcode::InitMethodCall, _) if method.is_some() => Form::Inline,
             _ => form,
         };
+        if let Some((Some(object), plain)) = method.as_ref()
+            && let Some(class) = plain.scope()
+        {
+            self.class_guard(idx, frame, at, (*object, class));
+        }
         if let (Form::Inline, Some(property)) = (form, property)
             && property.slot.cached().is_none()
         {
-            self.class_guard(idx, frame, at, property);
+            self.class_guard(idx, frame, at, (property.object, property.class));
         }
-        let in_place = (form == Form::Inline)
-            .then(|| self.in_place(frame, &op, next))
-            .flatten();
+        let in_place = match method {
+            Some((_, plain)) => Some(InPlace::Push(plain)),
+            None => (form == Form::Inline)
+                .then(|| self.in_place(frame, &op, next))
+                .flatten(),
+        };
         self.sampled.insert(idx, samples);
         let map_ptr = match property.and_then(|property| property.slot.cached()) {
             Some(raw) if form == Form::Inline => Some(self.map_ptr_of(raw)),
@@ -762,6 +772,17 @@ impl<'a> Builder<'a> {
             self.pushing = Some(plain);
         }
         self.stands(idx, (frame, at), &op, after.as_ref(), ahead, t1);
+        if form == Form::Step
+            && let Some(plain) = self.handed_at(&op, next)
+            && let Some(func) = plain.callee()
+        {
+            self.guards.push(Placed {
+                at: GuardAt::Within(idx),
+                check: Check::Callee { func },
+                exit: draft(Point::After(idx), frame, At::Stands),
+            });
+            self.pushing = Some(plain);
+        }
         // An array's reset goes on whatever it holds, so php's code holds
         // no direction there.
         let one_way = op.opcode == Opcode::FeResetR && form == Form::Inline;
@@ -1122,14 +1143,15 @@ impl<'a> Builder<'a> {
         // unqualified call in a namespace one declared there after the
         // recording, which php's trace guards and this tier does not, so
         // how it takes its arguments is not known.
-        let named = began == Began::Here
-            && matches!(
-                self.ops.last(),
-                Some(Op::Line(line)) if matches!(
-                    line.opcode,
-                    Opcode::InitFcall | Opcode::InitFcallByName
-                )
-            );
+        let named = plain.as_ref().is_some_and(|plain| plain.scope().is_some())
+            || began == Began::Here
+                && matches!(
+                    self.ops.last(),
+                    Some(Op::Line(line)) if matches!(
+                        line.opcode,
+                        Opcode::InitFcall | Opcode::InitFcallByName
+                    )
+                );
         self.begin();
         self.calls.push(Call {
             inline,
@@ -1251,7 +1273,8 @@ impl<'a> Builder<'a> {
                 let plain = match callee {
                     // A function named in full, or the frame's own.
                     Callee::User(callee) if op.opcode == Opcode::InitFcall || *callee == func => {
-                        self.view.call(*callee, op.extended_value)?
+                        (self.view.calls_of(*callee, op.extended_value))
+                            .find(|plain| plain.scope().is_none())?
                     }
                     // A native named in full, which php's trace pushes as
                     // it pushes a user function's call
@@ -2407,19 +2430,89 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// The call a method's `INIT_METHOD_CALL` pushes in place, as php's
+    /// `zend_jit_init_method_call` pushes it under its class guard
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:8950-9213`): over a constant
+    /// name, on `$this` or a variable that holds an object as it is, of a
+    /// published class the recording took the call of
+    /// ([`UnitView::call`]), the object the guard holds of that class
+    /// and none for a static method's call.
+    fn method_at(
+        &self,
+        frame: Frame,
+        op: &Opline,
+        (op1, sample1): (Operand, Option<Sample>),
+        seen: Seen,
+        next: Option<&Event>,
+    ) -> Option<(Option<Object>, PlainCall)> {
+        if op.opcode != Opcode::InitMethodCall || op.op2_type != OperandKind::Const {
+            return None;
+        }
+        let Some(Event::InitCall {
+            callee: Callee::User(callee),
+            began: Began::Here,
+        }) = next
+        else {
+            return None;
+        };
+        let class = sample1?.class?;
+        let object = match (op.op1_type, op1) {
+            (OperandKind::Unused, _) => Object::This(frame),
+            (OperandKind::Cv, Operand::Value(value))
+                if seen.types[0] == Types::OBJECT && seen.read[0] == Read::InPlace =>
+            {
+                Object::Value(value)
+            }
+            _ => return None,
+        };
+        let plain = (self.view.calls_of(*callee, op.extended_value))
+            .find(|plain| plain.scope() == Some(class))?;
+        Some((Some(object), plain.clone()))
+    }
+
+    /// The call a stepped `NEW`, `INIT_STATIC_METHOD_CALL` or
+    /// `INIT_METHOD_CALL` pushes through its handler, where the recording
+    /// took a plain call of a method to the callee it recorded: the
+    /// handler looks the method up, and a guard after it holds the call it
+    /// pushed to that callee ([`Check::Callee`]), as php's code holds
+    /// `call->func` with `zend_jit_func_guard` past the lookup
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:9283-9300`), so the call's sends,
+    /// its activation and its leave are compiled in place.
+    fn handed_at(&self, op: &Opline, next: Option<&Event>) -> Option<PlainCall> {
+        if !matches!(
+            op.opcode,
+            Opcode::New | Opcode::InitStaticMethodCall | Opcode::InitMethodCall
+        ) {
+            return None;
+        }
+        let Some(Event::InitCall {
+            callee: Callee::User(callee),
+            began: Began::Here,
+        }) = next
+        else {
+            return None;
+        };
+        (self.view.calls_of(*callee, op.extended_value))
+            .find(|plain| plain.scope().is_some())
+            .cloned()
+    }
+
     /// php's `zend_jit_class_guard` on the object a property opline at
     /// `here` reads, before it, where no guard held its class already.
-    fn class_guard(&mut self, idx: OpId, frame: Frame, here: OplineIdx, property: PropertyAt) {
-        if self.classed.get(&property.object) == Some(&property.class) {
+    fn class_guard(
+        &mut self,
+        idx: OpId,
+        frame: Frame,
+        here: OplineIdx,
+        (object, class): (Object, ClassId),
+    ) {
+        if self.classed.get(&object) == Some(&class) {
             return;
         }
-        self.classed.insert(property.object, property.class);
+        self.classed.insert(object, class);
         self.guards.push(Placed {
             at: GuardAt::Before(idx),
-            check: Check::Class {
-                object: property.object,
-                class: property.class,
-            },
+            check: Check::Class { object, class },
             exit: draft(Point::Before(idx), frame, At::Opline(here)),
         });
     }
@@ -2854,6 +2947,7 @@ impl<'a> Builder<'a> {
             }
             | Check::Direction { .. }
             | Check::Stands { .. }
+            | Check::Callee { .. }
             | Check::Arm { .. }
             | Check::Room { .. } => None,
         }
@@ -3943,6 +4037,7 @@ fn stack_type(check: Check) -> Option<(ValueId, ZvalType)> {
         | Check::Class { .. }
         | Check::Direction { .. }
         | Check::Stands { .. }
+        | Check::Callee { .. }
         | Check::Arm { .. }
         | Check::Room { .. } => None,
     }

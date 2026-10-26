@@ -28,9 +28,10 @@ use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
     DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FANNKUCH, FIB, Fixture, HASH_FETCH_W, HASH_IS,
-    HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL, NATIVE_CALL,
-    NBODY, NESTED_READ, NESTED_WRITE, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE,
-    REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held, traced as built,
+    HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL, METHOD_SCOPED,
+    NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS,
+    OBJECT_VALUE, OWNING_LEAVE, REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL,
+    STRING_BUILD, STRING_MATCH, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -2680,5 +2681,170 @@ fn a_methods_frame_is_left_in_place_with_its_receiver() -> Result<(), String> {
         "{rendered}"
     );
     assert!(leave.unwind.is_some(), "{rendered}");
+    Ok(())
+}
+
+/// The line of `opcode` in `ir`, the first.
+fn line_of(ir: &TraceIr, opcode: Opcode) -> Option<&super::Line> {
+    ir.ops.iter().find_map(|op| match op {
+        Op::Line(line) if line.opcode == opcode => Some(line),
+        _ => None,
+    })
+}
+
+/// A method called on a variable's object of a published class is pushed
+/// in place under the class guard, its send compiled by value and the
+/// call made in place, as php's `zend_jit_init_method_call` pushes it
+/// once its class guard holds (#3343).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_methods_call_is_pushed_in_place_under_its_class_guard() -> Result<(), String> {
+    let ir = golden(METHOD_CALL)?;
+    let rendered = dump::render(&ir);
+    let init = line_of(&ir, Opcode::InitMethodCall)
+        .ok_or_else(|| format!("no INIT_METHOD_CALL in\n{rendered}"))?;
+    assert_eq!(init.form, Form::Inline, "{rendered}");
+    assert!(
+        (ir.guards.iter()).any(|guard| matches!(
+            guard.check,
+            Check::Class {
+                object: super::Object::Value(_),
+                ..
+            }
+        )),
+        "{rendered}"
+    );
+    // `SEND_VAR_EX` compiled as the `SEND_VAR` its callee takes by value.
+    let send =
+        line_of(&ir, Opcode::SendVar).ok_or_else(|| format!("no SEND_VAR in\n{rendered}"))?;
+    assert_eq!(send.form, Form::Inline, "{rendered}");
+    let made =
+        line_of(&ir, Opcode::DoFcall).ok_or_else(|| format!("no DO_FCALL in\n{rendered}"))?;
+    assert!(matches!(made.imm, super::Imm::Make { .. }), "{rendered}");
+    Ok(())
+}
+
+/// A static method's call and `new`'s constructor are pushed by their
+/// handlers, and a guard after each holds the callee the trace recorded,
+/// as php's `zend_jit_func_guard` does; the sends after it are compiled by
+/// value and the call made in place (#3343).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_its_handler_pushes_is_held_to_its_callee() -> Result<(), String> {
+    for (fixture, opcode) in [
+        (STATIC_CALL, Opcode::InitStaticMethodCall),
+        (NEW_CALL, Opcode::New),
+    ] {
+        let ir = golden(fixture)?;
+        let rendered = dump::render(&ir);
+        let init = line_of(&ir, opcode).ok_or_else(|| format!("no {opcode:?} in\n{rendered}"))?;
+        assert_eq!(init.form, Form::Step, "{rendered}");
+        assert!(
+            (ir.guards.iter()).any(|guard| matches!(guard.check, Check::Callee { .. })),
+            "{rendered}"
+        );
+        let made = (ir.ops.iter())
+            .find_map(|op| match op {
+                Op::Line(line) if matches!(line.opcode, Opcode::DoFcall | Opcode::DoUcall) => {
+                    Some(line)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| format!("no DO_*CALL in\n{rendered}"))?;
+        assert!(matches!(made.imm, super::Imm::Make { .. }), "{rendered}");
+        let sends = [
+            Opcode::SendVar,
+            Opcode::SendVal,
+            Opcode::SendVarEx,
+            Opcode::SendValEx,
+        ];
+        assert!(
+            (ir.ops.iter()).all(|op| !matches!(op, Op::Line(line)
+                if sends.contains(&line.opcode) && line.form == Form::Step)),
+            "{rendered}"
+        );
+    }
+    Ok(())
+}
+
+/// A method of a request-scoped class, whose id and op array are the
+/// request's, is pushed by its handler with no class guard or callee
+/// held, and its sends stay the handlers' (#3343).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_request_scoped_classs_method_is_pushed_by_its_handler() -> Result<(), String> {
+    let ir = golden(METHOD_SCOPED)?;
+    let rendered = dump::render(&ir);
+    let init = line_of(&ir, Opcode::InitMethodCall)
+        .ok_or_else(|| format!("no INIT_METHOD_CALL in\n{rendered}"))?;
+    assert_eq!(init.form, Form::Step, "{rendered}");
+    assert!(
+        (ir.guards.iter())
+            .all(|guard| !matches!(guard.check, Check::Class { .. } | Check::Callee { .. })),
+        "{rendered}"
+    );
+    Ok(())
+}
+
+/// The clobber rule at a method's leave in place whose receiver's
+/// destructor runs (`free_this`): no `call` effect, so the caller's
+/// variables, a reference among them, are read again by nothing, as
+/// php's code keeps every type and register across `OBJ_RELEASE`
+/// (`Emit::free_this`'s witnesses hold such a destructor) (#3343).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_leave_whose_receiver_is_destroyed_reloads_nothing() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "class D { function m($i) { return $i; } function __destruct() { } }
+        function f(array &$a, int $n) {
+            $s = 0;
+            for ($i = 0; $i < $n; $i++) { $s += $a[0]; $d = new D; $s += $d->m($i); unset($d); $s += $a[0]; }
+            return $s;
+        }
+        $x = [1]; echo f($x, 3), \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let (at, leave) = (ir.ops.iter().enumerate())
+        .find_map(|(at, op)| match op {
+            Op::Line(line) if line.opcode == Opcode::Return => Some((at, line)),
+            _ => None,
+        })
+        .ok_or_else(|| format!("no RETURN in\n{rendered}"))?;
+    assert!(
+        matches!(leave.imm, super::Imm::Leave { receives: true, .. }),
+        "{rendered}"
+    );
+    assert!(leave.unwind.is_some(), "a destructor may throw: {rendered}");
+    let at = OpId(u32::try_from(at).map_err(|_| "a long trace")?);
+    assert_eq!(reloaded(&ir, at), Vec::<u32>::new(), "{rendered}");
+    Ok(())
+}
+
+/// The clobber rule at `new`, which has no `call` effect, and whose
+/// constructor, made in place and followed, may throw: nothing is read
+/// again after the `NEW`, a reference's inner type guarded where it is
+/// read as always, and the constructor's call unwinds where it throws
+/// (#3343).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_new_whose_constructor_may_throw_reloads_nothing() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "class C { public $v; function __construct($v) { if ($v > 99) { throw new Exception; } $this->v = $v; } }
+        function f(array &$a, int $n) {
+            $s = 0;
+            for ($i = 0; $i < $n; $i++) { $s += $a[0]; $c = new C($i); $s += $c->v; $s += $a[0]; }
+            return $s;
+        }
+        $x = [1]; echo f($x, 3), \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let at = stepped(&ir, Opcode::New)?;
+    assert_eq!(reloaded(&ir, at), Vec::<u32>::new(), "{rendered}");
+    let made =
+        line_of(&ir, Opcode::DoFcall).ok_or_else(|| format!("no DO_FCALL in\n{rendered}"))?;
+    assert!(matches!(made.imm, super::Imm::Make { .. }), "{rendered}");
+    assert!(made.unwind.is_some(), "{rendered}");
     Ok(())
 }
