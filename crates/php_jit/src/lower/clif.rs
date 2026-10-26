@@ -332,7 +332,7 @@ impl Onward {
     /// concatenation and a rope's pieces, whose string arms the handler
     /// holds as php's own functions over two strings hold them, an
     /// assignment, a write to an element and a compound one, a send, a
-    /// frameless call to a native, a string's length, a cast to a
+    /// frameless call to a native, `func_num_args()`, a string's length, a cast to a
     /// boolean, the free of a `foreach`'s array, a property's fetch,
     /// write, compound write, increment and decrement, whose `__get` and
     /// `__set` the handler serves through an `execute` of their own, as
@@ -587,6 +587,7 @@ impl Onward {
             | Opcode::Strlen
             | Opcode::Bool
             | Opcode::FeFree
+            | Opcode::FuncNumArgs
             | Opcode::FetchObjR
             | Opcode::FetchObjIs
             | Opcode::FetchObjW
@@ -2026,7 +2027,7 @@ impl<'a> Emit<'a> {
             Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => self.rope(line),
             Opcode::Concat | Opcode::FastConcat => self.concat(line),
             Opcode::Bool | Opcode::BoolNot => self.bool(at, line),
-            Opcode::FeFree => self.free_temp(line, line.op1),
+            Opcode::FeFree | Opcode::Free => self.free_temp(line, line.op1),
             Opcode::SendVal | Opcode::SendVar => self.send(at, line),
             Opcode::CheckFuncArg => self.check_func_arg(),
             Opcode::TypeCheck => self.type_check(at, line),
@@ -2880,7 +2881,31 @@ impl<'a> Emit<'a> {
     /// destructor throws leaving through the opline's unwind. A
     /// `foreach`'s array freed at its loop's end is this, php's
     /// `zend_jit_free` of `FE_FREE` over an array, which holds no iterator
-    /// to delete (`Z/ext/opcache/jit/zend_jit_ir.c:11543-11580`).
+    /// to delete (`Z/ext/opcache/jit/zend_jit_ir.c:11543-11580`), and a
+    /// `FREE` of a call's unused value is this too, php's `zend_jit_free`
+    /// of a `FREE`. An object a call returns, unused, its destructor served
+    /// at the `FREE`, beside `func_num_args()`, whose handler the trace
+    /// calls:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d"; } }
+    /// function mk($i) { return $i % 3 ? new D : [$i]; }
+    /// function f($n) { $t = 0; for ($i = 0; $i < $n; $i++) { mk($i); $t += func_num_args(); } return $t; }
+    /// echo f(7), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// dddd7
+    /// ```
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d"; } }
+    /// function mk($i) { return $i % 3 ? new D : [$i]; }
+    /// function f($n) { $t = 0; for ($i = 0; $i < $n; $i++) { mk($i); $t += func_num_args(); } return $t; }
+    /// echo f(7), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// dddd7
+    /// ```
     fn free_temp(&mut self, line: &Line, operand: Operand) -> Result<(), Abort> {
         let Operand::Value(value) = operand else {
             return Ok(());

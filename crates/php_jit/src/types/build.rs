@@ -1054,7 +1054,7 @@ impl<'a> Builder<'a> {
                     ) && [op1, op2].into_iter().any(|operand| {
                         self.is_temp(operand) && !self.types_of(frame, operand).within(UNCOUNTED)
                     }))
-                    || op.opcode == Opcode::FeFree
+                    || matches!(op.opcode, Opcode::FeFree | Opcode::Free)
                     // The join may refuse, the memory limit or the string's
                     // size, and leave it pending.
                     || matches!(
@@ -2239,6 +2239,9 @@ impl<'a> Builder<'a> {
                     && (scalar(t1) || copied(op.op1_type, op.op1, t1))
             }
             Opcode::TypeCheck => type_checked(op, t1, seen.read[0]),
+            // php's `zend_jit_free` of a `FREE`: the temporary given up as
+            // `jit_FREE_OP` gives it up (`:11543-11580`).
+            Opcode::Free => matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var),
             // A check of an argument the trace knows the callee takes by
             // value, php's `zend_jit_check_func_arg` (`:9925-9960`).
             Opcode::CheckFuncArg => {
