@@ -502,7 +502,7 @@ deny_types = ["std::sync::Mutex", "std::sync::RwLock", "std::cell::Cell", "std::
               "std::rc::Rc"]
 deny_macros = ["std::thread_local"]
 adr = "0005"
-text = "Extension state is request-scoped, immutable engine-scoped or process-scoped (ADR-0005, ADR-0010); no lock, cell, once, Rc or thread-local in ext/*. Cross-request caching is api::Cache; a library's object a call into PHP code must outlive is the request's, held by Memory::holding (ADR-0013)."
+text = "Extension state is request-scoped, immutable engine-scoped or process-scoped (ADR-0005, ADR-0010); no lock, cell, once, Rc or thread-local in ext/*. Cross-request caching is api::Cache; a library's object a call into PHP code must outlive is the request's, held by Memory::holding (ADR-0013); a C variable exported from src/ffi/ under php's name is C ABI, not state (#3551)."
 # Renders to the generated, committed `ext/clippy.toml` (`disallowed-types`);
 # a stale copy is a `budget` failure. The wildcard is expanded from Cargo.lock.
 
