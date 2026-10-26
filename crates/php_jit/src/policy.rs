@@ -52,7 +52,8 @@ const ID_SHIFT: u32 = 8;
 /// php's `ZEND_JIT_ON_HOT_TRACE`, the one trigger this tier runs.
 const HOT_TRACE: u32 = 5;
 
-/// How the tier runs, decided once at engine start.
+/// How the tier traces where it traces, decided once at engine start;
+/// when it traces is [`Runs`]'s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
     /// A safepoint answers `Continue` before it reads a word.
@@ -198,6 +199,22 @@ impl Setting {
             Setting::Invalid { crto } => digits(crto),
         }
     }
+}
+
+/// When a tier that is not `Off` traces, decided once at engine start
+/// ([`Policy::bound`], [`Policy::laid`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Runs {
+    /// From the start: `opcache.jit` turns php's tier on at startup, so
+    /// `JIT_G(on)` holds at every request start, which fills php's pool of
+    /// counters (`zend_jit_activate`, `Z/ext/opcache/jit/zend_jit.c:3906-3912`).
+    FromStart,
+    /// Set up and off, `opcache.jit=off` with a buffer: only what a
+    /// request publishes after it switches the tier on is traced, out of
+    /// a pool of counters no request start fills.
+    Switched,
+    /// A `jit.mode` lane: every unit counts whatever `opcache.jit` says.
+    Lane,
 }
 
 /// A line the start of a tier that runs logs (`jit-design.md` §4,
@@ -379,9 +396,9 @@ pub(crate) struct Policy {
     /// host, which is where `zend_jit_check_support` runs and so where its
     /// refusal warns ([`Policy::check_support`]).
     set_up: SetUp,
-    /// Whether `jit.mode` names a lane, so every unit counts whatever
-    /// `opcache.jit` says ([`Policy::counts`]).
-    lane: bool,
+    /// When the tier traces what it may: from the start, once a request
+    /// switches it on, or always, for a lane ([`Runs`]).
+    runs: Runs,
     /// What php's `zend_jit_status` reports once its start is over, no
     /// code in the buffer ([`Policy::status`]).
     started: TierStatus,
@@ -599,7 +616,11 @@ impl Policy {
             buffer_size: u64::try_from(buffer_size).unwrap_or(0),
             debug,
             set_up,
-            lane: lane.is_some(),
+            runs: match lane {
+                Some(_) => Runs::Lane,
+                None if started(setting, set_up, buffer_size).on => Runs::FromStart,
+                None => Runs::Switched,
+            },
             started: started(setting, set_up, buffer_size),
         };
         if mode == Mode::Off {
@@ -770,16 +791,13 @@ impl Policy {
     /// loop done
     /// ```
     pub(crate) fn laid(&self, jit_g: Option<Setting>) -> Laid {
-        let on = match jit_g {
-            _ if self.mode == Mode::Off => false,
-            _ if self.lane => return Laid::COLD,
-            None => self.started.on,
-            Some(setting) => matches!(setting, Setting::On { .. }),
-        };
-        match (on, self.started.on) {
-            (false, _) => Laid::Sealed,
-            (true, true) => Laid::COLD,
-            (true, false) => PRIMED,
+        let on = |setting: Option<Setting>| matches!(setting, Some(Setting::On { .. }));
+        match self.runs {
+            _ if self.mode == Mode::Off => Laid::Sealed,
+            Runs::Lane => Laid::COLD,
+            Runs::FromStart if jit_g.is_none() || on(jit_g) => Laid::COLD,
+            Runs::Switched if on(jit_g) => PRIMED,
+            Runs::FromStart | Runs::Switched => Laid::Sealed,
         }
     }
 
@@ -826,8 +844,10 @@ impl Policy {
         match self.mode {
             Mode::Off => Bound::Never,
             _ if !backed => Bound::Never,
-            _ if self.lane || self.started.on => Bound::On,
-            _ => Bound::Runtime,
+            _ => match self.runs {
+                Runs::Lane | Runs::FromStart => Bound::On,
+                Runs::Switched => Bound::Runtime,
+            },
         }
     }
 
