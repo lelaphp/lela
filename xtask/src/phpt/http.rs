@@ -68,6 +68,7 @@ pub(crate) fn subset(source: &Path) -> Subset {
         dirs,
         root: source.to_path_buf(),
         holds: Holds::Served,
+        routed: super::Routed::default(),
     }
 }
 
