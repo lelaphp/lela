@@ -9,6 +9,7 @@ use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use crate::archive::Input;
 use crate::archive::{
     AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE, AFL_IS_TORRENTZIP, Archive, CM_BZIP2, CM_DEFAULT,
     CM_DEFLATE, CM_LZMA, CM_STORE, D_ATTRIBUTES, D_COMMENT, D_COMP_METHOD, D_ENCRYPTION_METHOD,
@@ -16,9 +17,10 @@ use crate::archive::{
     GPBF_DATA_DESCRIPTOR, GPBF_ENCODING_UTF_8, GPBF_ENCRYPTED, TRUNCATE, actual, is_default,
 };
 use crate::cdir::Kind;
-use crate::codec;
+use crate::codec::{Attributes, BITS_ALLOWED, BUFSIZE, Compressor, Method, Sealer};
 use crate::dostime::{DosTime, TORRENTZIP};
 use crate::error::{Done, Er, Failed, Status};
+use crate::pipe::Pipe;
 use crate::strings::{Enc, ZStr};
 
 /// What a running close reaches beside what it writes: the archive, live
@@ -138,19 +140,62 @@ impl Out {
     }
 }
 
-/// `zip_file_attributes_t` as the sources under an entry give it.
-#[derive(Default)]
-struct Attributes {
-    host: Option<(u8, u32)>,
-    version_needed: Option<u16>,
-    bits: Option<(u16, u16)>,
+impl Attributes {
+    /// An unchanged entry's source, `zip_source_zip_file_create` over its
+    /// original dirent `orig`: its window's, the entry's own host,
+    /// attributes and bits (`_zip_file_attributes_from_dirent`), under
+    /// the decompression layer a compressed entry is read through. So the
+    /// version a decompressor needs stands, its bits clear the entry's
+    /// level, and a stored entry's `ZIP_GPBF_DATA_DESCRIPTOR` stays:
+    ///
+    /// ```php
+    /// $d = str_repeat('hello world ', 2000);
+    /// function hdr($label) { $b = file_get_contents('attr-witness.zip'); $l = unpack('vneed/vbits/vmethod', $b, 4);
+    ///     echo "$label: need {$l['need']} bits ", dechex($l['bits']), " method {$l['method']} descriptor ", var_export(strpos($b, "PK\7\x08") !== false, true), "\n"; }
+    /// $z = new ZipArchive;
+    /// foreach ([[ZipArchive::CM_BZIP2, 0, ZipArchive::CM_STORE], [ZipArchive::CM_DEFLATE, 9, ZipArchive::CM_STORE], [ZipArchive::CM_XZ, 0, ZipArchive::CM_STORE], [ZipArchive::CM_BZIP2, 0, ZipArchive::CM_DEFLATE]] as [$m1, $level, $m2]) {
+    ///     $z->open('attr-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE); $z->addFromString('a', $d); $z->setCompressionName('a', $m1, $level); $z->close(); hdr("$m1/$level");
+    ///     $z->open('attr-witness.zip'); $z->setCompressionName('a', $m2); $z->close(); hdr("  then $m2");
+    /// }
+    /// foreach ([ZipArchive::EM_NONE, ZipArchive::EM_AES_256] as $em) {
+    ///     $z->open('attr-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE); $z->addFromString('a', $d); $z->setCompressionName('a', ZipArchive::CM_STORE); $z->setEncryptionName('a', ZipArchive::EM_TRAD_PKWARE, 'pw'); $z->close();
+    ///     $z->open('attr-witness.zip'); $z->setPassword('pw'); $z->setEncryptionName('a', $em, 'pw'); $z->close(); hdr("pkware then $em");
+    ///     $z->open('attr-witness.zip'); $z->setPassword('pw'); echo '  ', strlen($z->getFromName('a')), "\n"; $z->close();
+    /// }
+    /// unlink('attr-witness.zip');
+    /// ```
+    /// ```expect
+    /// 12/0: need 46 bits 0 method 12 descriptor false
+    ///   then 0: need 46 bits 0 method 0 descriptor false
+    /// 8/9: need 20 bits 2 method 8 descriptor false
+    ///   then 0: need 20 bits 0 method 0 descriptor false
+    /// 95/0: need 20 bits 0 method 95 descriptor false
+    ///   then 0: need 20 bits 0 method 0 descriptor false
+    /// 12/0: need 46 bits 0 method 12 descriptor false
+    ///   then 8: need 46 bits 2 method 8 descriptor false
+    /// pkware then 0: need 10 bits 8 method 0 descriptor true
+    ///   24000
+    /// pkware then 259: need 51 bits 9 method 99 descriptor true
+    ///   24000
+    /// ```
+    fn unchanged(orig: &Dirent) -> Attributes {
+        let window = Attributes {
+            host: Some((
+                u8::try_from(orig.version_madeby >> 8).unwrap_or(0),
+                orig.ext_attrib,
+            )),
+            version_needed: None,
+            bits: Some((orig.bitflags, BITS_ALLOWED)),
+        };
+        match Method::of(actual(orig.comp_method)) {
+            Some(method) => Attributes::codec(method, 0).over(window),
+            None => window,
+        }
+    }
 }
 
-/// `ZIP_FILE_ATTRIBUTES_GENERAL_PURPOSE_BIT_FLAGS_ALLOWED_MASK`.
-const BITS_ALLOWED: u16 = 0x083e;
-
 /// `_zip_dirent_apply_attributes`: whether it changed the dirent.
-fn apply_attributes(de: &mut Dirent, a: &Attributes) -> bool {
+fn apply_attributes(de: &mut Dirent, a: &Attributes, force_zip64: bool) -> bool {
     // What `_zip_dirent_apply_attributes` may write, read before and after.
     let fields = |de: &Dirent| {
         (
@@ -181,7 +226,7 @@ fn apply_attributes(de: &mut Dirent, a: &Attributes) -> bool {
         51
     } else if de.comp_method == CM_BZIP2 {
         46
-    } else if needs_zip64(de, Kind::Local) {
+    } else if force_zip64 || needs_zip64(de, Kind::Local) {
         45
     } else if de.comp_method == CM_DEFLATE || de.encryption_method == EM_TRAD_PKWARE || dir {
         20
@@ -207,6 +252,38 @@ fn needs_zip64(de: &Dirent, kind: Kind) -> bool {
     de.uncomp_size >= 0xffff_ffff
         || de.comp_size >= 0xffff_ffff
         || (kind == Kind::Central && de.offset >= 0xffff_ffff)
+}
+
+/// Whether `_zip_dirent_write` writes a Zip64 field, which it answers:
+/// where the dirent needs one, and in a local header `add_data` asks for
+/// one with `ZIP_FL_FORCE_ZIP64` (`force`). An entry whose stated size
+/// is `0xffffffff` with no Zip64 field, recompressed by the close, has
+/// one forced, so its header written again keeps it; stored, it has one
+/// only as its stated size needs, which its header written again does
+/// not, and the close fails as `add_data` fails it:
+///
+/// ```php
+/// function crafted($f, $comp, $size, $crc) {
+///     $local = "PK\3\4" . pack('vvvvvVVVvv', 20, 0, 8, 0, 0x21, $crc, strlen($comp), $size, 1, 0) . 'c' . $comp;
+///     $cd = "PK\1\2" . pack('vvvvvvVVVvvvvvVV', 0x0314, 20, 0, 8, 0, 0x21, $crc, strlen($comp), $size, 1, 0, 0, 0, 0, 0x81a40000, 0) . 'c';
+///     file_put_contents($f, $local . $cd . "PK\5\6" . pack('vvvvVVv', 0, 0, 1, 1, strlen($cd), strlen($local), 0));
+/// }
+/// foreach ([ZipArchive::CM_STORE, ZipArchive::CM_DEFLATE] as $to) {
+///     crafted('zip64-witness.zip', gzdeflate('hello'), 0xFFFFFFFF, crc32('hello'));
+///     $z = new ZipArchive; $z->open('zip64-witness.zip'); $z->setCompressionName('c', $to);
+///     $r = @$z->close(); echo "$to: ", var_export($r, true), " $z->status ", $z->getStatusString(), "\n";
+///     if ($r) { echo '  ', bin2hex(substr(file_get_contents('zip64-witness.zip'), 4, 46)), "\n"; $z->open('zip64-witness.zip'); var_dump($z->getFromName('c')); $z->close(); }
+/// }
+/// unlink('zip64-witness.zip');
+/// ```
+/// ```expect
+/// 0: false 20 Internal error
+/// 8: true 0 No error
+///   2d00020008000000210086a610360700000005000000010014006301001000050000000000000007000000000000
+/// string(5) "hello"
+/// ```
+fn is_zip64(de: &Dirent, kind: Kind, force: bool) -> bool {
+    (kind == Kind::Local && force) || needs_zip64(de, kind)
 }
 
 /// Each value's little-endian bytes onto the buffer, as `_zip_buffer_put_*`.
@@ -276,7 +353,12 @@ fn ef_utf8(id: u16, s: &ZStr) -> Vec<u8> {
 /// string(22) "Extra fields too large"
 /// ```
 #[expect(clippy::too_many_lines, reason = "_zip_dirent_write's one body")]
-fn dirent_bytes(de: &mut Dirent, kind: Kind, torrentzip: bool) -> Result<Vec<u8>, Status> {
+fn dirent_bytes(
+    de: &mut Dirent,
+    kind: Kind,
+    torrentzip: bool,
+    force: bool,
+) -> Result<Vec<u8>, Status> {
     let central = kind == Kind::Central;
     let name_enc = de.filename.as_ref().map_or(Enc::Ascii, ZStr::guess);
     let com_enc = de.comment.as_ref().map_or(Enc::Ascii, ZStr::guess);
@@ -307,16 +389,18 @@ fn dirent_bytes(de: &mut Dirent, kind: Kind, torrentzip: bool) -> Result<Vec<u8>
         de.bitflags |= GPBF_ENCRYPTED;
     }
     let really_zip64 = needs_zip64(de, kind);
-    if really_zip64 {
+    if is_zip64(de, kind, force) {
         let mut z = Vec::new();
-        if !central && (de.comp_size > 0xffff_ffff || de.uncomp_size > 0xffff_ffff) {
+        let past = de.comp_size > 0xffff_ffff || de.uncomp_size > 0xffff_ffff;
+        if !central && (force || past) {
             put!(z; de.uncomp_size, de.comp_size);
         }
-        for v in [de.uncomp_size, de.comp_size, de.offset]
-            .into_iter()
-            .filter(|v| central && *v >= 0xffff_ffff)
-        {
-            put!(z; v);
+        if central && (force || past || de.offset > 0xffff_ffff) {
+            for v in [de.uncomp_size, de.comp_size, de.offset] {
+                if v >= 0xffff_ffff {
+                    put!(z; v);
+                }
+            }
         }
         let mut ef = Vec::new();
         put!(ef; 1u16, u16_of(z.len()));
@@ -383,11 +467,12 @@ fn dirent_bytes(de: &mut Dirent, kind: Kind, torrentzip: bool) -> Result<Vec<u8>
     Ok(b)
 }
 
-/// `write_data_descriptor`.
-fn data_descriptor(de: &Dirent) -> Vec<u8> {
+/// `write_data_descriptor`, with Zip64 sizes where the local header has
+/// a Zip64 field (`zip64`).
+fn data_descriptor(de: &Dirent, zip64: bool) -> Vec<u8> {
     let mut b = b"PK\x07\x08".to_vec();
     put!(b; de.crc);
-    if needs_zip64(de, Kind::Local) {
+    if zip64 {
         put!(b; de.comp_size, de.uncomp_size);
     } else {
         put!(b; u32_of(de.comp_size), u32_of(de.uncomp_size));
@@ -542,23 +627,41 @@ fn write_all(
             return Err(program.cancelled());
         }
         let at = out.pos;
-        let Some(entry) = program.live()?.entry(*i, at, unchanged)? else {
+        let Some(mut entry) = program.live()?.entry(*i, at, unchanged)? else {
             continue;
         };
         out.write(&entry.header)?;
-        let total = entry.data.len() as f64;
-        let chunks = entry.data.chunks(8192).count();
-        let mut done = 0usize;
-        for (n, chunk) in entry.data.chunks(8192).enumerate() {
-            out.write(chunk)?;
-            done += chunk.len();
-            let at = match &entry.route {
-                Route::Copy => Some(done as f64 / total),
-                Route::Add(settled) => (chunk.len() == 8192 && n + 1 < chunks)
-                    .then(|| done as f64 / settled.size.max(1) as f64),
-            };
-            if at.is_some_and(|at| progress.update(program, at)) {
-                return Err(program.cancelled());
+        match &mut entry.data {
+            Data::Copy(data) => {
+                let total = data.len() as f64;
+                let mut done = 0usize;
+                for chunk in data.chunks(BUFSIZE) {
+                    out.write(chunk)?;
+                    done += chunk.len();
+                    if progress.update(program, done as f64 / total) {
+                        return Err(program.cancelled());
+                    }
+                }
+            }
+            Data::Add(added) => {
+                let mut buf = [0u8; BUFSIZE];
+                loop {
+                    let za = program.live()?;
+                    let n = added
+                        .pipe
+                        .read(za, &mut buf)
+                        .inspect_err(|s| za.error = *s)?;
+                    if n == 0 {
+                        break;
+                    }
+                    out.write(&buf[..n])?;
+                    if n == BUFSIZE
+                        && let Some(share) = added.pipe.share(program.live()?)
+                        && progress.update(program, share)
+                    {
+                        return Err(program.cancelled());
+                    }
+                }
             }
         }
         program.live()?.finish(*i, &entry, at, out)?;
@@ -567,35 +670,66 @@ fn write_all(
 }
 
 /// One surviving entry as `zip_close`'s loop writes it before its data's
-/// progress points: its local header, its data and the way they came.
+/// progress points: its local header, and its data and the way it comes.
 struct Written {
     header: Vec<u8>,
-    data: Vec<u8>,
-    route: Route,
+    data: Data,
 }
 
 /// How an entry's data reaches the file, which says when the progress
 /// callback hears of it and what follows it.
-enum Route {
+enum Data {
     /// `copy_data`: copied as it stands, the progress callback told after
     /// each buffer the share of the data written.
-    Copy,
-    /// `add_data`: read from a source, the progress callback told after
-    /// each full buffer but the last the share of the uncompressed size
-    /// the buffers so far make; the dirent settled after.
-    Add(Settled),
+    Copy(Vec<u8>),
+    /// `add_data`: read through the layers over its source, the progress
+    /// callback told after each full buffer how far the source has been
+    /// read (`copy_source`); the dirent settled after.
+    Add(Box<Added>),
+}
+
+/// What `add_data` copies from: its source under its layers, and how the
+/// source's end is held.
+struct Added {
+    pipe: Pipe,
+    end: End,
+    zip64: Zip64,
+}
+
+/// The Zip64 field of an added entry's local header: whether `add_data`
+/// asked for one whatever the sizes (`ZIP_FL_FORCE_ZIP64`), and whether
+/// the preliminary header had one, as the header written again must.
+#[derive(Clone, Copy)]
+struct Zip64 {
+    forced: bool,
+    written: bool,
+}
+
+impl Added {
+    /// `zip_source_stat` of `src_final` once the data is written, and the
+    /// attributes it gives then.
+    fn settled(&self) -> Settled {
+        let (crc, size) = self.pipe.crc_and_size();
+        Settled {
+            method: self.pipe.method(),
+            crc,
+            size,
+            comp_size: self.pipe.written(),
+            attributes: self.pipe.attributes(),
+            zip64: self.zip64,
+        }
+    }
 }
 
 /// What `add_data`'s `zip_source_stat` of its final source says once the
-/// data is written, the attributes that source gives, and what the data's
-/// end found.
+/// data is written, and the attributes that source gives.
 struct Settled {
     method: u16,
     crc: u32,
     size: u64,
     comp_size: u64,
     attributes: Attributes,
-    end: Result<(), Status>,
+    zip64: Zip64,
 }
 
 impl Settled {
@@ -716,12 +850,11 @@ impl Archive {
         if de.encryption_method != EM_TRAD_PKWARE {
             de.bitflags &= !GPBF_DATA_DESCRIPTOR;
         }
-        let header = dirent_bytes(de, Kind::Local, torrentzip)?;
+        let header = dirent_bytes(de, Kind::Local, torrentzip, false)?;
         let data = self.raw_data(i).inspect_err(|s| self.error = *s)?;
         Ok(Written {
             header,
-            data,
-            route: Route::Copy,
+            data: Data::Copy(data),
         })
     }
 
@@ -776,33 +909,47 @@ impl Archive {
         at: u64,
         out: &mut Out,
     ) -> Result<(), Status> {
-        if let Route::Add(Settled {
-            end: Err(status), ..
-        }) = &written.route
-        {
-            self.error = *status;
-            return Err(*status);
-        }
+        let settled = match &written.data {
+            Data::Add(added) => {
+                let settled = added.settled();
+                if let Err(status) = data_end(&added.end, settled.crc, settled.size) {
+                    self.error = status;
+                    return Err(status);
+                }
+                Some(settled)
+            }
+            Data::Copy(_) => None,
+        };
         let torrentzip = self.want_torrentzip();
         let Some(de) = self.entries.get_mut(i).and_then(|e| e.changes.as_mut()) else {
             self.error.set(Er::Internal);
             return Err(self.error);
         };
-        if let Route::Add(settled) = &written.route {
+        if let Some(settled) = &settled {
+            let force = settled.zip64.forced;
             let mut changed = settled.settle(de);
             if !torrentzip {
                 // `dirent_changed`'s mtime half never holds: a source
                 // states one mtime, a buffer's when it was made and a
                 // file's when it was added, so the stat after the copy
                 // gives the one before it.
-                changed |= apply_attributes(de, &settled.attributes);
+                changed |= apply_attributes(de, &settled.attributes, force);
             }
             if changed {
-                out.rewrite(at, &dirent_bytes(de, Kind::Local, torrentzip)?)?;
+                out.rewrite(at, &dirent_bytes(de, Kind::Local, torrentzip, force)?)?;
+                // The header written again must fit where the preliminary
+                // one stood, with a Zip64 field as it had one or not.
+                if is_zip64(de, Kind::Local, force) != settled.zip64.written {
+                    self.error.set(Er::Internal);
+                    return Err(self.error);
+                }
             }
         }
         if de.bitflags & GPBF_DATA_DESCRIPTOR != 0 {
-            out.write(&data_descriptor(de))?;
+            let zip64 = settled
+                .as_ref()
+                .map_or_else(|| needs_zip64(de, Kind::Local), |s| s.zip64.written);
+            out.write(&data_descriptor(de, zip64))?;
         }
         Ok(())
     }
@@ -828,7 +975,7 @@ impl Archive {
             let ((Some(de), _) | (None, Some(de))) = (&mut e.changes, &mut e.orig) else {
                 continue;
             };
-            out.write(&dirent_bytes(de, Kind::Central, torrentzip)?)?;
+            out.write(&dirent_bytes(de, Kind::Central, torrentzip, false)?)?;
         }
         let cdir_crc = out.crc.take().map(crc32fast::Hasher::finalize);
         let size = out.pos - offset;
@@ -953,9 +1100,10 @@ impl Archive {
         Err(Failed)
     }
 
-    /// `add_data`: the entry's data from its source or its old self,
-    /// decrypted, decompressed, compressed and encrypted as its dirent
-    /// asks, the dirent written before it. An unchanged entry is read as
+    /// `add_data`: the entry's source or its old self, under the layers
+    /// that decrypt, decompress, compress and encrypt it as its dirent
+    /// asks ([`Pipe`]), which the close's loop reads as it writes, the
+    /// dirent written before it. An unchanged entry is read as
     /// libzip's zip source reads it, decrypted and decompressed, so any
     /// method but store compresses it again, at the level its dirent asks:
     ///
@@ -977,7 +1125,7 @@ impl Archive {
     /// e 8 2837 132000
     /// ```
     fn add_data(&mut self, i: usize, de: &mut Dirent, torrentzip: bool) -> Result<Written, Status> {
-        let Sourced { data, before, end } = self.source_data(i)?;
+        let Sourced { before, input, end } = self.source(i, de.changed & D_COMP_METHOD != 0)?;
         // The preliminary dirent, written before the data: what the stat
         // knows, a stored entry's compressed size its size, and what it
         // does not know as the dirent held it.
@@ -997,29 +1145,28 @@ impl Archive {
         }
         // `needs_compress`: what is stored needs no decompression, and a
         // method other than store is a recompression (`needs_recompress`).
-        let compress = actual(de.comp_method) != 0;
-        let encrypt = de.encryption_method != EM_NONE;
-        let crc = crc32fast::hash(&data);
-        let size = data.len() as u64;
-        let (mut data, mut method) = (data, 0u16);
-        let mut attributes = Attributes {
-            host: before.host,
-            ..Attributes::default()
+        let compressor = match actual(de.comp_method) {
+            0 => None,
+            code => {
+                let Some(method) = Method::of(code) else {
+                    self.error.set(Er::Compnotsupp);
+                    return Err(self.error);
+                };
+                let can_store = is_default(de.comp_method);
+                Some(
+                    Compressor::new(method, de.compression_level, can_store)
+                        .inspect_err(|s| self.error = *s)?,
+                )
+            }
         };
-        if compress {
-            let c = codec::compress(
-                &data,
-                actual(de.comp_method),
-                de.compression_level,
-                is_default(de.comp_method),
-            )
-            .inspect_err(|s| self.error = *s)?;
-            data = c.data;
-            method = c.method;
-            attributes.version_needed = Some(c.version_needed);
-            attributes.bits = Some((c.bitflags, BITS_ALLOWED));
-        }
-        if encrypt {
+        // `ZIP_FL_FORCE_ZIP64` where what the entry compresses to could
+        // pass 32 bits, and so its local header holds room for it.
+        let forced = compressor
+            .as_ref()
+            .is_some_and(|c| c.maximum_size(before.size) > u64::from(u32::MAX));
+        let sealer = if de.encryption_method == EM_NONE {
+            None
+        } else {
             let password = de
                 .password
                 .clone()
@@ -1028,105 +1175,98 @@ impl Archive {
                 self.error.set(Er::Inval);
                 return Err(self.error);
             };
-            match Encryption::of(de.encryption_method) {
+            Some(match Encryption::of(de.encryption_method) {
                 Encryption::Pkware => {
                     de.bitflags |= GPBF_DATA_DESCRIPTOR;
-                    data = codec::pkware(&data, &password, de.last_mod.time)?;
-                    attributes.version_needed = Some(20);
-                    attributes.bits = Some((GPBF_DATA_DESCRIPTOR, GPBF_DATA_DESCRIPTOR));
+                    Sealer::pkware(&password, de.last_mod.time)?
                 }
-                Encryption::Aes(strength) => {
-                    data = codec::winzip_aes(&data, &password, strength)?;
-                    attributes.version_needed = Some(51);
-                }
+                Encryption::Aes(strength) => Sealer::aes(&password, strength)?,
                 Encryption::None | Encryption::Unknown => {
                     self.error.set(Er::Encrnotsupp);
                     return Err(self.error);
                 }
-            }
-        }
+            })
+        };
+        let pipe = Pipe::new(input, before.size, before.attributes, compressor, sealer);
         if !torrentzip {
-            apply_attributes(de, &attributes);
+            apply_attributes(de, &pipe.attributes(), forced);
         }
+        let header = dirent_bytes(de, Kind::Local, torrentzip, forced)?;
+        let zip64 = Zip64 {
+            forced,
+            written: is_zip64(de, Kind::Local, forced),
+        };
+        let added = Added { pipe, end, zip64 };
         Ok(Written {
-            header: dirent_bytes(de, Kind::Local, torrentzip)?,
-            route: Route::Add(Settled {
-                method,
-                crc,
-                size,
-                comp_size: data.len() as u64,
-                attributes,
-                end,
-            }),
-            data,
+            header,
+            data: Data::Add(Box::new(added)),
         })
     }
 
-    /// What `add_data` reads of entry `i`'s source: a new source's bytes,
-    /// or the unchanged entry through `zip_source_zip_file_create(za, i,
+    /// What `add_data` copies from entry `i`: a new source opened, or the
+    /// unchanged entry through `zip_source_zip_file_create(za, i,
     /// ZIP_FL_UNCHANGED, ...)`, decrypted with the default password and
-    /// decompressed, whose stat carries the entry's size and CRC, and
-    /// whose end [`data_end`] holds. Either stats as stored and
-    /// unencrypted.
-    fn source_data(&mut self, i: usize) -> Result<Sourced, Status> {
-        Ok(if let Some(s) = &mut self.entries[i].source {
+    /// decompressed, its method changed where `method_changed` says; the stat before the
+    /// copy, which says either is stored and unencrypted, and how its end
+    /// is held ([`data_end`]).
+    fn source(&mut self, i: usize, method_changed: bool) -> Result<Sourced, Status> {
+        if let Some(s) = &mut self.entries[i].source {
             let st = s.stat();
             let before = Before {
                 size: st.size,
                 crc: None,
                 time: Time::Mtime(st.mtime),
-                host: s.attributes(),
+                attributes: Attributes {
+                    host: s.attributes(),
+                    ..Attributes::default()
+                },
             };
-            let data = s.read_all().inspect_err(|s| self.error = *s)?;
-            Sourced {
-                data,
+            let input = s.open(i).inspect_err(|s| self.error = *s)?;
+            return Ok(Sourced {
+                end: End::Size(before.size),
                 before,
-                end: Ok(()),
-            }
-        } else {
-            let password = self.default_password.clone();
-            let (data, fault) = self
-                .decoded(i, password.as_deref())
-                .inspect_err(|s| self.error = *s)?;
-            if let Some(fault) = fault {
-                self.error = fault;
-                return Err(fault);
-            }
-            let Some(o) = self.entries[i].orig.as_ref() else {
-                return Err(Status::new(Er::Internal));
-            };
-            let before = Before {
-                size: o.uncomp_size,
-                crc: o.crc_valid.then_some(o.crc),
-                time: Time::Dos(o.last_mod),
-                host: None,
-            };
-            Sourced {
-                end: data_end(o, &data),
-                data,
-                before,
-            }
-        })
+                input,
+            });
+        }
+        let password = self.default_password.clone();
+        let input = self
+            .unchanged_input(i, password.as_deref(), method_changed)
+            .inspect_err(|s| self.error = *s)?;
+        let Some(o) = self.entries[i].orig.as_ref() else {
+            return Err(Status::new(Er::Internal));
+        };
+        let crc = o.crc_valid.then_some(o.crc);
+        let end = End::Entry {
+            stored: actual(o.comp_method) == 0,
+            size: o.uncomp_size,
+            crc,
+        };
+        let before = Before {
+            size: o.uncomp_size,
+            crc,
+            time: Time::Dos(o.last_mod),
+            attributes: Attributes::unchanged(o),
+        };
+        Ok(Sourced { before, input, end })
     }
 }
 
-/// What `add_data` reads of an entry's source: its data, its stat before
-/// the copy, and what the data's end found, which `finish` raises past
-/// the data's last progress point, where libzip finds it.
+/// What `add_data` copies from entry `i`: its source's stat before the
+/// copy, the source opened, and how its end is held.
 struct Sourced {
-    data: Vec<u8>,
     before: Before,
-    end: Result<(), Status>,
+    input: Input,
+    end: End,
 }
 
 /// What `add_data`'s `zip_source_stat` of its source says before the
 /// copy: the size, the CRC where the source knows one, the time the
-/// dirent takes where none was set, and the host and attributes of a file.
+/// dirent takes where none was set, and the attributes the source gives.
 struct Before {
     size: u64,
     crc: Option<u32>,
     time: Time,
-    host: Option<(u8, u32)>,
+    attributes: Attributes,
 }
 
 /// The time a source gives an entry: an unchanged entry's DOS time as it
@@ -1137,14 +1277,20 @@ enum Time {
     Mtime(i64),
 }
 
-/// What the end of an unchanged entry's data, `data` as it decoded,
-/// finds as `add_data` copies it: `ZIP_ER_DATA_LENGTH` for stored data
-/// whose length is not the entry's size, from the stat of its CRC layer
+/// What the end of the data `add_data` copies finds, the CRC and the
+/// length `read` of what its source gave held as `end` says: for a new
+/// source, `ZIP_ER_DATA_LENGTH` where it gave other than its stated
+/// size, a buffer a stream left part read; for an unchanged entry,
+/// `ZIP_ER_DATA_LENGTH` for stored data whose length is not the entry's
+/// size, from the stat of its CRC layer
 /// after the copy, which no decompressor below has given the size it
 /// made (a decryption layer takes its header off the compressed size
 /// alone); otherwise `ZIP_ER_CRC` from `zip_source_zip_file_create`'s
 /// CRC layer at the end of the data, where the entry has a CRC to hold
-/// it to.
+/// it to. An encrypted entry whose method is changed is not copied at
+/// all, whether it keeps its encryption or not: its source's decryption
+/// layer is refused, `ZIP_ER_OPNOTSUPP`, before its data
+/// (`Archive::decoder`).
 ///
 /// ```php
 /// function crafted($f, $method, $comp, $size, $crc) {
@@ -1172,7 +1318,19 @@ enum Time {
 ///     $z->open('end-witness.zip'); $z->setPassword('pw'); $z->setEncryptionName('c', ZipArchive::EM_NONE); $r = @$z->close();
 ///     echo "stored, encrypted $em, decrypted: ", var_export($r, true), " $z->status ", $z->getStatusString(), "\n";
 ///     $z->open('end-witness.zip'); $s = $z->statIndex(0); echo "  {$s['encryption_method']} {$s['size']} {$s['comp_size']} ", strlen($z->getFromIndex(0)), "\n"; $z->close();
+///     foreach ([ZipArchive::CM_DEFLATE => 'kept', ZipArchive::CM_BZIP2 => 'decrypted'] as $m => $then) {
+///         $z->open('end-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+///         $z->addFromString('c', str_repeat('secret ', 10)); $z->setCompressionName('c', ZipArchive::CM_STORE); $z->setEncryptionName('c', $em, 'pw'); $z->close();
+///         $z->open('end-witness.zip'); $z->setPassword('pw'); $z->setCompressionName('c', $m);
+///         if ($then == 'decrypted') $z->setEncryptionName('c', ZipArchive::EM_NONE);
+///         $r = @$z->close(); echo "stored, encrypted $em, method $m, encryption $then: ", var_export($r, true), " $z->status ", $z->getStatusString(), "\n";
+///     }
 /// }
+/// $z = new ZipArchive; $z->open('end-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+/// $z->addFromString('c', 'tiny'); $z->setCompressionName('c', ZipArchive::CM_STORE); $z->setEncryptionName('c', ZipArchive::EM_AES_256, 'pw'); $z->close();
+/// $z->open('end-witness.zip'); $z->setPassword('pw'); $z->setEncryptionName('c', ZipArchive::EM_NONE); $r = @$z->close();
+/// echo "stored, AE-2 with no CRC, decrypted: ", var_export($r, true), " $z->status ", $z->getStatusString(), "\n";
+/// $z->open('end-witness.zip'); $s = $z->statIndex(0); echo "  {$s['crc']} {$s['size']} ", $z->getFromIndex(0), "\n"; $z->close();
 /// unlink('end-witness.zip');
 /// ```
 /// ```expect capture
@@ -1185,17 +1343,40 @@ enum Time {
 /// deflated, its size long and its CRC wrong: false 7 CRC error
 /// stored, encrypted 1, decrypted: true 0 No error
 ///   0 70 70 70
+/// stored, encrypted 1, method 8, encryption kept: false 28 Operation not supported
+/// stored, encrypted 1, method 12, encryption decrypted: false 28 Operation not supported
 /// stored, encrypted 259, decrypted: true 0 No error
 ///   0 70 70 70
+/// stored, encrypted 259, method 8, encryption kept: false 28 Operation not supported
+/// stored, encrypted 259, method 12, encryption decrypted: false 28 Operation not supported
+/// stored, AE-2 with no CRC, decrypted: true 0 No error
+///   1354274761 4 tiny
 /// ```
-fn data_end(orig: &Dirent, data: &[u8]) -> Result<(), Status> {
-    if actual(orig.comp_method) == 0 && data.len() as u64 != orig.uncomp_size {
-        return Err(Status::new(Er::DataLength));
+fn data_end(end: &End, crc: u32, read: u64) -> Result<(), Status> {
+    match *end {
+        End::Size(size)
+        | End::Entry {
+            stored: true, size, ..
+        } if read != size => Err(Status::new(Er::DataLength)),
+        End::Entry {
+            crc: Some(expect), ..
+        } if crc != expect => Err(Status::new(Er::Crc)),
+        End::Size(_) | End::Entry { .. } => Ok(()),
     }
-    if orig.crc_valid && crc32fast::hash(data) != orig.crc {
-        return Err(Status::new(Er::Crc));
-    }
-    Ok(())
+}
+
+/// How the end of the data `add_data` copies is held, past the copy.
+enum End {
+    /// A new source, by its CRC layer's stat: what it read must be the
+    /// size it stated.
+    Size(u64),
+    /// An unchanged entry, by its original dirent: stored data's length
+    /// its size, then its CRC where it has one.
+    Entry {
+        stored: bool,
+        size: u64,
+        crc: Option<u32>,
+    },
 }
 
 /// `_zip_dirent_merge`: what the changes did not change, from the

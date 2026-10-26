@@ -224,17 +224,16 @@ pub(crate) fn open_entry(
     if mode.first() != Some(&b'r') {
         return Ok(None);
     }
-    let reads_file = zf.reads_archive();
-    let id = orig.map(|(_, id)| id);
+    let hold = orig.map(|(_, id)| Hold::new(id, &mut zf));
     let kind = ZipStream {
         zf,
         path: path.or_else(|| orig.map(|(name, _)| name.to_vec())),
-        archive: id.map(|id| Hold::new(id, reads_file)),
+        archive: hold.clone(),
         file,
     };
     let stream = req.new_stream(Box::new(kind), mode)?;
-    if let Some(id) = id {
-        holder::hold(req, id, reads_file);
+    if let Some(hold) = &hold {
+        holder::hold(req, hold);
     }
     if let Some((name, _)) = orig
         && let Err(thrown) = stream.set_orig_path(req, name)

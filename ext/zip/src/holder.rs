@@ -22,7 +22,7 @@ use php_ext::values::{Owner, Value, ValueRef};
 
 use php_ext::abi::Callable;
 
-use crate::archive::Archive;
+use crate::archive::{Archive, BufferLink};
 use crate::c;
 use crate::error::{Er, Status};
 use crate::read::{Reader, Stdio};
@@ -113,18 +113,25 @@ pub(crate) fn create(req: &mut Request, mut za: Archive) -> ArchiveId {
     id
 }
 
-/// A stream's count of archive `id` (`self->archive`), and whether its
+/// A stream's count of archive `id` (`self->archive`), whether its
 /// `zip_file_t` reads the archive's own file, which a close's commit is
-/// refused under: taken by [`hold`] once the stream is made, given back
-/// by [`Hold::let_go`].
+/// refused under, and the buffer source of an added entry it holds open
+/// otherwise: taken by [`hold`] once the stream is made, given back by
+/// [`Hold::let_go`].
+#[derive(Clone)]
 pub(crate) struct Hold {
     pub(crate) id: ArchiveId,
     reads_file: bool,
+    buffer: Option<BufferLink>,
 }
 
 impl Hold {
-    pub(crate) fn new(id: ArchiveId, reads_file: bool) -> Hold {
-        Hold { id, reads_file }
+    pub(crate) fn new(id: ArchiveId, zf: &mut Reader) -> Hold {
+        Hold {
+            id,
+            reads_file: zf.reads_archive(),
+            buffer: zf.on_buffer().map(|(link, _)| link),
+        }
     }
 
     /// The hold given back: the stream's `zip_fclose`, then its count
@@ -132,26 +139,40 @@ impl Hold {
     pub(crate) fn let_go(self, req: &mut Request) {
         if let Some(h) = get(req, self.id) {
             h.readers = h.readers.saturating_sub(u32::from(self.reads_file));
+            if let (Some(za), Some(link)) = (h.za.live(), &self.buffer) {
+                za.close_buffer(link);
+            }
         }
         release(req, self.id);
     }
 }
 
-/// `php_zip_archive_addref` for a stream of archive `id`, counted among
-/// its readers where it reads the archive's own file.
-pub(crate) fn hold(req: &mut Request, id: ArchiveId, reads_file: bool) {
-    if let Some(h) = get(req, id) {
+/// `php_zip_archive_addref` for the stream `hold` is, counted among its
+/// archive's readers where it reads the archive's own file, and holding
+/// the buffer it reads open where it reads one.
+pub(crate) fn hold(req: &mut Request, hold: &Hold) {
+    if let Some(h) = get(req, hold.id) {
         h.refcount += 1;
-        h.readers += u32::from(reads_file);
+        h.readers += u32::from(hold.reads_file);
+        if let (Some(za), Some(link)) = (h.za.live(), &hold.buffer) {
+            za.open_buffer(link);
+        }
+    }
+}
+
+impl Za {
+    /// The archive where it is open, or under its close.
+    fn live(&mut self) -> Option<&mut Archive> {
+        match self {
+            Za::Open(za, _) | Za::Closing(za) => Some(za),
+            Za::Closed => None,
+        }
     }
 }
 
 /// Archive `id` where it is open, or under its close.
 pub(crate) fn archive(req: &mut Request, id: ArchiveId) -> Option<&mut Archive> {
-    match &mut get(req, id)?.za {
-        Za::Open(za, _) | Za::Closing(za) => Some(za),
-        Za::Closed => None,
-    }
+    get(req, id)?.za.live()
 }
 
 /// php's `close` member: whether archive `id` is under its close.
@@ -189,7 +210,12 @@ pub(crate) fn read(
     len: usize,
 ) -> Result<Vec<u8>, Status> {
     match get(req, id).map(|h| &mut h.za) {
-        Some(Za::Open(_, file)) => zf.read_through(len, file),
+        Some(Za::Open(za, file)) => {
+            za.lend(file);
+            let read = za.read_entry(zf, len);
+            za.lend(file);
+            read
+        }
         Some(Za::Closing(za)) => za.read_entry(zf, len),
         Some(Za::Closed) | None => {
             *zf = Reader::closed();
