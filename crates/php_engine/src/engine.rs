@@ -1817,7 +1817,7 @@ impl Shared {
             "a unit for every request holds a counted value"
         );
         let answers = home.settle(strings_kept(&unit));
-        let tree = arena.given_up();
+        let tree = arena.parsed();
         Fresh {
             unit,
             answers,

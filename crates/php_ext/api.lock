@@ -1157,8 +1157,8 @@ request::url_decode
 syntax::Arena
 syntax::Arena::concat
 syntax::Arena::copy
-syntax::Arena::given_up
 syntax::Arena::lowercase
+syntax::Arena::parsed
 syntax::Arena::reset
 syntax::Arena::vec
 syntax::Diagnostic

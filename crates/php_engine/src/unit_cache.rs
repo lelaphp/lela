@@ -629,8 +629,8 @@ pub(crate) enum Answers {
 pub(crate) struct Fresh {
     pub(crate) unit: Result<Unit, CompileError>,
     pub(crate) answers: Answers,
-    /// The bytes the compile's syntax arena held, its tree and the
-    /// compiler's temporaries: what stands for php's `CG(ast_arena)`.
+    /// The elements of the compile's tree, its nodes and significant
+    /// tokens, which php's `CG(ast_arena)` is charged by.
     pub(crate) tree: usize,
 }
 

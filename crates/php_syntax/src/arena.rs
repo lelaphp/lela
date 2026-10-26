@@ -18,7 +18,7 @@
 //! the builder's frames, lent to each parse and taken back empty, so
 //! their room is reused too.
 
-use std::cell::{RefCell, RefMut};
+use std::cell::{Cell, RefCell, RefMut};
 
 use bumpalo::Bump;
 
@@ -34,8 +34,8 @@ pub struct Arena {
     /// stand for a parse, so a parse nested in another finds them taken
     /// and makes its own.
     scratch: RefCell<Scratch>,
-    /// The bytes it held when it was last reset ([`Arena::given_up`]).
-    given_up: usize,
+    /// The elements of the last tree parsed into it ([`Arena::parsed`]).
+    parsed: Cell<usize>,
 }
 
 impl std::fmt::Debug for Arena {
@@ -94,19 +94,23 @@ impl Arena {
     /// Give up everything in the arena at once, keeping the room of its
     /// last chunk for what is bumped into it next, up to 256 KiB.
     pub fn reset(&mut self) {
-        self.given_up = self.bump.allocated_bytes();
         self.bump.reset();
         if self.bump.allocated_bytes() > KEPT {
             self.bump = Bump::new();
         }
     }
 
-    /// The bytes the arena held when it was last reset, its chunks
-    /// whole: the room the compile before it took for its tree and its
-    /// temporaries.
+    /// How many elements, nodes and significant tokens, the shape of
+    /// the last tree parsed into the arena holds
+    /// ([`crate::tree::Tree::elements`]), which a reset keeps.
     #[must_use]
-    pub fn given_up(&self) -> usize {
-        self.given_up
+    pub fn parsed(&self) -> usize {
+        self.parsed.get()
+    }
+
+    /// The shape of a tree parsed into the arena, `elements` long.
+    pub(crate) fn note_parsed(&self, elements: usize) {
+        self.parsed.set(elements);
     }
 
     /// The parse's stacks, borrowed where they stand; none while a parse

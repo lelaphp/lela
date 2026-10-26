@@ -57,6 +57,8 @@ const PROPERTY_INFO: usize = 72;
 const CLASS_CONSTANT: usize = 56;
 /// A block of `CG(ast_arena)`, `1024 * 32` (`zend_compile`).
 const AST_BLOCK: usize = 32 * 1024;
+/// `sizeof(zend_ast_zval)`, a `zend_ast` of two children's too.
+const AST_NODE: usize = 24;
 /// `INITIAL_OP_ARRAY_SIZE` (`Z/Zend/zend_compile.h`).
 const INITIAL_OPLINES: usize = 64;
 /// `sizeof(zend_string *)`, an entry of `op_array->vars` and of
@@ -1471,8 +1473,9 @@ pub(super) fn carve(req: &mut Request, unit: &Unit) -> Result<(), Thrown> {
 /// php's compile of a file opcache persists, charged to the request
 /// that includes it as it compiles (design §5.13, §6.3): its tree in
 /// `CG(ast_arena)`, `zend_arena_create(1024 * 32)` and a block of that
-/// size more each time it is full, here as many as the bytes `tree` the
-/// compile's own syntax arena held fill; its carves ([`carve`]), held to
+/// size more each time it is full, here a `zend_ast` of two children or
+/// a `zend_ast_zval`, 24 bytes either, for each of the `tree` elements of
+/// the engine's tree, whose shape is not php's; its carves ([`carve`]), held to
 /// the request's end; and the op arrays' and the classes' blocks it
 /// `emalloc`s ([`of_unit`]), which `zend_persist` copies into shared
 /// memory before the request's copies are given back with the tree. So a
@@ -1497,7 +1500,7 @@ pub(super) fn carve(req: &mut Request, unit: &Unit) -> Result<(), Thrown> {
 /// ```
 pub(super) fn persisted(req: &mut Request, unit: &Unit, tree: usize) -> Result<(), Thrown> {
     let mut ast = Vec::new();
-    let charged = (0..tree.div_ceil(AST_BLOCK).max(1))
+    let charged = (0..(tree * AST_NODE).div_ceil(AST_BLOCK).max(1))
         .try_for_each(|_| {
             ast.push(Emalloc::new(req, AST_BLOCK)?);
             Ok(())
