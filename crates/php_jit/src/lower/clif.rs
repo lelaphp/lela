@@ -339,9 +339,9 @@ enum Onward {
 impl Onward {
     /// Where `opcode`'s handler goes on, for the oplines whose handler
     /// can neither leave its frame, push or replace one, nor enter the
-    /// loop with the frame unstood: a jump on a value no inline form
-    /// tests, `?:`'s `JMP_SET`, `??`'s `COALESCE` and `?->`'s
-    /// `JMP_NULL` among them, which go where their handler went
+    /// loop with the frame unstood: the jumps php's code compiles no
+    /// inline form for, `?:`'s `JMP_SET`, `??`'s `COALESCE` and `?->`'s
+    /// `JMP_NULL`, which go where their handler went
     /// ([`Onward::Went`]); and, past them, building an array and
     /// adding to it, a native's call, made and popped by its handler, a
     /// concatenation and a rope's pieces, whose string arms the handler
@@ -356,8 +356,9 @@ impl Onward {
     /// serves so, and an increment or a decrement, of a `VAR` an inline
     /// fetch left indirect among them.
     /// None for every other
-    /// opline: a comparison, whose handler may take the jump
-    /// fused to it, a call's `INIT_*` and its `DO_*CALL` into user code,
+    /// opline: a `JMPZ` and its kin, which php's code compiles inline
+    /// whatever its value (`zend_jit_bool_jmpznz`), and a comparison,
+    /// whose handler may take the jump fused to it, a call's `INIT_*` and its `DO_*CALL` into user code,
     /// a return, an include or an `eval`, a generator's opcodes, a
     /// `finally`'s `FAST_CALL` and `FAST_RET`, and the two silence
     /// opcodes, whose observers a step tells. A property's `isset()` and
@@ -584,13 +585,7 @@ impl Onward {
     /// ```
     fn of(opcode: Opcode) -> Option<Onward> {
         match opcode {
-            Opcode::Jmpz
-            | Opcode::Jmpnz
-            | Opcode::JmpzEx
-            | Opcode::JmpnzEx
-            | Opcode::JmpSet
-            | Opcode::Coalesce
-            | Opcode::JmpNull => Some(Onward::Went),
+            Opcode::JmpSet | Opcode::Coalesce | Opcode::JmpNull => Some(Onward::Went),
             Opcode::InitArray
             | Opcode::AddArrayElement
             | Opcode::DoIcall
@@ -646,6 +641,30 @@ impl Onward {
             Onward::Went => guards
                 .iter()
                 .all(|guard| matches!(guard.check, Check::Direction { .. })),
+        }
+    }
+}
+
+/// What the handler of `?:`, `??` or `?->` tests of its operand, which
+/// [`Emit::tested`] tests in place where it can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Test {
+    /// `JMP_SET`: its truth, `zend_is_true`; the jump taken on true.
+    Truth,
+    /// `COALESCE`: that it is defined and not `null`; the jump taken so.
+    Defined,
+    /// `JMP_NULL`: that it is not `null`; the jump taken where it is.
+    NotNull,
+}
+
+impl Test {
+    /// The test `opcode`'s handler makes, for the three.
+    fn of(opcode: Opcode) -> Option<Test> {
+        match opcode {
+            Opcode::JmpSet => Some(Test::Truth),
+            Opcode::Coalesce => Some(Test::Defined),
+            Opcode::JmpNull => Some(Test::NotNull),
+            _ => None,
         }
     }
 }
@@ -1850,7 +1869,7 @@ impl<'a> Emit<'a> {
         line: &Line,
         onward: Onward,
         [room, opline, func]: [Value; 3],
-    ) -> Result<Value, Abort> {
+    ) -> Result<(), Abort> {
         let kernel = if line.opcode == Opcode::DoIcall || line.opcode.is_frameless_icall() {
             Kernel::Native
         } else {
@@ -1869,11 +1888,13 @@ impl<'a> Emit<'a> {
             let call = self.call_left(line.frame)?;
             self.b.ins().stack_store(I64, call, self.stood, STOOD_CALL);
         }
-        Ok(next)
+        Ok(())
     }
 
-    /// A jump on a value no inline form tests, served as php's code
-    /// serves one: its handler called directly, `zend_jit_handler`, and
+    /// `?:`'s `JMP_SET`, `??`'s `COALESCE` and `?->`'s `JMP_NULL`, which
+    /// php's code compiles no inline form for
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:261-330`), served as php's
+    /// code serves them: the handler called directly, `zend_jit_handler`, and
     /// the way it went, `EX(opline)` as the handler left it, held to the
     /// way the trace recorded by the opline's direction guards,
     /// `zend_jit_trace_handler`'s IP guard
@@ -1884,7 +1905,7 @@ impl<'a> Emit<'a> {
     /// it, and goes on with no call.
     ///
     /// `?:`, `??` and `?->` over a variable each kind of value passes
-    /// through, in place and by the handler: an object, a reference, a
+    /// through, in place and by the handler: an object, a reference, a temporary, a
     /// double and an undefined variable among them, whose warning the
     /// error handler turns into a throw caught outside the loop:
     ///
@@ -1896,7 +1917,8 @@ impl<'a> Emit<'a> {
     ///     for ($i = 0; $i < $n; $i++) {
     ///         $v = $vs[$i % 15]; $o = $os[$i % 3];
     ///         $a = $v ?: "e"; $b = $v ?? "n"; $c = $o?->v; $d = $ref ?: 0; $e = $ref ?? 0;
-    ///         $t[] = json_encode([$a, $b, $c, $d, $e]);
+    ///         $g = ($i % 2 ? $v : null) ?? "t"; $h = ($i % 2 ? $v : 0) ?: "t";
+    ///         $t[] = json_encode([$a, $b, $c, $d, $e, $g, $h]);
     ///     }
     ///     return implode(",", $t);
     /// }
@@ -1906,7 +1928,7 @@ impl<'a> Emit<'a> {
     /// try { echo g(10), "\n"; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
     /// ```
     /// ```expect regime=jit-force process
-    /// ["e","n",null,1,1],["e",false,7,1,1],[true,true,null,1,1],["e",0,null,1,1],[5,5,7,1,1],["e",0,null,1,1],[2.5,2.5,null,1,1],["e","",7,1,1],["e","0",null,1,1],["00","00",null,1,1],["a","a",7,1,1],["e",[],null,1,1],[[1],[1],null,1,1],[{"v":7},{"v":7},7,1,1],["e","n",null,1,1],["e","n",null,1,1],["e",false,7,1,1],[true,true,null,1,1],["e",0,null,1,1],[5,5,7,1,1],["e",0,null,1,1],[2.5,2.5,null,1,1],["e","",7,1,1],["e","0",null,1,1],["00","00",null,1,1],["a","a",7,1,1],["e",[],null,1,1],[[1],[1],null,1,1],[{"v":7},{"v":7},7,1,1],["e","n",null,1,1]
+    /// ["e","n",null,1,1,"t","t"],["e",false,7,1,1,false,"t"],[true,true,null,1,1,"t","t"],["e",0,null,1,1,0,"t"],[5,5,7,1,1,"t","t"],["e",0,null,1,1,0,"t"],[2.5,2.5,null,1,1,"t","t"],["e","",7,1,1,"","t"],["e","0",null,1,1,"t","t"],["00","00",null,1,1,"00","00"],["a","a",7,1,1,"t","t"],["e",[],null,1,1,[],"t"],[[1],[1],null,1,1,"t","t"],[{"v":7},{"v":7},7,1,1,{"v":7},{"v":7}],["e","n",null,1,1,"t","t"],["e","n",null,1,1,"t","t"],["e",false,7,1,1,"t","t"],[true,true,null,1,1,true,true],["e",0,null,1,1,"t","t"],[5,5,7,1,1,5,5],["e",0,null,1,1,"t","t"],[2.5,2.5,null,1,1,2.5,2.5],["e","",7,1,1,"t","t"],["e","0",null,1,1,"0","t"],["00","00",null,1,1,"t","t"],["a","a",7,1,1,"a","a"],["e",[],null,1,1,"t","t"],[[1],[1],null,1,1,[1],[1]],[{"v":7},{"v":7},7,1,1,"t","t"],["e","n",null,1,1,"t","t"]
     /// Undefined variable $u
     /// ```
     ///
@@ -1920,7 +1942,8 @@ impl<'a> Emit<'a> {
     ///     for ($i = 0; $i < $n; $i++) {
     ///         $v = $vs[$i % 15]; $o = $os[$i % 3];
     ///         $a = $v ?: "e"; $b = $v ?? "n"; $c = $o?->v; $d = $ref ?: 0; $e = $ref ?? 0;
-    ///         $t[] = json_encode([$a, $b, $c, $d, $e]);
+    ///         $g = ($i % 2 ? $v : null) ?? "t"; $h = ($i % 2 ? $v : 0) ?: "t";
+    ///         $t[] = json_encode([$a, $b, $c, $d, $e, $g, $h]);
     ///     }
     ///     return implode(",", $t);
     /// }
@@ -1930,52 +1953,41 @@ impl<'a> Emit<'a> {
     /// try { echo g(10), "\n"; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
     /// ```
     /// ```expect regime=jit-exit-fuzz process
-    /// ["e","n",null,1,1],["e",false,7,1,1],[true,true,null,1,1],["e",0,null,1,1],[5,5,7,1,1],["e",0,null,1,1],[2.5,2.5,null,1,1],["e","",7,1,1],["e","0",null,1,1],["00","00",null,1,1],["a","a",7,1,1],["e",[],null,1,1],[[1],[1],null,1,1],[{"v":7},{"v":7},7,1,1],["e","n",null,1,1],["e","n",null,1,1],["e",false,7,1,1],[true,true,null,1,1],["e",0,null,1,1],[5,5,7,1,1],["e",0,null,1,1],[2.5,2.5,null,1,1],["e","",7,1,1],["e","0",null,1,1],["00","00",null,1,1],["a","a",7,1,1],["e",[],null,1,1],[[1],[1],null,1,1],[{"v":7},{"v":7},7,1,1],["e","n",null,1,1]
+    /// ["e","n",null,1,1,"t","t"],["e",false,7,1,1,false,"t"],[true,true,null,1,1,"t","t"],["e",0,null,1,1,0,"t"],[5,5,7,1,1,"t","t"],["e",0,null,1,1,0,"t"],[2.5,2.5,null,1,1,"t","t"],["e","",7,1,1,"","t"],["e","0",null,1,1,"t","t"],["00","00",null,1,1,"00","00"],["a","a",7,1,1,"t","t"],["e",[],null,1,1,[],"t"],[[1],[1],null,1,1,"t","t"],[{"v":7},{"v":7},7,1,1,{"v":7},{"v":7}],["e","n",null,1,1,"t","t"],["e","n",null,1,1,"t","t"],["e",false,7,1,1,"t","t"],[true,true,null,1,1,true,true],["e",0,null,1,1,"t","t"],[5,5,7,1,1,5,5],["e",0,null,1,1,"t","t"],[2.5,2.5,null,1,1,2.5,2.5],["e","",7,1,1,"t","t"],["e","0",null,1,1,"0","t"],["00","00",null,1,1,"t","t"],["a","a",7,1,1,"a","a"],["e",[],null,1,1,"t","t"],[[1],[1],null,1,1,[1],[1]],[{"v":7},{"v":7},7,1,1,"t","t"],["e","n",null,1,1,"t","t"]
     /// Undefined variable $u
     /// ```
     fn branched(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         self.spill_operands(line)?;
         let handler = self.b.create_block();
-        let join = self.b.create_block();
-        self.b.append_block_param(join, I8);
-        self.tested(line, handler, join)?;
+        let done = self.b.create_block();
+        self.tested(at, line, handler, done)?;
         self.b.switch_to_block(handler);
         self.b.seal_block(handler);
         let [room, opline] = self.served(line)?;
         let func = self.func_of(line.frame)?;
-        let went = self.handled(line, Onward::Went, [room, opline, func])?;
-        let jumps = self
-            .b
-            .ins()
-            .icmp_imm_u(IntCC::NotEqual, went, i64::from(line.opline.0 + 1));
-        self.b.ins().jump(join, &[BlockArg::Value(jumps)]);
-        self.b.switch_to_block(join);
-        self.b.seal_block(join);
-        let jumps = *self
-            .b
-            .block_params(join)
-            .first()
-            .ok_or_else(|| mismatch("a jump's join with no way"))?;
-        self.direction(at, jumps)
+        self.handled(line, Onward::Went, [room, opline, func])?;
+        self.after_step(at, line)?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+        Ok(())
     }
 
     /// The test of `?:`'s `JMP_SET`, `??`'s `COALESCE` or `?->`'s
     /// `JMP_NULL` on a variable, made in place where it reads the value's
-    /// type byte and at most one word, as the handler makes it
-    /// (`ZEND_JMP_SET`, `ZEND_COALESCE`, `ZEND_JMP_NULL`,
-    /// `Z/Zend/zend_vm_def.h`): a `?:` on `null`, a boolean, a long, a
-    /// string or an array, by `zend_is_true`'s reading of each; a `??` on
-    /// anything defined that is no reference; a `?->` on such a value
-    /// other than `null`. The jump taken, the value is copied to the
-    /// opline's out slot with one owner more, as `ZVAL_COPY` copies a variable;
-    /// `join` takes whether it jumped. Every other value, and every other
-    /// opline, goes to `handler`, which serves it whole.
-    fn tested(&mut self, line: &Line, handler: Block, join: Block) -> Result<(), Abort> {
-        let opcode = line.opcode;
-        let (Operand::Value(value), true) = (
-            line.op1,
-            matches!(opcode, Opcode::JmpSet | Opcode::Coalesce | Opcode::JmpNull),
-        ) else {
+    /// type byte and its word, or the count or the length and first byte
+    /// that word points at, as the handler makes it (`ZEND_JMP_SET`,
+    /// `ZEND_COALESCE`, `ZEND_JMP_NULL`, `Z/Zend/zend_vm_def.h`):
+    /// [`Test`]'s three. A `?:` or `??` that jumps copies the value to
+    /// the opline's out slot with one owner more, as `ZVAL_COPY` copies a
+    /// variable; either way the direction guards are held on the way it
+    /// went, which is the way the recording names, as the jump's target is
+    /// never the opline after it: each of the three jumps past an operand
+    /// or a member the compiler lays down between. Then on to `done`.
+    /// Every other value, a temporary's among them, goes to `handler`,
+    /// which serves it whole.
+    fn tested(&mut self, at: OpId, line: &Line, handler: Block, done: Block) -> Result<(), Abort> {
+        let (Operand::Value(value), Some(test)) = (line.op1, Test::of(line.opcode)) else {
             self.b.ins().jump(handler, &[]);
             return Ok(());
         };
@@ -1988,23 +2000,23 @@ impl<'a> Emit<'a> {
         let info = self.b.ins().load(I32, trusted(), room, from_at + TYPE_AT);
         let kind = self.b.ins().band_imm_u(info, KIND);
         let goes_on = self.b.create_block();
-        let jumps = self.b.create_block();
+        let taken = self.b.create_block();
         let is =
             |emit: &mut Emit<'_>, t: ZvalType| emit.b.ins().icmp_imm_u(IntCC::Equal, kind, tag(t));
-        match opcode {
-            Opcode::JmpSet => {
+        match test {
+            Test::Truth => {
                 let word = self.b.ins().load(I64, trusted(), room, from_at);
                 let null_or_false = self.b.ins().iadd_imm_s(kind, -tag(ZvalType::Null));
                 let null_or_false =
                     self.b
                         .ins()
                         .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, null_or_false, 1);
-                self.or_else(null_or_false, goes_on);
+                self.divert_if(null_or_false, goes_on);
                 let true_ = is(self, ZvalType::True);
-                self.or_else(true_, jumps);
+                self.divert_if(true_, taken);
                 let long = is(self, ZvalType::Long);
                 self.when_else(long, |emit| {
-                    emit.b.ins().brif(word, jumps, &[], goes_on, &[]);
+                    emit.b.ins().brif(word, taken, &[], goes_on, &[]);
                 });
                 let array = is(self, ZvalType::Array);
                 self.when_else(array, |emit| {
@@ -2012,7 +2024,7 @@ impl<'a> Emit<'a> {
                         .b
                         .ins()
                         .load(I32, trusted(), word, imm(Arr::ELEMENTS_AT));
-                    emit.b.ins().brif(count, jumps, &[], goes_on, &[]);
+                    emit.b.ins().brif(count, taken, &[], goes_on, &[]);
                 });
                 let string = is(self, ZvalType::String);
                 self.when_else(string, |emit| {
@@ -2028,19 +2040,19 @@ impl<'a> Emit<'a> {
                         .icmp_imm_u(IntCC::NotEqual, byte, i64::from(b'0'));
                     let one = emit.b.ins().band(one, zero);
                     let truth = emit.b.ins().bor(long, one);
-                    emit.b.ins().brif(truth, jumps, &[], goes_on, &[]);
+                    emit.b.ins().brif(truth, taken, &[], goes_on, &[]);
                 });
                 self.b.ins().jump(handler, &[]);
             }
-            Opcode::Coalesce => {
+            Test::Defined => {
                 let null = is(self, ZvalType::Null);
-                self.or_else(null, goes_on);
+                self.divert_if(null, goes_on);
                 let undef = is(self, ZvalType::Undef);
                 let reference = is(self, ZvalType::Reference);
                 let other = self.b.ins().bor(undef, reference);
-                self.b.ins().brif(other, handler, &[], jumps, &[]);
+                self.b.ins().brif(other, handler, &[], taken, &[]);
             }
-            _ => {
+            Test::NotNull => {
                 let undef = is(self, ZvalType::Undef);
                 let null = is(self, ZvalType::Null);
                 let reference = is(self, ZvalType::Reference);
@@ -2052,28 +2064,25 @@ impl<'a> Emit<'a> {
         self.b.switch_to_block(goes_on);
         self.b.seal_block(goes_on);
         let no = self.b.ins().iconst(I8, 0);
-        self.b.ins().jump(join, &[BlockArg::Value(no)]);
-        self.b.switch_to_block(jumps);
-        self.b.seal_block(jumps);
-        if opcode != Opcode::JmpNull {
-            let out = line
-                .out
-                .ok_or_else(|| mismatch("a jump that copies its value to no result"))?;
-            let out_at = self.place(self.value(out)?.slot)?;
-            let zval = self.b.ins().iadd_imm_s(room, i64::from(from_at));
-            self.copy_at(zval, info, out_at)?;
+        self.direction(at, no)?;
+        self.b.ins().jump(done, &[]);
+        if test == Test::NotNull {
+            // `?->`'s jump writes the chain's value where its operand is
+            // `null`, which the handler serves.
+            return Ok(());
         }
+        self.b.switch_to_block(taken);
+        self.b.seal_block(taken);
+        let out = line
+            .out
+            .ok_or_else(|| mismatch("a jump that copies its value to no slot"))?;
+        let out_at = self.place(self.value(out)?.slot)?;
+        let zval = self.b.ins().iadd_imm_s(room, i64::from(from_at));
+        self.copy_at(zval, info, out_at)?;
         let yes = self.b.ins().iconst(I8, 1);
-        self.b.ins().jump(join, &[BlockArg::Value(yes)]);
+        self.direction(at, yes)?;
+        self.b.ins().jump(done, &[]);
         Ok(())
-    }
-
-    /// Go to `to` where `cond` is not zero, on in a fresh block otherwise.
-    fn or_else(&mut self, cond: Value, to: Block) {
-        let on = self.b.create_block();
-        self.b.ins().brif(cond, to, &[], on, &[]);
-        self.b.switch_to_block(on);
-        self.b.seal_block(on);
     }
 
     /// Where `cond` is not zero, `body`, which ends its block itself; on
@@ -3425,8 +3434,7 @@ impl<'a> Emit<'a> {
             emit.spill_operands(line)?;
             let [room, opline] = emit.served(line)?;
             let func = emit.func_of(line.frame)?;
-            emit.handled(line, Onward::Past(1), [room, opline, func])?;
-            Ok(())
+            emit.handled(line, Onward::Past(1), [room, opline, func])
         };
         if self.value(value)?.home == Home::Register {
             return handler(self);
