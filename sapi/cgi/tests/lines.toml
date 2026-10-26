@@ -345,6 +345,16 @@ name = "hard-limit-sends-no-head"
 args = ["-n", "-d", "memory_limit=128M", "{dir}/t.php"]
 files = { "t.php" = "<?php\nob_start();\nheader('X-A: 1');\necho \"body\\n\";\nhash_pbkdf2('md5', 'p', 's', 1, PHP_INT_MAX);\n" }
 
+# The header callback `header_register_callback` named runs where the head
+# is sent, `sapi_send_headers`, which the request's output deactivation
+# reaches in `php_request_shutdown`; the hard limit's `_exit(137)` comes
+# before it, so the callback never runs and what it would write is never
+# written (#3435).
+[[line]]
+name = "hard-limit-runs-no-header-callback"
+args = ["-n", "-d", "memory_limit=128M", "{dir}/t.php"]
+files = { "t.php" = "<?php\nheader_register_callback(function () { echo \"cb\\n\"; fwrite(STDERR, \"cb\\n\"); });\nob_start();\necho \"body\\n\";\nhash_pbkdf2('md5', 'p', 's', 1, PHP_INT_MAX);\n" }
+
 # A negative `CONTENT_LENGTH` is read to the body's end, stdin's under CGI
 # and `FCGI_STDIN`'s under FastCGI: `sapi_cgi_read_post` and
 # `sapi_fcgi_read_post` take what the length leaves as a `size_t`, which

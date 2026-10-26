@@ -641,3 +641,12 @@ args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protectio
 [[line]]
 name = "a-shutdown-function-under-r-takes-pcre-s-in-shutdown-pair"
 args = ["-n", "-r", '''register_shutdown_function(function () { preg_match("/(a)?(b)?c/", "c", $n, PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL); gc_collect_cycles(); unset($n); $f = gc_status()["roots"]; preg_match("/(x)?(y)/", "y", $m, PREG_OFFSET_CAPTURE); gc_collect_cycles(); unset($m); var_dump($f, gc_status()["roots"]); }); preg_match("/(x)?(y)/", "y", $o, PREG_OFFSET_CAPTURE);''']
+
+# php 8.5.12's hard memory limit `_exit(137)`s in `zend_mm_hard_limit_error`
+# (`Z/Zend/zend_alloc.c:519`), before `php_request_shutdown` deactivates
+# the output and sends the head, so the callback `header_register_callback`
+# named never runs. The CLI's head reaches no one, so only the callback's
+# own write tells: the hard limit's line alone, and 137 (#3435).
+[[line]]
+name = "hard-limit-runs-no-header-callback"
+args = ["-n", "-d", "memory_limit=128M", "-r", '''ob_start(); header_register_callback(function () { fwrite(STDERR, "cb\n"); echo "cb\n"; }); echo "body\n"; hash_pbkdf2("md5", "p", "s", 1, PHP_INT_MAX);''']
