@@ -480,6 +480,31 @@ fn a_change_to_what_rustc_is_built_under_asks_for_a_fold_reading() {
     );
     store.record(&[fresh(&root, "fold", "sapi/cli")]).unwrap();
     assert_eq!(asked(&judge(&root)), Vec::<String>::new());
+
+    // The manifest's profiles stale the reading, and a table of it that
+    // decides no codegen does not; the configuration's deployment target
+    // stales it as its rustflags do (#3356).
+    let unread = "[workspace.metadata]\nnote = 1\n";
+    write(&root, "Cargo.toml", unread);
+    assert_eq!(asked(&judge(&root)), Vec::<String>::new());
+    write(
+        &root,
+        "Cargo.toml",
+        &format!("{unread}[profile.release]\nlto = false\n"),
+    );
+    assert_eq!(
+        asked(&judge(&root)),
+        [
+            "fold: no reading for sapi/cli over the tree now, and .cargo/config.toml changed; `cargo xtask fold` takes it, building the release sapi/cli first (minutes)"
+        ]
+    );
+    store.record(&[fresh(&root, "fold", "sapi/cli")]).unwrap();
+    write(
+        &root,
+        ".cargo/config.toml",
+        "[target.'cfg(all())']\nrustflags = []\n[env]\nMACOSX_DEPLOYMENT_TARGET = \"11.0\"\n",
+    );
+    assert_eq!(asked(&judge(&root)).len(), 1);
 }
 
 // ------------------------------------------- the base is main

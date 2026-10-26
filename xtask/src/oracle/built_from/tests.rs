@@ -97,6 +97,7 @@ fn a_run_is_kept_under_the_packages_the_binary_links_and_nothing_else() {
             "crates/php_engine",
             "crates/timelib_sys",
             "ops.toml",
+            "rust-toolchain",
             "rust-toolchain.toml",
             "sapi/cgi",
             "sapi/cli",
