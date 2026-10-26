@@ -294,6 +294,7 @@ impl<'a> Dump<'a> {
                         format!("copied #{} through an indirect reference", value.0)
                     }
                 },
+                Stored::Null => "null".to_owned(),
             };
             write!(text, " {}={from}", self.slot(store.slot))?;
         }

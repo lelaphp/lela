@@ -789,6 +789,9 @@ pub(crate) enum Stored {
     /// way it is read, hold the element's address in registers of their
     /// own (`zend_jit_fetch_dim_read`).
     Copied { value: ValueId, read: Read },
+    /// `null`, which the fetch that found no element wrote to its slot
+    /// before it left, as php's stack map holds it, `null(type_only)`.
+    Null,
 }
 
 /// How a zval is read: in place, through the reference it is, or

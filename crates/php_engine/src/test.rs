@@ -2,7 +2,9 @@
 //! sink and `Engine::serve_capture`, behind the `test` feature, so an
 //! extension's tests build a fresh engine with that crate alone and read
 //! what it wrote. Re-exported by `php_ext::test`; its items are `api.lock`
-//! lines in the `test` group.
+//! lines in the `test` group. Beside them, [`in_a_process_apart`], which
+//! `php_ext::test` does not re-export: the engine's and the tier's tests
+//! that fork go through it, the tier's by a `tier.lock` line.
 
 use std::any::Any;
 use std::path::Path;
@@ -229,6 +231,86 @@ impl Served {
             "\nstdout:\n{stdout}\nstderr:\n{}",
             String::from_utf8_lossy(&self.stderr)
         );
+    }
+}
+
+/// The variable that tells a test binary, started again by
+/// [`in_a_process_apart`], which test it was started for.
+const APART: &str = "PHP_TEST_APART";
+
+/// `body` in a process of its own, for a test that forks through the
+/// engine: the test `name`, as the harness names it, started again with
+/// nothing else of the binary's inside the engine, so the fork is not
+/// refused for a sibling test's request. There `body` prints its line,
+/// or its failure before the process exits 1; here the test holds what
+/// that process printed to `came_to`, once it ends within half a minute.
+///
+/// # Panics
+///
+/// Where the process cannot start, fails, outlasts half a minute or did
+/// not print `came_to`, with what it printed in the message.
+pub fn in_a_process_apart(
+    name: &str,
+    came_to: &str,
+    body: impl FnOnce() -> Result<String, String>,
+) {
+    if std::env::var_os(APART).is_some_and(|apart| apart == name) {
+        let came = body();
+        let (Ok(line) | Err(line)) = &came;
+        println!("{line}");
+        if came.is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
+    let ran = run_apart(name);
+    let (Ok(said) | Err(said)) = &ran;
+    assert!(
+        ran.as_ref().is_ok_and(|printed| printed.contains(came_to)),
+        "{name} run apart: {said}"
+    );
+}
+
+/// What the test `name`, started again for itself alone, printed on
+/// either stream, where it passed within half a minute. Both streams go
+/// to a file rather than a pipe, so neither a process that prints more than
+/// a pipe holds nor a forked child that outlives it and keeps the
+/// stream open can stall the wait.
+fn run_apart(name: &str) -> Result<String, String> {
+    use std::time::{Duration, Instant};
+    let path = std::env::temp_dir().join(format!("dax-{}-apart-{name}", std::process::id()));
+    let printed = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    let streams = (printed.try_clone(), printed);
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut run = std::process::Command::new(exe)
+        .args([name, "--exact", "--nocapture", "--test-threads=1"])
+        .env(APART, name)
+        .stdout(streams.0.map_err(|e| e.to_string())?)
+        .stderr(streams.1)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let started = Instant::now();
+    let ended = loop {
+        match run.try_wait() {
+            Ok(None) if started.elapsed() <= Duration::from_secs(30) => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => break Err("it did not end in 30s: its fork's child hung".to_owned()),
+            Ok(Some(status)) => break Ok(status),
+            Err(e) => break Err(e.to_string()),
+        }
+    };
+    if ended.is_err() {
+        run.kill().ok();
+        run.wait().ok();
+    }
+    let printed = std::fs::read(&path).unwrap_or_default();
+    std::fs::remove_file(&path).ok();
+    let printed = String::from_utf8_lossy(&printed).into_owned();
+    match ended {
+        Ok(status) if status.success() => Ok(printed),
+        Ok(status) => Err(format!("{status}: {printed}")),
+        Err(failed) => Err(format!("{failed}: {printed}")),
     }
 }
 

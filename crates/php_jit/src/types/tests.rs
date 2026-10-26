@@ -2438,6 +2438,49 @@ fn a_temporarys_free_reloads_nothing() -> Result<(), String> {
     Ok(())
 }
 
+/// A `FETCH_DIM_IS` whose element the opline after it holds the type of
+/// takes php's three exits, in its order: an element not found leaves
+/// past the fetch `null`, then the element's guards in place and through
+/// a reference leave past it with the element copied, as the pinned php's
+/// `opcache.jit_debug` exit info has them (`exit_5` to `exit_7` of
+/// `nested_dims.php`'s `nested_read`; revision 114).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_held_fetch_is_leaves_past_itself_null_where_it_finds_nothing() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($h, $n) {
+            $s = 0;
+            for ($i = 0; $i < $n; $i++) { if (isset($h['n'][$i & 1])) { $s++; } }
+            return $s;
+        }
+        echo f(['n' => [5, 6]], 3), \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let at = inline_at(&ir, Opcode::FetchDimIs)?;
+    let Op::Line(line) = &ir.ops[at.index()] else {
+        return Err(format!("no fetch: {rendered}"));
+    };
+    let missed = line.exit.ok_or(format!("no exit of its own: {rendered}"))?;
+    let held: Vec<ExitId> = (ir.guards.iter())
+        .filter(|guard| guard.at == GuardAt::Within(at))
+        .map(|guard| guard.exit)
+        .collect();
+    assert_eq!(held.len(), 2, "{rendered}");
+    assert!(held.iter().all(|exit| exit.0 > missed.0), "{rendered}");
+    let spec = &ir.exits[usize::from(missed.0)];
+    assert!(
+        (spec.stores.iter()).any(|store| store.from == Stored::Null),
+        "{rendered}"
+    );
+    assert_eq!(
+        spec.opline,
+        Some(OplineIdx(line.opline.0 + 1)),
+        "{rendered}"
+    );
+    Ok(())
+}
+
 /// A write to a shared hash is its handler's, which copies the array,
 /// and one over an object gives the object up, whose destructor writes
 /// the variables a reference reaches: `ASSIGN_DIM` has no `call` effect,

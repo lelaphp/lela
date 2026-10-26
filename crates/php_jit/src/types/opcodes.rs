@@ -1145,11 +1145,15 @@ pub(super) fn packed_guard(
 
 /// How an inline op holds a guard on what it computes: an arithmetic
 /// checks its overflow and leaves for the interpreter to serve it again; a
-/// fetch checks the element's type.
+/// fetch checks the element's type, leaving past itself with the element
+/// copied, and, where `missed` says, an element it does not find leaves
+/// past it `null` first, `FETCH_DIM_IS`'s `not_found_exit_addr` where the
+/// type held is not `null` (`zend_jit_fetch_dim_read`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:12576-12610`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Within {
     Rerun,
-    Fetched,
+    Fetched { missed: bool },
 }
 
 pub(super) fn within(opcode: Opcode, tag: ZvalType) -> Option<Within> {
@@ -1167,7 +1171,10 @@ pub(super) fn within(opcode: Opcode, tag: ZvalType) -> Option<Within> {
         {
             Some(Within::Rerun)
         }
-        Opcode::FetchDimR | Opcode::FetchObjR => Some(Within::Fetched),
+        Opcode::FetchDimR | Opcode::FetchObjR => Some(Within::Fetched { missed: false }),
+        Opcode::FetchDimIs => Some(Within::Fetched {
+            missed: tag != ZvalType::Null,
+        }),
         _ => None,
     }
 }

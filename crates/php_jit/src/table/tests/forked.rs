@@ -7,8 +7,8 @@
 //! in a process of its own, this binary started again for it alone.
 
 use std::io::{Read, Write};
-use std::time::{Duration, Instant};
 
+use php_engine::test::in_a_process_apart;
 use php_engine::tier::{self, Extension, ExtensionBuilder, Flow, FrameRef, Request, Site, Tier};
 
 use super::super::code::{callable, returning};
@@ -17,42 +17,6 @@ use super::{compiled, trace};
 use crate::record::Start;
 use crate::table;
 use crate::testing;
-
-/// The variable that tells this binary, started again, which test it was
-/// started apart for.
-const APART: &str = "PHP_JIT_TEST_APART";
-
-/// `body` in a process of its own: the test `name` started again with
-/// nothing else of the binary's running, so the fork is not refused for a
-/// sibling test's request; the test holds the last line `body` printed
-/// there to `came_to`, once that process ends within half a minute.
-fn in_a_process_apart(name: &str, came_to: &str, body: impl FnOnce() -> Result<String, String>) {
-    if std::env::var_os(APART).is_some_and(|apart| apart == name) {
-        match body() {
-            Ok(line) => println!("{line}"),
-            Err(failed) => panic!("{failed}"),
-        }
-        return;
-    }
-    let mut run = std::process::Command::new(std::env::current_exe().expect("the test binary"))
-        .args([name, "--exact", "--nocapture", "--test-threads=1"])
-        .env(APART, name)
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .expect("the test binary runs");
-    let started = Instant::now();
-    while run.try_wait().expect("the run is waited for").is_none() {
-        if started.elapsed() > Duration::from_secs(30) {
-            run.kill().ok();
-            panic!("{name} run apart did not end in 30s: its fork's child hung");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let out = run.wait_with_output().expect("the run's output");
-    let printed = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{name} run apart failed: {printed}");
-    assert!(printed.contains(came_to), "{name} apart printed {printed}");
-}
 
 /// What the request's half of the test came to, kept for the test.
 #[derive(Debug, Default)]

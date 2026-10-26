@@ -650,49 +650,7 @@ mod tests {
 
     use super::{RealpathCache, Resolve, held, virtual_file_ex};
     use crate::fork::{Forked, fork};
-
-    /// The variable that tells this binary, started again, which test it
-    /// was started apart for ([`apart`]).
-    const APART: &str = "PHP_ENGINE_TEST_APART";
-
-    /// The test `name` started again in a process of its own, with nothing
-    /// else of the binary's inside the engine, so a host's fork is not
-    /// refused for a sibling test's request; what it printed, once it
-    /// passed within half a minute.
-    fn apart(name: &str) -> String {
-        let mut run = std::process::Command::new(std::env::current_exe().expect("the test binary"))
-            .args([name, "--exact", "--nocapture", "--test-threads=1"])
-            .env(APART, name)
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("the test binary runs");
-        let started = Instant::now();
-        while run.try_wait().expect("the run is waited for").is_none() {
-            if started.elapsed() > Duration::from_secs(30) {
-                run.kill().ok();
-                panic!("{name} run apart did not end in 30s: its fork's child hung");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let out = run.wait_with_output().expect("the run's output");
-        assert!(
-            out.status.success(),
-            "{name} run apart failed: {}",
-            out.status
-        );
-        String::from_utf8_lossy(&out.stdout).into_owned()
-    }
-
-    /// `body` in a process of its own ([`apart`]), which says what it
-    /// came to on its last line; the test holds that line to `came_to`.
-    fn in_a_process_apart(name: &str, came_to: &str, body: impl FnOnce() -> String) {
-        if std::env::var_os(APART).is_some_and(|apart| apart == name) {
-            println!("{}", body());
-        } else {
-            let printed = apart(name);
-            assert!(printed.contains(came_to), "{name} apart printed {printed}");
-        }
-    }
+    use crate::test::in_a_process_apart;
 
     /// A cache on, as the engine's defaults set it, with the entries a
     /// resolution of the temporary directory makes.
@@ -746,7 +704,7 @@ mod tests {
                 !cache.listed(|_| ()).is_empty(),
                 "the parent lost its entries"
             );
-            format!("child {entries}, parent kept")
+            Ok(format!("child {entries}, parent kept"))
         });
     }
 
@@ -779,7 +737,7 @@ mod tests {
                 "the fork returned before the mutex was let go"
             );
             assert_eq!(entries, 0, "the child kept its parent's entries");
-            format!("child {entries}, forked after the release")
+            Ok(format!("child {entries}, forked after the release"))
         });
     }
 
