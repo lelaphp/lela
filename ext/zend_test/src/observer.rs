@@ -45,6 +45,7 @@ use php_ext_standard::php_var_export_ex;
 
 use crate::Entry;
 use crate::Modifiable::{All, System};
+use crate::throwables::Throwables;
 
 /// `zend_test.observer.enabled`.
 const ENABLED: &[u8] = b"zend_test.observer.enabled";
@@ -105,7 +106,7 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
     builder
         .ini(ini())
         .on_modify(OBSERVE_FUNCTION_NAMES, on_update_function_names)
-        .engine_state(Switches::start)
+        .engine_state(Started::start)
         .observer_when(fcall_init, |start| started_on(start, ENABLED))
         .observer_when(execute_internal_init, |start| {
             started_on(start, b"zend_test.observer.execute_internal")
@@ -121,6 +122,24 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
 /// The table as the extension declares it.
 fn ini() -> Vec<IniDecl> {
     ENTRIES.iter().map(Entry::decl).collect()
+}
+
+/// The engine state: the switches and the classes the natives raise
+/// (`crate::throwables`), both as the engine started with them.
+#[derive(Clone, Copy)]
+pub(crate) struct Started {
+    switches: Switches,
+    pub(crate) throwables: Throwables,
+}
+
+impl Started {
+    /// The engine start: the switches read, the classes resolved.
+    fn start(start: &Start) -> Result<Started, Refusal> {
+        Ok(Started {
+            switches: Switches::start(start)?,
+            throwables: Throwables::start(start)?,
+        })
+    }
 }
 
 /// The `PHP_INI_SYSTEM` switches as the engine started with them,
@@ -179,7 +198,8 @@ impl Switches {
 
     /// The switches of the engine `req` is served by.
     fn of(req: &Request) -> Switches {
-        req.engine::<Switches>().copied().unwrap_or_default()
+        req.engine::<Started>()
+            .map_or_else(Switches::default, |state| state.switches)
     }
 }
 
@@ -435,7 +455,8 @@ impl Serves {
 
     fn function_of(req: &Request, function: Function, scope: Option<ClassId>) -> Serves {
         Serves::Function {
-            scope: scope.map(|class| req.symbols().class_name(class)),
+            scope: scope
+                .map(|class| String::from_utf8_lossy(req.symbols().class_name(class)).into_owned()),
             name: req
                 .symbols()
                 .function_decl(function)
@@ -693,7 +714,10 @@ fn end(observed: &mut Observed<'_>, returned: Option<&Value>) {
     let depth = observed.state::<crate::State>().observer.depth;
     if let Some(raised) = observed.diagnostics().raised() {
         let class = match raised {
-            Raised::Throwable(throwable) => observed.symbols().class_name(throwable.class()),
+            Raised::Throwable(throwable) => {
+                String::from_utf8_lossy(observed.symbols().class_name(throwable.class()))
+                    .into_owned()
+            }
             Raised::UnwindExit => String::from("UnwindExit"),
             Raised::GracefulExit => String::from("GracefulExit"),
         };
@@ -743,12 +767,13 @@ fn retval_info(
         None => info.extend_from_slice(b"NULL"),
         Some(value) if switches.show_return_value => {
             if let Some(object) = value.as_object() {
-                let named = format!(
-                    "object({})#{}",
+                let named = [
+                    b"object(".as_slice(),
                     req.symbols().class_name(object.class()),
-                    object.index()
-                );
-                info.extend_from_slice(named.as_bytes());
+                    format!(")#{}", object.index()).as_bytes(),
+                ]
+                .concat();
+                info.extend_from_slice(&named);
             } else {
                 let level = depth.saturating_mul(2).saturating_add(3);
                 // What the walk threw stands pending, as php's smart_str
@@ -756,7 +781,7 @@ fn retval_info(
                 php_var_export_ex(req, &mut info, value, level).ok();
             }
         }
-        Some(value) => info.extend_from_slice(type_name(req, value).as_bytes()),
+        Some(value) => info.extend_from_slice(&type_name(req, value)),
     }
     info
 }

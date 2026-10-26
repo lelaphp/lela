@@ -1,7 +1,8 @@
 //! The engine-owned form of the units an epoch's cache holds
 //! (`jit-design.md` §3.1, §3.2; design §5.14 *Identities*, §6.3): one
 //! [`Func`] per op array of each held unit, beside the unit, with one
-//! [`Word`] per entry of the op array's `safepoints`, all bits zero, and
+//! [`Word`] per entry of the op array's `safepoints`, laid as the tier
+//! said the unit's words are ([`super::Laid`]), and
 //! a landing word per opline, laid down sealed the first time a tier arms
 //! one (`jit-design.md` §2.2). The words are the engine's and never the
 //! unit's (ADR-0001).
@@ -21,7 +22,7 @@ use std::sync::OnceLock;
 use php_unit::decl::Parameter;
 use php_unit::{MapPtrOffset, OpArray, OplineIdx, PublishedUnit};
 
-use super::{SafepointIdx, Word};
+use super::{Laid, SafepointIdx, Word};
 use crate::arena::Column;
 use crate::exec::{self, Body};
 
@@ -149,10 +150,14 @@ impl Funcs {
     }
 
     /// One row per op array of `unit`, which the epoch's cache holds,
-    /// each at its offset with a zero word per safepoint. An op array
-    /// whose offset is the request's, or below the epoch's first, takes
-    /// none and reads the sealed word.
-    pub(crate) fn publish(&self, unit: &PublishedUnit) {
+    /// each at its offset with a word per safepoint, laid as `laid`
+    /// says: at the halves the tier gave where the unit's words count,
+    /// and sealed where they do not, which no visit acts on, as php's op
+    /// array persisted while its tier was off keeps php's own handlers
+    /// ([`super::Tier::laid`]). An op array whose offset is the
+    /// request's, or below the epoch's first, takes none and reads the
+    /// sealed word.
+    pub(crate) fn publish(&self, unit: &PublishedUnit, laid: Laid) {
         for (body, code) in bodies(unit) {
             let MapPtrOffset::Engine(offset) = code.runtime_cache else {
                 continue;
@@ -160,7 +165,11 @@ impl Funcs {
             let Some(at) = offset.checked_sub(self.first) else {
                 continue;
             };
-            let words = code.safepoints.iter().map(|_| Word::default()).collect();
+            let word = || match laid {
+                Laid::Counting(halves) => Word::laid(halves),
+                Laid::Sealed => Word::sealed(),
+            };
+            let words = code.safepoints.iter().map(|_| word()).collect();
             let row = Func {
                 unit: PublishedUnit::clone(unit),
                 body,
@@ -218,7 +227,7 @@ mod tests {
 
     use php_unit::{OpArray, Opline, OplineIdx, Unit};
 
-    use super::{Funcs, SEALED};
+    use super::{Funcs, Laid, SEALED};
     use crate::tier::SafepointIdx;
 
     /// A unit whose main op array has `safepoints` safepoints and as many
@@ -243,7 +252,7 @@ mod tests {
     #[test]
     fn a_held_units_op_arrays_have_rows_at_their_offsets_and_the_next_epoch_starts_past_them() {
         let funcs = Funcs::numbered_from(10);
-        funcs.publish(&published(10, 3));
+        funcs.publish(&published(10, 3), Laid::COLD);
         let main = funcs.get(10);
         assert!(main.is_some_and(|main| main.op_array().is_some()));
         let word = main.map(|main| main.word(SafepointIdx(2)));
@@ -255,9 +264,9 @@ mod tests {
         let next = funcs.after();
         // 11, past the one offset the epoch held a row at.
         assert!(next.get(10).is_none());
-        next.publish(&published(10, 1));
+        next.publish(&published(10, 1), Laid::COLD);
         assert!(next.get(10).is_none(), "below the epoch's first: sealed");
-        next.publish(&published(11, 1));
+        next.publish(&published(11, 1), Laid::COLD);
         assert!(next.get(11).is_some());
     }
 
@@ -267,7 +276,7 @@ mod tests {
     #[test]
     fn landing_words_are_sealed_until_laid_and_one_per_opline() {
         let funcs = Funcs::numbered_from(0);
-        funcs.publish(&published(0, 3));
+        funcs.publish(&published(0, 3), Laid::COLD);
         let main = funcs.get(0).expect("the main op array has a row");
         let sealed = |word: &crate::tier::Word| {
             word.halves()
@@ -290,6 +299,15 @@ mod tests {
         );
         assert!(sealed(main.landing(OplineIdx(2))));
         assert!(main.lay_landing(OplineIdx(3)).is_none());
+        // A unit whose words do not count has them sealed, each its own.
+        let uncounted = Funcs::numbered_from(0);
+        uncounted.publish(&published(0, 2), Laid::Sealed);
+        let main = uncounted.get(0).expect("an uncounted unit keeps its row");
+        assert!(main.op_array().is_some() && sealed(main.word(SafepointIdx(1))));
+        assert!(!std::ptr::addr_eq(
+            main.word(SafepointIdx(1)),
+            std::ptr::addr_of!(SEALED)
+        ));
         assert!(std::ptr::addr_eq(
             main.landing(OplineIdx(3)),
             std::ptr::addr_of!(SEALED)

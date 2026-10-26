@@ -43,7 +43,9 @@ use super::{Accept, Ask, Captured, Judged, Judgement, fence};
 use crate::divergence::{Divergence, Registry};
 use crate::oracle::expect::Expectation;
 use crate::oracle::hosts::FPM;
-use crate::oracle::{self, Observation, Oracle, Pin, Program, Regime, Verdict as Compared, linked};
+use crate::oracle::{
+    self, Invocation, Observation, Oracle, Pin, Program, Regime, Verdict as Compared, linked,
+};
 use crate::phpt::Lane;
 use crate::scratch::Full;
 use anyhow::{Context, Result};
@@ -168,42 +170,38 @@ fn both(
     // nothing, judged as it stands, and its note names why.
     let mut captured = witness.clone();
     let mut refused = None;
-    let (was, now) = if on.body_asked(witness, exit, oracle_out) {
-        let written = bodies(on.oracle, witness, exit, oracle_out).and_then(|(stdout, stderr)| {
-            fence::streams(&head, &stdout, &stderr).map(|lines| (stdout, stderr, lines))
-        });
-        match written {
-            Ok((stdout, stderr, lines)) => {
-                captured.stdout = stdout;
-                captured.stderr = (!stderr.is_empty()).then_some(stderr);
-                (&witness.fences[..], lines)
-            }
-            Err(why) => {
-                refused = Some(why);
-                (&witness.fences[..1], vec![head])
-            }
-        }
-    } else if on.ask.accept == Accept::Streams && witness.capture {
-        let streams = again(on.oracle, witness, oracle_out).and_then(|(stdout, stderr)| {
-            fence::streams(&head, &stdout, &stderr).map(|lines| (stdout, stderr, lines))
-        });
-        let (stdout, stderr, lines) = match streams {
-            Ok(written) => written,
-            Err(refused) => {
-                return Ok(judged(
-                    witness,
-                    Judgement::Unpinned,
-                    format!(
-                        "`capture` wrote nothing: {refused}; write the fence by hand, a wildcard where the line moves, and drop `capture`"
-                    ),
-                ));
-            }
-        };
-        captured.stdout = stdout;
-        captured.stderr = (!stderr.is_empty()).then_some(stderr);
-        (&witness.fences[..], lines)
+    let bodied = on.body_asked(witness, exit, oracle_out);
+    let streams = if bodied {
+        Some(bodies(on.oracle, witness, exit, oracle_out))
     } else {
-        (&witness.fences[..1], vec![head])
+        (on.ask.accept == Accept::Streams && witness.capture)
+            .then(|| again(on.oracle, witness, oracle_out))
+    };
+    let written = streams.map(|streams| {
+        streams.and_then(|(stdout, stderr)| {
+            fence::streams(&head, &stdout, &stderr).map(|lines| (stdout, stderr, lines))
+        })
+    });
+    let (was, now) = match written {
+        Some(Ok((stdout, stderr, lines))) => {
+            captured.stdout = stdout;
+            captured.stderr = (!stderr.is_empty()).then_some(stderr);
+            (&witness.fences[..], lines)
+        }
+        Some(Err(why)) if bodied => {
+            refused = Some(why);
+            (&witness.fences[..1], vec![head])
+        }
+        Some(Err(refused)) => {
+            return Ok(judged(
+                witness,
+                Judgement::Unpinned,
+                format!(
+                    "`capture` wrote nothing: {refused}; write the fence by hand, a wildcard where the line moves, and drop `capture`"
+                ),
+            ));
+        }
+        None => (&witness.fences[..1], vec![head]),
     };
     if now != was {
         kept.captured.push(Captured {
@@ -244,7 +242,12 @@ fn both(
     if let Some(why) = refused {
         verdict.note = format!("`--bodies` wrote nothing: {why}\n{}", verdict.note);
     }
-    Ok(verdict)
+    match on.registry.accepted(&witness.id()) {
+        Some(row) if verdict.judgement == Judgement::Diverged => {
+            Ok(proven(on, witness, row, (&ran, None), verdict))
+        }
+        _ => Ok(verdict),
+    }
 }
 
 /// The run of record, with what it entered kept, or the bork where it did
@@ -365,10 +368,58 @@ fn alone(
         &[(Run::Engine, &ran)],
     );
     if verdict.judgement == Judgement::Pass {
-        return Ok(judged(witness, Judgement::Covered, recorded));
+        let covered = judged(witness, Judgement::Covered, recorded);
+        return Ok(proven(on, witness, row, (&ran, Some(exit)), covered));
     }
     verdict.note = format!("{recorded}\n{}", verdict.note);
     Ok(verdict)
+}
+
+/// `verdict` on a fence `row` holds, where the row names the regime its
+/// cause is proven at (#3365): the oracle's run of the snippet again under
+/// that regime beside the fence's own, held to the engine's run `ran`.
+/// The verdict stands where the two are one run's bytes, or, for a fence
+/// pinning the engine's side under `exit`, where the run meets the fence
+/// as the engine's did, its wildcards over what moves; and the fence
+/// fails, naming its id and the regime, where they still differ (#3369);
+/// a request fence, whose host takes the fence's regime alone, fails so.
+fn proven(
+    on: &On<'_>,
+    witness: &Witness,
+    row: &Divergence,
+    (ran, pinned): (&Observation, Option<Exit>),
+    verdict: Judged,
+) -> Judged {
+    let Some(regime) = &row.proven_at else {
+        return verdict;
+    };
+    let regimes: Vec<&str> = (witness.regime.as_deref().into_iter())
+        .chain([regime.as_str()])
+        .collect();
+    let snippet = Program::Snippet(&witness.snippet);
+    let again = match &witness.request {
+        Some(_) => Err(anyhow::anyhow!(
+            "a request fence's host runs under the fence's regime alone"
+        )),
+        None => on.oracle.run_under(&Invocation {
+            regimes: &regimes,
+            ..Invocation::new(&on.oracle.pin().oracle.path, snippet)
+        }),
+    };
+    let pin = on.oracle.pin();
+    let meets =
+        |again: &Observation| pinned.is_some_and(|e| met(pin, witness, e, again).unwrap_or(false));
+    let differs = match again.map(|again| (meets(&again), shown_of(&again), shown_of(ran))) {
+        Ok((meets, theirs, ours)) if meets || theirs == ours => return verdict,
+        Ok((_, theirs, ours)) => oracle::diff(&theirs, &ours),
+        Err(trouble) => format!("{trouble:#}"),
+    };
+    let why = format!(
+        "{} proves its cause at {regime}, and the oracle under it is not the linked engine on {}:\n{differs}",
+        row.id,
+        witness.id()
+    );
+    judged(witness, Judgement::Fail, why)
 }
 
 /// How a run ended and what it printed, as a covered fence's note records
@@ -685,11 +736,7 @@ pub(super) fn held(
                 );
             }
         };
-        let actual = shown(
-            &String::from_utf8_lossy(&observed.stdout),
-            &String::from_utf8_lossy(&observed.stderr),
-            observed.exit.code(),
-        );
+        let actual = shown_of(observed);
         match oracle::verdict(registry, &id, met, &expected, &actual) {
             Compared::Same => {}
             verdict => missed.push((run, verdict, actual)),
@@ -740,6 +787,13 @@ fn met(pin: &Pin, witness: &Witness, exit: Exit, ran: &Observation) -> Result<bo
 /// own streams have been through; the oracle module owns the rule.
 fn normalised(pin: &Pin, text: &str) -> Vec<u8> {
     oracle::normalise(&pin.recipe.normalise, text.as_bytes().to_vec())
+}
+
+/// What `ran` printed and how it ended as [`shown`] renders it, a byte
+/// that is no UTF-8 shown lossily.
+fn shown_of(ran: &Observation) -> Vec<u8> {
+    let lossy = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    shown(&lossy(&ran.stdout), &lossy(&ran.stderr), ran.exit.code())
 }
 
 /// The three streams of one run as one document: what a difference is shown

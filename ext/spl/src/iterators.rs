@@ -34,6 +34,7 @@ use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value
 use php_ext_pcre::Regex;
 
 use crate::array::ArrayIterator;
+use crate::throwables::Throwables;
 use crate::{ArrayAccess, Countable, Iterator, IteratorAggregate, Stringable, Traversable};
 
 /// `CIT_PUBLIC`: the bits of a `CachingIterator`'s flags a program sets.
@@ -777,9 +778,10 @@ impl IteratorIterator {
                     cast = to;
                 }
                 _ => {
+                    let ce = Throwables::of(req)?;
                     return Err(throw(
                         req,
-                        "LogicException",
+                        ce.logic_exception,
                         "Class to downcast to not found or not base class or does not implement Traversable",
                     ));
                 }
@@ -795,9 +797,10 @@ impl IteratorIterator {
             };
             let Some(held) = crate::object_answered(req, answered, b"Traversable") else {
                 let name = String::from_utf8_lossy(&crate::class_name(req, cast)).into_owned();
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "LogicException",
+                    ce.logic_exception,
                     &format!(
                         "{name}::getIterator() must return an object that implements Traversable"
                     ),
@@ -1001,7 +1004,7 @@ impl RecursiveFilterIterator {
             return Ok(None);
         };
         let children = crate::method(req, inner, b"getChildren")?;
-        let made = instantiate(req, this.class(), &[*children]);
+        let made = instantiate(req, this.class(), &[*children], &[]);
         children.give_up(req);
         Ok(Some(made?.into_instance()))
     }
@@ -1135,7 +1138,7 @@ impl RecursiveCallbackFilterIterator {
                 return Err(thrown);
             }
         };
-        let made = instantiate(req, this.class(), &[*children, *callback]);
+        let made = instantiate(req, this.class(), &[*children, *callback], &[]);
         callback.give_up(req);
         children.give_up(req);
         Ok(made?.into_instance())
@@ -1405,9 +1408,10 @@ impl CachingIterator {
             == 0
         {
             let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 &format!("{class} does not fetch string value (see CachingIterator::__construct)"),
             ));
         }
@@ -1451,16 +1455,18 @@ impl CachingIterator {
         }
         let old = dual(req, this, |it| it.flags)?;
         if old & Self::CALL_TOSTRING != 0 && flags & Self::CALL_TOSTRING == 0 {
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "InvalidArgumentException",
+                ce.invalid_argument_exception,
                 "Unsetting flag CALL_TO_STRING is not possible",
             ));
         }
         if old & Self::TOSTRING_USE_INNER != 0 && flags & Self::TOSTRING_USE_INNER == 0 {
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "InvalidArgumentException",
+                ce.invalid_argument_exception,
                 "Unsetting flag TOSTRING_USE_INNER is not possible",
             ));
         }
@@ -1749,7 +1755,7 @@ impl AppendIterator {
                 "InternalError: AppendIterator::__construct served with ArrayIterator unlinked",
             ));
         };
-        let list = instantiate(req, class, &[])?;
+        let list = instantiate(req, class, &[], &[])?;
         let old = dual(req, this, |it| {
             it.kind = Kind::Append;
             it.appended.replace(list)
@@ -2250,7 +2256,7 @@ impl RecursiveRegexIterator {
             Value::int(regex.flags.0),
             Value::int(regex.preg_flags),
         ];
-        let made = instantiate(req, this.class(), &arguments);
+        let made = instantiate(req, this.class(), &arguments, &[]);
         children.give_up(req);
         source.give_up(req);
         Ok(made?.into_instance())
@@ -2282,9 +2288,10 @@ impl EmptyIterator {
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<Never, Thrown> {
         let _ = this;
+        let ce = Throwables::of(req)?;
         Err(throw(
             req,
-            "BadMethodCallException",
+            ce.bad_method_call_exception,
             "Accessing the value of an EmptyIterator",
         ))
     }
@@ -2296,9 +2303,10 @@ impl EmptyIterator {
     #[php(tentative)]
     fn key(req: &mut Request, this: This<Self>) -> Result<Never, Thrown> {
         let _ = this;
+        let ce = Throwables::of(req)?;
         Err(throw(
             req,
-            "BadMethodCallException",
+            ce.bad_method_call_exception,
             "Accessing the key of an EmptyIterator",
         ))
     }
@@ -2378,9 +2386,10 @@ impl RecursiveTreeIterator {
                 .is_some_and(|o| crate::is_a(req, o.class(), b"Traversable"))
             {
                 answered.give_up(req);
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "LogicException",
+                    ce.logic_exception,
                     "getIterator() must return an object that implements Traversable",
                 ));
             }
@@ -2395,7 +2404,7 @@ impl RecursiveTreeIterator {
                 "InternalError: RecursiveTreeIterator::__construct served with RecursiveCachingIterator unlinked",
             ));
         };
-        let caching = instantiate(req, class, &[*source, Value::int(caching_flags)]);
+        let caching = instantiate(req, class, &[*source, Value::int(caching_flags)], &[]);
         source.give_up(req);
         let caching = caching?;
         let built = rec_construct(req, this, *caching, mode, flags);
@@ -2636,9 +2645,10 @@ fn dual_next(req: &mut Request, this: PhpObject, free: bool) -> Result<(), Throw
         dual_free(req, this)?;
     }
     let Some(iter) = inner_iter(req, this)? else {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "The inner constructor wasn't initialized with an iterator instance",
         ));
     };
@@ -2665,9 +2675,10 @@ fn dual_set(
 /// `SPL_FETCH_AND_CHECK_DUAL_IT`: the receiver, its constructor served.
 fn checked(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
     if dual(req, this, |it| it.kind)? == Kind::Unknown {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "The object is in an invalid state as the parent constructor was not called",
         ));
     }
@@ -2678,9 +2689,10 @@ fn checked(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
 /// constructor call is `BadMethodCallException`, named for `base`.
 fn unconstructed(req: &mut Request, this: PhpObject, base: &str) -> Result<(), Thrown> {
     if dual(req, this, |it| it.kind)? != Kind::Unknown {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "BadMethodCallException",
+            ce.bad_method_call_exception,
             &format!("{base}::getIterator() must be called exactly once per instance"),
         ));
     }
@@ -2795,7 +2807,8 @@ fn construct_regex<C: Class>(
     let Some(mode) = Mode::named(mode) else {
         return Err(arg_value_error(req, 3, MODE_MESSAGE));
     };
-    let compiled = throwing_warnings(req, "InvalidArgumentException", |req| {
+    let ce = Throwables::of(req)?;
+    let compiled = throwing_warnings(req, ce.invalid_argument_exception, |req| {
         Ok(Regex::compile(req, source.as_bytes()))
     })?;
     let Some(pattern) = compiled else {
@@ -2935,16 +2948,18 @@ fn limit_seek_to(req: &mut Request, this: PhpObject, pos: i64) -> Result<(), Thr
     dual_free(req, this)?;
     let (offset, count, current) = dual(req, this, |it| (it.offset, it.count, it.pos))?;
     if pos < offset {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "OutOfBoundsException",
+            ce.out_of_bounds_exception,
             &format!("Cannot seek to {pos} which is below the offset {offset}"),
         ));
     }
     if count != -1 && pos - offset >= count {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "OutOfBoundsException",
+            ce.out_of_bounds_exception,
             &format!("Cannot seek to {pos} which is behind offset {offset} plus count {count}"),
         ));
     }
@@ -3036,7 +3051,12 @@ fn caching_next_step(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
                 children.give_up(req);
                 return Ok(None);
             };
-            let made = instantiate(req, class, &[*children, Value::int(flags & CIT_PUBLIC)]);
+            let made = instantiate(
+                req,
+                class,
+                &[*children, Value::int(flags & CIT_PUBLIC)],
+                &[],
+            );
             children.give_up(req);
             made.map(Some)
         })();
@@ -3073,9 +3093,10 @@ fn full_cache(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
         Some(cache) if flags & CachingIterator::FULL_CACHE != 0 => Ok(cache),
         _ => {
             let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
+            let ce = Throwables::of(req)?;
             Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 &format!("{class} does not use a full cache (see CachingIterator::__construct)"),
             ))
         }
@@ -3109,13 +3130,15 @@ fn no_rewind_iter(req: &mut Request, this: PhpObject) -> Result<Option<Iter>, Th
 }
 
 fn appended(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
-    match dual(req, this, |it| it.appended.as_deref().copied())? {
-        Some(list) => Ok(list),
-        None => Err(throw_exception_ex(
+    if let Some(list) = dual(req, this, |it| it.appended.as_deref().copied())? {
+        Ok(list)
+    } else {
+        let ce = Throwables::of(req)?;
+        Err(throw_exception_ex(
             req,
-            "BadMethodCallException",
+            ce.bad_method_call_exception,
             "Classes derived from AppendIterator must call AppendIterator::__construct()",
-        )),
+        ))
     }
 }
 
@@ -3191,13 +3214,15 @@ fn regex_accept(req: &mut Request, this: PhpObject) -> Result<bool, Thrown> {
 /// where no `RegexIterator` constructor was served on it.
 fn regex_of(req: &mut Request, this: PhpObject) -> Result<RegexIt, Thrown> {
     let this = checked(req, this)?;
-    match dual(req, this, |it| it.regex.clone())? {
-        Some(regex) => Ok(regex),
-        None => Err(throw_error(
+    if let Some(regex) = dual(req, this, |it| it.regex.clone())? {
+        Ok(regex)
+    } else {
+        let ce = Throwables::of(req)?;
+        Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "The object is in an invalid state as the parent constructor was not called",
-        )),
+        ))
     }
 }
 
@@ -3295,9 +3320,10 @@ fn rec<R>(
 /// The receiver, php's `Error` where its constructor was not served.
 fn rec_checked(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
     if rec(req, this, |it| it.levels.is_empty())? {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "The object is in an invalid state as the parent constructor was not called",
         ));
     }
@@ -3529,9 +3555,10 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
                     };
                     let Some(held) = crate::object_answered(req, child, b"RecursiveIterator")
                     else {
+                        let ce = Throwables::of(req)?;
                         return Err(throw(
                             req,
-                            "UnexpectedValueException",
+                            ce.unexpected_value_exception,
                             "Objects returned by RecursiveIterator::getChildren() must implement RecursiveIterator",
                         ));
                     };
@@ -3728,14 +3755,16 @@ impl ObjectHandlers for RecHandlers {
             return Ok(None);
         }
         if by_ref {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "An iterator cannot be used with foreach by reference",
             ));
         }
         if rec(req, object, |it| it.levels.is_empty())? {
-            return Err(throw_error(req, "Error", "Object is not initialized"));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, "Object is not initialized"));
         }
         Ok(Some(Box::new(RecWalk)))
     }
@@ -3763,9 +3792,10 @@ impl ObjectHandlers for RecHandlers {
         if rec(req, object, |it| it.levels.is_empty())? {
             let name =
                 String::from_utf8_lossy(&crate::class_name(req, object.class())).into_owned();
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!("The {name} instance wasn't initialized properly"),
             ));
         }
@@ -3858,9 +3888,10 @@ fn rec_construct(
         let answered = call_method(req, &given, b"getIterator", &[])?;
         let Some(held) = crate::object_answered(req, answered, b"Traversable") else {
             let name = String::from_utf8_lossy(&crate::class_name(req, given.class())).into_owned();
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "LogicException",
+                ce.logic_exception,
                 &format!("{name}::getIterator() must return an object that implements Traversable"),
             ));
         };
@@ -3870,9 +3901,10 @@ fn rec_construct(
     };
     if !crate::is_a(req, root.class(), b"RecursiveIterator") {
         root.give_up(req);
+        let ce = Throwables::of(req)?;
         return Err(throw(
             req,
-            "InvalidArgumentException",
+            ce.invalid_argument_exception,
             "An instance of RecursiveIterator or IteratorAggregate creating it is required",
         ));
     }

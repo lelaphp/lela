@@ -14,6 +14,7 @@ use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::ffi::{ColorOp, Copy, Draw, Font, Point};
 use crate::image::{GdFont, GdImage, gd, im, int, with_font};
+use crate::throwables::Throwables;
 
 /// `imagesetstyle(GdImage $image, array $style): bool`: each element
 /// read as an `int`, `zval_get_long`.
@@ -828,7 +829,8 @@ fn imagecolorsforindex(
     let im = im(req, image)?;
     let col = int(color);
     if col < 0 || (!im.true_color() && col >= im.colors_total()) {
-        return Err(argument_error(req, "ValueError", 2, "is out of range"));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 2, "is out of range"));
     }
     let channels = im.rgba(col);
     let mut array = PhpArray::new(req)?;

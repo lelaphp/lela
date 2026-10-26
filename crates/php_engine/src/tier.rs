@@ -27,7 +27,10 @@
 //! this face, so a host that binds a tier names none of `php_engine`.
 
 use std::any::Any;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+#[cfg(not(dispatch = "tailcall"))]
+use php_heap::Zval;
 
 /// What a tier declares its state with, as an extension does (design
 /// §4.4; `jit-design.md` §4, §5.3).
@@ -153,7 +156,7 @@ pub trait Tier: 'static {
 
     /// The tier's [`State`](Tier::State) for a request of the engine
     /// `started`, laid with the request where the engine binds the tier's
-    /// loop ([`Tier::asked`]): none where it binds `Nop`'s, and by
+    /// loop ([`Tier::bound`]): none where it binds `Nop`'s, and by
     /// default.
     #[must_use]
     fn lay(started: &Started<'_>) -> Option<Self::State> {
@@ -182,19 +185,20 @@ pub trait Tier: 'static {
         None
     }
 
-    /// Whether the engine `started` asks the tier at its safepoints at
-    /// all, asked once as the engine binds its loop, after every engine
-    /// state is built: where it answers `false` the engine binds
-    /// [`Nop`]'s loop, so a safepoint costs the loop nothing, as php's VM
-    /// keeps its own handlers where its compiled tier is not on.
-    /// A tier that [`HOLDS`](Tier::HOLDS) or hooks the compile
-    /// ([`HOOKED`](Tier::HOOKED)) is bound whatever it answers, since
-    /// `Nop`'s loop neither holds a frame nor runs a hooked call as it
-    /// does.
+    /// Which loops the engine `started` binds ([`Bound`]), asked once as
+    /// the engine binds them, after every engine state is built: the
+    /// tier's from the start, [`Nop`]'s where the tier never runs, so a
+    /// safepoint costs the loop nothing, as php's VM keeps its own
+    /// handlers where its compiled tier is not on, or both, where a
+    /// request may turn the tier on (ADR-0006, amended on #3301). A tier
+    /// that [`HOLDS`](Tier::HOLDS) or hooks the compile
+    /// ([`HOOKED`](Tier::HOOKED)) is bound from the start whatever it
+    /// answers, since `Nop`'s loop neither holds a frame nor runs a
+    /// hooked call as it does.
     #[must_use]
-    fn asked(started: &Started<'_>) -> bool {
+    fn bound(started: &Started<'_>) -> Bound {
         let _ = started;
-        true
+        Bound::On
     }
 
     /// What php's `zend_jit_status` reports of the tier on `req`'s
@@ -208,9 +212,62 @@ pub trait Tier: 'static {
         let _ = req;
         TierStatus::default()
     }
+
+    /// How the safepoint words of a unit the engine `started` publishes
+    /// now are laid ([`Laid`]), asked once per unit as the cache holds
+    /// it, with `req`, the request it is published for, none where the
+    /// engine publishes it for no request: php's `zend_persist` gives an
+    /// op array its counters only while its compiled tier is on, and none
+    /// of its handlers reads that again (`jit-design.md` §4.7). Every
+    /// unit counts from cold by default.
+    #[must_use]
+    fn laid(started: &Started<'_>, req: Option<&Request>) -> Laid {
+        let _ = (started, req);
+        Laid::COLD
+    }
 }
 
-/// The started engine as its tier reads it at [`Tier::asked`]: the
+/// Which loops an engine binds, as its tier answers at its start
+/// ([`Tier::bound`]; ADR-0006, amended on #3301).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bound {
+    /// [`Nop`]'s alone: the tier never runs in the engine, and its
+    /// safepoints cost the loop nothing.
+    Never,
+    /// Both, where the tier is set up and off and a request may switch
+    /// it on, php's `opcache.jit=off` with a buffer: a request starts in
+    /// the tier's loop once a unit with counting words ([`Laid`]) has
+    /// been published in the engine and in `Nop`'s otherwise, and at the
+    /// first interrupt check after it publishes one itself, `Nop`'s loop
+    /// hands its frame to the tier's for the rest of the request.
+    Runtime,
+    /// The tier's alone, from the start.
+    On,
+}
+
+/// How the safepoint words of a unit are laid as it is published
+/// ([`Tier::laid`]): sealed, so no visit acts on them, as php's op array
+/// persisted while its compiled tier was off keeps php's own handlers;
+/// or counting, each word at the two halves the tier gives, whose bits
+/// are the tier's alone ([`Word`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Laid {
+    Sealed,
+    Counting([u32; 2]),
+}
+
+impl Laid {
+    /// Counting from cold, every bit of the word zero.
+    pub const COLD: Laid = Laid::Counting([0, 0]);
+
+    /// Whether the words count.
+    #[must_use]
+    pub fn counts(self) -> bool {
+        matches!(self, Laid::Counting(_))
+    }
+}
+
+/// The started engine as its tier reads it at [`Tier::bound`]: the
 /// engine states its extensions and the tier built (ADR-0005).
 #[derive(Clone, Copy)]
 pub struct Started<'a> {
@@ -249,20 +306,27 @@ pub(crate) fn interpreted<T: Tier>() -> bool {
     std::any::TypeId::of::<T>() == std::any::TypeId::of::<Nop>()
 }
 
-/// Where a request keeps its tier's [`Tier::State`]
-/// (`jit-design.md` §2.2, #3144): laid once with the request, by the
-/// loop the engine bound ([`Loops::bound`]), and read by [`state`].
-/// Its box is never replaced, moved out of or borrowed mutably while
-/// the request lives, and the types hold that outside `api::request`,
-/// where the request is made: the box is this type's private field,
-/// with no `&mut` method, and the request's field holding it is private
-/// to `api::request`, which hands it out only shared
-/// ([`Request::tier_state`]). A tier lends its state across the
-/// request's own borrow on that (`php_jit`'s `enter::lent`, #3437),
-/// holding a [`Lending`] for as long as the lend stands, so where
-/// `api::request` drops or replaces the state while one is held, a debug
-/// assertion fails as it drops.
+/// Where a request keeps its tier (`jit-design.md` §2.2, #3144, #3362):
+/// the loops it is served in, which re-entry and resumption take, its
+/// tier's [`Tier::State`], laid by those loops ([`Loops::lay`]) and read
+/// by [`state`], and whether a hand-off from `Nop`'s loop to the tier's
+/// can come ([`Switch`]). Laid with the request from the engine's
+/// [`Binding`], and laid again once, at the hand-off
+/// ([`TierState::handed`]), never otherwise. The state's box is never
+/// replaced, moved out of or borrowed mutably while a tier lends it,
+/// and the types hold that outside `api::request`, where the request is
+/// made: the box is this type's private field, with no `&mut` method,
+/// and the request's field holding it is private to `api::request`,
+/// which hands it out only shared ([`Request::tier_state`]). A tier
+/// lends its state across the request's own borrow on that (`php_jit`'s
+/// `enter::lent`, #3437), holding a [`Lending`] for as long as the lend
+/// stands, so where `api::request` drops or replaces the state while one
+/// is held, a debug assertion fails as it drops. No lend stands in
+/// `Nop`'s loop, where the hand-off replaces it.
 pub(crate) struct TierState {
+    /// The loops the request is served in.
+    pub(crate) loops: Loops,
+    switch: std::cell::Cell<Switch>,
     state: Option<Box<dyn Any + Send>>,
     /// How many [`Lending`]s stand, counted under `debug_assertions`
     /// alone.
@@ -270,21 +334,97 @@ pub(crate) struct TierState {
     lends: std::sync::Arc<AtomicU32>,
 }
 
+/// Whether a request's hand-off from `Nop`'s loop to the tier's can
+/// come (#3362).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Switch {
+    /// None can: the engine binds one loop, or the request is in the
+    /// tier's.
+    Settled,
+    /// In `Nop`'s loop, the engine binding the tier's beside it
+    /// ([`Bound::Runtime`]).
+    Ready,
+    /// The request published a unit with counting words in `Nop`'s
+    /// loop: the next interrupt check that can hands its frame to the
+    /// tier's loop ([`interrupted_at`]), and every other raises the
+    /// interrupt again for it ([`owed`]).
+    Due,
+    /// In the tier's loops, the hand-off having served the rest of the
+    /// serving whose site took it: that site leaves along `Threw`, which
+    /// [`unwind_frame`] answers `Done` and settles.
+    Handed,
+}
+
 impl TierState {
-    /// The tier state of a request of the engine `shared`, as the loop it
-    /// bound lays it.
+    /// The tier of a request of the engine `shared`: the tier's loops
+    /// where the engine binds them from the start, or binds them beside
+    /// `Nop`'s and a unit with counting words is published in it, and
+    /// the engine's first loops otherwise, `Ready` to hand off where the
+    /// tier's stand beside them.
     pub(crate) fn laid(shared: &crate::engine::Shared) -> TierState {
-        (shared.loops.lay)(Started { shared })
+        let binding = &shared.binding;
+        let (loops, switch) = match binding.switched {
+            Some(tier) if binding.counting.load(Ordering::Acquire) => (tier, Switch::Settled),
+            Some(_) => (binding.first, Switch::Ready),
+            None => (binding.first, Switch::Settled),
+        };
+        TierState::of(shared, loops, switch)
     }
 
-    /// `T`'s state for a request of the engine `started`.
-    fn of<T: Tier>(started: Started<'_>) -> TierState {
+    /// The request's tier past its hand-off ([`Switch::Due`]): the
+    /// engine's tier's loops, settled, with the state they lay; none
+    /// where no hand-off is due.
+    pub(crate) fn handed(&self, shared: &crate::engine::Shared) -> Option<TierState> {
+        if self.switch.get() != Switch::Due {
+            return None;
+        }
+        let tier = shared.binding.switched?;
+        Some(TierState::of(shared, tier, Switch::Settled))
+    }
+
+    /// The request published a unit whose words count
+    /// ([`Laid::counts`]), as the engine noted it ([`Binding::published`]):
+    /// in `Nop`'s loop beside the tier's, a hand-off is due, and the
+    /// request's interrupt is raised for the check that takes it. Whether
+    /// it was.
+    pub(crate) fn published_counting(&self) -> bool {
+        if self.switch.get() != Switch::Ready {
+            return false;
+        }
+        self.switch.set(Switch::Due);
+        true
+    }
+
+    /// Whether a hand-off is due.
+    pub(crate) fn due(&self) -> bool {
+        self.switch.get() == Switch::Due
+    }
+
+    /// Whether the edge being unwound is the one a site of `Nop`'s loop
+    /// leaves along once its hand-off served ([`Switch::Handed`]), which
+    /// settles the switch.
+    fn take_handed(&self) -> bool {
+        let handed = self.switch.get() == Switch::Handed;
+        if handed {
+            self.switch.set(Switch::Settled);
+        }
+        handed
+    }
+
+    fn of(shared: &crate::engine::Shared, loops: Loops, switch: Switch) -> TierState {
         TierState {
-            state: T::lay(&started).map(|state| Box::new(state) as Box<dyn Any + Send>),
+            loops,
+            switch: std::cell::Cell::new(switch),
+            state: (loops.lay)(Started { shared }),
             #[cfg(debug_assertions)]
             lends: std::sync::Arc::default(),
         }
     }
+}
+
+/// `T`'s state for a request of the engine `started`.
+fn state_of<T: Tier>(started: Started<'_>) -> Option<Box<dyn Any + Send>> {
+    T::lay(&started).map(|state| Box::new(state) as Box<dyn Any + Send>)
 }
 
 #[cfg(debug_assertions)]
@@ -333,6 +473,12 @@ pub fn lending(req: &Request) -> Lending {
     }
 }
 
+/// How the words of a unit the engine `shared` holds now, for `req` or
+/// for no request, are laid ([`Tier::laid`]).
+pub(crate) fn words_laid(shared: &crate::engine::Shared, req: Option<&Request>) -> Laid {
+    (shared.binding.laid)(&Started { shared }, req)
+}
+
 /// The tier's state the request was laid with, where it is an `S`
 /// ([`Tier::State`]): one check of its type, and no lookup. None where
 /// the engine binds a loop that lays none, `Nop`'s.
@@ -353,6 +499,13 @@ impl Word {
     #[must_use]
     pub fn halves(&self) -> &[AtomicU32; 2] {
         &self.halves
+    }
+
+    /// A word at `halves`, the bits the tier lays it at ([`Laid`]).
+    pub(crate) const fn laid([heat, state]: [u32; 2]) -> Word {
+        Word {
+            halves: [AtomicU32::new(heat), AtomicU32::new(state)],
+        }
     }
 
     /// A word no tier acts on: every bit set. Allocated for every
@@ -496,11 +649,13 @@ pub(crate) enum Way {
 impl Next {
     /// The high half of each way, written by the constructors below and
     /// read by [`Next::way`] and nowhere else.
+    /// A call and a return, the edges met most after going on, come
+    /// first, so the search of the high half finds each in two compares.
     const ON_WAY: u64 = 0;
-    const JUMP_WAY: u64 = 1;
-    const SAME_WAY: u64 = 2;
-    const PUSHED_WAY: u64 = 3;
-    const POPPED_WAY: u64 = 4;
+    const PUSHED_WAY: u64 = 1;
+    const POPPED_WAY: u64 = 2;
+    const JUMP_WAY: u64 = 3;
+    const SAME_WAY: u64 = 4;
     const MOVED_WAY: u64 = 5;
     const THREW_WAY: u64 = 6;
     const DONE_WAY: u64 = 7;
@@ -535,10 +690,10 @@ impl Next {
             return Way::On(low);
         }
         match self.0 >> 32 {
-            Next::JUMP_WAY => Way::Jump(low),
-            Next::SAME_WAY => Way::Left(Stepped::Same(FrameRef(low))),
             Next::PUSHED_WAY => Way::Left(Stepped::Pushed(FrameRef(low))),
             Next::POPPED_WAY => Way::Left(Stepped::Popped(FrameRef(low))),
+            Next::JUMP_WAY => Way::Jump(low),
+            Next::SAME_WAY => Way::Left(Stepped::Same(FrameRef(low))),
             Next::MOVED_WAY => Way::Left(Stepped::Moved(FrameRef(low))),
             Next::THREW_WAY => Way::Left(Stepped::Threw(FrameRef(low))),
             // `DONE_WAY`, the one high half left: the fields are private,
@@ -546,6 +701,52 @@ impl Next {
             _ => Way::Left(Stepped::Done),
         }
     }
+}
+
+/// What a handler's inline path answers (design §5.8): the way on in the
+/// frame and nothing else, since an inline path reads and writes the
+/// frame's slots and the op array alone, never the request. The loop,
+/// which holds the frame's slots across the oplines it serves, reads it
+/// with no request in hand; a handler reads it as an edge
+/// (`handlers::inlined`), where a back-edge's interrupt and safepoint
+/// are served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Inline {
+    /// On by so many places from the opline served, as [`Next::by`].
+    On(u32),
+    /// On by so many places over a back-edge, whose safepoint number is
+    /// the second: the interrupt is tested and a bound tier asked before
+    /// the loop goes on there.
+    Back(u32, u32),
+}
+
+impl Inline {
+    /// `ZEND_VM_NEXT_OPCODE`.
+    pub(crate) const ADVANCE: Inline = Inline::On(1);
+
+    /// The jump from `at` to `to`, a back-edge with the safepoint
+    /// `number` where `back` says it goes back.
+    #[inline(always)] // a select of two words, in the loop
+    pub(crate) const fn to(at: u32, to: u32, back: bool, number: u32) -> Inline {
+        let places = to.wrapping_sub(at);
+        if back {
+            Inline::Back(places, number)
+        } else {
+            Inline::On(places)
+        }
+    }
+}
+
+/// What one arm of the loop's dispatch did ([`dispatch::held`]): the
+/// opline served by its handler's inline path over the slots the loop
+/// holds, or by its handler with the request in hand, the slots let go
+/// for it, which the loop takes up again for the frame it goes on in.
+#[cfg(not(dispatch = "tailcall"))]
+pub(crate) enum Dispatched {
+    /// Served over the slots the loop holds, which still name the frame.
+    Inline(Inline),
+    /// Served with the request in hand: the handler's answer.
+    Cold(Result<Next, Fatal>),
 }
 
 impl From<Stepped> for Next {
@@ -589,13 +790,22 @@ mod dispatch {
 
     include!(concat!(env!("OUT_DIR"), "/dispatch.rs"));
 
+    /// The internal error of an opline no handler serves, `why` after its
+    /// opcode's name: out of line, so no arm of the loop reads the opcode
+    /// to build it.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn refused(op: &Opline, why: &str) -> Fatal {
+        Fatal::error(format!("InternalError: {} {why}", op.opcode.name()))
+    }
+
     /// The arm of a handler the loop does not hold in its body: `handler`
     /// called out of line, so what it holds live is its own and not the
     /// loop's. An arm whose handler does not take its opline's place
     /// stands the frame at `at` first, php's `SAVE_OPLINE()`.
     #[cold]
     #[inline(never)]
-    fn aside<F>(
+    pub(super) fn aside<F>(
         req: &mut Request,
         frame: FrameRef,
         code: &OpArray,
@@ -645,28 +855,130 @@ fn answered(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Stepped, F
     Ok(Stepped::Same(at))
 }
 
-/// The activation of a frame serving `code`, its prologue having
-/// raised nothing (design §5.6, §4.3 seam 8): the interrupt check, then
-/// `Site::Entry`, then the frame the loop goes on in.
-#[inline]
-fn activated<T: Tier>(
+/// What a site of `T`'s loop, an activation or a back edge, does where
+/// its interrupt check found the interrupt raised (design §5.8):
+/// [`interrupt::interrupted`], and whether the site leaves along
+/// `Threw` of `frame`, its frame having thrown or been handed on. In
+/// `Nop`'s loop, where the request published a unit with counting words
+/// since its last check ([`Switch::Due`]), the loop hands its edge to
+/// the tier's loop (ADR-0006, amended on #3301), `went`, the edge it was
+/// taking, or `Threw` of `frame`: the request's tier is laid again with
+/// the tier's loops and state, so every serving it starts from here, a
+/// re-entry, a resumption, an `auto_append_file`, takes them, and the
+/// tier's loop serves the rest of this serving on the entry slot it
+/// stands on, under `Nop`'s, whose serving is then over: the `Threw`
+/// the site leaves along is taken up by [`unwind_frame`], which answers
+/// `Done` once the hand-off has served ([`Switch::Handed`]). The
+/// site's code is the shape it was with no hand-off built, the check's
+/// `bool` and the one edge it leaves along, since the serving loop's
+/// registers are held there: answering a third edge from the site spilled
+/// the op array's length in the loop's dispatch, one more load at every
+/// opline, two instructions a turn of the empty loop (#3362).
+#[cold]
+#[inline(never)]
+pub(crate) fn interrupted_at<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
-    code: &OpArray,
-) -> Result<Stepped, Fatal> {
-    if interrupt::check(req)? {
-        return Ok(Stepped::Threw(frame));
+    went: Stepped,
+) -> Result<bool, Fatal> {
+    let handed = interpreted::<T>() && req.hand_off();
+    let threw = interrupt::interrupted(req)?;
+    if handed {
+        let edge = if threw { Stepped::Threw(frame) } else { went };
+        (req.tier_state().loops.handed)(req, edge)?;
+        req.tier_state().switch.set(Switch::Handed);
+        return Ok(true);
     }
-    let flow = T::safepoint(req, frame, Site::Entry, Held::of(code));
-    answered(req, flow, frame)
+    Ok(threw)
+}
+
+/// The interrupt raised again where a hand-off is due and the check
+/// that found it raised cannot take it ([`Switch::Due`]): a check
+/// outside the loop or after a call, whose next site in `Nop`'s loop
+/// takes it ([`interrupted_at`]). No serving runs in the tier's loop
+/// while one is due.
+pub(crate) fn owed(req: &Request) {
+    if req.tier_state().due() {
+        req.limits().interrupt().raise();
+    }
 }
 
 /// One entry of the loop, as the engine binds it.
 pub(crate) type Loop = fn(&mut Request, FrameRef) -> Result<(), Fatal>;
 
-/// How an engine binds its tier's loop once its engine states are built
-/// and its declared opcodes fixed: [`Loops::bound`] for the tier.
-pub(crate) type BindLoops = fn(&crate::engine::Shared) -> Loops;
+/// How an engine binds its tier's loops once its engine states are
+/// built and its declared opcodes fixed: [`Binding::bound`] for the
+/// tier.
+pub(crate) type BindLoops = fn(&crate::engine::Shared) -> Binding;
+
+/// The loops an engine binds and what its tier answers whichever serves
+/// (ADR-0006, amended on #3301): the loops a request starts in, and
+/// under [`Bound::Runtime`] the tier's beside them, which a request
+/// starts in once a unit with counting words is published in the engine
+/// and hands its frame to once it publishes one itself
+/// ([`TierState`]).
+pub(crate) struct Binding {
+    /// The loops a request starts in: the tier's where it is bound
+    /// from the start, `Nop`'s otherwise.
+    pub(crate) first: Loops,
+    /// The tier's, beside `Nop`'s, under [`Bound::Runtime`] alone.
+    pub(crate) switched: Option<Loops>,
+    /// Whether a unit with counting words has been published in the
+    /// engine ([`Binding::published`]).
+    counting: AtomicBool,
+    /// The engine's tier's [`Tier::status`], its own whichever loop
+    /// serves; read by `UnitCache::status` alone.
+    pub(crate) status: fn(&Request) -> TierStatus,
+    /// The engine's tier's [`Tier::laid`], its own whichever loop
+    /// serves; read by the unit cache as it holds a unit.
+    pub(crate) laid: fn(&Started<'_>, Option<&Request>) -> Laid,
+}
+
+impl Binding {
+    /// `T`'s loops for the engine `shared` started, as `T` answers
+    /// ([`Tier::bound`]), each told as the declared set says
+    /// ([`Loops::told`]): a tier that holds a frame or hooks the compile
+    /// is bound from the start.
+    pub(crate) fn bound<T: Tier>(shared: &crate::engine::Shared) -> Binding {
+        let bound = if T::HOLDS || T::HOOKED != Hooked::NONE {
+            Bound::On
+        } else {
+            T::bound(&Started { shared })
+        };
+        let tier = Loops::told::<T>(&shared.opcodes);
+        let nop = Loops::told::<Nop>(&shared.opcodes);
+        let (first, switched) = match bound {
+            Bound::On => (tier, None),
+            Bound::Runtime => (nop, Some(tier)),
+            Bound::Never => (nop, None),
+        };
+        Binding {
+            first,
+            switched,
+            counting: AtomicBool::new(false),
+            status: T::status,
+            laid: T::laid,
+        }
+    }
+
+    /// The binding of an engine not yet started, which serves nothing
+    /// until its start binds the tier's ([`Binding::bound`]).
+    pub(crate) fn unstarted() -> Binding {
+        Binding {
+            first: Loops::of::<Nop, Untold>(),
+            switched: None,
+            counting: AtomicBool::new(false),
+            status: Nop::status,
+            laid: Nop::laid,
+        }
+    }
+
+    /// A unit whose words count was published in the engine: every
+    /// request starting after it starts in the tier's loop.
+    pub(crate) fn published(&self) {
+        self.counting.store(true, Ordering::Release);
+    }
+}
 
 /// The loop's three entries, [`execute`], [`reenter`] and [`resume`],
 /// bound to one tier and to one choice of whether declared opcodes are
@@ -682,36 +994,15 @@ pub(crate) struct Loops {
     pub(crate) reenter: Loop,
     /// The same loop over a generator's frame the resumption put back.
     pub(crate) resume: Loop,
-    /// The tier's state a request of the engine is laid with, the bound
-    /// tier's ([`Tier::lay`]).
-    pub(crate) lay: fn(Started<'_>) -> TierState,
-    /// The engine's tier's [`Tier::status`], its own whichever loop is
-    /// bound; read by `UnitCache::status` alone.
-    pub(crate) status: fn(&Request) -> TierStatus,
+    /// The loop taking up an edge another loop handed it, the rest of a
+    /// serving standing already ([`interrupted_at`], #3362).
+    pub(crate) handed: fn(&mut Request, Stepped) -> Result<(), Fatal>,
+    /// The tier's state a request served in these loops is laid with
+    /// ([`Tier::lay`]).
+    pub(crate) lay: fn(Started<'_>) -> Option<Box<dyn Any + Send>>,
 }
 
 impl Loops {
-    /// `T`'s loop for the engine `shared` started, or `Nop`'s where `T`
-    /// is not asked ([`Tier::asked`]) and neither holds a frame nor
-    /// hooks the compile, told as its declared set says
-    /// ([`Loops::told`]).
-    pub(crate) fn bound<T: Tier>(shared: &crate::engine::Shared) -> Loops {
-        if T::HOLDS || T::HOOKED != Hooked::NONE || T::asked(&Started { shared }) {
-            Loops::told::<T>(&shared.opcodes)
-        } else {
-            Loops {
-                status: T::status,
-                ..Loops::told::<Nop>(&shared.opcodes)
-            }
-        }
-    }
-
-    /// The loop of an engine not yet started, which serves nothing
-    /// until its start binds the tier's ([`Loops::bound`]).
-    pub(crate) fn unstarted() -> Loops {
-        Loops::of::<Nop, Untold>()
-    }
-
     /// `T`'s loop for an engine whose declared set is `opcodes`: the
     /// instantiation that tells the set's observers where an extension
     /// declared an opcode, and the one with no test where none did.
@@ -728,8 +1019,8 @@ impl Loops {
             entry: execute::<T, D>,
             reenter: reenter::<T, D>,
             resume: resume::<T, D>,
-            lay: TierState::of::<T>,
-            status: T::status,
+            handed: serve_frame::<T, D>,
+            lay: state_of::<T>,
         }
     }
 }
@@ -996,6 +1287,10 @@ fn serve_held<'u, T: Tier, D: Telling>(
 ) -> Result<Option<Stepped>, Fatal> {
     let declared = D::of(req);
     scope.measured(req);
+    // The interrupt a back-edge tests, held apart from the request so the
+    // loop tests it with the frame's slots in hand.
+    #[cfg(not(dispatch = "tailcall"))]
+    let interrupt = req.limits().interrupt().clone();
     let mut kept = Kept::<'u>::default();
     let mut stepped = first;
     // Every way out of this loop is taken once a serving, a scope or a
@@ -1071,36 +1366,80 @@ fn serve_held<'u, T: Tier, D: Telling>(
                 None => return Err(no_frame(frame)),
             },
         };
-        if pushed {
-            let start = req.vm().opline(frame);
+        let start = req.vm().opline(frame);
+        let mut at = if pushed {
             let entry = exec::entry_of(body);
             match entered::<T, D>(req, frame, body, (start, entry), declared)? {
-                Stepped::Same(at) if at == frame => {}
-                other => {
+                Ok(at) => at,
+                Err(other) => {
                     stepped = other;
                     continue;
                 }
             }
-        }
+        } else {
+            start
+        };
         let mut oplines = &*body.oplines;
-        let mut at = req.vm().opline(frame);
+        // The frame's slots, held across the oplines the loop dispatches
+        // and served by their handlers' inline paths ([`dispatch::held`]):
+        // a borrow of the request, so every arm that takes the request
+        // ends it, and the borrow checker refuses a loop that reads the
+        // slots again before it takes them up for the frame it goes on in,
+        // as it does once such an arm is served.
+        #[cfg(not(dispatch = "tailcall"))]
+        let mut slots: &mut [Zval] = req.slots_mut(frame);
         stepped = loop {
             #[cfg(not(dispatch = "tailcall"))]
             let way = {
                 let Some(op) = oplines.get(at as usize) else {
                     return Err(past_the_end(frame, at));
                 };
-                declared.before(req, frame, at, op.opcode);
-                let next = dispatch::dispatch::<T>(req, frame, body, op, at)?;
-                #[cfg(debug_assertions)]
-                req.sensed_after(body, op)?;
-                next.way()
+                if declared.tells(op.opcode) {
+                    declared.before(req, frame, at, op.opcode);
+                    slots = req.slots_mut(frame);
+                }
+                match dispatch::held!(req, slots, frame, body, op, at) {
+                    Dispatched::Inline(Inline::On(places)) => {
+                        at = at.wrapping_add(places);
+                        continue;
+                    }
+                    Dispatched::Inline(Inline::Back(places, _))
+                        if interpreted::<T>() && !interrupt.raised().load(Ordering::Relaxed) =>
+                    {
+                        at = at.wrapping_add(places);
+                        continue;
+                    }
+                    // A back-edge whose interrupt is raised or whose tier is
+                    // bound: what the handler does past its path, the request
+                    // in hand.
+                    Dispatched::Inline(inline) => {
+                        crate::handlers::inline_path::served::<T>(req, frame, body, at, inline)?
+                            .way()
+                    }
+                    Dispatched::Cold(next) => {
+                        let next = next?;
+                        #[cfg(debug_assertions)]
+                        req.sensed_after(body, op)?;
+                        next.way()
+                    }
+                }
             };
             #[cfg(dispatch = "tailcall")]
             let way = tail::chain::<T, D>(req, frame, body, oplines, at, &declared)?.way();
-            match way {
-                Way::On(places) => at = at.wrapping_add(places),
-                Way::Jump(to) => at = to,
+            // Whether the edge went into another frame, where the loop
+            // takes its position up with its slots. One take-up where the
+            // arms meet: the two edges into a frame taking theirs up in
+            // their own arms and going on by `continue` measured the empty
+            // loop 72.9 -> 89.2 (#3345).
+            let into = match way {
+                Way::On(places) => {
+                    at = at.wrapping_add(places);
+                    false
+                }
+                Way::Jump(to) => {
+                    at = to;
+                    false
+                }
                 // A return to a frame the loop entered: its op array as
                 // the loop left it for the call.
                 Way::Left(stepped @ (Stepped::Popped(to) | Stepped::Moved(to))) => {
@@ -1110,7 +1449,7 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     frame = to;
                     body = code;
                     oplines = &*body.oplines;
-                    at = req.vm().opline(frame);
+                    true
                 }
                 // A call to a function the loop called before: its op
                 // array as the loop entered it then.
@@ -1122,25 +1461,37 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     else {
                         break stepped;
                     };
-                    let Some(callee_body) = kept.called(function) else {
+                    let Some(called) = kept.called(function) else {
                         break stepped;
                     };
-                    kept.keep(callee, callee_body);
-                    let entry = exec::entry_of(callee_body);
-                    match entered::<T, D>(req, callee, callee_body, (start, entry), declared)? {
-                        Stepped::Same(at) if at == callee => {}
-                        other => break other,
+                    kept.keep(callee, called.code);
+                    let entry = (start, called.entry);
+                    if let Err(other) = entered::<T, D>(req, callee, called.code, entry, declared)?
+                    {
+                        break other;
                     }
                     frame = callee;
-                    body = callee_body;
+                    body = called.code;
                     oplines = &*body.oplines;
-                    // Where the callee stands: a prologue served moved it
-                    // on, and so did a tier whose `Site::Entry` answered a
-                    // `Resume` of it, a trace entered there or a recording
-                    // (#3077); the push's `start` is neither's.
-                    at = req.vm().opline(frame);
+                    true
                 }
                 Way::Left(stepped) => break stepped,
+            };
+            // The slots taken up for the frame the loop goes on in, and
+            // its position with them, from one look at the frame table,
+            // where the edge went into another frame. Read off the frame,
+            // not taken from `entered`: the position in hand from there
+            // measured every dispatch of the bare loops 4% higher, by two
+            // moves the allocator added at the loop's head (#3320).
+            #[cfg(not(dispatch = "tailcall"))]
+            if into {
+                (at, slots) = req.standing(frame);
+            } else {
+                slots = req.slots_mut(frame);
+            }
+            #[cfg(dispatch = "tailcall")]
+            if into {
+                at = req.vm().opline(frame);
             }
         };
     }
@@ -1257,7 +1608,13 @@ fn serve_scope<T: Tier, D: Telling>(
 /// is left of its `RECV*` prologue served over `code`, the op array the
 /// loop holds for it (design §5.6), up to `entry`, its entry safepoint
 /// ([`exec::entry_of`]), and then its activation, the interrupt check
-/// and `Site::Entry`. `Threw` of the callee where a `RECV` raised.
+/// and `Site::Entry`. The answer is the opline the loop goes on at in
+/// the callee, as php's `ZEND_VM_ENTER` loads `opline` once it has
+/// entered: where the tier answered `Continue`, the one the prologue
+/// left it at, which the loop's first entry of a frame takes as it
+/// stands; read off the frame only where a prologue was served or a
+/// tier resumed the callee itself. Any other edge, `Threw` of the callee
+/// where a `RECV` raised, is the `Err`.
 #[inline(always)] // once per call edge, in the loop
 fn entered<T: Tier, D: Telling>(
     req: &mut Request,
@@ -1265,23 +1622,38 @@ fn entered<T: Tier, D: Telling>(
     code: &OpArray,
     (start, entry): (u32, u32),
     told: D,
-) -> Result<Stepped, Fatal> {
+) -> Result<Result<u32, Stepped>, Fatal> {
+    let mut at = start;
     if start < entry {
         // The parameters php's `RECV` passes on its first test, read off
         // the frame in one run where nothing observes the opcode; the
         // handlers serve the rest from the first that does not pass.
-        let at = if told.tells(php_unit::Opcode::Recv) {
-            start
-        } else {
-            exec::recv_passed(req, callee, code, (start, entry))
-        };
-        if at < entry
-            && let Some(threw) = exec::prologue(req, callee, code, told)?
-        {
-            return Ok(Stepped::Threw(threw));
+        if !told.tells(php_unit::Opcode::Recv) {
+            at = exec::recv_passed(req, callee, code, (start, entry));
+        }
+        if at < entry {
+            if let Some(threw) = exec::prologue(req, callee, code, told)? {
+                return Ok(Err(Stepped::Threw(threw)));
+            }
+            at = req.vm().opline(callee);
         }
     }
-    activated::<T>(req, callee, code)
+    // The activation's interrupt check (design §5.8): where `Nop`'s loop
+    // hands the frame to the tier's there ([`interrupted_at`]), the tier's
+    // activates it again, past its prologue, so its `Site::Entry` is the
+    // tier's.
+    if interrupt::raised(req) && interrupted_at::<T>(req, callee, Stepped::Pushed(callee))? {
+        return Ok(Err(Stepped::Threw(callee)));
+    }
+    match T::safepoint(req, callee, Site::Entry, Held::of(code)) {
+        Flow::Continue => Ok(Ok(at)),
+        flow => match answered(req, flow, callee)? {
+            // A tier that resumed the callee itself, at a trace's end or
+            // a recording's start (#3077), stood it where it goes on.
+            Stepped::Same(to) if to == callee => Ok(Ok(req.vm().opline(callee))),
+            other => Ok(Err(other)),
+        },
+    }
 }
 
 /// The internal error for a frame the loop was sent into that serves no
@@ -1302,8 +1674,13 @@ fn no_frame(frame: FrameRef) -> Fatal {
 /// answers the same frame where it landed at a `catch` or a `finally`,
 /// the caller where it left the frame, and this frame again where the
 /// serving's entry frame caught nothing, which is where the serving
-/// ends.
+/// ends. `Done` where the edge is the one a site of `Nop`'s loop leaves
+/// along once it handed the rest of its serving to the tier's loop
+/// ([`interrupted_at`]), which unwinds nothing.
 fn unwind_frame<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
+    if req.tier_state().take_handed() {
+        return Ok(Stepped::Done);
+    }
     let serving = exec::standing(req, frame)?;
     let code = exec::serving_code(&serving, frame)?;
     let at = req.vm().opline(frame);
@@ -1454,7 +1831,7 @@ fn activated_over(req: &mut Request, callee: FrameRef, code: &OpArray) -> Result
     let start = req.vm().opline(callee);
     let entry = exec::entry_of(code);
     match entered::<Nop, Declared>(req, callee, code, (start, entry), told)? {
-        Stepped::Threw(at) => Ok(Stepped::Threw(at)),
+        Err(Stepped::Threw(at)) => Ok(Stepped::Threw(at)),
         _ => Ok(Stepped::Pushed(callee)),
     }
 }

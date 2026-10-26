@@ -25,6 +25,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod sxe;
+mod throwables;
 
 use php_ext::abi::{
     Dependency, DependencyKind, Extension, ExtensionBuilder, FromArgument, Instance, OrFalse, Path,
@@ -45,6 +46,7 @@ use php_ext_libxml::ffi::{
 use php_ext_libxml::{Errors, import_node, register_export};
 
 use sxe::{Ns, Sxe, View, Walk, c_name, sxe, sxe_mut, wrap};
+use throwables::Throwables;
 
 /// Core's interfaces and SPL's `RecursiveIterator`, named for `implements`.
 #[php_class(extern)]
@@ -85,6 +87,7 @@ pub fn extension() -> Extension {
             dependency("libxml", DependencyKind::Required),
             dependency("spl", DependencyKind::Required),
         ])
+        .engine_state(Throwables::start)
         .class::<SimpleXMLElement>()
         .class::<SimpleXMLIterator>()
         .register(
@@ -221,7 +224,8 @@ fn load(
     ns: Option<Ns>,
 ) -> Result<OrFalse<Owner<Instance<SimpleXMLElement>>>, Thrown> {
     if exceeds_int(options) {
-        return Err(argument_error(req, "ValueError", 3, "is too large"));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 3, "is too large"));
     }
     let Some(doc) = parse(req, source, options)? else {
         return Ok(OrFalse::False);
@@ -544,9 +548,10 @@ impl SimpleXMLElement {
     ) -> Result<bool, Thrown> {
         let this = this.object();
         if sxe(req, this).is_none_or(|s| !s.obj.has_document()) {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "SimpleXMLElement is not properly initialized",
             ));
         }
@@ -675,9 +680,10 @@ impl SimpleXMLElement {
         let this = this.object();
         let node = if fromRoot {
             let Some(doc) = sxe(req, this).and_then(|s| s.obj.document_node()) else {
+                let ce = Throwables::of(req)?;
                 return Err(throw_error(
                     req,
-                    "Error",
+                    ce.error,
                     "SimpleXMLElement is not properly initialized",
                 ));
             };
@@ -791,9 +797,10 @@ impl SimpleXMLElement {
         #[php(default = "")] namespaceOrPrefix: PhpString,
         #[php(default = false)] isPrefix: bool,
     ) -> Result<(), Thrown> {
+        let ce = Throwables::of(req)?;
         let this = this.object();
         if exceeds_int(options) {
-            return Err(argument_error(req, "Exception", 2, "is invalid"));
+            return Err(argument_error(req, ce.exception, 2, "is invalid"));
         }
         let source = if dataIsURL {
             Source::File(data.as_bytes())
@@ -801,7 +808,11 @@ impl SimpleXMLElement {
             Source::Memory(data.as_bytes())
         };
         let Some(doc) = parse(req, source, options)? else {
-            return Err(throw(req, "Exception", "String could not be parsed as XML"));
+            return Err(throw(
+                req,
+                ce.exception,
+                "String could not be parsed as XML",
+            ));
         };
         if let Some(s) = sxe_mut(req, this) {
             s.xpath = None;
@@ -1158,13 +1169,15 @@ impl SimpleXMLElement {
     /// ```
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<Element, Thrown> {
-        match sxe::current(req, this.object()) {
-            Some(value) => Element::from_value(req, value),
-            None => Err(throw_error(
+        if let Some(value) = sxe::current(req, this.object()) {
+            Element::from_value(req, value)
+        } else {
+            let ce = Throwables::of(req)?;
+            Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Iterator not initialized or already consumed",
-            )),
+            ))
         }
     }
 
@@ -1195,21 +1208,22 @@ impl SimpleXMLElement {
     /// ```
     #[php(tentative)]
     fn key(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
-        match sxe::current_name(req, this.object()) {
-            // `RETURN_FSTRINGL` since 8.5.12: `RETURN_OOM()` where the
-            // memory limit refused it.
-            Some(name) => match req
-                .memory_mut()
-                .fallible(|req| PhpString::new(req, &name))?
-            {
-                Some(name) => Ok(name),
-                None => PhpString::new(req, b""), // RETURN_OOM()
-            },
-            None => Err(throw_error(
+        let Some(name) = sxe::current_name(req, this.object()) else {
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Iterator not initialized or already consumed",
-            )),
+            ));
+        };
+        // `RETURN_FSTRINGL` since 8.5.12: `RETURN_OOM()` where the
+        // memory limit refused it.
+        match req
+            .memory_mut()
+            .fallible(|req| PhpString::new(req, &name))?
+        {
+            Some(name) => Ok(name),
+            None => PhpString::new(req, b""), // RETURN_OOM()
         }
     }
 

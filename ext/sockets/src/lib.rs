@@ -35,6 +35,7 @@ mod natives;
 mod options;
 mod socket;
 mod stream;
+mod throwables;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_const;
@@ -505,6 +506,7 @@ pub fn extension() -> Extension {
         .class::<socket::Socket>()
         .class::<addrinfo::AddressInfo>()
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .info(sockets_info)
         .build("sockets")
 }

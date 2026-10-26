@@ -353,7 +353,7 @@ impl FromArgument for Resource {
         Err(arg_type_error(
             req,
             position,
-            &format!("be of type resource, {name} given"),
+            &bytes!("be of type resource, ", name, " given"),
         ))
     }
 }
@@ -454,7 +454,7 @@ fn resource_or_null(req: &mut Request, given: &Value, position: u32) -> Thrown {
     arg_type_error(
         req,
         position,
-        &format!("be of type resource or null, {name} given"),
+        &bytes!("be of type resource or null, ", name, " given"),
     )
 }
 

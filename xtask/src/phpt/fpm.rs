@@ -19,7 +19,7 @@ use crate::oracle::hosts::FPM;
 
 /// Where the tests stand in the tree, the directory `FPM\Tester` looks
 /// beside.
-const TESTS: &str = "sapi/fpm/tests";
+pub(super) const TESTS: &str = "sapi/fpm/tests";
 
 /// `host` linked as `php-fpm` beside each directory of `subset` that is
 /// `sapi/fpm/tests`, where `FPM\Tester::findExecutable` looks last; a link

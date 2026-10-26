@@ -20,6 +20,7 @@ use crate::ffi::onig::{
 };
 use crate::settings::settings;
 use crate::text::{must_not_be_empty, new_string, value_error};
+use crate::throwables::Throwables;
 use php_ext::abi::{Callable, OrFalse, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref, throw_error};
@@ -1120,10 +1121,12 @@ fn search(
         st.search_str.as_deref().copied(),
     );
     let Some(re) = re else {
-        return Err(throw_error(req, "Error", "No pattern was provided"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "No pattern was provided"));
     };
     let Some(subject) = subject else {
-        return Err(throw_error(req, "Error", "No string was provided"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "No string was provided"));
     };
     let Some(mut region) = Region::new() else {
         return Ok(false);

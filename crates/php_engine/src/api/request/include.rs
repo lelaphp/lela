@@ -15,7 +15,7 @@ use php_unit::PublishedUnit;
 use crate::ProgramFile;
 use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{Owner, PhpString, Value};
+use crate::api::values::{ClassId, Owner, PhpString, Value};
 use crate::exec::IncludeKind;
 use crate::supplied::chain::{FileArgs, StringArgs};
 use crate::unit_cache::CompileRefused;
@@ -1337,9 +1337,9 @@ impl Request {
                 }
             }
             let class = if error.level == Level::Parse {
-                "ParseError"
+                ClassId::PARSE_ERROR
             } else {
-                "CompileError"
+                ClassId::COMPILE_ERROR
             };
             let thrown =
                 crate::api::raising::throw_at(self, class, &error.message, path, error.line);
@@ -1550,7 +1550,7 @@ impl Code<&mut Request> {
         let callee = self.0.push_code_frame(unit, from);
         let callee = self.0.fatal_of(callee)?;
         crate::observer::call(self.0, callee);
-        let reenter = self.0.shared.loops.reenter;
+        let reenter = self.0.loops().reenter;
         let served = reenter(self.0, callee);
         while self.0.vm.depth() > standing {
             let top = self.0.vm.stack.current();

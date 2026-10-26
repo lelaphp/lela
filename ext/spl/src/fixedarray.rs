@@ -22,6 +22,7 @@ use php_ext::request::Request;
 use php_ext::values::walk::{self};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, Value, ValueRef};
 
+use crate::throwables::Throwables;
 use crate::{ArrayAccess, Countable, Iterator, IteratorAggregate, JsonSerializable};
 
 /// `spl_fixedarray_object`'s row of elements.
@@ -530,16 +531,18 @@ impl SplFixedArray {
                 }
             }
             let Some(max) = max else {
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "InvalidArgumentException",
+                    ce.invalid_argument_exception,
                     "array must contain only positive integer keys",
                 ));
             };
             let Some(size) = max.checked_add(1).filter(|s| i64::try_from(*s).is_ok()) else {
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "InvalidArgumentException",
+                    ce.invalid_argument_exception,
                     "integer overflow detected",
                 ));
             };
@@ -756,7 +759,15 @@ fn illegal(req: &mut Request, offset: &Value) -> Thrown {
 }
 
 fn out_of_range(req: &mut Request) -> Thrown {
-    throw(req, "OutOfBoundsException", "Index invalid or out of range")
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    throw(
+        req,
+        ce.out_of_bounds_exception,
+        "Index invalid or out of range",
+    )
 }
 
 /// The index an offset makes, inside the row.
@@ -789,9 +800,10 @@ fn has(
 
 fn read(req: &mut Request, object: PhpObject, offset: Option<&Value>) -> Result<Value, Thrown> {
     let Some(offset) = offset else {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "[] operator not supported for SplFixedArray",
         ));
     };
@@ -806,9 +818,10 @@ fn write(
     value: Value,
 ) -> Result<(), Thrown> {
     let Some(offset) = offset else {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "[] operator not supported for SplFixedArray",
         ));
     };

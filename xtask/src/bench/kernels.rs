@@ -362,6 +362,31 @@ pub(crate) fn interrupt(root: &Path) -> [Declared; 2] {
     })
 }
 
+/// G1 under `opcache.jit=off` with a buffer (#3139), and its control:
+/// the engine built as [`Build::Jit`] against [`Build::Plain`] under
+/// `[regime.jit-off]`, its buffer php's default, over the seven kernels;
+/// and [`Build::Plain`] against itself. Set up and off, the featured
+/// engine binds both loops, and a request whose engine has published no
+/// unit with counting words serves in `Nop`'s, as php's VM keeps its own
+/// handlers (#3362): the bar holds that this costs nothing beside the
+/// engine without the tier.
+pub(crate) fn runtime(root: &Path) -> [Declared; 2] {
+    let pairs = [
+        ("g1-runtime", [Build::Jit, Build::Plain], Held::Series),
+        ("g1-runtime-aa", [Build::Plain, Build::Plain], Held::Control),
+    ];
+    let under = Under {
+        regime: "jit-off",
+        ini: None,
+    };
+    builds(root, pairs, under, |a, b| {
+        let regime = under.regime;
+        format!(
+            "the engine built as {a} against {b} under [regime.{regime}] over the seven kernels"
+        )
+    })
+}
+
 /// The one command line both arms of a bar of two builds run under: a
 /// regime of the pin, and an ini line after it.
 #[derive(Clone, Copy)]
@@ -623,6 +648,7 @@ mod tests {
             door(root),
             stepping(root),
             interrupt(root),
+            runtime(root),
         ];
         let bars = bars.map(|b| b.map(|b| (b.id, b.held)));
         let g4 = g4(root).map(|b| (b.id, b.held));
@@ -643,6 +669,7 @@ mod tests {
             door,
             series("step"),
             series("interrupt"),
+            series("g1-runtime"),
         ];
         assert_eq!(bars, tiers);
     }

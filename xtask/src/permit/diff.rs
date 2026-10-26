@@ -10,6 +10,7 @@
 //! not, or a base that cannot be read, displaces nothing, which is the
 //! reading that denies rather than excuses.
 
+use std::collections::BTreeSet;
 use std::collections::btree_map::{BTreeMap, Entry};
 use std::fmt::Write as _;
 use std::fs;
@@ -101,7 +102,26 @@ pub(crate) struct Diffed {
     pub content: Content,
 }
 
-/// What a file of a diff carries, as git reads it ([`git::binary`]).
+/// The extensions a file is text by whatever its bytes: what rustc,
+/// cargo, php and the harness read as text, none of which this repository
+/// tracks as binary. git's `-text` is a NUL or a lone CR anywhere, which
+/// rustc takes in a comment, so a file of these types read as bytes was
+/// one whose author took its content out of every rule's reach (833e084b7).
+const TEXT: [&str; 17] = [
+    "rs", "toml", "md", "php", "phpt", "inc", "sh", "py", "json", "txt", "yml", "yaml", "lock",
+    "c", "h", "js", "ts",
+];
+
+/// Which of `paths` is judged by its path alone: those git reads as binary
+/// on `side` ([`git::binary`]) whose path is no type of [`TEXT`].
+fn binary(root: &Path, side: git::Side, paths: &[&str]) -> Result<BTreeSet<String>> {
+    let mut binary = git::binary(root, side, paths)?;
+    binary
+        .retain(|path| (Path::new(path).extension()).is_none_or(|e| !TEXT.iter().any(|t| e == *t)));
+    Ok(binary)
+}
+
+/// What a file of a diff carries, as its path and git read it ([`binary`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Content {
     /// Text, a byte that is not UTF-8 read as U+FFFD, beside what the
@@ -211,7 +231,7 @@ fn staged_files(root: &Path) -> Result<Vec<Diffed>> {
         .filter(|c| !c.deleted)
         .collect();
     let paths: Vec<&str> = staged.iter().map(|c| c.path.as_str()).collect();
-    let binary = git::binary(root, git::Side::Index, &paths)?;
+    let binary = binary(root, git::Side::Index, &paths)?;
     let mut files = Vec::new();
     for git::Change { path, .. } in staged {
         if binary.contains(&path) {
@@ -261,7 +281,7 @@ pub(crate) fn working_files(
         .filter(|c| !c.deleted && root.join(&c.path).is_file())
         .map(|c| c.path.as_str())
         .collect();
-    let binary = git::binary(root, git::Side::Worktree, &changed)?;
+    let binary = binary(root, git::Side::Worktree, &changed)?;
     let mut files = Vec::new();
     for path in changed {
         let content = if binary.contains(path) {

@@ -205,6 +205,7 @@ pub(super) fn reflect_attributes(
     name: Option<PhpString>,
     flags: i64,
 ) -> Result<Owner<PhpArray>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let wanted = name.as_ref().map(|name| name.as_bytes().to_vec());
     if flags & !IS_INSTANCEOF != 0 {
         return Err(arg_value_error(req, 2, "be a valid attribute filter flag"));
@@ -215,7 +216,7 @@ pub(super) fn reflect_attributes(
             None => {
                 return Err(throw_error(
                     req,
-                    "Error",
+                    ce.error,
                     &format!("Class \"{}\" not found", String::from_utf8_lossy(name)),
                 ));
             }
@@ -309,6 +310,7 @@ fn attribute_factory(req: &mut Request, kept: &AttributeRef) -> Result<Owner<Php
 /// class's own `#[Attribute]` marker, `TARGET_ALL` where the marker
 /// takes none, and php's `Error` for a class carrying no marker.
 fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let marker = req.symbols().class_decl(class).and_then(|decl| {
         decl.attributes
             .iter()
@@ -318,7 +320,7 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
     let Some(marker) = marker else {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             &format!("Attempting to use non-attribute class \"{written}\" as attribute"),
         ));
     };
@@ -335,10 +337,13 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
         value.give_up(req);
         return Err(throw_error(
             req,
-            "Error",
-            &format!(
-                "Attribute::__construct(): Argument #1 ($flags) must be of type int, {given} given"
-            ),
+            ce.error,
+            &[
+                b"Attribute::__construct(): Argument #1 ($flags) must be of type int, ".as_slice(),
+                given.as_slice(),
+                b" given".as_slice(),
+            ]
+            .concat(),
         ));
     };
     value.give_up(req);
@@ -346,7 +351,7 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
     if flags & !(TARGET_ALL | IS_REPEATABLE) != 0 {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Invalid attribute flags specified",
         ));
     }
@@ -356,7 +361,7 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
 /// `zend_get_attribute_object`: the instance, its constructor served
 /// with the attribute's arguments, the named ones by their names, as
 /// `object_init_with_constructor` serves them
-/// ([`instantiate_named`]).
+/// ([`instantiate`]).
 /// `ReflectionAttribute` as the stub declares it, with the
 /// `attribute_reference` `reflection_attribute_factory` lays down beside
 /// it, given back with it:
@@ -667,6 +672,7 @@ impl ReflectionAttribute {
     /// 4616 32
     /// ```
     fn newInstance(req: &mut Request, this: This<Self>) -> Result<Owner<PhpObject>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let kept = this_attribute(req, this.object())?;
         let written = String::from_utf8_lossy(&kept.attribute.name.0).into_owned();
         let looked_up = bare_name(&kept.attribute.name.0).to_vec();
@@ -677,11 +683,11 @@ impl ReflectionAttribute {
             Ok(Some(class)) => class,
             Ok(None) => {
                 let message = format!("Attribute class \"{written}\" not found");
-                return Err(throw_error(req, "Error", &message));
+                return Err(throw_error(req, ce.error, &message));
             }
             Err(thrown) => {
                 let message = format!("Attribute class \"{written}\" not found");
-                return Err(throw_error_chained(req, thrown, "Error", &message));
+                return Err(throw_error_chained(req, thrown, ce.error, &message));
             }
         };
         let flags = marker_flags(req, class, &written)?;
@@ -690,7 +696,7 @@ impl ReflectionAttribute {
             let allowed = held_target_names(req, flags & TARGET_ALL)?;
             let thrown = throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!(
                     "Attribute \"{written}\" cannot target {} (allowed targets: {})",
                     location.0, allowed.0
@@ -714,12 +720,12 @@ impl ReflectionAttribute {
                 &String::from_utf8_lossy(&class_name_of(req, subject)),
             )
         {
-            return Err(throw(req, "Error", &refused));
+            return Err(throw(req, ce.error, &refused));
         }
         if kept.hook
             && let Some(refused) = hook_attribute_refusal(&looked_up)
         {
-            return Err(throw(req, "Error", refused));
+            return Err(throw(req, ce.error, refused));
         }
         // An extension's validator over a program's subject, which the
         // compiler ran where the attribute stands unless
@@ -739,12 +745,12 @@ impl ReflectionAttribute {
                 kept.scope.map(|scope| class_name_of(req, scope)).as_deref(),
             )
         {
-            return Err(throw(req, "Error", &refused));
+            return Err(throw(req, ce.error, &refused));
         }
         if !is_internal(req, class) && flags & IS_REPEATABLE == 0 && kept.repeated {
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!("Attribute \"{written}\" must not be repeated"),
             ));
         }
@@ -817,9 +823,10 @@ impl ReflectionAttribute {
     /// ```
     #[php(private, arity = manual)]
     fn __construct(req: &mut Request, _: This<Self>) -> Result<(), Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         Err(throw(
             req,
-            "ReflectionException",
+            ce.reflection_exception,
             "Cannot directly instantiate ReflectionAttribute",
         ))
     }

@@ -33,6 +33,8 @@ use php_ext::values::{Emalloc, Owner, PhpArray, PhpString, Value};
 use php_ext_standard::UriParser;
 use php_ext_uri::{ReadAs, UriStruct};
 
+use crate::throwables::Throwables;
+
 /// `LOG_DEBUG`, the `syslog(3)` level `zend_test_log_err_debug` logs at.
 const LOG_DEBUG: i32 = 7;
 
@@ -378,7 +380,8 @@ pub(crate) fn zend_test_uri_parser(
     parser: PhpString,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let Some(parser) = UriParser::named(parser.as_bytes()) else {
-        return Err(argument_error(req, "ValueError", 1, "Unknown parser"));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 1, "Unknown parser"));
     };
     let text = uri.as_bytes();
     // A parse that answers no struct and throws nothing is a component

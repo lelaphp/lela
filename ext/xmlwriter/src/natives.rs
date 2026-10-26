@@ -19,6 +19,7 @@ type Nullable = Option<PhpString>;
 /// What a call of the emitter answers, `bool`.
 type Took = Result<bool, Thrown>;
 
+use crate::throwables::Throwables;
 use crate::{
     Op, Opened, XMLWriter, call, create_static, flush, new_writer, open_uri, open_warned,
     output_memory, replace,
@@ -833,7 +834,10 @@ impl XMLWriter {
         }
         match open_uri(req, uri.0.as_bytes())? {
             Opened::Unresolved => Err(arg_value_error(req, 1, "resolve to a valid file path")),
-            Opened::Failed => Err(throw_error(req, "Error", UNCONSTRUCTED)),
+            Opened::Failed => {
+                let ce = Throwables::of(req)?;
+                Err(throw_error(req, ce.error, UNCONSTRUCTED))
+            }
             Opened::Emitter(writer) => create_static(req, writer),
         }
     }
@@ -871,9 +875,11 @@ impl XMLWriter {
     /// string(1) "a"
     /// ```
     fn toMemory(req: &mut Request) -> Result<Owner<Static>, Thrown> {
-        match Emitter::memory() {
-            Some(writer) => create_static(req, writer),
-            None => Err(throw_error(req, "Error", UNCONSTRUCTED)),
+        if let Some(writer) = Emitter::memory() {
+            create_static(req, writer)
+        } else {
+            let ce = Throwables::of(req)?;
+            Err(throw_error(req, ce.error, UNCONSTRUCTED))
         }
     }
 
@@ -900,9 +906,11 @@ impl XMLWriter {
         };
         let (made, raised, thrown) = Emitter::stream(req, stream);
         Errors::settle(req, raised, thrown)?;
-        match made {
-            Some(writer) => create_static(req, writer),
-            None => Err(throw_error(req, "Error", UNCONSTRUCTED)),
+        if let Some(writer) = made {
+            create_static(req, writer)
+        } else {
+            let ce = Throwables::of(req)?;
+            Err(throw_error(req, ce.error, UNCONSTRUCTED))
         }
     }
 

@@ -20,6 +20,7 @@ use php_ext::values::{
 };
 
 use crate::algos::{self, ALGOS, Algo, Options, Refusal, State};
+use crate::throwables::Throwables;
 
 /// `hash_init`'s `$flags`, php's `context->options`: kept whole, as
 /// `__serialize` writes it back as given, and read through [`Flags::hmac`].
@@ -761,7 +762,12 @@ fn hash_init(
     }
     let mut state = (algo.init)(req, options)?;
     let Some(class) = lookup_class(req, b"HashContext")? else {
-        return Err(throw_error(req, "Error", "Class \"HashContext\" not found"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(
+            req,
+            ce.error,
+            "Class \"HashContext\" not found",
+        ));
     };
     let object = new_object(req, class)?;
     let allocation = Emalloc::new(req, algo.context)?;
@@ -1099,7 +1105,10 @@ fn clone_context(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject
     // `CLONE` handler frees the object php's clone returns.
     let copy = new_object(req, object.class())?;
     let Some((Some(algo), Some(state), flags, key)) = forked else {
-        let thrown = throw(req, "ValueError", "Cannot clone a finalized HashContext");
+        let thrown = match Throwables::of(req) {
+            Ok(ce) => throw(req, ce.value_error, "Cannot clone a finalized HashContext"),
+            Err(fatal) => fatal,
+        };
         copy.give_up(req);
         return Err(thrown);
     };
@@ -1364,7 +1373,7 @@ fn hash_equals(
             return Err(arg_type_error(
                 req,
                 position,
-                &format!("be of type string, {name} given"),
+                &[b"be of type string, ".as_slice(), &name, b" given"].concat(),
             ));
         };
         strings.push(bytes.to_vec());
@@ -1709,9 +1718,10 @@ impl HashContext {
     /// through Reflection, since it is private.
     #[php(private)]
     fn __construct(req: &mut Request, _this: This<Self>) -> Result<(), Thrown> {
+        let ce = Throwables::of(req)?;
         Err(throw(
             req,
-            "Error",
+            ce.error,
             "Illegal call to private/final constructor",
         ))
     }
@@ -1737,9 +1747,13 @@ impl HashContext {
             .map_or((None, Flags::default()), |c| (c.algo, c.flags));
         let name = algo.map_or("", |a| a.label);
         let cannot = |req: &mut Request| {
+            let ce = match Throwables::of(req) {
+                Ok(ce) => ce,
+                Err(fatal) => return fatal,
+            };
             throw_exception_ex(
                 req,
-                "Exception",
+                ce.exception,
                 &format!("HashContext for algorithm \"{name}\" cannot be serialized"),
             )
         };
@@ -1747,9 +1761,10 @@ impl HashContext {
             return Err(cannot(req));
         };
         if flags.hmac() {
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "Exception",
+                ce.exception,
                 "HashContext with HASH_HMAC option cannot be serialized",
             ));
         }
@@ -1804,9 +1819,10 @@ impl HashContext {
             .native::<Context>(req)
             .is_some_and(|c| c.running.is_some())
         {
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "Exception",
+                ce.exception,
                 "HashContext::__unserialize called on initialized object",
             ));
         }
@@ -1817,26 +1833,30 @@ impl HashContext {
         let (Some(name), Some(flags), Some(fields), Some(magic), Some(members)) =
             (name, flags, fields, magic, members)
         else {
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "Exception",
+                ce.exception,
                 "Incomplete or ill-formed serialization data",
             ));
         };
         if flags.hmac() {
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "Exception",
+                ce.exception,
                 "HashContext with HASH_HMAC option cannot be serialized",
             ));
         }
         let Some(algo) = algos::fetch(&name) else {
-            return Err(throw(req, "Exception", "Unknown hash algorithm"));
+            let ce = Throwables::of(req)?;
+            return Err(throw(req, ce.exception, "Unknown hash algorithm"));
         };
         let Some(want) = algo.magic else {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "Exception",
+                ce.exception,
                 &format!("Hash algorithm \"{}\" cannot be unserialized", algo.label),
             ));
         };
@@ -1851,9 +1871,10 @@ impl HashContext {
         }
         if let Err(refusal) = written {
             let code = refusal.code();
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "Exception",
+                ce.exception,
                 &format!(
                     "Incomplete or ill-formed serialization data (\"{}\" code {code})",
                     algo.label

@@ -11,7 +11,7 @@ use php_ext::abi::{
     Ref, Union, Untyped, Variadic,
 };
 use php_ext::attr::php_function;
-use php_ext::call::{call, instantiate_named, known_method, lookup_class};
+use php_ext::call::{call, instantiate, known_method, lookup_class};
 use php_ext::coerce::{callable_checked, value_name};
 use php_ext::decl::{Attribute, FunctionDecl, Name, Type};
 use php_ext::raising::{
@@ -25,6 +25,7 @@ use php_ext::values::{
 
 use crate::classes::{ZendTestUnitEnum, stdClass};
 use crate::internals;
+use crate::throwables::Throwables;
 
 /// The functions onto the builder, in `ext_functions`' order, then
 /// `zend_test_internal_dnf_arguments`, which `MINIT` registers by hand,
@@ -528,7 +529,14 @@ fn stdclass_or_string(
     } else {
         "stdClass|string"
     };
-    let text = format!("be of type {expected}, {} given", value_name(req, &value));
+    let text = [
+        b"be of type ".as_slice(),
+        expected.as_bytes(),
+        b", ",
+        &value_name(req, &value),
+        b" given",
+    ]
+    .concat();
     Err(arg_type_error(req, 1, &text))
 }
 
@@ -761,20 +769,24 @@ fn zend_call_method(
             (None, class)
         }
         _ => {
-            let text = format!(
-                "be of type object|string, {} given",
-                value_name(req, &obj_or_class.value())
-            );
+            let text = [
+                b"be of type object|string, ".as_slice(),
+                &value_name(req, &obj_or_class.value()),
+                b" given",
+            ]
+            .concat();
             return Err(arg_type_error(req, 1, &text));
         }
     };
     let name = Name(method.as_bytes().into());
     let Some(callable) = known_method(req, class, &name, object) else {
-        let text = format!(
-            "Couldn't find implementation for method {}::{}",
+        let text = [
+            b"Couldn't find implementation for method ".as_slice(),
             req.symbols().class_name(class),
-            String::from_utf8_lossy(method.as_bytes())
-        );
+            b"::",
+            method.as_bytes(),
+        ]
+        .concat();
         return Err(fatal(req, &text));
     };
     let arguments: Vec<Value> = [arg1, arg2]
@@ -817,7 +829,7 @@ fn zend_object_init_with_constructor(
         );
         return Err(arg_type_error(req, 1, &text));
     };
-    Ok(instantiate_named(req, class, &args.positional, args.named())?.into_value())
+    Ok(instantiate(req, class, &args.positional, args.named())?.into_value())
 }
 
 /// `zend_call_method_if_exists(object $obj, string $method, mixed
@@ -1102,9 +1114,10 @@ fn throwing_resource(req: &mut Request) -> ResourceType {
 /// shutdown
 /// ```
 fn throw_from_dtor(req: &mut Request, _resource: Resource) -> Result<(), Thrown> {
+    let ce = Throwables::of(req)?;
     Err(throw(
         req,
-        "Exception",
+        ce.exception,
         "Throwing resource destructor called",
     ))
 }
@@ -1202,7 +1215,8 @@ fn zend_test_compile_to_ast(req: &mut Request, str: PhpString) -> Result<Owner<P
 #[php_function]
 fn zend_test_gh19792(req: &mut Request) -> Result<(), Thrown> {
     warning(req, "a warning");
-    Err(throw_error(req, "Error", "an exception"))
+    let ce = Throwables::of(req)?;
+    Err(throw_error(req, ce.error, "an exception"))
 }
 
 /// `zend_test_handle_post_data(mixed $stream, string $content_type, int
@@ -1276,9 +1290,11 @@ fn zend_test_internal_dnf_arguments(
     if is(b"Iterator")? || (is(b"Traversable")? && is(b"Countable")?) {
         return Ok(arg);
     }
-    let text = format!(
-        "be of type Iterator|(Traversable&Countable), {} given",
-        req.symbols().class_name(arg.class())
-    );
+    let text = [
+        b"be of type Iterator|(Traversable&Countable), ".as_slice(),
+        req.symbols().class_name(arg.class()),
+        b" given",
+    ]
+    .concat();
     Err(arg_type_error(req, 1, &text))
 }

@@ -564,10 +564,15 @@ impl<'r> Limits<&'r mut Request> {
     /// before it, as a host's fork joins it, and after it started again in the
     /// parent over the same deadlines, which loses none of them, as php's
     /// interval timer counts on across the fork; in the child what php's
-    /// `php_child_init` restores is restored: every deadline is dropped, the
-    /// execution timer's and each periodic interrupt's, as a child inherits no
-    /// interval timer and no POSIX timer, so it runs untimed until it sets a
-    /// limit of its own, in its copy of this request.
+    /// `php_child_init` restores is restored ([`crate::fork`]): every
+    /// deadline is dropped, the execution timer's and each periodic
+    /// interrupt's, as a child inherits no interval timer and no POSIX
+    /// timer, so it runs untimed until it sets a limit of its own, in its
+    /// copy of this request; and every engine's realpath cache, this
+    /// request's engine's among them, is emptied, as
+    /// `php_clear_stat_cache(true, NULL, 0)` empties php's. The stat cache
+    /// is `php_streams`', above the engine, so the native that asks empties
+    /// it, as `pcntl_fork` does.
     ///
     /// Two and a half seconds of a three-second limit spent before the fork
     /// leave a half after it. A limit counted again from the fork could end

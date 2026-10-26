@@ -26,6 +26,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use crate::api::values::ClassId;
 use php_heap::{Fatal, FrameRef};
 use php_macros::php_class;
 use php_unit::Opcode;
@@ -560,7 +561,7 @@ fn update_current(req: &mut Request, generator: PhpObject) -> PhpObject {
             let thrown = in_context(req, root, |req| {
                 throw(
                     req,
-                    "ClosedGeneratorException",
+                    ClassId::CLOSED_GENERATOR_EXCEPTION,
                     "Generator yielded from aborted, no return value available",
                 )
             });
@@ -1779,7 +1780,7 @@ pub(crate) fn get_iterator(
     if !has_frame(req, generator) {
         return Err(throw(
             req,
-            "Exception",
+            ClassId::EXCEPTION,
             "Cannot traverse an already closed generator",
         ));
     }
@@ -1790,7 +1791,7 @@ pub(crate) fn get_iterator(
     if by_ref && !yields_by_ref {
         return Err(throw(
             req,
-            "Exception",
+            ClassId::EXCEPTION,
             "You can only iterate a generator by-reference if it declared that it yields by-reference",
         ));
     }
@@ -1881,7 +1882,7 @@ pub(crate) fn iterator_rewind(req: &mut Request, generator: PhpObject) -> Result
     if !read(req, generator, |g| g.at_first_yield).unwrap_or(false) {
         return Err(throw(
             req,
-            "Exception",
+            ClassId::EXCEPTION,
             "Cannot rewind a generator that was already run",
         ));
     }
@@ -2150,7 +2151,7 @@ impl Generator {
         if retval.tag() == TypeTag::Undef {
             return Err(throw(
                 req,
-                "Exception",
+                ClassId::EXCEPTION,
                 "Cannot get return value of a generator that hasn't returned",
             ));
         }

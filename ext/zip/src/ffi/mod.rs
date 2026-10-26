@@ -15,15 +15,13 @@ use std::ffi::{c_char, c_int, c_uint, c_void};
 
 use libz_sys as z;
 
+use crate::codec::Turn;
+
 unsafe extern "C" {
     /// `ZLIB_VERSION` of the `zlib.h` this crate compiled against, the C
     /// constant `build.rs` compiles, NUL-terminated.
     static php_zip_zlib_version: c_char;
 }
-
-/// `BUFSIZE`, what `zip_source_compress` reads its source in and
-/// `copy_data` reads the compressed stream out in.
-const BUFSIZE: usize = 8192;
 
 /// `-MAX_WBITS`: a raw deflate stream, no zlib header.
 const RAW_WINDOW: c_int = -15;
@@ -45,94 +43,104 @@ extern "C" fn free(_opaque: *mut c_void, address: *mut c_void) {
     unsafe { libc::free(address) }
 }
 
-/// A `z_stream` after `deflateInit2`, ended with its owner; boxed, since
-/// zlib's state names the stream it was made for.
-struct Stream(Box<z::z_stream>);
+/// `zip_algorithm_deflate.c`'s compressing state: a `z_stream` after
+/// `deflateInit2(level, Z_DEFLATED, -MAX_WBITS, mem_level,
+/// Z_DEFAULT_STRATEGY)`, boxed, since zlib's state names the stream it
+/// was made for, and the input it is reading, which it owns while zlib
+/// reads it; ended with its owner.
+pub(crate) struct Deflate {
+    stream: Box<z::z_stream>,
+    input: Vec<u8>,
+}
 
-impl Drop for Stream {
+impl Drop for Deflate {
     fn drop(&mut self) {
         // SAFETY: the stream was initialised by `deflateInit2_` and is
         // ended once, here.
-        unsafe { z::deflateEnd(&raw mut *self.0) };
+        unsafe { z::deflateEnd(&raw mut *self.stream) };
     }
 }
 
-/// `zip_algorithm_deflate.c` over `data`: `deflateInit2(level,
-/// Z_DEFLATED, -MAX_WBITS, mem_level, Z_DEFAULT_STRATEGY)`, the input
-/// handed over `BUFSIZE` bytes at a time, as `zip_source_compress` reads
-/// it, and deflated with `Z_NO_FLUSH` until the input ends, then
-/// `Z_FINISH`; the raw stream, or `None` where zlib refused.
-pub(crate) fn deflate(data: &[u8], level: c_int, mem_level: c_int) -> Option<Vec<u8>> {
-    let mut stream = Stream(Box::new(z::z_stream {
-        next_in: std::ptr::null_mut(),
-        avail_in: 0,
-        total_in: 0,
-        next_out: std::ptr::null_mut(),
-        avail_out: 0,
-        total_out: 0,
-        msg: std::ptr::null_mut(),
-        state: std::ptr::null_mut(),
-        zalloc: alloc,
-        zfree: free,
-        opaque: std::ptr::null_mut(),
-        data_type: 0,
-        adler: 0,
-        reserved: 0,
-    }));
-    // The header's version, as libzip's `deflateInit2` macro hands it,
-    // which zlib's compatibility test holds to the library it loads.
-    let version = &raw const php_zip_zlib_version;
-    let size = c_int::try_from(std::mem::size_of::<z::z_stream>()).ok()?;
-    // SAFETY: a fresh stream with its allocator set, the header's
-    // NUL-terminated version string, which lives as long as the
-    // program, and the struct's size.
-    let code = unsafe {
-        z::deflateInit2_(
-            &raw mut *stream.0,
-            level,
-            z::Z_DEFLATED,
-            RAW_WINDOW,
-            mem_level,
-            z::Z_DEFAULT_STRATEGY,
-            version,
-            size,
-        )
-    };
-    if code != z::Z_OK {
-        // `deflateInit2_` freed what it took; the `deflateEnd` the drop
-        // makes of a stream with no state is zlib's `Z_STREAM_ERROR`.
-        return None;
-    }
-    let mut out = Vec::with_capacity(data.len() / 2 + BUFSIZE);
-    let mut buffer = [0u8; BUFSIZE];
-    let mut chunks = data.chunks(BUFSIZE);
-    let mut ended = data.is_empty();
-    loop {
-        if stream.0.avail_in == 0 && !ended {
-            match chunks.next() {
-                Some(chunk) => {
-                    stream.0.next_in = chunk.as_ptr().cast_mut();
-                    stream.0.avail_in = c_uint::try_from(chunk.len()).ok()?;
-                }
-                None => ended = true,
-            }
-            if stream.0.avail_in == 0 {
-                continue;
-            }
+impl Deflate {
+    /// `start`: the stream at `level` and `mem_level`, or the code zlib
+    /// refused it with.
+    pub(crate) fn new(level: c_int, mem_level: c_int) -> Result<Deflate, c_int> {
+        let mut stream = Box::new(z::z_stream {
+            next_in: std::ptr::null_mut(),
+            avail_in: 0,
+            total_in: 0,
+            next_out: std::ptr::null_mut(),
+            avail_out: 0,
+            total_out: 0,
+            msg: std::ptr::null_mut(),
+            state: std::ptr::null_mut(),
+            zalloc: alloc,
+            zfree: free,
+            opaque: std::ptr::null_mut(),
+            data_type: 0,
+            adler: 0,
+            reserved: 0,
+        });
+        // The header's version, as libzip's `deflateInit2` macro hands it,
+        // which zlib's compatibility test holds to the library it loads.
+        let version = &raw const php_zip_zlib_version;
+        let size = c_int::try_from(std::mem::size_of::<z::z_stream>()).unwrap_or(c_int::MAX);
+        // SAFETY: a fresh stream with its allocator set, the header's
+        // NUL-terminated version string, which lives as long as the
+        // program, and the struct's size.
+        let code = unsafe {
+            z::deflateInit2_(
+                &raw mut *stream,
+                level,
+                z::Z_DEFLATED,
+                RAW_WINDOW,
+                mem_level,
+                z::Z_DEFAULT_STRATEGY,
+                version,
+                size,
+            )
+        };
+        if code != z::Z_OK {
+            // `deflateInit2_` freed what it took, and the stream is not
+            // handed out, so no `deflateEnd` follows.
+            return Err(code);
         }
-        stream.0.next_out = buffer.as_mut_ptr();
-        stream.0.avail_out = c_uint::try_from(BUFSIZE).ok()?;
-        let flush = if ended { z::Z_FINISH } else { z::Z_NO_FLUSH };
-        // SAFETY: an initialised stream, reading the chunk of `data` set
-        // above, which outlives the call, and writing into `buffer`.
-        let code = unsafe { z::deflate(&raw mut *stream.0, flush) };
-        let written = BUFSIZE - stream.0.avail_out as usize;
-        out.extend_from_slice(buffer.get(..written)?);
+        Ok(Deflate {
+            stream,
+            input: Vec::new(),
+        })
+    }
+
+    /// `input`: `data` the next input, read from a copy the stream owns;
+    /// zlib has read what it was given before, as `process` asks for more
+    /// only then.
+    pub(crate) fn input(&mut self, data: &[u8]) {
+        self.input = data.to_vec();
+        self.stream.next_in = self.input.as_mut_ptr();
+        self.stream.avail_in = c_uint::try_from(self.input.len()).unwrap_or(c_uint::MAX);
+    }
+
+    /// `process`: one `deflate` into `out`, `Z_FINISH` once the input has
+    /// ended, what it came to and how much it wrote; the code of any
+    /// other return.
+    pub(crate) fn process(&mut self, out: &mut [u8], finish: bool) -> Result<(Turn, usize), c_int> {
+        let room = c_uint::try_from(out.len()).unwrap_or(c_uint::MAX);
+        self.stream.next_out = out.as_mut_ptr();
+        self.stream.avail_out = room;
+        let flush = if finish { z::Z_FINISH } else { z::Z_NO_FLUSH };
+        // SAFETY: an initialised stream, reading the rest of `self.input`,
+        // which zlib's `next_in` points into and which is not changed
+        // while `avail_in` is not zero, and writing into `out`, which
+        // outlives the call.
+        let code = unsafe { z::deflate(&raw mut *self.stream, flush) };
+        let written = (room - self.stream.avail_out) as usize;
+        self.stream.next_out = std::ptr::null_mut();
         match code {
-            z::Z_STREAM_END => return Some(out),
-            z::Z_OK => {}
-            z::Z_BUF_ERROR if stream.0.avail_in == 0 => {}
-            _ => return None,
+            z::Z_OK => Ok((Turn::More, written)),
+            z::Z_STREAM_END => Ok((Turn::End, written)),
+            // `Z_BUF_ERROR` with no input left: the next input is wanted.
+            z::Z_BUF_ERROR if self.stream.avail_in == 0 => Ok((Turn::NeedData, written)),
+            code => Err(code),
         }
     }
 }

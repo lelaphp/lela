@@ -463,9 +463,13 @@ pub(crate) struct Handlers;
 
 /// `zend_bad_array_access` over `FFI\CType`.
 fn bad_array_access(req: &mut Request) -> Thrown {
+    let ce = match crate::throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     throw_error(
         req,
-        "Error",
+        ce.error,
         "Cannot use object of type FFI\\CType as array",
     )
 }
@@ -479,9 +483,10 @@ impl ObjectHandlers for Handlers {
     }
 
     fn get_constructor(&self, req: &mut Request, _: PhpObject) -> Result<Option<Function>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Instantiation of FFI\\CType is not allowed",
         ))
     }
@@ -513,9 +518,10 @@ impl ObjectHandlers for Handlers {
         _: &[u8],
         _: PropertyRead,
     ) -> Result<Owner<Value>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Cannot access property of object of type FFI\\CType",
         ))
     }

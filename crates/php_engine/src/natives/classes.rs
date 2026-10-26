@@ -66,9 +66,10 @@ fn object_or_class_name(req: &mut Request, given: Value, position: u32) -> Resul
         }
         _ => {}
     }
-    let tail = format!(
-        "be an object or a valid class name, {} given",
-        crate::ops::value_name(req, &given)
+    let tail = bytes!(
+        "be an object or a valid class name, ",
+        crate::ops::value_name(req, &given),
+        " given"
     );
     Err(arg_type_error(req, position, &tail))
 }
@@ -974,9 +975,10 @@ fn class_of_argument(req: &mut Request, given: Value) -> Result<(Option<ClassId>
             Ok((lookup_class(req, &name, true)?, false))
         }
         _ => {
-            let tail = format!(
-                "be of type object|string, {} given",
-                crate::ops::value_name(req, &given)
+            let tail = bytes!(
+                "be of type object|string, ",
+                crate::ops::value_name(req, &given),
+                " given"
             );
             Err(arg_type_error(req, 1, &tail))
         }

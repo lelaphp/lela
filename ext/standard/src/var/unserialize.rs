@@ -28,6 +28,7 @@ use super::{
     Shared, has_method, is_enum_class, is_serializable, locked, not_serializable,
 };
 use crate::string::Decimal;
+use crate::throwables::Throwables;
 
 /// `HT_MAX_SIZE` on a 64-bit build.
 const HT_MAX_SIZE: i64 = 0x4000_0000;
@@ -1157,9 +1158,15 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
                 let name = value_name(req, &classes);
                 return Err(type_error(
                     req,
-                    &format!(
-                        "{function}(): Option \"allowed_classes\" must be of type array|bool, {name} given"
-                    ),
+                    &[
+                        format!(
+                            "{function}(): Option \"allowed_classes\" must be of type array|bool, "
+                        )
+                        .as_bytes(),
+                        name.as_slice(),
+                        b" given".as_slice(),
+                    ]
+                    .concat(),
                 ));
             }
         }
@@ -1173,7 +1180,12 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
             let name = value_name(req, &max);
             return Err(type_error(
                 req,
-                &format!("{function}(): Option \"max_depth\" must be of type int, {name} given"),
+                &[
+                    format!("{function}(): Option \"max_depth\" must be of type int, ").as_bytes(),
+                    name.as_slice(),
+                    b" given".as_slice(),
+                ]
+                .concat(),
             ));
         };
         if n < 0 {
@@ -1212,9 +1224,15 @@ fn allowed_names(
             let name = value_name(req, &entry);
             return Err(type_error(
                 req,
-                &format!(
-                    "{function}(): Option \"allowed_classes\" must be an array of class names, {name} given"
-                ),
+                &[
+                    format!(
+                        "{function}(): Option \"allowed_classes\" must be an array of class names, "
+                    )
+                    .as_bytes(),
+                    name.as_slice(),
+                    b" given".as_slice(),
+                ]
+                .concat(),
             ));
         }
         let name = php_ext::coerce::to_string(req, &entry)?;
@@ -2040,9 +2058,10 @@ impl State<'_> {
         };
         self.p = after;
         if let Some(shown) = not_serializable(req, class) {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "Exception",
+                ce.exception,
                 &format!("Unserialization of '{shown}' is not allowed"),
             ));
         }
@@ -2319,16 +2338,16 @@ impl State<'_> {
         let payload = self.buf[self.p..self.p + datalen].to_vec();
         if self.hash.incomplete_classes_only {
             // `keep_payload`: "keep the payload verbatim, so that the
-            // object serializes back to the same bytes", the string asked
-            // for fallibly, then the class name stored.
+            // object serializes back to the same bytes", the string
+            // `ZVAL_FSTRINGL`'s, a `zend_string_finit` asked for fallibly
+            // and never interned, then the class name stored.
             let kept = req
                 .memory_mut()
-                .fallible(|req| PhpString::new(req, &payload))?;
+                .fallible(|req| PhpString::finit(req, &payload))?;
             let Some(kept) = kept else {
                 return Ok(false);
             };
-            let key = PhpString::new(req, MAGIC_MEMBER_SERIALIZED)?;
-            object.unserialize_prop(req, key, kept.into_value())?;
+            store_value(req, object, MAGIC_MEMBER_SERIALIZED, kept.into_value())?;
             self.p += datalen + 1;
             store_member(req, object, MAGIC_MEMBER, name)?;
             return Ok(true);
@@ -2628,15 +2647,27 @@ fn store_member(
     member: &[u8],
     value: &[u8],
 ) -> Result<(), Thrown> {
-    let key = PhpString::new(req, member)?;
-    let stored = match PhpString::new(req, value) {
-        Ok(stored) => stored.into_value(),
+    let stored = PhpString::new(req, value)?.into_value();
+    store_value(req, object, member, stored)
+}
+
+/// `zend_hash_str_update(Z_OBJPROP_P(rval), member, ...)` with `value`,
+/// the value made before the key as php makes it: the value's owner is
+/// given up where the key cannot be had, so no path drops it.
+fn store_value(
+    req: &mut Request,
+    object: PhpObject,
+    member: &[u8],
+    value: Owner<Value>,
+) -> Result<(), Thrown> {
+    let key = match PhpString::new(req, member) {
+        Ok(key) => key,
         Err(thrown) => {
-            key.give_up(req);
+            value.give_up(req);
             return Err(thrown);
         }
     };
-    object.unserialize_prop(req, key, stored)?;
+    object.unserialize_prop(req, key, value)?;
     Ok(())
 }
 

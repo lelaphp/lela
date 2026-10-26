@@ -16,6 +16,7 @@ use php_ext_pdo::connector::{
 
 use crate::Sqlite;
 use crate::ffi::{self, Conn, Db, Function, Handler, Registration};
+use crate::throwables::Throwables;
 
 /// `PDO_ATTR_TIMEOUT` and `PDO_ATTR_CURSOR`, which the connector reads.
 const ATTR_TIMEOUT: i64 = 2;
@@ -220,9 +221,10 @@ fn open_db(req: &mut Request, source: &Source<'_>) -> Result<Foreign<Conn>, Fail
     {
         let Some(filename) = safe_filename(req, Some(source.dsn)) else {
             let shown = String::from_utf8_lossy(source.dsn).into_owned();
+            let ce = Throwables::of(req)?;
             return Err(Failure::from(throw_exception_ex(
                 req,
-                "PDOException",
+                ce.pdo_exception,
                 &format!("open_basedir prohibits opening {shown}"),
             )));
         };
@@ -505,11 +507,14 @@ impl Connection for Handle {
         if text.contains(&0) {
             let message = "SQLite PDO::quote does not support null bytes";
             return match raises {
-                OnError::Throw => Err(Failure::from(throw_exception_ex(
-                    req,
-                    "PDOException",
-                    message,
-                ))),
+                OnError::Throw => {
+                    let ce = Throwables::of(req)?;
+                    Err(Failure::from(throw_exception_ex(
+                        req,
+                        ce.pdo_exception,
+                        message,
+                    )))
+                }
                 OnError::Warn => {
                     docref(req, Level::Warning, message);
                     Err(Failure::silent())
@@ -1013,7 +1018,12 @@ impl Statement for Stmt {
             let given = value_name(req, value);
             return Err(Failure::from(type_error(
                 req,
-                &format!("explain mode must be of type int, {given} given"),
+                &[
+                    b"explain mode must be of type int, ".as_slice(),
+                    given.as_slice(),
+                    b" given".as_slice(),
+                ]
+                .concat(),
             )));
         };
         if !(0..=2).contains(&mode) {

@@ -258,11 +258,7 @@ impl Redirect {
         let listed = set_files(&dir)?;
         let redirect = Redirect {
             by: by.to_path_buf(),
-            set: Dir {
-                under,
-                path: dir,
-                needs: None,
-            },
+            set: Dir { under, path: dir },
             env,
             extensions,
         };

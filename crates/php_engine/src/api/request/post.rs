@@ -11,6 +11,7 @@
 //! block as it is asked, so `php://input` reads what no reader took, as
 //! php's does, and a body nothing asks for is never read.
 
+use crate::api::values::ClassId;
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -455,7 +456,7 @@ impl Request {
         let Some(content_type) = self.web().and_then(|web| web.content_type.clone()) else {
             return Err(throw_error(
                 self,
-                "RequestParseBodyException",
+                ClassId::REQUEST_PARSE_BODY_EXCEPTION,
                 "Request does not provide a content type",
             ));
         };
@@ -465,7 +466,11 @@ impl Request {
                 "Content-Type \"{}\" is not supported",
                 String::from_utf8_lossy(&content_type)
             );
-            return Err(throw_error(self, "RequestParseBodyException", &text));
+            return Err(throw_error(
+                self,
+                ClassId::REQUEST_PARSE_BODY_EXCEPTION,
+                &text,
+            ));
         }
         let post = self.array()?;
         let files = self.array()?;

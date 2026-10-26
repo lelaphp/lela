@@ -22,6 +22,7 @@ use crate::ffi::key::{DigestContext, Direction, KeyContext, Operation};
 use crate::ffi::{Digest, KeyKind, PKey};
 use crate::key::{Half, key_from};
 use crate::store_errors;
+use crate::throwables::Throwables;
 
 /// `php_openssl_get_evp_md_from_algo`: the digest an `OPENSSL_ALGO_*`
 /// names, of those the library carries (no MD2 in OpenSSL 3).
@@ -222,9 +223,10 @@ fn openssl_verify(
 ) -> Result<OrFalse<i64>, Thrown> {
     finish(req, move |req| {
         if u32::try_from(signature.as_bytes().len()).is_err() {
+            let ce = Throwables::of(req)?;
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 2,
                 "signature is too long",
             ));

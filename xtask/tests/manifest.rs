@@ -440,7 +440,8 @@ fn generated_decodes_as_a_list_of_files_and_any_other_shape_is_refused() {
 /// instrument that writes no reading of a crate (`status`), a predicate
 /// the harness does not derive, and a crate no row of the manifest is,
 /// a misspelling that would drop the obligation unseen; a second row of
-/// one instrument and an `exempt` naming no crate are refused as well.
+/// one instrument and a row narrowed by `exempt`, which left the grammar
+/// (#3278, #3292), are refused as well.
 /// The rows the grammar reads load.
 #[test]
 fn an_owed_row_naming_an_unknown_instrument_predicate_or_crate_is_refused_by_name() {
@@ -473,12 +474,9 @@ fn an_owed_row_naming_an_unknown_instrument_predicate_or_crate_is_refused_by_nam
         |instrument: &str| format!("[[owed]]\ninstrument = \"{instrument}\"\ncrates = \"*\"\n");
     let err = refused(&format!("{}{}", row("test"), row("test")));
     assert!(err.contains("[[owed]] names \"test\" twice"), "{err}");
-    let err = refused(&format!("{}exempt = [\"xtsak\"]\n", row("witness")));
-    assert!(
-        err.contains("row for witness names \"xtsak\", which matches no crate"),
-        "{err}"
-    );
-    let held = "[[owed]]\ninstrument = \"miri\"\ncrates = [\"php_*\"]\nexempt = [\"ext/*\"]\nwhen = \"lock-home\"\n";
+    let err = fixture("owed-exempt.toml");
+    assert!(err.contains("unknown field `exempt`"), "{err}");
+    let held = "[[owed]]\ninstrument = \"miri\"\ncrates = [\"php_*\"]\nwhen = \"lock-home\"\n";
     let manifest = parsed(&format!("{}{held}", row("test"))).unwrap();
     assert_eq!(manifest.owed.len(), 2);
     assert!(manifest.owing("test").unwrap().covers("ext/pcre"));

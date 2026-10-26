@@ -24,6 +24,7 @@
 
 mod compat;
 mod natives;
+mod throwables;
 
 use php_ext::abi::{
     Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, GcTable, ObjectHandlers,
@@ -38,6 +39,7 @@ use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{Position, PushParser};
 
 use compat::Collected;
+use throwables::Throwables;
 
 /// The extension value (design §7.1).
 ///
@@ -97,6 +99,7 @@ pub fn extension() -> Extension {
             version: None,
         }])
         .class::<XMLParser>()
+        .engine_state(Throwables::start)
         .info(xml_info)
         .build("xml")
 }
@@ -397,7 +400,13 @@ fn create(
         Some(e) => {
             let Some(t) = Target::named(e.as_bytes()) else {
                 let tail = "is not a supported source encoding";
-                return Err(php_ext::raising::argument_error(req, "ValueError", 1, tail));
+                let ce = Throwables::of(req)?;
+                return Err(php_ext::raising::argument_error(
+                    req,
+                    ce.value_error,
+                    1,
+                    tail,
+                ));
             };
             t
         }
@@ -511,9 +520,10 @@ fn method_on(
     }
     let Some(object) = object else {
         let tail = "an object must be set via xml_set_object() to be able to lookup method";
+        let ce = Throwables::of(req).map_err(Some)?;
         return Err(Some(php_ext::raising::argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             position,
             tail,
         )));
@@ -529,15 +539,20 @@ fn method_on(
             let class_name = req
                 .symbols()
                 .class_decl(class)
-                .map(|d| String::from_utf8_lossy(&d.name.0).into_owned())
+                .map(|d| d.name.0.to_vec())
                 .unwrap_or_default();
-            let tail = format!(
-                "method {class_name}::{}() does not exist",
-                String::from_utf8_lossy(name)
-            );
+            let tail = [
+                b"method ".as_slice(),
+                &class_name,
+                b"::",
+                name,
+                b"() does not exist",
+            ]
+            .concat();
+            let ce = Throwables::of(req).map_err(Some)?;
             Err(Some(php_ext::raising::argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 position,
                 &tail,
             )))
@@ -595,9 +610,10 @@ fn install(
         for handler in slots.into_iter().filter_map(|(_, h)| h) {
             handler.callable.give_up(req);
         }
+        let ce = Throwables::of(req)?;
         return Err(php_ext::raising::throw_error(
             req,
-            "Error",
+            ce.error,
             "Cannot change handlers while parsing",
         ));
     }
@@ -694,16 +710,21 @@ fn set_object(req: &mut Request, parser: PhpObject, new: PhpObject) -> Result<()
                 let class_name = req
                     .symbols()
                     .class_decl(new.class())
-                    .map(|d| String::from_utf8_lossy(&d.name.0).into_owned())
+                    .map(|d| d.name.0.to_vec())
                     .unwrap_or_default();
-                let tail = format!(
-                    "cannot safely swap to object of class {class_name} as method \"{}\" does not exist, which was set via {}",
-                    String::from_utf8_lossy(&name),
-                    hook.setter()
-                );
+                let tail = [
+                    b"cannot safely swap to object of class ".as_slice(),
+                    &class_name,
+                    b" as method \"",
+                    &name,
+                    b"\" does not exist, which was set via ",
+                    hook.setter().as_bytes(),
+                ]
+                .concat();
+                let ce = Throwables::of(req)?;
                 return Err(php_ext::raising::argument_error(
                     req,
-                    "ValueError",
+                    ce.value_error,
                     2,
                     &tail,
                 ));

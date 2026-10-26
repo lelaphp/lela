@@ -605,8 +605,18 @@ fn proto_describe(req: &mut Request, value: Value) -> Result<Owner<PhpString>, T
 /// `proto_never(): never`.
 #[php_function]
 fn proto_never(req: &mut Request) -> Result<Never, Thrown> {
-    Err(throw(req, "Exception", "never returns"))
+    let Some(&Raised(exception)) = req.engine::<Raised>() else {
+        return Err(php_ext::raising::fatal(
+            req,
+            "InternalError: no engine state",
+        ));
+    };
+    Err(throw(req, exception, "never returns"))
 }
+
+/// Core's `Exception` as the extension's engine start resolved it, the
+/// class `proto_never` throws.
+struct Raised(php_ext::values::ClassId);
 
 /// `proto_false(): false`.
 #[php_function]
@@ -807,5 +817,6 @@ pub(crate) fn extension() -> php_ext::abi::Extension {
         .class::<ProtoBox>()
         .class::<ProtoTally>()
         .class::<ProtoLaid>()
+        .engine_state(|start| start.class::<Exception>().map(Raised))
         .build("proto")
 }

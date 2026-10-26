@@ -71,7 +71,8 @@ fn shown(
         Some(Err(thrown)) => match thrown.cause(req) {
             Cause::Throwable(throwable) => {
                 let throwable = *throwable;
-                let class = req.symbols().class_name(throwable.class());
+                let class = String::from_utf8_lossy(req.symbols().class_name(throwable.class()))
+                    .into_owned();
                 let message = throwable
                     .prop(req, b"message")
                     .and_then(|message| message.as_str_bytes().map(<[u8]>::to_vec))
@@ -80,7 +81,10 @@ fn shown(
                     .prop(req, b"trace")
                     .and_then(|trace| trace.as_array())
                     .filter(|_| traced)
-                    .map(|trace| format!("\n{}", req.trace_to_string(trace, true)))
+                    .map(|trace| {
+                        let text = req.trace_to_string(trace, true);
+                        format!("\n{}", String::from_utf8_lossy(&text))
+                    })
                     .unwrap_or_default();
                 req.release(throwable.as_value());
                 format!("{class}: {}{trace}", String::from_utf8_lossy(&message))

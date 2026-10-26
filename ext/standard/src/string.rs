@@ -34,6 +34,7 @@ use php_ext::values::{Charset, Key, Layout, Owner, PhpArray, PhpString, Value};
 use php_ext_random::Rng;
 
 use crate::ffi::locale::{self as c, Class};
+use crate::throwables::Throwables;
 
 /// The request state `string.c` keeps: `BG(strtok_string)` and its
 /// cursor, and the request's `locale_t` once `setlocale()` built one.
@@ -1545,9 +1546,10 @@ fn wordwrap(
         return Err(arg_value_error(req, 3, "not be empty"));
     }
     if linelength == 0 && docut {
+        let ce = Throwables::of(req)?;
         return Err(argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             4,
             "cannot be true when argument #2 ($width) is 0",
         ));
@@ -2130,9 +2132,13 @@ fn str_decrement(req: &mut Request, string: PhpString) -> Result<Owner<PhpString
     // range", ...)`: a sentence without the `must` the face writes.
     let out_of_range = |req: &mut Request| {
         let text = String::from_utf8_lossy(string.as_bytes()).into_owned();
+        let ce = match Throwables::of(req) {
+            Ok(ce) => ce,
+            Err(fatal) => return fatal,
+        };
         argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             1,
             &format!("\"{text}\" is out of decrement range"),
         )

@@ -24,6 +24,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod natives;
+mod throwables;
 
 use php_ext::abi::{
     Dependency, DependencyKind, DtorObj, Extension, ExtensionBuilder, Instance, ObjectHandlers,
@@ -36,6 +37,8 @@ use php_ext::request::{Request, Resolve};
 use php_ext::values::{ClassId, Owner, PhpObject, PhpString};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{Emitter, Library, Name, Raised};
+
+use throwables::Throwables;
 
 /// The extension value (design §7.1).
 ///
@@ -108,6 +111,7 @@ pub fn extension() -> Extension {
             version: None,
         }])
         .class::<XMLWriter>()
+        .engine_state(Throwables::start)
         .info(|req| {
             req.extensions_mut()
                 .info_table(&[&["XMLWriter", "enabled"]]);
@@ -165,7 +169,16 @@ fn take(req: &mut Request, object: PhpObject) -> Result<Emitter, Thrown> {
     let taken = object
         .native_mut::<Intern>(req)
         .and_then(|i| i.writer.take());
-    taken.ok_or_else(|| throw_error(req, "Error", "Invalid or uninitialized XMLWriter object"))
+    if let Some(writer) = taken {
+        Ok(writer)
+    } else {
+        let ce = Throwables::of(req)?;
+        Err(throw_error(
+            req,
+            ce.error,
+            "Invalid or uninitialized XMLWriter object",
+        ))
+    }
 }
 
 /// The emitter put back on the object after a call.
@@ -488,7 +501,7 @@ pub(crate) fn new_writer(
 pub(crate) fn create_static(req: &mut Request, writer: Emitter) -> Result<Owner<Static>, Thrown> {
     let scope = req.frames().called_scope();
     let class = scope.map_or_else(|| writer_class(req), Ok)?;
-    match instantiate(req, class, &[]) {
+    match instantiate(req, class, &[], &[]) {
         Ok(object) => {
             put(req, *object, writer);
             Ok(object.into_static())

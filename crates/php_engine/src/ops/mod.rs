@@ -9,6 +9,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use crate::api::values::ClassId;
 use php_unit::OperandKind;
 use php_unit::decl::Bare;
 use std::cmp::Ordering;
@@ -198,11 +199,12 @@ pub(crate) fn object_to_string(
         }
         returned.give_up(req);
     }
-    let name = req.symbols().class_name(class);
-    Err(error(
-        req,
-        &format!("Object of class {name} could not be converted to string"),
-    ))
+    let message = bytes!(
+        b"Object of class ",
+        req.symbols().class_name(class),
+        b" could not be converted to string"
+    );
+    Err(error(req, &message))
 }
 
 /// Where a `SWITCH_LONG`, `SWITCH_STRING` or `MATCH` sends the loop:
@@ -504,11 +506,11 @@ pub(crate) fn match_unhandled_error(req: &mut Request, subject: &Value) -> Throw
     } else {
         req.zval_text(subject, cut)
     };
-    let text = quoted.unwrap_or_else(|| format!("of type {}", type_name(req, subject)));
+    let text = quoted.unwrap_or_else(|| bytes!(b"of type ", type_name(req, subject)));
     throw_exception_ex(
         req,
-        "UnhandledMatchError",
-        &format!("Unhandled match case {text}"),
+        ClassId::UNHANDLED_MATCH_ERROR,
+        &bytes!(b"Unhandled match case ", text),
     )
 }
 
@@ -525,16 +527,16 @@ pub(crate) fn match_unhandled_error(req: &mut Request, subject: &Value) -> Throw
 /// Unhandled match case of type classA
 /// Unhandled match case of type resource
 /// ```
-pub(crate) fn type_name(req: &Request, value: &Value) -> String {
+pub(crate) fn type_name(req: &Request, value: &Value) -> Vec<u8> {
     let value = value.deref();
     match value.as_ref() {
         ValueRef::Object(o) => req.symbols().class_decl(o.class()).map_or_else(
-            || String::from("object"),
-            |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
+            || b"object".to_vec(),
+            |decl| php_unit::decl::shown_bytes(&decl.name.0).to_vec(),
         ),
-        ValueRef::Undef => String::from("null"),
-        ValueRef::Resource(_) => String::from("resource"),
-        _ => String::from(value.type_name()),
+        ValueRef::Undef => b"null".to_vec(),
+        ValueRef::Resource(_) => b"resource".to_vec(),
+        _ => value.type_name().as_bytes().to_vec(),
     }
 }
 
@@ -647,7 +649,11 @@ fn object_is_true(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> 
         }
         Ok(None) => {
             let class = req.symbols().class_name(object.class());
-            let message = format!("Object of class {class} could not be converted to bool");
+            let message = bytes!(
+                b"Object of class ",
+                class,
+                b" could not be converted to bool"
+            );
             if req.note_error(Level::RecoverableError, &message) {
                 req.bail_out();
             }
@@ -1576,14 +1582,23 @@ pub(crate) fn typed_ref_holds(
                 let one_declared = php_unit::type_to_string(&first_ty);
                 let two_declared = php_unit::type_to_string(ty);
                 let given = type_name(req, &held.undef_as_null());
-                return Err(type_error(
-                    req,
-                    &format!(
-                        "Reference with value of type {given} held by property {class}::${} of type {one_declared} is not compatible with property {two}::${} of type {two_declared}",
-                        String::from_utf8_lossy(&first_name),
-                        String::from_utf8_lossy(name)
-                    ),
-                ));
+                let message = bytes!(
+                    b"Reference with value of type ",
+                    given,
+                    b" held by property ",
+                    class,
+                    b"::$",
+                    &first_name[..],
+                    b" of type ",
+                    one_declared,
+                    b" is not compatible with property ",
+                    two,
+                    b"::$",
+                    name,
+                    b" of type ",
+                    two_declared
+                );
+                return Err(type_error(req, &message));
             }
         }
         Assignable::No => {}
@@ -1630,13 +1645,22 @@ pub(crate) fn incdec_prop_error(
         Holder::Property => "",
         Holder::Reference => "a reference held by ",
     };
-    let thrown = type_error(
-        req,
-        &format!(
-            "Cannot {word} {what}property {class}::${} of type {declared} past its {edge} value",
-            String::from_utf8_lossy(name)
-        ),
+    let message = bytes!(
+        b"Cannot ",
+        word,
+        b" ",
+        what,
+        b"property ",
+        class,
+        b"::$",
+        name,
+        b" of type ",
+        declared,
+        b" past its ",
+        edge,
+        b" value"
     );
+    let thrown = type_error(req, &message);
     (thrown, Value::int(limit))
 }
 
@@ -1692,13 +1716,17 @@ pub(crate) fn ref_type_error(
     let class = req.symbols().class_name(declaring);
     let declared = php_unit::type_to_string(ty);
     let given = value_name(req, &value.undef_as_null());
-    type_error(
-        req,
-        &format!(
-            "Cannot assign {given} to reference held by property {class}::${} of type {declared}",
-            String::from_utf8_lossy(name)
-        ),
-    )
+    let message = bytes!(
+        b"Cannot assign ",
+        given,
+        b" to reference held by property ",
+        class,
+        b"::$",
+        name,
+        b" of type ",
+        declared
+    );
+    type_error(req, &message)
 }
 
 /// `zend_throw_conflicting_coercion_error`
@@ -1722,14 +1750,24 @@ fn conflicting_coercion(
     let one_declared = php_unit::type_to_string(one_ty);
     let two_declared = php_unit::type_to_string(two_ty);
     let given = value_name(req, &value.undef_as_null());
-    type_error(
-        req,
-        &format!(
-            "Cannot assign {given} to reference held by property {one_class}::${} of type {one_declared} and property {two_class}::${} of type {two_declared}, as this would result in an inconsistent type conversion",
-            String::from_utf8_lossy(one_name),
-            String::from_utf8_lossy(two_name)
-        ),
-    )
+    let message = bytes!(
+        b"Cannot assign ",
+        given,
+        b" to reference held by property ",
+        one_class,
+        b"::$",
+        one_name,
+        b" of type ",
+        one_declared,
+        b" and property ",
+        two_class,
+        b"::$",
+        two_name,
+        b" of type ",
+        two_declared,
+        b", as this would result in an inconsistent type conversion"
+    );
+    type_error(req, &message)
 }
 
 /// `MAY_BE_*` (`Z/Zend/zend_type_info.h:26-32`), the bits
@@ -1787,15 +1825,19 @@ pub(crate) fn verify_class_constant_type(
     let declared = php_unit::type_to_string(ty);
     let given = match held.as_object() {
         Some(object) => req.symbols().class_name(object.class()),
-        None => held.type_name().to_string(),
+        None => held.type_name().as_bytes(),
     };
-    Err(type_error(
-        req,
-        &format!(
-            "Cannot assign {given} to class constant {class}::{} of type {declared}",
-            String::from_utf8_lossy(name)
-        ),
-    ))
+    let message = bytes!(
+        b"Cannot assign ",
+        given,
+        b" to class constant ",
+        class,
+        b"::",
+        name,
+        b" of type ",
+        declared
+    );
+    Err(type_error(req, &message))
 }
 
 fn property_type_error(
@@ -1818,13 +1860,17 @@ fn property_type_error(
     let class = req.symbols().class_name(declaring);
     let declared = php_unit::type_to_string(ty);
     let given = value_name(req, &value.undef_as_null());
-    type_error(
-        req,
-        &format!(
-            "Cannot assign {given} to property {class}::${} of type {declared}",
-            String::from_utf8_lossy(name)
-        ),
-    )
+    let message = bytes!(
+        b"Cannot assign ",
+        given,
+        b" to property ",
+        class,
+        b"::$",
+        name,
+        b" of type ",
+        declared
+    );
+    type_error(req, &message)
 }
 
 /// `zend_cast_zval_to_object` (`Z/Zend/zend_execute.h:225`) under the
@@ -2013,7 +2059,12 @@ fn not_converted(req: &mut Request, value: &Value, to: &str) {
     let class = value_name(req, value);
     warning(
         req,
-        &format!("Object of class {class} could not be converted to {to}"),
+        &bytes!(
+            b"Object of class ",
+            class,
+            b" could not be converted to ",
+            to
+        ),
     );
 }
 
@@ -2142,7 +2193,11 @@ pub(crate) fn div(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
         return Ok(inline::number_value(n));
     }
     if b.double() == 0.0 {
-        return Err(throw_error(req, "DivisionByZeroError", "Division by zero"));
+        return Err(throw_error(
+            req,
+            ClassId::DIVISION_BY_ZERO_ERROR,
+            "Division by zero",
+        ));
     }
     // php's own case, "prevent overflow error/crash": `PHP_INT_MIN / -1`
     // as a double, the one other pair the rule refuses.
@@ -2225,7 +2280,7 @@ pub(crate) fn r#mod(req: &mut Request, left: &Value, right: &Value) -> Result<Va
         // `zend_throw_exception_ex` (`Z/Zend/zend_operators.c:1550`).
         None => Err(crate::api::raising::throw_exception_ex(
             req,
-            "DivisionByZeroError",
+            ClassId::DIVISION_BY_ZERO_ERROR,
             "Modulo by zero",
         )),
     }
@@ -2355,7 +2410,7 @@ fn shift(req: &mut Request, side: Shift, left: &Value, right: &Value) -> Result<
         Ok(by) => Ok(Value::int(by_heap(a, by))),
         Err(_) => Err(throw_exception_ex(
             req,
-            "ArithmeticError",
+            ClassId::ARITHMETIC_ERROR,
             "Bit shift by negative number",
         )),
     }
@@ -2646,7 +2701,7 @@ pub(crate) fn bitwise_not(req: &mut Request, value: &Value) -> Result<Value, Thr
     let name = value_name(req, &value);
     Err(type_error(
         req,
-        &format!("Cannot perform bitwise not on {name}"),
+        &bytes!(b"Cannot perform bitwise not on ", name),
     ))
 }
 
@@ -4241,7 +4296,7 @@ fn stepped_other(
         }
     }
     let name = value_name(req, value);
-    Err(type_error(req, &format!("Cannot {verb} {name}")))
+    Err(type_error(req, &bytes!(b"Cannot ", verb, b" ", name)))
 }
 
 /// `increment_string` (`Z/Zend/zend_operators.c:2613`), "Perl style
@@ -4404,7 +4459,11 @@ pub(crate) fn strlen(req: &mut Request, value: &Value) -> Result<Value, Thrown> 
     let name = value_name(req, value);
     Err(type_error(
         req,
-        &format!("strlen(): Argument #1 ($string) must be of type string, {name} given"),
+        &bytes!(
+            b"strlen(): Argument #1 ($string) must be of type string, ",
+            name,
+            b" given"
+        ),
     ))
 }
 
@@ -4603,8 +4662,11 @@ pub(crate) fn count(req: &mut Request, value: &Value, sizeof: bool) -> Result<i6
     let name = value_name(req, value);
     Err(type_error(
         req,
-        &format!(
-            "{function}(): Argument #1 ($value) must be of type Countable|array, {name} given"
+        &bytes!(
+            function,
+            b"(): Argument #1 ($value) must be of type Countable|array, ",
+            name,
+            b" given"
         ),
     ))
 }
@@ -4759,7 +4821,7 @@ pub(crate) fn dimension_const(
         return Ok(Value::null());
     }
     let named = value_name(req, &container.undef_as_null());
-    warning(req, &format!("Trying to access array offset on {named}"));
+    warning(req, &bytes!(b"Trying to access array offset on ", named));
     Ok(Value::null())
 }
 
@@ -5443,7 +5505,7 @@ pub(crate) fn property_read_on(req: &mut Request, name: &[u8], container: &Value
         b"Attempt to read property \"",
         c_str(name),
         b"\" on ",
-        shown.as_bytes(),
+        shown.as_slice(),
     ]
     .concat();
     warning(req, &message);
@@ -5463,11 +5525,17 @@ pub(crate) fn property_read_on(req: &mut Request, name: &[u8], container: &Value
 /// #0 {main}
 ///   thrown in %s on line 2
 /// ```
-pub(crate) fn value_name(req: &Request, value: &Value) -> String {
+pub(crate) fn value_name(req: &Request, value: &Value) -> Vec<u8> {
     match value.as_ref() {
         ValueRef::Object(_) => type_name(req, value),
-        ValueRef::Bool(b) => String::from(if b { "true" } else { "false" }),
-        _ => String::from(value.type_name()),
+        ValueRef::Bool(b) => {
+            if b {
+                b"true".to_vec()
+            } else {
+                b"false".to_vec()
+            }
+        }
+        _ => value.type_name().as_bytes().to_vec(),
     }
 }
 
@@ -5484,10 +5552,10 @@ pub(crate) fn value_name(req: &Request, value: &Value) -> String {
 /// Unsupported operand types: ArrayObject | int
 /// Unsupported operand types: array - bool
 /// ```
-pub(crate) fn zval_type_name(req: &Request, value: &Value) -> String {
+pub(crate) fn zval_type_name<'r>(req: &'r Request, value: &Value) -> &'r [u8] {
     match value.as_ref() {
         ValueRef::Object(o) => req.symbols().class_name(o.class()),
-        _ => String::from(value.type_name()),
+        _ => value.type_name().as_bytes(),
     }
 }
 
@@ -5566,6 +5634,24 @@ fn lacking(req: &mut Request, union: PhpArray, right: PhpArray) -> Vec<(Key, Val
 /// ```expect
 /// int(0)
 /// int(1)
+/// ```
+///
+/// Under opcache php's SCCP pass folds `str_repeat('a', 2)` into an
+/// immutable value at compile time, so the union's element offers no
+/// root and php counts one. This engine runs no optimizer on an executed op array
+/// (design §6.1), so it counts the two php counts with
+/// `opcache.optimization_level=0`: the fence pins the engine's side of
+/// the `by-design` row `trace:sccp-folded-roots` (#3334, #3366).
+///
+/// ```php
+/// class D { private array $p = [];
+///   function a() { parse_str('', $this->p); }
+///   function c() { $this->p += ['x' => [str_repeat('a', 2)]]; } }
+/// $d = new D; $d->a(); $d->c();
+/// echo gc_status()['roots'], "\n";
+/// ```
+/// ```expect regime=immutable-literals
+/// 2
 /// ```
 pub(crate) fn add_assign(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
     let held = left.deref();
@@ -5666,9 +5752,12 @@ fn operands<T>(
     {
         return Ok((a, b));
     }
-    let message = format!(
-        "Unsupported operand types: {} {operator} {}",
+    let message = bytes!(
+        b"Unsupported operand types: ",
         zval_type_name(req, left),
+        b" ",
+        operator,
+        b" ",
         zval_type_name(req, right)
     );
     Err(type_error(req, &message))

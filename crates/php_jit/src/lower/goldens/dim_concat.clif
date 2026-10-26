@@ -225,8 +225,8 @@ function u0:0(i64, i64) -> i32 tail {
 
                                 block4(v11: i64, v12: i64, v13: i64) cold:
                                     v146 = iconst.i64 0x0008_0000_000d
-                                    v147 = load.i64 notrap aligned v3+48
-                                    v148 = load.i64 notrap aligned v3+56
+                                    v147 = load.i64 notrap aligned v3+56
+                                    v148 = load.i64 notrap aligned v3+64
                                     v149 = isub v148, v147
                                     v150 = iconst.i32 8
                                     v151 = iconst.i64 0x6000_0000
@@ -280,8 +280,8 @@ function u0:0(i64, i64) -> i32 tail {
 
                                 block6(v18: i64, v19: i64, v20: i64) cold:
                                     v179 = iconst.i64 0x0008_0000_000d
-                                    v180 = load.i64 notrap aligned v3+48
-                                    v181 = load.i64 notrap aligned v3+56
+                                    v180 = load.i64 notrap aligned v3+56
+                                    v181 = load.i64 notrap aligned v3+64
                                     v182 = isub v181, v180
                                     v183 = iconst.i32 8
                                     v184 = iconst.i64 0x6000_0008
@@ -335,8 +335,8 @@ function u0:0(i64, i64) -> i32 tail {
 
                                 block8(v25: i64, v26: i64, v27: i64) cold:
                                     v212 = iconst.i64 0x0008_0000_000d
-                                    v213 = load.i64 notrap aligned v3+48
-                                    v214 = load.i64 notrap aligned v3+56
+                                    v213 = load.i64 notrap aligned v3+56
+                                    v214 = load.i64 notrap aligned v3+64
                                     v215 = isub v214, v213
                                     v216 = iconst.i32 8
                                     v217 = iconst.i64 0x6000_0010
@@ -390,8 +390,8 @@ function u0:0(i64, i64) -> i32 tail {
 
                                 block10(v32: i64, v33: i64, v34: i64) cold:
                                     v245 = iconst.i64 0x0008_0000_000d
-                                    v246 = load.i64 notrap aligned v3+48
-                                    v247 = load.i64 notrap aligned v3+56
+                                    v246 = load.i64 notrap aligned v3+56
+                                    v247 = load.i64 notrap aligned v3+64
                                     v248 = isub v247, v246
                                     v249 = iconst.i32 8
                                     v250 = iconst.i64 0x6000_0018
@@ -448,8 +448,8 @@ function u0:0(i64, i64) -> i32 tail {
                                     v278 = iconst.i32 4
                                     store notrap aligned v278, v38+136  ; v278 = 4
                                     v279 = iconst.i64 0x000a_0000_000d
-                                    v280 = load.i64 notrap aligned v3+48
-                                    v281 = load.i64 notrap aligned v3+56
+                                    v280 = load.i64 notrap aligned v3+56
+                                    v281 = load.i64 notrap aligned v3+64
                                     v282 = isub v281, v280
                                     v283 = iconst.i32 10
                                     v284 = iconst.i64 0x6000_0020
@@ -506,8 +506,8 @@ function u0:0(i64, i64) -> i32 tail {
                                     v312 = iconst.i32 4
                                     store notrap aligned v312, v101+136  ; v312 = 4
                                     v313 = iconst.i64 0x0007_0000_000d
-                                    v314 = load.i64 notrap aligned v3+48
-                                    v315 = load.i64 notrap aligned v3+56
+                                    v314 = load.i64 notrap aligned v3+56
+                                    v315 = load.i64 notrap aligned v3+64
                                     v316 = isub v315, v314
                                     v317 = iconst.i32 7
                                     v318 = iconst.i64 0x6000_0028

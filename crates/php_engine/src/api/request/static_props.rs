@@ -208,27 +208,25 @@ impl Request {
                 return Ok(None);
             }
             let class = self.symbols().class_name(class);
-            return Err(crate::api::raising::error(
-                self,
-                &format!(
-                    "Access to undeclared static property {class}::${}",
-                    String::from_utf8_lossy(name)
-                ),
-            ));
+            let message = bytes!(
+                b"Access to undeclared static property ",
+                class,
+                b"::$",
+                name
+            );
+            return Err(crate::api::raising::error(self, &message));
         };
         self.update_class_constants(class)?;
         self.init_statics(class)?;
         self.lay_down_static(info)?;
         if self.class_is(class, ClassKind::Trait) {
-            let shown = format!(
-                "{}::${}",
-                self.symbols().class_name(info.declaring),
-                String::from_utf8_lossy(name)
-            );
+            let shown = bytes!(self.symbols().class_name(info.declaring), b"::$", name);
             crate::api::raising::deprecated(
                 self,
-                &format!(
-                    "Accessing static trait property {shown} is deprecated, it should only be accessed on a class using the trait"
+                &bytes!(
+                    b"Accessing static trait property ",
+                    shown,
+                    b" is deprecated, it should only be accessed on a class using the trait"
                 ),
             );
         }
@@ -317,10 +315,12 @@ impl Request {
             if read == PropertyRead::Warning
                 && let Some(property) = self.property_decl(info).filter(|p| p.ty.is_some())
             {
-                let message = format!(
-                    "Typed static property {}::${} must not be accessed before initialization",
+                let message = bytes!(
+                    b"Typed static property ",
                     self.symbols().class_name(info.declaring),
-                    String::from_utf8_lossy(&property.name.0)
+                    b"::$",
+                    &property.name.0[..],
+                    b" must not be accessed before initialization"
                 );
                 return Err(crate::api::raising::error(self, &message));
             }

@@ -47,6 +47,7 @@ mod stream;
 mod stub;
 mod table;
 mod tar;
+mod throwables;
 mod web;
 mod write;
 mod zip;
@@ -135,6 +136,7 @@ pub fn extension() -> Extension {
         .class::<object::PharData>()
         .class::<fileinfo::PharFileInfo>()
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .rinit(rinit)
         .rshutdown(rshutdown)
         .compile_file(open::compile_file)

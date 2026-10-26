@@ -41,6 +41,7 @@ mod callbacks;
 mod conn;
 mod result;
 mod stmt;
+mod throwables;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::{php_class, php_const};
@@ -109,6 +110,7 @@ pub fn extension() -> Extension {
         .class::<stmt::SQLite3Stmt>()
         .class::<result::SQLite3Result>()
         .request_state::<conn::Forgotten>()
+        .engine_state(throwables::Throwables::start)
         .rshutdown(conn::rshutdown)
         .info(sqlite3_info)
         .build("sqlite3")

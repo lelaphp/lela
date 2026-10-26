@@ -16,6 +16,7 @@ use crate::tables::{
     MBFL_ENCTYPE_SBCS, MBFL_ENCTYPE_WCS2, MBFL_ENCTYPE_WCS4,
     MBFL_OUTPUTFILTER_ILLEGAL_MODE_BADUTF8,
 };
+use crate::throwables::Throwables;
 use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
@@ -869,7 +870,11 @@ fn mb_strrichr(
 /// `zend_argument_value_error`: the sentence as php words it after
 /// `Argument #N ($name) `.
 pub(crate) fn value_error(req: &mut Request, arg: u32, text: &str) -> Thrown {
-    argument_error(req, "ValueError", arg, text)
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    argument_error(req, ce.value_error, arg, text)
 }
 
 /// `zend_argument_must_not_be_empty_error`.
@@ -1747,7 +1752,8 @@ fn mb_str_pad(
         full_left.checked_mul(pad.len()),
         full_right.checked_mul(pad.len()),
     ) else {
-        return Err(throw_error(req, "Error", "String size overflow"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "String size overflow"));
     };
     let (tail_left, tail_right) = on_heap(req, || {
         (
@@ -1764,7 +1770,8 @@ fn mb_str_pad(
         .and_then(|(l, r)| l.checked_add(r))
         .filter(|&pads| pads <= max && string.len() <= max - pads);
     let Some(pads) = bytes else {
-        return Err(throw_error(req, "Error", "String size overflow"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "String size overflow"));
     };
     let input = string.as_bytes();
     // `zend_string_safe_falloc` since 8.5.12: the string asked for

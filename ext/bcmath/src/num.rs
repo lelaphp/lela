@@ -178,6 +178,16 @@ impl Num {
         }
     }
 
+    /// A zero keeps neither sign nor scale: php's `if (bc_is_zero(num))
+    /// { num->n_sign = PLUS; num->n_scale = 0; }`, which `bc_multiply`,
+    /// `bc_divide`, `bc_divmod` and `bc_round` ask of what they computed.
+    pub(crate) fn unsign_unscale_zero(&mut self) {
+        if self.is_zero() {
+            self.sign = Sign::Plus;
+            self.narrow(0);
+        }
+    }
+
     /// Whether the integer part is the single digit zero, the shape of a
     /// number below one in magnitude.
     fn int_is_zero_digit(&self) -> bool {
@@ -583,10 +593,7 @@ pub(crate) fn multiply(n1: &Num, n2: &Num, scale: usize) -> Num {
     prod.sign = n1.sign.times(n2.sign);
     prod.narrow(product_scale);
     prod.rm_leading_zeros();
-    if prod.is_zero() {
-        prod.sign = Sign::Plus;
-        prod.narrow(0);
-    }
+    prod.unsign_unscale_zero();
     prod
 }
 
@@ -766,12 +773,8 @@ pub(crate) fn divide(numerator: &Num, divisor: &Num, scale: usize) -> Option<Num
     let real = quot_limbs_len.min(quot_size.div_ceil(LIMB_DIGITS));
     write_limbs(&quot_limbs[..real], &mut quot.digits);
     quot.rm_leading_zeros();
-    if quot.is_zero() {
-        quot.sign = Sign::Plus;
-        quot.narrow(0);
-    } else {
-        quot.sign = sign;
-    }
+    quot.sign = sign;
+    quot.unsign_unscale_zero();
     Some(quot)
 }
 
@@ -809,10 +812,7 @@ pub(crate) fn divmod(num1: &Num, num2: &Num, scale: usize) -> Option<(Num, Num)>
     let product = multiply(&quotient, num2, rscale);
     let mut rem = sub(num1, &product, rscale);
     rem.narrow(scale);
-    if rem.is_zero() {
-        rem.sign = Sign::Plus;
-        rem.narrow(0);
-    }
+    rem.unsign_unscale_zero();
     Some((quotient, rem))
 }
 
@@ -1026,9 +1026,7 @@ pub(crate) fn floor_or_ceil(num: &Num, is_floor: bool) -> Num {
         stepped.sign = result.sign;
         result = stepped;
     }
-    if result.is_zero() {
-        result.sign = Sign::Plus;
-    }
+    result.unsign_zero();
     result
 }
 
@@ -1118,10 +1116,7 @@ pub(crate) fn round(num: &Num, precision: i64, mode: Rounding) -> (Num, usize) {
         };
     }
     let scale = result.scale;
-    if result.is_zero() {
-        result.sign = Sign::Plus;
-        result.narrow(0);
-    }
+    result.unsign_unscale_zero();
     (result, scale)
 }
 

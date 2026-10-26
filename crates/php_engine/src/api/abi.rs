@@ -91,7 +91,7 @@ pub struct StartupIni {
 /// name, `sapi_module.name`, and the process states. Read through its
 /// accessors, so a later field is not a breaking change.
 #[derive(Debug)]
-pub struct Start {
+pub struct Start<'e> {
     pub(crate) ini: StartupIni,
     pub(crate) host: &'static str,
     /// The process states of this extension and of every one before it
@@ -100,9 +100,29 @@ pub struct Start {
     /// The bundle's opcode observers, whose declarations the tier's
     /// start asks of this start ([`crate::observer::observes`]).
     pub(crate) opcodes: Box<[crate::observer::OpcodeObserver]>,
+    /// The classes the engine linked, Core's and the bundle's.
+    pub(crate) classes: crate::engine::ClassTable<'e>,
 }
 
-impl Start {
+impl Start<'_> {
+    /// The linked class `C` names, resolved once as the extension
+    /// starts, as php's `MINIT` keeps `zend_ce_error`, its own
+    /// `*_ce_*` and those of the extensions it includes: what an
+    /// extension raises names its class by this identity, held in its
+    /// engine state (ADR-0005), and never looks a class up as it
+    /// throws (#3403). A class the engine does not link refuses the
+    /// start, naming it, as the template's `InternalError` names what
+    /// it cannot reach.
+    pub fn class<C: crate::api::abi::Class>(&self) -> Result<ClassId, Refusal> {
+        self.classes.find(C::NAME).ok_or_else(|| {
+            let name = String::from_utf8_lossy(C::NAME);
+            Refusal::new().raise(
+                Level::CoreError,
+                format!("InternalError: the class {name} is not linked into this engine"),
+            )
+        })
+    }
+
     /// The startup ini, as the engine's entries stand once every
     /// handler has taken what the host set at the startup stage: a
     /// host's own entries are laid over the started engine at the
@@ -3354,11 +3374,16 @@ impl Refusals {
     /// in the template.
     fn refuse_construction(req: &mut Request, object: PhpObject, instead: Option<&str>) -> Thrown {
         let class = req.symbols().class_name(object.class());
-        let message = match instead {
-            Some(instead) => {
-                format!("Cannot directly construct {class}, use {instead} instead")
-            }
-            None => format!("Cannot directly construct {class}"),
+        let message = if let Some(instead) = instead {
+            bytes!(
+                b"Cannot directly construct ",
+                class,
+                b", use ",
+                instead,
+                b" instead"
+            )
+        } else {
+            bytes!(b"Cannot directly construct ", class)
         };
         crate::api::raising::error(req, &message)
     }

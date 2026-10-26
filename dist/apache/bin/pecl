@@ -1,0 +1,8 @@
+#!/bin/sh
+# pecl, pear, phpize and php-config in the dax-php image. dax-php is a
+# PHP engine in Rust: it has no Zend C ABI, so a C extension from PECL can
+# neither be built nor loaded. Fails with that reason rather than
+# "command not found".
+echo "$(basename "$0"): dax-php cannot build or load C extensions (PECL, phpize)." >&2
+echo "$(basename "$0"): its extensions are built in; 'php -m' lists them." >&2
+exit 1

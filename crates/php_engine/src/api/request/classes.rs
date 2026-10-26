@@ -1362,10 +1362,11 @@ impl Request {
                 Err(thrown) => return Err(self.link_abandoned(name, thrown, false)),
             };
             if self.symbols().class_decl(found).map(|t| t.kind) != Some(ClassKind::Trait) {
-                let message = format!(
-                    "{} cannot use {} - it is not a trait",
-                    String::from_utf8_lossy(name),
-                    self.symbols().class_name(found)
+                let message = bytes!(
+                    name,
+                    b" cannot use ",
+                    self.symbols().class_name(found),
+                    b" - it is not a trait"
                 );
                 let thrown = crate::api::raising::error(self, &message);
                 return Err(self.link_abandoned(name, thrown, false));
@@ -1496,10 +1497,13 @@ impl Request {
         } else {
             Level::UserDeprecated
         };
-        let message = format!(
-            "Trait {} used by {} is deprecated{suffix}",
+        let message = bytes!(
+            b"Trait ",
             self.symbols().class_name(found),
-            String::from_utf8_lossy(used_by)
+            b" used by ",
+            used_by,
+            b" is deprecated",
+            suffix.to_string()
         );
         crate::api::raising::raise(self, level, &message);
         suffix.give_up(self);
@@ -2096,7 +2100,8 @@ impl Request {
         }
         if let Some(object) = held.as_object() {
             if let Some(closure) = object.closure(self) {
-                let name = self.declared_name(closure.function);
+                let name =
+                    String::from_utf8_lossy(&self.declared_name(closure.function)).into_owned();
                 return match closure.scope.filter(|_| closure.fake) {
                     Some(scope) => format!("{}::{name}", self.whole_class_name(scope)),
                     None => name,

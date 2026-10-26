@@ -37,6 +37,7 @@ tier::Activation::keep
 tier::Activation::opline
 tier::Argument
 tier::Aside
+tier::Bound
 tier::Building
 tier::CachedSlot
 tier::Called
@@ -88,6 +89,7 @@ tier::FuncRef::at
 tier::FuncRef::offset
 tier::Held
 tier::Hooked
+tier::Laid
 tier::MapPtrRaw
 tier::PLACE
 tier::Parked

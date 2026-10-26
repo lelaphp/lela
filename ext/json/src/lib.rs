@@ -33,11 +33,11 @@
 mod decode;
 mod encode;
 
-use php_ext::abi::{Extension, ExtensionBuilder, OrFalse};
+use php_ext::abi::{Extension, ExtensionBuilder, OrFalse, Start};
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::raising::{Thrown, arg_value_error, new_throwable, pending, throw_value};
+use php_ext::raising::{Thrown, arg_value_error, fatal, new_throwable, pending, throw_value};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpString, SmartStr, Value};
+use php_ext::values::{ClassId, Owner, PhpString, SmartStr, Value};
 
 use constants::{
     JSON_ERROR_CTRL_CHAR, JSON_ERROR_DEPTH, JSON_ERROR_INF_OR_NAN,
@@ -128,6 +128,7 @@ pub fn extension() -> Extension {
         .class::<JsonSerializable>()
         .class::<JsonException>()
         .request_state::<State>()
+        .engine_state(|start: &Start| start.class::<JsonException>().map(Raised))
         .info(json_info)
         .build("json")
 }
@@ -206,22 +207,28 @@ fn error_message(code: i64) -> &'static str {
     }
 }
 
+/// `php_json_exception_ce`, resolved once as the engine starts
+/// (ADR-0005: engine state, immutable), so a raise names the class by
+/// its identity, never by a name looked up as it throws (#3403).
+#[derive(Clone, Copy)]
+struct Raised(ClassId);
+
 /// `zend_throw_exception(php_json_exception_ce, msg, error_code)`: the
 /// message `json_last_error_msg` would have answered, under the code
 /// `json_last_error` would have, which is what `getCode()` reads.
 fn throw_json(req: &mut Request, code: i64) -> Thrown {
-    let made = new_throwable(req, "JsonException", error_message(code));
-    let value = match made {
+    let Some(&Raised(class)) = req.engine::<Raised>() else {
+        return fatal(req, "InternalError: json was not started");
+    };
+    let value = match new_throwable(req, class, error_message(code)) {
         Ok(value) => value,
         Err(thrown) => return thrown,
     };
-    if let Some(object) = value.as_object() {
-        let code = Owner::int(code);
-        let written = php_ext::call::write_prop(req, &object, b"code", code);
-        if let Err(thrown) = written {
-            value.give_up(req);
-            return thrown;
-        }
+    if let Some(object) = value.as_object()
+        && let Err(thrown) = php_ext::call::write_prop(req, &object, b"code", Owner::int(code))
+    {
+        value.give_up(req);
+        return thrown;
     }
     let thrown = throw_value(req, &value);
     value.give_up(req);

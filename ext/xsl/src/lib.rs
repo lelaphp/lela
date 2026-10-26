@@ -20,6 +20,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod ffi;
+mod throwables;
 
 use php_ext::abi::{
     Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, GcTable, ObjectHandlers,
@@ -38,6 +39,8 @@ use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value
 use php_ext_dom::{CallbacksAt, XPathCallbacks};
 use php_ext_libxml::ffi::{ClassType, Kind, Node, NodeObject, Ns, Raised, Route};
 use php_ext_libxml::{Errors, import_node};
+
+use throwables::Throwables;
 
 /// `XSL_SECPREF_DEFAULT`: every write forbidden.
 const SECPREF_DEFAULT: i64 = 32 | 8 | 4;
@@ -96,6 +99,7 @@ pub fn extension() -> Extension {
         .process_state(|| Ok(initialize()))
         .constants(constants::declared())
         .class::<XSLTProcessor>()
+        .engine_state(Throwables::start)
         .info(xsl_info)
         .build("xsl")
 }
@@ -257,7 +261,8 @@ impl ObjectHandlers for Handlers {
                 String::from_utf8_lossy(name),
             );
             let message = format!("Indirect modification of {class}::${name} is not allowed");
-            return Err(throw_error(req, "Error", &message));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, &message));
         }
         Std.read_property(req, object, name, read)
     }
@@ -329,9 +334,10 @@ impl ObjectHandlers for Handlers {
                 class_name(req, object.class()),
                 String::from_utf8_lossy(name),
             );
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!("Cannot unset {class}::${name}"),
             ));
         }
@@ -442,7 +448,8 @@ fn apply<R>(
         let message = format!(
             "XSLTProcessor::{method}() can only be called after a stylesheet has been imported"
         );
-        return Err(throw_error(req, "Error", &message));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, &message));
     };
     let answer = id.held(req, |req, sheet| {
         if let Some(i) = intern(req, this) {
@@ -478,7 +485,8 @@ fn apply<R>(
         let message = format!(
             "XSLTProcessor::{method}() can only be called after a stylesheet has been imported"
         );
-        Err(throw_error(req, "Error", &message))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, &message))
     })
 }
 
@@ -721,6 +729,30 @@ impl XSLTProcessor {
     /// <o:out xmlns:o="urn:o">modern</o:out>
     /// "
     /// ```
+    ///
+    /// The owner document a node stands for is made as php's
+    /// `php_dom_create_object(nodep->doc, &owner_zv, nodeobj)` makes it,
+    /// over the libxml half of the object handed in whatever extension
+    /// made it, so an ext/simplexml element's document is counted once more
+    /// and not freed under it (GH-21496):
+    ///
+    /// ```php
+    /// $sxe = simplexml_load_string('<container/>');
+    /// $p = new XSLTProcessor;
+    /// var_dump(@$p->importStylesheet($sxe), $sxe->getName());
+    /// unset($p);
+    /// var_dump($sxe->asXML());
+    /// unset($sxe);
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// string(9) "container"
+    /// string(35) "<?xml version="1.0"?>
+    /// <container/>
+    /// "
+    /// done
+    /// ```
     #[php(tentative)]
     fn importStylesheet(
         req: &mut Request,
@@ -730,7 +762,8 @@ impl XSLTProcessor {
         let this = this.object();
         if intern(req, this).is_some_and(|i| i.transform_depth > 0) {
             let message = "Cannot call XSLTProcessor::importStylesheet() while a transformation is in progress";
-            return Err(throw_error(req, "Error", message));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, message));
         }
         let Some(exported) = import_node(req, stylesheet) else {
             return Err(arg_type_error(req, 1, "be a valid XML node"));
@@ -745,7 +778,13 @@ impl XSLTProcessor {
             let Some(doc) = node.doc() else {
                 return Err(arg_value_error(req, 1, "be part of a document"));
             };
-            match php_ext_dom::create_object(req, doc, Some(stylesheet))?.into_object() {
+            // `dom_object *nodeobj`: the libxml half of the object handed
+            // in, a dom node's or a SimpleXML element's alike, whose
+            // document reference the owner document's object shares.
+            let Some(half) = php_ext_libxml::node_object(req, stylesheet) else {
+                return Err(arg_type_error(req, 1, "be a valid XML node"));
+            };
+            match php_ext_dom::create_object_in(req, doc, &half)?.into_object() {
                 Ok(owner) => Some(owner),
                 Err(value) => {
                     value.give_up(req);
@@ -1076,7 +1115,8 @@ impl XSLTProcessor {
             Union::B(name) => {
                 let Some(value) = value else {
                     let tail = "cannot be null when argument #2 ($name) is a string";
-                    return Err(argument_error(req, "ValueError", 3, tail));
+                    let ce = Throwables::of(req)?;
+                    return Err(argument_error(req, ce.value_error, 3, tail));
                 };
                 if name.as_bytes().contains(&0) {
                     return Err(arg_value_error(req, 2, "not contain any null bytes"));

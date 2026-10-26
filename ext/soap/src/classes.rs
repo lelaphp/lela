@@ -6,22 +6,23 @@
 use php_ext::abi::ConstValue;
 use php_ext::abi::{ObjectHandlers, Passed, Refusals, Std, This, Union};
 use php_ext::attr::php_class;
-use php_ext::call::{call_method, lookup_class, read_prop};
+use php_ext::call::{call_method, read_prop};
 use php_ext::coerce::{to_long, to_string};
 use php_ext::raising::{Thrown, arg_value_error, argument_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 use crate::model;
+use crate::throwables::Throwables;
 use crate::{SOAP_1_1, SOAP_1_2, State};
 
 type R<T> = Result<T, Thrown>;
 
 /// `instanceof_function(ce, soap_fault_class_entry)`.
 pub(crate) fn is_fault(req: &mut Request, object: PhpObject) -> bool {
-    match lookup_class(req, b"SoapFault") {
-        Ok(Some(class)) => object.instance_of(req, class),
-        _ => false,
+    match Throwables::of(req) {
+        Ok(ce) => object.instance_of(req, ce.soap_fault),
+        Err(_) => false,
     }
 }
 
@@ -300,9 +301,10 @@ impl SoapFault {
             _ => {}
         }
         if given && fault_code.as_ref().is_none_or(Vec::is_empty) {
+            let ce = Throwables::of(req)?;
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 1,
                 "is not a valid fault code",
             ));
@@ -561,9 +563,10 @@ impl SoapVar {
                 let known = i32::try_from(t)
                     .is_ok_and(|t| model::DEFAULT_ENCODING.iter().any(|b| b.type_ == t));
                 if !known {
+                    let ce = Throwables::of(req)?;
                     return Err(argument_error(
                         req,
-                        "ValueError",
+                        ce.value_error,
                         2,
                         "is not a valid encoding",
                     ));

@@ -24,6 +24,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod ffi;
+mod throwables;
 
 use php_ext::abi::{Extension, ExtensionBuilder, Instance, OrFalse, Refusals};
 use php_ext::attr::{php_class, php_function};
@@ -65,6 +66,7 @@ pub fn extension() -> Extension {
             sem_remove::declared(),
         ])
         .class::<SysvSemaphore>()
+        .engine_state(throwables::Throwables::start)
         .info(sysvsem_info)
         .build("sysvsem")
 }
@@ -273,9 +275,10 @@ fn sem_get(
         warn(req, "Failed releasing SYSVSEM_SETVAL", errno);
     }
     let Some(class) = lookup_class(req, b"SysvSemaphore")? else {
+        let ce = throwables::Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Class \"SysvSemaphore\" not found",
         ));
     };

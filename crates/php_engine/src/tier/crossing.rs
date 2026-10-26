@@ -101,10 +101,10 @@ pub fn primed(req: &Request, frame: FrameRef, held: Held<'_>, at: OplineIdx) -> 
         op.opcode,
         Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName
     );
-    let exec::Cached::Function(function) = req.cached(frame, CacheSlot(op.out)) else {
+    let exec::Cached::Call(call) = req.cached(frame, CacheSlot(op.out)) else {
         return None;
     };
-    let user = req.user_function(function).filter(|_| init)?;
+    let user = req.user_function(call.function).filter(|_| init)?;
     let body = exec::body_of(&user.unit, user.body)?;
     Some(FuncRef::at(body.runtime_cache))
 }

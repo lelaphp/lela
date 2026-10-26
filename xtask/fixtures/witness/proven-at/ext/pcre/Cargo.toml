@@ -1,0 +1,4 @@
+[package]
+name = "php_ext_pcre"
+version = "0.0.0"
+edition = "2024"

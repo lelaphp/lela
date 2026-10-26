@@ -291,13 +291,7 @@ impl Request {
     /// ```
     pub(crate) fn undefined_property(&mut self, class: ClassId, name: &[u8]) {
         let class = self.symbols().class_name(class);
-        let message = [
-            b"Undefined property: ",
-            class.as_bytes(),
-            b"::$",
-            c_str(name),
-        ]
-        .concat();
+        let message = [b"Undefined property: ", class, b"::$", c_str(name)].concat();
         crate::api::raising::warning(self, &message);
     }
 
@@ -1153,7 +1147,7 @@ impl Request {
             let shown = self.symbols().class_name(class);
             let message = [
                 b"Accessing static property ",
-                shown.as_bytes(),
+                shown,
                 b"::$",
                 c_str(name),
                 b" as non static",
@@ -1456,11 +1450,19 @@ impl Request {
         };
         let from = self.scope_phrase(self.executed_scope());
         let class = self.symbols().class_name(class);
-        let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::error(
-            self,
-            &format!("Cannot {operation} {word} property {class}::${shown} from {from}"),
-        )
+        let message = bytes!(
+            b"Cannot ",
+            operation,
+            b" ",
+            word,
+            b" property ",
+            class,
+            b"::$",
+            name,
+            b" from ",
+            from
+        );
+        crate::api::raising::error(self, &message)
     }
 
     /// `zend_verify_property_access`: whether the executed scope may
@@ -1771,13 +1773,14 @@ impl Request {
             return Ok(());
         }
         let class = self.symbols().class_name(typed.declaring);
-        let shown = String::from_utf8_lossy(name);
-        Err(crate::api::raising::error(
-            self,
-            &format!(
-                "Cannot access uninitialized non-nullable property {class}::${shown} by reference"
-            ),
-        ))
+        let message = bytes!(
+            b"Cannot access uninitialized non-nullable property ",
+            class,
+            b"::$",
+            name,
+            b" by reference"
+        );
+        Err(crate::api::raising::error(self, &message))
     }
 
     /// `zend_get_typed_property_info_for_slot`: the typed property whose
@@ -1944,7 +1947,7 @@ impl Request {
             let class = self.symbols().class_name(class);
             let message = [
                 b"Indirect modification of overloaded property ",
-                class.as_bytes(),
+                class,
                 b"::$",
                 c_str(name),
                 b" has no effect",
@@ -2191,13 +2194,19 @@ impl Request {
         let given = crate::ops::type_name(self, held);
         let class = self.symbols().class_name(declaring);
         let ty = php_unit::type_to_string(ty);
-        let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::type_error(
-            self,
-            &format!(
-                "Value of type {given} returned from {class}::__get() must be compatible with unset property {class}::${shown} of type {ty}"
-            ),
-        )
+        let message = bytes!(
+            b"Value of type ",
+            given,
+            b" returned from ",
+            class,
+            b"::__get() must be compatible with unset property ",
+            class,
+            b"::$",
+            name,
+            b" of type ",
+            ty
+        );
+        crate::api::raising::type_error(self, &message)
     }
 
     /// `zend_readonly_property_modification_error` (`Cannot modify
@@ -2239,11 +2248,15 @@ impl Request {
         operation: &str,
     ) -> Thrown {
         let class = self.symbols().class_name(declaring);
-        let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::error(
-            self,
-            &format!("Cannot {operation} readonly property {class}::${shown}"),
-        )
+        let message = bytes!(
+            b"Cannot ",
+            operation,
+            b" readonly property ",
+            class,
+            b"::$",
+            name
+        );
+        crate::api::raising::error(self, &message)
     }
 
     /// php's `Error` for a typed property read before anything wrote it
@@ -2251,11 +2264,14 @@ impl Request {
     /// declared it, `prop_info->ce`.
     pub(crate) fn uninitialized_property(&mut self, declaring: ClassId, name: &[u8]) -> Thrown {
         let class = self.symbols().class_name(declaring);
-        let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::error(
-            self,
-            &format!("Typed property {class}::${shown} must not be accessed before initialization"),
-        )
+        let message = bytes!(
+            b"Typed property ",
+            class,
+            b"::$",
+            name,
+            b" must not be accessed before initialization"
+        );
+        crate::api::raising::error(self, &message)
     }
 
     /// `zend_get_property_offset`'s other wrong offset: a name no class
@@ -2332,11 +2348,8 @@ impl Request {
     ) -> Thrown {
         let word = super::methods::visibility_string(visibility);
         let class = self.symbols().class_name(class);
-        let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::error(
-            self,
-            &format!("Cannot access {word} property {class}::${shown}"),
-        )
+        let message = bytes!(b"Cannot access ", word, b" property ", class, b"::$", name);
+        crate::api::raising::error(self, &message)
     }
 
     /// `zobj->ce->__get` and its three neighbours: the magic accessor
@@ -3247,11 +3260,13 @@ impl Request {
             return Ok(landing);
         }
         let class = self.symbols().class_name(typed.declaring);
-        let shown = String::from_utf8_lossy(name).into_owned();
-        let error = crate::api::raising::error(
-            self,
-            &format!("Object was released while assigning to property {class}::${shown}"),
+        let message = bytes!(
+            b"Object was released while assigning to property ",
+            class,
+            b"::$",
+            name
         );
+        let error = crate::api::raising::error(self, &message);
         held.let_go(self);
         self.release(landing);
         Err(error)
@@ -3341,7 +3356,7 @@ impl Request {
     ) -> Result<(), Thrown> {
         if i >= o.slots() {
             self.release(value);
-            let class = self.symbols().class_name(ClassId(o.class()));
+            let class = String::from_utf8_lossy(self.symbols().class_name(ClassId(o.class())));
             let slots = o.slots();
             return self.fatal_of(Err(Fatal::error(format!(
                 "InternalError: slot {i} written on an object of class {class}, which declares {slots}"
@@ -3820,14 +3835,13 @@ impl Request {
             && hooked.is_virtual
         {
             let declaring = self.symbols().class_name(hooked.declaring);
-            crate::api::raising::docref(
-                self,
-                Level::Warning,
-                &format!(
-                    "Cannot unserialize value for virtual property {declaring}::${}",
-                    String::from_utf8_lossy(&name)
-                ),
+            let message = bytes!(
+                b"Cannot unserialize value for virtual property ",
+                declaring,
+                b"::$",
+                &name[..]
             );
+            crate::api::raising::docref(self, Level::Warning, &message);
             self.release(value);
             self.release(Value::string(key));
             return Ok(false);
@@ -4057,16 +4071,15 @@ impl Request {
         if carries == DynamicProperties::Allowed {
             return Ok(());
         }
-        let shown = String::from_utf8_lossy(name).into_owned();
-        let class_name = self.symbols().class_name(class);
-        let cannot = format!("Cannot create dynamic property {class_name}::${shown}");
+        let class_name = self.symbols().class_name(class).to_vec();
+        let cannot = bytes!(b"Cannot create dynamic property ", class_name, b"::$", name);
         if carries == DynamicProperties::Forbidden {
             return Err(crate::api::raising::error(self, &cannot));
         }
         let held = Owner::take(self, object.as_value());
         let message = [
             b"Creation of dynamic property ",
-            class_name.as_bytes(),
+            &class_name[..],
             b"::$",
             c_str(name),
             b" is deprecated",

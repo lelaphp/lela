@@ -14,6 +14,7 @@ use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpString, Resource, Value,
 use php_ext_uri::{Parser, ReadAs, UriStruct};
 
 use crate::streamsfuncs::{NullContext, context_of};
+use crate::throwables::Throwables;
 
 pub(super) use constants::PHP_QUERY_RFC3986;
 use constants::{
@@ -806,9 +807,10 @@ impl UriParser {
             if silent {
                 return Ok(None);
             }
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "Uri\\InvalidUriException",
+                ce.invalid_uri_exception,
                 "The specified URI is malformed",
             ));
         };
