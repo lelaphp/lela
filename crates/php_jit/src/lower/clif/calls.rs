@@ -18,19 +18,23 @@
 //! or a caller's slot that holds a counted value. None takes an exit of
 //! its own: php's code takes none there.
 
+use std::num::NonZeroU32;
+
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
 use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, Value};
 use cranelift_frontend::Variable;
 use php_engine::tier::{FRAME, FrameLayout, PlainCall};
-use php_heap::{Zval, ZvalType};
+use php_heap::{Ref, Zval, ZvalType};
 
 use super::{
     COUNTED, Dtor, Emit, Kernel, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE, STOOD_ROOM,
     Scalar, imm, leave_of, mismatch, trusted,
 };
 use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT, RETURNED, THREW};
-use crate::types::{Abort, End, ExitId, Frame, Imm, Line, OpId, Operand, Owners, Returned, Vars};
+use crate::types::{
+    Abort, ArgChecks, End, ExitId, Frame, Imm, Line, OpId, Operand, Owners, Returned, Vars,
+};
 
 /// What a leave in place writes into the caller's slot: a scalar, or a
 /// zval's two words, copied from a constant or moved from a temporary.
@@ -259,7 +263,7 @@ impl Emit<'_> {
         &mut self,
         id: OpId,
         line: &Line,
-        returns: Option<u32>,
+        (returns, checks): (Option<u32>, ArgChecks),
     ) -> Result<(), Abort> {
         let (call, plain) = *self
             .calls
@@ -281,10 +285,15 @@ impl Emit<'_> {
         let raised = self.b.ins().load(I8, trusted(), interrupt, 0);
         let raised = self.b.ins().icmp_imm_s(IntCC::NotEqual, raised, 0);
         let unready = self.unready()?;
-        let refused = self.b.ins().bor(raised, unready);
+        let mut refused = self.b.ins().bor(raised, unready);
+        let room = self.b.use_var(var);
+        for (arg, mask) in checks.each() {
+            let taken = self.takes(room, arg, mask)?;
+            let other = self.b.ins().icmp_imm_s(IntCC::Equal, taken, 0);
+            refused = self.b.ins().bor(refused, other);
+        }
         let (slow, join) = self.split();
         self.divert_if(refused, slow);
-        let room = self.b.use_var(var);
         let flags = self.b.ins().load(I32, trusted(), room, at(L.info()));
         let kept = self.b.ins().band_imm_u(flags, i64::from(activation.keep()));
         let set = i64::from(activation.info(returns.is_some()));
@@ -324,6 +333,31 @@ impl Emit<'_> {
         self.b.switch_to_block(join);
         self.b.seal_block(join);
         self.after_step(id, line)
+    }
+
+    /// Whether argument `arg` of the call whose room is `room`, from zero,
+    /// is of a type `mask` takes, `mask >> Z_TYPE_P(arg) & 1`, read
+    /// through the reference it is where it is one, as php's `RECV`
+    /// reads it (`ZVAL_DEREF`) and its trace's `zend_jit_recv` checks it
+    /// inline (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10873`): one where
+    /// the `RECV` would take it untouched, zero where it would coerce or
+    /// refuse it.
+    fn takes(&mut self, room: Value, arg: u32, mask: NonZeroU32) -> Result<Value, Abort> {
+        let at = var_at(arg)?;
+        let byte = self.b.ins().load(I8, trusted(), room, at + super::TYPE_AT);
+        let reference =
+            self.b
+                .ins()
+                .icmp_imm_u(IntCC::Equal, byte, i64::from(ZvalType::Reference as u8));
+        let word = self.b.ins().load(I64, trusted(), room, at);
+        let inner = self.b.ins().iadd_imm_s(word, i64::from(imm(Ref::VALUE_AT)));
+        let outer = self.b.ins().iadd_imm_s(room, i64::from(at));
+        let zval = self.b.ins().select(reference, inner, outer);
+        let byte = self.b.ins().load(I8, trusted(), zval, super::TYPE_AT);
+        let byte = self.b.ins().uextend(I32, byte);
+        let mask = self.b.ins().iconst(I32, i64::from(mask.get()));
+        let shifted = self.b.ins().ushr(mask, byte);
+        Ok(self.b.ins().band_imm_u(shifted, 1))
     }
 
     /// Whether a variable of `frame`, whose room is `room`, owns

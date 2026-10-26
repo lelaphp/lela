@@ -29,8 +29,8 @@ use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
     DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FANNKUCH, FIB, Fixture, HASH_FETCH_W, HASH_IS,
     HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, NATIVE_CALL, NBODY,
-    NESTED_READ, NESTED_WRITE, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_WRITE,
-    SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held, traced as built,
+    NESTED_READ, NESTED_WRITE, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_CALL,
+    REF_WRITE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -2630,5 +2630,31 @@ fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_is_inline() -> Re
             );
         }
     }
+    Ok(())
+}
+
+/// A call that sends arrays by reference to typed parameters is made in
+/// place, the two references' `RECV` checks inline, the array and the
+/// float sent by value known to pass theirs, and its `SEND_REF`s inline,
+/// as php's trace compiles `zend_jit_send_ref` and `zend_jit_recv` (#3340).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_by_reference_is_made_in_place_with_its_checks() -> Result<(), String> {
+    let ir = golden(REF_CALL)?;
+    let rendered = dump::render(&ir);
+    let line = |opcode| {
+        (ir.ops.iter()).find_map(|op| match op {
+            Op::Line(line) if line.opcode == opcode => Some(line),
+            _ => None,
+        })
+    };
+    let made = line(Opcode::DoUcall).ok_or_else(|| format!("no DO_UCALL in\n{rendered}"))?;
+    let checked: Vec<u32> = match made.imm {
+        super::Imm::Make { checks, .. } => checks.each().map(|(at, _)| at).collect(),
+        _ => return Err(format!("the call is not made in place\n{rendered}")),
+    };
+    assert_eq!(checked, [0, 1], "{rendered}");
+    let sent = line(Opcode::SendRef).ok_or_else(|| format!("no SEND_REF in\n{rendered}"))?;
+    assert_eq!(sent.form, Form::Inline, "{rendered}");
     Ok(())
 }

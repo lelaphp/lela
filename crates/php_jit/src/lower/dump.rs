@@ -405,7 +405,13 @@ fn check(check: Check) -> String {
 /// the variables it frees.
 fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
     let (value, owners) = match imm {
-        Imm::Make { .. } => return write!(text, " in-place"),
+        Imm::Make { checks, .. } => {
+            write!(text, " in-place")?;
+            for (at, mask) in checks.each() {
+                write!(text, " checks arg {} {mask:#x}", at + 1)?;
+            }
+            return Ok(());
+        }
         Imm::Property {
             slot: Slotted::Declared(slot),
             ..

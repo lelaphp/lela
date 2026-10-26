@@ -2035,7 +2035,7 @@ impl<'a> Emit<'a> {
             // A send to a callee that takes the argument by value.
             Opcode::SendValEx if matches!(line.imm, Imm::Arg(_)) => self.send(at, line),
             Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName => match line.imm {
-                Imm::Make { returns } => self.make_in_place(at, line, returns),
+                Imm::Make { returns, checks } => self.make_in_place(at, line, (returns, checks)),
                 _ => self.stepped(at, line),
             },
             Opcode::Return if matches!(line.imm, Imm::Leave { .. }) => {
@@ -3078,6 +3078,29 @@ impl<'a> Emit<'a> {
     /// ```
     /// ```expect regime=jit-exit-fuzz process
     /// [9,9,9]
+    /// ```
+    ///
+    /// An object sent by reference whose callee writes over it, its
+    /// destructor served there, through the reference the send made:
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo $this->n; } }
+    /// function drop(&$o) { $o = null; }
+    /// function f($k) { $t = 0; for ($i = 0; $i < $k; $i++) { $o = new D($i); drop($o); $t += $o === null ? 1 : 0; } return $t; }
+    /// $t = f(7); echo " $t\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 0123456 7
+    /// ```
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo $this->n; } }
+    /// function drop(&$o) { $o = null; }
+    /// function f($k) { $t = 0; for ($i = 0; $i < $k; $i++) { $o = new D($i); drop($o); $t += $o === null ? 1 : 0; } return $t; }
+    /// $t = f(7); echo " $t\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 0123456 7
     /// ```
     fn send_ref(&mut self, line: &Line) -> Result<(), Abort> {
         let Imm::Arg(number) = line.imm else {

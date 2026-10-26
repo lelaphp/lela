@@ -19,8 +19,8 @@ use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
     DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FIB, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET,
     HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, NATIVE_CALL, NBODY, NESTED_READ,
-    NESTED_WRITE, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_WRITE, SIEVE,
-    SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
+    NESTED_WRITE, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_CALL, REF_WRITE,
+    SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -1149,5 +1149,33 @@ fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_lowers_in_place()
             );
         }
     }
+    Ok(())
+}
+
+/// A call that sends arrays by reference is made in place: its
+/// `SEND_REF`s copy the references with an owner more, the reference's
+/// handler cold where the variable holds none, and the call's two checks
+/// read each reference's value before the activation, the call kernel
+/// cold where one fails (#3340).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_by_reference_lowers_its_sends_and_checks() -> Result<(), String> {
+    lowered(REF_CALL)?;
+    let clif =
+        std::fs::read_to_string(goldens_dir().join("ref_call.clif")).map_err(|e| e.to_string())?;
+    let calls = |kernel: Kernel| {
+        let address = format!("{:#x}", symbols().address(kernel)).replace("0x7000", "0x7000_");
+        (clif.lines())
+            .filter(|line| line.contains("call_indirect") && line.contains(&address))
+            .count()
+    };
+    // Each `SEND_REF`'s cold arm, and each `ASSIGN_DIM_OP`'s of the
+    // callee.
+    assert_eq!(calls(Kernel::Handle), 4, "{clif}");
+    // The made call's cold arm, where the interrupt is raised, the cache
+    // not laid down or a check fails.
+    assert_eq!(calls(Kernel::Call), 1, "{clif}");
+    // The push's and the leave's cold arms, and no send stepped.
+    assert_eq!(calls(Kernel::Step), 2, "{clif}");
     Ok(())
 }

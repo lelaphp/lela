@@ -77,6 +77,8 @@ mod opcodes;
 #[cfg(test)]
 mod tests;
 
+use std::num::NonZeroU32;
+
 use php_engine::tier::{ClassId, FuncRef, MapPtrRaw, PlainCall, UnitView};
 use php_heap::ZvalType;
 use php_unit::{ConstIdx, Opcode, OplineIdx};
@@ -325,6 +327,38 @@ pub(crate) enum Fused {
     Jmpnz,
 }
 
+/// What a call made in place checks of its arguments before its
+/// activation passes over the `RECV`s that would check them, as php's
+/// trace compiles `zend_jit_recv` with the check inline where its stack
+/// map does not know the argument of a type the parameter takes
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10873`): per argument, from
+/// the first, the types its `RECV` takes untouched, php's `op2.num`, one
+/// bit per `IS_*` type, held to what the argument holds, through a
+/// reference where it is one; `None` where the trace knows the argument
+/// of such a type or the parameter checks none. A call with a check past
+/// [`ArgChecks::ARGS`] is the call kernel's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ArgChecks([Option<NonZeroU32>; ArgChecks::ARGS]);
+
+impl ArgChecks {
+    /// The arguments a call checks in place at most.
+    pub(crate) const ARGS: usize = 8;
+
+    /// These checks with argument `at`, from zero, held to `mask`; none
+    /// past [`ArgChecks::ARGS`].
+    pub(crate) fn with(mut self, at: usize, mask: NonZeroU32) -> Option<ArgChecks> {
+        *self.0.get_mut(at)? = Some(mask);
+        Some(self)
+    }
+
+    /// Each argument checked, from zero, and the mask it is held to.
+    pub(crate) fn each(self) -> impl Iterator<Item = (u32, NonZeroU32)> {
+        (0u32..)
+            .zip(self.0)
+            .filter_map(|(at, mask)| Some((at, mask?)))
+    }
+}
+
 /// What an opline names beside its operands, where its inline form reads
 /// it: php's `op2.num` of a send, an `UNUSED` operand that is a number,
 /// and the operator an `ASSIGN_OP`'s `extended_value` names.
@@ -345,6 +379,7 @@ pub(crate) enum Imm {
     /// opline reads it.
     Make {
         returns: Option<u32>,
+        checks: ArgChecks,
     },
     /// A `RETURN` compiled code leaves its frame by in place
     /// (`zend_jit_leave_func`, `Z/ext/opcache/jit/zend_jit_ir.c:11035-11263`):

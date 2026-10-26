@@ -369,7 +369,10 @@ fn make_in_place(req: &mut Request, f: FrameRef) -> Option<Read> {
         call,
         Opcode::DoUcall,
         Operand::Unused,
-        Imm::Make { returns },
+        Imm::Make {
+            returns,
+            checks: crate::types::ArgChecks::default(),
+        },
     );
     made.unwind = Some(crate::types::UnwindId(0));
     let ops = vec![
@@ -431,7 +434,10 @@ fn make_over_handled_push(req: &mut Request, f: FrameRef) -> Option<Read> {
         call,
         Opcode::DoUcall,
         Operand::Unused,
-        Imm::Make { returns },
+        Imm::Make {
+            returns,
+            checks: crate::types::ArgChecks::default(),
+        },
     );
     made.unwind = Some(crate::types::UnwindId(0));
     let ops = vec![

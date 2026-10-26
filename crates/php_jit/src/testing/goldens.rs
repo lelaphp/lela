@@ -101,6 +101,19 @@ pub(crate) const NATIVE_CALL: Fixture = Fixture {
     ],
 };
 
+/// A call as nbody's main loop calls `advance`: two arrays sent by
+/// reference to typed parameters, an array and a float by value, made in
+/// place with each reference's `RECV` check inline (#3340).
+pub(crate) const REF_CALL: Fixture = Fixture {
+    name: "ref_call",
+    program: "ref_call",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
 /// A loop whose callee's variables own an array and a string as it
 /// returns: the `RETURN` left in place, freeing each (#3313).
 pub(crate) const OWNING_LEAVE: Fixture = Fixture {
