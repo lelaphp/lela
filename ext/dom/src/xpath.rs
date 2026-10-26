@@ -679,6 +679,10 @@ fn dispatch(
     };
     let views: Vec<Value> = args.iter().map(|a| **a).collect();
     let answered = call(req, &callable, &views);
+    // `php_dom_xpath_callback_dispatch` keeps a node the function returns
+    // before `php_dom_xpath_callback_cleanup_args` keeps the arguments it
+    // was handed, so `dom_xpath_intern_for_doc` meets the node first.
+    let returned = answered.and_then(|answer| returned(req, at, answer, modern));
     for a in args {
         if a.as_object().is_some() || a.as_array().is_some() {
             at.keep(req, a);
@@ -686,7 +690,18 @@ fn dispatch(
             a.give_up(req);
         }
     }
-    let answer = answered?;
+    returned
+}
+
+/// What the function answered, as `php_dom_xpath_callback_dispatch` turns
+/// it into a value the evaluation reads: a node kept with the callbacks, a boolean, a
+/// string, and an object that is no node php's `TypeError`.
+fn returned(
+    req: &mut Request,
+    at: CallbacksAt,
+    answer: Owner<Value>,
+    modern: bool,
+) -> Result<Returned, Thrown> {
     let node_class = if modern { "Dom\\Node" } else { "DOMNode" };
     let returned = match answer.as_ref() {
         ValueRef::Object(o) if crate::instance_of(req, o, node_class) => {
@@ -861,6 +876,11 @@ fn node_list(
     } else {
         PhpArray::new(req)?
     };
+    // The values the callbacks keep, read once: no PHP code is served
+    // while the node-set's objects are made, so none is added or let go.
+    let kept: Vec<Value> = callbacks(req, this)
+        .map(|callbacks| callbacks.node_list.iter().map(|value| **value).collect())
+        .unwrap_or_default();
     for item in items {
         if modern && matches!(item, Item::Namespace { .. }) {
             array.give_up(req);
@@ -874,7 +894,7 @@ fn node_list(
         // A namespace node's parent is made over the evaluator's own
         // object (`php_dom_create_object(nsparent, .., &intern->dom)`).
         let parent = match &item {
-            Item::Node(node) => intern_for_doc(req, this, node.doc()),
+            Item::Node(node) => intern_for_doc(req, this, &kept, node.doc()),
             Item::Namespace { .. } => this,
         };
         let v = match item_object(
@@ -908,8 +928,8 @@ fn node_list(
 /// `dom_xpath_intern_for_doc` (`Z/ext/dom/xpath.c:57`, GH-22077): the
 /// object a node of `doc` that an evaluation answers is made over, whose
 /// document it counts: the evaluator itself where `doc` is its document,
-/// otherwise the first value a php function was handed or handed back
-/// that counts `doc`, an array searched as `dom_xpath_intern_from_entry`
+/// otherwise the first of `kept`, the values a php function was handed
+/// or handed back, that counts `doc`, an array searched as `dom_xpath_intern_from_entry`
 /// searches it, so a node of a document a function made keeps that
 /// document alive; the evaluator where none does.
 ///
@@ -937,16 +957,13 @@ fn node_list(
 /// <root><uaf/><node/><uaf/></root>
 /// "
 /// ```
-fn intern_for_doc(req: &mut Request, this: PhpObject, doc: Option<Node>) -> PhpObject {
+fn intern_for_doc(req: &Request, this: PhpObject, kept: &[Value], doc: Option<Node>) -> PhpObject {
     let Some(doc) = doc else {
         return this;
     };
-    if counts(req, this, doc) {
+    if counts_doc(req, this, doc) {
         return this;
     }
-    let kept: Vec<Value> = callbacks(req, this)
-        .map(|callbacks| callbacks.node_list.iter().map(|value| **value).collect())
-        .unwrap_or_default();
     kept.iter()
         .find_map(|value| intern_from_entry(req, value, doc))
         .unwrap_or(this)
@@ -956,7 +973,7 @@ fn intern_for_doc(req: &mut Request, this: PhpObject, doc: Option<Node>) -> PhpO
 /// the array it is holds at any depth, that counts `doc`.
 fn intern_from_entry(req: &Request, entry: &Value, doc: Node) -> Option<PhpObject> {
     if let Some(object) = entry.as_object() {
-        return counts(req, object, doc).then_some(object);
+        return counts_doc(req, object, doc).then_some(object);
     }
     let array = entry.as_array()?;
     walk::rows(req, array).find_map(|(_, inner)| intern_from_entry(req, &inner, doc))
@@ -964,7 +981,7 @@ fn intern_from_entry(req: &Request, entry: &Value, doc: Node) -> Option<PhpObjec
 
 /// Whether `object` is a dom object counting `doc`, `obj->document &&
 /// obj->document->ptr == doc`.
-fn counts(req: &Request, object: PhpObject, doc: Node) -> bool {
+fn counts_doc(req: &Request, object: PhpObject, doc: Node) -> bool {
     dom(req, object).and_then(|d| d.obj.document_node()) == Some(doc)
 }
 
