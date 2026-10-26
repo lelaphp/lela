@@ -1609,4 +1609,65 @@ mod tests {
             1
         );
     }
+
+    /// A unit the cache holds for a request is held for it alone where
+    /// the cache built its entry, so that request alone owes the hand-off
+    /// its counting words raise (#3362): where another request held the
+    /// path's copy while this one compiled it, the race this one lost,
+    /// `cache_script_in_shared_memory` answers that copy
+    /// (`Filed::Existing`), and nothing is held for this request.
+    #[test]
+    fn a_copy_another_request_held_meanwhile_is_held_for_it_alone() {
+        use crate::unit_cache::{Asked, Filed, Levels};
+        let scratch = crate::test::Files::new("raced", &[("p.php", "<?php return 1;")]);
+        let file = scratch.path().join("p.php");
+        let resolved = std::fs::canonicalize(&file).unwrap_or_default();
+        let path = resolved.as_os_str().as_encoded_bytes().to_vec();
+        let source = std::fs::read(&file).unwrap_or_default();
+        let engine = Engine::builder().build();
+        let shared = Arc::clone(&engine.shared);
+        let mut first = Request::new(Arc::clone(&shared), RequestDescription::default());
+        let mut second = Request::new(Arc::clone(&shared), RequestDescription::default());
+        let asked = |held| Asked {
+            path: &path,
+            source: Some(&source),
+            written: None,
+            opened: true,
+            validation: crate::api::abi::Validation::Never,
+            protection: 0,
+            now: 0,
+            levels: Levels::Memory,
+            optimizer: shared.optimizer(),
+            laid: crate::tier::Laid::COLD,
+            held,
+        };
+        let (held_first, held_second) = (std::cell::Cell::new(false), std::cell::Cell::new(false));
+        let arena = Arc::clone(&second.arena);
+        let (_, filed, _) = shared.units.file(
+            &mut *second,
+            &arena.files,
+            asked(&held_second),
+            |second, source| {
+                // The first request holds the path while the second
+                // compiles it.
+                let (_, filed, _) = shared.units.file(
+                    &mut *first,
+                    &arena.files,
+                    asked(&held_first),
+                    |first, source| first.compile_for_cache(source, &path),
+                    |body| shared.decode_kept(body),
+                    |unit| shared.publish_compiled(unit),
+                    |first, unit| first.publish_unit(unit),
+                );
+                assert_eq!(filed, Filed::Held, "the first request holds it");
+                second.compile_for_cache(source, &path)
+            },
+            |body| shared.decode_kept(body),
+            |unit| shared.publish_compiled(unit),
+            |second, unit| second.publish_unit(unit),
+        );
+        assert_eq!(filed, Filed::Existing, "the second is answered the copy");
+        assert!(held_first.get(), "held for the first");
+        assert!(!held_second.get(), "and not for the second");
+    }
 }
