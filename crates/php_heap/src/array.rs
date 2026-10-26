@@ -231,8 +231,8 @@ pub(crate) fn persistent_array(entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
     if entries.is_empty() {
         return Ok(Arr::empty());
     }
-    let size =
-        check_size(u32::try_from(entries.len()).unwrap_or(u32::MAX)).map_err(Fatal::panic)?;
+    let size = check_size(u32::try_from(entries.len()).unwrap_or(u32::MAX))
+        .map_err(|said| System.overflow(said))?;
     let at = System.alloc(HEADER)?;
     // SAFETY: the allocation is the header's size and nothing else
     // holds it.
@@ -255,7 +255,7 @@ pub(crate) fn persistent_array(entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
 /// own. [`free_table_header`] gives the header back; the data goes with
 /// the heap whose allocator handed it out.
 pub(crate) fn table_header(size: u32) -> Result<Arr, Fatal> {
-    let size = check_size(size).map_err(Fatal::panic)?;
+    let size = check_size(size).map_err(|said| System.overflow(said))?;
     let at = System.alloc(HEADER)?;
     // SAFETY: the allocation is the header's size and nothing else
     // holds it.
@@ -1876,11 +1876,18 @@ impl crate::Heap {
         Ok(unsafe { Arr::init(at, 1) })
     }
 
+    /// `zend_hash_check_size(size, heap->fallible)` over this heap: the
+    /// table's size, and its overflow the heap's refusal or its end
+    /// ([`Mm::overflow_refusal`]).
+    fn table_size(&mut self, size: u32) -> Result<u32, Fatal> {
+        check_size(size).map_err(|said| self.mm.overflow_refusal(said))
+    }
+
     /// `zend_new_array(size)`, `array_init_size`: the header, with the
     /// first data allocation sized for `size` elements through
     /// `zend_hash_check_size`.
     pub fn array_sized(&mut self, size: u32) -> Result<Arr, Fatal> {
-        let size = check_size(size).map_err(|said| self.mm.overflow_refusal(said))?;
+        let size = self.table_size(size)?;
         let at = self.mm.alloc(HEADER)?;
         // SAFETY: the allocation is the header's size and nothing else
         // holds it.
@@ -1911,15 +1918,15 @@ impl crate::Heap {
         }
         if a.is_uninitialized() {
             if size > a.table_size() {
-                let checked = check_size(size).map_err(|said| self.mm.overflow_refusal(said));
-                a.header().table_size.set(checked?);
+                let checked = self.table_size(size)?;
+                a.header().table_size.set(checked);
             }
             return a.real_init_mixed(&mut self.tables());
         }
         if size <= a.table_size() {
             return Ok(());
         }
-        let grown = check_size(size).map_err(|said| self.mm.overflow_refusal(said))?;
+        let grown = self.table_size(size)?;
         let mut tables = self.tables();
         let old = a.data_addr();
         if a.is_packed() {
