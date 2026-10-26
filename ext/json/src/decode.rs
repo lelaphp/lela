@@ -285,47 +285,63 @@ impl Scanner<'_> {
         Ok(Token::Double(strtod(text)))
     }
 
-    /// Conditions `STR_P1` and `STR_P2` as one walk: php sizes the
-    /// string in the first and writes it in the second, over the same
-    /// bytes in the same order, so the first refusal is the same one.
-    /// The cursor stands past the opening quote.
+    /// Conditions `STR_P1` and `STR_P2`: php sizes the string in the
+    /// first and writes it in the second, over the same bytes in the same
+    /// order, so the first walk meets every refusal and the second, into
+    /// the string itself, meets none. The cursor stands past the opening
+    /// quote.
     fn scan_string(&mut self, req: &mut Request) -> Result<Token, Thrown> {
-        let mut out: Vec<u8> = Vec::new();
+        let start = self.cursor;
+        let mut sized = Written { to: &mut [], at: 0 };
+        if let Some(code) = self.walk_string(&mut sized) {
+            return Ok(self.refuse(code));
+        }
+        let end = self.cursor;
+        let made = Scanner::string(req, sized.at, |to| {
+            self.cursor = start;
+            self.walk_string(&mut Written { to, at: 0 });
+        });
+        self.cursor = end;
+        made
+    }
+
+    /// One walk of a string's bytes to its closing quote, past which it
+    /// leaves the cursor, each byte it makes put to `out`; the code of
+    /// the refusal it met, if any.
+    fn walk_string(&mut self, out: &mut Written<'_>) -> Option<i64> {
         loop {
             let c = self.byte(self.cursor);
             if c == b'"' {
                 self.cursor += 1;
-                return Scanner::string(req, &out);
+                return None;
             }
             if c <= 0x1f {
                 // `<STR_P1>CTRL`, the NUL terminator of an unterminated
                 // string among them.
-                return Ok(self.refuse(JSON_ERROR_CTRL_CHAR));
+                return Some(JSON_ERROR_CTRL_CHAR);
             }
             if c == b'\\' {
-                if let Some(code) = self.scan_escape(&mut out) {
-                    return Ok(self.refuse(code));
+                if let Some(code) = self.scan_escape(out) {
+                    return Some(code);
                 }
-                continue;
-            }
-            if c < 0x80 {
-                out.push(c);
-                self.cursor += 1;
                 continue;
             }
             let Some(len) = utf8_length(self.input, self.cursor) else {
                 // `<STR_P1>ANY`: one byte, ignored or replaced by U+FFFD
                 // where the options say so.
                 if self.options & JSON_INVALID_UTF8_SUBSTITUTE != 0 {
-                    out.extend_from_slice("\u{fffd}".as_bytes());
+                    out.put("\u{fffd}".as_bytes());
                 } else if self.options & JSON_INVALID_UTF8_IGNORE == 0 {
-                    return Ok(self.refuse(JSON_ERROR_UTF8));
+                    return Some(JSON_ERROR_UTF8);
                 }
                 self.cursor += 1;
                 continue;
             };
-            let taken = self.input.get(self.cursor..self.cursor + len);
-            out.extend_from_slice(taken.unwrap_or_default());
+            out.put(
+                self.input
+                    .get(self.cursor..self.cursor + len)
+                    .unwrap_or_default(),
+            );
             self.cursor += len;
         }
     }
@@ -367,13 +383,17 @@ impl Scanner<'_> {
     /// {"a":1} 408
     /// {"ab":1} 408
     /// ```
-    fn string(req: &mut Request, bytes: &[u8]) -> Result<Token, Thrown> {
-        if bytes.is_empty() {
-            return Ok(Token::Str(Some(PhpString::new(req, bytes)?)));
+    fn string(
+        req: &mut Request,
+        len: usize,
+        fill: impl FnOnce(&mut [u8]),
+    ) -> Result<Token, Thrown> {
+        if len == 0 {
+            return Ok(Token::Str(Some(PhpString::new(req, b"")?)));
         }
         let made = req
             .memory_mut()
-            .fallible(|req| PhpString::filled(req, bytes.len(), |to| to.copy_from_slice(bytes)))?;
+            .fallible(|req| PhpString::filled(req, len, fill))?;
         Ok(made.map_or(Token::Error, |string| Token::Str(Some(string))))
     }
 
@@ -382,7 +402,7 @@ impl Scanner<'_> {
     /// the four hex digits of `UTF16_1` through `UCS2`, then the
     /// one-character escapes of `ESC`. The code of the refusal, or
     /// `None` where the escape was written.
-    fn scan_escape(&mut self, out: &mut Vec<u8>) -> Option<i64> {
+    fn scan_escape(&mut self, out: &mut Written<'_>) -> Option<i64> {
         if let Some(code) = self.surrogate_pair() {
             push_utf8(out, code);
             self.cursor += 12;
@@ -408,7 +428,7 @@ impl Scanner<'_> {
             // `<STR_P1>ESCPREF`: a backslash before anything else.
             _ => return Some(JSON_ERROR_SYNTAX),
         };
-        out.push(escaped);
+        out.put(&[escaped]);
         self.cursor += 2;
         None
     }
@@ -450,10 +470,26 @@ fn strtod(text: &[u8]) -> f64 {
 }
 
 /// `php_utf32_utf8`: the code point as the bytes php writes for it.
-fn push_utf8(out: &mut Vec<u8>, code: u32) {
+fn push_utf8(out: &mut Written<'_>, code: u32) {
     let mut buffer = [0_u8; 4];
     if let Some(c) = char::from_u32(code) {
-        out.extend_from_slice(c.encode_utf8(&mut buffer).as_bytes());
+        out.put(c.encode_utf8(&mut buffer).as_bytes());
+    }
+}
+
+/// Where a string's walk puts its bytes: `STR_P2`'s write into the
+/// string, or, over no room, `STR_P1`'s count of what it would write.
+struct Written<'b> {
+    to: &'b mut [u8],
+    at: usize,
+}
+
+impl Written<'_> {
+    fn put(&mut self, bytes: &[u8]) {
+        if let Some(room) = self.to.get_mut(self.at..self.at + bytes.len()) {
+            room.copy_from_slice(bytes);
+        }
+        self.at += bytes.len();
     }
 }
 
