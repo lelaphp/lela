@@ -435,6 +435,37 @@ pub(crate) enum Imm {
         slot: Slotted,
         binary: Option<Opcode>,
     },
+    /// A method's call pushed in place under the guard on the pair its
+    /// own runtime-cache slot holds ([`Line::map_ptr`]), as php's code
+    /// reads `CACHED_PTR(opline->result.num)` and the callee past it
+    /// before it pushes (`zend_jit_init_method_call`,
+    /// `zend_jit_init_static_method_call`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:9025-9056`, `:9255-9265`): the
+    /// callee's number the pair is held to, a published method's
+    /// ([`php_engine::tier::CalleeSlot::function`]), and the class.
+    Pair {
+        function: u32,
+        class: PairClass,
+    },
+}
+
+/// The class the pair in a call's runtime-cache slot is held to, and so
+/// where the called scope of the call pushed in place comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PairClass {
+    /// The receiver's, of a request-scoped class an `INIT_METHOD_CALL`
+    /// calls a method on: the pair's class compared with `obj->ce`, as
+    /// php compares `CACHED_PTR(opline->result.num)` with it, and the
+    /// called scope written from it.
+    Receiver,
+    /// This published class, the one an `INIT_STATIC_METHOD_CALL` names,
+    /// which the call's header names as its called scope in every
+    /// request, as php takes an immutable linked class as a constant.
+    Published(ClassId),
+    /// The request-scoped class an `INIT_STATIC_METHOD_CALL` names,
+    /// whatever its request resolved the name to: the called scope
+    /// written from the pair, as php reads it from the slot.
+    Named,
 }
 
 /// Where a property opline compiled in place finds its declared slot.

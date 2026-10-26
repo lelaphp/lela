@@ -94,6 +94,15 @@ pub fn class_number(class: ClassId) -> u32 {
     class.0
 }
 
+/// Whether `class` is one every request of an epoch shares under its
+/// number, the engine's own or one the epoch published
+/// (`ClassId::is_published`); a request-scoped class's number is its
+/// request's alone, so compiled code reads it where it runs.
+#[must_use]
+pub fn class_published(class: ClassId) -> bool {
+    class.is_published()
+}
+
 /// The class [`class_number`] gave `number`, read back, as a recorded
 /// trace's text form names it; whether any request has such a class is
 /// the reader's to ask.

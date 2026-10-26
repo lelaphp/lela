@@ -7,9 +7,7 @@
 // and zend_jit_leave_func compile them. `s` calls a static method and `n`
 // constructs an object: each pushed through its handler, the callee held
 // by a guard after it, as php's zend_jit_func_guard holds it, so the sends,
-// the activation and the leave are in place. `scoped` calls a method of a
-// request-scoped class, `zend_lazy_class_load`'s copy of one linked over
-// an evaluated class, which its handler pushes.
+// the activation and the leave are in place.
 class Adder {
     public $base = 7;
     public function add($v) { return $this->base + $v; }
@@ -20,8 +18,6 @@ class Point {
     public $y;
     public function __construct($x, $y) { $this->x = $x; $this->y = $y; }
 }
-eval('class Base { public $b = 1; }');
-class Child extends Base { public function get($v) { return $this->b + $v; } }
 function k($n) {
     $o = new Adder();
     $s = 0;
@@ -45,11 +41,4 @@ function n($n) {
     }
     return $t;
 }
-function scoped($o, $n) {
-    $s = 0;
-    for ($i = 1; $i < $n; $i++) {
-        $s = $o->get($i);
-    }
-    return $s;
-}
-echo k(100), " ", s(100), " ", n(100), " ", scoped(new Child, 100), "\n";
+echo k(100), " ", s(100), " ", n(100), "\n";

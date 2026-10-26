@@ -1424,8 +1424,10 @@ pub(crate) struct Headers {
 }
 
 /// A call's header by the op array a user function's call serves, or
-/// the name a native's has, and the argument count.
-type CallKey = (Option<FuncRef>, Box<[u8]>, u32);
+/// the name a native's has, the argument count, and a method's called
+/// scope, which its header names: one image per call
+/// [`tier::PlainCall`]'s equality tells apart.
+type CallKey = (Option<FuncRef>, Box<[u8]>, u32, Option<tier::ClassId>);
 
 #[derive(Debug, Default)]
 struct HeadersKept {
@@ -1565,7 +1567,12 @@ fn header_of(
     } else {
         &[]
     };
-    let key = (call.callee(), Box::<[u8]>::from(named), call.count());
+    let key = (
+        call.callee(),
+        Box::<[u8]>::from(named),
+        call.count(),
+        call.scope(),
+    );
     if let Some(image) = calls.get(&key) {
         return Some(image.address());
     }

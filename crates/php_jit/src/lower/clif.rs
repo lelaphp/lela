@@ -2086,16 +2086,18 @@ impl<'a> Emit<'a> {
                 match self.ir.ops.get(at.index() + 1) {
                     Some(Op::InitCall {
                         plain: Some(plain), ..
-                    }) => self.push_in_place(line, plain),
+                    }) => self.push_in_place(at, line, plain),
                     _ => self.push_call(at, line),
                 }
             }
-            Opcode::InitMethodCall => match self.ir.ops.get(at.index() + 1) {
-                Some(Op::InitCall {
-                    plain: Some(plain), ..
-                }) => self.push_in_place(line, plain),
-                _ => Err(mismatch("a method's call in place with no call held")),
-            },
+            Opcode::InitMethodCall | Opcode::InitStaticMethodCall => {
+                match self.ir.ops.get(at.index() + 1) {
+                    Some(Op::InitCall {
+                        plain: Some(plain), ..
+                    }) => self.push_in_place(at, line, plain),
+                    _ => Err(mismatch("a method's call in place with no call held")),
+                }
+            }
             _ => Err(mismatch("an inline opline the lowering does not serve")),
         }
     }

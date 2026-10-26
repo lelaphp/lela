@@ -58,6 +58,7 @@ pub struct FrameLayout {
     annex: u32,
     this: u32,
     closure: u32,
+    called_scope: u32,
     leaves_by_kernel: u32,
     release_this: u32,
     send_by_ref: u32,
@@ -93,6 +94,7 @@ pub const FRAME: FrameLayout = FrameLayout {
     annex: word(HEADER_AT + Header::ANNEX_AT),
     this: word(HEADER_AT + Header::THIS_AT),
     closure: word(HEADER_AT + Header::CLOSURE_AT),
+    called_scope: word(HEADER_AT + Header::SCOPE_AT),
     leaves_by_kernel: CallInfo::LEAVES_BY_KERNEL,
     release_this: CallInfo::RELEASE_THIS,
     send_by_ref: CallInfo::SEND_BY_REF,
@@ -127,6 +129,7 @@ const _: () = {
     );
     assert!(FRAME.caller.is_multiple_of(4) && FRAME.returns_to.is_multiple_of(4));
     assert!(FRAME.cache.is_multiple_of(4) && FRAME.annex.is_multiple_of(4));
+    assert!(FRAME.called_scope.is_multiple_of(4));
     assert!(FRAME.this.is_multiple_of(8) && FRAME.closure.is_multiple_of(8));
 };
 
@@ -234,6 +237,14 @@ impl FrameLayout {
     #[must_use]
     pub const fn closure(&self) -> u32 {
         self.closure
+    }
+
+    /// The called scope, `static`, a half-word: the number of its class,
+    /// as `php_heap::Obj::CLASS_AT` and a runtime-cache slot hold it, with
+    /// every bit inverted; zero for none.
+    #[must_use]
+    pub const fn called_scope(&self) -> u32 {
+        self.called_scope
     }
 
     /// The flags of a frame whose leave the leave kernel serves: a call
@@ -352,7 +363,10 @@ impl FrameLayout {
 /// reads it in the request's own slot (`jit-design.md` §4.3, #3346), as
 /// php's code reads `CACHED_PTR(cache_slot)` and the offset past it for a
 /// class that is not immutable (`zend_jit_fetch_obj`,
-/// `Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`): offsets in bytes into
+/// `Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`), and a method's call
+/// its class and callee, as php's code reads `CACHED_PTR(result.num)`
+/// and the callee past it (`zend_jit_init_method_call`,
+/// `zend_jit_init_static_method_call`, `:9025-9056`, `:9255-9265`): offsets in bytes into
 /// one slot ([`touch`](super::touch)), the tags compiled code tests before
 /// it reads past them, and the bit of a slot's type that says it has
 /// none. One value, [`PLACE`], every offset `offset_of!` over the
@@ -362,6 +376,9 @@ pub struct PlaceLayout {
     tag: u32,
     unprimed: u32,
     property: u32,
+    pair: u32,
+    pair_class: u32,
+    pair_function: u32,
     class: u32,
     offset_tag: u32,
     declared: u8,
@@ -378,6 +395,9 @@ pub const PLACE: PlaceLayout = {
         tag: word(Cached::TAG_AT),
         unprimed: crate::exec::UNPRIMED,
         property: crate::exec::PROPERTY,
+        pair: crate::exec::CLASS_AND_CALLEE,
+        pair_class: word(Cached::PAIR_CLASS_AT),
+        pair_function: word(Cached::PAIR_FUNCTION_AT),
         class: word(Cached::PLACE_AT + PropertyPlace::CLASS_AT),
         offset_tag: word(offset + PropertyOffset::TAG_AT),
         declared: PropertyOffset::DECLARED,
@@ -404,6 +424,27 @@ impl PlaceLayout {
     #[must_use]
     pub const fn property(&self) -> u32 {
         self.property
+    }
+
+    /// The tag of a slot that holds the class and the callee a method's
+    /// call resolved together, php's `CACHE_POLYMORPHIC_PTR(num, ce, fbc)`.
+    #[must_use]
+    pub const fn pair(&self) -> u32 {
+        self.pair
+    }
+
+    /// Where the pair keeps its class, a half-word, the number
+    /// `php_heap::Obj::CLASS_AT` holds.
+    #[must_use]
+    pub const fn pair_class(&self) -> u32 {
+        self.pair_class
+    }
+
+    /// Where the pair keeps its callee, a half-word, its number
+    /// ([`CalleeSlot::function`](super::CalleeSlot::function)).
+    #[must_use]
+    pub const fn pair_function(&self) -> u32 {
+        self.pair_function
     }
 
     /// Where a property's place keeps the class it was found on, a
@@ -460,6 +501,8 @@ impl PlaceLayout {
 const _: () = {
     assert!(PLACE.class.is_multiple_of(4) && PLACE.slot.is_multiple_of(4));
     assert!(PLACE.ty.is_multiple_of(2) && PLACE.unprimed != PLACE.property);
+    assert!(PLACE.pair_class.is_multiple_of(4) && PLACE.pair_function.is_multiple_of(4));
+    assert!(PLACE.pair != PLACE.unprimed && PLACE.pair != PLACE.property);
 };
 
 /// A call to a user function as `push_call` laid it down and as a
@@ -483,7 +526,9 @@ pub struct PlainCall {
     activation: Option<Activation>,
     checks: bool,
     /// A method's call: the class of its receiver, its called scope, and
-    /// the method its methods answered, both published.
+    /// the method its methods answered, a published one. The class is
+    /// published, or the request's own, whose number the recording's
+    /// request gave it and compiled code reads where it runs.
     method: Option<(ClassId, Function)>,
 }
 
@@ -587,7 +632,12 @@ impl PlainCall {
 
     /// A method's call: the class of the receiver it was pushed over,
     /// which its called scope is and whose table answered the method;
-    /// none for a function's.
+    /// none for a function's. A class that is not
+    /// [`ClassId::is_published`] is the recording's request's own, the
+    /// one its number names there alone: compiled code that pushes the
+    /// call writes the called scope it reads in the request it runs in
+    /// ([`FrameLayout::called_scope`]), and the header [`call_image`]
+    /// lays out names none.
     #[must_use]
     pub fn scope(&self) -> Option<ClassId> {
         self.method.map(|(class, _)| class)
@@ -597,10 +647,14 @@ impl PlainCall {
 /// The plain call `call` is, the record on top of the stack being built:
 /// a call to a user function whose `INIT_*` found its entry plain, or to a
 /// native of the engine's table, given no receiver, closure, scope or
-/// annex, with no observer declared; or to a method of a published class
-/// a published method answered, over a receiver of that class or none,
+/// annex, with no observer declared; or to a method of a class a
+/// published method answered, over a receiver of that class or none,
 /// the class its called scope, as `INIT_METHOD_CALL`,
-/// `INIT_STATIC_METHOD_CALL` and `NEW` push it; none for any other.
+/// `INIT_STATIC_METHOD_CALL` and `NEW` push it: a published class, or a
+/// request-scoped one whose method is published (#3558), one it inherits
+/// from a published class; none for any other. A request-scoped class's
+/// own methods are the request's, numbered for it alone, as php's
+/// `zend_lazy_class_load` copies each into the request.
 #[must_use]
 pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let (top, laid) = req.vm().stack.top()?;
@@ -617,8 +671,7 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let method = match (header.called_scope(), header.this()) {
         (None, None) => None,
         (Some(class), this)
-            if class.is_published()
-                && function.published_number().is_some()
+            if function.published_number().is_some()
                 && this.is_none_or(|this| this.class() == class) =>
         {
             Some((class, function))
@@ -713,7 +766,8 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
 /// The header `push_call` lays down for `call` in `req`, as compiled code
 /// that pushes it in place copies it: the function the request's table
 /// holds under the call's name, where it serves the call's op array, its
-/// record, and the flags its `INIT_*` writes. None where the request has
+/// record, the flags its `INIT_*` writes, and a published class as its
+/// called scope, where compiled code writes a request-scoped one. None where the request has
 /// declared no such function yet, or its entry is no longer plain.
 #[must_use]
 pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
@@ -732,7 +786,7 @@ pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
         return None;
     }
     let mut header = Header::call(function, call.count);
-    header.set_called_scope(call.scope());
+    header.set_called_scope(call.scope().filter(|class| class.is_published()));
     let (_, header) = req.laid_call(header)?;
     // A header with no record of its callee is one `push_call` completes
     // as it lays it down, and so not one to copy.

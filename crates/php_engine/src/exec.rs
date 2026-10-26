@@ -750,6 +750,9 @@ impl Header {
     /// takes the return, `EX(run_time_cache)` and the annex.
     pub(crate) const THIS_AT: usize = std::mem::offset_of!(Header, this);
     pub(crate) const CLOSURE_AT: usize = std::mem::offset_of!(Header, closure);
+    /// Where the called scope stands, a half-word: the class's number
+    /// with every bit inverted, zero for none ([`ScopeAt`]).
+    pub(crate) const SCOPE_AT: usize = std::mem::offset_of!(Header, called_scope);
     pub(crate) const NUM_ARGS_AT: usize = std::mem::offset_of!(Header, num_args);
     pub(crate) const CALLER_AT: usize = std::mem::offset_of!(Header, caller);
     pub(crate) const RETURNS_TO_AT: usize = std::mem::offset_of!(Header, returns_to);
@@ -1763,7 +1766,7 @@ pub(crate) enum Cached {
         primed: PrimedFrom,
         function: Function,
         instance: bool,
-    },
+    } = CLASS_AND_CALLEE,
     /// The `static` property a fetch over a constant name found on its
     /// first pass, `CACHE_POLYMORPHIC_PTR(cache_slot, ce, result)` and
     /// `CACHE_PTR(cache_slot + 2, property_info)`
@@ -1856,6 +1859,10 @@ pub(crate) struct PrimedCall {
 /// before the handler's first pass.
 pub(crate) const UNPRIMED: u32 = 0;
 
+/// [`Cached::ClassAndCallee`]'s tag, which compiled code tests before it
+/// reads the pair.
+pub(crate) const CLASS_AND_CALLEE: u32 = 4;
+
 /// [`Cached::Property`]'s tag, which compiled code tests before it reads
 /// the place.
 pub(crate) const PROPERTY: u32 = 7;
@@ -1880,6 +1887,18 @@ struct PropertyRepr {
     place: PropertyPlace,
 }
 
+/// [`Cached::ClassAndCallee`] as RFC 2195 lays a variant of a
+/// `#[repr(u32)]` enum out: its tag, then its fields in their order as a
+/// `#[repr(C)]` struct, each of the variant's own type.
+#[repr(C)]
+struct PairRepr {
+    tag: u32,
+    class: ClassId,
+    primed: PrimedFrom,
+    function: Function,
+    instance: bool,
+}
+
 /// [`PropertyOffset::Declared`] as RFC 2195 lays it out.
 #[repr(C)]
 struct DeclaredRepr {
@@ -1893,6 +1912,12 @@ impl Cached {
     pub(crate) const TAG_AT: usize = std::mem::offset_of!(PropertyRepr, tag);
     /// Where [`Cached::Property`]'s place stands in a slot.
     pub(crate) const PLACE_AT: usize = std::mem::offset_of!(PropertyRepr, place);
+    /// Where [`Cached::ClassAndCallee`]'s class stands in a slot, its
+    /// number as `Obj::CLASS_AT` holds it.
+    pub(crate) const PAIR_CLASS_AT: usize = std::mem::offset_of!(PairRepr, class);
+    /// Where [`Cached::ClassAndCallee`]'s callee stands in a slot, its
+    /// number.
+    pub(crate) const PAIR_FUNCTION_AT: usize = std::mem::offset_of!(PairRepr, function);
 }
 
 impl PropertyPlace {
@@ -1922,6 +1947,10 @@ const _: () = {
     assert!(size_of::<Cached>() == 40 && size_of::<Option<Cached>>() == 40);
     assert!(size_of::<PropertyRepr>() <= size_of::<Cached>());
     assert!(align_of::<PropertyRepr>() <= align_of::<Cached>());
+    assert!(size_of::<PairRepr>() <= size_of::<Cached>());
+    assert!(align_of::<PairRepr>() <= align_of::<Cached>());
+    assert!(size_of::<Function>() == 4);
+    assert!(Cached::PAIR_CLASS_AT == 4 && Cached::PAIR_FUNCTION_AT.is_multiple_of(4));
     assert!(Cached::TAG_AT == 0 && Cached::PLACE_AT == 4);
     assert!(size_of::<ClassId>() == 4 && size_of::<SlotType>() == 2);
     assert!(size_of::<DeclaredRepr>() == size_of::<PropertyOffset>());

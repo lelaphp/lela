@@ -18,10 +18,10 @@ use crate::table::TraceName;
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DEFAULT_CALL, DIM_AND, DIM_CONCAT,
     DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FIB, Fixture, HASH_FETCH_W, HASH_IS,
-    HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL, NATIVE_CALL,
-    NBODY, NESTED_READ, NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE,
-    OWNING_LEAVE, REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL, STRING_BUILD,
-    STRING_MATCH, held,
+    HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL, METHOD_SCOPED,
+    NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS,
+    OBJECT_VALUE, OWNING_LEAVE, REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL,
+    STATIC_SCOPED, STRING_BUILD, STRING_MATCH, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -1223,6 +1223,91 @@ fn method_calls_lower_their_push_call_and_leave() -> Result<(), String> {
         assert_eq!(calls(Kernel::FreeThis), 1, "{}: {clif}", fixture.name);
     }
     Ok(())
+}
+
+/// The calls pushed in place under the pair their runtime-cache slot
+/// holds lower to the guard on the slot, read past the trace's headers,
+/// and one cold arm where the handler pushes the call, which no other
+/// kernel serves (#3557, #3558).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_pushed_under_its_slots_pair_lowers_one_handler_arm() -> Result<(), String> {
+    for fixture in [STATIC_CALL, METHOD_SCOPED, STATIC_SCOPED] {
+        let ir = lowered(fixture)?;
+        let clif = std::fs::read_to_string(goldens_dir().join(format!("{}.clif", fixture.name)))
+            .map_err(|e| e.to_string())?;
+        let at = (ir.ops.iter())
+            .position(|op| matches!(op, Op::Line(line) if matches!(line.imm, Imm::Pair { .. })))
+            .ok_or_else(|| format!("{}: no push under a pair", fixture.name))?;
+        let address =
+            format!("{:#x}", symbols().address(Kernel::Step)).replace("0x7000", "0x7000_");
+        let stepped = (clif.lines())
+            .filter(|line| line.starts_with(&format!("@{at:04x} ")))
+            .filter(|line| line.contains("call_indirect") && line.contains(&address))
+            .count();
+        assert_eq!(stepped, 1, "{}: {clif}", fixture.name);
+        assert_eq!(
+            calls_of(&clif, Kernel::Call).len(),
+            1,
+            "{}: {clif}",
+            fixture.name
+        );
+    }
+    Ok(())
+}
+
+/// A trace that pushes a static method's call in place, entered on a
+/// request whose serving of the op array has not primed the call's slot: the
+/// slot holds no pair, so the handler pushes the call, looking the class
+/// and the method up as php's `zend_jit_find_static_method_helper` does,
+/// the callee is held after it, and every pass after, the slot primed,
+/// pushes it in place; the call's `static` is the class the request
+/// resolved the name to (#3557).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_empty_slot_sends_a_static_call_to_its_handler() {
+    let scratch = testing::Scratch::new();
+    let engine = testing::engine::<Lane>(&[
+        ("jit.mode", "force"),
+        ("jit.compile", "inline"),
+        ("opcache.jit_debug", "258048"),
+    ]);
+    let program = "class Getter { public static function twice($v) { return static::class === 'Child' ? $v + $v : -1; } }
+        eval('class Base extends Getter { }');
+        class Child extends Base { }
+        class Pub { public static function three($v) { return 3 * $v; } }
+        function k($m) { $t = 0; for ($i = 0; $i < $m; $i++) { if ($i > 0) { $t += Child::twice($i) + Pub::three($i); } } return $t; }
+        echo k(20), \"\\n\";";
+    let first = scratch.serve(&engine, program);
+    assert_eq!(testing::stdout(&first), "950\n");
+    let second = scratch.serve(&engine, program);
+    assert_eq!(testing::stdout(&second), "950\n");
+    let lines = String::from_utf8_lossy(&second.stderr);
+    let exits = lines.lines().filter(|line| line.contains(" exit ")).count();
+    assert!(exits <= 2, "{lines}");
+}
+
+/// A trace that pushes a request-scoped class's inherited method in place
+/// under its slot's pair serves an object of another request-scoped class
+/// through the handler where the slot names the class it resolved the
+/// name on last, and in place once it names the object's own; the callee,
+/// the one method both inherit, holds, and each call's `static` is its
+/// receiver's class (#3558).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_slot_that_names_another_class_sends_a_methods_call_to_its_handler() {
+    let scratch = testing::Scratch::new();
+    let engine = testing::engine::<Lane>(&[
+        ("jit.mode", "force"),
+        ("jit.compile", "inline"),
+        ("opcache.jit_debug", "258048"),
+    ]);
+    let program = "class Getter { public $b = 1; public function get($v) { return static::class === 'A' ? $this->b + $v : $v; } }
+        eval('class A extends Getter { } class B extends Getter { public $b = 9; }');
+        function k($o, $p, $m) { $t = 0; for ($i = 0; $i < $m; $i++) { $t += $o->get($i); $o = $i % 2 ? $p : $o; } return $t; }
+        echo k(new A, new B, 10), ' ', k(new B, new A, 10), \"\\n\";";
+    let served = scratch.serve(&engine, program);
+    assert_eq!(testing::stdout(&served), "47 53\n");
 }
 
 /// A call passed fewer arguments than its callee has parameters lowers

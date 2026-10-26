@@ -279,6 +279,17 @@ fn own_row<'r>(
     }
 }
 
+/// The op array `frame` runs and the [`FuncRef`] of the cache it reads,
+/// where it reads its op array's own cache and every frame that runs the
+/// op array runs it in one scope ([`super::published::Func::fixes_scope`]):
+/// so it is no closure's and no trait method's copy's, and a slot of its
+/// cache answers each frame alike.
+fn scoped_code(req: &Request, frame: FrameRef) -> Option<(FuncRef, &OpArray)> {
+    let header = req.vm().at(frame)?;
+    let func = own_row(req, header).filter(|func| func.fixes_scope())?;
+    Some((FuncRef(header.runtime_cache().offset()), func.op_array()?))
+}
+
 /// The op array `frame` serves; none for a frame that serves none.
 #[must_use]
 pub fn func(req: &Request, frame: FrameRef) -> Option<FuncRef> {
@@ -468,6 +479,55 @@ impl PropertySlot {
     }
 }
 
+/// The class and the callee a method's call over constant names resolved
+/// together, from one op array ([`UnitView::hold_callee`]): the pair the
+/// handler wrote into the opline's runtime-cache slot,
+/// `CACHE_POLYMORPHIC_PTR(opline->result.num, ce, fbc)`, a published
+/// method's, which compiled code holds the slot of the request it runs in
+/// to before it pushes the call in place, as php's code reads
+/// `CACHED_PTR(opline->result.num)` and the callee past it
+/// (`zend_jit_init_method_call`, `zend_jit_init_static_method_call`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:9025-9056`, `:9255-9265`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalleeSlot {
+    func: FuncRef,
+    at: OplineIdx,
+    class: ClassId,
+    function: crate::api::call::Function,
+    instance: bool,
+    cached: MapPtrRaw,
+}
+
+impl CalleeSlot {
+    /// The class the pair was resolved on: the receiver's, or the one an
+    /// `INIT_STATIC_METHOD_CALL` names, the recording's request's number
+    /// for a class that is not [`ClassId::is_published`].
+    #[must_use]
+    pub fn class(self) -> ClassId {
+        self.class
+    }
+
+    /// The callee's number as the slot holds it, a published method's,
+    /// the same in every request of the epoch
+    /// ([`PlaceLayout::pair_function`](super::PlaceLayout::pair_function)).
+    #[must_use]
+    pub fn function(self) -> u32 {
+        self.function.0
+    }
+
+    /// Whether the callee takes `$this`, php's `ZEND_ACC_STATIC` clear.
+    #[must_use]
+    pub fn instance(self) -> bool {
+        self.instance
+    }
+
+    /// The runtime-cache slot compiled code reads the pair from.
+    #[must_use]
+    pub fn cached(self) -> MapPtrRaw {
+        self.cached
+    }
+}
+
 /// What a trace may read of the op arrays, literals and published
 /// classes it touched (`jit-design.md` §4.1, §5.3): built by the recorder
 /// from the request, it holds the request's epoch once and the ids it
@@ -484,6 +544,9 @@ pub struct UnitView {
     calls: Vec<super::PlainCall>,
     /// The property places the recording took ([`UnitView::hold_place`]).
     places: Vec<PropertySlot>,
+    /// The pairs of a method's call the recording took
+    /// ([`UnitView::hold_callee`]).
+    callees: Vec<CalleeSlot>,
     /// Whether an observer of calls was declared ([`UnitView::observed`]).
     observed: bool,
     /// What the natives of the frameless calls the recording served
@@ -512,6 +575,7 @@ impl UnitView {
             classes: Vec::new(),
             calls: Vec::new(),
             places: Vec::new(),
+            callees: Vec::new(),
             observed: crate::observer::observing(req),
             frameless: Vec::new(),
         }
@@ -573,17 +637,10 @@ impl UnitView {
         at: OplineIdx,
         class: ClassId,
     ) -> bool {
-        let Some(header) = req.vm().at(frame) else {
+        let Some((f, code)) = scoped_code(req, frame) else {
             return false;
         };
-        let Some(func) = own_row(req, header).filter(|func| func.fixes_scope()) else {
-            return false;
-        };
-        let f = FuncRef(header.runtime_cache().offset());
-        let Some(op) = func
-            .op_array()
-            .and_then(|code| code.oplines.get(at.0 as usize))
-        else {
+        let Some(op) = code.oplines.get(at.0 as usize) else {
             return false;
         };
         // `CACHE_ADDR(opline->extended_value & ~ZEND_FETCH_OBJ_FLAGS)`, an
@@ -598,10 +655,7 @@ impl UnitView {
             | Opcode::PreDecObj
             | Opcode::PostIncObj
             | Opcode::PostDecObj => CacheSlot(op.extended_value),
-            Opcode::AssignObjOp => match func
-                .op_array()
-                .and_then(|code| code.oplines.get(at.0 as usize + 1))
-            {
+            Opcode::AssignObjOp => match code.oplines.get(at.0 as usize + 1) {
                 Some(data) => CacheSlot(data.extended_value),
                 None => return false,
             },
@@ -655,6 +709,72 @@ impl UnitView {
             self.places.push(place);
         }
         true
+    }
+
+    /// Take the class and the callee the `INIT_METHOD_CALL` over a
+    /// constant name, or the `INIT_STATIC_METHOD_CALL` over a constant
+    /// class and name, at `at` of the op array `frame` serves wrote into
+    /// its runtime-cache slot, as the handler wrote it on this pass
+    /// ([`Request::cached_callee`]), so a trace that recorded the call
+    /// pushes it in place where the slot of the request it runs in holds
+    /// the same pair. Taken only where every frame that runs the op array
+    /// reads the pair one way, as [`UnitView::hold_place`] takes a place,
+    /// and where the callee is a published method, whose number is the
+    /// same in every request; `false`, taking nothing, for any other, and
+    /// where the slot holds no pair.
+    pub fn hold_callee(&mut self, req: &Request, frame: FrameRef, at: OplineIdx) -> bool {
+        let Some((f, code)) = scoped_code(req, frame) else {
+            return false;
+        };
+        let Some(op) = code.oplines.get(at.0 as usize) else {
+            return false;
+        };
+        let named = match op.opcode {
+            Opcode::InitMethodCall => op.op2_type == OperandKind::Const,
+            Opcode::InitStaticMethodCall => {
+                op.op1_type == OperandKind::Const && op.op2_type == OperandKind::Const
+            }
+            _ => false,
+        };
+        let slot = CacheSlot(op.out);
+        if !named || !self.hold(req, f) {
+            return false;
+        }
+        let Some(cached) = self.cache_slot(f, slot) else {
+            return false;
+        };
+        let crate::exec::Cached::ClassAndCallee {
+            class,
+            function,
+            instance,
+            ..
+        } = req.cached_in_scope(frame, slot)
+        else {
+            return false;
+        };
+        if function.published_number().is_none() {
+            return false;
+        }
+        let pair = CalleeSlot {
+            func: f,
+            at,
+            class,
+            function,
+            instance,
+            cached,
+        };
+        self.callees.retain(|held| (held.func, held.at) != (f, at));
+        self.callees.push(pair);
+        true
+    }
+
+    /// The pair the call at `at` of the op array `f` resolved; none
+    /// unless [`UnitView::hold_callee`] took it.
+    #[must_use]
+    pub fn callee_at(&self, f: FuncRef, at: OplineIdx) -> Option<CalleeSlot> {
+        (self.callees.iter())
+            .find(|pair| pair.func == f && pair.at == at)
+            .copied()
     }
 
     /// The declared slot the property opline at `at` of the op array `f`
