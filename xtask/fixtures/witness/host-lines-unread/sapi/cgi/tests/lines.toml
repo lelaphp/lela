@@ -1,0 +1,10 @@
+# The negative control of a watched run (#3457): a line whose `then`
+# carries a key no `then` takes, so the file is no host's lines and the
+# crate's reading fails, journaled where the watching run reads it.
+[[line]]
+name = "echoes-one"
+args = ["-n", "{dir}/t.php"]
+files = { "t.php" = "<?php echo 1;" }
+[[line.then]]
+args = ["-n", "{dir}/t.php"]
+stdin = "x"

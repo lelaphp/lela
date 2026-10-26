@@ -311,11 +311,12 @@ pub struct WebRequest {
 pub enum Body {
     /// The bytes the host reads, no more than `content_length`, from a
     /// reader the request pulls blocks from as php's `read_post` pulls
-    /// them: a read that answers fewer than it was asked for ends the
-    /// body, as php's `SG(post_read)`, and so does one that fails. A body
-    /// the host read before the request started is a reader over those
-    /// bytes, [`Body::from`].
-    Stream(Box<dyn std::io::Read + Send>),
+    /// them ([`ReadPost`](crate::api::request::ReadPost), which any
+    /// [`std::io::Read`] is): a read that answers fewer than it was asked
+    /// for ends the body, as php's `SG(post_read)`, and so does one that
+    /// fails. A body the host read before the request started is a reader
+    /// over those bytes, [`Body::from`].
+    Stream(Box<dyn crate::api::request::ReadPost>),
     /// Nothing, and the `E_WARNING` the host's read raises each time it
     /// is asked, as php-fpm's `sapi_cgi_read_post` raises
     /// `REQUEST_BODY_FILE: open('%s') failed: %s (%d)` where the file the
@@ -5901,7 +5902,7 @@ impl Engine {
         req.catch_bailout();
         req.free_shutdown_functions();
         req.destroy_http_globals();
-        req.destroy_uploaded_files();
+        req.deactivate_post();
         // `zend_deactivate` reaches `shutdown_executor`, whose
         // `zend_stream_shutdown` closes the files the scanner listed
         // first; then each extension's `deactivate`, in reverse, before

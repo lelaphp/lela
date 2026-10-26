@@ -379,6 +379,22 @@ fn regenerate(req: &mut Request, delete: bool) -> Result<bool, Thrown> {
 /// bool(false)
 /// session_create_id(): Argument #1 ($prefix) cannot be longer than 256 characters
 /// ```
+///
+/// A handler's `create_sid()` that throws is the answer, with no
+/// warning beside it (8.5.12):
+///
+/// ```php
+/// ob_start();
+/// class H extends SessionHandler { public $n = 0; function create_sid(): string { if ($this->n++) throw new Exception("create_sid failed"); return parent::create_sid(); } function validateId($id): bool { return false; } }
+/// session_set_save_handler(new H, true); session_save_path(__DIR__); session_start(["use_cookies" => 0, "cache_limiter" => ""]);
+/// try { session_create_id(); } catch (Exception $e) { echo $e->getMessage(), "\n"; var_dump($e->getPrevious()); }
+/// var_dump(session_status() === PHP_SESSION_ACTIVE); session_destroy(); ob_end_flush();
+/// ```
+/// ```expect
+/// create_sid failed
+/// NULL
+/// bool(true)
+/// ```
 #[php_function]
 fn session_create_id(
     req: &mut Request,
@@ -427,7 +443,10 @@ fn session_create_id(
         new_id = session::create_id(req);
     }
     let Some(new_id) = new_id else {
-        docref(req, Level::Warning, "Failed to create new ID");
+        // A handler that threw is the answer, with no warning (8.5.12).
+        if !crate::pending(req) {
+            docref(req, Level::Warning, "Failed to create new ID");
+        }
         return answer(req, OrFalse::False);
     };
     let mut id = prefix;

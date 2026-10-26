@@ -225,14 +225,23 @@ const CLEAN_OUTPUT: &str = "tidy.clean_output";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DocId(u32);
 
-/// `PHPTidyDoc`: the document, the objects that name it, whether a parse
-/// was asked of it, and php's `emalloc(sizeof(PHPTidyDoc))`.
+/// `PHPTidyDoc`: the document, the objects that name it, how many parses
+/// were asked of it, whether one was, and php's
+/// `emalloc(sizeof(PHPTidyDoc))`, whose size [`ffi::Doc`]'s witness
+/// pins.
 struct Slot {
     doc: Option<ffi::Doc>,
     refs: u32,
+    generation: Generation,
     initialized: bool,
     record: Option<Emalloc>,
 }
+
+/// `parse_generation`: which parse of its document a tree was read
+/// from. A parse frees the tree before it, so a `tidyNode` read from an
+/// earlier one names nodes libtidy no longer holds (8.5.12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Generation(u64);
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or
@@ -244,8 +253,9 @@ struct State {
     clean_output: bool,
 }
 
-/// `sizeof(PHPTidyDoc)`.
-const DOC_RECORD: usize = 24;
+/// `sizeof(PHPTidyDoc)`: two pointers, the count, `parse_generation` and
+/// `initialized`.
+const DOC_RECORD: usize = 40;
 
 /// A new document's slot, counted once, for the object that made it.
 pub(crate) fn adopt(req: &mut Request, doc: ffi::Doc) -> Result<DocId, Thrown> {
@@ -253,6 +263,7 @@ pub(crate) fn adopt(req: &mut Request, doc: ffi::Doc) -> Result<DocId, Thrown> {
     let slot = Slot {
         doc: Some(doc),
         refs: 1,
+        generation: Generation::default(),
         initialized: false,
         record: Some(record),
     };
@@ -311,6 +322,20 @@ pub(crate) fn initialized(req: &mut Request, id: DocId) -> bool {
 pub(crate) fn set_initialized(req: &mut Request, id: DocId) {
     if let Some(slot) = slot(req, id) {
         slot.initialized = true;
+    }
+}
+
+/// The parse the document's tree is from, `ptdoc->parse_generation`;
+/// `None` for a document no slot holds.
+pub(crate) fn generation(req: &mut Request, id: DocId) -> Option<Generation> {
+    slot(req, id).map(|slot| slot.generation)
+}
+
+/// One parse more, `ptdoc->parse_generation++`, before libtidy frees
+/// the tree it held.
+pub(crate) fn reparsed(req: &mut Request, id: DocId) {
+    if let Some(slot) = slot(req, id) {
+        slot.generation.0 = slot.generation.0.wrapping_add(1);
     }
 }
 

@@ -762,7 +762,7 @@ fn imageaffine(
 ///   float(3)
 /// }
 /// [6.123233995736766e-17,1,-1,6.123233995736766e-17,0,0]
-/// imageaffinematrixget(): Argument #1 ($type) must be of type array when using translate or scale
+/// imageaffinematrixget(): Argument #2 ($options) must be of type array when using translate or scale
 /// imageaffinematrixget(): Argument #2 ($options) must have a "y" key
 /// imageaffinematrixget(): Argument #1 ($type) must be a valid element type
 /// ```
@@ -778,7 +778,7 @@ fn imageaffinematrixget(
             let Some(array) = options.as_array() else {
                 return Err(arg_type_error(
                     req,
-                    1,
+                    2,
                     "be of type array when using translate or scale",
                 ));
             };
@@ -814,7 +814,7 @@ fn imageaffinematrixget(
 /// ```expect
 /// [2,0,0,2,4,6]
 /// imageaffinematrixconcat(): Argument #1 ($matrix1) must have 6 elements
-/// imageaffinematrixconcat(): Argument #1 ($matrix1) must have 6 elements
+/// imageaffinematrixconcat(): Argument #2 ($matrix2) must have 6 elements
 /// imageaffinematrixconcat(): Argument #2 ($matrix2) contains invalid type for element 5
 /// ```
 #[php_function]
@@ -823,8 +823,10 @@ fn imageaffinematrixconcat(
     matrix1: PhpArray,
     matrix2: PhpArray,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-    if matrix1.len() != 6 || matrix2.len() != 6 {
-        return Err(arg_value_error(req, 1, "have 6 elements"));
+    for (matrix, position) in [(&matrix1, 1), (&matrix2, 2)] {
+        if matrix.len() != 6 {
+            return Err(arg_value_error(req, position, "have 6 elements"));
+        }
     }
     let mut m1 = [0.0; 6];
     let mut m2 = [0.0; 6];

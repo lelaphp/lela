@@ -7,7 +7,7 @@
 use php_ext::abi::{Instance, OrFalse, Path, True, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, type_error};
+use php_ext::raising::{Cause, Level, Thrown, arg_type_error, arg_value_error, docref, type_error};
 use php_ext::request::{Ini, Opening, OwnedStream as _, Request, Stream, Streams as _};
 use php_ext::values::{Emalloc, Owner, PhpString, Value, ValueRef};
 
@@ -511,49 +511,126 @@ struct Sink {
 
 /// [`Sink`]'s target.
 enum To {
-    /// The request's stdout, `php_write`.
+    /// The request's stdout, `php_write`, a `gdIOCtx` alone.
     Output,
+    /// A stream, behind 8.5.12's `php_gd_stream_ctx` (GH-23457): `putC`'s
+    /// bytes held in its buffer and written when it fills, before a
+    /// `putBuf` and at `gd_free`, so a stream is not written a byte at a
+    /// time.
+    Stream { stream: Target, buf: Vec<u8> },
+}
+
+/// A stream sink's stream.
+enum Target {
     /// A stream resource the program handed, left open by `gd_free`.
-    Stream(Stream),
+    Handed(Stream),
     /// A stream the native opened, its owner closed by `gd_free`.
     Opened(Owner<Stream>),
+}
+
+/// The bytes `php_gd_stream_ctx` holds, `sizeof(stream_ctx->buf)`.
+const STREAM_BUF: usize = 8192;
+
+/// `sizeof(php_gd_stream_ctx)`: the `gdIOCtx`, its `size_t buf_len` and
+/// the buffer.
+const STREAM_CTX_SIZE: usize = ffi::CTX_SIZE + std::mem::size_of::<usize>() + STREAM_BUF;
+
+impl Target {
+    /// `php_stream_write`: the count the stream took, `None` for a
+    /// write that failed.
+    fn write(&self, req: &mut Request, bytes: &[u8]) -> Option<usize> {
+        match self {
+            Target::Handed(stream) => stream.write(req, bytes),
+            Target::Opened(stream) => stream.write(req, bytes),
+        }
+    }
+
+    /// The stream closed where it was opened here.
+    fn release(self, req: &mut Request) {
+        if let Target::Opened(stream) = self {
+            stream.free(req);
+        }
+    }
+}
+
+impl To {
+    fn stream(stream: Target) -> To {
+        To::Stream {
+            stream,
+            buf: Vec::new(),
+        }
+    }
+}
+
+/// `php_stream_write`'s count as `putBuf` answers it: `-1` for a write
+/// that failed.
+fn took(took: Option<usize>) -> i32 {
+    took.map_or(-1, |n| i32::try_from(n).unwrap_or(i32::MAX))
 }
 
 impl Sink {
     /// The `gdIOCtx` made over `to`; the memory limit refusing it closes
     /// the stream opened for it.
     fn new(req: &mut Request, to: To) -> Result<Sink, Thrown> {
-        match Emalloc::new(req, ffi::CTX_SIZE) {
+        let size = match to {
+            To::Output => ffi::CTX_SIZE,
+            To::Stream { .. } => STREAM_CTX_SIZE,
+        };
+        match Emalloc::new(req, size) {
             Ok(ctx) => Ok(Sink { to, ctx }),
             Err(thrown) => {
-                if let To::Opened(stream) = to {
-                    stream.free(req);
+                if let To::Stream { stream, .. } = to {
+                    stream.release(req);
                 }
                 Err(thrown)
             }
         }
     }
 
-    /// `putBuf`, and `putC` with its answer unread: how many bytes the
-    /// target took, `php_write` all of them, `php_stream_write` its own
-    /// count or `-1`.
-    fn put(&self, req: &mut Request, bytes: &[u8]) -> i32 {
-        let took = match &self.to {
-            To::Output => {
-                req.response_mut().write(bytes);
-                Some(bytes.len())
+    /// `putC` and `putBuf`: how many bytes the target took, `php_write`
+    /// all of them, `php_stream_write` its own count or `-1`; a stream's
+    /// `putC` is buffered (`_php_image_stream_putc`), and its `putBuf`
+    /// writes what the buffer holds first (`_php_image_stream_putbuf`).
+    fn put(&mut self, req: &mut Request, written: ffi::Written<'_>) -> i32 {
+        match (&mut self.to, written) {
+            (To::Output, ffi::Written::Byte(byte)) => {
+                req.response_mut().write(&[byte]);
+                1
             }
-            To::Stream(stream) => stream.write(req, bytes),
-            To::Opened(stream) => stream.write(req, bytes),
-        };
-        took.map_or(-1, |n| i32::try_from(n).unwrap_or(i32::MAX))
+            (To::Output, ffi::Written::Bytes(bytes)) => {
+                req.response_mut().write(bytes);
+                i32::try_from(bytes.len()).unwrap_or(i32::MAX)
+            }
+            (To::Stream { stream, buf }, ffi::Written::Byte(byte)) => {
+                if buf.len() == STREAM_BUF {
+                    flush(req, stream, buf);
+                }
+                buf.push(byte);
+                1
+            }
+            (To::Stream { stream, buf }, ffi::Written::Bytes(bytes)) => {
+                flush(req, stream, buf);
+                took(stream.write(req, bytes))
+            }
+        }
     }
 
-    /// `gd_free`: the stream closed where it was opened here, then the
-    /// `gdIOCtx` freed.
-    fn free(self, req: &mut Request) {
-        if let To::Opened(stream) = self.to {
-            stream.free(req);
+    /// `gd_free`: a stream's buffer written (`_php_image_stream_flush`),
+    /// the stream closed where it was opened here, then the `gdIOCtx`
+    /// freed.
+    fn free(mut self, req: &mut Request) {
+        if let To::Stream { stream, buf } = &mut self.to {
+            flush(req, stream, buf);
+        }
+        self.abandon(req);
+    }
+
+    /// What a fatal leaves of the sink, which php's `zend_bailout` never
+    /// hands to `gd_free`: nothing more written, the stream opened here
+    /// closed and the `gdIOCtx` given back as the request's end frees it.
+    fn abandon(self, req: &mut Request) {
+        if let To::Stream { stream, .. } = self.to {
+            stream.release(req);
         }
         self.ctx.free(req);
     }
@@ -571,12 +648,12 @@ impl Sink {
     /// ends the request there and nothing more reaches the target.
     /// `gd_free` follows.
     fn encode(
-        self,
+        mut self,
         req: &mut Request,
         write: impl FnOnce(&mut ffi::Put<'_>) -> Reported,
     ) -> Result<bool, Thrown> {
         let mut ended = None;
-        let left = write(&mut |reported, bytes| {
+        let left = write(&mut |reported, written| {
             if ended.is_some() {
                 return 0;
             }
@@ -584,14 +661,31 @@ impl Sink {
                 ended = Some(thrown);
                 return 0;
             }
-            self.put(req, bytes)
+            self.put(req, written)
         });
         let raised = match ended {
             Some(thrown) => Err(thrown),
             None => raise(req, left),
         };
-        self.free(req);
-        raised.map(|()| true)
+        match raised {
+            Err(thrown) if thrown.cause(req) == Cause::Fatal => {
+                self.abandon(req);
+                Err(thrown)
+            }
+            raised => {
+                self.free(req);
+                raised.map(|()| true)
+            }
+        }
+    }
+}
+
+/// `_php_image_stream_flush`: what the buffer holds written, its count
+/// unread as php leaves it.
+fn flush(req: &mut Request, stream: &Target, buf: &mut Vec<u8>) {
+    if !buf.is_empty() {
+        stream.write(req, buf);
+        buf.clear();
     }
 }
 
@@ -602,7 +696,7 @@ fn sink(req: &mut Request, file: &Value, name: &str) -> Result<Option<Sink>, Thr
     match file.as_ref() {
         ValueRef::Null => Sink::new(req, To::Output).map(Some),
         ValueRef::Resource(_) => match Stream::from_value(req, file) {
-            Some(stream) => Sink::new(req, To::Stream(stream)).map(Some),
+            Some(stream) => Sink::new(req, To::stream(Target::Handed(stream))).map(Some),
             None => Err(type_error(
                 req,
                 &format!("{name}(): supplied resource is not a valid stream resource"),
@@ -614,7 +708,7 @@ fn sink(req: &mut Request, file: &Value, name: &str) -> Result<Option<Sink>, Thr
             }
             let path = path.as_bytes().to_vec();
             match req.open_stream(&path, b"wb", false)? {
-                Some(stream) => Sink::new(req, To::Opened(stream)).map(Some),
+                Some(stream) => Sink::new(req, To::stream(Target::Opened(stream))).map(Some),
                 None => Ok(None),
             }
         }
@@ -690,7 +784,7 @@ fn imagexbm(
     let im = im(req, image)?;
     let to = match &filename {
         Some(path) => match req.open_stream(path.0.as_bytes(), b"wb", false)? {
-            Some(stream) => To::Opened(stream),
+            Some(stream) => To::stream(Target::Opened(stream)),
             None => return Ok(false),
         },
         None => To::Output,
@@ -788,6 +882,8 @@ fn imagegif(
 ///
 /// The bytes reach the sink as libgd writes them, so the peak is the
 /// `gdIOCtx` php allocates and what the sink holds, never the image whole:
+/// a stream's `php_gd_stream_ctx` with its 8192-byte buffer, stdout's
+/// bare `gdIOCtx`:
 ///
 /// ```php
 /// $i = imagecreatetruecolor(64, 64); $f = __DIR__ . '/w'; $h = fopen($f, 'w');
@@ -798,7 +894,7 @@ fn imagegif(
 /// fclose($h); var_dump(filesize($f)); unlink($f);
 /// ```
 /// ```expect
-/// 64
+/// 12288
 /// 64
 /// int(224)
 /// ```
@@ -887,18 +983,21 @@ fn imagejpeg(
 /// string(10) "0000020180"
 /// ```
 ///
-/// libgd writes a WBMP a byte at a time, `putC`, and each byte is one
-/// write to the stream:
+/// libgd writes a WBMP a byte at a time, `putC`, which a stream's
+/// `gdIOCtx` holds until `gd_free` writes them as one (GH-23457):
 ///
 /// ```php
 /// class C { public $context; static $n = []; function stream_open($p, $m, $o, &$op) { return true; } function stream_write($d) { self::$n[] = strlen($d); return strlen($d); } }
 /// stream_wrapper_register('cc', 'C');
 /// $i = imagecreate(9, 2); imagecolorallocate($i, 0, 0, 0);
 /// var_dump(imagewbmp($i, 'cc://x')); echo implode(',', C::$n), "\n";
+/// C::$n = []; $j = imagecreate(80000, 1); imagecolorallocate($j, 0, 0, 0);
+/// imagewbmp($j, 'cc://y'); echo implode(',', C::$n), "\n";
 /// ```
 /// ```expect
 /// bool(true)
-/// 1,1,1,1,1,1,1,1
+/// 8
+/// 8192,1814
 /// ```
 #[php_function]
 fn imagewbmp(

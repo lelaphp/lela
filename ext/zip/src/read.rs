@@ -1373,7 +1373,11 @@ impl Body {
 /// `struct crc_context` with `validate` set.
 struct Crc {
     expect: u32,
-    size: u64,
+    /// The size the layer below states at the data's end, which the data
+    /// is held to; `None` over a decompressor, which states the size it
+    /// made (`compress_callback`'s stat at `end_of_stream`), so the two
+    /// never differ.
+    size: Option<u64>,
     hasher: crc32fast::Hasher,
     position: u64,
     /// `crc_position`: how far the CRC has read.
@@ -1415,11 +1419,12 @@ pub(crate) struct Layers<'a> {
 
 impl Reader {
     fn new(body: Body, crc: Option<(u32, u64)>, seekable: bool) -> Reader {
+        let decompressed = matches!(body, Body::Compressed(_) | Body::Pulled(_));
         Reader {
             body,
             crc: crc.map(|(expect, size)| Crc {
                 expect,
-                size,
+                size: (!decompressed).then_some(size),
                 hasher: crc32fast::Hasher::new(),
                 position: 0,
                 hashed: 0,
@@ -1606,6 +1611,29 @@ impl Reader {
     /// int(50)
     /// bool(false)
     /// ```
+    ///
+    /// A decompressed entry's length is the decompressor's, so a central
+    /// size that is not it reads no error, where a stored one's is held
+    /// to it:
+    ///
+    /// ```php
+    /// foreach ([[8, gzdeflate('hello'), 6], [8, gzdeflate('hello'), 4], [0, 'hello', 6]] as [$m, $comp, $size]) {
+    ///     $local = "PK\3\4" . pack('vvvvvVVVvv', 20, 0, $m, 0, 0x21, crc32('hello'), strlen($comp), $size, 1, 0) . 'c' . $comp;
+    ///     $cd = "PK\1\2" . pack('vvvvvvVVVvvvvvVV', 0x0314, 20, 0, $m, 0, 0x21, crc32('hello'), strlen($comp), $size, 1, 0, 0, 0, 0, 0x81a40000, 0) . 'c';
+    ///     file_put_contents('length-witness.zip', $local . $cd . "PK\5\6" . pack('vvvvVVv', 0, 0, 1, 1, strlen($cd), strlen($local), 0));
+    ///     $z = new ZipArchive; $z->open('length-witness.zip');
+    ///     $s = $z->getStream('c'); $a = fread($s, 100); $b = fread($s, 100); fclose($s);
+    ///     echo "$m $size: ", var_export(@$z->getFromName('c'), true), ' ', var_export($a, true), ' ', var_export($b, true), "\n"; $z->close();
+    /// }
+    /// unlink('length-witness.zip');
+    /// ```
+    /// ```expect capture
+    /// 8 6: 'hello' 'hello' ''
+    /// 8 4: 'hell' 'hello' ''
+    ///
+    /// Warning: fread(): Zip stream error: Zip archive inconsistent: file length in header doesn't match actual file length in %SCRATCH%/witness.php on line 7
+    /// 0 6: false 'hello' false
+    /// ```
     fn read_layer(&mut self, buf: &mut [u8]) -> Result<usize, Status> {
         let n = self.body.read_some(buf)?;
         let Some(c) = &mut self.crc else {
@@ -1620,7 +1648,7 @@ impl Reader {
                     return Err(Status::new(Er::Crc));
                 }
             }
-            if c.position != c.size {
+            if c.size.is_some_and(|size| c.position != size) {
                 return Err(Status::incons(Detail::InvalidFileLength, None));
             }
         } else if !c.complete && c.position <= c.hashed {

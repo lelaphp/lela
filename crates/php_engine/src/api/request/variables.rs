@@ -1462,7 +1462,7 @@ impl HttpGlobals {
 
     /// The track an auto-global's array is kept in, `None` for one
     /// php keeps none of.
-    fn track(&mut self, global: AutoGlobal) -> Option<&mut Option<PhpArray>> {
+    pub(super) fn track(&mut self, global: AutoGlobal) -> Option<&mut Option<PhpArray>> {
         match global {
             AutoGlobal::Post => Some(&mut self.post),
             AutoGlobal::Get => Some(&mut self.get),

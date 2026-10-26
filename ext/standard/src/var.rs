@@ -157,6 +157,14 @@ pub(crate) const INCOMPLETE_CLASS: &[u8] = b"__PHP_Incomplete_Class";
 /// name in.
 pub(crate) const MAGIC_MEMBER: &[u8] = b"__PHP_Incomplete_Class_Name";
 
+/// `MAGIC_MEMBER_SERIALIZED`: the payload of a `C:` record an
+/// unserializer reading incomplete classes only keeps verbatim.
+pub(crate) const MAGIC_MEMBER_SERIALIZED: &[u8] = b"__PHP_Incomplete_Class_Serialized";
+
+/// `MAGIC_MEMBER_ENUM_CASE`: the case name of an `E:` value an
+/// unserializer reading incomplete classes only keeps.
+pub(crate) const MAGIC_MEMBER_ENUM_CASE: &[u8] = b"__PHP_Incomplete_Enum_Case";
+
 /// The object's class name as the linked table spells it.
 fn class_name(req: &Request, object: php_ext::values::PhpObject) -> Vec<u8> {
     req.symbols()
