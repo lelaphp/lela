@@ -63,14 +63,18 @@ use code::{Arena, Code, Pages};
 pub(crate) use perf::{Outputs, Perf, Usage, Used};
 
 /// The `Pages` adapter a trace's code is mapped through on this target
-/// (`jit-design.md` §4.4): `MAP_JIT` on macOS aarch64; under Miri the
-/// heap adapter, the only one it runs; elsewhere none yet (#2943), so a
-/// table maps no arena and numbers each trace it publishes with no code.
+/// (`jit-design.md` §4.4): `MAP_JIT` on macOS aarch64; one sealed `memfd`
+/// mapped twice on Linux x86-64 and aarch64; under Miri the heap adapter,
+/// the only one it runs; elsewhere, where `build.rs` sets no
+/// `php_jit_arena`, none, so a table maps no arena and numbers each trace
+/// it publishes with no code.
 #[cfg(miri)]
 pub(crate) type Native = code::HeapPages;
-#[cfg(all(not(miri), target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(not(miri), php_jit_arena, target_os = "macos"))]
 pub(crate) type Native = code::MapJit;
-#[cfg(all(not(miri), not(all(target_os = "macos", target_arch = "aarch64"))))]
+#[cfg(all(not(miri), php_jit_arena, target_os = "linux"))]
+pub(crate) type Native = code::Memfd;
+#[cfg(all(not(miri), not(php_jit_arena)))]
 pub(crate) type Native = code::Unmapped;
 
 /// The table an epoch keeps: over this target's pages.
