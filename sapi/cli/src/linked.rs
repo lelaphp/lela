@@ -19,8 +19,8 @@
 //! request entered one per line as the trace file holds them, into the
 //! same directory, and `abort` beside them where php's process would
 //! have ended on `abort()`, which this one, serving the next, does not
-//! (`php_sapi::abort_as_php`, #3515); then it answers `served` on a line of its own and
-//! reads the next. A request that panics leaves `panicked` instead, and
+//! (`php_sapi::abort_as_php`, #3515); then it answers `served` on a line
+//! of its own and reads the next. A request that panics leaves `panicked` instead, and
 //! the binary goes on to the next. End of input ends it. Before the
 //! first line it closes every fd beyond its three streams, so it
 //! holds no pipe of the harness's but its own two (#2550).
