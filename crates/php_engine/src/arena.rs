@@ -218,6 +218,11 @@ pub(crate) struct Arena {
     /// are rows here, php's `ZCSG(hash)` and what is counted of the
     /// memory under it ([`crate::unit_cache::Files`]).
     pub(crate) files: crate::unit_cache::Files,
+    /// Where compiled code finds the landing words of the epoch's rows,
+    /// its own in `files` and its rows of the preload's op arrays in
+    /// `below`, which a trace's escape reads
+    /// ([`crate::tier::published::Landings`]).
+    landings: crate::tier::published::Landings,
     /// The engine's own classes' linked records, which every epoch
     /// shares, so what holds an epoch reads a class of the engine's as it
     /// reads one the epoch published ([`Arena::linked_class`]).
@@ -305,8 +310,11 @@ impl Arena {
         interned: Interned,
     ) -> Arena {
         let [first_class, first_function, first_class_native] = first;
+        let preloaded = below.as_ref().map(|below| &below.funcs);
+        let landings = crate::tier::published::Landings::over(&files.funcs, preloaded);
         Arena {
             below,
+            landings,
             classes: Column::below(ClassId::LOCAL.saturating_sub(first_class)),
             functions: Column::below(Function::CLASS_NATIVE.saturating_sub(first_function)),
             class_natives: Column::below(Function::CLASS_NATIVE.saturating_sub(first_class_native)),
@@ -393,20 +401,21 @@ impl Arena {
     }
 
     /// The landing word of opline `at` of the held op array at `offset`,
-    /// for a tier to arm: this epoch's, named in the landing index
-    /// compiled code reads ([`crate::tier::published::Funcs::lay_landing`]),
-    /// or this epoch's of the preload's below it, which the index names
-    /// none of.
+    /// this epoch's or the preload's below it ([`Arena::func`]), for a
+    /// tier to arm, named in the landing index compiled code reads
+    /// ([`crate::tier::published::Landings::lay`]).
     pub(crate) fn lay_landing(
         &self,
         offset: u32,
         at: php_unit::OplineIdx,
     ) -> Option<&crate::tier::Word> {
-        let own = &self.files.funcs;
-        if own.get(offset).is_some() {
-            return own.lay_landing(offset, at);
-        }
-        self.below.as_ref()?.funcs.get(offset)?.lay_landing(at)
+        self.landings.lay(self.func(offset)?, offset, at)
+    }
+
+    /// Where compiled code finds the landing words of this epoch's op
+    /// arrays and its rows of the preload's (`jit-design.md` §4.9).
+    pub(crate) fn landing_index(&self) -> crate::tier::LandingIndex {
+        self.landings.index()
     }
 
     /// The published user function or method `function` names; none for
@@ -747,6 +756,40 @@ mod tests {
         let armed = first.func(5).map(|func| func.landing(OplineIdx(1)));
         assert!(armed.is_some_and(|word| word.halves()[1].load(Relaxed) == 0));
         assert!(second.func(4).is_none() && second.func(6).is_none());
+    }
+
+    /// A landing armed in a preloaded op array is named in the landing
+    /// index of the epoch that armed it, as one of the epoch's own is
+    /// (#3568), and a restart's epoch, which
+    /// lays the preload's words afresh, names none of the old epoch's,
+    /// and its own where it arms one.
+    #[test]
+    fn an_epochs_landing_index_names_its_landings_of_the_preload() {
+        use php_unit::OplineIdx;
+
+        let epochs = Epochs::of(Arena::past(0, 0, crate::unit_cache::Files::new(16)));
+        let preload = epochs.enter(|_| false);
+        let unit = crate::tier::published::tests::published(5, 2);
+        epochs.lay_base(&preload, Arc::from([unit]), Laid::Counting([3, 0]));
+        let first = epochs.enter(|_| false);
+        let words = |epoch: &Arena| {
+            let func = epoch.func(5)?;
+            Some(std::ptr::from_ref(func.landing(OplineIdx(0))).addr())
+        };
+        assert_eq!(first.landings.named(5), None, "none armed yet");
+        assert!(first.lay_landing(5, OplineIdx(1)).is_some());
+        let named = first.landings.named(5);
+        assert!(named.is_some() && named == words(&first), "{named:?}");
+        let second = epochs.enter(|_| true);
+        assert_eq!(second.landings.named(5), None, "not the old epoch's");
+        assert_eq!(
+            second.landing_index().preloaded,
+            first.landing_index().preloaded
+        );
+        assert!(second.lay_landing(5, OplineIdx(1)).is_some());
+        let renamed = second.landings.named(5);
+        assert!(renamed.is_some() && renamed == words(&second) && renamed != named);
+        assert_eq!(first.landings.named(5), named, "the old epoch's own");
     }
 
     /// The tier's value is the epoch's (`jit-design.md` §4.5): what the
