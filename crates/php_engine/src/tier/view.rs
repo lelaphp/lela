@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use php_heap::ZvalType;
 use php_link::LinkedClass;
-use php_unit::decl::{Parameter, Type};
+use php_unit::decl::{FunctionDecl, Name, Parameter, Type};
 use php_unit::{CacheSlot, MapPtrOffset, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::published::SEALED;
@@ -567,6 +567,15 @@ pub struct UnitView {
     frameless: Vec<(u32, Option<Type>)>,
 }
 
+/// What [`UnitView::declaration`] reads of an op array: the declaration
+/// it is the body of, none for a file's own code, and the name of the
+/// class a method or a property hook is declared in.
+#[derive(Debug, Clone, Copy)]
+pub struct Declaration<'a> {
+    pub function: Option<&'a FunctionDecl>,
+    pub scope: Option<&'a Name>,
+}
+
 /// A view and an epoch hold leave the request's thread with a claim and
 /// a compile job (`jit-design.md` §4.7, §4.8): held here, where they are
 /// defined, so a field that is not `Send` fails the build.
@@ -916,6 +925,19 @@ impl UnitView {
             return None;
         }
         self.epoch.func(f)?.parameters()
+    }
+
+    /// The declaration the op array `f` names is the body of and the class
+    /// it is declared in, php's `function_name` and `scope`, which
+    /// php's analysis of the op array reads; none unless [`UnitView::hold`]
+    /// accepted it.
+    #[must_use]
+    pub fn declaration(&self, f: FuncRef) -> Option<Declaration<'_>> {
+        if !self.funcs.contains(&f) {
+            return None;
+        }
+        let (function, scope) = self.epoch.func(f)?.declaration()?;
+        Some(Declaration { function, scope })
     }
 
     /// The linked record of class `c`; none unless

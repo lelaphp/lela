@@ -46,6 +46,7 @@ tier::Called
 tier::CalleeSlot
 tier::ClassId
 tier::Compiled
+tier::Declaration
 tier::Epoch
 tier::Epoch::fixture
 tier::Epoch::tier_state
@@ -127,6 +128,7 @@ tier::UnitView
 tier::UnitView::cache_slot
 tier::UnitView::call
 tier::UnitView::class
+tier::UnitView::declaration
 tier::UnitView::hold
 tier::UnitView::hold_call
 tier::UnitView::hold_class
