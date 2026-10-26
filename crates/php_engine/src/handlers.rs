@@ -3821,7 +3821,9 @@ pub(crate) fn do_fcall<T: Tier>(
 /// ```
 ///
 /// Where no frame is entered, the file already included, the one that
-/// failed to open and the unit that is one `RETURN` of a constant, the
+/// failed to open and the unit that is one `RETURN` of a constant (a
+/// file of nothing but its open tag, since the compiler's final `RETURN`
+/// follows any the source writes), the
 /// release stands at this opline after the value is written, and
 /// `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` raises what it threw here,
 /// before the opline after it runs.
@@ -3830,19 +3832,20 @@ pub(crate) fn do_fcall<T: Tier>(
 /// class D { function __construct(public string $s) {} function __destruct() { throw new Exception("dtor"); } function __toString(): string { return $this->s; } }
 /// function t($how, $f) { try { $r = $f(); echo "after "; var_dump($r); } catch (Exception $e) { echo $how, ": caught ", $e->getMessage(), "\n"; } }
 /// file_put_contents(__DIR__ . '/one.php', "<?php return 1;");
+/// file_put_contents(__DIR__ . '/empty.php', "<?php ");
 /// include_once __DIR__ . '/one.php';
 /// t('include_once', fn() => include_once new D(__DIR__ . '/one.php'));
-/// t('constant', fn() => include new D(__DIR__ . '/one.php'));
+/// t('constant', fn() => include new D(__DIR__ . '/empty.php'));
 /// t('missing', fn() => include new D(__DIR__ . '/missing.php'));
-/// unlink(__DIR__ . '/one.php');
+/// unlink(__DIR__ . '/one.php'); unlink(__DIR__ . '/empty.php');
 /// ```
 /// ```expect
 /// include_once: caught dtor
 /// constant: caught dtor
 ///
-/// Warning: include(%s/missing.php): Failed to open stream: No such file or directory in %s on line 8
+/// Warning: include(%s/missing.php): Failed to open stream: No such file or directory in %s on line 9
 ///
-/// Warning: include(): Failed opening '%s/missing.php' for inclusion (include_path='%s') in %s on line 8
+/// Warning: include(): Failed opening '%s/missing.php' for inclusion (include_path='%s') in %s on line 9
 /// missing: caught dtor
 /// ```
 pub(crate) fn include_or_eval<T: Tier>(
