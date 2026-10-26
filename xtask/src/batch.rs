@@ -12,9 +12,11 @@
 //! then judge each crate on its own part of the one run.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -124,6 +126,71 @@ impl Built {
     /// Every diagnostic, rendered, in the order rustc gave them.
     pub(crate) fn rendered(&self) -> String {
         self.messages.iter().map(|m| m.rendered.as_str()).collect()
+    }
+}
+
+/// How many builds of one test target a run leaves standing, its own
+/// among them.
+const KEPT: usize = 2;
+
+impl Built {
+    /// Each older build of each test executable the run built removed,
+    /// but the newest [`KEPT`], with its `.d` and `.dSYM`. A test
+    /// executable is named for its unit's metadata hash, which covers the
+    /// features cargo unified over every package a run selected, so a run
+    /// selecting another set builds a second executable beside the first,
+    /// and cargo removes neither: one worktree's `deps/` held 490
+    /// `capture-*` and 234 `leak_sensor-*`, 6.3 GB. A build is the same
+    /// target's where `.fingerprint/<package>-<hash>/` holds the same
+    /// fingerprint file as the new one's, so a binary's own build and
+    /// another package's target of the same name are left standing.
+    fn sweep(&self) {
+        for executable in &self.executables {
+            let (Some(deps), Some(file)) = (executable.path.parent(), executable.path.file_name())
+            else {
+                continue;
+            };
+            let Some((stem, hash)) = file.to_str().and_then(|f| f.rsplit_once('-')) else {
+                continue;
+            };
+            let unit = |hash: &str| {
+                deps.with_file_name(".fingerprint")
+                    .join(format!("{}-{hash}", self.package.name))
+            };
+            let print = fs::read_dir(unit(hash))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .find_map(|e| {
+                    let name = e.file_name().into_string().ok()?;
+                    (name.starts_with("test-") && Path::new(&name).extension().is_none())
+                        .then_some(name)
+                });
+            let Some(print) = print else { continue };
+            let mut older: Vec<(SystemTime, String)> = fs::read_dir(deps)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().into_string().ok()?;
+                    let other = name.strip_prefix(stem)?.strip_prefix('-')?;
+                    let same = other != hash
+                        && other.len() == 16
+                        && other.bytes().all(|b| b.is_ascii_hexdigit())
+                        && unit(other).join(&print).is_file();
+                    let made = e.metadata().and_then(|m| m.modified()).ok()?;
+                    same.then(|| (made, other.to_owned()))
+                })
+                .collect();
+            older.sort_by(|a, b| b.cmp(a));
+            for (_, other) in older.iter().skip(KEPT - 1) {
+                let built = deps.join(format!("{stem}-{other}"));
+                fs::remove_file(&built).ok();
+                fs::remove_file(built.with_extension("d")).ok();
+                fs::remove_dir_all(built.with_extension("dSYM")).ok();
+                fs::remove_dir_all(unit(other)).ok();
+            }
+        }
     }
 }
 
@@ -322,6 +389,7 @@ impl Run {
         for krate in run.crates.values_mut() {
             krate.whole =
                 krate.count("error") == 0 && krate.wanted.iter().all(|t| krate.made.contains(t));
+            krate.sweep();
         }
         Ok(run)
     }
@@ -494,9 +562,10 @@ pub(crate) fn tail(text: &str, n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
 
-    use super::{dir_of, tail};
+    use super::{Built, Executable, Package, dir_of, tail};
 
     #[test]
     fn a_package_id_names_its_directory_whatever_follows_the_hash() {
@@ -512,6 +581,72 @@ mod tests {
             dir_of("registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0"),
             None
         );
+    }
+
+    #[test]
+    fn a_run_leaves_the_newest_two_builds_of_its_test_target_and_no_other_units_build() {
+        let dir = crate::scratch::Tree::new("batch-sweep").unwrap();
+        let (deps, prints) = (dir.path().join("deps"), dir.path().join(".fingerprint"));
+        let unit = |package: &str, hash: &str, print: &str| {
+            fs::create_dir_all(prints.join(format!("{package}-{hash}"))).unwrap();
+            fs::write(prints.join(format!("{package}-{hash}")).join(print), "").unwrap();
+        };
+        let lay = |name: &str| {
+            fs::create_dir_all(&deps).unwrap();
+            fs::write(deps.join(name), "").unwrap();
+            fs::write(deps.join(format!("{name}.d")), "").unwrap();
+            fs::create_dir_all(deps.join(format!("{name}.dSYM"))).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let capture = "test-integration-test-capture";
+        // Three older builds of php_ext_a's capture, another package's
+        // capture, and the binary of php_ext_a's own `capture` bin.
+        for hash in ["000000000000000a", "000000000000000b", "000000000000000c"] {
+            unit("php_ext_a", hash, capture);
+            lay(&format!("capture-{hash}"));
+        }
+        unit("php_ext_b", "00000000000000b0", capture);
+        lay("capture-00000000000000b0");
+        unit("php_ext_a", "00000000000000e0", "bin-capture");
+        lay("capture-00000000000000e0");
+        unit("php_ext_a", "00000000000000ff", capture);
+        lay("capture-00000000000000ff");
+        let built = Built {
+            executables: vec![Executable {
+                path: deps.join("capture-00000000000000ff"),
+                name: "capture".into(),
+                kind: "test".into(),
+            }],
+            package: Package {
+                name: "php_ext_a".into(),
+                ..Package::default()
+            },
+            ..Built::default()
+        };
+        built.sweep();
+        let mut left: Vec<String> = fs::read_dir(&deps)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| !n.contains('.'))
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "capture-000000000000000c",
+                "capture-00000000000000b0",
+                "capture-00000000000000e0",
+                "capture-00000000000000ff",
+            ]
+        );
+        for gone in [
+            "capture-000000000000000a.d",
+            "capture-000000000000000b.dSYM",
+        ] {
+            assert!(!deps.join(gone).exists(), "{gone} stands");
+        }
+        assert!(!prints.join("php_ext_a-000000000000000a").exists());
+        assert!(prints.join("php_ext_a-000000000000000c").exists());
     }
 
     #[test]
