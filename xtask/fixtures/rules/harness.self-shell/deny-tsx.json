@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "printf 'export default {};\\n' | tee harness-plugins/hooks/x.tsx"}}

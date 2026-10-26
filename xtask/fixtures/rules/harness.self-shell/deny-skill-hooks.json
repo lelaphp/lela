@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "cp /tmp/allow.ts .claude/skills/x/hooks/allow.ts"}}

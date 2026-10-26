@@ -1,0 +1,1 @@
+{"tool_name":"Write","tool_input":{"file_path":".claude/skills/x/.claude-plugin/plugin.json","content":"{\"name\":\"harness\",\"hooks\":\"./hooks/hooks.json\"}\n"}}
