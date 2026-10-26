@@ -3869,6 +3869,12 @@ pub(crate) fn include_or_eval<T: Tier>(
         }
         Err(thrown) => Ok(Included::threw(req, frame, &thrown)),
     };
+    let made = made?;
+    if let Included::Entered(callee) = made
+        && req.shared.declared().hooked.user
+    {
+        return included_under_hook(req, frame, op, callee, returns_to);
+    }
     // `FREE_OP1()`: the operand stands while the file is opened and its
     // frame pushed. Where the frame was entered it goes with that frame
     // current, before `ZEND_VM_ENTER`, so what its destructor throws is
@@ -3876,11 +3882,70 @@ pub(crate) fn include_or_eval<T: Tier>(
     // on every other path it goes at this opline, and
     // `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` raises what it threw here.
     exec::free_operand(req, frame, op.op1_type, op.op1);
-    Ok(match made? {
+    Ok(match made {
         Included::Entered(callee) if req.is_pending() => Stepped::Threw(callee).into(),
         Included::Entered(callee) => Stepped::Pushed(callee).into(),
         Included::Answered => advance(req, frame),
         Included::Threw(at) => Stepped::Threw(at).into(),
+    })
+}
+
+/// `INCLUDE_OR_EVAL`'s arm where `zend_execute_ex` is not `execute_ex`,
+/// which the tier the engine binds takes where it hooks user op arrays
+/// (`Hooked::user`, phpdbg's loop): the code frame `callee` served to its
+/// end by the engine's loop entered once more, as php's
+/// `zend_execute_ex(call)` serves it, then popped, its value written,
+/// and only then `FREE_OP1()`, so what the operand's destructor throws
+/// is raised at this opline once the code was served
+/// (`Z/Zend/zend_vm_def.h:6604-6626`). A throwable the code left pending
+/// is raised here too, the value unwritten.
+///
+/// ```php
+/// class D { function __construct(public string $s) {} function __destruct() { throw new Exception("dtor"); } function __toString(): string { return $this->s; } }
+/// try { eval(new D("echo 'ran ';")); echo "after\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// try { var_dump(eval(new D("try { echo 'ran '; } catch (Exception \$e) { echo 'inner '; } return 5;"))); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// ```
+/// ```request phpdbg
+/// r
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> ran caught dtor
+/// ran caught dtor
+/// [Script ended normally]
+/// prompt>
+/// ```
+#[cold]
+#[inline(never)]
+fn included_under_hook(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    callee: FrameRef,
+    returns_to: Option<(FrameRef, u32)>,
+) -> Edge {
+    let standing = req.vm().depth().saturating_sub(1);
+    let reenter = req.shared.loops.reenter;
+    let served = reenter(req, callee);
+    let served = req.fatal_of(served);
+    req.leave_code(standing, callee);
+    if let Err(thrown) = served {
+        exec::free_operand(req, frame, op.op1_type, op.op1);
+        req.leave_pending(&thrown);
+        return Ok(Stepped::Threw(frame).into());
+    }
+    let returned = req.take_returned();
+    if req.is_pending() {
+        req.release(returned);
+    } else {
+        answered(req, returns_to, returned);
+    }
+    exec::free_operand(req, frame, op.op1_type, op.op1);
+    Ok(if req.is_pending() {
+        Stepped::Threw(frame).into()
+    } else {
+        advance(req, frame)
     })
 }
 
