@@ -7,6 +7,7 @@
 //! row of a foreach walk holding nothing, destroyed where the program
 //! lets it go and its bytes kept to the step's end.
 
+use crate::api::values::ClassId;
 use std::ops::ControlFlow;
 
 use php_macros::php_function;
@@ -25,7 +26,7 @@ fn table(req: &mut Request, array: &Ref<PhpArray>) -> Result<PhpArray, Thrown> {
     array
         .get()
         .copied()
-        .ok_or_else(|| throw_error(req, "Exception", "no array"))
+        .ok_or_else(|| throw_error(req, ClassId::EXCEPTION, "no array"))
 }
 
 /// The hold the test natives' `$owner` names: [`Hold::Owner`] where true.
@@ -66,7 +67,11 @@ fn foreach_rows(
 fn foreach_throws(req: &mut Request, array: Ref<PhpArray>, owner: bool) -> Result<(), Thrown> {
     let table = table(req, &array)?;
     walk::foreach(req, table, hold(owner), |req, _| -> walk::Step {
-        Err(throw_error(req, "Exception", "thrown at the first row"))
+        Err(throw_error(
+            req,
+            ClassId::EXCEPTION,
+            "thrown at the first row",
+        ))
     })?;
     Ok(())
 }
@@ -93,11 +98,15 @@ fn guarded_throws(req: &mut Request, array: Ref<PhpArray>) -> Result<(), Thrown>
             } else {
                 "not inside"
             };
-            Err(throw_error(req, "Exception", said))
+            Err(throw_error(req, ClassId::EXCEPTION, said))
         },
     )?;
     let Guarded::Walked(_) = walked else {
-        return Err(throw_error(req, "Exception", "recursive at the start"));
+        return Err(throw_error(
+            req,
+            ClassId::EXCEPTION,
+            "recursive at the start",
+        ));
     };
     Ok(())
 }
@@ -133,7 +142,11 @@ fn foreach_calls(
         call_then_read(req, &f, row, &mut read)
     })?;
     if walked == Guarded::Recursive {
-        return Err(throw_error(req, "Exception", "recursive at the start"));
+        return Err(throw_error(
+            req,
+            ClassId::EXCEPTION,
+            "recursive at the start",
+        ));
     }
     PhpString::new(req, read.as_bytes())
 }
@@ -168,7 +181,7 @@ fn live_reads(
     f: Callable,
 ) -> Result<Owner<PhpString>, Thrown> {
     let Some(holder) = array.reference() else {
-        return Err(throw_error(req, "Exception", "no reference"));
+        return Err(throw_error(req, ClassId::EXCEPTION, "no reference"));
     };
     let mut read = String::new();
     walk::live(req, holder, |req, row| {
@@ -217,7 +230,7 @@ fn object_rows(
     owner: bool,
 ) -> Result<Owner<PhpString>, Thrown> {
     let Some(object) = o.get().copied() else {
-        return Err(throw_error(req, "Exception", "no object"));
+        return Err(throw_error(req, ClassId::EXCEPTION, "no object"));
     };
     let table = object.property_table(req)?;
     let mut read = String::new();
@@ -248,7 +261,7 @@ fn object_rows(
 #[php_function]
 fn object_guarded(req: &mut Request, o: Ref<PhpObject>) -> Result<Owner<PhpString>, Thrown> {
     let Some(object) = o.get().copied() else {
-        return Err(throw_error(req, "Exception", "no object"));
+        return Err(throw_error(req, ClassId::EXCEPTION, "no object"));
     };
     let table = object.property_table(req)?;
     let inner = table.clone();

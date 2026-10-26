@@ -34,6 +34,7 @@ use crate::model::{
 };
 use crate::shared::{add_soap_fault_ex, client_throws, instance_of, new_fault};
 use crate::table::Table;
+use crate::throwables::Throwables;
 use crate::xml::{attr_content, get_attribute, get_node, node_is_equal};
 use crate::{Error, Res, SOAP_1_1, SOAP_1_2, State, Typemap, TypemapView, raised};
 
@@ -574,15 +575,16 @@ fn server_exception(
     function: Option<&Function>,
     thrown: Thrown,
 ) -> R<()> {
+    let ce = Throwables::of(req)?;
     let Some(exception) = thrown.exception().copied() else {
         return Err(thrown);
     };
-    if instance_of(req, exception, "SoapFault") {
+    if exception.instance_of(req, ce.soap_fault) {
         let value = exception.as_value();
         soap_server_fault_ex(req, sdl, function, value, &[])?;
         return clear(req, thrown);
     }
-    if instance_of(req, exception, "Error") {
+    if exception.instance_of(req, ce.error) {
         let send = this
             .native::<Server>(req)
             .and_then(|s| s.service.as_ref())
@@ -618,7 +620,8 @@ fn service_of(req: &mut Request, this: PhpObject) -> R<()> {
         .and_then(|s| s.service.as_ref())
         .is_none()
     {
-        return Err(throw_error(req, "Error", "Cannot fetch SoapServer object"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "Cannot fetch SoapServer object"));
     }
     Ok(())
 }
@@ -763,9 +766,10 @@ impl SoapServer {
         };
         let Some(list) = service.added_headers.as_mut() else {
             value.give_up(req);
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "SoapServer::addSoapHeader() may be called only during SOAP request processing",
             ));
         };
@@ -796,9 +800,10 @@ impl SoapServer {
         if kind == Some(ServiceKind::Class) {
             if mode == PERSISTENCE_SESSION || mode == PERSISTENCE_REQUEST {
                 if mode == PERSISTENCE_SESSION && req.extensions().named(b"session").is_none() {
+                    let ce = Throwables::of(req)?;
                     return Err(throw_error(
                         req,
-                        "Error",
+                        ce.error,
                         "SoapServer::setPersistence(): Session persistence cannot be enabled because the session module is not enabled",
                     ));
                 }
@@ -814,9 +819,10 @@ impl SoapServer {
                 ))
             }
         } else {
+            let ce = Throwables::of(req)?;
             Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "SoapServer::setPersistence(): Persistence cannot be set when the SOAP server is used in function mode",
             ))
         }
@@ -849,9 +855,10 @@ impl SoapServer {
         let object = this.object();
         let Some(ce) = php_ext::call::autoload(req, class.as_bytes())? else {
             let shown = String::from_utf8_lossy(class.as_bytes()).into_owned();
+            let ce = Throwables::of(req)?;
             return Err(argument_error(
                 req,
-                "TypeError",
+                ce.type_error,
                 1,
                 &format!("must be a valid class name, {shown} given"),
             ));
@@ -1002,9 +1009,10 @@ impl SoapServer {
                     .collect();
                 for name in names {
                     let Some(name) = name else {
+                        let ce = Throwables::of(req)?;
                         return Err(argument_error(
                             req,
-                            "TypeError",
+                            ce.type_error,
                             1,
                             "must contain only strings",
                         ));
@@ -1026,9 +1034,10 @@ impl SoapServer {
                 let name = name.as_bytes().to_vec();
                 let Some(declared) = declared_function(req, &name) else {
                     let shown = String::from_utf8_lossy(&name).into_owned();
+                    let ce = Throwables::of(req)?;
                     return Err(argument_error(
                         req,
-                        "TypeError",
+                        ce.type_error,
                         1,
                         &format!("must be a valid function name, function \"{shown}\" not found"),
                     ));
@@ -1066,11 +1075,17 @@ impl SoapServer {
             }
             _ => {
                 let shown = value_name(req, &given);
+                let ce = Throwables::of(req)?;
                 Err(argument_error(
                     req,
-                    "TypeError",
+                    ce.type_error,
                     1,
-                    &format!("must be of type array|string|int, {shown} given"),
+                    &[
+                        b"must be of type array|string|int, ".as_slice(),
+                        &shown,
+                        b" given",
+                    ]
+                    .concat(),
                 ))
             }
         }
@@ -1731,6 +1746,7 @@ fn serve(
     kind: ServiceKind,
     uri: Option<&[u8]>,
 ) -> Res<()> {
+    let ce = Throwables::of(req)?;
     let parsed = deserialize_function_call(req, sdl, doc_request, actor, soap_action);
     doc_request.free_document();
     let mut parsed = match parsed {
@@ -1775,7 +1791,7 @@ fn serve(
                 }
                 match found {
                     Some(o) => Some(o),
-                    None => match php_ext::call::instantiate(req, class, &argv) {
+                    None => match php_ext::call::instantiate(req, class, &argv, &[]) {
                         Ok(obj) => {
                             // The object's one owner, moved into the
                             // session or kept as `made` until the call is
@@ -1840,7 +1856,7 @@ fn serve(
                 }
                 let retval = parsed.headers[i].retval.deref();
                 if let ValueRef::Object(o) = retval.as_ref()
-                    && instance_of(req, o, "SoapFault")
+                    && o.instance_of(req, ce.soap_fault)
                 {
                     discard(req);
                     let one = std::slice::from_ref(&parsed.headers[i]);
@@ -1916,7 +1932,7 @@ fn serve(
             });
         }
         if let ValueRef::Object(o) = retval.deref().as_ref()
-            && instance_of(req, o, "SoapFault")
+            && o.instance_of(req, ce.soap_fault)
         {
             discard(req);
             let r = soap_server_fault_ex(req, sdl, function, *retval, &[]);

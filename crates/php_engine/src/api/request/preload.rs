@@ -735,7 +735,7 @@ impl Request {
         local: ClassId,
         renumbered: &HashMap<ClassId, ClassId>,
     ) -> Result<ClassId, String> {
-        let name = self.symbols().class_name(local);
+        let name = String::from_utf8_lossy(self.symbols().class_name(local)).into_owned();
         let shared = |class: ClassId| match renumbered.get(&class) {
             Some(published) => Some(*published),
             None => class.is_published().then_some(class),
@@ -997,6 +997,11 @@ mod tests {
     /// How many rounds each side runs.
     const ROUNDS: usize = 40;
 
+    /// The name `class` is declared under, as the rounds hand it on.
+    fn name_of(req: &Request, class: ClassId) -> String {
+        String::from_utf8_lossy(req.symbols().class_name(class)).into_owned()
+    }
+
     /// One thread publishes into the engine's arena as the preload does,
     /// round after round, while a request on another declares classes of
     /// its own and reads each class the first published as it is handed
@@ -1024,7 +1029,7 @@ mod tests {
                         return Err(format!("round {round} published nothing"));
                     };
                     for named in preloaded.classes.rows.iter() {
-                        let name = req.symbols().class_name(named.class);
+                        let name = name_of(&req, named.class);
                         assert!(named.class.is_published(), "{name} is published");
                         published.push((named.class, name.clone()));
                         if handed.send((named.class, name)).is_err() {
@@ -1034,7 +1039,7 @@ mod tests {
                     // Every number published so far still names its
                     // class, however many the request declared meanwhile.
                     for (class, name) in &published {
-                        assert_eq!(req.symbols().class_name(*class), *name, "{class:?} moved");
+                        assert_eq!(name_of(&req, *class), *name, "{class:?} moved");
                     }
                 }
                 Ok(published)
@@ -1074,12 +1079,12 @@ mod tests {
                         seen.push(handed);
                     }
                     for (class, name) in own.iter().chain(&seen) {
-                        assert_eq!(req.symbols().class_name(*class), *name, "{class:?} moved");
+                        assert_eq!(name_of(&req, *class), *name, "{class:?} moved");
                     }
                 }
                 seen.extend(taken.iter());
                 for (class, name) in own.iter().chain(&seen) {
-                    assert_eq!(req.symbols().class_name(*class), *name, "{class:?} moved");
+                    assert_eq!(name_of(&req, *class), *name, "{class:?} moved");
                 }
                 let child = seen
                     .iter()
@@ -1103,7 +1108,7 @@ mod tests {
             let reader = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
             assert_eq!(numbers.as_ref().map(Vec::len), Ok(2 * ROUNDS));
             for (class, name) in numbers.expect("the publisher's numbers") {
-                assert_eq!(reader.symbols().class_name(class), name, "{class:?} moved");
+                assert_eq!(name_of(&reader, class), name, "{class:?} moved");
             }
         });
     }
@@ -1140,7 +1145,7 @@ mod tests {
         let names: Vec<(ClassId, String)> = published
             .iter()
             .flat_map(|published| published.classes.rows.iter())
-            .map(|named| (named.class, req.symbols().class_name(named.class)))
+            .map(|named| (named.class, name_of(&req, named.class)))
             .collect();
         let order: Vec<&str> = names.iter().map(|(_, name)| name.as_str()).collect();
         assert_eq!(order, ["C", "T", "P"]);

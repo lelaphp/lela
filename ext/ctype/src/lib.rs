@@ -126,10 +126,12 @@ fn ctype(
     docref(
         req,
         Level::Deprecated,
-        &format!(
-            "Argument of type {} will be interpreted as string in the future",
-            type_name(req, &given)
-        ),
+        &[
+            b"Argument of type ".as_slice(),
+            &type_name(req, &given),
+            b" will be interpreted as string in the future",
+        ]
+        .concat(),
     );
     match given.as_ref() {
         ValueRef::Int(n) => match u8::try_from(n).or_else(|_| u8::try_from(n + 256)) {

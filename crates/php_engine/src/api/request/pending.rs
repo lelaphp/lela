@@ -300,9 +300,9 @@ impl Request {
         };
         self.clear_fatal_error_backtrace();
         let class = self.class_name_of(throwable);
-        let compile_time = match class.as_str() {
-            "ParseError" => Some(Level::Parse),
-            "CompileError" => Some(Level::CompileError),
+        let compile_time = match class.as_slice() {
+            b"ParseError" => Some(Level::Parse),
+            b"CompileError" => Some(Level::CompileError),
             _ => None,
         };
         let message = if compile_time.is_some() {
@@ -323,7 +323,7 @@ impl Request {
                     } else {
                         crate::api::raising::warning(
                             self,
-                            &format!("{class}::__toString() must return a string"),
+                            &bytes!(class, b"::__toString() must return a string"),
                         );
                     }
                     self.release(returned);
@@ -387,12 +387,13 @@ impl Request {
         Err(Thrown::of(None))
     }
 
-    /// The declared name of a throwable's class, `Error` for one the
+    /// The declared name of a throwable's class as `%s` prints
+    /// `ZSTR_VAL(ce->name)`, its bytes up to a NUL, `Error` for one the
     /// tables do not know.
-    fn class_name_of(&self, throwable: PhpObject) -> String {
+    fn class_name_of(&self, throwable: PhpObject) -> Vec<u8> {
         self.symbols().class_decl(throwable.class()).map_or_else(
-            || String::from("Error"),
-            |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
+            || b"Error".to_vec(),
+            |decl| php_unit::decl::shown_bytes(&decl.name.0).to_vec(),
         )
     }
 
@@ -460,13 +461,13 @@ impl Request {
             // `ArgumentCountError` whose message names the call site is
             // closed with ` and defined`, the class itself and not what
             // descends from it.
-            if (class == "TypeError" || class == "ArgumentCountError")
+            if (class == b"TypeError" || class == b"ArgumentCountError")
                 && message.windows(12).any(|window| window == b", called in ")
             {
                 message.extend_from_slice(b" and defined");
             }
             let trace = self.served_trace(trace_as_string, exception, &mut raised);
-            let mut rendered = class.into_bytes();
+            let mut rendered = class;
             if !message.is_empty() {
                 rendered.extend_from_slice(b": ");
                 rendered.extend_from_slice(&message);

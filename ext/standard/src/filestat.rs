@@ -58,6 +58,7 @@ use php_ext::request::{Realpaths, Request, Streams as _, UrlStat, WrapperOp};
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi;
+use crate::throwables::Throwables;
 
 /// `S_IFMT` and the file types `filetype` names, with `S_IFLNK`, which
 /// `php_stat` tests before the rest.
@@ -1160,9 +1161,10 @@ fn touch(
         (None, None) => None,
         (Some(mtime), None) => Some((mtime, mtime)),
         (None, Some(_)) => {
+            let ce = Throwables::of(req)?;
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 2,
                 "cannot be null when argument #3 ($atime) is an integer",
             ));

@@ -184,7 +184,8 @@ fn socket_addrinfo_lookup(
     #[php(default = [])] hints: PhpArray,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     if !hints.is_empty() && hints.is_list() {
-        return Err(argument_error(req, "ValueError", 3, HINT_KEYS));
+        let ce = crate::throwables::Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 3, HINT_KEYS));
     }
     let want = match hints_wanted(req, hints) {
         Ok(want) => want,
@@ -251,7 +252,7 @@ enum Refused {
     /// A key that is no hint's name.
     Keys,
     /// A hint whose value is no int, with its type's name.
-    NotInt { name: String, given: String },
+    NotInt { name: String, given: Vec<u8> },
     /// An `ai_family` that is neither `AF_INET` nor `AF_INET6`.
     Family,
     /// A hint outside `0..=i32::MAX`.
@@ -261,21 +262,30 @@ enum Refused {
 impl Refused {
     /// php's refusal of argument 3.
     fn raise(self, req: &mut Request) -> Thrown {
+        let ce = match crate::throwables::Throwables::of(req) {
+            Ok(ce) => ce,
+            Err(fatal) => return fatal,
+        };
         match self {
-            Refused::Keys => argument_error(req, "ValueError", 3, HINT_KEYS),
+            Refused::Keys => argument_error(req, ce.value_error, 3, HINT_KEYS),
             Refused::NotInt { name, given } => {
-                let tail = format!("\"{name}\" key must be of type int, {given} given");
-                argument_error(req, "TypeError", 3, &tail)
+                let head = format!("\"{name}\" key must be of type int, ");
+                argument_error(
+                    req,
+                    ce.type_error,
+                    3,
+                    &[head.as_bytes(), &given, b" given"].concat(),
+                )
             }
             Refused::Family => argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 3,
                 "\"ai_family\" key must be AF_INET or AF_INET6",
             ),
             Refused::Range { name } => {
                 let tail = format!("\"{name}\" key must be between 0 and {}", i32::MAX);
-                argument_error(req, "ValueError", 3, &tail)
+                argument_error(req, ce.value_error, 3, &tail)
             }
         }
     }

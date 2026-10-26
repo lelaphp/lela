@@ -172,11 +172,12 @@ impl IntlIterator {
 /// `INTLITERATOR_METHOD_FETCH_OBJECT`: the object's error reset, the
 /// cursor, or php's `Error` for an object no factory made.
 fn fetch(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     error::reset_object::<IteratorObject>(req, object);
     if cursor(req, object).is_none() {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Found unconstructed IntlIterator",
         ));
     }
@@ -197,13 +198,14 @@ fn with_cursor<T>(
     object: PhpObject,
     f: impl FnOnce(&mut Request, &mut Cursor) -> Result<T, Thrown>,
 ) -> Result<T, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let taken = object
         .native_mut::<IteratorObject>(req)
         .and_then(|o| o.cursor.take());
     let Some(mut cursor) = taken else {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Found unconstructed IntlIterator",
         ));
     };
@@ -415,16 +417,17 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         by_ref: bool,
     ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         if by_ref {
             return Err(throw(
                 req,
-                "Exception",
+                ce.exception,
                 "Iteration by reference is not supported",
             ));
         }
         if cursor(req, object).is_none() {
             let message = "The IntlIterator is not properly constructed";
-            return Err(throw(req, "Exception", message));
+            return Err(throw(req, ce.exception, message));
         }
         Ok(Some(Box::new(Shared)))
     }

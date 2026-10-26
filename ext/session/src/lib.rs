@@ -36,6 +36,7 @@ mod natives;
 mod progress;
 mod serializers;
 mod session;
+mod throwables;
 mod user;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, IntoReturn};
@@ -52,6 +53,7 @@ use crate::natives::{
     session_register_shutdown, session_reset, session_save_path, session_set_cookie_params,
     session_set_save_handler, session_start, session_status, session_unset, session_write_close,
 };
+use crate::throwables::Throwables;
 use crate::user::{
     SessionHandler, SessionHandlerInterface, SessionIdInterface,
     SessionUpdateTimestampHandlerInterface,
@@ -269,6 +271,7 @@ pub fn extension() -> Extension {
         .class::<SessionHandler>();
     ini::register(builder)
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .rinit(session::rinit)
         .rshutdown(session::rshutdown)
         .upload(progress::hook)
@@ -476,7 +479,10 @@ fn absorb<T>(req: &mut Request, done: Result<T, Thrown>) -> Result<Option<T>, Th
 /// `zend_throw_error(NULL, ...)` where no throwable is pending yet.
 fn throw_error(req: &mut Request, message: &str) {
     if req.state::<State>().thrown.is_none() {
-        let thrown = php_ext::raising::throw_error(req, "Error", message);
+        let thrown = match Throwables::of(req) {
+            Ok(ce) => php_ext::raising::throw_error(req, ce.error, message),
+            Err(fatal) => fatal,
+        };
         req.state::<State>().thrown = Some(thrown);
     }
 }

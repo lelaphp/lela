@@ -22,12 +22,12 @@ use crate::api::abi::{Encoding, Multibyte};
 use crate::api::raising::{Cause, Level, Thrown, docref, throw_exception_ex};
 use crate::api::request::temporary::TemporaryGuard;
 use crate::api::request::{BodyLimits, Input, Request, Upload};
-use crate::api::values::{Emalloc, Owner, PhpArray, PhpString, Value};
+use crate::api::values::{ClassId, Emalloc, Owner, PhpArray, PhpString, Value};
 use crate::c_number::{c_str, is_space};
 
 /// The class `EMIT_WARNING_OR_ERROR` throws under `request_parse_body()`
 /// (`Z/main/rfc1867.c:716`).
-const PARSE_BODY_EXCEPTION: &str = "RequestParseBodyException";
+const PARSE_BODY_EXCEPTION: ClassId = ClassId::REQUEST_PARSE_BODY_EXCEPTION;
 
 /// `FILLUNIT` (`Z/main/rfc1867.c:188`).
 const FILLUNIT: usize = 1024 * 5;

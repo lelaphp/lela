@@ -216,7 +216,7 @@ impl Request {
             }
             Target::Function(function) => {
                 let name = self.declared_name(function);
-                Ok(Value::string(self.string(name.as_bytes())?))
+                Ok(Value::string(self.string(&name)?))
             }
             Target::Method {
                 function,
@@ -226,14 +226,14 @@ impl Request {
                 let first = if let Some(object) = this {
                     Owner::take(self, object.as_value())
                 } else {
-                    let class = self.symbols().class_name(scope);
-                    let class = Value::string(self.string(class.as_bytes())?);
+                    let class = self.symbols().class_name(scope).to_vec();
+                    let class = Value::string(self.string(&class)?);
                     Owner::adopt(class)
                 };
                 let name = self.declared_name(function);
                 let mut pair = self.array()?;
                 pair.append(self, first)?;
-                let name = Value::string(self.string(name.as_bytes())?);
+                let name = Value::string(self.string(&name)?);
                 pair.append(self, Owner::adopt(name))?;
                 Ok(Value::array(pair))
             }

@@ -493,6 +493,7 @@ impl Request {
             Family::Known => {
                 crate::api::raising::pending(self)?;
                 let name = self.qualified_name_of(function);
+                let name = String::from_utf8_lossy(&name);
                 self.end_in_core_error(&format!("Couldn't execute method {name}"));
                 Err(Thrown::of(None))
             }
@@ -1006,8 +1007,9 @@ impl Request {
     pub(crate) fn param_must_be_ref(&mut self, function: Function, number: u32) {
         let callee = self.qualified_name(function, None);
         let name = crate::api::raising::arg_name_suffix(self, Some(function), number);
-        let message = format!(
-            "{callee}(): Argument #{number}{name} must be passed by reference, value given"
+        let message = bytes!(
+            callee,
+            format!("(): Argument #{number}{name} must be passed by reference, value given")
         );
         crate::api::raising::warning(self, &message);
     }
@@ -1544,10 +1546,7 @@ impl Request {
         }
         let Some(entry) = self.entry_of(function) else {
             let name = self.declared_name(function);
-            return Err(crate::api::raising::undefined_function(
-                self,
-                name.as_bytes(),
-            ));
+            return Err(crate::api::raising::undefined_function(self, &name));
         };
         self.serve_entry(function, entry, on_throw)
     }

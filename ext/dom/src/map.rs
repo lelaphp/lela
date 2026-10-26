@@ -15,6 +15,7 @@ use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRe
 use php_ext_libxml::ffi::{DtdTable, Kind, Node};
 
 use crate::object::{Dom, Extra};
+use crate::throwables::Throwables;
 use crate::{class_name, dom, dom_mut, node_of, object_for, string};
 
 /// What a map lists: `dom_nnodemap_object`'s handler and the fields it
@@ -503,7 +504,7 @@ fn illegal_offset(
     value: &Value,
     read: DimensionRead,
 ) -> Thrown {
-    let class = req.symbols().class_name(object.class());
+    let class = req.symbols().class_name(object.class()).to_vec();
     php_ext::raising::illegal_container_offset(req, &class, value, read)
 }
 
@@ -644,7 +645,8 @@ impl ObjectHandlers for MapHandlers {
             } else {
                 format!("Cannot append to {name}")
             };
-            return Err(throw_error(req, "Error", &message));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, &message));
         };
         if dims != Dims::Legacy {
             return match (dims, modern_index(req, offset_value)?) {
@@ -727,7 +729,8 @@ impl ObjectHandlers for MapHandlers {
     ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
         if by_ref {
             let message = "An iterator cannot be used with foreach by reference";
-            return Err(throw_error(req, "Error", message));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, message));
         }
         let current = item(req, object, 0)?;
         Ok(Some(Box::new(NodeIter {
@@ -809,9 +812,10 @@ impl ClassIterator for NodeIter {
         if self.steps == 0 {
             return Ok(());
         }
+        let ce = Throwables::of(req)?;
         Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Iterator does not support rewinding",
         ))
     }

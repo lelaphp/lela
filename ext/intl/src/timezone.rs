@@ -68,11 +68,12 @@ pub(crate) fn construct(
 /// (`TIMEZONE_METHOD_INIT_VARS`, `before_args`), and php's `Error` for an
 /// object no factory made.
 fn fetch(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     error::reset_object::<TimeZoneObject>(req, object);
     if zone(req, object).is_none() {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Found unconstructed IntlTimeZone",
         ));
     }
@@ -90,12 +91,13 @@ fn read<T>(
     object: PhpObject,
     f: impl FnOnce(&TimeZone) -> T,
 ) -> Result<T, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     fetch(req, object)?;
     match zone(req, object) {
         Some(zone) => Ok(f(zone)),
         None => Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Found unconstructed IntlTimeZone",
         )),
     }
@@ -170,6 +172,7 @@ impl ObjectHandlers for Handlers {
         left: &Value,
         right: &Value,
     ) -> Result<Option<Ordering>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let (ValueRef::Object(a), ValueRef::Object(b)) = (left.as_ref(), right.as_ref()) else {
             return Std.compare(req, left, right);
         };
@@ -183,7 +186,7 @@ impl ObjectHandlers for Handlers {
             return Ok(tz::php_intl_tz_equals(x, y).then_some(Ordering::Equal));
         }
         let message = "Comparison with at least one unconstructed IntlTimeZone operand";
-        Err(throw(req, "Exception", message))
+        Err(throw(req, ce.exception, message))
     }
 
     /// `TimeZone_get_debug_info`: whether the object holds a zone, its
@@ -257,6 +260,7 @@ pub(crate) fn set(
 /// bool(false)
 /// ```
 fn clone_timezone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let zone = zone(req, object).map(|z| tz::php_intl_tz_clone(z));
     let constructed = zone.is_some();
     let payload = TimeZoneObject {
@@ -274,7 +278,7 @@ fn clone_timezone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObjec
     } else {
         "Cannot clone uninitialized IntlTimeZone"
     };
-    Err(throw_error(req, "Error", message))
+    Err(throw_error(req, ce.error, message))
 }
 
 /// `class IntlTimeZone`: one ICU zone, made by its static factories and
@@ -373,9 +377,10 @@ impl IntlTimeZone {
     /// ```
     #[php(private)]
     fn __construct(req: &mut Request, _this: This<Self>) -> Result<(), Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         Err(throw(
             req,
-            "Exception",
+            ce.exception,
             "An object of this type cannot be created with the new operator",
         ))
     }
@@ -620,10 +625,11 @@ fn from_date_time_zone(
     req: &mut Request,
     timezone: Instance<DateTimeZone>,
 ) -> Result<Option<Owner<Instance<IntlTimeZone>>>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let Some(kind) = php_ext_date::timezone_obj(req, timezone.object()) else {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "DateTimeZone object is unconstructed",
         ));
     };

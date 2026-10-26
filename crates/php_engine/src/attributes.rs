@@ -125,11 +125,13 @@ fn attribute_suffix(
 /// `Method C::m()` or `Function f()`, as `zend_deprecated_function` and
 /// `zend_nodiscard_function` name the callee: the class that declares
 /// it, `common.scope`, and the name it was declared under.
-fn callee_named(req: &Request, function: Function, method: &str, function_word: &str) -> String {
+fn callee_named(req: &Request, function: Function, method: &str, function_word: &str) -> Vec<u8> {
     let name = req.declared_name(function);
-    match req.method_class(function) {
-        Some(class) => format!("{method} {}::{name}()", req.symbols().class_name(class)),
-        None => format!("{function_word} {name}()"),
+    if let Some(class) = req.method_class(function) {
+        let class = req.symbols().class_name(class);
+        bytes!(method, b" ", class, b"::", name, b"()")
+    } else {
+        bytes!(function_word, b" ", name, b"()")
     }
 }
 
@@ -230,7 +232,11 @@ pub(crate) fn deprecated_function(req: &mut Request, function: Function) -> Resu
         Level::Deprecated
     };
     let named = callee_named(req, function, "Method", "Function");
-    raise(req, level, &format!("{named} is deprecated{suffix}"));
+    raise(
+        req,
+        level,
+        &bytes!(named, b" is deprecated", suffix.to_string()),
+    );
     suffix.give_up(req);
     none_pending(req)
 }
@@ -288,8 +294,11 @@ pub(crate) fn no_discard_function(req: &mut Request, function: Function) -> Resu
     raise(
         req,
         level,
-        &format!(
-            "The return value of {named} should either be used or intentionally ignored by casting it as (void){suffix}"
+        &bytes!(
+            b"The return value of ",
+            named,
+            b" should either be used or intentionally ignored by casting it as (void)",
+            suffix.to_string()
         ),
     );
     suffix.give_up(req);
@@ -343,10 +352,14 @@ pub(crate) fn deprecated_class_constant(
     } else {
         "Constant"
     };
-    let message = format!(
-        "{what} {}::{} is deprecated{suffix}",
+    let message = bytes!(
+        what,
+        b" ",
         req.symbols().class_name(declaring),
-        String::from_utf8_lossy(name)
+        b"::",
+        name,
+        b" is deprecated",
+        suffix.to_string()
     );
     raise(req, level, &message);
     suffix.give_up(req);

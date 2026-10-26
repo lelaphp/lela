@@ -574,13 +574,14 @@ fn grapheme_substr(
     #[php(default = null)] length: Option<i64>,
     #[php(default = "")] locale: Path,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let _ = locale;
     let text = string.as_bytes();
     let Ok(mut start) = i32::try_from(offset) else {
-        return Err(argument_error(req, "ValueError", 2, "is too large"));
+        return Err(argument_error(req, ce.value_error, 2, "is too large"));
     };
     let Ok(mut length) = i32::try_from(length.unwrap_or(len_of(text))) else {
-        return Err(argument_error(req, "ValueError", 3, "is too large"));
+        return Err(argument_error(req, ce.value_error, 3, "is too large"));
     };
     if ascii(text, text.len()) {
         if i32::try_from(text.len()).is_err() {
@@ -1068,6 +1069,7 @@ fn grapheme_extract(
     #[php(default = 0)] offset: i64,
     #[php(default = null)] next: Ref<Untyped<Value>>,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let text = haystack.as_bytes();
     let mut start = offset;
     if start < 0 {
@@ -1095,7 +1097,7 @@ fn grapheme_extract(
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
     }
     if size > i64::from(i32::MAX) {
-        return Err(argument_error(req, "ValueError", 2, "is too large"));
+        return Err(argument_error(req, ce.value_error, 2, "is too large"));
     }
     if size == 0 {
         return bytes(req, b"");

@@ -252,9 +252,13 @@ fn collate(
     returned.give_up(req);
     let thrown = type_error(
         req,
-        &format!(
-            "{name}(): Return value of the collation callback must be of type int, {given} returned"
-        ),
+        &[
+            format!("{name}(): Return value of the collation callback must be of type int, ")
+                .as_bytes(),
+            given.as_slice(),
+            b" returned".as_slice(),
+        ]
+        .concat(),
     );
     (-1, Some(thrown))
 }
@@ -298,9 +302,13 @@ fn authorize(
     let Some(answer) = answer else {
         return Err(type_error(
             req,
-            &format!(
-                "{name}(): Return value of the authorizer callback must be of type int, {given} returned"
-            ),
+            &[
+                format!("{name}(): Return value of the authorizer callback must be of type int, ")
+                    .as_bytes(),
+                given.as_slice(),
+                b" returned".as_slice(),
+            ]
+            .concat(),
         ));
     };
     match i32::try_from(answer) {

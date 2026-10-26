@@ -20,6 +20,7 @@ use crate::obj::{
     AbbrZone, TIMEZONE, TzKind, TzObj, class_id, lent_time, rows_array, set_str, set_string,
     set_tz, std_rows, tz_fields, tz_of,
 };
+use crate::throwables::Throwables;
 
 /// Why `timezone_initialize` refuses a zone: the sentence php prints for
 /// it with `spprintf`, naming the zone as it was given.
@@ -762,7 +763,10 @@ impl DateTimeZone {
             "DateTimeZone::__construct(): {}",
             String::from_utf8_lossy(printed.text())
         );
-        let thrown = throw_exception_ex(req, "DateInvalidTimeZoneException", &message);
+        let thrown = match Throwables::of(req) {
+            Ok(ce) => throw_exception_ex(req, ce.date_invalid_time_zone_exception, &message),
+            Err(fatal) => fatal,
+        };
         printed.free(req);
         Err(thrown)
     }
@@ -890,9 +894,10 @@ impl DateTimeZone {
     fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
         let (object, hash) = (this.object(), data);
         let Some(kind) = from_hash(req, hash)? else {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Invalid serialization data for DateTimeZone object",
             ));
         };
@@ -925,13 +930,15 @@ impl DateTimeZone {
         }
         let kind = from_hash(req, *hash);
         hash.give_up(req);
-        match kind? {
-            Some(kind) => set_zone(req, object, kind),
-            None => Err(throw_error(
+        if let Some(kind) = kind? {
+            set_zone(req, object, kind)
+        } else {
+            let ce = Throwables::of(req)?;
+            Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Invalid serialization data for DateTimeZone object",
-            )),
+            ))
         }
     }
 
@@ -966,9 +973,10 @@ impl DateTimeZone {
         let object = new_object(req, class)?;
         let Some(kind) = from_hash(req, hash)? else {
             object.give_up(req);
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Invalid serialization data for DateTimeZone object",
             ));
         };

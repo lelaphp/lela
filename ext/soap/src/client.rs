@@ -24,6 +24,7 @@ use crate::shared::{
     ClientSlot, add_soap_fault, add_soap_fault_ex, client_slot, client_throws, instance_of,
     is_null, new_sdl_object, sdl_of, set_client_slot,
 };
+use crate::throwables::Throwables;
 use crate::{Error, Res, SOAP_1_1, SOAP_1_2, State, Typemap, raised};
 
 type R<T> = Result<T, Thrown>;
@@ -167,7 +168,8 @@ fn end_code<T>(req: &mut Request, r: Res<T>) -> R<T> {
         Err(thrown) => thrown,
         ok => return ok,
     };
-    Err(catch_fatal(req, thrown, "SoapFault").unwrap_or_else(|thrown| thrown))
+    let ce = Throwables::of(req)?;
+    Err(catch_fatal(req, thrown, ce.soap_fault).unwrap_or_else(|thrown| thrown))
 }
 
 /// `php_error_docref(NULL, E_ERROR, ...)`.
@@ -419,11 +421,17 @@ impl SoapClient {
             ValueRef::Object(o) if instance_of(req, o, "SoapHeader") => Some(vec![headers]),
             _ => {
                 let shown = value_name(req, &headers);
+                let ce = Throwables::of(req)?;
                 return Err(argument_error(
                     req,
-                    "TypeError",
+                    ce.type_error,
                     4,
-                    &format!("must be of type SoapHeader|array|null, {shown} given"),
+                    &[
+                        b"must be of type SoapHeader|array|null, ".as_slice(),
+                        &shown,
+                        b" given",
+                    ]
+                    .concat(),
                 ));
             }
         };
@@ -799,11 +807,17 @@ impl SoapClient {
             }
             _ => {
                 let shown = value_name(req, &headers);
+                let ce = Throwables::of(req)?;
                 return Err(argument_error(
                     req,
-                    "TypeError",
+                    ce.type_error,
                     1,
-                    &format!("must be of type SoapHeader|array|null, {shown} given"),
+                    &[
+                        b"must be of type SoapHeader|array|null, ".as_slice(),
+                        &shown,
+                        b" given",
+                    ]
+                    .concat(),
                 ));
             }
         }
@@ -1366,6 +1380,7 @@ fn soap_call_body(
     output_headers: Option<&Ref<Untyped<Value>>>,
     soap_version: i64,
 ) -> Res<Owner<Value>> {
+    let ce = Throwables::of(req)?;
     let mut ret = false;
     let mut return_value: Option<Owner<Value>> = None;
     if let Some(sdl_ref) = sdl {
@@ -1542,7 +1557,7 @@ fn soap_call_body(
         }
     };
     if let ValueRef::Object(o) = return_value.as_ref()
-        && instance_of(req, o, "SoapFault")
+        && o.instance_of(req, ce.soap_fault)
         && client_throws(this)
     {
         let thrown = throw_value(req, &return_value);

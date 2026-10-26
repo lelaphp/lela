@@ -306,7 +306,7 @@ mod tests {
             .unwrap_or_default();
         let line = prop(b"line").and_then(|v| v.as_int()).unwrap_or(0);
         Some((
-            req.symbols().class_name(object.class()),
+            String::from_utf8_lossy(req.symbols().class_name(object.class())).into_owned(),
             String::from_utf8_lossy(&file).into_owned(),
             line,
         ))

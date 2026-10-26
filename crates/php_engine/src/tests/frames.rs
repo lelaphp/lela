@@ -379,7 +379,10 @@ fn named(req: &Request, frame: &ChainFrame<'_>) -> String {
         .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
         .unwrap_or_default();
     match frame.function_scope() {
-        Some(class) => format!("{}::{name}", req.symbols().class_name(class)),
+        Some(class) => format!(
+            "{}::{name}",
+            String::from_utf8_lossy(req.symbols().class_name(class))
+        ),
         None => name,
     }
 }
@@ -494,7 +497,7 @@ fn traced_at_throw(req: &mut Request, beneath: Beneath<'_, chain::Throw>) {
     if req.state::<Traced>().0.is_none()
         && let Ok(trace) = req.frames_mut().backtrace_here(0, 0)
     {
-        let rendered = req.trace_to_string(*trace, true);
+        let rendered = String::from_utf8_lossy(&req.trace_to_string(*trace, true)).into_owned();
         trace.give_up(req);
         req.state::<Traced>().0 = Some(rendered);
     }

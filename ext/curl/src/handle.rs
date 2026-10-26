@@ -15,6 +15,7 @@ use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, SmartStr, TypeTag, 
 
 use crate::State;
 use crate::ffi::{Easy, EasyId, Hook};
+use crate::throwables::Throwables;
 
 /// A callable kept past the call it was given to, `zend_fcc_dup`
 /// (`Z/ext/curl/interface.c:1224`, `multi.c:493`): its value's owner and
@@ -395,7 +396,8 @@ pub(crate) fn cast_object(
 pub(crate) fn made(req: &mut Request, class: &[u8]) -> Result<Owner<PhpObject>, Thrown> {
     let Some(id) = lookup_class(req, class)? else {
         let text = format!("Class \"{}\" not found", String::from_utf8_lossy(class));
-        return Err(throw_error(req, "Error", &text));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, &text));
     };
     new_object(req, id)
 }
@@ -425,7 +427,10 @@ fn copied(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thro
     let copy = made(req, b"CurlHandle")?;
     let failed = |req: &mut Request, copy: Owner<PhpObject>| {
         copy.give_up(req);
-        throw(req, "Exception", "Failed to clone CurlHandle")
+        match Throwables::of(req) {
+            Ok(ce) => throw(req, ce.exception, "Failed to clone CurlHandle"),
+            Err(fatal) => fatal,
+        }
     };
     let source = match easy_of(req, object) {
         Ok(source) => source,
@@ -727,9 +732,10 @@ fn curl_error(req: &mut Request, handle: Instance<CurlHandle>) -> Result<Owner<P
 #[php_function(deprecated(since = "8.5", message = "as it has no effect since PHP 8.0"))]
 fn curl_close(req: &mut Request, handle: Instance<CurlHandle>) -> Result<(), Thrown> {
     if curl(req, handle)?.in_callback {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "curl_close(): Attempt to close cURL handle from a callback",
         ));
     }
@@ -804,9 +810,10 @@ fn reset_handlers(req: &mut Request, object: PhpObject) {
 #[php_function]
 fn curl_reset(req: &mut Request, handle: Instance<CurlHandle>) -> Result<(), Thrown> {
     if curl(req, handle)?.in_callback {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "curl_reset(): Attempt to reset cURL handle from a callback",
         ));
     }

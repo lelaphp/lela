@@ -12,6 +12,7 @@ use php_ext::values::{Owner, PhpString};
 use crate::State;
 use crate::ffi::{Tzdb, Zone};
 use crate::lent::lent;
+use crate::throwables::Throwables;
 
 /// `php_date_parse_tzfile(name, tzdb)`: the zone out of the request's
 /// cache, parsed from the bundled database onto the request's heap the
@@ -86,9 +87,13 @@ pub(super) fn default_zone(req: &mut Request) -> Result<Arc<Zone>, Thrown> {
 /// The `DateError` `get_timezone_info()` throws where the database
 /// cannot give the default zone.
 pub(super) fn corrupt(req: &mut Request) -> Thrown {
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     throw_error(
         req,
-        "DateError",
+        ce.date_error,
         "Timezone database is corrupt. Please file a bug report as this should never happen",
     )
 }

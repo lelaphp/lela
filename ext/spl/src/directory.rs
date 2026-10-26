@@ -25,6 +25,7 @@ use php_ext::raising::{
 use php_ext::request::{OwnedStream, Request, Stream, Streams as _, Whence};
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
+use crate::throwables::Throwables;
 use crate::{Countable, RecursiveIterator, SeekableIterator, Stringable};
 
 /// `SPL_FS_INFO`, `SPL_FS_DIR` and `SPL_FS_FILE`.
@@ -455,9 +456,10 @@ impl SplFileInfo {
             return Ok(OrFalse::False);
         }
         let name = String::from_utf8_lossy(&file_name(req, this)?).into_owned();
+        let ce = Throwables::of(req)?;
         Err(throw(
             req,
-            "RuntimeException",
+            ce.runtime_exception,
             &format!("SplFileInfo::getType(): Lstat failed for {name}"),
         ))
     }
@@ -530,9 +532,10 @@ impl SplFileInfo {
                     .map_or(text.as_str(), |(t, _)| t)
                     .to_owned();
                 let shown = String::from_utf8_lossy(&name).into_owned();
+                let ce = Throwables::of(req)?;
                 Err(throw_exception_ex(
                     req,
-                    "RuntimeException",
+                    ce.runtime_exception,
                     &format!("Unable to read link {shown}, error: {text}"),
                 ))
             }
@@ -630,9 +633,10 @@ impl SplFileInfo {
         let class = info_class(req, chosen)?;
         let (kind, entry) = fs(req, this, |it| (it.kind, it.entry.is_empty()))?;
         if kind == Type::Dir && entry {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "RuntimeException",
+                ce.runtime_exception,
                 "Could not open file",
             ));
         }
@@ -697,9 +701,10 @@ impl SplFileInfo {
         };
         let (kind, entry) = fs(req, this, |it| (it.kind, it.entry.is_empty()))?;
         if kind == Type::Dir && entry {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "RuntimeException",
+                ce.runtime_exception,
                 "Could not open file",
             ));
         }
@@ -710,6 +715,7 @@ impl SplFileInfo {
             req,
             class,
             &[*name_value, *mode_value, Value::bool(useIncludePath)],
+            &[],
         );
         name_value.give_up(req);
         mode_value.give_up(req);
@@ -801,9 +807,10 @@ impl SplFileInfo {
     #[php(final, deprecated(since = "8.2"))]
     fn _bad_state_ex(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let _ = this;
+        let ce = Throwables::of(req)?;
         Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "The parent constructor was not called: the object is in an invalid state",
         ))
     }
@@ -938,9 +945,10 @@ impl DirectoryIterator {
         }
         while fs(req, this, |it| it.index)? < pos {
             if !crate::valid(req, this)? {
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "OutOfBoundsException",
+                    ce.out_of_bounds_exception,
                     &format!("Seek position {pos} is out of range"),
                 ));
             }
@@ -1145,7 +1153,7 @@ impl RecursiveDirectoryIterator {
             )
         })?;
         let arg = crate::string_value(req, &name)?;
-        let made = instantiate(req, this.class(), &[*arg, Value::int(flags)]);
+        let made = instantiate(req, this.class(), &[*arg, Value::int(flags)], &[]);
         arg.give_up(req);
         let child = made?;
         let sub_path = match sub {
@@ -1256,9 +1264,15 @@ impl GlobIterator {
     /// `GlobIterator::count(): int`.
     #[php(tentative)]
     fn count(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
-        match glob_stream(req, this.object())?.and_then(|dir| dir.glob_count(req)) {
-            Some(n) => Ok(i64::try_from(n).unwrap_or(i64::MAX)),
-            None => Err(throw_error(req, "Error", "GlobIterator is not initialized")),
+        if let Some(n) = glob_stream(req, this.object())?.and_then(|dir| dir.glob_count(req)) {
+            Ok(i64::try_from(n).unwrap_or(i64::MAX))
+        } else {
+            let ce = Throwables::of(req)?;
+            Err(throw_error(
+                req,
+                ce.error,
+                "GlobIterator is not initialized",
+            ))
         }
     }
 }
@@ -1353,7 +1367,8 @@ impl SplFileObject {
         let this = this.object();
         let name = filename.0.as_bytes().to_vec();
         if fs(req, this, |it| it.stream.is_some())? {
-            return Err(throw_error(req, "Error", "Cannot call constructor twice"));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, "Cannot call constructor twice"));
         }
         file_open(req, this, &name, mode.as_bytes(), useIncludePath)?;
         // The path is the directory of the path the stream opened.
@@ -1787,9 +1802,10 @@ impl SplFileObject {
         let name =
             String::from_utf8_lossy(&fs(req, this, |it| it.file_name.clone())?.unwrap_or_default())
                 .into_owned();
+        let ce = Throwables::of(req)?;
         Err(throw_exception_ex(
             req,
-            "LogicException",
+            ce.logic_exception,
             &format!("Can't truncate file {name}"),
         ))
     }
@@ -1965,7 +1981,8 @@ impl SplTempFileObject {
     ) -> Result<(), Thrown> {
         let this = this.object();
         if fs(req, this, |it| it.stream.is_some())? {
-            return Err(throw_error(req, "Error", "Cannot call constructor twice"));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, "Cannot call constructor twice"));
         }
         let name: Vec<u8> = if maxMemory < 0 {
             b"php://memory".to_vec()
@@ -1994,7 +2011,11 @@ fn fs<R>(
 }
 
 fn uninitialized(req: &mut Request) -> Thrown {
-    throw_error(req, "Error", "Object not initialized")
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    throw_error(req, ce.error, "Object not initialized")
 }
 
 /// `IS_SLASH`.
@@ -2228,9 +2249,10 @@ impl ObjectHandlers for FileHandlers {
     ) -> Result<Option<Function>, Thrown> {
         let unopened = fs(req, object, |it| it.dir.is_none() && it.orig_path.is_none())?;
         if unopened {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "The parent constructor was not called: the object is in an invalid state",
             ));
         }
@@ -2254,9 +2276,10 @@ fn clone_fs(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Th
         )
     })?;
     if kind == Type::File {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Trying to clone an uncloneable object of class SplFileObject",
         ));
     }
@@ -2302,7 +2325,8 @@ type Stat = (Vec<u8>, [i64; 13]);
 /// `RuntimeException`; `None` where it fails.
 fn stat(req: &mut Request, this: PhpObject, link: bool) -> Result<Option<Stat>, Thrown> {
     let name = file_name(req, this)?;
-    let got = php_ext::raising::throwing_warnings(req, "RuntimeException", |req| {
+    let ce = Throwables::of(req)?;
+    let got = php_ext::raising::throwing_warnings(req, ce.runtime_exception, |req| {
         req.url_stat(&name, link, true)
     })?
     .found();
@@ -2331,9 +2355,10 @@ fn stat_field(
         return Ok(OrFalse::False);
     }
     let name = String::from_utf8_lossy(&file_name(req, this)?).into_owned();
+    let ce = Throwables::of(req)?;
     Err(throw(
         req,
-        "RuntimeException",
+        ce.runtime_exception,
         &format!("SplFileInfo::{what}(): stat failed for {name}"),
     ))
 }
@@ -2353,7 +2378,8 @@ fn access(
     ty: php_ext_standard::Fs,
 ) -> Result<Owner<Raw<bool>>, Thrown> {
     let name = file_name(req, this)?;
-    let answered = php_ext::raising::throwing_warnings(req, "RuntimeException", |req| {
+    let ce = Throwables::of(req)?;
+    let answered = php_ext::raising::throwing_warnings(req, ce.runtime_exception, |req| {
         php_ext_standard::php_stat(req, &name, ty)
     })?;
     Ok(crate::answered(answered))
@@ -2573,14 +2599,16 @@ fn dir_open(req: &mut Request, this: PhpObject, path: &[u8]) -> Result<(), Throw
         it.path = Some(trimmed.to_vec());
         it.index = 0;
     })?;
-    let opened = php_ext::raising::throwing_warnings(req, "UnexpectedValueException", |req| {
+    let ce = Throwables::of(req)?;
+    let opened = php_ext::raising::throwing_warnings(req, ce.unexpected_value_exception, |req| {
         req.open_dir(path)
     })?;
     let Some(dir) = opened else {
         let shown = String::from_utf8_lossy(path).into_owned();
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "UnexpectedValueException",
+            ce.unexpected_value_exception,
             &format!("Failed to open directory \"{shown}\""),
         ));
     };
@@ -2602,9 +2630,10 @@ fn dir_construct(
         return Err(arg_value_error(req, 1, "not be empty"));
     }
     if fs(req, this, |it| it.path.is_some())? {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Directory object is already initialized",
         ));
     }
@@ -2638,20 +2667,23 @@ fn file_open(
         .found()
         .is_some_and(|s| s[2] & 0o170_000 == 0o040_000)
     {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "LogicException",
+            ce.logic_exception,
             "Cannot use SplFileObject with directories",
         ));
     }
-    let opened = php_ext::raising::throwing_warnings(req, "RuntimeException", |req| {
+    let ce = Throwables::of(req)?;
+    let opened = php_ext::raising::throwing_warnings(req, ce.runtime_exception, |req| {
         req.open_stream(name, mode, include)
     })?;
     let Some(stream) = opened.filter(|_| !name.is_empty()) else {
         let shown = String::from_utf8_lossy(name).into_owned();
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "RuntimeException",
+            ce.runtime_exception,
             &format!("Cannot open file '{shown}'"),
         ));
     };
@@ -2704,9 +2736,10 @@ fn cannot_read(req: &mut Request, this: PhpObject) -> Result<Thrown, Thrown> {
     let name =
         String::from_utf8_lossy(&fs(req, this, |it| it.file_name.clone())?.unwrap_or_default())
             .into_owned();
+    let ce = Throwables::of(req)?;
     Ok(throw_exception_ex(
         req,
-        "RuntimeException",
+        ce.runtime_exception,
         &format!("Cannot read from file {name}"),
     ))
 }
@@ -2861,9 +2894,13 @@ fn read_line_ex(req: &mut Request, this: PhpObject, silent: bool) -> Result<bool
             answered.give_up(req);
             return Err(type_error(
                 req,
-                &format!(
-                    "{class}::getCurrentLine(): Return value must be of type string, {name} returned"
-                ),
+                &[
+                    format!("{class}::getCurrentLine(): Return value must be of type string, ")
+                        .as_bytes(),
+                    name.as_slice(),
+                    b" returned".as_slice(),
+                ]
+                .concat(),
             ));
         };
         answered.give_up(req);
@@ -2901,9 +2938,10 @@ fn file_rewind_to_start(req: &mut Request, this: PhpObject) -> Result<(), Thrown
         let name =
             String::from_utf8_lossy(&fs(req, this, |it| it.file_name.clone())?.unwrap_or_default())
                 .into_owned();
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "RuntimeException",
+            ce.runtime_exception,
             &format!("Cannot rewind file {name}"),
         ));
     }

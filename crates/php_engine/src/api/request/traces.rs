@@ -177,13 +177,13 @@ impl Request {
     /// `include_main`; a slot that holds no array, which is what a
     /// throwable made before this engine recorded one has, renders as
     /// the empty trace does, `#0 {main}`.
-    pub(crate) fn trace_string_of(&mut self, throwable: PhpObject) -> String {
+    pub(crate) fn trace_string_of(&mut self, throwable: PhpObject) -> Vec<u8> {
         match throwable
             .prop(self, b"trace")
             .and_then(|value| value.as_array())
         {
             Some(trace) => self.trace_to_string(trace, true),
-            None => String::from("#0 {main}"),
+            None => b"#0 {main}".to_vec(),
         }
     }
 
@@ -652,7 +652,7 @@ impl Request {
             Some(Some(held)) => Ok(PhpString::of(held)),
             Some(None) => {
                 let name = self.declared_name(function);
-                self.declared_string(name.as_bytes()).map(Owner::hand_on)
+                self.declared_string(&name).map(Owner::hand_on)
             }
             None => self.declared_string(b"native").map(Owner::hand_on),
         }
@@ -896,7 +896,7 @@ impl Request {
                 "InternalError: SensitiveParameterValue is not linked",
             ));
         };
-        crate::api::call::instantiate_named_made(self, class, &[argument], &[])
+        crate::api::call::instantiate_made(self, class, &[argument], &[])
             .map(|object| object.as_value())
     }
 
@@ -1203,9 +1203,9 @@ impl Request {
     /// #1 [unknown file]: [unknown]()
     /// #2 {main}"
     /// ```
-    pub(crate) fn trace_to_string(&mut self, trace: PhpArray, include_main: bool) -> String {
-        use std::fmt::Write as _;
-        let mut out = String::new();
+    pub(crate) fn trace_to_string(&mut self, trace: PhpArray, include_main: bool) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut out: Vec<u8> = Vec::new();
         let mut num = 0usize;
         // `ZEND_HASH_FOREACH_NUM_KEY_VAL(trace, index, frame)`
         // (`Z/Zend/zend_exceptions.c:641`), no owner of the trace taken: the
@@ -1226,10 +1226,10 @@ impl Request {
             write!(out, "#{num} ").ok();
             num += 1;
             match field(b"file").map(|file| file.as_str_bytes().map(<[u8]>::to_vec)) {
-                None => out.push_str("[internal function]: "),
+                None => out.extend_from_slice(b"[internal function]: "),
                 Some(None) => {
                     crate::api::raising::warning(req, "File name is not a string");
-                    out.push_str("[unknown file]: ");
+                    out.extend_from_slice(b"[unknown file]: ");
                 }
                 Some(Some(file)) => {
                     let line = match field(b"line") {
@@ -1239,7 +1239,8 @@ impl Request {
                         }),
                         None => 0,
                     };
-                    write!(out, "{}({line}): ", String::from_utf8_lossy(&file)).ok();
+                    out.extend_from_slice(&file);
+                    write!(out, "({line}): ").ok();
                 }
             }
             for key in ["class", "type", "function"] {
@@ -1250,20 +1251,20 @@ impl Request {
                 // an anonymous class's name to `class@anonymous`.
                 if let Some(text) = value.as_str_bytes() {
                     let text = text.split(|byte| *byte == 0).next().unwrap_or_default();
-                    out.push_str(&String::from_utf8_lossy(text));
+                    out.extend_from_slice(text);
                 } else {
                     crate::api::raising::warning(req, &format!("Value for {key} is not a string"));
-                    out.push_str("[unknown]");
+                    out.extend_from_slice(b"[unknown]");
                 }
             }
-            out.push('(');
+            out.push(b'(');
             if let Some(args) = field(b"args") {
                 match args.as_array() {
-                    Some(args) => out.push_str(&req.trace_arguments(args)?),
+                    Some(args) => out.extend_from_slice(&req.trace_arguments(args)?),
                     None => crate::api::raising::warning(req, "args element is not an array"),
                 }
             }
-            out.push_str(")\n");
+            out.extend_from_slice(b")\n");
             Ok(ControlFlow::Continue(()))
         });
         // The body answers no throwable but what a frame's arguments'
@@ -1285,7 +1286,9 @@ impl Request {
         let Ok(trace) = self.debug_backtrace() else {
             return (None, String::from("#0 {main}"));
         };
-        let text = self.trace_to_string(trace, true);
+        // `last_fatal_error_backtrace`'s rendering is held as a `String`
+        // by the fatal's display and log forms.
+        let text = String::from_utf8_lossy(&self.trace_to_string(trace, true)).into_owned();
         (Some(trace), text)
     }
 
@@ -1341,20 +1344,20 @@ impl Request {
     /// #1 {main}
     ///   thrown in %s on line 3
     /// ```
-    fn trace_arguments(&mut self, arguments: PhpArray) -> Result<String, Thrown> {
-        let mut out = String::new();
+    fn trace_arguments(&mut self, arguments: PhpArray) -> Result<Vec<u8>, Thrown> {
+        let mut out: Vec<u8> = Vec::new();
         let mut first = true;
         // `ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(tmp), name, arg)`
         // (`Z/Zend/zend_exceptions.c:616`), no owner of the table taken:
         // the frame holds it.
         walk::foreach(self, arguments, Hold::None, |req, row| -> walk::Step {
             if !first {
-                out.push_str(", ");
+                out.extend_from_slice(b", ");
             }
             first = false;
             if let Key::Str(name) = row.key() {
-                out.push_str(&String::from_utf8_lossy(name.as_bytes()));
-                out.push_str(": ");
+                out.extend_from_slice(name.as_bytes());
+                out.extend_from_slice(b": ");
             }
             req.trace_argument(&mut out, &row.value().deref());
             Ok(ControlFlow::Continue(()))
@@ -1366,28 +1369,27 @@ impl Request {
     /// `_build_trace_args` (`Z/Zend/zend_exceptions.c`): a reference
     /// followed, `ZVAL_DEREF`, then [`Request::zval_text`], and where
     /// that has no text, `Array`, `Object(ClassName)` or `Resource id #N`.
-    fn trace_argument(&mut self, out: &mut String, argument: &Value) {
+    fn trace_argument(&mut self, out: &mut Vec<u8>, argument: &Value) {
         let argument = argument.deref();
         if let Some(text) = self.zval_text(&argument, self.exception_string_param_max_len()) {
-            out.push_str(&text);
+            out.extend_from_slice(&text);
             return;
         }
         match argument.as_ref() {
-            ValueRef::Array(_) => out.push_str("Array"),
+            ValueRef::Array(_) => out.extend_from_slice(b"Array"),
             ValueRef::Object(object) => {
                 // `Z_OBJ_HANDLER_P(arg, get_class_name)`, then
                 // `smart_str_appends(str, ZSTR_VAL(class_name))`: up to
                 // the NUL of an anonymous class's name.
                 let table = self.object_handlers(object.heap());
                 let name = table.get_class_name(self, object);
-                let class = php_unit::decl::shown(&name).into_owned();
-                out.push_str("Object(");
-                out.push_str(&class);
-                out.push(')');
+                out.extend_from_slice(b"Object(");
+                out.extend_from_slice(php_unit::decl::shown_bytes(&name));
+                out.push(b')');
             }
             ValueRef::Resource(resource) => {
-                out.push_str("Resource id #");
-                out.push_str(&resource.id().to_string());
+                out.extend_from_slice(b"Resource id #");
+                out.extend_from_slice(resource.id().to_string().as_bytes());
             }
             // `zval_text` wrote every scalar and every enum case, and
             // `deref` followed the reference.
@@ -1414,30 +1416,33 @@ impl Request {
     /// after the cut. An enum case is `Enum::Case`. The test is on the
     /// value's own type, before any `ZVAL_DEREF`, so a reference has no
     /// text here and a caller that renders what it refers to derefs first.
-    pub(crate) fn zval_text(&self, value: &Value, truncate: usize) -> Option<String> {
-        let mut out = String::new();
+    pub(crate) fn zval_text(&self, value: &Value, truncate: usize) -> Option<Vec<u8>> {
+        let mut out: Vec<u8> = Vec::new();
         match value.as_ref() {
-            ValueRef::Undef | ValueRef::Null => out.push_str("NULL"),
-            ValueRef::Bool(b) => out.push_str(if b { "true" } else { "false" }),
-            ValueRef::Int(n) => out.push_str(&n.to_string()),
+            ValueRef::Undef | ValueRef::Null => out.extend_from_slice(b"NULL"),
+            ValueRef::Bool(b) => out.extend_from_slice(if b { b"true" } else { b"false" }),
+            ValueRef::Int(n) => out.extend_from_slice(n.to_string().as_bytes()),
             ValueRef::Float(f) => {
                 let precision = match self.ini().precision() {
                     0 => 1,
                     precision => precision,
                 };
                 let text = php_heap::double_to_string(f, precision, php_heap::Exponent::Upper);
-                out.push_str(&text);
+                out.extend_from_slice(text.as_bytes());
                 if f.is_finite() && !text.contains('.') {
-                    out.push_str(".0");
+                    out.extend_from_slice(b".0");
                 }
             }
             ValueRef::Str(s) => {
-                out.push('\'');
-                append_escaped(&mut out, &s.as_bytes()[..truncate.min(s.len())]);
+                // `smart_str_append_escaped` writes ASCII alone.
+                let mut escaped = String::new();
+                append_escaped(&mut escaped, &s.as_bytes()[..truncate.min(s.len())]);
+                out.push(b'\'');
+                out.extend_from_slice(escaped.as_bytes());
                 if s.len() > truncate {
-                    out.push_str("...");
+                    out.extend_from_slice(b"...");
                 }
-                out.push('\'');
+                out.push(b'\'');
             }
             ValueRef::Object(object) => {
                 let decl = self
@@ -1446,9 +1451,10 @@ impl Request {
                     .filter(|decl| decl.kind == ClassKind::Enum)?;
                 // `zend_enum_fetch_case_name`: the case's `name`.
                 let case = object.prop(self, b"name")?.as_php_string()?;
-                out.push_str(&String::from_utf8_lossy(&decl.name.0));
-                out.push_str("::");
-                out.push_str(&String::from_utf8_lossy(case.as_bytes()));
+                // `smart_str_append(dest, ce->name)`, the name whole.
+                out.extend_from_slice(&decl.name.0);
+                out.extend_from_slice(b"::");
+                out.extend_from_slice(case.as_bytes());
             }
             ValueRef::Array(_) | ValueRef::Resource(_) | ValueRef::Reference(_) => return None,
         }

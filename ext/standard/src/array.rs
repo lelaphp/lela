@@ -9,6 +9,7 @@
 use std::cmp::Ordering;
 use std::ops::ControlFlow;
 
+use crate::throwables::Throwables;
 use php_ext::abi::{Callable, FromArgument, Instance, Raw, Ref, Union, Variadic};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::call;
@@ -103,9 +104,10 @@ const HT_MAX_SIZE: u64 = 0x4000_0000;
 fn merge_total(req: &mut Request, arrays: &[PhpArray]) -> Result<(), Thrown> {
     let count: u64 = arrays.iter().map(|array| array.len() as u64).sum();
     if count >= HT_MAX_SIZE {
+        let ce = Throwables::of(req)?;
         return Err(php_ext::raising::throw_error(
             req,
-            "Error",
+            ce.error,
             &format!("The total number of elements must be lower than {HT_MAX_SIZE}"),
         ));
     }

@@ -53,6 +53,7 @@ mod ffi;
 mod linux_values;
 mod process;
 mod signals;
+mod throwables;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_const;
@@ -144,6 +145,7 @@ pub fn extension() -> Extension {
             process::pcntl_setqos_class::declared(),
         ])
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .rshutdown(signals::rshutdown)
         .interrupt(signals::interrupt)
         .ticks(signals::dispatch)

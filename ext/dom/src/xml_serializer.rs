@@ -21,6 +21,7 @@ use php_ext_libxml::ffi::{self as f, Dump, Kind, Name, Node, Ns};
 
 use crate::document::{XML_NS, XMLNS_NS};
 use crate::private::{HTML_NS, Private, ns_is};
+use crate::throwables::Throwables;
 
 /// A step of the serialisation that failed: a write libxml refused, or
 /// markup that well-formedness, where it is required, forbids; or the
@@ -808,9 +809,13 @@ fn serialize(
 
 /// `dom_xml_serialize`'s refusal where the stack came down to its limit.
 fn too_deep(req: &mut Request) -> Thrown {
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     php_ext::raising::throw_error(
         req,
-        "Error",
+        ce.error,
         "Maximum call stack size reached. Infinite recursion?",
     )
 }

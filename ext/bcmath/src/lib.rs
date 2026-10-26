@@ -24,6 +24,7 @@
 
 mod num;
 mod number;
+mod throwables;
 
 use php_ext::abi::{Extension, ExtensionBuilder, Instance};
 use php_ext::attr::{php_class, php_function};
@@ -34,6 +35,7 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use num::{Num, RaiseError, RaiseModError, Rounding};
+use throwables::Throwables;
 
 /// `bcmath.scale`, `PHP_INI_ALL`, php's `BCG(bc_precision)`.
 const SCALE: &[u8] = b"bcmath.scale";
@@ -75,6 +77,7 @@ pub fn extension() -> Extension {
         ])
         .class::<number::Number>()
         .request_state::<number::Shared>()
+        .engine_state(Throwables::start)
         .ini(vec![IniDecl {
             name: Name(SCALE.into()),
             default: Some(b"0".as_slice().into()),
@@ -194,7 +197,11 @@ fn operand(req: &mut Request, text: &[u8], position: u32) -> Result<Decimal, Thr
 /// `zend_argument_value_error`: php's `ValueError` for the argument at
 /// `position`, `tail` the sentence after its name as php words it.
 fn value_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
-    argument_error(req, "ValueError", position, tail)
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    argument_error(req, ce.value_error, position, tail)
 }
 
 /// A string of the request's holding `bytes`.
@@ -501,7 +508,11 @@ fn raise_error(req: &mut Request, error: RaiseError, position: Option<u32>) -> T
     const OVERFLOW: &str = "exponent is too large, the number of digits overflowed";
     match (error, position) {
         (RaiseError::DivideByZero, _) => {
-            throw_exception_ex(req, "DivisionByZeroError", "Negative power of zero")
+            let ce = match Throwables::of(req) {
+                Ok(ce) => ce,
+                Err(fatal) => return fatal,
+            };
+            throw_exception_ex(req, ce.division_by_zero_error, "Negative power of zero")
         }
         (RaiseError::Overflow, Some(position)) => value_error(req, position, OVERFLOW),
         (RaiseError::Overflow, None) => php_ext::raising::value_error(req, OVERFLOW),
@@ -713,10 +724,18 @@ fn bcround(
 
 /// "Division by zero".
 fn division_by_zero(req: &mut Request) -> Thrown {
-    throw_exception_ex(req, "DivisionByZeroError", "Division by zero")
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    throw_exception_ex(req, ce.division_by_zero_error, "Division by zero")
 }
 
 /// "Modulo by zero".
 fn modulo_by_zero(req: &mut Request) -> Thrown {
-    throw_exception_ex(req, "DivisionByZeroError", "Modulo by zero")
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    throw_exception_ex(req, ce.division_by_zero_error, "Modulo by zero")
 }

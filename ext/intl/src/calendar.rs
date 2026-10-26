@@ -154,11 +154,12 @@ impl Of {
 /// (`CALENDAR_METHOD_INIT_VARS`, `before_args`), and php's `Error` for an
 /// object no factory made.
 fn fetch(req: &mut Request, o: Of) -> Result<(), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     error::reset_object::<CalendarObject>(req, o.object);
     if held(req, o.object).is_none() {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Found unconstructed IntlCalendar",
         ));
     }
@@ -172,6 +173,7 @@ pub(crate) fn held(req: &Request, object: PhpObject) -> Option<&Calendar> {
 
 /// What `f` does with the calendar of a fetched object.
 fn with<T>(req: &mut Request, o: Of, f: impl FnOnce(&mut Calendar) -> T) -> Result<T, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     fetch(req, o)?;
     match o
         .object
@@ -181,7 +183,7 @@ fn with<T>(req: &mut Request, o: Of, f: impl FnOnce(&mut Calendar) -> T) -> Resu
         Some(calendar) => Ok(f(calendar)),
         None => Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Found unconstructed IntlCalendar",
         )),
     }
@@ -335,6 +337,7 @@ fn c_text(buffer: &[u8]) -> Vec<u8> {
 /// Cannot clone uninitialized IntlCalendar
 /// ```
 fn clone_calendar(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let calendar = held(req, object).map(|c| cal::php_intl_cal_clone(c));
     let constructed = calendar.is_some();
     let payload = CalendarObject {
@@ -352,7 +355,7 @@ fn clone_calendar(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObjec
     } else {
         "Cannot clone uninitialized IntlCalendar"
     };
-    Err(throw_error(req, "Error", message))
+    Err(throw_error(req, ce.error, message))
 }
 
 /// `class IntlCalendar`: one ICU calendar, made by its static factories
@@ -496,9 +499,10 @@ impl IntlCalendar {
     /// ```
     #[php(private)]
     fn __construct(req: &mut Request, _this: This<Self>) -> Result<(), Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         Err(throw(
             req,
-            "Exception",
+            ce.exception,
             "An object of this type cannot be created with the new operator",
         ))
     }
@@ -1301,8 +1305,9 @@ fn compare(
     other: Instance<IntlCalendar>,
     which: i32,
 ) -> Result<bool, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let uninitialized =
-        |req: &mut Request| argument_error(req, "Error", o.at(2), "is uninitialized");
+        |req: &mut Request| argument_error(req, ce.error, o.at(2), "is uninitialized");
     if which == 3 && held(req, other.object()).is_none() {
         return Err(uninitialized(req));
     }
@@ -1386,7 +1391,7 @@ fn from_date_time(
             let Some(class) = lookup_class(req, b"DateTime")? else {
                 return Err(fatal(req, "InternalError: DateTime is not linked"));
             };
-            let made = instantiate(req, class, &[Value::string(text)])?;
+            let made = instantiate(req, class, &[Value::string(text)], &[])?;
             (*made, Some(made))
         }
     };
@@ -1491,7 +1496,12 @@ fn date_time_at(
         return Err(fatal(req, "InternalError: DateTime is not linked"));
     };
     let stamp = PhpString::new(req, format!("@{seconds}").as_bytes())?;
-    let made = instantiate(req, class, &[Value::string(*stamp), Value::object(zone)]);
+    let made = instantiate(
+        req,
+        class,
+        &[Value::string(*stamp), Value::object(zone)],
+        &[],
+    );
     stamp.give_up(req);
     let date = made?;
     let answer = call_method(req, &date, b"setTimeZone", &[Value::object(zone)]);
@@ -1621,6 +1631,7 @@ impl IntlGregorianCalendar {
 /// six date and time fields in the default zone; `false` where it made
 /// none, with the error set.
 fn gregorian_body(req: &mut Request, object: PhpObject, constructor: bool) -> Result<bool, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let count = req.frames().argument_count();
     if constructor && count > 2 {
         let message = "Calling IntlGregorianCalendar::__construct() with more than 2 arguments is deprecated, use either IntlGregorianCalendar::createFromDate() or IntlGregorianCalendar::createFromDateTime() instead";
@@ -1662,13 +1673,13 @@ fn gregorian_body(req: &mut Request, object: PhpObject, constructor: bool) -> Re
         if held(req, object).is_some() {
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "IntlGregorianCalendar object is already constructed",
             ));
         }
         let zone = zone_argument(req, zone)?;
         let Some(zone) = process_timezone_argument(req, zone, &mut Outside::Request)? else {
-            return Err(throw(req, "IntlException", "Constructor failed"));
+            return Err(throw(req, ce.intl_exception, "Constructor failed"));
         };
         let locale = locale_name(req, locale.as_php_string());
         let mut status = Code::ZERO;
@@ -1701,7 +1712,7 @@ fn gregorian_body(req: &mut Request, object: PhpObject, constructor: bool) -> Re
         if held(req, object).is_some() {
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "IntlGregorianCalendar object is already constructed",
             ));
         }

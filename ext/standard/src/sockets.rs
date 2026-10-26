@@ -146,6 +146,7 @@ use crate::file::constants::{
     STREAM_SERVER_LISTEN, STREAM_SHUT_RD, STREAM_SHUT_RDWR, STREAM_SHUT_WR,
 };
 use crate::streamsfuncs::{NullContext, context_of};
+use crate::throwables::Throwables;
 
 /// An untyped by-reference out-parameter, `&$error_code = null`.
 type Out = Ref<Untyped<Value>>;
@@ -380,7 +381,8 @@ fn fsockopen_stream(
     let limited = timeout != -1.0;
     if limited && !(0.0..=TIMEOUT_MAX).contains(&timeout) {
         let text = format!("must be -1 or between 0 and {TIMEOUT_MAX_SHOWN}");
-        return Err(argument_error(req, "ValueError", 5, &text));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 5, &text));
     }
     let mut hostname = host.clone();
     if port > 0 {

@@ -55,7 +55,7 @@ fn a_catch_looks_the_class_up_once_and_reads_its_slot_after() {
     assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
     for pass in 1..=2 {
-        let thrown = crate::api::raising::throw_error(&mut req, "Error", "e");
+        let thrown = crate::api::raising::throw_error(&mut req, ClassId::ERROR, "e");
         req.leave_pending(&thrown);
         req.vm_mut().stand(frame, 0);
         assert_eq!(
@@ -305,7 +305,7 @@ fn a_catch_of_no_class_primes_no_slot() {
     let frame = req.pushed(PublishedUnit::clone(&unit));
     let code = crate::exec::code_of(&unit);
     let clause = code.oplines.first().copied().expect("opline 0");
-    let thrown = crate::api::raising::throw_error(&mut req, "Error", "e");
+    let thrown = crate::api::raising::throw_error(&mut req, ClassId::ERROR, "e");
     req.leave_pending(&thrown);
 
     for pass in 1..=2 {

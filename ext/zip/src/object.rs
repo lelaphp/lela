@@ -19,6 +19,7 @@ use crate::archive::{self as za, Archive, Source};
 use crate::c;
 use crate::error::{Done, Er, Status};
 use crate::holder::{self, ArchiveId, Callback, OnFailure};
+use crate::throwables::Throwables;
 
 /// `ze_zip_object.last_id`, `-1` until an add.
 pub(crate) struct LastId(pub(crate) i64);
@@ -204,7 +205,8 @@ impl ObjectHandlers for Handlers {
         value.give_up(req);
         let class = String::from_utf8_lossy(&Std.get_class_name(req, object)).into_owned();
         let message = format!("Cannot write read-only property {class}::${shown}");
-        Err(throw_error(req, "Error", &message))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, &message))
     }
 
     fn get_property_ptr_ptr(
@@ -389,7 +391,8 @@ fn refresh(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
 /// finds the archive under its close, so it comes first here.
 fn refuse_closing(req: &mut Request, id: Option<ArchiveId>) -> Result<(), Thrown> {
     if id.is_some_and(|id| holder::closing(req, id)) {
-        return Err(throw_error(req, "Error", "Already being closed"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "Already being closed"));
     }
     Ok(())
 }

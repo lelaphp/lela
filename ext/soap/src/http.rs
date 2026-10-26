@@ -29,6 +29,7 @@ use crate::constants::{SOAP_1_2, SOAP_COMPRESSION_ACCEPT, SOAP_COMPRESSION_DEFLA
 use crate::shared::{
     ClientSlot, add_soap_fault, class_id, client_slot, instance_of, set_client_slot,
 };
+use crate::throwables::Throwables;
 
 type R<T> = Result<T, Thrown>;
 
@@ -1464,9 +1465,10 @@ fn digest_authorization(
 ) -> R<()> {
     let mut nonce = [0u8; 16];
     if let Err(why) = getrandom::fill(&mut nonce) {
+        let ce = Throwables::of(req)?;
         let thrown = throw(
             req,
-            "Random\\RandomException",
+            ce.random_exception,
             &format!("Failed to retrieve randomness from the operating system ({why})"),
         );
         let socket = client_slot(this, ClientSlot::HttpSocket);

@@ -18,6 +18,7 @@ use crate::entry::{self, Dir, Found, Target};
 use crate::object::{SplFileInfo, construct_as, metadata_value, set_metadata};
 use crate::open::{self, has_bz2, has_zlib, readonly};
 use crate::path::{self, Create, Exec};
+use crate::throwables::Throwables;
 use crate::write;
 
 /// `phar_entry_object.entry`: a row of the archive's manifest, or a
@@ -61,11 +62,14 @@ fn held(req: &mut Request, this: PhpObject) -> Result<(ArchiveId, Option<usize>)
     });
     match found {
         Some(found) if entry_of(req, this).is_some() => Ok(found),
-        _ => Err(throw_exception_ex(
-            req,
-            "BadMethodCallException",
-            "Cannot call method on an uninitialized PharFileInfo object",
-        )),
+        _ => {
+            let ce = Throwables::of(req)?;
+            Err(throw_exception_ex(
+                req,
+                ce.bad_method_call_exception,
+                "Cannot call method on an uninitialized PharFileInfo object",
+            ))
+        }
     }
 }
 
@@ -104,7 +108,10 @@ fn flushed(req: &mut Request, id: ArchiveId) -> Result<(), Thrown> {
         a.is_modified = true;
     }
     match write::flush(req, id)? {
-        Some(error) => Err(throw_exception_ex(req, "PharException", &error)),
+        Some(error) => {
+            let ce = Throwables::of(req)?;
+            Err(throw_exception_ex(req, ce.phar_exception, &error))
+        }
         None => Ok(()),
     }
 }
@@ -167,9 +174,10 @@ impl PharFileInfo {
     fn __construct(req: &mut Request, this: This<Self>, filename: PathArg) -> Result<(), Thrown> {
         let this = this.object();
         if spl::other_mut::<Info>(req, this).is_some() {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 "Cannot call constructor twice",
             ));
         }
@@ -180,9 +188,10 @@ impl PharFileInfo {
             path::split_fname(req, &fname, Exec::Either, Create::No)?.ok()
         };
         let Some(split) = split else {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "RuntimeException",
+                ce.runtime_exception,
                 &format!(
                     "'{}' is not a valid phar archive URL (must have at least phar://filename.phar)",
                     lossy(&fname)
@@ -193,9 +202,10 @@ impl PharFileInfo {
             Ok(id) => id,
             Err(error) => {
                 let tail = error.map(|e| format!(": {e}")).unwrap_or_default();
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "RuntimeException",
+                    ce.runtime_exception,
                     &format!("Cannot open phar file '{}'{tail}", lossy(&fname)),
                 ));
             }
@@ -213,9 +223,10 @@ impl PharFileInfo {
             Ok(Found::TempDir(entry)) => Info::TempDir { archive: id, entry },
             Err(error) => {
                 let tail = error.map(|e| format!(", {e}")).unwrap_or_default();
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "RuntimeException",
+                    ce.runtime_exception,
                     &format!(
                         "Cannot access phar file entry '{}' in archive '{}'{tail}",
                         lossy(&split.entry),
@@ -265,18 +276,20 @@ impl PharFileInfo {
             (lossy(&e.filename).into_owned(), e.is_temp_dir)
         });
         if temp {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 &format!(
                     "Phar entry \"{name}\" is a temporary directory (not an actual entry in the archive), cannot chmod"
                 ),
             ));
         }
         if readonly(req) && !is_data {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "PharException",
+                ce.phar_exception,
                 &format!(
                     "Cannot modify permissions for file \"{name}\" in phar \"{fname}\", write operations are prohibited"
                 ),
@@ -298,8 +311,10 @@ impl PharFileInfo {
         let this = this.object();
         let (id, slot) = held(req, this)?;
         let (fname, is_data, is_tar) = archive_facts(req, id);
-        let bad =
-            |req: &mut Request, m: &str| Err(throw_exception_ex(req, "BadMethodCallException", m));
+        let bad = |req: &mut Request, m: &str| {
+            let ce = Throwables::of(req)?;
+            Err(throw_exception_ex(req, ce.bad_method_call_exception, m))
+        };
         if is_tar {
             return bad(
                 req,
@@ -398,8 +413,10 @@ impl PharFileInfo {
         let this = this.object();
         let (id, slot) = held(req, this)?;
         let (fname, is_data, _) = archive_facts(req, id);
-        let bad =
-            |req: &mut Request, m: &str| Err(throw_exception_ex(req, "BadMethodCallException", m));
+        let bad = |req: &mut Request, m: &str| {
+            let ce = Throwables::of(req)?;
+            Err(throw_exception_ex(req, ce.bad_method_call_exception, m))
+        };
         let (is_dir, deleted, flags, name) = read(req, this, |e| {
             (
                 e.is_dir,
@@ -468,17 +485,19 @@ impl PharFileInfo {
         let (id, _) = held(req, this)?;
         let (_, is_data, _) = archive_facts(req, id);
         if readonly(req) && !is_data {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 "Write operations disabled by the php.ini setting phar.readonly",
             ));
         }
         let (temp, has) = read(req, this, |e| (e.is_temp_dir, e.metadata.has_data()));
         if temp {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 "Phar entry is a temporary directory (not an actual entry in the archive), cannot delete metadata",
             ));
         }
@@ -511,16 +530,18 @@ impl PharFileInfo {
         held(req, this)?;
         let (is_dir, checked, crc) = read(req, this, |e| (e.is_dir, e.is_crc_checked, e.crc32));
         if is_dir {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 "Phar entry is a directory, does not have a CRC",
             ));
         }
         if !checked {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 "Phar entry was not CRC checked",
             ));
         }
@@ -535,8 +556,10 @@ impl PharFileInfo {
         let (id, slot) = held(req, this)?;
         let (fname, _, _) = archive_facts(req, id);
         let (is_dir, name) = read(req, this, |e| (e.is_dir, lossy(&e.filename).into_owned()));
-        let bad =
-            |req: &mut Request, m: &str| Err(throw_exception_ex(req, "BadMethodCallException", m));
+        let bad = |req: &mut Request, m: &str| {
+            let ce = Throwables::of(req)?;
+            Err(throw_exception_ex(req, ce.bad_method_call_exception, m))
+        };
         if is_dir {
             return bad(
                 req,
@@ -633,11 +656,14 @@ impl PharFileInfo {
             None | Some(9_021_976) => Ok(flags & ENT_COMPRESSION_MASK != 0),
             Some(0x1000) => Ok(flags & ENT_COMPRESSED_GZ != 0),
             Some(0x2000) => Ok(flags & ENT_COMPRESSED_BZ2 != 0),
-            Some(_) => Err(throw_exception_ex(
-                req,
-                "BadMethodCallException",
-                "Unknown compression type specified",
-            )),
+            Some(_) => {
+                let ce = Throwables::of(req)?;
+                Err(throw_exception_ex(
+                    req,
+                    ce.bad_method_call_exception,
+                    "Unknown compression type specified",
+                ))
+            }
         }
     }
 
@@ -656,16 +682,18 @@ impl PharFileInfo {
         let (id, _) = held(req, this)?;
         let (_, is_data, _) = archive_facts(req, id);
         if readonly(req) && !is_data {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 "Write operations disabled by the php.ini setting phar.readonly",
             ));
         }
         if read(req, this, |e| e.is_temp_dir) {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 "Phar entry is a temporary directory (not an actual entry in the archive), cannot set metadata",
             ));
         }

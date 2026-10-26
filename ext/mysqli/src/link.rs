@@ -19,6 +19,7 @@ use php_ext_mysqlnd::client::{
 use crate::props::{self, Props};
 use crate::result::mysqli_result;
 use crate::stmt::mysqli_stmt;
+use crate::throwables::Throwables;
 use crate::{
     On, Resource, State, affected, closed, extras, ini_bool, ini_string, long_or_string,
     not_initialized, report_conn, report_index, report_mode, sql_exception, string,
@@ -282,7 +283,7 @@ fn reuse(req: &mut Request, mysql: &mut Conn, target: &Target, key: &[u8]) -> Re
     } else {
         let kept = req
             .engine::<crate::Pooled>()
-            .and_then(|crate::Pooled(pool)| pool.take(&key.to_vec()));
+            .and_then(|crate::Pooled { pool, .. }| pool.take(&key.to_vec()));
         let Some(kept) = kept else {
             return Ok(false);
         };
@@ -342,7 +343,7 @@ fn give_to_pool(req: &mut Request, key: &[u8], handle: Mysqlnd) {
         return;
     };
     let past = match req.engine::<crate::Pooled>() {
-        Some(crate::Pooled(pool)) => pool.give_back(key.to_vec(), kept),
+        Some(crate::Pooled { pool, .. }) => pool.give_back(key.to_vec(), kept),
         None => Some(kept),
     };
     if let Some(past) = past {
@@ -359,7 +360,7 @@ fn give_to_pool(req: &mut Request, key: &[u8], handle: Mysqlnd) {
 pub(crate) fn engine_end(req: &mut Request) {
     let idle = req
         .engine::<crate::Pooled>()
-        .map(|crate::Pooled(pool)| pool.drain())
+        .map(|crate::Pooled { pool, .. }| pool.drain())
         .unwrap_or_default();
     for (_, idle) in idle {
         idle.close(req).ok();
@@ -444,7 +445,8 @@ fn connect_from(
             Some(Link::Closed) | None
         )
     {
-        return Err(throw_error(req, "Error", "Cannot call constructor twice"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "Cannot call constructor twice"));
     }
     Ok(Some(
         crate::payload::<Link>(req, object)
@@ -1400,7 +1402,8 @@ impl mysqli {
                 crate::payload_ref::<Link>(req, object),
                 Some(Link::Closed) | None
             ) {
-                return Err(throw_error(req, "Error", "Cannot call constructor twice"));
+                let ce = Throwables::of(req)?;
+                return Err(throw_error(req, ce.error, "Cannot call constructor twice"));
             }
             init(req, Some(object))?.give_up(req);
             return Ok(());

@@ -38,6 +38,7 @@ mod decls;
 mod ffi;
 mod parse;
 mod preload;
+mod throwables;
 mod types;
 
 use std::collections::HashMap;
@@ -107,14 +108,22 @@ pub(crate) fn types(req: &mut Request) -> &mut Types {
 }
 
 /// `zend_throw_error(zend_ffi_exception_ce, ...)`.
-pub(crate) fn ffi_error(req: &mut Request, message: &str) -> Thrown {
-    throw_error(req, "FFI\\Exception", message)
+pub(crate) fn ffi_error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
+    let ce = match crate::throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    throw_error(req, ce.exception, message)
 }
 
 /// `zend_ffi_parser_error`'s throw, `zend_throw_exception` of an
 /// `FFI\ParserException`.
 pub(crate) fn parser_error(req: &mut Request, message: &str) -> Thrown {
-    throw(req, "FFI\\ParserException", message)
+    let ce = match crate::throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    throw(req, ce.parser_exception, message)
 }
 
 /// `zend_ffi_api_restriction`, what `ffi.enable` says.

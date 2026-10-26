@@ -247,7 +247,7 @@ impl Request {
                 let Some(function) = made else {
                     return Err(Refusal::Said(format!(
                         "class {} does not have a method \"{}\"",
-                        self.symbols().class_name(scope),
+                        String::from_utf8_lossy(self.symbols().class_name(scope)),
                         shown(name.as_bytes()),
                     )));
                 };
@@ -806,15 +806,15 @@ impl Request {
                     if !self.symbols().instance_of(org, calling) {
                         return Err(Refusal::Said(format!(
                             "class {} is not a subclass of {}",
-                            self.symbols().class_name(org),
-                            self.symbols().class_name(calling)
+                            String::from_utf8_lossy(self.symbols().class_name(org)),
+                            String::from_utf8_lossy(self.symbols().class_name(calling))
                         )));
                     }
                     if deprecations == Deprecations::Raised {
                         let class = self.symbols().class_name(org);
                         let form = [
                             b"Callables of the form [\"",
-                            class.as_bytes(),
+                            class,
                             b"\", \"",
                             php_unit::decl::shown_bytes(callable),
                             b"\"] are deprecated",
@@ -856,7 +856,7 @@ impl Request {
         let Some((callee, via_handler)) = found else {
             return Err(Refusal::Said(format!(
                 "class {} does not have a method \"{}\"",
-                self.symbols().class_name(calling),
+                String::from_utf8_lossy(self.symbols().class_name(calling)),
                 shown(&method)
             )));
         };
@@ -1053,7 +1053,7 @@ impl Request {
             let method_shown = || {
                 format!(
                     "{}::{}",
-                    self.symbols().class_name(calling),
+                    String::from_utf8_lossy(self.symbols().class_name(calling)),
                     decl.map_or_else(String::new, |decl| {
                         shown(&decl.function.name.0).into_owned()
                     })

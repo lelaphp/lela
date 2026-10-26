@@ -15,7 +15,9 @@ use std::sync::Arc;
 use crate::api::abi::{AfterLog, Callable, IniStage};
 use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{Charset, Owner, PhpArray, PhpString, Value, ValueRef, adopted_some};
+use crate::api::values::{
+    Charset, ClassId, Owner, PhpArray, PhpString, Value, ValueRef, adopted_some,
+};
 use crate::supplied::Bail;
 use crate::supplied::chain::ErrorArgs;
 
@@ -137,7 +139,7 @@ pub(super) struct DiagnosticsState {
     last_fatal_error_backtrace: Option<(Option<PhpArray>, String)>,
     /// `EG(error_handling)` at `EH_THROW` with `EG(exception_class)`: the
     /// class a warning is thrown as meanwhile, `None` at `EH_NORMAL`.
-    error_handling: Option<String>,
+    error_handling: Option<ClassId>,
     /// What a warning was thrown as under `EH_THROW`, held until the
     /// native that asked for it hands it on.
     error_handling_thrown: Option<Thrown>,
@@ -609,7 +611,7 @@ impl Request {
         // `zend_error_impl` reaches past the user handler: a warning is
         // thrown as the class `zend_replace_error_handling` named, where
         // nothing is pending, and shown nowhere.
-        if let Some(class) = self.diagnostics.error_handling.clone()
+        if let Some(class) = self.diagnostics.error_handling
             && matches!(
                 level,
                 Level::Warning | Level::CoreWarning | Level::CompileWarning | Level::UserWarning
@@ -626,7 +628,7 @@ impl Request {
                 crate::observer::Told::Raised,
             );
             if self.raised.is_none() && self.diagnostics.error_handling_thrown.is_none() {
-                let thrown = crate::api::raising::throw(self, &class, message);
+                let thrown = crate::api::raising::throw(self, class, message);
                 self.diagnostics.error_handling_thrown = Some(thrown);
             }
             return false;
@@ -1163,7 +1165,7 @@ impl Request {
     /// [`Request::pending`] is the object alone.
     /// `zend_replace_error_handling`: the class a warning is thrown as,
     /// `None` for `EH_NORMAL`; the one it replaces comes back.
-    pub(crate) fn replace_error_handling(&mut self, class: Option<String>) -> Option<String> {
+    pub(crate) fn replace_error_handling(&mut self, class: Option<ClassId>) -> Option<ClassId> {
         std::mem::replace(&mut self.diagnostics.error_handling, class)
     }
 

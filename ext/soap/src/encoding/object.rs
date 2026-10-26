@@ -21,6 +21,7 @@ use crate::model::{
     Content, ContentKind, ContentModel, EncRef, Form, Sdl, ToZval, TypeId, TypeKind, Use,
     XML_NAMESPACE, ty,
 };
+use crate::throwables::Throwables;
 use crate::xml::{get_attribute_any_ns, get_node};
 use crate::{Res, State, soap_error};
 
@@ -380,7 +381,13 @@ fn fetch_class(req: &mut Request, name: &[u8]) -> Res<ClassId> {
     match autoload(req, name)? {
         Some(c) => Ok(c),
         None => {
-            Err(throw_error(req, "Error", &format!("Class \"{}\" not found", text(name))).into())
+            let ce = Throwables::of(req)?;
+            Err(throw_error(
+                req,
+                ce.error,
+                &format!("Class \"{}\" not found", text(name)),
+            )
+            .into())
         }
     }
 }

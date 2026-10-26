@@ -15,6 +15,7 @@ pub fn extensions() -> Vec<Extension> {
         php_ext_date::extension(),
         php_ext_libxml::extension(),
         php_ext_lexbor::extension(),
+        php_ext_random::extension(),
         php_ext_standard::extension(),
         php_ext_uri::extension(),
         php_ext_soap::extension(),

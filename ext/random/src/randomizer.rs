@@ -13,6 +13,7 @@ use php_ext::values::walk::{self};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::rng::Rng;
+use crate::throwables::Throwables;
 use crate::{Algo, Engine, Failure, gammasection};
 
 /// `php_random_randomizer`: the engine object, `None` before a
@@ -148,9 +149,10 @@ impl Randomizer {
         };
         if this.prop(req, b"engine").is_some() {
             engine.give_up(req);
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Cannot modify readonly property Random\\Randomizer::$engine",
             ));
         }

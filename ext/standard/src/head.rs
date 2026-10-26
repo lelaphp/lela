@@ -12,6 +12,7 @@
 
 use std::ops::ControlFlow;
 
+use crate::throwables::Throwables;
 use php_ext::abi::{Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, truthy, with_string};
@@ -340,11 +341,13 @@ fn php_setcookie(
     }
     if strpbrk(name, b"=,; \t\r\n\x0b\x0c") {
         let text = format!("cannot contain \"=\", {ILLEGAL_COOKIE_CHARACTER}");
-        return Err(argument_error(req, "ValueError", 1, &text));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 1, &text));
     }
     if !url_encode && value.is_some_and(|v| strpbrk(v, b",; \t\r\n\x0b\x0c")) {
         let text = format!("cannot contain {ILLEGAL_COOKIE_CHARACTER}");
-        return Err(argument_error(req, "ValueError", 2, &text));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 2, &text));
     }
     for (what, field) in [("path", &cookie.path), ("domain", &cookie.domain)] {
         if field

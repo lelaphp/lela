@@ -26,6 +26,7 @@ use crate::connector::{
 use crate::dbh::{self, PDO};
 use crate::error::{self, On};
 use crate::fetch::{self, Target};
+use crate::throwables::Throwables;
 
 /// How the statement reaches its connection: `stmt->dbh` with the owner
 /// `database_object_handle` takes, or, for the statement a failed
@@ -426,9 +427,10 @@ impl ObjectHandlers for Handlers {
         {
             value.give_up(req);
             name.give_up(req);
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Property queryString is read only",
             ));
         }
@@ -443,9 +445,10 @@ impl ObjectHandlers for Handlers {
         name: &[u8],
     ) -> Result<(), Thrown> {
         if name == b"queryString" {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Property queryString is read only",
             ));
         }
@@ -480,9 +483,10 @@ impl ObjectHandlers for Handlers {
         by_ref: bool,
     ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
         if by_ref {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "An iterator cannot be used with foreach by reference",
             ));
         }
@@ -615,9 +619,10 @@ pub(super) fn handle(req: &mut Request, object: PhpObject) -> Result<PhpObject, 
         return Ok(dbh);
     }
     let class = crate::class_name(req, object.class());
+    let ce = Throwables::of(req)?;
     Err(throw_error(
         req,
-        "Error",
+        ce.error,
         &format!("{class} object is uninitialized"),
     ))
 }
@@ -845,7 +850,8 @@ pub(super) fn describe_columns(req: &mut Request, object: PhpObject) -> Result<b
 pub(super) fn refuse_in_param_event(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
     if read(req, object, |s| s.in_param_event).unwrap_or(false) {
         let text = "Cannot modify a PDOStatement while parameter hooks are running";
-        return Err(throw_error(req, "Error", text));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, text));
     }
     Ok(())
 }
@@ -1190,15 +1196,17 @@ fn bind(
     refuse_in_param_event(req, stmt)?;
     let (name, position) = if let Union::A(name) = key {
         if name.is_empty() {
-            return Err(argument_error(req, "ValueError", 1, "must not be empty"));
+            let ce = Throwables::of(req)?;
+            return Err(argument_error(req, ce.value_error, 1, "must not be empty"));
         }
         (Some(Owner::take(req, name)), -1)
     } else {
         let n = if let Union::B(n) = key { n } else { 0 };
         if n <= 0 {
+            let ce = Throwables::of(req)?;
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 1,
                 "must be greater than or equal to 1",
             ));
@@ -2086,9 +2094,10 @@ impl PDOStatement {
     ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
         let (stmt, dbh) = this_stmt(req, this.object())?;
         let Ok(at) = usize::try_from(column) else {
+            let ce = Throwables::of(req)?;
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 1,
                 "must be greater than or equal to 0",
             ));

@@ -428,7 +428,7 @@ impl Request {
         }
         self.active_native_function().map_or_else(
             || String::from("native"),
-            |function| self.qualified_name(function, None),
+            |function| String::from_utf8_lossy(&self.qualified_name(function, None)).into_owned(),
         )
     }
 
@@ -441,7 +441,7 @@ impl Request {
         let frame = self.innermost_frame()?;
         Some(frame.function().map_or_else(
             || String::from("main"),
-            |function| self.qualified_name(function, None),
+            |function| String::from_utf8_lossy(&self.qualified_name(function, None)).into_owned(),
         ))
     }
 
@@ -449,11 +449,10 @@ impl Request {
     /// under, and `native` for one the table has no declaration for. A
     /// method's is its own name alone, what `get_active_function_name`
     /// answers; the class before it is [`Request::qualified_name`]'s.
-    pub(crate) fn declared_name(&self, function: Function) -> String {
-        self.symbols().function_decl(function).map_or_else(
-            || String::from("native"),
-            |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
-        )
+    pub(crate) fn declared_name(&self, function: Function) -> Vec<u8> {
+        self.symbols()
+            .function_decl(function)
+            .map_or_else(|| b"native".to_vec(), |decl| decl.name.0.to_vec())
     }
 
     /// `get_function_or_method_name(EX(func))` over the function `frame`
@@ -469,19 +468,19 @@ impl Request {
     /// ```expect
     /// C::{closure:C::m():2}(): Argument #1 ($a) must be of type int, string given, called in %s on line 4
     /// ```
-    pub(crate) fn frame_function_name(&self, frame: FrameRef) -> String {
+    pub(crate) fn frame_function_name(&self, frame: FrameRef) -> Vec<u8> {
         let Some(state) = self.vm.at(frame) else {
-            return String::new();
+            return Vec::new();
         };
         let Some(function) = state.function else {
-            return String::new();
+            return Vec::new();
         };
         if state.closure.is_none() {
             return self.qualified_name_of(function);
         }
         let name = self.declared_name(function);
         match self.frame_scope(frame) {
-            Some(scope) => format!("{}::{name}", self.symbols().class_name(scope)),
+            Some(scope) => bytes!(self.symbols().class_name(scope), b"::", name),
             None => name,
         }
     }
@@ -491,13 +490,12 @@ impl Request {
     /// `zend_wrong_parameters_count_error` and `zend_trace_to_string`
     /// join `func->common.scope->name` to it; a trace joins with `->`
     /// where the call had a receiver.
-    pub(super) fn qualified_name(&self, function: Function, this: Option<PhpObject>) -> String {
+    pub(super) fn qualified_name(&self, function: Function, this: Option<PhpObject>) -> Vec<u8> {
         let name = self.declared_name(function);
         match self.method_class(function) {
             Some(class) => {
-                let class = self.symbols().class_name(class);
-                let join = if this.is_some() { "->" } else { "::" };
-                format!("{class}{join}{name}")
+                let join: &[u8] = if this.is_some() { b"->" } else { b"::" };
+                bytes!(self.symbols().class_name(class), join, name)
             }
             None => name,
         }
@@ -558,12 +556,16 @@ impl Request {
     }
 
     /// `zend_argument_error_variadic`'s message:
-    /// `{fn}(): Argument #N ($name) must {tail}`.
-    pub(crate) fn argument_message(&self, position: u32, tail: &str) -> String {
-        format!(
-            "{}(): Argument #{position}{} must {tail}",
+    /// `{fn}(): Argument #N ($name) must {tail}`, as bytes, so a class
+    /// name the tail prints stands as it was declared (#3428).
+    pub(crate) fn argument_message(&self, position: u32, tail: &[u8]) -> Vec<u8> {
+        bytes!(
             self.active_native(),
-            self.argument_name_suffix(position)
+            "(): Argument #",
+            position.to_string(),
+            self.argument_name_suffix(position),
+            " must ",
+            tail
         )
     }
 
@@ -916,7 +918,7 @@ impl<'r> Frames<&'r Request> {
         };
         function.map_or_else(
             || String::from("main"),
-            |function| self.0.qualified_name(function, None),
+            |function| String::from_utf8_lossy(&self.0.qualified_name(function, None)).into_owned(),
         )
     }
 

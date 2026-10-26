@@ -20,6 +20,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod ffi;
+mod throwables;
 
 use php_ext::abi::{
     Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, GcTable, ObjectHandlers,
@@ -38,6 +39,8 @@ use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value
 use php_ext_dom::{CallbacksAt, XPathCallbacks};
 use php_ext_libxml::ffi::{ClassType, Kind, Node, NodeObject, Ns, Raised, Route};
 use php_ext_libxml::{Errors, import_node};
+
+use throwables::Throwables;
 
 /// `XSL_SECPREF_DEFAULT`: every write forbidden.
 const SECPREF_DEFAULT: i64 = 32 | 8 | 4;
@@ -96,6 +99,7 @@ pub fn extension() -> Extension {
         .process_state(|| Ok(initialize()))
         .constants(constants::declared())
         .class::<XSLTProcessor>()
+        .engine_state(Throwables::start)
         .info(xsl_info)
         .build("xsl")
 }
@@ -257,7 +261,8 @@ impl ObjectHandlers for Handlers {
                 String::from_utf8_lossy(name),
             );
             let message = format!("Indirect modification of {class}::${name} is not allowed");
-            return Err(throw_error(req, "Error", &message));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, &message));
         }
         Std.read_property(req, object, name, read)
     }
@@ -329,9 +334,10 @@ impl ObjectHandlers for Handlers {
                 class_name(req, object.class()),
                 String::from_utf8_lossy(name),
             );
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!("Cannot unset {class}::${name}"),
             ));
         }
@@ -442,7 +448,8 @@ fn apply<R>(
         let message = format!(
             "XSLTProcessor::{method}() can only be called after a stylesheet has been imported"
         );
-        return Err(throw_error(req, "Error", &message));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, &message));
     };
     let answer = id.held(req, |req, sheet| {
         if let Some(i) = intern(req, this) {
@@ -478,7 +485,8 @@ fn apply<R>(
         let message = format!(
             "XSLTProcessor::{method}() can only be called after a stylesheet has been imported"
         );
-        Err(throw_error(req, "Error", &message))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, &message))
     })
 }
 
@@ -754,7 +762,8 @@ impl XSLTProcessor {
         let this = this.object();
         if intern(req, this).is_some_and(|i| i.transform_depth > 0) {
             let message = "Cannot call XSLTProcessor::importStylesheet() while a transformation is in progress";
-            return Err(throw_error(req, "Error", message));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, message));
         }
         let Some(exported) = import_node(req, stylesheet) else {
             return Err(arg_type_error(req, 1, "be a valid XML node"));
@@ -1106,7 +1115,8 @@ impl XSLTProcessor {
             Union::B(name) => {
                 let Some(value) = value else {
                     let tail = "cannot be null when argument #2 ($name) is a string";
-                    return Err(argument_error(req, "ValueError", 3, tail));
+                    let ce = Throwables::of(req)?;
+                    return Err(argument_error(req, ce.value_error, 3, tail));
                 };
                 if name.as_bytes().contains(&0) {
                     return Err(arg_value_error(req, 2, "not contain any null bytes"));

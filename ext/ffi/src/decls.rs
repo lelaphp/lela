@@ -909,11 +909,12 @@ fn load_read(
                 // '%s'", ...)` over the parser's pending throw, its
                 // `zend_vspprintf` buffer standing across the throw.
                 Fail::Parse(message) => {
+                    let ce = crate::throwables::Throwables::of(req)?;
                     let thrown = parser_error(req, &message);
                     return Err(throw_error_chained(
                         req,
                         thrown,
-                        "FFI\\Exception",
+                        ce.exception,
                         &format!("Failed loading '{shown}'"),
                     ));
                 }
@@ -1100,7 +1101,7 @@ fn ffi_cast(
         return Err(arg_type_error(
             req,
             2,
-            &format!("be of type FFI\\CData, {given} given"),
+            &[b"be of type FFI\\CData, ".as_slice(), &given, b" given"].concat(),
         ));
     };
     let old = view(req, old_object);
@@ -1197,7 +1198,12 @@ fn data_or_type(req: &mut Request, value: Option<Value>) -> Result<TypeId, Throw
     Err(arg_type_error(
         req,
         1,
-        &format!("be of type FFI\\CData or FFI\\CType, {given} given"),
+        &[
+            b"be of type FFI\\CData or FFI\\CType, ".as_slice(),
+            &given,
+            b" given",
+        ]
+        .concat(),
     ))
 }
 
@@ -1245,7 +1251,12 @@ fn source(
     Err(arg_type_error(
         req,
         position,
-        &format!("be of type FFI\\CData or string, {given} given"),
+        &[
+            b"be of type FFI\\CData or string, ".as_slice(),
+            &given,
+            b" given",
+        ]
+        .concat(),
     ))
 }
 
@@ -1269,7 +1280,11 @@ pub(crate) struct Handlers;
 
 /// `zend_bad_array_access` over `FFI`.
 fn bad_array_access(req: &mut Request) -> Thrown {
-    throw_error(req, "Error", "Cannot use object of type FFI as array")
+    let ce = match crate::throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    throw_error(req, ce.error, "Cannot use object of type FFI as array")
 }
 
 /// What the table refuses: cloning.
@@ -1282,9 +1297,10 @@ impl ObjectHandlers for Handlers {
 
     /// `zend_fake_get_constructor`.
     fn get_constructor(&self, req: &mut Request, _: PhpObject) -> Result<Option<Function>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Instantiation of FFI is not allowed",
         ))
     }

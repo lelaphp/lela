@@ -39,6 +39,7 @@ mod murmur;
 mod natives;
 mod sha;
 mod snefru;
+mod throwables;
 mod tiger;
 mod whirlpool;
 mod xxhash;
@@ -153,5 +154,6 @@ pub fn extension() -> Extension {
         .constants(natives::constants::declared())
         .info(natives::info)
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .build("hash")
 }

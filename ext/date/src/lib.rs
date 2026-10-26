@@ -40,6 +40,7 @@ mod obj;
 mod parse;
 mod period;
 mod sun;
+mod throwables;
 mod timezone;
 mod tzdb;
 mod zone;
@@ -259,6 +260,7 @@ pub fn extension() -> Extension {
         ])
         .on_modify(b"date.timezone", zone::on_update_timezone)
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .rshutdown(rshutdown)
         .info(date_info)
         .build("date")

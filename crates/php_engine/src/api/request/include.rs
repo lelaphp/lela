@@ -15,7 +15,7 @@ use php_unit::PublishedUnit;
 use crate::ProgramFile;
 use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{Owner, PhpString, Value};
+use crate::api::values::{ClassId, Owner, PhpString, Value};
 use crate::exec::IncludeKind;
 use crate::supplied::chain::{FileArgs, StringArgs};
 use crate::unit_cache::CompileRefused;
@@ -1337,9 +1337,9 @@ impl Request {
                 }
             }
             let class = if error.level == Level::Parse {
-                "ParseError"
+                ClassId::PARSE_ERROR
             } else {
-                "CompileError"
+                ClassId::COMPILE_ERROR
             };
             let thrown =
                 crate::api::raising::throw_at(self, class, &error.message, path, error.line);

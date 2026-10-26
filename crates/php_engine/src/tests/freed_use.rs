@@ -12,6 +12,7 @@
 //! refused the first time it happens, and a write into a freed block while its
 //! bin holds it back is found as the block leaves.
 
+use crate::api::values::ClassId;
 use php_heap::Zval;
 use php_macros::php_function;
 
@@ -240,7 +241,7 @@ fn freed_addref_at_rinit(req: &mut Request) -> Result<(), Thrown> {
     }
     Err(crate::api::raising::throw_error(
         req,
-        "Error",
+        ClassId::ERROR,
         "start refused",
     ))
 }

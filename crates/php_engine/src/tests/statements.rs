@@ -15,6 +15,7 @@
 //! sequence below is those two read together, not one the oracle
 //! printed.
 
+use crate::api::values::ClassId;
 use std::path::Path;
 
 use super::observer::serve_main;
@@ -234,7 +235,7 @@ fn throwing<const N: u8>(statement: &mut Statement<'_>) -> Result<(), Thrown> {
         let message = format!("stopped by {N}");
         return Err(crate::api::raising::throw_error(
             statement,
-            "Exception",
+            ClassId::EXCEPTION,
             &message,
         ));
     }

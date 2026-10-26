@@ -38,6 +38,7 @@ use crate::obj::{
     time_of, tz_from_time, tz_of, uninitialized, with_time,
 };
 use crate::parse::keep_errors;
+use crate::throwables::Throwables;
 use crate::timezone::DateTimeZone;
 use crate::zone::{corrupt, guess_timezone, parse_tzfile};
 
@@ -95,19 +96,20 @@ pub(super) fn initialize(
         text
     };
     let given = match timezone {
-        Some(tz) => match tz
-            .native::<crate::obj::TzObj>(req)
-            .and_then(|t| t.tz.clone())
-        {
-            Some(kind) => Some(kind),
-            None => {
+        Some(tz) => {
+            let Some(kind) = tz
+                .native::<crate::obj::TzObj>(req)
+                .and_then(|t| t.tz.clone())
+            else {
+                let ce = Throwables::of(req)?;
                 return Err(throw_error(
                     req,
-                    "Error",
+                    ce.error,
                     "The DateTimeZone object has not been correctly initialized by its constructor",
                 ));
-            }
-        },
+            };
+            Some(kind)
+        }
         None => None,
     };
     let default = guess_timezone(req);
@@ -145,9 +147,10 @@ pub(super) fn initialize(
         Made::Refused(errors) => {
             if how.ctor {
                 let (at, c, message) = first_error(&errors);
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "DateMalformedStringException",
+                    ce.date_malformed_string_exception,
                     &format!(
                         "Failed to parse time string ({}) at position {at} ({c}): {message}",
                         String::from_utf8_lossy(text)
@@ -242,9 +245,13 @@ fn from_timestamp(lent: &Lent<'_>, sec: i64, usec: i64) -> Time {
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 fn from_float(req: &mut Request, ts: f64) -> Result<(i64, i64), Thrown> {
     let range = |req: &mut Request| {
+        let ce = match Throwables::of(req) {
+            Ok(ce) => ce,
+            Err(fatal) => return fatal,
+        };
         argument_error(
             req,
-            "DateRangeError",
+            ce.date_range_error,
             1,
             &format!(
                 "must be a finite number between {} and {}.999999, {} given",
@@ -485,9 +492,10 @@ fn modify(
         String::from_utf8_lossy(text)
     );
     if let Some(name) = method {
+        let ce = Throwables::of(req)?;
         return Err(throw(
             req,
-            "DateMalformedStringException",
+            ce.date_malformed_string_exception,
             &format!("{name}(): {message}"),
         ));
     }
@@ -573,9 +581,10 @@ fn sub(
     if diff.have_weekday_relative != 0 || diff.have_special_relative != 0 {
         let message = "Only non-special relative time specifications are supported for subtraction";
         if let Some(name) = method {
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "DateInvalidOperationException",
+                ce.date_invalid_operation_exception,
                 &format!("{name}(): {message}"),
             ));
         }
@@ -737,9 +746,10 @@ fn microsecond_in_range(req: &mut Request, us: i64) -> Result<(), Thrown> {
     if (0..=999_999).contains(&us) {
         return Ok(());
     }
+    let ce = Throwables::of(req)?;
     Err(argument_error(
         req,
-        "DateRangeError",
+        ce.date_range_error,
         1,
         &format!("must be between 0 and 999999, {us} given"),
     ))
@@ -771,13 +781,15 @@ fn timestamp_of(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> {
         }
         time.date_to_int()
     })?;
-    match ts {
-        Some(ts) => Ok(ts),
-        None => Err(throw_error(
+    if let Some(ts) = ts {
+        Ok(ts)
+    } else {
+        let ce = Throwables::of(req)?;
+        Err(throw_error(
             req,
-            "DateRangeError",
+            ce.date_range_error,
             "Epoch doesn't fit in a PHP integer",
-        )),
+        ))
     }
 }
 
@@ -859,9 +871,10 @@ fn set_state(req: &mut Request, class: &str, hash: PhpArray) -> Result<Owner<Php
         Ok(true) => Ok(object),
         Ok(false) => {
             object.give_up(req);
+            let ce = Throwables::of(req)?;
             Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!("Invalid serialization data for {class} object"),
             ))
         }
@@ -976,9 +989,10 @@ fn unserialize(
     hash: PhpArray,
 ) -> Result<(), Thrown> {
     if !initialize_from_hash(req, object, hash)? {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             &format!("Invalid serialization data for {class} object"),
         ));
     }
@@ -995,9 +1009,10 @@ fn wakeup(req: &mut Request, class: &str, object: PhpObject) -> Result<(), Throw
     let done = initialize_from_hash(req, object, *hash);
     hash.give_up(req);
     if !done? {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             &format!("Invalid serialization data for {class} object"),
         ));
     }

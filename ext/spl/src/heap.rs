@@ -19,6 +19,7 @@ use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, Value};
 
+use crate::throwables::Throwables;
 use crate::{Countable, Iterator};
 
 /// One element, the heap's owners of its data and its priority, `null`
@@ -128,9 +129,10 @@ impl SplHeap {
         let this = this.object();
         consistent(req, this, true)?;
         let Some(top) = delete_top(req, this)? else {
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "RuntimeException",
+                ce.runtime_exception,
                 "Can't extract from an empty heap",
             ));
         };
@@ -183,9 +185,10 @@ impl SplHeap {
             (h.queue, h.flags, h.elements.first().map(seen))
         })?;
         let Some(top) = top else {
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "RuntimeException",
+                ce.runtime_exception,
                 "Can't peek at an empty heap",
             ));
         };
@@ -538,9 +541,10 @@ impl SplPriorityQueue {
     fn setExtractFlags(req: &mut Request, this: This<Self>, flags: i64) -> Result<i64, Thrown> {
         let flags = flags & Self::EXTR_BOTH;
         if flags == 0 {
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "RuntimeException",
+                ce.runtime_exception,
                 "Must specify at least one extract flag",
             ));
         }
@@ -657,16 +661,18 @@ fn read<R>(
 fn consistent(req: &mut Request, object: PhpObject, write: bool) -> Result<(), Thrown> {
     let (corrupted, locked) = read(req, object, |h| (h.corrupted, h.locked))?;
     if corrupted {
+        let ce = Throwables::of(req)?;
         return Err(throw(
             req,
-            "RuntimeException",
+            ce.runtime_exception,
             "Heap is corrupted, heap properties are no longer ensured.",
         ));
     }
     if write && locked {
+        let ce = Throwables::of(req)?;
         return Err(throw(
             req,
-            "RuntimeException",
+            ce.runtime_exception,
             "Heap cannot be changed when it is already being modified.",
         ));
     }
@@ -1048,9 +1054,13 @@ fn unserialize(req: &mut Request, this: PhpObject, data: PhpArray) -> Result<(),
     }
     let invalid = |req: &mut Request| -> Thrown {
         let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
+        let ce = match Throwables::of(req) {
+            Ok(ce) => ce,
+            Err(fatal) => return fatal,
+        };
         throw_exception_ex(
             req,
-            "Exception",
+            ce.exception,
             &format!("Invalid serialization data for {class} object"),
         )
     };

@@ -32,6 +32,7 @@
 
 mod decode;
 mod encode;
+mod throwables;
 
 use php_ext::abi::{Extension, ExtensionBuilder, OrFalse};
 use php_ext::attr::{php_class, php_const, php_function};
@@ -128,6 +129,7 @@ pub fn extension() -> Extension {
         .class::<JsonSerializable>()
         .class::<JsonException>()
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .info(json_info)
         .build("json")
 }
@@ -210,7 +212,11 @@ fn error_message(code: i64) -> &'static str {
 /// message `json_last_error_msg` would have answered, under the code
 /// `json_last_error` would have, which is what `getCode()` reads.
 fn throw_json(req: &mut Request, code: i64) -> Thrown {
-    let made = new_throwable(req, "JsonException", error_message(code));
+    let ce = match throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    let made = new_throwable(req, ce.json_exception, error_message(code));
     let value = match made {
         Ok(value) => value,
         Err(thrown) => return thrown,

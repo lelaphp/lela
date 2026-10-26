@@ -16,6 +16,7 @@ use php_ext::values::{Value, ValueRef};
 use twox_hash::{XxHash3_64, XxHash3_128};
 
 use crate::algos::{Options, Slot, State};
+use crate::throwables::Throwables;
 
 const P32: [u32; 5] = [
     0x9E37_79B1,
@@ -406,9 +407,10 @@ impl Xxh3 {
         let seed = options.get(b"seed");
         let secret = options.get(b"secret");
         if seed.is_some() && secret.is_some() {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!("{name}: Only one of seed or secret is to be passed for initialization"),
             ));
         }
@@ -464,9 +466,10 @@ impl Xxh3 {
                 .map(Hasher3::Bits128),
         };
         let Some(hasher) = hasher else {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!(
                     "{name}: Secret length must be >= {SECRET_MIN} bytes, {given} bytes passed"
                 ),

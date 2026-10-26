@@ -27,6 +27,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod ffi;
+mod throwables;
 
 use std::ffi::{CStr, CString, c_int};
 
@@ -37,6 +38,7 @@ use php_ext::decl::Name;
 use php_ext::raising::{Thrown, arg_value_error, argument_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpString};
+use throwables::Throwables;
 
 /// `PHP_GETTEXT_MAX_DOMAIN_LENGTH`.
 const MAX_DOMAIN_LENGTH: usize = 1024;
@@ -70,6 +72,7 @@ pub fn extension() -> Extension {
             dcngettext::declared(),
             bind_textdomain_codeset::declared(),
         ])
+        .engine_state(Throwables::start)
         .info(info)
         .build("gettext")
 }
@@ -94,7 +97,8 @@ fn info(req: &mut Request) {
 /// limit, or empty, refused as the argument at `position`.
 fn domain_check(req: &mut Request, position: u32, domain: &[u8]) -> Result<CString, Thrown> {
     if domain.len() > MAX_DOMAIN_LENGTH {
-        return Err(argument_error(req, "ValueError", position, "is too long"));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, position, "is too long"));
     }
     if domain.is_empty() {
         return Err(arg_value_error(req, position, "not be empty"));
@@ -106,7 +110,8 @@ fn domain_check(req: &mut Request, position: u32, domain: &[u8]) -> Result<CStri
 /// refused as the argument at `position`.
 fn length_check(req: &mut Request, position: u32, msgid: &[u8]) -> Result<CString, Thrown> {
     if msgid.len() > MAX_MSGID_LENGTH {
-        return Err(argument_error(req, "ValueError", position, "is too long"));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, position, "is too long"));
     }
     Ok(ffi::c_string(msgid))
 }
@@ -115,9 +120,10 @@ fn length_check(req: &mut Request, position: u32, msgid: &[u8]) -> Result<CStrin
 /// php's `zend_long` narrows to at the call.
 fn category_check(req: &mut Request, position: u32, category: i64) -> Result<c_int, Thrown> {
     if category == i64::from(ffi::LC_ALL) {
+        let ce = Throwables::of(req)?;
         return Err(argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             position,
             "cannot be LC_ALL",
         ));
@@ -209,7 +215,8 @@ fn textdomain(
         Some(domain) => {
             let name = domain_check(req, 1, domain.as_bytes())?;
             if domain.as_bytes() == b"0" {
-                return Err(argument_error(req, "ValueError", 1, "cannot be zero"));
+                let ce = Throwables::of(req)?;
+                return Err(argument_error(req, ce.value_error, 1, "cannot be zero"));
             }
             Some(name)
         }

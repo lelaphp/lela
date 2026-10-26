@@ -28,6 +28,7 @@ use super::{
     Shared, has_method, is_enum_class, is_serializable, locked, not_serializable,
 };
 use crate::string::Decimal;
+use crate::throwables::Throwables;
 
 /// `HT_MAX_SIZE` on a 64-bit build.
 const HT_MAX_SIZE: i64 = 0x4000_0000;
@@ -1157,9 +1158,15 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
                 let name = value_name(req, &classes);
                 return Err(type_error(
                     req,
-                    &format!(
-                        "{function}(): Option \"allowed_classes\" must be of type array|bool, {name} given"
-                    ),
+                    &[
+                        format!(
+                            "{function}(): Option \"allowed_classes\" must be of type array|bool, "
+                        )
+                        .as_bytes(),
+                        name.as_slice(),
+                        b" given".as_slice(),
+                    ]
+                    .concat(),
                 ));
             }
         }
@@ -1173,7 +1180,12 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
             let name = value_name(req, &max);
             return Err(type_error(
                 req,
-                &format!("{function}(): Option \"max_depth\" must be of type int, {name} given"),
+                &[
+                    format!("{function}(): Option \"max_depth\" must be of type int, ").as_bytes(),
+                    name.as_slice(),
+                    b" given".as_slice(),
+                ]
+                .concat(),
             ));
         };
         if n < 0 {
@@ -1212,9 +1224,15 @@ fn allowed_names(
             let name = value_name(req, &entry);
             return Err(type_error(
                 req,
-                &format!(
-                    "{function}(): Option \"allowed_classes\" must be an array of class names, {name} given"
-                ),
+                &[
+                    format!(
+                        "{function}(): Option \"allowed_classes\" must be an array of class names, "
+                    )
+                    .as_bytes(),
+                    name.as_slice(),
+                    b" given".as_slice(),
+                ]
+                .concat(),
             ));
         }
         let name = php_ext::coerce::to_string(req, &entry)?;
@@ -2040,9 +2058,10 @@ impl State<'_> {
         };
         self.p = after;
         if let Some(shown) = not_serializable(req, class) {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "Exception",
+                ce.exception,
                 &format!("Unserialization of '{shown}' is not allowed"),
             ));
         }
