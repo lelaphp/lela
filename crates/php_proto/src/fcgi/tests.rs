@@ -80,8 +80,11 @@ fn a_request_is_its_role_its_flags_and_its_params_in_the_order_set() {
     let n = input.read(&mut stream, &mut body).unwrap();
     assert_eq!(&body[..n], b"body");
     // The empty record that ends the body was read with it, as
-    // `fcgi_read` reads it, so the stream holds nothing more.
-    assert!(input.read(&mut stream, &mut body).is_err());
+    // `fcgi_read` reads it, and a read past it hands out nothing and reads
+    // nothing more of the stream.
+    let end = stream.input.position();
+    assert_eq!(input.read(&mut stream, &mut body).unwrap(), 0);
+    assert_eq!(stream.input.position(), end);
 }
 
 #[test]

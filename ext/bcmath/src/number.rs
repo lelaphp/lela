@@ -989,7 +989,29 @@ fn shrunk(scale: usize, kept: usize) -> usize {
 
 /// `bcmath_number_{add,sub,mul,div,mod,pow}_internal`: the operation
 /// over two numbers, the trailing zeros of what it computed dropped,
-/// and the scale that reports.
+/// and the scale that reports. A number it computes that truncates to
+/// zero is an unsigned zero, as 8.5.12 makes it.
+///
+/// ```php
+/// foreach ([['div', '-0.001', '1', 0], ['div', '0.001', '-1', 0], ['add', '-0.001', '-0.001', 0],
+///           ['sub', '-0.001', '0.001', 0], ['mul', '-0.001', '1', 0], ['pow', '-0.1', 3, 2]] as [$m, $n, $a, $s]) {
+///     $r = (new BcMath\Number($n))->$m($a, $s);
+///     echo "$n $m $a: $r ", $r <=> 0, ' ', var_export($r == 0, true), "\n";
+/// }
+/// [$q] = (new BcMath\Number('-0.001'))->divmod('1', 0);
+/// echo $q, ' ', $q <=> 0, "\n";
+/// echo new BcMath\Number('-0.001') / 1, ' ', bcdiv('-0.001', '1', 0), ' ', bcmul('-0.001', '1', 0), "\n";
+/// ```
+/// ```expect
+/// -0.001 div 1: 0 0 true
+/// 0.001 div -1: 0 0 true
+/// -0.001 add -0.001: 0 0 true
+/// -0.001 sub 0.001: 0 0 true
+/// -0.001 mul 1: 0 0 true
+/// -0.1 pow 3: 0.00 0 true
+/// 0 0
+/// -0.001 0 0
+/// ```
 fn calc(
     req: &mut Request,
     calc: Calc,
@@ -1010,6 +1032,7 @@ fn calc(
                 num::sub(&n1.num, &n2.num, scale)
             };
             num.narrow(scale);
+            num.unsign_zero();
             (num, scale)
         }
         Calc::Mul => {
@@ -1022,6 +1045,7 @@ fn calc(
             }
             let mut num = num::multiply(&n1.num, &n2.num, scale);
             num.narrow(scale);
+            num.unsign_zero();
             (num, scale)
         }
         Calc::Div => {

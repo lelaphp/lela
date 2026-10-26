@@ -225,7 +225,45 @@ impl Status {
     }
 
     /// `zip_error_code_system`: the system half as `ZipArchive::$statusSys`
-    /// gives it.
+    /// gives it. A detail packs its entry above its eight bits
+    /// (`MAKE_DETAIL_WITH_INDEX`); the one an archive under php can hold
+    /// names entry 0, since the indexed ones are `zip_open`'s, which php
+    /// hands back as a code alone, and the CRC layer's
+    /// `MAX_DETAIL_INDEX` stays on the `zip_file_t` that read it, which
+    /// `getFromName` does not copy to the archive. A zlib error is zlib's
+    /// code:
+    ///
+    /// ```php
+    /// function crafted($f, $case) {
+    ///     $local = ''; $cd = '';
+    ///     foreach (['a', 'b', 'c'] as $n) {
+    ///         $off = strlen($local); [$method, $comp, $size, $magic] = [0, 'hello', 5, "PK\3\4"];
+    ///         if ($n == 'c') match ($case) {
+    ///             'magic' => $magic = "PK\3\5",
+    ///             'length' => $size = 6,
+    ///             'zlib' => [$method, $comp] = [8, "\xff\xff\xff\xff\xff"],
+    ///         };
+    ///         $local .= $magic . pack('vvvvvVVVvv', 20, 0, $method, 0, 0x21, crc32('hello'), strlen($comp), $size, 1, 0) . $n . $comp;
+    ///         $cd .= "PK\1\2" . pack('vvvvvvVVVvvvvvVV', 0x0314, 20, 0, $method, 0, 0x21, crc32('hello'), strlen($comp), $size, 1, 0, 0, 0, 0, 0x81a40000, $off) . $n;
+    ///     }
+    ///     file_put_contents($f, $local . $cd . "PK\5\6" . pack('vvvvVVv', 0, 0, 3, 3, strlen($cd), strlen($local), 0));
+    /// }
+    /// foreach (['magic', 'length', 'zlib'] as $case) {
+    ///     crafted('sys-witness.zip', $case); $z = new ZipArchive; $z->open('sys-witness.zip');
+    ///     echo "$case: ", var_export(@$z->getFromName('c'), true), " $z->status $z->statusSys ", $z->getStatusString(), "\n";
+    ///     $z->setCompressionName('c', $case == 'zlib' ? ZipArchive::CM_STORE : ZipArchive::CM_DEFLATE);
+    ///     echo "  close: ", var_export(@$z->close(), true), " $z->status $z->statusSys ", $z->getStatusString(), "\n";
+    /// }
+    /// unlink('sys-witness.zip');
+    /// ```
+    /// ```expect capture
+    /// magic: false 21 4 Zip archive inconsistent: entry 0: central header invalid
+    ///   close: false 21 4 Zip archive inconsistent: entry 0: central header invalid
+    /// length: false 0 0 No error
+    ///   close: false 33 0 Unexpected length of data
+    /// zlib: false 0 0 No error
+    ///   close: false 13 -3 Zlib error: data error
+    /// ```
     pub(crate) fn sys_code(self) -> i64 {
         i64::from(match self.sys {
             Sys::None => 0,

@@ -2573,8 +2573,8 @@ pub(crate) fn call_shutdown_functions(req: &mut Request) {
     let mut at = 0;
     while let Some((position, callback, arguments)) = req.shutdown_function(at) {
         at = position + 1;
-        match crate::api::call::call(req, &callback, &arguments) {
-            Ok(value) => value.give_up(req),
+        match crate::api::call::call_known_made(req, &callback, &arguments) {
+            Ok(value) => req.release(value),
             Err(thrown) => {
                 req.leave_pending(&thrown);
                 req.uncaught().ok();

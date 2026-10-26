@@ -432,8 +432,9 @@ impl OutputSink for Process {
     ///
     /// x
     /// ```
-    fn send_headers(&mut self, head: &ResponseHead) {
+    fn send_headers(&mut self, head: &ResponseHead) -> Result<(), Aborted> {
         self.write(&php_sapi::cgi::head(head)).ok();
+        Ok(())
     }
 
     fn log(&mut self, entry: &[u8]) {
@@ -556,20 +557,16 @@ fn describe(
         _ => Chdir::Stay,
     };
     let rows = php_sapi::cgi::server_variables(&env, &info, settings);
-    // The body, `sapi_cgi_read_post`'s stdin up to `CONTENT_LENGTH`, where
-    // stdin is not the program.
-    let mut body = Vec::new();
-    if info.content_length > 0 && !matches!(primary, Primary::Stdin) {
-        let length = u64::try_from(info.content_length).unwrap_or(0);
-        std::io::stdin()
-            .lock()
-            .take(length)
-            .read_to_end(&mut body)
-            .ok();
-    }
+    // The body, where stdin is not the program: `sapi_cgi_read_post`'s
+    // stdin, pulled as the request asks, up to what `CONTENT_LENGTH` leaves.
+    let body = if matches!(primary, Primary::Stdin) {
+        php_sapi::Body::default()
+    } else {
+        php_sapi::Body::Stream(Box::new(std::io::stdin().take(info.body_length())))
+    };
     let web = WebRequest {
         query,
-        body: php_sapi::Body::from(body),
+        body,
         no_headers: invocation.head == Head::Quiet,
         response_code: info.response_code,
         path_copies,

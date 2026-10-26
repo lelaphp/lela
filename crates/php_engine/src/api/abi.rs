@@ -20,6 +20,7 @@ use php_unit::decl::{
 use crate::api::call::{Function, Target};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::{Level, Thrown};
+use crate::api::request::Family;
 use crate::api::request::{HookedTable, Request};
 use crate::api::values::{
     ClassId, ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, Place, TypeTag, Value,
@@ -2025,6 +2026,9 @@ pub struct Callable {
     value: Value,
     name: String,
     target: Target,
+    /// Whose call serving it is: `zend_call_function`'s, or, for an fcc
+    /// filled by hand for `zend_call_known_function`, that one's.
+    family: Family,
 }
 
 impl Callable {
@@ -2033,7 +2037,23 @@ impl Callable {
             value,
             name: String::from_utf8_lossy(name).into_owned(),
             target,
+            family: Family::Fcall,
         }
+    }
+
+    /// The callable as a `zend_fcall_info_cache` filled by hand for
+    /// `zend_call_known_function`, whose refusal once the memory limit
+    /// was met is its own ([`Family::Known`]).
+    pub(crate) fn known(self) -> Callable {
+        Callable {
+            family: Family::Known,
+            ..self
+        }
+    }
+
+    /// Whose call serving the callable is.
+    pub(crate) const fn family(&self) -> Family {
+        self.family
     }
 
     pub(crate) fn name(&self) -> String {
@@ -2048,6 +2068,7 @@ impl Callable {
             value: self.value,
             name: std::mem::take(&mut self.name),
             target: self.target,
+            family: self.family,
         }
     }
 

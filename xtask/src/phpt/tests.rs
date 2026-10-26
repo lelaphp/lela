@@ -587,6 +587,22 @@ fn a_skipif_is_judged_by_what_it_says_as_upstream_judges_it() {
     }
 }
 
+/// A test's run a signal ended is handed back as upstream's
+/// `system_with_timeout` hands it back, raw, then its `Termsig=` line, and
+/// trimmed only after both (run-tests.php:1235-1239; dee3efd99): `x\n`
+/// and the line read `x`, a blank line and `Termsig=9`, which a run
+/// trimmed before the line was added, `x` and `Termsig=9` alone, misses.
+#[test]
+fn a_run_a_signal_ended_is_trimmed_after_its_termsig_line_as_upstream_trims_it() {
+    if oracle().is_none() {
+        return;
+    }
+    let test = "--TEST--\nKilled\n--FILE--\n<?php echo \"x\\n\"; posix_kill(getmypid(), 9);\n--EXPECT--\nx\n\nTermsig=9\n";
+    let (_tree, subset) = subset("termsig", &[("killed.phpt", test)]);
+    let tally = run(&subset, &registry(""));
+    assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
+}
+
 /// A test whose `--XFAIL--` section is there and which passes is
 /// upstream's lone `WARN` and this runner's `Warn`, which `--upstream`
 /// reads alike (#2922).

@@ -35,11 +35,12 @@ impl OutputSink for Capture {
     fn flush(&mut self) {}
 
     /// The head's lines, each with `\r\n` after it.
-    fn send_headers(&mut self, head: &ResponseHead) {
+    fn send_headers(&mut self, head: &ResponseHead) -> Result<(), crate::engine::Aborted> {
         for line in &head.lines {
             self.headers.extend_from_slice(line);
             self.headers.extend_from_slice(b"\r\n");
         }
+        Ok(())
     }
 
     fn log(&mut self, entry: &[u8]) {
@@ -78,7 +79,9 @@ impl OutputSink for Through {
     }
 
     /// The CLI sends no head.
-    fn send_headers(&mut self, _: &ResponseHead) {}
+    fn send_headers(&mut self, _: &ResponseHead) -> Result<(), crate::engine::Aborted> {
+        Ok(())
+    }
 
     fn log(&mut self, entry: &[u8]) {
         use std::io::Write as _;

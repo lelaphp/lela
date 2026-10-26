@@ -356,31 +356,45 @@ impl Request {
         level: Level,
         message: &(impl AsRef<[u8]> + ?Sized),
     ) -> bool {
-        let (file, line) = self.executed_site();
+        let (file, line) = self.executed_site(level);
         self.note_error_in(level, message, &file, line)
     }
 
-    /// `get_filename_lineno`'s site (`Z/Zend/zend.c:1640-1679`) for a
-    /// diagnostic raised where the request stands: the executing frame's
-    /// file and line, and, where nothing is executing, no file at all,
+    /// `get_filename_lineno` (`Z/Zend/zend.c:1649-1688`) for a diagnostic
+    /// of `level` raised where the request stands: the file of the
+    /// innermost frame of user code and its line, and no file at all,
     /// which `php_error_cb` is handed as `Unknown` at line zero
-    /// (`ZEND_STR_UNKNOWN_CAPITALIZED`). A destructor the shutdown walk
-    /// refuses to serve raises there, and so does an extension's
-    /// request-end function, which `zend_deactivate_modules` serves with
-    /// `EG(current_execute_data)` emptied, and what a `zend_catch` raises
-    /// while a fatal is in flight, since `_zend_bailout` empties it
-    /// first. php's arm for a file being compiled is not taken: the
-    /// engine compiles with no site of its own.
-    pub(super) fn executed_site(&self) -> (Vec<u8>, u32) {
-        if !self.frames().executing() || self.bailout {
-            return (b"Unknown".to_vec(), 0);
+    /// (`ZEND_STR_UNKNOWN_CAPITALIZED`), for an `E_CORE_*` level or
+    /// `E_STRICT`, where nothing is executing, and where no frame of user
+    /// code stands beneath the native that raised it
+    /// (`zend_get_executed_filename_ex`'s `NULL`). A destructor the
+    /// shutdown walk refuses to serve raises there, and so does an
+    /// extension's request-end function, which `zend_deactivate_modules`
+    /// serves with `EG(current_execute_data)` emptied, what a `zend_catch`
+    /// raises while a fatal is in flight, since `_zend_bailout` empties it
+    /// first, and a native a shutdown function or a session's user
+    /// handler calls with nothing beneath it. php's arm for a file being
+    /// compiled is not taken: the engine compiles with no site of its own.
+    ///
+    /// ```php
+    /// register_shutdown_function('fopen', __DIR__ . '/missing/x', 'r');
+    /// register_shutdown_function(function () { fopen(__DIR__ . '/missing/y', 'r'); });
+    /// ```
+    /// ```expect
+    /// Warning: fopen(%s/missing/x): Failed to open stream: No such file or directory in Unknown on line 0
+    ///
+    /// Warning: fopen(%s/missing/y): Failed to open stream: No such file or directory in %s on line 3
+    /// ```
+    pub(super) fn executed_site(&self, level: Level) -> (Vec<u8>, u32) {
+        let located = match level {
+            Level::CoreError | Level::CoreWarning | Level::Strict => None,
+            _ if !self.frames().executing() || self.bailout => None,
+            _ => self.frames().executed_file(),
+        };
+        match located {
+            Some(file) => (file.to_vec(), self.frames().current_line()),
+            None => (b"Unknown".to_vec(), 0),
         }
-        let file = self
-            .frames()
-            .current_file()
-            .map(<[u8]>::to_vec)
-            .unwrap_or_default();
-        (file, self.frames().current_line())
     }
 
     /// The same diagnostic at a file and line of its own, which is what
@@ -565,7 +579,7 @@ impl Request {
     /// handed it and the last error keeps it, one more owner each, as
     /// `trigger_error()`'s string is in php.
     pub(crate) fn note_error_string(&mut self, level: Level, message: PhpString) -> bool {
-        let (file, line) = self.executed_site();
+        let (file, line) = self.executed_site(level);
         self.note_message_in(level, Message::String(message), &file, line)
     }
 

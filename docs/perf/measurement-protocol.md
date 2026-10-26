@@ -228,9 +228,11 @@ the same way, as Mitchell ruled on #3127: one whose rows resolve in
 opposite directions is published unsigned as `mixed`, with the count
 each way, since +20% on one program and −17% on another make a geomean
 near 1.00, and signing it would claim no change while hiding a
-regression. A bar held to a bound does not read the value of a `mixed`
-geomean and fails on it, since a row of it resolved slower; a
-`NOISE-SWAMPED` one is never a regression (§1.2) and passes.
+regression. A bar held to a bound is held row by row and not by its
+geomean. It fails where any row resolves slower (§4.3) with its ratio
+beyond one plus the tolerance, and passes otherwise. A `NOISE-SWAMPED`
+row is never a regression (§1.2) and holds nothing. The geomean, signed,
+`mixed` or unsigned, is published and holds nothing.
 
 ## 11. Where a workload lives
 
@@ -287,8 +289,8 @@ A night is one reading of the bar: its paired delta's median, Q1 and Q3
    weeks of nights, the row carries the 2% floor alone and names no
    nights, as Mitchell ruled for G1 on #3130. A bar held to a bound and
    not a baseline, G1, whose door should cost nothing, is held to one
-   plus its row's tolerance: its ratio, a set's geomean, at most
-   1.02 at the floor. The row is the one place that bound is written.
+   plus its row's tolerance: each row's ratio at most 1.02 at the
+   floor. The row is the one place that bound is written.
 4. **The baseline ratchets, and is a reading.** The baseline is a reading
    of the store, `<bar>/baseline`, never a manifest value. The first is the
    median of the bar's nights over the tolerance's dates. It moves only

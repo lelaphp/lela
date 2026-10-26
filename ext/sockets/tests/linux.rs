@@ -81,6 +81,8 @@ var_dump(socket_set_option($s, SOL_TCP, TCP_KEEPIDLE, 30), socket_get_option($s,
 $u = socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
 var_dump(socket_set_option($u, SOL_UDP, UDP_SEGMENT, 1400), socket_get_option($u, SOL_UDP, UDP_SEGMENT));
 try { socket_set_option($u, SOL_UDP, UDP_SEGMENT, 70000); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+var_dump(socket_set_option($u, SOL_UDP, UDP_SEGMENT, (1 << 32) + 1200), socket_get_option($u, SOL_UDP, UDP_SEGMENT));
+try { socket_set_option($u, SOL_UDP, UDP_SEGMENT, (1 << 32) - 1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 var_dump(socket_set_option($u, SOL_SOCKET, SO_REUSEPORT, 1));
 var_dump(socket_set_option($u, SOL_SOCKET, SO_ATTACH_REUSEPORT_CBPF, SKF_AD_CPU));
 var_dump(socket_set_option($u, SOL_SOCKET, SO_ATTACH_REUSEPORT_CBPF, 99));
@@ -111,7 +113,10 @@ bool(true)
 int(30)
 bool(true)
 int(1400)
-socket_set_option(): Argument #4 ($value) must be of between 0 and 65535
+socket_set_option(): Argument #4 ($value) must be between 0 and 65535
+bool(true)
+int(1200)
+socket_set_option(): Argument #4 ($value) must be between 0 and 65535
 bool(true)
 bool(true)
 

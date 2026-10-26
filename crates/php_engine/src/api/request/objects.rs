@@ -604,7 +604,7 @@ impl Request {
         if matches!(saved, Saved::TheObject) {
             return;
         }
-        if let Err(thrown) = self.serve_method_made(destructor, Some(object), class, &[], &[]) {
+        if let Err(thrown) = self.serve_known_method(destructor, object, class, &[]) {
             self.leave_pending(&thrown);
             if !self.frames().executing() {
                 self.end_the_walk();

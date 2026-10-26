@@ -946,6 +946,34 @@ impl<'p> Recorder<'p> {
         policy::bad_stop(word, times)
     }
 
+    /// The opline at `at` of `func`, about to be served in `frame`,
+    /// written down as one `Op` with its operands sampled, and the native
+    /// a frameless call names taken into `view`
+    /// ([`UnitView::hold_frameless`]); its `op1`'s sample and how many
+    /// class records php's trace adds beside it ([`classes`]).
+    fn write_down(
+        &mut self,
+        req: &Request,
+        view: &mut UnitView,
+        frame: FrameRef,
+        (func, at): (FuncRef, OplineIdx),
+        (op, after): (&Opline, Option<&Opline>),
+    ) -> (Option<Sample>, u32) {
+        let (op1, op2, data) = sampled(req, frame, op, after);
+        self.events.push(Event::Op {
+            func,
+            opline: at,
+            op1,
+            op2,
+            data,
+            branch: None,
+        });
+        if op.opcode.is_frameless_icall() {
+            view.hold_frameless(req, op.extended_value);
+        }
+        (op1, classes(op, op1, op2))
+    }
+
     /// The recording loop from `frame`, rooted in `root`'s op array.
     fn record(
         &mut self,
@@ -978,16 +1006,8 @@ impl<'p> Recorder<'p> {
             if !stepped && behind.is_none() && unsupported(op.opcode) {
                 return Ok((Stop::NotSupported, ended(frame, false)));
             }
-            let (op1, op2, data) = sampled(req, frame, &op, after.as_ref());
-            let classes = classes(&op, op1, op2);
-            self.events.push(Event::Op {
-                func,
-                opline: at,
-                op1,
-                op2,
-                data,
-                branch: None,
-            });
+            let (op1, classes) =
+                self.write_down(req, view, frame, (func, at), (&op, after.as_ref()));
             if self.count(1 + classes) {
                 return Ok((Stop::TooLong, ended(frame, stepped)));
             }
@@ -1072,7 +1092,7 @@ impl<'p> Recorder<'p> {
     fn begun(
         &mut self,
         req: &Request,
-        view: &UnitView,
+        view: &mut UnitView,
         frame: FrameRef,
         root: FuncRef,
         behind: Option<OplineIdx>,
@@ -1085,16 +1105,10 @@ impl<'p> Recorder<'p> {
         let op = (view.op_array(root))
             .and_then(|code| code.oplines.get(condition.0 as usize).copied())
             .ok_or_else(|| Bailed::Fatal(off_the_end(condition)))?;
-        let (op1, op2, _) = sampled(req, frame, &op, None);
-        let classes = classes(&op, op1, op2);
-        self.events.push(Event::Op {
-            func: root,
-            opline: condition,
-            op1,
-            op2,
-            data: None,
-            branch: Some(true),
-        });
+        let (_, classes) = self.write_down(req, view, frame, (root, condition), (&op, None));
+        if let Some(Event::Op { branch, .. }) = self.events.last_mut() {
+            *branch = Some(true);
+        }
         Ok(self.count(1 + classes))
     }
 
@@ -1697,9 +1711,9 @@ pub(crate) fn position(req: &Request, frame: FrameRef) -> OplineIdx {
 }
 
 /// The loop header standing at `at`, as php's trace roots it, where
-/// php's CFG finds a header at all ([`reached`]): [`loop_at`]'s.
+/// php's CFG finds a loop at all ([`found`]): [`loop_at`]'s.
 pub(crate) fn header_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
-    loop_at(code, at).filter(|_| reached(code, at))
+    loop_at(code, at).filter(|header| found(code, *header))
 }
 
 /// The loop whose root stands at `at`, counted or not: the safepoint
@@ -1724,7 +1738,7 @@ pub(crate) fn loop_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
 /// `frame` where it lands: `zend_jit_setup_hot_trace_counters` swaps the
 /// handler of the header of each loop php's CFG finds
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:8954-8980`), and finds none where
-/// the header is not [`reached`] from the entry but through a `catch`, so
+/// the header is not [`reachable`] from the entry but through a `catch`, so
 /// php never records such a loop, and its word is blacklisted at its
 /// first claim, with no line (`dispatch::hot`). An op array no trace
 /// reads is counted: its word reads sealed already.
@@ -1749,13 +1763,56 @@ pub(crate) fn loop_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
 ///
 /// ```
 pub(crate) fn counts(req: &Request, frame: FrameRef, header: SafepointIdx) -> bool {
-    tier::served(req, frame).is_none_or(|held| {
-        let code = held.code();
-        loop_root(code, header).is_some_and(|root| reached(code, root))
-    })
+    tier::served(req, frame).is_none_or(|held| found(held.code(), header))
 }
 
-/// Whether the opline at `to` is reached from the op array's entry along
+/// Whether php's CFG finds loop `header`: its root is [`reachable`] from
+/// the entry, and so is a jump back to where its back edge lands, as
+/// `zend_cfg_identify_loops` finds a loop by a back edge from a block the
+/// entry reaches, an unreached block drawing no edge
+/// (`Z/Zend/Optimizer/zend_cfg.c:607-617`, `:778-880`). A `foreach`
+/// whose body always returns has none: the `JMP` its compiler emits past
+/// the body is dead, and php's trace records through the `FE_FETCH_R` as
+/// through any other opline.
+///
+/// ```php
+/// function first($a) { foreach ($a as $v) { return $v; } return 0; }
+/// $s = 0;
+/// for ($i = 0; $i < 3; $i++) { $s += first([$i, 9]); }
+/// echo $s, "\n";
+/// ```
+/// ```expect regime=jit-inline process capture
+/// 3
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:3
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) $main() %SCRATCH%/witness.php:4
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 2 $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 2 start (side trace 1/2) $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+/// ```
+pub(crate) fn found(code: &OpArray, header: SafepointIdx) -> bool {
+    let (Some(root), Some(&site)) = (
+        loop_root(code, header),
+        code.safepoints.get(header.0 as usize),
+    ) else {
+        return false;
+    };
+    let seen = reachable(code);
+    let reaches = |at: OplineIdx| seen.get(at.0 as usize).copied().unwrap_or(false);
+    let end = u32::try_from(code.oplines.len()).unwrap_or(u32::MAX);
+    reaches(root)
+        && (site.0..end)
+            .map(OplineIdx)
+            .any(|at| reaches(at) && tier::jump_targets(code, at).any(|to| to == site))
+}
+
+/// Per opline, whether it is reached from the op array's entry along
 /// the edges php's CFG draws (`zend_build_cfg`,
 /// `Z/Zend/Optimizer/zend_cfg.c:496-587`): each of its
 /// [`tier::jump_targets`], and the opline after each opline that has
@@ -1771,13 +1828,10 @@ pub(crate) fn counts(req: &Request, frame: FrameRef, header: SafepointIdx) -> bo
 ///
 /// `php_ssa`'s CFG and dominator tree replace this walk once ADR-0015's
 /// crate lands, and this tier reads its loop headers from there.
-pub(crate) fn reached(code: &OpArray, to: OplineIdx) -> bool {
+fn reachable(code: &OpArray) -> Vec<bool> {
     let mut seen = vec![false; code.oplines.len()];
     let mut work = vec![OplineIdx(0)];
     while let Some(at) = work.pop() {
-        if at == to {
-            return true;
-        }
         let index = at.0 as usize;
         let (Some(op), Some(seen)) = (code.oplines.get(index), seen.get_mut(index)) else {
             continue;
@@ -1802,7 +1856,7 @@ pub(crate) fn reached(code: &OpArray, to: OplineIdx) -> bool {
             work.extend(at.0.checked_add(1).map(OplineIdx));
         }
     }
-    false
+    seen
 }
 
 /// The opline php's trace of loop `header` roots at, where the safepoint

@@ -549,3 +549,29 @@ mask = [['(?s)phpinfo\(\)\n.*?(\n<br />|\n== run)', 'phpinfo() (the page)$1'], [
 args = ["-n", "-i", "-d", "memory_limit=600K"]
 [[line.then]]
 args = ["-n", "-h", "-d", "date.timezone=Foo/Bar"]
+
+# A negative `CONTENT_LENGTH` is read to the body's end: php-fpm's
+# `sapi_cgi_read_post` takes what the length leaves as a `size_t`, which
+# wraps (`Z/sapi/fpm/fpm/fpm_main.c:433`), and reads `FCGI_STDIN`, or the
+# file `REQUEST_BODY_FILE` names, until it ends, held to `post_max_size` by
+# the readers that pull it (#3457). php's `fcgi_read` waits past the record
+# that ends the body until the web server shuts its half of the connection,
+# as these requests do.
+[[line]]
+name = "a-negative-content-length-reads-the-body-to-its-end"
+args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\n", "body.txt" = "x=from&y=file", "p.php" = "<?php var_dump($_POST, file_get_contents('php://input'));\n" }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/p.php"], ["REQUEST_METHOD", "POST"], ["CONTENT_TYPE", "application/x-www-form-urlencoded"], ["CONTENT_LENGTH", "-1"]]
+body = "x=hello&y=world"
+shut = true
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/p.php"], ["REQUEST_METHOD", "POST"], ["CONTENT_TYPE", "multipart/form-data; boundary=b"], ["CONTENT_LENGTH", "-1"]]
+body = "--b\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nhello\r\n--b--\r\n"
+shut = true
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/p.php"], ["REQUEST_METHOD", "POST"], ["CONTENT_TYPE", "application/x-www-form-urlencoded"], ["CONTENT_LENGTH", "-1"], ["REQUEST_BODY_FILE", "{dir}/body.txt"]]

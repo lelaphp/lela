@@ -358,7 +358,7 @@ fn a_loop_on_a_constant_condition_roots_at_its_body() -> Result<(), String> {
 /// Whether php counts each loop of `a()` in `program`, in the order of
 /// their safepoints: whether [`super::header_at`] finds the loop at its
 /// root, which it does where the root is reached from the entry
-/// ([`super::reached`]), as php's CFG finds a header there
+/// ([`super::found`]), as php's CFG finds a header there
 /// (`zend_cfg_identify_loops`).
 fn counted(program: &str) -> Result<Vec<bool>, String> {
     let (recorded, _) = testing::records::recording(&at("a", "enter"), program)?;

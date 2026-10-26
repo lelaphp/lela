@@ -24,8 +24,8 @@ use php_ext::values::{
 };
 
 use super::{
-    Holder, INCOMPLETE_CLASS, MAGIC_MEMBER, Shared, has_method, is_enum_class, is_serializable,
-    locked, not_serializable,
+    Holder, INCOMPLETE_CLASS, MAGIC_MEMBER, MAGIC_MEMBER_ENUM_CASE, MAGIC_MEMBER_SERIALIZED,
+    Shared, has_method, is_enum_class, is_serializable, locked, not_serializable,
 };
 use crate::string::Decimal;
 use crate::throwables::Throwables;
@@ -143,6 +143,12 @@ pub(crate) struct VarHash {
     dtors: Vec<DtorBlock>,
     keys: Vec<Owner<Key>>,
     allowed: Allowed,
+    /// `incomplete_classes_only` (8.5.12): every object read as an
+    /// `__PHP_Incomplete_Class` without its class looked up, so no user
+    /// code runs; a `C:` payload and an `E:` case kept to be written
+    /// back as they were, and data that already holds one of the
+    /// members this keeps them under refused.
+    incomplete_classes_only: bool,
     max_depth: i64,
     depth: i64,
     /// `ref_props`: the slots of typed properties whose value was read
@@ -953,6 +959,19 @@ impl<'a> Unserializer<'a> {
         Ok(Unserializer {
             state: State::open(req, data)?,
         })
+    }
+
+    /// `php_var_unserialize_set_incomplete_classes_only`: whether every
+    /// object is read as an `__PHP_Incomplete_Class` with no class looked
+    /// up, no autoloader, `unserialize_callback_func`, `__wakeup()` or
+    /// `__unserialize()` served, and a `C:` payload and an `E:` case kept
+    /// for a [`Serializer`] set the same way to write back; ext/session's
+    /// upload progress reads a session so before any user code may be
+    /// served.
+    ///
+    /// [`Serializer`]: crate::Serializer
+    pub fn set_incomplete_classes_only(&mut self, on: bool) {
+        self.state.hash.incomplete_classes_only = on;
     }
 
     /// Where the scanner stands, php's `*p` after the last value.
@@ -2034,49 +2053,7 @@ impl State<'_> {
         else {
             return Ok(false);
         };
-        let lower = name.to_ascii_lowercase();
-        if lower != name {
-            let lowered = req
-                .memory_mut()
-                .fallible(|req| PhpString::new(req, &lower))?;
-            let Some(lowered) = lowered else {
-                held.give_up(req);
-                return Ok(false);
-            };
-            lowered.give_up(req);
-        }
-        held.give_up(req);
-        let allowed = self.hash.allowed.admits(&lower);
-        let mut incomplete = false;
-        let class = if allowed {
-            // `zend_is_valid_class_name` before the table is asked, since
-            // the one class php finds there without the test, a linked
-            // one, is never anonymous, whose name holds a NUL.
-            if !valid_class_name(&name) {
-                return Ok(false);
-            }
-            // The class loader and the callback run with
-            // `BG(serialize_lock)` held, so what they unserialize is read
-            // through a var hash of its own.
-            if let Some(class) = locked(req, |req| autoload(req, &name))? {
-                Some(class)
-            } else {
-                incomplete = true;
-                if locked(req, |req| Self::callback(req, &name))? {
-                    incomplete = false;
-                    lookup_class(req, &name)?
-                } else {
-                    lookup_class(req, INCOMPLETE_CLASS)?
-                }
-            }
-        } else {
-            if !valid_class_name(&name) {
-                return Ok(false);
-            }
-            incomplete = true;
-            lookup_class(req, INCOMPLETE_CLASS)?
-        };
-        let Some(class) = class else {
+        let Some((class, incomplete)) = self.resolve(req, &name, held)? else {
             return Ok(false);
         };
         self.p = after;
@@ -2131,16 +2108,7 @@ impl State<'_> {
         let object = *made;
         self.write(req, slot, entry, made.into_value())?;
         if incomplete {
-            let key = PhpString::new(req, MAGIC_MEMBER)?;
-            let stored = PhpString::new(req, &name).map(Owner::into_value);
-            let stored = match stored {
-                Ok(stored) => stored,
-                Err(thrown) => {
-                    key.give_up(req);
-                    return Err(thrown);
-                }
-            };
-            object.unserialize_prop(req, key, stored)?;
+            store_member(req, object, MAGIC_MEMBER, &name)?;
         }
         if has_unserialize {
             if elements >= HT_MAX_SIZE {
@@ -2193,6 +2161,72 @@ impl State<'_> {
             self.hash.tmp_var(req, Dtor::Wakeup(held))?;
         }
         Ok(self.finish())
+    }
+
+    /// The class an `O:` or `C:` record names, held as `class_name` is
+    /// while its lowered copy is asked for, and whether the object is an
+    /// incomplete one: under `incomplete_classes_only` no class is looked
+    /// up at all; otherwise the allowed class through the loader and
+    /// `unserialize_callback_func`, `__PHP_Incomplete_Class` past them or
+    /// where it is not allowed. `None` fails the read.
+    fn resolve(
+        &mut self,
+        req: &mut Request,
+        name: &[u8],
+        held: Owner<PhpString>,
+    ) -> Result<Option<(ClassId, bool)>, Thrown> {
+        if self.hash.incomplete_classes_only {
+            // "Do not look the class up at all, so that no user code can
+            // run."
+            held.give_up(req);
+            if !valid_class_name(name) {
+                return Ok(None);
+            }
+            return Ok(lookup_class(req, INCOMPLETE_CLASS)?.map(|class| (class, true)));
+        }
+        let lower = name.to_ascii_lowercase();
+        if lower != name {
+            let lowered = req
+                .memory_mut()
+                .fallible(|req| PhpString::new(req, &lower))?;
+            let Some(lowered) = lowered else {
+                held.give_up(req);
+                return Ok(None);
+            };
+            lowered.give_up(req);
+        }
+        held.give_up(req);
+        let allowed = self.hash.allowed.admits(&lower);
+        let mut incomplete = false;
+        let class = if allowed {
+            // `zend_is_valid_class_name` before the table is asked, since
+            // the one class php finds there without the test, a linked
+            // one, is never anonymous, whose name holds a NUL.
+            if !valid_class_name(name) {
+                return Ok(None);
+            }
+            // The class loader and the callback run with
+            // `BG(serialize_lock)` held, so what they unserialize is read
+            // through a var hash of its own.
+            if let Some(class) = locked(req, |req| autoload(req, name))? {
+                Some(class)
+            } else {
+                incomplete = true;
+                if locked(req, |req| Self::callback(req, name))? {
+                    incomplete = false;
+                    lookup_class(req, name)?
+                } else {
+                    lookup_class(req, INCOMPLETE_CLASS)?
+                }
+            }
+        } else {
+            if !valid_class_name(name) {
+                return Ok(None);
+            }
+            incomplete = true;
+            lookup_class(req, INCOMPLETE_CLASS)?
+        };
+        Ok(class.map(|class| (class, incomplete)))
     }
 
     /// `unserialize_callback_func`: the function the ini names, handed the
@@ -2302,6 +2336,22 @@ impl State<'_> {
         let object = *made;
         self.write(req, slot, entry, made.into_value())?;
         let payload = self.buf[self.p..self.p + datalen].to_vec();
+        if self.hash.incomplete_classes_only {
+            // `keep_payload`: "keep the payload verbatim, so that the
+            // object serializes back to the same bytes", the string asked
+            // for fallibly, then the class name stored.
+            let kept = req
+                .memory_mut()
+                .fallible(|req| PhpString::new(req, &payload))?;
+            let Some(kept) = kept else {
+                return Ok(false);
+            };
+            let key = PhpString::new(req, MAGIC_MEMBER_SERIALIZED)?;
+            object.unserialize_prop(req, key, kept.into_value())?;
+            self.p += datalen + 1;
+            store_member(req, object, MAGIC_MEMBER, name)?;
+            return Ok(true);
+        }
         // `zend_user_unserialize` runs outside `BG(serialize_lock)`: what
         // the class's `unserialize()` reads shares this var hash.
         let served = if incomplete {
@@ -2324,16 +2374,7 @@ impl State<'_> {
         .into_owned();
         warning(req, &format!("Class {shown} has no unserializer"));
         if incomplete {
-            let key = PhpString::new(req, MAGIC_MEMBER)?;
-            let stored = PhpString::new(req, name).map(Owner::into_value);
-            let stored = match stored {
-                Ok(stored) => stored,
-                Err(thrown) => {
-                    key.give_up(req);
-                    return Err(thrown);
-                }
-            };
-            object.unserialize_prop(req, key, stored)?;
+            store_member(req, object, MAGIC_MEMBER, name)?;
         }
         self.p += datalen + 1;
         Ok(true)
@@ -2421,6 +2462,20 @@ impl State<'_> {
                 }
                 _ => return Ok(false),
             };
+            // "Data that already carries one of them cannot be told apart
+            // from that bookkeeping, so it is rejected rather than
+            // silently overwritten."
+            if self.hash.incomplete_classes_only
+                && matches!(scalar, Some(Scalar::Str(_)))
+                && [
+                    MAGIC_MEMBER,
+                    MAGIC_MEMBER_SERIALIZED,
+                    MAGIC_MEMBER_ENUM_CASE,
+                ]
+                .contains(&key)
+            {
+                return Ok(false);
+            }
             // A key is `zend_string_init_existing_interned`'s, so a name
             // a unit already holds costs nothing.
             let owned = PhpString::existing_interned(req, key)?;
@@ -2515,6 +2570,23 @@ impl State<'_> {
         if !valid_class_name(enum_name) {
             return Ok(false);
         }
+        if self.hash.incomplete_classes_only {
+            // "Do not load the enum: keep the case name, so that the value
+            // serializes back to the same bytes."
+            self.p = after + 2;
+            let Some(class) = lookup_class(req, INCOMPLETE_CLASS)? else {
+                return Ok(false);
+            };
+            let made = new_object(req, class)?;
+            let object = *made;
+            self.write(req, slot, entry, made.into_value())?;
+            if req.memory().has_oom() {
+                return Ok(false);
+            }
+            store_member(req, object, MAGIC_MEMBER, enum_name)?;
+            store_member(req, object, MAGIC_MEMBER_ENUM_CASE, case)?;
+            return Ok(true);
+        }
         let Some(class) = autoload(req, enum_name)? else {
             docref(
                 req,
@@ -2563,6 +2635,28 @@ impl State<'_> {
         self.write(req, slot, entry, value)?;
         Ok(true)
     }
+}
+
+/// `zend_hash_str_update(Z_OBJPROP_P(rval), member, ...)` with a string
+/// of `value`, as `php_store_class_name` stores an incomplete object's
+/// class name and an unserializer reading incomplete classes only its
+/// kept `E:` case.
+fn store_member(
+    req: &mut Request,
+    object: PhpObject,
+    member: &[u8],
+    value: &[u8],
+) -> Result<(), Thrown> {
+    let key = PhpString::new(req, member)?;
+    let stored = match PhpString::new(req, value) {
+        Ok(stored) => stored.into_value(),
+        Err(thrown) => {
+            key.give_up(req);
+            return Err(thrown);
+        }
+    };
+    object.unserialize_prop(req, key, stored)?;
+    Ok(())
 }
 
 /// Whether two slots name the same place, php's `rval_ref == rval`.

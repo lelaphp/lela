@@ -331,11 +331,11 @@ mod touched {
 }
 
 /// Hand-assembled bodies entered through `enter` on real requests
-/// (`jit-design.md` §4.6 *Tested*), on the one target whose arena maps
-/// code today: a test tier enters, at a function's activation, the body
+/// (`jit-design.md` §4.6 *Tested*), on an aarch64 target whose arena
+/// maps code, the bodies' instruction set: a test tier enters, at a function's activation, the body
 /// its plan assembles for that function, publishes it into the epoch's
 /// table, and hands the loop the frame `enter` landed.
-#[cfg(all(target_os = "macos", target_arch = "aarch64", not(miri)))]
+#[cfg(all(php_jit_arena, target_arch = "aarch64", not(miri)))]
 pub(crate) mod entered {
     use std::marker::PhantomData;
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -352,7 +352,7 @@ pub(crate) mod entered {
         Numbered, STOOD_CALL, STOOD_OPLINE, a64, answering, calling, compiled, landing,
     };
     use crate::testing::{self, Scratch, function_of, stdout};
-    use crate::types::Landing;
+    use crate::types::{Frees, Landing};
 
     mod doors;
     mod parity;
@@ -480,7 +480,7 @@ pub(crate) mod entered {
                 words.extend(a64::EPILOGUE);
                 compiled(
                     &words,
-                    vec![landing(1, Landing::Plain), landing(2, Landing::Plain)],
+                    vec![landing(1, Landing::PLAIN), landing(2, Landing::PLAIN)],
                 )
             })
         }
@@ -535,7 +535,7 @@ pub(crate) mod entered {
                 _ => return None,
             };
             let words = answering(calling(kernel.addr(), 0, &[], true), 0);
-            Some(compiled(&words, vec![landing(0, Landing::Plain)]))
+            Some(compiled(&words, vec![landing(0, Landing::PLAIN)]))
         }
     }
 
@@ -591,9 +591,12 @@ pub(crate) mod entered {
             let words = [a64::movz(0, 0), a64::EPILOGUE[1]];
             let exit = landing(
                 fetch + 1,
-                Landing::FreeTemps {
-                    op1: true,
-                    op2: false,
+                Landing {
+                    frees: Frees {
+                        op1: true,
+                        op2: false,
+                    },
+                    restores_call: false,
                 },
             );
             Some(compiled(&words, vec![exit]))
@@ -654,7 +657,10 @@ pub(crate) mod entered {
             words.extend(a64::EPILOGUE);
             Some(compiled(
                 &words,
-                vec![landing(1, Landing::RestoreCall), landing(0, Landing::Plain)],
+                vec![
+                    landing(1, Landing::RESTORE_CALL),
+                    landing(0, Landing::PLAIN),
+                ],
             ))
         }
     }

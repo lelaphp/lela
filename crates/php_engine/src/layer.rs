@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::request::{HostPath, Request, Standard, Unresolved};
-use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Resource, Value};
+use crate::api::request::{Callee, Family, HostPath, Request, Retval, Standard, Unresolved};
+use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Resource, Value, adopted};
 
 pub use crate::api::request::paths::scheme_length;
 pub use crate::api::request::temporary::TemporaryGuard;
@@ -93,6 +93,24 @@ pub struct StreamHooks {
     /// reads `STDIN` a line at a time for `-R`, `-F` and `-B`; `None` at
     /// its end, or where it names no stream.
     pub get_line: fn(&mut Request, &Value) -> Option<Vec<u8>>,
+    /// `SG(request_info).request_body` made, as the form reader and
+    /// `php://input` make it (`Z/main/SAPI.c:264`,
+    /// `Z/ext/standard/php_fopen_wrapper.c:225`):
+    /// `php_stream_temp_create_ex(TEMP_STREAM_DEFAULT, SAPI_POST_BLOCK_SIZE, dir)`,
+    /// `dir` `upload_tmp_dir`, among the request's resources to its end
+    /// and named by the view answered.
+    pub body_open: fn(&mut Request, Option<&[u8]>) -> Result<Resource, Thrown>,
+    /// `php_stream_write` of a block at the end of that stream; whether it
+    /// took the block whole.
+    pub body_append: fn(&mut Request, Resource, &[u8]) -> bool,
+    /// `php_stream_truncate_set_size(.., 0)` of that stream, the body lost
+    /// whole as `sapi_read_standard_form_data` loses it.
+    pub body_discard: fn(&mut Request, Resource),
+    /// What that stream holds, read from its start.
+    pub body_read: fn(&mut Request, Resource) -> Vec<u8>,
+    /// `php_stream_close` of that stream, as php's `zend_test` closes the
+    /// one its parse made.
+    pub body_close: fn(&mut Request, Resource),
     /// The layer's engine state, built once as the engine is
     /// ([`Face::layer_state`]): what streams keep across requests, php's
     /// `EG(persistent_list)` as `zend_startup`'s `zend_init_rsrc_plist`
@@ -173,8 +191,10 @@ pub trait Face: sealed::Sealed {
     /// The tail of `zend_call_function` where the callee left something
     /// pending and no frame stands to take it.
     fn thrown_without_frame(&mut self, thrown: &Thrown) -> Result<Value, Thrown>;
-    /// `zend_call_function` over a method, as a user-space wrapper's
-    /// calls are served.
+    /// A method served as a user-space wrapper's calls are,
+    /// `zend_call_method_if_exists`'s `zend_call_known_fcc` and
+    /// `zend_call_known_instance_method` for its constructor: once the
+    /// memory limit was met, its refusal is `zend_call_known_function`'s.
     fn serve_method(
         &mut self,
         function: Function,
@@ -252,7 +272,15 @@ impl Face for Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Owner<Value>, Thrown> {
-        Request::serve_method(self, function, this, called_scope, arguments, extra_named)
+        let method = Callee::method(function, this, called_scope);
+        adopted(Request::serve_method_into(
+            self,
+            Retval::Native,
+            Family::Known,
+            method,
+            arguments,
+            extra_named,
+        ))
     }
     fn instantiable(&mut self, class: ClassId) -> Result<(), Thrown> {
         Request::instantiable(self, class)

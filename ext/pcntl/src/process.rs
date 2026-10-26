@@ -12,16 +12,13 @@ use std::ops::ControlFlow;
 
 use nix::errno::Errno;
 use php_ext::abi::{False, OrFalse, Passed, Path, Ref, Untyped};
-#[cfg(target_vendor = "apple")]
 use php_ext::attr::php_class;
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, with_string};
 #[cfg(target_vendor = "apple")]
-use php_ext::raising::arity;
-#[cfg(target_vendor = "apple")]
 use php_ext::raising::throw_error;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref};
-use php_ext::request::{Forked, Request};
+use php_ext::request::{Forked, Request, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
@@ -57,11 +54,56 @@ use crate::{State, failed, ffi};
 /// ```expect exit=255 process wall=1s
 /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 5
 /// ```
+///
+/// The child starts with the stat cache and the realpath cache empty,
+/// as php 8.5.12's `php_child_init` empties both
+/// (`php_clear_stat_cache(true, NULL, 0)`, `main/main.c:1901`,
+/// GH-23986), so a file the parent stat'ed and a link it resolved, each
+/// since changed by another process, read as they are now, and
+/// `/proc/self` is the child's. Both caches are above the engine's fork,
+/// so they are emptied here.
+///
+/// ```php
+/// $f = tempnam(sys_get_temp_dir(), 'fork');
+/// var_dump(filesize($f));
+/// if (($pid = pcntl_fork()) === 0) { file_put_contents($f, 'grown'); exit(0); }
+/// pcntl_waitpid($pid, $status);
+/// if (($pid = pcntl_fork()) === 0) { var_dump(filesize($f)); exit(0); }
+/// pcntl_waitpid($pid, $status);
+/// var_dump(filesize($f));
+/// unlink($f);
+/// ```
+/// ```expect process
+/// int(0)
+/// int(5)
+/// int(0)
+/// ```
+///
+/// ```php
+/// $d = sys_get_temp_dir() . '/fork' . getmypid();
+/// mkdir("$d/a", 0777, true); mkdir("$d/b"); symlink("$d/a", "$d/l");
+/// echo basename(realpath("$d/l")), "\n";
+/// if (($pid = pcntl_fork()) === 0) { unlink("$d/l"); symlink("$d/b", "$d/l"); exit(0); }
+/// pcntl_waitpid($pid, $status);
+/// if (($pid = pcntl_fork()) === 0) { echo basename(realpath("$d/l")), "\n"; exit(0); }
+/// pcntl_waitpid($pid, $status);
+/// echo basename(realpath("$d/l")), "\n";
+/// unlink("$d/l"); rmdir("$d/a"); rmdir("$d/b"); rmdir($d);
+/// ```
+/// ```expect process
+/// a
+/// b
+/// a
+/// ```
 #[php_function]
 pub(crate) fn pcntl_fork(req: &mut Request) -> i64 {
     match req.limits_mut().fork() {
         Ok(Forked::Parent { child }) => child.as_raw().into(),
-        Ok(Forked::Child) => 0,
+        Ok(Forked::Child) => {
+            req.clear_stat_cache();
+            req.environment_mut().realpath_cache_clear(None);
+            0
+        }
         Err(error) => {
             let errno = Errno::from_raw(error.raw_os_error().unwrap_or(0));
             failed(req, errno);
@@ -813,7 +855,8 @@ pub(crate) fn pcntl_setcpuaffinity(
             }
         };
         if !(0..configured).contains(&cpu) {
-            let tail = format!("cpu id must be between 0 and {configured} ({cpu})");
+            let last = configured - 1;
+            let tail = format!("cpu id must be between 0 and {last} ({cpu})");
             return Err(argument_error(req, ce.value_error, 2, &tail));
         }
         cpus.push(usize::try_from(cpu).unwrap_or(0));
@@ -884,6 +927,8 @@ fn strerror(errno: i32) -> String {
 }
 
 /// `enum Pcntl\QosClass`, Apple's `QoS` classes, a thread's scheduling class.
+/// php's MINIT registers it on every platform, where the two functions
+/// that take and give it are Apple's alone.
 ///
 /// ```php
 /// var_dump(Pcntl\QosClass::cases()[0], count(Pcntl\QosClass::cases()));
@@ -892,7 +937,6 @@ fn strerror(errno: i32) -> String {
 /// enum(Pcntl\QosClass::UserInteractive)
 /// int(5)
 /// ```
-#[cfg(target_vendor = "apple")]
 #[php_class(namespace(Pcntl))]
 pub(crate) enum QosClass {
     UserInteractive,
@@ -902,7 +946,6 @@ pub(crate) enum QosClass {
     Background,
 }
 
-#[cfg(target_vendor = "apple")]
 #[php_class]
 impl QosClass {}
 
@@ -939,29 +982,29 @@ pub(crate) fn pcntl_getqos_class(req: &mut Request) -> Result<QosClass, Thrown> 
 }
 
 /// `pcntl_setqos_class(Pcntl\QosClass $qos_class =
-/// Pcntl\QosClass::Default): void`: the calling thread's class set. The
-/// stub shows a default the body's `ZEND_PARSE_PARAMETERS_START(1, 1)`
-/// refuses, so a call with none is php's `ArgumentCountError`.
+/// Pcntl\QosClass::Default): void`: the calling thread's class set,
+/// `Default` where none is given, as 8.5.12's
+/// `ZEND_PARSE_PARAMETERS_START(0, 1)` takes it.
 ///
 /// ```php
 /// pcntl_setqos_class(Pcntl\QosClass::UserInitiated);
 /// var_dump(pcntl_getqos_class());
-/// pcntl_setqos_class(Pcntl\QosClass::Default);
+/// pcntl_setqos_class(Pcntl\QosClass::Background);
 /// var_dump(pcntl_getqos_class());
-/// try { pcntl_setqos_class(); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// pcntl_setqos_class();
+/// var_dump(pcntl_getqos_class());
 /// ```
 /// ```expect process
 /// enum(Pcntl\QosClass::UserInitiated)
+/// enum(Pcntl\QosClass::Background)
 /// enum(Pcntl\QosClass::Default)
-/// pcntl_setqos_class() expects exactly 1 argument, 0 given
 /// ```
 #[cfg(target_vendor = "apple")]
-#[php_function(arity = manual)]
+#[php_function]
 pub(crate) fn pcntl_setqos_class(
     req: &mut Request,
     #[php(default = Pcntl::QosClass::Default)] qos_class: QosClass,
 ) -> Result<(), Thrown> {
-    arity(req, 1, Some(1))?;
     let class = match qos_class {
         QosClass::UserInteractive => ffi::qos::USER_INTERACTIVE,
         QosClass::UserInitiated => ffi::qos::USER_INITIATED,

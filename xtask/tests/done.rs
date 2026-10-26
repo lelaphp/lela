@@ -429,6 +429,59 @@ fn a_dependents_reading_is_stale_once_a_crate_in_its_closure_changes() {
     assert!(verdict.unmet.contains(&named), "{verdict:#?}");
 }
 
+/// Condition 10 (#3372): a diff that changes `.cargo/config.toml` asks for
+/// a fresh passing `fold` reading of `sapi/cli`, and one taken before the
+/// file changed is stale, since `sapi/cli`'s key covers the files rustc is
+/// built under; a failing one is unmet with its message, a skip, a host
+/// the sensor cannot read, is met and a note, and a diff that changes none
+/// of those files asks for no reading.
+#[test]
+fn a_change_to_what_rustc_is_built_under_asks_for_a_fold_reading() {
+    let root = scratch("fold");
+    let asked = |verdict: &Verdict| -> Vec<String> {
+        let fold = verdict.unmet.iter().filter(|u| u.starts_with("fold: "));
+        fold.cloned().collect()
+    };
+    write(
+        &root,
+        "sapi/cli/Cargo.toml",
+        "[package]\nname = \"php_sapi_cli\"\nversion = \"0.0.0\"\n\n[dependencies]\nphp_bundle = { path = \"../../crates/php_bundle\" }\n",
+    );
+    assert_eq!(asked(&judge(&root)), Vec::<String>::new());
+    let store = Store::of_workspace(&root);
+    store.record(&[fresh(&root, "fold", "sapi/cli")]).unwrap();
+
+    write(
+        &root,
+        ".cargo/config.toml",
+        "[target.'cfg(all())']\nrustflags = []\n",
+    );
+    assert_eq!(
+        asked(&judge(&root)),
+        [
+            "fold: no reading for sapi/cli over the tree now, and .cargo/config.toml changed; `cargo xtask fold` takes it, building the release sapi/cli first (minutes)"
+        ]
+    );
+    let mut skipped = fresh(&root, "fold", "sapi/cli");
+    skipped.status = Status::Skip;
+    skipped.message = "sapi/cli: not held; this host is x86_64".into();
+    store.record(&[skipped]).unwrap();
+    let verdict = judge(&root);
+    assert_eq!(asked(&verdict), Vec::<String>::new());
+    let note = "fold: sapi/cli not held on this host: sapi/cli: not held; this host is x86_64";
+    assert!(verdict.notes.contains(&note.to_owned()), "{verdict:#?}");
+    let mut failing = fresh(&root, "fold", "sapi/cli");
+    failing.status = Status::Fail;
+    failing.message = "sapi/cli: hoisted".into();
+    store.record(&[failing]).unwrap();
+    assert_eq!(
+        asked(&judge(&root)),
+        ["fold: sapi/cli fail: sapi/cli: hoisted"]
+    );
+    store.record(&[fresh(&root, "fold", "sapi/cli")]).unwrap();
+    assert_eq!(asked(&judge(&root)), Vec::<String>::new());
+}
+
 // ------------------------------------------- the base is main
 
 /// A scratch repository on `t9`, cut from `main`, with `main` one commit
@@ -1232,6 +1285,38 @@ fn permit_over_the_diff_denies_a_lock_in_an_extension_and_notes_the_harness_file
     assert!(out.contains("notes:\n- seams.toml is in the diff"), "{out}");
 }
 
+/// A binary file in the diff `done` judges is judged by its path alone,
+/// as `permit --diff` judges a staged one: one committed in the base and
+/// changed since, and one untracked, each spelling a lock in bytes git
+/// reads as binary, deny nothing, and one at a harness path is that
+/// path's note.
+#[test]
+fn permit_over_the_diff_judges_a_binary_file_by_its_path_alone() {
+    const BINARY: &[u8] = b"\xcf\xfa\xed\xfe\x00\xff php_ext::__private\n";
+    let root = scratch("binary");
+    let repo = Repo::at(&root);
+    repo.write("ext/pcre/src/committed.so", b"\x00\x01\x02")
+        .commit("a binary");
+    repo.write("ext/pcre/src/committed.so", BINARY)
+        .write("ext/pcre/src/untracked.so", BINARY)
+        .write(".claude/hooks/stand-in", BINARY);
+    let verdict = judge(&root);
+    assert!(
+        verdict
+            .unmet
+            .iter()
+            .all(|l| !l.starts_with("permit denies")),
+        "{verdict:#?}"
+    );
+    assert_eq!(
+        verdict.notes,
+        [
+            ".claude/hooks/stand-in is in the diff: changed by a person, or not; the hook cannot tell (harness.self)"
+        ],
+        "{verdict:#?}"
+    );
+}
+
 /// The `unless` qualifier over the diff (#105): a crate whose only `exit=`
 /// is the one `xtask witness --accept` wrote is done, and the same tree
 /// with no witness reading behind it is denied with the rule id. The
@@ -1511,7 +1596,7 @@ fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
 /// While `DAX_BUILD_RUNNER` is set the oracle job is skipped, and the done
 /// step names as `--not-run` exactly the instruments of condition 1 that
 /// job's steps run, so a lane added there is named here or `done` is red
-/// for its absence (#2477).
+/// for its absence (#2477); and `fold`, which no runner takes, always.
 #[test]
 fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -1544,7 +1629,18 @@ fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
         .skip(1)
         .filter_map(|rest| rest.split_whitespace().next())
         .collect();
-    assert_eq!(named, runs, "{step}");
+    // `fold` is named on every run, before the test of the oracle job:
+    // no runner is the aarch64 Mac it reads (#3384).
+    let mut asked = runs.clone();
+    asked.insert("fold");
+    assert_eq!(named, asked, "{step}");
+    let always = step
+        .find("set -- --not-run fold\n")
+        .expect("fold is named on every run");
+    assert!(
+        always < step.find("if [ \"$ORACLE\" = skipped ]").unwrap(),
+        "{step}"
+    );
     assert!(
         step.contains("::warning title=the oracle lane did not run::"),
         "{step}"
@@ -2094,88 +2190,88 @@ fn a_withdrawn_branch_ticket_is_met_and_a_refused_withdrawal_is_not() {
 /// tickets' commits, as t3459 withdrew #3459 at e61851ebe and landed
 /// #3440's and #3449's after it. The first commit stales the withdrawal's
 /// reading, and the `ticket read` `done` names reads the ticket the
-/// tracker now holds closed with the withdrawal's comment, so it writes a
-/// passing reading that carries the withdrawal and the condition is met
-/// again. A read used to hold the unticked boxes, and a second withdrawal
-/// is refused as closed already, so nothing renewed it. A refused
-/// withdrawal is no closing comment, and stays unmet.
+/// tracker now holds closed and the store's reading of the close, so it
+/// writes a passing reading that carries the withdrawal and the condition
+/// is met again, and so does a read after that read. A read used to hold
+/// the unticked boxes, and a second withdrawal is refused as closed
+/// already, so nothing renewed it. A refused withdrawal is no close, and
+/// stays unmet.
 #[test]
 fn a_withdrawal_is_renewed_by_a_read_past_a_later_commit_and_a_refused_one_is_not() {
     use xtask::ticket::{Act, Reach, Successors, Verdict as Close};
-    let root = scratch("withdrawn-then-commit");
-    let repo = Repo::at(&root);
-    repo.git(&["config", "branch.main.ticket", "31"]);
-    let withdrawn = |reason: &str| {
-        let reach = Reach::of(&root).unwrap();
+    let withdrawn = |root: &Path, reason: &str| {
+        let reach = Reach::of(root).unwrap();
         Act::Close(
             Close::Withdrawn(reason.to_owned()),
             Successors::Nothing,
             reach,
         )
     };
-    let commit = |name: &str| {
+    let commit = |root: &Path, name: &str| {
         std::fs::write(root.join(name), "another ticket's work\n").unwrap();
+        let repo = Repo::at(root);
         repo.git(&["add", "--", name]);
         repo.git(&["commit", "-q", "-m", name]);
     };
-    // The tracker after the close: the ticket closed, carrying the comment
-    // the close wrote, or none where the close was refused.
-    let read_closed = |body: &str, comments: &[&str]| {
+    // The tracker after the close: the ticket closed. A read asks it
+    // nothing else, the withdrawal being the store's.
+    let read_closed = |root: &Path| {
         let tracker = Tracker::empty("done-withdrawn");
-        let mut answer = serde_json::to_value(xtask::ticket::Issue {
-            body: std::fs::read_to_string(fixtures().join("done/ticket").join(body)).unwrap(),
+        tracker.with_issue(&xtask::ticket::Issue {
+            body: std::fs::read_to_string(fixtures().join("done/ticket/withdrawn.md")).unwrap(),
             state: xtask::ticket::State::Closed,
             ..issue(31)
-        })
-        .unwrap();
-        let comments: Vec<_> = comments
-            .iter()
-            .map(|c| serde_json::json!({ "body": c }))
-            .collect();
-        answer["comments"] = comments.into();
-        tracker.with_answer(31, &answer.to_string());
+        });
         let reading = xtask::ticket::run(
-            &root,
-            &xtask::manifest::Manifest::load(&root).unwrap(),
+            root,
+            &xtask::manifest::Manifest::load(root).unwrap(),
             &tracker.gh(),
             Act::Read,
             xtask::track::Ticket::new(31),
             None,
         )
         .unwrap();
-        Store::of_workspace(&root)
+        Store::of_workspace(root)
             .record(std::slice::from_ref(&reading))
             .unwrap();
         reading
     };
 
-    let reading = ticket_act(
-        &root,
-        31,
-        "withdrawn.md",
-        withdrawn("measured on HEAD: not in the tree"),
-    );
+    let root = scratch("withdrawn-then-commit");
+    Repo::at(&root).git(&["config", "branch.main.ticket", "31"]);
+    let measured = withdrawn(&root, "measured on HEAD: not in the tree");
+    let reading = ticket_act(&root, 31, "withdrawn.md", measured);
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
-    commit("after-the-withdrawal.txt");
+    commit(&root, "after-the-withdrawal.txt");
     let lines = about_the_ticket(&judge(&root));
     assert!(lines.len() == 1 && lines[0].contains("stale"), "{lines:?}");
-    let comment = "Withdrawn by `xtask ticket close` at 1234567: measured on HEAD: not in the tree; 0 of 2 criteria ticked; opens nothing";
-    let read = read_closed("withdrawn.md", &["an earlier comment", comment]);
+    let read = read_closed(&root);
     assert_eq!(read.status, Status::Pass, "{}", read.message);
     assert_eq!(read.numbers["withdrawn"], 1.into(), "{read:#?}");
+    let said = format!("withdrawn by the close at {}: ", reading.commit);
     assert!(
-        read.message
-            .contains("withdrawn at 1234567: measured on HEAD"),
+        read.message.contains(&said) && read.message.contains("measured on HEAD"),
         "{}",
         read.message
     );
-    let verdict = judge(&root);
-    assert!(about_the_ticket(&verdict).is_empty(), "{verdict:#?}");
+    assert!(about_the_ticket(&judge(&root)).is_empty());
+    // A read after the read, and after a withdrawal refused since,
+    // still says the close.
+    commit(&root, "after-the-read.txt");
+    let again = ticket_act(&root, 31, "unticked.md", withdrawn(&root, "nothing here"));
+    assert_eq!(again.status, Status::Fail, "{}", again.message);
+    let again = read_closed(&root);
+    assert_eq!(again.status, Status::Pass, "{}", again.message);
+    assert_eq!(again.message, read.message, "the close is said again");
+    assert!(about_the_ticket(&judge(&root)).is_empty());
 
-    let reading = ticket_act(&root, 31, "unticked.md", withdrawn("nothing here"));
-    assert_eq!(reading.status, Status::Fail, "{}", reading.message);
-    commit("after-the-refusal.txt");
-    let read = read_closed("withdrawn.md", &["an earlier comment"]);
+    // A withdrawal refused and none taken: the read holds the boxes.
+    let root = scratch("withdrawn-refused");
+    Repo::at(&root).git(&["config", "branch.main.ticket", "31"]);
+    let refused = ticket_act(&root, 31, "unticked.md", withdrawn(&root, "nothing here"));
+    assert_eq!(refused.status, Status::Fail, "{}", refused.message);
+    commit(&root, "after-the-refusal.txt");
+    let read = read_closed(&root);
     assert_eq!(read.status, Status::Fail, "{}", read.message);
     let lines = about_the_ticket(&judge(&root));
     assert!(

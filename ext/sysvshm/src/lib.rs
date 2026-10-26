@@ -273,7 +273,9 @@ impl Head {
 /// `shm_attach(int $key, ?int $size = null, int $permissions = 0666):
 /// SysvSharedMemory|false`: the segment under `$key`, made with `$size`
 /// bytes (`sysvshm.init_mem`, 10000, without one) where there is none,
-/// and its head laid down where it has no magic.
+/// and its head laid down where it has no magic, over the size the
+/// kernel answers. A segment too small for the head is refused, and one
+/// this call made but could not use is removed again (8.5.12).
 ///
 /// ```php
 /// $k = ftok(__FILE__, "b");
@@ -284,12 +286,35 @@ impl Head {
 /// shm_remove($s);
 /// try { shm_attach($k, 0); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// var_dump(shm_attach($k, 39));
+/// var_dump(shm_attach($k, 1024, 0));
+/// $u = shm_attach($k, 1024, 0600);
+/// var_dump(shm_put_var($u, 1, "value"), shm_get_var($u, 1), shm_remove($u));
+/// $big = shm_attach($k, 4096);
+/// shm_detach($big);
+/// $v = shm_attach($k, 1 << 20);
+/// var_dump(shm_put_var($v, 1, str_repeat("A", 8192)), shm_remove($v));
+/// $raw = shmop_open($k, "n", 0600, 8);
+/// var_dump(shm_attach($k, 1024));
+/// shmop_delete($raw);
 /// ```
 /// ```expect
 /// string(3) "one"
 /// shm_attach(): Argument #2 ($size) must be greater than 0
 ///
 /// Warning: shm_attach(): Failed for key 0x%x: memorysize too small in %s on line 9
+/// bool(false)
+///
+/// Warning: shm_attach(): Failed for key 0x%x: Permission denied in %s on line 10
+/// bool(false)
+/// bool(true)
+/// string(5) "value"
+/// bool(true)
+///
+/// Warning: shm_put_var(): Not enough shared memory left in %s on line 16
+/// bool(false)
+/// bool(true)
+///
+/// Warning: shm_attach(): Failed for key 0x%x: segment too small in %s on line 18
 /// bool(false)
 /// ```
 #[php_function]
@@ -315,13 +340,13 @@ fn shm_attach(
         OrFalse::False
     };
     let len = usize::try_from(size).unwrap_or(usize::MAX);
-    let id = match ffi::get(key as i32, 0, 0) {
-        Ok(id) => id,
+    let (id, created) = match ffi::get(key as i32, 0, 0) {
+        Ok(id) => (id, false),
         Err(_) if len < HEAD => return Ok(failed(req, "memorysize too small")),
         Err(_) => {
             let flags = permissions as i32 | libc::IPC_CREAT | libc::IPC_EXCL;
             match ffi::get(key as i32, len, flags) {
-                Ok(id) => id,
+                Ok(id) => (id, true),
                 Err(errno) => {
                     let text = req.environment().os_error_text(errno);
                     return Ok(failed(req, &text));
@@ -329,19 +354,37 @@ fn shm_attach(
             }
         }
     };
+    // A segment this call made and could not use is removed, so the key
+    // is free again (8.5.12).
+    let unmake = || {
+        if created {
+            // php ignores what `shmctl(IPC_RMID)` answers here.
+            ffi::remove(id).ok();
+        }
+    };
     let segment = match Segment::attach(id) {
         Ok(segment) => segment,
         Err(errno) => {
             let text = req.environment().os_error_text(errno);
-            return Ok(failed(req, &text));
+            let refused = failed(req, &text);
+            unmake();
+            return Ok(refused);
         }
     };
+    // The size is the kernel's, `shm_desc.shm_segsz`, not `$size`.
+    let len = segment.size();
+    if len < HEAD {
+        let refused = failed(req, "segment too small");
+        drop(segment);
+        unmake();
+        return Ok(refused);
+    }
     let magic = segment.read(0, MAGIC.len());
     if magic.as_deref().map(php_ext::coerce::c_str) != Some(&b"PHP_SM"[..]) {
         segment.write(0, MAGIC);
         segment.set_word(8, word(HEAD));
         segment.set_word(16, word(HEAD));
-        segment.set_word(24, word(len.wrapping_sub(HEAD)));
+        segment.set_word(24, word(len - HEAD));
         segment.set_word(32, word(len));
     }
     let Some(class) = lookup_class(req, b"SysvSharedMemory")? else {

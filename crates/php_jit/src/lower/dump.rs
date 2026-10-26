@@ -237,16 +237,19 @@ impl<'a> Dump<'a> {
         let opline = exit
             .opline
             .map_or("where it stands".to_owned(), |at| format!("{:04}", at.0));
-        let landing = match exit.landing {
-            Landing::Plain => "plain".to_owned(),
-            Landing::RestoreCall => "restore call".to_owned(),
-            Landing::FreeTemps { op1, op2 } => {
-                let freed: Vec<&str> = [(op1, "op1"), (op2, "op2")]
-                    .into_iter()
-                    .filter_map(|(on, name)| on.then_some(name))
-                    .collect();
-                format!("free {}", freed.join(" "))
-            }
+        let Landing {
+            frees,
+            restores_call,
+        } = exit.landing;
+        let freed: Vec<&str> = [(frees.op1, "op1"), (frees.op2, "op2")]
+            .into_iter()
+            .filter_map(|(on, name)| on.then_some(name))
+            .collect();
+        let landing = match (restores_call, freed.is_empty()) {
+            (false, true) => "plain".to_owned(),
+            (true, true) => "restore call".to_owned(),
+            (false, false) => format!("free {}", freed.join(" ")),
+            (true, false) => format!("restore call free {}", freed.join(" ")),
         };
         write!(text, "exit {at}: f{} {opline} {landing}", exit.frame.0)?;
         self.stores(text, &exit.stores)?;

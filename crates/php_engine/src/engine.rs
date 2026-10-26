@@ -311,11 +311,12 @@ pub struct WebRequest {
 pub enum Body {
     /// The bytes the host reads, no more than `content_length`, from a
     /// reader the request pulls blocks from as php's `read_post` pulls
-    /// them: a read that answers fewer than it was asked for ends the
-    /// body, as php's `SG(post_read)`, and so does one that fails. A body
-    /// the host read before the request started is a reader over those
-    /// bytes, [`Body::from`].
-    Stream(Box<dyn std::io::Read + Send>),
+    /// them ([`ReadPost`](crate::api::request::ReadPost), which any
+    /// [`std::io::Read`] is): a read that answers fewer than it was asked
+    /// for ends the body, as php's `SG(post_read)`, and so does one that
+    /// fails. A body the host read before the request started is a reader
+    /// over those bytes, [`Body::from`].
+    Stream(Box<dyn crate::api::request::ReadPost>),
     /// Nothing, and the `E_WARNING` the host's read raises each time it
     /// is asked, as php-fpm's `sapi_cgi_read_post` raises
     /// `REQUEST_BODY_FILE: open('%s') failed: %s (%d)` where the file the
@@ -523,11 +524,13 @@ impl FileHandles {
     }
 }
 
-/// A body write the host could not make, php's hosts'
+/// A write the host could not make. For the body, php's hosts'
 /// `php_handle_aborted_connection` (`Z/main/main.c:2722`): the client
 /// went away, or the process's fd 1 refused it; with what the host sets
 /// `EG(exit_status)` to first, php's CLI 255 (`sapi_cli_ub_write`), and
-/// nothing for a host that sets none, as the built-in server.
+/// nothing for a host that sets none, as the built-in server. For the
+/// header block, `SAPI_HEADER_SEND_FAILED`, which sets no status
+/// ([`OutputSink::send_headers`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Aborted {
     pub exit_status: Option<i32>,
@@ -553,8 +556,17 @@ pub trait OutputSink: Any {
     fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted>;
     /// The host may push what it has.
     fn flush(&mut self);
-    /// The response's head, once, before the first body byte.
-    fn send_headers(&mut self, head: &ResponseHead);
+    /// The response's head, once, before the first body byte, and
+    /// whether the host sent it: [`Aborted`] where the block did not
+    /// reach the client, php's `SAPI_HEADER_SEND_FAILED`, as the built-in
+    /// server answers a client that reset the connection (GH-23425), so
+    /// `headers_sent()` stays false and `php_output_header` sets
+    /// `PHP_OUTPUT_DISABLED` (`Z/main/SAPI.c:943-946`).
+    ///
+    /// # Errors
+    ///
+    /// [`Aborted`], a header block the host could not send.
+    fn send_headers(&mut self, head: &ResponseHead) -> Result<(), Aborted>;
     /// One entry for the host's log, whole: what `php_log_err` was
     /// given where `error_log` names no file it could open
     /// (`sapi_module.log_message`), a diagnostic in its log form with
@@ -5912,7 +5924,7 @@ impl Engine {
         req.catch_bailout();
         req.free_shutdown_functions();
         req.destroy_http_globals();
-        req.destroy_uploaded_files();
+        req.deactivate_post();
         // `zend_deactivate` reaches `shutdown_executor`, whose
         // `zend_stream_shutdown` closes the files the scanner listed
         // first; then each extension's `deactivate`, in reverse, before
@@ -5967,7 +5979,7 @@ impl Engine {
         // hard memory limit hands none: php's process `_exit`ed there,
         // and a one-request host writes no head after it (#3435).
         if !req.output().headers_sent() && !req.terminated() {
-            req.send_header_block();
+            req.send_header_block().ok();
         }
         let sink = req.release_sink();
         // What the request entered, taken last, so a destructor or a

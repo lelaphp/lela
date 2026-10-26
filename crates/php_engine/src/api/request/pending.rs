@@ -537,7 +537,7 @@ impl Request {
         let Some((function, base)) = trace_as_string.filter(|_| raised.is_none()) else {
             return MAIN.to_vec();
         };
-        match self.serve_method_made(function, Some(exception), base, &[], &[]) {
+        match self.serve_known_method(function, exception, base, &[]) {
             Ok(trace) => {
                 let bytes = trace
                     .as_str_bytes()

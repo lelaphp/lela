@@ -21,7 +21,8 @@ use crate::ffi::{self, Base, OptType, Status};
 use crate::node::{self, tidyNode};
 use crate::throwables::Throwables;
 use crate::{
-    DocId, adopt, default_config, forget, initialized, load_config, set_initialized, with_doc,
+    DocId, Generation, adopt, default_config, forget, initialized, load_config, reparsed,
+    set_initialized, with_doc,
 };
 
 /// `array|string|null $config`.
@@ -30,11 +31,18 @@ type Config = Option<Union<PhpArray, PhpString>>;
 type Tidy = Instance<class::tidy>;
 
 /// `PHPTidyObj` past its `zend_object`: the document the object names,
-/// and for a `tidyNode` its node.
+/// and for a `tidyNode` its node and the parse it was read from.
 #[derive(Default)]
 pub(crate) struct Obj {
     pub(crate) doc: Option<DocId>,
-    pub(crate) node: Option<ffi::Node>,
+    pub(crate) node: Option<NodeAt>,
+}
+
+/// `obj->node` and `obj->node_generation`.
+#[derive(Clone, Copy)]
+pub(crate) struct NodeAt {
+    pub(crate) node: ffi::Node,
+    pub(crate) generation: Generation,
 }
 
 /// `tidy_object_handlers_doc` and `tidy_object_handlers_node`:
@@ -316,6 +324,7 @@ fn parse_string(
         }
     }
     set_initialized(req, id);
+    reparsed(req, id);
     let parsed = with_doc(req, id, |req, doc| {
         Ok((doc.parse(req, input)?, doc.errors()))
     })?;
@@ -1158,7 +1167,7 @@ pub(crate) mod class {
     /// string(1) "i"
     /// ```
     #[allow(non_camel_case_types)]
-    #[php_class(size = 80, payload = Obj, handlers = DOC)]
+    #[php_class(size = 88, payload = Obj, handlers = DOC)]
     pub(crate) struct tidy;
 
     #[php_class]

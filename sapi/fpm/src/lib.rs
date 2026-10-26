@@ -370,7 +370,9 @@ impl php_sapi::OutputSink for Stdout {
         php_sapi::stdio::flush();
     }
 
-    fn send_headers(&mut self, _head: &php_sapi::ResponseHead) {}
+    fn send_headers(&mut self, _head: &php_sapi::ResponseHead) -> Result<(), php_sapi::Aborted> {
+        Ok(())
+    }
 
     fn log(&mut self, entry: &[u8]) {
         let mut stderr = std::io::stderr().lock();

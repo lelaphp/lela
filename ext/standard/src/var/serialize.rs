@@ -18,8 +18,8 @@ use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 use super::{
-    Holder, INCOMPLETE_CLASS, MAGIC_MEMBER, Shared, class_name, has_method, is_enum,
-    is_serializable, locked, not_serializable,
+    Holder, INCOMPLETE_CLASS, MAGIC_MEMBER, MAGIC_MEMBER_ENUM_CASE, MAGIC_MEMBER_SERIALIZED,
+    Shared, class_name, has_method, is_enum, is_serializable, locked, not_serializable,
 };
 use crate::string::Decimal;
 use crate::throwables::Throwables;
@@ -42,6 +42,10 @@ pub(crate) struct VarHash {
     n: i64,
     seen: Vec<(Held, i64)>,
     owners: Vec<Owner<Value>>,
+    /// `incomplete_classes_only` (8.5.12): the `C:` and `E:` payloads an
+    /// unserializer reading incomplete classes only kept are written back
+    /// as they were read.
+    incomplete_classes_only: bool,
 }
 
 impl VarHash {
@@ -173,6 +177,18 @@ impl Serializer {
         value: &Value,
     ) -> Result<(), Thrown> {
         write(req, out, value, self, false, true)
+    }
+
+    /// `php_var_serialize_set_incomplete_classes_only`: whether an
+    /// `__PHP_Incomplete_Class` holding the payload of a `C:` record or
+    /// the case of an `E:` value, as an [`Unserializer`] reading
+    /// incomplete classes only made it, is written back as those bytes,
+    /// which is how ext/session's upload progress rewrites a session no
+    /// class of which it may load.
+    ///
+    /// [`Unserializer`]: crate::Unserializer
+    pub fn set_incomplete_classes_only(&mut self, on: bool) {
+        self.hash.incomplete_classes_only = on;
     }
 
     /// `PHP_VAR_SERIALIZE_DESTROY`: the var hash handed back to the
@@ -574,6 +590,12 @@ fn object_value(
     object: PhpObject,
     hash: &mut Serializer,
 ) -> Result<(), Thrown> {
+    if hash.hash.incomplete_classes_only
+        && class_name(req, object) == INCOMPLETE_CLASS
+        && incomplete_raw(req, out, object)
+    {
+        return Ok(());
+    }
     if let Some(shown) = not_serializable(req, object.class()) {
         let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
@@ -627,6 +649,49 @@ fn object_value(
         hash.fail(object);
     }
     written
+}
+
+/// `php_var_serialize_incomplete_raw`: an incomplete object's kept `C:`
+/// payload or `E:` case written as the record it was read from, under
+/// the class name it holds; `false`, for the ordinary path, where it
+/// holds neither or no class name.
+fn incomplete_raw(req: &mut Request, out: &mut Vec<u8>, object: PhpObject) -> bool {
+    // `Z_TYPE_P(member) == IS_STRING` over the row as it stands, a
+    // reference not followed.
+    let string = |req: &mut Request, name: &[u8]| {
+        object
+            .prop(req, name)
+            .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
+    };
+    if let Some(payload) = string(req, MAGIC_MEMBER_SERIALIZED) {
+        let Some(class) = string(req, MAGIC_MEMBER) else {
+            return false;
+        };
+        out.extend_from_slice(b"C:");
+        out.extend_from_slice(Decimal::size(class.len()).as_bytes());
+        out.extend_from_slice(b":\"");
+        out.extend_from_slice(&class);
+        out.extend_from_slice(b"\":");
+        out.extend_from_slice(Decimal::size(payload.len()).as_bytes());
+        out.extend_from_slice(b":{");
+        out.extend_from_slice(&payload);
+        out.push(b'}');
+        return true;
+    }
+    if let Some(case) = string(req, MAGIC_MEMBER_ENUM_CASE) {
+        let Some(class) = string(req, MAGIC_MEMBER) else {
+            return false;
+        };
+        out.extend_from_slice(b"E:");
+        out.extend_from_slice(Decimal::size(class.len() + 1 + case.len()).as_bytes());
+        out.extend_from_slice(b":\"");
+        out.extend_from_slice(&class);
+        out.push(b':');
+        out.extend_from_slice(&case);
+        out.extend_from_slice(b"\";");
+        return true;
+    }
+    false
 }
 
 /// The rows `php_var_serialize_intern` writes for an object its class

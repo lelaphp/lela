@@ -29,13 +29,31 @@ use crate::manifest::Manifest;
 use crate::oracle::Own;
 
 /// A package that links a native library the oracle links too: the
-/// `[env]` variable that points its build at the library, bare or after
-/// the target's name (`AARCH64_APPLE_DARWIN_OPENSSL_DIR`), and the library
-/// php loads, by its file's stem.
+/// `[env]` variable that points its build at the library, the forms of it
+/// that build reads ([`Reads`]), and the library php loads, by its file's
+/// stem.
 struct Native {
     package: &'static str,
     variable: &'static str,
+    reads: Reads,
     library: &'static str,
+}
+
+/// Which forms of a native's variable the build that links it reads: the
+/// bare name, the name after the target's (`AARCH64_APPLE_DARWIN_`), or
+/// either, each as the `build.rs` that reads it is written, so a binding
+/// is held where the build reads it and no form it ignores binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reads {
+    /// openssl-sys 0.9's `env`, the target's form and then the bare one
+    /// (`build/main.rs:42-46`).
+    Either,
+    /// libsqlite3-sys 0.38's `{env_prefix}_LIB_DIR`, the bare name alone
+    /// (`build.rs:468`).
+    Bare,
+    /// ext/curl's own `build.rs`, the target's form alone; curl-sys reads
+    /// no `CURL_LIB_DIR` of any form.
+    Target,
 }
 
 /// The packages the workspace links a native library of the oracle's
@@ -44,29 +62,37 @@ static NATIVES: [Native; 3] = [
     Native {
         package: "openssl-sys",
         variable: "OPENSSL_DIR",
+        reads: Reads::Either,
         library: "libssl",
     },
     Native {
         package: "libsqlite3-sys",
         variable: "SQLITE3_LIB_DIR",
+        reads: Reads::Bare,
         library: "libsqlite3",
     },
     Native {
         package: "curl-sys",
         variable: "CURL_LIB_DIR",
+        reads: Reads::Target,
         library: "libcurl",
     },
 ];
 
 impl Native {
     /// Whether `variable` is this package's on the target the harness is
-    /// built for, the one the engine's build is: bare, or after that
-    /// target's name as openssl-sys and curl-sys read it, so another
-    /// target's binding is not held to this machine's php.
+    /// built for, the one the engine's build is, in a form its build reads
+    /// ([`Reads`]), so another target's binding is not held to this
+    /// machine's php and a form the build ignores binds nothing.
     fn names(&self, variable: &str) -> bool {
         let host = env!("XTASK_TARGET").to_uppercase().replace('-', "_");
-        variable == self.variable
-            || variable.strip_prefix(&host) == Some(&format!("_{}", self.variable))
+        let bare = variable == self.variable;
+        let target = variable.strip_prefix(&host) == Some(&format!("_{}", self.variable));
+        match self.reads {
+            Reads::Either => bare || target,
+            Reads::Bare => bare,
+            Reads::Target => target,
+        }
     }
 }
 
@@ -182,19 +208,28 @@ impl Bindings {
 mod names {
     use super::NATIVES;
 
-    /// A native's variable binds bare or after the name of the target the
-    /// harness is built for, the form `.cargo/config.toml` writes
-    /// (`AARCH64_APPLE_DARWIN_OPENSSL_DIR`), and not after another
-    /// target's name or any other prefix.
+    /// Each native's variable binds in the forms its build reads and no
+    /// other (#3458): openssl-sys's bare or after the name of the target
+    /// the harness is built for, libsqlite3-sys's bare alone, and ext/curl's
+    /// after the target alone; none after another target's name or any
+    /// other prefix.
     #[test]
-    fn a_variable_binds_bare_or_after_this_target_alone() {
-        let openssl = &NATIVES[0];
+    fn a_variable_binds_in_the_forms_its_build_reads_alone() {
         let host = env!("XTASK_TARGET").to_uppercase().replace('-', "_");
-        assert!(openssl.names("OPENSSL_DIR"));
-        assert!(openssl.names(&format!("{host}_OPENSSL_DIR")));
-        assert!(!openssl.names("POWERPC64_IBM_AIX_OPENSSL_DIR"));
-        assert!(!openssl.names("DEP_OPENSSL_DIR"));
-        assert!(!openssl.names(&format!("{host}_OPENSSL_LIB_DIR")));
+        let forms = |variable: &str| {
+            let native = NATIVES.iter().find(|n| n.variable == variable).unwrap();
+            [
+                variable.to_owned(),
+                format!("{host}_{variable}"),
+                format!("POWERPC64_IBM_AIX_{variable}"),
+                format!("DEP_{variable}"),
+            ]
+            .map(|form| native.names(&form))
+        };
+        assert_eq!(forms("OPENSSL_DIR"), [true, true, false, false]);
+        assert_eq!(forms("SQLITE3_LIB_DIR"), [true, false, false, false]);
+        assert_eq!(forms("CURL_LIB_DIR"), [false, true, false, false]);
+        assert!(!NATIVES[0].names(&format!("{host}_OPENSSL_LIB_DIR")));
     }
 }
 
@@ -205,40 +240,61 @@ mod tests {
 
     use crate::manifest::Manifest;
     use crate::oracle::stand_in::macho;
-    use crate::reading::Status;
+    use crate::reading::{Reading, Status};
     use crate::scratch::{Tree, repository};
 
+    /// `xtask/fixtures/api-check/binding` laid at a scratch tree, its
+    /// `.cargo/config.toml` binding ext/openssl's openssl-sys to openssl@4.
+    fn fixture(name: &str) -> Tree {
+        let fixture = crate::package_dir().join("fixtures/api-check/binding");
+        let tree = Tree::new(&format!("api-check-binding-{name}")).unwrap();
+        repository(&fixture, tree.path(), &["."]).unwrap();
+        tree
+    }
+
+    /// The load command that names libssl in the fixture's keg of `major`.
+    fn libssl(major: &str) -> String {
+        let full = if major == "4" { "4.0.3" } else { "5.0.0" };
+        format!("@loader_path/../../../openssl@{major}/{full}/lib/libssl.{major}.dylib")
+    }
+
+    /// ext/openssl's reading where the pinned php is a stand-in build at
+    /// `version` in the tree's Cellar naming `loads`.
+    fn reading(tree: &Tree, version: &str, loads: &[&str]) -> Reading {
+        let bin = tree.path().join(format!("brew/Cellar/php/{version}/bin"));
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("php"), macho(loads)).unwrap();
+        let mut manifest = Manifest::load(crate::package_dir().parent().unwrap()).unwrap();
+        manifest.pin.as_mut().unwrap().oracle.path = bin.join("php");
+        let readings = super::super::hold(&manifest, tree.path(), false).unwrap();
+        (readings.into_iter())
+            .find(|r| r.scope == "ext/openssl")
+            .unwrap()
+    }
+
+    /// The fixture's tree with its `[env]` binding of openssl-sys written
+    /// as `binding`, none for no line.
+    fn bound(tree: &Tree, binding: Option<&str>) {
+        let other =
+            "POWERPC64_IBM_AIX_OPENSSL_DIR = { value = \"/nowhere/openssl@9\", force = true }";
+        let line = binding.map_or_else(String::new, |b| format!("OPENSSL_DIR = {b}\n"));
+        let config = format!("[env]\n{line}{other}\n");
+        fs::write(tree.path().join(".cargo/config.toml"), config).unwrap();
+    }
+
     /// A crate's binding is the keg the pinned php loads its library from
-    /// (#3458): `xtask/fixtures/api-check/binding` binds ext/openssl's
-    /// openssl-sys to openssl@4, and of two stand-in php builds laid in
-    /// its Cellar, 1.0 loads libssl from openssl@4 and holds it, and
-    /// 2.0, a pin that moved OpenSSL's major, loads it from openssl@5
-    /// and fails naming both.
+    /// (#3458): the fixture binds ext/openssl's openssl-sys to openssl@4,
+    /// and of two stand-in php builds laid in its Cellar, 1.0 loads libssl
+    /// from openssl@4 and holds it, and 2.0, a pin that moved OpenSSL's
+    /// major, loads it from openssl@5 and fails naming both.
     #[test]
     fn a_binding_to_another_major_than_the_pinned_php_loads_fails_naming_both() {
-        let fixture = crate::package_dir().join("fixtures/api-check/binding");
-        let tree = Tree::new("api-check-binding").unwrap();
-        repository(&fixture, tree.path(), &["."]).unwrap();
-        let openssl = |version: &str, major: &str| {
-            let bin = tree.path().join(format!("brew/Cellar/php/{version}/bin"));
-            fs::create_dir_all(&bin).unwrap();
-            let full = if major == "4" { "4.0.3" } else { "5.0.0" };
-            let libssl =
-                format!("@loader_path/../../../openssl@{major}/{full}/lib/libssl.{major}.dylib");
-            fs::write(bin.join("php"), macho(&[&libssl])).unwrap();
-            let mut manifest = Manifest::load(crate::package_dir().parent().unwrap()).unwrap();
-            manifest.pin.as_mut().unwrap().oracle.path = bin.join("php");
-            let readings = super::super::hold(&manifest, tree.path(), false).unwrap();
-            readings
-                .into_iter()
-                .find(|r| r.scope == "ext/openssl")
-                .unwrap()
-        };
-        let held = openssl("1.0", "4");
+        let tree = fixture("major");
+        let held = reading(&tree, "1.0", &[&libssl("4")]);
         assert_eq!(held.status, Status::Pass, "{}", held.message);
         let note = "openssl-sys bound to openssl@4, the keg the pinned php loads libssl from";
         assert!(held.message.ends_with(note), "{}", held.message);
-        let moved = openssl("2.0", "5");
+        let moved = reading(&tree, "2.0", &[&libssl("5")]);
         assert_eq!(moved.status, Status::Fail, "{}", moved.message);
         assert!(
             moved.message.starts_with(
@@ -247,6 +303,50 @@ mod tests {
             ),
             "{}",
             moved.message
+        );
+    }
+
+    /// Each binding the pinned php cannot hold fails the crate's reading
+    /// saying why (#3458): no `[env]` line naming openssl-sys's variable,
+    /// so its build links the first libssl a search finds; a binding to a
+    /// directory in no keg of the php's Homebrew; a php that loads no
+    /// libssl of its own; and a php whose loads cannot be read, a name
+    /// under `@executable_path/` the walk refuses to place.
+    #[test]
+    fn a_binding_the_pinned_php_cannot_hold_fails_saying_why() {
+        let tree = fixture("refused");
+        let fails = |loads: &[&str], why: &str| {
+            let reading = reading(&tree, "1.0", loads);
+            assert_eq!(reading.status, Status::Fail, "{why}: {}", reading.message);
+            assert!(reading.message.contains(why), "{why}: {}", reading.message);
+        };
+        let ssl = libssl("4");
+        bound(&tree, None);
+        fails(
+            &[&ssl],
+            "ext/openssl links openssl-sys, and no cargo configuration's [env] names its OPENSSL_DIR, \
+             so its build links the first libssl a search finds where the pinned php loads openssl@4's",
+        );
+        bound(
+            &tree,
+            Some("{ value = \"ext/openssl\", relative = true, force = true }"),
+        );
+        fails(
+            &[&ssl],
+            "/ext/openssl, no keg of the pinned php's Homebrew, and the pinned php loads libssl from openssl@4",
+        );
+        bound(
+            &tree,
+            Some("{ value = \"brew/Cellar/openssl@4/4.0.3\", relative = true, force = true }"),
+        );
+        assert_eq!(reading(&tree, "1.0", &[&ssl]).status, Status::Pass);
+        fails(
+            &[],
+            "ext/openssl links openssl-sys, and the pinned php loads no libssl of its own, so no keg holds the binding",
+        );
+        fails(
+            &["@executable_path/../lib/libssl.4.dylib"],
+            "ext/openssl links openssl-sys, whose binding is held to the libraries the pinned php loads, and those are unread: ",
         );
     }
 }

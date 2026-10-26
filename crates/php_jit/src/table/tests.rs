@@ -46,7 +46,7 @@ fn exit(link: Option<TraceId>) -> ExitSpec {
     ExitSpec {
         frame: Frame::ROOT,
         opline: Some(OplineIdx(1)),
-        landing: Landing::Plain,
+        landing: Landing::PLAIN,
         stores: Vec::new(),
         known: Vec::new(),
         grows: Grows::Side,
@@ -147,7 +147,7 @@ fn a_published_trace_is_got_by_its_id_with_its_exits() -> Result<(), String> {
     let first = &got.exits[1];
     assert_eq!(
         (first.opline, first.landing),
-        (Some(OplineIdx(1)), Landing::Plain)
+        (Some(OplineIdx(1)), Landing::PLAIN)
     );
     assert_eq!(got.kind, super::Kind::Trace);
     assert!(got.map_ptrs.is_empty() && got.marks.is_empty());
@@ -606,26 +606,16 @@ fn a_jitdump_record_is_laid_as_phps() {
     assert_eq!((close.len(), word(&close, 0), word(&close, 4)), (16, 3, 16));
 }
 
-/// On the target itself (`jit-design.md` §4.5): `mov w0, #7; ret`
-/// published into a table over `MAP_JIT` and entered through `get`.
-#[cfg(all(target_os = "macos", target_arch = "aarch64", not(miri)))]
+/// On the target itself (`jit-design.md` §4.5): `mov; ret` published into
+/// a table over the target's adapter and entered through `get`.
+#[cfg(all(php_jit_arena, not(miri)))]
 mod native {
-    use super::super::code::MapJit;
-    use super::super::{TraceTable, Unpublished};
+    use super::super::code::returning;
+    use super::super::{Native, TraceTable, Unpublished};
     use super::{compiled, trace};
     use crate::record::Start;
     use crate::table::Perf;
     use crate::testing;
-
-    /// `mov w0, #value; ret`.
-    fn returning(value: u16) -> [u8; 8] {
-        let mov = 0x5280_0000_u32 | (u32::from(value) << 5);
-        let ret = 0xD65F_03C0_u32;
-        let mut bytes = [0; 8];
-        bytes[..4].copy_from_slice(&mov.to_le_bytes());
-        bytes[4..].copy_from_slice(&ret.to_le_bytes());
-        bytes
-    }
 
     /// The code at `entry` as a function of no arguments.
     fn call(entry: std::ptr::NonNull<u8>) -> u32 {
@@ -636,13 +626,13 @@ mod native {
     #[test]
     fn mov_ret_runs_through_publish_and_get() -> Result<(), String> {
         let policy = testing::policy(&[("opcache.jit_buffer_size", "64K")]);
-        let table: TraceTable<MapJit> = TraceTable::with_perf(&policy, Perf::none());
+        let table: TraceTable<Native> = TraceTable::with_perf(&policy, Perf::none());
         let published = table.publish(compiled(&returning(7), vec![]), Start::Loop);
         assert_eq!(published, Ok(trace(1)));
         let got = table.get(trace(1)).ok_or("published")?;
         assert_eq!(call(got.code.entry()), 7);
         let mut offset = compiled(&[returning(1), returning(9)].concat(), vec![]);
-        offset.entry_offset = 8;
+        offset.entry_offset = returning(1).len();
         assert_eq!(
             table.publish(offset, Start::Loop),
             Ok::<_, Unpublished>(trace(2))
@@ -658,7 +648,7 @@ mod native {
 /// epoch it started in and claims that exit's word through an exit
 /// holder, which reads it through the epoch; the second request of the
 /// epoch finds the first's trace and takes the next id.
-#[cfg(all(target_os = "macos", target_arch = "aarch64", not(miri)))]
+#[cfg(all(php_jit_arena, not(miri)))]
 mod epoch {
     use php_engine::tier::{
         self, Extension, ExtensionBuilder, Flow, FrameRef, Request, Site, Tier,
@@ -789,10 +779,6 @@ mod epoch {
     /// php's `COMPILER_ERROR`, `TRACE 2 abort (JIT compilation error)`,
     /// one attempt counted; the next request's visit records it again,
     /// the table never stopped.
-    #[cfg_attr(
-        not(all(target_os = "macos", target_arch = "aarch64")),
-        ignore = "no code arena on this target until #2943"
-    )]
     #[test]
     fn a_spent_arena_refuses_no_hot_root() {
         let engine = testing::engine::<Spent>(&[
@@ -822,10 +808,6 @@ mod epoch {
     /// and none is refused or blacklisted, as php's do under a small
     /// `opcache.jit_buffer_size` (`zend_jit_trace.c:7612-7622`,
     /// `:8164-8167`).
-    #[cfg_attr(
-        not(all(target_os = "macos", target_arch = "aarch64")),
-        ignore = "no code arena on this target until #2943"
-    )]
     #[test]
     fn traces_that_fill_the_arena_abort_the_roots_after() {
         let engine = testing::engine::<testing::Lane>(&[

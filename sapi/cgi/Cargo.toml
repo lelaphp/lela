@@ -35,3 +35,8 @@ php_ext = { path = "../../crates/php_ext" }
 # `sigaction`).
 nix = { workspace = true, features = ["socket", "net", "process", "signal"] }
 libc = { workspace = true }
+
+[dev-dependencies]
+# The peak resident set of the php-cgi a test ran, `getrusage(RUSAGE_CHILDREN)`
+# (tests/content_length.rs, #3457).
+nix = { workspace = true, features = ["resource"] }

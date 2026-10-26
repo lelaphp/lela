@@ -3,6 +3,19 @@
 [alias]
 xtask = "run --quiet --package xtask --"
 
+# Every profile passes LLVM's --cgp-max-address-users-to-scan=1000, so
+# CodeGenPrepare folds a request field's address into each access of
+# `serve_frame`'s loop, `ldr x8, [x19, #C]`, where at LLVM's default of
+# 100 users a field the loop reaches more often stays one address the
+# register allocator holds or spills (design §10 Profiles; #3372, #3345).
+# `cfg(all())` holds for every target, and cargo joins a `--config` line's
+# array for the same key to this one, which is how the harness adds a cfg
+# (`xtask/src/oracle/profile.rs`, `scripts/ci/tailcall.sh`); a `RUSTFLAGS`
+# variable replaces the table instead, and php_engine's build.rs refuses a
+# release-like build it leaves without the option.
+[target.'cfg(all())']
+rustflags = ["-C", "llvm-args=--cgp-max-address-users-to-scan=1000"]
+
 # expect-test finds the file a snapshot lives in from the outermost ancestor
 # that has a Cargo.toml, which in a worktree laid under the checkout, as
 # `.claude/worktrees/` held them before revision 56, is the clone's root and
@@ -13,6 +26,12 @@ xtask = "run --quiet --package xtask --"
 # harness, so the config's wins (`force = true`).
 [env]
 CARGO_WORKSPACE_DIR = { value = "", relative = true, force = true }
+
+# Every build in the workspace asks php_engine's build.rs to refuse a
+# release-like build whose rustflags lack the LLVM option above, where one
+# from outside it is warned (design §10 Profiles, #3372); not forced, so
+# `PHP_ENGINE_FOLD=warn` builds one unfolded on purpose.
+PHP_ENGINE_FOLD = "refuse"
 
 # pcre2-sys finds libpcre2-8 through pkg-config, which on a Mac is
 # Homebrew's `pcre2` keg, the library the oracle links (design §7.2, #624,
@@ -53,3 +72,25 @@ AARCH64_APPLE_DARWIN_OPENSSL_DIR = { value = "/opt/homebrew/opt/openssl@4", forc
 # directory ahead of the SDK's and fails the build where it names none
 # (#1332), and a Linux host still finds its libcurl through pkg-config.
 AARCH64_APPLE_DARWIN_CURL_LIB_DIR = { value = "/opt/homebrew/opt/curl/lib", force = true }
+
+# Unnamed, rustc links for macOS 11.0 on aarch64-apple-darwin, and ld64
+# then writes the rebase and bind opcodes of LC_DYLD_INFO_ONLY, which dyld
+# applies at launch, so every page of a host's __DATA_CONST is dirty in
+# every process; the oracle, php 8.5.12's keg, is linked for macOS 15.0
+# with LC_DYLD_CHAINED_FIXUPS, which the kernel applies as each page comes
+# in, and its __DATA_CONST stays clean (design §7.2, #3356). Named, it is
+# the oracle's `minos` (`otool -l`, LC_BUILD_VERSION), the macOS rustc
+# compiles every crate's objects and links every host and test binary
+# for, and the one a `cc` build script compiles its C for (lexbor,
+# libmbfl, timelib, uriparser, the shims), which it otherwise built for
+# the installed SDK's own version; the keg archives linked in,
+# libpcre2-8.a, libsqlite3.a and libtidy's, are built for 15.0, so ld no
+# longer warns that an object is newer than the link. Cargo hands it to
+# every build script, rustc run and `cargo run` or test process, the
+# harness's own among them; what the harness runs under the oracle's
+# recipe, a witness's or a phpt test's php, starts from the environment
+# the recipe clears and states (`oracle.toml`, `[recipe.env]`), so no
+# test sees it. Another platform's target reads no such variable.
+# `xtask api-check` holds it to the pinned php's minos in each host's
+# reading, so it moves with the oracle.
+MACOSX_DEPLOYMENT_TARGET = { value = "15.0", force = true }

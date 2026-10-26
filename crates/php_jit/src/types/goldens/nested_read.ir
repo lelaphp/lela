@@ -19,9 +19,9 @@ loop at 0, loop, interrupt exit 21
 0006 f0 FETCH_DIM_IS #6, const#2 inline
   -> #7 f0.T2 [packed array]
   guard #7 array -> exit 5
-  guard #7 packed -> exit 6
+  guard #7 packed -> exit 7
 0007 f0 ISSET_ISEMPTY_DIM_OBJ #7, #5 fused inline unwinds -> unwind 0
-  checks direction fell -> exit 7
+  checks direction fell -> exit 6
 0009 f0 PRE_INC #1 inline
   -> #8 f0.CV2 [long] reg
   checks #8 long -> exit 8
@@ -58,8 +58,8 @@ exit 2: f0 0019 plain f0.CV0:array f0.CV1:long
 exit 3: f0 0019 plain f0.CV0:array f0.CV1:long f0.CV2:long
 exit 4: f0 0021 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long
 exit 5: f0 0007 plain f0.CV2=#1 f0.CV3=#3 f0.T3=#5 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.T3:long
-exit 6: f0 0007 plain f0.CV2=#1 f0.CV3=#3 f0.T3=#5 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.T2:array f0.T3:long packed guard
-exit 7: f0 0010 plain f0.CV2=#1 f0.CV3=#3 f0.T3=#5 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.T2:array f0.T3:long
+exit 6: f0 0010 plain f0.CV2=#1 f0.CV3=#3 f0.T3=#5 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.T2:array f0.T3:long
+exit 7: f0 0007 plain f0.CV2=#1 f0.CV3=#3 f0.T3=#5 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.T2:array f0.T3:long packed guard
 exit 8: f0 0009 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long
 exit 9: f0 0011 plain f0.CV2=#8 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long
 exit 10: f0 0013 plain f0.CV2=#8 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long

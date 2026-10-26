@@ -17,7 +17,7 @@ use php_ext::decl::{Attribute, FunctionDecl, Name, Type};
 use php_ext::raising::{
     Thrown, arg_type_error, arg_value_error, fatal, throw, throw_error, warning,
 };
-use php_ext::request::{Ini, Request, Stream};
+use php_ext::request::{Ini, ReadPost, Request, Stream};
 use php_ext::syntax::Position;
 use php_ext::values::{
     Owner, PhpArray, PhpObject, PhpString, Resource, ResourceType, Value, ValueRef,
@@ -89,6 +89,7 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
         internals::zend_test_opcache_preloading::declared(),
         internals::zend_test_uri_parser::declared(),
         zend_test_gh19792::declared(),
+        zend_test_handle_post_data::declared(),
         namespaced_func::declared(),
         alias(void(), &ns2("namespaced_deprecated_func"), true),
         alias(void(), &ns2("namespaced_aliased_func"), false),
@@ -1216,6 +1217,54 @@ fn zend_test_gh19792(req: &mut Request) -> Result<(), Thrown> {
     warning(req, "a warning");
     let ce = Throwables::of(req)?;
     Err(throw_error(req, ce.error, "an exception"))
+}
+
+/// `zend_test_handle_post_data(mixed $stream, string $content_type, int
+/// $content_length): void`: the post readers run over the stream's bytes
+/// as if they were the request's body, a `POST` of `$content_type`
+/// declared `$content_length` long, into a fresh `$_POST` and `$_FILES`
+/// (`Z/ext/zend_test/test.c:1121`); the stream read a block at a time as
+/// php's `zend_test_read_post` reads it, in place of the host's.
+///
+/// ```php
+/// function body(string $bytes) { $s = fopen('php://memory', 'r+'); fwrite($s, $bytes); rewind($s); return $s; }
+/// $form = 'a=1&b[]=2&b[]=3';
+/// zend_test_handle_post_data(body($form), 'application/x-www-form-urlencoded', strlen($form));
+/// echo json_encode([$_POST, $_FILES]), "\n";
+/// $multipart = "--b\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nhello\r\n--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"f.txt\"\r\n\r\nfile\r\n--b--\r\n";
+/// zend_test_handle_post_data(body($multipart), 'multipart/form-data; boundary=b', strlen($multipart));
+/// echo json_encode($_POST), ' ', $_FILES['f']['size'], ' ', file_get_contents($_FILES['f']['tmp_name']), ' ', var_export(is_uploaded_file($_FILES['f']['tmp_name']), true), "\n";
+/// zend_test_handle_post_data(body('{}'), 'application/json', 2);
+/// echo json_encode([$_POST, $_FILES]), "\n";
+/// ```
+/// ```expect
+/// [{"a":"1","b":["2","3"]},[]]
+/// {"x":"hello"} 4 file true
+/// [[],[]]
+/// ```
+#[php_function]
+fn zend_test_handle_post_data(
+    req: &mut Request,
+    stream: Value,
+    content_type: PhpString,
+    content_length: i64,
+) -> Result<(), Thrown> {
+    let Some(stream) = <Stream as FromArgument>::hold(req, stream, 1)? else {
+        return Ok(());
+    };
+    let content_type = content_type.as_bytes().to_vec();
+    req.variables_mut()
+        .read_post_body(PostStream(stream), &content_type, content_length)
+}
+
+/// `zend_test_read_post`: one `php_stream_read` of the stream a block,
+/// nothing for a read that failed.
+struct PostStream(Stream);
+
+impl ReadPost for PostStream {
+    fn read_post(&mut self, req: &mut Request, buf: &mut [u8]) -> usize {
+        self.0.read_into(req, buf).unwrap_or(0)
+    }
 }
 
 /// `zend_test_internal_dnf_arguments()`, taking and returning

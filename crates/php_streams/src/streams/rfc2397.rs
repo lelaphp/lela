@@ -68,7 +68,7 @@ pub(super) fn open(req: &mut Request, path: &[u8], mode: &[u8]) -> Result<Opened
     } else {
         url_decode(data)
     };
-    let stream = temp_stream(req, TempMode::Default, usize::MAX, "RFC2397", meta)?;
+    let stream = temp_stream(req, TempMode::Default, usize::MAX, "RFC2397", meta, None)?;
     req.stream_op(*stream, |op| {
         op.kind(|req, ops| {
             let _ = ops.write(req, &data);
