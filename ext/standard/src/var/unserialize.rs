@@ -2319,11 +2319,12 @@ impl State<'_> {
         let payload = self.buf[self.p..self.p + datalen].to_vec();
         if self.hash.incomplete_classes_only {
             // `keep_payload`: "keep the payload verbatim, so that the
-            // object serializes back to the same bytes", the string asked
-            // for fallibly, then the class name stored.
+            // object serializes back to the same bytes", the string
+            // `ZVAL_FSTRINGL`'s, a `zend_string_finit` asked for fallibly
+            // and never interned, then the class name stored.
             let kept = req
                 .memory_mut()
-                .fallible(|req| PhpString::new(req, &payload))?;
+                .fallible(|req| PhpString::finit(req, &payload))?;
             let Some(kept) = kept else {
                 return Ok(false);
             };
