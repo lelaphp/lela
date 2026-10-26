@@ -686,7 +686,7 @@ impl Request {
     /// restart keeps its rows at their numbers, with the units it saved,
     /// whose words every epoch lays its own of, counting where the tier
     /// counts a unit the cache holds now, as php's `zend_jit_script`
-    /// gives the preload's units their counters
+    /// lays the preload's units' words
     /// ([`crate::arena::Epochs::lay_base`]).
     pub(crate) fn save_preload_state(&self) {
         let units = (self.shared.units.preloaded())
@@ -697,7 +697,7 @@ impl Request {
             .collect();
         let laid = crate::tier::words_laid(&self.shared, Some(self));
         if laid.counts() {
-            self.shared.binding.published();
+            self.published_counting();
         }
         self.shared.arena.lay_base(&self.arena, units, laid);
     }

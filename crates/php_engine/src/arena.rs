@@ -389,28 +389,24 @@ impl Arena {
     /// epoch's or the preload's below it, with this epoch's words for it
     /// ([`crate::tier::published`]).
     pub(crate) fn func(&self, offset: u32) -> Option<&crate::tier::published::Func> {
-        self.funcs_of(offset)?.get(offset)
-    }
-
-    /// The rows the op array at `offset` stands in: this epoch's own, or
-    /// this epoch's for the preload's below it.
-    fn funcs_of(&self, offset: u32) -> Option<&crate::tier::published::Funcs> {
-        let own = &self.files.funcs;
-        if own.get(offset).is_some() {
-            return Some(own);
-        }
-        Some(&self.below.as_ref()?.funcs)
+        (self.files.funcs.get(offset)).or_else(|| self.below.as_ref()?.funcs.get(offset))
     }
 
     /// The landing word of opline `at` of the held op array at `offset`,
-    /// for a tier to arm, this epoch's or the preload's below it
-    /// ([`crate::tier::published::Funcs::lay_landing`]).
+    /// for a tier to arm: this epoch's, named in the landing index
+    /// compiled code reads ([`crate::tier::published::Funcs::lay_landing`]),
+    /// or this epoch's of the preload's below it, which the index names
+    /// none of.
     pub(crate) fn lay_landing(
         &self,
         offset: u32,
         at: php_unit::OplineIdx,
     ) -> Option<&crate::tier::Word> {
-        self.funcs_of(offset)?.lay_landing(offset, at)
+        let own = &self.files.funcs;
+        if own.get(offset).is_some() {
+            return own.lay_landing(offset, at);
+        }
+        self.below.as_ref()?.funcs.get(offset)?.lay_landing(at)
     }
 
     /// The published user function or method `function` names; none for
@@ -601,8 +597,8 @@ impl Epochs {
     /// `zend_shared_alloc_save_state` after preloading: the preload's
     /// `arena`, which it has published into, laid below every epoch from
     /// now on, with `units`, the files it preloaded, whose words are laid
-    /// as `laid` says, as php's `zend_jit_script` gives the preload's
-    /// units their counters as it persists them; the first laid stands, and
+    /// as `laid` says, as php's `zend_jit_script` lays the preload's
+    /// units' words as it persists them; the first laid stands, and
     /// an arena laid over one is never laid. The preload is served before
     /// any other request, and publishes nothing into it after; a row it
     /// did would be numbered among the next epoch's own and reached by no
@@ -732,10 +728,15 @@ mod tests {
         // loop, and armed a landing that a return roots.
         let word = first.func(5).map(|func| func.word(SafepointIdx(1)));
         word.inspect(|word| word.halves()[1].store((1 << 8) | 2, Relaxed));
+        let entry = first.func(5).map(|func| func.word(SafepointIdx(0)));
+        entry.inspect(|word| word.halves()[1].store(u32::MAX, Relaxed));
         let landing = first.lay_landing(5, OplineIdx(1));
         landing.inspect(|word| word.halves()[1].store(0, Relaxed));
         let second = epochs.enter(|_| true);
         assert_eq!(halves(&second), Some([3, 0]), "counting again");
+        let entry = second.func(5).map(|func| func.word(SafepointIdx(0)));
+        let cleared = entry.map(|word| word.halves()[1].load(Relaxed));
+        assert_eq!(cleared, Some(0), "no longer blacklisted");
         let unarmed = second.func(5).map(|func| func.landing(OplineIdx(1)));
         assert!(unarmed.is_some_and(|word| word.halves()[1].load(Relaxed) == u32::MAX));
         assert_eq!(
