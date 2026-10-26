@@ -799,11 +799,12 @@ fn a_loop_entered_at_its_body_holds_the_frame_to_what_it_knows_there() {
     }
 }
 
-/// `run` from trace to trace (`jit-design.md` §4.9 *Tested*), on the one
-/// target whose arena maps code today: two traces assembled by hand, each
+/// `run` from trace to trace (`jit-design.md` §4.9 *Tested*), on an
+/// aarch64 target whose arena maps code, the bodies' instruction set: two
+/// traces assembled by hand, each
 /// serving one opline through a kernel that keeps the number of the
 /// trace that called it.
-#[cfg(all(target_os = "macos", target_arch = "aarch64", not(miri)))]
+#[cfg(all(php_jit_arena, target_arch = "aarch64", not(miri)))]
 mod ran {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;

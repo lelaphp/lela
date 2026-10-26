@@ -14,7 +14,7 @@ use php_unit::decl::{IniDecl, Name};
 
 use crate::policy::Policy;
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64", not(miri)))]
+#[cfg(all(php_jit_arena, target_arch = "aarch64", not(miri)))]
 pub(crate) mod bodies;
 pub(crate) mod goldens;
 pub(crate) mod records;
@@ -75,9 +75,10 @@ impl Drop for Scratch {
     }
 }
 
-/// Whether this target maps a code arena, so a published trace keeps
-/// its code; elsewhere a table numbers what it publishes (#2943).
-pub(crate) const MAPS_CODE: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+/// Whether this target maps a code arena (`build.rs`'s `php_jit_arena`),
+/// so a published trace keeps its code; elsewhere a table numbers what it
+/// publishes.
+pub(crate) const MAPS_CODE: bool = cfg!(php_jit_arena);
 
 /// An engine bound to `T` under `ini`, the request's cache holding every
 /// file the moment it is written, for no host named.
