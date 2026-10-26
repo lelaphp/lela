@@ -764,8 +764,11 @@ fn one_file_of_the_pinned_tree_is_keyed_by_the_corpus_it_stands_in() {
 /// recipe's limit, or dies on a signal, fails that file and the lane goes
 /// on to the next (#699, #1069): of three files, the one it hangs on and
 /// the one it dies on differ, and the one after both is still dumped and
-/// identical. The limit is a second, in the test's own pin; the oracle's
-/// own dumps take a fraction of it.
+/// identical. The limit is ten seconds, in the test's own pin, against
+/// the thirty the hang holds for: the files meant to pass, and the pinned
+/// php's probe of its own `PHP_BINARY`, need finish only inside it, a margin
+/// a loaded machine's process start does not eat (at one second they did
+/// not, two whole-crate runs in four at load 19-35, #3238).
 #[test]
 fn a_dump_past_the_limit_or_ended_by_a_signal_fails_that_file_and_the_rest_are_judged() {
     let Some(php) = oracle() else {
@@ -780,7 +783,7 @@ fn a_dump_past_the_limit_or_ended_by_a_signal_fails_that_file_and_the_rest_are_j
         .unwrap()
         .recipe
         .limits
-        .timeout_s = 1;
+        .timeout_s = 10;
     let engine = scratch.binary(
         "php",
         &format!(
