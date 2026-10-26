@@ -622,6 +622,28 @@ impl Lookup {
 /// RuntimeException: boom / NULL
 /// Error: Invalid callback no_such_function, function "no_such_function" not found or invalid function name / NULL
 /// ```
+///
+/// The node the function answers is kept before the arguments it was
+/// handed, so the evaluator lets it go first:
+///
+/// ```php
+/// class E extends DOMElement { function __destruct() { echo "destruct ", $this->nodeName, "\n"; } }
+/// $d = new DOMDocument; $d->loadXML('<r><a/></r>');
+/// $d->registerNodeClass('DOMElement', 'E');
+/// $x = new DOMXPath($d);
+/// $x->registerNamespace('php', 'http://php.net/xpath');
+/// $x->registerPhpFunctions();
+/// function f($nodes) { global $d; return $d->createElement('ret'); }
+/// var_dump($x->evaluate("boolean(php:function('f', //a))"));
+/// unset($x);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// bool(true)
+/// destruct ret
+/// destruct a
+/// end
+/// ```
 fn dispatch(
     req: &mut Request,
     at: CallbacksAt,
