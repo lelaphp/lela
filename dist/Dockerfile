@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 #
 # The CLI, CGI and FPM hosts built from this checkout, and the image that
-# stands in for php:8.5-apache, with the checkout as the build context
+# stands in for php's official apache image, with the checkout as the build
+# context
 # (Dockerfile.dockerignore beside this file keeps target/ and what no build
 # reads out of it):
 #
@@ -12,11 +13,14 @@
 # builder's own architecture and cross-compiles, since QEMU's emulation
 # crashes it; only the apache stage's own layers run as the target.
 #
-# The base is Ubuntu 26.04, the userland CI builds and tests the workspace
-# on: ext/intl links ICU 78, the oracle's, which Debian trixie (php's
-# official images) does not ship.
+# The base is the Ubuntu release CI builds and tests the workspace on,
+# whose package names packages.txt gives: ext/intl links the ICU the
+# oracle links (packages.txt), which the Debian release php's official
+# images are built on does not ship.
 
 ARG UBUNTU=ubuntu:26.04
+# Where php's official images keep php.ini, $PHP_INI_DIR, with conf.d in it.
+ARG PHP_INI_DIR=/usr/local/etc/php
 # The hosts' names, `$NAME`, `$NAME-cgi` and `$NAME-fpm`, as ADR-0016 derives
 # them from one constant; php's until #3464 renames them.
 ARG NAME=php
@@ -63,6 +67,7 @@ RUN curl -sSf https://sh.rustup.rs | sh -s -- -y -q --no-modify-path --profile m
 FROM toolchain AS build
 ARG TARGETARCH
 ARG NAME
+ARG PHP_INI_DIR
 # What a release names as the build's provider (php's --with-build-provider),
 # none where it is empty; and the build date php_build_date renders.
 ARG BUILD_PROVIDER
@@ -73,15 +78,15 @@ ARG CARGO_BUILD_JOBS=1
 # The cache mounts' ids are `$CACHE-cargo-registry` and `$CACHE-target-<arch>`.
 ARG CACHE=dist
 # What php's official images configure: the php.ini search ends at
-# $PHP_INI_DIR, and conf.d beside it is scanned (php_engine's build_defs
+# $PHP_INI_DIR, and conf.d in it is scanned (php_engine's build_defs
 # layout reads these at build time).
-ENV PHP_CONFIG_FILE_PATH=/usr/local/etc/php \
-    PHP_CONFIG_FILE_SCAN_DIR=/usr/local/etc/php/conf.d \
+ENV PHP_CONFIG_FILE_PATH=${PHP_INI_DIR} \
+    PHP_CONFIG_FILE_SCAN_DIR=${PHP_INI_DIR}/conf.d \
     PHP_BUILD_PROVIDER=${BUILD_PROVIDER}
 WORKDIR /src
 COPY . .
-# The compiled tier is built in, as the macOS binaries have it, and off
-# until opcache.jit asks (jit-design.md §6).
+# The compiled tier is built in, php_bundle's `jit` feature, as the macOS
+# binaries have it; it stays off until opcache.jit asks, as php's does.
 RUN --mount=type=cache,id=${CACHE}-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=${CACHE}-target-${TARGETARCH},target=/src/target \
     . /usr/local/share/dax-target.env; \
@@ -113,7 +118,8 @@ RUN . /usr/local/share/dax-target.env; \
 
 # --- php.ini-development and php.ini-production ---------------------------
 # Of the php-src commit oracle.toml pins, as php's official images ship
-# them in $PHP_INI_DIR: fetched by that commit, so the pin is their digest.
+# them in $PHP_INI_DIR: fetched at that commit, so they move with the pin.
+# What holds them is the commit oracle.toml abbreviates, not a checksum.
 FROM toolchain AS ini
 COPY oracle.toml /tmp/oracle.toml
 RUN commit="$(sed -n '/^\[source\]/,/^\[/s/^commit = "\([0-9a-f]*\)".*/\1/p' /tmp/oracle.toml)"; \
@@ -130,16 +136,16 @@ COPY --from=build /out/usr/local/sbin/ /sbin/
 COPY --from=build /out/runtime-packages.txt /
 COPY --from=ini /ini/ /etc/
 
-# --- the drop-in for php:<version>-apache ---------------------------------
+# --- the drop-in for php's apache image -----------------------------------
 # Apache's prefork MPM in front of php-fpm over a unix socket, where php's
 # image loads mod_php: the engine has no apache2handler yet. php's image
 # also sets PHP_VERSION; this one does not, since the engine's version is
 # the engine's to say (`php -r 'echo PHP_VERSION;'`) and a second
 # statement of it here would drift.
 FROM ${UBUNTU} AS apache
-ARG NAME
+ARG PHP_INI_DIR
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
-ENV PHP_INI_DIR=/usr/local/etc/php \
+ENV PHP_INI_DIR=${PHP_INI_DIR} \
     APACHE_CONFDIR=/etc/apache2 \
     APACHE_ENVVARS=/etc/apache2/envvars
 COPY --from=build /out/runtime-packages.txt /tmp/runtime-packages.txt
@@ -169,18 +175,16 @@ COPY dist/apache/docker-php.conf /etc/apache2/conf-available/docker-php.conf
 RUN a2enmod -q proxy_fcgi; a2enconf -q docker-php; \
     mkdir -p /run/php; chmod 1777 /run/php
 COPY --from=build /out/usr/local/ /usr/local/
-COPY --from=ini /ini/ /usr/local/etc/php/
+COPY --from=ini /ini/ ${PHP_INI_DIR}/
 COPY dist/apache/php-fpm.conf /usr/local/etc/php-fpm.conf
 COPY dist/apache/www.conf /usr/local/etc/php-fpm.d/www.conf
 COPY dist/apache/bin/ /usr/local/bin/
 # A Dockerfile written for php's image runs `php`, and this image's own
-# scripts run `php` and `php-fpm`: under another NAME they are links to
-# the hosts, the opt-in link ADR-0016 names, which a drop-in opts into.
+# scripts run `php` and `php-fpm`. Under another NAME, how the image
+# offers those names is #3464's to decide (ADR-0016); until then the
+# check below fails the build.
 RUN cd /usr/local/bin; \
-    if [ "$NAME" != php ]; then \
-        ln -s "$NAME" php; ln -s "$NAME-cgi" php-cgi; ln -s "$NAME-fpm" ../sbin/php-fpm; \
-    fi; \
-    for name in docker-php-ext-enable; do ln -s docker-php-ext-install "$name"; done; \
+    ln -s docker-php-ext-install docker-php-ext-enable; \
     for name in pear peardev phpize php-config; do ln -s pecl "$name"; done; \
     php -v; php-fpm -t; apache2ctl -t
 ENTRYPOINT ["docker-php-entrypoint"]
