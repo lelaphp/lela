@@ -1612,7 +1612,7 @@ impl<'a> Emit<'a> {
         // The `ExitCtx`, the frame's room and the opline come first.
         let params: &[Type] = match kernel {
             Kernel::Step => &[I64, I64, I32, I32, I64],
-            Kernel::Handle => &[I64, I64, I32, I32],
+            Kernel::Handle | Kernel::Native => &[I64, I64, I32, I32],
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release | Kernel::FreeCv => &[I64, I64, I32, I64, I32],
             Kernel::Identical => &[I64, I64, I32, I64, I32, I64, I32, I64],
@@ -1776,13 +1776,45 @@ impl<'a> Emit<'a> {
     /// ```expect regime=jit-force process
     /// float(23.5)
     /// ```
+    ///
+    /// A native's call and its frameless calls go through
+    /// [`Kernel::Native`], which calls the handler with no dispatch, as
+    /// php's code calls the native directly; one that refuses its
+    /// argument throws out of the loop:
+    ///
+    /// ```php
+    /// function f($n) { $t = 0; for ($i = 1; $i < $n; $i++) { $t += max(10, min(200, $i & 255)) + strlen(substr("abcdef", $i % 4)); } return $t; }
+    /// function g($n, $a) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += str_contains("hay", $i < 7 ? "a" : $a) ? 1 : 0; } return $t; }
+    /// echo f(300), "\n";
+    /// try { g(10, [1]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 33490
+    /// str_contains(): Argument #2 ($needle) must be of type string, array given
+    /// ```
+    ///
+    /// ```php
+    /// function f($n) { $t = 0; for ($i = 1; $i < $n; $i++) { $t += max(10, min(200, $i & 255)) + strlen(substr("abcdef", $i % 4)); } return $t; }
+    /// function g($n, $a) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += str_contains("hay", $i < 7 ? "a" : $a) ? 1 : 0; } return $t; }
+    /// echo f(300), "\n";
+    /// try { g(10, [1]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 33490
+    /// str_contains(): Argument #2 ($needle) must be of type string, array given
+    /// ```
     fn handled(
         &mut self,
         line: &Line,
         Onward(places): Onward,
         [room, opline, func]: [Value; 3],
     ) -> Result<(), Abort> {
-        self.call(Kernel::Handle, &[room, opline, func], leave_of(line))?;
+        let kernel = if line.opcode == Opcode::DoIcall || line.opcode.is_frameless_icall() {
+            Kernel::Native
+        } else {
+            Kernel::Handle
+        };
+        self.call(kernel, &[room, opline, func], leave_of(line))?;
         let next = self.b.ins().iconst(I32, i64::from(line.opline.0 + places));
         self.b.ins().stack_store(I64, func, self.stood, STOOD_FUNC);
         self.b

@@ -199,6 +199,7 @@ tier::concat
 tier::dispatch_held
 tier::free_cv
 tier::lookup_element
+tier::native_held
 tier::release
 tier::return_entry
 tier::rope_end

@@ -570,6 +570,7 @@ kernels! {
         Find => find(array: u64, key: u64, key_info: u32, constant: u32) -> Zval;
         Lookup => lookup(array: u64, key: u64, key_info: u32, constant: u32) -> Zval = tier::lookup_element;
         Leave => leave(word: u64, type_info: u32) -> u64 = tier::return_entry;
+        Native => native(func: u32) = tier::native_held;
     }
 }
 
@@ -594,6 +595,18 @@ fn handle(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<(), Fatal> {
     let frame = standing(req, on.room, on.at)?;
     let (held, _) = held(on, func)?;
     tier::dispatch_held(req, frame, held)
+}
+
+/// The `native` kernel: the native's call at `at` of the op array the
+/// engine numbers `func`, a `DO_ICALL` or a `FRAMELESS_ICALL_*`, served
+/// by its handler with no dispatch ([`tier::native_held`]), as php's code
+/// calls the native directly; where the interpreter stands after it is
+/// compiled code's, and a throw is the request's pending throwable, as
+/// the `handle` kernel answers them.
+fn native(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<(), Fatal> {
+    let frame = standing(req, on.room, on.at)?;
+    let (held, _) = held(on, func)?;
+    tier::native_held(req, frame, held)
 }
 
 /// The `leave` kernel: the value the `RETURN` at `at`, which a trace ends

@@ -238,6 +238,7 @@ fn compiled(ir: &TraceIr, step: bool) -> Option<Compiled> {
         Kernel::Find => (super::super::super::wrapped::find as *const ()).addr(),
         Kernel::Lookup => (super::super::super::wrapped::lookup as *const ()).addr(),
         Kernel::Leave => (super::super::super::wrapped::leave as *const ()).addr(),
+        Kernel::Native => (super::super::super::wrapped::native as *const ()).addr(),
     });
     let backend = Backend::new(&testing::policy(&[]), symbols).ok()?;
     backend

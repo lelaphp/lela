@@ -1803,6 +1803,38 @@ pub fn dispatch_held(req: &mut Request, frame: FrameRef, held: Held<'_>) -> Resu
     }
 }
 
+/// The native's call at the opline `frame` stands at in `held`, a
+/// `DO_ICALL` or a `FRAMELESS_ICALL_*`, served by its handler with no
+/// dispatch, as php's compiled code calls the native directly
+/// (`zend_jit_do_call`'s internal arm, `jit_frameless_icall`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:10511-10600`, `:17780-17850`): the
+/// frame stood past it, the interrupt checked after a frameless call as
+/// the handler's `ZEND_VM_FCALL_INTERRUPT_CHECK` checks it, and a throw
+/// left pending. Any other opline is [`dispatch_held`]'s.
+pub fn native_held(req: &mut Request, frame: FrameRef, held: Held<'_>) -> Result<(), Fatal> {
+    use crate::handlers::{
+        do_icall, frameless_icall_0, frameless_icall_1, frameless_icall_2, frameless_icall_3,
+    };
+    use php_unit::Opcode;
+    let code = held.code();
+    let at = req.vm().opline(frame);
+    let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
+    let next = match op.opcode {
+        Opcode::DoIcall => do_icall::<Nop>(req, frame, code, op)?,
+        Opcode::FramelessIcall0 => frameless_icall_0::<Nop>(req, frame, code, op, at)?,
+        Opcode::FramelessIcall1 => frameless_icall_1::<Nop>(req, frame, code, op, at)?,
+        Opcode::FramelessIcall2 => frameless_icall_2::<Nop>(req, frame, code, op, at)?,
+        Opcode::FramelessIcall3 => frameless_icall_3::<Nop>(req, frame, code, op, at)?,
+        _ => return dispatch_held(req, frame, held),
+    };
+    match settled(req, frame, at, next) {
+        Stepped::Same(went) | Stepped::Threw(went) if went == frame => Ok(()),
+        _ => Err(Fatal::error(
+            "InternalError: a native's call compiled code makes went on elsewhere",
+        )),
+    }
+}
+
 /// The `DO_UCALL`, `DO_FCALL` or `DO_FCALL_BY_NAME` at `frame`'s opline
 /// of `held`, made as compiled code makes a call to the callee its trace
 /// recorded, `callee`, which the `INIT_*` before it pushed: the handler's
