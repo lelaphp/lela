@@ -2029,6 +2029,7 @@ impl<'a> Emit<'a> {
             Opcode::Bool | Opcode::BoolNot => self.bool(at, line),
             Opcode::FeFree | Opcode::Free => self.free_temp(line, line.op1),
             Opcode::SendVal | Opcode::SendVar => self.send(at, line),
+            Opcode::SendRef => self.send_ref(line),
             Opcode::CheckFuncArg => self.check_func_arg(),
             Opcode::TypeCheck => self.type_check(at, line),
             // A send to a callee that takes the argument by value.
@@ -3047,6 +3048,84 @@ impl<'a> Emit<'a> {
         let held = self.scalar(at, line.op1)?;
         let call = self.call_room()?;
         self.write(call, arg, held);
+        Ok(())
+    }
+
+    /// A `SEND_REF` of a variable, php's `zend_jit_send_ref`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:9792-9860`): the reference the
+    /// variable holds written into the call's slot for the argument with
+    /// one owner more, `GC_ADDREF` and `ZVAL_REF`. A variable that holds no
+    /// reference yet is made one by the handler, cold, through the
+    /// [`Kernel::Handle`] crossing, where php's code makes it inline with
+    /// `ZVAL_NEW_REF`; a variable the trace holds in a register holds a
+    /// scalar, and is stored to its slot for the handler first. Arrays
+    /// passed by reference in a loop, each written through its reference
+    /// by the callee, one made a reference at its first send:
+    ///
+    /// ```php
+    /// function bump(array &$a, array &$b, int &$n) { $a[0] += 1; $b[] = $n; $n++; }
+    /// function f($k) { $x = [0]; $y = []; $c = 0; for ($i = 0; $i < $k; $i++) { bump($x, $y, $c); } return [$x[0], count($y), $c]; }
+    /// echo json_encode(f(9)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [9,9,9]
+    /// ```
+    ///
+    /// ```php
+    /// function bump(array &$a, array &$b, int &$n) { $a[0] += 1; $b[] = $n; $n++; }
+    /// function f($k) { $x = [0]; $y = []; $c = 0; for ($i = 0; $i < $k; $i++) { bump($x, $y, $c); } return [$x[0], count($y), $c]; }
+    /// echo json_encode(f(9)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [9,9,9]
+    /// ```
+    fn send_ref(&mut self, line: &Line) -> Result<(), Abort> {
+        let Imm::Arg(number) = line.imm else {
+            return Err(mismatch("a send with no argument number"));
+        };
+        let arg = slot_offset(
+            number
+                .checked_sub(1)
+                .ok_or_else(|| mismatch("an argument numbered zero"))?,
+        )?;
+        let Operand::Value(value) = line.op1 else {
+            return Err(mismatch("a send by reference of no variable"));
+        };
+        let handler = |emit: &mut Emit<'_>| -> Result<(), Abort> {
+            emit.spill_operands(line)?;
+            let [room, opline] = emit.served(line)?;
+            let func = emit.func_of(line.frame)?;
+            emit.handled(line, Onward(1), [room, opline, func])
+        };
+        if self.value(value)?.home == Home::Register {
+            return handler(self);
+        }
+        let (room, from_at) = self.place(self.value(value)?.slot)?;
+        let info = self.b.ins().load(I32, trusted(), room, from_at + TYPE_AT);
+        let kind = self.b.ins().band_imm_u(info, KIND);
+        let reference = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
+        let (sent, make, on) = (
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+        );
+        self.b.set_cold_block(make);
+        self.b.ins().brif(reference, sent, &[], make, &[]);
+        self.b.switch_to_block(sent);
+        self.b.seal_block(sent);
+        let zval = self.b.ins().iadd_imm_s(room, i64::from(from_at));
+        let call = self.call_room()?;
+        self.copy_at(zval, info, (call, arg))?;
+        self.b.ins().jump(on, &[]);
+        self.b.switch_to_block(make);
+        self.b.seal_block(make);
+        handler(self)?;
+        self.b.ins().jump(on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
         Ok(())
     }
 

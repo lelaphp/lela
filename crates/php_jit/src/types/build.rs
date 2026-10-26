@@ -1055,6 +1055,9 @@ impl<'a> Builder<'a> {
                         self.is_temp(operand) && !self.types_of(frame, operand).within(UNCOUNTED)
                     }))
                     || matches!(op.opcode, Opcode::FeFree | Opcode::Free)
+                    // The handler that makes the reference may refuse at
+                    // the memory limit.
+                    || op.opcode == Opcode::SendRef
                     // The join may refuse, the memory limit or the string's
                     // size, and leave it pending.
                     || matches!(
@@ -2239,6 +2242,9 @@ impl<'a> Builder<'a> {
                     && (scalar(t1) || copied(op.op1_type, op.op1, t1))
             }
             Opcode::TypeCheck => type_checked(op, t1, seen.read[0]),
+            // php's `zend_jit_send_ref` of a variable (`:9792-9860`): the
+            // reference it holds sent with an owner more, or made first.
+            Opcode::SendRef => op.op1_type == OperandKind::Cv && op.op2_type == OperandKind::Unused,
             // php's `zend_jit_free` of a `FREE`: the temporary given up as
             // `jit_FREE_OP` gives it up (`:11543-11580`).
             Opcode::Free => matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var),
@@ -3599,7 +3605,11 @@ fn returned(op: &Opline, code: &OpArray, t1: Types) -> Returned {
 /// What `op` names beside its operands that its inline form reads.
 fn imm(op: &Opline) -> Imm {
     match op.opcode {
-        Opcode::SendVal | Opcode::SendVar if op.op2_type == OperandKind::Unused => Imm::Arg(op.op2),
+        Opcode::SendVal | Opcode::SendVar | Opcode::SendRef
+            if op.op2_type == OperandKind::Unused =>
+        {
+            Imm::Arg(op.op2)
+        }
         Opcode::AssignOp | Opcode::AssignDimOp => {
             lattice::binary_of(op.extended_value).map_or(Imm::None, Imm::Binary)
         }
