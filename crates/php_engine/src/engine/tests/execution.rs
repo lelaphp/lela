@@ -54,7 +54,7 @@ fn an_engine_with_no_extensions_serves_what_uses_zend_alone() {
     let (body, observables) = served(&engine, "<?php echo 1;");
     assert_eq!(body, "1");
     assert_eq!(observables.exit_code, 0);
-    assert_eq!(observables.fatal, None);
+    assert_eq!(observables.fatal(), None);
 }
 
 /// The same request through the `Capture` sink, which is the shape
@@ -107,7 +107,7 @@ fn the_arithmetic_opcodes_write_what_their_witnesses_pin() {
     ] {
         let (body, observables) = served(&engine, source);
         assert_eq!(body, pinned, "{source}");
-        assert_eq!(observables.fatal, None, "{source}");
+        assert_eq!(observables.fatal(), None, "{source}");
     }
 }
 
@@ -122,7 +122,7 @@ fn a_division_by_zero_throws_php_s_error_where_the_opcode_stands() {
     let engine = Engine::cli_builder().build();
     let (_, observables) = served(&engine, "<?php echo 1/0;");
     assert_eq!(
-        observables.fatal.as_deref(),
+        observables.fatal(),
         Some(
             "PHP Fatal error:  Uncaught DivisionByZeroError: Division by zero \
              in witness.php:1\nStack trace:\n#0 {main}\n  thrown in witness.php on line 1"
@@ -132,8 +132,7 @@ fn a_division_by_zero_throws_php_s_error_where_the_opcode_stands() {
     let (_, observables) = served(&engine, "<?php echo 1/0.0;");
     assert_eq!(
         observables
-            .fatal
-            .as_deref()
+            .fatal()
             .map(|text| text.contains("Uncaught DivisionByZeroError: Division by zero")),
         Some(true)
     );
@@ -148,13 +147,12 @@ fn an_operand_php_refuses_to_read_as_a_number_is_php_s_type_error() {
     let (_, observables) = served(&engine, "<?php echo \"abc\" + extension_loaded('Core');");
     assert_eq!(
         observables
-            .fatal
-            .as_deref()
+            .fatal()
             .map(|text| text
                 .contains("Uncaught TypeError: Unsupported operand types: string + bool")),
         Some(true),
         "{:?}",
-        observables.fatal
+        observables.fatal()
     );
     let (body, observables) = served(
         &engine,
@@ -164,7 +162,7 @@ fn an_operand_php_refuses_to_read_as_a_number_is_php_s_type_error() {
         body,
         "\nWarning: A non-numeric value encountered in witness.php on line 1\n3"
     );
-    assert_eq!(observables.fatal, None);
+    assert_eq!(observables.fatal(), None);
 }
 
 #[test]
@@ -190,7 +188,7 @@ fn a_call_of_a_name_nothing_declares_ends_the_request_as_php_names_it() {
          in witness.php:2\nStack trace:\n#0 {main}\n  thrown in witness.php on line 2\n"
     );
     assert_eq!(
-        observables.fatal.as_deref(),
+        observables.fatal(),
         Some(
             "PHP Fatal error:  Uncaught Error: Call to undefined function nope() \
              in witness.php:2\nStack trace:\n#0 {main}\n  thrown in witness.php on line 2"

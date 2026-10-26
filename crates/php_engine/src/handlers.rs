@@ -3879,7 +3879,9 @@ pub(crate) fn do_fcall<T: Tier>(
 /// ```
 ///
 /// Where no frame is entered, the file already included, the one that
-/// failed to open and the unit that is one `RETURN` of a constant, the
+/// failed to open and the unit that is one `RETURN` of a constant (a
+/// file of nothing but its open tag, since the compiler's final `RETURN`
+/// follows any the source writes), the
 /// release stands at this opline after the value is written, and
 /// `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` raises what it threw here,
 /// before the opline after it runs.
@@ -3888,19 +3890,20 @@ pub(crate) fn do_fcall<T: Tier>(
 /// class D { function __construct(public string $s) {} function __destruct() { throw new Exception("dtor"); } function __toString(): string { return $this->s; } }
 /// function t($how, $f) { try { $r = $f(); echo "after "; var_dump($r); } catch (Exception $e) { echo $how, ": caught ", $e->getMessage(), "\n"; } }
 /// file_put_contents(__DIR__ . '/one.php', "<?php return 1;");
+/// file_put_contents(__DIR__ . '/empty.php', "<?php ");
 /// include_once __DIR__ . '/one.php';
 /// t('include_once', fn() => include_once new D(__DIR__ . '/one.php'));
-/// t('constant', fn() => include new D(__DIR__ . '/one.php'));
+/// t('constant', fn() => include new D(__DIR__ . '/empty.php'));
 /// t('missing', fn() => include new D(__DIR__ . '/missing.php'));
-/// unlink(__DIR__ . '/one.php');
+/// unlink(__DIR__ . '/one.php'); unlink(__DIR__ . '/empty.php');
 /// ```
 /// ```expect
 /// include_once: caught dtor
 /// constant: caught dtor
 ///
-/// Warning: include(%s/missing.php): Failed to open stream: No such file or directory in %s on line 8
+/// Warning: include(%s/missing.php): Failed to open stream: No such file or directory in %s on line 9
 ///
-/// Warning: include(): Failed opening '%s/missing.php' for inclusion (include_path='%s') in %s on line 8
+/// Warning: include(): Failed opening '%s/missing.php' for inclusion (include_path='%s') in %s on line 9
 /// missing: caught dtor
 /// ```
 pub(crate) fn include_or_eval<T: Tier>(
@@ -3927,6 +3930,10 @@ pub(crate) fn include_or_eval<T: Tier>(
         }
         Err(thrown) => Ok(Included::threw(req, frame, &thrown)),
     };
+    let made = made?;
+    if let Included::Hooked(callee) = made {
+        return included_under_hook(req, frame, op, callee, returns_to);
+    }
     // `FREE_OP1()`: the operand stands while the file is opened and its
     // frame pushed. Where the frame was entered it goes with that frame
     // current, before `ZEND_VM_ENTER`, so what its destructor throws is
@@ -3934,11 +3941,76 @@ pub(crate) fn include_or_eval<T: Tier>(
     // on every other path it goes at this opline, and
     // `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` raises what it threw here.
     exec::free_operand(req, frame, op.op1_type, op.op1);
-    Ok(match made? {
+    Ok(match made {
         Included::Entered(callee) if req.is_pending() => Stepped::Threw(callee).into(),
-        Included::Entered(callee) => Stepped::Pushed(callee).into(),
+        Included::Entered(callee) | Included::Hooked(callee) => Stepped::Pushed(callee).into(),
         Included::Answered => advance(req, frame),
         Included::Threw(at) => Stepped::Threw(at).into(),
+    })
+}
+
+/// `INCLUDE_OR_EVAL`'s arm where `zend_execute_ex` is not `execute_ex`,
+/// which the tier the engine binds takes where it hooks user op arrays
+/// (`Hooked::user`, phpdbg's loop): the code frame `callee` served to its
+/// end by the engine's loop entered once more, as php's
+/// `zend_execute_ex(call)` serves it, then popped, its value written,
+/// and only then `FREE_OP1()`, so what the operand's destructor throws
+/// is raised at this opline once the code was served
+/// (`Z/Zend/zend_vm_def.h:6604-6626`). A throwable the code left pending
+/// is raised here too, the value unwritten.
+///
+/// ```php
+/// class D { function __construct(public string $s) {} function __destruct() { throw new Exception("dtor"); } function __toString(): string { return $this->s; } }
+/// try { eval(new D("echo 'ran ';")); echo "after\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// try { var_dump(eval(new D("try { echo 'ran '; } catch (Exception \$e) { echo 'inner '; } return 5;"))); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// var_dump(eval("return 5;"));
+/// ```
+/// ```request phpdbg
+/// r
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> ran caught dtor
+/// ran caught dtor
+/// int(5)
+/// [Script ended normally]
+/// prompt>
+/// ```
+#[cold]
+#[inline(never)]
+fn included_under_hook(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    callee: FrameRef,
+    returns_to: Option<(FrameRef, u32)>,
+) -> Edge {
+    // The depth below the frame `included` pushed, its place.
+    let standing = callee.0 as usize;
+    let reenter = req.loops().reenter;
+    let served = reenter(req, callee);
+    let served = req.fatal_of(served);
+    req.leave_code(standing, callee);
+    if let Err(thrown) = served {
+        exec::free_operand(req, frame, op.op1_type, op.op1);
+        req.leave_pending(&thrown);
+        return Ok(Stepped::Threw(frame).into());
+    }
+    let returned = req.take_returned();
+    if req.is_pending() {
+        // `zend_rethrow_exception`, `FREE_OP1()`, then `UNDEF_RESULT()`:
+        // the value is never written.
+        exec::free_operand(req, frame, op.op1_type, op.op1);
+        req.release(returned);
+        return Ok(Stepped::Threw(frame).into());
+    }
+    answered(req, returns_to, returned);
+    exec::free_operand(req, frame, op.op1_type, op.op1);
+    Ok(if req.is_pending() {
+        Stepped::Threw(frame).into()
+    } else {
+        advance(req, frame)
     })
 }
 
@@ -3951,6 +4023,9 @@ enum Included {
     Answered,
     /// The code frame pushed and current, its first opline next.
     Entered(FrameRef),
+    /// The code frame pushed where the bound tier hooks user op arrays,
+    /// which [`included_under_hook`] serves to its end.
+    Hooked(FrameRef),
     /// A throwable left pending on this frame.
     Threw(FrameRef),
 }
@@ -4043,7 +4118,8 @@ fn included(
         }
     };
     let main = exec::code_of(&unit);
-    if !req.shared.declared().hooked.user
+    let hooked = req.shared.declared().hooked.user;
+    if !hooked
         && let [only] = &main.oplines[..]
         && only.opcode == Opcode::Return
         && only.op1_type == OperandKind::Const
@@ -4060,7 +4136,11 @@ fn included(
     if let Err(thrown) = req.hold_op_array(callee, copy) {
         return Ok(Included::threw(req, callee, &thrown));
     }
-    Ok(Included::Entered(callee))
+    Ok(if hooked {
+        Included::Hooked(callee)
+    } else {
+        Included::Entered(callee)
+    })
 }
 
 /// The value an `INCLUDE_OR_EVAL` answers without a frame, into the

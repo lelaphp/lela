@@ -692,8 +692,11 @@ pub struct HostPage {
 pub struct Observables {
     pub exit_code: i32,
     pub headers_sent: bool,
-    /// The fatal's rendered text, when the request ended in one.
-    pub fatal: Option<String>,
+    /// How the request ended where it ended in no `exit` and no return
+    /// of its own: a fatal, a source that did not compile, or php's hard
+    /// memory limit, which a host that serves on answers as the web server
+    /// over a php-fpm worker that `_exit`ed there answers.
+    pub ending: Option<Ending>,
     /// `zend_memory_peak_usage(1)`: the most memory the request held.
     pub memory_peak: usize,
     /// What the program left uncaught, where the host renders it
@@ -708,6 +711,20 @@ pub struct Observables {
     /// `FastCGI` request and ends the worker, and phpdbg prints `Could not
     /// startup`.
     pub start_failed: bool,
+}
+
+impl Observables {
+    /// The fatal as `php_error_cb` gave it to `php_log_err`, where the
+    /// request ended in one: what the test face's `Served` and the
+    /// engine's own tests read.
+    #[cfg(any(feature = "test", test))]
+    #[must_use]
+    pub(crate) fn fatal(&self) -> Option<&str> {
+        match &self.ending {
+            Some(Ending::Fatal(logged)) => Some(logged),
+            _ => None,
+        }
+    }
 }
 
 /// What `php_request_startup` came to ([`Engine::begin`]).
@@ -5528,14 +5545,10 @@ impl Engine {
     fn start_failed(mut req: Box<Request>) -> (Observables, Lent) {
         #[cfg(debug_assertions)]
         req.end_in_sensed();
-        let fatal = match req.ending() {
-            Some(Ending::Fatal(logged)) => Some(logged.clone()),
-            _ => None,
-        };
         let observed = Observables {
             exit_code: req.diagnostics().exit_status(),
             headers_sent: req.output().headers_sent(),
-            fatal,
+            ending: req.ending().cloned(),
             memory_peak: req.memory().peak(true),
             uncaught: None,
             start_failed: true,
@@ -5974,10 +5987,7 @@ impl Engine {
         // whichever of the two streams the ini entries name; what is left
         // for the host is the log form of it, whether or not `log_errors`
         // put that form on the log.
-        let fatal = match req.ending() {
-            Some(Ending::Fatal(logged)) => Some(logged.clone()),
-            _ => None,
-        };
+        let ending = req.ending().cloned();
         let exit_code = req.diagnostics().exit_status();
         // The block reached the sink at the commit, which the output
         // layer's deactivation makes if nothing had; one it refused, for
@@ -5998,7 +6008,7 @@ impl Engine {
             Observables {
                 exit_code,
                 headers_sent: true,
-                fatal,
+                ending,
                 memory_peak: req.memory().peak(true),
                 uncaught: req.take_kept_uncaught(),
                 start_failed: false,

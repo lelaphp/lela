@@ -126,3 +126,35 @@ fn a_request_after_one_the_limit_ended_in_its_body_starts_fresh_on_the_same_thre
         "{status}: what the second request's program read"
     );
 }
+
+/// A request php 8.5.12's hard memory limit ends sends no head, since a
+/// php-fpm worker `_exit(137)`s there (`Z/Zend/zend_alloc.c:519`) before
+/// its head or a buffered body is written, and nginx answers the request
+/// it was serving with a 502. makala answers it so, read from the
+/// request's ending, where a request with no head for any other reason
+/// is its own 500; and the thread serves the next request.
+#[test]
+fn a_request_the_hard_memory_limit_ended_is_answered_502_and_its_thread_serves_the_next() {
+    let root = root(
+        "worker-hard-limit",
+        &[
+            (
+                "hard.php",
+                "<?php ob_start(); header('X-A: 1'); echo 'x'; \
+                 hash_pbkdf2('md5', 'p', 's', 1, PHP_INT_MAX);",
+            ),
+            ("next.php", "<?php echo 'next';"),
+        ],
+    );
+    let server = Server::with_args(&root, &["--threads", "1", "-d", "memory_limit=128M"]);
+    let get = |target: &str| {
+        let mut stream = server.send(&Request::get(target).host("localhost").close());
+        read_response(&mut stream)
+    };
+    let hard = get("/hard.php");
+    assert_eq!(hard.status, "HTTP/1.1 502 Bad Gateway", "{hard:?}");
+    assert_eq!(hard.header("x-a"), None, "{hard:?}");
+    let next = get("/next.php");
+    assert_eq!(next.status, "HTTP/1.1 200 OK", "{next:?}");
+    assert_eq!(next.body, b"next");
+}

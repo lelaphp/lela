@@ -63,15 +63,21 @@ enum Token {
 }
 
 /// A string token's `s->value` as `php_json_yylex` hands it to the
-/// grammar: the string the scanner made, or nothing under the
-/// validating methods, whose `yylex` gives each string up as it is
-/// scanned and hands on `UNDEF`.
-type Text = Option<Owner<PhpString>>;
+/// grammar.
+enum Text {
+    /// The string the scanner made.
+    Made(Owner<PhpString>),
+    /// `UNDEF`: the string given up as it was scanned, as the validating
+    /// methods' `yylex` gives each up.
+    GivenUp,
+}
 
-/// The string `text` holds given up, where it holds one.
-fn give_up_text(req: &mut Request, text: Text) {
-    if let Some(string) = text {
-        string.give_up(req);
+impl Text {
+    /// The string given up, where one was made.
+    fn give_up(self, req: &mut Request) {
+        if let Text::Made(string) = self {
+            string.give_up(req);
+        }
     }
 }
 
@@ -80,7 +86,7 @@ impl Token {
     /// string a string token holds given up.
     fn give_up(self, req: &mut Request) {
         if let Token::Str(text) = self {
-            give_up_text(req, text);
+            text.give_up(req);
         }
     }
 }
@@ -242,18 +248,21 @@ impl Scanner<'_> {
     /// what `JSON_BIGINT_AS_STRING` chooses between. The string is
     /// `ZVAL_STRINGL`, `zend_string_init` asked for infallibly
     /// (`Z/ext/json/json_scanner.re:187`), where a string token's is
-    /// fallible ([`Scanner::string`]): one past the memory limit is the
-    /// limit's fatal where it is asked for, and never a refused parse.
+    /// fallible ([`Scanner::string`]): one past the hard memory limit is
+    /// its `_exit` where it is asked for, where a fallible one would be a
+    /// refused parse and the soft limit's fatal as the call returns.
     ///
     /// ```php
     /// ini_set('memory_limit', '16M');
+    /// ini_set('memory_hard_limit_percent', '100');
     /// $n = 10 * 1024 * 1024; $json = str_repeat('9', $n); $json[0] = '['; $json[$n - 1] = ']';
     /// try { var_dump(json_decode($json, false, 512, JSON_BIGINT_AS_STRING | JSON_THROW_ON_ERROR)); } catch (JsonException $e) { echo "caught\n"; }
     /// echo "unreached\n";
     /// ```
-    /// ```expect exit=255
-    ///
-    /// Fatal error: Allowed memory size of 16777216 bytes exhausted (tried to allocate 10502144 bytes) in %s on line 4
+    /// ```expect capture exit=137
+    /// ```
+    /// ```stderr
+    /// Hard memory limit of 16777216 bytes exhausted (tried to allocate 10502144 bytes) in %SCRATCH%/witness.php on line 5
     /// ```
     fn integer(
         &self,
@@ -277,52 +286,70 @@ impl Scanner<'_> {
             ));
         }
         if self.options & JSON_BIGINT_AS_STRING != 0 {
-            return Ok(Token::Str(Some(PhpString::new(req, text)?)));
+            return Ok(Token::Str(Text::Made(PhpString::new(req, text)?)));
         }
         Ok(Token::Double(strtod(text)))
     }
 
-    /// Conditions `STR_P1` and `STR_P2` as one walk: php sizes the
-    /// string in the first and writes it in the second, over the same
-    /// bytes in the same order, so the first refusal is the same one.
-    /// The cursor stands past the opening quote.
+    /// Conditions `STR_P1` and `STR_P2`: php sizes the string in the
+    /// first and writes it in the second, over the same bytes in the same
+    /// order, so the first walk meets every refusal and the second, into
+    /// the string itself, meets none. The cursor stands past the opening
+    /// quote.
     fn scan_string(&mut self, req: &mut Request) -> Result<Token, Thrown> {
-        let mut out: Vec<u8> = Vec::new();
+        let start = self.cursor;
+        let mut sized = Written(None, 0);
+        if let Some(code) = self.walk_string(&mut sized) {
+            return Ok(self.refuse(code));
+        }
+        let (end, len) = (self.cursor, sized.1);
+        let made = Scanner::string(req, len, |to| {
+            self.cursor = start;
+            let mut written = Written(Some(to), 0);
+            let refused = self.walk_string(&mut written);
+            debug_assert!(refused.is_none() && written.1 == len);
+        });
+        self.cursor = end;
+        made
+    }
+
+    /// One walk of a string's bytes to its closing quote, past which it
+    /// leaves the cursor, each byte it makes put to `out`; the code of
+    /// the refusal it met, if any.
+    fn walk_string(&mut self, out: &mut Written<'_>) -> Option<i64> {
         loop {
             let c = self.byte(self.cursor);
             if c == b'"' {
                 self.cursor += 1;
-                return Scanner::string(req, &out);
+                return None;
             }
             if c <= 0x1f {
                 // `<STR_P1>CTRL`, the NUL terminator of an unterminated
                 // string among them.
-                return Ok(self.refuse(JSON_ERROR_CTRL_CHAR));
+                return Some(JSON_ERROR_CTRL_CHAR);
             }
             if c == b'\\' {
-                if let Some(code) = self.scan_escape(&mut out) {
-                    return Ok(self.refuse(code));
+                if let Some(code) = self.scan_escape(out) {
+                    return Some(code);
                 }
-                continue;
-            }
-            if c < 0x80 {
-                out.push(c);
-                self.cursor += 1;
                 continue;
             }
             let Some(len) = utf8_length(self.input, self.cursor) else {
                 // `<STR_P1>ANY`: one byte, ignored or replaced by U+FFFD
                 // where the options say so.
                 if self.options & JSON_INVALID_UTF8_SUBSTITUTE != 0 {
-                    out.extend_from_slice("\u{fffd}".as_bytes());
+                    out.put("\u{fffd}".as_bytes());
                 } else if self.options & JSON_INVALID_UTF8_IGNORE == 0 {
-                    return Ok(self.refuse(JSON_ERROR_UTF8));
+                    return Some(JSON_ERROR_UTF8);
                 }
                 self.cursor += 1;
                 continue;
             };
-            let taken = self.input.get(self.cursor..self.cursor + len);
-            out.extend_from_slice(taken.unwrap_or_default());
+            out.put(
+                self.input
+                    .get(self.cursor..self.cursor + len)
+                    .unwrap_or_default(),
+            );
             self.cursor += len;
         }
     }
@@ -364,14 +391,18 @@ impl Scanner<'_> {
     /// {"a":1} 408
     /// {"ab":1} 408
     /// ```
-    fn string(req: &mut Request, bytes: &[u8]) -> Result<Token, Thrown> {
-        if bytes.is_empty() {
-            return Ok(Token::Str(Some(PhpString::new(req, bytes)?)));
+    fn string(
+        req: &mut Request,
+        len: usize,
+        fill: impl FnOnce(&mut [u8]),
+    ) -> Result<Token, Thrown> {
+        if len == 0 {
+            return Ok(Token::Str(Text::Made(PhpString::new(req, b"")?)));
         }
         let made = req
             .memory_mut()
-            .fallible(|req| PhpString::filled(req, bytes.len(), |to| to.copy_from_slice(bytes)))?;
-        Ok(made.map_or(Token::Error, |string| Token::Str(Some(string))))
+            .fallible(|req| PhpString::filled(req, len, fill))?;
+        Ok(made.map_or(Token::Error, |string| Token::Str(Text::Made(string))))
     }
 
     /// One escape at the cursor, which stands on the backslash: the
@@ -379,7 +410,7 @@ impl Scanner<'_> {
     /// the four hex digits of `UTF16_1` through `UCS2`, then the
     /// one-character escapes of `ESC`. The code of the refusal, or
     /// `None` where the escape was written.
-    fn scan_escape(&mut self, out: &mut Vec<u8>) -> Option<i64> {
+    fn scan_escape(&mut self, out: &mut Written<'_>) -> Option<i64> {
         if let Some(code) = self.surrogate_pair() {
             push_utf8(out, code);
             self.cursor += 12;
@@ -405,7 +436,7 @@ impl Scanner<'_> {
             // `<STR_P1>ESCPREF`: a backslash before anything else.
             _ => return Some(JSON_ERROR_SYNTAX),
         };
-        out.push(escaped);
+        out.put(&[escaped]);
         self.cursor += 2;
         None
     }
@@ -447,10 +478,25 @@ fn strtod(text: &[u8]) -> f64 {
 }
 
 /// `php_utf32_utf8`: the code point as the bytes php writes for it.
-fn push_utf8(out: &mut Vec<u8>, code: u32) {
+fn push_utf8(out: &mut Written<'_>, code: u32) {
     let mut buffer = [0_u8; 4];
     if let Some(c) = char::from_u32(code) {
-        out.extend_from_slice(c.encode_utf8(&mut buffer).as_bytes());
+        out.put(c.encode_utf8(&mut buffer).as_bytes());
+    }
+}
+
+/// Where a string's walk puts its bytes, and how many it has put: into
+/// the string `STR_P1`'s count sized, `STR_P2`'s write, or, with no
+/// string yet, nowhere, `STR_P1`'s count itself.
+struct Written<'b>(Option<&'b mut [u8]>, usize);
+
+impl Written<'_> {
+    fn put(&mut self, bytes: &[u8]) {
+        let end = self.1 + bytes.len();
+        if let Some(room) = self.0.as_mut().and_then(|to| to.get_mut(self.1..end)) {
+            room.copy_from_slice(bytes);
+        }
+        self.1 = end;
     }
 }
 
@@ -485,7 +531,9 @@ enum Holder {
 
 /// A bracket the walk is inside, its rule half reduced on bison's
 /// stack: the count of states the stack held before its bracket, what
-/// it is building, and for an object the key its next value goes under.
+/// it is building, and for an object the key its next value goes under,
+/// none where no key is held: before the first is read, and from the
+/// member a key named to the next key's read.
 enum Open {
     Array {
         at: usize,
@@ -494,7 +542,7 @@ enum Open {
     Object {
         at: usize,
         holder: Holder,
-        key: Text,
+        key: Option<Text>,
     },
 }
 
@@ -528,7 +576,9 @@ impl Open {
                 None => Owner::null(),
             },
             Open::Object { holder, key, .. } => {
-                give_up_text(req, key);
+                if let Some(key) = key {
+                    key.give_up(req);
+                }
                 holder.into_value()
             }
         }
@@ -543,7 +593,9 @@ impl Open {
                 }
             }
             Open::Object { holder, key, .. } => {
-                give_up_text(req, key);
+                if let Some(key) = key {
+                    key.give_up(req);
+                }
                 holder.give_up(req);
             }
         }
@@ -580,11 +632,8 @@ impl Parser<'_> {
     /// discarded.
     fn advance(&mut self, req: &mut Request) -> Result<(), Thrown> {
         let mut token = self.scanner.scan(req)?;
-        if self.validating
-            && let Token::Str(text) = &mut token
-            && let Some(string) = text.take()
-        {
-            string.give_up(req);
+        if self.validating && matches!(token, Token::Str(_)) {
+            std::mem::replace(&mut token, Token::Str(Text::GivenUp)).give_up(req);
         }
         std::mem::replace(&mut self.token, token).give_up(req);
         Ok(())
@@ -716,7 +765,7 @@ impl Parser<'_> {
             Token::False => Owner::bool(false),
             Token::Int(n) => Owner::int(n),
             Token::Double(d) => Owner::float(d),
-            Token::Str(Some(string)) => string.into_value(),
+            Token::Str(Text::Made(string)) => string.into_value(),
             Token::ArrayOpen => {
                 self.advance(req)?;
                 // The array is made where its rule reduces, at its first
@@ -809,7 +858,7 @@ impl Parser<'_> {
         }
         if let Open::Object { key, .. } = &mut frame {
             match self.key(req) {
-                Ok(Some(read)) => *key = read,
+                Ok(Some(read)) => *key = Some(read),
                 Ok(None) => {
                     frame.give_up(req);
                     return Ok(Begun::Refused);
@@ -824,9 +873,9 @@ impl Parser<'_> {
         Ok(Begun::Opened)
     }
 
-    /// `key ':'` of a `member`, both shifted, the key's string answered
-    /// as the scanner made it; `None` where the parse was refused, the
-    /// key given up.
+    /// `key ':'` of a `member`, both shifted, the key answered as the
+    /// scanner made it; `None` where the parse was refused, the key given
+    /// up.
     fn key(&mut self, req: &mut Request) -> Result<Option<Text>, Thrown> {
         let key = match std::mem::replace(&mut self.token, Token::Eoi) {
             Token::Str(key) => key,
@@ -839,7 +888,7 @@ impl Parser<'_> {
         match self.colon(req) {
             Ok(true) => Ok(Some(key)),
             shifted => {
-                give_up_text(req, key);
+                key.give_up(req);
                 shifted.map(|_| None)
             }
         }
@@ -866,7 +915,18 @@ impl Parser<'_> {
     /// `value` handed to the bracket it closes: appended as an `element`,
     /// or written under its key by `php_json_parser_object_update` as a
     /// `member`, the holder built at the first; then the next after a
-    /// comma, or the bracket to close.
+    /// comma, or the bracket to close. A member's key was made as it was
+    /// scanned, before its value ([`Scanner::string`]), so the string
+    /// made second is the one the memory limit refuses, the value's here:
+    ///
+    /// ```php
+    /// $json = '{"' . str_repeat('k', 6 << 20) . '":"' . str_repeat('v', 10 << 20) . '"}';
+    /// ini_set('memory_limit', '30M');
+    /// var_dump(json_decode($json, true));
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 31457280 bytes exhausted (tried to allocate 10502144 bytes) in %s on line 4
+    /// ```
     fn attach(
         &mut self,
         req: &mut Request,
@@ -925,7 +985,7 @@ impl Parser<'_> {
                     };
                 }
                 match (holder, key.take()) {
-                    (Holder::Array(array), Some(name)) => {
+                    (Holder::Array(array), Some(Text::Made(name))) => {
                         let name = Key::from_string(req, name);
                         // `zend_symtable_fupdate` since 8.5.12.
                         if req
@@ -937,7 +997,7 @@ impl Parser<'_> {
                             return Ok(Attached::Refused);
                         }
                     }
-                    (Holder::Object(object), Some(name)) => {
+                    (Holder::Object(object), Some(Text::Made(name))) => {
                         if name.as_bytes().first() == Some(&0) {
                             // A name php mangles a private or protected
                             // property into; `zend_std_write_property`
@@ -955,15 +1015,17 @@ impl Parser<'_> {
                             return Ok(Attached::Refused);
                         }
                     }
-                    (Holder::Nothing, name) => {
-                        give_up_text(req, name);
+                    // Nothing built: under the validating methods, or with
+                    // no `stdClass`.
+                    (Holder::Nothing, Some(name)) | (_, Some(name @ Text::GivenUp)) => {
+                        name.give_up(req);
                         value.give_up(req);
                     }
-                    (Holder::Array(_) | Holder::Object(_), None) => {
+                    (_, None) => {
                         value.give_up(req);
                         return Err(fatal(
                             req,
-                            "InternalError: a JSON member's key was not made while its object was built",
+                            "InternalError: a JSON member's value came with no key",
                         ));
                     }
                 }
@@ -983,7 +1045,7 @@ impl Parser<'_> {
             let Some(read) = self.key(req)? else {
                 return Ok(Attached::Refused);
             };
-            *key = read;
+            *key = Some(read);
         }
         Ok(Attached::Next)
     }

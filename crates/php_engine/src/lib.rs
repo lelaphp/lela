@@ -110,6 +110,7 @@ mod unit_cache;
 mod virtual_cwd;
 mod weakrefs;
 
+pub use api::request::ending::Ending;
 pub use api::request::ini_files::IniFile;
 pub use api::request::{BuildDefs, IniFiles, PHP_VERSION};
 pub use command_line::{CommandLine, EachLine};

@@ -30,8 +30,8 @@ use php_proto::cgi::{Environment, RequestInfo, Settings};
 use php_proto::vpath::Translated;
 use php_sapi::cgi::{C_NUMBER, CachedDisk};
 use php_sapi::{
-    Aborted, Body, Chdir, Engine, HostPage, HostServes, HostThread, OutputSink, RequestDescription,
-    ResponseHead, WebRequest,
+    Aborted, Body, Chdir, Ending, Engine, HostPage, HostServes, HostThread, OutputSink,
+    RequestDescription, ResponseHead, WebRequest,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -39,7 +39,7 @@ use crate::options::Options;
 
 /// One program's request as its connection hands it over: the head as
 /// hyper read it, the program its route found, the body still arriving,
-/// and where the response goes.
+/// where the response goes, and where the request says how it ended.
 pub(crate) struct Job {
     pub(crate) head: Head,
     /// The program under the root, and the path past it.
@@ -47,6 +47,10 @@ pub(crate) struct Job {
     /// The body's pieces as the connection reads them; closed at its end.
     pub(crate) body: mpsc::Receiver<Bytes>,
     pub(crate) sink: Sink,
+    /// How the request ended, sent once `Engine::serve` returns and
+    /// before its sink is dropped, which a connection that got no head
+    /// reads its answer from; never sent where the request panicked.
+    pub(crate) ended: oneshot::Sender<Option<Ending>>,
 }
 
 /// A request's head, as the connection read it.
@@ -236,6 +240,7 @@ fn serve(engine: &Engine, root: &[u8], started_in: &Path, job: Job) {
         program,
         body,
         sink,
+        ended,
     } = job;
     let mut env = environment(&head, root, &program, head.query());
     // php-fpm's defaults of the entries `init_request_info` reads, which
@@ -279,7 +284,7 @@ fn serve(engine: &Engine, root: &[u8], started_in: &Path, job: Job) {
     // A program whose path holds a NUL is never run, as
     // `php_cli_server_dispatch_script` refuses it: the request ends with
     // the head it has (`vpath::holds_nul`, #2695).
-    let (_, sink) = engine.serve(description, Box::new(sink), |_| {
+    let (observed, sink) = engine.serve(description, Box::new(sink), |_| {
         if php_proto::vpath::holds_nul(&program.path_translated) {
             return HostServes::Nothing;
         }
@@ -291,6 +296,9 @@ fn serve(engine: &Engine, root: &[u8], started_in: &Path, job: Job) {
             }
         }
     });
+    // Sent before the sink, whose drop closes the head's channel, so a
+    // connection that got no head finds the ending standing.
+    ended.send(observed.ending).ok();
     // Dropped here, the sink says the body is whole.
     drop(sink);
 }
