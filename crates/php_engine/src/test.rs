@@ -2,7 +2,9 @@
 //! sink and `Engine::serve_capture`, behind the `test` feature, so an
 //! extension's tests build a fresh engine with that crate alone and read
 //! what it wrote. Re-exported by `php_ext::test`; its items are `api.lock`
-//! lines in the `test` group.
+//! lines in the `test` group. Beside them, [`in_a_process_apart`], which
+//! `php_ext::test` does not re-export: the engine's and the tier's tests
+//! that fork go through it, the tier's by a `tier.lock` line.
 
 use std::any::Any;
 use std::path::Path;
@@ -269,31 +271,46 @@ pub fn in_a_process_apart(
     );
 }
 
-/// What the test `name`, started again for itself alone, printed, where
-/// it passed within half a minute.
+/// What the test `name`, started again for itself alone, printed on
+/// either stream, where it passed within half a minute. Both streams go
+/// to a file rather than a pipe, so neither a process that prints more than
+/// a pipe holds nor a forked child that outlives it and keeps the
+/// stream open can stall the wait.
 fn run_apart(name: &str) -> Result<String, String> {
     use std::time::{Duration, Instant};
+    let path = std::env::temp_dir().join(format!("dax-{}-apart-{name}", std::process::id()));
+    let printed = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    let streams = (printed.try_clone(), printed);
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut run = std::process::Command::new(exe)
         .args([name, "--exact", "--nocapture", "--test-threads=1"])
         .env(APART, name)
-        .stdout(std::process::Stdio::piped())
+        .stdout(streams.0.map_err(|e| e.to_string())?)
+        .stderr(streams.1)
         .spawn()
         .map_err(|e| e.to_string())?;
     let started = Instant::now();
-    while run.try_wait().map_err(|e| e.to_string())?.is_none() {
-        if started.elapsed() > Duration::from_secs(30) {
-            run.kill().ok();
-            return Err("it did not end in 30s: its fork's child hung".to_owned());
+    let ended = loop {
+        match run.try_wait() {
+            Ok(None) if started.elapsed() <= Duration::from_secs(30) => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => break Err("it did not end in 30s: its fork's child hung".to_owned()),
+            Ok(Some(status)) => break Ok(status),
+            Err(e) => break Err(e.to_string()),
         }
-        std::thread::sleep(Duration::from_millis(20));
+    };
+    if ended.is_err() {
+        run.kill().ok();
+        run.wait().ok();
     }
-    let out = run.wait_with_output().map_err(|e| e.to_string())?;
-    let printed = String::from_utf8_lossy(&out.stdout).into_owned();
-    if out.status.success() {
-        Ok(printed)
-    } else {
-        Err(format!("{}: {printed}", out.status))
+    let printed = std::fs::read(&path).unwrap_or_default();
+    std::fs::remove_file(&path).ok();
+    let printed = String::from_utf8_lossy(&printed).into_owned();
+    match ended {
+        Ok(status) if status.success() => Ok(printed),
+        Ok(status) => Err(format!("{status}: {printed}")),
+        Err(failed) => Err(format!("{failed}: {printed}")),
     }
 }
 
