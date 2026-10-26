@@ -3,8 +3,8 @@
 // own marketplace (.claude-plugin/marketplace.json).
 //
 // Three hooks, and nothing the shipped command hooks do not also do
-// except the refresh, in-process latency and the one figure only this
-// layer has. `tool.call` on Edit, Write and Bash
+// except the refresh, in-process latency, the one figure only this
+// layer has and the denials kept for a desk. `tool.call` on Edit, Write and Bash
 // hands the call to `xtask permit` on stdin, the shape the command hook
 // reads, and returns its deny, or the tool's result with the notes as
 // context; after a Bash call that ran an instrument it invalidates
@@ -26,13 +26,19 @@
 // turn proceeds.
 //
 // The command hook in hooks.json beside this file judges the same call
-// beneath this one. A denial here ends the call and is recorded here; an
-// allow goes on to the command hook, which records the notes, which is
-// what `--above-the-command-hook` tells permit. Every hook here fails
-// open by construction (§13 item 8): a permit that does not run lets the
-// call through to the command hook, which on an Edit or a Write denies
-// when no candidate of its own judged, and on Bash hands the call on so a
-// broken harness can be repaired (#16 items 2 and 5). hooks.json and
+// beneath this one. A denial here ends the call and is recorded here, and
+// the last few are kept in `$.store` as `{ rule, adr, tool, at }` for a
+// desk to draw (#3489); an allow goes on to the command hook, which
+// records the notes, which is what `--above-the-command-hook` tells
+// permit. On Bash the hook fails open by construction (§13 item 8): a
+// permit that does not run lets the call through to the command hook,
+// which hands it on so a broken harness can be repaired (#16 items 2 and
+// 5). An Edit or a Write no judge saw is denied here, as the command hook
+// denies it, whether no candidate judged or the hook threw (by the
+// `.catch`): where no managed settings load the built-in guard, another
+// mod's `tool.check` can approve a call the command hook denied (#3470,
+// #3489). Each candidate has the command hook's 60 s, so a cargo rebuild
+// is judged rather than denied. hooks.json and
 // this module are a person's files under harness.self (#2283), since it
 // hands permit the evidence of the person's approval.
 //
@@ -143,6 +149,26 @@ function decisionOf(stdout: string): Decision {
   return { notes: head?.additionalContext };
 }
 
+/// The command hook's deny where no candidate judged an Edit or a Write,
+/// word for word from hooks.json, so both layers say one thing.
+const UNJUDGED =
+  'xtask permit did not judge this call: every candidate refused or failed to run. An Edit or a Write no judge saw does not proceed; a Bash call still does, so the harness can be repaired. Rebuild it: cargo build -p xtask.';
+
+/// How many denials `$.store` keeps.
+const KEPT = 50;
+
+/// The rule and first ADR a reason ends with, as `Finding::reason` writes them.
+const RULE = /\(([^\s,()]+)(?:, (ADR-\d+))?[^()]*\)\s*$/;
+
+/// One denial into `$.store` under `denials`, the last KEPT kept, for a
+/// desk to draw (#3489): the rule, its ADR, the tool and when.
+async function record($: EngineInterface, tool: string, reason: string): Promise<void> {
+  const [, rule = null, adr = null] = RULE.exec(reason) ?? [];
+  const at = new Date(await $.clock.now()).toISOString();
+  const kept = await $.store.get('denials');
+  await $.store.set('denials', [...(Array.isArray(kept) ? kept : []), { rule, adr, tool, at }].slice(-KEPT));
+}
+
 /// The turn `usage record` is told, counted here from the module's load:
 /// a reload of the plugin starts it over, and the last reading under a
 /// scope is still the session's final figure, since the ledger it carries
@@ -154,8 +180,9 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: JUDGED }, async ($, e, next) => {
     // permit before the call, as the command hook beneath is; whatever
-    // keeps permit from judging leaves the call to that hook.
+    // keeps permit from judging a Bash call leaves it to that hook.
     let decision: Decision = {};
+    let judged = false;
     try {
       const [cwd, id, bins] = await Promise.all([$.session.cwd(), $.session.id(), xtask($)]);
       // permit's exit is 0 whatever it decides, so a non-zero one is a
@@ -169,10 +196,11 @@ export const register: Register = (on, options) => {
           const run = await $.process.run([...bin, 'permit', '--above-the-command-hook'], {
             cwd,
             stdin,
-            timeoutMs: 30_000,
+            timeoutMs: 60_000,
           });
           if (run.exitCode === 0) {
             decision = decisionOf(run.stdout);
+            judged = true;
             break;
           }
         }
@@ -180,10 +208,16 @@ export const register: Register = (on, options) => {
         const found = await $.session.messages();
         stdin = stdinOf(e, id, cwd, Array.isArray(found) ? askedOf(found) : []);
       }
-    } catch {
-      // fails open: the command hook beneath judges the call
+    } catch (err) {
+      // Bash fails open: the command hook beneath judges the call. An Edit
+      // or a Write fails closed, by the `.catch` below.
+      if (e.tool !== 'Bash') throw err;
     }
-    if (decision.deny !== undefined) return { deny: decision.deny };
+    if (!judged && e.tool !== 'Bash') return { deny: UNJUDGED };
+    if (decision.deny !== undefined) {
+      await record($, e.tool, decision.deny).catch(() => undefined);
+      return { deny: decision.deny };
+    }
 
     const result = await next(e);
     if (e.tool === 'Bash' && RAN_AN_INSTRUMENT.test(e.command)) {
@@ -191,7 +225,13 @@ export const register: Register = (on, options) => {
     }
     if (decision.notes === undefined || result.deny !== undefined) return result;
     return { ...result, context: [...(result.context ?? []), decision.notes] };
-  });
+  }).catch(async (_$, e, next) =>
+    next.called || e.tool === 'Bash'
+      ? next(e)
+      : {
+          deny: `harness: the function hook failed (${next.error.kind}${next.error.message ? `: ${next.error.message}` : ''}) before xtask permit judged this ${e.tool}. An Edit or a Write no judge saw does not proceed; rebuild it: cargo build -p xtask.`,
+        },
+  );
 
   on('turn.complete', async ($, e, next) => {
     const out = await next(e);
