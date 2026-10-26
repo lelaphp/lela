@@ -1547,7 +1547,7 @@ impl<'a> Emit<'a> {
                     }
                 }
                 // Its site wrote the slot before it branched here.
-                Stored::Copied { .. } => {}
+                Stored::Copied { .. } | Stored::Null => {}
             }
         }
         Ok(())

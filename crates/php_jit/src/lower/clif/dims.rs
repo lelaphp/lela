@@ -17,7 +17,7 @@ use php_unit::Opcode;
 use super::{COUNTED, Emit, KIND, Kernel, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
 use crate::types::{
     Abort, Check, Constant, ExitId, Fused, GuardAt, Imm, Layout, Leave, Line, OpId, Operand, Read,
-    Types, ValueId, cannot_raise,
+    Slot, Types, ValueId, cannot_raise,
 };
 
 /// Where a read goes on that finds no element ([`Emit::reached`]): the
@@ -334,26 +334,94 @@ impl Emit<'_> {
     /// ```expect regime=jit-exit-fuzz process
     /// 1110 29
     /// ```
+    ///
+    /// An element the next fetch or test holds the type of, not found, a
+    /// reference and of another type, each leaving past the fetch, the
+    /// one not found with `null` in its slot, a temporary's freed where
+    /// it lands (revision NEXT), under force and where every guard fails
+    /// once:
+    ///
+    /// ```php
+    /// function f($h, $n) {
+    ///     $s = 0; $r = ['b' => 7];
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         if (isset($h['a']['b'])) { $s += 1; }
+    ///         $s += $h['a']['b'] ?? 100;
+    ///         $s += isset([$i => ['b' => 1]][$i % 2]['b']) ? 10 : 1000;
+    ///         if ($i == 3) { unset($h['a']); }
+    ///         if ($i == 5) { $h['a'] = &$r; }
+    ///         if ($i == 7) { $h['a'] = 5; }
+    ///     }
+    ///     return $s;
+    /// }
+    /// echo f(['a' => ['b' => 2]], 12), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 10648
+    /// ```
+    ///
+    /// ```php
+    /// function f($h, $n) {
+    ///     $s = 0; $r = ['b' => 7];
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         if (isset($h['a']['b'])) { $s += 1; }
+    ///         $s += $h['a']['b'] ?? 100;
+    ///         $s += isset([$i => ['b' => 1]][$i % 2]['b']) ? 10 : 1000;
+    ///         if ($i == 3) { unset($h['a']); }
+    ///         if ($i == 5) { $h['a'] = &$r; }
+    ///         if ($i == 7) { $h['a'] = 5; }
+    ///     }
+    ///     return $s;
+    /// }
+    /// echo f(['a' => ['b' => 2]], 12), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 10648
+    /// ```
     pub(super) fn fetch_is(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
-        let out = line
-            .out
-            .ok_or_else(|| mismatch("a fetch that writes nothing"))?;
-        let out = self.value(out)?.slot;
         let (missed, done) = (self.b.create_block(), self.b.create_block());
-        let element = self.reached(at, line, Missing::To(missed, &[]))?;
-        let element = self.deref(element);
-        let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
-        self.copy(element, info, out)?;
+        let out = self.read_element(at, line, Missing::To(missed, &[]))?;
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(missed);
         self.b.seal_block(missed);
         let (room, out_at) = self.place(out)?;
         let null = self.b.ins().iconst(I32, tag(ZvalType::Null));
         self.b.ins().store(trusted(), null, room, out_at + TYPE_AT);
-        self.b.ins().jump(done, &[]);
+        // Past the fetch with the `null`, where a guard holds the element
+        // to another type, as php's not-found exit leaves.
+        let (to, args) = match line.exit {
+            Some(exit) => self.guard_exit(exit)?,
+            None => (done, Vec::new()),
+        };
+        self.b.ins().jump(to, &args);
         self.b.switch_to_block(done);
         self.b.seal_block(done);
         self.free_temp(line, line.op1)
+    }
+
+    /// The element a read reaches ([`Emit::reached`]), on as `missing`
+    /// says where there is none, written to the slot the fetch writes:
+    /// copied as `ZVAL_COPY_DEREF` copies it, or held to its type by its
+    /// two guards ([`Emit::held_element`]). The slot it wrote.
+    fn read_element(&mut self, at: OpId, line: &Line, missing: Missing<'_>) -> Result<Slot, Abort> {
+        let out = line
+            .out
+            .ok_or_else(|| mismatch("a fetch that writes nothing"))?;
+        let element = self.reached(at, line, missing)?;
+        match self.within(at).as_slice() {
+            [] => {
+                let element = self.deref(element);
+                let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
+                self.copy(element, info, self.value(out)?.slot)?;
+            }
+            [in_place, through] => self.held_element([*in_place, *through], element, out)?,
+            _ => {
+                return Err(mismatch(
+                    "a fetch holds other guards than its element's two",
+                ));
+            }
+        }
+        Ok(self.value(out)?.slot)
     }
 
     /// The element `key` names in the array `arr`, through `kernel`,
@@ -457,24 +525,7 @@ impl Emit<'_> {
         let exit = line
             .exit
             .ok_or_else(|| mismatch("a fetch that cannot leave"))?;
-        let out = line
-            .out
-            .ok_or_else(|| mismatch("a fetch that writes nothing"))?;
-        let element = self.reached(at, line, Missing::Exit(exit))?;
-        match self.within(at).as_slice() {
-            [] => {
-                let element = self.deref(element);
-                let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
-                let out_slot = self.value(out)?.slot;
-                self.copy(element, info, out_slot)?;
-            }
-            [in_place, through] => self.held_element([*in_place, *through], element, out)?,
-            _ => {
-                return Err(mismatch(
-                    "a fetch holds other guards than its element's two",
-                ));
-            }
-        }
+        self.read_element(at, line, Missing::Exit(exit))?;
         // `FREE_OP1`, as the interpreter takes it.
         self.free_temp(line, line.op1)
     }

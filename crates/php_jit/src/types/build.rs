@@ -106,14 +106,25 @@ enum At {
     /// The frame stands where it goes on.
     Stands,
     /// After a fetch whose element's type a guard holds: the opline past
-    /// it with the element, read as `read` says, stored, the temporaries
-    /// it read freed, and a call under way restored.
+    /// it with what `left` says in the fetch's slot, the temporaries it
+    /// read freed, and a call under way restored.
     Fetched {
         fetch: OplineIdx,
         frees: Frees,
         out: ValueId,
-        read: Read,
+        left: Left,
     },
+}
+
+/// What a fetch that leaves past itself left in its slot: the element,
+/// read in place or through the reference it is, where a guard of its
+/// type failed; `null` where a `FETCH_DIM_IS` found none, as php's
+/// not-found exit leaves it (`zend_jit_fetch_dim_read`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:12576-12610`).
+#[derive(Clone, Copy)]
+enum Left {
+    Copied(Read),
+    Null,
 }
 
 /// An exit before it is numbered.
@@ -2236,25 +2247,41 @@ impl<'a> Builder<'a> {
                 (GuardAt::Entry, self.start())
             }
             (_, Some((def, frame, opline, kind, op1, op2))) => {
-                let fetched = |read| At::Fetched {
+                let fetched = |left| At::Fetched {
                     fetch: opline,
                     frees: Frees {
                         op1: self.is_temp(op1),
                         op2: self.is_temp(op2),
                     },
                     out: value,
-                    read,
+                    left,
                 };
                 let to = match kind {
                     Within::Rerun => At::Opline(opline),
-                    Within::Fetched => fetched(Read::InPlace),
+                    Within::Fetched => fetched(Left::Copied(Read::InPlace)),
                 };
                 if let (Within::Fetched, Some(tag)) = (kind, tag) {
                     then = Some(Placed {
                         at: GuardAt::Within(def),
                         check: Check::Deref { value, tag },
-                        exit: draft(Point::Before(def), frame, fetched(Read::Through)),
+                        exit: draft(
+                            Point::Before(def),
+                            frame,
+                            fetched(Left::Copied(Read::Through)),
+                        ),
                     });
+                    // An element `FETCH_DIM_IS` does not find leaves past
+                    // it `null`, where its guard holds another type, by an
+                    // exit php takes before the element's two
+                    // (`zend_jit_fetch_dim_read`'s `not_found_exit_addr`).
+                    let is = matches!(
+                        self.ops.get(def.index()),
+                        Some(Op::Line(line)) if line.opcode == Opcode::FetchDimIs
+                    );
+                    if is && tag != ZvalType::Null {
+                        let missed = draft(Point::Before(def), frame, fetched(Left::Null));
+                        self.leaves.push((def, Leaves::Unfinished, missed));
+                    }
                 }
                 if !self.aliased(held.slot) && self.val(value).types.scalar() {
                     self.val_mut(value).home = Home::Register;
@@ -3070,7 +3097,10 @@ impl<'a> Builder<'a> {
                 && matches!(
                     self.ops.get(op.index()),
                     Some(Op::Line(line))
-                        if matches!(line.opcode, Opcode::FetchDimR | Opcode::FetchObjR)
+                        if matches!(
+                            line.opcode,
+                            Opcode::FetchDimR | Opcode::FetchDimIs | Opcode::FetchObjR
+                        )
                 );
             let stage = if opens { Stage::Opens } else { Stage::Leaves };
             order.push((Order::At(*op, stage), Source::Leave(at)));
@@ -3550,7 +3580,7 @@ impl<'a> Builder<'a> {
                 fetch,
                 frees,
                 out,
-                read,
+                left,
             } => {
                 // Past the fetch, with the element it copied, as php's
                 // guard on a fetched element leaves for the opline after
@@ -3562,7 +3592,10 @@ impl<'a> Builder<'a> {
                 // one is (`Z/ext/opcache/jit/zend_jit_trace.c:144-147`).
                 extra = Some(Store {
                     slot: self.val(out).slot,
-                    from: Stored::Copied { value: out, read },
+                    from: match left {
+                        Left::Copied(read) => Stored::Copied { value: out, read },
+                        Left::Null => Stored::Null,
+                    },
                 });
                 let landing = Landing {
                     frees,
