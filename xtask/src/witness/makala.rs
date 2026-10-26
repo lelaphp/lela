@@ -534,10 +534,9 @@ fn mapped(
 /// makala's HTTP response as a client of nginx reads php-fpm's: the
 /// status line's code, the lines PHP set, the server's `date` and
 /// `connection` left out, and the body. A `content-length: 0` over no
-/// body is left out too: it frames an answer of the server's own, a 502
-/// for a request the hard memory limit ended among them, where nginx
-/// frames its own page with a length of its own and a PHP response it
-/// streams with none.
+/// body under a 5xx code is left out too: it frames an error answer of
+/// the server's own, the 502 for a request the hard memory limit ended
+/// among them, where nginx frames its own page with a length of its own.
 pub(crate) fn from_http(answer: &[u8]) -> Vec<u8> {
     let (head, body) = split_head(answer);
     let mut head = head.lines();
@@ -545,7 +544,9 @@ pub(crate) fn from_http(answer: &[u8]) -> Vec<u8> {
     let lines = head.filter(|line| {
         let own = line.starts_with("date:")
             || line.starts_with("connection:")
-            || (body.is_empty() && line.eq_ignore_ascii_case("content-length: 0"));
+            || (body.is_empty()
+                && code.is_some_and(|code| code.starts_with('5'))
+                && line.eq_ignore_ascii_case("content-length: 0"));
         !own
     });
     rendered(code.unwrap_or_default(), lines, body)
@@ -742,7 +743,7 @@ mod tests {
         assert_eq!(from_cgi(&upstream_closed(headed).0), b"200\nx-a: 1\n\nbo");
         let own = b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\ndate: x\r\n\r\n";
         assert_eq!(from_http(own), b"502\n\n");
-        let php = b"HTTP/1.0 200 OK\r\ncontent-length: 0\r\n\r\nx";
-        assert_eq!(from_http(php), b"200\ncontent-length: 0\n\nx");
+        let php = b"HTTP/1.0 200 OK\r\ncontent-length: 0\r\n\r\n";
+        assert_eq!(from_http(php), b"200\ncontent-length: 0\n\n");
     }
 }

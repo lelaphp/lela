@@ -378,13 +378,13 @@ pub(super) fn answer(mut stream: impl Read) -> Result<(Vec<u8>, Vec<u8>)> {
 /// A connection php-fpm closed before its `FCGI_END_REQUEST`, as its
 /// child does where it `_exit`s under a request, the pinned php's hard memory
 /// limit among them (`Z/Zend/zend_alloc.c:519`): what it wrote on
-/// `FCGI_STDOUT` and `FCGI_STDERR` until then, and the read that found
-/// the end, which a fence's own run fails in.
+/// `FCGI_STDOUT` and `FCGI_STDERR` until then, and the read that met the
+/// end, whose error a `request fpm` fence fails with.
 #[derive(Debug)]
-pub(crate) struct Closed {
-    pub(crate) stdout: Vec<u8>,
-    pub(crate) stderr: Vec<u8>,
-    pub(crate) error: std::io::Error,
+pub(super) struct Closed {
+    pub(super) stdout: Vec<u8>,
+    pub(super) stderr: Vec<u8>,
+    pub(super) error: std::io::Error,
 }
 
 impl std::fmt::Display for Closed {
