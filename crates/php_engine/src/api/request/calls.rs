@@ -1191,7 +1191,7 @@ impl Request {
                 None => Ok(Value::null()),
             };
         }
-        let reenter = self.shared.loops.reenter;
+        let reenter = self.loops().reenter;
         let served = reenter(self, frame);
         // A fatal is rendered where it was raised, `php_error_cb` under
         // `zend_error`, so the frames that raised it still stand while

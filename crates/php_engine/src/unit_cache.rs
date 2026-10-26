@@ -497,6 +497,13 @@ pub(crate) struct Asked<'a> {
     pub(crate) now: i64,
     pub(crate) levels: Levels<'a>,
     pub(crate) optimizer: Optimizer,
+    /// How the safepoint words of a unit held for this question are laid
+    /// (`tier::Tier::laid`), as the tier answered for the request asking.
+    pub(crate) laid: crate::tier::Laid,
+    /// Set where the cache held a unit it read or compiled for this
+    /// question, its words laid as `laid` says, and not where another
+    /// request held the path's copy meanwhile ([`Holding::Found`]).
+    pub(crate) held: &'a std::cell::Cell<bool>,
 }
 
 /// What opcache's optimizer makes of a unit it persists that a request
@@ -1026,6 +1033,8 @@ impl UnitCache {
             now,
             levels,
             optimizer,
+            laid,
+            held: held_now,
         } = asked;
         let (memory, disk) = match levels {
             Levels::Memory => (true, None),
@@ -1075,8 +1084,13 @@ impl UnitCache {
                 size: kept.size,
                 observed,
             };
-            let (Holding::Built(held) | Holding::Found(held)) =
-                self.hold(files, path, validation, now, read);
+            let held = match self.hold(files, (path, laid), validation, now, read) {
+                Holding::Built(held) => {
+                    held_now.set(true);
+                    held
+                }
+                Holding::Found(held) => held,
+            };
             files.hit(&held, validation, now);
             return answered_by(&held, Filed::Hit);
         }
@@ -1137,8 +1151,11 @@ impl UnitCache {
             size,
             observed,
         };
-        let held = match self.hold(files, path, validation, now, read) {
-            Holding::Built(held) => held,
+        let held = match self.hold(files, (path, laid), validation, now, read) {
+            Holding::Built(held) => {
+                held_now.set(true);
+                held
+            }
             Holding::Found(existing) => {
                 return self.existing(files, &existing, written, validation, observed, now);
             }
@@ -1243,11 +1260,12 @@ impl UnitCache {
     /// under its full path, in place of a discarded copy under every name
     /// that copy was filed under, as `cache_script_in_shared_memory`
     /// updates the bucket every key of it points to; the copy another
-    /// request held for the path meanwhile where it did.
+    /// request held for the path meanwhile where it did; its op arrays'
+    /// words `laid` as the tier answered (`tier::Tier::laid`).
     fn hold(
         &self,
         files: &Files,
-        path: &[u8],
+        (path, laid): (&[u8], crate::tier::Laid),
         validation: Validation,
         now: i64,
         read: Read,
@@ -1291,7 +1309,7 @@ impl UnitCache {
             return Holding::Found(held);
         }
         files.used.fetch_add(size, Ordering::Relaxed);
-        files.funcs.publish(&held.unit);
+        files.funcs.publish(&held.unit, laid);
         self.persist_names(path, &held.unit);
         Holding::Built(held)
     }

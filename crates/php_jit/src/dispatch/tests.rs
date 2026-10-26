@@ -602,8 +602,12 @@ impl Tier for Counted {
         flow
     }
 
-    fn asked(started: &tier::Started<'_>) -> bool {
-        <crate::Jit as Tier>::asked(started)
+    fn bound(started: &tier::Started<'_>) -> tier::Bound {
+        <crate::Jit as Tier>::bound(started)
+    }
+
+    fn laid(started: &tier::Started<'_>, req: Option<&Request>) -> tier::Laid {
+        <crate::Jit as Tier>::laid(started, req)
     }
 
     fn extension() -> Option<Extension> {
@@ -622,7 +626,7 @@ impl Tier for Counted {
 /// A tier that is `Off` is never asked (#3133): the engine binds `Nop`'s
 /// loop, so no loop's back edge reads its word or bumps its heat, and
 /// no call or return asks either, under a zero buffer, G1's setting, as
-/// under `opcache.jit=disable` and `off` and on the command line without
+/// under `opcache.jit=disable` and on the command line without
 /// `opcache.enable_cli`. Under tracing the same program asks at every
 /// back edge and bumps the header's heat.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -636,7 +640,6 @@ fn a_tier_that_is_off_is_asked_at_no_back_edge() {
             &[("opcache.jit", "tracing"), ("opcache.jit_buffer_size", "0")][..],
         ),
         ("", &[("opcache.jit", "disable")]),
-        ("", &[("opcache.jit", "off")]),
         ("cli", &[("opcache.jit", "tracing")]),
     ] {
         let engine = testing::engine_on::<Counted>(host, off);
@@ -657,6 +660,59 @@ fn a_tier_that_is_off_is_asked_at_no_back_edge() {
     // `$main`'s, five, each bumping its header's heat.
     assert_eq!((asked.loops, asked.loops_written), (15, 15), "{asked:?}");
     assert!(asked.entries >= 6 && asked.returns >= 5, "{asked:?}");
+}
+
+/// php gives an op array its counters as it persists it while its tier
+/// is on (#3139), and the loop that serves it follows (#3362). Set up
+/// and off, a request starts in `Nop`'s loop, which asks the tier at no
+/// site; one that turns the tier on and includes a file publishes it
+/// with counting words, and its loop hands the included frame to the
+/// tier's at the activation's check, where the file's entry and loop
+/// are asked, its primed words claimed at their first arrivals however
+/// high the threshold (#3363). On from the start, a unit's words
+/// count from cold, each back edge bumping its heat, and a unit
+/// published after a request turns the tier off is sealed, asked at
+/// every back edge and never written.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_unit_counts_as_its_request_had_the_tier_when_it_was_published() {
+    let looped = "function g() { $s = 0; for ($i = 0; $i < 4; $i++) { $s += $i; } return $s; }";
+    let program = |setting: Option<&str>| {
+        let switch = setting.map_or(String::new(), |s| format!("ini_set('opcache.jit', '{s}');"));
+        format!("{switch}\necho include __DIR__ . '/loop.php';")
+    };
+    let hot = ("opcache.jit_hot_loop", "255");
+    let serve = |start: &str, switch: Option<&str>| {
+        let engine = testing::engine::<Counted>(&[("opcache.jit", start), hot]);
+        let scratch = testing::Scratch::new();
+        let loop_file = format!("<?php {looped} return g();");
+        std::fs::write(scratch.0.join("loop.php"), loop_file).unwrap_or_default();
+        let (served, asked) = scratch.serve_kept::<Asked>(&engine, &program(switch));
+        assert_eq!(testing::stdout(&served), "6", "{start} then {switch:?}");
+        asked.unwrap_or_default()
+    };
+    assert_eq!(
+        serve("off", None),
+        Asked::default(),
+        "Nop's loop throughout"
+    );
+    let switched = serve("off", Some("tracing"));
+    // The included file's primed entry roots at its first arrival, and
+    // its recording roots `g`'s loop as it aborts there, so no visit the
+    // loop asks writes the loop's word (the `TRACE` lines are
+    // `Policy::laid`'s witness).
+    assert!(
+        switched.entries > 0 && switched.loops > 0,
+        "handed to the tier's loop: {switched:?}"
+    );
+    let tracing = serve("tracing", None);
+    assert_eq!(
+        (tracing.loops, tracing.loops_written),
+        (4, 4),
+        "{tracing:?}"
+    );
+    let sealed = serve("tracing", Some("off"));
+    assert_eq!((sealed.loops, sealed.loops_written), (4, 0), "{sealed:?}");
 }
 
 /// A loop in `$main` that no call activates is a root of its own: the

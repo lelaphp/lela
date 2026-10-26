@@ -23860,7 +23860,7 @@ fn jumped<T: Tier>(
         // handlers' backtrace starts there, and a tier the engine asks
         // at its safepoints (ADR-0006). `Nop`'s loop goes on at the
         // target in its own hand, as every other jump's does.
-        if crate::interrupt::raised(req) && interrupted_at_back_edge(req, frame, target)? {
+        if crate::interrupt::raised(req) && interrupted_at_back_edge::<T>(req, frame, target)? {
             return Ok(Stepped::Threw(frame).into());
         }
         if !crate::tier::interpreted::<T>() {
@@ -23879,17 +23879,19 @@ fn jumped<T: Tier>(
 /// [`jumped`]'s interrupt, out of the loop's line: a delayed OOM named at
 /// the site the frame stands on before the stand moves it to `target`
 /// ([`Request::locate_oom`]), then the frame stood there and the
-/// interrupt served; whether it threw is the answer.
+/// interrupt served ([`crate::tier::interrupted_at`]), `Nop`'s loop
+/// handing the frame at the target to the tier's where a hand-off is
+/// due; whether the site leaves along `Threw` of the frame.
 #[cold]
 #[inline(never)]
-fn interrupted_at_back_edge(
+fn interrupted_at_back_edge<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     target: u32,
 ) -> Result<bool, Fatal> {
     req.locate_oom();
     req.vm_mut().stand(frame, target);
-    crate::interrupt::interrupted(req)
+    crate::tier::interrupted_at::<T>(req, frame, Stepped::Same(frame))
 }
 
 /// `ZEND_JMPNZ`: the jump `zend_emit_cond_jump` leaves at the end of a

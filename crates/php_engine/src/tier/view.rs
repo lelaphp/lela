@@ -112,7 +112,7 @@ impl Epoch {
         crate::engine::assign_map_ptrs(&mut unit, &numbers);
         let unit = unit.published(None);
         let files = crate::unit_cache::Files::new(1);
-        files.funcs.publish(&unit);
+        files.funcs.publish(&unit, crate::tier::Laid::COLD);
         let arena = Arena::of_engine(Arc::from([]), 0, files, crate::arena::Interned::default());
         (Epoch(Arc::new(arena)), FuncRef(unit.main.runtime_cache))
     }

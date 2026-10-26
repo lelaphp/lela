@@ -121,9 +121,14 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
     // fatal costs the loop no test of its own.
     if req.has_oom() {
         req.handle_delayed_oom();
-        return Ok(req.is_pending());
+    } else {
+        req.serve_interrupt_hooks();
     }
-    req.serve_interrupt_hooks();
+    // A hand-off from `Nop`'s loop that this check cannot take is owed
+    // to the next one that can, raised once the hooks are served, so a
+    // serving a hook started does not take it in place of the one it
+    // interrupted (#3362).
+    crate::tier::owed(req);
     Ok(req.is_pending())
 }
 
