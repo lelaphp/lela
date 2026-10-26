@@ -153,7 +153,7 @@ pub trait Tier: 'static {
 
     /// The tier's [`State`](Tier::State) for a request of the engine
     /// `started`, laid with the request where the engine binds the tier's
-    /// loop ([`Tier::asked`]): none where it binds `Nop`'s, and by
+    /// loop ([`Tier::bound`]): none where it binds `Nop`'s, and by
     /// default.
     #[must_use]
     fn lay(started: &Started<'_>) -> Option<Self::State> {
@@ -264,7 +264,7 @@ impl Laid {
     }
 }
 
-/// The started engine as its tier reads it at [`Tier::asked`]: the
+/// The started engine as its tier reads it at [`Tier::bound`]: the
 /// engine states its extensions and the tier built (ADR-0005).
 #[derive(Clone, Copy)]
 pub struct Started<'a> {
@@ -324,9 +324,6 @@ pub(crate) struct TierState {
     /// The loops the request is served in.
     pub(crate) loops: Loops,
     switch: std::cell::Cell<Switch>,
-    /// Whether the hand-off just served the rest of a serving, read once
-    /// by [`unwind_frame`] as the site that handed it leaves.
-    served: std::cell::Cell<bool>,
     state: Option<Box<dyn Any + Send>>,
     /// How many [`Lending`]s stand, counted under `debug_assertions`
     /// alone.
@@ -349,6 +346,10 @@ enum Switch {
     /// tier's loop ([`interrupted_at`]), and every other raises the
     /// interrupt again for it ([`owed`]).
     Due,
+    /// In the tier's loops, the hand-off having served the rest of the
+    /// serving whose site took it: that site leaves along `Threw`, which
+    /// [`unwind_frame`] answers `Done` and settles.
+    Handed,
 }
 
 impl TierState {
@@ -396,11 +397,21 @@ impl TierState {
         self.switch.get() == Switch::Due
     }
 
+    /// Whether the edge being unwound is the one a site of `Nop`'s loop
+    /// leaves along once its hand-off served ([`Switch::Handed`]), which
+    /// settles the switch.
+    fn take_handed(&self) -> bool {
+        let handed = self.switch.get() == Switch::Handed;
+        if handed {
+            self.switch.set(Switch::Settled);
+        }
+        handed
+    }
+
     fn of(shared: &crate::engine::Shared, loops: Loops, switch: Switch) -> TierState {
         TierState {
             loops,
             switch: std::cell::Cell::new(switch),
-            served: std::cell::Cell::new(false),
             state: (loops.lay)(Started { shared }),
             #[cfg(debug_assertions)]
             lends: std::sync::Arc::default(),
@@ -816,7 +827,7 @@ fn activated<T: Tier>(
 /// tier's loop serves the rest of this serving on the entry slot it
 /// stands on, under `Nop`'s, whose serving is then over: the `Threw`
 /// the site leaves along is taken up by [`unwind_frame`], which answers
-/// `Done` once the hand-off has served ([`TierState`]'s `served`). The
+/// `Done` once the hand-off has served ([`Switch::Handed`]). The
 /// site's code is the shape it was with no hand-off built, the check's
 /// `bool` and the one edge it leaves along, since the serving loop's
 /// registers are held there: answering a third edge from the site spilled
@@ -834,7 +845,7 @@ pub(crate) fn interrupted_at<T: Tier>(
     if handed {
         let edge = if threw { Stepped::Threw(frame) } else { went };
         (req.tier_state().loops.handed)(req, edge)?;
-        req.tier_state().served.set(true);
+        req.tier_state().switch.set(Switch::Handed);
         return Ok(true);
     }
     Ok(threw)
@@ -1545,7 +1556,7 @@ fn no_frame(frame: FrameRef) -> Fatal {
 /// along once it handed the rest of its serving to the tier's loop
 /// ([`interrupted_at`]), which unwinds nothing.
 fn unwind_frame<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
-    if req.tier_state().served.replace(false) {
+    if req.tier_state().take_handed() {
         return Ok(Stepped::Done);
     }
     let serving = exec::standing(req, frame)?;

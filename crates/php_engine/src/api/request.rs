@@ -1075,11 +1075,6 @@ impl Request {
         &self.tier.loops
     }
 
-    /// The hand-off from `Nop`'s loop to the tier's, where one is due
-    /// (`crate::tier::interrupted_at`): the request's tier laid again
-    /// with the tier's loops and the state they lay, for the rest of the
-    /// request. Whether it was due. No tier lends its state in `Nop`'s
-    /// loop, so the old state drops with no lend standing.
     /// The request published a unit whose words count (#3362): the
     /// engine notes it, so every request starting after starts in the
     /// tier's loop, and where this one is in `Nop`'s beside the tier's,
@@ -1093,6 +1088,11 @@ impl Request {
         }
     }
 
+    /// The hand-off from `Nop`'s loop to the tier's, where one is due
+    /// (`crate::tier::interrupted_at`): the request's tier laid again
+    /// with the tier's loops and the state they lay, for the rest of the
+    /// request. Whether it was due. No tier lends its state in `Nop`'s
+    /// loop, so the old state drops with no lend standing.
     pub(crate) fn hand_off(&mut self) -> bool {
         let Some(handed) = self.tier.handed(&self.shared) else {
             return false;

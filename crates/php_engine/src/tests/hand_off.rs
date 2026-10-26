@@ -41,6 +41,25 @@ impl Tier for Switching {
     }
 }
 
+/// An engine bound to [`Switching`], whose request state counts what it
+/// was asked at, every file it includes held whatever its stamp.
+fn switching() -> Engine {
+    Engine::builder()
+        .tier::<Switching>()
+        .ini("opcache.file_update_protection", "0")
+        .extensions(&[ExtensionBuilder::default()
+            .request_state::<Entered>()
+            .build("switching")])
+        .build()
+}
+
+/// A scratch directory of the test's own, `name` and the process apart.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("dax-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("the scratch directory");
+    std::fs::canonicalize(&dir).expect("the scratch directory")
+}
+
 /// The first request serves its own program in `Nop`'s loop, asked at
 /// no activation, until the file it includes is published counting: the
 /// file's activation hands its frame to the tier's loop, which is asked
@@ -51,21 +70,13 @@ impl Tier for Switching {
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_request_that_publishes_a_counting_unit_hands_its_frame_to_the_tiers_loop() {
-    let dir = std::env::temp_dir().join(format!("dax-{}-hand-off", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("the scratch directory");
-    let dir = std::fs::canonicalize(&dir).expect("the scratch directory");
+    let dir = scratch("hand-off");
     std::fs::write(
         dir.join("inc.php"),
         "<?php function h() { return 1; } return h();",
     )
     .expect("the included file");
-    let engine = Engine::builder()
-        .tier::<Switching>()
-        .ini("opcache.file_update_protection", "0")
-        .extensions(&[ExtensionBuilder::default()
-            .request_state::<Entered>()
-            .build("switching")])
-        .build();
+    let engine = switching();
     let serve = |source: &str| {
         let (served, entered) = tier::serve_kept::<Entered>(&engine, &dir, b"main.php", source);
         (served.stdout_text(), entered.unwrap_or_default().0)
@@ -89,17 +100,9 @@ fn a_request_that_publishes_a_counting_unit_hands_its_frame_to_the_tiers_loop() 
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_serving_started_after_a_hand_off_takes_the_requests_loop() {
-    let dir = std::env::temp_dir().join(format!("dax-{}-hand-off-cb", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("the scratch directory");
-    let dir = std::fs::canonicalize(&dir).expect("the scratch directory");
+    let dir = scratch("hand-off-cb");
     std::fs::write(dir.join("cb.php"), "<?php return 3;").expect("the callback's file");
-    let engine = Engine::builder()
-        .tier::<Switching>()
-        .ini("opcache.file_update_protection", "0")
-        .extensions(&[ExtensionBuilder::default()
-            .request_state::<Entered>()
-            .build("switching")])
-        .build();
+    let engine = switching();
     let program = "<?php function g() { yield 4; }\n$gen = g();\nclass O {}\n$o = new O;\n$f = function ($i) { return $i ? 0 : include __DIR__ . '/cb.php'; };\necho $f->call($o, 0), $f->call($o, 1), $f->call($o, 2), $gen->current();";
     let (served, entered) = tier::serve_kept::<Entered>(&engine, &dir, b"main.php", program);
     assert_eq!(served.stdout_text(), "3004");
@@ -118,17 +121,9 @@ fn a_serving_started_after_a_hand_off_takes_the_requests_loop() {
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn past_a_hand_off_recursion_fibers_and_generators_serve_on() {
-    let dir = std::env::temp_dir().join(format!("dax-{}-hand-off-stack", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("the scratch directory");
-    let dir = std::fs::canonicalize(&dir).expect("the scratch directory");
+    let dir = scratch("hand-off-stack");
     std::fs::write(dir.join("inc.php"), "<?php return 1;").expect("the included file");
-    let engine = Engine::builder()
-        .tier::<Switching>()
-        .ini("opcache.file_update_protection", "0")
-        .extensions(&[ExtensionBuilder::default()
-            .request_state::<Entered>()
-            .build("switching")])
-        .build();
+    let engine = switching();
     let program = r#"<?php
 function g() { yield 1; yield 2; }
 $gen = g();
