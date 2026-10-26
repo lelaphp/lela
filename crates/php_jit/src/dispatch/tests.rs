@@ -1292,7 +1292,9 @@ impl Tier for Escaping {
 /// lands past a call no trace goes on at, thousands of times in fib(20),
 /// and the crossing goes on into the landing's trace only where the code
 /// found that trace's row unready, the first escape to it in the request,
-/// which lays the row; every other escape enters it in code. The traces
+/// which lays the row, so at least once; every other escape enters it in
+/// code, where with the code's lookup taken out the crossing goes on from
+/// thousands. The traces
 /// themselves keep nothing of the landings they escape to.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
@@ -1304,7 +1306,7 @@ fn an_escape_enters_the_trace_compiled_at_its_landing_in_code() {
     assert_eq!(testing::stdout(&served), "6765\n");
     let crossed = kept.map(|kept| kept.0);
     assert!(
-        crossed.is_some_and(|crossed| crossed <= 4),
+        crossed.is_some_and(|crossed| (1..=4).contains(&crossed)),
         "the crossing went on from {crossed:?} escapes"
     );
 }

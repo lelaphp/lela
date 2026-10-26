@@ -77,6 +77,9 @@ const SPAN: usize = 1 << SPAN_BITS;
 /// engine's start.
 const SPANS: usize = 1 << 6;
 
+/// The most rows a column holds.
+pub(crate) const COLUMN_ROWS: usize = SPANS * SPAN * CHUNK;
+
 /// One chunk of a column, laid down on first use and never moved: a
 /// fixed-length array, so a number's slot in it is its low bits with no
 /// bound to test.

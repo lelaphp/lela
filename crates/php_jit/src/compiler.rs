@@ -297,7 +297,7 @@ fn pipeline_with(
             }
             let start = claim.start();
             catch_unwind(AssertUnwindSafe(|| {
-                published(&recorded, name, &compile, (table, claim.epoch()), start)
+                published(&recorded, name, &compile, table, claim.epoch(), start)
             }))
             .unwrap_or(Outcome::Abort(Stop::CompilerError))
         }
@@ -355,7 +355,8 @@ fn published(
     recorded: &Recorded,
     name: TraceName,
     compile: &impl Fn(&TraceIr, TraceName, Option<Linked>, Option<Escapes>) -> Result<Compiled, Abort>,
-    (table, epoch): (&Table, &Epoch),
+    table: &Table,
+    epoch: &Epoch,
     start: Start,
 ) -> Outcome {
     let compiled = types::build(&recorded.record, &recorded.view).and_then(|ir| {

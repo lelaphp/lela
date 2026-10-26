@@ -157,29 +157,35 @@ pub const LANDING_CHUNK_BITS: u32 = 12;
 const LANDING_CHUNK: usize = 1 << LANDING_CHUNK_BITS;
 
 /// How many chunks a [`LandingIndex`] has: as many op arrays as a
-/// [`Column`] holds rows, `2^23`.
-const LANDING_CHUNKS: usize = 1 << 11;
+/// [`Column`] holds rows.
+const LANDING_CHUNKS: usize = crate::arena::COLUMN_ROWS >> LANDING_CHUNK_BITS;
 
 /// Where compiled code finds the landing words of an epoch's op arrays
 /// (`jit-design.md` §4.9), as php's escape finds the handler of the
 /// opline the frame stands at in the op array itself: at `chunks`, one
 /// address per chunk of [`LANDING_CHUNK_BITS`] op arrays, zero until a
-/// landing of one of them is laid down, and at that address one per op
-/// array, the address of its landing words, one [`Word`] per opline,
-/// zero until a tier laid them down. An op array is named by its offset
-/// less `first`, below `held`; one below `first`, the preload's, and
-/// one a request compiled are named by none, and read as no compiled
-/// landing. Each address is written once, with release, and stands as
-/// long as the epoch, which every trace whose code reads it holds.
+/// landing of one of them is laid down, and at that address two words
+/// per op array, the address of its landing words, one [`Word`] per
+/// opline, zero until a tier laid them down, and how many there are. An
+/// op array is named by its offset less `first`, below `held`, the most
+/// a [`Column`] numbers; one below `first`, the preload's, and one a
+/// request compiled are named by none, and read as no compiled landing.
+/// Each address is written once, with release, after what it names, and
+/// stands as long as the epoch, which every trace whose code reads it
+/// holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LandingIndex {
+    /// The address of the chunks' addresses.
     pub chunks: usize,
+    /// The offset the epoch's first op array stands at.
     pub first: u32,
+    /// How many op arrays past `first` the index can name.
     pub held: u32,
 }
 
-/// The index's own: each chunk, owned, and the address of each, which
-/// is what compiled code reads.
+/// The index's own: each chunk, owned, two words per op array, and the
+/// address of each chunk, which is what compiled code reads, as a
+/// request's rows of its traces are kept (`php_jit`'s `enter::Rows`).
 struct Index {
     chunks: Box<[OnceLock<Box<[AtomicUsize]>>]>,
     addresses: Box<[AtomicUsize]>,
@@ -202,8 +208,14 @@ impl Index {
         else {
             return;
         };
-        let laid = cell.get_or_init(|| (0..LANDING_CHUNK).map(|_| AtomicUsize::new(0)).collect());
-        if let Some(slot) = laid.get(at as usize & (LANDING_CHUNK - 1)) {
+        let laid = cell.get_or_init(|| {
+            (0..2 * LANDING_CHUNK)
+                .map(|_| AtomicUsize::new(0))
+                .collect()
+        });
+        let place = 2 * (at as usize & (LANDING_CHUNK - 1));
+        if let (Some(slot), Some(count)) = (laid.get(place), laid.get(place + 1)) {
+            count.store(words.len(), Ordering::Relaxed);
             slot.store(words.as_ptr().expose_provenance(), Ordering::Release);
         }
         address.store(laid.as_ptr().expose_provenance(), Ordering::Release);
@@ -446,6 +458,7 @@ mod tests {
             chunk.as_ptr().addr()
         );
         let words = chunk[0].load(Ordering::Acquire);
+        assert_eq!(chunk[1].load(Ordering::Acquire), 3, "one word per opline");
         let main = funcs.get(4).expect("the main op array has a row");
         assert!(std::ptr::addr_eq(main.landing(OplineIdx(2)), word));
         assert_eq!(
@@ -453,11 +466,11 @@ mod tests {
             std::ptr::from_ref(word).addr()
         );
         assert!(
-            chunk[1..]
+            chunk[2..]
                 .iter()
                 .all(|slot| slot.load(Ordering::Acquire) == 0)
         );
         assert!(funcs.lay_landing(3, OplineIdx(0)).is_none());
-        assert_eq!(1usize << LANDING_CHUNK_BITS, chunk.len());
+        assert_eq!(2usize << LANDING_CHUNK_BITS, chunk.len());
     }
 }

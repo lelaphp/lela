@@ -524,6 +524,10 @@ pub struct Word {
 }
 
 impl Word {
+    /// Where the second half stands in a word, which compiled code reads
+    /// a landing's state at ([`LandingIndex`]).
+    pub const STATE_AT: usize = std::mem::offset_of!(Word, halves) + size_of::<AtomicU32>();
+
     /// The one accessor; the meaning of the bits is the tier's.
     #[must_use]
     pub fn halves(&self) -> &[AtomicU32; 2] {

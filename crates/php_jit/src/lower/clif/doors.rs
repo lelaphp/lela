@@ -28,8 +28,6 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I32, I64};
 use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, Value};
-use std::sync::atomic::AtomicU32;
-
 use php_engine::tier::{FRAME, LANDING_CHUNK_BITS, Word};
 
 use super::calls::TOP;
@@ -84,9 +82,13 @@ const _: () = assert!(size_of::<usize>() == 1 << ADDRESS_SHIFT);
 
 /// A landing word's width, and where its state half stands in it, as
 /// compiled code reads a landing's (`php_engine::tier::LandingIndex`).
-const WORD_BYTES: i64 = 8;
-const WORD_STATE: i32 = 4;
-const _: () = assert!(size_of::<Word>() == 8 && size_of::<AtomicU32>() == 4);
+const WORD_BYTES: i32 = imm(size_of::<Word>());
+const WORD_STATE: i32 = imm(Word::STATE_AT);
+
+/// The width of one op array's place in a chunk of the landing index:
+/// the address of its words, and how many there are.
+const LANDING_PLACE_SHIFT: i64 = ADDRESS_SHIFT + 1;
+const LANDING_COUNT_AT: i32 = imm(size_of::<usize>());
 
 impl Emit<'_> {
     /// Where the frame goes on as a trace is entered from `exit`, its op
@@ -367,8 +369,12 @@ impl Emit<'_> {
     /// words found through the epoch's index by its offset, the word of
     /// the opline read, and where it reads compiled, the entrance of the
     /// trace it names read from the table's; `answer` where the op array
-    /// is past the index or its words are not laid, where the word reads
-    /// anything else, and where the table holds no entrance for it yet.
+    /// is past the index or its words are not laid, where the opline is
+    /// past them, where the word reads anything else, and where the table
+    /// holds no entrance for it yet. No interrupt is tested, as php's
+    /// escape stub tests none before the handler it jumps to
+    /// (`zend_jit_trace_escape_stub`); the trace entered tests it where
+    /// php's does.
     fn landed(&mut self, escapes: Escapes, answer: Block) -> Result<Value, Abort> {
         let Escapes {
             landings,
@@ -390,9 +396,16 @@ impl Emit<'_> {
         let chunk = self.b.ins().ushr_imm_u(past, i64::from(LANDING_CHUNK_BITS));
         let chunk = self.address_at(index, chunk, answer);
         let within = (self.b.ins()).band_imm_u(past, (1_i64 << LANDING_CHUNK_BITS) - 1);
-        let words = self.address_at(chunk, within, answer);
+        let place = self.b.ins().ishl_imm_u(within, LANDING_PLACE_SHIFT);
+        let place = self.b.ins().iadd(chunk, place);
+        let words = self.b.ins().atomic_load(I64, trusted(), place);
+        let none = self.b.ins().icmp_imm_u(IntCC::Equal, words, 0);
+        self.cold_if(none, answer);
+        let count = self.b.ins().load(I64, trusted(), place, LANDING_COUNT_AT);
         let opline = self.b.ins().uextend(I64, opline);
-        let word = self.b.ins().imul_imm_u(opline, WORD_BYTES);
+        let past_last = (self.b.ins()).icmp(IntCC::UnsignedGreaterThanOrEqual, opline, count);
+        self.cold_if(past_last, answer);
+        let word = self.b.ins().imul_imm_u(opline, i64::from(WORD_BYTES));
         let word = self.b.ins().iadd(words, word);
         let state = self.b.ins().load(I32, trusted(), word, WORD_STATE);
         let kind = self.b.ins().band_imm_u(state, i64::from(STATE));

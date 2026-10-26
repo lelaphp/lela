@@ -76,9 +76,10 @@ pub struct JitRequest {
     pub(crate) epoch: std::cell::OnceCell<Epoch>,
     /// The trace table of that epoch, kept once a request of it made it.
     pub(crate) table: std::cell::OnceCell<Arc<table::Table>>,
-    /// How many escapes the crossing went on from into the trace compiled
-    /// at the landing, the escaping trace's code having found it not there
-    /// or its row unready: what a test reads of the jump it makes itself.
+    /// How many times the crossing entered the trace compiled at a landing
+    /// a trace escaped to, which the escaping trace's code enters itself
+    /// once the request's row of it is laid: a test's count of the escapes
+    /// the code did not take.
     #[cfg(test)]
     pub(crate) escapes_crossed: Cell<u32>,
 }
