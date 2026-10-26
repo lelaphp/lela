@@ -715,9 +715,11 @@ pub struct Observables {
 
 impl Observables {
     /// The fatal as `php_error_cb` gave it to `php_log_err`, where the
-    /// request ended in one.
+    /// request ended in one: what the test face's `Served` and the
+    /// engine's own tests read.
+    #[cfg(any(feature = "test", test))]
     #[must_use]
-    pub fn fatal(&self) -> Option<&str> {
+    pub(crate) fn fatal(&self) -> Option<&str> {
         match &self.ending {
             Some(Ending::Fatal(logged)) => Some(logged),
             _ => None,

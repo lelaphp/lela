@@ -260,7 +260,7 @@ impl Engine {
         let mut through = Through;
         through.write_stderr(&dumped.stderr);
         let (observables, _) = self.serve(description, Box::new(through), |_| HostServes::Program);
-        served(observables, Vec::new(), Box::new(Capture::default()))
+        served(&observables, Vec::new(), Box::new(Capture::default()))
     }
 
     /// [`Engine::serve_capture`] with the request named `name` and its
@@ -316,7 +316,7 @@ impl Engine {
             let (observables, sink) = self.serve(description, sink, |_| HostServes::Program);
             (observables, Vec::new(), sink)
         };
-        served(observables, entered, sink)
+        served(&observables, entered, sink)
     }
 
     /// [`Engine::serve_capture_in`], and the request state of type `T` as
@@ -334,13 +334,13 @@ impl Engine {
         let program = description.source.clone();
         let mut req = match self.begin(description, Box::new(sink), false) {
             Ok(req) => req,
-            Err((refused, sink)) => return (served(refused, Vec::new(), sink), None),
+            Err((refused, sink)) => return (served(&refused, Vec::new(), sink), None),
         };
         req.keep_states();
         self.serve_in(&mut req, program.as_deref(), HostServes::Program);
         let (observables, entered, sink) = self.shutdown(&mut req);
         let kept = req.take_kept_state::<T>();
-        (served(observables, entered, sink), kept)
+        (served(&observables, entered, sink), kept)
     }
 
     /// The CLI's description of a request serving `source` as `name` in
@@ -400,7 +400,7 @@ impl Engine {
 
 /// What a served request handed back, as a test reads it.
 fn served(
-    observables: crate::engine::Observables,
+    observables: &crate::engine::Observables,
     entered: Vec<Entered>,
     sink: Box<dyn OutputSink + Send>,
 ) -> Served {
@@ -411,10 +411,7 @@ fn served(
         headers: sink.headers,
         log: sink.log,
         exit_code: observables.exit_code,
-        fatal: match observables.ending {
-            Some(crate::api::request::Ending::Fatal(logged)) => Some(logged),
-            _ => None,
-        },
+        fatal: observables.fatal().map(str::to_owned),
         entered,
     }
 }

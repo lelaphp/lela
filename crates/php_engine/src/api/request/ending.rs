@@ -41,8 +41,9 @@ pub(crate) enum Phase {
     EngineEnd,
 }
 
-/// The fatal the request is ending in, when it is one: `E_ERROR` and
-/// its kin, or a source that did not compile. An `exit` is not one:
+/// How the request is ending where it ends in no `exit` and no return of
+/// its own: a fatal, `E_ERROR` and its kin, a source that did not
+/// compile, or php's hard memory limit. An `exit` is not one:
 /// php unwinds it as a throwable ([`Request::throw_unwind_exit`]) and
 /// records its status alone, in `EG(exit_status)`, which a fatal writes
 /// too and the last write wins.
