@@ -411,7 +411,10 @@ fn served(
         headers: sink.headers,
         log: sink.log,
         exit_code: observables.exit_code,
-        fatal: observables.fatal,
+        fatal: match observables.ending {
+            Some(crate::api::request::Ending::Fatal(logged)) => Some(logged),
+            _ => None,
+        },
         entered,
     }
 }

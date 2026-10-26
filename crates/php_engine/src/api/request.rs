@@ -73,7 +73,7 @@ pub use diagnostics::Diagnostics;
 use diagnostics::{DISPLAY_ERRORS_STDERR, display_errors_mode_of, fatal_errors};
 pub use diagnostics::{FormatDate, Syslog};
 pub(crate) use diagnostics::{append_escaped, escape_html};
-mod ending;
+pub(crate) mod ending;
 pub(crate) use ending::{Ending, Phase};
 mod environment;
 pub use environment::Environment;

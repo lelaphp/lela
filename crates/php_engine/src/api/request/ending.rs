@@ -47,7 +47,7 @@ pub(crate) enum Phase {
 /// records its status alone, in `EG(exit_status)`, which a fatal writes
 /// too and the last write wins.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Ending {
+pub enum Ending {
     /// `E_ERROR`: the fatal as `php_error_cb` gave it to `php_log_err`,
     /// one entry, which is the text `serve` reports and not a second
     /// rendering; the streams already have theirs.

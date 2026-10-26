@@ -55,7 +55,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Version};
 use hyper_util::rt::TokioIo;
 use php_proto::cgi::Line;
-use php_sapi::ResponseHead;
+use php_sapi::{Ending, ResponseHead};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio_rustls::TlsAcceptor;
@@ -529,10 +529,10 @@ async fn respond(
 /// its body following it, and answered with the head the request sends
 /// and the body it writes after it. The server answers on its own with a
 /// 503 where the request side has stopped and takes no program; with the
-/// refusal of a body that faulted before the request sent its head; and
-/// with a 500 where the request ended without a head, which only a panic
-/// contained at its edge leaves, or where routing panicked, which
-/// nothing that routes does.
+/// refusal of a body that faulted before the request sent its head; where
+/// the request ended without a head, as its ending answers it
+/// ([`headless`]); and with a 500 where routing panicked, which nothing
+/// that routes does.
 async fn hand_over(
     connection: &Arc<Connection>,
     request: Request<Incoming>,
@@ -602,11 +602,13 @@ async fn hand_over(
     let (head_sent, answered) = oneshot::channel();
     let (out, pieces) = mpsc::channel(RESPONSE_PIECES);
     let (whole_sent, whole) = oneshot::channel();
+    let (ended_sent, ended) = oneshot::channel();
     let job = Job {
         head,
         program,
         body,
         sink: Sink::new(head_sent, out, whole_sent),
+        ended: ended_sent,
     };
     if connection.queue.send(job).await.is_err() {
         return plain(connection, StatusCode::SERVICE_UNAVAILABLE);
@@ -629,7 +631,20 @@ async fn hand_over(
             )
         }
         Answer::Broke(fault) => closing(connection, fault.status()),
-        Answer::Headless => plain(connection, StatusCode::INTERNAL_SERVER_ERROR),
+        Answer::Headless => plain(connection, headless(ended.await.ok().flatten().as_ref())),
+    }
+}
+
+/// The status a request that ended without sending a head is answered
+/// with, read from how it ended: a 502 where php 8.5.12's hard memory
+/// limit ended it, as nginx answers Bad Gateway over the php-fpm worker
+/// that `_exit(137)`ed there (`Z/Zend/zend_alloc.c:519`) and wrote no
+/// head; a 500 for any other, which a panic contained at the request's
+/// edge leaves, its ending never sent.
+fn headless(ending: Option<&Ending>) -> StatusCode {
+    match ending {
+        Some(Ending::Terminated) => StatusCode::BAD_GATEWAY,
+        Some(Ending::Fatal(_) | Ending::Parse) | None => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 

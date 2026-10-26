@@ -42,7 +42,7 @@ fn a_compile_error_carries_php_s_trace_under_the_default_ini() {
         "\nFatal error: The (unset) cast is no longer supported in witness.php on line 2\nStack trace:\n#0 {main}\n"
     );
     assert_eq!(
-        observables.fatal.as_deref(),
+        observables.fatal(),
         Some(
             "PHP Fatal error:  The (unset) cast is no longer supported in witness.php on line 2\nStack trace:\n#0 {main}"
         )
@@ -84,7 +84,8 @@ fn a_source_the_compiler_refuses_names_the_construct_it_could_not_read() {
     );
     assert_eq!(observables.exit_code, 255);
     assert_eq!(
-        observables.fatal, None,
+        observables.fatal(),
+        None,
         "a parse error is not the fatal `serve` renders a second time"
     );
 }
@@ -155,7 +156,7 @@ fn what_the_compiler_refuses_past_its_stack_limit_is_a_fatal() {
     assert_eq!(body, format!("\nFatal error: {sentence}\n"));
     assert_eq!(observables.exit_code, 255);
     assert_eq!(
-        observables.fatal.as_deref(),
+        observables.fatal(),
         Some(format!("PHP Fatal error:  {sentence}").as_str()),
         "the log form the host is handed, as for every fatal, the trace with it"
     );
@@ -500,7 +501,7 @@ fn a_fatal_is_displayed_or_logged_as_the_ini_entries_say() {
     assert!(logged.body().is_empty(), "display_errors is off");
     assert_eq!(
         logged.log().first().cloned(),
-        observables.fatal,
+        observables.fatal().map(str::to_owned),
         "what the log holds is the fatal, once"
     );
     assert_eq!(logged.log().len(), 1, "the four lines are one entry");
