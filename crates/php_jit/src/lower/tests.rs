@@ -22,7 +22,7 @@ use crate::testing::goldens::{
     METHOD_OWN, METHOD_SCOPED, NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE, NEW_CALL,
     OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, PARENT_THIS, REF_CALL, REF_WRITE,
     SIEVE, SPECTRALNORM, STATIC_CALL, STATIC_OWN, STATIC_SCOPED, STATIC_SELF, STATIC_THIS,
-    STRING_BUILD, STRING_MATCH, held,
+    STRING_BUILD, STRING_MATCH, TEMP_CALL, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -1170,14 +1170,14 @@ fn a_methods_leave_gives_its_receiver_up() -> Result<(), String> {
     Ok(())
 }
 
-/// The calls `k`, `s` and `n` make: `k`'s method pushed in place with
-/// its receiver, and `s`'s and `n`'s held to their callee after the
+/// The calls `k`, `s`, `n` and `t` make: `k`'s and `t`'s methods pushed in place with
+/// their receivers, and `s`'s and `n`'s held to their callee after the
 /// handler pushed them, each made in place with no send stepped, the
 /// call kernel cold (#3343).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn method_calls_lower_their_push_call_and_leave() -> Result<(), String> {
-    for fixture in [METHOD_CALL, STATIC_CALL, NEW_CALL] {
+    for fixture in [METHOD_CALL, STATIC_CALL, NEW_CALL, TEMP_CALL] {
         lowered(fixture)?;
         let clif = std::fs::read_to_string(goldens_dir().join(format!("{}.clif", fixture.name)))
             .map_err(|e| e.to_string())?;

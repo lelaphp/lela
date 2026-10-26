@@ -151,6 +151,19 @@ pub(crate) const METHOD_CALL: Fixture = Fixture {
     ],
 };
 
+/// A method's call on the object a temporary holds, `(new Adder)->add()`:
+/// pushed in place under the class guard, the call taking the
+/// temporary's owner over (#3560).
+pub(crate) const TEMP_CALL: Fixture = Fixture {
+    name: "temp_call",
+    program: "temp_call",
+    plan: &[
+        ("record.function", "t"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
 /// A static method's call, as `static_call` drives it: pushed in place
 /// under the guard on the pair its runtime-cache slot holds, its class the
 /// published one it names, and by its handler where the slot holds

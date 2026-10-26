@@ -32,7 +32,7 @@ use crate::testing::goldens::{
     MANDELBROT, METHOD_CALL, METHOD_OWN, METHOD_SCOPED, NATIVE_CALL, NBODY, NESTED_READ,
     NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, PARENT_THIS,
     REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL, STATIC_OWN, STATIC_SCOPED, STATIC_SELF,
-    STATIC_THIS, STRING_BUILD, STRING_MATCH, held, traced as built,
+    STATIC_THIS, STRING_BUILD, STRING_MATCH, TEMP_CALL, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -2763,11 +2763,19 @@ fn line_of(ir: &TraceIr, opcode: Opcode) -> Option<&super::Line> {
 /// A method called on a variable's object of a published class is pushed
 /// in place under the class guard, its send compiled by value and the
 /// call made in place, as php's `zend_jit_init_method_call` pushes it
-/// once its class guard holds (#3343).
+/// once its class guard holds (#3343), on a variable's object and on a
+/// temporary's (#3560).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_methods_call_is_pushed_in_place_under_its_class_guard() -> Result<(), String> {
-    let ir = golden(METHOD_CALL)?;
+    for fixture in [METHOD_CALL, TEMP_CALL] {
+        pushed_under_its_class_guard(fixture)?;
+    }
+    Ok(())
+}
+
+fn pushed_under_its_class_guard(fixture: Fixture) -> Result<(), String> {
+    let ir = golden(fixture)?;
     let rendered = dump::render(&ir);
     let init = line_of(&ir, Opcode::InitMethodCall)
         .ok_or_else(|| format!("no INIT_METHOD_CALL in\n{rendered}"))?;

@@ -2561,7 +2561,7 @@ impl<'a> Builder<'a> {
 
     /// The call a method's `INIT_METHOD_CALL` pushes in place, as php's
     /// `zend_jit_init_method_call` pushes it (`Z/ext/opcache/jit/zend_jit_ir.c:8950-9213`):
-    /// over a constant name, on `$this` or a variable that holds an object
+    /// over a constant name, on `$this`, a variable or a temporary that holds an object
     /// as it is, whose class's call the recording took
     /// ([`UnitView::calls_of`]). On a published class, under the class
     /// guard on the object; on a request-scoped one (#3558), under the
@@ -2589,9 +2589,11 @@ impl<'a> Builder<'a> {
             return None;
         };
         let class = sample1?.class?;
+        // A variable's object or a temporary's, `(new D)->m()`, which the
+        // call takes over as the handler does (`_TMPVAR_CONST`).
         let object = match (op.op1_type, op1) {
             (OperandKind::Unused, _) => Object::This(frame),
-            (OperandKind::Cv, Operand::Value(value))
+            (OperandKind::Cv | OperandKind::Tmp | OperandKind::Var, Operand::Value(value))
                 if seen.types[0] == Types::OBJECT && seen.read[0] == Read::InPlace =>
             {
                 Object::Value(value)

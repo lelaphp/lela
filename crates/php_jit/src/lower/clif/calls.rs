@@ -30,7 +30,7 @@ use php_unit::Opcode;
 
 use super::{
     COUNTED, Dtor, Emit, Kernel, Refuse, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE,
-    STOOD_ROOM, Scalar, imm, leave_of, mismatch, trusted,
+    STOOD_ROOM, Scalar, TYPE_AT, imm, leave_of, mismatch, tag, trusted,
 };
 use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT, RETURNED, THREW};
 use crate::types::{
@@ -38,15 +38,24 @@ use crate::types::{
     Owners, PairCallee, PairClass, Returned, Vars,
 };
 
-/// The receiver a method's call `line` pushes in place: `$this` of its
-/// frame, lent, or the object a variable holds, of which the call takes
-/// an owner.
-fn receiver_of(line: &Line) -> Result<(Object, bool), Abort> {
+/// The receiver a method's call `line` pushes in place.
+fn receiver_of(line: &Line) -> Result<Object, Abort> {
     match line.op1 {
-        Operand::Unused => Ok((Object::This(line.frame), false)),
-        Operand::Value(value) => Ok((Object::Value(value), true)),
+        Operand::Unused => Ok(Object::This(line.frame)),
+        Operand::Value(value) => Ok(Object::Value(value)),
         Operand::Constant(_) => Err(mismatch("a method called on a constant")),
     }
+}
+
+/// How a call pushed in place takes its receiver, as the handler's
+/// inline path takes it (`inline_init_method_call`): `$this`, lent; a
+/// variable's object, one owner more; a temporary's, its owner moved out
+/// of the slot.
+#[derive(Clone, Copy)]
+enum Taken {
+    Lent,
+    Shared,
+    Moved,
 }
 
 /// The engine's runtime-cache slot layout, as the guard on a call's pair
@@ -333,11 +342,9 @@ impl Emit<'_> {
             None => {}
         }
         if line.opcode == Opcode::InitMethodCall {
-            let (object, owned) = receiver_of(line)?;
-            let this = self.object(object)?;
-            self.receive(this, owned, top);
+            self.receive_of(line, top)?;
         } else if let Some(this) = over.this {
-            self.receive(this, false, top);
+            self.receive(this, Taken::Lent, top);
         }
         self.b.ins().store(trusted(), top, stack, INNERMOST);
         // The record, then the table's length and the top.
@@ -527,7 +534,7 @@ impl Emit<'_> {
         let refuse = Refuse::To(slow);
         let place = match class {
             PairClass::Receiver => {
-                let (object, _) = receiver_of(line)?;
+                let object = receiver_of(line)?;
                 let obj = self.object(object)?;
                 self.cache_guard(line, (P.pair(), P.pair_class()), obj, refuse)?
             }
@@ -617,9 +624,34 @@ impl Emit<'_> {
         }
     }
 
+    /// The receiver of method's call `line` pushed in place at `top`,
+    /// taken as [`Taken`] says: a temporary's moved out of its slot.
+    fn receive_of(&mut self, line: &Line, top: Value) -> Result<(), Abort> {
+        let object = receiver_of(line)?;
+        let this = self.object(object)?;
+        let taken = match object {
+            Object::This(_) => Taken::Lent,
+            Object::Value(value) => {
+                let slot = self.value(value)?.slot;
+                if self.is_temporary(slot)? {
+                    let (room, slot_at) = self.place(slot)?;
+                    let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+                    (self.b.ins()).store(trusted(), undef, room, slot_at + TYPE_AT);
+                    Taken::Moved
+                } else {
+                    Taken::Shared
+                }
+            }
+        };
+        self.receive(this, taken, top);
+        Ok(())
+    }
+
     /// The receiver of a method's call pushed in place at `top`, as
     /// `zend_jit_push_call_frame` writes it (`Z/ext/opcache/jit/zend_jit_ir.c:8657-8678`):
     /// `Z_PTR(call->This)`, and over a variable one owner more of it with
+    /// `ZEND_CALL_RELEASE_THIS`; over a temporary, `(new D)->m()`, its
+    /// owner moved out of the slot, which is left undefined, with
     /// `ZEND_CALL_RELEASE_THIS`; over `$this` the frame's receiver lent,
     /// pinned as [`php_heap::Obj::pin`] pins it, which the leave lets go
     /// ([`Emit::free_this`]). An object of another class leaves at the
@@ -632,10 +664,12 @@ impl Emit<'_> {
     /// function f($os, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $o = $os[$i % 3]; $t += $o->m($i); } return $t; }
     /// class C { public $o; function m() { $this->o = null; return 1; } function __destruct() { echo "c "; } }
     /// function g($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $c = new C; $c->o = $c; $t += $c->m(); unset($c); } return $t; }
-    /// echo f([new A, new A, new B], 30), " ", g(3), "\n";
+    /// class D { function m($x) { return $x + 1; } function __destruct() { echo "d "; } }
+    /// function h($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += (new D)->m($i); } return $t; }
+    /// echo f([new A, new A, new B], 30), " ", g(3), " ", h(3), "\n";
     /// ```
     /// ```expect regime=jit-force process
-    /// 1500 c c c 3
+    /// 1500 c c c 3 d d d 6
     /// ```
     ///
     /// ```php
@@ -644,14 +678,20 @@ impl Emit<'_> {
     /// function f($os, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $o = $os[$i % 3]; $t += $o->m($i); } return $t; }
     /// class C { public $o; function m() { $this->o = null; return 1; } function __destruct() { echo "c "; } }
     /// function g($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $c = new C; $c->o = $c; $t += $c->m(); unset($c); } return $t; }
-    /// echo f([new A, new A, new B], 30), " ", g(3), "\n";
+    /// class D { function m($x) { return $x + 1; } function __destruct() { echo "d "; } }
+    /// function h($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += (new D)->m($i); } return $t; }
+    /// echo f([new A, new A, new B], 30), " ", g(3), " ", h(3), "\n";
     /// ```
     /// ```expect regime=jit-exit-fuzz process
-    /// 1500 c c c 3
+    /// 1500 c c c 3 d d d 6
     /// ```
-    fn receive(&mut self, this: Value, owned: bool, top: Value) {
+    fn receive(&mut self, this: Value, taken: Taken, top: Value) {
         self.b.ins().store(trusted(), this, top, at(L.this()));
-        if owned {
+        if let Taken::Moved = taken {
+            let info = self.b.ins().load(I32, trusted(), top, at(L.info()));
+            let info = self.b.ins().bor_imm_u(info, i64::from(L.release_this()));
+            self.b.ins().store(trusted(), info, top, at(L.info()));
+        } else if let Taken::Shared = taken {
             // `GC_ADDREF`, the count kept below the bit above it.
             let count = self.b.ins().load(I32, trusted(), this, COUNT_AT);
             let bits = self.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
