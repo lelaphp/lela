@@ -945,6 +945,39 @@ fn a_fetched_elements_guard_leaves_past_the_fetch_under_a_call() -> Result<(), S
     Ok(())
 }
 
+/// A fetched element's guard under a call under way, over a temporary
+/// array, leaves past the fetch with the call to restore and the
+/// temporary to free, both: the two halves of the landing
+/// `a_fetched_elements_guard_leaves_past_the_fetch_under_a_call` and
+/// `a_fetched_elements_guard_frees_the_temporary_it_read` take apart, so
+/// a landing that dropped the free under a call would leak the array, or
+/// call its destructor late, at every such exit (#3438).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_fetched_elements_guard_under_a_call_frees_the_temporary_it_read() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function g() { $a = []; $a[] = 'b'; return $a; }
+        function f(int $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += strcmp(g()[0], 'b'); } return $t; }
+        echo f(10), \"\\n\";",
+    )?;
+    let freeing_under_a_call = Landing {
+        frees: Frees {
+            op1: true,
+            op2: false,
+        },
+        restores_call: true,
+    };
+    assert!(
+        ir.exits
+            .iter()
+            .any(|exit| exit.landing == freeing_under_a_call),
+        "{}",
+        dump::render(&ir)
+    );
+    Ok(())
+}
+
 /// `FE_FETCH_R` takes the exit the way out of the loop leaves through
 /// before its array's packed guard, as php's code generator takes it
 /// before `zend_jit_fe_fetch`, whose packed guard follows
