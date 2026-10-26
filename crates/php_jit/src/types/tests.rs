@@ -887,6 +887,9 @@ fn an_element_writes_guards_are_held_in_phps_order() -> Result<(), String> {
             _ => None,
         })
         .collect();
+    // Both guards stand, so the order below is held to something: with
+    // neither, the comparison is of two empty lists.
+    assert_eq!(held.len(), 2, "{}", dump::render(&ir));
     let exit = held.first().map(|(_, exit)| *exit);
     assert_eq!(
         held,
