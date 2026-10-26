@@ -70,6 +70,37 @@ impl Method {
         if self == Method::Bzip2 { 46 } else { 20 }
     }
 
+    /// `maximum_compressed_size` of its algorithm: the most `size` bytes
+    /// can compress to, `u64::MAX` past 64 bits.
+    fn maximum_compressed_size(self, size: u64) -> u64 {
+        let more = match self {
+            Method::Deflate => size
+                .div_ceil(16384)
+                .checked_mul(5)
+                .and_then(|n| n.checked_add(6)),
+            Method::Bzip2 => Some(size / 64 + 1024),
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss,
+                reason = "zip_algorithm_xz.c's double arithmetic"
+            )]
+            Method::Lzma | Method::Xz => {
+                return ((size as f64 * 1.1) as u64).saturating_add(64 * 1024 + 13);
+            }
+            // `ZSTD_compressBound`.
+            Method::Zstd => Some(
+                (size >> 8)
+                    + if size < 128 << 10 {
+                        ((128 << 10) - size) >> 11
+                    } else {
+                        0
+                    },
+            ),
+        };
+        more.and_then(|m| size.checked_add(m)).unwrap_or(u64::MAX)
+    }
+
     /// The general purpose bits its algorithm reports compressing at
     /// `level`: deflate's level, and LZMA's end marker.
     fn bits(self, level: u32) -> u16 {
@@ -445,6 +476,11 @@ impl Compressor {
             can_store,
             phase: Phase::Input,
         })
+    }
+
+    /// The most `size` bytes can compress to.
+    pub(crate) fn maximum_size(&self, size: u64) -> u64 {
+        self.method.maximum_compressed_size(size)
     }
 
     /// The method the data is in, once it has ended: store, where it was
