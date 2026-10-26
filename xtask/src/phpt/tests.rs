@@ -2598,15 +2598,19 @@ fn a_subset_a_full_volume_kept_from_running_is_a_skip_and_not_a_refusal() {
 }
 
 /// The dashboard's oracle job, the one CI job that runs the phpt lane on
-/// `main`, uploads the runs it keeps beside its store (#2362): one upload
-/// is the store's log, `oracle`, which `publish` folds, and one is
+/// `main`, stashes the runs it keeps beside its store (#2362, #3554): one
+/// put is the store's log, `oracle`, which `publish` folds, and one is
 /// [`against::RUNS`] under [`against::UPLOAD`], the name the fetch line
-/// downloads, which `publish`'s download of the stores does not take. The
-/// job is the lines from its key to the next job's, each upload the
-/// lines from its `uses` to the next step.
+/// reads, which `publish`'s get of the stores does not take. The job is
+/// the lines from its key to the next job's, each put the lines from its
+/// `uses` to the next step.
 #[test]
-fn the_oracle_job_uploads_the_kept_runs_beside_its_store() {
+fn the_oracle_job_stashes_the_kept_runs_beside_its_store() {
     let text = fs::read_to_string(workspace().join(".github/workflows/dashboard.yml")).unwrap();
+    assert!(
+        !text.contains("upload-artifact") && !text.contains("download-artifact"),
+        "the hand-offs are the stash's, not GitHub artifacts (#3554)"
+    );
     let job = |name: &str| -> String {
         let key = |line: &str| {
             line.strip_prefix("  ").is_some_and(|rest| {
@@ -2625,7 +2629,7 @@ fn the_oracle_job_uploads_the_kept_runs_beside_its_store() {
     };
     let oracle = &job("oracle");
     let uploads: Vec<&str> = oracle
-        .match_indices("- uses: actions/upload-artifact")
+        .match_indices("- uses: ./.github/actions/stash")
         .map(|(at, _)| {
             let step = &oracle[at..];
             &step[..step[1..]
@@ -2637,8 +2641,8 @@ fn the_oracle_job_uploads_the_kept_runs_beside_its_store() {
         uploads
             .iter()
             .copied()
-            .find(|step| step.contains(&format!("name: {name}\n")))
-            .unwrap_or_else(|| panic!("the oracle job uploads no {name}: {oracle}"))
+            .find(|step| step.contains(&format!("put: {name}\n")))
+            .unwrap_or_else(|| panic!("the oracle job stashes no {name}: {oracle}"))
     };
     assert!(
         named("oracle").contains("path: target/harness/log/\n"),
@@ -2648,13 +2652,13 @@ fn the_oracle_job_uploads_the_kept_runs_beside_its_store() {
     let runs = named(against::UPLOAD);
     assert!(
         runs.contains(&format!("path: {}/\n", against::RUNS)),
-        "the upload is the kept runs: {runs}"
+        "the put is the kept runs: {runs}"
     );
     let publish = job("publish");
     let stores = publish
         .lines()
-        .find(|line| line.trim_start().starts_with("pattern:"))
-        .expect("publish downloads the stores by a pattern");
+        .find(|line| line.trim_start().starts_with("get:") && line.contains("measure"))
+        .expect("publish gets the stores by their names");
     assert!(
         stores.contains("oracle") && !stores.contains(against::UPLOAD),
         "publish folds the store and not the runs: {stores}"

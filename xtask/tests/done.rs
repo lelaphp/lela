@@ -1517,10 +1517,10 @@ fn ci_typechecks_the_module_against_the_committed_declarations_before_the_tests(
 
 /// CI per commit (harness-design.md §7): the same instruments over the
 /// workspace, then `done`; the reading store is the only thing the run
-/// uploads; what it renders is the permits section. The instruments run
+/// keeps; what it renders is the permits section. The instruments run
 /// on two runners, the build runner's and the oracle runner's (#2253),
-/// and each job uploads its own store for `done`'s job, which joins them
-/// and uploads the one store the run keeps, `harness`.
+/// and each job stashes its own store for `done`'s job, which joins them
+/// and stashes the one store the run keeps, `harness` (#3554).
 #[test]
 fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
     let text = read(".github/workflows/harness.yml");
@@ -1543,33 +1543,43 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
         assert!(at > last, "{step} is out of order: {text}");
         last = at;
     }
-    // Every upload is a store and nothing else, less what a job excludes
-    // of it (the phpt runs a job that takes none would carry, #2299), and
-    // one of them is the run's, `harness`; a ticket is closed by the
-    // session that worked it, so no job closes one on a push (#290).
-    let uploads = text.match_indices("upload-artifact").collect::<Vec<_>>();
+    // Every put to the stash is a store and nothing else, less what a job
+    // excludes of it (the phpt runs a job that takes none would carry,
+    // #2299), and one of them is the run's, `harness`; a ticket is closed by
+    // the session that worked it, so no job closes one on a push (#290).
+    // The stash, not a GitHub artifact, which counts against the account's
+    // storage (#3554).
+    assert!(
+        !text.contains("upload-artifact") && !text.contains("download-artifact"),
+        "the hand-offs are the stash's: {text}"
+    );
+    let puts = text
+        .match_indices("uses: ./.github/actions/stash")
+        .map(|(at, _)| {
+            let step = &text[at..];
+            &step[..step.find("\n      - ").unwrap_or(step.len())]
+        })
+        .filter(|step| step.contains("put: "))
+        .collect::<Vec<_>>();
     assert_eq!(
-        uploads.len(),
+        puts.len(),
         4,
         "the three jobs' stores and the run's: {text}"
     );
     let mut kept = 0;
-    for (upload, _) in uploads {
-        let step = &text[upload..];
-        let step = &step[..step.find("\n      - ").unwrap_or(step.len())];
-        let excluding = step.split_once("path: |\n").is_some_and(|(_, paths)| {
-            let mut paths = paths
-                .lines()
-                .map(str::trim)
-                .take_while(|l| !l.contains(':'));
-            paths.next() == Some("target/harness")
-                && paths.all(|l| l.starts_with("!target/harness/") || l.is_empty())
-        });
+    for step in puts {
         assert!(
-            step.contains("path: target/harness") || excluding,
-            "the upload is the store: {step}"
+            step.contains("path: target/harness\n"),
+            "the put is the store: {step}"
         );
-        kept += usize::from(step.contains("name: harness\n"));
+        assert!(
+            step.lines()
+                .map(str::trim)
+                .filter_map(|l| l.strip_prefix("exclude: "))
+                .all(|l| l == "phpt-runs/"),
+            "a put leaves out the phpt runs and nothing else: {step}"
+        );
+        kept += usize::from(step.contains("put: harness\n"));
     }
     assert_eq!(kept, 1, "one store is the run's: {text}");
     assert!(

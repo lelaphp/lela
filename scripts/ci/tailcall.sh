@@ -36,7 +36,7 @@
 # profile passes (design §10 Profiles, #3372); a RUSTFLAGS variable would
 # replace the table, so none is set and none is inherited.
 # A subset that fails fails the run once every subset has run; the
-# readings are the lane's alone, uploaded apart from what the dashboard
+# readings are the lane's alone, stashed apart from what the dashboard
 # folds, and the runs `phpt` keeps are put back as they stood, so the
 # threaded build's are never read as the shipped engine's.
 #

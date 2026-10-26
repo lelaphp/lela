@@ -4,7 +4,7 @@
 # negative controls; and per commit the instruments run over the whole
 # workspace, then `done` judges the changes since the merge base with
 # `main`, the base the Stop hook took; the reading store is the only thing
-# the run uploads, and the permits section is the summary. A ticket is closed by
+# the run keeps, and the permits section is the summary. A ticket is closed by
 # the session that worked it, through `xtask ticket close`, the instrument
 # that reads its acceptance criteria; CI closes none (#290; CONTEXT.md,
 # Ticket). A red main is filed, once, by the last job (#1156).
@@ -15,7 +15,9 @@
 # build, clippy, the tests and the rest of the instruments; and
 # `dax-oracle`, a Mac mini, which has the pinned php, a macOS keg
 # (oracle.toml), for the witnesses, the crosscheck and the tests that spawn
-# the oracle (#678, #2200). The two stores meet in `done`. A runner keeps its
+# the oracle (#678, #2200). The two stores meet in `done`, handed to it
+# through the stash on `dax-build` rather than as GitHub artifacts, which
+# count against the account's storage (.github/actions/stash, #3554). A runner keeps its
 # work directory between jobs, so each checkout is `clean: false` and the
 # workspace action cleans all but target/, the warm build.
 #
@@ -98,7 +100,7 @@ jobs:
       # Mitchell ruled on #1345, fresh for this job.
       - uses: ./.github/actions/mysql
       # Each instrument exits 1 on a failing reading, which fails the job;
-      # the readings it wrote are uploaded either way.
+      # the readings it wrote are stashed either way.
       - run: cargo fmt --check
       - run: cargo xtask clippy
       # `new-ext` renders ext/AGENTS.md's extensions region with `computed
@@ -153,11 +155,10 @@ jobs:
       - run: cargo xtask port-map
       - name: this job's readings
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/stash
         with:
-          name: store-build
+          put: store-build
           path: target/harness
-          if-no-files-found: warn
           retention-days: 1 # read by `done`'s job, minutes later
 
   miri:
@@ -180,16 +181,14 @@ jobs:
       - run: cargo test -p xtask --test miri
       - name: this job's readings
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/stash
         with:
-          name: store-miri
+          put: store-miri
+          path: target/harness
           # The phpt runs the workspace keeps are the build job's to hand
           # `done`: this job takes none, and its runner's would be another
           # machine's or an older job's runs of the same tree.
-          path: |
-            target/harness
-            !target/harness/phpt-runs/
-          if-no-files-found: warn
+          exclude: phpt-runs/
           retention-days: 1 # read by `done`'s job, minutes later
 
   tailcall:
@@ -261,16 +260,14 @@ jobs:
       - run: cargo test -p xtask
       - name: this job's readings
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/stash
         with:
-          name: store-oracle
+          put: store-oracle
+          path: target/harness
           # The phpt runs the workspace keeps are the build job's to hand
           # `done`: this job takes none, and its runner's would be another
           # machine's or an older job's runs of the same tree.
-          path: |
-            target/harness
-            !target/harness/phpt-runs/
-          if-no-files-found: warn
+          exclude: phpt-runs/
           retention-days: 1 # read by `done`'s job, minutes later
 
   done:
@@ -288,12 +285,14 @@ jobs:
           fetch-depth: 0 # done measures since the merge base with main
       - uses: ./.github/actions/workspace
       # The three jobs' stores, one store again: each instrument keeps its
-      # own files, and no instrument ran on both runners.
+      # own files, and no instrument ran on both runners. A job that kept
+      # none, the oracle job while it is skipped, is passed over.
       - name: the three jobs' readings, one store
-        uses: actions/download-artifact@v4
+        uses: ./.github/actions/stash
         with:
-          pattern: store-*
-          merge-multiple: true
+          get: store-build store-miri store-oracle
+          merge: true
+          optional: true
           path: target/harness
       # A ticket's branch is judged on its pull request, whose checkout is
       # a detached merge commit, so the base is the ref the pull request
@@ -342,13 +341,13 @@ jobs:
           cargo xtask status --section permits --uncut > permits.md
           cat permits.md
           cat permits.md >> "$GITHUB_STEP_SUMMARY"
-      - name: the reading store, the only upload
+      - name: the reading store, the only one the run keeps
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/stash
         with:
-          name: harness
+          put: harness
           path: target/harness
-          if-no-files-found: warn
+          retention-days: 30
 
   # A red main filed (#1156, adopted on #1151): on a push to main alone, the
   # run's verdict and the one before it decide. Two red runs in a row file
