@@ -27,7 +27,7 @@
 
 use php_ext::abi::{FromArgument as _, Raw};
 use php_ext::attr::php_function;
-use php_ext::raising::{Thrown, argument_error};
+use php_ext::raising::{Thrown, argument_error, throw, throw_error};
 use php_ext::request::{Request, StandaloneHeap};
 use php_ext::values::{Emalloc, Owner, PhpArray, PhpString, Value};
 use php_ext_standard::UriParser;
@@ -91,6 +91,39 @@ pub(crate) fn zend_leak_bytes(
 #[php_function]
 pub(crate) fn zend_delref(variable: Value) {
     let _ = variable;
+}
+
+/// `zend_test_emalloc(int $size): void`: one `emalloc` of `$size` bytes,
+/// freed at once, so `memory_get_usage()` reads what it read before and
+/// its peak counts the block; an ask past the memory limit is php's
+/// fatal, and one past the hard limit ends the process where it stands
+/// (`Zend/tests/oom_hard_limit_exceeded.phpt`). The bytes come zeroed,
+/// so php's `memset` over them is left out.
+///
+/// ```php
+/// $m = memory_get_usage();
+/// memory_reset_peak_usage();
+/// zend_test_emalloc(1000000);
+/// var_dump(memory_get_usage() - $m, memory_get_peak_usage() - $m);
+/// ```
+/// ```expect
+/// int(0)
+/// int(1003520)
+/// ```
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// zend_test_emalloc(6 * 1024 * 1024);
+/// echo "not reached\n";
+/// ```
+/// ```expect exit=255
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 6291456 bytes) in %s on line 3
+/// ```
+#[php_function]
+pub(crate) fn zend_test_emalloc(req: &mut Request, size: i64) -> Result<(), Thrown> {
+    let size = usize::try_from(size.cast_unsigned()).unwrap_or(usize::MAX);
+    Emalloc::new(req, size)?.free(req);
+    Ok(())
 }
 
 /// `zend_test_zend_call_stack_get(): ?array`: the calling thread's
@@ -315,6 +348,29 @@ pub(crate) fn zend_test_crash(
     }
     req.response_mut().flush();
     crate::ffi::segfault()
+}
+
+/// `zend_test_raise_and_throw(int $signal): void`: `raise(3)` of the
+/// signal, the long narrowed to an `int` as C narrows it, then
+/// `Exception` thrown, so the signal's handler runs with a throwable
+/// pending; a signal `raise` refuses is php's `Error` instead.
+///
+/// ```php
+/// try { zend_test_raise_and_throw(0); } catch (Exception $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// try { zend_test_raise_and_throw(-1); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Exception: Exception after raise()
+/// Error: raise() failed
+/// ```
+#[php_function]
+pub(crate) fn zend_test_raise_and_throw(req: &mut Request, signal: i64) -> Result<(), Thrown> {
+    let [a, b, c, d, ..] = signal.to_le_bytes();
+    let throwables = Throwables::of(req)?;
+    if !crate::ffi::raise(i32::from_le_bytes([a, b, c, d])) {
+        return Err(throw_error(req, throwables.error, "raise() failed"));
+    }
+    Err(throw(req, throwables.exception, "Exception after raise()"))
 }
 
 /// `zend_test_gh18756(): void`: `zend_mm_startup`, `zend_mm_gc` twice and

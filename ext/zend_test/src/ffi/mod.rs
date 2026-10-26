@@ -1,5 +1,5 @@
-//! The one act of `test.c` this crate does in C's terms (`unsafe.homes`'
-//! `ext/*/src/ffi/`): `zend_test_crash`'s end of the process, the
+//! The acts of `test.c` this crate does in C's terms (`unsafe.homes`'
+//! `ext/*/src/ffi/`). The first is `zend_test_crash`'s end of the process, the
 //! `SIGSEGV` php's `php_printf("%s", (char *) 1)` takes when it reads
 //! the byte at address one (ruled on #2976).
 //!
@@ -7,11 +7,17 @@
 //! read delivers, under the disposition that read meets in php's CLI,
 //! the default one, so the process ends as php's does and a shell
 //! reports the same status.
+//!
+//! [`raise`] is `zend_test_raise_and_throw`'s `raise(3)`, and
+//! [`exports`] the C symbols `test.c` exports for ext/ffi's tests, under
+//! php's names and layout.
 #![allow(unsafe_code)]
 #![deny(
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block
 )]
+
+mod exports;
 
 /// End the process with `SIGSEGV`, as php's read of `(char *) 1` does.
 ///
@@ -43,4 +49,12 @@ pub(crate) fn segfault() -> ! {
     // The default action of an unblocked `SIGSEGV` does not return; were
     // it to, the process still ends rather than run on past the fault.
     std::process::abort()
+}
+
+/// `raise(3)` of `signal` to this thread: whether it was sent, which a
+/// number that names no signal is not.
+pub(crate) fn raise(signal: libc::c_int) -> bool {
+    // SAFETY: `raise(3)` takes any number and refuses one that names no
+    // signal; a signal sent meets the disposition the process set.
+    unsafe { libc::raise(signal) == 0 }
 }
