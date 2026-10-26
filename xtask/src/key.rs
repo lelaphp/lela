@@ -322,7 +322,10 @@ impl Snapshot {
             return Ok(kept);
         }
         let mut entries = Vec::new();
-        for file in BUILT_UNDER.iter().filter(|f| f.part != Part::Whole) {
+        for file in BUILT_UNDER
+            .iter()
+            .filter(|f| !toolchain().any(|t| t == f.path))
+        {
             let text = match self.source {
                 Source::Disk => {
                     let at = self.root.join(file.path);
@@ -440,11 +443,21 @@ pub(crate) const BUILT_UNDER: [BuiltUnder; 4] = [
 /// crate is compiled, so a crate's key moves with each: rustc reads
 /// `MACOSX_DEPLOYMENT_TARGET` for every object and link, and cc for every
 /// C build, and `api-check` holds it to the pinned php's (#3356).
-pub(crate) const REKEYED: [&str; 1] = ["MACOSX_DEPLOYMENT_TARGET"];
+pub(crate) const REKEYED: [&str; 1] = [DEPLOYMENT_TARGET];
 
-/// Whether `path`, relative to the root, is a file of [`BUILT_UNDER`].
+/// The variable that names the macOS every object and link is made for.
+pub(crate) const DEPLOYMENT_TARGET: &str = "MACOSX_DEPLOYMENT_TARGET";
+
+/// The file of [`BUILT_UNDER`] at `path`, relative to the root, if it is
+/// one.
 pub(crate) fn built_under(path: &str) -> Option<BuiltUnder> {
     BUILT_UNDER.into_iter().find(|f| f.path == path)
+}
+
+/// The files of [`BUILT_UNDER`] a crate's key takes whole, the toolchain's
+/// two spellings, by their paths.
+pub(crate) fn toolchain() -> impl Iterator<Item = &'static str> {
+    (BUILT_UNDER.into_iter()).filter_map(|f| matches!(f.part, Part::Whole).then_some(f.path))
 }
 
 /// The files of [`BUILT_UNDER`] among `paths` whose part differs between
@@ -476,8 +489,9 @@ impl BuiltUnder {
     /// none where it names nothing that does. A text that does not parse
     /// is taken whole, since what it says cannot be told apart.
     pub(crate) fn part_of(self, text: &str) -> Option<String> {
-        if self.part == Part::Whole {
-            return Some(text.to_owned());
+        match self.part {
+            Part::Whole => return Some(text.to_owned()),
+            Part::Config | Part::Manifest => {}
         }
         let Ok(table) = text.parse::<toml::Table>() else {
             return Some(text.trim_end().to_owned());
@@ -489,19 +503,22 @@ impl BuiltUnder {
             }
         };
         keep("profile".to_owned(), table.get("profile"));
-        if self.part == Part::Config {
-            keep(
-                "build.rustflags".to_owned(),
-                table.get("build").and_then(|b| b.get("rustflags")),
-            );
-            let targets = table.get("target").and_then(toml::Value::as_table);
-            for (name, target) in targets.into_iter().flatten() {
-                keep(format!("target.{name}.rustflags"), target.get("rustflags"));
+        match self.part {
+            Part::Config => {
+                keep(
+                    "build.rustflags".to_owned(),
+                    table.get("build").and_then(|b| b.get("rustflags")),
+                );
+                let targets = table.get("target").and_then(toml::Value::as_table);
+                for (name, target) in targets.into_iter().flatten() {
+                    keep(format!("target.{name}.rustflags"), target.get("rustflags"));
+                }
+                for variable in REKEYED {
+                    let env = table.get("env").and_then(|e| e.get(variable));
+                    keep(format!("env.{variable}"), env);
+                }
             }
-            for variable in REKEYED {
-                let env = table.get("env").and_then(|e| e.get(variable));
-                keep(format!("env.{variable}"), env);
-            }
+            Part::Manifest | Part::Whole => {}
         }
         (!kept.is_empty()).then(|| kept.to_string())
     }
@@ -519,8 +536,7 @@ fn crate_dir(root: &Path, path: &Path) -> bool {
 fn closure(root: &Path, path: &Path) -> Result<Vec<PathBuf>> {
     if crate_dir(root, path) {
         let mut paths = Graph::of(root)?.paths(path);
-        let whole = BUILT_UNDER.iter().filter(|f| f.part == Part::Whole);
-        paths.extend(whole.map(|f| PathBuf::from(f.path)));
+        paths.extend(toolchain().map(PathBuf::from));
         Ok(paths)
     } else {
         Ok(vec![path.to_path_buf()])
@@ -855,7 +871,10 @@ mod tests {
                 (path, id)
             })
             .collect();
-        for file in &super::BUILT_UNDER[2..] {
+        for file in super::BUILT_UNDER
+            .iter()
+            .filter(|f| !super::toolchain().any(|t| t == f.path))
+        {
             let text = fs::read_to_string(root.join(file.path)).unwrap();
             let part = file.part_of(&text).unwrap();
             listing.push((file.path.into(), git::blob_id(part.as_bytes())));

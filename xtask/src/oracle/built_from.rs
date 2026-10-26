@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use super::hosts::{HOSTS, MAKALA};
-use crate::key::{BUILT_UNDER, Part};
+use crate::key::{BUILT_UNDER, toolchain};
 use crate::layout::{Layout, normalize};
 
 /// The workspace's own files every build of a package reads: each file
@@ -143,8 +143,7 @@ impl BuiltFrom {
         let packages = self.packages(root, layout).into_iter();
         let packages = packages.filter(|p| is_package(p, layout));
         found.extend(packages.map(|package| root.join(package).join("Cargo.toml")));
-        let toolchain = BUILT_UNDER.iter().filter(|f| f.part == Part::Whole);
-        found.extend(toolchain.map(|f| root.join(f.path)));
+        found.extend(toolchain().map(|path| root.join(path)));
         if *self == BuiltFrom::Unlisted {
             found.retain(|path| is_engine_source(path.strip_prefix(root).unwrap_or(path)));
         }

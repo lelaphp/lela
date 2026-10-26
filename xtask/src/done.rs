@@ -520,8 +520,8 @@ pub fn judge(
 }
 
 /// Condition 10: on a diff that moves the part of a file of
-/// [`key::BUILT_UNDER`] that decides, `built_under` ([`key::moved`]), the `fold` reading of `sapi/cli`, fresh over its key now and passing.
-/// A skip, the reading of a host that is not `aarch64`, is met and a note
+/// [`key::BUILT_UNDER`] that decides, `built_under` ([`key::moved`]), the
+/// `fold` reading of `sapi/cli`, fresh over its key now and passing. A skip, the reading of a host that is not `aarch64`, is met and a note
 /// naming why, and where the caller says `fold` did not run, a missing
 /// reading is a note.
 fn folded(

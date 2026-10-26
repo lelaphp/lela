@@ -16,8 +16,9 @@ use crate::manifest::Manifest;
 use crate::oracle::Minos;
 use crate::oracle::hosts::{HOSTS, MAKALA};
 
-/// The variable that names the macOS a link is for.
-const VARIABLE: &str = "MACOSX_DEPLOYMENT_TARGET";
+/// The variable that names the macOS a link is for, the one a crate's key
+/// moves with ([`crate::key::REKEYED`]).
+const VARIABLE: &str = crate::key::DEPLOYMENT_TARGET;
 
 /// What a host's link is held to on this machine, each arm with the macOS
 /// the pinned php is linked for where it was read.
