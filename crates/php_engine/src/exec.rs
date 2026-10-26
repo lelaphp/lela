@@ -1501,8 +1501,7 @@ impl RuntimeCache {
     /// laid again or given back, which a function's never is while the
     /// request runs.
     pub(crate) fn place_of(&self, slot: CacheSlot) -> Option<std::ptr::NonNull<Cached>> {
-        let cell = self.slots.as_ref()?.get((slot.0 / SLOT_BYTES) as usize)?;
-        Some(std::ptr::NonNull::from(cell))
+        self.slot(slot).map(std::ptr::NonNull::from)
     }
 
     /// `CACHE_PTR(num, ptr)`: `value` into the slot at `slot`, where

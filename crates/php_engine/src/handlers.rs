@@ -14371,8 +14371,8 @@ fn taking<R: Retval>(
     // A `TMP` holds a value a variable may hold, never a reference, an
     // `IS_INDIRECT` or nothing, so it is taken untested, as php's
     // `ZEND_ASSIGN_SPEC_CV_TMP` takes it (`zend_copy_to_variable`). A
-    // debug build keeps the test, and every inline path that takes a
-    // `TMP` here senses one that breaks it first ([`sensed_unmovable`]).
+    // debug build keeps the test, so one that breaks it is refused here
+    // and the handler past the path senses it ([`sensed_unmovable`]).
     let untested = value.kind() == OperandKind::Tmp && !cfg!(debug_assertions);
     if !(untested || crate::operand::movable(z))
         || (value.kind() == OperandKind::Const && !crate::operand::owns_nothing(z))
@@ -26542,7 +26542,7 @@ pub(crate) mod inline_path {
     /// An inline path's answer served with the request in hand, as its
     /// handler serves it ([`super::inlined`]): where the loop that holds
     /// the slots meets a back-edge whose interrupt is raised or whose tier
-    /// is bound, or a string the path gave up.
+    /// is bound.
     #[inline(never)]
     #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
     pub(crate) fn served<T: Tier>(
@@ -26588,8 +26588,10 @@ pub(crate) mod inline_path {
         inline_arith(slots, code, op, Arith::Mul, (A::default(), B::default()))
     }
 
-    /// `ZEND_DIV` over the kinds its opline names.
-    #[inline(always)] // in the loop and in the handler
+    /// `ZEND_DIV` over the kinds its opline names. The loop alone serves
+    /// it: the handler goes through `binary_by_kind`, which serves the
+    /// same arithmetic first.
+    #[inline(always)] // in the loop
     #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
     pub(crate) fn div(slots: &mut [Zval], code: &OpArray, op: &Opline, _: u32) -> Option<Inline> {
         let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
@@ -26743,8 +26745,9 @@ pub(crate) mod inline_path {
     }
 
     /// `ZEND_JMP` to the opline in `op1`, a back-edge where it is at the
-    /// jump or before it, whose safepoint number is in `result`.
-    #[inline(always)] // in the loop and in the handler
+    /// jump or before it, whose safepoint number is in `result`. The loop
+    /// alone serves it; the handler answers `jmp_way` itself.
+    #[inline(always)] // in the loop
     #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
     pub(crate) fn jmp(_: &mut [Zval], _: &OpArray, op: &Opline, at: u32) -> Option<Inline> {
         Some(super::jmp_way(op, at))

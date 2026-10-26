@@ -1165,8 +1165,8 @@ fn serve_held<'u, T: Tier, D: Telling>(
                         continue;
                     }
                     // A back-edge whose interrupt is raised or whose tier is
-                    // bound, or a string the path gave up: what the handler
-                    // does past its path, the request in hand.
+                    // bound: what the handler does past its path, the request
+                    // in hand.
                     Dispatched::Inline(inline) => {
                         crate::handlers::inline_path::served::<T>(req, frame, body, at, inline)?
                             .way()
@@ -1182,7 +1182,10 @@ fn serve_held<'u, T: Tier, D: Telling>(
             #[cfg(dispatch = "tailcall")]
             let way = tail::chain::<T, D>(req, frame, body, oplines, at, &declared)?.way();
             // Whether the edge went into another frame, where the loop
-            // takes its position up with its slots.
+            // takes its position up with its slots. One take-up where the
+            // arms meet: the two edges into a frame taking theirs up in
+            // their own arms and going on by `continue` measured the empty
+            // loop 72.9 -> 89.2 (#3345).
             let into = match way {
                 Way::On(places) => {
                     at = at.wrapping_add(places);

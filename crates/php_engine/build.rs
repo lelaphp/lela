@@ -809,9 +809,11 @@ const IN_THE_LOOP: &[&str] = &[
 /// The handlers with an inline path, a function of
 /// `crate::handlers::inline_path` named as the handler and generic over
 /// what it is generic over but its tier, which the loop serves over the
-/// slots it holds ([`inline_of`]). A name here that has no such function,
-/// or a function there that no name here reaches, is a build error of
-/// the crate, an unresolved path or an unused item.
+/// slots it holds ([`inline_of`]). A name here that has no such function
+/// is a build error of the crate, an unresolved path; a function there
+/// that no name here reaches is one only where its handler does not
+/// serve it too, an unused item (`div`, `jmp`), so a name left out of
+/// the list leaves every other path served by its handler alone.
 const INLINE_PATHS: &[&str] = &[
     "add",
     "assign",
