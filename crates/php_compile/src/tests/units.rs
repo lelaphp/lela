@@ -72,7 +72,7 @@ fn dump_under_short_open_tag(source: &[u8], short_open_tag: bool) -> String {
         short_open_tag,
         ..bundled()
     };
-    compile_source(&mut Arena::new(), source, &options, &mut strings)
+    compile_source(&mut Arena::default(), source, &options, &mut strings)
         .expect("the source compiles")
         .dump(&[])
         .text()
@@ -124,7 +124,7 @@ fn a_unit_laid_down_in_a_room_is_the_unit_laid_down_in_none() {
         filename: b"/a.php(2) : eval()'d code",
         ..Options::default()
     };
-    let mut arena = Arena::new();
+    let mut arena = Arena::default();
     let mut strings = php_heap::Strings::new();
     let mut compile = |source: &[u8], room: Room| {
         compile_source_into(&mut arena, source, &options, &mut strings, room)
@@ -281,13 +281,13 @@ fn two_units_interned_into_one_table_share_their_constant_string() {
     let mut strings = php_heap::Strings::new();
     let compiled = [
         compile_source(
-            &mut Arena::new(),
+            &mut Arena::default(),
             b"<?php echo 'shared';",
             &Options::default(),
             &mut strings,
         ),
         compile_source(
-            &mut Arena::new(),
+            &mut Arena::default(),
             b"<?php echo 'shared', 'shared';",
             &Options::default(),
             &mut strings,

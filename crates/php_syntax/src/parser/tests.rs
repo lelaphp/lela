@@ -25,7 +25,7 @@ fn marker_precede_chains() {
         (SyntaxKind::INT, 1),
     ]);
     let input = Input::new(text, &raw);
-    let arena = crate::Arena::new();
+    let arena = crate::Arena::default();
     let lines = LineIndex::new(&arena, text);
     let mut p = Parser::new(&input, FileId(0), &lines);
 
@@ -64,7 +64,7 @@ fn at_reads_the_current_token_and_a_bump_moves_on() {
     let text = b"$x;";
     let raw = tokens(&[(SyntaxKind::VARIABLE, 2), (SyntaxKind::SEMICOLON, 1)]);
     let input = Input::new(text, &raw);
-    let arena = crate::Arena::new();
+    let arena = crate::Arena::default();
     let lines = LineIndex::new(&arena, text);
     let mut p = Parser::new(&input, FileId(0), &lines);
     assert!(!p.at(SyntaxKind::COMMA));
@@ -82,7 +82,7 @@ fn unexpected_here_spells_php() {
     let text = b"<?php $x = (1];";
     let lexed = lex(FileId(0), text, &LexOptions::default());
     let input = Input::new(text, &lexed.tokens);
-    let arena = crate::Arena::new();
+    let arena = crate::Arena::default();
     let lines = LineIndex::new(&arena, text);
     let mut p = Parser::new(&input, FileId(0), &lines);
     p.bump(SyntaxKind::OPEN_TAG);
@@ -116,7 +116,7 @@ fn unexpected_here_spells_php() {
     let text = b"<?php $x = 1";
     let lexed = lex(FileId(0), text, &LexOptions::default());
     let input = Input::new(text, &lexed.tokens);
-    let arena = crate::Arena::new();
+    let arena = crate::Arena::default();
     let lines = LineIndex::new(&arena, text);
     let mut p = Parser::new(&input, FileId(0), &lines);
     while !p.at_eof() {
@@ -134,7 +134,7 @@ fn unexpected_here_spells_php() {
     let text = b"<?php $x = 1);\n\n$y = (\n1];";
     let lexed = lex(FileId(0), text, &LexOptions::default());
     let input = Input::new(text, &lexed.tokens);
-    let arena = crate::Arena::new();
+    let arena = crate::Arena::default();
     let lines = LineIndex::new(&arena, text);
     let mut p = Parser::new(&input, FileId(0), &lines);
     while !p.at(SyntaxKind::R_PAREN) {
@@ -255,7 +255,7 @@ fn parse_nested(src: &[u8]) -> (tree::Built<'static>, Vec<crate::Diagnostic>) {
     let lexed = lex(FileId(0), src, &LexOptions::default());
     assert!(lexed.diagnostics.is_empty(), "the lexer has no depth");
     let input = Input::new(src, &lexed.tokens);
-    let arena: &'static crate::Arena = Box::leak(Box::new(crate::Arena::new()));
+    let arena: &'static crate::Arena = Box::leak(Box::new(crate::Arena::default()));
     let lines = LineIndex::new(arena, src);
     let mut p = Parser::new(&input, FileId(0), &lines);
     crate::grammar::source_file(&mut p);

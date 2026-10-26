@@ -24,7 +24,7 @@ struct Hand {
 impl Hand {
     fn new(source: &'static [u8], events: Vec<Event>) -> Hand {
         let tokens = lex(FileId(0), source, &LexOptions::default()).tokens;
-        let arena: &'static php_syntax::Arena = Box::leak(Box::new(php_syntax::Arena::new()));
+        let arena: &'static php_syntax::Arena = Box::leak(Box::new(php_syntax::Arena::default()));
         let built = tree::build(
             arena,
             &tokens,

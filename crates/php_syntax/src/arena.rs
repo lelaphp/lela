@@ -25,7 +25,8 @@ use bumpalo::Bump;
 use crate::lexer::Token;
 
 /// One arena: memory that is bumped into and given up whole, and the
-/// room of the stacks a parse lends itself.
+/// room of the stacks a parse lends itself. A new one, its `default`,
+/// allocates nothing until it is first used.
 #[derive(Default)]
 pub struct Arena {
     bump: Bump,
@@ -33,6 +34,8 @@ pub struct Arena {
     /// stand for a parse, so a parse nested in another finds them taken
     /// and makes its own.
     scratch: RefCell<Scratch>,
+    /// The bytes it held when it was last reset ([`Arena::given_up`]).
+    given_up: usize,
 }
 
 impl std::fmt::Debug for Arena {
@@ -88,19 +91,22 @@ impl Scratch {
 const KEPT: usize = 256 * 1024;
 
 impl Arena {
-    /// An empty arena, which allocates nothing until it is first used.
-    #[must_use]
-    pub fn new() -> Arena {
-        Arena::default()
-    }
-
     /// Give up everything in the arena at once, keeping the room of its
     /// last chunk for what is bumped into it next, up to 256 KiB.
     pub fn reset(&mut self) {
+        self.given_up = self.bump.allocated_bytes();
         self.bump.reset();
         if self.bump.allocated_bytes() > KEPT {
             self.bump = Bump::new();
         }
+    }
+
+    /// The bytes the arena held when it was last reset, its chunks
+    /// whole: the room the compile before it took for its tree and its
+    /// temporaries.
+    #[must_use]
+    pub fn given_up(&self) -> usize {
+        self.given_up
     }
 
     /// The parse's stacks, borrowed where they stand; none while a parse
@@ -187,7 +193,7 @@ mod tests {
 
     #[test]
     fn a_reset_arena_keeps_its_room_and_what_it_held_is_given_up() {
-        let mut arena = Arena::new();
+        let mut arena = Arena::default();
         assert_eq!(arena.copy(b"abc"), b"abc");
         assert_eq!(arena.concat(&[b"a\\", b"b"]), b"a\\b");
         let mut grown = arena.vec(1);

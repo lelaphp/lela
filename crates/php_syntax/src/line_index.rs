@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn ascii_lines() {
-        let arena = crate::Arena::new();
+        let arena = crate::Arena::default();
         let idx = LineIndex::new(&arena, b"<?php\necho 1;\n");
         assert_eq!(idx.line_count(), 3); // trailing \n opens an empty line
         assert_eq!(idx.line_col(0), lc(0, 0));
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn crlf_keeps_cr_addressable() {
-        let arena = crate::Arena::new();
+        let arena = crate::Arena::default();
         let idx = LineIndex::new(&arena, b"a\r\nb");
         assert_eq!(idx.line_col(1), lc(0, 1)); // the \r
         assert_eq!(idx.line_col(3), lc(1, 0));
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn offsets_past_end_clamp() {
-        let arena = crate::Arena::new();
+        let arena = crate::Arena::default();
         let idx = LineIndex::new(&arena, b"ab");
         assert_eq!(idx.line_col(99), lc(0, 2));
     }
@@ -163,7 +163,7 @@ mod tests {
     fn high_bytes_are_one_column_each() {
         // "péh🐘x": é is 2 bytes, 🐘 is 4; a column is a byte count.
         let text = "p\u{e9}h\u{1F418}x";
-        let arena = crate::Arena::new();
+        let arena = crate::Arena::default();
         let idx = LineIndex::new(&arena, text.as_bytes());
         assert_eq!(idx.line_col(3), lc(0, 3));
         assert_eq!(idx.line_col(8), lc(0, 8));
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn empty_file() {
-        let arena = crate::Arena::new();
+        let arena = crate::Arena::default();
         let idx = LineIndex::new(&arena, b"");
         assert!(idx.is_empty());
         assert_eq!(idx.line_count(), 1);
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn line_ranges() {
-        let arena = crate::Arena::new();
+        let arena = crate::Arena::default();
         let idx = LineIndex::new(&arena, b"ab\ncd");
         assert_eq!(idx.line_range(0), Some((0, 3)));
         assert_eq!(idx.line_range(1), Some((3, 5)));

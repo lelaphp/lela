@@ -1797,6 +1797,9 @@ impl Shared {
     ) -> Fresh {
         let mut strings = self.interned.strings();
         let mut home = PermanentStrings::new(&self.interned.names, &mut strings, heap);
+        // A unit for every request is compiled on the thread that asked,
+        // no request's arena at hand, so it brings its own.
+        let mut arena = php_compile::syntax::Arena::default();
         let unit = compile(
             source,
             origin,
@@ -1804,10 +1807,8 @@ impl Shared {
             self.declared(),
             stack,
             &mut home,
-            // A unit for every request is compiled on the thread that
-            // asked, no request's arena at hand, so it brings its own.
             Laid {
-                arena: &mut php_compile::syntax::Arena::new(),
+                arena: &mut arena,
                 room: php_compile::Room::default(),
             },
         );
@@ -1816,7 +1817,12 @@ impl Shared {
             "a unit for every request holds a counted value"
         );
         let answers = home.settle(strings_kept(&unit));
-        Fresh { unit, answers }
+        let tree = arena.given_up();
+        Fresh {
+            unit,
+            answers,
+            tree,
+        }
     }
 
     /// `unit` published for every request: each op array given its

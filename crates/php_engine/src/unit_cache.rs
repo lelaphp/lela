@@ -629,6 +629,9 @@ pub(crate) enum Answers {
 pub(crate) struct Fresh {
     pub(crate) unit: Result<Unit, CompileError>,
     pub(crate) answers: Answers,
+    /// The bytes the compile's syntax arena held, its tree and the
+    /// compiler's temporaries: what stands for php's `CG(ast_arena)`.
+    pub(crate) tree: usize,
 }
 
 /// What [`UnitCache::file`] answers: the unit, what it did with the
@@ -1120,7 +1123,7 @@ impl UnitCache {
         let Some(source) = source_or_read(handed, path) else {
             return (None, Filed::Unheld, None);
         };
-        let Fresh { unit, answers } = compile(caller, &source);
+        let Fresh { unit, answers, .. } = compile(caller, &source);
         let size = u64::try_from(source.len()).unwrap_or(u64::MAX);
         if answers == Answers::Asker || named_by_request(validation, &unit) {
             return alone(unit, Filed::Compiled);

@@ -11,7 +11,7 @@ pub(super) fn compile_parsed(
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
-    let arena = Arena::new();
+    let arena = Arena::default();
     let parsed = php_syntax::parse(&arena, source, &php_syntax::Options::default());
     compile(&arena, &parsed, options, strings)
 }
