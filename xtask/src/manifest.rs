@@ -217,6 +217,11 @@ pub struct Budget {
     pub new: u64,
     pub docs: u64,
     pub harness: u64,
+    /// `harness-plugins/desk/**` hand-written, tests included, held apart
+    /// from `harness` (#3491); absent while a person has not written the
+    /// row, and the desk's tree is then counted under `harness`.
+    #[serde(rename = "harness-desk")]
+    pub harness_desk: Option<u64>,
     pub lock_packages: u64,
     pub clean_build_release_s: Option<u64>,
     pub api_items: Option<u64>,
@@ -234,14 +239,15 @@ pub struct Budget {
 
 impl Budget {
     /// Every ceiling `n`: the table a test builds when no ceiling is what
-    /// it measures. The optional `scripts` and `api_private_items` rows
-    /// stay absent, as the file without them parses.
+    /// it measures. The optional `scripts`, `api_private_items` and
+    /// `harness-desk` rows stay absent, as the file without them parses.
     pub fn flat(n: u64) -> Budget {
         Budget {
             total: n,
             new: n,
             docs: n,
             harness: n,
+            harness_desk: None,
             lock_packages: n,
             clean_build_release_s: Some(n),
             api_items: Some(n),

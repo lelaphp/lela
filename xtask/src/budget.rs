@@ -44,8 +44,11 @@ pub(crate) mod numbers {
     pub(crate) const TOTAL: &str = "total";
     /// `docs/**` and the living documents, against `[budget] docs`.
     pub(crate) const DOCS: &str = "docs";
-    /// `.claude/**` and `harness-plugins/**`, against `[budget] harness`.
+    /// `.claude/**` and `harness-plugins/**`, less the desk where
+    /// `[budget] harness-desk` holds it, against `[budget] harness`.
     pub(crate) const HARNESS: &str = "harness";
+    /// `harness-plugins/desk/**`, against `[budget] harness-desk`.
+    pub(crate) const HARNESS_DESK: &str = "harness_desk";
     /// Third-party `Cargo.lock` packages, against `[budget] lock_packages`.
     pub(crate) const LOCK_PACKAGES: &str = "lock_packages";
     /// `[budget] new`, stated and not measured.
@@ -255,10 +258,22 @@ fn workspace_reading(snapshot: &Snapshot, manifest: &Manifest, total: Count) -> 
     )?;
     ceiling(
         numbers::HARNESS,
-        harness(root)?,
+        harness(root, budget.harness_desk.is_some())?,
         budget.harness,
-        ".claude/** and harness-plugins/** hand-written lines",
+        if budget.harness_desk.is_some() {
+            ".claude/** and harness-plugins/** hand-written lines, less the desk"
+        } else {
+            ".claude/** and harness-plugins/** hand-written lines"
+        },
     )?;
+    if let Some(desk) = budget.harness_desk {
+        ceiling(
+            numbers::HARNESS_DESK,
+            harness_desk(root)?,
+            desk,
+            "harness-plugins/desk/** hand-written lines",
+        )?;
+    }
     ceiling(
         numbers::LOCK_PACKAGES,
         u64::try_from(CargoLock::load(root)?.packages())?,
@@ -402,11 +417,23 @@ fn docs(root: &Path) -> Result<u64> {
     sum(root, &paths)
 }
 
+/// The desk plugin's tree, which `[budget] harness-desk` holds apart from
+/// `harness` where a person has written the row (#3491).
+const DESK: &str = "harness-plugins/desk";
+
 /// `.claude/**` and `harness-plugins/**` hand-written: generated types
-/// (`*.d.ts`) excluded.
-fn harness(root: &Path) -> Result<u64> {
+/// (`*.d.ts`) excluded, and the desk's tree with them where `desk_apart`.
+fn harness(root: &Path, desk_apart: bool) -> Result<u64> {
     let mut paths: Vec<String> = git::files(root, Path::new(".claude"))?;
     paths.extend(git::files(root, Path::new("harness-plugins"))?);
+    paths.retain(|p| !(p.ends_with(".d.ts") || desk_apart && Path::new(p).starts_with(DESK)));
+    sum(root, &paths)
+}
+
+/// `harness-plugins/desk/**` hand-written, its tests included: generated
+/// types excluded, as under `harness`.
+fn harness_desk(root: &Path) -> Result<u64> {
+    let mut paths = git::files(root, Path::new(DESK))?;
     paths.retain(|p| !p.ends_with(".d.ts"));
     sum(root, &paths)
 }
