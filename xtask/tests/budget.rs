@@ -134,6 +134,46 @@ fn a_budget_without_the_php_measures_holds_nothing_to_them() {
     }
 }
 
+/// `[budget] harness-desk` holds `harness-plugins/desk/**` apart from
+/// `harness` (#3491): a 1301-line module under the desk fails a row of
+/// 1300 and leaves `harness`'s count without it, and with no row the
+/// desk's lines are `harness`'s and no desk count is read.
+#[test]
+fn the_harness_desk_row_holds_the_desk_apart_from_harness() {
+    let root = scratch("harness-desk");
+    let repo = common::repo::scratch_workspace(workspace(), &root);
+    // A manifest of no row: what is measured here is the tree.
+    Tracked::minimal().write(&root);
+    std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+    let module = "export const x = 1;\n".repeat(1301);
+    repo.write("harness-plugins/desk/hooks/x.ts", module);
+    repo.commit("the desk");
+
+    let mut manifest = Manifest::load(&root).unwrap();
+    assert_eq!(manifest.budget.harness_desk, None);
+    let readings = budget::run(&root, &manifest).unwrap();
+    let without = &workspace_reading(&readings).numbers;
+    assert!(!without.contains_key("harness_desk"), "{without:?}");
+
+    manifest.budget.harness_desk = Some(1300);
+    let readings = budget::run(&root, &manifest).unwrap();
+    let ws = workspace_reading(&readings);
+    assert_eq!(ws.status, Status::Fail, "{ws:#?}");
+    assert_eq!(ws.numbers["harness_desk"], 1301.into());
+    assert_eq!(ws.numbers["harness_desk_ceiling"], 1300.into());
+    assert!(
+        ws.message
+            .contains("harness-plugins/desk/** hand-written lines: 1301 over the ceiling of 1300"),
+        "{}",
+        ws.message
+    );
+    assert_eq!(
+        int(&ws.numbers["harness"]) + 1301,
+        int(&without["harness"]),
+        "the desk's lines leave harness's count"
+    );
+}
+
 /// The mechanism, held without the row in the tracked manifest: a scratch
 /// tree with a hook and a generator, the row built as the file would parse
 /// it, and the generator's lines left out of the count. Everything under
@@ -664,7 +704,11 @@ mod tracked {
 
         let ws = readings.iter().find(|r| r.scope == "workspace").unwrap();
         assert_eq!(ws.status, Status::Pass, "{}", ws.message);
-        for key in ["total", "bindings", "docs", "harness", "lock_packages"] {
+        let desk = manifest.budget.harness_desk.map(|_| "harness_desk");
+        for key in ["total", "bindings", "docs", "harness", "lock_packages"]
+            .into_iter()
+            .chain(desk)
+        {
             assert!(ws.numbers.contains_key(key), "{key}: {:?}", ws.numbers);
             assert!(
                 int(&ws.numbers[key]) <= int(&ws.numbers[&format!("{key}_ceiling")]),
