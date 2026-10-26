@@ -1641,7 +1641,7 @@ impl Shared {
     /// is declared and the one with no test where none is, as php
     /// resolves an opline's handler when it compiles it (design §5.8,
     /// §7.1), and `Nop`'s where the tier does not serve the engine
-    /// ([`crate::tier::Tier::asked`]).
+    /// ([`crate::tier::Tier::bound`]).
     fn observe_opcodes(&mut self, start: &Start, bind_loops: BindLoops) {
         (self.supplied.observers).retain(|(_, registered)| registered.is_none_or(|r| r(start)));
         self.observers = self.supplied.observers.count();
@@ -1984,6 +1984,8 @@ impl Shared {
     /// all, which is the `None` `serve` serves nothing for.
     pub(crate) fn cached(&self, path: &[u8], cwd: &Path, stack: StackLimit) -> Cached {
         let full = crate::unit_cache::full_path(path, cwd);
+        // Held for no request, so no request's loop follows it.
+        let held = std::cell::Cell::new(false);
         let asked = crate::unit_cache::Asked {
             path: &full,
             source: None,
@@ -1995,6 +1997,7 @@ impl Shared {
             levels: crate::unit_cache::Levels::Memory,
             optimizer: self.optimizer(),
             laid: crate::tier::words_laid(self, None),
+            held: &held,
         };
         let arena = self.arena.current();
         let (compiled, _, _) = self.units.file(

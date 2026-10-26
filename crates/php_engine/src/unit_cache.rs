@@ -500,6 +500,10 @@ pub(crate) struct Asked<'a> {
     /// How the safepoint words of a unit held for this question are laid
     /// (`tier::Tier::laid`), as the tier answered for the request asking.
     pub(crate) laid: crate::tier::Laid,
+    /// Set where the cache held a unit it read or compiled for this
+    /// question, its words laid as `laid` says, and not where another
+    /// request held the path's copy meanwhile ([`Holding::Found`]).
+    pub(crate) held: &'a std::cell::Cell<bool>,
 }
 
 /// What opcache's optimizer makes of a unit it persists that a request
@@ -1030,6 +1034,7 @@ impl UnitCache {
             levels,
             optimizer,
             laid,
+            held: held_now,
         } = asked;
         let (memory, disk) = match levels {
             Levels::Memory => (true, None),
@@ -1079,8 +1084,13 @@ impl UnitCache {
                 size: kept.size,
                 observed,
             };
-            let (Holding::Built(held) | Holding::Found(held)) =
-                self.hold(files, (path, laid), validation, now, read);
+            let held = match self.hold(files, (path, laid), validation, now, read) {
+                Holding::Built(held) => {
+                    held_now.set(true);
+                    held
+                }
+                Holding::Found(held) => held,
+            };
             files.hit(&held, validation, now);
             return answered_by(&held, Filed::Hit);
         }
@@ -1142,7 +1152,10 @@ impl UnitCache {
             observed,
         };
         let held = match self.hold(files, (path, laid), validation, now, read) {
-            Holding::Built(held) => held,
+            Holding::Built(held) => {
+                held_now.set(true);
+                held
+            }
             Holding::Found(existing) => {
                 return self.existing(files, &existing, written, validation, observed, now);
             }

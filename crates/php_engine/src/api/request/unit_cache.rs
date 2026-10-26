@@ -709,6 +709,9 @@ impl Request {
         let by_key = written
             .as_ref()
             .is_some_and(|key| shared.units.find(&self.arena.files, key).is_some());
+        // Whether the cache held a unit for this request, its words laid
+        // as `laid` says.
+        let held = std::cell::Cell::new(false);
         let asked = Asked {
             path: &full,
             source,
@@ -720,14 +723,12 @@ impl Request {
             levels,
             optimizer: shared.optimizer(),
             laid: crate::tier::words_laid(&shared, Some(&*self)),
+            held: &held,
         };
         let laid = asked.laid;
         let arena = Arc::clone(&self.arena);
         // What a compile that ran read and made, none for a hit.
         let scanned = std::cell::Cell::new(None);
-        // Whether the cache published a unit for this request to hold, its
-        // words laid as `laid` says.
-        let published = std::cell::Cell::new(false);
         let (compiled, filed, early) = shared.units.file(
             self,
             &arena.files,
@@ -739,12 +740,9 @@ impl Request {
             },
             |body| shared.decode_kept(body),
             |unit| shared.publish_compiled(unit),
-            |req, unit| {
-                published.set(true);
-                req.publish_unit(unit)
-            },
+            |req, unit| req.publish_unit(unit),
         );
-        if published.get() && laid.counts() {
+        if held.get() && laid.counts() {
             self.published_counting();
         }
         if filed == Filed::Own {
