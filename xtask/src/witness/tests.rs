@@ -858,6 +858,23 @@ fn a_body_the_two_runs_differ_on_or_a_row_covers_is_written_nothing_and_named() 
         ),
         "{note}"
     );
+    // A kept line the matcher read trimmed, as the stream's first, keeps
+    // its indentation below a line of the oracle's, where the whole
+    // stream no longer meets the run: the whole-run hold refuses it.
+    let text = "/// ```php\n/// echo \"new\\n3 apples\";\n/// ```\n/// ```expect\n///   %d apples\n/// ```\npub fn k() {}\n";
+    let tally = judged(
+        Path::new("ext/fixture/src/lib.rs"),
+        text,
+        &registry(""),
+        Accept::Bodies,
+    );
+    let (judgement, note) = only(&tally);
+    assert_eq!(judgement, Judgement::Fail, "{note}");
+    assert!(tally.captured.is_empty(), "{tally:#?}");
+    assert!(
+        note.starts_with("`--bodies` wrote nothing: the authored lines kept among the oracle's do not meet the oracle's run as a whole"),
+        "{note}"
+    );
 }
 
 /// An accepted row names one side of a difference, the oracle's or the
