@@ -860,11 +860,12 @@ fn retiring_carries_the_worktrees_kept_phpt_runs_into_mains() {
 /// A run CI's dashboard kept at a `main` commit, fetched by the line the
 /// comparison's skip names, is found as that commit's base run (#2362).
 /// The skip names the fetch before the call that takes a run; a stand-in
-/// stash, a directory `DAX_STASH` names, holds the upload as
-/// scripts/ci/stash.sh keeps it (#3554), the kept runs each under its
-/// engine's tree in `latest/phpt-runs.tar.gz`, here a run of `ext/pcre`
-/// under the tree the skip named; the line run as it is printed lays it in
-/// the checkout, and the comparison finds it there.
+/// stash holds the upload as scripts/ci/stash.sh keeps it (#3554), the
+/// kept runs each under its engine's tree in `latest/phpt-runs.tar.gz`,
+/// here a run of `ext/pcre` under the tree the skip named, and a stand-in
+/// `ssh` answers as the server's `rrsync` does, running rsync's far side in
+/// the stash; the line run as it is printed lays it in the checkout, and
+/// the comparison finds it there.
 #[test]
 fn a_run_ci_kept_fetched_by_the_skips_line_is_the_bases_run() {
     if Promise::Tree
@@ -910,9 +911,25 @@ fn a_run_ci_kept_fetched_by_the_skips_line_is_the_bases_run() {
         stash.join("latest/phpt-runs.tar.gz"),
     )
     .unwrap();
+    let bin = Tree::new("worktree-ci-runs-ssh").unwrap();
+    write(
+        &bin,
+        "ssh",
+        &format!(
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do case $1 in -*) shift ;; *) break ;; esac; done\nshift\ncd '{}' && exec sh -c \"$*\"\n",
+            stash.display()
+        ),
+    );
+    executable(&bin.join("ssh"));
+    let path = std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
     let fetched = Command::new("sh")
         .args(["-c", fetch])
-        .env("DAX_STASH", &*stash)
+        .env("DAX_STASH", "runner@stash")
+        .env("PATH", path)
+        .env_remove("RSYNC_RSH")
         .output()
         .unwrap();
     assert!(fetched.status.success(), "{fetch}: {fetched:?}");
