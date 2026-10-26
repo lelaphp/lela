@@ -697,7 +697,7 @@ fn target(req: &mut Request, value: Value) -> Result<Target, Thrown> {
         },
         _ => {
             let name = value_name(req, &value);
-            let tail = format!("be of type resource|string, {name} given");
+            let tail = [b"be of type resource|string, ".as_slice(), &name, b" given"].concat();
             Err(arg_type_error(req, 1, &tail))
         }
     }

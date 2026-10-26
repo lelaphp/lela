@@ -160,9 +160,12 @@ fn verify_bool(req: &mut Request, answer: Option<Owner<Value>>) -> bool {
                 docref(
                     req,
                     Level::Deprecated,
-                    &format!(
-                        "Session callback must have a return value of type bool, {name} returned"
-                    ),
+                    &[
+                        b"Session callback must have a return value of type bool, ".as_slice(),
+                        name.as_slice(),
+                        b" returned".as_slice(),
+                    ]
+                    .concat(),
                 );
             }
             Some(n == 0)
@@ -174,7 +177,12 @@ fn verify_bool(req: &mut Request, answer: Option<Owner<Value>>) -> bool {
             let name = value_name(req, &value);
             let thrown = type_error(
                 req,
-                &format!("Session callback must have a return value of type bool, {name} returned"),
+                &[
+                    b"Session callback must have a return value of type bool, ".as_slice(),
+                    name.as_slice(),
+                    b" returned".as_slice(),
+                ]
+                .concat(),
             );
             req.state::<State>().thrown = Some(thrown);
         }

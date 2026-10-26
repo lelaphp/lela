@@ -853,10 +853,11 @@ fn method_operand(req: &mut Request, raw: Operand, position: u32) -> Result<Deci
         }
         _ => {
             let given = value_name(req, &value);
+            let tail = format!("be of type int, string, or {CLASS}, ");
             return Err(arg_type_error(
                 req,
                 position,
-                &format!("be of type int, string, or {CLASS}, {given} given"),
+                &[tail.as_bytes(), &given, b" given"].concat(),
             ));
         }
     };

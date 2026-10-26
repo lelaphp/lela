@@ -1395,7 +1395,12 @@ fn hashed(
     answered.give_up(req);
     Err(type_error(
         req,
-        &format!("{class}::getHash(): Return value must be of type string, {name} returned"),
+        &[
+            format!("{class}::getHash(): Return value must be of type string, ").as_bytes(),
+            name.as_slice(),
+            b" returned".as_slice(),
+        ]
+        .concat(),
     ))
 }
 

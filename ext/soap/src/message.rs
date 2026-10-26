@@ -1523,9 +1523,13 @@ pub(crate) fn soap_create_typemap(
             let given = php_ext::coerce::value_name(req, &tmp);
             return Err(php_ext::raising::type_error(
                 req,
-                &format!(
-                    "SoapHeader::__construct(): \"typemap\" option must be of type array, {given} given"
-                ),
+                &[
+                    b"SoapHeader::__construct(): \"typemap\" option must be of type array, "
+                        .as_slice(),
+                    given.as_slice(),
+                    b" given".as_slice(),
+                ]
+                .concat(),
             ));
         };
         let mut type_name: Option<Vec<u8>> = None;

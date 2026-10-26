@@ -1240,8 +1240,14 @@ pub(crate) fn non_object_error(
     container: &Value,
 ) -> Thrown {
     let shown = crate::ops::value_name(req, &container.undef_as_null());
-    let name = String::from_utf8_lossy(name);
-    let message = format!("Attempt to {verb} property \"{name}\" on {shown}");
+    let message = bytes!(
+        b"Attempt to ",
+        verb,
+        b" property \"",
+        name,
+        b"\" on ",
+        shown
+    );
     error(req, &message)
 }
 
@@ -1513,11 +1519,16 @@ fn throwable_with_message(
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-pub fn arg_type_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
+pub fn arg_type_error(
+    req: &mut Request,
+    position: u32,
+    tail: &(impl AsRef<[u8]> + ?Sized),
+) -> Thrown {
+    let tail = tail.as_ref();
     let message = req.argument_message(position, tail);
     let member = active_member(req);
     let member = member.as_deref().map(str::as_bytes);
-    throw_argument_error(req, member, ClassId::TYPE_ERROR, tail, message.as_bytes())
+    throw_argument_error(req, member, ClassId::TYPE_ERROR, tail, &message)
 }
 
 /// `zend_argument_error_variadic` (`Z/Zend/zend_API.c:398`) around the
@@ -1543,7 +1554,7 @@ pub(crate) fn throw_argument_error(
     req: &mut Request,
     member: Option<&[u8]>,
     class: ClassId,
-    tail: &str,
+    tail: &[u8],
     message: &[u8],
 ) -> Thrown {
     under_name(req, member, |req| match printf_buffer(req, tail.len()) {
@@ -1646,11 +1657,16 @@ pub(crate) fn printf_buffer(req: &mut Request, len: usize) -> Result<php_heap::B
 /// engine declares raises one; `ext/standard`'s `str_repeat` does, and
 /// its witness pins the rendering. The text is held here by
 /// `a_value_error_names_the_parameter` below.
-pub fn arg_value_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
+pub fn arg_value_error(
+    req: &mut Request,
+    position: u32,
+    tail: &(impl AsRef<[u8]> + ?Sized),
+) -> Thrown {
+    let tail = tail.as_ref();
     let message = req.argument_message(position, tail);
     let member = active_member(req);
     let member = member.as_deref().map(str::as_bytes);
-    throw_argument_error(req, member, ClassId::VALUE_ERROR, tail, message.as_bytes())
+    throw_argument_error(req, member, ClassId::VALUE_ERROR, tail, &message)
 }
 
 /// `zend_argument_error`: a throwable of `class` for the argument at
@@ -1665,12 +1681,18 @@ pub fn arg_value_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
 /// ```expect
 /// SplDoublyLinkedList::offsetGet(): Argument #1 ($index) is out of range
 /// ```
-pub fn argument_error(req: &mut Request, class: ClassId, position: u32, tail: &str) -> Thrown {
-    let message = req.argument_message(position, "");
-    let message = format!("{}{tail}", message.trim_end_matches("must "));
+pub fn argument_error(
+    req: &mut Request,
+    class: ClassId,
+    position: u32,
+    tail: &(impl AsRef<[u8]> + ?Sized),
+) -> Thrown {
+    let tail = tail.as_ref();
+    let message = req.argument_message(position, b"");
+    let message = bytes!(message.strip_suffix(b"must ").unwrap_or(&message), tail);
     let member = active_member(req);
     let member = member.as_deref().map(str::as_bytes);
-    throw_argument_error(req, member, class, tail, message.as_bytes())
+    throw_argument_error(req, member, class, tail, &message)
 }
 
 /// `zend_wrong_parameters_count_error`'s `ArgumentCountError`, `fn()
@@ -1688,8 +1710,8 @@ pub fn argument_error(req: &mut Request, class: ClassId, position: u32, tail: &s
 /// 2432 32
 /// 2928 0
 /// ```
-pub fn arg_count_error(req: &mut Request, tail: &str) -> Thrown {
-    let message = format!("{}() expects {tail}", req.active_native());
+pub fn arg_count_error(req: &mut Request, tail: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
+    let message = bytes!(req.active_native(), "() expects ", tail.as_ref());
     let member = active_member(req);
     under_name(req, member.as_deref().map(str::as_bytes), |req| {
         argument_count_error(req, &message)

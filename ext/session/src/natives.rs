@@ -645,10 +645,14 @@ fn session_start(
                 let given = value_name(req, &value);
                 return Err(type_error(
                     req,
-                    &format!(
-                        "session_start(): Option \"{}\" must be of type string|int|bool, {given} given",
-                        crate::shown(&name)
-                    ),
+                    &[
+                        b"session_start(): Option \"".as_slice(),
+                        crate::shown(&name).as_bytes(),
+                        b"\" must be of type string|int|bool, ",
+                        &given,
+                        b" given",
+                    ]
+                    .concat(),
                 ));
             }
         }
@@ -1409,7 +1413,12 @@ fn session_set_save_handler(
             return Err(arg_type_error(
                 req,
                 1,
-                &format!("be of type SessionHandlerInterface, {name} given"),
+                &[
+                    b"be of type SessionHandlerInterface, ".as_slice(),
+                    &name,
+                    b" given",
+                ]
+                .concat(),
             ));
         };
         let register = match close {

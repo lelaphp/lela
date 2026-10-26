@@ -338,9 +338,12 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
         return Err(throw_error(
             req,
             ce.error,
-            &format!(
-                "Attribute::__construct(): Argument #1 ($flags) must be of type int, {given} given"
-            ),
+            &[
+                b"Attribute::__construct(): Argument #1 ($flags) must be of type int, ".as_slice(),
+                given.as_slice(),
+                b" given".as_slice(),
+            ]
+            .concat(),
         ));
     };
     value.give_up(req);

@@ -539,12 +539,16 @@ fn method_on(
             let class_name = req
                 .symbols()
                 .class_decl(class)
-                .map(|d| String::from_utf8_lossy(&d.name.0).into_owned())
+                .map(|d| d.name.0.to_vec())
                 .unwrap_or_default();
-            let tail = format!(
-                "method {class_name}::{}() does not exist",
-                String::from_utf8_lossy(name)
-            );
+            let tail = [
+                b"method ".as_slice(),
+                &class_name,
+                b"::",
+                name,
+                b"() does not exist",
+            ]
+            .concat();
             let ce = Throwables::of(req).map_err(Some)?;
             Err(Some(php_ext::raising::argument_error(
                 req,
@@ -706,13 +710,17 @@ fn set_object(req: &mut Request, parser: PhpObject, new: PhpObject) -> Result<()
                 let class_name = req
                     .symbols()
                     .class_decl(new.class())
-                    .map(|d| String::from_utf8_lossy(&d.name.0).into_owned())
+                    .map(|d| d.name.0.to_vec())
                     .unwrap_or_default();
-                let tail = format!(
-                    "cannot safely swap to object of class {class_name} as method \"{}\" does not exist, which was set via {}",
-                    String::from_utf8_lossy(&name),
-                    hook.setter()
-                );
+                let tail = [
+                    b"cannot safely swap to object of class ".as_slice(),
+                    &class_name,
+                    b" as method \"",
+                    &name,
+                    b"\" does not exist, which was set via ",
+                    hook.setter().as_bytes(),
+                ]
+                .concat();
                 let ce = Throwables::of(req)?;
                 return Err(php_ext::raising::argument_error(
                     req,

@@ -1373,7 +1373,7 @@ fn hash_equals(
             return Err(arg_type_error(
                 req,
                 position,
-                &format!("be of type string, {name} given"),
+                &[b"be of type string, ".as_slice(), &name, b" given"].concat(),
             ));
         };
         strings.push(bytes.to_vec());

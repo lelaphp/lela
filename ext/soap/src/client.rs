@@ -426,7 +426,12 @@ impl SoapClient {
                     req,
                     ce.type_error,
                     4,
-                    &format!("must be of type SoapHeader|array|null, {shown} given"),
+                    &[
+                        b"must be of type SoapHeader|array|null, ".as_slice(),
+                        &shown,
+                        b" given",
+                    ]
+                    .concat(),
                 ));
             }
         };
@@ -807,7 +812,12 @@ impl SoapClient {
                     req,
                     ce.type_error,
                     1,
-                    &format!("must be of type SoapHeader|array|null, {shown} given"),
+                    &[
+                        b"must be of type SoapHeader|array|null, ".as_slice(),
+                        &shown,
+                        b" given",
+                    ]
+                    .concat(),
                 ));
             }
         }

@@ -616,9 +616,11 @@ pub(crate) fn assign_incompatible(
             }
             None => format!("Incompatible types when assigning to type '{name}'"),
         }
+        .into_bytes()
     } else {
         let given = value_name(req, &value.deref());
-        format!("Incompatible types when assigning to type '{name}' from PHP '{given}'")
+        let head = format!("Incompatible types when assigning to type '{name}' from PHP '");
+        [head.as_bytes(), &given, b"'"].concat()
     };
     Ok(ffi_error(req, &message))
 }

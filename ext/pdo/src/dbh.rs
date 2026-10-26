@@ -1055,9 +1055,13 @@ fn attribute_set(
                     let given = value_name(req, value);
                     return Err(type_error(
                         req,
-                        &format!(
-                            "Attribute value must be of type bool for selected attribute, {given} given"
-                        ),
+                        &[
+                            b"Attribute value must be of type bool for selected attribute, "
+                                .as_slice(),
+                            given.as_slice(),
+                            b" given".as_slice(),
+                        ]
+                        .concat(),
                     ));
                 }
             };
@@ -1202,7 +1206,7 @@ pub(super) fn statement_class(
     arg: Option<u32>,
 ) -> Result<(ClassId, Option<PhpArray>), Thrown> {
     let ce = Throwables::of(req)?;
-    let type_error = |req: &mut Request, tail: &str| match arg {
+    let type_error = |req: &mut Request, tail: &[u8]| match arg {
         Some(at) => argument_error(req, ce.type_error, at, tail),
         None => type_error(req, tail),
     };
@@ -1210,7 +1214,12 @@ pub(super) fn statement_class(
         let given = value_name(req, value);
         return Err(type_error(
             req,
-            &format!("PDO::ATTR_STATEMENT_CLASS value must be of type array, {given} given"),
+            &[
+                b"PDO::ATTR_STATEMENT_CLASS value must be of type array, ".as_slice(),
+                &given,
+                b" given",
+            ]
+            .concat(),
         ));
     };
     let Some(first) = array.get(&Key::Int(0)) else {
@@ -1227,19 +1236,19 @@ pub(super) fn statement_class(
     let Some(class) = class else {
         return Err(type_error(
             req,
-            "PDO::ATTR_STATEMENT_CLASS class must be a valid class",
+            b"PDO::ATTR_STATEMENT_CLASS class must be a valid class",
         ));
     };
     if !crate::extends(req, class, b"PDOStatement") {
         return Err(type_error(
             req,
-            "PDO::ATTR_STATEMENT_CLASS class must be derived from PDOStatement",
+            b"PDO::ATTR_STATEMENT_CLASS class must be derived from PDOStatement",
         ));
     }
     if public_constructor(req, class) {
         return Err(type_error(
             req,
-            "User-supplied statement class cannot have a public constructor",
+            b"User-supplied statement class cannot have a public constructor",
         ));
     }
     let args = match array.get(&Key::Int(1)) {
@@ -1251,9 +1260,13 @@ pub(super) fn statement_class(
                 let given = value_name(req, &args.deref());
                 return Err(type_error(
                     req,
-                    &format!(
-                        "PDO::ATTR_STATEMENT_CLASS constructor_args must be of type ?array, {given} given"
-                    ),
+                    &[
+                        b"PDO::ATTR_STATEMENT_CLASS constructor_args must be of type ?array, "
+                            .as_slice(),
+                        &given,
+                        b" given",
+                    ]
+                    .concat(),
                 ));
             }
         }

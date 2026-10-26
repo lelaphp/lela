@@ -315,7 +315,12 @@ fn number(req: &mut Request, raw: &Number, position: u32) -> Result<Mpz, Thrown>
         return Ok(n);
     }
     let given = value_name(req, &value);
-    let tail = format!("must be of type GMP|string|int, {given} given");
+    let tail = [
+        b"must be of type GMP|string|int, ".as_slice(),
+        &given,
+        b" given",
+    ]
+    .concat();
     let ce = Throwables::of(req)?;
     Err(argument_error(req, ce.type_error, position, &tail))
 }

@@ -497,7 +497,7 @@ fn traced_at_throw(req: &mut Request, beneath: Beneath<'_, chain::Throw>) {
     if req.state::<Traced>().0.is_none()
         && let Ok(trace) = req.frames_mut().backtrace_here(0, 0)
     {
-        let rendered = req.trace_to_string(*trace, true);
+        let rendered = String::from_utf8_lossy(&req.trace_to_string(*trace, true)).into_owned();
         trace.give_up(req);
         req.state::<Traced>().0 = Some(rendered);
     }

@@ -781,7 +781,7 @@ fn retval_info(
                 php_var_export_ex(req, &mut info, value, level).ok();
             }
         }
-        Some(value) => info.extend_from_slice(type_name(req, value).as_bytes()),
+        Some(value) => info.extend_from_slice(&type_name(req, value)),
     }
     info
 }

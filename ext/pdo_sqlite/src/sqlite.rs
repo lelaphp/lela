@@ -1018,7 +1018,12 @@ impl Statement for Stmt {
             let given = value_name(req, value);
             return Err(Failure::from(type_error(
                 req,
-                &format!("explain mode must be of type int, {given} given"),
+                &[
+                    b"explain mode must be of type int, ".as_slice(),
+                    given.as_slice(),
+                    b" given".as_slice(),
+                ]
+                .concat(),
             )));
         };
         if !(0..=2).contains(&mode) {

@@ -222,7 +222,12 @@ impl Options {
                 Err(arg_type_error(
                     req,
                     2,
-                    &format!("be of type zero-terminated string or array, {given} given"),
+                    &[
+                        b"be of type zero-terminated string or array, ".as_slice(),
+                        &given,
+                        b" given",
+                    ]
+                    .concat(),
                 ))
             }
         }

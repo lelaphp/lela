@@ -280,9 +280,12 @@ fn table(req: &mut Request, value: &Value, option: &str) -> Result<Owner<PhpArra
         }
         _ => {
             let given = value_name(req, value);
-            let tail =
-                format!("be of type array when argument #3 ($option) is {option}, {given} given");
-            Err(arg_type_error(req, 4, &tail))
+            let tail = format!("be of type array when argument #3 ($option) is {option}, ");
+            Err(arg_type_error(
+                req,
+                4,
+                &[tail.as_bytes(), &given, b" given"].concat(),
+            ))
         }
     }
 }
@@ -689,9 +692,12 @@ fn set_option(
     } else if is_bindtodevice(option) {
         let ValueRef::Str(s) = value.as_ref() else {
             let given = value_name(req, value);
-            let tail = format!(
-                "be of type string when argument #3 ($option) is SO_BINDTODEVICE, {given} given"
-            );
+            let tail = [
+                b"be of type string when argument #3 ($option) is SO_BINDTODEVICE, ".as_slice(),
+                &given,
+                b" given",
+            ]
+            .concat();
             return Err(arg_type_error(req, 4, &tail));
         };
         s.as_bytes().to_vec()

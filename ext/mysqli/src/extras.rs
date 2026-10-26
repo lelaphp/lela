@@ -461,7 +461,12 @@ fn links_of(req: &mut Request, array: PhpArray) -> Result<Vec<(Value, Mysqlnd)>,
                 return Err(arg_type_error(
                     req,
                     n,
-                    &format!("must be an instance of mysqli, {given} given"),
+                    &[
+                        b"must be an instance of mysqli, ".as_slice(),
+                        &given,
+                        b" given",
+                    ]
+                    .concat(),
                 ));
             }
         };

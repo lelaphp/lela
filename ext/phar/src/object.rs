@@ -1917,7 +1917,7 @@ fn zpp_name_and_value(
         return Err(arg_type_error(
             req,
             1,
-            &format!("be of type string, {given} given"),
+            &[b"be of type string, ".as_slice(), &given, b" given"].concat(),
         ));
     };
     if n.contains(&0) {
@@ -1933,7 +1933,7 @@ fn zpp_name_and_value(
             return Err(arg_type_error(
                 req,
                 2,
-                &format!("be of type string, {given} given"),
+                &[b"be of type string, ".as_slice(), &given, b" given"].concat(),
             ));
         }
     };

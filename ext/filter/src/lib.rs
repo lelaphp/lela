@@ -688,7 +688,7 @@ fn options_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
 }
 
 /// `zend_throw_exception(php_filter_failed_exception_ce, message, 0)`.
-fn throw_failed(req: &mut Request, message: &str) -> Thrown {
+fn throw_failed(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
     let ce = match throwables::Throwables::of(req) {
         Ok(ce) => ce,
         Err(fatal) => return fatal,
@@ -1019,7 +1019,12 @@ fn filter_call(
         if flags & FILTER_THROW_ON_FAILURE != 0 {
             return Err(throw_failed(
                 req,
-                &format!("filter validation failed: not an array (got {name})"),
+                &[
+                    b"filter validation failed: not an array (got ".as_slice(),
+                    &name,
+                    b")",
+                ]
+                .concat(),
             ));
         }
         return Ok(Owner::take(req, failure(flags)));

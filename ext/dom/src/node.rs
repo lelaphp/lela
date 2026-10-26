@@ -657,7 +657,12 @@ fn c14n_query(
             req,
             ce.type_error,
             3 + base,
-            &format!("\"query\" option must be a string, {given} given"),
+            &[
+                b"\"query\" option must be a string, ".as_slice(),
+                &given,
+                b" given",
+            ]
+            .concat(),
         ));
     };
     let mut namespaces = Vec::new();

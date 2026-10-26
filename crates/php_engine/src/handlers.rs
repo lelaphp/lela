@@ -3118,8 +3118,10 @@ pub(crate) fn send_array<T: Tier>(
         let shown = crate::ops::value_name(req, &given.undef_as_null());
         let thrown = type_error(
             req,
-            &format!(
-                "call_user_func_array(): Argument #2 ($args) must be of type array, {shown} given"
+            &bytes!(
+                b"call_user_func_array(): Argument #2 ($args) must be of type array, ",
+                shown,
+                b" given"
             ),
         );
         exec::free_operand(req, frame, op.op2_type, op.op2);
@@ -3205,7 +3207,11 @@ fn send_array_slice(
         exec::free_operand(req, frame, op.op2_type, op.op2);
         return Err(type_error(
             req,
-            &format!("array_slice(): Argument #3 ($length) must be of type ?int, {shown} given"),
+            &bytes!(
+                b"array_slice(): Argument #3 ($length) must be of type ?int, ",
+                shown,
+                b" given"
+            ),
         ));
     };
     exec::free_operand(req, frame, op.op2_type, op.op2);
@@ -4935,11 +4941,15 @@ fn return_type_error(
     let declared = resolved_type_name(req, frame, declared_again(req, frame)?);
     let given = match returned {
         Some(returned) => crate::ops::value_name(req, &returned.undef_as_null()),
-        None => String::from("none"),
+        None => b"none".to_vec(),
     };
     let message = bytes!(
         name,
-        format!("(): Return value must be of type {declared}, {given} returned")
+        b"(): Return value must be of type ",
+        declared,
+        b", ",
+        given,
+        b" returned"
     );
     Ok(type_error(req, &message))
 }
@@ -5236,13 +5246,11 @@ fn arg_type_error(
     let parameter = crate::api::raising::arg_name_suffix(req, function, number);
     let declared = resolved_type_name(req, frame, ty);
     let given = crate::ops::value_name(req, &argument.undef_as_null());
-    let tail = match call_site(req, frame) {
-        Some((file, line)) => {
-            format!("must be of type {declared}, {given} given, called in {file} on line {line}")
-        }
-        None => format!("must be of type {declared}, {given} given"),
-    };
-    let message = bytes!(name, format!("(): Argument #{number}{parameter} {tail}"));
+    let mut tail = bytes!(b"must be of type ", declared, b", ", given, b" given");
+    if let Some((file, line)) = call_site(req, frame) {
+        tail.extend_from_slice(format!(", called in {file} on line {line}").as_bytes());
+    }
+    let message = bytes!(name, format!("(): Argument #{number}{parameter} "), tail);
     // `zend_type_to_string_resolved`'s `need_msg`, a string made for
     // a type of more than one name, and `zend_argument_type_error`'s
     // member string for a method, stand across the throw.
@@ -6352,9 +6360,10 @@ fn method_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
         None => Err(crate::api::raising::throw_error(
             req,
             ClassId::ERROR,
-            &format!(
-                "Call to a member function {}() on {}",
-                String::from_utf8_lossy(method.written.as_str_bytes().unwrap_or_default()),
+            &bytes!(
+                b"Call to a member function ",
+                method.written.as_str_bytes().unwrap_or_default(),
+                b"() on ",
                 crate::ops::value_name(req, &receiver)
             ),
         )),
@@ -10442,7 +10451,7 @@ fn list_read(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) ->
         let _dim = exec::operand(req, frame, code, op.op2_type, op.op2);
         if !matches!(container.as_ref(), ValueRef::Undef | ValueRef::Null) {
             let named = crate::ops::type_name(req, &container);
-            crate::api::raising::warning(req, &format!("Cannot use {named} as array"));
+            crate::api::raising::warning(req, &bytes!(b"Cannot use ", named, b" as array"));
         }
         Ok(Value::null())
     };
@@ -10561,7 +10570,7 @@ fn read_dimension(
     // operand raises where it is an unwritten variable, in php's order.
     let _container = exec::operand(req, frame, code, op.op1_type, op.op1);
     let _dim = exec::operand(req, frame, code, op.op2_type, op.op2);
-    crate::api::raising::warning(req, &format!("Trying to access array offset on {named}"));
+    crate::api::raising::warning(req, &bytes!(b"Trying to access array offset on ", named));
     Ok(Ok(Value::null()))
 }
 
@@ -12261,9 +12270,10 @@ pub(crate) fn clone<T: Tier>(
         Some(object) => req.clone_object(object, None).map(Owner::hand_on),
         None => Err(type_error(
             req,
-            &format!(
-                "clone(): Argument #1 ($object) must be of type object, {} given",
-                crate::ops::value_name(req, &operand)
+            &bytes!(
+                b"clone(): Argument #1 ($object) must be of type object, ",
+                crate::ops::value_name(req, &operand),
+                b" given"
             ),
         )),
     };
@@ -12517,7 +12527,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
         let class = value.as_object().map(|v| v.class());
         let Some(class) = class else {
             let shown = crate::ops::value_name(req, &value);
-            let thrown = type_error(req, &format!("Cannot use \"::class\" on {shown}"));
+            let thrown = type_error(req, &bytes!(b"Cannot use \"::class\" on ", shown));
             exec::free_operand(req, frame, op.op1_type, op.op1);
             return threw(req, frame, &thrown);
         };
@@ -19800,7 +19810,11 @@ fn unpack_into(req: &mut Request, array: PhpArray, spread: &Value) -> Result<(),
         return Err(crate::api::raising::throw_error(
             req,
             ClassId::ERROR,
-            &format!("Only arrays and Traversables can be unpacked, {given} given"),
+            &bytes!(
+                b"Only arrays and Traversables can be unpacked, ",
+                given,
+                b" given"
+            ),
         ));
     };
     let wrapper = unpack_iterator(req, object)?;
@@ -19847,7 +19861,11 @@ fn unpack_iterator(req: &mut Request, object: PhpObject) -> Result<PhpObject, Th
         let given = crate::ops::value_name(req, &object.as_value());
         return Err(type_error(
             req,
-            &format!("Only arrays and Traversables can be unpacked, {given} given"),
+            &bytes!(
+                b"Only arrays and Traversables can be unpacked, ",
+                given,
+                b" given"
+            ),
         ));
     }
     crate::interfaces::get_iterator(req, object, false)
@@ -19994,7 +20012,11 @@ pub(crate) fn send_unpack<T: Tier>(
         let given = crate::ops::value_name(req, &spread.undef_as_null());
         Ok(Err(type_error(
             req,
-            &format!("Only arrays and Traversables can be unpacked, {given} given"),
+            &bytes!(
+                b"Only arrays and Traversables can be unpacked, ",
+                given,
+                b" given"
+            ),
         )))
     };
     exec::free_operand(req, frame, op.op1_type, op.op1);
@@ -20519,9 +20541,10 @@ fn take_temporary(req: &mut Request, frame: FrameRef, field: u32) {
 fn fe_reset_refused(req: &mut Request, frame: FrameRef, op: &Opline, subject: &Value) -> Edge {
     crate::api::raising::warning(
         req,
-        &format!(
-            "foreach() argument must be of type array|object, {} given",
-            crate::ops::value_name(req, subject)
+        &bytes!(
+            b"foreach() argument must be of type array|object, ",
+            crate::ops::value_name(req, subject),
+            b" given"
         ),
     );
     let slot = op.out;
@@ -21301,9 +21324,10 @@ pub(crate) fn fe_fetch_rw<T: Tier>(
             } else {
                 crate::api::raising::warning(
                     req,
-                    &format!(
-                        "foreach() argument must be of type array|object, {} given",
-                        crate::ops::value_name(req, &subject.undef_as_null())
+                    &bytes!(
+                        b"foreach() argument must be of type array|object, ",
+                        crate::ops::value_name(req, &subject.undef_as_null()),
+                        b" given"
                     ),
                 );
                 if req.is_pending() {
@@ -23563,8 +23587,10 @@ pub(crate) fn get_class<T: Tier>(
             let shown = crate::ops::value_name(req, &value);
             let thrown = type_error(
                 req,
-                &format!(
-                    "get_class(): Argument #1 ($object) must be of type object, {shown} given"
+                &bytes!(
+                    b"get_class(): Argument #1 ($object) must be of type object, ",
+                    shown,
+                    b" given"
                 ),
             );
             exec::free_operand(req, frame, op.op1_type, op.op1);
@@ -23723,8 +23749,10 @@ pub(crate) fn array_key_exists<T: Tier>(
             let shown = crate::ops::value_name(req, &subject);
             let thrown = type_error(
                 req,
-                &format!(
-                    "array_key_exists(): Argument #2 ($array) must be of type array, {shown} given"
+                &bytes!(
+                    b"array_key_exists(): Argument #2 ($array) must be of type array, ",
+                    shown,
+                    b" given"
                 ),
             );
             req.leave_pending(&thrown);

@@ -563,7 +563,7 @@ fn text_of(req: &mut Request, value: &Value, access: Access) -> Result<Vec<u8>, 
 
 /// php's `TypeError` text for a value that has no text to assign, a
 /// complex type; `None` for one that has.
-fn complex(req: &mut Request, value: &Value, access: Access) -> Option<String> {
+fn complex(req: &mut Request, value: &Value, access: Access) -> Option<Vec<u8>> {
     let value = value.deref();
     let exact = match value.as_ref() {
         ValueRef::Object(o) => lookup_class(req, b"SimpleXMLElement")
@@ -586,9 +586,8 @@ fn complex(req: &mut Request, value: &Value, access: Access) -> Option<String> {
                 Access::Elements => "properties",
             };
             let given = value_name(req, &value);
-            Some(format!(
-                "It's not possible to assign a complex type to {target}, {given} given"
-            ))
+            let head = format!("It's not possible to assign a complex type to {target}, ");
+            Some([head.as_bytes(), &given, b" given"].concat())
         }
     }
 }

@@ -120,7 +120,7 @@ pub(crate) fn pcntl_signal(
             return Err(arg_type_error(
                 req,
                 2,
-                &format!("be of type callable|int, {given} given"),
+                &[b"be of type callable|int, ".as_slice(), &given, b" given"].concat(),
             ));
         }
     };
@@ -573,7 +573,12 @@ fn signal_set(
                 req,
                 ce.type_error,
                 position,
-                &format!("signals must be of type int, {given} given"),
+                &[
+                    b"signals must be of type int, ".as_slice(),
+                    &given,
+                    b" given",
+                ]
+                .concat(),
             ));
         };
         let number = (1..NUMBERS)

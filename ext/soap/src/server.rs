@@ -1080,7 +1080,12 @@ impl SoapServer {
                     req,
                     ce.type_error,
                     1,
-                    &format!("must be of type array|string|int, {shown} given"),
+                    &[
+                        b"must be of type array|string|int, ".as_slice(),
+                        &shown,
+                        b" given",
+                    ]
+                    .concat(),
                 ))
             }
         }

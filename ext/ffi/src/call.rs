@@ -246,11 +246,13 @@ fn pass_incompatible(
                 "Passing incompatible argument {at} of C function '{name}', expecting '{expecting}'"
             ),
         }
+        .into_bytes()
     } else {
         let given = value_name(req, arg);
-        format!(
-            "Passing incompatible argument {at} of C function '{name}', expecting '{expecting}', found PHP '{given}'"
-        )
+        let head = format!(
+            "Passing incompatible argument {at} of C function '{name}', expecting '{expecting}', found PHP '"
+        );
+        [head.as_bytes(), &given, b"'"].concat()
     };
     Ok(ffi_error(req, &message))
 }

@@ -528,7 +528,14 @@ fn stdclass_or_string(
     } else {
         "stdClass|string"
     };
-    let text = format!("be of type {expected}, {} given", value_name(req, &value));
+    let text = [
+        b"be of type ".as_slice(),
+        expected.as_bytes(),
+        b", ",
+        &value_name(req, &value),
+        b" given",
+    ]
+    .concat();
     Err(arg_type_error(req, 1, &text))
 }
 
@@ -761,10 +768,12 @@ fn zend_call_method(
             (None, class)
         }
         _ => {
-            let text = format!(
-                "be of type object|string, {} given",
-                value_name(req, &obj_or_class.value())
-            );
+            let text = [
+                b"be of type object|string, ".as_slice(),
+                &value_name(req, &obj_or_class.value()),
+                b" given",
+            ]
+            .concat();
             return Err(arg_type_error(req, 1, &text));
         }
     };
@@ -1232,9 +1241,11 @@ fn zend_test_internal_dnf_arguments(
     if is(b"Iterator")? || (is(b"Traversable")? && is(b"Countable")?) {
         return Ok(arg);
     }
-    let text = format!(
-        "be of type Iterator|(Traversable&Countable), {} given",
-        String::from_utf8_lossy(req.symbols().class_name(arg.class()))
-    );
+    let text = [
+        b"be of type Iterator|(Traversable&Countable), ".as_slice(),
+        req.symbols().class_name(arg.class()),
+        b" given",
+    ]
+    .concat();
     Err(arg_type_error(req, 1, &text))
 }

@@ -600,7 +600,7 @@ pub(crate) fn set_stub(
             return Err(php_ext::raising::arg_type_error(
                 req,
                 1,
-                &format!("be of type string, {given} given"),
+                &[b"be of type string, ".as_slice(), &given, b" given"].concat(),
             ));
         }
     };

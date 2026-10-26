@@ -2760,7 +2760,7 @@ fn array_or_object(req: &mut Request, given: Value, position: u32) -> Result<Val
     Err(php_ext::raising::arg_type_error(
         req,
         position,
-        &format!("be of type array, {name} given"),
+        &[b"be of type array, ".as_slice(), &name, b" given"].concat(),
     ))
 }
 

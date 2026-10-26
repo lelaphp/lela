@@ -893,6 +893,24 @@ impl<'r> Symbols<&'r Request> {
     /// 43616c6c20746f20756e646566696e6564206d6574686f6420dc623a3a6d2829
     /// dc623a3a5f5f636f6e73747275637428293a20417267756d656e742023312028246929206d757374206265206f66207479706520696e74
     /// ```
+    ///
+    /// An object given where a type refuses it, a throwable's string, a
+    /// class constant's name and a trace's argument name it the same way:
+    ///
+    /// ```php
+    /// eval("class \xdcb {} class \xdcE extends Exception {}");
+    /// function f(int $i) {} function g($o) { return new Exception; }
+    /// try { f(new ("\xdcb")); } catch (TypeError $e) { echo bin2hex(strstr($e->getMessage(), ", called", true)), "\n"; }
+    /// echo bin2hex(strstr((string) new ("\xdcE")('m'), " in ", true)), "\n";
+    /// try { constant("\xdcb::X"); } catch (Error $e) { echo bin2hex($e->getMessage()), "\n"; }
+    /// preg_match('/g\((.*)\)\n/', g(new ("\xdcb"))->getTraceAsString(), $m); echo bin2hex($m[1]), "\n";
+    /// ```
+    /// ```expect
+    /// 6628293a20417267756d656e742023312028246929206d757374206265206f66207479706520696e742c20dc6220676976656e
+    /// dc453a206d
+    /// 556e646566696e656420636f6e7374616e7420dc623a3a58
+    /// 4f626a65637428dc6229
+    /// ```
     pub fn class_name(self, class: ClassId) -> &'r [u8] {
         (self.0.symbols().class_decl(class))
             .map_or(b"object", |decl| php_unit::decl::shown_bytes(&decl.name.0))

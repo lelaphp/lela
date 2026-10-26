@@ -1861,8 +1861,8 @@ fn ftp_set_option(
     let opt = Opt::of(req, option)?;
     let wrong = |req: &mut Request, ty: &str, name: &str| {
         let given = value_name(req, &value);
-        let tail = format!("be of type {ty} for the {name} option, {given} given");
-        arg_type_error(req, 3, &tail)
+        let tail = format!("be of type {ty} for the {name} option, ");
+        arg_type_error(req, 3, &[tail.as_bytes(), &given, b" given"].concat())
     };
     let setting = match (opt, value.as_ref()) {
         (Opt::Timeout, ValueRef::Int(n)) => {

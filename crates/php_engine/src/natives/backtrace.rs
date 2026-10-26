@@ -147,6 +147,6 @@ fn debug_print_backtrace(
     let trace = req.fetch_debug_backtrace(true, options, limit)?;
     let text = req.trace_to_string(trace, false);
     req.release(Value::array(trace));
-    req.response_mut().write(text.as_bytes());
+    req.response_mut().write(&text);
     Ok(())
 }

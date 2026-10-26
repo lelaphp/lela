@@ -232,7 +232,12 @@ fn operator_operand(req: &mut Request, value: &Value, position: u32) -> Result<M
         return Ok(n);
     }
     let given = value_name(req, &value.deref());
-    let text = format!("Number must be of type GMP|string|int, {given} given");
+    let text = [
+        b"Number must be of type GMP|string|int, ".as_slice(),
+        given.as_slice(),
+        b" given".as_slice(),
+    ]
+    .concat();
     Err(type_error(req, &text))
 }
 
@@ -263,7 +268,15 @@ fn unsupported(req: &mut Request, op: BinaryOp, left: &Value, right: &Value) -> 
         _ => ">>",
     };
     let (l, r) = (type_name(req, left), type_name(req, right));
-    let text = format!("Unsupported operand types: {l} {sigil} {r}");
+    let text = [
+        b"Unsupported operand types: ".as_slice(),
+        &l,
+        b" ",
+        sigil.as_bytes(),
+        b" ",
+        &r,
+    ]
+    .concat();
     type_error(req, &text)
 }
 

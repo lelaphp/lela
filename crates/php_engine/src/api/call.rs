@@ -2145,8 +2145,7 @@ pub fn fetch_constant(req: &mut Request, name: &[u8]) -> Result<Owner<Value>, Th
     {
         let (class_name, constant_name) = (&name[..colon - 1], &name[colon + 1..]);
         let class = fetch_class(req, class_name)?;
-        let shown = String::from_utf8_lossy(class_name).into_owned();
-        return adopted(req.class_constant_shown(class, constant_name, &shown));
+        return adopted(req.class_constant_shown(class, constant_name, class_name));
     }
     adopted(global_constant(req, name, None))
 }
@@ -3077,11 +3076,10 @@ fn class_constant_expr(
     scope: Option<ClassId>,
 ) -> Result<Value, Thrown> {
     let id = const_class(req, &class.0, scope)?;
-    let written = String::from_utf8_lossy(&class.0);
     req.class_constant_from(
         id,
         &name.0,
-        &written,
+        &class.0,
         scope,
         crate::api::request::ConstantFetch::Lookup,
     )

@@ -108,7 +108,7 @@ pub(crate) fn types(req: &mut Request) -> &mut Types {
 }
 
 /// `zend_throw_error(zend_ffi_exception_ce, ...)`.
-pub(crate) fn ffi_error(req: &mut Request, message: &str) -> Thrown {
+pub(crate) fn ffi_error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
     let ce = match crate::throwables::Throwables::of(req) {
         Ok(ce) => ce,
         Err(fatal) => return fatal,

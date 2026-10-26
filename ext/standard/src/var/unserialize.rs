@@ -1139,9 +1139,15 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
                 let name = value_name(req, &classes);
                 return Err(type_error(
                     req,
-                    &format!(
-                        "{function}(): Option \"allowed_classes\" must be of type array|bool, {name} given"
-                    ),
+                    &[
+                        format!(
+                            "{function}(): Option \"allowed_classes\" must be of type array|bool, "
+                        )
+                        .as_bytes(),
+                        name.as_slice(),
+                        b" given".as_slice(),
+                    ]
+                    .concat(),
                 ));
             }
         }
@@ -1155,7 +1161,12 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
             let name = value_name(req, &max);
             return Err(type_error(
                 req,
-                &format!("{function}(): Option \"max_depth\" must be of type int, {name} given"),
+                &[
+                    format!("{function}(): Option \"max_depth\" must be of type int, ").as_bytes(),
+                    name.as_slice(),
+                    b" given".as_slice(),
+                ]
+                .concat(),
             ));
         };
         if n < 0 {
@@ -1194,9 +1205,15 @@ fn allowed_names(
             let name = value_name(req, &entry);
             return Err(type_error(
                 req,
-                &format!(
-                    "{function}(): Option \"allowed_classes\" must be an array of class names, {name} given"
-                ),
+                &[
+                    format!(
+                        "{function}(): Option \"allowed_classes\" must be an array of class names, "
+                    )
+                    .as_bytes(),
+                    name.as_slice(),
+                    b" given".as_slice(),
+                ]
+                .concat(),
             ));
         }
         let name = php_ext::coerce::to_string(req, &entry)?;

@@ -92,7 +92,7 @@ impl Request {
         &mut self,
         class: ClassId,
         name: &[u8],
-        class_name: &str,
+        class_name: &[u8],
     ) -> Result<Value, Thrown> {
         let scope = self.executed_scope();
         self.class_constant_from(class, name, class_name, scope, ConstantFetch::Lookup)
@@ -119,7 +119,7 @@ impl Request {
         &mut self,
         class: ClassId,
         name: &[u8],
-        class_name: &str,
+        class_name: &[u8],
         scope: Option<ClassId>,
         fetch: ConstantFetch,
     ) -> Result<Value, Thrown> {
@@ -135,13 +135,12 @@ impl Request {
         &mut self,
         class: ClassId,
         name: &[u8],
-        class_name: Option<&str>,
+        class_name: Option<&[u8]>,
         scope: Option<ClassId>,
         fetch: ConstantFetch,
     ) -> Result<ConstantRead, Thrown> {
         let shown = |req: &Request| {
-            let class_name =
-                class_name.map_or_else(|| req.symbols().class_name(class), str::as_bytes);
+            let class_name = class_name.unwrap_or_else(|| req.symbols().class_name(class));
             bytes!(class_name, b"::", name)
         };
         self.separate_constants(class)?;
@@ -193,7 +192,7 @@ impl Request {
                 ConstantFetch::Lookup => {
                     let class_name = class_name.map_or_else(
                         || std::borrow::Cow::Owned(self.symbols().class_name(class).to_vec()),
-                        |name| std::borrow::Cow::Borrowed(name.as_bytes()),
+                        std::borrow::Cow::Borrowed,
                     );
                     self.visited_class_constant((holder, class), name, &class_name)
                 }

@@ -252,7 +252,7 @@ enum Refused {
     /// A key that is no hint's name.
     Keys,
     /// A hint whose value is no int, with its type's name.
-    NotInt { name: String, given: String },
+    NotInt { name: String, given: Vec<u8> },
     /// An `ai_family` that is neither `AF_INET` nor `AF_INET6`.
     Family,
     /// A hint outside `0..=i32::MAX`.
@@ -269,8 +269,13 @@ impl Refused {
         match self {
             Refused::Keys => argument_error(req, ce.value_error, 3, HINT_KEYS),
             Refused::NotInt { name, given } => {
-                let tail = format!("\"{name}\" key must be of type int, {given} given");
-                argument_error(req, ce.type_error, 3, &tail)
+                let head = format!("\"{name}\" key must be of type int, ");
+                argument_error(
+                    req,
+                    ce.type_error,
+                    3,
+                    &[head.as_bytes(), &given, b" given"].concat(),
+                )
             }
             Refused::Family => argument_error(
                 req,

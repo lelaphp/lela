@@ -783,7 +783,7 @@ fn varargs(req: &mut Request, tokens: &[Raw<PhpString>]) -> Result<Vec<Vec<u8>>,
             return Err(php_ext::raising::arg_type_error(
                 req,
                 position,
-                &format!("be of type string, {given} given"),
+                &[b"be of type string, ".as_slice(), &given, b" given"].concat(),
             ));
         };
         if bytes.contains(&0) {

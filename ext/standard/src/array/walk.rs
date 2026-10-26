@@ -233,7 +233,7 @@ fn walk(
         return Err(arg_type_error(
             req,
             1,
-            &format!("be of type array, {name} given"),
+            &[b"be of type array, ".as_slice(), &name, b" given"].concat(),
         ));
     }
     // `Z_PARAM_FUNC` after `Z_PARAM_ARRAY_OR_OBJECT_EX`, in php's order.

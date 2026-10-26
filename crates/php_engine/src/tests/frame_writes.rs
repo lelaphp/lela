@@ -81,7 +81,10 @@ fn shown(
                     .prop(req, b"trace")
                     .and_then(|trace| trace.as_array())
                     .filter(|_| traced)
-                    .map(|trace| format!("\n{}", req.trace_to_string(trace, true)))
+                    .map(|trace| {
+                        let text = req.trace_to_string(trace, true);
+                        format!("\n{}", String::from_utf8_lossy(&text))
+                    })
                     .unwrap_or_default();
                 req.release(throwable.as_value());
                 format!("{class}: {}{trace}", String::from_utf8_lossy(&message))

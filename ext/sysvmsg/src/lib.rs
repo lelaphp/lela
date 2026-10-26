@@ -265,7 +265,12 @@ fn msg_send(
             ValueRef::Float(d) => percent_f(d).into_bytes(),
             _ => {
                 let given = value_name(req, &message);
-                let tail = format!("be of type string|int|float|bool, {given} given");
+                let tail = [
+                    b"be of type string|int|float|bool, ".as_slice(),
+                    &given,
+                    b" given",
+                ]
+                .concat();
                 return Err(arg_type_error(req, 3, &tail));
             }
         }

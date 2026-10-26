@@ -2894,9 +2894,13 @@ fn read_line_ex(req: &mut Request, this: PhpObject, silent: bool) -> Result<bool
             answered.give_up(req);
             return Err(type_error(
                 req,
-                &format!(
-                    "{class}::getCurrentLine(): Return value must be of type string, {name} returned"
-                ),
+                &[
+                    format!("{class}::getCurrentLine(): Return value must be of type string, ")
+                        .as_bytes(),
+                    name.as_slice(),
+                    b" returned".as_slice(),
+                ]
+                .concat(),
             ));
         };
         answered.give_up(req);

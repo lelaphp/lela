@@ -506,11 +506,11 @@ pub(crate) fn match_unhandled_error(req: &mut Request, subject: &Value) -> Throw
     } else {
         req.zval_text(subject, cut)
     };
-    let text = quoted.unwrap_or_else(|| format!("of type {}", type_name(req, subject)));
+    let text = quoted.unwrap_or_else(|| bytes!(b"of type ", type_name(req, subject)));
     throw_exception_ex(
         req,
         ClassId::UNHANDLED_MATCH_ERROR,
-        &format!("Unhandled match case {text}"),
+        &bytes!(b"Unhandled match case ", text),
     )
 }
 
@@ -527,16 +527,16 @@ pub(crate) fn match_unhandled_error(req: &mut Request, subject: &Value) -> Throw
 /// Unhandled match case of type classA
 /// Unhandled match case of type resource
 /// ```
-pub(crate) fn type_name(req: &Request, value: &Value) -> String {
+pub(crate) fn type_name(req: &Request, value: &Value) -> Vec<u8> {
     let value = value.deref();
     match value.as_ref() {
         ValueRef::Object(o) => req.symbols().class_decl(o.class()).map_or_else(
-            || String::from("object"),
-            |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
+            || b"object".to_vec(),
+            |decl| php_unit::decl::shown_bytes(&decl.name.0).to_vec(),
         ),
-        ValueRef::Undef => String::from("null"),
-        ValueRef::Resource(_) => String::from("resource"),
-        _ => String::from(value.type_name()),
+        ValueRef::Undef => b"null".to_vec(),
+        ValueRef::Resource(_) => b"resource".to_vec(),
+        _ => value.type_name().as_bytes().to_vec(),
     }
 }
 
@@ -2059,7 +2059,12 @@ fn not_converted(req: &mut Request, value: &Value, to: &str) {
     let class = value_name(req, value);
     warning(
         req,
-        &format!("Object of class {class} could not be converted to {to}"),
+        &bytes!(
+            b"Object of class ",
+            class,
+            b" could not be converted to ",
+            to
+        ),
     );
 }
 
@@ -2696,7 +2701,7 @@ pub(crate) fn bitwise_not(req: &mut Request, value: &Value) -> Result<Value, Thr
     let name = value_name(req, &value);
     Err(type_error(
         req,
-        &format!("Cannot perform bitwise not on {name}"),
+        &bytes!(b"Cannot perform bitwise not on ", name),
     ))
 }
 
@@ -4291,7 +4296,7 @@ fn stepped_other(
         }
     }
     let name = value_name(req, value);
-    Err(type_error(req, &format!("Cannot {verb} {name}")))
+    Err(type_error(req, &bytes!(b"Cannot ", verb, b" ", name)))
 }
 
 /// `increment_string` (`Z/Zend/zend_operators.c:2613`), "Perl style
@@ -4454,7 +4459,11 @@ pub(crate) fn strlen(req: &mut Request, value: &Value) -> Result<Value, Thrown> 
     let name = value_name(req, value);
     Err(type_error(
         req,
-        &format!("strlen(): Argument #1 ($string) must be of type string, {name} given"),
+        &bytes!(
+            b"strlen(): Argument #1 ($string) must be of type string, ",
+            name,
+            b" given"
+        ),
     ))
 }
 
@@ -4652,8 +4661,11 @@ pub(crate) fn count(req: &mut Request, value: &Value, sizeof: bool) -> Result<i6
     let name = value_name(req, value);
     Err(type_error(
         req,
-        &format!(
-            "{function}(): Argument #1 ($value) must be of type Countable|array, {name} given"
+        &bytes!(
+            function,
+            b"(): Argument #1 ($value) must be of type Countable|array, ",
+            name,
+            b" given"
         ),
     ))
 }
@@ -4808,7 +4820,7 @@ pub(crate) fn dimension_const(
         return Ok(Value::null());
     }
     let named = value_name(req, &container.undef_as_null());
-    warning(req, &format!("Trying to access array offset on {named}"));
+    warning(req, &bytes!(b"Trying to access array offset on ", named));
     Ok(Value::null())
 }
 
@@ -5492,7 +5504,7 @@ pub(crate) fn property_read_on(req: &mut Request, name: &[u8], container: &Value
         b"Attempt to read property \"",
         c_str(name),
         b"\" on ",
-        shown.as_bytes(),
+        shown.as_slice(),
     ]
     .concat();
     warning(req, &message);
@@ -5512,11 +5524,17 @@ pub(crate) fn property_read_on(req: &mut Request, name: &[u8], container: &Value
 /// #0 {main}
 ///   thrown in %s on line 2
 /// ```
-pub(crate) fn value_name(req: &Request, value: &Value) -> String {
+pub(crate) fn value_name(req: &Request, value: &Value) -> Vec<u8> {
     match value.as_ref() {
         ValueRef::Object(_) => type_name(req, value),
-        ValueRef::Bool(b) => String::from(if b { "true" } else { "false" }),
-        _ => String::from(value.type_name()),
+        ValueRef::Bool(b) => {
+            if b {
+                b"true".to_vec()
+            } else {
+                b"false".to_vec()
+            }
+        }
+        _ => value.type_name().as_bytes().to_vec(),
     }
 }
 

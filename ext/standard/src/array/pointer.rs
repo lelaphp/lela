@@ -346,7 +346,11 @@ fn pointed(req: &mut Request, given: &Value, name: &str) -> Result<Pointed, Thro
 /// The `TypeError` `Z_PARAM_ARRAY_OR_OBJECT` raises, naming the array.
 fn not_an_array(req: &mut Request, given: &Value) -> Thrown {
     let name = value_name(req, given);
-    arg_type_error(req, 1, &format!("be of type array, {name} given"))
+    arg_type_error(
+        req,
+        1,
+        &[b"be of type array, ".as_slice(), &name, b" given"].concat(),
+    )
 }
 
 /// The four movers: the array the reference holds, separated as

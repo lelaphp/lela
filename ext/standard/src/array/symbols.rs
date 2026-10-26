@@ -708,7 +708,12 @@ fn compact_var(
             docref(
                 req,
                 Level::Warning,
-                &format!("Argument #{position} must be string or array of strings, {name} given"),
+                &[
+                    format!("Argument #{position} must be string or array of strings, ").as_bytes(),
+                    name.as_slice(),
+                    b" given".as_slice(),
+                ]
+                .concat(),
             );
         }
     }

@@ -68,14 +68,24 @@ fn parse_options(req: &mut Request, options: PhpArray) -> Result<Options, Thrown
         };
         if !fits {
             let (want, given) = (if flag { "bool" } else { "int" }, value_name(req, &v));
-            let message = format!("Option \"{name}\" must be of type {want}, {given} given");
+            let message = [
+                format!("Option \"{name}\" must be of type {want}, ").as_bytes(),
+                given.as_slice(),
+                b" given".as_slice(),
+            ]
+            .concat();
             docref(req, Level::Warning, &message);
         }
         to_long(req, &v)
     };
     let type_error = |req: &mut Request, name: &str, want: &str, v: &Value| -> Thrown {
         let given = value_name(req, v);
-        let message = format!("Option \"{name}\" must be of type {want}, {given} given");
+        let message = [
+            format!("Option \"{name}\" must be of type {want}, ").as_bytes(),
+            given.as_slice(),
+            b" given".as_slice(),
+        ]
+        .concat();
         type_error(req, &message)
     };
     if let Some(v) = find("remove_all_path") {

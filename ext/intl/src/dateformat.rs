@@ -1050,7 +1050,12 @@ fn try_long(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
     if let Some(n) = coerce::try_long(req, value)? {
         return Ok(n);
     }
-    let tail = format!("must be of type int, {} given", value_name(req, value));
+    let tail = [
+        b"must be of type int, ".as_slice(),
+        &value_name(req, value),
+        b" given",
+    ]
+    .concat();
     Err(argument_error(req, ce.type_error, 2, &tail))
 }
 

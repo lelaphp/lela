@@ -585,9 +585,12 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
                 req,
                 ce.reflection_exception,
                 1,
-                &format!(
-                    "must be a string, an array(class, method), or a callable object, {given} given"
-                ),
+                &[
+                    b"must be a string, an array(class, method), or a callable object, ".as_slice(),
+                    &given,
+                    b" given",
+                ]
+                .concat(),
             ));
         }
     };

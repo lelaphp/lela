@@ -37,12 +37,12 @@ pub(super) fn object_of(
     if object.instance_of(req, class) {
         return Ok(object);
     }
-    let name = String::from_utf8_lossy(&class_name_of(req, class)).into_owned();
+    let name = class_name_of(req, class);
     let shown = value_name(req, &object.as_value());
     Err(arg_type_error(
         req,
         position,
-        &format!("be of type {name}, {shown} given"),
+        &[b"be of type ".as_slice(), &name, b", ", &shown, b" given"].concat(),
     ))
 }
 

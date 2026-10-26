@@ -372,10 +372,12 @@ fn curl_share_init_persistent(
     walk::foreach(req, share_options, Hold::None, |req, row| -> walk::Step {
         let entry = row.value().deref();
         let Some(option) = try_long(req, &entry)? else {
-            let tail = format!(
-                "must contain only int values, {} given",
-                value_name(req, &entry)
-            );
+            let tail = [
+                b"must contain only int values, ".as_slice(),
+                &value_name(req, &entry),
+                b" given",
+            ]
+            .concat();
             return Err(argument_error(req, ce.type_error, 1, &tail));
         };
         if option == c::CURL_LOCK_DATA_COOKIE {

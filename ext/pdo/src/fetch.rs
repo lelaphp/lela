@@ -1302,7 +1302,14 @@ fn wrong_type<T>(req: &mut Request, n: u32, want: &str, arg: &Value) -> Result<T
         req,
         ce.type_error,
         n,
-        &format!("must be of type {want}, {shown} given"),
+        &[
+            b"must be of type ".as_slice(),
+            want.as_bytes(),
+            b", ",
+            &shown,
+            b" given",
+        ]
+        .concat(),
     ))
 }
 
@@ -1352,7 +1359,7 @@ fn class_target(
             req,
             ce.type_error,
             first,
-            &format!("must be of type string, {shown} given"),
+            &[b"must be of type string, ".as_slice(), &shown, b" given"].concat(),
         ));
     };
     let Some(class) = autoload(req, &name)? else {
@@ -1389,7 +1396,7 @@ fn class_target(
                     req,
                     ce.type_error,
                     mode_arg + 2,
-                    &format!("must be of type ?array, {shown} given"),
+                    &[b"must be of type ?array, ".as_slice(), &shown, b" given"].concat(),
                 ));
             }
         }
@@ -1568,7 +1575,7 @@ fn all_class(
                     req,
                     ce.type_error,
                     2,
-                    &format!("must be of type string, {shown} given"),
+                    &[b"must be of type string, ".as_slice(), &shown, b" given"].concat(),
                 ));
             };
             let Some(class) = autoload(req, &bytes)? else {
@@ -1664,7 +1671,7 @@ fn all_arguments(
                             req,
                             ce.type_error,
                             2,
-                            &format!("must be of type int, {shown} given"),
+                            &[b"must be of type int, ".as_slice(), &shown, b" given"].concat(),
                         ));
                     };
                     if n < 0 {

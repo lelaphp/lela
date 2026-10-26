@@ -325,7 +325,12 @@ impl _ZendTestClass {
             };
             if !held {
                 let given = php_ext::coerce::type_name(req, &element.value());
-                let text = format!("be of class Iterator or a string, {given} given");
+                let text = [
+                    b"be of class Iterator or a string, ".as_slice(),
+                    &given,
+                    b" given",
+                ]
+                .concat();
                 let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
                 return Err(arg_type_error(req, position, &text));
             }
@@ -343,10 +348,12 @@ impl _ZendTestClass {
         let _ = this;
         let given = arg.value();
         let ValueRef::Object(object) = given.as_ref() else {
-            let text = format!(
-                "be of type object, {} given",
-                php_ext::coerce::value_name(req, &arg.value())
-            );
+            let text = [
+                b"be of type object, ".as_slice(),
+                &php_ext::coerce::value_name(req, &arg.value()),
+                b" given",
+            ]
+            .concat();
             return Err(arg_type_error(req, 1, &text));
         };
         let mut is = |name: &[u8]| -> Result<bool, Thrown> {
@@ -356,10 +363,12 @@ impl _ZendTestClass {
         if is(b"stdClass")? || is(b"Iterator")? {
             return Ok(());
         }
-        let text = format!(
-            "be of type stdclass|Iterator, {} given",
-            String::from_utf8_lossy(req.symbols().class_name(object.class()))
-        );
+        let text = [
+            b"be of type stdclass|Iterator, ".as_slice(),
+            req.symbols().class_name(object.class()),
+            b" given",
+        ]
+        .concat();
         Err(arg_type_error(req, 1, &text))
     }
 }

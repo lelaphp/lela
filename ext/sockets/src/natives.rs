@@ -129,7 +129,12 @@ fn to_fd_set(
     match refused {
         None => Ok(Some(fds)),
         Some(Refused::Given(given)) => {
-            let tail = format!("only have elements of type Socket, {given} given");
+            let tail = [
+                b"only have elements of type Socket, ".as_slice(),
+                &given,
+                b" given",
+            ]
+            .concat();
             Err(arg_type_error(req, position, &tail))
         }
         Some(Refused::Closed) => Err(closed_in_set(req, position)),
@@ -150,7 +155,7 @@ fn closed_in_set(req: &mut Request, position: u32) -> Thrown {
 /// after it.
 enum Refused {
     /// An element that is no socket, by its type's name.
-    Given(String),
+    Given(Vec<u8>),
     /// A socket closed already.
     Closed,
 }

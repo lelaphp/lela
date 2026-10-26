@@ -764,8 +764,12 @@ fn xml_parser_set_option(
         ValueRef::Bool(_) | ValueRef::Int(_) | ValueRef::Str(_)
     ) {
         let given = type_name(req, &value);
-        let message =
-            format!("Argument #3 ($value) must be of type string|int|bool, {given} given");
+        let message = [
+            b"Argument #3 ($value) must be of type string|int|bool, ".as_slice(),
+            given.as_slice(),
+            b" given".as_slice(),
+        ]
+        .concat();
         docref(req, Level::Warning, &message);
     }
     let object = parser.object();

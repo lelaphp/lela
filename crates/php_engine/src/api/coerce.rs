@@ -494,7 +494,7 @@ pub fn is_type(value: &Value, tag: TypeTag) -> bool {
 /// so a native that words one by hand words it with this and not with
 /// [`type_name`], which says `bool` where php says `true`.
 #[must_use]
-pub fn value_name(req: &Request, value: &Value) -> String {
+pub fn value_name(req: &Request, value: &Value) -> Vec<u8> {
     crate::ops::value_name(req, value)
 }
 
@@ -524,7 +524,7 @@ pub fn value_name(req: &Request, value: &Value) -> String {
 /// bool(false)
 /// ```
 #[must_use]
-pub fn type_name(req: &Request, value: &Value) -> String {
+pub fn type_name(req: &Request, value: &Value) -> Vec<u8> {
     crate::ops::type_name(req, value)
 }
 
@@ -928,7 +928,7 @@ fn hold(req: &mut Request, value: &Value, ty: &Type, position: u32) -> Result<He
         return Err(arg_type_error(
             req,
             position,
-            &format!("be of type {declared}, {given} given"),
+            &bytes!("be of type ", declared, ", ", given, " given"),
         ));
     };
     if null {

@@ -798,14 +798,19 @@ fn fd_of(req: &mut Request, given: &Value, reader: FdReader) -> Result<Option<i3
             },
             Err(thrown) => {
                 clear(req, thrown)?;
-                let tail = format!("be of type int|resource, {} given", value_name(req, &given));
+                let tail = [
+                    b"be of type int|resource, ".as_slice(),
+                    &value_name(req, &given),
+                    b" given",
+                ]
+                .concat();
                 if reader == FdReader::Fpathconf {
                     return Err(arg_type_error(req, 1, &tail));
                 }
                 docref(
                     req,
                     Level::Warning,
-                    &format!("Argument #1 ($file_descriptor) must {tail}"),
+                    &[b"Argument #1 ($file_descriptor) must ".as_slice(), &tail].concat(),
                 );
                 if reader == FdReader::Isatty {
                     return Ok(None);

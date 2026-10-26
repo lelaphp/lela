@@ -172,10 +172,12 @@ fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>
             }
             ValueRef::Int(n) => n,
             _ => {
-                let text = format!(
-                    "Invalid {} value in $options argument",
-                    value_name(req, &value)
-                );
+                let text = [
+                    b"Invalid ".as_slice(),
+                    &value_name(req, &value),
+                    b" value in $options argument",
+                ]
+                .concat();
                 return Err(value_error(req, &text));
             }
         };
@@ -528,7 +530,7 @@ fn http_build_query(
                 return Err(arg_type_error(
                     req,
                     1,
-                    &format!("not be an enum, {name} given"),
+                    &[b"not be an enum, ".as_slice(), &name, b" given"].concat(),
                 ));
             }
             (object.property_table(req)?, Some(object))
@@ -539,7 +541,7 @@ fn http_build_query(
                 req,
                 1,
                 // `Z_PARAM_ARRAY_OR_OBJECT` names `array` alone.
-                &format!("be of type array, {name} given"),
+                &[b"be of type array, ".as_slice(), &name, b" given"].concat(),
             ));
         }
     };

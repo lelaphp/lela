@@ -1831,7 +1831,7 @@ impl Exception {
     #[php(final)]
     fn getTraceAsString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let trace = req.trace_string_of(this.object());
-        PhpString::new(req, trace.as_bytes())
+        PhpString::new(req, &trace)
     }
 
     /// `ZEND_METHOD(Exception, __toString)`: the class, the message, the

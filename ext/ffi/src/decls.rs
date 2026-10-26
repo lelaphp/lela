@@ -1101,7 +1101,7 @@ fn ffi_cast(
         return Err(arg_type_error(
             req,
             2,
-            &format!("be of type FFI\\CData, {given} given"),
+            &[b"be of type FFI\\CData, ".as_slice(), &given, b" given"].concat(),
         ));
     };
     let old = view(req, old_object);
@@ -1198,7 +1198,12 @@ fn data_or_type(req: &mut Request, value: Option<Value>) -> Result<TypeId, Throw
     Err(arg_type_error(
         req,
         1,
-        &format!("be of type FFI\\CData or FFI\\CType, {given} given"),
+        &[
+            b"be of type FFI\\CData or FFI\\CType, ".as_slice(),
+            &given,
+            b" given",
+        ]
+        .concat(),
     ))
 }
 
@@ -1246,7 +1251,12 @@ fn source(
     Err(arg_type_error(
         req,
         position,
-        &format!("be of type FFI\\CData or string, {given} given"),
+        &[
+            b"be of type FFI\\CData or string, ".as_slice(),
+            &given,
+            b" given",
+        ]
+        .concat(),
     ))
 }
 
