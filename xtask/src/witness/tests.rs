@@ -666,6 +666,70 @@ fn a_fence_a_trace_row_covers_is_held_to_the_engine_alone_and_one_it_does_not_bo
     );
 }
 
+/// A row naming the regime its cause is proven at runs each fence it
+/// covers again under the oracle in that regime (#3365, #3369): the
+/// fixture's fence the oracle agrees on there is covered, as is the one
+/// whose pid its wildcard meets in both runs, and the one it
+/// still differs on, the engine carrying `zend_test` and the oracle not,
+/// fails naming its id and the regime, which is the negative control. The
+/// tracked pin carries no `optimizer-off` until a person adds it, so the
+/// test lays it into the fixture's pin; a pin without it fails both.
+#[test]
+fn a_proven_rows_fences_run_again_under_its_regime_and_one_still_differing_fails() {
+    if oracle().is_none() {
+        return;
+    }
+    let root = workspace().join("xtask/fixtures/witness/proven-at");
+    let mut fixture = Manifest::load(&root).unwrap();
+    let found = super::extract(&root, &fixture.crates[0], None, Target::built()).unwrap();
+    let rows = Registry::load(&root).unwrap();
+    let judged = |fixture: &Manifest| {
+        let run = judge(
+            &fixture.pin().unwrap().oracle(),
+            &binary(),
+            &rows,
+            &Ask::default(),
+            &found,
+            None,
+        );
+        run.unwrap().witnesses.judged
+    };
+    for judged in judged(&fixture) {
+        assert_eq!(judged.judgement, Judgement::Fail, "{judged:#?}");
+        assert!(
+            judged.note.contains("no regime \"optimizer-off\""),
+            "{}",
+            judged.note
+        );
+    }
+    let off = crate::oracle::Regime {
+        ini: vec!["opcache.optimization_level=0".to_owned()],
+        args: Vec::new(),
+    };
+    fixture
+        .pin
+        .as_mut()
+        .unwrap()
+        .regime
+        .insert("optimizer-off".to_owned(), off);
+    let [agreed, moving, differs] = &judged(&fixture)[..] else {
+        panic!()
+    };
+    assert_eq!(agreed.judgement, Judgement::Covered, "{agreed:#?}");
+    assert_eq!(moving.judgement, Judgement::Covered, "{moving:#?}");
+    assert_eq!(differs.judgement, Judgement::Fail, "{differs:#?}");
+    assert!(
+        differs
+            .note
+            .contains("trace:fixture-proven-at proves its cause at optimizer-off")
+            && differs.note.contains(&differs.id)
+            && differs.note.contains("-oracle")
+            && differs.note.contains("+engine"),
+        "{}",
+        differs.note
+    );
+}
+
 /// A fence a `trace:` row covers is held to the engine alone: the row
 /// accepts no difference for it, so the engine's miss is a failure and
 /// not `diverged`, and an `open` row pins nothing (#1650). A `witness:`

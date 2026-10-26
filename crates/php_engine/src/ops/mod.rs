@@ -5567,6 +5567,24 @@ fn lacking(req: &mut Request, union: PhpArray, right: PhpArray) -> Vec<(Key, Val
 /// int(0)
 /// int(1)
 /// ```
+///
+/// Under opcache php's SCCP pass folds `str_repeat('a', 2)` into an
+/// immutable value at compile time, so the union's element offers no
+/// root and php counts one. This engine runs no optimizer on an executed op array
+/// (design §6.1), so it counts the two php counts with
+/// `opcache.optimization_level=0`: the fence pins the engine's side of
+/// the `by-design` row `trace:sccp-folded-roots` (#3334, #3366).
+///
+/// ```php
+/// class D { private array $p = [];
+///   function a() { parse_str('', $this->p); }
+///   function c() { $this->p += ['x' => [str_repeat('a', 2)]]; } }
+/// $d = new D; $d->a(); $d->c();
+/// echo gc_status()['roots'], "\n";
+/// ```
+/// ```expect regime=immutable-literals
+/// 2
+/// ```
 pub(crate) fn add_assign(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
     let held = left.deref();
     let (Some(mut array), Some(b)) = (held.as_array(), right.deref().as_array()) else {

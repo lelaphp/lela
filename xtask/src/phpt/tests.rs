@@ -99,10 +99,10 @@ fn subset(name: &str, tests: &[(&str, &str)]) -> (Tree, Subset) {
         dirs: vec![Dir {
             under: PathBuf::from("ext/fixture/tests"),
             path: dir.path().to_path_buf(),
-            needs: None,
         }],
         root: dir.path().to_path_buf(),
         holds: Holds::Every,
+        routed: route::Routed::default(),
     };
     (dir, subset)
 }
@@ -214,16 +214,7 @@ fn rooted(name: &str, text: &str) -> (Tree, Subset) {
     let dir = root.join("ext/fixture/tests");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join(format!("{name}.phpt")), text).unwrap();
-    let subset = Subset {
-        scope: "ext/fixture".to_owned(),
-        dirs: vec![Dir {
-            under: PathBuf::from("ext/fixture/tests"),
-            path: dir,
-            needs: None,
-        }],
-        root: root.path().to_path_buf(),
-        holds: Holds::Every,
-    };
+    let subset = over("ext/fixture", &root, "ext/fixture/tests");
     (root, subset)
 }
 
@@ -335,7 +326,7 @@ fn a_missed_expectation_fails_with_the_difference() {
     let (judgement, note) = only(&tally);
     assert_eq!(judgement, Judgement::Fail, "{tally:#?}");
     assert!(note.contains("-five") && note.contains("+four"), "{note}");
-    assert_eq!(tally.against(), ["missed.phpt"]);
+    assert_eq!(tally.against(), ["ext/fixture/tests/missed.phpt"]);
     // The miss keeps the lines where the two part and what they come to,
     // decoded where the verdict was made (#1185).
     assert_eq!(
@@ -382,17 +373,13 @@ fn a_program_past_the_recipes_limit_fails_its_test_and_the_lane_goes_on() {
     let tally = run_subset(&oracle, &registry(""), &subset, under)
         .unwrap()
         .0;
-    let went: Vec<(&str, Judgement)> = tally
-        .judged
-        .iter()
-        .map(|j| (j.name.as_str(), j.judgement))
-        .collect();
+    let went = went(&tally);
     assert_eq!(
         went,
         [
-            ("a.phpt", Judgement::Pass),
-            ("b.phpt", Judgement::Fail),
-            ("c.phpt", Judgement::Pass),
+            ("ext/fixture/tests/a.phpt", Judgement::Pass),
+            ("ext/fixture/tests/b.phpt", Judgement::Fail),
+            ("ext/fixture/tests/c.phpt", Judgement::Pass),
         ],
         "{tally:#?}"
     );
@@ -401,7 +388,7 @@ fn a_program_past_the_recipes_limit_fails_its_test_and_the_lane_goes_on() {
         note.contains(&format!("the recipe's limit of {LIMIT} s")),
         "{note}"
     );
-    assert_eq!(tally.against(), ["b.phpt"]);
+    assert_eq!(tally.against(), ["ext/fixture/tests/b.phpt"]);
     assert_eq!(tally.judged[1].miss, Some(miss::Miss::past_limit()));
     // The process the test ran is gone: `kill -0` finds no process by
     // that number, which it would for one still running or one killed and
@@ -681,7 +668,7 @@ fn a_file_that_is_not_a_test_borks_and_the_subset_fails_on_it() {
     let (judgement, note) = only(&tally);
     assert_eq!(judgement, Judgement::Bork);
     assert!(note.contains("must start with --TEST--"), "{note}");
-    assert_eq!(tally.against(), ["borked.phpt"]);
+    assert_eq!(tally.against(), ["ext/fixture/tests/borked.phpt"]);
     assert!(
         matches!(&tally.judged[0].miss, Some(miss::Miss { signature: miss::Signature::Bork(why), .. }) if why.contains("must start with --TEST--")),
         "{tally:#?}"
@@ -701,16 +688,12 @@ fn a_post_test_runs_through_the_cgi_host() {
     }
     let (_tree, subset) = fixture_subset("cgi");
     let tally = run(&subset, &registry(""));
-    let went: Vec<(&str, Judgement)> = tally
-        .judged
-        .iter()
-        .map(|j| (j.name.as_str(), j.judgement))
-        .collect();
+    let went = went(&tally);
     assert_eq!(
         went,
         [
-            ("headers.phpt", Judgement::Fail),
-            ("post.phpt", Judgement::Pass)
+            ("ext/fixture/tests/headers.phpt", Judgement::Fail),
+            ("ext/fixture/tests/post.phpt", Judgement::Pass)
         ],
         "{tally:#?}"
     );
@@ -735,32 +718,23 @@ fn a_test_of_sapi_fpm_finds_the_process_manager() {
     let tree = Tree::new("phpt-judge-fpm").unwrap();
     let tests = tree.join("sapi/fpm/tests");
     copy(&fixture("fpm"), &tests);
-    let subset = Subset {
-        scope: "sapi/fpm".to_owned(),
-        dirs: vec![Dir {
-            under: PathBuf::from("sapi/fpm/tests"),
-            path: tests.clone(),
-            needs: None,
-        }],
-        root: tree.path().to_path_buf(),
-        holds: Holds::Every,
-    };
+    let subset = over("sapi/fpm", &tree, "sapi/fpm/tests");
     let tally = run(&subset, &registry(""));
-    let found: Vec<(&str, Judgement)> = tally
-        .judged
-        .iter()
-        .map(|j| (j.name.as_str(), j.judgement))
-        .collect();
-    assert_eq!(found, [("found.phpt", Judgement::Pass)], "{tally:#?}");
+    let found = went(&tally);
+    assert_eq!(
+        found,
+        [("sapi/fpm/tests/found.phpt", Judgement::Pass)],
+        "{tally:#?}"
+    );
     assert!(tree.join("sapi/fpm/php-fpm").is_file());
     let (_elsewhere, subset) = fixture_subset("fpm");
     let tally = run(&subset, &registry(""));
-    let skipped: Vec<(&str, Judgement)> = tally
-        .judged
-        .iter()
-        .map(|j| (j.name.as_str(), j.judgement))
-        .collect();
-    assert_eq!(skipped, [("found.phpt", Judgement::Skip)], "{tally:#?}");
+    let skipped = went(&tally);
+    assert_eq!(
+        skipped,
+        [("ext/fixture/tests/found.phpt", Judgement::Skip)],
+        "{tally:#?}"
+    );
 }
 
 /// The fixture at `xtask/fixtures/phpt/phpdbg` (#1304): a `--PHPDBG--`
@@ -856,7 +830,10 @@ fn the_corpus_holds_each_extension_whole_as_a_row_derives_it() {
         .iter()
         .map(|test| nested.name(test))
         .collect();
-    assert_eq!(names, ["tests/c.phpt", "uchar/tests/d.phpt"]);
+    assert_eq!(
+        names,
+        ["ext/nested/tests/c.phpt", "ext/nested/uchar/tests/d.phpt"]
+    );
 }
 
 /// The patterns CI checks the corpus out by (#1713) take every subset the
@@ -1048,45 +1025,106 @@ fn a_crate_resolves_to_every_subset_its_row_names() {
     );
 }
 
-/// A row's `needed_in` holds, beside the extension's own tests, each test
-/// of the directory it names whose `--EXTENSIONS--` names the extension on
-/// a line of its own, among others, and no other: not one that spells it
-/// otherwise, which run-tests.php finds missing whatever loads it. So they
-/// run under the row's oracle where the main one skips them; a copy of
-/// the tree keeps the filter (#3309).
+/// Routing (#3312): a variant's row holds, beside its own tests, each
+/// test of the corpus whose `--EXTENSIONS--` names an extension its
+/// variant loads and the main oracle does not, on a line of its own,
+/// among others, and no other: not one that spells it otherwise, which
+/// run-tests.php finds missing whatever loads it. Each leaves the subset
+/// it stands in; one needing another feature or a host is held with why
+/// the lane cannot build for it; names are corpus paths, and a copy of
+/// the tree keeps the routing. The negative control: an extension the
+/// main oracle loads too routes nothing.
 #[test]
-fn a_row_holds_the_tests_elsewhere_that_need_its_extension() {
+fn a_variants_row_holds_the_tests_elsewhere_that_need_what_only_it_loads() {
+    use route::{Route, Unbuilt};
     let tree = fixture_tree();
     let write = |at: &str, extensions: &str| {
         let body = format!("--TEST--\n{at}\n{extensions}--FILE--\n<?php\n--EXPECT--\n");
         fs::create_dir_all(tree.join(at).parent().unwrap()).unwrap();
         fs::write(tree.join(at), body).unwrap();
     };
+    let needs = "--EXTENSIONS--\nzend_test\n";
     write("ext/zend_test/tests/own.phpt", "");
-    write("Zend/tests/needs.phpt", "--EXTENSIONS--\nzend_test\n");
+    write("Zend/tests/needs.phpt", needs);
     write(
         "Zend/tests/among.phpt",
         "--EXTENSIONS--\nstandard\nzend_test\n",
     );
     write("Zend/tests/other.phpt", "--EXTENSIONS--\nzend_testing\n");
     write("Zend/tests/cased.phpt", "--EXTENSIONS--\nZEND_TEST\n");
+    write(
+        "ext/ffi/tests/both.phpt",
+        "--EXTENSIONS--\nffi\nzend_test\n",
+    );
+    write("sapi/fpm/tests/served.phpt", needs);
     let mut row = Crate::named("ext/zend_test");
-    row.needed_in = vec!["Zend/tests".to_owned()];
-    let subset = resolve(&manifest_of([row], &tree), "zend_test").unwrap();
+    (row.feature, row.oracle) = (Some("zend_test".into()), Some("zend-test".into()));
+    let mut ffi = Crate::named("ext/ffi");
+    ffi.feature = Some("ffi".to_owned());
+    let engine = Crate::named("php_engine").with_phpt(&["Zend/tests"]);
+    let manifest = manifest_of([row, ffi, engine], &tree);
+    let listing = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect();
+    let variant = listing(&["standard", "ffi", "zend_test"]);
+    let routed = |main: &[&str]| {
+        let routes: Vec<Route> = Route::of(&manifest.crates[0], &variant, &listing(main))
+            .into_iter()
+            .collect();
+        let mut subsets: Vec<Subset> = ["zend_test", "php_engine", "ffi"]
+            .map(|name| resolve(&manifest, name).unwrap())
+            .into();
+        let carried = Carried::turning_on(&[]);
+        route::apply(&routes, &manifest, &carried, &tree, &mut subsets).unwrap();
+        subsets
+    };
     let names = |subset: &Subset| -> Vec<String> {
         let tests = subset.tests().unwrap();
         tests.iter().map(|test| subset.name(test)).collect()
     };
-    let held = [
-        "ext/zend_test/tests/own.phpt",
-        "Zend/tests/among.phpt",
-        "Zend/tests/needs.phpt",
-    ];
-    assert_eq!(names(&subset), held);
-    let copy = Tree::new("phpt-needed-in").unwrap();
-    let moved = subset.rooted(&copy);
-    assert_eq!(moved.dirs[1].path, copy.join("Zend/tests"));
-    assert_eq!(moved.dirs[1].needs.as_deref(), Some("zend_test"));
+    let [zend_test, engine, ffi] = <[Subset; 3]>::try_from(routed(&["standard", "ffi"])).unwrap();
+    assert_eq!(
+        names(&zend_test),
+        [
+            "ext/zend_test/tests/own.phpt",
+            "Zend/tests/among.phpt",
+            "Zend/tests/needs.phpt",
+            "ext/ffi/tests/both.phpt",
+            "sapi/fpm/tests/served.phpt",
+        ]
+    );
+    let why = |under: &str| zend_test.routed.gained[Path::new(under)].clone();
+    assert_eq!(why("Zend/tests/needs.phpt"), None);
+    assert_eq!(
+        why("ext/ffi/tests/both.phpt"),
+        Some(Unbuilt::Feature("ffi".to_owned()))
+    );
+    assert_eq!(
+        why("sapi/fpm/tests/served.phpt"),
+        Some(Unbuilt::Host(crate::oracle::hosts::FPM))
+    );
+    let left = names(&engine);
+    assert!(
+        left.contains(&"Zend/tests/other.phpt".to_owned()),
+        "{left:?}"
+    );
+    assert!(
+        !left
+            .iter()
+            .any(|n| n.ends_with("needs.phpt") || n.ends_with("among.phpt")),
+        "{left:?}"
+    );
+    assert!(names(&ffi).is_empty(), "{:?}", names(&ffi));
+    let copy = Tree::new("phpt-routed").unwrap();
+    let moved = zend_test.rooted(&copy);
+    assert!(
+        moved
+            .tests()
+            .unwrap()
+            .contains(&copy.join("Zend/tests/among.phpt"))
+    );
+    // The main oracle loads zend_test too: nothing routes.
+    let main_loads = routed(&["standard", "ffi", "zend_test"]);
+    assert_eq!(names(&main_loads[0]), ["ext/zend_test/tests/own.phpt"]);
+    assert!(names(&main_loads[1]).contains(&"Zend/tests/needs.phpt".to_owned()));
 }
 
 #[test]
@@ -1591,12 +1629,19 @@ fn copy(from: &Path, to: &Path) {
 /// php-src would, and the subset of one directory of it.
 fn redirect_subset(tree: &Tree, under: &str) -> Subset {
     copy(&fixture("redirect"), tree.path());
-    Subset {
-        scope: "ext/driver".to_owned(),
-        dirs: vec![Dir::at(tree.path(), PathBuf::from(under))],
-        root: tree.path().to_path_buf(),
-        holds: Holds::Every,
-    }
+    over("ext/driver", tree, under)
+}
+
+/// Each test of the run by name, with its verdict.
+fn went(tally: &Tally) -> Vec<(&str, Judgement)> {
+    (tally.judged.iter())
+        .map(|j| (j.name.as_str(), j.judgement))
+        .collect()
+}
+
+/// The subset `scope` of the one directory `under` of the tree at `root`.
+fn over(scope: &str, root: &Path, under: &str) -> Subset {
+    Subset::over(scope.to_owned(), root, [PathBuf::from(under)], Holds::Every)
 }
 
 /// `--unkept`'s reading of a redirect (#1830): a target stands for the
@@ -1665,17 +1710,17 @@ fn a_redirecttest_runs_its_set_under_the_environment_its_section_returns() {
         [
             (
                 "phpt:php-src/ext/shared/tests/dsn.phpt via php-src/ext/driver/tests/common.phpt",
-                "ext/shared/tests/dsn.phpt via common.phpt",
+                "ext/shared/tests/dsn.phpt via ext/driver/tests/common.phpt",
                 Judgement::Pass
             ),
             (
                 "phpt:php-src/ext/shared/tests/second.phpt via php-src/ext/driver/tests/common.phpt",
-                "ext/shared/tests/second.phpt via common.phpt",
+                "ext/shared/tests/second.phpt via ext/driver/tests/common.phpt",
                 Judgement::Pass
             ),
             (
                 "phpt:php-src/ext/driver/tests/own.phpt",
-                "own.phpt",
+                "ext/driver/tests/own.phpt",
                 Judgement::Pass
             ),
         ],
@@ -1698,12 +1743,12 @@ fn a_redirecttest_runs_its_set_under_the_environment_its_section_returns() {
             .collect::<Vec<_>>(),
         [
             (
-                "no-extension.phpt",
+                "ext/refused/tests/no-extension.phpt",
                 Judgement::Skip,
                 "Required extension missing: not_an_extension"
             ),
             (
-                "no-set.phpt",
+                "ext/refused/tests/no-set.phpt",
                 Judgement::Bork,
                 "Redirect info must contain exactly one TEST string to be used as redirect directory."
             ),
@@ -1822,7 +1867,10 @@ fn tests_that_conflict_never_run_at_once_and_the_verdicts_are_the_serial_runs() 
         "c-directory/two.phpt",
     ];
     let names: Vec<&str> = tally.judged.iter().map(|j| j.name.as_str()).collect();
-    assert_eq!(names, tests);
+    assert_eq!(
+        names,
+        tests.map(|test| format!("{}{test}", "ext/fixture/tests/"))
+    );
     assert!(
         tally.judged.iter().all(|j| j.judgement == Judgement::Pass),
         "{tally:#?}"
@@ -2077,16 +2125,7 @@ fn a_mysql_subset_with_no_server_is_refused_and_not_skipped() {
     let tree = Tree::new("phpt-judge-mysql").unwrap();
     let tests = tree.join("ext/pdo_mysql/tests");
     copy(&fixture("mysql"), &tests);
-    let subset = Subset {
-        scope: "ext/pdo_mysql".to_owned(),
-        dirs: vec![Dir {
-            under: PathBuf::from("ext/pdo_mysql/tests"),
-            path: tests,
-            needs: None,
-        }],
-        root: tree.path().to_path_buf(),
-        holds: Holds::Every,
-    };
+    let subset = over("ext/pdo_mysql", &tree, "ext/pdo_mysql/tests");
     assert!(server::needs(&subset));
     let mut down = manifest();
     down.pin.as_mut().unwrap().recipe.env.insert(
