@@ -168,8 +168,9 @@ const LANDING_CHUNKS: usize = crate::arena::COLUMN_ROWS >> LANDING_CHUNK_BITS;
 /// per op array, the address of its landing words, one [`Word`] per
 /// opline, zero until a tier laid them down, and how many there are. An
 /// op array is named by its offset less `first`, below `held`, the most
-/// a [`Column`] numbers; one below `first`, the preload's, and one a
-/// request compiled are named by none, and read as no compiled landing.
+/// a [`Column`] numbers; one of the preload's, whose rows each epoch
+/// lays apart from its own (`crate::arena::Base`), and one a request
+/// compiled are named by none, and read as no compiled landing.
 /// Each address is written once, with release, after what it names, and
 /// stands as long as the epoch, which every trace whose code reads it
 /// holds.
@@ -239,6 +240,25 @@ impl Funcs {
         Funcs::numbered_from(self.first.saturating_add(self.rows.reserved()))
     }
 
+    /// The rows of the preload's op arrays as one epoch over it runs
+    /// them: one per op array of `units`, the preload's, laid as `laid`
+    /// says, numbered from the least offset among them. Laid afresh for
+    /// every epoch (`crate::arena::Base::again`), so a restart's
+    /// epoch starts them as php's `zend_jit_restart` leaves a preloaded
+    /// op array (`zend_jit_restart_preloaded_script`,
+    /// `Z/ext/opcache/jit/zend_jit.c:4010-4034`): its entries and loops
+    /// counting again, no landing armed, nothing blacklisted, and no word
+    /// naming a trace of the table the restart dropped.
+    pub(crate) fn preloaded(units: &[PublishedUnit], laid: Laid) -> Funcs {
+        let bodies = units.iter().flat_map(bodies);
+        let least = bodies.filter_map(|(_, code)| engine_offset(code)).min();
+        let funcs = Funcs::numbered_from(least.unwrap_or(0));
+        for unit in units {
+            funcs.publish(unit, laid);
+        }
+        funcs
+    }
+
     /// One row per op array of `unit`, which the epoch's cache holds,
     /// each at its offset with a word per safepoint, laid as `laid`
     /// says: at the halves the tier gave where the unit's words count,
@@ -249,7 +269,7 @@ impl Funcs {
     /// sealed word.
     pub(crate) fn publish(&self, unit: &PublishedUnit, laid: Laid) {
         for (body, code) in bodies(unit) {
-            let MapPtrOffset::Engine(offset) = code.runtime_cache else {
+            let Some(offset) = engine_offset(code) else {
                 continue;
             };
             let Some(at) = offset.checked_sub(self.first) else {
@@ -303,6 +323,15 @@ impl Funcs {
     }
 }
 
+/// The engine offset `code` took as its unit was published; none for an
+/// op array compiled for one request.
+fn engine_offset(code: &OpArray) -> Option<u32> {
+    match code.runtime_cache {
+        MapPtrOffset::Engine(offset) => Some(offset),
+        MapPtrOffset::Request(_) => None,
+    }
+}
+
 /// Every op array of `unit` with its place: the main one, its
 /// functions', the ones no name binds, its methods' and its hooks', the
 /// order `assign_map_ptrs` gives them their offsets in.
@@ -336,7 +365,7 @@ fn bodies(unit: &PublishedUnit) -> impl Iterator<Item = (Body, &OpArray)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::atomic::Ordering;
 
     use php_unit::{OpArray, Opline, OplineIdx, Unit};
@@ -346,7 +375,7 @@ mod tests {
 
     /// A unit whose main op array has `safepoints` safepoints and as many
     /// oplines, published at offset `first`.
-    fn published(first: u32, safepoints: u32) -> php_unit::PublishedUnit {
+    pub(crate) fn published(first: u32, safepoints: u32) -> php_unit::PublishedUnit {
         let mut unit = Unit {
             main: OpArray {
                 safepoints: (0..safepoints).map(OplineIdx).collect::<Vec<_>>().into(),
