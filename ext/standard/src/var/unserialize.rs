@@ -2327,8 +2327,7 @@ impl State<'_> {
             let Some(kept) = kept else {
                 return Ok(false);
             };
-            let key = PhpString::new(req, MAGIC_MEMBER_SERIALIZED)?;
-            object.unserialize_prop(req, key, kept.into_value())?;
+            store_value(req, object, MAGIC_MEMBER_SERIALIZED, kept.into_value())?;
             self.p += datalen + 1;
             store_member(req, object, MAGIC_MEMBER, name)?;
             return Ok(true);
@@ -2628,15 +2627,27 @@ fn store_member(
     member: &[u8],
     value: &[u8],
 ) -> Result<(), Thrown> {
-    let key = PhpString::new(req, member)?;
-    let stored = match PhpString::new(req, value) {
-        Ok(stored) => stored.into_value(),
+    let stored = PhpString::new(req, value)?.into_value();
+    store_value(req, object, member, stored)
+}
+
+/// `zend_hash_str_update(Z_OBJPROP_P(rval), member, ...)` with `value`,
+/// the value made before the key as php makes it: the value's owner is
+/// given up where the key cannot be had, so no path drops it.
+fn store_value(
+    req: &mut Request,
+    object: PhpObject,
+    member: &[u8],
+    value: Owner<Value>,
+) -> Result<(), Thrown> {
+    let key = match PhpString::new(req, member) {
+        Ok(key) => key,
         Err(thrown) => {
-            key.give_up(req);
+            value.give_up(req);
             return Err(thrown);
         }
     };
-    object.unserialize_prop(req, key, stored)?;
+    object.unserialize_prop(req, key, value)?;
     Ok(())
 }
 
