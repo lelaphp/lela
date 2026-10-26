@@ -911,13 +911,7 @@ pub(crate) fn returning(value: u16) -> [u8; 6] {
     reason = "a test starts its own threads (seams.toml rule fork.threads)"
 )]
 mod native {
-    #[cfg(target_arch = "aarch64")]
-    use std::ptr::NonNull;
-    #[cfg(target_arch = "aarch64")]
-    use std::sync::atomic::AtomicPtr;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    #[cfg(target_arch = "aarch64")]
-    use std::time::{Duration, Instant};
 
     use super::{Arena, CHUNK, Code, Full, callable, returning};
     use crate::table::Native;
@@ -936,14 +930,6 @@ mod native {
     /// entry, until `enter` names the `Entry` type.
     fn entered(code: &Code<Native>) -> extern "C" fn() -> u32 {
         callable(code.entry())
-    }
-
-    /// This thread's own instruction synchronisation barrier, `isb`.
-    #[cfg(target_arch = "aarch64")]
-    fn isb() {
-        // SAFETY: `isb` touches no memory and no register the compiler
-        // allocates.
-        unsafe { std::arch::asm!("isb", options(nostack, preserves_flags)) };
     }
 
     /// `mov w0, #7; ret` on aarch64, `mov eax, 7; ret` on x86-64,
@@ -1002,110 +988,128 @@ mod native {
         Ok(())
     }
 
-    /// The reused-chunk question of §4.4, over `ROUNDS` rounds: a body
-    /// entered on as many threads as the machine has cores, and dropped; a thread started that has
-    /// never entered the chunk, waiting on an atomic pointer; a different
-    /// body published at the same address of the reused chunk; and its
-    /// entry stored in the pointer, the waiting thread entering the new
-    /// body as soon as it sees it, with or without its own `isb` first,
-    /// and with no system call between the two. Answers how many entries
-    /// returned the old body's value.
+    /// The reused-chunk question of §4.4, aarch64's alone: whether a
+    /// thread that enters a reused chunk needs its own `isb`.
     #[cfg(target_arch = "aarch64")]
-    fn stale_entries(own_isb: bool) -> Result<u32, String> {
-        const ROUNDS: u16 = 500;
-        // A core and not a thread holds instructions, and which core a
-        // thread runs on is the system's to choose: one warming thread per
-        // core, so the entering thread's core has likely run the old body.
-        let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
-        let mut arena = arena(1)?;
-        let mut stale = 0;
-        // Each round starts with the arena's one chunk full, or never
-        // taken, so its first body lands at the chunk's start.
-        let fill = |arena: &mut Arena<Native>| {
-            (arena.publish(&vec![0; CHUNK - 8], 1))
-                .map_err(|Full| "no room for the filler".to_owned())
-        };
-        for round in 0..ROUNDS {
-            let (old, new) = (2 * round, 2 * round + 1);
-            let first = published(&mut arena, old)?;
-            let filler = fill(&mut arena)?;
-            let address = first.entry();
-            let entry = AtomicPtr::new(std::ptr::null_mut());
-            let answer = std::thread::scope(|scope| -> Result<u32, String> {
-                let entering = scope.spawn(|| {
-                    let deadline = Instant::now() + Duration::from_secs(10);
-                    loop {
-                        let at = entry.load(Ordering::Acquire);
-                        if let Some(at) = NonNull::new(at) {
-                            if own_isb {
-                                isb();
+    mod reused {
+        use std::ptr::NonNull;
+        use std::sync::atomic::{AtomicPtr, Ordering};
+        use std::time::{Duration, Instant};
+
+        use super::super::{Arena, CHUNK, Full, callable};
+        use super::{Native, arena, entered, published};
+
+        /// This thread's own instruction synchronisation barrier, `isb`.
+        fn isb() {
+            // SAFETY: `isb` touches no memory and no register the compiler
+            // allocates.
+            unsafe { std::arch::asm!("isb", options(nostack, preserves_flags)) };
+        }
+
+        /// The reused-chunk question of §4.4, over `ROUNDS` rounds: a body
+        /// entered on as many threads as the machine has cores, and
+        /// dropped; a thread started that has never entered the chunk,
+        /// waiting on an atomic pointer; a different body published at the
+        /// same address of the reused chunk; and its entry stored in the
+        /// pointer, the waiting thread entering the new body as soon as it
+        /// sees it, with or without its own `isb` first, and with no system
+        /// call between the two. Answers how many entries returned the old
+        /// body's value.
+        fn stale_entries(own_isb: bool) -> Result<u32, String> {
+            const ROUNDS: u16 = 500;
+            // A core and not a thread holds instructions, and which core a
+            // thread runs on is the system's to choose: one warming thread per
+            // core, so the entering thread's core has likely run the old body.
+            let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+            let mut arena = arena(1)?;
+            let mut stale = 0;
+            // Each round starts with the arena's one chunk full, or never
+            // taken, so its first body lands at the chunk's start.
+            let fill = |arena: &mut Arena<Native>| {
+                (arena.publish(&vec![0; CHUNK - 8], 1))
+                    .map_err(|Full| "no room for the filler".to_owned())
+            };
+            for round in 0..ROUNDS {
+                let (old, new) = (2 * round, 2 * round + 1);
+                let first = published(&mut arena, old)?;
+                let filler = fill(&mut arena)?;
+                let address = first.entry();
+                let entry = AtomicPtr::new(std::ptr::null_mut());
+                let answer = std::thread::scope(|scope| -> Result<u32, String> {
+                    let entering = scope.spawn(|| {
+                        let deadline = Instant::now() + Duration::from_secs(10);
+                        loop {
+                            let at = entry.load(Ordering::Acquire);
+                            if let Some(at) = NonNull::new(at) {
+                                if own_isb {
+                                    isb();
+                                }
+                                return Some(callable(at)());
                             }
-                            return Some(callable(at)());
+                            if Instant::now() > deadline {
+                                return None;
+                            }
+                            std::hint::spin_loop();
                         }
-                        if Instant::now() > deadline {
-                            return None;
+                    });
+                    std::thread::scope(|warm| {
+                        for _ in 0..cores {
+                            warm.spawn(|| {
+                                assert!((0..10_000).all(|_| entered(&first)() == u32::from(old)));
+                            });
                         }
-                        std::hint::spin_loop();
+                    });
+                    drop((first, filler));
+                    let second = published(&mut arena, new)?;
+                    assert_eq!(
+                        second.entry(),
+                        address,
+                        "round {round}: the reused chunk's first body is at its start"
+                    );
+                    entry.store(second.entry().as_ptr(), Ordering::Release);
+                    let answer = entering
+                        .join()
+                        .map_err(|_| "the entering thread panicked".to_owned())?;
+                    drop(second);
+                    answer.ok_or_else(|| {
+                        format!("round {round}: the entering thread saw no body in ten seconds")
+                    })
+                })?;
+                drop(fill(&mut arena)?);
+                match answer {
+                    a if a == u32::from(new) => {}
+                    a if a == u32::from(old) => stale += 1,
+                    a => {
+                        return Err(format!(
+                            "round {round}: the reused chunk answered {a}, neither {old} nor {new}"
+                        ));
                     }
-                });
-                std::thread::scope(|warm| {
-                    for _ in 0..cores {
-                        warm.spawn(|| {
-                            assert!((0..10_000).all(|_| entered(&first)() == u32::from(old)));
-                        });
-                    }
-                });
-                drop((first, filler));
-                let second = published(&mut arena, new)?;
-                assert_eq!(
-                    second.entry(),
-                    address,
-                    "round {round}: the reused chunk's first body is at its start"
-                );
-                entry.store(second.entry().as_ptr(), Ordering::Release);
-                let answer = entering
-                    .join()
-                    .map_err(|_| "the entering thread panicked".to_owned())?;
-                drop(second);
-                answer.ok_or_else(|| {
-                    format!("round {round}: the entering thread saw no body in ten seconds")
-                })
-            })?;
-            drop(fill(&mut arena)?);
-            match answer {
-                a if a == u32::from(new) => {}
-                a if a == u32::from(old) => stale += 1,
-                a => {
-                    return Err(format!(
-                        "round {round}: the reused chunk answered {a}, neither {old} nor {new}"
-                    ));
                 }
             }
+            Ok(stale)
         }
-        Ok(stale)
-    }
 
-    #[cfg(target_arch = "aarch64")]
-    #[test]
-    fn a_reused_chunk_entered_by_a_fresh_thread_with_its_own_isb_runs_the_new_body()
-    -> Result<(), String> {
-        assert_eq!(stale_entries(true)?, 0);
-        Ok(())
-    }
+        #[test]
+        fn a_reused_chunk_entered_by_a_fresh_thread_with_its_own_isb_runs_the_new_body()
+        -> Result<(), String> {
+            assert_eq!(stale_entries(true)?, 0);
+            Ok(())
+        }
 
-    #[cfg(target_arch = "aarch64")]
-    #[test]
-    fn a_reused_chunk_entered_by_a_fresh_thread_without_an_isb_runs_the_new_body()
-    -> Result<(), String> {
-        assert_eq!(stale_entries(false)?, 0);
-        Ok(())
+        #[test]
+        fn a_reused_chunk_entered_by_a_fresh_thread_without_an_isb_runs_the_new_body()
+        -> Result<(), String> {
+            assert_eq!(stale_entries(false)?, 0);
+            Ok(())
+        }
     }
 
     /// On Linux the two views are two addresses of one sealed file: what
-    /// the write view holds the executable view reads, `/proc/self/maps`
-    /// shows the one shared and writable and the other shared and
-    /// executable, both of the `memfd`, and the file refuses to shrink or
-    /// grow.
+    /// the write view holds the executable view reads, and
+    /// `/proc/self/maps` shows the one shared and writable and the other
+    /// shared and executable, both of the `memfd`. The arena's file is
+    /// closed by then, so the seals are held on another file `sealed`
+    /// makes as it makes the arena's: it refuses to shrink or grow.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_two_views_are_two_addresses_of_one_sealed_file() -> Result<(), String> {

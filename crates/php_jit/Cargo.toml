@@ -23,7 +23,10 @@ cranelift-codegen = { workspace = true }  # lower: the one module that names a C
 cranelift-frontend = { workspace = true }
 cranelift-native = { workspace = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+# The targets `build.rs` sets `php_jit_arena` on that are Linux; Cargo
+# cannot gate a dependency on a build script's cfg, so the set is said
+# again here, and `build.rs` names this table.
+[target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
 rustix = { workspace = true }             # the code arena's memfd, its seals and its two mappings on Linux (jit-design.md §4.4, §6; #2945's ruling)
 
 [dev-dependencies]
