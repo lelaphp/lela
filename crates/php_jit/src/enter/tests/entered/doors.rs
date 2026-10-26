@@ -160,7 +160,7 @@ fn raced(req: &mut Request, frame: FrameRef) -> Result<Turns, String> {
         ],
     );
     let root = backend
-        .compile(&root, named(b"root"), None)
+        .compile(&root, named(b"root"), None, None)
         .map_err(|abort| format!("{abort:?}"))?;
     let root = table
         .publish(root, Start::Enter)
@@ -185,7 +185,7 @@ fn raced(req: &mut Request, frame: FrameRef) -> Result<Turns, String> {
                 std::hint::spin_loop();
             }
             let compiled = backend
-                .compile(&side, named(b"side"), None)
+                .compile(&side, named(b"side"), None, None)
                 .map_err(|abort| format!("{abort:?}"))?;
             table
                 .publish(compiled, grown)

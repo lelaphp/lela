@@ -76,6 +76,11 @@ pub struct JitRequest {
     pub(crate) epoch: std::cell::OnceCell<Epoch>,
     /// The trace table of that epoch, kept once a request of it made it.
     pub(crate) table: std::cell::OnceCell<Arc<table::Table>>,
+    /// How many escapes the crossing went on from into the trace compiled
+    /// at the landing, the escaping trace's code having found it not there
+    /// or its row unready: what a test reads of the jump it makes itself.
+    #[cfg(test)]
+    pub(crate) escapes_crossed: Cell<u32>,
 }
 
 /// What a visit to a word decided.
@@ -713,10 +718,10 @@ fn followed<'t>(
             Left::Escaped(frame) => match visit_landing(req, shared, frame, None) {
                 Visited::Enter(id) => match table.get(id) {
                     Some(next) => {
-                        // The escaping trace's code goes on into it from
-                        // now on, as php's escape goes on into the
-                        // landing's handler.
-                        enter::remembered(req, frame, trace, next);
+                        #[cfg(test)]
+                        state
+                            .escapes_crossed
+                            .set(state.escapes_crossed.get().saturating_add(1));
                         trace = next;
                         entered = enter::enter(req, Some(state), frame, (epoch, trace), At::First);
                         continue;

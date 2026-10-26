@@ -140,7 +140,7 @@ fn lowered(fixture: Fixture) -> Result<TraceIr, String> {
     let host = Backend::new(&policy(&[]), symbols()).map_err(|e| format!("{e:?}"))?;
     for backend in [&backend, &host] {
         let compiled = backend
-            .compile(&ir, named(fixture), None)
+            .compile(&ir, named(fixture), None, None)
             .map_err(|abort| format!("{}: {abort:?}", fixture.name))?;
         assert!(!compiled.bytes.is_empty());
         assert!(compiled.align.is_power_of_two());
@@ -385,6 +385,7 @@ fn compiled(plan: &[(&str, &str)], program: &str) -> Result<(TraceIr, String), S
                     at: b"f".as_slice().into(),
                     line: 1,
                 },
+                None,
                 None,
             )
             .map_err(|abort| format!("{abort:?}"))?;
@@ -772,7 +773,7 @@ fn a_side_trace_returning_an_array_its_parent_knew_compiles() -> Result<(), Stri
     let ir = crate::types::build(&record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
     let backend = golden_backend().map_err(|e| format!("{e:?}"))?;
     backend
-        .compile(&ir, named(SPECTRALNORM), None)
+        .compile(&ir, named(SPECTRALNORM), None, None)
         .map(|_| ())
         .map_err(|abort| format!("{abort:?}\n{}", super::dump::render(&ir)))
 }
@@ -823,40 +824,6 @@ fn a_body_entry_reads_where_the_frame_stands() -> Result<(), String> {
         "the stood is read after the entry branches:\n{clif}"
     );
     Ok(())
-}
-
-/// A trace's landing slots (`jit-design.md` §4.9): each written once, to
-/// the first trace entered at its landing, every key tagged so none is a
-/// free slot's zero, and a landing past the slots left to the crossing.
-#[test]
-fn a_landing_slot_names_the_first_trace_entered_at_its_landing() {
-    use super::{Entrance, LANDING_TAG, LANDINGS, LandingSlots, Stands};
-    let entrance = |trace| Entrance {
-        body: 0x1000,
-        trace,
-    };
-    let (first, second, third) = (entrance(1), entrance(2), entrance(3));
-    let slots = LandingSlots::new();
-    let key = LandingSlots::key(Stands { func: 0, opline: 0 });
-    assert_eq!(
-        key, LANDING_TAG,
-        "the first opline of op array 0 is no free slot"
-    );
-    slots.remember(key, &first);
-    slots.remember(key, &second);
-    let at = |entrance: &Entrance| std::ptr::from_ref(entrance).addr();
-    assert_eq!(slots.landed(key), Some(at(&first)));
-    let other = LandingSlots::key(Stands { func: 7, opline: 9 });
-    assert_eq!(other, 7 | 9 << 32 | LANDING_TAG);
-    slots.remember(other, &second);
-    assert_eq!(slots.landed(other), Some(at(&second)));
-    assert_eq!(LANDINGS, 2);
-    let past = LandingSlots::key(Stands {
-        func: 7,
-        opline: 10,
-    });
-    slots.remember(past, &third);
-    assert_eq!(slots.landed(past), None);
 }
 
 /// A link the trace was compiled against is a jump in its own bytes

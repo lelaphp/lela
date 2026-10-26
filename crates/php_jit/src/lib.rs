@@ -213,6 +213,8 @@ impl JitRequest {
             headers: crate::enter::Headers::default(),
             epoch: std::cell::OnceCell::new(),
             table: std::cell::OnceCell::new(),
+            #[cfg(test)]
+            escapes_crossed: Cell::new(0),
         }
     }
 }

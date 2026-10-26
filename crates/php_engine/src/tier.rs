@@ -61,6 +61,7 @@ mod frames;
 mod held;
 mod layout;
 pub(crate) mod published;
+pub use published::{LANDING_CHUNK_BITS, LandingIndex};
 mod sampled;
 mod strings;
 #[cfg(dispatch = "tailcall")]
@@ -514,7 +515,9 @@ pub fn state<S: Any>(req: &Request) -> Option<&S> {
 }
 
 /// One safepoint's word (`jit-design.md` §3.2): two atomics, zero at
-/// publication, all ones when sealed.
+/// publication, all ones when sealed, laid in that order, as compiled
+/// code reads a landing's ([`LandingIndex`]).
+#[repr(C)]
 #[derive(Debug, Default)]
 pub struct Word {
     halves: [AtomicU32; 2],

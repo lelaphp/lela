@@ -1234,3 +1234,77 @@ fn a_body_that_leaves_on_the_way_to_the_condition_goes_on_where_it_went() {
         .collect();
     assert_eq!(starts, ["---- TRACE 1 start (loop) f() body.php:2"]);
 }
+
+/// How many escapes the crossing went on from into a landing's trace
+/// in the request ([`crate::JitRequest`]'s count), as [`Escaping`] keeps it.
+#[derive(Debug, Default)]
+struct Crossed(u32);
+
+/// `Lane`, which keeps the request's count of escapes the crossing went
+/// on from in [`Crossed`] after each site.
+struct Escaping;
+
+impl Tier for Escaping {
+    type State = crate::JitRequest;
+
+    fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
+        crate::JitRequest::laid(*started)
+    }
+
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
+        let flow = super::safepoint(req, frame, site, held);
+        let crossed =
+            tier::state::<crate::JitRequest>(req).map_or(0, |state| state.escapes_crossed.get());
+        req.state::<Crossed>().0 = crossed;
+        flow
+    }
+
+    fn bound(started: &tier::Started<'_>) -> tier::Bound {
+        <Lane as Tier>::bound(started)
+    }
+
+    fn laid(started: &tier::Started<'_>, req: Option<&Request>) -> tier::Laid {
+        <Lane as Tier>::laid(started, req)
+    }
+
+    fn setting(started: &tier::Started<'_>, startup: TierStatus) -> TierStatus {
+        <Lane as Tier>::setting(started, startup)
+    }
+
+    fn extension() -> Option<Extension> {
+        let mut ini = crate::policy::ini();
+        ini.extend(testing::declared(&testing::OPCACHE));
+        Some(
+            testing::switched(ExtensionBuilder::default())
+                .ini(ini)
+                .engine_state(crate::JitEngine::new)
+                .rinit(crate::JitEngine::request_started)
+                .request_state::<Crossed>()
+                .build("jit"),
+        )
+    }
+}
+
+/// Where a trace escapes to a landing whose word reads compiled, its own
+/// code reads the word and goes on into the trace compiled there, as
+/// php's escape stub runs that opline's handler (#3299's ruling,
+/// `jit-design.md` §4.9): fib's side traces escape at every return that
+/// lands past a call no trace goes on at, thousands of times in fib(20),
+/// and the crossing goes on into the landing's trace only where the code
+/// found that trace's row unready, the first escape to it in the request,
+/// which lays the row; every other escape enters it in code. The traces
+/// themselves keep nothing of the landings they escape to.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_escape_enters_the_trace_compiled_at_its_landing_in_code() {
+    let ini = [("opcache.jit", "tracing"), ("jit.compile", "inline")];
+    let engine = testing::engine::<Escaping>(&ini);
+    let program = "function fib($n) { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }\necho fib(20), \"\\n\";";
+    let (served, kept) = testing::Scratch::new().serve_kept::<Crossed>(&engine, program);
+    assert_eq!(testing::stdout(&served), "6765\n");
+    let crossed = kept.map(|kept| kept.0);
+    assert!(
+        crossed.is_some_and(|crossed| crossed <= 4),
+        "the crossing went on from {crossed:?} escapes"
+    );
+}

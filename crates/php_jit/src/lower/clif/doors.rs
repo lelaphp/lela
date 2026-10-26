@@ -5,7 +5,10 @@
 //! (`Z/ext/opcache/jit/zend_jit_ir.c:17418-17432`); and an exit's jump to
 //! the side trace grown from it, through the exit's entry slot, which the
 //! table writes once as the side publishes, where php patches the exit's
-//! jump (`zend_jit_link_side_trace`, `:17413`).
+//! jump (`zend_jit_link_side_trace`, `:17413`); and an escape's jump to
+//! the trace compiled at the landing it escaped to, read through the
+//! landing's word, as php's escape stub runs that opline's handler
+//! (`jit-design.md` §4.9).
 //!
 //! Each is one tail call, made by [`Emit::hand_on`] alone: the trace it
 //! enters found, its row in the request found ready, and the entry laid
@@ -25,18 +28,20 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I32, I64};
 use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, Value};
-use php_engine::tier::FRAME;
+use std::sync::atomic::AtomicU32;
+
+use php_engine::tier::{FRAME, LANDING_CHUNK_BITS, Word};
 
 use super::calls::TOP;
 use super::{
-    CallRoom, Emit, Raised, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_ROOM, body_signature,
-    engine_offset, imm, mismatch, trusted,
+    CallRoom, Emit, Raised, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE, STOOD_ROOM,
+    body_signature, engine_offset, imm, mismatch, trusted,
 };
 use crate::lower::{
-    ENTRANCE_BODY, ENTRANCE_TRACE, ENTRY_AT, ESCAPED, IMAGES_AT, LANDING_BYTES, LANDING_KEY,
-    LANDING_TAG, LANDINGS, Linked, READY_AT, ROOT_AT, ROW_BYTES, ROW_IMAGES, ROW_READY,
-    ROW_SEGMENT, ROWS_AT, STOOD_AT, Stands, TRACE_AT,
+    ENTRANCE_BODY, ENTRANCE_TRACE, ENTRY_AT, ESCAPED, Escapes, IMAGES_AT, Linked, READY_AT,
+    ROOT_AT, ROW_BYTES, ROW_IMAGES, ROW_READY, ROW_SEGMENT, ROWS_AT, STOOD_AT, Stands, TRACE_AT,
 };
+use crate::policy::{COMPILED, ID_SHIFT, STATE};
 use crate::types::{Abort, End, ExitId, Grows};
 
 /// Where a jump finds the trace it enters.
@@ -44,7 +49,8 @@ use crate::types::{Abort, End, ExitId, Grows};
 enum Target {
     /// Through the entry slot at this address, set or not.
     Slot(usize),
-    /// At this entrance, read from a landing slot.
+    /// At this entrance, read from the table where the landing's word
+    /// names its trace.
     Entrance(Value),
     /// The trace a link names, whose entrance is known as the body is
     /// compiled.
@@ -71,6 +77,16 @@ const ROW_MASK: i32 = imm(ROW_SEGMENT - 1);
 
 /// Where the frame's opline is in its room, `EX(opline)`.
 const OPLINE: i32 = imm(FRAME.opline() as usize);
+
+/// An address's width, as the shift that scales a number of them.
+const ADDRESS_SHIFT: i64 = 3;
+const _: () = assert!(size_of::<usize>() == 1 << ADDRESS_SHIFT);
+
+/// A landing word's width, and where its state half stands in it, as
+/// compiled code reads a landing's (`php_engine::tier::LandingIndex`).
+const WORD_BYTES: i64 = 8;
+const WORD_STATE: i32 = 4;
+const _: () = assert!(size_of::<Word>() == 8 && size_of::<AtomicU32>() == 4);
 
 impl Emit<'_> {
     /// Where the frame goes on as a trace is entered from `exit`, its op
@@ -309,12 +325,12 @@ impl Emit<'_> {
     }
 
     /// The escape `block`, which takes the place of the frame the return
-    /// left: where the frame stands, its op array and opline as the last
-    /// `Stood` says, compared with each landing slot, and the jump to the
-    /// trace the slot that holds it names, as php's escape goes on into
-    /// the handler of the opline the frame stands at, the trace compiled
-    /// there (`jit_stub_trace_escape`); [`ESCAPED`] answered where none
-    /// does or the jump finds the trace's row unready.
+    /// left: php's escape stub, which runs the handler of the opline the
+    /// frame stands at (`zend_jit_trace_escape_stub`), so the jump to the
+    /// trace compiled at the landing where its word reads compiled
+    /// ([`Emit::landed`]), from where the last `Stood` says the frame
+    /// stands; [`ESCAPED`] answered where none is or the jump finds the
+    /// trace's row unready.
     pub(super) fn escaped(&mut self, block: Block) -> Result<(), Abort> {
         self.b.switch_to_block(block);
         self.b.seal_block(block);
@@ -325,43 +341,13 @@ impl Emit<'_> {
             .ok_or_else(|| mismatch("an escape that takes no place"))?;
         let answer = self.b.create_block();
         self.b.set_cold_block(answer);
-        if self.joins.landings != 0 {
-            let at = self.stood_word(I64, STOOD_FUNC);
-            let key = self.b.ins().bor_imm_u(at, LANDING_TAG.cast_signed());
-            let found = self.b.create_block();
-            self.b.set_cold_block(found);
-            self.b.append_block_param(found, I64);
-            for slot in 0..LANDINGS {
-                let address = (slot.checked_mul(LANDING_BYTES))
-                    .and_then(|past| self.joins.landings.checked_add(past))
-                    .and_then(|address| i64::try_from(address).ok())
-                    .ok_or_else(|| mismatch("a landing slot past the host's addresses"))?;
-                let address = self.b.ins().iconst(I64, address);
-                let entrance = self.b.ins().atomic_load(I64, trusted(), address);
-                let next = self.b.create_block();
-                self.b.set_cold_block(next);
-                self.closed_unless(entrance, next);
-                let held = self.b.ins().load(I64, trusted(), address, LANDING_KEY);
-                let other = self.b.ins().icmp(IntCC::NotEqual, held, key);
-                self.b
-                    .ins()
-                    .brif(other, next, &[], found, &[BlockArg::Value(entrance)]);
-                self.b.switch_to_block(next);
-                self.b.seal_block(next);
-            }
-            self.b.ins().jump(answer, &[]);
-            self.b.switch_to_block(found);
-            self.b.seal_block(found);
-            let entrance = *self
-                .b
-                .block_params(found)
-                .first()
-                .ok_or_else(|| mismatch("a landing found with no entrance"))?;
+        if let Some(escapes) = self.joins.escapes {
+            let entrance = self.landed(escapes, answer)?;
             let leaving = Leaving {
                 room: self.stood_word(I64, STOOD_FRAME),
                 place,
                 call: self.stood_word(I64, STOOD_CALL),
-                at,
+                at: self.stood_word(I64, STOOD_FUNC),
                 left: self.stood_word(I64, STOOD_ROOM),
                 stand: None,
             };
@@ -374,6 +360,79 @@ impl Emit<'_> {
         let escaped = self.b.ins().iconst(I32, i64::from(ESCAPED));
         self.b.ins().return_(&[escaped]);
         Ok(())
+    }
+
+    /// The entrance of the trace compiled at the landing the last `Stood`
+    /// says the frame stands at (`lower::Escapes`): the op array's landing
+    /// words found through the epoch's index by its offset, the word of
+    /// the opline read, and where it reads compiled, the entrance of the
+    /// trace it names read from the table's; `answer` where the op array
+    /// is past the index or its words are not laid, where the word reads
+    /// anything else, and where the table holds no entrance for it yet.
+    fn landed(&mut self, escapes: Escapes, answer: Block) -> Result<Value, Abort> {
+        let Escapes {
+            landings,
+            entrances,
+            traces,
+        } = escapes;
+        let func = self.stood_word(I32, STOOD_FUNC);
+        let opline = self.stood_word(I32, STOOD_OPLINE);
+        let first = self.b.ins().iconst(I32, i64::from(landings.first));
+        let past = self.b.ins().isub(func, first);
+        let outside = self.b.ins().icmp_imm_u(
+            IntCC::UnsignedGreaterThanOrEqual,
+            past,
+            i64::from(landings.held),
+        );
+        self.cold_if(outside, answer);
+        let past = self.b.ins().uextend(I64, past);
+        let index = self.address(landings.chunks)?;
+        let chunk = self.b.ins().ushr_imm_u(past, i64::from(LANDING_CHUNK_BITS));
+        let chunk = self.address_at(index, chunk, answer);
+        let within = (self.b.ins()).band_imm_u(past, (1_i64 << LANDING_CHUNK_BITS) - 1);
+        let words = self.address_at(chunk, within, answer);
+        let opline = self.b.ins().uextend(I64, opline);
+        let word = self.b.ins().imul_imm_u(opline, WORD_BYTES);
+        let word = self.b.ins().iadd(words, word);
+        let state = self.b.ins().load(I32, trusted(), word, WORD_STATE);
+        let kind = self.b.ins().band_imm_u(state, i64::from(STATE));
+        let other = (self.b.ins()).icmp_imm_u(IntCC::NotEqual, kind, i64::from(COMPILED));
+        self.cold_if(other, answer);
+        let id = self.b.ins().ushr_imm_u(state, i64::from(ID_SHIFT));
+        let unheld =
+            (self.b.ins()).icmp_imm_u(IntCC::UnsignedGreaterThanOrEqual, id, i64::from(traces));
+        self.cold_if(unheld, answer);
+        let id = self.b.ins().uextend(I64, id);
+        let entrances = self.address(entrances)?;
+        Ok(self.address_at(entrances, id, answer))
+    }
+
+    /// The constant `address`.
+    fn address(&mut self, address: usize) -> Result<Value, Abort> {
+        let address = i64::try_from(address).map_err(|_| mismatch("an address past the host's"))?;
+        Ok(self.b.ins().iconst(I64, address))
+    }
+
+    /// The address written `at` addresses past `base`, loaded with
+    /// acquire, as it was written with release; on to `answer` where it
+    /// is zero, none written there yet.
+    fn address_at(&mut self, base: Value, at: Value, answer: Block) -> Value {
+        let at = self.b.ins().ishl_imm_u(at, ADDRESS_SHIFT);
+        let at = self.b.ins().iadd(base, at);
+        let address = self.b.ins().atomic_load(I64, trusted(), at);
+        let none = self.b.ins().icmp_imm_u(IntCC::Equal, address, 0);
+        self.cold_if(none, answer);
+        address
+    }
+
+    /// Go to `to` where `cond` holds, and on in a cold block otherwise:
+    /// a test on the escape's way, which is cold as a whole.
+    fn cold_if(&mut self, cond: Value, to: Block) {
+        let on = self.b.create_block();
+        self.b.set_cold_block(on);
+        self.b.ins().brif(cond, to, &[], on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
     }
 
     /// Go to `closed` where `value` is zero; go on otherwise.

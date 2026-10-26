@@ -41,17 +41,20 @@ const PRIMED: Laid = Laid::Counting([PRIMED_HEAT, COLD]);
 /// ([`PRIMED`]).
 const PRIMED_HEAT: u32 = u32::MAX;
 
-/// The state bits of a word's second half.
-const STATE: u32 = 0b11;
+/// The state bits of a word's second half: [`decoded`] reads them, and
+/// so does compiled code where a trace escapes to a landing whose word
+/// reads [`COMPILED`] (`lower::Escapes`), the trace number above
+/// [`ID_SHIFT`].
+pub(crate) const STATE: u32 = 0b11;
 const COLD: u32 = 0;
 const RECORDING: u32 = 1;
-const COMPILED: u32 = 2;
+pub(crate) const COMPILED: u32 = 2;
 const BLACKLISTED: u32 = 3;
 /// Where the failed attempts stand, and how many the six bits hold.
 const ATTEMPTS_SHIFT: u32 = 2;
 const ATTEMPTS_MAX: u8 = 0x3F;
 /// Where the trace number stands.
-const ID_SHIFT: u32 = 8;
+pub(crate) const ID_SHIFT: u32 = 8;
 
 /// php's `ZEND_JIT_ON_HOT_TRACE`, the one trigger this tier runs.
 const HOT_TRACE: u32 = 5;

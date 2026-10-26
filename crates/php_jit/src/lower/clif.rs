@@ -204,12 +204,13 @@ pub(super) fn prologue(config: TargetFrontendConfig) -> Function {
 }
 
 /// Where a body jumps besides its exits (#3229's ruling): the address of
-/// its first entry slot, one per exit, of its first landing slot, and the
-/// trace its link jumps to, where it links to one with code.
+/// its first entry slot, one per exit, where its escape reads the trace
+/// compiled at the landing, and the trace its link jumps to, where it
+/// links to one with code.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Joins {
     pub(super) slots: usize,
-    pub(super) landings: usize,
+    pub(super) escapes: Option<super::Escapes>,
     pub(super) linked: Option<super::Linked>,
 }
 
@@ -733,7 +734,7 @@ impl<'a> Emit<'a> {
             fuzzed_sites: 0,
             joins: Joins {
                 slots: 0,
-                landings: 0,
+                escapes: None,
                 linked: None,
             },
             doors: vec![None; ir.exits.len()],
@@ -1947,8 +1948,8 @@ impl<'a> Emit<'a> {
 
     /// The trace's one escape block, made the first time a return
     /// branches to it with the place of the frame it returned into:
-    /// [`ESCAPED`](super::ESCAPED) answered, nothing stored, past the jump to the trace a
-    /// landing slot names ([`Emit::escaped`]).
+    /// [`ESCAPED`](super::ESCAPED) answered, nothing stored, past the jump to the trace
+    /// compiled at the landing, whose word it reads ([`Emit::escaped`]).
     fn escape_block(&mut self) -> Block {
         if let Some(block) = self.escape {
             return block;

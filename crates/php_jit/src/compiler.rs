@@ -26,7 +26,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use php_engine::tier::{self, Epoch, Parked};
 
-use crate::lower::{Compiled, Linked};
+use crate::lower::{Compiled, Escapes, Linked};
 use crate::policy::{self, Claim, Compile, Mode, Outcome, Policy, State, TraceEvent};
 use crate::record::{self, Recorded, Start, Stop};
 use crate::table::{self, Table, TraceName, Unpublished};
@@ -266,11 +266,11 @@ pub(crate) fn pipeline(shared: &Shared, job: Job, lines: &mut Lines) -> Outcome 
     match &shared.backend {
         Some(backend) => pipeline_with(
             shared,
-            |ir, name, linked| backend.compile(ir, name, linked),
+            |ir, name, linked, escapes| backend.compile(ir, name, linked, escapes),
             job,
             lines,
         ),
-        None => pipeline_with(shared, |_, _, _| Err(no_backend()), job, lines),
+        None => pipeline_with(shared, |_, _, _, _| Err(no_backend()), job, lines),
     }
 }
 
@@ -278,7 +278,7 @@ pub(crate) fn pipeline(shared: &Shared, job: Job, lines: &mut Lines) -> Outcome 
 /// tests drive each stage's failure through.
 fn pipeline_with(
     shared: &Shared,
-    compile: impl Fn(&TraceIr, TraceName, Option<Linked>) -> Result<Compiled, Abort>,
+    compile: impl Fn(&TraceIr, TraceName, Option<Linked>, Option<Escapes>) -> Result<Compiled, Abort>,
     job: Job,
     lines: &mut Lines,
 ) -> Outcome {
@@ -297,7 +297,7 @@ fn pipeline_with(
             }
             let start = claim.start();
             catch_unwind(AssertUnwindSafe(|| {
-                published(&recorded, name, &compile, table, start)
+                published(&recorded, name, &compile, (table, claim.epoch()), start)
             }))
             .unwrap_or(Outcome::Abort(Stop::CompilerError))
         }
@@ -347,13 +347,15 @@ fn arm_landings(recorded: &Recorded, epoch: &Epoch, policy: &Policy) {
 
 /// The pipeline's middle: the record built through its view, the trace
 /// compiled under `name`, its link a jump to the trace it links to where
-/// `table` holds that trace's code (`jit-design.md` §4.3), and the code
-/// published into `table`, or the failure of the first stage that failed.
+/// `table` holds that trace's code (`jit-design.md` §4.3) and its escape
+/// read through the landing index of `epoch`, the table's (§4.9), and the
+/// code published into `table`, or the failure of the first stage that
+/// failed.
 fn published(
     recorded: &Recorded,
     name: TraceName,
-    compile: &impl Fn(&TraceIr, TraceName, Option<Linked>) -> Result<Compiled, Abort>,
-    table: &Table,
+    compile: &impl Fn(&TraceIr, TraceName, Option<Linked>, Option<Escapes>) -> Result<Compiled, Abort>,
+    (table, epoch): (&Table, &Epoch),
     start: Start,
 ) -> Outcome {
     let compiled = types::build(&recorded.record, &recorded.view).and_then(|ir| {
@@ -362,7 +364,7 @@ fn published(
             End::Loop(_) | End::Return(_) => None,
         };
         let linked = link.and_then(|link| table.linked(link, start));
-        compile(&ir, name, linked)
+        compile(&ir, name, linked, Some(table.escapes(epoch)))
     });
     match compiled.map(|compiled| table.publish(compiled, start)) {
         Ok(Ok(trace)) => Outcome::Published(trace),
