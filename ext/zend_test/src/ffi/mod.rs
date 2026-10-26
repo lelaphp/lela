@@ -7,11 +7,16 @@
 //! read delivers, under the disposition that read meets in php's CLI,
 //! the default one, so the process ends as php's does and a shell
 //! reports the same status.
+//!
+//! [`exports`] is the other: the C symbols `test.c` exports for
+//! ext/ffi's tests, under php's names and layout.
 #![allow(unsafe_code)]
 #![deny(
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block
 )]
+
+mod exports;
 
 /// End the process with `SIGSEGV`, as php's read of `(char *) 1` does.
 ///
