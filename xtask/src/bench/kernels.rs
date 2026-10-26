@@ -366,9 +366,10 @@ pub(crate) fn interrupt(root: &Path) -> [Declared; 2] {
 /// the engine built as [`Build::Jit`] against [`Build::Plain`] under
 /// `[regime.jit-off]`, its buffer php's default, over the seven kernels;
 /// and [`Build::Plain`] against itself. Set up and off, the featured
-/// engine binds `Jit`'s loop, which a request may switch on, and every
-/// unit published while off has sealed words, so its safepoints cost a
-/// call and a word read where php's VM keeps its own handlers.
+/// engine binds both loops, and a request whose engine has published no
+/// unit with counting words serves in `Nop`'s, as php's VM keeps its own
+/// handlers (#3362): the bar holds that this costs nothing beside the
+/// engine without the tier.
 pub(crate) fn runtime(root: &Path) -> [Declared; 2] {
     let pairs = [
         ("g1-runtime", [Build::Jit, Build::Plain], Held::Series),
