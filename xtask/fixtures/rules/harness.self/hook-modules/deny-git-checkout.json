@@ -1,1 +1,1 @@
-{"tool_name": "Bash", "tool_input": {"command": "git checkout main -- harness-plugins/hooks/harness.ts", "description": "Take the module from another branch"}}
+{"tool_name": "Bash", "tool_input": {"command": "git checkout main -- harness-plugins/harness/hooks/harness.ts", "description": "Take the module from another branch"}}

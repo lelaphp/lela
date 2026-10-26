@@ -103,7 +103,7 @@ fn executable(path: &Path, body: &str) {
 }
 
 /// The scratch repository: the workspace's manifest and pin, the six
-/// region files, one crate file, one commit, and the real hooks under
+/// region files, one crate file, one plugin manifest, one commit, and the real hooks under
 /// `scripts/hooks` as its `core.hooksPath`.
 fn scratch(name: &str, computed: &Computed) -> Scratch {
     let dir = Tree::new(&format!("hooks-{name}")).unwrap();
@@ -113,6 +113,12 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
         write(&root, file, "# a region file\n\n<!-- computed layout -->\n");
     }
     write(&root, "crates/php_heap/src/lib.rs", "pub fn alloc() {}\n");
+    // One plugin, as pre-commit finds each: a directory with a manifest.
+    write(
+        &root,
+        "harness-plugins/harness/.claude-plugin/plugin.json",
+        "{}\n",
+    );
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
     executable(
@@ -277,7 +283,7 @@ impl Scratch {
     /// by pathspec, the shape AGENTS.md asks for, so the test holds that
     /// what the hook stages reaches such a commit.
     fn stage_plugin_and_commit(&self) -> (i32, String) {
-        let path = "harness-plugins/hooks/harness.ts";
+        let path = "harness-plugins/harness/hooks/harness.ts";
         write(&self.root, path, "export const register = () => {};\n");
         self.git(&["add", "--", path], false);
         self.run(&["commit", "-q", "-m", "the module", "--", path], true)
@@ -286,7 +292,7 @@ impl Scratch {
     /// A change to the module and a hand-written declaration file, both
     /// staged, and the commit through the hook by pathspec.
     fn stage_declarations_and_commit(&self) -> (i32, String) {
-        let module = "harness-plugins/hooks/harness.ts";
+        let module = "harness-plugins/harness/hooks/harness.ts";
         let types = "harness-plugins/types/claude-code.d.ts";
         write(&self.root, module, "export const register = () => {};\n");
         write(&self.root, types, "// Written by hand.\n");
@@ -506,14 +512,14 @@ fn pre_commit_rewrites_the_declarations_when_the_plugin_is_staged() {
     // own environment.
     assert!(
         calls[3].starts_with(&format!(
-            "claude [plugin][validate][harness-plugins][--strict] cwd={root} "
+            "claude [plugin][validate][harness-plugins/harness][--strict] cwd={root} "
         )),
         "{}",
         calls[3]
     );
     assert!(
         calls[4].starts_with(&format!(
-            "claude [plugin][test][harness-plugins] cwd={root} "
+            "claude [plugin][test][harness-plugins/harness] cwd={root} "
         )),
         "{}",
         calls[4]
@@ -526,7 +532,7 @@ fn pre_commit_rewrites_the_declarations_when_the_plugin_is_staged() {
         files,
         [
             "AGENTS.md",
-            "harness-plugins/hooks/harness.ts",
+            "harness-plugins/harness/hooks/harness.ts",
             "harness-plugins/types/claude-code.d.ts"
         ]
     );

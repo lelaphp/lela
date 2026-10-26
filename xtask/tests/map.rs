@@ -579,7 +579,7 @@ fn the_adr_index_lists_every_adr_with_its_title_status_and_date() {
 }
 
 /// The function-hook module, the one place the engine's cap is stated.
-const HOOK: &str = "harness-plugins/hooks/harness.ts";
+const HOOK: &str = "harness-plugins/harness/hooks/harness.ts";
 
 /// The declarations the module is typechecked against: a tracked file
 /// Claude Code writes (#62), whose first line names the build that wrote
@@ -777,7 +777,7 @@ fn the_function_hook_states_the_cap_once_and_hands_over_two_blocks() {
 #[test]
 fn the_session_start_hook_wires_the_clone_and_renders_the_local_file_on_the_four_matchers() {
     let hooks: serde_json::Value =
-        serde_json::from_str(&read("harness-plugins/hooks/hooks.json")).unwrap();
+        serde_json::from_str(&read("harness-plugins/harness/hooks/hooks.json")).unwrap();
     let start = &hooks["hooks"]["SessionStart"][0];
     let matcher = start["matcher"].as_str().unwrap();
     for source in ["startup", "resume", "clear", "compact"] {

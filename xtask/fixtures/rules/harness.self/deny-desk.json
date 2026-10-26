@@ -1,0 +1,1 @@
+{"tool_name":"Edit","tool_input":{"file_path":"harness-plugins/desk/hooks/desk.ts","old_string":"() => {}","new_string":"() => { /* */ }"}}

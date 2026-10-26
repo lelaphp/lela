@@ -1,1 +1,1 @@
-{"tool_name": "Bash", "tool_input": {"command": "echo 'export {}' >> ./harness-plugins/hooks/harness.test.ts", "description": "Append to the module's test"}}
+{"tool_name": "Bash", "tool_input": {"command": "echo 'export {}' >> ./harness-plugins/harness/hooks/harness.test.ts", "description": "Append to the module's test"}}

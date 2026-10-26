@@ -1,1 +1,1 @@
-{"tool_name": "Bash", "tool_input": {"command": "perl -pi -e 's/a/b/' harness-plugins/hooks/harness.ts", "description": "Rewrite the module with perl"}}
+{"tool_name": "Bash", "tool_input": {"command": "perl -pi -e 's/a/b/' harness-plugins/harness/hooks/harness.ts", "description": "Rewrite the module with perl"}}

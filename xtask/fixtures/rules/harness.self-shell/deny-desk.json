@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "printf x >> harness-plugins/desk/hooks/desk.ts"}}

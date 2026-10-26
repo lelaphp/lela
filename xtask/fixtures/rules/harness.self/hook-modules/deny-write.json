@@ -1,1 +1,1 @@
-{"tool_name": "Write", "tool_input": {"file_path": "harness-plugins/hooks/approvals.ts", "content": "export const asked = [];\n"}}
+{"tool_name": "Write", "tool_input": {"file_path": "harness-plugins/harness/hooks/approvals.ts", "content": "export const asked = [];\n"}}

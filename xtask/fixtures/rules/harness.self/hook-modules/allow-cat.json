@@ -1,1 +1,1 @@
-{"tool_name": "Bash", "tool_input": {"command": "cat harness-plugins/hooks/harness.ts", "description": "Read the module"}}
+{"tool_name": "Bash", "tool_input": {"command": "cat harness-plugins/harness/hooks/harness.ts", "description": "Read the module"}}
