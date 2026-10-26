@@ -117,6 +117,7 @@ fn measure(
     }
     let _seat = crate::seat::Seats::of_env().take(INSTRUMENT);
     let mut readings = Vec::with_capacity(crates.len());
+    let (builds, mut ran) = (batch::Builds::hold(root), Vec::new());
     for run in batch::runs(root, &crates)? {
         let built = Run::of(root, &["build", "--keep-going"], &run, Targets::Tests)?;
         let docs = doctests(root, &built, &run)?;
@@ -140,7 +141,9 @@ fn measure(
                 );
             }
         }
+        ran.push(built);
     }
+    builds.sweep(&ran);
     Ok(readings)
 }
 

@@ -12,7 +12,7 @@
 //! then judge each crate on its own part of the one run.
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -133,6 +133,43 @@ impl Built {
 /// among them.
 const KEPT: usize = 2;
 
+/// The width of the metadata hash cargo names a unit's files by.
+const HASH: usize = 16;
+
+/// A test run's hold on the workspace's builds: shared while it builds
+/// and runs its executables, so another run's sweep never removes one it
+/// is about to run, and given up at its end for an exclusive one to sweep
+/// under, which is not waited for: a run that finds another holding its
+/// share sweeps nothing, and the next sweeps for it.
+pub(crate) struct Builds(Option<File>);
+
+impl Builds {
+    /// The share of the run at `root`, none where the lock file cannot be
+    /// opened, which sweeps nothing.
+    pub(crate) fn hold(root: &Path) -> Builds {
+        let at = root.join("target/xtask-test.lock");
+        let opened = crate::make_parent(&at).ok().and_then(|()| {
+            let mut options = File::options();
+            options.create(true).append(true).open(&at).ok()
+        });
+        Builds(opened.filter(|file| file.lock_shared().is_ok()))
+    }
+
+    /// Each older build of each test executable of `runs` removed
+    /// ([`Built::sweep`]), where no other run holds a share.
+    pub(crate) fn sweep(self, runs: &[Run]) {
+        let Some(file) = self.0 else {
+            return;
+        };
+        file.unlock().ok();
+        if file.try_lock().is_ok() {
+            runs.iter()
+                .flat_map(|run| run.crates.values())
+                .for_each(Built::sweep);
+        }
+    }
+}
+
 impl Built {
     /// Each older build of each test executable the run built removed,
     /// but the newest [`KEPT`], with its `.d` and `.dSYM`. A test
@@ -175,7 +212,7 @@ impl Built {
                     let name = e.file_name().into_string().ok()?;
                     let other = name.strip_prefix(stem)?.strip_prefix('-')?;
                     let same = other != hash
-                        && other.len() == 16
+                        && other.len() == HASH
                         && other.bytes().all(|b| b.is_ascii_hexdigit())
                         && unit(other).join(&print).is_file();
                     let made = e.metadata().and_then(|m| m.modified()).ok()?;
@@ -389,7 +426,6 @@ impl Run {
         for krate in run.crates.values_mut() {
             krate.whole =
                 krate.count("error") == 0 && krate.wanted.iter().all(|t| krate.made.contains(t));
-            krate.sweep();
         }
         Ok(run)
     }
