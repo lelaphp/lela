@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 
-use super::fpm::{Pool, round, terminate};
+use super::fpm::{Closed, Pool, round, terminate};
 use super::process;
 use crate::oracle::{Mapping, Observation, Oracle, Piece, Recipe, Sent, Variable};
 use crate::phpt::cgi;
@@ -368,9 +368,29 @@ pub(crate) fn by_fpm(
     ports: Ports,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     let mut fpm = Fpm::start(oracle, host, program, http, (ini, ports), 1)?;
-    let answered = fpm.ask()?;
+    let answered = match fpm.ask() {
+        Ok(answered) => answered,
+        Err(error) => return error.downcast::<Closed>().map(upstream_closed),
+    };
     fpm.settle()?;
     Ok(answered)
+}
+
+/// What nginx hands on of a php-fpm connection that closed before its
+/// `FCGI_END_REQUEST`: the response as far as it came where its head came
+/// whole, which nginx has already sent; else nginx's own 502, "upstream
+/// prematurely closed connection while reading response header from
+/// upstream", read as a CGI head with the code alone, since the page
+/// nginx writes with it is the server's and no line or body PHP set.
+fn upstream_closed(closed: Closed) -> (Vec<u8>, Vec<u8>) {
+    let headed = closed.stdout.windows(4).any(|w| w == b"\r\n\r\n")
+        || closed.stdout.windows(2).any(|w| w == b"\n\n");
+    let stdout = if headed {
+        closed.stdout
+    } else {
+        b"Status: 502 Bad Gateway\r\n\r\n".to_vec()
+    };
+    (stdout, closed.stderr)
 }
 
 /// A pool of its own of the php-fpm at `host`, kept to hand one request,
@@ -513,12 +533,21 @@ fn mapped(
 
 /// makala's HTTP response as a client of nginx reads php-fpm's: the
 /// status line's code, the lines PHP set, the server's `date` and
-/// `connection` left out, and the body.
+/// `connection` left out, and the body. A `content-length: 0` over no
+/// body is left out too: it frames an answer of the server's own, a 502
+/// for a request the hard memory limit ended among them, where nginx
+/// frames its own page with a length of its own and a PHP response it
+/// streams with none.
 pub(crate) fn from_http(answer: &[u8]) -> Vec<u8> {
     let (head, body) = split_head(answer);
     let mut head = head.lines();
     let code = head.next().and_then(|status| status.split(' ').nth(1));
-    let lines = head.filter(|line| !line.starts_with("date:") && !line.starts_with("connection:"));
+    let lines = head.filter(|line| {
+        let own = line.starts_with("date:")
+            || line.starts_with("connection:")
+            || (body.is_empty() && line.eq_ignore_ascii_case("content-length: 0"));
+        !own
+    });
     rendered(code.unwrap_or_default(), lines, body)
 }
 
@@ -689,5 +718,31 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&http), shown);
         let logged = "2026-10-10T08:22:40.123Z makala: drained\n2026-10-10T08:22:40.124Z x\n  y\n";
         assert_eq!(php_logged(logged), b"x\n  y\n");
+    }
+
+    /// A php-fpm connection that closed before `FCGI_END_REQUEST` and
+    /// before a whole head is nginx's 502 with no line and no body, and
+    /// one whose head came whole is what came; makala's own 502, framed
+    /// with `content-length: 0`, reads as that 502.
+    #[test]
+    fn an_upstream_closed_before_its_head_is_nginx_s_502() {
+        let headless = Closed {
+            stdout: b"X-A: 1".to_vec(),
+            stderr: b"e".to_vec(),
+            error: std::io::ErrorKind::UnexpectedEof.into(),
+        };
+        let (stdout, stderr) = upstream_closed(headless);
+        assert_eq!(from_cgi(&stdout), b"502\n\n");
+        assert_eq!(stderr, b"e");
+        let headed = Closed {
+            stdout: b"X-A: 1\r\n\r\nbo".to_vec(),
+            stderr: Vec::new(),
+            error: std::io::ErrorKind::UnexpectedEof.into(),
+        };
+        assert_eq!(from_cgi(&upstream_closed(headed).0), b"200\nx-a: 1\n\nbo");
+        let own = b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\ndate: x\r\n\r\n";
+        assert_eq!(from_http(own), b"502\n\n");
+        let php = b"HTTP/1.0 200 OK\r\ncontent-length: 0\r\n\r\nx";
+        assert_eq!(from_http(php), b"200\ncontent-length: 0\n\nx");
     }
 }

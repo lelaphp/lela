@@ -343,14 +343,23 @@ pub(super) fn request<'a>(
 }
 
 /// What the server writes back on `FCGI_STDOUT` and `FCGI_STDERR` until
-/// `FCGI_END_REQUEST`, [`round`]'s.
+/// `FCGI_END_REQUEST`, [`round`]'s; [`Closed`], with what it wrote, where
+/// the connection ends at a record's edge before that record.
 pub(super) fn answer(mut stream: impl Read) -> Result<(Vec<u8>, Vec<u8>)> {
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
     loop {
         let mut header = [0u8; 8];
-        stream
-            .read_exact(&mut header)
-            .context("reading php-fpm's response")?;
+        if let Err(error) = stream.read_exact(&mut header) {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                return Err(Closed {
+                    stdout,
+                    stderr,
+                    error,
+                }
+                .into());
+            }
+            return Err(anyhow::Error::from(error).context("reading php-fpm's response"));
+        }
         let len = usize::from(u16::from_be_bytes([header[4], header[5]]));
         let mut content = vec![0u8; len + usize::from(header[6])];
         stream
@@ -365,6 +374,30 @@ pub(super) fn answer(mut stream: impl Read) -> Result<(Vec<u8>, Vec<u8>)> {
         }
     }
 }
+
+/// A connection php-fpm closed before its `FCGI_END_REQUEST`, as its
+/// child does where it `_exit`s under a request, the pinned php's hard memory
+/// limit among them (`Z/Zend/zend_alloc.c:519`): what it wrote on
+/// `FCGI_STDOUT` and `FCGI_STDERR` until then, and the read that found
+/// the end, which a fence's own run fails in.
+#[derive(Debug)]
+pub(crate) struct Closed {
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+    pub(crate) error: std::io::Error,
+}
+
+impl std::fmt::Display for Closed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "reading php-fpm's response: {}, before FCGI_END_REQUEST",
+            self.error
+        )
+    }
+}
+
+impl std::error::Error for Closed {}
 
 #[cfg(test)]
 #[cfg(tracked)]

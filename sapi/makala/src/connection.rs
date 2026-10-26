@@ -640,7 +640,24 @@ async fn hand_over(
 /// limit ended it, as nginx answers Bad Gateway over the php-fpm worker
 /// that `_exit(137)`ed there (`Z/Zend/zend_alloc.c:519`) and wrote no
 /// head; a 500 for any other, which a panic contained at the request's
-/// edge leaves, its ending never sent.
+/// edge leaves, its ending never sent. Neither the head the program set
+/// nor what its buffer held reaches the client:
+///
+/// ```php
+/// ob_start();
+/// header('X-A: 1');
+/// echo "body\n";
+/// hash_pbkdf2('md5', 'p', 's', 1, PHP_INT_MAX);
+/// ```
+/// ```request makala
+/// --GET--
+/// q=1
+/// ```
+/// ```expect capture
+/// 502
+/// ```
+// The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
+#[allow(rustdoc::invalid_codeblock_attributes)]
 fn headless(ending: Option<&Ending>) -> StatusCode {
     match ending {
         Some(Ending::Terminated) => StatusCode::BAD_GATEWAY,
