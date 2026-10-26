@@ -327,10 +327,11 @@ pub(crate) fn modify<const AT: usize>(
         Kind::Bool | Kind::Text | Kind::FileCache | Kind::Real => true,
         Kind::Unempty => !value.is_empty(),
         // A `Kind::Long` entry's handler is the engine's ([`handler`]).
-        Kind::Long | Kind::JitDebug => {
+        Kind::Long => {
             quantity(req, name, value);
             true
         }
+        Kind::JitDebug => on_jit_debug(req, value),
         Kind::Enable => on_enable(req, value),
         Kind::Memory => refused_unless(
             req,
@@ -498,6 +499,47 @@ fn on_jit(req: &mut Request, value: &[u8]) -> bool {
         req,
         "Invalid \"opcache.jit\" setting. Should be \"disable\", \"on\", \"off\", \"tracing\", \"function\" or 4-digit number",
     );
+    false
+}
+
+/// `OnUpdateJitDebug`, `zend_jit_debug_config`
+/// (`Z/ext/opcache/zend_accelerator_module.c:208-218`,
+/// `Z/ext/opcache/jit/zend_jit.c:3735-3746`): the value read as a
+/// quantity, warning for a shape php reads for backwards compatibility,
+/// and once started, refused where it changes a bit of
+/// `ZEND_JIT_DEBUG_PERSISTENT`, the profiler's and the debugger's, which
+/// php set up at its start; any other bit a request sets is the one the
+/// tier reads where it writes each `TRACE` line.
+///
+/// ```php
+/// var_dump(ini_set('opcache.jit_debug', '16'), ini_get('opcache.jit_debug'));
+/// var_dump(ini_set('opcache.jit_debug', '0x3000'), ini_set('opcache.jit_debug', '1x'), ini_get('opcache.jit_debug'));
+/// ```
+/// ```expect
+/// Warning: Some opcache.jit_debug bits cannot be changed after startup in %s on line 2
+/// bool(false)
+/// string(1) "0"
+///
+/// Warning: Invalid "opcache.jit_debug" setting. Invalid quantity "1x": unknown multiplier "x", interpreting as "1" for backwards compatibility in %s on line 3
+/// string(1) "0"
+/// string(6) "0x3000"
+/// string(2) "1x"
+/// ```
+fn on_jit_debug(req: &mut Request, value: &[u8]) -> bool {
+    /// `ZEND_JIT_DEBUG_PERSISTENT` (`Z/ext/opcache/jit/zend_jit.h:87`).
+    const PERSISTENT: i64 = 0x1f0;
+    let name = "opcache.jit_debug";
+    let new = quantity(req, name, value);
+    let stage = req.ini().stage();
+    if stage == IniStage::Startup || (long(req, name) ^ new) & PERSISTENT == 0 {
+        return true;
+    }
+    if stage == IniStage::Runtime {
+        warning(
+            req,
+            "Some opcache.jit_debug bits cannot be changed after startup",
+        );
+    }
     false
 }
 
