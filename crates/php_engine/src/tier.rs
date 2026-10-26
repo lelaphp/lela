@@ -934,8 +934,8 @@ pub(crate) type Loop = fn(&mut Request, FrameRef) -> Result<(), Fatal>;
 
 /// How an engine binds its tier's loops once its engine states are
 /// built and its declared opcodes fixed: [`Binding::bound`] for the
-/// tier.
-pub(crate) type BindLoops = fn(&crate::engine::Shared) -> Binding;
+/// tier, with `JIT_G` as the startup's handler of `opcache.jit` left it.
+pub(crate) type BindLoops = fn(&crate::engine::Shared, TierStatus) -> Binding;
 
 /// The loops an engine binds and what its tier answers whichever serves
 /// (ADR-0006, amended on #3301): the loops a request starts in, and
@@ -959,9 +959,9 @@ pub(crate) struct Binding {
     /// serves; read by the unit cache as it holds a unit.
     pub(crate) laid: fn(&Started<'_>, Option<&Request>) -> Laid,
     /// php's `JIT_G` as the engine's start left it, each request's to
-    /// start from ([`Tier::setting`]); before the tier binds, what
-    /// `opcache.jit`'s handler left it as the start served the host's
-    /// value.
+    /// start from ([`Tier::setting`]), and as a pool's value laid over the
+    /// started engine leaves it
+    /// ([`Engine::alter_master_ini`](crate::engine::Engine::alter_master_ini)).
     pub(crate) setting: TierStatus,
 }
 
@@ -969,8 +969,10 @@ impl Binding {
     /// `T`'s loops for the engine `shared` started, as `T` answers
     /// ([`Tier::bound`]), each told as the declared set says
     /// ([`Loops::told`]): a tier that holds a frame or hooks the compile
-    /// is bound from the start.
-    pub(crate) fn bound<T: Tier>(shared: &crate::engine::Shared) -> Binding {
+    /// is bound from the start. `setting` is `JIT_G` as the startup's
+    /// handler of `opcache.jit` left it, which `T` rewrites
+    /// ([`Tier::setting`]).
+    pub(crate) fn bound<T: Tier>(shared: &crate::engine::Shared, setting: TierStatus) -> Binding {
         let bound = if T::HOLDS || T::HOOKED != Hooked::NONE {
             Bound::On
         } else {
@@ -989,7 +991,7 @@ impl Binding {
             counting: AtomicBool::new(false),
             status: T::status,
             laid: T::laid,
-            setting: T::setting(&Started { shared }, shared.binding.setting),
+            setting: T::setting(&Started { shared }, setting),
         }
     }
 
