@@ -153,8 +153,13 @@ fn an_eval_string_begins_in_code_and_returns_null() {
         ..bundled()
     };
     let mut strings = php_heap::Strings::new();
-    let unit = compile_source(&mut Arena::new(), b"echo 1; ?>x", &options, &mut strings)
-        .expect("the source compiles");
+    let unit = compile_source(
+        &mut Arena::default(),
+        b"echo 1; ?>x",
+        &options,
+        &mut strings,
+    )
+    .expect("the source compiles");
     expect![[r#"
 
         $_main:
@@ -640,7 +645,7 @@ fn an_assertion_under_assertions_off_is_the_constant_true() {
         ..bundled()
     };
     let dump = compile_source(
-        &mut Arena::new(),
+        &mut Arena::default(),
         b"<?php namespace A; $a = assert(f());",
         &options,
         &mut strings,

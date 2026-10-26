@@ -837,7 +837,7 @@ __halt_compiler(); data"#;
             ..php_compile::Options::default()
         };
         let unit = php_compile::compile_source(
-            &mut php_compile::syntax::Arena::new(),
+            &mut php_compile::syntax::Arena::default(),
             source,
             &options,
             &mut strings,

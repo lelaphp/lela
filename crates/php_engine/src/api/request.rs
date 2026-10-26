@@ -1230,7 +1230,7 @@ impl Request {
             links: linking::Links::default(),
             record: recording::Record::default(),
             keys_made: 0,
-            compile_arena: php_compile::syntax::Arena::new(),
+            compile_arena: php_compile::syntax::Arena::default(),
             spare_unit: None,
             compiling_host_string: false,
             no_extensions: false,

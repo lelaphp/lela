@@ -604,7 +604,7 @@ mod tests {
                 sums.iter()
                     .map(|source| {
                         crate::compile_source(
-                            &mut php_syntax::Arena::new(),
+                            &mut php_syntax::Arena::default(),
                             source.as_bytes(),
                             &options,
                             &mut strings,

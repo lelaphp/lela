@@ -881,7 +881,7 @@ mod tests {
         };
         let mut strings = php_heap::Strings::new();
         crate::compile_source(
-            &mut php_syntax::Arena::new(),
+            &mut php_syntax::Arena::default(),
             script,
             &options,
             &mut strings,
