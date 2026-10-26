@@ -39,7 +39,7 @@ use super::anchor::{Entry, Record};
 use super::fence::{Exit, Served, Witness};
 use super::makala;
 use super::process::{self, Binary};
-use super::{Accept, Ask, Captured, Judged, Judgement, fence};
+use super::{Accept, Ask, Captured, Judged, Judgement, body, fence};
 use crate::divergence::{Divergence, Registry};
 use crate::oracle::expect::Expectation;
 use crate::oracle::hosts::FPM;
@@ -510,7 +510,8 @@ fn texts(ran: &Observation) -> Result<[&str; 2], String> {
 }
 
 /// The two streams a capture writes: the oracle's `first` run, held to a
-/// second apart ([`apart`]) line by line. `Err` names what the two runs
+/// second apart ([`apart`]) line by line, each as text that matches it
+/// alone ([`body::literal`]). `Err` names what the two runs
 /// did not agree on, the status or each line that differs.
 fn again(
     oracle: &Oracle<'_>,
@@ -537,7 +538,8 @@ fn again(
     if !moved.is_empty() {
         return Err(moved.join("; "));
     }
-    Ok((one[0].to_owned(), one[1].to_owned()))
+    let rules = &oracle.pin().recipe.normalise;
+    Ok((body::literal(rules, one[0]), body::literal(rules, one[1])))
 }
 
 /// The two streams `--bodies` writes into a plain fence the oracle's
@@ -568,8 +570,8 @@ fn bodies(
     let rules = &pin.recipe.normalise;
     let stderr = witness.stderr.as_deref().unwrap_or_default();
     let mut written = witness.clone();
-    written.stdout = super::body::kept(rules, "stdout", &witness.stdout, [one[0], two[0]])?;
-    let stderr = super::body::kept(rules, "stderr", stderr, [one[1], two[1]])?;
+    written.stdout = body::kept(rules, "stdout", &witness.stdout, [one[0], two[0]])?;
+    let stderr = body::kept(rules, "stderr", stderr, [one[1], two[1]])?;
     written.stderr = Some(stderr);
     for ran in [first, &second] {
         if !met(pin, &written, exit, ran).unwrap_or(false) {

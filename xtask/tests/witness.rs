@@ -562,7 +562,8 @@ fn a_capture_whose_two_runs_differ_writes_nothing_and_fails_the_crate() {
 /// marked `capture` byte for byte (#3455, as #3429 ruled): the authored
 /// `string(%d) "%s"` the oracle's two runs still meet, though they print
 /// two lengths, and the authored stderr line with its wildcards are kept as
-/// written, and the lines the oracle moved are its own. `--accept` alone
+/// written, and the lines the oracle moved are its own, a `%s` it printed
+/// written to match that text alone. `--accept` alone
 /// writes no body, and a second run writes nothing.
 #[test]
 fn accept_bodies_writes_the_plain_fences_the_oracle_does_not_meet() {
@@ -573,14 +574,15 @@ fn accept_bodies_writes_the_plain_fences_the_oracle_does_not_meet() {
     let marked = "/// ```php\n/// echo 3;\n/// ```\n/// ```expect capture\n/// x\n/// ```\npub fn marked() {}\n";
     let snippet = "/// ```php\n/// ini_set('display_errors', 'stderr');\n/// echo \"one\\n\";\n/// var_dump(__FILE__);\n/// echo \"three\", $u;\n/// ```\n";
     let stderr = "/// ```stderr\n/// Warning: Undefined variable $u in %s on line %d\n/// ```\n";
+    let percent = "/// ```php\n/// printf(\"100%%|%%s\\n\");\n/// ```\n/// ```expect\n/// x\n/// ```\npub fn percent() {}\n";
     let text = format!(
-        "{met}{snippet}/// ```expect\n/// uno\n/// string(%d) \"%s\"\n/// tres\n/// ```\n{stderr}pub fn moved() {{}}\n{marked}"
+        "{met}{snippet}/// ```expect\n/// uno\n/// string(%d) \"%s\"\n/// tres\n/// ```\n{stderr}pub fn moved() {{}}\n{percent}{marked}"
     );
     let root = scratch("bodies", &text);
     let file = root.join("ext/fixture/src/lib.rs");
 
     let reading = run(&root, &registry(""), Accept::Status);
-    assert_eq!(count(&reading, "failed"), 2, "{reading:#?}");
+    assert_eq!(count(&reading, "failed"), 3, "{reading:#?}");
     assert_eq!(count(&reading, "accepted"), 0);
     assert_eq!(
         fs::read_to_string(&file).unwrap(),
@@ -589,15 +591,17 @@ fn accept_bodies_writes_the_plain_fences_the_oracle_does_not_meet() {
     );
 
     let reading = run(&root, &registry(""), Accept::Bodies);
-    assert_eq!(count(&reading, "accepted"), 1, "{reading:#?}");
+    assert_eq!(count(&reading, "accepted"), 2, "{reading:#?}");
     assert_eq!(
         count(&reading, "failed"),
         1,
         "the capture's stale body stands: {reading:#?}"
     );
     let written = fs::read_to_string(&file).unwrap();
+    // The `%s` the oracle printed is written as text that matches it alone.
+    let percent = percent.replace("/// x\n", "/// 100%|%r[%]%rs\n");
     let expected = format!(
-        "{met}{snippet}/// ```expect\n/// one\n/// string(%d) \"%s\"\n/// three\n/// ```\n{stderr}pub fn moved() {{}}\n{marked}"
+        "{met}{snippet}/// ```expect\n/// one\n/// string(%d) \"%s\"\n/// three\n/// ```\n{stderr}pub fn moved() {{}}\n{percent}{marked}"
     );
     assert_eq!(written, expected);
 
