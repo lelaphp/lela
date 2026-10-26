@@ -17,6 +17,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use super::file::Phpt;
 use super::{Subset, adapter, fpm};
@@ -61,6 +62,10 @@ pub(crate) struct Routed {
     pub gained: BTreeMap<PathBuf, Option<Unbuilt>>,
     /// The tests of the subset's own directories it leaves to a variant's.
     pub left: BTreeSet<PathBuf>,
+    /// Why a variant's subset could not be routed: its variant unknown to
+    /// the pin, or a listing that could not be read. The subset's own
+    /// failing reading says it, and no other subset's (harness §4.3).
+    pub refused: Option<String>,
 }
 
 /// One variant's row and the extensions its variant loads and the main
@@ -84,58 +89,124 @@ impl<'m> Route<'m> {
     }
 }
 
+/// What routing reads of one test of the corpus whose `--EXTENSIONS--`
+/// names an extension: the names, and the host beside php it runs
+/// through, where it is one of the two its sections say.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Named {
+    extensions: Vec<String>,
+    cgi: bool,
+    phpdbg: bool,
+}
+
+impl Named {
+    /// The test at `path`, none where it names no extension or does not
+    /// parse; a file without the section is never parsed.
+    fn of(path: &Path) -> Option<Named> {
+        let bytes = std::fs::read(path).ok()?;
+        let section = bytes.windows(14).any(|w| w == b"--EXTENSIONS--");
+        let phpt = section.then(|| Phpt::load(path).ok())??;
+        Some(Named {
+            extensions: phpt.extensions(),
+            cgi: phpt.is_cgi(),
+            phpdbg: phpt.has("PHPDBG"),
+        })
+    }
+}
+
 /// Route the tests of `subsets` under the pinned tree at `source`: each
 /// variant row's gains every test of the corpus that names an extension
 /// of its route, and every other subset leaves those of its own. Nothing
 /// routes where the main oracle is not on this machine, nor to a variant
-/// whose php is not, since neither listing is there to read.
+/// whose php is not, since neither listing is there to read. A row whose
+/// variant cannot be listed is refused in its own subset ([`Routed`]).
 pub(crate) fn route(
+    root: &Path,
     manifest: &Manifest,
-    oracles: &Oracles<'_>,
-    carried: &Carried,
+    (oracles, carried): (&Oracles<'_>, &Carried),
     source: &Path,
     subsets: &mut [Subset],
 ) -> Result<()> {
-    let routes = routes(manifest, oracles)?;
-    apply(&routes, manifest, carried, source, subsets)
+    let (routes, refused) = routes(manifest, oracles);
+    for (scope, why) in refused {
+        if let Some(subset) = subsets.iter_mut().find(|s| s.scope == scope) {
+            subset.routed.refused = Some(why);
+        }
+    }
+    if routes.is_empty() {
+        return Ok(());
+    }
+    let named = named(root, &oracles.main().pin().source.commit, source)?;
+    apply(&routes, manifest, carried, &named, subsets);
+    Ok(())
 }
 
-/// [`route`] by `routes`, derived.
+/// [`walked`]'s, read once per pinned commit and kept under `root`'s
+/// target directory: the tree is held to its commit, and a walk reads
+/// every one of its 22,000 tests, seconds of every run.
+fn named(root: &Path, commit: &str, source: &Path) -> Result<BTreeMap<PathBuf, Named>> {
+    let kept = root
+        .join("target/phpt-routing")
+        .join(format!("{commit}-1.json"));
+    let read = std::fs::read(&kept).ok();
+    if let Some(named) = read.and_then(|bytes| serde_json::from_slice(&bytes).ok()) {
+        return Ok(named);
+    }
+    let named = walked(source)?;
+    if let Ok(bytes) = serde_json::to_vec(&named) {
+        crate::make_parent(&kept)
+            .and_then(|()| crate::write(&kept, bytes))
+            .ok();
+    }
+    Ok(named)
+}
+
+/// Each test of the pinned tree at `source` that names an extension, by
+/// where it stands in the corpus.
+pub(crate) fn walked(source: &Path) -> Result<BTreeMap<PathBuf, Named>> {
+    let mut named = BTreeMap::new();
+    for corpus in Subset::corpus(source) {
+        for test in corpus.tests()? {
+            if let Some(read) = Named::of(&test) {
+                named.insert(corpus.under(&test), read);
+            }
+        }
+    }
+    Ok(named)
+}
+
+/// [`route`] by `routes`, derived, over the corpus's `named` tests.
 pub(crate) fn apply(
     routes: &[Route<'_>],
     manifest: &Manifest,
     carried: &Carried,
-    source: &Path,
+    named: &BTreeMap<PathBuf, Named>,
     subsets: &mut [Subset],
-) -> Result<()> {
-    if routes.is_empty() {
-        return Ok(());
-    }
-    let mut named = BTreeMap::new();
-    for corpus in Subset::corpus(source) {
-        for test in corpus.tests()? {
-            if let Some((route, phpt)) = routed_by(routes, &test) {
-                named.insert(corpus.under(&test), (route, phpt));
-            }
-        }
-    }
+) {
+    let moved: Vec<(&PathBuf, &Route<'_>, &Named)> = (named.iter())
+        .filter_map(|(under, test)| Some((under, routed_by(routes, test)?, test)))
+        .collect();
     for subset in subsets {
-        for (under, (route, phpt)) in &named {
-            let own = subset.found_in(&source.join(under)).is_some();
+        for &(under, route, test) in &moved {
+            let own = subset.found_in(&subset.root.join(under)).is_some();
             if route.krate.name == subset.scope && !own {
-                let why = unbuilt(manifest, carried, route.krate, under, phpt);
+                let why = unbuilt(manifest, carried, route.krate, under, test);
                 subset.routed.gained.insert(under.clone(), why);
             } else if route.krate.name != subset.scope && own {
                 subset.routed.left.insert(under.clone());
             }
         }
     }
-    Ok(())
 }
 
 /// Each row naming a variant whose php is here, with the extensions its
-/// listing has and the main oracle's has not.
-fn routes<'m>(manifest: &'m Manifest, oracles: &Oracles<'_>) -> Result<Vec<Route<'m>>> {
+/// listing has and the main oracle's has not; and each row whose variant
+/// could not be listed, by its crate, with why. A main listing that could
+/// not be read refuses every variant's row, since none can be routed.
+fn routes<'m>(
+    manifest: &'m Manifest,
+    oracles: &Oracles<'_>,
+) -> (Vec<Route<'m>>, Vec<(&'m str, String)>) {
     let listed = |variant: Option<&str>| -> Result<Option<BTreeSet<String>>> {
         let oracle = oracles.of(variant)?;
         let pin = oracle.pin();
@@ -145,36 +216,39 @@ fn routes<'m>(manifest: &'m Manifest, oracles: &Oracles<'_>) -> Result<Vec<Route
         let loaded = adapter::loaded_extensions(oracle, &pin.oracle.path)?;
         Ok(Some(loaded.into_iter().collect()))
     };
-    let Some(main) = listed(None)? else {
-        return Ok(Vec::new());
+    let rows = (manifest.crates.iter()).filter_map(|k| Some((k, k.oracle.as_deref()?)));
+    let main = match listed(None) {
+        Ok(Some(main)) => main,
+        Ok(None) => return (Vec::new(), Vec::new()),
+        Err(why) => {
+            let why = format!(
+                "the main oracle's extensions could not be listed, so nothing is routed: {why:#}"
+            );
+            return (
+                Vec::new(),
+                rows.map(|(k, _)| (k.name.as_str(), why.clone())).collect(),
+            );
+        }
     };
-    let mut routes = Vec::new();
-    for krate in &manifest.crates {
-        let Some(variant) = krate.oracle.as_deref() else {
-            continue;
-        };
-        if let Some(loaded) = listed(Some(variant))? {
-            routes.extend(Route::of(krate, &loaded, &main));
+    let (mut routes, mut refused) = (Vec::new(), Vec::new());
+    for (krate, variant) in rows {
+        match listed(Some(variant)) {
+            Ok(loaded) => routes.extend(loaded.and_then(|loaded| Route::of(krate, &loaded, &main))),
+            Err(why) => refused.push((
+                krate.name.as_str(),
+                format!(
+                    "its subset could not be routed under the oracle variant {variant}: {why:#}"
+                ),
+            )),
         }
     }
-    Ok(routes)
+    (routes, refused)
 }
 
-/// The route the test at `path` takes, the first whose extensions its
-/// `--EXTENSIONS--` names, with the test read; none where it names none
-/// or does not parse. A file without the section is never parsed.
-fn routed_by<'r, 'm>(routes: &'r [Route<'m>], path: &Path) -> Option<(&'r Route<'m>, Phpt)> {
-    let bytes = std::fs::read(path).ok()?;
-    bytes
-        .windows(14)
-        .any(|w| w == b"--EXTENSIONS--")
-        .then_some(())?;
-    let phpt = Phpt::load(path).ok()?;
-    let names = phpt.extensions();
-    let route = routes
-        .iter()
-        .find(|route| names.iter().any(|name| route.extensions.contains(name)))?;
-    Some((route, phpt))
+/// The route `test` takes, the first whose extensions it names.
+fn routed_by<'r, 'm>(routes: &'r [Route<'m>], test: &Named) -> Option<&'r Route<'m>> {
+    let names = &test.extensions;
+    (routes.iter()).find(|route| names.iter().any(|name| route.extensions.contains(name)))
 }
 
 /// Why the lane of `row` cannot build for the routed test standing at
@@ -186,11 +260,11 @@ fn unbuilt(
     carried: &Carried,
     row: &Crate,
     under: &Path,
-    phpt: &Phpt,
+    test: &Named,
 ) -> Option<Unbuilt> {
-    let host = if phpt.is_cgi() {
+    let host = if test.cgi {
         Some(CGI)
-    } else if phpt.has("PHPDBG") {
+    } else if test.phpdbg {
         Some(PHPDBG)
     } else {
         under.starts_with(fpm::TESTS).then_some(FPM)
@@ -198,9 +272,7 @@ fn unbuilt(
     if let Some(host) = host {
         return Some(Unbuilt::Host(host));
     }
-    let named = phpt.extensions();
-    let behind = named
-        .iter()
+    let behind = (test.extensions.iter())
         .filter_map(|name| manifest.crate_named(&format!("ext/{name}")))
         .find(|krate| !carried.carries(krate) && krate.feature != row.feature)?;
     behind.feature.clone().map(Unbuilt::Feature)
