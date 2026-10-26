@@ -922,8 +922,12 @@ impl Backend {
             escapes: Some(Escapes {
                 landings: LandingIndex {
                     chunks: 0x6100_0000,
-                    first: 0x10,
-                    held: 1 << 23,
+                    own: php_engine::tier::LandingRows {
+                        first: 0x10,
+                        held: 1 << 23,
+                        place: 0,
+                    },
+                    preloaded: None,
                 },
                 entrances: 0x6200_0000,
                 traces: 1024,

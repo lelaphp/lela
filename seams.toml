@@ -370,7 +370,7 @@ porting = false   # it ports nothing of php-src's
 [[seam]]
 name = "heap"
 producer = "php_heap"
-consumers = ["php_unit", "php_compile", "php_link", "php_engine", "php_jit"]
+consumers = ["php_unit", "php_compile", "php_link", "php_engine", "php_jit", "php_ssa"]
 lock = "heap.lock"
 adr = "0003"
 [[seam]]
@@ -381,13 +381,13 @@ lock = "process.lock"
 [[seam]]
 name = "unit"
 producer = "php_unit"
-consumers = ["php_compile", "php_engine", "php_jit", "php_link"]
+consumers = ["php_compile", "php_engine", "php_jit", "php_link", "php_ssa"]
 lock = "unit.lock"
 adr = "0001"
 [[seam]]
 name = "link"
 producer = "php_link"
-consumers = ["php_compile", "php_engine", "php_jit"]
+consumers = ["php_compile", "php_engine", "php_jit", "php_ssa"]
 lock = "link.lock"
 adr = "0012"
 [[seam]]
@@ -472,7 +472,7 @@ order = "registration"
 adr = ["0004", "0006"]
 [[edge]]
 from = "php_jit"
-to = ["php_engine", "php_unit", "php_link", "php_heap"]
+to = ["php_engine", "php_unit", "php_link", "php_heap", "php_ssa"]
 allowlist = "tier.lock"
 adr = "0006"
 [[edge]]

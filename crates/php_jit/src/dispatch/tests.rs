@@ -11,6 +11,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::Ordering;
 
+use php_engine::api::abi::PostStartup;
 use php_engine::api::request::TierStatus;
 use php_engine::tier::{
     self, Epoch, Extension, ExtensionBuilder, Fatal, Flow, FrameRef, FuncRef, Request,
@@ -1271,15 +1272,25 @@ impl Tier for Escaping {
         <Lane as Tier>::setting(started, startup)
     }
 
+    /// `Lane`'s, which preloads the file `opcache.preload` names, as
+    /// opcache's `accel_post_startup` does.
     fn extension() -> Option<Extension> {
         let mut ini = crate::policy::ini();
         ini.extend(testing::declared(&testing::OPCACHE));
+        ini.extend(testing::declared(&["opcache.preload"]));
         Some(
             testing::switched(ExtensionBuilder::default())
                 .ini(ini)
                 .engine_state(crate::JitEngine::new)
                 .rinit(crate::JitEngine::request_started)
                 .request_state::<Crossed>()
+                .post_startup(|req, _| match req.ini().get(b"opcache.preload") {
+                    Some(script) if !script.is_empty() => PostStartup::Preload {
+                        script: script.to_vec(),
+                        thread: None,
+                    },
+                    _ => PostStartup::Serve,
+                })
                 .build("jit"),
         )
     }
@@ -1303,6 +1314,37 @@ fn an_escape_enters_the_trace_compiled_at_its_landing_in_code() {
     let engine = testing::engine::<Escaping>(&ini);
     let program = "function fib($n) { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }\necho fib(20), \"\\n\";";
     let (served, kept) = testing::Scratch::new().serve_kept::<Crossed>(&engine, program);
+    assert_eq!(testing::stdout(&served), "6765\n");
+    let crossed = kept.map(|kept| kept.0);
+    assert!(
+        crossed.is_some_and(|crossed| (1..=4).contains(&crossed)),
+        "the crossing went on from {crossed:?} escapes"
+    );
+}
+
+/// [`an_escape_enters_the_trace_compiled_at_its_landing_in_code`] with
+/// fib preloaded (#3568): a preloaded op array has its words and its
+/// landings in every epoch (`php_engine::arena::Base`), and the epoch's
+/// landing index names them as it names the ones its cache holds, so an
+/// escape to a landing compiled in fib enters its trace in code, as php's
+/// escape stub runs the landing's handler whatever file the op array
+/// is of; the crossing goes on from at most the first escape to each.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_escape_enters_the_trace_compiled_at_a_preloaded_landing_in_code() {
+    let scratch = testing::Scratch::new();
+    let preload = scratch.0.join("preload.php");
+    let fib =
+        "<?php function fib($n) { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }";
+    std::fs::write(&preload, fib).expect("the preload's file");
+    let script = preload.to_string_lossy().into_owned();
+    let ini = [
+        ("opcache.jit", "tracing"),
+        ("jit.compile", "inline"),
+        ("opcache.preload", script.as_str()),
+    ];
+    let engine = testing::engine::<Escaping>(&ini);
+    let (served, kept) = scratch.serve_kept::<Crossed>(&engine, "echo fib(20), \"\\n\";");
     assert_eq!(testing::stdout(&served), "6765\n");
     let crossed = kept.map(|kept| kept.0);
     assert!(

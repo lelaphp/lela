@@ -1076,7 +1076,8 @@ fn a_hashs_dimension_oplines_lower_through_the_lookup_kernels() -> Result<(), St
 /// and a fetch for writing through the `VAR` a fetch for writing left
 /// indirect, and a write to the array a reference holds, through the
 /// lookup kernels, the handler called only where a write is not made in
-/// place and nothing stepped but the `COALESCE`, as php calls its handler.
+/// place and for the `COALESCE` over a temporary, as php calls its
+/// handler, and nothing stepped.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_lowers_in_place()
@@ -1087,8 +1088,8 @@ fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_lowers_in_place()
             &[
                 (Kernel::Find, 5),
                 (Kernel::Release, 3),
-                (Kernel::Step, 1),
-                (Kernel::Handle, 0),
+                (Kernel::Step, 0),
+                (Kernel::Handle, 1),
             ],
         ),
         (

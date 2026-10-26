@@ -61,7 +61,7 @@ mod frames;
 mod held;
 mod layout;
 pub(crate) mod published;
-pub use published::{LANDING_CHUNK_BITS, LandingIndex};
+pub use published::{LANDING_CHUNK_BITS, LandingIndex, LandingRows};
 mod sampled;
 mod strings;
 #[cfg(dispatch = "tailcall")]

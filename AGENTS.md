@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=230a08dbf3300a1e50a9c1ef47dc77e8222110d08d005c8a55e7b8147330461c out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=aba831672f7c98dfb66075db32afa181e6a11795479d0d88fc459633f2366878 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
 
 ## What makes the third engine special?
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=038a807279c26d2ca28f03138a8342170bd98eb369bd383ac1b075e9e302420b out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=284c08dbc790822a2e2b4aef6d7fcbca8d0aea6aa20428e18cd3350bd9a1d8eb out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -123,18 +123,18 @@ third-engine-design.md
 
 | seam | lock | items | ceiling |
 |---|---|---|---|
-| heap | heap.lock | 517 |  |
+| heap | heap.lock | 518 |  |
 | process | process.lock | 40 |  |
 | unit | unit.lock | 125 |  |
 | link | link.lock | 62 |  |
 | ops | ops.lock | 209 |  |
 | api | api.lock | 1522 | 1525 |
 | sapi | sapi.lock | 60 |  |
-| tier | tier.lock | 212 |  |
+| tier | tier.lock | 214 |  |
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 428 |  |
 
-<!-- /computed in=b0cf3f6ebe8ecd00c88c458e8b54f199851be1fb12f8b0bdd792481430d3aa0c out=3df986fef2b3b6c1e78b9a5d37a4af85dab6fa1bfab81c30d26c4dc1aeb2e180 -->
+<!-- /computed in=772605a0069806c70273527fe985917c40d898f2827eaa26ffcdff3aa9bf9045 out=7f7af6d8080b61ab2ddf4463b88c75a1228936d7be78c8d84b5c540351fabfab -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

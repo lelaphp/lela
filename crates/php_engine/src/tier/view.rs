@@ -74,11 +74,12 @@ impl Epoch {
     }
 
     /// Where compiled code finds the landing words of the op arrays this
-    /// epoch published (`jit-design.md` §4.9): what a trace's escape
-    /// reads, laid down where it was not.
+    /// epoch holds, the ones it published and the preload's
+    /// (`jit-design.md` §4.9): what a trace's escape reads, laid down
+    /// where it was not.
     #[must_use]
     pub fn landing_index(&self) -> super::LandingIndex {
-        self.0.files.funcs.landing_index()
+        self.0.landing_index()
     }
 
     /// The op array `f` names, held by this epoch for as long as the

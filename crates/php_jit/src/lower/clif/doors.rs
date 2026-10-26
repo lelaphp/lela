@@ -28,12 +28,12 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I32, I64};
 use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, Value};
-use php_engine::tier::{FRAME, LANDING_CHUNK_BITS, Word};
+use php_engine::tier::{LANDING_CHUNK_BITS, LandingIndex, LandingRows, Word};
 
 use super::calls::TOP;
 use super::{
-    CallRoom, Emit, Raised, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE, STOOD_ROOM,
-    body_signature, engine_offset, imm, mismatch, trusted,
+    CallRoom, EX_OPLINE, Emit, Raised, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE,
+    STOOD_ROOM, body_signature, engine_offset, imm, mismatch, trusted,
 };
 use crate::lower::{
     ENTRANCE_BODY, ENTRANCE_TRACE, ENTRY_AT, ESCAPED, Escapes, IMAGES_AT, Linked, READY_AT,
@@ -72,9 +72,6 @@ struct Leaving {
 
 /// A trace's number's place in its segment of rows, as a mask.
 const ROW_MASK: i32 = imm(ROW_SEGMENT - 1);
-
-/// Where the frame's opline is in its room, `EX(opline)`.
-const OPLINE: i32 = imm(FRAME.opline() as usize);
 
 /// An address's width, as the shift that scales a number of them.
 const ADDRESS_SHIFT: i64 = 3;
@@ -366,7 +363,9 @@ impl Emit<'_> {
 
     /// The entrance of the trace compiled at the landing the last `Stood`
     /// says the frame stands at (`lower::Escapes`): the op array's landing
-    /// words found through the epoch's index by its offset, the word of
+    /// words found through the epoch's index by its offset, at the place
+    /// `LandingIndex::place` says, the epoch's own stretch first and the
+    /// preload's after, the word of
     /// the opline read, and where it reads compiled, the entrance of the
     /// trace it names read from the table's; `answer` where the op array
     /// is past the index or its words are not laid, where the opline is
@@ -383,15 +382,7 @@ impl Emit<'_> {
         } = escapes;
         let func = self.stood_word(I32, STOOD_FUNC);
         let opline = self.stood_word(I32, STOOD_OPLINE);
-        let first = self.b.ins().iconst(I32, i64::from(landings.first));
-        let past = self.b.ins().isub(func, first);
-        let outside = self.b.ins().icmp_imm_u(
-            IntCC::UnsignedGreaterThanOrEqual,
-            past,
-            i64::from(landings.held),
-        );
-        self.cold_if(outside, answer);
-        let past = self.b.ins().uextend(I64, past);
+        let past = self.landing_place(func, landings, answer);
         let index = self.address(landings.chunks)?;
         let chunk = self.b.ins().ushr_imm_u(past, i64::from(LANDING_CHUNK_BITS));
         let chunk = self.address_at(index, chunk, answer);
@@ -418,6 +409,59 @@ impl Emit<'_> {
         let id = self.b.ins().uextend(I64, id);
         let entrances = self.address(entrances)?;
         Ok(self.address_at(entrances, id, answer))
+    }
+
+    /// The place the op array at offset `func` is named at in `landings`,
+    /// as `LandingIndex::place` says: in the epoch's own stretch where that
+    /// names it, and in the preload's where that one does; on to `answer`
+    /// past both.
+    fn landing_place(&mut self, func: Value, landings: LandingIndex, answer: Block) -> Value {
+        let (past, outside) = self.past_first(func, landings.own);
+        let Some(preloaded) = landings.preloaded else {
+            self.cold_if(outside, answer);
+            return self.placed(past, landings.own);
+        };
+        let named = self.b.create_block();
+        self.b.set_cold_block(named);
+        let place = self.b.append_block_param(named, I64);
+        let below = self.b.create_block();
+        self.b.set_cold_block(below);
+        let ours = self.placed(past, landings.own);
+        self.b
+            .ins()
+            .brif(outside, below, &[], named, &[BlockArg::Value(ours)]);
+        self.b.switch_to_block(below);
+        self.b.seal_block(below);
+        let (past, outside) = self.past_first(func, preloaded);
+        self.cold_if(outside, answer);
+        let theirs = self.placed(past, preloaded);
+        self.b.ins().jump(named, &[BlockArg::Value(theirs)]);
+        self.b.switch_to_block(named);
+        self.b.seal_block(named);
+        place
+    }
+
+    /// The offset `func` past the first of `rows`, and whether the stretch
+    /// leaves it out.
+    fn past_first(&mut self, func: Value, rows: LandingRows) -> (Value, Value) {
+        let first = self.b.ins().iconst(I32, i64::from(rows.first));
+        let past = self.b.ins().isub(func, first);
+        let outside = (self.b.ins()).icmp_imm_u(
+            IntCC::UnsignedGreaterThanOrEqual,
+            past,
+            i64::from(rows.held),
+        );
+        (past, outside)
+    }
+
+    /// The place `rows` names the op array `past` its first at: from the
+    /// place the stretch starts at.
+    fn placed(&mut self, past: Value, rows: LandingRows) -> Value {
+        let past = self.b.ins().uextend(I64, past);
+        match rows.place {
+            0 => past,
+            from => self.b.ins().iadd_imm_u(past, i64::from(from)),
+        }
     }
 
     /// The constant `address`.
@@ -565,7 +609,7 @@ impl Emit<'_> {
         }
         // The frame stood where the exit lands it.
         if let Some(opline) = stand {
-            self.b.ins().store(trusted(), opline, room, OPLINE);
+            self.b.ins().store(trusted(), opline, room, EX_OPLINE);
         }
         let sig = self.b.import_signature(body_signature());
         self.b.ins().return_call_indirect(sig, body, &[cx, room]);
