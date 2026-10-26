@@ -1474,6 +1474,27 @@ impl Archive {
     /// An unchanged entry's data opened for reading whole: decrypted with
     /// `password` where one is given, decompressed, its CRC checked at
     /// the end where `stat` has one (`zip_source_zip_file_create`).
+    /// `zip_stat_index` under `ZIP_FL_UNCHANGED` knows no compressed size
+    /// for an entry whose method is changed, as `changed`, the bits its
+    /// dirent's changes carry, say, so its decryption layer is refused,
+    /// though the stat still prints the size:
+    ///
+    /// ```php
+    /// foreach ([ZipArchive::EM_TRAD_PKWARE, ZipArchive::EM_AES_256] as $em) {
+    ///     $z = new ZipArchive; $z->open('opns-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    ///     $z->addFromString('a', str_repeat('secret ', 10)); $z->setEncryptionName('a', $em, 'pw'); $z->close();
+    ///     $z->open('opns-witness.zip'); $z->setPassword('pw'); $z->setCompressionName('a', ZipArchive::CM_STORE);
+    ///     echo "$em: ", var_export(@$z->getFromName('a'), true), ' ', $z->getStatusString(), ' ', var_export(@$z->getStream('a'), true), ' ', $z->statName('a')['comp_size'], "\n";
+    ///     $z->unchangeName('a'); echo '  ', strlen($z->getFromName('a')), "\n"; $z->close();
+    /// }
+    /// unlink('opns-witness.zip');
+    /// ```
+    /// ```expect
+    /// 1: false Operation not supported false 24
+    ///   70
+    /// 259: false Operation not supported false 40
+    ///   70
+    /// ```
     fn decoder(
         &mut self,
         idx: usize,
@@ -1481,16 +1502,18 @@ impl Archive {
         password: Option<&[u8]>,
         st: &Stat,
         check_crc: bool,
+        changed: u32,
     ) -> Result<Reader, Status> {
         let de = self.dirent(idx, flags).map_err(Status::new)?;
         let (dostime, bitflags) = (de.last_mod.time, de.bitflags);
         let crc_valid = self.entries[idx].orig.as_ref().is_some_and(|o| o.crc_valid);
+        let comp_size_known = changed & D_COMP_METHOD == 0;
         let layers = Layers {
             method: st.comp_method,
             encryption: st.encryption_method,
             password,
             size: st.size,
-            comp_size: st.comp_size,
+            comp_size: comp_size_known.then_some(st.comp_size),
             crc: (check_crc && crc_valid).then_some(st.crc),
             dostime,
             bitflags,
@@ -1500,7 +1523,8 @@ impl Archive {
     }
 
     /// An unchanged entry's data, decrypted with `password` and
-    /// decompressed, and the error that stopped the read short. Each of
+    /// decompressed, and the error that stopped the read short, the
+    /// entry's dirent changed in `changed`. Each of
     /// two entries under one name reads its own data.
     ///
     /// ```php
@@ -1524,6 +1548,7 @@ impl Archive {
         &mut self,
         idx: usize,
         password: Option<&[u8]>,
+        changed: u32,
     ) -> Result<(Vec<u8>, Option<Status>), Status> {
         let st = self
             .stat_index(idx, FL_UNCHANGED)
@@ -1531,7 +1556,7 @@ impl Archive {
         if st.encryption_method != EM_NONE && password.is_none() {
             return Err(Status::new(Er::Nopasswd));
         }
-        let mut reader = self.decoder(idx, FL_UNCHANGED, password, &st, false)?;
+        let mut reader = self.decoder(idx, FL_UNCHANGED, password, &st, false, changed)?;
         Ok(match &mut self.data {
             Some(d) => reader.read_to_end(&mut d.stdio),
             None => reader.read_to_end(&mut None),
@@ -1612,7 +1637,8 @@ impl Archive {
             } else {
                 None
             };
-            self.decoder(idx, flags, password, &st, true)
+            let changed = self.entries[idx].changes.as_ref().map_or(0, |c| c.changed);
+            self.decoder(idx, flags, password, &st, true, changed)
         };
         opened.map_err(|status| {
             self.error = status;

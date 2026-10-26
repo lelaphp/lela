@@ -1405,7 +1405,9 @@ pub(crate) struct Layers<'a> {
     pub(crate) encryption: u16,
     pub(crate) password: Option<&'a [u8]>,
     pub(crate) size: u64,
-    pub(crate) comp_size: u64,
+    /// The compressed size, `None` where the stat does not know it
+    /// (`ZIP_STAT_COMP_SIZE` clear).
+    pub(crate) comp_size: Option<u64>,
     /// The CRC to check the data against, where the stat has one.
     pub(crate) crc: Option<u32>,
     /// The DOS time PKWARE's header is checked by.
@@ -1477,18 +1479,19 @@ impl Reader {
             return Err(Status::new(Er::Compnotsupp));
         }
         // The decryption layer's refusal as libzip 1.12 creates it, before
-        // the empty data's shortcut: twelve bytes of PKWARE header, and
+        // the empty data's shortcut: a compressed size the stat does not
+        // know, or one short of twelve bytes of PKWARE header, or of
         // WinZip AES's salt, check and code.
         if decrypt
             && encryption
                 .overhead()
-                .is_some_and(|least| l.comp_size < least)
+                .is_some_and(|least| l.comp_size.is_none_or(|size| size < least))
         {
             return Err(Status::new(Er::Opnotsupp));
         }
         let crc = l.crc.map(|c| (c, l.size));
         let empty = if decrypt || l.method != 0 {
-            l.comp_size == 0
+            l.comp_size == Some(0)
         } else {
             l.size == 0
         };
@@ -1505,7 +1508,9 @@ impl Reader {
         let window = window()?;
         let raw = match (key, encryption) {
             (Some(p), Encryption::Pkware) => Raw::pkware(window, p, l.crc.map(|c| (l.dostime, c)))?,
-            (Some(p), Encryption::Aes(strength)) => Raw::aes(window, p, strength, l.comp_size)?,
+            (Some(p), Encryption::Aes(strength)) => {
+                Raw::aes(window, p, strength, l.comp_size.unwrap_or_default())?
+            }
             _ => Raw::Plain(window),
         };
         if l.method == 0 {

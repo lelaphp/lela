@@ -9,13 +9,21 @@ use std::io::Write;
 use crate::error::{Er, Status};
 
 /// A compressed entry: its bytes, the method they are in, and the
-/// general purpose bits and version the algorithm reports
+/// general purpose bits the algorithm reports
 /// (`ZIP_SOURCE_GET_FILE_ATTRIBUTES`).
 pub(crate) struct Compressed {
     pub(crate) data: Vec<u8>,
     pub(crate) method: u16,
     pub(crate) bitflags: u16,
-    pub(crate) version_needed: u16,
+}
+
+/// The version an algorithm's layer reports needed, compressing or
+/// decompressing alike (`zip_compression_algorithm_t`'s
+/// `version_needed`): bzip2's 4.6, and 2.0 for deflate, LZMA, XZ and
+/// zstd, whose own versions `_zip_dirent_apply_attributes` raises by the
+/// method.
+pub(crate) fn version_needed(method: u16) -> u16 {
+    if method == 12 { 46 } else { 20 }
 }
 
 /// `TORRENTZIP_COMPRESSION_FLAGS`, the level a torrentzip entry is
@@ -79,7 +87,7 @@ pub(crate) fn compress(
     can_store: bool,
 ) -> Result<Compressed, Status> {
     let fail = |_| Status::new(Er::Internal);
-    let (out, bitflags, version_needed) = match method {
+    let (out, bitflags) = match method {
         8 => {
             // `zip_algorithm_deflate.c`'s `allocate`: level 0 or past 9
             // is `Z_BEST_COMPRESSION`, and torrentzip's flags ask for
@@ -100,13 +108,13 @@ pub(crate) fn compress(
             let Some(out) = crate::ffi::deflate(data, level.cast_signed(), mem_level) else {
                 return Err(Status::new(Er::Zlib));
             };
-            (out, bits, 20)
+            (out, bits)
         }
         12 => {
             let level = if (1..=9).contains(&level) { level } else { 9 };
             let mut e = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::new(level));
             e.write_all(data).map_err(fail)?;
-            (e.finish().map_err(fail)?, 0, 46)
+            (e.finish().map_err(fail)?, 0)
         }
         14 | 95 => {
             let preset = if level <= 9 { level } else { 6 };
@@ -115,7 +123,7 @@ pub(crate) fn compress(
                 options.set_check_sum_type(lzma_rust2::CheckType::Crc64);
                 let mut w = lzma_rust2::XzWriter::new(Vec::new(), options).map_err(fail)?;
                 w.write_all(data).map_err(fail)?;
-                (w.finish().map_err(fail)?, 0, 63)
+                (w.finish().map_err(fail)?, 0)
             } else {
                 let options = lzma_rust2::LzmaOptions::with_preset(preset);
                 let mut out = vec![0x09, 0x14, 0x05, 0x00, options.get_props()];
@@ -123,7 +131,7 @@ pub(crate) fn compress(
                 let mut w =
                     lzma_rust2::LzmaWriter::new(out, &options, false, true, None).map_err(fail)?;
                 w.write_all(data).map_err(fail)?;
-                (w.finish().map_err(fail)?, 2, 63)
+                (w.finish().map_err(fail)?, 2)
             }
         }
         93 => {
@@ -131,7 +139,7 @@ pub(crate) fn compress(
                 data,
                 ruzstd::encoding::CompressionLevel::Fastest,
             );
-            (out, 0, 63)
+            (out, 0)
         }
         _ => return Err(Status::new(Er::Compnotsupp)),
     };
@@ -140,14 +148,12 @@ pub(crate) fn compress(
             data: data.to_vec(),
             method: 0,
             bitflags: 0,
-            version_needed,
         });
     }
     Ok(Compressed {
         data: out,
         method,
         bitflags,
-        version_needed,
     })
 }
 
