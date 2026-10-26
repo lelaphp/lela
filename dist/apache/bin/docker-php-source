@@ -1,0 +1,8 @@
+#!/bin/sh
+# docker-php-source for dax-php, which ships no php-src to extract.
+# `delete` and `extract` succeed with nothing to do; what a Dockerfile
+# then builds from the source (pecl, phpize) fails with its reason.
+case "$1" in
+	extract|delete) echo "docker-php-source: dax-php has no C source to $1; nothing to do" ;;
+	*) echo "usage: $0 extract|delete" >&2; exit 1 ;;
+esac
