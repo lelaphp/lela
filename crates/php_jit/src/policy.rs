@@ -35,7 +35,11 @@ use crate::table::{TraceId, code};
 /// at its top, so the first visit's bump reaches any threshold and
 /// claims, and an abort or a release starts the count again from zero
 /// as php's slot of the pool starts again from `ZEND_JIT_COUNTER_INIT`.
-const PRIMED: Laid = Laid::Counting([u32::MAX, COLD]);
+const PRIMED: Laid = Laid::Counting([PRIMED_HEAT, COLD]);
+
+/// The heat of a word php's unfilled pool hands a slot for: the top
+/// ([`PRIMED`]).
+const PRIMED_HEAT: u32 = u32::MAX;
 
 /// The state bits of a word's second half.
 const STATE: u32 = 0b11;
@@ -1432,18 +1436,54 @@ pub(crate) fn armed(word: &Word) -> bool {
 }
 
 /// Arm a landing word, php's `zend_jit_trace_setup_ret_counter`
-/// (`Z/ext/opcache/jit/zend_jit_trace.c:3404-3418`): a sealed word made
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:3417-3430`): a sealed word made
 /// cold, so the returns that land on it count toward
 /// `opcache.jit_hot_return`; one armed already, whatever its state, is
-/// left, as php arms an opline whose `trace_flags` are clear.
-pub(crate) fn arm(word: &Word) {
+/// left, as php arms an opline whose `trace_flags` are clear. php hands
+/// the landing a slot of the same pool of counters as a unit's entries
+/// and loops ([`Policy::laid`]), so where the tier is set up and off and
+/// nothing fills that pool, the slot fires at the first return, and the
+/// landing is armed primed as such a unit's words are laid (#3363);
+/// otherwise its heat starts at zero.
+///
+/// Under `opcache.jit=off` with a buffer and php's thresholds, a file
+/// included after `ini_set('opcache.jit', 'tracing')` roots its entry,
+/// whose trace stops at the `eval` and arms the landing past it, and the
+/// `eval`'d code's first return roots php's return trace there:
+///
+/// ```php
+/// $dir = realpath(sys_get_temp_dir()) . '/jit-return-' . getmypid(); mkdir($dir);
+/// file_put_contents("$dir/main.php", '<?php ini_set("opcache.jit", "tracing"); include __DIR__ . "/inc.php";');
+/// file_put_contents("$dir/inc.php", '<?php eval("\$x = 1;"); $s = 0; for ($i = 0; $i < 3; $i++) { $s += $i; } echo $s, "\n";');
+/// touch("$dir/main.php", time() - 60); touch("$dir/inc.php", time() - 60);
+/// $cmd = [PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.jit_debug=28672', "$dir/main.php"];
+/// $p = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]), str_replace($dir, 'DIR', stream_get_contents($pipes[2]));
+/// proc_close($p); unlink("$dir/main.php"); unlink("$dir/inc.php"); rmdir($dir);
+/// ```
+/// ```expect process
+/// 3
+/// ---- TRACE 1 start (enter) $main() DIR/inc.php:1
+/// ---- TRACE 1 stop (exit to VM interpreter)
+/// ---- TRACE 1 compiled
+///
+/// ---- TRACE 2 start (return) $main() DIR/inc.php:1
+/// ---- TRACE 2 start (loop) $main() DIR/inc.php:1
+/// ---- TRACE 2 stop (loop)
+/// ---- TRACE 2 compiled
+/// ```
+pub(crate) fn arm(word: &Word, policy: &Policy) {
     if armed(word) {
         return;
     }
     // The heat first: a sealed word is never bumped, and a visit that
     // finds the state cold finds no heat left over from the seal.
     let [heat, state] = word.halves();
-    heat.store(0, Ordering::Relaxed);
+    let armed_heat = match policy.runs {
+        Runs::Switched => PRIMED_HEAT,
+        Runs::FromStart | Runs::Lane => 0,
+    };
+    heat.store(armed_heat, Ordering::Relaxed);
     // Another arming of the same landing may win; either leaves it cold.
     state
         .compare_exchange(u32::MAX, COLD, Ordering::Release, Ordering::Relaxed)

@@ -296,6 +296,25 @@ fn a_primed_word_reaches_any_threshold_at_its_first_visit() {
     assert_eq!(bump(&word), u32::MAX, "the heat saturates");
 }
 
+/// A landing is armed as php's `zend_jit_trace_setup_ret_counter` hands
+/// it a slot of the pool of counters: where the tier is set up and off,
+/// a slot no request start filled, primed, so the first return claims;
+/// where it was on from the start, from zero, so php's
+/// `opcache.jit_hot_return` returns claim. An armed landing is left.
+#[test]
+fn a_landing_is_armed_from_the_pool_php_hands_it_a_slot_of() {
+    for (setting, heat) in [("off", u32::MAX), ("tracing", 0)] {
+        let (policy, _) = read_ini(&[("opcache.jit", setting)]);
+        let word = Word::sealed();
+        super::arm(&word, &policy);
+        assert_eq!(read(&word), State::Cold, "{setting}");
+        assert_eq!(word.halves()[0].load(Ordering::Relaxed), heat, "{setting}");
+        word.halves()[0].store(7, Ordering::Relaxed);
+        super::arm(&word, &policy);
+        assert_eq!(word.halves()[0].load(Ordering::Relaxed), 7, "{setting}");
+    }
+}
+
 /// `zend_jit_check_support` refuses a buffer the target's code cannot
 /// reach once it set the tier up, with php's warning, and refuses no
 /// lane over a tier php never set up.

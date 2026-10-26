@@ -27,7 +27,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use php_engine::tier::{self, Epoch, Parked};
 
 use crate::lower::{Compiled, Linked};
-use crate::policy::{self, Claim, Compile, Mode, Outcome, State, TraceEvent};
+use crate::policy::{self, Claim, Compile, Mode, Outcome, Policy, State, TraceEvent};
 use crate::record::{self, Recorded, Start, Stop};
 use crate::table::{self, Table, TraceName, Unpublished};
 use crate::types::{self, Abort, End, TraceIr};
@@ -306,7 +306,7 @@ fn pipeline_with(
     };
     if matches!(outcome, Outcome::Published(_)) && shared.policy.threshold(Start::Return).is_some()
     {
-        arm_landings(&recorded, claim.epoch());
+        arm_landings(&recorded, claim.epoch(), &shared.policy);
     }
     let start = claim.start();
     let settled = policy::settle(claim, &outcome);
@@ -337,10 +337,10 @@ fn pipeline_with(
 /// `opcache.jit_hot_return` is not zero
 /// (`zend_jit_trace_setup_ret_counter`, `Z/ext/opcache/jit/zend_jit_trace.c:3404-3418`;
 /// `jit-design.md` §2.2, #3036).
-fn arm_landings(recorded: &Recorded, epoch: &Epoch) {
+fn arm_landings(recorded: &Recorded, epoch: &Epoch, policy: &Policy) {
     for (func, at) in record::landings(&recorded.record, &recorded.view) {
         if let Some(word) = epoch.lay_landing(func, at) {
-            policy::arm(word);
+            policy::arm(word, policy);
         }
     }
 }
