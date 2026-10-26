@@ -1753,6 +1753,7 @@ dependencies = [
  "libc",
  "php_engine",
  "php_heap",
+ "php_ssa",
  "php_unit",
  "rustix",
 ]
@@ -1854,6 +1855,14 @@ dependencies = [
  "php_bundle",
  "php_ext",
  "php_sapi",
+]
+
+[[package]]
+name = "php_ssa"
+version = "0.0.0"
+dependencies = [
+ "php_heap",
+ "php_unit",
 ]
 
 [[package]]
