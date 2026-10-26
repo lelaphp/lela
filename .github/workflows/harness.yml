@@ -17,7 +17,8 @@
 # (oracle.toml), for the witnesses, the crosscheck and the tests that spawn
 # the oracle (#678, #2200). The two stores meet in `done`, handed to it
 # through the stash on `dax-build` rather than as GitHub artifacts, which
-# count against the account's storage (.github/actions/stash, #3554). A runner keeps its
+# count against the account's storage (.github/actions/stash, #3554); the
+# stash is the repository's to configure, in the `env` below. A runner keeps its
 # work directory between jobs, so each checkout is `clean: false` and the
 # workspace action cleans all but target/, the warm build.
 #
@@ -46,6 +47,13 @@ on:
 concurrency:
   group: harness-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+# The stash every hand-off between jobs goes through (.github/actions/stash,
+# #3554): the repository's to configure once, for every runner, and unset
+# on a fork, where the hand-off is a GitHub artifact.
+env:
+  DAX_STASH: ${{ vars.DAX_STASH }}
+  DAX_STASH_HOST_KEY: ${{ vars.DAX_STASH_HOST_KEY }}
+  DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
 jobs:
   regions:
     name: computed check

@@ -3,10 +3,11 @@
 # rather than as a GitHub artifact (#3554). GitHub counts artifact storage
 # across the account over its billing month, and a run of `main` that hit
 # the quota failed at its first upload (run 40316950733), though every job
-# that reads a hand-off runs on the server that could have kept it.
+# that reads a hand-off could reach a server that keeps it.
 #
 #   stash.sh put <name> <path> [--exclude <path under it>]... [--days <n>]
 #   stash.sh get <dest> <name>... [--merge] [--optional]
+#   stash.sh prune <directory>
 #
 # `put` keeps <path>, a file or a directory, as <name> of this run
 # (GITHUB_RUN_ID), less each `--exclude`, for <n> days (7 where unnamed),
@@ -17,17 +18,20 @@
 # without `--merge`, as download-artifact did; a name this run kept none of
 # fails it, or is a note under `--optional`.
 #
-# The stash is DAX_STASH: a directory on the server, `~/dax-stash` where
-# unset on Linux, or `<user>@<host>:<directory>` from another machine,
-# reached by rsync over SSH with the key DAX_STASH_KEY names
-# (~/.ssh/dax-stash where unset and present). runner.sh writes both into
-# the Mac's runner environment (`runner.sh mac --stash`), and the wizard
-# authorizes the key for the server's runner user; the server's own jobs
-# need no rsync. Each entry is one gzipped tar, `runs/<run id>/<name>.tar.gz`,
-# so a put over rsync replaces it whole and needs no command on the far side; `latest/<name>.tar.gz` is a
-# link to the newest, which `xtask phpt --against`'s fetch line reads for
-# `phpt-runs` (#2362). Every put and get on the server drops the entries
-# past their days, but none a `latest` link names.
+# The stash is DAX_STASH, `<user>@<host>`, reached by rsync over SSH as
+# RSYNC_RSH says, the same from every runner and from a person's machine:
+# the repository's variable of that name, with the key and the server's
+# host key beside it, which .github/actions/stash lays down for the step
+# (scripts/ci/README.md). The server holds the key to `rrsync` over one
+# directory, so every path here is relative to the stash and the far side
+# runs no command but rsync's. Each entry is one gzipped tar,
+# `runs/<run id>/<name>.tar.gz`, beside `<name>.expires`, the second it may
+# go, so a put replaces it whole; `latest/<name>.tar.gz` is a link to the
+# newest, which `xtask phpt --against`'s fetch line reads for `phpt-runs`
+# (#2362).
+#
+# `prune` runs on the server, from the timer runner.sh lays: it drops each
+# entry of <directory> past its days, but none a `latest` link names.
 set -euo pipefail
 
 die() { printf 'stash.sh: %s\n' "$*" >&2; exit 1; }
@@ -35,30 +39,9 @@ die() { printf 'stash.sh: %s\n' "$*" >&2; exit 1; }
 stage="" got=""
 trap 'rm -rf "$stage" "$got"' EXIT
 
-stash=${DAX_STASH:-}
-if [ -z "$stash" ]; then
-    [ "$(uname -s)" = Linux ] || die "DAX_STASH is unset: off the server it names the server's stash, <user>@<host>:dax-stash, which runner.sh mac --stash writes"
-    stash=$HOME/dax-stash
-fi
-run=${GITHUB_RUN_ID:?the stash keys each entry by the run, GITHUB_RUN_ID}
-case $stash in
-    /*) remote="" ;;
-    *:*) remote=1 ;;
-    *) die "DAX_STASH is an absolute directory or <user>@<host>:<directory>, not $stash" ;;
-esac
-if [ -n "$remote" ]; then
-    command -v rsync >/dev/null || die "no rsync on this machine, which reaches the stash by it"
-    key=${DAX_STASH_KEY:-$HOME/.ssh/dax-stash}
-    rsh="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-    [ ! -f "$key" ] || rsh="$rsh -i $key"
-    export RSYNC_RSH=$rsh
-fi
-
-# The entries past their days, on the server alone: each `.expires` holds
-# the second its entry may go.
 prune() {
-    [ -z "$remote" ] && [ -d "$stash/runs" ] || return 0
-    local now kept expires entry
+    local stash=${1:?prune names the stash directory} now kept expires entry
+    [ -d "$stash/runs" ] || return 0
     now=$(date +%s)
     kept=$(for link in "$stash"/latest/*.tar.gz; do [ -L "$link" ] && readlink "$link"; done)
     for expires in "$stash"/runs/*/*.expires; do
@@ -68,6 +51,14 @@ prune() {
         rm -f "$entry" "$expires"
     done
     find "$stash/runs" -mindepth 1 -maxdepth 1 -type d -empty -delete
+}
+
+# The far side, and the run, of a put or a get.
+remote() {
+    stash=${DAX_STASH:?DAX_STASH names the stash, <user>@<host>, as the repository variable does}
+    [[ $stash == *@* && $stash != *:* ]] || die "DAX_STASH is <user>@<host>, not $stash"
+    run=${GITHUB_RUN_ID:?the stash keys each entry by the run, GITHUB_RUN_ID}
+    command -v rsync >/dev/null || die "no rsync on this machine, which reaches the stash by it"
 }
 
 put() {
@@ -80,11 +71,11 @@ put() {
             *) die "unknown argument $1" ;;
         esac
     done
+    remote
     if [ ! -e "$path" ]; then
         echo "::warning title=nothing stashed::no $path, so this run keeps no $name"
         return 0
     fi
-    prune
     stage=$(mktemp -d)
     mkdir -p "$stage/runs/$run" "$stage/latest"
     if [ -d "$path" ]; then
@@ -95,13 +86,7 @@ put() {
     echo $(($(date +%s) + days * 86400)) > "$stage/runs/$run/$name.expires"
     ln -s "../runs/$run/$name.tar.gz" "$stage/latest/$name.tar.gz"
     echo "keeping $path as $name of run $run in $stash, for $days days ($(du -h "$stage/runs/$run/$name.tar.gz" | cut -f1))"
-    if [ -n "$remote" ]; then
-        rsync -a "$stage/" "$stash/"
-    else
-        mkdir -p "$stash/runs/$run" "$stash/latest"
-        mv -f "$stage/runs/$run/$name.tar.gz" "$stage/runs/$run/$name.expires" "$stash/runs/$run/"
-        ln -sfn "../runs/$run/$name.tar.gz" "$stash/latest/$name.tar.gz"
-    fi
+    rsync -a "$stage/" "$stash:"
 }
 
 get() {
@@ -116,23 +101,17 @@ get() {
     done
     [ ${#names[@]} -gt 0 ] || die "get names at least one entry"
     [ ${#names[@]} -gt 1 ] || merge=1
-    prune
+    remote
     got=$(mktemp -d)
     for name in "${names[@]}"; do
-        local at=$dest
+        local at=$dest status=0
         [ -n "$merge" ] || at=$dest/$name
-        local entry=$stash/runs/$run/$name.tar.gz status=0
-        if [ -n "$remote" ]; then
-            rsync -a "$entry" "$got/" 2>"$got/err" || status=$?
-            # rsync's 23 is a source that is not there; any other failure
-            # is the stash's, which no `--optional` passes over.
-            if [ "$status" -ne 0 ] && [ "$status" -ne 23 ]; then
-                cat "$got/err" >&2
-                die "the stash at $stash did not answer (rsync exit $status)"
-            fi
-            entry=$got/$name.tar.gz
-        elif [ ! -f "$entry" ]; then
-            status=23
+        rsync -a "$stash:runs/$run/$name.tar.gz" "$got/" 2>"$got/err" || status=$?
+        # rsync's 23 is a source that is not there; any other failure is
+        # the stash's, which no `--optional` passes over.
+        if [ "$status" -ne 0 ] && [ "$status" -ne 23 ]; then
+            cat "$got/err" >&2
+            die "the stash at $stash did not answer (rsync exit $status)"
         fi
         if [ "$status" -eq 23 ]; then
             if [ -n "$optional" ]; then
@@ -144,13 +123,13 @@ get() {
             continue
         fi
         mkdir -p "$at"
-        tar -xzf "$entry" -C "$at"
+        tar -xzf "$got/$name.tar.gz" -C "$at"
         echo "laid $name of run $run at $at"
     done
     return "$missing"
 }
 
 case ${1:-} in
-    put | get) "$@" ;;
-    *) die "usage: stash.sh put <name> <path> [--exclude <path>]... [--days <n>] | get <dest> <name>... [--merge] [--optional]" ;;
+    put | get | prune) "$@" ;;
+    *) die "usage: stash.sh put <name> <path> [--exclude <path>]... [--days <n>] | get <dest> <name>... [--merge] [--optional] | prune <directory>" ;;
 esac
