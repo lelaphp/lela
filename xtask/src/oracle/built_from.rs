@@ -24,15 +24,15 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use super::hosts::{HOSTS, MAKALA};
+use crate::key::{BUILT_UNDER, toolchain};
 use crate::layout::{Layout, normalize};
 
-/// The workspace's own files every build of a package reads.
-const WORKSPACE: [&str; 4] = [
-    "Cargo.toml",
-    "Cargo.lock",
-    "rust-toolchain.toml",
-    ".cargo/config.toml",
-];
+/// The workspace's own files every build of a package reads: each file
+/// rustc is built under, in the one list of them ([`BUILT_UNDER`]), and
+/// the lock, which pins each dependency's version.
+fn workspace() -> impl Iterator<Item = &'static str> {
+    BUILT_UNDER.iter().map(|f| f.path).chain(["Cargo.lock"])
+}
 
 /// What a binary with no dep-info is keyed over beside the crate
 /// directories: the key every run had before #3109, so a run kept then is
@@ -70,7 +70,7 @@ impl BuiltFrom {
     /// The paths, relative to `root`, a phpt run on the binary is kept
     /// under: each package of the workspace the dep-info names a path in,
     /// whole, each host's, each other file of the workspace it names (a
-    /// file a `build.rs` reads, `ops.toml`), and [`WORKSPACE`]. Where it
+    /// file a `build.rs` reads, `ops.toml`), and [`workspace`]'s. Where it
     /// names no package under `root`, every crate directory of `layout`,
     /// as [`BuiltFrom::Unlisted`] is.
     pub(crate) fn keyed(&self, root: &Path, layout: &Layout) -> Vec<PathBuf> {
@@ -81,7 +81,7 @@ impl BuiltFrom {
             let every = UNLISTED.into_iter().chain(layout.dirs());
             return every.map(PathBuf::from).collect();
         }
-        let workspace = WORKSPACE.iter().chain(&hosts).map(PathBuf::from);
+        let workspace = workspace().chain(hosts).map(PathBuf::from);
         let keyed: BTreeSet<PathBuf> = packages.into_iter().chain(workspace).collect();
         keyed.into_iter().collect()
     }
@@ -143,7 +143,7 @@ impl BuiltFrom {
         let packages = self.packages(root, layout).into_iter();
         let packages = packages.filter(|p| is_package(p, layout));
         found.extend(packages.map(|package| root.join(package).join("Cargo.toml")));
-        found.push(root.join("rust-toolchain.toml"));
+        found.extend(toolchain().map(|path| root.join(path)));
         if *self == BuiltFrom::Unlisted {
             found.retain(|path| is_engine_source(path.strip_prefix(root).unwrap_or(path)));
         }

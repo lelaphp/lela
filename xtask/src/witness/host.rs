@@ -679,14 +679,31 @@ mod tests {
 
     use super::{Held, Judgement, hosts};
     use crate::divergence::Registry;
-    use crate::oracle::{Host, Pin};
+    use crate::oracle::{Host, Pin, Promise};
     use crate::scratch::Tree;
+
+    /// The tracked pin, whole.
+    fn tracked() -> Pin {
+        let root = crate::package_dir().join("..");
+        Pin::parse(&fs::read_to_string(root.join("oracle.toml")).unwrap()).unwrap()
+    }
+
+    /// Whether the tracked pin's php is on this machine, which a line
+    /// judged under the pin whole reads beside its stand-in host; a skip
+    /// where this machine did not promise it, and a failure where it did
+    /// (#38, #3249).
+    fn oracle() -> bool {
+        let pin = tracked();
+        Promise::Oracle
+            .or_skip(pin.oracle.file().map(Path::to_path_buf))
+            .unwrap()
+            .is_some()
+    }
 
     /// The tracked pin with `php-cgi` standing at `cgi`, pinned by the
     /// digest given, the file's own where none is.
     fn pin(cgi: &Path, md5: Option<&str>) -> Pin {
-        let root = crate::package_dir().join("..");
-        let mut pin = Pin::parse(&fs::read_to_string(root.join("oracle.toml")).unwrap()).unwrap();
+        let mut pin = tracked();
         let md5 = md5.map_or_else(
             || format!("{:x}", md5::compute(fs::read(cgi).unwrap_or_default())),
             str::to_owned,
@@ -726,6 +743,9 @@ mod tests {
     /// leaves another file fails, the difference named.
     #[test]
     fn a_line_passes_where_the_hosts_agree_and_fails_where_they_differ() {
+        if !oracle() {
+            return;
+        }
         let hosts = Tree::new("host-line-hosts").unwrap();
         let same = "echo \"$1\" | wc -c; echo err >&2; cat in.txt > out.txt; exit 3";
         let pinned = host(&hosts, "php-cgi", same);
@@ -760,6 +780,9 @@ mod tests {
     /// no mask stands where the line names none.
     #[test]
     fn a_mask_the_line_names_hides_what_it_matches() {
+        if !oracle() {
+            return;
+        }
         let hosts = Tree::new("host-line-masked").unwrap();
         let pinned = host(&hosts, "php-cgi", "echo \"pid $$\"");
         let pin = pin(&pinned, None);
@@ -774,6 +797,9 @@ mod tests {
     /// line and names it; neither is a skip.
     #[test]
     fn an_absent_or_drifted_pinned_host_fails_the_line() {
+        if !oracle() {
+            return;
+        }
         let hosts = Tree::new("host-line-absent").unwrap();
         let engine = host(&hosts, "engine", "echo 1");
         let absent = hosts.join("php-cgi");
@@ -791,6 +817,9 @@ mod tests {
     /// has written nothing for a while: both held as any line is.
     #[test]
     fn a_line_s_head_ends_a_program_that_does_not_end_on_its_own() {
+        if !oracle() {
+            return;
+        }
         let hosts = Tree::new("host-line-head").unwrap();
         for (name, body) in [("loops", "yes x"), ("waits", "echo x; sleep 60")] {
             let pinned = host(&hosts, "php-cgi", body);
@@ -814,6 +843,9 @@ mod tests {
     /// and the line is run again, both hosts, on another port, and passes.
     #[test]
     fn a_port_taken_before_the_host_binds_it_is_tried_again_on_another() {
+        if !oracle() {
+            return;
+        }
         let hosts = Tree::new("host-line-taken").unwrap();
         let once = hosts.join("refused-once");
         let serve = "echo up > up; exec sleep 30";
@@ -861,6 +893,9 @@ mod tests {
     /// between the answer and the stop lets the line land first.
     #[test]
     fn a_server_is_stopped_once_its_file_matches_what_it_settles_on() {
+        if !oracle() {
+            return;
+        }
         let hosts = Tree::new("host-line-settled").unwrap();
         let late = |name: &str, seconds: u32| {
             let body = format!(

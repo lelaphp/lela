@@ -1099,6 +1099,30 @@ pub fn run(
             log
         }
     };
+    measure_bars(
+        store,
+        &snapshot,
+        bars,
+        &tolerances,
+        &log,
+        reps,
+        (label, note),
+    )
+}
+
+/// [`run`]'s measurement of `bars`, once read: each measured, held to its
+/// row of `tolerances` and its earlier nights in `log`, rendered and
+/// recorded, a regressed series's ticket left for the lane. The bars are
+/// handed in, so a test feeds the arms' timings from a stub.
+fn measure_bars(
+    store: &Store,
+    snapshot: &Snapshot,
+    bars: Vec<Declared>,
+    tolerances: &[Tolerance],
+    log: &[Reading],
+    reps: usize,
+    (label, note): (Label, &str),
+) -> Result<()> {
     let failed = store.root().join(FAILED);
     std::fs::remove_dir_all(&failed).ok();
     let (mut readings, mut refused) = (Vec::new(), Vec::new());
@@ -1115,12 +1139,12 @@ pub fn run(
         let (measured, names, load) = match measured {
             Ok(Ok(measured)) => measured,
             Ok(Err(why)) => {
-                readings.push(unmeasured(&id, Status::Skip, &why, &snapshot)?);
+                readings.push(unmeasured(&id, Status::Skip, &why, snapshot)?);
                 continue;
             }
             Err(e) => {
                 let why = format!("{e:#}");
-                readings.push(unmeasured(&id, Status::Fail, &why, &snapshot)?);
+                readings.push(unmeasured(&id, Status::Fail, &why, snapshot)?);
                 refused.push(format!("{id}: {why}"));
                 continue;
             }
@@ -1134,9 +1158,9 @@ pub fn run(
             row,
         };
         print!("{}", rendered(&bar, &measured, reps, label, load));
-        let mut reading = recorded(&bar, &measured, (reps, label, note), load, &snapshot)?;
+        let mut reading = recorded(&bar, &measured, (reps, label, note), load, snapshot)?;
         let held = (row.filter(|_| held == Held::Series))
-            .map(|tolerance| series::hold(tolerance, &log, &mut reading));
+            .map(|tolerance| series::hold(tolerance, log, &mut reading));
         readings.push(reading);
         if let Some((baseline, regressed)) = held {
             readings.extend(baseline);
@@ -1814,5 +1838,187 @@ mod tests {
         );
         assert!(refuse_a_hosted_runner(Some("self-hosted")).is_ok());
         assert!(refuse_a_hosted_runner(None).is_ok());
+    }
+
+    /// A stub arm's name and what each of its reps takes, by the rep.
+    type Stubbed = (&'static str, fn(u32) -> f64);
+
+    /// An arm whose reps take what `ms` says of each, as a stub states
+    /// them: the timings a test feeds the instrument, so its verdict is
+    /// the rule's and never the machine's load (#3235). It writes nothing
+    /// and pins `/bin/sh`, which it never runs.
+    struct Stub {
+        name: &'static str,
+        ms: fn(u32) -> f64,
+        rep: u32,
+        program: std::path::PathBuf,
+    }
+
+    impl super::Side for Stub {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn program(&self) -> &std::path::Path {
+            &self.program
+        }
+        fn once(&mut self) -> anyhow::Result<super::Sample> {
+            self.rep += 1;
+            Ok(super::Sample::of((self.ms)(self.rep), Vec::new()))
+        }
+    }
+
+    /// `id` declared with two stub arms, held as `held`.
+    fn stubbed(id: &str, held: Held, [a, b]: [Stubbed; 2]) -> super::Declared {
+        let stub = |(name, ms)| -> Box<dyn super::Side> {
+            let program = "/bin/sh".into();
+            Box::new(Stub {
+                name,
+                ms,
+                rep: 0,
+                program,
+            })
+        };
+        super::Declared {
+            id: id.to_owned(),
+            about: format!("{id}, its arms stubbed"),
+            held,
+            start: Box::new(move || Ok(Ok(super::Arms::Pair([stub(a), stub(b)])))),
+        }
+    }
+
+    /// A scratch repository, its store and its snapshot, for one test.
+    fn scratch(
+        name: &str,
+    ) -> (
+        crate::scratch::Tree,
+        crate::reading::Store,
+        crate::key::Snapshot,
+    ) {
+        let tree = crate::scratch::Tree::new(name).unwrap();
+        crate::scratch::repository(&crate::built_root(), &tree, &["xtask/fixtures/bench"]).unwrap();
+        let store = crate::reading::Store::of_workspace(&tree);
+        let snapshot = crate::key::Snapshot::disk(&tree).unwrap();
+        (tree, store, snapshot)
+    }
+
+    /// The A/A control whose arms differ by a known twenty milliseconds,
+    /// with a jitter of its own, reads fail on the resolved sign: the
+    /// negative control of the verdict, fed by a stub so a loaded
+    /// machine's noise never swamps it (#3235). Six measured reps after the
+    /// two discarded, the load beside the number, and the arms' empty
+    /// streams the vacuous value of §5.
+    #[test]
+    fn a_control_fed_arms_a_known_amount_apart_reads_fail_whatever_the_load() {
+        let (_tree, store, snapshot) = scratch("bench-stub-control");
+        let arms: [Stubbed; 2] = [
+            ("10ms", |r| 10.0 + f64::from(r % 3) * 0.5),
+            ("30ms", |r| 30.0 + f64::from(r % 2)),
+        ];
+        let bars = vec![stubbed("aa-differs", Held::Control, arms)];
+        super::measure_bars(
+            &store,
+            &snapshot,
+            bars,
+            &[],
+            &[],
+            6,
+            (super::Label::Smoke, ""),
+        )
+        .unwrap();
+        let reading = store.read("bench", "aa-differs").unwrap().unwrap();
+        assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+        for said in ["resolved", "SMOKE", "load ", "vacuous"] {
+            assert!(
+                reading.message.contains(said),
+                "{said}: {}",
+                reading.message
+            );
+        }
+        assert_eq!(reading.numbers["reps"], 6.into());
+        assert_eq!(reading.numbers["warmup_discarded"], 2.into());
+        let delta = reading.numbers["delta_median_ms"].as_f64();
+        assert!(delta < -10.0, "{:?}", reading.numbers);
+        // The same arms one arm: the sign swamped, the control passes.
+        let same: [Stubbed; 2] = [
+            ("a", |r| 10.0 + f64::from(r % 2)),
+            ("b", |r| 10.0 + f64::from((r + 1) % 2)),
+        ];
+        let bars = vec![stubbed("aa-same", Held::Control, same)];
+        super::measure_bars(
+            &store,
+            &snapshot,
+            bars,
+            &[],
+            &[],
+            6,
+            (super::Label::Smoke, ""),
+        )
+        .unwrap();
+        let reading = store.read("bench", "aa-same").unwrap().unwrap();
+        assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    }
+
+    /// A series held to a baseline of 0% within 2 points, its first arm
+    /// twenty milliseconds behind its second after a night that already
+    /// regressed, both read from a history handed in as the nightly lane
+    /// hands the published one, fails its reading and the run and leaves
+    /// the ticket the lane files, naming the commits (#2659); the arms'
+    /// timings fed by a stub (#3235). The same night not regressed before
+    /// leaves the run standing.
+    #[test]
+    fn a_series_that_regressed_two_nights_running_fails_and_leaves_its_ticket() {
+        use crate::reading::{Number, Reading};
+        let (_tree, store, snapshot) = scratch("bench-stub-series");
+        let id = "series-regressed";
+        let tolerance = crate::manifest::Tolerance {
+            bar: id.to_owned(),
+            pct: 2.0,
+            nights: Some(["1970-01-01".parse().unwrap(), "1970-01-02".parse().unwrap()]),
+        };
+        let mut baseline = Reading::new("bench", &format!("{id}/baseline"));
+        baseline
+            .numbers
+            .insert("baseline_pct".to_owned(), Number::Float(0.0));
+        let night = |delta: f64| {
+            let mut night = Reading::new("bench", id);
+            night.commit = "c1".to_owned();
+            for (key, ms) in [("b_median_ms", 10.0), ("delta_median_ms", delta)] {
+                night.numbers.insert(key.to_owned(), Number::Float(ms));
+            }
+            for (key, ms) in [("delta_q1_ms", delta - 1.0), ("delta_q3_ms", delta + 1.0)] {
+                night.numbers.insert(key.to_owned(), Number::Float(ms));
+            }
+            night.numbers.insert("reps".to_owned(), Number::Int(12));
+            night
+        };
+        let arms: [Stubbed; 2] = [
+            ("30ms", |r| 30.0 + f64::from(r % 3) * 0.5),
+            ("10ms", |r| 10.0 + f64::from(r % 2)),
+        ];
+        let run = |log: &[Reading]| {
+            let bars = vec![stubbed(id, Held::Series, arms)];
+            let ask = (super::Label::Smoke, "");
+            super::measure_bars(
+                &store,
+                &snapshot,
+                bars,
+                std::slice::from_ref(&tolerance),
+                log,
+                6,
+                ask,
+            )
+        };
+        run(&[baseline.clone(), night(0.0)]).expect("one night regressed is no failed run");
+        let failed =
+            run(&[baseline, night(20.0)]).expect_err("a second night in a row fails the run");
+        assert!(
+            format!("{failed:#}").contains("two nights running"),
+            "{failed:#}"
+        );
+        let reading = store.read("bench", id).unwrap().unwrap();
+        assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+        let ticket = store.root().join(super::FAILED).join(format!("{id}.md"));
+        let ticket = std::fs::read_to_string(ticket).expect("the ticket the lane files");
+        assert!(ticket.contains("..c1"), "{ticket}");
     }
 }

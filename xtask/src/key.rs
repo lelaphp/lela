@@ -34,16 +34,20 @@
 //! the key its own tree gave it.
 //!
 //! A crate's key also covers what decides outside every crate how rustc
-//! compiles it ([`BUILT_UNDER`]): the toolchain file, and of
-//! `.cargo/config.toml` the tables codegen reads, its rustflags, whose
-//! `[target.'cfg(all())']` passes LLVM's `--cgp-max-address-users-to-scan`
-//! to every profile (design §10 Profiles, #3372), and its profiles
-//! ([`codegen_of`]). A reading taken under another toolchain or other
-//! rustflags measured another build, so it is stale, as one taken before
-//! a crate of the closure changed is; an `[env]` line, such as a library's
+//! compiles it ([`BUILT_UNDER`], one list): the toolchain file, whole; of
+//! `.cargo/config.toml` its rustflags, whose `[target.'cfg(all())']`
+//! passes LLVM's `--cgp-max-address-users-to-scan` to every profile
+//! (design §10 Profiles, #3372), its profiles, and the `[env]` variables
+//! rustc and every C build read for every crate ([`REKEYED`]: the
+//! deployment target every object and link is made for, #3356); and of
+//! the workspace's `Cargo.toml` its profiles, which the release and the
+//! lanes' builds are made in. A reading taken under another toolchain,
+//! other rustflags, another profile or another deployment target measured
+//! another build, so it is stale, as one taken before a crate of the
+//! closure changed is. Any other `[env]` line, such as a library's
 //! directory, moves no crate's key, since the crate it reaches is the one
-//! whose `build.rs` reads it, and a whole-file key would stale every
-//! crate for it.
+//! whose `build.rs` reads it, and neither does the rest of the manifest,
+//! whose members and dependencies reach a key through the crates' own.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -100,11 +104,12 @@ pub struct Snapshot {
     /// one per set of sources a phpt run was kept over, for every touched
     /// crate ([`Snapshot::tracked_over`]).
     tracked_keys: Mutex<BTreeMap<Vec<PathBuf>, String>>,
-    /// Where `.cargo/config.toml`'s text is read from.
+    /// Where the text of a file of [`BUILT_UNDER`] is read from.
     source: Source,
-    /// The listing entry of `.cargo/config.toml`'s codegen tables, read
-    /// once ([`Snapshot::codegen`]).
-    codegen: OnceLock<Option<(String, String)>>,
+    /// The listing entries of what decides in each file of
+    /// [`BUILT_UNDER`] read for its part, read once
+    /// ([`Snapshot::built_under`]).
+    built_under: OnceLock<Vec<(String, String)>>,
 }
 
 /// Where a snapshot's files are: on disk, or in git's objects, as an
@@ -141,7 +146,7 @@ impl Snapshot {
             keys: Mutex::default(),
             tracked_keys: Mutex::default(),
             source,
-            codegen: OnceLock::new(),
+            built_under: OnceLock::new(),
         }
     }
 
@@ -288,8 +293,8 @@ impl Snapshot {
     /// The key of the sources under `path`, relative to the root: one
     /// hash over the files of the path and, when the path is a workspace
     /// crate's directory, of the directories of its dependency closure
-    /// ([`Graph::paths`]), the toolchain file and `.cargo/config.toml`'s
-    /// codegen tables ([`BUILT_UNDER`]). The graph is read only for a
+    /// ([`Graph::paths`]), and of what decides in each file rustc is built
+    /// under ([`BUILT_UNDER`]). The graph is read only for a
     /// directory with a manifest, the one kind of path it can widen. A
     /// path outside what a [`Snapshot::disk_over`] was read under is
     /// refused.
@@ -298,47 +303,52 @@ impl Snapshot {
             let paths = closure(&self.root, path)?;
             self.covering(&paths)?;
             let mut listing = under(&self.files, &paths);
-            if crate_dir(&self.root, path)
-                && let Some(entry) = self.codegen()?
-            {
-                listing.push(entry);
+            if crate_dir(&self.root, path) {
+                listing.extend(self.built_under()?.iter().cloned());
                 listing.sort_unstable();
             }
             Ok(git::listing_id(&listing))
         })
     }
 
-    /// `.cargo/config.toml`'s listing entry for a crate's key: its path
-    /// and the blob id of its codegen tables ([`codegen_of`]), none where
-    /// the file is absent or names no such table. Read from disk for a
-    /// snapshot of the working tree and from git's object otherwise.
-    fn codegen(&self) -> Result<Option<(String, String)>> {
-        if let Some(kept) = self.codegen.get() {
-            return Ok(kept.clone());
+    /// The listing entries a crate's key takes beside its closure's files
+    /// for each file of [`BUILT_UNDER`] read for its part: its path and
+    /// the blob id of what of it decides ([`BuiltUnder::part_of`]), none
+    /// where the file is absent or names nothing that does. Read from
+    /// disk for a snapshot of the working tree and from git's object
+    /// otherwise.
+    fn built_under(&self) -> Result<&[(String, String)]> {
+        if let Some(kept) = self.built_under.get() {
+            return Ok(kept);
         }
-        let text = match self.source {
-            Source::Disk => {
-                let file = self.root.join(CARGO_CONFIG);
-                file.is_file()
-                    .then(|| fs::read_to_string(&file))
-                    .transpose()
-                    .with_context(|| format!("reading {}", file.display()))?
+        let mut entries = Vec::new();
+        for file in BUILT_UNDER
+            .iter()
+            .filter(|f| !toolchain().any(|t| t == f.path))
+        {
+            let text = match self.source {
+                Source::Disk => {
+                    let at = self.root.join(file.path);
+                    at.is_file()
+                        .then(|| fs::read_to_string(&at))
+                        .transpose()
+                        .with_context(|| format!("reading {}", at.display()))?
+                }
+                Source::Git => {
+                    let found = self
+                        .files
+                        .binary_search_by(|(p, _)| p.as_str().cmp(file.path));
+                    found
+                        .ok()
+                        .map(|at| git::git(&self.root, &["cat-file", "blob", &self.files[at].1]))
+                        .transpose()?
+                }
+            };
+            if let Some(part) = text.as_deref().and_then(|t| file.part_of(t)) {
+                entries.push((file.path.to_owned(), git::blob_id(part.as_bytes())));
             }
-            Source::Git => {
-                let found = self
-                    .files
-                    .binary_search_by(|(p, _)| p.as_str().cmp(CARGO_CONFIG));
-                found
-                    .ok()
-                    .map(|at| git::git(&self.root, &["cat-file", "blob", &self.files[at].1]))
-                    .transpose()?
-            }
-        };
-        let entry = text
-            .as_deref()
-            .and_then(codegen_of)
-            .map(|tables| (CARGO_CONFIG.to_owned(), git::blob_id(tables.as_bytes())));
-        Ok(self.codegen.get_or_init(|| entry).clone())
+        }
+        Ok(self.built_under.get_or_init(|| entries))
     }
 
     /// The stamp of the sources under `path`: its key, and the commit
@@ -398,40 +408,120 @@ impl Snapshot {
     }
 }
 
-/// The files outside every crate that decide how rustc compiles each
-/// one: the toolchain, in either spelling rustup reads, whole, and the
-/// cargo configuration, whose codegen tables alone are under every
-/// crate's key ([`codegen_of`]; design §10 Profiles, #3372).
-pub(crate) const BUILT_UNDER: [&str; 3] = [TOOLCHAIN[0], TOOLCHAIN[1], CARGO_CONFIG];
+/// What of a file of [`BUILT_UNDER`] decides how rustc compiles a crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Part {
+    /// The whole file: the toolchain.
+    Whole,
+    /// Of the cargo configuration, `[build] rustflags`, each `[target.<t>]
+    /// rustflags`, `[profile]` and each `[env]` variable of [`REKEYED`].
+    Config,
+    /// Of the workspace's manifest, `[profile]`.
+    Manifest,
+}
 
-/// The toolchain file, in either spelling rustup reads.
-const TOOLCHAIN: [&str; 2] = ["rust-toolchain.toml", "rust-toolchain"];
+/// One file outside every crate that decides how rustc compiles each one,
+/// and what of it does.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BuiltUnder {
+    pub(crate) path: &'static str,
+    pub(crate) part: Part,
+}
 
-/// The workspace's cargo configuration.
-const CARGO_CONFIG: &str = ".cargo/config.toml";
+/// The files outside every crate that decide how rustc compiles each one,
+/// each under every crate's key for its [`Part`] (design §10 Profiles,
+/// #3372): the toolchain, in either spelling rustup reads, the cargo
+/// configuration and the workspace's manifest.
+pub(crate) const BUILT_UNDER: [BuiltUnder; 4] = [
+    BuiltUnder::of("rust-toolchain.toml", Part::Whole),
+    BuiltUnder::of("rust-toolchain", Part::Whole),
+    BuiltUnder::of(".cargo/config.toml", Part::Config),
+    BuiltUnder::of("Cargo.toml", Part::Manifest),
+];
 
-/// Of the cargo configuration `text`, the tables codegen reads, in one
-/// canonical rendering: `[build] rustflags`, each `[target.<t>] rustflags`
-/// and `[profile]`; none where it names none. A text that does not parse
-/// is taken whole, since what it says cannot be told apart.
-pub(crate) fn codegen_of(text: &str) -> Option<String> {
-    let Ok(table) = text.parse::<toml::Table>() else {
-        return Some(text.trim_end().to_owned());
-    };
-    let mut kept = toml::Table::new();
-    if let Some(flags) = table.get("build").and_then(|b| b.get("rustflags")) {
-        kept.insert("build.rustflags".to_owned(), flags.clone());
-    }
-    let targets = table.get("target").and_then(toml::Value::as_table);
-    for (name, target) in targets.into_iter().flatten() {
-        if let Some(flags) = target.get("rustflags") {
-            kept.insert(format!("target.{name}.rustflags"), flags.clone());
+/// The cargo configuration's `[env]` variables that decide how every
+/// crate is compiled, so a crate's key moves with each: rustc reads
+/// `MACOSX_DEPLOYMENT_TARGET` for every object and link, and cc for every
+/// C build, and `api-check` holds it to the pinned php's (#3356).
+pub(crate) const REKEYED: [&str; 1] = [DEPLOYMENT_TARGET];
+
+/// The variable that names the macOS every object and link is made for.
+pub(crate) const DEPLOYMENT_TARGET: &str = "MACOSX_DEPLOYMENT_TARGET";
+
+/// The file of [`BUILT_UNDER`] at `path`, relative to the root, if it is
+/// one.
+pub(crate) fn built_under(path: &str) -> Option<BuiltUnder> {
+    BUILT_UNDER.into_iter().find(|f| f.path == path)
+}
+
+/// The files of [`BUILT_UNDER`] a crate's key takes whole, the toolchain's
+/// two spellings, by their paths.
+pub(crate) fn toolchain() -> impl Iterator<Item = &'static str> {
+    (BUILT_UNDER.into_iter()).filter_map(|f| matches!(f.part, Part::Whole).then_some(f.path))
+}
+
+/// The files of [`BUILT_UNDER`] among `paths` whose part differs between
+/// the commit `base` and the working tree at `root`, in `paths`' order:
+/// what moved every crate's key since, which `done` names and asks the
+/// `fold` reading for. A manifest change to a member or a dependency, or
+/// an `[alias]`, moves no part and is not among them.
+pub(crate) fn moved<'p>(root: &Path, base: &str, paths: &[&'p str]) -> Result<Vec<&'p str>> {
+    let mut moved = Vec::new();
+    for path in paths {
+        let Some(file) = built_under(path) else {
+            continue;
+        };
+        let part = |text: Option<String>| text.as_deref().and_then(|t| file.part_of(t));
+        let now = fs::read_to_string(root.join(path)).ok();
+        if part(git::show(root, base, path)?) != part(now) {
+            moved.push(*path);
         }
     }
-    if let Some(profile) = table.get("profile") {
-        kept.insert("profile".to_owned(), profile.clone());
+    Ok(moved)
+}
+
+impl BuiltUnder {
+    const fn of(path: &'static str, part: Part) -> BuiltUnder {
+        BuiltUnder { path, part }
     }
-    (!kept.is_empty()).then(|| kept.to_string())
+
+    /// What of `text`, the file's, decides, in one canonical rendering;
+    /// none where it names nothing that does. A text that does not parse
+    /// is taken whole, since what it says cannot be told apart.
+    pub(crate) fn part_of(self, text: &str) -> Option<String> {
+        match self.part {
+            Part::Whole => return Some(text.to_owned()),
+            Part::Config | Part::Manifest => {}
+        }
+        let Ok(table) = text.parse::<toml::Table>() else {
+            return Some(text.trim_end().to_owned());
+        };
+        let mut kept = toml::Table::new();
+        let mut keep = |key: String, value: Option<&toml::Value>| {
+            if let Some(value) = value {
+                kept.insert(key, value.clone());
+            }
+        };
+        keep("profile".to_owned(), table.get("profile"));
+        match self.part {
+            Part::Config => {
+                keep(
+                    "build.rustflags".to_owned(),
+                    table.get("build").and_then(|b| b.get("rustflags")),
+                );
+                let targets = table.get("target").and_then(toml::Value::as_table);
+                for (name, target) in targets.into_iter().flatten() {
+                    keep(format!("target.{name}.rustflags"), target.get("rustflags"));
+                }
+                for variable in REKEYED {
+                    let env = table.get("env").and_then(|e| e.get(variable));
+                    keep(format!("env.{variable}"), env);
+                }
+            }
+            Part::Manifest | Part::Whole => {}
+        }
+        (!kept.is_empty()).then(|| kept.to_string())
+    }
 }
 
 /// Whether `path` is a workspace crate's directory, one with a manifest.
@@ -446,7 +536,7 @@ fn crate_dir(root: &Path, path: &Path) -> bool {
 fn closure(root: &Path, path: &Path) -> Result<Vec<PathBuf>> {
     if crate_dir(root, path) {
         let mut paths = Graph::of(root)?.paths(path);
-        paths.extend(TOOLCHAIN.map(PathBuf::from));
+        paths.extend(toolchain().map(PathBuf::from));
         Ok(paths)
     } else {
         Ok(vec![path.to_path_buf()])
@@ -770,8 +860,8 @@ mod tests {
             now.key(Path::new(".")).unwrap(),
             tree_hash(&root, &[PathBuf::from(".")]).unwrap()
         );
-        // A crate's: its closure's files and the configuration's codegen
-        // tables, each by its blob id.
+        // A crate's: its closure's files and what decides in the
+        // configuration and the manifest, each by its blob id.
         let json = super::closure(&root, Path::new("ext/json")).unwrap();
         let mut listing: Vec<(String, String)> = git::files_under(&root, &json)
             .unwrap()
@@ -781,9 +871,14 @@ mod tests {
                 (path, id)
             })
             .collect();
-        let config = fs::read_to_string(root.join(".cargo/config.toml")).unwrap();
-        let tables = super::codegen_of(&config).unwrap();
-        listing.push((".cargo/config.toml".into(), git::blob_id(tables.as_bytes())));
+        for file in super::BUILT_UNDER
+            .iter()
+            .filter(|f| !super::toolchain().any(|t| t == f.path))
+        {
+            let text = fs::read_to_string(root.join(file.path)).unwrap();
+            let part = file.part_of(&text).unwrap();
+            listing.push((file.path.into(), git::blob_id(part.as_bytes())));
+        }
         listing.sort_unstable();
         assert_eq!(
             now.key(Path::new("ext/json")).unwrap(),
@@ -791,9 +886,11 @@ mod tests {
         );
     }
 
-    /// A crate's key moves with the toolchain and with the codegen tables
-    /// of the cargo configuration, whose rustflags every profile passes
-    /// (#3372), and not with its `[env]` or a file rustc never reads; the
+    /// A crate's key moves with the toolchain, with the codegen tables of
+    /// the cargo configuration, whose rustflags every profile passes
+    /// (#3372), with its deployment target (#3356) and with the manifest's
+    /// profiles, and not with another `[env]` line, the rest of the
+    /// manifest or a file rustc never reads; the
     /// index's key agrees with the working tree's, read from git's object.
     #[test]
     fn a_crates_key_moves_with_what_rustc_is_built_under() {
@@ -806,10 +903,16 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, text).unwrap();
         };
+        let manifest = fs::read_to_string(tree.join("Cargo.toml")).unwrap();
         write("README.md", "read by no rustc\n");
         write(".cargo/config.toml", "[env]\nA = \"1\"\n");
+        write(
+            "Cargo.toml",
+            &format!("{manifest}\n[workspace.package]\nversion = \"1.0.0\"\n"),
+        );
         assert_eq!(key(&tree), before);
         let mut seen = vec![before];
+        let profiled = format!("{manifest}\n[profile.release]\ncodegen-units = 16\n");
         for (file, text) in [
             (
                 ".cargo/config.toml",
@@ -824,6 +927,11 @@ mod tests {
                 "[build]\nrustflags = [\"-C\", \"y\"]\n",
             ),
             (".cargo/config.toml", "[profile.release]\nlto = true\n"),
+            (
+                ".cargo/config.toml",
+                "[profile.release]\nlto = true\n[env]\nMACOSX_DEPLOYMENT_TARGET = \"11.0\"\n",
+            ),
+            ("Cargo.toml", profiled.as_str()),
             ("rust-toolchain.toml", "[toolchain]\n"),
             ("rust-toolchain", "stable\n"),
         ] {
@@ -845,7 +953,7 @@ mod tests {
         }
         write(
             ".cargo/config.toml",
-            "[env]\nB = \"3\"\n[profile.release]\nlto = true\n",
+            "[env]\nB = \"3\"\nMACOSX_DEPLOYMENT_TARGET = \"11.0\"\n[profile.release]\nlto = true\n",
         );
         let now = key(&tree);
         assert_eq!(&now, seen.last().unwrap());

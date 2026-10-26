@@ -16,8 +16,9 @@ use crate::manifest::Manifest;
 use crate::oracle::Minos;
 use crate::oracle::hosts::{HOSTS, MAKALA};
 
-/// The variable that names the macOS a link is for.
-const VARIABLE: &str = "MACOSX_DEPLOYMENT_TARGET";
+/// The variable that names the macOS a link is for, the one a crate's key
+/// moves with ([`crate::key::REKEYED`]).
+const VARIABLE: &str = crate::key::DEPLOYMENT_TARGET;
 
 /// What a host's link is held to on this machine, each arm with the macOS
 /// the pinned php is linked for where it was read.
@@ -140,12 +141,69 @@ mod tests {
             unnamed[0].contains("no cargo configuration's [env] names MACOSX_DEPLOYMENT_TARGET"),
             "{unnamed:?}"
         );
-        let unread = target(Some("fifteen")).hold("sapi/cgi").problems;
+        let none = target(Some("fifteen")).hold("sapi/cgi").problems;
         assert!(
-            unread[0].contains("MACOSX_DEPLOYMENT_TARGET is fifteen"),
-            "{unread:?}"
+            none[0].contains("MACOSX_DEPLOYMENT_TARGET is fifteen"),
+            "{none:?}"
         );
         let library = target(None).hold("crates/php_engine");
         assert!(library.problems.is_empty() && library.notes.is_empty());
+    }
+
+    /// api-check over `xtask/fixtures/api-check/host-edge` laid at a
+    /// scratch tree, its configuration's `[env]` written as `env`, under a
+    /// pin whose php is `php`'s bytes, none for a php not there: the
+    /// reading of `sapi/cgi`, the fixture's host within its edges.
+    fn cgi(name: &str, env: &str, php: Option<&[u8]>) -> crate::reading::Reading {
+        let fixture = crate::package_dir().join("fixtures/api-check/host-edge");
+        let tree = crate::scratch::Tree::new(&format!("api-check-target-{name}")).unwrap();
+        crate::scratch::repository(&fixture, tree.path(), &["."]).unwrap();
+        std::fs::write(tree.join(".cargo/config.toml"), env).unwrap();
+        let at = tree.join("php");
+        if let Some(bytes) = php {
+            std::fs::write(&at, bytes).unwrap();
+        }
+        let root = crate::package_dir().parent().unwrap().to_path_buf();
+        let mut manifest = crate::manifest::Manifest::load(&root).unwrap();
+        manifest.pin.as_mut().unwrap().oracle.path = at;
+        let readings = super::super::hold(&manifest, tree.path(), false).unwrap();
+        (readings.into_iter())
+            .find(|r| r.scope == "sapi/cgi")
+            .unwrap()
+    }
+
+    /// The hold as api-check runs it, `Target::read` over a stand-in php
+    /// linked for macOS 15.0 and the workspace's configuration: a host's
+    /// reading notes the target where `[env]` names 15.0, fails naming
+    /// both where it names 11.0, and fails where nothing names it; a pin
+    /// whose load commands cannot be read fails it as unread, and one not
+    /// there or no Mach-O file holds nothing.
+    #[test]
+    fn a_host_s_reading_holds_its_target_to_the_pinned_php_s() {
+        use crate::oracle::stand_in::macos_15;
+        use crate::reading::Status;
+        let named = |value: &str| format!("[env]\nMACOSX_DEPLOYMENT_TARGET = \"{value}\"\n");
+        let held = cgi("agrees", &named("15.0"), Some(&macos_15()));
+        assert_eq!(held.status, Status::Pass, "{}", held.message);
+        let note = "linked for macOS 15.0, the pinned php's minos";
+        assert!(held.message.contains(note), "{}", held.message);
+        for (name, env) in [("differs", named("11.0")), ("unnamed", String::new())] {
+            let held = cgi(name, &env, Some(&macos_15()));
+            assert_eq!(held.status, Status::Fail, "{name}: {}", held.message);
+            let said = held.message.contains("MACOSX_DEPLOYMENT_TARGET");
+            assert!(said, "{name}: {}", held.message);
+        }
+        // A 32-bit Mach-O header, whose load commands are not read past.
+        let mut magic = vec![0; 32];
+        magic[..4].copy_from_slice(&0xfeed_face_u32.to_le_bytes());
+        let unread = cgi("unread", &named("15.0"), Some(&magic));
+        assert_eq!(unread.status, Status::Fail, "{}", unread.message);
+        let said = unread.message.contains("its load commands are unread");
+        assert!(said, "{}", unread.message);
+        for (name, php) in [("absent", None), ("text", Some(&b"#!/bin/sh\n"[..]))] {
+            let held = cgi(name, &named("11.0"), php);
+            assert_eq!(held.status, Status::Pass, "{name}: {}", held.message);
+            assert!(!held.message.contains("macOS"), "{name}: {}", held.message);
+        }
     }
 }

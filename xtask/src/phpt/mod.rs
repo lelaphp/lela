@@ -1483,6 +1483,9 @@ impl<'v> Runners<'v> {
         oracles: &'r Oracles<'o>,
         subset: &Subset,
     ) -> Result<Side<'r, 'o>> {
+        if let Some(why) = &subset.routed.refused {
+            bail!("{why}");
+        }
         let variant = manifest.variant_of(&subset.scope);
         let oracle = oracles.of(variant)?;
         let feature = manifest
@@ -1651,13 +1654,8 @@ fn asked(root: &Path, manifest: &Manifest, source: &Path, ask: &Ask) -> Result<V
     // variant's, routed from the two listings (#3312).
     let variants = manifest.variants();
     let oracles = Oracles::new(manifest.pin()?, &variants);
-    route::route(
-        manifest,
-        &oracles,
-        &Carried::binary(root)?,
-        source,
-        &mut subsets,
-    )?;
+    let carried = Carried::binary(root)?;
+    route::route(root, manifest, &oracles, &carried, source, &mut subsets)?;
     Ok(subsets)
 }
 

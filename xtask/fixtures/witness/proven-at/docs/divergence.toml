@@ -1,7 +1,8 @@
 # The fixture's registry (harness-design.md §4.3; #3369): one accepted
-# `trace:` row whose `covers` names the three fences of ext/pcre/src/lib.rs and
-# whose `proven_at` names the regime its cause is proven at, which the test
-# lays into the pin as `opcache.optimization_level=0`.
+# `trace:` row whose `covers` names the first four fences of
+# ext/pcre/src/lib.rs, and two accepted `witness:` rows over the last two,
+# each naming in `proven_at` the regime its cause is proven at, which the
+# test lays into the pin as `opcache.optimization_level=0`.
 
 [[divergence]]
 id = "trace:fixture-proven-at"
@@ -10,5 +11,23 @@ cause = "by-design"
 reason = "The engine's side is each fence, proven at the oracle's optimizer off, as design §6.1 runs none (fixture)."
 status = "accepted"
 since = "2026-10-26"
-covers = ["witness:a6800c379cb7047d9a21ee76352517328670f00e", "witness:5c6c2f766e4fd513982cfac867bcb33be5c4c660", "witness:34804ef20b1a3e1a7d39b9790a01610bb5381690"]
+covers = ["witness:a6800c379cb7047d9a21ee76352517328670f00e", "witness:5c6c2f766e4fd513982cfac867bcb33be5c4c660", "witness:34804ef20b1a3e1a7d39b9790a01610bb5381690", "witness:9b32b9257e9241bec51f2a1b48ca43f842306439"]
+proven_at = "optimizer-off"
+
+[[divergence]]
+id = "witness:296639df394333353140ed416b085b20c0c19c3f"
+kind = "witness"
+cause = "by-design"
+reason = "The oracle's side is the fence, the engine's proven at the oracle's optimizer off, as design §6.1 runs none (fixture)."
+status = "accepted"
+since = "2026-10-26"
+proven_at = "optimizer-off"
+
+[[divergence]]
+id = "witness:02d783502dc839dfe90959ee3346dfd1ba71f0b5"
+kind = "witness"
+cause = "by-design"
+reason = "The oracle's side is the fence, the engine's proven at the oracle's optimizer off, as design §6.1 runs none (fixture)."
+status = "accepted"
+since = "2026-10-26"
 proven_at = "optimizer-off"

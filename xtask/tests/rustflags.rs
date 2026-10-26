@@ -45,13 +45,19 @@ fn said(out: &Output) -> String {
 
 /// Inside the workspace a release build, and a release-da one, whose
 /// flags lack the option are refused, naming it and the line that adds
-/// flags without replacing the table: the workspace's `[env]` asks. One
-/// that sets the variable to `warn` is built with a warning naming it,
-/// as one from outside the workspace is; a `dev` build is neither; and a
-/// value the rule does not know fails naming the two it does.
+/// flags without replacing the table: the workspace's `[env]` asks, and a
+/// release build that passed under the table before, in the same target
+/// directory, is judged again, cargo running `build.rs` anew for the new
+/// rustflags. One whose last value is under the floor is refused, the
+/// last standing where a higher came before it. One that sets the
+/// variable to `warn` is built with a warning naming it, as one from
+/// outside the workspace is; a `dev` build is neither; and a value the
+/// rule does not know fails naming the two it does.
 #[test]
 fn a_release_build_without_the_option_is_refused_where_the_workspace_asks() {
     let target = xtask::scratch::Tree::new("rustflags").unwrap();
+    let warm = built(&target, "release", None, None);
+    assert!(warm.status.success(), "{}", said(&warm));
     for profile in ["release", "release-da"] {
         let out = built(&target, profile, Some(WITHOUT), None);
         let said = said(&out);
@@ -62,18 +68,18 @@ fn a_release_build_without_the_option_is_refused_where_the_workspace_asks() {
             "{profile}: {said}"
         );
     }
-    let low = built(
-        &target,
-        "release",
-        Some(&format!("-C\x1fllvm-args={OPTION}=100")),
-        None,
-    );
-    assert!(!low.status.success(), "{}", said(&low));
-    assert!(
-        said(&low).contains(&format!("{OPTION}=100, under the 1000")),
-        "{}",
-        said(&low)
-    );
+    for low in [
+        format!("-C\x1fllvm-args={OPTION}=100"),
+        format!("-Cllvm-args={OPTION}=100000\x1f-C\x1fllvm-args={OPTION}=100"),
+    ] {
+        let out = built(&target, "release", Some(&low), None);
+        assert!(!out.status.success(), "{low:?}: {}", said(&out));
+        assert!(
+            said(&out).contains(&format!("{OPTION}=100, under the 1000")),
+            "{low:?}: {}",
+            said(&out)
+        );
+    }
 
     let warned = built(&target, "release", Some(WITHOUT), Some("warn"));
     assert!(warned.status.success(), "{}", said(&warned));
@@ -98,8 +104,9 @@ fn a_release_build_without_the_option_is_refused_where_the_workspace_asks() {
 
 /// The positive control: the workspace's own rustflags table passes the
 /// option, so a release build is built with nothing said of it, as one
-/// whose flags pass it in another of rustc's spellings is, the last value
-/// standing where several are passed.
+/// whose flags pass it in another of rustc's spellings is, `--codegen`
+/// and its argument apart among them and LLVM's one-dash spelling of the
+/// option, the last value standing where several are passed.
 #[test]
 fn a_release_build_under_the_workspaces_table_is_built() {
     let target = xtask::scratch::Tree::new("rustflags-table").unwrap();
@@ -109,6 +116,8 @@ fn a_release_build_under_the_workspaces_table_is_built() {
     for flags in [
         format!("-Cllvm-args={OPTION}=1000"),
         format!("--codegen=llvm-args={OPTION}=100\x1f-C\x1fllvm-args={OPTION}=100000"),
+        format!("--codegen\x1fllvm-args={OPTION}=1000"),
+        format!("-Cllvm-args=-{}=1000", OPTION.trim_start_matches('-')),
     ] {
         let out = built(&target, "release", Some(&flags), None);
         assert!(out.status.success(), "{flags:?}: {}", said(&out));

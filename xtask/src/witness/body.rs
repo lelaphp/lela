@@ -11,11 +11,12 @@
 //! wildcards. The authored lines are matched to the oracle's in order, the
 //! most kept that the two runs allow ([`aligned`]): a line the two runs
 //! print alike is written as the oracle prints it where no authored line
-//! is kept for it, and one they print apart is written only by an
-//! authored line that meets it in both; any other is refused, named, and
-//! nothing of the fence is written.
+//! is kept for it, as text that matches it alone ([`literal`]), and one
+//! they print apart is written only by an authored line that meets it in
+//! both; any other is refused, named, and nothing of the fence is
+//! written.
 
-use crate::oracle::expect::{Expectation, Line};
+use crate::oracle::expect::{self, Expectation, Line};
 use crate::oracle::{Normalise, normalise};
 
 /// The stream `authored`, a fence's body as the grammar read it, rewritten
@@ -53,9 +54,22 @@ pub(super) fn kept(
             written.contains('%').then_some((line, *written))
         })
         .collect();
-    aligned(&wildcards, &one, &two)
+    aligned(rules, &wildcards, &one, &two)
         .map(|lines| lines.join("\n"))
         .ok_or_else(|| moved(stream, &wildcards, &one, &two))
+}
+
+/// The oracle's `text` as a fence writes it: as text that matches it
+/// alone ([`expect::literal`]), where a `%s` it printed would otherwise
+/// be read as a wildcard and the fence would meet more than the oracle
+/// printed, the recipe's scratch token left as the token it is.
+pub(super) fn literal(rules: &Normalise, text: &str) -> String {
+    let token = rules.scratch_token.as_str();
+    if token.is_empty() {
+        return expect::literal(text).into_owned();
+    }
+    let parts: Vec<_> = text.split(token).map(expect::literal).collect();
+    parts.join(token)
 }
 
 /// What a refused stream names: the first line the two runs differ on
@@ -100,7 +114,12 @@ enum Step {
 /// other oracle line the two runs print alike, as the first prints it.
 /// None where some line the runs print apart is met by no kept line. The
 /// table is the longest common subsequence's, over a fence's lines.
-fn aligned(wildcards: &[Option<(&Line, &str)>], one: &[&str], two: &[&str]) -> Option<Vec<String>> {
+fn aligned(
+    rules: &Normalise,
+    wildcards: &[Option<(&Line, &str)>],
+    one: &[&str],
+    two: &[&str],
+) -> Option<Vec<String>> {
     let (n, m) = (one.len(), wildcards.len());
     // most[i][k]: the most authored lines kept over oracle lines i.. and
     // authored lines k.., none where the rest cannot be written.
@@ -144,7 +163,7 @@ fn aligned(wildcards: &[Option<(&Line, &str)>], one: &[&str], two: &[&str]) -> O
     while i < n {
         match step[i][k] {
             Step::Oracle => {
-                out.push(one[i].to_owned());
+                out.push(literal(rules, one[i]));
                 i += 1;
             }
             Step::Pass => k += 1,
@@ -203,6 +222,21 @@ mod tests {
             ),
             Ok("extension #%d ctype".to_owned()),
             "matched as the judge matches, under the recipe's tokens"
+        );
+    }
+
+    /// A line of the oracle's written as the oracle's is written as text
+    /// that matches it alone: a `%s` it printed is no wildcard in the
+    /// fence, and the recipe's scratch token stays the token.
+    #[test]
+    fn an_oracle_line_is_written_to_match_what_it_printed_alone() {
+        assert_eq!(
+            body("x", "100%|%s|x", "100%|%s|x"),
+            Ok("100%|%r[%]%rs|x".to_owned())
+        );
+        assert_eq!(
+            body("x", "%SCRATCH%/a %a", "%SCRATCH%/a %a"),
+            Ok("%SCRATCH%/a %r[%]%ra".to_owned())
         );
     }
 

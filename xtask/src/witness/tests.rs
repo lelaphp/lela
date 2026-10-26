@@ -671,9 +671,14 @@ fn a_fence_a_trace_row_covers_is_held_to_the_engine_alone_and_one_it_does_not_bo
 /// fixture's fence the oracle agrees on there is covered, as is the one
 /// whose pid its wildcard meets in both runs, and the one it
 /// still differs on, the engine carrying `zend_test` and the oracle not,
-/// fails naming its id and the regime, which is the negative control. The
-/// tracked pin carries no `optimizer-off` until a person adds it, so the
-/// test lays it into the fixture's pin; a pin without it fails both.
+/// fails naming its id and the regime, which is the negative control.
+/// #3366's snippet, which the oracle meets only with the regime's ini
+/// applied, is covered, so a regime named and not applied fails it. A
+/// diverged fence a `witness:` row naming the regime accepts is run the
+/// same way: diverged where the oracle there prints the engine's bytes,
+/// and failing where it does not. The tracked pin carries no
+/// `optimizer-off` until a person adds it, so the test lays it into the
+/// fixture's pin; a pin without it fails every one.
 #[test]
 fn a_proven_rows_fences_run_again_under_its_regime_and_one_still_differing_fails() {
     if oracle().is_none() {
@@ -712,12 +717,27 @@ fn a_proven_rows_fences_run_again_under_its_regime_and_one_still_differing_fails
         .unwrap()
         .regime
         .insert("optimizer-off".to_owned(), off);
-    let [agreed, moving, differs] = &judged(&fixture)[..] else {
-        panic!()
+    let judged = judged(&fixture);
+    let [agreed, moving, differs, sccp, diverged, still] = &judged[..] else {
+        panic!("{judged:#?}")
     };
     assert_eq!(agreed.judgement, Judgement::Covered, "{agreed:#?}");
     assert_eq!(moving.judgement, Judgement::Covered, "{moving:#?}");
     assert_eq!(differs.judgement, Judgement::Fail, "{differs:#?}");
+    // The fence the regime exists for: covered because the oracle meets it
+    // with the regime's ini, and with it alone.
+    assert_eq!(sccp.judgement, Judgement::Covered, "{sccp:#?}");
+    // A diverged fence under a `witness:` row's regime: one the oracle
+    // there prints the engine's bytes of stays diverged, and one it does
+    // not fails naming the row, the regime and the fence.
+    assert_eq!(diverged.judgement, Judgement::Diverged, "{diverged:#?}");
+    assert_eq!(still.judgement, Judgement::Fail, "{still:#?}");
+    let named = format!("witness:{}", still.id.trim_start_matches("witness:"));
+    assert!(
+        still.note.contains("proves its cause at optimizer-off") && still.note.contains(&named),
+        "{}",
+        still.note
+    );
     assert!(
         differs
             .note
@@ -856,6 +876,23 @@ fn a_body_the_two_runs_differ_on_or_a_row_covers_is_written_nothing_and_named() 
         note.starts_with(
             "`--bodies` wrote nothing: the oracle ends on status 3 and the fence pins status 0"
         ),
+        "{note}"
+    );
+    // A kept line the matcher read trimmed, as the stream's first, keeps
+    // its indentation below a line of the oracle's, where the whole
+    // stream no longer meets the run: the whole-run hold refuses it.
+    let text = "/// ```php\n/// echo \"new\\n3 apples\";\n/// ```\n/// ```expect\n///   %d apples\n/// ```\npub fn k() {}\n";
+    let tally = judged(
+        Path::new("ext/fixture/src/lib.rs"),
+        text,
+        &registry(""),
+        Accept::Bodies,
+    );
+    let (judgement, note) = only(&tally);
+    assert_eq!(judgement, Judgement::Fail, "{note}");
+    assert!(tally.captured.is_empty(), "{tally:#?}");
+    assert!(
+        note.starts_with("`--bodies` wrote nothing: the authored lines kept among the oracle's do not meet the oracle's run as a whole"),
         "{note}"
     );
 }

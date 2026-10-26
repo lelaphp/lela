@@ -747,6 +747,9 @@ mod tests {
             "10000103c:     \tldr\tx8, [x16, #0x8]!\n",
         ));
         assert_eq!(held.hoisted, vec![], "{held:#?}");
+        // The callee overwrote `x0`, so its load is no site at all, not
+        // one the escape at the same offset hides.
+        assert_eq!(held.escaped, vec![], "{held:#?}");
     }
 
     /// An access through an address a call is also handed is escaped and
@@ -790,38 +793,76 @@ mod tests {
 
     /// An address spilled to the stack and loaded back is followed, as
     /// the allocator may hold an unfolded field (#3345); a slot written
-    /// over in between holds it no longer.
+    /// over in between holds it no longer. Each slot is spilled from a
+    /// register that still holds the address, since a store names its
+    /// data register and drops it.
     #[test]
     fn a_spilled_address_is_followed_back_from_its_slot() {
         let held = one(concat!(
             "100001008:     \tadd\tx8, x19, #0x5c8\n",
             "10000100c:     \tstr\tx8, [sp, #0x10]\n",
-            "100001010:     \tstur\tx8, [x29, #-0x18]\n",
-            "100001014:     \tbl\t0x100002000 <_callee>\n",
-            "100001018:     \tldr\tx9, [sp, #0x10]\n",
-            "10000101c:     \tldr\tx10, [x9]\n",
-            "100001020:     \tstr\txzr, [x29, #-0x18]\n",
-            "100001024:     \tldur\tx11, [x29, #-0x18]\n",
-            "100001028:     \tldr\tx12, [x11]\n",
+            "100001010:     \tadd\tx8, x19, #0x5c8\n",
+            "100001014:     \tstur\tx8, [x29, #-0x18]\n",
+            "100001018:     \tbl\t0x100002000 <_callee>\n",
+            "10000101c:     \tldr\tx9, [sp, #0x10]\n",
+            "100001020:     \tldr\tx10, [x9]\n",
+            "100001024:     \tstr\txzr, [x29, #-0x18]\n",
+            "100001028:     \tldur\tx11, [x29, #-0x18]\n",
+            "10000102c:     \tldr\tx12, [x11]\n",
         ));
         assert_eq!(held.hoisted.len(), 1, "{held:#?}");
         assert_eq!(held.hoisted[0].access, "ldr x10, [x9]");
     }
 
+    /// `add xN, x19, #C, lsl #12` makes the address of a field past 4095,
+    /// which an access can still encode, so its access is a site at the
+    /// shifted offset.
+    #[test]
+    fn a_shifted_add_is_the_field_past_4095() {
+        let held = one(concat!(
+            "100001008:     \tadd\tx8, x19, #0x1, lsl #12\n",
+            "10000100c:     \tldr\tx9, [x8]\n",
+        ));
+        assert_eq!(held.hoisted.len(), 1, "{held:#?}");
+        assert_eq!(held.hoisted[0].offset, 0x1000);
+    }
+
     /// A register the callee keeps is followed across a call and a
-    /// branch; one it does not is dropped at the branch.
+    /// branch; one it does not is dropped at each on its own: a
+    /// caller-saved register no argument hands on at the call, the link
+    /// register at the call, and a caller-saved one at a branch with no
+    /// call before it.
     #[test]
     fn a_kept_register_is_followed_across_a_call_and_a_branch() {
-        let held = one(concat!(
-            "100001008:     \tadd\tx27, x19, #0x5c8\n",
-            "10000100c:     \tadd\tx9, x19, #0x5d0\n",
-            "100001010:     \tbl\t0x100002000 <_callee>\n",
-            "100001014:     \tb\t0x100001020 <__ZN10php_engine4tier11serve_frame17h0123456789abcdefE+0x20>\n",
-            "100001018:     \tldr\tx8, [x9]\n",
-            "10000101c:     \tldr\tx8, [x27, #0x8]\n",
+        let branch =
+            "\tb\t0x100001020 <__ZN10php_engine4tier11serve_frame17h0123456789abcdefE+0x20>\n";
+        let held = one(&format!(
+            "100001008:     \tadd\tx27, x19, #0x5c8\n\
+             10000100c:     \tadd\tx9, x19, #0x5d0\n\
+             100001010:     \tadd\tx30, x19, #0x5d8\n\
+             100001014:     \tbl\t0x100002000 <_callee>\n\
+             100001018:     {branch}\
+             10000101c:     \tldr\tx8, [x9]\n\
+             100001020:     \tldr\tx8, [x30]\n\
+             100001024:     \tldr\tx8, [x27, #0x8]\n"
         ));
         assert_eq!(held.hoisted.len(), 1, "{held:#?}");
         assert_eq!(held.hoisted[0].add, "add x27, x19, #0x5c8");
+        for dropped in ["x9", "x30"] {
+            let held = one(&format!(
+                "100001008:     \tadd\t{dropped}, x19, #0x5d0\n\
+                 10000100c:     \tbl\t0x100002000 <_callee>\n\
+                 100001010:     \tldr\tx8, [{dropped}]\n"
+            ));
+            assert_eq!(held.hoisted, vec![], "{dropped} at the call: {held:#?}");
+            assert_eq!(held.escaped, vec![], "{dropped} at the call: {held:#?}");
+        }
+        let held = one(&format!(
+            "100001008:     \tadd\tx9, x19, #0x5d0\n\
+             10000100c:     {branch}\
+             100001010:     \tldr\tx8, [x9]\n"
+        ));
+        assert_eq!(held.hoisted, vec![], "x9 at the branch: {held:#?}");
     }
 
     /// A function whose prologue names no register for the request is

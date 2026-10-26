@@ -248,6 +248,32 @@ pub fn expectf_to_regex(wanted: &str) -> String {
     substitute(&quoted)
 }
 
+/// `text` as `--EXPECTF--` text that matches it and nothing else, where
+/// the grammar has no escape of its own (run-tests.php has none): each `%`
+/// that would open a wildcard or a `%r` section is written `%r[%]%r`, a
+/// section whose one-character class is the `%` alone, so `100%|%s` is
+/// `100%|%r[%]%rs`, which `%s` read as a wildcard would widen.
+pub(crate) fn literal(text: &str) -> Cow<'_, str> {
+    let opens = |rest: &str| {
+        WILDCARDS
+            .iter()
+            .map(|(w, _)| *w)
+            .chain(["%r"])
+            .any(|w| rest.starts_with(w))
+    };
+    if !text.match_indices('%').any(|(at, _)| opens(&text[at..])) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    for (at, c) in text.char_indices() {
+        match c {
+            '%' if opens(&text[at..]) => out.push_str("%r[%]%r"),
+            c => out.push(c),
+        }
+    }
+    Cow::Owned(out)
+}
+
 /// The wildcards, in upstream's `strtr` table. `%e` is the directory
 /// separator quoted, which on this engine's hosts is `/`.
 const WILDCARDS: [(&str, &str); 12] = [
@@ -448,6 +474,23 @@ mod tests {
             expectf_to_regex("in %s on line %d"),
             r"in [^\r\n]+ on line \d+"
         );
+    }
+
+    /// A literal reads as the text it was written from and nothing wider:
+    /// `%s` would meet `AB` where the oracle printed `%s`.
+    #[test]
+    fn a_literal_meets_its_text_alone() {
+        let printed = "100%|%s|%d|%r|%%|50% off";
+        let written = super::literal(printed);
+        assert_eq!(written, "100%|%r[%]%rs|%r[%]%rd|%r[%]%rr|%%|50% off");
+        let met = |actual: &str| {
+            Expectation::Format(written.as_bytes().to_vec())
+                .met(actual.as_bytes())
+                .unwrap()
+        };
+        assert!(met(printed));
+        assert!(!met("100%|AB|7|%r|%%|50% off"));
+        assert_eq!(super::literal("no wildcard"), "no wildcard");
     }
 
     #[test]

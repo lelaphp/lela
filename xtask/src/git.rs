@@ -485,7 +485,15 @@ pub(crate) fn show_bytes(root: &Path, rev: &str, path: &str) -> Result<Option<Ve
         None,
     ) {
         Ok(bytes) => Ok(Some(bytes)),
-        Err(err) if err.to_string().contains("does not exist") => Ok(None),
+        // git words a path the commit lacks by whether the working tree
+        // holds it: `does not exist in`, or `exists on disk, but not in`.
+        Err(err)
+            if ["does not exist", "but not in"]
+                .iter()
+                .any(|w| err.to_string().contains(w)) =>
+        {
+            Ok(None)
+        }
         Err(err) => Err(err),
     }
 }
@@ -543,6 +551,24 @@ mod tests {
                 dir.display()
             )
         );
+    }
+
+    /// A file the commit lacks is none, whether the working tree holds it
+    /// or not: git words the two cases apart.
+    #[test]
+    fn a_file_a_commit_lacks_shows_as_none_whatever_the_tree_holds() {
+        let dir = crate::scratch::Tree::new("git-show-absent").unwrap();
+        super::git(&dir, &["init", "-q"]).unwrap();
+        std::fs::write(dir.join("kept"), "1\n").unwrap();
+        super::git(&dir, &["add", "kept"]).unwrap();
+        let identity = ["-c", "user.name=t", "-c", "user.email=t@t"];
+        super::git(&dir, &[&identity[..], &["commit", "-qm", "c"]].concat()).unwrap();
+        std::fs::write(dir.join("written"), "2\n").unwrap();
+        for path in ["written", "nowhere"] {
+            assert_eq!(super::show(&dir, "HEAD", path).unwrap(), None, "{path}");
+        }
+        let kept = super::show(&dir, "HEAD", "kept").unwrap();
+        assert_eq!(kept.as_deref(), Some("1\n"));
     }
 
     /// Run by [`elsewhere_reads_the_repository_it_names_under_a_hooks_git_dir`]

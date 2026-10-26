@@ -383,8 +383,10 @@ pub(crate) enum Condition {
     /// a ticket it left open counts `unclosed` and is named here,
     /// and a partial landing is a `skip` counting `partial`, which is not.
     Stranded,
-    /// For a diff that changes a file rustc is built under, the toolchain
-    /// file or `.cargo/config.toml`, a fresh passing `fold` reading exists
+    /// For a diff that changes what decides in a file rustc is built
+    /// under, the toolchain file, `.cargo/config.toml`'s rustflags,
+    /// profiles and deployment target, or the workspace manifest's
+    /// profiles, a fresh passing `fold` reading exists
     /// for `sapi/cli`: the release `serve_frame` reaches no request field
     /// through an address held apart from the request's register, which
     /// LLVM's `--cgp-max-address-users-to-scan` folds for every profile
@@ -433,6 +435,7 @@ pub fn judge(
     let changed = git::changed_since(root, &base.commit)?;
     let paths: Vec<&str> = changed.iter().map(|c| c.path.as_str()).collect();
     let crates: Vec<&Crate> = manifest.crates_of(&paths);
+    let built_under = key::moved(root, &base.commit, &paths)?;
     let ticket = track::head_ticket(root)?;
     let mut unmet = Vec::new();
     let mut notes = Vec::new();
@@ -451,7 +454,7 @@ pub fn judge(
         match condition {
             Condition::Fresh => {
                 for krate in &crates {
-                    let now = KeyNow::of(snapshot, krate, &crates, &paths)?;
+                    let now = KeyNow::of(snapshot, krate, &crates, &built_under)?;
                     fresh_readings(
                         &asking,
                         krate,
@@ -500,7 +503,7 @@ pub fn judge(
                 }
             }
             Condition::Stranded => unmet.extend(ticket::stranded(root, store, &base.commit)?),
-            Condition::Folded => folded(&asking, &paths, &mut unmet, &mut notes)?,
+            Condition::Folded => folded(&asking, &built_under, &mut unmet, &mut notes)?,
         }
     }
     slack_porting_notes(snapshot, manifest, store, &mut notes)?;
@@ -516,18 +519,18 @@ pub fn judge(
     })
 }
 
-/// Condition 10: on a diff that changes a file of [`key::BUILT_UNDER`],
-/// the `fold` reading of `sapi/cli`, fresh over its key now and passing.
-/// A skip, the reading of a host that is not `aarch64`, is met and a note
+/// Condition 10: on a diff that moves the part of a file of
+/// [`key::BUILT_UNDER`] that decides, `built_under` ([`key::moved`]), the
+/// `fold` reading of `sapi/cli`, fresh over its key now and passing. A skip, the reading of a host that is not `aarch64`, is met and a note
 /// naming why, and where the caller says `fold` did not run, a missing
 /// reading is a note.
 fn folded(
     asking: &Asking,
-    paths: &[&str],
+    built_under: &[&str],
     unmet: &mut Vec<String>,
     notes: &mut Vec<String>,
 ) -> Result<()> {
-    let Some(changed) = paths.iter().find(|p| key::BUILT_UNDER.contains(p)) else {
+    let Some(changed) = built_under.first() else {
         return Ok(());
     };
     let (instrument, scope) = (crate::fold::INSTRUMENT, crate::fold::SCOPE);
@@ -856,14 +859,14 @@ struct KeyNow {
 }
 
 impl KeyNow {
-    /// The key of `krate` now, and what of `touched` and of the diff's
-    /// `paths` it covers: the crates of its closure, and the files rustc
-    /// is built under ([`key::BUILT_UNDER`]).
+    /// The key of `krate` now, and what of `touched` and of the diff it
+    /// covers: the crates of its closure, and `built_under`, the files
+    /// rustc is built under whose deciding part moved ([`key::moved`]).
     fn of(
         snapshot: &Snapshot,
         krate: &Crate,
         touched: &[&Crate],
-        paths: &[&str],
+        built_under: &[&str],
     ) -> Result<KeyNow> {
         let closure = key::Graph::of(snapshot.root())?.paths(&krate.path());
         let mut names = vec![krate.name.as_str()];
@@ -873,12 +876,7 @@ impl KeyNow {
                 .filter(|t| t.name != krate.name && closure.contains(&t.path()))
                 .map(|t| t.name.as_str()),
         );
-        names.extend(
-            paths
-                .iter()
-                .copied()
-                .filter(|p| key::BUILT_UNDER.contains(p)),
-        );
+        names.extend(built_under);
         let changed = match names.split_last() {
             Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
             _ => krate.name.clone(),
