@@ -1,0 +1,1 @@
+{"tool_name":"Edit","tool_input":{"file_path":".claude-plugin/marketplace.json","old_string":"\"source\": \"./harness-plugins\"","new_string":"\"source\": \"./elsewhere\""}}

@@ -74,7 +74,8 @@
 //!   sanctioned writer, and a file it moved stands where steer's own
 //!   reading of that call says it wrote exactly that ([`steered`]).
 //! - A file the rule's `exempt` covers: `.claude/skills/**` is an ordinary
-//!   file (#626), so a `Bash` write there stands as an `Edit` there does.
+//!   file (#626), so a `Bash` write there stands as an `Edit` there does,
+//!   but for what a `!` pattern takes back, a plugin laid in a skill (#3470).
 //!
 //! Each session keeps its records in a directory of its own, a file per
 //! call, so two sessions in one checkout, or two calls of one session side
@@ -681,7 +682,7 @@ fn shell_at(call: &Call, checkout: &Path, line: &argv::Line) -> PathBuf {
 /// The rule's text and the blob of every tracked file it scopes and does
 /// not exempt in `checkout`; `None` where the manifest carries no such
 /// rule. The exempt is read in the manifest's one path grammar,
-/// [`manifest::scope_matches`], as `permit` reads it at the call. A file
+/// [`manifest::exempted`], as `permit` reads it at the call. A file
 /// whose blob the object database may not hold, one edited and not
 /// staged, is written into it, so the record can always put it back.
 fn guard(checkout: &Path) -> Result<Option<Guarded>> {
@@ -709,9 +710,7 @@ fn guard(checkout: &Path) -> Result<Option<Guarded>> {
         };
         if mode == "160000"
             || blobs.contains_key(path)
-            || exempt
-                .iter()
-                .any(|pattern| manifest::scope_matches(pattern, Path::new(path)))
+            || manifest::exempted(exempt.iter().map(String::as_str), Path::new(path))
         {
             continue;
         }

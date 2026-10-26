@@ -98,6 +98,51 @@ fn a_row_built_by_name_is_the_row_the_file_would_parse() {
     assert_eq!(row, Manifest::parse(&text).unwrap().crates[0]);
 }
 
+/// A `!` in `exempt` takes back what an earlier pattern let off, the last
+/// that matches deciding (#3470): a skill's own files stay exempt and a
+/// plugin laid inside one does not. A `!` is refused in `scope`, and at the
+/// head of an `exempt`, where it takes back nothing.
+#[test]
+fn a_bang_in_exempt_takes_back_what_an_earlier_pattern_let_off() {
+    let row = |scope: &str, exempt: &str| {
+        format!(
+            "{MINIMAL}\n[[rule]]\nid = \"x.self\"\nscope = {scope}\nexempt = {exempt}\ndeny = true\ntext = \"x.self\"\n"
+        )
+    };
+    let text = row(
+        r#"[".claude/**"]"#,
+        r#"[".claude/skills/**", "!.claude/skills/**/.claude-plugin/**", "!.claude/skills/**/hooks/**"]"#,
+    );
+    let rule = &Manifest::parse(&text).unwrap().rules[0];
+    for (path, exempt) in [
+        (".claude/skills/x/SKILL.md", true),
+        (".claude/skills/x/myhooks/notes.md", true),
+        (".claude/skills/x/.claude-plugin/plugin.json", false),
+        (".claude/skills/x/hooks/allow.ts", false),
+        (".claude/skills/x/y/hooks/allow.ts", false),
+        (".claude/settings.json", false),
+    ] {
+        assert_eq!(rule.exempts(Path::new(path)), exempt, "{path}");
+        assert!(rule.covers(Path::new(path)), "{path}");
+    }
+    let taken_back_again = row(
+        r#"[".claude/**"]"#,
+        r#"[".claude/skills/**", "!.claude/skills/**/hooks/**", ".claude/skills/x/**"]"#,
+    );
+    let rule = &Manifest::parse(&taken_back_again).unwrap().rules[0];
+    assert!(rule.exempts(Path::new(".claude/skills/x/hooks/allow.ts")));
+    assert!(!rule.exempts(Path::new(".claude/skills/y/hooks/allow.ts")));
+
+    let err = Manifest::parse(&row(r#"["!.claude/**"]"#, "[]"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("read in `exempt` alone"), "{err}");
+    let err = Manifest::parse(&row(r#"[".claude/**"]"#, r#"["!.claude/skills/**"]"#))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("takes back nothing"), "{err}");
+}
+
 #[test]
 fn a_key_outside_the_grammar_is_refused_by_name() {
     let text = format!("{MINIMAL}\n[[crate]]\nname = \"php_heap\"\nbudget = 1\nceiling = 2\n");

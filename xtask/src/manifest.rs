@@ -834,7 +834,7 @@ impl Rule {
     /// sensor after a `Bash` call reads `harness.self`'s exempt over the
     /// files the call wrote, in this grammar (`permit::after`, #626).
     pub fn exempts(&self, path: &Path) -> bool {
-        any_matches(self.exempt.iter().map(String::as_str), path)
+        exempted(self.exempt.iter().map(String::as_str), path)
     }
 }
 
@@ -842,6 +842,40 @@ impl Rule {
 /// `scope` and `exempt` share.
 fn any_matches<'a>(mut patterns: impl Iterator<Item = &'a str>, path: &Path) -> bool {
     patterns.any(|pattern| scope_matches(pattern, path))
+}
+
+/// Whether an `exempt` list lets `path` off: its patterns in order, each a
+/// scope pattern or one led by `!`, which takes back what an earlier one
+/// let off, the last that matches deciding, as gitignore reads its own. So
+/// `.claude/skills/**` lets a skill off and `!.claude/skills/**/hooks/**`
+/// holds a hooks module laid inside one (#3470).
+pub(crate) fn exempted<'a>(patterns: impl IntoIterator<Item = &'a str>, path: &Path) -> bool {
+    patterns
+        .into_iter()
+        .fold(false, |off, pattern| match pattern.strip_prefix('!') {
+            Some(back) if scope_matches(back, path) => false,
+            None if scope_matches(pattern, path) => true,
+            _ => off,
+        })
+}
+
+/// Refuse a `!` pattern where [`exempted`] gives it no meaning: in `scope`,
+/// which no exempt precedes, and at the head of an `exempt`, where it takes
+/// back nothing.
+fn bangs_in_place(rule: &Rule) -> Result<()> {
+    if let Some(pattern) = rule.scope.iter().find(|s| s.starts_with('!')) {
+        bail!(
+            "rule \"{}\" has the scope pattern {pattern:?}; a `!` takes back what an `exempt` let off, so it is read in `exempt` alone",
+            rule.id
+        );
+    }
+    if let Some(head) = rule.exempt.first().filter(|e| e.starts_with('!')) {
+        bail!(
+            "rule \"{}\" leads its `exempt` with {head:?}, which takes back nothing; a `!` pattern follows the one whose paths it holds",
+            rule.id
+        );
+    }
+    Ok(())
 }
 
 /// Whether `path` is at or under the scope pattern: `*` is one segment or
@@ -1053,6 +1087,7 @@ impl Manifest {
                     named[0]
                 );
             }
+            bangs_in_place(rule)?;
             if !rule.exempt_label.is_empty() && !rule.predicate.describes_a_call() {
                 bail!(
                     "rule \"{}\" has `exempt_label` beside `{}`; a label is read off the issue a command names, so `exempt_label` qualifies a rule permit judges at the call",
