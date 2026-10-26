@@ -1782,20 +1782,4 @@ impl Reader {
             .span()
             .map_or(0, |(at, _)| i64::try_from(at).unwrap_or(i64::MAX))
     }
-
-    /// Every byte to the end, read through `file` as `read_through`
-    /// reads, and the error that stopped it short.
-    pub(crate) fn read_to_end(&mut self, file: &mut Option<Stdio>) -> (Vec<u8>, Option<Status>) {
-        let mut out = Vec::new();
-        self.lend(file);
-        let fault = loop {
-            match self.read(ONE_READ) {
-                Ok(chunk) if chunk.is_empty() => break None,
-                Ok(chunk) => out.extend_from_slice(&chunk),
-                Err(status) => break Some(status),
-            }
-        };
-        self.lend(file);
-        (out, fault)
-    }
 }

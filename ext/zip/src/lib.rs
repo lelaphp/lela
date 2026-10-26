@@ -35,6 +35,7 @@ mod ffi;
 mod holder;
 mod object;
 mod pattern;
+mod pipe;
 mod procedural;
 mod read;
 mod stream;

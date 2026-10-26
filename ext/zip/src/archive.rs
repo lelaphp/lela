@@ -365,13 +365,14 @@ impl Source {
         matches!(self, Source::Buffer(_))
     }
 
-    /// The bytes the close reads of the source, opened by it: a buffer's
-    /// from where its reading stands while a stream holds it open, since
-    /// `zip_source_open` of an open source does not rewind it, and from
-    /// its start otherwise, read on to its end; or the file's window. So
-    /// a stream that read, or a read past it, leaves the close short of
-    /// the data, until the stream is closed; a stream over a buffer the
-    /// entry has since been given in place of reads its own:
+    /// The source of entry `entry` opened for the close to read
+    /// (`zip_source_open` under `copy_source`): a buffer from where its
+    /// reading stands while a stream holds it open, since the open of an
+    /// open source does not rewind it, and from its start otherwise; or
+    /// the file's window. So a stream that read, or a read past it,
+    /// leaves the close short of the data, until the stream is closed; a
+    /// stream over a buffer the entry has since been given in place of
+    /// reads its own:
     ///
     /// ```php
     /// function fresh() { $z = new ZipArchive; $z->open('share-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE); $z->addFromString('b', 'bee'); return $z; }
@@ -404,12 +405,16 @@ impl Source {
     /// given anew: true 0
     ///   'new data'
     /// ```
-    pub(crate) fn read_all(&mut self) -> Result<Vec<u8>, Status> {
+    pub(crate) fn open(&mut self, entry: usize) -> Result<Input, Status> {
         match self {
             Source::Buffer(b) => {
-                let start = if b.opens > 0 { b.offset } else { 0 };
-                b.offset = b.data.len();
-                Ok(b.data.get(start..).unwrap_or_default().to_vec())
+                if b.opens == 0 {
+                    b.offset = 0;
+                }
+                Ok(Input::Buffer {
+                    link: BufferLink::new(entry, &b.data),
+                    offset: b.offset,
+                })
             }
             Source::File {
                 path,
@@ -418,24 +423,51 @@ impl Source {
                 len,
                 ..
             } => {
-                let mut opened;
-                let f = if let Some(f) = file {
-                    f
-                } else {
-                    opened = File::open(&*path).map_err(|e| Status::os(Er::Open, &e))?;
-                    &mut opened
-                };
+                let mut f = match file {
+                    Some(f) => f.try_clone(),
+                    None => File::open(&*path),
+                }
+                .map_err(|e| Status::os(Er::Open, &e))?;
                 f.seek(SeekFrom::Start(*start))
                     .map_err(|e| Status::os(Er::Seek, &e))?;
-                let mut out = Vec::new();
-                f.take(*len)
-                    .read_to_end(&mut out)
-                    .map_err(|e| Status::os(Er::Read, &e))?;
-                if (out.len() as u64) < *len {
-                    return Err(Status::new(Er::DataLength));
-                }
-                Ok(out)
+                Ok(Input::File {
+                    file: f,
+                    left: *len,
+                    read: 0,
+                })
             }
+        }
+    }
+}
+
+/// An entry's data as the close reads it, the source `add_data` copies
+/// from: a buffer, which the windows of its streams share; a file's
+/// window; or an unchanged entry's data through
+/// `zip_source_zip_file_create`, decrypted and decompressed.
+pub(crate) enum Input {
+    Buffer {
+        link: BufferLink,
+        /// Where its reading stands, kept here once the entry has another.
+        offset: usize,
+    },
+    File {
+        file: File,
+        left: u64,
+        read: u64,
+    },
+    Unchanged {
+        reader: Reader,
+        read: u64,
+    },
+}
+
+impl Input {
+    /// `zip_source_tell`: where a buffer's reading stands, and how much
+    /// of any other has been read.
+    pub(crate) fn position(&self) -> u64 {
+        match self {
+            Input::Buffer { offset, .. } => *offset as u64,
+            Input::File { read, .. } | Input::Unchanged { read, .. } => *read,
         }
     }
 }
@@ -1595,9 +1627,9 @@ impl Archive {
         Reader::decoded(|| self.window(idx), &layers)
     }
 
-    /// An unchanged entry's data, decrypted with `password` and
-    /// decompressed, and the error that stopped the read short, the
-    /// entry's dirent changed in `changed`. Each of
+    /// An unchanged entry's data opened for the close, decrypted with
+    /// `password` and decompressed, the entry's dirent changed in
+    /// `changed`. Each of
     /// two entries under one name reads its own data.
     ///
     /// ```php
@@ -1617,23 +1649,20 @@ impl Archive {
     /// string(5) "first"
     /// second second second second second second second second second
     /// ```
-    pub(crate) fn decoded(
+    pub(crate) fn unchanged_input(
         &mut self,
         idx: usize,
         password: Option<&[u8]>,
         changed: u32,
-    ) -> Result<(Vec<u8>, Option<Status>), Status> {
+    ) -> Result<Input, Status> {
         let st = self
             .stat_index(idx, FL_UNCHANGED)
             .map_err(|Failed| Status::new(Er::Internal))?;
         if st.encryption_method != EM_NONE && password.is_none() {
             return Err(Status::new(Er::Nopasswd));
         }
-        let mut reader = self.decoder(idx, FL_UNCHANGED, password, &st, false, changed)?;
-        Ok(match &mut self.data {
-            Some(d) => reader.read_to_end(&mut d.stdio),
-            None => reader.read_to_end(&mut None),
-        })
+        let reader = self.decoder(idx, FL_UNCHANGED, password, &st, false, changed)?;
+        Ok(Input::Unchanged { reader, read: 0 })
     }
 
     /// `file` swapped with the archive's `FILE`: lent to it, and taken
@@ -1659,6 +1688,67 @@ impl Archive {
             b.offset = at;
         }
         read
+    }
+
+    /// `zip_source_read` of `input`: `buf` filled, short only at the
+    /// data's end. A buffer is read from where its reading stands, and
+    /// left past what was read, where its entry still has it.
+    pub(crate) fn read_input(
+        &mut self,
+        input: &mut Input,
+        buf: &mut [u8],
+    ) -> Result<usize, Status> {
+        let copy = |data: &[u8], at: usize, buf: &mut [u8]| {
+            let rest = data.get(at..).unwrap_or_default();
+            let n = rest.len().min(buf.len());
+            buf[..n].copy_from_slice(&rest[..n]);
+            n
+        };
+        match input {
+            Input::Buffer { link, offset } => {
+                if let Some(b) = self.buffer_of(link) {
+                    let n = copy(&b.data, b.offset, buf);
+                    b.offset += n;
+                    *offset = b.offset;
+                    Ok(n)
+                } else {
+                    let n = copy(&link.data, *offset, buf);
+                    *offset += n;
+                    Ok(n)
+                }
+            }
+            Input::File { file, left, read } => {
+                let mut got = 0;
+                while got < buf.len() && *left > 0 {
+                    let room = buf.len() - got;
+                    let want = usize::try_from(*left).map_or(room, |l| l.min(room));
+                    match file.read(&mut buf[got..got + want]) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            got += n;
+                            *left -= n as u64;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(e) => return Err(Status::os(Er::Read, &e)),
+                    }
+                }
+                *read += got as u64;
+                Ok(got)
+            }
+            Input::Unchanged { reader, read } => {
+                let mut got = 0;
+                while got < buf.len() {
+                    let chunk = self.read_entry(reader, buf.len() - got)?;
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    buf[got..got + chunk.len()].copy_from_slice(&chunk);
+                    got += chunk.len();
+                }
+                *read += got as u64;
+                Ok(got)
+            }
+        }
     }
 
     /// The buffer source `link` names, where its entry still has it.
