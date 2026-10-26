@@ -5545,6 +5545,11 @@ impl Engine {
         if self.show_startup_raised(&mut req) {
             return Begun::Refused(ended(1), req.release_sink());
         }
+        // The memory limit's fatal as the body was read bailed out of
+        // `php_request_startup`, which failed: no program is compiled.
+        if req.diagnostics().bailing_out() {
+            return Begun::Failed(req);
+        }
         if let Err(thrown) = serve_rinits(&mut req, &self.shared.extensions) {
             // `zend_throw_exception_internal` with no frame standing
             // (`Z/Zend/zend_exceptions.c:206-224`): the throwable rendered
