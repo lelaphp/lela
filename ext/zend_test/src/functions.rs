@@ -1293,7 +1293,9 @@ impl ReadPost for PostStream {
 }
 
 /// `zend_new_singleton_array(): array`, `array_init_singleton`: an empty
-/// array that grows as any other.
+/// array whose first write lays down room for one element, where an
+/// array's first write lays down eight, and that grows as any other from
+/// there.
 ///
 /// ```php
 /// $a = zend_new_singleton_array();
@@ -1313,9 +1315,23 @@ impl ReadPost for PostStream {
 ///   string(6) "second"
 /// }
 /// ```
+///
+/// ```php
+/// $m = memory_get_usage();
+/// $a = zend_new_singleton_array();
+/// $a[] = 1;
+/// $n = memory_get_usage();
+/// $a[] = 2;
+/// $a[] = 3;
+/// var_dump($n - $m, memory_get_usage() - $n);
+/// ```
+/// ```expect
+/// int(80)
+/// int(56)
+/// ```
 #[php_function]
 fn zend_new_singleton_array(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
-    PhpArray::new(req)
+    PhpArray::singleton(req)
 }
 
 /// `zend_test_internal_dnf_arguments()`, taking and returning

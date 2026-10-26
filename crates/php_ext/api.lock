@@ -1366,6 +1366,7 @@ values::PhpArray::set
 values::PhpArray::set_next_free
 values::PhpArray::set_str
 values::PhpArray::set_symtable_str
+values::PhpArray::singleton
 values::PhpArray::sized
 values::PhpArray::sort_by
 values::PhpArray::to_value

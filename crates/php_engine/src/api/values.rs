@@ -588,6 +588,15 @@ impl PhpArray {
         adopted(req.array_sized(size, true))
     }
 
+    /// `array_init_singleton`, `zend_new_array_singleton()`: an empty
+    /// array whose first write lays down room for one element, and each
+    /// growth doubles from there, where [`PhpArray::new`]'s first write
+    /// lays down eight. The `Err` is the memory limit.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn singleton(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
+        req.array_singleton()
+    }
+
     /// `RETURN_EMPTY_ARRAY`, `ZVAL_EMPTY_ARRAY`: the process's one
     /// immutable empty array, php's `zend_empty_array`, which costs the
     /// request nothing and is what a native answers where php's body
