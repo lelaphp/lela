@@ -1,0 +1,10 @@
+# The build context of dist/Dockerfile, the checkout, less what no build of
+# the hosts reads: cargo's targets, git's and the sessions' state, and the
+# research and census records (BuildKit reads this file for that Dockerfile
+# alone).
+**/target
+.git
+.claude
+research
+data
+**/.DS_Store

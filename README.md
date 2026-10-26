@@ -9,7 +9,7 @@ The harness is the `xtask` crate, `cargo xtask <instrument>`: `cargo xtask statu
 Data files the harness reads, each stated once:
 
 - `seams.toml`: the seam manifest (harness §4.1).
-- `oracle.toml`: the pinned oracle, php 8.5.9, and its invocation recipe.
+- `oracle.toml`: the pinned oracle, the only statement of its version, and its invocation recipe.
 - `docs/divergence.toml`: the divergence registry, one row per accepted difference from the oracle; `docs/divergence.md` is its rendering, a computed region.
 - `ops.toml`: the instruction set, extracted from `Zend/zend_vm_def.h` at the pinned tag by `scripts/extract_ops.py`.
 - `crates/php_ext/api.lock`: the extension-facing interface; v0 is drafted from the Mahout census by `scripts/census.sh`.
