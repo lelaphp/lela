@@ -568,7 +568,7 @@ impl Subset {
     /// its directories and not routed out, or routed in.
     pub(crate) fn holds_test(&self, test: &Path) -> bool {
         let under = self.under(test);
-        let own = self.dirs.iter().any(|place| test.starts_with(&place.path));
+        let own = self.found_in(test).is_some();
         self.routed.gained.contains_key(&under) || (own && !self.routed.left.contains(&under))
     }
 
@@ -584,13 +584,18 @@ impl Subset {
     /// the path this machine keeps it at, which `id` would carry into a
     /// divergence key.
     pub(crate) fn under(&self, test: &Path) -> PathBuf {
-        if let Some(place) = self.dirs.iter().find(|place| test.starts_with(&place.path)) {
+        if let Some(place) = self.found_in(test) {
             return place.under.join(place.inside(test));
         }
         test.strip_prefix(&self.root).map_or_else(
             |_| PathBuf::from(test.file_name().unwrap_or(test.as_os_str())),
             Path::to_path_buf,
         )
+    }
+
+    /// The directory of the subset the test stands under.
+    pub(crate) fn found_in(&self, test: &Path) -> Option<&Dir> {
+        self.dirs.iter().find(|place| test.starts_with(&place.path))
     }
 
     /// The test's name: where it stands in the corpus, whatever number of

@@ -121,11 +121,7 @@ pub(crate) fn apply(
     }
     for subset in subsets {
         for (under, (route, phpt)) in &named {
-            let path = source.join(under);
-            let own = subset
-                .dirs
-                .iter()
-                .any(|place| path.starts_with(&place.path));
+            let own = subset.found_in(&source.join(under)).is_some();
             if route.krate.name == subset.scope && !own {
                 let why = unbuilt(manifest, carried, route.krate, under, phpt);
                 subset.routed.gained.insert(under.clone(), why);
