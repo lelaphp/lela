@@ -545,7 +545,7 @@ pub struct VmStack<H> {
     /// `EG(vm_stack_end)`: one past the top page's last slot.
     end: NonNull<Zval>,
     frames: Frames<H>,
-    entries: Vec<FrameRef>,
+    entries: Entries,
     /// The room off the pages the last frameless call's frame gave
     /// back, the next one's.
     spare: Option<Loose>,
@@ -588,7 +588,7 @@ impl<H> Default for VmStack<H> {
             top: NonNull::dangling(),
             end: NonNull::dangling(),
             frames: Frames::new(),
-            entries: Vec::new(),
+            entries: Entries::default(),
             spare: None,
             innermost: AtomicUsize::new(0),
         }
@@ -770,22 +770,21 @@ impl<H> VmStack<H> {
             let at = self.take_room(used);
             return Ok(self.lay(at, slots, Placed::OnPage, header, undefine));
         }
-        self.push_opening(heap, slots, used, header)
+        // The room a page opens is found out of line and the frame laid
+        // here, so what makes the header is never handed to the cold
+        // half, which would hold it in memory for the hot one too.
+        let placed = self.opening(heap, used)?;
+        let at = self.take_room(used);
+        Ok(self.lay(at, slots, placed, header, undefine))
     }
 
-    /// [`VmStack::push_frame`] where no page stands yet or the top one
-    /// has no room for the frame: the first page laid down, and a page
-    /// of the frame's own where that one cannot hold it either
-    /// (`zend_vm_stack_extend`).
+    /// The room [`VmStack::push_frame`] takes where no page stands yet or
+    /// the top one has no room for `used` slots: the first page laid
+    /// down, and a page of the frame's own where that one cannot hold it
+    /// either (`zend_vm_stack_extend`); where the frame stands then.
     #[cold]
     #[inline(never)]
-    fn push_opening(
-        &mut self,
-        heap: &mut Heap,
-        slots: usize,
-        used: usize,
-        header: impl FnOnce() -> H,
-    ) -> Result<FrameRef, Fatal> {
+    fn opening(&mut self, heap: &mut Heap, used: usize) -> Result<Placed, Fatal> {
         self.open(heap)?;
         let placed = if used <= self.left() {
             Placed::OnPage
@@ -808,8 +807,7 @@ impl<H> VmStack<H> {
                 "InternalError: a VM stack with no room for a frame after its push laid a page down",
             ));
         }
-        let at = self.take_room(used);
-        Ok(self.lay(at, slots, placed, header, undefine))
+        Ok(placed)
     }
 
     /// A frame of `len` slots from `at` laid on top of the stack where
@@ -981,18 +979,17 @@ impl<H> VmStack<H> {
     #[inline(always)] // once per return, in the loop's RETURN arms
     #[allow(clippy::inline_always)]
     pub fn pop_frame(&mut self, heap: &mut Heap) {
-        let Some(frame) = self.frames.pop() else {
-            return;
-        };
         // `zend_vm_stack_free_call_frame_ex` over a frame on the top page,
         // `EG(vm_stack_top) = call`: every return of a call in a loop, its
         // room linked as every room on a page is.
-        if let Placed::OnPage = frame.placed {
-            self.innermost
-                .store(frame.linked_below(), Ordering::Relaxed);
-            self.top = frame.room();
+        if let Some((below, room)) = self.frames.pop_on_page() {
+            self.innermost.store(below, Ordering::Relaxed);
+            self.top = room;
             return;
         }
+        let Some(frame) = self.frames.pop() else {
+            return;
+        };
         // An unobserved frameless call's room, which links nothing: kept
         // for the next where none is spare, every frameless call's pop.
         if let Placed::Loose(room) = frame.placed {
@@ -1012,6 +1009,22 @@ impl<H> VmStack<H> {
         let at = self.frames.len().checked_sub(1)?;
         let frame = self.frames.last()?;
         Some((FrameRef(u32::try_from(at).ok()?), frame))
+    }
+
+    /// The frame on top of the stack, its position and every frame below
+    /// it, mutably, from one look at the table: the frame a return leaves
+    /// and the one it returns into, which a plain leave reads and writes
+    /// together, as php's `zend_leave_helper` reaches `execute_data` and
+    /// `EX(prev_execute_data)`.
+    #[inline]
+    #[allow(clippy::type_complexity)] // three borrows of one look, named where they are taken
+    pub fn top_over_mut(&mut self) -> Option<(FrameRef, &mut Frame<H>, &mut [Frame<H>])> {
+        let (top, below) = self.frames.split_last_mut()?;
+        // A place past `u32::MAX` would be 2^32 frames of at least eighty
+        // bytes each, which no request's memory holds.
+        #[allow(clippy::cast_possible_truncation)]
+        let at = FrameRef(below.len() as u32);
+        Some((at, top, below))
     }
 
     /// The frame on top of the stack, mutably, and its position.
@@ -1291,11 +1304,9 @@ impl<H> VmStack<H> {
     /// The entry frame of the innermost serving on this stack; the
     /// current frame when nothing has pushed an entry.
     #[must_use]
+    #[inline]
     pub fn entry(&self) -> FrameRef {
-        self.entries
-            .last()
-            .copied()
-            .unwrap_or_else(|| self.current())
+        self.entries.innermost.unwrap_or_else(|| self.current())
     }
 
     /// Pushed by the loop on entry, and popped by [`VmStack::pop_entry`]
@@ -1364,13 +1375,43 @@ impl Page {
     }
 }
 
+/// A stack's entry slots, one per serving standing on it, the
+/// innermost held apart from those below it, so the loop's test of
+/// whether a frame is its serving's entry reads one word.
+#[derive(Debug, Default)]
+struct Entries {
+    below: Vec<FrameRef>,
+    innermost: Option<FrameRef>,
+}
+
+impl Entries {
+    /// How many slots stand.
+    fn len(&self) -> usize {
+        self.below.len() + usize::from(self.innermost.is_some())
+    }
+
+    /// `f` the innermost serving's entry.
+    fn push(&mut self, f: FrameRef) {
+        if let Some(was) = self.innermost.replace(f) {
+            self.below.push(was);
+        }
+    }
+
+    /// The slots past the first `len` popped.
+    fn truncate(&mut self, len: usize) {
+        while self.len() > len {
+            self.innermost = self.below.pop();
+        }
+    }
+}
+
 /// The frames of a stack and its entry slots, set aside by
 /// [`VmStack::set_aside`] and put back by [`VmStack::put_back`].
 #[derive(Debug)]
 #[must_use = "the frames are put back by VmStack::put_back, which takes this"]
 pub struct FramesAside<H> {
     frames: Frames<H>,
-    entries: Vec<FrameRef>,
+    entries: Entries,
     /// The word as it stood, the innermost of the frames set aside.
     innermost: usize,
 }
@@ -1460,6 +1501,38 @@ mod tests {
             stack.frame(outer).map(|f| f.slot(Slot(5))),
             Some(Zval::UNDEF)
         );
+        drop(stack.close(&mut heap));
+    }
+
+    /// Entry slots nest: each serving's is the entry while it stands,
+    /// the one below it again once it pops, and the pop of an outer
+    /// guard pops an inner one left standing with it.
+    #[test]
+    fn entry_slots_nest_and_an_outer_pop_takes_the_inner_with_it() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let mut stack = VmStack::<Head>::new();
+        let frames: Vec<FrameRef> = (0..3)
+            .filter_map(|_| stack.push_frame(&mut heap, 1, 0, Head::default).ok())
+            .collect();
+        let [a, b, c] = frames[..] else {
+            panic!("three frames fit the first page");
+        };
+        assert_eq!(
+            stack.entry(),
+            c,
+            "with no slot the entry is the current frame"
+        );
+        let outer = stack.push_entry(a);
+        let inner = stack.push_entry(b);
+        assert_eq!(stack.entry(), b);
+        stack.pop_entry(inner);
+        assert_eq!(stack.entry(), a);
+        let _left = stack.push_entry(b);
+        let _innermost = stack.push_entry(c);
+        assert_eq!(stack.entry(), c);
+        stack.pop_entry(outer);
+        assert_eq!(stack.entry(), c, "the outer pop leaves no slot");
         drop(stack.close(&mut heap));
     }
 
@@ -1558,6 +1631,56 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(heap.memory_usage(false) - start, 3 * PAGE_SIZE);
+        drop(stack.close(&mut heap));
+        assert_eq!(heap.memory_usage(false), start);
+    }
+
+    /// A pop puts the stack's top and its innermost room back where the
+    /// frame below left them, whichever room the frame stood in: one on
+    /// the top page, read where it stands; one that opened a page, which
+    /// goes back to the heap; and one a generator's move put in an
+    /// allocation of its own and a resumption put back on top, under a
+    /// frame on the page above it.
+    #[test]
+    fn a_pop_puts_the_top_back_from_every_kind_of_room() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let start = heap.memory_usage(false);
+        let mut stack = VmStack::<Head>::new();
+        assert_eq!(stack.open(&mut heap), Ok(()));
+        let (empty_room, empty_link) = (stack.room(), stack.innermost());
+        for _ in 0..1092 {
+            assert!(stack.push_frame(&mut heap, 10, 0, Head::default).is_ok());
+        }
+        let (full, link) = (stack.room(), stack.innermost());
+        assert!(stack.push_frame(&mut heap, 10, 0, Head::default).is_ok());
+        assert_eq!(heap.memory_usage(false) - start, 2 * PAGE_SIZE);
+        stack.pop_frame(&mut heap);
+        assert_eq!(heap.memory_usage(false) - start, PAGE_SIZE);
+        assert_eq!((stack.room(), stack.innermost()), (full, link));
+        stack.pop_frame(&mut heap);
+        let (below, below_link) = (stack.room(), stack.innermost());
+        assert!(stack.push_frame(&mut heap, 2, 0, Head::default).is_ok());
+        let moved = stack
+            .move_to_heap(&mut heap)
+            .expect("the move to the heap")
+            .expect("the frame moves to the heap");
+        let resumed = stack.resume_frame(moved);
+        let above = stack
+            .push_frame(&mut heap, 3, 0, Head::default)
+            .expect("a frame above the resumed one");
+        assert_eq!(above.0, resumed.0 + 1);
+        stack.pop_frame(&mut heap);
+        assert_ne!(stack.innermost(), below_link);
+        stack.pop_frame(&mut heap);
+        assert_eq!((stack.room(), stack.innermost()), (below, below_link));
+        for _ in 0..1091 {
+            stack.pop_frame(&mut heap);
+        }
+        assert!(stack.is_empty());
+        assert_eq!((stack.room(), stack.innermost()), (empty_room, empty_link));
+        stack.pop_frame(&mut heap);
+        assert!(stack.is_empty());
         drop(stack.close(&mut heap));
         assert_eq!(heap.memory_usage(false), start);
     }
