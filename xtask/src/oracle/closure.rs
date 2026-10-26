@@ -447,13 +447,30 @@ pub(crate) mod stand_in {
         file.extend(bytes);
         file
     }
+
+    /// A Mach-O stand-in linked for `minos` of `platform`, its one command
+    /// the `LC_BUILD_VERSION` `ld -platform_version <platform> <minos>
+    /// 15.4` writes.
+    pub(crate) fn built_for(platform: u32, minos: u32) -> Vec<u8> {
+        let mut file = macho(&[]);
+        file[16..24].copy_from_slice(&[1, 0, 0, 0, 24, 0, 0, 0]);
+        for w in [super::BUILD_VERSION, 24, platform, minos, 0x000f_0400, 0] {
+            file.extend(u32::to_le_bytes(w));
+        }
+        file
+    }
+
+    /// A stand-in linked for macOS 15.0.
+    pub(crate) fn macos_15() -> Vec<u8> {
+        built_for(super::MACOS, 0x000f_0000)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::symlink;
 
-    use super::stand_in::{commanded, macho};
+    use super::stand_in::{built_for, commanded, macho};
     use super::*;
     use crate::scratch::Tree;
 
@@ -623,18 +640,6 @@ mod tests {
             err.contains("zstd 1.5.7_1 is loaded and not recorded"),
             "{err}"
         );
-    }
-
-    /// A Mach-O stand-in linked for `minos` of `platform`, its one command
-    /// the `LC_BUILD_VERSION` `ld -platform_version <platform> <minos>
-    /// 15.4` writes.
-    fn built_for(platform: u32, minos: u32) -> Vec<u8> {
-        let mut file = macho(&[]);
-        file[16..24].copy_from_slice(&[1, 0, 0, 0, 24, 0, 0, 0]);
-        for w in [BUILD_VERSION, 24, platform, minos, 0x000f_0400, 0] {
-            file.extend(u32::to_le_bytes(w));
-        }
-        file
     }
 
     #[test]
