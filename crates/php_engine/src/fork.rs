@@ -312,7 +312,8 @@ impl std::fmt::Debug for Worker {
 static WORKERS: Mutex<Vec<Weak<Worker>>> = Mutex::new(Vec::new());
 
 /// One of the process's lists of what a fork stops first, held, with
-/// what has dropped let go: [`WORKERS`], and the timers.
+/// what has dropped let go: [`WORKERS`], the timers, and the realpath
+/// caches a fork's child empties ([`RealpathCaches`]).
 pub(crate) fn living<T>(list: &'static Mutex<Vec<Weak<T>>>) -> MutexGuard<'static, Vec<Weak<T>>> {
     let mut held = list.lock().unwrap_or_else(PoisonError::into_inner);
     held.retain(|entry| entry.strong_count() > 0);
@@ -547,11 +548,13 @@ fn busy() -> io::Error {
 /// Every engine's realpath cache is locked last, once the threads are
 /// joined, and held across the copy: let go unchanged in the process that
 /// asked, and emptied before it is let go in the child, as php's
-/// `php_child_init` empties the process's. Nothing inside the engine holds
-/// one beside the caller, since anything that stood inside would have
-/// refused the fork, and a thread outside it that holds one, as a test
-/// does, lets it go without waiting on the fork ([`RealpathCaches::hold`]),
-/// so the fork waits for it and the child never copies one held.
+/// `php_child_init` empties the process's. Whatever holds one, a request
+/// still on its way out of the engine or a thread outside it as a test
+/// is, holds it for one lookup, entry or clean and lets it go without
+/// waiting on the fork ([`RealpathCaches::hold`]), so the fork waits for
+/// it and the child never copies one held; a request that still stands
+/// inside once it is let go refuses the fork at [`Alone::fork`]'s reading,
+/// and the caches are let go unchanged.
 ///
 /// What stands inside is read before the threads are counted, and only
 /// falls while the fork is held: a count that covers the reading means

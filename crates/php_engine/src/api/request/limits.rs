@@ -568,7 +568,8 @@ impl<'r> Limits<&'r mut Request> {
     /// deadline is dropped, the execution timer's and each periodic
     /// interrupt's, as a child inherits no interval timer and no POSIX
     /// timer, so it runs untimed until it sets a limit of its own, in its
-    /// copy of this request; and the engine's realpath cache is emptied, as
+    /// copy of this request; and every engine's realpath cache, this
+    /// request's engine's among them, is emptied, as
     /// `php_clear_stat_cache(true, NULL, 0)` empties php's. The stat cache
     /// is `php_streams`', above the engine, so the native that asks empties
     /// it, as `pcntl_fork` does.

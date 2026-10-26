@@ -651,8 +651,8 @@ mod tests {
     use super::{RealpathCache, Resolve, held, virtual_file_ex};
     use crate::fork::{Forked, fork};
 
-    /// The variable that tells this binary, started again, that it is the
-    /// process a test started apart ([`apart`]).
+    /// The variable that tells this binary, started again, which test it
+    /// was started apart for ([`apart`]).
     const APART: &str = "PHP_ENGINE_TEST_APART";
 
     /// The test `name` started again in a process of its own, with nothing
@@ -686,7 +686,7 @@ mod tests {
     /// `body` in a process of its own ([`apart`]), which says what it
     /// came to on its last line; the test holds that line to `came_to`.
     fn in_a_process_apart(name: &str, came_to: &str, body: impl FnOnce() -> String) {
-        if std::env::var_os(APART).is_some() {
+        if std::env::var_os(APART).is_some_and(|apart| apart == name) {
             println!("{}", body());
         } else {
             let printed = apart(name);
