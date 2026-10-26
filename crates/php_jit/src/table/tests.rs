@@ -23,6 +23,9 @@ use crate::record::Start;
 use crate::testing;
 use crate::types::{ExitId, ExitSpec, Frame, Grows, Landing};
 
+#[cfg(all(php_jit_arena, not(miri)))]
+mod forked;
+
 type Heap = TraceTable<HeapPages>;
 
 /// A table over the heap adapter under `entries`, with one chunk of
