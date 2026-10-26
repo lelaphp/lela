@@ -23860,10 +23860,8 @@ fn jumped<T: Tier>(
         // handlers' backtrace starts there, and a tier the engine asks
         // at its safepoints (ADR-0006). `Nop`'s loop goes on at the
         // target in its own hand, as every other jump's does.
-        if crate::interrupt::raised(req)
-            && let Some(left) = interrupted_at_back_edge::<T>(req, frame, target)?
-        {
-            return Ok(left.into());
+        if crate::interrupt::raised(req) && interrupted_at_back_edge::<T>(req, frame, target)? {
+            return Ok(Stepped::Threw(frame).into());
         }
         if !crate::tier::interpreted::<T>() {
             req.vm_mut().stand(frame, target);
@@ -23881,17 +23879,16 @@ fn jumped<T: Tier>(
 /// [`jumped`]'s interrupt, out of the loop's line: a delayed OOM named at
 /// the site the frame stands on before the stand moves it to `target`
 /// ([`Request::locate_oom`]), then the frame stood there and the
-/// interrupt served ([`crate::tier::interrupted_at`]): `Threw` of the
-/// frame where it threw, `Done` where `Nop`'s loop handed the frame at
-/// the target to the tier's, which served the rest of the serving, and
-/// none where the loop goes on.
+/// interrupt served ([`crate::tier::interrupted_at`]), `Nop`'s loop
+/// handing the frame at the target to the tier's where a hand-off is
+/// due; whether the site leaves along `Threw` of the frame.
 #[cold]
 #[inline(never)]
 fn interrupted_at_back_edge<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     target: u32,
-) -> Result<Option<Stepped>, Fatal> {
+) -> Result<bool, Fatal> {
     req.locate_oom();
     req.vm_mut().stand(frame, target);
     crate::tier::interrupted_at::<T>(req, frame, Stepped::Same(frame))

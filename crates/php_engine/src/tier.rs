@@ -324,6 +324,9 @@ pub(crate) struct TierState {
     /// The loops the request is served in.
     pub(crate) loops: Loops,
     switch: std::cell::Cell<Switch>,
+    /// Whether the hand-off just served the rest of a serving, read once
+    /// by [`unwind_frame`] as the site that handed it leaves.
+    served: std::cell::Cell<bool>,
     state: Option<Box<dyn Any + Send>>,
     /// How many [`Lending`]s stand, counted under `debug_assertions`
     /// alone.
@@ -397,6 +400,7 @@ impl TierState {
         TierState {
             loops,
             switch: std::cell::Cell::new(switch),
+            served: std::cell::Cell::new(false),
             state: (loops.lay)(Started { shared }),
             #[cfg(debug_assertions)]
             lends: std::sync::Arc::default(),
@@ -792,10 +796,8 @@ fn activated<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
 ) -> Result<Stepped, Fatal> {
-    if interrupt::raised(req)
-        && let Some(left) = interrupted_at::<T>(req, frame, Stepped::Pushed(frame))?
-    {
-        return Ok(left);
+    if interrupt::raised(req) && interrupted_at::<T>(req, frame, Stepped::Pushed(frame))? {
+        return Ok(Stepped::Threw(frame));
     }
     let flow = T::safepoint(req, frame, Site::Entry, Held::of(code));
     answered(req, flow, frame)
@@ -803,31 +805,39 @@ fn activated<T: Tier>(
 
 /// What a site of `T`'s loop, an activation or a back edge, does where
 /// its interrupt check found the interrupt raised (design §5.8):
-/// [`interrupt::interrupted`], and `Threw` of `frame` where it left a
-/// throwable pending, none where the loop goes on along `went`, the
-/// edge it was taking. In `Nop`'s loop, where the request published a
-/// unit with counting words since its last check ([`Switch::Due`]), the
-/// loop hands the edge to the tier's loop instead (ADR-0006, amended on
-/// #3301): the request's tier is laid again with the tier's loops and
-/// state, so every serving it starts from here, a re-entry, a
-/// resumption, an `auto_append_file`, takes them, and the tier's loop
-/// serves the rest of this serving on the entry slot it stands on, under
-/// `Nop`'s, whose serving is then over: `Done`.
+/// [`interrupt::interrupted`], and whether the site leaves along
+/// `Threw` of `frame`, its frame having thrown or been handed on. In
+/// `Nop`'s loop, where the request published a unit with counting words
+/// since its last check ([`Switch::Due`]), the loop hands its edge to
+/// the tier's loop (ADR-0006, amended on #3301), `went`, the edge it was
+/// taking, or `Threw` of `frame`: the request's tier is laid again with
+/// the tier's loops and state, so every serving it starts from here, a
+/// re-entry, a resumption, an `auto_append_file`, takes them, and the
+/// tier's loop serves the rest of this serving on the entry slot it
+/// stands on, under `Nop`'s, whose serving is then over: the `Threw`
+/// the site leaves along is taken up by [`unwind_frame`], which answers
+/// `Done` once the hand-off has served ([`TierState`]'s `served`). The
+/// site's code is the shape it was with no hand-off built, the check's
+/// `bool` and the one edge it leaves along, since the serving loop's
+/// registers are held there: answering a third edge from the site spilled
+/// the op array's length in the loop's dispatch, one more load at every
+/// opline, two instructions a turn of the empty loop (#3362).
 #[cold]
 #[inline(never)]
 pub(crate) fn interrupted_at<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     went: Stepped,
-) -> Result<Option<Stepped>, Fatal> {
+) -> Result<bool, Fatal> {
     let handed = interpreted::<T>() && req.hand_off();
     let threw = interrupt::interrupted(req)?;
-    let edge = if threw { Stepped::Threw(frame) } else { went };
     if handed {
+        let edge = if threw { Stepped::Threw(frame) } else { went };
         (req.tier_state().loops.handed)(req, edge)?;
-        return Ok(Some(Stepped::Done));
+        req.tier_state().served.set(true);
+        return Ok(true);
     }
-    Ok(threw.then_some(edge))
+    Ok(threw)
 }
 
 /// The interrupt raised again where a hand-off is due and the check
@@ -1531,8 +1541,13 @@ fn no_frame(frame: FrameRef) -> Fatal {
 /// answers the same frame where it landed at a `catch` or a `finally`,
 /// the caller where it left the frame, and this frame again where the
 /// serving's entry frame caught nothing, which is where the serving
-/// ends.
+/// ends. `Done` where the edge is the one a site of `Nop`'s loop leaves
+/// along once it handed the rest of its serving to the tier's loop
+/// ([`interrupted_at`]), which unwinds nothing.
 fn unwind_frame<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
+    if req.tier_state().served.replace(false) {
+        return Ok(Stepped::Done);
+    }
     let serving = exec::standing(req, frame)?;
     let code = exec::serving_code(&serving, frame)?;
     let at = req.vm().opline(frame);
