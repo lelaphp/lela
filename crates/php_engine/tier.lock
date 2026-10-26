@@ -205,6 +205,7 @@ tier::dispatch_held
 tier::free_cv
 tier::free_this
 tier::lookup_element
+tier::make_ref
 tier::native_held
 tier::release
 tier::return_entry

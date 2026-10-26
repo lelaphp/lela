@@ -672,11 +672,18 @@ pub(crate) enum Kernel {
     /// `OBJ_RELEASE(Z_OBJ(execute_data->This))` gives it up; its
     /// destructor's throw is the status's.
     FreeThis,
+    /// `make_ref(cx, frame, opline: u32, place: u64, made: *mut u64)`:
+    /// `ZVAL_MAKE_REF` of the variable at `place`, which holds no
+    /// reference, a `SEND_REF`'s, as php's `zend_jit_send_ref` makes it
+    /// (`php_engine::tier::make_ref`), written into the place; `made` one
+    /// where it made it, zero where the memory limit refused it, which
+    /// the handler then serves.
+    MakeRef,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 17] = [
+    pub(crate) const ALL: [Kernel; 18] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
@@ -694,6 +701,7 @@ impl Kernel {
         Kernel::Leave,
         Kernel::Native,
         Kernel::FreeThis,
+        Kernel::MakeRef,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

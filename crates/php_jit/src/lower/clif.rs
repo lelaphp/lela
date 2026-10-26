@@ -1625,6 +1625,7 @@ impl<'a> Emit<'a> {
             Kernel::RopeEnd => &[I64, I64, I32, I64, I64, I32, I64],
             Kernel::Concat => &[I64, I64, I32, I64, I32, I64, I32, I32, I64],
             Kernel::Find | Kernel::Lookup => &[I64, I64, I32, I64, I64, I32, I32, I64],
+            Kernel::MakeRef => &[I64, I64, I32, I64, I64],
         };
         sig.params
             .extend(params.iter().map(|ty| AbiParam::new(*ty)));
@@ -3104,29 +3105,36 @@ impl<'a> Emit<'a> {
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:9792-9860`): the reference the
     /// variable holds written into the call's slot for the argument with
     /// one owner more, `GC_ADDREF` and `ZVAL_REF`. A variable that holds no
-    /// reference yet is made one by the handler, cold, through the
-    /// [`Kernel::Handle`] crossing, where php's code makes it inline with
-    /// `ZVAL_NEW_REF`; a variable the trace holds in a register holds a
-    /// scalar, and is stored to its slot for the handler first. Arrays
-    /// passed by reference in a loop, each written through its reference
-    /// by the callee, one made a reference at its first send:
+    /// reference yet is made one in place, `ZVAL_MAKE_REF`, its reference
+    /// laid down by [`Kernel::MakeRef`] as php's code calls the allocator
+    /// for it, and then sent as one; the handler serves the send, cold,
+    /// only where the memory limit refused the reference. A variable the
+    /// trace holds in a register holds a scalar, and is stored to its slot
+    /// first. Arrays passed by reference in a loop, each written through
+    /// its reference by the callee, one made a reference at its first
+    /// send, and a variable unset before each send, made a reference over
+    /// `null`:
     ///
     /// ```php
     /// function bump(array &$a, array &$b, int &$n) { $a[0] += 1; $b[] = $n; $n++; }
     /// function f($k) { $x = [0]; $y = []; $c = 0; for ($i = 0; $i < $k; $i++) { bump($x, $y, $c); } return [$x[0], count($y), $c]; }
-    /// echo json_encode(f(9)), "\n";
+    /// function put(&$v) { $v = ($v ?? 0) + 2; }
+    /// function g($k) { $t = 0; for ($i = 0; $i < $k; $i++) { unset($u); put($u); $t += $u; } return $t; }
+    /// echo json_encode(f(9)), " ", g(9), "\n";
     /// ```
     /// ```expect regime=jit-force process
-    /// [9,9,9]
+    /// [9,9,9] 18
     /// ```
     ///
     /// ```php
     /// function bump(array &$a, array &$b, int &$n) { $a[0] += 1; $b[] = $n; $n++; }
     /// function f($k) { $x = [0]; $y = []; $c = 0; for ($i = 0; $i < $k; $i++) { bump($x, $y, $c); } return [$x[0], count($y), $c]; }
-    /// echo json_encode(f(9)), "\n";
+    /// function put(&$v) { $v = ($v ?? 0) + 2; }
+    /// function g($k) { $t = 0; for ($i = 0; $i < $k; $i++) { unset($u); put($u); $t += $u; } return $t; }
+    /// echo json_encode(f(9)), " ", g(9), "\n";
     /// ```
     /// ```expect regime=jit-exit-fuzz process
-    /// [9,9,9]
+    /// [9,9,9] 18
     /// ```
     ///
     /// An object sent by reference whose callee writes over it, its
@@ -3163,38 +3171,49 @@ impl<'a> Emit<'a> {
         let Operand::Value(value) = line.op1 else {
             return Err(mismatch("a send by reference of no variable"));
         };
-        let handler = |emit: &mut Emit<'_>| -> Result<(), Abort> {
-            emit.spill_operands(line)?;
-            let [room, opline] = emit.served(line)?;
-            let func = emit.func_of(line.frame)?;
-            emit.handled(line, Onward(1), [room, opline, func])
-        };
-        if self.value(value)?.home == Home::Register {
-            return handler(self);
-        }
+        self.spill_operands(line)?;
         let (room, from_at) = self.place(self.value(value)?.slot)?;
+        let zval = self.b.ins().iadd_imm_s(room, i64::from(from_at));
         let info = self.b.ins().load(I32, trusted(), room, from_at + TYPE_AT);
         let kind = self.b.ins().band_imm_u(info, KIND);
         let reference = self
             .b
             .ins()
             .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
-        let (sent, make, on) = (
+        let (sent, make, refused, on) = (
+            self.b.create_block(),
             self.b.create_block(),
             self.b.create_block(),
             self.b.create_block(),
         );
-        self.b.set_cold_block(make);
+        self.b.set_cold_block(refused);
         self.b.ins().brif(reference, sent, &[], make, &[]);
+        // `ZVAL_MAKE_REF`: the reference laid down over what the variable
+        // holds, then sent as one.
+        self.b.switch_to_block(make);
+        self.b.seal_block(make);
+        let [served_room, opline] = self.served(line)?;
+        let answer = self.answer();
+        let made_at = self.b.ins().stack_addr(I64, answer, 0);
+        self.call(
+            Kernel::MakeRef,
+            &[served_room, opline, zval, made_at],
+            leave_of(line),
+        )?;
+        let laid = self.b.ins().stack_load(I64, I64, answer, 0);
+        self.b.ins().brif(laid, sent, &[], refused, &[]);
         self.b.switch_to_block(sent);
         self.b.seal_block(sent);
-        let zval = self.b.ins().iadd_imm_s(room, i64::from(from_at));
+        let info = self.b.ins().load(I32, trusted(), room, from_at + TYPE_AT);
         let call = self.call_room()?;
         self.copy_at(zval, info, (call, arg))?;
         self.b.ins().jump(on, &[]);
-        self.b.switch_to_block(make);
-        self.b.seal_block(make);
-        handler(self)?;
+        // The memory limit refused the reference: the handler's send, which
+        // raises its fatal.
+        self.b.switch_to_block(refused);
+        self.b.seal_block(refused);
+        let func = self.func_of(line.frame)?;
+        self.handled(line, Onward(1), [served_room, opline, func])?;
         self.b.ins().jump(on, &[]);
         self.b.switch_to_block(on);
         self.b.seal_block(on);

@@ -572,6 +572,7 @@ kernels! {
         Leave => leave(word: u64, type_info: u32) -> u64 = tier::return_entry;
         Native => native(func: u32) = tier::native_held;
         FreeThis => free_this() = tier::free_this;
+        MakeRef => make_ref(place: u64) -> u64 = tier::make_ref;
     }
 }
 
@@ -879,6 +880,18 @@ fn lookup(
     let laid = keyed_element(array, (key, key_info), constant)
         .and_then(|(array, key)| tier::lookup_element(req, array, key));
     Ok(placed(laid))
+}
+
+/// The `make_ref` kernel: the reference a `SEND_REF` makes of the
+/// variable at `place` ([`tier::make_ref`]), as php's `zend_jit_send_ref`
+/// makes it, written into the place; one where it made it, zero where
+/// the memory limit refused it, which the handler then serves and raises.
+fn make_ref(req: &mut Request, on: On<'_, '_>, place: u64) -> Result<u64, Fatal> {
+    standing(req, on.room, on.at)?;
+    let place = zval(place, u32::from(ZvalType::Indirect as u8))
+        .as_indirect()
+        .ok_or_else(|| internal("compiled code's SEND_REF of no place"))?;
+    Ok(u64::from(tier::make_ref(req, place)))
 }
 
 /// The frame whose room compiled code handed a kernel, stood at the

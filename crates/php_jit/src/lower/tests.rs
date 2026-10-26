@@ -1125,8 +1125,9 @@ fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_lowers_in_place()
 }
 
 /// A call that sends arrays by reference is made in place: its
-/// `SEND_REF`s copy the references with an owner more, the reference's
-/// handler cold where the variable holds none, and the call's two checks
+/// `SEND_REF`s copy the references with an owner more, the reference
+/// made in place where the variable holds none, its handler cold where
+/// the memory limit refuses it (#3560), and the call's two checks
 /// read each reference's value before the activation, the call kernel
 /// cold where one fails (#3340).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -1141,8 +1142,9 @@ fn a_call_by_reference_lowers_its_sends_and_checks() -> Result<(), String> {
             .filter(|line| line.contains("call_indirect") && line.contains(&address))
             .count()
     };
-    // Each `SEND_REF`'s cold arm, and each `ASSIGN_DIM_OP`'s of the
-    // callee.
+    // Each `SEND_REF`'s reference made in place, its refused arm, and
+    // each `ASSIGN_DIM_OP`'s of the callee.
+    assert_eq!(calls(Kernel::MakeRef), 2, "{clif}");
     assert_eq!(calls(Kernel::Handle), 4, "{clif}");
     // The made call's cold arm, where the interrupt is raised, the cache
     // not laid down or a check fails.

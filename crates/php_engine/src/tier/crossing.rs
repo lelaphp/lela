@@ -130,6 +130,16 @@ pub fn release(req: &mut Request, zval: Zval) {
     req.release(Value::of_slot(zval));
 }
 
+/// `ZVAL_MAKE_REF` of the variable at `place`, which holds no reference,
+/// as php's `zend_jit_send_ref` makes it in place
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:9792-9860`): a new reference over
+/// what it held, `null` for what nothing wrote, written back into the
+/// place, which keeps the one owner of it; `false` where the memory
+/// limit refused it, whose fatal the request ends in.
+pub fn make_ref(req: &mut Request, place: php_heap::ZvalRef) -> bool {
+    req.make_ref(place).is_ok()
+}
+
 /// php's `zend_jit_free_cv` of a variable of `frame`, which a `RETURN`
 /// compiled code leaves the frame by in place gives up where it is the
 /// last owner, or where it leaves owners of a value the collector may
