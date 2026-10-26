@@ -317,7 +317,9 @@ pause "Press Enter once automatic login is set"
 stage "The Mac mini becomes the runner labelled dax-oracle"
 say "runner.sh mac, as $MAC_USER: Homebrew (sudo asks for $MAC_USER's password once),"
 say "rustup, the pinned php by md5, and the runner. The pin is rendered here, by"
-say "xtask, from oracle.toml."
+say "xtask, from oracle.toml. The Mac's jobs hand what they keep to the server's"
+say "stash (scripts/ci/stash.sh), so the key runner.sh lays there is authorized for"
+say "the server's runner user."
 if confirm "Lay the Mac down as $REPO's runner 'dax-oracle'?"; then
   pin=$(mktemp)
   cargo xtask status --section oracle --format json > "$pin"
@@ -326,8 +328,26 @@ if confirm "Lay the Mac down as $REPO's runner 'dax-oracle'?"; then
   act ssh_to "$MAC_USER@$MAC_HOST" mkdir -p dax-ci
   act scp -i "$SSH_KEY" scripts/ci/runner.sh scripts/ci/pinned-php.sh "$MAC_USER@$MAC_HOST:dax-ci/"
   act scp -i "$SSH_KEY" "$pin" "$MAC_USER@$MAC_HOST:dax-ci/oracle.json"
-  act ssh_to -t "$MAC_USER@$MAC_HOST" dax-ci/runner.sh mac --url "$REPO_URL" --token "$MAC_TOKEN" --pin dax-ci/oracle.json
+  act ssh_to -t "$MAC_USER@$MAC_HOST" dax-ci/runner.sh mac --url "$REPO_URL" --token "$MAC_TOKEN" --pin dax-ci/oracle.json \
+    --stash "runner@$LINUX_HOST:dax-stash"
   rm -f "$pin"
+  if [[ "${DRY_RUN:-}" == 1 ]]; then
+    note "dry run, not authorized: the Mac's ~/.ssh/dax-stash.pub for runner@$LINUX_HOST"
+  else
+    stash_key=$(ssh_to "$MAC_USER@$MAC_HOST" cat .ssh/dax-stash.pub)
+    ssh_to "root@$LINUX_HOST" "install -d -m 700 -o runner -g runner /home/runner/.ssh
+      touch /home/runner/.ssh/authorized_keys
+      grep -qxF '$stash_key' /home/runner/.ssh/authorized_keys || echo '$stash_key' >> /home/runner/.ssh/authorized_keys
+      chown runner:runner /home/runner/.ssh/authorized_keys; chmod 600 /home/runner/.ssh/authorized_keys"
+    if ssh_to "$MAC_USER@$MAC_HOST" ssh -i .ssh/dax-stash -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+      "runner@$LINUX_HOST" true; then
+      printf '  %s✓%s the Mac reaches the stash at runner@%s\n' "$GREEN" "$RESET" "$LINUX_HOST"
+    else
+      warn "the Mac does not reach runner@$LINUX_HOST with its stash key; run this stage again"
+    fi
+  fi
+  step "To fetch CI's phpt runs (xtask phpt --against) from this machine:"
+  note "export DAX_STASH=root@$LINUX_HOST:/home/runner/dax-stash RSYNC_RSH='ssh -i $SSH_KEY'"
 fi
 pause
 
