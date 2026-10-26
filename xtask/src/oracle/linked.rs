@@ -87,7 +87,8 @@ const BINARY: &str = "php-linked";
 /// answered as the fresh-process adapter answers it: the program written
 /// where that adapter writes it and served in that directory, both streams
 /// normalised by the recipe's rules with the directory as the token, and
-/// the exit code the request ended on.
+/// the exit code the request ended on, or `SIGABRT` where php's process
+/// would have ended on `abort()`.
 pub(crate) fn serve(
     recipe: &Recipe,
     regime: Option<&Regime>,
@@ -144,10 +145,17 @@ pub(crate) fn serve_by(
         .trim()
         .parse()
         .context("the linked engine wrote no status")?;
+    // The request ended where php's process ends on `abort()`, which the
+    // binary, serving on, records beside its status (#3515).
+    let aborted = request.join("abort").exists();
     let observed = Observation {
         stdout: scratch.normalise(&recipe.normalise, read("stdout")),
         stderr: scratch.normalise(&recipe.normalise, read("stderr")),
-        exit: Ended::Status(exit),
+        exit: if aborted {
+            Ended::Signal(nix::sys::signal::Signal::SIGABRT as i32)
+        } else {
+            Ended::Status(exit)
+        },
         wall,
     };
     Ok((

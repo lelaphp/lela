@@ -25,7 +25,8 @@
 //! row ([`alone`]; harness §4.3, §8; #1650): it is held to its pinned
 //! `expect` against the engine alone, and the oracle still runs, its
 //! signal, status and bytes recorded in the verdict's note and not judged.
-//! A fence no such row covers whose oracle ends on a signal is a bork.
+//! A fence no such row covers whose oracle ends on a signal it does not pin
+//! is a bork; `signal=N` pins one, captured onto a bare `exit` (#3545).
 //!
 //! A fence naming a `locale=<name>` is asked first whether the host knows
 //! it, as a `.phpt`'s `--SKIPIF--` asks `setlocale` (#1678): the oracle
@@ -44,7 +45,7 @@ use crate::divergence::{Divergence, Registry};
 use crate::oracle::expect::Expectation;
 use crate::oracle::hosts::FPM;
 use crate::oracle::{
-    self, Invocation, Observation, Oracle, Pin, Program, Regime, Verdict as Compared, linked,
+    self, Ended, Invocation, Observation, Oracle, Pin, Program, Regime, Verdict as Compared, linked,
 };
 use crate::phpt::Lane;
 use crate::scratch::Full;
@@ -136,22 +137,22 @@ pub(super) fn one(
 /// A fence no accepted `trace:` row covers, held to the oracle's run and
 /// the engine's by one rule ([`held`]): the status `--accept` may capture
 /// from the oracle, the streams a `capture` writes from it, the run of
-/// record, and the verdict. An oracle that ends on a signal leaves no
-/// status to pin, and the fence borks.
+/// record, and the verdict. An oracle that ends on a signal leaves a
+/// fence that pins a status nothing to judge, and it borks; a bare `exit`
+/// captures the signal and `signal=N` pins it (#3545).
 fn both(
     on: &On<'_>,
     witness: &Witness,
     oracle_out: &Observation,
     kept: &mut Kept,
 ) -> Result<Judged> {
-    let Some(status) = oracle_out.exit.code() else {
-        return Ok(judged(
-            witness,
-            Judgement::Bork,
-            "the oracle ended on a signal, so there is no status to pin",
-        ));
-    };
-
+    let status = oracle_out.exit;
+    if let Ended::Signal(_) = status
+        && let Exit::Absent | Exit::Pinned(_) = witness.exit
+    {
+        let why = format!("the oracle ended on {status}, which the fence does not pin");
+        return Ok(judged(witness, Judgement::Bork, why));
+    }
     // The bare `exit` is the opt-in, and the only status `--accept` writes:
     // a status the fence already pins and the oracle no longer gives is a
     // difference for the registry or for a fix, never one to repin over
@@ -160,7 +161,7 @@ fn both(
     let mut head = witness.fences[0].clone();
     if on.ask.accept != Accept::Nothing && exit == Exit::Bare {
         head = fence::pinned(&head, status);
-        exit = Exit::Pinned(status);
+        exit = Exit::of(status);
     }
     // A fence marked `capture` is written whole from the oracle's streams,
     // where a second run from a scratch tree apart prints them again
@@ -211,7 +212,7 @@ fn both(
             now,
         });
     } else if on.ask.accept != Accept::Nothing
-        && (matches!(exit, Exit::Pinned(_)) || witness.capture)
+        && (matches!(exit, Exit::Pinned(_) | Exit::Signal(_)) || witness.capture)
         && met(on.oracle.pin(), witness, exit, oracle_out).unwrap_or(false)
     {
         kept.reproduced = Some((witness.file.clone(), witness.fence));
@@ -223,7 +224,7 @@ fn both(
             witness,
             Judgement::Unpinned,
             format!(
-                "the fence's `exit` is bare and the oracle exits {status}; `xtask witness --accept` writes it, and nothing else does"
+                "the fence's `exit` is bare and the oracle ends on {status}; `xtask witness --accept` writes it, and nothing else does"
             ),
         ));
     }
@@ -330,31 +331,21 @@ fn alone(
     };
     let mut exit = witness.exit;
     if on.ask.accept != Accept::Nothing && exit == Exit::Bare {
-        let Some(status) = ran.exit.code() else {
-            return Ok(judged(
-                witness,
-                Judgement::Bork,
-                format!(
-                    "{} ended on a signal, so there is no status to pin; {recorded}",
-                    Run::Engine
-                ),
-            ));
-        };
         let head = witness.fences[0].clone();
         kept.captured.push(Captured {
             file: witness.file.clone(),
             line: witness.fence,
-            now: vec![fence::pinned(&head, status)],
+            now: vec![fence::pinned(&head, ran.exit)],
             was: vec![head],
         });
-        exit = Exit::Pinned(status);
+        exit = Exit::of(ran.exit);
     }
     if exit == Exit::Bare {
         return Ok(judged(
             witness,
             Judgement::Unpinned,
             format!(
-                "the fence's `exit` is bare and {} exits {}; `xtask witness --accept` writes it, and nothing else does; {recorded}",
+                "the fence's `exit` is bare and {} ends on {}; `xtask witness --accept` writes it, and nothing else does; {recorded}",
                 Run::Engine,
                 ran.exit
             ),
@@ -478,15 +469,9 @@ fn apart(
     let second = ran_by_oracle(&oracle.apart(), witness)
         .map_err(|trouble| format!("the oracle's second run did not run: {trouble:#}"))?;
     if first.exit != second.exit {
-        let status = |ran: &Observation| {
-            ran.exit
-                .code()
-                .map_or_else(|| "on a signal".to_owned(), |code| format!("{code}"))
-        };
         return Err(format!(
-            "the oracle exits {} from one scratch directory and {} from another",
-            status(first),
-            status(&second)
+            "the oracle ends on {} from one scratch directory and {} from another",
+            first.exit, second.exit
         ));
     }
     Ok(second)
@@ -557,8 +542,8 @@ fn bodies(
     exit: Exit,
     first: &Observation,
 ) -> Result<(String, String), String> {
-    if first.exit.code() != exit.asserted() {
-        let pinned = (exit.asserted()).map_or_else(|| "none".to_owned(), |c| format!("status {c}"));
+    if Some(first.exit) != exit.asserted() {
+        let pinned = (exit.asserted()).map_or_else(|| "none".to_owned(), |e| e.to_string());
         return Err(format!(
             "the oracle ends on {} and the fence pins {pinned}, and a body's write moves no status",
             first.exit
@@ -771,7 +756,7 @@ pub(super) fn held(
 /// runner matches an `--EXPECTF--` section, since the lines a witness pins
 /// carry the same wildcards (design §8), and the status exactly.
 fn met(pin: &Pin, witness: &Witness, exit: Exit, ran: &Observation) -> Result<bool> {
-    if ran.exit.code() != exit.asserted() {
+    if Some(ran.exit) != exit.asserted() {
         return Ok(false);
     }
     let stdout = Expectation::Format(normalised(pin, &witness.stdout));
@@ -795,14 +780,14 @@ fn normalised(pin: &Pin, text: &str) -> Vec<u8> {
 /// that is no UTF-8 shown lossily.
 fn shown_of(ran: &Observation) -> Vec<u8> {
     let lossy = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
-    shown(&lossy(&ran.stdout), &lossy(&ran.stderr), ran.exit.code())
+    shown(&lossy(&ran.stdout), &lossy(&ran.stderr), Some(ran.exit))
 }
 
 /// The three streams of one run as one document: what a difference is shown
 /// as, and never a format anything reads back.
-fn shown(stdout: &str, stderr: &str, exit: Option<i32>) -> Vec<u8> {
-    let status = exit.map_or_else(|| "a signal".to_owned(), |code| code.to_string());
-    format!("status {status}\nstdout:\n{stdout}\nstderr:\n{stderr}\n").into_bytes()
+fn shown(stdout: &str, stderr: &str, exit: Option<Ended>) -> Vec<u8> {
+    let ended = exit.map_or_else(|| "no status".to_owned(), |ended| ended.to_string());
+    format!("{ended}\nstdout:\n{stdout}\nstderr:\n{stderr}\n").into_bytes()
 }
 
 #[cfg(test)]
@@ -811,9 +796,9 @@ mod tests {
 
     #[test]
     fn the_shown_document_carries_the_status_and_both_streams() {
-        let text = String::from_utf8(shown("out", "err", Some(3))).unwrap();
+        let text = String::from_utf8(shown("out", "err", Some(Ended::Status(3)))).unwrap();
         assert_eq!(text, "status 3\nstdout:\nout\nstderr:\nerr\n");
-        let signal = String::from_utf8(shown("", "", None)).unwrap();
-        assert!(signal.starts_with("status a signal"), "{signal}");
+        let signal = String::from_utf8(shown("", "", Some(Ended::Signal(6)))).unwrap();
+        assert!(signal.starts_with("signal 6\n"), "{signal}");
     }
 }

@@ -1011,14 +1011,6 @@ impl Ended {
             None => Ended::Signal(status.signal().unwrap_or_default()),
         }
     }
-
-    /// The status it exited with, and `None` where a signal ended it.
-    pub(crate) fn code(self) -> Option<i32> {
-        match self {
-            Ended::Status(code) => Some(code),
-            Ended::Signal(_) => None,
-        }
-    }
 }
 
 impl fmt::Display for Ended {

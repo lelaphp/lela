@@ -537,8 +537,9 @@ pub(crate) struct Witness {
 /// What a `witness` run writes onto the fences (`witness::Accept`).
 #[derive(Debug, Args)]
 pub(crate) struct Accepting {
-    /// Write the oracle's status onto each `expect` fence line that
-    /// does not already pin it; the only thing that writes an `exit`.
+    /// Write the oracle's status, or the signal its run ended on, onto
+    /// each `expect` fence line that does not already pin it; the only
+    /// thing that writes an `exit` or a `signal`.
     #[arg(long)]
     pub accept: bool,
     /// With `--accept`, also write the oracle's two streams, normalised,
