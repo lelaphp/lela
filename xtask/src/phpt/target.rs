@@ -414,15 +414,11 @@ impl Measure {
             return "0 outside".to_owned();
         }
         if n > NAMED {
-            let skipped = (self.outside.iter())
-                .filter(|(_, left)| matches!(left, LeftOut::Skipped(_)))
-                .count();
-            let held = (self.outside.iter())
-                .filter(|(_, left)| matches!(left, LeftOut::Missed { row: Some(_), .. }))
-                .count();
-            let unsent = (self.outside.iter())
-                .filter(|(_, left)| matches!(left, LeftOut::Unlaned(_)))
-                .count();
+            let count =
+                |kind: fn(&LeftOut) -> bool| self.outside.iter().filter(|(_, l)| kind(l)).count();
+            let skipped = count(|left| matches!(left, LeftOut::Skipped(_)));
+            let held = count(|left| matches!(left, LeftOut::Missed { row: Some(_), .. }));
+            let unsent = count(|left| matches!(left, LeftOut::Unlaned(_)));
             let mut kinds = Vec::new();
             if skipped > 0 {
                 kinds.push(format!("{skipped} skipped by the oracle"));

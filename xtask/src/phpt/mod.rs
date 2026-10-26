@@ -1019,18 +1019,16 @@ fn words(
             }
         }
     } else {
-        let named: Vec<String> = if empty {
+        let unders = if empty {
             subset
                 .dirs
                 .iter()
-                .map(|place| place.under.to_string_lossy().into_owned())
+                .map(|place| place.under.as_path())
                 .collect()
         } else {
             absent
-                .iter()
-                .map(|under| under.to_string_lossy().into_owned())
-                .collect()
         };
+        let named: Vec<_> = unders.iter().map(|under| under.to_string_lossy()).collect();
         let (whose, why) = match outcome {
             Outcome::Absent(why) => ("the design derives", format!("; {why}")),
             _ => ("the [[crate]] row names", String::new()),

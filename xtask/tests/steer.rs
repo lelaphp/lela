@@ -315,6 +315,44 @@ fn a_new_row_with_covers_is_one_addition_to_the_registry() {
     }
 }
 
+/// A row's `proven_at`, the regime its cause is proven at (#3369), is
+/// part of the row a proposal adds: steer writes it, and the registry
+/// reads it back; on a row holding an id that is no fence, which no lane
+/// runs again under a regime, it is refused as the registry would at load.
+#[test]
+fn a_proven_rows_regime_is_written_with_the_row_and_one_on_no_fence_is_refused() {
+    use xtask::divergence::{FILE, Registry};
+    let root = scratch_at("proven-at", FILE, REGISTRY);
+    let proposal = root.join("proposed.toml");
+    let proven = "\n[[divergence]]\nid = \"trace:fixture-proven\"\nkind = \"trace\"\n\
+                  cause = \"by-design\"\nreason = \"r (fixture).\"\nstatus = \"accepted\"\n\
+                  since = \"2026-10-26\"\ncovers = [\"witness:abc\"]\nproven_at = \"optimizer-off\"\n";
+    let on_a_test = format!("{COVERING}proven_at = \"optimizer-off\"\n");
+    for (row, status, named) in [
+        (
+            on_a_test.as_str(),
+            Status::Fail,
+            "names `proven_at`, and an id it holds is no fence",
+        ),
+        (proven, Status::Pass, "divergence[trace:fixture-proven]"),
+    ] {
+        fs::write(&proposal, format!("{REGISTRY}{row}")).expect("the proposal");
+        let reading =
+            steer::run(&root, &harness(), FILE, &proposal, false).expect("the instrument runs");
+        assert_eq!(reading.status, status, "{}", reading.message);
+        assert!(
+            reading.message.contains(named),
+            "{named}: {}",
+            reading.message
+        );
+    }
+    let written = Registry::load(&root).expect("the registry steer wrote");
+    let row = written
+        .row("trace:fixture-proven")
+        .and_then(|r| r.proven_at.clone());
+    assert_eq!(row.as_deref(), Some("optimizer-off"));
+}
+
 /// A trace-dump row's digests are part of the row a proposal adds
 /// (#3291): steer writes them as the proposal spells them, and refuses a
 /// row naming one side's alone, as the registry would at load.
