@@ -6,13 +6,14 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use php_engine::api::request::TierStatus;
 use php_engine::test::{Capture, Engine, Served};
 use php_engine::tier::{
     self, Extension, ExtensionBuilder, Flow, FrameRef, Request, Site, Started, StartupIni, Tier,
 };
 use php_unit::decl::{IniDecl, Name};
 
-use crate::policy::Policy;
+use crate::policy::{Policy, Setting};
 
 #[cfg(all(php_jit_arena, target_arch = "aarch64", not(miri)))]
 pub(crate) mod bodies;
@@ -145,6 +146,33 @@ pub(crate) fn declared(names: &[&str]) -> Vec<IniDecl> {
         .collect()
 }
 
+/// `builder` with the handlers of `opcache.jit` and `opcache.jit_debug`
+/// as a test's engine serves them, which has no opcache extension: each
+/// value, the host's at the start and a request's `ini_set`, rewrites
+/// `enabled` and `on` of the request's `JIT_G` as `Setting` reads it,
+/// which is what a unit's countability reads, leaving the digits as the
+/// start left them, and its `debug` bits, which its `TRACE` lines read.
+/// The opcache extension's `on_jit` is php's whole `zend_jit_config`,
+/// refusals and digits included, and `on_jit_debug` its
+/// `zend_jit_debug_config`; their witnesses are the ones that hold them.
+pub(crate) fn switched(builder: ExtensionBuilder) -> ExtensionBuilder {
+    let builder = builder.on_modify(b"opcache.jit_debug", |req, value| {
+        let debug = crate::policy::JitDebug::of(value.unwrap_or_default());
+        req.code_mut().unit_cache().tier_setting().debug = debug.get();
+        Ok(true)
+    });
+    builder.on_modify(b"opcache.jit", |req, value| {
+        let setting = Setting::of(value.unwrap_or_default());
+        let jit = req.code_mut().unit_cache().tier_setting();
+        (jit.enabled, jit.on) = match setting {
+            Setting::Off => (true, false),
+            Setting::On { .. } => (true, true),
+            Setting::Disable | Setting::Invalid { .. } => (false, false),
+        };
+        Ok(!matches!(setting, Setting::Invalid { .. }))
+    })
+}
+
 /// php's `opcache.jit*` directives, and the two that start opcache at
 /// all, which ext/opcache declares in the bundle and no engine of a
 /// tier's test has, declared by the test tier instead so the tier's
@@ -196,11 +224,15 @@ impl Tier for Lane {
         <crate::Jit as Tier>::laid(started, req)
     }
 
+    fn setting(started: &Started<'_>, startup: TierStatus) -> TierStatus {
+        <crate::Jit as Tier>::setting(started, startup)
+    }
+
     fn extension() -> Option<Extension> {
         let mut ini = crate::policy::ini();
         ini.extend(declared(&OPCACHE));
         Some(
-            ExtensionBuilder::default()
+            switched(ExtensionBuilder::default())
                 .ini(ini)
                 .engine_state(crate::JitEngine::new)
                 .rinit(crate::JitEngine::request_started)

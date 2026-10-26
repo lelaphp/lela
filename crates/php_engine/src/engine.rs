@@ -4732,6 +4732,7 @@ impl Engine {
         startup_directives(&mut req, &self.shared);
         let raised = req.end_startup();
         let written = req.startup_stderr();
+        let setting = *req.tier_setting_held();
         drop(req);
         let Some(shared) = Arc::get_mut(&mut self.shared) else {
             return;
@@ -4798,6 +4799,7 @@ impl Engine {
             (supplied.observers).retain(|(_, registered)| registered.is_none_or(|r| r(&start)));
             shared.observers = supplied.observers.count();
             shared.opcodes = crate::observer::ObservedOpcodes::start(&supplied.opcodes, &start);
+            shared.binding.setting = setting;
             shared.binding = bind_loops(shared);
         }
         shared.startup_raised = raised;

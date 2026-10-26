@@ -121,10 +121,12 @@ pub struct CacheStatus {
     pub tier: TierStatus,
 }
 
-/// `opcache_get_status()['jit']`, what php's `zend_jit_status` reports
-/// (`Z/ext/opcache/jit/zend_jit.c:825-842`): `JIT_G` as php's start left
-/// it, and the code buffer. A tier that compiles nothing reports every
-/// field zero, the default.
+/// php's `JIT_G` beside the code buffer: what `zend_jit_status` reports
+/// as `opcache_get_status()['jit']` (`Z/ext/opcache/jit/zend_jit.c:825-842`),
+/// and `JIT_G(debug)`, which it does not. A tier that compiles nothing
+/// reports every field zero, the default. A request holds its `JIT_G` as
+/// one of these ([`UnitCache::tier_setting`]), the buffer's fields as its
+/// engine's start laid them, before what any trace takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TierStatus {
     /// `JIT_G(enabled)`: `opcache.jit` set the tier up and php's start
@@ -144,6 +146,9 @@ pub struct TierStatus {
     pub buffer_size: u64,
     /// `dasm_end - *dasm_ptr`: what of it no code takes yet.
     pub buffer_free: u64,
+    /// `JIT_G(debug)`, `opcache.jit_debug`'s bits as its handler,
+    /// `OnUpdateJitDebug`, took them: the `TRACE` lines a request writes.
+    pub debug: u32,
 }
 
 /// `opcache_get_status()['preload_statistics']`: what the preload
@@ -1137,6 +1142,28 @@ impl<'r> Code<&'r mut Request> {
     /// The unit cache (design §6.3), as `opcache_*` read it.
     pub fn unit_cache(self) -> UnitCache<'r> {
         UnitCache { req: self.0 }
+    }
+}
+
+impl<'r> UnitCache<'r> {
+    /// php's `JIT_G` as the request holds it, which the opcache
+    /// extension's handlers alone rewrite: `opcache.jit`'s, php's
+    /// `OnUpdateJit`, as `zend_jit_config` does, and
+    /// `opcache.jit_debug`'s, `OnUpdateJitDebug`. It is the engine's
+    /// start's ([`crate::tier::Tier::setting`]), and after each of the
+    /// request's `ini_set` what that setting left. The tier reads it where
+    /// it publishes a unit, where it writes a `TRACE` line and where it
+    /// reports its status ([`crate::tier::setting`]); the buffer's
+    /// fields are the start's, which no handler writes.
+    pub fn tier_setting(self) -> &'r mut TierStatus {
+        &mut self.req.tier_setting
+    }
+}
+
+impl Request {
+    /// The request's `JIT_G` ([`UnitCache::tier_setting`]), shared.
+    pub(crate) fn tier_setting_held(&self) -> &TierStatus {
+        &self.tier_setting
     }
 }
 

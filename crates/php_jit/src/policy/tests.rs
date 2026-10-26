@@ -5,6 +5,7 @@
 
 use std::sync::atomic::Ordering;
 
+use php_engine::api::request::TierStatus;
 use php_engine::tier::{Epoch, FuncRef, Laid, SafepointIdx, StartupIni, Word};
 use php_unit::{OpArray, Opcode, OplineIdx, Unit};
 
@@ -128,7 +129,7 @@ fn the_status_is_zend_jit_status() {
     let status = |entries: &[(&str, &str)]| {
         let (mut policy, _) = read_ini(entries);
         policy.check_support(|_| false);
-        let s = policy.status(0, None);
+        let s = Policy::status(0, &policy.start_setting());
         (
             (s.enabled, s.on),
             (s.kind, s.opt_level, s.opt_flags),
@@ -195,72 +196,78 @@ fn the_status_is_zend_jit_status() {
         assert_eq!(status(asked), expected, "{asked:?}");
     }
     let (policy, _) = read_ini(&[("opcache.jit", "tracing")]);
-    let used = policy.status(1000, None);
+    let started = policy.start_setting();
+    let used = Policy::status(1000, &started);
     assert_eq!((used.buffer_size, used.buffer_free), (big, big - 1000));
-    assert_eq!(policy.status(usize::MAX, None).buffer_free, 0);
+    assert_eq!(Policy::status(usize::MAX, &started).buffer_free, 0);
 }
 
-/// `zend_jit_status` after a request's `ini_set('opcache.jit', ...)`,
-/// where php set its tier up: `zend_jit_config` writes `on` and the
-/// digits of a setting that turns it on, drops `on` under `off` and
-/// `enabled` too under `disable`, keeping the digits; the buffer is the
-/// start's. Where php never set its tier up the start's stands.
+/// `zend_jit_status` after a request's `ini_set('opcache.jit', ...)`:
+/// `JIT_G` as the request holds it, which the opcache extension's
+/// handler rewrote, and the buffer it holds as the start laid it down,
+/// less what the traces take; the start's `JIT_G` keeps
+/// `opcache.jit_debug`'s bits whatever the tier runs.
 #[test]
-fn the_status_follows_the_requests_setting_where_the_tier_is_set_up() {
-    let status = |entries: &[(&str, &str)], setting: &[u8]| {
-        let (policy, _) = read_ini(entries);
-        let s = policy.status(0, Some(Setting::of(setting)));
-        (
-            (s.enabled, s.on),
-            (s.kind, s.opt_level, s.opt_flags),
-            s.buffer_size,
-        )
-    };
+fn the_status_is_the_requests_jit_g_and_its_buffer() {
+    let (policy, _) = read_ini(&[("opcache.jit", "off"), ("opcache.jit_debug", "16")]);
+    let started = policy.start_setting();
     let big = u64::try_from(crate::table::code::capacity(64 << 20) - 16).unwrap_or(0);
-    let off = [("opcache.jit", "off")];
-    let tracing = [("opcache.jit", "tracing")];
-    assert_eq!(status(&off, b"function"), ((true, true), (0, 5, 6), big));
-    assert_eq!(status(&off, b"tracing"), ((true, true), (5, 4, 6), big));
-    assert_eq!(status(&off, b"off"), ((true, false), (0, 0, 0), big));
-    assert_eq!(status(&tracing, b"off"), ((true, false), (5, 4, 6), big));
+    assert_eq!((started.buffer_size, started.debug), (big, 16));
+    let jit_g = TierStatus {
+        on: true,
+        opt_level: 5,
+        opt_flags: 6,
+        ..started
+    };
+    let s = Policy::status(100, &jit_g);
     assert_eq!(
-        status(&tracing, b"disable"),
-        ((false, false), (5, 4, 6), big)
+        s,
+        TierStatus {
+            buffer_free: big - 100,
+            ..jit_g
+        }
     );
-    assert_eq!(status(&[], b"tracing"), ((false, false), (0, 0, 0), 0));
+    let (off, _) = read_ini(&[("opcache.jit", "disable"), ("opcache.jit_debug", "0x3000")]);
+    assert_eq!(off.start_setting().debug, 0x3000);
+    assert_eq!(JitDebug::of(b"-1").get(), u32::MAX);
 }
 
 /// php gives an op array its counters as it persists it while
 /// `JIT_G(on)`: a unit's words count where the request publishing it has
-/// the setting on, whatever the start's was, and a lane counts every
-/// unit; a tier that runs `Off` counts none. With no request, the
-/// start's setting says. Counting words start cold where the tier was on
+/// the tier on, whatever the start's was, and a lane counts every unit;
+/// a tier that runs `Off` counts none. With no request, the start's
+/// `JIT_G` says. Counting words start cold where the tier was on
 /// at the start, which fills php's pool of counters at each request
 /// start, and primed where it was set up and off, whose pool nothing
 /// fills, so each roots at its first arrival (#3363).
 #[test]
 fn a_units_words_are_laid_as_its_request_has_the_tier() {
-    let laid = |entries: &[(&str, &str)], setting: Option<&[u8]>| {
+    let laid = |entries: &[(&str, &str)], on: Option<bool>| {
         let (policy, _) = read_ini(entries);
-        policy.laid(setting.map(Setting::of))
+        policy.laid(on.unwrap_or(policy.start_setting().on))
     };
     let off = [("opcache.jit", "off")];
     let tracing = [("opcache.jit", "tracing")];
-    assert_eq!(laid(&off, Some(b"off")), Laid::Sealed);
+    assert_eq!(laid(&off, Some(false)), Laid::Sealed);
     assert_eq!(laid(&off, None), Laid::Sealed);
-    assert_eq!(laid(&off, Some(b"tracing")), super::PRIMED);
-    assert_eq!(laid(&off, Some(b"1205")), super::PRIMED);
-    assert_eq!(laid(&tracing, Some(b"tracing")), Laid::COLD);
-    assert_eq!(laid(&tracing, Some(b"off")), Laid::Sealed);
+    assert_eq!(laid(&off, Some(true)), super::PRIMED);
+    assert_eq!(laid(&tracing, Some(true)), Laid::COLD);
+    assert_eq!(laid(&tracing, Some(false)), Laid::Sealed);
     assert_eq!(laid(&tracing, None), Laid::COLD);
     let lane = [("opcache.jit", "off"), ("jit.mode", "force")];
-    assert_eq!(laid(&lane, Some(b"off")), Laid::COLD);
+    assert_eq!(laid(&lane, Some(false)), Laid::COLD);
     assert_eq!(
-        laid(&[("opcache.jit", "disable")], Some(b"tracing")),
+        laid(&[("opcache.jit", "disable")], Some(true)),
         Laid::Sealed
     );
     let zero = [("opcache.jit", "tracing"), ("opcache.jit_buffer_size", "0")];
-    assert_eq!(laid(&zero, Some(b"tracing")), Laid::Sealed);
+    assert_eq!(laid(&zero, Some(true)), Laid::Sealed);
+    let file_cache_only = [
+        ("opcache.enable_cli", "1"),
+        ("opcache.jit", "tracing"),
+        ("opcache.file_cache_only", "1"),
+    ];
+    assert_eq!(laid(&file_cache_only, None), Laid::Sealed);
 }
 
 /// A word laid primed reads cold and reaches every threshold php's

@@ -225,6 +225,20 @@ pub trait Tier: 'static {
         let _ = (started, req);
         Laid::COLD
     }
+
+    /// php's `JIT_G` as the start of the engine `started` leaves it, which
+    /// each request starts from ([`setting`]): `startup`, what
+    /// `opcache.jit`'s handler left it as the engine's start served the
+    /// host's value, as php's `OnUpdateJit` writes `JIT_G` at startup,
+    /// rewritten where the tier's start rewrites it, as php's
+    /// `zend_jit_startup` and `zend_jit_check_support` do, with the buffer
+    /// it lays down; kept as it is by default, by a tier that starts
+    /// nothing.
+    #[must_use]
+    fn setting(started: &Started<'_>, startup: TierStatus) -> TierStatus {
+        let _ = started;
+        startup
+    }
 }
 
 /// Which loops an engine binds, as its tier answers at its start
@@ -477,6 +491,17 @@ pub fn lending(req: &Request) -> Lending {
 /// for no request, are laid ([`Tier::laid`]).
 pub(crate) fn words_laid(shared: &crate::engine::Shared, req: Option<&Request>) -> Laid {
     (shared.binding.laid)(&Started { shared }, req)
+}
+
+/// php's `JIT_G` as `req` holds it now (`opcache_get_status()['jit']`
+/// less the code its traces take): its start's ([`Tier::setting`]),
+/// as each of its `ini_set('opcache.jit', ...)` rewrote it through the
+/// opcache extension's handler, which alone writes it
+/// (`UnitCache::tier_setting`). What the tier reads of whether a unit it
+/// publishes counts, and what it reports.
+#[must_use]
+pub fn setting(req: &Request) -> &TierStatus {
+    req.tier_setting_held()
 }
 
 /// The tier's state the request was laid with, where it is an `S`
@@ -932,6 +957,11 @@ pub(crate) struct Binding {
     /// The engine's tier's [`Tier::laid`], its own whichever loop
     /// serves; read by the unit cache as it holds a unit.
     pub(crate) laid: fn(&Started<'_>, Option<&Request>) -> Laid,
+    /// php's `JIT_G` as the engine's start left it, each request's to
+    /// start from ([`Tier::setting`]); before the tier binds, what
+    /// `opcache.jit`'s handler left it as the start served the host's
+    /// value.
+    pub(crate) setting: TierStatus,
 }
 
 impl Binding {
@@ -958,6 +988,7 @@ impl Binding {
             counting: AtomicBool::new(false),
             status: T::status,
             laid: T::laid,
+            setting: T::setting(&Started { shared }, shared.binding.setting),
         }
     }
 
@@ -970,6 +1001,7 @@ impl Binding {
             counting: AtomicBool::new(false),
             status: Nop::status,
             laid: Nop::laid,
+            setting: TierStatus::default(),
         }
     }
 

@@ -9,7 +9,7 @@ use php_ext::abi::{ExtensionBuilder, IniStage, LongHandler};
 use php_ext::coerce::atoi;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Thrown, warning};
-use php_ext::request::{Ini, Request, Zone};
+use php_ext::request::{Ini, Request, TierStatus, Zone};
 
 use crate::State;
 
@@ -457,11 +457,17 @@ fn on_enable(req: &mut Request, value: &[u8]) -> bool {
     false
 }
 
-/// `OnUpdateJit`, `zend_jit_config`: `disable`, the forms of off and on,
-/// `tracing`, `function`, or php's four digits. Once started, a program
-/// may change the setting only where the setting the engine started
-/// with configured the tier, [`jit_configured`]; the tier compiles
-/// nothing either way, and the setting is what php would hold.
+/// `OnUpdateJit`, `zend_jit_config` (`Z/ext/opcache/jit/zend_jit.c:3680-3733`):
+/// `disable`, the forms of off and on, `tracing`, `function`, or php's
+/// four digits, folded into the request's `JIT_G`
+/// ([`UnitCache::tier_setting`](php_ext::request::UnitCache::tier_setting)),
+/// which the tier's countability and `opcache_get_status()['jit']` read.
+/// Once started, a setting is refused while `JIT_G(enabled)` is off, with
+/// php's warning where a program's `ini_set` asks: under
+/// `disable`, and after a setting php refused, which turns the tier off
+/// for the rest of the request (`failure:`). `off` keeps the digits the
+/// last setting that turned the tier on wrote, and a number php refuses
+/// those it passed.
 ///
 /// ```php
 /// var_dump(ini_set('opcache.jit', 'tracing'), ini_get('opcache.jit'));
@@ -474,16 +480,55 @@ fn on_enable(req: &mut Request, value: &[u8]) -> bool {
 ///
 /// ```php
 /// var_dump(ini_set('opcache.jit', 'tracing'), ini_set('opcache.jit', 'sideways'), ini_get('opcache.jit'));
+/// var_dump(ini_set('opcache.jit', 'off'), ini_get('opcache.jit'));
 /// ```
 /// ```expect regime=jit-off
 /// Warning: Invalid "opcache.jit" setting. Should be "disable", "on", "off", "tracing", "function" or 4-digit number in %s on line 2
 /// string(0) ""
 /// bool(false)
 /// string(7) "tracing"
+///
+/// Warning: Cannot change opcache.jit setting at run-time (JIT is disabled) in %s on line 3
+/// bool(false)
+/// string(7) "tracing"
+/// ```
+///
+/// and `disable` turns the tier off for the rest of the request:
+///
+/// ```php
+/// var_dump(ini_set('opcache.jit', 'disable'), ini_set('opcache.jit', 'tracing'), ini_get('opcache.jit'));
+/// ```
+/// ```expect regime=jit-off
+/// Warning: Cannot change opcache.jit setting at run-time (JIT is disabled) in %s on line 2
+/// string(0) ""
+/// bool(false)
+/// string(7) "disable"
+/// ```
+///
+/// as a cache that starts with no buffer for the tier, or with the file
+/// cache alone, starts every request with it off (`rinit`):
+///
+/// ```php
+/// foreach ([['opcache.jit_buffer_size=0'], ['opcache.file_cache_only=1', 'opcache.file_cache=' . sys_get_temp_dir()]] as $ini) {
+///     $cmd = [PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=tracing'];
+///     foreach ($ini as $line) { array_push($cmd, '-d', $line); }
+///     array_push($cmd, '-r', 'var_dump(ini_set("opcache.jit", "off"));');
+///     $p = proc_open($cmd, [1 => ['pipe', 'w']], $pipes);
+///     echo stream_get_contents($pipes[1]);
+///     proc_close($p);
+/// }
+/// ```
+/// ```expect process
+/// Warning: Cannot change opcache.jit setting at run-time (JIT is disabled) in Command line code on line 1
+/// bool(false)
+///
+/// Warning: Cannot change opcache.jit setting at run-time (JIT is disabled) in Command line code on line 1
+/// bool(false)
 /// ```
 fn on_jit(req: &mut Request, value: &[u8]) -> bool {
     let stage = req.ini().stage();
-    if stage != IniStage::Startup && !jit_configured(req) {
+    let mut jit = *req.code_mut().unit_cache().tier_setting();
+    if stage != IniStage::Startup && !jit.enabled {
         if stage == IniStage::Runtime {
             warning(
                 req,
@@ -492,14 +537,15 @@ fn on_jit(req: &mut Request, value: &[u8]) -> bool {
         }
         return false;
     }
-    if jit_setting(value) != Jit::Invalid {
-        return true;
+    let taken = jit_config(&mut jit, value);
+    *req.code_mut().unit_cache().tier_setting() = jit;
+    if !taken {
+        warning(
+            req,
+            "Invalid \"opcache.jit\" setting. Should be \"disable\", \"on\", \"off\", \"tracing\", \"function\" or 4-digit number",
+        );
     }
-    warning(
-        req,
-        "Invalid \"opcache.jit\" setting. Should be \"disable\", \"on\", \"off\", \"tracing\", \"function\" or 4-digit number",
-    );
-    false
+    taken
 }
 
 /// `OnUpdateJitDebug`, `zend_jit_debug_config`
@@ -508,8 +554,9 @@ fn on_jit(req: &mut Request, value: &[u8]) -> bool {
 /// quantity, warning for a shape php reads for backwards compatibility,
 /// and once started, refused where it changes a bit of
 /// `ZEND_JIT_DEBUG_PERSISTENT`, the profiler's and the debugger's, which
-/// php set up at its start; any other bit a request sets is the one the
-/// tier reads where it writes each `TRACE` line.
+/// php set up at its start; otherwise written to the request's
+/// `JIT_G(debug)` ([`UnitCache::tier_setting`](php_ext::request::UnitCache::tier_setting)),
+/// which the tier reads where it writes each `TRACE` line.
 ///
 /// ```php
 /// var_dump(ini_set('opcache.jit_debug', '16'), ini_get('opcache.jit_debug'));
@@ -528,10 +575,13 @@ fn on_jit(req: &mut Request, value: &[u8]) -> bool {
 fn on_jit_debug(req: &mut Request, value: &[u8]) -> bool {
     /// `ZEND_JIT_DEBUG_PERSISTENT` (`Z/ext/opcache/jit/zend_jit.h:87`).
     const PERSISTENT: i64 = 0x1f0;
-    let name = "opcache.jit_debug";
-    let new = quantity(req, name, value);
+    let new = quantity(req, "opcache.jit_debug", value);
     let stage = req.ini().stage();
-    if stage == IniStage::Startup || (long(req, name) ^ new) & PERSISTENT == 0 {
+    let jit = req.code_mut().unit_cache().tier_setting();
+    if stage == IniStage::Startup || (i64::from(jit.debug) ^ new) & PERSISTENT == 0 {
+        // `JIT_G(debug)` is a `zend_long`; its low 32 bits are every bit
+        // php names.
+        jit.debug = u32::try_from(new & 0xFFFF_FFFF).unwrap_or(0);
         return true;
     }
     if stage == IniStage::Runtime {
@@ -543,50 +593,86 @@ fn on_jit_debug(req: &mut Request, value: &[u8]) -> bool {
     false
 }
 
-/// What an `opcache.jit` setting says of the tier, `JIT_G(enabled)` as
-/// `zend_jit_config` sets it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Jit {
-    /// `disable`: the tier is never set up.
-    Disabled,
-    /// Every other setting php reads, off or on.
-    Enabled,
-    /// A setting php refuses.
-    Invalid,
+/// `ZEND_JIT_LEVEL_OPT_FUNCS`, `ZEND_JIT_LEVEL_OPT_SCRIPT`,
+/// `ZEND_JIT_ON_SCRIPT_LOAD`, `ZEND_JIT_ON_HOT_TRACE`,
+/// `ZEND_JIT_REG_ALLOC_GLOBAL` and `ZEND_JIT_CPU_AVX`
+/// (`Z/ext/opcache/jit/zend_jit.h:36-48`).
+const OPT_FUNCS: u8 = 4;
+const OPT_SCRIPT: u8 = 5;
+const ON_SCRIPT_LOAD: u8 = 0;
+const ON_HOT_TRACE: u8 = 5;
+const REG_ALLOC_GLOBAL: u8 = 1 << 1;
+const CPU_AVX: u8 = 1 << 2;
+
+/// What `zend_jit_config` writes to `jit` for `value` past its stage's
+/// test, and whether it took it: a setting it refuses leaves the tier
+/// neither enabled nor on, with the digits it passed (`failure:`).
+fn jit_config(jit: &mut TierStatus, value: &[u8]) -> bool {
+    let set = match value.to_ascii_lowercase().as_slice() {
+        b"disable" => Some((false, false)),
+        b"" | b"0" | b"off" | b"no" | b"false" => Some((true, false)),
+        b"1" | b"on" | b"yes" | b"true" | b"tracing" => {
+            (jit.opt_level, jit.kind) = (OPT_FUNCS, ON_HOT_TRACE);
+            jit.opt_flags = REG_ALLOC_GLOBAL | CPU_AVX;
+            Some((true, true))
+        }
+        b"function" => {
+            (jit.opt_level, jit.kind) = (OPT_SCRIPT, ON_SCRIPT_LOAD);
+            jit.opt_flags = REG_ALLOC_GLOBAL | CPU_AVX;
+            Some((true, true))
+        }
+        _ => jit_number(jit, value).map(|on| (true, on)),
+    };
+    (jit.enabled, jit.on) = set.unwrap_or((false, false));
+    set.is_some()
 }
 
-/// The setting read as `zend_jit_config` reads it.
-fn jit_setting(value: &[u8]) -> Jit {
-    let lower = value.to_ascii_lowercase();
-    let named = [
-        &b""[..],
-        b"0",
-        b"off",
-        b"no",
-        b"false",
-        b"1",
-        b"on",
-        b"yes",
-        b"true",
-        b"tracing",
-        b"function",
-    ];
-    if lower == b"disable" {
-        Jit::Disabled
-    } else if named.contains(&lower.as_slice()) || jit_digits(value) {
-        Jit::Enabled
-    } else {
-        Jit::Invalid
+/// `ZEND_STRTOL` over the whole setting and `zend_jit_parse_config_num`:
+/// zero is off; otherwise each `CRTO` digit from the right in its range,
+/// `O` 1 to 5, `T` 0 to 5 but 4, `R` 0 to 2, `C` 0 or 1 for
+/// `ZEND_JIT_CPU_AVX`, and nothing past them, each written to `jit` as
+/// php passes it. Whether the number turns the tier on; none where php
+/// refuses it.
+fn jit_number(jit: &mut TierStatus, value: &[u8]) -> Option<bool> {
+    let text = std::str::from_utf8(value).ok()?;
+    // C's `isspace`, which `ZEND_STRTOL` skips: Rust's ASCII whitespace
+    // and the vertical tab.
+    let space = |c: char| c.is_ascii_whitespace() || c == '\x0B';
+    let mut rest: i64 = (text.trim_start_matches(space)).parse().ok()?;
+    if rest < 0 {
+        return None;
     }
-}
-
-/// `JIT_G(enabled)` after startup: the setting the engine started with
-/// enabled the tier, and where the cache started, `accel_post_startup`
-/// kept it, which a zero `opcache.jit_buffer_size` or the file cache
-/// alone does not.
-fn jit_configured(req: &mut Request) -> bool {
-    let started = req.state::<State>().startup == crate::Startup::Ok;
-    jit_enabled(req) && (!started || jit_kept(req))
+    if rest == 0 {
+        return Some(false);
+    }
+    let mut digit = || {
+        let digit = u8::try_from(rest % 10).unwrap_or(u8::MAX);
+        rest /= 10;
+        digit
+    };
+    let opt_level = digit();
+    if opt_level == 0 || opt_level > 5 {
+        return None;
+    }
+    jit.opt_level = opt_level;
+    let trigger = digit();
+    if trigger > 5 || trigger == 4 {
+        return None;
+    }
+    jit.kind = trigger;
+    let flags = digit();
+    if flags > 2 {
+        return None;
+    }
+    jit.opt_flags = flags;
+    let cpu = digit();
+    if cpu > 1 {
+        return None;
+    }
+    if cpu == 1 {
+        jit.opt_flags |= CPU_AVX;
+    }
+    (rest == 0).then_some(true)
 }
 
 /// Whether `accel_post_startup`, over a cache that started, sets the
@@ -599,15 +685,16 @@ pub(crate) fn jit_starts(req: &mut Request) -> bool {
     jit_enabled(req) && jit_buffer_supported(req) && jit_kept(req)
 }
 
-/// `JIT_G(enabled)` as the startup's `opcache.jit` set it: anything but
-/// `disable`.
+/// `JIT_G(enabled)` as the startup's `opcache.jit` set it
+/// ([`jit_config`]): anything but `disable` and a setting php refuses.
 fn jit_enabled(req: &mut Request) -> bool {
-    jit_setting(&master(req, "opcache.jit")) == Jit::Enabled
+    let mut jit = TierStatus::default();
+    jit_config(&mut jit, &master(req, "opcache.jit")) && jit.enabled
 }
 
 /// What a started cache keeps `JIT_G(enabled)` for: a buffer to start
 /// in, and a segment, which the file cache alone lays none of.
-fn jit_kept(req: &mut Request) -> bool {
+pub(crate) fn jit_kept(req: &mut Request) -> bool {
     let buffer = Ini::parse_quantity(&master(req, "opcache.jit_buffer_size")).0;
     buffer > 0 && !flag(req, "opcache.file_cache_only")
 }
@@ -636,30 +723,6 @@ fn master(req: &mut Request, name: &str) -> Vec<u8> {
         .and_then(|held| held.master)
         .map(<[u8]>::into_vec)
         .unwrap_or_default()
-}
-
-/// `zend_jit_parse_config_num` over `ZEND_STRTOL`'s whole reading: the
-/// CRTO digits, each in its range, or zero.
-fn jit_digits(value: &[u8]) -> bool {
-    let Ok(mut jit) = String::from_utf8_lossy(value).parse::<i64>() else {
-        return false;
-    };
-    if jit == 0 {
-        return true;
-    }
-    if jit < 0 || jit % 10 == 0 || jit % 10 > 5 {
-        return false;
-    }
-    jit /= 10;
-    if jit % 10 > 5 || jit % 10 == 4 {
-        return false;
-    }
-    jit /= 10;
-    if jit % 10 > 2 {
-        return false;
-    }
-    jit /= 10;
-    jit % 10 <= 1 && jit / 10 == 0
 }
 
 /// Every entry's handler registered on `builder`, in table order.

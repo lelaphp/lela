@@ -56,6 +56,7 @@ mod storage;
 #[cfg(debug_assertions)]
 mod table_copy;
 pub(crate) mod test_ext;
+mod tier_setting;
 mod time_limit;
 mod trace_num;
 mod typed_errors;

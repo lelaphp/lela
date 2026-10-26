@@ -264,6 +264,10 @@ pub struct Request {
     /// over it anywhere else fails to compile; a write over the whole
     /// request does not ([`crate::tier::TierState`]).
     tier: crate::tier::TierState,
+    /// php's `JIT_G` as the request holds it, its engine's start's
+    /// rewritten by its `ini_set('opcache.jit', ...)`
+    /// ([`UnitCache::tier_setting`](unit_cache::UnitCache::tier_setting)).
+    tier_setting: TierStatus,
     /// The units the loop's servings held, kept with their shares for the
     /// next serving ([`crate::tier::UnitsLeft`]).
     pub(crate) units_left: crate::tier::UnitsLeft,
@@ -1168,6 +1172,7 @@ impl Request {
             _inside: crate::fork::Inside::enter(),
             limits: limits::LimitsState::new(&shared.timer),
             tier: crate::tier::TierState::laid(&shared),
+            tier_setting: shared.binding.setting,
             units_left: crate::tier::UnitsLeft::default(),
             shared,
             description,

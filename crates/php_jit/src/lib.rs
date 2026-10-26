@@ -101,28 +101,43 @@ impl Tier for Jit {
         JitRequest::laid(*started)
     }
 
-    /// php's `zend_jit_status` ([`policy::Policy::status`]): `JIT_G` as
-    /// the directives set it at engine start and `req`'s `opcache.jit`
-    /// rewrites it, and the buffer less what the traces of `req`'s epoch
-    /// take ([`table::TraceTable::usage`]), none where no request of the
-    /// epoch made its table.
+    /// php's `zend_jit_status` ([`policy::Policy::status`]): `req`'s
+    /// `JIT_G` ([`tier::setting`]), and the buffer less what the
+    /// traces of `req`'s epoch take ([`table::TraceTable::usage`]), none
+    /// where no request of the epoch made its table.
     fn status(req: &Request) -> TierStatus {
-        let Some(engine) = req.engine::<JitEngine>() else {
+        if req.engine::<JitEngine>().is_none() {
             return TierStatus::default();
-        };
+        }
         let epoch = tier::epoch(req);
         let used = table::of_epoch(&epoch).map_or(0, |table| table.usage().bytes);
-        engine.shared.policy.status(used, jit_g(req))
+        policy::Policy::status(used, tier::setting(req))
     }
 
     /// How a unit published now lays its words ([`policy::Policy::laid`]):
-    /// as `req`'s `JIT_G` says, the startup's where the engine publishes
-    /// it for no request; sealed where the engine built no [`JitEngine`].
+    /// as `JIT_G(on)` of `req` says ([`tier::setting`]), the start's
+    /// where the engine publishes it for no request; sealed where the
+    /// engine built no [`JitEngine`].
     fn laid(started: &Started<'_>, req: Option<&Request>) -> Laid {
         let Some(engine) = started.engine::<JitEngine>() else {
             return Laid::Sealed;
         };
-        engine.shared.policy.laid(req.and_then(jit_g))
+        let policy = &engine.shared.policy;
+        let jit_g = req.map_or(policy.start_setting(), |req| *tier::setting(req));
+        policy.laid(jit_g.on)
+    }
+
+    /// php's `JIT_G` past its start ([`policy::Policy::start_setting`]):
+    /// the start's directives as the tier's `Policy` read them, folded as
+    /// `zend_jit_config` folds `opcache.jit` and rewritten as php's start
+    /// rewrites `JIT_G` past it, in place of `startup`, the opcache
+    /// extension's fold of the same host value, which knows nothing of
+    /// the tier's start; `startup` where the engine built no
+    /// [`JitEngine`].
+    fn setting(started: &Started<'_>, startup: TierStatus) -> TierStatus {
+        started
+            .engine::<JitEngine>()
+            .map_or(startup, |engine| engine.shared.policy.start_setting())
     }
 
     /// The tier's state (`jit-design.md` §4): its two directives and
@@ -141,13 +156,6 @@ impl Tier for Jit {
         let tier = tier.rshutdown(JitEngine::request_ended);
         Some(tier.build("jit"))
     }
-}
-
-/// php's `JIT_G` as `req` has it now, the one place the tier reads it:
-/// its `opcache.jit` as `zend_jit_config` decodes it after the request's
-/// last `ini_set`; none where no extension declares the directive.
-fn jit_g(req: &Request) -> Option<policy::Setting> {
-    req.ini().get(b"opcache.jit").map(policy::Setting::of)
 }
 
 impl JitRequest {
@@ -222,8 +230,8 @@ pub(crate) struct Shared {
     perf: table::Outputs,
 }
 
-/// The `TRACE` lines a request writes, under the `opcache.jit_debug`
-/// bits it has where it writes them, as php reads `JIT_G(debug)` at each
+/// The `TRACE` lines a request writes, under the `JIT_G(debug)` bits it
+/// has where it writes them, as php reads `JIT_G(debug)` at each
 /// line (`Z/ext/opcache/jit/zend_jit_trace.c:8152-8250`), so a request's
 /// `ini_set('opcache.jit_debug', ...)` changes the lines it writes from
 /// then on (#3297); the bits the start alone sets, `PERF` and its kin,
@@ -259,15 +267,15 @@ pub(crate) struct Lines {
 }
 
 impl Lines {
-    /// The lines `req` writes now, under its `opcache.jit_debug`; none
-    /// for a tier that runs `Off`, which reads no bit, and the engine's
-    /// where no extension declares the directive.
+    /// The lines `req` writes now, under its `JIT_G(debug)`
+    /// ([`tier::setting`]), which the opcache extension's handler
+    /// rewrites at each `ini_set('opcache.jit_debug', ...)`; none for a
+    /// tier that runs `Off`, which reads no bit.
     pub(crate) fn of(req: &Request, shared: &Shared) -> Lines {
         let debug = if shared.policy.mode() == policy::Mode::Off {
             policy::JitDebug::default()
         } else {
-            (req.ini().get(b"opcache.jit_debug"))
-                .map_or(shared.policy.debug(), policy::JitDebug::of)
+            policy::JitDebug::bits(i64::from(tier::setting(req).debug))
         };
         Lines::under(debug)
     }

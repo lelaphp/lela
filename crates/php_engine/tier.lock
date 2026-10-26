@@ -177,6 +177,7 @@ tier::set_argv
 tier::set_aside
 tier::set_stdin
 tier::set_trace_num
+tier::setting
 tier::sink
 tier::stack
 tier::stack_room

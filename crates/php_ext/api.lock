@@ -1111,6 +1111,7 @@ request::UnitCache::invalidate
 request::UnitCache::map_ptr_last
 request::UnitCache::reset
 request::UnitCache::status
+request::UnitCache::tier_setting
 request::Unresolved
 request::Upload
 request::UrlStat
