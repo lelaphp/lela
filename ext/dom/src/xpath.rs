@@ -726,7 +726,8 @@ fn dispatch(
 /// callbacks, the set of its node or the empty set where it stands for
 /// none, a boolean, a string, and an object that is no node php's
 /// `TypeError`. A node object with no node is kept as any other, so it
-/// lives as long as the evaluator:
+/// lives as long as the evaluator, and answers the empty set, which
+/// `count()` takes as it takes no string:
 ///
 /// ```php
 /// $d = new DOMDocument; $d->loadXML('<r><a/><a/></r>');
@@ -736,11 +737,13 @@ fn dispatch(
 /// function f() { echo "f"; return new class extends DOMElement { function __construct() {} function __destruct() { echo "d"; } }; }
 /// $n = $x->query('//a[php:function("f")]')->length;
 /// echo "|$n|";
+/// var_dump($x->evaluate('count(php:function("f"))'));
 /// unset($x);
 /// echo "end\n";
 /// ```
 /// ```expect
-/// ff|0|ddend
+/// ff|0|ffloat(0)
+/// dddend
 /// ```
 fn returned(
     req: &mut Request,
