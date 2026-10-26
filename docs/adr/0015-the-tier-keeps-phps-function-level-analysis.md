@@ -38,4 +38,4 @@ What php does, which this ADR copies:
 - The interpreter, the compiler and compile-identity are untouched. An op array nobody traces is never analysed.
 - §3.2 and the maintainer's note hold. The SSA is php's own representation, read by the tier alone and never executed. There is still one executor, and no IR of this engine's own.
 - The epoch's tier state gains one slot per analysed op array, written once.
-- The build waits on #2968. If #2968 rules NO-GO, this ADR is moot, and a person marks it so.
+- *Amended 2026-10-26 (#3563):* the build no longer waits on #2968. A NO-GO on #2968 defers the default; the port stands, and any later GO's run of record includes it.
