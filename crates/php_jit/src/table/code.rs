@@ -441,7 +441,10 @@ impl Mapping {
     }
 
     /// The address of offset `at`, which lies inside the mapping; an
-    /// address only, which reads and writes nothing.
+    /// address only, which reads and writes nothing. An adapter's alone:
+    /// the jitdump's mapping is made and unmapped, never addressed, so a
+    /// target with no adapter (`build.rs`) has no caller.
+    #[cfg(php_jit_arena)]
     fn at(&self, at: usize) -> NonNull<u8> {
         self.base.map_addr(|addr| addr.saturating_add(at))
     }
