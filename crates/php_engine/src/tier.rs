@@ -1890,10 +1890,7 @@ pub fn frameless_call(
     at: FramelessAt,
     operands: [(Zval, OperandKind); 3],
 ) -> Result<Zval, Fatal> {
-    let named = req
-        .vm()
-        .at(frame)
-        .is_none_or(|header| header.annex.is_some());
+    let named = exec::frameless_named(req.vm().at(frame));
     let mut held = [Zval::UNDEF; 3];
     let mut owned = 0u8;
     let mut count = 0;

@@ -13332,15 +13332,12 @@ fn frameless_call<const N: usize>(
     arguments: [(OperandKind, u32); N],
 ) -> Edge {
     // The frame stands at the call, and a `CV` is borrowed where no name
-    // reaches its variables, where it carries no annex
-    // ([`exec::frameless_operand`]).
-    let named = match req.vm_mut().at_mut(frame) {
-        Some(header) => {
-            header.opline = at;
-            header.annex.is_some()
-        }
-        None => true,
-    };
+    // reaches its variables ([`exec::frameless_named`]).
+    let header = req.vm_mut().at_mut(frame);
+    let named = exec::frameless_named(header.as_deref());
+    if let Some(header) = header {
+        header.opline = at;
+    }
     let mut operands = [Zval::UNDEF; N];
     let mut owned = 0u8;
     for (at, (operand, read)) in arguments.into_iter().zip(&mut operands).enumerate() {

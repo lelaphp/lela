@@ -2968,6 +2968,14 @@ pub(crate) fn frameless_operand(
     frameless_owner(z, kind, named)
 }
 
+/// Whether a name reaches the variables of the frame `header` is, so a
+/// frameless call's `CV` operand takes one more owner
+/// ([`frameless_owner`]): a frame that carries an annex, its symbol
+/// table or its extra arguments, or none at all.
+pub(crate) fn frameless_named(header: Option<&Header>) -> bool {
+    header.is_none_or(|header| header.annex.is_some())
+}
+
 /// What a frameless call's record holds of the operand `z` of `kind`,
 /// read where it stands and neither `UNDEF` nor a reference, and whether
 /// it owns it, as [`frameless_operand`] reads it from its slot and
