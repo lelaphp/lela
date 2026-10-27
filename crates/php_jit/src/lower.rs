@@ -75,7 +75,7 @@ use cranelift_codegen::isa::{self, OwnedTargetIsa};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::{Context, Final, MachSrcLoc};
 use php_engine::tier::{FuncRef, LandingIndex, MapPtrRaw, PlainCall};
-use php_unit::{MapPtrOffset, OplineIdx};
+use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
 
 use crate::policy::{Mode, Policy};
 use crate::record::{Began, Stop};
@@ -555,6 +555,50 @@ fn stub_at(ir: &TraceIr) -> Option<OplineIdx> {
     }
 }
 
+/// The kinds of the operands compiled code hands a kernel, at most
+/// three, which the crossing carries as one `i32`, a byte each in
+/// operand order: the `frameless` and `concat` kernels' (`jit-design.md`
+/// §4.3). `lower` makes it from the kinds and `enter` reads them back at
+/// the crossing, so the encoding is this type's alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub(crate) struct OperandKinds(u32);
+
+impl OperandKinds {
+    /// `kinds` in operand order, each one `Unused` past the operands a
+    /// kernel takes.
+    pub(crate) fn of(kinds: [OperandKind; 3]) -> OperandKinds {
+        OperandKinds(
+            kinds
+                .iter()
+                .rev()
+                .fold(0, |word, kind| word << 8 | u32::from(*kind as u8)),
+        )
+    }
+
+    /// The word compiled code passes.
+    pub(crate) fn word(self) -> i64 {
+        i64::from(self.0)
+    }
+
+    /// The kinds in operand order; none where a byte names no kind,
+    /// which compiled code never writes.
+    pub(crate) fn kinds(self) -> Option<[OperandKind; 3]> {
+        let kind = |at: u32| {
+            [
+                OperandKind::Unused,
+                OperandKind::Const,
+                OperandKind::Tmp,
+                OperandKind::Var,
+                OperandKind::Cv,
+            ]
+            .into_iter()
+            .find(|kind| u32::from(*kind as u8) == self.0 >> (8 * at) & 0xff)
+        };
+        Some([kind(0)?, kind(1)?, kind(2)?])
+    }
+}
+
 /// A kernel compiled code calls (`jit-design.md` §4.6, §5.2), by the
 /// wrapper `enter`'s `kernels!` list makes of it. Every wrapper is
 /// `extern "C"` on the host's convention, takes the `ExitCtx`, the room
@@ -658,13 +702,17 @@ pub(crate) enum Kernel {
     /// (`php_engine::tier::return_entry`), `left` then one; zero, with
     /// nothing done, for any other frame.
     Leave,
-    /// `frameless(cx, frame, opline: u32, place: u32, func: u32)`: a
-    /// `FRAMELESS_ICALL_*` of the frame at `place` on the stack, served
-    /// by its handler with no dispatch
-    /// (`php_engine::tier::frameless_held`), as php's code calls the
-    /// native directly (`jit_frameless_icall`), with no `Stood` written,
-    /// as [`Kernel::Handle`]; its throw, and what user code the native
-    /// calls back throws, is answered as one.
+    /// `frameless(cx, frame, opline: u32, place: u32, at: u32, kinds:
+    /// u32, a: u64, a_info: u32, b: u64, b_info: u32, c: u64, c_info: u32,
+    /// out: *mut Zval)`: the native at `at` of the engine's frameless
+    /// table, a `FRAMELESS_ICALL_*`'s of the frame at `place` on the
+    /// stack, served over the operand zvals compiled code read, each of
+    /// the `OperandKind` its byte of `kinds` names, `Unused` past the
+    /// native's arity, with no opline read
+    /// (`php_engine::tier::frameless_call`), as php's `jit_frameless_icall*`
+    /// calls the native's frameless handler with the operands' addresses;
+    /// what it returned written to `out`, `null` where it threw, its
+    /// throw, and what user code it calls back throws, answered as one.
     Frameless,
     /// `free_this(cx, frame, opline: u32)`: the receiver of the method's
     /// frame a `RETURN` leaves in place, after its variables, where the
@@ -681,50 +729,31 @@ pub(crate) enum Kernel {
     /// request's fatal, answered as its unwinding, or a fallible scope's
     /// refusal, whose send the handler then serves.
     MakeRef,
-    /// `call_native(cx, frame, opline: u32, place: u32, into: u32)`: the
-    /// `DO_ICALL` of the frame at `place` on the stack, the call on top a
-    /// native's, made with no opline read (`php_engine::tier::call_native`),
-    /// as php's `zend_jit_do_fcall` calls a native's handler, what it
-    /// returns written into the temporary `into` numbers from one, given
-    /// up where `into` is zero; no `Stood` written, and its throw answered
-    /// as [`Kernel::Frameless`]'s.
+    /// `call_native(cx, frame, opline: u32, call: u32, out: *mut Zval)`:
+    /// the native the call at `call` on the stack, on top and made the
+    /// one being served by compiled code, is to, served with no opline
+    /// read (`php_engine::tier::call_native`), as php's `zend_jit_do_fcall`
+    /// calls a native's handler with the call and the address of the slot
+    /// that takes its return: what it returned written to `out`, the call
+    /// still on top; `null`, the call popped and the throw answered as
+    /// one, where it threw.
     CallNative,
-}
-
-/// The temporary a native's `DO_ICALL` writes what it returns into, as
-/// [`Kernel::CallNative`] is handed it across the crossing: the slot
-/// numbered from one, zero where the opline's `result` is `UNUSED` and
-/// what the native returns is given up. Compiled code passes the word,
-/// and the wrapper takes it as this type, so the numbering is this
-/// type's alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(transparent)]
-pub(crate) struct ReturnsTo(u32);
-
-impl ReturnsTo {
-    /// The word for `slot`, a temporary's number, or for none; none
-    /// where the slot is the last a `u32` numbers, which no frame has.
-    pub(crate) fn of(slot: Option<u32>) -> Option<ReturnsTo> {
-        match slot {
-            Some(slot) => slot.checked_add(1).map(ReturnsTo),
-            None => Some(ReturnsTo(0)),
-        }
-    }
-
-    /// The word compiled code passes.
-    pub(crate) const fn word(self) -> u32 {
-        self.0
-    }
-
-    /// The temporary's number, none where nothing reads the return.
-    pub(crate) const fn slot(self) -> Option<u32> {
-        self.0.checked_sub(1)
-    }
+    /// `pop_call(cx, frame, opline: u32)`: the call on top popped, its
+    /// arguments given up (`php_engine::tier::pop_call`), where compiled
+    /// code does not pop a native's call in place; a destructor's throw
+    /// is the status's.
+    PopCall,
+    /// `interrupt(cx, frame, opline: u32)`: the interrupt check php's
+    /// `zend_fcall_interrupt` makes once a native returned, where
+    /// compiled code found the interrupt raised
+    /// (`php_engine::tier::interrupted`); a hook's throw is the status's,
+    /// and the timeout's fatal an exit.
+    Interrupt,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 19] = [
+    pub(crate) const ALL: [Kernel; 21] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
@@ -744,6 +773,8 @@ impl Kernel {
         Kernel::FreeThis,
         Kernel::MakeRef,
         Kernel::CallNative,
+        Kernel::PopCall,
+        Kernel::Interrupt,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

@@ -1,0 +1,12 @@
+start loop
+root e1
+op e1 14 long long - taken
+op e1 6 long - - -
+op e1 7 - long - -
+op e1 8 long - - -
+op e1 9 - long - -
+op e1 10 object.reference#41 string - -
+op e1 11 true false - -
+op e1 12 long long - -
+op e1 13 long - - -
+stop loop

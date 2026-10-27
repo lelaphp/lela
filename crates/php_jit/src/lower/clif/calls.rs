@@ -22,20 +22,20 @@ use std::num::NonZeroU32;
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
-use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, Value};
+use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, MemFlagsData, Value};
 use cranelift_frontend::Variable;
 use php_engine::tier::{self, FRAME, FrameLayout, FuncRef, PLACE, PlaceLayout, PlainCall};
 use php_heap::{Obj, Ref, Zval, ZvalType};
-use php_unit::Opcode;
+use php_unit::{Opcode, OperandKind};
 
 use super::{
-    COUNTED, Dtor, Emit, Kernel, Refuse, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE,
-    STOOD_ROOM, Scalar, TYPE_AT, imm, leave_of, mismatch, tag, trusted,
+    COUNTED, Dtor, EX_OPLINE, Emit, KIND, Kernel, Refuse, STOOD_CALL, STOOD_FRAME, STOOD_FUNC,
+    STOOD_OPLINE, STOOD_ROOM, Scalar, TYPE_AT, imm, leave_of, mismatch, tag, trusted,
 };
-use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT, RETURNED, THREW};
+use crate::lower::{IMAGES_AT, INTERRUPT_AT, OperandKinds, READY_AT, RETURNED, THREW};
 use crate::types::{
-    Abort, ArgChecks, Check, Defaults, End, ExitId, Frame, Imm, Line, Object, OpId, Operand,
-    Owners, PairCallee, PairClass, Returned, Vars,
+    Abort, ArgChecks, Check, Constant, Defaults, End, ExitId, Frame, Home, Imm, Line, Object, OpId,
+    Operand, Owners, PairCallee, PairClass, Returned, Types, Vars,
 };
 
 /// The receiver a method's call `line` pushes in place.
@@ -1778,5 +1778,526 @@ impl Emit<'_> {
             End::Return(exit) if id.index() + 1 == self.ir.ops.len() => Some(exit),
             End::Return(_) | End::Leave(_) | End::Loop(_) => None,
         }
+    }
+}
+
+/// What a native's call made from compiled code writes its return to:
+/// the temporary the `DO_ICALL` or the frameless call names, as php's
+/// code hands the native `EX_VAR(opline->result.var)`; or, where the
+/// opline's `result` is `UNUSED`, the stack's own zval, php's
+/// `alloca`'d one, which compiled code gives up after the call.
+#[derive(Clone, Copy)]
+enum Returns {
+    Slot(Value),
+    Unread(Value),
+}
+
+impl Returns {
+    /// The address the native writes what it returns to.
+    fn address(self) -> Value {
+        let (Returns::Slot(out) | Returns::Unread(out)) = self;
+        out
+    }
+}
+
+impl Emit<'_> {
+    /// Where `line`'s native writes what it returns ([`Returns`]).
+    fn returns_of(&mut self, line: &Line) -> Result<Returns, Abort> {
+        Ok(if let Some(out) = line.out {
+            let (room, at) = self.place(self.value(out)?.slot)?;
+            Returns::Slot(self.b.ins().iadd_imm_s(room, i64::from(at)))
+        } else {
+            let answer = self.answer();
+            Returns::Unread(self.b.ins().stack_addr(I64, answer, 0))
+        })
+    }
+
+    /// What a native returned that nothing reads given up, as php's
+    /// `zend_jit_do_fcall` gives up its `alloca`'d zval once the call is
+    /// popped, a destructor's throw leaving through the opline's unwind.
+    fn release_unread(&mut self, line: &Line, returns: Returns) -> Result<(), Abort> {
+        if let Returns::Unread(_) = returns {
+            let answer = self.answer();
+            let word = self.b.ins().stack_load(I64, I64, answer, 0);
+            let info = self.b.ins().stack_load(I64, I32, answer, TYPE_AT);
+            self.release(line, word, info, Dtor::Gc)?;
+        }
+        Ok(())
+    }
+
+    /// A native's `DO_ICALL`, made as php's `zend_jit_do_fcall` makes an
+    /// native's call (`Z/ext/opcache/jit/zend_jit_ir.c:10522-10720`):
+    /// the caller stood at the call, `SET_EX_OPLINE`; the call made the
+    /// one being served, `EG(current_execute_data) = call`, its flags
+    /// written in place ([`FrameLayout::building`],
+    /// [`FrameLayout::return_unused`]); the native served through
+    /// [`Kernel::CallNative`] with the call and the address of the slot
+    /// that takes its return, its observer told there where one is
+    /// declared; then, the call still on top, the interrupt tested, and
+    /// checked through [`Kernel::Interrupt`] where it is raised, php's
+    /// `zend_fcall_interrupt`; the call popped in place
+    /// ([`Emit::pop_native`]); a return nothing reads given up; and last
+    /// the throw tested, php's `EG(exception)` guard, which leaves through
+    /// the opline's unwind. A native that throws is answered with its
+    /// call popped, as the handler pops it, and leaves at once.
+    ///
+    /// The frame a native's backtrace and its warning read is the
+    /// caller's at the call, an interrupt a native raised is checked
+    /// before the next opline, with the call on the stack, and a
+    /// destructor the return nobody reads runs at the call:
+    ///
+    /// ```php
+    /// pcntl_async_signals(true);
+    /// pcntl_signal(SIGUSR1, function () { echo "usr1 ", count(debug_backtrace()), "\n"; });
+    /// class D { function __destruct() { echo "d\n"; } }
+    /// function f($n) {
+    ///     $t = 0;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         if ($i == 3) { posix_kill(posix_getpid(), SIGUSR1); echo "after kill\n"; }
+    ///         $t += strlen(str_repeat("ab", $i)) + intdiv($i, 1);
+    ///         array_reverse([new D]);
+    ///     }
+    ///     return $t;
+    /// }
+    /// echo f(5), "\n";
+    /// echo @intdiv(1, 1) + array_sum(array_map('intdiv', [6, 8], [2, 2])), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// d
+    /// d
+    /// d
+    /// usr1 3
+    /// after kill
+    /// d
+    /// d
+    /// 30
+    /// 8
+    /// ```
+    ///
+    /// ```php
+    /// pcntl_async_signals(true);
+    /// pcntl_signal(SIGUSR1, function () { echo "usr1 ", count(debug_backtrace()), "\n"; });
+    /// class D { function __destruct() { echo "d\n"; } }
+    /// function f($n) {
+    ///     $t = 0;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         if ($i == 3) { posix_kill(posix_getpid(), SIGUSR1); echo "after kill\n"; }
+    ///         $t += strlen(str_repeat("ab", $i)) + intdiv($i, 1);
+    ///         array_reverse([new D]);
+    ///     }
+    ///     return $t;
+    /// }
+    /// echo f(5), "\n";
+    /// echo @intdiv(1, 1) + array_sum(array_map('intdiv', [6, 8], [2, 2])), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// d
+    /// d
+    /// d
+    /// usr1 3
+    /// after kill
+    /// d
+    /// d
+    /// 30
+    /// 8
+    /// ```
+    pub(super) fn native_call(
+        &mut self,
+        line: &Line,
+        [room, opline]: [Value; 2],
+    ) -> Result<(), Abort> {
+        let (_, plain) = *self
+            .calls
+            .last()
+            .ok_or_else(|| mismatch("a native's call with no call under way"))?;
+        let count = plain.map(PlainCall::count);
+        let call = self.call_room()?;
+        self.b.ins().store(trusted(), opline, room, EX_OPLINE);
+        let flags = self.b.ins().load(I32, trusted(), call, at(L.info()));
+        let made = self
+            .b
+            .ins()
+            .band_imm_u(flags, i64::from(!(L.building() | L.return_unused())));
+        let returns = self.returns_of(line)?;
+        let made = match returns {
+            Returns::Slot(_) => made,
+            Returns::Unread(_) => self.b.ins().bor_imm_u(made, i64::from(L.return_unused())),
+        };
+        self.b.ins().store(trusted(), made, call, at(L.info()));
+        let stack = self.stack()?;
+        let len = self.b.ins().load(I64, trusted(), stack, FRAMES_LEN);
+        let last = self.b.ins().iadd_imm_s(len, -1);
+        let place = self.b.ins().ireduce(I32, last);
+        let out = returns.address();
+        self.call(
+            Kernel::CallNative,
+            &[room, opline, place, out],
+            leave_of(line),
+        )?;
+        let threw = self.interrupt_after(line, [room, opline])?;
+        self.pop_native(line, (call, count), [room, opline], threw)?;
+        self.release_unread(line, returns)?;
+        let threw = self.b.use_var(threw);
+        let to = self.left_by(leave_of(line))?;
+        let on = self.b.create_block();
+        self.b.ins().brif(threw, to, &[], on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
+        Ok(())
+    }
+
+    /// The interrupt tested after a native returned and, where it is
+    /// raised, checked through [`Kernel::Interrupt`], php's
+    /// `ZEND_VM_FCALL_INTERRUPT_CHECK` as its code compiles it under a
+    /// `zend_interrupt_function`, `zend_fcall_interrupt` on a cold path
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:10583-10590`, `:17842-17850`): a
+    /// variable that holds whether a hook left a throwable pending, which
+    /// the caller tests once it has done what php's code does before its
+    /// throw guard; an exit leaves at once.
+    fn interrupt_after(
+        &mut self,
+        line: &Line,
+        [room, opline]: [Value; 2],
+    ) -> Result<Variable, Abort> {
+        let threw = self.b.declare_var(I8);
+        let none = self.b.ins().iconst(I8, 0);
+        self.b.def_var(threw, none);
+        let cx = self
+            .cx
+            .ok_or_else(|| mismatch("a native's call before the entry"))?;
+        let interrupt = self.b.ins().load(I64, trusted(), cx, INTERRUPT_AT);
+        let raised = self.b.ins().load(I8, trusted(), interrupt, 0);
+        let (checked, on) = self.split();
+        self.b.ins().brif(raised, checked, &[], on, &[]);
+        self.b.switch_to_block(checked);
+        self.b.seal_block(checked);
+        let status = self.call_status(Kernel::Interrupt, &[room, opline])?;
+        self.thrown_into(line, status, threw)?;
+        self.b.ins().jump(on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
+        Ok(threw)
+    }
+
+    /// A kernel's `status` read where compiled code goes on past a throw
+    /// to finish what php's code finishes before its throw guard: an
+    /// exit or a panic leaves through `line`'s way out at once, and a
+    /// throw is or'd into `threw`.
+    fn thrown_into(&mut self, line: &Line, status: Value, threw: Variable) -> Result<(), Abort> {
+        let unwinds = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedGreaterThan, status, i64::from(THREW));
+        let to = self.left_by(leave_of(line))?;
+        let on = self.b.create_block();
+        self.b.ins().brif(unwinds, to, &[], on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
+        let thrown = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::Equal, status, i64::from(THREW));
+        let before = self.b.use_var(threw);
+        let now = self.b.ins().bor(before, thrown);
+        self.b.def_var(threw, now);
+        Ok(())
+    }
+
+    /// The native's call at `call` popped once it returned,
+    /// `zend_vm_stack_free_args` and `zend_vm_stack_free_call_frame` as
+    /// php's `zend_jit_do_fcall` writes them inline (`:10592-10640`):
+    /// where the push was compiled code's, of `count` arguments, the
+    /// call is the frame table's last record on the top page and carries
+    /// no annex (an `INIT_FCALL`'s call carries no receiver and no
+    /// closure), and no argument's release can be the last of its value,
+    /// each counted argument's owner given up by a `GC_DELREF` inline,
+    /// the record off the table and the top back; through
+    /// [`Kernel::PopCall`] otherwise, a destructor's throw or'd into
+    /// `threw`. An argument of `count` is the last owner only where its
+    /// value has no more owners than there are arguments, which may each
+    /// hold it, so no release in place frees a value.
+    fn pop_native(
+        &mut self,
+        line: &Line,
+        (call, count): (Value, Option<u32>),
+        [room, opline]: [Value; 2],
+        threw: Variable,
+    ) -> Result<(), Abort> {
+        let (by_kernel, join) = self.split();
+        let Some(count) = count else {
+            self.b.ins().jump(by_kernel, &[]);
+            return self.popped_by_kernel(line, (by_kernel, join), [room, opline], threw);
+        };
+        let stack = self.stack()?;
+        let len = self.b.ins().load(I64, trusted(), stack, FRAMES_LEN);
+        let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
+        let last = self.b.ins().iadd_imm_s(len, -1);
+        let refused = self.not_on_top(frames, last, call);
+        self.divert_if(refused, by_kernel);
+        let annex = self.b.ins().load(I32, trusted(), call, at(L.annex()));
+        self.divert_if(annex, by_kernel);
+        for arg in 0..count {
+            let slot = var_at(arg)?;
+            let info = self.b.ins().load(I32, trusted(), call, slot + TYPE_AT);
+            let counted = self.b.ins().band_imm_u(info, COUNTED);
+            self.when(counted, |emit| {
+                let word = emit.b.ins().load(I64, trusted(), call, slot);
+                let owners = emit.b.ins().load(I32, trusted(), word, COUNT_AT);
+                let owners = emit.b.ins().band_imm_u(owners, i64::from(Zval::COUNT_BITS));
+                let freed = emit.b.ins().icmp_imm_u(
+                    IntCC::UnsignedLessThanOrEqual,
+                    owners,
+                    i64::from(count),
+                );
+                emit.divert_if(freed, by_kernel);
+                Ok(())
+            })?;
+        }
+        for arg in 0..count {
+            let slot = var_at(arg)?;
+            let info = self.b.ins().load(I32, trusted(), call, slot + TYPE_AT);
+            let counted = self.b.ins().band_imm_u(info, COUNTED);
+            self.when(counted, |emit| {
+                let word = emit.b.ins().load(I64, trusted(), call, slot);
+                let owners = emit.b.ins().load(I32, trusted(), word, COUNT_AT);
+                let fewer = emit.b.ins().iadd_imm_s(owners, -1);
+                emit.b.ins().store(trusted(), fewer, word, COUNT_AT);
+                Ok(())
+            })?;
+        }
+        self.b.ins().store(trusted(), last, stack, FRAMES_LEN);
+        let below = self.b.ins().load(I64, trusted(), call, at(L.link()));
+        self.b.ins().store(trusted(), below, stack, INNERMOST);
+        self.b.ins().store(trusted(), call, stack, TOP);
+        self.b.ins().jump(join, &[]);
+        self.popped_by_kernel(line, (by_kernel, join), [room, opline], threw)
+    }
+
+    /// The pop's kernel path, `slow`, joined at `join`: [`Kernel::PopCall`],
+    /// its throw or'd into `threw`.
+    fn popped_by_kernel(
+        &mut self,
+        line: &Line,
+        (slow, join): (Block, Block),
+        [room, opline]: [Value; 2],
+        threw: Variable,
+    ) -> Result<(), Abort> {
+        self.b.switch_to_block(slow);
+        self.b.seal_block(slow);
+        let status = self.call_status(Kernel::PopCall, &[room, opline])?;
+        self.thrown_into(line, status, threw)?;
+        self.b.ins().jump(join, &[]);
+        self.b.switch_to_block(join);
+        self.b.seal_block(join);
+        Ok(())
+    }
+
+    /// A `FRAMELESS_ICALL_*`, made as php's `jit_frameless_icall*` makes
+    /// it (`Z/ext/opcache/jit/zend_jit_ir.c:17868-18110`): the frame
+    /// stood at the call, `SET_EX_OPLINE`; the operand zvals read where
+    /// they stand, a temporary's moved out of its slot, php's `FREE_OP*`
+    /// after the call being the native's record's; the native at the
+    /// opline's place in the frameless table served over them through
+    /// [`Kernel::Frameless`], which reads no opline, its return written to
+    /// the temporary the opline names; then the interrupt tested, php's
+    /// `jit_frameless_interrupt_check`, and a throw leaving through the
+    /// opline's unwind. A variable's reference is read through in place,
+    /// php's `jit_ZVAL_DEREF_ref`; a variable that may be unset, or a
+    /// temporary that may hold a reference, is tested first and, where it
+    /// is, the call is its handler's, through [`Kernel::Handle`], which
+    /// warns of it as php's `zend_jit_zval_check_undef` calls
+    /// `zend_jit_undefined_op_helper` to.
+    ///
+    /// The three arities over constants, variables, a temporary, a
+    /// variable that is unset once and one that holds a reference, a
+    /// coercion's deprecation and a refusal:
+    ///
+    /// ```php
+    /// function f($n, $a) {
+    ///     $t = []; $r = "xyz"; $ref = &$r;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         if ($i == 2) { unset($u); } else { $u = "u$i"; }
+    ///         $t[] = trim(" $i ") . substr($a, $i % 3, 2) . str_contains($a, $u ?? "") . substr($ref, $i & 1) . max(1, min(9, $i & 7)) . in_array($i, [1, 2]) . substr($u, 0, 1);
+    ///     }
+    ///     return implode(",", $t);
+    /// }
+    /// echo f(5, "abcdef"), "\n";
+    /// try { f(1, [1]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect regime=jit-force process
+    /// Warning: Undefined variable $u in %SCRATCH%/witness.php on line 6
+    ///
+    /// Deprecated: substr(): Passing null to parameter #1 ($string) of type string is deprecated in %SCRATCH%/witness.php on line 6
+    /// 0abxyz1u,1bcyz11u,2cd1xyz21,3abyz3u,4bcxyz4u
+    /// substr(): Argument #1 ($string) must be of type string, array given
+    /// ```
+    ///
+    /// ```php
+    /// function f($n, $a) {
+    ///     $t = []; $r = "xyz"; $ref = &$r;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         if ($i == 2) { unset($u); } else { $u = "u$i"; }
+    ///         $t[] = trim(" $i ") . substr($a, $i % 3, 2) . str_contains($a, $u ?? "") . substr($ref, $i & 1) . max(1, min(9, $i & 7)) . in_array($i, [1, 2]) . substr($u, 0, 1);
+    ///     }
+    ///     return implode(",", $t);
+    /// }
+    /// echo f(5, "abcdef"), "\n";
+    /// try { f(1, [1]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// Warning: Undefined variable $u in %SCRATCH%/witness.php on line 6
+    ///
+    /// Deprecated: substr(): Passing null to parameter #1 ($string) of type string is deprecated in %SCRATCH%/witness.php on line 6
+    /// 0abxyz1u,1bcyz11u,2cd1xyz21,3abyz3u,4bcxyz4u
+    /// substr(): Argument #1 ($string) must be of type string, array given
+    /// ```
+    pub(super) fn frameless_call(
+        &mut self,
+        line: &Line,
+        [room, opline, func]: [Value; 3],
+    ) -> Result<(), Abort> {
+        let Imm::Frameless(native) = line.imm else {
+            return Err(mismatch("a frameless call with no native named"));
+        };
+        let arity = match line.opcode {
+            Opcode::FramelessIcall0 => 0,
+            Opcode::FramelessIcall1 => 1,
+            Opcode::FramelessIcall2 => 2,
+            Opcode::FramelessIcall3 => 3,
+            _ => return Err(mismatch("a frameless call of another opcode")),
+        };
+        let operands = [line.op1, line.op2, line.data];
+        let (handler, join) = self.split();
+        for operand in operands.iter().take(arity) {
+            let Operand::Value(value) = *operand else {
+                continue;
+            };
+            let held = self.value(value)?;
+            // A variable's reference is read through in place below; a
+            // temporary's is the handler's, as is an unset variable,
+            // which php's code warns of out of line.
+            let through = self.kind_of(*operand)? == OperandKind::Cv;
+            let refused = if through {
+                Types::UNDEF
+            } else {
+                Types::UNDEF.or(Types::REF)
+            };
+            if !held.types.meets(refused) {
+                continue;
+            }
+            let (base, slot) = self.place(held.slot)?;
+            let info = self.b.ins().load(I32, trusted(), base, slot + TYPE_AT);
+            let kind = self.b.ins().band_imm_u(info, KIND);
+            let mut either = self
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Undef));
+            if !through && held.types.meets(Types::REF) {
+                let reference =
+                    self.b
+                        .ins()
+                        .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
+                either = self.b.ins().bor(either, reference);
+            }
+            self.divert_if(either, handler);
+        }
+        self.b.ins().store(trusted(), opline, room, EX_OPLINE);
+        let mut kinds = [OperandKind::Unused; 3];
+        let mut words = Vec::with_capacity(6);
+        for (place, operand) in operands.into_iter().enumerate() {
+            if place >= arity {
+                words.push(self.b.ins().iconst(I64, 0));
+                words.push(self.b.ins().iconst(I32, 0));
+                continue;
+            }
+            let kind = self.kind_of(operand)?;
+            let (word, info) = match operand {
+                Operand::Value(value)
+                    if kind == OperandKind::Cv && self.value(value)?.types.meets(Types::REF) =>
+                {
+                    // php's `ZVAL_DEREF` before the native reads it.
+                    let (base, slot) = self.place(self.value(value)?.slot)?;
+                    let zval = self.b.ins().iadd_imm_s(base, i64::from(slot));
+                    let zval = self.deref(zval);
+                    let word = self.b.ins().load(I64, trusted(), zval, 0);
+                    let info = self.b.ins().load(I32, trusted(), zval, TYPE_AT);
+                    (word, info)
+                }
+                _ => self.operand_words(line.frame, operand)?,
+            };
+            if let (OperandKind::Tmp, Operand::Value(value)) = (kind, operand) {
+                // The temporary's owner is the native's record's now.
+                let (base, slot) = self.place(self.value(value)?.slot)?;
+                let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+                self.b.ins().store(trusted(), undef, base, slot + TYPE_AT);
+            }
+            kinds[place] = kind;
+            words.extend([word, info]);
+        }
+        let returns = self.returns_of(line)?;
+        let out = returns.address();
+        let place = self.frame_ref(line.frame)?;
+        let place = self.b.ins().ireduce(I32, place);
+        let native = self.b.ins().iconst(I32, i64::from(native.0));
+        let kinds = self.b.ins().iconst(I32, OperandKinds::of(kinds).word());
+        let mut args = vec![room, opline, place, native, kinds];
+        args.extend(words);
+        args.push(out);
+        self.call(Kernel::Frameless, &args, leave_of(line))?;
+        let threw = self.interrupt_after(line, [room, opline])?;
+        self.release_unread(line, returns)?;
+        let threw = self.b.use_var(threw);
+        let to = self.left_by(leave_of(line))?;
+        self.b.ins().brif(threw, to, &[], join, &[]);
+        self.b.switch_to_block(handler);
+        self.b.seal_block(handler);
+        self.call(Kernel::Handle, &[room, opline, func], leave_of(line))?;
+        self.b.ins().jump(join, &[]);
+        self.b.switch_to_block(join);
+        self.b.seal_block(join);
+        Ok(())
+    }
+
+    /// The two words of the zval `operand` of `frame` stands for: a
+    /// scalar constant's, as php's op array holds it, a value's held in a
+    /// register as php's code writes it to the zval it hands on, or the
+    /// zval's as it stands in its slot or among the op array's constants.
+    fn operand_words(&mut self, frame: Frame, operand: Operand) -> Result<(Value, Value), Abort> {
+        if let Operand::Value(value) = operand
+            && self.value(value)?.home == Home::Register
+        {
+            return Ok(match self.register(value)? {
+                Scalar::Long(x) => (x, self.b.ins().iconst(I32, tag(ZvalType::Long))),
+                Scalar::Double(x) => (
+                    self.b.ins().bitcast(I64, MemFlagsData::new(), x),
+                    self.b.ins().iconst(I32, tag(ZvalType::Double)),
+                ),
+                Scalar::Bool(b) => {
+                    let b = self.b.ins().uextend(I32, b);
+                    (
+                        self.b.ins().iconst(I64, 0),
+                        self.b.ins().iadd_imm_s(b, tag(ZvalType::False)),
+                    )
+                }
+                Scalar::Null => (
+                    self.b.ins().iconst(I64, 0),
+                    self.b.ins().iconst(I32, tag(ZvalType::Null)),
+                ),
+            });
+        }
+        let (word, kind) = match operand {
+            Operand::Constant(Constant::Null) => (0, ZvalType::Null),
+            Operand::Constant(Constant::False) => (0, ZvalType::False),
+            Operand::Constant(Constant::True) => (0, ZvalType::True),
+            Operand::Constant(Constant::Long(n)) => (n, ZvalType::Long),
+            Operand::Constant(Constant::Double(d)) => (
+                i64::from_ne_bytes(d.to_bits().to_ne_bytes()),
+                ZvalType::Double,
+            ),
+            _ => return self.zval_words(frame, operand),
+        };
+        let word = self.b.ins().iconst(I64, word);
+        let info = self.b.ins().iconst(I32, tag(kind));
+        Ok((word, info))
     }
 }

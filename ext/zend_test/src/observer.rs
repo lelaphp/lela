@@ -568,6 +568,156 @@ fn indent(depth: usize) -> Vec<u8> {
 /// 137
 /// </file 'D/loop.php'>
 /// ```
+///
+/// A native's `DO_ICALL` and a frameless call that compiled code makes
+/// (`jit-design.md` §4.3, #3560) are begun and ended as the
+/// interpreter begins and ends them, a native whose return nothing reads
+/// and one that throws among them, under the force lane and where every
+/// guard fails once:
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/observed-native' . getmypid(); @mkdir($dir);
+/// file_put_contents("$dir/loop.php", '<?php
+/// function k($n) {
+///     $t = 0;
+///     for ($i = 0; $i < $n; $i++) {
+///         $t += strlen(str_repeat("a", $i)) + max(1, min(5, $i)) + in_array($i, [1, 2]);
+///         abs($i);
+///         try { $t += intdiv(6, $i - 1); } catch (DivisionByZeroError $e) { $t += 100; }
+///     }
+///     return $t;
+/// }
+/// echo k(3), "\n";');
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=tracing', '-d', 'opcache.jit_buffer_size=64M',
+///     '-d', 'jit.mode=force', '-d', 'zend_test.observer.enabled=1', '-d', 'zend_test.observer.observe_all=1',
+///     '-d', 'zend_test.observer.show_return_value=1', "$dir/loop.php"], [1 => ['pipe', 'w']], $pipes);
+/// echo str_replace(realpath($dir), 'D', stream_get_contents($pipes[1])); proc_close($p);
+/// exec('rm -rf ' . escapeshellarg($dir));
+/// ```
+/// ```expect process regime=jit-force
+/// <!-- init 'D/loop.php' -->
+/// <file 'D/loop.php'>
+///   <!-- init k() -->
+///   <k>
+///     <!-- init str_repeat() -->
+///     <str_repeat>
+///     </str_repeat:''>
+///     <!-- init min() -->
+///     <min>
+///     </min:0>
+///     <!-- init max() -->
+///     <max>
+///     </max:1>
+///     <!-- init in_array() -->
+///     <in_array>
+///     </in_array:false>
+///     <!-- init abs() -->
+///     <abs>
+///     </abs:0>
+///     <!-- init intdiv() -->
+///     <intdiv>
+///     </intdiv:-6>
+///     <str_repeat>
+///     </str_repeat:'a'>
+///     <min>
+///     </min:1>
+///     <max>
+///     </max:1>
+///     <in_array>
+///     </in_array:true>
+///     <abs>
+///     </abs:1>
+///     <intdiv>
+///       <!-- Exception: DivisionByZeroError -->
+///     </intdiv:NULL>
+///     <str_repeat>
+///     </str_repeat:'aa'>
+///     <min>
+///     </min:2>
+///     <max>
+///     </max:2>
+///     <in_array>
+///     </in_array:true>
+///     <abs>
+///     </abs:2>
+///     <intdiv>
+///     </intdiv:6>
+///   </k:109>
+/// 109
+/// </file 'D/loop.php'>
+/// ```
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/observed-native' . getmypid(); @mkdir($dir);
+/// file_put_contents("$dir/loop.php", '<?php
+/// function k($n) {
+///     $t = 0;
+///     for ($i = 0; $i < $n; $i++) {
+///         $t += strlen(str_repeat("a", $i)) + max(1, min(5, $i)) + in_array($i, [1, 2]);
+///         abs($i);
+///         try { $t += intdiv(6, $i - 1); } catch (DivisionByZeroError $e) { $t += 100; }
+///     }
+///     return $t;
+/// }
+/// echo k(3), "\n";');
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=tracing', '-d', 'opcache.jit_buffer_size=64M',
+///     '-d', 'jit.mode=exit-fuzz', '-d', 'zend_test.observer.enabled=1', '-d', 'zend_test.observer.observe_all=1',
+///     '-d', 'zend_test.observer.show_return_value=1', "$dir/loop.php"], [1 => ['pipe', 'w']], $pipes);
+/// echo str_replace(realpath($dir), 'D', stream_get_contents($pipes[1])); proc_close($p);
+/// exec('rm -rf ' . escapeshellarg($dir));
+/// ```
+/// ```expect process regime=jit-exit-fuzz
+/// <!-- init 'D/loop.php' -->
+/// <file 'D/loop.php'>
+///   <!-- init k() -->
+///   <k>
+///     <!-- init str_repeat() -->
+///     <str_repeat>
+///     </str_repeat:''>
+///     <!-- init min() -->
+///     <min>
+///     </min:0>
+///     <!-- init max() -->
+///     <max>
+///     </max:1>
+///     <!-- init in_array() -->
+///     <in_array>
+///     </in_array:false>
+///     <!-- init abs() -->
+///     <abs>
+///     </abs:0>
+///     <!-- init intdiv() -->
+///     <intdiv>
+///     </intdiv:-6>
+///     <str_repeat>
+///     </str_repeat:'a'>
+///     <min>
+///     </min:1>
+///     <max>
+///     </max:1>
+///     <in_array>
+///     </in_array:true>
+///     <abs>
+///     </abs:1>
+///     <intdiv>
+///       <!-- Exception: DivisionByZeroError -->
+///     </intdiv:NULL>
+///     <str_repeat>
+///     </str_repeat:'aa'>
+///     <min>
+///     </min:2>
+///     <max>
+///     </max:2>
+///     <in_array>
+///     </in_array:true>
+///     <abs>
+///     </abs:2>
+///     <intdiv>
+///     </intdiv:6>
+///   </k:109>
+/// 109
+/// </file 'D/loop.php'>
+/// ```
 fn fcall_init(observed: &mut Observed<'_>) -> ObserverHandlers {
     let switches = Switches::of(observed);
     if !switches.enabled {

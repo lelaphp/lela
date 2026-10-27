@@ -205,7 +205,7 @@ ini = ["opcache.enable_cli=1", "opcache.jit=off"]
 # from `ext/opcache/jit/zend_jit.h:67-72` at the tag; 0x3F000 = 258048. The
 # engine's `inline` mode is the synchronous compile so the dump is
 # deterministic; php compiles synchronously always.
-ini = ["opcache.enable_cli=1", "opcache.jit=tracing", "opcache.jit_buffer_size=64M", "opcache.jit_debug=258048"]
+ini = ["opcache.enable_cli=1", "opcache.jit=tracing", "opcache.jit_buffer_size=64M", "opcache.optimization_level=0", "opcache.jit_debug=258048"]
 [regime.jit-force]
 # The tier's force lane on the witnesses (jit-design §7): php ignores the engine-only jit.mode.
 ini = ["opcache.enable_cli=1", "opcache.jit=tracing", "opcache.jit_buffer_size=64M", "jit.mode=force"]
@@ -215,7 +215,7 @@ ini = ["opcache.enable_cli=1", "opcache.jit=tracing", "opcache.jit_buffer_size=6
 [regime.jit-small-buffer]
 # A code buffer that fills: php rounds 16K to the page, and the engine's
 # arena holds the same (#3112). The trace-dump bits of jit-inline (jit-design §4.1).
-ini = ["opcache.enable_cli=1", "opcache.jit=tracing", "opcache.jit_buffer_size=16K", "opcache.jit_debug=258048"]
+ini = ["opcache.enable_cli=1", "opcache.jit=tracing", "opcache.jit_buffer_size=16K", "opcache.optimization_level=0", "opcache.jit_debug=258048"]
 [regime.jit-ssa]
 # php's function-level analysis as the tracing JIT builds it, on a trace's
 # first pass through an op array (zend_jit_trace_build_ssa,
