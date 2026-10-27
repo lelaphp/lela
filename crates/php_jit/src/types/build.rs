@@ -961,6 +961,35 @@ impl<'a> Builder<'a> {
         clippy::too_many_arguments,
         reason = "the one place the opline's parts meet"
     )]
+    ///
+    /// What it writes to `op2` or the `OP_DATA`'s variable is in its slot:
+    /// a `foreach` over an array php knows holds booleans reads each one
+    /// from the slot `FE_FETCH_R` copied it to, under force and where
+    /// every guard fails once:
+    ///
+    /// ```php
+    /// function s($n) {
+    ///     $a = []; for ($i = 0; $i < $n; $i++) { $a[] = ($i % 3) != 0; }
+    ///     $c = 0; foreach ($a as $p) { if ($p) { $c++; } }
+    ///     return $c;
+    /// }
+    /// echo s(30), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 20
+    /// ```
+    ///
+    /// ```php
+    /// function s($n) {
+    ///     $a = []; for ($i = 0; $i < $n; $i++) { $a[] = ($i % 3) != 0; }
+    ///     $c = 0; foreach ($a as $p) { if ($p) { $c++; } }
+    ///     return $c;
+    /// }
+    /// echo s(30), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 20
+    /// ```
     fn write(
         &mut self,
         idx: OpId,
@@ -1009,16 +1038,19 @@ impl<'a> Builder<'a> {
             }
             _ => None,
         };
+        // What an op writes to its `op2` or its `OP_DATA`'s variable, as
+        // `FE_FETCH_R`'s copy of the element, is written to the slot, so
+        // the value is in memory, typed as php's inference types it.
         let op2 = match (slot_of(frame, op.op2_type, op.op2), inferred.op2) {
             (Some(slot), Some(held)) => {
-                Some(self.define(slot, (held.types, held.range), idx, form))
+                Some(self.define(slot, (held.types, held.range), idx, Form::Step))
             }
             _ => None,
         };
         if let (Some(data), Some(held)) = (data_line, inferred.data)
             && let Some(slot) = slot_of(frame, data.op1_type, data.op1)
         {
-            self.define(slot, (held.types, held.range), idx, form);
+            self.define(slot, (held.types, held.range), idx, Form::Step);
         }
         if op.opcode == Opcode::Return {
             self.returned = if op.op1_type == OperandKind::Unused {
