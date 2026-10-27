@@ -41,13 +41,13 @@ exit 0: f0 0014 plain
 exit 1: f0 0014 plain f0.CV0:array packed guard
 exit 2: f0 0014 plain f0.CV0:array
 exit 3: f0 0014 plain f0.CV0:array f0.CV1:long
-exit 4: f0 0014 plain f0.CV0:array f0.CV1:long f0.CV2:long
-exit 5: f0 0016 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV4:long
-exit 6: f0 0009 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV4:long
-exit 7: f0 0008 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV4:long
+exit 4: f0 0014 plain f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string
+exit 5: f0 0016 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
+exit 6: f0 0009 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
+exit 7: f0 0008 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
 exit 8: f0 0011 plain f0.CV2=#6 f0.CV4=#3 f0.T5=#8 f0.T6=#9 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
 exit 9: f0 0011 plain f0.CV2=#6 f0.CV4=#3 f0.T5=#8 f0.T6=#9 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T5:true
 exit 10: f0 0012 plain f0.CV2=#6 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
 exit 11: f0 0012 plain f0.CV2=#6 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T7:long
 exit 12: f0 0013 plain f0.CV2=#11 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
-exit 13: f0 0014 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV4:long to vm
+exit 13: f0 0014 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long to vm

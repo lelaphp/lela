@@ -2734,55 +2734,63 @@ impl<'a> Emit<'a> {
         Ok(self.b.ins().iconst(I64, address))
     }
 
-    /// A fetched element at `element` held to its type by its two guards,
-    /// `[in place, through a reference]`: read in place, or through the
-    /// reference it is, each by a guard of its own, as php's two reads
-    /// hold it, then written to what the fetch writes.
+    /// A fetched element at `element` held to its type by its guards,
+    /// `in place` and, where the array may hold a reference, `through` it:
+    /// read in place, or through the reference it is, each by a guard of
+    /// its own, as php's two reads hold it, then written to what the fetch
+    /// writes. Where it holds no reference, the guard in place alone, as
+    /// `zend_jit_guard_fetch_result_type` guards it with no `deref`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:8024-8090`).
     fn held_element(
         &mut self,
-        [in_place, through]: [Guard; 2],
+        in_place: Guard,
+        through: Option<Guard>,
         element: Value,
         out: ValueId,
     ) -> Result<(), Abort> {
-        let (
-            Check::Type { value, tag: t },
-            Check::Deref {
-                value: by,
-                tag: t_by,
-            },
-        ) = (in_place.check, through.check)
-        else {
+        let Check::Type { value, tag: t } = in_place.check else {
             return Err(mismatch("a fetch holds guards of another kind"));
         };
-        if value != out || by != out || t != t_by {
+        let deref = match through.map(|through| through.check) {
+            None => None,
+            Some(Check::Deref { value: by, tag }) if by == out && tag == t => through,
+            Some(_) => return Err(mismatch("a fetch holds guards of another kind")),
+        };
+        if value != out {
             return Err(mismatch("a fetch guards a value it does not write"));
         }
         let out_slot = self.value(out)?.slot;
-        let byte = self.b.ins().load(I8, trusted(), element, TYPE_AT);
-        let is_ref = self
-            .b
-            .ins()
-            .icmp_imm_s(IntCC::Equal, byte, tag(ZvalType::Reference));
-        let referred = self.b.create_block();
-        let direct = self.b.create_block();
-        let read = self.b.create_block();
-        let held = self.b.append_block_param(read, I64);
-        self.b.ins().brif(is_ref, referred, &[], direct, &[]);
-        self.b.switch_to_block(direct);
-        self.b.seal_block(direct);
-        self.element_guard(in_place, element, out, out_slot)?;
-        self.b.ins().jump(read, &[element.into()]);
-        self.b.switch_to_block(referred);
-        self.b.seal_block(referred);
-        let reference = self.b.ins().load(I64, trusted(), element, 0);
-        let inner = self
-            .b
-            .ins()
-            .iadd_imm_s(reference, i64::from(imm(Ref::VALUE_AT)));
-        self.element_guard(through, inner, out, out_slot)?;
-        self.b.ins().jump(read, &[inner.into()]);
-        self.b.switch_to_block(read);
-        self.b.seal_block(read);
+        let held = if let Some(through) = deref {
+            let byte = self.b.ins().load(I8, trusted(), element, TYPE_AT);
+            let is_ref = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, byte, tag(ZvalType::Reference));
+            let referred = self.b.create_block();
+            let direct = self.b.create_block();
+            let read = self.b.create_block();
+            let held = self.b.append_block_param(read, I64);
+            self.b.ins().brif(is_ref, referred, &[], direct, &[]);
+            self.b.switch_to_block(direct);
+            self.b.seal_block(direct);
+            self.element_guard(in_place, element, out, out_slot)?;
+            self.b.ins().jump(read, &[element.into()]);
+            self.b.switch_to_block(referred);
+            self.b.seal_block(referred);
+            let reference = self.b.ins().load(I64, trusted(), element, 0);
+            let inner = self
+                .b
+                .ins()
+                .iadd_imm_s(reference, i64::from(imm(Ref::VALUE_AT)));
+            self.element_guard(through, inner, out, out_slot)?;
+            self.b.ins().jump(read, &[inner.into()]);
+            self.b.switch_to_block(read);
+            self.b.seal_block(read);
+            held
+        } else {
+            self.element_guard(in_place, element, out, out_slot)?;
+            element
+        };
         if let Some(kind) = Kind::of_tag(t) {
             let read = self.read(held, 0, kind);
             self.define(out, read)

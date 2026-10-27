@@ -4,7 +4,7 @@
 //! loop, then the exits numbered and laid out from the state the trace
 //! held where each leaves.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::{NonZeroU32, NonZeroUsize};
 
 use php_engine::tier::{
@@ -36,7 +36,7 @@ use crate::table::TraceId;
 mod infer;
 
 use infer::{Inferred, Reads};
-use php_ssa::Range;
+use php_ssa::{Range, Types as Php};
 mod loads;
 mod stack;
 
@@ -2385,7 +2385,23 @@ impl<'a> Builder<'a> {
                         matches!(kind, Within::Fetched { .. })
                             || !self.over_aliased(line.op1, line.op2)
                     })
-                    .map(|kind| (def, line.frame, line.opline, kind, line.op1, line.op2)),
+                    .map(|kind| {
+                        // A dimension's element is read through a reference
+                        // only where php's analysis says the array may hold
+                        // one, `zend_jit_guard_fetch_result_type`'s `deref`
+                        // (`Z/ext/opcache/jit/zend_jit_ir.c:12678-12679`).
+                        let deref = line.opcode == Opcode::FetchObjR
+                            || (self.types_of(line.frame, line.op1).info()).has(Php::OF_REF);
+                        (
+                            def,
+                            line.frame,
+                            line.opline,
+                            kind,
+                            line.op1,
+                            line.op2,
+                            deref,
+                        )
+                    }),
                 _ => None,
             },
             _ => None,
@@ -2398,7 +2414,7 @@ impl<'a> Builder<'a> {
             {
                 (GuardAt::Entry, self.start())
             }
-            (_, Some((def, frame, opline, kind, op1, op2))) => {
+            (_, Some((def, frame, opline, kind, op1, op2, deref))) => {
                 let fetched = |left| At::Fetched {
                     fetch: opline,
                     frees: Frees {
@@ -2413,7 +2429,7 @@ impl<'a> Builder<'a> {
                     Within::Fetched { .. } => fetched(Left::Copied(Read::InPlace)),
                 };
                 if let (Within::Fetched { missed }, Some(tag)) = (kind, tag) {
-                    then = Some(Placed {
+                    then = deref.then_some(Placed {
                         at: GuardAt::Within(def),
                         check: Check::Deref { value, tag },
                         exit: draft(
@@ -3095,7 +3111,7 @@ impl<'a> Builder<'a> {
                 Source::Interrupt(_) => self.interrupt(),
                 Source::End => self.end_draft.unwrap_or_else(|| self.start()),
             };
-            let mut spec = self.spec(&draft, &known);
+            let mut spec = self.spec(&draft, &known, self.entry_bound(source));
             if let Source::Guard(at) = source {
                 spec.layout = matches!(self.guards[at].check, Check::Layout { .. });
             }
@@ -3286,6 +3302,26 @@ impl<'a> Builder<'a> {
         (order, ended)
     }
 
+    /// How far into the variables an exit of `source` knows their entry.
+    /// An entry guard is placed as php's code generator walks the
+    /// variables in order, setting each one's stack type before its
+    /// packed guard and after its type guard
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:4228-4288`): its exit knows a
+    /// concrete entry of the variables before it alone, and one on no
+    /// variable, the stack's room tested before the walk, knows none.
+    fn entry_bound(&self, source: Source) -> Option<u32> {
+        let Source::Guard(at) = source else {
+            return None;
+        };
+        let placed = self.guards[at];
+        (placed.at == GuardAt::Entry).then(|| {
+            (self.guarded_slot(placed.check)).map_or(0, |slot| match placed.check {
+                Check::Layout { .. } => slot.var.saturating_add(1),
+                _ => slot.var,
+            })
+        })
+    }
+
     /// The slot a guard holds a value of; none for a guard on no value.
     fn guarded_slot(&self, check: Check) -> Option<Slot> {
         match check {
@@ -3332,7 +3368,7 @@ impl<'a> Builder<'a> {
         let stubbed = || {
             self.rec.start.grew().is_none()
                 && self.uses_initial_ip()
-                && (self.spec(&self.interrupt(), &HashMap::new()).stores).is_empty()
+                && (self.spec(&self.interrupt(), &HashMap::new(), None).stores).is_empty()
         };
         match repeat {
             Repeat::Return => closed(Interrupt::None),
@@ -3738,7 +3774,12 @@ impl<'a> Builder<'a> {
 
     /// One exit's spec from its draft and the state it leaves, the values
     /// in `known` held by a guard before it.
-    fn spec(&self, draft: &Draft, known: &HashMap<ValueId, ZvalType>) -> ExitSpec {
+    fn spec(
+        &self,
+        draft: &Draft,
+        known: &HashMap<ValueId, ZvalType>,
+        bound: Option<u32>,
+    ) -> ExitSpec {
         let empty = Snapshot::default();
         let snapshot = self.snapshot_at(draft.point).unwrap_or(&empty);
         let calls = snapshot.calls > 0;
@@ -3805,11 +3846,27 @@ impl<'a> Builder<'a> {
                 .copied()
                 .or_else(|| self.born[value.0 as usize].tag())
         };
+        // A slot the trace has not read yet is known as it entered where
+        // that is one type, as php's code generator sets the stack type of
+        // each variable whose entry info is concrete before the trace's
+        // first op (`Z/ext/opcache/jit/zend_jit_trace.c:4228-4245`), and
+        // a frame it pushes holds its variables past the arguments unset.
         let read: HashSet<Slot> = snapshot.values.iter().map(|(slot, _)| *slot).collect();
-        let entered = (known.keys())
-            .filter(|value| self.val(**value).def == Def::Entry)
-            .map(|value| (self.val(*value).slot, *value))
-            .filter(|(slot, _)| !read.contains(slot));
+        let concrete = (0..self.values.len())
+            .filter_map(|at| u32::try_from(at).ok().map(ValueId))
+            .filter(|value| {
+                let entry = self.val(*value);
+                entry.def == Def::Entry
+                    && bound.is_none_or(|bound| entry.slot.var < bound)
+                    && self.born[value.0 as usize].tag().is_some()
+                    && !self.aliased(entry.slot)
+            });
+        let entered = (known.keys().copied())
+            .filter(|value| self.val(*value).def == Def::Entry)
+            .chain(concrete)
+            .map(|value| (self.val(value).slot, value))
+            .filter(|(slot, _)| !read.contains(slot))
+            .collect::<BTreeMap<Slot, ValueId>>();
         // Past an op, a slot it wrote is known as it was before it, as
         // php's code generator sets the type of what an op writes only
         // once the op's code, and the exits it takes, are done

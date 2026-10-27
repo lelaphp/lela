@@ -45,14 +45,14 @@ exit 0: f0 0013 plain
 exit 1: f0 0013 plain f0.CV0:array packed guard
 exit 2: f0 0013 plain f0.CV0:array
 exit 3: f0 0013 plain f0.CV0:array f0.CV1:long
-exit 4: f0 0013 plain f0.CV0:array f0.CV1:long f0.CV2:long
-exit 5: f0 0015 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV4:long
-exit 6: f0 0006 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV4:long to vm
-exit 7: f0 0007 plain f0.CV2=#1 f0.CV4=#3 f0.T3=copied #6 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV4:long
-exit 8: f0 0007 plain f0.CV2=#1 f0.CV4=#3 f0.T3=copied #6 through a reference f0.CV0:array f0.CV1:long f0.CV2:long f0.CV4:long
-exit 9: f0 0007 plain f0.CV2=#1 f0.CV4=#3 f0.T3=#6 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV4:long f0.T3:long to vm
-exit 10: f0 0008 plain f0.CV2=#1 f0.CV4=#3 f0.T3=#6 f0.T4=copied #8 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV4:long f0.T3:long
-exit 11: f0 0008 plain f0.CV2=#1 f0.CV4=#3 f0.T3=#6 f0.T4=copied #8 through a reference f0.CV0:array f0.CV1:long f0.CV2:long f0.CV4:long f0.T3:long
+exit 4: f0 0013 plain f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string
+exit 5: f0 0015 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
+exit 6: f0 0006 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long to vm
+exit 7: f0 0007 plain f0.CV2=#1 f0.CV4=#3 f0.T3=copied #6 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
+exit 8: f0 0007 plain f0.CV2=#1 f0.CV4=#3 f0.T3=copied #6 through a reference f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
+exit 9: f0 0007 plain f0.CV2=#1 f0.CV4=#3 f0.T3=#6 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T3:long to vm
+exit 10: f0 0008 plain f0.CV2=#1 f0.CV4=#3 f0.T3=#6 f0.T4=copied #8 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T3:long
+exit 11: f0 0008 plain f0.CV2=#1 f0.CV4=#3 f0.T3=#6 f0.T4=copied #8 through a reference f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T3:long
 exit 12: f0 0008 plain f0.CV2=#1 f0.CV4=#3 f0.T3=#6 f0.T4=#8 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T3:long f0.T4:long
 exit 13: f0 0009 plain f0.CV2=#1 f0.CV4=#3 f0.T5=#9 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T5:long to vm
 exit 14: f0 0010 plain f0.CV2=#1 f0.CV4=#3 f0.T5=#9 f0.T6=copied #10 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T5:long
@@ -60,4 +60,4 @@ exit 15: f0 0010 plain f0.CV2=#1 f0.CV4=#3 f0.T5=#9 f0.T6=copied #10 through a r
 exit 16: f0 0010 plain f0.CV2=#1 f0.CV4=#3 f0.T5=#9 f0.T6=#10 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T5:long f0.T6:long
 exit 17: f0 0011 plain f0.CV2=#1 f0.CV4=#3 f0.T7=#11 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T7:long
 exit 18: f0 0012 plain f0.CV2=#12 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
-exit 19: f0 0013 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV4:long to vm
+exit 19: f0 0013 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long to vm

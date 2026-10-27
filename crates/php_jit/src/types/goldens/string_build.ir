@@ -43,7 +43,7 @@ loop at 0, loop, interrupt exit 5
 end: back to 0
 exit 0: f0 0017 plain
 exit 1: f0 0017 plain f0.CV0:string
-exit 2: f0 0017 plain f0.CV0:string f0.CV1:long
+exit 2: f0 0017 plain f0.CV0:string f0.CV1:long f0.CV2:string
 exit 3: f0 0019 plain f0.CV3=#3 f0.CV0:string f0.CV1:long f0.CV2:string f0.CV3:long
 exit 4: f0 0016 plain f0.CV3=#3 f0.CV0:string f0.CV1:long f0.CV2:string f0.CV3:long f0.CV4:string
 exit 5: f0 0017 plain f0.CV3=#3 f0.CV0:string f0.CV1:long f0.CV2:string f0.CV3:long to vm

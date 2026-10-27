@@ -11,7 +11,7 @@ entry
   guard #4 long -> exit 1
   guard #0 long -> exit 2
   guard #2 long -> exit 3
-loop at 0, loop, interrupt exit 11
+loop at 0, loop, interrupt exit 10
   #1 f0.CV2 [long] reg = phi(#0, #14)
   #3 f0.CV3 [long] reg = phi(#2, #15)
 0011 f0 IS_SMALLER #3, #4 fused inline
@@ -31,30 +31,28 @@ loop at 0, loop, interrupt exit 11
 0004 f1 FETCH_DIM_R #6, int(0) inline leaves -> exit 5
   -> #11 f1.T2 [long] reg
   checks #11 long -> exit 6
-  checks #11 ref to long -> exit 7
 0005 f1 ADD #11, #7 inline
   -> #12 f1.T3 [long] reg
-  checks #12 long -> exit 8
+  checks #12 long -> exit 7
 0006 f1 RETURN #12 inline in-place frees CV0,CV2 unwinds -> unwind 0
      f0 back to #13
   -> #13 f0.T3 [long]
 0009 f0 ASSIGN_OP #1, #13 inline
   -> #14 f0.CV2 [long] reg
-  checks #14 long -> exit 9
+  checks #14 long -> exit 8
 0010 f0 PRE_INC #3 inline
   -> #15 f0.CV3 [long] reg
-  checks #15 long -> exit 10
+  checks #15 long -> exit 9
 end: back to 0
 exit 0: f0 0011 plain to vm
 exit 1: f0 0011 plain
-exit 2: f0 0011 plain f0.CV0:long
-exit 3: f0 0011 plain f0.CV0:long f0.CV2:long
-exit 4: f0 0013 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:long f0.CV2:long f0.CV3:long
+exit 2: f0 0011 plain f0.CV0:long f0.CV1:array
+exit 3: f0 0011 plain f0.CV0:long f0.CV1:array f0.CV2:long
+exit 4: f0 0013 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV2:long f0.CV3:long
 exit 5: f1 0004 plain f0.CV2=#1 f0.CV3=#3 f1.CV0:array f1.CV1:long f1.CV2:string to vm
 exit 6: f1 0005 plain f0.CV2=#1 f0.CV3=#3 f1.T2=copied #11 f1.CV0:array f1.CV1:long f1.CV2:string
-exit 7: f1 0005 plain f0.CV2=#1 f0.CV3=#3 f1.T2=copied #11 through a reference f1.CV0:array f1.CV1:long f1.CV2:string
-exit 8: f1 0005 plain f0.CV2=#1 f0.CV3=#3 f1.T2=#11 f1.CV0:array f1.CV1:long f1.CV2:string f1.T2:long
-exit 9: f0 0009 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV2:long f0.CV3:long f0.T3:long
-exit 10: f0 0010 plain f0.CV2=#14 f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV2:long f0.CV3:long
-exit 11: f0 0011 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:long f0.CV2:long f0.CV3:long to vm
+exit 7: f1 0005 plain f0.CV2=#1 f0.CV3=#3 f1.T2=#11 f1.CV0:array f1.CV1:long f1.CV2:string f1.T2:long
+exit 8: f0 0009 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV2:long f0.CV3:long f0.T3:long
+exit 9: f0 0010 plain f0.CV2=#14 f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV2:long f0.CV3:long
+exit 10: f0 0011 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV2:long f0.CV3:long to vm
 unwind 0: f0.CV2=#1 f0.CV3=#3
