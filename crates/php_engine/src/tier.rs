@@ -1845,10 +1845,18 @@ pub fn call_native(req: &mut Request, call: FrameRef) -> Result<Zval, Fatal> {
     match req.serve_native(function, OnThrow::Nothing) {
         Ok(value) => Ok(value.to_zval()),
         Err(thrown) => {
-            crate::handlers::thrown_on_call(req, &thrown)?;
+            native_threw(req, &thrown)?;
             Ok(Zval::null())
         }
     }
+}
+
+/// [`call_native`]'s throw path, the handler's own
+/// ([`crate::handlers::thrown_on_call`]), kept out of the kernel's
+/// returning path, which the handler's inlining would otherwise lengthen.
+#[cold]
+fn native_threw(req: &mut Request, thrown: &Thrown) -> Result<(), Fatal> {
+    crate::handlers::thrown_on_call(req, thrown)
 }
 
 /// The call on top of the stack popped, `zend_vm_stack_free_args` and

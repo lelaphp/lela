@@ -12907,7 +12907,7 @@ fn do_call(req: &mut Request, frame: FrameRef, says: DoCall, opcode: &str) -> Ed
 /// unwind exit, so no `catch` takes it (a DOM parse lexbor stopped at the
 /// limit throws its `DOMException` and the limit's fatal is raised in its
 /// place), which is the `Err`.
-#[cold]
+#[inline(always)] // the handler's throw path, as it was before the tier shared it
 pub(super) fn thrown_on_call(req: &mut Request, thrown: &Thrown) -> Result<(), Fatal> {
     if req.has_oom() && crate::interrupt::raised(req) {
         req.leave_pending(thrown);
