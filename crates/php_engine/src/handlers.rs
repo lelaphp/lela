@@ -12898,6 +12898,7 @@ fn do_call(req: &mut Request, frame: FrameRef, says: DoCall, opcode: &str) -> Ed
 /// the native threw for the unwind exit, so no `catch` takes it (a DOM
 /// parse lexbor stopped at the limit throws its `DOMException` and the
 /// limit's fatal is raised in its place), which is the `Err`.
+#[inline(always)] // the handler's hot path, which it was before the tier shared it
 pub(super) fn returned_on_call(
     req: &mut Request,
     served: Result<Value, Thrown>,
@@ -13366,6 +13367,7 @@ fn frameless_call<const N: usize>(
 /// or not, as php's frameless handler and its full call for an observed
 /// one do (`Z/Zend/zend_execute.c:1597`). What it returned, or none
 /// with the throwable left pending.
+#[inline(always)] // the handler's hot path, which it was before the tier shared it
 pub(super) fn frameless_served(
     req: &mut Request,
     at: u32,
