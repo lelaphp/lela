@@ -607,6 +607,18 @@ enum Site {
     ParentHook(Box<[u8]>, HookKind),
 }
 
+impl Site {
+    /// The site as [`UnitView::called`] is asked for it.
+    fn as_call_site(&self) -> CallSite<'_> {
+        match self {
+            Site::Function(name) => CallSite::Function(name),
+            Site::Method(class, name) => CallSite::Method(*class, name),
+            Site::Frameless(index) => CallSite::Frameless(*index),
+            Site::ParentHook(name, kind) => CallSite::ParentHook(name, *kind),
+        }
+    }
+}
+
 /// What php's analysis of an op array asks [`UnitView::called`] for: a
 /// function by its lower-cased name, a method of a class by its
 /// lower-cased name, the native of a row of the engine's frameless
@@ -823,8 +835,12 @@ impl UnitView {
                     sites.extend(literal(op.op2).map(|n| Site::Function(n.into())));
                 }
                 Opcode::InitMethodCall | Opcode::InitStaticMethodCall
-                    if op.op2_type == OperandKind::Const =>
+                    if op.op2_type == OperandKind::Const
+                        && (op.opcode == Opcode::InitStaticMethodCall
+                            || op.op1_type == OperandKind::Unused) =>
                 {
+                    // php finds the method of an `INIT_METHOD_CALL` on
+                    // `$this` alone (`zend_optimizer_get_called_func`).
                     let Some(name) = literal(op.op2 + 1) else {
                         continue;
                     };
@@ -1003,19 +1019,8 @@ impl UnitView {
     /// call analysis finds none.
     #[must_use]
     pub fn called(&self, f: FuncRef, site: CallSite<'_>) -> Option<&CalledFunction> {
-        let matches = |held: &Site| match (held, site) {
-            (Site::Function(held), CallSite::Function(name)) => **held == *name,
-            (Site::Method(held_class, held), CallSite::Method(class, name)) => {
-                *held_class == class && **held == *name
-            }
-            (Site::Frameless(held), CallSite::Frameless(index)) => *held == index,
-            (Site::ParentHook(held, held_kind), CallSite::ParentHook(name, kind)) => {
-                **held == *name && *held_kind == kind
-            }
-            _ => false,
-        };
         (self.called.iter())
-            .find(|(func, held, _)| *func == f && matches(held))
+            .find(|(func, held, _)| *func == f && held.as_call_site() == site)
             .map(|(.., called)| called)
     }
 

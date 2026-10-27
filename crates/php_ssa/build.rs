@@ -19,9 +19,13 @@ fn main() {
         println!("cargo:warning=CARGO_MANIFEST_DIR is unset; cargo sets it for every `build.rs`");
         std::process::exit(1);
     };
+    let Some(out) = env::var_os("OUT_DIR") else {
+        println!("cargo:warning=OUT_DIR is unset; cargo sets it for every `build.rs`");
+        std::process::exit(1);
+    };
+    let out = PathBuf::from(out).join("func_infos.rs");
     let data = Path::new(&dir).join("../../data/func-infos.toml");
     println!("cargo:rerun-if-changed={}", data.display());
-    let out = PathBuf::from(env::var("OUT_DIR").unwrap_or_default()).join("func_infos.rs");
     let text = fs::read_to_string(&data)
         .map_err(|e| e.to_string())
         .and_then(|text| generate(&text));
@@ -65,6 +69,13 @@ fn generate(text: &str) -> Result<String, String> {
         .get("function")
         .and_then(toml::Value::as_array)
         .ok_or("no [[function]] rows")?;
+    let counted = table.get("rows").and_then(toml::Value::as_integer);
+    if counted != i64::try_from(functions.len()).ok() {
+        return Err(format!(
+            "rows = {counted:?} where the file holds {} [[function]] rows",
+            functions.len()
+        ));
+    }
     let mut rows = Vec::new();
     for row in functions {
         let field = |key: &str| {
