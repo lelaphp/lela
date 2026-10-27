@@ -4721,6 +4721,29 @@ impl<'a> Emit<'a> {
 
     /// `num` written to the zval at `base + at` with the type word it
     /// turned out.
+    ///
+    /// Variables of a file's own code outside any function, which php's analysis cannot type,
+    /// incremented and multiplied past `PHP_INT_MAX`:
+    ///
+    /// ```php
+    /// $a = PHP_INT_MAX - 3; $t = [];
+    /// for ($i = 0; $i < 8; $i++) { $a++; $b = $a * 2; $c = $i * 3 - 1; $t[] = gettype($a) . ":" . $b . ":" . $c; }
+    /// echo implode(",", $t), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// integer:1.844674407371E+19:-1,integer:1.844674407371E+19:2,integer:1.844674407371E+19:5,double:1.844674407371E+19:8,double:1.844674407371E+19:11,double:1.844674407371E+19:14,double:1.844674407371E+19:17,double:1.844674407371E+19:20
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// $a = PHP_INT_MAX - 3; $t = [];
+    /// for ($i = 0; $i < 8; $i++) { $a++; $b = $a * 2; $c = $i * 3 - 1; $t[] = gettype($a) . ":" . $b . ":" . $c; }
+    /// echo implode(",", $t), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// integer:1.844674407371E+19:-1,integer:1.844674407371E+19:2,integer:1.844674407371E+19:5,double:1.844674407371E+19:8,double:1.844674407371E+19:11,double:1.844674407371E+19:14,double:1.844674407371E+19:17,double:1.844674407371E+19:20
+    /// ```
     fn write_num(&mut self, base: Value, at: i32, num: Num) {
         match num {
             Num::Long(x) => self.write(base, at, Scalar::Long(x)),
@@ -4730,13 +4753,27 @@ impl<'a> Emit<'a> {
                 long,
                 double,
             } => {
-                let bits = self.b.ins().bitcast(I64, MemFlagsData::new(), double);
-                let word = self.b.ins().select(overflowed, bits, long);
-                let as_double = self.b.ins().iconst(I32, tag(ZvalType::Double));
-                let as_long = self.b.ins().iconst(I32, tag(ZvalType::Long));
-                let info = self.b.ins().select(overflowed, as_double, as_long);
-                self.b.ins().store(trusted(), word, base, at);
-                self.b.ins().store(trusted(), info, base, at + TYPE_AT);
+                // The double written on its own cold way, as php's
+                // `zend_jit_math_long_long` writes an overflow's, so the
+                // way a long takes makes none.
+                let (as_long, as_double, done) = (
+                    self.b.create_block(),
+                    self.b.create_block(),
+                    self.b.create_block(),
+                );
+                self.b.set_cold_block(as_double);
+                self.b.ins().brif(overflowed, as_double, &[], as_long, &[]);
+                for (block, held) in [
+                    (as_long, Scalar::Long(long)),
+                    (as_double, Scalar::Double(double)),
+                ] {
+                    self.b.switch_to_block(block);
+                    self.b.seal_block(block);
+                    self.write(base, at, held);
+                    self.b.ins().jump(done, &[]);
+                }
+                self.b.switch_to_block(done);
+                self.b.seal_block(done);
             }
         }
     }
