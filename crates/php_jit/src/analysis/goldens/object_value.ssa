@@ -1,0 +1,83 @@
+k:
+     ; (lines=25, args=2, vars=4, tmps=15, ssa_vars=29)
+     ; (JIT)
+     ; object_value.php:14-26
+     ; return  [rc1, rcn, false, long, double, object]
+     ; #0.CV0($p) NOVAL [undef]
+     ; #1.CV1($m) NOVAL [undef]
+     ; #2.CV2($t) NOVAL [undef]
+     ; #3.CV3($i) NOVAL [undef]
+BB0:
+     ; start lines=[0-0]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 #4.CV0($p) [rc1, rcn, any] = RECV 1
+
+BB1:
+     ; recv follow entry lines=[1-1]
+     ; from=(BB0)
+     ; to=(BB2)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB2)
+0001 #5.CV1($m) [rc1, rcn, any] = RECV 2
+
+BB2:
+     ; recv follow entry lines=[2-4]
+     ; from=(BB1)
+     ; to=(BB4)
+     ; idom=BB1
+     ; level=2
+     ; children=(BB4)
+0002 ASSIGN #2.CV2($t) NOVAL [undef] -> #6.CV2($t) [long] RANGE[0..0] int(0)
+0003 ASSIGN #3.CV3($i) NOVAL [undef] -> #7.CV3($i) [long] RANGE[0..0] int(0)
+0004 JMP BB4
+
+BB3:
+     ; target lines=[5-18]
+     ; from=(BB4)
+     ; to=(BB4)
+     ; idom=BB4
+     ; level=4
+     ; loop_header=4
+     #13.CV1($m) [rc1, rcn, any] RANGE[1..++] = Pi<BB4>(#9.CV1($m) [rc1, rcn, any] & RANGE[#11.CV3($i) [long, double] RANGE[0..++] + 1 .. ++])
+     #14.CV3($i) [long, double] RANGE[0..++] = Pi<BB4>(#11.CV3($i) [long, double] RANGE[0..++] & RANGE[-- .. #9.CV1($m) [rc1, rcn, any] - 1])
+0005 #15.T6 [rc1, rcn, any] = FETCH_OBJ_R #8.CV0($p) [rc1, rcn, any] string("x")
+0006 ASSIGN_OP (ADD) #10.CV2($t) [rc1, rcn, false, long, double, object] -> #16.CV2($t) [rc1, rcn, false, long, double, object] #15.T6 [rc1, rcn, any]
+0007 ASSIGN_OBJ #8.CV0($p) [rc1, rcn, any] -> #17.CV0($p) [rc1, rcn, object] string("tag")
+0008 OP_DATA string("p")
+0009 ASSIGN_OBJ_OP (SUB) #17.CV0($p) [rc1, rcn, object] -> #18.CV0($p) [rc1, rcn, object] string("y")
+0010 OP_DATA int(2)
+0011 PRE_DEC_OBJ #18.CV0($p) [rc1, rcn, object] -> #19.CV0($p) [rc1, rcn, object] string("x")
+0012 ASSIGN_OBJ #19.CV0($p) [rc1, rcn, object] -> #21.CV0($p) [rc1, rcn, object] string("n")
+0013 OP_DATA #14.CV3($i) [long, double] RANGE[0..++] -> #20.CV3($i) [long, double] RANGE[0..++]
+0014 ASSIGN_OBJ #21.CV0($p) [rc1, rcn, object] -> #22.CV0($p) [rc1, rcn, object] string("n")
+0015 OP_DATA string("7")
+0016 #24.T13 [rc1, rcn, any] = POST_DEC_OBJ #22.CV0($p) [rc1, rcn, object] -> #23.CV0($p) [rc1, rcn, object] string("y")
+0017 ASSIGN_OP (ADD) #16.CV2($t) [rc1, rcn, false, long, double, object] -> #25.CV2($t) [rc1, rcn, false, long, double, object] #24.T13 [rc1, rcn, any]
+0018 PRE_INC #20.CV3($i) [long, double] RANGE[0..++] -> #26.CV3($i) [long, double] RANGE[1..++]
+
+BB4:
+     ; follow target loop_header lines=[19-20]
+     ; from=(BB2, BB3)
+     ; to=(BB3, BB5)
+     ; idom=BB2
+     ; level=3
+     ; children=(BB3, BB5)
+     #8.CV0($p) [rc1, rcn, any] = Phi(#4.CV0($p) [rc1, rcn, any], #23.CV0($p) [rc1, rcn, object])
+     #9.CV1($m) [rc1, rcn, any] = Phi(#5.CV1($m) [rc1, rcn, any], #13.CV1($m) [rc1, rcn, any] RANGE[1..++])
+     #10.CV2($t) [rc1, rcn, false, long, double, object] = Phi(#6.CV2($t) [long] RANGE[0..0], #25.CV2($t) [rc1, rcn, false, long, double, object])
+     #11.CV3($i) [long, double] RANGE[0..++] = Phi(#7.CV3($i) [long] RANGE[0..0], #26.CV3($i) [long, double] RANGE[1..++])
+0019 #12.T16 [bool] = IS_SMALLER #11.CV3($i) [long, double] RANGE[0..++] #9.CV1($m) [rc1, rcn, any]
+0020 JMPNZ #12.T16 [bool] BB3
+
+BB5:
+     ; follow exit lines=[21-23]
+     ; from=(BB4)
+     ; idom=BB4
+     ; level=4
+0021 #27.T17 [rc1, rcn, any] = FETCH_OBJ_R #8.CV0($p) [rc1, rcn, any] string("n")
+0022 #28.T18 [rc1, false, long, double, object] = ADD #10.CV2($t) [rc1, rcn, false, long, double, object] #27.T17 [rc1, rcn, any]
+0023 RETURN #28.T18 [rc1, false, long, double, object]
+

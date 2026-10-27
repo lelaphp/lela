@@ -29,6 +29,7 @@ mod opcode {
     include!(concat!(env!("OUT_DIR"), "/opcode.rs"));
 }
 
+pub use dump::{InBlock, SsaOperands, SsaVars, dump_type_info, may_be};
 pub use enum_methods::{enum_methods, written_methods};
 pub use frameless::{FramelessEntry, frameless_table};
 pub use op::{

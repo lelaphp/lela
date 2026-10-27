@@ -452,6 +452,8 @@ pub(crate) struct TraceTable<P: Pages = Native> {
     /// What the published traces take, the counts of the `Perf` behind
     /// the compile mutex, read with nothing taken, as php reads `*dasm_ptr`.
     used: Arc<Used>,
+    /// php's analysis of each op array a trace was built through.
+    analyses: crate::analysis::Analyses,
 }
 
 impl<P: Pages> std::fmt::Debug for TraceTable<P> {
@@ -617,7 +619,14 @@ impl<P: Pages> TraceTable<P> {
                 perf,
             }),
             used,
+            analyses: crate::analysis::Analyses::default(),
         }
+    }
+
+    /// The analyses of the op arrays the epoch's traces were built
+    /// through ([`crate::analysis`]).
+    pub(crate) fn analyses(&self) -> &crate::analysis::Analyses {
+        &self.analyses
     }
 
     /// What the traces published into this epoch's table so far take

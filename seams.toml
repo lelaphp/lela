@@ -88,6 +88,10 @@ budget = 28000
 feature = "jit"
 targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin"]
 [[crate]]
+name = "php_ssa"
+budget = 9000                              # php's CFG, DFG, SSA and inference over one op array, below the compiled tier (ADR-0015; #3174, #3571)
+lock = "ssa.lock"
+[[crate]]
 name = "php_proto"
 budget = 4000
 [[crate]]
@@ -417,6 +421,12 @@ allowlist = true
 sections = ["face", { name = "kernels", consumers = ["php_jit"] }]
 adr = "0006"
 [[seam]]
+name = "ssa"
+producer = "php_ssa"
+consumers = ["php_jit"]                    # the epoch's slot is php_jit's own type, kept through tier::epoch_state, so php_engine names no php_ssa type (#3571)
+lock = "ssa.lock"
+adr = "0015"
+[[seam]]
 name = "layer"                            # the stream layer's face of php_engine, sealed from extensions: a trait implemented for Request and free items, which php_ext re-exports neither of (#1959, ruled 2026-10-07)
 producer = "php_engine"
 module = "layer"
@@ -475,6 +485,10 @@ from = "php_jit"
 to = ["php_engine", "php_unit", "php_link", "php_heap", "php_ssa"]
 allowlist = "tier.lock"
 adr = "0006"
+[[edge]]
+from = "php_ssa"
+to = ["php_unit", "php_link", "php_heap"]
+adr = "0015"
 [[edge]]
 from = "php_sapi"
 to = ["php_proto", "php_engine"]

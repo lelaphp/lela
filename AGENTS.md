@@ -6,12 +6,12 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 
 | directory | crates | behind a feature |
 |---|---|---|
-| crates/ | 15 | 1 |
+| crates/ | 16 | 1 |
 | ext/ | 59 | 31 |
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=aba831672f7c98dfb66075db32afa181e6a11795479d0d88fc459633f2366878 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=65247c4f2f217f33ee52f4dfa17e8ca055913f7bee12a5b6a3f15a787a15614d out=6ba0892c9255d463a40e6c1df9a6c86358dea5a0b2a04df470497c174dc89391 -->
 
 ## What makes the third engine special?
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=97e2fa7d919284e9472cff552824f7ccd05caef9cdd9b00fc30502c40136a3fd out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=26499d3a50b9c9e04fac90cc560f061962966b39fc5d01178a4e7719bd97e7f0 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -125,16 +125,17 @@ third-engine-design.md
 |---|---|---|---|
 | heap | heap.lock | 518 |  |
 | process | process.lock | 40 |  |
-| unit | unit.lock | 125 |  |
+| unit | unit.lock | 158 |  |
 | link | link.lock | 62 |  |
 | ops | ops.lock | 209 |  |
 | api | api.lock | 1522 | 1525 |
 | sapi | sapi.lock | 60 |  |
-| tier | tier.lock | 213 |  |
+| tier | tier.lock | 216 |  |
+| ssa | ssa.lock | 32 |  |
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 428 |  |
 
-<!-- /computed in=0ecd1b390da1d8d8974dddd631442cc0b51b1b7eaad5dd4eaf26f645a4866a0a out=cfe359a7f25df87aa4b635726187c6f7abde6b3dbd48c09a796d63f24462cc32 -->
+<!-- /computed in=b41fc06a8df9739382bb4149d7db9181b5e1051738cadfdae74701e6f2916774 out=8dd28eb2a62f23ec5c8b7373f61f28cb5489fcec33e34f05b9266cb63e9ce976 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -193,12 +194,13 @@ Options:
 ├── php_process
 ├── php_proto
 ├── php_sapi
+├── php_ssa
 ├── php_streams
 ├── php_syntax
 ├── php_unit
 └── timelib_sys
 ```
-<!-- /computed in=70b3b7eca9690068316f014f00bdd615bc6f89449cdfd3567d5ee9f795b18194 out=b73614d2eac7f713540dbdf7f6b1b890c6288f77445621d7a7118414d6885560 -->
+<!-- /computed in=9658ec9f1437b147db08254f39be027100720d383cb2755361228e4fae66d65a out=d92203a48d53e6c6b64fca99ec784fc36a1c0b46849b43e148ef89dc27b4ec4d -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .

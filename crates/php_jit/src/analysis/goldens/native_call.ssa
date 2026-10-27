@@ -1,0 +1,73 @@
+k:
+     ; (lines=15, args=2, vars=4, tmps=6, ssa_vars=19)
+     ; (JIT)
+     ; native_call.php:4-10
+     ; return  [long, double]
+     ; #0.CV0($a) NOVAL [undef]
+     ; #1.CV1($n) NOVAL [undef]
+     ; #2.CV2($c) NOVAL [undef]
+     ; #3.CV3($i) NOVAL [undef]
+BB0:
+     ; start lines=[0-0]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 #4.CV0($a) [rc1, rcn, any] = RECV 1
+
+BB1:
+     ; recv follow entry lines=[1-1]
+     ; from=(BB0)
+     ; to=(BB2)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB2)
+0001 #5.CV1($n) [rc1, rcn, any] = RECV 2
+
+BB2:
+     ; recv follow entry lines=[2-4]
+     ; from=(BB1)
+     ; to=(BB4)
+     ; idom=BB1
+     ; level=2
+     ; children=(BB4)
+0002 ASSIGN #2.CV2($c) NOVAL [undef] -> #6.CV2($c) [long] RANGE[0..0] int(0)
+0003 ASSIGN #3.CV3($i) NOVAL [undef] -> #7.CV3($i) [long] RANGE[0..0] int(0)
+0004 JMP BB4
+
+BB3:
+     ; target lines=[5-10]
+     ; from=(BB4)
+     ; to=(BB4)
+     ; idom=BB4
+     ; level=4
+     ; loop_header=4
+     #13.CV1($n) [rc1, rcn, any] RANGE[1..++] = Pi<BB4>(#9.CV1($n) [rc1, rcn, any] & RANGE[#11.CV3($i) [long, double] RANGE[0..++] + 1 .. ++])
+     #14.CV3($i) [long, double] RANGE[0..++] = Pi<BB4>(#11.CV3($i) [long, double] RANGE[0..++] & RANGE[-- .. #9.CV1($n) [rc1, rcn, any] - 1])
+0005 INIT_FCALL 2 112 string("strcmp")
+0006 SEND_VAR #8.CV0($a) [rc1, rcn, any] -> #15.CV0($a) [rc1, rcn, any] 1
+0007 SEND_VAL string("m") 2
+0008 #16.V6 [long] = DO_ICALL
+0009 ASSIGN_OP (ADD) #10.CV2($c) [long, double] -> #17.CV2($c) [long, double] #16.V6 [long]
+0010 PRE_INC #14.CV3($i) [long, double] RANGE[0..++] -> #18.CV3($i) [long, double] RANGE[1..++]
+
+BB4:
+     ; follow target loop_header lines=[11-12]
+     ; from=(BB2, BB3)
+     ; to=(BB3, BB5)
+     ; idom=BB2
+     ; level=3
+     ; children=(BB3, BB5)
+     #8.CV0($a) [rc1, rcn, any] = Phi(#4.CV0($a) [rc1, rcn, any], #15.CV0($a) [rc1, rcn, any])
+     #9.CV1($n) [rc1, rcn, any] = Phi(#5.CV1($n) [rc1, rcn, any], #13.CV1($n) [rc1, rcn, any] RANGE[1..++])
+     #10.CV2($c) [long, double] = Phi(#6.CV2($c) [long] RANGE[0..0], #17.CV2($c) [long, double])
+     #11.CV3($i) [long, double] RANGE[0..++] = Phi(#7.CV3($i) [long] RANGE[0..0], #18.CV3($i) [long, double] RANGE[1..++])
+0011 #12.T9 [bool] = IS_SMALLER #11.CV3($i) [long, double] RANGE[0..++] #9.CV1($n) [rc1, rcn, any]
+0012 JMPNZ #12.T9 [bool] BB3
+
+BB5:
+     ; follow exit lines=[13-13]
+     ; from=(BB4)
+     ; idom=BB4
+     ; level=4
+0013 RETURN #10.CV2($c) [long, double]
+

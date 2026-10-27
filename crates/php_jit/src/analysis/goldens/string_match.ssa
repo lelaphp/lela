@@ -1,0 +1,113 @@
+k:
+     ; (lines=25, args=2, vars=6, tmps=17, ssa_vars=35)
+     ; (JIT)
+     ; string_match.php:6-17
+     ; return  [long, double]
+     ; #0.CV0($lines) NOVAL [undef]
+     ; #1.CV1($n) NOVAL [undef]
+     ; #2.CV2($c) NOVAL [undef]
+     ; #3.CV3($i) NOVAL [undef]
+     ; #4.CV4($s) NOVAL [undef]
+     ; #5.CV5($same) NOVAL [undef]
+BB0:
+     ; start lines=[0-0]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 #6.CV0($lines) [rc1, rcn, any] = RECV 1
+
+BB1:
+     ; recv follow entry lines=[1-1]
+     ; from=(BB0)
+     ; to=(BB2)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB2)
+0001 #7.CV1($n) [rc1, rcn, any] = RECV 2
+
+BB2:
+     ; recv follow entry lines=[2-4]
+     ; from=(BB1)
+     ; to=(BB7)
+     ; idom=BB1
+     ; level=2
+     ; children=(BB7)
+0002 ASSIGN #2.CV2($c) NOVAL [undef] -> #8.CV2($c) [long] RANGE[0..0] int(0)
+0003 ASSIGN #3.CV3($i) NOVAL [undef] -> #9.CV3($i) [long] RANGE[0..0] int(0)
+0004 JMP BB7
+
+BB3:
+     ; target lines=[5-9]
+     ; from=(BB7)
+     ; to=(BB5, BB4)
+     ; idom=BB7
+     ; level=4
+     ; loop_header=7
+     ; children=(BB4, BB5, BB6)
+     #16.CV1($n) [rc1, rcn, any] RANGE[1..++] = Pi<BB7>(#10.CV1($n) [rc1, rcn, any] & RANGE[#12.CV3($i) [long, double] RANGE[0..++] + 1 .. ++])
+     #17.CV3($i) [long, double] RANGE[0..++] = Pi<BB7>(#12.CV3($i) [long, double] RANGE[0..++] & RANGE[-- .. #10.CV1($n) [rc1, rcn, any] - 1])
+0005 #18.T8 [long] RANGE[MIN..MAX] = MOD #17.CV3($i) [long, double] RANGE[0..++] int(4)
+0006 #19.T9 [rc1, rcn, any] = FETCH_DIM_R #6.CV0($lines) [rc1, rcn, any] #18.T8 [long] RANGE[MIN..MAX]
+0007 ASSIGN #13.CV4($s) NOVAL [undef, rc1, rcn, any] -> #20.CV4($s) [rc1, rcn, any] #19.T9 [rc1, rcn, any]
+0008 #21.T11 [bool] = IS_IDENTICAL #20.CV4($s) [rc1, rcn, any] string("")
+0009 JMPZ #21.T11 [bool] BB5
+
+BB4:
+     ; follow lines=[10-10]
+     ; from=(BB3)
+     ; to=(BB6)
+     ; idom=BB3
+     ; level=5
+     ; loop_header=7
+0010 JMP BB6
+
+BB5:
+     ; target lines=[11-19]
+     ; from=(BB3)
+     ; to=(BB6)
+     ; idom=BB3
+     ; level=5
+     ; loop_header=7
+0011 #22.T12 [bool] = IS_NOT_IDENTICAL #20.CV4($s) [rc1, rcn, any] string("zz")
+0012 ASSIGN #14.CV5($same) NOVAL [undef, bool] -> #23.CV5($same) [bool] #22.T12 [bool]
+0013 #24.T14 [long] RANGE[0..MAX] = STRLEN #20.CV4($s) [rc1, rcn, any]
+0014 #26.T15 [long] RANGE[MIN..MAX] = CAST (long) #23.CV5($same) [bool] -> #25.CV5($same) NOVAL [bool]
+0015 #27.T16 [long, double] RANGE[MIN..++] = ADD #24.T14 [long] RANGE[0..MAX] #26.T15 [long] RANGE[MIN..MAX]
+0016 #28.T17 [bool] = BOOL #17.CV3($i) [long, double] RANGE[0..++]
+0017 #29.T18 [long] RANGE[MIN..MAX] = CAST (long) #28.T17 [bool]
+0018 #30.T19 [long, double] = ADD #27.T16 [long, double] RANGE[MIN..++] #29.T18 [long] RANGE[MIN..MAX]
+0019 ASSIGN_OP (ADD) #11.CV2($c) [long, double] -> #31.CV2($c) [long, double] #30.T19 [long, double]
+
+BB6:
+     ; follow target lines=[20-20]
+     ; from=(BB4, BB5)
+     ; to=(BB7)
+     ; idom=BB3
+     ; level=5
+     ; loop_header=7
+     #32.CV2($c) [long, double] = Phi(#11.CV2($c) [long, double], #31.CV2($c) [long, double])
+     #33.CV5($same) NOVAL [undef, bool] = Phi(#14.CV5($same) NOVAL [undef, bool], #25.CV5($same) NOVAL [bool])
+0020 PRE_INC #17.CV3($i) [long, double] RANGE[0..++] -> #34.CV3($i) [long, double] RANGE[1..++]
+
+BB7:
+     ; follow target loop_header lines=[21-22]
+     ; from=(BB2, BB6)
+     ; to=(BB3, BB8)
+     ; idom=BB2
+     ; level=3
+     ; children=(BB3, BB8)
+     #10.CV1($n) [rc1, rcn, any] = Phi(#7.CV1($n) [rc1, rcn, any], #16.CV1($n) [rc1, rcn, any] RANGE[1..++])
+     #11.CV2($c) [long, double] = Phi(#8.CV2($c) [long] RANGE[0..0], #32.CV2($c) [long, double])
+     #12.CV3($i) [long, double] RANGE[0..++] = Phi(#9.CV3($i) [long] RANGE[0..0], #34.CV3($i) [long, double] RANGE[1..++])
+     #13.CV4($s) NOVAL [undef, rc1, rcn, any] = Phi(#4.CV4($s) NOVAL [undef], #20.CV4($s) [rc1, rcn, any])
+     #14.CV5($same) NOVAL [undef, bool] = Phi(#5.CV5($same) NOVAL [undef], #33.CV5($same) NOVAL [undef, bool])
+0021 #15.T22 [bool] = IS_SMALLER #12.CV3($i) [long, double] RANGE[0..++] #10.CV1($n) [rc1, rcn, any]
+0022 JMPNZ #15.T22 [bool] BB3
+
+BB8:
+     ; follow exit lines=[23-23]
+     ; from=(BB7)
+     ; idom=BB7
+     ; level=4
+0023 RETURN #11.CV2($c) [long, double]
+

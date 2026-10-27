@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use php_heap::ZvalType;
 use php_link::LinkedClass;
-use php_unit::decl::{Parameter, Type};
+use php_unit::decl::{FunctionDecl, Name, Parameter, Type};
 use php_unit::{CacheSlot, MapPtrOffset, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::published::SEALED;
@@ -565,6 +565,18 @@ pub struct UnitView {
     /// declare they return, by their row of the engine's frameless table
     /// ([`UnitView::hold_frameless`]).
     frameless: Vec<(u32, Option<Type>)>,
+    /// `zend_flf_functions` by name, the engine's frameless table, taken
+    /// when the view first holds an op array that calls through it.
+    frameless_names: Vec<Name>,
+}
+
+/// What [`UnitView::declaration`] reads of an op array: the declaration
+/// it is the body of, none for a file's own code, and the name of the
+/// class a method or a property hook is declared in.
+#[derive(Debug, Clone, Copy)]
+pub struct Declaration<'a> {
+    pub function: Option<&'a FunctionDecl>,
+    pub scope: Option<&'a Name>,
 }
 
 /// A view and an epoch hold leave the request's thread with a claim and
@@ -590,6 +602,7 @@ impl UnitView {
             callees: Vec::new(),
             observed: crate::observer::observing(req),
             frameless: Vec::new(),
+            frameless_names: Vec::new(),
         }
     }
 
@@ -603,8 +616,21 @@ impl UnitView {
         }
         if !self.funcs.contains(&f) {
             self.funcs.push(f);
+            let frameless = (self.epoch.func(f).and_then(|func| func.op_array()))
+                .is_some_and(|body| body.oplines.iter().any(|op| op.opcode.is_frameless_icall()));
+            if frameless && self.frameless_names.is_empty() {
+                self.frameless_names = req.shared.frameless_names();
+            }
         }
         true
+    }
+
+    /// `zend_flf_functions` by name, as the dump of an op array the view
+    /// holds names the native a `FRAMELESS_ICALL_*` calls; empty until
+    /// [`UnitView::hold`] accepts an op array with such a call.
+    #[must_use]
+    pub fn frameless_names(&self) -> &[Name] {
+        &self.frameless_names
     }
 
     /// Accept class `c` where every request shares it, the engine's own
@@ -916,6 +942,19 @@ impl UnitView {
             return None;
         }
         self.epoch.func(f)?.parameters()
+    }
+
+    /// The declaration the op array `f` names is the body of and the class
+    /// it is declared in, php's `function_name` and `scope`, which
+    /// php's analysis of the op array reads; none unless [`UnitView::hold`]
+    /// accepted it.
+    #[must_use]
+    pub fn declaration(&self, f: FuncRef) -> Option<Declaration<'_>> {
+        if !self.funcs.contains(&f) {
+            return None;
+        }
+        let (function, scope) = self.epoch.func(f)?.declaration()?;
+        Some(Declaration { function, scope })
     }
 
     /// The linked record of class `c`; none unless

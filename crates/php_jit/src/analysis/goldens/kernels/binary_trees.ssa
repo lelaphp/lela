@@ -1,0 +1,327 @@
+make_tree:
+     ; (lines=16, args=1, vars=2, tmps=6, ssa_vars=12)
+     ; (JIT)
+     ; binary_trees.php:15-22
+     ; return  [rc1, rcn, [packed, hash] array [long] of [any]] RANGE[0..0]
+     ; #0.CV0($depth) NOVAL [undef]
+     ; #1.CV1($d) NOVAL [undef]
+BB0:
+     ; start lines=[0-0]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 #2.CV0($depth) [long] RANGE[MIN..MAX] = RECV 1
+
+BB1:
+     ; recv follow entry lines=[1-2]
+     ; from=(BB0)
+     ; to=(BB3, BB2)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB2, BB3)
+0001 #3.T2 [bool] = IS_IDENTICAL #2.CV0($depth) [long] RANGE[MIN..MAX] int(0)
+0002 JMPZ #3.T2 [bool] BB3
+
+BB2:
+     ; follow exit lines=[3-3]
+     ; from=(BB1)
+     ; idom=BB1
+     ; level=2
+0003 RETURN array(...)
+
+BB3:
+     ; target lines=[4-8]
+     ; from=(BB1)
+     ; to=(BB4)
+     ; idom=BB1
+     ; level=2
+     ; children=(BB4)
+0004 #4.T3 [long, double] RANGE[--..9223372036854775806] = SUB #2.CV0($depth) [long] RANGE[MIN..MAX] int(1)
+0005 ASSIGN #1.CV1($d) NOVAL [undef] -> #5.CV1($d) [long, double] RANGE[--..9223372036854775806] #4.T3 [long, double] RANGE[--..9223372036854775806]
+0006 INIT_FCALL_BY_NAME 1 string("make_tree")
+0007 SEND_VAR_EX #5.CV1($d) [long, double] RANGE[--..9223372036854775806] -> #6.CV1($d) [ref, rc1, rcn, any] 1
+0008 #7.V5 [ref, rc1, rcn, any] = DO_FCALL_BY_NAME
+
+BB4:
+     ; follow entry lines=[9-12]
+     ; from=(BB3)
+     ; to=(BB5)
+     ; idom=BB3
+     ; level=3
+     ; children=(BB5)
+0009 #8.T6 [rc1, [packed, hash] array [long] of [any]] = INIT_ARRAY 2 (packed) #7.V5 [ref, rc1, rcn, any] NEXT
+0010 INIT_FCALL_BY_NAME 1 string("make_tree")
+0011 SEND_VAR_EX #6.CV1($d) [ref, rc1, rcn, any] -> #9.CV1($d) NOVAL [ref, rc1, rcn, any] 1
+0012 #10.V7 [ref, rc1, rcn, any] = DO_FCALL_BY_NAME
+
+BB5:
+     ; follow exit entry lines=[13-14]
+     ; from=(BB4)
+     ; idom=BB4
+     ; level=4
+0013 ADD_ARRAY_ELEMENT #10.V7 [ref, rc1, rcn, any] NEXT #8.T6 [rc1, [packed, hash] array [long] of [any]] -> #11.T6 [rc1, [packed, hash] array [long] of [any]]
+0014 RETURN #11.T6 [rc1, [packed, hash] array [long] of [any]]
+
+check_tree:
+     ; (lines=21, args=1, vars=1, tmps=8, ssa_vars=13)
+     ; (JIT)
+     ; binary_trees.php:24-30
+     ; return  [long]
+     ; #0.CV0($node) NOVAL [undef]
+BB0:
+     ; start lines=[0-0]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 #1.CV0($node) [rc1, rcn, any] = RECV 1
+
+BB1:
+     ; recv follow entry lines=[1-3]
+     ; from=(BB0)
+     ; to=(BB3, BB2)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB2, BB3)
+0001 #2.T1 [rc1, rcn, any] = FETCH_DIM_R #1.CV0($node) [rc1, rcn, any] int(0)
+0002 #3.T2 [bool] = TYPE_CHECK (null) #2.T1 [rc1, rcn, any]
+0003 JMPZ #3.T2 [bool] BB3
+
+BB2:
+     ; follow exit lines=[4-4]
+     ; from=(BB1)
+     ; idom=BB1
+     ; level=2
+0004 RETURN int(1)
+
+BB3:
+     ; target lines=[5-9]
+     ; from=(BB1)
+     ; to=(BB4)
+     ; idom=BB1
+     ; level=2
+     ; children=(BB4)
+0005 INIT_FCALL_BY_NAME 1 string("check_tree")
+0006 CHECK_FUNC_ARG 1
+0007 #5.V3 [ind, ref, rc1, rcn, any] = FETCH_DIM_FUNC_ARG #1.CV0($node) [rc1, rcn, any] -> #4.CV0($node) [rc1, rcn, any] int(0)
+0008 SEND_FUNC_ARG #5.V3 [ind, ref, rc1, rcn, any] 1
+0009 #6.V4 [ref, rc1, rcn, any] = DO_FCALL_BY_NAME
+
+BB4:
+     ; follow entry lines=[10-15]
+     ; from=(BB3)
+     ; to=(BB5)
+     ; idom=BB3
+     ; level=3
+     ; children=(BB5)
+0010 #7.T5 [rc1, false, long, double, object] = ADD int(1) #6.V4 [ref, rc1, rcn, any]
+0011 INIT_FCALL_BY_NAME 1 string("check_tree")
+0012 CHECK_FUNC_ARG 1
+0013 #9.V6 [ind, ref, rc1, rcn, any] = FETCH_DIM_FUNC_ARG #4.CV0($node) [rc1, rcn, any] -> #8.CV0($node) NOVAL [rc1, rcn, any] int(1)
+0014 SEND_FUNC_ARG #9.V6 [ind, ref, rc1, rcn, any] 1
+0015 #10.V7 [ref, rc1, rcn, any] = DO_FCALL_BY_NAME
+
+BB5:
+     ; follow exit entry lines=[16-18]
+     ; from=(BB4)
+     ; idom=BB4
+     ; level=4
+0016 #11.T8 [rc1, false, long, double, object] = ADD #7.T5 [rc1, false, long, double, object] #10.V7 [ref, rc1, rcn, any]
+0017 VERIFY_RETURN_TYPE #11.T8 [rc1, false, long, double, object] -> #12.T8 [long]
+0018 RETURN #12.T8 [long]
+
+$_main:
+     ; (lines=65, args=0, vars=10, tmps=32, ssa_vars=0)
+     ; (JIT)
+     ; binary_trees.php:1-51
+     ; return  [] RANGE[0..0]
+BB0:
+     ; start lines=[0-4]
+     ; to=(BB2, BB1)
+     ; level=0
+     ; children=(BB1, BB2, BB3)
+0000 ASSIGN CV0($N) int(6)
+0001 ASSIGN CV1($minDepth) int(4)
+0002 T12 = ADD CV1($minDepth) int(2)
+0003 T13 = IS_SMALLER CV0($N) T12
+0004 JMPZ T13 BB2
+
+BB1:
+     ; follow lines=[5-7]
+     ; from=(BB0)
+     ; to=(BB3)
+     ; idom=BB0
+     ; level=1
+0005 T14 = ADD CV1($minDepth) int(2)
+0006 T15 = QM_ASSIGN T14
+0007 JMP BB3
+
+BB2:
+     ; target lines=[8-8]
+     ; from=(BB0)
+     ; to=(BB3)
+     ; idom=BB0
+     ; level=1
+0008 T15 = QM_ASSIGN CV0($N)
+
+BB3:
+     ; follow target lines=[9-14]
+     ; from=(BB1, BB2)
+     ; to=(BB4)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB4)
+0009 ASSIGN CV2($maxDepth) T15
+0010 T17 = ADD CV2($maxDepth) int(1)
+0011 ASSIGN CV3($stretchDepth) T17
+0012 INIT_FCALL 1 208 string("make_tree")
+0013 SEND_VAR CV3($stretchDepth) 1
+0014 V19 = DO_UCALL
+
+BB4:
+     ; follow entry lines=[15-21]
+     ; from=(BB3)
+     ; to=(BB5)
+     ; idom=BB3
+     ; level=2
+     ; children=(BB5)
+0015 ASSIGN CV4($stretch) V19
+0016 INIT_FCALL 3 128 string("printf")
+0017 SEND_VAL string("stretch tree of depth %d\t check: %d\n") 1
+0018 SEND_VAR CV3($stretchDepth) 2
+0019 INIT_FCALL 1 224 string("check_tree")
+0020 SEND_VAR CV4($stretch) 1
+0021 V21 = DO_UCALL
+
+BB5:
+     ; follow entry lines=[22-26]
+     ; from=(BB4)
+     ; to=(BB6)
+     ; idom=BB4
+     ; level=3
+     ; children=(BB6)
+0022 SEND_VAR V21 3
+0023 DO_ICALL
+0024 INIT_FCALL 1 208 string("make_tree")
+0025 SEND_VAR CV2($maxDepth) 1
+0026 V23 = DO_UCALL
+
+BB6:
+     ; follow entry lines=[27-29]
+     ; from=(BB5)
+     ; to=(BB13)
+     ; idom=BB5
+     ; level=4
+     ; children=(BB13)
+0027 ASSIGN CV5($longLived) V23
+0028 ASSIGN CV6($depth) CV1($minDepth)
+0029 JMP BB13
+
+BB7:
+     ; target lines=[30-36]
+     ; from=(BB13)
+     ; to=(BB11)
+     ; idom=BB13
+     ; level=6
+     ; loop_header=13
+     ; children=(BB11)
+0030 T26 = SUB CV2($maxDepth) CV6($depth)
+0031 T27 = ADD T26 CV1($minDepth)
+0032 T28 = SL int(1) T27
+0033 ASSIGN CV7($iterations) T28
+0034 ASSIGN CV8($check) int(0)
+0035 ASSIGN CV9($i) int(0)
+0036 JMP BB11
+
+BB8:
+     ; target lines=[37-40]
+     ; from=(BB11)
+     ; to=(BB9)
+     ; idom=BB11
+     ; level=8
+     ; loop_header=11
+     ; children=(BB9)
+0037 INIT_FCALL 1 224 string("check_tree")
+0038 INIT_FCALL 1 208 string("make_tree")
+0039 SEND_VAR CV6($depth) 1
+0040 V32 = DO_UCALL
+
+BB9:
+     ; follow entry lines=[41-42]
+     ; from=(BB8)
+     ; to=(BB10)
+     ; idom=BB8
+     ; level=9
+     ; loop_header=11
+     ; children=(BB10)
+0041 SEND_VAR V32 1
+0042 V33 = DO_UCALL
+
+BB10:
+     ; follow entry lines=[43-44]
+     ; from=(BB9)
+     ; to=(BB11)
+     ; idom=BB9
+     ; level=10
+     ; loop_header=11
+0043 ASSIGN_OP (ADD) CV8($check) V33
+0044 PRE_INC CV9($i)
+
+BB11:
+     ; follow target loop_header lines=[45-46]
+     ; from=(BB7, BB10)
+     ; to=(BB8, BB12)
+     ; idom=BB7
+     ; level=7
+     ; loop_header=13
+     ; children=(BB8, BB12)
+0045 T36 = IS_SMALLER CV9($i) CV7($iterations)
+0046 JMPNZ T36 BB8
+
+BB12:
+     ; follow lines=[47-53]
+     ; from=(BB11)
+     ; to=(BB13)
+     ; idom=BB11
+     ; level=8
+     ; loop_header=13
+0047 INIT_FCALL 4 144 string("printf")
+0048 SEND_VAL string("%d\t trees of depth %d\t check: %d\n") 1
+0049 SEND_VAR CV7($iterations) 2
+0050 SEND_VAR CV6($depth) 3
+0051 SEND_VAR CV8($check) 4
+0052 DO_ICALL
+0053 ASSIGN_OP (ADD) CV6($depth) int(2)
+
+BB13:
+     ; follow target loop_header lines=[54-55]
+     ; from=(BB6, BB12)
+     ; to=(BB7, BB14)
+     ; idom=BB6
+     ; level=5
+     ; children=(BB7, BB14)
+0054 T39 = IS_SMALLER_OR_EQUAL CV6($depth) CV2($maxDepth)
+0055 JMPNZ T39 BB7
+
+BB14:
+     ; follow lines=[56-61]
+     ; from=(BB13)
+     ; to=(BB15)
+     ; idom=BB13
+     ; level=6
+     ; children=(BB15)
+0056 INIT_FCALL 3 128 string("printf")
+0057 SEND_VAL string("long lived tree of depth %d\t check: %d\n") 1
+0058 SEND_VAR CV2($maxDepth) 2
+0059 INIT_FCALL 1 224 string("check_tree")
+0060 SEND_VAR CV5($longLived) 1
+0061 V40 = DO_UCALL
+
+BB15:
+     ; follow exit entry lines=[62-64]
+     ; from=(BB14)
+     ; idom=BB14
+     ; level=7
+0062 SEND_VAR V40 3
+0063 DO_ICALL
+0064 RETURN int(1)
+

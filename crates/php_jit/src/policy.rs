@@ -91,6 +91,9 @@ pub(crate) enum Compile {
 pub(crate) struct JitDebug(u32);
 
 impl JitDebug {
+    /// php's analysis of each op array a compiled trace passes through,
+    /// `ZEND_JIT_DEBUG_SSA`.
+    pub(crate) const SSA: u32 = 1 << 1;
     /// A `/tmp/perf-<pid>.map` line per trace.
     pub(crate) const PERF: u32 = 1 << 4;
     /// A jitdump record per trace, where php writes one.

@@ -1,0 +1,225 @@
+k:
+     ; (lines=13, args=1, vars=3, tmps=6, ssa_vars=16)
+     ; (JIT)
+     ; default_call.php:11-17
+     ; return  [rc1, rcn, false, long, double, object]
+     ; #0.CV0($n) NOVAL [undef]
+     ; #1.CV1($s) NOVAL [undef]
+     ; #2.CV2($i) NOVAL [undef]
+BB0:
+     ; start lines=[0-0]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 #3.CV0($n) [rc1, rcn, any] = RECV 1
+
+BB1:
+     ; recv follow entry lines=[1-3]
+     ; from=(BB0)
+     ; to=(BB4)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB4)
+0001 ASSIGN #1.CV1($s) NOVAL [undef] -> #4.CV1($s) [double] float(0)
+0002 ASSIGN #2.CV2($i) NOVAL [undef] -> #5.CV2($i) [long] RANGE[0..0] int(0)
+0003 JMP BB4
+
+BB2:
+     ; target lines=[4-6]
+     ; from=(BB4)
+     ; to=(BB3)
+     ; idom=BB4
+     ; level=3
+     ; loop_header=4
+     ; children=(BB3)
+     #10.CV0($n) [rc1, rcn, any] RANGE[1..++] = Pi<BB4>(#6.CV0($n) [rc1, rcn, any] & RANGE[#8.CV2($i) [long, double] RANGE[0..++] + 1 .. ++])
+     #11.CV2($i) [long, double] RANGE[0..++] = Pi<BB4>(#8.CV2($i) [long, double] RANGE[0..++] & RANGE[-- .. #6.CV0($n) [rc1, rcn, any] - 1])
+0004 INIT_FCALL 1 208 string("f")
+0005 SEND_VAR #11.CV2($i) [long, double] RANGE[0..++] -> #12.CV2($i) [long, double] RANGE[0..++] 1
+0006 #13.V5 [rc1, rcn, any] = DO_UCALL
+
+BB3:
+     ; follow entry lines=[7-8]
+     ; from=(BB2)
+     ; to=(BB4)
+     ; idom=BB2
+     ; level=4
+     ; loop_header=4
+0007 ASSIGN_OP (ADD) #7.CV1($s) [rc1, rcn, false, long, double, object] -> #14.CV1($s) [rc1, rcn, false, long, double, object] #13.V5 [rc1, rcn, any]
+0008 PRE_INC #12.CV2($i) [long, double] RANGE[0..++] -> #15.CV2($i) [long, double] RANGE[1..++]
+
+BB4:
+     ; follow target loop_header lines=[9-10]
+     ; from=(BB1, BB3)
+     ; to=(BB2, BB5)
+     ; idom=BB1
+     ; level=2
+     ; children=(BB2, BB5)
+     #6.CV0($n) [rc1, rcn, any] = Phi(#3.CV0($n) [rc1, rcn, any], #10.CV0($n) [rc1, rcn, any] RANGE[1..++])
+     #7.CV1($s) [rc1, rcn, false, long, double, object] = Phi(#4.CV1($s) [double], #14.CV1($s) [rc1, rcn, false, long, double, object])
+     #8.CV2($i) [long, double] RANGE[0..++] = Phi(#5.CV2($i) [long] RANGE[0..0], #15.CV2($i) [long, double] RANGE[1..++])
+0009 #9.T8 [bool] = IS_SMALLER #8.CV2($i) [long, double] RANGE[0..++] #6.CV0($n) [rc1, rcn, any]
+0010 JMPNZ #9.T8 [bool] BB2
+
+BB5:
+     ; follow exit lines=[11-11]
+     ; from=(BB4)
+     ; idom=BB4
+     ; level=3
+0011 RETURN #7.CV1($s) [rc1, rcn, false, long, double, object]
+
+f:
+     ; (lines=10, args=4, vars=4, tmps=4, ssa_vars=12)
+     ; (JIT)
+     ; default_call.php:9-9
+     ; return  [rc1, rcn, false, long, double, object]
+     ; #0.CV0($a) NOVAL [undef]
+     ; #1.CV1($b) NOVAL [undef]
+     ; #2.CV2($c) NOVAL [undef]
+     ; #3.CV3($d) NOVAL [undef]
+BB0:
+     ; start lines=[0-0]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 #4.CV0($a) [rc1, rcn, any] = RECV 1
+
+BB1:
+     ; recv follow entry lines=[1-1]
+     ; from=(BB0)
+     ; to=(BB2)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB2)
+0001 RECV_INIT 2 int(2) #1.CV1($b) NOVAL [undef] -> #5.CV1($b) [rc1, rcn, any]
+
+BB2:
+     ; recv follow entry lines=[2-2]
+     ; from=(BB1)
+     ; to=(BB3)
+     ; idom=BB1
+     ; level=2
+     ; children=(BB3)
+0002 RECV_INIT 3 float(1.5) #2.CV2($c) NOVAL [undef] -> #6.CV2($c) [rc1, rcn, any]
+
+BB3:
+     ; recv follow entry lines=[3-3]
+     ; from=(BB2)
+     ; to=(BB4)
+     ; idom=BB2
+     ; level=3
+     ; children=(BB4)
+0003 RECV_INIT 4 string("s") #3.CV3($d) NOVAL [undef] -> #7.CV3($d) [rc1, rcn, any]
+
+BB4:
+     ; recv follow exit entry lines=[4-8]
+     ; from=(BB3)
+     ; idom=BB3
+     ; level=4
+0004 #8.T4 [rc1, false, long, double, array of [any, ref], object] = ADD #4.CV0($a) [rc1, rcn, any] #5.CV1($b) [rc1, rcn, any]
+0005 #9.T5 [rc1, false, long, double, array of [any, ref], object] = ADD #8.T4 [rc1, false, long, double, array of [any, ref], object] #6.CV2($c) [rc1, rcn, any]
+0006 #10.T6 [long] RANGE[0..MAX] = STRLEN #7.CV3($d) [rc1, rcn, any]
+0007 #11.T7 [rc1, false, long, double, object] = ADD #9.T5 [rc1, false, long, double, array of [any, ref], object] #10.T6 [long] RANGE[0..MAX]
+0008 RETURN #11.T7 [rc1, false, long, double, object]
+
+c:
+     ; (lines=13, args=1, vars=3, tmps=6, ssa_vars=16)
+     ; (JIT)
+     ; default_call.php:18-24
+     ; return  [rc1, rcn, false, long, double, object]
+     ; #0.CV0($n) NOVAL [undef]
+     ; #1.CV1($s) NOVAL [undef]
+     ; #2.CV2($i) NOVAL [undef]
+BB0:
+     ; start lines=[0-0]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 #3.CV0($n) [rc1, rcn, any] = RECV 1
+
+BB1:
+     ; recv follow entry lines=[1-3]
+     ; from=(BB0)
+     ; to=(BB4)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB4)
+0001 ASSIGN #1.CV1($s) NOVAL [undef] -> #4.CV1($s) [long] RANGE[0..0] int(0)
+0002 ASSIGN #2.CV2($i) NOVAL [undef] -> #5.CV2($i) [long] RANGE[0..0] int(0)
+0003 JMP BB4
+
+BB2:
+     ; target lines=[4-6]
+     ; from=(BB4)
+     ; to=(BB3)
+     ; idom=BB4
+     ; level=3
+     ; loop_header=4
+     ; children=(BB3)
+     #10.CV0($n) [rc1, rcn, any] RANGE[1..++] = Pi<BB4>(#6.CV0($n) [rc1, rcn, any] & RANGE[#8.CV2($i) [long, double] RANGE[0..++] + 1 .. ++])
+     #11.CV2($i) [long, double] RANGE[0..++] = Pi<BB4>(#8.CV2($i) [long, double] RANGE[0..++] & RANGE[-- .. #6.CV0($n) [rc1, rcn, any] - 1])
+0004 INIT_FCALL 1 128 string("g")
+0005 SEND_VAR #11.CV2($i) [long, double] RANGE[0..++] -> #12.CV2($i) [long, double] RANGE[0..++] 1
+0006 #13.V5 [rc1, rcn, any] = DO_UCALL
+
+BB3:
+     ; follow entry lines=[7-8]
+     ; from=(BB2)
+     ; to=(BB4)
+     ; idom=BB2
+     ; level=4
+     ; loop_header=4
+0007 ASSIGN_OP (ADD) #7.CV1($s) [rc1, rcn, false, long, double, object] -> #14.CV1($s) [rc1, rcn, false, long, double, object] #13.V5 [rc1, rcn, any]
+0008 PRE_INC #12.CV2($i) [long, double] RANGE[0..++] -> #15.CV2($i) [long, double] RANGE[1..++]
+
+BB4:
+     ; follow target loop_header lines=[9-10]
+     ; from=(BB1, BB3)
+     ; to=(BB2, BB5)
+     ; idom=BB1
+     ; level=2
+     ; children=(BB2, BB5)
+     #6.CV0($n) [rc1, rcn, any] = Phi(#3.CV0($n) [rc1, rcn, any], #10.CV0($n) [rc1, rcn, any] RANGE[1..++])
+     #7.CV1($s) [rc1, rcn, false, long, double, object] = Phi(#4.CV1($s) [long] RANGE[0..0], #14.CV1($s) [rc1, rcn, false, long, double, object])
+     #8.CV2($i) [long, double] RANGE[0..++] = Phi(#5.CV2($i) [long] RANGE[0..0], #15.CV2($i) [long, double] RANGE[1..++])
+0009 #9.T8 [bool] = IS_SMALLER #8.CV2($i) [long, double] RANGE[0..++] #6.CV0($n) [rc1, rcn, any]
+0010 JMPNZ #9.T8 [bool] BB2
+
+BB5:
+     ; follow exit lines=[11-11]
+     ; from=(BB4)
+     ; idom=BB4
+     ; level=3
+0011 RETURN #7.CV1($s) [rc1, rcn, false, long, double, object]
+
+g:
+     ; (lines=5, args=2, vars=2, tmps=1, ssa_vars=5)
+     ; (JIT)
+     ; default_call.php:10-10
+     ; return  [rc1, rcn, false, long, double, array of [any, ref], object]
+     ; #0.CV0($a) NOVAL [undef]
+     ; #1.CV1($b) NOVAL [undef]
+BB0:
+     ; start lines=[0-0]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 #2.CV0($a) [rc1, rcn, any] = RECV 1
+
+BB1:
+     ; recv follow entry lines=[1-1]
+     ; from=(BB0)
+     ; to=(BB2)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB2)
+0001 RECV_INIT 2 zval(type=11) #1.CV1($b) NOVAL [undef] -> #3.CV1($b) [rc1, rcn, any]
+
+BB2:
+     ; recv follow exit entry lines=[2-3]
+     ; from=(BB1)
+     ; idom=BB1
+     ; level=2
+0002 #4.T2 [rc1, false, long, double, array of [any, ref], object] = ADD #2.CV0($a) [rc1, rcn, any] #3.CV1($b) [rc1, rcn, any]
+0003 RETURN #4.T2 [rc1, false, long, double, array of [any, ref], object]
+
