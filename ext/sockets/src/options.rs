@@ -647,9 +647,12 @@ fn set_option(
     if level == i64::from(libc::IPPROTO_TCP) && option == i64::from(libc::TCP_CONGESTION) {
         let ValueRef::Str(s) = value.as_ref() else {
             let given = value_name(req, value);
-            let tail = format!(
-                "be of type string when argument #3 ($option) is TCP_CONGESTION, {given} given"
-            );
+            let tail = [
+                b"be of type string when argument #3 ($option) is TCP_CONGESTION, ".as_slice(),
+                &given,
+                b" given",
+            ]
+            .concat();
             return Err(arg_type_error(req, 4, &tail));
         };
         return Ok(apply(req, socket, fd, lvl, opt, s.as_bytes()));
