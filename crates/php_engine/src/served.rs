@@ -47,7 +47,7 @@ pub(crate) fn served(
     let mut made = MADE.lock().unwrap_or_else(PoisonError::into_inner);
     let held = made
         .iter()
-        .find(|held| held.extension == extension && std::ptr::addr_eq(held.table, table));
+        .find(|held| held.extension == extension && std::ptr::eq(held.table, table));
     if let Some(held) = held {
         return *held;
     }
@@ -177,5 +177,39 @@ impl ClassIterator for ServedIterator {
         fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown>;
         fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown>;
         fn release(&mut self, req: &mut Request, object: PhpObject);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ExtensionId, ObjectHandlers, served};
+
+    struct First;
+    struct Second;
+
+    impl ObjectHandlers for First {
+        fn iterator_size(&self) -> usize {
+            11
+        }
+    }
+
+    impl ObjectHandlers for Second {
+        fn iterator_size(&self) -> usize {
+            22
+        }
+    }
+
+    #[test]
+    fn tables_at_the_same_data_address_keep_their_own_slots() {
+        let first: &'static dyn ObjectHandlers = Box::leak(Box::new(First));
+        let second: &'static dyn ObjectHandlers = Box::leak(Box::new(Second));
+        assert!(std::ptr::addr_eq(first, second));
+        let extension = ExtensionId(3584);
+        let first_served = served(first, extension);
+        let second_served = served(second, extension);
+        assert_eq!(first_served.iterator_size(), 11);
+        assert_eq!(second_served.iterator_size(), 22);
+        assert!(std::ptr::eq(first_served, served(first, extension)));
+        assert!(std::ptr::eq(second_served, served(second, extension)));
     }
 }
