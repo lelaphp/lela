@@ -39,6 +39,7 @@ ObjectShape
 Phi
 PhiId
 PhiKind
+Position
 Property
 Range
 Range::ANY
@@ -55,6 +56,10 @@ Ssa::var
 SsaOp
 SsaVar
 SsaVarInfo
+TraceFrame
+TraceFrame::new
+TraceFrame::propagate_range
+TraceFrame::update_type_info
 Types
 Types::ANY
 Types::ARRAY

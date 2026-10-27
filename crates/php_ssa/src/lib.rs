@@ -36,6 +36,7 @@ mod func_info;
 mod infer;
 mod range;
 mod ssa;
+mod trace;
 mod types;
 mod update;
 
@@ -44,6 +45,7 @@ use php_unit::{OpArray, OperandKind, Opline};
 
 pub use cfg::{Block, Cfg};
 pub use ssa::{Alias, Constraint, Negative, Phi, PhiKind, RangeConstraint, Ssa, SsaOp, SsaVarInfo};
+pub use trace::{Position, TraceFrame};
 pub use types::{ClassOf, Range, Returns, Types, VarInfo};
 
 /// A basic block's number, its index in [`Cfg::blocks`].

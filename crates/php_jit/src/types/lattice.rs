@@ -1,102 +1,199 @@
-//! What a value of a trace may be (`jit-design.md` §4.2): [`Types`], the
-//! subset of php's `MAY_BE_*` bits (`Z/Zend/zend_type_info.h`) the
-//! inference keeps, and the one transfer per opcode the trace SSA reads,
-//! php's `zend_update_type_info` (`Z/Zend/Optimizer/zend_inference.c`)
-//! over those bits for the scalar core and "anything" past it. php's
-//! reference counts and ranges are not kept: a long arithmetic is long
-//! or double here wherever php's range inference does not prove it
-//! stays long, which costs a guard and never a wrong answer.
+//! What a value of a trace may be (`jit-design.md` §4.2): [`Types`],
+//! php's `MAY_BE_*` bits (`Z/Zend/zend_type_info.h`) as its inference
+//! types a variable, and the part of them the trace decides by.
 
 use php_heap::{Zval, ZvalType};
+use php_ssa::Types as Php;
 use php_unit::Opcode;
 
 use super::Layout;
 
-/// A set of the kinds a value may be, php's `MAY_BE_*` with one bit per
-/// `IS_*` from `IS_UNDEF` to `IS_RESOURCE` at php's places, `MAY_BE_REF`,
-/// and an array's two layouts, php's `MAY_BE_ARRAY_PACKED` and
-/// `MAY_BE_ARRAY_HASH`, which mean something only beside `ARRAY`.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub(crate) struct Types(u16);
+/// What a value may be: php's `MAY_BE_*` bits (`Z/Zend/zend_type_info.h`)
+/// whole, as php's inference types a variable, the kinds from `IS_UNDEF`
+/// to `IS_RESOURCE` and `MAY_BE_REF` at php's places, an array's keys and
+/// elements, its reference counts and `MAY_BE_INDIRECT`. What the trace
+/// decides by is a part of them, its *view*: the kinds, a reference, the
+/// indirection, and an array's two layouts, php's `MAY_BE_PACKED` and
+/// `MAY_BE_HASH` (an array whose keys php does not know, or that may be
+/// php's empty array, being of either), which mean something only beside
+/// `ARRAY`. Two sets are equal, and one is within another, by their
+/// views: what php knows of an array's elements or a count rides along.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Types(Php);
+
+impl PartialEq for Types {
+    fn eq(&self, other: &Types) -> bool {
+        self.view() == other.view()
+    }
+}
+
+impl Eq for Types {}
+
+impl std::hash::Hash for Types {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.view().hash(state);
+    }
+}
+
+/// The kinds and `MAY_BE_REF`, at php's places.
+const KINDS_REF: u32 = 0x7ff;
+/// The view's bits for a layout: php's `MAY_BE_ARRAY_PACKED`, and one of
+/// php's two hash bits standing for both.
+const VIEW_PACKED: u32 = 1 << 21;
+const VIEW_HASH: u32 = 1 << 22;
+/// php's `MAY_BE_INDIRECT`.
+const VIEW_INDIRECT: u32 = 1 << 25;
 
 impl Types {
-    /// The bits, as a recorded trace's text form writes a native's
-    /// declared return ([`Types::of_bits`]).
-    pub(crate) fn bits(self) -> u16 {
+    /// The bits the trace decides by.
+    fn view(self) -> u32 {
+        let bits = self.0.0;
+        let mut view = bits & (KINDS_REF | VIEW_INDIRECT);
+        if bits & Php::ARRAY.0 != 0 {
+            let packed = bits & Php::PACKED.0 != 0;
+            let hash = bits & (Php::NUMERIC_HASH.0 | Php::STRING_HASH.0) != 0;
+            let empty = bits & Php::EMPTY.0 != 0;
+            view |= match (packed, hash || empty) {
+                (true, false) => VIEW_PACKED,
+                (false, true) => VIEW_HASH,
+                _ => VIEW_PACKED | VIEW_HASH,
+            };
+        } else {
+            view |= bits & Php::PACKED.0;
+            if bits & (Php::NUMERIC_HASH.0 | Php::STRING_HASH.0) != 0 {
+                view |= VIEW_HASH;
+            }
+        }
+        view
+    }
+
+    /// php's bits, as its inference reads and writes them.
+    pub(crate) const fn info(self) -> Php {
         self.0
     }
 
-    /// The types `bits` names; none for a bit no type has.
-    pub(crate) fn of_bits(bits: u16) -> Option<Types> {
-        let all = Types::UNKNOWN.0 | Types::LAYOUTS;
-        (bits & !all == 0).then_some(Types(bits))
+    /// The types php's bits `info` name, its code generator's marks,
+    /// `MAY_BE_GUARD` and `MAY_BE_PACKED_GUARD` (`MAY_BE_CLASS_GUARD`'s
+    /// bit), left out.
+    pub(crate) fn of_info(info: Php) -> Types {
+        Types(info.without(Php::GUARD | Php(1 << 27)))
     }
 
-    pub(crate) const NONE: Types = Types(0);
-    pub(crate) const UNDEF: Types = Types(1 << 0);
-    pub(crate) const NULL: Types = Types(1 << 1);
-    pub(crate) const FALSE: Types = Types(1 << 2);
-    pub(crate) const TRUE: Types = Types(1 << 3);
-    pub(crate) const LONG: Types = Types(1 << 4);
-    pub(crate) const DOUBLE: Types = Types(1 << 5);
-    pub(crate) const STRING: Types = Types(1 << 6);
-    pub(crate) const ARRAY: Types = Types(1 << 7);
-    pub(crate) const OBJECT: Types = Types(1 << 8);
-    pub(crate) const RESOURCE: Types = Types(1 << 9);
+    /// The bits, as a recorded trace's text form writes a native's
+    /// declared return ([`Types::of_bits`]): the view, in the compact
+    /// form the text has always carried.
+    pub(crate) fn bits(self) -> u16 {
+        let view = self.view();
+        let mut bits = u16::try_from(view & KINDS_REF).unwrap_or(0);
+        if view & VIEW_PACKED != 0 {
+            bits |= 1 << 11;
+        }
+        if view & VIEW_HASH != 0 {
+            bits |= 1 << 12;
+        }
+        if view & VIEW_INDIRECT != 0 {
+            bits |= 1 << 13;
+        }
+        bits
+    }
+
+    /// The types `bits` names; none for a bit no type has. A kind is
+    /// php's of its tag, its counts and an array's elements anything.
+    pub(crate) fn of_bits(bits: u16) -> Option<Types> {
+        if bits & !0x3fff != 0 {
+            return None;
+        }
+        let mut types = Types::NONE;
+        for (tag, bit) in TAGS {
+            if u32::from(bits) & bit.0.0 != 0 {
+                types = types.or(Types::of_tag(tag));
+            }
+        }
+        if bits & (1 << 10) != 0 {
+            types = types.or(Types::REF);
+        }
+        if bits & (1 << 13) != 0 {
+            types = types.or(Types::INDIRECT);
+        }
+        if types.meets(Types::ARRAY) {
+            let layouts = match (bits & (1 << 11) != 0, bits & (1 << 12) != 0) {
+                (true, false) => Some(Layout::Packed),
+                (false, true) => Some(Layout::Hash),
+                _ => None,
+            };
+            if let Some(layout) = layouts {
+                types = types.laid_out(layout);
+            }
+        }
+        Some(types)
+    }
+
+    pub(crate) const NONE: Types = Types(Php::NONE);
+    pub(crate) const UNDEF: Types = Types(Php::UNDEF);
+    pub(crate) const NULL: Types = Types(Php::NULL);
+    pub(crate) const FALSE: Types = Types(Php::FALSE);
+    pub(crate) const TRUE: Types = Types(Php::TRUE);
+    pub(crate) const LONG: Types = Types(Php::LONG);
+    pub(crate) const DOUBLE: Types = Types(Php::DOUBLE);
+    pub(crate) const STRING: Types = Types(Php::STRING);
+    pub(crate) const ARRAY: Types = Types(Php::ARRAY);
+    pub(crate) const OBJECT: Types = Types(Php::OBJECT);
+    pub(crate) const RESOURCE: Types = Types(Php::RESOURCE);
     /// php's `MAY_BE_REF`: the slot may hold a reference.
-    pub(crate) const REF: Types = Types(1 << 10);
+    pub(crate) const REF: Types = Types(Php::REF);
     /// An array that may be packed, php's `MAY_BE_ARRAY_PACKED`.
-    pub(crate) const PACKED: Types = Types(1 << 11);
-    /// An array that may be a hash, php's `MAY_BE_ARRAY_HASH`.
-    pub(crate) const HASH: Types = Types(1 << 12);
+    pub(crate) const PACKED: Types = Types(Php::PACKED);
+    /// An array that may be a hash, php's `MAY_BE_HASH`: either of its
+    /// hash keys.
+    pub(crate) const HASH: Types = Types(Php(Php::NUMERIC_HASH.0 | Php::STRING_HASH.0));
     /// php's `MAY_BE_INDIRECT`: the slot holds the address of a zval,
     /// `IS_INDIRECT`, which a fetch for writing leaves in its `VAR`.
-    pub(crate) const INDIRECT: Types = Types(1 << 13);
+    pub(crate) const INDIRECT: Types = Types(Php::INDIRECT);
 
-    pub(crate) const BOOL: Types = Types(Types::FALSE.0 | Types::TRUE.0);
-    pub(crate) const NUMBER: Types = Types(Types::LONG.0 | Types::DOUBLE.0);
-    /// php's `MAY_BE_ANY`: every kind a value can be, an array of either
-    /// layout.
-    pub(crate) const ANY: Types = Types(0x3fe | Types::PACKED.0 | Types::HASH.0);
+    pub(crate) const BOOL: Types = Types(Php::BOOL);
+    pub(crate) const NUMBER: Types = Types(Php(Php::LONG.0 | Php::DOUBLE.0));
+    /// Every kind a value can be, php's `MAY_BE_ANY` with an array of any
+    /// keys and elements and both counts, what php's inference knows of a
+    /// value it knows nothing of.
+    pub(crate) const ANY: Types = Types(Php::UNKNOWN);
     /// What a variable nothing narrowed may hold: anything, unset, or a
     /// reference to anything.
-    pub(crate) const UNKNOWN: Types = Types(Types::ANY.0 | Types::UNDEF.0 | Types::REF.0);
+    pub(crate) const UNKNOWN: Types = Types(Php(Php::UNKNOWN.0 | Php::UNDEF.0 | Php::REF.0));
     /// The kinds, without the layouts and without `REF`.
-    const KINDS: u16 = 0x3ff;
-    const LAYOUTS: u16 = Types::PACKED.0 | Types::HASH.0;
+    const KINDS: u32 = 0x3ff;
 
     /// Both.
     #[must_use]
     pub(crate) const fn or(self, other: Types) -> Types {
-        Types(self.0 | other.0)
+        Types(Php(self.0.0 | other.0.0))
     }
 
     /// What both allow.
     #[must_use]
     pub(crate) const fn and(self, other: Types) -> Types {
-        Types(self.0 & other.0)
+        Types(Php(self.0.0 & other.0.0))
     }
 
     /// These less `other`.
     #[must_use]
     pub(crate) const fn without(self, other: Types) -> Types {
-        Types(self.0 & !other.0)
+        Types(Php(self.0.0 & !other.0.0))
     }
 
     /// Whether any kind of `other` is one of these.
-    pub(crate) const fn meets(self, other: Types) -> bool {
-        self.0 & other.0 != 0
+    pub(crate) fn meets(self, other: Types) -> bool {
+        self.view() & other.view() != 0
     }
 
     /// Whether every kind of these is one of `other`.
-    pub(crate) const fn within(self, other: Types) -> bool {
-        self.0 & !other.0 == 0
+    pub(crate) fn within(self, other: Types) -> bool {
+        self.view() & !other.view() == 0
     }
 
     /// The kinds alone, php's `info & (MAY_BE_ANY|MAY_BE_UNDEF)`.
     #[must_use]
     pub(crate) const fn kinds(self) -> Types {
-        Types(self.0 & Types::KINDS)
+        Types(Php(self.0.0 & Types::KINDS))
     }
 
     /// The one kind these are, where they are one and no reference: what
@@ -106,7 +203,7 @@ impl Types {
             return None;
         }
         TAGS.iter()
-            .find(|(_, bit)| bit.0 == self.kinds().0)
+            .find(|(_, bit)| bit.kinds() == self.kinds())
             .map(|(tag, _)| *tag)
     }
 
@@ -122,55 +219,66 @@ impl Types {
         })
     }
 
-    /// The kinds of one tag, an array's of either layout, php's
-    /// `zend_jit_trace_type_to_info`; none for a tag no value has.
+    /// The kinds of one tag, php's `zend_jit_trace_type_to_info`: a
+    /// counted kind with both counts, an array of any keys and elements;
+    /// none for a tag no value has.
     pub(crate) fn of_tag(tag: ZvalType) -> Types {
-        match tag {
-            ZvalType::Array => Types::ARRAY.or(Types::PACKED).or(Types::HASH),
-            other => TAGS
-                .iter()
-                .find(|(t, _)| *t == other)
-                .map_or(Types::NONE, |(_, bit)| *bit),
-        }
+        Types::ANY.or(Types::UNDEF).narrowed(tag)
     }
 
-    /// The kinds of php's `IS_*` code `code`, as an opline names a type;
-    /// none for a code no value has.
-    pub(crate) fn of_code(code: u32) -> Option<Types> {
-        TAGS.iter()
-            .find(|(tag, _)| u32::from(*tag as u8) == code)
-            .map(|(tag, _)| Types::of_tag(*tag))
-    }
-
-    /// These narrowed to `tag`, php's `zend_jit_trace_type_to_info_ex`:
-    /// an array keeps the layouts it may have.
+    /// These narrowed to `tag`, php's `zend_jit_trace_type_to_info_ex`
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:356-369`): a scalar its kind
+    /// alone, a counted kind its counts kept, an array its keys, elements
+    /// and counts; none for a tag no value has.
     #[must_use]
     pub(crate) fn narrowed(self, tag: ZvalType) -> Types {
-        let to = Types::of_tag(tag);
-        if tag == ZvalType::Array {
-            let layouts = Types(self.0 & Types::LAYOUTS);
-            return Types::ARRAY.or(if layouts == Types::NONE {
-                Types(Types::LAYOUTS)
-            } else {
-                layouts
-            });
-        }
-        to
+        let Some((_, bit)) = TAGS.iter().find(|(t, _)| *t == tag) else {
+            return Types::NONE;
+        };
+        let info = self.0;
+        let kept = match tag {
+            ZvalType::Undef
+            | ZvalType::Null
+            | ZvalType::False
+            | ZvalType::True
+            | ZvalType::Long
+            | ZvalType::Double => Php::NONE,
+            ZvalType::Array => info & (Php::OF_ANY | Php::OF_REF | Php::KEY_ANY | Php::RC),
+            _ => info & Php::RC,
+        };
+        Types(bit.0 | kept)
     }
 
-    /// An array of one layout, where these are an array of either.
+    /// An array of one layout, where these are an array of either: a
+    /// packed array no hash and not php's empty one, which is no packed
+    /// array, as php's packed guard leaves it.
     #[must_use]
     pub(crate) fn laid_out(self, layout: Layout) -> Types {
-        self.without(Types(Types::LAYOUTS)).or(match layout {
-            Layout::Packed => Types::PACKED,
-            Layout::Hash => Types::HASH,
+        let mut info = self.0;
+        if info & Php::KEY_ANY == Php::NONE {
+            info |= Php::KEY_ANY;
+        }
+        Types(match layout {
+            Layout::Packed => {
+                info.without(Php::NUMERIC_HASH | Php::STRING_HASH | Php::EMPTY) | Php::PACKED
+            }
+            Layout::Hash => {
+                let hash = info & (Php::NUMERIC_HASH | Php::STRING_HASH);
+                let hash = if hash == Php::NONE {
+                    Php::NUMERIC_HASH | Php::STRING_HASH
+                } else {
+                    hash
+                };
+                info.without(Php::PACKED | Php::NUMERIC_HASH | Php::STRING_HASH) | hash
+            }
         })
     }
 
     /// Whether these are an array that may be either layout, php's
     /// `MAY_BE_PACKED(t) && MAY_BE_HASH(t) && (t & ANY|UNDEF) == ARRAY`.
     pub(crate) fn either_layout(self) -> bool {
-        self.kinds() == Types::ARRAY && self.0 & Types::LAYOUTS == Types::LAYOUTS
+        let view = self.view();
+        self.kinds() == Types::ARRAY && view & VIEW_PACKED != 0 && view & VIEW_HASH != 0
     }
 
     /// Whether a value of these kinds lives in a register alone: one
@@ -181,73 +289,56 @@ impl Types {
             && (self.kinds() == Types::BOOL || self.tag().is_some_and(is_scalar_tag))
     }
 
-    /// What php's inference knows of a value, in these bits: the kinds and
-    /// a reference at their places, an indirect slot, and an array's
-    /// layouts, php's `MAY_BE_PACKED` and `MAY_BE_HASH`, an array that may
-    /// be empty or whose keys php does not know being of either.
-    pub(crate) fn of_info(info: php_ssa::Types) -> Types {
-        use php_ssa::Types as Php;
-        let mut types = Types(u16::try_from(info.0 & 0x7ff).unwrap_or(0));
-        if info.has(Php::INDIRECT) {
-            types = types.or(Types::INDIRECT);
-        }
-        if info.has(Php::ARRAY) {
-            let packed = info.has(Php::PACKED);
-            let hash = info.has(Php::NUMERIC_HASH | Php::STRING_HASH);
-            types = types.or(match (packed, hash) {
-                (true, false) if !info.has(Php::EMPTY) => Types::PACKED,
-                (false, true) if !info.has(Php::EMPTY) => Types::HASH,
-                _ => Types(Types::LAYOUTS),
-            });
-        }
-        types
-    }
-
-    /// These narrowed by what php's inference over the op array knows of
-    /// the same value, `zend_jit_trace_restrict_ssa_var_info`'s `type &=`
-    /// (`Z/ext/opcache/jit/zend_jit_trace.c:1059-1100`); these where the
-    /// two share no kind, a value php's inference holds unreachable, and
-    /// an array's layouts where the two share none.
-    #[must_use]
-    pub(crate) fn restricted(self, info: php_ssa::Types) -> Types {
-        let narrowed = self.and(Types::of_info(info));
-        if narrowed.kinds() == Types::NONE {
-            return self;
-        }
-        if narrowed.meets(Types::ARRAY) && narrowed.0 & Types::LAYOUTS == 0 {
-            return narrowed.or(Types(self.0 & Types::LAYOUTS));
-        }
-        narrowed
-    }
-
     /// The types of the parameter a `RECV`'s `op2` mask declares
     /// (`Type::mask`, php's `ZEND_TYPE_PURE_MASK`): the mask's kinds, and
     /// beside them an object and a reference, which the mask cannot
     /// carry, since a class name adds no bit to it and passing by
     /// reference is the declaration's.
     pub(crate) fn of_mask(mask: u32) -> Types {
-        let bits = u16::try_from(mask & 0x3fe).unwrap_or(0);
-        let mut types = Types(bits).or(Types::OBJECT).or(Types::REF);
-        if types.meets(Types::ARRAY) {
-            types = types.or(Types::PACKED).or(Types::HASH);
-        }
-        types
+        (Types::NONE.narrowed_kinds(mask & 0x3fe))
+            .or(Types::of_tag(ZvalType::Object))
+            .or(Types::REF)
     }
 
-    /// The types of a constant operand, php's `_const_op_type`.
+    /// Each kind of php's `MAY_BE_*` `mask` as `of_tag` makes it, beside
+    /// these.
+    #[must_use]
+    fn narrowed_kinds(self, mask: u32) -> Types {
+        (TAGS.iter())
+            .filter(|(_, bit)| mask & bit.0.0 != 0)
+            .fold(self, |types, (tag, _)| types.or(Types::of_tag(*tag)))
+    }
+
+    /// The types of a constant operand, php's `_const_op_type`: a string's
+    /// or an array's no count, as an interned or immutable value has none
+    /// (`Z/Zend/Optimizer/zend_inference.c:4130-4150`).
     pub(crate) fn of_constant(value: &Zval) -> Types {
         match value.kind() {
             ZvalType::Array => value
                 .as_arr()
                 .map_or(Types::of_tag(ZvalType::Array), |arr| {
-                    Types::ARRAY.laid_out(if arr.is_packed() {
+                    Types::of_tag(ZvalType::Array).laid_out(if arr.is_packed() {
                         Layout::Packed
                     } else {
                         Layout::Hash
                     })
-                }),
-            tag => Types::of_tag(tag),
+                })
+                .without(Types(Php::RC)),
+            tag => Types::of_tag(tag).without(Types(Php::RC)),
         }
+    }
+
+    /// These narrowed by what php's inference over the op array knows of
+    /// the same value, `zend_jit_trace_restrict_ssa_var_info`'s `type &=`
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:1059-1100`); these where the
+    /// two share no kind, a value php's inference holds unreachable.
+    #[must_use]
+    pub(crate) fn restricted(self, info: Php) -> Types {
+        let narrowed = self.and(Types::of_info(info));
+        if narrowed.kinds() == Types::NONE {
+            return self;
+        }
+        narrowed
     }
 }
 
@@ -341,92 +432,6 @@ pub(crate) fn binary_of(extended: u32) -> Option<Opcode> {
     Opcode::from_u8(u8::try_from(extended).ok()?)
 }
 
-/// What a binary operator yields over operands of `a` and `b`, php's
-/// `binary_op_result_type` (`Z/Zend/Optimizer/zend_inference.c:2259-2355`)
-/// for `ADD` to `POW` and the bitwise operators, without ranges, and its
-/// inference's boolean for the comparisons. An undefined operand reads as
-/// null, and one that may be an object may be overloaded, as GMP's are,
-/// so what it yields may be an object or false: php's trace inference runs
-/// at optimisation level 0, which ignores no overloading
-/// (`Z/ext/opcache/jit/zend_jit_trace.c:1332`).
-pub(crate) fn binary(op: Opcode, a: Types, b: Types) -> Types {
-    let read = |t: Types| {
-        let kinds = deref(t).kinds();
-        if kinds.meets(Types::UNDEF) {
-            kinds.without(Types::UNDEF).or(Types::NULL)
-        } else {
-            kinds
-        }
-    };
-    let (a, b) = (read(a), read(b));
-    let overloaded = if a.meets(Types::OBJECT) || b.meets(Types::OBJECT) {
-        Types::OBJECT.or(Types::FALSE)
-    } else {
-        Types::NONE
-    };
-    let doubled = a == Types::DOUBLE || b == Types::DOUBLE;
-    let array = Types::of_tag(ZvalType::Array);
-    let yields = match op {
-        Opcode::Add | Opcode::Sub | Opcode::Mul => {
-            if a == Types::LONG && b == Types::LONG {
-                Types::NUMBER
-            } else if doubled {
-                Types::DOUBLE
-            } else if op == Opcode::Add && a == Types::ARRAY && b == Types::ARRAY {
-                array
-            } else if op == Opcode::Add && a.meets(Types::ARRAY) && b.meets(Types::ARRAY) {
-                Types::NUMBER.or(array)
-            } else {
-                Types::NUMBER
-            }
-        }
-        Opcode::Div | Opcode::Pow if doubled => Types::DOUBLE,
-        Opcode::Div | Opcode::Pow => Types::NUMBER,
-        Opcode::Mod | Opcode::Sl | Opcode::Sr => Types::LONG,
-        Opcode::BwOr | Opcode::BwAnd | Opcode::BwXor => {
-            let strings = if a.meets(Types::STRING) && b.meets(Types::STRING) {
-                Types::STRING
-            } else {
-                Types::NONE
-            };
-            if a.within(Types::STRING) && b.within(Types::STRING) {
-                strings
-            } else {
-                strings.or(Types::LONG)
-            }
-        }
-        // php adds no object here: "TODO: +MAY_BE_OBJECT ???".
-        Opcode::Concat | Opcode::FastConcat => return Types::STRING,
-        Opcode::IsEqual
-        | Opcode::IsNotEqual
-        | Opcode::IsSmaller
-        | Opcode::IsSmallerOrEqual
-        | Opcode::IsIdentical
-        | Opcode::IsNotIdentical
-        | Opcode::Case
-        | Opcode::CaseStrict
-        | Opcode::BoolXor => return Types::BOOL,
-        _ => return Types::ANY,
-    };
-    yields.or(overloaded)
-}
-
-/// What `++` or `--` makes of `a`, php's `zend_update_type_info` for
-/// `PRE_INC` and its kin: a long may overflow to a double, a null becomes
-/// a long or stays null, and anything else is anything.
-pub(crate) fn stepped(a: Types) -> Types {
-    let a = deref(a);
-    if a.kinds() == Types::LONG {
-        Types::NUMBER
-    } else if a.kinds() == Types::DOUBLE {
-        Types::DOUBLE
-    } else if a.kinds().within(Types::NUMBER) {
-        Types::NUMBER
-    } else {
-        Types::ANY
-    }
-}
-
 /// A value read out of a slot that may hold a reference: what the
 /// reference holds, which is anything where the slot may be one.
 pub(crate) fn deref(a: Types) -> Types {
@@ -440,9 +445,8 @@ pub(crate) fn deref(a: Types) -> Types {
 #[cfg(test)]
 mod tests {
     use php_heap::ZvalType;
-    use php_unit::Opcode;
 
-    use super::{Types, binary, stepped};
+    use super::Types;
     use crate::types::Layout;
 
     /// A tag is the one kind of a set, as php's guard compares it; an
@@ -456,23 +460,10 @@ mod tests {
         assert_eq!(Types::UNKNOWN.narrowed(ZvalType::Long), Types::LONG);
     }
 
-    /// Long arithmetic may overflow to a double, a double makes a double,
-    /// and a comparison is a boolean, as php infers with no ranges.
+    /// A long, a boolean and a double are each one scalar; a number
+    /// is two.
     #[test]
-    fn arithmetic_is_inferred_as_php_infers_it() {
-        assert_eq!(binary(Opcode::Add, Types::LONG, Types::LONG), Types::NUMBER);
-        assert_eq!(
-            binary(Opcode::Mul, Types::LONG, Types::DOUBLE),
-            Types::DOUBLE
-        );
-        assert_eq!(
-            binary(Opcode::IsSmaller, Types::ANY, Types::LONG),
-            Types::BOOL
-        );
-        assert_eq!(binary(Opcode::BwAnd, Types::LONG, Types::LONG), Types::LONG);
-        assert_eq!(stepped(Types::LONG), Types::NUMBER);
-        // What a reference holds is anything.
-        assert_eq!(stepped(Types::LONG.or(Types::REF)), Types::ANY);
+    fn a_scalar_is_one_kind() {
         assert!(!Types::NUMBER.scalar() && Types::BOOL.scalar() && Types::DOUBLE.scalar());
     }
 

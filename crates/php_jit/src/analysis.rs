@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use php_engine::tier::{Bindings, CallSite, CalledFunction, ClassId, FuncRef, UnitView};
 use php_ssa::{
     Analysis, BlockId, Body, Callee, Cfg, ClassConstant, Function, Level, LinkedTable, Method,
-    ObjectShape, PhiKind, Property, Returns, Ssa, SsaVar, VarInfo,
+    ObjectShape, PhiKind, Position, Property, Range, Returns, Ssa, SsaVar, TraceFrame, VarInfo,
 };
 use php_unit::decl::{ClassKind, HookKind, PropertyDecl, Visibility};
 
@@ -350,9 +350,25 @@ fn passed(record: &TraceRecord) -> Vec<FuncRef> {
 
 /// The analyses of the op arrays one trace's build passes through, as
 /// `zend_jit_trace_build_tssa` reads each one's `func_info.ssa`: none for
-/// an op array php does not analyse, or analyses with no SSA.
-#[derive(Debug, Default)]
-pub(crate) struct Analysed(Vec<(FuncRef, Arc<Analysis<ClassId>>)>);
+/// an op array php does not analyse, or analyses with no SSA; and what
+/// php's inference over the trace reads beside them, the level they were
+/// built at and what each op array analysed returns.
+#[derive(Debug)]
+pub(crate) struct Analysed {
+    analyses: Vec<(FuncRef, Arc<Analysis<ClassId>>)>,
+    built: Vec<(FuncRef, Option<Returns<ClassId>>)>,
+    level: Level,
+}
+
+impl Default for Analysed {
+    fn default() -> Analysed {
+        Analysed {
+            analyses: Vec::new(),
+            built: Vec::new(),
+            level: Level::Func,
+        }
+    }
+}
 
 /// Which variable an opline defines: php's `op1_def`, `op2_def` or
 /// `result_def`.
@@ -367,7 +383,7 @@ impl Analysed {
     /// The analysis of `f` this build made or read, and its SSA, where it
     /// has one.
     fn of(&self, f: FuncRef) -> Option<(&Cfg, &Ssa<ClassId>)> {
-        let (_, analysis) = self.0.iter().find(|(g, _)| *g == f)?;
+        let (_, analysis) = self.analyses.iter().find(|(g, _)| *g == f)?;
         Some((&analysis.cfg, analysis.ssa.as_ref()?))
     }
 
@@ -451,6 +467,95 @@ impl Analysed {
     }
 }
 
+impl Analysed {
+    /// What php's inference over a trace reads of each op array `record`
+    /// passes through: the op array, and the classes and functions its view
+    /// binds, as the analyses read them.
+    pub(crate) fn tables<'a>(&'a self, record: &TraceRecord, view: &'a UnitView) -> Tables<'a> {
+        let mut funcs = vec![record.root];
+        for event in &record.events {
+            if let Event::Op { func, .. } | Event::Enter { func } = *event
+                && !funcs.contains(&func)
+            {
+                funcs.push(func);
+            }
+        }
+        let tables = (funcs.into_iter())
+            .filter_map(|f| {
+                let table = Bound {
+                    view,
+                    f,
+                    built: &self.built,
+                    reads_returns: Cell::new(false),
+                };
+                Some((f, function(view, f)?, table))
+            })
+            .collect();
+        Tables {
+            tables,
+            level: self.level,
+        }
+    }
+}
+
+/// What php's inference over a trace reads of the op arrays it passes
+/// through
+/// ([`Analysed::tables`]), from which its frames are made
+/// ([`Tables::frames`]).
+pub(crate) struct Tables<'a> {
+    tables: Vec<(FuncRef, Function<'a>, Bound<'a>)>,
+    level: Level,
+}
+
+impl Tables<'_> {
+    /// php's inference over a trace, one frame per op array.
+    pub(crate) fn frames(&self) -> Inference<'_> {
+        Inference(
+            (self.tables.iter())
+                .map(|(f, function, table)| (*f, TraceFrame::new(function, table, self.level)))
+                .collect(),
+        )
+    }
+}
+
+/// php's inference over a trace's SSA, `zend_update_type_info` and
+/// `zend_inference_propagate_range` as `zend_jit_trace_build_tssa` calls
+/// them, each op read in the op array it is of.
+pub(crate) struct Inference<'a>(Vec<(FuncRef, TraceFrame<'a, Bound<'a>>)>);
+
+impl<'a> Inference<'a> {
+    fn frame(&self, f: FuncRef) -> Option<&TraceFrame<'a, Bound<'a>>> {
+        self.0.iter().find(|(g, _)| *g == f).map(|(_, frame)| frame)
+    }
+
+    /// `zend_update_type_info` at the op `at` of `tssa`, which is of
+    /// `f`; false where `f` is no op array the trace passes through, or php's
+    /// would narrow what it wrote.
+    pub(crate) fn update(
+        &self,
+        f: FuncRef,
+        tssa: &mut Ssa<ClassId>,
+        positions: &[Position],
+        at: usize,
+    ) -> bool {
+        self.frame(f)
+            .is_some_and(|frame| frame.update_type_info(tssa, positions, at))
+    }
+
+    /// `zend_inference_propagate_range` of `var`, which the op `at` of
+    /// `tssa`, running in `f`, defines.
+    pub(crate) fn propagate_range(
+        &self,
+        f: FuncRef,
+        tssa: &mut Ssa<ClassId>,
+        positions: &[Position],
+        at: usize,
+        var: SsaVar,
+    ) -> Option<Range> {
+        self.frame(f)?.propagate_range(tssa, positions, at, var)
+    }
+}
+
 /// The phi of `var` at `block`, a pi only where the block has no phi of
 /// it, as `zend_jit_trace_copy_ssa_var_info` walks `ssa->blocks[b].phis`.
 fn block_phi(ssa: &Ssa<ClassId>, block: BlockId, var: u32) -> Option<SsaVar> {
@@ -493,7 +598,7 @@ pub(crate) fn build(
         Level::Func
     };
     let mut built: Vec<(FuncRef, Option<Returns<ClassId>>)> = Vec::new();
-    let mut read = Analysed::default();
+    let mut found = Vec::new();
     for &f in passed.iter().take(MAX_FUNCS) {
         let Some(function) = function(view, f) else {
             continue;
@@ -525,10 +630,14 @@ pub(crate) fn build(
         }
         built.push((f, kept.as_ref().map(|a| a.returns)));
         if let Some(analysis) = kept.filter(|a| a.ssa.is_some()) {
-            read.0.push((f, analysis));
+            found.push((f, analysis));
         }
     }
-    (passed.len() <= MAX_FUNCS).then_some(read)
+    (passed.len() <= MAX_FUNCS).then_some(Analysed {
+        analyses: found,
+        built,
+        level,
+    })
 }
 
 /// The analyses a trace's build reads, made afresh as the tier makes

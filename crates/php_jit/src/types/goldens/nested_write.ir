@@ -14,12 +14,12 @@ loop at 0, loop, interrupt exit 8
 0004 f0 BW_AND #3, int(3) inline
   -> #5 f0.T3 [long] reg
 0005 f0 FETCH_DIM_W #1, const#2 inline unwinds -> unwind 0
-  -> #6 f0.T2 [ind]
+  -> #6 f0.T2 [ind, null, array]
   -> #7 f0.CV1 [hash array]
   guard #6 ind to array -> exit 3
 0006 f0 ASSIGN_DIM #6, #5, #3 inline unwinds -> unwind 1
 0008 f0 FETCH_DIM_RW #7, const#4 inline unwinds -> unwind 1
-  -> #8 f0.T5 [null, array]
+  -> #8 f0.T5 [ind, null, array]
   -> #9 f0.CV1 [hash array]
   guard #8 ind to array -> exit 4
 0009 f0 ASSIGN_DIM_OP #8, const#5, #3 inline unwinds -> unwind 1
@@ -28,11 +28,11 @@ loop at 0, loop, interrupt exit 8
 0012 f0 BW_AND #3, int(1) inline
   -> #11 f0.T10 [long] reg
 0013 f0 FETCH_DIM_W #9, const#6 inline unwinds -> unwind 2
-  -> #12 f0.T7 [ind]
+  -> #12 f0.T7 [ind, null, array]
   -> #13 f0.CV1 [hash array]
   guard #12 ind to array -> exit 5
 0014 f0 FETCH_DIM_W #12, #10 inline unwinds -> unwind 3
-  -> #14 f0.T9 [ind]
+  -> #14 f0.T9 [ind, ref, null, bool, long, double, string, array, object, resource]
   guard #14 ind to array -> exit 6
 0015 f0 ASSIGN_DIM #14, #11, int(1) inline unwinds -> unwind 1
 0017 f0 PRE_INC #3 inline

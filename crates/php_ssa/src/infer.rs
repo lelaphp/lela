@@ -43,6 +43,11 @@ pub(crate) struct Infer<'a, T: LinkedTable> {
     /// `func_info->call_map`; none where it maps none.
     pub(crate) calls: Option<&'a Calls<'a, T::Class>>,
     pub(crate) info: Vec<VarInfo<T::Class>>,
+    /// Where each SSA op's opline stands, php's `ssa_opcodes`: none for
+    /// an op array's own SSA, whose op `at` is its opline `at`; a
+    /// trace's for a trace's SSA, whose ops follow the trace
+    /// ([`crate::trace`]), where no worklist is kept.
+    pub(crate) positions: Option<&'a [crate::trace::Position]>,
 }
 
 /// `zend_ssa_inference` over `ssa`, then `zend_func_return_info` into
@@ -762,6 +767,7 @@ pub(crate) fn infer<T: LinkedTable>(
         table,
         calls,
         info,
+        positions: None,
     };
     cx.mark_cv_references();
     cx.infer_ranges();
@@ -783,6 +789,32 @@ impl<T: LinkedTable> Infer<'_, T> {
 
     pub(crate) fn op(&self, at: usize) -> SsaOp {
         self.ssa.ops.get(at).copied().unwrap_or_default()
+    }
+
+    /// The opline of the op array whose SSA op `at` is: its own at `at`,
+    /// or a trace's at the place `ssa_opcodes[at]` names.
+    pub(crate) fn opline(&self, at: usize) -> Option<&php_unit::Opline> {
+        self.body.oplines.get(self.index(at)?)
+    }
+
+    /// The opline's place in its op array of SSA op `at`.
+    pub(crate) fn index(&self, at: usize) -> Option<usize> {
+        match self.positions {
+            None => Some(at),
+            Some(positions) => positions.get(at).map(|p| p.opline as usize),
+        }
+    }
+
+    /// Whether SSA op `next`'s opline is the one after SSA op `at`'s in
+    /// the same op array, php's `opline + 1 == ssa_opcodes[next]`.
+    pub(crate) fn follows(&self, at: usize, next: usize) -> bool {
+        match self.positions {
+            None => next == at + 1,
+            Some(positions) => match (positions.get(at), positions.get(next)) {
+                (Some(a), Some(n)) => n.array == a.array && n.opline == a.opline + 1,
+                _ => false,
+            },
+        }
     }
 
     /// `get_ssa_var_info`: everything for no variable.
@@ -1143,8 +1175,8 @@ impl<T: LinkedTable> Infer<'_, T> {
     /// `zend_inference_propagate_range`: the range of `var`, which the
     /// opline at `at` defines.
     #[allow(clippy::too_many_lines)]
-    fn propagate_range(&self, at: usize, var: SsaVar) -> Option<Range> {
-        let op = self.body.oplines.get(at)?;
+    pub(crate) fn propagate_range(&self, at: usize, var: SsaVar) -> Option<Range> {
+        let op = self.opline(at)?;
         let ssa_op = self.op(at);
         let var = Some(var);
         let mut tmp = Range::default();
@@ -1254,7 +1286,7 @@ impl<T: LinkedTable> Infer<'_, T> {
                 range::binary(opcode, op1(), op2(), &mut tmp).then_some(tmp)
             }
             Opcode::OpData if is_op1 => {
-                let prev = at.checked_sub(1).and_then(|p| self.body.oplines.get(p))?;
+                let prev = at.checked_sub(1).and_then(|p| self.opline(p))?;
                 if matches!(
                     prev.opcode,
                     Opcode::AssignDim
@@ -1605,6 +1637,10 @@ impl<T: LinkedTable> Infer<'_, T> {
 
     /// `add_usages`.
     fn add_usages(&self, var: SsaVar, worklist: &mut Bits) {
+        // A trace's inference keeps no worklist (`update_worklist` 0).
+        if self.positions.is_some() {
+            return;
+        }
         for used in self.usages(var) {
             worklist.incl(used.index());
         }

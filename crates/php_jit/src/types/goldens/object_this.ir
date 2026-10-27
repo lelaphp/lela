@@ -24,7 +24,7 @@ loop at 0, loop, interrupt exit 13
 0008 f0 ASSIGN_OBJ_OP const#4, float(1.5) inline slot 1 unwinds -> unwind 0
 0010 f0 PRE_INC_OBJ const#6 inline slot 0 unwinds -> unwind 0
 0011 f0 FETCH_OBJ_W const#7 inline slot 2 leaves -> exit 9
-  -> #7 f0.T7 [ref, any]
+  -> #7 f0.T7 [undef, ind, ref, null, bool, long, double, string, array, object, resource]
   guard #7 ind to array -> exit 10
 0012 f0 ASSIGN_DIM #7, #3 step unwinds -> unwind 0
 0014 f0 ISSET_ISEMPTY_PROP_OBJ const#8 step unwinds -> unwind 0

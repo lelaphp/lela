@@ -15,12 +15,12 @@ loop at 0, loop, interrupt exit 5
 0005 f0 BW_AND #3, int(3) inline
   -> #5 f0.T4 [long] reg
 0006 f0 FETCH_DIM_W #1, const#3 inline unwinds -> unwind 0
-  -> #6 f0.T3 [ind]
+  -> #6 f0.T3 [ind, null, long, double, array]
   -> #7 f0.CV1 [hash array]
   guard #6 ind to array -> exit 3
 0007 f0 ASSIGN_DIM #6, #5, #3 inline unwinds -> unwind 1
 0009 f0 FETCH_DIM_RW #7, #8 inline unwinds -> unwind 1
-  -> #9 f0.T6 [null, long, double, array]
+  -> #9 f0.T6 [ind, null, long, double, array]
   -> #10 f0.CV1 [hash array]
 0010 f0 PRE_INC #9 step unwinds -> unwind 1
 0011 f0 PRE_INC #3 inline

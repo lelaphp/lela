@@ -255,7 +255,7 @@ impl<T: LinkedTable> Infer<'_, T> {
 
     /// `_ssa_op1_info` of the opline at `at`.
     pub(crate) fn op1_types(&self, at: usize) -> Types {
-        let (Some(op), ssa_op) = (self.body.oplines.get(at), self.op(at)) else {
+        let (Some(op), ssa_op) = (self.opline(at), self.op(at)) else {
             return Types::NONE;
         };
         self.operand_types(op.op1_type, op.op1, ssa_op.op1_use)
@@ -333,9 +333,9 @@ impl<T: LinkedTable> Infer<'_, T> {
         };
         if let Some(first) = var.use_chain
             && var.phi_use_chain.is_none()
-            && first as usize == at + 1
+            && self.follows(at, first as usize)
         {
-            let next = self.op(at + 1);
+            let next = self.op(first as usize);
             if (next.op1_use == ssa_op.out_def && next.op1_use_chain.is_none())
                 || (next.op2_use == ssa_op.out_def && next.op2_use_chain.is_none())
             {
@@ -350,7 +350,7 @@ impl<T: LinkedTable> Infer<'_, T> {
     fn read_next(&self, at: usize, var: Option<SsaVar>) -> bool {
         var.and_then(|v| self.ssa.var(v))
             .and_then(|v| v.use_chain)
-            .is_some_and(|first| first as usize == at + 1)
+            .is_some_and(|first| self.follows(at, first as usize))
     }
 
     /// The constant class `zend_fetch_class_const_info` finds for a
@@ -388,22 +388,20 @@ impl<T: LinkedTable> Infer<'_, T> {
     /// before it where it is an `OP_DATA`.
     #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     pub(crate) fn update(&mut self, at: usize, wl: &mut Bits) -> Result<(), Narrowed> {
-        let body = self.body;
         let mut at = at;
-        if body
-            .oplines
-            .get(at)
+        if self
+            .opline(at)
             .is_some_and(|op| op.opcode == Opcode::OpData)
             && at > 0
         {
             at -= 1;
         }
-        let Some(&op) = body.oplines.get(at) else {
+        let Some(&op) = self.opline(at) else {
             return Ok(());
         };
         let ssa_op = self.op(at);
         let data_op = self.op(at + 1);
-        let data = body.oplines.get(at + 1).copied();
+        let data = self.opline(at + 1).copied();
         let mut t1 = self.operand_types(op.op1_type, op.op1, ssa_op.op1_use);
         let mut t2 = self.operand_types(op.op2_type, op.op2, ssa_op.op2_use);
         let res_use = self.operand_types(op.out_type, op.out, ssa_op.out_use);
@@ -1696,12 +1694,12 @@ impl<T: LinkedTable> Infer<'_, T> {
                 tmp |= keys | Types::ARRAY | Types::OF_NULL;
             }
             while let Some(j) = next {
-                if j as usize != at + 1 {
+                if !self.follows(at, j as usize) {
                     // The use must be the next opline.
                     tmp |= keys | Types::OF_ANY | Types::OF_REF;
                     break;
                 }
-                match self.body.oplines.get(j as usize).map(|o| o.opcode) {
+                match self.opline(j as usize).map(|o| o.opcode) {
                     Some(
                         Opcode::FetchDimW
                         | Opcode::FetchDimRw
@@ -1773,7 +1771,7 @@ impl<T: LinkedTable> Infer<'_, T> {
         if result.is_none() {
             return Ok(());
         }
-        let Some(call) = self.calls.and_then(|calls| calls.at(at)) else {
+        let Some(call) = (self.index(at)).and_then(|i| self.calls?.at(i)) else {
             return self.unknown_result(op, result, wl);
         };
         let (tmp, class) = self.func_info(call);
