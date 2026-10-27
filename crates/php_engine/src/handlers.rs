@@ -3644,7 +3644,13 @@ pub(crate) fn do_icall<T: Tier>(
     _: &OpArray,
     op: &Opline,
 ) -> Edge {
-    do_call(req, frame, DoCall::of(op), "ZEND_DO_ICALL")
+    // `DO_ICALL` never tests the callee's flags, known here and not
+    // read off the opline.
+    let says = DoCall {
+        flagged: false,
+        ..DoCall::of(op)
+    };
+    do_call(req, frame, says, "ZEND_DO_ICALL")
 }
 
 /// `ZEND_DO_FCALL_BY_NAME`: serve the callee an `INIT_FCALL_BY_NAME`
@@ -12863,8 +12869,12 @@ fn do_call(req: &mut Request, frame: FrameRef, says: DoCall, opcode: &str) -> Ed
         }
         req.serve_native(function, OnThrow::Nothing)
     };
-    let Some(value) = returned_on_call(req, served)? else {
-        return Ok(Stepped::Threw(frame).into());
+    let value = match served {
+        Ok(value) => value,
+        Err(thrown) => {
+            thrown_on_call(req, &thrown)?;
+            return Ok(Stepped::Threw(frame).into());
+        }
     };
     // `ZEND_VM_FCALL_INTERRUPT_CHECK(call)`: the check php makes after a
     // native returns, with the call still on the stack, which is where
@@ -12886,36 +12896,28 @@ fn do_call(req: &mut Request, frame: FrameRef, says: DoCall, opcode: &str) -> Ed
     Ok(advance(req, frame))
 }
 
-/// What a native served on the call on top of the stack answered, as
+/// A native served on the call on top of the stack threw `thrown`, as
 /// `DO_*CALL`'s handler and the call compiled code makes
-/// ([`crate::tier::call_native`]) both read it: what it returned, the
-/// call still on the stack for the interrupt check php makes there; or
-/// none, the call popped as php frees it on the throw's path too and
-/// the throwable left pending. A native that threw leaves the interrupt
-/// raised for the next site, since php calls no PHP handler while
-/// `EG(exception)` stands, but for the memory limit: php checks before
-/// it reads `EG(exception)`, and `zend_handle_delayed_oom` gives up what
-/// the native threw for the unwind exit, so no `catch` takes it (a DOM
-/// parse lexbor stopped at the limit throws its `DOMException` and the
-/// limit's fatal is raised in its place), which is the `Err`.
-#[inline(always)] // the handler's hot path, which it was before the tier shared it
-pub(super) fn returned_on_call(
-    req: &mut Request,
-    served: Result<Value, Thrown>,
-) -> Result<Option<Value>, Fatal> {
-    let thrown = match served {
-        Ok(value) => return Ok(Some(value)),
-        Err(thrown) => thrown,
-    };
+/// ([`crate::tier::call_native`]) both meet it: the call popped, as php
+/// frees it on the throw's path too, and the throwable left pending. A
+/// native that threw leaves the interrupt raised for the next site,
+/// since php calls no PHP handler while `EG(exception)` stands, but for
+/// the memory limit: php checks before it reads `EG(exception)`, and
+/// `zend_handle_delayed_oom` gives up what the native threw for the
+/// unwind exit, so no `catch` takes it (a DOM parse lexbor stopped at the
+/// limit throws its `DOMException` and the limit's fatal is raised in its
+/// place), which is the `Err`.
+#[cold]
+pub(super) fn thrown_on_call(req: &mut Request, thrown: &Thrown) -> Result<(), Fatal> {
     if req.has_oom() && crate::interrupt::raised(req) {
-        req.leave_pending(&thrown);
+        req.leave_pending(thrown);
         let interrupted = crate::interrupt::interrupted(req);
         req.pop_call();
-        return interrupted.map(|_| None);
+        return interrupted.map(drop);
     }
     req.pop_call();
-    req.leave_pending(&thrown);
-    Ok(None)
+    req.leave_pending(thrown);
+    Ok(())
 }
 
 /// `DO_FCALL` and `DO_FCALL_BY_NAME` over a callee whose `fn_flags`

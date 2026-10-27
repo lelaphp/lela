@@ -1824,7 +1824,7 @@ pub fn dispatch_held(req: &mut Request, frame: FrameRef, held: Held<'_>) -> Resu
 /// owner, the call still on the stack; `null`, as php's `ZVAL_NULL`
 /// before the handler leaves it, where it threw, the call then popped
 /// and the throwable left pending, as `DO_ICALL`'s handler leaves it
-/// ([`crate::handlers::returned_on_call`]).
+/// ([`crate::handlers::thrown_on_call`]).
 ///
 /// # Errors
 ///
@@ -1842,9 +1842,13 @@ pub fn call_native(req: &mut Request, call: FrameRef) -> Result<Zval, Fatal> {
         .filter(|header| header.info.serving_native())
         .and_then(|header| header.function)
         .ok_or_else(|| Fatal::error("InternalError: compiled code served no native's call"))?;
-    let served = req.serve_native(function, OnThrow::Nothing);
-    let returned = crate::handlers::returned_on_call(req, served)?;
-    Ok(returned.map_or_else(Zval::null, Value::to_zval))
+    match req.serve_native(function, OnThrow::Nothing) {
+        Ok(value) => Ok(value.to_zval()),
+        Err(thrown) => {
+            crate::handlers::thrown_on_call(req, &thrown)?;
+            Ok(Zval::null())
+        }
+    }
 }
 
 /// The call on top of the stack popped, `zend_vm_stack_free_args` and
