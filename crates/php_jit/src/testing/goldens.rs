@@ -151,6 +151,19 @@ pub(crate) const METHOD_CALL: Fixture = Fixture {
     ],
 };
 
+/// A method's call on the object a temporary holds, `(new Adder)->add()`:
+/// pushed in place under the class guard, the call taking the
+/// temporary's owner over (#3560).
+pub(crate) const TEMP_CALL: Fixture = Fixture {
+    name: "temp_call",
+    program: "temp_call",
+    plan: &[
+        ("record.function", "t"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
 /// A static method's call, as `static_call` drives it: pushed in place
 /// under the guard on the pair its runtime-cache slot holds, its class the
 /// published one it names, and by its handler where the slot holds
@@ -200,6 +213,80 @@ pub(crate) const STATIC_SCOPED: Fixture = Fixture {
     program: "scoped_calls",
     plan: &[
         ("record.function", "statics"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A static method called through `self`: pushed in place under the
+/// guard on the pair its runtime-cache slot holds, the pair's class not
+/// compared and its called scope the calling frame's (#3561).
+pub(crate) const STATIC_SELF: Fixture = Fixture {
+    name: "static_self",
+    program: "scope_calls",
+    plan: &[
+        ("record.function", "selfs"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A method that takes `$this` called through its class's name from an
+/// instance of it: pushed in place under the pair, with the calling
+/// frame's `$this` held to its class (#3561).
+pub(crate) const STATIC_THIS: Fixture = Fixture {
+    name: "static_this",
+    program: "scope_calls",
+    plan: &[
+        ("record.function", "named"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A method that takes `$this` called through `parent` (#3561).
+pub(crate) const PARENT_THIS: Fixture = Fixture {
+    name: "parent_this",
+    program: "scope_calls",
+    plan: &[
+        ("record.function", "parents"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A request-scoped class's own method called on a variable's object: pushed
+/// in place under the pair its runtime-cache slot holds, the callee held
+/// by its record (#3561).
+pub(crate) const METHOD_OWN: Fixture = Fixture {
+    name: "method_own",
+    program: "own_calls",
+    plan: &[
+        ("record.function", "owns"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A request-scoped class's own static method called through its name:
+/// pushed in place under the pair, the callee held by its record (#3561).
+pub(crate) const STATIC_OWN: Fixture = Fixture {
+    name: "static_own",
+    program: "own_calls",
+    plan: &[
+        ("record.function", "statics"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// An enum's own method called on its case: pushed in place under the
+/// pair, the callee held by its record (#3561).
+pub(crate) const ENUM_OWN: Fixture = Fixture {
+    name: "enum_own",
+    program: "own_calls",
+    plan: &[
+        ("record.function", "cases"),
         ("record.start", "loop"),
         ("record.headers", "0"),
     ],

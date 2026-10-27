@@ -27,11 +27,12 @@ use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DEFAULT_CALL, DEFAULT_CONSTANT,
-    DIM_AND, DIM_CONCAT, DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FANNKUCH, FIB, Fixture,
-    HASH_FETCH_W, HASH_IS, HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT,
-    METHOD_CALL, METHOD_SCOPED, NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE, NEW_CALL,
-    OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_CALL, REF_WRITE, SIEVE,
-    SPECTRALNORM, STATIC_CALL, STATIC_SCOPED, STRING_BUILD, STRING_MATCH, held, traced as built,
+    DIM_AND, DIM_CONCAT, DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, ENUM_OWN, FANNKUCH,
+    FIB, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE,
+    MANDELBROT, METHOD_CALL, METHOD_OWN, METHOD_SCOPED, NATIVE_CALL, NBODY, NESTED_READ,
+    NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, PARENT_THIS,
+    REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL, STATIC_OWN, STATIC_SCOPED, STATIC_SELF,
+    STATIC_THIS, STRING_BUILD, STRING_MATCH, TEMP_CALL, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -2762,11 +2763,19 @@ fn line_of(ir: &TraceIr, opcode: Opcode) -> Option<&super::Line> {
 /// A method called on a variable's object of a published class is pushed
 /// in place under the class guard, its send compiled by value and the
 /// call made in place, as php's `zend_jit_init_method_call` pushes it
-/// once its class guard holds (#3343).
+/// once its class guard holds (#3343), on a variable's object and on a
+/// temporary's (#3560).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_methods_call_is_pushed_in_place_under_its_class_guard() -> Result<(), String> {
-    let ir = golden(METHOD_CALL)?;
+    for fixture in [METHOD_CALL, TEMP_CALL] {
+        pushed_under_its_class_guard(fixture)?;
+    }
+    Ok(())
+}
+
+fn pushed_under_its_class_guard(fixture: Fixture) -> Result<(), String> {
+    let ir = golden(fixture)?;
     let rendered = dump::render(&ir);
     let init = line_of(&ir, Opcode::InitMethodCall)
         .ok_or_else(|| format!("no INIT_METHOD_CALL in\n{rendered}"))?;
@@ -2867,8 +2876,16 @@ fn pushed_under_its_pair(
                 && matches!(guard.check, Check::Callee { .. })),
         "{rendered}"
     );
+    // No class guard holds the receiver or the calling frame's `$this`:
+    // the pair's guard does; a callee's own property oplines hold its own.
+    let callers_own = |object: super::Object| match object {
+        super::Object::This(frame) => frame == init.frame,
+        super::Object::Value(_) => true,
+    };
     assert!(
-        (ir.guards.iter()).all(|guard| !matches!(guard.check, Check::Class { .. })),
+        (ir.guards.iter()).all(
+            |guard| !matches!(guard.check, Check::Class { object, .. } if callers_own(object))
+        ),
         "{rendered}"
     );
     made_in_place(ir, &rendered)?;
@@ -2892,6 +2909,31 @@ fn a_static_methods_call_is_pushed_in_place_under_its_slots_pair() -> Result<(),
     pushed_under_its_pair(&ir, Opcode::InitStaticMethodCall, |class| {
         class == super::PairClass::Named
     })?;
+    let ir = golden(STATIC_SELF)?;
+    pushed_under_its_pair(&ir, Opcode::InitStaticMethodCall, |class| {
+        class == super::PairClass::Forwarded
+    })?;
+    Ok(())
+}
+
+/// A method that takes `$this` called by a static call's syntax, through
+/// its class's name or through `parent`, from an instance of the class,
+/// is pushed in place under the pair its runtime-cache slot holds with
+/// the calling frame's `$this`, as php's
+/// `zend_jit_push_this_method_call_frame` passes it: the pair's class
+/// held to the published class a name names, and to nothing through
+/// `parent` (#3561).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_static_call_to_a_method_with_this_is_pushed_in_place() -> Result<(), String> {
+    let ir = golden(STATIC_THIS)?;
+    pushed_under_its_pair(&ir, Opcode::InitStaticMethodCall, |class| {
+        matches!(class, super::PairClass::This { named: Some(_), .. })
+    })?;
+    let ir = golden(PARENT_THIS)?;
+    pushed_under_its_pair(&ir, Opcode::InitStaticMethodCall, |class| {
+        matches!(class, super::PairClass::This { named: None, .. })
+    })?;
     Ok(())
 }
 
@@ -2912,28 +2954,35 @@ fn a_request_scoped_classs_method_is_pushed_under_its_slots_pair() -> Result<(),
 
 /// A method a request-scoped class declares itself is the request's,
 /// numbered for it alone, as php's `zend_lazy_class_load` copies it into
-/// the request: its call is pushed by its handler, with no class guard,
-/// pair or callee held, and its sends stay the handlers' (#3343, #3558).
+/// the request: its call, on an object, through the class's name and on
+/// an enum's case, is pushed in place under the pair its runtime-cache
+/// slot holds, the callee held by its record, as php's
+/// `zend_jit_func_guard` holds a function that is not immutable by its
+/// opcodes (#3561).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
-fn a_request_scoped_classs_own_method_is_pushed_by_its_handler() -> Result<(), String> {
-    let ir = built(
-        &IN_F,
-        "eval('class Base { public $b = 1; }');
-        class Child extends Base { public function get($v) { return $this->b + $v; } public static function twice($v) { return $v + $v; } }
-        function f($o, $n) { $s = 0; for ($i = 1; $i < $n; $i++) { $s += $o->get($i) + Child::twice($i); } return $s; }
-        echo f(new Child, 100), \"\\n\";",
-    )?;
-    let rendered = dump::render(&ir);
-    for opcode in [Opcode::InitMethodCall, Opcode::InitStaticMethodCall] {
+fn a_request_scoped_classs_own_method_is_pushed_under_its_slots_pair() -> Result<(), String> {
+    for (fixture, opcode) in [
+        (METHOD_OWN, Opcode::InitMethodCall),
+        (STATIC_OWN, Opcode::InitStaticMethodCall),
+        (ENUM_OWN, Opcode::InitMethodCall),
+    ] {
+        let ir = golden(fixture)?;
+        let rendered = pushed_under_its_pair(&ir, opcode, |class| {
+            matches!(class, super::PairClass::Receiver | super::PairClass::Named)
+        })?;
         let init = line_of(&ir, opcode).ok_or_else(|| format!("no {opcode:?} in\n{rendered}"))?;
-        assert_eq!(init.form, Form::Step, "{rendered}");
+        assert!(
+            matches!(
+                init.imm,
+                Imm::Pair {
+                    function: super::PairCallee::Record,
+                    ..
+                }
+            ),
+            "{rendered}"
+        );
     }
-    assert!(
-        (ir.guards.iter())
-            .all(|guard| !matches!(guard.check, Check::Class { .. } | Check::Callee { .. })),
-        "{rendered}"
-    );
     Ok(())
 }
 
@@ -3001,7 +3050,7 @@ fn a_new_whose_constructor_may_throw_reloads_nothing() -> Result<(), String> {
 }
 
 /// The clobber rule at a native that calls back into user code, served
-/// through the native kernel (`Kernel::Native`): `trigger_error` runs
+/// through the native kernel (`Kernel::CallNative`): `trigger_error` runs
 /// the error handler, PHP that writes through a global, so what a
 /// reference holds is read again after it, the trace's own longs kept
 /// (#3340).
@@ -3024,27 +3073,52 @@ fn a_native_that_calls_back_reloads_what_a_reference_holds() -> Result<(), Strin
 }
 
 /// The clobber rule at a call whose `RECV` check fails in place: the
-/// call is made by the call kernel, which serves the prologue and its
-/// coercion, and may throw its `TypeError`, so the made call unwinds
-/// (#3340).
+/// call is made in place, the argument handed to its `RECV`'s handler,
+/// which coerces it, here a string the trace knows to an `int`, or may
+/// throw its `TypeError`, so the made call unwinds and clobbers nothing
+/// (#3340, #3560).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_call_whose_check_may_coerce_or_throw_unwinds() -> Result<(), String> {
-    let ir = built(
-        &IN_F,
-        "function g(int $v) { return $v; }
+    for (program, checked) in [
+        (
+            "function g(int $v) { return $v; }
         function f(array &$a, int $n) {
             $s = 0;
             for ($i = 0; $i < $n; $i++) { $s += g($a[0]); }
             return $s;
         }
         $x = [1]; echo f($x, 3), \"\\n\";",
-    )?;
-    let rendered = dump::render(&ir);
-    let made =
-        line_of(&ir, Opcode::DoUcall).ok_or_else(|| format!("no DO_UCALL in\n{rendered}"))?;
-    assert!(matches!(made.imm, super::Imm::Make { .. }), "{rendered}");
-    assert!(made.unwind.is_some(), "{rendered}");
+            0,
+        ),
+        (
+            "function g(int $v) { return $v; }
+        function f(array &$a, int $n) {
+            $s = 0;
+            for ($i = 0; $i < $n; $i++) { $s += g(\"4\" . $i); }
+            return $s;
+        }
+        $x = [1]; echo f($x, 3), \"\\n\";",
+            1,
+        ),
+    ] {
+        let ir = built(&IN_F, program)?;
+        let rendered = dump::render(&ir);
+        let made =
+            line_of(&ir, Opcode::DoUcall).ok_or_else(|| format!("no DO_UCALL in\n{rendered}"))?;
+        let super::Imm::Make { checks, .. } = made.imm else {
+            return Err(format!("no call made in place in\n{rendered}"));
+        };
+        assert_eq!(checks.each().count(), checked, "{rendered}");
+        assert!(made.unwind.is_some(), "{rendered}");
+        // The handler's coercion or throw reads nothing back.
+        let at = (ir.ops.iter())
+            .position(|op| matches!(op, Op::Line(line) if line.opcode == Opcode::DoUcall))
+            .and_then(|at| u32::try_from(at).ok())
+            .map(OpId)
+            .ok_or_else(|| format!("no DO_UCALL in\n{rendered}"))?;
+        assert_eq!(reloaded(&ir, at), Vec::<u32>::new(), "{rendered}");
+    }
     Ok(())
 }
 

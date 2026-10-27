@@ -1208,11 +1208,13 @@ impl Request {
         class: crate::api::values::ClassId,
         (function, instance): (Function, bool),
     ) {
+        let (_, record, _) = self.call_room(function, 0);
         self.prime_scoped(frame, slot, |primed| exec::Cached::ClassAndCallee {
             class,
             primed,
             function,
             instance,
+            record,
         });
     }
 

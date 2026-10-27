@@ -1127,6 +1127,43 @@ const MAY_BE_LONG: u32 = 1 << 4;
 const MAY_BE_DOUBLE: u32 = 1 << 5;
 const MAY_BE_STRING: u32 = 1 << 6;
 
+/// An int where a declared type's `mask` accepts a float, converted: the
+/// one conversion php makes under `strict_types`
+/// (`zend_verify_scalar_type_hint`'s one allowance there) and the first the weak
+/// rule makes where the type takes no int, so a native's parameter reads
+/// it with no question of which rule the caller declared, as `Z_PARAM_DOUBLE`'s
+/// `zend_parse_arg_double_slow` reads `IS_LONG` before it asks
+/// (`Z/Zend/zend_API.c:687-698`). None for any other value. Under
+/// either rule, an int sent to a native's `float` is that float, and
+/// only the weak rule reads a numeric string or a bool:
+///
+/// ```php
+/// var_dump(sqrt(16), sqrt("2.25"), sqrt(true), fmod(7, 2));
+/// ```
+/// ```expect
+/// float(4)
+/// float(1.5)
+/// float(1)
+/// float(1)
+/// ```
+///
+/// ```php
+/// declare(strict_types=1);
+/// var_dump(sqrt(9), fmod(7, 2));
+/// try { sqrt("9"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// float(3)
+/// float(1)
+/// sqrt(): Argument #1 ($num) must be of type float, string given
+/// ```
+pub(crate) fn widened(mask: u32, value: &Value) -> Option<Value> {
+    match (mask & MAY_BE_DOUBLE != 0, value.as_ref()) {
+        (true, ValueRef::Int(n)) => Some(Value::float(n as f64)),
+        _ => None,
+    }
+}
+
 /// `is_numeric_str_function`: the number a string is, whitespace
 /// allowed on either side and nothing else past it.
 fn numeric_whole(bytes: &[u8]) -> Option<php_heap::Number> {
@@ -1171,12 +1208,7 @@ pub(crate) fn scalar_type_hint(
 ) -> Result<Option<Value>, Thrown> {
     let value = value.deref();
     if strict {
-        // The one exception php makes under `strict_types`: an int
-        // where a float is accepted, converted.
-        return Ok(match (mask & MAY_BE_DOUBLE != 0, value.as_ref()) {
-            (true, ValueRef::Int(n)) => Some(Value::float(n as f64)),
-            _ => None,
-        });
+        return Ok(widened(mask, &value));
     }
     if matches!(value.as_ref(), ValueRef::Null | ValueRef::Undef) {
         return Ok(None);

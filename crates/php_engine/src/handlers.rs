@@ -76,8 +76,9 @@ use crate::api::values::{
     ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
 };
 use crate::exec::{
-    self, Cached, E_FATAL_ERRORS, LAST_CATCH, cached_class, cleanup_live_vars,
-    cleanup_unfinished_calls, free_carried_value, has_only_fatal_errors, restore_silenced,
+    self, Cached, E_FATAL_ERRORS, FETCH_CLASS_MASK, FETCH_CLASS_PARENT, FETCH_CLASS_SELF,
+    LAST_CATCH, cached_class, class_fixed, cleanup_live_vars, cleanup_unfinished_calls,
+    free_carried_value, has_only_fatal_errors, restore_silenced,
 };
 use crate::observer::OnThrow;
 use crate::operand::{ByKind, Operand, Retval, RetvalByte, Var};
@@ -3643,7 +3644,21 @@ pub(crate) fn do_icall<T: Tier>(
     _: &OpArray,
     op: &Opline,
 ) -> Edge {
-    do_call(req, frame, op, "ZEND_DO_ICALL")
+    icall(req, frame, returns_into(op))
+}
+
+/// [`do_icall`] past its opline, where what the native returns goes into
+/// the temporary of `frame` that `into` names, none where the opline's
+/// `result` is `UNUSED`: the call compiled code makes knowing the opline
+/// it compiled (`crate::tier::call_native`), as php's trace calls the
+/// handler with the address of the return's slot it computed
+/// (`zend_jit_do_fcall`'s internal arm).
+pub(super) fn icall(req: &mut Request, frame: FrameRef, into: Option<u32>) -> Edge {
+    let says = DoCall {
+        flagged: false,
+        into,
+    };
+    do_call(req, frame, says, "ZEND_DO_ICALL")
 }
 
 /// `ZEND_DO_FCALL_BY_NAME`: serve the callee an `INIT_FCALL_BY_NAME`
@@ -3677,7 +3692,7 @@ pub(crate) fn do_fcall_by_name<T: Tier>(
         return edge;
     }
     req.vm_mut().stand(frame, at);
-    do_call(req, frame, op, "ZEND_DO_FCALL_BY_NAME")
+    do_call(req, frame, DoCall::of(op), "ZEND_DO_FCALL_BY_NAME")
 }
 
 /// `ZEND_DO_FCALL`: serve the callee an `INIT_STATIC_METHOD_CALL`, an
@@ -3711,7 +3726,7 @@ pub(crate) fn do_fcall<T: Tier>(
         return edge;
     }
     req.vm_mut().stand(frame, at);
-    do_call(req, frame, op, "ZEND_DO_FCALL")
+    do_call(req, frame, DoCall::of(op), "ZEND_DO_FCALL")
 }
 
 /// `ZEND_INCLUDE_OR_EVAL` (`Z/Zend/zend_vm_def.h:6545`), the four file
@@ -4201,7 +4216,7 @@ pub(crate) fn do_ucall<T: Tier>(
         return edge;
     }
     req.vm_mut().stand(frame, at);
-    do_call(req, frame, op, "ZEND_DO_UCALL")
+    do_call(req, frame, DoCall::of(op), "ZEND_DO_UCALL")
 }
 
 /// The inline path of `DO_UCALL`, and of `DO_FCALL` and
@@ -4242,12 +4257,11 @@ fn inline_enter(
 fn enter(
     req: &mut Request,
     frame: FrameRef,
-    op: &Opline,
+    says: DoCall,
     call: FrameRef,
     shape: crate::api::request::FrameShape,
 ) -> Edge {
-    let returns_to = (op.out_type != OperandKind::Unused).then_some(op.out);
-    let activated = req.activate_user(call, shape, returns_to, exec::Caller::Opline(frame))?;
+    let activated = req.activate_user(call, shape, says.into, exec::Caller::Opline(frame))?;
     Ok(Stepped::Pushed(activated.frame).into())
 }
 
@@ -5820,6 +5834,27 @@ pub(crate) fn new<T: Tier>(
 /// Call to private method A::p() from global scope
 /// ```
 ///
+/// A class the scope names, `self`, `parent` or `static`, or one a
+/// `FETCH_CLASS` left, is resolved on every pass, and the pair answers
+/// where it holds that pass's class, php's `CACHED_PTR(opline->result.num)
+/// == ce`: `static` names another class on each call below, and a
+/// trait's `self` the class that uses it, each looked up again where the
+/// pair holds the other.
+///
+/// ```php
+/// class P { static function name() { return "P"; } }
+/// class A extends P { static function f() { return "A" . static::g(); } static function g() { return "a"; } static function run() { $s = ""; for ($i = 0; $i < 2; $i++) { $s .= self::f() . parent::name() . static::g(); } return $s; } }
+/// class B extends A { static function g() { return "b"; } }
+/// class C extends P { static function f() { return "C"; } static function run() { $s = ""; for ($i = 0; $i < 2; $i++) { $s .= self::f() . parent::name(); } return $s; } }
+/// trait T { static function h() { return self::name(); } }
+/// class D { use T; static function name() { return "D"; } }
+/// class E { use T; static function name() { return "E"; } }
+/// echo A::run(), " ", B::run(), " ", C::run(), " ", D::h(), E::h(), D::h(), "\n";
+/// ```
+/// ```expect
+/// AaPaAaPa AbPbAbPb CPCP DED
+/// ```
+///
 /// A method named on a trait itself, and never one a class took from
 /// it, is php's deprecation on every pass, since php caches no such
 /// callee, and an abstract one is `zend_abstract_method_call`'s `Error`
@@ -5883,12 +5918,16 @@ pub(crate) fn init_static_method_call<T: Tier>(
         }
     };
     // The pair answers where it holds this pass's class and was written
-    // from this frame's scope ([`Request::cached_callee`]).
-    let cached_callee = match (op.op2_type, primed) {
-        (OperandKind::Const, Cached::ClassAndCallee { .. }) => {
-            req.cached_callee(frame, slot, class)
-        }
-        _ => None,
+    // from this frame's scope ([`Request::cached_callee`]): for a constant
+    // class, where the slot was found holding a pair; for any other,
+    // whichever pair it holds, php's `CACHED_PTR(opline->result.num) == ce`.
+    // One read of the pair, so the read stays inline in the handler.
+    let pair_read = op.op2_type == OperandKind::Const
+        && (op.op1_type != OperandKind::Const || matches!(primed, Cached::ClassAndCallee { .. }));
+    let cached_callee = if pair_read {
+        req.cached_callee(frame, slot, class)
+    } else {
+        None
     };
     if let Some((function, instance)) = cached_callee {
         return static_call_frame(req, frame, op, class, (function, instance));
@@ -5955,7 +5994,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // `ZEND_ACC_NEVER_CACHE` and one a trait declared, whose deprecation
     // is raised on every pass.
     let instance = looked_up.unwrap_or_else(|| req.takes_this(function));
-    if op.op1_type == OperandKind::Const && op.op2_type == OperandKind::Const && !uncached {
+    if op.op2_type == OperandKind::Const && !uncached {
         req.prime_callee(frame, slot, class, (function, instance));
     }
     static_call_frame(req, frame, op, class, (function, instance))
@@ -12528,31 +12567,10 @@ fn class_operand(
     ))
 }
 
-/// Whether the class operand `kind`/`at` names one class wherever a
-/// slot is read back: a constant, or `self` or `parent`, which the
-/// frame's scope fixes, and which a slot read back from the scope that
-/// wrote it ([`Request::cached_in_scope`]) needs not resolve again;
-/// `static` and a `FETCH_CLASS`'s are resolved on every pass.
-fn class_fixed(kind: OperandKind, at: u32) -> bool {
-    kind == OperandKind::Const
-        || kind == OperandKind::Unused
-            && matches!(at & FETCH_CLASS_MASK, FETCH_CLASS_SELF | FETCH_CLASS_PARENT)
-}
-
-/// `ZEND_FETCH_CLASS_MASK` (`Z/Zend/zend_compile.h:1034`): the bits of a
-/// class operand's number that are its fetch type, the flags above them.
-const FETCH_CLASS_MASK: u32 = 0x0f;
-
 /// `ZEND_FETCH_CLASS_NO_AUTOLOAD` and `ZEND_FETCH_CLASS_SILENT`
 /// (`Z/Zend/zend_compile.h:1035-1036`).
 const FETCH_CLASS_NO_AUTOLOAD: u32 = 0x80;
 const FETCH_CLASS_SILENT: u32 = 0x100;
-
-/// `ZEND_FETCH_CLASS_SELF` and `ZEND_FETCH_CLASS_PARENT`
-/// (`Z/Zend/zend_compile.h:1028`), the two fetch types a call on the class
-/// forwards the called scope through.
-const FETCH_CLASS_SELF: u32 = 1;
-const FETCH_CLASS_PARENT: u32 = 2;
 
 /// `zend_fetch_class(NULL, fetch_type)` (`Z/Zend/zend_execute_API.c:1712`)
 /// under `ZEND_FETCH_CLASS_EXCEPTION`, which every compiled reference
@@ -12799,18 +12817,45 @@ fn threw(req: &mut Request, frame: FrameRef, thrown: &Thrown) -> Edge {
     Ok(Stepped::Threw(frame).into())
 }
 
+/// What a `DO_*CALL` opline says of the call it makes: whether the
+/// callee's flags are tested before it is entered, `DO_FCALL`'s and
+/// `DO_FCALL_BY_NAME`'s ([`flagged_call`]), and the temporary of the
+/// caller's frame that takes what it returns ([`returns_into`]).
+#[derive(Clone, Copy)]
+struct DoCall {
+    flagged: bool,
+    into: Option<u32>,
+}
+
+impl DoCall {
+    /// What the `DO_*CALL` `op` says of its call.
+    fn of(op: &Opline) -> DoCall {
+        DoCall {
+            flagged: matches!(op.opcode, Opcode::DoFcall | Opcode::DoFcallByName),
+            into: returns_into(op),
+        }
+    }
+}
+
+/// The temporary of its frame a call opline `op` writes what the callee
+/// returns into, none where its `result` is `UNUSED`, php's
+/// `RETURN_VALUE_USED(opline)`.
+fn returns_into(op: &Opline) -> Option<u32> {
+    (op.out_type != OperandKind::Unused).then_some(op.out)
+}
+
 /// The body the `DO_*CALL` handlers share, `opcode` naming the one that
 /// found no call frame under it: the `ZEND_USER_FUNCTION` arm enters
 /// the callee's op array ([`enter`]), the `ZEND_INTERNAL_FUNCTION` arm
 /// serves the native on the call frame.
-fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edge {
-    if matches!(op.opcode, Opcode::DoFcall | Opcode::DoFcallByName)
-        && let Err(thrown) = flagged_call(req, op)
+fn do_call(req: &mut Request, frame: FrameRef, says: DoCall, opcode: &str) -> Edge {
+    if says.flagged
+        && let Err(thrown) = flagged_call(req, says)
     {
         req.pop_call();
         return threw(req, frame, &thrown);
     }
-    let Some((call, function)) = req.activate_call(op.out_type != OperandKind::Unused) else {
+    let Some((call, function)) = req.activate_call(says.into.is_some()) else {
         return Err(Fatal::error(format!(
             "InternalError: {opcode} with no call frame under it"
         )));
@@ -12823,7 +12868,7 @@ fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edg
         req.serve_entry(function, entry, OnThrow::Nothing)
     } else if let Some(user) = req.user_function(function) {
         let shape = user.shape;
-        return enter(req, frame, op, call, shape);
+        return enter(req, frame, says, call, shape);
     } else {
         let function = match crate::trampoline::hand_to_magic(req, function) {
             Ok(function) => function,
@@ -12834,7 +12879,7 @@ fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edg
         };
         if let Some(user) = req.user_function(function) {
             let shape = user.shape;
-            return enter(req, frame, op, call, shape);
+            return enter(req, frame, says, call, shape);
         }
         req.serve_native(function, OnThrow::Nothing)
     };
@@ -12868,7 +12913,7 @@ fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edg
                     return Err(fatal);
                 }
             };
-            let into = (op.out_type != OperandKind::Unused).then_some((frame, op.out));
+            let into = says.into.map(|slot| (frame, slot));
             if handed_back(req, into, value) || threw {
                 return Ok(Stepped::Threw(frame).into());
             }
@@ -12885,7 +12930,7 @@ fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edg
 /// yet entered, which is why `zend_get_call_op` keeps such a callee off
 /// `DO_UCALL` and `DO_ICALL`, the two that never test. What a handler
 /// threw is the `Err`, and the call is never made.
-fn flagged_call(req: &mut Request, op: &Opline) -> Result<(), Thrown> {
+fn flagged_call(req: &mut Request, says: DoCall) -> Result<(), Thrown> {
     let Some(function) = req.building_call_function() else {
         return Ok(());
     };
@@ -12893,7 +12938,7 @@ fn flagged_call(req: &mut Request, op: &Opline) -> Result<(), Thrown> {
     if flags.deprecated {
         crate::attributes::deprecated_function(req, function)?;
     }
-    if flags.no_discard && op.out_type == OperandKind::Unused {
+    if flags.no_discard && says.into.is_none() {
         crate::attributes::no_discard_function(req, function)?;
     }
     Ok(())

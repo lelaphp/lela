@@ -40,7 +40,7 @@ pub use crate::api::abi::{Extension, ExtensionBuilder, Refusal, Start, StartupIn
 pub use crate::api::raising::Thrown;
 use crate::observer::{Declared, ObservedOpcodes, Telling, Untold};
 use crate::{exec, interrupt};
-use php_unit::OpArray;
+use php_unit::{OpArray, OplineIdx};
 
 pub use crate::api::request::Request;
 use crate::api::request::TierStatus;
@@ -68,8 +68,8 @@ mod strings;
 mod tail;
 mod view;
 pub use crossing::{
-    at_room, current, free_cv, free_operands, free_this, laid, primed, release, return_entry, room,
-    stack, stack_room, stand,
+    at_room, current, free_cv, free_operands, free_this, laid, make_ref, primed, release,
+    return_entry, room, stack, stack_room, stand,
 };
 pub use dims::{dim_key, lookup_element};
 pub use frames::{
@@ -1811,30 +1811,72 @@ pub fn dispatch_held(req: &mut Request, frame: FrameRef, held: Held<'_>) -> Resu
     }
 }
 
-/// The native's call at the opline `frame` stands at in `held`, a
-/// `DO_ICALL` or a `FRAMELESS_ICALL_*`, served by its handler with no
-/// dispatch, as php's compiled code calls the native directly
-/// (`zend_jit_do_call`'s internal arm, `jit_frameless_icall`,
-/// `Z/ext/opcache/jit/zend_jit_ir.c:10511-10600`, `:17780-17850`): the
-/// frame stood past it, the interrupt checked after a frameless call as
-/// the handler's `ZEND_VM_FCALL_INTERRUPT_CHECK` checks it, and a throw
-/// left pending. Any other opline is [`dispatch_held`]'s.
-pub fn native_held(req: &mut Request, frame: FrameRef, held: Held<'_>) -> Result<(), Fatal> {
+/// The frameless call at the opline `frame` stands at in `held`, a
+/// `FRAMELESS_ICALL_*`, served by its handler with no dispatch, as php's
+/// compiled code calls the native directly (`jit_frameless_icall`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:17868-18080`): `frame` stood at `at`
+/// by compiled code's `SET_EX_OPLINE`, and past it after the call, the
+/// interrupt checked after the call as `jit_frameless_interrupt_check`
+/// checks it, and a throw left pending. Any other opline is
+/// [`dispatch_held`]'s.
+pub fn frameless_held(
+    req: &mut Request,
+    frame: FrameRef,
+    held: Held<'_>,
+    at: OplineIdx,
+) -> Result<(), Fatal> {
     use crate::handlers::{
-        do_icall, frameless_icall_0, frameless_icall_1, frameless_icall_2, frameless_icall_3,
+        frameless_icall_0, frameless_icall_1, frameless_icall_2, frameless_icall_3,
     };
     use php_unit::Opcode;
     let code = held.code();
-    let at = req.vm().opline(frame);
+    let at = at.0;
+    debug_assert_eq!(
+        req.vm().opline(frame),
+        at,
+        "compiled code stood the frame at the call"
+    );
     let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
     let next = match op.opcode {
-        Opcode::DoIcall => do_icall::<Nop>(req, frame, code, op)?,
         Opcode::FramelessIcall0 => frameless_icall_0::<Nop>(req, frame, code, op, at)?,
         Opcode::FramelessIcall1 => frameless_icall_1::<Nop>(req, frame, code, op, at)?,
         Opcode::FramelessIcall2 => frameless_icall_2::<Nop>(req, frame, code, op, at)?,
         Opcode::FramelessIcall3 => frameless_icall_3::<Nop>(req, frame, code, op, at)?,
         _ => return dispatch_held(req, frame, held),
     };
+    went_on_in(req, frame, at, next)
+}
+
+/// The `DO_ICALL` at `at` of `frame`, the call on top of the stack a
+/// native's, made as php's compiled code makes it knowing the opline it
+/// compiled (`zend_jit_do_fcall`'s internal arm,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:10545-10660`): `frame` stood at `at`
+/// by compiled code's `SET_EX_OPLINE`, the handler's internal arm served
+/// with no opline read and no dispatch,
+/// what the native returned written into the temporary `into` names, or
+/// given up where the opline's `result` is `UNUSED`, the interrupt
+/// checked with the call still on the stack, the call popped, and a
+/// throw left pending.
+pub fn call_native(
+    req: &mut Request,
+    frame: FrameRef,
+    at: OplineIdx,
+    into: Option<u32>,
+) -> Result<(), Fatal> {
+    debug_assert_eq!(
+        req.vm().opline(frame),
+        at.0,
+        "compiled code stood the frame at the call"
+    );
+    let next = crate::handlers::icall(req, frame, into)?;
+    went_on_in(req, frame, at.0, next)
+}
+
+/// Where a native's call compiled code makes, at `at` of `frame`, went
+/// on: in `frame`, past it or at a throw; anywhere else is an internal
+/// error, which no call compiled code makes reaches.
+#[inline]
+fn went_on_in(req: &mut Request, frame: FrameRef, at: u32, next: Next) -> Result<(), Fatal> {
     match settled(req, frame, at, next) {
         Stepped::Same(went) | Stepped::Threw(went) if went == frame => Ok(()),
         _ => Err(Fatal::error(
