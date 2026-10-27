@@ -850,7 +850,12 @@ pub(crate) fn pcntl_setcpuaffinity(
             },
             _ => {
                 let given = php_ext::coerce::value_name(req, &value);
-                let tail = format!("value must be of type int|string, {given} given");
+                let tail = [
+                    b"value must be of type int|string, ".as_slice(),
+                    &given,
+                    b" given",
+                ]
+                .concat();
                 return Err(argument_error(req, ce.type_error, 2, &tail));
             }
         };
