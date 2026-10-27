@@ -2,9 +2,10 @@
 //! (ADR-0015, `jit-design.md` §4.6): `php_ssa`'s CFG, DFG, SSA and the
 //! types and ranges inferred over them, asked for where
 //! `zend_jit_trace_build_tssa` builds them, for the op arrays it builds
-//! them for, built once per op array of the epoch and kept in its table
+//! them for, built once per op array and binding set of the epoch and
+//! kept in its table, as php's rebuild at every build would find it
 //! (built anew at each build where it binds a class only the request
-//! holds, as php builds every one), and written under
+//! holds, or reads what another function returns), and written under
 //! `ZEND_JIT_DEBUG_SSA` at each trace's build, as php writes them each
 //! time it builds them anew.
 //!
@@ -18,7 +19,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use php_engine::tier::{CallSite, CalledFunction, ClassId, FuncRef, UnitView};
+use php_engine::tier::{Bindings, CallSite, CalledFunction, ClassId, FuncRef, UnitView};
 use php_ssa::{
     Analysis, Body, Callee, ClassConstant, Function, Level, LinkedTable, Method, ObjectShape,
     Property, Returns,
@@ -44,23 +45,32 @@ const OPT_FUNCS: u8 = 4;
 /// past which php refuses to compile it (`zend_jit.h`).
 const MAX_FUNCS: usize = 30;
 
-/// An epoch's analyses by op array, each written once
-/// (`jit-design.md` §4.6).
+/// An epoch's analyses by op array and the classes and functions its
+/// view bound for it, each written once (`jit-design.md` §4.6; ADR-0015
+/// as amended on #3571): php rebuilds an op array's analysis at every
+/// trace's build, and a build that binds what an earlier one bound
+/// finds what php's rebuild would.
 #[derive(Debug, Default)]
-pub(crate) struct Analyses(Mutex<HashMap<FuncRef, Kept>>);
+pub(crate) struct Analyses(Mutex<HashMap<FuncRef, Vec<(Bindings, Kept)>>>);
 
 impl Analyses {
-    /// The analysis of `f`, none where none was kept.
-    fn kept(&self, f: FuncRef) -> Option<Kept> {
+    /// The analysis of `f` kept under `bindings`, none where none was.
+    fn kept(&self, f: FuncRef, bindings: &Bindings) -> Option<Kept> {
         let map = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        map.get(&f).cloned()
+        let under = map.get(&f)?.iter().find(|(held, _)| held == bindings);
+        under.map(|(_, kept)| kept.clone())
     }
 
-    /// Keep `made` for `f`, or the analysis kept first where two builds
-    /// race.
-    fn keep(&self, f: FuncRef, made: Kept) -> Kept {
+    /// Keep `made` for `f` under `bindings`, or the analysis kept first
+    /// where two builds race.
+    fn keep(&self, f: FuncRef, bindings: Bindings, made: Kept) -> Kept {
         let mut map = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        map.entry(f).or_insert(made).clone()
+        let entries = map.entry(f).or_default();
+        if let Some((_, kept)) = entries.iter().find(|(held, _)| *held == bindings) {
+            return kept.clone();
+        }
+        entries.push((bindings, made.clone()));
+        made
     }
 }
 
@@ -373,21 +383,20 @@ pub(crate) fn build(
             built: &built,
             reads_returns: Cell::new(false),
         };
-        let own = view.binds_request_class(f);
-        let kept = match analyses.kept(f) {
-            Some(kept) if !own => kept,
-            _ => {
+        // Kept for the epoch only where what it read stays: no class
+        // only the request holds, and no other function's return.
+        let bindings = (!view.binds_request_class(f)).then(|| view.bindings(f));
+        let kept = (bindings.as_ref())
+            .and_then(|b| analyses.kept(f, b))
+            .unwrap_or_else(|| {
                 let made = php_ssa::analyse(&function, &table, level).map(Arc::new);
-                // Kept for the epoch only where what it read stays: no
-                // class only the request holds, and no other function's
-                // return.
-                if own || table.reads_returns.get() {
-                    made
-                } else {
-                    analyses.keep(f, made)
+                match bindings {
+                    Some(bindings) if !table.reads_returns.get() => {
+                        analyses.keep(f, bindings, made)
+                    }
+                    _ => made,
                 }
-            }
-        };
+            });
         if dump && let Some(analysis) = &kept {
             let mut written = Vec::new();
             analysis.dump(&mut written, &function, &table, view.frameless_names());

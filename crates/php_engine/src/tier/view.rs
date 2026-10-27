@@ -598,6 +598,23 @@ pub struct UnitView {
     called: Vec<(FuncRef, Site, CalledFunction)>,
 }
 
+/// What a view bound for php's analysis of one op array
+/// ([`UnitView::bindings`]): the class the op array is declared in, the
+/// classes its literals name, the engine's own classes declared types
+/// name, and the functions its calls reach, each by its identity. php
+/// rebuilds the analysis at every trace's build against the tables as
+/// they stand then (`zend_jit_trace_build_ssa`); two builds that bind
+/// the same find the same in them, so an analysis kept under one
+/// binding set is the one php would build at the next build that binds
+/// it (ADR-0015, as amended on #3571; #3579).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bindings {
+    scope: Option<ClassId>,
+    named: Vec<(Box<[u8]>, ClassId)>,
+    engine_named: Vec<(Box<[u8]>, ClassId)>,
+    called: Vec<(Site, CalledFunction)>,
+}
+
 /// Where [`UnitView::called`] looks a callee up, owned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Site {
@@ -636,7 +653,7 @@ pub enum CallSite<'a> {
 /// reads it (`zend_optimizer_get_called_func`, `zend_get_func_info`):
 /// its name, its declared return, the op array a user function's call
 /// serves, and a method's class and flags.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalledFunction {
     /// `common.function_name`, as declared.
     pub name: Name,
@@ -651,7 +668,7 @@ pub struct CalledFunction {
 
 /// A method's `common.scope` and the `fn_flags` php's call analysis
 /// reads.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct CalledMethod {
     /// The class that declares it.
@@ -1012,6 +1029,28 @@ impl UnitView {
     #[must_use]
     pub fn binds_request_class(&self, f: FuncRef) -> bool {
         self.request_bound.contains(&f)
+    }
+
+    /// What the view bound for php's analysis of the op array `f` names,
+    /// the key the epoch keeps its analysis under: an analysis built
+    /// under one [`Bindings`] is read only where a later build's view
+    /// binds the same.
+    #[must_use]
+    pub fn bindings(&self, f: FuncRef) -> Bindings {
+        let mut engine_named = self.engine_named.clone();
+        engine_named.sort_unstable();
+        Bindings {
+            scope: self.scope(f),
+            named: (self.named.iter())
+                .filter(|(func, ..)| *func == f)
+                .map(|(_, name, class)| (name.clone(), *class))
+                .collect(),
+            engine_named,
+            called: (self.called.iter())
+                .filter(|(func, ..)| *func == f)
+                .map(|(_, site, called)| (site.clone(), called.clone()))
+                .collect(),
+        }
     }
 
     /// The function the call `site` of the op array `f` names reaches, as
