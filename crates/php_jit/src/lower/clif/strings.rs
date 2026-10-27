@@ -238,7 +238,11 @@ impl Emit<'_> {
     }
 
     /// The two words of the zval `operand` of `frame` names, as it stands.
-    fn zval_words(&mut self, frame: Frame, operand: Operand) -> Result<(Value, Value), Abort> {
+    pub(super) fn zval_words(
+        &mut self,
+        frame: Frame,
+        operand: Operand,
+    ) -> Result<(Value, Value), Abort> {
         let (base, at) = self.zval_place(frame, operand)?;
         let word = self.b.ins().load(I64, trusted(), base, at);
         let info = self.b.ins().load(I32, trusted(), base, at + TYPE_AT);
@@ -464,7 +468,7 @@ impl Emit<'_> {
 
     /// The `IS_*` of the slot or constant `operand` names, as the handler
     /// reads its kind.
-    fn kind_of(&self, operand: Operand) -> Result<OperandKind, Abort> {
+    pub(super) fn kind_of(&self, operand: Operand) -> Result<OperandKind, Abort> {
         Ok(match operand {
             Operand::Value(value) => {
                 if self.is_temporary(self.value(value)?.slot)? {

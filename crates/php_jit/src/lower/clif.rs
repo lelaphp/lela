@@ -45,8 +45,8 @@ use php_heap::{Arr, ROOM_BYTES, Ref, Str, Zval, ZvalType};
 use php_unit::{ConstIdx, Opcode, OplineIdx};
 
 use super::{
-    ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, ROOT_AT, ReturnsTo, STACK_AT,
-    STOOD_AT, Stood, Symbols, UNWOUND, located,
+    ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, ROOT_AT, STACK_AT, STOOD_AT,
+    Stood, Symbols, UNWOUND, located,
 };
 
 mod calls;
@@ -303,16 +303,6 @@ enum Num {
         long: Value,
         double: Value,
     },
-}
-
-/// A native's call compiled code hands its kernel ([`Emit::handled`]):
-/// a `DO_ICALL`, which [`Kernel::CallNative`] makes with the temporary
-/// that takes the return, or a `FRAMELESS_ICALL_*`, which
-/// [`Kernel::Frameless`] serves.
-#[derive(Clone, Copy)]
-enum NativeCall {
-    Made(ReturnsTo),
-    Frameless,
 }
 
 /// Where a kernel serving `line` leaves: its exit, where an inline form
@@ -1676,10 +1666,12 @@ impl<'a> Emit<'a> {
         let mut sig = Signature::new(self.call_conv);
         // The `ExitCtx`, the frame's room and the opline come first.
         let params: &[Type] = match kernel {
-            Kernel::Step => &[I64, I64, I32, I32, I64],
             Kernel::Handle => &[I64, I64, I32, I32],
-            Kernel::Frameless | Kernel::CallNative => &[I64, I64, I32, I32, I32],
-            Kernel::FreeThis => &[I64, I64, I32],
+            Kernel::Frameless => &[
+                I64, I64, I32, I32, I32, I32, I64, I32, I64, I32, I64, I32, I64,
+            ],
+            Kernel::Step | Kernel::CallNative => &[I64, I64, I32, I32, I64],
+            Kernel::FreeThis | Kernel::PopCall | Kernel::Interrupt => &[I64, I64, I32],
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release | Kernel::FreeCv => &[I64, I64, I32, I64, I32],
             Kernel::Identical => &[I64, I64, I32, I64, I32, I64, I32, I64],
@@ -1850,12 +1842,11 @@ impl<'a> Emit<'a> {
     /// float(23.5)
     /// ```
     ///
-    /// A native's `DO_ICALL` goes through [`Kernel::CallNative`], which
-    /// makes the call with no opline read, as php's `zend_jit_do_fcall`
-    /// calls the native's handler, and a frameless call through
-    /// [`Kernel::Frameless`], which calls its handler with no dispatch;
-    /// each is handed the frame's place, so no frame is looked for by its
-    /// room. One that refuses its argument throws out of the loop:
+    /// A native's `DO_ICALL` is made in place ([`Emit::native_call`]), the
+    /// native alone served through [`Kernel::CallNative`], and a frameless
+    /// call's operands are handed to [`Kernel::Frameless`]
+    /// ([`Emit::frameless_call`]); neither kernel reads an opline. One that
+    /// refuses its argument throws out of the loop:
     ///
     /// ```php
     /// function f($n) { $t = 0; for ($i = 1; $i < $n; $i++) { $t += max(10, min(200, $i & 255)) + strlen(substr("abcdef", $i % 4)); } return $t; }
@@ -1924,34 +1915,10 @@ impl<'a> Emit<'a> {
         onward: Onward,
         [room, opline, func]: [Value; 3],
     ) -> Result<(), Abort> {
-        let native = if line.opcode == Opcode::DoIcall {
-            let slot = line
-                .out
-                .map(|out| Ok(self.value(out)?.slot.var))
-                .transpose()?;
-            let into = ReturnsTo::of(slot)
-                .ok_or_else(|| mismatch("a temporary past the slots a kernel numbers"))?;
-            Some(NativeCall::Made(into))
-        } else {
-            line.opcode
-                .is_frameless_icall()
-                .then_some(NativeCall::Frameless)
-        };
-        if let Some(native) = native {
-            // php's `SET_EX_OPLINE` before the native's call, which the
-            // kernel serves the frame stood at, and the frame's place, so
-            // the kernel looks for no frame by its room.
-            self.b.ins().store(trusted(), opline, room, EX_OPLINE);
-            let place = self.frame_ref(line.frame)?;
-            let place = self.b.ins().ireduce(I32, place);
-            let (kernel, last) = match native {
-                NativeCall::Made(into) => (
-                    Kernel::CallNative,
-                    self.b.ins().iconst(I32, i64::from(into.word())),
-                ),
-                NativeCall::Frameless => (Kernel::Frameless, func),
-            };
-            self.call(kernel, &[room, opline, place, last], leave_of(line))?;
+        if line.opcode == Opcode::DoIcall {
+            self.native_call(line, [room, opline])?;
+        } else if line.opcode.is_frameless_icall() {
+            self.frameless_call(line, [room, opline, func])?;
         } else {
             self.call(Kernel::Handle, &[room, opline, func], leave_of(line))?;
         }
@@ -1963,7 +1930,7 @@ impl<'a> Emit<'a> {
         self.b
             .ins()
             .stack_store(I64, next, self.stood, STOOD_OPLINE);
-        if matches!(native, Some(NativeCall::Made(_))) {
+        if line.opcode == Opcode::DoIcall {
             let call = self.call_left(line.frame)?;
             self.b.ins().stack_store(I64, call, self.stood, STOOD_CALL);
         }

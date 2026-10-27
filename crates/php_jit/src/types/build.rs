@@ -3968,6 +3968,7 @@ fn imm(op: &Opline) -> Imm {
             lattice::binary_of(op.extended_value).map_or(Imm::None, Imm::Binary)
         }
         Opcode::TypeCheck => Imm::Mask(op.extended_value),
+        opcode if opcode.is_frameless_icall() => Imm::Frameless(op.extended_value),
         _ => Imm::None,
     }
 }

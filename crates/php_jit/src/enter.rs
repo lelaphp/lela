@@ -50,7 +50,7 @@ use php_engine::tier::{
 use php_heap::{Arr, HeaderImage, Key, Scalar, Zval, ZvalRef, ZvalType};
 use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
 
-use crate::lower::{self, ReturnsTo, Stood, engine_offset};
+use crate::lower::{self, Stood, engine_offset};
 use crate::table::{Exit, Trace};
 use crate::types::ExitId;
 
@@ -570,10 +570,12 @@ kernels! {
         Find => find(array: u64, key: u64, key_info: u32, constant: u32) -> Zval;
         Lookup => lookup(array: u64, key: u64, key_info: u32, constant: u32) -> Zval = tier::lookup_element;
         Leave => leave(word: u64, type_info: u32) -> u64 = tier::return_entry;
-        Frameless => frameless(place: u32, func: u32) = tier::frameless_held;
+        Frameless => frameless(place: u32, at: u32, kinds: u32, a: u64, a_info: u32, b: u64, b_info: u32, c: u64, c_info: u32) -> Zval = tier::frameless_call;
         FreeThis => free_this() = tier::free_this;
         MakeRef => make_ref(place: u64) -> u64 = tier::make_ref;
-        CallNative => call_native(place: u32, into: ReturnsTo) = tier::call_native;
+        CallNative => call_native(call: u32) -> Zval = tier::call_native;
+        PopCall => pop_call() = tier::pop_call;
+        Interrupt => interrupt() = tier::interrupted;
     }
 }
 
@@ -600,34 +602,80 @@ fn handle(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<(), Fatal> {
     tier::dispatch_held(req, frame, held)
 }
 
-/// The `frameless` kernel: the frameless call at `at` of the op array
-/// the engine numbers `func`, a `FRAMELESS_ICALL_*` of the frame at
-/// `place`, served by its handler with no dispatch
-/// ([`tier::frameless_held`]), as php's code calls the native directly;
-/// where the interpreter stands after it is compiled code's, and a throw
-/// is the request's pending throwable, as the `handle` kernel answers
-/// them.
-fn frameless(req: &mut Request, on: On<'_, '_>, place: u32, func: u32) -> Result<(), Fatal> {
-    let frame = at_place(req, on.room, place);
-    let (held, _) = held(on, func)?;
-    tier::frameless_held(req, frame, held, on.at)
-}
-
-/// The `call_native` kernel: the `DO_ICALL` at `at` of the frame at
-/// `place`, whose call on top of the stack is a native's, made with no
-/// opline read ([`tier::call_native`]), as php's code calls the native's
-/// handler with the address of the return's slot it computed; `into` is
-/// the temporary that takes what it returns ([`ReturnsTo`]). Where the
-/// interpreter stands after it is compiled code's, and a throw is the
-/// request's pending throwable.
-fn call_native(
+/// The `frameless` kernel: the native at `at` of the engine's
+/// frameless table, the `FRAMELESS_ICALL_*` at `on.at` of the frame at
+/// `place`, served over the three operand zvals compiled code read, each
+/// of the kind its byte of `kinds` names ([`operand_kind`]), with no
+/// opline read ([`tier::frameless_call`]), as php's code calls the
+/// native's frameless handler; where the interpreter stands after it is
+/// compiled code's, and a throw is the request's pending throwable.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "php's frameless handler takes three operand zvals, each two words across the crossing"
+)]
+fn frameless(
     req: &mut Request,
     on: On<'_, '_>,
     place: u32,
-    into: ReturnsTo,
-) -> Result<(), Fatal> {
+    at: u32,
+    kinds: u32,
+    a: u64,
+    a_info: u32,
+    b: u64,
+    b_info: u32,
+    c: u64,
+    c_info: u32,
+) -> Result<Zval, Fatal> {
     let frame = at_place(req, on.room, place);
-    tier::call_native(req, frame, on.at, into.slot())
+    let operands = [
+        (zval(a, a_info), operand_kind(kinds)?),
+        (zval(b, b_info), operand_kind(kinds >> 8)?),
+        (zval(c, c_info), operand_kind(kinds >> 16)?),
+    ];
+    tier::frameless_call(req, frame, at, operands)
+}
+
+/// The `call_native` kernel: the native the call at `call` on the stack
+/// is to, the call on top and made the one being served by compiled code,
+/// served with no opline read ([`tier::call_native`]), as php's code calls
+/// the native's handler with the call; where the interpreter stands
+/// after it is compiled code's, and a throw is the request's pending
+/// throwable.
+fn call_native(req: &mut Request, _: On<'_, '_>, call: u32) -> Result<Zval, Fatal> {
+    tier::call_native(req, FrameRef(call))
+}
+
+/// The `pop_call` kernel: the call on top popped and its arguments given
+/// up ([`tier::pop_call`]), a destructor's throw left pending.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "a kernel answers as `kernels!` calls it, and this one never fails"
+)]
+fn pop_call(req: &mut Request, _: On<'_, '_>) -> Result<(), Fatal> {
+    tier::pop_call(req);
+    Ok(())
+}
+
+/// The `interrupt` kernel: the interrupt check after a native returned,
+/// php's `zend_fcall_interrupt` ([`tier::interrupted`]); a hook's throw is
+/// the request's pending throwable.
+fn interrupt(req: &mut Request, _: On<'_, '_>) -> Result<(), Fatal> {
+    tier::interrupted(req).map(drop)
+}
+
+/// The `OperandKind` the low byte of `kinds` names, as compiled code
+/// writes one byte per operand it hands a kernel.
+fn operand_kind(kinds: u32) -> Result<OperandKind, Fatal> {
+    [
+        OperandKind::Const,
+        OperandKind::Tmp,
+        OperandKind::Var,
+        OperandKind::Cv,
+        OperandKind::Unused,
+    ]
+    .into_iter()
+    .find(|kind| u32::from(*kind as u8) == kinds & 0xff)
+    .ok_or_else(|| internal("an operand of no operand kind"))
 }
 
 /// The `leave` kernel: the value the `RETURN` at `at`, which a trace ends
@@ -817,19 +865,8 @@ fn concat(
     b_info: u32,
     kinds: u32,
 ) -> Result<Zval, Fatal> {
-    let kind = |byte: u32| {
-        [
-            OperandKind::Const,
-            OperandKind::Tmp,
-            OperandKind::Var,
-            OperandKind::Cv,
-        ]
-        .into_iter()
-        .find(|kind| u32::from(*kind as u8) == byte & 0xff)
-        .ok_or_else(|| internal("a side of a concatenation of no operand kind"))
-    };
-    let left = (zval(a, a_info), kind(kinds)?);
-    let right = (zval(b, b_info), kind(kinds >> 8)?);
+    let left = (zval(a, a_info), operand_kind(kinds)?);
+    let right = (zval(b, b_info), operand_kind(kinds >> 8)?);
     Ok(tier::concat(req, left, right)?.unwrap_or(Zval::UNDEF))
 }
 

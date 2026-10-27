@@ -28,11 +28,11 @@ use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DEFAULT_CALL, DEFAULT_CONSTANT,
     DIM_AND, DIM_CONCAT, DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, ENUM_OWN, FANNKUCH,
-    FIB, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE,
-    MANDELBROT, METHOD_CALL, METHOD_OWN, METHOD_SCOPED, NATIVE_CALL, NBODY, NESTED_READ,
-    NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, PARENT_THIS,
-    REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL, STATIC_OWN, STATIC_SCOPED, STATIC_SELF,
-    STATIC_THIS, STRING_BUILD, STRING_MATCH, TEMP_CALL, held, traced as built,
+    FIB, FRAMELESS_CALL, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET, HASH_READ, HASH_WRITE,
+    INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL, METHOD_OWN, METHOD_SCOPED, NATIVE_CALL, NBODY,
+    NESTED_READ, NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE,
+    PARENT_THIS, REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL, STATIC_OWN, STATIC_SCOPED,
+    STATIC_SELF, STATIC_THIS, STRING_BUILD, STRING_MATCH, TEMP_CALL, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -459,6 +459,30 @@ fn a_natives_call_is_pushed_in_place() -> Result<(), String> {
         _ => None,
     });
     assert_eq!(init, Some(Form::Inline), "{}", dump::render(&ir));
+    Ok(())
+}
+
+/// A frameless call in a loop names the native its opline calls, its
+/// place in the engine's frameless table, so compiled code hands it to
+/// the `frameless` kernel with no opline read (#3560).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_frameless_call_names_its_native() -> Result<(), String> {
+    let ir = golden(FRAMELESS_CALL)?;
+    let named = (ir.ops.iter())
+        .filter_map(|op| match op {
+            Op::Line(line) if line.opcode.is_frameless_icall() => Some(line.imm),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!named.is_empty(), "{}", dump::render(&ir));
+    assert!(
+        named
+            .iter()
+            .all(|imm| matches!(imm, super::Imm::Frameless(_))),
+        "{}",
+        dump::render(&ir)
+    );
     Ok(())
 }
 

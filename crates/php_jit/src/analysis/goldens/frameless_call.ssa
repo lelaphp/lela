@@ -1,0 +1,73 @@
+k:
+     ; (lines=16, args=2, vars=4, tmps=10, ssa_vars=22)
+     ; (JIT)
+     ; frameless_call.php:5-11
+     ; return  [long, double]
+     ; #0.CV0($o) NOVAL [undef]
+     ; #1.CV1($n) NOVAL [undef]
+     ; #2.CV2($c) NOVAL [undef]
+     ; #3.CV3($i) NOVAL [undef]
+BB0:
+     ; start lines=[0-0]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 #4.CV0($o) [rc1, rcn, any] = RECV 1
+
+BB1:
+     ; recv follow entry lines=[1-1]
+     ; from=(BB0)
+     ; to=(BB2)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB2)
+0001 #5.CV1($n) [rc1, rcn, any] = RECV 2
+
+BB2:
+     ; recv follow entry lines=[2-4]
+     ; from=(BB1)
+     ; to=(BB4)
+     ; idom=BB1
+     ; level=2
+     ; children=(BB4)
+0002 ASSIGN #2.CV2($c) NOVAL [undef] -> #6.CV2($c) [long] RANGE[0..0] int(0)
+0003 ASSIGN #3.CV3($i) NOVAL [undef] -> #7.CV3($i) [long] RANGE[0..0] int(0)
+0004 JMP BB4
+
+BB3:
+     ; target lines=[5-11]
+     ; from=(BB4)
+     ; to=(BB4)
+     ; idom=BB4
+     ; level=4
+     ; loop_header=4
+     #12.CV1($n) [rc1, rcn, any] RANGE[1..++] = Pi<BB4>(#8.CV1($n) [rc1, rcn, any] & RANGE[#10.CV3($i) [long, double] RANGE[0..++] + 1 .. ++])
+     #13.CV3($i) [long, double] RANGE[0..++] = Pi<BB4>(#10.CV3($i) [long, double] RANGE[0..++] & RANGE[-- .. #8.CV1($n) [rc1, rcn, any] - 1])
+0005 #14.T6 [bool] = FRAMELESS_ICALL_1(class_exists) string("stdClass")
+0006 #15.T7 [long] RANGE[MIN..MAX] = BW_AND #13.CV3($i) [long, double] RANGE[0..++] int(1)
+0007 #16.T8 [rc1, rcn, string] = CONCAT string("p") #15.T7 [long] RANGE[MIN..MAX]
+0008 #18.T9 [bool] = FRAMELESS_ICALL_2(property_exists) #4.CV0($o) [rc1, rcn, any] -> #17.CV0($o) NOVAL [rc1, rcn, any] #16.T8 [rc1, rcn, string]
+0009 #19.T10 [long, double] = ADD #14.T6 [bool] #18.T9 [bool]
+0010 ASSIGN_OP (ADD) #9.CV2($c) [long, double] -> #20.CV2($c) [long, double] #19.T10 [long, double]
+0011 PRE_INC #13.CV3($i) [long, double] RANGE[0..++] -> #21.CV3($i) [long, double] RANGE[1..++]
+
+BB4:
+     ; follow target loop_header lines=[12-13]
+     ; from=(BB2, BB3)
+     ; to=(BB3, BB5)
+     ; idom=BB2
+     ; level=3
+     ; children=(BB3, BB5)
+     #8.CV1($n) [rc1, rcn, any] = Phi(#5.CV1($n) [rc1, rcn, any], #12.CV1($n) [rc1, rcn, any] RANGE[1..++])
+     #9.CV2($c) [long, double] = Phi(#6.CV2($c) [long] RANGE[0..0], #20.CV2($c) [long, double])
+     #10.CV3($i) [long, double] RANGE[0..++] = Phi(#7.CV3($i) [long] RANGE[0..0], #21.CV3($i) [long, double] RANGE[1..++])
+0012 #11.T13 [bool] = IS_SMALLER #10.CV3($i) [long, double] RANGE[0..++] #8.CV1($n) [rc1, rcn, any]
+0013 JMPNZ #11.T13 [bool] BB3
+
+BB5:
+     ; follow exit lines=[14-14]
+     ; from=(BB4)
+     ; idom=BB4
+     ; level=4
+0014 RETURN #9.CV2($c) [long, double]
+
