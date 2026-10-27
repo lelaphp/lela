@@ -30,7 +30,7 @@ loop at 0, loop, interrupt exit 13
 0014 f0 ISSET_ISEMPTY_PROP_OBJ const#8 step unwinds -> unwind 0
   -> #8 f0.T9 [true]
   guard #8 true -> exit 11
-0015 f0 ASSIGN_OP #6, #8 step unwinds -> unwind 1
+0015 f0 ASSIGN_OP #6, #8 step
   -> #9 f0.CV1 [long, double]
 0016 f0 PRE_INC #3 inline
   -> #10 f0.CV2 [long] reg
@@ -51,4 +51,3 @@ exit 11: f0 0015 plain f0.CV1=#6 f0.CV2=#3 f0.CV0:long f0.CV1:long f0.CV2:long
 exit 12: f0 0016 plain f0.CV2=#3 f0.CV0:long f0.CV2:long
 exit 13: f0 0017 plain f0.CV2=#3 f0.CV0:long f0.CV1:long f0.CV2:long to vm
 unwind 0: f0.CV1=#6 f0.CV2=#3
-unwind 1: f0.CV2=#3

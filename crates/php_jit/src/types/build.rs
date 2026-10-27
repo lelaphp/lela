@@ -893,7 +893,13 @@ impl<'a> Builder<'a> {
         let jump = if fused { after } else { Some(op) };
         let target = jump.and_then(|jump| jump.jump_target());
         self.successor = went(at, &op, target, len, branch);
-        self.own_exit(idx, frame, &op, (form, in_place.as_ref()), t1);
+        self.own_exit(
+            idx,
+            frame,
+            &op,
+            (form, in_place.as_ref()),
+            (t1, inferred.may_throw),
+        );
         if let Some(InPlace::Push(plain)) = in_place {
             self.pushing = Some(plain);
         }
@@ -1166,7 +1172,7 @@ impl<'a> Builder<'a> {
         frame: Frame,
         op: &Opline,
         (form, in_place): (Form, Option<&InPlace>),
-        old: Types,
+        (old, may_throw): (Types, bool),
     ) {
         let Some(Op::Line(line)) = self.ops.get(idx.index()) else {
             return;
@@ -1257,7 +1263,10 @@ impl<'a> Builder<'a> {
                     // the class and the method up and may throw.
                     || matches!(line.imm, Imm::Pair { .. })
             }
-            Form::Step => op.opcode.effects().contains(Effects::THROW),
+            // php checks for a throwable after a handler where
+            // `zend_may_throw_ex` says it may leave one
+            // (`Z/ext/opcache/jit/zend_jit_trace.c:6503-6516`).
+            Form::Step => may_throw,
         };
         if throws {
             let unwind = draft(Point::After(idx), frame, At::Opline(at));

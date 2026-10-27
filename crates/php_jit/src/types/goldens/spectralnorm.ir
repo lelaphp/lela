@@ -35,7 +35,7 @@ loop at 0, loop, interrupt exit 12
   checks #11 long -> exit 6
 0005 f1 MUL #10, #11 inline
   -> #12 f1.T3 [long, double]
-0006 f1 DIV #12, int(2) step unwinds -> unwind 1
+0006 f1 DIV #12, int(2) step
   -> #13 f1.T4 [long]
   guard #13 long -> exit 7
 0007 f1 ADD #13, #6 inline

@@ -94,7 +94,7 @@ loop at 0, loop, interrupt exit 45
   -> #43 f0.T20 [double] reg
 0031 f0 ASSIGN #15, #43 inline unwinds -> unwind 3
   -> #44 f0.CV14 [double] reg
-0032 f0 POW #44, float(0.5) step unwinds -> unwind 3
+0032 f0 POW #44, float(0.5) step
   -> #45 f0.T22 [double]
 0033 f0 MUL #44, #45 inline
   -> #46 f0.T23 [double] reg

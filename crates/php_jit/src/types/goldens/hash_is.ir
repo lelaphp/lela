@@ -18,12 +18,12 @@ loop at 0, loop, interrupt exit 15
   checks direction taken -> exit 5
 0006 f0 FETCH_DIM_IS #5, const#3 inline
   -> #6 f0.T3 [any]
-0007 f0 COALESCE #6 step unwinds -> unwind 0
+0007 f0 COALESCE #6 step
   -> #7 f0.T4 [long]
   checks direction taken -> exit 6
 0009 f0 FETCH_DIM_IS #5, #8 inline
   -> #9 f0.T5 [any]
-0010 f0 COALESCE #9 step unwinds -> unwind 0
+0010 f0 COALESCE #9 step
   -> #10 f0.T6 [long]
   checks direction taken -> exit 7
   guard #7 long -> exit 8
@@ -35,7 +35,7 @@ loop at 0, loop, interrupt exit 15
   -> #12 f0.T8 [long] reg
 0014 f0 FETCH_DIM_IS #5, #12 inline
   -> #13 f0.T9 [any]
-0015 f0 COALESCE #13 step unwinds -> unwind 1
+0015 f0 COALESCE #13 step
   -> #14 f0.T10 [bool, long, double, string, array, object, resource]
   checks direction fell -> exit 11
 0016 f0 QM_ASSIGN int(0) inline
@@ -66,5 +66,3 @@ exit 12: f0 0017 plain f0.CV2=#1 f0.CV4=#3 f0.T7=#11 f0.T10=#15 f0.CV0:array f0.
 exit 13: f0 0018 plain f0.CV2=#1 f0.CV4=#3 f0.T11=#16 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T11:long
 exit 14: f0 0019 plain f0.CV2=#17 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
 exit 15: f0 0020 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV4:long to vm
-unwind 0: f0.CV2=#1 f0.CV4=#3
-unwind 1: f0.CV2=#1 f0.CV4=#3 f0.T7=#11

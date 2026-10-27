@@ -24,7 +24,7 @@ loop at 0, loop, interrupt exit 11
      f1 enter e1
   -> #6 f1.CV0 [packed array]
   -> #7 f1.CV1 [long]
-0002 f1 CONCAT const#0, #7 step unwinds -> unwind 0
+0002 f1 CONCAT const#0, #7 step
   -> #8 f1.T0 [string]
 0003 f1 ASSIGN #9, #8 inline
   -> #10 f1.CV2 [string]

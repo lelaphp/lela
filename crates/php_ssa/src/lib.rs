@@ -34,6 +34,7 @@ mod dfg;
 mod dump;
 mod func_info;
 mod infer;
+mod may_throw;
 mod range;
 mod ssa;
 mod trace;
@@ -44,7 +45,10 @@ use php_unit::decl::{FunctionDecl, HookKind, Type, Visibility};
 use php_unit::{OpArray, OperandKind, Opline};
 
 pub use cfg::{Block, Cfg};
-pub use ssa::{Alias, Constraint, Negative, Phi, PhiKind, RangeConstraint, Ssa, SsaOp, SsaVarInfo};
+pub use ssa::{
+    Alias, Constraint, Negative, Phi, PhiKind, RangeConstraint, Ssa, SsaOp, SsaVarInfo,
+    is_no_val_use,
+};
 pub use trace::{Position, TraceFrame};
 pub use types::{ClassOf, Range, Returns, Types, VarInfo};
 

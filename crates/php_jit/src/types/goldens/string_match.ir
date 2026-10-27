@@ -36,14 +36,14 @@ loop at 0, loop, interrupt exit 15
   -> #14 f0.CV5 [true] reg
 0013 f0 STRLEN #12 inline
   -> #15 f0.T8 [long] reg
-0014 f0 CAST #14 step unwinds -> unwind 1
+0014 f0 CAST #14 step
   -> #16 f0.T9 [long]
 0015 f0 ADD #15, #16 inline
   -> #17 f0.T10 [long] reg
   checks #17 long -> exit 11
 0016 f0 BOOL #3 inline
   -> #18 f0.T11 [bool] reg
-0017 f0 CAST #18 step unwinds -> unwind 2
+0017 f0 CAST #18 step
   -> #19 f0.T12 [long]
 0018 f0 ADD #17, #19 inline
   -> #20 f0.T13 [long] reg
@@ -72,5 +72,3 @@ exit 13: f0 0019 plain f0.CV2=#1 f0.CV3=#3 f0.CV5=#14 f0.T13=#20 f0.CV0:array f0
 exit 14: f0 0020 plain f0.CV2=#21 f0.CV3=#3 f0.CV5=#14 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.CV4:string f0.CV5:true
 exit 15: f0 0021 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long to vm
 unwind 0: f0.CV2=#1 f0.CV3=#3
-unwind 1: f0.CV2=#1 f0.CV3=#3 f0.CV5=#14 f0.T8=#15
-unwind 2: f0.CV2=#1 f0.CV3=#3 f0.CV5=#14 f0.T10=#17

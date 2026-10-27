@@ -62,7 +62,7 @@ loop at 0, recursive return, interrupt none
 0003 f4 RETURN const#1 inline in-place constant
      f3 back to #15
   -> #15 f3.T3 [packed array]
-0009 f3 INIT_ARRAY #15 step unwinds -> unwind 1
+0009 f3 INIT_ARRAY #15 step
   -> #16 f3.T4 [array]
   guard room 208 -> exit 5
 0010 f3 INIT_FCALL_BY_NAME const#5 inline

@@ -27,7 +27,7 @@ loop at 0, loop, interrupt exit 13
   -> #9 f0.T6 [bool] reg
   guard #8 true -> exit 8
   guard #9 false -> exit 9
-0011 f0 ADD #8, #9 step unwinds -> unwind 0
+0011 f0 ADD #8, #9 step
   -> #10 f0.T7 [long]
   guard #10 long -> exit 10
 0012 f0 ASSIGN_OP #6, #10 inline
@@ -51,4 +51,3 @@ exit 10: f0 0012 plain f0.CV2=#6 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long 
 exit 11: f0 0012 plain f0.CV2=#6 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T7:long
 exit 12: f0 0013 plain f0.CV2=#11 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
 exit 13: f0 0014 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV4:long to vm
-unwind 0: f0.CV2=#6 f0.CV4=#3

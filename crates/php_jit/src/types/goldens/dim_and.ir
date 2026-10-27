@@ -13,7 +13,7 @@ loop at 0, loop, interrupt exit 4
   checks direction taken -> exit 2
 0004 f0 BW_AND #3, int(1) inline
   -> #5 f0.T3 [long] reg
-0005 f0 BW_NOT #5 step unwinds -> unwind 0
+0005 f0 BW_NOT #5 step
   -> #6 f0.T4 [long]
 0006 f0 ASSIGN_DIM_OP #1, const#2, #6 inline unwinds -> unwind 0
   -> #7 f0.CV1 [hash array]

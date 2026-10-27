@@ -30,6 +30,9 @@ pub(super) struct Inferred {
     pub(super) op1: Option<Held>,
     pub(super) op2: Option<Held>,
     pub(super) data: Option<Held>,
+    /// Whether its handler may leave a throwable pending,
+    /// `zend_may_throw_ex` over what its operands hold.
+    pub(super) may_throw: bool,
 }
 
 /// What a variable holds: its types, and the range of the long it holds
@@ -103,6 +106,8 @@ impl Builder<'_> {
         let written = writes(op, data);
         let [t1, t2, _] = reads.types;
         let (mut tssa, positions) = self.trace_ssa(frame, at, reads, next);
+        let may_throw =
+            (self.inference).may_throw(func, &mut tssa, &positions, 0, (t1.info(), t2.info()));
         self.copy_ranges(func, at, &mut tssa, &positions, data.is_some());
         let exits = matches!(op.opcode, Opcode::FeFetchR | Opcode::FeFetchRw)
             && op.jump_target().is_some_and(|target| {
@@ -148,6 +153,7 @@ impl Builder<'_> {
         };
         let main = tssa.ops[0];
         Inferred {
+            may_throw,
             out: held(main.out_def, Defined::Out, 0, true),
             // php's `SEND_VAR_EX` of a value sent by value keeps what it
             // read, unrestricted.
@@ -427,6 +433,7 @@ fn pushes_out(op: &Opline) -> bool {
 fn unknown(op: &Opline, data: Option<&Opline>, written: crate::types::opcodes::Writes) -> Inferred {
     let any = |types: Types| Some(Held { types, range: None });
     Inferred {
+        may_throw: true,
         out: (op.out_type != OperandKind::Unused && !pushes_out(op))
             .then(|| any(Types::UNKNOWN.without(Types::UNDEF)))
             .flatten(),

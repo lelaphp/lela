@@ -23,7 +23,7 @@ loop at 0, loop, interrupt exit 5
   -> #10 f0.CV4 [string]
 0008 f0 ROPE_INIT const#4 inline
   -> #11 f0.T6 [string]
-0009 f0 ROPE_ADD #11, #3 step unwinds -> unwind 0
+0009 f0 ROPE_ADD #11, #3 step
   -> #12 f0.T6 [string]
 0010 f0 ROPE_ADD #12, const#5 inline
   -> #13 f0.T6 [string]

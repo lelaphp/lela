@@ -23,7 +23,9 @@ use php_engine::tier::{Bindings, CallSite, CalledFunction, ClassId, FuncRef, Uni
 use php_ssa::{
     Analysis, BlockId, Body, Callee, Cfg, ClassConstant, Function, Level, LinkedTable, Method,
     ObjectShape, PhiKind, Position, Property, Range, Returns, Ssa, SsaVar, TraceFrame, VarInfo,
+    is_no_val_use,
 };
+use php_unit::OpArray;
 use php_unit::decl::{ClassKind, HookKind, PropertyDecl, Visibility};
 
 use crate::Lines;
@@ -370,8 +372,9 @@ impl Default for Analysed {
     }
 }
 
-/// Which variable an opline defines: php's `op1_def`, `op2_def` or
-/// `result_def`.
+/// Which operand of an opline: php's `op1_def`, `op2_def` or
+/// `result_def` where it defines, its `op1_use`, `op2_use` or
+/// `result_use` where it reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Defined {
     Op1,
@@ -434,6 +437,69 @@ impl Analysed {
             block = b.idom?;
             let up = cfg.blocks.get(block.index())?;
             op_num = up.start + up.len;
+        }
+    }
+
+    /// `zend_ssa_is_last_use` (`Z/ext/opcache/jit/zend_jit.c:125-172`):
+    /// whether opline `at` of `f`, whose oplines are `code`'s, reads the
+    /// value its `which` operand names for the last time, as php's
+    /// analysis of the op array sees it: no phi takes the value on, no
+    /// use the loop around it dominates reads it again, and no opline
+    /// after it reads it but to overwrite it. None where the analysis has
+    /// no SSA.
+    pub(crate) fn is_last_use(
+        &self,
+        f: FuncRef,
+        code: &OpArray,
+        at: u32,
+        which: Defined,
+    ) -> Option<bool> {
+        let (cfg, ssa) = self.of(f)?;
+        let op = ssa.ops.get(at as usize)?;
+        let var = match which {
+            Defined::Op1 => op.op1_use,
+            Defined::Op2 => op.op2_use,
+            Defined::Out => op.out_use,
+        }?;
+        let info = ssa.var(var)?;
+        let mut phi = info.phi_use_chain;
+        while let Some(id) = phi {
+            if !ssa.var(ssa.phi(id)?.ssa_var)?.no_val {
+                return Some(false);
+            }
+            phi = ssa.next_use_phi(var, id);
+        }
+        let no_val = |at: u32| {
+            let (op, ssa_op) = (code.oplines.get(at as usize)?, ssa.ops.get(at as usize)?);
+            Some(is_no_val_use(op, ssa_op, var))
+        };
+        let b = *cfg.map.get(at as usize)?;
+        let block = cfg.blocks.get(b.index())?;
+        if block.loop_header.is_some_and(|h| h.0 > 0) || block.marks.loop_header {
+            let defined_in = match info.definition {
+                Some(def) => *cfg.map.get(def as usize)?,
+                None => ssa.phi(info.definition_phi?)?.block,
+            };
+            let header = if block.marks.loop_header {
+                b
+            } else {
+                block.loop_header?
+            };
+            if cfg.dominates(defined_in, header) {
+                return Some(false);
+            }
+            let mut prev = info.use_chain;
+            while let Some(p) = prev.filter(|p| *p != at) {
+                let pb = *cfg.map.get(p as usize)?;
+                if b != pb && cfg.dominates(b, pb) && !no_val(p)? {
+                    return Some(false);
+                }
+                prev = ssa.next_use(var, p);
+            }
+        }
+        match ssa.next_use(var, at) {
+            None => Some(true),
+            Some(next) => no_val(next),
         }
     }
 
@@ -540,6 +606,21 @@ impl<'a> Inference<'a> {
     ) -> bool {
         self.frame(f)
             .is_some_and(|frame| frame.update_type_info(tssa, positions, at))
+    }
+
+    /// `zend_may_throw_ex` at the op `at` of `tssa`, which is of `f`, its
+    /// operands of `t1` and `t2`; true where `f` is no op array the trace
+    /// passes through.
+    pub(crate) fn may_throw(
+        &self,
+        f: FuncRef,
+        tssa: &mut Ssa<ClassId>,
+        positions: &[Position],
+        at: usize,
+        operands: (php_ssa::Types, php_ssa::Types),
+    ) -> bool {
+        self.frame(f)
+            .is_none_or(|frame| frame.may_throw(tssa, positions, at, operands))
     }
 
     /// `zend_inference_propagate_range` of `var`, which the op `at` of

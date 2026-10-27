@@ -228,7 +228,7 @@ function u0:0(i64, i64) -> i32 tail {
 @0005                               v130 = stack_addr.i64 ss0
 @0005                               v131 = iconst.i64 0x7000_0400
 @0005                               v132 = call_indirect sig3, v131(v0, v113, v128, v129)  ; v131 = 0x7000_0400, v128 = 9, v129 = 1
-@0005                               brif v132, block15, block28
+@0005                               brif v132, block26, block28
 
                                 block28:
 @0005                               v133 = iconst.i32 10

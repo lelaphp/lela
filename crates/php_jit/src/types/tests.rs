@@ -1310,7 +1310,8 @@ fn a_typed_parameter_its_return_type_keeps_is_no_owner_at_the_leave() -> Result<
     Ok(())
 }
 
-/// A kernel that may throw and calls nothing, a cast to string, reads
+/// A kernel that may throw and calls nothing, a cast of an array to
+/// string, which `zend_may_throw_ex` says warns, reads
 /// nothing again: it may only unwind, which takes no exit, as php's
 /// compiled code jumps to its stub for a throwable and takes no exit point.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -1320,7 +1321,7 @@ fn a_throwing_kernel_reloads_nothing_but_may_leave() -> Result<(), String> {
         &IN_F,
         "function f(array &$a, int $n) {
             $s = 0;
-            for ($i = 0; $i < $n; $i++) { $s += $a[0]; $t = (string) $s; $s += $a[0]; }
+            for ($i = 0; $i < $n; $i++) { $s += $a[0]; $t = (string) $a; $s += $a[0]; }
             return $s;
         }
         $x = [1]; echo f($x, 3), \"\\n\";",

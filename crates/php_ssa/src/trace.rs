@@ -11,7 +11,7 @@
 use crate::bits::Bits;
 use crate::calls::{self, Calls};
 use crate::infer::Infer;
-use crate::{Cfg, Function, Level, LinkedTable, Range, Ssa, SsaVar};
+use crate::{Cfg, Function, Level, LinkedTable, Range, Ssa, SsaVar, Types};
 
 /// Where one op of a trace's SSA stands, `ssa_opcodes[i]`: the op array
 /// it is of, by a number the tier gives each op array of the trace, and
@@ -98,5 +98,17 @@ impl<'a, T: LinkedTable> TraceFrame<'a, T> {
         var: SsaVar,
     ) -> Option<Range> {
         self.infer(tssa, positions, |cx| cx.propagate_range(at, var))
+    }
+
+    /// `zend_may_throw_ex` at the trace's op `at`, its operands of `t1`
+    /// and `t2`, over what `tssa.info` holds of the rest.
+    pub fn may_throw(
+        &self,
+        tssa: &mut Ssa<T::Class>,
+        positions: &[Position],
+        at: usize,
+        (t1, t2): (Types, Types),
+    ) -> bool {
+        self.infer(tssa, positions, |cx| cx.may_throw_ex(at, t1, t2))
     }
 }
