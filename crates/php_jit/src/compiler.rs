@@ -344,7 +344,7 @@ fn pipeline_with(
 /// (`zend_jit_trace_setup_ret_counter`, `Z/ext/opcache/jit/zend_jit_trace.c:3404-3418`;
 /// `jit-design.md` §2.2, #3036).
 fn arm_landings(recorded: &Recorded, epoch: &Epoch, policy: &Policy) {
-    for (func, at) in record::landings(&recorded.record, &recorded.view) {
+    for (func, at) in record::landings(&recorded.record, &recorded.view, policy.folds()) {
         if let Some(word) = epoch.lay_landing(func, at) {
             policy::arm(word, policy);
         }

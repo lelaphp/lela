@@ -11,7 +11,7 @@ use php_unit::{MapPtrOffset, Opcode, OperandKind, OplineIdx};
 use super::{Began, Callee, Event, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 use crate::testing;
-use crate::testing::records::{at, kept, recorded, trace};
+use crate::testing::records::{DEFAULT_FOLDS as FOLDS, at, kept, recorded, trace};
 use crate::types::ExitId;
 use crate::types::Types;
 
@@ -344,15 +344,37 @@ fn a_loop_on_a_constant_condition_roots_at_its_body() -> Result<(), String> {
         (jump.opcode, jump.op1_type, jump.jump_target()),
         (Opcode::Jmpnz, OperandKind::Const, Some(body))
     );
-    assert_eq!(super::header_at(code, condition), None);
-    let header = super::header_at(code, body).ok_or("the body is no header")?;
-    assert_eq!(super::loop_root(code, header), Some(body));
+    assert_eq!(super::header_at(code, condition, FOLDS), None);
+    let header = super::header_at(code, body, FOLDS).ok_or("the body is no header")?;
+    assert_eq!(super::loop_root(code, header, FOLDS), Some(body));
+    // Where php's optimizer folds nothing, its CFG heads the loop at the
+    // condition, as it heads a `for`'s (#3578).
+    let unfolded = super::Folds(false);
+    let at_condition = super::header_at(code, condition, unfolded).ok_or("no header")?;
+    assert_eq!(super::header_at(code, body, unfolded), None);
+    assert_eq!(
+        super::loop_root(code, at_condition, unfolded),
+        Some(condition)
+    );
     let first = record.events.iter().find_map(|event| match event {
         Event::Op { opline, .. } => Some(*opline),
         _ => None,
     });
     assert_eq!(first, Some(body));
     Ok(())
+}
+
+/// The levels of `opcache.optimization_level` that fold a loop's constant
+/// condition, pass 5, or pass 1 with pass 3, as the pinned php's `TRACE`
+/// lines root a `while (true)` at its body at 5, 16, 17, 21 and its
+/// default and at its condition at 0, 1 and 4 (#3578).
+#[test]
+fn the_levels_that_fold_a_constant_condition_are_phps() {
+    let folds = |level: i64| super::Folds::of(level).0;
+    assert_eq!(
+        [0, 1, 4, 5, 16, 17, 21, 0x7FFE_BFFF].map(folds),
+        [false, false, false, true, true, true, true, true]
+    );
 }
 
 /// Whether php counts each loop of `a()` in `program`, in the order of
@@ -370,8 +392,8 @@ fn counted(program: &str) -> Result<Vec<bool>, String> {
         .filter(|(number, site)| !super::is_return_site(code, **site, *number))
         .map(|(number, _)| {
             let header = SafepointIdx(u32::try_from(number).unwrap_or(u32::MAX));
-            super::loop_root(code, header)
-                .is_some_and(|root| super::header_at(code, root) == Some(header))
+            super::loop_root(code, header, FOLDS)
+                .is_some_and(|root| super::header_at(code, root, FOLDS) == Some(header))
         })
         .collect())
 }
@@ -481,10 +503,10 @@ fn a_counted_loops_root_is_never_an_armed_landing() -> Result<(), String> {
             *opline = call;
         }
         (handed.events, handed.stop) = (vec![op], Stop::Interpreter);
-        super::landings(&handed, &recorded.view)
+        super::landings(&handed, &recorded.view, FOLDS)
     };
     let condition = OplineIdx(inside.0 + 1);
-    assert!(super::header_at(code, condition).is_some());
+    assert!(super::header_at(code, condition, FOLDS).is_some());
     assert_eq!(armed(inside), []);
     assert_eq!(armed(past), [(record.root, OplineIdx(past.0 + 1))]);
     Ok(())
@@ -587,7 +609,7 @@ fn a_call_into_an_evaled_function_exits_to_the_interpreter() -> Result<(), Strin
         .ok_or("past f()'s end")?;
     assert!(super::is_do_call(last.opcode), "{:?}", last.opcode);
     assert_eq!(
-        super::landings(record, &recorded.view),
+        super::landings(record, &recorded.view, FOLDS),
         [(record.root, OplineIdx(opline.0 + 1))]
     );
     Ok(())

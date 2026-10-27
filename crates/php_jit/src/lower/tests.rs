@@ -1480,3 +1480,41 @@ echo f(100), \"\\n\";",
     assert_eq!(testing::stdout(&served), "5050\n", "{lines}");
     assert!(lines.contains("TRACE 2 start (loop) f()"), "{lines}");
 }
+
+/// A `while (true)` under `opcache.optimization_level=0` is rooted at its
+/// `while`, the condition php's optimizer leaves unfolded, where at the
+/// default level it is rooted at its body (`record::Folds`, #3578).
+#[test]
+fn a_while_true_is_rooted_where_the_optimization_level_leaves_its_condition() {
+    let program = "function f() {
+    $i = 0;
+    while (true) {
+        if ($i === 10) {
+            return $i;
+        }
+        $i++;
+    }
+}
+echo f(), \"\\n\";";
+    for (level, line) in [("0", "body.php:4"), ("0x7FFEBFFF", "body.php:5")] {
+        let served = testing::serve::<Lane>(
+            &[
+                ("opcache.enable_cli", "1"),
+                ("opcache.jit", "tracing"),
+                ("opcache.jit_buffer_size", "64M"),
+                ("jit.compile", "inline"),
+                ("opcache.optimization_level", level),
+                ("opcache.jit_debug", "258048"),
+                ("opcache.jit_hot_loop", "1"),
+                ("opcache.jit_hot_func", "1"),
+                ("opcache.jit_hot_return", "1"),
+                ("opcache.jit_hot_side_exit", "1"),
+            ],
+            program,
+        );
+        let lines = String::from_utf8_lossy(&served.stderr);
+        assert_eq!(testing::stdout(&served), "10\n", "{level}: {lines}");
+        let root = lines.lines().find(|l| l.contains("start (loop) f()"));
+        assert!(root.is_some_and(|l| l.ends_with(line)), "{level}: {lines}");
+    }
+}

@@ -633,7 +633,11 @@ pub(crate) struct Opening {
 /// array and opline, but one whose `trace_flags` php has set already, a
 /// loop's header or an opline the recorder does not serve, which php's
 /// arming leaves as it is; none for any other stop.
-pub(crate) fn landings(record: &TraceRecord, view: &UnitView) -> Vec<(FuncRef, OplineIdx)> {
+pub(crate) fn landings(
+    record: &TraceRecord,
+    view: &UnitView,
+    folds: Folds,
+) -> Vec<(FuncRef, OplineIdx)> {
     let past = |(func, at): (FuncRef, OplineIdx)| (func, OplineIdx(at.0.saturating_add(1)));
     let mut last = None;
     let mut calls = Vec::new();
@@ -676,7 +680,7 @@ pub(crate) fn landings(record: &TraceRecord, view: &UnitView) -> Vec<(FuncRef, O
     }
     armed.retain(|(func, at)| {
         (view.op_array(*func)).is_some_and(|code| {
-            header_at(code, *at).is_none()
+            header_at(code, *at, folds).is_none()
                 && (code.oplines.get(at.0 as usize)).is_some_and(|op| !unsupported(op.opcode))
         })
     });
@@ -721,13 +725,18 @@ pub(crate) fn landings(record: &TraceRecord, view: &UnitView) -> Vec<(FuncRef, O
 /// ---- TRACE 3 compiled
 ///
 /// ```
-pub(crate) fn behind(req: &Request, frame: FrameRef, header: SafepointIdx) -> Option<OplineIdx> {
+pub(crate) fn behind(
+    req: &Request,
+    frame: FrameRef,
+    header: SafepointIdx,
+    folds: Folds,
+) -> Option<OplineIdx> {
     let mut view = UnitView::new(req);
     let code = tier::func(req, frame)
         .filter(|func| view.hold(req, *func))
         .and_then(|func| view.op_array(func))?;
     let body = position(req, frame);
-    let root = loop_root(code, header).filter(|root| *root != body)?;
+    let root = loop_root(code, header, folds).filter(|root| *root != body)?;
     let compare = code.oplines.get(root.0 as usize)?;
     let jump = code.oplines.get(root.0 as usize + 1)?;
     let read = |kind: OperandKind| matches!(kind, OperandKind::Cv | OperandKind::Const);
@@ -777,13 +786,14 @@ pub(crate) fn headed(
     req: &mut Request,
     frame: FrameRef,
     header: SafepointIdx,
+    folds: Folds,
 ) -> Result<Headed, Fatal> {
     let from = position(req, frame);
     let mut view = UnitView::new(req);
     let Some(code) = served_code(req, &mut view, frame) else {
         return Ok(Headed::Unstepped);
     };
-    let Some(root) = loop_root(code, header) else {
+    let Some(root) = loop_root(code, header, folds) else {
         return Ok(Headed::Unstepped);
     };
     if root == from {
@@ -825,6 +835,7 @@ pub(crate) fn served(
     req: &mut Request,
     frame: FrameRef,
     header: SafepointIdx,
+    folds: Folds,
 ) -> Result<Option<FrameRef>, Fatal> {
     let mut view = UnitView::new(req);
     let Some(code) = served_code(req, &mut view, frame) else {
@@ -833,7 +844,7 @@ pub(crate) fn served(
     let Some(site) = code.safepoints.get(header.0 as usize).copied() else {
         return Ok(None);
     };
-    let root = rooted(code, site);
+    let root = rooted(code, site, folds);
     let end = (code.oplines.iter().enumerate().skip(root.0 as usize))
         .find(|(_, op)| op.jump_target() == Some(site))
         .and_then(|(at, _)| u32::try_from(at).ok());
@@ -1544,7 +1555,9 @@ impl<'p> Recorder<'p> {
     /// `trace_flags` (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1296-1375`).
     fn landed(&mut self, req: &Request, view: &UnitView, frame: FrameRef, func: FuncRef) -> Went {
         let at = position(req, frame);
-        let Some(header) = view.op_array(func).and_then(|code| header_at(code, at)) else {
+        let Some(header) =
+            (view.op_array(func)).and_then(|code| header_at(code, at, self.policy.folds()))
+        else {
             return self.return_landing(func, at);
         };
         let depth = self.level + self.ret_level;
@@ -1870,8 +1883,8 @@ pub(crate) fn position(req: &Request, frame: FrameRef) -> OplineIdx {
 
 /// The loop header standing at `at`, as php's trace roots it, where
 /// php's CFG finds a loop at all ([`found`]): [`loop_at`]'s.
-pub(crate) fn header_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
-    loop_at(code, at).filter(|header| found(code, *header))
+pub(crate) fn header_at(code: &OpArray, at: OplineIdx, folds: Folds) -> Option<SafepointIdx> {
+    loop_at(code, at, folds).filter(|header| found(code, *header, folds))
 }
 
 /// The loop whose root stands at `at`, counted or not: the safepoint
@@ -1879,14 +1892,15 @@ pub(crate) fn header_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
 /// finds at `at`. Its word says whether php counts it, which a claim
 /// asks ([`counts`]), so a return that lands here reads it with no walk
 /// of the op array (`dispatch::goes_on`).
-pub(crate) fn loop_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
+pub(crate) fn loop_at(code: &OpArray, at: OplineIdx, folds: Folds) -> Option<SafepointIdx> {
     code.safepoints
         .iter()
         .enumerate()
         .skip(1)
         .filter(|(number, site)| !is_return_site(code, **site, *number))
         .find(|(_, site)| {
-            (**site == at || before_body(code, **site) == Some(at)) && rooted(code, **site) == at
+            (**site == at || before_body(code, **site) == Some(at))
+                && rooted(code, **site, folds) == at
         })
         .and_then(|(number, _)| u32::try_from(number).ok())
         .map(SafepointIdx)
@@ -1920,8 +1934,8 @@ pub(crate) fn loop_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
 /// ---- TRACE 1 abort (exception)
 ///
 /// ```
-pub(crate) fn counts(req: &Request, frame: FrameRef, header: SafepointIdx) -> bool {
-    tier::served(req, frame).is_none_or(|held| found(held.code(), header))
+pub(crate) fn counts(req: &Request, frame: FrameRef, header: SafepointIdx, folds: Folds) -> bool {
+    tier::served(req, frame).is_none_or(|held| found(held.code(), header, folds))
 }
 
 /// Whether php's CFG finds loop `header`: its root is [`reachable`] from
@@ -2013,9 +2027,9 @@ pub(crate) fn counts(req: &Request, frame: FrameRef, header: SafepointIdx) -> bo
 /// ---- TRACE 2 stop (return)
 /// ---- TRACE 2 compiled
 /// ```
-pub(crate) fn found(code: &OpArray, header: SafepointIdx) -> bool {
+pub(crate) fn found(code: &OpArray, header: SafepointIdx, folds: Folds) -> bool {
     let (Some(root), Some(&site)) = (
-        loop_root(code, header),
+        loop_root(code, header, folds),
         code.safepoints.get(header.0 as usize),
     ) else {
         return false;
@@ -2096,6 +2110,172 @@ fn reachable(code: &OpArray) -> Vec<bool> {
     seen
 }
 
+/// Whether php's optimizer folds a loop's constant condition before its
+/// tier reads the op array ([`folds_to_jmp`]): pass 1 makes a `JMPZ` or a
+/// `JMPNZ` on a constant that takes it a `JMP`, and pass 3's jump
+/// optimization or pass 5's CFG threads the `JMP` entering the loop onto
+/// the body, and pass 5 folds the constant on its own
+/// (`Z/Zend/Optimizer/zend_optimizer.c:1072-1107`), as
+/// `opcache.optimization_level` asks for each. With neither, php's CFG
+/// heads a `while (true)` at its condition, the `while`'s line, as it
+/// heads a `for`'s (#3578):
+///
+/// ```php
+/// function f() {
+///     $i = 0;
+///     while (true) {
+///         if ($i === 10) {
+///             return $i;
+///         }
+///         $i++;
+///     }
+/// }
+/// echo f(), "\n";
+/// ```
+/// ```expect regime=jit-ssa process
+/// 10
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:11
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) f() %SCRATCH%/witness.php:4
+/// ---- TRACE 1 stop (loop)
+///
+/// f:
+///      ; (lines=8, args=0, vars=1, tmps=3, ssa_vars=5)
+///      ; (JIT)
+///      ; %SCRATCH%/witness.php:2-10
+///      ; return  [null, long, double] RANGE[0..++]
+///      ; #0.CV0($i) NOVAL [undef]
+/// BB0:
+///      ; start lines=[0-1]
+///      ; to=(BB4)
+///      ; level=0
+///      ; children=(BB4)
+/// 0000 ASSIGN #0.CV0($i) NOVAL [undef] -> #1.CV0($i) [long] RANGE[0..0] int(0)
+/// 0001 JMP BB4
+///
+/// BB1:
+///      ; target lines=[2-3]
+///      ; from=(BB4)
+///      ; to=(BB3, BB2)
+///      ; idom=BB4
+///      ; level=2
+///      ; loop_header=4
+///      ; children=(BB2, BB3)
+/// 0002 #3.T2 [bool] = IS_IDENTICAL #2.CV0($i) [long, double] RANGE[0..++] int(10)
+/// 0003 JMPZ #3.T2 [bool] BB3
+///
+/// BB2:
+///      ; follow exit lines=[4-4]
+///      ; from=(BB1)
+///      ; idom=BB1
+///      ; level=3
+/// 0004 RETURN #2.CV0($i) [long, double] RANGE[0..++]
+///
+/// BB3:
+///      ; target lines=[5-5]
+///      ; from=(BB1)
+///      ; to=(BB4)
+///      ; idom=BB1
+///      ; level=3
+///      ; loop_header=4
+/// 0005 PRE_INC #2.CV0($i) [long, double] RANGE[0..++] -> #4.CV0($i) [long, double] RANGE[1..++]
+///
+/// BB4:
+///      ; follow target loop_header lines=[6-6]
+///      ; from=(BB0, BB3)
+///      ; to=(BB1, BB5)
+///      ; idom=BB0
+///      ; level=1
+///      ; children=(BB1, BB5)
+///      #2.CV0($i) [long, double] RANGE[0..++] = Phi(#1.CV0($i) [long] RANGE[0..0], #4.CV0($i) [long, double] RANGE[1..++])
+/// 0006 JMPNZ bool(true) BB1
+///
+/// BB5:
+///      ; follow exit lines=[7-7]
+///      ; from=(BB4)
+///      ; idom=BB4
+///      ; level=2
+/// 0007 RETURN null
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 1 f() %SCRATCH%/witness.php:6
+/// ---- TRACE 2 start (side trace 1/1) f() %SCRATCH%/witness.php:6
+/// ---- TRACE 2 stop (return)
+///
+/// f:
+///      ; (lines=8, args=0, vars=1, tmps=3, ssa_vars=5)
+///      ; (JIT)
+///      ; %SCRATCH%/witness.php:2-10
+///      ; return  [null, long, double] RANGE[0..++]
+///      ; #0.CV0($i) NOVAL [undef]
+/// BB0:
+///      ; start lines=[0-1]
+///      ; to=(BB4)
+///      ; level=0
+///      ; children=(BB4)
+/// 0000 ASSIGN #0.CV0($i) NOVAL [undef] -> #1.CV0($i) [long] RANGE[0..0] int(0)
+/// 0001 JMP BB4
+///
+/// BB1:
+///      ; target lines=[2-3]
+///      ; from=(BB4)
+///      ; to=(BB3, BB2)
+///      ; idom=BB4
+///      ; level=2
+///      ; loop_header=4
+///      ; children=(BB2, BB3)
+/// 0002 #3.T2 [bool] = IS_IDENTICAL #2.CV0($i) [long, double] RANGE[0..++] int(10)
+/// 0003 JMPZ #3.T2 [bool] BB3
+///
+/// BB2:
+///      ; follow exit lines=[4-4]
+///      ; from=(BB1)
+///      ; idom=BB1
+///      ; level=3
+/// 0004 RETURN #2.CV0($i) [long, double] RANGE[0..++]
+///
+/// BB3:
+///      ; target lines=[5-5]
+///      ; from=(BB1)
+///      ; to=(BB4)
+///      ; idom=BB1
+///      ; level=3
+///      ; loop_header=4
+/// 0005 PRE_INC #2.CV0($i) [long, double] RANGE[0..++] -> #4.CV0($i) [long, double] RANGE[1..++]
+///
+/// BB4:
+///      ; follow target loop_header lines=[6-6]
+///      ; from=(BB0, BB3)
+///      ; to=(BB1, BB5)
+///      ; idom=BB0
+///      ; level=1
+///      ; children=(BB1, BB5)
+///      #2.CV0($i) [long, double] RANGE[0..++] = Phi(#1.CV0($i) [long] RANGE[0..0], #4.CV0($i) [long, double] RANGE[1..++])
+/// 0006 JMPNZ bool(true) BB1
+///
+/// BB5:
+///      ; follow exit lines=[7-7]
+///      ; from=(BB4)
+///      ; idom=BB4
+///      ; level=2
+/// 0007 RETURN null
+/// ---- TRACE 2 compiled
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Folds(pub(crate) bool);
+
+impl Folds {
+    /// What `level`, php's `opcache.optimization_level`, folds.
+    pub(crate) fn of(level: i64) -> Folds {
+        const PASS_1: i64 = 1;
+        const PASS_3: i64 = 1 << 2;
+        const PASS_5: i64 = 1 << 4;
+        Folds(level & PASS_5 != 0 || (level & PASS_1 != 0 && level & PASS_3 != 0))
+    }
+}
+
 /// The opline php's trace of loop `header` roots at, where the safepoint
 /// numbers an opline the back edge lands on: the block php's CFG finds
 /// as the loop's header (`zend_cfg_identify_loops`), the one
@@ -2108,15 +2288,18 @@ fn reachable(code: &OpArray) -> Vec<bool> {
 /// other loop is entered where its back edge lands.
 ///
 /// php's CFG is built over the op array its optimizer left, which this
-/// engine runs none of (design §6.1, #1220), so a condition pass 1 folds
-/// as it is written, a jump on a constant operand, is read as folded: a
-/// `while (true)` or a `for (;;)`, whose condition is a jump on a
-/// constant php makes a `JMP` back to the body ([`folds_to_jmp`]), is
-/// headed at the body, where the back edge lands, and its condition is
-/// no header. The opline past a call that ends the
+/// engine runs none of (design §6.1, #1220), so where
+/// `opcache.optimization_level` runs the passes that fold it ([`Folds`]),
+/// a condition pass 1 folds as it is written, a jump on a constant
+/// operand, is read as folded: a `while (true)` or a `for (;;)`, whose
+/// condition is a jump on a constant php makes a `JMP` back to the body
+/// ([`folds_to_jmp`]), is headed at the body, where the back edge lands,
+/// and its condition is no header. The opline past a call that ends the
 /// body is then a landing a compiled trace arms ([`landings`]), as php's
 /// `zend_jit_trace_setup_ret_counter` arms the folded `JMP`, so a return
-/// trace is rooted there and links to the loop's (#3317):
+/// trace is rooted there and links to the loop's (#3317). At level 0, the
+/// regime below, nothing folds: the loop is headed at its condition, and
+/// no return trace is rooted past the call (#3578):
 ///
 /// ```php
 /// set_time_limit(1);
@@ -2148,26 +2331,22 @@ fn reachable(code: &OpArray) -> Vec<bool> {
 /// ---- TRACE 4 start (loop) $main() %s:4
 /// ---- TRACE 4 stop (link to 1)
 /// ---- TRACE 4 compiled
-///
-/// ---- TRACE 5 start (return) $main() %s:4
-/// ---- TRACE 5 stop (link to 4)
-/// ---- TRACE 5 compiled
 /// ```
-pub(crate) fn loop_root(code: &OpArray, header: SafepointIdx) -> Option<OplineIdx> {
+pub(crate) fn loop_root(code: &OpArray, header: SafepointIdx, folds: Folds) -> Option<OplineIdx> {
     code.safepoints
         .get(header.0 as usize)
-        .map(|site| rooted(code, *site))
+        .map(|site| rooted(code, *site, folds))
 }
 
 /// [`loop_root`] of the loop whose back edge lands on `site`.
-fn rooted(code: &OpArray, site: OplineIdx) -> OplineIdx {
+fn rooted(code: &OpArray, site: OplineIdx, folds: Folds) -> OplineIdx {
     before_body(code, site)
         .filter(|condition| {
             // A condition php keeps, with its own jump back to the body
             // at or past the `JMP`'s target: a `JMP` past a loop entered
             // where it lands, an `else`'s or a `break`'s, is followed by
             // none.
-            !folds_to_jmp(code, *condition, site)
+            !(folds.0 && folds_to_jmp(code, *condition, site))
                 && (code.oplines.iter().skip(condition.0 as usize))
                     .any(|op| op.jump_target() == Some(site))
         })
