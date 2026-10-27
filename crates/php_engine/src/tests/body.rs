@@ -240,7 +240,9 @@ fn a_body_declared_over_post_max_size_is_warned_of_and_never_read() {
 /// body's `smart_str`, grown `BUFSIZ` at a time, first asks past the limit.
 /// php-cgi under `-d memory_limit=4M -d html_errors=0` writes the same
 /// fatal and its one-row trace for `a=` and three million `x`, and
-/// `ran 1 2 3` for a small form.
+/// `ran 1 2 3` for a small form. Measured on #3583: the pinned build
+/// asks for 2101248 bytes on x86-64 Linux (4 KiB pages) and 2097152
+/// on arm64 macOS (16 KiB pages), with the same body and limit.
 #[test]
 fn a_form_past_the_memory_limit_ends_the_request_before_the_script() {
     let engine = Engine::cli_builder()
@@ -252,9 +254,16 @@ fn a_form_past_the_memory_limit_ends_the_request_before_the_script() {
     big.resize(big.len() + 3_000_000, b'x');
     big.extend_from_slice(b"&b=1");
     let (stdout, _) = posted(&engine, "application/x-www-form-urlencoded", &big, program);
+    let allocation = if cfg!(target_os = "linux") {
+        2_101_248
+    } else {
+        2_097_152
+    };
     assert_eq!(
         stdout,
-        "\nFatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in Unknown on line 0\nStack trace:\n#0 {main}\n"
+        format!(
+            "\nFatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate {allocation} bytes) in Unknown on line 0\nStack trace:\n#0 {{main}}\n"
+        )
     );
     let (stdout, _) = posted(
         &engine,
