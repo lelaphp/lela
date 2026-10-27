@@ -524,6 +524,44 @@ impl Emit<'_> {
     /// 465 -435 3045 15
     /// 2175 Child
     /// ```
+    ///
+    /// An evaluated class's own method, whose op array is the request's, on
+    /// the object the trace recorded, of another evaluated class whose
+    /// method takes its argument by reference with a default, of a lazy
+    /// copy and an enum's case, and its static method through its name: the
+    /// trace pushes the first in place and stops at its call, which the
+    /// interpreter makes, under force and where every guard fails once
+    /// (#3570):
+    ///
+    /// ```php
+    /// eval('class Evald { public $b = 1; function get($v) { return $this->b + $v; } static function twice($v) { return $v + $v; } }');
+    /// eval('class Other { public $b = 100; function get(&$v, $w = 5) { $v = -$v; return $v + $w; } }');
+    /// class Getter { public $b = 1; }
+    /// eval('class Base extends Getter { }');
+    /// class Child extends Base { function get($v) { return $this->b + $v; } }
+    /// enum Suit { case Hearts; case Spades; function get($v) { return $this === Suit::Hearts ? $v * 2 : $v; } }
+    /// function f($o, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $j = $i; $t += $o->get($j) + $j; } return $t; }
+    /// function s($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += Evald::twice($i); } return $t; }
+    /// echo f(new Evald, 30), " ", f(new Other, 30), " ", f(new Child, 30), " ", f(Suit::Hearts, 30), " ", f(new Evald, 5), " ", s(30), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 900 -720 900 1305 25 870
+    /// ```
+    ///
+    /// ```php
+    /// eval('class Evald { public $b = 1; function get($v) { return $this->b + $v; } static function twice($v) { return $v + $v; } }');
+    /// eval('class Other { public $b = 100; function get(&$v, $w = 5) { $v = -$v; return $v + $w; } }');
+    /// class Getter { public $b = 1; }
+    /// eval('class Base extends Getter { }');
+    /// class Child extends Base { function get($v) { return $this->b + $v; } }
+    /// enum Suit { case Hearts; case Spades; function get($v) { return $this === Suit::Hearts ? $v * 2 : $v; } }
+    /// function f($o, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $j = $i; $t += $o->get($j) + $j; } return $t; }
+    /// function s($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += Evald::twice($i); } return $t; }
+    /// echo f(new Evald, 30), " ", f(new Other, 30), " ", f(new Child, 30), " ", f(Suit::Hearts, 30), " ", f(new Evald, 5), " ", s(30), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 900 -720 900 1305 25 870
+    /// ```
     fn pair_guard(
         &mut self,
         line: &Line,

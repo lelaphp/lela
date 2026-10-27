@@ -64,6 +64,12 @@ impl Func {
         matches!(self.body, Body::Main)
     }
 
+    /// Whether the op array is a property hook's body, php's
+    /// `op_array.prop_info` set.
+    pub(crate) fn is_hook(&self) -> bool {
+        matches!(self.body, Body::Hook(_))
+    }
+
     /// Whether a frame that runs the op array may have a receiver,
     /// `EX(This)` an object: every op array but a function's, whose frame
     /// never has one.

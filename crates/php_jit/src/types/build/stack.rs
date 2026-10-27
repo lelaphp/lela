@@ -139,6 +139,7 @@ impl Builder<'_> {
     fn pushed(&self, op: &Opline, callee: Callee) -> Option<i64> {
         let code = match callee {
             Callee::User(f) => Some(self.view.op_array(f)?),
+            Callee::Request => return None,
             Callee::Native(_) => None,
         };
         Some(used(op.extended_value, code))

@@ -201,7 +201,7 @@ fn safepoint_lent(
                 let Some((caller, at)) = landing_past(req, frame) else {
                     return Flow::Continue;
                 };
-                let (goes, word) = goes_on(req, caller, at);
+                let (goes, word) = goes_on(req, caller, at, shared.policy.folds());
                 (Rooted::Goes(caller, goes), word)
             }
         };
@@ -385,13 +385,13 @@ impl Goes {
 /// ---- TRACE 4 stop (link to 1)
 /// ---- TRACE 4 compiled
 /// ```
-fn goes_on(req: &Request, frame: FrameRef, at: OplineIdx) -> (Goes, &Word) {
+fn goes_on(req: &Request, frame: FrameRef, at: OplineIdx, folds: record::Folds) -> (Goes, &Word) {
     let landing = tier::landing(req, frame, at);
     if policy::armed(landing) {
         return (Goes::Landing(at), landing);
     }
-    let header =
-        tier::served(req, frame).and_then(|held| Some((held, record::loop_at(held.code(), at)?)));
+    let header = tier::served(req, frame)
+        .and_then(|held| Some((held, record::loop_at(held.code(), at, folds)?)));
     match header {
         Some((held, header)) => (Goes::Header, held.word(req, header)),
         None => (Goes::Landing(at), landing),
@@ -511,7 +511,7 @@ fn looped(
     if let Some(flow) = run_at(req, lent, frame, id, At::Body) {
         return flow;
     }
-    match record::headed(req, frame, header) {
+    match record::headed(req, frame, header, lent.shared().policy.folds()) {
         Ok(Headed::Stands(at)) => run(req, lent, at, id),
         Ok(Headed::Stepped(at)) => match run(req, lent, at, id) {
             Flow::Continue => Flow::Resume(at),
@@ -847,7 +847,7 @@ fn visit_landing(req: &mut Request, shared: &Shared, frame: FrameRef, came: Came
     let Some(at) = tier::frame(req, frame).map(|view| view.opline()) else {
         return Visited::Continue;
     };
-    let (goes, word) = goes_on(req, frame, at);
+    let (goes, word) = goes_on(req, frame, at, shared.policy.folds());
     if let Some(left) = left
         && policy::read(word) == State::Compiled(left)
     {
@@ -1103,7 +1103,7 @@ fn recordings(
 ) -> Result<(Flow, Option<Stood>, bool), Flow> {
     loop {
         let start = claim.start();
-        let behind = match begins(req, frame, start, claim.holder()) {
+        let behind = match begins(req, frame, start, claim.holder(), shared.policy.folds()) {
             Ok(Begins::Behind(condition)) => Some(condition),
             Ok(Begins::Stands) => None,
             Ok(Begins::Stepped(header)) => {
@@ -1380,7 +1380,7 @@ fn counted(
         Visited::Enter(_) => return Counted::Stands,
         Visited::Continue => {}
     }
-    match record::served(req, frame, header) {
+    match record::served(req, frame, header, shared.policy.folds()) {
         Ok(Some(at)) => Counted::On(Flow::Resume(at)),
         Ok(None) => Counted::Stands,
         Err(fatal) => Counted::On(Flow::Bail(fatal)),
@@ -1469,18 +1469,19 @@ fn begins(
     frame: FrameRef,
     start: Start,
     claimed: &Holder,
+    folds: record::Folds,
 ) -> Result<Begins, Flow> {
     let (Start::Loop, Holder::Root { at, .. }) = (start, claimed) else {
         return Ok(Begins::Stands);
     };
     let at = *at;
-    if !record::counts(req, frame, at) {
+    if !record::counts(req, frame, at, folds) {
         return Ok(Begins::Uncounted);
     }
-    if let Some(condition) = record::behind(req, frame, at) {
+    if let Some(condition) = record::behind(req, frame, at, folds) {
         return Ok(Begins::Behind(condition));
     }
-    match record::headed(req, frame, at) {
+    match record::headed(req, frame, at, folds) {
         Ok(Headed::Stands(_)) => Ok(Begins::Stands),
         Ok(Headed::Stepped(header)) => Ok(Begins::Stepped(header)),
         Ok(Headed::Away(away)) => Err(Flow::Resume(away)),

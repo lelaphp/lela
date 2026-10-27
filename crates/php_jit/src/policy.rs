@@ -509,6 +509,7 @@ pub(crate) struct Policy {
     max_recursive_returns: u8,
     max_polymorphic_calls: u32,
     buffer_size: u64,
+    folds: crate::record::Folds,
     debug: JitDebug,
     /// How php's start leaves its tier under these directives and this
     /// host, which is where `zend_jit_check_support` runs and so where its
@@ -723,6 +724,7 @@ impl Policy {
             max_recursive_returns: small(ini, "opcache.jit_max_recursive_returns", 2, 0..=3),
             max_polymorphic_calls: count(ini, "opcache.jit_max_polymorphic_calls", 2),
             buffer_size: u64::try_from(buffer_size).unwrap_or(0),
+            folds: crate::record::Folds::of(long(ini, "opcache.optimization_level", 0x7FFE_BFFF)),
             debug,
             set_up,
             runs: match lane {
@@ -1083,6 +1085,12 @@ impl Policy {
     /// `opcache.jit_max_loop_unrolls`.
     pub(crate) fn max_loop_unrolls(&self) -> u8 {
         self.max_loop_unrolls
+    }
+
+    /// Whether `opcache.optimization_level` runs the passes that fold a
+    /// loop's constant condition ([`crate::record::Folds`]).
+    pub(crate) fn folds(&self) -> crate::record::Folds {
+        self.folds
     }
 
     /// `opcache.jit_max_recursive_calls`.

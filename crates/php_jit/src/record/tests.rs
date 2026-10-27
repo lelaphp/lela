@@ -11,7 +11,7 @@ use php_unit::{MapPtrOffset, Opcode, OperandKind, OplineIdx};
 use super::{Began, Callee, Event, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 use crate::testing;
-use crate::testing::records::{at, kept, recorded, trace};
+use crate::testing::records::{DEFAULT_FOLDS as FOLDS, at, kept, recorded, trace};
 use crate::types::ExitId;
 use crate::types::Types;
 
@@ -344,15 +344,56 @@ fn a_loop_on_a_constant_condition_roots_at_its_body() -> Result<(), String> {
         (jump.opcode, jump.op1_type, jump.jump_target()),
         (Opcode::Jmpnz, OperandKind::Const, Some(body))
     );
-    assert_eq!(super::header_at(code, condition), None);
-    let header = super::header_at(code, body).ok_or("the body is no header")?;
-    assert_eq!(super::loop_root(code, header), Some(body));
+    assert_eq!(super::header_at(code, condition, FOLDS), None);
+    let header = super::header_at(code, body, FOLDS).ok_or("the body is no header")?;
+    assert_eq!(super::loop_root(code, header, FOLDS), Some(body));
+    // Where php's optimizer folds nothing, its CFG heads the loop at the
+    // condition, as it heads a `for`'s (#3578).
+    let unfolded = super::Folds(false);
+    let at_condition = super::header_at(code, condition, unfolded).ok_or("no header")?;
+    assert_eq!(super::header_at(code, body, unfolded), None);
+    assert_eq!(
+        super::loop_root(code, at_condition, unfolded),
+        Some(condition)
+    );
     let first = record.events.iter().find_map(|event| match event {
         Event::Op { opline, .. } => Some(*opline),
         _ => None,
     });
     assert_eq!(first, Some(body));
     Ok(())
+}
+
+/// The levels of `opcache.optimization_level` that fold a loop's constant
+/// condition, pass 5, or pass 1 with pass 3, as the pinned php's `TRACE`
+/// lines root a `while (true)` at its body at 5, 16, 17, 21, 37 and its
+/// default and at its condition at 0, 1, 4, 32, 33, 160 and `0x7FFEBFEA`,
+/// the default less passes 1, 3 and 5, whose DFA folds no loop's entry
+/// (#3578).
+#[test]
+fn the_levels_that_fold_a_constant_condition_are_phps() {
+    let folds = |level: i64| super::Folds::of(level).0;
+    assert_eq!(
+        [
+            0,
+            1,
+            4,
+            5,
+            16,
+            17,
+            21,
+            32,
+            33,
+            37,
+            160,
+            0x7FFE_BFEA,
+            0x7FFE_BFFF
+        ]
+        .map(folds),
+        [
+            false, false, false, true, true, true, true, false, false, true, false, false, true
+        ]
+    );
 }
 
 /// Whether php counts each loop of `a()` in `program`, in the order of
@@ -370,8 +411,8 @@ fn counted(program: &str) -> Result<Vec<bool>, String> {
         .filter(|(number, site)| !super::is_return_site(code, **site, *number))
         .map(|(number, _)| {
             let header = SafepointIdx(u32::try_from(number).unwrap_or(u32::MAX));
-            super::loop_root(code, header)
-                .is_some_and(|root| super::header_at(code, root) == Some(header))
+            super::loop_root(code, header, FOLDS)
+                .is_some_and(|root| super::header_at(code, root, FOLDS) == Some(header))
         })
         .collect())
 }
@@ -481,10 +522,10 @@ fn a_counted_loops_root_is_never_an_armed_landing() -> Result<(), String> {
             *opline = call;
         }
         (handed.events, handed.stop) = (vec![op], Stop::Interpreter);
-        super::landings(&handed, &recorded.view)
+        super::landings(&handed, &recorded.view, FOLDS)
     };
     let condition = OplineIdx(inside.0 + 1);
-    assert!(super::header_at(code, condition).is_some());
+    assert!(super::header_at(code, condition, FOLDS).is_some());
     assert_eq!(armed(inside), []);
     assert_eq!(armed(past), [(record.root, OplineIdx(past.0 + 1))]);
     Ok(())
@@ -550,19 +591,74 @@ fn a_conditional_jump_says_which_way_it_went() -> Result<(), String> {
 }
 
 /// A call into a function an `eval` declared: its op array is the
-/// request's, which no trace may read, and the recorder stops at it.
+/// request's, which no trace may read, so the recorder stops at it with
+/// `Interpreter`, as php's `zend_jit_trace_execute` stops at a frame whose
+/// op array keeps no `jit_extension` (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1097-1109`):
+/// the trace compiles, ends at the `DO_UCALL` the interpreter makes, and
+/// arms `f`'s landing past it; the call it wrote down names no op array
+/// (#3570).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
-fn a_call_into_an_evaled_function_stops_at_the_request_unit() -> Result<(), String> {
-    let (record, out) = recorded(
+fn a_call_into_an_evaled_function_exits_to_the_interpreter() -> Result<(), String> {
+    let (recorded, out) = testing::records::recording(
         &at("f", "enter"),
         "eval('function h() { return 7; }');
         function f() { return h() + 1; }
         echo f(), \"\\n\";",
     )?;
+    let record = &recorded.record;
     assert_eq!(out, "8\n");
-    assert_eq!(record.stop, Stop::RequestUnit);
-    assert_eq!(enters(&record), 0);
+    assert_eq!(record.stop, Stop::Interpreter);
+    assert!(record.stop.compiles());
+    assert_eq!(enters(record), 0);
+    let callees: Vec<Callee> = (record.events.iter())
+        .filter_map(|event| match event {
+            Event::InitCall { callee, .. } => Some(*callee),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(callees, [Callee::Request], "{:?}", record.events);
+    let Some(Event::Op { func, opline, .. }) = record.events.last() else {
+        return Err(format!("no last opline: {:?}", record.events));
+    };
+    let code = recorded.view.op_array(*func).ok_or("the view holds f()")?;
+    let last = code
+        .oplines
+        .get(opline.0 as usize)
+        .ok_or("past f()'s end")?;
+    assert!(super::is_do_call(last.opcode), "{:?}", last.opcode);
+    assert_eq!(
+        super::landings(record, &recorded.view, FOLDS),
+        [(record.root, OplineIdx(opline.0 + 1))]
+    );
+    Ok(())
+}
+
+/// A return trace that follows a recursive return past its root into a
+/// frame an `eval`'d function runs stops there with `Return`, on the
+/// branch of php's recorder that stops at a frame whose op array keeps no
+/// `jit_extension` (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1097-1109`;
+/// #3570).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_followed_into_an_evaled_caller_stops_with_return() -> Result<(), String> {
+    let (record, out) = recorded(
+        &[("record.every", "1"), ("record.start", "return")],
+        "eval('function e($n) { return g($n, \"r\"); }');
+        function r($n) { return $n; }
+        function g($n, $h) { $v = $h($n); return $v + 1; }
+        echo g(1, \"e\"), \"\\n\";",
+    )?;
+    assert_eq!(out, "3\n");
+    assert_eq!((record.start, record.stop), (Start::Return, Stop::Return));
+    let backs = (record.events.iter())
+        .filter(|event| matches!(event, Event::Back))
+        .count();
+    assert_eq!(
+        backs, 0,
+        "nothing past the root is followed: {:?}",
+        record.events
+    );
     Ok(())
 }
 

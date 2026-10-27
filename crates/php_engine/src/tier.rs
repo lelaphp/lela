@@ -1382,7 +1382,7 @@ fn serve_held<'u, T: Tier, D: Telling>(
         // A return to a frame the loop entered, which a scope that served
         // its callee hands back: its op array as the loop left it.
         let kept_body = if pushed { None } else { kept.returned(frame) };
-        let mut body = match kept_body.or_else(|| scope.own(&mut kept, frame)) {
+        let mut body = match kept_body.or_else(|| scope.own(req, &mut kept, frame)) {
             Some(code) => code,
             None => match units.enter(req, &mut kept, frame) {
                 Some(Entered::Held(code)) => code,
