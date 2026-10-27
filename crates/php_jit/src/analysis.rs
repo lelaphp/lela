@@ -406,6 +406,24 @@ impl Analysed {
         ssa.info.get(var.index())
     }
 
+    /// Whether php's analysis of `f` holds what opline `at` defines as
+    /// `which` reachable other than through its slot (a symbol table, a
+    /// `compact`, a reference taken by name), the `alias` of its SSA
+    /// variable, which `zend_jit_trace_copy_ssa_var_range` copies before
+    /// it propagates the range (`Z/ext/opcache/jit/zend_jit_trace.c:996-1050`).
+    pub(crate) fn aliased(&self, f: FuncRef, at: u32, which: Defined) -> bool {
+        let Some((_, ssa)) = self.of(f) else {
+            return false;
+        };
+        let var = ssa.ops.get(at as usize).and_then(|op| match which {
+            Defined::Op1 => op.op1_def,
+            Defined::Op2 => op.op2_def,
+            Defined::Out => op.out_def,
+        });
+        var.and_then(|var| ssa.vars.get(var.index()))
+            .is_some_and(|var| var.alias != php_ssa::Alias::None)
+    }
+
     /// What php's analysis of `f` knows of variable `var` where opline
     /// `at` begins, `zend_jit_trace_copy_ssa_var_info`'s search of the
     /// dominator tree from the opline a trace starts at

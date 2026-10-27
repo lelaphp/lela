@@ -115,15 +115,19 @@ impl Builder<'_> {
             });
         if exits {
             // php leaves a `FE_FETCH`'s variables as they were where the
-            // trace leaves the loop there; they are read nowhere after.
-            if let (Some(def), Some(use_)) = (tssa.ops[0].op2_def, tssa.ops[0].op2_use) {
-                tssa.info[def.index()] = tssa.info[use_.index()];
+            // trace leaves the loop there; they are read nowhere after
+            // (`Z/ext/opcache/jit/zend_jit_trace.c:2357-2364`).
+            let main = tssa.ops[0];
+            for (def, use_) in [(main.op2_def, main.op2_use), (main.out_def, main.out_use)] {
+                if let (Some(def), Some(use_)) = (def, use_) {
+                    tssa.info[def.index()] = tssa.info[use_.index()];
+                }
             }
         } else if !self.inference.update(func, &mut tssa, &positions, 0) {
             return unknown(op, data, written);
         }
         // A packed array whose element is written in place stays packed
-        // (`zend_jit_trace.c:2357-2372`).
+        // (`Z/ext/opcache/jit/zend_jit_trace.c:2368-2383`).
         if op.opcode == Opcode::AssignDimOp
             && let Some(def) = tssa.ops[0].op1_def
             && t1.tag() == Some(ZvalType::Array)
@@ -155,14 +159,11 @@ impl Builder<'_> {
         Inferred {
             may_throw,
             out: held(main.out_def, Defined::Out, 0, true),
-            // php's `SEND_VAR_EX` of a value sent by value keeps what it
-            // read, unrestricted.
-            op1: held(
-                main.op1_def,
-                Defined::Op1,
-                0,
-                op.opcode != Opcode::SendVarEx,
-            ),
+            // A `SEND_VAR_EX` to a known callee's parameter taken by value
+            // is a `SEND_VAR` here, which defines no variable, as php keeps
+            // what it read; one that stands is restricted as any other op
+            // (`Z/ext/opcache/jit/zend_jit_trace.c:2388-2400`).
+            op1: held(main.op1_def, Defined::Op1, 0, true),
             op2: held(main.op2_def, Defined::Op2, 0, !exits),
             data: tssa
                 .ops
@@ -280,7 +281,34 @@ impl Builder<'_> {
     /// range before php's update reads it:
     /// `zend_jit_trace_copy_ssa_var_range`, the propagated range met with
     /// what php's analysis of the op array knows, or the propagation
-    /// alone where that analysis has none.
+    /// alone where that analysis has none. A loop php knows `$i` stays
+    /// within `1..200` in takes no exit for its increment's overflow, none
+    /// for the division by it and no guard on `$i` at entry, so the loop's
+    /// end is php's exit 0:
+    ///
+    /// ```php
+    /// function f() { $s = 0.0; for ($i = 1; $i < 200; $i++) { $s += 3.0 / $i; } return $s; }
+    /// printf("%.6f %.6f\n", f(), f());
+    /// ```
+    /// ```expect regime=jit-inline process capture
+    /// 17.619093 17.619093
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:3
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 0 f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 2 start (side trace 1/0) f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    ///
+    /// ---- TRACE 3 start (enter) f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 3 stop (link to 1)
+    /// ---- TRACE 3 compiled
+    /// ```
     fn copy_ranges(
         &self,
         func: FuncRef,
@@ -311,7 +339,10 @@ impl Builder<'_> {
             let place = at.0 + i;
             let static_info = self.analysed.defined(func, place, which).copied();
             let propagates = match &static_info {
-                Some(info) => !info.types.has(php_ssa::Types::REF),
+                Some(info) => {
+                    !info.types.has(php_ssa::Types::REF)
+                        && !self.analysed.aliased(func, place, which)
+                }
                 None => use_
                     .and_then(|u| tssa.info.get(u.index()))
                     .is_none_or(|u| !u.types.has(php_ssa::Types::REF)),
