@@ -479,7 +479,7 @@ fn mark_reachable_blocks(cfg: &mut Cfg, body: &OpArray) {
                 if !reachable(cfg, b) {
                     if tc.catch_op.0 != 0 {
                         let end = cfg.block_of(tc.catch_op.0);
-                        while b != end {
+                        while b < end {
                             if reachable(cfg, b) {
                                 let start = cfg.block(b).map_or(0, |b| b.start);
                                 if let Some(tc) = cfg.try_catch.get_mut(j) {
@@ -494,7 +494,7 @@ fn mark_reachable_blocks(cfg: &mut Cfg, body: &OpArray) {
                     b = cfg.block_of(tc.try_op.0);
                     if !reachable(cfg, b) && tc.finally_op.0 != 0 {
                         let end = cfg.block_of(tc.finally_op.0);
-                        while b != end {
+                        while b < end {
                             if reachable(cfg, b) {
                                 let start = cfg.block(b).map_or(0, |b| b.start);
                                 let try_op = if tc.catch_op.0 != 0 {

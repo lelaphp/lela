@@ -1,8 +1,9 @@
 #!/bin/zsh
 # capture.sh [php]: the oracle's SSA dumps of each program of
-# ../types/goldens, written to goldens/<program>.ssa, and of the seven
-# kernels, written to goldens/kernels/<kernel>.ssa, which
-# analysis/tests.rs holds the tier's dumps to.
+# ../types/goldens and of goldens/ itself, written to
+# goldens/<program>.ssa, and of the seven kernels, written to
+# goldens/kernels/<kernel>.ssa, which analysis/tests.rs holds the
+# tier's dumps to.
 #
 # The settings are the oracle's recipe and its `[regime.jit-ssa]`, both
 # read from `oracle.toml`: php's command-line tier on, tracing, every
@@ -55,7 +56,7 @@ capture() {
       }
       END { flush() }' > $3
 }
-for program in $here/../types/goldens/*.php; do
+for program in $here/../types/goldens/*.php $here/goldens/*.php; do
   capture ${program:h} ${program:t} $here/goldens/${program:t:r}.ssa
 done
 # The seven kernels of docs/perf/workloads, each `@bench-param` set small,

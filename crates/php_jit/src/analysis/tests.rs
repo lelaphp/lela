@@ -4,6 +4,7 @@
 //! inference, with the one php wrote, `goldens/<program>.ssa`.
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::testing::{self, Lane, goldens};
@@ -234,11 +235,15 @@ fn held(name: &str, stream: &[u8], golden: &Path) -> Result<Option<String>, Stri
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn each_op_array_a_trace_passes_is_dumped_as_php_dumps_it() -> Result<(), String> {
-    let mut programs: Vec<PathBuf> = std::fs::read_dir(goldens::types())
-        .map_err(|e| e.to_string())?
-        .filter_map(|entry| Some(entry.ok()?.path()))
-        .filter(|path| path.extension().is_some_and(|e| e == "php"))
-        .collect();
+    let mut programs = Vec::new();
+    for dir in [goldens::types(), oracle()] {
+        let entries = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        programs.extend(
+            entries
+                .filter_map(|entry| Some(entry.ok()?.path()))
+                .filter(|path| path.extension().is_some_and(|e| e == "php")),
+        );
+    }
     programs.sort();
     let mut differ = Vec::new();
     for path in programs {
@@ -297,4 +302,56 @@ fn the_seven_kernels_are_analysed_as_php_analyses_them() -> Result<(), String> {
     } else {
         Err(differ.join("\n\n"))
     }
+}
+
+/// php analyses the op arrays a trace passes through from
+/// `ZEND_JIT_LEVEL_OPT_FUNC` alone (`zend_jit_trace_build_tssa`): with
+/// `opcache.jit`'s `O` digit at 2 the trace compiles and nothing is
+/// dumped.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn below_the_function_level_nothing_is_analysed() {
+    let program = "function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $i; } return $s; }\necho f(20), \"\\n\";";
+    let mut ini = SSA.to_vec();
+    ini.push(("opcache.jit", "1252"));
+    let low = testing::serve::<Lane>(&ini, program);
+    let traced = testing::serve::<Lane>(&SSA, program);
+    let (low, traced) = (
+        String::from_utf8_lossy(&low.stderr),
+        String::from_utf8_lossy(&traced.stderr),
+    );
+    assert!(traced.contains("     ; (lines="), "{traced}");
+    assert!(low.contains("compiled"), "{low}");
+    assert!(!low.contains("     ; (lines="), "{low}");
+}
+
+/// A trace through more than `ZEND_JIT_TRACE_MAX_FUNCS` op arrays is not
+/// compiled, as php's `zend_jit_trace_build_tssa` fails on the
+/// thirty-first: php aborts this loop, which calls thirty-one functions,
+/// with `JIT compilation error` after dumping the first thirty, its file's
+/// own code among them.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_trace_through_more_than_thirty_op_arrays_is_not_compiled() -> Result<(), std::fmt::Error> {
+    let mut functions = String::new();
+    let mut calls = String::new();
+    for i in 0..31 {
+        writeln!(functions, "function f{i}($x) {{ return $x + {i}; }}")?;
+        writeln!(calls, "    $s += f{i}($i);")?;
+    }
+    let program =
+        format!("{functions}$s = 0;\nfor ($i = 0; $i < 5; $i++) {{\n{calls}}}\necho $s, \"\\n\";");
+    let served = testing::serve::<Lane>(&SSA, &program);
+    let stderr = String::from_utf8_lossy(&served.stderr);
+    let first = stderr
+        .split("---- TRACE 1 abort (JIT compilation error)")
+        .next()
+        .and_then(|before| before.rsplit("---- TRACE 1 stop (loop)").next())
+        .unwrap_or_default();
+    assert!(
+        stderr.contains("---- TRACE 1 abort (JIT compilation error)"),
+        "{stderr}"
+    );
+    assert_eq!(first.matches("     ; (lines=").count(), 30, "{first}");
+    Ok(())
 }
