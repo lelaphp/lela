@@ -26,7 +26,7 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use php_unit::decl::Parameter;
+use php_unit::decl::{FunctionDecl, Name, Parameter};
 use php_unit::{MapPtrOffset, OpArray, OplineIdx, PublishedUnit};
 
 use super::{Laid, SafepointIdx, Word};
@@ -93,24 +93,36 @@ impl Func {
     /// The parameters the op array's declaration lists: none for a
     /// file's own code.
     pub(crate) fn parameters(&self) -> Option<&[Parameter]> {
+        let (decl, _) = self.declaration()?;
+        Some(decl.map_or(&[][..], |decl| &decl.parameters))
+    }
+
+    /// The declaration the op array is the body of, none for a file's own
+    /// code, and the name of the class a method's or a hook's is declared
+    /// in, php's `function_name` and `scope`.
+    pub(crate) fn declaration(&self) -> Option<(Option<&FunctionDecl>, Option<&Name>)> {
         let unit = &self.unit;
-        let decl = match self.body {
-            Body::Main => return Some(&[]),
-            Body::Function(at) => &unit.functions.get(at as usize)?.0,
-            Body::Dynamic(at) => &unit.dynamic.get(at as usize)?.0,
+        let (decl, class) = match self.body {
+            Body::Main => return Some((None, None)),
+            Body::Function(at) => (&unit.functions.get(at as usize)?.0, None),
+            Body::Dynamic(at) => (&unit.dynamic.get(at as usize)?.0, None),
             Body::Method(at) => {
                 let method = unit.methods.get(at as usize)?;
                 let class = unit.classes.get(method.class as usize)?;
-                &class.methods.get(method.method as usize)?.function
+                let method = &class.methods.get(method.method as usize)?.function;
+                (method, Some(&class.name))
             }
             Body::Hook(at) => {
                 let hook = unit.hooks.get(at as usize)?;
                 let class = unit.classes.get(hook.class as usize)?;
                 let property = class.properties.get(hook.property as usize)?;
-                &property.hooks.as_ref()?.of(hook.kind)?.function
+                (
+                    &property.hooks.as_ref()?.of(hook.kind)?.function,
+                    Some(&class.name),
+                )
             }
         };
-        Some(&decl.parameters)
+        Some((Some(decl), class))
     }
 
     /// The word of safepoint `at`; the sealed word past the last.

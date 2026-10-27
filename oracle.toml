@@ -216,6 +216,14 @@ ini = ["opcache.enable_cli=1", "opcache.jit=tracing", "opcache.jit_buffer_size=6
 # A code buffer that fills: php rounds 16K to the page, and the engine's
 # arena holds the same (#3112). The trace-dump bits of jit-inline (jit-design §4.1).
 ini = ["opcache.enable_cli=1", "opcache.jit=tracing", "opcache.jit_buffer_size=16K", "opcache.jit_debug=258048"]
+[regime.jit-ssa]
+# php's function-level analysis as the tracing JIT builds it, on a trace's
+# first pass through an op array (zend_jit_trace_build_ssa,
+# ext/opcache/jit/zend_jit_trace.c:567; ADR-0015): jit-inline's TRACE bits
+# 0x3F000 plus ZEND_JIT_DEBUG_SSA (1<<1, zend_jit.h:55) = 258050. The
+# optimizer is off so php analyses the op arrays the engine executes,
+# the compiler's before zend_optimize_script (design §6.1, revision 44).
+ini = ["opcache.enable_cli=1", "opcache.jit=tracing", "opcache.jit_buffer_size=64M", "opcache.optimization_level=0", "opcache.jit_debug=258050"]
 
 [regime.short-tags]
 # `short_open_tag` is `PHP_INI_SYSTEM|PHP_INI_PERDIR` (`Z/main/main.c:820`), so

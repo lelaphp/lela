@@ -1,0 +1,162 @@
+Shape::grow:
+     ; (lines=16, args=1, vars=2, tmps=8, ssa_vars=14)
+     ; (JIT)
+     ; instanceof.php:4-14
+     ; return  [rcn, any]
+     ; #0.CV0($x) NOVAL [undef]
+     ; #1.CV1($i) NOVAL [undef]
+BB0:
+     ; start lines=[0-0]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 #2.CV0($x) [rc1, rcn, any] = RECV 1
+
+BB1:
+     ; recv follow entry lines=[1-2]
+     ; from=(BB0)
+     ; to=(BB7)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB7)
+0001 ASSIGN #1.CV1($i) NOVAL [undef] -> #3.CV1($i) [long] RANGE[0..0] int(0)
+0002 JMP BB7
+
+BB2:
+     ; target lines=[3-4]
+     ; from=(BB7)
+     ; to=(BB4, BB3)
+     ; idom=BB7
+     ; level=3
+     ; loop_header=7
+     ; children=(BB3, BB4)
+     #7.CV1($i) [long] RANGE[0..9] = Pi<BB7>(#5.CV1($i) [long] RANGE[0..10] & RANGE[-- .. 9])
+0003 #8.T3 [bool] = INSTANCEOF #4.CV0($x) [rc1, rcn, any] string("Shape")
+0004 JMPZ #8.T3 [bool] BB4
+
+BB3:
+     ; follow lines=[5-6]
+     ; from=(BB2)
+     ; to=(BB4)
+     ; idom=BB2
+     ; level=4
+     ; loop_header=7
+     #9.CV0($x) [rc1, rcn, object (instanceof Shape)] = Pi<BB2>(#4.CV0($x) [rc1, rcn, any] & TYPE [ref, rc1, rcn, object (instanceof Shape)])
+0005 ASSIGN_OBJ_OP (ADD) THIS string("n")
+0006 OP_DATA #7.CV1($i) [long] RANGE[0..9]
+
+BB4:
+     ; follow target lines=[7-8]
+     ; from=(BB2, BB3)
+     ; to=(BB6, BB5)
+     ; idom=BB2
+     ; level=4
+     ; loop_header=7
+     ; children=(BB5, BB6)
+     #10.CV0($x) [rc1, rcn, any] = Phi(#4.CV0($x) [rc1, rcn, any], #9.CV0($x) [rc1, rcn, object (instanceof Shape)])
+0007 #11.T5 [bool] = INSTANCEOF #10.CV0($x) [rc1, rcn, any] (self) (no-autoload) (silent) (exception)
+0008 JMPZ #11.T5 [bool] BB6
+
+BB5:
+     ; follow lines=[9-9]
+     ; from=(BB4)
+     ; to=(BB6)
+     ; idom=BB4
+     ; level=5
+     ; loop_header=7
+0009 PRE_INC_OBJ THIS string("n")
+
+BB6:
+     ; follow target lines=[10-10]
+     ; from=(BB4, BB5)
+     ; to=(BB7)
+     ; idom=BB4
+     ; level=5
+     ; loop_header=7
+0010 PRE_INC #7.CV1($i) [long] RANGE[0..9] -> #12.CV1($i) [long] RANGE[1..10]
+
+BB7:
+     ; follow target loop_header lines=[11-12]
+     ; from=(BB1, BB6)
+     ; to=(BB2, BB8)
+     ; idom=BB1
+     ; level=2
+     ; children=(BB2, BB8)
+     #4.CV0($x) [rc1, rcn, any] = Phi(#2.CV0($x) [rc1, rcn, any], #10.CV0($x) [rc1, rcn, any])
+     #5.CV1($i) [long] RANGE[0..10] = Phi(#3.CV1($i) [long] RANGE[0..0], #12.CV1($i) [long] RANGE[1..10])
+0011 #6.T8 [bool] = IS_SMALLER #5.CV1($i) [long] RANGE[0..10] int(10)
+0012 JMPNZ #6.T8 [bool] BB2
+
+BB8:
+     ; follow exit lines=[13-14]
+     ; from=(BB7)
+     ; idom=BB7
+     ; level=3
+0013 #13.T9 [rcn, any] = FETCH_OBJ_R THIS string("n")
+0014 RETURN #13.T9 [rcn, any]
+
+$_main:
+     ; (lines=15, args=0, vars=2, tmps=8, ssa_vars=0)
+     ; (JIT)
+     ; instanceof.php:1-21
+     ; return  [] RANGE[0..0]
+BB0:
+     ; start lines=[0-1]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 V2 = NEW 0 string("Shape")
+0001 DO_FCALL
+
+BB1:
+     ; follow entry lines=[2-4]
+     ; from=(BB0)
+     ; to=(BB4)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB4)
+0002 ASSIGN CV0($s) V2
+0003 ASSIGN CV1($j) int(0)
+0004 JMP BB4
+
+BB2:
+     ; target lines=[5-7]
+     ; from=(BB4)
+     ; to=(BB3)
+     ; idom=BB4
+     ; level=3
+     ; loop_header=4
+     ; children=(BB3)
+0005 INIT_METHOD_CALL 1 CV0($s) string("grow")
+0006 SEND_VAR_EX CV0($s) 1
+0007 DO_FCALL
+
+BB3:
+     ; follow entry lines=[8-8]
+     ; from=(BB2)
+     ; to=(BB4)
+     ; idom=BB2
+     ; level=4
+     ; loop_header=4
+0008 PRE_INC CV1($j)
+
+BB4:
+     ; follow target loop_header lines=[9-10]
+     ; from=(BB1, BB3)
+     ; to=(BB2, BB5)
+     ; idom=BB1
+     ; level=2
+     ; children=(BB2, BB5)
+0009 T8 = IS_SMALLER CV1($j) int(5)
+0010 JMPNZ T8 BB2
+
+BB5:
+     ; follow exit lines=[11-14]
+     ; from=(BB4)
+     ; idom=BB4
+     ; level=3
+0011 T9 = FETCH_OBJ_R CV0($s) string("n")
+0012 ECHO T9
+0013 ECHO string("\n")
+0014 RETURN int(1)
+

@@ -297,6 +297,12 @@ fn pipeline_with(
             }
             let start = claim.start();
             catch_unwind(AssertUnwindSafe(|| {
+                // `zend_jit_trace_build_tssa` analyses the op arrays first.
+                let opt_level = shared.policy.start_setting().opt_level;
+                let (record, view) = (&recorded.record, &recorded.view);
+                if !crate::analysis::build(record, view, table.analyses(), opt_level, lines) {
+                    return Outcome::Abort(Stop::CompilerError);
+                }
                 published(&recorded, name, &compile, table, claim.epoch(), start)
             }))
             .unwrap_or(Outcome::Abort(Stop::CompilerError))

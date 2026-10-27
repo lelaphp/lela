@@ -1,0 +1,121 @@
+$_main:
+     ; (lines=11, args=0, vars=0, tmps=4, ssa_vars=0)
+     ; (JIT)
+     ; scoped_objects.php:1-16
+     ; return  [] RANGE[0..0]
+BB0:
+     ; start lines=[0-0]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 INCLUDE_OR_EVAL (eval) string("class Base { public $x = 1; public $y = 0; public int $n = 0; }")
+
+BB1:
+     ; follow entry lines=[1-4]
+     ; from=(BB0)
+     ; to=(BB2)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB2)
+0001 DECLARE_CLASS_DELAYED string("child") string("base")
+0002 INIT_FCALL 2 304 string("scoped")
+0003 V1 = NEW 0 string("Child")
+0004 DO_FCALL
+
+BB2:
+     ; follow entry lines=[5-7]
+     ; from=(BB1)
+     ; to=(BB3)
+     ; idom=BB1
+     ; level=2
+     ; children=(BB3)
+0005 SEND_VAR V1 1
+0006 SEND_VAL int(300) 2
+0007 V3 = DO_UCALL
+
+BB3:
+     ; follow exit entry lines=[8-10]
+     ; from=(BB2)
+     ; idom=BB2
+     ; level=3
+0008 ECHO V3
+0009 ECHO string("\n")
+0010 RETURN int(1)
+
+scoped:
+     ; (lines=19, args=2, vars=4, tmps=10, ssa_vars=24)
+     ; (JIT)
+     ; scoped_objects.php:8-14
+     ; return  [rc1, rcn, false, long, double, object]
+     ; #0.CV0($o) NOVAL [undef]
+     ; #1.CV1($m) NOVAL [undef]
+     ; #2.CV2($t) NOVAL [undef]
+     ; #3.CV3($i) NOVAL [undef]
+BB0:
+     ; start lines=[0-0]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 #4.CV0($o) [rc1, rcn, any] = RECV 1
+
+BB1:
+     ; recv follow entry lines=[1-1]
+     ; from=(BB0)
+     ; to=(BB2)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB2)
+0001 #5.CV1($m) [rc1, rcn, any] = RECV 2
+
+BB2:
+     ; recv follow entry lines=[2-4]
+     ; from=(BB1)
+     ; to=(BB4)
+     ; idom=BB1
+     ; level=2
+     ; children=(BB4)
+0002 ASSIGN #2.CV2($t) NOVAL [undef] -> #6.CV2($t) [long] RANGE[0..0] int(0)
+0003 ASSIGN #3.CV3($i) NOVAL [undef] -> #7.CV3($i) [long] RANGE[0..0] int(0)
+0004 JMP BB4
+
+BB3:
+     ; target lines=[5-14]
+     ; from=(BB4)
+     ; to=(BB4)
+     ; idom=BB4
+     ; level=4
+     ; loop_header=4
+     #13.CV1($m) [rc1, rcn, any] RANGE[1..++] = Pi<BB4>(#9.CV1($m) [rc1, rcn, any] & RANGE[#11.CV3($i) [long, double] RANGE[0..++] + 1 .. ++])
+     #14.CV3($i) [long, double] RANGE[0..++] = Pi<BB4>(#11.CV3($i) [long, double] RANGE[0..++] & RANGE[-- .. #9.CV1($m) [rc1, rcn, any] - 1])
+0005 #15.T6 [rc1, rcn, any] = FETCH_OBJ_R #8.CV0($o) [rc1, rcn, any] string("x")
+0006 ASSIGN_OP (ADD) #10.CV2($t) [rc1, rcn, false, long, double, object] -> #16.CV2($t) [rc1, rcn, false, long, double, object] #15.T6 [rc1, rcn, any]
+0007 ASSIGN_OBJ #8.CV0($o) [rc1, rcn, any] -> #18.CV0($o) [rc1, rcn, object] string("y")
+0008 OP_DATA #14.CV3($i) [long, double] RANGE[0..++] -> #17.CV3($i) [long, double] RANGE[0..++]
+0009 ASSIGN_OBJ_OP (ADD) #18.CV0($o) [rc1, rcn, object] -> #19.CV0($o) [rc1, rcn, object] string("x")
+0010 OP_DATA int(1)
+0011 PRE_INC_OBJ #19.CV0($o) [rc1, rcn, object] -> #20.CV0($o) [rc1, rcn, object] string("y")
+0012 ASSIGN_OBJ #20.CV0($o) [rc1, rcn, object] -> #22.CV0($o) [rc1, rcn, object] string("n")
+0013 OP_DATA #17.CV3($i) [long, double] RANGE[0..++] -> #21.CV3($i) [long, double] RANGE[0..++]
+0014 PRE_INC #21.CV3($i) [long, double] RANGE[0..++] -> #23.CV3($i) [long, double] RANGE[1..++]
+
+BB4:
+     ; follow target loop_header lines=[15-16]
+     ; from=(BB2, BB3)
+     ; to=(BB3, BB5)
+     ; idom=BB2
+     ; level=3
+     ; children=(BB3, BB5)
+     #8.CV0($o) [rc1, rcn, any] = Phi(#4.CV0($o) [rc1, rcn, any], #22.CV0($o) [rc1, rcn, object])
+     #9.CV1($m) [rc1, rcn, any] = Phi(#5.CV1($m) [rc1, rcn, any], #13.CV1($m) [rc1, rcn, any] RANGE[1..++])
+     #10.CV2($t) [rc1, rcn, false, long, double, object] = Phi(#6.CV2($t) [long] RANGE[0..0], #16.CV2($t) [rc1, rcn, false, long, double, object])
+     #11.CV3($i) [long, double] RANGE[0..++] = Phi(#7.CV3($i) [long] RANGE[0..0], #23.CV3($i) [long, double] RANGE[1..++])
+0015 #12.T13 [bool] = IS_SMALLER #11.CV3($i) [long, double] RANGE[0..++] #9.CV1($m) [rc1, rcn, any]
+0016 JMPNZ #12.T13 [bool] BB3
+
+BB5:
+     ; follow exit lines=[17-17]
+     ; from=(BB4)
+     ; idom=BB4
+     ; level=4
+0017 RETURN #10.CV2($t) [rc1, rcn, false, long, double, object]
+
