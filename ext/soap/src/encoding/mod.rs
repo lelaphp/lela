@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use php_ext::call::lookup_class;
+use php_ext::raising::call_stack_end;
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Owner, PhpObject, PhpRef, PhpString, Value, ValueRef, walk};
 use php_ext_libxml::ffi::{Kind, Library, Node, Ns};
@@ -620,6 +621,33 @@ pub(crate) fn master_to_xml(
 }
 
 /// `master_to_xml_int`, with `data` held for the length of the call.
+/// Array elements, object properties and `SoapVar` values all descend
+/// here. php leaves this walk unguarded (`php_encoding.c`), so it asks
+/// the floor, never the configured limit (§5.6, `trace:stack-floor-refusal`).
+/// A nest still fits under a small configured limit:
+///
+/// ```php
+/// class C extends SoapClient {
+///     function __doRequest($r, $l, $a, $v, $o = false, $u = null): ?string {
+///         return '<e:Envelope xmlns:e="http://schemas.xmlsoap.org/soap/envelope/"><e:Body><r><v>ok</v></r></e:Body></e:Envelope>';
+///     }
+/// }
+/// $c = new C(null, ['uri' => 'urn:t', 'location' => 'test://', 'trace' => true]);
+/// foreach (['array', 'object', 'soapvar'] as $shape) {
+///     $v = 'leaf';
+///     for ($i = 0; $i < 100; $i++) {
+///         if ($shape === 'array') { $v = [$v]; }
+///         elseif ($shape === 'object') { $v = (object)['next' => $v]; }
+///         else { $v = new SoapVar((object)['next' => $v], SOAP_ENC_OBJECT); }
+///     }
+///     echo $c->__soapCall('f', [$v]), ':', str_contains($c->__getLastRequest(), 'leaf') ? 'leaf' : 'missing', "\n";
+/// }
+/// ```
+/// ```expect regime=small-stack
+/// ok:leaf
+/// ok:leaf
+/// ok:leaf
+/// ```
 fn master_to_xml_int(
     req: &mut Request,
     cx: &mut Cx,
@@ -629,6 +657,7 @@ fn master_to_xml_int(
     parent: Node,
     check_class_map: bool,
 ) -> Res<Option<Node>> {
+    call_stack_end(req)?;
     let held = Owner::take(req, data);
     let out = master_to_xml_held(req, cx, encode, data, style, parent, check_class_map);
     held.give_up(req);
