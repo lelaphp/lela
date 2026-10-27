@@ -366,14 +366,33 @@ fn a_loop_on_a_constant_condition_roots_at_its_body() -> Result<(), String> {
 
 /// The levels of `opcache.optimization_level` that fold a loop's constant
 /// condition, pass 5, or pass 1 with pass 3, as the pinned php's `TRACE`
-/// lines root a `while (true)` at its body at 5, 16, 17, 21 and its
-/// default and at its condition at 0, 1 and 4 (#3578).
+/// lines root a `while (true)` at its body at 5, 16, 17, 21, 37 and its
+/// default and at its condition at 0, 1, 4, 32, 33, 160 and `0x7FFEBFEA`,
+/// the default less passes 1, 3 and 5, whose DFA folds no loop's entry
+/// (#3578).
 #[test]
 fn the_levels_that_fold_a_constant_condition_are_phps() {
     let folds = |level: i64| super::Folds::of(level).0;
     assert_eq!(
-        [0, 1, 4, 5, 16, 17, 21, 0x7FFE_BFFF].map(folds),
-        [false, false, false, true, true, true, true, true]
+        [
+            0,
+            1,
+            4,
+            5,
+            16,
+            17,
+            21,
+            32,
+            33,
+            37,
+            160,
+            0x7FFE_BFEA,
+            0x7FFE_BFFF
+        ]
+        .map(folds),
+        [
+            false, false, false, true, true, true, true, false, false, true, false, false, true
+        ]
     );
 }
 

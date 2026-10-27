@@ -1086,6 +1086,8 @@ impl<'p> Recorder<'p> {
         }
         loop {
             let at = position(req, frame);
+            // Only the root can stand here unheld: every op array the
+            // recording goes on into was held as it pushed or landed.
             let Some(code) = view.op_array(func) else {
                 return Ok((Stop::RequestUnit, ended(frame, stepped)));
             };
@@ -1548,8 +1550,13 @@ impl<'p> Recorder<'p> {
             if self.count(1) {
                 return Went::Stopped(Stop::TooLong);
             }
+            // A caller the recording entered serves an op array the view
+            // holds; where it serves none, php's branch for a frame whose
+            // op array keeps no `jit_extension`, its caller not the frame
+            // it left, stops with `Return`
+            // (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1097-1109`).
             let Some(landed) = tier::func(req, caller) else {
-                return Went::Stopped(Stop::RequestUnit);
+                return Went::Stopped(Stop::Return);
             };
             *func = landed;
         }

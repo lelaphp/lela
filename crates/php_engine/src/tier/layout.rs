@@ -664,6 +664,13 @@ impl PlainCall {
         self.serves == Serves::Native
     }
 
+    /// Whether the call serves an op array of the request's own, one an
+    /// `eval` declared, which no trace names (`jit-design.md` §4.1).
+    #[must_use]
+    pub fn is_request(&self) -> bool {
+        self.serves == Serves::Request
+    }
+
     /// The callee's name as the function table holds it, lowered.
     #[must_use]
     pub fn name(&self) -> &[u8] {

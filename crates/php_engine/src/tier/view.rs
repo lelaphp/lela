@@ -1309,8 +1309,7 @@ impl UnitView {
         count: u32,
     ) -> Option<&super::PlainCall> {
         (self.calls.iter()).find(|call| {
-            !call.is_native()
-                && call.callee().is_none()
+            call.is_request()
                 && call.scope() == Some(scope)
                 && call.name() == name
                 && call.count() == count
