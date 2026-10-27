@@ -1229,16 +1229,20 @@ impl UnitView {
     }
 
     /// Take the call being built at `call` where it is a plain call
-    /// ([`super::plain_call`]) to an op array the view holds, so a trace
-    /// that recorded it writes it in place; `false`, taking nothing, for
-    /// any other.
+    /// ([`super::plain_call`]) to an op array the view holds, or to a
+    /// request-scoped class's own method whose op array is the request's,
+    /// which the view never holds and the call names by its class's name
+    /// and its own (#3561, #3570), so a trace that recorded it writes it
+    /// in place; `false`, taking nothing, for any other.
     pub fn hold_call(&mut self, req: &Request, call: FrameRef) -> bool {
         let Some(plain) = super::plain_call(req, call) else {
             return false;
         };
-        if let Some(callee) = plain.callee()
-            && !self.hold(req, callee)
-        {
+        let held = match plain.callee() {
+            Some(callee) => self.hold(req, callee),
+            None => plain.is_native() || plain.own_class().is_some(),
+        };
+        if !held {
             return false;
         }
         if !self.calls.contains(&plain) {
@@ -1290,7 +1294,26 @@ impl UnitView {
     #[must_use]
     pub fn native_call(&self, name: &[u8], count: u32) -> Option<&super::PlainCall> {
         (self.calls.iter())
-            .find(|call| call.callee().is_none() && call.name() == name && call.count() == count)
+            .find(|call| call.is_native() && call.name() == name && call.count() == count)
+    }
+
+    /// The plain call [`UnitView::hold_call`] took to the method `name`,
+    /// lowered, of the request-scoped class `scope`, with `count`
+    /// arguments, whose op array is the request's own; none unless it
+    /// took one.
+    #[must_use]
+    pub fn request_call(
+        &self,
+        scope: ClassId,
+        name: &[u8],
+        count: u32,
+    ) -> Option<&super::PlainCall> {
+        (self.calls.iter()).find(|call| {
+            call.is_request()
+                && call.scope() == Some(scope)
+                && call.name() == name
+                && call.count() == count
+        })
     }
 
     /// The op array `f` names; none unless [`UnitView::hold`] accepted it.
@@ -1312,6 +1335,18 @@ impl UnitView {
             return None;
         }
         Some(self.epoch.func(f)?.is_main())
+    }
+
+    /// Whether the op array `f` names is a property hook's body, php's
+    /// `op_array.prop_info`, which php's recorder stops at a call into
+    /// (`ZEND_JIT_TRACE_STOP_PROP_HOOK_CALL`); none unless
+    /// [`UnitView::hold`] accepted it.
+    #[must_use]
+    pub fn is_hook(&self, f: FuncRef) -> Option<bool> {
+        if !self.funcs.contains(&f) {
+            return None;
+        }
+        Some(self.epoch.func(f)?.is_hook())
     }
 
     /// Whether a frame that runs the op array `f` names may have a

@@ -1,0 +1,8 @@
+start loop
+root e1
+op e1 10 long long - taken
+op e1 5 object#2147483648 - - -
+init request
+op e1 6 long - - -
+op e1 7 - - - -
+stop exit to VM interpreter

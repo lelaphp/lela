@@ -549,9 +549,7 @@ const _: () = {
 /// are the request's.
 #[derive(Debug, Clone)]
 pub struct PlainCall {
-    /// The op array a user function's call serves; none for a native's,
-    /// which its name names.
-    callee: Option<FuncRef>,
+    serves: Serves,
     count: u32,
     /// The function's name as the function table holds it, lowered.
     name: Box<[u8]>,
@@ -565,6 +563,20 @@ pub struct PlainCall {
     method: Option<(ClassId, Method)>,
 }
 
+/// What a plain call serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Serves {
+    /// A native, which the call's name names.
+    Native,
+    /// A user function's op array, published.
+    Published(FuncRef),
+    /// An op array of the request's own, an evaluated class's own
+    /// method's: no number names it past the request, so each request
+    /// finds it under the call's names, and the call is held to the
+    /// room the recording's took ([`call_image`]; #3570).
+    Request,
+}
+
 /// The method a method's plain call serves, as a request that runs the
 /// code finds it ([`call_image`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -572,22 +584,23 @@ enum Method {
     /// A published method, the same number in every request of the epoch.
     Published(Function),
     /// A request-scoped class's own method, `zend_lazy_class_load`'s
-    /// copy's, an enum's: numbered by each request for itself, so found
-    /// in the request that runs the code under the name of the class that
-    /// answered it, lowered, and the call's own name, and held there to
-    /// the op array the call serves.
+    /// copy's, an enum's, an evaluated class's: numbered by each request
+    /// for itself, so found in the request that runs the code under the
+    /// name of the class that answered it, lowered, and the call's own
+    /// name, and held there to the op array the call serves.
     Own(Box<[u8]>),
 }
 
 /// Two calls of one callee, one argument count and one called scope are
-/// the same call: a user function by its op array, a native by its name,
-/// and a request-scoped class's own method by its class's name too.
+/// the same call: a published user function by its op array, a native
+/// and a request's own op array by its name, and a request-scoped class's
+/// own method by its class's name too.
 impl PartialEq for PlainCall {
     fn eq(&self, other: &PlainCall) -> bool {
-        (self.callee, self.count) == (other.callee, other.count)
+        (self.serves, self.count) == (other.serves, other.count)
             && self.scope() == other.scope()
             && self.own_class() == other.own_class()
-            && (self.callee.is_some() || self.name == other.name)
+            && (self.callee().is_some() || self.name == other.name)
     }
 }
 
@@ -635,10 +648,27 @@ impl Activation {
 }
 
 impl PlainCall {
-    /// The op array the call serves; none for a native's call.
+    /// The published op array the call serves; none for a native's call
+    /// and a request's own op array's.
     #[must_use]
     pub fn callee(&self) -> Option<FuncRef> {
-        self.callee
+        match self.serves {
+            Serves::Published(f) => Some(f),
+            Serves::Native | Serves::Request => None,
+        }
+    }
+
+    /// Whether the call serves a native.
+    #[must_use]
+    pub fn is_native(&self) -> bool {
+        self.serves == Serves::Native
+    }
+
+    /// Whether the call serves an op array of the request's own, one an
+    /// `eval` declared, which no trace names (`jit-design.md` §4.1).
+    #[must_use]
+    pub fn is_request(&self) -> bool {
+        self.serves == Serves::Request
     }
 
     /// The callee's name as the function table holds it, lowered.
@@ -756,7 +786,7 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
         req.native_entry(function)?;
         req.shared.native_callee(function)?;
         return Some(PlainCall {
-            callee: None,
+            serves: Serves::Native,
             count: header.num_args,
             name: name()?,
             slots: u32::try_from(laid.len()).ok()?,
@@ -816,8 +846,12 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
         }
         _ => None,
     };
+    let served = FuncRef::at(code.runtime_cache);
     Some(PlainCall {
-        callee: Some(FuncRef::at(code.runtime_cache)),
+        serves: match served.offset() {
+            MapPtrOffset::Engine(_) => Serves::Published(served),
+            MapPtrOffset::Request(_) => Serves::Request,
+        },
         count,
         name,
         slots,
@@ -832,7 +866,8 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
 /// holds under the call's name, where it serves the call's op array, its
 /// record, the flags its `INIT_*` writes, and a published class as its
 /// called scope, where compiled code writes a request-scoped one. None where the request has
-/// declared no such function yet, or its entry is no longer plain.
+/// declared no such function yet, its entry is no longer plain, or its
+/// room is not the one the recording's request laid.
 #[must_use]
 pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
     let function = match &call.method {
@@ -845,20 +880,28 @@ pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
     };
     let served = if let Some(user) = req.user_function(function) {
         let code = crate::exec::body_of(&user.unit, user.body)?;
-        Some(FuncRef::at(code.runtime_cache))
+        match code.runtime_cache {
+            MapPtrOffset::Engine(_) => Serves::Published(FuncRef::at(code.runtime_cache)),
+            MapPtrOffset::Request(_) => Serves::Request,
+        }
     } else {
         req.native_entry(function)?;
-        None
+        Serves::Native
     };
-    if served != call.callee {
+    if served != call.serves {
         return None;
     }
     let mut header = Header::call(function, call.count);
     header.set_called_scope(call.scope().filter(|class| class.is_published()));
-    let (_, header) = req.laid_call(header)?;
+    let (room, header) = req.laid_call(header)?;
+    // The room compiled code lays is the recording's: a request's own op
+    // array another request found under the same names may take another.
+    if u32::try_from(room).ok() != Some(call.slots) {
+        return None;
+    }
     // A header with no record of its callee is one `push_call` completes
     // as it lays it down, and so not one to copy.
-    let plain = call.callee.is_none() || header.info.plain_entry();
+    let plain = call.is_native() || header.info.plain_entry();
     if !plain || header.callee.is_none() {
         return None;
     }

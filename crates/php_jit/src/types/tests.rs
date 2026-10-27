@@ -27,12 +27,13 @@ use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DEFAULT_CALL, DEFAULT_CONSTANT,
-    DIM_AND, DIM_CONCAT, DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, ENUM_OWN, FANNKUCH,
-    FIB, FRAMELESS_CALL, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET, HASH_READ, HASH_WRITE,
-    INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL, METHOD_OWN, METHOD_SCOPED, NATIVE_CALL, NBODY,
-    NESTED_READ, NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE,
-    PARENT_THIS, REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL, STATIC_OWN, STATIC_SCOPED,
-    STATIC_SELF, STATIC_THIS, STRING_BUILD, STRING_MATCH, TEMP_CALL, held, traced as built,
+    DIM_AND, DIM_CONCAT, DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, ENUM_OWN, EVAL_OWN,
+    EVAL_STATIC, FANNKUCH, FIB, FRAMELESS_CALL, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET,
+    HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL, METHOD_OWN, METHOD_SCOPED,
+    NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS,
+    OBJECT_VALUE, OWNING_LEAVE, PARENT_THIS, REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL,
+    STATIC_OWN, STATIC_SCOPED, STATIC_SELF, STATIC_THIS, STRING_BUILD, STRING_MATCH, TEMP_CALL,
+    held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -3179,5 +3180,87 @@ fn a_send_by_reference_whose_value_is_destroyed_runs_nothing() -> Result<(), Str
         })
         .ok_or_else(|| format!("no ASSIGN in the callee in\n{rendered}"))?;
     assert!(assign.unwind.is_some(), "{rendered}");
+    Ok(())
+}
+
+/// A trace that calls an `eval`'d function, a function's and a method's,
+/// stops at the call (#3570), and nothing it builds names the request's
+/// op array: no frame, no guard and no call, whose number another
+/// request gives another op array (design §3.4).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_trace_names_no_request_scoped_op_array() -> Result<(), String> {
+    use php_unit::MapPtrOffset;
+
+    let request = |f: php_engine::tier::FuncRef| matches!(f.offset(), MapPtrOffset::Request(_));
+    for program in [
+        "eval('function h($a) { return $a + 1; }');
+        function f($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += h($i); } return $t; }
+        echo f(5), \"\\n\";",
+        "eval('class E { function m($a) { return $a + 1; } }');
+        function f($n) { $e = new E; $t = 0; for ($i = 0; $i < $n; $i++) { $t += $e->m($i); } return $t; }
+        echo f(5), \"\\n\";",
+    ] {
+        let ir = built(&IN_F, program)?;
+        let rendered = dump::render(&ir);
+        assert_eq!(ir.entry.stop, Stop::Interpreter, "{rendered}");
+        assert!(!ir.frames.iter().any(|frame| request(frame.func)), "{rendered}");
+        let guarded = (ir.guards.iter()).any(|guard| match guard.check {
+            Check::Callee { func } | Check::Stands { func, .. } => request(func),
+            _ => false,
+        });
+        assert!(!guarded, "{rendered}");
+        let called = (ir.ops.iter()).any(|op| match op {
+            Op::InitCall { callee, plain, .. } => {
+                callee.user().is_some_and(request)
+                    || plain.as_ref().and_then(php_engine::tier::PlainCall::callee).is_some_and(request)
+            }
+            _ => false,
+        });
+        assert!(!called, "{rendered}");
+    }
+    Ok(())
+}
+
+/// An evaluated class's own method, whose op array is the request's: its
+/// call on an object and through the class's name is pushed in place
+/// under the pair its runtime-cache slot holds, the callee held by its
+/// record, with no guard on a callee no number names, and the trace stops
+/// at the call with `Interpreter`, the frame pushed for the interpreter
+/// to make the call (#3561, #3570).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_evaluated_classs_own_method_is_pushed_under_its_slots_pair() -> Result<(), String> {
+    for (fixture, opcode, class) in [
+        (EVAL_OWN, Opcode::InitMethodCall, super::PairClass::Receiver),
+        (
+            EVAL_STATIC,
+            Opcode::InitStaticMethodCall,
+            super::PairClass::Named,
+        ),
+    ] {
+        let ir = golden(fixture)?;
+        let rendered = dump::render(&ir);
+        assert_eq!(ir.entry.stop, Stop::Interpreter, "{rendered}");
+        let init = line_of(&ir, opcode).ok_or_else(|| format!("no {opcode:?} in\n{rendered}"))?;
+        assert_eq!(init.form, Form::Inline, "{rendered}");
+        assert_eq!(
+            init.imm,
+            Imm::Pair {
+                function: super::PairCallee::Record,
+                class,
+            },
+            "{rendered}"
+        );
+        assert!(init.map_ptr.is_some(), "{rendered}");
+        let callee_guard =
+            (ir.guards.iter()).any(|guard| matches!(guard.check, Check::Callee { .. }));
+        assert!(!callee_guard, "{rendered}");
+        let pushed = (ir.ops.iter()).any(|op| {
+            matches!(op, Op::InitCall { plain: Some(plain), .. }
+                if plain.callee().is_none() && !plain.is_native() && plain.own_class() == Some(b"evald".as_slice()))
+        });
+        assert!(pushed, "{rendered}");
+    }
     Ok(())
 }

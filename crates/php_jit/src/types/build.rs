@@ -1230,7 +1230,7 @@ impl<'a> Builder<'a> {
             args: Vec::new(),
             returns: match callee {
                 Callee::Native(returns) => Some(returns),
-                Callee::User(_) => None,
+                Callee::User(_) | Callee::Request => None,
             },
             callee,
             pushed: plain.as_ref().map(|plain| {
@@ -1357,7 +1357,7 @@ impl<'a> Builder<'a> {
                         let name = code.literals.get(op.op2 as usize)?.str_bytes()?;
                         self.view.native_call(name, op.extended_value)?
                     }
-                    Callee::User(_) | Callee::Native(_) => return None,
+                    Callee::User(_) | Callee::Native(_) | Callee::Request => return None,
                 };
                 Some(InPlace::Push(plain.clone()))
             }
@@ -2585,7 +2585,7 @@ impl<'a> Builder<'a> {
             return None;
         }
         let Some(Event::InitCall {
-            callee: Callee::User(callee),
+            callee,
             began: Began::Here,
         }) = next
         else {
@@ -2603,9 +2603,13 @@ impl<'a> Builder<'a> {
             }
             _ => return None,
         };
-        let plain = (self.view.calls_of(*callee, op.extended_value))
-            .find(|plain| plain.scope() == Some(class))?
-            .clone();
+        let plain = match callee {
+            Callee::User(callee) => (self.view.calls_of(*callee, op.extended_value))
+                .find(|plain| plain.scope() == Some(class))?
+                .clone(),
+            Callee::Request => self.request_call(func, op, class)?,
+            Callee::Native(_) => return None,
+        };
         let held = if tier::class_published(class) {
             HeldBy::Class(object, class)
         } else {
@@ -2642,14 +2646,26 @@ impl<'a> Builder<'a> {
         if !(constant || scoped) || op.op2_type != OperandKind::Const {
             return None;
         }
-        let Some(Event::InitCall {
-            callee: Callee::User(callee),
-            began: Began::Here,
-        }) = next
-        else {
-            return None;
-        };
         let pair = self.view.callee_at(func, at)?;
+        let callee = match next {
+            Some(Event::InitCall {
+                callee: Callee::User(callee),
+                began: Began::Here,
+            }) => callee,
+            // A request-scoped class's own static method whose op array
+            // is the request's, through the class's name.
+            Some(Event::InitCall {
+                callee: Callee::Request,
+                began: Began::Here,
+            }) if constant && !pair.instance() => {
+                let plain = self.request_call(func, op, pair.class())?;
+                return Some(PushAt {
+                    plain,
+                    held: HeldBy::Pair(pair, PairClass::Named),
+                });
+            }
+            _ => return None,
+        };
         let named = (constant && tier::class_published(pair.class())).then_some(pair.class());
         let mut plains = self.view.calls_of(*callee, op.extended_value);
         let (plain, class) = if pair.instance() {
@@ -2675,6 +2691,24 @@ impl<'a> Builder<'a> {
             plain,
             held: HeldBy::Pair(pair, class),
         })
+    }
+
+    /// The plain call the recording took of a method of the request-scoped
+    /// class `scope` whose op array is the request's own, an evaluated
+    /// class's, which the record names by no number (#3570): found by the
+    /// method's name, the constant the `INIT_*` at `op` of the op array
+    /// `func` names, lowered, and its argument count.
+    fn request_call(&self, func: FuncRef, op: &Opline, scope: ClassId) -> Option<PlainCall> {
+        if tier::class_published(scope) {
+            return None;
+        }
+        let code = self.view.op_array(func)?;
+        let name = code
+            .literals
+            .get(op.op2 as usize)?
+            .str_bytes()?
+            .to_ascii_lowercase();
+        (self.view.request_call(scope, &name, op.extended_value)).cloned()
     }
 
     /// The call a stepped `NEW`, `INIT_STATIC_METHOD_CALL` or

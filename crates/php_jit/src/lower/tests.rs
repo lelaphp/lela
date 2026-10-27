@@ -17,12 +17,12 @@ use super::{Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupp
 use crate::table::TraceName;
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DEFAULT_CALL, DIM_AND, DIM_CONCAT,
-    DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, ENUM_OWN, FIB, FRAMELESS_CALL, Fixture,
-    HASH_FETCH_W, HASH_IS, HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT,
-    METHOD_CALL, METHOD_OWN, METHOD_SCOPED, NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE,
-    NEW_CALL, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, PARENT_THIS, REF_CALL,
-    REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL, STATIC_OWN, STATIC_SCOPED, STATIC_SELF,
-    STATIC_THIS, STRING_BUILD, STRING_MATCH, TEMP_CALL, held,
+    DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, ENUM_OWN, EVAL_OWN, EVAL_STATIC, FIB,
+    FRAMELESS_CALL, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET, HASH_READ, HASH_WRITE,
+    INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL, METHOD_OWN, METHOD_SCOPED, NATIVE_CALL, NBODY,
+    NESTED_READ, NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE,
+    PARENT_THIS, REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL, STATIC_OWN, STATIC_SCOPED,
+    STATIC_SELF, STATIC_THIS, STRING_BUILD, STRING_MATCH, TEMP_CALL, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -1313,6 +1313,36 @@ fn a_slot_that_names_another_class_sends_a_methods_call_to_its_handler() {
     assert_eq!(testing::stdout(&served), "47 53\n");
 }
 
+/// An evaluated class's own method's call pushed in place under its
+/// slot's pair lowers to the guard on the slot and one cold arm where the
+/// handler pushes it, and makes no call: the trace stops at the call,
+/// which the interpreter makes (#3561, #3570).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_evaluated_classs_call_lowers_its_push_and_no_call() -> Result<(), String> {
+    for fixture in [EVAL_OWN, EVAL_STATIC] {
+        let ir = lowered(fixture)?;
+        let clif = std::fs::read_to_string(goldens_dir().join(format!("{}.clif", fixture.name)))
+            .map_err(|e| e.to_string())?;
+        let at = (ir.ops.iter())
+            .position(|op| matches!(op, Op::Line(line) if matches!(line.imm, Imm::Pair { .. })))
+            .ok_or_else(|| format!("{}: no push under a pair", fixture.name))?;
+        let address =
+            format!("{:#x}", symbols().address(Kernel::Step)).replace("0x7000", "0x7000_");
+        let stepped = (clif.lines())
+            .filter(|line| line.starts_with(&format!("@{at:04x} ")))
+            .filter(|line| line.contains("call_indirect") && line.contains(&address))
+            .count();
+        assert_eq!(stepped, 1, "{}: {clif}", fixture.name);
+        assert!(
+            calls_of(&clif, Kernel::Call).is_empty(),
+            "{}: {clif}",
+            fixture.name
+        );
+    }
+    Ok(())
+}
+
 /// A call passed fewer arguments than its callee has parameters lowers
 /// to its activation in place, each default copied from the op array's
 /// constants, the call kernel cold where the call is refused (#3340).
@@ -1331,4 +1361,221 @@ fn a_call_passed_fewer_arguments_lowers_its_defaults() -> Result<(), String> {
     assert_eq!(calls(Kernel::Call), 1, "{clif}");
     assert_eq!(calls(Kernel::Handle), 0, "{clif}");
     Ok(())
+}
+
+/// A trace one request compiled through a call into the function its
+/// `eval` declared, entered by a request whose `eval` declares another
+/// function under the same name and the same request-scoped number, by
+/// reference and with another arity: the trace left at the call the
+/// first time, so the second request's call is its own handler's, and
+/// each request writes what the interpreter writes, under force and
+/// where every guard fails once (#3570).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_trace_through_an_evaled_call_serves_another_requests_function() {
+    for mode in ["force", "exit-fuzz"] {
+        let scratch = testing::Scratch::new();
+        let engine = testing::engine::<Lane>(&[
+            ("jit.mode", mode),
+            ("jit.compile", "inline"),
+            ("opcache.jit_debug", "258048"),
+        ]);
+        let declare = |code: &str| {
+            let written =
+                std::fs::write(scratch.0.join("h.php"), format!("<?php return '{code}';"));
+            assert!(written.is_ok(), "{written:?}");
+        };
+        let program = "eval(include __DIR__ . '/h.php');
+            function f($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $a = $i; $t += h($a); $t += $a; } return $t; }
+            echo f(20), \"\\n\";";
+        declare("function h($a) { return $a + 1; }");
+        let first = scratch.serve(&engine, program);
+        assert_eq!(testing::stdout(&first), "400\n", "{mode}");
+        let lines = String::from_utf8_lossy(&first.stderr);
+        assert!(
+            lines.contains("stop (exit to VM interpreter)"),
+            "{mode}: {lines}"
+        );
+        declare("function h(&$a, $b = 10) { $a = $a * 2; return $a + $b; }");
+        let second = scratch.serve(&engine, program);
+        assert_eq!(testing::stdout(&second), "960\n", "{mode}");
+        let lines = String::from_utf8_lossy(&second.stderr);
+        assert!(
+            !lines.contains("start (loop) f()"),
+            "{mode}: the first request's trace serves: {lines}"
+        );
+    }
+}
+
+/// A trace one request compiled through a call pushed in place to an
+/// evaluated class's own method, entered by a request whose `eval`
+/// declares the class under the same name with another method of the same
+/// name: by reference and with another room, which the request's header
+/// refuses, so the handler pushes it; and by reference with the same
+/// room, pushed in place and its argument sent by its handler. Each
+/// request writes what the interpreter writes, under force and where every
+/// guard fails once (#3561, #3570).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_push_of_an_evaluated_classs_method_serves_another_requests_class() {
+    for mode in ["force", "exit-fuzz"] {
+        let scratch = testing::Scratch::new();
+        let engine = testing::engine::<Lane>(&[
+            ("jit.mode", mode),
+            ("jit.compile", "inline"),
+            ("opcache.jit_debug", "258048"),
+        ]);
+        let declare = |code: &str| {
+            let written =
+                std::fs::write(scratch.0.join("h.php"), format!("<?php return '{code}';"));
+            assert!(written.is_ok(), "{written:?}");
+        };
+        let program = "eval(include __DIR__ . '/h.php');
+            function g($o, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $a = $i; $t += $o->get($a); $t += $a; } return $t; }
+            echo g(new E, 20), \"\\n\";";
+        declare("class E { function get($a) { return $a + 1; } }");
+        let first = scratch.serve(&engine, program);
+        assert_eq!(testing::stdout(&first), "400\n", "{mode}");
+        for code in [
+            "class E { function get(&$a, $b = 10) { $c = 0; $a = $a * 2; return $a + $b + $c; } }",
+            "class E { function get(&$a) { $a = $a * 2; return $a + 10; } }",
+        ] {
+            declare(code);
+            let next = scratch.serve(&engine, program);
+            assert_eq!(testing::stdout(&next), "960\n", "{mode}: {code}");
+            let lines = String::from_utf8_lossy(&next.stderr);
+            assert!(
+                !lines.contains("start (loop) g()"),
+                "{mode}: the first request's trace serves: {lines}"
+            );
+        }
+    }
+}
+
+/// A recording begun at the return out of an `eval`'s frame goes on into
+/// a function called from the frame below, at the `eval` frame's number:
+/// the loop's scope for the `eval` takes that frame up through the
+/// function's op array, not its own, which stood it past its end.
+#[test]
+fn a_recording_begun_at_an_evals_return_calls_on_at_its_frames_number() {
+    let scratch = testing::Scratch::new();
+    let engine = testing::engine::<Lane>(&[
+        ("opcache.enable_cli", "1"),
+        ("opcache.jit", "tracing"),
+        ("opcache.jit_buffer_size", "64M"),
+        ("jit.compile", "inline"),
+        ("opcache.jit_debug", "258048"),
+        ("opcache.jit_hot_loop", "1"),
+        ("opcache.jit_hot_func", "1"),
+        ("opcache.jit_hot_return", "1"),
+        ("opcache.jit_hot_side_exit", "1"),
+    ]);
+    let served = scratch.serve(
+        &engine,
+        "eval('function h($a) { return $a + 1; } $declared = true;');
+function f($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += h($i); } return $t; }
+echo f(100), \"\\n\";",
+    );
+    let lines = String::from_utf8_lossy(&served.stderr);
+    assert_eq!(testing::stdout(&served), "5050\n", "{lines}");
+    assert!(lines.contains("TRACE 2 start (loop) f()"), "{lines}");
+}
+
+/// A `while (true)` under `opcache.optimization_level=0` is rooted at its
+/// `while`, the condition php's optimizer leaves unfolded, where at the
+/// default level it is rooted at its body (`record::Folds`, #3578).
+#[test]
+fn a_while_true_is_rooted_where_the_optimization_level_leaves_its_condition() {
+    let program = "function f() {
+    $i = 0;
+    while (true) {
+        if ($i === 10) {
+            return $i;
+        }
+        $i++;
+    }
+}
+echo f(), \"\\n\";";
+    for (level, line) in [("0", "body.php:4"), ("0x7FFEBFFF", "body.php:5")] {
+        let served = testing::serve::<Lane>(
+            &[
+                ("opcache.enable_cli", "1"),
+                ("opcache.jit", "tracing"),
+                ("opcache.jit_buffer_size", "64M"),
+                ("jit.compile", "inline"),
+                ("opcache.optimization_level", level),
+                ("opcache.jit_debug", "258048"),
+                ("opcache.jit_hot_loop", "1"),
+                ("opcache.jit_hot_func", "1"),
+                ("opcache.jit_hot_return", "1"),
+                ("opcache.jit_hot_side_exit", "1"),
+            ],
+            program,
+        );
+        let lines = String::from_utf8_lossy(&served.stderr);
+        assert_eq!(testing::stdout(&served), "10\n", "{level}: {lines}");
+        let root = lines.lines().find(|l| l.contains("start (loop) f()"));
+        assert!(root.is_some_and(|l| l.ends_with(line)), "{level}: {lines}");
+    }
+}
+
+/// A child's `get` hook calling its parent's, read in a loop, under
+/// `opcache.optimization_level=0`: the hook's trace stops at the call into
+/// the parent's with `property hook call`, and the parent's and the
+/// return trace past the call are php's, as the pinned php writes them
+/// (#3577). The loop's exit numbers wait on the analysis's guards (#3575),
+/// so the lines past the fourth trace are not held here.
+#[test]
+fn a_parent_property_hooks_call_stops_the_trace_that_reaches_it() {
+    let served = testing::serve::<Lane>(
+        &[
+            ("opcache.enable_cli", "1"),
+            ("opcache.jit", "tracing"),
+            ("opcache.jit_buffer_size", "64M"),
+            ("jit.compile", "inline"),
+            ("opcache.optimization_level", "0"),
+            ("opcache.jit_debug", "258048"),
+            ("opcache.jit_hot_loop", "1"),
+            ("opcache.jit_hot_func", "1"),
+            ("opcache.jit_hot_return", "1"),
+            ("opcache.jit_hot_side_exit", "1"),
+        ],
+        "class P { public int $x = 2 { get => $this->x + 1; } }
+class C extends P {
+    public int $x = 2 {
+        get => parent::$x::get() * 2;
+    }
+}
+function f($c) { $s = 0; for ($i = 0; $i < 5; $i++) { $s += $c->x; } return $s; }
+echo f(new C), \"\\n\";",
+    );
+    let lines = String::from_utf8_lossy(&served.stderr);
+    assert_eq!(testing::stdout(&served), "30\n", "{lines}");
+    let traced: Vec<&str> = lines
+        .lines()
+        .map(|line| line.split_once(" /").map_or(line, |(head, _)| head))
+        .take(16)
+        .collect();
+    assert_eq!(
+        traced,
+        [
+            "---- TRACE 1 start (enter) $main()",
+            "---- TRACE 1 abort (inner loop)",
+            "---- TRACE 1 start (loop) f()",
+            "---- TRACE 1 stop (loop)",
+            "---- TRACE 1 compiled",
+            "",
+            "---- TRACE 2 start (enter) C::$x::get()",
+            "---- TRACE 2 stop (property hook call)",
+            "---- TRACE 2 compiled",
+            "",
+            "---- TRACE 3 start (enter) P::$x::get()",
+            "---- TRACE 3 stop (return)",
+            "---- TRACE 3 compiled",
+            "",
+            "---- TRACE 4 start (return) C::$x::get()",
+            "---- TRACE 4 stop (return)",
+        ],
+        "{lines}"
+    );
 }

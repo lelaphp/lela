@@ -177,7 +177,7 @@ pub(crate) fn switched(builder: ExtensionBuilder) -> ExtensionBuilder {
 /// all, which ext/opcache declares in the bundle and no engine of a
 /// tier's test has, declared by the test tier instead so the tier's
 /// start reads what a test sets.
-pub(crate) const OPCACHE: [&str; 21] = [
+pub(crate) const OPCACHE: [&str; 22] = [
     "opcache.enable",
     "opcache.enable_cli",
     "opcache.jit",
@@ -199,6 +199,7 @@ pub(crate) const OPCACHE: [&str; 21] = [
     "opcache.jit_max_polymorphic_calls",
     "opcache.jit_bisect_limit",
     "opcache.jit_prof_threshold",
+    "opcache.optimization_level",
 ];
 
 /// The compiled tier as a test binds it: `Jit`, its state declared with
