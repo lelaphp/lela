@@ -9,8 +9,8 @@ entry
   checks direction taken -> exit 2
 0004 f0 INIT_STATIC_METHOD_CALL const#2, const#4 inline pair fn own of named map 0 unwinds -> unwind 0
      f0 init request in-place
-0005 f0 SEND_VAR_EX #0 step unwinds -> unwind 0
-  -> #2 f0.CV2 [undef, ref, any]
+0005 f0 SEND_VAR_EX #0 step
+  -> #2 f0.CV2 [ref, any]
 end: exit 3
 exit 0: f0 0009 plain
 exit 1: f0 0009 plain f0.CV2:long

@@ -743,7 +743,7 @@ function u0:0(i64, i64) -> i32 tail {
 @0007                               v398 = iconst.i32 1
 @0007                               v399 = iconst.i64 0x7000_0400
 @0007                               v400 = call_indirect sig2, v399(v0, v52, v397, v398)  ; v399 = 0x7000_0400, v397 = 12, v398 = 1
-@0007                               brif v400, block86, block101
+@0007                               brif v400, block19, block101
 
                                 block101:
 @0007                               v401 = load.i32 notrap aligned v52+40

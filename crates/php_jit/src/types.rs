@@ -81,10 +81,12 @@ use std::num::{NonZeroU32, NonZeroUsize};
 
 use php_engine::tier::{ClassId, FramelessAt, FuncRef, MapPtrRaw, PlainCall, UnitView};
 use php_heap::ZvalType;
+use php_ssa::Range;
 use php_unit::{ConstIdx, Opcode, OplineIdx};
 
 pub(crate) use lattice::Types;
 
+use crate::analysis::Analysed;
 use crate::record::{Began, Callee, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 
@@ -210,6 +212,8 @@ pub(crate) struct ValueId(pub(crate) u32);
 pub(crate) struct Value {
     pub(crate) slot: Slot,
     pub(crate) types: Types,
+    /// What php's inference knows of the long it holds, where it knows.
+    pub(crate) range: Option<Range>,
     pub(crate) def: Def,
     pub(crate) home: Home,
 }
@@ -1103,7 +1107,14 @@ pub(crate) fn on_declared_slot(opcode: Opcode) -> bool {
     )
 }
 
-/// The trace `rec` builds, read through `view`, or why it builds none.
-pub(crate) fn build(rec: &TraceRecord, view: &UnitView) -> Result<TraceIr, Abort> {
-    build::build(rec, view)
+/// The trace `rec` builds, read through `view` and what php's analysis
+/// of each op array it passes through learned, or why it builds none.
+pub(crate) fn build(
+    rec: &TraceRecord,
+    view: &UnitView,
+    analysed: &Analysed,
+) -> Result<TraceIr, Abort> {
+    let tables = analysed.tables(rec, view);
+    let inference = tables.frames();
+    build::build(rec, view, analysed, &inference)
 }

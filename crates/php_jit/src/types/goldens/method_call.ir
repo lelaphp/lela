@@ -2,35 +2,34 @@ trace loop e1, stop loop
 frame f0 e1 root, 4 cvs 9 temps
 frame f1 e4 callee of f0, 1 cvs 2 temps
 entry
-  #0 f0.CV2 [undef, any]
+  #0 f0.CV2 [any]
   #2 f0.CV3 [long]
   #4 f0.CV0 [long]
   #5 f0.CV1 [object]
   guard room 128 -> exit 0
   guard #4 long -> exit 1
-  guard #5 object -> exit 2
-  guard #2 long -> exit 3
-loop at 0, loop, interrupt exit 13
-  #1 f0.CV2 [undef, any] = phi(#0, #10)
+  guard #2 long -> exit 2
+loop at 0, loop, interrupt exit 12
+  #1 f0.CV2 [any] = phi(#0, #10)
   #3 f0.CV3 [long] reg = phi(#2, #11)
 0012 f0 IS_SMALLER #3, #4 fused inline
-  checks direction taken -> exit 4
-  guard #5 class 41 -> exit 5
+  checks direction taken -> exit 3
+  guard #5 class 41 -> exit 4
 0007 f0 INIT_METHOD_CALL #5, const#4 inline
      f0 init e4 in-place
 0008 f0 SEND_VAR #3 inline
 0009 f0 DO_FCALL inline in-place unwinds -> unwind 0
-  checks stands e4 0001 -> exit 6
+  checks stands e4 0001 -> exit 5
      f1 enter e4
   -> #6 f1.CV0 [long]
-  guard f1.this class 41 -> exit 7
-0001 f1 FETCH_OBJ_R const#0 inline slot 0 leaves -> exit 8
+  guard f1.this class 41 -> exit 6
+0001 f1 FETCH_OBJ_R const#0 inline slot 0 leaves -> exit 7
   -> #7 f1.T0 [long] reg
-  checks #7 long -> exit 9
-  checks #7 ref to long -> exit 10
+  checks #7 long -> exit 8
+  checks #7 ref to long -> exit 9
 0002 f1 ADD #7, #6 inline
   -> #8 f1.T1 [long] reg
-  checks #8 long -> exit 11
+  checks #8 long -> exit 10
 0003 f1 RETURN #8 inline receives in-place unwinds -> unwind 0
      f0 back to #9
   -> #9 f0.T5 [long]
@@ -38,21 +37,20 @@ loop at 0, loop, interrupt exit 13
   -> #10 f0.CV2 [long] reg
 0011 f0 PRE_INC #3 inline
   -> #11 f0.CV3 [long] reg
-  checks #11 long -> exit 12
+  checks #11 long -> exit 11
 end: back to 0
 exit 0: f0 0012 plain to vm
 exit 1: f0 0012 plain
-exit 2: f0 0012 plain f0.CV0:long
-exit 3: f0 0012 plain f0.CV0:long f0.CV1:object
-exit 4: f0 0014 plain f0.CV3=#3 f0.CV0:long f0.CV1:object f0.CV3:long
-exit 5: f0 0007 plain f0.CV3=#3 f0.CV0:long f0.CV1:object f0.CV3:long
-exit 6: f0 where it stands restore call f0.CV3=#3 f0.CV0:long f0.CV1:object f0.CV3:long
-exit 7: f1 0001 plain f0.CV3=#3 f1.CV0:long
-exit 8: f1 0001 plain f0.CV3=#3 f1.CV0:long to vm
-exit 9: f1 0002 plain f0.CV3=#3 f1.T0=copied #7 f1.CV0:long
-exit 10: f1 0002 plain f0.CV3=#3 f1.T0=copied #7 through a reference f1.CV0:long
-exit 11: f1 0002 plain f0.CV3=#3 f1.T0=#7 f1.CV0:long f1.T0:long
-exit 12: f0 0011 plain f0.CV2=#10 f0.CV3=#3 f0.CV0:long f0.CV1:object f0.CV2:long f0.CV3:long
-exit 13: f0 0012 plain f0.CV3=#3 f0.CV0:long f0.CV1:object f0.CV3:long to vm
+exit 2: f0 0012 plain f0.CV0:long f0.CV1:object
+exit 3: f0 0014 plain f0.CV3=#3 f0.CV0:long f0.CV1:object f0.CV3:long
+exit 4: f0 0007 plain f0.CV3=#3 f0.CV0:long f0.CV1:object f0.CV3:long
+exit 5: f0 where it stands restore call f0.CV3=#3 f0.CV0:long f0.CV1:object f0.CV3:long
+exit 6: f1 0001 plain f0.CV3=#3 f1.CV0:long
+exit 7: f1 0001 plain f0.CV3=#3 f1.CV0:long to vm
+exit 8: f1 0002 plain f0.CV3=#3 f1.T0=copied #7 f1.CV0:long
+exit 9: f1 0002 plain f0.CV3=#3 f1.T0=copied #7 through a reference f1.CV0:long
+exit 10: f1 0002 plain f0.CV3=#3 f1.T0=#7 f1.CV0:long f1.T0:long
+exit 11: f0 0011 plain f0.CV2=#10 f0.CV3=#3 f0.CV0:long f0.CV1:object f0.CV2:long f0.CV3:long
+exit 12: f0 0012 plain f0.CV3=#3 f0.CV0:long f0.CV1:object f0.CV3:long to vm
 unwind 0: f0.CV3=#3
 unwind 1: f0.CV2=#10 f0.CV3=#3

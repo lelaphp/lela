@@ -685,7 +685,10 @@ pub(crate) fn record(fixture: Fixture) -> Result<TraceRecord, String> {
 /// The trace the fixture's golden record builds, read through the view
 /// of `recorded`.
 pub(crate) fn built(fixture: Fixture, recorded: &Recorded) -> Result<TraceIr, String> {
-    build(&record(fixture)?, &recorded.view).map_err(|abort| format!("{}: {abort:?}", fixture.name))
+    let record = record(fixture)?;
+    let analysed = crate::analysis::analysed(&record, &recorded.view);
+    build(&record, &recorded.view, &analysed)
+        .map_err(|abort| format!("{}: {abort:?}", fixture.name))
 }
 
 /// The trace `program` builds when recorded under `plan`, from its
@@ -694,5 +697,10 @@ pub(crate) fn traced(plan: &[(&str, &str)], program: &str) -> Result<TraceIr, St
     let (recorded, _) = recording(plan, program)?;
     let record = TraceRecord::parse(&recorded.record.dump())
         .map_err(|e| format!("the record's text: {e:?}"))?;
-    build(&record, &recorded.view).map_err(|abort| format!("{abort:?}"))
+    build(
+        &record,
+        &recorded.view,
+        &crate::analysis::analysed(&record, &recorded.view),
+    )
+    .map_err(|abort| format!("{abort:?}"))
 }

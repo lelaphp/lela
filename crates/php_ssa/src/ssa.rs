@@ -1288,9 +1288,9 @@ fn chains<C: Copy>(ssa: &mut Ssa<C>, body: &OpArray) {
     }
 }
 
-/// `zend_ssa_is_no_val_use`: the opline at `at` reads `var` only to
-/// overwrite it.
-fn is_no_val_use(op: &Opline, ssa_op: &SsaOp, var: SsaVar) -> bool {
+/// `zend_ssa_is_no_val_use`: `op` reads `var` only to overwrite it.
+#[must_use]
+pub fn is_no_val_use(op: &Opline, ssa_op: &SsaOp, var: SsaVar) -> bool {
     let var = Some(var);
     match op.opcode {
         Opcode::Assign | Opcode::UnsetCv | Opcode::BindGlobal | Opcode::BindStatic => {

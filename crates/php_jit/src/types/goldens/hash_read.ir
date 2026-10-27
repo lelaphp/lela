@@ -10,56 +10,54 @@ entry
   guard #5 hash -> exit 1
   guard #4 long -> exit 2
   guard #0 long -> exit 3
-  guard #7 string -> exit 4
-  guard #2 long -> exit 5
-loop at 0, loop, interrupt exit 20
+  guard #2 long -> exit 4
+loop at 0, loop, interrupt exit 19
   #1 f0.CV2 [long] reg = phi(#0, #12)
   #3 f0.CV4 [long] reg = phi(#2, #13)
 0013 f0 IS_SMALLER #3, #4 fused inline
-  checks direction taken -> exit 6
-0006 f0 FETCH_DIM_R #5, const#3 inline leaves -> exit 7
+  checks direction taken -> exit 5
+0006 f0 FETCH_DIM_R #5, const#3 inline leaves -> exit 6
   -> #6 f0.T3 [long] reg
-  checks #6 long -> exit 8
-  checks #6 ref to long -> exit 9
-0007 f0 FETCH_DIM_R #5, #7 inline leaves -> exit 10
+  checks #6 long -> exit 7
+  checks #6 ref to long -> exit 8
+0007 f0 FETCH_DIM_R #5, #7 inline leaves -> exit 9
   -> #8 f0.T4 [long] reg
-  checks #8 long -> exit 11
-  checks #8 ref to long -> exit 12
+  checks #8 long -> exit 10
+  checks #8 ref to long -> exit 11
 0008 f0 ADD #6, #8 inline
   -> #9 f0.T5 [long] reg
-  checks #9 long -> exit 13
-0009 f0 FETCH_DIM_R #5, int(7) inline leaves -> exit 14
+  checks #9 long -> exit 12
+0009 f0 FETCH_DIM_R #5, int(7) inline leaves -> exit 13
   -> #10 f0.T6 [long] reg
-  checks #10 long -> exit 15
-  checks #10 ref to long -> exit 16
+  checks #10 long -> exit 14
+  checks #10 ref to long -> exit 15
 0010 f0 ADD #9, #10 inline
   -> #11 f0.T7 [long] reg
-  checks #11 long -> exit 17
+  checks #11 long -> exit 16
 0011 f0 ASSIGN_OP #1, #11 inline
   -> #12 f0.CV2 [long] reg
-  checks #12 long -> exit 18
+  checks #12 long -> exit 17
 0012 f0 PRE_INC #3 inline
   -> #13 f0.CV4 [long] reg
-  checks #13 long -> exit 19
+  checks #13 long -> exit 18
 end: back to 0
 exit 0: f0 0013 plain
 exit 1: f0 0013 plain f0.CV0:array packed guard
 exit 2: f0 0013 plain f0.CV0:array
 exit 3: f0 0013 plain f0.CV0:array f0.CV1:long
-exit 4: f0 0013 plain f0.CV0:array f0.CV1:long f0.CV2:long
-exit 5: f0 0013 plain f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string
-exit 6: f0 0015 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
-exit 7: f0 0006 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long to vm
-exit 8: f0 0007 plain f0.CV2=#1 f0.CV4=#3 f0.T3=copied #6 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
-exit 9: f0 0007 plain f0.CV2=#1 f0.CV4=#3 f0.T3=copied #6 through a reference f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
-exit 10: f0 0007 plain f0.CV2=#1 f0.CV4=#3 f0.T3=#6 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T3:long to vm
-exit 11: f0 0008 plain f0.CV2=#1 f0.CV4=#3 f0.T3=#6 f0.T4=copied #8 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T3:long
-exit 12: f0 0008 plain f0.CV2=#1 f0.CV4=#3 f0.T3=#6 f0.T4=copied #8 through a reference f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T3:long
-exit 13: f0 0008 plain f0.CV2=#1 f0.CV4=#3 f0.T3=#6 f0.T4=#8 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T3:long f0.T4:long
-exit 14: f0 0009 plain f0.CV2=#1 f0.CV4=#3 f0.T5=#9 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T5:long to vm
-exit 15: f0 0010 plain f0.CV2=#1 f0.CV4=#3 f0.T5=#9 f0.T6=copied #10 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T5:long
-exit 16: f0 0010 plain f0.CV2=#1 f0.CV4=#3 f0.T5=#9 f0.T6=copied #10 through a reference f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T5:long
-exit 17: f0 0010 plain f0.CV2=#1 f0.CV4=#3 f0.T5=#9 f0.T6=#10 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T5:long f0.T6:long
-exit 18: f0 0011 plain f0.CV2=#1 f0.CV4=#3 f0.T7=#11 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T7:long
-exit 19: f0 0012 plain f0.CV2=#12 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
-exit 20: f0 0013 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long to vm
+exit 4: f0 0013 plain f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string
+exit 5: f0 0015 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
+exit 6: f0 0006 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long to vm
+exit 7: f0 0007 plain f0.CV2=#1 f0.CV4=#3 f0.T3=copied #6 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
+exit 8: f0 0007 plain f0.CV2=#1 f0.CV4=#3 f0.T3=copied #6 through a reference f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
+exit 9: f0 0007 plain f0.CV2=#1 f0.CV4=#3 f0.T3=#6 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T3:long to vm
+exit 10: f0 0008 plain f0.CV2=#1 f0.CV4=#3 f0.T3=#6 f0.T4=copied #8 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T3:long
+exit 11: f0 0008 plain f0.CV2=#1 f0.CV4=#3 f0.T3=#6 f0.T4=copied #8 through a reference f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T3:long
+exit 12: f0 0008 plain f0.CV2=#1 f0.CV4=#3 f0.T3=#6 f0.T4=#8 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T3:long f0.T4:long
+exit 13: f0 0009 plain f0.CV2=#1 f0.CV4=#3 f0.T5=#9 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T5:long to vm
+exit 14: f0 0010 plain f0.CV2=#1 f0.CV4=#3 f0.T5=#9 f0.T6=copied #10 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T5:long
+exit 15: f0 0010 plain f0.CV2=#1 f0.CV4=#3 f0.T5=#9 f0.T6=copied #10 through a reference f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T5:long
+exit 16: f0 0010 plain f0.CV2=#1 f0.CV4=#3 f0.T5=#9 f0.T6=#10 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T5:long f0.T6:long
+exit 17: f0 0011 plain f0.CV2=#1 f0.CV4=#3 f0.T7=#11 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T7:long
+exit 18: f0 0012 plain f0.CV2=#12 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
+exit 19: f0 0013 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long to vm

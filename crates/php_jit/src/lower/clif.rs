@@ -1322,8 +1322,29 @@ impl<'a> Emit<'a> {
 
     /// What an op computed, held to the type guards it holds on the values
     /// in `defs`: a number that may be either kind leaves where it is not
-    /// the one held.
+    /// the one held, and is the long where every value it writes is typed
+    /// long alone, which php's ranges proved cannot overflow, as php's
+    /// `zend_jit_math_long_long` checks no overflow where `may_overflow`
+    /// is false (`Z/ext/opcache/jit/zend_jit_ir.c:5059-5200`).
     fn settle(&mut self, at: OpId, defs: &[ValueId], num: Num) -> Result<Num, Abort> {
+        let num = self.held(at, defs, num)?;
+        if let Num::Either { long, .. } = num
+            && !defs.is_empty()
+        {
+            let mut long_only = true;
+            for &value in defs {
+                long_only &= self.value(value)?.types.kinds() == Types::LONG;
+            }
+            if long_only {
+                return Ok(Num::Long(long));
+            }
+        }
+        Ok(num)
+    }
+
+    /// What an op computed, held to the type guards it holds on the values
+    /// in `defs`.
+    fn held(&mut self, at: OpId, defs: &[ValueId], num: Num) -> Result<Num, Abort> {
         let mut num = num;
         for guard in self.within(at) {
             let Check::Type { value, tag: t } = guard.check else {
@@ -2458,8 +2479,6 @@ impl<'a> Emit<'a> {
     /// The arithmetic `op` over the opline's two operands, written to what
     /// it writes: its `out`, or the variable an `ASSIGN_OP` assigns.
     fn arithmetic(&mut self, at: OpId, line: &Line, op: Opcode) -> Result<(), Abort> {
-        let a = self.scalar(at, line.op1)?;
-        let b = self.scalar(at, line.op2)?;
         let raises = if cannot_raise(op, line.op2) {
             None
         } else {
@@ -2467,13 +2486,153 @@ impl<'a> Emit<'a> {
                 mismatch("an arithmetic that cannot leave")
             })?))
         };
-        let num = self.binary(op, a, b, raises)?;
+        let num = match (self.either(at, line.op1)?, self.either(at, line.op2)?) {
+            (None, None) => {
+                let a = self.scalar(at, line.op1)?;
+                let b = self.scalar(at, line.op2)?;
+                self.binary(op, a, b, raises)?
+            }
+            (a, b) => self.dispatched(at, line, op, [a, b], raises)?,
+        };
         let defs: Vec<ValueId> = [line.out, line.op1_def].into_iter().flatten().collect();
         let num = self.settle(at, &defs, num)?;
         for value in defs {
             self.define_num(value, num)?;
         }
         Ok(())
+    }
+
+    /// The slot of an operand of the inline op at `at` that holds a
+    /// number of either kind, which no guard before the op holds to one:
+    /// read by its type where it is read, as `zend_jit_math_helper` tests
+    /// it.
+    fn either(&self, at: OpId, operand: Operand) -> Result<Option<Slot>, Abort> {
+        let Operand::Value(value) = operand else {
+            return Ok(None);
+        };
+        let held = self.value(value)?;
+        if held.home == Home::Register || held.types != Types::NUMBER {
+            return Ok(None);
+        }
+        Ok(match self.kind_at(at, value)? {
+            (None, false) => Some(held.slot),
+            _ => None,
+        })
+    }
+
+    /// `op` over operands of which those in `either` hold a number of
+    /// either kind, as `zend_jit_math_helper` serves them
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:5332-5520`): each such operand's
+    /// type tested, the operation made for each pair of kinds, and what
+    /// it made carried to one block as a number of either kind.
+    fn dispatched(
+        &mut self,
+        at: OpId,
+        line: &Line,
+        op: Opcode,
+        either: [Option<Slot>; 2],
+        raises: Option<Refuse>,
+    ) -> Result<Num, Abort> {
+        let fixed = [
+            either[0].map_or_else(|| self.scalar(at, line.op1).map(Some), |_| Ok(None))?,
+            either[1].map_or_else(|| self.scalar(at, line.op2).map(Some), |_| Ok(None))?,
+        ];
+        let join = self.b.create_block();
+        let as_double = self.b.append_block_param(join, I8);
+        let long = self.b.append_block_param(join, I64);
+        let double = self.b.append_block_param(join, F64);
+        let kinds = |slot: Option<Slot>| -> &'static [Kind] {
+            if slot.is_some() {
+                &[Kind::Long, Kind::Double]
+            } else {
+                &[Kind::Long]
+            }
+        };
+        // One block per pair of kinds, reached by testing each operand of
+        // either kind in turn.
+        let mut pairs: Vec<(Kind, Kind, Block)> = Vec::new();
+        for &ka in kinds(either[0]) {
+            for &kb in kinds(either[1]) {
+                pairs.push((ka, kb, self.b.create_block()));
+            }
+        }
+        let tested = |emit: &mut Self, slot: Slot| -> Result<Value, Abort> {
+            let (room, at) = emit.place(slot)?;
+            let byte = emit.b.ins().load(I8, trusted(), room, at + TYPE_AT);
+            Ok(emit
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, byte, tag(ZvalType::Long)))
+        };
+        match either {
+            [Some(a), Some(b)] => {
+                let (first_long, first_double) = (self.b.create_block(), self.b.create_block());
+                let is_long = tested(self, a)?;
+                self.b
+                    .ins()
+                    .brif(is_long, first_long, &[], first_double, &[]);
+                for (block, first) in [(first_long, 0), (first_double, 2)] {
+                    self.b.switch_to_block(block);
+                    self.b.seal_block(block);
+                    let is_long = tested(self, b)?;
+                    let (to_long, to_double) = (pairs[first].2, pairs[first + 1].2);
+                    self.b.ins().brif(is_long, to_long, &[], to_double, &[]);
+                }
+            }
+            [Some(slot), None] | [None, Some(slot)] => {
+                let is_long = tested(self, slot)?;
+                self.b.ins().brif(is_long, pairs[0].2, &[], pairs[1].2, &[]);
+            }
+            [None, None] => return Err(mismatch("a dispatch over no number of either kind")),
+        }
+        let (mut longs, mut doubles) = (true, true);
+        for (ka, kb, block) in pairs.clone() {
+            self.b.switch_to_block(block);
+            self.b.seal_block(block);
+            let read =
+                |emit: &mut Self, slot: Option<Slot>, kind: Kind, fixed: Option<Scalar>| match (
+                    slot, fixed,
+                ) {
+                    (Some(slot), _) => emit.load(slot, kind, false),
+                    (None, Some(scalar)) => Ok(scalar),
+                    (None, None) => Err(mismatch("an operand of no kind")),
+                };
+            let a = read(self, either[0], ka, fixed[0])?;
+            let b = read(self, either[1], kb, fixed[1])?;
+            let num = self.binary(op, a, b, raises)?;
+            longs &= matches!(num, Num::Long(_));
+            doubles &= matches!(num, Num::Double(_));
+            let (is_double, l, d) = match num {
+                Num::Long(l) => {
+                    let d = self.b.ins().f64const(0.0);
+                    (self.b.ins().iconst(I8, 0), l, d)
+                }
+                Num::Double(d) => {
+                    let l = self.b.ins().iconst(I64, 0);
+                    (self.b.ins().iconst(I8, 1), l, d)
+                }
+                Num::Either {
+                    overflowed,
+                    long,
+                    double,
+                } => (overflowed, long, double),
+            };
+            self.b
+                .ins()
+                .jump(join, &[is_double.into(), l.into(), d.into()]);
+        }
+        self.b.switch_to_block(join);
+        self.b.seal_block(join);
+        // A kind every pair made is that kind.
+        Ok(match (longs, doubles) {
+            (true, _) => Num::Long(long),
+            (_, true) => Num::Double(double),
+            _ => Num::Either {
+                overflowed: as_double,
+                long,
+                double,
+            },
+        })
     }
 
     /// An increment or a decrement of a number in a variable: the variable
@@ -2680,55 +2839,63 @@ impl<'a> Emit<'a> {
         Ok(self.b.ins().iconst(I64, address))
     }
 
-    /// A fetched element at `element` held to its type by its two guards,
-    /// `[in place, through a reference]`: read in place, or through the
-    /// reference it is, each by a guard of its own, as php's two reads
-    /// hold it, then written to what the fetch writes.
+    /// A fetched element at `element` held to its type by its guards,
+    /// `in place` and, where the array may hold a reference, `through` it:
+    /// read in place, or through the reference it is, each by a guard of
+    /// its own, as php's two reads hold it, then written to what the fetch
+    /// writes. Where it holds no reference, the guard in place alone, as
+    /// `zend_jit_guard_fetch_result_type` guards it with no `deref`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:8024-8090`).
     fn held_element(
         &mut self,
-        [in_place, through]: [Guard; 2],
+        in_place: Guard,
+        through: Option<Guard>,
         element: Value,
         out: ValueId,
     ) -> Result<(), Abort> {
-        let (
-            Check::Type { value, tag: t },
-            Check::Deref {
-                value: by,
-                tag: t_by,
-            },
-        ) = (in_place.check, through.check)
-        else {
+        let Check::Type { value, tag: t } = in_place.check else {
             return Err(mismatch("a fetch holds guards of another kind"));
         };
-        if value != out || by != out || t != t_by {
+        let deref = match through.map(|through| through.check) {
+            None => None,
+            Some(Check::Deref { value: by, tag }) if by == out && tag == t => through,
+            Some(_) => return Err(mismatch("a fetch holds guards of another kind")),
+        };
+        if value != out {
             return Err(mismatch("a fetch guards a value it does not write"));
         }
         let out_slot = self.value(out)?.slot;
-        let byte = self.b.ins().load(I8, trusted(), element, TYPE_AT);
-        let is_ref = self
-            .b
-            .ins()
-            .icmp_imm_s(IntCC::Equal, byte, tag(ZvalType::Reference));
-        let referred = self.b.create_block();
-        let direct = self.b.create_block();
-        let read = self.b.create_block();
-        let held = self.b.append_block_param(read, I64);
-        self.b.ins().brif(is_ref, referred, &[], direct, &[]);
-        self.b.switch_to_block(direct);
-        self.b.seal_block(direct);
-        self.element_guard(in_place, element, out, out_slot)?;
-        self.b.ins().jump(read, &[element.into()]);
-        self.b.switch_to_block(referred);
-        self.b.seal_block(referred);
-        let reference = self.b.ins().load(I64, trusted(), element, 0);
-        let inner = self
-            .b
-            .ins()
-            .iadd_imm_s(reference, i64::from(imm(Ref::VALUE_AT)));
-        self.element_guard(through, inner, out, out_slot)?;
-        self.b.ins().jump(read, &[inner.into()]);
-        self.b.switch_to_block(read);
-        self.b.seal_block(read);
+        let held = if let Some(through) = deref {
+            let byte = self.b.ins().load(I8, trusted(), element, TYPE_AT);
+            let is_ref = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, byte, tag(ZvalType::Reference));
+            let referred = self.b.create_block();
+            let direct = self.b.create_block();
+            let read = self.b.create_block();
+            let held = self.b.append_block_param(read, I64);
+            self.b.ins().brif(is_ref, referred, &[], direct, &[]);
+            self.b.switch_to_block(direct);
+            self.b.seal_block(direct);
+            self.element_guard(in_place, element, out, out_slot)?;
+            self.b.ins().jump(read, &[element.into()]);
+            self.b.switch_to_block(referred);
+            self.b.seal_block(referred);
+            let reference = self.b.ins().load(I64, trusted(), element, 0);
+            let inner = self
+                .b
+                .ins()
+                .iadd_imm_s(reference, i64::from(imm(Ref::VALUE_AT)));
+            self.element_guard(through, inner, out, out_slot)?;
+            self.b.ins().jump(read, &[inner.into()]);
+            self.b.switch_to_block(read);
+            self.b.seal_block(read);
+            held
+        } else {
+            self.element_guard(in_place, element, out, out_slot)?;
+            element
+        };
         if let Some(kind) = Kind::of_tag(t) {
             let read = self.read(held, 0, kind);
             self.define(out, read)

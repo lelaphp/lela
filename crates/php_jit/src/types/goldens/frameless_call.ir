@@ -4,7 +4,7 @@ entry
   #0 f0.CV2 [long]
   #2 f0.CV4 [long]
   #4 f0.CV1 [long]
-  #9 f0.CV3 [undef, ref, any]
+  #9 f0.CV3 [ref, any]
   guard #4 long -> exit 0
   guard #0 long -> exit 1
   guard #2 long -> exit 2
@@ -19,14 +19,14 @@ loop at 0, loop, interrupt exit 9
   -> #6 f0.T4 [true]
 0008 f0 BW_AND #3, int(1) inline
   -> #7 f0.T5 [long] reg
-0009 f0 CONCAT const#5, #7 step unwinds -> unwind 0
+0009 f0 CONCAT const#5, #7 step
   -> #8 f0.T6 [string]
 0010 f0 FRAMELESS_ICALL_2 #9, #8 step unwinds -> unwind 0
   -> #10 f0.T7 [false]
   reload #11 f0.CV3 [undef, ref, any]
   guard #6 true -> exit 4
   guard #10 false -> exit 5
-0011 f0 ADD #6, #10 step unwinds -> unwind 0
+0011 f0 ADD #6, #10 step
   -> #12 f0.T8 [long]
   guard #12 long -> exit 6
 0012 f0 ASSIGN_OP #1, #12 inline

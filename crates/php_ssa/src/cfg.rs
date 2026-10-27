@@ -79,7 +79,8 @@ impl Cfg {
     }
 
     /// `dominates(blocks, a, b)`: whether `a` dominates `b`, both reachable.
-    pub(crate) fn dominates(&self, a: BlockId, mut b: BlockId) -> bool {
+    #[must_use]
+    pub fn dominates(&self, a: BlockId, mut b: BlockId) -> bool {
         let level = |id: BlockId| self.block(id).and_then(|block| block.level);
         while let (Some(lb), Some(la)) = (level(b), level(a))
             && lb > la

@@ -9,7 +9,7 @@ use php_unit::decl::{Parameter, Type};
 use php_unit::{ConstIdx, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::lattice::{self, Types};
-use super::{Constant, Frame, Imm, Layout, Line, Read, Slot};
+use super::{Constant, Frame, Imm, Layout, Line, Slot};
 
 /// php's `MAX_ARG_FLAG_NUM`: past it, how a send passes is read late.
 pub(super) const MAX_ARG_FLAG_NUM: u32 = 12;
@@ -193,181 +193,6 @@ pub(super) fn assigned(t: Types) -> Types {
         t.without(Types::UNDEF).or(Types::NULL)
     } else {
         t
-    }
-}
-
-/// What an opline writes to its `out` slot, php's `zend_update_type_info`
-/// for the scalar core and anything past it.
-pub(super) fn out_types(
-    op: &Opline,
-    [t1, t2, td]: [Types; 3],
-    read1: Read,
-    code: &OpArray,
-) -> Types {
-    match op.opcode {
-        Opcode::Add
-        | Opcode::Sub
-        | Opcode::Mul
-        | Opcode::Div
-        | Opcode::Pow
-        | Opcode::Mod
-        | Opcode::Sl
-        | Opcode::Sr
-        | Opcode::BwOr
-        | Opcode::BwAnd
-        | Opcode::BwXor
-        | Opcode::Concat
-        | Opcode::FastConcat
-        | Opcode::IsEqual
-        | Opcode::IsNotEqual
-        | Opcode::IsSmaller
-        | Opcode::IsSmallerOrEqual
-        | Opcode::IsIdentical
-        | Opcode::IsNotIdentical
-        | Opcode::Case
-        | Opcode::CaseStrict
-        | Opcode::BoolXor => lattice::binary(op.opcode, t1, t2),
-        Opcode::AssignOp => lattice::binary_of(op.extended_value)
-            .map_or(Types::ANY, |binary| lattice::binary(binary, t1, t2)),
-        Opcode::Assign => assigned(t2),
-        Opcode::AssignDim => assigned(td),
-        Opcode::QmAssign | Opcode::PostInc | Opcode::PostDec => assigned(t1),
-        Opcode::PreInc | Opcode::PreDec => lattice::stepped(t1),
-        Opcode::BoolNot
-        | Opcode::Bool
-        | Opcode::JmpzEx
-        | Opcode::JmpnzEx
-        | Opcode::IssetIsemptyCv
-        | Opcode::IssetIsemptyDimObj
-        | Opcode::IssetIsemptyPropObj
-        | Opcode::IssetIsemptyVar
-        | Opcode::IssetIsemptyStaticProp
-        | Opcode::IssetIsemptyThis
-        | Opcode::TypeCheck
-        | Opcode::Instanceof
-        | Opcode::Defined
-        | Opcode::InArray
-        | Opcode::ArrayKeyExists => Types::BOOL,
-        Opcode::Count | Opcode::Strlen | Opcode::FuncNumArgs => Types::LONG,
-        Opcode::RopeEnd => Types::STRING,
-        Opcode::InitArray | Opcode::AddArrayElement => Types::of_tag(ZvalType::Array),
-        Opcode::VerifyReturnType => returned(code, t1),
-        Opcode::Cast => cast(op.extended_value),
-        Opcode::FeFetchR | Opcode::FeFetchRw => fetched_key(t1),
-        // The element's address, which the handler lays down for any key
-        // the lookups take, warning of none, in a variable's array or the
-        // one an indirect `VAR` points at: php's `MAY_BE_INDIRECT`, its
-        // `indirect_reference`. A `VAR` that holds an array of its own
-        // takes a copy of the element, and a `FETCH_DIM_RW`'s warning may
-        // reach an error handler that frees the array, the `VAR` then an
-        // error.
-        Opcode::FetchDimW
-            if t1.tag() == Some(ZvalType::Array)
-                && keyed(op, t2)
-                && (op.op1_type == OperandKind::Cv || matches!(read1, Read::Indirect(_))) =>
-        {
-            Types::INDIRECT
-        }
-        _ => Types::UNKNOWN.without(Types::UNDEF),
-    }
-}
-
-/// What a `FE_FETCH_R` or `FE_FETCH_RW` writes as its key, over an
-/// iterated `t`, as php's `zend_update_type_info` types it: a long from a
-/// packed array, whose keys are its positions, a long or a string from a
-/// hash, and anything from an object (`Z/Zend/Optimizer/zend_inference.c:3536-3548`).
-/// So a key read from a packed array holds no guard, as php's holds none.
-fn fetched_key(t: Types) -> Types {
-    let mut key = Types::NONE;
-    if t.meets(Types::OBJECT) {
-        key = key.or(Types::ANY);
-    }
-    if t.meets(Types::ARRAY) {
-        let packed = t.meets(Types::PACKED) || !t.meets(Types::HASH);
-        let hash = t.meets(Types::HASH) || !t.meets(Types::PACKED);
-        if packed {
-            key = key.or(Types::LONG);
-        }
-        if hash {
-            key = key.or(Types::LONG).or(Types::STRING);
-        }
-    }
-    if key == Types::NONE {
-        Types::UNKNOWN.without(Types::UNDEF)
-    } else {
-        key
-    }
-}
-
-/// What a `VERIFY_RETURN_TYPE` leaves of `t`.
-fn returned(code: &OpArray, t: Types) -> Types {
-    let declared = Types::of_mask(code.return_mask).without(Types::REF);
-    let kept = assigned(t).and(declared);
-    if kept.kinds() == Types::NONE {
-        declared
-    } else {
-        kept
-    }
-}
-
-/// php's `_IS_BOOL`, the type code a `(bool)` cast names, past the
-/// `IS_*` a zval carries.
-const IS_BOOL: u32 = 18;
-
-/// What a `CAST` to php's type code `to` makes: the `IS_*` it names, a
-/// boolean for `_IS_BOOL`.
-fn cast(to: u32) -> Types {
-    if to == IS_BOOL {
-        return Types::BOOL;
-    }
-    Types::of_code(to).unwrap_or(Types::ANY)
-}
-
-/// What an opline writes to its variable `op1`, where it writes it.
-pub(super) fn op1_types(
-    op: &Opline,
-    t1: Types,
-    t2: Types,
-    sample1: Option<Sample>,
-    code: &OpArray,
-) -> Types {
-    let written = match op.opcode {
-        Opcode::Assign => assigned(t2),
-        Opcode::AssignOp => lattice::binary_of(op.extended_value)
-            .map_or(Types::ANY, |binary| lattice::binary(binary, t1, t2)),
-        Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec => lattice::stepped(t1),
-        // A packed array whose element is written in place stays packed
-        // (`zend_jit_trace.c:2357-2372`).
-        Opcode::AssignDimOp
-            if sample1.is_some_and(|s| s.packed) && t1 == Types::ARRAY.laid_out(Layout::Packed) =>
-        {
-            t1
-        }
-        Opcode::AssignDim | Opcode::AssignDimOp => Types::of_tag(ZvalType::Array),
-        // An array fetched for writing stays an array, separated or not,
-        // as php's inference keeps it (`zend_update_type_info`'s
-        // `ZEND_FETCH_DIM_W` case, `Z/Zend/Optimizer/zend_inference.c:3562-3600`).
-        Opcode::FetchDimW | Opcode::FetchDimRw if t1.tag() == Some(ZvalType::Array) => {
-            Types::of_tag(ZvalType::Array)
-        }
-        Opcode::VerifyReturnType => returned(code, t1),
-        // The object a property opline writes through stays the object
-        // it was, of the class it was (`zend_update_type_info`'s
-        // `ZEND_ASSIGN_OBJ` and `ZEND_PRE_INC_OBJ` cases,
-        // `Z/Zend/Optimizer/zend_inference.c:3028-3083`).
-        Opcode::AssignObj
-        | Opcode::AssignObjOp
-        | Opcode::PreIncObj
-        | Opcode::PreDecObj
-        | Opcode::PostIncObj
-        | Opcode::PostDecObj => t1.and(Types::OBJECT.or(Types::REF)),
-        Opcode::UnsetCv => return Types::UNDEF,
-        _ => Types::UNKNOWN,
-    };
-    if t1.meets(Types::REF) {
-        written.or(Types::REF)
-    } else {
-        written
     }
 }
 
@@ -582,53 +407,6 @@ pub(super) fn referenced(code: &OpArray, var: u32) -> bool {
     })
 }
 
-/// Whether an opline past the leading `RECV` oplines writes variable
-/// `var`, which `holds` what it was passed: a `VERIFY_RETURN_TYPE` of it
-/// that leaves what it holds as it is, its declaration holding every kind
-/// `holds` may be, writes nothing it did not hold, as php's inference
-/// types that definition (`zend_update_type_info`'s `ZEND_VERIFY_RETURN_TYPE`):
-/// `return $n;` of `function f(int $n): int`. One that coerces it, an
-/// `int` returned as a `string`, writes a string the leave frees:
-///
-/// ```php
-/// function s(int $n): string { if ($n < 0) { return "neg"; } return $n; }
-/// function f(int $n): int { if ($n < 2) { return $n; } $a = f($n - 1); return $a + 1; }
-/// function k($m) { $t = ""; $c = 0; for ($i = 0; $i < $m; $i++) { $t = s($i); $c += f(5); } return "$t $c"; }
-/// k(10); $u = memory_get_usage(); echo k(100), " ", memory_get_usage() - $u, "\n";
-/// ```
-/// ```expect regime=jit-force process
-/// 99 500 32
-/// ```
-///
-/// The same where every guard fails once:
-///
-/// ```php
-/// function s(int $n): string { if ($n < 0) { return "neg"; } return $n; }
-/// function f(int $n): int { if ($n < 2) { return $n; } $a = f($n - 1); return $a + 1; }
-/// function k($m) { $t = ""; $c = 0; for ($i = 0; $i < $m; $i++) { $t = s($i); $c += f(5); } return "$t $c"; }
-/// k(10); $u = memory_get_usage(); echo k(100), " ", memory_get_usage() - $u, "\n";
-/// ```
-/// ```expect regime=jit-exit-fuzz process
-/// 99 500 32
-/// ```
-pub(super) fn written_after_entry(code: &OpArray, var: u32, holds: Types) -> bool {
-    let start = code
-        .oplines
-        .iter()
-        .take_while(|op| {
-            matches!(
-                op.opcode,
-                Opcode::Recv | Opcode::RecvInit | Opcode::RecvVariadic
-            )
-        })
-        .count();
-    code.oplines.iter().enumerate().skip(start).any(|(at, op)| {
-        let after = code.oplines.get(at + 1);
-        let kept = op.opcode == Opcode::VerifyReturnType && returned(code, holds).within(holds);
-        !kept && written(op, after).contains(&var)
-    })
-}
-
 /// A constant operand: a scalar by its value.
 pub(super) fn constant(code: &OpArray, at: u32) -> Constant {
     let Some(value) = code.literals.get(at as usize) else {
@@ -730,14 +508,16 @@ pub(super) enum Arith {
 }
 
 impl Arith {
-    /// Whether operands of `a` and `b` are the ones served.
+    /// Whether operands of `a` and `b` are the ones served: a number of
+    /// either kind tested where it is read, as `zend_jit_math_helper`
+    /// tests an operand php's inference types `MAY_BE_LONG|MAY_BE_DOUBLE`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:5332-5520`).
     pub(super) fn serves(self, a: Types, b: Types) -> bool {
         let one = |t: Types, of: Types| t == of;
+        let number =
+            |t: Types| one(t, Types::LONG) || one(t, Types::DOUBLE) || one(t, Types::NUMBER);
         match self {
-            Arith::Numbers => {
-                (one(a, Types::LONG) || one(a, Types::DOUBLE))
-                    && (one(b, Types::LONG) || one(b, Types::DOUBLE))
-            }
+            Arith::Numbers => number(a) && number(b),
             Arith::Longs => one(a, Types::LONG) && one(b, Types::LONG),
         }
     }
@@ -823,20 +603,11 @@ fn named(op: &Opline, code: &OpArray) -> bool {
 /// The operands php's switch in `zend_jit_trace_build_tssa` adds a guard
 /// for (`ADD_OP1_TRACE_GUARD`, `ADD_OP2_TRACE_GUARD`,
 /// `ADD_OP1_DATA_TRACE_GUARD`), in its order, which marks them; the code
-/// generator holds them in [`checked_order`].
-///
-/// Where php types an operand from its inference over the whole
-/// function, which this tier does not keep (`jit-design.md` §4.2,
-/// revision 26), the operand is guarded here. A division is the first
-/// such case: `DIV` and `ASSIGN_OP`'s are guarded as a product is, where
-/// php's switch leaves them out (`// case ZEND_DIV: // TODO: check for
-/// division by zero ???`), typing them from that inference, so a loop's
-/// variable `$i` read by `3.0 / $i` is a long there with no guard; with
-/// no guard here the division sees the loop's phi as anything and is
-/// stepped on every turn (#3073). Its inline division leaves through its
-/// exit at a zero divisor, so the guard narrows nothing php's TODO is
-/// about. The guard retires if the tier ever keeps php's inference
-/// (#3149; #3111's ruling).
+/// generator holds them in [`checked_order`]. A division is left out, as
+/// php's switch leaves it (`// case ZEND_DIV: // TODO: check for division
+/// by zero ???`): its operands are typed by php's inference over the op
+/// array, so a loop's variable `$i` read by `3.0 / $i` is a long there
+/// with no guard.
 #[allow(
     clippy::too_many_lines,
     clippy::match_same_arms,
@@ -856,7 +627,10 @@ pub(super) fn guard_sites(
         || cv1 && data.is_some_and(|d| d.op1_type == OperandKind::Cv && d.op1 == op.op1);
     match op.opcode {
         Opcode::AssignOp => {
-            let unguarded = lattice::binary_of(op.extended_value) == Some(Opcode::Pow);
+            let unguarded = matches!(
+                lattice::binary_of(op.extended_value),
+                Some(Opcode::Pow | Opcode::Div)
+            );
             if unguarded || !cv1 || op.out_type != OperandKind::Unused {
                 vec![]
             } else {
@@ -891,7 +665,7 @@ pub(super) fn guard_sites(
                 vec![]
             }
         }
-        Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div
+        Opcode::Add | Opcode::Sub | Opcode::Mul
             if k1 == Some(ZvalType::Undef) || k2 == Some(ZvalType::Undef) =>
         {
             vec![]
@@ -899,7 +673,6 @@ pub(super) fn guard_sites(
         Opcode::Add
         | Opcode::Sub
         | Opcode::Mul
-        | Opcode::Div
         | Opcode::IsEqual
         | Opcode::IsNotEqual
         | Opcode::IsSmaller

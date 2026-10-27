@@ -405,7 +405,7 @@ impl Emit<'_> {
     /// The element a read reaches ([`Emit::reached`]), on as `missing`
     /// says where there is none, written to the slot the fetch writes:
     /// copied as `ZVAL_COPY_DEREF` copies it, or held to its type by its
-    /// two guards ([`Emit::held_element`]). The slot it wrote.
+    /// one or two guards ([`Emit::held_element`]). The slot it wrote.
     fn read_element(&mut self, at: OpId, line: &Line, missing: Missing<'_>) -> Result<Slot, Abort> {
         let out = line
             .out
@@ -417,10 +417,11 @@ impl Emit<'_> {
                 let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
                 self.copy(element, info, self.value(out)?.slot)?;
             }
-            [in_place, through] => self.held_element([*in_place, *through], element, out)?,
+            [in_place] => self.held_element(*in_place, None, element, out)?,
+            [in_place, through] => self.held_element(*in_place, Some(*through), element, out)?,
             _ => {
                 return Err(mismatch(
-                    "a fetch holds other guards than its element's two",
+                    "a fetch holds other guards than its element's one or two",
                 ));
             }
         }

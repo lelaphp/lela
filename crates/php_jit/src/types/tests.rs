@@ -178,12 +178,15 @@ fn fib_leaves_both_levels_through_one_exit_per_place() -> Result<(), String> {
 /// check before the second call, the comparison's direction in the
 /// callee and the addition's overflow, each an opline later here, past
 /// the `VERIFY_RETURN_TYPE` php's optimiser drops from `return $n`. The
-/// trace takes those three and #3176's two, which php's function-level
-/// inference proves need no guard: the entry's guard on what the call
-/// before returned, exit 0, and the subtraction's overflow before the
-/// second call, exit 2. `$n` is held long by its declaration, as php's
-/// inference holds it, `return $n;`'s `VERIFY_RETURN_TYPE` keeping it as
-/// it is (`types::opcodes::written_after_entry`), so no guard reads it.
+/// trace takes those three and one more, the entry's guard on what the
+/// call before returned, exit 0: php's analysis of `fib` types a
+/// `DO_FCALL_BY_NAME`'s return as anything, so the phi of the recursive
+/// return holds a guard, as the oracle's does at
+/// `opcache.optimization_level=0`, where its `TRACE 3` numbers the exit
+/// php's optimiser leaves it one short of. The subtraction before the
+/// second call takes no overflow guard, as php's range of `$n - 2` over
+/// `$n >= 2` proves it stays long, and `$n` is held long where php's
+/// analysis finds `RECV` defined it, so no guard reads it.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_loop_by_recursive_return_takes_no_interrupt_test() -> Result<(), String> {
@@ -207,7 +210,7 @@ fn a_loop_by_recursive_return_takes_no_interrupt_test() -> Result<(), String> {
         (Repeat::Return, Interrupt::None),
         "{rendered}"
     );
-    let inferred = [0, 2];
+    let inferred = [0];
     let phps: Vec<(Frame, Option<u32>, Grows)> = (ir.exits.iter().enumerate())
         .filter(|(at, _)| !inferred.contains(at))
         .map(|(_, exit)| (exit.frame, exit.opline.map(|at| at.0), exit.grows))
@@ -293,11 +296,21 @@ fn a_trace_that_does_not_loop_holds_its_guards_at_the_read() -> Result<(), Strin
         "function f($a, $n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $a[$i]; } return $s; }
         echo f([1, 2, 3], 3), \"\\n\";",
     )?;
-    let looping = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let looping = build(
+        &recorded.record,
+        &recorded.view,
+        &crate::analysis::analysed(&recorded.record, &recorded.view),
+    )
+    .map_err(|abort| format!("{abort:?}"))?;
     let at_entry = |ir: &TraceIr| ir.guards.iter().filter(|g| g.at == GuardAt::Entry).count();
     assert!(at_entry(&looping) > 0, "{}", dump::render(&looping));
     recorded.record.stop = Stop::Link(crate::table::TraceId::new(1).ok_or("no trace 1")?);
-    let linked = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let linked = build(
+        &recorded.record,
+        &recorded.view,
+        &crate::analysis::analysed(&recorded.record, &recorded.view),
+    )
+    .map_err(|abort| format!("{abort:?}"))?;
     let entered: Vec<u32> = (linked.guards.iter())
         .filter(|guard| guard.at == GuardAt::Entry)
         .filter_map(|guard| match guard.check {
@@ -341,7 +354,12 @@ op {root} 73 long long - -\nop {root} 74 long - - -\nop {root} 75 - - - -
 link-at {root} 82\nstop link 6\n"
         .replace("{root}", &root);
     let record = TraceRecord::parse(&text).map_err(|e| format!("{e:?}"))?;
-    let ir = build(&record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let ir = build(
+        &record,
+        &recorded.view,
+        &crate::analysis::analysed(&record, &recorded.view),
+    )
+    .map_err(|abort| format!("{abort:?}"))?;
     let first: Vec<Option<(u32, Option<u32>, bool)>> = (ir.guards.iter().take(2))
         .map(|guard| match guard.check {
             Check::Type { value, .. } => {
@@ -378,7 +396,12 @@ fn a_key_written_as_its_own_value_is_read_twice() -> Result<(), String> {
         echo f([1, 2, 3], 1, 3)[1], \"\\n\";",
     )?;
     recorded.record.stop = Stop::Link(crate::table::TraceId::new(1).ok_or("no trace 1")?);
-    let linked = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let linked = build(
+        &recorded.record,
+        &recorded.view,
+        &crate::analysis::analysed(&recorded.record, &recorded.view),
+    )
+    .map_err(|abort| format!("{abort:?}"))?;
     let entered: Vec<u32> = (linked.guards.iter())
         .filter(|guard| guard.at == GuardAt::Entry)
         .filter_map(|guard| match guard.check {
@@ -691,7 +714,12 @@ fn a_trace_holds_the_stacks_room_where_php_does() -> Result<(), String> {
             .map(|guard| (guard.at, guard.exit.0))
             .collect()
     };
-    let looping = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let looping = build(
+        &recorded.record,
+        &recorded.view,
+        &crate::analysis::analysed(&recorded.record, &recorded.view),
+    )
+    .map_err(|abort| format!("{abort:?}"))?;
     assert_eq!(
         rooms(&looping),
         [(GuardAt::Entry, 0)],
@@ -704,7 +732,12 @@ fn a_trace_holds_the_stacks_room_where_php_does() -> Result<(), String> {
         (Some(OplineIdx(9)), Grows::Never, 0)
     );
     recorded.record.stop = Stop::Link(crate::table::TraceId::new(1).ok_or("no trace 1")?);
-    let linked = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let linked = build(
+        &recorded.record,
+        &recorded.view,
+        &crate::analysis::analysed(&recorded.record, &recorded.view),
+    )
+    .map_err(|abort| format!("{abort:?}"))?;
     let init = (linked.ops.iter())
         .position(|op| matches!(op, Op::Line(line) if line.opcode == Opcode::InitFcall))
         .and_then(|at| u32::try_from(at).ok())
@@ -786,7 +819,12 @@ fn a_side_holds_an_arrays_layout_at_its_first_read() -> Result<(), String> {
         stop: Stop::Link(parent),
         link_at: Some((f, OplineIdx(13))),
     };
-    let ir = build(&side, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let ir = build(
+        &side,
+        &recorded.view,
+        &crate::analysis::analysed(&side, &recorded.view),
+    )
+    .map_err(|abort| format!("{abort:?}"))?;
     let layouts: Vec<(GuardAt, u16)> = (ir.guards.iter())
         .filter(|guard| matches!(guard.check, Check::Layout { .. }))
         .map(|guard| (guard.at, guard.exit.0))
@@ -1297,7 +1335,8 @@ fn a_typed_parameter_its_return_type_keeps_is_no_owner_at_the_leave() -> Result<
     Ok(())
 }
 
-/// A kernel that may throw and calls nothing, a cast to string, reads
+/// A kernel that may throw and calls nothing, a cast of an array to
+/// string, which `zend_may_throw_ex` says warns, reads
 /// nothing again: it may only unwind, which takes no exit, as php's
 /// compiled code jumps to its stub for a throwable and takes no exit point.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -1307,7 +1346,7 @@ fn a_throwing_kernel_reloads_nothing_but_may_leave() -> Result<(), String> {
         &IN_F,
         "function f(array &$a, int $n) {
             $s = 0;
-            for ($i = 0; $i < $n; $i++) { $s += $a[0]; $t = (string) $s; $s += $a[0]; }
+            for ($i = 0; $i < $n; $i++) { $s += $a[0]; $t = (string) $a; $s += $a[0]; }
             return $s;
         }
         $x = [1]; echo f($x, 3), \"\\n\";",
@@ -1447,13 +1486,13 @@ fn a_fetched_elements_guard_frees_the_temporary_it_read() -> Result<(), String> 
 /// long at entry, and the sum its back edge brings is held long within
 /// the last `+=`, which reruns where it overflows, as php's
 /// `is_checked_guard` moves the phi's guard (#3135), so no guard on `$s`
-/// stands at the header. With the entry guards on `$s` and `$i`, the
-/// `$i++`'s overflow, the loop's test and its interrupt test, which grows
-/// no side trace and leaves through an exit of its own, php's
-/// `ZEND_JIT_EXIT_TO_VM`, that is 505, where an exit per place was 754.
-/// php's is 502: its inference over the whole function knows `$i` long
-/// and its range, so it holds no entry guard on it and no overflow on
-/// `$i++` or on `$i * 1`.
+/// stands at the header. `$i * 1` takes none: php's analysis of the op
+/// array knows `$i` long and its range at the loop's header, so no entry
+/// guard holds `$i` and neither `$i * 1` nor `$i++` can overflow. With the
+/// entry guard on `$s`, the loop's test and its interrupt test, which
+/// grows no side trace and leaves through an exit of its own, php's
+/// `ZEND_JIT_EXIT_TO_VM`, that is 502, php's, where an exit per place was
+/// 754.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_long_loop_shares_its_exits_as_php_reuses_them() -> Result<(), String> {
@@ -1468,7 +1507,7 @@ fn a_long_loop_shares_its_exits_as_php_reuses_them() -> Result<(), String> {
             echo f(3), \"\\n\";"
         ),
     )?;
-    assert_eq!(ir.exits.len(), 505, "{}", dump::render(&ir));
+    assert_eq!(ir.exits.len(), 502, "{}", dump::render(&ir));
     let s = |value: ValueId| ir.values[value.0 as usize].slot.var == 1;
     let on_s: Vec<_> = (ir.guards.iter())
         .filter_map(|guard| match guard.check {
@@ -1891,10 +1930,20 @@ fn a_side_of_an_exit_that_names_no_opline_holds_where_the_frame_stands() -> Resu
             .map(|guard| (guard.check, guard.exit.0))
             .collect()
     };
-    let named = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let named = build(
+        &recorded.record,
+        &recorded.view,
+        &crate::analysis::analysed(&recorded.record, &recorded.view),
+    )
+    .map_err(|abort| format!("{abort:?}"))?;
     assert_eq!(stands(&named), [], "{}", dump::render(&named));
     recorded.record.landed = Landed::Stood;
-    let ir = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let ir = build(
+        &recorded.record,
+        &recorded.view,
+        &crate::analysis::analysed(&recorded.record, &recorded.view),
+    )
+    .map_err(|abort| format!("{abort:?}"))?;
     let Some(Op::Line(first)) = ir.ops.first() else {
         return Err("no first opline".to_owned());
     };

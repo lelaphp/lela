@@ -1299,13 +1299,10 @@ function u0:0(i64, i64) -> i32 tail {
                                     return v765  ; v765 = -2
 
                                 block74 cold:
-                                    store.i64 notrap aligned v279, v253+112
-                                    v766 = iconst.i32 4
-                                    store notrap aligned v766, v253+120  ; v766 = 4
-                                    v767 = iconst.i32 -2
-                                    return v767  ; v767 = -2
+                                    v766 = iconst.i32 -1
+                                    return v766  ; v766 = -1
 
                                 block78 cold:
-                                    v768 = iconst.i32 -4
-                                    return v768  ; v768 = -4
+                                    v767 = iconst.i32 -4
+                                    return v767  ; v767 = -4
 }

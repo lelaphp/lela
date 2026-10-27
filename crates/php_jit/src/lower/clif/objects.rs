@@ -328,7 +328,7 @@ impl Emit<'_> {
                 let out_slot = self.value(out)?.slot;
                 self.copy(zval, info, out_slot)
             }
-            [in_place, through] => self.held_element([*in_place, *through], zval, out),
+            [in_place, through] => self.held_element(*in_place, Some(*through), zval, out),
             _ => Err(mismatch(
                 "a property fetch holds other guards than its value's two",
             )),

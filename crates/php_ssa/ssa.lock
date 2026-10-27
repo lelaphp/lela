@@ -6,6 +6,7 @@ BlockId
 Body
 Callee
 Cfg
+Cfg::dominates
 ClassConstant
 ClassOf
 Constraint
@@ -39,6 +40,7 @@ ObjectShape
 Phi
 PhiId
 PhiKind
+Position
 Property
 Range
 Range::ANY
@@ -55,6 +57,11 @@ Ssa::var
 SsaOp
 SsaVar
 SsaVarInfo
+TraceFrame
+TraceFrame::may_throw
+TraceFrame::new
+TraceFrame::propagate_range
+TraceFrame::update_type_info
 Types
 Types::ANY
 Types::ARRAY
@@ -104,3 +111,4 @@ Types::without
 Var
 VarInfo
 analyse
+is_no_val_use

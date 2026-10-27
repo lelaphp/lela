@@ -11,8 +11,8 @@ entry
   guard #2 object -> exit 3
 0005 f0 INIT_METHOD_CALL #2, const#2 inline pair fn own of receiver map 0 unwinds -> unwind 0
      f0 init request in-place
-0006 f0 SEND_VAR_EX #0 step unwinds -> unwind 0
-  -> #3 f0.CV3 [undef, ref, any]
+0006 f0 SEND_VAR_EX #0 step
+  -> #3 f0.CV3 [ref, any]
 end: exit 4
 exit 0: f0 0010 plain
 exit 1: f0 0010 plain f0.CV3:long

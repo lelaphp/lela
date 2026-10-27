@@ -292,3 +292,160 @@ fn a_trace_through_more_than_thirty_op_arrays_is_not_compiled() -> Result<(), st
     assert_eq!(first.matches("     ; (lines=").count(), 30, "{first}");
     Ok(())
 }
+
+/// The dumps of the op array `function` names in a `jit_debug` stream,
+/// each build's, in the order the stream wrote them.
+fn dumps_of(stream: &[u8], function: &str) -> Vec<String> {
+    let stream = String::from_utf8_lossy(stream);
+    let head = format!("{function}:");
+    let lines: Vec<&str> = stream.lines().collect();
+    let mut out = Vec::new();
+    let opens = |at: usize| {
+        lines.get(at).is_some_and(|l| l.ends_with(':'))
+            && lines
+                .get(at + 1)
+                .is_some_and(|l| l.starts_with("     ; (lines="))
+    };
+    for (at, line) in lines.iter().enumerate() {
+        if *line == head && opens(at) {
+            let mut body: Vec<&str> = vec![line];
+            body.extend(
+                (at + 1..lines.len())
+                    .take_while(|&n| !opens(n))
+                    .filter_map(|n| lines.get(n).copied())
+                    .take_while(|l| {
+                        !l.starts_with("---- ")
+                            && !l.starts_with("     TRACE ")
+                            && !l.starts_with("JIT")
+                    }),
+            );
+            while body.last().is_some_and(|l| l.is_empty()) {
+                body.pop();
+            }
+            out.push(body.join("\n"));
+        }
+    }
+    out
+}
+
+/// The files of [`a_class_of_one_name_bound_in_one_request_is_not_read_in_another`]:
+/// `f.php` declares `Foo` where no `Foo` is declared yet, linked as it
+/// runs against `base.php`'s `Base`, so the inheritance cache publishes
+/// it; `g.php` declares another `Foo`; `a.php` and `b.php` each trace a
+/// loop that calls `f.php`'s `make()`, `b.php` with `g.php`'s `Foo`
+/// declared first.
+const NAMESAKES: [(&str, &str); 5] = [
+    ("base.php", "<?php\nclass Base {}\n"),
+    (
+        "f.php",
+        "<?php\ninclude_once __DIR__ . '/base.php';\nif (!class_exists('Foo', false)) { class Foo extends Base { public $n = 1; } }\nfunction make() { return new Foo; }\n",
+    ),
+    ("g.php", "<?php\nclass Foo { public $n = 2; }\n"),
+    (
+        "a.php",
+        "<?php\ninclude __DIR__ . '/f.php';\n$s = 0;\nfor ($i = 0; $i < 5; $i++) { $s += make()->n; }\necho $s, \"\\n\";\n",
+    ),
+    (
+        "b.php",
+        "<?php\ninclude __DIR__ . '/g.php';\ninclude __DIR__ . '/f.php';\n$t = 0;\nfor ($j = 0; $j < 5; $j++) { $t += make()->n; }\necho $t, \"\\n\";\n",
+    ),
+];
+
+/// The dumps of `function` each of `mains`, served in turn by one engine
+/// whose cache holds them, wrote; `files` written to a directory of
+/// their own.
+fn served_in_turn(files: &[(&str, &str)], mains: &[&str], function: &str) -> Vec<Vec<String>> {
+    let scratch = testing::Scratch::new();
+    for (name, text) in files {
+        assert!(std::fs::write(scratch.0.join(name), text).is_ok());
+    }
+    let engine = testing::engine_holding::<Lane>(&SSA);
+    let mut dumps = Vec::new();
+    for main in mains {
+        let served = engine.serve_capture_in(
+            &scratch.0,
+            b"main.php",
+            &format!("<?php include '{main}';"),
+            php_engine::test::Capture::default(),
+        );
+        let stream = String::from_utf8_lossy(&served.stderr);
+        let dir = std::fs::canonicalize(&scratch.0).unwrap_or_else(|_| scratch.0.clone());
+        let dir = dir.to_string_lossy();
+        dumps.push(
+            dumps_of(&served.stderr, function)
+                .into_iter()
+                .map(|d| d.replace(&*dir, ""))
+                .collect(),
+        );
+        assert!(!stream.contains("Fatal"), "{stream}");
+    }
+    dumps
+}
+
+/// A class php's analysis binds by name is the one the build finds, so
+/// an analysis kept from one request is not read in another that bound
+/// another class of the name (#3579): request A binds `f.php`'s `Foo`
+/// and its build types `make()`'s `NEW` with it; request B declared
+/// `g.php`'s `Foo` first, which php's analysis of `make()` ignores as
+/// another file's (`zend_optimizer_ignore_class`), so B's dump is the one
+/// an engine that never served A writes.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_class_of_one_name_bound_in_one_request_is_not_read_in_another() {
+    let after_a = served_in_turn(&NAMESAKES, &["a.php", "b.php"], "make");
+    let alone = served_in_turn(&NAMESAKES, &["b.php"], "make");
+    let (Some(a), Some(b), Some(fresh)) = (after_a.first(), after_a.get(1), alone.first()) else {
+        panic!("{after_a:?} {alone:?}");
+    };
+    assert!(a.iter().any(|d| d.contains("object (Foo)] = NEW")), "{a:?}");
+    assert!(!fresh.is_empty(), "{fresh:?}");
+    assert_eq!(b, fresh);
+}
+
+/// The files of [`a_class_declared_after_a_trace_is_bound_at_the_next`]:
+/// `f.php` declares `Bar` only where `WANT_BAR` is defined, and
+/// `check()` names it; `before.php` traces `check()` with no `Bar`
+/// declared, `after.php` with it declared.
+const LATER: [(&str, &str); 4] = [
+    ("base.php", "<?php\nclass Base {}\n"),
+    (
+        "f.php",
+        "<?php\ninclude_once __DIR__ . '/base.php';\nif (defined('WANT_BAR')) { class Bar extends Base {} }\nfunction check($x) { if ($x instanceof Bar) { $y = new Bar; return $x; } return null; }\n",
+    ),
+    (
+        "before.php",
+        "<?php\ninclude __DIR__ . '/f.php';\n$n = 0;\nfor ($i = 0; $i < 5; $i++) { $n += (int) (check($i) === null); }\necho $n, \"\\n\";\n",
+    ),
+    (
+        "after.php",
+        "<?php\ndefine('WANT_BAR', 1);\ninclude __DIR__ . '/f.php';\n$m = 0;\nfor ($j = 0; $j < 5; $j++) { $m += (int) (check(new Bar) !== null); }\necho $m, \"\\n\";\n",
+    ),
+];
+
+/// A class declared after a trace's build through an op array is bound
+/// at the next build (#3579), as php's analysis, rebuilt at every build,
+/// finds it in the linked table then: the later dump types `NEW Bar` and
+/// the `INSTANCEOF` pi with `Bar`, as an engine that never served the
+/// earlier request writes it.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_class_declared_after_a_trace_is_bound_at_the_next() {
+    let in_turn = served_in_turn(&LATER, &["before.php", "after.php"], "check");
+    let alone = served_in_turn(&LATER, &["after.php"], "check");
+    let (Some(before), Some(after), Some(fresh)) = (in_turn.first(), in_turn.get(1), alone.first())
+    else {
+        panic!("{in_turn:?} {alone:?}");
+    };
+    assert!(before.iter().all(|d| !d.contains("(Bar)")), "{before:?}");
+    assert!(
+        fresh.iter().any(|d| d.contains("object (Bar)] = NEW")),
+        "{fresh:?}"
+    );
+    assert!(
+        fresh
+            .iter()
+            .any(|d| d.contains("TYPE [ref, rc1, rcn, object (instanceof Bar)])")),
+        "{fresh:?}"
+    );
+    assert_eq!(after, fresh);
+}
