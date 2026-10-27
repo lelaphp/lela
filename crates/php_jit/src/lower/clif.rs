@@ -45,8 +45,8 @@ use php_heap::{Arr, ROOM_BYTES, Ref, Str, Zval, ZvalType};
 use php_unit::{ConstIdx, Opcode, OplineIdx};
 
 use super::{
-    ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, ROOT_AT, STACK_AT, STOOD_AT,
-    Stood, Symbols, UNWOUND, located,
+    ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, ROOT_AT, ReturnsTo, STACK_AT,
+    STOOD_AT, Stood, Symbols, UNWOUND, located,
 };
 
 mod calls;
@@ -303,6 +303,16 @@ enum Num {
         long: Value,
         double: Value,
     },
+}
+
+/// A native's call compiled code hands its kernel ([`Emit::handled`]):
+/// a `DO_ICALL`, which [`Kernel::CallNative`] makes with the temporary
+/// that takes the return, or a `FRAMELESS_ICALL_*`, which
+/// [`Kernel::Frameless`] serves.
+#[derive(Clone, Copy)]
+enum NativeCall {
+    Made(ReturnsTo),
+    Frameless,
 }
 
 /// Where a kernel serving `line` leaves: its exit, where an inline form
@@ -1914,25 +1924,32 @@ impl<'a> Emit<'a> {
         onward: Onward,
         [room, opline, func]: [Value; 3],
     ) -> Result<(), Abort> {
-        if line.opcode == Opcode::DoIcall || line.opcode.is_frameless_icall() {
+        let native = if line.opcode == Opcode::DoIcall {
+            let slot = line
+                .out
+                .map(|out| Ok(self.value(out)?.slot.var))
+                .transpose()?;
+            let into = ReturnsTo::of(slot)
+                .ok_or_else(|| mismatch("a temporary past the slots a kernel numbers"))?;
+            Some(NativeCall::Made(into))
+        } else {
+            line.opcode
+                .is_frameless_icall()
+                .then_some(NativeCall::Frameless)
+        };
+        if let Some(native) = native {
             // php's `SET_EX_OPLINE` before the native's call, which the
             // kernel serves the frame stood at, and the frame's place, so
             // the kernel looks for no frame by its room.
             self.b.ins().store(trusted(), opline, room, EX_OPLINE);
             let place = self.frame_ref(line.frame)?;
             let place = self.b.ins().ireduce(I32, place);
-            let (kernel, last) = if line.opcode == Opcode::DoIcall {
-                let into = match line.out {
-                    Some(out) => self.value(out)?.slot.var.checked_add(1),
-                    None => Some(0),
-                }
-                .ok_or_else(|| mismatch("a temporary past the slots a kernel numbers"))?;
-                (
+            let (kernel, last) = match native {
+                NativeCall::Made(into) => (
                     Kernel::CallNative,
-                    self.b.ins().iconst(I32, i64::from(into)),
-                )
-            } else {
-                (Kernel::Frameless, func)
+                    self.b.ins().iconst(I32, i64::from(into.word())),
+                ),
+                NativeCall::Frameless => (Kernel::Frameless, func),
             };
             self.call(kernel, &[room, opline, place, last], leave_of(line))?;
         } else {
@@ -1946,7 +1963,7 @@ impl<'a> Emit<'a> {
         self.b
             .ins()
             .stack_store(I64, next, self.stood, STOOD_OPLINE);
-        if line.opcode == Opcode::DoIcall {
+        if matches!(native, Some(NativeCall::Made(_))) {
             let call = self.call_left(line.frame)?;
             self.b.ins().stack_store(I64, call, self.stood, STOOD_CALL);
         }

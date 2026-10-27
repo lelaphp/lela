@@ -50,7 +50,7 @@ use php_engine::tier::{
 use php_heap::{Arr, HeaderImage, Key, Scalar, Zval, ZvalRef, ZvalType};
 use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
 
-use crate::lower::{self, Stood, engine_offset};
+use crate::lower::{self, ReturnsTo, Stood, engine_offset};
 use crate::table::{Exit, Trace};
 use crate::types::ExitId;
 
@@ -573,7 +573,7 @@ kernels! {
         Frameless => frameless(place: u32, func: u32) = tier::frameless_held;
         FreeThis => free_this() = tier::free_this;
         MakeRef => make_ref(place: u64) -> u64 = tier::make_ref;
-        CallNative => call_native(place: u32, into: u32) = tier::call_native;
+        CallNative => call_native(place: u32, into: ReturnsTo) = tier::call_native;
     }
 }
 
@@ -616,14 +616,18 @@ fn frameless(req: &mut Request, on: On<'_, '_>, place: u32, func: u32) -> Result
 /// The `call_native` kernel: the `DO_ICALL` at `at` of the frame at
 /// `place`, whose call on top of the stack is a native's, made with no
 /// opline read ([`tier::call_native`]), as php's code calls the native's
-/// handler with the address of the return's slot it computed; `into` is the
-/// temporary that takes what it returns, numbered from one, zero where
-/// the opline's `result` is `UNUSED`. Where the interpreter stands
-/// after it is compiled code's, and a throw is the request's pending
-/// throwable.
-fn call_native(req: &mut Request, on: On<'_, '_>, place: u32, into: u32) -> Result<(), Fatal> {
+/// handler with the address of the return's slot it computed; `into` is
+/// the temporary that takes what it returns ([`ReturnsTo`]). Where the
+/// interpreter stands after it is compiled code's, and a throw is the
+/// request's pending throwable.
+fn call_native(
+    req: &mut Request,
+    on: On<'_, '_>,
+    place: u32,
+    into: ReturnsTo,
+) -> Result<(), Fatal> {
     let frame = at_place(req, on.room, place);
-    tier::call_native(req, frame, on.at, into.checked_sub(1))
+    tier::call_native(req, frame, on.at, into.slot())
 }
 
 /// The `leave` kernel: the value the `RETURN` at `at`, which a trace ends
@@ -900,7 +904,9 @@ fn lookup(
 /// The `make_ref` kernel: the reference a `SEND_REF` makes of the
 /// variable at `place` ([`tier::make_ref`]), as php's `zend_jit_send_ref`
 /// makes it, written into the place; one where it made it, zero where
-/// the memory limit refused it, which the handler then serves and raises.
+/// the memory limit refused it, the request ended in its fatal, which
+/// the wrapper answers as the request's unwinding, or a fallible scope's
+/// refusal, whose send the handler then serves.
 fn make_ref(req: &mut Request, on: On<'_, '_>, place: u64) -> Result<u64, Fatal> {
     standing(req, on.room, on.at)?;
     let place = zval(place, u32::from(ZvalType::Indirect as u8))

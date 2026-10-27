@@ -677,8 +677,9 @@ pub(crate) enum Kernel {
     /// `ZVAL_MAKE_REF` of the variable at `place`, which holds no
     /// reference, a `SEND_REF`'s, as php's `zend_jit_send_ref` makes it
     /// (`php_engine::tier::make_ref`), written into the place; `made` one
-    /// where it made it, zero where the memory limit refused it, which
-    /// the handler then serves.
+    /// where it made it, zero where the memory limit refused it: the
+    /// request's fatal, answered as its unwinding, or a fallible scope's
+    /// refusal, whose send the handler then serves.
     MakeRef,
     /// `call_native(cx, frame, opline: u32, place: u32, into: u32)`: the
     /// `DO_ICALL` of the frame at `place` on the stack, the call on top a
@@ -688,6 +689,37 @@ pub(crate) enum Kernel {
     /// up where `into` is zero; no `Stood` written, and its throw answered
     /// as [`Kernel::Frameless`]'s.
     CallNative,
+}
+
+/// The temporary a native's `DO_ICALL` writes what it returns into, as
+/// [`Kernel::CallNative`] is handed it across the crossing: the slot
+/// numbered from one, zero where the opline's `result` is `UNUSED` and
+/// what the native returns is given up. Compiled code passes the word,
+/// and the wrapper takes it as this type, so the numbering is this
+/// type's alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub(crate) struct ReturnsTo(u32);
+
+impl ReturnsTo {
+    /// The word for `slot`, a temporary's number, or for none; none
+    /// where the slot is the last a `u32` numbers, which no frame has.
+    pub(crate) fn of(slot: Option<u32>) -> Option<ReturnsTo> {
+        match slot {
+            Some(slot) => slot.checked_add(1).map(ReturnsTo),
+            None => Some(ReturnsTo(0)),
+        }
+    }
+
+    /// The word compiled code passes.
+    pub(crate) const fn word(self) -> u32 {
+        self.0
+    }
+
+    /// The temporary's number, none where nothing reads the return.
+    pub(crate) const fn slot(self) -> Option<u32> {
+        self.0.checked_sub(1)
+    }
 }
 
 impl Kernel {

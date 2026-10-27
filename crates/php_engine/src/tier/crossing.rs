@@ -135,7 +135,9 @@ pub fn release(req: &mut Request, zval: Zval) {
 /// (`Z/ext/opcache/jit/zend_jit_ir.c:9792-9860`): a new reference over
 /// what it held, `null` for what nothing wrote, written back into the
 /// place, which keeps the one owner of it; `false` where the memory
-/// limit refused it, whose fatal the request ends in.
+/// limit refused it: a fatal the request ends in, which the crossing
+/// answers as its unwinding, or, under a fallible scope, a refusal that
+/// ends nothing, whose send the handler then serves.
 pub fn make_ref(req: &mut Request, place: php_heap::ZvalRef) -> bool {
     req.make_ref(place).is_ok()
 }
