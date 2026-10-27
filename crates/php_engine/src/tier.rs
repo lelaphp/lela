@@ -1863,8 +1863,9 @@ pub fn pop_call(req: &mut Request) {
 /// zvals it addressed and the slot that takes its return
 /// (`jit_frameless_icall*`, `Z/ext/opcache/jit/zend_jit_ir.c:17868-18110`),
 /// with no opline read: each operand of the kind of its slot, as
-/// compiled code read it, neither `UNDEF` nor a reference, which
-/// compiled code hands to the handler instead, a temporary moved out of
+/// compiled code read it, neither `UNDEF`, which compiled code hands to
+/// the handler instead, nor a reference, which it reads through, a
+/// temporary moved out of
 /// its slot, and `Unused` past the native's arity. Its record is
 /// owned as [`crate::exec::frameless_owner`] says, and given up as the
 /// call ends ([`crate::handlers::frameless_served`]); compiled code

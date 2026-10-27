@@ -22,7 +22,7 @@ use std::num::NonZeroU32;
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
-use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, Value};
+use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, MemFlagsData, Value};
 use cranelift_frontend::Variable;
 use php_engine::tier::{self, FRAME, FrameLayout, FuncRef, PLACE, PlaceLayout, PlainCall};
 use php_heap::{Obj, Ref, Zval, ZvalType};
@@ -34,7 +34,7 @@ use super::{
 };
 use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT, RETURNED, THREW};
 use crate::types::{
-    Abort, ArgChecks, Check, Constant, Defaults, End, ExitId, Frame, Imm, Line, Object, OpId,
+    Abort, ArgChecks, Check, Constant, Defaults, End, ExitId, Frame, Home, Imm, Line, Object, OpId,
     Operand, Owners, PairCallee, PairClass, Returned, Types, Vars,
 };
 
@@ -1754,6 +1754,14 @@ enum Returns {
     Unread(Value),
 }
 
+impl Returns {
+    /// The address the native writes what it returns to.
+    fn address(self) -> Value {
+        let (Returns::Slot(out) | Returns::Unread(out)) = self;
+        out
+    }
+}
+
 impl Emit<'_> {
     /// Where `line`'s native writes what it returns ([`Returns`]).
     fn returns_of(&mut self, line: &Line) -> Result<Returns, Abort> {
@@ -1882,7 +1890,7 @@ impl Emit<'_> {
         let len = self.b.ins().load(I64, trusted(), stack, FRAMES_LEN);
         let last = self.b.ins().iadd_imm_s(len, -1);
         let place = self.b.ins().ireduce(I32, last);
-        let (Returns::Slot(out) | Returns::Unread(out)) = returns;
+        let out = returns.address();
         self.call(
             Kernel::CallNative,
             &[room, opline, place, out],
@@ -2055,11 +2063,12 @@ impl Emit<'_> {
     /// [`Kernel::Frameless`], which reads no opline, its return written to
     /// the temporary the opline names; then the interrupt tested, php's
     /// `jit_frameless_interrupt_check`, and a throw leaving through the
-    /// opline's unwind. A variable that may be unset or hold a reference
-    /// is tested first and, where it is either, the call is its
-    /// handler's, through [`Kernel::Handle`], which warns of it or reads
-    /// through it as php's `zend_jit_zval_check_undef` and
-    /// `jit_ZVAL_DEREF_ref` do.
+    /// opline's unwind. A variable's reference is read through in place,
+    /// php's `jit_ZVAL_DEREF_ref`; a variable that may be unset, or a
+    /// temporary that may hold a reference, is tested first and, where it
+    /// is, the call is its handler's, through [`Kernel::Handle`], which
+    /// warns of it as php's `zend_jit_zval_check_undef` calls
+    /// `zend_jit_undefined_op_helper` to.
     ///
     /// The three arities over constants, variables, a temporary, a
     /// variable that is unset once and one that holds a reference, a
@@ -2070,7 +2079,7 @@ impl Emit<'_> {
     ///     $t = []; $r = "xyz"; $ref = &$r;
     ///     for ($i = 0; $i < $n; $i++) {
     ///         if ($i == 2) { unset($u); } else { $u = "u$i"; }
-    ///         $t[] = trim(" $i ") . substr($a, $i % 3, 2) . str_contains($a, $u ?? "") . strlen($ref) . in_array($i, [1, 2]) . substr($u, 0, 1);
+    ///         $t[] = trim(" $i ") . substr($a, $i % 3, 2) . str_contains($a, $u ?? "") . substr($ref, $i & 1) . max(1, min(9, $i & 7)) . in_array($i, [1, 2]) . substr($u, 0, 1);
     ///     }
     ///     return implode(",", $t);
     /// }
@@ -2081,7 +2090,7 @@ impl Emit<'_> {
     /// Warning: Undefined variable $u in %SCRATCH%/witness.php on line 6
     ///
     /// Deprecated: substr(): Passing null to parameter #1 ($string) of type string is deprecated in %SCRATCH%/witness.php on line 6
-    /// 0ab3u,1bc31u,2cd131,3ab3u,4bc3u
+    /// 0abxyz1u,1bcyz11u,2cd1xyz21,3abyz3u,4bcxyz4u
     /// substr(): Argument #1 ($string) must be of type string, array given
     /// ```
     ///
@@ -2090,7 +2099,7 @@ impl Emit<'_> {
     ///     $t = []; $r = "xyz"; $ref = &$r;
     ///     for ($i = 0; $i < $n; $i++) {
     ///         if ($i == 2) { unset($u); } else { $u = "u$i"; }
-    ///         $t[] = trim(" $i ") . substr($a, $i % 3, 2) . str_contains($a, $u ?? "") . strlen($ref) . in_array($i, [1, 2]) . substr($u, 0, 1);
+    ///         $t[] = trim(" $i ") . substr($a, $i % 3, 2) . str_contains($a, $u ?? "") . substr($ref, $i & 1) . max(1, min(9, $i & 7)) . in_array($i, [1, 2]) . substr($u, 0, 1);
     ///     }
     ///     return implode(",", $t);
     /// }
@@ -2101,7 +2110,7 @@ impl Emit<'_> {
     /// Warning: Undefined variable $u in %SCRATCH%/witness.php on line 6
     ///
     /// Deprecated: substr(): Passing null to parameter #1 ($string) of type string is deprecated in %SCRATCH%/witness.php on line 6
-    /// 0ab3u,1bc31u,2cd131,3ab3u,4bc3u
+    /// 0abxyz1u,1bcyz11u,2cd1xyz21,3abyz3u,4bcxyz4u
     /// substr(): Argument #1 ($string) must be of type string, array given
     /// ```
     pub(super) fn frameless_call(
@@ -2116,7 +2125,8 @@ impl Emit<'_> {
             Opcode::FramelessIcall0 => 0,
             Opcode::FramelessIcall1 => 1,
             Opcode::FramelessIcall2 => 2,
-            _ => 3,
+            Opcode::FramelessIcall3 => 3,
+            _ => return Err(mismatch("a frameless call of another opcode")),
         };
         let operands = [line.op1, line.op2, line.data];
         let (handler, join) = self.split();
@@ -2125,21 +2135,32 @@ impl Emit<'_> {
                 continue;
             };
             let held = self.value(value)?;
-            if !held.types.meets(Types::UNDEF.or(Types::REF)) {
+            // A variable's reference is read through in place below; a
+            // temporary's is the handler's, as is an unset variable,
+            // which php's code warns of out of line.
+            let through = self.kind_of(*operand)? == OperandKind::Cv;
+            let refused = if through {
+                Types::UNDEF
+            } else {
+                Types::UNDEF.or(Types::REF)
+            };
+            if !held.types.meets(refused) {
                 continue;
             }
             let (base, slot) = self.place(held.slot)?;
             let info = self.b.ins().load(I32, trusted(), base, slot + TYPE_AT);
             let kind = self.b.ins().band_imm_u(info, KIND);
-            let unset = self
+            let mut either = self
                 .b
                 .ins()
                 .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Undef));
-            let reference = self
-                .b
-                .ins()
-                .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
-            let either = self.b.ins().bor(unset, reference);
+            if !through && held.types.meets(Types::REF) {
+                let reference =
+                    self.b
+                        .ins()
+                        .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
+                either = self.b.ins().bor(either, reference);
+            }
             self.divert_if(either, handler);
         }
         self.b.ins().store(trusted(), opline, room, EX_OPLINE);
@@ -2154,7 +2175,20 @@ impl Emit<'_> {
                 continue;
             }
             let kind = self.kind_of(operand)?;
-            let (word, info) = self.operand_words(line.frame, operand)?;
+            let (word, info) = match operand {
+                Operand::Value(value)
+                    if kind == OperandKind::Cv && self.value(value)?.types.meets(Types::REF) =>
+                {
+                    // php's `ZVAL_DEREF` before the native reads it.
+                    let (base, slot) = self.place(self.value(value)?.slot)?;
+                    let zval = self.b.ins().iadd_imm_s(base, i64::from(slot));
+                    let zval = self.deref(zval);
+                    let word = self.b.ins().load(I64, trusted(), zval, 0);
+                    let info = self.b.ins().load(I32, trusted(), zval, TYPE_AT);
+                    (word, info)
+                }
+                _ => self.operand_words(line.frame, operand)?,
+            };
             if let (OperandKind::Tmp, Operand::Value(value)) = (kind, operand) {
                 // The temporary's owner is the native's record's now.
                 let (base, slot) = self.place(self.value(value)?.slot)?;
@@ -2165,7 +2199,7 @@ impl Emit<'_> {
             words.extend([word, info]);
         }
         let returns = self.returns_of(line)?;
-        let (Returns::Slot(out) | Returns::Unread(out)) = returns;
+        let out = returns.address();
         let place = self.frame_ref(line.frame)?;
         let place = self.b.ins().ireduce(I32, place);
         let native = self.b.ins().iconst(I32, i64::from(native));
@@ -2189,9 +2223,32 @@ impl Emit<'_> {
     }
 
     /// The two words of the zval `operand` of `frame` stands for: a
-    /// scalar constant's, as php's op array holds it, or the zval's as it
-    /// stands in its slot or among the op array's constants.
+    /// scalar constant's, as php's op array holds it, a value's held in a
+    /// register as php's code writes it to the zval it hands on, or the
+    /// zval's as it stands in its slot or among the op array's constants.
     fn operand_words(&mut self, frame: Frame, operand: Operand) -> Result<(Value, Value), Abort> {
+        if let Operand::Value(value) = operand
+            && self.value(value)?.home == Home::Register
+        {
+            return Ok(match self.register(value)? {
+                Scalar::Long(x) => (x, self.b.ins().iconst(I32, tag(ZvalType::Long))),
+                Scalar::Double(x) => (
+                    self.b.ins().bitcast(I64, MemFlagsData::new(), x),
+                    self.b.ins().iconst(I32, tag(ZvalType::Double)),
+                ),
+                Scalar::Bool(b) => {
+                    let b = self.b.ins().uextend(I32, b);
+                    (
+                        self.b.ins().iconst(I64, 0),
+                        self.b.ins().iadd_imm_s(b, tag(ZvalType::False)),
+                    )
+                }
+                Scalar::Null => (
+                    self.b.ins().iconst(I64, 0),
+                    self.b.ins().iconst(I32, tag(ZvalType::Null)),
+                ),
+            });
+        }
         let (word, kind) = match operand {
             Operand::Constant(Constant::Null) => (0, ZvalType::Null),
             Operand::Constant(Constant::False) => (0, ZvalType::False),
