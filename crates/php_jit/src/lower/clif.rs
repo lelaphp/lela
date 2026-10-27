@@ -305,6 +305,45 @@ enum Num {
     },
 }
 
+/// An operand of an inline arithmetic that holds a number of either
+/// kind ([`Emit::mixed`]): in its slot, its type byte read where it is
+/// read, or kept in registers by the op before ([`Kept`]), its kind the
+/// overflow bit that op computed.
+#[derive(Debug, Clone, Copy)]
+enum Mixed {
+    Slot(Slot),
+    Kept {
+        overflowed: Value,
+        long: Value,
+        double: Value,
+    },
+}
+
+/// An operand of a stepped arithmetic ([`Emit::stepped_numbers`]): a
+/// number the trace holds, or a slot read by its type byte, with the
+/// types php's analysis gives what it holds.
+#[derive(Debug, Clone, Copy)]
+enum Numeric {
+    Held(Scalar),
+    Slot(Slot, Types),
+}
+
+/// A number of either kind an inline arithmetic wrote to a temporary
+/// that the inline arithmetic after it alone reads ([`Emit::keeps`]):
+/// held in registers and not written, so the reader tests the overflow bit the
+/// op computed rather than the type byte it would store, as php's
+/// code keeps a value in a register its stack map stores only where it
+/// leaves. A place that leaves before the reader is done writes it
+/// first ([`Emit::leave_where`]), so the interpreter finds it where its
+/// opline reads it.
+#[derive(Debug, Clone, Copy)]
+struct Kept {
+    value: ValueId,
+    slot: Slot,
+    reader: OpId,
+    num: Num,
+}
+
 /// Where a kernel serving `line` leaves: its exit, where an inline form
 /// has one, else its unwind.
 fn leave_of(line: &Line) -> Option<Leave> {
@@ -742,6 +781,8 @@ struct Emit<'a> {
     /// Per exit, the block that answers its number and stores nothing,
     /// where a jump finds no trace to enter.
     answers: Vec<Option<Block>>,
+    /// The number the last inline arithmetic kept for the op after it.
+    kept: Option<Kept>,
 }
 
 impl<'a> Emit<'a> {
@@ -791,6 +832,7 @@ impl<'a> Emit<'a> {
             },
             doors: vec![None; ir.exits.len()],
             answers: vec![None; ir.exits.len()],
+            kept: None,
         }
     }
 
@@ -1106,6 +1148,18 @@ impl<'a> Emit<'a> {
     fn op(&mut self, at: usize) -> Result<(), Abort> {
         let id = OpId(u32::try_from(at).map_err(|_| mismatch("too many ops"))?);
         self.b.set_srcloc(located(at));
+        if self.kept.is_some_and(|kept| kept.reader != id) {
+            self.write_kept()?;
+        }
+        let done = self.op_at(id, at);
+        if self.kept.is_some_and(|kept| kept.reader == id) {
+            self.kept = None;
+        }
+        done
+    }
+
+    /// The op at `at`, its guards before it held first.
+    fn op_at(&mut self, id: OpId, at: usize) -> Result<(), Abort> {
         let before: Vec<Guard> = self
             .ir
             .guards
@@ -1374,6 +1428,18 @@ impl<'a> Emit<'a> {
                     Num::Double(double)
                 }
                 (Num::Long(_), Some(Kind::Long)) | (Num::Double(_), Some(Kind::Double)) => num,
+                // A pair of kinds [`Emit::dispatched`] made that makes the
+                // other kind always leaves; nothing reads what it holds.
+                (Num::Double(_), Some(Kind::Long)) => {
+                    let always = self.b.ins().iconst(I8, 1);
+                    self.leave_where(always, guard.exit)?;
+                    Num::Long(self.b.ins().iconst(I64, 0))
+                }
+                (Num::Long(_), Some(Kind::Double)) => {
+                    let always = self.b.ins().iconst(I8, 1);
+                    self.leave_where(always, guard.exit)?;
+                    Num::Double(self.b.ins().f64const(0.0))
+                }
                 _ => return Err(mismatch("an arithmetic guarded as a type it cannot make")),
             };
         }
@@ -1432,9 +1498,32 @@ impl<'a> Emit<'a> {
     fn leave_where(&mut self, cond: Value, exit: ExitId) -> Result<(), Abort> {
         let (to, args) = self.guard_exit(exit)?;
         let on = self.b.create_block();
-        self.b.ins().brif(cond, to, &args, on, &[]);
+        if let Some(kept) = self.kept {
+            // The number kept in registers written where the exit's
+            // opline reads it, on the way out only.
+            let writes = self.b.create_block();
+            self.b.set_cold_block(writes);
+            self.b.ins().brif(cond, writes, &[], on, &[]);
+            self.b.switch_to_block(writes);
+            self.b.seal_block(writes);
+            let (room, at) = self.place(kept.slot)?;
+            self.write_num(room, at, kept.num);
+            self.b.ins().jump(to, &args);
+        } else {
+            self.b.ins().brif(cond, to, &args, on, &[]);
+        }
         self.b.switch_to_block(on);
         self.b.seal_block(on);
+        Ok(())
+    }
+
+    /// The number kept for the op after the op that made it written to its slot,
+    /// where an op other than its reader comes first.
+    fn write_kept(&mut self) -> Result<(), Abort> {
+        if let Some(kept) = self.kept.take() {
+            let (room, at) = self.place(kept.slot)?;
+            self.write_num(room, at, kept.num);
+        }
         Ok(())
     }
 
@@ -1760,8 +1849,166 @@ impl<'a> Emit<'a> {
             return self.branched(at, line);
         }
 
+        if matches!(
+            line.opcode,
+            Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div
+        ) && line.op1_def.is_none()
+            && self.within(at).is_empty()
+            && let Some(out) = line.out
+            && let (Some(a), Some(b)) = (self.numeric(line.op1)?, self.numeric(line.op2)?)
+            && matches!((a, b), (Numeric::Slot(..), _) | (_, Numeric::Slot(..)))
+        {
+            return self.stepped_numbers(at, line, out, [a, b]);
+        }
         self.step_kernel(at, line)?;
         self.after_step(at, line)
+    }
+
+    /// An operand of a stepped arithmetic as [`Emit::stepped_numbers`]
+    /// reads it: a number it holds, or a slot whose type byte says; none
+    /// where it is neither.
+    fn numeric(&mut self, operand: Operand) -> Result<Option<Numeric>, Abort> {
+        Ok(match operand {
+            Operand::Constant(Constant::Long(_) | Constant::Double(_)) => {
+                Some(Numeric::Held(self.scalar_unguarded(operand)?))
+            }
+            Operand::Value(value) => {
+                let held = self.value(value)?;
+                match (held.home, Kind::of(held.types)) {
+                    (Home::Memory, _) if held.types.meets(Types::NUMBER) => {
+                        Some(Numeric::Slot(held.slot, held.types))
+                    }
+                    (Home::Register, Some(Kind::Long | Kind::Double)) => {
+                        Some(Numeric::Held(self.register(value)?))
+                    }
+                    (Home::Memory | Home::Register, _) => None,
+                }
+            }
+            Operand::Constant(_) | Operand::Unused => None,
+        })
+    }
+
+    /// `+`, `-`, `*` or `/` the trace steps, its operands' types unknown
+    /// to it, served in place where each operand's type byte reads a long
+    /// or a double and no division is by zero, as `zend_jit_math_helper`
+    /// serves what its fast paths take and calls a function for the rest
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:5332-5520`): what it makes written
+    /// to `out`'s slot with its type word, as the handler writes it. Every
+    /// other operand, a division by zero among them, goes to the handler,
+    /// which serves it whole; either way on with the slot written, so the
+    /// trace leaves through no exit of its own here.
+    ///
+    /// A division whose dividend php's analysis cannot type, in place
+    /// over numbers and through the handler over the rest:
+    ///
+    /// ```php
+    /// $vs = [3, 2.5, "6", null, 7, true, 9.0];
+    /// $t = [];
+    /// for ($i = 0; $i < 70; $i++) {
+    ///     $v = $vs[$i % 7];
+    ///     try { $t[] = (2.0 * $i / ($i % 5)) + $v / 2; } catch (DivisionByZeroError $e) { $t[] = "z"; }
+    /// }
+    /// echo implode(",", array_slice($t, 0, 14)), " ", count($t), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// z,3.25,5,2,5.5,z,16.5,8.5,6.5833333333333,7.5,z,25.5,12.5,13.166666666667 70
+    /// ```
+    fn stepped_numbers(
+        &mut self,
+        at: OpId,
+        line: &Line,
+        out: ValueId,
+        operands: [Numeric; 2],
+    ) -> Result<(), Abort> {
+        let handler = self.b.create_block();
+        let done = self.b.create_block();
+        // The kinds each operand may hold: a slot's, those of the two its
+        // types name; a held number's, its own.
+        let kinds = |operand: Numeric| -> Result<Vec<Kind>, Abort> {
+            Ok(match operand {
+                Numeric::Slot(_, types) => {
+                    [(Types::LONG, Kind::Long), (Types::DOUBLE, Kind::Double)]
+                        .into_iter()
+                        .filter(|&(of, _)| types.meets(of))
+                        .map(|(_, kind)| kind)
+                        .collect()
+                }
+                Numeric::Held(Scalar::Long(_)) => vec![Kind::Long],
+                Numeric::Held(Scalar::Double(_)) => vec![Kind::Double],
+                Numeric::Held(_) => return Err(mismatch("a stepped arithmetic over no number")),
+            })
+        };
+        let (ka, kb) = (kinds(operands[0])?, kinds(operands[1])?);
+        // A slot's type byte: each kind it may hold to its block, anything
+        // else to the handler.
+        let branch = |emit: &mut Self, slot: Slot, to: &[(Kind, Block)]| {
+            let (room, at) = emit.place(slot)?;
+            let byte = emit.b.ins().load(I8, trusted(), room, at + TYPE_AT);
+            for &(kind, block) in to {
+                let t = if kind == Kind::Long {
+                    ZvalType::Long
+                } else {
+                    ZvalType::Double
+                };
+                let is = emit.b.ins().icmp_imm_s(IntCC::Equal, byte, tag(t));
+                emit.divert_if(is, block);
+            }
+            emit.b.ins().jump(handler, &[]);
+            Ok::<(), Abort>(())
+        };
+        // One block per pair of kinds, reached by testing each operand
+        // held in a slot in turn.
+        let mut pairs: Vec<(Kind, Kind, Block)> = Vec::new();
+        let firsts: Vec<(Kind, Block)> = ka.iter().map(|&k| (k, self.b.create_block())).collect();
+        match operands[0] {
+            Numeric::Slot(slot, _) => branch(self, slot, &firsts)?,
+            Numeric::Held(_) => {
+                let [(_, first)] = firsts.as_slice() else {
+                    return Err(mismatch("a held operand of more than one kind"));
+                };
+                self.b.ins().jump(*first, &[]);
+            }
+        }
+        for &(k1, first) in &firsts {
+            self.b.switch_to_block(first);
+            self.b.seal_block(first);
+            let seconds: Vec<(Kind, Block)> =
+                kb.iter().map(|&k| (k, self.b.create_block())).collect();
+            match operands[1] {
+                Numeric::Slot(slot, _) => branch(self, slot, &seconds)?,
+                Numeric::Held(_) => {
+                    let [(_, second)] = seconds.as_slice() else {
+                        return Err(mismatch("a held operand of more than one kind"));
+                    };
+                    self.b.ins().jump(*second, &[]);
+                }
+            }
+            pairs.extend(seconds.into_iter().map(|(k2, block)| (k1, k2, block)));
+        }
+        let out_slot = self.value(out)?.slot;
+        for (ka, kb, block) in pairs {
+            self.b.switch_to_block(block);
+            self.b.seal_block(block);
+            let read = |emit: &mut Self, operand: Numeric, kind: Kind| match operand {
+                Numeric::Slot(slot, _) => emit.load(slot, kind, false),
+                Numeric::Held(held) => Ok(held),
+            };
+            let a = read(self, operands[0], ka)?;
+            let b = read(self, operands[1], kb)?;
+            let num = self.binary(line.opcode, a, b, Some(Refuse::To(handler)))?;
+            let (room, at) = self.place(out_slot)?;
+            self.write_num(room, at, num);
+            self.b.ins().jump(done, &[]);
+        }
+        self.b.switch_to_block(handler);
+        self.b.seal_block(handler);
+        self.b.set_cold_block(handler);
+        self.step_kernel(at, line)?;
+        self.after_step(at, line)?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+        Ok(())
     }
 
     /// The kernel that serves `line` whole, [`Kernel::Step`], or
@@ -2479,6 +2726,7 @@ impl<'a> Emit<'a> {
     /// The arithmetic `op` over the opline's two operands, written to what
     /// it writes: its `out`, or the variable an `ASSIGN_OP` assigns.
     fn arithmetic(&mut self, at: OpId, line: &Line, op: Opcode) -> Result<(), Abort> {
+        let defs: Vec<ValueId> = [line.out, line.op1_def].into_iter().flatten().collect();
         let raises = if cannot_raise(op, line.op2) {
             None
         } else {
@@ -2486,36 +2734,135 @@ impl<'a> Emit<'a> {
                 mismatch("an arithmetic that cannot leave")
             })?))
         };
-        let num = match (self.either(at, line.op1)?, self.either(at, line.op2)?) {
+        let num = match (self.mixed(at, line.op1)?, self.mixed(at, line.op2)?) {
             (None, None) => {
                 let a = self.scalar(at, line.op1)?;
                 let b = self.scalar(at, line.op2)?;
                 self.binary(op, a, b, raises)?
             }
-            (a, b) => self.dispatched(at, line, op, [a, b], raises)?,
+            (a, b) => self.dispatched(at, line, (op, &defs), [a, b], raises)?,
         };
-        let defs: Vec<ValueId> = [line.out, line.op1_def].into_iter().flatten().collect();
         let num = self.settle(at, &defs, num)?;
+        if let ([value], Num::Either { .. }) = (defs.as_slice(), num)
+            && let Some(reader) = self.keeps(at, *value)?
+        {
+            let slot = self.value(*value)?.slot;
+            self.kept = Some(Kept {
+                value: *value,
+                slot,
+                reader,
+                num,
+            });
+            return Ok(());
+        }
         for value in defs {
             self.define_num(value, num)?;
         }
         Ok(())
     }
 
-    /// The slot of an operand of the inline op at `at` that holds a
-    /// number of either kind, which no guard before the op holds to one:
-    /// read by its type where it is read, as `zend_jit_math_helper` tests
-    /// it.
-    fn either(&self, at: OpId, operand: Operand) -> Result<Option<Slot>, Abort> {
+    /// The op that alone reads `value`, a number of either kind the inline
+    /// arithmetic at `at` writes to a temporary, where it is the op after
+    /// it and an inline arithmetic that tests its kind where it reads it
+    /// ([`Emit::mixed`]): nothing else reads the slot until that op is
+    /// done, but an exit, which [`Emit::leave_where`] writes it for.
+    ///
+    /// A product that overflows to a double on some passes, read by a
+    /// division whose quotient leaves where it is not a long, and the
+    /// interpreter reads the product again from its slot:
+    ///
+    /// ```php
+    /// function f($n, $k) { $s = 0; for ($i = 0; $i < $n; $i++) { $s = $s + (($i - 5) * $k) / 2 + 1; } return $s; }
+    /// function g($n, $k) { $s = 0.0; for ($i = 0; $i < $n; $i++) { if ($i != 5) { $s += 1.0 / (($i - 5) * $k); } } return $s; }
+    /// echo f(12, 2), " ", f(12, 3), " ", f(12, intdiv(PHP_INT_MAX, 2)), " ", g(12, 3), " ", g(12, intdiv(PHP_INT_MAX, 2)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 18 21 1.3835058055282E+19 0.055555555555556 3.6140072416184E-20
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function f($n, $k) { $s = 0; for ($i = 0; $i < $n; $i++) { $s = $s + (($i - 5) * $k) / 2 + 1; } return $s; }
+    /// function g($n, $k) { $s = 0.0; for ($i = 0; $i < $n; $i++) { if ($i != 5) { $s += 1.0 / (($i - 5) * $k); } } return $s; }
+    /// echo f(12, 2), " ", f(12, 3), " ", f(12, intdiv(PHP_INT_MAX, 2)), " ", g(12, 3), " ", g(12, intdiv(PHP_INT_MAX, 2)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 18 21 1.3835058055282E+19 0.055555555555556 3.6140072416184E-20
+    /// ```
+    fn keeps(&self, at: OpId, value: ValueId) -> Result<Option<OpId>, Abort> {
+        let held = self.value(value)?;
+        if held.home != Home::Memory || !self.is_temporary(held.slot)? {
+            return Ok(None);
+        }
+        let reader = OpId(at.0 + 1);
+        let Some(Op::Line(line)) = self.ir.ops.get(reader.index()) else {
+            return Ok(None);
+        };
+        let read = Operand::Value(value);
+        let reads = |line: &Line| {
+            [line.op1, line.op2, line.data]
+                .iter()
+                .filter(|&&operand| operand == read)
+                .count()
+        };
+        if line.form != Form::Inline
+            || !matches!(
+                line.opcode,
+                Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div
+            )
+            || reads(line) != 1
+            || self.mixed(reader, read)?.is_none()
+        {
+            return Ok(None);
+        }
+        let others = self.ir.ops.iter().filter_map(|op| match op {
+            Op::Line(line) => Some(reads(line)),
+            _ => None,
+        });
+        if others.sum::<usize>() != 1 {
+            return Ok(None);
+        }
+        let named =
+            self.ir.values.iter().any(
+                |v| matches!(v.def, Def::Phi { entry, back } if entry == value || back == value),
+            ) || self.ir.exits.iter().any(|exit| {
+                exit.stores.iter().any(|store| match store.from {
+                    Stored::Value(v) | Stored::Copied { value: v, .. } => v == value,
+                    Stored::Null => false,
+                })
+            });
+        Ok((!named).then_some(reader))
+    }
+
+    /// An operand of the inline op at `at` that holds a number of either
+    /// kind, which no guard before the op holds to one: kept in registers
+    /// by the op before ([`Kept`]), or in its slot, read by its type where
+    /// it is read, as `zend_jit_math_helper` tests it.
+    fn mixed(&self, at: OpId, operand: Operand) -> Result<Option<Mixed>, Abort> {
         let Operand::Value(value) = operand else {
             return Ok(None);
         };
+        if let Some(kept) = self.kept
+            && kept.value == value
+            && let Num::Either {
+                overflowed,
+                long,
+                double,
+            } = kept.num
+        {
+            return Ok(Some(Mixed::Kept {
+                overflowed,
+                long,
+                double,
+            }));
+        }
         let held = self.value(value)?;
         if held.home == Home::Register || held.types != Types::NUMBER {
             return Ok(None);
         }
         Ok(match self.kind_at(at, value)? {
-            (None, false) => Some(held.slot),
+            (None, false) => Some(Mixed::Slot(held.slot)),
             _ => None,
         })
     }
@@ -2523,115 +2870,154 @@ impl<'a> Emit<'a> {
     /// `op` over operands of which those in `either` hold a number of
     /// either kind, as `zend_jit_math_helper` serves them
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:5332-5520`): each such operand's
-    /// type tested, the operation made for each pair of kinds, and what
-    /// it made carried to one block as a number of either kind.
+    /// kind tested, its type byte or the overflow bit the op that kept it
+    /// computed, the operation made for each pair of kinds and held there
+    /// to the guards the op holds on what it writes ([`Emit::held`]), and
+    /// what the pairs that go on made carried to one block.
     fn dispatched(
         &mut self,
         at: OpId,
         line: &Line,
-        op: Opcode,
-        either: [Option<Slot>; 2],
+        (op, defs): (Opcode, &[ValueId]),
+        either: [Option<Mixed>; 2],
         raises: Option<Refuse>,
     ) -> Result<Num, Abort> {
         let fixed = [
             either[0].map_or_else(|| self.scalar(at, line.op1).map(Some), |_| Ok(None))?,
             either[1].map_or_else(|| self.scalar(at, line.op2).map(Some), |_| Ok(None))?,
         ];
-        let join = self.b.create_block();
-        let as_double = self.b.append_block_param(join, I8);
-        let long = self.b.append_block_param(join, I64);
-        let double = self.b.append_block_param(join, F64);
-        let kinds = |slot: Option<Slot>| -> &'static [Kind] {
-            if slot.is_some() {
-                &[Kind::Long, Kind::Double]
-            } else {
-                &[Kind::Long]
+        // The kinds each operand may be read as: both where it holds a
+        // number of either kind, its own otherwise.
+        let kinds = |mixed: Option<Mixed>, fixed: Option<Scalar>| -> &'static [Kind] {
+            match (mixed, fixed) {
+                (Some(_), _) => &[Kind::Long, Kind::Double],
+                (None, Some(Scalar::Double(_))) => &[Kind::Double],
+                (None, _) => &[Kind::Long],
             }
         };
         // One block per pair of kinds, reached by testing each operand of
         // either kind in turn.
         let mut pairs: Vec<(Kind, Kind, Block)> = Vec::new();
-        for &ka in kinds(either[0]) {
-            for &kb in kinds(either[1]) {
+        for &ka in kinds(either[0], fixed[0]) {
+            for &kb in kinds(either[1], fixed[1]) {
                 pairs.push((ka, kb, self.b.create_block()));
             }
         }
-        let tested = |emit: &mut Self, slot: Slot| -> Result<Value, Abort> {
-            let (room, at) = emit.place(slot)?;
-            let byte = emit.b.ins().load(I8, trusted(), room, at + TYPE_AT);
-            Ok(emit
-                .b
-                .ins()
-                .icmp_imm_s(IntCC::Equal, byte, tag(ZvalType::Long)))
+        let branch = |emit: &mut Self, mixed: Mixed, longs: Block, doubles: Block| {
+            match mixed {
+                Mixed::Slot(slot) => {
+                    let (room, at) = emit.place(slot)?;
+                    let byte = emit.b.ins().load(I8, trusted(), room, at + TYPE_AT);
+                    let is_long = emit
+                        .b
+                        .ins()
+                        .icmp_imm_s(IntCC::Equal, byte, tag(ZvalType::Long));
+                    emit.b.ins().brif(is_long, longs, &[], doubles, &[]);
+                }
+                Mixed::Kept { overflowed, .. } => {
+                    emit.b.ins().brif(overflowed, doubles, &[], longs, &[]);
+                }
+            }
+            Ok::<(), Abort>(())
         };
         match either {
             [Some(a), Some(b)] => {
                 let (first_long, first_double) = (self.b.create_block(), self.b.create_block());
-                let is_long = tested(self, a)?;
-                self.b
-                    .ins()
-                    .brif(is_long, first_long, &[], first_double, &[]);
+                branch(self, a, first_long, first_double)?;
                 for (block, first) in [(first_long, 0), (first_double, 2)] {
                     self.b.switch_to_block(block);
                     self.b.seal_block(block);
-                    let is_long = tested(self, b)?;
-                    let (to_long, to_double) = (pairs[first].2, pairs[first + 1].2);
-                    self.b.ins().brif(is_long, to_long, &[], to_double, &[]);
+                    branch(self, b, pairs[first].2, pairs[first + 1].2)?;
                 }
             }
-            [Some(slot), None] | [None, Some(slot)] => {
-                let is_long = tested(self, slot)?;
-                self.b.ins().brif(is_long, pairs[0].2, &[], pairs[1].2, &[]);
+            [Some(mixed), None] | [None, Some(mixed)] => {
+                branch(self, mixed, pairs[0].2, pairs[1].2)?;
             }
             [None, None] => return Err(mismatch("a dispatch over no number of either kind")),
         }
-        let (mut longs, mut doubles) = (true, true);
-        for (ka, kb, block) in pairs.clone() {
+        let (join, made) = self.join_of(at, &pairs);
+        for (ka, kb, block) in pairs {
             self.b.switch_to_block(block);
             self.b.seal_block(block);
-            let read =
-                |emit: &mut Self, slot: Option<Slot>, kind: Kind, fixed: Option<Scalar>| match (
-                    slot, fixed,
-                ) {
-                    (Some(slot), _) => emit.load(slot, kind, false),
-                    (None, Some(scalar)) => Ok(scalar),
-                    (None, None) => Err(mismatch("an operand of no kind")),
-                };
+            let read = |emit: &mut Self,
+                        mixed: Option<Mixed>,
+                        kind: Kind,
+                        fixed: Option<Scalar>| match (mixed, fixed, kind) {
+                (Some(Mixed::Slot(slot)), _, _) => emit.load(slot, kind, false),
+                (Some(Mixed::Kept { long, .. }), _, Kind::Long) => Ok(Scalar::Long(long)),
+                (Some(Mixed::Kept { double, .. }), _, _) => Ok(Scalar::Double(double)),
+                (None, Some(scalar), _) => Ok(scalar),
+                (None, None, _) => Err(mismatch("an operand of no kind")),
+            };
             let a = read(self, either[0], ka, fixed[0])?;
             let b = read(self, either[1], kb, fixed[1])?;
             let num = self.binary(op, a, b, raises)?;
-            longs &= matches!(num, Num::Long(_));
-            doubles &= matches!(num, Num::Double(_));
-            let (is_double, l, d) = match num {
-                Num::Long(l) => {
-                    let d = self.b.ins().f64const(0.0);
-                    (self.b.ins().iconst(I8, 0), l, d)
-                }
-                Num::Double(d) => {
-                    let l = self.b.ins().iconst(I64, 0);
-                    (self.b.ins().iconst(I8, 1), l, d)
-                }
+            let num = self.held(at, defs, num)?;
+            let args = self.carried(made, num)?;
+            self.b.ins().jump(join, &args);
+        }
+        self.b.switch_to_block(join);
+        self.b.seal_block(join);
+        Ok(made)
+    }
+
+    /// The block the pairs of kinds [`Emit::dispatched`] makes go on to,
+    /// and what it carries: the one kind every pair makes and holds, where
+    /// they make one, a pair of longs a number of either kind and any
+    /// other a double, each held to the kind a guard on what the op at
+    /// `at` writes holds it to.
+    fn join_of(&mut self, at: OpId, pairs: &[(Kind, Kind, Block)]) -> (Block, Num) {
+        let held_kind = self.within(at).iter().find_map(|guard| match guard.check {
+            Check::Type { tag: t, .. } => Kind::of_tag(t),
+            _ => None,
+        });
+        let makes = |ka: Kind, kb: Kind| match (held_kind, ka, kb) {
+            (Some(kind), _, _) => Some(kind),
+            (None, Kind::Long, Kind::Long) => None,
+            (None, _, _) => Some(Kind::Double),
+        };
+        let join = self.b.create_block();
+        let made = match pairs
+            .iter()
+            .map(|&(ka, kb, _)| makes(ka, kb))
+            .reduce(|a, b| if a == b { a } else { None })
+            .flatten()
+        {
+            Some(Kind::Long) => Num::Long(self.b.append_block_param(join, I64)),
+            Some(Kind::Double) => Num::Double(self.b.append_block_param(join, F64)),
+            _ => Num::Either {
+                overflowed: self.b.append_block_param(join, I8),
+                long: self.b.append_block_param(join, I64),
+                double: self.b.append_block_param(join, F64),
+            },
+        };
+        (join, made)
+    }
+
+    /// What a pair that made `num` hands the join that carries `made`
+    /// ([`Emit::join_of`]).
+    fn carried(&mut self, made: Num, num: Num) -> Result<Vec<BlockArg>, Abort> {
+        Ok(match (made, num) {
+            (Num::Long(_), Num::Long(x)) | (Num::Double(_), Num::Double(x)) => {
+                vec![x.into()]
+            }
+            (Num::Either { .. }, Num::Long(l)) => {
+                let d = self.b.ins().f64const(0.0);
+                vec![self.b.ins().iconst(I8, 0).into(), l.into(), d.into()]
+            }
+            (Num::Either { .. }, Num::Double(d)) => {
+                let l = self.b.ins().iconst(I64, 0);
+                vec![self.b.ins().iconst(I8, 1).into(), l.into(), d.into()]
+            }
+            (
+                Num::Either { .. },
                 Num::Either {
                     overflowed,
                     long,
                     double,
-                } => (overflowed, long, double),
-            };
-            self.b
-                .ins()
-                .jump(join, &[is_double.into(), l.into(), d.into()]);
-        }
-        self.b.switch_to_block(join);
-        self.b.seal_block(join);
-        // A kind every pair made is that kind.
-        Ok(match (longs, doubles) {
-            (true, _) => Num::Long(long),
-            (_, true) => Num::Double(double),
-            _ => Num::Either {
-                overflowed: as_double,
-                long,
-                double,
-            },
+                },
+            ) => vec![overflowed.into(), long.into(), double.into()],
+            _ => return Err(mismatch("a pair of kinds made another kind")),
         })
     }
 
@@ -3948,12 +4334,19 @@ impl<'a> Emit<'a> {
                 })
             }
             (Opcode::Div, _, _) => {
-                let (rx, ry) = (self.real(a)?, self.real(b)?);
                 if let Some(refuse) = raises {
-                    let zero = self.b.ins().f64const(0.0);
-                    let by_zero = self.b.ins().fcmp(FloatCC::Equal, ry, zero);
+                    // A long divisor is zero as a long, before it is
+                    // converted.
+                    let by_zero = if let Scalar::Long(y) = b {
+                        self.b.ins().icmp_imm_s(IntCC::Equal, y, 0)
+                    } else {
+                        let ry = self.real(b)?;
+                        let zero = self.b.ins().f64const(0.0);
+                        self.b.ins().fcmp(FloatCC::Equal, ry, zero)
+                    };
                     self.refuse_if(by_zero, refuse)?;
                 }
+                let (rx, ry) = (self.real(a)?, self.real(b)?);
                 Ok(Num::Double(self.b.ins().fdiv(rx, ry)))
             }
             (Opcode::Mod, Scalar::Long(x), Scalar::Long(y)) => {
@@ -4328,6 +4721,29 @@ impl<'a> Emit<'a> {
 
     /// `num` written to the zval at `base + at` with the type word it
     /// turned out.
+    ///
+    /// Variables of a file's own code outside any function, which php's analysis cannot type,
+    /// incremented and multiplied past `PHP_INT_MAX`:
+    ///
+    /// ```php
+    /// $a = PHP_INT_MAX - 3; $t = [];
+    /// for ($i = 0; $i < 8; $i++) { $a++; $b = $a * 2; $c = $i * 3 - 1; $t[] = gettype($a) . ":" . $b . ":" . $c; }
+    /// echo implode(",", $t), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// integer:1.844674407371E+19:-1,integer:1.844674407371E+19:2,integer:1.844674407371E+19:5,double:1.844674407371E+19:8,double:1.844674407371E+19:11,double:1.844674407371E+19:14,double:1.844674407371E+19:17,double:1.844674407371E+19:20
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// $a = PHP_INT_MAX - 3; $t = [];
+    /// for ($i = 0; $i < 8; $i++) { $a++; $b = $a * 2; $c = $i * 3 - 1; $t[] = gettype($a) . ":" . $b . ":" . $c; }
+    /// echo implode(",", $t), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// integer:1.844674407371E+19:-1,integer:1.844674407371E+19:2,integer:1.844674407371E+19:5,double:1.844674407371E+19:8,double:1.844674407371E+19:11,double:1.844674407371E+19:14,double:1.844674407371E+19:17,double:1.844674407371E+19:20
+    /// ```
     fn write_num(&mut self, base: Value, at: i32, num: Num) {
         match num {
             Num::Long(x) => self.write(base, at, Scalar::Long(x)),
@@ -4337,13 +4753,27 @@ impl<'a> Emit<'a> {
                 long,
                 double,
             } => {
-                let bits = self.b.ins().bitcast(I64, MemFlagsData::new(), double);
-                let word = self.b.ins().select(overflowed, bits, long);
-                let as_double = self.b.ins().iconst(I32, tag(ZvalType::Double));
-                let as_long = self.b.ins().iconst(I32, tag(ZvalType::Long));
-                let info = self.b.ins().select(overflowed, as_double, as_long);
-                self.b.ins().store(trusted(), word, base, at);
-                self.b.ins().store(trusted(), info, base, at + TYPE_AT);
+                // The double written on its own cold way, as php's
+                // `zend_jit_math_long_long` writes an overflow's, so the
+                // way a long takes makes none.
+                let (as_long, as_double, done) = (
+                    self.b.create_block(),
+                    self.b.create_block(),
+                    self.b.create_block(),
+                );
+                self.b.set_cold_block(as_double);
+                self.b.ins().brif(overflowed, as_double, &[], as_long, &[]);
+                for (block, held) in [
+                    (as_long, Scalar::Long(long)),
+                    (as_double, Scalar::Double(double)),
+                ] {
+                    self.b.switch_to_block(block);
+                    self.b.seal_block(block);
+                    self.write(base, at, held);
+                    self.b.ins().jump(done, &[]);
+                }
+                self.b.switch_to_block(done);
+                self.b.seal_block(done);
             }
         }
     }
