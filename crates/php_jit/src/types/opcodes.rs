@@ -508,14 +508,16 @@ pub(super) enum Arith {
 }
 
 impl Arith {
-    /// Whether operands of `a` and `b` are the ones served.
+    /// Whether operands of `a` and `b` are the ones served: a number of
+    /// either kind tested where it is read, as `zend_jit_math_helper`
+    /// tests an operand php's inference types `MAY_BE_LONG|MAY_BE_DOUBLE`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:5332-5520`).
     pub(super) fn serves(self, a: Types, b: Types) -> bool {
         let one = |t: Types, of: Types| t == of;
+        let number =
+            |t: Types| one(t, Types::LONG) || one(t, Types::DOUBLE) || one(t, Types::NUMBER);
         match self {
-            Arith::Numbers => {
-                (one(a, Types::LONG) || one(a, Types::DOUBLE))
-                    && (one(b, Types::LONG) || one(b, Types::DOUBLE))
-            }
+            Arith::Numbers => number(a) && number(b),
             Arith::Longs => one(a, Types::LONG) && one(b, Types::LONG),
         }
     }

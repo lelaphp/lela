@@ -2479,8 +2479,6 @@ impl<'a> Emit<'a> {
     /// The arithmetic `op` over the opline's two operands, written to what
     /// it writes: its `out`, or the variable an `ASSIGN_OP` assigns.
     fn arithmetic(&mut self, at: OpId, line: &Line, op: Opcode) -> Result<(), Abort> {
-        let a = self.scalar(at, line.op1)?;
-        let b = self.scalar(at, line.op2)?;
         let raises = if cannot_raise(op, line.op2) {
             None
         } else {
@@ -2488,13 +2486,153 @@ impl<'a> Emit<'a> {
                 mismatch("an arithmetic that cannot leave")
             })?))
         };
-        let num = self.binary(op, a, b, raises)?;
+        let num = match (self.either(at, line.op1)?, self.either(at, line.op2)?) {
+            (None, None) => {
+                let a = self.scalar(at, line.op1)?;
+                let b = self.scalar(at, line.op2)?;
+                self.binary(op, a, b, raises)?
+            }
+            (a, b) => self.dispatched(at, line, op, [a, b], raises)?,
+        };
         let defs: Vec<ValueId> = [line.out, line.op1_def].into_iter().flatten().collect();
         let num = self.settle(at, &defs, num)?;
         for value in defs {
             self.define_num(value, num)?;
         }
         Ok(())
+    }
+
+    /// The slot of an operand of the inline op at `at` that holds a
+    /// number of either kind, which no guard before the op holds to one:
+    /// read by its type where it is read, as `zend_jit_math_helper` tests
+    /// it.
+    fn either(&self, at: OpId, operand: Operand) -> Result<Option<Slot>, Abort> {
+        let Operand::Value(value) = operand else {
+            return Ok(None);
+        };
+        let held = self.value(value)?;
+        if held.home == Home::Register || held.types != Types::NUMBER {
+            return Ok(None);
+        }
+        Ok(match self.kind_at(at, value)? {
+            (None, false) => Some(held.slot),
+            _ => None,
+        })
+    }
+
+    /// `op` over operands of which those in `either` hold a number of
+    /// either kind, as `zend_jit_math_helper` serves them
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:5332-5520`): each such operand's
+    /// type tested, the operation made for each pair of kinds, and what
+    /// it made carried to one block as a number of either kind.
+    fn dispatched(
+        &mut self,
+        at: OpId,
+        line: &Line,
+        op: Opcode,
+        either: [Option<Slot>; 2],
+        raises: Option<Refuse>,
+    ) -> Result<Num, Abort> {
+        let fixed = [
+            either[0].map_or_else(|| self.scalar(at, line.op1).map(Some), |_| Ok(None))?,
+            either[1].map_or_else(|| self.scalar(at, line.op2).map(Some), |_| Ok(None))?,
+        ];
+        let join = self.b.create_block();
+        let as_double = self.b.append_block_param(join, I8);
+        let long = self.b.append_block_param(join, I64);
+        let double = self.b.append_block_param(join, F64);
+        let kinds = |slot: Option<Slot>| -> &'static [Kind] {
+            if slot.is_some() {
+                &[Kind::Long, Kind::Double]
+            } else {
+                &[Kind::Long]
+            }
+        };
+        // One block per pair of kinds, reached by testing each operand of
+        // either kind in turn.
+        let mut pairs: Vec<(Kind, Kind, Block)> = Vec::new();
+        for &ka in kinds(either[0]) {
+            for &kb in kinds(either[1]) {
+                pairs.push((ka, kb, self.b.create_block()));
+            }
+        }
+        let tested = |emit: &mut Self, slot: Slot| -> Result<Value, Abort> {
+            let (room, at) = emit.place(slot)?;
+            let byte = emit.b.ins().load(I8, trusted(), room, at + TYPE_AT);
+            Ok(emit
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, byte, tag(ZvalType::Long)))
+        };
+        match either {
+            [Some(a), Some(b)] => {
+                let (first_long, first_double) = (self.b.create_block(), self.b.create_block());
+                let is_long = tested(self, a)?;
+                self.b
+                    .ins()
+                    .brif(is_long, first_long, &[], first_double, &[]);
+                for (block, first) in [(first_long, 0), (first_double, 2)] {
+                    self.b.switch_to_block(block);
+                    self.b.seal_block(block);
+                    let is_long = tested(self, b)?;
+                    let (to_long, to_double) = (pairs[first].2, pairs[first + 1].2);
+                    self.b.ins().brif(is_long, to_long, &[], to_double, &[]);
+                }
+            }
+            [Some(slot), None] | [None, Some(slot)] => {
+                let is_long = tested(self, slot)?;
+                self.b.ins().brif(is_long, pairs[0].2, &[], pairs[1].2, &[]);
+            }
+            [None, None] => return Err(mismatch("a dispatch over no number of either kind")),
+        }
+        let (mut longs, mut doubles) = (true, true);
+        for (ka, kb, block) in pairs.clone() {
+            self.b.switch_to_block(block);
+            self.b.seal_block(block);
+            let read =
+                |emit: &mut Self, slot: Option<Slot>, kind: Kind, fixed: Option<Scalar>| match (
+                    slot, fixed,
+                ) {
+                    (Some(slot), _) => emit.load(slot, kind, false),
+                    (None, Some(scalar)) => Ok(scalar),
+                    (None, None) => Err(mismatch("an operand of no kind")),
+                };
+            let a = read(self, either[0], ka, fixed[0])?;
+            let b = read(self, either[1], kb, fixed[1])?;
+            let num = self.binary(op, a, b, raises)?;
+            longs &= matches!(num, Num::Long(_));
+            doubles &= matches!(num, Num::Double(_));
+            let (is_double, l, d) = match num {
+                Num::Long(l) => {
+                    let d = self.b.ins().f64const(0.0);
+                    (self.b.ins().iconst(I8, 0), l, d)
+                }
+                Num::Double(d) => {
+                    let l = self.b.ins().iconst(I64, 0);
+                    (self.b.ins().iconst(I8, 1), l, d)
+                }
+                Num::Either {
+                    overflowed,
+                    long,
+                    double,
+                } => (overflowed, long, double),
+            };
+            self.b
+                .ins()
+                .jump(join, &[is_double.into(), l.into(), d.into()]);
+        }
+        self.b.switch_to_block(join);
+        self.b.seal_block(join);
+        // A kind every pair made is that kind.
+        Ok(match (longs, doubles) {
+            (true, _) => Num::Long(long),
+            (_, true) => Num::Double(double),
+            _ => Num::Either {
+                overflowed: as_double,
+                long,
+                double,
+            },
+        })
     }
 
     /// An increment or a decrement of a number in a variable: the variable
