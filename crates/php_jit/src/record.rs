@@ -784,16 +784,76 @@ pub(crate) fn headed(
     if root == from {
         return Ok(Headed::Stands(frame));
     }
+    stepped_on(req, frame, code, |now| {
+        if now == root {
+            Some(Headed::Stepped)
+        } else if now.0 < from.0 || now.0 > root.0 {
+            Some(Headed::Away)
+        } else {
+            None
+        }
+    })
+}
+
+/// `frame`, which stands at the condition loop `header` roots at
+/// ([`loop_root`]), stepped through that condition and the jump it ends
+/// in, as php's interpreter serves them at the loop's header once the
+/// header's handler has counted the visit: `Stepped` where they went, the
+/// body or past the loop; `Away` where the condition threw or left. A
+/// loop rooted where its back edge lands has no condition before its
+/// body, and nothing is stepped: `Stands`. The back edge's site, which
+/// would count the same visit again, is not asked: a step serves a
+/// back edge with `Nop` at its safepoint (`tier::step`).
+pub(crate) fn served(
+    req: &mut Request,
+    frame: FrameRef,
+    header: SafepointIdx,
+) -> Result<Headed, Fatal> {
+    let mut view = UnitView::new(req);
+    let Some(code) = tier::func(req, frame)
+        .filter(|func| view.hold(req, *func))
+        .and_then(|func| view.op_array(func))
+    else {
+        return Ok(Headed::Unstepped);
+    };
+    let Some(site) = code.safepoints.get(header.0 as usize).copied() else {
+        return Ok(Headed::Unstepped);
+    };
+    let root = rooted(code, site);
+    if root == site || position(req, frame) != root {
+        return Ok(Headed::Stands(frame));
+    }
+    let Some(end) = (code.oplines.iter().enumerate().skip(root.0 as usize))
+        .find(|(_, op)| op.jump_target() == Some(site))
+        .and_then(|(at, _)| u32::try_from(at).ok())
+    else {
+        return Ok(Headed::Stands(frame));
+    };
+    stepped_on(req, frame, code, |now| {
+        (now.0 < root.0 || now.0 > end).then_some(Headed::Stepped as fn(FrameRef) -> Headed)
+    })
+}
+
+/// `frame` stepped one handler at a time, the calls it makes stepped
+/// through, until `reached` says, of the opline it stands at in its own
+/// op array `code`, where it is; `Away` where it leaves its serving's
+/// entry first, or a step returned past it, moved it or threw.
+fn stepped_on(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    reached: impl Fn(OplineIdx) -> Option<fn(FrameRef) -> Headed>,
+) -> Result<Headed, Fatal> {
     let (mut at, mut depth) = (frame, 0u32);
     loop {
         if depth == 0 {
             let now = position(req, at);
-            if now == root {
-                return Ok(Headed::Stepped(at));
+            if let Some(headed) = reached(now) {
+                return Ok(headed(at));
             }
             let leaving = (code.oplines.get(now.0 as usize))
                 .is_some_and(|op| leaves(op.opcode) && at == tier::entry(req));
-            if now.0 < from.0 || now.0 > root.0 || leaving {
+            if leaving {
                 return Ok(Headed::Away(at));
             }
         }
