@@ -814,6 +814,59 @@ pub(crate) fn headed(
     })
 }
 
+/// Where a frame a return landed in stands once stepped on toward the
+/// header of the loop its landing is in ([`arrived`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Arrived {
+    /// At the opline php's trace of the loop roots at.
+    Header(FrameRef),
+    /// At a call the body makes first, which php's interpreter makes,
+    /// its entry counted, before the header is reached: not stepped.
+    Call(FrameRef),
+    /// Somewhere else first, a `break`, a return or a throw, or past
+    /// the loop: the interpreter goes on at the frame named.
+    Away(FrameRef),
+    /// Nothing was stepped: its op array is not one a trace reads.
+    Unstepped,
+}
+
+/// `frame`, which a return left at its landing in the body of loop
+/// `header`, stepped on as php's interpreter runs the body's rest, to
+/// the opline php's trace of the loop roots at ([`loop_root`]), short of
+/// any call the body makes on the way, whose entry php's interpreter
+/// counts. A fatal is the step's.
+pub(crate) fn arrived(
+    req: &mut Request,
+    frame: FrameRef,
+    header: SafepointIdx,
+    folds: Folds,
+) -> Result<Arrived, Fatal> {
+    let from = position(req, frame);
+    let mut view = UnitView::new(req);
+    let Some(code) = served_code(req, &mut view, frame) else {
+        return Ok(Arrived::Unstepped);
+    };
+    let Some(root) = loop_root(code, header, folds) else {
+        return Ok(Arrived::Unstepped);
+    };
+    let calls =
+        |now: OplineIdx| (code.oplines.get(now.0 as usize)).is_some_and(|op| is_do_call(op.opcode));
+    let (reached, at) = stepped_on(req, frame, code, |now| {
+        if now == root || calls(now) {
+            Some(Reached::There)
+        } else if now.0 < from.0 || now.0 > root.0 {
+            Some(Reached::Away)
+        } else {
+            None
+        }
+    })?;
+    Ok(match reached {
+        Reached::There if position(req, at) == root => Arrived::Header(at),
+        Reached::There => Arrived::Call(at),
+        Reached::Away => Arrived::Away(at),
+    })
+}
+
 /// The op array `frame` runs, as `view` holds it; none where it runs no
 /// op array a trace reads.
 fn served_code<'v>(req: &Request, view: &'v mut UnitView, frame: FrameRef) -> Option<&'v OpArray> {
