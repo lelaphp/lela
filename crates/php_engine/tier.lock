@@ -66,6 +66,7 @@ tier::Fatal::error
 tier::Flow
 tier::FrameLayout
 tier::FrameLayout::annex
+tier::FrameLayout::building
 tier::FrameLayout::cache
 tier::FrameLayout::caller
 tier::FrameLayout::caller_loop
@@ -88,12 +89,14 @@ tier::FrameLayout::record
 tier::FrameLayout::record_at
 tier::FrameLayout::record_len
 tier::FrameLayout::record_placed
+tier::FrameLayout::return_unused
 tier::FrameLayout::returns_to
 tier::FrameLayout::room
 tier::FrameLayout::slot
 tier::FrameLayout::this
 tier::FrameLayout::top
 tier::FrameRef
+tier::FramelessAt
 tier::FuncRef
 tier::FuncRef::at
 tier::FuncRef::offset
@@ -214,11 +217,12 @@ tier::call_held
 tier::call_native
 tier::concat
 tier::dispatch_held
-tier::frameless_held
+tier::frameless_call
 tier::free_cv
 tier::free_this
 tier::lookup_element
 tier::make_ref
+tier::pop_call
 tier::release
 tier::return_entry
 tier::rope_end

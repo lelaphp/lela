@@ -17,12 +17,12 @@ use super::{Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupp
 use crate::table::TraceName;
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DEFAULT_CALL, DIM_AND, DIM_CONCAT,
-    DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, ENUM_OWN, FIB, Fixture, HASH_FETCH_W,
-    HASH_IS, HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL,
-    METHOD_OWN, METHOD_SCOPED, NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE, NEW_CALL,
-    OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, PARENT_THIS, REF_CALL, REF_WRITE,
-    SIEVE, SPECTRALNORM, STATIC_CALL, STATIC_OWN, STATIC_SCOPED, STATIC_SELF, STATIC_THIS,
-    STRING_BUILD, STRING_MATCH, TEMP_CALL, held,
+    DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, ENUM_OWN, FIB, FRAMELESS_CALL, Fixture,
+    HASH_FETCH_W, HASH_IS, HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT,
+    METHOD_CALL, METHOD_OWN, METHOD_SCOPED, NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE,
+    NEW_CALL, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, PARENT_THIS, REF_CALL,
+    REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL, STATIC_OWN, STATIC_SCOPED, STATIC_SELF,
+    STATIC_THIS, STRING_BUILD, STRING_MATCH, TEMP_CALL, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -74,18 +74,20 @@ fn constants_named(ir: &TraceIr, clif: &str) -> String {
         _ => Vec::new(),
     });
     // A constant no scalar is, which an inline form copies from its op
-    // array's table.
+    // array's table, and which a frameless call hands its native.
     let copied = ir.ops.iter().flat_map(|op| match op {
-        Op::Line(line) if line.form == Form::Inline => [line.op1, line.op2, line.data]
-            .into_iter()
-            .filter_map(|operand| match operand {
-                Operand::Constant(Constant::Other(idx)) => ir
-                    .frames
-                    .get(usize::from(line.frame.0))
-                    .map(|frame| frame.literals + 16 * idx.0 as usize),
-                _ => None,
-            })
-            .collect::<Vec<_>>(),
+        Op::Line(line) if line.form == Form::Inline || line.opcode.is_frameless_icall() => {
+            [line.op1, line.op2, line.data]
+                .into_iter()
+                .filter_map(|operand| match operand {
+                    Operand::Constant(Constant::Other(idx)) => ir
+                        .frames
+                        .get(usize::from(line.frame.0))
+                        .map(|frame| frame.literals + 16 * idx.0 as usize),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        }
         _ => Vec::new(),
     });
     let mut seen = Vec::new();
@@ -296,12 +298,25 @@ fn an_element_write_lowers_inline_and_steps_where_it_cannot() -> Result<(), Stri
     Ok(())
 }
 
-/// A native's call pushed in place and its `DO_ICALL` served by the
-/// `handle` kernel, the `Stood` written past it (#2963).
+/// A native's call pushed in place and its `DO_ICALL` made from
+/// compiled code: the call made the one served, the native served
+/// through [`Kernel::CallNative`], the interrupt tested, the call popped
+/// in place and the throw tested, the `Stood` written past it (#2963,
+/// #3560).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_natives_call_lowers_in_place() -> Result<(), String> {
     lowered(NATIVE_CALL).map(drop)
+}
+
+/// A frameless call made from compiled code: the operand zvals handed
+/// to [`Kernel::Frameless`], which reads no opline, then the interrupt
+/// tested; a variable that may be unset or hold a reference tested
+/// first, its handler's through [`Kernel::Handle`] where it is (#3560).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_frameless_call_lowers_in_place() -> Result<(), String> {
+    lowered(FRAMELESS_CALL).map(drop)
 }
 
 /// Strings compared, measured and cast inline: the comparison of two
@@ -507,9 +522,9 @@ fn a_link_answers_its_last_exit() -> Result<(), String> {
 }
 
 /// A native's call is pushed in place, its sends of constants stepped,
-/// the operands they read stored first, and its `DO_ICALL` served by its
-/// handler's internal arm through [`Kernel::CallNative`], with no
-/// opline read and no dispatch (#2963, #3340, #3560).
+/// the operands they read stored first, and its `DO_ICALL` made in
+/// place, the native alone served through [`Kernel::CallNative`], with
+/// no opline read and no dispatch (#2963, #3340, #3560).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_natives_call_is_served_by_its_handler() -> Result<(), String> {

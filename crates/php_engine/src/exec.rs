@@ -817,12 +817,12 @@ impl CallInfo {
     /// is not on.
     const CALL: u32 = 1 << 3;
     /// The call is being built, its `SEND_*` oplines placing arguments.
-    const BUILDING: u32 = 1 << 4;
+    pub(crate) const BUILDING: u32 = 1 << 4;
     /// `!USED_RET()` (`Z/Zend/zend_API.h`): the `DO_*CALL` serving the
     /// call writes its `result` to an `UNUSED` operand. A call
     /// `zend_call_function` makes reads it, as php's test finds the
     /// frame before the callee's internal.
-    const RETURN_UNUSED: u32 = 1 << 5;
+    pub(crate) const RETURN_UNUSED: u32 = 1 << 5;
     /// `ZEND_CALL_DYNAMIC`: the callee was named as the program served,
     /// by `INIT_DYNAMIC_CALL` or `INIT_USER_CALL`, which a native that
     /// reads its caller's frame refuses (`zend_forbid_dynamic_call`).
@@ -2964,12 +2964,36 @@ pub(crate) fn frameless_operand(
     };
     if kind != OperandKind::Cv {
         *slot = Zval::UNDEF;
-        return (z, true);
     }
-    if named {
-        z.addref();
+    frameless_owner(z, kind, named)
+}
+
+/// Whether a name reaches the variables of the frame `header` is, so a
+/// frameless call's `CV` operand takes one more owner
+/// ([`frameless_owner`]): a frame that carries an annex, its symbol
+/// table or its extra arguments, or none at all.
+pub(crate) fn frameless_named(header: Option<&Header>) -> bool {
+    header.is_none_or(|header| header.annex.is_some())
+}
+
+/// What a frameless call's record holds of the operand `z` of `kind`,
+/// read where it stands and neither `UNDEF` nor a reference, and whether
+/// it owns it, as [`frameless_operand`] reads it from its slot and
+/// compiled code hands it over: a `TMP` or a `VAR` moved out of its
+/// slot is owned, a `CONST` borrowed, and a `CV` borrowed but in a frame
+/// whose variables a name reaches (`named`), where it takes one more
+/// owner.
+pub(crate) fn frameless_owner(z: Zval, kind: OperandKind, named: bool) -> (Zval, bool) {
+    match kind {
+        OperandKind::Tmp | OperandKind::Var => (z, true),
+        OperandKind::Cv => {
+            if named {
+                z.addref();
+            }
+            (z, named)
+        }
+        OperandKind::Const | OperandKind::Unused => (z, false),
     }
-    (z, named)
 }
 
 /// `FREE_OP`: a `TMP` or a `VAR` operand read by [`operand`] and done

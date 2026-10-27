@@ -101,6 +101,20 @@ pub(crate) const NATIVE_CALL: Fixture = Fixture {
     ],
 };
 
+/// A frameless call in a loop, `class_exists` and `property_exists`,
+/// Core's frameless natives, over a constant, a variable and a
+/// temporary, made from compiled code as php's `jit_frameless_icall*`
+/// makes it (#3560).
+pub(crate) const FRAMELESS_CALL: Fixture = Fixture {
+    name: "frameless_call",
+    program: "frameless_call",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "1"),
+    ],
+};
+
 /// A call as nbody's main loop calls `advance`: two arrays sent by
 /// reference to typed parameters, an array and a float by value, made in
 /// place with each reference's `RECV` check inline (#3340).

@@ -36,7 +36,7 @@ use std::sync::atomic::Ordering;
 
 use php_engine::tier::Flow;
 use php_engine::tier::{
-    self, Epoch, Fatal, FrameRef, Held, Request, SafepointIdx, Site, Stepped, Word,
+    self, Epoch, Fatal, FrameRef, FuncRef, Held, Request, SafepointIdx, Site, Stepped, Word,
 };
 use php_unit::OplineIdx;
 
@@ -1068,13 +1068,46 @@ pub(crate) fn hot(
     shared: &Shared,
 ) -> Flow {
     let mut stepped = false;
-    let (flow, stood, activated) = loop {
+    loop {
+        let (flow, stood, activated) = match recordings(req, frame, claim, shared, &mut stepped) {
+            Ok(last) => last,
+            Err(left) => return left,
+        };
+        written(req, shared, &TraceEvent::Done);
+        if let Some(Stood::Header(at, func, header)) = stood {
+            match counted(req, shared, at, func, header) {
+                Counted::Again(again) => {
+                    (frame, claim) = (at, again);
+                    continue;
+                }
+                Counted::Stands => {}
+                Counted::On(on) => return on,
+            }
+        }
+        return went_on(req, shared, flow, stood, activated);
+    }
+}
+
+/// The recordings a claim of `frame`'s word makes, [`hot`]'s, the inner
+/// loop each repeats at once included: where the last stopped, the flow
+/// back to the loop, what its handler there is, and whether it stopped at
+/// a call's activation; `Err` with the flow where a recording was never
+/// made or bailed out. `stepped` says whether anything was stepped,
+/// across every call for one [`hot`].
+fn recordings(
+    req: &mut Request,
+    mut frame: FrameRef,
+    mut claim: Claim,
+    shared: &Shared,
+    stepped: &mut bool,
+) -> Result<(Flow, Option<Stood>, bool), Flow> {
+    loop {
         let start = claim.start();
         let behind = match begins(req, frame, start, claim.holder()) {
             Ok(Begins::Behind(condition)) => Some(condition),
             Ok(Begins::Stands) => None,
             Ok(Begins::Stepped(header)) => {
-                (frame, stepped) = (header, true);
+                (frame, *stepped) = (header, true);
                 None
             }
             // php's interpreter runs the header's own handler, which php
@@ -1083,11 +1116,11 @@ pub(crate) fn hot(
             // (`record::header_at`).
             Ok(Begins::Uncounted) => {
                 policy::settle(claim, &Outcome::Uncounted);
-                return resumed(frame, stepped);
+                return Err(resumed(frame, *stepped));
             }
             Err(flow) => {
                 policy::settle(claim, &Outcome::Released);
-                return flow;
+                return Err(flow);
             }
         };
         let epoch = table::holding(req, &shared.policy, &shared.perf);
@@ -1096,7 +1129,7 @@ pub(crate) fn hot(
         // A frame that shows no op array has no place to record from.
         let Some(name) = started(req, shared, frame, next, start, behind) else {
             policy::settle(claim, &Outcome::Released);
-            break (resumed(frame, stepped), None, false);
+            return Ok((resumed(frame, *stepped), None, false));
         };
         if let Some(refusal) = refused(table, start) {
             let recorded = record::refused(req, frame, start, refusal);
@@ -1110,7 +1143,7 @@ pub(crate) fn hot(
                 },
                 GoesOn::Past,
             );
-            break (resumed(frame, stepped), None, false);
+            return Ok((resumed(frame, *stepped), None, false));
         }
         let opening = side_opened(table, start, behind);
         let claimed = claim.holder();
@@ -1121,17 +1154,18 @@ pub(crate) fn hot(
                 // the start line and nothing counted against the root.
                 Err(bailed) => {
                     policy::settle(claim, &Outcome::Released);
-                    return match bailed {
+                    return Err(match bailed {
                         Bailed::Fatal(fatal) => Flow::Bail(fatal),
                         Bailed::Unwinding(at) => Flow::Resume(at),
-                    };
+                    });
                 }
             };
-        stepped |= ended.stepped;
+        *stepped |= ended.stepped;
         let stop = recorded.record.stop;
         let Some((rooted, name)) = rerooted(req, shared, claim, name, &ended) else {
-            break (resumed(ended.at, stepped), None, ended.activated);
+            return Ok((resumed(ended.at, *stepped), None, ended.activated));
         };
+        let header = header_of(&rooted);
         let job = Job {
             recorded,
             claim: rooted,
@@ -1162,22 +1196,195 @@ pub(crate) fn hot(
             // stopped at, whose handler is the trace compiled there: the
             // one just published where it repeats, at its loop's header,
             // its recursive call's entry or its recursive return's
-            // landing, or the one the recording stopped at.
-            let stood = match (outcome, stop) {
+            // landing, or the one the recording stopped at; at a loop's
+            // header whose trace was not published, the header's handler
+            // still counts the loop.
+            let stood = match (outcome, stop, header) {
                 (
                     Some(Outcome::Published(id)),
                     Stop::Loop | Stop::RecursiveCall | Stop::RecursiveRet,
-                ) => Some(id),
-                _ => ended.stood,
+                    _,
+                ) => Some(Stood::Trace(ended.at, id)),
+                (Some(Outcome::Abort(_)), Stop::Loop, Some((func, header))) => {
+                    Some(Stood::Header(ended.at, func, header))
+                }
+                _ => ended.stood.map(|id| Stood::Trace(ended.at, id)),
             };
-            let stood = stood.map(|id| (ended.at, id));
-            break (resumed(ended.at, stepped), stood, ended.activated);
+            return Ok((resumed(ended.at, *stepped), stood, ended.activated));
         };
         frame = ended.at;
         claim = inner;
+    }
+}
+
+/// The loop header a loop's claim holds the word of, by its op array and
+/// safepoint; none for any other claim.
+fn header_of(claim: &Claim) -> Option<(FuncRef, SafepointIdx)> {
+    match (claim.start(), claim.holder()) {
+        (Start::Loop, Holder::Root { func, at, .. }) => Some((*func, *at)),
+        _ => None,
+    }
+}
+
+/// What php's interpreter meets at the opline a recording stopped at,
+/// where that opline's handler is the tier's.
+#[derive(Debug, Clone, Copy)]
+enum Stood {
+    /// The compiled trace rooted there, which it enters at once.
+    Trace(FrameRef, TraceId),
+    /// The header of the loop, in this op array, whose recording closed
+    /// there and published nothing: the handler counts the loop.
+    Header(FrameRef, FuncRef, SafepointIdx),
+}
+
+/// What came of the count at a loop's header ([`counted`]).
+enum Counted {
+    /// The count claimed the header's word, recorded from at once.
+    Again(Claim),
+    /// Nothing was counted or stepped: the interpreter goes on where the
+    /// recording stopped, through [`went_on`], which enters a trace a
+    /// thread published at the header meanwhile.
+    Stands,
+    /// The interpreter goes on where the loop's condition went.
+    On(Flow),
+}
+
+/// php's interpreter going on at the header of loop `header` of `func`,
+/// where `frame`'s recording of the loop closed and the loop's trace
+/// failed to compile: php's `zend_jit_trace_counter_helper`, which the
+/// header's handler still is, counts the visit there and, at
+/// `opcache.jit_hot_loop`, calls `zend_jit_trace_hot_root` again
+/// (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:464-497`), since an abort
+/// that may recover leaves the header's handler as it stood
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:8262-8268`). Here the header's
+/// word is visited as a site visits it, claimed for a recording from
+/// the header where its heat reaches the threshold. A word that is not
+/// cold, blacklisted at this abort or claimed or published elsewhere, is
+/// not visited, and the interpreter goes on where it stood. Where the visit claimed nothing, the loop's
+/// condition, which its back edge counts php's visit of, is stepped
+/// through to where it goes, so the back edge does not count it twice
+/// ([`record::served`]).
+///
+/// A loop whose trace calls 31 functions, more op arrays than php's
+/// `ZEND_JIT_TRACE_MAX_FUNCS` lets a trace's build analyse
+/// (`analysis::MAX_FUNCS`), aborts at each compile; the interpreter goes
+/// on at the header after each, and the sixth visit, where the condition
+/// leaves the loop, records the loop's exit to `$main`'s return (#3576):
+///
+/// ```php
+/// function f0($x) { return $x + 0; } function f1($x) { return $x + 1; } function f2($x) { return $x + 2; } function f3($x) { return $x + 3; } function f4($x) { return $x + 4; } function f5($x) { return $x + 5; } function f6($x) { return $x + 6; } function f7($x) { return $x + 7; }
+/// function f8($x) { return $x + 8; } function f9($x) { return $x + 9; } function f10($x) { return $x + 10; } function f11($x) { return $x + 11; } function f12($x) { return $x + 12; } function f13($x) { return $x + 13; } function f14($x) { return $x + 14; } function f15($x) { return $x + 15; }
+/// function f16($x) { return $x + 16; } function f17($x) { return $x + 17; } function f18($x) { return $x + 18; } function f19($x) { return $x + 19; } function f20($x) { return $x + 20; } function f21($x) { return $x + 21; } function f22($x) { return $x + 22; } function f23($x) { return $x + 23; }
+/// function f24($x) { return $x + 24; } function f25($x) { return $x + 25; } function f26($x) { return $x + 26; } function f27($x) { return $x + 27; } function f28($x) { return $x + 28; } function f29($x) { return $x + 29; } function f30($x) { return $x + 30; }
+/// $s = 0;
+/// for ($i = 0; $i < 5; $i++) {
+///     $s += f0($i); $s += f1($i); $s += f2($i); $s += f3($i); $s += f4($i); $s += f5($i); $s += f6($i); $s += f7($i);
+///     $s += f8($i); $s += f9($i); $s += f10($i); $s += f11($i); $s += f12($i); $s += f13($i); $s += f14($i); $s += f15($i);
+///     $s += f16($i); $s += f17($i); $s += f18($i); $s += f19($i); $s += f20($i); $s += f21($i); $s += f22($i); $s += f23($i);
+///     $s += f24($i); $s += f25($i); $s += f26($i); $s += f27($i); $s += f28($i); $s += f29($i); $s += f30($i);
+/// }
+/// echo $s, "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 2635
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:6
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) $main() %s:7
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 abort (JIT compilation error)
+///
+/// ---- TRACE 1 start (loop) $main() %s:7
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 abort (JIT compilation error)
+///
+/// ---- TRACE 1 start (loop) $main() %s:7
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 abort (JIT compilation error)
+///
+/// ---- TRACE 1 start (loop) $main() %s:7
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 abort (JIT compilation error)
+///
+/// ---- TRACE 1 start (loop) $main() %s:7
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 abort (JIT compilation error)
+///
+/// ---- TRACE 1 start (loop) $main() %s:7
+/// ---- TRACE 1 stop (return)
+/// ---- TRACE 1 compiled
+///
+/// ```
+///
+/// The same under the force lane and the exit-fuzz lane:
+///
+/// ```php
+/// function f0($x) { return $x + 0; } function f1($x) { return $x + 1; } function f2($x) { return $x + 2; } function f3($x) { return $x + 3; } function f4($x) { return $x + 4; } function f5($x) { return $x + 5; } function f6($x) { return $x + 6; } function f7($x) { return $x + 7; }
+/// function f8($x) { return $x + 8; } function f9($x) { return $x + 9; } function f10($x) { return $x + 10; } function f11($x) { return $x + 11; } function f12($x) { return $x + 12; } function f13($x) { return $x + 13; } function f14($x) { return $x + 14; } function f15($x) { return $x + 15; }
+/// function f16($x) { return $x + 16; } function f17($x) { return $x + 17; } function f18($x) { return $x + 18; } function f19($x) { return $x + 19; } function f20($x) { return $x + 20; } function f21($x) { return $x + 21; } function f22($x) { return $x + 22; } function f23($x) { return $x + 23; }
+/// function f24($x) { return $x + 24; } function f25($x) { return $x + 25; } function f26($x) { return $x + 26; } function f27($x) { return $x + 27; } function f28($x) { return $x + 28; } function f29($x) { return $x + 29; } function f30($x) { return $x + 30; }
+/// $s = 0;
+/// for ($i = 0; $i < 5; $i++) {
+///     $s += f0($i); $s += f1($i); $s += f2($i); $s += f3($i); $s += f4($i); $s += f5($i); $s += f6($i); $s += f7($i);
+///     $s += f8($i); $s += f9($i); $s += f10($i); $s += f11($i); $s += f12($i); $s += f13($i); $s += f14($i); $s += f15($i);
+///     $s += f16($i); $s += f17($i); $s += f18($i); $s += f19($i); $s += f20($i); $s += f21($i); $s += f22($i); $s += f23($i);
+///     $s += f24($i); $s += f25($i); $s += f26($i); $s += f27($i); $s += f28($i); $s += f29($i); $s += f30($i);
+/// }
+/// echo $s, "\n";
+/// ```
+/// ```expect regime=jit-force process
+/// 2635
+/// ```
+///
+/// ```php
+/// function f0($x) { return $x + 0; } function f1($x) { return $x + 1; } function f2($x) { return $x + 2; } function f3($x) { return $x + 3; } function f4($x) { return $x + 4; } function f5($x) { return $x + 5; } function f6($x) { return $x + 6; } function f7($x) { return $x + 7; }
+/// function f8($x) { return $x + 8; } function f9($x) { return $x + 9; } function f10($x) { return $x + 10; } function f11($x) { return $x + 11; } function f12($x) { return $x + 12; } function f13($x) { return $x + 13; } function f14($x) { return $x + 14; } function f15($x) { return $x + 15; }
+/// function f16($x) { return $x + 16; } function f17($x) { return $x + 17; } function f18($x) { return $x + 18; } function f19($x) { return $x + 19; } function f20($x) { return $x + 20; } function f21($x) { return $x + 21; } function f22($x) { return $x + 22; } function f23($x) { return $x + 23; }
+/// function f24($x) { return $x + 24; } function f25($x) { return $x + 25; } function f26($x) { return $x + 26; } function f27($x) { return $x + 27; } function f28($x) { return $x + 28; } function f29($x) { return $x + 29; } function f30($x) { return $x + 30; }
+/// $s = 0;
+/// for ($i = 0; $i < 5; $i++) {
+///     $s += f0($i); $s += f1($i); $s += f2($i); $s += f3($i); $s += f4($i); $s += f5($i); $s += f6($i); $s += f7($i);
+///     $s += f8($i); $s += f9($i); $s += f10($i); $s += f11($i); $s += f12($i); $s += f13($i); $s += f14($i); $s += f15($i);
+///     $s += f16($i); $s += f17($i); $s += f18($i); $s += f19($i); $s += f20($i); $s += f21($i); $s += f22($i); $s += f23($i);
+///     $s += f24($i); $s += f25($i); $s += f26($i); $s += f27($i); $s += f28($i); $s += f29($i); $s += f30($i);
+/// }
+/// echo $s, "\n";
+/// ```
+/// ```expect regime=jit-exit-fuzz process
+/// 2635
+/// ```
+fn counted(
+    req: &mut Request,
+    shared: &Shared,
+    frame: FrameRef,
+    func: FuncRef,
+    header: SafepointIdx,
+) -> Counted {
+    let epoch = tier::epoch(req);
+    let word = epoch.word(func, header);
+    if policy::read(word) != State::Cold {
+        return Counted::Stands;
+    }
+    let claims = !quiet(req, Some(Site::Loop(header)));
+    let holder = || {
+        let table = table::of(req, &shared.policy, &shared.perf)?;
+        (!table.stopped()).then(|| Holder::Root {
+            epoch: epoch.clone(),
+            func,
+            at: header,
+        })
     };
-    written(req, shared, &TraceEvent::Done);
-    went_on(req, shared, flow, stood, activated)
+    match visit(word, &shared.policy, Start::Loop, claims, holder) {
+        Visited::Hot(claim) => return Counted::Again(claim),
+        Visited::Enter(_) => return Counted::Stands,
+        Visited::Continue => {}
+    }
+    match record::served(req, frame, header) {
+        Ok(Some(at)) => Counted::On(Flow::Resume(at)),
+        Ok(None) => Counted::Stands,
+        Err(fatal) => Counted::On(Flow::Bail(fatal)),
+    }
 }
 
 /// Where a recording that answered `flow` stopped, php's interpreter
@@ -1189,10 +1396,14 @@ fn went_on(
     req: &mut Request,
     shared: &Shared,
     flow: Flow,
-    stood: Option<(FrameRef, TraceId)>,
+    stood: Option<Stood>,
     activated: bool,
 ) -> Flow {
-    let ran = match (stood.filter(|(at, id)| opens(req, *at, *id, shared)), &flow) {
+    let trace = match stood {
+        Some(Stood::Trace(at, id)) if opens(req, at, id, shared) => Some((at, id)),
+        Some(Stood::Trace(..) | Stood::Header(..)) | None => None,
+    };
+    let ran = match (trace, &flow) {
         (Some((at, id)), _) => run_lent(req, at, id),
         // The callee's op array, as the epoch holds it; one of the
         // request's reads the sealed word, which nothing visits.

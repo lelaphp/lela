@@ -62,6 +62,8 @@ pub struct FrameLayout {
     leaves_by_kernel: u32,
     release_this: u32,
     send_by_ref: u32,
+    building: u32,
+    return_unused: u32,
     caller_loop: u32,
     numbered_from: u32,
     top: u32,
@@ -98,6 +100,8 @@ pub const FRAME: FrameLayout = FrameLayout {
     leaves_by_kernel: CallInfo::LEAVES_BY_KERNEL,
     release_this: CallInfo::RELEASE_THIS,
     send_by_ref: CallInfo::SEND_BY_REF,
+    building: CallInfo::BUILDING,
+    return_unused: CallInfo::RETURN_UNUSED,
     caller_loop: Header::CALLER_LOOP,
     numbered_from: Header::NUMBERED_FROM,
     top: word(STACK.top),
@@ -270,6 +274,22 @@ impl FrameLayout {
     #[must_use]
     pub const fn send_by_ref(&self) -> u32 {
         self.send_by_ref
+    }
+
+    /// The bit of a call whose `SEND_*` oplines are placing its
+    /// arguments, which its `DO_*CALL` clears as it makes the call the one
+    /// being served, php's `EG(current_execute_data) = call`.
+    #[must_use]
+    pub const fn building(&self) -> u32 {
+        self.building
+    }
+
+    /// The bit of a call being served whose `DO_*CALL` reads nothing it
+    /// returns, `!RETURN_VALUE_USED(opline)`, which its activation writes
+    /// beside clearing [`FrameLayout::building`].
+    #[must_use]
+    pub const fn return_unused(&self) -> u32 {
+        self.return_unused
     }
 
     /// The caller's bit that says the call was served from outside the
