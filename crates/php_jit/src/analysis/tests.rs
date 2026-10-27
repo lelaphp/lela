@@ -89,12 +89,17 @@ fn inferred(rest: &str) -> usize {
     at
 }
 
-/// The oplines whose value php types by the callee.
-const CALLS: [&str; 4] = [
+/// The oplines whose value php types by the callee, the frameless calls
+/// among them, which `zend_analyze_calls` maps as it maps the others.
+const CALLS: [&str; 8] = [
     "= DO_UCALL",
     "= DO_ICALL",
     "= DO_FCALL",
     "= DO_FCALL_BY_NAME",
+    "= FRAMELESS_ICALL_0",
+    "= FRAMELESS_ICALL_1",
+    "= FRAMELESS_ICALL_2",
+    "= FRAMELESS_ICALL_3",
 ];
 
 /// `line` as php prints it before inference: no line per CV, and no types

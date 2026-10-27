@@ -1,12 +1,12 @@
 //! `_zend_update_type_info`: the types an opline gives the variables it
 //! defines from the types of those it reads, opcode by opcode, with
-//! `zend_inference.c`'s helpers for arrays, binary operations, property
+//! `zend_inference.c`'s functions for arrays, binary operations, property
 //! and class lookups beside it.
 
 use php_unit::{Opcode, OperandKind, Opline};
 
 use crate::bits::Bits;
-use crate::infer::{ELEMENT_REF, Infer, Narrowed, binary_opcode};
+use crate::infer::{BIND_REF, ELEMENT_REF, Infer, Narrowed, binary_opcode};
 use crate::ssa::SsaOp;
 use crate::types::{Types, bit, of_declared};
 use crate::{LinkedTable, Property, SsaVar};
@@ -143,18 +143,7 @@ fn assign_dim_array_result(
         if value_type.has(Types::UNDEF) {
             value_type |= Types::NULL;
         }
-        if dim_kind == OperandKind::Unused {
-            if arr_type.has(Types::UNDEF | Types::NULL | Types::FALSE) {
-                tmp |= Types::PACKED;
-            }
-            tmp |= if arr_type.hash_only() {
-                Types::NUMERIC_HASH
-            } else {
-                Types::KEY_LONG
-            };
-        } else {
-            tmp |= written_keys(arr_type, dim_type, dim_kind);
-        }
+        tmp |= written_keys(arr_type, dim_type, dim_kind);
     }
     if tmp.has(Types::KEY_ANY) {
         tmp |= value_type.as_elements();
@@ -969,7 +958,7 @@ impl<T: LinkedTable> Infer<'_, T> {
             }
             Opcode::BindStatic => {
                 let mut tmp = Types::ANY | Types::ARRAY_ANY;
-                tmp |= if op.extended_value & ELEMENT_REF != 0 {
+                tmp |= if op.extended_value & BIND_REF != 0 {
                     Types::REF
                 } else {
                     Types::RC
@@ -995,7 +984,7 @@ impl<T: LinkedTable> Infer<'_, T> {
             }
             Opcode::BindLexical => {
                 if ssa_op.op2_def.is_some() {
-                    let tmp = if op.extended_value & ELEMENT_REF != 0 {
+                    let tmp = if op.extended_value & BIND_REF != 0 {
                         t2 | Types::REF
                     } else {
                         Self::shared(t2)

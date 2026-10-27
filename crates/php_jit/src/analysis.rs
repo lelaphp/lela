@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use php_engine::tier::{ClassId, FuncRef, UnitView};
 use php_ssa::{Analysis, ClassConstant, Function, Level, LinkedTable, ObjectShape, Property};
-use php_unit::decl::{ClassKind, Visibility};
+use php_unit::decl::{ClassKind, PropertyDecl, Visibility};
 
 use crate::Lines;
 use crate::policy::JitDebug;
@@ -78,22 +78,39 @@ impl Bound<'_> {
 
     /// `zend_get_property_info`'s access check for code of `scope`: a
     /// public property, or one `scope` declares; a protected one where
-    /// `scope` and the declaring class are one below the other
-    /// (`is_protected_compatible_scope`).
+    /// `scope` and the class whose declaration the property's prototype
+    /// is are one below the other (`is_protected_compatible_scope`).
     fn reaches(
         &self,
         visibility: Visibility,
         declared_in: ClassId,
+        name: &[u8],
         scope: Option<ClassId>,
     ) -> bool {
         match (visibility, scope) {
             (Visibility::Public, _) => true,
             (_, Some(scope)) if scope == declared_in => true,
             (Visibility::Protected, Some(scope)) => {
-                self.instance_of(scope, declared_in) || self.instance_of(declared_in, scope)
+                let root = self.prototype(declared_in, name);
+                self.instance_of(scope, root) || self.instance_of(root, scope)
             }
             _ => false,
         }
+    }
+
+    /// `property_info->prototype->ce`: the class above `declared_in`
+    /// furthest up whose properties still hold `name`, where an
+    /// inherited protected property was first declared.
+    fn prototype(&self, declared_in: ClassId, name: &[u8]) -> ClassId {
+        self.lineage(declared_in)
+            .take_while(|&c| self.own_property(c, name).is_some())
+            .last()
+            .unwrap_or(declared_in)
+    }
+
+    /// The property `name` class `c` declares itself.
+    fn own_property(&self, c: ClassId, name: &[u8]) -> Option<&PropertyDecl> {
+        (self.view.class_decl(c)?.properties.iter()).find(|p| *p.name.0 == *name)
     }
 }
 
@@ -176,9 +193,25 @@ impl LinkedTable for Bound<'_> {
         let row = (self.view.class(class)?.properties).find(name, |row| {
             declared(row.holder_in(class), row.at).map_or(&[][..], |p| &p.name.0)
         })?;
-        let holder = row.holder_in(class);
-        let decl = declared(holder, row.at)?;
-        self.reaches(decl.visibility, holder, scope)
+        let (holder, decl) = match scope {
+            // `zend_get_parent_private_property`: code of a class above
+            // `class` that declares `name` private reads its own.
+            Some(scope)
+                if scope != row.holder_in(class)
+                    && scope != class
+                    && self.lineage(class).any(|c| c == scope)
+                    && self
+                        .own_property(scope, name)
+                        .is_some_and(|p| p.visibility == Visibility::Private) =>
+            {
+                (scope, self.own_property(scope, name)?)
+            }
+            _ => (
+                row.holder_in(class),
+                declared(row.holder_in(class), row.at)?,
+            ),
+        };
+        self.reaches(decl.visibility, holder, name, scope)
             .then_some(Property {
                 is_static: !decl.is_instance,
                 ty: decl.ty.as_ref(),

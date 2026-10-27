@@ -20,8 +20,12 @@ use crate::{Function, LinkedTable, SsaVar};
 /// `RANGE_WARMUP_PASSES`.
 const WARMUP_PASSES: usize = 16;
 
-/// `ZEND_ARRAY_ELEMENT_REF`, `ZEND_BIND_REF`: an `extended_value` bit.
+/// `ZEND_ARRAY_ELEMENT_REF`: an `extended_value` bit.
 pub(crate) const ELEMENT_REF: u32 = 1;
+
+/// `ZEND_BIND_REF`: an `extended_value` bit, the same as
+/// [`ELEMENT_REF`].
+pub(crate) const BIND_REF: u32 = 1;
 
 /// Inference narrowed a type, which php reports as its own bug and
 /// abandons the analysis over (`emit_type_narrowing_warning`).
@@ -903,9 +907,10 @@ impl<T: LinkedTable> Infer<'_, T> {
                         | Opcode::SendVarEx
                         | Opcode::SendFuncArg
                         | Opcode::BindInitStaticOrJmp => true,
-                        Opcode::InitArray | Opcode::AddArrayElement | Opcode::BindStatic => {
+                        Opcode::InitArray | Opcode::AddArrayElement => {
                             op.extended_value & ELEMENT_REF != 0
                         }
+                        Opcode::BindStatic => op.extended_value & BIND_REF != 0,
                         Opcode::Yield => self.function.decl.is_some_and(|d| d.returns_by_ref),
                         Opcode::OpData => at
                             .checked_sub(1)
@@ -921,7 +926,7 @@ impl<T: LinkedTable> Infer<'_, T> {
                 } else if ssa_op.op2_def == Some(id) {
                     match op.opcode {
                         Opcode::AssignRef | Opcode::FeFetchRw => true,
-                        Opcode::BindLexical => op.extended_value & ELEMENT_REF != 0,
+                        Opcode::BindLexical => op.extended_value & BIND_REF != 0,
                         _ => false,
                     }
                 } else {
@@ -1766,7 +1771,9 @@ impl<T: LinkedTable> Infer<'_, T> {
 
     /// `zend_func_return_info`, not recursive and not widening, as
     /// `zend_infer_types` asks it: what each reachable `RETURN` returns,
-    /// joined, within what `ret` holds already.
+    /// joined, within what `ret` holds already. php skips a return of a
+    /// recursive tail call (`is_recursive_tail_call`), which reads the
+    /// call map; with none built (#3574) no return is one.
     fn return_info(&self, ret: &mut Returns<T::Class>) {
         if ret.types.is_empty() {
             ret.types = Types::REF_ANY;
