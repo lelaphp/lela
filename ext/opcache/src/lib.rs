@@ -781,13 +781,14 @@ fn scripts(req: &mut Request, status: &CacheStatus) -> Result<Owner<PhpArray>, T
 /// engine's tier as it reports itself, `JIT_G` as php's start left it
 /// and the code buffer, of which `buffer_free` is what no trace's code
 /// takes; php's stubs take some of it before any trace, which this tier
-/// has none of. A build without the tier reports one that compiles
+/// has none of, so the engine's whole buffer is pinned here
+/// (`trace:jit-buffer-free-engine-code`). A build without the tier reports one that compiles
 /// nothing, every field zero.
 ///
 /// ```php
 /// $jit = opcache_get_status(false)['jit'];
 /// var_dump(implode(' ', array_keys($jit)), $jit['enabled'], $jit['on'], $jit['kind'], $jit['opt_level'], $jit['opt_flags']);
-/// var_dump($jit['buffer_size'], is_int($jit['buffer_free']) && $jit['buffer_free'] <= $jit['buffer_size']);
+/// var_dump($jit['buffer_size'], $jit['buffer_free']);
 /// ```
 /// ```expect regime=jit-tracing process
 /// string(59) "enabled on kind opt_level opt_flags buffer_size buffer_free"
@@ -797,7 +798,7 @@ fn scripts(req: &mut Request, status: &CacheStatus) -> Result<Owner<PhpArray>, T
 /// int(4)
 /// int(6)
 /// int(67108848)
-/// bool(true)
+/// int(67108848)
 /// ```
 ///
 /// A buffer of `opcache.jit_buffer_size=16K`, rounded to the page, less
