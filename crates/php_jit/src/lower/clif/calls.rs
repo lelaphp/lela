@@ -32,7 +32,7 @@ use super::{
     COUNTED, Dtor, EX_OPLINE, Emit, KIND, Kernel, Refuse, STOOD_CALL, STOOD_FRAME, STOOD_FUNC,
     STOOD_OPLINE, STOOD_ROOM, Scalar, TYPE_AT, imm, leave_of, mismatch, tag, trusted,
 };
-use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT, RETURNED, THREW};
+use crate::lower::{IMAGES_AT, INTERRUPT_AT, OperandKinds, READY_AT, RETURNED, THREW};
 use crate::types::{
     Abort, ArgChecks, Check, Constant, Defaults, End, ExitId, Frame, Home, Imm, Line, Object, OpId,
     Operand, Owners, PairCallee, PairClass, Returned, Types, Vars,
@@ -2164,12 +2164,10 @@ impl Emit<'_> {
             self.divert_if(either, handler);
         }
         self.b.ins().store(trusted(), opline, room, EX_OPLINE);
-        let mut kinds = 0u32;
+        let mut kinds = [OperandKind::Unused; 3];
         let mut words = Vec::with_capacity(6);
         for (place, operand) in operands.into_iter().enumerate() {
-            let shift = 8 * u32::try_from(place).map_err(|_| mismatch("an operand past three"))?;
             if place >= arity {
-                kinds |= u32::from(OperandKind::Unused as u8) << shift;
                 words.push(self.b.ins().iconst(I64, 0));
                 words.push(self.b.ins().iconst(I32, 0));
                 continue;
@@ -2195,15 +2193,15 @@ impl Emit<'_> {
                 let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
                 self.b.ins().store(trusted(), undef, base, slot + TYPE_AT);
             }
-            kinds |= u32::from(kind as u8) << shift;
+            kinds[place] = kind;
             words.extend([word, info]);
         }
         let returns = self.returns_of(line)?;
         let out = returns.address();
         let place = self.frame_ref(line.frame)?;
         let place = self.b.ins().ireduce(I32, place);
-        let native = self.b.ins().iconst(I32, i64::from(native));
-        let kinds = self.b.ins().iconst(I32, i64::from(kinds));
+        let native = self.b.ins().iconst(I32, i64::from(native.0));
+        let kinds = self.b.ins().iconst(I32, OperandKinds::of(kinds).word());
         let mut args = vec![room, opline, place, native, kinds];
         args.extend(words);
         args.push(out);

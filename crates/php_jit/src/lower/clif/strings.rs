@@ -17,6 +17,7 @@ use php_heap::{Str, ZvalType};
 use php_unit::{Opcode, OperandKind};
 
 use super::{EX_OPLINE, Emit, Kernel, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
+use crate::lower::OperandKinds;
 use crate::types::{
     Abort, Check, Constant, Frame, Fused, GuardAt, Home, Leave, Line, OpId, Operand,
 };
@@ -531,8 +532,8 @@ impl Emit<'_> {
         let (b, b_info) = self.zval_words(line.frame, line.op2)?;
         self.save_opline(line)?;
         let [room, opline] = self.served(line)?;
-        let kinds = u32::from(a_kind as u8) | u32::from(b_kind as u8) << 8;
-        let kinds = self.b.ins().iconst(I32, i64::from(kinds));
+        let kinds = OperandKinds::of([a_kind, b_kind, OperandKind::Unused]);
+        let kinds = self.b.ins().iconst(I32, kinds.word());
         let slot = self.answer();
         let answer = self.b.ins().stack_addr(I64, slot, 0);
         self.call_freeing(

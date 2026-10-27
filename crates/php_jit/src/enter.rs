@@ -45,12 +45,13 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::AtomicBool;
 
 use php_engine::tier::{
-    self, CachedSlot, Epoch, Fatal, FrameRef, FuncRef, Held, Request, Stepped, TraceNum,
+    self, CachedSlot, Epoch, Fatal, FrameRef, FramelessAt, FuncRef, Held, Request, Stepped,
+    TraceNum,
 };
 use php_heap::{Arr, HeaderImage, Key, Scalar, Zval, ZvalRef, ZvalType};
 use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
 
-use crate::lower::{self, Stood, engine_offset};
+use crate::lower::{self, OperandKinds, Stood, engine_offset};
 use crate::table::{Exit, Trace};
 use crate::types::ExitId;
 
@@ -566,11 +567,11 @@ kernels! {
         RopeAdd => rope_add(rope: u64, word: u64, type_info: u32) = tier::rope_push;
         RopeEnd => rope_end(rope: u64, word: u64, type_info: u32) -> Zval = tier::rope_end;
         AssignConcat => assign_concat(place: u64, word: u64, type_info: u32) = tier::assign_concat;
-        Concat => concat(a: u64, a_info: u32, b: u64, b_info: u32, kinds: u32) -> Zval = tier::concat;
+        Concat => concat(a: u64, a_info: u32, b: u64, b_info: u32, kinds: OperandKinds) -> Zval = tier::concat;
         Find => find(array: u64, key: u64, key_info: u32, constant: u32) -> Zval;
         Lookup => lookup(array: u64, key: u64, key_info: u32, constant: u32) -> Zval = tier::lookup_element;
         Leave => leave(word: u64, type_info: u32) -> u64 = tier::return_entry;
-        Frameless => frameless(place: u32, at: u32, kinds: u32, a: u64, a_info: u32, b: u64, b_info: u32, c: u64, c_info: u32) -> Zval = tier::frameless_call;
+        Frameless => frameless(place: u32, at: FramelessAt, kinds: OperandKinds, a: u64, a_info: u32, b: u64, b_info: u32, c: u64, c_info: u32) -> Zval = tier::frameless_call;
         FreeThis => free_this() = tier::free_this;
         MakeRef => make_ref(place: u64) -> u64 = tier::make_ref;
         CallNative => call_native(call: u32) -> Zval = tier::call_native;
@@ -605,7 +606,7 @@ fn handle(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<(), Fatal> {
 /// The `frameless` kernel: the native at `at` of the engine's
 /// frameless table, the `FRAMELESS_ICALL_*` at `on.at` of the frame at
 /// `place`, served over the three operand zvals compiled code read, each
-/// of the kind its byte of `kinds` names ([`operand_kind`]), with no
+/// of the kind `kinds` names for it ([`OperandKinds`]), with no
 /// opline read ([`tier::frameless_call`]), as php's code calls the
 /// native's frameless handler; where the interpreter stands after it is
 /// compiled code's, and a throw is the request's pending throwable.
@@ -617,8 +618,8 @@ fn frameless(
     req: &mut Request,
     on: On<'_, '_>,
     place: u32,
-    at: u32,
-    kinds: u32,
+    at: FramelessAt,
+    kinds: OperandKinds,
     a: u64,
     a_info: u32,
     b: u64,
@@ -627,10 +628,11 @@ fn frameless(
     c_info: u32,
 ) -> Result<Zval, Fatal> {
     let frame = at_place(req, on.room, place);
+    let [a_kind, b_kind, c_kind] = operand_kinds(kinds)?;
     let operands = [
-        (zval(a, a_info), operand_kind(kinds)?),
-        (zval(b, b_info), operand_kind(kinds >> 8)?),
-        (zval(c, c_info), operand_kind(kinds >> 16)?),
+        (zval(a, a_info), a_kind),
+        (zval(b, b_info), b_kind),
+        (zval(c, c_info), c_kind),
     ];
     tier::frameless_call(req, frame, at, operands)
 }
@@ -663,19 +665,11 @@ fn interrupt(req: &mut Request, _: On<'_, '_>) -> Result<(), Fatal> {
     tier::interrupted(req).map(drop)
 }
 
-/// The `OperandKind` the low byte of `kinds` names, as compiled code
-/// writes one byte per operand it hands a kernel.
-fn operand_kind(kinds: u32) -> Result<OperandKind, Fatal> {
-    [
-        OperandKind::Const,
-        OperandKind::Tmp,
-        OperandKind::Var,
-        OperandKind::Cv,
-        OperandKind::Unused,
-    ]
-    .into_iter()
-    .find(|kind| u32::from(*kind as u8) == kinds & 0xff)
-    .ok_or_else(|| internal("an operand of no operand kind"))
+/// The kinds `kinds` carries across, in operand order.
+fn operand_kinds(kinds: OperandKinds) -> Result<[OperandKind; 3], Fatal> {
+    kinds
+        .kinds()
+        .ok_or_else(|| internal("an operand of no operand kind"))
 }
 
 /// The `leave` kernel: the value the `RETURN` at `at`, which a trace ends
@@ -851,8 +845,8 @@ fn assign_concat(
 }
 
 /// The `concat` kernel: `CONCAT` or `FAST_CONCAT` of two strings
-/// ([`tier::concat`]), `kinds` the left side's `IS_*` in its low byte and
-/// the right side's above it, the left one handed with its owner where it
+/// ([`tier::concat`]), `kinds` the two sides' `IS_*` ([`OperandKinds`]),
+/// the left one handed with its owner where it
 /// is a temporary; the joined string's zval, or `UNDEF` where the join
 /// refused and left its throwable pending, which the wrapper answers as
 /// one. Compiled code stood the frame at the opline first.
@@ -863,10 +857,11 @@ fn concat(
     a_info: u32,
     b: u64,
     b_info: u32,
-    kinds: u32,
+    kinds: OperandKinds,
 ) -> Result<Zval, Fatal> {
-    let left = (zval(a, a_info), operand_kind(kinds)?);
-    let right = (zval(b, b_info), operand_kind(kinds >> 8)?);
+    let [a_kind, b_kind, _] = operand_kinds(kinds)?;
+    let left = (zval(a, a_info), a_kind);
+    let right = (zval(b, b_info), b_kind);
     Ok(tier::concat(req, left, right)?.unwrap_or(Zval::UNDEF))
 }
 

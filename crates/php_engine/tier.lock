@@ -92,6 +92,7 @@ tier::FrameLayout::slot
 tier::FrameLayout::this
 tier::FrameLayout::top
 tier::FrameRef
+tier::FramelessAt
 tier::FuncRef
 tier::FuncRef::at
 tier::FuncRef::offset

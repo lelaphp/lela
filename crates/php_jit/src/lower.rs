@@ -75,7 +75,7 @@ use cranelift_codegen::isa::{self, OwnedTargetIsa};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::{Context, Final, MachSrcLoc};
 use php_engine::tier::{FuncRef, LandingIndex, MapPtrRaw, PlainCall};
-use php_unit::{MapPtrOffset, OplineIdx};
+use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
 
 use crate::policy::{Mode, Policy};
 use crate::record::{Began, Stop};
@@ -552,6 +552,50 @@ fn stub_at(ir: &TraceIr) -> Option<OplineIdx> {
     match header.interrupt {
         Interrupt::Stub(at) => Some(at),
         Interrupt::Exit(_) | Interrupt::None => None,
+    }
+}
+
+/// The kinds of the operands compiled code hands a kernel, at most
+/// three, which the crossing carries as one `i32`, a byte each in
+/// operand order: the `frameless` and `concat` kernels' (`jit-design.md`
+/// §4.3). `lower` makes it from the kinds and `enter` reads them back at
+/// the crossing, so the encoding is this type's alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub(crate) struct OperandKinds(u32);
+
+impl OperandKinds {
+    /// `kinds` in operand order, each one `Unused` past the operands a
+    /// kernel takes.
+    pub(crate) fn of(kinds: [OperandKind; 3]) -> OperandKinds {
+        OperandKinds(
+            kinds
+                .iter()
+                .rev()
+                .fold(0, |word, kind| word << 8 | u32::from(*kind as u8)),
+        )
+    }
+
+    /// The word compiled code passes.
+    pub(crate) fn word(self) -> i64 {
+        i64::from(self.0)
+    }
+
+    /// The kinds in operand order; none where a byte names no kind,
+    /// which compiled code never writes.
+    pub(crate) fn kinds(self) -> Option<[OperandKind; 3]> {
+        let kind = |at: u32| {
+            [
+                OperandKind::Unused,
+                OperandKind::Const,
+                OperandKind::Tmp,
+                OperandKind::Var,
+                OperandKind::Cv,
+            ]
+            .into_iter()
+            .find(|kind| u32::from(*kind as u8) == self.0 >> (8 * at) & 0xff)
+        };
+        Some([kind(0)?, kind(1)?, kind(2)?])
     }
 }
 

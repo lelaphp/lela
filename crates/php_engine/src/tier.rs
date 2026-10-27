@@ -1857,6 +1857,14 @@ pub fn pop_call(req: &mut Request) {
     req.pop_call();
 }
 
+/// The place of a native's row in the engine's frameless table, which a
+/// `FRAMELESS_ICALL_*`'s `extended_value` holds, as php's
+/// `ZEND_FLF_HANDLER(opline)` reads it, and compiled code hands the
+/// `frameless` kernel ([`frameless_call`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct FramelessAt(pub u32);
+
 /// The native at `at` of the engine's frameless table served over
 /// `operands` for the `FRAMELESS_ICALL_*` `frame` stands at, as php's
 /// compiled code calls the native's frameless handler with the operand
@@ -1879,7 +1887,7 @@ pub fn pop_call(req: &mut Request) {
 pub fn frameless_call(
     req: &mut Request,
     frame: FrameRef,
-    at: u32,
+    at: FramelessAt,
     operands: [(Zval, OperandKind); 3],
 ) -> Result<Zval, Fatal> {
     let named = req
@@ -1900,7 +1908,7 @@ pub fn frameless_call(
         count = place + 1;
     }
     let operands = held.get(..count).unwrap_or_default();
-    let returned = crate::handlers::frameless_served(req, at, operands, owned)?;
+    let returned = crate::handlers::frameless_served(req, at.0, operands, owned)?;
     Ok(returned.map_or_else(Zval::null, Value::to_zval))
 }
 
