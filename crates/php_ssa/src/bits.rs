@@ -107,6 +107,50 @@ impl Bits {
     }
 }
 
+/// `WHILE_WORKLIST`'s order: pass after pass over the set, each word
+/// read once as the pass reaches it and its members popped lowest first,
+/// until a pass pops none. A member added behind the pass, or into the
+/// word it is in, waits for the next pass.
+pub(crate) struct Passes {
+    word: usize,
+    snapshot: u64,
+    base: usize,
+    idle: bool,
+}
+
+impl Passes {
+    pub(crate) fn new() -> Passes {
+        Passes {
+            word: 0,
+            snapshot: 0,
+            base: 0,
+            idle: true,
+        }
+    }
+
+    /// The next member, taken out of `set`.
+    pub(crate) fn next(&mut self, set: &mut Bits) -> Option<usize> {
+        while self.snapshot == 0 {
+            if self.word >= set.words.len() {
+                if self.idle {
+                    return None;
+                }
+                self.idle = true;
+                self.word = 0;
+                continue;
+            }
+            self.snapshot = set.words.get(self.word).copied().unwrap_or(0);
+            self.base = self.word * 64;
+            self.word += 1;
+        }
+        let n = self.base + self.snapshot.trailing_zeros() as usize;
+        self.snapshot &= self.snapshot - 1;
+        set.excl(n);
+        self.idle = false;
+        Some(n)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Bits;
@@ -126,5 +170,17 @@ mod tests {
         other.incl(64);
         assert!(other.is_subset(&set));
         assert!(!set.is_subset(&other));
+        let mut passes = super::Passes::new();
+        let mut popped = Vec::new();
+        while let Some(n) = passes.next(&mut set) {
+            // 70 joins a word the pass has yet to read and is taken in it;
+            // 1 joins the word it read, and waits for the next.
+            if n == 63 {
+                set.incl(70);
+                set.incl(1);
+            }
+            popped.push(n);
+        }
+        assert_eq!(popped, [0, 63, 64, 70, 1]);
     }
 }

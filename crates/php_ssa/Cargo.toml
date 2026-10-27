@@ -17,3 +17,6 @@ workspace = true
 [dependencies]
 php_unit = { path = "../php_unit" }
 php_heap = { path = "../php_heap" }
+
+[build-dependencies]
+toml.workspace = true

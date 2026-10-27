@@ -39,3 +39,4 @@ What php does, which this ADR copies:
 - §3.2 and the maintainer's note hold. The SSA is php's own representation, read by the tier alone and never executed. There is still one executor, and no IR of this engine's own.
 - The epoch's tier state gains one slot per analysed op array, written once.
 - *Amended 2026-10-26 (#3563):* the build no longer waits on #2968. A NO-GO on #2968 defers the default; the port stands, and any later GO's run of record includes it.
+- *Amended 2026-10-27 (#3571):* php does not keep the result on the op array's JIT extension, as the first "When" bullet says: `zend_jit_trace_build_ssa` rebuilds it at every trace build (`Z/ext/opcache/jit/zend_jit_trace.c:541-546`). The epoch's write-once slot is per op array and binding set, the classes its view bound (`named`, `scope` and `engine_named`, as `ClassId`s), so a kept analysis is observably php's rebuild; an analysis that binds a request-scoped class is never kept (#3579).

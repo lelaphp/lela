@@ -2,9 +2,8 @@
 //! `ZEND_DUMP_RC_INFERENCE` and `ZEND_DUMP_SSA`, as
 //! `zend_jit_trace_build_ssa` prints an analysis with the message `JIT`:
 //! the header, each reachable block with its phis, its oplines as the SSA
-//! names their variables, and the `try`/`catch` table by block. What only
-//! type inference knows prints as php prints it before inference: the
-//! return's types empty and its range `0..0`, and no line per CV.
+//! names their variables with the types and ranges inference gave them,
+//! and the `try`/`catch` table by block.
 
 use std::io::Write as _;
 
@@ -13,17 +12,53 @@ use php_unit::{InBlock, OpArray, OperandKind, OplineIdx, SsaOperands, SsaVars, d
 
 use crate::cfg::Block;
 use crate::ssa::{Constraint, Negative, PhiKind, RangeConstraint, Ssa};
-use crate::{Analysis, Function, LinkedTable, SsaVar, Var};
+use crate::types::{Range, Types, VarInfo};
+use crate::{Analysis, ClassOf, Function, LinkedTable, SsaVar, Var};
 
 /// `zend_dump_ssa_var`'s printing over one SSA, for the opline dump.
-struct Names<'a, C> {
+struct Names<'a, T: LinkedTable> {
     body: &'a OpArray,
-    ssa: &'a Ssa<C>,
+    ssa: &'a Ssa<T::Class>,
+    table: &'a T,
 }
 
-impl<C> Names<'_, C> {
+/// `zend_dump_type_info` under `ZEND_DUMP_RC_INFERENCE`, a class named
+/// by the table.
+fn type_info<T: LinkedTable>(
+    out: &mut Vec<u8>,
+    types: Types,
+    class: Option<ClassOf<T::Class>>,
+    table: &T,
+) {
+    let class = class.map(|c| (table.name(c.class), c.instanceof));
+    dump_type_info(out, types.0, class, true);
+}
+
+/// `zend_dump_range`.
+fn range_of(out: &mut Vec<u8>, r: &Range) {
+    if r.underflow && r.overflow {
+        return;
+    }
+    out.extend_from_slice(b" RANGE[");
+    if r.underflow {
+        out.extend_from_slice(b"--..");
+    } else if r.min == i64::MIN {
+        out.extend_from_slice(b"MIN..");
+    } else {
+        write!(out, "{}..", r.min).ok();
+    }
+    if r.overflow {
+        out.extend_from_slice(b"++]");
+    } else if r.max == i64::MAX {
+        out.extend_from_slice(b"MAX]");
+    } else {
+        write!(out, "{}]", r.max).ok();
+    }
+}
+
+impl<T: LinkedTable> Names<'_, T> {
     /// `zend_dump_ssa_var`: `#3.CV0($n)`, `#7.T2`, ` NOVAL` after a
-    /// variable whose value nothing reads.
+    /// variable whose value nothing reads, then what inference knows of it.
     fn write(&self, out: &mut Vec<u8>, ssa_var: Option<SsaVar>, kind: OperandKind, var: u32) {
         match ssa_var {
             Some(n) => write!(out, "#{}.", n.0).ok(),
@@ -40,10 +75,21 @@ impl<C> Names<'_, C> {
         {
             out.extend_from_slice(b" NOVAL");
         }
+        if let Some(VarInfo {
+            types,
+            class,
+            range,
+        }) = ssa_var.and_then(|n| self.ssa.info.get(n.index()))
+        {
+            type_info(out, *types, *class, self.table);
+            if let Some(r) = range {
+                range_of(out, r);
+            }
+        }
     }
 }
 
-impl<C> SsaVars for Names<'_, C> {
+impl<T: LinkedTable> SsaVars for Names<'_, T> {
     fn ssa_var(&self, out: &mut Vec<u8>, ssa_var: u32, kind: OperandKind, var: u32) {
         self.write(out, Some(SsaVar(ssa_var)), kind, var);
     }
@@ -113,12 +159,13 @@ fn block_info(out: &mut Vec<u8>, n: usize, block: &Block) {
 }
 
 /// `zend_dump_range_constraint`.
-fn range<C>(out: &mut Vec<u8>, names: &Names<'_, C>, r: &RangeConstraint) {
+fn range<T: LinkedTable>(out: &mut Vec<u8>, names: &Names<'_, T>, c: &RangeConstraint) {
+    let r = &c.range;
     if r.underflow && r.overflow {
         return;
     }
     out.extend_from_slice(b" RANGE");
-    if r.negative != Negative::None {
+    if c.negative != Negative::None {
         out.push(b'~');
     }
     out.push(b'[');
@@ -138,13 +185,13 @@ fn range<C>(out: &mut Vec<u8>, names: &Names<'_, C>, r: &RangeConstraint) {
     if r.underflow {
         out.extend_from_slice(b"-- .. ");
     } else {
-        bound(out, r.min_ssa_var, r.min_var, r.min);
+        bound(out, c.min_ssa_var, c.min_var, r.min);
         out.extend_from_slice(b" .. ");
     }
     if r.overflow {
         out.extend_from_slice(b"++]");
     } else {
-        bound(out, r.max_ssa_var, r.max_var, r.max);
+        bound(out, c.max_ssa_var, c.max_var, r.max);
         out.push(b']');
     }
 }
@@ -162,7 +209,7 @@ impl<C: Copy> Analysis<C> {
     ) {
         let body = function.body;
         out.push(b'\n');
-        match (function.name, function.scope) {
+        match (function.name(), function.scope) {
             (Some(name), Some(scope)) => {
                 out.extend_from_slice(scope);
                 out.extend_from_slice(b"::");
@@ -176,7 +223,7 @@ impl<C: Copy> Analysis<C> {
             out,
             ":\n     ; (lines={}, args={}, vars={}, tmps={}, ssa_vars={ssa_vars})\n     ; (JIT)\n     ; ",
             body.oplines.len(),
-            function.num_args,
+            function.num_args(),
             body.num_cvs,
             body.num_tmps,
         )
@@ -184,8 +231,18 @@ impl<C: Copy> Analysis<C> {
         out.extend_from_slice(&body.filename.0);
         writeln!(out, ":{}-{}", body.line_start, body.line_end).ok();
         out.extend_from_slice(b"     ; return ");
-        dump_type_info(out, 0, None, true);
-        out.extend_from_slice(b" RANGE[0..0]\n");
+        let returns = &self.returns;
+        type_info(out, returns.types, returns.class, table);
+        range_of(out, &returns.range);
+        out.push(b'\n');
+        if let Some(ssa) = self.ssa.as_ref().filter(|ssa| !ssa.info.is_empty()) {
+            let names = Names { body, ssa, table };
+            for cv in 0..body.num_cvs {
+                out.extend_from_slice(b"     ; ");
+                names.write(out, Some(SsaVar(cv)), OperandKind::Cv, cv);
+                out.push(b'\n');
+            }
+        }
 
         for (n, block) in self.cfg.blocks.iter().enumerate() {
             if !block.marks.reachable {
@@ -193,8 +250,8 @@ impl<C: Copy> Analysis<C> {
             }
             block_info(out, n, block);
             if let Some(ssa) = &self.ssa {
-                let names = Names { body, ssa };
-                Self::phis(out, &names, n, table);
+                let names = Names { body, ssa, table };
+                Self::phis(out, &names, n);
             }
             let successors: Vec<u32> = block.successors.iter().map(|b| b.0).collect();
             for at in block.start..block.start + block.len {
@@ -203,7 +260,7 @@ impl<C: Copy> Analysis<C> {
                 let pad = 5usize.saturating_sub(line.len()).max(1);
                 line.resize(line.len() + pad, b' ');
                 out.extend_from_slice(&line);
-                let names = self.ssa.as_ref().map(|ssa| Names { body, ssa });
+                let names = self.ssa.as_ref().map(|ssa| Names { body, ssa, table });
                 let ssa = names.as_ref().and_then(|names| {
                     let op = names.ssa.ops.get(at as usize)?;
                     let n = |v: Option<SsaVar>| v.map(|v| v.0);
@@ -244,12 +301,7 @@ impl<C: Copy> Analysis<C> {
     }
 
     /// `zend_dump_block_header`'s phis of block `n`.
-    fn phis<T: LinkedTable<Class = C>>(
-        out: &mut Vec<u8>,
-        names: &Names<'_, C>,
-        n: usize,
-        table: &T,
-    ) {
+    fn phis<T: LinkedTable<Class = C>>(out: &mut Vec<u8>, names: &Names<'_, T>, n: usize) {
         let ssa = names.ssa;
         for &id in ssa.block_phis.get(n).map(Vec::as_slice).unwrap_or_default() {
             let Some(p) = ssa.phi(id) else {
@@ -281,8 +333,11 @@ impl<C: Copy> Analysis<C> {
                         Constraint::Range(r) => range(out, names, r),
                         Constraint::Type { mask, class } => {
                             out.extend_from_slice(b" TYPE");
-                            let class = class.map(|class| (table.name(class), true));
-                            dump_type_info(out, *mask, class, true);
+                            let class = class.map(|class| ClassOf {
+                                class,
+                                instanceof: true,
+                            });
+                            type_info(out, *mask, class, names.table);
                         }
                     }
                     out.extend_from_slice(b")\n");

@@ -1,7 +1,11 @@
 //! The tier's SSA dumps held to the oracle's: each program of
 //! `types/goldens` served under the settings `capture.sh` ran php with,
-//! and each op array's dump compared, as far as php knows it before type
-//! inference, with the one php wrote, `goldens/<program>.ssa`.
+//! and each op array's dump compared with the one php wrote,
+//! `goldens/<program>.ssa`, with the types and ranges inference gave
+//! each variable. An op array with a call is compared as php knows it
+//! before inference: php types what a call returns by what it knows of the
+//! callee (`zend_get_func_info`), which the analysis does not read yet
+//! (#3574).
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -33,87 +37,30 @@ fn oracle() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/analysis/goldens")
 }
 
-/// The length of the SSA variable `line` names at its start, `#3.CV0($n)`,
-/// `#7.T2`, `#?.V4`, with a ` NOVAL` after it.
-fn ssa_var(line: &str) -> Option<usize> {
-    let rest = line.strip_prefix('#')?;
-    let dot = rest.find('.')?;
-    let number = rest.get(..dot)?;
-    if number != "?" && !number.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let var = rest.get(dot + 1..)?;
-    let len = if var.starts_with("CV") {
-        var.find(')')? + 1
-    } else if var.starts_with(['T', 'V', 'X']) {
-        1 + var.get(1..)?.bytes().take_while(u8::is_ascii_digit).count()
-    } else {
-        return None;
-    };
-    let mut end = 1 + dot + 1 + len;
-    if line.get(end..)?.starts_with(" NOVAL") {
-        end += " NOVAL".len();
-    }
-    Some(end)
-}
-
-/// What inference prints after a variable at the start of `rest`: its
-/// types, ` [long]`, and its range, ` RANGE[MIN..MAX]`; their length.
-fn inferred(rest: &str) -> usize {
-    let mut at = 0;
-    if rest.starts_with(" [") {
-        let mut depth = 0;
-        for (i, b) in rest.bytes().enumerate() {
-            match b {
-                b'[' => depth += 1,
-                b']' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        at = i + 1;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    if let Some(range) = rest.get(at..).filter(|r| r.starts_with(" RANGE["))
-        && let Some(close) = range.find(']')
-    {
-        at += close + 1;
-    }
-    at
-}
-
-/// `line` as php prints it before inference: no line per CV, and no types
-/// or range after a variable or the return; a pi's constraint kept.
-fn projected(line: &str) -> Option<String> {
-    if line.starts_with("     ; #") && line.contains(".CV") {
-        return None;
-    }
-    let mut out = String::new();
+/// `line` without the number php's dump has been seen to print before
+/// a `ref` among an array's element types, `array of [any, 893 ref]`,
+/// which changes from one serving to the next: the one byte pattern dropped, digits
+/// and a space after `, ` where `ref]` follows.
+fn stray_digits(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
     let mut rest = line;
-    while !rest.is_empty() {
-        let end = if rest.starts_with("; return ") {
-            Some("; return ".len())
-        } else {
-            ssa_var(rest)
+    while let Some(at) = rest.find(", ") {
+        let (head, tail) = rest.split_at(at + 2);
+        out.push_str(head);
+        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+        rest = match tail.get(digits..) {
+            Some(after) if digits > 0 && after.starts_with(" ref]") => {
+                after.get(1..).unwrap_or_default()
+            }
+            _ => tail,
         };
-        if let Some(end) = end {
-            out.push_str(rest.get(..end).unwrap_or_default());
-            let after = rest.get(end..).unwrap_or_default();
-            rest = after.get(inferred(after)..).unwrap_or_default();
-            continue;
-        }
-        let mut chars = rest.chars();
-        out.extend(chars.next());
-        rest = chars.as_str();
     }
-    Some(out)
+    out.push_str(rest);
+    out
 }
 
-/// The dumps of a `jit_debug` stream, each op array's once, projected,
-/// the file of each named by `file` alone.
+/// The dumps of a `jit_debug` stream, each op array's once, the file of
+/// each named by `file` alone.
 fn dumps(stream: &str, file: &str) -> BTreeSet<String> {
     let lines: Vec<&str> = stream.lines().collect();
     let mut dumps = BTreeSet::new();
@@ -123,6 +70,7 @@ fn dumps(stream: &str, file: &str) -> BTreeSet<String> {
             while dump.last().is_some_and(String::is_empty) {
                 dump.pop();
             }
+            let dump: Vec<String> = dump.iter().map(|line| stray_digits(line)).collect();
             dumps.insert(dump.join("\n"));
         }
     };
@@ -151,7 +99,7 @@ fn dumps(stream: &str, file: &str) -> BTreeSet<String> {
                 }
                 _ => (*line).to_owned(),
             };
-            dump.extend(projected(&named));
+            dump.push(named);
         }
     }
     close(&mut current);
@@ -159,22 +107,11 @@ fn dumps(stream: &str, file: &str) -> BTreeSet<String> {
 }
 
 #[test]
-fn projection_drops_what_inference_prints() {
+fn stray_digits_before_a_ref_go() {
     assert_eq!(
-        projected("0001 #2.T1 [bool] = IS_SMALLER #1.CV0($n) [long] RANGE[MIN..MAX] int(2)")
-            .as_deref(),
-        Some("0001 #2.T1 = IS_SMALLER #1.CV0($n) int(2)")
+        stray_digits("     ; return  [rcn, array of [any, 893 ref]] RANGE[0..0]"),
+        "     ; return  [rcn, array of [any, ref]] RANGE[0..0]"
     );
-    assert_eq!(
-        projected("     #4.CV0($n) [long] RANGE[MIN..1] = Pi<BB1>(#1.CV0($n) [long, ref] & RANGE[-- .. 1])")
-            .as_deref(),
-        Some("     #4.CV0($n) = Pi<BB1>(#1.CV0($n) & RANGE[-- .. 1])")
-    );
-    assert_eq!(
-        projected("     ; return  [] RANGE[0..0]").as_deref(),
-        Some("     ; return ")
-    );
-    assert_eq!(projected("     ; #0.CV0($n) NOVAL [undef]"), None);
 }
 
 /// The seven kernels of `docs/perf/workloads`, each with the size its
