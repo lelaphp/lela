@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use php_heap::ZvalType;
 use php_link::LinkedClass;
-use php_unit::decl::{FunctionDecl, Name, Parameter, Type};
+use php_unit::decl::{Bare, ClassDecl, FunctionDecl, Name, Parameter, Type};
 use php_unit::{CacheSlot, MapPtrOffset, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::published::SEALED;
@@ -568,6 +568,20 @@ pub struct UnitView {
     /// `zend_flf_functions` by name, the engine's frameless table, taken
     /// when the view first holds an op array that calls through it.
     frameless_names: Vec<Name>,
+    /// The classes php's analysis of each held op array binds by name
+    /// ([`UnitView::class_named`]), bound as the view accepts it.
+    named: Vec<(FuncRef, Box<[u8]>, ClassId)>,
+    /// The engine's own classes the declared types of what the view
+    /// holds name ([`UnitView::engine_class`]).
+    engine_named: Vec<(Box<[u8]>, ClassId)>,
+    /// The class each held op array is declared in ([`UnitView::scope`]).
+    scopes: Vec<(FuncRef, ClassId)>,
+    /// Each class bound for the analysis with its parent
+    /// ([`UnitView::parent`]).
+    related: Vec<(ClassId, Option<ClassId>)>,
+    /// The declarations of the engine's own classes bound for the
+    /// analysis, which the epoch does not keep ([`UnitView::class_decl`]).
+    engine_decls: Vec<(ClassId, ClassDecl)>,
 }
 
 /// What [`UnitView::declaration`] reads of an op array: the declaration
@@ -603,6 +617,11 @@ impl UnitView {
             observed: crate::observer::observing(req),
             frameless: Vec::new(),
             frameless_names: Vec::new(),
+            named: Vec::new(),
+            engine_named: Vec::new(),
+            scopes: Vec::new(),
+            related: Vec::new(),
+            engine_decls: Vec::new(),
         }
     }
 
@@ -621,6 +640,127 @@ impl UnitView {
             if frameless && self.frameless_names.is_empty() {
                 self.frameless_names = req.shared.frameless_names();
             }
+            self.bind_names(req, f);
+        }
+        true
+    }
+
+    /// Bind what php's analysis of the op array `f` names may look up
+    /// when a trace's build analyses it (`zend_jit_trace_build_ssa`, its
+    /// `script` null): each string constant that names a class the
+    /// request's table holds, the engine's own or one declared in the op array's
+    /// file (`zend_optimizer_get_class_entry`, `zend_optimizer_ignore_class`);
+    /// the class it is declared in; and each of the engine's classes a
+    /// declared type names, which bind whatever the file
+    /// (`zend_convert_type`). Each bound class is held with its parents,
+    /// so the analysis reads them on a thread with no request. A class
+    /// only the request holds binds nothing.
+    fn bind_names(&mut self, req: &Request, f: FuncRef) {
+        let epoch = self.epoch.clone();
+        let Some(func) = epoch.func(f) else {
+            return;
+        };
+        let Some(body) = func.op_array() else {
+            return;
+        };
+        let (decl, scope) = func.declaration().unwrap_or_default();
+        let lookup = |name: &[u8]| {
+            (!name.is_empty() && !name.starts_with(b"\\"))
+                .then(|| req.class_named(Bare::resolved(name)))?
+        };
+        if let Some(scope) = scope.and_then(|name| lookup(&name.0))
+            && self.relate(req, scope)
+        {
+            self.scopes.push((f, scope));
+        }
+        for name in body
+            .literals
+            .iter()
+            .filter_map(|literal| literal.str_bytes())
+        {
+            let Some(class) = lookup(name) else {
+                continue;
+            };
+            let own = req.native_class_at(class).is_some()
+                || req
+                    .symbols()
+                    .class_decl(class)
+                    .is_some_and(|d| d.file.0 == body.filename.0);
+            if own && self.relate(req, class) {
+                self.named
+                    .push((f, name.to_ascii_lowercase().into_boxed_slice(), class));
+            }
+        }
+        let mut types = Vec::new();
+        if let Some(decl) = decl {
+            types.extend(decl.parameters.iter().filter_map(|p| p.ty.as_ref()));
+            types.extend(decl.return_type.as_ref());
+        }
+        self.bind_engine_types(req, &types);
+        for name in [&b"closure"[..], b"traversable"] {
+            self.bind_engine_type(req, name);
+        }
+    }
+
+    /// Bind the engine's own classes `types` name ([`UnitView::bind_names`]).
+    fn bind_engine_types(&mut self, req: &Request, types: &[&Type]) {
+        let mut names = Vec::new();
+        let mut walk: Vec<&Type> = types.to_vec();
+        while let Some(ty) = walk.pop() {
+            match ty {
+                Type::Named(name) => names.push(&name.0),
+                Type::Nullable(inner) => walk.push(inner),
+                Type::Union(members) | Type::Intersection(members) => walk.extend(members),
+                _ => {}
+            }
+        }
+        for name in names {
+            self.bind_engine_type(req, name);
+        }
+    }
+
+    /// Bind the engine's own class `name` ([`UnitView::bind_names`]).
+    fn bind_engine_type(&mut self, req: &Request, name: &[u8]) {
+        let lcname = name.to_ascii_lowercase();
+        if self.engine_named.iter().any(|(held, _)| **held == *lcname) || name.starts_with(b"\\") {
+            return;
+        }
+        if let Some(class) = req.class_named(Bare::resolved(name))
+            && req.native_class_at(class).is_some()
+            && self.relate(req, class)
+        {
+            self.engine_named.push((lcname.into_boxed_slice(), class));
+        }
+    }
+
+    /// Hold class `c` for the analysis with its parents, the engine's
+    /// declaration of it where it is one of the engine's own, and the
+    /// engine's classes its properties' and constants' types name;
+    /// `false` where it is not shared ([`UnitView::hold_class`]).
+    fn relate(&mut self, req: &Request, c: ClassId) -> bool {
+        if self.related.iter().any(|(class, _)| *class == c) {
+            return true;
+        }
+        if !self.hold_class(req, c) {
+            return false;
+        }
+        let at = self.related.len();
+        self.related.push((c, None));
+        let Some(decl) = req.symbols().class_decl(c) else {
+            return true;
+        };
+        if req.native_class_at(c).is_some() {
+            self.engine_decls.push((c, decl.clone()));
+        }
+        let types: Vec<&Type> = (decl.properties.iter().filter_map(|p| p.ty.as_ref()))
+            .chain(decl.constants.iter().filter_map(|c| c.ty.as_ref()))
+            .collect();
+        self.bind_engine_types(req, &types);
+        if let Some(parent) = req.symbols().class_parent(c)
+            && self.relate(req, parent)
+            && let Some((_, held)) = self.related.get_mut(at)
+        {
+            *held = Some(parent);
         }
         true
     }
@@ -955,6 +1095,59 @@ impl UnitView {
         }
         let (function, scope) = self.epoch.func(f)?.declaration()?;
         Some(Declaration { function, scope })
+    }
+
+    /// The class `lcname`, in lower case, binds for php's analysis of the
+    /// op array `f` names: the engine's own, or one declared in the op
+    /// array's file, as the request's table held it when the view
+    /// accepted the op array (`zend_optimizer_get_class_entry`, its
+    /// `script` null); none for any other.
+    #[must_use]
+    pub fn class_named(&self, f: FuncRef, lcname: &[u8]) -> Option<ClassId> {
+        (self.named.iter())
+            .find(|(func, name, _)| *func == f && **name == *lcname)
+            .map(|(_, _, class)| *class)
+    }
+
+    /// The engine's own class `lcname`, in lower case, where a declared
+    /// type of what the view holds names it, or it is `Closure` or
+    /// `Traversable`, which php's analysis names itself.
+    #[must_use]
+    pub fn engine_class(&self, lcname: &[u8]) -> Option<ClassId> {
+        (self.engine_named.iter())
+            .find(|(name, _)| **name == *lcname)
+            .map(|(_, class)| *class)
+    }
+
+    /// The class the op array `f` names is declared in, php's
+    /// `op_array->scope`, where the view holds it.
+    #[must_use]
+    pub fn scope(&self, f: FuncRef) -> Option<ClassId> {
+        (self.scopes.iter())
+            .find(|(func, _)| *func == f)
+            .map(|(_, class)| *class)
+    }
+
+    /// `ce->parent` of a class bound for the analysis.
+    #[must_use]
+    pub fn parent(&self, c: ClassId) -> Option<ClassId> {
+        (self.related.iter())
+            .find(|(class, _)| *class == c)
+            .and_then(|(_, parent)| *parent)
+    }
+
+    /// The declaration of class `c`; none unless [`UnitView::hold_class`]
+    /// accepted it, and for one of the engine's own the analysis did not
+    /// bind.
+    #[must_use]
+    pub fn class_decl(&self, c: ClassId) -> Option<&ClassDecl> {
+        if !self.classes.contains(&c) {
+            return None;
+        }
+        match self.engine_decls.iter().find(|(class, _)| *class == c) {
+            Some((_, decl)) => Some(decl),
+            None => self.epoch.0.class(c)?.decl(),
+        }
     }
 
     /// The linked record of class `c`; none unless

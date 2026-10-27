@@ -1,14 +1,17 @@
 //! php's function-level analysis (ADR-0015, `jit-design.md` §4.6): the CFG,
 //! DFG and SSA that `Zend/Optimizer` builds over one op array, built as
 //! `zend_jit_op_array_analyze1` builds them on a trace's first pass
-//! through the op array, with php's algorithms copied where the order of
-//! blocks, phis and SSA variables is observable in php's own dump
-//! (`opcache.jit_debug`'s `ZEND_JIT_DEBUG_SSA`).
+//! through the op array, and the types and integer ranges
+//! `zend_ssa_inference` infers over them as `zend_jit_op_array_analyze2`
+//! runs it, with php's algorithms copied where the order of blocks, phis
+//! and SSA variables, and what inference learns of each, is observable in
+//! php's own dump (`opcache.jit_debug`'s `ZEND_JIT_DEBUG_SSA`).
 //!
 //! The crate reads the unit format and the constants an op array carries,
-//! and asks its caller, through [`LinkedTable`], for the one thing an op
-//! array does not hold: which class a name binds. The compiled tier alone
-//! calls it, and holds what it builds once per op array.
+//! and asks its caller, through [`LinkedTable`], for what an op array does
+//! not hold: which class a name binds, and what inference reads of a
+//! linked class. The compiled tier alone calls it, and holds what it
+//! builds once per op array.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -28,12 +31,18 @@ mod bits;
 mod cfg;
 mod dfg;
 mod dump;
+mod infer;
+mod range;
 mod ssa;
+mod types;
+mod update;
 
 use php_unit::OpArray;
+use php_unit::decl::{FunctionDecl, Type};
 
 pub use cfg::{Block, Cfg};
 pub use ssa::{Alias, Constraint, Negative, Phi, PhiKind, RangeConstraint, Ssa, SsaOp, SsaVarInfo};
+pub use types::{ClassOf, Range, Returns, Types, VarInfo};
 
 /// A basic block's number, its index in [`Cfg::blocks`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -123,17 +132,22 @@ impl Features {
     }
 }
 
-/// The class names an op array's code can bind while it is analysed:
-/// `zend_optimizer_get_class_entry`'s lookup, which the caller answers
-/// from the classes linked so far.
+/// The classes an op array's code can name while it is analysed, as
+/// the caller holds them linked: `zend_optimizer_get_class_entry`'s
+/// lookup and what inference reads of a class entry.
 pub trait LinkedTable {
     /// A linked class, as the caller holds one.
     type Class: Copy + PartialEq;
 
     /// The class `lcname`, in lower case, binds for code of the file the
-    /// op array was compiled from: one of the engine's own, or one
-    /// declared in that same file; none otherwise.
+    /// op array was compiled from, as `EG(class_table)` holds it when php
+    /// builds the analysis: one of the engine's own, or one declared in
+    /// that same file; none otherwise.
     fn class(&self, lcname: &[u8]) -> Option<Self::Class>;
+
+    /// The engine's own class `lcname`, in lower case, which a declared
+    /// type binds alone.
+    fn engine_class(&self, lcname: &[u8]) -> Option<Self::Class>;
 
     /// The class the op array is declared in, `op_array->scope`, which a
     /// name binds that no other class answers to.
@@ -141,50 +155,187 @@ pub trait LinkedTable {
 
     /// The class's name as declared.
     fn name(&self, class: Self::Class) -> &[u8];
+
+    /// `ce->parent`.
+    fn parent(&self, class: Self::Class) -> Option<Self::Class>;
+
+    /// `instanceof_function(class, of)`: `of` is the class, a parent of
+    /// it, or an interface it implements.
+    fn instance_of(&self, class: Self::Class, of: Self::Class) -> bool;
+
+    /// `ZEND_ACC_FINAL`.
+    fn is_final(&self, class: Self::Class) -> bool;
+
+    /// `ZEND_ACC_TRAIT`.
+    fn is_trait(&self, class: Self::Class) -> bool;
+
+    /// What making, reading and writing an object of the class runs
+    /// besides the standard handlers.
+    fn object(&self, class: Self::Class) -> ObjectShape;
+
+    /// `zend_get_property_info(class, name, silent)` as code of `scope`
+    /// sees it: the property a fetch of `name` on an object of `class`
+    /// finds; none where it finds none or one `scope` may not reach.
+    fn property(
+        &self,
+        class: Self::Class,
+        name: &[u8],
+        scope: Option<Self::Class>,
+    ) -> Option<Property<'_, Self::Class>>;
+
+    /// The class constant `name` of `class` as `zend_fetch_class_const_info`
+    /// finds it in `ce->constants_table`; none for a trait's.
+    fn constant(&self, class: Self::Class, name: &[u8]) -> Option<ClassConstant<'_, Self::Class>>;
+}
+
+/// What an object of a class does besides `zend_std_*`'s handlers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ObjectShape {
+    /// `ce->constructor`.
+    pub constructor: bool,
+    /// `ce->__get`.
+    pub get: bool,
+    /// `ce->__set`.
+    pub set: bool,
+    /// `ce->create_object` is unset and its object handlers are php's
+    /// standard ones, as a user class not extending an engine one has.
+    pub standard: bool,
+}
+
+/// `zend_property_info` as inference reads it.
+#[derive(Debug, Clone, Copy)]
+pub struct Property<'a, C> {
+    /// `ZEND_ACC_STATIC`.
+    pub is_static: bool,
+    /// Its declared type; none where it declares none.
+    pub ty: Option<&'a Type>,
+    /// The class that declares it, `prop_info->ce`, whose name a `self`
+    /// of its type is.
+    pub declared_in: C,
+}
+
+/// `zend_class_constant` as inference reads it.
+#[derive(Debug, Clone, Copy)]
+pub struct ClassConstant<'a, C> {
+    /// Its declared type; none where it declares none.
+    pub ty: Option<&'a Type>,
+    /// `ZEND_ACC_PUBLIC` among its flags.
+    pub is_public: bool,
+    /// `ZEND_ACC_DEPRECATED`.
+    pub is_deprecated: bool,
+    /// The class that declares it.
+    pub declared_in: C,
+}
+
+/// `zend_optimizer_get_class_entry` with `script` null: the class `lcname`
+/// binds for `function`'s code, or its scope where that is the class's
+/// name.
+fn class_entry<T: LinkedTable>(
+    function: &Function<'_>,
+    table: &T,
+    lcname: &[u8],
+) -> Option<T::Class> {
+    table.class(lcname).or_else(|| {
+        (function.scope)
+            .filter(|scope| scope.eq_ignore_ascii_case(lcname))
+            .and_then(|_| table.scope())
+    })
 }
 
 /// One op array and what php reads beside it.
 #[derive(Debug, Clone, Copy)]
 pub struct Function<'a> {
     pub body: &'a OpArray,
-    /// `op_array->function_name`; none for a file's own code.
-    pub name: Option<&'a [u8]>,
+    /// The declaration it is the body of, `op_array->function_name`,
+    /// `arg_info` and `fn_flags`; none for a file's own code.
+    pub decl: Option<&'a FunctionDecl>,
     /// The name of the class it is declared in, `op_array->scope`'s.
     pub scope: Option<&'a [u8]>,
-    /// `op_array->num_args`, the declared parameters but a variadic one.
-    pub num_args: u32,
-    /// `ZEND_ACC_GENERATOR`.
-    pub generator: bool,
 }
 
-/// What `zend_jit_op_array_analyze1` leaves: the CFG always, and the SSA
-/// where php builds one.
+impl<'a> Function<'a> {
+    /// `op_array->function_name`.
+    #[must_use]
+    pub fn name(&self) -> Option<&'a [u8]> {
+        self.decl.map(|decl| &*decl.name.0)
+    }
+
+    /// `op_array->num_args`, the declared parameters but a variadic one.
+    #[must_use]
+    pub fn num_args(&self) -> u32 {
+        let n = self.decl.map_or(0, |decl| {
+            decl.parameters.iter().filter(|p| !p.variadic).count()
+        });
+        u32::try_from(n).unwrap_or(u32::MAX)
+    }
+
+    /// `ZEND_ACC_GENERATOR`.
+    #[must_use]
+    pub fn generator(&self) -> bool {
+        self.decl.is_some_and(|decl| decl.is_generator)
+    }
+}
+
+/// `opcache.jit`'s optimization level, its `O` digit, from which php
+/// analyses an op array a trace passes through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Level {
+    /// `ZEND_JIT_LEVEL_OPT_FUNC`: the op array alone.
+    Func,
+    /// `ZEND_JIT_LEVEL_OPT_FUNCS` and above: with the calls it makes and
+    /// its declared return type.
+    Funcs,
+}
+
+/// What `zend_jit_trace_build_ssa` leaves: the CFG always, the SSA with
+/// what inference learned where php builds one, and what the function
+/// returns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Analysis<C> {
     pub cfg: Cfg,
     /// None for a file's own code, a generator, a function with a `try`,
     /// or one whose variables are reachable by name, as php declines them.
     pub ssa: Option<Ssa<C>>,
+    /// `func_info->return_info`.
+    pub returns: Returns<C>,
 }
 
-/// `zend_jit_op_array_analyze1` at `opcache.jit`'s optimization level 3 or
-/// above: the CFG, then the SSA, its use-def chains, its false
-/// dependencies and its SCCs where php builds them. None where php's
-/// analysis fails, for a function of more than 100,000 blocks or one whose
-/// blocks times variables pass 4,194,304, which php neither compiles from
-/// its SSA nor dumps.
-pub fn analyse<T: LinkedTable>(function: &Function<'_>, table: &T) -> Option<Analysis<T::Class>> {
+/// `zend_jit_trace_build_ssa` at `level`: the CFG, then the SSA, its
+/// use-def chains, its false dependencies and its SCCs where php builds
+/// them, and inference over them. None where php's analysis fails, for a
+/// function of more than 100,000 blocks or one whose blocks times
+/// variables pass 4,194,304, or where inference narrows a type, which
+/// php neither compiles from nor dumps.
+pub fn analyse<T: LinkedTable>(
+    function: &Function<'_>,
+    table: &T,
+    level: Level,
+) -> Option<Analysis<T::Class>> {
     let body = function.body;
-    let mut cfg = cfg::build(body, function.name.is_some())?;
-    if function.name.is_none() {
+    let mut cfg = cfg::build(body, function.name().is_some())?;
+    if function.name().is_none() {
         cfg.features.indirect_var_access = true;
     }
-    if !body.try_catch.is_empty() || function.generator || cfg.features.indirect_var_access {
-        return Some(Analysis { cfg, ssa: None });
+    let mut returns = Returns::default();
+    if level >= Level::Funcs
+        && let Some(decl) = function.decl
+        && decl.return_type.is_some()
+    {
+        returns = infer::signature_returns(decl, table);
     }
-    let ssa = ssa::build(function, &cfg, table)?;
+    if !body.try_catch.is_empty() || function.generator() || cfg.features.indirect_var_access {
+        return Some(Analysis {
+            cfg,
+            ssa: None,
+            returns,
+        });
+    }
+    let mut ssa = ssa::build(function, &cfg, table)?;
+    infer::infer(function, &cfg, &mut ssa, table, &mut returns)?;
     Some(Analysis {
         cfg,
         ssa: Some(ssa),
+        returns,
     })
 }

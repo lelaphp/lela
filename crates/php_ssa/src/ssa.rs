@@ -5,11 +5,12 @@
 //! strongly connected components of the def-use graph, by Pearce.
 
 use php_heap::ZvalType;
-use php_unit::{OpArray, Opcode, OperandKind, Opline, may_be};
+use php_unit::{OpArray, Opcode, OperandKind, Opline};
 
 use crate::bits::Bits;
 use crate::cfg::Cfg;
 use crate::dfg::{self, Dfg, is_var};
+use crate::types::{Range, Types, VarInfo};
 use crate::{BlockId, Function, LinkedTable, PhiId, SsaVar, Var};
 
 /// `zend_build_ssa` declines a function whose blocks times variables pass
@@ -26,18 +27,12 @@ pub enum Negative {
     Init,
 }
 
-/// `zend_ssa_range_constraint`: the variable lies in `min..=max`, each
+/// `zend_ssa_range_constraint`: the variable lies in `range`, each
 /// bound a constant or, where a variable names it, that variable's value
-/// plus the constant.
+/// plus the constant; a bound passed has none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(clippy::struct_field_names)]
 pub struct RangeConstraint {
-    pub min: i64,
-    pub max: i64,
-    /// No lower bound.
-    pub underflow: bool,
-    /// No upper bound.
-    pub overflow: bool,
+    pub range: Range,
     pub min_var: Option<Var>,
     pub max_var: Option<Var>,
     /// The SSA variable `min_var` was on the edge, set by renaming.
@@ -53,7 +48,7 @@ pub enum Constraint<C> {
     /// `zend_ssa_type_constraint`: the value is of `mask`, an instance of
     /// `class` where one is named.
     Type {
-        mask: u32,
+        mask: Types,
         class: Option<C>,
     },
 }
@@ -133,7 +128,7 @@ pub struct SsaVarInfo {
     pub alias: Alias,
 }
 
-/// `zend_ssa` as the compiled tier's first pass leaves it, before inference.
+/// `zend_ssa` as the compiled tier builds it, with what inference learned.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ssa<C> {
     pub phis: Vec<Phi<C>>,
@@ -145,6 +140,8 @@ pub struct Ssa<C> {
     pub vars: Vec<SsaVarInfo>,
     /// How many strongly connected components there are.
     pub sccs: u32,
+    /// What inference learned of each SSA variable, `ssa->var_info`.
+    pub info: Vec<VarInfo<C>>,
 }
 
 impl<C> Ssa<C> {
@@ -306,10 +303,12 @@ fn range(
     negative: Negative,
 ) -> RangeConstraint {
     RangeConstraint {
-        min,
-        max,
-        underflow: under,
-        overflow: over,
+        range: Range {
+            min,
+            max,
+            underflow: under,
+            overflow: over,
+        },
         min_var,
         max_var,
         min_ssa_var: None,
@@ -335,24 +334,23 @@ fn at_most(var: Option<Var>, val: i64) -> RangeConstraint {
 }
 
 /// `pi_type_mask`.
-fn type_mask<C>(mask: u32) -> Constraint<C> {
-    let mut mask = may_be::REF | may_be::RC1 | may_be::RCN | mask;
-    if mask & may_be::NULL != 0 {
-        mask |= may_be::UNDEF;
+fn type_mask<C>(mask: Types) -> Constraint<C> {
+    let mut mask = Types::REF | Types::RC | mask;
+    if mask.has(Types::NULL) {
+        mask |= Types::UNDEF;
     }
     Constraint::Type { mask, class: None }
 }
 
 /// `pi_not_type_mask`.
-fn not_type_mask<C>(mask: u32) -> Constraint<C> {
-    let relevant = may_be::ANY | may_be::KEY_ANY | may_be::OF_ANY | may_be::OF_REF;
-    type_mask(!mask & relevant)
+fn not_type_mask<C>(mask: Types) -> Constraint<C> {
+    type_mask(!mask & (Types::ANY | Types::ARRAY_ANY))
 }
 
 /// `mask_for_type_check`.
-fn mask_for_type_check(mask: u32) -> u32 {
-    if mask & may_be::ARRAY != 0 {
-        mask | may_be::KEY_ANY | may_be::OF_ANY | may_be::OF_REF
+fn mask_for_type_check(mask: Types) -> Types {
+    if mask.has(Types::ARRAY) {
+        mask | Types::ARRAY_ANY
     } else {
         mask
     }
@@ -491,7 +489,7 @@ impl<C: Copy + PartialEq> Builder<'_, C> {
                 Opcode::Coalesce | Opcode::JmpNull => {
                     if op.op1_type == cv {
                         let to = succ(usize::from(op.opcode == Opcode::JmpNull));
-                        self.add_pi(dfg, j, to, Var(op.op1), not_type_mask(may_be::NULL));
+                        self.add_pi(dfg, j, to, Var(op.op1), not_type_mask(Types::NULL));
                     }
                     continue;
                 }
@@ -724,10 +722,10 @@ impl<C: Copy + PartialEq> Builder<'_, C> {
                 }
                 Opcode::TypeCheck if prev.op1_type == cv => {
                     let var = Var(prev.op1);
-                    let mask = prev.extended_value;
+                    let mask = Types(prev.extended_value);
                     self.add_pi(dfg, j, bt, var, type_mask(mask_for_type_check(mask)));
                     // `is_resource()` is false for a closed resource.
-                    if mask != may_be::RESOURCE {
+                    if mask != Types::RESOURCE {
                         self.add_pi(dfg, j, bf, var, not_type_mask(mask_for_type_check(mask)));
                     }
                 }
@@ -743,9 +741,9 @@ impl<C: Copy + PartialEq> Builder<'_, C> {
                     // `=== null`, `true` or `false` rules a type out on the
                     // other edge; another constant is seldom of use.
                     let mask = match value.map(|v| v.kind()) {
-                        Some(ZvalType::Null) => may_be::NULL,
-                        Some(ZvalType::True) => may_be::TRUE,
-                        Some(ZvalType::False) => may_be::FALSE,
+                        Some(ZvalType::Null) => Types::NULL,
+                        Some(ZvalType::True) => Types::TRUE,
+                        Some(ZvalType::False) => Types::FALSE,
                         _ => continue,
                     };
                     let (is, not) = if prev.opcode == Opcode::IsIdentical {
@@ -767,17 +765,11 @@ impl<C: Copy + PartialEq> Builder<'_, C> {
                     let Some(lcname) = lcname else {
                         continue;
                     };
-                    let class = table.class(lcname.bytes()).or_else(|| {
-                        function
-                            .scope
-                            .filter(|scope| scope.eq_ignore_ascii_case(lcname.bytes()))
-                            .and_then(|_| table.scope())
-                    });
-                    let Some(class) = class else {
+                    let Some(class) = crate::class_entry(function, table, lcname.bytes()) else {
                         continue;
                     };
                     let constraint = Constraint::Type {
-                        mask: may_be::REF | may_be::RC1 | may_be::RCN | may_be::OBJECT,
+                        mask: Types::REF | Types::RC | Types::OBJECT,
                         class: Some(class),
                     };
                     self.add_pi(dfg, j, bt, Var(prev.op1), constraint);
@@ -1179,6 +1171,7 @@ impl<C: Copy + PartialEq> Builder<'_, C> {
             ops: self.ops,
             vars: vec![blank; self.count as usize],
             sccs: 0,
+            info: Vec::new(),
         })
     }
 }
@@ -1356,7 +1349,7 @@ fn false_dependencies<C>(ssa: &mut Ssa<C>, body: &OpArray) {
 /// The SSA variables the oplines at and beside `at` define, as
 /// `FOR_EACH_DEFINED_VAR` takes them: its own, then an `OP_DATA`'s
 /// assignment's or an assignment's `OP_DATA`'s.
-fn defined_at<C>(ssa: &Ssa<C>, body: &OpArray, at: usize) -> Vec<SsaVar> {
+pub(crate) fn defined_at<C>(ssa: &Ssa<C>, body: &OpArray, at: usize) -> Vec<SsaVar> {
     let defs = |at: usize| {
         ssa.ops
             .get(at)

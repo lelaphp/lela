@@ -1046,7 +1046,7 @@ impl Declared {
     }
 
     /// The declaration the table holds for the class.
-    fn decl(&self) -> Option<&ClassDecl> {
+    pub(crate) fn decl(&self) -> Option<&ClassDecl> {
         match &self.composed {
             Some(composed) => Some(&composed.decl),
             None => self.unit.classes.get(usize::try_from(self.at).ok()?),

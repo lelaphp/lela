@@ -98,14 +98,15 @@ impl Func {
     }
 
     /// The declaration the op array is the body of, none for a file's own
-    /// code, and the name of the class a method's or a hook's is declared
-    /// in, php's `function_name` and `scope`.
+    /// code, and the name of the class a method's, a hook's or a closure
+    /// written in either is declared in, php's `function_name` and
+    /// `scope`.
     pub(crate) fn declaration(&self) -> Option<(Option<&FunctionDecl>, Option<&Name>)> {
         let unit = &self.unit;
         let (decl, class) = match self.body {
             Body::Main => return Some((None, None)),
             Body::Function(at) => (&unit.functions.get(at as usize)?.0, None),
-            Body::Dynamic(at) => (&unit.dynamic.get(at as usize)?.0, None),
+            Body::Dynamic(at) => (&unit.dynamic.get(at as usize)?.0, dynamic_scope(unit, at)),
             Body::Method(at) => {
                 let method = unit.methods.get(at as usize)?;
                 let class = unit.classes.get(method.class as usize)?;
@@ -462,6 +463,34 @@ fn bodies(unit: &PublishedUnit) -> impl Iterator<Item = (Body, &OpArray)> {
                 .enumerate()
                 .map(move |(at, hook)| (Body::Hook(numbered(at)), &hook.body)),
         )
+}
+
+/// The class a function written inside another body is declared in, as
+/// php's compiler sets `op_array->scope` to `CG(active_class_entry)`: the
+/// class of the method or hook whose body, or a body inside it, declares
+/// it; none inside a function or a file's own code.
+fn dynamic_scope(unit: &php_unit::Unit, at: u32) -> Option<&Name> {
+    let mut at = at;
+    for _ in 0..=unit.dynamic.len() {
+        let declares = |body: &OpArray| body.dynamic_func_defs.contains(&at);
+        let class = (unit
+            .methods
+            .iter()
+            .find(|m| declares(&m.body))
+            .map(|m| m.class))
+        .or_else(|| {
+            unit.hooks
+                .iter()
+                .find(|h| declares(&h.body))
+                .map(|h| h.class)
+        });
+        if let Some(class) = class {
+            return unit.classes.get(class as usize).map(|c| &c.name);
+        }
+        let outer = unit.dynamic.iter().position(|(_, body)| declares(body))?;
+        at = u32::try_from(outer).ok()?;
+    }
+    None
 }
 
 #[cfg(test)]
