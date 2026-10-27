@@ -38,9 +38,10 @@ pub use crate::api::abi::{Extension, ExtensionBuilder, Refusal, Start, StartupIn
 /// What a tier's request start answers where it fails, as an
 /// extension's `rinit` does.
 pub use crate::api::raising::Thrown;
-use crate::observer::{Declared, ObservedOpcodes, Telling, Untold};
+use crate::api::values::Value;
+use crate::observer::{Declared, ObservedOpcodes, OnThrow, Telling, Untold};
 use crate::{exec, interrupt};
-use php_unit::{OpArray, OplineIdx};
+use php_unit::{OpArray, OperandKind};
 
 pub use crate::api::request::Request;
 use crate::api::request::TierStatus;
@@ -1811,78 +1812,113 @@ pub fn dispatch_held(req: &mut Request, frame: FrameRef, held: Held<'_>) -> Resu
     }
 }
 
-/// The frameless call at the opline `frame` stands at in `held`, a
-/// `FRAMELESS_ICALL_*`, served by its handler with no dispatch, as php's
-/// compiled code calls the native directly (`jit_frameless_icall`,
-/// `Z/ext/opcache/jit/zend_jit_ir.c:17868-18080`): `frame` stood at `at`
-/// by compiled code's `SET_EX_OPLINE`, and past it after the call, the
-/// interrupt checked after the call as `jit_frameless_interrupt_check`
-/// checks it, and a throw left pending. Any other opline is
-/// [`dispatch_held`]'s.
-pub fn frameless_held(
-    req: &mut Request,
-    frame: FrameRef,
-    held: Held<'_>,
-    at: OplineIdx,
-) -> Result<(), Fatal> {
-    use crate::handlers::{
-        frameless_icall_0, frameless_icall_1, frameless_icall_2, frameless_icall_3,
-    };
-    use php_unit::Opcode;
-    let code = held.code();
-    let at = at.0;
-    debug_assert_eq!(
-        req.vm().opline(frame),
-        at,
-        "compiled code stood the frame at the call"
+/// The native the call on top of the stack, `call`, is to, served from
+/// compiled code as php's `zend_jit_do_fcall` calls an internal
+/// function's handler with the call and the address of the slot that
+/// takes its return (`Z/ext/opcache/jit/zend_jit_ir.c:10528-10575`):
+/// compiled code stood the caller at the `DO_ICALL` and made the call
+/// the one being served, `EG(current_execute_data) = call`, and makes
+/// the interrupt check, the call's pop and the throw's test after
+/// it, so this serves the native alone, its observer told where one is
+/// declared, and reads no opline. What the native returned, with its
+/// owner, the call still on the stack; `null`, as php's `ZVAL_NULL`
+/// before the handler leaves it, where it threw, the call then popped
+/// and the throwable left pending, as `DO_ICALL`'s handler leaves it
+/// ([`crate::handlers::thrown_on_call`]).
+///
+/// # Errors
+///
+/// The memory limit's fatal, raised where the native threw past it, and
+/// an internal error where `call` is no native's call on top, which no
+/// call compiled code makes is.
+pub fn call_native(req: &mut Request, call: FrameRef) -> Result<Zval, Fatal> {
+    debug_assert!(
+        req.vm().stack.top().is_some_and(|(top, _)| top == call),
+        "compiled code serves the call on top"
     );
-    let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
-    let next = match op.opcode {
-        Opcode::FramelessIcall0 => frameless_icall_0::<Nop>(req, frame, code, op, at)?,
-        Opcode::FramelessIcall1 => frameless_icall_1::<Nop>(req, frame, code, op, at)?,
-        Opcode::FramelessIcall2 => frameless_icall_2::<Nop>(req, frame, code, op, at)?,
-        Opcode::FramelessIcall3 => frameless_icall_3::<Nop>(req, frame, code, op, at)?,
-        _ => return dispatch_held(req, frame, held),
-    };
-    went_on_in(req, frame, at, next)
-}
-
-/// The `DO_ICALL` at `at` of `frame`, the call on top of the stack a
-/// native's, made as php's compiled code makes it knowing the opline it
-/// compiled (`zend_jit_do_fcall`'s internal arm,
-/// `Z/ext/opcache/jit/zend_jit_ir.c:10545-10660`): `frame` stood at `at`
-/// by compiled code's `SET_EX_OPLINE`, the handler's internal arm served
-/// with no opline read and no dispatch,
-/// what the native returned written into the temporary `into` names, or
-/// given up where the opline's `result` is `UNUSED`, the interrupt
-/// checked with the call still on the stack, the call popped, and a
-/// throw left pending.
-pub fn call_native(
-    req: &mut Request,
-    frame: FrameRef,
-    at: OplineIdx,
-    into: Option<u32>,
-) -> Result<(), Fatal> {
-    debug_assert_eq!(
-        req.vm().opline(frame),
-        at.0,
-        "compiled code stood the frame at the call"
-    );
-    let next = crate::handlers::icall(req, frame, into)?;
-    went_on_in(req, frame, at.0, next)
-}
-
-/// Where a native's call compiled code makes, at `at` of `frame`, went
-/// on: in `frame`, past it or at a throw; anywhere else is an internal
-/// error, which no call compiled code makes reaches.
-#[inline]
-fn went_on_in(req: &mut Request, frame: FrameRef, at: u32, next: Next) -> Result<(), Fatal> {
-    match settled(req, frame, at, next) {
-        Stepped::Same(went) | Stepped::Threw(went) if went == frame => Ok(()),
-        _ => Err(Fatal::error(
-            "InternalError: a native's call compiled code makes went on elsewhere",
-        )),
+    let function = req
+        .vm()
+        .at(call)
+        .filter(|header| header.info.serving_native())
+        .and_then(|header| header.function)
+        .ok_or_else(|| Fatal::error("InternalError: compiled code served no native's call"))?;
+    match req.serve_native(function, OnThrow::Nothing) {
+        Ok(value) => Ok(value.to_zval()),
+        Err(thrown) => {
+            native_threw(req, &thrown)?;
+            Ok(Zval::null())
+        }
     }
+}
+
+/// [`call_native`]'s throw path, the handler's own
+/// ([`crate::handlers::thrown_on_call`]), kept out of the kernel's
+/// returning path, which the handler's inlining would otherwise lengthen.
+#[cold]
+fn native_threw(req: &mut Request, thrown: &Thrown) -> Result<(), Fatal> {
+    crate::handlers::thrown_on_call(req, thrown)
+}
+
+/// The call on top of the stack popped, `zend_vm_stack_free_args` and
+/// `zend_vm_stack_free_call_frame` ([`Request::pop_call`]), where the
+/// call compiled code made to a native ([`call_native`]) is not one it
+/// pops in place: an argument that counts owners, or a call that
+/// carries an annex, off the top page. A destructor an argument's
+/// release serves may leave a throwable pending.
+pub fn pop_call(req: &mut Request) {
+    req.pop_call();
+}
+
+/// The place of a native's row in the engine's frameless table, which a
+/// `FRAMELESS_ICALL_*`'s `extended_value` holds, as php's
+/// `ZEND_FLF_HANDLER(opline)` reads it, and compiled code hands the
+/// `frameless` kernel ([`frameless_call`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct FramelessAt(pub u32);
+
+/// The native at `at` of the engine's frameless table served over
+/// `operands` for the `FRAMELESS_ICALL_*` `frame` stands at, as php's
+/// compiled code calls the native's frameless handler with the operand
+/// zvals it addressed and the slot that takes its return
+/// (`jit_frameless_icall*`, `Z/ext/opcache/jit/zend_jit_ir.c:17868-18110`),
+/// with no opline read: each operand of the kind of its slot, as
+/// compiled code read it, neither `UNDEF`, which compiled code hands to
+/// the handler instead, nor a reference, which it reads through, a
+/// temporary moved out of
+/// its slot, and `Unused` past the native's arity. Its record is
+/// owned as [`crate::exec::frameless_owner`] says, and given up as the
+/// call ends ([`crate::handlers::frameless_served`]); compiled code
+/// makes the interrupt check after it, `jit_frameless_interrupt_check`.
+/// What the native returned, or `null` with the throwable left pending.
+///
+/// # Errors
+///
+/// The memory limit's fatal where the record's room is refused, and an
+/// internal error where `at` names no entry of the table.
+pub fn frameless_call(
+    req: &mut Request,
+    frame: FrameRef,
+    at: FramelessAt,
+    operands: [(Zval, OperandKind); 3],
+) -> Result<Zval, Fatal> {
+    let named = exec::frameless_named(req.vm().at(frame));
+    let mut held = [Zval::UNDEF; 3];
+    let mut owned = 0u8;
+    let mut count = 0;
+    for (place, (z, kind)) in operands.into_iter().enumerate() {
+        if kind == OperandKind::Unused {
+            break;
+        }
+        debug_assert!(!z.is_undef() && z.kind() != php_heap::ZvalType::Reference);
+        let own;
+        (held[place], own) = exec::frameless_owner(z, kind, named);
+        owned |= u8::from(own) << place;
+        count = place + 1;
+    }
+    let operands = held.get(..count).unwrap_or_default();
+    let returned = crate::handlers::frameless_served(req, at.0, operands, owned)?;
+    Ok(returned.map_or_else(Zval::null, Value::to_zval))
 }
 
 /// The `DO_UCALL`, `DO_FCALL` or `DO_FCALL_BY_NAME` at `frame`'s opline

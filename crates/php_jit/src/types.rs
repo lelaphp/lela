@@ -79,7 +79,7 @@ mod tests;
 
 use std::num::{NonZeroU32, NonZeroUsize};
 
-use php_engine::tier::{ClassId, FuncRef, MapPtrRaw, PlainCall, UnitView};
+use php_engine::tier::{ClassId, FramelessAt, FuncRef, MapPtrRaw, PlainCall, UnitView};
 use php_heap::ZvalType;
 use php_unit::{ConstIdx, Opcode, OplineIdx};
 
@@ -422,6 +422,11 @@ pub(crate) enum Imm {
         value: Returned,
         receives: bool,
     },
+    /// The native a `FRAMELESS_ICALL_*` calls, its place in the engine's
+    /// frameless table, the opline's `extended_value`, php's
+    /// `ZEND_FLF_HANDLER(opline)`, which compiled code hands the
+    /// `frameless` kernel so it reads no opline.
+    Frameless(FramelessAt),
     /// The types a `TYPE_CHECK` asks for, its `extended_value`: one bit
     /// per type, `1 << IS_*`, php's `MAY_BE_*` mask.
     Mask(u32),

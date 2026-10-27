@@ -8,7 +8,8 @@ use std::collections::{HashMap, HashSet};
 use std::num::{NonZeroU32, NonZeroUsize};
 
 use php_engine::tier::{
-    self, CalleeSlot, ClassId, FuncRef, MapPtrRaw, PlainCall, PropertySlot, Sample, UnitView,
+    self, CalleeSlot, ClassId, FramelessAt, FuncRef, MapPtrRaw, PlainCall, PropertySlot, Sample,
+    UnitView,
 };
 use php_heap::ZvalType;
 use php_unit::decl::Parameter;
@@ -3968,6 +3969,7 @@ fn imm(op: &Opline) -> Imm {
             lattice::binary_of(op.extended_value).map_or(Imm::None, Imm::Binary)
         }
         Opcode::TypeCheck => Imm::Mask(op.extended_value),
+        opcode if opcode.is_frameless_icall() => Imm::Frameless(FramelessAt(op.extended_value)),
         _ => Imm::None,
     }
 }
