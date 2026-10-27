@@ -2056,15 +2056,17 @@ impl<'a> Builder<'a> {
         let known = (self.rec.entered.iter())
             .find(|entered| slot.frame == Frame::ROOT && entered.var == slot.var)
             .filter(|_| !self.aliased(slot));
-        if let Some(known) = known {
-            return Types::of_tag(known.tag);
-        }
         let FrameInfo { func, place, .. } = self.frames[usize::from(slot.frame.0)];
         let reaching = |unknown: Types| {
             (meta.begins)
                 .and_then(|at| self.analysed.reaching(func, at.0, slot.var))
                 .map_or(unknown, |info| unknown.restricted(info.types))
         };
+        // Narrowed by what php's analysis knows reaches it, as php's side
+        // copies the op array's info and meets it with its parent's type.
+        if let Some(known) = known {
+            return reaching(Types::of_tag(known.tag));
+        }
         let cv = slot.var < meta.code.num_cvs;
         if !cv {
             return reaching(Types::UNKNOWN.without(Types::UNDEF));
@@ -3310,6 +3312,54 @@ impl<'a> Builder<'a> {
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:4228-4288`): its exit knows a
     /// concrete entry of the variables before it alone, and one on no
     /// variable, the stack's room tested before the walk, knows none.
+    /// A side trace grown from such an exit enters knowing what it knew,
+    /// and guards none of it again: the row's layout guard hands its
+    /// side the types of `$n`, `$out`, `$i` and `$sum`, so the side's
+    /// exits are php's two, the increment's overflow and the loop's end:
+    ///
+    /// ```php
+    /// function a(int $i, int $j): float { $ij = $i + $j; return 1.0 / ($ij * ($ij + 1) / 2 + $i + 1); }
+    /// function f(int $n, array $u): array {
+    ///     $out = [];
+    ///     for ($i = 0; $i < $n; $i++) { $sum = 0.0; for ($j = 0; $j < $n; $j++) { $sum += a($i, $j) * $u[$j]; } $out[$i] = $sum; }
+    ///     return $out;
+    /// }
+    /// $u = array_fill(0, 60, 1.0);
+    /// $u = f(60, f(60, $u));
+    /// printf("%.6f\n", $u[0]);
+    /// ```
+    /// ```expect regime=jit-inline process capture
+    /// 3.230547
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:8
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %SCRATCH%/witness.php:5
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %SCRATCH%/witness.php:5
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 4 f() %SCRATCH%/witness.php:5
+    /// ---- TRACE 2 start (side trace 1/4) f() %SCRATCH%/witness.php:5
+    /// ---- TRACE 2 stop (link to 1)
+    /// ---- TRACE 2 compiled
+    ///
+    ///      TRACE 2 exit 0 f() %SCRATCH%/witness.php:5
+    /// ---- TRACE 3 start (side trace 2/0) f() %SCRATCH%/witness.php:5
+    /// ---- TRACE 3 stop (link to 1)
+    /// ---- TRACE 3 compiled
+    ///
+    ///      TRACE 3 exit 1 f() %SCRATCH%/witness.php:6
+    /// ---- TRACE 4 start (side trace 3/1) f() %SCRATCH%/witness.php:6
+    /// ---- TRACE 4 stop (return)
+    /// ---- TRACE 4 compiled
+    ///
+    /// ---- TRACE 5 start (enter) f() %SCRATCH%/witness.php:3
+    /// ---- TRACE 5 abort (inner loop)
+    /// ---- TRACE 5 start (loop) f() %SCRATCH%/witness.php:5
+    /// ---- TRACE 5 abort (compiled loop)
+    /// ```
     fn entry_bound(&self, source: Source) -> Option<u32> {
         let Source::Guard(at) = source else {
             return None;
