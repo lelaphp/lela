@@ -118,7 +118,7 @@ third-engine-design.md
 - ADR-0015 (accepted, 2026-10-21): The compiled tier keeps php's function-level analysis, computed on a trace's first pass through an op array, in a crate of its own below the tier
 - ADR-0016 (accepted, 2026-10-25): The binaries are named after the product from one constant, with `php` an opt-in symlink
 
-<!-- /computed in=32bffaa78c685b9c9320da169f6f2575c3385abc138522b6988d8c2b7edbed2b out=059605fab045f8a0e0476a5fbe57a17446b44e77150f840f41eef3b197833fa8 -->
+<!-- /computed in=4467ce77ca30cafe83485af3995eaf02e740eb1866466df1d7ad3ed40845e9d2 out=059605fab045f8a0e0476a5fbe57a17446b44e77150f840f41eef3b197833fa8 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md --tracked" inputs=seams.toml,crates/**/*.lock,xtask/xtask.lock,xtask/src/status.rs name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling |
