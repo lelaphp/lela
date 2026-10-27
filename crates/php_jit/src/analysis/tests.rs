@@ -1,7 +1,11 @@
 //! The tier's SSA dumps held to the oracle's: each program of
 //! `types/goldens` served under the settings `capture.sh` ran php with,
-//! and each op array's dump compared, as far as php knows it before type
-//! inference, with the one php wrote, `goldens/<program>.ssa`.
+//! and each op array's dump compared with the one php wrote,
+//! `goldens/<program>.ssa`, with the types and ranges inference gave
+//! each variable. An op array with a call is compared as php knows it
+//! before inference: php types what a call returns by what it knows of the
+//! callee (`zend_get_func_info`), which the analysis does not read yet
+//! (#3574).
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -85,6 +89,19 @@ fn inferred(rest: &str) -> usize {
     at
 }
 
+/// The oplines whose value php types by the callee, the frameless calls
+/// among them, which `zend_analyze_calls` maps as it maps the others.
+const CALLS: [&str; 8] = [
+    "= DO_UCALL",
+    "= DO_ICALL",
+    "= DO_FCALL",
+    "= DO_FCALL_BY_NAME",
+    "= FRAMELESS_ICALL_0",
+    "= FRAMELESS_ICALL_1",
+    "= FRAMELESS_ICALL_2",
+    "= FRAMELESS_ICALL_3",
+];
+
 /// `line` as php prints it before inference: no line per CV, and no types
 /// or range after a variable or the return; a pi's constraint kept.
 fn projected(line: &str) -> Option<String> {
@@ -112,8 +129,30 @@ fn projected(line: &str) -> Option<String> {
     Some(out)
 }
 
-/// The dumps of a `jit_debug` stream, each op array's once, projected,
-/// the file of each named by `file` alone.
+/// `line` without the number php's dump has been seen to print before
+/// a `ref` among an array's element types, `array of [any, 893 ref]`,
+/// which changes from one serving to the next: the one byte pattern dropped, digits
+/// and a space after `, ` where `ref]` follows.
+fn stray_digits(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(at) = rest.find(", ") {
+        let (head, tail) = rest.split_at(at + 2);
+        out.push_str(head);
+        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+        rest = match tail.get(digits..) {
+            Some(after) if digits > 0 && after.starts_with(" ref]") => {
+                after.get(1..).unwrap_or_default()
+            }
+            _ => tail,
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The dumps of a `jit_debug` stream, each op array's once, the file of
+/// each named by `file` alone; one with a call projected.
 fn dumps(stream: &str, file: &str) -> BTreeSet<String> {
     let lines: Vec<&str> = stream.lines().collect();
     let mut dumps = BTreeSet::new();
@@ -123,6 +162,14 @@ fn dumps(stream: &str, file: &str) -> BTreeSet<String> {
             while dump.last().is_some_and(String::is_empty) {
                 dump.pop();
             }
+            let calls = dump
+                .iter()
+                .any(|line| CALLS.iter().any(|call| line.contains(call)));
+            let dump: Vec<String> = if calls {
+                dump.iter().filter_map(|line| projected(line)).collect()
+            } else {
+                dump.iter().map(|line| stray_digits(line)).collect()
+            };
             dumps.insert(dump.join("\n"));
         }
     };
@@ -151,7 +198,7 @@ fn dumps(stream: &str, file: &str) -> BTreeSet<String> {
                 }
                 _ => (*line).to_owned(),
             };
-            dump.extend(projected(&named));
+            dump.push(named);
         }
     }
     close(&mut current);
@@ -159,7 +206,7 @@ fn dumps(stream: &str, file: &str) -> BTreeSet<String> {
 }
 
 #[test]
-fn projection_drops_what_inference_prints() {
+fn projection_drops_what_inference_prints_and_stray_digits_go() {
     assert_eq!(
         projected("0001 #2.T1 [bool] = IS_SMALLER #1.CV0($n) [long] RANGE[MIN..MAX] int(2)")
             .as_deref(),
@@ -175,6 +222,10 @@ fn projection_drops_what_inference_prints() {
         Some("     ; return ")
     );
     assert_eq!(projected("     ; #0.CV0($n) NOVAL [undef]"), None);
+    assert_eq!(
+        stray_digits("     ; return  [rcn, array of [any, 893 ref]] RANGE[0..0]"),
+        "     ; return  [rcn, array of [any, ref]] RANGE[0..0]"
+    );
 }
 
 /// The seven kernels of `docs/perf/workloads`, each with the size its
