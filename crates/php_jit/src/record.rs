@@ -772,10 +772,7 @@ pub(crate) fn headed(
 ) -> Result<Headed, Fatal> {
     let from = position(req, frame);
     let mut view = UnitView::new(req);
-    let Some(code) = tier::func(req, frame)
-        .filter(|func| view.hold(req, *func))
-        .and_then(|func| view.op_array(func))
-    else {
+    let Some(code) = served_code(req, &mut view, frame) else {
         return Ok(Headed::Unstepped);
     };
     let Some(root) = loop_root(code, header) else {
@@ -784,77 +781,94 @@ pub(crate) fn headed(
     if root == from {
         return Ok(Headed::Stands(frame));
     }
-    stepped_on(req, frame, code, |now| {
+    let (reached, at) = stepped_on(req, frame, code, |now| {
         if now == root {
-            Some(Headed::Stepped)
+            Some(Reached::There)
         } else if now.0 < from.0 || now.0 > root.0 {
-            Some(Headed::Away)
+            Some(Reached::Away)
         } else {
             None
         }
+    })?;
+    Ok(match reached {
+        Reached::There => Headed::Stepped(at),
+        Reached::Away => Headed::Away(at),
     })
+}
+
+/// The op array `frame` runs, as `view` holds it; none where it runs no
+/// op array a trace reads.
+fn served_code<'v>(req: &Request, view: &'v mut UnitView, frame: FrameRef) -> Option<&'v OpArray> {
+    let func = tier::func(req, frame).filter(|func| view.hold(req, *func))?;
+    view.op_array(func)
 }
 
 /// `frame`, which stands at the condition loop `header` roots at
 /// ([`loop_root`]), stepped through that condition and the jump it ends
 /// in, as php's interpreter serves them at the loop's header once the
-/// header's handler has counted the visit: `Stepped` where they went, the
-/// body or past the loop; `Away` where the condition threw or left. A
-/// loop rooted where its back edge lands has no condition before its
-/// body, and nothing is stepped: `Stands`. The back edge's site, which
-/// would count the same visit again, is not asked: a step serves a
-/// back edge with `Nop` at its safepoint (`tier::step`).
+/// header's handler has counted the visit: the frame where they went,
+/// the body, past the loop, or wherever the condition threw or left to.
+/// None where nothing is stepped: a loop rooted where its back edge
+/// lands, which has no condition before its body, or a frame that does
+/// not stand at its condition. The back edge's site, which would count
+/// the same visit again, is not asked: a step serves a back edge with
+/// `Nop` at its safepoint (`tier::step`).
 pub(crate) fn served(
     req: &mut Request,
     frame: FrameRef,
     header: SafepointIdx,
-) -> Result<Headed, Fatal> {
+) -> Result<Option<FrameRef>, Fatal> {
     let mut view = UnitView::new(req);
-    let Some(code) = tier::func(req, frame)
-        .filter(|func| view.hold(req, *func))
-        .and_then(|func| view.op_array(func))
-    else {
-        return Ok(Headed::Unstepped);
+    let Some(code) = served_code(req, &mut view, frame) else {
+        return Ok(None);
     };
     let Some(site) = code.safepoints.get(header.0 as usize).copied() else {
-        return Ok(Headed::Unstepped);
+        return Ok(None);
     };
     let root = rooted(code, site);
-    if root == site || position(req, frame) != root {
-        return Ok(Headed::Stands(frame));
-    }
-    let Some(end) = (code.oplines.iter().enumerate().skip(root.0 as usize))
+    let end = (code.oplines.iter().enumerate().skip(root.0 as usize))
         .find(|(_, op)| op.jump_target() == Some(site))
-        .and_then(|(at, _)| u32::try_from(at).ok())
-    else {
-        return Ok(Headed::Stands(frame));
+        .and_then(|(at, _)| u32::try_from(at).ok());
+    let Some(end) = end.filter(|_| root != site && position(req, frame) == root) else {
+        return Ok(None);
     };
-    stepped_on(req, frame, code, |now| {
-        (now.0 < root.0 || now.0 > end).then_some(Headed::Stepped as fn(FrameRef) -> Headed)
-    })
+    let (_, at) = stepped_on(req, frame, code, |now| {
+        (now.0 < root.0 || now.0 > end).then_some(Reached::There)
+    })?;
+    Ok(Some(at))
+}
+
+/// Where [`stepped_on`] stopped stepping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reached {
+    /// Where it was stepping to.
+    There,
+    /// Somewhere else first.
+    Away,
 }
 
 /// `frame` stepped one handler at a time, the calls it makes stepped
 /// through, until `reached` says, of the opline it stands at in its own
 /// op array `code`, where it is; `Away` where it leaves its serving's
-/// entry first, or a step returned past it, moved it or threw.
+/// entry first, or a step returned past it, moved it or threw. The frame
+/// it stopped in beside.
 fn stepped_on(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
-    reached: impl Fn(OplineIdx) -> Option<fn(FrameRef) -> Headed>,
-) -> Result<Headed, Fatal> {
+    reached: impl Fn(OplineIdx) -> Option<Reached>,
+) -> Result<(Reached, FrameRef), Fatal> {
     let (mut at, mut depth) = (frame, 0u32);
     loop {
         if depth == 0 {
             let now = position(req, at);
-            if let Some(headed) = reached(now) {
-                return Ok(headed(at));
+            if let Some(reached) = reached(now) {
+                return Ok((reached, at));
             }
             let leaving = (code.oplines.get(now.0 as usize))
                 .is_some_and(|op| leaves(op.opcode) && at == tier::entry(req));
             if leaving {
-                return Ok(Headed::Away(at));
+                return Ok((Reached::Away, at));
             }
         }
         match tier::step(req, at)? {
@@ -868,7 +882,7 @@ fn stepped_on(
                 at = caller;
             }
             Stepped::Popped(next) | Stepped::Moved(next) | Stepped::Threw(next) => {
-                return Ok(Headed::Away(next));
+                return Ok((Reached::Away, next));
             }
             Stepped::Done => return Err(stepped_past_entry()),
         }

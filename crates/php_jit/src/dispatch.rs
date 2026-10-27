@@ -1074,18 +1074,16 @@ pub(crate) fn hot(
             Err(left) => return left,
         };
         written(req, shared, &TraceEvent::Done);
-        let stood = match stood {
-            Some(Stood::Header(at, func, header)) => match counted(req, shared, at, func, header) {
+        if let Some(Stood::Header(at, func, header)) = stood {
+            match counted(req, shared, at, func, header) {
                 Counted::Again(again) => {
                     (frame, claim) = (at, again);
                     continue;
                 }
-                Counted::On(Flow::Continue) => return flow,
+                Counted::Stands => {}
                 Counted::On(on) => return on,
-            },
-            Some(Stood::Trace(at, id)) => Some((at, id)),
-            None => None,
-        };
+            }
+        }
         return went_on(req, shared, flow, stood, activated);
     }
 }
@@ -1167,7 +1165,7 @@ fn recordings(
         let Some((rooted, name)) = rerooted(req, shared, claim, name, &ended) else {
             return Ok((resumed(ended.at, *stepped), None, ended.activated));
         };
-        let header = loop_rooted(&rooted);
+        let header = header_of(&rooted);
         let job = Job {
             recorded,
             claim: rooted,
@@ -1221,7 +1219,7 @@ fn recordings(
 
 /// The loop header a loop's claim holds the word of, by its op array and
 /// safepoint; none for any other claim.
-fn loop_rooted(claim: &Claim) -> Option<(FuncRef, SafepointIdx)> {
+fn header_of(claim: &Claim) -> Option<(FuncRef, SafepointIdx)> {
     match (claim.start(), claim.holder()) {
         (Start::Loop, Holder::Root { func, at, .. }) => Some((*func, *at)),
         _ => None,
@@ -1243,8 +1241,11 @@ enum Stood {
 enum Counted {
     /// The count claimed the header's word, recorded from at once.
     Again(Claim),
-    /// The interpreter goes on: where the loop's condition went, or, on
-    /// `Continue`, where the recording stopped.
+    /// Nothing was counted or stepped: the interpreter goes on where the
+    /// recording stopped, through [`went_on`], which enters a trace a
+    /// thread published at the header meanwhile.
+    Stands,
+    /// The interpreter goes on where the loop's condition went.
     On(Flow),
 }
 
@@ -1258,8 +1259,8 @@ enum Counted {
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:8262-8268`). Here the header's
 /// word is visited as a site visits it, claimed for a recording from
 /// the header where its heat reaches the threshold. A word that is not
-/// cold, blacklisted at this abort or claimed elsewhere, is not visited,
-/// and the interpreter goes on. Where the visit claimed nothing, the loop's
+/// cold, blacklisted at this abort or claimed or published elsewhere, is
+/// not visited, and the interpreter goes on where it stood. Where the visit claimed nothing, the loop's
 /// condition, which its back edge counts php's visit of, is stepped
 /// through to where it goes, so the back edge does not count it twice
 /// ([`record::served`]).
@@ -1363,7 +1364,7 @@ fn counted(
     let epoch = tier::epoch(req);
     let word = epoch.word(func, header);
     if policy::read(word) != State::Cold {
-        return Counted::On(Flow::Continue);
+        return Counted::Stands;
     }
     let claims = !quiet(req, Some(Site::Loop(header)));
     let holder = || {
@@ -1374,12 +1375,14 @@ fn counted(
             at: header,
         })
     };
-    if let Visited::Hot(claim) = visit(word, &shared.policy, Start::Loop, claims, holder) {
-        return Counted::Again(claim);
+    match visit(word, &shared.policy, Start::Loop, claims, holder) {
+        Visited::Hot(claim) => return Counted::Again(claim),
+        Visited::Enter(_) => return Counted::Stands,
+        Visited::Continue => {}
     }
     match record::served(req, frame, header) {
-        Ok(Headed::Stepped(at) | Headed::Away(at)) => Counted::On(Flow::Resume(at)),
-        Ok(Headed::Stands(_) | Headed::Unstepped) => Counted::On(Flow::Continue),
+        Ok(Some(at)) => Counted::On(Flow::Resume(at)),
+        Ok(None) => Counted::Stands,
         Err(fatal) => Counted::On(Flow::Bail(fatal)),
     }
 }
@@ -1393,10 +1396,14 @@ fn went_on(
     req: &mut Request,
     shared: &Shared,
     flow: Flow,
-    stood: Option<(FrameRef, TraceId)>,
+    stood: Option<Stood>,
     activated: bool,
 ) -> Flow {
-    let ran = match (stood.filter(|(at, id)| opens(req, *at, *id, shared)), &flow) {
+    let trace = match stood {
+        Some(Stood::Trace(at, id)) if opens(req, at, id, shared) => Some((at, id)),
+        Some(Stood::Trace(..) | Stood::Header(..)) | None => None,
+    };
+    let ran = match (trace, &flow) {
         (Some((at, id)), _) => run_lent(req, at, id),
         // The callee's op array, as the epoch holds it; one of the
         // request's reads the sealed word, which nothing visits.
