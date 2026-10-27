@@ -136,13 +136,13 @@ impl Submitter {
 
     /// `job` through the [`pipeline`]: here, its lines added to `lines`,
     /// and what it settled the claim with, where the request has no
-    /// worker or its bits ask for a root's end lines
-    /// ([`policy::JitDebug::ends`]); or queued for the worker, which
+    /// worker or its bits ask for a line the compile writes
+    /// ([`policy::JitDebug::on_request`]); or queued for the worker, which
     /// writes no line, and none. Where the system refuses the worker a
     /// thread, the queue is served here.
     pub(crate) fn submit(&self, shared: &Shared, job: Job, lines: &mut Lines) -> Option<Outcome> {
         let threaded = match &self.0 {
-            Some(threaded) if !lines.debug().ends() => threaded,
+            Some(threaded) if !lines.debug().on_request() => threaded,
             _ => return Some(pipeline(shared, job, lines)),
         };
         threaded.queue.held().jobs.push_back(job);

@@ -76,8 +76,8 @@ pub(crate) enum Mode {
 /// Where a trace compiles: on the engine's compile thread, or on the
 /// request's at the claim (`jit.compile`). `Force` and `ExitFuzz` imply
 /// `Inline`; so does, for one recording, the request's `opcache.jit_debug`
-/// where it asks for a root's end lines ([`JitDebug::ends`]), which php
-/// writes on the request in one order a worker could not keep
+/// where it asks for a line the compile writes ([`JitDebug::on_request`]),
+/// which php writes on the request in one order a worker could not keep
 /// (`compiler::Submitter::submit`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Compile {
@@ -141,6 +141,15 @@ impl JitDebug {
                 | JitDebug::TRACE_ABORT
                 | JitDebug::TRACE_BLACKLIST,
         )
+    }
+
+    /// Whether the bits ask for a line a recording's compile writes: a
+    /// root's end lines ([`JitDebug::ends`]), or php's analysis of the op
+    /// arrays it passes through, which php's build of the trace writes on
+    /// the request (`zend_jit_trace_build_ssa`): where they do, the
+    /// recording compiles on the request.
+    pub(crate) fn on_request(self) -> bool {
+        self.ends() || self.any(JitDebug::SSA)
     }
 
     /// One of php's `TRACE` lines for `event`, where the bits ask for it
