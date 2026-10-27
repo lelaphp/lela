@@ -4334,12 +4334,19 @@ impl<'a> Emit<'a> {
                 })
             }
             (Opcode::Div, _, _) => {
-                let (rx, ry) = (self.real(a)?, self.real(b)?);
                 if let Some(refuse) = raises {
-                    let zero = self.b.ins().f64const(0.0);
-                    let by_zero = self.b.ins().fcmp(FloatCC::Equal, ry, zero);
+                    // A long divisor is zero as a long, before it is
+                    // converted.
+                    let by_zero = if let Scalar::Long(y) = b {
+                        self.b.ins().icmp_imm_s(IntCC::Equal, y, 0)
+                    } else {
+                        let ry = self.real(b)?;
+                        let zero = self.b.ins().f64const(0.0);
+                        self.b.ins().fcmp(FloatCC::Equal, ry, zero)
+                    };
                     self.refuse_if(by_zero, refuse)?;
                 }
+                let (rx, ry) = (self.real(a)?, self.real(b)?);
                 Ok(Num::Double(self.b.ins().fdiv(rx, ry)))
             }
             (Opcode::Mod, Scalar::Long(x), Scalar::Long(y)) => {
