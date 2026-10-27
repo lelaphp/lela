@@ -305,6 +305,15 @@ enum Num {
     },
 }
 
+/// An operand of a stepped arithmetic ([`Emit::stepped_numbers`]): a
+/// number the trace holds, or a slot read by its type byte, with the
+/// types php's analysis gives what it holds.
+#[derive(Debug, Clone, Copy)]
+enum Numeric {
+    Held(Scalar),
+    Slot(Slot, Types),
+}
+
 /// Where a kernel serving `line` leaves: its exit, where an inline form
 /// has one, else its unwind.
 fn leave_of(line: &Line) -> Option<Leave> {
@@ -1760,8 +1769,166 @@ impl<'a> Emit<'a> {
             return self.branched(at, line);
         }
 
+        if matches!(
+            line.opcode,
+            Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div
+        ) && line.op1_def.is_none()
+            && self.within(at).is_empty()
+            && let Some(out) = line.out
+            && let (Some(a), Some(b)) = (self.numeric(line.op1)?, self.numeric(line.op2)?)
+            && matches!((a, b), (Numeric::Slot(..), _) | (_, Numeric::Slot(..)))
+        {
+            return self.stepped_numbers(at, line, out, [a, b]);
+        }
         self.step_kernel(at, line)?;
         self.after_step(at, line)
+    }
+
+    /// An operand of a stepped arithmetic as [`Emit::stepped_numbers`]
+    /// reads it: a number it holds, or a slot whose type byte says; none
+    /// where it is neither.
+    fn numeric(&mut self, operand: Operand) -> Result<Option<Numeric>, Abort> {
+        Ok(match operand {
+            Operand::Constant(Constant::Long(_) | Constant::Double(_)) => {
+                Some(Numeric::Held(self.scalar_unguarded(operand)?))
+            }
+            Operand::Value(value) => {
+                let held = self.value(value)?;
+                match (held.home, Kind::of(held.types)) {
+                    (Home::Memory, _) if held.types.meets(Types::NUMBER) => {
+                        Some(Numeric::Slot(held.slot, held.types))
+                    }
+                    (Home::Register, Some(Kind::Long | Kind::Double)) => {
+                        Some(Numeric::Held(self.register(value)?))
+                    }
+                    (Home::Memory | Home::Register, _) => None,
+                }
+            }
+            Operand::Constant(_) | Operand::Unused => None,
+        })
+    }
+
+    /// `+`, `-`, `*` or `/` the trace steps, its operands' types unknown
+    /// to it, served in place where each operand's type byte reads a long
+    /// or a double and no division is by zero, as `zend_jit_math_helper`
+    /// serves what its fast paths take and calls a function for the rest
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:5332-5520`): what it makes written
+    /// to `out`'s slot with its type word, as the handler writes it. Every
+    /// other operand, a division by zero among them, goes to the handler,
+    /// which serves it whole; either way on with the slot written, so the
+    /// trace leaves through no exit of its own here.
+    ///
+    /// A division whose dividend php's analysis cannot type, in place
+    /// over numbers and through the handler over the rest:
+    ///
+    /// ```php
+    /// $vs = [3, 2.5, "6", null, 7, true, 9.0];
+    /// $t = [];
+    /// for ($i = 0; $i < 70; $i++) {
+    ///     $v = $vs[$i % 7];
+    ///     try { $t[] = (2.0 * $i / ($i % 5)) + $v / 2; } catch (DivisionByZeroError $e) { $t[] = "z"; }
+    /// }
+    /// echo implode(",", array_slice($t, 0, 14)), " ", count($t), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// z,3.25,5,2,5.5,z,16.5,8.5,6.5833333333333,7.5,z,25.5,12.5,13.166666666667 70
+    /// ```
+    fn stepped_numbers(
+        &mut self,
+        at: OpId,
+        line: &Line,
+        out: ValueId,
+        operands: [Numeric; 2],
+    ) -> Result<(), Abort> {
+        let handler = self.b.create_block();
+        let done = self.b.create_block();
+        // The kinds each operand may hold: a slot's, those of the two its
+        // types name; a held number's, its own.
+        let kinds = |operand: Numeric| -> Result<Vec<Kind>, Abort> {
+            Ok(match operand {
+                Numeric::Slot(_, types) => {
+                    [(Types::LONG, Kind::Long), (Types::DOUBLE, Kind::Double)]
+                        .into_iter()
+                        .filter(|&(of, _)| types.meets(of))
+                        .map(|(_, kind)| kind)
+                        .collect()
+                }
+                Numeric::Held(Scalar::Long(_)) => vec![Kind::Long],
+                Numeric::Held(Scalar::Double(_)) => vec![Kind::Double],
+                Numeric::Held(_) => return Err(mismatch("a stepped arithmetic over no number")),
+            })
+        };
+        let (ka, kb) = (kinds(operands[0])?, kinds(operands[1])?);
+        // A slot's type byte: each kind it may hold to its block, anything
+        // else to the handler.
+        let branch = |emit: &mut Self, slot: Slot, to: &[(Kind, Block)]| {
+            let (room, at) = emit.place(slot)?;
+            let byte = emit.b.ins().load(I8, trusted(), room, at + TYPE_AT);
+            for &(kind, block) in to {
+                let t = if kind == Kind::Long {
+                    ZvalType::Long
+                } else {
+                    ZvalType::Double
+                };
+                let is = emit.b.ins().icmp_imm_s(IntCC::Equal, byte, tag(t));
+                emit.divert_if(is, block);
+            }
+            emit.b.ins().jump(handler, &[]);
+            Ok::<(), Abort>(())
+        };
+        // One block per pair of kinds, reached by testing each operand
+        // held in a slot in turn.
+        let mut pairs: Vec<(Kind, Kind, Block)> = Vec::new();
+        let firsts: Vec<(Kind, Block)> = ka.iter().map(|&k| (k, self.b.create_block())).collect();
+        match operands[0] {
+            Numeric::Slot(slot, _) => branch(self, slot, &firsts)?,
+            Numeric::Held(_) => {
+                let [(_, first)] = firsts.as_slice() else {
+                    return Err(mismatch("a held operand of more than one kind"));
+                };
+                self.b.ins().jump(*first, &[]);
+            }
+        }
+        for &(k1, first) in &firsts {
+            self.b.switch_to_block(first);
+            self.b.seal_block(first);
+            let seconds: Vec<(Kind, Block)> =
+                kb.iter().map(|&k| (k, self.b.create_block())).collect();
+            match operands[1] {
+                Numeric::Slot(slot, _) => branch(self, slot, &seconds)?,
+                Numeric::Held(_) => {
+                    let [(_, second)] = seconds.as_slice() else {
+                        return Err(mismatch("a held operand of more than one kind"));
+                    };
+                    self.b.ins().jump(*second, &[]);
+                }
+            }
+            pairs.extend(seconds.into_iter().map(|(k2, block)| (k1, k2, block)));
+        }
+        let out_slot = self.value(out)?.slot;
+        for (ka, kb, block) in pairs {
+            self.b.switch_to_block(block);
+            self.b.seal_block(block);
+            let read = |emit: &mut Self, operand: Numeric, kind: Kind| match operand {
+                Numeric::Slot(slot, _) => emit.load(slot, kind, false),
+                Numeric::Held(held) => Ok(held),
+            };
+            let a = read(self, operands[0], ka)?;
+            let b = read(self, operands[1], kb)?;
+            let num = self.binary(line.opcode, a, b, Some(Refuse::To(handler)))?;
+            let (room, at) = self.place(out_slot)?;
+            self.write_num(room, at, num);
+            self.b.ins().jump(done, &[]);
+        }
+        self.b.switch_to_block(handler);
+        self.b.seal_block(handler);
+        self.b.set_cold_block(handler);
+        self.step_kernel(at, line)?;
+        self.after_step(at, line)?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+        Ok(())
     }
 
     /// The kernel that serves `line` whole, [`Kernel::Step`], or
