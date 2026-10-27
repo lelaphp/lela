@@ -45,7 +45,7 @@ use crate::enter::{self, Answered, At, Crossed as _, Exited, Left, Lent};
 use crate::policy::{
     self, Claim, Holder, JitDebug, Mode, Outcome, Place, Policy, State, TraceEvent,
 };
-use crate::record::{self, Bailed, Ended, Headed, Landed, Start, Stop};
+use crate::record::{self, Arrived, Bailed, Ended, Headed, Landed, Start, Stop};
 use crate::table::{self, TraceId, TraceName};
 use crate::types::Grows;
 use crate::{Lines, Shared};
@@ -76,6 +76,9 @@ pub struct JitRequest {
     pub(crate) epoch: std::cell::OnceCell<Epoch>,
     /// The trace table of that epoch, kept once a request of it made it.
     pub(crate) table: std::cell::OnceCell<Arc<table::Table>>,
+    /// The loop header whose next arrival a recording aborted in a callee
+    /// owes a count, as php's handler there counts it ([`Owed`]).
+    pub(crate) owed: Cell<Option<Owed>>,
     /// How many times the crossing entered the trace compiled at a landing
     /// a trace escaped to, which the escaping trace's code enters itself
     /// once the request's row of it is laid: a test's count of the escapes
@@ -227,11 +230,22 @@ fn safepoint_lent(
         }
     };
     match (site, decided) {
+        (Site::Return(at), Visited::Continue) if owes(req, lent.state, frame) => {
+            returned(req, lent, (frame, held), at, Visited::Continue)
+        }
+        (Site::Loop(_), Visited::Continue) => {
+            paid(lent.state, frame);
+            Flow::Continue
+        }
         (_, Visited::Continue) => Flow::Continue,
         (Site::Return(at), decided) => returned(req, lent, (frame, held), at, decided),
         (Site::Loop(header), Visited::Enter(id)) => looped(req, lent, frame, header, id),
         (Site::Entry, Visited::Enter(id)) => run(req, lent, frame, id),
-        (Site::Loop(_) | Site::Entry, Visited::Hot(claim)) => hot(req, frame, claim, shared),
+        (Site::Loop(_), Visited::Hot(claim)) => {
+            paid(lent.state, frame);
+            hot(req, frame, claim, shared)
+        }
+        (Site::Entry, Visited::Hot(claim)) => hot(req, frame, claim, shared),
     }
 }
 
@@ -483,7 +497,7 @@ fn returned(
         }
     };
     let flow = match decided {
-        Visited::Continue => Flow::Continue,
+        Visited::Continue => owed(req, lent.shared(), caller).unwrap_or(Flow::Continue),
         Visited::Enter(id) => run(req, lent, caller, id),
         Visited::Hot(claim) => hot(req, caller, claim, lent.shared()),
     };
@@ -783,6 +797,7 @@ fn followed<'t>(
             Some(next) => next,
             // Left for the interpreter, which runs the opline's handler:
             // where a return lands, the landing's.
+            None if let Some(flow) = owed(req, shared, frame) => return flow,
             None => match visit_landing(req, shared, frame, Came::Left(Some(trace.id))) {
                 Visited::Enter(id) => match table.get(id) {
                     Some(next) => next,
@@ -1179,6 +1194,7 @@ fn recordings(
             GoesOn::Past
         };
         let outcome = settled(req, shared, job, goes_on);
+        owe(req, outcome, (frame, header), ended.at);
         let repeat = match (outcome, ended.inner) {
             (Some(Outcome::Abort(Stop::InnerLoop)), Some((func, header))) => policy::claim(
                 Holder::Root {
@@ -1215,6 +1231,157 @@ fn recordings(
         frame = ended.at;
         claim = inner;
     }
+}
+
+/// A loop's header whose next arrival php's handler at the header counts and
+/// the back edge does not see: the loop's recording in `frame` aborted
+/// in a callee, a may-recover abort that leaves the header's handler in
+/// place (`Z/ext/opcache/jit/zend_jit_trace.c:8262-8268`), and the
+/// interpreter reaches the header next from the call's landing, past
+/// the body's rest, where the condition may leave the loop ([`owed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Owed {
+    frame: FrameRef,
+    func: FuncRef,
+    header: SafepointIdx,
+}
+
+/// A count owed to loop `header`'s frame where its recording, `outcome`,
+/// aborted in a callee, `at` ([`Owed`]).
+fn owe(
+    req: &Request,
+    outcome: Option<Outcome>,
+    (frame, header): (FrameRef, Option<(FuncRef, SafepointIdx)>),
+    at: FrameRef,
+) {
+    if let (Some(Outcome::Abort(_)), Some((func, header))) = (outcome, header)
+        && at != frame
+        && let Some(state) = tier::state::<JitRequest>(req)
+    {
+        state.owed.set(Some(Owed {
+            frame,
+            func,
+            header,
+        }));
+    }
+}
+
+/// Whether the return of `frame` lands in the frame a count is owed to
+/// ([`Owed`]), which [`returned`] steps the return for.
+fn owes(req: &Request, state: &JitRequest, frame: FrameRef) -> bool {
+    state
+        .owed
+        .get()
+        .is_some_and(|owed| tier::below(req, frame).is_some_and(|caller| caller == owed.frame))
+}
+
+/// A back edge in `frame` counted its loop, so what a return into
+/// `frame` owed is counted already.
+fn paid(state: &JitRequest, frame: FrameRef) {
+    if state.owed.get().is_some_and(|owed| owed.frame == frame) {
+        state.owed.set(None);
+    }
+}
+
+/// The count a return into `frame` owes its loop's header ([`Owed`]):
+/// the frame stepped from its landing to the header, as php's
+/// interpreter runs the body's rest, and the header's word visited
+/// there, as php's `zend_jit_trace_counter_helper` counts the arrival
+/// (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:464-497`) ([`counted`]).
+/// None where nothing is owed to `frame`, or a recording is under way.
+///
+/// `$main`'s recording enters `f`, whose outer loop aborts it, and that
+/// loop's own recording aborts at the inner loop compiled already; `f`
+/// returns, and the arrival at `$main`'s header counts, the last one
+/// where the condition leaves the loop and the recording stops at
+/// `$main`'s return (#3586):
+///
+/// ```php
+/// function a(int $i, int $j): float { $ij = $i + $j; return 1.0 / ($ij * ($ij + 1) / 2 + $i + 1); }
+/// function f(int $n, array $u): array {
+///     $out = [];
+///     for ($i = 0; $i < $n; $i++) { $sum = 0.0; for ($j = 0; $j < $n; $j++) { $sum += a($i, $j) * $u[$j]; } $out[$i] = $sum; }
+///     return $out;
+/// }
+/// $u = array_fill(0, 60, 1.0);
+/// for ($k = 0; $k < 4; $k++) { $u = f(60, $u); }
+/// printf("%.6f\n", $u[0]);
+/// ```
+/// ```expect regime=jit-inline process
+/// 5.188575
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:8
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) $main() %SCRATCH%/witness.php:9
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) f() %SCRATCH%/witness.php:5
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) f() %SCRATCH%/witness.php:5
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 4 f() %SCRATCH%/witness.php:5
+/// ---- TRACE 2 start (side trace 1/4) f() %SCRATCH%/witness.php:5
+/// ---- TRACE 2 stop (link to 1)
+/// ---- TRACE 2 compiled
+///
+///      TRACE 2 exit 0 f() %SCRATCH%/witness.php:5
+/// ---- TRACE 3 start (side trace 2/0) f() %SCRATCH%/witness.php:5
+/// ---- TRACE 3 stop (link to 1)
+/// ---- TRACE 3 compiled
+///
+///      TRACE 3 exit 1 f() %SCRATCH%/witness.php:6
+/// ---- TRACE 4 start (side trace 3/1) f() %SCRATCH%/witness.php:6
+/// ---- TRACE 4 stop (return)
+/// ---- TRACE 4 compiled
+///
+/// ---- TRACE 5 start (loop) $main() %SCRATCH%/witness.php:9
+/// ---- TRACE 5 abort (inner loop)
+/// ---- TRACE 5 start (loop) f() %SCRATCH%/witness.php:5
+/// ---- TRACE 5 abort (compiled loop)
+///
+/// ---- TRACE 5 start (loop) $main() %SCRATCH%/witness.php:9
+/// ---- TRACE 5 abort (inner loop)
+/// ---- TRACE 5 start (loop) f() %SCRATCH%/witness.php:5
+/// ---- TRACE 5 abort (compiled loop)
+///
+/// ---- TRACE 5 start (loop) $main() %SCRATCH%/witness.php:9
+/// ---- TRACE 5 abort (inner loop)
+/// ---- TRACE 5 start (loop) f() %SCRATCH%/witness.php:5
+/// ---- TRACE 5 abort (compiled loop)
+///
+/// ---- TRACE 5 start (loop) $main() %SCRATCH%/witness.php:9
+/// ---- TRACE 5 stop (return)
+/// ---- TRACE 5 compiled
+/// ```
+fn owed(req: &mut Request, shared: &Shared, frame: FrameRef) -> Option<Flow> {
+    let state = tier::state::<JitRequest>(req)?;
+    let owed = state.owed.get().filter(|owed| owed.frame == frame)?;
+    state.owed.set(None);
+    if state.recording.get() || tier::func(req, frame) != Some(owed.func) {
+        return None;
+    }
+    let at = match record::arrived(req, frame, owed.header, shared.policy.folds()) {
+        Ok(Arrived::Header(at)) => at,
+        // The call's return lands here again, still owed the count.
+        Ok(Arrived::Call(at)) => {
+            tier::state::<JitRequest>(req)?.owed.set(Some(owed));
+            return Some(Flow::Resume(at));
+        }
+        Ok(Arrived::Away(at)) => return Some(Flow::Resume(at)),
+        Ok(Arrived::Unstepped) => return None,
+        Err(fatal) => return Some(Flow::Bail(fatal)),
+    };
+    let flow = match counted(req, shared, at, owed.func, owed.header) {
+        Counted::Again(claim) => hot(req, at, claim, shared),
+        Counted::Stands => went_on(req, shared, Flow::Resume(at), None, false),
+        Counted::On(on) => on,
+    };
+    Some(match flow {
+        Flow::Continue => Flow::Resume(at),
+        flow => flow,
+    })
 }
 
 /// The loop header a loop's claim holds the word of, by its op array and
