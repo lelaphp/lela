@@ -4,7 +4,7 @@ entry
   #0 f0.CV2 [long]
   #2 f0.CV3 [long]
   #4 f0.CV4 [undef, any]
-  #6 f0.CV5 [undef, any]
+  #6 f0.CV5 [undef, bool]
   #8 f0.CV1 [long]
   #10 f0.CV0 [packed array]
   guard #10 array -> exit 0
@@ -16,7 +16,7 @@ loop at 0, loop, interrupt exit 15
   #1 f0.CV2 [long] reg = phi(#0, #21)
   #3 f0.CV3 [long] reg = phi(#2, #22)
   #5 f0.CV4 [undef, any] = phi(#4, #12)
-  #7 f0.CV5 [undef, any] = phi(#6, #14)
+  #7 f0.CV5 [undef, bool] = phi(#6, #14)
 0021 f0 IS_SMALLER #3, #8 fused inline
   checks direction taken -> exit 5
 0005 f0 MOD #3, int(4) inline
@@ -32,18 +32,18 @@ loop at 0, loop, interrupt exit 15
 0011 f0 IS_NOT_IDENTICAL #12, const#4 inline
   -> #13 f0.T6 [bool] reg
   guard #13 true -> exit 10
-0012 f0 ASSIGN #7, #13 inline unwinds -> unwind 1
+0012 f0 ASSIGN #7, #13 inline
   -> #14 f0.CV5 [true] reg
 0013 f0 STRLEN #12 inline
   -> #15 f0.T8 [long] reg
-0014 f0 CAST #14 step unwinds -> unwind 2
+0014 f0 CAST #14 step unwinds -> unwind 1
   -> #16 f0.T9 [long]
 0015 f0 ADD #15, #16 inline
   -> #17 f0.T10 [long] reg
   checks #17 long -> exit 11
 0016 f0 BOOL #3 inline
   -> #18 f0.T11 [bool] reg
-0017 f0 CAST #18 step unwinds -> unwind 3
+0017 f0 CAST #18 step unwinds -> unwind 2
   -> #19 f0.T12 [long]
 0018 f0 ADD #17, #19 inline
   -> #20 f0.T13 [long] reg
@@ -72,6 +72,5 @@ exit 13: f0 0019 plain f0.CV2=#1 f0.CV3=#3 f0.CV5=#14 f0.T13=#20 f0.CV0:array f0
 exit 14: f0 0020 plain f0.CV2=#21 f0.CV3=#3 f0.CV5=#14 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.CV4:string f0.CV5:true
 exit 15: f0 0021 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long to vm
 unwind 0: f0.CV2=#1 f0.CV3=#3
-unwind 1: f0.CV2=#1 f0.CV3=#3 f0.CV5=#14
-unwind 2: f0.CV2=#1 f0.CV3=#3 f0.CV5=#14 f0.T8=#15
-unwind 3: f0.CV2=#1 f0.CV3=#3 f0.CV5=#14 f0.T10=#17
+unwind 1: f0.CV2=#1 f0.CV3=#3 f0.CV5=#14 f0.T8=#15
+unwind 2: f0.CV2=#1 f0.CV3=#3 f0.CV5=#14 f0.T10=#17

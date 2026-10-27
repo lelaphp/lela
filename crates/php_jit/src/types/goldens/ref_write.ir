@@ -1,13 +1,13 @@
 trace loop e3, stop loop
 frame f0 e3 root, 3 cvs 6 temps
 entry
-  #0 f0.CV0 [undef, ref, any]
+  #0 f0.CV0 [ref, any]
   #2 f0.CV2 [long]
   #4 f0.CV1 [long]
   guard #4 long -> exit 0
   guard #2 long -> exit 1
 loop at 0, loop, interrupt exit 6
-  #1 f0.CV0 [undef, ref, any] = phi(#0, #7)
+  #1 f0.CV0 [ref, any] = phi(#0, #7)
   #3 f0.CV2 [long] reg = phi(#2, #8)
 0010 f0 IS_SMALLER #3, #4 fused inline
   checks direction taken -> exit 2

@@ -582,53 +582,6 @@ pub(super) fn referenced(code: &OpArray, var: u32) -> bool {
     })
 }
 
-/// Whether an opline past the leading `RECV` oplines writes variable
-/// `var`, which `holds` what it was passed: a `VERIFY_RETURN_TYPE` of it
-/// that leaves what it holds as it is, its declaration holding every kind
-/// `holds` may be, writes nothing it did not hold, as php's inference
-/// types that definition (`zend_update_type_info`'s `ZEND_VERIFY_RETURN_TYPE`):
-/// `return $n;` of `function f(int $n): int`. One that coerces it, an
-/// `int` returned as a `string`, writes a string the leave frees:
-///
-/// ```php
-/// function s(int $n): string { if ($n < 0) { return "neg"; } return $n; }
-/// function f(int $n): int { if ($n < 2) { return $n; } $a = f($n - 1); return $a + 1; }
-/// function k($m) { $t = ""; $c = 0; for ($i = 0; $i < $m; $i++) { $t = s($i); $c += f(5); } return "$t $c"; }
-/// k(10); $u = memory_get_usage(); echo k(100), " ", memory_get_usage() - $u, "\n";
-/// ```
-/// ```expect regime=jit-force process
-/// 99 500 32
-/// ```
-///
-/// The same where every guard fails once:
-///
-/// ```php
-/// function s(int $n): string { if ($n < 0) { return "neg"; } return $n; }
-/// function f(int $n): int { if ($n < 2) { return $n; } $a = f($n - 1); return $a + 1; }
-/// function k($m) { $t = ""; $c = 0; for ($i = 0; $i < $m; $i++) { $t = s($i); $c += f(5); } return "$t $c"; }
-/// k(10); $u = memory_get_usage(); echo k(100), " ", memory_get_usage() - $u, "\n";
-/// ```
-/// ```expect regime=jit-exit-fuzz process
-/// 99 500 32
-/// ```
-pub(super) fn written_after_entry(code: &OpArray, var: u32, holds: Types) -> bool {
-    let start = code
-        .oplines
-        .iter()
-        .take_while(|op| {
-            matches!(
-                op.opcode,
-                Opcode::Recv | Opcode::RecvInit | Opcode::RecvVariadic
-            )
-        })
-        .count();
-    code.oplines.iter().enumerate().skip(start).any(|(at, op)| {
-        let after = code.oplines.get(at + 1);
-        let kept = op.opcode == Opcode::VerifyReturnType && returned(code, holds).within(holds);
-        !kept && written(op, after).contains(&var)
-    })
-}
-
 /// A constant operand: a scalar by its value.
 pub(super) fn constant(code: &OpArray, at: u32) -> Constant {
     let Some(value) = code.literals.get(at as usize) else {
@@ -823,20 +776,11 @@ fn named(op: &Opline, code: &OpArray) -> bool {
 /// The operands php's switch in `zend_jit_trace_build_tssa` adds a guard
 /// for (`ADD_OP1_TRACE_GUARD`, `ADD_OP2_TRACE_GUARD`,
 /// `ADD_OP1_DATA_TRACE_GUARD`), in its order, which marks them; the code
-/// generator holds them in [`checked_order`].
-///
-/// Where php types an operand from its inference over the whole
-/// function, which this tier does not keep (`jit-design.md` §4.2,
-/// revision 26), the operand is guarded here. A division is the first
-/// such case: `DIV` and `ASSIGN_OP`'s are guarded as a product is, where
-/// php's switch leaves them out (`// case ZEND_DIV: // TODO: check for
-/// division by zero ???`), typing them from that inference, so a loop's
-/// variable `$i` read by `3.0 / $i` is a long there with no guard; with
-/// no guard here the division sees the loop's phi as anything and is
-/// stepped on every turn (#3073). Its inline division leaves through its
-/// exit at a zero divisor, so the guard narrows nothing php's TODO is
-/// about. The guard retires if the tier ever keeps php's inference
-/// (#3149; #3111's ruling).
+/// generator holds them in [`checked_order`]. A division is left out, as
+/// php's switch leaves it (`// case ZEND_DIV: // TODO: check for division
+/// by zero ???`): its operands are typed by php's inference over the op
+/// array, so a loop's variable `$i` read by `3.0 / $i` is a long there
+/// with no guard.
 #[allow(
     clippy::too_many_lines,
     clippy::match_same_arms,
@@ -856,7 +800,10 @@ pub(super) fn guard_sites(
         || cv1 && data.is_some_and(|d| d.op1_type == OperandKind::Cv && d.op1 == op.op1);
     match op.opcode {
         Opcode::AssignOp => {
-            let unguarded = lattice::binary_of(op.extended_value) == Some(Opcode::Pow);
+            let unguarded = matches!(
+                lattice::binary_of(op.extended_value),
+                Some(Opcode::Pow | Opcode::Div)
+            );
             if unguarded || !cv1 || op.out_type != OperandKind::Unused {
                 vec![]
             } else {
@@ -891,7 +838,7 @@ pub(super) fn guard_sites(
                 vec![]
             }
         }
-        Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div
+        Opcode::Add | Opcode::Sub | Opcode::Mul
             if k1 == Some(ZvalType::Undef) || k2 == Some(ZvalType::Undef) =>
         {
             vec![]
@@ -899,7 +846,6 @@ pub(super) fn guard_sites(
         Opcode::Add
         | Opcode::Sub
         | Opcode::Mul
-        | Opcode::Div
         | Opcode::IsEqual
         | Opcode::IsNotEqual
         | Opcode::IsSmaller

@@ -1,7 +1,7 @@
 trace loop e1, stop loop
 frame f0 e1 root, 3 cvs 13 temps
 entry
-  #0 f0.CV1 [undef, any]
+  #0 f0.CV1 [false, long, double, object]
   #2 f0.CV2 [long]
   #4 f0.CV0 [long]
   guard #4 long -> exit 0

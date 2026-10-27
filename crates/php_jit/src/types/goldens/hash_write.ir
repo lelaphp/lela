@@ -1,38 +1,32 @@
 trace loop e4, stop loop
 frame f0 e4 root, 4 cvs 14 temps
 entry
-  #0 f0.CV1 [array]
+  #0 f0.CV1 [hash array]
   #2 f0.CV3 [long]
   #4 f0.CV0 [long]
   #6 f0.CV2 [string]
   guard #4 long -> exit 0
-  guard #0 array -> exit 1
-  guard #6 string -> exit 2
-  guard #2 long -> exit 3
-loop at 0, loop, interrupt exit 7
-  #1 f0.CV1 [array] = phi(#0, #9)
+  guard #2 long -> exit 1
+loop at 0, loop, interrupt exit 4
+  #1 f0.CV1 [hash array] = phi(#0, #9)
   #3 f0.CV3 [long] reg = phi(#2, #10)
 0013 f0 IS_SMALLER #3, #4 fused inline
-  checks direction taken -> exit 4
+  checks direction taken -> exit 2
 0005 f0 ASSIGN_DIM #1, const#3, #3 inline unwinds -> unwind 0
-  -> #5 f0.CV1 [array]
+  -> #5 f0.CV1 [hash array]
 0007 f0 ASSIGN_DIM #5, #6, #3 inline unwinds -> unwind 0
   -> #7 f0.CV1 [hash array]
 0009 f0 BW_AND #3, int(7) inline
   -> #8 f0.T5 [long] reg
-  guard #7 hash -> exit 5
 0010 f0 ASSIGN_DIM #7, #8, #3 inline unwinds -> unwind 0
-  -> #9 f0.CV1 [array]
+  -> #9 f0.CV1 [hash array]
 0012 f0 PRE_INC #3 inline
   -> #10 f0.CV3 [long] reg
-  checks #10 long -> exit 6
+  checks #10 long -> exit 3
 end: back to 0
 exit 0: f0 0013 plain
 exit 1: f0 0013 plain f0.CV0:long
-exit 2: f0 0013 plain f0.CV0:long f0.CV1:array
-exit 3: f0 0013 plain f0.CV0:long f0.CV1:array f0.CV2:string
-exit 4: f0 0015 plain f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV2:string f0.CV3:long
-exit 5: f0 0010 plain f0.CV3=#3 f0.T5=#8 f0.CV0:long f0.CV1:array f0.CV2:string f0.CV3:long f0.T5:long packed guard
-exit 6: f0 0012 plain f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV2:string f0.CV3:long
-exit 7: f0 0013 plain f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV2:string f0.CV3:long to vm
+exit 2: f0 0015 plain f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV3:long
+exit 3: f0 0012 plain f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV2:string f0.CV3:long
+exit 4: f0 0013 plain f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV3:long to vm
 unwind 0: f0.CV3=#3

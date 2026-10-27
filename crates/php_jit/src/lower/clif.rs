@@ -1332,8 +1332,29 @@ impl<'a> Emit<'a> {
 
     /// What an op computed, held to the type guards it holds on the values
     /// in `defs`: a number that may be either kind leaves where it is not
-    /// the one held.
+    /// the one held, and is the long where every value it writes is typed
+    /// long alone, which php's ranges proved cannot overflow, as php's
+    /// `zend_jit_math_long_long` checks no overflow where `may_overflow`
+    /// is false (`Z/ext/opcache/jit/zend_jit_ir.c:5059-5200`).
     fn settle(&mut self, at: OpId, defs: &[ValueId], num: Num) -> Result<Num, Abort> {
+        let num = self.held(at, defs, num)?;
+        if let Num::Either { long, .. } = num
+            && !defs.is_empty()
+        {
+            let mut long_only = true;
+            for &value in defs {
+                long_only &= self.value(value)?.types.kinds() == Types::LONG;
+            }
+            if long_only {
+                return Ok(Num::Long(long));
+            }
+        }
+        Ok(num)
+    }
+
+    /// What an op computed, held to the type guards it holds on the values
+    /// in `defs`.
+    fn held(&mut self, at: OpId, defs: &[ValueId], num: Num) -> Result<Num, Abort> {
         let mut num = num;
         for guard in self.within(at) {
             let Check::Type { value, tag: t } = guard.check else {

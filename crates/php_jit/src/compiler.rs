@@ -300,10 +300,20 @@ fn pipeline_with(
                 // `zend_jit_trace_build_tssa` analyses the op arrays first.
                 let opt_level = shared.policy.start_setting().opt_level;
                 let (record, view) = (&recorded.record, &recorded.view);
-                if !crate::analysis::build(record, view, table.analyses(), opt_level, lines) {
+                let Some(analysed) =
+                    crate::analysis::build(record, view, table.analyses(), opt_level, lines)
+                else {
                     return Outcome::Abort(Stop::CompilerError);
-                }
-                published(&recorded, name, &compile, table, claim.epoch(), start)
+                };
+                published(
+                    &recorded,
+                    &analysed,
+                    name,
+                    &compile,
+                    table,
+                    claim.epoch(),
+                    start,
+                )
             }))
             .unwrap_or(Outcome::Abort(Stop::CompilerError))
         }
@@ -359,13 +369,14 @@ fn arm_landings(recorded: &Recorded, epoch: &Epoch, policy: &Policy) {
 /// failed.
 fn published(
     recorded: &Recorded,
+    analysed: &crate::analysis::Analysed,
     name: TraceName,
     compile: &impl Fn(&TraceIr, TraceName, Option<Linked>, Option<Escapes>) -> Result<Compiled, Abort>,
     table: &Table,
     epoch: &Epoch,
     start: Start,
 ) -> Outcome {
-    let compiled = types::build(&recorded.record, &recorded.view).and_then(|ir| {
+    let compiled = types::build(&recorded.record, &recorded.view, analysed).and_then(|ir| {
         let link = match ir.end {
             End::Leave(end) => ir.exits.get(usize::from(end.0)).and_then(|exit| exit.link),
             End::Loop(_) | End::Return(_) => None,

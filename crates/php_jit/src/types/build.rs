@@ -20,7 +20,7 @@ use super::opcodes::{
     compiled_inline, compound_in_place, constant, constant_types, goes_one_way, guard_sites,
     held_as_is, inline_may_leave, is_call, keeps_temporaries, keyed, may_exit, op1_types,
     out_types, packed_guard, param_types, params, reads, reads_by_name, recv_exits, referenced,
-    slot_of, within, writes, written, written_after_entry, written_through,
+    slot_of, within, writes, written, written_through,
 };
 use super::{
     Abort, ArgChecks, BodyEntry, Check, Constant, Def, Defaults, End, Entry, ExitId, ExitSpec,
@@ -29,6 +29,7 @@ use super::{
     PairClass, Place, Read, Repeat, Returned, Slot, Slotted, Store, Stored, TraceIr, Unwind,
     UnwindId, Value, ValueId, Vars, on_declared_slot,
 };
+use crate::analysis::{Analysed, Defined};
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 
@@ -44,15 +45,19 @@ const UNCOUNTED: Types = Types::UNDEF
     .or(Types::BOOL)
     .or(Types::NUMBER);
 
-/// The trace `rec` builds, read through `view`.
-pub(super) fn build(rec: &TraceRecord, view: &UnitView) -> Result<TraceIr, Abort> {
+/// The trace `rec` builds, read through `view` and `analysed`.
+pub(super) fn build(
+    rec: &TraceRecord,
+    view: &UnitView,
+    analysed: &Analysed,
+) -> Result<TraceIr, Abort> {
     if !rec.stop.compiles() {
         return Err(Abort {
             stop: rec.stop,
             why: "the recording stopped on a failed attempt",
         });
     }
-    let mut builder = Builder::new(rec, view)?;
+    let mut builder = Builder::new(rec, view, analysed)?;
     builder.walk()?;
     builder.finish()
 }
@@ -76,6 +81,9 @@ struct Meta<'a> {
     aliased: bool,
     /// For a frame the trace pushed, the opline of its caller's call.
     called_at: Option<OplineIdx>,
+    /// For a frame the trace entered in or returned to, the opline its
+    /// part of the trace begins at.
+    begins: Option<OplineIdx>,
 }
 
 /// What the trace held before one op: every value of a live frame, and
@@ -264,6 +272,9 @@ struct Sent {
 struct Builder<'a> {
     rec: &'a TraceRecord,
     view: &'a UnitView,
+    /// What php's analysis of each op array the trace passes through
+    /// learned, which `zend_jit_trace_build_tssa` reads.
+    analysed: &'a Analysed,
     frames: Vec<FrameInfo>,
     meta: Vec<Meta<'a>>,
     /// Per frame, what each slot holds now.
@@ -341,10 +352,15 @@ struct PropertyAt {
 const MAY_BE_RESOURCE: u32 = 1 << ZvalType::Resource as u32;
 
 impl<'a> Builder<'a> {
-    fn new(rec: &'a TraceRecord, view: &'a UnitView) -> Result<Builder<'a>, Abort> {
+    fn new(
+        rec: &'a TraceRecord,
+        view: &'a UnitView,
+        analysed: &'a Analysed,
+    ) -> Result<Builder<'a>, Abort> {
         let mut builder = Builder {
             rec,
             view,
+            analysed,
             frames: Vec::new(),
             meta: Vec::new(),
             slots: Vec::new(),
@@ -378,7 +394,11 @@ impl<'a> Builder<'a> {
             sampled: HashMap::new(),
             classed: HashMap::new(),
         };
-        let root = builder.frame(rec.root, Place::Root, None)?;
+        let begins = rec.events.iter().find_map(|event| match event {
+            Event::Op { opline, .. } => Some(*opline),
+            _ => None,
+        });
+        let root = builder.frame(rec.root, Place::Root, None, begins)?;
         builder.stack.push(root);
         Ok(builder)
     }
@@ -389,6 +409,7 @@ impl<'a> Builder<'a> {
         func: FuncRef,
         place: Place,
         called_at: Option<OplineIdx>,
+        begins: Option<OplineIdx>,
     ) -> Result<Frame, Abort> {
         let code = self
             .view
@@ -409,6 +430,7 @@ impl<'a> Builder<'a> {
             parameters: self.view.parameters(func),
             aliased,
             called_at,
+            begins,
         });
         let size = code.num_cvs.saturating_add(code.num_tmps) as usize;
         self.slots.push(vec![None; size]);
@@ -590,13 +612,26 @@ impl<'a> Builder<'a> {
                 _ => {}
             }
         }
+        // The trace's last opline, which `zend_jit_trace_is_false_loop`
+        // reads where it is the root's.
+        let last = body.iter().rev().find_map(|event| match event {
+            Event::Op { func, opline, .. } => Some((*func == self.rec.root).then_some(opline.0)),
+            _ => None,
+        });
+        let (func, start) = (self.rec.root, meta.begins);
         for var in 0..size {
             if used[var] && defined[var] {
                 let slot = Slot {
                     frame: Frame::ROOT,
                     var: u32::try_from(var).unwrap_or(u32::MAX),
                 };
-                self.phi(slot);
+                let header = start
+                    .and_then(|start| {
+                        self.analysed
+                            .header(func, start.0, last.flatten(), slot.var)
+                    })
+                    .map(|info| info.types);
+                self.phi(slot, header);
             }
         }
         Ok(())
@@ -607,10 +642,11 @@ impl<'a> Builder<'a> {
     fn call_phis(&mut self) {
         let meta = self.meta(Frame::ROOT);
         for param in params(meta.code, meta.parameters) {
-            self.phi(Slot {
+            let slot = Slot {
                 frame: Frame::ROOT,
                 var: param.cv,
-            });
+            };
+            self.phi(slot, self.reaching_start(slot));
         }
     }
 
@@ -626,14 +662,32 @@ impl<'a> Builder<'a> {
             .and_then(|at| self.meta(Frame::ROOT).code.oplines.get(at as usize))
             .filter(|call| is_call(call.opcode) && self.frames[0].func == *func);
         if let Some(slot) = call.and_then(|call| slot_of(Frame::ROOT, call.out_type, call.out)) {
-            self.phi(slot);
+            self.phi(slot, self.reaching_start(slot));
         }
     }
 
-    /// A phi at the header for `slot`, entered with what it holds now.
-    fn phi(&mut self, slot: Slot) {
+    /// What php's analysis knows the root's `slot` holds where the trace
+    /// begins, which a recursive call's or return's phi copies: php
+    /// copies what the phi's first use reads (`zend_jit_trace_copy_ssa_var_info`
+    /// with no opline), the definition that reaches the trace's start.
+    fn reaching_start(&self, slot: Slot) -> Option<php_ssa::Types> {
+        let at = self.meta(Frame::ROOT).begins?;
+        let info = self.analysed.reaching(self.rec.root, at.0, slot.var)?;
+        Some(info.types)
+    }
+
+    /// A phi at the header for `slot`, entered with what it holds now,
+    /// and of what php's analysis knows its loop's header phi holds where
+    /// it knows (`header`), of what it entered with otherwise, as php
+    /// propagates the initial value through its phis
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:1774-1790`).
+    fn phi(&mut self, slot: Slot, header: Option<php_ssa::Types>) {
         let entry = self.current(slot);
         let types = self.val(entry).types;
+        let types = match header {
+            Some(header) if !self.aliased(slot) => Types::UNKNOWN.restricted(header),
+            _ => types,
+        };
         let phi = self.value(slot, types, Def::Phi { entry, back: entry }, Home::Memory);
         self.set(slot, phi);
         self.phis.push(phi);
@@ -745,6 +799,7 @@ impl<'a> Builder<'a> {
         let written = self.write(
             idx,
             frame,
+            at,
             &op,
             data_line.as_ref(),
             seen,
@@ -885,6 +940,7 @@ impl<'a> Builder<'a> {
         &mut self,
         idx: OpId,
         frame: Frame,
+        at: OplineIdx,
         op: &Opline,
         data_line: Option<&Opline>,
         seen: Seen,
@@ -917,6 +973,7 @@ impl<'a> Builder<'a> {
             Some(slot) if !pushes && !fused => {
                 let types = out_types(op, [t1, t2, td], seen.read[0], code);
                 let types = returns.map_or(types, |returns| types.and(returns));
+                let types = self.restricted(frame, at, Defined::Out, types);
                 Some(self.define(slot, types, idx, form))
             }
             _ => None,
@@ -930,18 +987,35 @@ impl<'a> Builder<'a> {
                 } else {
                     types
                 };
+                // php's `SEND_VAR_EX` of a value sent by value keeps what
+                // it read, unrestricted.
+                let types = if op.opcode == Opcode::SendVarEx {
+                    types
+                } else {
+                    self.restricted(frame, at, Defined::Op1, types)
+                };
                 Some(self.define(slot, types, idx, form))
             }
             _ => None,
         };
         let op2 = match slot_of(frame, op.op2_type, op.op2) {
-            Some(slot) if writes.op2 => Some(self.define(slot, Types::UNKNOWN, idx, form)),
+            Some(slot) if writes.op2 => {
+                // php leaves a `FE_FETCH`'s key as it is where the trace
+                // leaves the loop there; it is read nowhere after.
+                let types = if matches!(op.opcode, Opcode::FeFetchR | Opcode::FeFetchRw) {
+                    Types::UNKNOWN
+                } else {
+                    self.restricted(frame, at, Defined::Op2, Types::UNKNOWN)
+                };
+                Some(self.define(slot, types, idx, form))
+            }
             _ => None,
         };
         if let (true, Some(data)) = (writes.data, data_line)
             && let Some(slot) = slot_of(frame, data.op1_type, data.op1)
         {
-            self.define(slot, Types::UNKNOWN, idx, form);
+            let types = self.restricted(frame, OplineIdx(at.0 + 1), Defined::Op1, Types::UNKNOWN);
+            self.define(slot, types, idx, form);
         }
         if op.opcode == Opcode::Return {
             self.returned = if op.op1_type == OperandKind::Unused {
@@ -956,6 +1030,16 @@ impl<'a> Builder<'a> {
             op1,
             op2,
         }
+    }
+
+    /// `types` narrowed by what php's analysis of `frame`'s op array
+    /// knows of the variable opline `at` defines as `which`,
+    /// `zend_jit_trace_restrict_ssa_var_info` after each op's
+    /// `zend_update_type_info` (`Z/ext/opcache/jit/zend_jit_trace.c:2386-2410`).
+    fn restricted(&self, frame: Frame, at: OplineIdx, which: Defined, types: Types) -> Types {
+        let func = self.frames[usize::from(frame.0)].func;
+        (self.analysed.defined(func, at.0, which))
+            .map_or(types, |info| types.restricted(info.types))
     }
 
     /// php's IP guard after an opline whose handler may go elsewhere than
@@ -1555,7 +1639,7 @@ impl<'a> Builder<'a> {
             .copied()
             .filter(|value| self.val(*value).home == Home::Register)
             .collect();
-        let frame = self.frame(func, Place::Callee(caller), self.call_at)?;
+        let frame = self.frame(func, Place::Callee(caller), self.call_at, None)?;
         self.stack.push(frame);
         let meta = self.meta(frame);
         for param in params(meta.code, meta.parameters) {
@@ -1608,7 +1692,7 @@ impl<'a> Builder<'a> {
             (caller, self.meta(from).called_at, None)
         } else {
             let func = next_op.map_or(self.rec.root, |(func, _)| func);
-            let caller = self.frame(func, Place::Caller(from), None)?;
+            let caller = self.frame(func, Place::Caller(from), None, next_op.map(|(_, at)| at))?;
             self.stack.push(caller);
             let call_at = next_op
                 .and_then(|(_, at)| at.0.checked_sub(1))
@@ -1899,12 +1983,39 @@ impl<'a> Builder<'a> {
         value
     }
 
-    /// What the op array alone implies `slot` holds where the frame's
-    /// part of the trace begins, php's initial `var_info` of
-    /// `zend_jit_trace_build_tssa`: a parameter its declaration, which an
-    /// entry has checked, and which no later write can have changed where
-    /// nothing else writes it; a variable of a frame the trace pushed is
-    /// unset; anything else is anything.
+    /// What `slot` holds where the frame's part of the trace begins,
+    /// php's initial `var_info` of `zend_jit_trace_build_tssa`
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:1678-1772`): in a trace that
+    /// enters a function, a parameter its declaration, which the entry has
+    /// checked, and any other variable unset; in a frame the trace pushed,
+    /// unset; elsewhere what php's analysis of the op array knows reaches
+    /// the opline the frame's part begins at
+    /// (`zend_jit_trace_copy_ssa_var_info`), and anything where it knows
+    /// nothing. A parameter php's analysis knows is an `int` past a
+    /// `VERIFY_RETURN_TYPE` that leaves it as it is, and one that coerces
+    /// it, an `int` returned as a `string` the leave frees:
+    ///
+    /// ```php
+    /// function s(int $n): string { if ($n < 0) { return "neg"; } return $n; }
+    /// function f(int $n): int { if ($n < 2) { return $n; } $a = f($n - 1); return $a + 1; }
+    /// function k($m) { $t = ""; $c = 0; for ($i = 0; $i < $m; $i++) { $t = s($i); $c += f(5); } return "$t $c"; }
+    /// k(10); $u = memory_get_usage(); echo k(100), " ", memory_get_usage() - $u, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 99 500 32
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function s(int $n): string { if ($n < 0) { return "neg"; } return $n; }
+    /// function f(int $n): int { if ($n < 2) { return $n; } $a = f($n - 1); return $a + 1; }
+    /// function k($m) { $t = ""; $c = 0; for ($i = 0; $i < $m; $i++) { $t = s($i); $c += f(5); } return "$t $c"; }
+    /// k(10); $u = memory_get_usage(); echo k(100), " ", memory_get_usage() - $u, "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 99 500 32
+    /// ```
     fn entry_types(&self, slot: Slot) -> Types {
         let meta = self.meta(slot.frame);
         // A side trace enters with what its parent's exit knew of the
@@ -1916,9 +2027,15 @@ impl<'a> Builder<'a> {
         if let Some(known) = known {
             return Types::of_tag(known.tag);
         }
+        let FrameInfo { func, place, .. } = self.frames[usize::from(slot.frame.0)];
+        let reaching = |unknown: Types| {
+            (meta.begins)
+                .and_then(|at| self.analysed.reaching(func, at.0, slot.var))
+                .map_or(unknown, |info| unknown.restricted(info.types))
+        };
         let cv = slot.var < meta.code.num_cvs;
         if !cv {
-            return Types::UNKNOWN.without(Types::UNDEF);
+            return reaching(Types::UNKNOWN.without(Types::UNDEF));
         }
         if self.aliased(slot) {
             return Types::UNKNOWN;
@@ -1934,15 +2051,12 @@ impl<'a> Builder<'a> {
         } else {
             Types::UNKNOWN.without(Types::REF)
         };
-        match self.frames[usize::from(slot.frame.0)].place {
+        match place {
             Place::Callee(_) => Types::UNDEF,
             Place::Root if self.rec.start == Start::Enter => {
                 param.map_or(Types::UNDEF, |p| param_types(p.declared, None))
             }
-            _ => match param.map(|p| param_types(p.declared, None)) {
-                Some(holds) if !written_after_entry(meta.code, slot.var, holds) => holds,
-                _ => unknown,
-            },
+            _ => reaching(unknown),
         }
     }
 

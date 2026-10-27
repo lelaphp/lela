@@ -181,6 +181,45 @@ impl Types {
             && (self.kinds() == Types::BOOL || self.tag().is_some_and(is_scalar_tag))
     }
 
+    /// What php's inference knows of a value, in these bits: the kinds and
+    /// a reference at their places, an indirect slot, and an array's
+    /// layouts, php's `MAY_BE_PACKED` and `MAY_BE_HASH`, an array that may
+    /// be empty or whose keys php does not know being of either.
+    pub(crate) fn of_info(info: php_ssa::Types) -> Types {
+        use php_ssa::Types as Php;
+        let mut types = Types(u16::try_from(info.0 & 0x7ff).unwrap_or(0));
+        if info.has(Php::INDIRECT) {
+            types = types.or(Types::INDIRECT);
+        }
+        if info.has(Php::ARRAY) {
+            let packed = info.has(Php::PACKED);
+            let hash = info.has(Php::NUMERIC_HASH | Php::STRING_HASH);
+            types = types.or(match (packed, hash) {
+                (true, false) if !info.has(Php::EMPTY) => Types::PACKED,
+                (false, true) if !info.has(Php::EMPTY) => Types::HASH,
+                _ => Types(Types::LAYOUTS),
+            });
+        }
+        types
+    }
+
+    /// These narrowed by what php's inference over the op array knows of
+    /// the same value, `zend_jit_trace_restrict_ssa_var_info`'s `type &=`
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:1059-1100`); these where the
+    /// two share no kind, a value php's inference holds unreachable, and
+    /// an array's layouts where the two share none.
+    #[must_use]
+    pub(crate) fn restricted(self, info: php_ssa::Types) -> Types {
+        let narrowed = self.and(Types::of_info(info));
+        if narrowed.kinds() == Types::NONE {
+            return self;
+        }
+        if narrowed.meets(Types::ARRAY) && narrowed.0 & Types::LAYOUTS == 0 {
+            return narrowed.or(Types(self.0 & Types::LAYOUTS));
+        }
+        narrowed
+    }
+
     /// The types of the parameter a `RECV`'s `op2` mask declares
     /// (`Type::mask`, php's `ZEND_TYPE_PURE_MASK`): the mask's kinds, and
     /// beside them an object and a reference, which the mask cannot

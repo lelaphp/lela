@@ -85,6 +85,7 @@ use php_unit::{ConstIdx, Opcode, OplineIdx};
 
 pub(crate) use lattice::Types;
 
+use crate::analysis::Analysed;
 use crate::record::{Began, Callee, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 
@@ -1098,7 +1099,12 @@ pub(crate) fn on_declared_slot(opcode: Opcode) -> bool {
     )
 }
 
-/// The trace `rec` builds, read through `view`, or why it builds none.
-pub(crate) fn build(rec: &TraceRecord, view: &UnitView) -> Result<TraceIr, Abort> {
-    build::build(rec, view)
+/// The trace `rec` builds, read through `view` and what php's analysis
+/// of each op array it passes through learned, or why it builds none.
+pub(crate) fn build(
+    rec: &TraceRecord,
+    view: &UnitView,
+    analysed: &Analysed,
+) -> Result<TraceIr, Abort> {
+    build::build(rec, view, analysed)
 }

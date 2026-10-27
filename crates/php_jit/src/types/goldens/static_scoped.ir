@@ -2,14 +2,14 @@ trace loop e2, stop loop
 frame f0 e2 root, 3 cvs 6 temps
 frame f1 e4 callee of f0, 1 cvs 1 temps
 entry
-  #0 f0.CV1 [undef, any]
+  #0 f0.CV1 [any]
   #2 f0.CV2 [long]
   #4 f0.CV0 [long]
   guard room 112 -> exit 0
   guard #4 long -> exit 1
   guard #2 long -> exit 2
 loop at 0, loop, interrupt exit 8
-  #1 f0.CV1 [undef, any] = phi(#0, #8)
+  #1 f0.CV1 [any] = phi(#0, #8)
   #3 f0.CV2 [long] reg = phi(#2, #9)
 0009 f0 IS_SMALLER #3, #4 fused inline
   checks direction taken -> exit 3

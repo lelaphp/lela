@@ -31,7 +31,7 @@ loop at 0, loop, interrupt exit 25
   checks #9 array -> exit 12
   checks #9 ref to array -> exit 13
 0011 f0 FETCH_DIM_IS #9, const#5 inline unwinds -> unwind 1
-  -> #10 f0.T7 [ref, any]
+  -> #10 f0.T7 [any]
 0012 f0 COALESCE #10 step unwinds -> unwind 1
   -> #11 f0.T8 [long]
   checks direction taken -> exit 14

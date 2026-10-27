@@ -772,7 +772,12 @@ fn a_side_trace_returning_an_array_its_parent_knew_compiles() -> Result<(), Stri
          op e2 23 array.packed - - -\nop e2 24 array.packed - - -\nstop return\n",
     )
     .map_err(|e| format!("{e:?}"))?;
-    let ir = crate::types::build(&record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let ir = crate::types::build(
+        &record,
+        &recorded.view,
+        &crate::analysis::analysed(&record, &recorded.view),
+    )
+    .map_err(|abort| format!("{abort:?}"))?;
     let backend = golden_backend().map_err(|e| format!("{e:?}"))?;
     backend
         .compile(&ir, named(SPECTRALNORM), None, None)
