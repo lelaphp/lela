@@ -25,9 +25,9 @@ use super::opcodes::{
 use super::{
     Abort, ArgChecks, BodyEntry, Check, Constant, Def, Defaults, End, Entry, ExitId, ExitSpec,
     Form, Frame, FrameInfo, Frees, Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known,
-    Landing, Layout, Leave, Line, LoopHeader, Object, Op, OpId, Operand, Owners, PairClass, Place,
-    Read, Repeat, Returned, Slot, Slotted, Store, Stored, TraceIr, Unwind, UnwindId, Value,
-    ValueId, Vars, on_declared_slot,
+    Landing, Layout, Leave, Line, LoopHeader, Object, Op, OpId, Operand, Owners, PairCallee,
+    PairClass, Place, Read, Repeat, Returned, Slot, Slotted, Store, Stored, TraceIr, Unwind,
+    UnwindId, Value, ValueId, Vars, on_declared_slot,
 };
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -793,7 +793,9 @@ impl<'a> Builder<'a> {
                     defaults,
                 },
                 _ if let Some((slot, class)) = pair => Imm::Pair {
-                    function: slot.function(),
+                    function: slot
+                        .function()
+                        .map_or(PairCallee::Record, PairCallee::Number),
                     class,
                 },
                 _ if let Some(property) = property.filter(|_| form == Form::Inline) => {
@@ -1383,15 +1385,17 @@ impl<'a> Builder<'a> {
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10873`): nothing of an
     /// argument the trace knows, from what its send wrote, of a type its
     /// parameter declares and holds as it is ([`held_as_is`]); the
-    /// `RECV`'s own mask, held as the call is made, of one it knows nothing of, a
-    /// reference among them, whose value the check reads ([`ArgChecks`]).
-    /// None, the call kernel's, which serves the prologue, where a
-    /// parameter is variadic, declares a type no mask holds, a class, or
-    /// is sent an argument the trace knows its `RECV` coerces or refuses.
-    /// A long sent to an `int` is made in place; one sent to a `float`,
-    /// which the `RECV` coerces, and a string sent to an `int` are the
-    /// call kernel's; arrays by reference are checked in place, and a
-    /// string by reference to an `int` is coerced by the kernel:
+    /// declared type's mask, the `RECV`'s own `op2.num` or a passed
+    /// `RECV_INIT`'s, held as the call is made, of any other, a reference
+    /// among them, whose value the check reads ([`ArgChecks`]), an
+    /// argument it fails handed to its `RECV`'s handler alone
+    /// (`Emit::verify_args`). None, the call kernel's, which serves the
+    /// prologue, where a parameter is variadic or declares a type no mask
+    /// holds, a class. A long sent to an `int` is made in place with no
+    /// check; one sent to a `float`, and a string sent to an `int`, are
+    /// checked, the handler coercing them; arrays by reference are
+    /// checked in place, and a string by reference to an `int` is coerced
+    /// by the handler:
     ///
     /// ```php
     /// function fib(int $n): int { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }
@@ -1443,16 +1447,16 @@ impl<'a> Builder<'a> {
                 .filter(|sent| {
                     sent.kinds() != Types::NONE && !sent.meets(Types::REF.or(Types::UNDEF))
                 });
-            match sent {
-                Some(sent) if !param.by_ref && sent.kinds().within(held) => continue,
-                Some(sent) if !sent.kinds().meets(held) => return None,
-                _ => {}
+            if sent.is_some_and(|sent| !param.by_ref && sent.kinds().within(held)) {
+                continue;
             }
-            let recv = code
-                .oplines
-                .get(at)
-                .filter(|op| op.opcode == Opcode::Recv && op.op1 as usize == at + 1)?;
-            checks = checks.with(at, NonZeroU32::new(recv.op2)?)?;
+            // The `RECV`'s mask, its `op2.num`, or a passed `RECV_INIT`'s,
+            // which checks the declared type's as php's
+            // `zend_verify_recv_arg_type` does.
+            code.oplines.get(at).filter(|op| {
+                matches!(op.opcode, Opcode::Recv | Opcode::RecvInit) && op.op1 as usize == at + 1
+            })?;
+            checks = checks.with(at, NonZeroU32::new(ty.mask())?)?;
         }
         Some(checks)
     }
@@ -2559,7 +2563,7 @@ impl<'a> Builder<'a> {
 
     /// The call a method's `INIT_METHOD_CALL` pushes in place, as php's
     /// `zend_jit_init_method_call` pushes it (`Z/ext/opcache/jit/zend_jit_ir.c:8950-9213`):
-    /// over a constant name, on `$this` or a variable that holds an object
+    /// over a constant name, on `$this`, a variable or a temporary that holds an object
     /// as it is, whose class's call the recording took
     /// ([`UnitView::calls_of`]). On a published class, under the class
     /// guard on the object; on a request-scoped one (#3558), under the
@@ -2587,9 +2591,11 @@ impl<'a> Builder<'a> {
             return None;
         };
         let class = sample1?.class?;
+        // A variable's object or a temporary's, `(new D)->m()`, which the
+        // call takes over as the handler does (`_TMPVAR_CONST`).
         let object = match (op.op1_type, op1) {
             (OperandKind::Unused, _) => Object::This(frame),
-            (OperandKind::Cv, Operand::Value(value))
+            (OperandKind::Cv | OperandKind::Tmp | OperandKind::Var, Operand::Value(value))
                 if seen.types[0] == Types::OBJECT && seen.read[0] == Read::InPlace =>
             {
                 Object::Value(value)
@@ -2609,21 +2615,30 @@ impl<'a> Builder<'a> {
         Some(PushAt { plain, held })
     }
 
-    /// The call an `INIT_STATIC_METHOD_CALL` over a constant class and
-    /// method name pushes in place, as php's
-    /// `zend_jit_init_static_method_call` pushes it
-    /// (`Z/ext/opcache/jit/zend_jit_ir.c:9215-9330`): under the guard on
-    /// the pair its runtime-cache slot holds, the callee the static method
-    /// the recording took the call of, and its class the published one
-    /// the opline names, php's constant `ce`, or whichever class a
-    /// request-scoped name resolved to, which php reads from the slot.
+    /// The call an `INIT_STATIC_METHOD_CALL` over a constant method name
+    /// pushes in place, as php's `zend_jit_init_static_method_call`
+    /// pushes it (`Z/ext/opcache/jit/zend_jit_ir.c:9215-9370`), over a
+    /// constant class, or `self` or `parent`, as php's trace compiles it
+    /// for those three alone (`Z/ext/opcache/jit/zend_jit_trace.c:6428-6442`):
+    /// under the guard on the pair its runtime-cache slot holds, the
+    /// callee the method the recording took the call of. A static callee
+    /// over a constant class is held to the published class the opline
+    /// names, php's constant `ce`, or to whichever class a request-scoped
+    /// name resolved to, which php reads from the slot; over `self` or
+    /// `parent` its called scope is the calling frame's ([`PairClass::Forwarded`]).
+    /// A callee that takes `$this` takes the calling frame's, of the
+    /// published class the recording saw it of ([`PairClass::This`]).
     fn static_at(
         &self,
         (func, at): (FuncRef, OplineIdx),
         op: &Opline,
         next: Option<&Event>,
     ) -> Option<PushAt> {
-        if op.op1_type != OperandKind::Const || op.op2_type != OperandKind::Const {
+        // An `UNUSED` class operand whose pair the view took is `self` or
+        // `parent` ([`UnitView::hold_callee`]).
+        let constant = op.op1_type == OperandKind::Const;
+        let scoped = op.op1_type == OperandKind::Unused;
+        if !(constant || scoped) || op.op2_type != OperandKind::Const {
             return None;
         }
         let Some(Event::InitCall {
@@ -2633,14 +2648,27 @@ impl<'a> Builder<'a> {
         else {
             return None;
         };
-        let pair = (self.view.callee_at(func, at)).filter(|pair| !pair.instance())?;
-        let plain = (self.view.calls_of(*callee, op.extended_value))
-            .find(|plain| plain.scope() == Some(pair.class()))?
-            .clone();
-        let class = if tier::class_published(pair.class()) {
-            PairClass::Published(pair.class())
+        let pair = self.view.callee_at(func, at)?;
+        let named = (constant && tier::class_published(pair.class())).then_some(pair.class());
+        let mut plains = self.view.calls_of(*callee, op.extended_value);
+        let (plain, class) = if pair.instance() {
+            // The receiver's class is the call's called scope, the one
+            // plain call to the callee whose scope is published.
+            let plain = plains
+                .find(|plain| plain.scope().is_some_and(tier::class_published))?
+                .clone();
+            let receiver = plain.scope()?;
+            (plain, PairClass::This { named, receiver })
+        } else if scoped {
+            (
+                plains.find(|plain| plain.scope().is_some())?.clone(),
+                PairClass::Forwarded,
+            )
         } else {
-            PairClass::Named
+            let plain = plains
+                .find(|plain| plain.scope() == Some(pair.class()))?
+                .clone();
+            (plain, named.map_or(PairClass::Named, PairClass::Published))
         };
         Some(PushAt {
             plain,

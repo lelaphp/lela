@@ -50,7 +50,7 @@ use php_engine::tier::{
 use php_heap::{Arr, HeaderImage, Key, Scalar, Zval, ZvalRef, ZvalType};
 use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
 
-use crate::lower::{self, Stood, engine_offset};
+use crate::lower::{self, ReturnsTo, Stood, engine_offset};
 use crate::table::{Exit, Trace};
 use crate::types::ExitId;
 
@@ -570,8 +570,10 @@ kernels! {
         Find => find(array: u64, key: u64, key_info: u32, constant: u32) -> Zval;
         Lookup => lookup(array: u64, key: u64, key_info: u32, constant: u32) -> Zval = tier::lookup_element;
         Leave => leave(word: u64, type_info: u32) -> u64 = tier::return_entry;
-        Native => native(func: u32) = tier::native_held;
+        Frameless => frameless(place: u32, func: u32) = tier::frameless_held;
         FreeThis => free_this() = tier::free_this;
+        MakeRef => make_ref(place: u64) -> u64 = tier::make_ref;
+        CallNative => call_native(place: u32, into: ReturnsTo) = tier::call_native;
     }
 }
 
@@ -598,16 +600,34 @@ fn handle(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<(), Fatal> {
     tier::dispatch_held(req, frame, held)
 }
 
-/// The `native` kernel: the native's call at `at` of the op array the
-/// engine numbers `func`, a `DO_ICALL` or a `FRAMELESS_ICALL_*`, served
-/// by its handler with no dispatch ([`tier::native_held`]), as php's code
-/// calls the native directly; where the interpreter stands after it is
-/// compiled code's, and a throw is the request's pending throwable, as
-/// the `handle` kernel answers them.
-fn native(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<(), Fatal> {
-    let frame = standing(req, on.room, on.at)?;
+/// The `frameless` kernel: the frameless call at `at` of the op array
+/// the engine numbers `func`, a `FRAMELESS_ICALL_*` of the frame at
+/// `place`, served by its handler with no dispatch
+/// ([`tier::frameless_held`]), as php's code calls the native directly;
+/// where the interpreter stands after it is compiled code's, and a throw
+/// is the request's pending throwable, as the `handle` kernel answers
+/// them.
+fn frameless(req: &mut Request, on: On<'_, '_>, place: u32, func: u32) -> Result<(), Fatal> {
+    let frame = at_place(req, on.room, place);
     let (held, _) = held(on, func)?;
-    tier::native_held(req, frame, held)
+    tier::frameless_held(req, frame, held, on.at)
+}
+
+/// The `call_native` kernel: the `DO_ICALL` at `at` of the frame at
+/// `place`, whose call on top of the stack is a native's, made with no
+/// opline read ([`tier::call_native`]), as php's code calls the native's
+/// handler with the address of the return's slot it computed; `into` is
+/// the temporary that takes what it returns ([`ReturnsTo`]). Where the
+/// interpreter stands after it is compiled code's, and a throw is the
+/// request's pending throwable.
+fn call_native(
+    req: &mut Request,
+    on: On<'_, '_>,
+    place: u32,
+    into: ReturnsTo,
+) -> Result<(), Fatal> {
+    let frame = at_place(req, on.room, place);
+    tier::call_native(req, frame, on.at, into.slot())
 }
 
 /// The `leave` kernel: the value the `RETURN` at `at`, which a trace ends
@@ -879,6 +899,33 @@ fn lookup(
     let laid = keyed_element(array, (key, key_info), constant)
         .and_then(|(array, key)| tier::lookup_element(req, array, key));
     Ok(placed(laid))
+}
+
+/// The `make_ref` kernel: the reference a `SEND_REF` makes of the
+/// variable at `place` ([`tier::make_ref`]), as php's `zend_jit_send_ref`
+/// makes it, written into the place; one where it made it, zero where
+/// the memory limit refused it, the request ended in its fatal, which
+/// the wrapper answers as the request's unwinding, or a fallible scope's
+/// refusal, whose send the handler then serves.
+fn make_ref(req: &mut Request, on: On<'_, '_>, place: u64) -> Result<u64, Fatal> {
+    standing(req, on.room, on.at)?;
+    let place = zval(place, u32::from(ZvalType::Indirect as u8))
+        .as_indirect()
+        .ok_or_else(|| internal("compiled code's SEND_REF of no place"))?;
+    Ok(u64::from(tier::make_ref(req, place)))
+}
+
+/// The frame at `place` on the stack, which compiled code holds for the
+/// frame whose room it handed a kernel, so no frame is looked for by its
+/// room ([`standing`]); a debug build holds the two to one frame.
+fn at_place(req: &Request, room: Room, place: u32) -> FrameRef {
+    let frame = FrameRef(place);
+    debug_assert_eq!(
+        NonNull::new(room.0).and_then(|room| tier::at_room(req, room)),
+        Some(frame),
+        "compiled code's place of a frame is the place of the frame at its room"
+    );
+    frame
 }
 
 /// The frame whose room compiled code handed a kernel, stood at the
@@ -1562,10 +1609,12 @@ fn header_of(
     req: &Request,
     call: &tier::PlainCall,
 ) -> Option<usize> {
-    let named = if call.callee().is_none() {
-        call.name()
-    } else {
-        &[]
+    // A native's call by its name, and a request-scoped class's own
+    // method's by its class's, under which the request finds the function.
+    let named = match (call.callee(), call.own_class()) {
+        (None, _) => call.name(),
+        (Some(_), Some(class)) => class,
+        (Some(_), None) => &[],
     };
     let key = (
         call.callee(),

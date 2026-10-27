@@ -45,8 +45,8 @@ use php_heap::{Arr, ROOM_BYTES, Ref, Str, Zval, ZvalType};
 use php_unit::{ConstIdx, Opcode, OplineIdx};
 
 use super::{
-    ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, ROOT_AT, STACK_AT, STOOD_AT,
-    Stood, Symbols, UNWOUND, located,
+    ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, ROOT_AT, ReturnsTo, STACK_AT,
+    STOOD_AT, Stood, Symbols, UNWOUND, located,
 };
 
 mod calls;
@@ -303,6 +303,16 @@ enum Num {
         long: Value,
         double: Value,
     },
+}
+
+/// A native's call compiled code hands its kernel ([`Emit::handled`]):
+/// a `DO_ICALL`, which [`Kernel::CallNative`] makes with the temporary
+/// that takes the return, or a `FRAMELESS_ICALL_*`, which
+/// [`Kernel::Frameless`] serves.
+#[derive(Clone, Copy)]
+enum NativeCall {
+    Made(ReturnsTo),
+    Frameless,
 }
 
 /// Where a kernel serving `line` leaves: its exit, where an inline form
@@ -1667,7 +1677,8 @@ impl<'a> Emit<'a> {
         // The `ExitCtx`, the frame's room and the opline come first.
         let params: &[Type] = match kernel {
             Kernel::Step => &[I64, I64, I32, I32, I64],
-            Kernel::Handle | Kernel::Native => &[I64, I64, I32, I32],
+            Kernel::Handle => &[I64, I64, I32, I32],
+            Kernel::Frameless | Kernel::CallNative => &[I64, I64, I32, I32, I32],
             Kernel::FreeThis => &[I64, I64, I32],
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release | Kernel::FreeCv => &[I64, I64, I32, I64, I32],
@@ -1677,6 +1688,7 @@ impl<'a> Emit<'a> {
             Kernel::RopeEnd => &[I64, I64, I32, I64, I64, I32, I64],
             Kernel::Concat => &[I64, I64, I32, I64, I32, I64, I32, I32, I64],
             Kernel::Find | Kernel::Lookup => &[I64, I64, I32, I64, I64, I32, I32, I64],
+            Kernel::MakeRef => &[I64, I64, I32, I64, I64],
         };
         sig.params
             .extend(params.iter().map(|ty| AbiParam::new(*ty)));
@@ -1838,10 +1850,12 @@ impl<'a> Emit<'a> {
     /// float(23.5)
     /// ```
     ///
-    /// A native's call and its frameless calls go through
-    /// [`Kernel::Native`], which calls the handler with no dispatch, as
-    /// php's code calls the native directly; one that refuses its
-    /// argument throws out of the loop:
+    /// A native's `DO_ICALL` goes through [`Kernel::CallNative`], which
+    /// makes the call with no opline read, as php's `zend_jit_do_fcall`
+    /// calls the native's handler, and a frameless call through
+    /// [`Kernel::Frameless`], which calls its handler with no dispatch;
+    /// each is handed the frame's place, so no frame is looked for by its
+    /// room. One that refuses its argument throws out of the loop:
     ///
     /// ```php
     /// function f($n) { $t = 0; for ($i = 1; $i < $n; $i++) { $t += max(10, min(200, $i & 255)) + strlen(substr("abcdef", $i % 4)); } return $t; }
@@ -1864,18 +1878,83 @@ impl<'a> Emit<'a> {
     /// 33490
     /// str_contains(): Argument #2 ($needle) must be of type string, array given
     /// ```
+    ///
+    /// The frame stood at the call before the native runs, so what a
+    /// native throws is raised at its line, what it returns given up where
+    /// nothing reads it, and a frameless call's at its own:
+    ///
+    /// ```php
+    /// function f($n) {
+    ///     $t = 0;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         str_repeat("ab", $i);
+    ///         $t += intdiv(100, 7 - $i);
+    ///     }
+    ///     return $t;
+    /// }
+    /// function g($n, $a) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += strlen(implode(",", $i < 7 ? [$i] : $a)); } return $t; }
+    /// try { f(10); } catch (DivisionByZeroError $e) { echo $e->getMessage(), " at ", $e->getLine(), "\n"; }
+    /// try { g(10, 1); } catch (TypeError $e) { echo $e->getMessage(), " at ", $e->getLine(), "\n"; }
+    /// ```
+    /// ```expect regime=jit-force process
+    /// Division by zero at 6
+    /// implode(): Argument #2 ($array) must be of type ?array, int given at 10
+    /// ```
+    ///
+    /// ```php
+    /// function f($n) {
+    ///     $t = 0;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         str_repeat("ab", $i);
+    ///         $t += intdiv(100, 7 - $i);
+    ///     }
+    ///     return $t;
+    /// }
+    /// function g($n, $a) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += strlen(implode(",", $i < 7 ? [$i] : $a)); } return $t; }
+    /// try { f(10); } catch (DivisionByZeroError $e) { echo $e->getMessage(), " at ", $e->getLine(), "\n"; }
+    /// try { g(10, 1); } catch (TypeError $e) { echo $e->getMessage(), " at ", $e->getLine(), "\n"; }
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// Division by zero at 6
+    /// implode(): Argument #2 ($array) must be of type ?array, int given at 10
+    /// ```
     fn handled(
         &mut self,
         line: &Line,
         onward: Onward,
         [room, opline, func]: [Value; 3],
     ) -> Result<(), Abort> {
-        let kernel = if line.opcode == Opcode::DoIcall || line.opcode.is_frameless_icall() {
-            Kernel::Native
+        let native = if line.opcode == Opcode::DoIcall {
+            let slot = line
+                .out
+                .map(|out| Ok(self.value(out)?.slot.var))
+                .transpose()?;
+            let into = ReturnsTo::of(slot)
+                .ok_or_else(|| mismatch("a temporary past the slots a kernel numbers"))?;
+            Some(NativeCall::Made(into))
         } else {
-            Kernel::Handle
+            line.opcode
+                .is_frameless_icall()
+                .then_some(NativeCall::Frameless)
         };
-        self.call(kernel, &[room, opline, func], leave_of(line))?;
+        if let Some(native) = native {
+            // php's `SET_EX_OPLINE` before the native's call, which the
+            // kernel serves the frame stood at, and the frame's place, so
+            // the kernel looks for no frame by its room.
+            self.b.ins().store(trusted(), opline, room, EX_OPLINE);
+            let place = self.frame_ref(line.frame)?;
+            let place = self.b.ins().ireduce(I32, place);
+            let (kernel, last) = match native {
+                NativeCall::Made(into) => (
+                    Kernel::CallNative,
+                    self.b.ins().iconst(I32, i64::from(into.word())),
+                ),
+                NativeCall::Frameless => (Kernel::Frameless, func),
+            };
+            self.call(kernel, &[room, opline, place, last], leave_of(line))?;
+        } else {
+            self.call(Kernel::Handle, &[room, opline, func], leave_of(line))?;
+        }
         let next = match onward {
             Onward::Past(places) => self.b.ins().iconst(I32, i64::from(line.opline.0 + places)),
             Onward::Went => self.b.ins().load(I32, trusted(), room, EX_OPLINE),
@@ -1884,7 +1963,7 @@ impl<'a> Emit<'a> {
         self.b
             .ins()
             .stack_store(I64, next, self.stood, STOOD_OPLINE);
-        if line.opcode == Opcode::DoIcall {
+        if matches!(native, Some(NativeCall::Made(_))) {
             let call = self.call_left(line.frame)?;
             self.b.ins().stack_store(I64, call, self.stood, STOOD_CALL);
         }
@@ -3371,29 +3450,36 @@ impl<'a> Emit<'a> {
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:9792-9860`): the reference the
     /// variable holds written into the call's slot for the argument with
     /// one owner more, `GC_ADDREF` and `ZVAL_REF`. A variable that holds no
-    /// reference yet is made one by the handler, cold, through the
-    /// [`Kernel::Handle`] crossing, where php's code makes it inline with
-    /// `ZVAL_NEW_REF`; a variable the trace holds in a register holds a
-    /// scalar, and is stored to its slot for the handler first. Arrays
-    /// passed by reference in a loop, each written through its reference
-    /// by the callee, one made a reference at its first send:
+    /// reference yet is made one in place, `ZVAL_MAKE_REF`, its reference
+    /// laid down by [`Kernel::MakeRef`] as php's code calls the allocator
+    /// for it, and then sent as one; the handler serves the send, cold,
+    /// only where the memory limit refused the reference. A variable the
+    /// trace holds in a register holds a scalar, and is stored to its slot
+    /// first. Arrays passed by reference in a loop, each written through
+    /// its reference by the callee, one made a reference at its first
+    /// send, and a variable unset before each send, made a reference over
+    /// `null`:
     ///
     /// ```php
     /// function bump(array &$a, array &$b, int &$n) { $a[0] += 1; $b[] = $n; $n++; }
     /// function f($k) { $x = [0]; $y = []; $c = 0; for ($i = 0; $i < $k; $i++) { bump($x, $y, $c); } return [$x[0], count($y), $c]; }
-    /// echo json_encode(f(9)), "\n";
+    /// function put(&$v) { $v = ($v ?? 0) + 2; }
+    /// function g($k) { $t = 0; for ($i = 0; $i < $k; $i++) { unset($u); put($u); $t += $u; } return $t; }
+    /// echo json_encode(f(9)), " ", g(9), "\n";
     /// ```
     /// ```expect regime=jit-force process
-    /// [9,9,9]
+    /// [9,9,9] 18
     /// ```
     ///
     /// ```php
     /// function bump(array &$a, array &$b, int &$n) { $a[0] += 1; $b[] = $n; $n++; }
     /// function f($k) { $x = [0]; $y = []; $c = 0; for ($i = 0; $i < $k; $i++) { bump($x, $y, $c); } return [$x[0], count($y), $c]; }
-    /// echo json_encode(f(9)), "\n";
+    /// function put(&$v) { $v = ($v ?? 0) + 2; }
+    /// function g($k) { $t = 0; for ($i = 0; $i < $k; $i++) { unset($u); put($u); $t += $u; } return $t; }
+    /// echo json_encode(f(9)), " ", g(9), "\n";
     /// ```
     /// ```expect regime=jit-exit-fuzz process
-    /// [9,9,9]
+    /// [9,9,9] 18
     /// ```
     ///
     /// An object sent by reference whose callee writes over it, its
@@ -3430,38 +3516,49 @@ impl<'a> Emit<'a> {
         let Operand::Value(value) = line.op1 else {
             return Err(mismatch("a send by reference of no variable"));
         };
-        let handler = |emit: &mut Emit<'_>| -> Result<(), Abort> {
-            emit.spill_operands(line)?;
-            let [room, opline] = emit.served(line)?;
-            let func = emit.func_of(line.frame)?;
-            emit.handled(line, Onward::Past(1), [room, opline, func])
-        };
-        if self.value(value)?.home == Home::Register {
-            return handler(self);
-        }
+        self.spill_operands(line)?;
         let (room, from_at) = self.place(self.value(value)?.slot)?;
+        let zval = self.b.ins().iadd_imm_s(room, i64::from(from_at));
         let info = self.b.ins().load(I32, trusted(), room, from_at + TYPE_AT);
         let kind = self.b.ins().band_imm_u(info, KIND);
         let reference = self
             .b
             .ins()
             .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
-        let (sent, make, on) = (
+        let (sent, make, refused, on) = (
+            self.b.create_block(),
             self.b.create_block(),
             self.b.create_block(),
             self.b.create_block(),
         );
-        self.b.set_cold_block(make);
+        self.b.set_cold_block(refused);
         self.b.ins().brif(reference, sent, &[], make, &[]);
+        // `ZVAL_MAKE_REF`: the reference laid down over what the variable
+        // holds, then sent as one.
+        self.b.switch_to_block(make);
+        self.b.seal_block(make);
+        let [served_room, opline] = self.served(line)?;
+        let answer = self.answer();
+        let made_at = self.b.ins().stack_addr(I64, answer, 0);
+        self.call(
+            Kernel::MakeRef,
+            &[served_room, opline, zval, made_at],
+            leave_of(line),
+        )?;
+        let laid = self.b.ins().stack_load(I64, I64, answer, 0);
+        self.b.ins().brif(laid, sent, &[], refused, &[]);
         self.b.switch_to_block(sent);
         self.b.seal_block(sent);
-        let zval = self.b.ins().iadd_imm_s(room, i64::from(from_at));
+        let info = self.b.ins().load(I32, trusted(), room, from_at + TYPE_AT);
         let call = self.call_room()?;
         self.copy_at(zval, info, (call, arg))?;
         self.b.ins().jump(on, &[]);
-        self.b.switch_to_block(make);
-        self.b.seal_block(make);
-        handler(self)?;
+        // The memory limit refused the reference: the handler's send, which
+        // raises its fatal.
+        self.b.switch_to_block(refused);
+        self.b.seal_block(refused);
+        let func = self.func_of(line.frame)?;
+        self.handled(line, Onward::Past(1), [served_room, opline, func])?;
         self.b.ins().jump(on, &[]);
         self.b.switch_to_block(on);
         self.b.seal_block(on);

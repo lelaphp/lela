@@ -1760,12 +1760,19 @@ pub(crate) enum Cached {
     /// what was asked and what answered, never how the answer was
     /// found. And `instance` is whether the callee takes `$this`, the
     /// test of `fbc->common.fn_flags` php makes, read where the pair is
-    /// written, as php reads it off the callee it holds.
+    /// written, as php reads it off the callee it holds. `record` is
+    /// the callee's record, the word a frame serving it is pushed with
+    /// ([`Header::callee`]): what compiled code holds a request's own
+    /// method to, whose number is the request's alone, as php's
+    /// `zend_jit_func_guard` holds a function that is not immutable by
+    /// its opcodes rather than its address
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:8999-9024`).
     ClassAndCallee {
         class: ClassId,
         primed: PrimedFrom,
         function: Function,
         instance: bool,
+        record: crate::readable::CalleeAt,
     } = CLASS_AND_CALLEE,
     /// The `static` property a fetch over a constant name found on its
     /// first pass, `CACHE_POLYMORPHIC_PTR(cache_slot, ce, result)` and
@@ -1897,6 +1904,7 @@ struct PairRepr {
     primed: PrimedFrom,
     function: Function,
     instance: bool,
+    record: crate::readable::CalleeAt,
 }
 
 /// [`PropertyOffset::Declared`] as RFC 2195 lays it out.
@@ -1918,6 +1926,9 @@ impl Cached {
     /// Where [`Cached::ClassAndCallee`]'s callee stands in a slot, its
     /// number.
     pub(crate) const PAIR_FUNCTION_AT: usize = std::mem::offset_of!(PairRepr, function);
+    /// Where [`Cached::ClassAndCallee`]'s callee's record stands in a
+    /// slot, a word.
+    pub(crate) const PAIR_RECORD_AT: usize = std::mem::offset_of!(PairRepr, record);
 }
 
 impl PropertyPlace {
@@ -1951,6 +1962,7 @@ const _: () = {
     assert!(align_of::<PairRepr>() <= align_of::<Cached>());
     assert!(size_of::<Function>() == 4);
     assert!(Cached::PAIR_CLASS_AT == 4 && Cached::PAIR_FUNCTION_AT.is_multiple_of(4));
+    assert!(Cached::PAIR_RECORD_AT.is_multiple_of(8));
     assert!(Cached::TAG_AT == 0 && Cached::PLACE_AT == 4);
     assert!(size_of::<ClassId>() == 4 && size_of::<SlotType>() == 2);
     assert!(size_of::<DeclaredRepr>() == size_of::<PropertyOffset>());
@@ -2003,7 +2015,7 @@ impl Cached {
 /// (`zend_create_closure`, `Z/Zend/zend_closures.c:794`). Both read a
 /// cache of their own here too ([`init_runtime_cache`]), and the slot is
 /// still read back only from the scope that wrote it
-/// ([`crate::api::request::Request::cached_in_scope`]): a frame of the
+/// ([`Request::cached_in_scope`]): a frame of the
 /// function that wrote it without asking its scope, as
 /// [`Cached::Property`]'s `function` is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3969,6 +3981,27 @@ pub(crate) fn cached_class(
     }
     found
 }
+
+/// Whether the class operand `kind`/`at` names one class wherever a
+/// slot is read back: a constant, or `self` or `parent`, which the
+/// frame's scope fixes, and which a slot read back from the scope that
+/// wrote it ([`Request::cached_in_scope`]) needs not resolve again;
+/// `static` and a `FETCH_CLASS`'s are resolved on every pass.
+pub(crate) fn class_fixed(kind: php_unit::OperandKind, at: u32) -> bool {
+    kind == php_unit::OperandKind::Const
+        || kind == php_unit::OperandKind::Unused
+            && matches!(at & FETCH_CLASS_MASK, FETCH_CLASS_SELF | FETCH_CLASS_PARENT)
+}
+
+/// `ZEND_FETCH_CLASS_MASK` (`Z/Zend/zend_compile.h:1034`): the bits of a
+/// class operand's number that are its fetch type, the flags above them.
+pub(crate) const FETCH_CLASS_MASK: u32 = 0x0f;
+
+/// `ZEND_FETCH_CLASS_SELF` and `ZEND_FETCH_CLASS_PARENT`
+/// (`Z/Zend/zend_compile.h:1028`), the two fetch types a call on the class
+/// forwards the called scope through.
+pub(crate) const FETCH_CLASS_SELF: u32 = 1;
+pub(crate) const FETCH_CLASS_PARENT: u32 = 2;
 
 #[cfg(test)]
 mod tests {

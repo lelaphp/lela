@@ -30,28 +30,53 @@ use php_unit::Opcode;
 
 use super::{
     COUNTED, Dtor, Emit, Kernel, Refuse, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE,
-    STOOD_ROOM, Scalar, imm, leave_of, mismatch, trusted,
+    STOOD_ROOM, Scalar, TYPE_AT, imm, leave_of, mismatch, tag, trusted,
 };
 use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT, RETURNED, THREW};
 use crate::types::{
     Abort, ArgChecks, Check, Defaults, End, ExitId, Frame, Imm, Line, Object, OpId, Operand,
-    Owners, PairClass, Returned, Vars,
+    Owners, PairCallee, PairClass, Returned, Vars,
 };
 
-/// The receiver a method's call `line` pushes in place: `$this` of its
-/// frame, lent, or the object a variable holds, of which the call takes
-/// an owner.
-fn receiver_of(line: &Line) -> Result<(Object, bool), Abort> {
+/// The receiver a method's call `line` pushes in place.
+fn receiver_of(line: &Line) -> Result<Object, Abort> {
     match line.op1 {
-        Operand::Unused => Ok((Object::This(line.frame), false)),
-        Operand::Value(value) => Ok((Object::Value(value), true)),
+        Operand::Unused => Ok(Object::This(line.frame)),
+        Operand::Value(value) => Ok(Object::Value(value)),
         Operand::Constant(_) => Err(mismatch("a method called on a constant")),
     }
+}
+
+/// How a call pushed in place takes its receiver, as the handler's
+/// inline path takes it (`inline_init_method_call`): `$this`, lent; a
+/// variable's object, one owner more; a temporary's, its owner moved out
+/// of the slot.
+#[derive(Clone, Copy)]
+enum Taken {
+    Lent,
+    Shared,
+    Moved,
 }
 
 /// The engine's runtime-cache slot layout, as the guard on a call's pair
 /// reads it.
 const P: PlaceLayout = PLACE;
+
+/// What a push in place under its pair's guard writes past the image it
+/// copies ([`Emit::pair_guard`]): the called scope where the image names
+/// none, and the receiver lent from the calling frame.
+#[derive(Default)]
+struct Over {
+    scope: Option<Scope>,
+    this: Option<Value>,
+}
+
+/// A called scope compiled code writes: a class's number, which the
+/// header keeps inverted, or the calling frame's word as it stands.
+enum Scope {
+    Number(Value),
+    Word(Value),
+}
 
 /// What a leave in place writes into the caller's slot: a scalar, or a
 /// zval's two words, copied from a constant or moved from a temporary.
@@ -249,7 +274,9 @@ impl Emit<'_> {
     /// A method's call held by the pair its runtime-cache slot holds
     /// ([`Imm::Pair`]) is pushed where the slot holds the pair the trace
     /// recorded ([`Emit::pair_guard`]), its called scope written where its
-    /// class is the request's own, and its handler pushes it otherwise,
+    /// class is the request's own or the calling frame forwards it, and
+    /// the calling frame's `$this` lent where a static call's syntax
+    /// calls a method that takes it, and its handler pushes it otherwise,
     /// which looks the class and the method up and may push another
     /// callee, so the call it pushed is held to the one recorded after it
     /// ([`Emit::callee_guard`]), as php's code calls
@@ -263,9 +290,11 @@ impl Emit<'_> {
         plain: &PlainCall,
     ) -> Result<(), Abort> {
         let (slow, join) = self.split();
-        let scope = match line.imm {
-            Imm::Pair { function, class } => self.pair_guard(line, (function, class), slow)?,
-            _ => None,
+        let over = match line.imm {
+            Imm::Pair { function, class } => {
+                self.pair_guard(line, plain, (function, class), slow)?
+            }
+            _ => Over::default(),
         };
         let stack = self.stack()?;
         let header = self.header_of(plain)?;
@@ -301,13 +330,21 @@ impl Emit<'_> {
             self.b.ins().store(trusted(), zero, top, at(cell));
             self.b.ins().store(trusted(), zero, top, at(cell + 8));
         }
-        if let Some(class) = scope {
-            // `ScopeAt`'s half-word: the class's number inverted.
-            let word = self.b.ins().bnot(class);
-            (self.b.ins()).store(trusted(), word, top, at(L.called_scope()));
+        match over.scope {
+            Some(Scope::Number(class)) => {
+                // `ScopeAt`'s half-word: the class's number inverted.
+                let word = self.b.ins().bnot(class);
+                (self.b.ins()).store(trusted(), word, top, at(L.called_scope()));
+            }
+            Some(Scope::Word(word)) => {
+                (self.b.ins()).store(trusted(), word, top, at(L.called_scope()));
+            }
+            None => {}
         }
         if line.opcode == Opcode::InitMethodCall {
-            self.receive(line, top)?;
+            self.receive_of(line, top)?;
+        } else if let Some(this) = over.this {
+            self.receive(this, Taken::Lent, top);
         }
         self.b.ins().store(trusted(), top, stack, INNERMOST);
         // The record, then the table's length and the top.
@@ -360,13 +397,96 @@ impl Emit<'_> {
     /// runtime-cache slot before it pushes the call in place
     /// (`zend_jit_init_method_call`, `zend_jit_init_static_method_call`,
     /// `Z/ext/opcache/jit/zend_jit_ir.c:9025-9056`, `:9255-9265`): on to
-    /// `slow` unless the slot holds a pair whose callee is `function` and
-    /// whose class is the receiver's, or the published class the call
-    /// names; the class's number where the call's called scope is a
-    /// request-scoped class, which the push writes, none where its image
-    /// names it. The scope the slot was primed from is not compared:
-    /// [`tier::UnitView::hold_callee`] takes only a slot of an op array of
-    /// one scope that its own frame reads, so every frame primes it alike.
+    /// `slow` unless the slot holds a pair whose callee is `function`, by
+    /// its number, or by its record where it is a request-scoped class's
+    /// own method, compared with the record of the header the request laid
+    /// out for the call ([`PairCallee::Record`]), and whose class is the
+    /// receiver's, or the published class the call names; through `self` or `parent`, whose class the op array's scope
+    /// fixes, the class is not compared, as php reads `fbc` alone. What
+    /// the push writes past the image ([`Over`]): the class's number where
+    /// the call's called scope is a request-scoped class, the calling
+    /// frame's own called scope where `self` or `parent` forwards it, as
+    /// php takes `EX(This)`'s (`:9340-9358`), and the calling frame's
+    /// `$this` where the callee takes it, held to the class the trace
+    /// recorded, as php's `zend_jit_push_this_method_call_frame` holds it
+    /// to be an instance of the class named; nothing where the image
+    /// names it all. A frame with no called scope or no `$this`, and
+    /// `$this` of another class, are the handler's, which raises php's
+    /// `Error` where it is no instance. The scope the slot was primed
+    /// from is not compared: [`tier::UnitView::hold_callee`] takes only a
+    /// slot of an op array of one scope that its own frame reads, so
+    /// every frame primes it alike.
+    ///
+    /// A request-scoped class's own method, held by its record: a lazy
+    /// copy's, on an object of the copy, of a subclass whose slot's pair
+    /// names another class, and of an evaluated class whose method of the
+    /// same name is another, its static method through its name, and an
+    /// enum's on two cases, under force and where every guard fails once:
+    ///
+    /// ```php
+    /// class Getter { public $b = 1; }
+    /// eval('class Base extends Getter { }');
+    /// class Child extends Base { function get($v) { return $this->b + $v; } static function twice($v) { return $v + $v; } }
+    /// class Grand extends Child { }
+    /// eval('class Other { public $b = 100; function get($v) { return -$v; } }');
+    /// enum Suit { case Hearts; case Spades; function weight($v) { return $this === Suit::Hearts ? $v * 2 : $v; } }
+    /// function f($o, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o->get($i); } return $t; }
+    /// function s($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += Child::twice($i); } return $t; }
+    /// function c($e, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += $e->weight($i); } return $t; }
+    /// echo f(new Child, 30), " ", f(new Grand, 30), " ", f(new Other, 30), " ", f(new Child, 5), " ", s(30), " ", c(Suit::Hearts, 30), " ", c(Suit::Spades, 30), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 465 465 -435 15 870 870 435
+    /// ```
+    ///
+    /// ```php
+    /// class Getter { public $b = 1; }
+    /// eval('class Base extends Getter { }');
+    /// class Child extends Base { function get($v) { return $this->b + $v; } static function twice($v) { return $v + $v; } }
+    /// class Grand extends Child { }
+    /// eval('class Other { public $b = 100; function get($v) { return -$v; } }');
+    /// enum Suit { case Hearts; case Spades; function weight($v) { return $this === Suit::Hearts ? $v * 2 : $v; } }
+    /// function f($o, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o->get($i); } return $t; }
+    /// function s($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += Child::twice($i); } return $t; }
+    /// function c($e, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += $e->weight($i); } return $t; }
+    /// echo f(new Child, 30), " ", f(new Grand, 30), " ", f(new Other, 30), " ", f(new Child, 5), " ", s(30), " ", c(Suit::Hearts, 30), " ", c(Suit::Spades, 30), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 465 465 -435 15 870 870 435
+    /// ```
+    ///
+    /// Through `self` a static method forwarding `static`, and a method
+    /// taking `$this` through its class's name and through `parent`, from
+    /// an instance of the class the trace recorded, of a subclass, and of
+    /// no subclass, under force and where every guard fails once:
+    ///
+    /// ```php
+    /// class A { public $v = 1; static function f($x) { return static::class . $x; } function m($x) { return $this->v + $x; }
+    ///   static function selfs($n) { $s = ""; for ($i = 0; $i < $n; $i++) { $s = self::f($i); } return $s; }
+    ///   function named($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += A::m($i); } return $t; } }
+    /// class B extends A { public $v = 10; function p($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += parent::m($i); } return $t; } }
+    /// class X { function call($n) { $t = 0; for ($i = 0; $i < $n; $i++) { try { $t += A::m($i); } catch (Error $e) { return $e->getMessage(); } } return $t; } }
+    /// echo A::selfs(30), " ", B::selfs(30), " ", (new A)->named(30), " ", (new B)->named(30), " ", (new B)->p(30), "\n";
+    /// echo (new X)->call(3), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// A29 B29 465 735 735
+    /// Non-static method A::m() cannot be called statically
+    /// ```
+    ///
+    /// ```php
+    /// class A { public $v = 1; static function f($x) { return static::class . $x; } function m($x) { return $this->v + $x; }
+    ///   static function selfs($n) { $s = ""; for ($i = 0; $i < $n; $i++) { $s = self::f($i); } return $s; }
+    ///   function named($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += A::m($i); } return $t; } }
+    /// class B extends A { public $v = 10; function p($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += parent::m($i); } return $t; } }
+    /// class X { function call($n) { $t = 0; for ($i = 0; $i < $n; $i++) { try { $t += A::m($i); } catch (Error $e) { return $e->getMessage(); } } return $t; } }
+    /// echo A::selfs(30), " ", B::selfs(30), " ", (new A)->named(30), " ", (new B)->named(30), " ", (new B)->p(30), "\n";
+    /// echo (new X)->call(3), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// A29 B29 465 735 735
+    /// Non-static method A::m() cannot be called statically
+    /// ```
     ///
     /// `zend_lazy_class_load`'s copy of a class linked over one the request
     /// evaluated, whose method and static method are pushed in place, then
@@ -407,41 +527,131 @@ impl Emit<'_> {
     fn pair_guard(
         &mut self,
         line: &Line,
-        (function, class): (u32, PairClass),
+        plain: &PlainCall,
+        (function, class): (PairCallee, PairClass),
         slow: Block,
-    ) -> Result<Option<Value>, Abort> {
+    ) -> Result<Over, Abort> {
         let refuse = Refuse::To(slow);
         let place = match class {
             PairClass::Receiver => {
-                let (object, _) = receiver_of(line)?;
+                let object = receiver_of(line)?;
                 let obj = self.object(object)?;
                 self.cache_guard(line, (P.pair(), P.pair_class()), obj, refuse)?
             }
-            PairClass::Published(_) | PairClass::Named => {
-                self.cached_slot(line, P.pair(), refuse)?
+            PairClass::Published(_)
+            | PairClass::Named
+            | PairClass::Forwarded
+            | PairClass::This { .. } => self.cached_slot(line, P.pair(), refuse)?,
+        };
+        match function {
+            PairCallee::Number(function) => {
+                let callee = (self.b.ins()).load(I32, trusted(), place, at(P.pair_function()));
+                let other = self
+                    .b
+                    .ins()
+                    .icmp_imm_u(IntCC::NotEqual, callee, i64::from(function));
+                self.refuse_if(other, refuse)?;
+            }
+            PairCallee::Record => {
+                // The record of the header the request laid out for the
+                // call, read once the request is ready, so laid out.
+                let unready = self.unready()?;
+                self.refuse_if(unready, refuse)?;
+                let header = self.header_of(plain)?;
+                let cx = self
+                    .cx
+                    .ok_or_else(|| mismatch("a pair's record read before the entry"))?;
+                let images = self.b.ins().load(I64, trusted(), cx, IMAGES_AT);
+                let image = self.b.ins().load(I64, trusted(), images, header);
+                let laid = (self.b.ins()).load(I64, trusted(), image, at(L.callee() - L.header()));
+                let record = (self.b.ins()).load(I64, trusted(), place, at(P.pair_record()));
+                let other = self.b.ins().icmp(IntCC::NotEqual, record, laid);
+                self.refuse_if(other, refuse)?;
+            }
+        }
+        let named = match class {
+            PairClass::Published(class)
+            | PairClass::This {
+                named: Some(class), ..
+            } => Some(class),
+            _ => None,
+        };
+        if let Some(class) = named {
+            let held = (self.b.ins()).load(I32, trusted(), place, at(P.pair_class()));
+            let number = i64::from(tier::class_number(class));
+            let other = self.b.ins().icmp_imm_u(IntCC::NotEqual, held, number);
+            self.refuse_if(other, refuse)?;
+        }
+        match class {
+            PairClass::Published(_) => Ok(Over::default()),
+            PairClass::Receiver | PairClass::Named => {
+                let held = (self.b.ins()).load(I32, trusted(), place, at(P.pair_class()));
+                Ok(Over {
+                    scope: Some(Scope::Number(held)),
+                    this: None,
+                })
+            }
+            PairClass::Forwarded => {
+                // `static` of the calling frame, its `ScopeAt` as it
+                // stands; a frame with none is the handler's to refuse.
+                let room = self.room(line.frame)?;
+                let word = (self.b.ins()).load(I32, trusted(), room, at(L.called_scope()));
+                let none = self.b.ins().icmp_imm_u(IntCC::Equal, word, 0);
+                self.refuse_if(none, refuse)?;
+                Ok(Over {
+                    scope: Some(Scope::Word(word)),
+                    this: None,
+                })
+            }
+            PairClass::This { receiver, .. } => {
+                // `Z_TYPE(EX(This)) == IS_OBJECT` and of the class the
+                // trace recorded, which is an instance of the one named;
+                // any other `$this`, or none, is the handler's, which
+                // raises php's `Error` where it is no instance.
+                let room = self.room(line.frame)?;
+                let this = self.b.ins().load(I64, trusted(), room, at(L.this()));
+                let none = self.b.ins().icmp_imm_u(IntCC::Equal, this, 0);
+                self.refuse_if(none, refuse)?;
+                let of = self.b.ins().load(I32, trusted(), this, imm(Obj::CLASS_AT));
+                let number = i64::from(tier::class_number(receiver));
+                let other = self.b.ins().icmp_imm_u(IntCC::NotEqual, of, number);
+                self.refuse_if(other, refuse)?;
+                Ok(Over {
+                    scope: None,
+                    this: Some(this),
+                })
+            }
+        }
+    }
+
+    /// The receiver of method's call `line` pushed in place at `top`,
+    /// taken as [`Taken`] says: a temporary's moved out of its slot.
+    fn receive_of(&mut self, line: &Line, top: Value) -> Result<(), Abort> {
+        let object = receiver_of(line)?;
+        let this = self.object(object)?;
+        let taken = match object {
+            Object::This(_) => Taken::Lent,
+            Object::Value(value) => {
+                let slot = self.value(value)?.slot;
+                if self.is_temporary(slot)? {
+                    let (room, slot_at) = self.place(slot)?;
+                    let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+                    (self.b.ins()).store(trusted(), undef, room, slot_at + TYPE_AT);
+                    Taken::Moved
+                } else {
+                    Taken::Shared
+                }
             }
         };
-        let callee = (self.b.ins()).load(I32, trusted(), place, at(P.pair_function()));
-        let other = self
-            .b
-            .ins()
-            .icmp_imm_u(IntCC::NotEqual, callee, i64::from(function));
-        self.refuse_if(other, refuse)?;
-        let held = (self.b.ins()).load(I32, trusted(), place, at(P.pair_class()));
-        match class {
-            PairClass::Published(class) => {
-                let number = i64::from(tier::class_number(class));
-                let other = self.b.ins().icmp_imm_u(IntCC::NotEqual, held, number);
-                self.refuse_if(other, refuse)?;
-                Ok(None)
-            }
-            PairClass::Receiver | PairClass::Named => Ok(Some(held)),
-        }
+        self.receive(this, taken, top);
+        Ok(())
     }
 
     /// The receiver of a method's call pushed in place at `top`, as
     /// `zend_jit_push_call_frame` writes it (`Z/ext/opcache/jit/zend_jit_ir.c:8657-8678`):
     /// `Z_PTR(call->This)`, and over a variable one owner more of it with
+    /// `ZEND_CALL_RELEASE_THIS`; over a temporary, `(new D)->m()`, its
+    /// owner moved out of the slot, which is left undefined, with
     /// `ZEND_CALL_RELEASE_THIS`; over `$this` the frame's receiver lent,
     /// pinned as [`php_heap::Obj::pin`] pins it, which the leave lets go
     /// ([`Emit::free_this`]). An object of another class leaves at the
@@ -454,10 +664,12 @@ impl Emit<'_> {
     /// function f($os, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $o = $os[$i % 3]; $t += $o->m($i); } return $t; }
     /// class C { public $o; function m() { $this->o = null; return 1; } function __destruct() { echo "c "; } }
     /// function g($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $c = new C; $c->o = $c; $t += $c->m(); unset($c); } return $t; }
-    /// echo f([new A, new A, new B], 30), " ", g(3), "\n";
+    /// class D { function m($x) { return $x + 1; } function __destruct() { echo "d "; } }
+    /// function h($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += (new D)->m($i); } return $t; }
+    /// echo f([new A, new A, new B], 30), " ", g(3), " ", h(3), "\n";
     /// ```
     /// ```expect regime=jit-force process
-    /// 1500 c c c 3
+    /// 1500 c c c 3 d d d 6
     /// ```
     ///
     /// ```php
@@ -466,16 +678,20 @@ impl Emit<'_> {
     /// function f($os, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $o = $os[$i % 3]; $t += $o->m($i); } return $t; }
     /// class C { public $o; function m() { $this->o = null; return 1; } function __destruct() { echo "c "; } }
     /// function g($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $c = new C; $c->o = $c; $t += $c->m(); unset($c); } return $t; }
-    /// echo f([new A, new A, new B], 30), " ", g(3), "\n";
+    /// class D { function m($x) { return $x + 1; } function __destruct() { echo "d "; } }
+    /// function h($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += (new D)->m($i); } return $t; }
+    /// echo f([new A, new A, new B], 30), " ", g(3), " ", h(3), "\n";
     /// ```
     /// ```expect regime=jit-exit-fuzz process
-    /// 1500 c c c 3
+    /// 1500 c c c 3 d d d 6
     /// ```
-    fn receive(&mut self, line: &Line, top: Value) -> Result<(), Abort> {
-        let (object, owned) = receiver_of(line)?;
-        let this = self.object(object)?;
+    fn receive(&mut self, this: Value, taken: Taken, top: Value) {
         self.b.ins().store(trusted(), this, top, at(L.this()));
-        if owned {
+        if let Taken::Moved = taken {
+            let info = self.b.ins().load(I32, trusted(), top, at(L.info()));
+            let info = self.b.ins().bor_imm_u(info, i64::from(L.release_this()));
+            self.b.ins().store(trusted(), info, top, at(L.info()));
+        } else if let Taken::Shared = taken {
             // `GC_ADDREF`, the count kept below the bit above it.
             let count = self.b.ins().load(I32, trusted(), this, COUNT_AT);
             let bits = self.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
@@ -498,6 +714,72 @@ impl Emit<'_> {
             let word = self.b.ins().iadd(word, room);
             self.b.ins().store(trusted(), word, this, PINS_AT);
         }
+    }
+
+    /// The checks of a call's arguments made in place, after its frame is
+    /// the callee's and before it stands past its `RECV`s, as php's trace
+    /// compiles `zend_jit_recv` and `zend_jit_verify_arg_type`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:10750-10873`): an argument whose
+    /// type its parameter's mask holds goes on; one it does not is handed,
+    /// cold, to its own `RECV`'s handler through [`Kernel::Handle`], php's
+    /// `zend_jit_verify_arg_slow`, which coerces it where it stands or
+    /// throws from the callee's frame, stood at that `RECV`, the caller at
+    /// its call; the call goes on in place either way it did not throw.
+    /// What the coercion runs, an error handler or `__toString`, writes
+    /// nothing the trace holds in a register, as no kernel's user code
+    /// does (`Builder::clobber`). A call whose argument its `RECV` coerces,
+    /// one whose `RECV_INIT`'s is checked, and one whose error handler
+    /// throws from the coercion and whose `TypeError` a caller catches,
+    /// with the caller's registers kept across them:
+    ///
+    /// ```php
+    /// function twice(int $n) { return $n * 2; }
+    /// function opt(int $n, int $m = 3) { return $n + $m; }
+    /// function f($k) { $t = 0; $x = 1.5; for ($i = 0; $i < $k; $i++) { $t += twice($i % 2 ? "4" : $i) + opt("1", $i) + $x; } return $t; }
+    /// function g($k) { $t = 0; $x = 2; for ($i = 0; $i < $k; $i++) { try { $t += twice($i == 3 ? [] : $i) + $x; } catch (TypeError $e) { $t += 100; } } return $t; }
+    /// set_error_handler(function ($no, $msg) { throw new Exception($msg); });
+    /// function h($k) { $t = 0; for ($i = 0; $i < $k; $i++) { try { $t += twice($i == 4 ? 1.5 : $i); } catch (Exception $e) { echo $e->getMessage(), "\n"; } } return $t; }
+    /// echo f(8), " ", g(6), "\n", h(6), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 104 134
+    /// Implicit conversion from float 1.5 to int loses precision
+    /// 22
+    /// ```
+    ///
+    /// ```php
+    /// function twice(int $n) { return $n * 2; }
+    /// function opt(int $n, int $m = 3) { return $n + $m; }
+    /// function f($k) { $t = 0; $x = 1.5; for ($i = 0; $i < $k; $i++) { $t += twice($i % 2 ? "4" : $i) + opt("1", $i) + $x; } return $t; }
+    /// function g($k) { $t = 0; $x = 2; for ($i = 0; $i < $k; $i++) { try { $t += twice($i == 3 ? [] : $i) + $x; } catch (TypeError $e) { $t += 100; } } return $t; }
+    /// set_error_handler(function ($no, $msg) { throw new Exception($msg); });
+    /// function h($k) { $t = 0; for ($i = 0; $i < $k; $i++) { try { $t += twice($i == 4 ? 1.5 : $i); } catch (Exception $e) { echo $e->getMessage(), "\n"; } } return $t; }
+    /// echo f(8), " ", g(6), "\n", h(6), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 104 134
+    /// Implicit conversion from float 1.5 to int loses precision
+    /// 22
+    /// ```
+    fn verify_args(
+        &mut self,
+        line: &Line,
+        (room, func): (Value, Value),
+        checks: ArgChecks,
+    ) -> Result<(), Abort> {
+        for (arg, mask) in checks.each() {
+            let taken = self.takes(room, arg, mask)?;
+            let (other, on) = (self.b.create_block(), self.b.create_block());
+            self.b.set_cold_block(other);
+            self.b.ins().brif(taken, on, &[], other, &[]);
+            self.b.switch_to_block(other);
+            self.b.seal_block(other);
+            let recv = self.b.ins().iconst(I32, i64::from(arg));
+            self.call(Kernel::Handle, &[room, recv, func], leave_of(line))?;
+            self.b.ins().jump(on, &[]);
+            self.b.switch_to_block(on);
+            self.b.seal_block(on);
+        }
         Ok(())
     }
 
@@ -506,8 +788,9 @@ impl Emit<'_> {
     /// `i_init_func_execute_data` inline and `Request::enter_call` writes
     /// it: the flags, the opline past the prologue, the callee's own cache,
     /// the slot of the caller's that takes the return and the caller
-    /// written over the pushed header, and the caller stood at the call,
-    /// php's `SET_EX_OPLINE`. Where the interrupt is raised, which the
+    /// written over the pushed header, the caller stood at the call,
+    /// php's `SET_EX_OPLINE`, and the arguments checked before the opline
+    /// is written ([`Emit::verify_args`]). Where the interrupt is raised, which the
     /// callee's activation tests, or the callee's cache is not laid down,
     /// [`Kernel::Call`] makes the call; where the callee serves a prologue
     /// it does on every pass.
@@ -537,13 +820,8 @@ impl Emit<'_> {
         let raised = self.b.ins().load(I8, trusted(), interrupt, 0);
         let raised = self.b.ins().icmp_imm_s(IntCC::NotEqual, raised, 0);
         let unready = self.unready()?;
-        let mut refused = self.b.ins().bor(raised, unready);
+        let refused = self.b.ins().bor(raised, unready);
         let room = self.b.use_var(var);
-        for (arg, mask) in checks.each() {
-            let taken = self.takes(room, arg, mask)?;
-            let other = self.b.ins().icmp_imm_s(IntCC::Equal, taken, 0);
-            refused = self.b.ins().bor(refused, other);
-        }
         let (slow, join) = self.split();
         self.divert_if(refused, slow);
         self.copy_defaults(room, defaults)?;
@@ -553,7 +831,6 @@ impl Emit<'_> {
         let flags = self.b.ins().bor_imm_u(kept, set);
         self.b.ins().store(trusted(), flags, room, at(L.info()));
         let words = [
-            (L.opline(), activation.opline()),
             (L.cache(), activation.cache()),
             (
                 L.returns_to(),
@@ -571,10 +848,12 @@ impl Emit<'_> {
         let from = self.room(line.frame)?;
         let opline = self.b.ins().iconst(I32, i64::from(line.opline.0));
         self.b.ins().store(trusted(), opline, from, at(L.opline()));
+        let func = self.func_of(callee)?;
+        self.verify_args(line, (room, func), checks)?;
+        let entry = self.b.ins().iconst(I32, i64::from(activation.opline()));
+        self.b.ins().store(trusted(), entry, room, at(L.opline()));
         // Where the interpreter stands: in the callee, at its entry.
         let none = self.b.ins().iconst(I64, 0);
-        let func = self.func_of(callee)?;
-        let entry = self.b.ins().iconst(I32, i64::from(activation.opline()));
         let top = self.b.ins().load(I64, trusted(), stack, TOP);
         let left = self.left_past(stack, top);
         self.stand([room, none, func, entry, left]);

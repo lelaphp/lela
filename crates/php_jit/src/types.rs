@@ -441,12 +441,27 @@ pub(crate) enum Imm {
     /// before it pushes (`zend_jit_init_method_call`,
     /// `zend_jit_init_static_method_call`,
     /// `Z/ext/opcache/jit/zend_jit_ir.c:9025-9056`, `:9255-9265`): the
-    /// callee's number the pair is held to, a published method's
-    /// ([`php_engine::tier::CalleeSlot::function`]), and the class.
+    /// callee the pair is held to, and the class.
     Pair {
-        function: u32,
+        function: PairCallee,
         class: PairClass,
     },
+}
+
+/// The callee the pair in a call's runtime-cache slot is held to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PairCallee {
+    /// A published method's number, the same in every request of the
+    /// epoch ([`php_engine::tier::CalleeSlot::function`]), compared as a
+    /// constant.
+    Number(u32),
+    /// A request-scoped class's own method, numbered by each request for
+    /// itself: the pair's record compared with the record of the header
+    /// the request laid out for the call, which names the method the
+    /// request found for the class's name over the op array the trace
+    /// recorded, as php's `zend_jit_func_guard` holds a function that is
+    /// not immutable by its opcodes (`Z/ext/opcache/jit/zend_jit_ir.c:8999-9024`).
+    Record,
 }
 
 /// The class the pair in a call's runtime-cache slot is held to, and so
@@ -466,6 +481,25 @@ pub(crate) enum PairClass {
     /// whatever its request resolved the name to: the called scope
     /// written from the pair, as php reads it from the slot.
     Named,
+    /// The class `self` or `parent` names, which the scope of the op array
+    /// fixes, so the pair's class is not compared, as php reads `fbc`
+    /// alone from the slot of an `UNUSED` class operand; a static callee,
+    /// whose called scope is the calling frame's own, forwarded, as php's
+    /// `zend_jit_init_static_method_call` takes `EX(This)`'s
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:9340-9358`).
+    Forwarded,
+    /// A callee that takes `$this`, called by a static call's syntax: the
+    /// calling frame's `$this`, lent, held to be of `receiver`, a
+    /// published class and the call's called scope, as php's
+    /// `zend_jit_push_this_method_call_frame` passes `This` where it is an
+    /// instance of the class named (`Z/ext/opcache/jit/zend_jit_helpers.c:262-273`);
+    /// and the pair's class compared with `named` where the opline names a
+    /// published class, and with nothing where `self` or `parent` or a
+    /// request-scoped name names it.
+    This {
+        named: Option<ClassId>,
+        receiver: ClassId,
+    },
 }
 
 /// Where a property opline compiled in place finds its declared slot.

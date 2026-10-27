@@ -1,0 +1,16 @@
+start loop
+root e1
+op e1 11 long long - taken
+op e1 4 - - - -
+op e1 6 object#41 - - -
+init e2
+op e1 7 long - - -
+op e1 8 - - - -
+enter e2
+op e2 1 object#41 - - -
+op e2 2 long long - -
+op e2 3 long - - -
+back
+op e1 9 long long - -
+op e1 10 long - - -
+stop loop

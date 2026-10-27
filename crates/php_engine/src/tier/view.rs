@@ -495,7 +495,8 @@ impl PropertySlot {
 /// together, from one op array ([`UnitView::hold_callee`]): the pair the
 /// handler wrote into the opline's runtime-cache slot,
 /// `CACHE_POLYMORPHIC_PTR(opline->result.num, ce, fbc)`, a published
-/// method's, which compiled code holds the slot of the request it runs in
+/// method's or a request-scoped class's own, which compiled code holds
+/// the slot of the request it runs in
 /// to before it pushes the call in place, as php's code reads
 /// `CACHED_PTR(opline->result.num)` and the callee past it
 /// (`zend_jit_init_method_call`, `zend_jit_init_static_method_call`,
@@ -521,10 +522,13 @@ impl CalleeSlot {
 
     /// The callee's number as the slot holds it, a published method's,
     /// the same in every request of the epoch
-    /// ([`PlaceLayout::pair_function`](super::PlaceLayout::pair_function)).
+    /// ([`PlaceLayout::pair_function`](super::PlaceLayout::pair_function));
+    /// none for a request-scoped class's own method, numbered by each
+    /// request for itself, which compiled code holds the slot to by the
+    /// callee's record ([`PlaceLayout::pair_record`](super::PlaceLayout::pair_record)).
     #[must_use]
-    pub fn function(self) -> u32 {
-        self.function.0
+    pub fn function(self) -> Option<u32> {
+        self.function.published_number()
     }
 
     /// Whether the callee takes `$this`, php's `ZEND_ACC_STATIC` clear.
@@ -751,15 +755,14 @@ impl UnitView {
 
     /// Take the class and the callee the `INIT_METHOD_CALL` over a
     /// constant name, or the `INIT_STATIC_METHOD_CALL` over a constant
-    /// class and name, at `at` of the op array `frame` serves wrote into
+    /// name and a class a constant, `self` or `parent` names, at `at` of the op array `frame` serves wrote into
     /// its runtime-cache slot, as the handler wrote it on this pass
     /// ([`Request::cached_callee`]), so a trace that recorded the call
     /// pushes it in place where the slot of the request it runs in holds
     /// the same pair. Taken only where every frame that runs the op array
-    /// reads the pair one way, as [`UnitView::hold_place`] takes a place,
-    /// and where the callee is a published method, whose number is the
-    /// same in every request; `false`, taking nothing, for any other, and
-    /// where the slot holds no pair.
+    /// reads the pair one way, as [`UnitView::hold_place`] takes a place;
+    /// `false`, taking nothing, for any other, and where the slot holds no
+    /// pair.
     pub fn hold_callee(&mut self, req: &Request, frame: FrameRef, at: OplineIdx) -> bool {
         let Some((f, code)) = scoped_code(req, frame) else {
             return false;
@@ -770,7 +773,7 @@ impl UnitView {
         let named = match op.opcode {
             Opcode::InitMethodCall => op.op2_type == OperandKind::Const,
             Opcode::InitStaticMethodCall => {
-                op.op1_type == OperandKind::Const && op.op2_type == OperandKind::Const
+                op.op2_type == OperandKind::Const && crate::exec::class_fixed(op.op1_type, op.op1)
             }
             _ => false,
         };
@@ -790,9 +793,6 @@ impl UnitView {
         else {
             return false;
         };
-        if function.published_number().is_none() {
-            return false;
-        }
         let pair = CalleeSlot {
             func: f,
             at,
