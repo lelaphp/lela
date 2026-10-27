@@ -5921,14 +5921,13 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // from this frame's scope ([`Request::cached_callee`]): for a constant
     // class, where the slot was found holding a pair; for any other,
     // whichever pair it holds, php's `CACHED_PTR(opline->result.num) == ce`.
-    let cached_callee = match (op.op1_type, op.op2_type, primed) {
-        (OperandKind::Const, OperandKind::Const, Cached::ClassAndCallee { .. }) => {
-            req.cached_callee(frame, slot, class)
-        }
-        (op1, OperandKind::Const, _) if op1 != OperandKind::Const => {
-            req.cached_callee(frame, slot, class)
-        }
-        _ => None,
+    // One read of the pair, so the read stays inline in the handler.
+    let pair_read = op.op2_type == OperandKind::Const
+        && (op.op1_type != OperandKind::Const || matches!(primed, Cached::ClassAndCallee { .. }));
+    let cached_callee = if pair_read {
+        req.cached_callee(frame, slot, class)
+    } else {
+        None
     };
     if let Some((function, instance)) = cached_callee {
         return static_call_frame(req, frame, op, class, (function, instance));
