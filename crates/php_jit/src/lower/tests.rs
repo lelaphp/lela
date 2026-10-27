@@ -1518,3 +1518,64 @@ echo f(), \"\\n\";";
         assert!(root.is_some_and(|l| l.ends_with(line)), "{level}: {lines}");
     }
 }
+
+/// A child's `get` hook calling its parent's, read in a loop, under
+/// `opcache.optimization_level=0`: the hook's trace stops at the call into
+/// the parent's with `property hook call`, and the parent's and the
+/// return trace past the call are php's, as the pinned php writes them
+/// (#3577). The loop's exit numbers wait on the analysis's guards (#3575),
+/// so the lines past the fourth trace are not held here.
+#[test]
+fn a_parent_property_hooks_call_stops_the_trace_that_reaches_it() {
+    let served = testing::serve::<Lane>(
+        &[
+            ("opcache.enable_cli", "1"),
+            ("opcache.jit", "tracing"),
+            ("opcache.jit_buffer_size", "64M"),
+            ("jit.compile", "inline"),
+            ("opcache.optimization_level", "0"),
+            ("opcache.jit_debug", "258048"),
+            ("opcache.jit_hot_loop", "1"),
+            ("opcache.jit_hot_func", "1"),
+            ("opcache.jit_hot_return", "1"),
+            ("opcache.jit_hot_side_exit", "1"),
+        ],
+        "class P { public int $x = 2 { get => $this->x + 1; } }
+class C extends P {
+    public int $x = 2 {
+        get => parent::$x::get() * 2;
+    }
+}
+function f($c) { $s = 0; for ($i = 0; $i < 5; $i++) { $s += $c->x; } return $s; }
+echo f(new C), \"\\n\";",
+    );
+    let lines = String::from_utf8_lossy(&served.stderr);
+    assert_eq!(testing::stdout(&served), "30\n", "{lines}");
+    let traced: Vec<&str> = lines
+        .lines()
+        .map(|line| line.split_once(" /").map_or(line, |(head, _)| head))
+        .take(16)
+        .collect();
+    assert_eq!(
+        traced,
+        [
+            "---- TRACE 1 start (enter) $main()",
+            "---- TRACE 1 abort (inner loop)",
+            "---- TRACE 1 start (loop) f()",
+            "---- TRACE 1 stop (loop)",
+            "---- TRACE 1 compiled",
+            "",
+            "---- TRACE 2 start (enter) C::$x::get()",
+            "---- TRACE 2 stop (property hook call)",
+            "---- TRACE 2 compiled",
+            "",
+            "---- TRACE 3 start (enter) P::$x::get()",
+            "---- TRACE 3 stop (return)",
+            "---- TRACE 3 compiled",
+            "",
+            "---- TRACE 4 start (return) C::$x::get()",
+            "---- TRACE 4 stop (return)",
+        ],
+        "{lines}"
+    );
+}

@@ -1338,6 +1338,18 @@ impl UnitView {
         Some(self.epoch.func(f)?.is_main())
     }
 
+    /// Whether the op array `f` names is a property hook's body, php's
+    /// `op_array.prop_info`, which php's recorder stops at a call into
+    /// (`ZEND_JIT_TRACE_STOP_PROP_HOOK_CALL`); none unless
+    /// [`UnitView::hold`] accepted it.
+    #[must_use]
+    pub fn is_hook(&self, f: FuncRef) -> Option<bool> {
+        if !self.funcs.contains(&f) {
+            return None;
+        }
+        Some(self.epoch.func(f)?.is_hook())
+    }
+
     /// Whether a frame that runs the op array `f` names may have a
     /// receiver, `EX(This)`, which its leave gives up: a method's, a
     /// closure's, a hook's and a file's own code's, which an include

@@ -1385,6 +1385,50 @@ impl<'p> Recorder<'p> {
     /// ---- TRACE 4 compiled
     /// ```
     ///
+    /// A call into a property hook's body stops with `PropHookCall`, as
+    /// php's recorder stops at a callee whose op array has `prop_info`
+    /// (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1129-1132`; #3577): the
+    /// child's hook's trace stops at its call to its parent's, and the
+    /// return trace past the call starts in the child's:
+    ///
+    /// ```php
+    /// class P { public int $x = 2 { get => $this->x + 1; } }
+    /// class C extends P {
+    ///     public int $x = 2 {
+    ///         get => parent::$x::get() * 2;
+    ///     }
+    /// }
+    /// function f($c, $n) { $s = 0; while ($n-- > 0) { $s += $c->x; } return $s; }
+    /// echo f(new C, 5), "\n";
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 30
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:9
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %SCRATCH%/witness.php:8
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    /// ---- TRACE 2 start (enter) C::$x::get() %SCRATCH%/witness.php:5
+    /// ---- TRACE 2 stop (property hook call)
+    /// ---- TRACE 2 compiled
+    ///
+    /// ---- TRACE 3 start (enter) P::$x::get() %SCRATCH%/witness.php:2
+    /// ---- TRACE 3 stop (return)
+    /// ---- TRACE 3 compiled
+    ///
+    /// ---- TRACE 4 start (return) C::$x::get() %SCRATCH%/witness.php:5
+    /// ---- TRACE 4 stop (return)
+    /// ---- TRACE 4 compiled
+    ///
+    ///      TRACE 1 exit 4 f() %SCRATCH%/witness.php:8
+    /// ---- TRACE 5 start (side trace 1/4) f() %SCRATCH%/witness.php:8
+    /// ---- TRACE 5 stop (return)
+    /// ---- TRACE 5 compiled
+    /// ```
+    ///
     /// Calls into an `eval`'d function, one taking its argument by
     /// reference, and an evaluated class's method, from a loop whose trace
     /// stops at each, under force and where every guard fails once:
@@ -1422,6 +1466,9 @@ impl<'p> Recorder<'p> {
         };
         if self.level > MAX_CALL_DEPTH {
             return Went::Stopped(Stop::TooDeep);
+        }
+        if view.is_hook(entered) == Some(true) {
+            return Went::Stopped(Stop::PropHookCall);
         }
         self.events.push(Event::Enter { func: entered });
         if self.count(1) {
