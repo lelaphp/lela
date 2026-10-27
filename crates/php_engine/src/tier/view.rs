@@ -586,6 +586,13 @@ pub struct UnitView {
     /// The declarations of the engine's own classes bound for the
     /// analysis, which the epoch does not keep ([`UnitView::class_decl`]).
     engine_decls: Vec<(ClassId, ClassDecl)>,
+    /// The request-scoped classes bound for the analysis, each's linked
+    /// record and declaration as the request linked it, which the epoch
+    /// does not hold ([`UnitView::hold_own`]).
+    own: Vec<(ClassId, LinkedClass<ClassId>, ClassDecl)>,
+    /// The op arrays whose analysis binds one of `own`
+    /// ([`UnitView::binds_request_class`]).
+    request_bound: Vec<FuncRef>,
 }
 
 /// What [`UnitView::declaration`] reads of an op array: the declaration
@@ -626,6 +633,8 @@ impl UnitView {
             scopes: Vec::new(),
             related: Vec::new(),
             engine_decls: Vec::new(),
+            own: Vec::new(),
+            request_bound: Vec::new(),
         }
     }
 
@@ -658,7 +667,10 @@ impl UnitView {
     /// declared type names, which bind whatever the file
     /// (`zend_convert_type`). Each bound class is held with its parents,
     /// so the analysis reads them on a thread with no request. A class
-    /// only the request holds binds nothing.
+    /// only the request holds binds as it stands in the request, as
+    /// php's `op_array->scope` and `EG(class_table)` name the request's, and
+    /// marks the op array's analysis as the request's
+    /// ([`UnitView::binds_request_class`]).
     fn bind_names(&mut self, req: &Request, f: FuncRef) {
         let epoch = self.epoch.clone();
         let Some(func) = epoch.func(f) else {
@@ -676,6 +688,7 @@ impl UnitView {
             && self.relate(req, scope)
         {
             self.scopes.push((f, scope));
+            self.mark_own(f, scope);
         }
         for name in body
             .literals
@@ -693,6 +706,7 @@ impl UnitView {
             if own && self.relate(req, class) {
                 self.named
                     .push((f, name.to_ascii_lowercase().into_boxed_slice(), class));
+                self.mark_own(f, class);
             }
         }
         let mut types = Vec::new();
@@ -740,12 +754,13 @@ impl UnitView {
     /// Hold class `c` for the analysis with its parents, the engine's
     /// declaration of it where it is one of the engine's own, and the
     /// engine's classes its properties' and constants' types name;
-    /// `false` where it is not shared ([`UnitView::hold_class`]).
+    /// `false` where the request has not linked it
+    /// ([`UnitView::hold_class`], [`UnitView::hold_own`]).
     fn relate(&mut self, req: &Request, c: ClassId) -> bool {
         if self.related.iter().any(|(class, _)| *class == c) {
             return true;
         }
-        if !self.hold_class(req, c) {
+        if !self.hold_class(req, c) && !self.hold_own(req, c) {
             return false;
         }
         let at = self.related.len();
@@ -767,6 +782,38 @@ impl UnitView {
             *held = Some(parent);
         }
         true
+    }
+
+    /// Hold the request-scoped class `c` for the analysis as the request
+    /// linked it, its linked record and declaration copied, since no
+    /// other request reads it; `false` for a shared one and one the
+    /// request has not linked.
+    fn hold_own(&mut self, req: &Request, c: ClassId) -> bool {
+        if !self.epoch.of(req) || c.is_published() {
+            return false;
+        }
+        let (Some(linked), Some(decl)) = (req.linked_class(c), req.symbols().class_decl(c)) else {
+            return false;
+        };
+        self.own.push((c, linked.clone(), decl.clone()));
+        true
+    }
+
+    /// Mark the analysis of `f` as the request's where `c`, a class it
+    /// binds, is held for the request alone.
+    fn mark_own(&mut self, f: FuncRef, c: ClassId) {
+        if self.own.iter().any(|(class, ..)| *class == c) && !self.request_bound.contains(&f) {
+            self.request_bound.push(f);
+        }
+    }
+
+    /// Whether the analysis of the op array `f` names binds a class only
+    /// the request holds, its declaring class or one it names: what it
+    /// learns is this request's, so it is built anew at each trace's
+    /// build, as php builds every one, and kept for no other.
+    #[must_use]
+    pub fn binds_request_class(&self, f: FuncRef) -> bool {
+        self.request_bound.contains(&f)
     }
 
     /// `zend_flf_functions` by name, as the dump of an op array the view
@@ -1141,6 +1188,9 @@ impl UnitView {
     /// bind.
     #[must_use]
     pub fn class_decl(&self, c: ClassId) -> Option<&ClassDecl> {
+        if let Some((.., decl)) = self.own.iter().find(|(class, ..)| *class == c) {
+            return Some(decl);
+        }
         if !self.classes.contains(&c) {
             return None;
         }
@@ -1154,6 +1204,9 @@ impl UnitView {
     /// [`UnitView::hold_class`] accepted it.
     #[must_use]
     pub fn class(&self, c: ClassId) -> Option<&LinkedClass<ClassId>> {
+        if let Some((_, linked, _)) = self.own.iter().find(|(class, ..)| *class == c) {
+            return Some(linked);
+        }
         if !self.classes.contains(&c) {
             return None;
         }

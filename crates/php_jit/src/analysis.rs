@@ -2,9 +2,11 @@
 //! (ADR-0015, `jit-design.md` §4.6): `php_ssa`'s CFG, DFG, SSA and the
 //! types and ranges inferred over them, asked for where
 //! `zend_jit_trace_build_tssa` builds them, for the op arrays it builds
-//! them for, built once per op array of the epoch and kept in its table,
-//! and written under `ZEND_JIT_DEBUG_SSA` at each trace's build, as php
-//! writes them each time it builds them anew.
+//! them for, built once per op array of the epoch and kept in its table
+//! (built anew at each build where it binds a class only the request
+//! holds, as php builds every one), and written under
+//! `ZEND_JIT_DEBUG_SSA` at each trace's build, as php writes them each
+//! time it builds them anew.
 //!
 //! Nothing in the trace reads the analysis yet (#3575); what a call returns
 //! is typed as php types an opline it knows nothing of until the analysis
@@ -305,9 +307,12 @@ pub(crate) fn build(
             continue;
         };
         let table = Bound { view, f };
-        let kept = analyses.get_or_build(f, || {
-            php_ssa::analyse(&function, &table, level).map(Arc::new)
-        });
+        let analyse = || php_ssa::analyse(&function, &table, level).map(Arc::new);
+        let kept = if view.binds_request_class(f) {
+            analyse()
+        } else {
+            analyses.get_or_build(f, analyse)
+        };
         if dump && let Some(analysis) = kept {
             let mut written = Vec::new();
             analysis.dump(&mut written, &function, &table, view.frameless_names());
