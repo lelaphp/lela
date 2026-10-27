@@ -1,0 +1,2868 @@
+# What php's optimizer knows an internal function returns beyond its
+# declared type: Zend/Optimizer/zend_func_infos.h's func_infos[], one
+# row per F1/FN, by scripts/extract_func_infos.py. Not edited by hand.
+version = "php-8.5.12"
+rows = 563
+
+[[function]]
+name = "clone"
+count = "1"
+types = ["OBJECT"]
+
+[[function]]
+name = "zend_version"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "func_get_args"
+count = "n"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_ANY"]
+
+[[function]]
+name = "get_class_vars"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "get_class_methods"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "get_included_files"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "set_error_handler"
+count = "n"
+types = ["STRING", "ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "ARRAY_OF_OBJECT", "OBJECT", "NULL"]
+
+[[function]]
+name = "set_exception_handler"
+count = "n"
+types = ["STRING", "ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "ARRAY_OF_OBJECT", "OBJECT", "NULL"]
+
+[[function]]
+name = "get_declared_classes"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "get_declared_traits"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "get_declared_interfaces"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "get_defined_functions"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ARRAY"]
+
+[[function]]
+name = "get_defined_vars"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "get_resource_type"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "get_loaded_extensions"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "get_defined_constants"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ANY"]
+
+[[function]]
+name = "debug_backtrace"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_ARRAY"]
+
+[[function]]
+name = "get_extension_funcs"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "gc_status"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_DOUBLE", "ARRAY_OF_FALSE", "ARRAY_OF_TRUE"]
+
+[[function]]
+name = "bcadd"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "bcsub"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "bcmul"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "bcdiv"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "bcmod"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "bcdivmod"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "bcpowmod"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "bcpow"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "bcsqrt"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "bcfloor"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "bcceil"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "bcround"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "bzopen"
+count = "n"
+types = ["RESOURCE", "FALSE"]
+
+[[function]]
+name = "bzerror"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "cal_from_jd"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "ARRAY_OF_NULL"]
+
+[[function]]
+name = "cal_info"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY"]
+
+[[function]]
+name = "curl_copy_handle"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "curl_error"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "curl_escape"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "curl_unescape"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "curl_file_create"
+count = "1"
+types = ["OBJECT"]
+
+[[function]]
+name = "curl_init"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "curl_multi_info_read"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_OBJECT", "FALSE"]
+
+[[function]]
+name = "curl_multi_init"
+count = "1"
+types = ["OBJECT"]
+
+[[function]]
+name = "curl_multi_strerror"
+count = "1"
+types = ["STRING", "NULL"]
+
+[[function]]
+name = "curl_share_init"
+count = "1"
+types = ["OBJECT"]
+
+[[function]]
+name = "curl_share_strerror"
+count = "1"
+types = ["STRING", "NULL"]
+
+[[function]]
+name = "curl_share_init_persistent"
+count = "1"
+types = ["OBJECT"]
+
+[[function]]
+name = "curl_strerror"
+count = "1"
+types = ["STRING", "NULL"]
+
+[[function]]
+name = "curl_version"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY", "FALSE"]
+
+[[function]]
+name = "date"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "gmdate"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "strftime"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "gmstrftime"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "localtime"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_LONG"]
+
+[[function]]
+name = "getdate"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "date_create"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "date_create_immutable"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "date_create_from_format"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "date_create_immutable_from_format"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "date_parse"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ANY"]
+
+[[function]]
+name = "date_parse_from_format"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ANY"]
+
+[[function]]
+name = "date_get_last_errors"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_ARRAY", "FALSE"]
+
+[[function]]
+name = "date_format"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "date_timezone_get"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "date_diff"
+count = "1"
+types = ["OBJECT"]
+
+[[function]]
+name = "timezone_open"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "timezone_name_get"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "timezone_name_from_abbr"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "timezone_transitions_get"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_ARRAY", "FALSE"]
+
+[[function]]
+name = "timezone_location_get"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_DOUBLE", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "timezone_identifiers_list"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "timezone_abbreviations_list"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ARRAY"]
+
+[[function]]
+name = "timezone_version_get"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "date_interval_create_from_date_string"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "date_interval_format"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "date_default_timezone_get"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "date_sunrise"
+count = "1"
+types = ["STRING", "LONG", "DOUBLE", "FALSE"]
+
+[[function]]
+name = "date_sunset"
+count = "1"
+types = ["STRING", "LONG", "DOUBLE", "FALSE"]
+
+[[function]]
+name = "date_sun_info"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_FALSE", "ARRAY_OF_TRUE", "ARRAY_OF_LONG"]
+
+[[function]]
+name = "dba_key_split"
+count = "n"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "dba_handlers"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "dba_list"
+count = "n"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "enchant_broker_list_dicts"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_ARRAY"]
+
+[[function]]
+name = "enchant_broker_describe"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_ARRAY"]
+
+[[function]]
+name = "enchant_dict_suggest"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "enchant_dict_describe"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "exif_tagname"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "exif_read_data"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "FALSE"]
+
+[[function]]
+name = "exif_thumbnail"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "finfo_open"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "finfo_file"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "finfo_buffer"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "mime_content_type"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "filter_input_array"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF", "FALSE", "NULL"]
+
+[[function]]
+name = "filter_var_array"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF", "FALSE", "NULL"]
+
+[[function]]
+name = "filter_list"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "ftp_raw"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "NULL"]
+
+[[function]]
+name = "ftp_nlist"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "ftp_rawlist"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "ftp_mlsd"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_ARRAY", "FALSE"]
+
+[[function]]
+name = "gd_info"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "ARRAY_OF_FALSE", "ARRAY_OF_TRUE"]
+
+[[function]]
+name = "imagecreatetruecolor"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "imagegrabwindow"
+count = "1"
+types = ["OBJECT", "FALSE"]
+when = "defined(PHP_WIN32)"
+
+[[function]]
+name = "imagegrabscreen"
+count = "1"
+types = ["OBJECT", "FALSE"]
+when = "defined(PHP_WIN32)"
+
+[[function]]
+name = "imagerotate"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "imagecreate"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "imagecreatefromstring"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "imagecreatefromavif"
+count = "1"
+types = ["OBJECT", "FALSE"]
+when = "defined(HAVE_GD_AVIF)"
+
+[[function]]
+name = "imagecreatefromgif"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "imagecreatefromjpeg"
+count = "1"
+types = ["OBJECT", "FALSE"]
+when = "defined(HAVE_GD_JPG)"
+
+[[function]]
+name = "imagecreatefrompng"
+count = "1"
+types = ["OBJECT", "FALSE"]
+when = "defined(HAVE_GD_PNG)"
+
+[[function]]
+name = "imagecreatefromwebp"
+count = "1"
+types = ["OBJECT", "FALSE"]
+when = "defined(HAVE_GD_WEBP)"
+
+[[function]]
+name = "imagecreatefromxbm"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "imagecreatefromxpm"
+count = "1"
+types = ["OBJECT", "FALSE"]
+when = "defined(HAVE_GD_XPM)"
+
+[[function]]
+name = "imagecreatefromwbmp"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "imagecreatefromgd"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "imagecreatefromgd2"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "imagecreatefromgd2part"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "imagecreatefrombmp"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "imagecolorsforindex"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG"]
+
+[[function]]
+name = "imagegetclip"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_LONG"]
+
+[[function]]
+name = "imageftbbox"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_LONG", "FALSE"]
+when = "defined(HAVE_GD_FREETYPE)"
+
+[[function]]
+name = "imagefttext"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_LONG", "FALSE"]
+when = "defined(HAVE_GD_FREETYPE)"
+
+[[function]]
+name = "imagecrop"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "imagecropauto"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "imagescale"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "imageaffine"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "imageaffinematrixget"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_DOUBLE", "FALSE"]
+
+[[function]]
+name = "imageaffinematrixconcat"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_DOUBLE", "FALSE"]
+
+[[function]]
+name = "imageresolution"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_LONG", "TRUE"]
+
+[[function]]
+name = "textdomain"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "gettext"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "dgettext"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "dcgettext"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "bindtextdomain"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "ngettext"
+count = "1"
+types = ["STRING"]
+when = "defined(HAVE_NGETTEXT)"
+
+[[function]]
+name = "dngettext"
+count = "1"
+types = ["STRING"]
+when = "defined(HAVE_DNGETTEXT)"
+
+[[function]]
+name = "dcngettext"
+count = "1"
+types = ["STRING"]
+when = "defined(HAVE_DCNGETTEXT)"
+
+[[function]]
+name = "bind_textdomain_codeset"
+count = "1"
+types = ["STRING", "FALSE"]
+when = "defined(HAVE_BIND_TEXTDOMAIN_CODESET)"
+
+[[function]]
+name = "gmp_div_qr"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_OBJECT"]
+
+[[function]]
+name = "gmp_sqrtrem"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_OBJECT"]
+
+[[function]]
+name = "gmp_rootrem"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_OBJECT"]
+
+[[function]]
+name = "gmp_gcdext"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_OBJECT"]
+
+[[function]]
+name = "hash"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "hash_file"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "hash_hmac"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "hash_hmac_file"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "hash_init"
+count = "1"
+types = ["OBJECT"]
+
+[[function]]
+name = "hash_final"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "hash_copy"
+count = "1"
+types = ["OBJECT"]
+
+[[function]]
+name = "hash_algos"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "hash_hmac_algos"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "hash_pbkdf2"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "hash_hkdf"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mhash_get_hash_name"
+count = "1"
+types = ["STRING", "FALSE"]
+when = "defined(PHP_MHASH_BC)"
+
+[[function]]
+name = "mhash_keygen_s2k"
+count = "1"
+types = ["STRING", "FALSE"]
+when = "defined(PHP_MHASH_BC)"
+
+[[function]]
+name = "mhash"
+count = "1"
+types = ["STRING", "FALSE"]
+when = "defined(PHP_MHASH_BC)"
+
+[[function]]
+name = "iconv_substr"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "iconv_mime_encode"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "iconv_mime_decode"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "iconv_mime_decode_headers"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY", "FALSE"]
+
+[[function]]
+name = "iconv"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "iconv_get_encoding"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "STRING", "FALSE"]
+
+[[function]]
+name = "intlcal_get_available_locales"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "datefmt_localtime"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "FALSE"]
+
+[[function]]
+name = "locale_get_keywords"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "FALSE", "NULL"]
+
+[[function]]
+name = "msgfmt_parse"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_LONG", "ARRAY_OF_DOUBLE", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "msgfmt_parse_message"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_LONG", "ARRAY_OF_DOUBLE", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "resourcebundle_locales"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "transliterator_list_ids"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "json_encode"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "json_last_error_msg"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "ldap_get_entries"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_ARRAY", "FALSE"]
+
+[[function]]
+name = "ldap_get_attributes"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY"]
+
+[[function]]
+name = "ldap_get_values_len"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "ldap_explode_dn"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "libxml_get_errors"
+count = "n"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_OBJECT"]
+
+[[function]]
+name = "mb_language"
+count = "1"
+types = ["STRING", "BOOL"]
+
+[[function]]
+name = "mb_internal_encoding"
+count = "1"
+types = ["STRING", "BOOL"]
+
+[[function]]
+name = "mb_http_input"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "STRING", "FALSE"]
+
+[[function]]
+name = "mb_http_output"
+count = "1"
+types = ["STRING", "BOOL"]
+
+[[function]]
+name = "mb_detect_order"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "TRUE"]
+
+[[function]]
+name = "mb_substitute_character"
+count = "1"
+types = ["STRING", "LONG", "BOOL"]
+
+[[function]]
+name = "mb_preferred_mime_name"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "mb_output_handler"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mb_strstr"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "mb_strrchr"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "mb_stristr"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "mb_strrichr"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "mb_substr"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mb_strcut"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mb_convert_encoding"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "STRING", "FALSE"]
+
+[[function]]
+name = "mb_convert_case"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mb_strtoupper"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mb_strtolower"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mb_detect_encoding"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "mb_list_encodings"
+count = "n"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "mb_encoding_aliases"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "mb_encode_mimeheader"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mb_decode_mimeheader"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mb_convert_kana"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mb_convert_variables"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "mb_encode_numericentity"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mb_decode_numericentity"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mb_get_info"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY", "STRING", "LONG", "FALSE", "NULL"]
+
+[[function]]
+name = "mb_regex_encoding"
+count = "1"
+types = ["STRING", "BOOL"]
+when = "defined(HAVE_MBREGEX)"
+
+[[function]]
+name = "mb_ereg_replace"
+count = "1"
+types = ["STRING", "FALSE", "NULL"]
+when = "defined(HAVE_MBREGEX)"
+
+[[function]]
+name = "mb_eregi_replace"
+count = "1"
+types = ["STRING", "FALSE", "NULL"]
+when = "defined(HAVE_MBREGEX)"
+
+[[function]]
+name = "mb_ereg_replace_callback"
+count = "1"
+types = ["STRING", "FALSE", "NULL"]
+when = "defined(HAVE_MBREGEX)"
+
+[[function]]
+name = "mb_split"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "FALSE"]
+when = "defined(HAVE_MBREGEX)"
+
+[[function]]
+name = "mb_ereg_search_pos"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_LONG", "FALSE"]
+when = "defined(HAVE_MBREGEX)"
+
+[[function]]
+name = "mb_ereg_search_regs"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "ARRAY_OF_FALSE", "FALSE"]
+when = "defined(HAVE_MBREGEX)"
+
+[[function]]
+name = "mb_ereg_search_getregs"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "ARRAY_OF_FALSE", "FALSE"]
+when = "defined(HAVE_MBREGEX)"
+
+[[function]]
+name = "mb_regex_set_options"
+count = "1"
+types = ["STRING"]
+when = "defined(HAVE_MBREGEX)"
+
+[[function]]
+name = "mysqli_affected_rows"
+count = "1"
+types = ["LONG", "STRING"]
+
+[[function]]
+name = "mysqli_character_set_name"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mysqli_connect"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "mysqli_connect_error"
+count = "1"
+types = ["STRING", "NULL"]
+
+[[function]]
+name = "mysqli_error"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mysqli_error_list"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_ARRAY"]
+
+[[function]]
+name = "mysqli_fetch_field"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "mysqli_fetch_fields"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_OBJECT"]
+
+[[function]]
+name = "mysqli_fetch_field_direct"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "mysqli_fetch_lengths"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_LONG", "FALSE"]
+
+[[function]]
+name = "mysqli_fetch_all"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY"]
+
+[[function]]
+name = "mysqli_fetch_array"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "NULL", "FALSE"]
+
+[[function]]
+name = "mysqli_fetch_assoc"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "NULL", "FALSE"]
+
+[[function]]
+name = "mysqli_fetch_object"
+count = "1"
+types = ["OBJECT", "NULL", "FALSE"]
+
+[[function]]
+name = "mysqli_fetch_row"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_ANY", "NULL", "FALSE"]
+
+[[function]]
+name = "mysqli_get_connection_stats"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ANY"]
+
+[[function]]
+name = "mysqli_get_client_stats"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "mysqli_get_charset"
+count = "1"
+types = ["OBJECT", "NULL"]
+
+[[function]]
+name = "mysqli_get_client_info"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mysqli_get_links_stats"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG"]
+
+[[function]]
+name = "mysqli_get_host_info"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mysqli_get_server_info"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mysqli_get_warnings"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "mysqli_init"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "mysqli_info"
+count = "1"
+types = ["STRING", "NULL"]
+
+[[function]]
+name = "mysqli_insert_id"
+count = "1"
+types = ["LONG", "STRING"]
+
+[[function]]
+name = "mysqli_num_rows"
+count = "1"
+types = ["LONG", "STRING"]
+
+[[function]]
+name = "mysqli_prepare"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "mysqli_query"
+count = "1"
+types = ["OBJECT", "BOOL"]
+
+[[function]]
+name = "mysqli_real_escape_string"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mysqli_reap_async_query"
+count = "1"
+types = ["OBJECT", "BOOL"]
+
+[[function]]
+name = "mysqli_stmt_affected_rows"
+count = "1"
+types = ["LONG", "STRING"]
+
+[[function]]
+name = "mysqli_stmt_error"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mysqli_stmt_error_list"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_ARRAY"]
+
+[[function]]
+name = "mysqli_stmt_get_result"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "mysqli_stmt_get_warnings"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "mysqli_stmt_init"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "mysqli_stmt_insert_id"
+count = "1"
+types = ["LONG", "STRING"]
+
+[[function]]
+name = "mysqli_stmt_num_rows"
+count = "1"
+types = ["LONG", "STRING"]
+
+[[function]]
+name = "mysqli_stmt_result_metadata"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "mysqli_stmt_sqlstate"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mysqli_sqlstate"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "mysqli_stat"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "mysqli_store_result"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "mysqli_use_result"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "opcache_get_status"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "FALSE"]
+
+[[function]]
+name = "opcache_get_configuration"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "FALSE"]
+
+[[function]]
+name = "openssl_x509_parse"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY", "FALSE"]
+
+[[function]]
+name = "openssl_csr_get_subject"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY", "FALSE"]
+
+[[function]]
+name = "openssl_pkey_get_details"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY", "FALSE"]
+
+[[function]]
+name = "openssl_get_md_methods"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "openssl_get_cipher_methods"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "openssl_get_curve_names"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "FALSE"]
+when = "defined(HAVE_EVP_PKEY_EC)"
+
+[[function]]
+name = "openssl_get_cert_locations"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "pcntl_signal_get_handler"
+count = "n"
+types = ["STRING", "ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "ARRAY_OF_OBJECT", "OBJECT", "LONG"]
+
+[[function]]
+name = "preg_replace"
+count = "n"
+types = ["STRING", "ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "NULL"]
+
+[[function]]
+name = "preg_filter"
+count = "n"
+types = ["STRING", "ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "NULL"]
+
+[[function]]
+name = "preg_replace_callback"
+count = "n"
+types = ["STRING", "ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "NULL"]
+
+[[function]]
+name = "preg_split"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY", "FALSE"]
+
+[[function]]
+name = "preg_grep"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF", "FALSE"]
+
+[[function]]
+name = "pdo_drivers"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "pg_dbname"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "pg_options"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "pg_port"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "pg_tty"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "pg_host"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "pg_version"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "ARRAY_OF_NULL"]
+
+[[function]]
+name = "pg_jit"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "ARRAY_OF_NULL"]
+
+[[function]]
+name = "pg_parameter_status"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "pg_query"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "pg_query_params"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "pg_prepare"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "pg_execute"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "pg_field_name"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "pg_field_type_oid"
+count = "1"
+types = ["STRING", "LONG"]
+
+[[function]]
+name = "pg_fetch_result"
+count = "1"
+types = ["STRING", "FALSE", "NULL"]
+
+[[function]]
+name = "pg_fetch_row"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "ARRAY_OF_NULL", "FALSE"]
+
+[[function]]
+name = "pg_fetch_assoc"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "ARRAY_OF_NULL", "FALSE"]
+
+[[function]]
+name = "pg_fetch_array"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "ARRAY_OF_NULL", "FALSE"]
+
+[[function]]
+name = "pg_fetch_object"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "pg_fetch_all"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_ARRAY"]
+
+[[function]]
+name = "pg_fetch_all_columns"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "ARRAY_OF_NULL"]
+
+[[function]]
+name = "pg_last_oid"
+count = "1"
+types = ["STRING", "LONG", "FALSE"]
+
+[[function]]
+name = "pg_lo_create"
+count = "1"
+types = ["STRING", "LONG", "FALSE"]
+
+[[function]]
+name = "pg_lo_open"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "pg_lo_read"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "pg_lo_import"
+count = "1"
+types = ["STRING", "LONG", "FALSE"]
+
+[[function]]
+name = "pg_copy_to"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "pg_escape_string"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "pg_escape_bytea"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "pg_unescape_bytea"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "pg_escape_literal"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "pg_escape_identifier"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "pg_result_error"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "pg_result_error_field"
+count = "1"
+types = ["STRING", "FALSE", "NULL"]
+
+[[function]]
+name = "pg_get_result"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "pg_result_status"
+count = "1"
+types = ["STRING", "LONG"]
+
+[[function]]
+name = "pg_get_notify"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "pg_socket"
+count = "1"
+types = ["RESOURCE", "FALSE"]
+
+[[function]]
+name = "pg_meta_data"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ARRAY", "FALSE"]
+
+[[function]]
+name = "pg_convert"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "FALSE"]
+
+[[function]]
+name = "pg_insert"
+count = "1"
+types = ["OBJECT", "STRING", "BOOL"]
+
+[[function]]
+name = "pg_update"
+count = "1"
+types = ["STRING", "BOOL"]
+
+[[function]]
+name = "pg_delete"
+count = "1"
+types = ["STRING", "BOOL"]
+
+[[function]]
+name = "pg_select"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_ARRAY", "STRING", "FALSE"]
+
+[[function]]
+name = "posix_getgroups"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_LONG", "FALSE"]
+when = "defined(HAVE_GETGROUPS)"
+
+[[function]]
+name = "posix_uname"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "posix_times"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "FALSE"]
+
+[[function]]
+name = "posix_getgrnam"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY", "ARRAY_OF_NULL", "FALSE"]
+
+[[function]]
+name = "posix_getgrgid"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY", "ARRAY_OF_NULL", "FALSE"]
+
+[[function]]
+name = "posix_getpwnam"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "posix_getpwuid"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "posix_getrlimit"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "FALSE"]
+when = "defined(HAVE_GETRLIMIT)"
+
+[[function]]
+name = "random_bytes"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "readline_list_history"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+when = "defined(HAVE_HISTORY_LIST)"
+
+[[function]]
+name = "session_name"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "session_module_name"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "session_save_path"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "session_create_id"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "session_encode"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "session_get_cookie_params"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ANY"]
+
+[[function]]
+name = "session_cache_limiter"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "socket_get_option"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "LONG", "FALSE"]
+
+[[function]]
+name = "socket_export_stream"
+count = "n"
+types = ["RESOURCE", "FALSE"]
+
+[[function]]
+name = "socket_addrinfo_lookup"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_OBJECT", "FALSE"]
+
+[[function]]
+name = "socket_addrinfo_explain"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY"]
+
+[[function]]
+name = "sodium_crypto_kx_client_session_keys"
+count = "n"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "sodium_crypto_kx_server_session_keys"
+count = "n"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "sodium_crypto_secretstream_xchacha20poly1305_init_push"
+count = "n"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+when = "defined(crypto_secretstream_xchacha20poly1305_ABYTES)"
+
+[[function]]
+name = "sodium_crypto_secretstream_xchacha20poly1305_pull"
+count = "n"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "FALSE"]
+when = "defined(crypto_secretstream_xchacha20poly1305_ABYTES)"
+
+[[function]]
+name = "class_implements"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "class_parents"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "class_uses"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "spl_classes"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "spl_object_hash"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "ob_get_flush"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "ob_get_clean"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "ob_list_handlers"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "ob_get_status"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY"]
+
+[[function]]
+name = "compact"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "array_fill"
+count = "n"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_ANY"]
+
+[[function]]
+name = "array_fill_keys"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "array_keys"
+count = "n"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "array_values"
+count = "n"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "array_count_values"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_LONG"]
+
+[[function]]
+name = "array_column"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "array_reverse"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "array_flip"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "array_change_key_case"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "array_intersect_key"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "array_intersect_assoc"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "array_uintersect_assoc"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "array_diff_key"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "array_diff_ukey"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "array_udiff"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "array_diff_assoc"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "array_diff_uassoc"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "array_udiff_assoc"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "array_udiff_uassoc"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "ARRAY_OF_REF"]
+
+[[function]]
+name = "array_rand"
+count = "n"
+types = ["LONG", "STRING", "ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "base64_encode"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "base64_decode"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "long2ip"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "getenv"
+count = "1"
+types = ["STRING", "ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "getopt"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY", "ARRAY_OF_FALSE", "FALSE"]
+
+[[function]]
+name = "time_nanosleep"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "BOOL"]
+when = "defined(HAVE_NANOSLEEP)"
+
+[[function]]
+name = "get_current_user"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "get_cfg_var"
+count = "n"
+types = ["STRING", "ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY", "FALSE"]
+
+[[function]]
+name = "error_get_last"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY", "NULL"]
+
+[[function]]
+name = "highlight_file"
+count = "1"
+types = ["STRING", "BOOL"]
+
+[[function]]
+name = "php_strip_whitespace"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "highlight_string"
+count = "1"
+types = ["STRING", "TRUE"]
+
+[[function]]
+name = "ini_get_all"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY", "ARRAY_OF_NULL", "FALSE"]
+
+[[function]]
+name = "set_include_path"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "print_r"
+count = "1"
+types = ["STRING", "TRUE"]
+
+[[function]]
+name = "getservbyport"
+count = "1"
+types = ["STRING", "FALSE"]
+when = "defined(HAVE_GETSERVBYPORT)"
+
+[[function]]
+name = "getprotobynumber"
+count = "1"
+types = ["STRING", "FALSE"]
+when = "defined(HAVE_GETPROTOBYNUMBER)"
+
+[[function]]
+name = "parse_ini_file"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_FALSE", "ARRAY_OF_TRUE", "ARRAY_OF_LONG", "ARRAY_OF_DOUBLE", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY", "ARRAY_OF_NULL", "FALSE"]
+
+[[function]]
+name = "parse_ini_string"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_FALSE", "ARRAY_OF_TRUE", "ARRAY_OF_LONG", "ARRAY_OF_DOUBLE", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY", "ARRAY_OF_NULL", "FALSE"]
+
+[[function]]
+name = "config_get_hash"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY"]
+when = "ZEND_DEBUG"
+
+[[function]]
+name = "sys_getloadavg"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_DOUBLE", "FALSE"]
+when = "defined(HAVE_GETLOADAVG)"
+
+[[function]]
+name = "get_browser"
+count = "1"
+types = ["OBJECT", "ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "FALSE"]
+
+[[function]]
+name = "crypt"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "strptime"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "FALSE"]
+when = "defined(HAVE_STRPTIME)"
+
+[[function]]
+name = "gethostname"
+count = "1"
+types = ["STRING", "FALSE"]
+when = "defined(HAVE_GETHOSTNAME)"
+
+[[function]]
+name = "gethostbyaddr"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "gethostbyname"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "gethostbynamel"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "dns_get_record"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_ARRAY", "FALSE"]
+when = "(defined(PHP_WIN32) || defined(HAVE_DNS_SEARCH_FUNC))"
+
+[[function]]
+name = "md5"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "md5_file"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "sha1"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "sha1_file"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "inet_ntop"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "inet_pton"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "metaphone"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "headers_list"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "htmlspecialchars"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "htmlentities"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "get_html_translation_table"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "bin2hex"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "hex2bin"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "nl_langinfo"
+count = "1"
+types = ["STRING", "FALSE"]
+when = "defined(HAVE_NL_LANGINFO)"
+
+[[function]]
+name = "wordwrap"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "explode"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "strtok"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "basename"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "dirname"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "pathinfo"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "STRING"]
+
+[[function]]
+name = "stristr"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "strstr"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "strrchr"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "chunk_split"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "substr_replace"
+count = "n"
+types = ["STRING", "ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "quotemeta"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "chr"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "ucwords"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "strrev"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "stripcslashes"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "stripslashes"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "str_replace"
+count = "n"
+types = ["STRING", "ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "str_ireplace"
+count = "n"
+types = ["STRING", "ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "hebrev"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "strip_tags"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "str_getcsv"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "ARRAY_OF_NULL"]
+
+[[function]]
+name = "str_repeat"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "count_chars"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_LONG", "STRING"]
+
+[[function]]
+name = "localeconv"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY"]
+
+[[function]]
+name = "sscanf"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_ANY", "LONG", "NULL"]
+
+[[function]]
+name = "str_rot13"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "str_shuffle"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "str_word_count"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "LONG"]
+
+[[function]]
+name = "str_split"
+count = "n"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "strpbrk"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "utf8_encode"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "utf8_decode"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "opendir"
+count = "n"
+types = ["RESOURCE", "FALSE"]
+
+[[function]]
+name = "dir"
+count = "1"
+types = ["OBJECT", "FALSE"]
+
+[[function]]
+name = "getcwd"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "readdir"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "scandir"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "glob"
+count = "n"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "exec"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "system"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "escapeshellcmd"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "escapeshellarg"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "shell_exec"
+count = "1"
+types = ["STRING", "FALSE", "NULL"]
+
+[[function]]
+name = "get_meta_tags"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "popen"
+count = "1"
+types = ["RESOURCE", "FALSE"]
+
+[[function]]
+name = "fgets"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "fread"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "fopen"
+count = "1"
+types = ["RESOURCE", "FALSE"]
+
+[[function]]
+name = "fscanf"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_ANY", "LONG", "FALSE", "NULL"]
+
+[[function]]
+name = "fstat"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "FALSE"]
+
+[[function]]
+name = "tempnam"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "tmpfile"
+count = "1"
+types = ["RESOURCE", "FALSE"]
+
+[[function]]
+name = "file"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "file_get_contents"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "fgetcsv"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "ARRAY_OF_NULL", "FALSE"]
+
+[[function]]
+name = "realpath"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "sys_get_temp_dir"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "filetype"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "stat"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_FALSE", "ARRAY_OF_TRUE", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "lstat"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_FALSE", "ARRAY_OF_TRUE", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "realpath_cache_get"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ARRAY"]
+
+[[function]]
+name = "sprintf"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "vsprintf"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "fsockopen"
+count = "1"
+types = ["RESOURCE", "FALSE"]
+
+[[function]]
+name = "pfsockopen"
+count = "n"
+types = ["RESOURCE", "FALSE"]
+
+[[function]]
+name = "http_build_query"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "request_parse_body"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_ARRAY"]
+
+[[function]]
+name = "image_type_to_mime_type"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "image_type_to_extension"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "getimagesize"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "getimagesizefromstring"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "phpversion"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "php_sapi_name"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "php_uname"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "php_ini_scanned_files"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "php_ini_loaded_file"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "iptcembed"
+count = "1"
+types = ["STRING", "BOOL"]
+
+[[function]]
+name = "iptcparse"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ARRAY", "FALSE"]
+
+[[function]]
+name = "readlink"
+count = "1"
+types = ["STRING", "FALSE"]
+when = "(defined(HAVE_SYMLINK) || defined(PHP_WIN32))"
+
+[[function]]
+name = "decbin"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "decoct"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "dechex"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "base_convert"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "number_format"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "microtime"
+count = "1"
+types = ["STRING", "DOUBLE"]
+when = "defined(HAVE_GETTIMEOFDAY)"
+
+[[function]]
+name = "gettimeofday"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "DOUBLE"]
+when = "defined(HAVE_GETTIMEOFDAY)"
+
+[[function]]
+name = "getrusage"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "FALSE"]
+when = "defined(HAVE_GETRUSAGE)"
+
+[[function]]
+name = "pack"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "unpack"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_ANY", "FALSE"]
+
+[[function]]
+name = "password_get_info"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY", "ARRAY_OF_NULL"]
+
+[[function]]
+name = "password_hash"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "proc_open"
+count = "1"
+types = ["RESOURCE", "FALSE"]
+when = "defined(PHP_CAN_SUPPORT_PROC_OPEN)"
+
+[[function]]
+name = "proc_get_status"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_FALSE", "ARRAY_OF_TRUE", "ARRAY_OF_LONG", "ARRAY_OF_STRING"]
+when = "defined(PHP_CAN_SUPPORT_PROC_OPEN)"
+
+[[function]]
+name = "quoted_printable_decode"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "quoted_printable_encode"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "soundex"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "stream_context_create"
+count = "1"
+types = ["RESOURCE"]
+
+[[function]]
+name = "stream_context_get_params"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ANY"]
+
+[[function]]
+name = "stream_context_get_options"
+count = "n"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ANY"]
+
+[[function]]
+name = "stream_context_get_default"
+count = "n"
+types = ["RESOURCE"]
+
+[[function]]
+name = "stream_context_set_default"
+count = "n"
+types = ["RESOURCE"]
+
+[[function]]
+name = "stream_filter_prepend"
+count = "n"
+types = ["RESOURCE", "FALSE"]
+
+[[function]]
+name = "stream_filter_append"
+count = "n"
+types = ["RESOURCE", "FALSE"]
+
+[[function]]
+name = "stream_socket_client"
+count = "1"
+types = ["RESOURCE", "FALSE"]
+
+[[function]]
+name = "stream_socket_server"
+count = "1"
+types = ["RESOURCE", "FALSE"]
+
+[[function]]
+name = "stream_socket_accept"
+count = "1"
+types = ["RESOURCE", "FALSE"]
+
+[[function]]
+name = "stream_socket_recvfrom"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "stream_socket_pair"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_RESOURCE", "FALSE"]
+when = "defined(HAVE_SOCKETPAIR)"
+
+[[function]]
+name = "stream_get_contents"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "stream_get_meta_data"
+count = "n"
+types = ["ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_ANY"]
+
+[[function]]
+name = "stream_get_line"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "stream_resolve_include_path"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "stream_get_wrappers"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "stream_get_transports"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "uniqid"
+count = "1"
+types = ["STRING"]
+when = "defined(HAVE_GETTIMEOFDAY)"
+
+[[function]]
+name = "parse_url"
+count = "1"
+types = ["LONG", "STRING", "ARRAY", "ARRAY_KEY_STRING", "ARRAY_OF_LONG", "ARRAY_OF_STRING", "NULL", "FALSE"]
+
+[[function]]
+name = "urlencode"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "urldecode"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "rawurlencode"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "rawurldecode"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "get_headers"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_KEY_STRING", "ARRAY_OF_STRING", "ARRAY_OF_ARRAY", "FALSE"]
+
+[[function]]
+name = "stream_bucket_make_writeable"
+count = "1"
+types = ["OBJECT", "NULL"]
+
+[[function]]
+name = "stream_bucket_new"
+count = "1"
+types = ["OBJECT"]
+
+[[function]]
+name = "stream_get_filters"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING"]
+
+[[function]]
+name = "convert_uuencode"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "convert_uudecode"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "var_export"
+count = "1"
+types = ["STRING", "NULL"]
+
+[[function]]
+name = "serialize"
+count = "1"
+types = ["STRING"]
+
+[[function]]
+name = "xml_error_string"
+count = "1"
+types = ["STRING", "NULL"]
+
+[[function]]
+name = "xml_parser_get_option"
+count = "1"
+types = ["STRING", "LONG", "BOOL"]
+
+[[function]]
+name = "zend_test_create_throwing_resource"
+count = "n"
+types = ["RESOURCE"]
+
+[[function]]
+name = "zip_open"
+count = "n"
+types = ["RESOURCE", "LONG", "FALSE"]
+
+[[function]]
+name = "zip_read"
+count = "n"
+types = ["RESOURCE", "FALSE"]
+
+[[function]]
+name = "ob_gzhandler"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "zlib_get_coding_type"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "gzfile"
+count = "1"
+types = ["ARRAY", "ARRAY_KEY_LONG", "ARRAY_OF_STRING", "FALSE"]
+
+[[function]]
+name = "gzopen"
+count = "1"
+types = ["RESOURCE", "FALSE"]
+
+[[function]]
+name = "zlib_encode"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "zlib_decode"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "gzdeflate"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "gzencode"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "gzcompress"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "gzinflate"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "gzdecode"
+count = "1"
+types = ["STRING", "FALSE"]
+
+[[function]]
+name = "gzuncompress"
+count = "1"
+types = ["STRING", "FALSE"]

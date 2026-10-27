@@ -15,10 +15,10 @@ use crate::{LinkedTable, Property, SsaVar};
 type Declared<C> = (Types, Option<C>);
 
 /// `ZEND_FETCH_CLASS_MASK` and the fetch kinds under it.
-const FETCH_CLASS_MASK: u32 = 0x0f;
-const FETCH_CLASS_SELF: u32 = 1;
+pub(crate) const FETCH_CLASS_MASK: u32 = 0x0f;
+pub(crate) const FETCH_CLASS_SELF: u32 = 1;
 const FETCH_CLASS_PARENT: u32 = 2;
-const FETCH_CLASS_STATIC: u32 = 3;
+pub(crate) const FETCH_CLASS_STATIC: u32 = 3;
 /// `ZEND_FETCH_OBJ_FLAGS` and `ZEND_FETCH_DIM_WRITE` beside it.
 const FETCH_OBJ_FLAGS: u32 = 3;
 const FETCH_DIM_WRITE: u32 = 2;
@@ -254,7 +254,7 @@ impl<T: LinkedTable> Infer<'_, T> {
     }
 
     /// `_ssa_op1_info` of the opline at `at`.
-    fn op1_types(&self, at: usize) -> Types {
+    pub(crate) fn op1_types(&self, at: usize) -> Types {
         let (Some(op), ssa_op) = (self.body.oplines.get(at), self.op(at)) else {
             return Types::NONE;
         };
@@ -266,26 +266,14 @@ impl<T: LinkedTable> Infer<'_, T> {
         self.literal(n)?.str_bytes()
     }
 
-    /// The class a constant `op` names, by the lower-cased name the
-    /// compiler wrote after it.
+    /// The class a constant `op` names ([`crate::class_named`]).
     fn class_named(&self, n: u32) -> Option<T::Class> {
-        self.literal(n)?.as_str()?;
-        crate::class_entry(self.function, self.table, self.str_literal(n + 1)?)
+        crate::class_named(self.function, self.table, n)
     }
 
-    /// `zend_optimizer_get_class_entry_from_op1`.
+    /// `zend_optimizer_get_class_entry_from_op1` ([`crate::class_of_op1`]).
     fn class_of_op1(&self, op: &Opline) -> Option<T::Class> {
-        match op.op1_type {
-            OperandKind::Const => self.class_named(op.op1),
-            OperandKind::Unused => {
-                let scope = self.table.scope().filter(|s| !self.table.is_trait(*s))?;
-                let fetch = op.op1 & FETCH_CLASS_MASK;
-                (fetch == FETCH_CLASS_SELF
-                    || (fetch == FETCH_CLASS_STATIC && self.table.is_final(scope)))
-                .then_some(scope)
-            }
-            _ => None,
-        }
+        crate::class_of_op1(self.function, self.table, op)
     }
 
     /// `zend_fetch_prop_info`: the declared type of the instance property
@@ -1416,17 +1404,14 @@ impl<T: LinkedTable> Infer<'_, T> {
                     let tmp = Self::shared_rc1(self.var_types(data_op.op1_use));
                     self.set_types(tmp, data_op.op1_def, wl)?;
                 }
-                self.unknown_result(&op, result, wl)?;
+                self.call_result(at, &op, result, wl)?;
             }
-            // A call's result is typed by the callee the call map names,
-            // which the analysis builds no entry of: php types it as an
-            // opline it knows nothing of.
             Opcode::FramelessIcall0
             | Opcode::DoFcall
             | Opcode::DoIcall
             | Opcode::DoUcall
             | Opcode::DoFcallByName => {
-                self.unknown_result(&op, result, wl)?;
+                self.call_result(at, &op, result, wl)?;
             }
             Opcode::CallableConvert | Opcode::DeclareLambdaFunction => {
                 self.set_types(Types::OBJECT | Types::RC, result, wl)?;
@@ -1773,6 +1758,30 @@ impl<T: LinkedTable> Infer<'_, T> {
                     | Opcode::FetchListR
             );
         valid.then_some(tmp)
+    }
+
+    /// What a call returns, typed by what php knows of the callee the call map
+    /// names at `at` (`zend_get_func_info`), and as an opline it knows
+    /// nothing of where it names none.
+    fn call_result(
+        &mut self,
+        at: usize,
+        op: &Opline,
+        result: Option<SsaVar>,
+        wl: &mut Bits,
+    ) -> Result<(), Narrowed> {
+        if result.is_none() {
+            return Ok(());
+        }
+        let Some(call) = self.calls.and_then(|calls| calls.at(at)) else {
+            return self.unknown_result(op, result, wl);
+        };
+        let (tmp, class) = self.func_info(call);
+        self.set_types(tmp, result, wl)?;
+        if let Some(class) = class {
+            self.set_class(Some(class.class), class.instanceof, result, wl);
+        }
+        Ok(())
     }
 
     /// `unknown_opcode`: a value php knows nothing of but its kind.

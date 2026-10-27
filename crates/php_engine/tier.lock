@@ -42,7 +42,9 @@ tier::Aside
 tier::Bound
 tier::Building
 tier::CachedSlot
+tier::CallSite
 tier::Called
+tier::CalledFunction
 tier::CalleeSlot
 tier::ClassId
 tier::Compiled

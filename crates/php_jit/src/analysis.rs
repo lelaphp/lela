@@ -8,16 +8,22 @@
 //! `ZEND_JIT_DEBUG_SSA` at each trace's build, as php writes them each
 //! time it builds them anew.
 //!
-//! Nothing in the trace reads the analysis yet (#3575); what a call returns
-//! is typed as php types an opline it knows nothing of until the analysis
-//! reads the callee (#3574).
+//! What a call returns is typed by what php knows of the callee: a
+//! native's from php's table, a user function's from what its analysis
+//! earlier in the same build found it returns (`func_info->return_info`),
+//! or from its declaration. Nothing in the trace reads the analysis yet
+//! (#3575).
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use php_engine::tier::{ClassId, FuncRef, UnitView};
-use php_ssa::{Analysis, ClassConstant, Function, Level, LinkedTable, ObjectShape, Property};
-use php_unit::decl::{ClassKind, PropertyDecl, Visibility};
+use php_engine::tier::{CallSite, CalledFunction, ClassId, FuncRef, UnitView};
+use php_ssa::{
+    Analysis, Body, Callee, ClassConstant, Function, Level, LinkedTable, Method, ObjectShape,
+    Property, Returns,
+};
+use php_unit::decl::{ClassKind, HookKind, PropertyDecl, Visibility};
 
 use crate::Lines;
 use crate::policy::JitDebug;
@@ -44,19 +50,15 @@ const MAX_FUNCS: usize = 30;
 pub(crate) struct Analyses(Mutex<HashMap<FuncRef, Kept>>);
 
 impl Analyses {
-    /// The analysis of `f`, built by `build` where none was kept, and the
-    /// first one kept where two builds race.
-    fn get_or_build(&self, f: FuncRef, build: impl FnOnce() -> Kept) -> Kept {
-        let kept = self
-            .0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&f)
-            .cloned();
-        if let Some(kept) = kept {
-            return kept;
-        }
-        let made = build();
+    /// The analysis of `f`, none where none was kept.
+    fn kept(&self, f: FuncRef) -> Option<Kept> {
+        let map = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        map.get(&f).cloned()
+    }
+
+    /// Keep `made` for `f`, or the analysis kept first where two builds
+    /// race.
+    fn keep(&self, f: FuncRef, made: Kept) -> Kept {
         let mut map = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         map.entry(f).or_insert(made).clone()
     }
@@ -70,6 +72,15 @@ struct Bound<'a> {
     view: &'a UnitView,
     /// The op array analysed.
     f: FuncRef,
+    /// What the analyses this build made before `f`'s found each op
+    /// array returns, `func_info->return_info`, which php clears from
+    /// every op array a build analysed once its trace is compiled
+    /// (`zend_jit_compile_trace`), so a caller reads only this build's.
+    built: &'a [(FuncRef, Option<Returns<ClassId>>)],
+    /// Whether the analysis read what another user function returns,
+    /// which differs from build to build with the order the op arrays
+    /// are analysed in, so the analysis is built anew at each build.
+    reads_returns: Cell<bool>,
 }
 
 impl Bound<'_> {
@@ -113,6 +124,35 @@ impl Bound<'_> {
     /// The property `name` class `c` declares itself.
     fn own_property(&self, c: ClassId, name: &[u8]) -> Option<&PropertyDecl> {
         (self.view.class_decl(c)?.properties.iter()).find(|p| *p.name.0 == *name)
+    }
+}
+
+impl<'a> Bound<'a> {
+    /// `called` as php's call analysis reads it.
+    fn callee(&self, called: &'a CalledFunction) -> Callee<'a, ClassId> {
+        let body = match called.body {
+            None => Body::Native,
+            Some(g) if g == self.f => Body::Analysed,
+            Some(g) => {
+                self.reads_returns.set(true);
+                let built = self.built.iter().find(|(h, _)| *h == g);
+                Body::User(built.and_then(|&(_, returns)| returns))
+            }
+        };
+        Callee {
+            name: &called.name.0,
+            return_type: called.return_type.as_ref(),
+            returns_by_ref: called.returns_by_ref,
+            generator: called.generator,
+            method: called.method.map(|m| Method {
+                scope: m.scope,
+                visibility: m.visibility,
+                is_final: m.is_final,
+                is_abstract: m.is_abstract,
+                tentative_return: m.tentative_return,
+            }),
+            body,
+        }
     }
 }
 
@@ -221,6 +261,26 @@ impl LinkedTable for Bound<'_> {
             })
     }
 
+    fn function(&self, lcname: &[u8]) -> Option<Callee<'_, ClassId>> {
+        let called = self.view.called(self.f, CallSite::Function(lcname))?;
+        Some(self.callee(called))
+    }
+
+    fn method(&self, class: ClassId, lcname: &[u8]) -> Option<Callee<'_, ClassId>> {
+        let called = self.view.called(self.f, CallSite::Method(class, lcname))?;
+        Some(self.callee(called))
+    }
+
+    fn frameless(&self, index: u32) -> Option<Callee<'_, ClassId>> {
+        let called = self.view.called(self.f, CallSite::Frameless(index))?;
+        Some(self.callee(called))
+    }
+
+    fn parent_hook(&self, name: &[u8], kind: HookKind) -> Option<Callee<'_, ClassId>> {
+        let called = self.view.called(self.f, CallSite::ParentHook(name, kind))?;
+        Some(self.callee(called))
+    }
+
     fn constant(&self, class: ClassId, name: &[u8]) -> Option<ClassConstant<'_, ClassId>> {
         let declared =
             |holder: ClassId, at: u32| self.view.class_decl(holder)?.constants.get(at as usize);
@@ -302,22 +362,38 @@ pub(crate) fn build(
     } else {
         Level::Func
     };
+    let mut built: Vec<(FuncRef, Option<Returns<ClassId>>)> = Vec::new();
     for &f in passed.iter().take(MAX_FUNCS) {
         let Some(function) = function(view, f) else {
             continue;
         };
-        let table = Bound { view, f };
-        let analyse = || php_ssa::analyse(&function, &table, level).map(Arc::new);
-        let kept = if view.binds_request_class(f) {
-            analyse()
-        } else {
-            analyses.get_or_build(f, analyse)
+        let table = Bound {
+            view,
+            f,
+            built: &built,
+            reads_returns: Cell::new(false),
         };
-        if dump && let Some(analysis) = kept {
+        let own = view.binds_request_class(f);
+        let kept = match analyses.kept(f) {
+            Some(kept) if !own => kept,
+            _ => {
+                let made = php_ssa::analyse(&function, &table, level).map(Arc::new);
+                // Kept for the epoch only where what it read stays: no
+                // class only the request holds, and no other function's
+                // return.
+                if own || table.reads_returns.get() {
+                    made
+                } else {
+                    analyses.keep(f, made)
+                }
+            }
+        };
+        if dump && let Some(analysis) = &kept {
             let mut written = Vec::new();
             analysis.dump(&mut written, &function, &table, view.frameless_names());
             lines.push(&written);
         }
+        built.push((f, kept.as_ref().map(|a| a.returns)));
     }
     passed.len() <= MAX_FUNCS
 }

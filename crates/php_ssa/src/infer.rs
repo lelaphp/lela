@@ -7,14 +7,14 @@
 //! never runs: the tier masks `ZEND_OPTIMIZER_NARROW_TO_DOUBLE` off.
 
 use php_heap::Zval;
-use php_unit::decl::FunctionDecl;
 use php_unit::{OpArray, Opcode, OperandKind};
 
 use crate::bits::{Bits, Passes};
+use crate::calls::Calls;
 use crate::cfg::Cfg;
 use crate::range::{self, add_overflows};
 use crate::ssa::{Alias, Constraint, PhiKind, Ssa, SsaOp, defined_at};
-use crate::types::{ClassOf, Range, Returns, Types, VarInfo, of_alias, of_constant, of_declared};
+use crate::types::{ClassOf, Range, Returns, Types, VarInfo, of_alias, of_constant};
 use crate::{Function, LinkedTable, SsaVar};
 
 /// `RANGE_WARMUP_PASSES`.
@@ -39,6 +39,9 @@ pub(crate) struct Infer<'a, T: LinkedTable> {
     pub(crate) cfg: &'a Cfg,
     pub(crate) ssa: &'a Ssa<T::Class>,
     pub(crate) table: &'a T,
+    /// The calls php maps where it reads the calls the op array makes,
+    /// `func_info->call_map`; none where it maps none.
+    pub(crate) calls: Option<&'a Calls<'a, T::Class>>,
     pub(crate) info: Vec<VarInfo<T::Class>>,
 }
 
@@ -727,6 +730,7 @@ pub(crate) fn infer<T: LinkedTable>(
     cfg: &Cfg,
     ssa: &mut Ssa<T::Class>,
     table: &T,
+    calls: Option<&Calls<'_, T::Class>>,
     returns: &mut Returns<T::Class>,
 ) -> Option<()> {
     let body = function.body;
@@ -756,6 +760,7 @@ pub(crate) fn infer<T: LinkedTable>(
         cfg,
         ssa: &*ssa,
         table,
+        calls,
         info,
     };
     cx.mark_cv_references();
@@ -769,31 +774,6 @@ pub(crate) fn infer<T: LinkedTable>(
     let info = cx.info;
     ssa.info = info;
     Some(())
-}
-
-/// `zend_get_return_info_from_signature_only` as
-/// `zend_init_func_return_info` reads it: the declared return type, a
-/// class it names taken as the class or one below it, and a reference
-/// where the function returns one.
-pub(crate) fn signature_returns<T: LinkedTable>(
-    decl: &FunctionDecl,
-    table: &T,
-) -> Returns<T::Class> {
-    let (mut types, class) = of_declared(decl.return_type.as_ref(), table);
-    let mut class = class.map(|class| ClassOf {
-        class,
-        instanceof: true,
-    });
-    if decl.returns_by_ref && !decl.is_generator {
-        types |= Types::REF;
-        class = None;
-    }
-    Returns {
-        types,
-        class,
-        range: Range::default(),
-        has_range: false,
-    }
 }
 
 impl<T: LinkedTable> Infer<'_, T> {
@@ -1312,8 +1292,11 @@ impl<T: LinkedTable> Infer<'_, T> {
                 tmp.max = i64::MAX;
                 Some(tmp)
             }
-            // A call's result takes the callee's return range through the
-            // call map, which the analysis builds no entry of.
+            Opcode::DoFcall | Opcode::DoIcall | Opcode::DoUcall | Opcode::DoFcallByName
+                if is_result =>
+            {
+                self.call_range(at)
+            }
             _ => None,
         }
     }
@@ -1769,11 +1752,29 @@ impl<T: LinkedTable> Infer<'_, T> {
 
     // ------------------------------------------------------------ return
 
-    /// `zend_func_return_info`, not recursive and not widening, as
+    /// `is_recursive_tail_call`: `returned` is what a `DO_UCALL` of the
+    /// op array analysed itself returned.
+    fn is_recursive_tail_call(&self, returned: Option<SsaVar>) -> bool {
+        let Some(calls) = self.calls else {
+            return false;
+        };
+        let defined = returned
+            .and_then(|v| self.ssa.var(v))
+            .and_then(|v| v.definition);
+        defined.is_some_and(|at| {
+            let at = at as usize;
+            self.body
+                .oplines
+                .get(at)
+                .is_some_and(|op| op.opcode == Opcode::DoUcall)
+                && calls.at(at).is_some_and(|call| call.callee.is_analysed())
+        })
+    }
+
+    /// `zend_func_return_info`, recursive and not widening, as
     /// `zend_infer_types` asks it: what each reachable `RETURN` returns,
-    /// joined, within what `ret` holds already. php skips a return of a
-    /// recursive tail call (`is_recursive_tail_call`), which reads the
-    /// call map; with none built (#3574) no return is one.
+    /// joined, within what `ret` holds already, but a return of a
+    /// recursive tail call.
     fn return_info(&self, ret: &mut Returns<T::Class>) {
         if ret.types.is_empty() {
             ret.types = Types::REF_ANY;
@@ -1796,6 +1797,9 @@ impl<T: LinkedTable> Infer<'_, T> {
                 continue;
             }
             let ssa_op = self.op(at);
+            if self.is_recursive_tail_call(ssa_op.op1_use) {
+                continue;
+            }
             let mut t1 = self.operand_types(op.op1_type, op.op1, ssa_op.op1_use);
             if t1.has(Types::UNDEF) {
                 t1 |= Types::NULL;

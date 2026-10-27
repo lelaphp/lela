@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use php_heap::ZvalType;
 use php_link::LinkedClass;
-use php_unit::decl::{Bare, ClassDecl, FunctionDecl, Name, Parameter, Type};
+use php_unit::decl::{Bare, ClassDecl, FunctionDecl, HookKind, Name, Parameter, Type, Visibility};
 use php_unit::{CacheSlot, MapPtrOffset, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::published::SEALED;
@@ -593,6 +593,62 @@ pub struct UnitView {
     /// The op arrays whose analysis binds one of `own`
     /// ([`UnitView::binds_request_class`]).
     request_bound: Vec<FuncRef>,
+    /// The functions the calls of each held op array reach, bound as the
+    /// view accepts it ([`UnitView::called`]).
+    called: Vec<(FuncRef, Site, CalledFunction)>,
+}
+
+/// Where [`UnitView::called`] looks a callee up, owned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Site {
+    Function(Box<[u8]>),
+    Method(ClassId, Box<[u8]>),
+    Frameless(u32),
+    ParentHook(Box<[u8]>, HookKind),
+}
+
+/// What php's analysis of an op array asks [`UnitView::called`] for: a
+/// function by its lower-cased name, a method of a class by its
+/// lower-cased name, the native of a row of the engine's frameless
+/// table, or the hook of a kind the parent of the op array's class holds
+/// for a property by its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallSite<'a> {
+    Function(&'a [u8]),
+    Method(ClassId, &'a [u8]),
+    Frameless(u32),
+    ParentHook(&'a [u8], HookKind),
+}
+
+/// A function a call of a held op array reaches, as php's call analysis
+/// reads it (`zend_optimizer_get_called_func`, `zend_get_func_info`):
+/// its name, its declared return, the op array a user function's call
+/// serves, and a method's class and flags.
+#[derive(Debug, Clone)]
+pub struct CalledFunction {
+    /// `common.function_name`, as declared.
+    pub name: Name,
+    pub return_type: Option<Type>,
+    pub returns_by_ref: bool,
+    pub generator: bool,
+    /// The op array a user function's call serves; none for a native.
+    pub body: Option<FuncRef>,
+    /// A method's class and flags; none for a function.
+    pub method: Option<CalledMethod>,
+}
+
+/// A method's `common.scope` and the `fn_flags` php's call analysis
+/// reads.
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct CalledMethod {
+    /// The class that declares it.
+    pub scope: ClassId,
+    pub visibility: Visibility,
+    pub is_final: bool,
+    pub is_abstract: bool,
+    /// The tentative bit of a native's declared return type.
+    pub tentative_return: bool,
 }
 
 /// What [`UnitView::declaration`] reads of an op array: the declaration
@@ -602,6 +658,29 @@ pub struct UnitView {
 pub struct Declaration<'a> {
     pub function: Option<&'a FunctionDecl>,
     pub scope: Option<&'a Name>,
+}
+
+/// What [`CalledFunction`] holds of `func`, a function the request links.
+fn called(
+    req: &Request,
+    func: crate::api::call::Function,
+    method: Option<CalledMethod>,
+) -> Option<CalledFunction> {
+    let decl = req.symbols().function_decl(func)?;
+    let body = match req.user_function(func) {
+        Some(user) => Some(FuncRef(
+            crate::exec::body_of(&user.unit, user.body)?.runtime_cache,
+        )),
+        None => None,
+    };
+    Some(CalledFunction {
+        name: decl.name.clone(),
+        return_type: decl.return_type.clone(),
+        returns_by_ref: decl.returns_by_ref,
+        generator: decl.is_generator,
+        body,
+        method,
+    })
 }
 
 /// A view and an epoch hold leave the request's thread with a claim and
@@ -635,6 +714,7 @@ impl UnitView {
             engine_decls: Vec::new(),
             own: Vec::new(),
             request_bound: Vec::new(),
+            called: Vec::new(),
         }
     }
 
@@ -717,6 +797,108 @@ impl UnitView {
         self.bind_engine_types(req, &types);
         for name in [&b"closure"[..], b"traversable"] {
             self.bind_engine_type(req, name);
+        }
+        self.bind_calls(req, f, body);
+    }
+
+    /// Bind the functions the calls of `body`, the op array `f` names,
+    /// reach, as php's call analysis finds them when it builds the
+    /// analysis ([`UnitView::called`]): an `INIT_FCALL`'s function, a
+    /// native or one declared in the same file
+    /// (`zend_optimizer_ignore_function`); the method a constant name
+    /// names of the op array's class or of a class it names; and a
+    /// frameless call's native.
+    fn bind_calls(&mut self, req: &Request, f: FuncRef, body: &OpArray) {
+        let literal = |n: u32| body.literals.get(n as usize).and_then(|z| z.str_bytes());
+        let mut classes: Vec<ClassId> = self.scope(f).into_iter().collect();
+        classes.extend(
+            (self.named.iter())
+                .filter(|(func, ..)| *func == f)
+                .map(|(.., c)| *c),
+        );
+        let mut sites = Vec::new();
+        for op in &body.oplines {
+            match op.opcode {
+                Opcode::InitFcall => {
+                    sites.extend(literal(op.op2).map(|n| Site::Function(n.into())));
+                }
+                Opcode::InitMethodCall | Opcode::InitStaticMethodCall
+                    if op.op2_type == OperandKind::Const =>
+                {
+                    let Some(name) = literal(op.op2 + 1) else {
+                        continue;
+                    };
+                    sites.extend(classes.iter().map(|&c| Site::Method(c, name.into())));
+                }
+                Opcode::InitParentPropertyHookCall => {
+                    let kind = if op.op2 == 0 {
+                        HookKind::Get
+                    } else {
+                        HookKind::Set
+                    };
+                    sites.extend(literal(op.op1).map(|n| Site::ParentHook(n.into(), kind)));
+                }
+                _ if op.opcode.is_frameless_icall() => {
+                    sites.push(Site::Frameless(op.extended_value));
+                }
+                _ => {}
+            }
+        }
+        for site in sites {
+            if self
+                .called
+                .iter()
+                .any(|(func, held, _)| *func == f && *held == site)
+            {
+                continue;
+            }
+            let found = match &site {
+                Site::Function(name) => req.function_named(Bare::resolved(name)).and_then(|func| {
+                    let user = req.user_function(func);
+                    let elsewhere = user.is_some_and(|user| {
+                        crate::exec::body_of(&user.unit, user.body)
+                            .is_none_or(|code| code.filename != body.filename)
+                    });
+                    (!elsewhere).then(|| called(req, func, None)).flatten()
+                }),
+                Site::Method(class, name) => {
+                    req.symbols().method_named(*class, name).and_then(|func| {
+                        let decl = req.method_decl(func)?;
+                        let method = CalledMethod {
+                            scope: req.method_class(func)?,
+                            visibility: decl.visibility,
+                            is_final: decl.is_final,
+                            is_abstract: decl.is_abstract,
+                            tentative_return: decl.tentative_return,
+                        };
+                        called(req, func, Some(method))
+                    })
+                }
+                Site::Frameless(index) => req
+                    .frameless_entry(*index)
+                    .and_then(|(func, _)| called(req, func, None)),
+                // `zend_get_property_info` on the parent of the op array's
+                // class, a property it may read that is not private, and
+                // its hook of that kind.
+                Site::ParentHook(name, kind) => {
+                    let parent = self.scope(f).and_then(|c| req.symbols().class_parent(c));
+                    parent.and_then(|parent| {
+                        let (_, property) = req.property_info_of(parent, name)?;
+                        if property.visibility == Visibility::Private {
+                            return None;
+                        }
+                        let hooked = req.row_hooked(parent, name)?;
+                        let func = match kind {
+                            HookKind::Get => hooked.get,
+                            HookKind::Set => hooked.set,
+                        }?;
+                        called(req, func, None)
+                    })
+                }
+            };
+            if let Some(found) = found {
+                self.called.push((f, site, found));
+            }
         }
     }
 
@@ -814,6 +996,27 @@ impl UnitView {
     #[must_use]
     pub fn binds_request_class(&self, f: FuncRef) -> bool {
         self.request_bound.contains(&f)
+    }
+
+    /// The function the call `site` of the op array `f` names reaches, as
+    /// the view bound it when it accepted the op array; none where php's
+    /// call analysis finds none.
+    #[must_use]
+    pub fn called(&self, f: FuncRef, site: CallSite<'_>) -> Option<&CalledFunction> {
+        let matches = |held: &Site| match (held, site) {
+            (Site::Function(held), CallSite::Function(name)) => **held == *name,
+            (Site::Method(held_class, held), CallSite::Method(class, name)) => {
+                *held_class == class && **held == *name
+            }
+            (Site::Frameless(held), CallSite::Frameless(index)) => *held == index,
+            (Site::ParentHook(held, held_kind), CallSite::ParentHook(name, kind)) => {
+                **held == *name && *held_kind == kind
+            }
+            _ => false,
+        };
+        (self.called.iter())
+            .find(|(func, held, _)| *func == f && matches(held))
+            .map(|(.., called)| called)
     }
 
     /// `zend_flf_functions` by name, as the dump of an op array the view
