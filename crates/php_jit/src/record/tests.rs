@@ -550,19 +550,74 @@ fn a_conditional_jump_says_which_way_it_went() -> Result<(), String> {
 }
 
 /// A call into a function an `eval` declared: its op array is the
-/// request's, which no trace may read, and the recorder stops at it.
+/// request's, which no trace may read, so the recorder stops at it with
+/// `Interpreter`, as php's `zend_jit_trace_execute` stops at a frame whose
+/// op array keeps no `jit_extension` (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1097-1109`):
+/// the trace compiles, ends at the `DO_UCALL` the interpreter makes, and
+/// arms `f`'s landing past it; the call it wrote down names no op array
+/// (#3570).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
-fn a_call_into_an_evaled_function_stops_at_the_request_unit() -> Result<(), String> {
-    let (record, out) = recorded(
+fn a_call_into_an_evaled_function_exits_to_the_interpreter() -> Result<(), String> {
+    let (recorded, out) = testing::records::recording(
         &at("f", "enter"),
         "eval('function h() { return 7; }');
         function f() { return h() + 1; }
         echo f(), \"\\n\";",
     )?;
+    let record = &recorded.record;
     assert_eq!(out, "8\n");
-    assert_eq!(record.stop, Stop::RequestUnit);
-    assert_eq!(enters(&record), 0);
+    assert_eq!(record.stop, Stop::Interpreter);
+    assert!(record.stop.compiles());
+    assert_eq!(enters(record), 0);
+    let callees: Vec<Callee> = (record.events.iter())
+        .filter_map(|event| match event {
+            Event::InitCall { callee, .. } => Some(*callee),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(callees, [Callee::Request], "{:?}", record.events);
+    let Some(Event::Op { func, opline, .. }) = record.events.last() else {
+        return Err(format!("no last opline: {:?}", record.events));
+    };
+    let code = recorded.view.op_array(*func).ok_or("the view holds f()")?;
+    let last = code
+        .oplines
+        .get(opline.0 as usize)
+        .ok_or("past f()'s end")?;
+    assert!(super::is_do_call(last.opcode), "{:?}", last.opcode);
+    assert_eq!(
+        super::landings(record, &recorded.view),
+        [(record.root, OplineIdx(opline.0 + 1))]
+    );
+    Ok(())
+}
+
+/// A return trace that follows a recursive return past its root into a
+/// frame an `eval`'d function runs stops there with `Return`, on the
+/// branch of php's recorder that stops at a frame whose op array keeps no
+/// `jit_extension` (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1097-1109`;
+/// #3570).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_followed_into_an_evaled_caller_stops_with_return() -> Result<(), String> {
+    let (record, out) = recorded(
+        &[("record.every", "1"), ("record.start", "return")],
+        "eval('function e($n) { return g($n, \"r\"); }');
+        function r($n) { return $n; }
+        function g($n, $h) { $v = $h($n); return $v + 1; }
+        echo g(1, \"e\"), \"\\n\";",
+    )?;
+    assert_eq!(out, "3\n");
+    assert_eq!((record.start, record.stop), (Start::Return, Stop::Return));
+    let backs = (record.events.iter())
+        .filter(|event| matches!(event, Event::Back))
+        .count();
+    assert_eq!(
+        backs, 0,
+        "nothing past the root is followed: {:?}",
+        record.events
+    );
     Ok(())
 }
 

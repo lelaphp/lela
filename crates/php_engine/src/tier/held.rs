@@ -185,13 +185,30 @@ impl<'u> Scope<'u> {
 
     /// The op array of `frame` where it is the scope's own, a file's
     /// whose unit the scope holds, kept for the return to it; none for
-    /// any other, which [`Units::enter`] enters.
+    /// any other, which [`Units::enter`] enters. A frame standing at the
+    /// scope's number that serves another unit is not its own: a tier
+    /// that answered the return out of the scope's frame went on in
+    /// frames it pushed there, a recording begun at the return that
+    /// called on from the frame below (#3561).
     #[inline]
-    pub(super) fn own(self, kept: &mut Kept<'u>, frame: FrameRef) -> Option<&'u OpArray> {
+    pub(super) fn own(
+        self,
+        req: &Request,
+        kept: &mut Kept<'u>,
+        frame: FrameRef,
+    ) -> Option<&'u OpArray> {
         let Scope::Took { base, unit, .. } = self else {
             return None;
         };
         if frame != base {
+            return None;
+        }
+        let header = req.vm().at(frame)?;
+        if header.function.is_some()
+            || !req
+                .unit_of(header)
+                .is_some_and(|(served, _)| PublishedUnit::ptr_eq(served, unit))
+        {
             return None;
         }
         let code = exec::code_of(unit);

@@ -1470,11 +1470,18 @@ pub(crate) struct Headers {
     rows: std::cell::OnceCell<Rows>,
 }
 
-/// A call's header by the op array a user function's call serves, or
-/// the name a native's has, the argument count, and a method's called
-/// scope, which its header names: one image per call
+/// A call's header by the op array a published user function's call
+/// serves, the name of the class a request-scoped class's own method's is
+/// found under, the call's own name, the argument count, and a method's
+/// called scope, which its header names: one image per call
 /// [`tier::PlainCall`]'s equality tells apart.
-type CallKey = (Option<FuncRef>, Box<[u8]>, u32, Option<tier::ClassId>);
+type CallKey = (
+    Option<FuncRef>,
+    Box<[u8]>,
+    Box<[u8]>,
+    u32,
+    Option<tier::ClassId>,
+);
 
 #[derive(Debug, Default)]
 struct HeadersKept {
@@ -1609,16 +1616,10 @@ fn header_of(
     req: &Request,
     call: &tier::PlainCall,
 ) -> Option<usize> {
-    // A native's call by its name, and a request-scoped class's own
-    // method's by its class's, under which the request finds the function.
-    let named = match (call.callee(), call.own_class()) {
-        (None, _) => call.name(),
-        (Some(_), Some(class)) => class,
-        (Some(_), None) => &[],
-    };
     let key = (
         call.callee(),
-        Box::<[u8]>::from(named),
+        Box::<[u8]>::from(call.own_class().unwrap_or_default()),
+        Box::<[u8]>::from(call.name()),
         call.count(),
         // The scope the image writes: a request-scoped class's is none.
         call.scope().filter(|class| tier::class_published(*class)),

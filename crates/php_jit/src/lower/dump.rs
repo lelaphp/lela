@@ -26,7 +26,7 @@ use std::fmt::{self, Write as _};
 use php_engine::tier;
 use php_heap::ZvalType;
 
-use crate::record::func_name as func;
+use crate::record::{Callee, func_name as func};
 use crate::types::{
     Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Imm, Interrupt,
     Landing, Layout, Object, Op, OpId, Operand, Owners, PairCallee, PairClass, Place, Pointee,
@@ -194,7 +194,11 @@ impl<'a> Dump<'a> {
                 began,
                 plain,
             } => {
-                let target = callee.user().map_or("native".to_owned(), func);
+                let target = match callee {
+                    Callee::User(f) => func(*f),
+                    Callee::Native(_) => "native".to_owned(),
+                    Callee::Request => "request".to_owned(),
+                };
                 let in_place = if plain.is_some() { " in-place" } else { "" };
                 writeln!(
                     text,

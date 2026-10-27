@@ -172,7 +172,7 @@ impl Stop {
             Stop::CompiledLoop => "compiled loop",
             Stop::CompilerError => "JIT compilation error",
             Stop::MovedFrame => "frame moved to the heap",
-            Stop::RequestUnit => "call into a request-scoped op array",
+            Stop::RequestUnit => "root in a request-scoped op array",
             Stop::TooManyTraces => "too many traces",
             Stop::TooManyChildren => "too many side traces",
             Stop::TooManyExits => "too many side exits",
@@ -317,12 +317,20 @@ pub(crate) enum Callee {
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:2626-2650`); anything where it
     /// declares none.
     Native(Types),
+    /// A user function whose op array is the request's own, an `eval`'s
+    /// or an uncached include's, which a record never names: its number
+    /// is this request's alone, and another request numbers another op
+    /// array the same, so nothing a trace compiles may read it (design
+    /// §3.4, #3570). php's record names `func` here, which its traces may
+    /// embed since they belong to one process.
+    Request,
 }
 
 impl Callee {
     /// The callee of the call `call` is building, as `req` serves it.
     fn of(req: &Request, call: tier::Building) -> Callee {
         match call.target {
+            Some(f) if matches!(f.offset(), php_unit::MapPtrOffset::Request(_)) => Callee::Request,
             Some(f) => Callee::User(f),
             None => Callee::Native(
                 tier::native_returns(req, call.call).map_or(Types::ANY, |ty| types::declared(&ty)),
@@ -334,7 +342,7 @@ impl Callee {
     pub(crate) fn user(self) -> Option<FuncRef> {
         match self {
             Callee::User(f) => Some(f),
-            Callee::Native(_) => None,
+            Callee::Native(_) | Callee::Request => None,
         }
     }
 }
@@ -1253,8 +1261,70 @@ impl<'p> Recorder<'p> {
     }
 
     /// A call followed into `callee`, php's "Enter into function": the
-    /// op array held by the view or the recording stopped at it, then
-    /// php's depth and recursion limits, then the callee's entry word.
+    /// op array held by the view, then php's depth and recursion limits,
+    /// then the callee's entry word. A request-scoped op array cannot be
+    /// held, and the recording stops at it with `Interpreter`, as php's
+    /// `zend_jit_trace_execute` stops at a frame whose op array keeps no
+    /// `jit_extension` (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1097-1109`):
+    /// the trace leaves at the `DO_*CALL`, whose handler activates the
+    /// callee, and arms the landing past it ([`landings`]; #3570). The
+    /// loop's trace compiles and stops at the call, and the return trace
+    /// rooted at the landing past it links back to the loop's:
+    ///
+    /// ```php
+    /// eval('function h($a) { return $a + 1; } $declared = true;');
+    /// function f($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += h($i); } return $t; }
+    /// echo f(100), "\n";
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 5050
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:2
+    /// ---- TRACE 1 stop (exit to VM interpreter)
+    /// ---- TRACE 1 compiled
+    ///
+    /// ---- TRACE 2 start (return) $main() %SCRATCH%/witness.php:4
+    /// ---- TRACE 2 abort (inner loop)
+    /// ---- TRACE 2 start (loop) f() %SCRATCH%/witness.php:3
+    /// ---- TRACE 2 stop (exit to VM interpreter)
+    /// ---- TRACE 2 compiled
+    ///
+    /// ---- TRACE 3 start (return) f() %SCRATCH%/witness.php:3
+    /// ---- TRACE 3 stop (link to 2)
+    /// ---- TRACE 3 compiled
+    ///
+    ///      TRACE 2 exit 2 f() %SCRATCH%/witness.php:3
+    /// ---- TRACE 4 start (side trace 2/2) f() %SCRATCH%/witness.php:3
+    /// ---- TRACE 4 stop (return)
+    /// ---- TRACE 4 compiled
+    /// ```
+    ///
+    /// Calls into an `eval`'d function, one taking its argument by
+    /// reference, and an evaluated class's method, from a loop whose trace
+    /// stops at each, under force and where every guard fails once:
+    ///
+    /// ```php
+    /// eval('function h($a) { return $a + 1; } function r(&$a, $b = 10) { $a = $a * 2; return $a + $b; }');
+    /// eval('class Evald { public $b = 3; function get($v) { return $this->b * $v; } }');
+    /// function f($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $a = $i; $t += h($a) + r($a) + $a; } return $t; }
+    /// function g($o, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o->get($i); } return $t; }
+    /// echo f(30), " ", g(new Evald, 30), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 2505 1305
+    /// ```
+    ///
+    /// ```php
+    /// eval('function h($a) { return $a + 1; } function r(&$a, $b = 10) { $a = $a * 2; return $a + $b; }');
+    /// eval('class Evald { public $b = 3; function get($v) { return $this->b * $v; } }');
+    /// function f($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $a = $i; $t += h($a) + r($a) + $a; } return $t; }
+    /// function g($o, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o->get($i); } return $t; }
+    /// echo f(30), " ", g(new Evald, 30), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 2505 1305
+    /// ```
     fn pushed(
         &mut self,
         req: &Request,
@@ -1263,7 +1333,7 @@ impl<'p> Recorder<'p> {
         func: &mut FuncRef,
     ) -> Went {
         let Some(entered) = tier::func(req, callee).filter(|f| view.hold(req, *f)) else {
-            return Went::Stopped(Stop::RequestUnit);
+            return Went::Stopped(Stop::Interpreter);
         };
         if self.level > MAX_CALL_DEPTH {
             return Went::Stopped(Stop::TooDeep);
@@ -1355,7 +1425,11 @@ impl<'p> Recorder<'p> {
     }
 
     /// A return trace's return past its root that php follows, its
-    /// recursion counted; the stop where it may not.
+    /// recursion counted; the stop where it may not. A return into a
+    /// request-scoped op array stops with `Return`, on php's branch for a
+    /// frame whose op array keeps no `jit_extension`, its caller not the
+    /// frame it left (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1097-1109`;
+    /// #3570).
     fn followed_return(
         &mut self,
         req: &Request,
@@ -1367,7 +1441,7 @@ impl<'p> Recorder<'p> {
             return Some(Stop::TooDeepRet);
         }
         let Some(landed) = tier::func(req, caller).filter(|f| view.hold(req, *f)) else {
-            return Some(Stop::RequestUnit);
+            return Some(Stop::Return);
         };
         self.events.push(Event::Back);
         if self.count(1) {
