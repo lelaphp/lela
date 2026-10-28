@@ -1,0 +1,22 @@
+# Reviewed distribution downloads. See dist/README.md for refresh and bounds.
+toolchain_sha256 = "12dc5d64dbd96c1b07be2943241d52d9f6127a79ba47a820455ba7b873fc896a"
+
+[php]
+tag = "php-8.5.12"
+commit = "136e049ac10b032c83018e65b63b6df858943750"
+# SHA-256 of the files at the full commit above, cross-checked with the
+# php-src tree held by the oracle.
+[php.ini]
+"php.ini-development" = "218f8422b9343f049a41a75d6a22490da1e4d18537498bcb7b2ccacf920a1c19"
+"php.ini-production" = "40bb01691e2189f6cf1f9e2c4a29aa42f99b97944ba98f7b02036f50d3774116"
+
+[rustup]
+version = "1.29.2"
+# Published at static.rust-lang.org/rustup/archive/<version>/<host>/
+# rustup-init.sha256. BUILDARCH selects the installer, TARGETARCH does not.
+[rustup.amd64]
+host = "x86_64-unknown-linux-gnu"
+sha256 = "5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4"
+[rustup.arm64]
+host = "aarch64-unknown-linux-gnu"
+sha256 = "a9c168dbea81a84671c6b7a5c1795cb0eb699020110d107ddfca427bd797e697"

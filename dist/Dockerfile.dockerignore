@@ -6,5 +6,7 @@
 .git
 .claude
 research
-data
+# The compiled tier's build reads this extracted native table.
+data/*
+!data/func-infos.toml
 **/.DS_Store
