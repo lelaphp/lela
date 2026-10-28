@@ -29,7 +29,6 @@
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-#[cfg(not(dispatch = "tailcall"))]
 use php_heap::Zval;
 
 /// What a tier declares its state with, as an extension does (design
