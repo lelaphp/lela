@@ -8,6 +8,15 @@ A ticket is finished when its branch is ready to merge. `xtask track work` reads
 
 **Where you stand.** `cargo xtask ticket read <n>` prints the ticket's acceptance criteria and holds the work to them; without a number it reads the branch's. `gh issue view <n>` is the body and the blocking edges. `AGENTS.md` is the map and binds: read it and `CONTEXT.md` before the first edit, and read the ADR before touching what it names. `cargo xtask track` says the branch, the ticket it records and what `done` measures since, the merge base with `main`. The ticket's track is its `track:` label, or `main` where it carries none (ADR-0009).
 
+**Checkout preflight.** Before implementation in the actual allocated checkout:
+
+- Confirm its absolute path, branch, source head, recorded ticket and exclusive file ownership; reconcile existing edits and active owners before writing.
+- Exercise the normal region renderer and `computed check` there before expensive work. Separate stale regions the renderer can refresh from an untrusted checkout or renderer failure. A trust grant remains a person's; wire that blocker before starting dependent work.
+- Verify the pinned oracle and the task's required corpus provenance, libraries and runner access. Establish budget headroom and disk space with the existing instruments and readings; stop new large builds below /specs' disk floor.
+- Read existing blockers and apply “Whether it is still to do” below at that head; reuse only matching evidence.
+
+Record the checkout/head, evidence and concrete blockers in the handoff material. Complete independent work while a wired external blocker waits; keep blocked criteria honest. Preflight is a small examination of this task's prerequisites, not a broad validation run or authority to provision trust, credentials or protected files.
+
 **Whether it is still to do.** Before the first edit, measure the ticket against the tip you were laid down at: run what its "what happened" ran, the probe under the engine and under the oracle, the named test, the grep, and read each box against what you see. A ticket whose behaviour already holds is answered under another number; its ending is the withdrawal below with that measurement as the reason, or, where every box holds, the close. Where some boxes hold and others do not, build only what does not. The oldest ticket is the first `track next` names and the likeliest to be answered already.
 
 **The work.** The witness is the test: write the `php` fence beside the kernel or native before the body where you can, pin it with `cargo xtask witness --accept`, and read what it pinned rather than authoring an `exit=`. Copy php's algorithm where the behaviour is observable; where it is not, pick the smallest model. The smallest proof is the instrument for the crate you touched, `cargo xtask test --crate xtask` for the harness itself, and the commit's own hook is the measurement that counts: stage-commit's step 4 says what not to run twice. A difference from the oracle the engine is right about is a row proposed in the commit message, never written into `docs/divergence.toml`.
