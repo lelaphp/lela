@@ -32,9 +32,9 @@
 # .claude/harness.local.md, is not rendered here: no commit takes it, and
 # every session re-renders it, so its render here could only refuse a
 # commit for another session's write (#1312). Every command's own exit is
-# read; past the first group the commit is refused while any failed, and
-# clippy and test both run before witness is skipped. When a path under
-# harness-plugins/ is staged, the function-hook declarations are rewritten
+# read; a region refusal ends before clippy and test (#3611). Once the
+# regions pass, clippy and test both run and either can refuse the commit.
+# When a path under harness-plugins/ is staged, the function-hook declarations are rewritten
 # first (#62): harness-plugins/types is a tracked generated file, written
 # by the committer's own Claude Code as `declarations` below says, and
 # staged; `tsc` then holds every plugin's modules to it, and for each
@@ -290,6 +290,10 @@ if ! computed check $regions >/dev/null 2>&1; then
     status=1
 fi
 rm -rf "$at_once"
+if [ "$status" != 0 ]; then
+    echo "pre-commit: refused before clippy and test ran; fix the regions above" >&2
+    exit "$status"
+fi
 step $X clippy --staged
 step $X test --staged
 # No witness here (#2982): it builds the lanes' optimised binary, minutes
