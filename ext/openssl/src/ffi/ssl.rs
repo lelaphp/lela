@@ -604,9 +604,9 @@ pub(crate) fn san_names(cert: &Certificate) -> Vec<San> {
         let kind = unsafe { (*name).type_ };
         // SAFETY: as above.
         let data = unsafe { (*name).d }.cast::<sys::ASN1_STRING>();
-        // SAFETY: the string is live.
-        let stored = usize::try_from(unsafe { sys::ASN1_STRING_length(data) }).unwrap_or(0);
         if kind == sys::GEN_DNS {
+            // SAFETY: GEN_DNS holds a live ASN1_IA5STRING.
+            let stored = usize::try_from(unsafe { sys::ASN1_STRING_length(data) }).unwrap_or(0);
             let mut utf8: *mut c_uchar = ptr::null_mut();
             // SAFETY: the string is live; the output is ours to free.
             if unsafe { sys::ASN1_STRING_to_UTF8(&raw mut utf8, data) } < 0 || utf8.is_null() {
@@ -634,6 +634,8 @@ pub(crate) fn san_names(cert: &Certificate) -> Vec<San> {
                 out.push(San::Srv);
             }
         } else if kind == sys::GEN_IPADD {
+            // SAFETY: GEN_IPADD holds a live ASN1_OCTET_STRING.
+            let stored = usize::try_from(unsafe { sys::ASN1_STRING_length(data) }).unwrap_or(0);
             // SAFETY: the string is live and holds `stored` bytes.
             let bytes = unsafe { sys::ASN1_STRING_get0_data(data) };
             if !bytes.is_null() {

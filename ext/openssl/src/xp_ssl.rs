@@ -861,6 +861,8 @@ fn expand_ipv6(bytes: &[u8]) -> String {
 /// }
 /// served('DNS:a*aaaa, DNS:w*www.example.org', ['aaaa', 'www.example.org', 'cn.example.org', 'axaaaa']);
 /// served('IP:127.0.0.1', ['cn.example.org', 'other']);
+/// served('URI:https://san.example.org/x', ['cn.example.org']);
+/// served('otherName:1.3.6.1.5.5.7.8.7;IA5STRING:_https.san.example.org', ['cn.example.org']);
 /// ```
 /// ```expect process
 /// aaaa: stream_socket_client(): Peer certificate subjectAltName did not match expected name `aaaa'
@@ -869,6 +871,8 @@ fn expand_ipv6(bytes: &[u8]) -> String {
 /// axaaaa: connected
 /// cn.example.org: connected
 /// other: stream_socket_client(): Peer certificate CN=`cn.example.org' did not match expected CN=`other'
+/// cn.example.org: stream_socket_client(): Peer certificate subjectAltName did not match expected name `cn.example.org'
+/// cn.example.org: stream_socket_client(): Peer certificate subjectAltName did not match expected name `cn.example.org'
 /// ```
 fn matches_san_list(cert: &Certificate, subject: &[u8]) -> SanMatch {
     let subject_v6 = std::str::from_utf8(subject)
