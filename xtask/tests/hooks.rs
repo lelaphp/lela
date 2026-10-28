@@ -658,6 +658,18 @@ fn pre_commit_names_a_build_that_writes_no_declarations_and_allows_the_commit() 
     assert!(!committed.contains("harness-plugins/types"), "{committed}");
 }
 
+/// A region refusal ends before building instruments start (#3611),
+/// preserving the staged change for the person who can resolve it.
+fn assert_no_builds(scratch: &Scratch) {
+    let calls = scratch.calls("cargo");
+    for instrument in ["xtask clippy", "xtask test"] {
+        assert!(
+            !calls.iter().any(|call| call.starts_with(instrument)),
+            "a refused region started {instrument}: {calls:?}"
+        );
+    }
+}
+
 /// A region a hand edited is refused with the line naming
 /// `computed check` and what it said; the change stays staged for the person.
 #[test]
@@ -671,6 +683,7 @@ fn a_hand_edited_region_refuses_the_commit_naming_computed_check() {
     assert!(out.contains("AGENTS.md:3 layout tree hand-edited"), "{out}");
     let staged = scratch.git(&["diff", "--cached", "--name-only"], false);
     assert_eq!(staged.trim(), "crates/php_heap/src/lib.rs");
+    assert_no_builds(&scratch);
 }
 
 /// A region whose command fails is never committed unrendered: `xtask
@@ -686,6 +699,7 @@ fn a_region_whose_command_fails_refuses_the_commit() {
     assert!(out.contains("exec unrendered failed; body kept"), "{out}");
     assert!(out.contains("could not be rendered"), "{out}");
     assert!(out.contains("AGENTS.md:3 layout exec unrendered"), "{out}");
+    assert_no_builds(&scratch);
 }
 
 /// A root without a trust grant is refused with the `computed trust`
@@ -704,6 +718,7 @@ fn an_untrusted_root_refuses_the_commit_naming_computed_trust() {
     assert!(out.contains("the regions were not rendered"), "{out}");
     let staged = scratch.git(&["diff", "--cached", "--name-only"], false);
     assert_eq!(staged.trim(), "crates/php_heap/src/lib.rs");
+    assert_no_builds(&scratch);
 }
 
 /// An instrument that fails past the first group refuses the commit by
