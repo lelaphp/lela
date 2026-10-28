@@ -504,7 +504,7 @@ fn phpt_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Phpt)
     if let (Some(subset), false) = (&ask.subset, ask.upstream.is_empty()) {
         return phpt::upstream::compare(manifest, &registry, subset, &ask.upstream, ask.jobs);
     }
-    let since = ask.base;
+    let (since, per_commit) = (ask.baseline.base, ask.baseline.per_commit);
     let ask = phpt::Ask {
         subset: ask.subset,
         full: ask.full,
@@ -517,7 +517,7 @@ fn phpt_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Phpt)
         unkept: ask.unkept,
     };
     if let Some(since) = &since {
-        return phpt::base::take(root, manifest, &registry, &ask, since);
+        return phpt::base::take(root, manifest, &registry, &ask, since, per_commit);
     }
     let readings = phpt::run(root, manifest, &registry, &ask)?;
     let outcome = recorded(store, &readings)?;

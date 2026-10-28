@@ -586,19 +586,8 @@ pub(crate) struct Phpt {
     /// test met there is not met here, and the exit is those readings'.
     #[arg(long, value_name = "COMMIT")]
     pub against: Option<String>,
-    /// Take the run `--against` holds each subset to at the merge base
-    /// with this ref, `main` unless named, as `done --base` takes it: the
-    /// subset named or every touched one the lane runs, run in a worktree
-    /// laid at the base with its hosts built, the runs kept in the main
-    /// worktree and the worktree removed (#2364).
-    #[arg(
-        long,
-        value_name = "REF",
-        num_args = 0..=1,
-        default_missing_value = "main",
-        conflicts_with_all = ["full", "jit", "engine", "control", "against", "unkept"]
-    )]
-    pub base: Option<String>,
+    #[command(flatten)]
+    pub baseline: PhptBase,
     /// How many tests run at once: the machine's cores unless named, and
     /// one test at a time at 1. Tests that share a `--CONFLICTS--` key
     /// never run at once whatever the number.
@@ -623,6 +612,28 @@ pub(crate) struct Phpt {
         conflicts_with_all = ["full", "jit", "engine", "control", "census", "against", "base", "unkept"]
     )]
     pub upstream: Vec<PathBuf>,
+}
+
+/// The selection of runs to recover at a published base.
+#[derive(Debug, Args)]
+pub(crate) struct PhptBase {
+    /// Take the run `--against` holds each subset to at the merge base
+    /// with this ref, `main` unless named, as `done --base` takes it: the
+    /// subset named or every touched one the lane runs, run in a worktree
+    /// laid at the base with its hosts built, the runs kept in the main
+    /// worktree and the worktree removed (#2364).
+    #[arg(
+        long,
+        value_name = "REF",
+        num_args = 0..=1,
+        default_missing_value = "main",
+        conflicts_with_all = ["full", "jit", "engine", "control", "against", "unkept"]
+    )]
+    pub base: Option<String>,
+    /// With `--base`, take every subset of the per-commit lane, including
+    /// untouched crates. This does not select the nightly corpus.
+    #[arg(long, requires = "base", conflicts_with_all = ["subset", "full"])]
+    pub per_commit: bool,
 }
 
 /// The binary under test one `phpt` run asks for, at most one of the two.

@@ -6,8 +6,9 @@
 //!
 //! The call does each of those steps: the merge base of `HEAD` with
 //! `REF`, `main` unless named, as `done --base` takes it; the subset
-//! named, or each of the touched crates the per-commit lane runs a subset
-//! of ([`done::measured_by_the_lane`]), less the ones a run is kept for
+//! named, all of the per-commit lane with `--per-commit`, or each of the
+//! touched crates the per-commit lane runs a subset of
+//! ([`done::measured_by_the_lane`]), less the ones a run is kept for
 //! at that base already, so a base one call took serves every later one
 //! while the engine's tree stands; a detached worktree at the base beside
 //! the others ([`worktree::homes`]), its `target/<lane profile>` seeded
@@ -57,23 +58,11 @@ pub(crate) fn take(
     registry: &Registry,
     ask: &Ask,
     since: &str,
+    per_commit: bool,
 ) -> Result<()> {
     let base = Base::of(root, Some(since))?;
     let commit = short(&base.commit);
-    let source = manifest.pin()?.source.tree()?;
-    let names = match &ask.subset {
-        Some(name) => vec![name.clone()],
-        None => touched(root, manifest, &base)?,
-    };
-    let mut wanted = Vec::new();
-    for name in names {
-        let scope = Subset::resolve(manifest, &source, &name)?.scope;
-        if against::kept_at(root, manifest, &base.commit, &scope)?.is_ok() {
-            say(&format!("a run of {scope} is kept at {base} already"));
-        } else {
-            wanted.push(scope);
-        }
-    }
+    let wanted = wanted(root, manifest, ask, &base, per_commit)?;
     if wanted.is_empty() {
         say(&format!("no run to take at {base}"));
         return Ok(());
@@ -106,6 +95,40 @@ pub(crate) fn take(
     }
     say(&format!("kept: {} at {base}", listed(&wanted)));
     Ok(())
+}
+
+/// The selected scopes without a valid run under the caller's recipe.
+fn wanted(
+    root: &Path,
+    manifest: &Manifest,
+    ask: &Ask,
+    base: &Base,
+    per_commit: bool,
+) -> Result<Vec<String>> {
+    let source = manifest.pin()?.source.tree()?;
+    let names = match &ask.subset {
+        Some(name) => vec![name.clone()],
+        None if per_commit => Subset::lane(manifest, &Carried::binary(root)?, &source)
+            .into_iter()
+            .map(|subset| subset.scope)
+            .collect(),
+        None => touched(root, manifest, base)?,
+    };
+    let mut wanted = Vec::new();
+    for name in names {
+        let subset = Subset::resolve(manifest, &source, &name)?;
+        if per_commit && subset.testless(manifest)? {
+            say(&format!("{} has no tests of its own", subset.scope));
+            continue;
+        }
+        let scope = subset.scope;
+        if against::kept_at(root, manifest, &base.commit, &scope)?.is_ok() {
+            say(&format!("a run of {scope} is kept at {base} already"));
+        } else {
+            wanted.push(scope);
+        }
+    }
+    Ok(wanted)
 }
 
 /// The touched crates the per-commit lane runs a subset of, since `base`.
