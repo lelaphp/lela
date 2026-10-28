@@ -1621,7 +1621,7 @@ fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
 /// While `DAX_BUILD_RUNNER` is set the oracle job is skipped, and the done
 /// step names as `--not-run` exactly the instruments of condition 1 that
 /// job's steps run, so a lane added there is named here or `done` is red
-/// for its absence (#2477); and `fold`, which no runner takes, always.
+/// for its absence (#2477). No instrument without an owed row is named.
 #[test]
 fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -1654,16 +1654,12 @@ fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
         .skip(1)
         .filter_map(|rest| rest.split_whitespace().next())
         .collect();
-    // `fold` is named on every run, before the test of the oracle job:
-    // no runner is the aarch64 Mac it reads (#3384).
-    let mut asked = runs.clone();
-    asked.insert("fold");
-    assert_eq!(named, asked, "{step}");
-    let always = step
-        .find("set -- --not-run fold\n")
-        .expect("fold is named on every run");
+    assert_eq!(named, runs, "{step}");
+    let empty = step
+        .find("set --\n")
+        .expect("no instrument is excluded before the oracle job is tested");
     assert!(
-        always < step.find("if [ \"$ORACLE\" = skipped ]").unwrap(),
+        empty < step.find("if [ \"$ORACLE\" = skipped ]").unwrap(),
         "{step}"
     );
     assert!(
