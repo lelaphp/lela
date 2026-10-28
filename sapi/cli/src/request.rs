@@ -361,13 +361,7 @@ pub fn report(engine: &Engine, report: &Report, file: Option<&Path>) -> i32 {
             ]
             .concat()
         }
-        Report::IniFiles => {
-            b"printf(\"Configuration File (php.ini) Path: \\\"%s\\\"\\n\", PHP_CONFIG_FILE_PATH); \
-            echo \"Loaded Configuration File:         (none)\\n\", \
-            \"Scan for additional .ini files in: (none)\\n\", \
-            \"Additional .ini files parsed:      (none)\\n\";"
-                .to_vec()
-        }
+        Report::IniFiles => ini_files(engine),
     };
     match describe(file, &[], false) {
         Ok(mut description) => {
@@ -377,6 +371,40 @@ pub fn report(engine: &Engine, report: &Report, file: Option<&Path>) -> i32 {
         }
         Err(code) => code,
     }
+}
+
+/// `PHP_CLI_MODE_SHOW_INI_CONFIG` (`Z/sapi/cli/php_cli.c:1127-1142`):
+/// the paths quoted where present, `(none)` only for NULL, and the
+/// scanned files joined with comma-newlines and their final newline,
+/// before the report's own newline. Serve the bytes in the report's
+/// request so its startup, output buffering and shutdown are the CLI's.
+fn ini_files(engine: &Engine) -> Vec<u8> {
+    let files = engine.ini_files();
+    let path = |path: Option<&[u8]>| {
+        path.map_or_else(
+            || b"(none)".to_vec(),
+            |path| [b"\"".as_slice(), path, b"\""].concat(),
+        )
+    };
+    let scanned: Vec<_> = files.scanned().collect();
+    let scanned = if scanned.is_empty() {
+        b"(none)".to_vec()
+    } else {
+        [scanned.join(b",\n".as_slice()), b"\n".to_vec()].concat()
+    };
+    let body = [
+        b"Configuration File (php.ini) Path: \"".as_slice(),
+        files.ini_path(),
+        b"\"\nLoaded Configuration File:         ",
+        &path(files.loaded()),
+        b"\nScan for additional .ini files in: ",
+        &path(files.scan_dir()),
+        b"\nAdditional .ini files parsed:      ",
+        &scanned,
+        b"\n",
+    ]
+    .concat();
+    [b"echo ".as_slice(), &quoted(&body), b";"].concat()
 }
 
 /// `-i`, `do_cli`'s first loop (`php_cli.c:622-630`): `php_print_info`

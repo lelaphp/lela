@@ -1213,6 +1213,7 @@ test::Engine::dump_before_optimizer
 test::Engine::frameless
 test::Engine::has_shell
 test::Engine::highlight
+test::Engine::ini_files
 test::Engine::ini_get
 test::Engine::ini_value
 test::Engine::lint
