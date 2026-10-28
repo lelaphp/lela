@@ -6,6 +6,27 @@
 # oracle's run is the expectation. The grammar is
 # xtask/src/witness/host.rs's.
 
+# `PHP_CLI_MODE_SHOW_INI_CONFIG`: the loaded path and scan path are quoted,
+# the scanned files keep their scan order, comma-newlines and final newline.
+# Only the configured build path differs between these two builds; the
+# three startup facts and every byte around them are held to php's bytes.
+[[line]]
+name = "ini-files-report-startup-facts"
+args = ["--ini"]
+env = { PHPRC = "{dir}/php.ini", PHP_INI_SCAN_DIR = "{dir}/scan z:{dir}/scan a" }
+files = { "php.ini" = "memory_limit=77M\n", "scan z/20-z.ini" = "precision=14\n", "scan z/10-a.ini" = "precision=15\n", "scan a/00-last.ini" = "precision=16\n", "empty/" = "" }
+mask = [['(?m)^(Configuration File \(php.ini\) Path: )"[^"]*"$', '${1}"<build path>"']]
+[[line.then]]
+args = ["--ini"]
+env = { PHP_INI_SCAN_DIR = "{dir}/empty" }
+[[line.then]]
+args = ["--ini"]
+env = { PHP_INI_SCAN_DIR = "{dir}/missing" }
+[[line.then]]
+args = ["-n", "--ini"]
+[[line.then]]
+args = ["-n", "-c", "{dir}/php.ini", "--ini"]
+
 # `sapi_cli_ub_write` writes each chunk to fd 1 as it comes and the error
 # stream reaches fd 2 as it is written, so a child process writing to the
 # stdout it inherits stands between the request's own writes; what a handler

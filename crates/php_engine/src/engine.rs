@@ -5056,6 +5056,13 @@ impl Engine {
         self.shared.ini.master(name).map(<[u8]>::to_vec)
     }
 
+    /// The php.ini files read at startup, including the scan path even
+    /// where it contained no files, as `PHP_CLI_MODE_SHOW_INI_CONFIG` reads.
+    #[must_use]
+    pub fn ini_files(&self) -> &crate::api::request::IniFiles {
+        &self.shared.ini_files
+    }
+
     /// `tsrm_realpath(path, NULL)` outside any request
     /// (`Z/Zend/zend_virtual_cwd.c:1717`): `path` with every link
     /// resolved, through the engine's realpath cache, which it reads and
