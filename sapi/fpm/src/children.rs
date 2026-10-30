@@ -1,5 +1,5 @@
 //! `fpm_children.c`: children made for a pool up to what its process
-//! manager asks, each forked with its pipes and its scoreboard slot, and
+//! manager asks, each forked with its pipes and its `scoreboard` slot, and
 //! buried when it exits: its exit logged, its slot freed, what it still
 //! had to say read, and another made in its place unless the process
 //! manager ended it.
@@ -30,7 +30,7 @@ pub(crate) enum Made {
 
 /// `fpm_stdio_prepare_pipes`: a pipe for the child's stdout and one for
 /// its stderr, their read ends non-blocking, where the pool catches its
-/// workers' output.
+/// workers' stdout and stderr.
 fn prepare_pipes(catch: bool) -> Result<Option<[(OwnedFd, OwnedFd); 2]>, ()> {
     if !catch {
         return Ok(None);

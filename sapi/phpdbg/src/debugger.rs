@@ -1,5 +1,5 @@
 //! The debugging host's tier (`jit-design.md` §2.4, revision 8): its
-//! `safepoint` is the gate and `step` is its loop, as the recorder's.
+//! `safepoint` is where it stops and `step` is its loop, as the recorder's.
 //! At the activation of the frame a serving enters, the session takes
 //! the serving over and drives it one handler at a time, checking what
 //! php's `phpdbg_execute_ex` checks between two handlers
@@ -19,7 +19,7 @@ use crate::opcodes;
 use crate::out;
 use crate::prompt::{self, Here, Outcome};
 use crate::read;
-use crate::session::{self, AfterRun, Context, Execution, Origin, Plan, SeekKind, Session};
+use crate::session::{self, AfterServe, ExecCompile, Execution, Origin, Plan, SeekKind, Session};
 use crate::shown;
 
 /// The tier the `phpdbg` binary binds.
@@ -73,10 +73,10 @@ impl Tier for Debugger {
         natives: false,
     };
 
-    /// php compiles the execution context and executes it only at `run`
+    /// php compiles the `exec` file and executes it only at `run`
     /// (`zend_execute(PHPDBG_G(ops))`, `Z/sapi/phpdbg/phpdbg_prompt.c:866`),
     /// so an observer is handed the main file's begin there, after what
-    /// the prompt served before it, and nothing for a cycle never run
+    /// the prompt served before it, and nothing for a cycle never served
     /// ([`executed`]).
     const HOLDS: bool = true;
 
@@ -134,16 +134,16 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
     };
     match plan {
         Plan::Hold => {
-            session::with(req, |s| s.plan = Some(Plan::Run));
+            session::with(req, |s| s.plan = Some(Plan::Serve));
             held(req, frame)
         }
         Plan::Init => {
-            session::with(req, |s| s.plan = Some(Plan::Run));
+            session::with(req, |s| s.plan = Some(Plan::Serve));
             let Some(mut session) = session::take(req) else {
                 return Flow::Continue;
             };
-            crate::init::run(&mut session, &mut Here::Idle { req });
-            let quits = session.after_run == AfterRun::Quit;
+            crate::init::serve(&mut session, &mut Here::Idle { req });
+            let quits = session.after_serve == AfterServe::Quit;
             let runs = std::mem::take(&mut session.init_runs);
             if runs && session.stopped.is_none() {
                 // Before the run's compile, php's own after the init files,
@@ -187,7 +187,7 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
             Flow::Resume(frame)
         }
         Plan::Idle => {
-            session::with(req, |s| s.plan = Some(Plan::Run));
+            session::with(req, |s| s.plan = Some(Plan::Serve));
             let Some(mut session) = session::take(req) else {
                 return Flow::Continue;
             };
@@ -198,8 +198,8 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
                 // compile under `PHPDBG_DISCARD_OUTPUT` once php is fully
                 // started, so its log stands at a prompt that writes
                 // nothing (`Z/sapi/phpdbg/phpdbg.c:1540-1553`).
-                let compiles = session.init_due && session.context == Context::Refused;
-                crate::init::run(&mut session, &mut Here::Idle { req });
+                let compiles = session.init_due && session.exec_compile == ExecCompile::Refused;
+                crate::init::serve(&mut session, &mut Here::Idle { req });
                 if compiles && session.stopped.is_none() {
                     out::discarded(&mut session, |session| {
                         prompt::refused_again(session, &mut Here::Idle { req });
@@ -211,7 +211,7 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
             tier::exit(req);
             Flow::Resume(frame)
         }
-        Plan::Run => {
+        Plan::Serve => {
             if initialized(req) {
                 tier::exit(req);
                 return Flow::Resume(frame);
@@ -219,7 +219,10 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
             // The run's own entry, not what the init files or the prompt
             // serve inside the request.
             session::with(req, |s| {
-                if !s.initializing && s.origin == Origin::Program && s.execution == Execution::Run {
+                if !s.initializing
+                    && s.origin == Origin::Program
+                    && s.execution == Execution::Serving
+                {
                     announce(s);
                 }
             });
@@ -234,13 +237,13 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
     }
 }
 
-/// The init files run where a cycle starts with a run, before the run's
-/// first opline, in the run's request, so what they leave the program
+/// The init files are read where a cycle starts with a `run`, before the `run`'s
+/// first opline, in the `run`'s request, so what they leave the program
 /// finds; true where they stopped the session. php's `run` begins after
 /// them: a code block that bailed out of the loop left `in_execution`
 /// set, so `run` asks before it restarts, and stands at the prompt where
-/// the answer is no; where they left something pending, the context
-/// does not open; and the run cleans up after them.
+/// the answer is no; where they left something pending, the `exec` file
+/// does not open; and the `run` cleans up after them.
 fn initialized(req: &mut Request) -> bool {
     if session::with(req, |s| !s.init_due).unwrap_or(true) {
         return false;
@@ -250,7 +253,7 @@ fn initialized(req: &mut Request) -> bool {
     };
     let execution = std::mem::replace(&mut session.execution, Execution::Not);
     session.program_held = true;
-    crate::init::run(&mut session, &mut Here::Idle { req });
+    crate::init::serve(&mut session, &mut Here::Idle { req });
     session.program_held = false;
     // The run's compile after them comes under `PHPDBG_DISCARD_OUTPUT`.
     compiled_after_init(&mut session, req, true);
@@ -260,8 +263,8 @@ fn initialized(req: &mut Request) -> bool {
     session.seek = None;
     session.handled = None;
     session.breaks.reset_hits();
-    let quits = session.after_run == AfterRun::Quit;
-    if session.inline_run {
+    let quits = session.after_serve == AfterServe::Quit;
+    if session.inline_serve {
         // A `run` among them runs the program now.
         let frame = tier::entry(req);
         inline(&mut session, req, frame);
@@ -295,14 +298,14 @@ fn initialized(req: &mut Request) -> bool {
     stopped
 }
 
-/// `phpdbg_compile`'s notice, once for the context, where nothing has
-/// written it yet: at the held prompt, or where `run` compiles a context
+/// `phpdbg_compile`'s notice, once for the `exec` file, where nothing has
+/// written it yet: at the held prompt, or where `run` compiles an `exec` file
 /// the init files left unopened.
 pub fn announce(session: &mut Session) {
-    if session.context == Context::Announced {
+    if session.exec_compile == ExecCompile::Announced {
         return;
     }
-    session.context = Context::Announced;
+    session.exec_compile = ExecCompile::Announced;
     if let Some(exec) = &session.exec {
         let message = if session.stdin_code.is_some() {
             b"Successful compilation of stdin input".to_vec()
@@ -313,7 +316,7 @@ pub fn announce(session: &mut Session) {
     }
 }
 
-/// The context's compile after the init files, which the compiler
+/// The `exec` file's compile after the init files, which the compiler
 /// refused: its log as `php_sapi_phpdbg_log_message` writes it, the
 /// listing where nothing executes, and the status 255; the first cycle
 /// is fully started after it, so a later fatal's log stops at a prompt.
@@ -322,13 +325,13 @@ fn refused(session: &mut Session, req: &mut Request) {
     session.started = true;
 }
 
-/// A `run` in the init files about to run the program at `frame`: the
-/// run's clean up, and its `phpdbg_clean` after it, which lets go of the
-/// compiled context, so a `print exec` after it compiles it again.
+/// A `run` in the init files about to serve the program at `frame`: the
+/// `run`'s clean up, and its `phpdbg_clean` after it, which lets go of the
+/// compiled `exec` file, so a `print exec` after it compiles it again.
 fn inline(session: &mut Session, req: &mut Request, frame: FrameRef) {
     // The run's `phpdbg_clean(1, 0)` lets the line go.
     session.command_line = None;
-    session.execution = Execution::Run;
+    session.execution = Execution::Serving;
     session.seek = None;
     session.handled = None;
     session.breaks.reset_hits();
@@ -336,8 +339,8 @@ fn inline(session: &mut Session, req: &mut Request, frame: FrameRef) {
     session.init_compiled = false;
 }
 
-/// A cycle a yes to its startup run's question restarted: its own startup
-/// run is `phpdbg_interactive(1, first_command)`, the line the cycle
+/// A cycle a yes to its startup `run`'s question restarted: its own startup
+/// `run` is `phpdbg_interactive(1, first_command)`, the line the cycle
 /// before parsed last read at a prompt in place of `run`
 /// (`Z/sapi/phpdbg/phpdbg.c:1588-1592`), and the prompt after it, where
 /// nothing executes. An init file whose `ev` bailed out has it bail out
@@ -370,14 +373,14 @@ fn idle_prompt(session: &mut Session, req: &mut Request, quits: bool) {
 
 /// What `phpdbg_compile` answers where the init files left a throwable
 /// or an exit pending: `php_stream_open_for_zend_ex` refuses the file,
-/// `Could not open file`, and the context is not compiled. True where
+/// `Could not open file`, and the `exec` file is not compiled. True where
 /// that is so.
 fn unopened(session: &mut Session, req: &mut Request) -> bool {
     if !read::open_refused(req) {
         return false;
     }
     // `run` compiles it again, and writes the notice then.
-    session.context = Context::Unannounced;
+    session.exec_compile = ExecCompile::Unannounced;
     session.out.error(
         format!(
             "Could not open file {}",
@@ -388,7 +391,7 @@ fn unopened(session: &mut Session, req: &mut Request) -> bool {
     true
 }
 
-/// What the cycle's compile of the execution context wrote, which php
+/// What the cycle's compile of the `exec` file wrote, which php
 /// writes after the init files (`Z/sapi/phpdbg/phpdbg.c:1502-1553`),
 /// written there, its log discarded where `discard` says; where the init
 /// files stopped the session or left something pending, php's compile
@@ -401,7 +404,7 @@ fn compiled_after_init(session: &mut Session, req: &Request, discard: bool) {
     }
 }
 
-/// The execution context compiled and standing at its first opline: the
+/// The `exec` file compiled and standing at its first opline: the
 /// compile notice, then the prompt, until `run` goes on in this same
 /// request or a command ends it. Where the init files left something
 /// pending, php's compile after them fails, and the prompt stands with
@@ -414,10 +417,10 @@ fn held(req: &mut Request, frame: FrameRef) -> Flow {
     // under `PHPDBG_DISCARD_OUTPUT`.
     let later = session.init_ran;
     session.program_held = true;
-    crate::init::run(&mut session, &mut Here::Idle { req });
+    crate::init::serve(&mut session, &mut Here::Idle { req });
     session.program_held = false;
     compiled_after_init(&mut session, req, later);
-    if session.stopped.is_none() && session.inline_run {
+    if session.stopped.is_none() && session.inline_serve {
         // A `run` among them runs the program now, the loop stopping for
         // nothing but a throwable nothing catches.
         inline(&mut session, req, frame);
@@ -454,7 +457,7 @@ fn held(req: &mut Request, frame: FrameRef) -> Flow {
     executed(req, frame)
 }
 
-/// `run`'s `zend_execute` over the execution context held at `frame`, the
+/// `run`'s `zend_execute` over the `exec` file held at `frame`, the
 /// request's first: the observer's begin of the main file, which the
 /// engine raises for no frame this tier holds, then the loop.
 fn executed(req: &mut Request, frame: FrameRef) -> Flow {
@@ -465,7 +468,7 @@ fn executed(req: &mut Request, frame: FrameRef) -> Flow {
 /// The prompt where nothing is executing, stood at again after a
 /// command that goes on with a program none is running, until one ends
 /// the request or, in the held request, `run` goes on in it. With no
-/// execution context to hold, or one the compiler refused, the idle
+/// `exec` file to hold, or one the compiler refused, the idle
 /// request stands across the prompt's commands as php's one request
 /// does, so what one `ev` leaves the next finds.
 ///
@@ -498,9 +501,9 @@ fn prompted(
 
 /// What the loop does with the opline at hand.
 enum Next {
-    /// Run it with `step`.
+    /// Step it with `step`.
     Step,
-    /// Run the unwinder over the frame, which takes its throwable.
+    /// Hand the frame to the unwinder, which takes its throwable.
     Unwind,
     /// Hand the serving back: the loop does what comes next.
     HandBack,
@@ -536,9 +539,9 @@ fn drive(req: &mut Request, frame: FrameRef) -> Flow {
 /// entry (`Z/sapi/phpdbg/phpdbg.c:731-770`), outside what `ev` serves and
 /// other than under `-rr`: the listing where the request stands, the frame the
 /// loop was stepping or `[no active file]` where nothing is executing,
-/// then, once the execution context's first compile is behind the
+/// then, once the `exec` file's first compile is behind the
 /// session, a prompt there until a command goes on, after which the fatal
-/// ends the run; a prompt that stopped, `quit` among them, bails out of
+/// ends the `run`; a prompt that stopped, `quit` among them, bails out of
 /// the log before php's `php_error_cb` writes the status.
 ///
 /// ```php
@@ -573,14 +576,14 @@ pub fn fatal_logged(req: &mut Request) -> AfterLog {
     // after the init files.
     if session.out.logging()
         || session.origin == Origin::Eval
-        || (session.after_run == AfterRun::Quit && !session.initializing)
+        || (session.after_serve == AfterServe::Quit && !session.initializing)
     {
         session::put(req, session);
         return AfterLog::Returned;
     }
     let standing = session
         .standing
-        .filter(|_| session.execution == Execution::Run)
+        .filter(|_| session.execution == Execution::Serving)
         .and_then(|frame| read::position(req, frame).map(|position| (frame, position)));
     let (file, line) = standing
         .as_ref()
@@ -595,12 +598,14 @@ pub fn fatal_logged(req: &mut Request) -> AfterLog {
     // The context's own compile refused it: nothing is held, and the
     // first frame an `ev` at this prompt enters is no program's.
     if session.plan == Some(Plan::Hold) {
-        session.plan = Some(Plan::Run);
-        session.context = Context::Refused;
+        session.plan = Some(Plan::Serve);
+        session.exec_compile = ExecCompile::Refused;
     }
     let mut here = match standing {
         Some((frame, _)) => Here::paused(req, frame),
-        None if session.exec.is_some() && session.context != Context::Refused => Here::Held { req },
+        None if session.exec.is_some() && session.exec_compile != ExecCompile::Refused => {
+            Here::Held { req }
+        }
         None => Here::Idle { req },
     };
     let outcome = out::in_log(&mut session, |s| prompt::interactive(s, &mut here));
@@ -729,7 +734,7 @@ fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
 }
 
 /// `PHPDBG_G(vmret)`, what `zend_vm_call_opcode_handler` answered for
-/// the handler run from `before`: 0 where the loop stays in the frame,
+/// the handler called from `before`: 0 where the loop stays in the frame,
 /// 1 where it entered one whose caller is `before`, 2 where it went to
 /// any other, and -1 where the serving ended
 /// (`Z/Zend/zend_vm_execute.h`'s hybrid `zend_vm_call_opcode_handler`).
@@ -785,7 +790,7 @@ fn checked(req: &mut Request, at: &Standing, position: &read::Position) -> Optio
     // `-rr`'s `PHPDBG_PREVENT_INTERACTIVE` (`phpdbg_prompt.c:1666-1669`):
     // the opline logged and nothing checked, so an uncaught throwable is
     // the run's end to report.
-    if session::with(req, |s| s.after_run == AfterRun::Quit).unwrap_or(false) {
+    if session::with(req, |s| s.after_serve == AfterServe::Quit).unwrap_or(false) {
         if !at.unwinding {
             stepped_opline(req, at.frame);
             let serves = read::serves(req, at.frame);
@@ -961,7 +966,7 @@ struct Checks {
 /// The seek, the step, the watchpoints and the breakpoints, in `phpdbg_execute_ex`'s
 /// order (`phpdbg_prompt.c:1713-1788`): whether the loop stops here. The
 /// watchpoints are checked with the session in the request's sink, since their
-/// report writes through the request's output and may run PHP code the
+/// diff writes through the request's sink and may call PHP code the
 /// debugger stops in.
 fn decide(req: &mut Request, here: &At<'_>, checks: &Checks) -> bool {
     match session::with(req, |s| moved(s, here, checks)) {
@@ -1041,7 +1046,7 @@ fn broken(s: &mut Session, here: &At<'_>, checks: &Checks) -> bool {
 /// Whether a user frame of the chain from `frame` down catches the
 /// throwable pending, past the natives between them: a throwable a
 /// callback raised under `array_map` and the program catches is no
-/// uncaught one, and the run goes on to the catch.
+/// uncaught one, and the `run` goes on to the catch.
 ///
 /// ```php
 /// function cb() { throw new Exception("x"); }

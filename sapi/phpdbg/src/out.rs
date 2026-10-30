@@ -1,8 +1,8 @@
-//! What phpdbg writes, and the program's output beside it
+//! What phpdbg writes, and what the program writes beside it
 //! (`Z/sapi/phpdbg/phpdbg_out.c`): one stream, stdout, and one fact about
 //! it, whether the last byte written was a newline, which a notice or an
 //! error reads to start on a line of its own; an op array's listing goes
-//! to stderr, where `zend_dump_op_array` writes it. The program's output comes
+//! to stderr, where `zend_dump_op_array` writes it. What the program writes comes
 //! through [`Sink`] as `php_sapi_phpdbg_ub_write` sends it, `P_STDOUT`.
 //!
 //! A notice and an error are coloured, as php colours them whether or not
@@ -122,7 +122,7 @@ impl Palette {
 /// What phpdbg keeps of its own stream (`phpdbg_out.c`'s part of
 /// `PHPDBG_G`): the palette, whether the last byte written was a newline,
 /// `PHPDBG_DISCARD_OUTPUT`, the log's guard, and whether a write of its
-/// own through the program's output is under way. The session holds it
+/// own through the program's `P_STDOUT` is under way. The session holds it
 /// ([`crate::session::Session::out`]), and the program's bytes reach it
 /// through [`Sink`], which holds the session while a request runs.
 #[derive(Debug)]
@@ -136,22 +136,22 @@ pub struct Out {
     /// `PG(in_error_log)`: a prompt inside `php_sapi_phpdbg_log_message`
     /// stands, [`in_log`].
     in_log: bool,
-    /// `PG(in_error_log)` left set by a bailout out of the log,
+    /// `PG(in_error_log)` left set by a `zend_bailout` out of the log,
     /// [`Out::stick_log`].
     stuck: bool,
-    /// A write of the debugger's own through the program's output is
+    /// A write of the debugger's own through the program's `P_STDOUT` is
     /// under way, [`interruptible`].
     interruptible: bool,
-    /// What the execution context's compile wrote, which php writes
+    /// What the `exec` file's compile wrote, which php writes
     /// after the init files, [`Out::hold`].
     compile: Compile,
 }
 
-/// Where a cycle's compile of the execution context writes. php runs
+/// Where a cycle's compile of the `exec` file writes. php reads
 /// the init files first and compiles after them (`phpdbg_init`, then
 /// `phpdbg_compile`, `Z/sapi/phpdbg/phpdbg.c:1502-1553`); the engine
-/// compiles a context that compiles as its request starts, before the
-/// init files run at its first opline, so what that compile writes is
+/// compiles an `exec` file that compiles as its request starts, before the
+/// init files are read at its first opline, so what that compile writes is
 /// held until they have, and written then, or dropped where php's
 /// compile after them never comes.
 #[derive(Debug, Default)]
@@ -191,7 +191,7 @@ impl Default for Out {
 
 /// `f` inside the host's log: `php_log_err` guards against itself, so
 /// whatever is logged while `f` runs, the compiler's refusal of the
-/// context among it, is logged nowhere.
+/// `exec` file among it, is logged nowhere.
 pub fn in_log<R>(s: &mut Session, f: impl FnOnce(&mut Session) -> R) -> R {
     let outer = std::mem::replace(&mut s.out.in_log, true);
     let result = f(s);
@@ -209,8 +209,8 @@ pub fn discarded(s: &mut Session, f: impl FnOnce(&mut Session)) {
     s.out.discarding = outer;
 }
 
-/// `f`, a write of the debugger's own that goes through the program's
-/// output of the request standing, run so that what it still sends once
+/// `f`, a write of the debugger's own that goes through the `P_STDOUT`
+/// of the request standing, called so that what it still sends once
 /// a prompt inside it quit is dropped: php's `quit` bails out of the
 /// write it interrupted (`zend_bailout`), which never finishes.
 pub fn interruptible(req: &mut Request, f: impl FnOnce(&mut Request)) {
@@ -231,7 +231,7 @@ impl Out {
     /// What the cycle's compile wrote, written where php's compile after
     /// the init files writes it: its log under `PHPDBG_DISCARD_OUTPUT`
     /// where `discard` says php's `settings || phpdbg_startup_run > 0`
-    /// holds, that is past the first cycle or before a startup run, its
+    /// holds, that is past the first cycle or before a startup `run`, its
     /// displays whatever it says.
     pub fn compiled(&mut self, discard: bool) {
         let held = self.unhold();
@@ -399,7 +399,7 @@ impl Out {
         self.last_was_newline = true;
     }
 
-    /// The program's output, `P_STDOUT`: the bytes, the newline fact read
+    /// What the program writes, `P_STDOUT`: the bytes, the newline fact read
     /// off their last.
     pub fn program(&mut self, bytes: &[u8]) {
         if !bytes.is_empty() {
@@ -437,7 +437,7 @@ pub fn dump(bytes: &[u8]) {
     stderr.flush().ok();
 }
 
-/// The program's output, `P_STDOUT`, as `php_sapi_phpdbg_ub_write` sends
+/// What the program writes, `P_STDOUT`, as `php_sapi_phpdbg_ub_write` sends
 /// it; the header block nowhere, the error stream on stderr, and the log
 /// as `php_sapi_phpdbg_log_message` writes it. It is the value the host
 /// lends each request it serves and takes back at its end, so it holds
@@ -453,7 +453,7 @@ pub struct Sink {
 
 impl OutputSink for Sink {
     /// The bytes, unless a write of the debugger's own through the
-    /// program's output was interrupted by a prompt inside it that quit.
+    /// program's `P_STDOUT` was interrupted by a prompt inside it that quit.
     fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
         match &mut self.session {
             Some(s) if s.out.interruptible && s.stopped == Some(Stop::Quit) => {}
@@ -495,7 +495,7 @@ impl OutputSink for Sink {
 }
 
 /// A sink that writes nothing: what the host serves to learn whether the
-/// compiler refuses the execution context, before the request that
+/// compiler refuses the `exec` file, before the request that
 /// compiles it where php does.
 #[derive(Debug, Default)]
 pub struct Unwritten;

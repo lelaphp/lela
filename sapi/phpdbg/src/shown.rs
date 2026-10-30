@@ -181,10 +181,10 @@ fn variable_rows(req: &mut Request, read: Vec<(Vec<u8>, Value)>, depth: u32) -> 
         .collect()
 }
 
-/// php's auto-globals, `CG(auto_globals)` in the order php registers
+/// php's `auto_globals`, `CG(auto_globals)` in the order php registers
 /// them (`php_startup_auto_globals`, then ext/session's `_SESSION`):
-/// what `zend_is_auto_global` knows, and the seven phpdbg's `info
-/// globals` arms before it walks the global table.
+/// what `zend_is_auto_global` knows, and the seven phpdbg's
+/// `info globals` arms before it walks the global table.
 const AUTO_GLOBALS: [&[u8]; 8] = [
     b"_GET",
     b"_POST",
@@ -211,7 +211,7 @@ pub fn variable(req: &mut Request, frame: FrameRef, name: &[u8], depth: u32) -> 
 }
 
 /// The variables of `frame` as phpdbg's `info vars` lists them,
-/// `zend_rebuild_symbol_table`'s rows without the auto-globals, each one
+/// `zend_rebuild_symbol_table`'s rows without the `auto_globals`, each one
 /// level deep.
 pub fn variables(req: &mut Request, frame: FrameRef) -> Vec<Variable> {
     let read = frame_id(req, frame)

@@ -611,7 +611,7 @@ struct WireSink {
 
 impl OutputSink for WireSink {
     /// `sapi_cli_server_ub_write`: a client that went away is
-    /// `php_handle_aborted_connection`, with no status set, so a script
+    /// `php_handle_aborted_connection`, with no status set, so a program
     /// that ignores the abort sees `connection_aborted()`.
     ///
     /// ```php
@@ -673,7 +673,7 @@ impl OutputSink for WireSink {
 
     /// `php://stdout` is the server's own fd 1, never the client's
     /// socket: `php_stream_url_wrap_php` opens it as `dup(STDOUT_FILENO)`
-    /// under any SAPI not named `cli`, and the built-in server's is
+    /// under any `sapi_module` not named `cli`, and the built-in server's is
     /// `cli-server` (`Z/ext/standard/php_fopen_wrapper.c:260-272`), so
     /// what a router logs there, as Laravel's `artisan serve` router logs
     /// each request, reaches the terminal the server was started from.

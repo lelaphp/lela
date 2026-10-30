@@ -70,9 +70,9 @@ pub(crate) struct Head {
 /// Whether a request came clear or under TLS (#2343).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Scheme {
-    /// Clear, on the `--listen` port.
+    /// Clear, on the `--listen` address.
     Http,
-    /// Under TLS, on the `--listen-tls` port.
+    /// Under TLS, on the `--listen-tls` address.
     Https,
 }
 
@@ -440,7 +440,7 @@ fn refusal(info: &RequestInfo) -> Option<Refusal<'_>> {
 /// same request under the recipe with its default `clear_env`: every row
 /// but php-fpm's own, `FCGI_ROLE`, the `FastCGI` role, which a host that speaks
 /// HTTP has none of, and `USER` and `HOME`, which `fpm_env_init_child`
-/// puts in a child's emptied environment; the ports, which are the run's
+/// puts in a child's emptied environment; the ports, which are this process's
 /// own, and `SERVER_SOFTWARE`, nginx's in the recipe and
 /// `makala/<version>` here (#2335), masked.
 ///
@@ -706,7 +706,7 @@ impl OutputSink for Sink {
     fn flush(&mut self) {}
 
     /// php-fpm's `sapi_cgibin_flush` sends the head first, so `flush()`
-    /// before any output sends it here too.
+    /// before any body byte sends it here too.
     ///
     /// ```php
     /// var_dump(headers_sent());
@@ -757,7 +757,7 @@ impl OutputSink for Sink {
     }
 
     /// `php://stdout` is makala's own fd 1, never the body, as php-fpm's
-    /// child writes it to its fd 1 (`dup(STDOUT_FILENO)` under a SAPI not
+    /// child writes it to its fd 1 (`dup(STDOUT_FILENO)` under a `sapi_module` not
     /// named `cli`, `Z/ext/standard/php_fopen_wrapper.c:260-272`), the
     /// pipe its master logs or `/dev/null`.
     ///

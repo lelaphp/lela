@@ -79,14 +79,14 @@ pub(crate) fn writable_within(fd: RawFd, millis: i32) -> bool {
 /// Set by the built-in server's `SIGINT` handler ([`stop_on_sigint`]).
 static SIGINT_RAISED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// `php_cli_server_sigint_handler`: the flag the event loop reads.
+/// `php_cli_server_sigint_handler`: the atomic the event loop reads.
 extern "C" fn on_sigint(_: libc::c_int) {
     SIGINT_RAISED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// `signal(SIGINT, php_cli_server_sigint_handler)`
 /// (`Z/sapi/cli/php_cli_server.c:2900`): from here a `SIGINT` sets
-/// the flag answered, which the built-in server's loop reads between
+/// the atomic answered, which the built-in server's loop reads between
 /// waits, where it would have ended the process.
 pub(crate) fn stop_on_sigint() -> &'static std::sync::atomic::AtomicBool {
     let handler = on_sigint as extern "C" fn(libc::c_int);

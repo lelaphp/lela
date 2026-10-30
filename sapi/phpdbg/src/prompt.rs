@@ -1,7 +1,7 @@
 //! The prompt (`Z/sapi/phpdbg/phpdbg_prompt.c`, `phpdbg_cmd.c`): a line
 //! read, cut into commands, each resolved against php's table by its
 //! name, an abbreviation of it or its one-letter alias, its parameters
-//! held to the command's specification, and run. A command that goes
+//! held to the command's specification, and served. A command that goes
 //! on with the program ends the prompt; one that fails drops the rest of
 //! its line, the error it failed with written unless the line named a
 //! registered function, which is called instead.
@@ -13,37 +13,37 @@ use php_ext::request::Opcode;
 use php_sapi::tier::{self, Argument, FrameRef, Request};
 
 use crate::bp::{Kind, OpArray, Resolution};
-use crate::cmd::{self, Command, Param};
+use crate::cmd::{self, Command, Parameter};
 use crate::input::{self, Line};
 use crate::opcodes;
 use crate::out;
 use crate::read;
-use crate::session::{Context, Execution, Origin, Seek, SeekKind, Session, Stop};
+use crate::session::{ExecCompile, Execution, Origin, Seek, SeekKind, Session, Stop};
 
 /// Where the prompt stands.
 pub enum Here<'a> {
-    /// A run stopped between two handlers: `frame` is the one the
-    /// commands read, php's `EG(current_execute_data)`, the frame the run
+    /// A `run` stopped between two handlers: `frame` is the one the
+    /// commands read, php's `EG(current_execute_data)`, the frame the `run`
     /// stopped in unless `frame n` switched it.
     Paused {
         req: &'a mut Request,
         frame: FrameRef,
         switched: Option<Switched>,
     },
-    /// The execution context compiled before `run`, with nothing
+    /// The `exec` file compiled before `run`, with nothing
     /// executing: php's `PHPDBG_G(ops)` with `EG(current_execute_data)`
     /// `NULL`.
     Held { req: &'a mut Request },
-    /// A request with no program of the context's, with nothing
-    /// executing: the prompt's where no context is held.
+    /// A request with no program of the `exec` file's, with nothing
+    /// executing: the prompt's where no `exec` file is held.
     Idle { req: &'a mut Request },
     /// No request standing.
     Outside,
 }
 
 /// `PHPDBG_G(frame)` while `frame n` has switched the frame the
-/// commands read: its number, counted from the frame the run stopped in,
-/// and that frame, which the prompt goes back to before the run goes on
+/// commands read: its number, counted from the frame the `run` stopped in,
+/// and that frame, which the prompt goes back to before the `run` goes on
 /// (`phpdbg_restore_frame`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Switched {
@@ -52,7 +52,7 @@ pub struct Switched {
 }
 
 impl<'a> Here<'a> {
-    /// The prompt of a run stopped at `frame`.
+    /// The prompt of a `run` stopped at `frame`.
     pub fn paused(req: &'a mut Request, frame: FrameRef) -> Here<'a> {
         Here::Paused {
             req,
@@ -63,7 +63,7 @@ impl<'a> Here<'a> {
 }
 
 impl Here<'_> {
-    /// `phpdbg_restore_frame`: the frame the run stopped in read again.
+    /// `phpdbg_restore_frame`: the frame the `run` stopped in read again.
     fn restore_frame(&mut self) {
         if let Here::Paused {
             frame, switched, ..
@@ -74,7 +74,7 @@ impl Here<'_> {
         }
     }
 
-    /// `PHPDBG_FRAME(num)`: how many frames below the one the run stopped
+    /// `PHPDBG_FRAME(num)`: how many frames below the one the `run` stopped
     /// in the commands read.
     pub fn frame_num(&self) -> u32 {
         match self {
@@ -94,7 +94,7 @@ impl Here<'_> {
         }
     }
 
-    /// The request and the frame a run stopped in, `EG(current_execute_data)`,
+    /// The request and the frame a `run` stopped in, `EG(current_execute_data)`,
     /// where one is executing.
     pub fn standing(&mut self) -> Option<(&mut Request, FrameRef)> {
         match self {
@@ -105,8 +105,8 @@ impl Here<'_> {
 
     /// The request the prompt has serve code of its own, an `ev` or a
     /// registered function, and what that code stands on: the frame a
-    /// run stopped in, or nothing, as php's `EG(current_execute_data)` is
-    /// `NULL` at a prompt no run stands under.
+    /// `run` stopped in, or nothing, as php's `EG(current_execute_data)` is
+    /// `NULL` at a prompt no `run` stands under.
     fn serving(&mut self) -> Option<(&mut Request, tier::Under)> {
         match self {
             Here::Paused { req, frame, .. } => Some((&mut **req, tier::Under::Frame(*frame))),
@@ -121,7 +121,7 @@ impl Here<'_> {
         matches!(self, Here::Paused { .. })
     }
 
-    /// `PHPDBG_G(ops)`: the context is compiled and standing.
+    /// `PHPDBG_G(ops)`: the `exec` file is compiled and standing.
     fn compiled(&self) -> bool {
         matches!(self, Here::Paused { .. } | Here::Held { .. })
     }
@@ -184,25 +184,25 @@ impl Outcome {
 
 /// What one command asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Ret {
+pub enum Reply {
     Success,
     Failure,
     /// `PHPDBG_NEXT` and its kin: the program goes on.
     Resume,
-    /// `run` in the held request, which goes on as the run.
-    Run,
+    /// `run` in the held request, which goes on as that `run`.
+    Serve,
 }
 
-/// `phpdbg_interactive`: lines read and run until one goes on with the
+/// `phpdbg_interactive`: lines read and served until one goes on with the
 /// program or ends the request; the commands left of a line after a
-/// `run` wait in the session for the run to end.
+/// `run` wait in the session for that `run` to end.
 pub fn interactive(s: &mut Session, here: &mut Here<'_>) -> Outcome {
     let outcome = prompt_loop(s, here);
     here.restore_frame();
     outcome
 }
 
-/// The prompt's commands, read and run until one ends it.
+/// The prompt's commands, read and served until one ends it.
 fn prompt_loop(s: &mut Session, here: &mut Here<'_>) -> Outcome {
     loop {
         if s.stopped.is_some() {
@@ -245,13 +245,13 @@ fn prompt_loop(s: &mut Session, here: &mut Here<'_>) -> Outcome {
                 return Outcome::Stopped;
             }
             match asked {
-                Ret::Success => {}
-                Ret::Failure => break,
-                Ret::Run => {
+                Reply::Success => {}
+                Reply::Failure => break,
+                Reply::Serve => {
                     s.queued = rest.collect();
                     return Outcome::Resume;
                 }
-                Ret::Resume => {
+                Reply::Resume => {
                     if here.executing() {
                         return Outcome::Resume;
                     }
@@ -265,8 +265,8 @@ fn prompt_loop(s: &mut Session, here: &mut Here<'_>) -> Outcome {
     }
 }
 
-/// The commands a run left, run where the run ended, outside a request.
-pub fn run_queued(s: &mut Session) {
+/// The commands a `run` left, served where the `run` ended, outside a request.
+pub fn serve_queued(s: &mut Session) {
     let mut here = Here::Outside;
     let mut rest = std::mem::take(&mut s.queued).into_iter();
     while let Some(command) = rest.next() {
@@ -276,9 +276,9 @@ pub fn run_queued(s: &mut Session) {
             return;
         }
         match asked {
-            Ret::Success => {}
-            Ret::Failure | Ret::Run => return,
-            Ret::Resume => {
+            Reply::Success => {}
+            Reply::Failure | Reply::Serve => return,
+            Reply::Resume => {
                 s.out.error(b"Not running");
                 return;
             }
@@ -327,35 +327,35 @@ pub fn init_line(s: &mut Session, here: &mut Here<'_>, commands: Vec<Command>) -
                     }
                 }
             }
-            Command::Eval(_) | Command::Run(_) | Command::Shell(_) => execute(s, here, &command),
+            Command::Eval(_) | Command::Serve(_) | Command::Shell(_) => execute(s, here, &command),
         };
         if s.stopped.is_some() {
             return InitLine::Stopped;
         }
-        if s.inline_run {
+        if s.inline_serve {
             return InitLine::Ran;
         }
         match asked {
-            Ret::Success => {}
-            Ret::Failure | Ret::Run | Ret::Resume => return InitLine::Done,
+            Reply::Success => {}
+            Reply::Failure | Reply::Serve | Reply::Resume => return InitLine::Done,
         }
     }
     InitLine::Done
 }
 
-/// The command a run left that needs a request standing, served by an
-/// idle request of its own once the run's has ended.
+/// The command a `run` left that needs a request standing, served by an
+/// idle request of its own once the `run`'s has ended.
 pub fn idle_job(s: &mut Session, req: &mut Request, command: &Command) {
     let mut here = Here::Idle { req };
     let _ = execute(s, &mut here, command);
 }
 
 /// `phpdbg_internal_stack_execute`.
-fn execute(s: &mut Session, here: &mut Here<'_>, command: &Command) -> Ret {
+fn execute(s: &mut Session, here: &mut Here<'_>, command: &Command) -> Reply {
     match command {
         Command::Eval(code) => ev(s, here, code),
-        Command::Run(args) => run(s, here, args.as_deref()),
-        Command::Shell(_) => Ret::Success,
+        Command::Serve(args) => run(s, here, args.as_deref()),
+        Command::Shell(_) => Reply::Success,
         Command::Params(params) => {
             let resolved = resolve(&ROOT, None, params).and_then(|(def, rest)| {
                 verify(def, rest)?;
@@ -369,7 +369,7 @@ fn execute(s: &mut Session, here: &mut Here<'_>, command: &Command) -> Ret {
                     {
                         s.out.error(error.as_bytes());
                     }
-                    Ret::Failure
+                    Reply::Failure
                 }
             }
         }
@@ -377,7 +377,7 @@ fn execute(s: &mut Session, here: &mut Here<'_>, command: &Command) -> Ret {
 }
 
 /// A handler.
-type Handler = fn(&mut Session, &mut Here<'_>, &[Param]) -> Ret;
+type Handler = fn(&mut Session, &mut Here<'_>, &[Parameter]) -> Reply;
 
 /// A row of php's command tables.
 struct Def {
@@ -528,8 +528,14 @@ static INFO: &[Def] = &[
         crate::info::constants,
     ),
     sub(&ROOT[13], "vars", Some(b'v'), "", crate::info::vars),
-    sub(&ROOT[13], "globals", Some(b'g'), "", crate::info::globals),
-    sub(&ROOT[13], "literal", Some(b'l'), "", crate::info::literal),
+    sub(
+        &ROOT[13],
+        "globals",
+        Some(b'g'),
+        "",
+        crate::info::superglobals,
+    ),
+    sub(&ROOT[13], "literal", Some(b'l'), "", crate::info::literals),
     sub(&ROOT[13], "memory", Some(b'm'), "", unsupported),
 ];
 
@@ -565,9 +571,9 @@ static WATCH: &[Def] = &[
 fn resolve<'p>(
     table: &'static [Def],
     parent: Option<&'static Def>,
-    params: &'p [Param],
-) -> Result<(&'static Def, &'p [Param]), Option<String>> {
-    let Some((Param::Str(name), rest)) = params.split_first() else {
+    params: &'p [Parameter],
+) -> Result<(&'static Def, &'p [Parameter]), Option<String>> {
+    let Some((Parameter::Str(name), rest)) = params.split_first() else {
         if params.is_empty() {
             return Err(Some(String::from("The stack contains nothing !")));
         }
@@ -606,7 +612,7 @@ fn resolve<'p>(
         },
         [one] => {
             if !one.subs.is_empty()
-                && let Some(Param::Str(_)) = rest.first()
+                && let Some(Parameter::Str(_)) = rest.first()
             {
                 return resolve(one.subs, Some(one), rest);
             }
@@ -657,7 +663,7 @@ fn command_name(def: &Def) -> String {
 }
 
 /// Whether an argument is of the kind a letter of a command's spec names.
-type Fits = fn(&Param) -> bool;
+type Fits = fn(&Parameter) -> bool;
 
 /// `phpdbg_stack_verify`: each letter of the command's spec checks the
 /// argument it stands for, and `*` checks none, so `list` with nothing
@@ -685,7 +691,7 @@ type Fits = fn(&Param) -> bool;
 /// [Script ended normally]
 /// prompt>
 /// ```
-fn verify(def: &Def, params: &[Param]) -> Result<(), Option<String>> {
+fn verify(def: &Def, params: &[Parameter]) -> Result<(), Option<String>> {
     let name = command_name(def);
     if def.args.is_empty() {
         if params.is_empty() {
@@ -711,15 +717,15 @@ fn verify(def: &Def, params: &[Param]) -> Result<(), Option<String>> {
         // against nothing: a missing argument ends the loop, and the
         // count after it answers.
         let kind: Option<(&str, Fits)> = match spec {
-            b'i' => Some(("raw input", |p| matches!(p, Param::Str(_)))),
-            b's' => Some(("string", |p| matches!(p, Param::Str(_)))),
-            b'n' => Some(("number", |p| matches!(p, Param::Num(_)))),
-            b'm' => Some(("method", |p| matches!(p, Param::Method { .. }))),
-            b'a' => Some(("address", |p| matches!(p, Param::Addr(_)))),
-            b'f' => Some(("file:line", |p| matches!(p, Param::File { .. }))),
-            b'c' => Some(("condition", |p| matches!(p, Param::Cond(_)))),
-            b'o' => Some(("opcode", |p| matches!(p, Param::Op(_)))),
-            b'b' => Some(("boolean", |p| matches!(p, Param::Num(_)))),
+            b'i' => Some(("raw input", |p| matches!(p, Parameter::Str(_)))),
+            b's' => Some(("string", |p| matches!(p, Parameter::Str(_)))),
+            b'n' => Some(("number", |p| matches!(p, Parameter::Num(_)))),
+            b'm' => Some(("method", |p| matches!(p, Parameter::Method { .. }))),
+            b'a' => Some(("address", |p| matches!(p, Parameter::Addr(_)))),
+            b'f' => Some(("file:line", |p| matches!(p, Parameter::File { .. }))),
+            b'c' => Some(("condition", |p| matches!(p, Parameter::Cond(_)))),
+            b'o' => Some(("opcode", |p| matches!(p, Parameter::Op(_)))),
+            b'b' => Some(("boolean", |p| matches!(p, Parameter::Num(_)))),
             _ => None,
         };
         match (top, kind) {
@@ -804,8 +810,8 @@ fn verify(def: &Def, params: &[Param]) -> Result<(), Option<String>> {
 /// [Could not find information about included file...]
 /// prompt>
 /// ```
-fn call_registered(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> bool {
-    let Some((Param::Str(name), rest)) = params.split_first() else {
+fn call_registered(s: &mut Session, here: &mut Here<'_>, params: &[Parameter]) -> bool {
+    let Some((Parameter::Str(name), rest)) = params.split_first() else {
         return false;
     };
     let lowered = name.to_ascii_lowercase();
@@ -815,18 +821,18 @@ fn call_registered(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> bo
     let arguments: Vec<Argument> = rest
         .iter()
         .filter_map(|param| match param {
-            Param::Num(n) => Some(Argument::Int(*n)),
-            Param::Str(_)
-            | Param::Op(_)
-            | Param::Cond(_)
-            | Param::Method { .. }
-            | Param::NumericMethod { .. }
-            | Param::NumericFunction { .. }
-            | Param::File { .. } => Some(Argument::Str(param.text())),
-            Param::NumericFile { name, line } => Some(Argument::Str(
+            Parameter::Num(n) => Some(Argument::Int(*n)),
+            Parameter::Str(_)
+            | Parameter::Op(_)
+            | Parameter::Cond(_)
+            | Parameter::Method { .. }
+            | Parameter::NumericMethod { .. }
+            | Parameter::NumericFunction { .. }
+            | Parameter::File { .. } => Some(Argument::Str(param.text())),
+            Parameter::NumericFile { name, line } => Some(Argument::Str(
                 [name.as_slice(), format!(":#{line}").as_bytes()].concat(),
             )),
-            Param::Addr(_) => None,
+            Parameter::Addr(_) => None,
         })
         .collect();
     let Some((req, under)) = here.serving() else {
@@ -898,33 +904,33 @@ pub const NO_ACTIVE_FILE: &[u8] = b"[no active file]";
 
 // ------------------------------------------------------------ commands
 
-fn unsupported(_: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
-    Ret::Success
+fn unsupported(_: &mut Session, _: &mut Here<'_>, _: &[Parameter]) -> Reply {
+    Reply::Success
 }
 
 /// `PHPDBG_COMMAND(exec)`.
-fn exec(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
-    let Some(Param::Str(path)) = params.first() else {
-        return Ret::Failure;
+fn exec(s: &mut Session, here: &mut Here<'_>, params: &[Parameter]) -> Reply {
+    let Some(Parameter::Str(path)) = params.first() else {
+        return Reply::Failure;
     };
     let shown = String::from_utf8_lossy(path).into_owned();
     let os = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
     let Ok(meta) = std::fs::metadata(os) else {
         s.out
             .error(format!("Cannot stat {shown}, ensure the file exists").as_bytes());
-        return Ret::Success;
+        return Reply::Success;
     };
     if !meta.is_file() {
         s.out.error(
             format!("Cannot use {shown} as execution context, not a valid file or symlink")
                 .as_bytes(),
         );
-        return Ret::Success;
+        return Reply::Success;
     }
     let resolved = crate::host::real_path(path);
     if s.exec.as_deref() == Some(resolved.as_slice()) {
         s.out.notice(b"Execution context not changed");
-        return Ret::Success;
+        return Reply::Success;
     }
     if in_execution(s, here)
         && !permitted(
@@ -932,7 +938,7 @@ fn exec(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
             b"Do you really want to stop execution to set a new execution context?",
         )
     {
-        return Ret::Failure;
+        return Reply::Failure;
     }
     if let Some(old) = &s.exec {
         s.out.notice(
@@ -955,24 +961,24 @@ fn exec(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     s.exec = Some(resolved);
     s.stdin_code = None;
     s.exec_in_log = !in_execution(s, here) && s.out.logging();
-    s.context = if in_execution(s, here) {
-        Context::Announced
+    s.exec_compile = if in_execution(s, here) {
+        ExecCompile::Announced
     } else {
-        Context::Unannounced
+        ExecCompile::Unannounced
     };
     // `phpdbg_clean(.., 0)` lets the line the cycle parsed last go.
     s.command_line = None;
     s.stopped = Some(Stop::Exec);
-    Ret::Success
+    Reply::Success
 }
 
 use std::os::unix::ffi::OsStrExt as _;
 
 /// `PHPDBG_COMMAND(stdin)`: lines up to one that is the delimiter, as
-/// the execution context.
-fn stdin(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
-    let Some(Param::Str(delimiter)) = params.first() else {
-        return Ret::Failure;
+/// the `exec` file.
+fn stdin(s: &mut Session, here: &mut Here<'_>, params: &[Parameter]) -> Reply {
+    let Some(Parameter::Str(delimiter)) = params.first() else {
+        return Reply::Failure;
     };
     let mut code = Vec::new();
     loop {
@@ -994,43 +1000,43 @@ fn stdin(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
             b"Do you really want to stop execution to set a new execution context?",
         )
     {
-        return Ret::Failure;
+        return Reply::Failure;
     }
     s.exec = Some(b"Standard input code".to_vec());
     s.stdin_code = Some(code);
-    s.context = Context::Unannounced;
+    s.exec_compile = ExecCompile::Unannounced;
     s.stopped = Some(Stop::Exec);
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_COMMAND(step)`.
-fn step(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+fn step(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     if here.executing() {
         s.stepping = true;
     }
-    Ret::Resume
+    Reply::Resume
 }
 
 /// `PHPDBG_COMMAND(continue)`.
-fn resume(_: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
-    Ret::Resume
+fn resume(_: &mut Session, _: &mut Here<'_>, _: &[Parameter]) -> Reply {
+    Reply::Resume
 }
 
 /// `run` as a word, with its one parameter, where the lexer did not
 /// read it as `run`'s raw form.
-fn run_command(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
+fn run_command(s: &mut Session, here: &mut Here<'_>, params: &[Parameter]) -> Reply {
     let args = match params.first() {
-        Some(Param::Str(args)) => Some(args.as_slice()),
+        Some(Parameter::Str(args)) => Some(args.as_slice()),
         _ => None,
     };
     run(s, here, args)
 }
 
 /// `PHPDBG_COMMAND(run)`.
-fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
+fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Reply {
     if s.exec.is_none() {
         s.out.error(b"Nothing to execute!");
-        return Ret::Success;
+        return Reply::Success;
     }
     let args = args.filter(|args| !args.is_empty()).map(<[u8]>::to_vec);
     // A yes in the init files, after the run among them, has php count
@@ -1038,7 +1044,7 @@ fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
     if in_execution(s, here) {
         if restart_permitted(s) {
             if s.initializing {
-                s.startup_run = true;
+                s.startup_serve = true;
             } else {
                 // php keeps this line for the next cycle to resubmit,
                 // which is this `run` again, the restart's.
@@ -1046,13 +1052,13 @@ fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
                 s.stopped = Some(Stop::Restart(args));
             }
         }
-        return Ret::Success;
+        return Reply::Success;
     }
     // `phpdbg_compile` before anything of the run: the compiler refuses
     // the context again, in its log, and bails out of the run.
-    if s.context == Context::Refused && !here.compiled() {
+    if s.exec_compile == ExecCompile::Refused && !here.compiled() {
         refused_again(s, here);
-        return Ret::Success;
+        return Reply::Success;
     }
     // In the init files, php's `run` compiles the context and runs it
     // there and then, `PHPDBG_IS_INITIALIZING` keeping the loop from
@@ -1071,7 +1077,7 @@ fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
                         format!("Could not open '{}' for reading from stdin", path.display())
                             .as_bytes(),
                     );
-                    return Ret::Success;
+                    return Reply::Success;
                 };
                 if let Some(req) = here.request() {
                     tier::set_stdin(req, file.into());
@@ -1083,37 +1089,37 @@ fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
                 tier::set_argv(req, words);
             }
         }
-        s.inline_run = true;
-        return Ret::Success;
+        s.inline_serve = true;
+        return Reply::Success;
     }
     match here {
-        Here::Paused { .. } => Ret::Success,
+        Here::Paused { .. } => Reply::Success,
         Here::Held { .. } if args.is_none() => {
-            begin_run(s);
-            Ret::Run
+            begin_serve(s);
+            Reply::Serve
         }
         Here::Held { .. } | Here::Outside | Here::Idle { .. } => {
-            s.stopped = Some(Stop::RunWith(args));
-            Ret::Success
+            s.stopped = Some(Stop::ServeWith(args));
+            Reply::Success
         }
     }
 }
 
-/// What a run starts from: the hits at zero, no seek, no throwable seen
+/// What a `run` starts from: the hits at zero, no seek, no throwable seen
 /// (`PHPDBG_COMMAND(run)`'s clean up from last execution).
-pub fn begin_run(s: &mut Session) {
+pub fn begin_serve(s: &mut Session) {
     s.breaks.reset_hits();
     s.seek = None;
     s.handled = None;
     s.stepping = false;
     s.last_line = 0;
-    s.execution = Execution::Run;
+    s.execution = Execution::Serving;
 }
 
 /// `ev` as a word with its raw parameter.
-fn ev_command(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
-    let Some(Param::Str(code)) = params.first() else {
-        return Ret::Failure;
+fn ev_command(s: &mut Session, here: &mut Here<'_>, params: &[Parameter]) -> Reply {
+    let Some(Parameter::Str(code)) = params.first() else {
+        return Reply::Failure;
     };
     let code = code.clone();
     ev(s, here, &code)
@@ -1216,8 +1222,8 @@ fn ev_command(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 /// prompt>
 /// ```
 ///
-/// Thrown with a frame executing, it leaves the frame at its exception
-/// op, so the run goes on from there with nothing pending and the frame
+/// Thrown with a frame executing, it leaves the frame at its
+/// `EG(exception_op)`, so the `run` goes on from there with nothing pending and the frame
 /// returns nothing.
 ///
 /// ```php
@@ -1249,7 +1255,7 @@ fn ev_command(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 ///
 /// A fatal raised inside what it serves bails out to its `zend_catch`,
 /// which writes the status 0: the request goes on and the next `ev` is
-/// served. Where nothing was executing, the bailout passed the
+/// served. Where nothing was executing, the `zend_bailout` passed the
 /// `phpdbg_execute_ex` that set `in_execution`, so `run` asks before it
 /// restarts.
 ///
@@ -1290,15 +1296,15 @@ fn ev_command(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4210688 bytes) in eval()'d code on line 1
 /// prompt> Do you really want to restart execution? (type y or n): Please enter either y (yes) or n (no):
 /// ```
-fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
+fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Reply {
     // `phpdbg_execute_ex` bails out at its entry while the cycle is being
     // cleaned, and `ev`'s `zend_catch` writes nothing.
     if s.init_cleaning {
-        return Ret::Success;
+        return Reply::Success;
     }
     let Some((req, under)) = here.serving() else {
         crate::host::idle(s, Command::Eval(code.to_vec()));
-        return Ret::Success;
+        return Reply::Success;
     };
     let stepping = std::mem::take(&mut s.stepping);
     crate::watch::freeze(s, req);
@@ -1330,7 +1336,7 @@ fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
         }
         tier::Evaluated::Rendered | tier::Evaluated::BailedOut => {}
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// The oplines of the frame the prompt stands in, and the frame.
@@ -1351,27 +1357,27 @@ fn seek_over(here: &mut Here<'_>, keep: impl Fn(Opcode, u32, u32) -> bool) -> Op
 }
 
 /// `phpdbg_skip_line_helper`.
-fn skip_line(s: &mut Session, here: &mut Here<'_>) -> Ret {
+fn skip_line(s: &mut Session, here: &mut Here<'_>) -> Reply {
     s.seek = seek_over(here, |opcode, line, current| {
         line != current || opcodes::is(opcode, opcodes::ENDS)
     });
-    Ret::Resume
+    Reply::Resume
 }
 
 /// `PHPDBG_COMMAND(until)`.
-fn until(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+fn until(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     if !here.executing() {
         s.out.error(b"Not executing");
-        return Ret::Success;
+        return Reply::Success;
     }
     skip_line(s, here)
 }
 
 /// `PHPDBG_COMMAND(next)`.
-fn next(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+fn next(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     if !here.executing() {
         s.out.error(b"Not executing");
-        return Ret::Success;
+        return Reply::Success;
     }
     s.stepping = true;
     skip_line(s, here)
@@ -1397,40 +1403,40 @@ fn seek_to_end(s: &mut Session, here: &mut Here<'_>, kind: SeekKind) -> bool {
 }
 
 /// `PHPDBG_COMMAND(finish)`.
-fn finish(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+fn finish(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     if !here.executing() {
         s.out.error(b"Not executing");
-        return Ret::Success;
+        return Reply::Success;
     }
     seek_to_end(s, here, SeekKind::Finish);
-    Ret::Resume
+    Reply::Resume
 }
 
 /// `PHPDBG_COMMAND(leave)`.
-fn leave(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+fn leave(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     if !here.executing() {
         s.out.error(b"Not executing");
-        return Ret::Success;
+        return Reply::Success;
     }
     if seek_to_end(s, here, SeekKind::Leave) {
         s.out.notice(b"Already at the end of the function");
-        return Ret::Success;
+        return Reply::Success;
     }
-    Ret::Resume
+    Reply::Resume
 }
 
 /// `PHPDBG_COMMAND(print)`: the stack with nothing, a function or a
 /// method by name.
-fn print(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
+fn print(s: &mut Session, here: &mut Here<'_>, params: &[Parameter]) -> Reply {
     match params.first() {
         None => print_stack(s, here, params),
-        Some(Param::Str(_)) => print_func(s, here, params),
-        Some(Param::Method { .. }) => print_method(s, here, params),
+        Some(Parameter::Str(_)) => print_func(s, here, params),
+        Some(Parameter::Method { .. }) => print_method(s, here, params),
         Some(_) => {
             s.out.error(
                 b"Invalid arguments to print, expected nothing, function name or method name",
             );
-            Ret::Success
+            Reply::Success
         }
     }
 }
@@ -1440,17 +1446,17 @@ fn lossy(bytes: &[u8]) -> String {
 }
 
 /// `PHPDBG_PRINT(exec)`. In the init files, before php's cycle has
-/// compiled the context, `phpdbg_compile` compiles it here first and
+/// compiled the `exec` file, `phpdbg_compile` compiles it here first and
 /// writes its notice, once a cycle.
-fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     let Some(exec) = s.exec.clone() else {
         s.out.error(b"No execution context set");
-        return Ret::Success;
+        return Reply::Success;
     };
     // The compiler refuses the context again, its log written again.
-    if s.context == Context::Refused {
+    if s.exec_compile == ExecCompile::Refused {
         refused_again(s, here);
-        return Ret::Success;
+        return Reply::Success;
     }
     let Some(req) = here.request() else {
         // After a `run` in the init files, no request stands, and
@@ -1463,7 +1469,7 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
                 .notice(format!("Context {} ({} ops)", lossy(&exec), code.ops.len()).as_bytes());
             out::dump(&code.dump);
         }
-        return Ret::Success;
+        return Reply::Success;
     };
     compiled_in_init(s);
     let entry = tier::entry(req);
@@ -1473,10 +1479,10 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
             .notice(format!("Context {} ({} ops)", lossy(&exec), code.ops.len()).as_bytes());
         out::dump(&code.dump);
     }
-    Ret::Success
+    Reply::Success
 }
 
-/// `phpdbg_compile` where the compiler refuses the context: the context
+/// `phpdbg_compile` where the compiler refuses the `exec` file: the file
 /// compiled again in the request the prompt stands in ([`tier::compile`]),
 /// its diagnostics displayed and logged, and where its fatal was logged,
 /// the listing where nothing executes and, once the session is fully
@@ -1540,7 +1546,7 @@ pub fn refused_again(s: &mut Session, here: &mut Here<'_>) {
     }
 }
 
-/// `phpdbg_compile`'s notice where the init files compile the context,
+/// `phpdbg_compile`'s notice where the init files compile the `exec` file,
 /// `PHPDBG_G(ops)` being empty until they have: once a cycle, whatever
 /// the cycle's own compile writes after them.
 pub fn compiled_in_init(s: &mut Session) {
@@ -1604,7 +1610,7 @@ fn main_frame(req: &Request, frame: FrameRef) -> FrameRef {
     at
 }
 
-/// `PHPDBG_PRINT(opline)`: the opline the run stands at, as
+/// `PHPDBG_PRINT(opline)`: the opline the `run` stands at, as
 /// `zend_dump_op_line` writes it, to stderr.
 ///
 /// ```php
@@ -1635,13 +1641,13 @@ fn main_frame(req: &Request, frame: FrameRef) -> FrameRef {
 /// ```stderr
 /// L0003 0001 T2 = ADD CV0($x) int(1)
 /// ```
-fn print_opline(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+fn print_opline(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     let executing = here.executing();
     match here.standing() {
         Some((req, frame)) if executing => print_opline_ex(req, frame),
         _ => s.out.error(b"Not Executing!"),
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `phpdbg_print_opline`'s `zend_dump_op_line`: the opline `frame`
@@ -1664,15 +1670,15 @@ fn opline_line(dump: &[u8], at: u32) -> Option<&[u8]> {
 }
 
 /// `PHPDBG_PRINT(class)`.
-fn print_class(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
-    let Some(Param::Str(name)) = params.first() else {
-        return Ret::Failure;
+fn print_class(s: &mut Session, here: &mut Here<'_>, params: &[Parameter]) -> Reply {
+    let Some(Parameter::Str(name)) = params.first() else {
+        return Reply::Failure;
     };
     let class = here.request().and_then(|req| read::class_named(req, name));
     let Some(class) = class else {
         s.out
             .error(format!("The class {} could not be found", lossy(name)).as_bytes());
-        return Ret::Success;
+        return Reply::Success;
     };
     let shape = match class.shape {
         read::Shape::Interface => "Interface",
@@ -1691,7 +1697,7 @@ fn print_class(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     for method in &class.methods {
         print_function(s, method);
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `phpdbg_print_function_helper`.
@@ -1708,9 +1714,9 @@ fn print_function(s: &mut Session, code: &read::Code) {
 }
 
 /// `PHPDBG_PRINT(method)`.
-fn print_method(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
-    let Some(Param::Method { class, name }) = params.first() else {
-        return Ret::Failure;
+fn print_method(s: &mut Session, here: &mut Here<'_>, params: &[Parameter]) -> Reply {
+    let Some(Parameter::Method { class, name }) = params.first() else {
+        return Reply::Failure;
     };
     let found = here.request().map_or(read::Named::NoClass, |req| {
         read::method_named(req, class, name)
@@ -1741,13 +1747,13 @@ fn print_method(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
                 .error(format!("The class {} could not be found", lossy(class)).as_bytes());
         }
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_PRINT(func)`.
-fn print_func(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
-    let Some(Param::Str(name)) = params.first() else {
-        return Ret::Failure;
+fn print_func(s: &mut Session, here: &mut Here<'_>, params: &[Parameter]) -> Reply {
+    let Some(Parameter::Str(name)) = params.first() else {
+        return Reply::Failure;
     };
     let found = here.request().map_or(read::Named::NoFunction, |req| {
         read::function_named(req, name)
@@ -1775,18 +1781,18 @@ fn print_func(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
                 .error(format!("The function {} could not be found", lossy(name)).as_bytes());
         }
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_PRINT(stack)`.
-fn print_stack(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+fn print_stack(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     let executing = here.executing();
     let Some((req, frame)) = here.standing().filter(|_| executing) else {
         s.out.error(b"Not Executing!");
-        return Ret::Success;
+        return Reply::Success;
     };
     let Some(code) = read::frame_code(req, frame) else {
-        return Ret::Success;
+        return Reply::Success;
     };
     let title = match (&code.class, code.name.is_empty()) {
         (_, true) => format!("Stack in {} ({} ops)", lossy(&code.file), code.ops.len()),
@@ -1800,7 +1806,7 @@ fn print_stack(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     };
     s.out.notice(title.as_bytes());
     print_function(s, &code);
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_COMMAND(break)`. With nothing named, the line standing, which
@@ -1821,7 +1827,7 @@ fn print_stack(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 /// prompt> [Breakpoint at [no active file]:0 exists]
 /// prompt>
 /// ```
-fn breakpoint(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
+fn breakpoint(s: &mut Session, here: &mut Here<'_>, params: &[Parameter]) -> Reply {
     let executing = here.executing();
     let current = here
         .standing()
@@ -1837,16 +1843,16 @@ fn breakpoint(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
             (Some(_), None) => crate::host::file_break(s, NO_ACTIVE_FILE, 0),
             (None, _) => s.out.error(b"Execution context not set!"),
         },
-        Some(Param::Num(line)) => match &s.exec {
+        Some(Parameter::Num(line)) => match &s.exec {
             Some(exec) => {
                 let file = current.map_or_else(|| exec.clone(), |(file, _)| file);
                 s.breaks.set_file(&mut s.out, Some(file), &[], *line);
             }
             None => s.out.error(b"Execution context not set!"),
         },
-        Some(Param::File { name, line }) => crate::host::file_break(s, name, *line),
-        Some(Param::Method { class, name }) => s.breaks.set_method(&mut s.out, class, name),
-        Some(Param::NumericMethod { class, name, num }) => opline_break(
+        Some(Parameter::File { name, line }) => crate::host::file_break(s, name, *line),
+        Some(Parameter::Method { class, name }) => s.breaks.set_method(&mut s.out, class, name),
+        Some(Parameter::NumericMethod { class, name, num }) => opline_break(
             s,
             here,
             Kind::MethodOpline {
@@ -1855,7 +1861,7 @@ fn breakpoint(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
                 opline: opline_of(*num),
             },
         ),
-        Some(Param::NumericFunction { name, num }) => opline_break(
+        Some(Parameter::NumericFunction { name, num }) => opline_break(
             s,
             here,
             Kind::FunctionOpline {
@@ -1863,7 +1869,7 @@ fn breakpoint(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
                 opline: opline_of(*num),
             },
         ),
-        Some(Param::NumericFile { name, line }) => opline_break(
+        Some(Parameter::NumericFile { name, line }) => opline_break(
             s,
             here,
             Kind::FileOpline {
@@ -1871,11 +1877,11 @@ fn breakpoint(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
                 opline: opline_of(*line),
             },
         ),
-        Some(Param::Str(name)) => s.breaks.set_symbol(&mut s.out, name),
-        Some(Param::Op(name)) => s.breaks.set_opcode(&mut s.out, name),
+        Some(Parameter::Str(name)) => s.breaks.set_symbol(&mut s.out, name),
+        Some(Parameter::Op(name)) => s.breaks.set_opcode(&mut s.out, name),
         Some(_) => {}
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// The opline a `#N` names, as php's `zend_ulong` holds it.
@@ -1890,7 +1896,7 @@ fn opline_of(num: i64) -> u32 {
 /// ([`crate::bp::Breakpoints::set_named_opline`]). A file's is resolved
 /// at once against the frames executing, its own code's under the name
 /// as typed, and is pending where nothing executes, as php's compare
-/// with the compiled context never matches.
+/// with the compiled `exec` file never matches.
 ///
 /// ```php
 /// function f() {
@@ -2032,33 +2038,33 @@ fn named_opline(
 }
 
 /// `PHPDBG_BREAK(del)`.
-fn break_del(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
-    if let Some(Param::Num(id)) = params.first() {
+fn break_del(s: &mut Session, _: &mut Here<'_>, params: &[Parameter]) -> Reply {
+    if let Some(Parameter::Num(id)) = params.first() {
         s.breaks.delete(&mut s.out, *id);
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_COMMAND(back)`: from the frame the commands read.
-fn back(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
+fn back(s: &mut Session, here: &mut Here<'_>, params: &[Parameter]) -> Reply {
     let executing = here.executing();
     let above = here.frame_num();
     let Some((req, frame)) = here.standing().filter(|_| executing) else {
         s.out.error(b"Not executing!");
-        return Ret::Success;
+        return Reply::Success;
     };
     let limit = match params.first() {
-        Some(Param::Num(n)) => usize::try_from(*n).unwrap_or(0),
+        Some(Parameter::Num(n)) => usize::try_from(*n).unwrap_or(0),
         _ => 0,
     };
     crate::info::backtrace(&mut s.out, req, frame, above, limit);
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_COMMAND(frame)`: with no number, the frame the commands read;
 /// with one, `phpdbg_switch_frame`: the frame that many below the one the
-/// run stopped in made the one `ev`, `info vars`, `back` and the listings
-/// read, said so with its call and listed, until the run goes on.
+/// `run` stopped in made the one `ev`, `info vars`, `back` and the listings
+/// read, said so with its call and listed, until the `run` goes on.
 ///
 /// ```php
 /// function g() {
@@ -2098,7 +2104,7 @@ fn back(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 ///
 /// The frame of a file's code is named by its number alone, a native's
 /// call between two frames is passed over, and the count is from the
-/// frame the run stopped in whichever one the commands read.
+/// frame the `run` stopped in whichever one the commands read.
 ///
 /// ```php
 /// function g($x) {
@@ -2141,7 +2147,7 @@ fn back(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 /// ```
 ///
 /// `info vars` and `back` read the frame switched to, and a step goes
-/// on from the frame the run stopped in, the frame read again.
+/// on from the frame the `run` stopped in, the frame read again.
 ///
 /// ```php
 /// function g() {
@@ -2190,17 +2196,17 @@ fn back(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 /// [Script ended normally]
 /// prompt>
 /// ```
-fn frame(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
+fn frame(s: &mut Session, here: &mut Here<'_>, params: &[Parameter]) -> Reply {
     let num = here.frame_num();
-    let Some(Param::Num(asked)) = params.first() else {
+    let Some(Parameter::Num(asked)) = params.first() else {
         s.out
             .notice(format!("Currently in frame #{num}").as_bytes());
-        return Ret::Success;
+        return Reply::Success;
     };
     if i64::from(num) == *asked {
         s.out
             .notice(format!("Already in frame #{asked}").as_bytes());
-        return Ret::Success;
+        return Reply::Success;
     }
     let Here::Paused {
         req,
@@ -2209,7 +2215,7 @@ fn frame(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     } = here
     else {
         s.out.error(format!("No frame #{asked}").as_bytes());
-        return Ret::Success;
+        return Reply::Success;
     };
     let stopped = switched.map_or(*frame, |switched| switched.stopped);
     let target = u32::try_from(*asked).ok().and_then(|to| {
@@ -2221,7 +2227,7 @@ fn frame(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     });
     let Some((to, target)) = target else {
         s.out.error(format!("No frame #{asked}").as_bytes());
-        return Ret::Success;
+        return Reply::Success;
     };
     *frame = target;
     *switched = (to > 0).then_some(Switched { num: to, stopped });
@@ -2233,11 +2239,11 @@ fn frame(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     if let Some(position) = read::position(req, target) {
         crate::list::code(s, &position.file, position.line);
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_COMMAND(list)` and `PHPDBG_LIST(lines)`.
-fn list(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
+fn list(s: &mut Session, here: &mut Here<'_>, params: &[Parameter]) -> Reply {
     let executing = here.executing();
     let current = here
         .standing()
@@ -2247,26 +2253,26 @@ fn list(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     } else {
         let Some(exec) = &s.exec else {
             s.out.error(b"Not executing, and execution context not set");
-            return Ret::Success;
+            return Reply::Success;
         };
         (exec.clone(), 0)
     };
     match params.first() {
         None => crate::list::file(s, &file, 0, i64::from(line), 0),
-        Some(Param::Num(n)) => {
+        Some(Parameter::Num(n)) => {
             let count = if *n < 0 { 1 - *n } else { *n };
             let offset = if *n < 0 { *n } else { 0 } + i64::from(line);
             crate::list::file(s, &file, count, offset, 0);
         }
-        Some(Param::File { name, line }) => {
+        Some(Parameter::File { name, line }) => {
             crate::list::file(s, &crate::host::real_path(name), *line, 0, 0);
         }
         Some(_) => {}
     }
-    Ret::Success
+    Reply::Success
 }
 
-/// `PHPDBG_COMMAND(info)` with no sub-command: the execution context's
+/// `PHPDBG_COMMAND(info)` with no sub-command: the `exec` file's
 /// overview (`Z/sapi/phpdbg/phpdbg_prompt.c:1070-1109`), the build's
 /// line editor as the oracle's (libedit, no readline), the main op
 /// array's sizes where it is compiled, and the tables' sizes as the
@@ -2308,7 +2314,7 @@ fn list(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 /// Included   0
 /// prompt>
 /// ```
-fn info_overview(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+fn info_overview(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     s.out.out(b"Execution Context Information\n\n");
     s.out.writeln(b"Readline   no");
     s.out.writeln(b"Libedit    yes");
@@ -2351,15 +2357,15 @@ fn info_overview(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     s.out.writeln(format!("Functions  {functions}").as_bytes());
     s.out.writeln(format!("Constants  {constants}").as_bytes());
     s.out.writeln(format!("Included   {included}").as_bytes());
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_COMMAND(clean)`.
-fn clean(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+fn clean(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     if in_execution(s, here)
         && !permitted(s, b"Do you really want to clean your current environment?")
     {
-        return Ret::Success;
+        return Reply::Success;
     }
     s.out.out(b"Cleaning Execution Environment\n");
     let [classes, functions, constants, includes] =
@@ -2371,18 +2377,18 @@ fn clean(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     // `phpdbg_clean(1, 0)` lets the line the cycle parsed last go.
     s.command_line = None;
     s.stopped = Some(Stop::Clean);
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_COMMAND(clear)`.
-fn clear(s: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
+fn clear(s: &mut Session, _: &mut Here<'_>, _: &[Parameter]) -> Reply {
     s.breaks.clear(&mut s.out);
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_COMMAND(help)`, as far as a topic nobody has.
-fn help(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
-    if let Some(Param::Str(topic)) = params.first()
+fn help(s: &mut Session, _: &mut Here<'_>, params: &[Parameter]) -> Reply {
+    if let Some(Parameter::Str(topic)) = params.first()
         && !ROOT.iter().any(|def| {
             def.name.as_bytes().starts_with(topic.as_slice())
                 || (topic.len() == 1 && def.alias == Some(topic[0]))
@@ -2391,13 +2397,13 @@ fn help(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
         s.out
             .error(format!("No help topic found for {}", lossy(topic)).as_bytes());
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_COMMAND(set)`: a word no row of `set` names.
-fn set(s: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
+fn set(s: &mut Session, _: &mut Here<'_>, _: &[Parameter]) -> Reply {
     s.out.error(b"No set command selected!");
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_SET(prompt)`: the prompt as the prompt shows it, or its text
@@ -2419,9 +2425,9 @@ fn set(s: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
 /// [Script ended normally]
 /// dbg>
 /// ```
-fn set_prompt(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
+fn set_prompt(s: &mut Session, _: &mut Here<'_>, params: &[Parameter]) -> Reply {
     match params.first() {
-        Some(Param::Str(text)) => {
+        Some(Parameter::Str(text)) => {
             s.prompt = text
                 .iter()
                 .map(|b| if *b & 0x80 == 0 { *b } else { b'?' })
@@ -2431,7 +2437,7 @@ fn set_prompt(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
             .out
             .writeln(&[&b"Current prompt: "[..], &s.prompt, b" "].concat()),
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_SET(color)`: the element's colour by the table's name for it,
@@ -2457,19 +2463,19 @@ fn set_prompt(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
 /// %s0;31m[Script ended normally]%s
 /// prompt>
 /// ```
-fn set_color(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
-    let [Param::Str(element), Param::Str(name), ..] = params else {
-        return Ret::Failure;
+fn set_color(s: &mut Session, _: &mut Here<'_>, params: &[Parameter]) -> Reply {
+    let [Parameter::Str(element), Parameter::Str(name), ..] = params else {
+        return Reply::Failure;
     };
     let Some(colour) = out::find_colour(name) else {
         s.out
             .error(format!("Failed to find the requested color ({})", lossy(name)).as_bytes());
-        return Ret::Success;
+        return Reply::Success;
     };
     let Some(element) = out::Element::named(element) else {
         s.out
             .error(format!("Failed to find the requested element ({})", lossy(element)).as_bytes());
-        return Ret::Success;
+        return Reply::Success;
     };
     let named = match element {
         out::Element::Prompt => "prompt",
@@ -2479,7 +2485,7 @@ fn set_color(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
     s.out
         .notice(format!("setting {named} color to {} ({})", colour.name, colour.code).as_bytes());
     s.out.set_colour(element, colour);
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_SET(colors)`: whether notices and errors are coloured, or
@@ -2504,7 +2510,7 @@ fn set_color(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
 /// [Script ended normally]
 /// prompt>
 /// ```
-fn set_colors(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
+fn set_colors(s: &mut Session, _: &mut Here<'_>, params: &[Parameter]) -> Reply {
     match params.first() {
         None => {
             let shown = match s.out.colours() {
@@ -2513,7 +2519,7 @@ fn set_colors(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
             };
             s.out.writeln(format!("Colors {shown}").as_bytes());
         }
-        Some(Param::Num(on)) => s.out.set_colours(if *on != 0 {
+        Some(Parameter::Num(on)) => s.out.set_colours(if *on != 0 {
             out::Colours::On
         } else {
             out::Colours::Off
@@ -2522,7 +2528,7 @@ fn set_colors(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
             .out
             .error(b"set colors used incorrectly: set colors <on|off>"),
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_SET(break)`: one breakpoint by its number enabled or
@@ -2571,10 +2577,10 @@ fn set_colors(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
 ///  00004: echo "end\n";
 /// prompt>
 /// ```
-fn set_break(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
+fn set_break(s: &mut Session, _: &mut Here<'_>, params: &[Parameter]) -> Reply {
     match params {
-        [Param::Num(id), Param::Num(on), ..] => s.breaks.enable(*id, *on != 0),
-        [Param::Num(id), ..] => match s.breaks.enabled(*id) {
+        [Parameter::Num(id), Parameter::Num(on), ..] => s.breaks.enable(*id, *on != 0),
+        [Parameter::Num(id), ..] => match s.breaks.enabled(*id) {
             Some(on) => s
                 .out
                 .writeln(format!("Breakpoint #{id} {}", if on { "on" } else { "off" }).as_bytes()),
@@ -2586,11 +2592,11 @@ fn set_break(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
             .out
             .error(b"set break used incorrectly: set break [id] <on|off>"),
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_SET(breaks)`: every breakpoint enabled or disabled at once,
-/// or whether they are, `PHPDBG_IS_BP_ENABLED`: a flag of
+/// or whether they are, `PHPDBG_IS_BP_ENABLED`: a bit of
 /// `PHPDBG_G(flags)`, which each cycle sets from the line again.
 ///
 /// ```php
@@ -2623,7 +2629,7 @@ fn set_break(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
 ///  00004: echo "end\n";
 /// prompt>
 /// ```
-fn set_breaks(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
+fn set_breaks(s: &mut Session, _: &mut Here<'_>, params: &[Parameter]) -> Reply {
     match params.first() {
         None => s.out.writeln(
             format!(
@@ -2632,12 +2638,12 @@ fn set_breaks(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
             )
             .as_bytes(),
         ),
-        Some(Param::Num(on)) => s.breaks.disabled = *on == 0,
+        Some(Parameter::Num(on)) => s.breaks.disabled = *on == 0,
         Some(_) => s
             .out
             .error(b"set breaks used incorrectly: set breaks <on|off>"),
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_SET(quiet)`: `PHPDBG_IS_QUIET`, which `-v` clears and each
@@ -2685,24 +2691,24 @@ fn set_breaks(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
 /// L0003 0002 ASSIGN CV1($y) T2
 /// L0004 0003 RETURN CV1($y)
 /// ```
-fn set_quiet(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
+fn set_quiet(s: &mut Session, _: &mut Here<'_>, params: &[Parameter]) -> Reply {
     match params.first() {
         None => {
             s.out
                 .writeln(format!("Quietness {}", if s.quiet { "on" } else { "off" }).as_bytes());
         }
-        Some(Param::Num(on)) => s.quiet = *on != 0,
+        Some(Parameter::Num(on)) => s.quiet = *on != 0,
         Some(param) => s
             .out
             .error(format!("Unsupported parameter type ({}) for command", param.kind()).as_bytes()),
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_COMMAND(register)`: the name looked up in the function table
 /// of the request standing, which with none standing is served a request
 /// of its own, as `ev` is there, where php's `EG(function_table)` holds
-/// the internal functions between its requests: here, a context the
+/// the internal functions between its requests: here, an `exec` file the
 /// compiler refused.
 ///
 /// ```php
@@ -2719,26 +2725,26 @@ fn set_quiet(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
 /// prompt>%s
 /// prompt>
 /// ```
-fn register(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
-    let Some(Param::Str(name)) = params.first() else {
-        return Ret::Failure;
+fn register(s: &mut Session, here: &mut Here<'_>, params: &[Parameter]) -> Reply {
+    let Some(Parameter::Str(name)) = params.first() else {
+        return Reply::Failure;
     };
     let lowered = name.to_ascii_lowercase();
     if s.registered.contains(&lowered) {
         s.out.error(
             format!("The requested name ({}) is already in use", lossy(&lowered)).as_bytes(),
         );
-        return Ret::Success;
+        return Reply::Success;
     }
     let Some(req) = here.request() else {
         crate::host::idle(
             s,
             Command::Params(vec![
-                Param::Str(b"register".to_vec()),
-                Param::Str(name.clone()),
+                Parameter::Str(b"register".to_vec()),
+                Parameter::Str(name.clone()),
             ]),
         );
-        return Ret::Success;
+        return Reply::Success;
     };
     if php_ext::call::lookup_function(req, &lowered).is_some() {
         s.out
@@ -2753,11 +2759,11 @@ fn register(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
             .as_bytes(),
         );
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_COMMAND(quit)`.
-fn quit(s: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
+fn quit(s: &mut Session, _: &mut Here<'_>, _: &[Parameter]) -> Reply {
     s.stopped = Some(Stop::Quit);
-    Ret::Success
+    Reply::Success
 }

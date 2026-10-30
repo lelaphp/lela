@@ -28,7 +28,7 @@ fn info_row(info: &str, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The provider the build named, as the engine's build script reads the
+/// The provider the build named, as the engine's `build.rs` reads the
 /// same variable: none where it is unset or empty.
 fn provider() -> Option<&'static str> {
     option_env!("PHP_BUILD_PROVIDER").filter(|provider| !provider.is_empty())

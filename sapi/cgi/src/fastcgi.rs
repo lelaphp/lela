@@ -1,4 +1,4 @@
-//! php-cgi's `FastCGI` mode, `php-cgi -b <path>` (`Z/sapi/cgi/cgi_main.c:1931-2140`,
+//! php-cgi's `FastCGI` serving, `php-cgi -b <path>` (`Z/sapi/cgi/cgi_main.c:1931-2140`,
 //! `:2412-2640`): the socket `fcgi_listen` binds, the children
 //! `PHP_FCGI_CHILDREN` pre-forks and keeps, and in each process the loop
 //! `fcgi_accept_request` drives, each request's variables read from its
@@ -22,7 +22,7 @@ use php_sapi::{
 
 use crate::{NAME, refusal};
 
-/// `MIN(SOMAXCONN, 128)`, `fcgi_listen`'s backlog where
+/// `MIN(SOMAXCONN, 128)`, `fcgi_listen`'s `backlog` where
 /// `PHP_FCGI_BACKLOG` names none.
 const BACKLOG: i32 = 128;
 
@@ -75,7 +75,7 @@ impl Listening {
     }
 }
 
-/// `fcgi_listen(path, backlog)`: `host:port` and a bare port bind TCP,
+/// `fcgi_listen(path, backlog)`: `host:port` and a bare `port` bind TCP,
 /// every address where the host is empty or `*`, and anything else names
 /// a Unix socket, which is opened to everyone (`chmod(path, 0777)`).
 fn listen(path: &[u8], backlog: i32) -> Option<Listening> {
@@ -156,7 +156,7 @@ fn resolve(host: &[u8]) -> Option<std::net::Ipv4Addr> {
 }
 
 /// What one process serves through: the connection, the request's
-/// output records and its body's input records.
+/// `FCGI_STDOUT` and `FCGI_STDERR` records and its body's input records.
 struct Wire {
     conn: Option<Conn>,
     out: Outgoing,

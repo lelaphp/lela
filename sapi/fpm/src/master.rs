@@ -31,7 +31,7 @@ pub(crate) const EXIT_CONFIG: u8 = 78;
 /// now the child of the pool at the index.
 #[derive(Debug)]
 pub(crate) enum Became {
-    /// The pool's index, and the child's scoreboard slot.
+    /// The pool's index, and the child's `scoreboard` slot.
     Child(usize, usize),
 }
 
@@ -77,7 +77,7 @@ pub(crate) struct Child {
 /// One pool, `struct fpm_worker_pool_s`.
 pub(crate) struct Pool {
     pub(crate) config: PoolConfig,
-    /// The pool whose scoreboard this one's status page shows.
+    /// The pool whose `scoreboard` this one's status page shows.
     pub(crate) shared: Option<usize>,
     pub(crate) domain: Domain,
     pub(crate) listening: Option<RawFd>,
@@ -125,7 +125,7 @@ struct Queued {
     every: Option<std::time::Duration>,
 }
 
-/// What a ready descriptor of the loop is.
+/// What a ready fd of the loop is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Watched {
     Signals,
@@ -597,7 +597,7 @@ impl Fpm {
         }
     }
 
-    /// `fpm_scoreboard_init_main`: each pool's scoreboard mapped, a
+    /// `fpm_scoreboard_init_main`: each pool's `scoreboard` mapped, a
     /// status pool's pointing at the one it shows.
     fn scoreboard_init_main(&mut self) -> bool {
         zlog!(Debug @ fpm_scoreboard_init_main:38, "got clock tick '{}'", crate::scoreboard::clock_tick());
@@ -716,9 +716,9 @@ impl Fpm {
         true
     }
 
-    /// `fpm_event_init_main`: the event module made, reserving one event
+    /// `fpm_event_init_main`: the event queue made, reserving one event
     /// for the signal pipe and two for each child of a pool that catches
-    /// its workers' output.
+    /// its workers' stdout and stderr.
     fn event_init_main(&mut self) -> bool {
         let max = 1 + self
             .pools
@@ -816,7 +816,7 @@ impl Fpm {
         self.watched.push((fd, what));
     }
 
-    /// The descriptor a watch names, borrowed from its owner.
+    /// The fd a watch names, borrowed from its owner.
     fn borrow(&self, fd: RawFd, what: Watched) -> Option<std::os::fd::BorrowedFd<'_>> {
         match what {
             Watched::Signals => self.signal_read.as_ref().map(AsFd::as_fd),
@@ -831,7 +831,7 @@ impl Fpm {
         }
     }
 
-    /// `fpm_event_del` of a descriptor still open.
+    /// `fpm_event_del` of an fd still open.
     pub(crate) fn unwatch(&mut self, fd: std::os::fd::BorrowedFd<'_>) {
         if let Some(poller) = &self.poller {
             poller.remove(fd);
@@ -1058,7 +1058,7 @@ impl Fpm {
 
     /// `fpm_event_cleanup` in a new child: the event queue given up. A
     /// kqueue is not inherited across `fork`, so its number is no
-    /// descriptor of the child's and is left unclosed, lest it close
+    /// fd of the child's and is left unclosed, lest it close
     /// whatever the child opens under that number next.
     pub(crate) fn leave_events(&mut self) {
         self.watched.clear();

@@ -80,7 +80,7 @@ pub(crate) fn cli(builder: EngineBuilder) -> EngineBuilder {
     ])
 }
 
-/// `builder` with the built-in server's module, `cli_server.color` off and
+/// `builder` with the built-in server's `cli_server_module_entry`, `cli_server.color` off and
 /// nothing else, and its `server_additional_functions`.
 #[must_use]
 pub(crate) fn server(builder: EngineBuilder) -> EngineBuilder {

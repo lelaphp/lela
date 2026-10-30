@@ -1,7 +1,7 @@
-//! Static files (#2346) over a real socket against the binary, by
+//! Files served as themselves (#2346) over a real socket against the binary, by
 //! `php -S`'s path rules (`php_proto::vpath`) and the refusals over them
 //! (#2586): a file that is not PHP is served with the type php's table
-//! gives its extension, a `.php` file is run and never sent as its
+//! gives its extension, a `.php` file is served as a program and never sent as its
 //! source, no path, `..` or encoded, leaves the document root, and a dot
 //! segment or a file of PHP's source is not found.
 
@@ -75,7 +75,7 @@ fn a_static_file_is_served_with_its_mime_type() {
     assert_eq!(put.header("Allow"), Some("GET, HEAD, POST"));
 }
 
-/// A `.php` file is run, under a path's info after it or as a directory's
+/// A `.php` file is served as a program, under a path's info after it or as a directory's
 /// index, and never sent as its source: not in any case of its
 /// extension, which on a file system that folds case names the same file
 /// and is refused as php-fpm's `security.limit_extensions` refuses it,
@@ -227,7 +227,7 @@ fn serve_hidden_serves_them_as_php_s_does() {
 /// finds it (#2695): under the default it is answered as a path with
 /// nothing at it; under `--serve-hidden` as `php -S` answers it, a static
 /// file's refused with 400, a write first with 405, and a program's
-/// request started with its program never run, a 200 with no body.
+/// request started with its program never started, a 200 with no body.
 #[test]
 fn a_path_holding_a_nul_is_refused_as_php_s_refuses_it() {
     let files = [("run.php", "<?php echo 'ran';"), ("a.txt", "hello")];

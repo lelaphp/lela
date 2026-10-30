@@ -2,8 +2,8 @@
 //! (ADR-0008): the binary `phpdbg`, reaching the engine through
 //! `php_sapi` alone. The debugger is a `Tier` too (`jit-design.md` §2.4,
 //! revision 8; #1308): the engine is built with [`debugger::Debugger`]
-//! bound, whose `safepoint` is the gate and whose loop is `step`, so a
-//! program runs under the one executor and its kernels, and the prompt,
+//! bound, whose `safepoint` is where it stops and whose loop is `step`, so a
+//! program is served by the one dispatch loop and its kernels, and the prompt,
 //! the breakpoints and the watch list live here.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
@@ -41,7 +41,7 @@ use php_ext::abi::Extension;
 use php_sapi::Engine;
 use php_sapi::getopt::{Getopt, Opt, Taken, opt};
 
-use crate::cmd::{Command, Param};
+use crate::cmd::{Command, Parameter};
 use crate::session::{Session, Stop};
 
 /// `sapi_module.name`: what `php_sapi_name()` answers.
@@ -153,7 +153,7 @@ fn read_line(argv: &[Vec<u8>]) -> Line {
 /// `php_sapi_phpdbg_log_message` before phpdbg is booted, as it stands
 /// while php starts (`Z/sapi/phpdbg/phpdbg.c:767-768`): the entry and a
 /// newline to C's `stdout`, an `fprintf`, which holds them past the
-/// program's output where stdout is not a terminal.
+/// program's writes where stdout is not a terminal.
 fn log_message(entry: &[u8]) {
     php_sapi::stdio::write(&[entry, b"\n"].concat());
 }
@@ -203,7 +203,7 @@ pub fn main_with(argv: &[Vec<u8>], beside: &[Extension]) -> ExitCode {
     session.line_args.clone_from(&line.args);
     session.args.clone_from(&line.args);
     if line.run > 1 {
-        session.after_run = session::AfterRun::Quit;
+        session.after_serve = session::AfterServe::Quit;
     }
     if let Some(exec) = &line.exec {
         let path = std::path::Path::new(std::ffi::OsStr::from_bytes(exec));
@@ -225,13 +225,13 @@ pub fn main_with(argv: &[Vec<u8>], beside: &[Extension]) -> ExitCode {
     session.out.set_colours(session.line_colours);
     if let Some(delimiter) = &line.stdin_delimiter {
         session.queued.push(Command::Params(vec![
-            Param::Str(b"stdin".to_vec()),
-            Param::Str(delimiter.clone()),
+            Parameter::Str(b"stdin".to_vec()),
+            Parameter::Str(delimiter.clone()),
         ]));
     }
     if line.run > 0 && session.exec.is_some() {
-        session.stopped = Some(Stop::RunWith(None));
-        session.context = session::Context::Announced;
+        session.stopped = Some(Stop::ServeWith(None));
+        session.exec_compile = session::ExecCompile::Announced;
     }
     php_sapi::exit_code(host::serve(&engine, session))
 }
