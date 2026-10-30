@@ -895,7 +895,8 @@ impl Request {
     /// is raised: the check's answer over what the callee served, a
     /// throwable it threw left pending for the check and taken back after.
     /// A fatal leaving makes no check, since php's `zend_bailout` left the
-    /// callee before it.
+    /// callee before it, and a refusal that left nothing pending, a
+    /// fallible scope's, is handed back as it stands.
     #[cold]
     #[inline(never)]
     fn interrupted_after_call(&mut self, served: Result<Value, Thrown>) -> Result<Value, Thrown> {
@@ -904,6 +905,9 @@ impl Request {
             Err(thrown) if self.diagnostics().bailing_out() => return Err(thrown),
             Err(thrown) => {
                 self.leave_pending(&thrown);
+                if !self.is_pending() {
+                    return Err(thrown);
+                }
                 Value::null()
             }
         };
