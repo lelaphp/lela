@@ -516,6 +516,9 @@ pub fn judge(
         }
     }
     slack_porting_notes(snapshot, manifest, store, &mut notes)?;
+    // What did not validate narrows the instruments that read it, and
+    // `done` judges by what loaded (#3618 ruling 4).
+    notes.extend(manifest.defects().iter().map(ToString::to_string));
 
     Ok(Verdict {
         base,

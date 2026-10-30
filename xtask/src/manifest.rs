@@ -85,6 +85,23 @@ pub struct Manifest {
     pub root: PathBuf,
 }
 
+/// One thing a person's file carries that parses but does not validate,
+/// a cross-file check's refusal ([`Manifest::defects`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Defect {
+    /// The file, relative to the workspace.
+    pub file: String,
+    /// The check's refusal.
+    pub error: String,
+}
+
+impl std::fmt::Display for Defect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let first = self.error.lines().next().unwrap_or_default();
+        write!(f, "{} parses but does not validate: {first}", self.file)
+    }
+}
+
 /// `[telemetry]`: the one number the silent-instrument query of
 /// harness-design.md §7 reads, optional; without it `status` renders no
 /// silent column and says so.
@@ -1016,11 +1033,30 @@ impl Manifest {
 
     /// The oracle pin, which every instrument that runs php asks for here
     /// and nowhere else: refused, naming it, where the manifest has no
-    /// `[oracle]` row (#3181).
+    /// `[oracle]` row (#3181), and with its first defect where it parses
+    /// but does not validate (#3618 ruling 4).
     pub fn pin(&self) -> Result<&Pin> {
-        self.pin.as_ref().ok_or_else(|| {
+        let pin = self.pin.as_ref().ok_or_else(|| {
             anyhow!("{FILE} has no `[oracle]` row, so no oracle pin names the php to run or the php-src it is held to")
+        })?;
+        match self.defects().into_iter().next() {
+            Some(defect) => bail!("{defect}"),
+            None => Ok(pin),
+        }
+    }
+
+    /// What the person's files carry that parses but does not validate,
+    /// apart from loading (#3618 ruling 4): a TOML or grammar error is
+    /// fatal to [`Manifest::load`], and this is the rest, each a refusal
+    /// of the instruments that read what failed.
+    pub fn defects(&self) -> Vec<Defect> {
+        let pin = self.pin.iter().flat_map(Pin::defects);
+        let file = self.pin_file().unwrap_or_default();
+        pin.map(|error| Defect {
+            file: file.to_owned(),
+            error: error.clone(),
         })
+        .collect()
     }
 
     /// The file the `[oracle]` row names, where the manifest has one.

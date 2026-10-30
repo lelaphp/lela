@@ -331,8 +331,12 @@ fn loads(manifest: &Manifest, file: &str, tracked: &str, proposed: &str) -> Resu
         divergence::FILE => {
             Registry::parse(proposed)?;
         }
-        _ if manifest.pin_file() == Some(file) && Pin::parse(tracked).is_ok() => {
-            Pin::parse(proposed)?;
+        _ if manifest.pin_file() == Some(file)
+            && Pin::parse(tracked).is_ok_and(|pin| pin.defects().is_empty()) =>
+        {
+            if let Some(defect) = Pin::parse(proposed)?.defects().first() {
+                bail!("{defect}");
+            }
         }
         manifest::FILE if Manifest::parse(tracked).is_ok() => {
             Manifest::parse(proposed)?;

@@ -1040,7 +1040,8 @@ fn changing_the_oracles_md5_a_closure_keg_or_a_recipe_ini_stales_every_run() {
     after_the_pin_moves("oracle-md5", oracle, true);
     let keg = |text: &str| {
         let moved = text.replacen("\nzstd = \"", "\nzstd = \"0", 1);
-        let refused = xtask::oracle::Pin::parse(&moved).unwrap_err().to_string();
+        let parsed = xtask::oracle::Pin::parse(&moved).unwrap();
+        let refused = parsed.defects().first().unwrap().clone();
         let (_, at) = refused.split_once("made against the closure ").unwrap();
         let (was, at) = at.split_once(", and the pin's [closure] is ").unwrap();
         moved.replace(was, at.split(',').next().unwrap())

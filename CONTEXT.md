@@ -194,6 +194,10 @@ _Avoid_: obligatory
 What a denied call does instead, a rule's `remedy` in the manifest, which a denial renders after the rule's text and before the checkout it judged.
 _Avoid_: suggestion
 
+**Defect**:
+What a person's file carries that parses but does not validate across files, such as a variant's build made against a closure the pin has moved past (`manifest::Defect`). Only the instruments that read the failing part refuse; permit and `done` judge by what loaded and note it, and the session's facts list it. A file that does not parse is no defect: loading it fails.
+_Avoid_: broken pin, invalid pin
+
 **Seat**:
 One of the machine's few places a building instrument runs in, `XTASK_SEATS` of them (three unless set), each an exclusive lock on a file under `XTASK_SEAT_DIR` that the operating system gives back however its holder ends. `clippy`, `test`, `miri`, `phpt`, `compile-identity`, `crosscheck`, `trace-dump`, `fold`, `fpm-compare`, `soak`, `witness` and `bench` take one before they build and wait while every one is held; what a seated instrument spawns sits in its seat (`seat`, #2982).
 _Avoid_: lease

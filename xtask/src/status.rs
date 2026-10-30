@@ -386,6 +386,15 @@ pub fn session(
     let week = tickets::render(store, root, Table::Md);
     let week = week.unwrap_or_else(|err| format!("unread: {err:#}\n"));
     write!(facts, "\n## tickets\n\n{week}").ok();
+    // What a person's file carries that parses but does not validate, so
+    // an edit is seen before the next call meets it (#3618 ruling 4).
+    let defects = manifest.defects();
+    if !defects.is_empty() {
+        write!(facts, "\n## defects\n\n").ok();
+        for defect in defects {
+            writeln!(facts, "- {defect}").ok();
+        }
+    }
     if let Some(id) = session_id {
         let log = store.history(permit::INSTRUMENT)?;
         let rows: Vec<Row> = permit_rows(

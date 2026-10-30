@@ -143,6 +143,10 @@ pub struct Judgement {
     /// The rules that judged the call, whether or not they found: the
     /// denominator a rule's denials are read against (#3619).
     pub judged: Vec<String>,
+    /// What the person's files carry that does not validate, which the
+    /// decision notes beside itself while it judges by what loaded (#3618
+    /// ruling 4).
+    pub(crate) defects: Vec<String>,
 }
 
 impl Judgement {
@@ -159,9 +163,16 @@ impl Judgement {
     /// The hook's stdout: the deny, the allow with its notes, or nothing.
     pub fn hook_stdout(&self) -> Option<Value> {
         if let Some(denial) = self.denial() {
-            return Some(deny_output(&denial.reason()));
+            let reason = [denial.reason()]
+                .into_iter()
+                .chain(self.defects.iter().cloned());
+            return Some(deny_output(&reason.collect::<Vec<_>>().join("\n")));
         }
-        let notes: Vec<String> = self.notes().map(Finding::reason).collect();
+        let notes = self
+            .notes()
+            .map(Finding::reason)
+            .chain(self.defects.iter().cloned());
+        let notes: Vec<String> = notes.collect();
         if notes.is_empty() {
             return None;
         }
@@ -211,7 +222,12 @@ pub fn judge(manifest: &Manifest, root: &Path, call: &Call) -> Result<Judgement>
         let finding = evaluate(manifest, root, rule, call, path.as_deref(), line.as_ref())?;
         findings.extend(finding);
     }
-    Ok(Judgement { findings, judged })
+    let defects = manifest.defects().iter().map(ToString::to_string).collect();
+    Ok(Judgement {
+        findings,
+        judged,
+        defects,
+    })
 }
 
 /// Whether `rule` judges the call at all: its tool, a file its exempt does

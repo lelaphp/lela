@@ -1438,6 +1438,60 @@ fn a_burst_of_calls_handed_on_writes_a_failing_reading_and_a_judged_call_ends_it
     assert!(unjudged(&quiet).is_none(), "a judged call ends the run");
 }
 
+/// A pin that parses but does not validate narrows the harness and does
+/// not blind it (#3618 ruling 4): a variant made against a closure the pin
+/// has moved past is a defect, so the pin refuses whoever asks for it,
+/// while permit judges by what loaded and notes the defect, `done` notes
+/// it and the session's facts list it.
+#[test]
+fn a_pin_that_does_not_validate_refuses_only_what_reads_it() {
+    let root = scratch("pin-defect");
+    let pin = std::fs::read_to_string(root.join("oracle.toml")).unwrap();
+    let named = regex_lite::Regex::new(r#"closure = "sha256:[0-9a-f]{64}""#).unwrap();
+    assert!(
+        named.is_match(&pin),
+        "the tracked pin names a macOS build's closure"
+    );
+    let moved = format!("closure = \"sha256:{}\"", "0".repeat(64));
+    std::fs::write(
+        root.join("oracle.toml"),
+        named.replace(&pin, moved.as_str()).as_ref(),
+    )
+    .unwrap();
+
+    let manifest = Manifest::load(&root).expect("the manifest loads");
+    let said = "oracle.toml parses but does not validate: [variant.";
+    assert!(
+        manifest
+            .defects()
+            .iter()
+            .any(|d| d.to_string().starts_with(said)),
+        "{:?}",
+        manifest.defects()
+    );
+    let refused = format!("{:#}", manifest.pin().unwrap_err());
+    assert!(refused.contains("predates the closure"), "{refused}");
+
+    let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let out = permit(&root, &stdin, &[]).ok();
+    assert!(
+        out.contains("harness.self") && out.contains(said),
+        "judged, with the note: {out}"
+    );
+    let bash = serde_json::json!({"session_id": "s", "tool_name": "Bash", "tool_input": {"command": "git status"}});
+    let out = permit(&root, &bash.to_string(), &[]).ok();
+    assert!(!out.contains("\"deny\"") && out.contains(said), "{out}");
+
+    let done = Run::at(&root).args(["done", "--base", "HEAD"]).go().stdout;
+    assert!(done.contains(said), "{done}");
+    std::fs::write(root.join("AGENTS.md"), "# map\n").unwrap();
+    let facts = Run::at(&root).args(["status", "--session"]).go().ok();
+    assert!(
+        facts.contains("## defects") && facts.contains(said),
+        "{facts}"
+    );
+}
+
 /// The outage of #16 was the loud staleness: a manifest no build reads at
 /// all. It exited without judging, which the fallback walks, and every
 /// candidate walked to did the same, so the call proceeded unjudged and
