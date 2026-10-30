@@ -319,10 +319,15 @@ regions='AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md harness-design
 # says one of its regions reads a staged path. A tree region reads the
 # directories it lists, so a directory a staged path adds or takes away
 # is asked about as itself, as `--staged` asks about an untracked one.
-# This runs before `xtask regions --staged`, whose check then holds what
-# was staged here as it holds every file the commit stages.
+# A file that also differs outside its regions holds a person's line, not
+# the commit's, and is left; where its regions differ too, their closers'
+# sums not the index's, the commit carries them unrendered, so the file is
+# named with the first staged path its region reads, a note as a person's
+# change elsewhere is, refusing nothing (#3645). This runs before `xtask
+# regions --staged`, whose check then holds what was staged here as it
+# holds every file the commit stages.
 rendered_before() {
-    local file dir differ=() paths=() affected tmp
+    local file dir read differ=() paths=() affected tmp
     for file in $regions; do
         git diff --quiet -- "$file" || differ+=("$file")
     done
@@ -357,6 +362,12 @@ rendered_before() {
         if cmp -s "$tmp/working/${file##*/}" "$tmp/index/${file##*/}"; then
             stage "$file"
             echo "pre-commit: staged $file, whose regions an earlier run rendered from what this commit stages (#3638)"
+        elif ! cmp -s <(grep -F '<!-- /computed' "$file") <(git show ":$file" | grep -F '<!-- /computed'); then
+            for read in "${paths[@]}"; do
+                computed affected "$read" 2>/dev/null | cut -d: -f1 | grep -qxF -- "$file" || continue
+                echo "pre-commit: left $file unstaged, whose region reads $read, which this commit stages: it holds a change outside its regions, so the commit carries the region unrendered until $file is staged (#3645)"
+                break
+            done
         fi
     done
     rm -rf "$tmp"
