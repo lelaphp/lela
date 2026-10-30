@@ -263,7 +263,7 @@ fn a_merge_is_refused_in_main_but_a_fast_forward_and_in_the_merge_worktree_under
         ff_only.id = "git.main-ff-only".to_owned();
         ff_only.within = Where::Main;
         ff_only.predicate.unless_pattern =
-            Some(r"\s--(ff-only|abort|quit|help)\b|\s-h\b".to_owned());
+            Some(r"\s--(ff-only|abort|continue|quit|help)\b|\s-h\b".to_owned());
         proposed.rules.push(ff_only);
     }
     let (main, merge) = staging("merge-queue");

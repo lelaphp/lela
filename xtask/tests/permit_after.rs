@@ -1038,7 +1038,9 @@ fn a_call_by_pushd_into_its_worktree_leaves_the_main_checkout_alone() {
 /// sides each append a row to the registry stops on the conflict, git's
 /// union of the three blobs is the proposal, `steer` writes it, and the
 /// merge is staged and committed. No call is denied, steer's write is
-/// steer's and stands, and the merge commits the union.
+/// steer's and stands, and the merge commits the union. The sequence runs
+/// in the merge worktree, the linked one on `staging`, where the merge
+/// queue makes every merge (#3622); main's checkout takes none.
 #[test]
 fn a_steer_call_that_lands_a_merges_union_stands_and_the_merge_commits_it() {
     let root = scratch("steer-union");
@@ -1062,26 +1064,32 @@ fn a_steer_call_that_lands_a_merges_union_stands_and_the_merge_commits_it() {
     std::fs::write(root.join(file), format!("{tracked}{}", row("head.toml"))).unwrap();
     Repo::at(&root).git(&["commit", "-q", "-am", "HEAD's row"]);
     let union = format!("{tracked}{}{}", row("head.toml"), row("merged.toml"));
+    let queue = Tree::new("permit-after-steer-union-queue").unwrap();
+    let at = queue.join("_merge");
+    Repo::at(&root).git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "staging",
+        at.to_str().unwrap(),
+        main.trim(),
+    ]);
 
     let call = |id: &str, command: &str| {
-        let out = permit(
-            &root,
-            &stdin("PreToolUse", SESSION, id, &root, command),
-            &[],
-        )
-        .ok();
+        let out = permit(&at, &stdin("PreToolUse", SESSION, id, &at, command), &[]).ok();
         assert!(!out.contains("\"deny\""), "{command} is admitted: {out}");
-        shell(&root, command);
+        shell(&at, command);
         permit(
-            &root,
-            &stdin("PostToolUse", SESSION, id, &root, command),
+            &at,
+            &stdin("PostToolUse", SESSION, id, &at, command),
             &["--after"],
         )
         .ok()
     };
     call("toolu_union_start", "git merge --no-commit merged || true");
     assert!(
-        read(&root, file).contains("<<<<<<<"),
+        read(&at, file).contains("<<<<<<<"),
         "the merge stopped on the conflict"
     );
     call(
@@ -1095,27 +1103,27 @@ fn a_steer_call_that_lands_a_merges_union_stands_and_the_merge_commits_it() {
     // `git merge-file --union`, which shares the `[[divergence]]` line two
     // appended rows open with and so makes one row of two.
     assert_eq!(
-        read(&root, "proposal.toml"),
+        read(&at, "proposal.toml"),
         union,
         "the union is the two rows"
     );
     let steer = format!(
         "{} --root {} steer {file} --from proposal.toml",
         xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")).display(),
-        root.display()
+        at.display()
     );
     let steered = call("toolu_union_steer", &steer);
     assert_eq!(steered.trim(), "", "steer's write is steer's: {steered}");
-    assert_eq!(read(&root, file), union, "steer's write stands");
+    assert_eq!(read(&at, file), union, "steer's write stands");
     call("toolu_union_add", &format!("git add -- {file}"));
     call("toolu_union_commit", "git commit -q -m merged");
     assert_eq!(
-        Repo::at(&root).git(&["show", &format!("HEAD:{file}")]),
+        Repo::at(&at).git(&["show", &format!("HEAD:{file}")]),
         union.trim_end(),
         "the commit holds the union, its trailing newline aside"
     );
     assert_eq!(
-        Repo::at(&root)
+        Repo::at(&at)
             .git(&["rev-list", "--parents", "-n1", "HEAD"])
             .split(' ')
             .count(),
