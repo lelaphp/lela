@@ -54,7 +54,7 @@ mod dims;
 mod doors;
 mod objects;
 mod strings;
-use crate::record::{Began, Callee, Stop};
+use crate::record::{Began, Callee, Stop, returns};
 use crate::types::{
     Abort, BodyEntry, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home,
     Imm, Interrupt, Layout, Leave, Line, Op, OpId, Operand, Pointee, Read, Repeat, Slot, Store,
@@ -739,7 +739,7 @@ struct Emit<'a> {
     /// Per frame of the trace, its place on the stack, a `FrameRef`'s
     /// number, kept where `stack` is.
     refs: Vec<Variable>,
-    /// The place of the frame the last `RETURN` leaves to, which its
+    /// The place of the frame the last return leaves to, which its
     /// `Op::Back` names the frame it lands in by.
     returned_to: Option<Variable>,
     /// The `ExitCtx`, the function's first parameter.
@@ -1846,8 +1846,53 @@ impl<'a> Emit<'a> {
     /// `line` served whole by [`Kernel::Step`]: the operands it reads from
     /// registers stored first, so the interpreter reads them in their
     /// slots, and the way a jump it served went held to its guards.
+    ///
+    /// A return, whichever of `RETURN`, `RETURN_BY_REF` and
+    /// `GENERATOR_RETURN` it is ([`returns`]), first reads the caller its
+    /// frame's header names, the place of the frame its `Op::Back` lands
+    /// in, as php's trace takes the frame it goes on in from where the
+    /// handler of any of the three left the interpreter
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:17157-17199`). A return trace
+    /// whose `RETURN_BY_REF` the handler serves, its caller going on to
+    /// call `h()` in place:
+    ///
+    /// ```php
+    /// function h() { return 1; }
+    /// function &p($n) { static $z = 0; if ($n == 0) { return $z; } $x = &p($n - 1); h(); return $x; }
+    /// $r = &p(6); echo $r, "\n";
+    /// for ($i = 0; $i < 5; $i++) { $r = &p(8); echo $r, "\n"; }
+    /// echo "done\n";
+    /// ```
+    /// ```expect regime=jit-tracing process
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// done
+    /// ```
+    ///
+    /// and the same trace compiled before it runs, under `jit.mode=force`:
+    ///
+    /// ```php
+    /// function h() { return 1; }
+    /// function &p($n) { static $z = 0; if ($n == 0) { return $z; } $x = &p($n - 1); h(); return $x; }
+    /// $r = &p(6); echo $r, "\n";
+    /// for ($i = 0; $i < 5; $i++) { $r = &p(8); echo $r, "\n"; }
+    /// echo "done\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// done
+    /// ```
     fn stepped(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
-        if line.opcode == Opcode::Return {
+        if returns(line.opcode) {
             self.returns_to(line)?;
         }
         if let Some(onward @ Onward::Went) = Onward::of(line.opcode)

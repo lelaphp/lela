@@ -970,7 +970,7 @@ impl Emit<'_> {
         Ok(self.b.ins().icmp_imm_s(IntCC::NotEqual, counted, 0))
     }
 
-    /// The place of the frame `line`'s `RETURN` leaves to, read off its
+    /// The place of the frame `line`'s return leaves to, read off its
     /// header's caller before it leaves, for the `Op::Back` after it.
     pub(super) fn returns_to(&mut self, line: &Line) -> Result<Option<Value>, Abort> {
         if self.stack.is_none() {
