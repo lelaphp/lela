@@ -179,10 +179,11 @@ pub(crate) fn build_hosts(root: &Path) -> Result<()> {
     run(root, &mut cargo, &Added::inherited(), &what)
 }
 
-/// `cargo`, a build line, run in `root` with `added` on it, refused
-/// naming `what` it builds where cargo fails.
+/// `cargo`, a build line, run in `root` with `added` on it and the seat's
+/// share of the machine, refused naming `what` it builds where cargo fails.
 fn run(root: &Path, cargo: &mut Command, added: &Added, what: &str) -> Result<()> {
     added.onto(cargo);
+    crate::seat::lend(cargo);
     let status = cargo
         .current_dir(root)
         .status()

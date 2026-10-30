@@ -803,6 +803,18 @@ where = "owned"   # grammar: where, a checkout another session owns by its owner
 writes = true   # grammar: writes, an Edit, a Write, or a Bash line with a command that can change a checkout or a redirection into a file (#3621)
 text = "One session writes in a checkout: its owner, recorded by `xtask worktree add` or `xtask worktree own` (#3618 M1). Instead: work in your own worktree (`xtask worktree add`), or have its owner let it go with `xtask worktree own --release`."
 
+[[rule]]
+id = "wait.foreground"
+tool = "Bash"
+runs = "foreground"   # grammar: runs, a call the runtime runs in the foreground and never one with run_in_background, whose end it notifies (#3624)
+# A poll loop, an until, while or for whose body sleeps 3 s or more
+# before its done, where it is run and not where a heredoc writes it:
+# the shape that held a coordinator, a seat or a lock in #3624's
+# measurement of 821 builder waits (265 coordinator, 14 lock and 92 seat
+# loops fire; no single sleep and no settle of 2 s or less does).
+deny_pattern = '''(?s)(?:\A|[;&|({\n]|\b(?:then|do|else))\s*(?:until|while|for)\s.*?[;\n]\s*do\b(?:.*?(?:[;&|({\n]|\b(?:then|do|else)))?\s*sleep\s+0*(?:[3-9]|[1-9][0-9]+)(?:\.[0-9]+)?[smh]?\b.*?\bdone\b'''
+text = "A foreground poll loop holds the turn, and the coordinator, seat or lock it waits on with it (#3624): run what it waits for with run_in_background, whose end the runtime notifies, or wait on the condition with Monitor and an until-loop."
+
 # ---------------------------------------------------------------- owed
 # What a crate owes before done (harness §4.5 condition 1): one row per
 # instrument, the crates a glob or a list less `exempt`, and `when` a

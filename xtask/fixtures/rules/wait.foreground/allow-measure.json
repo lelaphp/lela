@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "for b in base head; do ./bin/$b-jit -n mm.php > /dev/null & p=$!; sleep 1; sample $p 3 -file sample-$b.txt >/dev/null 2>&1; wait $p; done", "description": "Sample each build once it has started"}}

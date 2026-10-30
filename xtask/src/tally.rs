@@ -185,7 +185,7 @@ impl<J: Judgement> Tally<J> {
         Ok(tally)
     }
 
-    /// [`Tally::judge_apart`] on as many threads as the machine has, for a
+    /// [`Tally::judge_apart`] on the seat's share of the machine, for a
     /// lane whose items share nothing: each witness runs in a scratch tree
     /// of its own, and most of its wall is the oracle's process starting,
     /// which a thread spends waiting.
@@ -197,7 +197,7 @@ impl<J: Judgement> Tally<J> {
         J: Send,
     {
         let apart = vec![Apart::default(); items.len()];
-        Tally::judge_apart(items, cores(), NonZeroUsize::MIN, &apart, judge)
+        Tally::judge_apart(items, crate::seat::jobs(), NonZeroUsize::MIN, &apart, judge)
     }
 
     /// [`Tally::judge`] on [`pool`]'s threads, each item held apart from
@@ -359,13 +359,7 @@ pub enum Within {
     Alone,
 }
 
-/// The pool a lane runs on unless it is told otherwise: as many threads
-/// as the machine has.
-pub fn cores() -> NonZeroUsize {
-    thread::available_parallelism().unwrap_or(NonZeroUsize::MIN)
-}
-
-/// `each` over every item on as many threads as the machine has, the
+/// `each` over every item on the seat's share of the machine, the
 /// answers in the items' order: for a lane whose items share nothing and
 /// spend their wall waiting on processes, as `crosscheck`'s renderings do
 /// (#2166).
@@ -376,7 +370,8 @@ pub(crate) fn each_beside<T: Sync, R: Send>(
     let mut answers = Vec::with_capacity(items.len());
     let apart = vec![Apart::default(); items.len()];
     let (each, batch) = (|item: &T| Ok(each(item)), NonZeroUsize::MIN);
-    pool(items, cores(), batch, &apart, each, |r| answers.push(r))?;
+    let jobs = crate::seat::jobs();
+    pool(items, jobs, batch, &apart, each, |r| answers.push(r))?;
     Ok(answers)
 }
 

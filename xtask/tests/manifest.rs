@@ -150,6 +150,22 @@ fn a_key_outside_the_grammar_is_refused_by_name() {
     assert!(err.contains("ceiling"), "the offending key is named: {err}");
 }
 
+/// `runs` says how the runtime runs a `Bash` call, so it is refused on a
+/// rule that judges any other tool, and read on one that judges `Bash`
+/// (#3624).
+#[test]
+fn runs_qualifies_a_bash_rule_alone() {
+    let rule = |tool: &str| {
+        format!(
+            "{MINIMAL}\n[[rule]]\nid = \"x.wait\"\ntool = \"{tool}\"\nruns = \"foreground\"\ndeny_pattern = 'sleep'\ntext = \"x\"\n"
+        )
+    };
+    let err = Manifest::parse(&rule("Edit")).unwrap_err().to_string();
+    assert!(err.contains("`runs`") && err.contains("x.wait"), "{err}");
+    let parsed = Manifest::parse(&rule("Bash")).unwrap();
+    assert_eq!(parsed.rules[0].runs, xtask::manifest::Runs::Foreground);
+}
+
 #[test]
 fn a_table_outside_the_grammar_is_refused_by_name() {
     let text = format!("{MINIMAL}\n[policy]\nstrict = true\n");
