@@ -270,6 +270,13 @@ impl Kind {
         })
     }
 
+    /// Whether a register of the kind holds a value the op that writes it
+    /// defines, a long, a double or a boolean: a `null`, `false` or
+    /// `true` register is a constant and defines nothing.
+    fn carries(self) -> bool {
+        matches!(self, Kind::Long | Kind::Double | Kind::Bool)
+    }
+
     /// The Cranelift type a register of the kind is.
     fn ty(self) -> Type {
         match self {
@@ -4549,7 +4556,7 @@ impl<'a> Emit<'a> {
     fn register(&mut self, value: ValueId) -> Result<Scalar, Abort> {
         let defined = (self.regs.get(value.0 as usize).copied().flatten()).is_some();
         let (var, kind) = self.register_var(value)?;
-        if !defined && matches!(kind, Kind::Long | Kind::Double | Kind::Bool) {
+        if !defined && kind.carries() {
             return Err(mismatch("a register read before anything defined it"));
         }
         Ok(match kind {
