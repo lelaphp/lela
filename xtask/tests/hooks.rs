@@ -69,11 +69,26 @@ enum Computed {
     /// sides re-rendered: `check` finds it unrendered until `run` renders
     /// it, which rewrites `AGENTS.md` and says so.
     Unrendered,
+    /// The real `computed` this test found on `PATH`, as CI installs it,
+    /// every call recorded first: for a case whose answer is computed's
+    /// own reading of the regions, not one shape.
+    Real,
+}
+
+/// The real `computed` on `PATH`, the one the stand-in hands [`Computed::Real`] to.
+fn real_computed() -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("computed"))
+        .find(|path| path.is_file())
+        .expect("computed is on PATH, as CI installs it")
 }
 
 impl Computed {
-    fn body(&self) -> &'static str {
-        match self {
+    fn body(&self) -> String {
+        let shape = match self {
+            Computed::Real => {
+                return format!("exec '{}' \"$@\"\n", real_computed().display());
+            }
             Computed::Rendered => {
                 "if [ \"$1\" = run ]; then echo rendered >> AGENTS.md; printf 'AGENTS.md:3 layout tree stale written\\n' >&2; exit 1; fi\nexit 0\n"
             }
@@ -89,7 +104,8 @@ impl Computed {
             Computed::Unrendered => {
                 "if [ \"$1\" = run ] && ! grep -qx rendered AGENTS.md; then echo rendered >> AGENTS.md; printf 'AGENTS.md:3 layout exec unrendered written\\n' >&2; exit 1; fi\nif [ \"$1\" = check ] && ! grep -qx rendered AGENTS.md; then printf 'AGENTS.md:3 layout exec unrendered\\n' >&2; exit 1; fi\nexit 0\n"
             }
-        }
+        };
+        shape.to_owned()
     }
 }
 
@@ -749,6 +765,107 @@ fn an_untrusted_root_refuses_the_commit_naming_computed_trust() {
     let staged = scratch.git(&["diff", "--cached", "--name-only"], false);
     assert_eq!(staged.trim(), "crates/php_heap/src/lib.rs");
     assert_no_builds(&scratch);
+}
+
+/// A scratch whose region files the real `computed` reads: `AGENTS.md`
+/// holds one tree region over `crates`, rendered and committed, the other
+/// five no region; then a new crate is staged and committed by pathspec,
+/// the shape AGENTS.md asks for, and `clippy` refuses it after the hook
+/// has rendered the region and staged it. The refusal rolls the commit's
+/// index back, so the render stands in the working copy alone, which is
+/// returned.
+fn refused_after_its_render(name: &str, path: &str) -> (Scratch, String) {
+    let scratch = scratch(name, &Computed::Real);
+    for file in REGIONS {
+        write(&scratch.root, file, "# a region file\n");
+    }
+    write(
+        &scratch.root,
+        "AGENTS.md",
+        "# a region file\n\n<!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->\n<!-- /computed -->\n",
+    );
+    let laid = Command::new(real_computed())
+        .args(["run", "AGENTS.md"])
+        .current_dir(&scratch.root)
+        .output()
+        .unwrap();
+    assert!(laid.status.code().is_some_and(|c| c < 2), "{laid:?}");
+    scratch.git(&[&["add", "--"][..], &REGIONS].concat(), false);
+    scratch.git(&["commit", "-q", "-m", "a tree region"], false);
+
+    write(&scratch.root, path, "pub fn push() {}\n");
+    scratch.git(&["add", "--", path], false);
+    scratch.refuse("xtask clippy");
+    let before = scratch.head();
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "a crate", "--", path], true);
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(scratch.head(), before, "clippy refused the commit: {out}");
+    fs::remove_file(scratch.dir.join("refuse")).unwrap();
+    let rendered = fs::read_to_string(scratch.root.join("AGENTS.md")).unwrap();
+    assert!(
+        rendered.contains("php_stack"),
+        "the refused run rendered the region: {rendered}"
+    );
+    let staged = scratch.git(&["diff", "--cached", "--name-only"], false);
+    assert_eq!(
+        staged.trim(),
+        path,
+        "the refusal took the render's staging back"
+    );
+    (scratch, rendered)
+}
+
+/// A pathspec commit refused after its render, then committed again,
+/// carries the rendered region (#3638): the second run finds the region
+/// fresh on disk and writes nothing, and the hook stages `AGENTS.md`
+/// because its working copy differs from the commit's index only inside
+/// its region, and the region lists a directory the commit adds. A hook
+/// that stages only what this run wrote commits the listing from before
+/// the crate and fails here.
+#[test]
+fn a_render_a_refused_commit_wrote_is_carried_by_the_next() {
+    let path = "crates/php_stack/src/lib.rs";
+    let (scratch, rendered) = refused_after_its_render("rendered-before", path);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "a crate", "--", path], true);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("staged AGENTS.md"), "{out}");
+    assert_eq!(scratch.git(&["show", "HEAD:AGENTS.md"], false), rendered);
+    assert_eq!(scratch.git(&["status", "--porcelain"], false), "");
+}
+
+/// What is not the commit's render is left where it stands (#3638): a
+/// commit that stages no path the region reads leaves `AGENTS.md`, whose
+/// listing names a crate that commit does not carry; and once a person
+/// has written a line outside the region, the commit that adds the crate
+/// leaves the file too, their line with it, since its working copy then
+/// differs from the commit's index by more than the region's body.
+#[test]
+fn a_region_file_that_is_not_the_commit_s_render_is_left() {
+    let path = "crates/php_stack/src/lib.rs";
+    let (scratch, rendered) = refused_after_its_render("rendered-before-left", path);
+    let committed = scratch.git(&["show", "HEAD:AGENTS.md"], false);
+    let other = "crates/php_heap/src/lib.rs";
+    write(
+        &scratch.root,
+        other,
+        "pub fn alloc() {}\npub fn free() {}\n",
+    );
+    scratch.git(&["add", "--", other], false);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "the heap", "--", other], true);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("staged AGENTS.md"), "{out}");
+    assert_eq!(scratch.git(&["show", "HEAD:AGENTS.md"], false), committed);
+
+    let written = format!("{rendered}\nA line a person wrote.\n");
+    write(&scratch.root, "AGENTS.md", &written);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "a crate", "--", path], true);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("staged AGENTS.md"), "{out}");
+    assert_eq!(scratch.git(&["show", "HEAD:AGENTS.md"], false), committed);
+    assert_eq!(
+        fs::read_to_string(scratch.root.join("AGENTS.md")).unwrap(),
+        written
+    );
 }
 
 /// An instrument that fails past the first group refuses the commit by

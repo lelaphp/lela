@@ -29,7 +29,8 @@
 # regions`, which reads computed's exit once
 # for every caller and refuses a broken marker, a missing computed and an
 # untrusted clone; what it wrote is re-staged, and a hand-edited region is
-# refused, since only a person runs --force. The gitignored local file,
+# refused, since only a person runs --force; a render an earlier, refused
+# run wrote is staged too (#3638). The gitignored local file,
 # .claude/harness.local.md, is not rendered here: no commit takes it, and
 # every session re-renders it, so its render here could only refuse a
 # commit for another session's write (#1312). Every command's own exit is
@@ -283,6 +284,59 @@ fi
 # region it would write that reads a path whose working copy the commit
 # does not stage: rendered, it would carry that change (#2236).
 regions='AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md harness-design.md third-engine-design.md'
+# A render a refused run wrote, staged here (#3638). A pathspec commit
+# refused after its regions were rendered and staged is rolled back to
+# the index it started from, and the next run finds those regions fresh
+# on disk and writes nothing, so the commit would carry the bodies from
+# before the render. So a region file is staged where its working copy
+# differs from the commit's index only inside its regions, the two equal
+# once `computed clean` has emptied each, and where `computed affected`
+# says one of its regions reads a staged path. A tree region reads the
+# directories it lists, so a directory a staged path adds or takes away
+# is asked about as itself, as `--staged` asks about an untracked one.
+# This runs before `xtask regions --staged`, whose check then holds what
+# was staged here as it holds every file the commit stages.
+rendered_before() {
+    local file dir differ=() paths=() affected tmp
+    for file in $regions; do
+        git diff --quiet -- "$file" || differ+=("$file")
+    done
+    [ "${#differ[@]}" != 0 ] || return 0
+    while IFS= read -r file; do
+        paths+=("$file")
+    done < <(
+        git diff --cached --name-only
+        git diff --cached --name-only --diff-filter=AD | while IFS= read -r file; do
+            dir=$file
+            while [ "${dir#*/}" != "$dir" ]; do
+                dir=${dir%/*}
+                if ! git cat-file -e "HEAD:$dir" 2>/dev/null || [ -z "$(git ls-files -- "$dir")" ]; then
+                    printf '%s\n' "$dir"
+                fi
+            done
+        done | sort -u
+    )
+    [ "${#paths[@]}" != 0 ] || return 0
+    affected=$(computed affected "${paths[@]}" 2>/dev/null | cut -d: -f1 | sort -u)
+    tmp=$(mktemp -d) || return 0
+    for file in "${differ[@]}"; do
+        printf '%s\n' "$affected" | grep -qxF -- "$file" || continue
+        rm -rf "${tmp:?}/working" "${tmp:?}/index"
+        mkdir -p "$tmp/working" "$tmp/index"
+        if ! cp -- "$file" "$tmp/working/${file##*/}" ||
+            ! git show ":$file" > "$tmp/index/${file##*/}" 2>/dev/null; then
+            continue
+        fi
+        (cd "$tmp/working" && computed clean -- "${file##*/}" >/dev/null 2>&1)
+        (cd "$tmp/index" && computed clean -- "${file##*/}" >/dev/null 2>&1)
+        if cmp -s "$tmp/working/${file##*/}" "$tmp/index/${file##*/}"; then
+            stage "$file"
+            echo "pre-commit: staged $file, whose regions an earlier run rendered from what this commit stages (#3638)"
+        fi
+    done
+    rm -rf "$tmp"
+}
+rendered_before
 # shellcheck disable=SC2086
 if rendered=$($X regions --staged $regions); then
     echo "$rendered" | grep -E ' written$' | cut -d: -f1 | sort -u | while read -r file; do
