@@ -12898,26 +12898,56 @@ fn do_call(req: &mut Request, frame: FrameRef, says: DoCall, opcode: &str) -> Ed
 
 /// A native served on the call on top of the stack threw `thrown`, as
 /// `DO_*CALL`'s handler and the call compiled code makes
-/// ([`crate::tier::call_native`]) both meet it: the call popped, as php
-/// frees it on the throw's path too, and the throwable left pending. A
-/// native that threw leaves the interrupt raised for the next site,
-/// since php calls no PHP handler while `EG(exception)` stands, but for
-/// the memory limit: php checks before it reads `EG(exception)`, and
-/// `zend_handle_delayed_oom` gives up what the native threw for the
-/// unwind exit, so no `catch` takes it (a DOM parse lexbor stopped at the
-/// limit throws its `DOMException` and the limit's fatal is raised in its
-/// place), which is the `Err`.
+/// ([`crate::tier::call_native`]) both meet it: the throwable left
+/// pending, the interrupt check made with the call still on the stack,
+/// and the call popped, its arguments given up with the throwable
+/// pending, as php's handler frees them on the throw's path too. php
+/// 8.5.12 makes `ZEND_VM_FCALL_INTERRUPT_CHECK` before it reads
+/// `EG(exception)`, so a signal the native raised before it threw is
+/// dispatched there, its handler served with the throwable set aside
+/// ([`crate::api::raising::set_aside`]), and seen from the native's
+/// call:
+///
+/// ```php
+/// pcntl_signal(SIGUSR1, function () { pcntl_async_signals(true); posix_kill(posix_getpid(), SIGUSR2); throw new Exception("usr1"); });
+/// pcntl_signal(SIGUSR2, function () { echo "usr2 from ", debug_backtrace()[1]['function'], "\n"; });
+/// posix_kill(posix_getpid(), SIGUSR1);
+/// try { pcntl_signal_dispatch(); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect process
+/// usr2 from pcntl_signal_dispatch
+/// caught usr1
+/// ```
+///
+/// The memory limit's is the `Err`: `zend_handle_delayed_oom` gives up
+/// what the native threw for the unwind exit, so no `catch` takes it (a
+/// DOM parse lexbor stopped at the limit throws its `DOMException` and
+/// the limit's fatal is raised in its place). A fatal leaving makes no
+/// check, since php's `zend_bailout` left the native before it.
+///
+/// An argument's destructor that throws as the call is popped chains
+/// what the native threw under its own, as `zend_objects_destroy_object`
+/// sets `EG(exception)` aside around it:
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class D { function __destruct() { throw new Exception("destructed"); } }
+/// function made() { return new D; }
+/// try { strlen(made(), 1); } catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// destructed after strlen() expects exactly 1 argument, 2 given
+/// ```
 #[inline(always)] // the handler's throw path, as it was before the tier shared it
 pub(super) fn thrown_on_call(req: &mut Request, thrown: &Thrown) -> Result<(), Fatal> {
-    if req.has_oom() && crate::interrupt::raised(req) {
-        req.leave_pending(thrown);
-        let interrupted = crate::interrupt::interrupted(req);
-        req.pop_call();
-        return interrupted.map(drop);
-    }
-    req.pop_call();
     req.leave_pending(thrown);
-    Ok(())
+    let checked = if req.diagnostics().bailing_out() {
+        Ok(false)
+    } else {
+        crate::interrupt::check(req)
+    };
+    req.pop_call();
+    checked.map(drop)
 }
 
 /// `DO_FCALL` and `DO_FCALL_BY_NAME` over a callee whose `fn_flags`

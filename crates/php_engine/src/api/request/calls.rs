@@ -817,8 +817,23 @@ impl Request {
     /// callback's last check is taken here, before the native that
     /// called it goes on. The timer's is the fatal;
     /// otherwise the extensions' hooks, and what they throw is what the
-    /// call hands back. A native that threw leaves the interrupt for the
-    /// next site, as the loop's own check after a call does.
+    /// call hands back. A callee that threw is checked after too, with
+    /// what it threw pending, as php 8.5.12 checks whatever
+    /// `EG(exception)` holds and the loop's own check after a call does
+    /// ([`crate::handlers::thrown_on_call`]): a signal the callee raised
+    /// before it threw is dispatched here, seen from the native that made
+    /// the call, which is gone from the stack by then:
+    ///
+    /// ```php
+    /// pcntl_signal(SIGUSR1, function () { pcntl_async_signals(true); posix_kill(posix_getpid(), SIGUSR2); throw new Exception("usr1"); });
+    /// pcntl_signal(SIGUSR2, function () { echo "usr2 from ", debug_backtrace()[1]['function'], "\n"; });
+    /// posix_kill(posix_getpid(), SIGUSR1);
+    /// try { iterator_apply(new ArrayIterator([1]), 'pcntl_signal_dispatch'); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect process
+    /// usr2 from iterator_apply
+    /// caught usr1
+    /// ```
     ///
     /// The signal here is sent by a forked child, and its ordering is
     /// fixed by construction: the child sends it only once it has read a
@@ -877,13 +892,20 @@ impl Request {
     }
 
     /// [`Request::checked_after_call`] past its load, where the interrupt
-    /// is raised: what the callee served handed on as it stands where it
-    /// threw, and otherwise the check's answer over it.
+    /// is raised: the check's answer over what the callee served, a
+    /// throwable it threw left pending for the check and taken back after.
+    /// A fatal leaving makes no check, since php's `zend_bailout` left the
+    /// callee before it.
     #[cold]
     #[inline(never)]
     fn interrupted_after_call(&mut self, served: Result<Value, Thrown>) -> Result<Value, Thrown> {
-        let Ok(value) = served else {
-            return served;
+        let value = match served {
+            Ok(value) => value,
+            Err(thrown) if self.diagnostics().bailing_out() => return Err(thrown),
+            Err(thrown) => {
+                self.leave_pending(&thrown);
+                Value::null()
+            }
         };
         match crate::interrupt::interrupted(self) {
             Ok(false) => Ok(value),
