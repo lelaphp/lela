@@ -2,17 +2,22 @@
 //! ledger 11), run by git in a scratch repository: a stand-in `cargo` on
 //! `PATH` records each call and answers as the instruments would, and
 //! hands `xtask regions` to this crate's own binary against the scratch
-//! root, so the hook's re-stage loop reads the real reader; a stand-in
-//! `computed` answers with one shape per case. What is read back is what
+//! root, so the hook's re-stage loop reads the real reader, and
+//! `xtask vocab --message` too where a test asks for the real glossary; a
+//! stand-in `computed` answers with one shape per case. What is read back is what
 //! the hook did, the commit it allowed or refused, the files it staged
 //! and the base it handed `done`, since a hook that exits without doing
-//! its job is invisible to a substring over its text.
+//! its job is invisible to a substring over its text. Each runs git with
+//! no session of its own, as a person's terminal does, unless the test
+//! names one (#3621).
 #![cfg(tracked)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use xtask::owner::{self, SESSION_VARIABLE, SessionId};
+use xtask::reading::{Status, Store};
 use xtask::scratch::Tree;
 
 mod common {
@@ -39,7 +44,8 @@ const REGIONS: [&str; 6] = [
 /// repository, `bin` holds `cargo` and `computed`, `plugin-bin` holds
 /// `claude` and `npx`, `cargo.log`, `computed.log` and `plugin.log` hold
 /// one line per call, and `refuse` names the one `cargo` call that exits
-/// 1, when a test writes it. `claude_on_path` says whether `plugin-bin`
+/// 1, when a test writes it; `vocab-message`, when a test writes it, hands
+/// commit-msg's `xtask vocab --message` to this crate's own binary. `claude_on_path` says whether `plugin-bin`
 /// is on the hook's `PATH`: off, the hook finds no `claude` at all.
 struct Scratch {
     dir: Tree,
@@ -125,15 +131,18 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
         &bin.join("cargo"),
         &format!(
             "#!/bin/sh\n\
+             if [ \"$1 $2\" = 'xtask worktree' ]; then shift 2; exec '{xtask}' --root \"$PWD\" worktree \"$@\"; fi\n\
              printf '%s\\n' \"$*\" >> '{log}'\n\
              if [ -f '{refuse}' ] && [ \"$(cat '{refuse}')\" = \"$1 $2\" ]; then exit 1; fi\n\
              if [ \"$1 $2\" = 'xtask regions' ]; then shift 2; exec '{xtask}' --root \"$PWD\" regions \"$@\"; fi\n\
+             if [ \"$1 $2 $3\" = 'xtask vocab --message' ] && [ -f '{vocab}' ]; then shift 2; exec '{xtask}' --root \"$PWD\" vocab \"$@\"; fi\n\
              if [ \"$1 $2\" = 'xtask api-check' ]; then sleep 1; fi\n\
              if [ \"$1 $2\" = 'xtask test' ]; then HOOKS_TESTED='{tested}' '{probe}' --exact as_xtask_test_runs_a_map_test --ignored > /dev/null 2>&1; fi\n\
              printf 'ran %s\\n' \"$*\"\n\
              exit 0\n",
             log = dir.join("cargo.log").display(),
             refuse = dir.join("refuse").display(),
+            vocab = dir.join("vocab-message").display(),
             tested = dir.join("tested-AGENTS.md").display(),
             probe = std::env::current_exe().unwrap().display(),
             xtask = xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")).display(),
@@ -207,6 +216,12 @@ impl Scratch {
     /// Without `claude`, `PATH` is the stand-ins and the system's own
     /// directories alone, so the hook finds no `claude` anywhere.
     fn run(&self, args: &[&str], hooked: bool) -> (i32, String) {
+        self.run_as(args, hooked, None)
+    }
+
+    /// [`Scratch::run`] from `session`, as Claude Code hands its session
+    /// to a call's processes, or from none, a person's terminal.
+    fn run_as(&self, args: &[&str], hooked: bool, session: Option<&str>) -> (i32, String) {
         let path = if self.claude_on_path {
             format!(
                 "{}:{}",
@@ -226,6 +241,10 @@ impl Scratch {
             .env("GIT_AUTHOR_EMAIL", "x@x")
             .env("GIT_COMMITTER_NAME", "x")
             .env("GIT_COMMITTER_EMAIL", "x@x");
+        match session {
+            Some(id) => command.env(SESSION_VARIABLE, id),
+            None => command.env_remove(SESSION_VARIABLE),
+        };
         if hooked {
             command.env("PATH", format!("{}:{path}", self.dir.join("bin").display()));
         } else {
@@ -354,6 +373,8 @@ fn as_xtask_test_runs_a_map_test() {
 /// tests read the map the commit carries from the index (#1416): a hook
 /// that renders after `test` hands it the map before the render and fails
 /// here. The commit carries the rendered file and the tree is clean after.
+/// commit-msg runs last, handing `vocab --message` the file git wrote the
+/// message to, as a whole path (#3624).
 #[test]
 fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     let scratch = scratch("rendered", &Computed::Rendered);
@@ -382,6 +403,7 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
         .chain([rendering.as_str()])
         .chain(["xtask clippy --staged", "xtask test --staged"])
         .map(str::to_owned)
+        .chain([message(&scratch)])
         .collect();
     expected[1..6].sort_unstable();
     assert_eq!(calls, expected);
@@ -392,7 +414,8 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     );
     let printed: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("ran ")).collect();
     assert_eq!(printed[1..6], reading, "{out}");
-    let building = ["xtask clippy --staged", "xtask test --staged"];
+    let message = message(&scratch);
+    let building = ["xtask clippy --staged", "xtask test --staged", &message];
     assert_eq!(printed[6..], building, "{out}");
     assert_eq!(
         scratch.calls("computed"),
@@ -415,6 +438,13 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
         Vec::<String>::new(),
         "nothing under harness-plugins/ was staged, so the declarations step did not run"
     );
+}
+
+/// The `cargo` call commit-msg makes: `vocab --message` over the file git
+/// wrote, named whole.
+fn message(scratch: &Scratch) -> String {
+    let file = scratch.root.join(".git/COMMIT_EDITMSG");
+    format!("xtask vocab --message {}", file.display())
 }
 
 /// A commit by pathspec, the shape AGENTS.md asks for, is written from a
@@ -783,6 +813,73 @@ fn a_merge_commit_runs_no_witness() {
     );
 }
 
+/// One session writes in a checkout, its owner (#3618 M1, #3621): with an
+/// owner record naming `the-owner`, a commit from another session is
+/// refused by pre-commit before any instrument starts, naming the owner,
+/// the session and the checkout, and so is a merge git commits itself,
+/// by pre-merge-commit, the merge left standing; the owner's commit and
+/// a person's, made from no session, go through.
+#[test]
+fn a_commit_from_another_session_than_the_checkout_s_owner_is_refused() {
+    let scratch = scratch("owner", &Computed::Rendered);
+    let main = scratch
+        .git(&["symbolic-ref", "--short", "HEAD"], false)
+        .trim()
+        .to_owned();
+    owner::record(&scratch.root, &SessionId::new("the-owner").unwrap()).unwrap();
+    let path = "crates/php_heap/src/lib.rs";
+    let commit = |text: &str, session: Option<&str>| {
+        write(&scratch.root, path, text);
+        scratch.git(&["add", "--", path], false);
+        scratch.run_as(
+            &["commit", "-q", "-m", "a change", "--", path],
+            true,
+            session,
+        )
+    };
+    let before = scratch.head();
+    let (code, out) = commit("pub fn free() {}\n", Some("another-session"));
+    assert_eq!(code, 1, "{out}");
+    let named = format!(
+        "{} is session the-owner's and this is session another-session",
+        scratch.root.display()
+    );
+    assert!(out.contains(&named), "{out}");
+    assert!(out.contains("Instead: work in your own worktree"), "{out}");
+    assert!(scratch.calls("cargo").is_empty(), "nothing ran: {out}");
+    assert_eq!(scratch.head(), before, "{out}");
+
+    let (code, out) = commit("pub fn free() {}\n", Some("the-owner"));
+    assert_eq!(code, 0, "the owner's commit: {out}");
+    let (code, out) = commit("pub fn alloc() {}\n", None);
+    assert_eq!(code, 0, "a person's commit: {out}");
+
+    scratch.git(&["checkout", "-q", "-b", "t9"], false);
+    write(&scratch.root, "notes.txt", "b\n");
+    scratch.git(&["add", "--", "notes.txt"], false);
+    scratch.git(&["commit", "-q", "-m", "the work of #9"], false);
+    scratch.git(&["checkout", "-q", &main], false);
+    let before = scratch.head();
+    let merge = [
+        "merge",
+        "-q",
+        "--no-ff",
+        "t9",
+        "-m",
+        "Merge t9: the work (#9)",
+    ];
+    let (code, out) = scratch.run_as(&merge, true, Some("another-session"));
+    assert_ne!(code, 0, "{out}");
+    assert!(
+        out.contains(&named) && out.contains("pre-merge-commit"),
+        "{out}"
+    );
+    assert_eq!(scratch.head(), before, "{out}");
+    scratch.git(&["merge", "--abort"], false);
+    let (code, out) = scratch.run_as(&merge, true, Some("the-owner"));
+    assert_eq!(code, 0, "the owner's merge: {out}");
+}
+
 /// git reads the file `-F` names only after pre-commit, so a missing one
 /// is refused by the hook before any instrument starts, by name; one that
 /// exists is committed (revision 140).
@@ -847,12 +944,68 @@ fn a_vocab_refusal_ends_the_hook_before_clippy_runs() {
     assert_eq!(scratch.calls("computed"), Vec::<String>::new());
 }
 
+// ---------------------------------------------------------------- commit-msg
+
+/// commit-msg notes the message against the glossary its staged crate is
+/// held to and refuses nothing (#3624, ruled on #3629), through the real
+/// `vocab --message` against the workspace's `CONTEXT.md`:
+/// `fixtures/hooks/commit-msg/avoided.txt` is committed, each word printed
+/// with its line and the word the glossary says, and the reading under
+/// `message` fails listing them; `clean.txt`, which carries avoided words
+/// only in a code span, its subject's path and a trailer, is committed
+/// and its reading passes. A hook that never reads the message, reads it
+/// from where it ran rather than where git wrote it, records nothing or
+/// refuses a commit fails here.
+#[test]
+fn commit_msg_notes_an_avoided_word_by_line_and_refuses_nothing() {
+    let scratch = scratch("commit-msg", &Computed::Rendered);
+    fs::write(scratch.dir.join("vocab-message"), "").unwrap();
+    let glossary = fs::read(workspace().join("CONTEXT.md")).unwrap();
+    fs::write(scratch.root.join("CONTEXT.md"), glossary).unwrap();
+    // The store the reading lands in is ignored, as a checkout's is.
+    write(&scratch.root, ".gitignore", "/target/\n");
+    scratch.git(&["add", "--", "CONTEXT.md", ".gitignore"], false);
+    scratch.git(&["commit", "-q", "-m", "the glossary"], false);
+    let fixture = xtask::package_dir().join("fixtures/hooks/commit-msg");
+    let store = Store::of_workspace(&scratch.root);
+    let commit = |name: &str, text: &str| {
+        let path = "crates/php_heap/src/lib.rs";
+        write(&scratch.root, path, text);
+        scratch.git(&["add", "--", path], false);
+        let before = scratch.head();
+        let file = fixture.join(name);
+        let (code, out) = scratch.run(&["commit", "-q", "-F", file.to_str().unwrap()], true);
+        assert_eq!(code, 0, "{name}: {out}");
+        assert_ne!(scratch.head(), before, "{name} was committed: {out}");
+        let reading = store.read("vocab", "message").unwrap().unwrap();
+        (out, reading)
+    };
+
+    let (out, reading) = commit("avoided.txt", "pub fn alloc() {}\npub fn free() {}\n");
+    for line in [
+        ":1: \"helper\" in the commit message; the glossary says \"Command\"",
+        ":3: \"helper\" in the commit message; the glossary says \"Command\"",
+        ":3: \"output\" in the commit message; the glossary says \"Reading\"",
+    ] {
+        assert!(out.contains(line), "{line}: {out}");
+        assert!(reading.message.contains(line), "{line}: {reading:#?}");
+    }
+    assert!(out.contains("noted and not refused"), "{out}");
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(reading.rule, "vocab.avoid", "{reading:#?}");
+
+    let (_, reading) = commit("clean.txt", "pub fn alloc() {}\n");
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+}
+
 /// A revision a branch adds is written `NEXT` and numbered by the merge
 /// into `main` (#2982), its ledger row and every citation of it: a commit
 /// on `main` whose Markdown or Rust still cites one, as
 /// `fixtures/hooks/next/cited.md` and `cited.rs` do in each shape that has
 /// landed, one wrapped onto the next line among them, is refused before
-/// anything runs, naming each line, and the same commit on a branch is not.
+/// anything runs, naming each line, as it is on `staging`, the merge
+/// queue's branch, which `main` fast-forwards to (#3622), and the same
+/// commit on a ticket's branch is not.
 /// Prose that names NEXT and cites no revision, the convention quoted in
 /// backticks and a line that ends in "revision" among it, is no citation.
 #[test]
@@ -891,6 +1044,11 @@ fn a_revision_still_cited_as_next_is_refused_on_main_and_not_on_a_branch() {
     }
     assert!(out.contains("is still NEXT"), "{out}");
     assert_eq!(scratch.calls("cargo"), Vec::<String>::new());
+
+    scratch.git(&["checkout", "-q", "-b", "staging"], false);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "citations"], true);
+    assert_eq!(code, 1, "staging: {out}");
+    assert!(out.contains("docs/ledger.md:3:"), "staging: {out}");
 
     scratch.git(&["checkout", "-q", "-b", "t9"], false);
     let (code, out) = scratch.run(&["commit", "-q", "-m", "citations"], true);
@@ -1365,4 +1523,108 @@ fn pre_push_hands_done_the_remote_sha_and_no_base_for_a_ref_the_remote_lacks() {
     );
     let held = scratch.git(&["rev-parse", &format!("origin/{branch}")], false);
     assert_eq!(held.trim(), second, "the push was refused");
+}
+
+// ------------------------------------------------------------- the merge queue
+
+/// The niceness of the process `pid`, as `ps` prints it.
+fn niceness(pid: &str) -> i32 {
+    let out = Command::new("ps")
+        .args(["-o", "nice=", "-p", pid])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+}
+
+/// The merge queue's commits run at full priority (#3622): pre-commit
+/// renices a commit in a linked worktree, a builder's, so it yields the
+/// cores to the merge, and the merge worktree, the linked worktree on
+/// `staging`, is that merge, so its hook is not reniced. Each call of the
+/// stand-in `cargo` records the niceness it ran at.
+#[test]
+fn a_commit_on_staging_runs_at_full_priority_and_a_builder_s_yields() {
+    let scratch = scratch("renice", &Computed::Rendered);
+    let own = niceness(&std::process::id().to_string());
+    let log = scratch.dir.join("nice.log");
+    let cargo = scratch.dir.join("bin/cargo");
+    let body = fs::read_to_string(&cargo).unwrap().replacen(
+        "#!/bin/sh\n",
+        &format!("#!/bin/sh\nps -o nice= -p $$ >> '{}'\n", log.display()),
+        1,
+    );
+    executable(&cargo, &body);
+    let mut seen = Vec::new();
+    for branch in ["staging", "t9"] {
+        let dir = scratch.dir.join(branch);
+        let path = dir.to_str().unwrap();
+        scratch.git(&["worktree", "add", "-q", "-b", branch, path], false);
+        write(&dir, "crates/php_heap/src/lib.rs", "pub fn free() {}\n");
+        scratch.git(
+            &["-C", path, "add", "--", "crates/php_heap/src/lib.rs"],
+            false,
+        );
+        let (code, out) = scratch.run(&["-C", path, "commit", "-q", "-m", "a change"], true);
+        assert_eq!(code, 0, "{branch}: {out}");
+        let levels: Vec<i32> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|l| l.trim().parse().unwrap())
+            .collect();
+        fs::remove_file(&log).unwrap();
+        assert!(!levels.is_empty(), "{branch}: {out}");
+        seen.push(levels);
+    }
+    assert!(
+        seen[0].iter().all(|&n| n == own),
+        "staging: {:?} at {own}",
+        seen[0]
+    );
+    // The first call is the owner's, `xtask worktree whose`, made before
+    // the renice; every one after it, the builds among them, yields.
+    if own < 20 {
+        assert!(
+            seen[1].len() > 1 && seen[1][1..].iter().all(|&n| n > own),
+            "t9: {:?} at {own}",
+            seen[1]
+        );
+    }
+}
+
+/// The merge queue's fast-forward closes the tickets (#3622): a merge
+/// committed on `staging` reaches `xtask ticket merged` through
+/// post-commit, which closes nothing off `main`, and `main`'s `git merge
+/// --ff-only staging` reaches it through post-merge, since `ORIG_HEAD`,
+/// which reads the merges the fast-forward brought.
+#[test]
+fn a_fast_forward_of_main_to_staging_reaches_ticket_merged() {
+    let scratch = scratch("staging-ff", &Computed::Rendered);
+    let main = scratch
+        .git(&["symbolic-ref", "--short", "HEAD"], false)
+        .trim()
+        .to_owned();
+    let merged = |scratch: &Scratch| {
+        scratch
+            .calls("cargo")
+            .into_iter()
+            .filter(|call| call.starts_with("xtask ticket merged"))
+            .collect::<Vec<_>>()
+    };
+    scratch.git(&["checkout", "-q", "-b", "t7", &main], false);
+    scratch.git(
+        &["commit", "-q", "--allow-empty", "-m", "the work of #7"],
+        false,
+    );
+    scratch.git(&["checkout", "-q", "-b", "staging", &main], false);
+    scratch.git(&["merge", "-q", "--no-ff", "--no-commit", "t7"], false);
+    scratch.git(&["commit", "-q", "-m", "Merge t7: the work (#7)"], true);
+    assert_eq!(merged(&scratch), ["xtask ticket merged --since HEAD^1"]);
+    scratch.git(&["checkout", "-q", &main], false);
+    scratch.git(&["merge", "-q", "--ff-only", "staging"], true);
+    assert_eq!(
+        merged(&scratch),
+        [
+            "xtask ticket merged --since HEAD^1",
+            "xtask ticket merged --since ORIG_HEAD"
+        ]
+    );
 }

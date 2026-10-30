@@ -14,7 +14,8 @@
 # was never read, so it refused nothing and cost a release build of every
 # extension per engine commit; `done` asks a touched extension for its
 # row, and `cargo xtask crosscheck --ext <name>` takes it (revision 140).
-# Before anything runs, a `git commit -F` whose file is missing is
+# Before anything runs, a commit from a session that does not own the
+# checkout is refused (#3621), and a `git commit -F` whose file is missing is
 # refused, since git reads the message only after this hook, and a
 # commit in a linked worktree, a builder's, runs at a lower priority than
 # one in the main checkout, a merge (revision 140);
@@ -99,6 +100,12 @@ message_file() {
     return 1
 }
 message_file || exit 1
+# One session writes in a checkout, its owner (#3618 M1, #3621): a commit
+# from a session other than the one `xtask worktree add` or `xtask
+# worktree own` recorded is refused before anything runs, whatever made
+# the change, naming the owner and the checkout. A commit from no
+# session is a person's, and is admitted.
+cargo xtask worktree whose >/dev/null || exit 1
 # A line the commit adds that git's own check reads as a conflict
 # marker left in (`<<<<<<<`, `=======`, `>>>>>>>`, `|||||||`) refuses
 # it, naming file and line: d0e168554, a merge `git commit` concluded
@@ -111,7 +118,7 @@ if markers=$(git diff --cached --check | grep -E ': leftover conflict marker$');
     echo "pre-commit: the staged line above is a conflict marker left in; resolve it, or exempt a file that holds one on purpose by its conflict-marker-size in .gitattributes" >&2
     exit 1
 fi
-# A revision a commit on `main` still cites as `NEXT`, the ledger row or
+# A revision a commit on `main` or `staging` still cites as `NEXT`, the ledger row or
 # prose such as "revisions 11 and NEXT", refuses it before anything runs,
 # naming each line; `next-cited` beside this file says what is read and
 # why, and pre-merge-commit asks it the same of a merge git commits itself.
@@ -121,9 +128,11 @@ if unnumbered=$("$(dirname "$0")/next-cited") && [ -n "$unnumbered" ]; then
     exit 1
 fi
 # A builder commits from a linked worktree, whose .git is a file, while
-# the coordinator merges in the main checkout; the builder's hook and
-# every build under it yield the cores to the merge.
-[ -f .git ] && renice -n 10 -p $$ >/dev/null 2>&1
+# the coordinator merges in the merge worktree, the linked one on
+# `staging` (#3622); the builder's hook and every build under it yield
+# the cores to the merge, and the merge's own hook does not.
+[ -f .git ] && [ "$(git symbolic-ref --short -q HEAD)" != staging ] &&
+    renice -n 10 -p $$ >/dev/null 2>&1
 X='cargo xtask'
 status=0
 step() {

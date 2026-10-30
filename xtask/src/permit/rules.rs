@@ -17,9 +17,12 @@ use super::argv::{Argv, Joint, Line, Move};
 use super::call::Call;
 use super::label;
 use super::operation;
+use super::owned::{self, Owned, Scope, redirected};
 use super::region::region_body;
 use super::unless;
-use crate::manifest::{Manifest, Rule, Where, scope_matches};
+use super::writes::changes;
+use crate::manifest::{Manifest, Rule, Runs, Where, scope_matches};
+use crate::owner::{self, SessionId};
 use crate::rust;
 
 /// The hook event the shipped adapter wires (§6).
@@ -235,6 +238,7 @@ pub fn judge(manifest: &Manifest, root: &Path, call: &Call) -> Result<Judgement>
 /// call.
 fn applies(rule: &Rule, call: &Call, path: Option<&Path>) -> bool {
     (rule.tool.is_empty() || rule.tool.iter().any(|t| t == call.tool_name))
+        && !(rule.runs == Runs::Foreground && call.tool_input.run_in_background)
         && !path.is_some_and(|path| rule.exempts(path))
         && (rule.scope.is_empty() || path.is_some_and(|path| rule.covers(path)))
         && rule.predicate.describes_a_call()
@@ -297,6 +301,13 @@ fn evaluate(
         }
     } else if p.deny == Some(true) {
         true
+    } else if p.writes == Some(true) {
+        // A write: an edit's or a write's file, or a shell line that
+        // changes a checkout by a command or a redirection (#3621).
+        match line {
+            Some(line) => line.commands().iter().any(changes) || !redirected(root, line).is_empty(),
+            None => call.tool_input.file_path.is_some(),
+        }
     } else if let Some(types) = &p.deny_types {
         // The file before and after the write, each read whole, since a
         // fragment of an edit cannot say whether it stands in a comment
@@ -328,7 +339,7 @@ fn evaluate(
     // names ([`judges_where`]).
     let mut standing = Standing::Judged;
     if fired {
-        standing = judges_where(root, rule, line, call);
+        standing = judges_where(root, rule, line, call)?;
         if matches!(standing, Standing::Outside) {
             return Ok(None);
         }
@@ -364,9 +375,9 @@ enum Standing {
     Outside,
     /// Inside them, a row without `where` among them.
     Judged,
-    /// Where an operation stands that the calling session did not start,
-    /// which the denial names (#2476).
-    Foreign(operation::Foreign),
+    /// In a checkout another session owns, an operation standing there
+    /// where the rule asks for one, which the denial names (#3621).
+    Foreign(Owned),
     /// Past a change the line does not say where it goes, where the rule
     /// would judge: the denial says so, and guesses no checkout.
     Unplaced(Unplaced),
@@ -374,9 +385,10 @@ enum Standing {
 
 /// Where the call stands for the rule's `where`: asked where a command it
 /// fires on runs ([`fired_in`]), whose branch records a ticket, which is
-/// the main checkout (#2751), or where another session's operation
-/// stands.
-fn judges_where(root: &Path, rule: &Rule, line: Option<&Line>, call: &Call) -> Standing {
+/// the main checkout (#2751), which is the merge worktree (#3622), or
+/// whose checkout it is, and whether an operation stands there ([`owned`], #3621). An owner record that does
+/// not read is an error, so the call is judged by no build.
+fn judges_where(root: &Path, rule: &Rule, line: Option<&Line>, call: &Call) -> Result<Standing> {
     let judged = |inside: bool| {
         if inside {
             Standing::Judged
@@ -384,28 +396,48 @@ fn judges_where(root: &Path, rule: &Rule, line: Option<&Line>, call: &Call) -> S
             Standing::Outside
         }
     };
+    let owned = |scope| {
+        let found = owned::owned(root, call, line, scope, |argv| fires(rule, argv))?;
+        Ok(found.map_or(Standing::Outside, Standing::Foreign))
+    };
     let lost = line.and_then(|line| unplaced(root, line, |argv| fires(rule, argv)));
-    match (rule.within, lost) {
+    Ok(match (rule.within, lost) {
         (Where::Anywhere, _) => Standing::Judged,
-        (Where::Operating, Some(lost)) if operating_anywhere(root) => Standing::Unplaced(lost),
+        // Where each write lands is the owner record's to judge (#3621).
+        (Where::Owned, _) => return owned(Scope::Owned),
+        (Where::Operating, Some(lost)) if operating_elsewhere(root, call)? => {
+            Standing::Unplaced(lost)
+        }
         (Where::Operating, Some(_)) => Standing::Outside,
         (_, Some(lost)) => Standing::Unplaced(lost),
         (Where::Ticketed, None) => judged(ticketed(root, rule, line)),
-        (Where::Operating, None) => operation::foreign(root, line, call, |argv| fires(rule, argv))
-            .map_or(Standing::Outside, Standing::Foreign),
+        (Where::Operating, None) => return owned(Scope::Operating),
         (Where::Main, None) => judged(in_main(root, rule, line)),
+        (Where::Staging, None) => judged(on_staging(root, rule, line)),
         (Where::Checkout, None) => judged(in_a_checkout(root, line)),
-    }
+    })
 }
 
-/// Whether an operation stands in any checkout of `root`'s repository, or
-/// the repository cannot be listed: what makes an unplaced command one
-/// `where = "operating"` must refuse.
-fn operating_anywhere(root: &Path) -> bool {
-    crate::track::checkouts(root).map_or(true, |all| {
-        all.iter()
-            .any(|checkout| operation::standing_in(checkout).is_some())
-    })
+/// Whether an operation stands in a checkout of `root`'s repository that
+/// another session than the caller's owns (#3621), or the repository
+/// cannot be listed: what makes an unplaced command one `where =
+/// "operating"` must refuse. A call that names no session is judged by no
+/// owner record, so it is none.
+fn operating_elsewhere(root: &Path, call: &Call) -> Result<bool> {
+    let Some(caller) = SessionId::new(&call.session_id) else {
+        return Ok(false);
+    };
+    let Ok(all) = crate::track::checkouts(root) else {
+        return Ok(true);
+    };
+    for checkout in all {
+        if operation::standing_in(&checkout).is_some()
+            && owner::another(&checkout, Some(&caller))?.is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The first command of `line` that `fires` and that the walk places in
@@ -512,6 +544,15 @@ fn in_main(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
         .any(|dir| linked(dir) == Some(false))
 }
 
+/// Whether a command the rule fires on runs in the merge worktree, the
+/// checkout on [`crate::queue::STAGING`], read where [`ticketed`] reads
+/// (#3622).
+fn on_staging(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
+    scoped_in(root, rule, line)
+        .iter()
+        .any(|dir| crate::track::head_branch(dir).as_deref() == Some(crate::queue::STAGING))
+}
+
 /// Where a `where`-scoped rule asks: each checkout a command it fires on
 /// runs in ([`fired_in`]), or, for a call with no line or a line with no
 /// such command, where the call stands ([`runs_in`]).
@@ -540,9 +581,13 @@ fn linked(dir: &Path) -> Option<bool> {
 /// `deny_pattern` fires on a command whose words it matches and its
 /// `unless_pattern` does not, so a `where` rule asks where the hit runs
 /// and not where its neighbours do (#2751); a rule judging by another
-/// predicate fires on the line whole.
+/// predicate fires on the line whole, and `writes` on a command that
+/// changes a checkout ([`changes`]).
 fn fires(rule: &Rule, argv: &Argv) -> bool {
     let p = &rule.predicate;
+    if p.writes.is_some() {
+        return changes(argv);
+    }
     match (&p.deny_argv, &p.require_argv, &p.deny_pattern) {
         (Some(denied), _, _) => argv.denies(denied, &p.with, p.unless_argv.as_ref()),
         (None, Some(separator), _) => argv.unbounded(separator, &p.with),
@@ -610,11 +655,11 @@ pub(super) fn runs_in(root: &Path, line: Option<&Line>) -> PathBuf {
 }
 
 /// The commands of `line` whose place is read, each with every place of
-/// it `asked` names, one pair per place ([`Walk::placed`]). What
-/// records whose operation stands in a checkout reads a command past a
-/// later change where that change took the shell, never where the shell
-/// started (#2720): an orchestrator's `cat $S/owner; cd <main>; git merge
-/// --no-commit t1955` started a merge no record named (#2723).
+/// it `asked` names, one pair per place ([`Walk::placed`]), a command
+/// past a later change read where that change took the shell, never
+/// where the shell started (#2720), as an orchestrator's
+/// `cat $S/owner; cd <main>; git merge --no-commit t1955` once was not
+/// (#2723).
 pub(super) fn placed<'a>(root: &Path, line: &'a Line, asked: Places) -> Vec<(&'a Argv, PathBuf)> {
     let walk = Walk::of(root, Some(line));
     let kept = walk.placed.into_iter();
@@ -710,8 +755,8 @@ pub(super) fn acts_in(root: &Path, line: Option<&Line>) -> PathBuf {
 
 /// The one reading of where a shell line's commands run, from which
 /// [`runs_in`], [`placed`], [`fired_in`] and [`acts_in`] are read, so
-/// `where = "ticketed"`, `where = "main"`, `where = "operating"`,
-/// `where = "checkout"`, the checkout `permit --after` holds and the
+/// `where = "ticketed"`, `where = "main"`, `where = "staging"`,
+/// `where = "operating"`, `where = "checkout"`, the checkout `permit --after` holds and the
 /// approvals it reads move together (#2597, #2607, #2995).
 ///
 /// Each `cd`, `pushd` and `popd` the line says the target of moves the

@@ -5,7 +5,7 @@
 //! a file `fopen()` opened without `e` and has not closed. A file opened
 //! with `e`, one closed, and an included one, which php closes once it
 //! has compiled it, are not held; nor is the program's file once the
-//! program has run, since `do_cli` destroys its handle before
+//! program has ended, since `do_cli` destroys its `zend_file_handle` before
 //! `php_request_shutdown` calls the shutdown functions.
 
 use std::os::unix::fs::MetadataExt;

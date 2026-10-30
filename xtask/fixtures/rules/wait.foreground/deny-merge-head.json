@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "until [ ! -f ~/Projects/dax-php/.git/MERGE_HEAD ]; do sleep 20; done; echo merge-ended; git -C ~/Projects/dax-php log --oneline -1 main", "description": "Wait for the coordinator's merge to end (a lock, #3624)"}}

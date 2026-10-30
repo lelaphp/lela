@@ -4,8 +4,8 @@
 //! sensor, armed in this debug build, finding nothing in the error log.
 //! The nightly soak is `xtask soak`, ten minutes over php's own corpus;
 //! this is its shape over requests that each touch state a request must
-//! not hand on: statics, globals, ini, output buffers, headers, cookies, a
-//! class declared per request, a body read as it arrives and an exception.
+//! not hand on: statics, `$GLOBALS`, ini, `ob_` buffers, headers, cookies, a
+//! class declared per request, a body read as it arrives and a thrown `Exception`.
 
 #![allow(
     clippy::disallowed_methods,

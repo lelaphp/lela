@@ -43,6 +43,8 @@ pub(crate) enum Where {
     Item,
     /// Rustdoc prose.
     Prose,
+    /// A commit message.
+    Message,
 }
 
 /// One avoided word found: where, in what, and the terms the glossary
@@ -85,6 +87,7 @@ impl fmt::Display for Finding {
         match self.site {
             Where::Item => write!(f, "names `{}`", self.subject)?,
             Where::Prose => write!(f, "in rustdoc prose")?,
+            Where::Message => write!(f, "in the commit message")?,
         }
         write!(f, "; the glossary says {}", quoted(&self.terms))
     }
@@ -155,6 +158,97 @@ pub fn hold(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Rea
         readings.push(reading_of(&scan, &snapshot, rule, krate)?);
     }
     Ok(readings)
+}
+
+/// The scope of the reading [`message`] writes: one scope for every
+/// commit message, whose log is the record a later ruling on refusal reads
+/// (#3629), and no crate's, so it never stands for a crate's reading.
+pub(crate) const MESSAGE: &str = "message";
+
+/// A commit message held to the glossary its commit's crates are held to,
+/// as `scripts/hooks/commit-msg` asks (#3624): every `avoid_from` rule
+/// that covers a crate with a staged change lends its terms, so a harness
+/// commit is held to the Harness section as the harness's rustdoc is, and
+/// a commit that touches no such crate is held to nothing. The prose is
+/// read as rustdoc prose is, inline code spans and fenced blocks aside,
+/// and so are what is not prose: git's `#` comments, a trailer line
+/// (`Ticket: #3624`) and the subject's leading path, the file or crate the
+/// commit touches. Each avoided word is printed with its line, and the
+/// reading under [`MESSAGE`], stamped over what is staged, lists them: a
+/// note and never a refusal, until a person rules otherwise on these
+/// readings (#3629).
+pub fn message(root: &Path, manifest: &Manifest, file: &Path) -> Result<Reading> {
+    let staged: Vec<String> = crate::git::staged(root)?
+        .into_iter()
+        .map(|c| c.path)
+        .collect();
+    let crates = manifest.crates_of(&staged);
+    let mut lent: Vec<&str> = Vec::new();
+    let mut terms: Vec<glossary::Term> = Vec::new();
+    for rule in &manifest.rules {
+        let Some(from) = &rule.predicate.avoid_from else {
+            continue;
+        };
+        if !crates.iter().any(|k| rule.covers(&k.path())) {
+            continue;
+        }
+        lent.push(&rule.id);
+        let glossary = Glossary::load(&root.join(from.file()))?;
+        let glossary = match from.section() {
+            Some(section) => glossary.section(section)?,
+            None => glossary,
+        };
+        for term in glossary.terms {
+            if !terms
+                .iter()
+                .any(|t| t.name == term.name && t.section == term.section)
+            {
+                terms.push(term);
+            }
+        }
+    }
+    let avoided = Glossary { terms }.avoided_phrases();
+    let mut findings = Vec::new();
+    let mut in_fence = false;
+    for (index, line) in crate::read(file)?.lines().enumerate() {
+        let prose = if index == 0 {
+            line.split_once(": ").map_or(line, |(_, sentence)| sentence)
+        } else {
+            line
+        };
+        let trailer = line.split_once(": ").is_some_and(|(key, _)| {
+            index > 0 && !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '-')
+        });
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+        } else if !in_fence && !trailer && !line.starts_with('#') {
+            let words = glossary::words(&without_code_spans(prose));
+            for hit in hits(&words, &avoided) {
+                findings.push(Finding::at(file, index + 1, Where::Message, "", hit));
+            }
+        }
+    }
+    let snapshot = Snapshot::index(root, &crate::git::Index::read(root)?)?;
+    let mut reading = Reading::stamped_over(INSTRUMENT, MESSAGE, &snapshot, Path::new("."))?;
+    reading.rule = lent.join(", ");
+    reading.count("hits", u64::try_from(findings.len())?)?;
+    reading.status = if lent.is_empty() {
+        Status::Skip
+    } else {
+        Status::of(findings.is_empty())
+    };
+    reading.message = if lent.is_empty() {
+        "the commit stages no crate a glossary rule covers, so no word is avoided".to_owned()
+    } else if findings.is_empty() {
+        "no avoided word in the commit message".to_owned()
+    } else {
+        let list = joined(findings.iter(), "\n");
+        format!(
+            "{} avoided words in the commit message, noted and not refused (#3629)\n{list}",
+            findings.len()
+        )
+    };
+    Ok(reading)
 }
 
 /// The one rule whose scope covers `krate`, with its glossary; `None`

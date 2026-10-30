@@ -59,7 +59,7 @@
 //! `against` module says what keys a run and what gives no verdict (#664).
 //!
 //! **What one run is.** One process per test, on a pool of threads the
-//! size of the machine's cores or of `--jobs`, and the tests held apart as
+//! size of the seat's share of the machine or of `--jobs`, and the tests held apart as
 //! upstream's parallel runner holds them. Its workers are handed batches
 //! of neighbours in the tests' order and run each batch one test after
 //! another (run-tests.php:1537-1546, 1742-1744), so the tests of a batch
@@ -1072,7 +1072,8 @@ pub struct Ask {
     /// one more reading per subset, at its scope with `@against` after it,
     /// failing while a test met there is not met here (#664).
     pub against: Option<String>,
-    /// How many tests run at once; the machine's cores unless named.
+    /// How many tests run at once; the seat's share of the machine unless
+    /// named ([`crate::seat::jobs`]).
     pub jobs: Option<NonZeroUsize>,
     /// The directory a test's conflict keys are held in as locks, where
     /// every run on the machine meets (#1313): the temporary directory
@@ -1148,7 +1149,7 @@ pub fn run(
         println!("phpt: nothing runs; {why}");
     }
     let locks = ask.locks.clone().unwrap_or_else(across::machine);
-    let jobs = ask.jobs.unwrap_or_else(tally::cores);
+    let jobs = ask.jobs.unwrap_or_else(crate::seat::jobs);
     // No room for the copy every subset runs in leaves the copy's error
     // standing, and each subset is a run not measured, its reading the
     // skip that names the volume (#644); any other trouble ends the run.

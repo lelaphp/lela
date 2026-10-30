@@ -1,7 +1,7 @@
 //! The binary is php's debugger: the file its line names compiled and
 //! the prompt read off stdin. What the pinned phpdbg writes for a session
 //! is held beside it by `xtask witness`, from `tests/lines.toml` (#1975,
-//! #2507); what is held here is a relation within one run, not bytes.
+//! #2507); what is held here is a relation within one session, not bytes.
 
 use std::io::Write;
 use std::process::{Command, Stdio};

@@ -214,7 +214,7 @@ fn obs_fold_bare_cr_and_whitespace_before_the_colon_answer_400() {
 }
 
 /// An HTTP/1.1 request with no `Host`, with two, or with one that is not
-/// a host and port answers 400 and closes; HTTP/1.0 needs none (§3.2).
+/// a host and `port` answers 400 and closes; HTTP/1.0 needs none (§3.2).
 #[test]
 fn host_missing_repeated_or_invalid_on_http_1_1_answers_400() {
     let server = server();
@@ -317,8 +317,8 @@ fn a_clean_request_keeps_the_connection_open() {
     assert_eq!(exchange.ending, Ending::Open);
 }
 
-/// A TLS handshake sent to the port that serves HTTP without TLS is
-/// closed unanswered, no 400 sent, and the error log says so; the port
+/// A TLS handshake sent to the listener that serves HTTP without TLS is
+/// closed unanswered, no 400 sent, and the error log says so; the listener
 /// serves HTTP on (#2343, research/production-server.r2.md M19).
 #[test]
 fn a_tls_handshake_on_the_clear_port_is_closed_and_logged() {

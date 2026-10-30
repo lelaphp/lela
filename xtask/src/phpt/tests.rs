@@ -34,7 +34,7 @@ impl<'a> Under<'a> {
             runner,
             lane: None,
             oracle_absent: None,
-            jobs: crate::tally::cores(),
+            jobs: crate::seat::jobs(),
             served: None,
             locks,
         }

@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git merge --squash t1234","description":"Squash a branch into main"}}

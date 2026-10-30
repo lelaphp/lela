@@ -1091,3 +1091,136 @@ fn one_call_takes_the_merge_bases_run_and_keeps_it_in_the_main_worktree() {
         "{again}"
     );
 }
+
+/// One half of `xtask worktree` run from `root` by `session`, as Claude
+/// Code hands its session to a call's processes, with the build stood in.
+fn by(session: &str, root: &Path, half: &str) -> (i32, String) {
+    let (_bin, path) = stand_in();
+    let out = Command::new(scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
+        .arg("--root")
+        .arg(root)
+        .args(["worktree", half])
+        .current_dir(root)
+        .env("PATH", &path)
+        .env(xtask::owner::SESSION_VARIABLE, session)
+        .env_remove("CARGO_MANIFEST_DIR")
+        .env("GIT_AUTHOR_NAME", "x")
+        .env("GIT_AUTHOR_EMAIL", "x@x")
+        .env("GIT_COMMITTER_NAME", "x")
+        .env("GIT_COMMITTER_EMAIL", "x@x")
+        .output()
+        .unwrap();
+    joined(&out)
+}
+
+/// Everything in `root` committed, unsigned and unhooked; the commit.
+fn commit_all(root: &Path, message: &str) -> String {
+    sh(root, &["git", "add", "-A"]);
+    commit(root, message);
+    sh(root, &["git", "rev-parse", "HEAD"]).trim().to_owned()
+}
+
+/// The merge queue's worktree (#3622): `queue` lays `_merge` down beside
+/// the clone on `staging`, cut from `main`, owned by the calling session,
+/// each build the merge lanes run seeded from main's with main's harness
+/// binary taken out of it; the same session's second call claims it as it
+/// stands, and another session's is refused.
+#[test]
+fn the_queue_lays_the_merge_worktree_on_staging_owned_and_seeded_from_mains() {
+    let root = repository("queue");
+    let builds = ["debug", "release", "release-da"];
+    for build in builds {
+        write(&root, &format!("target/{build}/seeded"), build);
+        write(&root, &format!("target/{build}/xtask"), "main's harness");
+    }
+    let (code, out) = by("the-coordinator", &root, "queue");
+    assert_eq!(code, 0, "{out}");
+    let dir = worktree_of(&root, "_merge");
+    let head = |dir: &Path, what: &str| sh(dir, &["git", "rev-parse", what]);
+    assert_eq!(
+        sh(&dir, &["git", "symbolic-ref", "--short", "HEAD"]).trim(),
+        "staging"
+    );
+    assert_eq!(head(&dir, "HEAD"), head(&root, "main"), "{out}");
+    assert_eq!(
+        xtask::owner::of(&dir).unwrap(),
+        xtask::owner::SessionId::new("the-coordinator"),
+        "{out}"
+    );
+    for build in builds {
+        let seeded = dir.join(format!("target/{build}"));
+        assert_eq!(fs::read_to_string(seeded.join("seeded")).unwrap(), build);
+        assert_ne!(
+            fs::read_to_string(seeded.join("xtask")).ok().as_deref(),
+            Some("main's harness"),
+            "{build}: {out}"
+        );
+    }
+
+    let (code, again) = by("the-coordinator", &root, "queue");
+    assert_eq!(code, 0, "{again}");
+    assert!(again.contains("stands on staging"), "{again}");
+    assert_eq!(worktrees(&root).len(), 2, "{again}");
+    let (code, other) = by("another-session", &root, "queue");
+    assert_eq!(code, 1, "{other}");
+    assert!(other.contains("is session the-coordinator's"), "{other}");
+}
+
+/// `land` is the one step that moves `main` (#3622). A harness source
+/// committed on `staging` with no reading over it is unmet in `done`, so
+/// the land refuses and `main` stands where it was, its store unwritten.
+/// Once `staging` is reset to `main` with `--keep` and holds a change
+/// `done` meets, `main` is fast-forwarded to it and `_merge`'s log is
+/// landed in main's store and emptied, the worktree standing. A person's
+/// commit on `main` refuses the next land, `main` untouched.
+#[test]
+fn a_red_merge_check_leaves_main_untouched_and_a_met_one_fast_forwards_it() {
+    let root = repository("land");
+    let (code, out) = by("the-coordinator", &root, "queue");
+    assert_eq!(code, 0, "{out}");
+    let merge = worktree_of(&root, "_merge");
+    let main_at = || sh(&root, &["git", "rev-parse", "main"]);
+    let before = main_at();
+
+    write(&merge, "xtask/src/queued.rs", "pub fn queued() {}\n");
+    commit_all(&merge, "a harness source no reading measured");
+    let (code, red) = by("the-coordinator", &merge, "land");
+    assert_eq!(code, 1, "{red}");
+    assert!(red.contains("done is unmet"), "{red}");
+    assert!(red.contains("main is untouched"), "{red}");
+    assert_eq!(main_at(), before, "{red}");
+    assert!(!root.join("target/harness/log").exists(), "{red}");
+
+    sh(&merge, &["git", "reset", "-q", "--keep", "main"]);
+    write(&merge, "notes/queue.md", "A note no crate holds.\n");
+    let met = commit_all(&merge, "a change done meets");
+    let mut merged = Reading::new("clippy", "xtask");
+    merged.message = "the merge worktree's reading".to_owned();
+    let line = serde_json::to_string(&merged.to_json().unwrap()).unwrap();
+    write(
+        &merge,
+        "target/harness/log/clippy.jsonl",
+        &format!("{line}\n"),
+    );
+    let (code, green) = by("the-coordinator", &root, "land");
+    assert_eq!(code, 0, "{green}");
+    assert_eq!(main_at().trim(), met, "{green}");
+    let landed = fs::read_to_string(root.join("target/harness/log/clippy.jsonl")).unwrap();
+    assert!(landed.contains("the merge worktree's reading"), "{green}");
+    assert_eq!(
+        fs::read_to_string(merge.join("target/harness/log/clippy.jsonl")).unwrap(),
+        "",
+        "{green}"
+    );
+    assert!(merge.is_dir(), "the merge worktree stays: {green}");
+    assert_eq!(worktrees(&root).len(), 2, "{green}");
+
+    commit(&root, "a person's commit on main");
+    let person = main_at();
+    write(&merge, "notes/second.md", "A second note.\n");
+    commit_all(&merge, "a second change");
+    let (code, moved) = by("the-coordinator", &merge, "land");
+    assert_eq!(code, 1, "{moved}");
+    assert!(moved.contains("main moved"), "{moved}");
+    assert_eq!(main_at(), person, "{moved}");
+}

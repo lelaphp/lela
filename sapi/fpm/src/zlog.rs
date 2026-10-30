@@ -4,7 +4,7 @@
 //! `stderr` while the master has not launched, or to syslog; a child's
 //! message sent to the request's `FCGI_STDERR` too, by the logger a
 //! child registers ([`set_external`]). A [`Stream`] is a message built in
-//! pieces, wrapped or truncated at `log_limit`, what a child's output
+//! pieces, wrapped or truncated at `log_limit`, what a child's stdout and stderr
 //! caught by the master and the access log are written through.
 
 use std::io::Write as _;
@@ -99,7 +99,7 @@ pub(crate) const MIN_LIMIT: usize = 512;
 pub(crate) enum Target {
     /// `-1`: the process's `stderr`.
     Stderr,
-    /// The error log's descriptor.
+    /// The error log's fd.
     File(OwnedFd),
     /// `ZLOG_SYSLOG`.
     Syslog,
@@ -146,7 +146,7 @@ pub(crate) fn set_target(target: Target, is_stderr: bool) -> Target {
     std::mem::replace(&mut state.target, target)
 }
 
-/// The error log's descriptor, where the log goes to one, for a reopen
+/// The error log's fd, where the log goes to one, for a reopen
 /// to `dup2` the new file onto.
 pub(crate) fn with_file<R>(f: impl FnOnce(Option<&mut OwnedFd>) -> R) -> R {
     let mut state = state();
@@ -350,7 +350,7 @@ pub(crate) fn msg(level: Level, site: Site, prefix: &[u8], message: &[u8]) {
     stream.finish();
 }
 
-/// Where a stream writes, the descriptor `zlog_stream_init_internal` is
+/// Where a stream writes, the fd `zlog_stream_init_internal` is
 /// handed.
 enum Dest {
     /// `0`: the log's own target, `zlog_fd`.
@@ -358,7 +358,7 @@ enum Dest {
     /// `STDERR_FILENO`: the process's `stderr`, which the master tied to
     /// its error log.
     Stderr,
-    /// A descriptor of its own, the access log's.
+    /// An fd of its own, the access log's.
     Fd(OwnedFd),
 }
 
@@ -449,7 +449,7 @@ impl Stream {
     }
 
     /// `zlog_stream_init_ex(stream, level, STDERR_FILENO)`, wrapping on:
-    /// what the master writes a child's output through.
+    /// what the master writes a child's stdout and stderr through.
     pub(crate) fn stderr(level: Level) -> Stream {
         let mut stream = Stream::new(level, 1024, Dest::Stderr, false);
         stream.wrap = true;
@@ -529,7 +529,7 @@ impl Stream {
         self.alloc_ex(0);
     }
 
-    /// The raw write under the stream: to its descriptor, and to `stderr`
+    /// The raw write under the stream: to its fd, and to `stderr`
     /// where it writes there too.
     fn direct_write(&self, bytes: &[u8]) {
         if self.use_fd {

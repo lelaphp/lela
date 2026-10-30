@@ -95,6 +95,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use anyhow::{Context, Result, bail};
 
 use crate::key::Snapshot;
+use crate::owner::SessionId;
 use crate::reading::{Reading, Status, Store, joined};
 use crate::tally::{Judged, Judgement, Outcome, Tally};
 use crate::ticket::{self, Gh, State};
@@ -233,18 +234,25 @@ impl Session {
 
     /// The arguments after the program, in the order they are passed,
     /// ending in `prompt`: a ticket's, [`Session::prompt`], or the
-    /// frontier's, [`FRONTIER_PROMPT`].
-    pub fn arguments(&self, prompt: &str) -> Vec<String> {
-        vec![
-            "-p".to_owned(),
-            "--model".to_owned(),
-            self.model.clone(),
-            "--permission-mode".to_owned(),
-            self.permission_mode.clone(),
-            "--effort".to_owned(),
-            self.effort.clone(),
-            prompt.to_owned(),
-        ]
+    /// frontier's, [`FRONTIER_PROMPT`]; with `id`, the session's own,
+    /// which its worktree's owner record names (#3621).
+    pub fn arguments(&self, prompt: &str, id: Option<&SessionId>) -> Vec<String> {
+        let id = id
+            .into_iter()
+            .flat_map(|id| ["--session-id".to_owned(), id.to_string()]);
+        ["-p".to_owned()]
+            .into_iter()
+            .chain(id)
+            .chain([
+                "--model".to_owned(),
+                self.model.clone(),
+                "--permission-mode".to_owned(),
+                self.permission_mode.clone(),
+                "--effort".to_owned(),
+                self.effort.clone(),
+                prompt.to_owned(),
+            ])
+            .collect()
     }
 
     /// The subagents' model: the one named, or the session's.
@@ -254,11 +262,11 @@ impl Session {
 
     /// The line saying what is started where: the program and its
     /// arguments, the directory and the subagents' model.
-    fn announce(&self, dir: &Path, prompt: &str) {
+    fn announce(&self, dir: &Path, prompt: &str, id: Option<&SessionId>) {
         say!(
             WORK,
             "session: {PROGRAM} {} in {}, subagents on {}",
-            self.arguments(prompt).join(" "),
+            self.arguments(prompt, id).join(" "),
             dir.display(),
             self.subagent()
         );
@@ -269,9 +277,9 @@ impl Session {
     /// ticket closed at the tracker is the one signal, since the hooks
     /// judged the session's turns; a program that does not start is an
     /// error.
-    fn run(&self, dir: &Path, prompt: &str) -> Result<ExitStatus> {
+    fn run(&self, dir: &Path, prompt: &str, id: Option<&SessionId>) -> Result<ExitStatus> {
         Command::new(PROGRAM)
-            .args(self.arguments(prompt))
+            .args(self.arguments(prompt, id))
             .env(SUBAGENT_VARIABLE, self.subagent())
             .current_dir(dir)
             .stdin(Stdio::null())
@@ -599,10 +607,13 @@ pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
     let branch = format!("t{}", next.number);
     say!(WORK, "{ticket} {}: on {branch}", next.title);
 
-    let dir = worktree::add(root, &branch, Some(ticket))?;
+    // The session is started under an id of its own, recorded as the
+    // worktree's owner before it starts, so its writes there are its own.
+    let id = SessionId::fresh()?;
+    let dir = worktree::add(root, &branch, Some(ticket), Some(&id))?;
     let prompt = Session::prompt(skill, ticket);
-    run.session.announce(&dir, &prompt);
-    let status = run.session.run(&dir, &prompt)?;
+    run.session.announce(&dir, &prompt, Some(&id));
+    let status = run.session.run(&dir, &prompt, Some(&id))?;
     say!(WORK, "the session ended: {status}");
     let tip = rev(root, &format!("refs/heads/{branch}"))?;
     let issue = gh.view(root, ticket)?;
@@ -635,8 +646,8 @@ pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
 /// the session's exit is said, not judged, as a ticket's is.
 fn fill(root: &Path, gh: &Gh, session: &Session, track: &str) -> Result<Option<Next>> {
     say!(WORK, "the frontier of {track} is empty");
-    session.announce(root, FRONTIER_PROMPT);
-    let status = session.run(root, FRONTIER_PROMPT)?;
+    session.announce(root, FRONTIER_PROMPT, None);
+    let status = session.run(root, FRONTIER_PROMPT, None)?;
     say!(WORK, "the {FRONTIER_PROMPT} session ended: {status}");
     track_next::next(root, gh, track)
 }

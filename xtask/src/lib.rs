@@ -64,9 +64,11 @@ pub mod miri;
 pub mod new_ext;
 pub mod new_sapi;
 pub mod oracle;
+pub mod owner;
 pub mod permit;
 pub mod phpt;
 pub mod port_map;
+pub mod queue;
 pub mod reading;
 mod reply;
 mod rust;
@@ -101,6 +103,7 @@ use clap::Parser;
 use cli::{Cli, Command, TicketCommand, TrackCommand, UsageCommand, WorktreeCommand};
 use divergence::Registry;
 use manifest::Manifest;
+use owner::SessionId;
 use reading::{Outcome, Reading, Store};
 use sources::Standing;
 
@@ -354,9 +357,7 @@ fn command_line() -> Result<()> {
             said(new_sapi::run(&root, &manifest, &name, binary.as_deref()))
         }
         Command::Witness(ask) => witness::command(&root, &manifest, &store, ask),
-        Command::Vocab { crates, staged } => {
-            vocab_command(&root, &manifest, &store, crates, staged)
-        }
+        Command::Vocab(ask) => vocab_command(&root, &manifest, &store, ask),
         Command::Ticket { command } => ticket_command(&root, &manifest, &store, command),
         Command::Usage {
             command: UsageCommand::Record { session, turn },
@@ -394,14 +395,21 @@ pub(crate) fn record(store: &Store, readings: &[Reading]) -> Result<()> {
 }
 
 /// `xtask vocab`: the crates named, or with `--staged` every crate less
-/// those whose reading stands for the commit (#1143).
-fn vocab_command(
-    root: &Path,
-    manifest: &Manifest,
-    store: &Store,
-    crates: Vec<String>,
-    staged: bool,
-) -> Result<()> {
+/// those whose reading stands for the commit (#1143), or with `--message`
+/// the commit message alone (#3624).
+fn vocab_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Vocab) -> Result<()> {
+    let cli::Vocab {
+        crates,
+        staged,
+        message,
+    } = ask;
+    if let Some(file) = message {
+        // A note, never a refusal (#3629): the reading is recorded as a
+        // measurement, whose exit is not its status.
+        let reading = vocab::message(root, manifest, &file)?;
+        println!("{reading}");
+        return store.record_measurement(std::slice::from_ref(&reading));
+    }
     let crates = if staged {
         let all: Vec<String> = manifest.crates.iter().map(|c| c.name.clone()).collect();
         let standing = Standing::of_every_crate(true, root, manifest, store, vocab::INSTRUMENT)?;
@@ -642,10 +650,38 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
         )),
         Command::Worktree {
             command: WorktreeCommand::Add { branch, ticket },
-        } => Some(worktree::add(root, branch, ticket.map(track::Ticket::new)).map(|_| ())),
+        } => Some(
+            worktree::add(
+                root,
+                branch,
+                ticket.map(track::Ticket::new),
+                SessionId::current().as_ref(),
+            )
+            .map(|_| ()),
+        ),
         Command::Worktree {
             command: WorktreeCommand::Retire { branch },
         } => Some(worktree::retire(root, branch)),
+        Command::Worktree {
+            command: WorktreeCommand::Own { session, release },
+        } => Some(
+            session
+                .as_deref()
+                .map(|id| SessionId::new(id).context("--session names no session"))
+                .transpose()
+                .and_then(|named| {
+                    worktree::own(root, SessionId::current().as_ref(), named, *release)
+                }),
+        ),
+        Command::Worktree {
+            command: WorktreeCommand::Whose,
+        } => Some(worktree::whose(root, SessionId::current().as_ref())),
+        Command::Worktree {
+            command: WorktreeCommand::Queue,
+        } => Some(queue::claim(root, SessionId::current().as_ref()).map(|_| ())),
+        Command::Worktree {
+            command: WorktreeCommand::Land,
+        } => Some(queue::land(root)),
         _ => None,
     }
 }

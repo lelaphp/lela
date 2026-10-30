@@ -557,7 +557,8 @@ impl Edge {
 /// an issue rather than a file: the tracker's labels under which the rule
 /// does not judge the call (#341), which only a rule `permit` judges over
 /// a command may carry. `where` is the same idea for the checkout a call
-/// runs in ([`Where`]), and the same rules alone may carry it.
+/// runs in ([`Where`]), and the same rules alone may carry it; `runs` for
+/// whether the runtime runs a `Bash` call in the foreground ([`Runs`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -574,6 +575,9 @@ pub struct Rule {
     /// `where`: the checkouts the rule judges a call in (#1149).
     #[serde(default, rename = "where")]
     pub within: Where,
+    /// `runs`: the calls the rule judges by how the runtime runs them (#3624).
+    #[serde(default)]
+    pub runs: Runs,
     #[serde(default)]
     pub adr: OneOrMany,
     pub text: String,
@@ -588,7 +592,7 @@ pub struct Rule {
 /// `where`: the checkouts a rule judges a call in. A builder works in a
 /// worktree whose branch records its ticket (`branch.<b>.ticket`, which
 /// `xtask worktree add --ticket` writes and `xtask track` reads), and the
-/// merge check runs in main's checkout, which records none; a rule on
+/// merge check runs in the merge worktree, which records none; a rule on
 /// what a builder may run is one on the first alone (#1145, #1149).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -600,18 +604,37 @@ pub enum Where {
     /// [`crate::track`]'s record; a record that is not a number is one.
     Ticketed,
     /// A checkout where a merge, cherry-pick, revert or rebase stands
-    /// that the calling session did not start (#2476), read in
-    /// `permit::operation`.
+    /// and another session than the calling one owns (#2476, #3621),
+    /// read by [`crate::owner`] and `permit::operation`.
     Operating,
+    /// A checkout another session than the calling one owns, by its
+    /// owner record ([`crate::owner`], #3618 M1, #3621).
+    Owned,
     /// The repository's main checkout, the one whose `.git` is a
-    /// directory, and never a linked worktree: where merges into `main`
-    /// are made (#2751).
+    /// directory, and never a linked worktree: what moves `main` (#2751).
     Main,
+    /// The merge worktree, the checkout on `staging`: where the merge
+    /// queue's merges are made (#3618 M2, #3622).
+    Staging,
     /// A checkout of the repository, the main one or a linked worktree,
     /// as `git worktree list` names them, and never a directory outside
     /// them, such as a scratch repository: read where each command of a
     /// shell line runs, and judged wherever `permit` cannot say (#2887).
     Checkout,
+}
+
+/// `runs`: whether a rule judges a `Bash` call the runtime runs in the
+/// background. A wait there blocks nothing, since the runtime notifies its
+/// end, so a rule on what a foreground wait holds judges the foreground
+/// alone (#3624).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Runs {
+    /// However the call runs: a row without `runs`.
+    #[default]
+    Either,
+    /// Only a call without `run_in_background`.
+    Foreground,
 }
 
 /// The predicates of harness-design.md §4.1, which cites [`Self::NAMES`]
@@ -659,6 +682,11 @@ pub struct Predicates {
     pub with: OneOrMany,
     pub on: Option<String>,
     pub deny: Option<bool>,
+    /// `writes = true`: a call that writes, an `Edit`, a `Write`, or a
+    /// shell command that can change the checkout it runs in or a
+    /// redirection into a file (`permit::writes`); with `where = "owned"`
+    /// it is what one session per checkout refuses (#3621).
+    pub writes: Option<bool>,
     pub deny_lints: Option<Vec<String>>,
     /// The `deny_lints` lints a test may still trip, each rendered as
     /// clippy's own `allow-*-in-tests` key ([`IN_TESTS`]) into the
@@ -766,7 +794,7 @@ impl Predicates {
     /// and whether it describes one write or one command, so `permit` can
     /// judge it before the call runs (the other five read the tree after
     /// the write, harness-design.md §4.4).
-    const TABLE: [(&'static str, Carries, bool); 12] = [
+    const TABLE: [(&'static str, Carries, bool); 13] = [
         ("deny_types", |p| p.deny_types.is_some(), true),
         ("deny_methods", |p| p.deny_methods.is_some(), false),
         ("allow", |p| p.allow.is_some(), true),
@@ -775,6 +803,7 @@ impl Predicates {
         ("require_argv", |p| p.require_argv.is_some(), true),
         ("on", |p| p.on.is_some(), true),
         ("deny", |p| p.deny.is_some(), true),
+        ("writes", |p| p.writes.is_some(), true),
         ("deny_lints", |p| p.deny_lints.is_some(), false),
         ("check", |p| p.check.is_some(), false),
         ("avoid_from", |p| p.avoid_from.is_some(), false),
@@ -790,8 +819,8 @@ impl Predicates {
     }
 
     /// Whether the predicate describes one write or one command, so `permit`
-    /// can judge it before the call runs: `deny`, `deny_argv`, `require_argv`,
-    /// `deny_pattern`, `deny_types`, `allow`, `on`. The other five read the
+    /// can judge it before the call runs: `deny`, `writes`, `deny_argv`,
+    /// `require_argv`, `deny_pattern`, `deny_types`, `allow`, `on`. The other five read the
     /// tree after the write (harness-design.md §4.4).
     pub fn describes_a_call(&self) -> bool {
         Self::TABLE
@@ -1131,6 +1160,13 @@ impl Manifest {
                     "rule \"{}\" has `where` beside `{}`; the checkout is the one a call runs in, so `where` qualifies a rule permit judges at the call",
                     rule.id,
                     named[0]
+                );
+            }
+            let bash = !rule.tool.is_empty() && rule.tool.iter().all(|t| t == "Bash");
+            if rule.runs != Runs::Either && !bash {
+                bail!(
+                    "rule \"{}\" has `runs` beside a tool that is not Bash; only a Bash call runs in the background",
+                    rule.id
                 );
             }
             bangs_in_place(rule)?;

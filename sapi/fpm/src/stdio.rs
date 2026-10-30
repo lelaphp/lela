@@ -280,8 +280,8 @@ pub(crate) fn flush_child() {
     std::io::stderr().write_all(CMD_FLUSH).ok();
 }
 
-/// One of the two pipes a child's output comes up, where the pool catches
-/// its workers' output.
+/// One of the two pipes a child's stdout or stderr comes up, where the pool catches
+/// its workers' stdout and stderr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pipe {
     Stdout,
@@ -326,7 +326,7 @@ pub(crate) fn child_said(fpm: &mut Fpm, pid: i32, pipe: Pipe) {
 /// `fpm_stdio_child_said` on `pipe` of `child`, who ran in the pool at
 /// `pool` and stands outside the pools while it is read: what it wrote
 /// read to the end of what stands and logged a line at a time, and the
-/// pipe, where it ended, taken out of the loop while the descriptor is
+/// pipe, where it ended, taken out of the loop while the fd is
 /// still open and closed after, as php's `fpm_event_del` comes before its
 /// `close` (#2793).
 pub(crate) fn pipe_said(fpm: &mut Fpm, pool: usize, child: &mut Child, pipe: Pipe) {

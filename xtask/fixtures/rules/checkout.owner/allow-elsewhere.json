@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"cd /tmp && touch t3621-notes.txt; git log -1 > /tmp/t3621-log.txt","description":"Write outside every checkout another session owns"}}

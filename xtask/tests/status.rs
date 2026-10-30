@@ -871,28 +871,22 @@ Read CONTEXT.md first.
         "the local file is laid down from its template"
     );
     let template = std::fs::read_to_string(&local).unwrap();
-    for name in [
-        "budget",
-        "phpt",
-        "witness",
-        "mutants",
-        "divergence",
-        "permits",
-        "git",
-    ] {
+    for name in ["budget", "phpt", "witness", "port-map", "divergence", "git"] {
         assert!(
             template.contains(&format!("--section {name}\" volatile name={name}")),
             "{name} is a volatile region of the local file: {template}"
         );
     }
+    for name in ["mutants", "permits"] {
+        assert!(
+            !template.contains(&format!("name={name}")),
+            "{name} is rendered by name, not in the local file: {template}"
+        );
+    }
     assert!(text.contains("unrendered"), "{text}");
     assert!(text.contains("computed trust"), "{text}");
 
-    std::fs::write(
-        &local,
-        "# Local\n\n<!-- computed exec cmd=\"x\" volatile name=budget -->\n| crate |\n<!-- /computed in=a out=b -->\n",
-    )
-    .unwrap();
+    std::fs::write(&local, rendered(&template)).unwrap();
     let text = status(&root, &["--session"]).ok();
     assert!(
         text.contains(
@@ -906,12 +900,12 @@ Read CONTEXT.md first.
     // As JSON, the two blocks the function hook hands the engine (#64):
     // the map as the file is, the facts with the note that they are
     // unrendered; the Markdown is the two joined.
-    std::fs::write(&local, "# Local\n\n<!-- /computed -->\n").unwrap();
+    std::fs::write(&local, &template).unwrap();
     let json = status(&root, &["--session", "--format", "json"]).ok();
     let blocks: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(blocks["map"], "# The map\n\nRead CONTEXT.md first.\n");
     let facts = blocks["facts"].as_str().unwrap();
-    assert!(facts.starts_with("# Local\n"), "{facts}");
+    assert!(facts.starts_with("# Local facts\n"), "{facts}");
     assert!(facts.contains("unrendered"), "{facts}");
     let text = status(&root, &["--session"]).stdout;
     assert_eq!(
@@ -927,6 +921,54 @@ Read CONTEXT.md first.
         0,
         "one of --section and --session is required: {ran}"
     );
+}
+
+/// A local file as `computed` renders one: each region's body between its
+/// opener and a closer carrying sums.
+fn rendered(template: &str) -> String {
+    template.replace(
+        "<!-- /computed -->\n",
+        "\n| crate |\n\n<!-- /computed in=a out=b -->\n",
+    )
+}
+
+/// A clone keeps its local file across sessions, so a template that moved,
+/// a section dropped or added, reached only a clone that had none: the
+/// main checkout carried `mutants` and lacked `port-map` long after both
+/// changed (#3620 D1). `--session` lays the file down again whenever what
+/// was laid differs from the template, and leaves a rendering of the
+/// template as it stands.
+#[test]
+fn session_lays_the_local_file_down_again_when_the_template_moved() {
+    let root = scratch("session-relay");
+    std::fs::write(root.join("AGENTS.md"), "# The map\n").unwrap();
+    let local = root.join(".claude/harness.local.md");
+    status(&root, &["--session"]).ok();
+    let template = std::fs::read_to_string(&local).unwrap();
+
+    let current = rendered(&template);
+    std::fs::write(&local, &current).unwrap();
+    let text = status(&root, &["--session"]).ok();
+    assert_eq!(std::fs::read_to_string(&local).unwrap(), current);
+    assert!(
+        text.contains("| crate |") && !text.contains("unrendered"),
+        "{text}"
+    );
+
+    let older = current.replace(
+        "\n## git\n",
+        "\n## mutants\n\n<!-- computed exec cmd=\"cargo xtask status --section mutants\" volatile name=mutants | do not edit; run computed -->\n\n| crate |\n\n<!-- /computed in=a out=b -->\n\n## git\n",
+    );
+    assert_ne!(older, current);
+    std::fs::write(&local, &older).unwrap();
+    let text = status(&root, &["--session"]).ok();
+    assert_eq!(
+        std::fs::read_to_string(&local).unwrap(),
+        template,
+        "a file laid from an older template is laid down again"
+    );
+    assert!(text.contains("unrendered"), "{text}");
+    assert!(!text.contains("name=mutants"), "{text}");
 }
 
 /// permit judges by three rules of its own beside the manifest's, the

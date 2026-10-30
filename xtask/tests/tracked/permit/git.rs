@@ -210,12 +210,13 @@ fn operation_refuses(
     judged.denial().is_some_and(|d| d.rule == "git.operation")
 }
 
-/// `git.merge-commits-itself` as #2751 ruled it: a merge that commits
-/// itself is refused in the main checkout and let through in a linked
+/// The placement #2751 ruled, which `git.main-ff-only` holds since
+/// `git.merge-commits-itself` moved to the merge worktree (#3622, #3639):
+/// a merge is refused in the main checkout and let through in a linked
 /// worktree, where a builder merges `main` into its branch; a neighbour
 /// in main does not place a merge `-C` runs in the worktree there.
 #[test]
-fn a_merge_that_commits_itself_is_refused_in_main_alone() {
+fn a_merge_is_refused_in_main_alone_and_a_builders_goes_through() {
     let manifest = Manifest::load(workspace()).unwrap();
     let main = checkout("merge-commits-itself", None);
     Repo::at(&main).git(&["worktree", "add", "-q", "-b", "own", "own"]);
@@ -225,10 +226,10 @@ fn a_merge_that_commits_itself_is_refused_in_main_alone() {
             .unwrap()
             .findings
             .iter()
-            .any(|f| f.rule == "git.merge-commits-itself" && f.kind == Kind::Deny)
+            .any(|f| f.rule.starts_with("git.m") && f.kind == Kind::Deny)
     };
     assert!(refused(main.path(), "git merge --no-ff t1234"));
-    assert!(!refused(main.path(), "git merge --no-ff --no-commit t1234"));
+    assert!(!refused(main.path(), "git merge --ff-only t1234"));
     assert!(!refused(&linked, "git merge main"));
     let apart = format!(
         "git -C {} merge --abort; git -C {} merge main",
@@ -298,4 +299,74 @@ fn a_line_permit_cannot_place_is_denied_saying_so_only_where_an_operation_stands
     let quiet = checkout("unplaced-quiet", None);
     let judged = judge(&manifest, quiet.path(), &bash(line)).unwrap();
     assert!(judged.denial().is_none(), "{judged:?}");
+}
+
+/// The merge queue's rows (#3618 M2, #3622) as tracked:
+/// `git.main-ff-only`, and `git.merge-commits-itself` on `where =
+/// "staging"` as #3639 ruled. Main's checkout refuses every merge but a
+/// fast-forward or the end of one, and the merge worktree refuses a merge
+/// that commits itself and lets one through that leaves its commit to
+/// `git commit`. Each fixture of `git.main-ff-only` holds in main, and
+/// each of `git.merge-commits-itself` in the merge worktree, its
+/// `deny-after-cd.json` a `cd` into it.
+#[test]
+fn a_merge_is_refused_in_main_but_a_fast_forward_and_in_the_merge_worktree() {
+    let tracked = Manifest::load(workspace()).unwrap();
+    let within = |id: &str| tracked.rule(id).map(|r| r.within);
+    assert_eq!(within("git.merge-commits-itself"), Some(Where::Staging));
+    assert_eq!(within("git.main-ff-only"), Some(Where::Main));
+    let (main, merge) = staging("merge-queue");
+    let fired = |root: &Path, call: &Call, rule: &str| {
+        judge(&tracked, root, call)
+            .unwrap()
+            .findings
+            .iter()
+            .any(|f| f.rule == rule && f.kind == Kind::Deny)
+    };
+    let in_main = |line: &str, rule: &str| fired(main.path(), &bash(line), rule);
+    let in_merge = |line: &str, rule: &str| fired(&merge, &bash(line), rule);
+    assert!(in_main(
+        "git merge --no-ff --no-commit t1234",
+        "git.main-ff-only"
+    ));
+    assert!(!in_main("git merge --ff-only staging", "git.main-ff-only"));
+    assert!(!in_main(
+        "git merge --ff-only staging",
+        "git.merge-commits-itself"
+    ));
+    assert!(!in_main(
+        "git merge --no-ff t1234",
+        "git.merge-commits-itself"
+    ));
+    assert!(in_merge(
+        "git merge --no-ff t1234",
+        "git.merge-commits-itself"
+    ));
+    assert!(!in_merge(
+        "git merge --no-ff --no-commit t1234",
+        "git.merge-commits-itself"
+    ));
+    assert!(!in_merge(
+        "git merge --no-ff --no-commit t1234",
+        "git.main-ff-only"
+    ));
+
+    for (rule, root) in [
+        ("git.main-ff-only", main.path()),
+        ("git.merge-commits-itself", merge.as_path()),
+    ] {
+        let dir = fixtures().join("rules").join(rule);
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            // A rule's replay corpus is the replay's to judge ([`super::replay`]).
+            .filter(|n| Path::new(n).extension().is_some_and(|e| e == "json"))
+            .collect();
+        names.sort();
+        assert!(names.len() >= 5, "{rule}: {names:?}");
+        for name in &names {
+            let denied = fired(root, &call(&dir.join(name)), rule);
+            assert_eq!(denied, name.starts_with("deny"), "{rule}: {name}");
+        }
+    }
 }

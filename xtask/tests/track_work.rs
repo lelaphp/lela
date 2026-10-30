@@ -290,6 +290,37 @@ impl Scratch {
         String::from_utf8(out.stdout).unwrap()
     }
 
+    /// What the sessions were started with, `session.args`, each ticket's
+    /// own session id taken out: a fresh one per session, which its
+    /// worktree's owner record names (#3621) and [`Scratch::ids`] reads.
+    fn args(&self) -> String {
+        let raw = self.wrote("session.args");
+        let mut words: Vec<&str> = Vec::new();
+        let mut lines: Vec<String> = Vec::new();
+        for line in raw.lines() {
+            let mut it = line.split(' ');
+            while let Some(word) = it.next() {
+                if word == "--session-id" {
+                    it.next();
+                } else {
+                    words.push(word);
+                }
+            }
+            lines.push(words.join(" "));
+            words.clear();
+        }
+        lines.join("\n")
+    }
+
+    /// The session id each session was started with, in order.
+    fn ids(&self) -> Vec<String> {
+        let raw = self.wrote("session.args");
+        raw.lines()
+            .filter_map(|line| line.split_once("--session-id ").map(|(_, rest)| rest))
+            .filter_map(|rest| rest.split(' ').next().map(str::to_owned))
+            .collect()
+    }
+
     fn wrote(&self, name: &str) -> String {
         fs::read_to_string(self.dir.join(name))
             .unwrap_or_default()
@@ -370,7 +401,7 @@ fn a_ready_tickets_branch_is_left_its_worktree_retired_and_main_unmoved() {
 
     // The session was started as the flags say, in the worktree.
     assert_eq!(
-        scratch.wrote("session.args"),
+        scratch.args(),
         "-p --model claude-opus-5 --permission-mode auto --effort high /build 20"
     );
     // The prompt names the exit condition the run reads back (#115).
@@ -484,7 +515,7 @@ fn a_run_on_a_label_track_names_its_ticket_and_lays_its_branch_off_main() {
     assert!(!has_ref(&scratch.root, "refs/heads/t19"), "{out}");
     assert!(!has_ref(&scratch.root, "refs/heads/t22"), "{out}");
     assert_eq!(
-        scratch.wrote("session.args"),
+        scratch.args(),
         "-p --model claude-fable-5 --permission-mode auto --effort high /build 21"
     );
     assert_eq!(scratch.wrote("session.subagent"), "claude-fable-5");
@@ -520,8 +551,16 @@ fn a_ticket_left_open_leaves_the_worktree_standing() {
     assert_eq!(rev(&scratch.root, "HEAD"), before, "{out}");
     assert_ne!(rev(&scratch.root, "t20"), before, "the work stands: {out}");
     assert_eq!(
-        scratch.wrote("session.args"),
+        scratch.args(),
         "-p --model claude-opus-5 --permission-mode acceptEdits --effort max /build 20"
+    );
+    // The session was started under the id its worktree's owner record
+    // names, so its writes there are its own (#3621).
+    let owner = xtask::owner::of(&scratch.worktree("t20")).unwrap();
+    assert_eq!(
+        owner.as_ref().map(xtask::owner::SessionId::as_str),
+        scratch.ids().first().map(String::as_str),
+        "{out}"
     );
     assert_eq!(out.matches("computed trust").count(), 1, "{out}");
 }
@@ -569,14 +608,14 @@ fn no_model_refuses_before_a_worktree_and_an_empty_frontier_is_none() {
     assert!(out.contains("--model <NAME>"), "{out}");
     assert_eq!(scratch.worktrees().len(), 1, "{out}");
     assert!(!has_ref(&scratch.root, "refs/heads/t20"), "{out}");
-    assert_eq!(scratch.wrote("session.args"), "", "no session started");
+    assert_eq!(scratch.args(), "", "no session started");
 
     scratch.tracker(&[], 20);
     let (code, out) = scratch.work(&["--one"]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("none: the frontier of main is empty"), "{out}");
     assert_eq!(scratch.worktrees().len(), 1, "{out}");
-    assert_eq!(scratch.wrote("session.args"), "", "no session started");
+    assert_eq!(scratch.args(), "", "no session started");
     assert!(!scratch.dir.join("planned").exists(), "no planner: {out}");
 }
 
@@ -627,7 +666,7 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
 
     // Both sessions started, each in its own worktree.
     assert_eq!(
-        scratch.wrote("session.args"),
+        scratch.args(),
         "-p --model claude-opus-5 --permission-mode auto --effort high /build 20\n-p --model claude-opus-5 --permission-mode auto --effort high /build 21"
     );
     assert_eq!(
@@ -810,7 +849,7 @@ fn an_empty_frontier_starts_the_fill_session_in_the_checkout() {
     let (code, out) = scratch.work(&["--one", "--fill"]);
     assert_eq!(code, 0, "{out}");
     assert_eq!(
-        scratch.wrote("session.args"),
+        scratch.args(),
         "-p --model claude-opus-5 --permission-mode auto --effort high /frontier",
         "{out}"
     );
@@ -842,7 +881,7 @@ fn a_research_ticket_starts_the_session_on_research() {
     let (code, out) = scratch.work(&["--one"]);
     assert_eq!(code, 0, "{out}");
     assert_eq!(
-        scratch.wrote("session.args"),
+        scratch.args(),
         "-p --model claude-opus-5 --permission-mode auto --effort high /research 20"
     );
     assert_eq!(scratch.wrote("session.subagent"), "claude-sonnet-5");
@@ -863,7 +902,7 @@ fn a_decision_ticket_starts_the_session_on_grill_design() {
     let (code, out) = scratch.work(&["--one"]);
     assert_eq!(code, 0, "{out}");
     assert_eq!(
-        scratch.wrote("session.args"),
+        scratch.args(),
         "-p --model claude-opus-5 --permission-mode auto --effort high /grill-design 20"
     );
     assert!(out.contains("#20 closed at"), "{out}");
@@ -889,7 +928,7 @@ fn a_ticket_with_both_frontier_labels_refuses_before_a_worktree() {
     assert!(out.contains("nothing is laid down"), "{out}");
     assert_eq!(scratch.worktrees().len(), 1, "{out}");
     assert!(!has_ref(&scratch.root, "refs/heads/t20"), "{out}");
-    assert_eq!(scratch.wrote("session.args"), "", "no session started");
+    assert_eq!(scratch.args(), "", "no session started");
 }
 
 /// With `--fill` the run fills its own frontier (#85): the one ticket
@@ -930,7 +969,7 @@ fn an_empty_frontier_is_filled_by_a_frontier_session_until_it_stays_empty() {
     // it filed, the planner again.
     let session = "-p --model claude-opus-5 --permission-mode auto --effort high";
     assert_eq!(
-        scratch.wrote("session.args"),
+        scratch.args(),
         format!(
             "{session} /build 20\n{session} /frontier\n{session} /build 21\n{session} /frontier"
         )
@@ -979,7 +1018,7 @@ fn a_frontier_that_stays_empty_after_the_planner_ends_the_run() {
     let (code, out) = scratch.work(&["--one", "--fill"]);
     assert_eq!(code, 0, "{out}");
     assert_eq!(
-        scratch.wrote("session.args"),
+        scratch.args(),
         "-p --model claude-opus-5 --permission-mode auto --effort high /frontier"
     );
     assert!(

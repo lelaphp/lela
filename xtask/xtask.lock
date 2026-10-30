@@ -143,6 +143,7 @@ manifest::Rule
 manifest::Rule::covers
 manifest::Rule::exempts
 manifest::Rule::named
+manifest::Runs
 manifest::SCRIPTS
 manifest::Scripts
 manifest::Scripts::new
@@ -241,6 +242,13 @@ oracle::normalise
 oracle::normalise_in
 oracle::run_by
 oracle::verdict
+owner::SESSION_VARIABLE
+owner::SessionId
+owner::SessionId::as_str
+owner::SessionId::current
+owner::SessionId::new
+owner::of
+owner::record
 package_dir
 permit::Adapter
 permit::Arguments
@@ -269,6 +277,8 @@ port_map::CENSUS
 port_map::INSTRUMENT
 port_map::SEED
 port_map::command
+queue::claim
+queue::land
 reading::Chain
 reading::Chain::of_head
 reading::Chain::standing
@@ -424,6 +434,7 @@ usage::reading
 usage::record
 usage::scope_of
 vocab::hold
+vocab::message
 vocab::run
 witness::Accept
 witness::Ask
@@ -431,4 +442,6 @@ witness::Scope
 witness::record_accepted
 witness::run
 worktree::add
+worktree::own
 worktree::retire
+worktree::whose

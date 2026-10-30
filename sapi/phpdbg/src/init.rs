@@ -2,13 +2,13 @@
 //! of the file `-i` names, or, unless `-I`, of a `.phpdbginit` in
 //! `PHP_CONFIG_FILE_PATH`, in each directory of `PHP_INI_SCAN_DIR` or,
 //! where it is unset, `PHP_CONFIG_FILE_SCAN_DIR`, and then the working
-//! directory's, run a line at a time where php's `main` runs
-//! `phpdbg_init`, before the execution context is compiled
+//! directory's, read a line at a time where php's `main` runs
+//! `phpdbg_init`, before the `exec` file is compiled
 //! (`Z/sapi/phpdbg/phpdbg.c:1502-1507`). php runs it again at the start
 //! of every cycle of its main loop, which starts over from
 //! `phpdbg_main:`; this host runs it in the first request of each cycle,
 //! at its entry, before anything else there, and in a request of its own
-//! where the context will not compile.
+//! where the `exec` file will not compile.
 
 use std::os::unix::ffi::OsStrExt as _;
 
@@ -81,7 +81,7 @@ impl Files {
 
 /// Where a `run` in the init files left the reading: php runs the
 /// program inline, uninterrupted, and goes on with the line after it
-/// once the run is over. The lines after it of the file it stood in,
+/// once the `run` is over. The lines after it of the file it stood in,
 /// numbered from `first`, the files after that, and whether the session
 /// was fully started before the files ran.
 #[derive(Debug, Clone)]
@@ -95,23 +95,23 @@ pub struct Rest {
 
 /// `phpdbg_init` with `PHPDBG_IS_INITIALIZING` set, where the session
 /// says a cycle has started: each file read a line at a time, with
-/// nothing of the execution context compiled. A `quit` among them ends
+/// nothing of the `exec` file compiled. A `quit` among them ends
 /// the reading, and so does a fatal or an exit in a code block, which
 /// bails out of `phpdbg_init` to the `zend_try` around it; else the
-/// breakpoints the last cycle carried are set again, their lines run as
+/// breakpoints the last cycle carried are set again, their lines read as
 /// php's `phpdbg_string_init` runs them, with nothing written, after the
-/// init files have numbered theirs. The first cycle's init files run
+/// init files have numbered theirs. The first cycle's init files are read
 /// before `phpdbg_fully_started`, so a fatal there stops at no prompt.
 /// A `run` among them leaves the reading in the session's `init_rest`
-/// for [`resume`], with `PHPDBG_IS_INITIALIZING` still set for the run.
-pub fn run(s: &mut Session, here: &mut Here<'_>) {
+/// for [`resume`], with `PHPDBG_IS_INITIALIZING` still set for the `run`.
+pub fn serve(s: &mut Session, here: &mut Here<'_>) {
     if !std::mem::take(&mut s.init_due) {
         return;
     }
     s.initializing = true;
     s.init_compiled = false;
     s.first_command = s.command_line.take();
-    s.startup_run = false;
+    s.startup_serve = false;
     let started = std::mem::replace(&mut s.started, s.init_ran);
     s.init_ran = true;
     let files = s.init_files.read();
@@ -172,8 +172,8 @@ fn finish(s: &mut Session, here: &mut Here<'_>, started: bool) {
     s.initializing = false;
 }
 
-/// The init files' lines after a `run` among them, once the run is over:
-/// read outside any request, with `PHPDBG_IS_CLEANING` set by the run's
+/// The init files' lines after a `run` among them, once the `run` is over:
+/// read outside any request, with `PHPDBG_IS_CLEANING` set by the `run`'s
 /// `phpdbg_clean`, under which whatever would serve code bails out of
 /// `phpdbg_execute_ex` at its entry, an `ev` writing nothing and a code
 /// block ending the reading.
@@ -216,7 +216,7 @@ const CODE: &[u8] = b"phpdbginit code";
 /// `phpdbg_try_file_init`'s lines, or `phpdbg_string_init`'s where no
 /// file is named, through `phpdbg_line_init`: trailing blanks cut, an
 /// empty line and one that starts with `#` skipped, and every other line
-/// run on its own, so a line that fails leaves the next to run. The
+/// taken on its own, so a line that fails leaves the next to be taken. The
 /// lines between a `<:` line and a `:>` line are a code block, joined
 /// with nothing between them and evaluated at the `:>` as
 /// `zend_eval_stringl` evaluates `phpdbginit code` with no value asked

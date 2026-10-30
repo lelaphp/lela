@@ -18,9 +18,9 @@ use nix::sys::signal::{Signal, kill, killpg};
 use nix::unistd::Pid;
 use php_proto::fcgi::{self, Header, Kind};
 
-/// The binary under test, let run as root with `-R`: as root php-fpm
+/// The binary under test, let serve as root with `-R`: as root php-fpm
 /// refuses a pool with no `user` directive unless `--allow-to-run-as-root`
-/// lets it, as the oracle's does, and a container's tests run as root.
+/// lets it, as the oracle's does, and a container's tests go as root.
 fn php_fpm() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_php-fpm"));
     command.arg("-R");
@@ -59,7 +59,7 @@ fn conf(dir: &Path, more: &str) -> PathBuf {
 
 /// Where a pool in `dir` listens: a socket in the test's own directory,
 /// which no other process names, so nothing else can listen there before
-/// the master does (#1474). A loopback port found free and let go was
+/// the master does (#1474). A loopback `port` found free and let go was
 /// anyone's until the master bound it, and a request sent there reached
 /// whatever took it.
 fn socket(dir: &Path) -> PathBuf {
@@ -133,7 +133,7 @@ impl Master {
         master
     }
 
-    /// The test's directory, where the pool's script and logs are.
+    /// The test's directory, where the pool's program and logs are.
     fn dir(&self) -> &Path {
         &self.dir
     }
@@ -591,22 +591,22 @@ echo "$hung of 15000 children hung, $otherwise did not fork or end with status 0
 echo "$workers_otherwise of 8 workers did not end with status 0\n";
 "#;
 
-/// What a process a request execs holds (#2428, #2458), each descriptor
+/// What a process a request execs holds (#2428, #2458), each fd
 /// named by what it is: the oracle's php-fpm, a static pool of one child
 /// with its master's stderr on a file, lists `0` `/dev/null`, `1` the
 /// pipe `shell_exec` reads, `2` `/dev/null`, `5` the master's stderr,
 /// which `fpm_stdio_save_original_stderr` dup'd without `FD_CLOEXEC` and
-/// no child closes, and, for the first request, `7` the request's script,
+/// no child closes, and, for the first request, `7` the request's program,
 /// which `php_fopen_primary_script`'s `zend_stream_open` opened with no
 /// `O_CLOEXEC` and which stays open through the shutdown functions, since
-/// `fpm_main` leaves the handle the scanner listed to `shutdown_executor`.
-/// The second request's script is opcache's, held from the first under
+/// `fpm_main` leaves the `zend_file_handle` the scanner listed to `shutdown_executor`.
+/// The second request's program is opcache's, held from the first under
 /// `opcache.file_update_protection=0`, which caches a file written this
 /// second, and `persistent_stream_open_function` answers its open
-/// without opening it, so no descriptor of it is listed. The accepted connection and the
+/// without opening it, so no fd of it is listed. The accepted connection and the
 /// listening socket are not among them: `fcgi_accept_request` and
 /// `fpm_child_cloexec` set `FD_CLOEXEC` on both, as the child here does,
-/// and the engine's other descriptors (`/dev/urandom`, opcache's lock
+/// and the engine's other fds (`/dev/urandom`, opcache's `lock`
 /// file in php) are close-on-exec in both. What this test's own process
 /// leaves open past its stdio, a harness's jobserver pipe, reaches the
 /// master and every process after it under either, and is left out.
@@ -680,9 +680,9 @@ echo listed();
 /// The binary under test, where the master can read its child's memory:
 /// on macOS a copy into `dir` signed ad hoc with
 /// `com.apple.security.get-task-allow`, which lets a process of the same
-/// user take the task port of a child that runs it (`task_for_pid`, as
+/// user take the task right of a child that runs it (`task_for_pid`, as
 /// php-fpm's master asks for it), since the build's own signature carries
-/// no entitlement and the kernel refuses the port, as it refuses the
+/// no entitlement and the kernel refuses the right, as it refuses the
 /// pinned php-fpm's; elsewhere the binary itself, whose master attaches
 /// to its own child with `ptrace`.
 fn readable_php_fpm(dir: &Path) -> Command {
@@ -786,10 +786,10 @@ fn slow_frames(name: &str, more: &str, files: &[(&str, &str)]) -> (Vec<String>, 
 /// `fpm_php_trace_dump` writes them (#1301): one line per frame from the
 /// innermost, its address, the name of what it serves, a method's alone,
 /// `[INCLUDE_OR_EVAL]` for an included file, and the file and line it
-/// was called from; the main script's frame ends the walk. The engine
+/// was called from; the main program's frame ends the walk. The engine
 /// lays the chain the master reads in its frames' rooms (design §5.6,
 /// revision 59), and the child publishes where it starts in its
-/// scoreboard slot.
+/// `scoreboard` slot.
 #[test]
 #[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
 fn a_slow_request_s_frames_follow_the_head_where_the_child_is_readable() {
@@ -853,7 +853,7 @@ fn a_slow_request_s_frames_stop_at_the_trace_depth() {
 /// frame of the native that resumed it, as `zend_fiber_resume` writes
 /// `fiber->stack_bottom->prev_execute_data`, so the walk runs from the
 /// sleep through the fiber's callable into `Fiber::start` and the main
-/// script. php's own walk meets the fiber's zeroed bottom frame there,
+/// program. php's own walk meets the fiber's zeroed bottom frame there,
 /// whose `function_name` is NULL and whose call kind is no kind it names
 /// (`ZEND_UNREACHABLE`), so this line has no oracle (#2897).
 #[test]

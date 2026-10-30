@@ -181,7 +181,6 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
             }
             record_the_approvals(&checkout, &call, &judgement);
             if adapter == Adapter::CommandHook {
-                record_the_operation(&workspace, &call, &judgement);
                 if let Err(err) = ledger::count(&checkout, &judgement.judged) {
                     eprintln!("xtask permit: the calls judged were not counted: {err:#}");
                 }
@@ -235,30 +234,6 @@ fn record_the_approvals(checkout: &Path, call: &Call, judgement: &Judgement) {
         if let Err(err) = audit::record(checkout, call, admission) {
             eprintln!("xtask permit: the approval stands but its entry was not written: {err:#}");
         }
-    }
-}
-
-/// The session whose `git merge`, `rebase` or kin this admits, as the
-/// starter of the operation it begins ([`operation::record`]), whatever
-/// the manifest holds: an operation can bring the first `where =
-/// "operating"` rule into the working tree it stands in, and a starter
-/// recorded only under such a rule left that one foreign to every session
-/// (#2694). Best effort, as recording the decision is.
-///
-/// The command hook alone records it, the adapter that judges a call
-/// last: the function hook above it admits a call the command hook then
-/// judges again, and an `--abort` that admission dropped the record for
-/// was refused beneath it as foreign, with every later abort of its
-/// starter's (#2734).
-fn record_the_operation(root: &Path, call: &Call, judgement: &Judgement) {
-    let Some(command) = call.command() else {
-        return;
-    };
-    if judgement.denial().is_some() {
-        return;
-    }
-    if let Err(err) = operation::record(root, call, &Line::read(command)) {
-        eprintln!("xtask permit: the operation's starter was not recorded: {err:#}");
     }
 }
 
@@ -364,15 +339,15 @@ fn refusal_reading(root: &Path, call: &Call, rule: &str, status: Status, what: &
 #[cfg(test)]
 #[cfg(tracked)]
 mod tests {
-    use std::path::Path;
     use std::process::Command;
 
-    use super::{Call, Manifest, judge, record_the_operation};
-    use crate::manifest::Where;
+    use super::{Call, Manifest, judge};
+    use crate::owner::{self, SessionId};
     use crate::scratch::Tree;
 
-    /// A repository of one commit on `main`.
-    fn repository(name: &str) -> Tree {
+    /// A repository of one commit on `main`, owned by `owner`, with a
+    /// merge standing in it as git leaves one stopped before its commit.
+    fn merging(name: &str, owner: &str) -> Tree {
         let dir = Tree::new(name).unwrap();
         for args in [
             &["init", "-q", "-b", "main"][..],
@@ -391,6 +366,8 @@ mod tests {
                     .success()
             );
         }
+        owner::record(&dir, &SessionId::new(owner).unwrap()).unwrap();
+        std::fs::write(dir.join(".git/MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
         dir
     }
 
@@ -399,29 +376,16 @@ mod tests {
         Call::parse(&call.to_string()).unwrap()
     }
 
-    /// `session`'s `git merge` admitted and recorded under `manifest`, and
-    /// the merge it started then standing, as git leaves one stopped
-    /// before its commit.
-    fn started(manifest: &Manifest, dir: &Path, session: &str) {
-        let start = bash(session, "git merge --no-commit topic");
-        let admitted = judge(manifest, dir, &start).unwrap();
-        record_the_operation(dir, &start, &admitted);
-        std::fs::write(dir.join(".git/MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
-    }
-
-    /// The trap of #2694: a merge started under a manifest with no `where
-    /// = "operating"` rule, whose working tree then carries `git.operation`
-    /// as the merge that lands it does, is still its starter's to step,
-    /// abort and commit, and still another session's to be refused.
+    /// #3621: a merge standing in a checkout is its owner's to step, abort
+    /// and commit, under the manifest as it stands, and every other
+    /// session's to be refused, by `git.operation`'s more specific text
+    /// first; who started it is recorded nowhere, so no admission and no
+    /// adapter can leave it foreign to its owner (#2694, #2734).
     #[test]
-    fn a_merge_started_before_the_operating_row_landed_is_still_its_starters() {
+    fn a_merge_standing_in_an_owned_checkout_is_its_owners_to_end() {
         let workspace = crate::package_dir().parent().unwrap();
         let manifest = Manifest::load(workspace).unwrap();
-        let mut without = manifest.clone();
-        without.rules.retain(|r| r.within != Where::Operating);
-        let dir = repository("permit-operating");
-        started(&without, &dir, "s1");
-
+        let dir = merging("permit-operating", "s1");
         let judged = |session: &str, line: &str| {
             let judgement = judge(&manifest, &dir, &bash(session, line)).unwrap();
             judgement.denial().map(|f| f.rule.clone())
@@ -441,19 +405,18 @@ mod tests {
         }
     }
 
-    /// `git.operation` as the manifest carries it (#2530, #2617): its
-    /// `allow-starter-continue.json`, the starter's own `git merge
-    /// --continue`, passes the merge that session started, which the
+    /// `git.operation` as the manifest carries it: its
+    /// `allow-owner-continue.json`, the owner's own `git merge
+    /// --continue`, passes in the checkout that session owns, which the
     /// fixture walks cannot record, and the same line from another session
     /// is refused.
     #[test]
-    fn the_git_operation_row_lets_the_starter_conclude_its_own_merge() {
+    fn the_git_operation_row_lets_the_owner_conclude_its_merge() {
         let workspace = crate::package_dir().parent().unwrap();
         let manifest = Manifest::load(workspace).unwrap();
-        let fixture = "xtask/fixtures/rules/git.operation/allow-starter-continue.json";
+        let fixture = "xtask/fixtures/rules/git.operation/allow-owner-continue.json";
         let own = Call::parse(&std::fs::read_to_string(workspace.join(fixture)).unwrap()).unwrap();
-        let dir = repository("permit-operating-starter");
-        started(&manifest, &dir, &own.session_id);
+        let dir = merging("permit-operating-owner", &own.session_id);
         let judged = |call: &Call| {
             let judgement = judge(&manifest, &dir, call).unwrap();
             judgement.denial().map(|f| f.rule.clone())
@@ -461,56 +424,5 @@ mod tests {
         assert_eq!(judged(&own), None);
         let other = bash("another-hand", own.command().unwrap());
         assert_eq!(judged(&other).as_deref(), Some("git.operation"));
-    }
-
-    /// #2720 as it happened: an agent's `git merge` is admitted, and before
-    /// the merge writes its marker a sibling agent of the same session has
-    /// a line admitted that `cd`s into its own worktree past its first
-    /// command and, joined by `&&` (#2995), runs `git merge --ff-only`
-    /// there. The merge stays its
-    /// starter's: `allow-starter-commit.json` and the starter's abort pass,
-    /// and `deny-sibling-commit.json` and the sibling's abort are refused.
-    #[test]
-    fn a_sibling_s_line_between_a_start_and_its_marker_leaves_the_merge_its_starters() {
-        let workspace = crate::package_dir().parent().unwrap();
-        let manifest = Manifest::load(workspace).unwrap();
-        let fixture = |name: &str| {
-            let path = workspace
-                .join("xtask/fixtures/rules/git.operation")
-                .join(name);
-            Call::parse(&std::fs::read_to_string(path).unwrap()).unwrap()
-        };
-        let own = fixture("allow-starter-commit.json");
-        let sibling = fixture("deny-sibling-commit.json");
-        let saying = |call: &Call, line: &str| {
-            let mut call = call.clone();
-            call.tool_input.command = Some(line.to_owned());
-            call
-        };
-        let dir = repository("permit-operating-sibling");
-        let admit = |call: &Call| {
-            let admitted = judge(&manifest, &dir, call).unwrap();
-            assert!(admitted.denial().is_none(), "{admitted:?}");
-            record_the_operation(&dir, call, &admitted);
-        };
-        admit(&saying(&own, "git merge --no-ff --no-commit t2634"));
-        let elsewhere = format!(
-            "S=/var/empty; cat $S/owner; cd /var/empty/t2645 && git merge --ff-only main; \
-             cd {}; git log --oneline -3",
-            dir.display()
-        );
-        admit(&saying(&sibling, &elsewhere));
-        std::fs::write(dir.join(".git/MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
-
-        let judged = |call: &Call| {
-            let judgement = judge(&manifest, &dir, call).unwrap();
-            judgement.denial().map(|f| f.rule.clone())
-        };
-        let refused = Some("git.operation");
-        assert_eq!(judged(&own), None);
-        assert_eq!(judged(&saying(&own, "git merge --abort")), None);
-        assert_eq!(judged(&sibling).as_deref(), refused);
-        let abort = saying(&sibling, "git merge --abort");
-        assert_eq!(judged(&abort).as_deref(), refused);
     }
 }

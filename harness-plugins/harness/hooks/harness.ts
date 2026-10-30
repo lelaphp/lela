@@ -9,14 +9,15 @@
 // reads, and returns its deny, or the tool's result with the notes as
 // context; after a Bash call that ran an instrument it invalidates
 // `prompt.context`, so the next read of the facts is fresh (§7, "what the
-// agent sees"). `prompt.context` renders the local facts and appends the
-// map and the local facts as two blocks, `xtask status --session --format
-// json`, with the session's id so the permits section can say "this
-// session" (§4.6); the engine caps one block at BLOCK_CAP characters and
-// skips a hook whose block is over it, so each stands on its own and one
-// over the cap is cut with a note rather than the session losing both
-// (#64). The SessionStart command hook prints no map, so a session
-// without this module has none (§5). `turn.complete` records what the
+// agent sees"). `prompt.context` renders the local facts and appends them
+// as one block, the `facts` of `xtask status --session --format json`,
+// with the session's id so it can say "permits this session" (§4.6); the
+// engine caps one block at BLOCK_CAP characters and skips a hook whose
+// block is over it, so a block over the cap is cut with a note rather
+// than the session losing it (#64). The map, AGENTS.md, is not a block:
+// it reaches the model by the runtime's own load, CLAUDE.md's
+// `@AGENTS.md`, so a session without this module still has it and lacks
+// only the facts (§5, #3620 D1). `turn.complete` records what the
 // session has spent (#210): `$.session.usage()` is the one live figure of
 // the `/cost` ledger and the context window's fill, and it is piped once
 // a turn to `xtask usage record`, which writes the reading under the
@@ -82,8 +83,9 @@ async function xtask($: EngineInterface): Promise<readonly (readonly string[])[]
   return [...built.filter((bin): bin is readonly string[] => bin !== undefined), CARGO_XTASK];
 }
 
-/// The names of the two blocks, the map and the local facts.
-const BLOCKS = { map: 'harness-map', facts: 'harness-facts' } as const;
+/// The name of the facts block. The map's block of before #3620 D1 is
+/// named so a context that still carries one drops it.
+const BLOCKS = { facts: 'harness-facts', map: 'harness-map' } as const;
 
 /// The engine's cap on one context block, in characters: a block over it
 /// is "the wrong shape" and the whole hook is skipped. Stated here once;
@@ -286,10 +288,10 @@ export const register: Register = (on, options) => {
       .catch((err: unknown) => ({ exitCode: -1, stdout: '', stderr: String(err) }));
     const ours = out.blocks.filter((b) => b.name !== BLOCKS.map && b.name !== BLOCKS.facts);
     if (run.exitCode !== 0) {
-      const text = `harness: \`xtask status --session\` did not run (exit ${run.exitCode}); the map and the local facts are missing from this session. Fix the build of xtask.\n${run.stderr}`;
-      return { blocks: [...ours, capped(BLOCKS.map, text)] };
+      const text = `harness: \`xtask status --session\` did not run (exit ${run.exitCode}); the local facts are missing from this session. Fix the build of xtask.\n${run.stderr}`;
+      return { blocks: [...ours, capped(BLOCKS.facts, text)] };
     }
-    const { map, facts } = JSON.parse(run.stdout) as { map: string; facts: string };
-    return { blocks: [...ours, capped(BLOCKS.map, map), capped(BLOCKS.facts, facts)] };
+    const { facts } = JSON.parse(run.stdout) as { facts: string };
+    return { blocks: [...ours, capped(BLOCKS.facts, facts)] };
   });
 };

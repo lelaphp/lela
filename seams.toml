@@ -23,7 +23,7 @@ pin = "oracle.toml"                        # the only statement of version, dige
 total = 560000                             # every counted line of the workspace plus `bindings`; the crate rows are ceilings each crate is held to, and do not sum to this; 560000, the +40k step at the measured weekly rate, for php_ssa's 9,000 (#3174) and the tier's queue; #2971's dedupe freed 93 (#3565, 2026-10-26)
 new = 127500                               # design §0, §4.1: lines not on the inheritance manifest (§13)
 docs = 6500                                # design §10; `docs/**` plus the three living documents
-harness = 4800                             # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded, less the desk where `harness-desk` holds it; 1600 for the readiness-update skill (2026-10-24)
+harness = 4800                             # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded, less the desk where `harness-desk` holds it; 1600 for the readiness-update skill (2026-10-24); 4800 for the vendored skills (#3620 D2, 2026-10-30)
 harness-desk = 1300                        # harness §12 item 6: `harness-plugins/desk/**` hand-written, tests included; 1300 for the desk's estimated 980 and its tests (#3491, ruled 2026-10-25)
 lock_packages = 190                        # design §4.1: third-party `Cargo.lock` packages (those with a `source`); a workspace crate is held by its [[crate]] row and ceiling (#1335); 164 is stage 1's TLS as #2333 ruled, 190 adds the compiled tier's Cranelift core set and rustix as #2945 ruled
 clean_build_release_s = 90                 # design §10: `cargo build --release` from clean on the dev machine
@@ -103,7 +103,7 @@ budget = 10000                              # php's main/streams/ and main/netwo
 phpt = ["ext/standard/tests/streams"]
 [[crate]]
 name = "xtask"
-budget = 45500                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here; 36k for #1975's host-bytes instrument (#2468, option C); 38k for #2597's permit --after fix and the harness tickets after it (2026-10-10); 40k for the harness tickets this wave's rulings asked for (#2707, 2026-10-12); 42k for the testing tier's harness work (#3082, 2026-10-20); 44k after #3279's dedupe found 166 lines (#3357, 2026-10-24)
+budget = 45500                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here; 36k for #1975's host-bytes instrument (#2468, option C); 38k for #2597's permit --after fix and the harness tickets after it (2026-10-10); 40k for the harness tickets this wave's rulings asked for (#2707, 2026-10-12); 42k for the testing tier's harness work (#3082, 2026-10-20); 44k after #3279's dedupe found 166 lines (#3357, 2026-10-24); 45.5k for #3619, #3621, #3622 and #3624 (2026-10-30)
 lock = "xtask.lock"                        # harness §4.1, revision 16: the harness holds its own interface
 
 # ---------------------------------------------------------------- ext/
@@ -635,6 +635,14 @@ avoid_from = { file = "CONTEXT.md", section = "Harness" } # grammar: avoid_from,
 text = "The Harness section's _Avoid_ words appear in no public item name or rustdoc prose of the harness; xtask/fixtures/** are other crates' sources and are not read."
 
 [[rule]]
+id = "vocab.sapi"
+scope = "sapi/*"
+avoid_from = "CONTEXT.md" # grammar: avoid_from, harness §5
+# vocab.avoid's scope gaining sapi/* (#3620 D4, #3624), as an addition: a
+# host crate is held to the whole glossary, as an engine or extension crate is.
+text = "The glossary's _Avoid_ words appear in no public item name or rustdoc prose of a host; a lock line mirrors php's names and is not read."
+
+[[rule]]
 id = "generated.committed"
 generated = ["crates/clippy.toml", "ext/clippy.toml", "sapi/clippy.toml"] # grammar: generated, design §10
 text = "Each clippy.toml the row names is generated from the manifest and committed; a stale copy fails budget."
@@ -646,14 +654,16 @@ where = "checkout"   # a scratch repository outside every checkout has no hooks 
 deny_argv = ["--no-verify", "-n", "-c core.hooksPath", "--config-env core.hooksPath"]
 with = ["git commit", "git merge"]   # git merge --no-verify skips pre-merge-commit as git commit's skips pre-commit (#2751); -n there is --no-stat, refused all the same
 text = "Commits run the pre-commit hook; --no-verify is not available to agents."
+remedy = "run the commit as it is, and fix what the hook names"                 # #3627
 
 [[rule]]
 id = "git.merge-commits-itself"
 tool = "Bash"
-where = "main"   # grammar: where, the repository's main checkout and never a linked worktree (#2751)
+where = "staging"   # grammar: where, the merge worktree on `staging`, where the merge queue's merges are made (#3618 M2, #3622)
 deny_pattern = '(?m)(\A|[|;&(\n]\s*)git(\s+-[cC]\s+\S+|\s+--?[\w.-]+(=\S+)?)*\s+merge(\s|$)'   # git merge where it is run (first in the call, after a separator or a newline), never where it is cited
 unless_pattern = '\s--(no-commit|squash|ff-only|abort|continue|quit|help)\b|\s-h\b'   # a merge that leaves its commit to git commit, commits nothing, or ends one
-text = "A merge in the main checkout is finished by git commit, so pre-commit renders, tests and checks what it commits: merge with --no-commit, then commit (#2744, #2751)."
+text = "A merge in the merge worktree is finished by git commit, so pre-commit renders, tests and checks what it commits (#2744, #2751, #3622)."
+remedy = "`git merge --no-commit <branch>`, then `git commit -F <file> -- <paths>`"                 # #3627, #3639
 
 [[rule]]
 id = "git.no-amend"
@@ -661,15 +671,16 @@ tool = "Bash"
 deny_argv = ["--amend"]
 with = "git commit"
 text = "A commit is never rewritten: make a new one. An amend of a pushed commit forks main from origin (#2267)."
+remedy = "`git commit -F <file> -- <paths>` with a new commit"                 # #3627
 
 [[rule]]
 id = "git.operation"
 tool = "Bash"
-where = "operating"   # grammar: where, a checkout holding a merge, cherry-pick, revert, rebase or am the calling session did not start (#2476)
+where = "operating"   # grammar: where, a checkout another session owns by its owner record, with a merge, cherry-pick, revert, rebase or am standing in it (#2476, #3621)
 deny_argv = ["add", "stage", "commit", "rm", "mv", "restore", "reset", "apply", "merge", "cherry-pick", "revert", "rebase", "am"]
 with = "git"
-text = "A merge, cherry-pick, revert or rebase in progress commits the whole index, so what you stage or step there lands in its commit: wait for it to end, or work in your own worktree (#2476)."
-remedy = "if it is yours, `git merge --abort` or finish with `git commit`; otherwise work in your own worktree"                 # #3618 ruling 3
+text = "A merge, cherry-pick, revert or rebase in progress commits the whole index, so what you stage or step there lands in its commit, and it is the checkout's owner's to end (#2476, #3618 M1)."
+remedy = "work in your own worktree, or wait for its owner to end it"                 # #3627
 
 [[rule]]
 id = "ticket.close"
@@ -678,6 +689,7 @@ deny_argv = ["close", "reopen"]
 with = "gh issue"
 exempt_label = ["frontier:chart"] # a chart sheet carries no acceptance criteria, so the close of a filled one is the frontier skill's bookkeeping (#341)
 text = "A ticket closes through `xtask ticket close`, the instrument that read its acceptance criteria; `gh issue close` and `gh issue reopen` are not available to agents."
+remedy = "`cargo xtask ticket close <n>`"                 # #3627
 
 [[rule]]
 id = "ticket.close-api"
@@ -691,6 +703,7 @@ id = "ticket.reply-unfiled"
 tool = "Stop"
 deny_pattern = '(?i)\b(left (for|to) a person|for a person to|handed (off )?to a person|a person (decides|must|should|will|would|has to)|is a person.?s( alone)?|worth (filing|a ticket)|(needs|deserves|wants) (a|its own) ticket|should be filed|not (yet )?filed|left open|leaves? open|open question|still to (do|decide)|not (yet )?done|remains? (to be|to do|undone|open)|in a later (commit|turn|session|ticket)|next turn|future work|follow[- ]?ups?|leftovers?|out of scope|todo)\b'
 text = "A session that closed a ticket names what it found and did not do in a ticket, a divergence row or a rule proposed in a commit message, never in its reply alone (CONTEXT.md, Ticket): a reply that hands work to a person, leaves a decision open or calls a thing worth filing is held once. A heuristic beside the close's own conditions; the second Stop passes."
+remedy = "file it with `gh issue create`, `ready-for-agent` or `for-a-person`, and name its number in the reply"                 # #3627
 
 [[rule]]
 id = "lanes.nightly"
@@ -706,6 +719,7 @@ deny_argv = ["--full", "--jit"]
 unless_argv = { "--jit" = "xtask phpt --subset" }   # grammar: unless_argv, a denied element let through where the phrase runs bounded by the option, as require_argv reads one: the tier's one-subset reading (#3052, #3068)
 with = ["xtask phpt", "xtask bench"]   # xtask however it is run: the cargo alias, cargo run -p xtask, a path, a variable the line assigns (#1860)
 text = "Nightly lanes run in CI only; run the per-crate subset, and the tier's `--jit` lane on one subset named by `--subset` (#3052)."
+remedy = "`cargo xtask phpt --subset <crate>`, with `--jit` on one subset"                 # #3627
 
 [[rule]]
 id = "lanes.nightly-soak"
@@ -713,6 +727,7 @@ tool = "Bash"
 deny_argv = ["--nightly"]
 with = ["xtask soak"]
 text = "Nightly lanes run in CI only; run the per-crate subset."
+remedy = "`cargo xtask phpt --subset <crate>`"                 # #3627
 
 [[rule]]
 id = "lanes.builder-subset"
@@ -728,6 +743,7 @@ id = "computed.force"
 tool = "Bash"
 deny_pattern = 'computed\s+run\b.*--force'
 text = "`computed run --force` discards a hand edit; a person decides that."
+remedy = "`computed run <file>` to refresh the region; a hand edit to keep is a person's"                 # #3627
 
 [[rule]]
 id = "harness.self"
@@ -795,12 +811,43 @@ deny_pattern = '''(?x)
 | \b(?:git\s+(?:-C\s+\S+\s+)?(?:apply|checkout|restore)|patch)\b[^|;&\n]*[\s'"=](?:~|\$\{?HOME\}?|/[^\s'"|;&)<>]*)/\.claude/projects/(?:[^/\s'"|;&)<>]*/?(?:$|[\s'\"|;&)<>])|[^/\s'"|;&)<>]+/(?:[^m\s'\"|;&)<>]|m[^e]|me[^m]|mem[^o]|memo[^r]|memor[^y]|memory[^/]))
 '''
 text = "A session's transcript is Claude Code's record of what the person said; no agent writes it, nor anything else under ~/.claude/projects but a project's memory/."
+remedy = "keep working material in the session's scratchpad"                 # #3627
 
 [[rule]]
 id = "divergence.reason"
 scope = "docs/divergence.toml"
 check = "divergence-reason"
 text = "A divergence row with status accepted has a reason a person wrote, a by-design row's citing the design section or ADR that chose it, and an oracle-build row carries what it retires at; done fails while an open row touches the scope (harness §4.3)."
+
+[[rule]]
+id = "checkout.owner"
+tool = ["Edit", "Write", "Bash"]
+where = "owned"   # grammar: where, a checkout another session owns by its owner record, judged where each write lands (#3618 M1, #3621)
+writes = true   # grammar: writes, an Edit, a Write, or a Bash line with a command that can change a checkout or a redirection into a file (#3621)
+text = "One session writes in a checkout: its owner, recorded by `xtask worktree add` or `xtask worktree own` (#3618 M1)."
+remedy = "work in your own worktree (`xtask worktree add`), or have its owner let it go with `xtask worktree own --release`"                 # #3627
+
+[[rule]]
+id = "wait.foreground"
+tool = "Bash"
+runs = "foreground"   # grammar: runs, a call the runtime runs in the foreground and never one with run_in_background, whose end it notifies (#3624)
+# A poll loop, an until, while or for whose body sleeps 3 s or more
+# before its done, where it is run and not where a heredoc writes it:
+# the shape that held a coordinator, a seat or a lock in #3624's
+# measurement of 821 builder waits (265 coordinator, 14 lock and 92 seat
+# loops fire; no single sleep and no settle of 2 s or less does).
+deny_pattern = '''(?s)(?:\A|[;&|({\n]|\b(?:then|do|else))\s*(?:until|while|for)\s.*?[;\n]\s*do\b(?:.*?(?:[;&|({\n]|\b(?:then|do|else)))?\s*sleep\s+0*(?:[3-9]|[1-9][0-9]+)(?:\.[0-9]+)?[smh]?\b.*?\bdone\b'''
+text = "A foreground poll loop holds the turn, and the coordinator, seat or lock it waits on with it (#3624)."
+remedy = "run what it waits for with run_in_background, whose end the runtime notifies, or wait on the condition with Monitor and an until-loop"                 # #3627
+
+[[rule]]
+id = "git.main-ff-only"
+tool = "Bash"
+where = "main"   # grammar: where, the repository's main checkout and never a linked worktree (#2751)
+deny_pattern = '(?m)(\A|[|;&(\n]\s*)git(\s+-[cC]\s+\S+|\s+--?[\w.-]+(=\S+)?)*\s+merge(\s|$)'   # git merge where it is run, as git.merge-commits-itself reads it
+unless_pattern = '\s--(ff-only|abort|continue|quit|help)\b|\s-h\b'   # a fast-forward, which commits nothing, or the end of a merge that stands, its owner's (#3621)
+text = "main moves only by a fast-forward to a commit the merge queue judged (#3618 M2, #3622)."
+remedy = "merge in the merge worktree on staging, then `xtask worktree land`"                 # #3627
 
 # ---------------------------------------------------------------- owed
 # What a crate owes before done (harness §4.5 condition 1): one row per

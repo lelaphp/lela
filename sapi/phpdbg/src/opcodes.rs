@@ -12,7 +12,7 @@ use php_ext::request::Opcode;
 pub(crate) const RETURNS: &[&str] = &["ZEND_RETURN", "ZEND_RETURN_BY_REF", "ZEND_GENERATOR_RETURN"];
 
 /// The oplines that pop the frame they stand in, which on the frame a
-/// serving entered are the loop's to run.
+/// serving entered are the loop's to step.
 pub(crate) const LEAVES: &[&str] = &[
     "ZEND_RETURN",
     "ZEND_RETURN_BY_REF",

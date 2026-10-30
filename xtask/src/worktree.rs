@@ -45,6 +45,14 @@
 //! no reading is written: the readings are the worktree's own, once an
 //! agent is in it.
 //!
+//! The session that lays the worktree down owns it (#3618 M1, #3621):
+//! the add records it ([`crate::owner`]), so pre-commit and `permit`
+//! refuse another session's writes there. `xtask worktree own` records
+//! the owner of a checkout no add laid down, main's and the merge
+//! worktree, or lets one go; `xtask worktree whose` says whose a
+//! checkout is and refuses another session, which is what pre-commit and
+//! pre-merge-commit ask before anything else runs.
+//!
 //! The ticket the branch's work is for is the add's to record (#30):
 //! `--ticket` writes it on the branch, where the track module reads it by
 //! name, so a reader that asks whether the work of a branch is done need
@@ -84,6 +92,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::computed;
 use crate::git::{git, has_ref};
+use crate::owner::{self, SessionId};
 use crate::phpt::against;
 use crate::reading::Store;
 use crate::track::{self, MAIN, Ticket, Track, short};
@@ -138,6 +147,8 @@ const LOCAL: &str = ".claude/harness.local.md";
 /// it is.
 const ADD: &str = "worktree add";
 const RETIRE: &str = "worktree retire";
+const OWN: &str = "worktree own";
+const WHOSE: &str = "worktree whose";
 
 /// A worktree that is laid down but not ready to be worked in: the lines
 /// printed before it say what failed. Its own error, so the exit can say
@@ -160,10 +171,15 @@ impl std::fmt::Display for NotReady {
 impl std::error::Error for NotReady {}
 
 /// Lay the worktree for `branch` down under `root`, recording `ticket` on
-/// the branch where one is given, or refuse and change nothing. `Ok` is
-/// the worktree's directory, ready; [`NotReady`] is the directory laid
-/// down with a fact missing.
-pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf> {
+/// the branch where one is given and `owner` as the session that owns it,
+/// or refuse and change nothing. `Ok` is the worktree's directory, ready;
+/// [`NotReady`] is the directory laid down with a fact missing.
+pub fn add(
+    root: &Path,
+    branch: &str,
+    ticket: Option<Ticket>,
+    owner: Option<&SessionId>,
+) -> Result<PathBuf> {
     let track = Track::of(root, Some(branch))
         .with_context(|| format!("where {branch} is taken off could not be said"))?;
     let homes = homes(&track.store)?;
@@ -220,19 +236,125 @@ pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf>
             "for no ticket: none was named, and `xtask track` says so rather than guessing from the branch name"
         ),
     }
+    record_owner(&dir, owner, ADD)?;
+    make_ready(dir, root, &homes, ADD, &["debug"])
+}
 
-    seed(&dir, root);
+/// `owner` recorded as the session that owns the checkout at `dir`, said
+/// under `whose`; a checkout laid down outside a session is said to be
+/// no session's.
+pub(crate) fn record_owner(dir: &Path, owner: Option<&SessionId>, whose: &str) -> Result<()> {
+    match owner {
+        Some(session) => {
+            owner::record(dir, session)?;
+            say!(
+                whose,
+                "owned by session {session}: pre-commit and permit refuse another session's writes there"
+            );
+        }
+        None => say!(
+            whose,
+            "owned by no session, being laid down outside one; `xtask worktree own --session <id>` there names one"
+        ),
+    }
+    Ok(())
+}
+
+/// The worktree at `dir`, laid down beside the clone at `root`, made
+/// ready to be worked in, its lines under `whose`: each of `builds` seeded
+/// from the clone's ([`seed`]), `xtask` built, the local file laid and
+/// rendered under the grant over `homes`, and what the clone carries over
+/// said. `Ok` is the directory; [`NotReady`] names it with a fact
+/// missing.
+pub(crate) fn make_ready(
+    dir: PathBuf,
+    root: &Path,
+    homes: &Path,
+    whose: &str,
+    builds: &[&str],
+) -> Result<PathBuf> {
+    seed(&dir, root, whose, builds);
     let mut ready = true;
-    ready &= build(&dir);
-    ready &= lay_local(&dir);
-    trust(&dir, &homes);
-    carried_over(&dir);
+    ready &= build(&dir, whose);
+    ready &= lay_local(&dir, whose);
+    trust(&dir, homes, whose);
+    carried_over(&dir, whose);
     if ready {
-        say!(ADD, "ready: cd {}", dir.display());
+        say!(whose, "ready: cd {}", dir.display());
         Ok(dir)
     } else {
         Err(NotReady { dir }.into())
     }
+}
+
+/// Record the owner of the checkout `root` stands in: `named`, or the
+/// `caller`'s own session; or, with `release`, take its record away. A
+/// session records itself alone, and neither takes nor lets go of a
+/// checkout another session owns; a person, who calls from no session,
+/// names any session and hands a checkout over.
+pub fn own(
+    root: &Path,
+    caller: Option<&SessionId>,
+    named: Option<SessionId>,
+    release: bool,
+) -> Result<()> {
+    let checkout = owner::checkout_of(root)
+        .with_context(|| format!("{} is in no checkout", root.display()))?;
+    let at = checkout.display();
+    let held = owner::of(&checkout)?;
+    if let Some(other) = owner::another(&checkout, caller)? {
+        bail!(
+            "{at} is session {other}'s; {other} lets it go with `xtask worktree own --release`, or a person hands it over with `xtask worktree own --session <id>` in a terminal"
+        );
+    }
+    if release {
+        let was = owner::release(&checkout)?;
+        say!(
+            OWN,
+            "{at} is no session's{}",
+            if was { " now" } else { " already" }
+        );
+        return Ok(());
+    }
+    let session = match (named, caller) {
+        (Some(named), Some(caller)) if named != *caller => bail!(
+            "a session records itself as an owner, and {named} is not this one; a person names another session from a terminal"
+        ),
+        (Some(named), _) => named,
+        (None, Some(caller)) => caller.clone(),
+        (None, None) => bail!(
+            "no session runs this; a person names the session that owns {at} with --session <id>"
+        ),
+    };
+    owner::record(&checkout, &session)?;
+    let taken = match held {
+        Some(was) if was != session => format!(", taken from {was}"),
+        _ => String::new(),
+    };
+    say!(OWN, "{at} is session {session}'s{taken}");
+    Ok(())
+}
+
+/// Say whose the checkout `root` stands in is, and refuse where another
+/// session than the `caller` owns it: what pre-commit and
+/// pre-merge-commit ask before anything runs, so a commit there is the
+/// owner's or a person's.
+pub fn whose(root: &Path, caller: Option<&SessionId>) -> Result<()> {
+    let checkout = owner::checkout_of(root)
+        .with_context(|| format!("{} is in no checkout", root.display()))?;
+    let at = checkout.display();
+    if let Some(other) = owner::another(&checkout, caller)? {
+        let caller = caller.map(SessionId::as_str).unwrap_or_default();
+        bail!(
+            "{at} is session {other}'s and this is session {caller}: one session writes in a checkout, its owner (#3618 M1). Instead: work in your own worktree (`xtask worktree add`), or have {other} let it go with `xtask worktree own --release`"
+        );
+    }
+    match (owner::of(&checkout)?, caller) {
+        (None, _) => say!(WHOSE, "{at} is no session's"),
+        (Some(session), Some(_)) => say!(WHOSE, "{at} is session {session}'s, this one"),
+        (Some(session), None) => say!(WHOSE, "{at} is session {session}'s; a person is admitted"),
+    }
+    Ok(())
 }
 
 /// Retire the worktree on `branch`: its log appended into the main
@@ -332,31 +454,36 @@ pub(crate) fn carry_runs(dir: &Path, whose: &str) -> Result<()> {
     Ok(())
 }
 
-/// The worktree's `target/debug` seeded from the clone's at `root`
-/// ([`seed_build`]), so the build that follows compiles the workspace's
-/// own crates and no dependency (harness-design.md §5, "Worktrees";
-/// #245). The copy is `target/debug` and nothing beside it: the
-/// worktree's `target/harness/` is its own from its first instrument.
-/// Best-effort: a clone with no `target/debug`, and a `cp -c` that fails,
-/// are one line and a cold start. The seeded `xtask` binary is taken away
-/// too, so the one under the worktree's `target/debug` is built from the
-/// worktree's sources or is not there: a build that fails leaves no binary
-/// whose root is the clone's for the hook's walk to find.
-fn seed(dir: &Path, root: &Path) {
-    match seed_build(dir, root, "debug") {
-        Ok(true) => {
-            fs::remove_file(dir.join("target/debug/xtask")).ok();
-            say!(
-                ADD,
-                "seeded target/debug from the clone's by cp -c: the dependencies are blocks the two share, and the build compiles the workspace's own crates"
-            );
+/// Each of `builds`, `target/<build>` of the worktree, seeded from the
+/// clone's at `root` ([`seed_build`]), so the build that follows compiles
+/// the workspace's own crates and no dependency (harness-design.md §5,
+/// "Worktrees"; #245). Nothing beside them is copied: the worktree's
+/// `target/harness/` is its own from its first instrument. Best-effort: a
+/// clone with no such build, and a `cp -c` that fails, are one line and a
+/// cold start. Each seeded `xtask` binary is taken away too, so the one
+/// under the worktree's `target/` is built from the worktree's sources or
+/// is not there: a build that fails leaves no binary whose root is the
+/// clone's for the hook's walk to find.
+fn seed(dir: &Path, root: &Path, whose: &str, builds: &[&str]) {
+    for build in builds {
+        match seed_build(dir, root, build) {
+            Ok(true) => {
+                fs::remove_file(dir.join("target").join(build).join("xtask")).ok();
+                say!(
+                    whose,
+                    "seeded target/{build} from the clone's by cp -c: the dependencies are blocks the two share, and the build compiles the workspace's own crates"
+                );
+            }
+            Ok(false) => say!(
+                whose,
+                "nothing to seed target/{build} from: {} holds no build, so it starts cold",
+                root.join("target").join(build).display()
+            ),
+            Err(failed) => complain!(
+                whose,
+                "{failed}; target/{build} of the worktree starts cold"
+            ),
         }
-        Ok(false) => say!(
-            ADD,
-            "nothing to seed target/debug from: {} holds no build, so the worktree starts cold",
-            root.join("target/debug").display()
-        ),
-        Err(failed) => complain!(ADD, "{failed}; the worktree starts cold"),
     }
 }
 
@@ -399,7 +526,7 @@ pub(crate) fn seed_build(dir: &Path, root: &Path, build: &str) -> Result<bool, S
 /// on a build; whether it was, with what the build compiled on the line:
 /// the workspace's own crates, which a seeded worktree compiles, and the
 /// dependencies, which it does not.
-fn build(dir: &Path) -> bool {
+fn build(dir: &Path, whose: &str) -> bool {
     let built = Command::new("cargo")
         .args(["build", "-p", "xtask"])
         .current_dir(dir)
@@ -414,7 +541,7 @@ fn build(dir: &Path) -> bool {
                 format!("{own} crates of the workspace and {deps} dependencies")
             };
             say!(
-                ADD,
+                whose,
                 "built target/debug/xtask, compiling {what}: the first Edit in it is judged by this build, not by a cold cargo run"
             );
             true
@@ -422,14 +549,14 @@ fn build(dir: &Path) -> bool {
         Ok(out) => {
             eprint!("{}", String::from_utf8_lossy(&out.stderr));
             complain!(
-                ADD,
+                whose,
                 "cargo build -p xtask failed; an Edit there is judged by a cold cargo run or denied"
             );
             false
         }
         Err(err) => {
             complain!(
-                ADD,
+                whose,
                 "cargo did not run ({err}); an Edit there is judged by nothing"
             );
             false
@@ -472,10 +599,10 @@ fn built(dir: &Path) -> Option<PathBuf> {
 
 /// The local file, laid down by the build just made and rendered by name;
 /// whether it is there.
-fn lay_local(dir: &Path) -> bool {
+fn lay_local(dir: &Path, whose: &str) -> bool {
     let Some(built) = built(dir) else {
         complain!(
-            ADD,
+            whose,
             "no built xtask under {}/target; the worktree has no local file",
             dir.display()
         );
@@ -489,12 +616,12 @@ fn lay_local(dir: &Path) -> bool {
         .status();
     match laid {
         Ok(status) if status.success() => {
-            say!(ADD, "laid {LOCAL} down");
+            say!(whose, "laid {LOCAL} down");
             true
         }
         _ => {
             complain!(
-                ADD,
+                whose,
                 "xtask status --session failed; the worktree has no local file"
             );
             false
@@ -509,53 +636,53 @@ fn lay_local(dir: &Path) -> bool {
 /// clone's grant does not, the worktrees being beside it (revision 56).
 /// Nothing waits on the line. A broken marker and a missing `computed`
 /// are complaints, since the file is laid down either way.
-fn trust(dir: &Path, homes: &Path) {
+fn trust(dir: &Path, homes: &Path, whose: &str) {
     let files = [LOCAL.to_owned()];
     match computed::render(dir, &files) {
-        Ok(computed::Answer::Rendered(_)) => say!(ADD, "rendered {LOCAL}"),
+        Ok(computed::Answer::Rendered(_)) => say!(whose, "rendered {LOCAL}"),
         Ok(computed::Answer::Untrusted { .. }) => say!(
-            ADD,
+            whose,
             "{LOCAL}'s exec regions are unrendered here: no grant covers {}, where the worktrees are laid down; a person runs, once, for every worktree there (harness-design.md §11): computed trust {}",
             homes.display(),
             homes.display()
         ),
-        Ok(answer) => complain!(ADD, "{}", answer.refusal().unwrap_or_default()),
-        Err(err) => complain!(ADD, "{err:#}"),
+        Ok(answer) => complain!(whose, "{}", answer.refusal().unwrap_or_default()),
+        Err(err) => complain!(whose, "{err:#}"),
     }
 }
 
 /// What the clone already has, said rather than set again.
-fn carried_over(dir: &Path) {
+fn carried_over(dir: &Path, whose: &str) {
     match git(dir, &["config", "core.hooksPath"]) {
         Ok(hooks) if !hooks.trim().is_empty() => say!(
-            ADD,
+            whose,
             "carried over: core.hooksPath={}, which is repository config",
             hooks.trim()
         ),
         _ => say!(
-            ADD,
+            whose,
             "core.hooksPath is unset, so pre-commit and pre-push are not wired; the session hook points it at scripts/hooks"
         ),
     }
     if dir.join(".claude/settings.json").is_file() {
         say!(
-            ADD,
+            whose,
             "carried over: .claude/settings.json, which is tracked, so the plugin settings are the clone's"
         );
     } else {
         say!(
-            ADD,
+            whose,
             ".claude/settings.json is missing, so this worktree loads no harness plugin"
         );
     }
     if dir.join("oracle.toml").is_file() {
         say!(
-            ADD,
+            whose,
             "carried over: oracle.toml, which is tracked, and the php-src tree it pins, which is outside the clone; `xtask phpt` says if that tree is gone"
         );
     } else {
         say!(
-            ADD,
+            whose,
             "oracle.toml is missing, so this worktree has no oracle and no pinned php-src"
         );
     }

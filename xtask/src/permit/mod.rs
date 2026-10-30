@@ -38,8 +38,9 @@
 //! change in [`approval`], the audit record of each change it admitted in
 //! [`audit`], whether a line can write one of them in [`writes`], the
 //! `unless` qualifier's sensor in [`unless`], the `exempt_label`
-//! qualifier's in [`label`], the operation in progress in a checkout and
-//! whose it is, which `where = "operating"` reads, in [`operation`], the
+//! qualifier's in [`label`], the operation in progress in a checkout in
+//! [`operation`], whose a checkout is, which `where = "owned"` and `where
+//! = "operating"` read, in [`owned`], the
 //! adapters and the
 //! recording in [`adapters`], the call handed to a worktree's own build in
 //! [`hand_off`], the diff judge in [`diff`] and the bench of
@@ -60,6 +61,7 @@ mod kept;
 mod label;
 mod ledger;
 mod operation;
+mod owned;
 mod region;
 mod rules;
 mod unless;

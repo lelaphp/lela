@@ -175,8 +175,11 @@ pub(crate) enum Command {
         command: Option<TrackCommand>,
     },
     /// A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>,
-    /// `retire` appends its log into the store and removes it. Writes no
-    /// reading.
+    /// `retire` removes it, `own` and `whose` say its owner, `queue` and
+    /// `land` run the merge queue.
+    ///
+    /// None writes a reading of its own; `land` asks `done`, which writes
+    /// one.
     ///
     /// `add` lays the worktree down ready to be worked in, the branch cut
     /// from `main` with the ticket it is for recorded on it, `xtask` built
@@ -461,15 +464,25 @@ pub(crate) enum Command {
     Witness(Witness),
     /// The glossary as a sensor: `_Avoid_` words in public item names and
     /// rustdoc prose, never in a lock; one reading per crate.
-    Vocab {
-        /// Only these crates, by manifest name; default every crate that exists.
-        #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]
-        crates: Vec<String>,
-        /// For pre-commit: leave out each crate whose reading passes and
-        /// was taken over what is staged, naming the reading (#1143).
-        #[arg(long)]
-        staged: bool,
-    },
+    Vocab(Vocab),
+}
+
+/// What one `vocab` run is asked for, flattened onto the command as
+/// [`Bench`] is, so the dispatch has one line for the instrument.
+#[derive(Debug, Args)]
+pub(crate) struct Vocab {
+    /// Only these crates, by manifest name; default every crate that exists.
+    #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]
+    pub crates: Vec<String>,
+    /// For pre-commit: leave out each crate whose reading passes and
+    /// was taken over what is staged, naming the reading (#1143).
+    #[arg(long)]
+    pub staged: bool,
+    /// For commit-msg: the message git is about to commit, noted against
+    /// the glossary each staged crate is held to; one reading, exit 0
+    /// whatever it finds (#3624, #3629).
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["crates", "staged"])]
+    pub message: Option<PathBuf>,
 }
 
 /// What one `bench` run is asked for, flattened onto the command so the
@@ -593,8 +606,9 @@ pub(crate) struct Phpt {
     pub against: Option<String>,
     #[command(flatten)]
     pub baseline: PhptBase,
-    /// How many tests run at once: the machine's cores unless named, and
-    /// one test at a time at 1. Tests that share a `--CONFLICTS--` key
+    /// How many tests run at once: the seat's share of the machine unless
+    /// named, its cores divided among `XTASK_SEATS`, and one test at a time
+    /// at 1. Tests that share a `--CONFLICTS--` key
     /// never run at once whatever the number.
     #[arg(long, value_name = "N")]
     pub jobs: Option<std::num::NonZeroUsize>,
@@ -734,7 +748,7 @@ pub(crate) enum TrackCommand {
     },
 }
 
-/// The two halves of a ticket's worktree.
+/// A ticket's worktree laid down and retired, and whose a checkout is.
 #[derive(Debug, Subcommand)]
 pub(crate) enum WorktreeCommand {
     /// Lay the worktree for a branch down, ready to be worked in, with
@@ -754,6 +768,28 @@ pub(crate) enum WorktreeCommand {
         /// The branch a worktree is on.
         branch: String,
     },
+    /// Record the session that owns the checkout this runs in, the
+    /// calling session's own unless a person names one, or let it go;
+    /// refused where another session owns it (#3621).
+    Own {
+        /// The session to record, which only a person names.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+        /// Take the record away, so the checkout is no session's.
+        #[arg(long, conflicts_with = "session")]
+        release: bool,
+    },
+    /// Say whose the checkout this runs in is; exit 1 where another
+    /// session owns it, as pre-commit asks (#3621).
+    Whose,
+    /// Lay the merge queue's worktree down beside the checkout, `_merge`
+    /// on `staging`, its builds seeded from main's, owned by the calling
+    /// session; or claim the one that stands (#3622).
+    Queue,
+    /// Fast-forward `main` to `staging`'s head once `done` is met in
+    /// `_merge` since main's tip, landing `_merge`'s log in main's store
+    /// first; refused, `main` untouched, while anything is unmet (#3622).
+    Land,
 }
 
 /// Read the criteria, or read them and close.

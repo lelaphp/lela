@@ -70,3 +70,18 @@ test('a harness.self denial is asked again with the answers, and lifted', async 
   expect(stdins[0].asked).toBe(undefined);
   expect(stdins[1].asked).toEqual([{ tool_use_id: 'toolu_ask', input: { q: 1 }, result: { answers: {} } }]);
 });
+
+test("prompt.context hands over the facts alone, the map being CLAUDE.md's load", async ($, on) => {
+  on('session.id', () => ({ value: 'session' }));
+  on('session.cwd', () => ({ value: '/work' }));
+  on('process.run', () => ran(JSON.stringify({ map: '# The map\n', facts: '# Local facts\n' })));
+  on('prompt.context', (_$, e) => ({ blocks: e.blocks }));
+  const { blocks } = await $.prompt.context({
+    blocks: [
+      { name: 'claudeMd', text: '@AGENTS.md' },
+      { name: 'harness-map', text: 'a map block from before' },
+    ],
+  });
+  expect(blocks.map((b) => b.name)).toEqual(['claudeMd', 'harness-facts']);
+  expect(blocks[1]?.text).toBe('# Local facts\n');
+});

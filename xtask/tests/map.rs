@@ -748,9 +748,10 @@ fn the_map_and_the_local_facts_are_each_under_the_engines_cap_with_room() {
 }
 
 /// The hook reads the same line the test does, and hands the engine the
-/// map and the facts as two blocks, each held to the cap on its own.
+/// facts as one block held to the cap; the map reaches the model by
+/// CLAUDE.md's `@AGENTS.md`, never as a block (#3620 D1).
 #[test]
-fn the_function_hook_states_the_cap_once_and_hands_over_two_blocks() {
+fn the_function_hook_states_the_cap_once_and_hands_over_the_facts_alone() {
     let hook = read(HOOK);
     assert_eq!(
         hook.matches("const BLOCK_CAP = ").count(),
@@ -763,12 +764,19 @@ fn the_function_hook_states_the_cap_once_and_hands_over_two_blocks() {
     );
     for needle in [
         "'--format', 'json'",
-        "capped(BLOCKS.map, map)",
         "capped(BLOCKS.facts, facts)",
         "text.length <= BLOCK_CAP",
     ] {
         assert!(hook.contains(needle), "the hook has {needle}");
     }
+    assert!(
+        !hook.contains("capped(BLOCKS.map"),
+        "the map is the runtime's load, not the hook's block"
+    );
+    assert!(
+        read("CLAUDE.md").lines().any(|l| l.trim() == "@AGENTS.md"),
+        "CLAUDE.md loads the map"
+    );
 }
 
 #[test]
@@ -794,9 +802,10 @@ fn the_session_start_hook_wires_the_clone_and_renders_the_local_file_on_the_four
         .find("computed run .claude/harness.local.md")
         .expect(command);
     assert!(hooks_path < computed, "hooksPath is set first: {command}");
-    // The local file is laid down when missing, before it is rendered; the
-    // map itself reaches the model through the plugin's prompt.context
-    // (harness-plugins/), so the hook ends with the render and prints no map.
+    // The local file is laid down, where missing or where its template
+    // moved, before it is rendered; the map reaches the model through
+    // CLAUDE.md's `@AGENTS.md`, so the hook ends with the render and
+    // prints no map (#3620 D1).
     let laid = command.find("status --session >/dev/null").expect(command);
     assert!(
         laid < computed,
@@ -804,7 +813,7 @@ fn the_session_start_hook_wires_the_clone_and_renders_the_local_file_on_the_four
     );
     assert!(
         !command.trim_end().ends_with("status --session"),
-        "the map is the plugin's block, not the hook's stdout: {command}"
+        "the map is the runtime's load, not the hook's stdout: {command}"
     );
     assert!(
         hooks["hooks"]["PreToolUse"].is_array(),
