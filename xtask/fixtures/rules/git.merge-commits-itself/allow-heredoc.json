@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cat > /private/tmp/claude-501/scratchpad/t3635/merge.sh <<'EOF'\ncd ../_merge\ngit merge staging\nEOF\nchmod +x /private/tmp/claude-501/scratchpad/t3635/merge.sh","description":"Write a script that merges, without running it: a heredoc body is text (#3635)"}}

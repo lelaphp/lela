@@ -269,11 +269,11 @@ fn evaluate(
             .with_context(|| format!("rule \"{}\": unless_pattern is not a regex", rule.id))?;
         // A hit whose own command the `unless_pattern` matches is let
         // through; the rule fires on any other.
-        let unexcused = |subject: &str| {
-            regex.find_iter(subject).any(|hit| {
+        let unexcused = |subject: &str, hits: Vec<std::ops::Range<usize>>| {
+            hits.into_iter().any(|hit| {
                 unless_pattern
                     .as_ref()
-                    .is_none_or(|unless| !unless.is_match(command_around(subject, hit.range())))
+                    .is_none_or(|unless| !unless.is_match(command_around(subject, hit)))
             })
         };
         // A hit the rule's `unless` accounts for is the named instrument's
@@ -284,8 +284,9 @@ fn evaluate(
             })
         };
         // A shell line is what it would run, so the pattern is asked of
-        // its text less the heredoc bodies it carries as text: what a
-        // command quotes is not what it runs (#1771, #1832). A write is a
+        // its commands ([`Line::subject`]): less the heredoc bodies it
+        // carries as text, and no hit starting in a quote, since what a
+        // command quotes is not what it runs (#1771, #1832, #3635). A write is a
         // change to a file, so the pattern is asked of what the change
         // adds and not of what the file already carries (#510): a write
         // that leaves every hit where it stood adds none and fires on
@@ -294,9 +295,10 @@ fn evaluate(
         // own text does not hold, and a pattern over a block is never
         // whole in an edit inside it (#2413).
         match line {
-            Some(line) => unexcused(line.text()) && !excused(line.text()),
+            Some(line) => unexcused(line.subject(), line.hits(&regex)) && !excused(line.subject()),
             None => call.rewrite(root, path).is_some_and(|(before, after)| {
-                adds(&regex, &after, &before) && unexcused(&after) && !excused(&after)
+                let hits = regex.find_iter(&after).map(|hit| hit.range()).collect();
+                adds(&regex, &after, &before) && unexcused(&after, hits) && !excused(&after)
             }),
         }
     } else if p.deny == Some(true) {
@@ -592,7 +594,9 @@ fn fires(rule: &Rule, argv: &Argv) -> bool {
         (Some(denied), _, _) => argv.denies(denied, &p.with, p.unless_argv.as_ref()),
         (None, Some(separator), _) => argv.unbounded(separator, &p.with),
         (None, None, Some(pattern)) => {
-            let words = argv.words().join(" ");
+            // A separator among a command's words is one a quote held, and
+            // no command position (#3635).
+            let words = argv.words().join(" ").replace([';', '&', '|', '\n'], " ");
             let matches = |pattern: &str| Regex::new(pattern).map(|r| r.is_match(&words));
             matches(pattern).unwrap_or(true)
                 && !p

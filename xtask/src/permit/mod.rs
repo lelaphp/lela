@@ -21,7 +21,8 @@
 //! their twins run on save and per commit (§6). A Bash line is read as the
 //! argv of each simple command it runs, quotes removed and heredoc bodies
 //! skipped, in [`argv`] (#1001), and a `deny_pattern` reads the same line
-//! less the heredoc bodies that reading skips as text (#1832); what a shell
+//! less the heredoc bodies that reading skips as text (#1832), with no
+//! quoted argument read as a command position (#3635); what a shell
 //! can hide beyond that is `done`'s to find at pre-push and in CI.
 //!
 //! The interface is four things: [`judge`], one call against the manifest;
