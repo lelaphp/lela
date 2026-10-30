@@ -8,7 +8,7 @@ use std::ptr::{self, NonNull};
 
 use php_ext::raising::Thrown;
 use php_ext::request::{Foreign, ForeignId, Request, Stream};
-use php_ext::values::PhpObject;
+use php_ext::values::{Owner, PhpObject, Value};
 
 use super::multi::ShareHandle;
 use super::sys::{self, curl_mime, curl_mimepart};
@@ -508,6 +508,15 @@ impl EasyId {
             let file = to.and_then(|(stream, fd)| CFile::of(&handle.tag().session, stream, fd));
             handle.set_stderr(file)
         })
+    }
+
+    /// The `CURLOPT_STDERR` stream's value let go of as
+    /// [`Session::let_stream_go`] says, or now where the `CURL *` is gone.
+    pub(crate) fn let_stream_go(self, req: &mut Request, value: Owner<Value>) {
+        match self.with(req, None, |handle| Some(handle.tag().session.clone())) {
+            Some(session) => session.let_stream_go(req, value),
+            None => value.give_up(req),
+        }
     }
 
     /// The `CURLOPT_STDERR` file, flushed, as `php_stream_flush` flushes

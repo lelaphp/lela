@@ -24,7 +24,13 @@
 //! every place that lets that value go points the library elsewhere first.
 //! A file let go of during a call may be one the library is writing to,
 //! whose write ran PHP code that set the option again, so it is kept to
-//! the link's end ([`Session::let_file_go`]) and never closed under it.
+//! the link's end ([`Session::let_file_go`]) and never closed under it,
+//! and the stream's value let go of then is kept to the request's end
+//! ([`Session::let_stream_go`]), since the C library may call the cookie
+//! again to finish a short write. `curl_free_obj` lets the value go
+//! after the `CURL *` is cleaned up; a cleanup a transfer's hold defers
+//! would leave the cookie over a stream let go of, which cannot happen
+//! while `curl_exec`'s frame and a multi's list hold the object.
 
 use std::ffi::{c_char, c_int, c_void};
 use std::os::fd::RawFd;

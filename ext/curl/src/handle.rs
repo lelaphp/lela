@@ -573,13 +573,13 @@ pub(crate) fn verify_handlers(req: &mut Request, object: PhpObject, report: bool
                 curl.write.stream.take()
             }
         };
-        if which == 0
-            && let Some(easy) = easy
-        {
-            easy.set_stderr(req, None);
-        }
-        if let Some(value) = released {
-            value.give_up(req);
+        match (released, easy) {
+            (Some(value), Some(easy)) if which == 0 => {
+                easy.set_stderr(req, None);
+                easy.let_stream_go(req, value);
+            }
+            (Some(value), _) => value.give_up(req),
+            (None, _) => {}
         }
     }
 }
@@ -761,14 +761,20 @@ fn reset_handlers(req: &mut Request, object: PhpObject) {
         curl.write.stream.take(),
         curl.header.stream.take(),
         curl.read.stream.take(),
-        curl.stderr.take(),
     ]
     .into_iter()
     .flatten()
     .collect();
+    let stderr = curl.stderr.take();
+    let easy = curl.easy.as_ref().map(Easy::id);
     let hooks: Vec<Handler> = curl.hooks.iter_mut().filter_map(Option::take).collect();
     for value in released {
         value.give_up(req);
+    }
+    match (stderr, easy) {
+        (Some(value), Some(easy)) => easy.let_stream_go(req, value),
+        (Some(value), None) => value.give_up(req),
+        (None, _) => {}
     }
     for handler in hooks {
         handler.give_up(req);

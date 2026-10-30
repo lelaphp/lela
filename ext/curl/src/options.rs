@@ -652,9 +652,20 @@ fn set_stream(req: &mut Request, object: PhpObject, which: StreamOpt, value: &Va
     };
     let mut code = 0;
     if which == StreamOpt::Stderr {
-        code = easy_of(req, object)?.set_stderr(req, what);
-    }
-    if let Some(old) = old {
+        let easy = match easy_of(req, object) {
+            Ok(easy) => easy,
+            Err(thrown) => {
+                if let Some(old) = old {
+                    old.give_up(req);
+                }
+                return Err(thrown);
+            }
+        };
+        code = easy.set_stderr(req, what);
+        if let Some(old) = old {
+            easy.let_stream_go(req, old);
+        }
+    } else if let Some(old) = old {
         old.give_up(req);
     }
     saved(req, object, code)

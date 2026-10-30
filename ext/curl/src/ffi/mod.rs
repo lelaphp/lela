@@ -134,6 +134,10 @@ struct Kept {
     /// A file let go of while the library may be inside a write to it, a
     /// cookie's that runs PHP code which sets the option again.
     files: Vec<CFile>,
+    /// The stream values let go of at such a time, which the cookie of a
+    /// kept file names until its write ends, given up by
+    /// [`Session::close_kept`].
+    streams: Vec<Owner<Value>>,
 }
 
 /// One owner of the request's [`Link`].
@@ -224,11 +228,30 @@ impl Session {
         }
     }
 
+    /// A `CURLOPT_STDERR` stream's value let go of: given up now between
+    /// calls, and during one kept to the request's end, since a kept
+    /// file's cookie may still be inside a write to the stream.
+    pub(crate) fn let_stream_go(&self, req: &mut Request, value: Owner<Value>) {
+        if self.entered() {
+            // SAFETY: an owner's allocation; the field is written alone.
+            unsafe { (*self.0.0.as_ptr()).kept.streams.push(value) };
+        } else {
+            value.give_up(req);
+        }
+    }
+
     /// What `curl_easy_cleanup` and `curl_mime_free` would have closed of
     /// the kept trees' file parts, closed with the request at its end,
-    /// once no `CURL *` that may read them is left (`post_deactivate`);
-    /// the memory goes with the link.
+    /// once no `CURL *` that may read them is left (`post_deactivate`),
+    /// and the kept stream values given up; the memory goes with the
+    /// link.
     pub(crate) fn close_kept(&self, req: &mut Request) {
+        // SAFETY: an owner's allocation; the values are taken off it
+        // alone, so giving one up reaches no field.
+        let streams = unsafe { std::mem::take(&mut (*self.0.0.as_ptr()).kept.streams) };
+        for value in streams {
+            value.give_up(req);
+        }
         // SAFETY: an owner's allocation; the trees are taken off it alone
         // and put back after, so closing a stream reaches no field.
         let trees = unsafe { std::mem::take(&mut (*self.0.0.as_ptr()).kept.trees) };
