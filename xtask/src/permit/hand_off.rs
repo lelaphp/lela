@@ -40,7 +40,7 @@ impl Candidate {
     /// one stale build does not silence both), then cargo.
     fn walk(checkout: &Path, adapter: Adapter) -> [Candidate; 3] {
         let [first, second] = match adapter {
-            Adapter::CommandHook => ["release", "debug"],
+            Adapter::CommandHook | Adapter::PreCommit => ["release", "debug"],
             Adapter::AboveTheCommandHook => ["debug", "release"],
         };
         let built =
@@ -48,9 +48,9 @@ impl Candidate {
         [built(first), built(second), Candidate::Cargo]
     }
 
-    /// The command that asks this candidate to judge the call, `None` for
-    /// a binary that is not there.
-    fn command(&self, checkout: &Path, adapter: Adapter) -> Option<Command> {
+    /// The command that asks this candidate `args` in `checkout`, `None`
+    /// for a binary that is not there.
+    fn command(&self, checkout: &Path, args: &[&str]) -> Option<Command> {
         let mut command = match self {
             Candidate::Built(binary) => {
                 if !binary.is_file() {
@@ -70,14 +70,11 @@ impl Candidate {
         command
             .arg("--root")
             .arg(checkout)
-            .arg("permit")
+            .args(args)
             .current_dir(checkout)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if adapter == Adapter::AboveTheCommandHook {
-            command.arg("--above-the-command-hook");
-        }
         Some(command)
     }
 }
@@ -88,9 +85,32 @@ impl Candidate {
 /// over says nothing, and the last one's stderr is in the refusal, since
 /// cargo closes the walk and its words are the ones a person needs.
 pub(super) fn hand_off(checkout: &Path, stdin: &str, adapter: Adapter) -> Result<Vec<u8>, Refusal> {
+    let args: &[&str] = match adapter {
+        Adapter::AboveTheCommandHook => &["permit", "--above-the-command-hook"],
+        Adapter::CommandHook | Adapter::PreCommit => &["permit"],
+    };
+    walk(checkout, adapter, args, stdin).map_err(|last| {
+        Refusal::HandOff(anyhow!(
+            "{} carries a manifest this build was not compiled against, and none of its own \
+             candidates judged this call: {last}",
+            checkout.join(crate::inputs::MANIFEST_FILE).display()
+        ))
+    })
+}
+
+/// `args` asked of the build of `checkout`, `stdin` handed to it, over
+/// the walk the command hook takes: the stdout of the first candidate
+/// that exits 0, or the last one's stderr. What `done --hook` hands each
+/// checkout a session wrote in (#3619).
+pub(crate) fn walk(
+    checkout: &Path,
+    adapter: Adapter,
+    args: &[&str],
+    stdin: &str,
+) -> Result<Vec<u8>, String> {
     let mut last = String::from("no candidate was there to ask");
     for candidate in Candidate::walk(checkout, adapter) {
-        let Some(command) = candidate.command(checkout, adapter) else {
+        let Some(command) = candidate.command(checkout, args) else {
             continue;
         };
         match ask(command, stdin) {
@@ -104,11 +124,7 @@ pub(super) fn hand_off(checkout: &Path, stdin: &str, adapter: Adapter) -> Result
             Err(err) => last = format!("{err:#}"),
         }
     }
-    Err(Refusal::HandOff(anyhow!(
-        "{} carries a manifest this build was not compiled against, and none of its own \
-         candidates judged this call: {last}",
-        checkout.join(crate::inputs::MANIFEST_FILE).display()
-    )))
+    Err(last)
 }
 
 /// One candidate asked: the call written to its stdin from a thread of its

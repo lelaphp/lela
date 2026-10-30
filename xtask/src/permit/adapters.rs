@@ -9,10 +9,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use super::approval::Evidence;
+use super::argv::Line;
 use super::audit;
 use super::call::Call;
 use super::hand_off::hand_off;
+use super::ledger;
+use super::operation;
 use super::rules::{Judgement, Kind, deny_output, judge};
+use super::writes;
 use super::{INSTRUMENT, STALE_RULE, UNJUDGED_RULE};
 use crate::built::{self, Judge, Refusal};
 use crate::key::Snapshot;
@@ -22,17 +26,24 @@ use crate::reading::{Reading, Status, Store};
 /// Which adapter judges the call: the command hook records every
 /// finding; the function hook above it records a denial, which ends the
 /// call there, and leaves a note to the command hook beneath, which sees
-/// the same call and records it once (harness-design.md §4.4).
+/// the same call and records it once (harness-design.md §4.4). Pre-commit's
+/// `--diff` records every finding under its own caller, [`PRE_COMMIT`], so
+/// a diff's judgement is never counted as an agent's call (#3619).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Adapter {
     CommandHook,
     AboveTheCommandHook,
+    PreCommit,
 }
+
+/// The caller a diff judged at pre-commit is recorded under: its readings'
+/// session, and the head of their scope.
+pub(crate) const PRE_COMMIT: &str = "pre-commit";
 
 impl Adapter {
     fn records(self, kind: Kind) -> bool {
         match self {
-            Adapter::CommandHook => true,
+            Adapter::CommandHook | Adapter::PreCommit => true,
             Adapter::AboveTheCommandHook => kind == Kind::Deny,
         }
     }
@@ -79,10 +90,14 @@ pub(super) fn record(
             "{} {}: {}",
             call.tool_name,
             call.subject(root),
-            finding.text
+            finding.said()
         );
         reading.adr = finding.adr.first().cloned().unwrap_or_default();
         reading.session.clone_from(&call.session_id);
+        if adapter == Adapter::PreCommit {
+            reading.scope = format!("{PRE_COMMIT}/{}", finding.rule);
+            PRE_COMMIT.clone_into(&mut reading.session);
+        }
         readings.push(reading);
     }
     Store::of_workspace(root).record(&readings)?;
@@ -109,7 +124,7 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
     // them: the command hook from the transcript Claude Code writes, the
     // function hook from the records it read from the engine (#2247).
     call.evidence = match adapter {
-        Adapter::CommandHook => Evidence::Transcript,
+        Adapter::CommandHook | Adapter::PreCommit => Evidence::Transcript,
         Adapter::AboveTheCommandHook => Evidence::Engine,
     };
     // The blobs of harness.self's files before a Bash call, for the
@@ -150,7 +165,13 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
         Ok(manifest) => manifest,
         Err(refusal) => {
             record_the_refusal(&checkout, &call, &refusal);
-            return Err(refusal.into());
+            if refusal.hands_the_call_on() {
+                return Err(refusal.into());
+            }
+            // No rebuild judges it either, so the decision is this one's,
+            // and the walk ends here, the call recorded once (#3619).
+            println!("{}", unjudged_output(&call, refusal.why()));
+            return Ok(());
         }
     };
     match judge(&manifest, &workspace, &call) {
@@ -159,6 +180,12 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
                 println!("{output}");
             }
             record_the_approvals(&checkout, &call, &judgement);
+            if adapter == Adapter::CommandHook {
+                if let Err(err) = ledger::count(&checkout, &judgement.judged) {
+                    eprintln!("xtask permit: the calls judged were not counted: {err:#}");
+                }
+                record_the_write(&workspace, &call, &judgement);
+            }
             if let Err(err) = record(&checkout, &call, &judgement, adapter) {
                 eprintln!("xtask permit: the decision stands but was not recorded: {err:#}");
             }
@@ -166,6 +193,22 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
         Err(err) => unjudged(&err),
     }
     Ok(())
+}
+
+/// The decision on a call no build judges, with the error's first line:
+/// a write no judge saw is denied, and a `Bash` call passes with the note,
+/// since an agent repairs a broken harness with `Bash` (#16, harness-design.md
+/// §13 item 8).
+fn unjudged_output(call: &Call, why: &anyhow::Error) -> serde_json::Value {
+    let why = format!("{why:#}");
+    let first = why.lines().next().unwrap_or_default();
+    let said = format!("permit could not judge this call: {first}");
+    if call.tool_name == "Bash" {
+        serde_json::json!({"hookSpecificOutput": {
+            "hookEventName": super::rules::HOOK_EVENT, "additionalContext": said}})
+    } else {
+        deny_output(&said)
+    }
 }
 
 /// The deny a call this build could not judge is, printed: why, `err`.
@@ -191,6 +234,41 @@ fn record_the_approvals(checkout: &Path, call: &Call, judgement: &Judgement) {
         if let Err(err) = audit::record(checkout, call, admission) {
             eprintln!("xtask permit: the approval stands but its entry was not written: {err:#}");
         }
+    }
+}
+
+/// The checkout an admitted writing call is placed in, kept under its
+/// session and agent for the Stop to hold (#3618 ruling 1): a file's by
+/// the file, a `Bash` line's where it runs from the call's directory
+/// ([`operation::ran_in`]) unless it only reads ([`writes::reads_only`]);
+/// a place in no checkout of the repository is none. Best effort, as
+/// recording the decision is.
+fn record_the_write(workspace: &Path, call: &Call, judgement: &Judgement) {
+    if judgement.denial().is_some() {
+        return;
+    }
+    let checkout = match (call.command(), call.path(workspace)) {
+        (Some(command), _) => {
+            let line = Line::read(command);
+            if writes::reads_only(&line, workspace) {
+                return;
+            }
+            let start = call.cwd.as_deref().map_or(workspace, Path::new);
+            operation::ran_in(start, Some(&line))
+        }
+        (None, Some(path)) => match path.ancestors().find(|dir| dir.is_dir()) {
+            Some(dir) => operation::ran_in(dir, None),
+            None => return,
+        },
+        (None, None) => return,
+    };
+    let ours = crate::track::worktrees(workspace).is_ok_and(|all| {
+        all.iter()
+            .any(|(dir, _)| dir.canonicalize().ok().as_ref() == Some(&checkout))
+    });
+    let agent = call.agent_id.as_deref().unwrap_or_default();
+    if ours && let Err(err) = ledger::wrote(workspace, &call.session_id, agent, checkout) {
+        eprintln!("xtask permit: the checkout this call wrote in was not recorded: {err:#}");
     }
 }
 
@@ -226,23 +304,36 @@ fn record_the_refusal(root: &Path, call: &Call, refusal: &Refusal) {
              same way.",
         )
     };
-    let recorded = Snapshot::disk_over(root, Path::new(manifest::FILE))
-        .and_then(|now| Reading::stamped_over(INSTRUMENT, rule, &now, Path::new(manifest::FILE)))
-        .and_then(|mut reading| {
-            rule.clone_into(&mut reading.rule);
-            reading.status = status;
-            reading.message = format!(
-                "{} {}: {what} {refusal}",
-                call.tool_name,
-                call.subject(root)
-            );
-            reading.session.clone_from(&call.session_id);
-            Store::of_workspace(root).record(&[reading])
-        });
+    let mut recorded = refusal_reading(root, call, rule, status, &format!("{what} {refusal}"));
+    // A run of calls handed on with none judged is the walk failing open:
+    // its last candidate never judged them, and the hook passed them on.
+    if refusal.hands_the_call_on()
+        && let Ok(within) = ledger::handed(root, &call.tool_use_id)
+        && within >= ledger::BURST
+    {
+        let what = format!(
+            "{within} calls were handed on within a minute and none was judged since: no \
+             candidate of the walk judges, and the hook passes a Bash call on unjudged."
+        );
+        recorded =
+            recorded.and_then(|()| refusal_reading(root, call, UNJUDGED_RULE, Status::Fail, &what));
+    }
     // The refusal is the exit already; the outcome of recording it is not.
     if let Err(err) = recorded {
         eprintln!("xtask permit: the refusal to judge was not recorded: {err:#}");
     }
+}
+
+/// One reading of permit's own `rule` over the manifest, for `call`.
+fn refusal_reading(root: &Path, call: &Call, rule: &str, status: Status, what: &str) -> Result<()> {
+    let now = Snapshot::disk_over(root, Path::new(manifest::FILE))?;
+    let mut reading = Reading::stamped_over(INSTRUMENT, rule, &now, Path::new(manifest::FILE))?;
+    rule.clone_into(&mut reading.rule);
+    reading.status = status;
+    reading.message = format!("{} {}: {what}", call.tool_name, call.subject(root));
+    reading.session.clone_from(&call.session_id);
+    Store::of_workspace(root).record(&[reading])?;
+    Ok(())
 }
 
 #[cfg(test)]

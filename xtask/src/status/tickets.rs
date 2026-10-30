@@ -16,7 +16,7 @@ use crate::reading::{self, Reading, Store};
 use crate::ticket::{self, Closed};
 
 /// How far back the section counts, in days.
-const DAYS: i64 = 7;
+pub(super) const DAYS: i64 = 7;
 
 /// The closes of the window, counted.
 #[derive(Debug, Default, PartialEq, Eq)]

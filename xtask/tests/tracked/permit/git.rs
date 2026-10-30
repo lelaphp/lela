@@ -210,12 +210,13 @@ fn operation_refuses(
     judged.denial().is_some_and(|d| d.rule == "git.operation")
 }
 
-/// `git.merge-commits-itself` as #2751 ruled it: a merge that commits
-/// itself is refused in the main checkout and let through in a linked
+/// The placement #2751 ruled, which `git.main-ff-only` holds since
+/// `git.merge-commits-itself` moved to the merge worktree (#3622, #3639):
+/// a merge is refused in the main checkout and let through in a linked
 /// worktree, where a builder merges `main` into its branch; a neighbour
 /// in main does not place a merge `-C` runs in the worktree there.
 #[test]
-fn a_merge_that_commits_itself_is_refused_in_main_alone() {
+fn a_merge_is_refused_in_main_alone_and_a_builders_goes_through() {
     let manifest = Manifest::load(workspace()).unwrap();
     let main = checkout("merge-commits-itself", None);
     Repo::at(&main).git(&["worktree", "add", "-q", "-b", "own", "own"]);
@@ -225,10 +226,10 @@ fn a_merge_that_commits_itself_is_refused_in_main_alone() {
             .unwrap()
             .findings
             .iter()
-            .any(|f| f.rule == "git.merge-commits-itself" && f.kind == Kind::Deny)
+            .any(|f| f.rule.starts_with("git.m") && f.kind == Kind::Deny)
     };
     assert!(refused(main.path(), "git merge --no-ff t1234"));
-    assert!(!refused(main.path(), "git merge --no-ff --no-commit t1234"));
+    assert!(!refused(main.path(), "git merge --ff-only t1234"));
     assert!(!refused(&linked, "git merge main"));
     let apart = format!(
         "git -C {} merge --abort; git -C {} merge main",
@@ -238,37 +239,85 @@ fn a_merge_that_commits_itself_is_refused_in_main_alone() {
     assert!(!refused(main.path(), &apart));
 }
 
-/// The merge queue's rows (#3618 M2, #3622): `git.main-ff-only` as it
-/// reaches the manifest by `steer`, and `git.merge-commits-itself` moved
-/// to `where = "staging"` as proposed on #3622, the changed row a
-/// person's. Under both, main's checkout refuses every merge but a
+/// A denial names the checkout it judged (#3619): `git.operation`'s own
+/// fixture, a commit by pathspec where another hand's merge stands, is
+/// denied as judged in that checkout; the must-pass beside it, the same
+/// commit run in a quiet checkout the line `cd`s into, is let through
+/// though the shell starts where the merge stands.
+#[test]
+fn a_denial_names_the_checkout_it_judged_and_the_remedy() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let merging = operating("placed-merging");
+    let quiet = checkout("placed-quiet", None);
+    let commit = call(&fixtures().join("rules/git.operation/deny-commit.json"));
+    let judged = judge(&manifest, merging.path(), &commit).unwrap();
+    let denial = judged.denial().unwrap_or_else(|| panic!("{judged:?}"));
+    let top = merging.path().canonicalize().unwrap();
+    // The rule's remedy, then the checkout (#3618 ruling 3).
+    let remedy = manifest
+        .rules
+        .iter()
+        .find(|r| r.id == "git.operation")
+        .and_then(|r| r.remedy.clone());
+    let remedy = remedy.expect("git.operation carries its remedy");
+    assert!(
+        denial
+            .reason()
+            .contains(&format!("Instead: {remedy}. Judged in {}.", top.display())),
+        "{}",
+        denial.reason()
+    );
+    let line = format!(
+        "cd {} && git commit -q -F /var/empty/m -- a",
+        quiet.path().display()
+    );
+    let judged = judge(&manifest, merging.path(), &bash(&line)).unwrap();
+    assert!(judged.denial().is_none(), "{judged:?}");
+}
+
+/// A line permit cannot place says so and guesses no checkout (#3619):
+/// past `cd "$UNSET_BY_THE_LINE"` a commit is denied under
+/// `git.operation` where a merge stands in a checkout of the repository,
+/// naming the command and the change it lost the line at; the must-pass,
+/// the same line where no operation stands anywhere, is let through.
+#[test]
+fn a_line_permit_cannot_place_is_denied_saying_so_only_where_an_operation_stands() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let line = "cd \"$UNSET_BY_THE_LINE\" && git commit -q -F /var/empty/m -- a";
+    let merging = operating("unplaced-merging");
+    let judged = judge(&manifest, merging.path(), &bash(line)).unwrap();
+    let denial = judged.denial().unwrap_or_else(|| panic!("{judged:?}"));
+    assert_eq!(denial.rule, "git.operation");
+    let reason = denial.reason();
+    assert!(reason.contains("Not placed"), "{reason}");
+    assert!(
+        reason.contains("`git commit -q -F /var/empty/m -- a`"),
+        "{reason}"
+    );
+    assert!(reason.contains("$UNSET_BY_THE_LINE"), "{reason}");
+    assert!(!reason.contains("Judged in"), "{reason}");
+    let quiet = checkout("unplaced-quiet", None);
+    let judged = judge(&manifest, quiet.path(), &bash(line)).unwrap();
+    assert!(judged.denial().is_none(), "{judged:?}");
+}
+
+/// The merge queue's rows (#3618 M2, #3622) as tracked:
+/// `git.main-ff-only`, and `git.merge-commits-itself` on `where =
+/// "staging"` as #3639 ruled. Main's checkout refuses every merge but a
 /// fast-forward or the end of one, and the merge worktree refuses a merge
 /// that commits itself and lets one through that leaves its commit to
 /// `git commit`. Each fixture of `git.main-ff-only` holds in main, and
-/// each of `git.merge-commits-itself` in the merge worktree but
-/// `deny-after-cd.json`, whose `cd` is into main's checkout, where the
-/// merge is `git.main-ff-only`'s.
+/// each of `git.merge-commits-itself` in the merge worktree, its
+/// `deny-after-cd.json` a `cd` into it.
 #[test]
-fn a_merge_is_refused_in_main_but_a_fast_forward_and_in_the_merge_worktree_under_the_proposed_row()
-{
-    let mut proposed = Manifest::load(workspace()).unwrap();
-    let itself = proposed
-        .rules
-        .iter_mut()
-        .find(|r| r.id == "git.merge-commits-itself")
-        .unwrap();
-    itself.within = Where::Staging;
-    let mut ff_only = itself.clone();
-    if proposed.rule("git.main-ff-only").is_none() {
-        ff_only.id = "git.main-ff-only".to_owned();
-        ff_only.within = Where::Main;
-        ff_only.predicate.unless_pattern =
-            Some(r"\s--(ff-only|abort|continue|quit|help)\b|\s-h\b".to_owned());
-        proposed.rules.push(ff_only);
-    }
+fn a_merge_is_refused_in_main_but_a_fast_forward_and_in_the_merge_worktree() {
+    let tracked = Manifest::load(workspace()).unwrap();
+    let within = |id: &str| tracked.rule(id).map(|r| r.within);
+    assert_eq!(within("git.merge-commits-itself"), Some(Where::Staging));
+    assert_eq!(within("git.main-ff-only"), Some(Where::Main));
     let (main, merge) = staging("merge-queue");
     let fired = |root: &Path, call: &Call, rule: &str| {
-        judge(&proposed, root, call)
+        judge(&tracked, root, call)
             .unwrap()
             .findings
             .iter()
@@ -310,7 +359,8 @@ fn a_merge_is_refused_in_main_but_a_fast_forward_and_in_the_merge_worktree_under
         let mut names: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|n| n != "deny-after-cd.json" || rule == "git.main-ff-only")
+            // A rule's replay corpus is the replay's to judge ([`super::replay`]).
+            .filter(|n| Path::new(n).extension().is_some_and(|e| e == "json"))
             .collect();
         names.sort();
         assert!(names.len() >= 5, "{rule}: {names:?}");

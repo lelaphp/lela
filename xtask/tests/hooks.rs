@@ -1384,7 +1384,13 @@ fn a_push_of_main_that_fast_forwards_a_revision_still_cited_as_next_is_refused()
     scratch.git(&["commit", "-q", "-m", "the work of #9"], false);
     let (code, out) = scratch.run(&["push", "-q", "origin", "t9"], true);
     assert_eq!(code, 0, "another branch is not read: {out}");
-    assert_eq!(scratch.calls("cargo"), ["xtask done", "xtask done"]);
+    assert_eq!(
+        scratch.calls("cargo"),
+        [
+            "xtask done --caller pre-push",
+            "xtask done --caller pre-push"
+        ]
+    );
 
     scratch.git(&["checkout", "-q", "main"], false);
     scratch.git(&["merge", "-q", "--ff-only", "t9"], false);
@@ -1493,7 +1499,7 @@ fn pre_push_hands_done_the_remote_sha_and_no_base_for_a_ref_the_remote_lacks() {
 
     let (code, out) = scratch.run(&["push", "-q", "origin", &branch], true);
     assert_eq!(code, 0, "{out}");
-    assert_eq!(scratch.calls("cargo"), ["xtask done"]);
+    assert_eq!(scratch.calls("cargo"), ["xtask done --caller pre-push"]);
 
     scratch.git(&["commit", "-q", "--allow-empty", "-m", "one more"], false);
     let second = scratch.head();
@@ -1502,8 +1508,8 @@ fn pre_push_hands_done_the_remote_sha_and_no_base_for_a_ref_the_remote_lacks() {
     assert_eq!(
         scratch.calls("cargo"),
         [
-            "xtask done".to_owned(),
-            format!("xtask done --base {first}")
+            "xtask done --caller pre-push".to_owned(),
+            format!("xtask done --caller pre-push --base {first}")
         ]
     );
 
@@ -1513,7 +1519,7 @@ fn pre_push_hands_done_the_remote_sha_and_no_base_for_a_ref_the_remote_lacks() {
     assert_ne!(code, 0, "{out}");
     assert_eq!(
         scratch.calls("cargo").last().unwrap(),
-        &format!("xtask done --base {second}")
+        &format!("xtask done --caller pre-push --base {second}")
     );
     let held = scratch.git(&["rev-parse", &format!("origin/{branch}")], false);
     assert_eq!(held.trim(), second, "the push was refused");

@@ -24,6 +24,18 @@ pub struct Owed {
     pub crates: OneOrMany,
     /// What else must hold of a crate, derived in code.
     pub when: Option<When>,
+    /// Where the row is held, where it is not every checkout's to meet
+    /// (#3618 ruling 2).
+    pub held_at: Option<HeldAt>,
+}
+
+/// Where an `[[owed]]` row is held apart from every checkout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HeldAt {
+    /// The merge check owns the row: `done` in a ticketed checkout renders
+    /// it as delegated, and holds it in main's.
+    Merge,
 }
 
 /// An instrument that writes a reading at a crate's scope, which `done`

@@ -68,15 +68,15 @@ fn permits_marks_this_session_and_the_session_block_carries_it() {
     let md = status(&root, &["--section", "permits", "--session-id", this]).ok();
     let row = md.lines().find(|l| l.contains("harness.self")).unwrap();
     assert!(
-        row.contains("| 3 | 0 | 1 |"),
-        "total, the calls handed on, then this session: {row}"
+        row.contains("| 3 | 0 | 0 | 0 | 1 |"),
+        "total, the calls judged, at pre-commit, handed on, then this session: {row}"
     );
     let row = md.lines().find(|l| l.contains("ext.no-locks")).unwrap();
-    assert!(row.contains("| 0 | 0 | 0 |"), "{row}");
+    assert!(row.contains("| 0 | 0 | 0 | 0 | 0 |"), "{row}");
     let md = status(&root, &["--section", "permits"]).stdout;
     let row = md.lines().find(|l| l.contains("harness.self")).unwrap();
     assert!(
-        row.contains("| 3 | 0 |  |"),
+        row.contains("| 3 | 0 | 0 | 0 |  |"),
         "no session named, no count: {row}"
     );
 
@@ -166,7 +166,7 @@ fn the_sessions_cell_of_permits_does_not_grow_as_sessions_are_added() {
     };
     let cell = |md: &str| {
         let row = md.lines().find(|l| l.contains("| harness.self |")).unwrap();
-        row.split(" | ").nth(7).unwrap().to_owned()
+        row.split(" | ").nth(9).unwrap().to_owned()
     };
     for n in 1..=5 {
         deny(n);

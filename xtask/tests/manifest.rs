@@ -42,6 +42,26 @@ fn a_manifest_with_no_oracle_row_loads_and_phpt_refuses_naming_the_pin() {
     );
 }
 
+/// A rule judged at a call carries what to do instead (#3618 ruling 3,
+/// #3627): `fixtures/manifest/tool-rule-without-remedy.toml`, a `tool`
+/// rule with no `remedy`, is refused naming the rule, as is one whose
+/// remedy is blank; the must-pass, the same row with a remedy, parses.
+#[test]
+fn a_rule_with_a_tool_and_no_remedy_is_refused_by_name() {
+    let path = xtask::package_dir().join("fixtures/manifest/tool-rule-without-remedy.toml");
+    let text = std::fs::read_to_string(path).unwrap();
+    let err = format!("{:#}", Manifest::parse(&text).unwrap_err());
+    assert!(
+        err.contains("rule \"git.no-amend\" has a `tool` and no `remedy`"),
+        "{err}"
+    );
+    let blank = format!("{text}remedy = \" \"\n");
+    assert!(Manifest::parse(&blank).is_err());
+    let held = format!("{text}remedy = \"`git commit -F <file> -- <paths>` with a new commit\"\n");
+    let parsed = Manifest::parse(&held).unwrap();
+    assert!(parsed.rule("git.no-amend").unwrap().remedy.is_some());
+}
+
 /// `[budget] scripts` is one row, the ceiling and the generators it leaves
 /// out, read as the file writes it and absent when the file has none; the
 /// constructor a test builds it by is the row the file would parse (#34).
@@ -157,7 +177,7 @@ fn a_key_outside_the_grammar_is_refused_by_name() {
 fn runs_qualifies_a_bash_rule_alone() {
     let rule = |tool: &str| {
         format!(
-            "{MINIMAL}\n[[rule]]\nid = \"x.wait\"\ntool = \"{tool}\"\nruns = \"foreground\"\ndeny_pattern = 'sleep'\ntext = \"x\"\n"
+            "{MINIMAL}\n[[rule]]\nid = \"x.wait\"\ntool = \"{tool}\"\nruns = \"foreground\"\ndeny_pattern = 'sleep'\ntext = \"x\"\nremedy = \"r\"\n"
         )
     };
     let err = Manifest::parse(&rule("Edit")).unwrap_err().to_string();
@@ -237,7 +257,7 @@ fn a_deny_argv_element_of_no_known_shape_is_refused() {
 fn an_unless_argv_excuse_names_a_denied_element_and_one_with_phrase() {
     let row = |excuse: &str| {
         format!(
-            "{MINIMAL}\n[[rule]]\nid = \"x.lane\"\ntool = \"Bash\"\ndeny_argv = [\"--full\", \"--jit\"]\nunless_argv = {{ {excuse} }}\nwith = [\"xtask phpt\", \"xtask bench\"]\ntext = \"t\"\n"
+            "{MINIMAL}\n[[rule]]\nid = \"x.lane\"\ntool = \"Bash\"\ndeny_argv = [\"--full\", \"--jit\"]\nunless_argv = {{ {excuse} }}\nwith = [\"xtask phpt\", \"xtask bench\"]\ntext = \"t\"\nremedy = \"r\"\n"
         )
     };
     let parsed = Manifest::parse(&row(r#""--jit" = "xtask phpt --subset""#)).unwrap();

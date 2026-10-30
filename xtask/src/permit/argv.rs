@@ -1230,8 +1230,10 @@ impl Argv {
     /// after it a name for the tree rather than for files (`.`, `:/`, a
     /// `*` the shell left unexpanded). The separator is `--` for git, after
     /// which every word is a path, so `git add -A -- src` is bounded to
-    /// `src` and passes; an option separator may carry its value after
-    /// `=`, `--subset=ext/pcre`. A command that asks for its help (`-h`,
+    /// `src` and passes; an option separator bounds the one value it
+    /// takes, after `=` or as its next word, `--subset=ext/pcre`, so a
+    /// substitution further along the command, `--against $(git
+    /// merge-base HEAD main)`, is no path of it (#3619). A command that asks for its help (`-h`,
     /// `--help` among its options) runs nothing and is never unbounded.
     pub(super) fn unbounded(&self, separator: &str, with: &OneOrMany) -> bool {
         self.invocations(with).any(|invocation| {
@@ -1251,9 +1253,11 @@ impl Argv {
             else {
                 return true;
             };
+            let values = if separator == "--" { usize::MAX } else { 1 };
             let paths: Vec<String> = joined(&own[at])
                 .into_iter()
-                .chain(own[at + 1..].iter().cloned())
+                .chain(own[at + 1..].iter().take(values).cloned())
+                .take(values)
                 .collect();
             paths.is_empty() || paths.iter().any(|p| names_the_tree(p))
         })

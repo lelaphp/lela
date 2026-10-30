@@ -5,5 +5,6 @@ mod exempt;
 mod git;
 mod harness_files;
 mod lanes;
+mod replay;
 mod rule_fixtures;
 mod sources;

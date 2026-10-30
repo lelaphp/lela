@@ -423,6 +423,8 @@ fn every_bash_rule_holds_to_each_of_its_fixtures() {
         names.sort();
         for name in names
             .iter()
+            // A rule's replay corpus is the replay's to judge ([`super::replay`]).
+            .filter(|n| Path::new(n).extension().is_some_and(|e| e == "json"))
             .filter(|n| !n.starts_with("replay-") && !unpasted(rule, n))
         {
             let root = match rule.within {

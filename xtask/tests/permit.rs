@@ -79,6 +79,7 @@ deny_argv = ["--full", "--jit"]
 unless_argv = { "--jit" = "xtask phpt --subset" }   # grammar: unless_argv, a denied element let through where the phrase runs bounded by the option, as require_argv reads one: the tier's one-subset reading (#3052, #3068)
 with = ["xtask phpt", "xtask bench"]   # xtask however it is run: the cargo alias, cargo run -p xtask, a path, a variable the line assigns (#1860)
 text = "Nightly lanes run in CI only; run the per-crate subset, and the tier's `--jit` lane on one subset named by `--subset` (#3052)."
+remedy = "`cargo xtask phpt --subset <crate>`, with `--jit` on one subset"
 "#;
 
 /// The `git.no-verify` row #1001 proposes: `with` names git's `commit` and
@@ -244,6 +245,7 @@ tool = ["Edit", "Write"]
 scope = "only-here/**"
 deny = true
 text = "A file under only-here/ is refused by the worktree's manifest alone."
+remedy = "write it in your own worktree"
 "#
                 .parse::<toml::Table>()
                 .unwrap(),
@@ -315,9 +317,8 @@ text = "A file under only-here/ is refused by the worktree's manifest alone."
 
 /// A hand-off that does not run decides nothing, and nothing is allowed on
 /// its silence (#1047): the worktree here has no build to hand the call
-/// to, so the checkout's build exits without judging, as it did before
-/// there was a hand-off, and the call reaches the end of the hook's walk
-/// unjudged. Every candidate of that walk hands the call to the same
+/// to, so the call is unjudged, and the checkout's build denies it in its
+/// own words (#3619). Every candidate of that walk hands the call to the same
 /// worktree, so it is the failure no rebuild repairs, in the worktree's
 /// store, naming the worktree's manifest.
 #[test]
@@ -336,14 +337,15 @@ fn a_hand_off_that_does_not_run_leaves_the_call_unjudged() {
         &serde_json::json!({"file_path": beside.join("README.md").to_str().unwrap(),
             "content": "one\n"}),
     );
-    let ran = permit(&root, &stdin, &[]);
-    assert_ne!(ran.code(), 0, "the call was not judged: {ran}");
-    let out = ran.stdout;
-    let err = ran.stderr;
-    assert!(out.trim().is_empty(), "and nothing was decided: {out}");
+    // No rebuild judges it either, so the build says so in its own
+    // decision and exits 0, the walk ending here (#3619): a write no
+    // judge saw is denied, naming the error's first line.
+    let out = permit(&root, &stdin, &[]).ok();
+    assert!(out.contains("\"deny\""), "{out}");
+    assert!(out.contains("permit could not judge this call"), "{out}");
     assert!(
-        err.contains(&beside.join("seams.toml").display().to_string()),
-        "{err}"
+        out.contains(&beside.join("seams.toml").display().to_string()),
+        "{out}"
     );
     let reading = Store::of_workspace(&beside)
         .read("permit", "permit.unjudged-call")
@@ -830,11 +832,14 @@ fn diff_judges_the_staged_files_and_refuses_a_denied_one_with_the_rule_id() {
         "the rule id is printed: {out}"
     );
     assert!(out.contains("ext/pcre/src/cache.rs"), "{out}");
+    // Recorded under pre-commit's own caller, never as an agent's call
+    // (#3619).
     let reading = Store::of_workspace(&root)
-        .read("permit", "ext.no-locks")
+        .read("permit", "pre-commit/ext.no-locks")
         .unwrap()
         .expect("the denial was recorded");
     assert_eq!(reading.status, Status::Fail);
+    assert_eq!(reading.session, "pre-commit");
     assert!(
         reading.message.starts_with("Write ext/pcre/src/cache.rs"),
         "{}",
@@ -1356,11 +1361,148 @@ fn the_refusal_that_hands_the_call_on_is_a_skip_that_names_the_next_candidate() 
     );
 }
 
+/// The permits section of the scratch at `root`, as JSON, and the row of
+/// `rule` in it.
+fn permits_row(root: &Path, rule: &str) -> serde_json::Value {
+    let json = Run::at(root)
+        .args(["status", "--section", "permits", "--format", "json"])
+        .go()
+        .ok();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    value["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["rule"] == rule)
+        .unwrap_or_else(|| panic!("no row for {rule}:\n{json}"))
+        .clone()
+}
+
+/// The denominator (#3619): each call a rule judged is counted, whether or
+/// not it found, so a rule's deny rate is a reading. A call the rule's tool
+/// does not name is not one it judged.
+#[test]
+fn permit_counts_the_calls_each_rule_judged_beside_its_denials() {
+    let root = scratch("judged-count");
+    let call = |command: &str| {
+        serde_json::json!({"session_id": "s", "tool_name": "Bash", "cwd": root.to_str().unwrap(),
+            "tool_input": {"command": command}})
+        .to_string()
+    };
+    permit(&root, &call("git status"), &[]).ok();
+    permit(&root, &call("git commit --no-verify -m x"), &[]).ok();
+    let write = serde_json::json!({"session_id": "s", "tool_name": "Write",
+        "tool_input": {"file_path": root.join("a.txt").to_str().unwrap(), "content": "a\n"}});
+    permit(&root, &write.to_string(), &[]).ok();
+    let row = permits_row(&root, "git.no-verify");
+    assert_eq!(row["judged"], 2, "{row}");
+    assert_eq!(row["denials"], 1, "{row}");
+}
+
+/// A run of calls handed on with none judged is the walk failing open
+/// (#3619): the hook passes a Bash call on when no candidate judges it, so
+/// the third such call within a minute writes a failing reading; a call
+/// judged between them ends the run, and nothing fails.
+#[test]
+fn a_burst_of_calls_handed_on_writes_a_failing_reading_and_a_judged_call_ends_it() {
+    let stale = scratch_with_a_stale_manifest("burst");
+    let call = |id: &str| {
+        serde_json::json!({"session_id": "s", "tool_use_id": id, "tool_name": "Bash",
+            "tool_input": {"command": "git status"}})
+        .to_string()
+    };
+    for id in ["a", "b"] {
+        assert_ne!(permit(&stale, &call(id), &[]).code(), 0);
+    }
+    let unjudged = |root: &Path| {
+        Store::of_workspace(root)
+            .read("permit", "permit.unjudged-call")
+            .unwrap()
+    };
+    assert!(unjudged(&stale).is_none(), "two calls are not a burst");
+    permit(&stale, &call("c"), &[]);
+    let reading = unjudged(&stale).expect("the third is");
+    assert_eq!(reading.status, Status::Fail);
+    assert!(
+        reading.message.contains("none was judged"),
+        "{}",
+        reading.message
+    );
+
+    let quiet = scratch("burst-ended");
+    let fresh = std::fs::read_to_string(quiet.join("seams.toml")).unwrap();
+    for (i, id) in ["a", "b", "c", "d"].into_iter().enumerate() {
+        let manifest = if i == 2 {
+            fresh.clone()
+        } else {
+            stale_manifest()
+        };
+        std::fs::write(quiet.join("seams.toml"), manifest).unwrap();
+        permit(&quiet, &call(id), &[]);
+    }
+    assert!(unjudged(&quiet).is_none(), "a judged call ends the run");
+}
+
+/// A pin that parses but does not validate narrows the harness and does
+/// not blind it (#3618 ruling 4): a variant made against a closure the pin
+/// has moved past is a defect, so the pin refuses whoever asks for it,
+/// while permit judges by what loaded and notes the defect, `done` notes
+/// it and the session's facts list it.
+#[test]
+fn a_pin_that_does_not_validate_refuses_only_what_reads_it() {
+    let root = scratch("pin-defect");
+    let pin = std::fs::read_to_string(root.join("oracle.toml")).unwrap();
+    let named = regex_lite::Regex::new(r#"closure = "sha256:[0-9a-f]{64}""#).unwrap();
+    assert!(
+        named.is_match(&pin),
+        "the tracked pin names a macOS build's closure"
+    );
+    let moved = format!("closure = \"sha256:{}\"", "0".repeat(64));
+    std::fs::write(
+        root.join("oracle.toml"),
+        named.replace(&pin, moved.as_str()).as_ref(),
+    )
+    .unwrap();
+
+    let manifest = Manifest::load(&root).expect("the manifest loads");
+    let said = "oracle.toml parses but does not validate: [variant.";
+    assert!(
+        manifest
+            .defects()
+            .iter()
+            .any(|d| d.to_string().starts_with(said)),
+        "{:?}",
+        manifest.defects()
+    );
+    let refused = format!("{:#}", manifest.pin().unwrap_err());
+    assert!(refused.contains("predates the closure"), "{refused}");
+
+    let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let out = permit(&root, &stdin, &[]).ok();
+    assert!(
+        out.contains("harness.self") && out.contains(said),
+        "judged, with the note: {out}"
+    );
+    let bash = serde_json::json!({"session_id": "s", "tool_name": "Bash", "tool_input": {"command": "git status"}});
+    let out = permit(&root, &bash.to_string(), &[]).ok();
+    assert!(!out.contains("\"deny\"") && out.contains(said), "{out}");
+
+    let done = Run::at(&root).args(["done", "--base", "HEAD"]).go().stdout;
+    assert!(done.contains(said), "{done}");
+    std::fs::write(root.join("AGENTS.md"), "# map\n").unwrap();
+    let facts = Run::at(&root).args(["status", "--session"]).go().ok();
+    assert!(
+        facts.contains("## defects") && facts.contains(said),
+        "{facts}"
+    );
+}
+
 /// The outage of #16 was the loud staleness: a manifest no build reads at
 /// all. It exited without judging, which the fallback walks, and every
 /// candidate walked to did the same, so the call proceeded unjudged and
 /// `status --section permits` said the judge was up for the hour it was
-/// down. That one stays a failure, since no rebuild repairs it (#118). The
+/// down. That one stays a failure, since no rebuild repairs it (#118), and
+/// the build decides it in its own words (#3619). The
 /// manifest here is a fixture workspace's, the one place a build standing
 /// over the checkout it was compiled against still meets rules it cannot
 /// read (#57).
@@ -1383,16 +1525,23 @@ fn a_manifest_no_candidate_can_read_is_a_failure_the_build_records() {
         }
     })
     .to_string();
-    let ran = permit(&root, &stdin, &[]);
-    assert_ne!(
-        ran.code(),
-        0,
-        "the build that cannot judge exits non-zero: {ran}"
+    // The write is denied in permit's own words, with the error's first
+    // line, and the exit is 0: only a stale build exits non-zero, so the
+    // walk ends here and the call is recorded once (#3619).
+    let out = permit(&root, &stdin, &[]).ok();
+    assert!(out.contains("\"deny\""), "{out}");
+    assert!(out.contains("seams.toml"), "{out}");
+    // A shell stands in a workspace of its own only where it has a `.git`.
+    std::fs::create_dir(nested.join(".git")).unwrap();
+    let bash = serde_json::json!({"session_id": "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11",
+        "tool_name": "Bash", "cwd": nested.to_str().unwrap(), "tool_input": {"command": "true"}})
+    .to_string();
+    let out = permit(&root, &bash, &[]).ok();
+    assert!(
+        !out.contains("\"deny\""),
+        "a Bash call passes, with the note: {out}"
     );
-    let out = ran.stdout;
-    let err = ran.stderr;
-    assert!(out.trim().is_empty(), "and decides nothing: {out}");
-    assert!(err.contains("seams.toml"), "{err}");
+    assert!(out.contains("permit could not judge this call"), "{out}");
     let reading = Store::of_workspace(&root)
         .read("permit", "permit.unjudged-call")
         .unwrap()

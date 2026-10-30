@@ -133,9 +133,29 @@ fn judge_since(root: &Path, base: Option<&str>) -> Verdict {
     .unwrap()
 }
 
-/// `done --hook` over `root` with `event` on stdin, as the Stop hook runs it.
+/// `done --hook` over `root` with `event` on stdin, as the Stop hook runs
+/// it, the stopping session and agent having written in `root` as permit
+/// records it (#3619).
 fn hook(root: &Path, event: &str) -> Ran {
+    if let Ok(stop) = serde_json::from_str::<serde_json::Value>(event) {
+        let session = stop["session_id"].as_str().unwrap_or_default();
+        wrote_in(root, root, session, stop["agent_id"].as_str());
+    }
+    stop_hook(root, event)
+}
+
+/// `done --hook` over `root` with `event` on stdin, and nothing recorded.
+fn stop_hook(root: &Path, event: &str) -> Ran {
     Run::at(root).args(["done", "--hook"]).stdin(event).go()
+}
+
+/// A writing call of `agent` of `session` in `checkout`, admitted by the
+/// permit of `root`, which records where it wrote.
+fn wrote_in(root: &Path, checkout: &Path, session: &str, agent: Option<&str>) {
+    let call = serde_json::json!({"session_id": session, "agent_id": agent, "tool_name": "Bash",
+        "cwd": checkout.to_str().unwrap(), "tool_input": {"command": "touch written"}});
+    // A build that cannot judge records nothing, as the hook's would not.
+    Run::at(root).args(["permit"]).stdin(call.to_string()).go();
 }
 
 /// A passing reading of `instrument` over `scope`, stamped through the
@@ -524,6 +544,42 @@ fn on_a_ticket_branch(name: &str) -> (Tree, String) {
     Repo::at(&root).commit("main's own change");
     Repo::at(&root).git(&["checkout", "-q", "t9"]);
     (root, cut)
+}
+
+/// A row held at the merge (#3618 ruling 2) is the merge check's: a
+/// ticketed checkout renders it as delegated, and main's holds it.
+#[test]
+fn a_row_held_at_the_merge_is_delegated_in_a_ticketed_checkout_and_held_in_mains() {
+    let root = scratch("held-at-merge");
+    let text = std::fs::read_to_string(root.join("seams.toml")).unwrap();
+    let row = "instrument = \"crosscheck\"\n";
+    assert!(text.contains(row));
+    let held = text.replace(row, &format!("{row}held_at = \"merge\"\n"));
+    std::fs::write(root.join("seams.toml"), held).unwrap();
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let crosscheck =
+        |verdict: &Verdict| verdict.unmet.iter().any(|u| u.starts_with("crosscheck: "));
+
+    let on_main = judge(&root);
+    assert!(crosscheck(&on_main), "{on_main:#?}");
+    assert!(on_main.delegated.is_empty(), "{on_main:#?}");
+
+    Repo::at(&root).git(&["checkout", "-q", "-b", "t9"]);
+    Repo::at(&root).git(&["config", "branch.t9.ticket", "9"]);
+    let ticketed = judge(&root);
+    assert!(!crosscheck(&ticketed), "{ticketed:#?}");
+    assert!(
+        ticketed
+            .delegated
+            .iter()
+            .any(|d| d == "crosscheck for ext/pcre"),
+        "{ticketed:#?}"
+    );
+    assert!(
+        ticketed
+            .render()
+            .contains("delegated to the merge check:\n- crosscheck for ext/pcre")
+    );
 }
 
 /// A bare `done` measures since the merge base with `main` (ADR-0009,
@@ -984,7 +1040,8 @@ fn changing_the_oracles_md5_a_closure_keg_or_a_recipe_ini_stales_every_run() {
     after_the_pin_moves("oracle-md5", oracle, true);
     let keg = |text: &str| {
         let moved = text.replacen("\nzstd = \"", "\nzstd = \"0", 1);
-        let refused = xtask::oracle::Pin::parse(&moved).unwrap_err().to_string();
+        let parsed = xtask::oracle::Pin::parse(&moved).unwrap();
+        let refused = parsed.defects().first().unwrap().clone();
         let (_, at) = refused.split_once("made against the closure ").unwrap();
         let (was, at) = at.split_once(", and the pin's [closure] is ").unwrap();
         moved.replace(was, at.split(',').next().unwrap())
@@ -1423,6 +1480,136 @@ fn the_hook_prints_nothing_when_done_is_met() {
     assert_eq!(out, "");
 }
 
+/// The Stop holds what the session wrote and nothing else (#3618 ruling
+/// 1): a change in the checkout that no call of the stopping session wrote
+/// passes it, whoever made the change.
+#[test]
+fn a_session_that_wrote_in_no_checkout_passes_the_stop() {
+    let root = scratch("hook-wrote-nothing");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let stop = "{\"session_id\":\"quiet\",\"stop_hook_active\":false}";
+    assert_eq!(
+        stop_hook(&root, stop).ok(),
+        "",
+        "the change is not this session's"
+    );
+    let reading = Store::of_workspace(&root)
+        .read("done", "workspace")
+        .unwrap()
+        .unwrap();
+    assert!(
+        reading
+            .message
+            .starts_with("stop: 0 unmet over the 0 checkouts"),
+        "{}",
+        reading.message
+    );
+
+    let out = hook(&root, stop).ok();
+    assert!(
+        out.contains("no reading for ext/pcre"),
+        "once it wrote there: {out}"
+    );
+}
+
+/// A subagent's writes are its own (#3619): they hold its own Stop and
+/// never its parent's, whose Stop with no write of its own passes.
+#[test]
+fn a_subagents_writes_hold_its_own_stop_and_not_its_parents() {
+    let root = scratch("hook-subagent");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    wrote_in(&root, &root, "s", Some("builder"));
+    let parent = "{\"session_id\":\"s\",\"hook_event_name\":\"Stop\"}";
+    assert_eq!(
+        stop_hook(&root, parent).ok(),
+        "",
+        "the parent wrote nothing"
+    );
+    let own =
+        "{\"session_id\":\"s\",\"agent_id\":\"builder\",\"hook_event_name\":\"SubagentStop\"}";
+    let out = stop_hook(&root, own).ok();
+    assert!(out.contains("no reading for ext/pcre"), "{out}");
+    let reading = Store::of_workspace(&root)
+        .read("done", "workspace")
+        .unwrap()
+        .unwrap();
+    assert!(
+        reading.message.starts_with("subagent-stop: "),
+        "{}",
+        reading.message
+    );
+}
+
+/// A checkout the session wrote in other than the one the hook stands in
+/// is judged by that checkout's own build, and a checkout with none that
+/// judges holds the turn naming it, never a silent pass (#3619).
+#[test]
+fn a_checkout_written_elsewhere_is_handed_to_its_own_build() {
+    let root = scratch("hook-elsewhere");
+    let tree = Tree::new("done-hook-elsewhere").unwrap();
+    let other = tree.join("t1");
+    Repo::at(&root).git(&["worktree", "add", "-q", "-b", "t1", other.to_str().unwrap()]);
+    wrote_in(&root, &other, "s", None);
+    // A directory in no checkout of the repository is none the Stop holds.
+    wrote_in(&root, tree.path(), "s", None);
+    let out = stop_hook(&root, "{\"session_id\":\"s\"}").ok();
+    let other = other.canonicalize().unwrap();
+    assert!(
+        out.contains(&format!("done could not judge {}", other.display())),
+        "{out}"
+    );
+}
+
+/// The second Stop releases a held turn and records that it did, with the
+/// count the block had (#3618 M4).
+#[test]
+fn a_block_the_second_stop_released_is_a_reading_with_its_count() {
+    let root = scratch("hook-released");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let stop = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
+    assert!(hook(&root, &stop).ok().contains("block"));
+    let store = Store::of_workspace(&root);
+    let held = store.read("done", "workspace").unwrap().unwrap();
+    let active = std::fs::read_to_string(fixtures().join("hooks/stop-active.json")).unwrap();
+    assert_eq!(stop_hook(&root, &active).ok(), "");
+    let release = store
+        .history("done")
+        .unwrap()
+        .readings
+        .into_iter()
+        .rfind(|r| r.scope == "released");
+    let release = release.expect("the release was recorded");
+    assert_eq!(release.status, Status::Fail);
+    assert_eq!(release.numbers["unmet"], held.numbers["unmet"]);
+    assert!(
+        release
+            .message
+            .starts_with("stop: the second Stop released"),
+        "{}",
+        release.message
+    );
+}
+
+/// Each reading names its caller (#3619): pre-push says so on the command
+/// line, and a run that names none is a hand's outside CI.
+#[test]
+fn a_done_reading_carries_its_caller() {
+    let root = scratch("caller");
+    let store = Store::of_workspace(&root);
+    xtask(&root, &["done", "--base", "HEAD", "--caller", "pre-push"]).ok();
+    let reading = store.read("done", "workspace").unwrap().unwrap();
+    assert!(
+        reading.message.starts_with("pre-push: "),
+        "{}",
+        reading.message
+    );
+    if std::env::var_os("GITHUB_ACTIONS").is_none() {
+        xtask(&root, &["done", "--base", "HEAD"]).ok();
+        let reading = store.read("done", "workspace").unwrap().unwrap();
+        assert!(reading.message.starts_with("hand: "), "{}", reading.message);
+    }
+}
+
 // ---------------------------------------------------------------- the reading
 
 #[test]
@@ -1438,7 +1625,7 @@ fn every_verdict_is_one_reading_of_done_over_the_workspace() {
     assert_eq!(reading.numbers["crates"], 1.into());
     assert_eq!(reading.numbers["changed"], 1.into());
     assert!(
-        reading.message.starts_with("9 unmet since "),
+        reading.message.contains(": 9 unmet since "),
         "{}",
         reading.message
     );

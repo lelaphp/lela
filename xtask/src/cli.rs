@@ -142,6 +142,11 @@ pub(crate) enum Command {
         /// An `[[owed]]` row names it, or the run is refused.
         #[arg(long = "not-run", value_name = "INSTRUMENT", conflicts_with = "hook")]
         not_run: Vec<String>,
+        /// Who asks, which the reading carries (#3619); CI where
+        /// `GITHUB_ACTIONS` is set, a hand otherwise. The hook's is the
+        /// event it came in on.
+        #[arg(long, value_enum, conflicts_with = "hook")]
+        caller: Option<crate::done::Caller>,
     },
     /// Say the branch, the commit it was taken off main at, the store
     /// and the branch's ticket; as text or as one object. Writes no
@@ -934,8 +939,13 @@ pub enum Section {
     /// The last 7 days of `ticket` readings in the main worktree's store
     /// and this checkout's: the closes, the successors they opened, the
     /// withdrawals among them and the successors opened per close, in
-    /// one line (#1157).
+    /// one line (#1157); and the tracker's week beside it, tickets created
+    /// against closed and how many are open (#3619).
     Tickets,
+    /// Whether CI runs and passes on `main`: the last run that executed a
+    /// job and the last that passed, from GitHub, unknown where it cannot
+    /// be asked (#3619).
+    Ci,
     /// The last run of `xtask track work`: one row per ticket it worked,
     /// with the outcome, what its session spent and the commit its branch
     /// is at, and the run's own row last with the usd total.

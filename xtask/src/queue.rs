@@ -142,7 +142,7 @@ impl Passed {
             &Manifest::load(merge)?,
             &Registry::load(merge)?,
             &Store::of_workspace(merge),
-            Some(tip),
+            (Some(tip), done::Caller::ambient()),
             &[],
         )
         .with_context(|| {

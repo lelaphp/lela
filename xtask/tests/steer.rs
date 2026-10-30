@@ -45,7 +45,7 @@ fn naming(files: &[&str]) -> Manifest {
         .collect::<Vec<_>>()
         .join(", ");
     Manifest::parse(&format!(
-        "[oracle]\npin = \"oracle.toml\"\n[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\nclean_build_release_s = 1\napi_items = 1\nbindings = 1\n[[rule]]\nid = \"harness.self\"\ntool = [\"Edit\", \"Write\"]\nscope = [{scope}]\ndeny = true\ntext = \"harness.self\"\n"
+        "[oracle]\npin = \"oracle.toml\"\n[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\nclean_build_release_s = 1\napi_items = 1\nbindings = 1\n[[rule]]\nid = \"harness.self\"\ntool = [\"Edit\", \"Write\"]\nscope = [{scope}]\ndeny = true\ntext = \"harness.self\"\nremedy = \"steer\"\n"
     ))
     .expect("the manifest")
 }

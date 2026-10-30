@@ -8,7 +8,7 @@ use std::path::Path;
 
 use super::REGION_RULE;
 use super::call::Call;
-use super::rules::{Finding, Kind};
+use super::rules::{Finding, Kind, Placement};
 
 const REGION_TEXT: &str = "The body of a computed region is rendered by `computed run`, not edited; change the command or its inputs, or the prose around the region (computed ADR 0005).";
 
@@ -95,6 +95,8 @@ pub(super) fn region_body(root: &Path, path: &Path, call: &Call) -> Option<Findi
         text: REGION_TEXT.to_owned(),
         adr: Vec::new(),
         admission: None,
+        placement: Some(Placement::In(root.to_path_buf())),
+        remedy: None,
     })
 }
 

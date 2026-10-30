@@ -59,7 +59,7 @@ use crate::crosscheck;
 use crate::divergence::{self, Registry};
 use crate::git::{self, Change};
 use crate::key::{self, Snapshot};
-use crate::manifest::{Crate, Manifest, Owed, When};
+use crate::manifest::{Crate, HeldAt, Manifest, Owed, When};
 use crate::permit;
 use crate::phpt;
 use crate::phpt::against::{self, Against};
@@ -173,6 +173,10 @@ pub struct Verdict {
     /// The instruments the caller said this run did not take (`--not-run`),
     /// whose missing readings are notes and not unmet (#2477).
     pub not_run: Vec<String>,
+    /// The readings a ticketed checkout leaves to the merge check, each
+    /// `<instrument> for <scope>`: its `[[owed]]` row is held at the merge
+    /// (#3618 ruling 2).
+    pub delegated: Vec<String>,
 }
 
 impl Verdict {
@@ -207,6 +211,9 @@ impl Verdict {
         }
         if !self.notes.is_empty() {
             bullets(&mut out, "notes", &self.notes);
+        }
+        if !self.delegated.is_empty() {
+            bullets(&mut out, "delegated to the merge check", &self.delegated);
         }
         out
     }
@@ -449,7 +456,9 @@ pub fn judge(
         base: &base.commit,
         carried: &carried,
         not_run,
+        ticketed: ticket.is_some(),
     };
+    let mut delegated = Vec::new();
     for condition in Condition::ALL {
         match condition {
             Condition::Fresh => {
@@ -460,7 +469,7 @@ pub fn judge(
                         krate,
                         &now,
                         &mut not_judged,
-                        &mut unmet,
+                        (&mut unmet, &mut delegated),
                         &mut notes,
                     )?;
                 }
@@ -507,6 +516,9 @@ pub fn judge(
         }
     }
     slack_porting_notes(snapshot, manifest, store, &mut notes)?;
+    // What did not validate narrows the instruments that read it, and
+    // `done` judges by what loaded (#3618 ruling 4).
+    notes.extend(manifest.defects().iter().map(ToString::to_string));
 
     Ok(Verdict {
         base,
@@ -516,6 +528,7 @@ pub fn judge(
         unmet,
         notes,
         not_run: not_run.to_vec(),
+        delegated,
     })
 }
 
@@ -801,6 +814,9 @@ struct Asking<'a> {
     carried: &'a Carried,
     /// The instruments the caller's run did not take (#2477).
     not_run: &'a [String],
+    /// Whether the checkout's branch records a ticket, where the rows held
+    /// at the merge are delegated.
+    ticketed: bool,
 }
 
 /// Condition 1's `phpt` for one touched crate (harness §4.5, #725): its
@@ -898,7 +914,7 @@ fn fresh_readings(
     krate: &Crate,
     now: &KeyNow,
     not_judged: &mut Vec<String>,
-    unmet: &mut Vec<String>,
+    (unmet, delegated): (&mut Vec<String>, &mut Vec<String>),
     notes: &mut Vec<String>,
 ) -> Result<()> {
     let (root, store, not_run) = (asking.snapshot.root(), asking.store, asking.not_run);
@@ -912,6 +928,11 @@ fn fresh_readings(
     let mut asked = Vec::new();
     let mut phpt = false;
     for instrument in owed(asking.manifest, krate, asking.carried) {
+        let row = asking.manifest.owing(instrument);
+        if asking.ticketed && row.is_some_and(|row| row.held_at == Some(HeldAt::Merge)) {
+            delegated.push(format!("{instrument} for {name}"));
+            continue;
+        }
         // `phpt` is held by its kept runs, not by a reading, after them.
         if instrument == "phpt" {
             phpt = true;
@@ -1162,6 +1183,35 @@ fn bullets(out: &mut String, head: &str, lines: &[String]) {
     }
 }
 
+/// `xtask done` as the command line asks it: the caller it names, or the
+/// one its environment says ([`Caller::ambient`]).
+pub(crate) fn command(
+    root: &Path,
+    manifest: &Manifest,
+    store: &Store,
+    asked: crate::cli::Command,
+) -> Result<()> {
+    let crate::cli::Command::Done {
+        base,
+        not_run,
+        caller,
+        ..
+    } = asked
+    else {
+        bail!("done: asked with another command");
+    };
+    let caller = caller.unwrap_or_else(Caller::ambient);
+    let registry = Registry::load(root)?;
+    run(
+        root,
+        manifest,
+        &registry,
+        store,
+        (base.as_deref(), caller),
+        &not_run,
+    )
+}
+
 /// The command: judge, write the reading, print the list, fail while
 /// anything is unmet. An instrument `not_run` names that no `[[owed]]`
 /// row does is refused, naming the ones the rows do.
@@ -1170,7 +1220,7 @@ pub fn run(
     manifest: &Manifest,
     registry: &Registry,
     store: &Store,
-    base: Option<&str>,
+    (base, caller): (Option<&str>, Caller),
     not_run: &[String],
 ) -> Result<()> {
     if let Some(unowed) = not_run.iter().find(|n| manifest.owing(n).is_none()) {
@@ -1182,10 +1232,56 @@ pub fn run(
     }
     let snapshot = Snapshot::disk(root)?;
     let verdict = judge(&snapshot, manifest, registry, store, base, not_run)?;
-    let outcome = store.record(&[verdict.reading(manifest, &snapshot)?])?;
+    let outcome = store.record(&[called(verdict.reading(manifest, &snapshot)?, caller)])?;
     print!("{}", verdict.render());
     let unmet = verdict.unmet.len();
     outcome.exit_saying(|| format!("{unmet} condition{} of done unmet", plural(unmet)))
+}
+
+/// Who asked `done` (#3619): each reading carries it, so a hold's verdict
+/// is told from a push's, CI's and a person's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Caller {
+    Stop,
+    SubagentStop,
+    PrePush,
+    Ci,
+    Hand,
+}
+
+impl Caller {
+    /// The caller of a run that names none: CI where GitHub's runner says
+    /// so, a hand otherwise.
+    pub fn ambient() -> Caller {
+        match std::env::var_os("GITHUB_ACTIONS") {
+            Some(_) => Caller::Ci,
+            None => Caller::Hand,
+        }
+    }
+
+    /// The caller of a hook, by the event it came in on.
+    fn of_hook(event: Option<&str>) -> Caller {
+        match event {
+            Some("SubagentStop") => Caller::SubagentStop,
+            _ => Caller::Stop,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Caller::Stop => "stop",
+            Caller::SubagentStop => "subagent-stop",
+            Caller::PrePush => "pre-push",
+            Caller::Ci => "ci",
+            Caller::Hand => "hand",
+        }
+    }
+}
+
+/// `reading` as `caller`'s: the caller heads its message.
+fn called(mut reading: Reading, caller: Caller) -> Reading {
+    reading.message = format!("{}: {}", caller.name(), reading.message);
+    reading
 }
 
 /// The Stop hook's stdin: the keys `done` reads (harness-design.md §13
@@ -1199,15 +1295,32 @@ struct StopStdin {
     session_id: String,
     #[serde(default)]
     last_assistant_message: String,
+    /// The subagent stopping, absent at the main loop's Stop.
+    #[serde(default)]
+    agent_id: Option<String>,
+    /// `Stop` or `SubagentStop`.
+    #[serde(default)]
+    hook_event_name: Option<String>,
+    /// The Stop of another checkout handing this one to its own build:
+    /// judge this checkout alone, and leave the reply to the Stop that
+    /// handed it (#3619).
+    #[serde(default)]
+    here: bool,
 }
 
 const UNREAD_STDIN: &str = "done could not read the Stop hook's stdin";
 
 /// `--hook`: judge the Stop hook's stdin text and give the hook's stdout,
 /// `None` for a pass. The second Stop (`stop_hook_active`) passes without
-/// judging; whatever goes wrong before a verdict is a block that says so,
+/// judging and records the release with the count the block had (#3618
+/// M4); whatever goes wrong before a verdict is a block that says so,
 /// since the second Stop releases a held turn and nothing releases a
 /// silent pass.
+///
+/// What is judged is each checkout the session's own calls wrote in, as
+/// permit placed them (harness-design.md §4.5, #3618 ruling 1): this one
+/// here, another by its own build, handed the Stop with `here`. A session
+/// that wrote in none passes.
 pub(crate) fn hook(
     root: &Path,
     manifest: &Manifest,
@@ -1219,48 +1332,157 @@ pub(crate) fn hook(
         Ok(stop) => stop,
         Err(err) => return Some(block(&format!("{UNREAD_STDIN}: {err}"))),
     };
+    let caller = Caller::of_hook(stop.hook_event_name.as_deref());
     if stop.stop_hook_active {
+        if let Err(err) = released(store, &stop, caller) {
+            eprintln!("xtask done: the release was not recorded: {err:#}");
+        }
         return None;
     }
-    let verdict = match Snapshot::disk(root).and_then(|snapshot| {
-        Ok((
-            judge(&snapshot, manifest, registry, store, None, &[])?,
-            snapshot,
-        ))
-    }) {
-        Ok(verdict) => verdict,
+    let snapshot = match Snapshot::disk(root) {
+        Ok(snapshot) => snapshot,
         Err(err) => return Some(block(&format!("done could not judge the changes: {err:#}"))),
     };
+    let checkouts = if stop.here {
+        vec![root.to_path_buf()]
+    } else {
+        let agent = stop.agent_id.as_deref().unwrap_or_default();
+        crate::permit::written(root, &stop.session_id, agent)
+    };
+    let mut reasons = Vec::new();
+    let mut unmet = 0;
+    let mut here = None;
+    for checkout in checkouts.iter().filter(|c| c.is_dir()) {
+        if same_dir(checkout, root) {
+            match judge(&snapshot, manifest, registry, store, None, &[]) {
+                Ok(verdict) => {
+                    unmet += verdict.unmet.len();
+                    if !verdict.met() {
+                        reasons.push(verdict.render());
+                    }
+                    here = Some(verdict);
+                }
+                Err(err) => {
+                    return Some(block(&format!("done could not judge the changes: {err:#}")));
+                }
+            }
+            continue;
+        }
+        let handed = json!({"session_id": stop.session_id, "hook_event_name": stop.hook_event_name,
+            "here": true});
+        let args = ["done", "--hook"];
+        let adapter = crate::permit::Adapter::CommandHook;
+        match crate::permit::walk(checkout, adapter, &args, &handed.to_string()) {
+            Ok(out) => {
+                let held: Value = serde_json::from_slice(&out).unwrap_or(Value::Null);
+                if let Some(reason) = held["reason"].as_str() {
+                    unmet += (held["unmet"].as_u64())
+                        .and_then(|n| usize::try_from(n).ok())
+                        .unwrap_or(1);
+                    reasons.push(format!("In {}:\n{reason}", checkout.display()));
+                }
+            }
+            Err(last) => {
+                unmet += 1;
+                reasons.push(format!(
+                    "done could not judge {}: {last}",
+                    checkout.display()
+                ));
+            }
+        }
+    }
     // The reply, for a session that closed a ticket and no other.
-    let unfiled = match reply::closed_by(store, &stop.session_id)
-        .and_then(|closed| reply::read(manifest, &closed, &stop.last_assistant_message))
-    {
-        Ok(unfiled) => unfiled,
-        Err(err) => return Some(block(&format!("done could not read the reply: {err:#}"))),
+    let read = || {
+        reply::closed_by(store, &stop.session_id)
+            .and_then(|closed| reply::read(manifest, &closed, &stop.last_assistant_message))
+    };
+    let unfiled = if stop.here {
+        None
+    } else {
+        match read() {
+            Ok(unfiled) => unfiled,
+            Err(err) => return Some(block(&format!("done could not read the reply: {err:#}"))),
+        }
     };
     // The hook's exit is 0 and its verdict is the JSON; the outcome of
     // recording it is neither.
-    let (verdict, snapshot) = verdict;
-    let recorded = verdict.reading(manifest, &snapshot).and_then(|mut r| {
-        // The Stop's verdict carries the session: what marks a later
-        // turn's close as this turn's and not an earlier one's.
-        stop.session_id.clone_into(&mut r.session);
-        let mut readings = vec![r];
-        if let Some(unfiled) = &unfiled {
-            readings.push(unfiled.reading(&snapshot, &stop.session_id)?);
-        }
-        store.record(&readings)
-    });
+    let recorded = stop_reading(here.as_ref(), manifest, &snapshot, unmet, checkouts.len())
+        .and_then(|r| {
+            // The Stop's verdict carries the session: what marks a later
+            // turn's close as this turn's and not an earlier one's.
+            let mut r = called(r, caller);
+            stop.session_id.clone_into(&mut r.session);
+            let mut readings = vec![r];
+            if let Some(unfiled) = &unfiled {
+                readings.push(unfiled.reading(&snapshot, &stop.session_id)?);
+            }
+            store.record(&readings)
+        });
     if let Err(err) = recorded {
         eprintln!("xtask done: the verdict stands but was not recorded: {err:#}");
     }
-    match (verdict.met(), unfiled) {
-        (true, None) => None,
-        (false, None) => Some(block(&verdict.render())),
-        (true, Some(unfiled)) => Some(block(&unfiled.render())),
-        (false, Some(unfiled)) => Some(block(&format!("{}{}", verdict.render(), unfiled.render()))),
+    if let Some(unfiled) = unfiled {
+        reasons.push(unfiled.render());
     }
+    (!reasons.is_empty()).then(|| {
+        let mut held = block(&reasons.join("\n"));
+        // The count, for the Stop that handed this checkout over.
+        if stop.here {
+            held["unmet"] = json!(unmet);
+        }
+        held
+    })
 }
+
+/// Whether `a` and `b` are one directory.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a.canonicalize().ok() == b.canonicalize().ok()
+}
+
+/// The Stop's one reading: this checkout's verdict where it was judged,
+/// otherwise one over the checkouts the session wrote in; `unmet` counted
+/// over them all.
+fn stop_reading(
+    here: Option<&Verdict>,
+    manifest: &Manifest,
+    snapshot: &Snapshot,
+    unmet: usize,
+    checkouts: usize,
+) -> Result<Reading> {
+    let mut reading = if let Some(verdict) = here {
+        verdict.reading(manifest, snapshot)?
+    } else {
+        let mut reading = Reading::for_scope(INSTRUMENT, WORKSPACE, manifest, snapshot)?;
+        reading.message = format!(
+            "{unmet} unmet over the {checkouts} checkout{} the session wrote in, none of them this one",
+            plural(checkouts)
+        );
+        reading
+    };
+    reading.status = Status::of(unmet == 0);
+    reading.count("unmet", unmet as u64)?;
+    Ok(reading)
+}
+
+/// The second Stop's release, recorded (#3618 M4): `done` over `released`,
+/// failed, with the count of the block this session's last Stop wrote.
+fn released(store: &Store, stop: &StopStdin, caller: Caller) -> Result<()> {
+    let log = store.history(INSTRUMENT)?;
+    let last = log.readings.iter().rev().find(|r| {
+        r.scope == WORKSPACE && r.session == stop.session_id && !stop.session_id.is_empty()
+    });
+    let unmet = last.and_then(|r| r.int("unmet")).unwrap_or_default();
+    let mut reading = Reading::new(INSTRUMENT, RELEASED);
+    reading.status = Status::Fail;
+    reading.count("unmet", u64::try_from(unmet).unwrap_or_default())?;
+    reading.message = format!("the second Stop released a block of {unmet} unmet");
+    stop.session_id.clone_into(&mut reading.session);
+    store.record(&[called(reading, caller)])?;
+    Ok(())
+}
+
+/// The scope of a release's reading.
+pub(crate) const RELEASED: &str = "released";
 
 /// `--hook` at the command line: stdin in, the hook's JSON out, exit 0.
 pub fn run_hook(root: &Path, manifest: &Manifest, registry: &Registry, store: &Store) {

@@ -178,6 +178,26 @@ _Avoid_: config (php's `PHP_CONFIG_FILE_PATH`, `PHP_CONFIG_FILE_SCAN_DIR`), rule
 The one-shaped value an instrument writes after a run: instrument, scope, rule, status, numbers, message, ADR, the scope's key (§4.2), commit, time. Everything an agent or a person reads about the state of the engine is a rendering of readings by `xtask status`.
 _Avoid_: result, artefact, report, telemetry (the manifest's `[telemetry]` table: the field `telemetry` and `Telemetry`, its type), output (php's `OutputOp`, `output_buffer_op`, `output_started_at`; seam 4's `OutputSink`)
 
+**Caller**:
+Who asked `done` for its verdict, which each `done` reading names at the head of its message: the Stop hook, the `SubagentStop` hook, pre-push, CI, or a hand at the command line (`done::Caller`). The Stop's verdict is over the checkouts the stopping session and agent wrote in, as permit recorded them; pre-push's and CI's is over the checkout they run in.
+_Avoid_: invoker, requester
+
+**Released**:
+Said of a block the second Stop let through (`stop_hook_active`): the turn ends with the conditions unmet, and a `done` reading over `released` records the count the block had.
+_Avoid_: forgiven
+
+**Owed**:
+Said of a reading a crate must have fresh and passing before `done`: what an `[[owed]]` row of the manifest names for the crates it covers. A row with `held_at = "merge"` is **delegated** in a checkout whose branch records a ticket: `done` there lists it under the merge check's name and does not hold it, and main's checkout holds it.
+_Avoid_: obligatory
+
+**Remedy**:
+What a denied call does instead, a rule's `remedy` in the manifest, which a denial renders after the rule's text and before the checkout it judged.
+_Avoid_: suggestion
+
+**Defect**:
+What a person's file carries that parses but does not validate across files, such as a variant's build made against a closure the pin has moved past (`manifest::Defect`). Only the instruments that read the failing part refuse; permit and `done` judge by what loaded and note it, and the session's facts list it. A file that does not parse is no defect: loading it fails.
+_Avoid_: broken pin, invalid pin
+
 **Seat**:
 One of the machine's few places a building instrument runs in, `XTASK_SEATS` of them (three unless set), each an exclusive lock on a file under `XTASK_SEAT_DIR` that the operating system gives back however its holder ends. `clippy`, `test`, `miri`, `phpt`, `compile-identity`, `crosscheck`, `trace-dump`, `fold`, `fpm-compare`, `soak`, `witness` and `bench` take one before they build and wait while every one is held; what a seated instrument spawns sits in its seat (`seat`, #2982).
 _Avoid_: lease

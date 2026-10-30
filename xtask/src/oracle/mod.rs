@@ -263,6 +263,11 @@ pub struct Pin {
     /// [`Pin::digest`]: set by [`Pin::parse`], not a value of the file.
     #[serde(skip)]
     digest: String,
+    /// What parses but does not validate across the file's tables, each
+    /// refusal's text: set by [`Pin::parse`], and what [`Pin::defects`]
+    /// says (#3618 ruling 4).
+    #[serde(skip)]
+    defects: Vec<String>,
     /// The command every program's binary is run under, before it and its
     /// arguments: none from the file, and `unshare` for a System V subset
     /// on Linux (#1482), set by [`Pin::wrapped`].
@@ -793,11 +798,19 @@ impl Pin {
     pub fn parse(text: &str) -> Result<Pin> {
         let mut pin: Pin = toml::from_str(text)?;
         let closure = pin.closure.as_ref().map(Closure::digest);
-        for (name, variant) in &pin.variant {
-            variant.held(name, closure.as_ref())?;
-        }
+        pin.defects = (pin.variant.iter())
+            .filter_map(|(name, variant)| variant.held(name, closure.as_ref()).err())
+            .map(|err| format!("{err:#}"))
+            .collect();
         pin.digest = digest(text)?;
         Ok(pin)
+    }
+
+    /// What parses in the pin but does not validate, a cross-file check's
+    /// refusal each: the instruments that read the pin refuse with it, and
+    /// the rest judge by what loaded (#3618 ruling 4).
+    pub fn defects(&self) -> &[String] {
+        &self.defects
     }
 
     /// The digest of the pin's values, every section's and none of its
