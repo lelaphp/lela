@@ -149,7 +149,7 @@ fn assert_denied(root: &Path, out: &str, path: &str, written: &str) {
     let now = xtask::key::Snapshot::disk(root).unwrap();
     assert_eq!(reading.key(), now.key(Path::new(path)).unwrap());
     let kept = reason
-        .split("what the call wrote is blob ")
+        .split(" wrote is blob ")
         .nth(1)
         .and_then(|rest| rest.get(..40))
         .unwrap_or_else(|| panic!("the denial names the kept blob: {reason}"));
@@ -1322,4 +1322,117 @@ fn a_stale_build_leaves_a_steer_to_the_next_build() {
     let err = ran.failed();
     assert!(err.contains("no judge of steer's write"), "{err}");
     assert!(record(&root, SESSION, id).is_file(), "the record is left");
+}
+
+// ------------------------------------- a linked worktree the session owns
+
+/// A linked worktree of `root` on `branch` that the test's session owns,
+/// as `xtask worktree add` or `own` records one (#3621); the tree that
+/// holds it, and its path.
+fn owned_worktree(root: &Path, branch: &str) -> (Tree, std::path::PathBuf) {
+    let base = Tree::new(&format!("permit-after-owned-{branch}")).unwrap();
+    let at = base.join(branch);
+    Repo::at(root).git(&["worktree", "add", "-q", "-b", branch, at.to_str().unwrap()]);
+    let at = at.canonicalize().unwrap();
+    xtask::owner::record(&at, &xtask::owner::SessionId::new(SESSION).unwrap()).unwrap();
+    (base, at)
+}
+
+/// A python heredoc in `at` that appends to the manifest, its path spelled
+/// in two halves, so no word of the line names a harness file.
+fn heredoc(at: &Path) -> String {
+    let command = format!(
+        "cd {} && python3 - <<'EOF'\nimport pathlib\np = pathlib.Path('se' + 'ams.toml')\n\
+         p.write_text(p.read_text() + '# by a heredoc\\n')\nEOF",
+        at.display()
+    );
+    assert!(
+        !command.contains("seams.toml"),
+        "the line names no harness file"
+    );
+    command
+}
+
+/// #3644 ruling 1, must-fail: in a linked worktree the session owns, a
+/// heredoc whose line names no harness file writes the manifest. It is put
+/// back, the call denied, and the denial names the blob the write is kept
+/// as.
+#[test]
+fn a_heredoc_write_in_a_worktree_the_session_owns_is_put_back_and_denied() {
+    let root = scratch("owned-heredoc");
+    let (_base, wt) = owned_worktree(&root, "t1");
+    let was = read(&wt, "seams.toml");
+    let (out, _) = through_the_hooks(&root, "toolu_owned_heredoc", &heredoc(&wt));
+    assert_eq!(read(&wt, "seams.toml"), was, "put back");
+    assert_denied(&wt, &out, "seams.toml", "# by a heredoc");
+}
+
+/// #3644 ruling 1, must-pass: the same write in main's checkout, though
+/// the session owns it, in a linked worktree no session owns, and in one
+/// another session owns, is kept as it stands and named, as before.
+#[test]
+fn the_same_write_in_main_s_checkout_or_one_the_session_does_not_own_is_kept() {
+    let root = scratch("owned-elsewhere");
+    let session = |id: &str| xtask::owner::SessionId::new(id).unwrap();
+    xtask::owner::record(&root, &session(SESSION)).unwrap();
+    let (out, _) = through_the_hooks(&root, "toolu_main_heredoc", &heredoc(&root));
+    assert!(read(&root, "seams.toml").ends_with("# by a heredoc\n"));
+    assert_kept(&root, &out, "seams.toml");
+    Repo::at(&root).git(&["checkout", "HEAD", "--", "seams.toml"]);
+
+    let (_base, wt) = linked_worktree(&root);
+    for (owner, id) in [
+        (None, "toolu_unowned"),
+        (Some("another"), "toolu_another_s"),
+    ] {
+        if let Some(owner) = owner {
+            Repo::at(&wt).git(&["checkout", "HEAD", "--", "seams.toml"]);
+            xtask::owner::record(&wt, &session(owner)).unwrap();
+        }
+        let (out, _) = through_the_hooks(&root, id, &heredoc(&wt));
+        assert!(
+            read(&wt, "seams.toml").ends_with("# by a heredoc\n"),
+            "{id}"
+        );
+        assert_kept(&wt, &out, "seams.toml");
+    }
+}
+
+/// #3644 ruling 4: a write that lands in a worktree the session owns while
+/// one of its calls runs, a call whose line cannot write it, is put back
+/// in that call, whichever call made it, and the denial names the call it
+/// was caught in and says the write may have come from a background call.
+#[test]
+fn a_write_caught_in_another_call_of_the_session_is_put_back_naming_a_background_call() {
+    let root = scratch("owned-background");
+    let (_base, wt) = owned_worktree(&root, "t1");
+    let was = read(&wt, "oracle.toml");
+    let command = format!("cd {} && git status --short", wt.display());
+    let (out, _) = through_the_hooks_while(&root, "toolu_caught", &command, || {
+        std::fs::write(
+            wt.join("oracle.toml"),
+            format!("{was}# from the background\n"),
+        )
+        .unwrap();
+    });
+    assert_eq!(read(&wt, "oracle.toml"), was, "put back");
+    assert_denied(&wt, &out, "oracle.toml", "# from the background");
+    assert!(
+        out.contains("may have come from a background call") && out.contains("toolu_caught"),
+        "{out}"
+    );
+}
+
+/// #3644 ruling 1 and #3622: a sanctioned steer in a linked worktree the
+/// session owns stands, as the coordinator's steer of a merge's union does
+/// in the merge worktree on `staging`.
+#[test]
+fn a_steer_in_a_worktree_the_session_owns_stands() {
+    let root = scratch("owned-steer");
+    let (_base, wt) = owned_worktree(&root, "staging");
+    let added = proposal(&wt);
+    let command = format!("cd {} && {}", wt.display(), steer_command(&wt));
+    let (out, err) = through_the_hooks(&root, "toolu_owned_steer", &command);
+    assert_eq!(out.trim(), "", "{err}");
+    assert_eq!(read(&wt, "oracle.toml"), added, "steer's write stands");
 }
