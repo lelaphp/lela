@@ -23,13 +23,17 @@
 //! an array assignment, `P=(a b)`, open no subshell: its elements are
 //! words of the assignment (#3165).
 //!
-//! The same reading gives a `deny_pattern` its text ([`Line::text`]): the
-//! line with the heredoc bodies it carries as text removed, so a pattern
-//! judges what a command runs and not what it quotes (#1771, #1832), as
-//! an argv rule does. One lexer decides what a body is for both.
+//! The same reading gives a `deny_pattern` what it reads, the line's
+//! commands ([`Line::subject`]): the line with the heredoc bodies it
+//! carries as text removed, and a quoted argument read as words and never
+//! as a command position, so a pattern judges what a command runs and not
+//! what it quotes (#1771, #1832, #3635), as an argv rule does. One lexer
+//! decides what a body and a quote are for both.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
+
+use regex_lite::Regex;
 
 use crate::manifest::OneOrMany;
 
@@ -107,6 +111,9 @@ pub(super) struct Line {
     shells: Vec<Vec<u32>>,
     joints: Vec<Joints>,
     text: String,
+    subject: String,
+    /// Whether a quote holds each byte of `subject`.
+    quoted: Vec<bool>,
     bodies: Vec<Heretext>,
     written: Vec<String>,
 }
@@ -130,11 +137,14 @@ impl Line {
             at = body.end;
         }
         text.extend(&lexer.chars[at..]);
+        let (subject, quoted) = lexer.subject();
         Line {
             commands: lexer.commands,
             shells: lexer.shells,
             joints: lexer.joints,
             text,
+            subject,
+            quoted,
             bodies: lexer.bodies,
             written: lexer.written,
         }
@@ -159,15 +169,44 @@ impl Line {
         &self.joints
     }
 
-    /// What a `deny_pattern` reads: the line with every heredoc body line
-    /// that is text to its command removed, the line ending with it. A
-    /// body a shell reads on its stdin stays, being commands, and so does
-    /// a line of an unquoted body that runs a `$(…)` or a backquote. A
-    /// heredoc inside a body a shell runs, a backquote or a `-c` argument
-    /// stays too, being read by a lexer of its own: the text is then
-    /// stricter than the argv, never looser.
+    /// The line as it is spelled less the heredoc body lines that are text
+    /// to their command, each with its line ending. A body a shell reads on
+    /// its stdin stays, being commands, and so does a line of an unquoted
+    /// body that runs a `$(…)` or a backquote. A heredoc inside a body a
+    /// shell runs, a backquote or a `-c` argument stays too, being read by
+    /// a lexer of its own.
     pub(super) fn text(&self) -> &str {
         &self.text
+    }
+
+    /// What a `deny_pattern` and its `unless_pattern` read, the line's
+    /// commands (#3635): [`Line::text`] with each `;`, `&`, `|` and newline
+    /// a quote holds read as a space, since the shell reads none of them as
+    /// a separator, and after it, a line each, what a line the line runs in
+    /// turn reads, a `-c` argument, `eval`'s words, a backquote or a body a
+    /// shell reads on its stdin, so a command a quote holds and a shell
+    /// runs is read where it runs.
+    pub(super) fn subject(&self) -> &str {
+        &self.subject
+    }
+
+    /// Each hit of `regex` over [`Line::subject`] that starts outside a
+    /// quote: a quoted argument is never a command position, nor a
+    /// redirection, so no hit starts in one (#3635). Each search resumes
+    /// just past the last hit's start, so a hit passed over hides none.
+    pub(super) fn hits(&self, regex: &Regex) -> Vec<Range<usize>> {
+        let (mut hits, mut at) = (Vec::new(), 0);
+        while let Some(hit) = regex.find_at(&self.subject, at) {
+            if !self.quoted.get(hit.start()).copied().unwrap_or_default() {
+                hits.push(hit.range());
+            }
+            let next = self.subject[hit.start()..].chars().next();
+            at = hit.start() + next.map_or(1, char::len_utf8);
+            if at > self.subject.len() {
+                break;
+            }
+        }
+        hits
     }
 
     /// Every heredoc body a command reads as text, a nested line's
@@ -297,14 +336,49 @@ struct Lexer {
     written: Vec<String>,
     /// The heredoc bodies the line's commands read as text ([`Heretext`]).
     bodies: Vec<Heretext>,
+    /// Whether a quote or an escape holds each of `chars`, as text.
+    quoted: Vec<bool>,
+    /// What each line this line runs in turn reads ([`Lexer::subject`]).
+    nested: Vec<(String, Vec<bool>)>,
 }
 
 impl Lexer {
     fn new(line: &str) -> Lexer {
+        let chars: Vec<char> = line.chars().collect();
         Lexer {
-            chars: line.chars().collect(),
+            quoted: vec![false; chars.len()],
+            chars,
             ..Lexer::default()
         }
+    }
+
+    /// The char just read is text a quote or an escape holds.
+    fn held(&mut self) {
+        if let Some(held) = self.quoted.get_mut(self.at.saturating_sub(1)) {
+            *held = true;
+        }
+    }
+
+    /// What a `deny_pattern` reads of what this lexer read
+    /// ([`Line::subject`]), and whether a quote holds each byte of it.
+    fn subject(&self) -> (String, Vec<bool>) {
+        let (mut text, mut quoted) = (String::new(), Vec::new());
+        for (at, &c) in self.chars.iter().enumerate() {
+            if self.text_bodies.iter().any(|body| body.contains(&at)) {
+                continue;
+            }
+            let held = self.quoted.get(at).copied().unwrap_or_default();
+            let blank = held && matches!(c, ';' | '&' | '|' | '\n');
+            text.push(if blank { ' ' } else { c });
+            quoted.resize(text.len(), held);
+        }
+        for (line, held) in &self.nested {
+            text.push('\n');
+            text.push_str(line);
+            quoted.push(false);
+            quoted.extend(held);
+        }
+        (text, quoted)
     }
 
     /// The whole line read.
@@ -321,6 +395,7 @@ impl Lexer {
         let mut nested = Lexer::new(line);
         nested.before = self.before;
         nested.list(None);
+        self.nested.push(nested.subject());
         let offset = self.commands.len();
         self.adopt(&mut nested);
         self.written.extend(nested.written);
@@ -421,6 +496,7 @@ impl Lexer {
             '\\' => match self.bump() {
                 Some('\n') | None => {}
                 Some(c) => {
+                    self.held();
                     command.open(true);
                     command.push(c);
                 }
@@ -428,6 +504,7 @@ impl Lexer {
             '\'' => {
                 command.open(true);
                 while let Some(c) = self.bump().filter(|c| *c != '\'') {
+                    self.held();
                     command.push(c);
                 }
             }
@@ -524,15 +601,22 @@ impl Lexer {
                 c if Some(c) == close => return,
                 '\\' => match self.bump() {
                     Some('\n') | None => {}
-                    Some(c @ ('"' | '\\' | '$' | '`')) => command.push(c),
+                    Some(c @ ('"' | '\\' | '$' | '`')) => {
+                        self.held();
+                        command.push(c);
+                    }
                     Some(c) => {
+                        self.held();
                         command.push('\\');
                         command.push(c);
                     }
                 },
                 '`' => self.backquote(),
                 '$' if self.eat('(') => self.child(|lexer| lexer.list(Some(')'))),
-                c => command.push(c),
+                c => {
+                    self.held();
+                    command.push(c);
+                }
             }
         }
     }
@@ -782,6 +866,11 @@ impl Assigned {
             let Some((name, append)) = assigns(set) else {
                 continue;
             };
+            // A value led by a variable the line assigned is that value,
+            // as the shell expands it: `S=/x; R=$S/repo` names `/x/repo`
+            // (#3625).
+            let led = self.directory(value);
+            let value = led.as_deref().unwrap_or(value);
             let prior = self.0.get(name).filter(|_| append);
             let value = format!("{}{value}", prior.map_or("", String::as_str));
             self.0.insert(name.to_owned(), value);
@@ -906,8 +995,10 @@ const RESERVED: [&str; 10] = [
 /// Programs that run the rest of their words as a command, with the
 /// options each reads a value after and the operands it reads before the
 /// command: `timeout`'s duration (#2668), and `caffeinate`'s, which keeps
-/// the machine awake while its command runs (#2990).
-const WRAPPERS: [(&str, &[&str], usize); 9] = [
+/// the machine awake while its command runs (#2990), and `xargs`'s, whose
+/// command may run a line a quote holds, `xargs sh -c '…'` (#3635).
+const WRAPPERS: [(&str, &[&str], usize); 10] = [
+    ("xargs", &XARGS_VALUED, 0),
     ("command", &[], 0),
     ("builtin", &[], 0),
     ("exec", &["-a"], 0),
@@ -917,6 +1008,11 @@ const WRAPPERS: [(&str, &[&str], usize); 9] = [
     ("nice", &["-n"], 0),
     ("timeout", &["-s", "--signal", "-k", "--kill-after"], 1),
     ("caffeinate", &["-t", "-w"], 0),
+];
+
+/// `xargs`'s options, BSD's and GNU's, that read a value after them.
+const XARGS_VALUED: [&str; 11] = [
+    "-E", "-I", "-J", "-L", "-n", "-P", "-R", "-S", "-s", "-a", "-d",
 ];
 
 /// Programs that read commands, from a `-c` argument, a file or stdin.
@@ -1557,6 +1653,35 @@ mod tests {
         // A herestring and a line with no heredoc are what they are.
         assert_eq!(text("cat <<< 'quoted'"), "cat <<< 'quoted'");
         assert_eq!(text("echo é; ls"), "echo é; ls");
+    }
+
+    /// #3635: a quoted argument is read as words and never as a command
+    /// position, and a line a shell runs is read where it runs.
+    #[test]
+    fn a_lines_subject_reads_no_quote_as_a_command_position() {
+        let subject = |line: &str| Line::read(line).subject().to_owned();
+        assert_eq!(
+            subject("printf '%s\\n' 'a && git merge x\ngit merge y' > f; ls"),
+            "printf '%s\\n' 'a    git merge x git merge y' > f; ls"
+        );
+        assert_eq!(subject("echo \"a;b\" a\\;b"), "echo \"a b\" a\\ b");
+        // A line a shell runs is read again after the line, a line of its own.
+        assert_eq!(
+            subject("sh -c 'cd x; git merge y'"),
+            "sh -c 'cd x  git merge y'\ncd x; git merge y"
+        );
+        // A heredoc body that is text is no more read there than here.
+        assert_eq!(subject("cat <<'EOF'\ngit merge y\nEOF"), "cat <<'EOF'\nEOF");
+        let merge = Regex::new(r"(?m)(\A|[|;&(\n]\s*)git\s+merge").unwrap();
+        let hits = |line: &str| Line::read(line).hits(&merge).len();
+        assert_eq!(hits("echo 'x\ngit merge y'"), 0);
+        assert_eq!(hits("echo '(git merge y'"), 0);
+        assert_eq!(hits("echo 'x' && git merge y"), 1);
+        assert_eq!(hits("bash -c 'ls; git merge y'"), 1);
+        // A hit passed over in a quote hides none after it.
+        let redirect = Regex::new(r">\s*seams\.toml").unwrap();
+        let hits = Line::read("echo '> seams.toml' > seams.toml").hits(&redirect);
+        assert_eq!(hits, vec![20..32]);
     }
 
     #[test]

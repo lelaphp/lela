@@ -487,6 +487,42 @@ fn a_steer_call_that_adds_a_row_stands() {
     );
 }
 
+/// A steer that is one simple command among several on its line, the line
+/// run from main's checkout into a worktree by its leading `cd`, and the
+/// proposal named through a variable the line assigns, stands as the same
+/// steer alone does (#3631): the shape that was put back on t3632.
+#[test]
+fn a_steer_among_other_commands_on_its_line_stands() {
+    let root = scratch("steer-among");
+    let beside = Tree::new("permit-after-steer-among-wt").unwrap();
+    let wt = beside.path().join("t3632");
+    Repo::at(&root).git(&["worktree", "add", "-q", "-b", "t3632", wt.to_str().unwrap()]);
+    let wt = wt.canonicalize().unwrap();
+    let added = proposal(&wt);
+    let id = "toolu_among";
+    let command = format!(
+        "cd {wt} && S={wt} && {} --root {wt} steer oracle.toml --from $S/proposal.toml; echo exit=$?; git diff --stat",
+        xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")).display(),
+        wt = wt.display(),
+    );
+    permit(
+        &root,
+        &stdin("PreToolUse", SESSION, id, &root, &command),
+        &[],
+    )
+    .ok();
+    assert!(record(&root, SESSION, id).is_file(), "the blobs were taken");
+    shell(&root, &command);
+    let ran = permit(
+        &root,
+        &stdin("PostToolUse", SESSION, id, &root, &command),
+        &["--after"],
+    );
+    let out = ran.ok();
+    assert_eq!(out.trim(), "", "nothing is put back");
+    assert_eq!(read(&wt, "oracle.toml"), added, "steer's write stands");
+}
+
 /// A write beside steer's in the same call is not steer's: the file no
 /// longer carries what steer's reading says it wrote, and it is put back
 /// as it stood before the call.
@@ -1158,4 +1194,132 @@ fn a_conflicted_registry_written_beside_steer_is_put_back_to_its_markers() {
     let (out, _) = through_the_hooks(&root, "toolu_conflict_written", &command);
     assert_eq!(read(&root, file), conflicted, "put back to the markers");
     assert_denied(&root, &out, file, "# resolved");
+}
+
+/// A manifest this build cannot read committed in `at`: a table its
+/// grammar does not know, as a branch that adds grammar commits one.
+fn unknown_grammar(at: &Path) {
+    let repo = Repo::at(at);
+    let manifest = format!("{}\n[grammar_3631]\nkey = 1\n", read(at, "seams.toml"));
+    repo.write("seams.toml", manifest);
+    repo.commit("a manifest carrying grammar this build does not know");
+    assert!(Manifest::load(at).is_err(), "the build cannot read it");
+}
+
+/// The steer of a call whose checkout commits a manifest this build cannot
+/// read, with a write of the proposal beside it, as the line in `at`: the
+/// steer, which cannot read it either, then the write it would have made.
+fn steer_or_write(at: &Path) -> String {
+    format!("{} || cp proposal.toml oracle.toml", steer_command(at))
+}
+
+/// Where the checkout a steer ran in commits a manifest this build cannot
+/// read, and it is the checkout this build is asked about, `--after` says
+/// it could not judge and puts nothing back (#3631): the change is kept,
+/// named, as one the sensor cannot tell.
+#[test]
+fn a_steer_this_build_cannot_judge_is_kept_and_said() {
+    let root = scratch("steer-unread");
+    let added = proposal(&root);
+    unknown_grammar(&root);
+    let id = "toolu_unread";
+    let command = steer_or_write(&root);
+    permit(
+        &root,
+        &stdin("PreToolUse", SESSION, id, &root, &command),
+        &[],
+    );
+    assert!(record(&root, SESSION, id).is_file(), "the blobs were taken");
+    shell(&root, &command);
+    let ran = permit(
+        &root,
+        &stdin("PostToolUse", SESSION, id, &root, &command),
+        &["--after"],
+    );
+    let out = ran.ok();
+    assert_eq!(read(&root, "oracle.toml"), added, "nothing is put back");
+    assert!(out.contains("could not judge"), "{out}");
+    assert!(!out.contains("\"block\""), "{out}");
+}
+
+/// Where a worktree the call ran in commits a manifest this build cannot
+/// read, `--after` hands the call to that worktree's own build, with the
+/// record it took, and prints what that build decides (#3631): here a
+/// build that puts nothing back, and the steer's write stands.
+#[test]
+fn a_steer_in_a_worktree_this_build_cannot_read_is_handed_to_its_build() {
+    let root = scratch("steer-handed");
+    let beside = Tree::new("permit-after-steer-handed-wt").unwrap();
+    let wt = beside.path().join("t3631");
+    Repo::at(&root).git(&["worktree", "add", "-q", "-b", "t3631", wt.to_str().unwrap()]);
+    let wt = wt.canonicalize().unwrap();
+    let added = proposal(&wt);
+    unknown_grammar(&wt);
+    let build = wt.join("target/release/xtask");
+    std::fs::create_dir_all(build.parent().unwrap()).unwrap();
+    std::fs::write(
+        &build,
+        "#!/bin/sh\ncat > \"$(dirname \"$0\")/asked.json\"\n",
+    )
+    .unwrap();
+    Command::new("chmod")
+        .arg("+x")
+        .arg(&build)
+        .status()
+        .unwrap();
+    let id = "toolu_handed";
+    let command = steer_or_write(&wt);
+    permit(&root, &stdin("PreToolUse", SESSION, id, &wt, &command), &[]);
+    assert!(record(&root, SESSION, id).is_file(), "the blobs were taken");
+    shell(&wt, &command);
+    let ran = permit(
+        &root,
+        &stdin("PostToolUse", SESSION, id, &wt, &command),
+        &["--after"],
+    );
+    let out = ran.ok();
+    assert_eq!(out.trim(), "", "the worktree's build decided");
+    assert_eq!(read(&wt, "oracle.toml"), added, "nothing is put back");
+    let asked = read(&wt, "target/release/asked.json");
+    assert!(
+        asked.contains("PostToolUse") && asked.contains(id),
+        "{asked}"
+    );
+    assert!(
+        record(&wt, SESSION, id).is_file(),
+        "the record went with it"
+    );
+}
+
+/// Where this build is stale against the sources the checkout a steer ran
+/// in carries, `--after` refuses, exiting non-zero so the hook's next build
+/// judges, and leaves the record for it (#3631): main's release judge after
+/// a land moved main's sources past it, which put back a sanctioned steer.
+#[test]
+fn a_stale_build_leaves_a_steer_to_the_next_build() {
+    let root = scratch("steer-stale");
+    proposal(&root);
+    let id = "toolu_stale";
+    let command = steer_command(&root);
+    permit(
+        &root,
+        &stdin("PreToolUse", SESSION, id, &root, &command),
+        &[],
+    );
+    assert!(record(&root, SESSION, id).is_file(), "the blobs were taken");
+    shell(&root, &command);
+    std::fs::create_dir_all(root.join("xtask/src")).unwrap();
+    std::fs::write(
+        root.join("xtask/src/lib.rs"),
+        "// not this build's sources\n",
+    )
+    .unwrap();
+    let ran = permit(
+        &root,
+        &stdin("PostToolUse", SESSION, id, &root, &command),
+        &["--after"],
+    );
+    let err = ran.failed();
+    assert!(err.contains("no judge of steer's write"), "{err}");
+    assert!(record(&root, SESSION, id).is_file(), "the record is left");
 }

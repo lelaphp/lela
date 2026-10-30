@@ -72,6 +72,10 @@ pub struct Arguments {
     /// end of, which a `runs = "foreground"` rule does not judge (#3624).
     #[serde(default)]
     pub run_in_background: bool,
+    /// A `Monitor` call's deadline, an argument no `Bash` call carries:
+    /// the runtime hands a `Monitor` to the hook as `Bash`, and runs it in
+    /// the background by construction (#3637).
+    pub timeout_ms: Option<f64>,
 }
 
 impl Call {
@@ -170,6 +174,14 @@ impl Call {
             format!("{standing}{new}")
         };
         Some((vec![standing], after))
+    }
+
+    /// Whether the runtime runs the call in the background and notifies
+    /// its end: a `Bash` call with `run_in_background`, or a `Monitor`,
+    /// by its name or its `timeout_ms` (#3637).
+    pub(super) fn in_background(&self) -> bool {
+        let input = &self.tool_input;
+        input.run_in_background || self.tool_name == "Monitor" || input.timeout_ms.is_some()
     }
 
     pub(super) fn command(&self) -> Option<&str> {

@@ -554,7 +554,13 @@ fn a_row_held_at_the_merge_is_delegated_in_a_ticketed_checkout_and_held_in_mains
     let text = std::fs::read_to_string(root.join("seams.toml")).unwrap();
     let row = "instrument = \"crosscheck\"\n";
     assert!(text.contains(row));
-    let held = text.replace(row, &format!("{row}held_at = \"merge\"\n"));
+    // The workspace's manifest holds the row at the merge once a person
+    // has landed the ruling; a second `held_at` would be a duplicate key.
+    let held = if text.contains(&format!("{row}held_at = \"merge\"")) {
+        text
+    } else {
+        text.replace(row, &format!("{row}held_at = \"merge\"\n"))
+    };
     std::fs::write(root.join("seams.toml"), held).unwrap();
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
     let crosscheck =
@@ -575,10 +581,12 @@ fn a_row_held_at_the_merge_is_delegated_in_a_ticketed_checkout_and_held_in_mains
             .any(|d| d == "crosscheck for ext/pcre"),
         "{ticketed:#?}"
     );
+    // Other rows the manifest holds at the merge may come first.
+    let rendered = ticketed.render();
+    let list = rendered.split("delegated to the merge check:\n").nth(1);
     assert!(
-        ticketed
-            .render()
-            .contains("delegated to the merge check:\n- crosscheck for ext/pcre")
+        list.is_some_and(|list| list.contains("- crosscheck for ext/pcre\n")),
+        "{rendered}"
     );
 }
 
