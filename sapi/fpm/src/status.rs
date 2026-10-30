@@ -1,6 +1,6 @@
 //! `fpm_status.c`: the ping page, the status page in its five forms —
 //! plain, `html`, `xml`, `json` and `openmetrics`, each with the process
-//! list under `full` — from a copy of the pool's scoreboard, and
+//! list under `full` — from a copy of the pool's `scoreboard`, and
 //! `fpm_get_status()`'s array of the same.
 
 use std::fmt::Write as _;
@@ -105,7 +105,7 @@ fn when(form: Form, epoch: i64) -> String {
 }
 
 /// The page `fpm_status_handle_request` answers where it cannot read the
-/// scoreboard.
+/// `scoreboard`.
 fn internal_error() -> HostPage {
     HostPage {
         code: 500,

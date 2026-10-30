@@ -3,7 +3,7 @@
 //! `php_sapi` alone. `main` reads the command line as `fpm_main.c`'s
 //! `main` reads it through `php_getopt`, starts php, and hands the rest to
 //! the process manager: the master reads `php-fpm.conf` ([`conf`]), opens
-//! each pool's socket ([`sockets`]), maps each pool's scoreboard
+//! each pool's socket ([`sockets`]), maps each pool's `scoreboard`
 //! ([`scoreboard`]) and forks the children each pool's `pm` asks for
 //! ([`children`], [`pctl`]), then runs its event loop ([`master`]) until a
 //! signal ends it; each child serves `FastCGI` requests on an engine of its
@@ -15,7 +15,7 @@
 //! request's trace is php's: the child stopped and its memory asked for
 //! as php asks, and where it opens, the request's frames read out of it
 //! from the chain the engine lays and the child publishes in its
-//! scoreboard slot ([`slowlog`]; design §5.6, revision 59).
+//! `scoreboard` slot ([`slowlog`]; design §5.6, revision 59).
 
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).

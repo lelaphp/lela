@@ -1,4 +1,4 @@
-//! `fpm_events.c`'s module: the descriptors the master waits on, as php
+//! `fpm_events.c`: the fds the master waits on, as php
 //! picks the mechanism — kqueue where the system has it, epoll on Linux —
 //! each registered read, edge-triggered where the event asks
 //! (`FPM_EV_EDGE`, the ondemand listening socket), and the time a wait

@@ -1,10 +1,10 @@
 //! `fpm_trace_*`, the half of the slow log that stops a child and opens
 //! its memory: `fpm_trace_mach.c` on macOS, which stops the child with
-//! `SIGSTOP` and asks the kernel for its task port, and
+//! `SIGSTOP` and asks the kernel for its Mach task right, and
 //! `fpm_trace_ptrace.c` elsewhere, which attaches to it. Once it is open
 //! the master reads bytes out of it ([`Memory::read`]), the request's
 //! frames as the engine lays them (design §5.6, revision 59): through
-//! `mach_vm_read_overwrite` on the task port, and `process_vm_readv` on
+//! `mach_vm_read_overwrite` on the task right, and `process_vm_readv` on
 //! Linux, which the attachment permits.
 
 use nix::sys::signal::{Signal, kill};
@@ -46,7 +46,7 @@ unsafe extern "C" {
     fn mach_port_deallocate(task: libc::mach_port_t, name: libc::mach_port_t) -> libc::c_int;
 }
 
-/// A stopped child's memory, open for the master to read: its task port
+/// A stopped child's memory, open for the master to read: its task right
 /// on macOS, its pid where the master is attached to it. Dropping it is
 /// `fpm_trace_close`, so it closes on every path out of the read.
 pub(crate) struct Memory {
@@ -104,9 +104,9 @@ impl Memory {
 }
 
 /// `fpm_trace_close`, once the read is done, which on macOS lets go of
-/// what the read held and forgets the task port
+/// what the read held and forgets the task right
 /// (`fpm_mach_vm_deallocate`, `target = 0`): here the reads hold nothing
-/// past their call, and the port's send right goes back, which php leaves
+/// past their call, and the send right goes back, which php leaves
 /// to the process's end.
 #[cfg(target_os = "macos")]
 impl Drop for Memory {
@@ -119,7 +119,7 @@ impl Drop for Memory {
     }
 }
 
-/// `fpm_trace_ready`: the child's task port, where the kernel gives it.
+/// `fpm_trace_ready`: the child's task right, where the kernel gives it.
 #[cfg(target_os = "macos")]
 pub(crate) fn ready(pid: i32) -> Option<Memory> {
     let mut target: libc::mach_port_t = 0;
