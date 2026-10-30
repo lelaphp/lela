@@ -1400,6 +1400,53 @@ fn a_return_trace_guards_the_caller_it_lands_in() -> Result<(), String> {
     Ok(())
 }
 
+/// A return trace rooted inside an argument of an outer call opens with
+/// that call's fake init, and each return past its root escapes unless
+/// the caller stands at the send past it, as php's code steps over a
+/// `BACK`'s `INIT_CALL` records to the opline it holds the pointer to:
+/// where the next record is a fake init, and where the header is one.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_trace_inside_an_argument_guards_the_send_past_its_fake_init() -> Result<(), String> {
+    let ir = built(
+        &[("record.function", "s"), ("record.start", "return")],
+        "function id($x) { return $x; }
+        function s($n) { if ($n == 0) { return 0; } return id(s($n - 1)) + 1; }
+        echo s(5), \"\\n\";",
+    )?;
+    assert_eq!(ir.entry.stop, Stop::RecursiveRet);
+    assert!(
+        matches!(ir.ops.first(), Some(Op::InitCall { .. })),
+        "the trace opens with its fake init:\n{}",
+        dump::render(&ir)
+    );
+    let Some(send) = ir.ops.iter().find_map(|op| match op {
+        Op::Line(line) => Some(line.opline),
+        _ => None,
+    }) else {
+        return Err("no opline".to_owned());
+    };
+    // A return past the root lands in a frame no opline ran in before.
+    let past_root: Vec<_> = (ir.ops.iter().enumerate())
+        .filter_map(|(at, op)| match op {
+            Op::Back { frame, escapes, .. }
+                if !(ir.ops.iter().take(at))
+                    .any(|op| matches!(op, Op::Line(line) if line.frame == *frame)) =>
+            {
+                Some(escapes.map(|(_, opline)| opline))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        past_root,
+        [Some(send), Some(send)],
+        "each return past the root held to the send:\n{}",
+        dump::render(&ir)
+    );
+    Ok(())
+}
+
 /// A trace that reaches a compiled entry links to it: it leaves through
 /// its last exit, in the frame the call pushed, standing where the frame
 /// stands, naming the trace.

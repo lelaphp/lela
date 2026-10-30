@@ -498,7 +498,6 @@ impl<'a> Builder<'a> {
         }
         for (at, event) in body.iter().enumerate() {
             let ahead = events.get(at + 1..).unwrap_or_default();
-            let next = ahead.first();
             match event {
                 Event::Op {
                     func,
@@ -510,7 +509,7 @@ impl<'a> Builder<'a> {
                 } => self.line(*func, *opline, [*op1, *op2, *data], *branch, ahead)?,
                 Event::InitCall { callee, began } => self.init_call(*callee, *began)?,
                 Event::Enter { func } => self.enter(*func)?,
-                Event::Back => self.back(next)?,
+                Event::Back => self.back(ahead)?,
             }
         }
         self.end(events.get(body.len()))?;
@@ -1132,14 +1131,26 @@ impl<'a> Builder<'a> {
         let ends = next.is_none() && !ahead.iter().any(|event| matches!(event, Event::Back));
         match (next, ends, self.repeat) {
             (Some(next), ..) => Some(next),
-            (None, true, Some(_)) => match self.ops.get(self.header.index()) {
-                Some(Op::Line(line)) => {
-                    Some((self.frames[usize::from(line.frame.0)].func, line.opline))
-                }
-                _ => None,
-            },
+            (None, true, Some(_)) => self.header_line(),
             _ => None,
         }
+    }
+
+    /// The opline the trace's header serves first: past the calls its
+    /// root began before the recording reached it, whose fake inits a
+    /// return trace opens with, as php steps over `INIT_CALL` records to
+    /// the opline it holds the instruction pointer to
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:11210-11214`).
+    fn header_line(&self) -> Option<(FuncRef, OplineIdx)> {
+        let header = (self.ops.get(self.header.index()..)?.iter())
+            .find(|op| !matches!(op, Op::InitCall { .. }));
+        let Some(Op::Line(line)) = header else {
+            return None;
+        };
+        Some((
+            self.frames.get(usize::from(line.frame.0))?.func,
+            line.opline,
+        ))
     }
 
     /// The direction guard of a conditional jump, leaving where the jump
@@ -1702,19 +1713,39 @@ impl<'a> Builder<'a> {
     /// links at, as php's `zend_jit_leave_func` holds the instruction
     /// pointer to the next record's opline
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:11188-11224`).
-    fn back(&mut self, next: Option<&Event>) -> Result<(), Abort> {
+    ///
+    /// That opline is the one past the calls the caller began before the
+    /// return, its fake inits, as php's code steps over the `INIT_CALL`
+    /// records after a `BACK` to the opline it holds the pointer to
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:11210-11214`). A return trace
+    /// rooted inside an argument of an outer call opens with its fake
+    /// init, and its recursive return goes back there only where the
+    /// caller stands at that send; where it stands past the outer call, the
+    /// trace escapes. Under the recipe's hot thresholds of one, `Ack`'s
+    /// return trace at its inner call's landing returns into a caller past
+    /// its outer call:
+    ///
+    /// ```php
+    /// function Ack($m, $n) {
+    ///     if ($m == 0) return $n + 1;
+    ///     if ($n == 0) return Ack($m - 1, 1);
+    ///     return Ack($m - 1, Ack($m, ($n - 1)));
+    /// }
+    /// echo Ack(3, 7), "\n";
+    /// ```
+    /// ```expect regime=jit-tracing process
+    /// 1021
+    /// ```
+    fn back(&mut self, ahead: &[Event]) -> Result<(), Abort> {
         let idx = self.begin();
         let from = self.running()?;
         self.stack.pop();
+        let next = (ahead.iter()).find(|event| !matches!(event, Event::InitCall { .. }));
         let next_op = match next {
             Some(Event::Op { func, opline, .. }) => Some((*func, *opline)),
             Some(_) => None,
-            None => match (self.repeat, self.ops.get(self.header.index())) {
-                (Some(Repeat::Return), Some(Op::Line(line))) => {
-                    Some((self.frames[usize::from(line.frame.0)].func, line.opline))
-                }
-                _ => self.rec.link_at,
-            },
+            None if self.repeat == Some(Repeat::Return) => self.header_line(),
+            None => self.rec.link_at,
         };
         let (caller, call_at, guard) = if let Some(&caller) = self.stack.last() {
             (caller, self.meta(from).called_at, None)
