@@ -65,8 +65,9 @@ use super::{Consulted, Entry, Held, SCOPE};
 use crate::divergence::Registry;
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
-use crate::oracle::{Invocation, Oracle, Program, Promise, diff, normalise_in};
-use crate::phpt::adapter::{Said, system_with_timeout};
+use crate::oracle::{Invocation, Oracle, Program, Promise, diff, hosts::CGI, normalise_in};
+use crate::phpt::adapter::{SKIPIF_SHOWS, Said, system_with_timeout};
+use crate::phpt::environment::Environment;
 use crate::reading::{Reading, Status};
 use crate::witness::makala::{self, Ports};
 
@@ -134,29 +135,45 @@ fn narrowed(entries: &mut Vec<Entry>, left: &mut Vec<String>, only: &[String]) {
     }
 }
 
-/// Why the pinned php's run of the entry's `--SKIPIF--` says to skip it,
-/// or what it wrote where upstream borks the test and runs nothing, its
-/// words read by the phpt lane's rule (`adapter::Said`); none
-/// for an entry with no section or one the section does not skip. The
-/// section is written to a directory of its own, so the pinned tree at
-/// `tree` is never written to, and runs in the test's directory there, so
-/// its `include('skipif.inc')` finds the file beside the test through the
-/// include path's `.`; it runs under the recipe alone, without the test's
-/// `--ENV--`, so a section that reads `__DIR__` or the test's environment
-/// may answer otherwise than in the phpt lane.
+/// Why upstream's runner, run over the pinned build, skips the entry, or
+/// what its `--SKIPIF--` wrote where upstream borks the test and runs
+/// nothing, its words read by the phpt lane's rule (`adapter::Said`);
+/// none for an entry with no section or one the section does not skip.
+/// Every entry is CGI-shaped, so the section runs as run-tests.php runs
+/// such a test's: through the pinned php-cgi with `-C -q` and
+/// `SKIPIF_SHOWS` (run-tests.php:1897-1901, 2133-2134), so a section
+/// that skips under the CLI alone runs here, and in the runner's
+/// environment over the recipe's, the pinned php as `TEST_PHP_EXECUTABLE`
+/// with its hosts beside it and the CGI variables emptied
+/// (run-tests.php:667-677, 2000-2008), so a section that looks for
+/// php-cgi there finds it. The section is written to a directory of its
+/// own, so the pinned tree at `tree` is never written to, and runs in the
+/// test's directory there, so its `include('skipif.inc')` finds the file
+/// beside the test through the include path's `.`; it runs without the
+/// test's `--ENV--`, so a section that reads `__DIR__` or the test's own
+/// environment may answer otherwise than in the phpt lane.
 fn skipped(oracle: &Oracle<'_>, tree: &Path, entry: &Entry) -> Result<Option<String>> {
     let Some(body) = &entry.skipif else {
         return Ok(None);
     };
+    let pin = oracle.pin();
+    let cgi = oracle.pinned_host(CGI)?;
+    let phpdbg = (pin.sapi.phpdbg.as_ref()).map(|host| host.path.as_path());
+    let recipe = pin.recipe.environment()?;
+    let mut env = Environment::of_runner(&pin.oracle.path, (Some(&cgi), phpdbg), tree, &recipe);
+    env.reset();
     let own = oracle.tree("fpm-compare-skipif")?;
     let program = own.write("skipif.php", body)?;
-    let php = &oracle.pin().oracle.path;
-    let beside = tree.join(&entry.id);
+    let flags = ["-C", "-q"].map(String::from);
+    let shown = SKIPIF_SHOWS.map(String::from);
     let ran = system_with_timeout(
         oracle,
         &Invocation {
-            cwd: beside.parent(),
-            ..Invocation::new(php, Program::Beside(&program))
+            ini: &shown,
+            flags: &flags,
+            env: env.entries(),
+            cwd: tree.join(&entry.id).parent(),
+            ..Invocation::new(&cgi, Program::Beside(&program))
         },
     )?;
     Ok(match Said::ran(&ran) {
@@ -211,11 +228,10 @@ fn compared(oracle: &Oracle<'_>, fpm: &Path, host: &Path, entry: &Entry) -> Resu
 /// agrees, and else a difference, the second pair's diff, whether or not
 /// a side's answer moved between its two runs.
 fn held_twice(mut pair: impl FnMut() -> Result<[Vec<u8>; 2]>) -> Result<Came> {
-    let [wanted, shown] = pair()?;
-    if wanted == shown {
-        return Ok(Came::Same);
+    let [mut wanted, mut shown] = pair()?;
+    if wanted != shown {
+        [wanted, shown] = pair()?;
     }
-    let [wanted, shown] = pair()?;
     Ok(if wanted == shown {
         Came::Same
     } else {
@@ -229,11 +245,8 @@ fn software(response: &[u8], own: &str, nginx: &str) -> Vec<u8> {
     if own.is_empty() {
         return response.to_vec();
     }
-    crate::oracle::replace(
-        response,
-        own.as_bytes(),
-        format!("nginx/{nginx}").as_bytes(),
-    )
+    let nginx = format!("nginx/{nginx}");
+    crate::oracle::replace(response, own.as_bytes(), nginx.as_bytes())
 }
 
 /// A rendered response with its header lines in the order of their names,
@@ -283,11 +296,10 @@ struct Ledger<'r> {
 
 impl<'r> Ledger<'r> {
     fn new(registry: &'r Registry) -> Ledger<'r> {
-        let (consulted, held) = (Consulted::default(), Vec::new());
         Ledger {
             registry,
-            consulted,
-            held,
+            consulted: Consulted::default(),
+            held: Vec::new(),
         }
     }
 
@@ -329,10 +341,8 @@ impl<'r> Ledger<'r> {
             .map(|(id, c, _)| (id.as_str(), c))
             .collect();
         let count = |kind: fn(&Came) -> bool| standing.iter().filter(|(_, c)| kind(c)).count();
-        let (differs, borked) = (
-            count(|c| matches!(c, Came::Differs(_))),
-            count(|c| matches!(c, Came::Bork(_))),
-        );
+        let differs = count(|c| matches!(c, Came::Differs(_)));
+        let borked = count(|c| matches!(c, Came::Bork(_)));
         for (key, n) in [
             ("entries", came.len()),
             ("same", same),
@@ -388,6 +398,46 @@ mod tests {
         let mut reading = Reading::new(INSTRUMENT, SCOPE);
         ledger.tally(&mut reading, left).unwrap();
         reading
+    }
+
+    /// A `--SKIPIF--` runs as upstream's runs a CGI-shaped test's, through
+    /// php-cgi in the runner's environment: ext/soap's skip under the CLI
+    /// alone and sapi/cgi's `skipif.inc`, which looks for php-cgi beside
+    /// `TEST_PHP_EXECUTABLE`, each run the test, and a skip still skips.
+    #[test]
+    fn a_skipif_runs_through_php_cgi_in_the_runner_s_environment() {
+        let manifest = Manifest::load(&crate::built_root()).unwrap();
+        let pin = manifest.pin().unwrap();
+        let file = pin.oracle.file().map(Path::to_path_buf);
+        let (Some(_), Some(tree)) = (
+            Promise::Oracle.or_skip(file).unwrap(),
+            Promise::Tree.or_skip(pin.source.tree()).unwrap(),
+        ) else {
+            return;
+        };
+        let entry = |id: &str, skipif: &str| Entry {
+            id: id.to_owned(),
+            program: Vec::new(),
+            script: "a.php".to_owned(),
+            skipif: Some(skipif.as_bytes().to_vec()),
+            http: crate::witness::makala::Http::get(),
+            ini: Vec::new(),
+        };
+        let oracle = pin.oracle();
+        let soap = "<?php if (php_sapi_name()=='cli') echo 'skip';";
+        let cgi = "<?php include \"skipif.inc\"; ?>";
+        for (id, skipif, wanted) in [
+            ("ext/soap/tests/server029.phpt", soap, None),
+            ("sapi/cgi/tests/bug61605.phpt", cgi, None),
+            (
+                "ext/soap/tests/a.phpt",
+                "<?php echo 'skip because';",
+                Some("because"),
+            ),
+        ] {
+            let came = skipped(&oracle, &tree, &entry(id, skipif)).unwrap();
+            assert_eq!(came.as_deref(), wanted, "{id}");
+        }
     }
 
     /// A narrowed run counts as left out only the tests it asked for that
