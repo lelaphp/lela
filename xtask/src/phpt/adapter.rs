@@ -840,7 +840,7 @@ fn replace_all(regex: &Regex, text: &str, mut with: impl FnMut(&str) -> String) 
 /// The ini a `SKIPIF` runs under after the recipe's: its errors shown and
 /// not those of startup, as upstream's command line has it
 /// (run-tests.php:2134).
-const SKIPIF_SHOWS: [&str; 2] = ["display_errors=1", "display_startup_errors=0"];
+pub(crate) const SKIPIF_SHOWS: [&str; 2] = ["display_errors=1", "display_startup_errors=0"];
 
 /// What a `SKIPIF` wrote on stdout, with upstream's `Termsig=` line,
 /// trimmed as php's `trim` trims and read as upstream reads it (run-tests.php:2154-2190, 3595-3597).
