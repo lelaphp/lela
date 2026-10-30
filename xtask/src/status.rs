@@ -19,6 +19,7 @@ use serde_json::{Map, Value, json};
 
 mod conditions;
 pub(crate) mod every;
+mod facts;
 mod graph;
 mod invocation;
 mod parity;
@@ -47,10 +48,12 @@ pub(crate) const MAP: &str = "AGENTS.md";
 /// The local region file, gitignored, rendered only by name (§5).
 pub(crate) const LOCAL: &str = ".claude/harness.local.md";
 /// The volatile sections of the local file, in the order it renders them:
-/// §5's eight, the instrument readings first and `port-map` with them
+/// §5's ten, the instrument readings first and `port-map` with them
 /// since #148, a reading that moves with the store like the others and is
-/// otherwise renderable only by name.
-pub(crate) const LOCAL_SECTIONS: [&str; 8] = [
+/// otherwise renderable only by name; `ci` and `tickets` last, which ask
+/// GitHub, so they are read where the local file renders and never at a
+/// prompt (#3619).
+pub(crate) const LOCAL_SECTIONS: [&str; 10] = [
     "budget",
     "phpt",
     "witness",
@@ -59,6 +62,8 @@ pub(crate) const LOCAL_SECTIONS: [&str; 8] = [
     "divergence",
     "permits",
     "git",
+    "ci",
+    "tickets",
 ];
 /// What `--session` says under a local file whose regions have no sums.
 const UNRENDERED: &str = "The local facts above are unrendered: `computed run .claude/harness.local.md` \
@@ -127,6 +132,7 @@ fn refuse_under_tracked(section: Section, against: Against<'_>) -> Result<()> {
             | Section::Corpus
             | Section::Parity
             | Section::Tickets
+            | Section::Ci
     );
     if alone && matches!(against, Against::Tree) {
         bail!(
@@ -166,7 +172,13 @@ pub fn render(
             fold_uncreated(budget(manifest, &readings), "crate")?,
             BUDGET,
         ),
-        Section::Divergence => return divergence(manifest, registry, format, uncut),
+        Section::Divergence => {
+            let out = divergence(manifest, registry, format, uncut)?;
+            return Ok(match format {
+                Table::Md => format!("{out}\n{}\n", facts::moves(root, registry, tickets::DAYS)),
+                Table::Json => out,
+            });
+        }
         Section::Phpt => {
             let rows = fold_uncreated(standing(manifest, against.checkout()?, root)?, "scope")?;
             match format {
@@ -184,7 +196,14 @@ pub fn render(
             (instrument(&readings, &every::name(s)), INSTRUMENT)
         }
         Section::Ticket => (instrument(&readings, "ticket"), TICKET),
-        Section::Tickets => return tickets::render(against.checkout()?, root, format),
+        Section::Tickets => {
+            let week = tickets::render(against.checkout()?, root, format)?;
+            return Ok(match format {
+                Table::Md => format!("{week}{}\n", facts::tracker(root, tickets::DAYS)),
+                Table::Json => week,
+            });
+        }
+        Section::Ci => return Ok(facts::ci(root)),
         Section::Track => (
             last_run(&against.checkout()?.history(track_work::INSTRUMENT)?),
             TRACK,
@@ -382,10 +401,6 @@ pub fn session(
         facts.push_str(UNRENDERED);
         facts.push('\n');
     }
-    // A log the week cannot be read from costs the line, never the block.
-    let week = tickets::render(store, root, Table::Md);
-    let week = week.unwrap_or_else(|err| format!("unread: {err:#}\n"));
-    write!(facts, "\n## tickets\n\n{week}").ok();
     // What a person's file carries that parses but does not validate, so
     // an edit is seen before the next call meets it (#3618 ruling 4).
     let defects = manifest.defects();
@@ -1033,27 +1048,42 @@ fn permits(
                 "instrument",
                 "readings",
                 "failures",
+                "last reading",
                 "last failure",
-                "silent",
             ];
-            let head = &head[..if window.is_some() { 5 } else { 4 }];
             out.push_str(&grid(
-                head,
+                &head,
                 instruments.iter().map(|i| {
-                    let candidate = i.silent.map(|s| if s { "candidate" } else { "" });
                     let (readings, failures) = (i.readings.to_string(), i.failures.to_string());
-                    let last = i.last_failure.clone().unwrap_or_default();
-                    [cell(&i.name), readings, failures, last]
-                        .into_iter()
-                        .chain(candidate.map(str::to_owned))
+                    let failed = i.last_failure.clone().unwrap_or_default();
+                    [
+                        cell(&i.name),
+                        readings,
+                        failures,
+                        i.last_reading.clone(),
+                        failed,
+                    ]
                 }),
             ));
-            if window.is_none() {
-                writeln!(
+            match window {
+                None => writeln!(
                     out,
                     "\nThe candidates for silent are not rendered: `[telemetry] silent_days` is unset in seams.toml (harness-design.md §7)."
-                ).ok();
+                ),
+                Some(days) => {
+                    let named: Vec<&str> = (instruments.iter())
+                        .filter(|i| i.silent == Some(true))
+                        .map(|i| i.name.as_str())
+                        .collect();
+                    let named = if named.is_empty() { "none".to_owned() } else { named.join(", ") };
+                    writeln!(
+                        out,
+                        "\nThe candidates for silent, read within {days} days with no failure in them (harness-design.md §7): {named}. `{}` is never one, since its reading cannot fail.",
+                        usage::INSTRUMENT
+                    )
+                }
             }
+            .ok();
             if let Some(note) = log.unreadable_note() {
                 writeln!(out, "\n{note}").ok();
             }
@@ -1170,8 +1200,12 @@ struct InstrumentLine {
     name: String,
     readings: usize,
     failures: usize,
+    /// When the instrument was last read, failing or not.
+    last_reading: String,
     last_failure: Option<String>,
-    /// No failure within the manifest's window; none when it has no window.
+    /// Read within the manifest's window and no failure within it; none
+    /// when it has no window, and for an instrument whose reading cannot
+    /// fail, which is never quiet (#3619).
     silent: Option<bool>,
 }
 
@@ -1181,6 +1215,7 @@ impl InstrumentLine {
             "instrument": self.name,
             "readings": self.readings,
             "failures": self.failures,
+            "last_reading": self.last_reading,
             "last_failure": self.last_failure,
             "silent": self.silent,
         })
@@ -1188,9 +1223,9 @@ impl InstrumentLine {
 }
 
 /// The log per instrument, in name order: readings, failures, the last
-/// failure's time, and, when the manifest has a window, whether no failure
-/// lies within it of now; read off each line's status and time alone
-/// ([`Store::tallies`]).
+/// reading's and the last failure's time, and, when the manifest has a
+/// window, whether a reading and no failure lies within it of now; read
+/// off each line's status and time alone ([`Store::tallies`]).
 fn instruments(
     tallies: &BTreeMap<String, Vec<(reading::Status, String)>>,
     window_days: Option<u64>,
@@ -1211,23 +1246,32 @@ fn instruments(
                 .filter(|(status, _)| *status == reading::Status::Fail)
                 .map(|(_, at)| at.as_str())
                 .collect();
-            let silent = match since {
-                Some(since) => {
-                    let mut recent = false;
-                    for at in &failed {
-                        let at = at
-                            .parse()
-                            .context("a log line whose `at` is not a datetime")?;
-                        recent |= reading::epoch_seconds(&at)? >= since;
-                    }
-                    Some(!recent)
-                }
-                None => None,
-            };
+            let within =
+                |at: &str| -> Result<bool> {
+                    let at = at
+                        .parse()
+                        .context("a log line whose `at` is not a datetime")?;
+                    Ok(since
+                        .is_some_and(|since| reading::epoch_seconds(&at).is_ok_and(|s| s >= since)))
+                };
+            let mut recent = (false, false);
+            for (status, at) in lines {
+                let now = within(at)?;
+                recent.0 |= now;
+                recent.1 |= now && *status == reading::Status::Fail;
+            }
+            let silent =
+                (since.is_some() && name != usage::INSTRUMENT).then_some(recent == (true, false));
             Ok(InstrumentLine {
                 name: name.clone(),
                 readings: lines.len(),
                 failures: failed.len(),
+                last_reading: lines
+                    .iter()
+                    .map(|(_, at)| at.as_str())
+                    .max()
+                    .unwrap_or_default()
+                    .to_owned(),
                 last_failure: failed.iter().max().map(|at| (*at).to_owned()),
                 silent,
             })
@@ -1804,9 +1848,9 @@ mod tests {
     }
 
     #[test]
-    fn the_local_template_is_the_eight_volatile_sections() {
+    fn the_local_template_is_the_ten_volatile_sections() {
         let template = local_template();
-        assert_eq!(LOCAL_SECTIONS.len(), 8, "harness-design.md §5 says eight");
+        assert_eq!(LOCAL_SECTIONS.len(), 10, "harness-design.md §5 says ten");
         for name in LOCAL_SECTIONS {
             let line = opener(&template, name).unwrap();
             assert!(line.contains(" volatile "), "{line}");

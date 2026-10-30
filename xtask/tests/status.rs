@@ -522,9 +522,12 @@ fn tickets_counts_the_weeks_closes_in_the_main_worktrees_store_and_the_checkouts
         .unwrap();
 
     let md = status(&checkout, &["--section", "tickets"]).ok();
+    // The tracker's line follows, unknown where the scratch has no
+    // GitHub to ask (#3619).
     assert_eq!(
         md,
-        "the last 7 days: 3 closes, 1 of them withdrawals, opened 3 tickets, 1.00 per close\n"
+        "the last 7 days: 3 closes, 1 of them withdrawals, opened 3 tickets, 1.00 per close\n\
+         on the tracker: unknown: GitHub could not be asked\n"
     );
     let json = status(&checkout, &["--section", "tickets", "--format", "json"]).ok();
     let json: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1084,10 +1087,12 @@ fn permits_renders_the_bench_reading_as_before() {
     );
 }
 
-/// The query behind CI's §7 section (harness-design.md): readings and
-/// failures per instrument from the log, and an instrument with readings
-/// but no failure in fourteen days is a candidate for silent; one whose
-/// fixture failed within the window is not.
+/// The query behind CI's §7 section (harness-design.md): readings,
+/// failures, the last reading and the last failure per instrument from the
+/// log. An instrument read within fourteen days with no failure in them is
+/// a candidate for silent; one whose fixture failed within the window is
+/// not, nor one with no reading in it, nor `usage`, whose reading cannot
+/// fail (#3619).
 #[test]
 fn permits_lists_the_instruments_and_the_candidates_for_silent() {
     let root = scratch("silent");
@@ -1104,6 +1109,7 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
     let mut budget = Reading::new("budget", "php_heap");
     budget.status = Status::Pass;
     store.record(std::slice::from_ref(&budget)).unwrap();
+    budget.at = xtask::reading::now().unwrap();
     store.record(std::slice::from_ref(&budget)).unwrap();
 
     let mut vocab = Reading::new("vocab", "php_heap");
@@ -1117,11 +1123,23 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
     let mut old = Reading::new("clippy", "php_heap");
     old.status = Status::Fail;
     store.record(std::slice::from_ref(&old)).unwrap();
+    old.status = Status::Pass;
+    old.at = xtask::reading::now().unwrap();
+    store.record(std::slice::from_ref(&old)).unwrap();
+
+    let mut quiet = Reading::new("test", "php_heap");
+    quiet.status = Status::Pass;
+    store.record(std::slice::from_ref(&quiet)).unwrap();
+
+    let mut usage = Reading::new("usage", "3619");
+    usage.status = Status::Pass;
+    usage.at = xtask::reading::now().unwrap();
+    store.record(std::slice::from_ref(&usage)).unwrap();
 
     let md = status(&root, &["--section", "permits"]).ok();
     assert!(
-        !md.contains(" silent |") && md.contains("silent_days"),
-        "no window in the manifest: no silent column, and the key is named: {md}"
+        md.contains("| last reading | last failure |") && md.contains("silent_days"),
+        "no window in the manifest: no candidates, and the key is named: {md}"
     );
     let json = status(&root, &["--section", "permits", "--format", "json"]).ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1136,13 +1154,19 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
             .to_owned()
     };
     assert!(row("budget").contains("| 2 | 0 |"), "{}", row("budget"));
-    assert!(row("budget").contains("candidate"), "{}", row("budget"));
     assert!(row("vocab").contains("| 2 | 1 |"), "{}", row("vocab"));
-    assert!(!row("vocab").contains("candidate"), "{}", row("vocab"));
     assert!(
-        row("clippy").contains("candidate"),
-        "a failure at the epoch is not one in the window: {}",
+        row("clippy").contains("| 2 | 1 | 20") && row("clippy").contains("| 1970-01-01"),
+        "the last reading is today's and the last failure the epoch's: {}",
         row("clippy")
+    );
+    let named = md
+        .lines()
+        .find(|l| l.starts_with("The candidates for silent"))
+        .unwrap_or_else(|| panic!("{md}"));
+    assert!(
+        named.contains(": budget, clippy. `usage` is never one"),
+        "a failure at the epoch is not one in the window, and an instrument unread in it is not quiet: {named}"
     );
 
     let json = status(&root, &["--section", "permits", "--format", "json"]).ok();
@@ -1160,6 +1184,8 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
     assert_eq!(of("budget")["silent"], true);
     assert_eq!(of("vocab")["failures"], 1);
     assert_eq!(of("vocab")["silent"], false);
+    assert_eq!(of("test")["silent"], false);
+    assert_eq!(of("usage")["silent"], serde_json::Value::Null);
 }
 
 /// The weekly bar table is gone (#2934, #2973): `--section week` and
