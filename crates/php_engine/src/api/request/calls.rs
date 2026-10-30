@@ -1684,11 +1684,15 @@ impl Request {
         }
     }
 
-    fn native_trampoline_as(
+    /// The native trampoline of `entry` under `name`, carrying
+    /// `reserved` where it is given; the one the request already made
+    /// with the same where it made one.
+    fn native_trampoline_as<T: std::any::Any + Copy + PartialEq + Send>(
         &mut self,
         name: &[u8],
         entry: crate::api::abi::Entry,
         is_instance: bool,
+        reserved: Option<T>,
     ) -> Option<Function> {
         self.trampoline_made(
             |made| {
@@ -1696,9 +1700,25 @@ impl Request {
                 if std::ptr::fn_addr_eq(made_entry, entry))
                     && *made.decl.function.name.0 == *name
                     && made.decl.is_instance == is_instance
+                    && match (&made.reserved, &reserved) {
+                        (Some(made), Some(reserved)) => made.is(reserved),
+                        (None, None) => true,
+                        _ => false,
+                    }
             },
-            |_| Some(CallTrampoline::native(entry, name, is_instance)),
+            move |_| {
+                let reserved = reserved.map(crate::trampoline::Reserved::new);
+                Some(CallTrampoline::native(entry, name, is_instance, reserved))
+            },
         )
+    }
+
+    /// What the native trampoline being served carries in `reserved[]`
+    /// ([`Symbols::native_trampoline_reserving`]), where it is a `T`.
+    pub(crate) fn active_reserved<T: std::any::Any + Copy>(&self) -> Option<T> {
+        let function = self.active_native_function()?;
+        let (made, _) = self.trampoline_of(function)?;
+        made.reserved.as_ref()?.get::<T>()
     }
 
     /// Whether `function` is a native [`Symbols::native_trampoline`]
@@ -1850,7 +1870,28 @@ impl Symbols<&mut Request> {
     /// [`ObjectHandlers::get_method`]: crate::api::abi::ObjectHandlers::get_method
     /// [`ObjectHandlers::get_closure`]: crate::api::abi::ObjectHandlers::get_closure
     pub fn native_trampoline(self, name: &[u8], entry: crate::api::abi::Entry) -> Option<Function> {
-        self.0.native_trampoline_as(name, entry, true)
+        self.0.native_trampoline_as::<()>(name, entry, true, None)
+    }
+
+    /// [`Symbols::native_trampoline`] carrying `reserved`, a value of
+    /// the extension's own its body reads back with
+    /// [`Frames::reserved`], as php's `internal_function.reserved[]`:
+    /// what `zend_ffi_cdata_get_closure` makes (`Z/ext/ffi/ffi.c:2139`),
+    /// the C function's type and address on the function, so the call
+    /// holds no receiver and the `FFI\CData` the callee was read from is
+    /// given up before the arguments are sent. One per entry, name and
+    /// reserved value: a value equal to one the request made a trampoline
+    /// with finds that one.
+    ///
+    /// [`Frames::reserved`]: crate::api::request::Frames::reserved
+    pub fn native_trampoline_reserving<T: std::any::Any + Copy + PartialEq + Send>(
+        self,
+        name: &[u8],
+        entry: crate::api::abi::Entry,
+        reserved: T,
+    ) -> Option<Function> {
+        self.0
+            .native_trampoline_as(name, entry, true, Some(reserved))
     }
 
     /// [`Symbols::native_trampoline`] for a call named on the class,
@@ -1864,7 +1905,7 @@ impl Symbols<&mut Request> {
         name: &[u8],
         entry: crate::api::abi::Entry,
     ) -> Option<Function> {
-        self.0.native_trampoline_as(name, entry, false)
+        self.0.native_trampoline_as::<()>(name, entry, false, None)
     }
 }
 

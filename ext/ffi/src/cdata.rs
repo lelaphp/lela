@@ -1302,13 +1302,19 @@ impl ObjectHandlers for Handlers {
         if v.freed() || v.ptr == 0 {
             return None;
         }
-        func_pointee(req, v.ty)?;
-        let function = req
-            .symbols_mut()
-            .native_trampoline(b"__invoke", crate::call::invoke)?;
+        let func = func_pointee(req, v.ty)?;
+        let pointer = crate::call::CFunction {
+            func,
+            addr: ffi::read::<usize>(v.ptr),
+        };
+        let function = req.symbols_mut().native_trampoline_reserving(
+            b"__invoke",
+            crate::call::invoke,
+            pointer,
+        )?;
         Some(ClosureInfo {
             function,
-            this: Some(object),
+            this: None,
             scope: None,
             called_scope: None,
             bound: None,

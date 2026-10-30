@@ -47,11 +47,41 @@ pub(crate) enum Served {
     ClosureCall,
 }
 
-/// One function php makes on a lookup: what serves it, and the method
-/// declaration it carries.
+/// One function php makes on a lookup: what serves it, the method
+/// declaration it carries, and what a native's maker reserved on it.
 pub(crate) struct CallTrampoline {
     pub(crate) via: Via,
     pub(crate) decl: MethodDecl,
+    /// `internal_function.reserved[]`, which only a [`Via::Native`]
+    /// carries.
+    pub(crate) reserved: Option<Reserved>,
+}
+
+/// php's `internal_function.reserved[]` on a native trampoline: a value
+/// of the extension's own the made function carries for its body to
+/// read back ([`Frames::reserved`]), as `zend_ffi_cdata_get_closure`
+/// puts the C function's type and address in `reserved[0]` and
+/// `reserved[1]` (`Z/ext/ffi/ffi.c:2186-2187`). Two natives made of one
+/// entry and name are one function where their reserved values are of
+/// one type and equal.
+///
+/// [`Frames::reserved`]: crate::api::request::Frames::reserved
+pub(crate) struct Reserved(Box<dyn std::any::Any + Send>);
+
+impl Reserved {
+    pub(crate) fn new<T: std::any::Any + Send>(value: T) -> Self {
+        Reserved(Box::new(value))
+    }
+
+    /// Whether this holds `value`, of its type and equal to it.
+    pub(crate) fn is<T: std::any::Any + PartialEq>(&self, value: &T) -> bool {
+        self.0.downcast_ref::<T>() == Some(value)
+    }
+
+    /// The value held, where it is a `T`.
+    pub(crate) fn get<T: std::any::Any + Copy>(&self) -> Option<T> {
+        self.0.downcast_ref::<T>().copied()
+    }
 }
 
 /// What a made function is made of.
@@ -107,6 +137,7 @@ impl CallTrampoline {
         CallTrampoline {
             via: Via::Invoke(function),
             decl: public_method(function_decl, true),
+            reserved: None,
         }
     }
 
@@ -136,6 +167,7 @@ impl CallTrampoline {
                 is_abstract: of.is_abstract,
                 ..public_method(function, !is_static)
             },
+            reserved: None,
         }
     }
 
@@ -145,12 +177,19 @@ impl CallTrampoline {
     /// `ZEND_ACC_VARIADIC`, as a magic method's trampoline is, so a named
     /// argument is php's `Unknown named parameter`.
     /// A trampoline a class's `get_static_method` answers is
-    /// `ZEND_ACC_STATIC` beside it, `is_instance` false.
-    pub(crate) fn native(entry: crate::api::abi::Entry, name: &[u8], is_instance: bool) -> Self {
+    /// `ZEND_ACC_STATIC` beside it, `is_instance` false; `reserved` is
+    /// what the maker put in `reserved[]` for the body to read.
+    pub(crate) fn native(
+        entry: crate::api::abi::Entry,
+        name: &[u8],
+        is_instance: bool,
+        reserved: Option<Reserved>,
+    ) -> Self {
         let function = native_function(name);
         CallTrampoline {
             via: Via::Native(entry),
             decl: public_method(function, is_instance),
+            reserved,
         }
     }
 

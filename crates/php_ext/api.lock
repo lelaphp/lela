@@ -717,6 +717,7 @@ request::Frames::forbid_dynamic_call
 request::Frames::frameless
 request::Frames::of
 request::Frames::op_array
+request::Frames::reserved
 request::Frames::return_value_used
 request::Frames::scope
 request::Frames::set_caller_var
@@ -1092,6 +1093,7 @@ request::Symbols::method_row
 request::Symbols::method_rows
 request::Symbols::native_static_trampoline
 request::Symbols::native_trampoline
+request::Symbols::native_trampoline_reserving
 request::Symbols::property_info_row
 request::Symbols::property_info_rows
 request::Symbols::register_constant

@@ -69,16 +69,46 @@ pub(crate) fn trampoline(req: &mut Request) -> Result<Owner<Value>, Thrown> {
 /// ```expect
 /// int(3)
 /// ```
+///
+/// The call holds no receiver: the `FFI\CData` a struct's field read
+/// for it is given up before the arguments are sent, so the callback's
+/// argument and the struct returned take its number, and the frame
+/// names no class (gh16013.phpt):
+///
+/// ```php
+/// $ffi = FFI::cdef("typedef struct { int field; } S; typedef struct { S (*f)(S); } CB;");
+/// $cb = $ffi->new("CB");
+/// $cb->f = function ($v) { debug_print_backtrace(); return $v; };
+/// $s = $ffi->new("S"); $s->field = 10;
+/// var_dump(($cb->f)($s));
+/// ```
+/// ```expect
+/// #0 %s(6): {closure:%s:4}(Object(FFI\CData:struct <anonymous>))
+/// #1 %s(6): __invoke(Object(FFI\CData:struct <anonymous>))
+/// object(FFI\CData:struct <anonymous>)#5 (1) {
+///   ["field"]=>
+///   int(10)
+/// }
+/// ```
 pub(crate) fn invoke(req: &mut Request) -> Result<Owner<Value>, Thrown> {
-    let Some(this) = req.frames().this() else {
-        return Ok(Owner::null());
+    let Some(CFunction { func, addr }) = req.frames().reserved::<CFunction>() else {
+        return Err(fatal(
+            req,
+            "InternalError: a C function pointer's trampoline carries no function",
+        ));
     };
-    let v = view(req, this);
-    let Some(func) = func_pointee(req, v.ty) else {
-        return Err(ffi_error(req, "Attempt to call non C function pointer"));
-    };
-    let addr = ffi::read::<usize>(v.ptr);
     call(req, "__invoke", func, addr)
+}
+
+/// What `zend_ffi_cdata_get_closure` keeps in the trampoline's
+/// `reserved[]` (`Z/ext/ffi/ffi.c:2186-2187`): the function type the
+/// pointer points to and the address it held when the call was made.
+/// The call holds no receiver, so the `FFI\CData` read for it is given
+/// up as php gives it up, before the arguments are sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CFunction {
+    pub(crate) func: TypeId,
+    pub(crate) addr: usize,
 }
 
 /// The function's parameters, its return, its calling convention and
