@@ -635,6 +635,14 @@ avoid_from = { file = "CONTEXT.md", section = "Harness" } # grammar: avoid_from,
 text = "The Harness section's _Avoid_ words appear in no public item name or rustdoc prose of the harness; xtask/fixtures/** are other crates' sources and are not read."
 
 [[rule]]
+id = "vocab.sapi"
+scope = "sapi/*"
+avoid_from = "CONTEXT.md" # grammar: avoid_from, harness §5
+# vocab.avoid's scope gaining sapi/* (#3620 D4, #3624), as an addition: a
+# host crate is held to the whole glossary, as an engine or extension crate is.
+text = "The glossary's _Avoid_ words appear in no public item name or rustdoc prose of a host; a lock line mirrors php's names and is not read."
+
+[[rule]]
 id = "generated.committed"
 generated = ["crates/clippy.toml", "ext/clippy.toml", "sapi/clippy.toml"] # grammar: generated, design §10
 text = "Each clippy.toml the row names is generated from the manifest and committed; a stale copy fails budget."
