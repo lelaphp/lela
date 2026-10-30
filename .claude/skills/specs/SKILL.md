@@ -19,7 +19,7 @@ The coordinator keeps the builder **slots** full and merges what they finish. A 
 
 The coordinator owns three phases, recorded in the existing checkpoint:
 
-- **Building:** dispatch independent specs within the shared capacity. Require /build's preflight in each actual allocated checkout before implementation. Runtime completion delivers the builder's exact final handoff; the ready record, not an acknowledgment, establishes merge readiness.
+- **Building:** dispatch independent specs within the shared capacity. Require /build's preflight in each actual allocated checkout before implementation. Runtime completion delivers the builder's exact final handoff; the ready record, not an acknowledgment, establishes merge readiness. `ticket ready` is the builder's hold: it refuses while `done` in the builder's worktree is unmet, and `SubagentStop` warns with the same list.
 - **Integrating:** select a bounded batch from branches already ready and integrate it serially. A single ready branch can be a batch; running builders need not finish first. Where ready branches share a dependency, integrate the shared engine change first where practical, then the extension changes, before refreshing the combined tree.
 - **Publishing:** save the comparison base and candidate head, freeze that source, run §6 and push as soon as its comparisons and `done --base origin/main` pass. Broader production qualification continues separately. Finish publication before starting another integration batch.
 
@@ -34,8 +34,6 @@ After publication, reassess and fill the next slots. Builder and command complet
 **Blocker first.** A crash, a regression the merge check found, or a harness defect that stops a merge takes the next slot ahead of any spec. A regression goes back to a builder on its branch, a fresh one when the first has ended, with the test names. Harness work fills a slot only when a merge waits on it (#653).
 
 Otherwise the slot gets a **spec**, drawn from the parity tracks in this order: a track's open, unblocked ticket that is already a spec's size; several of one track's smaller tickets on one code path bundled into one spec (the first compiler batch, #1187, #1188 and #1189, is 91 tests over one emit path); then a spec cut from a chart's Not yet specified, as step 2 cuts. A ready ticket that isn't a spec joins the spec that shares its code path (#667 bundled five compiler refusals; #668 absorbed #661, #529 and #533), or waits for one. Every slot holds a spec or a blocker.
-
-Until [each run works in its own copy of the pinned tree](https://github.com/mitchellvanw/dax-php/issues/1183) has merged, it is a blocker: builders running phpt at once in the one pinned php-src tree strand programs there that bork tests the oracle meets. The crashes of the runtime track (#1192, #1193, #1194) are blockers too.
 
 ## 2. Cut a spec
 
@@ -57,10 +55,10 @@ The cut is done when you can name the group, its track, its test count and the c
 
 ## 3. Write the spec
 
-The body is the user-level `to-spec` skill's template (Problem Statement, Solution, User Stories, Implementation Decisions, Testing Decisions, Out of Scope, Further Notes), synthesised from the cut, followed by this repository's `## Acceptance criteria` boxes, which `xtask ticket read` holds, and `## Blocked by`. #751 is the model.
+The body is the house shape every ticket here has, synthesised from the cut: `## What to build`, `## Acceptance criteria` as boxes, which `xtask ticket read` holds, and `## Blocked by`.
 
-- The Problem Statement carries the measured counts and the commit. Out of Scope names the neighbouring spec. Further Notes names the branch the spec is laid on, when it isn't `main`.
-- The boxes cover every cause of the group, each met and witnessed or named and filed; the before and after counts in the closing comment; and `cargo xtask done` listing nothing unmet for the crates touched. Regressions are the merge check's, so no box asks the builder for them.
+- What to build carries the measured counts and the commit, the group's causes and php-src files, the neighbouring spec it stops at, and the branch the spec is laid on when it isn't `main`.
+- The boxes cover every cause of the group, each met and witnessed or named and filed; the before and after counts in the closing comment; and `cargo xtask ticket ready <n>` accepted. Regressions are the merge check's, so no box asks the builder for them.
 - File it with the labels `ready-for-agent` and its track's `track:parity-<name>`, and no parent: a chart takes no sub-issues (#619), and the label is what groups the track. A spec that absorbs a track's tickets names them, and each gets a comment linking the spec.
 - Anything a person must rule on first (a manifest row, a ceiling, a porting key, a design line) is its own `for-a-person` ticket, wired with `gh issue edit <spec> --add-blocked-by <n>`. A blocked spec waits, and the slot takes the next cut.
 
@@ -93,7 +91,7 @@ After the last merge of a batch, before any push, and never while a merge commit
 1. `cargo xtask port-map` when `crates/php_ext` changed.
 2. `cargo xtask witness --unmeasured`: every crate without a passing reading over its tree now. The hook runs no witness on a merge commit and no crosscheck at all (harness revision 140), so this is where the batch's merged tree is witnessed, and `cargo xtask crosscheck` beside it renders every extension the binary carries over that tree once per batch, the two sharing the one build of the linked engine; a `fail crosscheck` on an extension the batch touched is what `done` refuses at the push. The ones measured over the tree that landed stand and are not run again (#1312), and before revision 140 the hook ran only staged crates' witnesses, which is how #681 broke ext/reflection unseen until #733.
 3. Establish the baseline before launching candidate comparisons. Use `cargo xtask phpt --base <base> --per-commit --jobs 3` (#3605) to collect missing per-commit subsets with one base checkout and host build under the caller's current manifest, registry and recipe. Recover the additional `Zend/tests`, `tests` and `sapi/cli` runs below with explicit `--base <base> --subset <subset> --jobs 3` only when matching runs are absent. Use the retained-run mechanism; running the old checkout's harness directly loads its old recipe and cannot establish this comparison. A missing or mismatched baseline is unresolved evidence, so recover it before spending capacity on a comparison that can only skip.
-4. Build all four correctness hosts (CLI, CGI, FPM and phpdbg) in `release-da` before PHPT; freshness applies to every host the lane can serve through. On that fresh build, the profile CI's lanes run (harness revision 82), the lane and `Zend/tests`, each held test by test against the merge base, the tip before the batch, whose runs the cut's first step kept (#664). `xtask phpt` runs `target/release-da/php` ahead of a fresh `release` one, so a base kept on `release` compares across profiles: a test met there and missed here is an overflow check or a debug assertion firing, a bug to file and not the batch's regression. `target/release/xtask` is the command hook's harness, not a lane's, and stays a release build. The witness and the four runs read the tree and not each other, and each run works in its own copy of the pinned tree (#1183), so they run at once; the lane is the longest:
+4. Build all four correctness hosts (CLI, CGI, FPM and phpdbg) in `release-da` before PHPT; freshness applies to every host the lane can serve through. On that fresh build, the profile CI's lanes run (harness revision 82), the lane and `Zend/tests`, each held test by test against the merge base, the tip before the batch, whose runs the cut's first step kept (#664). `xtask phpt` runs `target/release-da/php` ahead of a fresh `release` one, so a base kept on `release` compares across profiles: a test met there and missed here is an overflow check or a debug assertion firing, a bug to file and not the batch's regression. `target/release/xtask` is the command hook's harness, not a lane's, and stays a release build. The witness and the four runs read the tree and not each other, and each run works in its own copy of the pinned tree, so they run at once; the lane is the longest:
    ```
    cargo build --profile release-da -p php_sapi_cli -p php_sapi_cgi -p php_sapi_fpm -p php_sapi_phpdbg
    cargo build --release -p xtask
@@ -114,12 +112,7 @@ After the last merge of a batch, before any push, and never while a merge commit
 
 A regression sends its branch back as a blocker (step 1), and the rest of the batch goes on without it: return the checkout to the base with `git reset --keep <base>` (the merges are unpushed, each branch keeps its own commits, and `--keep` leaves a person's uncommitted edit standing where `--hard` would discard it), merge the others again and run the check again.
 
-**What stops a merge and goes to a person.** A ceiling (`api_items`, a crate's line budget), a `done` refusal on a crate without `porting` whose subset doesn't fully pass (until #725 lands), or a design line for a cross-extension export. File it `for-a-person` with the exact refusal and the saved resolution, as #684 did, and merge the rest of the batch.
-
-## When the instruments track lands
-
-- [Every miss keeps its reason on the run](https://github.com/mitchellvanw/dax-php/issues/1185): step 2 groups by `cargo xtask phpt --census`'s signatures, read off the run, and `first-failures.awk` is retired with the commit that says so.
-- [The oracle's verdict per test is kept as the target](https://github.com/mitchellvanw/dax-php/issues/1184): a group's count is the target tests it misses, never a test the oracle skips or misses, and the Problem Statement's counts are met-of-target.
+**What stops a merge and goes to a person.** A ceiling (`api_items`, a crate's line budget), a `done` refusal on a touched crate's phpt subset, or a design line for a cross-extension export. File it `for-a-person` with the exact refusal and the saved resolution, as #684 did, and merge the rest of the batch.
 
 ## 7. Free the disk
 
