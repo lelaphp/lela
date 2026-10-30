@@ -578,3 +578,48 @@ fn a_conflicted_merge_refuses_a_reworded_reason_and_a_row_neither_side_carries()
         );
     }
 }
+
+/// An `[[owed]]` row named by its instrument (#3636): `held_at` added to
+/// two rows is written, and the negative controls beside it, a changed
+/// `when` and a second row of one instrument, are refused with nothing
+/// written (xtask/fixtures/steer/README.md).
+#[test]
+fn a_key_added_to_an_owed_row_is_written_and_a_change_or_a_second_row_is_refused() {
+    let tracked = fixture("owed/tracked.toml");
+    let steered = |name: &str| {
+        let root = scratch_at(&format!("owed-{name}"), "seams.toml", &tracked);
+        let proposal = root.join("proposed.toml");
+        fs::write(&proposal, fixture(&format!("owed/{name}.toml"))).expect("the proposal");
+        let reading = steer::run(&root, &harness(), "seams.toml", &proposal, false)
+            .expect("the instrument runs");
+        let now = fs::read_to_string(root.join("seams.toml")).expect("the manifest");
+        (reading, now)
+    };
+    let (reading, now) = steered("held-at");
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert!(
+        reading
+            .message
+            .ends_with("owed[phpt].held_at, owed[crosscheck].held_at"),
+        "{}",
+        reading.message
+    );
+    assert_eq!(
+        now,
+        fixture("owed/held-at.toml"),
+        "the proposal is the file now"
+    );
+    for (name, path) in [
+        ("changed-when", "owed[crosscheck].when"),
+        ("second-row", "owed[phpt] twice"),
+    ] {
+        let (reading, now) = steered(name);
+        assert_eq!(reading.status, Status::Fail, "{name}: {}", reading.message);
+        assert!(
+            reading.message.contains(path),
+            "{name} is refused at {path}: {}",
+            reading.message
+        );
+        assert_eq!(now, tracked, "{name}: a refused proposal writes nothing");
+    }
+}

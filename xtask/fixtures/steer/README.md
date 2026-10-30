@@ -38,3 +38,15 @@ never the markers:
 
 `xtask/tests/steer.rs` lays each merge in a scratch repository and runs
 all four.
+
+## An `[[owed]]` row (#3636)
+
+`owed/tracked.toml` is a slice of `seams.toml`'s `[[owed]]` rows, each
+named by its `instrument`. `owed/held-at.toml` is the control: `held_at`
+added to both rows, two additions, written. The negative controls beside
+it are refused with nothing written:
+
+| proposal | what it does | the path the refusal names |
+|---|---|---|
+| `owed/changed-when.toml` | changes a `when` the row already carries | `owed[crosscheck].when` |
+| `owed/second-row.toml` | adds a second row for an instrument already owed | `owed[phpt] twice` |

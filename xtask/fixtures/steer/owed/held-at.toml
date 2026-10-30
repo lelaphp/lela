@@ -1,0 +1,13 @@
+# A slice of seams.toml's [[owed]] rows (README.md).
+
+[[owed]]
+instrument = "phpt"
+crates = "*"
+when = "phpt-subset"
+held_at = "merge"
+
+[[owed]]
+instrument = "crosscheck"
+crates = "ext/*"
+when = "carried"
+held_at = "merge"

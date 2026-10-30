@@ -108,8 +108,9 @@ pub(crate) fn binding(root: &Path) -> Result<Manifest> {
 /// The keys an array-of-tables row is identified by, in order: a proposal
 /// that adds a row whose identity an existing row already carries is
 /// refused, since two rows of one name is how a row is shadowed rather
-/// than added.
-const IDENTITY: [&str; 3] = ["id", "name", "from"];
+/// than added. An `[[owed]]` row is one per instrument, so its
+/// `instrument` names it, and a key added to one is an addition (#3636).
+const IDENTITY: [&str; 4] = ["id", "name", "from", "instrument"];
 
 /// What a proposal does to the tracked file, as the judge reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -445,9 +446,9 @@ fn rows(array: &[Value]) -> bool {
     !array.is_empty() && array.iter().all(Value::is_table)
 }
 
-/// What names one row of an array of tables: its `id`, else its `name`,
-/// else the row itself rendered, which no two rows share unless they are
-/// the same row.
+/// What names one row of an array of tables: the first of [`IDENTITY`]
+/// it carries, else the row itself rendered, which no two rows share
+/// unless they are the same row.
 fn identity(row: &Value) -> String {
     for key in IDENTITY {
         if let Some(Value::String(value)) = row.get(key) {
@@ -681,6 +682,28 @@ mod tests {
             merge().judge(&head).expect("all parse"),
             Verdict::Refused(vec!["divergence[trace:merged] dropped".to_owned()]),
             "HEAD's file alone drops what MERGE_HEAD adds"
+        );
+    }
+
+    /// An `[[owed]]` row is named by its instrument (#3636): a key added to
+    /// one is an addition, a changed value and a second row are not.
+    #[test]
+    fn an_owed_row_is_named_by_its_instrument() {
+        let old = "[[owed]]\ninstrument = \"phpt\"\ncrates = \"*\"\nwhen = \"phpt-subset\"\n";
+        assert_eq!(
+            verdict(old, &format!("{old}held_at = \"merge\"\n")),
+            Verdict::Additive(vec!["owed[phpt].held_at".to_owned()])
+        );
+        assert_eq!(
+            verdict(old, &old.replace("phpt-subset", "always")),
+            Verdict::Refused(vec!["owed[phpt].when".to_owned()])
+        );
+        assert_eq!(
+            verdict(
+                old,
+                &format!("{old}[[owed]]\ninstrument = \"phpt\"\ncrates = \"*\"\n")
+            ),
+            Verdict::Refused(vec!["owed[phpt] twice".to_owned()])
         );
     }
 
