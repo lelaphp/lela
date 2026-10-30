@@ -73,8 +73,9 @@ pub(crate) use bench::{BAR_MS, run_bench, scratch_workspace};
 pub use call::{Arguments, Call};
 pub(crate) use diff::judge_files;
 pub(crate) use diff::{run_diff, working_files};
+pub(crate) use hand_off::walk;
 pub(crate) use kept::kept_changes;
-pub(crate) use ledger::judged;
+pub(crate) use ledger::{judged, written};
 pub use rules::{Finding, Judgement, Kind, judge, judged_at_the_call};
 
 /// The instrument name every reading of permit carries.

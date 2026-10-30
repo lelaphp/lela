@@ -16,6 +16,7 @@ use super::hand_off::hand_off;
 use super::ledger;
 use super::operation;
 use super::rules::{Judgement, Kind, deny_output, judge};
+use super::writes;
 use super::{INSTRUMENT, STALE_RULE, UNJUDGED_RULE};
 use crate::built::{self, Judge, Refusal};
 use crate::key::Snapshot;
@@ -184,6 +185,7 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
                 if let Err(err) = ledger::count(&checkout, &judgement.judged) {
                     eprintln!("xtask permit: the calls judged were not counted: {err:#}");
                 }
+                record_the_write(&workspace, &call, &judgement);
             }
             if let Err(err) = record(&checkout, &call, &judgement, adapter) {
                 eprintln!("xtask permit: the decision stands but was not recorded: {err:#}");
@@ -257,6 +259,41 @@ fn record_the_operation(root: &Path, call: &Call, judgement: &Judgement) {
     }
     if let Err(err) = operation::record(root, call, &Line::read(command)) {
         eprintln!("xtask permit: the operation's starter was not recorded: {err:#}");
+    }
+}
+
+/// The checkout an admitted writing call is placed in, kept under its
+/// session and agent for the Stop to hold (#3618 ruling 1): a file's by
+/// the file, a `Bash` line's where it runs from the call's directory
+/// ([`operation::ran_in`]) unless it only reads ([`writes::reads_only`]);
+/// a place in no checkout of the repository is none. Best effort, as
+/// recording the decision is.
+fn record_the_write(workspace: &Path, call: &Call, judgement: &Judgement) {
+    if judgement.denial().is_some() {
+        return;
+    }
+    let checkout = match (call.command(), call.path(workspace)) {
+        (Some(command), _) => {
+            let line = Line::read(command);
+            if writes::reads_only(&line, workspace) {
+                return;
+            }
+            let start = call.cwd.as_deref().map_or(workspace, Path::new);
+            operation::ran_in(start, Some(&line))
+        }
+        (None, Some(path)) => match path.ancestors().find(|dir| dir.is_dir()) {
+            Some(dir) => operation::ran_in(dir, None),
+            None => return,
+        },
+        (None, None) => return,
+    };
+    let ours = crate::track::worktrees(workspace).is_ok_and(|all| {
+        all.iter()
+            .any(|(dir, _)| dir.canonicalize().ok().as_ref() == Some(&checkout))
+    });
+    let agent = call.agent_id.as_deref().unwrap_or_default();
+    if ours && let Err(err) = ledger::wrote(workspace, &call.session_id, agent, checkout) {
+        eprintln!("xtask permit: the checkout this call wrote in was not recorded: {err:#}");
     }
 }
 

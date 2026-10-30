@@ -1,12 +1,13 @@
 //! What permit keeps beside its readings, in main's store, since a reading
 //! per call would grow the store by one per `Bash` call (#3619): how many
 //! calls each rule judged, the denominator its denials are read against,
-//! and the calls handed on since one was last judged.
+//! and per session and agent the checkouts its writing calls were placed
+//! in, which the Stop holds (harness-design.md §4.5, #3618 ruling 1).
 //!
 //! Each is one JSON file rewritten whole under a lock, since the two
 //! adapters and every session's calls write it at once.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -26,6 +27,11 @@ const HANDED: &str = "handed.json";
 pub(super) const BURST: usize = 3;
 /// The window a burst falls in, in seconds.
 const WINDOW: u64 = 60;
+
+/// The checkouts written in per agent of one session, under
+/// `<main store>/permit/wrote/<session>.json`; the main loop is the agent
+/// named by the empty string.
+type Wrote = BTreeMap<String, BTreeSet<PathBuf>>;
 
 /// `permit/` in the store of the main checkout of the repository `root` is
 /// in, or of `root` where it is in none.
@@ -96,4 +102,40 @@ pub(super) fn handed(root: &Path, id: &str) -> Result<usize> {
 /// The calls each rule judged, as the store under `store` keeps them.
 pub(crate) fn judged(store: &Store) -> BTreeMap<String, u64> {
     read(&store.root().join("permit").join(JUDGED))
+}
+
+/// The file of `session`'s writes, its id made a file name.
+fn wrote_path(root: &Path, session: &str) -> PathBuf {
+    let name: String = session
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    dir(root).join("wrote").join(format!("{name}.json"))
+}
+
+/// `checkout` added to those `agent` of `session` wrote in.
+pub(super) fn wrote(root: &Path, session: &str, agent: &str, checkout: PathBuf) -> Result<()> {
+    if session.is_empty() {
+        return Ok(());
+    }
+    update(&wrote_path(root, session), |wrote: &mut Wrote| {
+        wrote.entry(agent.to_owned()).or_default().insert(checkout);
+    })
+}
+
+/// The checkouts `agent` of `session` wrote in, as recorded in the store
+/// of the repository `root` is in; none for a session that wrote nothing.
+pub(crate) fn written(root: &Path, session: &str, agent: &str) -> Vec<PathBuf> {
+    let mut wrote: Wrote = read(&wrote_path(root, session));
+    wrote
+        .remove(agent)
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
 }

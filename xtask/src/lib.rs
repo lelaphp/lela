@@ -314,11 +314,7 @@ fn command_line() -> Result<()> {
             done::run_hook(&root, &manifest, &Registry::load(&root)?, &store);
             Ok(())
         }
-        Command::Done { base, not_run, .. } => {
-            let registry = Registry::load(&root)?;
-            let base = base.as_deref();
-            done::run(&root, &manifest, &registry, &store, base, &not_run)
-        }
+        asked @ Command::Done { .. } => done::command(&root, &manifest, &store, asked),
         Command::Bench(ask) => bench_command(&root, &store, &ask),
         Command::Budget { staged } => {
             record(&store, &budget::measure(&root, &manifest, &store, staged)?)

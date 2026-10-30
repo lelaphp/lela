@@ -64,6 +64,8 @@ divergence::Status::as_str
 divergence::reason
 done::Base
 done::Base::of
+done::Caller
+done::Caller::ambient
 done::Verdict
 done::Verdict::met
 done::Verdict::render

@@ -142,6 +142,11 @@ pub(crate) enum Command {
         /// An `[[owed]]` row names it, or the run is refused.
         #[arg(long = "not-run", value_name = "INSTRUMENT", conflicts_with = "hook")]
         not_run: Vec<String>,
+        /// Who asks, which the reading carries (#3619); CI where
+        /// `GITHUB_ACTIONS` is set, a hand otherwise. The hook's is the
+        /// event it came in on.
+        #[arg(long, value_enum, conflicts_with = "hook")]
+        caller: Option<crate::done::Caller>,
     },
     /// Say the branch, the commit it was taken off main at, the store
     /// and the branch's ticket; as text or as one object. Writes no
