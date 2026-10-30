@@ -237,3 +237,58 @@ fn a_merge_that_commits_itself_is_refused_in_main_alone() {
     );
     assert!(!refused(main.path(), &apart));
 }
+
+/// A denial names the checkout it judged (#3619): `git.operation`'s own
+/// fixture, a commit by pathspec where another hand's merge stands, is
+/// denied as judged in that checkout; the must-pass beside it, the same
+/// commit run in a quiet checkout the line `cd`s into, is let through
+/// though the shell starts where the merge stands.
+#[test]
+fn a_denial_names_the_checkout_it_judged() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let merging = operating("placed-merging");
+    let quiet = checkout("placed-quiet", None);
+    let commit = call(&fixtures().join("rules/git.operation/deny-commit.json"));
+    let judged = judge(&manifest, merging.path(), &commit).unwrap();
+    let denial = judged.denial().unwrap_or_else(|| panic!("{judged:?}"));
+    let top = merging.path().canonicalize().unwrap();
+    assert!(
+        denial
+            .reason()
+            .contains(&format!("Judged in {}.", top.display())),
+        "{}",
+        denial.reason()
+    );
+    let line = format!(
+        "cd {} && git commit -q -F /var/empty/m -- a",
+        quiet.path().display()
+    );
+    let judged = judge(&manifest, merging.path(), &bash(&line)).unwrap();
+    assert!(judged.denial().is_none(), "{judged:?}");
+}
+
+/// A line permit cannot place says so and guesses no checkout (#3619):
+/// past `cd "$UNSET_BY_THE_LINE"` a commit is denied under
+/// `git.operation` where a merge stands in a checkout of the repository,
+/// naming the command and the change it lost the line at; the must-pass,
+/// the same line where no operation stands anywhere, is let through.
+#[test]
+fn a_line_permit_cannot_place_is_denied_saying_so_only_where_an_operation_stands() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let line = "cd \"$UNSET_BY_THE_LINE\" && git commit -q -F /var/empty/m -- a";
+    let merging = operating("unplaced-merging");
+    let judged = judge(&manifest, merging.path(), &bash(line)).unwrap();
+    let denial = judged.denial().unwrap_or_else(|| panic!("{judged:?}"));
+    assert_eq!(denial.rule, "git.operation");
+    let reason = denial.reason();
+    assert!(reason.contains("Not placed"), "{reason}");
+    assert!(
+        reason.contains("`git commit -q -F /var/empty/m -- a`"),
+        "{reason}"
+    );
+    assert!(reason.contains("$UNSET_BY_THE_LINE"), "{reason}");
+    assert!(!reason.contains("Judged in"), "{reason}");
+    let quiet = checkout("unplaced-quiet", None);
+    let judged = judge(&manifest, quiet.path(), &bash(line)).unwrap();
+    assert!(judged.denial().is_none(), "{judged:?}");
+}

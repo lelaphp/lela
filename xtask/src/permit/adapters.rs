@@ -81,7 +81,7 @@ pub(super) fn record(
             "{} {}: {}",
             call.tool_name,
             call.subject(root),
-            finding.text
+            finding.said()
         );
         reading.adr = finding.adr.first().cloned().unwrap_or_default();
         reading.session.clone_from(&call.session_id);

@@ -609,6 +609,11 @@ pub(super) fn ran_in(workspace: &Path, line: Option<&Line>) -> PathBuf {
     fs::canonicalize(&top).unwrap_or(top)
 }
 
+/// The operation standing in `checkout`, if one does.
+pub(super) fn standing_in(checkout: &Path) -> Option<Operation> {
+    Operation::in_progress(&git::git_dir(checkout)?)
+}
+
 /// The operation standing in `checkout` that has staged `path`, its index
 /// entry other than `HEAD`'s and not a conflict's: the operation's commit
 /// carries it, so `permit --after` never puts it back (#2597), where a

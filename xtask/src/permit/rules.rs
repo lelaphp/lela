@@ -54,6 +54,37 @@ pub struct Finding {
     pub adr: Vec<String>,
     /// The person's approval that turned the rule's denial into this note.
     pub(crate) admission: Option<Admission>,
+    /// Where a denial judged the call, which its reason names.
+    pub(crate) placement: Option<Placement>,
+}
+
+/// Where permit judged a call it denies: the checkout it asked, or a line
+/// whose command it could not place, which it says rather than guess a
+/// checkout (#3619).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Placement {
+    In(PathBuf),
+    Unplaced(Unplaced),
+}
+
+/// A command a rule fires on that the walk places nowhere, and the change
+/// or the program past which it lost the line ([`Walk::lost_by`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Unplaced {
+    command: String,
+    past: String,
+}
+
+impl std::fmt::Display for Placement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Placement::In(checkout) => write!(f, "Judged in {}.", checkout.display()),
+            Placement::Unplaced(Unplaced { command, past }) => write!(
+                f,
+                "Not placed: permit cannot tell which checkout `{command}` runs in past `{past}`, which does not say where it goes; name the directory in the line, or run the command in a line of its own."
+            ),
+        }
+    }
 }
 
 impl Finding {
@@ -64,6 +95,7 @@ impl Finding {
             text: rule.text.clone(),
             adr: rule.adr.iter().map(str::to_owned).collect(),
             admission: None,
+            placement: None,
         }
     }
 
@@ -76,15 +108,23 @@ impl Finding {
         }
     }
 
-    /// The sentence the model reads: the text, then the rule id and ADR
-    /// numbers in parentheses.
+    /// The sentence the model reads: what the finding says, then the
+    /// rule id and ADR numbers in parentheses.
     pub fn reason(&self) -> String {
         let mut tail = self.rule.clone();
         for adr in &self.adr {
             tail.push_str(", ADR-");
             tail.push_str(adr);
         }
-        format!("{} ({tail})", self.text)
+        format!("{} ({tail})", self.said())
+    }
+
+    /// The text, then where a denial judged the call (#3619).
+    pub(crate) fn said(&self) -> String {
+        match &self.placement {
+            Some(placement) => format!("{} {placement}", self.text),
+            None => self.text.clone(),
+        }
     }
 }
 
@@ -260,12 +300,11 @@ fn evaluate(
     }
     // A rule scoped by `where` judges a call only in the checkout it
     // names ([`judges_where`]).
-    let mut foreign = None;
+    let mut standing = Standing::Judged;
     if fired {
-        match judges_where(root, rule, line, call) {
-            Standing::Outside => return Ok(None),
-            Standing::Judged => {}
-            Standing::Foreign(operation) => foreign = Some(operation),
+        standing = judges_where(root, rule, line, call);
+        if matches!(standing, Standing::Outside) {
+            return Ok(None);
         }
     }
     // A denial of the agent's hand on a harness file is lifted from the
@@ -278,9 +317,17 @@ fn evaluate(
     }
     Ok(fired.then(|| {
         let mut finding = Finding::of(Kind::of(rule), rule);
-        if let Some(foreign) = foreign {
-            finding.text = format!("{} {foreign}", rule.text);
+        if finding.kind == Kind::Note {
+            return finding;
         }
+        finding.placement = Some(match standing {
+            Standing::Foreign(foreign) => {
+                finding.text = format!("{} {foreign}", rule.text);
+                Placement::In(foreign.checkout)
+            }
+            Standing::Unplaced(lost) => Placement::Unplaced(lost),
+            Standing::Judged | Standing::Outside => Placement::In(judged_in(root, rule, line)),
+        });
         finding
     }))
 }
@@ -294,6 +341,9 @@ enum Standing {
     /// Where an operation stands that the calling session did not start,
     /// which the denial names (#2476).
     Foreign(operation::Foreign),
+    /// Past a change the line does not say where it goes, where the rule
+    /// would judge: the denial says so, and guesses no checkout.
+    Unplaced(Unplaced),
 }
 
 /// Where the call stands for the rule's `where`: asked where a command it
@@ -308,14 +358,62 @@ fn judges_where(root: &Path, rule: &Rule, line: Option<&Line>, call: &Call) -> S
             Standing::Outside
         }
     };
-    match rule.within {
-        Where::Anywhere => Standing::Judged,
-        Where::Ticketed => judged(ticketed(root, rule, line)),
-        Where::Operating => operation::foreign(root, line, call, |argv| fires(rule, argv))
+    let lost = line.and_then(|line| unplaced(root, line, |argv| fires(rule, argv)));
+    match (rule.within, lost) {
+        (Where::Anywhere, _) => Standing::Judged,
+        (Where::Operating, Some(lost)) if operating_anywhere(root) => Standing::Unplaced(lost),
+        (Where::Operating, Some(_)) => Standing::Outside,
+        (_, Some(lost)) => Standing::Unplaced(lost),
+        (Where::Ticketed, None) => judged(ticketed(root, rule, line)),
+        (Where::Operating, None) => operation::foreign(root, line, call, |argv| fires(rule, argv))
             .map_or(Standing::Outside, Standing::Foreign),
-        Where::Main => judged(in_main(root, rule, line)),
-        Where::Checkout => judged(in_a_checkout(root, line)),
+        (Where::Main, None) => judged(in_main(root, rule, line)),
+        (Where::Checkout, None) => judged(in_a_checkout(root, line)),
     }
+}
+
+/// Whether an operation stands in any checkout of `root`'s repository, or
+/// the repository cannot be listed: what makes an unplaced command one
+/// `where = "operating"` must refuse.
+fn operating_anywhere(root: &Path) -> bool {
+    crate::track::checkouts(root).map_or(true, |all| {
+        all.iter()
+            .any(|checkout| operation::standing_in(checkout).is_some())
+    })
+}
+
+/// The first command of `line` that `fires` and that the walk places in
+/// no checkout: one past a change the line does not say where it goes,
+/// or one moved by its own words where they do not say ([`Walk::lost`]).
+fn unplaced(root: &Path, line: &Line, fires: impl Fn(&Argv) -> bool) -> Option<Unplaced> {
+    let walk = Walk::of(root, Some(line));
+    let past = walk.lost_by.clone()?;
+    let lost = |argv: &&Argv| {
+        walk.places_of(argv).next().is_none() || argv.moves().contains(&Move::Unsaid)
+    };
+    let command = line
+        .commands()
+        .iter()
+        .filter(|argv| fires(argv))
+        .find(lost)?;
+    Some(Unplaced {
+        command: command.words().join(" "),
+        past,
+    })
+}
+
+/// The checkout a denial judged the call in: where the first command the
+/// rule fires on runs ([`fired_in`]) or else where the call acts
+/// ([`acts_in`]), at the top of its worktree.
+fn judged_in(root: &Path, rule: &Rule, line: Option<&Line>) -> PathBuf {
+    let fired = line.and_then(|line| {
+        fired_in(root, line, Places::Every, |argv| fires(rule, argv))
+            .into_iter()
+            .next()
+    });
+    let dir = fired.unwrap_or_else(|| acts_in(root, line));
+    let top = crate::git::rev_parse(&dir, &["--show-toplevel"]).map_or(dir, PathBuf::from);
+    fs::canonicalize(&top).unwrap_or(top)
 }
 
 /// Whether a shell line runs anything inside a checkout of `root`'s
@@ -379,9 +477,13 @@ fn ticketed(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
 
 /// Whether a command the rule fires on runs in the repository's main
 /// checkout rather than a linked worktree ([`linked`]), read where
-/// [`ticketed`] reads (#2751).
+/// [`ticketed`] reads (#2751). A directory under no `.git` is in no
+/// checkout at all, such as a scratch repository the line has yet to
+/// make, and not in main's (#3619).
 fn in_main(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
-    scoped_in(root, rule, line).iter().any(|dir| !linked(dir))
+    scoped_in(root, rule, line)
+        .iter()
+        .any(|dir| linked(dir) == Some(false))
 }
 
 /// Where a `where`-scoped rule asks: each checkout a command it fires on
@@ -399,12 +501,12 @@ fn scoped_in(root: &Path, rule: &Rule, line: Option<&Line>) -> Vec<PathBuf> {
 
 /// Whether `dir` stands in a linked worktree: the nearest `.git` above it
 /// is the file git writes there, where the main checkout's is a
-/// directory. A directory under no `.git` is not one.
-fn linked(dir: &Path) -> bool {
+/// directory. `None` for a directory under no `.git`, in no checkout.
+fn linked(dir: &Path) -> Option<bool> {
     dir.ancestors()
         .map(|dir| dir.join(".git"))
         .find(|git| git.exists())
-        .is_some_and(|git| git.is_file())
+        .map(|git| git.is_file())
 }
 
 /// Whether one command of a shell line is one the rule's argv predicate,
@@ -632,6 +734,9 @@ struct Walk<'a> {
     /// Whether the line makes a change, or moves a program, where it does
     /// not say.
     lost: bool,
+    /// The first such change or program, as the line spells it: what a
+    /// denial names when it cannot place a command past it.
+    lost_by: Option<String>,
 }
 
 /// One place the walk gives a command, and how it stands there, which
@@ -770,12 +875,12 @@ impl<'a> Walk<'a> {
                 && words.iter().skip(1).all(|w| w.contains('='));
             if changes && !apart && !shell.lost {
                 shell.change(at.clone(), argv);
-                walk.lost |= shell.lost;
+                walk.lose(shell.lost, argv);
             } else if !exports {
                 // It may fail, and a change past it in its chain not run.
                 shell.certain = false;
             }
-            walk.lost |= argv.moves().contains(&Move::Unsaid);
+            walk.lose(argv.moves().contains(&Move::Unsaid), argv);
             for (dir, via) in at.iter().flat_map(|dir| moved(dir, argv)) {
                 if changes || shell.lost {
                     continue;
@@ -805,6 +910,14 @@ impl<'a> Walk<'a> {
             walk.stands = top.sure;
         }
         walk
+    }
+
+    /// The walk lost where `argv` goes, when `lost` says it did.
+    fn lose(&mut self, lost: bool, argv: &Argv) {
+        if lost && !self.lost {
+            self.lost_by = Some(argv.words().join(" "));
+        }
+        self.lost |= lost;
     }
 
     /// Where the line stands: the one place its shell may stand at its
