@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # next-cited: the revisions still cited as `NEXT` in what a commit on
-# `main` would take, one `file:line:text` each, for pre-commit and
+# `main` or `staging` would take, one `file:line:text` each, for pre-commit and
 # pre-merge-commit to refuse it on, and in what a push of `main` would
 # add, for pre-push. A branch writes a ledger revision it
 # adds as `NEXT` (`NEXT-2` for a second in one file) and cites it so
@@ -17,8 +17,10 @@
 # quotes the convention rather than citing a revision, and a citation
 # wrapped onto the next line, the next line's comment marker taken off,
 # is named at the line it starts on. xtask/fixtures holds the negative
-# controls and is not read. Prints nothing and exits 0 off `main`, where
-# NEXT is the rule.
+# controls and is not read. A commit on `staging`, the merge queue's
+# branch, is read as one on `main`: `main` reaches it by a fast-forward,
+# which writes no commit (#3622). Prints nothing and exits 0 off both,
+# where NEXT is the rule.
 #
 # `next-cited <base> <tip>` is the range form, for pre-push: the files
 # `git diff <base> <tip>` changes, read at <tip>, whatever branch is
@@ -43,7 +45,7 @@ if [ $# -eq 2 ]; then
     holds() { git grep -q -I -w NEXT "$tip" -- "$1"; }
     at() { git show "$tip:$1"; }
 elif [ $# -eq 0 ]; then
-    [ "$(git symbolic-ref --short -q HEAD)" = main ] || exit 0
+    case $(git symbolic-ref --short -q HEAD) in main | staging) ;; *) exit 0 ;; esac
     changed() { git diff --cached --name-only -z --diff-filter=d -- "$@"; }
     holds() { git grep --cached -q -I -w NEXT -- "$1"; }
     at() { git show ":$1"; }
