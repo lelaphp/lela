@@ -581,10 +581,12 @@ fn a_row_held_at_the_merge_is_delegated_in_a_ticketed_checkout_and_held_in_mains
             .any(|d| d == "crosscheck for ext/pcre"),
         "{ticketed:#?}"
     );
+    // Other rows the manifest holds at the merge may come first.
+    let rendered = ticketed.render();
+    let list = rendered.split("delegated to the merge check:\n").nth(1);
     assert!(
-        ticketed
-            .render()
-            .contains("delegated to the merge check:\n- crosscheck for ext/pcre")
+        list.is_some_and(|list| list.contains("- crosscheck for ext/pcre\n")),
+        "{rendered}"
     );
 }
 
