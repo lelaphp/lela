@@ -1,0 +1,15 @@
+# A slice of seams.toml's [[owed]] rows (README.md).
+
+[[owed]]
+instrument = "phpt"
+crates = "*"
+when = "phpt-subset"
+
+[[owed]]
+instrument = "crosscheck"
+crates = "ext/*"
+when = "carried"
+
+[[owed]]
+instrument = "phpt"
+crates = ["php_engine"]
