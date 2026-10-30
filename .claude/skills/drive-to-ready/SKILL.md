@@ -12,7 +12,7 @@ The loop's mechanics belong to /specs: slots, seats, cuts, collisions, the merge
 
 ## Stance
 
-**Scope is the board**: work that moves no gate is filed and left. **Absorb**: a gap found mid-spec, on its path and within its size, is done in that spec; only other paths, person-only acts and work bigger than a spec become tickets. **Critic**: read the design of record for an area before cutting there. When a refactor or rewrite is the right shape, it is the spec: priced with /rust-invoice, reasoned in the Problem Statement, and bounded to one gate's path. **Push back** with evidence, through /grill-design, when a ticket's premise contradicts the code or the design; never build to it.
+**Scope is the board**: work that moves no gate is filed and left. **Absorb**: a gap found mid-spec, on its path and within its size, is done in that spec; only other paths, person-only acts and work bigger than a spec become tickets. **Critic**: read the design of record for an area before cutting there. When a refactor or rewrite is the right shape, it is the spec: priced with /rust-invoice, reasoned under What to build, and bounded to one gate's path. **Push back** with evidence, through /grill-design, when a ticket's premise contradicts the code or the design; never build to it.
 
 ## The loop
 

@@ -55,9 +55,9 @@ The cut is done when you can name the group, its track, its test count and the c
 
 ## 3. Write the spec
 
-The body is the user-level `to-spec` skill's template (Problem Statement, Solution, User Stories, Implementation Decisions, Testing Decisions, Out of Scope, Further Notes), synthesised from the cut, followed by this repository's `## Acceptance criteria` boxes, which `xtask ticket read` holds, and `## Blocked by`. #751 is the model.
+The body is the house shape every ticket here has, synthesised from the cut: `## What to build`, `## Acceptance criteria` as boxes, which `xtask ticket read` holds, and `## Blocked by`.
 
-- The Problem Statement carries the measured counts and the commit. Out of Scope names the neighbouring spec. Further Notes names the branch the spec is laid on, when it isn't `main`.
+- What to build carries the measured counts and the commit, the group's causes and php-src files, the neighbouring spec it stops at, and the branch the spec is laid on when it isn't `main`.
 - The boxes cover every cause of the group, each met and witnessed or named and filed; the before and after counts in the closing comment; and `cargo xtask ticket ready <n>` accepted. Regressions are the merge check's, so no box asks the builder for them.
 - File it with the labels `ready-for-agent` and its track's `track:parity-<name>`, and no parent: a chart takes no sub-issues (#619), and the label is what groups the track. A spec that absorbs a track's tickets names them, and each gets a comment linking the spec.
 - Anything a person must rule on first (a manifest row, a ceiling, a porting key, a design line) is its own `for-a-person` ticket, wired with `gh issue edit <spec> --add-blocked-by <n>`. A blocked spec waits, and the slot takes the next cut.
