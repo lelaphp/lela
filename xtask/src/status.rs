@@ -47,22 +47,15 @@ pub(crate) const MAP: &str = "AGENTS.md";
 /// The local region file, gitignored, rendered only by name (§5).
 pub(crate) const LOCAL: &str = ".claude/harness.local.md";
 /// The volatile sections of the local file, in the order it renders them:
-/// §5's eight, the instrument readings first and `port-map` with them
-/// since #148, a reading that moves with the store like the others and is
-/// otherwise renderable only by name.
-pub(crate) const LOCAL_SECTIONS: [&str; 8] = [
-    "budget",
-    "phpt",
-    "witness",
-    "mutants",
-    "port-map",
-    "divergence",
-    "permits",
-    "git",
-];
+/// §5's six, the instrument readings first and `port-map` with them since
+/// #148, a reading that moves with the store like the others and is
+/// otherwise renderable only by name. `mutants` waits on its instrument and
+/// `permits` is rendered by name, its "this session" line kept (#3620 D1).
+pub(crate) const LOCAL_SECTIONS: [&str; 6] =
+    ["budget", "phpt", "witness", "port-map", "divergence", "git"];
 /// What `--session` says under a local file whose regions have no sums.
 const UNRENDERED: &str = "The local facts above are unrendered: `computed run .claude/harness.local.md` \
-fills them once a person has run `computed trust` for this clone (harness-design.md §11).";
+fills them, once a person has run `computed trust` for this clone where it has none (harness-design.md §11).";
 
 /// What a section is rendered against: this checkout, its store and what
 /// its machine holds, or the tree alone, as a tracked region carries it.
@@ -354,8 +347,10 @@ pub(crate) fn session_of_stdin() -> Option<String> {
 /// the two are one text, the map first; as JSON they are the object
 /// `{"map", "facts"}`, since the engine caps a context block and the hook
 /// hands them over as two (#64). The map is tracked and must exist; the
-/// local file is written from `local_template` when the clone has none,
-/// so the hook's `computed run` has a file to render next time.
+/// local file is written from `local_template` when the clone has none or
+/// its [`skeleton`] is not the template, so a template that moved reaches
+/// a clone that rendered the old one (#3620 D1), and the hook's `computed
+/// run` has the file to render next time.
 pub fn session(
     manifest: &Manifest,
     store: &Store,
@@ -369,9 +364,10 @@ pub fn session(
         map.push('\n');
     }
     let local_path = root.join(LOCAL);
-    if !local_path.exists() {
+    let template = local_template();
+    if !fs::read_to_string(&local_path).is_ok_and(|laid| skeleton(&laid) == template) {
         crate::make_parent(&local_path)?;
-        fs::write(&local_path, local_template()).with_context(|| format!("writing {LOCAL}"))?;
+        fs::write(&local_path, &template).with_context(|| format!("writing {LOCAL}"))?;
     }
     let mut facts = fs::read_to_string(&local_path).with_context(|| format!("reading {LOCAL}"))?;
     if !facts.ends_with('\n') {
@@ -413,6 +409,24 @@ pub fn session(
         Table::Json => serde_json::to_string(&json!({ "map": map, "facts": facts }))?,
         Table::Md => format!("{map}\n{facts}"),
     })
+}
+
+/// A local file as it was laid: each region's body taken out and its
+/// closer's sums with it, so a rendering of the template is the template.
+fn skeleton(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut inside = false;
+    for line in text.lines() {
+        if line.starts_with("<!-- /computed") {
+            inside = false;
+            out.push_str("<!-- /computed -->\n");
+        } else if !inside {
+            inside = line.starts_with("<!-- computed ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// The local file with every region unrendered: one volatile `exec` per
@@ -462,7 +476,7 @@ fn against_target(manifest: &Manifest) -> String {
 
 /// The widest a reading's message renders in a Markdown cell, in
 /// characters. A Markdown table is what a session scans, and the local
-/// facts it is handed at start are eight sections under the engine's cap
+/// facts it is handed at start are six sections under the engine's cap
 /// on one block (§5, #64); so a row says its message in one line of at
 /// most this many, and a number the reading holds at zero, which says
 /// nothing happened, is left out of its `numbers` cell. `--format json`
@@ -1755,7 +1769,7 @@ pub(crate) fn grid<R: IntoIterator<Item = String>>(
 #[cfg(test)]
 #[cfg(tracked)]
 mod tests {
-    use super::{LOCAL_SECTIONS, Row, compared, local_template, outermost, outlived};
+    use super::{LOCAL_SECTIONS, Row, compared, local_template, outermost, outlived, skeleton};
     use serde_json::json;
 
     /// The opener of a region by name, if the text has one.
@@ -1782,13 +1796,19 @@ mod tests {
     }
 
     #[test]
-    fn the_local_template_is_the_eight_volatile_sections() {
+    fn the_local_template_is_the_six_volatile_sections() {
         let template = local_template();
-        assert_eq!(LOCAL_SECTIONS.len(), 8, "harness-design.md §5 says eight");
+        assert_eq!(LOCAL_SECTIONS.len(), 6, "harness-design.md §5 says six");
         for name in LOCAL_SECTIONS {
             let line = opener(&template, name).unwrap();
             assert!(line.contains(" volatile "), "{line}");
             assert!(line.contains(&format!("status --section {name}")), "{line}");
+        }
+        for name in ["mutants", "permits"] {
+            assert!(
+                opener(&template, name).is_none(),
+                "{name} is rendered by name"
+            );
         }
         assert_eq!(
             template.matches("<!-- /computed -->").count(),
@@ -1799,6 +1819,28 @@ mod tests {
             ignored.contains("/.claude/harness.local.md"),
             "the local file is gitignored"
         );
+    }
+
+    /// `computed` renders a region as its opener, a blank line, the body,
+    /// a blank line and a closer carrying its sums; the skeleton of that is
+    /// the template again, and the skeleton of a template with a section
+    /// more or less is not, which is what lays the local file down again.
+    #[test]
+    fn a_rendering_of_the_template_has_the_template_as_its_skeleton() {
+        let template = local_template();
+        let rendered = template.replace(
+            "<!-- /computed -->\n",
+            "\n| crate | lines |\n|---|---|\n| xtask | 1 |\n\n<!-- /computed in=ab out=cd -->\n",
+        );
+        assert_ne!(rendered, template);
+        assert_eq!(skeleton(&rendered), template);
+        let older = template.replace(
+            "\n## git\n",
+            "\n## mutants\n\n<!-- computed exec cmd=\"cargo xtask status --section mutants\" volatile name=mutants | do not edit; run computed -->\n<!-- /computed -->\n\n## git\n",
+        );
+        assert_ne!(skeleton(&older), template, "a section the template dropped");
+        let shorter = template.replace("\n## git\n", "\n");
+        assert_ne!(skeleton(&shorter), template);
     }
 
     /// A narrower run inside a subset the section shows folds away, its
