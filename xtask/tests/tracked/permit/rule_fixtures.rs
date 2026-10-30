@@ -314,12 +314,21 @@ fn the_proposed_ticket_close_rules_fire_on_their_fixtures_and_not_on_their_neigh
             "{line}: {judged:?}"
         );
     }
+    // The neighbours carry no session, as `allow.json` does: this
+    // workspace may be a worktree a session owns (#3621), whose
+    // `checkout.owner` row would deny another session's `xtask` line.
     for line in [
         "gh pr close 3",
         "cargo xtask ticket close 28",
         "gh api repos/o/r/issues?state=closed",
     ] {
-        let judged = judge(&manifest, workspace(), &bash(line)).unwrap();
+        let call = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": line}});
+        let judged = judge(
+            &manifest,
+            workspace(),
+            &Call::parse(&call.to_string()).unwrap(),
+        )
+        .unwrap();
         assert!(judged.denial().is_none(), "{line}: {judged:?}");
     }
 }
