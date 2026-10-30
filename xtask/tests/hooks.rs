@@ -69,11 +69,26 @@ enum Computed {
     /// sides re-rendered: `check` finds it unrendered until `run` renders
     /// it, which rewrites `AGENTS.md` and says so.
     Unrendered,
+    /// The real `computed` this test found on `PATH`, as CI installs it,
+    /// every call recorded first: for a case whose answer is computed's
+    /// own reading of the regions, not one shape.
+    Real,
+}
+
+/// The real `computed` on `PATH`, the one the stand-in hands [`Computed::Real`] to.
+fn real_computed() -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("computed"))
+        .find(|path| path.is_file())
+        .expect("computed is on PATH, as CI installs it")
 }
 
 impl Computed {
-    fn body(&self) -> &'static str {
-        match self {
+    fn body(&self) -> String {
+        let shape = match self {
+            Computed::Real => {
+                return format!("exec '{}' \"$@\"\n", real_computed().display());
+            }
             Computed::Rendered => {
                 "if [ \"$1\" = run ]; then echo rendered >> AGENTS.md; printf 'AGENTS.md:3 layout tree stale written\\n' >&2; exit 1; fi\nexit 0\n"
             }
@@ -89,7 +104,8 @@ impl Computed {
             Computed::Unrendered => {
                 "if [ \"$1\" = run ] && ! grep -qx rendered AGENTS.md; then echo rendered >> AGENTS.md; printf 'AGENTS.md:3 layout exec unrendered written\\n' >&2; exit 1; fi\nif [ \"$1\" = check ] && ! grep -qx rendered AGENTS.md; then printf 'AGENTS.md:3 layout exec unrendered\\n' >&2; exit 1; fi\nexit 0\n"
             }
-        }
+        };
+        shape.to_owned()
     }
 }
 
@@ -751,6 +767,107 @@ fn an_untrusted_root_refuses_the_commit_naming_computed_trust() {
     assert_no_builds(&scratch);
 }
 
+/// A scratch whose region files the real `computed` reads: `AGENTS.md`
+/// holds one tree region over `crates`, rendered and committed, the other
+/// five no region; then a new crate is staged and committed by pathspec,
+/// the shape AGENTS.md asks for, and `clippy` refuses it after the hook
+/// has rendered the region and staged it. The refusal rolls the commit's
+/// index back, so the render stands in the working copy alone, which is
+/// returned.
+fn refused_after_its_render(name: &str, path: &str) -> (Scratch, String) {
+    let scratch = scratch(name, &Computed::Real);
+    for file in REGIONS {
+        write(&scratch.root, file, "# a region file\n");
+    }
+    write(
+        &scratch.root,
+        "AGENTS.md",
+        "# a region file\n\n<!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->\n<!-- /computed -->\n",
+    );
+    let laid = Command::new(real_computed())
+        .args(["run", "AGENTS.md"])
+        .current_dir(&scratch.root)
+        .output()
+        .unwrap();
+    assert!(laid.status.code().is_some_and(|c| c < 2), "{laid:?}");
+    scratch.git(&[&["add", "--"][..], &REGIONS].concat(), false);
+    scratch.git(&["commit", "-q", "-m", "a tree region"], false);
+
+    write(&scratch.root, path, "pub fn push() {}\n");
+    scratch.git(&["add", "--", path], false);
+    scratch.refuse("xtask clippy");
+    let before = scratch.head();
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "a crate", "--", path], true);
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(scratch.head(), before, "clippy refused the commit: {out}");
+    fs::remove_file(scratch.dir.join("refuse")).unwrap();
+    let rendered = fs::read_to_string(scratch.root.join("AGENTS.md")).unwrap();
+    assert!(
+        rendered.contains("php_stack"),
+        "the refused run rendered the region: {rendered}"
+    );
+    let staged = scratch.git(&["diff", "--cached", "--name-only"], false);
+    assert_eq!(
+        staged.trim(),
+        path,
+        "the refusal took the render's staging back"
+    );
+    (scratch, rendered)
+}
+
+/// A pathspec commit refused after its render, then committed again,
+/// carries the rendered region (#3638): the second run finds the region
+/// fresh on disk and writes nothing, and the hook stages `AGENTS.md`
+/// because its working copy differs from the commit's index only inside
+/// its region, and the region lists a directory the commit adds. A hook
+/// that stages only what this run wrote commits the listing from before
+/// the crate and fails here.
+#[test]
+fn a_render_a_refused_commit_wrote_is_carried_by_the_next() {
+    let path = "crates/php_stack/src/lib.rs";
+    let (scratch, rendered) = refused_after_its_render("rendered-before", path);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "a crate", "--", path], true);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("staged AGENTS.md"), "{out}");
+    assert_eq!(scratch.git(&["show", "HEAD:AGENTS.md"], false), rendered);
+    assert_eq!(scratch.git(&["status", "--porcelain"], false), "");
+}
+
+/// What is not the commit's render is left where it stands (#3638): a
+/// commit that stages no path the region reads leaves `AGENTS.md`, whose
+/// listing names a crate that commit does not carry; and once a person
+/// has written a line outside the region, the commit that adds the crate
+/// leaves the file too, their line with it, since its working copy then
+/// differs from the commit's index by more than the region's body.
+#[test]
+fn a_region_file_that_is_not_the_commit_s_render_is_left() {
+    let path = "crates/php_stack/src/lib.rs";
+    let (scratch, rendered) = refused_after_its_render("rendered-before-left", path);
+    let committed = scratch.git(&["show", "HEAD:AGENTS.md"], false);
+    let other = "crates/php_heap/src/lib.rs";
+    write(
+        &scratch.root,
+        other,
+        "pub fn alloc() {}\npub fn free() {}\n",
+    );
+    scratch.git(&["add", "--", other], false);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "the heap", "--", other], true);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("staged AGENTS.md"), "{out}");
+    assert_eq!(scratch.git(&["show", "HEAD:AGENTS.md"], false), committed);
+
+    let written = format!("{rendered}\nA line a person wrote.\n");
+    write(&scratch.root, "AGENTS.md", &written);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "a crate", "--", path], true);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("staged AGENTS.md"), "{out}");
+    assert_eq!(scratch.git(&["show", "HEAD:AGENTS.md"], false), committed);
+    assert_eq!(
+        fs::read_to_string(scratch.root.join("AGENTS.md")).unwrap(),
+        written
+    );
+}
+
 /// An instrument that fails past the first group refuses the commit by
 /// name: `test` still runs after a `clippy` refusal, so the commit says
 /// both (revision 140).
@@ -946,35 +1063,42 @@ fn a_vocab_refusal_ends_the_hook_before_clippy_runs() {
 
 // ---------------------------------------------------------------- commit-msg
 
+/// The scratch's `vocab --message` handed to this crate's own binary,
+/// against the workspace's `CONTEXT.md`, committed beside an ignored
+/// store, as a checkout's is; the directory of the message fixtures.
+fn with_glossary(scratch: &Scratch) -> PathBuf {
+    fs::write(scratch.dir.join("vocab-message"), "").unwrap();
+    let glossary = fs::read(workspace().join("CONTEXT.md")).unwrap();
+    fs::write(scratch.root.join("CONTEXT.md"), glossary).unwrap();
+    write(&scratch.root, ".gitignore", "/target/\n");
+    scratch.git(&["add", "--", "CONTEXT.md", ".gitignore"], false);
+    scratch.git(&["commit", "-q", "-m", "the glossary"], false);
+    xtask::package_dir().join("fixtures/hooks/commit-msg")
+}
+
 /// commit-msg notes the message against the glossary its staged crate is
 /// held to and refuses nothing (#3624, ruled on #3629), through the real
-/// `vocab --message` against the workspace's `CONTEXT.md`:
-/// `fixtures/hooks/commit-msg/avoided.txt` is committed, each word printed
-/// with its line and the word the glossary says, and the reading under
-/// `message` fails listing them; `clean.txt`, which carries avoided words
-/// only in a code span, its subject's path and a trailer, is committed
-/// and its reading passes. A hook that never reads the message, reads it
-/// from where it ran rather than where git wrote it, records nothing or
+/// `vocab --message` against the workspace's `CONTEXT.md`: the text of
+/// `fixtures/hooks/commit-msg/avoided.txt`, handed over by `-m` as a `-F`
+/// file is pre-commit's (#3630), is committed, each word printed with its
+/// line and the word the glossary says, and the reading under `message`
+/// fails listing them; `clean.txt`, which carries avoided words only in a
+/// code span, its subject's path and a trailer, is committed and its
+/// reading passes. A hook that never reads the message, reads it from
+/// where it ran rather than where git wrote it, records nothing or
 /// refuses a commit fails here.
 #[test]
 fn commit_msg_notes_an_avoided_word_by_line_and_refuses_nothing() {
     let scratch = scratch("commit-msg", &Computed::Rendered);
-    fs::write(scratch.dir.join("vocab-message"), "").unwrap();
-    let glossary = fs::read(workspace().join("CONTEXT.md")).unwrap();
-    fs::write(scratch.root.join("CONTEXT.md"), glossary).unwrap();
-    // The store the reading lands in is ignored, as a checkout's is.
-    write(&scratch.root, ".gitignore", "/target/\n");
-    scratch.git(&["add", "--", "CONTEXT.md", ".gitignore"], false);
-    scratch.git(&["commit", "-q", "-m", "the glossary"], false);
-    let fixture = xtask::package_dir().join("fixtures/hooks/commit-msg");
+    let fixture = with_glossary(&scratch);
     let store = Store::of_workspace(&scratch.root);
     let commit = |name: &str, text: &str| {
         let path = "crates/php_heap/src/lib.rs";
         write(&scratch.root, path, text);
         scratch.git(&["add", "--", path], false);
         let before = scratch.head();
-        let file = fixture.join(name);
-        let (code, out) = scratch.run(&["commit", "-q", "-F", file.to_str().unwrap()], true);
+        let said = fs::read_to_string(fixture.join(name)).unwrap();
+        let (code, out) = scratch.run(&["commit", "-q", "-m", &said], true);
         assert_eq!(code, 0, "{name}: {out}");
         assert_ne!(scratch.head(), before, "{name} was committed: {out}");
         let reading = store.read("vocab", "message").unwrap().unwrap();
@@ -996,6 +1120,61 @@ fn commit_msg_notes_an_avoided_word_by_line_and_refuses_nothing() {
 
     let (_, reading) = commit("clean.txt", "pub fn alloc() {}\n");
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+}
+
+/// A `-F` message is noted by pre-commit before its first instrument
+/// (#3630), so an avoided word is said in the seconds before any build
+/// and not after it, and refused by nothing (#3629):
+/// `fixtures/hooks/commit-msg/avoided.txt`, committed with `-F`, is the
+/// hook's first `cargo` call, ahead of `fmt`, `clippy` and `test`, its
+/// words printed by line though `clippy` then refuses the commit; once
+/// `clippy` passes, the commit goes in, and commit-msg, handed the same
+/// message, does not read it a second time.
+#[test]
+fn a_message_file_is_noted_before_any_build_and_once() {
+    let scratch = scratch("message-noted", &Computed::Rendered);
+    let file = with_glossary(&scratch).join("avoided.txt");
+    let path = "crates/php_heap/src/lib.rs";
+    write(&scratch.root, path, "pub fn alloc() {}\npub fn free() {}\n");
+    scratch.git(&["add", "--", path], false);
+    let noted = format!("xtask vocab --message {}", file.display());
+    let said = ":1: \"helper\" in the commit message; the glossary says \"Command\"";
+    let commit = || {
+        fs::remove_file(scratch.dir.join("cargo.log")).ok();
+        let (code, out) = scratch.run(&["commit", "-q", "-F", file.to_str().unwrap()], true);
+        (code, out, scratch.calls("cargo"))
+    };
+
+    scratch.refuse("xtask clippy");
+    let before = scratch.head();
+    let (code, out, calls) = commit();
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(scratch.head(), before, "clippy refused the commit: {out}");
+    assert_eq!(calls.first(), Some(&noted), "{calls:?}");
+    assert!(
+        calls.iter().any(|c| c == "xtask clippy --staged"),
+        "{calls:?}"
+    );
+    assert!(out.contains(said), "{out}");
+
+    fs::remove_file(scratch.dir.join("refuse")).unwrap();
+    let (code, out, calls) = commit();
+    assert_eq!(code, 0, "{out}");
+    assert_ne!(scratch.head(), before, "the commit went in: {out}");
+    assert_eq!(calls.first(), Some(&noted), "{calls:?}");
+    let messages: Vec<&String> = calls
+        .iter()
+        .filter(|c| c.starts_with("xtask vocab --message"))
+        .collect();
+    assert_eq!(messages, [&noted], "commit-msg read it again: {calls:?}");
+    for ran in [
+        "fmt --check",
+        "xtask clippy --staged",
+        "xtask test --staged",
+    ] {
+        assert!(calls.iter().any(|c| c == ran), "{ran}: {calls:?}");
+    }
+    assert!(out.contains(said), "{out}");
 }
 
 /// A revision a branch adds is written `NEXT` and numbered by the merge

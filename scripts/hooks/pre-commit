@@ -16,9 +16,11 @@
 # row, and `cargo xtask crosscheck --ext <name>` takes it (revision 140).
 # Before anything runs, a commit from a session that does not own the
 # checkout is refused (#3621), and a `git commit -F` whose file is missing is
-# refused, since git reads the message only after this hook, and a
-# commit in a linked worktree, a builder's, runs at a lower priority than
-# one in the main checkout, a merge (revision 140);
+# refused, since git reads the message only after this hook; a commit
+# in a linked worktree, a builder's, runs at a lower priority than one
+# in the main checkout, a merge (revision 140); and a `-F` message is
+# noted against the glossary before the first instrument, as commit-msg
+# notes a `-m` one, refusing nothing (#3630, #3629);
 # `permit --diff` judges every staged file as the Write of
 # its staged content and refuses the commit with the rule id on a denial
 # (the harness's own files are a note: a person commits those). Between
@@ -29,7 +31,8 @@
 # regions`, which reads computed's exit once
 # for every caller and refuses a broken marker, a missing computed and an
 # untrusted clone; what it wrote is re-staged, and a hand-edited region is
-# refused, since only a person runs --force. The gitignored local file,
+# refused, since only a person runs --force; a render an earlier, refused
+# run wrote is staged too (#3638). The gitignored local file,
 # .claude/harness.local.md, is not rendered here: no commit takes it, and
 # every session re-renders it, so its render here could only refuse a
 # commit for another session's write (#1312). Every command's own exit is
@@ -53,13 +56,19 @@
 # scripts/hooks`.
 set -u
 cd "$(git rev-parse --show-toplevel)"
+# What a `-F` message this hook noted leaves for commit-msg, so the
+# message is held to the glossary once (#3630); one an earlier run left,
+# refused before git wrote the message, is gone before anything else.
+noted="$(git rev-parse --absolute-git-dir)/vocab-noted"
+rm -f "$noted"
 # The message file `git commit -F` names, read from the committing git's
 # arguments, since git reads it only after this hook: a missing one
 # refused a commit sixteen minutes into the hook twice in one session. A
 # path is tried word by word, so one with a space in it is found; a
-# relative one is tried against the checkout's root and the directory git
-# was started from, and is not judged beside `-C`. Where the arguments
-# cannot be read, nothing is judged.
+# relative one is tried against the directory git was started from, as
+# git reads it, and then the checkout's root, and is not judged beside
+# `-C`. The file found is printed as a whole path. Where the arguments
+# cannot be read, nothing is judged and nothing is printed.
 message_file() {
     local args word path=
     args=$(ps -ww -o args= -p "$PPID" 2>/dev/null) || return 0
@@ -87,8 +96,11 @@ message_file() {
     rest=${args#*"$path"}
     while :; do
         case "$word" in
-            /*) [ -r "$word" ] && return 0 ;;
-            *) [ -r "$word" ] || { [ -n "$from" ] && [ -r "$from/$word" ]; } && return 0 ;;
+            /*) [ -r "$word" ] && printf '%s\n' "$word" && return 0 ;;
+            *)
+                [ -n "$from" ] && [ -r "$from/$word" ] && printf '%s\n' "$from/$word" && return 0
+                [ -r "$word" ] && printf '%s\n' "$PWD/$word" && return 0
+                ;;
         esac
         case "$rest" in " "*) ;; *) break ;; esac
         rest=${rest# }
@@ -99,7 +111,7 @@ message_file() {
     echo "pre-commit: git commit -F names $path, which is not a file git can read, so the commit is refused before anything runs" >&2
     return 1
 }
-message_file || exit 1
+message=$(message_file) || exit 1
 # One session writes in a checkout, its owner (#3618 M1, #3621): a commit
 # from a session other than the one `xtask worktree add` or `xtask
 # worktree own` recorded is refused before anything runs, whatever made
@@ -134,6 +146,17 @@ fi
 [ -f .git ] && [ "$(git symbolic-ref --short -q HEAD)" != staging ] &&
     renice -n 10 -p $$ >/dev/null 2>&1
 X='cargo xtask'
+# The `-F` message against the glossary before any build (#3630): commit-msg
+# would hold it only once every instrument below has run, and an avoided
+# word would be said minutes late. It notes and refuses nothing, as
+# commit-msg does (#3629): the words are printed by line and one reading
+# under `message` records them. Once it has, the message git will hand
+# commit-msg is recorded as noted, as git cleans it (`git stripspace`), so
+# commit-msg does not read it again; a `-m` message, or one an editor
+# changed, is commit-msg's.
+if [ -n "$message" ] && $X vocab --message "$message"; then
+    git stripspace < "$message" | git hash-object --stdin > "$noted"
+fi
 status=0
 step() {
     "$@" || { echo "pre-commit: $* failed" >&2; status=1; }
@@ -283,6 +306,59 @@ fi
 # region it would write that reads a path whose working copy the commit
 # does not stage: rendered, it would carry that change (#2236).
 regions='AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md harness-design.md third-engine-design.md'
+# A render a refused run wrote, staged here (#3638). A pathspec commit
+# refused after its regions were rendered and staged is rolled back to
+# the index it started from, and the next run finds those regions fresh
+# on disk and writes nothing, so the commit would carry the bodies from
+# before the render. So a region file is staged where its working copy
+# differs from the commit's index only inside its regions, the two equal
+# once `computed clean` has emptied each, and where `computed affected`
+# says one of its regions reads a staged path. A tree region reads the
+# directories it lists, so a directory a staged path adds or takes away
+# is asked about as itself, as `--staged` asks about an untracked one.
+# This runs before `xtask regions --staged`, whose check then holds what
+# was staged here as it holds every file the commit stages.
+rendered_before() {
+    local file dir differ=() paths=() affected tmp
+    for file in $regions; do
+        git diff --quiet -- "$file" || differ+=("$file")
+    done
+    [ "${#differ[@]}" != 0 ] || return 0
+    while IFS= read -r file; do
+        paths+=("$file")
+    done < <(
+        git diff --cached --name-only
+        git diff --cached --name-only --diff-filter=AD | while IFS= read -r file; do
+            dir=$file
+            while [ "${dir#*/}" != "$dir" ]; do
+                dir=${dir%/*}
+                if ! git cat-file -e "HEAD:$dir" 2>/dev/null || [ -z "$(git ls-files -- "$dir")" ]; then
+                    printf '%s\n' "$dir"
+                fi
+            done
+        done | sort -u
+    )
+    [ "${#paths[@]}" != 0 ] || return 0
+    affected=$(computed affected "${paths[@]}" 2>/dev/null | cut -d: -f1 | sort -u)
+    tmp=$(mktemp -d) || return 0
+    for file in "${differ[@]}"; do
+        printf '%s\n' "$affected" | grep -qxF -- "$file" || continue
+        rm -rf "${tmp:?}/working" "${tmp:?}/index"
+        mkdir -p "$tmp/working" "$tmp/index"
+        if ! cp -- "$file" "$tmp/working/${file##*/}" ||
+            ! git show ":$file" > "$tmp/index/${file##*/}" 2>/dev/null; then
+            continue
+        fi
+        (cd "$tmp/working" && computed clean -- "${file##*/}" >/dev/null 2>&1)
+        (cd "$tmp/index" && computed clean -- "${file##*/}" >/dev/null 2>&1)
+        if cmp -s "$tmp/working/${file##*/}" "$tmp/index/${file##*/}"; then
+            stage "$file"
+            echo "pre-commit: staged $file, whose regions an earlier run rendered from what this commit stages (#3638)"
+        fi
+    done
+    rm -rf "$tmp"
+}
+rendered_before
 # shellcheck disable=SC2086
 if rendered=$($X regions --staged $regions); then
     echo "$rendered" | grep -E ' written$' | cut -d: -f1 | sort -u | while read -r file; do
