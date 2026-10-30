@@ -540,7 +540,8 @@ impl Edge {
 /// an issue rather than a file: the tracker's labels under which the rule
 /// does not judge the call (#341), which only a rule `permit` judges over
 /// a command may carry. `where` is the same idea for the checkout a call
-/// runs in ([`Where`]), and the same rules alone may carry it.
+/// runs in ([`Where`]), and the same rules alone may carry it; `runs` for
+/// whether the runtime runs a `Bash` call in the foreground ([`Runs`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -557,6 +558,9 @@ pub struct Rule {
     /// `where`: the checkouts the rule judges a call in (#1149).
     #[serde(default, rename = "where")]
     pub within: Where,
+    /// `runs`: the calls the rule judges by how the runtime runs them (#3624).
+    #[serde(default)]
+    pub runs: Runs,
     #[serde(default)]
     pub adr: OneOrMany,
     pub text: String,
@@ -591,6 +595,20 @@ pub enum Where {
     /// them, such as a scratch repository: read where each command of a
     /// shell line runs, and judged wherever `permit` cannot say (#2887).
     Checkout,
+}
+
+/// `runs`: whether a rule judges a `Bash` call the runtime runs in the
+/// background. A wait there blocks nothing, since the runtime notifies its
+/// end, so a rule on what a foreground wait holds judges the foreground
+/// alone (#3624).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Runs {
+    /// However the call runs: a row without `runs`.
+    #[default]
+    Either,
+    /// Only a call without `run_in_background`.
+    Foreground,
 }
 
 /// The predicates of harness-design.md §4.1, which cites [`Self::NAMES`]
@@ -1091,6 +1109,13 @@ impl Manifest {
                     "rule \"{}\" has `where` beside `{}`; the checkout is the one a call runs in, so `where` qualifies a rule permit judges at the call",
                     rule.id,
                     named[0]
+                );
+            }
+            let bash = !rule.tool.is_empty() && rule.tool.iter().all(|t| t == "Bash");
+            if rule.runs != Runs::Either && !bash {
+                bail!(
+                    "rule \"{}\" has `runs` beside a tool that is not Bash; only a Bash call runs in the background",
+                    rule.id
                 );
             }
             bangs_in_place(rule)?;

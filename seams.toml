@@ -796,6 +796,18 @@ scope = "docs/divergence.toml"
 check = "divergence-reason"
 text = "A divergence row with status accepted has a reason a person wrote, a by-design row's citing the design section or ADR that chose it, and an oracle-build row carries what it retires at; done fails while an open row touches the scope (harness §4.3)."
 
+[[rule]]
+id = "wait.foreground"
+tool = "Bash"
+runs = "foreground"   # grammar: runs, a call the runtime runs in the foreground and never one with run_in_background, whose end it notifies (#3624)
+# A poll loop, an until, while or for whose body sleeps 3 s or more
+# before its done, where it is run and not where a heredoc writes it:
+# the shape that held a coordinator, a seat or a lock in #3624's
+# measurement of 821 builder waits (265 coordinator, 14 lock and 92 seat
+# loops fire; no single sleep and no settle of 2 s or less does).
+deny_pattern = '''(?s)(?:\A|[;&|({\n]|\b(?:then|do|else))\s*(?:until|while|for)\s.*?[;\n]\s*do\b(?:.*?(?:[;&|({\n]|\b(?:then|do|else)))?\s*sleep\s+0*(?:[3-9]|[1-9][0-9]+)(?:\.[0-9]+)?[smh]?\b.*?\bdone\b'''
+text = "A foreground poll loop holds the turn, and the coordinator, seat or lock it waits on with it (#3624): run what it waits for with run_in_background, whose end the runtime notifies, or wait on the condition with Monitor and an until-loop."
+
 # ---------------------------------------------------------------- owed
 # What a crate owes before done (harness §4.5 condition 1): one row per
 # instrument, the crates a glob or a list less `exempt`, and `when` a

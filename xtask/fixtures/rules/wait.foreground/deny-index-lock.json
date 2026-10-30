@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "until [ ! -e ~/Projects/dax-php/.git/worktrees/t3256/index.lock ]; do sleep 5; done; cd ~/Projects/dax-php-worktrees/t3256 && git add -- ext/standard/src/string.rs", "description": "Wait for the index lock, then stage (a lock, #3624)"}}

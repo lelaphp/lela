@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "sleep 1; tail -5 ~/Projects/dax-php-worktrees/_coordinator/runs/t3298/w-onjit.txt", "description": "Read the run's last lines after a beat"}}

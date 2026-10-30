@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "cd ~/Projects/dax-php-worktrees/t2674; end=$(( $(date +%s) + 2600 )); until git config --get branch.t3061.ready-3061 >/dev/null || [ $(date +%s) -ge $end ]; do sleep 60; done; git log --format='%h %ci %s' main..t3061 | head", "description": "Wait for t3061's ready record (a coordinator's wait, #3624)"}}

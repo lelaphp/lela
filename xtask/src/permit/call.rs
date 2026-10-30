@@ -71,6 +71,10 @@ pub struct Arguments {
     pub replace_all: bool,
     pub content: Option<String>,
     pub command: Option<String>,
+    /// A `Bash` call the runtime runs in the background and notifies the
+    /// end of, which a `runs = "foreground"` rule does not judge (#3624).
+    #[serde(default)]
+    pub run_in_background: bool,
 }
 
 impl Call {

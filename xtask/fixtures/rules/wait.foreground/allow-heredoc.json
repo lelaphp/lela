@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "cat > /private/tmp/claude-501/scratchpad/t3624/wait.sh <<'EOF'\n#!/bin/sh\nuntil [ ! -f .git/MERGE_HEAD ]; do sleep 20; done\nEOF\nchmod +x /private/tmp/claude-501/scratchpad/t3624/wait.sh", "description": "Write a waiting script without running it"}}

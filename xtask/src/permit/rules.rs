@@ -19,7 +19,7 @@ use super::label;
 use super::operation;
 use super::region::region_body;
 use super::unless;
-use crate::manifest::{Manifest, Rule, Where, scope_matches};
+use crate::manifest::{Manifest, Rule, Runs, Where, scope_matches};
 use crate::rust;
 
 /// The hook event the shipped adapter wires (§6).
@@ -168,6 +168,9 @@ fn evaluate(
     line: Option<&Line>,
 ) -> Result<Option<Finding>> {
     if !rule.tool.is_empty() && !rule.tool.iter().any(|t| t == call.tool_name) {
+        return Ok(None);
+    }
+    if rule.runs == Runs::Foreground && call.tool_input.run_in_background {
         return Ok(None);
     }
     // A file the rule's exempt covers is not judged by it, whatever the
