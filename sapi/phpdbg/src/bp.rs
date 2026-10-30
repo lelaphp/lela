@@ -64,7 +64,7 @@ pub struct OpArray<'a> {
 }
 
 /// The table of `PHPDBG_BP_RESOLVE_MASK` an opline of a named op array
-/// is kept in, each with its flag.
+/// is kept in, each with its bit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Table {
     /// `PHPDBG_BREAK_FUNCTION_OPLINE`, `PHPDBG_HAS_FUNCTION_OPLINE_BP`.
@@ -180,7 +180,7 @@ pub struct At<'a> {
     pub file: &'a [u8],
     pub line: u32,
     pub opline: u32,
-    /// The first opline past the `RECV*` run.
+    /// The first opline past the `RECV*` oplines.
     pub body: u32,
     pub opcode: &'a str,
     /// The function served, none for a file's code.
@@ -344,7 +344,7 @@ impl Breakpoints {
         }
     }
 
-    /// Whether a resolve flag is set, `PHPDBG_BP_RESOLVE_MASK`.
+    /// Whether a resolve bit is set, `PHPDBG_BP_RESOLVE_MASK`.
     pub fn resolves(&self) -> bool {
         self.resolving != 0
     }
@@ -615,8 +615,8 @@ impl Breakpoints {
     }
 
     /// `phpdbg_delete_breakpoint`. A breakpoint on an opline of a named
-    /// op array takes its resolve flag with it where it was the last of
-    /// its name's table, every resolve flag where the opline table held
+    /// op array takes its resolve bit with it where it was the last of
+    /// its name's table, every resolve bit where the opline table held
     /// one breakpoint, as php's `flags &= PHPDBG_HAS_OPLINE_BP` clears
     /// them, and its resolved opline.
     pub fn delete(&mut self, out: &mut Out, id: i64) {

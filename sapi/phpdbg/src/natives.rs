@@ -289,8 +289,8 @@ fn phpdbg_prompt(req: &mut Request, string: PhpString) {
     session::with(req, |s| s.prompt = text);
 }
 
-/// `phpdbg_exec(string $context): string|bool`: the execution context
-/// from the next run on, and the one it replaces, or `true` where there
+/// `phpdbg_exec(string $context): string|bool`: the `exec` file
+/// from the next `run` on, and the one it replaces, or `true` where there
 /// was none; `false` and php's warning for a path that is no file.
 ///
 /// ```php

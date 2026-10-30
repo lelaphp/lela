@@ -10,10 +10,10 @@
 
 use php_sapi::tier::{FrameRef, Request};
 
-use crate::cmd::Param;
+use crate::cmd::Parameter;
 use crate::info::flat;
 use crate::out;
-use crate::prompt::{Here, Ret};
+use crate::prompt::{Here, Reply};
 use crate::read;
 use crate::session::{self, Origin, Session};
 use crate::shown::{self, Key, Shown};
@@ -81,7 +81,7 @@ struct Watch {
     old: Shown,
     /// Its variable's place in the frame's symbol table.
     place: usize,
-    /// What frees it at the run's end, as of the last boundary.
+    /// What frees it at the `run`'s end, as of the last boundary.
     freed: Freed,
 }
 
@@ -342,39 +342,39 @@ fn add(s: &mut Session, here: &mut Here<'_>, input: &[u8], kind: Kind) {
 }
 
 /// `PHPDBG_COMMAND(watch)`: a simple watch, or the list with nothing.
-pub fn watch(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
+pub fn watch(s: &mut Session, here: &mut Here<'_>, params: &[Parameter]) -> Reply {
     match params.first() {
         None => list(s, here, params),
-        Some(Param::Str(input)) => {
+        Some(Parameter::Str(input)) => {
             let input = input.clone();
             add(s, here, &input, Kind::Simple);
-            Ret::Success
+            Reply::Success
         }
-        Some(_) => Ret::Success,
+        Some(_) => Reply::Success,
     }
 }
 
 /// `PHPDBG_WATCH(array)`.
-pub fn array(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
-    if let Some(Param::Str(input)) = params.first() {
+pub fn array(s: &mut Session, here: &mut Here<'_>, params: &[Parameter]) -> Reply {
+    if let Some(Parameter::Str(input)) = params.first() {
         let input = input.clone();
         add(s, here, &input, Kind::Array);
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_WATCH(recursive)`.
-pub fn recursive(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
-    if let Some(Param::Str(input)) = params.first() {
+pub fn recursive(s: &mut Session, here: &mut Here<'_>, params: &[Parameter]) -> Reply {
+    if let Some(Parameter::Str(input)) = params.first() {
         let input = input.clone();
         add(s, here, &input, Kind::Recursive);
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_WATCH(delete)`.
-pub fn delete(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
-    if let Some(Param::Num(id)) = params.first() {
+pub fn delete(s: &mut Session, _: &mut Here<'_>, params: &[Parameter]) -> Reply {
+    if let Some(Parameter::Num(id)) = params.first() {
         match s.watches.list.iter().position(|w| i64::from(w.id) == *id) {
             Some(at) => {
                 s.watches.list.remove(at);
@@ -385,11 +385,11 @@ pub fn delete(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
                 .error(b"Nothing was deleted, no corresponding watchpoint found"),
         }
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `phpdbg_list_watchpoints`.
-pub fn list(s: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn list(s: &mut Session, _: &mut Here<'_>, _: &[Parameter]) -> Reply {
     for watch in &s.watches.list {
         s.out.writeln(
             format!(
@@ -408,7 +408,7 @@ pub fn list(s: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
             .as_bytes(),
         );
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// Whether two zvals differ as php's `WATCH_ON_ZVAL` compares them: the
@@ -447,14 +447,14 @@ fn zval_differs(old: &Shown, new: &Shown) -> bool {
     }
 }
 
-/// Whether the report must stop: what it wrote ran PHP code, a header
+/// Whether the diff must stop: what it wrote ran PHP code, a header
 /// callback, that ended the request, `quit` at a prompt inside it.
 fn ended(req: &mut Request) -> bool {
     read::exiting(req) || session::with(req, |s| s.stopped.is_some()).unwrap_or(true)
 }
 
 /// `phpdbg_print_watch_diff` for a zval: the labels to phpdbg's own
-/// stream, the values through the request's output as
+/// stream, the values through the request's sink as
 /// `zend_print_flat_zval_r` writes them with `zend_write`, so the first
 /// byte sends the headers and a header callback runs, under the
 /// debugger, before the rest is written; `false` where that ended the
@@ -521,7 +521,7 @@ fn key_text(key: &Key) -> Vec<u8> {
 /// table's element `name[]`, each key appended since announced from the
 /// last back (`Element 2 has been added to watchpoint`) and a changed
 /// count reported, then each element that stands in both, named
-/// `name[key]`, by the same rules. `false` where a report ended the
+/// `name[key]`, by the same rules. `false` where a diff ended the
 /// request.
 ///
 /// ```php
@@ -640,7 +640,7 @@ fn str_changed<'a>(old: &'a Shown, new: &'a Shown) -> Option<(&'a [u8], &'a [u8]
     }
 }
 
-/// The copy the session holds of watch `id` now: what a check the report
+/// The copy the session holds of watch `id` now: what a check the diff
 /// re-entered left there, or none where it is gone.
 fn held(req: &mut Request, id: u32) -> Option<Shown> {
     session::with(req, |s| {
@@ -657,7 +657,7 @@ fn held(req: &mut Request, id: u32) -> Option<Shown> {
 /// with what it held, each change reported and then kept as what it
 /// holds; whether any was, `PHPDBG_G(watchpoint_hit)` read and cleared.
 /// The session stands in the request's sink throughout, so a header callback a
-/// report's first byte runs is checked by the debugger too, and finds
+/// diff's first byte runs is checked by the debugger too, and finds
 /// the same change, as php's does; the hit it takes is cleared before
 /// this check reads it.
 pub fn changed(req: &mut Request) -> bool {
@@ -767,7 +767,7 @@ pub fn thaw(s: &mut Session) {
     s.watches.frozen.pop();
 }
 
-/// The watchpoints left when a run ends, each reported removed as the
+/// The watchpoints left when a `run` ends, each reported removed as the
 /// request's teardown frees what php watches for it ([`Freed`]): those
 /// on counted values as the variables are destroyed from the last back,
 /// each array's after those of what it holds, in the order of its keys,

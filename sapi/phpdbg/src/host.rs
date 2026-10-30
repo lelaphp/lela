@@ -1,11 +1,11 @@
 //! The requests phpdbg serves (`Z/sapi/phpdbg/phpdbg.c:1159-1767`): php
-//! keeps one request standing and restarts it after every run, its
-//! execution context compiled again each time; this host serves the
-//! same cycle as requests of the engine's. The context is served held at
+//! keeps one request standing and restarts it after every `run`, its
+//! `exec` file compiled again each time; this host serves the
+//! same cycle as requests of the engine's. The `exec` file is served held at
 //! its first opline for the prompt before `run`, and `run` goes on in
-//! that request; a run ends with its request, and the next is held again.
-//! Where there is no context to hold, a request with no program of the
-//! context's stands across the prompt's commands instead.
+//! that request; a `run` ends with its request, and the next is held again.
+//! Where there is no `exec` file to hold, a request with no program of
+//! its own stands across the prompt's commands instead.
 
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
@@ -17,7 +17,7 @@ use php_sapi::{
 use crate::cmd::Command;
 use crate::out::{self, Sink};
 use crate::prompt;
-use crate::session::{AfterRun, Context, Execution, Plan, Session, Stop};
+use crate::session::{AfterServe, ExecCompile, Execution, Plan, Session, Stop};
 use crate::{NAME, input};
 
 /// The session's requests, until it quits; the status the last of them
@@ -47,42 +47,42 @@ pub fn serve(engine: &Engine, mut s: Session) -> i32 {
     loop {
         let plan = match s.stopped.take() {
             Some(Stop::Quit) => return s.exit_status,
-            Some(Stop::Restart(args) | Stop::RunWith(args)) => {
+            Some(Stop::Restart(args) | Stop::ServeWith(args)) => {
                 if let Some(args) = args {
                     set_arguments(&mut s, &args);
                 }
                 if s.init_due && refuses(engine, &s) {
-                    s.context = Context::Refused;
+                    s.exec_compile = ExecCompile::Refused;
                     s.init_runs = true;
                     Plan::Init
                 } else {
-                    Plan::Run
+                    Plan::Serve
                 }
             }
             Some(Stop::Idle) => Plan::Idle,
             Some(Stop::Clean | Stop::Exec) | None => {
                 // No context, or one the compiler refused, which the
                 // prompt compiles again in the request.
-                if s.exec.is_none() || s.context == Context::Refused {
+                if s.exec.is_none() || s.exec_compile == ExecCompile::Refused {
                     Plan::Idle
                 } else if std::mem::take(&mut s.exec_in_log) && refuses(engine, &s) {
                     // `exec`'s compile inside the log: its refusal is
                     // logged nowhere and bails out of the log with its
                     // guard left set, to the prompt outside it.
-                    s.context = Context::Refused;
+                    s.exec_compile = ExecCompile::Refused;
                     s.status = Some(255);
                     s.out.stick_log();
                     Plan::Idle
                 } else if s.init_due && refuses(engine, &s) {
-                    s.context = Context::Refused;
+                    s.exec_compile = ExecCompile::Refused;
                     Plan::Init
                 } else {
                     Plan::Hold
                 }
             }
         };
-        if plan == Plan::Run {
-            prompt::begin_run(&mut s);
+        if plan == Plan::Serve {
+            prompt::begin_serve(&mut s);
         }
         s.plan = Some(plan);
         s.standing = None;
@@ -90,7 +90,7 @@ pub fn serve(engine: &Engine, mut s: Session) -> i32 {
         // A cycle's compile of a context that compiles comes as its request
         // starts, and php's after the init files: what it writes is held
         // for them.
-        if matches!(plan, Plan::Hold | Plan::Run) && s.init_due {
+        if matches!(plan, Plan::Hold | Plan::Serve) && s.init_due {
             s.out.hold();
         }
         let description = describe(&s, plan);
@@ -133,10 +133,10 @@ fn start_failed(sink: &mut dyn OutputSink) -> i32 {
     1
 }
 
-/// After a request: the context marked as one that does not compile
-/// where its held request never reached its first opline, and a run
+/// After a request: the `exec` file marked as one that does not compile
+/// where its held request never reached its first opline, and a `run`
 /// that ended by itself reported as php reports it; the cycle ended
-/// where the request was a run or `clean` ended it. A context the
+/// where the request was a `run` or `clean` ended it. An `exec` file the
 /// compiler refused leaves the fatal's 255 in php's `EG(exit_status)`.
 ///
 /// ```php
@@ -150,8 +150,8 @@ fn start_failed(sink: &mut dyn OutputSink) -> i32 {
 /// prompt>
 /// ```
 ///
-/// What `register` named goes where php's cycle starts its module again,
-/// after a run among them, so a user function registered before the run
+/// What `register` named goes where php's cycle calls `php_module_startup` again,
+/// after a `run` among them, so a user function registered before the `run`
 /// is no function after it.
 ///
 /// ```php
@@ -186,7 +186,7 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
     s.args.clone_from(&s.line_args);
     s.stdin_file = None;
     if plan == Plan::Hold && !reached {
-        s.context = Context::Refused;
+        s.exec_compile = ExecCompile::Refused;
         return;
     }
     // php's cycle ends with the request a run, a restart, `clean` or an
@@ -215,12 +215,12 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
         }
         crate::watch::removed_at_end(s);
     }
-    if std::mem::take(&mut s.inline_run) {
+    if std::mem::take(&mut s.inline_serve) {
         inline_ran(s, plan);
     } else {
         // `run`'s `phpdbg_clean(1, 0)` once its program is over lets the
         // line the cycle parsed last go.
-        if execution == Execution::Run && s.stopped.is_none() {
+        if execution == Execution::Serving && s.stopped.is_none() {
             s.command_line = None;
         }
         stopped(s, execution, cycle_ended);
@@ -242,15 +242,15 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
     }
 }
 
-/// What follows the request where it ended early or its run is over.
+/// What follows the request where it ended early or its `run` is over.
 fn stopped(s: &mut Session, execution: Execution, cycle_ended: bool) {
     match s.stopped {
-        None if execution == Execution::Run => {
-            prompt::run_queued(s);
+        None if execution == Execution::Serving => {
+            prompt::serve_queued(s);
             // `-rr` quits with `PHPDBG_IS_QUITTING` set
             // (`Z/sapi/phpdbg/phpdbg.c:1713-1719`), so the module's
             // shutdown writes no notice.
-            if s.after_run == AfterRun::Quit {
+            if s.after_serve == AfterServe::Quit {
                 s.stopped = Some(Stop::Quit);
             } else if s.stopped != Some(Stop::Quit) {
                 cycle_notice(s);
@@ -260,7 +260,7 @@ fn stopped(s: &mut Session, execution: Execution, cycle_ended: bool) {
         // at a prompt no run stands under: the cycle ends with the run
         // flag clear, so the module's shutdown writes its notice, which
         // a run that `clean` or `exec` stopped does not reach.
-        Some(Stop::Clean | Stop::Exec) if cycle_ended && execution != Execution::Run => {
+        Some(Stop::Clean | Stop::Exec) if cycle_ended && execution != Execution::Serving => {
             cycle_notice(s);
         }
         None
@@ -270,7 +270,7 @@ fn stopped(s: &mut Session, execution: Execution, cycle_ended: bool) {
             | Stop::Clean
             | Stop::Exec
             | Stop::Restart(_)
-            | Stop::RunWith(_),
+            | Stop::ServeWith(_),
         ) => {}
     }
 }
@@ -278,15 +278,15 @@ fn stopped(s: &mut Session, execution: Execution, cycle_ended: bool) {
 /// What follows a `run` in the init files once the program it ran is
 /// over: its `phpdbg_clean` has the cycle cleaned, so the init files'
 /// lines after it are read under that ([`crate::init::resume`]); then a
-/// cycle that began with a run, or whose init files said yes to a `run`
+/// cycle that began with a `run`, or whose init files said yes to a `run`
 /// after theirs, finds `in_execution` set and asks before
 /// it restarts, `-rr` quitting whatever the answer, and else the cycle's
 /// compile after the init files writes its notice, the first cycle's
 /// alone, and the prompt bails out at once, which ends the cycle. php
-/// loops so for as long as the init files run the program.
+/// loops so for as long as the init files start the program.
 fn inline_ran(s: &mut Session, plan: Plan) {
     // The run left `in_execution` set, which a `run` after it asks about.
-    s.execution = Execution::Run;
+    s.execution = Execution::Serving;
     crate::init::resume(s);
     s.execution = Execution::Not;
     if s.stopped.is_some() {
@@ -294,8 +294,8 @@ fn inline_ran(s: &mut Session, plan: Plan) {
     }
     // A startup run the init files counted resubmits the line the last
     // cycle kept, which bails out at once, where it kept one.
-    let counted = std::mem::take(&mut s.startup_run);
-    if plan == Plan::Run || counted && s.first_command.is_none() {
+    let counted = std::mem::take(&mut s.startup_serve);
+    if plan == Plan::Serve || counted && s.first_command.is_none() {
         // `-rr` quits whatever the answer. Else a yes asks for the run
         // again and a no does not; the input's end bails out quitting,
         // which the cycle being cleaned turns into its end, so the
@@ -306,7 +306,7 @@ fn inline_ran(s: &mut Session, plan: Plan) {
         // cycle bails out of at once, so that cycle asks nothing and ends
         // as one with no startup run does; with none, it is `run` again.
         let answer = input::ask(s, b"Do you really want to restart execution?");
-        if s.after_run == AfterRun::Quit {
+        if s.after_serve == AfterServe::Quit {
             s.stopped = Some(Stop::Quit);
             return;
         }
@@ -359,9 +359,9 @@ fn cycle_notice(s: &mut Session) {
     input::forget(s);
 }
 
-/// Whether the compiler refuses the execution context, learned from a
-/// lint of it whose sink writes nothing: php runs the init files before
-/// its compile, so a context that will be refused has them run first and
+/// Whether the compiler refuses the `exec` file, learned from a
+/// lint of it whose sink writes nothing: php reads the init files before
+/// its compile, so an `exec` file that will be refused has them read first and
 /// its compile after them, in a request of their own that the prompt then
 /// stands in ([`crate::debugger`]'s `Plan::Init`), where the compile is
 /// made again and says what it says ([`prompt::refused_again`]).
@@ -436,9 +436,9 @@ pub fn set_arguments(s: &mut Session, line: &[u8]) {
     s.args = args;
 }
 
-/// The request for `plan`: the context by name, or the code `stdin` read
+/// The request for `plan`: the `exec` file by name, or the code `stdin` read
 /// under `Standard input code`, or, for an idle request, an empty
-/// program; `argv` the context and the arguments after it.
+/// program; `argv` the `exec` file and the arguments after it.
 fn describe(s: &Session, plan: Plan) -> RequestDescription {
     let exec = s.exec.clone().unwrap_or_default();
     let mut argv = vec![exec.clone()];
@@ -492,8 +492,8 @@ fn describe(s: &Session, plan: Plan) -> RequestDescription {
     }
 }
 
-/// A command a run left that needs a request standing: served by a
-/// request of its own, after the run's has ended.
+/// A command a `run` left that needs a request standing: served by a
+/// request of its own, after the `run`'s has ended.
 pub fn idle(s: &mut Session, command: Command) {
     s.job = Some(command);
     s.stopped = Some(Stop::Idle);
