@@ -3,6 +3,7 @@
 //! value it takes ([`Opt`]), and each kind set as php sets it.
 
 use std::ops::ControlFlow;
+use std::os::fd::RawFd;
 
 use php_ext::abi::Instance;
 use php_ext::attr::php_function;
@@ -13,7 +14,7 @@ use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, Value, ValueRef};
 
 use crate::constants as c;
-use crate::ffi::{CFile, EasyId, Hook, Slist};
+use crate::ffi::{EasyId, Hook, Slist};
 use crate::handle::{Curl, CurlHandle, Handler, HeaderTo, ReadFrom, WriteTo, easy_of};
 use crate::throwables::Throwables;
 
@@ -529,9 +530,50 @@ fn set_hook(
 }
 
 /// The stream a stream option names, as `zend_fetch_resource2_ex`
-/// fetches it and `php_stream_cast(PHP_STREAM_AS_STDIO)` casts it: the
-/// stream and its fd, or php's `TypeError` or warning.
-fn stream_of(req: &mut Request, value: &Value) -> Result<Option<(Stream, i32)>, Thrown> {
+/// fetches it and `php_stream_cast(PHP_STREAM_AS_STDIO)` casts it, which
+/// never fails where php has `fopencookie` or `funopen`: the stream and
+/// the fd php `fdopen`s, none where its `FILE *` is a cookie over the
+/// stream, or php's `TypeError`.
+///
+/// ```php
+/// foreach (['php://temp', 'php://memory'] as $url) {
+///     $h = curl_init('file:///i_dont_exist/');
+///     curl_setopt($h, CURLOPT_VERBOSE, true);
+///     curl_setopt($h, CURLOPT_RETURNTRANSFER, true);
+///     var_dump(curl_setopt($h, CURLOPT_STDERR, $o = fopen($url, 'w+')));
+///     curl_exec($h);
+///     rewind($o);
+///     var_dump(stream_get_contents($o));
+/// }
+/// $c = curl_copy_handle($h);
+/// unset($h);
+/// curl_exec($c);
+/// rewind($o);
+/// var_dump(stream_get_contents($o));
+/// $f = tempnam(sys_get_temp_dir(), 'curl');
+/// file_put_contents($f, "body\n");
+/// $h = curl_init("file://$f");
+/// var_dump(curl_setopt($h, CURLOPT_FILE, $m = fopen('php://memory', 'w+')), curl_exec($h));
+/// rewind($m);
+/// var_dump(stream_get_contents($m));
+/// unlink($f);
+/// ```
+/// ```expect
+/// bool(true)
+/// string(37) "* Could not open file /i_dont_exist/
+/// "
+/// bool(true)
+/// string(37) "* Could not open file /i_dont_exist/
+/// "
+/// string(74) "* Could not open file /i_dont_exist/
+/// * Could not open file /i_dont_exist/
+/// "
+/// bool(true)
+/// bool(true)
+/// string(5) "body
+/// "
+/// ```
+fn stream_of(req: &mut Request, value: &Value) -> Result<(Stream, Option<RawFd>), Thrown> {
     let Some(resource) = value.as_resource() else {
         let text = format!(
             "{}(): supplied argument is not a valid File-Handle resource",
@@ -546,16 +588,7 @@ fn stream_of(req: &mut Request, value: &Value) -> Result<Option<(Stream, i32)>, 
         );
         return Err(type_error(req, &text));
     };
-    let label = stream.can_cast(req, Cast::Fd).err();
-    if let Some(fd) = stream.cast(req, Cast::Fd, false) {
-        return Ok(Some((stream, fd)));
-    }
-    let text = format!(
-        "Cannot represent a stream of type {} as a STDIO FILE*",
-        label.unwrap_or("")
-    );
-    docref(req, Level::Warning, &text);
-    Ok(None)
+    Ok((stream, stream.cast(req, Cast::Stdio, true)))
 }
 
 /// `what->mode[0] != 'r' || what->mode[1] == '+'`.
@@ -575,10 +608,7 @@ fn set_stream(req: &mut Request, object: PhpObject, which: StreamOpt, value: &Va
     let what = if matches!(value.as_ref(), ValueRef::Null) {
         None
     } else {
-        match stream_of(req, &value)? {
-            Some(found) => Some(found),
-            None => return Ok(false),
-        }
+        Some(stream_of(req, &value)?)
     };
     if let Some((stream, _)) = what
         && which != StreamOpt::Infile
@@ -622,9 +652,7 @@ fn set_stream(req: &mut Request, object: PhpObject, which: StreamOpt, value: &Va
     };
     let mut code = 0;
     if which == StreamOpt::Stderr {
-        let easy = easy_of(req, object)?;
-        let file = what.and_then(|(_, fd)| CFile::open(fd));
-        code = easy.set_stderr(req, file);
+        code = easy_of(req, object)?.set_stderr(req, what);
     }
     if let Some(old) = old {
         old.give_up(req);

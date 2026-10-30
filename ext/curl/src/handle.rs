@@ -467,7 +467,10 @@ fn copied(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thro
 }
 
 /// `_php_setup_easy_copy_handlers`: the three channels, the six
-/// callables and the private value, each with one more owner.
+/// callables and the private value, each with one more owner; and the
+/// `CURLOPT_STDERR` stream, which php's copy does not hold though its
+/// `CURL *` writes to the stream's `FILE *`, held, so the copy's file is
+/// never left over a stream the original let go of.
 pub(crate) fn copy_handlers(req: &mut Request, object: PhpObject) -> Result<Curl, Thrown> {
     object.native_mut_or_fatal::<Curl>(req)?;
     let mut copy = Curl {
@@ -487,14 +490,16 @@ pub(crate) fn copy_handlers(req: &mut Request, object: PhpObject) -> Result<Curl
     for (slot, hook) in copy.hooks.iter_mut().zip(hooks) {
         *slot = hook;
     }
-    let (private, postfields) = match object.native::<Curl>(req) {
+    let (private, postfields, stderr) = match object.native::<Curl>(req) {
         Some(from) => (
             from.private.as_deref().copied(),
             from.postfields.as_deref().copied(),
+            from.stderr.as_deref().copied(),
         ),
-        None => (None, None),
+        None => (None, None, None),
     };
     copy.private = private.map(|private| Owner::take(req, private));
+    copy.stderr = stderr.map(|stderr| Owner::take(req, stderr));
     copy.postfields = postfields.map(|postfields| Owner::take(req, postfields));
     Ok(copy)
 }
