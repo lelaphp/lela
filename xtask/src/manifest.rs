@@ -560,6 +560,10 @@ pub struct Rule {
     #[serde(default)]
     pub adr: OneOrMany,
     pub text: String,
+    /// What to do instead, which a denial renders after the text (#3618
+    /// ruling 3).
+    #[serde(default)]
+    pub remedy: Option<String>,
     #[serde(flatten)]
     pub predicate: Predicates,
 }

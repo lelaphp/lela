@@ -56,6 +56,8 @@ pub struct Finding {
     pub(crate) admission: Option<Admission>,
     /// Where a denial judged the call, which its reason names.
     pub(crate) placement: Option<Placement>,
+    /// What to do instead, the rule's `remedy`, which a denial names.
+    pub(crate) remedy: Option<String>,
 }
 
 /// Where permit judged a call it denies: the checkout it asked, or a line
@@ -96,6 +98,7 @@ impl Finding {
             adr: rule.adr.iter().map(str::to_owned).collect(),
             admission: None,
             placement: None,
+            remedy: (kind == Kind::Deny).then(|| rule.remedy.clone()).flatten(),
         }
     }
 
@@ -119,11 +122,16 @@ impl Finding {
         format!("{} ({tail})", self.said())
     }
 
-    /// The text, then where a denial judged the call (#3619).
+    /// The text, then what to do instead and where a denial judged the
+    /// call (#3618 ruling 3).
     pub(crate) fn said(&self) -> String {
+        let mut said = self.text.clone();
+        if let Some(remedy) = &self.remedy {
+            said = format!("{said} Instead: {remedy}.");
+        }
         match &self.placement {
-            Some(placement) => format!("{} {placement}", self.text),
-            None => self.text.clone(),
+            Some(placement) => format!("{said} {placement}"),
+            None => said,
         }
     }
 }

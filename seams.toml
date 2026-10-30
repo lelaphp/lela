@@ -669,6 +669,7 @@ where = "operating"   # grammar: where, a checkout holding a merge, cherry-pick,
 deny_argv = ["add", "stage", "commit", "rm", "mv", "restore", "reset", "apply", "merge", "cherry-pick", "revert", "rebase", "am"]
 with = "git"
 text = "A merge, cherry-pick, revert or rebase in progress commits the whole index, so what you stage or step there lands in its commit: wait for it to end, or work in your own worktree (#2476)."
+remedy = "if it is yours, `git merge --abort` or finish with `git commit`; otherwise work in your own worktree"                 # #3618 ruling 3
 
 [[rule]]
 id = "ticket.close"
@@ -683,6 +684,7 @@ id = "ticket.close-api"
 tool = "Bash"
 deny_pattern = '''gh\s+api\b(?:[^|;&]*issues/\d+(?:['"\s]|$)[^|;&]*(?:[\s'"]state=(?:closed|open)\b|"state"\s*:\s*"(?:closed|open)"|--input\b|=@-|=["']?\$\()|[^|;&]*(?:[\s'"]state=(?:closed|open)\b|"state"\s*:\s*"(?:closed|open)"|--input\b|=@-|=["']?\$\()[^|;&]*issues/\d+(?:['"\s]|$)|[^|;&]*\bgraphql\b[^|;&]*(?:(?:close|reopen)Issue\(|--input\b|=@-|=["']?\$\()|[^|;&]*(?:(?:close|reopen)Issue\(|--input\b|=@-|=["']?\$\()[^|;&]*\bgraphql\b)'''
 text = "The same act through `gh api`: an issue's state is set by `xtask ticket close` and by nothing else. A write to an issue's comments, labels or other sub-resources sets no state and is not this rule's (#2390)."
+remedy = "`cargo xtask ticket close <n>`"                 # #3618 ruling 3
 
 [[rule]]
 id = "ticket.reply-unfiled"
@@ -695,6 +697,7 @@ id = "lanes.nightly"
 tool = "Bash"
 deny_pattern = '(?m)(\A|[|;&]\s*)"?(\S*\bphp[0-9.]*|\$\{?\w+\}?)"?(\s+[^|;&\s]+)*?\s+\S*run-tests\.php|(\A|[|;&]\s*)\S*run-tests\.php|compile-identity --corpus'   # upstream's runner where it is run (first in the call, after a separator, or under php), never where it is cited, a message's line included (#790); the lane's flags are lanes.nightly-flags (#1860)
 text = "Nightly lanes run in CI only; run the per-crate subset."
+remedy = "`cargo xtask phpt --subset <crate>`"                 # #3618 ruling 3
 
 [[rule]]
 id = "lanes.nightly-flags"
@@ -718,6 +721,7 @@ where = "ticketed"   # grammar: where, a builder's worktree (branch.<b>.ticket);
 require_argv = "--subset"
 with = "xtask phpt"   # the subset named, as a word or after =; a call for the instrument's help runs no lane (#1424, #1860)
 text = "A builder runs its crates' subsets, and Zend/tests when it touches php_engine, php_compile, php_syntax or php_heap; the whole lane is the merge check's (specs §6)."
+remedy = "`cargo xtask phpt --subset <your crate>`, plus Zend/tests when you touch the engine crates"                 # #3618 ruling 3
 
 [[rule]]
 id = "computed.force"
@@ -738,6 +742,7 @@ scope = [".claude/**", ".claude-plugin/marketplace.json", "harness-plugins/*/hoo
 exempt = [".claude/skills/**", "!.claude/skills/**/.claude-plugin/**", "!.claude/skills/**/hooks/**"]
 deny = true
 text = "Harness configuration, the oracle pin and the divergence registry are edited by a person."
+remedy = "propose it on a `for-a-person` ticket; an additive row a person settled lands with `cargo xtask steer`; to discard your change, file it, since `git restore` of these paths is denied too"                 # #3618 ruling 3
 
 [[rule]]
 id = "harness.self-shell"
@@ -767,6 +772,7 @@ deny_pattern = '''(?x)
     (?:(?:\./)?(?:seams\.toml|oracle\.toml|docs/divergence\.toml|harness-plugins/[^/\s'"|;&)<>]+/(?:hooks|\.claude-plugin)/[^\s'"|;&)<>]*|\.claude-plugin/marketplace\.json)(?:$|[\s'"|;&)<>])|(?:\./)?\.claude/(?:[^s\s'"]|s[^k]|sk[^i]|ski[^l]|skil[^l]|skill[^s]|skills[^/]|skills/[^\s'"|;&)<>]*/(?:\.claude-plugin|hooks)/))
 '''
 text = "Harness configuration, the oracle pin and the divergence registry are edited by a person, through a shell as through Edit and Write."
+remedy = "propose it on a `for-a-person` ticket; an additive row a person settled lands with `cargo xtask steer`; to discard your change, file it, since `git restore` of these paths is denied too"                 # #3618 ruling 3
 
 [[rule]]
 id = "harness.transcript"

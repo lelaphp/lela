@@ -244,7 +244,7 @@ fn a_merge_that_commits_itself_is_refused_in_main_alone() {
 /// commit run in a quiet checkout the line `cd`s into, is let through
 /// though the shell starts where the merge stands.
 #[test]
-fn a_denial_names_the_checkout_it_judged() {
+fn a_denial_names_the_checkout_it_judged_and_the_remedy() {
     let manifest = Manifest::load(workspace()).unwrap();
     let merging = operating("placed-merging");
     let quiet = checkout("placed-quiet", None);
@@ -252,10 +252,17 @@ fn a_denial_names_the_checkout_it_judged() {
     let judged = judge(&manifest, merging.path(), &commit).unwrap();
     let denial = judged.denial().unwrap_or_else(|| panic!("{judged:?}"));
     let top = merging.path().canonicalize().unwrap();
+    // The rule's remedy, then the checkout (#3618 ruling 3).
+    let remedy = manifest
+        .rules
+        .iter()
+        .find(|r| r.id == "git.operation")
+        .and_then(|r| r.remedy.clone());
+    let remedy = remedy.expect("git.operation carries its remedy");
     assert!(
         denial
             .reason()
-            .contains(&format!("Judged in {}.", top.display())),
+            .contains(&format!("Instead: {remedy}. Judged in {}.", top.display())),
         "{}",
         denial.reason()
     );

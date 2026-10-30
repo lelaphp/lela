@@ -96,6 +96,7 @@ pub(super) fn region_body(root: &Path, path: &Path, call: &Call) -> Option<Findi
         adr: Vec::new(),
         admission: None,
         placement: Some(Placement::In(root.to_path_buf())),
+        remedy: None,
     })
 }
 
