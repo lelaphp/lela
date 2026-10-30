@@ -878,7 +878,8 @@ impl KeyNow {
     /// The key of `krate` now, and what of `touched` and of the diff it
     /// covers: the crates of its closure, `built_under`, the files rustc
     /// is built under whose deciding part moved ([`key::moved`]), and the
-    /// paths of the diff its tests read ([`key::READ_BY_TESTS`]).
+    /// paths of the diff its tests or its `build.rs` read
+    /// ([`key::READ_BY_TESTS`], [`key::READ_BY_BUILDS`]).
     fn of(
         snapshot: &Snapshot,
         krate: &Crate,

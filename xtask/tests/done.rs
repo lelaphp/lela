@@ -331,6 +331,51 @@ fn a_change_to_the_manifest_alone_stales_the_harness_test_reading() {
     );
 }
 
+/// A change to `ops.toml` alone, which `php_engine`'s `build.rs` reads
+/// (`key::READ_BY_BUILDS`, #3654), touches `php_engine` and stales its
+/// reading, naming the file, and stales the reading of `ext/reflection`,
+/// built from it, though nothing under either crate changed.
+#[test]
+fn a_change_to_a_file_read_at_build_stales_the_crates_built_from_it() {
+    let root = Tree::new("done-read-by-builds").unwrap();
+    xtask::scratch::repository(&fixtures().join("closure"), &root, &["."]).unwrap();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    for file in ["seams.toml", "oracle.toml", "ops.toml"] {
+        std::fs::copy(workspace().join(file), root.join(file)).unwrap();
+    }
+    let registry = fixtures().join("registry/empty.toml");
+    std::fs::copy(registry, root.join("docs/divergence.toml")).unwrap();
+    write(&root, ".gitignore", "target/\n");
+    write(
+        &root,
+        "ext/reflection/src/lib.rs",
+        "pub fn reflection() { }\n",
+    );
+    Repo::at(&root).commit("the harness's own files and the opcodes");
+    let store = Store::of_workspace(&root);
+    let readings = [("test", "php_engine"), ("witness", "ext/reflection")];
+    for (instrument, scope) in readings {
+        store.record(&[fresh(&root, instrument, scope)]).unwrap();
+    }
+    let stands = |u: &String| !u.contains("is stale");
+    assert!(judge_since(&root, Some("HEAD~1")).unmet.iter().all(stands));
+
+    write(&root, "ops.toml", &format!("{}# moved\n", read("ops.toml")));
+    let verdict = judge(&root);
+    assert_eq!(verdict.crates, ["php_engine"]);
+    let engine = "test: the reading for php_engine is stale; php_engine or ops.toml changed";
+    assert!(
+        verdict.unmet.iter().any(|u| u.starts_with(engine)),
+        "{verdict:#?}"
+    );
+    let verdict = judge_since(&root, Some("HEAD~1"));
+    let built = "witness: the reading for ext/reflection is stale";
+    assert!(
+        verdict.unmet.iter().any(|u| u.starts_with(built)),
+        "{verdict:#?}"
+    );
+}
+
 #[test]
 fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_is_1() {
     let root = scratch("none");
