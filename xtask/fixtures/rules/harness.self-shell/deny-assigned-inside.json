@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "S=.; R=$S/.; cd $R && cat >> harness-plugins/harness/hooks/harness.test.ts <<'EOF'\n// a test\nEOF", "description": "The same write, the variable assigned to a path inside the checkout (#3625)"}}

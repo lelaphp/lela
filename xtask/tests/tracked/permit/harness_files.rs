@@ -190,3 +190,28 @@ fn harness_self_shell_judges_a_write_where_it_runs_and_only_in_a_checkout() {
         assert!(refused(main, &line), "{line}");
     }
 }
+
+/// #3625: a shell write past a `cd` to a variable the line did not assign
+/// is denied saying permit could not place it, naming the command and the
+/// change it lost the line at, and is never judged where the shell started;
+/// the same write past a variable the line assigns from another it assigned
+/// is placed where the value names.
+#[test]
+fn a_shell_write_permit_cannot_place_is_denied_saying_so() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let quiet = checkout("self-shell-unplaced", None);
+    let write = "cat >> harness-plugins/harness/hooks/harness.test.ts <<'EOF'\n// a test\nEOF";
+    let judged = judge(&manifest, quiet.path(), &bash(&format!("cd $R && {write}"))).unwrap();
+    let denial = judged.denial().unwrap_or_else(|| panic!("{judged:?}"));
+    assert_eq!(denial.rule, "harness.self-shell");
+    let reason = denial.reason();
+    assert!(reason.contains("Not placed"), "{reason}");
+    assert!(
+        reason.contains("`cat`") && reason.contains("`cd $R`"),
+        "{reason}"
+    );
+    assert!(!reason.contains("Judged in"), "{reason}");
+    let assigned = format!("S=/usr; R=$S/share; cd $R && {write}");
+    let judged = judge(&manifest, quiet.path(), &bash(&assigned)).unwrap();
+    assert!(judged.denial().is_none(), "{judged:?}");
+}

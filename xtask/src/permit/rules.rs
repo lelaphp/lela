@@ -445,16 +445,22 @@ fn operating_elsewhere(root: &Path, call: &Call) -> Result<bool> {
 /// The first command of `line` that `fires` and that the walk places in
 /// no checkout: one past a change the line does not say where it goes,
 /// or one moved by its own words where they do not say ([`Walk::lost`]).
+/// Where no command fires on its words alone, the line fired whole, as a
+/// pattern over a redirection does, and the first command placed nowhere
+/// that changes no directory is the one named, so the line is never
+/// judged where the shell started (#3625).
 fn unplaced(root: &Path, line: &Line, fires: impl Fn(&Argv) -> bool) -> Option<Unplaced> {
     let walk = Walk::of(root, Some(line));
     let past = walk.lost_by.clone()?;
     let lost = |argv: &&Argv| {
         walk.places_of(argv).next().is_none() || argv.moves().contains(&Move::Unsaid)
     };
+    let whole = !line.commands().iter().any(&fires);
+    let changes = |argv: &Argv| matches!(argv.program(), "cd" | "pushd" | "popd");
     let command = line
         .commands()
         .iter()
-        .filter(|argv| fires(argv))
+        .filter(|argv| if whole { !changes(argv) } else { fires(argv) })
         .find(lost)?;
     Some(Unplaced {
         command: command.words().join(" "),

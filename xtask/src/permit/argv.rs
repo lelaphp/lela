@@ -866,6 +866,11 @@ impl Assigned {
             let Some((name, append)) = assigns(set) else {
                 continue;
             };
+            // A value led by a variable the line assigned is that value,
+            // as the shell expands it: `S=/x; R=$S/repo` names `/x/repo`
+            // (#3625).
+            let led = self.directory(value);
+            let value = led.as_deref().unwrap_or(value);
             let prior = self.0.get(name).filter(|_| append);
             let value = format!("{}{value}", prior.map_or("", String::as_str));
             self.0.insert(name.to_owned(), value);
