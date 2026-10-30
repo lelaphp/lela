@@ -1513,3 +1513,42 @@ fn a_commit_on_staging_runs_at_full_priority_and_a_builder_s_yields() {
         );
     }
 }
+
+/// The merge queue's fast-forward closes the tickets (#3622): a merge
+/// committed on `staging` reaches `xtask ticket merged` through
+/// post-commit, which closes nothing off `main`, and `main`'s `git merge
+/// --ff-only staging` reaches it through post-merge, since `ORIG_HEAD`,
+/// which reads the merges the fast-forward brought.
+#[test]
+fn a_fast_forward_of_main_to_staging_reaches_ticket_merged() {
+    let scratch = scratch("staging-ff", &Computed::Rendered);
+    let main = scratch
+        .git(&["symbolic-ref", "--short", "HEAD"], false)
+        .trim()
+        .to_owned();
+    let merged = |scratch: &Scratch| {
+        scratch
+            .calls("cargo")
+            .into_iter()
+            .filter(|call| call.starts_with("xtask ticket merged"))
+            .collect::<Vec<_>>()
+    };
+    scratch.git(&["checkout", "-q", "-b", "t7", &main], false);
+    scratch.git(
+        &["commit", "-q", "--allow-empty", "-m", "the work of #7"],
+        false,
+    );
+    scratch.git(&["checkout", "-q", "-b", "staging", &main], false);
+    scratch.git(&["merge", "-q", "--no-ff", "--no-commit", "t7"], false);
+    scratch.git(&["commit", "-q", "-m", "Merge t7: the work (#7)"], true);
+    assert_eq!(merged(&scratch), ["xtask ticket merged --since HEAD^1"]);
+    scratch.git(&["checkout", "-q", &main], false);
+    scratch.git(&["merge", "-q", "--ff-only", "staging"], true);
+    assert_eq!(
+        merged(&scratch),
+        [
+            "xtask ticket merged --since HEAD^1",
+            "xtask ticket merged --since ORIG_HEAD"
+        ]
+    );
+}
