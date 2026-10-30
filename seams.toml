@@ -796,6 +796,13 @@ scope = "docs/divergence.toml"
 check = "divergence-reason"
 text = "A divergence row with status accepted has a reason a person wrote, a by-design row's citing the design section or ADR that chose it, and an oracle-build row carries what it retires at; done fails while an open row touches the scope (harness §4.3)."
 
+[[rule]]
+id = "checkout.owner"
+tool = ["Edit", "Write", "Bash"]
+where = "owned"   # grammar: where, a checkout another session owns by its owner record, judged where each write lands (#3618 M1, #3621)
+writes = true   # grammar: writes, an Edit, a Write, or a Bash line with a command that can change a checkout or a redirection into a file (#3621)
+text = "One session writes in a checkout: its owner, recorded by `xtask worktree add` or `xtask worktree own` (#3618 M1). Instead: work in your own worktree (`xtask worktree add`), or have its owner let it go with `xtask worktree own --release`."
+
 # ---------------------------------------------------------------- owed
 # What a crate owes before done (harness §4.5 condition 1): one row per
 # instrument, the crates a glob or a list less `exempt`, and `when` a

@@ -6,13 +6,16 @@
 //! `computed` answers with one shape per case. What is read back is what
 //! the hook did, the commit it allowed or refused, the files it staged
 //! and the base it handed `done`, since a hook that exits without doing
-//! its job is invisible to a substring over its text.
+//! its job is invisible to a substring over its text. Each runs git with
+//! no session of its own, as a person's terminal does, unless the test
+//! names one (#3621).
 #![cfg(tracked)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use xtask::owner::{self, SESSION_VARIABLE, SessionId};
 use xtask::scratch::Tree;
 
 mod common {
@@ -125,6 +128,7 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
         &bin.join("cargo"),
         &format!(
             "#!/bin/sh\n\
+             if [ \"$1 $2\" = 'xtask worktree' ]; then shift 2; exec '{xtask}' --root \"$PWD\" worktree \"$@\"; fi\n\
              printf '%s\\n' \"$*\" >> '{log}'\n\
              if [ -f '{refuse}' ] && [ \"$(cat '{refuse}')\" = \"$1 $2\" ]; then exit 1; fi\n\
              if [ \"$1 $2\" = 'xtask regions' ]; then shift 2; exec '{xtask}' --root \"$PWD\" regions \"$@\"; fi\n\
@@ -207,6 +211,12 @@ impl Scratch {
     /// Without `claude`, `PATH` is the stand-ins and the system's own
     /// directories alone, so the hook finds no `claude` anywhere.
     fn run(&self, args: &[&str], hooked: bool) -> (i32, String) {
+        self.run_as(args, hooked, None)
+    }
+
+    /// [`Scratch::run`] from `session`, as Claude Code hands its session
+    /// to a call's processes, or from none, a person's terminal.
+    fn run_as(&self, args: &[&str], hooked: bool, session: Option<&str>) -> (i32, String) {
         let path = if self.claude_on_path {
             format!(
                 "{}:{}",
@@ -226,6 +236,10 @@ impl Scratch {
             .env("GIT_AUTHOR_EMAIL", "x@x")
             .env("GIT_COMMITTER_NAME", "x")
             .env("GIT_COMMITTER_EMAIL", "x@x");
+        match session {
+            Some(id) => command.env(SESSION_VARIABLE, id),
+            None => command.env_remove(SESSION_VARIABLE),
+        };
         if hooked {
             command.env("PATH", format!("{}:{path}", self.dir.join("bin").display()));
         } else {
@@ -781,6 +795,73 @@ fn a_merge_commit_runs_no_witness() {
         !calls.iter().any(|c| c.starts_with("xtask witness")),
         "{calls:?}"
     );
+}
+
+/// One session writes in a checkout, its owner (#3618 M1, #3621): with an
+/// owner record naming `the-owner`, a commit from another session is
+/// refused by pre-commit before any instrument starts, naming the owner,
+/// the session and the checkout, and so is a merge git commits itself,
+/// by pre-merge-commit, the merge left standing; the owner's commit and
+/// a person's, made from no session, go through.
+#[test]
+fn a_commit_from_another_session_than_the_checkout_s_owner_is_refused() {
+    let scratch = scratch("owner", &Computed::Rendered);
+    let main = scratch
+        .git(&["symbolic-ref", "--short", "HEAD"], false)
+        .trim()
+        .to_owned();
+    owner::record(&scratch.root, &SessionId::new("the-owner").unwrap()).unwrap();
+    let path = "crates/php_heap/src/lib.rs";
+    let commit = |text: &str, session: Option<&str>| {
+        write(&scratch.root, path, text);
+        scratch.git(&["add", "--", path], false);
+        scratch.run_as(
+            &["commit", "-q", "-m", "a change", "--", path],
+            true,
+            session,
+        )
+    };
+    let before = scratch.head();
+    let (code, out) = commit("pub fn free() {}\n", Some("another-session"));
+    assert_eq!(code, 1, "{out}");
+    let named = format!(
+        "{} is session the-owner's and this is session another-session",
+        scratch.root.display()
+    );
+    assert!(out.contains(&named), "{out}");
+    assert!(out.contains("Instead: work in your own worktree"), "{out}");
+    assert!(scratch.calls("cargo").is_empty(), "nothing ran: {out}");
+    assert_eq!(scratch.head(), before, "{out}");
+
+    let (code, out) = commit("pub fn free() {}\n", Some("the-owner"));
+    assert_eq!(code, 0, "the owner's commit: {out}");
+    let (code, out) = commit("pub fn alloc() {}\n", None);
+    assert_eq!(code, 0, "a person's commit: {out}");
+
+    scratch.git(&["checkout", "-q", "-b", "t9"], false);
+    write(&scratch.root, "notes.txt", "b\n");
+    scratch.git(&["add", "--", "notes.txt"], false);
+    scratch.git(&["commit", "-q", "-m", "the work of #9"], false);
+    scratch.git(&["checkout", "-q", &main], false);
+    let before = scratch.head();
+    let merge = [
+        "merge",
+        "-q",
+        "--no-ff",
+        "t9",
+        "-m",
+        "Merge t9: the work (#9)",
+    ];
+    let (code, out) = scratch.run_as(&merge, true, Some("another-session"));
+    assert_ne!(code, 0, "{out}");
+    assert!(
+        out.contains(&named) && out.contains("pre-merge-commit"),
+        "{out}"
+    );
+    assert_eq!(scratch.head(), before, "{out}");
+    scratch.git(&["merge", "--abort"], false);
+    let (code, out) = scratch.run_as(&merge, true, Some("the-owner"));
+    assert_eq!(code, 0, "the owner's merge: {out}");
 }
 
 /// git reads the file `-F` names only after pre-commit, so a missing one

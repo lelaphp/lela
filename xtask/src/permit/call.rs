@@ -42,9 +42,6 @@ pub struct Call {
     pub transcript_path: Option<String>,
     /// The subagent the call runs in, absent on the main loop.
     pub agent_id: Option<String>,
-    /// How long the call ran, which the `PostToolUse` hook carries: what
-    /// began during it began no earlier than this before the hook.
-    pub(super) duration_ms: Option<u64>,
     /// The hook event the call came in on, which the hook's answer names
     /// again: `PostToolUse`, or `PostToolUseFailure` for a `Bash` call that
     /// exited non-zero, which gets no `PostToolUse` (#2762).

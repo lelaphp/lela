@@ -170,8 +170,8 @@ pub(crate) enum Command {
         command: Option<TrackCommand>,
     },
     /// A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>,
-    /// `retire` appends its log into the store and removes it. Writes no
-    /// reading.
+    /// `retire` removes it, `own` and `whose` record and say its owner.
+    /// Writes no reading.
     ///
     /// `add` lays the worktree down ready to be worked in, the branch cut
     /// from `main` with the ticket it is for recorded on it, `xtask` built
@@ -729,7 +729,7 @@ pub(crate) enum TrackCommand {
     },
 }
 
-/// The two halves of a ticket's worktree.
+/// A ticket's worktree laid down and retired, and whose a checkout is.
 #[derive(Debug, Subcommand)]
 pub(crate) enum WorktreeCommand {
     /// Lay the worktree for a branch down, ready to be worked in, with
@@ -749,6 +749,20 @@ pub(crate) enum WorktreeCommand {
         /// The branch a worktree is on.
         branch: String,
     },
+    /// Record the session that owns the checkout this runs in, the
+    /// calling session's own unless a person names one, or let it go;
+    /// refused where another session owns it (#3621).
+    Own {
+        /// The session to record, which only a person names.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+        /// Take the record away, so the checkout is no session's.
+        #[arg(long, conflicts_with = "session")]
+        release: bool,
+    },
+    /// Say whose the checkout this runs in is; exit 1 where another
+    /// session owns it, as pre-commit asks (#3621).
+    Whose,
 }
 
 /// Read the criteria, or read them and close.

@@ -45,6 +45,14 @@
 //! no reading is written: the readings are the worktree's own, once an
 //! agent is in it.
 //!
+//! The session that lays the worktree down owns it (#3618 M1, #3621):
+//! the add records it ([`crate::owner`]), so pre-commit and `permit`
+//! refuse another session's writes there. `xtask worktree own` records
+//! the owner of a checkout no add laid down, main's and the merge
+//! worktree, or lets one go; `xtask worktree whose` says whose a
+//! checkout is and refuses another session, which is what pre-commit and
+//! pre-merge-commit ask before anything else runs.
+//!
 //! The ticket the branch's work is for is the add's to record (#30):
 //! `--ticket` writes it on the branch, where the track module reads it by
 //! name, so a reader that asks whether the work of a branch is done need
@@ -84,6 +92,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::computed;
 use crate::git::{git, has_ref};
+use crate::owner::{self, SessionId};
 use crate::phpt::against;
 use crate::reading::Store;
 use crate::track::{self, MAIN, Ticket, Track, short};
@@ -138,6 +147,8 @@ const LOCAL: &str = ".claude/harness.local.md";
 /// it is.
 const ADD: &str = "worktree add";
 const RETIRE: &str = "worktree retire";
+const OWN: &str = "worktree own";
+const WHOSE: &str = "worktree whose";
 
 /// A worktree that is laid down but not ready to be worked in: the lines
 /// printed before it say what failed. Its own error, so the exit can say
@@ -160,10 +171,15 @@ impl std::fmt::Display for NotReady {
 impl std::error::Error for NotReady {}
 
 /// Lay the worktree for `branch` down under `root`, recording `ticket` on
-/// the branch where one is given, or refuse and change nothing. `Ok` is
-/// the worktree's directory, ready; [`NotReady`] is the directory laid
-/// down with a fact missing.
-pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf> {
+/// the branch where one is given and `owner` as the session that owns it,
+/// or refuse and change nothing. `Ok` is the worktree's directory, ready;
+/// [`NotReady`] is the directory laid down with a fact missing.
+pub fn add(
+    root: &Path,
+    branch: &str,
+    ticket: Option<Ticket>,
+    owner: Option<&SessionId>,
+) -> Result<PathBuf> {
     let track = Track::of(root, Some(branch))
         .with_context(|| format!("where {branch} is taken off could not be said"))?;
     let homes = homes(&track.store)?;
@@ -220,6 +236,19 @@ pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf>
             "for no ticket: none was named, and `xtask track` says so rather than guessing from the branch name"
         ),
     }
+    match owner {
+        Some(session) => {
+            owner::record(&dir, session)?;
+            say!(
+                ADD,
+                "owned by session {session}: pre-commit and permit refuse another session's writes there"
+            );
+        }
+        None => say!(
+            ADD,
+            "owned by no session, being laid down outside one; `xtask worktree own --session <id>` there names one"
+        ),
+    }
 
     seed(&dir, root);
     let mut ready = true;
@@ -233,6 +262,76 @@ pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf>
     } else {
         Err(NotReady { dir }.into())
     }
+}
+
+/// Record the owner of the checkout `root` stands in: `named`, or the
+/// `caller`'s own session; or, with `release`, take its record away. A
+/// session records itself alone, and neither takes nor lets go of a
+/// checkout another session owns; a person, who calls from no session,
+/// names any session and hands a checkout over.
+pub fn own(
+    root: &Path,
+    caller: Option<&SessionId>,
+    named: Option<SessionId>,
+    release: bool,
+) -> Result<()> {
+    let checkout = owner::checkout_of(root)
+        .with_context(|| format!("{} is in no checkout", root.display()))?;
+    let at = checkout.display();
+    let held = owner::of(&checkout)?;
+    if let Some(other) = owner::another(&checkout, caller)? {
+        bail!(
+            "{at} is session {other}'s; {other} lets it go with `xtask worktree own --release`, or a person hands it over with `xtask worktree own --session <id>` in a terminal"
+        );
+    }
+    if release {
+        let was = owner::release(&checkout)?;
+        say!(
+            OWN,
+            "{at} is no session's{}",
+            if was { " now" } else { " already" }
+        );
+        return Ok(());
+    }
+    let session = match (named, caller) {
+        (Some(named), Some(caller)) if named != *caller => bail!(
+            "a session records itself as an owner, and {named} is not this one; a person names another session from a terminal"
+        ),
+        (Some(named), _) => named,
+        (None, Some(caller)) => caller.clone(),
+        (None, None) => bail!(
+            "no session runs this; a person names the session that owns {at} with --session <id>"
+        ),
+    };
+    owner::record(&checkout, &session)?;
+    let taken = match held {
+        Some(was) if was != session => format!(", taken from {was}"),
+        _ => String::new(),
+    };
+    say!(OWN, "{at} is session {session}'s{taken}");
+    Ok(())
+}
+
+/// Say whose the checkout `root` stands in is, and refuse where another
+/// session than the `caller` owns it: what pre-commit and
+/// pre-merge-commit ask before anything runs, so a commit there is the
+/// owner's or a person's.
+pub fn whose(root: &Path, caller: Option<&SessionId>) -> Result<()> {
+    let checkout = owner::checkout_of(root)
+        .with_context(|| format!("{} is in no checkout", root.display()))?;
+    let at = checkout.display();
+    if let Some(other) = owner::another(&checkout, caller)? {
+        let caller = caller.map(SessionId::as_str).unwrap_or_default();
+        bail!(
+            "{at} is session {other}'s and this is session {caller}: one session writes in a checkout, its owner (#3618 M1). Instead: work in your own worktree (`xtask worktree add`), or have {other} let it go with `xtask worktree own --release`"
+        );
+    }
+    match (owner::of(&checkout)?, caller) {
+        (None, _) => say!(WHOSE, "{at} is no session's"),
+        (Some(session), Some(_)) => say!(WHOSE, "{at} is session {session}'s, this one"),
+        (Some(session), None) => say!(WHOSE, "{at} is session {session}'s; a person is admitted"),
+    }
+    Ok(())
 }
 
 /// Retire the worktree on `branch`: its log appended into the main
