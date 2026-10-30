@@ -71,7 +71,13 @@
 //!   act, and putting those back would undo the person.
 //! - What `steer` wrote: a call whose words run `xtask steer` is the
 //!   sanctioned writer, and a file it moved stands where steer's own
-//!   reading of that call says it wrote exactly that ([`steered`]).
+//!   reading of that call says it wrote exactly that ([`steered`]), as
+//!   judged by a build compiled from the sources the checkout carries that
+//!   reads the manifest it commits ([`Steering`], #3631): another
+//!   checkout's own build where this one is not that ([`handed`]), the
+//!   next build the hook runs where this one is stale, its record left for
+//!   it, and where no build is, every file is kept and the answer says it
+//!   could not judge.
 //! - A file the rule's `exempt` covers: `.claude/skills/**` is an ordinary
 //!   file (#626), so a `Bash` write there stands as an `Edit` there does,
 //!   but for what a `!` pattern takes back, a plugin laid in a skill (#3470).
@@ -242,11 +248,29 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
         );
         return Ok(());
     };
-    // The record is this call's alone and is spent whatever follows.
-    fs::remove_file(&file).ok();
     let record: Record = serde_json::from_str(&taken)
         .with_context(|| format!("reading the record at {}", file.display()))?;
-    let moved = sort_moved(&record, &call, &held(root, &call));
+    let checkout = held(root, &call);
+    let steering = runs_steer(&record.command);
+    let unread = match steering.then(|| Steering::of(root, &checkout)) {
+        Some(Steering::Newer(why)) => anyhow::bail!(
+            "{why}, so this build is no judge of steer's write; the record is left for the \
+             next build the hook runs, the last of which rebuilds"
+        ),
+        Some(Steering::Checkout(why)) => {
+            fs::remove_file(&file).ok();
+            if let Some(decision) = handed(&checkout, &call, &taken, &text) {
+                return std::io::Write::write_all(&mut std::io::stdout(), &decision)
+                    .context("printing the decision the checkout's build made");
+            }
+            Some(why)
+        }
+        Some(Steering::This(unread)) => unread,
+        None => None,
+    };
+    // The record is this call's alone and is spent whatever follows.
+    fs::remove_file(&file).ok();
+    let moved = sort_moved(&record, &call, &checkout, unread.as_deref());
     if moved.is_empty() {
         return Ok(());
     }
@@ -272,8 +296,10 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
 /// that steer did not write: kept where history carries it ([`landed_at`]),
 /// put back where the call's line can write it and no operation in
 /// progress staged it, kept otherwise. A word of the line is read where
-/// its shell stands ([`shell_at`]).
-fn sort_moved(record: &Record, call: &Call, held: &Path) -> Vec<Moved> {
+/// its shell stands ([`shell_at`]). Where the line runs steer and this
+/// build cannot read the manifest steer judges by, `unread` says why, and
+/// every file is kept: whether steer wrote it is not this build's to say.
+fn sort_moved(record: &Record, call: &Call, held: &Path, unread: Option<&str>) -> Vec<Moved> {
     let steering = runs_steer(&record.command);
     let line = argv::Line::read(&record.command);
     let mut moved = Vec::new();
@@ -304,7 +330,15 @@ fn sort_moved(record: &Record, call: &Call, held: &Path) -> Vec<Moved> {
             let staged = writes
                 .then(|| operation::staged(&guarded.checkout, path))
                 .flatten();
-            let (verdict, said) = if let Some(moved_to) = landed {
+            let (verdict, said) = if let Some(why) = unread {
+                let why = format!(
+                    "the line runs steer, and this build could not judge whether steer wrote \
+                     it, since it cannot read the manifest steer judges by ({why}); nothing is \
+                     put back and it is kept as it stands"
+                );
+                let said = kept_words(&guarded.checkout, path, &why, was.as_deref());
+                (Verdict::Kept, format!("{path}: {said}"))
+            } else if let Some(moved_to) = landed {
                 let why = format!(
                     "HEAD moved to {moved_to} during the call and holds it at this blob: history \
                      carries the change, so it is kept as it stands and settles nothing"
@@ -578,6 +612,62 @@ fn steered_by(checkout: &Path, path: &str, was: &str, since: i64) -> Option<()> 
         && reading.numbers.get("added") == Some(&Number::count(added.len()))
         && reading.message.ends_with(&added.join(", ")))
     .then_some(())
+}
+
+/// Which build judges a call that runs steer (#3631). Steer's write is
+/// judged with steer's own code and by the manifest the checkout commits,
+/// so a build compiled from other sources than the checkout carries, or
+/// one that cannot read that manifest, is no judge of it.
+enum Steering {
+    /// This build, with why it cannot read the manifest where it cannot,
+    /// and no other build of the checkout would.
+    This(Option<String>),
+    /// The build of the checkout the call ran in, another than the one
+    /// this build was asked about, and why this one is not.
+    Checkout(String),
+    /// A newer build of this checkout: this one is stale, and why.
+    Newer(String),
+}
+
+impl Steering {
+    fn of(root: &Path, checkout: &Path) -> Steering {
+        let sources = crate::inputs::sources_digest(checkout).ok();
+        let apart = checkout.join(crate::inputs::SOURCES_DIR).is_dir()
+            && sources.as_deref() != Some(crate::built::SOURCES);
+        let unread = steer::binding(checkout).err().map(|err| format!("{err:#}"));
+        let why = unread.clone().unwrap_or_else(|| {
+            let carries = checkout.join(crate::inputs::SOURCES_DIR);
+            format!(
+                "{} is not what this build was compiled from",
+                carries.display()
+            )
+        });
+        match (
+            apart,
+            unread.is_some(),
+            crate::built::same_directory(checkout, root),
+        ) {
+            (false, false, _) => Steering::This(None),
+            (_, _, false) => Steering::Checkout(why),
+            (true, _, true) => Steering::Newer(why),
+            (false, true, true) => Steering::This(unread),
+        }
+    }
+}
+
+/// The call handed to the build of `held`, the checkout it ran in: the
+/// record laid in `held`'s store, where its build looks for it, and what
+/// that build printed, whose decision is this one's (#1047, #3631). `None`
+/// where no build of it judged the call.
+fn handed(held: &Path, call: &Call, taken: &str, text: &str) -> Option<Vec<u8>> {
+    reading::replace(&record_path(held, call)?, taken.as_bytes()).ok()?;
+    super::hand_off::walk(
+        held,
+        super::Adapter::CommandHook,
+        &["permit", "--after"],
+        text,
+    )
+    .ok()
 }
 
 /// Whether one of the command's simple commands runs `xtask steer`,
