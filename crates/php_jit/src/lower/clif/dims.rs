@@ -14,10 +14,10 @@ use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, StackSlot, Value};
 use php_heap::{Arr, ZvalType};
 use php_unit::Opcode;
 
-use super::{COUNTED, Emit, KIND, Kernel, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
+use super::{COUNTED, Emit, KIND, Kernel, Kind, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
 use crate::types::{
-    Abort, Check, Constant, ExitId, Fused, GuardAt, Imm, Layout, Leave, Line, OpId, Operand, Read,
-    Slot, Types, ValueId, cannot_raise,
+    Abort, Check, Constant, ExitId, Fused, GuardAt, Home, Imm, Layout, Leave, Line, OpId, Operand,
+    Read, Slot, Types, ValueId, cannot_raise,
 };
 
 /// Where a read goes on that finds no element ([`Emit::reached`]): the
@@ -404,19 +404,16 @@ impl Emit<'_> {
 
     /// The element a read reaches ([`Emit::reached`]), on as `missing`
     /// says where there is none, written to the slot the fetch writes:
-    /// copied as `ZVAL_COPY_DEREF` copies it, or held to its type by its
-    /// one or two guards ([`Emit::held_element`]). The slot it wrote.
+    /// copied as `ZVAL_COPY_DEREF` copies it ([`Emit::copied_element`]),
+    /// or held to its type by its one or two guards
+    /// ([`Emit::held_element`]). The slot it wrote.
     fn read_element(&mut self, at: OpId, line: &Line, missing: Missing<'_>) -> Result<Slot, Abort> {
         let out = line
             .out
             .ok_or_else(|| mismatch("a fetch that writes nothing"))?;
         let element = self.reached(at, line, missing)?;
         match self.within(at).as_slice() {
-            [] => {
-                let element = self.deref(element);
-                let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
-                self.copy(element, info, self.value(out)?.slot)?;
-            }
+            [] => self.copied_element(element, out)?,
             [in_place] => self.held_element(*in_place, None, element, out)?,
             [in_place, through] => self.held_element(*in_place, Some(*through), element, out)?,
             _ => {
@@ -426,6 +423,86 @@ impl Emit<'_> {
             }
         }
         Ok(self.value(out)?.slot)
+    }
+
+    /// An element no guard holds, at `element`, copied through the
+    /// reference it may be to the slot of `out`, as php's
+    /// `zend_jit_fetch_dim_read` copies one with no `MAY_BE_GUARD`
+    /// (`ZVAL_COPY_DEREF`, `Z/ext/opcache/jit/zend_jit_ir.c:12695-12704`).
+    ///
+    /// Its value is never one a register carries, so the slot is all it
+    /// writes. php's analysis types every read of an array's element as
+    /// what the array holds or `null` (`zend_array_element_type`,
+    /// `Z/Zend/Optimizer/zend_inference.c:2147-2151`, `php_ssa`'s
+    /// `element_type`), and `types` compiles a fetch inline only over an
+    /// array, so the types of one no guard holds are one scalar only where
+    /// they are `null` alone, which `types` keeps in a register that is a
+    /// constant and defines nothing. A long, a double or a boolean is kept
+    /// in a register only under the guard within the fetch that holds it
+    /// to the type the trace recorded, which [`Emit::held_element`]
+    /// defines, as php gives a fetched element a register only under its
+    /// `MAY_BE_GUARD` (`Z/ext/opcache/jit/zend_jit_trace.c:3045-3068`) and a
+    /// register to a long or a double alone
+    /// (`zend_jit_var_supports_reg`, `Z/ext/opcache/jit/zend_jit_ir.c:17724-17728`).
+    /// Such a register here would be a fetch that wrote its slot alone,
+    /// #3665's defect, so it is refused as php's `COMPILER_ERROR`.
+    ///
+    /// Elements of an array of `null`s, by a long key and by a string, the
+    /// second through `??`, each kept in a register that is a constant:
+    ///
+    /// ```php
+    /// function f($n) {
+    ///     $z = [null, null]; $h = ['k' => null];
+    ///     for ($i = 0; $i < $n; $i++) { echo $z[$i & 1] === null ? "null" : "set", " ", $h['k'] ?? $i, "\n"; }
+    /// }
+    /// f(3);
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// null 0
+    /// null 1
+    /// null 2
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:6
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %s:4
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 2 f() %s:5
+    /// ---- TRACE 2 start (side trace 1/2) f() %s:5
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    /// ```
+    ///
+    /// The same beside the elements a guard holds, a long, a double and a
+    /// boolean, each read on the compiler's thread once its trace is
+    /// entered, none read wrong:
+    ///
+    /// ```php
+    /// function f($n) {
+    ///     $z = [null, null]; $h = ['k' => null]; $l = [0, 0, 0]; $d = ['x' => 0.0]; $b = [false, true]; $bad = 0;
+    ///     for ($i = 1; $i < $n; $i++) {
+    ///         $l[$i % 3] = $i; $d['x'] = $i * 0.5;
+    ///         if ($z[$i & 1] !== null || ($h['k'] ?? -1) !== -1 || $l[$i % 3] !== $i || $d['x'] !== $i * 0.5 || $b[$i & 1] !== (($i & 1) === 1)) { $bad++; }
+    ///     }
+    ///     return $bad;
+    /// }
+    /// echo f(200000), "\n";
+    /// ```
+    /// ```expect regime=jit-tracing process
+    /// 0
+    /// ```
+    fn copied_element(&mut self, element: Value, out: ValueId) -> Result<(), Abort> {
+        let held = self.value(out)?;
+        if held.home == Home::Register && Kind::of(held.types).is_some_and(Kind::carries) {
+            return Err(mismatch(
+                "an element no guard holds kept in a register that carries a value",
+            ));
+        }
+        let element = self.deref(element);
+        let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
+        self.copy(element, info, held.slot)
     }
 
     /// The element `key` names in the array `arr`, through `kernel`,

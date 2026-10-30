@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use cranelift_codegen::isa;
 
+use php_heap::ZvalType;
 use php_unit::Opcode;
 
 use super::{Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupported};
@@ -953,6 +954,66 @@ fn a_typed_property_read_through_this_defines_its_register() -> Result<(), Strin
             .any(|guard| matches!(guard.at, GuardAt::Within(op) if op.0 as usize == read.0)),
         "{}",
         super::dump::render(&ir)
+    );
+    Ok(())
+}
+
+/// An element fetch no guard holds keeps its value in its slot, or in a
+/// register that is a constant: php's analysis types every read of an
+/// array's element as what the array holds or `null`, so the one scalar
+/// such a fetch's types can be is `null`, and a long, a double or a
+/// boolean in a register is always held by a guard within the fetch,
+/// which defines it (#3674). An array of `null`s read by a long key, by
+/// a string and through `??`, and an empty one through `??`, reach the
+/// first; arrays of longs, doubles and booleans, and one a parameter
+/// holds, the second. Each trace compiles, where `Emit::copied_element`
+/// would refuse a register that carries a value.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_element_fetch_no_guard_holds_keeps_no_value_in_a_register() -> Result<(), String> {
+    let programs = [
+        "function f($n) { $a = [null, null]; $s = 0; for ($i = 0; $i < $n; $i++) { if ($a[$i & 1] === null) { $s++; } } return $s; }",
+        "function f($n) { $a = ['x' => null, 'y' => null]; $s = 0; for ($i = 0; $i < $n; $i++) { $v = $a['x']; if ($v === null) { $s++; } } return $s; }",
+        "function f($n) { $a = [null, null]; $s = 0; for ($i = 0; $i < $n; $i++) { $s += $a[$i & 1] ?? 5; } return $s; }",
+        "function f($n) { $e = []; $s = 0; for ($i = 0; $i < $n; $i++) { $s += $e[$i] ?? 1; } return $s; }",
+        "function f($n) { $a = [1, 2, 3]; $s = 0; for ($i = 0; $i < $n; $i++) { $s += $a[$i % 3]; } return $s; }",
+        "function f($n) { $a = [1.5, 2.5]; $s = 0.0; for ($i = 0; $i < $n; $i++) { $s += $a[$i & 1]; } return $s; }",
+        "function f($n) { $a = [true, false]; $s = 0; for ($i = 0; $i < $n; $i++) { if ($a[$i & 1]) { $s++; } } return $s; }",
+        "function f($n) { $l = [1, 2, 3]; $s = 0; for ($i = 0; $i < $n; $i++) { $s += $l[$i] ?? 1; } return $s; }",
+    ];
+    let plan = [("record.function", "f"), ("record.start", "loop")];
+    let (mut constant, mut guarded) = (0, 0);
+    for program in programs {
+        let program = format!("{program}\necho f(10), \"\\n\";");
+        let (ir, _) = compiled(&plan, &program)?;
+        let rendered = super::dump::render(&ir);
+        for (at, op) in ir.ops.iter().enumerate() {
+            let Op::Line(line) = op else {
+                continue;
+            };
+            if !matches!(line.opcode, Opcode::FetchDimR | Opcode::FetchDimIs) {
+                continue;
+            }
+            let out = line.out.ok_or("a fetch that writes nothing")?;
+            let held = ir.values.get(out.0 as usize).ok_or("the fetch's value")?;
+            let within = (ir.guards.iter())
+                .any(|guard| matches!(guard.at, GuardAt::Within(op) if op.0 as usize == at));
+            if within {
+                guarded += usize::from(held.home == Home::Register);
+                continue;
+            }
+            let carries = held.home == Home::Register
+                && !matches!(
+                    held.types.tag(),
+                    Some(ZvalType::Null | ZvalType::False | ZvalType::True)
+                );
+            assert!(!carries, "{program}\n{rendered}");
+            constant += usize::from(held.home == Home::Register);
+        }
+    }
+    assert!(
+        constant >= 4 && guarded >= 3,
+        "{constant} constant, {guarded} guarded"
     );
     Ok(())
 }
