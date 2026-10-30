@@ -1,1 +1,1 @@
-{"tool_name":"Bash","tool_input":{"command":"git add -- docs/divergence.toml && git commit -F /tmp/t2471.txt -- docs/divergence.toml","description":"Stage and commit the settled row by pathspec"}}
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"git add -- docs/divergence.toml && git commit -F /tmp/t2471.txt -- docs/divergence.toml","description":"Stage and commit the settled row by pathspec"}}

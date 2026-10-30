@@ -20,8 +20,7 @@
 //! where the call acts, its `cwd` moved by the line's leading `cd`,
 //! `pushd` and `popd`, or by git's `-C` where every command past them is
 //! git and names one directory, at the top of its worktree
-//! ([`operation::ran_in`]), the resolution `where = "operating"` reads
-//! (#2607), and not the hook's own: a subagent's shell starts in the main
+//! ([`operation::ran_in`], #2607), and not the hook's own: a subagent's shell starts in the main
 //! checkout and `cd`s into its worktree, so the hook's checkout is often
 //! one the call never touched, and another session's merge may stand
 //! there (#2597). The line's words are read where its shell stands, the
@@ -57,8 +56,8 @@
 //! - A file the merge, cherry-pick, revert or rebase in progress in the
 //!   checkout has staged, its index entry other than `HEAD`'s
 //!   ([`operation::staged`]): the operation's commit carries it, so even a
-//!   line that can write it does not put it back. It is kept and named,
-//!   and the commit that ends the operation settles the record. A path
+//!   line that can write it does not put it back. It is kept and named.
+//!   A path
 //!   the operation left conflicted, unmerged in the index, is not staged:
 //!   its markers are guarded as any file is, so the one hand that resolves
 //!   it is `steer`'s ([`crate::steer::Ground`], #2880).
@@ -229,19 +228,6 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
     if call.tool_name != "Bash" {
         return Ok(());
     }
-    // The call ran: its operation's start is settled whatever was taken
-    // before it (#2723).
-    let since = began(&call, record_path(root, &call).as_deref());
-    if let Some(command) = call.command()
-        && let Err(err) = operation::settle(
-            &call.workspace(root),
-            &call,
-            &argv::Line::read(command),
-            since,
-        )
-    {
-        eprintln!("xtask permit --after: the operation's starter was not settled: {err:#}");
-    }
     let Some(file) = record_path(root, &call) else {
         eprintln!(
             "xtask permit --after: the call carries no session or tool-use id to pair it with \
@@ -280,19 +266,6 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
         eprintln!("xtask permit --after: what was found stands but was not recorded: {err:#}");
     }
     Ok(())
-}
-
-/// When the call began, the clock's grace before it: its `duration_ms`
-/// before now, or, where the hook carries none, when [`before`] took its
-/// record; `None` where neither says.
-fn began(call: &Call, file: Option<&Path>) -> Option<SystemTime> {
-    const GRACE: Duration = Duration::from_secs(1);
-    let ran = call.duration_ms.map(Duration::from_millis).or_else(|| {
-        let record: Record = serde_json::from_str(&fs::read_to_string(file?).ok()?).ok()?;
-        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(record.at).ok()?);
-        SystemTime::now().duration_since(at).ok()
-    })?;
-    SystemTime::now().checked_sub(ran + GRACE)
 }
 
 /// Every file of the record in the checkout `held` whose blob moved and

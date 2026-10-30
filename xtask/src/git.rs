@@ -64,6 +64,13 @@ fn git_dirs(root: &Path) -> Option<(PathBuf, PathBuf)> {
     Some((git_dir, common))
 }
 
+/// The git dir of the checkout at `root` alone, where its `HEAD` and
+/// index are, canonical and read from its `.git` without git; `None` for
+/// a directory whose `.git` does not say.
+pub(crate) fn own_dir(root: &Path) -> Option<PathBuf> {
+    git_dirs(root).and_then(|(own, _)| fs::canonicalize(own).ok())
+}
+
 /// The directory every worktree of the repository `root` is checked out
 /// from shares, canonical: two checkouts are worktrees of one repository
 /// when theirs are equal, wherever either was laid down. `None` for a

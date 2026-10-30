@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"git status --short && git log --oneline -3 | head -1; cat notes.txt 2>&1 >&2","description":"Read a checkout another session owns"}}

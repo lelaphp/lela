@@ -23,12 +23,14 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
     // A rule scoped by `where` is judged in a checkout whose branch
     // records a ticket, which the tree the tests run in need not be.
     let ticketed = checkout("fixtures-ticketed", Some(1));
-    // One scoped to `where = "operating"` in a checkout whose merge no
-    // session of the fixture's started (#2476), and every other `Bash`
-    // rule in a checkout where none stands, since the tests' own checkout
-    // holds a merge while its merge commit's hook runs them; a write is
-    // judged against the workspace's files.
+    // One scoped to `where = "operating"` in a checkout `the-owner` owns
+    // with a merge standing (#2476, #3621), one scoped to `where =
+    // "owned"` in one it owns with none, and every other `Bash` rule in a
+    // checkout where none stands, since the tests' own checkout holds a
+    // merge while its merge commit's hook runs them; a write is judged
+    // against the workspace's files.
     let merging = operating("fixtures-operating");
+    let owned_by = owned("fixtures-owned");
     let quiet = checkout("fixtures-quiet", None);
     for rule in judged {
         let dir = fixtures().join("rules").join(&rule.id);
@@ -38,6 +40,7 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
             Where::Anywhere => workspace(),
             Where::Ticketed => ticketed.path(),
             Where::Operating => merging.path(),
+            Where::Owned => owned_by.path(),
             Where::Main | Where::Checkout => quiet.path(),
         };
         // Every control of the rule's directory: each `deny*.json` (or
@@ -89,15 +92,12 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
             }
         }
         // `allow-main.json` is a neighbour in main's checkout, where a
-        // ticketed rule does not judge, an `allow-starter*.json` one
-        // in a checkout whose operation the fixture's session started,
-        // which a walk does not record, and an `allow-excused*.json` one
+        // ticketed rule does not judge, and an `allow-excused*.json` one
         // under an `unless_argv` a person has yet to paste (#3068): each
         // one's own test holds it.
         let neighbours = named("allow").into_iter().filter(|p| {
             let name = p.file_name().unwrap().to_string_lossy();
-            !name.starts_with("allow-starter")
-                && !unpasted(rule, &name)
+            !unpasted(rule, &name)
                 && (rule.within == Where::Anywhere || !p.ends_with("allow-main.json"))
         });
         for neighbour in neighbours {
@@ -379,16 +379,16 @@ fn the_whole_file_fixture_is_denied_here_and_permitted_where_the_file_carries_it
 /// A rule scoped `where = "ticketed"` is judged in a checkout whose branch
 /// records a ticket, but for an `allow-main*` call, the merge check's,
 /// which passes in main's checkout alone. A rule with an `exempt_label`
-/// asks the tracker, an `allow-starter*` call passes an operation its
-/// session started, which a walk does not record, and an
-/// `allow-excused*` call an `unless_argv` yet to be pasted: each is held
-/// by its own test.
+/// asks the tracker, an `allow-excused*` call an `unless_argv` yet to be
+/// pasted, and a `replay-*` call is an incident's verbatim, its paths
+/// another machine's: each is held by its own test.
 #[test]
 fn every_bash_rule_holds_to_each_of_its_fixtures() {
     let manifest = Manifest::load(workspace()).unwrap();
     let ticketed = checkout("bash-fixtures-ticketed", Some(1832));
     let main = checkout("bash-fixtures-main", None);
     let merging = operating("bash-fixtures-operating");
+    let owned_by = owned("bash-fixtures-owned");
     let rules: Vec<&Rule> = manifest
         .rules
         .iter()
@@ -413,13 +413,14 @@ fn every_bash_rule_holds_to_each_of_its_fixtures() {
         names.sort();
         for name in names
             .iter()
-            .filter(|n| !n.starts_with("allow-starter") && !unpasted(rule, n))
+            .filter(|n| !n.starts_with("replay-") && !unpasted(rule, n))
         {
             let root = match rule.within {
                 Where::Ticketed if name.starts_with("allow-main") => main.path(),
                 Where::Ticketed => ticketed.path(),
                 Where::Anywhere => workspace(),
                 Where::Operating => merging.path(),
+                Where::Owned => owned_by.path(),
                 Where::Main | Where::Checkout => main.path(),
             };
             let judged = judge(&manifest, root, &call(&dir.join(name))).unwrap();

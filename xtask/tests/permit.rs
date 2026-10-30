@@ -60,11 +60,13 @@ fn with_the_pathspec_rule(mut manifest: Manifest) -> Manifest {
     manifest
 }
 
+/// A `Bash` call from `another-session`, a session that owns none of the
+/// scratch checkouts ([`owned`]), so a rule scoped to a checkout another
+/// session owns judges it.
 fn bash(line: &str) -> Call {
-    Call::parse(
-        &serde_json::json!({"tool_name": "Bash", "tool_input": {"command": line}}).to_string(),
-    )
-    .unwrap()
+    let call = serde_json::json!({"tool_name": "Bash", "session_id": "another-session",
+        "tool_input": {"command": line}});
+    Call::parse(&call.to_string()).unwrap()
 }
 
 /// The `lanes.nightly-flags` row #3052 ruled and #3068 proposes, as a
@@ -658,23 +660,23 @@ fn above_the_command_hook_a_denial_is_recorded_and_a_note_is_left_to_it() {
     assert_eq!(reading.status, Status::Fail);
 }
 
-/// #2734 as it happened: an agent's merge stands in main's checkout, its
-/// starter recorded, and its line aborting it there and starting a merge
-/// in its own worktree is judged by both adapters, the function hook's
-/// first. That admission dropped the record, as the abort's own, and
-/// recorded the worktree's start, before the command hook beneath judged
-/// the same call; that one found the merge standing with no record,
-/// refused the abort, and every later abort of the starter's with it. The
-/// operation is recorded by the command hook alone, the adapter that
-/// judges a call last, so the abort is the starter's under both.
+/// #2734 as it happened: an agent's merge stands in main's checkout, and
+/// its line aborting it there and starting a merge in its own worktree is
+/// judged by both adapters, the function hook's first. When the start was
+/// recorded at the call, that admission dropped the record before the
+/// command hook beneath judged the same call, which refused the abort.
+/// Whose the merge is, is whose the checkout is (#3621), which no
+/// adapter writes: the owner's abort passes under both, and another
+/// session's is refused under both.
 #[test]
-fn an_abort_the_function_hook_admits_is_its_starter_s_under_the_command_hook_too() {
+fn an_abort_the_function_hook_admits_is_its_owner_s_under_the_command_hook_too() {
     let root = scratch("operation-adapters");
     let worktree = root.join("own");
     Repo::at(&root).git(&["worktree", "add", "-q", "-b", "own", "own"]);
-    let line = |command: &str| {
+    xtask::owner::record(&root, &xtask::owner::SessionId::new("s1").unwrap()).unwrap();
+    let line = |session: &str, command: &str| {
         serde_json::json!({
-            "session_id": "s1",
+            "session_id": session,
             "agent_id": "comp",
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
@@ -682,25 +684,26 @@ fn an_abort_the_function_hook_admits_is_its_starter_s_under_the_command_hook_too
         })
         .to_string()
     };
-    let admitted = |stdin: &str, args: &[&str], what: &str| {
-        let out = permit(&root, stdin, args).ok();
-        assert!(!out.contains("\"deny\""), "{what} {args:?}: {out}");
-    };
     let above: &[&str] = &["--above-the-command-hook"];
-    let start = line("git merge --no-ff --no-commit topic");
-    for adapter in [above, &[]] {
-        admitted(&start, adapter, "the start");
-    }
     std::fs::write(root.join(".git/MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
-    let abort = line(&format!(
+    let abort = format!(
         "C={}; git -C $C merge --abort; git -C $C status --short | head -3; \
          git -C $C log --oneline -1; W={}; git -C $W status --short | head; \
          git -C $W merge main 2>&1 | tail -3",
         root.display(),
         worktree.display()
-    ));
+    );
     for adapter in [above, &[]] {
-        admitted(&abort, adapter, "the starter's abort");
+        let out = permit(&root, &line("s1", &abort), adapter).ok();
+        assert!(
+            !out.contains("\"deny\""),
+            "the owner's abort {adapter:?}: {out}"
+        );
+        let out = permit(&root, &line("s2", &abort), adapter).ok();
+        assert!(
+            out.contains("git.operation"),
+            "another's abort {adapter:?}: {out}"
+        );
     }
 }
 
@@ -2026,64 +2029,71 @@ fn checkout(name: &str, ticket: Option<u32>) -> Tree {
     dir
 }
 
-/// A scratch checkout with a merge in progress, as git leaves one stopped
-/// before its commit: `MERGE_HEAD` in its git dir.
-fn operating(name: &str) -> Tree {
+/// A scratch checkout `the-owner` owns, as `xtask worktree add` records
+/// it (#3621).
+fn owned(name: &str) -> Tree {
     let dir = checkout(name, None);
+    xtask::owner::record(&dir, &xtask::owner::SessionId::new("the-owner").unwrap()).unwrap();
+    dir
+}
+
+/// A scratch checkout `the-owner` owns with a merge in progress, as git
+/// leaves one stopped before its commit: `MERGE_HEAD` in its git dir.
+fn operating(name: &str) -> Tree {
+    let dir = owned(name);
     let git_dir = PathBuf::from(Repo::at(&dir).git(&["rev-parse", "--absolute-git-dir"]));
     std::fs::write(git_dir.join("MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
     dir
 }
 
-/// One line that starts a second merge, cherry-pick, revert or rebase in
-/// a checkout after the first is refused under `git.operation` though no
-/// operation stands yet (#3261): the hook can record the first start's
-/// base, `HEAD` as the line begins, and never the second's, so the second
-/// would stand foreign to its own starter, its commit and its `--abort`
-/// refused. The fixture is the line main's checkout ran; the control, one
-/// start on a line, is admitted in the same quiet checkout, and so is a
-/// second start in another checkout.
+/// #2991 and #3413 replayed (#3621): each call refused then, verbatim, a
+/// session's commit and its `git merge --abort` of the merge standing in
+/// the checkout it owned, a builder's worktree and main's checkout, now
+/// passes in a scratch checkout standing for that one, owned by that
+/// session with a merge standing in it; the same call from another
+/// session is refused by `git.operation`. Who started the merge is
+/// recorded nowhere: `caffeinate` hid #2991's start from the hook, and
+/// #3413's start ran before the build that judged its commit.
 #[test]
-fn a_line_that_starts_a_second_operation_in_one_checkout_is_refused() {
+fn the_owner_s_commit_and_abort_of_the_merge_in_its_checkout_pass() {
     let manifest = Manifest::load(workspace()).unwrap();
-    let quiet = checkout("two-starts", None);
-    let dir = fixtures().join("rules/git.operation");
-    let judged = judge(
-        &manifest,
-        quiet.path(),
-        &call(&dir.join("deny-two-starts.json")),
+    let main = operating("replay-main");
+    Repo::at(&main).git(&["worktree", "add", "-q", "-b", "t2891", "t2794"]);
+    let worktree = main.path().join("t2794");
+    let git_dir = Repo::at(&worktree).git(&["rev-parse", "--absolute-git-dir"]);
+    std::fs::write(
+        Path::new(git_dir.trim()).join("MERGE_HEAD"),
+        "0".repeat(40) + "\n",
     )
     .unwrap();
-    let denial = judged
-        .denial()
-        .unwrap_or_else(|| panic!("two starts on one line: {judged:?}"));
-    assert_eq!(denial.rule, "git.operation", "{denial:?}");
-    assert!(
-        denial.reason().contains("one operation per line"),
-        "{}",
-        denial.reason()
-    );
-
-    for line in [
-        "git merge --no-commit t3261w && git commit -q -F /var/empty/m.txt",
-        "git merge --abort && git merge --no-commit t3370",
+    let dir = fixtures().join("rules/git.operation");
+    for (name, checkout) in [
+        ("replay-2991-commit.json", &worktree),
+        ("replay-2991-abort.json", &worktree),
+        ("replay-3413-commit.json", &main.path().to_path_buf()),
+        ("replay-3413-abort.json", &main.path().to_path_buf()),
     ] {
-        let judged = judge(&manifest, quiet.path(), &bash(line)).unwrap();
-        assert!(
-            judged.findings.iter().all(|f| f.rule != "git.operation"),
-            "{line}: {judged:?}"
-        );
+        let mut replayed = call(&dir.join(name));
+        let line = replayed.tool_input.command.take().unwrap();
+        let line = line
+            .replace(
+                "~/Projects/dax-php-worktrees/t2794",
+                &worktree.display().to_string(),
+            )
+            .replace(
+                "~/Projects/dax-php",
+                &main.path().display().to_string(),
+            );
+        replayed.tool_input.command = Some(line);
+        let session = xtask::owner::SessionId::new(&replayed.session_id).unwrap();
+        xtask::owner::record(checkout, &session).unwrap();
+        let judged = judge(&manifest, main.path(), &replayed).unwrap();
+        assert!(judged.denial().is_none(), "{name}: {judged:?}");
+        replayed.session_id = "another-session".to_owned();
+        let judged = judge(&manifest, main.path(), &replayed).unwrap();
+        let denial = judged.denial().map(|f| f.rule.as_str());
+        assert_eq!(denial, Some("git.operation"), "{name}: {judged:?}");
     }
-    let other = checkout("two-starts-other", None);
-    let line = format!(
-        "git merge --no-commit a && git -C {} merge --no-commit b",
-        other.path().display()
-    );
-    let judged = judge(&manifest, quiet.path(), &bash(&line)).unwrap();
-    assert!(
-        judged.findings.iter().all(|f| f.rule != "git.operation"),
-        "{line}: {judged:?}"
-    );
 }
 
 /// A `Bash` rule denying `xtask phpt`, with its qualifiers set by `with`.
