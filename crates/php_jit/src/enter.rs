@@ -583,12 +583,18 @@ kernels! {
 /// The `step` kernel (`jit-design.md` §5.2): the opline at `at` of the op
 /// array the engine numbers `func`, which the trace recorded and its epoch
 /// holds, served whole over that op array ([`tier::step_held`]), and
-/// where the interpreter stands after it.
+/// where the interpreter stands after it: nowhere ([`Stood::NOWHERE`])
+/// where the opline left the serving's entry frame and the serving is
+/// over, as php's `zend_jit_leave_func_helper` and a `RETURN`'s handler
+/// answer the halt for a `ZEND_CALL_TOP` frame, which compiled code
+/// past an opline that leaves its frame reads (`Emit::halts`).
 fn step(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<Stood, Fatal> {
     let frame = standing(req, on.room, on.at)?;
     let (held, epoch) = held(on, func)?;
-    let stepped = tier::step_held(req, frame, held, epoch)?;
-    stood(req, stepped, (frame, func), on.holding)
+    match tier::step_held(req, frame, held, epoch)? {
+        Stepped::Done => Ok(Stood::NOWHERE),
+        stepped => stood(req, stepped, (frame, func), on.holding),
+    }
 }
 
 /// The `handle` kernel: the opline at `at` of the op array the engine

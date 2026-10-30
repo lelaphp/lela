@@ -824,7 +824,10 @@ pub(crate) struct Stood {
 }
 
 impl Stood {
-    /// Where nothing stood: a null frame and call, and no room.
+    /// Where nothing stood: a null frame and call, and no room. What an
+    /// `ExitCtx` holds before its first kernel, and what [`Kernel::Step`]
+    /// answers where its opline ended the serving the trace runs in, the
+    /// frame null being php's halted IP.
     pub(crate) const NOWHERE: Stood = Stood {
         frame: std::ptr::null_mut(),
         call: std::ptr::null_mut(),

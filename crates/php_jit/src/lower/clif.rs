@@ -45,8 +45,8 @@ use php_heap::{Arr, ROOM_BYTES, Ref, Str, Zval, ZvalType};
 use php_unit::{ConstIdx, Opcode, OplineIdx};
 
 use super::{
-    ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, ROOT_AT, STACK_AT, STOOD_AT,
-    Stood, Symbols, UNWOUND, located,
+    ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, RETURNED, ROOT_AT, STACK_AT,
+    STOOD_AT, Stood, Symbols, UNWOUND, located,
 };
 
 mod calls;
@@ -54,11 +54,11 @@ mod dims;
 mod doors;
 mod objects;
 mod strings;
-use crate::record::{Began, Callee, Stop, returns};
+use crate::record::{Began, Callee, Stop, leaves, returns};
 use crate::types::{
     Abort, BodyEntry, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home,
-    Imm, Interrupt, Layout, Leave, Line, Op, OpId, Operand, Pointee, Read, Repeat, Slot, Store,
-    Stored, TraceIr, Types, UnwindId, ValueId, cannot_raise,
+    Imm, Interrupt, Layout, Leave, Line, Op, OpId, Operand, Place, Pointee, Read, Repeat, Slot,
+    Store, Stored, TraceIr, Types, UnwindId, ValueId, cannot_raise,
 };
 
 /// Where an inline arithmetic that would raise goes instead
@@ -2068,7 +2068,9 @@ impl<'a> Emit<'a> {
 
     /// The kernel that serves `line` whole, [`Kernel::Step`], or
     /// [`Kernel::Call`] for a call the trace follows into its callee, its
-    /// operands held in registers stored to their slots first.
+    /// operands held in registers stored to their slots first; past a
+    /// step of an opline that leaves a frame the trace did not push, the
+    /// trace halted where the step ended the serving ([`Emit::halts`]).
     fn step_kernel(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         self.spill_operands(line)?;
         let [room, opline] = self.served(line)?;
@@ -2088,9 +2090,25 @@ impl<'a> Emit<'a> {
             {
                 self.handled(line, onward, [room, opline, func])?;
             }
-            None => self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?,
+            None => {
+                self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?;
+                if leaves(line.opcode) && self.may_be_top(line.frame)? {
+                    self.halts();
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Whether `frame` may be the entry of the serving the trace runs in,
+    /// php's `may_be_top_frame`, `!TRACE_FRAME_IS_NESTED`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:11056-11059`): the frame the trace
+    /// entered in, or one a return past it landed in, and never one the
+    /// trace pushed.
+    fn may_be_top(&self, frame: Frame) -> Result<bool, Abort> {
+        let info = (self.ir.frames.get(usize::from(frame.0)))
+            .ok_or_else(|| mismatch("a step in a frame the trace does not hold"))?;
+        Ok(!matches!(info.place, Place::Callee(_)))
     }
 
     /// `line`'s operands held in registers stored to their slots, for a
@@ -2519,6 +2537,74 @@ impl<'a> Emit<'a> {
             }
         }
         Ok(())
+    }
+
+    /// php's `jit_stub_trace_halt` past the step of an opline that leaves
+    /// its frame ([`leaves`]), a frame that may be the serving's entry
+    /// ([`Emit::may_be_top`]), where the step left that entry, ending the
+    /// serving the trace runs in: the [`Kernel::Step`] stands nowhere
+    /// ([`Stood::NOWHERE`]), and compiled code answers
+    /// [`RETURNED`] with nothing to store, as php's trace guards the IP
+    /// that `zend_jit_leave_func_helper` or the handler of a `RETURN`
+    /// answers for a `ZEND_CALL_TOP` frame and halts
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:11095-11112`, `:17218-17228`).
+    /// The recorder stops before such an opline only in the serving it
+    /// records in (`jit-design.md` §4.1's entry-frame rule), so a return
+    /// trace recorded where the lowest frame it returns past has a user
+    /// caller runs, in a serving a native began, past that serving's
+    /// entry. Here `p`'s return trace is recorded under the loop, and
+    /// `array_map` calls `p` again, its outermost frame the entry of the
+    /// serving `array_map` began:
+    ///
+    /// ```php
+    /// function h() { return 1; }
+    /// function p($n) { if ($n == 0) return 0; $x = p($n - 1); h(); return $x; }
+    /// for ($i = 0; $i < 3; $i++) p(6);
+    /// echo implode(",", array_map('p', [6, 6])), "\n";
+    /// echo "done\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 0,0
+    /// done
+    /// ```
+    ///
+    /// and the same, every guard failed, and compiled on the worker:
+    ///
+    /// ```php
+    /// function h() { return 1; }
+    /// function p($n) { if ($n == 0) return 0; $x = p($n - 1); h(); return $x; }
+    /// for ($i = 0; $i < 3; $i++) p(6);
+    /// echo implode(",", array_map('p', [6, 6])), "\n";
+    /// echo "done\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 0,0
+    /// done
+    /// ```
+    ///
+    /// ```php
+    /// function h() { return 1; }
+    /// function p($n) { if ($n == 0) return 0; $x = p($n - 1); h(); return $x; }
+    /// for ($i = 0; $i < 3; $i++) p(6);
+    /// echo implode(",", array_map('p', [6, 6])), "\n";
+    /// echo "done\n";
+    /// ```
+    /// ```expect regime=jit-tracing process
+    /// 0,0
+    /// done
+    /// ```
+    fn halts(&mut self) {
+        let frame = self.stood_word(I64, STOOD_FRAME);
+        let ended = self.b.ins().icmp_imm_s(IntCC::Equal, frame, 0);
+        let (halt, on) = (self.b.create_block(), self.b.create_block());
+        self.b.set_cold_block(halt);
+        self.b.ins().brif(ended, halt, &[], on, &[]);
+        self.b.switch_to_block(halt);
+        self.b.seal_block(halt);
+        let answer = self.b.ins().iconst(I32, i64::from(RETURNED));
+        self.b.ins().return_(&[answer]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
     }
 
     /// The frame a `DO_*CALL` at `at` enters, where the trace follows the
