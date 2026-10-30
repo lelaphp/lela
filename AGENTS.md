@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=b5d520316ff1394cad2c5bc91dd90b1269607aca1b340b200a10ea1508a827bb out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=5e6201f4d7a84f065d344dd01d86ae743f982f90625d63002615b9d425dfa0b3 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -133,9 +133,9 @@ third-engine-design.md
 | tier | tier.lock | 228 |  |
 | ssa | ssa.lock | 114 |  |
 | layer | layer.lock | 38 |  |
-| harness | xtask.lock | 437 |  |
+| harness | xtask.lock | 439 |  |
 
-<!-- /computed in=ba44f0ece95ed9d2228ff9958a9aafb910d6b9ba05e25176ca2be031da1dcf11 out=ee56829d34d329179e5c882062de77511844fc2955380e7fe06583a869b36af2 -->
+<!-- /computed in=358d70266dd6b25048b898d6065f348301bfb6fa01a81cb91e0ec309162e7499 out=55d42e0a40cbd310fb10b7ba524d5ef27853c11738f9df0405498c46c67b792c -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -148,7 +148,7 @@ Commands:
   permit             Judge one intended call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
   done               The definition of done: the conditions unmet since the base, and exit 1 while any is; the Stop hook, pre-push and CI read the list
   track              Say the branch, the commit it was taken off main at, the store and the branch's ticket; as text or as one object. Writes no reading
-  worktree           A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>, `retire` removes it, `own` and `whose` record and say its owner. Writes no reading
+  worktree           A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>, `retire` removes it, `own` and `whose` say its owner, `queue` and `land` run the merge queue
   ticket             A ticket, one GitHub issue: `read <n>` holds it to its acceptance criteria, `close <n>` closes it naming what it opened, `parent <n>` says whether a chart sheet is at the cap
   usage              What a session spent per turn: `record` reads the plugin's `SessionUsage` on stdin and writes one `usage` reading under the branch's ticket, or the session id
   regions            Render the named files' regions with `computed run` and say what it did, one line per file, for pre-commit to re-stage. Writes no reading
@@ -178,7 +178,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=fa9895e4bbf3336b131c6eb43280c771b41f107e9d25cd0af748b710779c3e40 out=ce5169c396c1babe88cebe479f71e4cb4da740f45b236472ece98e1dbca398af -->
+<!-- /computed in=be16046009542f28ac051981a1ad37b781c4825b309f56acf223fb82d40e4e1d out=7d36360474ef686aa1dbccf693f6c58be3e09ee20203fbcf67b49f6bd0e36f2b -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

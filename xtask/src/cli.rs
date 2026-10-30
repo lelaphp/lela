@@ -170,8 +170,11 @@ pub(crate) enum Command {
         command: Option<TrackCommand>,
     },
     /// A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>,
-    /// `retire` removes it, `own` and `whose` record and say its owner.
-    /// Writes no reading.
+    /// `retire` removes it, `own` and `whose` say its owner, `queue` and
+    /// `land` run the merge queue.
+    ///
+    /// None writes a reading of its own; `land` asks `done`, which writes
+    /// one.
     ///
     /// `add` lays the worktree down ready to be worked in, the branch cut
     /// from `main` with the ticket it is for recorded on it, `xtask` built
@@ -763,6 +766,14 @@ pub(crate) enum WorktreeCommand {
     /// Say whose the checkout this runs in is; exit 1 where another
     /// session owns it, as pre-commit asks (#3621).
     Whose,
+    /// Lay the merge queue's worktree down beside the checkout, `_merge`
+    /// on `staging`, its builds seeded from main's, owned by the calling
+    /// session; or claim the one that stands (#3622).
+    Queue,
+    /// Fast-forward `main` to `staging`'s head once `done` is met in
+    /// `_merge` since main's tip, landing `_merge`'s log in main's store
+    /// first; refused, `main` untouched, while anything is unmet (#3622).
+    Land,
 }
 
 /// Read the criteria, or read them and close.

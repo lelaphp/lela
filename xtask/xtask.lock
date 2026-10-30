@@ -270,6 +270,8 @@ port_map::CENSUS
 port_map::INSTRUMENT
 port_map::SEED
 port_map::command
+queue::claim
+queue::land
 reading::Chain
 reading::Chain::of_head
 reading::Chain::standing
