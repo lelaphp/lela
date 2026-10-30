@@ -469,6 +469,31 @@ fn diff_judges_a_fixture_source_by_the_fixture_manifest() {
     );
 }
 
+/// #3644 ruling 2: an Edit of a fixture's manifest, test data, is judged
+/// by the checkout's manifest and goes through; the checkout's own
+/// manifest is still denied as `harness.self`.
+#[test]
+fn an_edit_of_a_fixture_s_manifest_is_allowed_and_the_root_s_is_denied() {
+    let root = scratch("fixture-manifest");
+    let fixture = "xtask/fixtures/rules/a-rule/seams.toml";
+    let manifest = std::fs::read_to_string(root.join("seams.toml")).unwrap();
+    write(&root, fixture, &manifest);
+    let edit = |path: &str| {
+        let call = serde_json::json!({"session_id": "s", "tool_name": "Edit",
+            "cwd": root.to_str().unwrap(), "tool_input": {
+                "file_path": root.join(path).to_str().unwrap(),
+                "old_string": "[budget]", "new_string": "[budget]\n"}});
+        permit(&root, &call.to_string(), &[]).ok()
+    };
+    let out = edit(fixture);
+    assert!(!out.contains("\"deny\""), "{out}");
+    let out = edit("seams.toml");
+    assert!(
+        out.contains("\"deny\"") && out.contains("harness.self"),
+        "{out}"
+    );
+}
+
 /// The label a rule does not judge (#341, harness-design.md ledger 52).
 /// `ticket.close` denies `gh issue close` so that nothing closes a ticket
 /// but the instrument that read its acceptance criteria; a chart sheet
