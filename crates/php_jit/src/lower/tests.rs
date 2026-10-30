@@ -13,6 +13,8 @@ use std::path::PathBuf;
 
 use cranelift_codegen::isa;
 
+use php_unit::Opcode;
+
 use super::{Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupported};
 use crate::table::TraceName;
 use crate::testing::goldens::{
@@ -26,7 +28,8 @@ use crate::testing::goldens::{
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
-    Check, Constant, End, Form, Guard, GuardAt, Imm, Interrupt, Op, Operand, Returned, TraceIr,
+    Check, Constant, End, Form, Guard, GuardAt, Home, Imm, Interrupt, Op, Operand, Returned,
+    TraceIr,
 };
 
 /// Where `lower`'s goldens are.
@@ -915,6 +918,41 @@ fn a_link_jumps_to_the_trace_it_links_to() -> Result<(), String> {
         reads(&tested),
         reads(&clif) + 1,
         "a side's link to its looping root tests the interrupt:\n{tested}"
+    );
+    Ok(())
+}
+
+/// A typed property read through `$this` in a method the loop's trace
+/// calls: php's analysis types the read by the declaration, so it holds no
+/// guard and its value is kept in a register, which the read defines as
+/// it reads the slot; a register read before anything defined it would
+/// be refused as `COMPILER_ERROR`, never read as zero (#3665).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_typed_property_read_through_this_defines_its_register() -> Result<(), String> {
+    let program = "class P { public int $m = 0; function f() { return $this->m; } }
+        function g($p) { $s = 0; for ($i = 1; $i < 40; $i++) { $p->m = $i; $s += $p->f(); } return $s; }
+        echo g(new P), \"\\n\";";
+    let plan = [
+        ("record.function", "g"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ];
+    let (ir, _) = compiled(&plan, program)?;
+    let read = (ir.ops.iter().enumerate())
+        .find_map(|(at, op)| match op {
+            Op::Line(line) if line.opcode == Opcode::FetchObjR => Some((at, line)),
+            _ => None,
+        })
+        .ok_or("the trace reads no property")?;
+    let out = read.1.out.ok_or("the read writes nothing")?;
+    let held = ir.values.get(out.0 as usize).ok_or("the read's value")?;
+    assert_eq!(held.home, Home::Register, "{}", super::dump::render(&ir));
+    assert!(
+        !(ir.guards.iter())
+            .any(|guard| matches!(guard.at, GuardAt::Within(op) if op.0 as usize == read.0)),
+        "{}",
+        super::dump::render(&ir)
     );
     Ok(())
 }

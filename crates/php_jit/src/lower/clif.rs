@@ -4539,9 +4539,19 @@ impl<'a> Emit<'a> {
         Ok((var, kind))
     }
 
-    /// What a value the trace keeps in a register holds.
+    /// What a value the trace keeps in a register holds. A register of a
+    /// kind that carries a value is read only after the op that writes
+    /// it defined it: a read before is a lowering that wrote the value's
+    /// slot alone, which Cranelift would answer with zero (#3665), so it
+    /// is php's `COMPILER_ERROR` instead. The order held is the order the
+    /// ops are lowered in, not dominance: a definition on one arm of a
+    /// branch and a read on the other is not caught here.
     fn register(&mut self, value: ValueId) -> Result<Scalar, Abort> {
+        let defined = (self.regs.get(value.0 as usize).copied().flatten()).is_some();
         let (var, kind) = self.register_var(value)?;
+        if !defined && matches!(kind, Kind::Long | Kind::Double | Kind::Bool) {
+            return Err(mismatch("a register read before anything defined it"));
+        }
         Ok(match kind {
             Kind::Long => Scalar::Long(self.b.use_var(var)),
             Kind::Double => Scalar::Double(self.b.use_var(var)),
