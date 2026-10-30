@@ -586,6 +586,22 @@ mod tracked {
     /// fails naming itself, and ext/ctype, with it, passes. The tracked
     /// workspace, every member carrying the line, is held by
     /// `the_workspace_today_has_no_failing_reading`.
+    /// A raise that names its class by a lookup of the linked table fails
+    /// the reading of the extension that raises and no other (#3656): the
+    /// scan `php_engine`'s `typed_errors` test ran over the workspace is a
+    /// hold of each crate's own reading.
+    #[test]
+    fn an_extension_raising_by_name_fails_its_own_reading() {
+        let readings = readings("raise-by-name");
+        let ctype = of(&readings, "ext/ctype");
+        assert_eq!(ctype.status, Status::Fail, "{}", ctype.message);
+        let named =
+            "ext/ctype/src/lib.rs: a raise names its class as lookup_class(req, b\"ValueError\")?";
+        assert!(ctype.message.starts_with(named), "{}", ctype.message);
+        assert_eq!(of(&readings, "ext/json").status, Status::Pass);
+        assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
+    }
+
     #[test]
     fn a_crate_that_does_not_inherit_the_workspace_lints_fails_naming_it() {
         let readings = readings("lints");

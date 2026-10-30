@@ -59,7 +59,6 @@ pub(crate) mod test_ext;
 mod tier_setting;
 mod time_limit;
 mod trace_num;
-mod typed_errors;
 mod unit_view;
 #[cfg(debug_assertions)]
 mod walks;
