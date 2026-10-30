@@ -48,6 +48,8 @@
 //! directory, moves no crate's key, since the crate it reaches is the one
 //! whose `build.rs` reads it, and neither does the rest of the manifest,
 //! whose members and dependencies reach a key through the crates' own.
+//! Last, it covers the files beyond its directory its tests read
+//! ([`READ_BY_TESTS`], one list, #3646).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -448,6 +450,51 @@ pub(crate) const REKEYED: [&str; 1] = [DEPLOYMENT_TARGET];
 /// The variable that names the macOS every object and link is made for.
 pub(crate) const DEPLOYMENT_TARGET: &str = "MACOSX_DEPLOYMENT_TARGET";
 
+/// The files beyond its own directory a crate's tests read as the tree
+/// holds them, by the crate's: each under that crate's key, so a change
+/// to one stales every reading of the crate, `test` among them, and
+/// touches the crate for `done` and pre-commit ([`read_by_tests`], #3646).
+/// xtask's tests copy the manifest, pin, registry and glossary into
+/// scratch trees, run the hooks and scripts, and read the workflows, the
+/// plugin's hooks and four crates' files. Left out: the Markdown regions
+/// they hold, which pre-commit renders and `computed check` holds, and
+/// `Cargo.lock`, whose pins reach a crate through `sources::lock_moved`.
+pub(crate) const READ_BY_TESTS: [(&str, &[&str]); 1] = [(
+    crate::layout::HARNESS,
+    &[
+        "seams.toml",
+        "oracle.toml",
+        "docs/divergence.toml",
+        "CONTEXT.md",
+        "data",
+        "scripts",
+        "harness-plugins",
+        ".github",
+        ".gitattributes",
+        ".gitignore",
+        "ext/clippy.toml",
+        "crates/php_bundle/Cargo.toml",
+        "crates/php_compile/tests/support/skip.rs",
+        "crates/php_process",
+        "sapi/cli/Cargo.toml",
+    ],
+)];
+
+/// The files of [`READ_BY_TESTS`] the tests of the crate at `dir` read.
+fn read_by(dir: &Path) -> impl Iterator<Item = &'static str> {
+    let dir = normalize(dir);
+    let of = READ_BY_TESTS
+        .iter()
+        .filter(move |(of, _)| Path::new(of) == dir);
+    of.flat_map(|(_, files)| files.iter().copied())
+}
+
+/// Whether the tests of the crate at `root`'s `dir` read `path` beyond
+/// its directory ([`READ_BY_TESTS`]), so a change to it touches the crate.
+pub(crate) fn read_by_tests(root: &Path, dir: &Path, path: &str) -> bool {
+    crate_dir(root, dir) && read_by(dir).any(|f| Path::new(path).starts_with(f))
+}
+
 /// The file of [`BUILT_UNDER`] at `path`, relative to the root, if it is
 /// one.
 pub(crate) fn built_under(path: &str) -> Option<BuiltUnder> {
@@ -530,13 +577,13 @@ fn crate_dir(root: &Path, path: &Path) -> bool {
 }
 
 /// The paths the key of `path` is taken over: the path alone, or a
-/// workspace crate's directory, its closure's and the toolchain file, the
-/// graph read only for a directory with a manifest, the one kind of path
-/// it can widen.
+/// workspace crate's directory, its closure's, the toolchain file and the
+/// files its tests read ([`READ_BY_TESTS`]), the graph read only for a
+/// directory with a manifest, the one kind of path it can widen.
 fn closure(root: &Path, path: &Path) -> Result<Vec<PathBuf>> {
     if crate_dir(root, path) {
         let mut paths = Graph::of(root)?.paths(path);
-        paths.extend(toolchain().map(PathBuf::from));
+        paths.extend(toolchain().chain(read_by(path)).map(PathBuf::from));
         Ok(paths)
     } else {
         Ok(vec![path.to_path_buf()])

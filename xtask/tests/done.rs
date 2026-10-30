@@ -301,6 +301,36 @@ fn the_harness_crate_is_asked_for_clippy_test_api_check_budget_and_unsafe_audit_
     assert!(judge(&root).unmet.is_empty(), "{:#?}", judge(&root));
 }
 
+/// A commit that changes `seams.toml` alone touches xtask, whose tests
+/// copy the manifest (`key::READ_BY_TESTS`, #3646): its `test` reading,
+/// taken before, no longer stands, and `done` names the file.
+#[test]
+fn a_change_to_the_manifest_alone_stales_the_harness_test_reading() {
+    let root = scratch("read-by-tests");
+    let package = "[package]\nname = \"xtask\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";
+    write(&root, "xtask/Cargo.toml", package);
+    write(&root, "xtask/src/lib.rs", "pub fn measure() {}\n");
+    Repo::at(&root).commit("the harness");
+    let store = Store::of_workspace(&root);
+    store.record(&[fresh(&root, "test", "xtask")]).unwrap();
+    assert!(judge(&root).crates.is_empty(), "{:#?}", judge(&root));
+
+    write(
+        &root,
+        "seams.toml",
+        &format!("{}# moved\n", read("seams.toml")),
+    );
+    Repo::at(&root).commit("a steer");
+    let verdict = judge_since(&root, Some("HEAD~1"));
+    assert_eq!(verdict.crates, ["xtask"]);
+    let stale =
+        "test: the reading for xtask is stale; xtask or seams.toml changed since it was taken";
+    assert!(
+        verdict.unmet.iter().any(|u| u.starts_with(stale)),
+        "{verdict:#?}"
+    );
+}
+
 #[test]
 fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_is_1() {
     let root = scratch("none");

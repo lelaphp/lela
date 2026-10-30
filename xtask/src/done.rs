@@ -441,7 +441,7 @@ pub fn judge(
     let base = Base::of(root, base)?;
     let changed = git::changed_since(root, &base.commit)?;
     let paths: Vec<&str> = changed.iter().map(|c| c.path.as_str()).collect();
-    let crates: Vec<&Crate> = manifest.crates_of(&paths);
+    let crates: Vec<&Crate> = manifest.touched_by(root, &paths);
     let built_under = key::moved(root, &base.commit, &paths)?;
     let ticket = track::head_ticket(root)?;
     let mut unmet = Vec::new();
@@ -463,7 +463,7 @@ pub fn judge(
         match condition {
             Condition::Fresh => {
                 for krate in &crates {
-                    let now = KeyNow::of(snapshot, krate, &crates, &built_under)?;
+                    let now = KeyNow::of(snapshot, krate, &crates, (&built_under, &paths))?;
                     fresh_readings(
                         &asking,
                         krate,
@@ -876,13 +876,14 @@ struct KeyNow {
 
 impl KeyNow {
     /// The key of `krate` now, and what of `touched` and of the diff it
-    /// covers: the crates of its closure, and `built_under`, the files
-    /// rustc is built under whose deciding part moved ([`key::moved`]).
+    /// covers: the crates of its closure, `built_under`, the files rustc
+    /// is built under whose deciding part moved ([`key::moved`]), and the
+    /// paths of the diff its tests read ([`key::READ_BY_TESTS`]).
     fn of(
         snapshot: &Snapshot,
         krate: &Crate,
         touched: &[&Crate],
-        built_under: &[&str],
+        (built_under, diff): (&[&str], &[&str]),
     ) -> Result<KeyNow> {
         let closure = key::Graph::of(snapshot.root())?.paths(&krate.path());
         let mut names = vec![krate.name.as_str()];
@@ -893,6 +894,11 @@ impl KeyNow {
                 .map(|t| t.name.as_str()),
         );
         names.extend(built_under);
+        let root = snapshot.root();
+        names.extend(
+            diff.iter()
+                .filter(|p| key::read_by_tests(root, &krate.path(), p)),
+        );
         let changed = match names.split_last() {
             Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
             _ => krate.name.clone(),
