@@ -737,8 +737,10 @@ struct Emit<'a> {
     /// makes or leaves a call in place.
     stack: Option<Value>,
     /// Per frame of the trace, its place on the stack, a `FrameRef`'s
-    /// number, kept where `stack` is.
-    refs: Vec<Variable>,
+    /// number, kept where `stack` is: none until the entry, the frame's
+    /// `Op::Enter` or the `Op::Back` that lands in it defined it
+    /// ([`Emit::place_frame`]).
+    refs: Vec<Option<Variable>>,
     /// The place of the frame the last return leaves to, which its
     /// `Op::Back` names the frame it lands in by.
     returned_to: Option<Variable>,
@@ -800,7 +802,6 @@ impl<'a> Emit<'a> {
         (symbols, held): (&'a Symbols, &'a [PlainCall]),
     ) -> Emit<'a> {
         let rooms = ir.frames.iter().map(|_| b.declare_var(I64)).collect();
-        let refs = ir.frames.iter().map(|_| b.declare_var(I64)).collect();
         let stood = b.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             u32::try_from(size_of::<Stood>()).unwrap_or(u32::MAX),
@@ -813,7 +814,7 @@ impl<'a> Emit<'a> {
             symbols,
             held,
             stack: None,
-            refs,
+            refs: vec![None; ir.frames.len()],
             returned_to: None,
             cx: None,
             interrupt: None,
@@ -871,7 +872,7 @@ impl<'a> Emit<'a> {
         self.stack = Some(self.b.ins().load(I64, trusted(), cx, STACK_AT));
         let place = self.b.ins().load(I32, trusted(), cx, ROOT_AT);
         let place = self.b.ins().uextend(I64, place);
-        self.b.def_var(self.ref_var(Frame::ROOT)?, place);
+        self.place_frame(Frame::ROOT, place)?;
         // Laid down before either way in: a guard at the body's entry
         // reads it too.
         self.stood_at_entry(cx);
@@ -934,7 +935,7 @@ impl<'a> Emit<'a> {
                     self.b.def_var(self.room_var(looped)?, last);
                     if self.stack.is_some() {
                         let place = self.frame_ref(self.running)?;
-                        self.b.def_var(self.ref_var(looped)?, place);
+                        self.place_frame(looped, place)?;
                     }
                 }
                 self.b.ins().jump(head, &[]);
@@ -1219,7 +1220,7 @@ impl<'a> Emit<'a> {
                     // The frame entered is the stack's top record.
                     let len = self.b.ins().load(I64, trusted(), stack, calls::FRAMES_LEN);
                     let place = self.b.ins().iadd_imm_s(len, -1);
-                    self.b.def_var(self.ref_var(*frame)?, place);
+                    self.place_frame(*frame, place)?;
                 }
                 Ok(())
             }
@@ -1229,7 +1230,7 @@ impl<'a> Emit<'a> {
                 self.running = *frame;
                 if let Some(var) = self.returned_to.take() {
                     let place = self.b.use_var(var);
-                    self.b.def_var(self.ref_var(*frame)?, place);
+                    self.place_frame(*frame, place)?;
                 }
                 if let Some((func, opline)) = *escapes {
                     self.escapes(func, opline)?;
@@ -4549,17 +4550,27 @@ impl<'a> Emit<'a> {
             .ok_or_else(|| mismatch("a frame past the trace's"))
     }
 
-    /// The variable of `frame`'s place on the stack.
-    fn ref_var(&self, frame: Frame) -> Result<Variable, Abort> {
-        self.refs
-            .get(usize::from(frame.0))
-            .copied()
-            .ok_or_else(|| mismatch("a frame past the trace's"))
+    /// Defines `frame`'s place on the stack as `place`, its variable
+    /// declared where this is its first definition.
+    fn place_frame(&mut self, frame: Frame, place: Value) -> Result<(), Abort> {
+        let held = (self.refs.get_mut(usize::from(frame.0)))
+            .ok_or_else(|| mismatch("a frame past the trace's"))?;
+        let var = *held.get_or_insert_with(|| self.b.declare_var(I64));
+        self.b.def_var(var, place);
+        Ok(())
     }
 
-    /// `frame`'s place on the stack, a `FrameRef`'s number.
+    /// `frame`'s place on the stack, a `FrameRef`'s number. It is read
+    /// only after the entry, the frame's `Op::Enter` or the `Op::Back`
+    /// that lands in it defined it, the ops lowered in trace order: a
+    /// read before is a lowering that named no place for the frame,
+    /// which Cranelift would answer with zero, the stack's first frame
+    /// (#3685), so it is php's `COMPILER_ERROR` instead, as a register
+    /// read before its definition is ([`Emit::register`]).
     fn frame_ref(&mut self, frame: Frame) -> Result<Value, Abort> {
-        let var = self.ref_var(frame)?;
+        let var = (self.refs.get(usize::from(frame.0)).copied())
+            .ok_or_else(|| mismatch("a frame past the trace's"))?
+            .ok_or_else(|| mismatch("a frame's place read before anything defined it"))?;
         Ok(self.b.use_var(var))
     }
 

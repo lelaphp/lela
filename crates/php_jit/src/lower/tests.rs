@@ -29,7 +29,7 @@ use crate::testing::goldens::{
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
-    Check, Constant, End, Form, Guard, GuardAt, Home, Imm, Interrupt, Op, Operand, Returned,
+    Check, Constant, End, Form, Guard, GuardAt, Home, Imm, Interrupt, Op, Operand, Place, Returned,
     TraceIr,
 };
 
@@ -954,6 +954,40 @@ fn a_typed_property_read_through_this_defines_its_register() -> Result<(), Strin
             .any(|guard| matches!(guard.at, GuardAt::Within(op) if op.0 as usize == read.0)),
         "{}",
         super::dump::render(&ir)
+    );
+    Ok(())
+}
+
+/// A return trace past a `RETURN_BY_REF` the handler serves: the frame it
+/// lands in, below the trace's root, is named by the caller its header
+/// held before the step, as a `RETURN`'s is, and goes on to call `h()` in
+/// place, whose header takes that place as its caller. A frame's place
+/// read before anything defined it would be refused as `COMPILER_ERROR`,
+/// never read as zero, the stack's first frame (#3685).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_by_reference_names_the_frame_it_lands_in() -> Result<(), String> {
+    let program = "function h() { return 1; }
+        function &p($n) { static $z = 0; if ($n == 0) { return $z; } $x = &p($n - 1); h(); return $x; }
+        $r = &p(6); echo $r, \"\\n\";";
+    let plan = [("record.function", "p"), ("record.start", "return")];
+    let (ir, _) = compiled(&plan, program)?;
+    let shown = super::dump::render(&ir);
+    let stepped = (ir.ops.iter())
+        .position(|op| {
+            matches!(op, Op::Line(line)
+                if line.opcode == Opcode::ReturnByRef && line.form == Form::Step)
+        })
+        .ok_or_else(|| format!("the trace steps no RETURN_BY_REF:\n{shown}"))?;
+    let Some(&Op::Back { frame: landed, .. }) = ir.ops.get(stepped + 1) else {
+        return Err(format!("no return lands past the RETURN_BY_REF:\n{shown}"));
+    };
+    let below = (ir.frames.get(usize::from(landed.0))).map(|frame| frame.place);
+    assert!(matches!(below, Some(Place::Caller(_))), "{shown}");
+    assert!(
+        (ir.ops.iter().skip(stepped)).any(|op| matches!(op, Op::Line(line)
+            if line.frame == landed && matches!(line.imm, Imm::Make { .. }))),
+        "the frame landed in makes no call in place:\n{shown}"
     );
     Ok(())
 }
