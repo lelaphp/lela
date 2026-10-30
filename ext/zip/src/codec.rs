@@ -1,15 +1,16 @@
 //! What libzip's algorithms and encryption sources do to an entry's data
 //! on the way out (`zip_algorithm_*.c`, `zip_source_compress.c`,
 //! `zip_source_pkware_encode.c`, `zip_source_winzip_aes_encode.c`), over
-//! the platform's zlib and pure-Rust codecs and ciphers, each fed and
-//! read a buffer at a time as libzip's layers are, and the attributes
-//! each layer gives; and the ciphers' state on the way in, which
-//! [`crate::read`] decrypts with.
+//! the platform's zlib, liblzma and libzstd, libbzip2 rewritten in Rust
+//! and pure-Rust ciphers, each fed and read a buffer at a time as
+//! libzip's layers are, and the attributes each layer gives; and the
+//! ciphers' state on the way in, which [`crate::read`] decrypts with.
 
-use std::io::Write;
+use std::ops::Range;
 
 use crate::error::{Er, Status};
 use crate::ffi::Deflate;
+use crate::{xz, zstd};
 
 /// `TORRENTZIP_COMPRESSION_FLAGS`, the level a torrentzip entry is
 /// written at ([`crate::write`]'s `zip_dirent_torrentzip_normalize`):
@@ -88,15 +89,7 @@ impl Method {
             Method::Lzma | Method::Xz => {
                 return ((size as f64 * 1.1) as u64).saturating_add(64 * 1024 + 13);
             }
-            // `ZSTD_compressBound`.
-            Method::Zstd => Some(
-                (size >> 8)
-                    + if size < 128 << 10 {
-                        ((128 << 10) - size) >> 11
-                    } else {
-                        0
-                    },
-            ),
+            Method::Zstd => return crate::ffi::compress_bound(size),
         };
         more.and_then(|m| size.checked_add(m)).unwrap_or(u64::MAX)
     }
@@ -178,8 +171,7 @@ pub(crate) enum Turn {
     End,
 }
 
-/// The compressed bytes an encoder has made and `process` has not yet
-/// handed on.
+/// The bytes a layer has made and not yet handed on.
 #[derive(Default)]
 struct Made {
     bytes: Vec<u8>,
@@ -216,76 +208,21 @@ pub(crate) fn copy_from(data: &[u8], at: usize, out: &mut [u8]) -> usize {
     n
 }
 
-/// A pure-Rust encoder written to as its input comes: what it has made
-/// of its input so far, and the rest once its input ends.
-trait Encoder {
-    fn feed(&mut self, data: &[u8]) -> Result<Vec<u8>, Status>;
-    fn finish(self: Box<Self>) -> Result<Vec<u8>, Status>;
-}
-
-/// lzma-rust2's writers, each over a `Vec` its made bytes are taken from.
-macro_rules! lzma_encoder {
-    ($($writer:ty),*) => {$(
-        impl Encoder for $writer {
-            fn feed(&mut self, data: &[u8]) -> Result<Vec<u8>, Status> {
-                self.write_all(data)
-                    .map_err(|_| Status::new(Er::Internal))?;
-                Ok(std::mem::take(self.inner_mut()))
-            }
-
-            fn finish(self: Box<Self>) -> Result<Vec<u8>, Status> {
-                (*self).finish().map_err(|_| Status::new(Er::Internal))
-            }
-        }
-    )*};
-}
-
-lzma_encoder!(
-    lzma_rust2::XzWriter<Vec<u8>>,
-    lzma_rust2::LzmaWriter<Vec<u8>>
-);
-
-/// zstd, whose encoder here is ruzstd's one-shot frame: the input
-/// gathered, compressed as it ends.
-struct Zstd(Vec<u8>);
-
-impl Encoder for Zstd {
-    fn feed(&mut self, data: &[u8]) -> Result<Vec<u8>, Status> {
-        self.0.extend_from_slice(data);
-        Ok(Vec::new())
-    }
-
-    fn finish(self: Box<Self>) -> Result<Vec<u8>, Status> {
-        Ok(ruzstd::encoding::compress_to_vec(
-            self.0.as_slice(),
-            ruzstd::encoding::CompressionLevel::Fastest,
-        ))
-    }
-}
-
-/// `zip_compression_algorithm_t` compressing: deflate through the
-/// platform's zlib, bzip2 through libbz2-rs, as libzip drives them;
-/// LZMA, XZ and zstd through an [`Encoder`], which hands on what it has
-/// made before it asks for more.
+/// `zip_compression_algorithm_t` compressing, each over the input left
+/// of the buffer last read: deflate through the platform's zlib, bzip2
+/// through libbz2-rs, LZMA and XZ through liblzma, ZSTD through libzstd,
+/// as libzip drives them.
 enum Algorithm {
     Deflate(Deflate),
-    Bzip2 {
-        z: bzip2::Compress,
-        input: Vec<u8>,
-        at: usize,
-    },
-    Streamed {
-        encoder: Option<Box<dyn Encoder>>,
-        made: Made,
-    },
+    Bzip2(bzip2::Compress),
+    Xz(xz::Compress),
+    Zstd(zstd::Compress),
 }
 
 impl Algorithm {
     /// `allocate` and `start` for `method` at `level`.
     fn start(method: Method, level: u32) -> Result<Algorithm, Status> {
-        let fail = |_| Status::new(Er::Internal);
-        let preset = if level <= 9 { level } else { 6 };
-        let encoder: Box<dyn Encoder> = match method {
+        Ok(match method {
             Method::Deflate => {
                 // `zip_algorithm_deflate.c`'s `allocate`: torrentzip's flags
                 // ask for `TORRENTZIP_MEM_LEVEL`, every other level
@@ -296,61 +233,30 @@ impl Algorithm {
                     9
                 };
                 let z = Deflate::new(nine(level).cast_signed(), mem_level).map_err(Status::zlib)?;
-                return Ok(Algorithm::Deflate(z));
+                Algorithm::Deflate(z)
             }
-            Method::Bzip2 => {
-                return Ok(Algorithm::Bzip2 {
-                    z: bzip2::Compress::new(bzip2::Compression::new(nine(level)), 30),
-                    input: Vec::new(),
-                    at: 0,
-                });
-            }
-            Method::Xz => {
-                let mut options = lzma_rust2::XzOptions::with_preset(preset);
-                options.set_check_sum_type(lzma_rust2::CheckType::Crc64);
-                Box::new(lzma_rust2::XzWriter::new(Vec::new(), options).map_err(fail)?)
-            }
-            Method::Lzma => {
-                let options = lzma_rust2::LzmaOptions::with_preset(preset);
-                let mut out = vec![0x09, 0x14, 0x05, 0x00, options.get_props()];
-                out.extend_from_slice(&options.dict_size.to_le_bytes());
-                Box::new(
-                    lzma_rust2::LzmaWriter::new(out, &options, false, true, None).map_err(fail)?,
-                )
-            }
-            Method::Zstd => Box::new(Zstd(Vec::new())),
-        };
-        Ok(Algorithm::Streamed {
-            encoder: Some(encoder),
-            made: Made::default(),
+            Method::Bzip2 => Algorithm::Bzip2(bzip2::Compress::new(
+                bzip2::Compression::new(nine(level)),
+                30,
+            )),
+            Method::Lzma | Method::Xz => Algorithm::Xz(xz::Compress::start(method, level)?),
+            Method::Zstd => Algorithm::Zstd(zstd::Compress::start(level)?),
         })
     }
 
-    /// `input`: `data`, the next buffer of the source.
-    fn input(&mut self, data: &[u8]) -> Result<(), Status> {
+    /// `process`: what one turn over `input` writes into `out`, `finish`
+    /// once the input has ended, and how much of `input` it took.
+    fn process(
+        &mut self,
+        input: &[u8],
+        out: &mut [u8],
+        finish: bool,
+    ) -> Result<(Turn, usize, usize), Status> {
         match self {
-            Algorithm::Deflate(z) => z.input(data),
-            Algorithm::Bzip2 { input, at, .. } => {
-                *input = data.to_vec();
-                *at = 0;
-            }
-            Algorithm::Streamed { encoder, made } => {
-                if let Some(e) = encoder {
-                    made.extend(&e.feed(data)?);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// `process`: what one turn writes into `out`, `finish` once the
-    /// input has ended.
-    fn process(&mut self, out: &mut [u8], finish: bool) -> Result<(Turn, usize), Status> {
-        match self {
-            Algorithm::Deflate(z) => z.process(out, finish).map_err(Status::zlib),
-            Algorithm::Bzip2 { z, input, at } => {
-                if *at >= input.len() && !finish {
-                    return Ok((Turn::NeedData, 0));
+            Algorithm::Deflate(z) => z.process(input, out, finish).map_err(Status::zlib),
+            Algorithm::Bzip2(z) => {
+                if input.is_empty() && !finish {
+                    return Ok((Turn::NeedData, 0, 0));
                 }
                 let (before_in, before_out) = (z.total_in(), z.total_out());
                 let action = if finish {
@@ -359,34 +265,19 @@ impl Algorithm {
                     bzip2::Action::Run
                 };
                 let status = z
-                    .compress(input.get(*at..).unwrap_or_default(), out, action)
+                    .compress(input, out, action)
                     .map_err(|_| Status::new(Er::Internal))?;
-                *at += usize::try_from(z.total_in() - before_in).unwrap_or(usize::MAX);
+                let used = usize::try_from(z.total_in() - before_in).unwrap_or(usize::MAX);
                 let n = usize::try_from(z.total_out() - before_out).unwrap_or(usize::MAX);
                 let turn = match status {
                     bzip2::Status::StreamEnd => Turn::End,
-                    bzip2::Status::RunOk if *at >= input.len() => Turn::NeedData,
+                    bzip2::Status::RunOk if used >= input.len() => Turn::NeedData,
                     _ => Turn::More,
                 };
-                Ok((turn, n))
+                Ok((turn, used, n))
             }
-            Algorithm::Streamed { encoder, made } => {
-                if made.is_empty()
-                    && finish
-                    && let Some(e) = encoder.take()
-                {
-                    made.extend(&e.finish()?);
-                }
-                if !made.is_empty() {
-                    return Ok((Turn::More, made.take(out)));
-                }
-                let turn = if encoder.is_some() {
-                    Turn::NeedData
-                } else {
-                    Turn::End
-                };
-                Ok((turn, 0))
-            }
+            Algorithm::Xz(x) => x.process(input, out, finish),
+            Algorithm::Zstd(z) => z.process(input, out, finish),
         }
     }
 }
@@ -396,10 +287,36 @@ impl Algorithm {
 /// each time it asks for more, and as much handed out as each read asks.
 /// `can_store` is `ZIP_CM_IS_DEFAULT`, under which data that ends within
 /// one buffer of input and one read of what it makes, and does not
-/// shrink, is stored. Deflate is the platform zlib's ([`crate::ffi`]) at libzip's
-/// memLevel, 9 or torrentzip's 8, so an entry carries php's bytes at
-/// every level, and a stream cut short inflates as far as php's does
-/// (#1651).
+/// shrink, is stored. Deflate is the platform zlib's ([`crate::ffi`]) at
+/// libzip's memLevel, 9 or torrentzip's 8, so an entry carries php's
+/// bytes at every level, and a stream cut short inflates as far as php's
+/// does (#1651); LZMA and XZ are liblzma's at libzip's extreme preset,
+/// and ZSTD libzstd's at the level as libzip reads it (#3529):
+///
+/// ```php
+/// $text = ''; for ($i = 0; $i < 20000; $i++) $text .= md5((string) $i);
+/// foreach ([[ZipArchive::CM_XZ, [1, 9, 0, 12]], [ZipArchive::CM_LZMA, [1, 0]], [ZipArchive::CM_ZSTD, [1, 19, 0, 23, -5]]] as [$m, $levels]) foreach ($levels as $level) {
+///     $z = new ZipArchive; $z->open('codec-levels.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+///     $z->addFromString('t', $text); $z->setCompressionName('t', $m, $level); $z->close();
+///     $b = file_get_contents('codec-levels.zip'); $u = unpack('vbits/vmethod/x8/Vsize/x4/vn/vm', $b, 6);
+///     $z->open('codec-levels.zip'); $same = $z->getFromName('t') === $text ? 'intact' : 'damaged'; $z->close();
+///     echo "$m $level: {$u['method']} {$u['bits']} {$u['size']} ", md5(substr($b, 30 + $u['n'] + $u['m'], $u['size'])), " $same\n";
+/// }
+/// unlink('codec-levels.zip');
+/// ```
+/// ```expect
+/// 95 1: 95 0 332492 84d1ac1552dbe18857b0266c2a3c70bb intact
+/// 95 9: 95 0 332492 ee68f067bb48982080fbf6bec2140aa8 intact
+/// 95 0: 95 0 332484 d12f5f98cadac7c288687a2a092eb99b intact
+/// 95 12: 95 0 332492 65d7f80da9f7791271be05c6fa5a23ea intact
+/// 14 1: 14 2 332396 4982c25d3b22ae16d49b7178ed62b6fb intact
+/// 14 0: 14 2 332386 f8443a946a62257dac8ed999cacd88b4 intact
+/// 93 1: 93 0 320113 07bdab0cd38464d7b1f4e4beda3227cc intact
+/// 93 19: 93 0 320836 9e13728dcb384a67c50f03f17851f2cb intact
+/// 93 0: 93 0 330674 155d903ead90b0c88582d9867ffed9ef intact
+/// 93 23: 93 0 330674 155d903ead90b0c88582d9867ffed9ef intact
+/// 93 -5: 93 0 330674 155d903ead90b0c88582d9867ffed9ef intact
+/// ```
 ///
 /// ```php
 /// $d = ''; for ($i = 0; $i < 3000; $i++) { $d .= hash('sha256', "row $i") . "\n"; }
@@ -445,6 +362,8 @@ pub(crate) struct Compressor {
     bits: u16,
     /// `ctx->buffer`: the last buffer of input read.
     buffer: Box<[u8; BUFSIZE]>,
+    /// The part of `buffer` the algorithm has not taken.
+    pending: Range<usize>,
     /// How much the first read of input gave, once one was made.
     first_read: Option<usize>,
     /// Whether the data may yet be stored: one buffer of input read so
@@ -472,6 +391,7 @@ impl Compressor {
             method,
             bits: method.bits(level),
             buffer: Box::new([0; BUFSIZE]),
+            pending: 0..0,
             first_read: None,
             can_store,
             phase: Phase::Input,
@@ -522,6 +442,25 @@ impl Compressor {
     /// 12 rand: 0 1 | 100818
     /// 12 text: 0 1 | 325352
     /// ```
+    ///
+    /// LZMA's and XZ's points fall where liblzma's encoder hands on what
+    /// it has made, and ZSTD's where libzstd flushes a block; an LZMA
+    /// entry's first is libzip's header of it, alone in its turn:
+    ///
+    /// ```php
+    /// $text = ''; for ($i = 0; $i < 20000; $i++) $text .= md5((string) $i);
+    /// foreach ([ZipArchive::CM_XZ, ZipArchive::CM_LZMA, ZipArchive::CM_ZSTD] as $m) {
+    ///     $z = new ZipArchive; $z->open('codec-feed.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE); $z->addFromString('t', $text); $z->setCompressionName('t', $m);
+    ///     echo "$m: "; $z->registerProgressCallback(0.0001, function ($r) { echo round($r, 4), ' '; }); $z->close();
+    ///     $z->open('codec-feed.zip'); echo '| ', $z->statIndex(0)['comp_size'], ' ', $z->getFromName('t') === $text ? 'intact' : 'damaged', "\n"; $z->close();
+    /// }
+    /// unlink('codec-feed.zip');
+    /// ```
+    /// ```expect
+    /// 95: 0 0.2048 0.2176 0.384 0.3968 0.576 0.5888 0.7552 0.768 0.9472 0.96 1 | 332484 intact
+    /// 14: 0 0.0384 0.064 0.0896 0.1152 0.1408 0.1664 0.192 0.2176 0.2432 0.2688 0.2944 0.32 0.3328 0.3584 0.384 0.4096 0.4352 0.4608 0.4864 0.512 0.5376 0.5632 0.5888 0.6144 0.64 0.6528 0.6784 0.704 0.7296 0.7552 0.7808 0.8064 0.832 0.8576 0.8832 0.9088 0.9344 0.96 0.9856 0.9984 1 | 332386 intact
+    /// 93: 0 0.2176 0.4224 0.6272 0.832 1 | 330674 intact
+    /// ```
     pub(crate) fn read(
         &mut self,
         out: &mut [u8],
@@ -533,7 +472,9 @@ impl Compressor {
         let mut done = 0;
         while done < out.len() {
             let finish = self.phase != Phase::Input;
-            let (turn, n) = self.algorithm.process(&mut out[done..], finish)?;
+            let input = &self.buffer[self.pending.clone()];
+            let (turn, used, n) = self.algorithm.process(input, &mut out[done..], finish)?;
+            self.pending.start += used;
             done += n;
             match turn {
                 Turn::More => {}
@@ -561,7 +502,7 @@ impl Compressor {
                         } else {
                             self.first_read = Some(got);
                         }
-                        self.algorithm.input(&self.buffer[..got])?;
+                        self.pending = 0..got;
                     }
                 }
             }
