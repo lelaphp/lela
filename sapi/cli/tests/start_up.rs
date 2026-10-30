@@ -73,7 +73,7 @@ fn the_server_starts_no_session_before_its_first_client() {
     let dir = save_path("server");
     let save_path = format!("session.save_path={}", dir.display());
     let server = Server::start_on(
-        std::iter::repeat_with(server::free_port),
+        std::iter::repeat_with(server::free_loopback),
         "start-up",
         &[],
         &[],
@@ -85,14 +85,14 @@ fn the_server_starts_no_session_before_its_first_client() {
     assert_eq!(sessions(&dir), Vec::<String>::new());
 }
 
-/// A port another process holds when php -S binds it is given up for a
+/// A `port` another process holds when php -S binds it is given up for a
 /// fresh one (#2653): php says it is in use and exits, and the server is
-/// started again on the next port offered.
+/// started again on the next `port` offered.
 #[test]
 fn a_server_whose_port_is_taken_starts_on_a_fresh_one() {
     let held = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|e| panic!("{e}"));
     let taken = held.local_addr().map_or(0, |bound| bound.port());
-    let ports = std::iter::once(taken).chain(std::iter::repeat_with(server::free_port));
+    let ports = std::iter::once(taken).chain(std::iter::repeat_with(server::free_loopback));
     let server = Server::start_on(
         ports,
         "taken",

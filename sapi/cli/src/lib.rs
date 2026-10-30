@@ -27,7 +27,7 @@
 //! where it has none.
 //!
 //! `-e` builds the engine with extended info, as `main` sets
-//! `ZEND_COMPILE_EXTENDED_INFO` once the module has started
+//! `ZEND_COMPILE_EXTENDED_INFO` once `php_module_startup` has returned
 //! (`Z/sapi/cli/php_cli.c:1366`), for the built-in server's engine as for the CLI's
 //! ([`php_sapi::EngineBuilder::extended_info`]). The switches taken and
 //! changing nothing: `-H`, which blanks copies
@@ -73,7 +73,7 @@ use crate::natives::ProcessTitle;
 #[cfg(feature = "linked")]
 pub use ffi::close_inherited_fds;
 pub use options::{
-    Ask, Each, Lines, Options, Program, Refused, Report, Server, Startup, usage_text,
+    Ask, Each, Lines, Listing, Options, Program, Refused, Server, Startup, usage_text,
 };
 pub use request::Process;
 
@@ -165,7 +165,7 @@ fn served(argv: &[OsString]) -> i32 {
         Ask::Server(server) => {
             let engine = server_engine(startup);
             let color = php_sapi::ini::enabled(&engine, "cli_server.color");
-            server::run(engine, server, color)
+            server::serve(engine, server, color)
         }
         ask => {
             if options.interactive {
@@ -204,7 +204,7 @@ fn once(engine: &Engine, ask: &Ask) -> i32 {
         Ask::Lines(lines, arguments) => request::process_stdin(engine, lines, arguments),
         Ask::Highlight(program, arguments) => request::highlight(engine, program, arguments),
         Ask::Strip(program, arguments) => request::strip(engine, program, arguments),
-        Ask::Report(report, file) => request::report(engine, report, file.as_deref()),
+        Ask::Listing(listing, file) => request::listing(engine, listing, file.as_deref()),
         Ask::Shell(file, arguments) => request::shell(engine, file.as_deref(), arguments),
         // `do_cli`'s lint loop: the status starts at 0, a lint that fails
         // sets 255 and a file that cannot be opened sets 1, each as it
@@ -230,7 +230,7 @@ fn once(engine: &Engine, ask: &Ask) -> i32 {
 }
 
 /// `-m` (`php_cli.c:643-655`), which prints in a request of its own
-/// ([`request::started`]) once `php_module_startup` has run, as `-v`
+/// ([`request::started`]) once `php_module_startup` has returned, as `-v`
 /// prints with none: what the startup raised displayed first either way,
 /// as [`php_sapi::start`] finishes the startup, and where it failed
 /// nothing printed and its status the answer.
@@ -327,7 +327,7 @@ fn cli_defaults(builder: EngineBuilder) -> EngineBuilder {
 
 /// The built-in server's engine: the bundle as [`engine`] builds it,
 /// without the CLI's `HARDCODED_INI`, which `main` lays only under the
-/// CLI's module (`php_cli.c:1336`), and the `cli_server` module and its
+/// CLI's `sapi_module` (`php_cli.c:1336`), and `cli_server_module_entry` and its
 /// natives after the bundle; with extended info where the line carried
 /// `-e`.
 ///
@@ -335,8 +335,8 @@ fn cli_defaults(builder: EngineBuilder) -> EngineBuilder {
 /// `php_module_startup` before `-S` (`php_cli.c:1341`): what the startup
 /// raised displayed to C's `stdout` under the server's name
 /// ([`php_sapi::stdio`]), held there to the process's exit, since the
-/// server's module has no `deactivate` to flush it as the CLI's does; no
-/// extension's `rinit` run, and a startup that failed leaves no server.
+/// server's `sapi_module` has no `deactivate` to flush it as the CLI's does; no
+/// extension's `rinit` called, and a startup that failed leaves no server.
 /// The server's responses carry none of it, since php wrote it before any
 /// client connected.
 ///

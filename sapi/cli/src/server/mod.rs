@@ -39,7 +39,7 @@ use log::{Log, Type};
 /// answers under it.
 pub(crate) const NAME: &str = "cli-server";
 
-/// How long the loop waits before it reads the flag a `SIGINT` sets
+/// How long the loop waits before it reads the atomic a `SIGINT` sets
 /// again, in milliseconds: `php_cli_server_do_event_loop`'s `tv` of one
 /// second.
 const WAIT: i32 = 1000;
@@ -56,7 +56,7 @@ pub(crate) fn log_message(entry: &[u8]) {
 }
 
 /// What every connection of one server reads: the engine, the document
-/// root and the router, the host and port the server listens on, and
+/// root and the router, the `host:port` the server listens on, and
 /// the log. Shared with the sink a request holds, which the engine may
 /// keep past the call that serves it.
 struct Site {
@@ -79,7 +79,7 @@ struct Site {
 /// `php_cli_server_dtor` closes and waits. The exit code: 0 once
 /// stopped, 1 where the wait failed, what refused it where it does not
 /// start.
-pub fn run(engine: Engine, server: &Server, color: bool) -> i32 {
+pub fn serve(engine: Engine, server: &Server, color: bool) -> i32 {
     let document_root = match &server.document_root {
         Some(root) => {
             let shown = root.display();
@@ -157,7 +157,7 @@ pub fn run(engine: Engine, server: &Server, color: bool) -> i32 {
 /// connection, each for what it waits on, then each that is ready
 /// answered in the order of its fd, as `php_cli_server_poller_iter_on_active`
 /// (`Z/sapi/cli/php_cli_server.c:883`) walks them: the listening socket's one connection accepted, a
-/// request read on and served once whole, a response sent on. The flag a
+/// request read on and served once whole, a response sent on. The atomic a
 /// `SIGINT` sets is read before each wait; once it is set every
 /// connection still open is shut and dropped with nothing logged, as
 /// `php_cli_server_dtor` destroys the clients. A request in flight when
@@ -248,7 +248,7 @@ fn refuse(line: &str) -> i32 {
 }
 
 /// `php_cli_server_parse_addr` (`Z/sapi/cli/php_cli_server.c:2432`):
-/// `host:port` or `[host]:port`, the port all digits `strtol` reads and
+/// `host:port` or `[host]:port`, the `port` all digits `strtol` reads and
 /// at most 65535.
 fn parse_address(address: &str) -> Option<(String, u16)> {
     let (host, port) = if let Some(rest) = address.strip_prefix('[') {
@@ -281,7 +281,7 @@ fn strtol_port(digits: &str) -> Option<u16> {
 
 /// `php_network_listen_socket` (`Z/sapi/cli/php_cli_server.c:1283`): each
 /// address the host resolves to bound in turn with `SO_REUSEADDR`, an
-/// address in use or refused as invalid ending the search, and the port
+/// address in use or refused as invalid ending the search, and the `port`
 /// the system chose where `0` was asked; `listen`. The reason where none
 /// binds, `?` where php kept none.
 fn listen(host: &str, port: u16) -> Result<(TcpListener, u16), String> {
