@@ -1848,12 +1848,14 @@ impl<'a> Emit<'a> {
     /// registers stored first, so the interpreter reads them in their
     /// slots, and the way a jump it served went held to its guards.
     ///
-    /// A return, whichever of `RETURN`, `RETURN_BY_REF` and
-    /// `GENERATOR_RETURN` it is ([`returns`]), first reads the caller its
+    /// A return, any opline [`returns`] names, first reads the caller its
     /// frame's header names, the place of the frame its `Op::Back` lands
     /// in, as php's trace takes the frame it goes on in from where the
-    /// handler of any of the three left the interpreter
-    /// (`Z/ext/opcache/jit/zend_jit_ir.c:17157-17199`). A return trace
+    /// handler of a `RETURN` or a `RETURN_BY_REF` left the interpreter
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:17157-17199`). A
+    /// `GENERATOR_RETURN` lands in no `Op::Back`: its frame is a resumed
+    /// generator's, the serving's entry, whose leaving the recorder never
+    /// steps, as php's trace halts there (`:17219-17224`). A return trace
     /// whose `RETURN_BY_REF` the handler serves, its caller going on to
     /// call `h()` in place:
     ///
