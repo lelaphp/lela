@@ -186,6 +186,10 @@ _Avoid_: invoker, requester
 Said of a block the second Stop let through (`stop_hook_active`): the turn ends with the conditions unmet, and a `done` reading over `released` records the count the block had.
 _Avoid_: forgiven
 
+**Owed**:
+Said of a reading a crate must have fresh and passing before `done`: what an `[[owed]]` row of the manifest names for the crates it covers. A row with `held_at = "merge"` is **delegated** in a checkout whose branch records a ticket: `done` there lists it under the merge check's name and does not hold it, and main's checkout holds it.
+_Avoid_: obligatory
+
 **Seat**:
 One of the machine's few places a building instrument runs in, `XTASK_SEATS` of them (three unless set), each an exclusive lock on a file under `XTASK_SEAT_DIR` that the operating system gives back however its holder ends. `clippy`, `test`, `miri`, `phpt`, `compile-identity`, `crosscheck`, `trace-dump`, `fold`, `fpm-compare`, `soak`, `witness` and `bench` take one before they build and wait while every one is held; what a seated instrument spawns sits in its seat (`seat`, #2982).
 _Avoid_: lease

@@ -59,7 +59,7 @@ use crate::crosscheck;
 use crate::divergence::{self, Registry};
 use crate::git::{self, Change};
 use crate::key::{self, Snapshot};
-use crate::manifest::{Crate, Manifest, Owed, When};
+use crate::manifest::{Crate, HeldAt, Manifest, Owed, When};
 use crate::permit;
 use crate::phpt;
 use crate::phpt::against::{self, Against};
@@ -173,6 +173,10 @@ pub struct Verdict {
     /// The instruments the caller said this run did not take (`--not-run`),
     /// whose missing readings are notes and not unmet (#2477).
     pub not_run: Vec<String>,
+    /// The readings a ticketed checkout leaves to the merge check, each
+    /// `<instrument> for <scope>`: its `[[owed]]` row is held at the merge
+    /// (#3618 ruling 2).
+    pub delegated: Vec<String>,
 }
 
 impl Verdict {
@@ -207,6 +211,9 @@ impl Verdict {
         }
         if !self.notes.is_empty() {
             bullets(&mut out, "notes", &self.notes);
+        }
+        if !self.delegated.is_empty() {
+            bullets(&mut out, "delegated to the merge check", &self.delegated);
         }
         out
     }
@@ -449,7 +456,9 @@ pub fn judge(
         base: &base.commit,
         carried: &carried,
         not_run,
+        ticketed: ticket.is_some(),
     };
+    let mut delegated = Vec::new();
     for condition in Condition::ALL {
         match condition {
             Condition::Fresh => {
@@ -460,7 +469,7 @@ pub fn judge(
                         krate,
                         &now,
                         &mut not_judged,
-                        &mut unmet,
+                        (&mut unmet, &mut delegated),
                         &mut notes,
                     )?;
                 }
@@ -516,6 +525,7 @@ pub fn judge(
         unmet,
         notes,
         not_run: not_run.to_vec(),
+        delegated,
     })
 }
 
@@ -801,6 +811,9 @@ struct Asking<'a> {
     carried: &'a Carried,
     /// The instruments the caller's run did not take (#2477).
     not_run: &'a [String],
+    /// Whether the checkout's branch records a ticket, where the rows held
+    /// at the merge are delegated.
+    ticketed: bool,
 }
 
 /// Condition 1's `phpt` for one touched crate (harness §4.5, #725): its
@@ -898,7 +911,7 @@ fn fresh_readings(
     krate: &Crate,
     now: &KeyNow,
     not_judged: &mut Vec<String>,
-    unmet: &mut Vec<String>,
+    (unmet, delegated): (&mut Vec<String>, &mut Vec<String>),
     notes: &mut Vec<String>,
 ) -> Result<()> {
     let (root, store, not_run) = (asking.snapshot.root(), asking.store, asking.not_run);
@@ -912,6 +925,11 @@ fn fresh_readings(
     let mut asked = Vec::new();
     let mut phpt = false;
     for instrument in owed(asking.manifest, krate, asking.carried) {
+        let row = asking.manifest.owing(instrument);
+        if asking.ticketed && row.is_some_and(|row| row.held_at == Some(HeldAt::Merge)) {
+            delegated.push(format!("{instrument} for {name}"));
+            continue;
+        }
         // `phpt` is held by its kept runs, not by a reading, after them.
         if instrument == "phpt" {
             phpt = true;

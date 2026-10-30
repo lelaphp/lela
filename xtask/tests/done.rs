@@ -546,6 +546,42 @@ fn on_a_ticket_branch(name: &str) -> (Tree, String) {
     (root, cut)
 }
 
+/// A row held at the merge (#3618 ruling 2) is the merge check's: a
+/// ticketed checkout renders it as delegated, and main's holds it.
+#[test]
+fn a_row_held_at_the_merge_is_delegated_in_a_ticketed_checkout_and_held_in_mains() {
+    let root = scratch("held-at-merge");
+    let text = std::fs::read_to_string(root.join("seams.toml")).unwrap();
+    let row = "instrument = \"crosscheck\"\n";
+    assert!(text.contains(row));
+    let held = text.replace(row, &format!("{row}held_at = \"merge\"\n"));
+    std::fs::write(root.join("seams.toml"), held).unwrap();
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let crosscheck =
+        |verdict: &Verdict| verdict.unmet.iter().any(|u| u.starts_with("crosscheck: "));
+
+    let on_main = judge(&root);
+    assert!(crosscheck(&on_main), "{on_main:#?}");
+    assert!(on_main.delegated.is_empty(), "{on_main:#?}");
+
+    Repo::at(&root).git(&["checkout", "-q", "-b", "t9"]);
+    Repo::at(&root).git(&["config", "branch.t9.ticket", "9"]);
+    let ticketed = judge(&root);
+    assert!(!crosscheck(&ticketed), "{ticketed:#?}");
+    assert!(
+        ticketed
+            .delegated
+            .iter()
+            .any(|d| d == "crosscheck for ext/pcre"),
+        "{ticketed:#?}"
+    );
+    assert!(
+        ticketed
+            .render()
+            .contains("delegated to the merge check:\n- crosscheck for ext/pcre")
+    );
+}
+
 /// A bare `done` measures since the merge base with `main` (ADR-0009,
 /// harness-design.md §4.5), so `main`'s commits since the cut are not
 /// the branch's.

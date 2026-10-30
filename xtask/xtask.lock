@@ -97,6 +97,7 @@ manifest::Edge::between
 manifest::FILE
 manifest::Generated
 manifest::Generated::files
+manifest::HeldAt
 manifest::Instrument
 manifest::Instrument::name
 manifest::Layout
