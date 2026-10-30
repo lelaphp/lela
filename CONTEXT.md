@@ -195,7 +195,7 @@ One GitHub issue in this repository: what happened, what to build, its acceptanc
 _Avoid_: leftover (hides whether the thing was filed), follow-up (hides whose it is)
 
 **Map**:
-`AGENTS.md` at the workspace root: what an agent reads first, a person's prose and the rest rendered as computed regions, handed to a session by the function hook's `prompt.context` as the `map` block of `xtask status --session`. §5 has called it the map since revision 1 and the harness spells the word in its own code, so the map is this file and nothing else. It says where a session starts and never where the track is going; that is the track's chart.
+`AGENTS.md` at the workspace root: what an agent reads first, a person's prose and the rest rendered as computed regions, loaded into every session by the runtime itself, through `CLAUDE.md`'s `@AGENTS.md` (harness-design.md §5). §5 has called it the map since revision 1 and the harness spells the word in its own code, so the map is this file and nothing else. It says where a session starts and never where the track is going; that is the track's chart.
 _Avoid_: context file, system prompt, a track's map (the chart is that, and the two were one word until revision 22)
 
 **Frontier**:
