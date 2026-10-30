@@ -16,9 +16,11 @@
 # row, and `cargo xtask crosscheck --ext <name>` takes it (revision 140).
 # Before anything runs, a commit from a session that does not own the
 # checkout is refused (#3621), and a `git commit -F` whose file is missing is
-# refused, since git reads the message only after this hook, and a
-# commit in a linked worktree, a builder's, runs at a lower priority than
-# one in the main checkout, a merge (revision 140);
+# refused, since git reads the message only after this hook; a commit
+# in a linked worktree, a builder's, runs at a lower priority than one
+# in the main checkout, a merge (revision 140); and a `-F` message is
+# noted against the glossary before the first instrument, as commit-msg
+# notes a `-m` one, refusing nothing (#3630, #3629);
 # `permit --diff` judges every staged file as the Write of
 # its staged content and refuses the commit with the rule id on a denial
 # (the harness's own files are a note: a person commits those). Between
@@ -54,13 +56,19 @@
 # scripts/hooks`.
 set -u
 cd "$(git rev-parse --show-toplevel)"
+# What a `-F` message this hook noted leaves for commit-msg, so the
+# message is held to the glossary once (#3630); one an earlier run left,
+# refused before git wrote the message, is gone before anything else.
+noted="$(git rev-parse --absolute-git-dir)/vocab-noted"
+rm -f "$noted"
 # The message file `git commit -F` names, read from the committing git's
 # arguments, since git reads it only after this hook: a missing one
 # refused a commit sixteen minutes into the hook twice in one session. A
 # path is tried word by word, so one with a space in it is found; a
-# relative one is tried against the checkout's root and the directory git
-# was started from, and is not judged beside `-C`. Where the arguments
-# cannot be read, nothing is judged.
+# relative one is tried against the directory git was started from, as
+# git reads it, and then the checkout's root, and is not judged beside
+# `-C`. The file found is printed as a whole path. Where the arguments
+# cannot be read, nothing is judged and nothing is printed.
 message_file() {
     local args word path=
     args=$(ps -ww -o args= -p "$PPID" 2>/dev/null) || return 0
@@ -88,8 +96,11 @@ message_file() {
     rest=${args#*"$path"}
     while :; do
         case "$word" in
-            /*) [ -r "$word" ] && return 0 ;;
-            *) [ -r "$word" ] || { [ -n "$from" ] && [ -r "$from/$word" ]; } && return 0 ;;
+            /*) [ -r "$word" ] && printf '%s\n' "$word" && return 0 ;;
+            *)
+                [ -n "$from" ] && [ -r "$from/$word" ] && printf '%s\n' "$from/$word" && return 0
+                [ -r "$word" ] && printf '%s\n' "$PWD/$word" && return 0
+                ;;
         esac
         case "$rest" in " "*) ;; *) break ;; esac
         rest=${rest# }
@@ -100,7 +111,7 @@ message_file() {
     echo "pre-commit: git commit -F names $path, which is not a file git can read, so the commit is refused before anything runs" >&2
     return 1
 }
-message_file || exit 1
+message=$(message_file) || exit 1
 # One session writes in a checkout, its owner (#3618 M1, #3621): a commit
 # from a session other than the one `xtask worktree add` or `xtask
 # worktree own` recorded is refused before anything runs, whatever made
@@ -135,6 +146,17 @@ fi
 [ -f .git ] && [ "$(git symbolic-ref --short -q HEAD)" != staging ] &&
     renice -n 10 -p $$ >/dev/null 2>&1
 X='cargo xtask'
+# The `-F` message against the glossary before any build (#3630): commit-msg
+# would hold it only once every instrument below has run, and an avoided
+# word would be said minutes late. It notes and refuses nothing, as
+# commit-msg does (#3629): the words are printed by line and one reading
+# under `message` records them. Once it has, the message git will hand
+# commit-msg is recorded as noted, as git cleans it (`git stripspace`), so
+# commit-msg does not read it again; a `-m` message, or one an editor
+# changed, is commit-msg's.
+if [ -n "$message" ] && $X vocab --message "$message"; then
+    git stripspace < "$message" | git hash-object --stdin > "$noted"
+fi
 status=0
 step() {
     "$@" || { echo "pre-commit: $* failed" >&2; status=1; }
