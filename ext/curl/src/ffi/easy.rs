@@ -3,11 +3,12 @@
 //! `build_mime_structure_from_hash` builds.
 
 use std::ffi::{c_char, c_double, c_int, c_void};
+use std::os::fd::RawFd;
 use std::ptr::{self, NonNull};
 
 use php_ext::raising::Thrown;
-use php_ext::request::{Foreign, ForeignId, Request};
-use php_ext::values::PhpObject;
+use php_ext::request::{Foreign, ForeignId, Request, Stream};
+use php_ext::values::{Owner, PhpObject, Value};
 
 use super::multi::ShareHandle;
 use super::sys::{self, curl_mime, curl_mimepart};
@@ -78,6 +79,11 @@ impl Drop for Tag {
         self.let_go(lists.collect(), trees);
     }
 }
+
+/// The `CURLOPT_STDERR` a copy of a `CURL *` that has a file points at:
+/// the file opened again as the copy's own, or the process's `stderr`,
+/// `None`, where it would not open.
+struct Reopened(Option<CFile>);
 
 /// One `CURL *` the request keeps, with its tag.
 pub(super) struct Handle {
@@ -213,10 +219,12 @@ impl Handle {
         }
     }
 
-    /// The error buffer and every data pointer off the tag, for a pushed
-    /// `CURL *` the library frees once the tag is gone.
+    /// The error buffer, the `CURLOPT_STDERR` file and every data pointer
+    /// off the tag, for a pushed `CURL *` the library frees once the tag
+    /// is gone.
     fn unpoint(&self) {
         self.set_ptr(sys::CURLOPT_ERRORBUFFER.into(), ptr::null_mut());
+        self.set_ptr(c::CURLOPT_STDERR, ptr::null_mut());
         self.point_data(ptr::null_mut());
     }
 
@@ -240,14 +248,27 @@ impl Handle {
         code(unsafe { sys::curl_easy_setopt(self.raw(), opt(option), raw) })
     }
 
-    /// `CURLOPT_STDERR` at `file`, held in place of the one it held.
+    /// `CURLOPT_STDERR` at `file`, held in place of the one it held,
+    /// which is let go of as [`Session::let_file_go`] says.
     fn set_stderr(&mut self, file: Option<CFile>) -> i32 {
-        let raw = file
-            .as_ref()
-            .map_or(ptr::null_mut(), |file| file.0.as_ptr());
+        let raw = file.as_ref().map_or(ptr::null_mut(), CFile::as_ptr);
         let code = self.set_ptr(c::CURLOPT_STDERR, raw.cast());
-        self.tag_mut().stderr = file;
+        let tag = self.tag_mut();
+        if let Some(old) = std::mem::replace(&mut tag.stderr, file) {
+            tag.session.let_file_go(old);
+        }
         code
+    }
+
+    /// For a copy of this `CURL *`, which points at this one's file and
+    /// does not keep it: the file opened again as its own, or `None`, the
+    /// process's `stderr`, where it would not open; nothing where there
+    /// is no file.
+    fn stderr_again(&self) -> Option<Reopened> {
+        let tag = self.tag();
+        tag.stderr
+            .as_ref()
+            .map(|file| Reopened(file.reopen(&tag.session)))
     }
 
     /// A list option at `list`, held in place of the one it held.
@@ -362,19 +383,22 @@ impl EasyId {
         let (raw, session, stderr) = self.with(req, None, |handle| {
             // SAFETY: a live handle.
             let raw = NonNull::new(unsafe { sys::curl_easy_duphandle(handle.raw()) })?;
-            let tag = handle.tag_mut();
-            tag.copied = true;
-            let stderr = tag.stderr.as_ref().map(CFile::reopen);
-            Some((raw, tag.session.clone(), stderr))
+            handle.tag_mut().copied = true;
+            Some((raw, handle.tag().session.clone(), handle.stderr_again()))
         })?;
         let mut copy = Handle::make(raw, session, object, true);
-        // The copy points at the original's file, which it does not
-        // keep: at one of its own, or at the process's `stderr` where
-        // the file would not open again.
-        if let Some(stderr) = stderr {
+        if let Some(Reopened(stderr)) = stderr {
             copy.set_stderr(stderr);
         }
         Some(Easy(req.memory_mut().adopt(copy)))
+    }
+
+    /// A pushed `CURL *`, which the library made a copy of `parent`'s,
+    /// given a `CURLOPT_STDERR` file of its own, as a copy is.
+    pub(crate) fn stderr_from(self, req: &mut Request, parent: EasyId) {
+        if let Some(Reopened(stderr)) = parent.with(req, None, |handle| handle.stderr_again()) {
+            self.with(req, 0, |handle| handle.set_stderr(stderr));
+        }
     }
 
     /// The pushed `CURL *` accepted: the multi owns it from here, as any.
@@ -476,9 +500,23 @@ impl EasyId {
     }
 
     /// `CURLOPT_STDERR`: the file the library writes its verbose lines
-    /// to, the process's `stderr` for `None`.
-    pub(crate) fn set_stderr(self, req: &mut Request, file: Option<CFile>) -> i32 {
-        self.with(req, GONE, |handle| handle.set_stderr(file))
+    /// to, what php's cast makes of the stream and the fd
+    /// [`Cast::Stdio`](php_ext::request::Cast::Stdio) answered for it
+    /// ([`CFile::of`]), the process's `stderr` for `None`.
+    pub(crate) fn set_stderr(self, req: &mut Request, to: Option<(Stream, Option<RawFd>)>) -> i32 {
+        self.with(req, GONE, |handle| {
+            let file = to.and_then(|(stream, fd)| CFile::of(&handle.tag().session, stream, fd));
+            handle.set_stderr(file)
+        })
+    }
+
+    /// The `CURLOPT_STDERR` stream's value let go of as
+    /// [`Session::let_stream_go`] says, or now where the `CURL *` is gone.
+    pub(crate) fn let_stream_go(self, req: &mut Request, value: Owner<Value>) {
+        match self.with(req, None, |handle| Some(handle.tag().session.clone())) {
+            Some(session) => session.let_stream_go(req, value),
+            None => value.give_up(req),
+        }
     }
 
     /// The `CURLOPT_STDERR` file, flushed, as `php_stream_flush` flushes
@@ -608,6 +646,9 @@ impl EasyId {
         self.with(req, (), |handle| {
             // SAFETY: a live handle.
             unsafe { sys::curl_easy_reset(handle.raw()) };
+            // The library writes to `stderr` again, and a copy made from
+            // here on must not open the file again.
+            handle.set_stderr(None);
         });
     }
 

@@ -715,6 +715,9 @@ pub(crate) fn push(
         pushed.give_up(cx.req);
         return false;
     };
+    if let Some(from) = easy_id(cx.req, parent) {
+        easy.id().stderr_from(cx.req, from);
+    }
     match copy_handlers(cx.req, parent) {
         Ok(mut copied) => {
             if let Some(curl) = pushed.native_mut::<Curl>(cx.req) {

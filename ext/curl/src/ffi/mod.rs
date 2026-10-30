@@ -46,6 +46,7 @@
 
 mod easy;
 mod multi;
+mod stdio;
 mod sys;
 
 use std::ffi::{CStr, CString, c_char, c_long, c_void};
@@ -59,6 +60,7 @@ use php_ext::values::{Owner, Value};
 
 pub(crate) use easy::{Address, Easy, EasyId, Hook, Info, MimeBuilder, Posted};
 pub(crate) use multi::{Multi, MultiId, Persistent, Share, ShareRef, Shared};
+use stdio::CFile;
 
 use sys::CURL_ERROR_SIZE as ERROR_SIZE;
 
@@ -119,15 +121,23 @@ struct Link {
     pending: Option<Thrown>,
     /// The lists and MIME trees a `CURL *` let go of where a copy of it
     /// may still point at them, or where the file parts could not be
-    /// closed for want of a request, freed with the link.
+    /// closed for want of a request, and the `CURLOPT_STDERR` files let
+    /// go of during a call, freed with the link.
     kept: Kept,
 }
 
-/// The lists and trees [`Link`] keeps to its own end.
+/// What [`Link`] keeps to its own end.
 #[derive(Default)]
 struct Kept {
     lists: Vec<Slist>,
     trees: Vec<easy::Mime>,
+    /// A file let go of while the library may be inside a write to it, a
+    /// cookie's that runs PHP code which sets the option again.
+    files: Vec<CFile>,
+    /// The stream values let go of at such a time, which the cookie of a
+    /// kept file names until its write ends, given up by
+    /// [`Session::close_kept`].
+    streams: Vec<Owner<Value>>,
 }
 
 /// One owner of the request's [`Link`].
@@ -206,11 +216,42 @@ impl Session {
         kept.trees.extend(trees);
     }
 
+    /// A `CURLOPT_STDERR` file let go of: closed now between calls, and
+    /// kept to the link's end during one, which may be inside a write to
+    /// it ([`stdio`]).
+    fn let_file_go(&self, file: CFile) {
+        if self.entered() {
+            // SAFETY: an owner's allocation; the field is written alone.
+            unsafe { (*self.0.0.as_ptr()).kept.files.push(file) };
+        } else {
+            drop(file);
+        }
+    }
+
+    /// A `CURLOPT_STDERR` stream's value let go of: given up now between
+    /// calls, and during one kept to the request's end, since a kept
+    /// file's cookie may still be inside a write to the stream.
+    pub(crate) fn let_stream_go(&self, req: &mut Request, value: Owner<Value>) {
+        if self.entered() {
+            // SAFETY: an owner's allocation; the field is written alone.
+            unsafe { (*self.0.0.as_ptr()).kept.streams.push(value) };
+        } else {
+            value.give_up(req);
+        }
+    }
+
     /// What `curl_easy_cleanup` and `curl_mime_free` would have closed of
     /// the kept trees' file parts, closed with the request at its end,
-    /// once no `CURL *` that may read them is left (`post_deactivate`);
-    /// the memory goes with the link.
+    /// once no `CURL *` that may read them is left (`post_deactivate`),
+    /// and the kept stream values given up; the memory goes with the
+    /// link.
     pub(crate) fn close_kept(&self, req: &mut Request) {
+        // SAFETY: an owner's allocation; the values are taken off it
+        // alone, so giving one up reaches no field.
+        let streams = unsafe { std::mem::take(&mut (*self.0.0.as_ptr()).kept.streams) };
+        for value in streams {
+            value.give_up(req);
+        }
         // SAFETY: an owner's allocation; the trees are taken off it alone
         // and put back after, so closing a stream reaches no field.
         let trees = unsafe { std::mem::take(&mut (*self.0.0.as_ptr()).kept.trees) };
@@ -383,55 +424,6 @@ fn holding_all<T: Send + 'static, R>(
     {
         Some(answer) => answer,
         None => holding_all(req, rest, body),
-    }
-}
-
-/// `FILE *` over a duplicate of a stream's fd, what `php_stream_cast` to
-/// `PHP_STREAM_AS_STDIO` makes of a plain file, for `CURLOPT_STDERR`.
-pub(crate) struct CFile(NonNull<libc::FILE>);
-
-// SAFETY: as for `Session`: one request's, held by one `CURL *`.
-unsafe impl Send for CFile {}
-
-impl CFile {
-    /// `fdopen(dup(fd), "a")`, `None` where either fails.
-    pub(crate) fn open(fd: i32) -> Option<CFile> {
-        // SAFETY: `dup` of a descriptor the stream holds open.
-        let own = unsafe { libc::dup(fd) };
-        if own < 0 {
-            return None;
-        }
-        // SAFETY: a descriptor this call owns and a NUL-terminated mode.
-        let file = unsafe { libc::fdopen(own, c"a".as_ptr()) };
-        if let Some(file) = NonNull::new(file) {
-            return Some(CFile(file));
-        }
-        // SAFETY: the descriptor `dup` made, which nothing else holds.
-        unsafe { libc::close(own) };
-        None
-    }
-
-    /// `fflush`.
-    pub(crate) fn flush(&self) {
-        // SAFETY: an open `FILE` this value owns.
-        unsafe { libc::fflush(self.0.as_ptr()) };
-    }
-
-    /// The same file opened again for a copy of the `CURL *`, which
-    /// writes to it and flushes it as its own: what the original wrote
-    /// flushed first, so the two keep their order.
-    fn reopen(&self) -> Option<CFile> {
-        self.flush();
-        // SAFETY: an open `FILE` this value owns.
-        let fd = unsafe { libc::fileno(self.0.as_ptr()) };
-        CFile::open(fd)
-    }
-}
-
-impl Drop for CFile {
-    fn drop(&mut self) {
-        // SAFETY: the `FILE` `open` made, closed once by its one owner.
-        unsafe { libc::fclose(self.0.as_ptr()) };
     }
 }
 

@@ -467,7 +467,10 @@ fn copied(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thro
 }
 
 /// `_php_setup_easy_copy_handlers`: the three channels, the six
-/// callables and the private value, each with one more owner.
+/// callables and the private value, each with one more owner; and the
+/// `CURLOPT_STDERR` stream, which php's copy does not hold though its
+/// `CURL *` writes to the stream's `FILE *`, held, so the copy's file is
+/// never left over a stream the original let go of.
 pub(crate) fn copy_handlers(req: &mut Request, object: PhpObject) -> Result<Curl, Thrown> {
     object.native_mut_or_fatal::<Curl>(req)?;
     let mut copy = Curl {
@@ -487,14 +490,16 @@ pub(crate) fn copy_handlers(req: &mut Request, object: PhpObject) -> Result<Curl
     for (slot, hook) in copy.hooks.iter_mut().zip(hooks) {
         *slot = hook;
     }
-    let (private, postfields) = match object.native::<Curl>(req) {
+    let (private, postfields, stderr) = match object.native::<Curl>(req) {
         Some(from) => (
             from.private.as_deref().copied(),
             from.postfields.as_deref().copied(),
+            from.stderr.as_deref().copied(),
         ),
-        None => (None, None),
+        None => (None, None, None),
     };
     copy.private = private.map(|private| Owner::take(req, private));
+    copy.stderr = stderr.map(|stderr| Owner::take(req, stderr));
     copy.postfields = postfields.map(|postfields| Owner::take(req, postfields));
     Ok(copy)
 }
@@ -568,13 +573,13 @@ pub(crate) fn verify_handlers(req: &mut Request, object: PhpObject, report: bool
                 curl.write.stream.take()
             }
         };
-        if which == 0
-            && let Some(easy) = easy
-        {
-            easy.set_stderr(req, None);
-        }
-        if let Some(value) = released {
-            value.give_up(req);
+        match (released, easy) {
+            (Some(value), Some(easy)) if which == 0 => {
+                easy.set_stderr(req, None);
+                easy.let_stream_go(req, value);
+            }
+            (Some(value), _) => value.give_up(req),
+            (None, _) => {}
         }
     }
 }
@@ -756,14 +761,20 @@ fn reset_handlers(req: &mut Request, object: PhpObject) {
         curl.write.stream.take(),
         curl.header.stream.take(),
         curl.read.stream.take(),
-        curl.stderr.take(),
     ]
     .into_iter()
     .flatten()
     .collect();
+    let stderr = curl.stderr.take();
+    let easy = curl.easy.as_ref().map(Easy::id);
     let hooks: Vec<Handler> = curl.hooks.iter_mut().filter_map(Option::take).collect();
     for value in released {
         value.give_up(req);
+    }
+    match (stderr, easy) {
+        (Some(value), Some(easy)) => easy.let_stream_go(req, value),
+        (Some(value), None) => value.give_up(req),
+        (None, _) => {}
     }
     for handler in hooks {
         handler.give_up(req);

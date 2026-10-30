@@ -1853,7 +1853,7 @@ impl StreamOp<'_> {
     /// `show_err`: whether the kind would answer the cast, asked of it
     /// without flushing, seeking or converting the stream.
     pub(crate) fn can_cast(&mut self, cast: Cast) -> bool {
-        self.cast_as(cast, Ret::Null, false).is_some()
+        cast == Cast::Stdio || self.cast_as(cast, Ret::Null, false).is_some()
     }
 
     /// `_php_stream_cast` (`Z/main/streams/cast.c:194`) to a fd: with a
@@ -1887,10 +1887,17 @@ impl StreamOp<'_> {
                 self.fill_read_buffer(pending);
             }
         }
-        let (filtered, own) = self.with(|s| {
+        let (filtered, own, stdio) = self.with(|s| {
             let filtered = s.has_filters(Chain::Read) || s.has_filters(Chain::Write);
-            (filtered, s.res.map(Stream::of))
+            (filtered, s.res.map(Stream::of), s.is_stdio())
         })?;
+        // `PHP_STREAM_AS_STDIO` with `fopencookie` (`Z/main/streams/cast.c:211`):
+        // only an unfiltered stdio kind is asked; any other stream is the
+        // caller's cookie, as is one whose kind refuses.
+        if cast == Cast::Stdio && (filtered || !stdio) {
+            return None;
+        }
+        let warn = warn && cast != Cast::Stdio;
         if filtered {
             if warn {
                 let text = format!(
@@ -1927,6 +1934,7 @@ impl StreamOp<'_> {
                     Cast::Select => "select()able descriptor",
                     Cast::Socket => "Socket Descriptor",
                     Cast::Internal | Cast::Fd => "File Descriptor",
+                    Cast::Stdio => "STDIO FILE*",
                 };
                 let label = self.with(|s| s.ops.label()).unwrap_or("");
                 let text = format!(
@@ -1938,7 +1946,7 @@ impl StreamOp<'_> {
             return None;
         };
         let held = self.with(|s| s.writepos - s.readpos).unwrap_or(0);
-        if ret == Ret::Given && held > 0 && matches!(cast, Cast::Fd | Cast::Socket) {
+        if ret == Ret::Given && held > 0 && matches!(cast, Cast::Fd | Cast::Socket | Cast::Stdio) {
             let text = format!(
                 "{}(): {held} bytes of buffered data lost during stream conversion!",
                 self.req.frames().active_function_name()
@@ -5144,10 +5152,11 @@ impl Stream {
 
     /// `php_stream_cast` to a fd, `PHP_STREAM_AS_FD_FOR_SELECT`
     /// for [`Cast::Select`], `PHP_STREAM_AS_SOCKETD` for
-    /// [`Cast::Socket`] and `PHP_STREAM_AS_FD` otherwise: the host
-    /// fd the stream's kind reads and writes, or `None` for a
-    /// kind with none, php's `Cannot represent a stream of type %s as a
-    /// %s` warning under `warn`. Short of [`Cast::Select`] the stream
+    /// [`Cast::Socket`], `PHP_STREAM_AS_STDIO` for [`Cast::Stdio`] and
+    /// `PHP_STREAM_AS_FD` otherwise: the host fd the stream's kind reads
+    /// and writes, or `None` for a kind with none, php's `Cannot
+    /// represent a stream of type %s as a %s` warning under `warn` but
+    /// for [`Cast::Stdio`], whose `None` is a cookie's. Short of [`Cast::Select`] the stream
     /// is flushed and sought to its position first, and a [`Cast::Fd`]
     /// that leaves bytes in the read buffer warns that they are lost.
     /// The fd is the stream's, open while the stream is.
