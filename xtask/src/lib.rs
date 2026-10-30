@@ -405,7 +405,11 @@ fn vocab_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Voca
         message,
     } = ask;
     if let Some(file) = message {
-        return vocab::message(root, manifest, &file);
+        // A note, never a refusal (#3629): the reading is recorded as a
+        // measurement, whose exit is not its status.
+        let reading = vocab::message(root, manifest, &file)?;
+        println!("{reading}");
+        return store.record_measurement(std::slice::from_ref(&reading));
     }
     let crates = if staged {
         let all: Vec<String> = manifest.crates.iter().map(|c| c.name.clone()).collect();

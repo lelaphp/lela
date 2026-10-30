@@ -14,6 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use xtask::reading::{Status, Store};
 use xtask::scratch::Tree;
 
 mod common {
@@ -864,55 +865,56 @@ fn a_vocab_refusal_ends_the_hook_before_clippy_runs() {
 
 // ---------------------------------------------------------------- commit-msg
 
-/// commit-msg holds the message to the glossary its staged crate is held
-/// to (#3624), through the real `vocab --message` against the workspace's
-/// `CONTEXT.md`: `fixtures/hooks/commit-msg/avoided.txt` is refused after
-/// pre-commit has passed, naming each word, its line and the word the
-/// glossary says, and the change stays staged; `clean.txt`, which carries
-/// avoided words only in a code span, its subject's path and a trailer, is
-/// committed. A hook that never reads the message, or reads it from where
-/// it ran rather than where git wrote it, commits the first.
+/// commit-msg notes the message against the glossary its staged crate is
+/// held to and refuses nothing (#3624, ruled on #3629), through the real
+/// `vocab --message` against the workspace's `CONTEXT.md`:
+/// `fixtures/hooks/commit-msg/avoided.txt` is committed, each word printed
+/// with its line and the word the glossary says, and the reading under
+/// `message` fails listing them; `clean.txt`, which carries avoided words
+/// only in a code span, its subject's path and a trailer, is committed
+/// and its reading passes. A hook that never reads the message, reads it
+/// from where it ran rather than where git wrote it, records nothing or
+/// refuses a commit fails here.
 #[test]
-fn commit_msg_refuses_an_avoided_word_in_the_message_by_line() {
+fn commit_msg_notes_an_avoided_word_by_line_and_refuses_nothing() {
     let scratch = scratch("commit-msg", &Computed::Rendered);
     fs::write(scratch.dir.join("vocab-message"), "").unwrap();
     let glossary = fs::read(workspace().join("CONTEXT.md")).unwrap();
     fs::write(scratch.root.join("CONTEXT.md"), glossary).unwrap();
-    scratch.git(&["add", "--", "CONTEXT.md"], false);
+    // The store the reading lands in is ignored, as a checkout's is.
+    write(&scratch.root, ".gitignore", "/target/\n");
+    scratch.git(&["add", "--", "CONTEXT.md", ".gitignore"], false);
     scratch.git(&["commit", "-q", "-m", "the glossary"], false);
     let fixture = xtask::package_dir().join("fixtures/hooks/commit-msg");
-    let path = "crates/php_heap/src/lib.rs";
-    write(&scratch.root, path, "pub fn alloc() {}\npub fn free() {}\n");
-    scratch.git(&["add", "--", path], false);
-    let commit = |name: &str| {
+    let store = Store::of_workspace(&scratch.root);
+    let commit = |name: &str, text: &str| {
+        let path = "crates/php_heap/src/lib.rs";
+        write(&scratch.root, path, text);
+        scratch.git(&["add", "--", path], false);
+        let before = scratch.head();
         let file = fixture.join(name);
-        scratch.run(&["commit", "-q", "-F", file.to_str().unwrap()], true)
+        let (code, out) = scratch.run(&["commit", "-q", "-F", file.to_str().unwrap()], true);
+        assert_eq!(code, 0, "{name}: {out}");
+        assert_ne!(scratch.head(), before, "{name} was committed: {out}");
+        let reading = store.read("vocab", "message").unwrap().unwrap();
+        (out, reading)
     };
 
-    let before = scratch.head();
-    let (code, out) = commit("avoided.txt");
-    assert_eq!(code, 1, "{out}");
-    assert_eq!(scratch.head(), before, "the commit was refused: {out}");
+    let (out, reading) = commit("avoided.txt", "pub fn alloc() {}\npub fn free() {}\n");
     for line in [
         ":1: \"helper\" in the commit message; the glossary says \"Command\"",
         ":3: \"helper\" in the commit message; the glossary says \"Command\"",
         ":3: \"output\" in the commit message; the glossary says \"Reading\"",
     ] {
         assert!(out.contains(line), "{line}: {out}");
+        assert!(reading.message.contains(line), "{line}: {reading:#?}");
     }
-    assert!(
-        out.contains("3 avoided words in the commit message"),
-        "{out}"
-    );
-    let staged = scratch.git(&["diff", "--cached", "--name-only"], false);
-    assert!(
-        staged.lines().any(|l| l == path),
-        "the change stays staged: {staged}"
-    );
+    assert!(out.contains("noted and not refused"), "{out}");
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(reading.rule, "vocab.avoid", "{reading:#?}");
 
-    let (code, out) = commit("clean.txt");
-    assert_eq!(code, 0, "{out}");
-    assert_ne!(scratch.head(), before, "the commit was allowed: {out}");
+    let (_, reading) = commit("clean.txt", "pub fn alloc() {}\n");
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
 }
 
 /// A revision a branch adds is written `NEXT` and numbered by the merge

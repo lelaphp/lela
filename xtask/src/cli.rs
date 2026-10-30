@@ -470,8 +470,9 @@ pub(crate) struct Vocab {
     /// was taken over what is staged, naming the reading (#1143).
     #[arg(long)]
     pub staged: bool,
-    /// For commit-msg: the message git is about to commit, held to the
-    /// glossary each staged crate is held to; writes no reading (#3624).
+    /// For commit-msg: the message git is about to commit, noted against
+    /// the glossary each staged crate is held to; one reading, exit 0
+    /// whatever it finds (#3624, #3629).
     #[arg(long, value_name = "FILE", conflicts_with_all = ["crates", "staged"])]
     pub message: Option<PathBuf>,
 }
