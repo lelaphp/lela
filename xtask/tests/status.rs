@@ -952,6 +952,14 @@ fn permits_separates_the_calls_denied_from_the_calls_handed_to_the_next_candidat
     handed_on.session = session.into();
     store.record(std::slice::from_ref(&handed_on)).unwrap();
 
+    // A diff judged at pre-commit is that caller's, never an agent's
+    // denial (#3619).
+    let mut at_pre_commit = Reading::new("permit", "pre-commit/computed.region-body");
+    at_pre_commit.rule = "computed.region-body".into();
+    at_pre_commit.status = Status::Fail;
+    at_pre_commit.session = "pre-commit".into();
+    store.record(std::slice::from_ref(&at_pre_commit)).unwrap();
+
     let mut unjudged = Reading::new("permit", "permit.unjudged-call");
     unjudged.rule = "permit.unjudged-call".into();
     unjudged.status = Status::Fail;
@@ -977,10 +985,13 @@ fn permits_separates_the_calls_denied_from_the_calls_handed_to_the_next_candidat
     assert_eq!(walked_past["denials"], 1, "{walked_past}");
     assert_eq!(walked_past["handed_on"], 0, "{walked_past}");
     row("computed.region-body");
+    let person = row("computed.region-body");
+    assert_eq!(person["denials"], 0, "{person}");
+    assert_eq!(person["at_pre_commit"], 1, "{person}");
 
     let md = status(&root, &["--section", "permits"]).ok();
     assert!(
-        md.contains("| denials | handed on |"),
+        md.contains("| denials | judged | at pre-commit | handed on |"),
         "the two are two columns:\n{md}"
     );
     let line = md

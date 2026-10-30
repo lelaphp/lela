@@ -201,7 +201,7 @@ pub fn render(
             return permits(
                 manifest,
                 &readings,
-                &store.history(permit::INSTRUMENT)?,
+                (&store.history(permit::INSTRUMENT)?, &permit::judged(store)),
                 &store.tallies()?,
                 format,
                 session_id,
@@ -391,7 +391,7 @@ pub fn session(
         let rows: Vec<Row> = permit_rows(
             manifest,
             &store.readings()?.readings,
-            &log.readings,
+            (&log.readings, &BTreeMap::new()),
             Some(id),
         )
         .into_iter()
@@ -989,13 +989,13 @@ fn last_per_scope(log: &Log, instrument: &str) -> Vec<Row> {
 fn permits(
     manifest: &Manifest,
     readings: &[Reading],
-    log: &Log,
+    (log, judged): (&Log, &BTreeMap<String, u64>),
     tallies: &BTreeMap<String, Vec<(reading::Status, String)>>,
     format: Table,
     this: Option<&str>,
     uncut: bool,
 ) -> Result<String> {
-    let rules = permit_rows(manifest, readings, &log.readings, this);
+    let rules = permit_rows(manifest, readings, (&log.readings, judged), this);
     let window = manifest.telemetry.as_ref().map(|t| t.silent_days);
     let instruments = instruments(tallies, window)?;
     Ok(match format {
@@ -1063,11 +1063,13 @@ fn permits(
 /// them with one number: `denials` counts what a rule refused, `handed on`
 /// counts the calls a build passed to the candidate that rebuilds, which
 /// judged them. A walk is not a refusal, so the second never adds to the
-/// first.
+/// first. `judged` is the calls the rule judged, the denominator of its
+/// denials, and `at pre-commit` what a diff judged there was refused,
+/// never an agent's call (#3619).
 fn permit_rows(
     manifest: &Manifest,
     readings: &[Reading],
-    log: &[Reading],
+    (log, judged): (&[Reading], &BTreeMap<String, u64>),
     this: Option<&str>,
 ) -> Vec<Row> {
     let manifests = manifest
@@ -1085,8 +1087,12 @@ fn permit_rows(
     manifests
         .chain(permits)
         .map(|(id, adr)| {
-            let sessions = per_session(log, &id, reading::Status::Fail);
+            let (pre_commit, sessions): (Vec<_>, Vec<_>) =
+                per_session(log, &id, reading::Status::Fail)
+                    .into_iter()
+                    .partition(|(s, _)| s == permit::PRE_COMMIT);
             let denials: usize = sessions.iter().map(|(_, n)| n).sum();
+            let at_pre_commit: usize = pre_commit.iter().map(|(_, n)| n).sum();
             let handed_on: usize = per_session(log, &id, reading::Status::Skip)
                 .iter()
                 .map(|(_, n)| n)
@@ -1104,6 +1110,11 @@ fn permit_rows(
                     ("rule", json!(id)),
                     ("adr", json!(adr)),
                     ("denials", json!(denials)),
+                    (
+                        "judged",
+                        json!(judged.get(&id).copied().unwrap_or_default()),
+                    ),
+                    ("at_pre_commit", json!(at_pre_commit)),
                     ("handed_on", json!(handed_on)),
                     ("this_session", this_session),
                     (
@@ -1701,6 +1712,8 @@ const PERMITS: Columns = &[
     READING,
     AT,
     Fact("denials"),
+    Fact("judged"),
+    Cell("at pre-commit", |r| r.fact("at_pre_commit")),
     Cell("handed on", |r| r.fact("handed_on")),
     FIRED,
     Cell("sessions", |r| r.sessions(Some(SESSIONS_SHOWN))),

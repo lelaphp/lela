@@ -23,7 +23,7 @@ use crate::manifest::{Manifest, Rule, Where, scope_matches};
 use crate::rust;
 
 /// The hook event the shipped adapter wires (§6).
-const HOOK_EVENT: &str = "PreToolUse";
+pub(super) const HOOK_EVENT: &str = "PreToolUse";
 
 /// A rule's verdict on one call: a deny stops the call, a note rides on
 /// the allow.
@@ -132,6 +132,9 @@ impl Finding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Judgement {
     pub findings: Vec<Finding>,
+    /// The rules that judged the call, whether or not they found: the
+    /// denominator a rule's denials are read against (#3619).
+    pub judged: Vec<String>,
 }
 
 impl Judgement {
@@ -187,18 +190,34 @@ pub fn judge(manifest: &Manifest, root: &Path, call: &Call) -> Result<Judgement>
     let path = call.path(root);
     let line = call.command().map(Line::read);
     let mut findings = Vec::new();
+    let mut judged = Vec::new();
     if let Some(path) = &path {
         findings.extend(region_body(root, path, call));
     }
-    for rule in &manifest.rules {
+    for rule in manifest
+        .rules
+        .iter()
+        .filter(|r| applies(r, call, path.as_deref()))
+    {
+        judged.push(rule.id.clone());
         let finding = evaluate(manifest, root, rule, call, path.as_deref(), line.as_ref())?;
         findings.extend(finding);
     }
-    Ok(Judgement { findings })
+    Ok(Judgement { findings, judged })
 }
 
-/// One rule over the call, with the file it touches and the shell line it
-/// runs, each read once for every rule.
+/// Whether `rule` judges the call at all: its tool, a file its exempt does
+/// not cover and its scope does (#23), and a predicate that describes a
+/// call.
+fn applies(rule: &Rule, call: &Call, path: Option<&Path>) -> bool {
+    (rule.tool.is_empty() || rule.tool.iter().any(|t| t == call.tool_name))
+        && !path.is_some_and(|path| rule.exempts(path))
+        && (rule.scope.is_empty() || path.is_some_and(|path| rule.covers(path)))
+        && rule.predicate.describes_a_call()
+}
+
+/// One rule that [`applies`] over the call, with the file it touches and
+/// the shell line it runs, each read once for every rule.
 fn evaluate(
     manifest: &Manifest,
     root: &Path,
@@ -207,26 +226,9 @@ fn evaluate(
     path: Option<&Path>,
     line: Option<&Line>,
 ) -> Result<Option<Finding>> {
-    if !rule.tool.is_empty() && !rule.tool.iter().any(|t| t == call.tool_name) {
-        return Ok(None);
-    }
-    // A file the rule's exempt covers is not judged by it, whatever the
-    // predicate; the grammar is the scope's (#23).
-    if path.is_some_and(|path| rule.exempts(path)) {
-        return Ok(None);
-    }
-    // A rule with a scope judges a file in it and nothing else.
-    if !rule.scope.is_empty() {
-        match path {
-            Some(path) if rule.covers(path) => {}
-            _ => return Ok(None),
-        }
-    }
     let p = &rule.predicate;
     let source = path.is_some_and(is_rust_source);
-    let fired = if !p.describes_a_call() {
-        return Ok(None);
-    } else if p.deny_argv.is_some() || p.require_argv.is_some() {
+    let fired = if p.deny_argv.is_some() || p.require_argv.is_some() {
         line.is_some_and(|l| l.commands().iter().any(|a| fires(rule, a)))
     } else if let Some(pattern) = &p.deny_pattern {
         let regex = Regex::new(pattern)

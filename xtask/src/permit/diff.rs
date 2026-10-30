@@ -81,14 +81,14 @@ impl Judged {
         out
     }
 
-    /// Every finding as a reading, as the hook records one call's.
+    /// Every finding as a reading, under pre-commit's own caller.
     pub fn record(&self, root: &Path) -> Result<()> {
         for (path, judgement) in &self.files {
             record(
                 root,
                 &Call::write_of(path, None),
                 judgement,
-                Adapter::CommandHook,
+                Adapter::PreCommit,
             )?;
         }
         Ok(())
