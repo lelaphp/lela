@@ -49,7 +49,8 @@
 //! whose `build.rs` reads it, and neither does the rest of the manifest,
 //! whose members and dependencies reach a key through the crates' own.
 //! Last, it covers the files beyond its directory its tests read
-//! ([`READ_BY_TESTS`], one list, #3646).
+//! ([`READ_BY_TESTS`], one list, #3646), and those the `build.rs` of each
+//! crate of its closure reads ([`READ_BY_BUILDS`], #3654).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -459,40 +460,59 @@ pub(crate) const DEPLOYMENT_TARGET: &str = "MACOSX_DEPLOYMENT_TARGET";
 /// plugin's hooks and four crates' files. Left out: the Markdown regions
 /// they hold, which pre-commit renders and `computed check` holds, and
 /// `Cargo.lock`, whose pins reach a crate through `sources::lock_moved`.
-pub(crate) const READ_BY_TESTS: [(&str, &[&str]); 1] = [(
-    crate::layout::HARNESS,
-    &[
-        "seams.toml",
-        "oracle.toml",
-        "docs/divergence.toml",
-        "CONTEXT.md",
-        "data",
-        "scripts",
-        "harness-plugins",
-        ".github",
-        ".gitattributes",
-        ".gitignore",
-        "ext/clippy.toml",
-        "crates/php_bundle/Cargo.toml",
-        "crates/php_compile/tests/support/skip.rs",
-        "crates/php_process",
-        "sapi/cli/Cargo.toml",
-    ],
-)];
+pub(crate) const READ_BY_TESTS: [(&str, &[&str]); 2] = [
+    (
+        crate::layout::HARNESS,
+        &[
+            "seams.toml",
+            "oracle.toml",
+            "docs/divergence.toml",
+            "CONTEXT.md",
+            "data",
+            "scripts",
+            "harness-plugins",
+            ".github",
+            ".gitattributes",
+            ".gitignore",
+            "ext/clippy.toml",
+            "crates/php_bundle/Cargo.toml",
+            "crates/php_compile/tests/support/skip.rs",
+            "crates/php_process",
+            "sapi/cli/Cargo.toml",
+        ],
+    ),
+    // The crash test reads the zend-test variant's binary from the pin.
+    ("ext/zend_test", &["oracle.toml"]),
+];
 
-/// The files of [`READ_BY_TESTS`] the tests of the crate at `dir` read.
-fn read_by(dir: &Path) -> impl Iterator<Item = &'static str> {
+/// The files beyond its own directory a crate's `build.rs` reads, by the
+/// crate's: what the crate is compiled from, so each is under the key of
+/// every crate built from it as the crate's own files are (ADR-0011), and
+/// a change to one touches the crate as [`READ_BY_TESTS`]' do (#3654).
+/// `php_unit`'s and `php_engine`'s generate the opcode enum and the
+/// dispatch from `ops.toml`, `php_ssa`'s php's table of natives from
+/// `data/func-infos.toml`; `php_engine`'s also digests four crates'
+/// sources, which its closure holds.
+pub(crate) const READ_BY_BUILDS: [(&str, &[&str]); 3] = [
+    ("crates/php_unit", &["ops.toml"]),
+    ("crates/php_engine", &["ops.toml"]),
+    ("crates/php_ssa", &["data/func-infos.toml"]),
+];
+
+/// The files `list`, [`READ_BY_TESTS`] or [`READ_BY_BUILDS`], names for
+/// the crate at `dir`.
+fn read_by(list: &'static [(&str, &[&str])], dir: &Path) -> impl Iterator<Item = &'static str> {
     let dir = normalize(dir);
-    let of = READ_BY_TESTS
-        .iter()
-        .filter(move |(of, _)| Path::new(of) == dir);
+    let of = list.iter().filter(move |(of, _)| Path::new(of) == dir);
     of.flat_map(|(_, files)| files.iter().copied())
 }
 
-/// Whether the tests of the crate at `root`'s `dir` read `path` beyond
-/// its directory ([`READ_BY_TESTS`]), so a change to it touches the crate.
+/// Whether the tests or the `build.rs` of the crate at `root`'s `dir`
+/// read `path` beyond its directory ([`READ_BY_TESTS`],
+/// [`READ_BY_BUILDS`]), so a change to it touches the crate.
 pub(crate) fn read_by_tests(root: &Path, dir: &Path, path: &str) -> bool {
-    crate_dir(root, dir) && read_by(dir).any(|f| Path::new(path).starts_with(f))
+    let mut read = read_by(&READ_BY_TESTS, dir).chain(read_by(&READ_BY_BUILDS, dir));
+    crate_dir(root, dir) && read.any(|f| Path::new(path).starts_with(f))
 }
 
 /// The file of [`BUILT_UNDER`] at `path`, relative to the root, if it is
@@ -578,12 +598,17 @@ fn crate_dir(root: &Path, path: &Path) -> bool {
 
 /// The paths the key of `path` is taken over: the path alone, or a
 /// workspace crate's directory, its closure's, the toolchain file and the
-/// files its tests read ([`READ_BY_TESTS`]), the graph read only for a
-/// directory with a manifest, the one kind of path it can widen.
+/// files its tests read ([`READ_BY_TESTS`]) and its closure's `build.rs`
+/// files ([`READ_BY_BUILDS`]), the graph read only for a directory with
+/// a manifest, the one kind of path it can widen.
 fn closure(root: &Path, path: &Path) -> Result<Vec<PathBuf>> {
     if crate_dir(root, path) {
         let mut paths = Graph::of(root)?.paths(path);
-        paths.extend(toolchain().chain(read_by(path)).map(PathBuf::from));
+        let built: Vec<&str> = (paths.iter())
+            .flat_map(|dir| read_by(&READ_BY_BUILDS, dir))
+            .collect();
+        let read = toolchain().chain(read_by(&READ_BY_TESTS, path));
+        paths.extend(read.chain(built).map(PathBuf::from));
         Ok(paths)
     } else {
         Ok(vec![path.to_path_buf()])

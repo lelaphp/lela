@@ -57,6 +57,7 @@ mod inventory;
 pub(crate) mod lock;
 mod mirrors;
 mod ops;
+mod raises;
 pub(crate) mod row;
 mod surfaces;
 mod target;
@@ -671,7 +672,9 @@ fn kernel_lines(crates: &Crates, seam: &Seam) -> Result<BTreeSet<String>> {
 /// each held to a row of design §4.10's list of surfaces, and its surface
 /// to its lock (#2251); a crate's links to a native library, each held to
 /// the keg the pinned php loads that library from (#3458); and a host's
-/// link, held to the macOS the pinned php is linked for (#3356).
+/// link, held to the macOS the pinned php is linked for (#3356); and its
+/// raises, each naming its class by a handle and php's typed ones at php's
+/// sites alone (#3656).
 struct Holds {
     surfaces: Surfaces,
     bindings: Bindings,
@@ -701,6 +704,7 @@ impl Holds {
         }
         held.absorb(self.bindings.hold(krate));
         held.absorb(self.target.hold(&krate.name));
+        held.absorb(raises::hold(crates.root(), krate)?);
         Ok(held)
     }
 }
