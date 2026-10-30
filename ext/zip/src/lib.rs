@@ -7,11 +7,13 @@
 //! ([`holder`]), libzip's codes and sentences ([`error`]), its strings
 //! ([`strings`]) and DOS times ([`dostime`]); the central directory
 //! found and read as libzip's `zip_open` reads it ([`cdir`]), every entry
-//! read as its stream is read through libzip's layers over pure-Rust codecs and ciphers
-//! ([`read`]), and written through them ([`codec`]), deflate alone
-//! through the platform's zlib at libzip's memLevel ([`ffi`], the
-//! crate's one binding and its one home of `unsafe`; #1657). The phpt
-//! subset is `php-src/ext/zip/tests`, through `xtask phpt --subset`.
+//! read as its stream is read through libzip's layers ([`read`]), and
+//! written through them ([`codec`]), over pure-Rust ciphers and bzip2,
+//! and over the platform's libraries libzip links for deflate, LZMA, XZ
+//! and ZSTD ([`ffi`], the crate's one home of `unsafe`; #1657, #3529),
+//! driven as `zip_algorithm_xz.c` ([`xz`]) and `zip_algorithm_zstd.c`
+//! ([`zstd`]) drive them. The phpt subset is `php-src/ext/zip/tests`,
+//! through `xtask phpt --subset`.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -42,6 +44,8 @@ mod stream;
 mod strings;
 mod throwables;
 mod write;
+mod xz;
+mod zstd;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::attr::php_class;

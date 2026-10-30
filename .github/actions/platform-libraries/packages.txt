@@ -19,6 +19,8 @@ libssl-dev            # ext/openssl: openssl-sys, OpenSSL 3
 libsqlite3-dev        # ext/pdo_sqlite, ext/sqlite3: libsqlite3-sys, >= 3.34.1
 libpcre2-dev          # ext/pcre, ext/fileinfo: pcre2-sys, pkg-config libpcre2-8
 zlib1g-dev            # ext/zlib, ext/mysqlnd, ext/zip: libz-sys
+liblzma-dev           # ext/zip: pkg-config liblzma, >= 5.2
+libzstd-dev           # ext/zip: pkg-config libzstd, >= 1.4
 libgmp-dev            # ext/gmp: pkg-config gmp, >= 6.0
 libsodium-dev         # ext/sodium: pkg-config libsodium, >= 1.0.18
 libtidy-dev           # ext/tidy: pkg-config tidy, >= 5.8
