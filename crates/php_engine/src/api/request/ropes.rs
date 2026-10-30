@@ -66,6 +66,69 @@ impl Request {
     /// hQ hQ hQ
     /// ap S bp
     /// ```
+    ///
+    /// Nothing of an open rope is on the request's heap, as nothing of
+    /// php's is (`Z/Zend/zend_vm_def.h:3410-3417`): a piece's
+    /// `__toString` reads the heap as it stood before the rope, its usage
+    /// and its peak, interpreted, under `jit-tracing`, and under
+    /// `jit-inline`, whose compile on the request enters the loop's trace,
+    /// rope and all, from the second pass on:
+    ///
+    /// ```php
+    /// class P { public $m = 0; function __toString(): string { $u = memory_get_usage() - $this->m; $k = memory_get_peak_usage() - $this->m; echo $u, " ", $k, "\n"; return 'p'; } }
+    /// $a = str_repeat('a', 100); $p = new P; $s = '';
+    /// for ($i = 0; $i < 3; $i++) { unset($s); $p->m = memory_get_usage(); memory_reset_peak_usage(); $s = "x$a y$p z$a"; echo strlen($s), " ", memory_get_usage() - $p->m, "\n"; }
+    /// ```
+    /// ```expect
+    /// 0 0
+    /// 206 288
+    /// 0 0
+    /// 206 256
+    /// 0 0
+    /// 206 256
+    /// ```
+    /// ```php
+    /// class P { public $m = 0; function __toString(): string { $u = memory_get_usage() - $this->m; $k = memory_get_peak_usage() - $this->m; echo $u, " ", $k, "\n"; return 'p'; } }
+    /// $a = str_repeat('a', 100); $p = new P; $s = '';
+    /// for ($i = 0; $i < 3; $i++) { unset($s); $p->m = memory_get_usage(); memory_reset_peak_usage(); $s = "x$a y$p z$a"; echo strlen($s), " ", memory_get_usage() - $p->m, "\n"; }
+    /// ```
+    /// ```expect regime=jit-tracing process
+    /// 0 0
+    /// 206 288
+    /// 0 0
+    /// 206 256
+    /// 0 0
+    /// 206 256
+    /// ```
+    /// ```php
+    /// class P { public $m = 0; function __toString(): string { $u = memory_get_usage() - $this->m; $k = memory_get_peak_usage() - $this->m; echo $u, " ", $k, "\n"; return 'p'; } }
+    /// $a = str_repeat('a', 100); $p = new P; $s = '';
+    /// for ($i = 0; $i < 3; $i++) { unset($s); $p->m = memory_get_usage(); memory_reset_peak_usage(); $s = "x$a y$p z$a"; echo strlen($s), " ", memory_get_usage() - $p->m, "\n"; }
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 0 0
+    /// 206 288
+    /// 0 0
+    /// 206 256
+    /// 0 0
+    /// 206 256
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:2
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) $main() %s:4
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    /// ---- TRACE 2 start (enter) P::__toString() %s:2
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    ///
+    ///      TRACE 1 exit 2 $main() %s:%d
+    /// ---- TRACE 3 start (side trace 1/2) $main() %s:%d
+    /// ---- TRACE 3 stop (return)
+    /// ---- TRACE 3 compiled
+    /// ```
     pub(crate) fn rope_open(&mut self) -> RopeAt {
         let at = self.ropes.free.pop().unwrap_or_else(|| {
             let at = RopeAt(u32::try_from(self.ropes.held.len()).unwrap_or(u32::MAX));
