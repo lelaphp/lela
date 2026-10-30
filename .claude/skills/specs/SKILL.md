@@ -19,7 +19,7 @@ The coordinator keeps the builder **slots** full and merges what they finish. A 
 
 The coordinator owns three phases, recorded in the existing checkpoint:
 
-- **Building:** dispatch independent specs within the shared capacity. Require /build's preflight in each actual allocated checkout before implementation. Runtime completion delivers the builder's exact final handoff; the ready record, not an acknowledgment, establishes merge readiness.
+- **Building:** dispatch independent specs within the shared capacity. Require /build's preflight in each actual allocated checkout before implementation. Runtime completion delivers the builder's exact final handoff; the ready record, not an acknowledgment, establishes merge readiness. `ticket ready` is the builder's hold: it refuses while `done` in the builder's worktree is unmet, and `SubagentStop` warns with the same list.
 - **Integrating:** select a bounded batch from branches already ready and integrate it serially. A single ready branch can be a batch; running builders need not finish first. Where ready branches share a dependency, integrate the shared engine change first where practical, then the extension changes, before refreshing the combined tree.
 - **Publishing:** save the comparison base and candidate head, freeze that source, run §6 and push as soon as its comparisons and `done --base origin/main` pass. Broader production qualification continues separately. Finish publication before starting another integration batch.
 
@@ -60,7 +60,7 @@ The cut is done when you can name the group, its track, its test count and the c
 The body is the user-level `to-spec` skill's template (Problem Statement, Solution, User Stories, Implementation Decisions, Testing Decisions, Out of Scope, Further Notes), synthesised from the cut, followed by this repository's `## Acceptance criteria` boxes, which `xtask ticket read` holds, and `## Blocked by`. #751 is the model.
 
 - The Problem Statement carries the measured counts and the commit. Out of Scope names the neighbouring spec. Further Notes names the branch the spec is laid on, when it isn't `main`.
-- The boxes cover every cause of the group, each met and witnessed or named and filed; the before and after counts in the closing comment; and `cargo xtask done` listing nothing unmet for the crates touched. Regressions are the merge check's, so no box asks the builder for them.
+- The boxes cover every cause of the group, each met and witnessed or named and filed; the before and after counts in the closing comment; and `cargo xtask ticket ready <n>` accepted. Regressions are the merge check's, so no box asks the builder for them.
 - File it with the labels `ready-for-agent` and its track's `track:parity-<name>`, and no parent: a chart takes no sub-issues (#619), and the label is what groups the track. A spec that absorbs a track's tickets names them, and each gets a comment linking the spec.
 - Anything a person must rule on first (a manifest row, a ceiling, a porting key, a design line) is its own `for-a-person` ticket, wired with `gh issue edit <spec> --add-blocked-by <n>`. A blocked spec waits, and the slot takes the next cut.
 

@@ -26,7 +26,7 @@ The face: add a `php_ext` api item only where the face can't serve, general and 
 
 Standard: modern Rust and decisions that hold as the engine grows. State is a type, never an encoding: an enum decoded once at a boundary and matched exhaustively, not sentinel values packed into a field. One representation per idea, one place per rule. Typed faces, not stringly or `op(Kind)` ones. php's algorithm where the behaviour is observable, and php's shape where it keeps the executor and the compiled tier on one frame layout (ADR-0006).
 
-Leave pushing and merging to the coordinator. Finish with `cargo xtask ticket ready <n>` as /build prescribes; the merge into main closes the ticket. A blocked contribution has wired blockers and no ready record. A `permit` denial is a `for-a-person` ticket, filed, and the work it stops waits on it.
+Leave pushing and merging to the coordinator. Finish with `cargo xtask ticket ready <n>` as /build prescribes: it is your hold, refusing while `done` in this worktree is unmet, and `SubagentStop` warns with the same list. The merge into main closes the ticket. A blocked contribution has wired blockers and no ready record. A `permit` denial is a `for-a-person` ticket, filed, and the work it stops waits on it.
 
 Spec: <anything the ticket doesn't say: its track, the neighbouring slots and what they own, the counts measured at the cut>. What you file carries the spec's `track:parity-<name>` label, as the build skill carries a ticket's label.
 ```
