@@ -32,6 +32,7 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
     let merging = operating("fixtures-operating");
     let owned_by = owned("fixtures-owned");
     let quiet = checkout("fixtures-quiet", None);
+    let (_queued, merge) = staging("fixtures-staging");
     for rule in judged {
         let dir = fixtures().join("rules").join(&rule.id);
         let kind = Kind::of(rule);
@@ -42,6 +43,7 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
             Where::Operating => merging.path(),
             Where::Owned => owned_by.path(),
             Where::Main | Where::Checkout => quiet.path(),
+            Where::Staging => merge.as_path(),
         };
         // Every control of the rule's directory: each `deny*.json` (or
         // `note*.json`) must fire, each `allow*.json` must not (#625).
@@ -393,6 +395,7 @@ fn every_bash_rule_holds_to_each_of_its_fixtures() {
     let main = checkout("bash-fixtures-main", None);
     let merging = operating("bash-fixtures-operating");
     let owned_by = owned("bash-fixtures-owned");
+    let (_queued, merge) = staging("bash-fixtures-staging");
     let rules: Vec<&Rule> = manifest
         .rules
         .iter()
@@ -426,6 +429,7 @@ fn every_bash_rule_holds_to_each_of_its_fixtures() {
                 Where::Operating => merging.path(),
                 Where::Owned => owned_by.path(),
                 Where::Main | Where::Checkout => main.path(),
+                Where::Staging => merge.as_path(),
             };
             let judged = judge(&manifest, root, &call(&dir.join(name))).unwrap();
             let fired = judged

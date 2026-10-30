@@ -567,7 +567,7 @@ pub struct Rule {
 /// `where`: the checkouts a rule judges a call in. A builder works in a
 /// worktree whose branch records its ticket (`branch.<b>.ticket`, which
 /// `xtask worktree add --ticket` writes and `xtask track` reads), and the
-/// merge check runs in main's checkout, which records none; a rule on
+/// merge check runs in the merge worktree, which records none; a rule on
 /// what a builder may run is one on the first alone (#1145, #1149).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -586,9 +586,11 @@ pub enum Where {
     /// owner record ([`crate::owner`], #3618 M1, #3621).
     Owned,
     /// The repository's main checkout, the one whose `.git` is a
-    /// directory, and never a linked worktree: where merges into `main`
-    /// are made (#2751).
+    /// directory, and never a linked worktree: what moves `main` (#2751).
     Main,
+    /// The merge worktree, the checkout on `staging`: where the merge
+    /// queue's merges are made (#3618 M2, #3622).
+    Staging,
     /// A checkout of the repository, the main one or a linked worktree,
     /// as `git worktree list` names them, and never a directory outside
     /// them, such as a scratch repository: read where each command of a

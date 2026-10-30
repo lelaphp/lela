@@ -237,3 +237,86 @@ fn a_merge_that_commits_itself_is_refused_in_main_alone() {
     );
     assert!(!refused(main.path(), &apart));
 }
+
+/// The merge queue's rows (#3618 M2, #3622): `git.main-ff-only` as it
+/// reaches the manifest by `steer`, and `git.merge-commits-itself` moved
+/// to `where = "staging"` as proposed on #3622, the changed row a
+/// person's. Under both, main's checkout refuses every merge but a
+/// fast-forward or the end of one, and the merge worktree refuses a merge
+/// that commits itself and lets one through that leaves its commit to
+/// `git commit`. Each fixture of `git.main-ff-only` holds in main, and
+/// each of `git.merge-commits-itself` in the merge worktree but
+/// `deny-after-cd.json`, whose `cd` is into main's checkout, where the
+/// merge is `git.main-ff-only`'s.
+#[test]
+fn a_merge_is_refused_in_main_but_a_fast_forward_and_in_the_merge_worktree_under_the_proposed_row()
+{
+    let mut proposed = Manifest::load(workspace()).unwrap();
+    let itself = proposed
+        .rules
+        .iter_mut()
+        .find(|r| r.id == "git.merge-commits-itself")
+        .unwrap();
+    itself.within = Where::Staging;
+    let mut ff_only = itself.clone();
+    if proposed.rule("git.main-ff-only").is_none() {
+        ff_only.id = "git.main-ff-only".to_owned();
+        ff_only.within = Where::Main;
+        ff_only.predicate.unless_pattern =
+            Some(r"\s--(ff-only|abort|quit|help)\b|\s-h\b".to_owned());
+        proposed.rules.push(ff_only);
+    }
+    let (main, merge) = staging("merge-queue");
+    let fired = |root: &Path, call: &Call, rule: &str| {
+        judge(&proposed, root, call)
+            .unwrap()
+            .findings
+            .iter()
+            .any(|f| f.rule == rule && f.kind == Kind::Deny)
+    };
+    let in_main = |line: &str, rule: &str| fired(main.path(), &bash(line), rule);
+    let in_merge = |line: &str, rule: &str| fired(&merge, &bash(line), rule);
+    assert!(in_main(
+        "git merge --no-ff --no-commit t1234",
+        "git.main-ff-only"
+    ));
+    assert!(!in_main("git merge --ff-only staging", "git.main-ff-only"));
+    assert!(!in_main(
+        "git merge --ff-only staging",
+        "git.merge-commits-itself"
+    ));
+    assert!(!in_main(
+        "git merge --no-ff t1234",
+        "git.merge-commits-itself"
+    ));
+    assert!(in_merge(
+        "git merge --no-ff t1234",
+        "git.merge-commits-itself"
+    ));
+    assert!(!in_merge(
+        "git merge --no-ff --no-commit t1234",
+        "git.merge-commits-itself"
+    ));
+    assert!(!in_merge(
+        "git merge --no-ff --no-commit t1234",
+        "git.main-ff-only"
+    ));
+
+    for (rule, root) in [
+        ("git.main-ff-only", main.path()),
+        ("git.merge-commits-itself", merge.as_path()),
+    ] {
+        let dir = fixtures().join("rules").join(rule);
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "deny-after-cd.json" || rule == "git.main-ff-only")
+            .collect();
+        names.sort();
+        assert!(names.len() >= 5, "{rule}: {names:?}");
+        for name in &names {
+            let denied = fired(root, &call(&dir.join(name)), rule);
+            assert_eq!(denied, name.starts_with("deny"), "{rule}: {name}");
+        }
+    }
+}

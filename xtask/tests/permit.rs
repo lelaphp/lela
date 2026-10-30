@@ -2046,6 +2046,15 @@ fn operating(name: &str) -> Tree {
     dir
 }
 
+/// A scratch checkout and its merge worktree, `_merge` on `staging`
+/// inside it, as `xtask worktree queue` lays one beside a clone (#3622).
+fn staging(name: &str) -> (Tree, PathBuf) {
+    let main = checkout(name, None);
+    Repo::at(&main).git(&["worktree", "add", "-q", "-b", "staging", "_merge"]);
+    let merge = main.path().join("_merge");
+    (main, merge)
+}
+
 /// #2991 and #3413 replayed (#3621): each call refused then, verbatim, a
 /// session's commit and its `git merge --abort` of the merge standing in
 /// the checkout it owned, a builder's worktree and main's checkout, now
