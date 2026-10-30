@@ -20,6 +20,13 @@ if ! cargo xtask worktree whose >/dev/null; then
     echo "pre-merge-commit: the merge stands uncommitted; its owner, or a person, ends it" >&2
     exit 1
 fi
+# An agent's merge that would commit a harness file no steer reading
+# covers, content neither side committed, is refused by `permit --diff`,
+# as pre-commit refuses the commit (#3644); a person's is not asked.
+if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && ! cargo xtask permit --diff >&2; then
+    echo "pre-merge-commit: the merge stands uncommitted; a person commits a harness file, or \`cargo xtask steer\` writes the merge's union" >&2
+    exit 1
+fi
 # A conflict marker left in, which the merge would add, refuses it, as
 # pre-commit's check does, naming file and line (#2996).
 if markers=$(git diff --cached --check | grep -E ': leftover conflict marker$'); then

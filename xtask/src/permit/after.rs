@@ -38,7 +38,11 @@
 //!   ([`super::kept`]). Until a person commits it or restores it to
 //!   `HEAD`, it is one of `done`'s unmet conditions, which is where a
 //!   binary that hides the path is held; a person's lost edit would be
-//!   held by nothing.
+//!   held by nothing. That holds in main's checkout and in one no session
+//!   owns, where persons edit. In a linked worktree the call's session
+//!   owns ([`crate::owner`]), the change is the session's whichever of its
+//!   calls made it, a background one among them: where it differs from
+//!   `HEAD` it is put back and the call denied, saying so (#3644).
 //! - A file history carries (#3220): `HEAD` moved during the call, its
 //!   blob for the file moved with it, and the file stands at the blob
 //!   `HEAD` holds now, as another session's merge or commit in the
@@ -106,6 +110,7 @@ use super::rules::{at, runs_in};
 use super::writes::{self, Place};
 use crate::key::Snapshot;
 use crate::manifest::OneOrMany;
+use crate::owner::{self, SessionId};
 use crate::reading::{self, Number, Reading, Status, Store, joined};
 use crate::{git, manifest, steer};
 
@@ -308,6 +313,7 @@ fn sort_moved(record: &Record, call: &Call, held: &Path, unread: Option<&str>) -
         // A line that moves `HEAD` itself makes the history it would be
         // credited with, so it is credited with none.
         let credited = !moves_head(&line);
+        let owned = sessions_own(&guarded.checkout, &call.session_id);
         for (path, was) in &guarded.blobs {
             let file = guarded.checkout.join(path);
             if on_disk(&file) == *was {
@@ -324,10 +330,18 @@ fn sort_moved(record: &Record, call: &Call, held: &Path, unread: Option<&str>) -
             let landed = landed_at(guarded, tip.as_deref(), path, now.as_deref());
             let place = OnDisk::new(&cwd, &guarded.checkout, path);
             let writes = landed.is_none() && writes::can_write(&line, &place);
-            let approved = writes
+            // In a linked worktree the session owns, a change its line
+            // cannot be read to write is the session's all the same, where
+            // it now differs from `HEAD` (#3644 rulings 1 and 4).
+            let sessions = landed.is_none()
+                && !writes
+                && owned
+                && !matches!(kept::at_head(&guarded.checkout, path), Ok(true));
+            let answers = writes || sessions;
+            let approved = answers
                 .then(|| approved(&guarded.checkout, path, was.as_deref(), call))
                 .flatten();
-            let staged = writes
+            let staged = answers
                 .then(|| operation::staged(&guarded.checkout, path))
                 .flatten();
             let (verdict, said) = if let Some(why) = unread {
@@ -354,8 +368,27 @@ fn sort_moved(record: &Record, call: &Call, held: &Path, unread: Option<&str>) -
                 );
                 let said = kept_words(&guarded.checkout, path, &why, was.as_deref());
                 (Verdict::Kept, format!("{path}: {said}"))
-            } else if writes {
-                let what = restore(&guarded.checkout, path, was.as_deref(), now.as_deref());
+            } else if writes || sessions {
+                let by = if writes {
+                    "the call"
+                } else {
+                    "a call of this session"
+                };
+                let what = restore(&guarded.checkout, path, was.as_deref(), now.as_deref(), by);
+                let what = if writes {
+                    what
+                } else {
+                    format!(
+                        "changed while this call, {} `{}`, ran, whose line cannot be read to \
+                         write it, and it differs from HEAD; {} is a linked worktree this \
+                         session owns, so the change is the session's whichever of its calls \
+                         made it, and the write may have come from a background call (#3644); \
+                         {what}",
+                        call.tool_use_id,
+                        call.subject(held),
+                        guarded.checkout.display()
+                    )
+                };
                 (Verdict::PutBack, format!("{} {path}: {what}", guarded.text))
             } else {
                 let why = "its line cannot write it, so it is kept as it stands: a person's \
@@ -532,9 +565,9 @@ fn record_moved(root: &Path, call: &Call, moved: &[Moved]) -> Result<()> {
     Ok(())
 }
 
-/// Put `path` back as it was before the call, keeping what the call left
+/// Put `path` back as it was before the call, keeping what `by` left
 /// first; what was done, in words for the denial.
-fn restore(checkout: &Path, path: &str, was: Option<&str>, now: Option<&str>) -> String {
+fn restore(checkout: &Path, path: &str, was: Option<&str>, now: Option<&str>, by: &str) -> String {
     let target = checkout.join(path);
     let kept = match now {
         Some(_) => match hash_objects(checkout, &[path]) {
@@ -565,11 +598,25 @@ fn restore(checkout: &Path, path: &str, was: Option<&str>, now: Option<&str>) ->
     let done = done.unwrap_or_else(|err| format!("it could not be put back: {err:#}"));
     match kept {
         Some(id) => format!(
-            "the call wrote it, and it is {done}; what the call wrote is blob {id} \
+            "{by} wrote it, and it is {done}; what {by} wrote is blob {id} \
              (`git cat-file -p {id}`)"
         ),
-        None => format!("the call removed it, and it is {done}"),
+        None => format!("{by} removed it, and it is {done}"),
     }
+}
+
+/// Whether `checkout` is a linked worktree whose owner record names
+/// `session` (#3621): where a change to a guarded file is the session's
+/// whichever of its calls was running, and is put back (#3644 rulings 1
+/// and 4). Main's checkout, where a person edits, and a checkout no
+/// record names, or another's, are not.
+fn sessions_own(checkout: &Path, session: &str) -> bool {
+    let linked = git::own_dir(checkout)
+        .zip(git::common_dir(checkout))
+        .is_some_and(|(own, common)| own != common);
+    linked
+        && SessionId::new(session)
+            .is_some_and(|session| owner::of(checkout).ok().flatten() == Some(session))
 }
 
 /// Whether the file stands as steer wrote it in this call: the call runs

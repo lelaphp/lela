@@ -233,11 +233,28 @@ impl Call {
     /// ancestor with a manifest that also has a `.git`: a `Bash` call whose
     /// shell stands in a fixture directory is the checkout's, whose
     /// manifest carries the shell rules, since a fixture's manifest
-    /// describes the fixture's sources and not what a shell may run.
+    /// describes the fixture's sources and not what a shell may run. A
+    /// fixture's manifest itself, one in a directory with no `.git`, is
+    /// test data and not that workspace's harness file, so it is placed
+    /// from the directory above (#3644 ruling 2): the guard on a negative
+    /// control is its test, every rule having a fixture that must fail.
     pub(super) fn nested(&self, root: &Path) -> Option<PathBuf> {
         let root = canonical(root);
         match (self.tool_input.file_path.as_deref(), self.cwd.as_deref()) {
-            (Some(file), _) => nearest(&root, &canonical(&root.join(file)), &[manifest::FILE]),
+            (Some(file), _) => {
+                let file = canonical(&root.join(file));
+                let place = match file.parent() {
+                    Some(dir)
+                        if file.file_name() == Some(manifest::FILE.as_ref())
+                            && dir != root
+                            && !dir.join(".git").exists() =>
+                    {
+                        dir.parent().unwrap_or(dir)
+                    }
+                    _ => &file,
+                };
+                nearest(&root, place, &[manifest::FILE])
+            }
             (None, Some(cwd)) => nearest(
                 &root,
                 &canonical(&root.join(cwd)),
