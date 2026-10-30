@@ -59,13 +59,19 @@ pub enum Whence {
 /// and `PHP_STREAM_AS_FD` alone, which `proc_open` asks of a stream it
 /// hands a child and which warns of buffered bytes the child will not
 /// see; and `PHP_STREAM_AS_SOCKETD`, which `socket_import_stream` asks,
-/// which only a socket's kind answers and which warns as `Fd` does.
+/// which only a socket's kind answers and which warns as `Fd` does; and
+/// `PHP_STREAM_AS_STDIO` as php casts it where the C library has
+/// `fopencookie` or `funopen`: an unfiltered plain file's fd, which the
+/// caller `fdopen`s, and `None` for every other stream, which the caller
+/// wraps in a cookie `FILE *` over the stream's own writes. So it never
+/// fails and never warns that it cannot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cast {
     Select,
     Internal,
     Fd,
     Socket,
+    Stdio,
 }
 
 /// One option `php_stream_set_option` sets, with what it is set to: the
