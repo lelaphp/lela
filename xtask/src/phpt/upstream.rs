@@ -51,7 +51,7 @@ pub(crate) fn compare(
     let own = Own::of(oracle, &subset, &subset.scope, true)?;
     let beside = own.pin.as_ref().map(|pin| oracle.beside(pin));
     let oracle = beside.as_ref().unwrap_or(oracle);
-    let jobs = jobs.unwrap_or_else(tally::cores);
+    let jobs = jobs.unwrap_or_else(crate::seat::jobs);
     let locks = across::machine();
     let ours = {
         let copy = copy_of(&source, jobs)?;

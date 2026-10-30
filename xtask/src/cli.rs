@@ -588,8 +588,9 @@ pub(crate) struct Phpt {
     pub against: Option<String>,
     #[command(flatten)]
     pub baseline: PhptBase,
-    /// How many tests run at once: the machine's cores unless named, and
-    /// one test at a time at 1. Tests that share a `--CONFLICTS--` key
+    /// How many tests run at once: the seat's share of the machine unless
+    /// named, its cores divided among `XTASK_SEATS`, and one test at a time
+    /// at 1. Tests that share a `--CONFLICTS--` key
     /// never run at once whatever the number.
     #[arg(long, value_name = "N")]
     pub jobs: Option<std::num::NonZeroUsize>,
