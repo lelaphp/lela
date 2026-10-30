@@ -6,7 +6,7 @@
 //! file is opened on tokio's blocking pool as the request is routed
 //! ([`crate::route::Router::route`]), and each piece is read there as
 //! the client takes the last (`tokio::fs::File`), so a slow client holds
-//! a file descriptor and one piece, and no thread. The response's
+//! an open fd and one piece, and no thread. The response's
 //! minimum data rate bounds it as it bounds a program's.
 
 use std::pin::Pin;

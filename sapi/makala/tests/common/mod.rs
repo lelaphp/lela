@@ -1,5 +1,5 @@
 //! What every test of the binary over a socket shares: a document root of
-//! its own, the server started on a port the system picks, and a response
+//! its own, the server started on a `port` the system picks, and a response
 //! read as a client reads it.
 
 #![allow(
@@ -43,7 +43,7 @@ pub fn manifest_dir() -> PathBuf {
 }
 
 impl Server {
-    /// `makala -n` over `root` with two request threads, on a port of the
+    /// `makala -n` over `root` with two request threads, on a `port` of the
     /// system's.
     pub fn start(root: &Path) -> Server {
         Server::with_args(root, &["--threads", "2"])
@@ -91,7 +91,7 @@ impl Server {
         Server { child, addr, tls }
     }
 
-    /// SIGTERM sent to the server, as a service manager stops it, through
+    /// SIGTERM sent to the server, as `systemd` stops it, through
     /// `kill(1)`, so the test needs no `unsafe` of its own.
     pub fn terminate(&self) {
         let sent = Command::new("kill")

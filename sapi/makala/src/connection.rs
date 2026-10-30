@@ -115,7 +115,7 @@ pub(crate) struct ConnectionSide {
 /// How the drain ended.
 pub(crate) struct Drained {
     /// When the shutdown timeout ends, counted from the SIGTERM: what the
-    /// request threads still run then is left to the process's end.
+    /// request threads still serve then is left to the process's end.
     pub(crate) deadline: std::time::Instant,
     /// Whether every connection ended before the deadline; where one did
     /// not, it was aborted, its socket closed.
@@ -474,7 +474,7 @@ fn failure(peer: SocketAddr, failed: &hyper::Error) {
     crate::log::error(format!("makala: {peer}: {failed}{under}").as_bytes());
 }
 
-/// The first of two futures to end: `a`'s output, or `None` where `b`
+/// The first of two futures to end: what `a` yields, or `None` where `b`
 /// ended first; the other is dropped unfinished.
 async fn first_of<A: Future, B: Future>(a: A, b: B) -> Option<A::Output> {
     let (mut a, mut b) = (pin!(a), pin!(b));

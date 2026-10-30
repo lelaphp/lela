@@ -44,7 +44,7 @@ pub fn usage() -> String {
 /// The server as the operator's line set it.
 #[derive(Debug, Clone)]
 pub struct Options {
-    /// The address the clear listening socket binds, where one does; port
+    /// The address the clear listening socket binds, where one does; `port`
     /// 0 takes one the system picks, which the started line names.
     pub listen: Option<SocketAddr>,
     /// The TLS listener, where one is.
@@ -52,7 +52,7 @@ pub struct Options {
     /// The document root, made absolute: what a request's path is found
     /// under, and never left (`php -S`'s `normalize_vpath`).
     pub document_root: PathBuf,
-    /// How many requests run at once, each on a thread of its own.
+    /// How many requests are served at once, each on a thread of its own.
     pub request_threads: usize,
     /// How many whole requests wait for a free request thread; a request
     /// past them waits on its connection for room.
@@ -81,7 +81,7 @@ pub struct Options {
 /// explicitly (research/production-server.r2.md §1.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tls {
-    /// The address the TLS listening socket binds; port 0 as `listen`'s.
+    /// The address the TLS listening socket binds; `port` 0 as `listen`'s.
     pub listen: SocketAddr,
     /// The certificate a handshake gets that names no host, or a host
     /// with none of its own; with none, such a handshake fails.

@@ -56,11 +56,11 @@ pub const SERVER_SOFTWARE: &str = concat!("makala/", env!("CARGO_PKG_VERSION"));
 /// The host's `main`: the line read into its [`Options`], the TLS
 /// certificates read where it serves TLS, one engine of the bundle's
 /// enabled set started, the listening sockets bound, the
-/// request threads started, and the connection side run on this thread
+/// request threads started, and the connection side driven on this thread
 /// for as long as the process serves, until the drain SIGTERM begins
 /// has ended (#2344). The engine is the last to end, once the request
 /// threads have: where one is still in a request at the drain's
-/// deadline, the process ends around it, the engine's end not run, as a
+/// deadline, the process ends around it, the engine's end never reached, as a
 /// php-fpm child killed at its master's timeout ends.
 pub fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
