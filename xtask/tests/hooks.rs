@@ -852,7 +852,8 @@ fn a_render_a_refused_commit_wrote_is_carried_by_the_next() {
 /// listing names a crate that commit does not carry; and once a person
 /// has written a line outside the region, the commit that adds the crate
 /// leaves the file too, their line with it, since its working copy then
-/// differs from the commit's index by more than the region's body.
+/// differs from the commit's index by more than the region's body, and
+/// names it on a line, since that commit carries the listing unrendered.
 #[test]
 fn a_region_file_that_is_not_the_commit_s_render_is_left() {
     let path = "crates/php_stack/src/lib.rs";
@@ -868,6 +869,7 @@ fn a_region_file_that_is_not_the_commit_s_render_is_left() {
     let (code, out) = scratch.run(&["commit", "-q", "-m", "the heap", "--", other], true);
     assert_eq!(code, 0, "{out}");
     assert!(!out.contains("staged AGENTS.md"), "{out}");
+    assert!(!out.contains("left AGENTS.md"), "{out}");
     assert_eq!(scratch.git(&["show", "HEAD:AGENTS.md"], false), committed);
 
     let written = format!("{rendered}\nA line a person wrote.\n");
@@ -875,6 +877,12 @@ fn a_region_file_that_is_not_the_commit_s_render_is_left() {
     let (code, out) = scratch.run(&["commit", "-q", "-m", "a crate", "--", path], true);
     assert_eq!(code, 0, "{out}");
     assert!(!out.contains("staged AGENTS.md"), "{out}");
+    // The file left is named, with the staged path its region reads (#3645).
+    let left = out.lines().find(|l| l.contains("left AGENTS.md"));
+    assert!(
+        left.is_some_and(|l| l.contains("crates/php_stack") && l.contains("unrendered")),
+        "{out}"
+    );
     assert_eq!(scratch.git(&["show", "HEAD:AGENTS.md"], false), committed);
     assert_eq!(
         fs::read_to_string(scratch.root.join("AGENTS.md")).unwrap(),
