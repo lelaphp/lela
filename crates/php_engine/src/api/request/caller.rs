@@ -865,6 +865,17 @@ impl<'r> Frames<&'r Request> {
         self.0.vm.innermost()?.this()
     }
 
+    /// `EX(func)->internal_function.reserved[]`: the value the native
+    /// trampoline being served was made with
+    /// ([`Symbols::native_trampoline_reserving`]), where it is a `T`;
+    /// none in any other native, or outside a native's body.
+    ///
+    /// [`Symbols::native_trampoline_reserving`]: crate::api::request::Symbols::native_trampoline_reserving
+    #[must_use]
+    pub fn reserved<T: std::any::Any + Copy>(self) -> Option<T> {
+        self.0.active_reserved()
+    }
+
     /// `zend_get_this_object(EG(current_execute_data))`
     /// (`Z/Zend/zend_execute_API.c:1317`): the receiver of the first link
     /// of the chain that has one, walked past the natives that have no
