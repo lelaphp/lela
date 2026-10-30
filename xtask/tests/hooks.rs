@@ -2,8 +2,9 @@
 //! ledger 11), run by git in a scratch repository: a stand-in `cargo` on
 //! `PATH` records each call and answers as the instruments would, and
 //! hands `xtask regions` to this crate's own binary against the scratch
-//! root, so the hook's re-stage loop reads the real reader; a stand-in
-//! `computed` answers with one shape per case. What is read back is what
+//! root, so the hook's re-stage loop reads the real reader, and
+//! `xtask vocab --message` too where a test asks for the real glossary; a
+//! stand-in `computed` answers with one shape per case. What is read back is what
 //! the hook did, the commit it allowed or refused, the files it staged
 //! and the base it handed `done`, since a hook that exits without doing
 //! its job is invisible to a substring over its text.
@@ -39,7 +40,8 @@ const REGIONS: [&str; 6] = [
 /// repository, `bin` holds `cargo` and `computed`, `plugin-bin` holds
 /// `claude` and `npx`, `cargo.log`, `computed.log` and `plugin.log` hold
 /// one line per call, and `refuse` names the one `cargo` call that exits
-/// 1, when a test writes it. `claude_on_path` says whether `plugin-bin`
+/// 1, when a test writes it; `vocab-message`, when a test writes it, hands
+/// commit-msg's `xtask vocab --message` to this crate's own binary. `claude_on_path` says whether `plugin-bin`
 /// is on the hook's `PATH`: off, the hook finds no `claude` at all.
 struct Scratch {
     dir: Tree,
@@ -128,12 +130,14 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
              printf '%s\\n' \"$*\" >> '{log}'\n\
              if [ -f '{refuse}' ] && [ \"$(cat '{refuse}')\" = \"$1 $2\" ]; then exit 1; fi\n\
              if [ \"$1 $2\" = 'xtask regions' ]; then shift 2; exec '{xtask}' --root \"$PWD\" regions \"$@\"; fi\n\
+             if [ \"$1 $2 $3\" = 'xtask vocab --message' ] && [ -f '{vocab}' ]; then shift 2; exec '{xtask}' --root \"$PWD\" vocab \"$@\"; fi\n\
              if [ \"$1 $2\" = 'xtask api-check' ]; then sleep 1; fi\n\
              if [ \"$1 $2\" = 'xtask test' ]; then HOOKS_TESTED='{tested}' '{probe}' --exact as_xtask_test_runs_a_map_test --ignored > /dev/null 2>&1; fi\n\
              printf 'ran %s\\n' \"$*\"\n\
              exit 0\n",
             log = dir.join("cargo.log").display(),
             refuse = dir.join("refuse").display(),
+            vocab = dir.join("vocab-message").display(),
             tested = dir.join("tested-AGENTS.md").display(),
             probe = std::env::current_exe().unwrap().display(),
             xtask = xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")).display(),
@@ -354,6 +358,8 @@ fn as_xtask_test_runs_a_map_test() {
 /// tests read the map the commit carries from the index (#1416): a hook
 /// that renders after `test` hands it the map before the render and fails
 /// here. The commit carries the rendered file and the tree is clean after.
+/// commit-msg runs last, handing `vocab --message` the file git wrote the
+/// message to, as a whole path (#3624).
 #[test]
 fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     let scratch = scratch("rendered", &Computed::Rendered);
@@ -382,6 +388,7 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
         .chain([rendering.as_str()])
         .chain(["xtask clippy --staged", "xtask test --staged"])
         .map(str::to_owned)
+        .chain([message(&scratch)])
         .collect();
     expected[1..6].sort_unstable();
     assert_eq!(calls, expected);
@@ -392,7 +399,8 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     );
     let printed: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("ran ")).collect();
     assert_eq!(printed[1..6], reading, "{out}");
-    let building = ["xtask clippy --staged", "xtask test --staged"];
+    let message = message(&scratch);
+    let building = ["xtask clippy --staged", "xtask test --staged", &message];
     assert_eq!(printed[6..], building, "{out}");
     assert_eq!(
         scratch.calls("computed"),
@@ -415,6 +423,13 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
         Vec::<String>::new(),
         "nothing under harness-plugins/ was staged, so the declarations step did not run"
     );
+}
+
+/// The `cargo` call commit-msg makes: `vocab --message` over the file git
+/// wrote, named whole.
+fn message(scratch: &Scratch) -> String {
+    let file = scratch.root.join(".git/COMMIT_EDITMSG");
+    format!("xtask vocab --message {}", file.display())
 }
 
 /// A commit by pathspec, the shape AGENTS.md asks for, is written from a
@@ -845,6 +860,59 @@ fn a_vocab_refusal_ends_the_hook_before_clippy_runs() {
         ]
     );
     assert_eq!(scratch.calls("computed"), Vec::<String>::new());
+}
+
+// ---------------------------------------------------------------- commit-msg
+
+/// commit-msg holds the message to the glossary its staged crate is held
+/// to (#3624), through the real `vocab --message` against the workspace's
+/// `CONTEXT.md`: `fixtures/hooks/commit-msg/avoided.txt` is refused after
+/// pre-commit has passed, naming each word, its line and the word the
+/// glossary says, and the change stays staged; `clean.txt`, which carries
+/// avoided words only in a code span, its subject's path and a trailer, is
+/// committed. A hook that never reads the message, or reads it from where
+/// it ran rather than where git wrote it, commits the first.
+#[test]
+fn commit_msg_refuses_an_avoided_word_in_the_message_by_line() {
+    let scratch = scratch("commit-msg", &Computed::Rendered);
+    fs::write(scratch.dir.join("vocab-message"), "").unwrap();
+    let glossary = fs::read(workspace().join("CONTEXT.md")).unwrap();
+    fs::write(scratch.root.join("CONTEXT.md"), glossary).unwrap();
+    scratch.git(&["add", "--", "CONTEXT.md"], false);
+    scratch.git(&["commit", "-q", "-m", "the glossary"], false);
+    let fixture = xtask::package_dir().join("fixtures/hooks/commit-msg");
+    let path = "crates/php_heap/src/lib.rs";
+    write(&scratch.root, path, "pub fn alloc() {}\npub fn free() {}\n");
+    scratch.git(&["add", "--", path], false);
+    let commit = |name: &str| {
+        let file = fixture.join(name);
+        scratch.run(&["commit", "-q", "-F", file.to_str().unwrap()], true)
+    };
+
+    let before = scratch.head();
+    let (code, out) = commit("avoided.txt");
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(scratch.head(), before, "the commit was refused: {out}");
+    for line in [
+        ":1: \"helper\" in the commit message; the glossary says \"Command\"",
+        ":3: \"helper\" in the commit message; the glossary says \"Command\"",
+        ":3: \"output\" in the commit message; the glossary says \"Reading\"",
+    ] {
+        assert!(out.contains(line), "{line}: {out}");
+    }
+    assert!(
+        out.contains("3 avoided words in the commit message"),
+        "{out}"
+    );
+    let staged = scratch.git(&["diff", "--cached", "--name-only"], false);
+    assert!(
+        staged.lines().any(|l| l == path),
+        "the change stays staged: {staged}"
+    );
+
+    let (code, out) = commit("clean.txt");
+    assert_eq!(code, 0, "{out}");
+    assert_ne!(scratch.head(), before, "the commit was allowed: {out}");
 }
 
 /// A revision a branch adds is written `NEXT` and numbered by the merge

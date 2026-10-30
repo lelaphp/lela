@@ -358,9 +358,7 @@ fn command_line() -> Result<()> {
             said(new_sapi::run(&root, &manifest, &name, binary.as_deref()))
         }
         Command::Witness(ask) => witness::command(&root, &manifest, &store, ask),
-        Command::Vocab { crates, staged } => {
-            vocab_command(&root, &manifest, &store, crates, staged)
-        }
+        Command::Vocab(ask) => vocab_command(&root, &manifest, &store, ask),
         Command::Ticket { command } => ticket_command(&root, &manifest, &store, command),
         Command::Usage {
             command: UsageCommand::Record { session, turn },
@@ -398,14 +396,17 @@ pub(crate) fn record(store: &Store, readings: &[Reading]) -> Result<()> {
 }
 
 /// `xtask vocab`: the crates named, or with `--staged` every crate less
-/// those whose reading stands for the commit (#1143).
-fn vocab_command(
-    root: &Path,
-    manifest: &Manifest,
-    store: &Store,
-    crates: Vec<String>,
-    staged: bool,
-) -> Result<()> {
+/// those whose reading stands for the commit (#1143), or with `--message`
+/// the commit message alone (#3624).
+fn vocab_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Vocab) -> Result<()> {
+    let cli::Vocab {
+        crates,
+        staged,
+        message,
+    } = ask;
+    if let Some(file) = message {
+        return vocab::message(root, manifest, &file);
+    }
     let crates = if staged {
         let all: Vec<String> = manifest.crates.iter().map(|c| c.name.clone()).collect();
         let standing = Standing::of_every_crate(true, root, manifest, store, vocab::INSTRUMENT)?;

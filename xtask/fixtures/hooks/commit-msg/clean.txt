@@ -1,0 +1,5 @@
+crates/php_heap: free gives a block back to the heap
+
+The heap had no way to take a block back; `free` is that way, `run` in code is no word, and its test holds it.
+
+Ticket: #1

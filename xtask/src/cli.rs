@@ -456,15 +456,24 @@ pub(crate) enum Command {
     Witness(Witness),
     /// The glossary as a sensor: `_Avoid_` words in public item names and
     /// rustdoc prose, never in a lock; one reading per crate.
-    Vocab {
-        /// Only these crates, by manifest name; default every crate that exists.
-        #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]
-        crates: Vec<String>,
-        /// For pre-commit: leave out each crate whose reading passes and
-        /// was taken over what is staged, naming the reading (#1143).
-        #[arg(long)]
-        staged: bool,
-    },
+    Vocab(Vocab),
+}
+
+/// What one `vocab` run is asked for, flattened onto the command as
+/// [`Bench`] is, so the dispatch has one line for the instrument.
+#[derive(Debug, Args)]
+pub(crate) struct Vocab {
+    /// Only these crates, by manifest name; default every crate that exists.
+    #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]
+    pub crates: Vec<String>,
+    /// For pre-commit: leave out each crate whose reading passes and
+    /// was taken over what is staged, naming the reading (#1143).
+    #[arg(long)]
+    pub staged: bool,
+    /// For commit-msg: the message git is about to commit, held to the
+    /// glossary each staged crate is held to; writes no reading (#3624).
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["crates", "staged"])]
+    pub message: Option<PathBuf>,
 }
 
 /// What one `bench` run is asked for, flattened onto the command so the

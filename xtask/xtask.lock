@@ -419,6 +419,7 @@ usage::reading
 usage::record
 usage::scope_of
 vocab::hold
+vocab::message
 vocab::run
 witness::Accept
 witness::Ask

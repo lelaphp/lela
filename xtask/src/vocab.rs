@@ -43,6 +43,8 @@ pub(crate) enum Where {
     Item,
     /// Rustdoc prose.
     Prose,
+    /// A commit message.
+    Message,
 }
 
 /// One avoided word found: where, in what, and the terms the glossary
@@ -85,6 +87,7 @@ impl fmt::Display for Finding {
         match self.site {
             Where::Item => write!(f, "names `{}`", self.subject)?,
             Where::Prose => write!(f, "in rustdoc prose")?,
+            Where::Message => write!(f, "in the commit message")?,
         }
         write!(f, "; the glossary says {}", quoted(&self.terms))
     }
@@ -155,6 +158,73 @@ pub fn hold(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Rea
         readings.push(reading_of(&scan, &snapshot, rule, krate)?);
     }
     Ok(readings)
+}
+
+/// A commit message held to the glossary its commit's crates are held to,
+/// as `scripts/hooks/commit-msg` asks (#3624): every `avoid_from` rule
+/// that covers a crate with a staged change lends its terms, so a harness
+/// commit is held to the Harness section as the harness's rustdoc is, and
+/// a commit that touches no such crate is held to nothing. The prose is
+/// read as rustdoc prose is, inline code spans and fenced blocks aside,
+/// and so are what is not prose: git's `#` comments, a trailer line
+/// (`Ticket: #3624`) and the subject's leading path, the file or crate the
+/// commit touches. Each avoided word is printed with its line, and one
+/// refuses the message; no reading is written, since a message is no
+/// crate's, and the refused commit is the record.
+pub fn message(root: &Path, manifest: &Manifest, file: &Path) -> Result<()> {
+    let staged: Vec<String> = crate::git::staged(root)?
+        .into_iter()
+        .map(|c| c.path)
+        .collect();
+    let crates = manifest.crates_of(&staged);
+    let mut terms: Vec<glossary::Term> = Vec::new();
+    for rule in &manifest.rules {
+        let Some(from) = &rule.predicate.avoid_from else {
+            continue;
+        };
+        if !crates.iter().any(|k| rule.covers(&k.path())) {
+            continue;
+        }
+        let glossary = Glossary::load(&root.join(from.file()))?;
+        let glossary = match from.section() {
+            Some(section) => glossary.section(section)?,
+            None => glossary,
+        };
+        for term in glossary.terms {
+            if !terms
+                .iter()
+                .any(|t| t.name == term.name && t.section == term.section)
+            {
+                terms.push(term);
+            }
+        }
+    }
+    let avoided = Glossary { terms }.avoided_phrases();
+    let mut found = 0;
+    let mut in_fence = false;
+    for (index, line) in crate::read(file)?.lines().enumerate() {
+        let prose = if index == 0 {
+            line.split_once(": ").map_or(line, |(_, sentence)| sentence)
+        } else {
+            line
+        };
+        let trailer = line.split_once(": ").is_some_and(|(key, _)| {
+            index > 0 && !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '-')
+        });
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+        } else if !in_fence && !trailer && !line.starts_with('#') {
+            let words = glossary::words(&without_code_spans(prose));
+            for hit in hits(&words, &avoided) {
+                println!("{}", Finding::at(file, index + 1, Where::Message, "", hit));
+                found += 1;
+            }
+        }
+    }
+    if found > 0 {
+        bail!("vocab: {found} avoided words in the commit message; the findings are above");
+    }
+    Ok(())
 }
 
 /// The one rule whose scope covers `krate`, with its glossary; `None`
