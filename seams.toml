@@ -880,6 +880,7 @@ crates = "*"
 
 [[owed]]
 instrument = "phpt"
+held_at = "merge"  # #3618 ruling 2: the merge check owns the row
 crates = "*"
 when = "phpt-subset"                       # the per-commit lane runs a subset of the crate
 
@@ -890,6 +891,7 @@ when = "lock-home"                         # the crate api.lock lives with, the 
 
 [[owed]]
 instrument = "crosscheck"
+held_at = "merge"  # #3618 ruling 2: the merge check owns the row
 crates = "ext/*"
 when = "carried"                           # an extension the binary under test carries
 
