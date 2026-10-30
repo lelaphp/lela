@@ -64,6 +64,7 @@ pub mod miri;
 pub mod new_ext;
 pub mod new_sapi;
 pub mod oracle;
+pub mod owner;
 pub mod permit;
 pub mod phpt;
 pub mod port_map;
@@ -101,6 +102,7 @@ use clap::Parser;
 use cli::{Cli, Command, TicketCommand, TrackCommand, UsageCommand, WorktreeCommand};
 use divergence::Registry;
 use manifest::Manifest;
+use owner::SessionId;
 use reading::{Outcome, Reading, Store};
 use sources::Standing;
 
@@ -646,10 +648,32 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
         )),
         Command::Worktree {
             command: WorktreeCommand::Add { branch, ticket },
-        } => Some(worktree::add(root, branch, ticket.map(track::Ticket::new)).map(|_| ())),
+        } => Some(
+            worktree::add(
+                root,
+                branch,
+                ticket.map(track::Ticket::new),
+                SessionId::current().as_ref(),
+            )
+            .map(|_| ()),
+        ),
         Command::Worktree {
             command: WorktreeCommand::Retire { branch },
         } => Some(worktree::retire(root, branch)),
+        Command::Worktree {
+            command: WorktreeCommand::Own { session, release },
+        } => Some(
+            session
+                .as_deref()
+                .map(|id| SessionId::new(id).context("--session names no session"))
+                .transpose()
+                .and_then(|named| {
+                    worktree::own(root, SessionId::current().as_ref(), named, *release)
+                }),
+        ),
+        Command::Worktree {
+            command: WorktreeCommand::Whose,
+        } => Some(worktree::whose(root, SessionId::current().as_ref())),
         _ => None,
     }
 }

@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"the-owner","tool_input":{"command":"sed -i '' -e s/one/two/ notes.txt && printf 'two\\n' >> notes.txt && git add -- notes.txt","description":"Write in the checkout this session owns"}}

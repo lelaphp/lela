@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=bb3d3d89d4ed6357fe8919835e218b5bea679f964816bc04603765e18a10a69a out=6ba0892c9255d463a40e6c1df9a6c86358dea5a0b2a04df470497c174dc89391 -->
+<!-- /computed in=f5acea4916e18bfefa08e5eedcb88f2f47f44a3f3097c9b77aa4989176f5255c out=6ba0892c9255d463a40e6c1df9a6c86358dea5a0b2a04df470497c174dc89391 -->
 
 ## What makes the third engine special?
 
@@ -64,7 +64,7 @@ A session stops where `permit` denies an edit, and at an act harness §11 gives 
 
 - `cargo xtask <instrument>` runs one instrument; `cargo xtask --help` lists the ones built so far. The smallest proof is the instrument for the crate you touched. The harness itself is tested by `cargo test -p xtask`, and every manifest rule has a fixture under `xtask/fixtures/` that must fail.
 - A change to behaviour comes with a witness beside the kernel or native, pinned by `--accept`. The witness is the test; write it before the body when you can. The phpt subset for an extension is every `.phpt` under `php-src/ext/<name>`, as run-tests.php walks the directory. A bench number is a claim a person signs off, with the A/A control read by a person: state the measurement, never the conclusion.
-- Stage and commit by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: the index is shared with every session in the checkout, and `git add -A`, `git add .` or a commit that names no path takes what another session staged. The shell is zsh, which does not split an unquoted `$P`: write the paths out, or use an array, `P=(a b)` and `git add -- "${P[@]}"`. A merge, cherry-pick, revert or rebase in progress commits the whole index, whoever staged it; where one stands that you did not start, `permit` refuses the git commands that write its index or step it, so wait for it to end or work in your own worktree. The message file is named for the branch or its ticket, never `msg.txt`: the scratchpad is shared across the checkout's worktrees, so a generic name is whichever session wrote it last. Commits are plain language, one concern, the change in one sentence: `xtask vocab: the glossary as a sensor`. If the message says "also", split it. The lock line, the witness and the regenerated `ext/clippy.toml` travel with the code that needs them. A rule you want, or a divergence you found, is a paragraph in the message proposing it, with the fixture that would fail. What the work opened is the close's `--opens`, recorded as a reading, not a trailer in the message. A ticket's acceptance criteria are boxes its own label can tick. Where the work waits on a decision, the decision is a `for-a-person` ticket of its own and the work is wired to wait on it; a box in an agent's ticket that reads *a person decides* closes nothing however finished the code is.
+- Stage and commit by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: `git add -A`, `git add .` or a commit that names no path takes whatever else stands in the index, a person's work among it. One session writes in a checkout, its owner: `xtask worktree add` records the session that lays a worktree down, `xtask worktree own` claims main's checkout or the merge worktree and `--release` lets one go, and `permit` and pre-commit refuse another session's writes and commits there. Your subagents are your session; a person is refused nowhere. The shell is zsh, which does not split an unquoted `$P`: write the paths out, or use an array, `P=(a b)` and `git add -- "${P[@]}"`. A merge, cherry-pick, revert or rebase in progress commits the whole index, and it is its checkout's owner's to commit or abort; in a checkout you do not own, `permit` refuses the git commands that write its index or step it, so work in your own worktree. The message file is named for the branch or its ticket, never `msg.txt`: the scratchpad is shared across the checkout's worktrees, so a generic name is whichever session wrote it last. Commits are plain language, one concern, the change in one sentence: `xtask vocab: the glossary as a sensor`. If the message says "also", split it. The lock line, the witness and the regenerated `ext/clippy.toml` travel with the code that needs them. A rule you want, or a divergence you found, is a paragraph in the message proposing it, with the fixture that would fail. What the work opened is the close's `--opens`, recorded as a reading, not a trailer in the message. A ticket's acceptance criteria are boxes its own label can tick. Where the work waits on a decision, the decision is a `for-a-person` ticket of its own and the work is wired to wait on it; a box in an agent's ticket that waits on a person's decision closes nothing however finished the code is.
 
 ## Documentation and where code lives
 
@@ -88,7 +88,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=41e494b3a52288c6d25196b7863c72343bae866304366e9247fddafcf2cb5168 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=364282ea90c1184d79b4650cde0b031ca6f19f88395114c46848de92cd428245 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -123,9 +123,9 @@ third-engine-design.md
 | tier | tier.lock | 228 |  |
 | ssa | ssa.lock | 114 |  |
 | layer | layer.lock | 38 |  |
-| harness | xtask.lock | 428 |  |
+| harness | xtask.lock | 437 |  |
 
-<!-- /computed in=ff8e668df93ed04fde029abb2484309574d30d385b5140634bd453319d213700 out=dc6f118691d6b291aea8b0a4908de5e834848ebf13fac5a21ea9677f427ec79d -->
+<!-- /computed in=6a64e15a23a789794ba6aa7852d8ff637f42d2659577572a455dfb7c7d68f550 out=ee56829d34d329179e5c882062de77511844fc2955380e7fe06583a869b36af2 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -138,7 +138,7 @@ Commands:
   permit             Judge one intended call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
   done               The definition of done: the conditions unmet since the base, and exit 1 while any is; the Stop hook, pre-push and CI read the list
   track              Say the branch, the commit it was taken off main at, the store and the branch's ticket; as text or as one object. Writes no reading
-  worktree           A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>, `retire` appends its log into the store and removes it. Writes no reading
+  worktree           A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>, `retire` removes it, `own` and `whose` record and say its owner. Writes no reading
   ticket             A ticket, one GitHub issue: `read <n>` holds it to its acceptance criteria, `close <n>` closes it naming what it opened, `parent <n>` says whether a chart sheet is at the cap
   usage              What a session spent per turn: `record` reads the plugin's `SessionUsage` on stdin and writes one `usage` reading under the branch's ticket, or the session id
   regions            Render the named files' regions with `computed run` and say what it did, one line per file, for pre-commit to re-stage. Writes no reading
@@ -168,7 +168,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=d813ef64efa9ee009223c0288c640ed9782bf2c8f274ca5b8a6b80cac5df2bea out=f75906f17b5734883eb8cab7c977ae1cd12d0f5abd2810e819387650464a5b08 -->
+<!-- /computed in=fa9895e4bbf3336b131c6eb43280c771b41f107e9d25cd0af748b710779c3e40 out=ce5169c396c1babe88cebe479f71e4cb4da740f45b236472ece98e1dbca398af -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

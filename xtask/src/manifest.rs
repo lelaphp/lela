@@ -579,9 +579,12 @@ pub enum Where {
     /// [`crate::track`]'s record; a record that is not a number is one.
     Ticketed,
     /// A checkout where a merge, cherry-pick, revert or rebase stands
-    /// that the calling session did not start (#2476), read in
-    /// `permit::operation`.
+    /// and another session than the calling one owns (#2476, #3621),
+    /// read by [`crate::owner`] and `permit::operation`.
     Operating,
+    /// A checkout another session than the calling one owns, by its
+    /// owner record ([`crate::owner`], #3618 M1, #3621).
+    Owned,
     /// The repository's main checkout, the one whose `.git` is a
     /// directory, and never a linked worktree: where merges into `main`
     /// are made (#2751).
@@ -638,6 +641,11 @@ pub struct Predicates {
     pub with: OneOrMany,
     pub on: Option<String>,
     pub deny: Option<bool>,
+    /// `writes = true`: a call that writes, an `Edit`, a `Write`, or a
+    /// shell command that can change the checkout it runs in or a
+    /// redirection into a file (`permit::writes`); with `where = "owned"`
+    /// it is what one session per checkout refuses (#3621).
+    pub writes: Option<bool>,
     pub deny_lints: Option<Vec<String>>,
     /// The `deny_lints` lints a test may still trip, each rendered as
     /// clippy's own `allow-*-in-tests` key ([`IN_TESTS`]) into the
@@ -745,7 +753,7 @@ impl Predicates {
     /// and whether it describes one write or one command, so `permit` can
     /// judge it before the call runs (the other five read the tree after
     /// the write, harness-design.md §4.4).
-    const TABLE: [(&'static str, Carries, bool); 12] = [
+    const TABLE: [(&'static str, Carries, bool); 13] = [
         ("deny_types", |p| p.deny_types.is_some(), true),
         ("deny_methods", |p| p.deny_methods.is_some(), false),
         ("allow", |p| p.allow.is_some(), true),
@@ -754,6 +762,7 @@ impl Predicates {
         ("require_argv", |p| p.require_argv.is_some(), true),
         ("on", |p| p.on.is_some(), true),
         ("deny", |p| p.deny.is_some(), true),
+        ("writes", |p| p.writes.is_some(), true),
         ("deny_lints", |p| p.deny_lints.is_some(), false),
         ("check", |p| p.check.is_some(), false),
         ("avoid_from", |p| p.avoid_from.is_some(), false),
@@ -769,8 +778,8 @@ impl Predicates {
     }
 
     /// Whether the predicate describes one write or one command, so `permit`
-    /// can judge it before the call runs: `deny`, `deny_argv`, `require_argv`,
-    /// `deny_pattern`, `deny_types`, `allow`, `on`. The other five read the
+    /// can judge it before the call runs: `deny`, `writes`, `deny_argv`,
+    /// `require_argv`, `deny_pattern`, `deny_types`, `allow`, `on`. The other five read the
     /// tree after the write (harness-design.md §4.4).
     pub fn describes_a_call(&self) -> bool {
         Self::TABLE

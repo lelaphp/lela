@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"the-owner","agent_id":"a-sibling","tool_input":{"command":"git commit -F /tmp/merge-t2634.txt -- AGENTS.md","description":"Commit the merge standing in the checkout this session owns, from another of its agents: a session and its subagents are one writer (#3621)"}}

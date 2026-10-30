@@ -1034,48 +1034,6 @@ fn a_call_by_pushd_into_its_worktree_leaves_the_main_checkout_alone() {
     });
 }
 
-/// #2723, through both hooks: a merge start admitted while another
-/// merge stands takes no record before it runs; once that merge has ended
-/// and the start has run, `permit --after` records the agent whose call
-/// began it, so its commit is its own and another agent's is refused. The
-/// hook here carries no `duration_ms`, so the call is dated by the record
-/// `permit` took before it.
-#[test]
-fn a_start_admitted_while_another_merge_stood_is_recorded_once_it_has_run() {
-    let root = scratch("operation-settled");
-    let main = Repo::at(&root).git(&["rev-parse", "--abbrev-ref", "HEAD"]);
-    Repo::at(&root).git(&["checkout", "-q", "-b", "topic"]);
-    shell(
-        &root,
-        "echo topic > topic.txt && git add topic.txt && git commit -q -m topic",
-    );
-    Repo::at(&root).git(&["checkout", "-q", main.trim()]);
-    let git_dir = Repo::at(&root).git(&["rev-parse", "--absolute-git-dir"]);
-    let marker = Path::new(git_dir.trim()).join("MERGE_HEAD");
-    let hook = |event: &str, agent: &str, command: &str| {
-        let input = serde_json::json!({"session_id": SESSION, "agent_id": agent,
-            "tool_use_id": format!("toolu_{agent}"), "hook_event_name": event,
-            "tool_name": "Bash", "cwd": root.path(),
-            "tool_input": {"command": command}});
-        let args: &[&str] = if event == "PostToolUse" {
-            &["--after"]
-        } else {
-            &[]
-        };
-        permit(&root, &input.to_string(), args).ok()
-    };
-    let start = "git merge --no-ff --no-commit topic";
-    std::fs::write(&marker, "0".repeat(40) + "\n").unwrap();
-    hook("PreToolUse", "host", "git status --short");
-    hook("PreToolUse", "face", start);
-    std::fs::remove_file(&marker).unwrap();
-    shell(&root, start);
-    hook("PostToolUse", "face", start);
-    let commit = "git commit -q -m merged";
-    assert!(!hook("PreToolUse", "face", commit).contains("git.operation"));
-    assert!(hook("PreToolUse", "host", commit).contains("git.operation"));
-}
-
 /// #2880, the coordinator's sequence through both hooks: a merge whose
 /// sides each append a row to the registry stops on the conflict, git's
 /// union of the three blobs is the proposal, `steer` writes it, and the

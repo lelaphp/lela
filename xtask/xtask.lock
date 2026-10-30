@@ -235,6 +235,13 @@ oracle::normalise
 oracle::normalise_in
 oracle::run_by
 oracle::verdict
+owner::SESSION_VARIABLE
+owner::SessionId
+owner::SessionId::as_str
+owner::SessionId::current
+owner::SessionId::new
+owner::of
+owner::record
 package_dir
 permit::Adapter
 permit::Arguments
@@ -425,4 +432,6 @@ witness::Scope
 witness::record_accepted
 witness::run
 worktree::add
+worktree::own
 worktree::retire
+worktree::whose

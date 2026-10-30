@@ -14,7 +14,8 @@
 # was never read, so it refused nothing and cost a release build of every
 # extension per engine commit; `done` asks a touched extension for its
 # row, and `cargo xtask crosscheck --ext <name>` takes it (revision 140).
-# Before anything runs, a `git commit -F` whose file is missing is
+# Before anything runs, a commit from a session that does not own the
+# checkout is refused (#3621), and a `git commit -F` whose file is missing is
 # refused, since git reads the message only after this hook, and a
 # commit in a linked worktree, a builder's, runs at a lower priority than
 # one in the main checkout, a merge (revision 140);
@@ -99,6 +100,12 @@ message_file() {
     return 1
 }
 message_file || exit 1
+# One session writes in a checkout, its owner (#3618 M1, #3621): a commit
+# from a session other than the one `xtask worktree add` or `xtask
+# worktree own` recorded is refused before anything runs, whatever made
+# the change, naming the owner and the checkout. A commit from no
+# session is a person's, and is admitted.
+cargo xtask worktree whose >/dev/null || exit 1
 # A line the commit adds that git's own check reads as a conflict
 # marker left in (`<<<<<<<`, `=======`, `>>>>>>>`, `|||||||`) refuses
 # it, naming file and line: d0e168554, a merge `git commit` concluded
