@@ -440,10 +440,12 @@ impl Emit<'_> {
     /// constant and defines nothing. A long, a double or a boolean is kept
     /// in a register only under the guard within the fetch that holds it
     /// to the type the trace recorded, which [`Emit::held_element`]
-    /// defines, as php gives a fetched element a register only under its
-    /// `MAY_BE_GUARD` (`Z/ext/opcache/jit/zend_jit_trace.c:3045-3068`) and a
-    /// register to a long or a double alone
-    /// (`zend_jit_var_supports_reg`, `Z/ext/opcache/jit/zend_jit_ir.c:17724-17728`).
+    /// defines. php comes to the same: it keeps a fetched element's
+    /// register under its `MAY_BE_GUARD` too
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:3051-3062`), but gives a
+    /// register to a long or a double alone (`zend_jit_var_supports_reg`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:17724-17728`), which an unguarded
+    /// fetch, typed with `null` beside what the array holds, never is.
     /// Such a register here would be a fetch that wrote its slot alone,
     /// #3665's defect, so it is refused as php's `COMPILER_ERROR`.
     ///
