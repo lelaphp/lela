@@ -92,12 +92,13 @@ pub fn undeclared(root: &Path, manifest: &Manifest) -> Vec<String> {
 
 /// The crates with a staged change, by manifest name: pre-commit's touched
 /// crates (harness-design.md §6), what `clippy --staged` and `witness
-/// --staged` run over.
+/// --staged` run over, a crate whose tests read a staged file among them
+/// ([`Manifest::touched_by`]).
 pub(crate) fn staged_crates(root: &Path, manifest: &Manifest) -> Result<Vec<String>> {
     let staged = git::staged(root)?;
     let paths: Vec<&str> = staged.iter().map(|c| c.path.as_str()).collect();
     Ok(manifest
-        .crates_of(&paths)
+        .touched_by(root, &paths)
         .into_iter()
         .map(|c| c.name.clone())
         .collect())

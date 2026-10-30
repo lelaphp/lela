@@ -1351,6 +1351,19 @@ impl Manifest {
             .collect()
     }
 
+    /// The crates a change to `paths` touches, in manifest order: those
+    /// [`Manifest::crates_of`] names and those whose tests read one of
+    /// them as the tree at `root` holds it ([`crate::key::read_by_tests`],
+    /// #3646).
+    pub(crate) fn touched_by(&self, root: &Path, paths: &[&str]) -> Vec<&Crate> {
+        let touches = |c: &&Crate, p: &&str| {
+            Path::new(p).starts_with(c.path()) || crate::key::read_by_tests(root, &c.path(), p)
+        };
+        (self.crates.iter())
+            .filter(|c| paths.iter().any(|p| touches(c, p)))
+            .collect()
+    }
+
     /// The crate a lock lives with: the one whose row names it, or the
     /// crate its `lock_from` entry names for a lock listed on one row and
     /// generated from another (`api.lock` on `php_engine`'s row, from
