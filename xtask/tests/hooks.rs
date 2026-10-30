@@ -45,7 +45,8 @@ const REGIONS: [&str; 6] = [
 /// `claude` and `npx`, `cargo.log`, `computed.log` and `plugin.log` hold
 /// one line per call, and `refuse` names the one `cargo` call that exits
 /// 1, when a test writes it; `vocab-message`, when a test writes it, hands
-/// commit-msg's `xtask vocab --message` to this crate's own binary. `claude_on_path` says whether `plugin-bin`
+/// commit-msg's `xtask vocab --message` to this crate's own binary, and
+/// `permit-diff` the hooks' `xtask permit --diff`. `claude_on_path` says whether `plugin-bin`
 /// is on the hook's `PATH`: off, the hook finds no `claude` at all.
 struct Scratch {
     dir: Tree,
@@ -152,6 +153,7 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
              if [ -f '{refuse}' ] && [ \"$(cat '{refuse}')\" = \"$1 $2\" ]; then exit 1; fi\n\
              if [ \"$1 $2\" = 'xtask regions' ]; then shift 2; exec '{xtask}' --root \"$PWD\" regions \"$@\"; fi\n\
              if [ \"$1 $2 $3\" = 'xtask vocab --message' ] && [ -f '{vocab}' ]; then shift 2; exec '{xtask}' --root \"$PWD\" vocab \"$@\"; fi\n\
+             if [ \"$1 $2\" = 'xtask permit' ] && [ -f '{permit}' ]; then shift 2; exec '{xtask}' --root \"$PWD\" permit \"$@\"; fi\n\
              if [ \"$1 $2\" = 'xtask api-check' ]; then sleep 1; fi\n\
              if [ \"$1 $2\" = 'xtask test' ]; then HOOKS_TESTED='{tested}' '{probe}' --exact as_xtask_test_runs_a_map_test --ignored > /dev/null 2>&1; fi\n\
              printf 'ran %s\\n' \"$*\"\n\
@@ -159,6 +161,7 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
             log = dir.join("cargo.log").display(),
             refuse = dir.join("refuse").display(),
             vocab = dir.join("vocab-message").display(),
+            permit = dir.join("permit-diff").display(),
             tested = dir.join("tested-AGENTS.md").display(),
             probe = std::env::current_exe().unwrap().display(),
             xtask = xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")).display(),
@@ -238,6 +241,17 @@ impl Scratch {
     /// [`Scratch::run`] from `session`, as Claude Code hands its session
     /// to a call's processes, or from none, a person's terminal.
     fn run_as(&self, args: &[&str], hooked: bool, session: Option<&str>) -> (i32, String) {
+        self.run_in(&self.root, args, hooked, session)
+    }
+
+    /// [`Scratch::run_as`] in `dir`, a worktree of the repository.
+    fn run_in(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        hooked: bool,
+        session: Option<&str>,
+    ) -> (i32, String) {
         let path = if self.claude_on_path {
             format!(
                 "{}:{}",
@@ -250,7 +264,7 @@ impl Scratch {
         let mut command = Command::new("git");
         command
             .args(["-c", "commit.gpgsign=false"])
-            .current_dir(&self.root)
+            .current_dir(dir)
             .env_remove("CARGO")
             .env_remove("CARGO_MANIFEST_DIR")
             .env("GIT_AUTHOR_NAME", "x")
@@ -1806,4 +1820,115 @@ fn a_fast_forward_of_main_to_staging_reaches_ticket_merged() {
             "xtask ticket merged --since ORIG_HEAD"
         ]
     );
+}
+
+// ------------------------------------- an agent's commit of a harness path
+
+/// A scratch whose hooks run the real `permit --diff`, the store it writes
+/// ignored as the workspace ignores `target/`.
+fn agent_s(name: &str) -> Scratch {
+    let scratch = scratch(name, &Computed::Rendered);
+    fs::write(scratch.dir.join("permit-diff"), "").unwrap();
+    write(&scratch.root, ".git/info/exclude", "target/\n");
+    scratch
+}
+
+/// #3644 ruling 3: a commit from an agent's session that stages a harness
+/// path no steer reading covers is refused by pre-commit's `permit
+/// --diff`, naming the path; the same commit from no session, a person's,
+/// is admitted, the path a note.
+#[test]
+fn pre_commit_refuses_an_agent_s_uncovered_harness_path_and_admits_a_person_s() {
+    let scratch = agent_s("agent-harness");
+    let path = "seams.toml";
+    let manifest = fs::read_to_string(scratch.root.join(path)).unwrap();
+    write(&scratch.root, path, &format!("{manifest}# a row\n"));
+    scratch.git(&["add", "--", path], false);
+    let before = scratch.head();
+    let commit = ["commit", "-q", "-m", "the manifest", "--", path];
+    let (code, out) = scratch.run_as(&commit, true, Some("an-agent"));
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains(&format!("deny {path}")) && out.contains("#3644"),
+        "{out}"
+    );
+    assert_eq!(scratch.head(), before, "{out}");
+    let (code, out) = scratch.run_as(&commit, true, None);
+    assert_eq!(code, 0, "a person's commit: {out}");
+    assert!(out.contains(&format!("note {path}")), "{out}");
+}
+
+/// #3644 ruling 3 and #3622: the coordinator merges in the merge worktree,
+/// a linked one on `staging` its session owns. A merge that takes a
+/// person's committed manifest whole from one side is admitted, committed
+/// through pre-commit after `--no-commit` or by `git merge` through
+/// pre-merge-commit; one whose manifest neither side committed, git's
+/// union of both, is refused to the agent until steer writes it.
+#[test]
+fn a_merge_taking_one_side_s_committed_manifest_is_admitted_and_a_union_is_refused() {
+    let scratch = agent_s("agent-merge");
+    let main = scratch
+        .git(&["symbolic-ref", "--short", "HEAD"], false)
+        .trim()
+        .to_owned();
+    let manifest = fs::read_to_string(scratch.root.join("seams.toml")).unwrap();
+    // A person's commit of the manifest on a branch, made with no hook.
+    let persons = |branch: &str, text: &str| {
+        scratch.git(&["checkout", "-q", "-b", branch, &main], false);
+        write(&scratch.root, "seams.toml", text);
+        scratch.git(&["commit", "-q", "-am", "a person's manifest"], false);
+        scratch.git(&["checkout", "-q", &main], false);
+    };
+    persons("t7", &format!("{manifest}# t7's row\n"));
+    persons("t8", &format!("{manifest}# t8's row\n# and another\n"));
+    persons("t9", &format!("# t9's row\n{manifest}"));
+    let merging = scratch.dir.join("merge");
+    let at = merging.to_str().unwrap();
+    scratch.git(
+        &["worktree", "add", "-q", "-b", "staging", at, &main],
+        false,
+    );
+    let merging = merging.canonicalize().unwrap();
+    owner::record(&merging, &SessionId::new("the-coordinator").unwrap()).unwrap();
+    let coordinator = |args: &[&str], hooked: bool| {
+        scratch.run_in(&merging, args, hooked, Some("the-coordinator"))
+    };
+
+    let (code, out) = coordinator(&["merge", "-q", "--no-ff", "--no-commit", "t7"], false);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = coordinator(&["commit", "-q", "-m", "Merge t7 (#7)"], true);
+    assert_eq!(code, 0, "through pre-commit: {out}");
+    let (code, out) = coordinator(
+        &[
+            "merge", "-q", "--no-ff", "-X", "theirs", "-m", "Merge t8", "t8",
+        ],
+        true,
+    );
+    assert_eq!(code, 0, "through pre-merge-commit: {out}");
+    assert!(
+        scratch
+            .calls("cargo")
+            .iter()
+            .filter(|c| *c == "xtask permit --diff")
+            .count()
+            >= 2,
+        "{:?}",
+        scratch.calls("cargo")
+    );
+
+    let before = scratch.git(
+        &["-C", merging.to_str().unwrap(), "rev-parse", "HEAD"],
+        false,
+    );
+    let (code, out) = coordinator(&["merge", "-q", "--no-ff", "-m", "Merge t9", "t9"], true);
+    assert_ne!(code, 0, "{out}");
+    assert!(
+        out.contains("deny seams.toml") && out.contains("#3644"),
+        "{out}"
+    );
+    let after = scratch.git(
+        &["-C", merging.to_str().unwrap(), "rev-parse", "HEAD"],
+        false,
+    );
+    assert_eq!(before, after, "the merge stands uncommitted: {out}");
 }

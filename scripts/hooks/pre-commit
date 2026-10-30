@@ -23,7 +23,10 @@
 # notes a `-m` one, refusing nothing (#3630, #3629);
 # `permit --diff` judges every staged file as the Write of
 # its staged content and refuses the commit with the rule id on a denial
-# (the harness's own files are a note: a person commits those). Between
+# (the harness's own files are a note: a person commits those; an agent's
+# commit, `CLAUDE_CODE_SESSION_ID` set, that stages one no steer reading
+# covers is refused, a merge's file taken whole from one side being that
+# side's, #3644). Between
 # the two groups and before clippy and test, `computed run` on the region
 # files, always, so the map tests read the map the commit carries (#1416),
 # and since a staged change under

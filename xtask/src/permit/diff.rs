@@ -21,35 +21,58 @@ use anyhow::{Context, Result, bail};
 use super::adapters::{Adapter, record};
 use super::call::Call;
 use super::rules::{Finding, Judgement, Kind, judge};
-use crate::git;
 use crate::manifest::Manifest;
+use crate::owner::SessionId;
+use crate::reading::{Status, Store};
+use crate::{git, steer};
 
 /// What permit found over a set of files, each judged as the `Write` of
 /// its content: `done`'s condition 5 and pre-commit's `--diff` read one
 /// verdict (harness-design.md §4.4, §4.5, §6). A denial under a rule the
 /// manifest marks `deny = true`, the harness's own files, stands apart: a
-/// person commits those, and the hook cannot tell a person from an agent,
-/// so it refuses nothing and is reported as a note.
+/// person commits those, so it is reported as a note, except where an
+/// agent's commit stages one no steer reading covers ([`Judged::refuse`],
+/// #3644 ruling 3).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Judged {
     /// Each file's judgement, in the order given.
     pub files: Vec<(String, Judgement)>,
     /// The ids of the rules the manifest marks `deny = true`.
     a_persons: Vec<String>,
+    /// The harness files an agent's commit stages uncovered, refused.
+    refused: Vec<String>,
 }
 
 impl Judged {
     /// The denials that refuse the diff: every `Deny` finding outside a
     /// person's rules.
     pub fn denials(&self) -> impl Iterator<Item = (&str, &Finding)> {
-        self.findings(Kind::Deny)
-            .filter(|(_, f)| !self.a_persons.contains(&f.rule))
+        self.findings(Kind::Deny).filter(|(path, f)| {
+            !self.a_persons.contains(&f.rule) || self.refused.iter().any(|r| r == path)
+        })
     }
 
     /// The harness's own files in the diff: a `Deny` under a person's rule.
     pub fn a_persons(&self) -> impl Iterator<Item = (&str, &Finding)> {
-        self.findings(Kind::Deny)
-            .filter(|(_, f)| self.a_persons.contains(&f.rule))
+        self.findings(Kind::Deny).filter(|(path, f)| {
+            self.a_persons.contains(&f.rule) && !self.refused.iter().any(|r| r == path)
+        })
+    }
+
+    /// An agent's commit (`CLAUDE_CODE_SESSION_ID` set), refused for each
+    /// harness file it stages that no steer reading covers: one that
+    /// passed, wrote, and is stamped over the staged blob (#3644 ruling 3). This closes the gap where an agent clears `done`'s
+    /// kept change by committing the file itself. A merge's file taken
+    /// whole from one side is that side's commit and never staged here
+    /// ([`staged_files`]); a person's commit is not asked.
+    pub(crate) fn refuse(&mut self, root: &Path) -> Result<()> {
+        let paths: BTreeSet<String> = self.a_persons().map(|(p, _)| p.to_owned()).collect();
+        for path in paths {
+            if !steered(root, &path)? {
+                self.refused.push(path);
+            }
+        }
+        Ok(())
     }
 
     /// The notes that ride on the diff.
@@ -77,6 +100,16 @@ impl Judged {
         let mut out = String::new();
         for (word, (path, finding)) in denials.chain(notes) {
             writeln!(out, "{word} {path}: {}", finding.reason()).ok();
+            if word == "deny" && self.refused.iter().any(|r| r == path) {
+                writeln!(
+                    out,
+                    "deny {path}: an agent's commit (CLAUDE_CODE_SESSION_ID is set) stages it, and \
+                     no steer reading covers what is staged, so the commit is refused (#3644); a \
+                     person commits it, a row a person settled lands by `cargo xtask steer`, and \
+                     `git restore --staged -- {path}` takes it out of this commit"
+                )
+                .ok();
+            }
         }
         out
     }
@@ -183,7 +216,23 @@ pub fn judge_files(manifest: &Manifest, root: &Path, files: &[Diffed]) -> Result
     Ok(Judged {
         files: judged,
         a_persons,
+        refused: Vec::new(),
     })
+}
+
+/// Whether a steer reading covers the staged content at `path`: steer's
+/// latest reading of the file passed, wrote, and is stamped over the
+/// staged blob, as `permit --after` holds steer's write ([`super::after`]).
+fn steered(root: &Path, path: &str) -> Result<bool> {
+    let Some(reading) = Store::of_workspace(root).read(steer::INSTRUMENT, path)? else {
+        return Ok(false);
+    };
+    let Ok(staged) = git::rev_parse(root, &["-q", "--verify", &format!(":{path}")]) else {
+        return Ok(false);
+    };
+    Ok(reading.status == Status::Pass
+        && !reading.message.contains("dry run")
+        && reading.key() == git::file_hash(path, &staged))
 }
 
 /// The ids of the rules a manifest marks `deny = true`.
@@ -226,7 +275,7 @@ fn text(bytes: Vec<u8>) -> String {
 /// A hit neither parent carried as often is the merge's. A file git
 /// reads as binary in the index is judged by its path alone.
 fn staged_files(root: &Path) -> Result<Vec<Diffed>> {
-    let theirs = git::rev_parse(root, &["-q", "--verify", "MERGE_HEAD"]).ok();
+    let theirs = merged(root);
     let staged: Vec<git::Change> = (git::staged(root)?.into_iter())
         .filter(|c| !c.deleted)
         .collect();
@@ -268,6 +317,23 @@ fn staged_files(root: &Path) -> Result<Vec<Diffed>> {
     Ok(files)
 }
 
+/// The commit a merge takes in: `MERGE_HEAD`, which a merge stopped
+/// before its commit keeps, or, for a merge git commits itself, whose
+/// pre-merge-commit runs with no `MERGE_HEAD` written, the first name
+/// `GIT_REFLOG_ACTION` gives after `merge` that is a commit (#3644).
+fn merged(root: &Path) -> Option<String> {
+    if let Ok(head) = git::rev_parse(root, &["-q", "--verify", "MERGE_HEAD"]) {
+        return Some(head);
+    }
+    let action = std::env::var("GIT_REFLOG_ACTION").ok()?;
+    (action.strip_prefix("merge ")?.split_whitespace())
+        .filter(|word| !word.starts_with('-'))
+        .find_map(|word| {
+            let commit = format!("{word}^{{commit}}");
+            git::rev_parse(root, &["-q", "--verify", &commit]).ok()
+        })
+}
+
 /// The changed files with their working-tree content, as `done` judges
 /// them, against what `base` carries; a deleted or vanished file has
 /// nothing to judge, and one git reads as binary in the working tree is
@@ -305,7 +371,10 @@ pub(crate) fn working_files(
 /// anything is denied, so the commit is refused with the rule id.
 pub(crate) fn run_diff(root: &Path, manifest: &Manifest) -> Result<()> {
     let files = staged_files(root)?;
-    let diff = judge_files(manifest, root, &files)?;
+    let mut diff = judge_files(manifest, root, &files)?;
+    if SessionId::current().is_some() {
+        diff.refuse(root)?;
+    }
     diff.record(root)?;
     print!("{}", diff.render());
     let denied = diff.denials().count();

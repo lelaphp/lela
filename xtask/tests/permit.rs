@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use xtask::divergence::Registry;
 use xtask::manifest::{Manifest, OneOrMany, Rule, Where};
 use xtask::oracle::Promise;
+use xtask::owner::SESSION_VARIABLE;
 use xtask::permit::{Call, Finding, Kind, judge, judged_at_the_call};
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
@@ -469,31 +470,6 @@ fn diff_judges_a_fixture_source_by_the_fixture_manifest() {
     );
 }
 
-/// #3644 ruling 2: an Edit of a fixture's manifest, test data, is judged
-/// by the checkout's manifest and goes through; the checkout's own
-/// manifest is still denied as `harness.self`.
-#[test]
-fn an_edit_of_a_fixture_s_manifest_is_allowed_and_the_root_s_is_denied() {
-    let root = scratch("fixture-manifest");
-    let fixture = "xtask/fixtures/rules/a-rule/seams.toml";
-    let manifest = std::fs::read_to_string(root.join("seams.toml")).unwrap();
-    write(&root, fixture, &manifest);
-    let edit = |path: &str| {
-        let call = serde_json::json!({"session_id": "s", "tool_name": "Edit",
-            "cwd": root.to_str().unwrap(), "tool_input": {
-                "file_path": root.join(path).to_str().unwrap(),
-                "old_string": "[budget]", "new_string": "[budget]\n"}});
-        permit(&root, &call.to_string(), &[]).ok()
-    };
-    let out = edit(fixture);
-    assert!(!out.contains("\"deny\""), "{out}");
-    let out = edit("seams.toml");
-    assert!(
-        out.contains("\"deny\"") && out.contains("harness.self"),
-        "{out}"
-    );
-}
-
 /// The label a rule does not judge (#341, harness-design.md ledger 52).
 /// `ticket.close` denies `gh issue close` so that nothing closes a ticket
 /// but the instrument that read its acceptance criteria; a chart sheet
@@ -886,16 +862,92 @@ fn diff_judges_the_staged_files_and_refuses_a_denied_one_with_the_rule_id() {
     Repo::at(&root).git(&["add", "ext/pcre/src/cache.rs"]);
     permit(&root, "", &["--diff"]).ok();
 
-    // The harness's own file: a note, since the hook cannot tell a person
-    // from an agent, and the commit goes through.
-    // A person's note.
+    // The harness's own file in a person's commit, one from no session: a
+    // note, and the commit goes through.
     Tracked::of(&root)
         .with_crate("php_heap", |row| row.budget += 1)
         .write(&root);
     Repo::at(&root).git(&["add", "seams.toml"]);
-    let out = permit(&root, "", &["--diff"]).ok();
+    let out = diff_from(&root, None).ok();
     assert!(out.contains("note seams.toml"), "{out}");
     assert!(out.contains("harness.self"), "{out}");
+}
+
+/// `permit --diff` from `session`, as an agent's commit hands its hook
+/// `CLAUDE_CODE_SESSION_ID`, or from none, a person's terminal.
+fn diff_from(root: &Path, session: Option<&str>) -> Ran {
+    let run = Run::at(root).args(["permit", "--diff"]);
+    match session {
+        Some(id) => run.env(SESSION_VARIABLE, id),
+        None => run.env_remove(SESSION_VARIABLE),
+    }
+    .go()
+}
+
+/// #3644 ruling 3: an agent's commit that stages a harness file is refused
+/// unless a steer reading covers what is staged, and the same staged file
+/// in a person's commit is a note. Steer's write is covered; an edit after
+/// it moves the staged blob from under the reading, and is refused again.
+/// A fixture's manifest is test data (ruling 2), and no harness file.
+#[test]
+fn an_agent_s_commit_of_a_harness_file_no_steer_covers_is_refused() {
+    let root = scratch("diff-agent");
+    let pin = "oracle.toml";
+    let was = std::fs::read_to_string(root.join(pin)).unwrap();
+    write(&root, pin, &format!("{was}\n# typed by an agent\n"));
+    Repo::at(&root).git(&["add", "--", pin]);
+    let ran = diff_from(&root, Some("an-agent"));
+    assert_eq!(ran.code(), 1, "{ran}");
+    assert!(
+        ran.stdout.contains(&format!("deny {pin}")) && ran.stdout.contains("#3644"),
+        "{ran}"
+    );
+    assert_eq!(diff_from(&root, None).code(), 0, "a person's commit");
+
+    Repo::at(&root).git(&["checkout", "HEAD", "--", pin]);
+    let proposal = format!("{was}\n[regime.ruling-3]\nini = [\"opcache.enable=0\"]\n");
+    write(&root, "proposal.toml", &proposal);
+    let from = root.join("proposal.toml");
+    xtask(&root, &["steer", pin, "--from", from.to_str().unwrap()]).ok();
+    Repo::at(&root).git(&["add", "--", pin]);
+    let ran = diff_from(&root, Some("an-agent"));
+    assert_eq!(ran.code(), 0, "steer's write is covered: {ran}");
+    write(&root, pin, &format!("{proposal}# and then typed\n"));
+    Repo::at(&root).git(&["add", "--", pin]);
+    assert_eq!(diff_from(&root, Some("an-agent")).code(), 1, "moved since");
+    Repo::at(&root).git(&["checkout", "HEAD", "--", pin]);
+
+    let fixture = "xtask/fixtures/rules/a-rule/seams.toml";
+    write(&root, fixture, &was);
+    Repo::at(&root).git(&["add", "--", fixture]);
+    let ran = diff_from(&root, Some("an-agent"));
+    assert_eq!(ran.code(), 0, "{ran}");
+    assert!(!ran.stdout.contains(fixture), "{ran}");
+}
+
+/// #3644 ruling 2: an Edit of a fixture's manifest, test data, is judged
+/// by the checkout's manifest and goes through; the checkout's own
+/// manifest is still denied as `harness.self`.
+#[test]
+fn an_edit_of_a_fixture_s_manifest_is_allowed_and_the_root_s_is_denied() {
+    let root = scratch("fixture-manifest");
+    let fixture = "xtask/fixtures/rules/a-rule/seams.toml";
+    let manifest = std::fs::read_to_string(root.join("seams.toml")).unwrap();
+    write(&root, fixture, &manifest);
+    let edit = |path: &str| {
+        let call = serde_json::json!({"session_id": "s", "tool_name": "Edit",
+            "cwd": root.to_str().unwrap(), "tool_input": {
+                "file_path": root.join(path).to_str().unwrap(),
+                "old_string": "[budget]", "new_string": "[budget]\n"}});
+        permit(&root, &call.to_string(), &[]).ok()
+    };
+    let out = edit(fixture);
+    assert!(!out.contains("\"deny\""), "{out}");
+    let out = edit("seams.toml");
+    assert!(
+        out.contains("\"deny\"") && out.contains("harness.self"),
+        "{out}"
+    );
 }
 
 /// A Mach-O header, a byte that is no UTF-8 anywhere, and the name
@@ -949,7 +1001,7 @@ fn diff_judges_a_staged_binary_file_by_its_path_alone() {
     }
 
     put(".claude/hooks/stand-in");
-    let out = permit(&root, "", &["--diff"]).ok();
+    let out = diff_from(&root, None).ok();
     assert!(out.contains("note .claude/hooks/stand-in"), "{out}");
     assert!(out.contains("harness.self"), "{out}");
 }
