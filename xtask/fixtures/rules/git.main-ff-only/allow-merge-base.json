@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git merge-base --is-ancestor main staging","description":"Ask whether staging holds main, which commits nothing"}}

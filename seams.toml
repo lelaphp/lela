@@ -823,6 +823,14 @@ runs = "foreground"   # grammar: runs, a call the runtime runs in the foreground
 deny_pattern = '''(?s)(?:\A|[;&|({\n]|\b(?:then|do|else))\s*(?:until|while|for)\s.*?[;\n]\s*do\b(?:.*?(?:[;&|({\n]|\b(?:then|do|else)))?\s*sleep\s+0*(?:[3-9]|[1-9][0-9]+)(?:\.[0-9]+)?[smh]?\b.*?\bdone\b'''
 text = "A foreground poll loop holds the turn, and the coordinator, seat or lock it waits on with it (#3624): run what it waits for with run_in_background, whose end the runtime notifies, or wait on the condition with Monitor and an until-loop."
 
+[[rule]]
+id = "git.main-ff-only"
+tool = "Bash"
+where = "main"   # grammar: where, the repository's main checkout and never a linked worktree (#2751)
+deny_pattern = '(?m)(\A|[|;&(\n]\s*)git(\s+-[cC]\s+\S+|\s+--?[\w.-]+(=\S+)?)*\s+merge(\s|$)'   # git merge where it is run, as git.merge-commits-itself reads it
+unless_pattern = '\s--(ff-only|abort|continue|quit|help)\b|\s-h\b'   # a fast-forward, which commits nothing, or the end of a merge that stands, its owner's (#3621)
+text = "main moves only by a fast-forward to a commit the merge queue judged: merge in the merge worktree on staging, then `xtask worktree land` (#3618 M2, #3622)."
+
 # ---------------------------------------------------------------- owed
 # What a crate owes before done (harness §4.5 condition 1): one row per
 # instrument, the crates a glob or a list less `exempt`, and `when` a

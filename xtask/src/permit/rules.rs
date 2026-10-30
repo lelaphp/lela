@@ -309,8 +309,8 @@ enum Standing {
 
 /// Where the call stands for the rule's `where`: asked where a command it
 /// fires on runs ([`fired_in`]), whose branch records a ticket, which is
-/// the main checkout (#2751), or whose checkout it is, and whether an
-/// operation stands there ([`owned`], #3621). An owner record that does
+/// the main checkout (#2751), which is the merge worktree (#3622), or
+/// whose checkout it is, and whether an operation stands there ([`owned`], #3621). An owner record that does
 /// not read is an error, so the call is judged by no build.
 fn judges_where(root: &Path, rule: &Rule, line: Option<&Line>, call: &Call) -> Result<Standing> {
     let judged = |inside: bool| {
@@ -330,6 +330,7 @@ fn judges_where(root: &Path, rule: &Rule, line: Option<&Line>, call: &Call) -> R
         Where::Operating => return owned(Scope::Operating),
         Where::Owned => return owned(Scope::Owned),
         Where::Main => judged(in_main(root, rule, line)),
+        Where::Staging => judged(on_staging(root, rule, line)),
         Where::Checkout => judged(in_a_checkout(root, line)),
     })
 }
@@ -398,6 +399,15 @@ fn ticketed(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
 /// [`ticketed`] reads (#2751).
 fn in_main(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
     scoped_in(root, rule, line).iter().any(|dir| !linked(dir))
+}
+
+/// Whether a command the rule fires on runs in the merge worktree, the
+/// checkout on [`crate::queue::STAGING`], read where [`ticketed`] reads
+/// (#3622).
+fn on_staging(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
+    scoped_in(root, rule, line)
+        .iter()
+        .any(|dir| crate::track::head_branch(dir).as_deref() == Some(crate::queue::STAGING))
 }
 
 /// Where a `where`-scoped rule asks: each checkout a command it fires on
@@ -602,8 +612,8 @@ pub(super) fn acts_in(root: &Path, line: Option<&Line>) -> PathBuf {
 
 /// The one reading of where a shell line's commands run, from which
 /// [`runs_in`], [`placed`], [`fired_in`] and [`acts_in`] are read, so
-/// `where = "ticketed"`, `where = "main"`, `where = "operating"`,
-/// `where = "checkout"`, the checkout `permit --after` holds and the
+/// `where = "ticketed"`, `where = "main"`, `where = "staging"`,
+/// `where = "operating"`, `where = "checkout"`, the checkout `permit --after` holds and the
 /// approvals it reads move together (#2597, #2607, #2995).
 ///
 /// Each `cd`, `pushd` and `popd` the line says the target of moves the

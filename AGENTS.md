@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=26f48200b91e1cdbfcc143612db01eb61d42a30fd409cfbc59b4377a76b22986 out=6ba0892c9255d463a40e6c1df9a6c86358dea5a0b2a04df470497c174dc89391 -->
+<!-- /computed in=c186b16e2dcfac880fd75889f578bb57f87a922c39ea26e379924df014b0b131 out=6ba0892c9255d463a40e6c1df9a6c86358dea5a0b2a04df470497c174dc89391 -->
 
 ## What makes the third engine special?
 
@@ -88,7 +88,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=049bdd8d9a62d60d9c0972b5bc7994d99079c09e0e7cf02457fdad4a6d051ced out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=4ed21e5cc4727040546d6d93c129b4f51c021ff31ebefc6f6844ffc2cda608b7 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -123,9 +123,9 @@ third-engine-design.md
 | tier | tier.lock | 228 |  |
 | ssa | ssa.lock | 114 |  |
 | layer | layer.lock | 38 |  |
-| harness | xtask.lock | 439 |  |
+| harness | xtask.lock | 441 |  |
 
-<!-- /computed in=3575969835eb16c97b3ef1a27ef59d0f999fe4e7f721617cd1492695a826a419 out=55d42e0a40cbd310fb10b7ba524d5ef27853c11738f9df0405498c46c67b792c -->
+<!-- /computed in=0b153bf165f07e3f8ac915c1bda814c1c882f13f3b98964f753e4e6a63397a23 out=c365675a332f7005ee75baa844f05d8cffdb9e5f683f029c553580c98a6e08f5 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -138,7 +138,7 @@ Commands:
   permit             Judge one intended call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
   done               The definition of done: the conditions unmet since the base, and exit 1 while any is; the Stop hook, pre-push and CI read the list
   track              Say the branch, the commit it was taken off main at, the store and the branch's ticket; as text or as one object. Writes no reading
-  worktree           A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>, `retire` removes it, `own` and `whose` record and say its owner. Writes no reading
+  worktree           A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>, `retire` removes it, `own` and `whose` say its owner, `queue` and `land` run the merge queue
   ticket             A ticket, one GitHub issue: `read <n>` holds it to its acceptance criteria, `close <n>` closes it naming what it opened, `parent <n>` says whether a chart sheet is at the cap
   usage              What a session spent per turn: `record` reads the plugin's `SessionUsage` on stdin and writes one `usage` reading under the branch's ticket, or the session id
   regions            Render the named files' regions with `computed run` and say what it did, one line per file, for pre-commit to re-stage. Writes no reading
@@ -168,7 +168,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=cc6a95dda57ea38a7f585f61d2a5eb58dff64ff0feef45bd19a3ec18e0976ade out=ce5169c396c1babe88cebe479f71e4cb4da740f45b236472ece98e1dbca398af -->
+<!-- /computed in=d1e7385c2b973b393fe9131191ca56b9d23b8dd0775d5365feeb9ac227023c56 out=7d36360474ef686aa1dbccf693f6c58be3e09ee20203fbcf67b49f6bd0e36f2b -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

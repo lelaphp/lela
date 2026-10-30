@@ -32,6 +32,7 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
     let merging = operating("fixtures-operating");
     let owned_by = owned("fixtures-owned");
     let quiet = checkout("fixtures-quiet", None);
+    let (_queued, merge) = staging("fixtures-staging");
     for rule in judged {
         let dir = fixtures().join("rules").join(&rule.id);
         let kind = Kind::of(rule);
@@ -42,6 +43,7 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
             Where::Operating => merging.path(),
             Where::Owned => owned_by.path(),
             Where::Main | Where::Checkout => quiet.path(),
+            Where::Staging => merge.as_path(),
         };
         // Every control of the rule's directory: each `deny*.json` (or
         // `note*.json`) must fire, each `allow*.json` must not (#625).
@@ -289,12 +291,16 @@ fn the_stale_fixture_parses_and_lets_through_what_the_manifest_on_disk_denies() 
 #[test]
 fn the_proposed_ticket_close_rules_fire_on_their_fixtures_and_not_on_their_neighbours() {
     let manifest = with_the_ticket_close_rules(Manifest::load(workspace()).unwrap());
+    // A checkout no session owns: the workspace the tests run in is the
+    // committing session's, where `checkout.owner` refuses the calls'
+    // `another-session` a write such as `xtask ticket close` (#3621).
+    let quiet = checkout("ticket-close-quiet", None);
     for rule in ["ticket.close", "ticket.close-api"] {
         let dir = fixtures().join("rules").join(rule);
-        let allowed = judge(&manifest, workspace(), &call(&dir.join("allow.json"))).unwrap();
+        let allowed = judge(&manifest, quiet.path(), &call(&dir.join("allow.json"))).unwrap();
         assert!(allowed.denial().is_none(), "{rule}: {allowed:?}");
         for fixture in [dir.join("deny.json"), dir.join("deny-reopen.json")] {
-            let judged = judge(&manifest, workspace(), &call(&fixture)).unwrap();
+            let judged = judge(&manifest, quiet.path(), &call(&fixture)).unwrap();
             assert_eq!(
                 judged.denial().map(|f| f.rule.as_str()),
                 Some(rule),
@@ -307,7 +313,7 @@ fn the_proposed_ticket_close_rules_fire_on_their_fixtures_and_not_on_their_neigh
         "gh api --method PATCH /repos/o/r/issues/28 --input /tmp/close.json",
         "gh api graphql -f query='mutation { closeIssue(input: {issueId: \"I_1\"}) { issue { id } } }'",
     ] {
-        let judged = judge(&manifest, workspace(), &bash(line)).unwrap();
+        let judged = judge(&manifest, quiet.path(), &bash(line)).unwrap();
         assert_eq!(
             judged.denial().map(|f| f.rule.as_str()),
             Some("ticket.close-api"),
@@ -322,13 +328,7 @@ fn the_proposed_ticket_close_rules_fire_on_their_fixtures_and_not_on_their_neigh
         "cargo xtask ticket close 28",
         "gh api repos/o/r/issues?state=closed",
     ] {
-        let call = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": line}});
-        let judged = judge(
-            &manifest,
-            workspace(),
-            &Call::parse(&call.to_string()).unwrap(),
-        )
-        .unwrap();
+        let judged = judge(&manifest, quiet.path(), &bash(line)).unwrap();
         assert!(judged.denial().is_none(), "{line}: {judged:?}");
     }
 }
@@ -398,6 +398,7 @@ fn every_bash_rule_holds_to_each_of_its_fixtures() {
     let main = checkout("bash-fixtures-main", None);
     let merging = operating("bash-fixtures-operating");
     let owned_by = owned("bash-fixtures-owned");
+    let (_queued, merge) = staging("bash-fixtures-staging");
     let rules: Vec<&Rule> = manifest
         .rules
         .iter()
@@ -431,6 +432,7 @@ fn every_bash_rule_holds_to_each_of_its_fixtures() {
                 Where::Operating => merging.path(),
                 Where::Owned => owned_by.path(),
                 Where::Main | Where::Checkout => main.path(),
+                Where::Staging => merge.as_path(),
             };
             let judged = judge(&manifest, root, &call(&dir.join(name))).unwrap();
             let fired = judged

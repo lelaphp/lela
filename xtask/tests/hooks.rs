@@ -1003,7 +1003,9 @@ fn commit_msg_notes_an_avoided_word_by_line_and_refuses_nothing() {
 /// on `main` whose Markdown or Rust still cites one, as
 /// `fixtures/hooks/next/cited.md` and `cited.rs` do in each shape that has
 /// landed, one wrapped onto the next line among them, is refused before
-/// anything runs, naming each line, and the same commit on a branch is not.
+/// anything runs, naming each line, as it is on `staging`, the merge
+/// queue's branch, which `main` fast-forwards to (#3622), and the same
+/// commit on a ticket's branch is not.
 /// Prose that names NEXT and cites no revision, the convention quoted in
 /// backticks and a line that ends in "revision" among it, is no citation.
 #[test]
@@ -1042,6 +1044,11 @@ fn a_revision_still_cited_as_next_is_refused_on_main_and_not_on_a_branch() {
     }
     assert!(out.contains("is still NEXT"), "{out}");
     assert_eq!(scratch.calls("cargo"), Vec::<String>::new());
+
+    scratch.git(&["checkout", "-q", "-b", "staging"], false);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "citations"], true);
+    assert_eq!(code, 1, "staging: {out}");
+    assert!(out.contains("docs/ledger.md:3:"), "staging: {out}");
 
     scratch.git(&["checkout", "-q", "-b", "t9"], false);
     let (code, out) = scratch.run(&["commit", "-q", "-m", "citations"], true);
@@ -1510,4 +1517,108 @@ fn pre_push_hands_done_the_remote_sha_and_no_base_for_a_ref_the_remote_lacks() {
     );
     let held = scratch.git(&["rev-parse", &format!("origin/{branch}")], false);
     assert_eq!(held.trim(), second, "the push was refused");
+}
+
+// ------------------------------------------------------------- the merge queue
+
+/// The niceness of the process `pid`, as `ps` prints it.
+fn niceness(pid: &str) -> i32 {
+    let out = Command::new("ps")
+        .args(["-o", "nice=", "-p", pid])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+}
+
+/// The merge queue's commits run at full priority (#3622): pre-commit
+/// renices a commit in a linked worktree, a builder's, so it yields the
+/// cores to the merge, and the merge worktree, the linked worktree on
+/// `staging`, is that merge, so its hook is not reniced. Each call of the
+/// stand-in `cargo` records the niceness it ran at.
+#[test]
+fn a_commit_on_staging_runs_at_full_priority_and_a_builder_s_yields() {
+    let scratch = scratch("renice", &Computed::Rendered);
+    let own = niceness(&std::process::id().to_string());
+    let log = scratch.dir.join("nice.log");
+    let cargo = scratch.dir.join("bin/cargo");
+    let body = fs::read_to_string(&cargo).unwrap().replacen(
+        "#!/bin/sh\n",
+        &format!("#!/bin/sh\nps -o nice= -p $$ >> '{}'\n", log.display()),
+        1,
+    );
+    executable(&cargo, &body);
+    let mut seen = Vec::new();
+    for branch in ["staging", "t9"] {
+        let dir = scratch.dir.join(branch);
+        let path = dir.to_str().unwrap();
+        scratch.git(&["worktree", "add", "-q", "-b", branch, path], false);
+        write(&dir, "crates/php_heap/src/lib.rs", "pub fn free() {}\n");
+        scratch.git(
+            &["-C", path, "add", "--", "crates/php_heap/src/lib.rs"],
+            false,
+        );
+        let (code, out) = scratch.run(&["-C", path, "commit", "-q", "-m", "a change"], true);
+        assert_eq!(code, 0, "{branch}: {out}");
+        let levels: Vec<i32> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|l| l.trim().parse().unwrap())
+            .collect();
+        fs::remove_file(&log).unwrap();
+        assert!(!levels.is_empty(), "{branch}: {out}");
+        seen.push(levels);
+    }
+    assert!(
+        seen[0].iter().all(|&n| n == own),
+        "staging: {:?} at {own}",
+        seen[0]
+    );
+    // The first call is the owner's, `xtask worktree whose`, made before
+    // the renice; every one after it, the builds among them, yields.
+    if own < 20 {
+        assert!(
+            seen[1].len() > 1 && seen[1][1..].iter().all(|&n| n > own),
+            "t9: {:?} at {own}",
+            seen[1]
+        );
+    }
+}
+
+/// The merge queue's fast-forward closes the tickets (#3622): a merge
+/// committed on `staging` reaches `xtask ticket merged` through
+/// post-commit, which closes nothing off `main`, and `main`'s `git merge
+/// --ff-only staging` reaches it through post-merge, since `ORIG_HEAD`,
+/// which reads the merges the fast-forward brought.
+#[test]
+fn a_fast_forward_of_main_to_staging_reaches_ticket_merged() {
+    let scratch = scratch("staging-ff", &Computed::Rendered);
+    let main = scratch
+        .git(&["symbolic-ref", "--short", "HEAD"], false)
+        .trim()
+        .to_owned();
+    let merged = |scratch: &Scratch| {
+        scratch
+            .calls("cargo")
+            .into_iter()
+            .filter(|call| call.starts_with("xtask ticket merged"))
+            .collect::<Vec<_>>()
+    };
+    scratch.git(&["checkout", "-q", "-b", "t7", &main], false);
+    scratch.git(
+        &["commit", "-q", "--allow-empty", "-m", "the work of #7"],
+        false,
+    );
+    scratch.git(&["checkout", "-q", "-b", "staging", &main], false);
+    scratch.git(&["merge", "-q", "--no-ff", "--no-commit", "t7"], false);
+    scratch.git(&["commit", "-q", "-m", "Merge t7: the work (#7)"], true);
+    assert_eq!(merged(&scratch), ["xtask ticket merged --since HEAD^1"]);
+    scratch.git(&["checkout", "-q", &main], false);
+    scratch.git(&["merge", "-q", "--ff-only", "staging"], true);
+    assert_eq!(
+        merged(&scratch),
+        [
+            "xtask ticket merged --since HEAD^1",
+            "xtask ticket merged --since ORIG_HEAD"
+        ]
+    );
 }

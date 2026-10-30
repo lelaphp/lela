@@ -68,6 +68,7 @@ pub mod owner;
 pub mod permit;
 pub mod phpt;
 pub mod port_map;
+pub mod queue;
 pub mod reading;
 mod reply;
 mod rust;
@@ -679,6 +680,12 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
         Command::Worktree {
             command: WorktreeCommand::Whose,
         } => Some(worktree::whose(root, SessionId::current().as_ref())),
+        Command::Worktree {
+            command: WorktreeCommand::Queue,
+        } => Some(queue::claim(root, SessionId::current().as_ref()).map(|_| ())),
+        Command::Worktree {
+            command: WorktreeCommand::Land,
+        } => Some(queue::land(root)),
         _ => None,
     }
 }
