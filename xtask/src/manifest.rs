@@ -80,9 +80,27 @@ pub struct Manifest {
     /// through [`Manifest::pin`].
     #[serde(skip)]
     pub pin: Option<Pin>,
+    /// Where the `[oracle]` row names a file the workspace lacks, the
+    /// refusal of reading it: a defect, which [`Manifest::pin`] refuses
+    /// with and loading does not (#3618 ruling 4, #3642).
+    #[serde(skip)]
+    pin_absent: Option<String>,
     /// The workspace the manifest was loaded from; empty for `parse`.
     #[serde(skip)]
     pub root: PathBuf,
+}
+
+/// Hold `rule` to carrying what to do instead where it is judged at a
+/// call, one with a `tool`: a `remedy`, which a denial renders after its
+/// text (#3618 ruling 3, #3627).
+fn remedied(rule: &Rule) -> Result<()> {
+    if !rule.tool.is_empty() && rule.remedy.as_deref().is_none_or(|r| r.trim().is_empty()) {
+        bail!(
+            "rule \"{}\" has a `tool` and no `remedy`; a denial says what to do instead, so a rule judged at a call carries one (#3618 ruling 3, #3627)",
+            rule.id
+        );
+    }
+    Ok(())
 }
 
 /// One thing a person's file carries that parses but does not validate,
@@ -93,12 +111,19 @@ pub struct Defect {
     pub file: String,
     /// The check's refusal.
     pub error: String,
+    /// Whether the file is absent, which nothing parsed (#3642).
+    absent: bool,
 }
 
 impl std::fmt::Display for Defect {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let first = self.error.lines().next().unwrap_or_default();
-        write!(f, "{} parses but does not validate: {first}", self.file)
+        let said = if self.absent {
+            "is absent"
+        } else {
+            "parses but does not validate"
+        };
+        write!(f, "{} {said}: {first}", self.file)
     }
 }
 
@@ -1053,39 +1078,52 @@ impl Manifest {
         let path = root.join(FILE);
         let text = crate::read(&path)?;
         let mut manifest = Manifest::parse(&text).with_context(|| format!("{}", path.display()))?;
-        manifest.pin = (manifest.oracle.as_ref())
-            .map(|row| Pin::load(&root.join(&row.pin)))
-            .transpose()?;
+        let named = manifest.oracle.as_ref().map(|row| root.join(&row.pin));
+        if let Some(file) = named {
+            match fs::exists(&file) {
+                Ok(false) => {
+                    manifest.pin_absent =
+                        Some(format!("no oracle pin stands at {}", file.display()));
+                }
+                _ => manifest.pin = Some(Pin::load(&file)?),
+            }
+        }
         manifest.root = root.to_path_buf();
         Ok(manifest)
     }
 
     /// The oracle pin, which every instrument that runs php asks for here
     /// and nowhere else: refused, naming it, where the manifest has no
-    /// `[oracle]` row (#3181), and with its first defect where it parses
-    /// but does not validate (#3618 ruling 4).
+    /// `[oracle]` row (#3181), and with its first defect where the file
+    /// the row names is absent or parses but does not validate (#3618
+    /// ruling 4, #3642).
     pub fn pin(&self) -> Result<&Pin> {
-        let pin = self.pin.as_ref().ok_or_else(|| {
-            anyhow!("{FILE} has no `[oracle]` row, so no oracle pin names the php to run or the php-src it is held to")
-        })?;
-        match self.defects().into_iter().next() {
-            Some(defect) => bail!("{defect}"),
-            None => Ok(pin),
+        if let Some(defect) = self.defects().into_iter().next() {
+            bail!("{defect}");
         }
+        self.pin.as_ref().ok_or_else(|| {
+            anyhow!("{FILE} has no `[oracle]` row, so no oracle pin names the php to run or the php-src it is held to")
+        })
     }
 
     /// What the person's files carry that parses but does not validate,
     /// apart from loading (#3618 ruling 4): a TOML or grammar error is
     /// fatal to [`Manifest::load`], and this is the rest, each a refusal
-    /// of the instruments that read what failed.
+    /// of the instruments that read what failed; a pin the `[oracle]` row
+    /// names and the workspace lacks is one, absent (#3642).
     pub fn defects(&self) -> Vec<Defect> {
-        let pin = self.pin.iter().flat_map(Pin::defects);
         let file = self.pin_file().unwrap_or_default();
-        pin.map(|error| Defect {
+        let absent = self.pin_absent.iter().map(|error| Defect {
             file: file.to_owned(),
             error: error.clone(),
-        })
-        .collect()
+            absent: true,
+        });
+        let pin = self.pin.iter().flat_map(Pin::defects).map(|error| Defect {
+            file: file.to_owned(),
+            error: error.clone(),
+            absent: false,
+        });
+        absent.chain(pin).collect()
     }
 
     /// The file the `[oracle]` row names, where the manifest has one.
@@ -1218,6 +1256,7 @@ impl Manifest {
                     rule.id
                 );
             }
+            remedied(rule)?;
         }
         manifest.parity.hold(&manifest.crates)?;
         owed::hold(&manifest.owed, &manifest.crates)?;

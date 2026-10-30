@@ -79,6 +79,7 @@ deny_argv = ["--full", "--jit"]
 unless_argv = { "--jit" = "xtask phpt --subset" }   # grammar: unless_argv, a denied element let through where the phrase runs bounded by the option, as require_argv reads one: the tier's one-subset reading (#3052, #3068)
 with = ["xtask phpt", "xtask bench"]   # xtask however it is run: the cargo alias, cargo run -p xtask, a path, a variable the line assigns (#1860)
 text = "Nightly lanes run in CI only; run the per-crate subset, and the tier's `--jit` lane on one subset named by `--subset` (#3052)."
+remedy = "`cargo xtask phpt --subset <crate>`, with `--jit` on one subset"
 "#;
 
 /// The `git.no-verify` row #1001 proposes: `with` names git's `commit` and
@@ -244,6 +245,7 @@ tool = ["Edit", "Write"]
 scope = "only-here/**"
 deny = true
 text = "A file under only-here/ is refused by the worktree's manifest alone."
+remedy = "write it in your own worktree"
 "#
                 .parse::<toml::Table>()
                 .unwrap(),

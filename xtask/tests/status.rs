@@ -1062,6 +1062,7 @@ tool = "Bash"
 with = ["git add", "git commit"]
 require_argv = "--"
 text = "An agent stages and commits by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: the index is shared with every session in the checkout."
+remedy = "`git add -- <paths>` and `git commit -F <file> -- <paths>`"
 "#
                     .parse::<toml::Table>()
                     .unwrap(),

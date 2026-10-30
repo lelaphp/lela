@@ -862,7 +862,7 @@ mod tests {
     #[test]
     fn a_steer_reading_over_a_file_harness_self_does_not_name_is_no_steer_write() {
         let root = crate::scratch::Tree::new("after-steered").unwrap();
-        let manifest = "[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\nclean_build_release_s = 1\napi_items = 1\nbindings = 1\n[[rule]]\nid = \"harness.self\"\ntool = [\"Edit\", \"Write\"]\nscope = [\"seams.toml\", \"oracle.toml\"]\ndeny = true\ntext = \"harness.self\"\n";
+        let manifest = "[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\nclean_build_release_s = 1\napi_items = 1\nbindings = 1\n[[rule]]\nid = \"harness.self\"\ntool = [\"Edit\", \"Write\"]\nscope = [\"seams.toml\", \"oracle.toml\"]\ndeny = true\ntext = \"harness.self\"\nremedy = \"steer\"\n";
         let was = "[a]\nb = 1\n";
         fs::write(root.join("seams.toml"), manifest).unwrap();
         for file in ["oracle.toml", "notes.toml"] {
