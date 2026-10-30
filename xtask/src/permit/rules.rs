@@ -238,7 +238,7 @@ pub fn judge(manifest: &Manifest, root: &Path, call: &Call) -> Result<Judgement>
 /// call.
 fn applies(rule: &Rule, call: &Call, path: Option<&Path>) -> bool {
     (rule.tool.is_empty() || rule.tool.iter().any(|t| t == call.tool_name))
-        && !(rule.runs == Runs::Foreground && call.tool_input.run_in_background)
+        && !(rule.runs == Runs::Foreground && call.in_background())
         && !path.is_some_and(|path| rule.exempts(path))
         && (rule.scope.is_empty() || path.is_some_and(|path| rule.covers(path)))
         && rule.predicate.describes_a_call()

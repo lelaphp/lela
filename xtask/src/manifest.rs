@@ -658,7 +658,8 @@ pub enum Runs {
     /// However the call runs: a row without `runs`.
     #[default]
     Either,
-    /// Only a call without `run_in_background`.
+    /// Only a call without `run_in_background`, and never a `Monitor`,
+    /// which runs in the background by construction (#3637).
     Foreground,
 }
 

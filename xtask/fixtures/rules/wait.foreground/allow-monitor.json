@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "until grep -q \"^exit=\" /private/tmp/claude-501/scratchpad/t3622/commit-0.out 2>/dev/null; do sleep 5; done; tail -3 /private/tmp/claude-501/scratchpad/t3622/commit-0.out", "description": "A Monitor's until-loop, as the hook receives it: the runtime hands a Monitor on as Bash with its timeout_ms (#3637)", "timeout_ms": 1800000}}
