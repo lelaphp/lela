@@ -137,6 +137,14 @@ impl Pending {
     /// an enclosing step put there, so the step is taken with either
     /// there. `None`, with nothing taken, where what stands is a fatal.
     ///
+    /// A user wrapper's method a stream op of the step serves, a
+    /// `stream_stat` or a `stream_close`, may throw, and the stream layer
+    /// keeps that throw ([`Diagnostics::stream_thrown`]) where php's
+    /// stream layer leaves it in `EG(exception)`. What the step's stream
+    /// ops kept is left pending here as the step returns, so it stands
+    /// over the steps after it and what they raise is chained onto it;
+    /// what was kept before the step began is no op of its.
+    ///
     /// A destructor a step serves, a callable the option replaces, chains
     /// what it throws onto what stands, as `zend_objects_destroy_object`
     /// chains it onto the `EG(exception)` it put aside:
@@ -172,6 +180,8 @@ impl Pending {
     /// caught dtor
     /// string(1) "p"
     /// ```
+    ///
+    /// [`Diagnostics::stream_thrown`]: php_ext::request::Diagnostics::stream_thrown
     pub(crate) fn step<R>(
         &mut self,
         req: &mut Request,
@@ -180,6 +190,7 @@ impl Pending {
         if self.fatal(req) {
             return None;
         }
+        let kept = req.diagnostics_mut().stream_thrown().is_some();
         let answer = if matches!(self.0, Standing::Slot) || req.diagnostics().raised().is_some() {
             let exit =
                 matches!(&self.0, Standing::Here(Some(thrown)) if thrown.exception().is_none());
@@ -199,6 +210,9 @@ impl Pending {
             self.0 = Standing::Here(raising::pending(req).err());
             answer
         };
+        if !kept && let Some(thrown) = req.diagnostics_mut().stream_thrown().take() {
+            self.park(req, thrown);
+        }
         Some(answer)
     }
 
@@ -208,12 +222,8 @@ impl Pending {
     /// back here, so no owner outlives the request's heap.
     ///
     /// A stream the release closes, a form's file part through its
-    /// `free_cb`, may serve a user wrapper's `stream_close`, whose throw
-    /// the stream layer keeps ([`Diagnostics::stream_thrown`]) where php's
-    /// `php_stream_close` leaves it in `EG(exception)`. What the release's
-    /// closes kept is left pending here as the release returns, so it
-    /// stands over the steps after it and what they raise is chained onto
-    /// it; what was kept before the release began is no close of its.
+    /// `free_cb`, may serve a user wrapper's `stream_close` that throws,
+    /// which stands over the steps after it as the step says:
     ///
     /// ```php
     /// class W { public $context; function stream_open($p,$m,$o,&$op){return true;} function stream_read($n){return '';} function stream_eof(){return true;} function stream_stat(){return ['size'=>0];} function stream_close(){ echo "close\n"; throw new Exception("close"); } }
@@ -231,15 +241,9 @@ impl Pending {
     /// close
     /// ValueError: curl_setopt_array(): cURL option must not contain any null bytes prev close
     /// ```
-    ///
-    /// [`Diagnostics::stream_thrown`]: php_ext::request::Diagnostics::stream_thrown
     pub(crate) fn release(&mut self, req: &mut Request, mut release: impl FnMut(&mut Request)) {
-        let kept = req.diagnostics_mut().stream_thrown().is_some();
         if self.step(req, |req, _| release(req)).is_none() {
             release(req);
-        }
-        if !kept && let Some(thrown) = req.diagnostics_mut().stream_thrown().take() {
-            self.park(req, thrown);
         }
     }
 

@@ -571,6 +571,25 @@ impl Form<'_> {
     /// opened on it now, held by the part until its `free_cb`. Each
     /// property read that throws leaves the throwable pending and reads
     /// as no string, as php's `zend_read_property` answers then.
+    ///
+    /// A user wrapper's `stream_stat` that throws as the part's size is
+    /// read stands over the parts after it, so a `__toString` is not
+    /// called and a `CURLStringFile` ends the walk, as php's
+    /// `if (EG(exception)) goto out_string` does:
+    ///
+    /// ```php
+    /// class W { public $context; function stream_open($p,$m,$o,&$op){return true;} function stream_seek($o,$w){return true;} function stream_tell(){return 0;} function stream_stat(){ echo "stat\n"; throw new Exception("stat"); } function stream_close(){} }
+    /// stream_wrapper_register('ww', 'W');
+    /// class U { function __toString(): string { echo "U called\n"; return "u"; } }
+    /// $h = curl_init();
+    /// try { curl_setopt_array($h, [CURLOPT_POSTFIELDS => ['f' => new CURLFile('ww://x'), 'u' => new U, 's' => new CURLStringFile('d', 'n')], CURLOPT_PRIVATE => 'p']); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump(curl_getinfo($h, CURLINFO_PRIVATE));
+    /// ```
+    /// ```expect
+    /// stat
+    /// stat
+    /// bool(false)
+    /// ```
     fn file(&mut self, req: &mut Request, name: &[u8], file: PhpObject) -> ControlFlow<()> {
         let Some(path) = self.prop(req, file, b"name") else {
             let text = format!("Invalid filename for key {}", String::from_utf8_lossy(name));
