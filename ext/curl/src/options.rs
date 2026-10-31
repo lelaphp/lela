@@ -14,9 +14,9 @@ use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, Value, ValueRef};
 
 use crate::constants as c;
-use crate::ffi::{EasyId, Hook, Slist};
+use crate::ffi::{Called, EasyId, Hook, Slist};
 use crate::handle::{Curl, CurlHandle, Handler, HeaderTo, ReadFrom, WriteTo, easy_of};
-use crate::throwables::Throwables;
+use crate::throwables::{Pending, Throwables};
 
 /// The three transfer channels a callable can take over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -401,9 +401,26 @@ fn saved(req: &mut Request, object: PhpObject, code: i32) -> Set {
     Ok(code == 0)
 }
 
+/// A set the library answered, [`saved`]: what a callback threw during
+/// it left in `pending`, as `zend_call_known_fcc` leaves it, the set
+/// going on past it.
+fn set(req: &mut Request, object: PhpObject, called: Called, pending: &mut Pending) -> Set {
+    let (code, thrown) = called;
+    if let Some(thrown) = thrown {
+        pending.park(req, thrown);
+    }
+    saved(req, object, code)
+}
+
 /// `php_curl_option_str`: php's `ValueError` for a NUL, then the string
 /// set, its code saved.
-fn option_str(req: &mut Request, object: PhpObject, option: i64, value: &[u8]) -> Set {
+fn option_str(
+    req: &mut Request,
+    object: PhpObject,
+    option: i64,
+    value: &[u8],
+    pending: &mut Pending,
+) -> Set {
     if value.contains(&0) {
         let text = format!(
             "{}(): cURL option must not contain any null bytes",
@@ -412,22 +429,30 @@ fn option_str(req: &mut Request, object: PhpObject, option: i64, value: &[u8]) -
         return Err(value_error(req, &text));
     }
     let easy = easy_of(req, object)?;
-    let code = easy.set_str(req, option, Some(value));
-    saved(req, object, code)
+    let called = easy.set_str(req, option, Some(value));
+    set(req, object, called, pending)
 }
 
 /// `php_curl_option_url`: `file://` kept out under `open_basedir`, then
 /// the URL set.
-pub(crate) fn set_url(req: &mut Request, object: PhpObject, url: &[u8]) -> Set {
+pub(crate) fn set_url(
+    req: &mut Request,
+    object: PhpObject,
+    url: &[u8],
+    pending: &mut Pending,
+) -> Set {
     if basedir(req) {
         let easy = easy_of(req, object)?;
-        easy.set_long(
+        let (_, thrown) = easy.set_long(
             req,
             c::CURLOPT_PROTOCOLS,
             c::CURLPROTO_ALL & !c::CURLPROTO_FILE,
         );
+        if let Some(thrown) = thrown {
+            pending.park(req, thrown);
+        }
     }
-    option_str(req, object, c::CURLOPT_URL, url)
+    option_str(req, object, c::CURLOPT_URL, url, pending)
 }
 
 /// `php_curl_set_callable_handler`: the callable a value names, `None`
@@ -519,13 +544,16 @@ fn set_hook(
     value: &Value,
     option: i64,
     in_array: bool,
+    pending: &mut Pending,
 ) -> Set {
     if let Some(old) = payload(req, object)?.hook_mut(hook).take() {
         old.give_up(req);
     }
     let handler = callable(req, value, option, in_array)?;
     *payload(req, object)?.hook_mut(hook) = handler;
-    easy_of(req, object)?.set_hook(req, hook);
+    if let Some(thrown) = easy_of(req, object)?.set_hook(req, hook) {
+        pending.park(req, thrown);
+    }
     saved(req, object, 0)
 }
 
@@ -603,7 +631,13 @@ fn writable(req: &mut Request, stream: Stream) -> Result<bool, Thrown> {
 }
 
 /// A stream option set.
-fn set_stream(req: &mut Request, object: PhpObject, which: StreamOpt, value: &Value) -> Set {
+fn set_stream(
+    req: &mut Request,
+    object: PhpObject,
+    which: StreamOpt,
+    value: &Value,
+    pending: &mut Pending,
+) -> Set {
     let value = value.deref();
     let what = if matches!(value.as_ref(), ValueRef::Null) {
         None
@@ -661,7 +695,11 @@ fn set_stream(req: &mut Request, object: PhpObject, which: StreamOpt, value: &Va
                 return Err(thrown);
             }
         };
-        code = easy.set_stderr(req, what);
+        let thrown;
+        (code, thrown) = easy.set_stderr(req, what);
+        if let Some(thrown) = thrown {
+            pending.park(req, thrown);
+        }
         if let Some(old) = old {
             easy.let_stream_go(req, old);
         }
@@ -672,7 +710,13 @@ fn set_stream(req: &mut Request, object: PhpObject, which: StreamOpt, value: &Va
 }
 
 /// A list option: each element's string, one line each.
-fn set_list(req: &mut Request, object: PhpObject, option: i64, value: &Value) -> Set {
+fn set_list(
+    req: &mut Request,
+    object: PhpObject,
+    option: i64,
+    value: &Value,
+    pending: &mut Pending,
+) -> Set {
     let Some(array) = value.deref().as_array() else {
         let text = format!(
             "{}(): The {} option must have an array value",
@@ -695,38 +739,46 @@ fn set_list(req: &mut Request, object: PhpObject, option: i64, value: &Value) ->
         return Ok(false);
     };
     let easy = easy_of(req, object)?;
-    let code = easy.set_slist(req, option, list);
-    saved(req, object, code)
+    let called = easy.set_slist(req, option, list);
+    set(req, object, called, pending)
 }
 
 /// `CURLOPT_POSTFIELDS`: an array as a MIME form, anything else as the
 /// body's bytes.
-fn set_post_fields(req: &mut Request, object: PhpObject, value: &Value) -> Set {
+fn set_post_fields(
+    req: &mut Request,
+    object: PhpObject,
+    value: &Value,
+    pending: &mut Pending,
+) -> Set {
     let value = value.deref();
     if let Some(array) = value.as_array() {
         if array.is_empty() {
             let easy = easy_of(req, object)?;
-            let code = easy.set_post_fields(req, b"");
-            return saved(req, object, code);
+            let called = easy.set_post_fields(req, b"");
+            return set(req, object, called, pending);
         }
-        return crate::file::build_mime(req, object, array);
+        return crate::file::build_mime(req, object, array, pending);
     }
     let body = with_string(req, &value, <[u8]>::to_vec)?;
     let easy = easy_of(req, object)?;
-    let code = easy.set_post_fields(req, &body);
-    saved(req, object, code)
+    let called = easy.set_post_fields(req, &body);
+    set(req, object, called, pending)
 }
 
 /// `CURLOPT_SHARE`: a share kept by the easy one and by the
 /// object; anything else is ignored, as php ignores it.
-fn set_share(req: &mut Request, object: PhpObject, value: &Value) -> Set {
+fn set_share(req: &mut Request, object: PhpObject, value: &Value, pending: &mut Pending) -> Set {
     let Some(share) = value.deref().as_object() else {
         return saved(req, object, 0);
     };
     let Some(handle) = crate::share::share_of(req, share) else {
         return saved(req, object, 0);
     };
-    easy_of(req, object)?.set_share(req, handle);
+    let (_, thrown) = easy_of(req, object)?.set_share(req, handle);
+    if let Some(thrown) = thrown {
+        pending.park(req, thrown);
+    }
     let held = Owner::take(req, share);
     let old = match payload(req, object) {
         Ok(curl) => curl.share.replace(held),
@@ -741,14 +793,16 @@ fn set_share(req: &mut Request, object: PhpObject, value: &Value) -> Set {
     saved(req, object, 0)
 }
 
-/// `_php_curl_setopt`.
+/// `_php_curl_setopt`, what a callback the library served left in
+/// `pending`.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn setopt(
+fn setopt(
     req: &mut Request,
     object: PhpObject,
     option: i64,
     value: &Value,
     in_array: bool,
+    pending: &mut Pending,
 ) -> Set {
     let Some(kind) = decode(option) else {
         let tail = if in_array {
@@ -763,7 +817,7 @@ pub(crate) fn setopt(
     let easy: EasyId = easy_of(req, object)?;
     match kind {
         Opt::Channel(chan) => set_channel(req, object, chan, value, option, in_array),
-        Opt::Hook(hook) => set_hook(req, object, hook, value, option, in_array),
+        Opt::Hook(hook) => set_hook(req, object, hook, value, option, in_array, pending),
         Opt::VerifyHost => {
             let n = to_long(req, &value.deref())?;
             if n == 1 {
@@ -772,11 +826,11 @@ pub(crate) fn setopt(
                     Level::Notice,
                     "CURLOPT_SSL_VERIFYHOST no longer accepts the value 1, value 2 will be used instead",
                 );
-                let code = easy.set_long(req, option, 2);
-                return saved(req, object, code);
+                let called = easy.set_long(req, option, 2);
+                return set(req, object, called, pending);
             }
-            let code = easy.set_long(req, option, n);
-            saved(req, object, code)
+            let called = easy.set_long(req, option, n);
+            set(req, object, called, pending)
         }
         Opt::Long | Opt::Protocols => {
             let n = to_long(req, &value.deref())?;
@@ -788,8 +842,8 @@ pub(crate) fn setopt(
                 );
                 return Ok(false);
             }
-            let code = easy.set_long(req, option, n);
-            saved(req, object, code)
+            let called = easy.set_long(req, option, n);
+            set(req, object, called, pending)
         }
         Opt::SafeUpload => {
             if !truthy(req, &value.deref())? {
@@ -815,15 +869,15 @@ pub(crate) fn setopt(
                     return Ok(false);
                 }
             }
-            option_str(req, object, option, &text)
+            option_str(req, object, option, &text, pending)
         }
         Opt::NullableStr => {
             if matches!(value.deref().as_ref(), ValueRef::Null) {
-                let code = easy.set_str(req, option, None);
-                return saved(req, object, code);
+                let called = easy.set_str(req, option, None);
+                return set(req, object, called, pending);
             }
             let text = with_string(req, value, <[u8]>::to_vec)?;
-            option_str(req, object, option, &text)
+            option_str(req, object, option, &text, pending)
         }
         Opt::Private => {
             let held = Owner::take(req, value.deref());
@@ -841,12 +895,12 @@ pub(crate) fn setopt(
         }
         Opt::Url => {
             let url = with_string(req, value, <[u8]>::to_vec)?;
-            set_url(req, object, &url)
+            set_url(req, object, &url, pending)
         }
-        Opt::Stream(which) => set_stream(req, object, which, value),
-        Opt::List => set_list(req, object, option, value),
+        Opt::Stream(which) => set_stream(req, object, which, value, pending),
+        Opt::List => set_list(req, object, option, value, pending),
         Opt::Ignored => saved(req, object, 0),
-        Opt::PostFields => set_post_fields(req, object, value),
+        Opt::PostFields => set_post_fields(req, object, value, pending),
         Opt::ReturnTransfer => {
             let on = truthy(req, &value.deref())?;
             payload(req, object)?.write.to = if on { WriteTo::Return } else { WriteTo::Stdout };
@@ -854,13 +908,13 @@ pub(crate) fn setopt(
         }
         Opt::OffT => {
             let n = to_long(req, &value.deref())?;
-            let code = easy.set_off(req, option, n);
-            saved(req, object, code)
+            let called = easy.set_off(req, option, n);
+            set(req, object, called, pending)
         }
         Opt::PostRedir => {
             let n = to_long(req, &value.deref())?;
-            let code = easy.set_long(req, option, n & c::CURL_REDIR_POST_ALL);
-            saved(req, object, code)
+            let called = easy.set_long(req, option, n & c::CURL_REDIR_POST_ALL);
+            set(req, object, called, pending)
         }
         Opt::Path => {
             let path = with_string(req, value, <[u8]>::to_vec)?;
@@ -872,7 +926,7 @@ pub(crate) fn setopt(
             {
                 return Ok(false);
             }
-            option_str(req, object, option, &path)
+            option_str(req, object, option, &path, pending)
         }
         Opt::HeaderOut => {
             if payload(req, object)?.hook(Hook::Debug).is_some() {
@@ -882,15 +936,17 @@ pub(crate) fn setopt(
                 ));
             }
             let on = truthy(req, &value.deref())?;
-            easy.set_debug(req, on);
-            easy.set_long(req, c::CURLOPT_VERBOSE, i64::from(on));
-            saved(req, object, 0)
+            if let Some(thrown) = easy.set_debug(req, on) {
+                pending.park(req, thrown);
+            }
+            let (_, thrown) = easy.set_long(req, c::CURLOPT_VERBOSE, i64::from(on));
+            set(req, object, (0, thrown), pending)
         }
-        Opt::Share => set_share(req, object, value),
+        Opt::Share => set_share(req, object, value, pending),
         Opt::Blob => {
             let blob = with_string(req, value, <[u8]>::to_vec)?;
-            let code = easy.set_blob(req, option, &blob);
-            saved(req, object, code)
+            let called = easy.set_blob(req, option, &blob);
+            set(req, object, called, pending)
         }
     }
 }
@@ -942,6 +998,93 @@ pub(crate) fn setopt(
 /// dtor
 /// end
 /// ```
+///
+/// libcurl logs from inside `curl_easy_setopt`: a boolean option given
+/// a value past 1 is `infof`'s line (`lib/setopt.c`), which reaches the
+/// debug callable, as php calls the library with the `CURL *` live.
+///
+/// ```php
+/// $h = curl_init();
+/// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) { var_dump($type, $data); });
+/// var_dump(curl_setopt($h, CURLOPT_VERBOSE, 2));
+/// ```
+/// ```expect
+/// int(0)
+/// string(60) "boolean setopt(41) got unsupported argument 2, treated as 1
+/// "
+/// bool(true)
+/// ```
+///
+/// With no debug callable the line is the `CURLOPT_STDERR` file's, a
+/// `php://memory` stream's through its cookie.
+///
+/// ```php
+/// $h = curl_init();
+/// curl_setopt($h, CURLOPT_STDERR, $m = fopen('php://memory', 'w+'));
+/// var_dump(curl_setopt($h, CURLOPT_VERBOSE, 2));
+/// curl_setopt($h, CURLOPT_FAILONERROR, 5);
+/// rewind($m);
+/// var_dump(stream_get_contents($m));
+/// ```
+/// ```expect
+/// bool(true)
+/// string(124) "* boolean setopt(41) got unsupported argument 2, treated as 1
+/// * boolean setopt(45) got unsupported argument 5, treated as 1
+/// "
+/// ```
+///
+/// What the callable throws stays pending, as `zend_call_known_fcc`
+/// leaves it, and is `curl_setopt`'s throwable; `curl_setopt_array`
+/// goes on to its next option past it, calling no callable meanwhile.
+///
+/// ```php
+/// $h = curl_init();
+/// $n = 0;
+/// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) use (&$n) { $n++; throw new Exception(trim($data)); });
+/// try { curl_setopt($h, CURLOPT_VERBOSE, 2); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// try { curl_setopt_array($h, [CURLOPT_VERBOSE => 3, CURLOPT_PRIVATE => 'p', CURLOPT_FAILONERROR => 4]); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($n, curl_getinfo($h, CURLINFO_PRIVATE));
+/// ```
+/// ```expect
+/// boolean setopt(41) got unsupported argument 2, treated as 1
+/// boolean setopt(41) got unsupported argument 3, treated as 1
+/// int(2)
+/// string(1) "p"
+/// ```
+///
+/// The `CURL *` is held across the library's call, so the callable may
+/// set options on it again, and a set made from another transfer's
+/// callback serves the callable of the `CurlHandle` it names.
+///
+/// ```php
+/// $h = curl_init();
+/// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) {
+///     echo $data;
+///     curl_setopt($ch, CURLOPT_HTTPHEADER, ['X: y']);
+///     curl_setopt($ch, CURLOPT_STDERR, fopen('php://memory', 'w+'));
+///     curl_setopt($ch, CURLOPT_DEBUGFUNCTION, null);
+/// });
+/// var_dump(curl_setopt($h, CURLOPT_VERBOSE, 2), curl_setopt($h, CURLOPT_VERBOSE, 2));
+/// $g = curl_init();
+/// curl_setopt($g, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) { echo "g: $data"; });
+/// $f = tempnam(sys_get_temp_dir(), 'curl');
+/// file_put_contents($f, "body");
+/// $c = curl_init("file://$f");
+/// curl_setopt($c, CURLOPT_WRITEFUNCTION, function ($c, $data) use ($g) {
+///     var_dump(curl_setopt($g, CURLOPT_VERBOSE, 3));
+///     return strlen($data);
+/// });
+/// var_dump(curl_exec($c));
+/// unlink($f);
+/// ```
+/// ```expect
+/// boolean setopt(41) got unsupported argument 2, treated as 1
+/// bool(true)
+/// bool(true)
+/// g: boolean setopt(41) got unsupported argument 3, treated as 1
+/// bool(true)
+/// bool(true)
+/// ```
 #[php_function]
 fn curl_setopt(
     req: &mut Request,
@@ -949,7 +1092,9 @@ fn curl_setopt(
     option: i64,
     value: Value,
 ) -> Result<bool, Thrown> {
-    setopt(req, handle.object(), option, &value, false)
+    let mut pending = Pending::default();
+    let answered = setopt(req, handle.object(), option, &value, false, &mut pending);
+    pending.answer(req, answered)
 }
 
 /// `curl_setopt_array(CurlHandle $handle, array $options): bool`: each
@@ -975,22 +1120,31 @@ fn curl_setopt_array(
     // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(arr), …)`
     // (`Z/ext/curl/interface.c:2357`), no owner of the table taken: the
     // argument holds it while each option's conversion and callback run.
+    // What a callback left pending stands over the options after it, as
+    // php's `EG(exception)` does.
+    let mut pending = Pending::default();
     let walked = walk::foreach(req, options, Hold::None, |req, row| -> walk::Step<bool> {
         let key = row.key().clone();
         let value = row.value().deref();
-        let Key::Int(option) = key else {
-            let ce = Throwables::of(req)?;
-            return Err(argument_error(
-                req,
-                ce.value_error,
-                2,
-                "contains an invalid cURL option",
-            ));
-        };
-        if !setopt(req, handle.object(), option, &value, true)? {
-            return Ok(ControlFlow::Break(false));
+        let set = pending.step(req, |req, pending| {
+            let Key::Int(option) = key else {
+                let ce = Throwables::of(req)?;
+                return Err(argument_error(
+                    req,
+                    ce.value_error,
+                    2,
+                    "contains an invalid cURL option",
+                ));
+            };
+            setopt(req, handle.object(), option, &value, true, pending)
+        });
+        match set {
+            Some(Ok(true)) => Ok(ControlFlow::Continue(())),
+            // A fatal or an `exit` standing leaves at once.
+            Some(Ok(false)) | None => Ok(ControlFlow::Break(false)),
+            Some(Err(thrown)) => Err(thrown),
         }
-        Ok(ControlFlow::Continue(()))
-    })?;
-    Ok(walked.unwrap_or(true))
+    });
+    let answered = walked.map(|ended| ended.unwrap_or(true));
+    pending.answer(req, answered)
 }

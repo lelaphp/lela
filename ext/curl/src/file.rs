@@ -9,13 +9,14 @@ use php_ext::abi::{FromArgument as _, Instance, Path, Raw, This};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, read_prop, write_prop};
 use php_ext::coerce::with_string;
-use php_ext::raising::{Level, Thrown, docref, while_pending};
+use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Opening, OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, PropertyScope, Value, ValueRef};
 
 use crate::ffi::{MimeBuilder, Posted};
 use crate::handle::{Curl, easy_of, made};
+use crate::throwables::Pending;
 
 /// `struct mime_data_cb_arg`: the path a `CURLFile` part reads and the
 /// stream open on it, opened again where a transfer finds it closed, an
@@ -387,28 +388,31 @@ fn keep_postfields(req: &mut Request, object: PhpObject, array: PhpArray) {
 /// int(0)
 /// ```
 ///
+/// What the walk leaves pending, and what the tree's set or free
+/// threw, is left in `pending`, which may stand already as the walk
+/// starts, an earlier option's in `curl_setopt_array`.
+///
 /// [`EasyId::post_form`]: crate::ffi::EasyId::post_form
 pub(crate) fn build_mime(
     req: &mut Request,
     object: PhpObject,
     array: PhpArray,
+    pending: &mut Pending,
 ) -> Result<bool, Thrown> {
     let easy = easy_of(req, object)?;
-    let mut pending = None;
     let posted = easy.post_form(req, |req, mime| {
         let mut form = Form {
             mime,
             object,
             array,
             error: 0,
-            pending: None,
+            pending: &mut *pending,
         };
         let walked = form.fill(req);
         // `SAVE_CURL_ERROR(ch, error)` where the walk reached its end.
         if walked && let Some(curl) = object.native_mut::<Curl>(req) {
             curl.err = i64::from(form.error);
         }
-        pending = form.pending;
         walked && form.error == 0
     });
     let Some((posted, thrown)) = posted else {
@@ -419,26 +423,10 @@ pub(crate) fn build_mime(
     {
         curl.err = i64::from(code);
     }
-    let thrown = match thrown {
-        Some(later) => Some(raised(req, pending, later)),
-        None => pending,
-    };
-    match thrown {
-        Some(thrown) => Err(thrown),
-        None => Ok(posted == Posted::Set(0)),
+    if let Some(thrown) = thrown {
+        pending.park(req, thrown);
     }
-}
-
-/// `later` raised while `earlier` stands pending: chained onto it, as
-/// `zend_throw_exception_internal` chains one raised while another is
-/// pending. A call made while a throwable stands answers that same
-/// throwable, having served nothing, which is no second throwable.
-fn raised(req: &mut Request, earlier: Option<Thrown>, later: Thrown) -> Thrown {
-    match earlier {
-        Some(earlier) if earlier.exception() == later.exception() => earlier,
-        Some(earlier) => earlier.chain(req, later),
-        None => later,
-    }
+    Ok(posted == Posted::Set(0))
 }
 
 /// `build_mime_structure_from_hash`'s walk over `array`, the option's
@@ -450,7 +438,7 @@ struct Form<'m> {
     object: PhpObject,
     array: PhpArray,
     error: i32,
-    pending: Option<Thrown>,
+    pending: &'m mut Pending,
 }
 
 impl Form<'_> {
@@ -564,7 +552,7 @@ impl Form<'_> {
     fn string_file(&mut self, req: &mut Request, name: &[u8], file: PhpObject) -> ControlFlow<()> {
         // `if (EG(exception)) goto out_string;` after each read, which
         // finds a throwable the walk left pending as well.
-        if self.pending.is_some() {
+        if self.pending.stands() {
             return ControlFlow::Break(());
         }
         let (object, array) = (self.object, self.array);
@@ -611,22 +599,17 @@ impl Form<'_> {
     }
 
     /// `step` taken as php takes it, with what the walk left pending
-    /// standing in `EG(exception)` ([`while_pending`]), so a call it
-    /// makes returns at once and a diagnostic it raises reaches no
-    /// handler; what it throws is left pending in turn, and `None`.
-    /// `None` too where what stands is a fatal or an `exit`, which
-    /// [`Form::flow`] ends the walk on before any further step.
+    /// standing in `EG(exception)` ([`Pending::step`]); what it throws is
+    /// left pending in turn, and `None`. `None` too where what stands is
+    /// a fatal or an `exit`, which [`Form::flow`] ends the walk on before
+    /// any further step.
     fn step<R>(
         &mut self,
         req: &mut Request,
         step: impl FnOnce(&mut Request, &mut MimeBuilder) -> Result<R, Thrown>,
     ) -> Option<R> {
         let mime = &mut *self.mime;
-        let taken = match &self.pending {
-            None => Some(step(req, mime)),
-            Some(pending) => while_pending(req, pending, |req| step(req, mime)),
-        };
-        match taken? {
+        match self.pending.step(req, |req, _| step(req, mime))? {
             Ok(answer) => Some(answer),
             Err(thrown) => {
                 self.park(req, thrown);
@@ -642,18 +625,19 @@ impl Form<'_> {
             .flatten()
     }
 
-    /// `thrown` left pending ([`raised`]).
+    /// `thrown` left pending ([`Pending::park`]).
     fn park(&mut self, req: &mut Request, thrown: Thrown) {
-        self.pending = Some(raised(req, self.pending.take(), thrown));
+        self.pending.park(req, thrown);
     }
 
     /// Whether the walk goes on: past a throwable, as php's loop goes on
     /// with `EG(exception)` set; not past a fatal or an `exit`, which
     /// leave by `zend_bailout` at once.
     fn flow(&self) -> ControlFlow<()> {
-        match &self.pending {
-            Some(thrown) if thrown.exception().is_none() => ControlFlow::Break(()),
-            _ => ControlFlow::Continue(()),
+        if self.pending.leaving() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
         }
     }
 }

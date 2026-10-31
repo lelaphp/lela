@@ -16,7 +16,7 @@ use crate::handle::{
     hand_out, made, verify_handlers,
 };
 use crate::info::Assoc;
-use crate::throwables::Throwables;
+use crate::throwables::{Pending, Throwables};
 
 /// `php_curlm` less its `zend_object`.
 #[derive(Default)]
@@ -191,7 +191,9 @@ fn curl_multi_add_handle(
     handle: Instance<CurlHandle>,
 ) -> Result<i64, Thrown> {
     let object = handle.object();
-    verify_handlers(req, object, true);
+    if let Some(thrown) = verify_handlers(req, object, true) {
+        return Err(thrown);
+    }
     cleanup_handle(req, object);
     let multi = multi_of(req, multi_handle)?;
     let easy = easy_of(req, object)?;
@@ -360,7 +362,9 @@ fn curl_multi_exec(
     let handles = handles(mh(req, multi_handle)?);
     let mut held: Vec<EasyId> = Vec::with_capacity(handles.len());
     for handle in &handles {
-        verify_handlers(req, *handle, true);
+        if let Some(thrown) = verify_handlers(req, *handle, true) {
+            return Err(thrown);
+        }
         if let Ok(easy) = easy_of(req, *handle) {
             held.push(easy);
         }
@@ -532,14 +536,17 @@ fn curl_multi_close(
     }
     let multi = multi_of(req, multi_handle)?;
     let handles = std::mem::take(&mut mh(req, multi_handle)?.easy);
+    let mut pending = Pending::default();
     for handle in handles {
-        verify_handlers(req, *handle, true);
+        if let Some(thrown) = verify_handlers(req, *handle, true) {
+            pending.park(req, thrown);
+        }
         if let Ok(easy) = easy_of(req, *handle) {
             multi.remove(req, easy);
         }
         handle.give_up(req);
     }
-    Ok(())
+    pending.answer(req, Ok(()))
 }
 
 /// `curl_multi_errno(CurlMultiHandle $multi_handle): int`.

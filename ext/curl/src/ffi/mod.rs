@@ -23,8 +23,11 @@
 //! ([`Persistent::alone`]).
 //!
 //! **Callbacks.** libcurl calls back from inside `curl_easy_perform`,
-//! `curl_multi_perform`, `curl_easy_pause` and the calls that free a MIME
-//! tree. Each such call is made through [`Session::enter`], which leaves
+//! `curl_multi_perform`, `curl_easy_pause`, the calls that free a MIME
+//! tree, and `curl_easy_setopt`, whose `infof` and `failf` lines reach
+//! the debug callable and the `CURLOPT_STDERR` file: a `CURL *` is set
+//! only through `Live`, which `EasyId::call` makes holding it. Each such
+//! call is made through [`Session::enter`], which leaves
 //! the request where a trampoline finds it for the length of the call and
 //! hands back what a callback threw, which the library cannot carry. A
 //! trampoline outside such a call reaches no request and answers as php
@@ -58,7 +61,7 @@ use php_ext::raising::{Cause, Thrown};
 use php_ext::request::{ForeignId, Held, Request};
 use php_ext::values::{Owner, Value};
 
-pub(crate) use easy::{Address, Easy, EasyId, Hook, Info, MimeBuilder, Posted};
+pub(crate) use easy::{Address, Called, Easy, EasyId, Hook, Info, MimeBuilder, Posted};
 pub(crate) use multi::{Multi, MultiId, Persistent, Share, ShareRef, Shared};
 use stdio::CFile;
 

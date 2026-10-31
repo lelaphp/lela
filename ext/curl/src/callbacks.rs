@@ -31,8 +31,10 @@ fn user(
     let mut arguments = vec![object.as_value()];
     arguments.extend_from_slice(rest);
     let returned = call_held(cx, object, held, &arguments);
-    if returned.is_some() {
-        verify_handlers(cx.req, object, true);
+    if returned.is_some()
+        && let Some(thrown) = verify_handlers(cx.req, object, true)
+    {
+        cx.raise(thrown);
     }
     returned
 }

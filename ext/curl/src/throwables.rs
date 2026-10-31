@@ -5,7 +5,7 @@
 
 use php_ext::abi::{Refusal, Start};
 use php_ext::attr::php_class;
-use php_ext::raising::{self, Thrown};
+use php_ext::raising::{self, Thrown, while_pending};
 use php_ext::request::Request;
 use php_ext::values::ClassId;
 
@@ -58,5 +58,79 @@ impl Throwables {
                 "InternalError: curl's classes were not resolved at its engine start",
             )),
         }
+    }
+}
+
+/// What a native's body left in php's `EG(exception)` and went on past:
+/// the throwable that stands, with what was raised after it chained onto
+/// it, or the fatal or `exit` that leaves at once. A callable the library
+/// called back leaves its throwable here as `zend_call_known_fcc` leaves
+/// it, and so does a `__toString` a walk converts with.
+#[derive(Default)]
+pub(crate) struct Pending(Option<Thrown>);
+
+impl Pending {
+    /// Whether anything stands, php's `if (EG(exception))`.
+    pub(crate) fn stands(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Whether what stands is a fatal or an `exit`, which leaves by
+    /// `zend_bailout` at once, past every step after it.
+    pub(crate) fn leaving(&self) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|thrown| thrown.exception().is_none())
+    }
+
+    /// `thrown` left pending ([`raised`]).
+    pub(crate) fn park(&mut self, req: &mut Request, thrown: Thrown) {
+        self.0 = Some(raised(req, self.0.take(), thrown));
+    }
+
+    /// `step` taken as php takes it, with what stands in `EG(exception)`
+    /// ([`while_pending`]), so a call it makes returns at once and a
+    /// diagnostic it raises reaches no handler; `step` may leave more
+    /// pending in turn. `None`, with nothing taken, where what stands is a
+    /// fatal or an `exit`.
+    pub(crate) fn step<R>(
+        &mut self,
+        req: &mut Request,
+        step: impl FnOnce(&mut Request, &mut Pending) -> R,
+    ) -> Option<R> {
+        // A copy naming the throwable, for the step to stand it in; the
+        // owner stays this one.
+        match self.0.clone() {
+            None => Some(step(req, self)),
+            Some(standing) => while_pending(req, &standing, |req| step(req, self)),
+        }
+    }
+
+    /// The native's answer: `answer` where nothing stands, and what
+    /// stands otherwise, a throwable `answer` raised chained onto it, as
+    /// php's return value is dropped with `EG(exception)` set. `T` holds
+    /// no owner.
+    pub(crate) fn answer<T>(
+        self,
+        req: &mut Request,
+        answer: Result<T, Thrown>,
+    ) -> Result<T, Thrown> {
+        match (answer, self.0) {
+            (Ok(answered), None) => Ok(answered),
+            (Ok(_), Some(standing)) => Err(standing),
+            (Err(thrown), standing) => Err(raised(req, standing, thrown)),
+        }
+    }
+}
+
+/// `later` raised while `earlier` stands pending: chained onto it, as
+/// `zend_throw_exception_internal` chains one raised while another is
+/// pending. A call made while a throwable stands answers that same
+/// throwable, having served nothing, which is no second throwable.
+fn raised(req: &mut Request, earlier: Option<Thrown>, later: Thrown) -> Thrown {
+    match earlier {
+        Some(earlier) if earlier.exception() == later.exception() => earlier,
+        Some(earlier) => earlier.chain(req, later),
+        None => later,
     }
 }
