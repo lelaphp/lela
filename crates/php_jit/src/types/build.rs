@@ -1756,18 +1756,21 @@ impl<'a> Builder<'a> {
     /// the trace recorded. A
     /// return trace whose `RETURN_BY_REF` returns into the file's code,
     /// away from its recursion's header, takes that exit and grows a side
-    /// trace there. The file's code reads the reference only once its
-    /// loop is done: an `ECHO` of it in the loop is held by a guard php
-    /// does not take (#3695).
+    /// trace there, #3688's program:
     ///
     /// ```php
     /// function h() { return 1; }
     /// function &p($n) { static $z = 0; if ($n == 0) { return $z; } $x = &p($n - 1); h(); return $x; }
-    /// $r = &p(6);
-    /// for ($i = 0; $i < 5; $i++) { $r = &p(8); }
-    /// echo $r, "\n", "done\n";
+    /// $r = &p(6); echo $r, "\n";
+    /// for ($i = 0; $i < 5; $i++) { $r = &p(8); echo $r, "\n"; }
+    /// echo "done\n";
     /// ```
     /// ```expect regime=jit-inline process
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// 0
     /// 0
     /// done
     /// ```
@@ -1810,11 +1813,16 @@ impl<'a> Builder<'a> {
     /// ```php
     /// function h() { return 1; }
     /// function &p($n) { static $z = 0; if ($n == 0) { return $z; } $x = &p($n - 1); h(); return $x; }
-    /// $r = &p(6);
-    /// for ($i = 0; $i < 5; $i++) { $r = &p(8); }
-    /// echo $r, "\n", "done\n";
+    /// $r = &p(6); echo $r, "\n";
+    /// for ($i = 0; $i < 5; $i++) { $r = &p(8); echo $r, "\n"; }
+    /// echo "done\n";
     /// ```
     /// ```expect regime=jit-exit-fuzz process
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// 0
     /// 0
     /// done
     /// ```
