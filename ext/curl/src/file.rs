@@ -637,7 +637,7 @@ impl Form<'_> {
     fn string_file(&mut self, req: &mut Request, name: &[u8], file: PhpObject) -> ControlFlow<()> {
         // `if (EG(exception)) goto out_string;` after each read, which
         // finds a throwable the walk left pending as well.
-        if self.pending.stands() {
+        if self.pending.stands(req) {
             return ControlFlow::Break(());
         }
         let (object, array) = (self.object, self.array);

@@ -631,6 +631,24 @@ fn writable(req: &mut Request, stream: Stream) -> Result<bool, Thrown> {
 }
 
 /// A stream option set.
+///
+/// The stream it replaces is given up here, as php's
+/// `zval_ptr_dtor(&ch->handlers.write->stream)` gives it up, so a user
+/// wrapper's `stream_close` that throws leaves its throwable pending in
+/// the body that set the option, and what an option after it raises in
+/// `curl_setopt_array` is chained onto it ([`Pending::step`]):
+///
+/// ```php
+/// class W { public $context; function stream_open($p,$m,$o,&$op){return true;} function stream_write($d){return strlen($d);} function stream_eof(){return true;} function stream_close(){ echo "close\n"; throw new Exception("close"); } }
+/// stream_wrapper_register('ww', 'W');
+/// $h = curl_init();
+/// curl_setopt($h, CURLOPT_FILE, fopen('ww://x', 'w'));
+/// try { curl_setopt_array($h, [CURLOPT_FILE => fopen('php://memory', 'w'), CURLOPT_URL => "a\0b"]); } catch (Throwable $e) { echo get_class($e), " <- ", $e->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// close
+/// ValueError <- close
+/// ```
 fn set_stream(
     req: &mut Request,
     object: PhpObject,
