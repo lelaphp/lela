@@ -90,10 +90,14 @@ const READERS: [(&str, &[&str]); 30] = [
 ];
 
 /// Commands that leave the checkout they run in as it was, beside
-/// [`READERS`]: a change of directory, what reads the repository's
-/// history or refs, and what reaches the tracker alone; each with the
-/// words that would make it write.
-const LEAVES: [(&str, &[&str]); 25] = [
+/// [`READERS`]: what writes nothing of its working tree, its index, its
+/// HEAD or its operation files, which is all the owner lock covers
+/// (#3755). A change of directory; what reads the repository's history,
+/// refs or settings; what writes only what checkouts share, refs, objects,
+/// settings and a new worktree beside them; what reaches the tracker alone;
+/// and the instruments that say where things stand. Each with the words
+/// that would make it write.
+const LEAVES: [(&str, &[&str]); 34] = [
     ("cd", &[]),
     ("pushd", &[]),
     ("popd", &[]),
@@ -119,6 +123,16 @@ const LEAVES: [(&str, &[&str]); 25] = [
     ("git describe", &[]),
     ("git for-each-ref", &[]),
     ("git fetch", &[]),
+    ("git config --get", &[]),
+    ("git config --get-all", &[]),
+    ("git config --get-regexp", &[]),
+    ("git worktree list", &[]),
+    ("git worktree add", &[]),
+    ("xtask worktree add", &[]),
+    ("xtask worktree whose", &[]),
+    // `track work` runs sessions in the checkout it stands in.
+    ("xtask track", &["work"]),
+    ("xtask status", &[]),
 ];
 
 /// Commands whose last operand is the one they write.
@@ -198,8 +212,8 @@ pub(super) fn can_write(line: &Line, place: &impl Place) -> bool {
         })
 }
 
-/// Whether `argv` can change the checkout it runs in (#3621): its working
-/// tree, its index or its history. Every command can but a reader that
+/// Whether `argv` can change the checkout it runs in (#3621, #3755): its
+/// working tree, its index, its HEAD or its operation files. Every command can but a reader that
 /// leaves the index alone ([`READERS`] less git's `add` and `commit`),
 /// `sed` without `-i`, and what [`LEAVES`] names; a redirection the line
 /// makes is the line's, and read beside its commands.
@@ -412,6 +426,11 @@ mod tests {
             "rm -f a",
             "gh pr checkout 1",
             "sort -o a b",
+            "git checkout -b t1",
+            "git config branch.t1.ticket 1",
+            "git worktree remove wt",
+            "cargo xtask track work --track x",
+            "cargo xtask worktree own",
         ] {
             assert!(changes(line), "{line}");
         }
@@ -426,6 +445,15 @@ mod tests {
             "cd /tmp",
             "gh issue view 3621",
             "echo x",
+            // #3755: what writes only what checkouts share.
+            "git worktree list --porcelain",
+            "git -C wt worktree add -q -b t1 ../t1",
+            "git config --get branch.t1.ticket",
+            "git config --get-regexp '^branch'",
+            "cargo xtask worktree add t1 --ticket 1",
+            "cargo xtask worktree whose",
+            "cargo xtask track",
+            "cargo xtask status --section git",
         ] {
             assert!(!changes(line), "{line}");
         }
