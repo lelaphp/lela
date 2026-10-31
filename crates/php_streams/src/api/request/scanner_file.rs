@@ -44,12 +44,18 @@ pub struct ScannerFile {
 
 impl ScannerFile {
     /// `php_stream_open_for_zend_ex(handle, USE_PATH | REPORT_ERRORS |
-    /// STREAM_OPEN_FOR_INCLUDE)`: the path opened along `include_path`,
+    /// STREAM_OPEN_FOR_INCLUDE)`, the bit that warns left out where `warns`
+    /// is `false`: the path opened along `include_path`,
     /// as an include's open, so `allow_url_include` holds a URL wrapper
     /// to it, with buffering off "to avoid double buffering between PHP
-    /// and Zend streams"; `None` for the open that failed, which warned.
+    /// and Zend streams"; `None` for the open that failed, which warned
+    /// where `warns` said.
     /// The `Err` is what the open threw, or the memory limit's fatal.
-    pub fn open(req: &mut Request, path: &[u8]) -> Result<Option<ScannerFile>, Thrown> {
+    pub fn open(
+        req: &mut Request,
+        path: &[u8],
+        warns: bool,
+    ) -> Result<Option<ScannerFile>, Thrown> {
         ScannerFile::open_with(
             req,
             path,
@@ -57,7 +63,8 @@ impl ScannerFile {
                 use_path: true,
                 for_include: true,
                 for_zend_stream: true,
-                ..OpenOptions::REPORT
+                report: warns,
+                ..OpenOptions::default()
             },
         )
     }

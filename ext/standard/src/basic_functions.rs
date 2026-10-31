@@ -1034,7 +1034,7 @@ fn parse_ini_file(
     }
     let into = PhpArray::new(req)?;
     let name = filename.as_bytes().to_vec();
-    let mut fh = match ScannerFile::open(req, &name) {
+    let mut fh = match ScannerFile::open(req, &name, true) {
         Ok(Some(fh)) => fh,
         Ok(None) => {
             into.give_up(req);

@@ -411,7 +411,7 @@ fn file_action(
                 let start = usize::from(entry.first() == Some(&b'/'));
                 state.cwd = (cut > 0).then(|| entry[start..cut].to_vec());
             }
-            let served = php_ext::call::load_file(req, &name);
+            let served = php_ext::call::load_file(req, &name, false);
             let state = req.state::<crate::State>();
             state.cwd = None;
             state.cwd_init = false;
