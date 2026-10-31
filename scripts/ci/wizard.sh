@@ -227,7 +227,7 @@ token() {
   gh api -X POST "repos/$REPO/actions/runners/registration-token" --jq .token
 }
 
-TOTAL_STAGES=11
+TOTAL_STAGES=12
 
 banner "dax-php CI: the Hetzner server and the Mac mini as runners"
 
@@ -297,7 +297,7 @@ say "gh login needs admin on $REPO."
 if confirm "Lay the server down as $REPO's runner 'dax-build'?"; then
   LINUX_TOKEN=$(token)
   act ssh_to "root@$LINUX_HOST" mkdir -p /root/dax-ci
-  act scp -i "$SSH_KEY" scripts/ci/runner.sh scripts/ci/pinned-php.sh "root@$LINUX_HOST:/root/dax-ci/"
+  act scp -i "$SSH_KEY" scripts/ci/runner.sh scripts/ci/pinned-php.sh scripts/ci/stash.sh "root@$LINUX_HOST:/root/dax-ci/"
   act ssh_to "root@$LINUX_HOST" /root/dax-ci/runner.sh linux --url "$REPO_URL" --token "$LINUX_TOKEN"
 fi
 pause
@@ -359,6 +359,56 @@ fi
 pause
 
 # ── 10 ────────────────────────────────────────────────────────────────────
+stage "The stash every job hands off through"
+say "The jobs keep what they hand each other on the server (scripts/ci/stash.sh),"
+say "not as GitHub artifacts, which count against the account's storage (#3554)."
+say "One key, a repository secret, reaches it from every runner; the server holds it"
+say "to rrsync over ~runner/dax-stash, and your key from stage 1 reads it, for"
+say "xtask phpt --against. The settings are the repository's: DAX_STASH and"
+say "DAX_STASH_HOST_KEY, variables, and DAX_STASH_KEY, a secret. Stage 5 laid the"
+say "directory and its prune timer down; run it again first on a server laid before."
+STASH_KEY="$(dirname "$SSH_KEY")/dax-stash-ci"
+if confirm "Authorize the stash's keys on the server and set the repository's stash settings?"; then
+  [[ -f "$STASH_KEY" ]] || act ssh-keygen -t ed25519 -N "" -C "dax-php CI stash" -f "$STASH_KEY"
+  # Each key held to rrsync over the stash alone: the jobs' to read and
+  # write, the person's to read.
+  keys=(
+    "restrict,command=\"rrsync /home/runner/dax-stash\" $(cat "$STASH_KEY.pub" 2>/dev/null || echo "(not created: dry run)")"
+    "restrict,command=\"rrsync -ro /home/runner/dax-stash\" $(cat "$SSH_KEY.pub" 2>/dev/null || echo "(not created: dry run)")"
+  )
+  # shellcheck disable=SC2016 # the script is the server's, its $f its own
+  printf '%s\n' "${keys[@]}" | act ssh_to "root@$LINUX_HOST" 'f=/home/runner/.ssh/authorized_keys
+    install -d -m 700 -o runner -g runner /home/runner/.ssh && touch "$f"
+    while IFS= read -r key; do grep -qxF "$key" "$f" || echo "$key" >> "$f"; done
+    chown runner:runner "$f" && chmod 600 "$f"'
+  # The host key as the server states it over the connection stage 4
+  # checked, so no job takes the first key it is offered.
+  if [[ "${DRY_RUN:-}" == 1 ]]; then
+    host_key="$LINUX_HOST ssh-ed25519 DRY-RUN"
+  else
+    host_key="$LINUX_HOST $(ssh_to "root@$LINUX_HOST" cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)"
+  fi
+  if [[ "${DRY_RUN:-}" == 1 ]]; then
+    note "dry run, not set: the variables DAX_STASH=runner@$LINUX_HOST and DAX_STASH_HOST_KEY, the secret DAX_STASH_KEY"
+  else
+    set_var DAX_STASH "runner@$LINUX_HOST"
+    set_var DAX_STASH_HOST_KEY "$host_key"
+    set_secret DAX_STASH_KEY "$(cat "$STASH_KEY")"
+  fi
+  if act rsync -e "ssh -i $SSH_KEY -o BatchMode=yes" --list-only "runner@$LINUX_HOST:" >/dev/null; then
+    printf '  %s✓%s your key reads the stash at runner@%s\n' "$GREEN" "$RESET" "$LINUX_HOST"
+  else
+    warn "your key does not read the stash at runner@$LINUX_HOST; run this stage again"
+  fi
+  step "To fetch CI's phpt runs (xtask phpt --against) from this machine:"
+  note "export DAX_STASH=runner@$LINUX_HOST RSYNC_RSH='ssh -i $SSH_KEY'"
+else
+  warn "No stash: every hand-off between jobs stays a GitHub artifact, against the account's storage."
+  SKIPPED+=("the stash: run this stage again")
+fi
+pause
+
+# ── 11 ────────────────────────────────────────────────────────────────────
 stage "Billing"
 say "Self-hosted jobs spend no Actions minutes, but GitHub started no job at all while"
 say "the account's billing failed (#2218)."
@@ -368,7 +418,7 @@ step "Hosted macOS minutes are no longer used; a budget of 0 for them is safe."
 step "Hosted Linux minutes stop once the next stage deletes DAX_BUILD_RUNNER."
 pause "Press Enter once billing is settled"
 
-# ── 11 ────────────────────────────────────────────────────────────────────
+# ── 12 ────────────────────────────────────────────────────────────────────
 stage "The Linux jobs come home: DAX_BUILD_RUNNER deleted, then the first run"
 say "While DAX_BUILD_RUNNER is set, the Linux jobs run on a GitHub-hosted image and"
 say "both oracle jobs are skipped (scripts/ci/README.md). With both runners online"

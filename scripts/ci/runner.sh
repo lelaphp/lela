@@ -9,8 +9,11 @@
 #       names, #1724). The packages the jobs need beyond packages.txt, Docker
 #       for ci/mysql/compose.yaml, a `runner` user in the `docker` group who
 #       may run apt-get, locale-gen and localedef as root with no password,
-#       rustup for that user, and the runner, labelled `dax-build`, as a
-#       systemd service.
+#       rustup for that user, the runner, labelled `dax-build`, as a
+#       systemd service, and the stash every job hands off through
+#       (scripts/ci/stash.sh, #3554): ~/dax-stash, the runner's, and a timer
+#       that prunes it hourly. The key the jobs reach it by is authorized
+#       by the wizard's stash stage, held to `rrsync` over that directory.
 #   runner.sh mac --url <repository URL> --token <registration token> --pin <oracle.json> [--name <name>]
 #       On the Mac mini, as the admin user the runner runs as; sudo asks for
 #       the password, for Homebrew and the variants' directories. Homebrew,
@@ -106,7 +109,7 @@ linux() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends build-essential ca-certificates curl git jq unzip zstd \
-        locales sudo docker.io docker-compose-v2 nodejs npm gh
+        locales sudo docker.io docker-compose-v2 nodejs npm gh rsync python3
     systemctl enable --now docker
     id runner >/dev/null 2>&1 || useradd --create-home --shell /bin/bash runner
     usermod -aG docker runner
@@ -123,8 +126,42 @@ EOF
     visudo -cf /etc/sudoers.d/dax-runner
     say "rustup, with no toolchain until a job names one"
     sudo -u runner -H bash -c '[ -x ~/.cargo/bin/rustup ] || curl -sSf https://sh.rustup.rs | sh -s -- -y -q --default-toolchain none --profile minimal'
+    stash
     register linux x64 /home/runner/actions-runner runner dax-build \
         /home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+}
+
+# The stash on the server: its directory, the runner's, and stash.sh's
+# prune, installed beside this script and run hourly as the runner by a
+# systemd timer. rrsync, which the wizard holds the stash's keys to, comes
+# with rsync and runs on python3.
+stash() {
+    say "the stash the jobs hand off through, pruned hourly"
+    command -v rrsync >/dev/null || die "rsync installed no rrsync, which the stash's keys are held to"
+    install -d -o runner -g runner -m 0750 /home/runner/dax-stash
+    install -D -m 0755 "$here/stash.sh" /usr/local/lib/dax-ci/stash.sh
+    cat > /etc/systemd/system/dax-stash-prune.service <<'EOF'
+[Unit]
+Description=dax-php CI: drop the stash's entries past their days (scripts/ci/stash.sh)
+
+[Service]
+Type=oneshot
+User=runner
+ExecStart=/usr/local/lib/dax-ci/stash.sh prune /home/runner/dax-stash
+EOF
+    cat > /etc/systemd/system/dax-stash-prune.timer <<'EOF'
+[Unit]
+Description=dax-php CI: prune the stash hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now dax-stash-prune.timer
 }
 
 mac() {

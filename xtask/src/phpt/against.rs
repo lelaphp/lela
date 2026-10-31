@@ -480,18 +480,20 @@ impl Base {
     }
 }
 
-/// The name the dashboard's oracle job uploads [`RUNS`] under: every run
-/// its runner keeps, each under its engine's tree (#2362).
+/// The name the dashboard's oracle job stashes [`RUNS`] under: every run
+/// its runner keeps, each under its engine's tree (#2362), kept in the
+/// stash as `latest/<name>.tar.gz` (scripts/ci/stash.sh, #3554).
 pub(crate) const UPLOAD: &str = "phpt-runs";
 
 /// The line that lays the runs CI kept into the workspace at `root`,
-/// where [`roots`] looks first (#2362): the latest [`UPLOAD`] downloaded
-/// apart, since `gh` writes over no file, and every run and every set of
-/// sources one was kept over ([`KEYED`]) copied in where the workspace
-/// keeps none, as [`carry`] copies a worktree's.
+/// where [`roots`] looks first (#2362): the latest [`UPLOAD`] fetched over
+/// rsync from the stash `DAX_STASH` names, `<user>@<host>` as the
+/// repository's variable does, and unpacked apart, and every run and every
+/// set of sources one was kept over ([`KEYED`]) copied in where the
+/// workspace keeps none, as [`carry`] copies a worktree's.
 pub(crate) fn fetch(root: &Path) -> String {
     format!(
-        "d=$(mktemp -d) && gh run download -n {UPLOAD} -D \"$d\" && rsync -a --ignore-existing \"$d/\" '{}/'",
+        "d=$(mktemp -d) && rsync -L \"${{DAX_STASH:?names the stash on the server, as scripts/ci/README.md says}}:latest/{UPLOAD}.tar.gz\" \"$d/\" && mkdir \"$d/runs\" && tar -xzf \"$d/{UPLOAD}.tar.gz\" -C \"$d/runs\" && rsync -a --ignore-existing \"$d/runs/\" '{}/'",
         root.join(RUNS).display()
     )
 }
