@@ -558,9 +558,6 @@ impl Request {
             Ok(path) => return self.include_stream(kind, written, &path),
             Err(Unresolved::Threw(thrown)) => return Err(thrown),
             Err(_) if is_wrapper_url(written) => {
-                if kind.once() && self.included_files.contains(written) {
-                    return Ok(Opened::Already);
-                }
                 return self.include_stream(kind, written, written);
             }
             Err(Unresolved::Missing(reason)) => {
@@ -961,9 +958,47 @@ impl Request {
     /// bool(true)
     /// ```
     ///
+    /// A once form opens the stream before it asks the table, by the
+    /// `*opened_path` the opener set or the path, as `zend_include_or_eval`'s
+    /// `ONCE` arm calls `zend_stream_open` first: a path the table holds is
+    /// closed unread, and one that did not open is not put in it, so the
+    /// next once form opens it again.
+    ///
+    /// ```php
+    /// class W { public $context; private $d = false;
+    ///     function stream_open($p, $m, $o, &$op) { echo "open $p\n"; if ($p === 'ww://b') $op = 'ww://a'; return $p !== 'ww://f'; }
+    ///     function stream_read($n) { echo "read\n"; if ($this->d) return ''; $this->d = true; return "<?php echo 'ran ', __FILE__, PHP_EOL;"; }
+    ///     function stream_eof() { return $this->d; }
+    ///     function stream_stat() { return []; }
+    ///     function stream_close() { echo "close\n"; }
+    ///     function stream_set_option($o, $a, $b) { return false; } }
+    /// stream_wrapper_register('ww', 'W');
+    /// include 'ww://a';
+    /// var_dump(include_once 'ww://a', require_once 'ww://b');
+    /// var_dump(@include_once 'ww://f', @include_once 'ww://f', count(get_included_files()));
+    /// ```
+    /// ```expect
+    /// open ww://a
+    /// read
+    /// read
+    /// close
+    /// ran ww://a
+    /// open ww://a
+    /// close
+    /// open ww://b
+    /// close
+    /// bool(true)
+    /// bool(true)
+    /// open ww://f
+    /// open ww://f
+    /// bool(false)
+    /// bool(false)
+    /// int(2)
+    /// ```
+    ///
     /// A read that fails, as one through a filter that answers
     /// `PSFS_ERR_FATAL` fails, is the file php could not open
-    /// (`zend_stream_fixup`, [`crate::layer::StreamHooks::open`]).
+    /// (`zend_stream_fixup`, [`crate::layer::StreamHooks::read_include`]).
     ///
     /// ```php
     /// class F extends php_user_filter { }
@@ -982,25 +1017,16 @@ impl Request {
         written: &[u8],
         path: &[u8],
     ) -> Result<Opened, Thrown> {
-        if kind.once() {
-            self.note_included(path)?;
-        }
         // Zend alone opens no wrapper's path (`zend_stream_open` with no
         // `zend_stream_open_function`).
         let Some(hooks) = self.stream_hooks() else {
             return self.failed_opening(kind, written);
         };
         let outer = self.include.including.replace((kind, self.vm.depth()));
-        let read = (hooks.open)(self, path);
+        let opened = (hooks.open)(self, path);
         self.include.including = outer;
-        let read = read?;
-        // `compile_file` compiles nothing and reports the file it could not
-        // open or read only where nothing is pending (`if (!EG(exception))`):
-        // what the open or the read threw stands as the compile's.
-        let compiled = match self.stream_thrown.take() {
-            Some(thrown) => Err(thrown),
-            None => self.compile_read(kind, written, path, read),
-        };
+        let named = opened?;
+        let compiled = self.compile_stream(kind, written, named, hooks.read_include);
         // `zend_destroy_file_handle` once the compile is done, with what it
         // threw standing in `EG(exception)`, so the wrapper's `stream_close`
         // is refused as `zend_call_function` refuses it.
@@ -1025,21 +1051,43 @@ impl Request {
         Err(thrown)
     }
 
-    /// [`Request::include_stream`]'s `compile_file` over what the open
-    /// read: the bytes compiled under the path the opener named, and
-    /// `compile_file`'s message where the open or the read failed.
-    fn compile_read(
+    /// [`Request::include_stream`] over the file the open `named`, before
+    /// `zend_destroy_file_handle`: a once form's `EG(included_files)` asked
+    /// by that name, `ZEND_FAKE_OP_ARRAY` for one it holds, which is read
+    /// nothing of, and the name put in it before the compile otherwise;
+    /// then `compile_file` over the file read whole, compiled under the
+    /// name, and its message where the open or the read failed.
+    fn compile_stream(
         &mut self,
         kind: IncludeKind,
         written: &[u8],
-        path: &[u8],
-        read: Option<crate::layer::IncludeSource>,
+        named: Option<Vec<u8>>,
+        read: fn(&mut Request) -> Result<Option<Vec<u8>>, Thrown>,
     ) -> Result<Opened, Thrown> {
-        let Some(crate::layer::IncludeSource {
-            source,
-            opened_path,
-        }) = read
-        else {
+        if kind.once()
+            && let Some(named) = &named
+        {
+            if self.included_files.contains(named) {
+                return Ok(Opened::Already);
+            }
+            self.note_included(named)?;
+        }
+        let source = match &named {
+            Some(_) if self.stream_thrown.is_none() => {
+                let outer = self.include.including.replace((kind, self.vm.depth()));
+                let source = read(self);
+                self.include.including = outer;
+                source?
+            }
+            _ => None,
+        };
+        // `compile_file` compiles nothing and reports the file it could not
+        // open or read only where nothing is pending (`if (!EG(exception))`):
+        // what the open or the read threw stands as the compile's.
+        if let Some(thrown) = self.stream_thrown.take() {
+            return Err(thrown);
+        }
+        let (Some(path), Some(source)) = (named, source) else {
             // A read a fatal ended is no file php reports: the bailout
             // jumps past `compile_file`'s message.
             if self.diagnostics().bailing_out() {
@@ -1047,12 +1095,11 @@ impl Request {
             }
             return self.failed_opening(kind, written);
         };
-        let path = opened_path.as_deref().unwrap_or(path);
         // Compiled through every `zend_compile_file` link, the stream's
         // bytes handed down as the stream php's handle holds.
         let args = FileArgs {
             source: Some(&source),
-            ..FileArgs::new(path, Some(written), HandlePath::Stream)
+            ..FileArgs::new(&path, Some(written), HandlePath::Stream)
         };
         let outer = self.include.including.replace((kind, self.vm.depth()));
         let compiled = self.compile_through(args);
@@ -1060,11 +1107,11 @@ impl Request {
         let unit = match compiled? {
             Some(Ok(unit)) => unit,
             Some(Err(refused)) => {
-                return Err(self.refused_include(&refused, path, SourceKind::File));
+                return Err(self.refused_include(&refused, &path, SourceKind::File));
             }
             None => return self.failed_opening(kind, written),
         };
-        self.note_compiled_file(path, &unit)?;
+        self.note_compiled_file(&path, &unit)?;
         // `zend_compile_file` raises what it recorded and declares the
         // file's functions and classes before the handle is destroyed.
         if !crate::engine::note_compiled(self, &unit, SourceKind::File) {
