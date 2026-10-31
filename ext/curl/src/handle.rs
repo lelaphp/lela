@@ -311,6 +311,26 @@ impl ObjectHandlers for Handlers {
     /// as php releases `ch->share` after `curl_easy_cleanup`; what a
     /// callback threw is left pending, as php leaves it in
     /// `EG(exception)`.
+    ///
+    /// A form's file part closed by the cleanup through a user wrapper
+    /// whose `stream_close` throws leaves that throwable standing over
+    /// the values let go after it, so a destructor among them chains onto
+    /// it:
+    ///
+    /// ```php
+    /// class W { public $context; function stream_open($p,$m,$o,&$op){return true;} function stream_read($n){return '';} function stream_eof(){return true;} function stream_stat(){return ['size'=>0];} function stream_close(){ echo "close\n"; throw new Exception("close"); } }
+    /// stream_wrapper_register('ww', 'W');
+    /// class D { function __invoke() {} function __destruct() { echo "dtor\n"; throw new Exception("dtor"); } }
+    /// $h = curl_init('file:///nonexistent');
+    /// curl_setopt($h, CURLOPT_POSTFIELDS, ['f' => new CURLFile('ww://x')]);
+    /// curl_setopt($h, CURLOPT_WRITEFUNCTION, new D);
+    /// try { $h = null; } catch (Exception $e) { echo $e->getMessage(), " <- ", $e->getPrevious()->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// close
+    /// dtor
+    /// dtor <- close
+    /// ```
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let mut pending = Pending::default();
         verify_before_cleanup(req, object, &mut pending);

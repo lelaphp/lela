@@ -388,6 +388,22 @@ fn keep_postfields(req: &mut Request, object: PhpObject, array: PhpArray) {
 /// int(0)
 /// ```
 ///
+/// An `exit` while an element is read stands as php's unwind exit does,
+/// and the walk goes on past it as past a throwable, so the form is still
+/// set:
+///
+/// ```php
+/// class X { function __toString(): string { exit("exit\n"); } }
+/// $h = curl_init('http://127.0.0.1:1/');
+/// register_shutdown_function(function () use ($h) { curl_exec($h); var_dump(curl_getinfo($h, CURLINFO_EFFECTIVE_METHOD)); });
+/// curl_setopt($h, CURLOPT_POSTFIELDS, ['a' => new X, 'b' => 'later']);
+/// echo "unreached\n";
+/// ```
+/// ```expect
+/// exit
+/// string(4) "POST"
+/// ```
+///
 /// The trees the `CURL *` held are let go of as the walk ends, before
 /// the new one is set, as php cleans `ch->to_free->post` before
 /// `curl_easy_setopt(CURLOPT_MIMEPOST)`; a walk that ends early
@@ -538,12 +554,12 @@ impl Form<'_> {
         match self.step(req, |req, _| is_a(req, value, b"CURLFile")) {
             Some(Some(file)) => return self.file(req, name, file),
             Some(None) => {}
-            None => return self.flow(),
+            None => return self.flow(req),
         }
         match self.step(req, |req, _| is_a(req, value, b"CURLStringFile")) {
             Some(Some(file)) => return self.string_file(req, name, file),
             Some(None) => {}
-            None => return self.flow(),
+            None => return self.flow(req),
         }
         if let ValueRef::Array(inner) = value.as_ref() {
             return self.list(req, name, inner);
@@ -555,6 +571,25 @@ impl Form<'_> {
     /// opened on it now, held by the part until its `free_cb`. Each
     /// property read that throws leaves the throwable pending and reads
     /// as no string, as php's `zend_read_property` answers then.
+    ///
+    /// A user wrapper's `stream_stat` that throws as the part's size is
+    /// read stands over the parts after it, so a `__toString` is not
+    /// called and a `CURLStringFile` ends the walk, as php's
+    /// `if (EG(exception)) goto out_string` does:
+    ///
+    /// ```php
+    /// class W { public $context; function stream_open($p,$m,$o,&$op){return true;} function stream_seek($o,$w){return true;} function stream_tell(){return 0;} function stream_stat(){ echo "stat\n"; throw new Exception("stat"); } function stream_close(){} }
+    /// stream_wrapper_register('ww', 'W');
+    /// class U { function __toString(): string { echo "U called\n"; return "u"; } }
+    /// $h = curl_init();
+    /// try { curl_setopt_array($h, [CURLOPT_POSTFIELDS => ['f' => new CURLFile('ww://x'), 'u' => new U, 's' => new CURLStringFile('d', 'n')], CURLOPT_PRIVATE => 'p']); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump(curl_getinfo($h, CURLINFO_PRIVATE));
+    /// ```
+    /// ```expect
+    /// stat
+    /// stat
+    /// bool(false)
+    /// ```
     fn file(&mut self, req: &mut Request, name: &[u8], file: PhpObject) -> ControlFlow<()> {
         let Some(path) = self.prop(req, file, b"name") else {
             let text = format!("Invalid filename for key {}", String::from_utf8_lossy(name));
@@ -562,7 +597,7 @@ impl Form<'_> {
                 docref(req, Level::Warning, &text);
                 Ok(())
             });
-            return self.flow();
+            return self.flow(req);
         };
         match self.step(req, |req, _| {
             Ok(req
@@ -573,7 +608,7 @@ impl Form<'_> {
             Some(true) => {}
             // `goto out_string`.
             Some(false) => return ControlFlow::Break(()),
-            None => return self.flow(),
+            None => return self.flow(req),
         }
         let kind = self.prop(req, file, b"mime").filter(|m| !m.is_empty());
         let postname = self.prop(req, file, b"postname").filter(|p| !p.is_empty());
@@ -604,7 +639,7 @@ impl Form<'_> {
             Ok((code, thrown))
         });
         let Some((code, thrown)) = added else {
-            return self.flow();
+            return self.flow(req);
         };
         if let Some(thrown) = thrown {
             self.park(req, thrown);
@@ -614,14 +649,14 @@ impl Form<'_> {
             Some(code) => self.error = code,
             None => return ControlFlow::Break(()),
         }
-        self.flow()
+        self.flow(req)
     }
 
     /// A `CURLStringFile` part: its data, file name and type.
     fn string_file(&mut self, req: &mut Request, name: &[u8], file: PhpObject) -> ControlFlow<()> {
         // `if (EG(exception)) goto out_string;` after each read, which
         // finds a throwable the walk left pending as well.
-        if self.pending.stands() {
+        if self.pending.stands(req) {
             return ControlFlow::Break(());
         }
         let (object, array) = (self.object, self.array);
@@ -650,7 +685,7 @@ impl Form<'_> {
         if let Err(thrown) = walked {
             self.park(req, thrown);
         }
-        self.flow()
+        self.flow(req)
     }
 
     /// `add_simple_field`: a part named `name` holding `value`'s text,
@@ -664,14 +699,14 @@ impl Form<'_> {
         if added.is_none() {
             self.mime.add_data(name, b"");
         }
-        self.flow()
+        self.flow(req)
     }
 
     /// `step` taken as php takes it, with what the walk left pending
     /// standing in `EG(exception)` ([`Pending::step`]); what it throws is
     /// left pending in turn, and `None`. `None` too where what stands is
-    /// a fatal or an `exit`, which [`Form::flow`] ends the walk on before
-    /// any further step.
+    /// a fatal, which [`Form::flow`] ends the walk on before any further
+    /// step.
     fn step<R>(
         &mut self,
         req: &mut Request,
@@ -699,11 +734,11 @@ impl Form<'_> {
         self.pending.park(req, thrown);
     }
 
-    /// Whether the walk goes on: past a throwable, as php's loop goes on
-    /// with `EG(exception)` set; not past a fatal or an `exit`, which
-    /// leave by `zend_bailout` at once.
-    fn flow(&self) -> ControlFlow<()> {
-        if self.pending.leaving() {
+    /// Whether the walk goes on: past a throwable or an `exit`, as php's
+    /// loop goes on with either in `EG(exception)`; not past a fatal,
+    /// which leaves by `zend_bailout` at once.
+    fn flow(&self, req: &Request) -> ControlFlow<()> {
+        if self.pending.fatal(req) {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
