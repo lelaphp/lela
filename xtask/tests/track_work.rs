@@ -254,6 +254,7 @@ impl Scratch {
             .env_remove("CARGO")
             .env_remove("CARGO_MANIFEST_DIR")
             .env_remove("CLAUDE_CODE_SUBAGENT_MODEL")
+            .env_remove(xtask::owner::SESSION_VARIABLE)
             .env("PATH", path)
             .env("STAND_IN_TRACKER", self.tracker.bin())
             .env("GIT_AUTHOR_NAME", "x")
@@ -268,6 +269,25 @@ impl Scratch {
             String::from_utf8_lossy(&out.stderr)
         );
         (out.status.code().unwrap_or(-1), text)
+    }
+
+    /// What `xtask worktree whose` says of the checkout at `dir`, asked
+    /// from a person's terminal.
+    fn whose(dir: &Path) -> String {
+        let out = Command::new(scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
+            .arg("--root")
+            .arg(dir)
+            .args(["worktree", "whose"])
+            .current_dir(dir)
+            .env_remove(xtask::owner::SESSION_VARIABLE)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "worktree whose: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim_end().to_owned()
     }
 
     /// One section of `xtask status` over the checkout's store, as Markdown:
@@ -525,12 +545,19 @@ fn a_run_on_a_label_track_names_its_ticket_and_lays_its_branch_off_main() {
 /// A session that ends with the ticket open, `--one`: the worktree stands,
 /// `main` and `origin` are where they were, nothing is retired, the
 /// record is kept and the exit is 1 with the reason; and
-/// `--permission-mode` and `--effort` override the defaults.
+/// `--permission-mode` and `--effort` override the defaults. The
+/// worktree is the session's while it runs and no session's once it has
+/// ended, as `xtask worktree whose` says (#3782).
 #[test]
 fn a_ticket_left_open_leaves_the_worktree_standing() {
     let scratch = Scratch::lay("open");
     scratch.tracker(&[20], 20);
     scratch.act("commit");
+    let during = scratch.dir.join("session.whose");
+    scratch.session_then(&format!(
+        "cargo xtask worktree whose > '{}'",
+        during.display()
+    ));
     let before = rev(&scratch.root, "main");
     let (code, out) = scratch.work(&[
         "--one",
@@ -555,12 +582,29 @@ fn a_ticket_left_open_leaves_the_worktree_standing() {
         "-p --model claude-opus-5 --permission-mode acceptEdits --effort max /build 20"
     );
     // The session was started under the id its worktree's owner record
-    // names, so its writes there are its own (#3621).
-    let owner = xtask::owner::of(&scratch.worktree("t20")).unwrap();
+    // names, so its writes there are its own (#3621); once it has ended,
+    // the record names a session no process runs, and is gone (#3782).
+    let worktree = scratch.worktree("t20");
+    let id = &scratch.ids()[0];
     assert_eq!(
-        owner.as_ref().map(xtask::owner::SessionId::as_str),
-        scratch.ids().first().map(String::as_str),
+        fs::read_to_string(&during).unwrap().trim_end(),
+        format!(
+            "worktree whose: {} is session {id}'s; a person is admitted",
+            worktree.display()
+        ),
         "{out}"
+    );
+    assert_eq!(xtask::owner::of(&worktree).unwrap(), None, "{out}");
+    assert!(
+        out.contains(&format!(
+            "stands at {} for a person, no session's",
+            worktree.display()
+        )),
+        "{out}"
+    );
+    assert_eq!(
+        Scratch::whose(&worktree),
+        format!("worktree whose: {} is no session's", worktree.display())
     );
     assert_eq!(out.matches("computed trust").count(), 1, "{out}");
 }
@@ -689,7 +733,7 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
     );
     assert!(
         lines.contains(&format!(
-            "track work: #21 is open with no ready record after the session (exit status: 0), the branch at {}; the worktree stands at {} for a person, nothing retired",
+            "track work: #21 is open with no ready record after the session (exit status: 0), the branch at {}; the worktree stands at {} for a person, no session's, nothing retired",
             &second[..7],
             scratch.worktree("t21").display()
         ).as_str()),

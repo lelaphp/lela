@@ -32,7 +32,11 @@
 //! ticket withdrawn at the tracker with nothing committed, which is
 //! retired the same way. When the session ends with neither, the
 //! worktree is left standing for a person, the ticket's record kept with its branch, nothing retired, and
-//! the line says so; the console shows the worktree. A worktree left
+//! the line says so; the console shows the worktree. Whatever it ends
+//! with, its owner record is taken away once the session has ended: the
+//! run wrote it before the session started, so it names no process to
+//! lapse with (#3755), and a worktree left standing is no session's, the
+//! next session to write there admitted (#3782). A worktree left
 //! standing is not the loop's again, whatever becomes of its ticket: a
 //! run lays down, and retires, only the worktree its own session ran in,
 //! and a standing one is retired by /specs or a person with `xtask
@@ -95,7 +99,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use anyhow::{Context, Result, bail};
 
 use crate::key::Snapshot;
-use crate::owner::SessionId;
+use crate::owner::{self, SessionId};
 use crate::reading::{Reading, Status, Store, joined};
 use crate::tally::{Judged, Judgement, Outcome, Tally};
 use crate::ticket::{self, Gh, State};
@@ -324,7 +328,7 @@ pub enum Worked {
     },
     /// The session ended with the ticket open, `why`: the ticket is the
     /// session's to finish. The worktree at `dir` stands for a person with
-    /// the branch at `commit`, nothing retired.
+    /// the branch at `commit`, no session's, nothing retired.
     Standing {
         ticket: Ticket,
         commit: String,
@@ -400,7 +404,7 @@ impl Worked {
                 dir,
                 why,
             } => format!(
-                "{ticket} {why}, the branch at {}; the worktree stands at {} for a person, nothing retired",
+                "{ticket} {why}, the branch at {}; the worktree stands at {} for a person, no session's, nothing retired",
                 short(commit),
                 dir.display()
             ),
@@ -609,11 +613,17 @@ pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
 
     // The session is started under an id of its own, recorded as the
     // worktree's owner before it starts, so its writes there are its own.
+    // The record names no process, since none ran when it was written, so
+    // it would never lapse (#3755): once the session has ended, or never
+    // started, the record goes, and the worktree is no session's (#3782).
     let id = SessionId::fresh()?;
     let dir = worktree::add(root, &branch, Some(ticket), Some(&id))?;
     let prompt = Session::prompt(skill, ticket);
     run.session.announce(&dir, &prompt, Some(&id));
-    let status = run.session.run(&dir, &prompt, Some(&id))?;
+    let ran = run.session.run(&dir, &prompt, Some(&id));
+    let released = owner::release(&dir);
+    let status = ran?;
+    released?;
     say!(WORK, "the session ended: {status}");
     let tip = rev(root, &format!("refs/heads/{branch}"))?;
     let issue = gh.view(root, ticket)?;
