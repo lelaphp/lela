@@ -4003,7 +4003,12 @@ pub(crate) trait StreamLayer {
         len: usize,
     ) -> Result<Option<Owner<PhpString>>, Thrown>;
     fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Owner<Stream>, Thrown>;
-    fn wrapper_register(&mut self, protocol: &[u8], class: ClassId, flags: i64) -> bool;
+    fn wrapper_register(
+        &mut self,
+        protocol: &[u8],
+        class: ClassId,
+        flags: i64,
+    ) -> Result<bool, Thrown>;
     fn wrapper_unregister(&mut self, protocol: &[u8]) -> bool;
     fn wrapper_restore(&mut self, protocol: &[u8]) -> bool;
 }
@@ -5062,22 +5067,33 @@ impl StreamLayer for Request {
         self.stream_alloc(stream)
     }
 
-    fn wrapper_register(&mut self, protocol: &[u8], class: ClassId, flags: i64) -> bool {
+    fn wrapper_register(
+        &mut self,
+        protocol: &[u8],
+        class: ClassId,
+        flags: i64,
+    ) -> Result<bool, Thrown> {
+        // `zend_register_resource(uwrap, le_protocols)` before the scheme
+        // is tried, its owner the payload's once the scheme takes it.
+        let factory = self.types().factory;
+        let owner = Resource::new(self, factory, userspace::Factory(None))?;
+        let resource = *owner;
         let valid = protocol
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'));
         let taken = self.wrapper_table().iter().any(|r| r.scheme == protocol);
         if valid && !taken {
-            let wrapper = Located::Space(userspace::UserWrapper::new(
-                class,
-                flags & 1 != 0,
-                protocol.to_vec(),
-            ));
+            if let Some(payload) = resource.native_mut::<userspace::Factory>(self) {
+                payload.0 = Some(owner);
+            } else {
+                owner.give_up(self);
+            }
+            let user = userspace::UserWrapper::new(class, flags & 1 != 0, resource);
             self.own_wrappers().push(Registered {
                 scheme: protocol.to_vec(),
-                wrapper,
+                wrapper: Located::Space(user),
             });
-            return true;
+            return Ok(true);
         }
         let shown = String::from_utf8_lossy(protocol);
         let text = if taken {
@@ -5094,7 +5110,9 @@ impl StreamLayer for Request {
             .concat()
         };
         crate::api::raising::docref(self, Level::Warning, &text);
-        false
+        // `zend_list_delete(rsrc)`.
+        owner.give_up(self);
+        Ok(false)
     }
 
     fn wrapper_unregister(&mut self, protocol: &[u8]) -> bool {
@@ -5107,7 +5125,12 @@ impl StreamLayer for Request {
             crate::api::raising::docref(self, Level::Warning, &text);
             return false;
         };
-        table.remove(at);
+        // `zend_list_delete(uwrap->resource)` for a user wrapper.
+        if let Located::Space(user) = table.remove(at).wrapper
+            && let Some(owner) = userspace::Factory::take(self, user.resource)
+        {
+            owner.give_up(self);
+        }
         true
     }
 

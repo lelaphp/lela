@@ -198,7 +198,7 @@ fn stream_wrapper_register(
         return Err(arg_type_error(req, 2, &text));
     };
     let flags = flags.hold(req)?;
-    Ok(req.wrapper_register(&protocol, class, flags))
+    req.wrapper_register(&protocol, class, flags)
 }
 
 /// `stream_wrapper_unregister(string $protocol): bool`,

@@ -1597,7 +1597,67 @@ pub trait Streams {
     /// the request, a URL wrapper where `flags` holds `STREAM_IS_URL`;
     /// php's `Protocol %s:// is already defined.` where the scheme is
     /// taken and `Invalid protocol scheme specified` where it is not one.
-    fn wrapper_register(&mut self, protocol: &[u8], class: ClassId, flags: i64) -> bool;
+    ///
+    /// The registration is a resource of php's `le_protocols` type,
+    /// `stream factory`, made before the scheme is tried
+    /// (`zend_register_resource(uwrap, le_protocols)`), so it spends an id
+    /// whether or not the scheme takes it:
+    ///
+    /// ```php
+    /// var_dump(fopen('php://memory', 'r'));
+    /// class F { public $context; }
+    /// stream_wrapper_register('ff', 'F');
+    /// var_dump(fopen('php://memory', 'r'));
+    /// ```
+    /// ```expect
+    /// resource(5) of type (stream)
+    /// resource(7) of type (stream)
+    /// ```
+    ///
+    /// The resource stands in `get_resources()` while the registration or
+    /// a stream it opened holds it: a refused registration lets it go at
+    /// once, `stream_wrapper_unregister()` lets the registration's go
+    /// (`zend_list_delete`), and the stream's goes with its close
+    /// (`user_wrapper_close`). `stream_wrapper_restore()` over a user
+    /// wrapper lets nothing go, so its resource stands to the request's end.
+    ///
+    /// ```php
+    /// class F { public $context; function stream_open($p, $m, $o, &$op) { return true; } }
+    /// var_dump(@stream_wrapper_register('a b', 'F'), stream_wrapper_register('ff', 'F'), get_resources('stream factory'));
+    /// $s = fopen('ff://x', 'r');
+    /// stream_wrapper_unregister('ff');
+    /// var_dump(get_resources('stream factory'));
+    /// fclose($s);
+    /// var_dump(get_resources('stream factory'));
+    /// stream_wrapper_unregister('file'); stream_wrapper_register('file', 'F'); stream_wrapper_restore('file');
+    /// var_dump(get_resources('stream factory'));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(true)
+    /// array(1) {
+    ///   [5]=>
+    ///   resource(5) of type (stream factory)
+    /// }
+    /// array(1) {
+    ///   [5]=>
+    ///   resource(5) of type (stream factory)
+    /// }
+    /// array(0) {
+    /// }
+    /// array(1) {
+    ///   [8]=>
+    ///   resource(8) of type (stream factory)
+    /// }
+    /// ```
+    ///
+    /// The `Err` is the memory limit, met making the resource.
+    fn wrapper_register(
+        &mut self,
+        protocol: &[u8],
+        class: ClassId,
+        flags: i64,
+    ) -> Result<bool, Thrown>;
 
     /// `stream_wrapper_unregister()` (`Z/main/streams/userspace.c:473`):
     /// the scheme taken out of the request's table, a built-in one
@@ -1920,7 +1980,12 @@ impl Streams for Request {
         StreamLayer::stream_from_fd(self, fd, kind)
     }
 
-    fn wrapper_register(&mut self, protocol: &[u8], class: ClassId, flags: i64) -> bool {
+    fn wrapper_register(
+        &mut self,
+        protocol: &[u8],
+        class: ClassId,
+        flags: i64,
+    ) -> Result<bool, Thrown> {
         StreamLayer::wrapper_register(self, protocol, class, flags)
     }
 

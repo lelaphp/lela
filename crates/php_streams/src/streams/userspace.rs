@@ -27,34 +27,66 @@ use crate::api::request::Streams;
 use crate::api::request::{
     Cast, Ini, OptionAnswer, Request, Stream, StreamOption, Whence, WrapperOp,
 };
-use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
+use crate::api::values::{
+    ClassId, Owner, PhpArray, PhpObject, PhpRef, PhpString, Resource, Value, ValueRef,
+};
 use crate::state::Layer;
 use crate::streams::StreamLayer;
 
 /// `struct php_user_stream_wrapper` less the scheme, which is the row's:
-/// the class every instance is of, and `wrapper.is_url`.
+/// the class every instance is of, `wrapper.is_url`, and `resource`.
 #[derive(Clone)]
 pub(crate) struct UserWrapper {
     class: ClassId,
     pub(crate) is_url: bool,
-    /// The scheme it was registered under, which tells two registrations
-    /// apart as php's two wrapper structs are.
-    scheme: Vec<u8>,
+    /// The `stream factory` resource the registration is, which tells two
+    /// registrations apart as php's two wrapper structs are: the
+    /// registration's owner of it is its own payload's ([`Factory`]), and
+    /// each stream it opens holds one more until its close.
+    pub(crate) resource: Resource,
 }
 
 impl UserWrapper {
-    pub(crate) const fn new(class: ClassId, is_url: bool, scheme: Vec<u8>) -> UserWrapper {
+    pub(crate) const fn new(class: ClassId, is_url: bool, resource: Resource) -> UserWrapper {
         UserWrapper {
             class,
             is_url,
-            scheme,
+            resource,
         }
     }
 
     /// Whether two are one registration.
     pub(crate) fn same(&self, other: &UserWrapper) -> bool {
-        self.scheme == other.scheme && self.class == other.class
+        self.resource == other.resource
     }
+}
+
+/// The payload of a `stream factory` resource: the registration's owner
+/// of the resource, which php's `FG(stream_wrappers)` row names by
+/// pointer and `stream_wrapper_unregister()` lets go (`zend_list_delete`).
+pub(crate) struct Factory(pub(crate) Option<Owner<Resource>>);
+
+impl Factory {
+    /// The registration's owner taken out of `resource`'s payload, where
+    /// it still stands there.
+    pub(crate) fn take(req: &mut Request, resource: Resource) -> Option<Owner<Resource>> {
+        resource.native_mut::<Factory>(req)?.0.take()
+    }
+}
+
+/// `stream_wrapper_dtor`, `le_protocols`' destructor: what it frees is
+/// not observable. Closed with the request's list while the registration
+/// still holds it, its owner is the list's from there, as php's resource
+/// stands in `EG(regular_list)` until the list is destroyed.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the resource destructor's shape, which a destructor that throws needs"
+)]
+pub(crate) fn factory_dtor(req: &mut Request, resource: Resource) -> Result<(), Thrown> {
+    if let Some(owner) = Factory::take(req, resource) {
+        req.keep_in_list(owner);
+    }
+    Ok(())
 }
 
 /// What one method call came to: the method is not there, it raised
@@ -293,7 +325,11 @@ pub(crate) fn open(
     {
         req.streams().in_user_include = true;
     }
+    // `GC_ADDREF(us->wrapper->resource)` for the open, the stream it
+    // opens holding its own until its close (`user_wrapper_close`).
+    let factory = Owner::take(req, user.resource);
     let opened = open_with(req, user, path, mode, options);
+    factory.give_up(req);
     req.streams().in_user_include = in_user_include;
     req.streams().user_stream_current = outer;
     opened
@@ -362,6 +398,7 @@ fn open_with(
     let kind = UserStream {
         object,
         held: Some(held),
+        factory: Some(Owner::take(req, user.resource)),
         no_seek: false,
         own: None,
         share: Share::Stream,
@@ -381,7 +418,9 @@ pub(crate) fn open_dir(
         return Ok(Err(String::from("infinite recursion prevented")));
     }
     let outer = req.streams().user_stream_current.replace(path.to_vec());
+    let factory = Owner::take(req, user.resource);
     let opened = open_dir_with(req, user, path);
+    factory.give_up(req);
     req.streams().user_stream_current = outer;
     opened
 }
@@ -432,6 +471,7 @@ fn open_dir_with(
         Box::new(UserDir {
             object,
             held,
+            factory: Some(Owner::take(req, user.resource)),
             share: Share::Stream,
         }),
         b"r",
@@ -445,6 +485,9 @@ struct UserStream {
     object: PhpObject,
     /// The instance's one owner, the kind's until its close.
     held: Option<Owner<PhpObject>>,
+    /// The stream's owner of its wrapper's `stream factory` resource,
+    /// given up at its close; a shared kind holds none.
+    factory: Option<Owner<Resource>>,
     no_seek: bool,
     /// The stream the kind is under, which its methods hold against
     /// `fclose`.
@@ -806,6 +849,9 @@ impl Ops for UserStream {
         if let Some(held) = self.held.take() {
             held.give_up(req);
         }
+        if let Some(factory) = self.factory.take() {
+            factory.give_up(req);
+        }
         0
     }
 
@@ -880,6 +926,7 @@ impl Ops for UserStream {
         Some(Box::new(UserStream {
             object: self.object,
             held: Some(Owner::take(req, self.object)),
+            factory: None,
             no_seek: self.no_seek,
             own: self.own,
             share: Share::Call,
@@ -1043,6 +1090,8 @@ struct UserDir {
     object: PhpObject,
     /// The instance's one owner, the kind's until its close.
     held: Option<Owner<PhpObject>>,
+    /// As [`UserStream`]'s.
+    factory: Option<Owner<Resource>>,
     share: Share,
 }
 
@@ -1056,6 +1105,7 @@ impl Ops for UserDir {
         Some(Box::new(UserDir {
             object: self.object,
             held: Some(Owner::take(req, self.object)),
+            factory: None,
             share: Share::Call,
         }))
     }
@@ -1083,6 +1133,9 @@ impl Ops for UserDir {
         }
         if let Some(held) = self.held.take() {
             held.give_up(req);
+        }
+        if let Some(factory) = self.factory.take() {
+            factory.give_up(req);
         }
         0
     }
