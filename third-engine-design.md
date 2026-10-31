@@ -722,10 +722,10 @@ The set is declared once in `seams.toml`, as its `[[seam]]` rows, and `xtask sta
 | sapi | sapi.lock | 60 |  |
 | tier | tier.lock | 228 |  |
 | ssa | ssa.lock | 114 |  |
-| layer | layer.lock | 37 |  |
+| layer | layer.lock | 38 |  |
 | harness | xtask.lock | 448 |  |
 
-<!-- /computed in=cb4e8cf2e4e2b7cd614861ad4d52d4b1c147fb1c2a1479005ff298a6c3804799 out=d01811fc950199e86748d1fed6ff9be7ab72cf213a19d60489b96981463c47b8 -->
+<!-- /computed in=caa4c9ead8e8f908e1f511107d058c388af4cda76f0ffb403b830df46d981314 out=b7b12baf9c3799d13512e5f18e8d47d3c07e1b9c4bf389538759bba43cfc29f0 -->
 
 What a lock holds that its row does not say. `heap.lock` carries the VM stack's entry slot and its peers, `VmStack::entry`, `push_entry`, `current` and `MapTable::base`. `tier.lock` is the widening of `php_engine` toward the tier, in two sections: the face, a few dozen items reviewed one by one, and the kernels named by `php_jit`'s `kernels!` list, about three hundred, generated from the list and diffed as one section. `process.lock` is `php_process`'s surface, whose one consumer is `php_engine`. `link.lock` is `php_link`'s surface, the linker and the linked class record that the compiler and the engine both call (ADR-0012). Dax's `effects.lock` is retired, its content being `ops.lock`'s effects column. A lock is one of three kinds, and `xtask api-check` regenerates each from what it is a lock of: the public items of the crate the lock lives with (`heap.lock`, `process.lock`, `unit.lock`, `link.lock`, `api.lock`, and the harness's own `xtask.lock`), or of one module of its producer (`layer.lock`, where a crate outside the seam's consumers that `use`s the module fails); what the consumers import from the producer (`sapi.lock`, `tier.lock`, which is why both are headers carrying nothing until a consumer exists); or the rows of the file the seam is generated from (`ops.lock`, rendered from `ops.toml`'s `[[op]]` rows). All three fail on any difference; adding an item means committing the new lock line with the code. This is how "smallest possible codebase" is measured at the interface, where callers pay, not only in lines.
 

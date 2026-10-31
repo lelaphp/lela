@@ -2,8 +2,9 @@
 //! it as php's `sapi_read_post_block` pulls stdin, while the program
 //! runs, so a body that arrives in pieces reads as one handed over whole,
 //! and one declared over `post_max_size` is never read. What `php://input`
-//! reads is ext/standard's stream over [`Request::input_bytes`], which
-//! this engine of no extension reaches through a native of its own.
+//! reads of it is the stream layer's, which this engine of no extension
+//! has not, and is held by the hosts' tests; here the body is seen by how
+//! much of it the host has handed out.
 
 use std::io::Read;
 use std::sync::Arc;
@@ -15,17 +16,9 @@ use php_macros::php_function;
 use crate::api::abi::{Extension, ExtensionBuilder};
 use crate::api::raising::Thrown;
 use crate::api::request::{BodyLimits, Request};
-use crate::api::values::{Owner, PhpArray, PhpString};
+use crate::api::values::{Owner, PhpArray};
 use crate::engine::{Body, Engine, Method, RequestDescription, WebRequest};
 use crate::test::Capture;
-
-/// `body_input(): string`: what `php://input` reads,
-/// `php_stream_input_read` over the request's body.
-#[php_function]
-fn body_input(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
-    let bytes = req.input_bytes();
-    PhpString::new(req, &bytes)
-}
 
 /// `parse_body(): array`: `request_parse_body()` with no options, as
 /// ext/standard's native makes its pair, `[$_POST, $_FILES]`.
@@ -47,11 +40,7 @@ fn body_read(req: &mut Request) -> i64 {
 
 fn input() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            body_input::declared(),
-            parse_body::declared(),
-            body_read::declared(),
-        ])
+        .functions(vec![parse_body::declared(), body_read::declared()])
         .build("body")
 }
 
@@ -168,39 +157,36 @@ fn streamed(
     )
 }
 
-/// A form that arrives in pieces while the request runs is `$_POST` and
-/// `php://input` as php-cgi makes them of the same body on its stdin,
-/// and `php://input` reads it again whole; the oracle's line for the
-/// same program, `echo $_POST['a'], ' ', $_POST['b'], ' ',
-/// strlen($_POST['big']), ' ', strlen($input), ' ', $input ===
-/// file_get_contents('php://input') …`, is `1 two 20000 20014 true true`.
+/// A form that arrives in pieces while the request runs is `$_POST` as
+/// php-cgi makes it of the same body on its stdin, read whole before the
+/// program; the oracle's line for `echo $_POST['a'], ' ', $_POST['b'], '
+/// ', strlen($_POST['big']), ' ', strlen(file_get_contents('php://input'))`
+/// is `1 two 20000 20014`.
 #[test]
-fn a_form_that_arrives_in_pieces_is_post_and_input_as_php_reads_it() {
+fn a_form_that_arrives_in_pieces_is_post_as_php_reads_it() {
     let engine = Engine::cli_builder().extensions(&[input()]).build();
     let (stdout, reads) = posted(
         &engine,
         "application/x-www-form-urlencoded",
         &form(),
-        "<?php $input = body_input();
-        echo $_POST['a'], ' ', $_POST['b'], ' ', strlen($_POST['big']), ' ', strlen($input), ' ',
-            $input === body_input() ? 'true' : 'false', ' ',
-            strncmp($input, 'a=1&b=two&big=xx', 16) === 0 ? 'true' : 'false', \"\\n\";",
+        "<?php echo $_POST['a'], ' ', $_POST['b'], ' ', strlen($_POST['big']), ' ', body_read(), \"\\n\";",
     );
-    assert_eq!(stdout, "1 two 20000 20014 true true\n");
+    assert_eq!(stdout, "1 two 20000 20014\n");
     assert!(reads > 5, "the body was read in its pieces: {reads} reads");
 }
 
-/// A body no content type's reader takes is read by `php://input` alone,
-/// as it arrives, and `$_POST` is empty: php-cgi answers `0 20014` for
-/// `count($_POST), ' ', strlen(file_get_contents('php://input'))`.
+/// A `POST` body no content type's reader takes is swallowed whole as it
+/// arrives (`php_default_post_reader`), and `$_POST` is empty: php-cgi
+/// answers `0 20014` for `count($_POST), ' ',
+/// strlen(file_get_contents('php://input'))`.
 #[test]
-fn a_body_no_reader_takes_is_read_by_input_alone_as_it_arrives() {
+fn a_body_no_reader_takes_is_swallowed_as_it_arrives() {
     let engine = Engine::cli_builder().extensions(&[input()]).build();
     let (stdout, _) = posted(
         &engine,
         "application/octet-stream",
         &form(),
-        "<?php echo $_POST === [] ? 0 : 1, ' ', strlen(body_input()), \"\\n\";",
+        "<?php echo $_POST === [] ? 0 : 1, ' ', body_read(), \"\\n\";",
     );
     assert_eq!(stdout, "0 20014\n");
 }

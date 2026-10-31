@@ -208,23 +208,73 @@ fn a_post_body_reaches_php_input_through_the_stream() {
     stream
         .read_to_end(&mut seen)
         .unwrap_or_else(|e| panic!("{e}"));
-    let mut whole = seen.as_slice();
-    let response = {
-        let end = whole
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
-            .unwrap_or_else(|| panic!("no head"));
-        let chunked = String::from_utf8_lossy(&whole[..end])
-            .to_ascii_lowercase()
-            .contains("transfer-encoding: chunked");
-        whole = &whole[end + 4..];
-        if chunked {
-            unchunked(whole)
-        } else {
-            whole.to_vec()
-        }
-    };
-    assert_eq!(String::from_utf8_lossy(&response), "ready\n40000 same 0");
+    assert_eq!(
+        String::from_utf8_lossy(&body_of(&seen)),
+        "ready\n40000 same 0"
+    );
+}
+
+/// `php://input` asks the host for the body as the program reads it, as
+/// php's `php_stream_input_read` does (#3522): opening it reads nothing,
+/// and reading 10 bytes fills the stream's buffer with one read of 8192,
+/// so a client that sends exactly that much and waits for the program's
+/// answer before sending the rest is answered, where a stream that read
+/// the body whole at `fopen` would wait on the client until the read's
+/// timeout failed. The rest is read when the program asks for it.
+#[test]
+fn reading_ten_bytes_of_php_input_pulls_one_block_of_the_body() {
+    let root = root(
+        "input",
+        &[(
+            "input.php",
+            "<?php $f = fopen('php://input', 'r'); echo fread($f, 10) . \"\\n\"; flush(); \
+             $rest = stream_get_contents($f); \
+             echo strlen($rest), ' ', $rest === str_repeat('y', 39990) ? 'same' : 'differs';",
+        )],
+    );
+    let server = Server::start(&root);
+    let body = vec![b'y'; 40_000];
+    let mut stream = server.send(
+        &Request::new("PUT", "/input.php")
+            .host("localhost")
+            .close()
+            .field("Content-Type", "application/octet-stream")
+            .field("Content-Length", &body.len().to_string()),
+    );
+    let (block, rest) = body.split_at(8192);
+    stream.write_all(block).unwrap_or_else(|e| panic!("{e}"));
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 1024];
+    while !seen.windows(11).any(|w| w == b"yyyyyyyyyy\n") {
+        let n = stream.read(&mut buf).unwrap_or_else(|e| panic!("{e}"));
+        assert!(n > 0, "closed before the program answered");
+        seen.extend_from_slice(&buf[..n]);
+    }
+    stream.write_all(rest).unwrap_or_else(|e| panic!("{e}"));
+    stream
+        .read_to_end(&mut seen)
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        String::from_utf8_lossy(&body_of(&seen)),
+        "yyyyyyyyyy\n39990 same"
+    );
+}
+
+/// The body of a response read whole, past its head, unchunked where the
+/// head says it is chunked.
+fn body_of(whole: &[u8]) -> Vec<u8> {
+    let end = whole
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or_else(|| panic!("no head"));
+    let chunked = String::from_utf8_lossy(&whole[..end])
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked");
+    if chunked {
+        unchunked(&whole[end + 4..])
+    } else {
+        whole[end + 4..].to_vec()
+    }
 }
 
 /// A form `POST` that arrives in two writes with a pause between, past
