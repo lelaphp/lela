@@ -437,6 +437,17 @@ fn execute(executable: &Executable, built: &Built, run: &Run) -> Result<Ran> {
     })
 }
 
+/// The `CARGO` a test executable is handed: the one this run was started
+/// with where it was started by cargo, and otherwise the `cargo` on `PATH`
+/// that built the test, by its absolute path, so a cargo stand-in never
+/// hands a call on to itself (#3683). Bare only where `PATH` holds no
+/// cargo, where that build had already failed.
+fn cargo() -> OsString {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    crate::scratch::absolute_cargo(std::env::var_os("CARGO"), &path)
+        .map_or_else(|| "cargo".into(), Into::into)
+}
+
 /// The environment `cargo test` runs a test executable of `built` with
 /// (the Cargo book, "Environment variables Cargo sets for crates", which
 /// holds for `cargo test` as for `cargo run`): the package's manifest
@@ -454,10 +465,7 @@ fn environment(executable: &Executable, built: &Built, run: &Run) -> Vec<(&'stat
     let text = |s: &str| OsString::from(s);
     let optional = |s: &Option<String>| OsString::from(s.as_deref().unwrap_or_default());
     let mut env = vec![
-        (
-            "CARGO",
-            std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
-        ),
+        ("CARGO", cargo()),
         ("CARGO_MANIFEST_DIR", package.dir().into()),
         ("CARGO_MANIFEST_PATH", package.manifest_path.clone().into()),
         ("CARGO_PKG_NAME", text(&package.name)),
