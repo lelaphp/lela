@@ -1756,7 +1756,7 @@ echo \"done\\n\";",
 /// masked off before [`FrameLayout::numbered_from`] is taken away, so a
 /// frame an error handler's serving began, whose caller is the loop's,
 /// names no place 2^31 records away (#3691). The trace is the return
-/// trace `a_return_trace_past_a_servings_entry_halts` runs under the
+/// trace `a_return_trace_past_a_servings_entry_halts` serves under the
 /// handler: each half-word it loads becomes a place only through the mask.
 ///
 /// [`FrameLayout::caller_loop`]: php_engine::tier::FrameLayout::caller_loop
@@ -1775,7 +1775,7 @@ trigger_error(\"x\", E_USER_WARNING);
 echo \"done\\n\";",
     )?;
     let lines: Vec<&str> = clif.lines().map(instruction).collect();
-    // Each `to = op a, b  ; b = constant` as its result, its opcode less
+    // Each `to = op a, b  ; b = constant` as the value it defines, its opcode less
     // the type, its first operand and the constant its second names.
     let ops: Vec<(&str, &str, &str, &str)> = (lines.iter())
         .filter_map(|line| {

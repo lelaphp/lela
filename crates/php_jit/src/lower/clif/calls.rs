@@ -974,8 +974,10 @@ impl Emit<'_> {
     /// leaves, and the place of the frame its return leaves to, for the
     /// `Op::Back` after it: the half-word decoded as `exec::CallerAt::caller`
     /// decodes it, [`FrameLayout::caller_loop`] masked off before
-    /// [`FrameLayout::numbered_from`] is taken away, so a frame served
-    /// from outside the loop names its caller's place too (#3691). The one
+    /// [`FrameLayout::numbered_from`] is taken away, so a frame the loop's
+    /// caller served (`exec::Caller::Loop`) names that caller's place too;
+    /// one with no caller (`exec::Caller::Outside`) names no frame's, and a
+    /// leave in place refuses it by `Emit::outside` (#3691). The one
     /// decoding of the half-word compiled code turns into a place.
     pub(super) fn returns_to(&mut self, line: &Line) -> Result<Option<(Value, Value)>, Abort> {
         if self.stack.is_none() {
