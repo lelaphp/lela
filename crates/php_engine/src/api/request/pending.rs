@@ -124,6 +124,29 @@ impl Request {
     /// dtor
     /// dtor <- TypeError
     /// ```
+    ///
+    /// Where the slot holds the throwable already, a destructor's an
+    /// earlier step left there and the caller has named since, the slot's
+    /// owner is its own as it stands: the step is taken with it there, its
+    /// answers naming it again take no owner, and the slot keeps it after.
+    /// pdo's fetch into an object writes each column past the destructor's
+    /// throwable the first column's write left, and the refused typed
+    /// columns after it leave nothing kept:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "dtor\n"; throw new Exception("dtor"); } }
+    /// class R { public $b; public int $a; public int $c; }
+    /// $st = (new PDO('sqlite::memory:'))->query("select 'y' as b, 'x' as a, 'z' as c");
+    /// $r = new R; $r->b = new D;
+    /// $st->setFetchMode(PDO::FETCH_INTO, $r);
+    /// try { $st->fetch(); } catch (Exception $e) { echo $e->getMessage(), " ", var_export($e->getPrevious(), true), "\n"; $w = WeakReference::create($e); }
+    /// unset($e); var_dump($w->get());
+    /// ```
+    /// ```expect
+    /// dtor
+    /// dtor NULL
+    /// NULL
+    /// ```
     pub(crate) fn while_pending<R>(
         &mut self,
         pending: &Thrown,
@@ -131,7 +154,16 @@ impl Request {
     ) -> Option<R> {
         let object = pending.exception().copied()?;
         if self.raised.is_some() || self.bailout {
-            return Some(step(self));
+            if self.pending() != Some(object) || self.stepping_past(object) {
+                return Some(step(self));
+            }
+            let outer = self.stepping_past.replace(Stepping {
+                object,
+                owned: true,
+            });
+            let answer = step(self);
+            self.stepping_past = outer;
+            return Some(answer);
         }
         self.addref(&object.as_value());
         self.raised = Some(Raised::Throwable(object));
