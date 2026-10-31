@@ -263,7 +263,10 @@ pub(crate) fn compiled(root: &Path) -> [Declared; 2] {
 enum Build {
     /// With the tier's feature of the bundle on, `php_jit::Jit` bound.
     Jit,
-    /// The default build, without it.
+    /// The engine without it: the host's default features off, since
+    /// each host turns the bundle's `jit` on by default (#3676), into a
+    /// target directory of its own, so `target/release` keeps the shipped
+    /// build.
     Plain,
     /// [`Build::Jit`] with `cfg(php_jit_stepping)` set, whose tier steps
     /// a serving to its end at the first safepoint it is asked at
@@ -300,12 +303,17 @@ impl Build {
     /// The build in the bench lane's profile: every build but
     /// [`Build::Plain`] with the tier's feature, into the directory the
     /// lanes build [`Build::Jit`] in ([`profile::featured`]) or one of its
-    /// own, a cfg set where the build names one.
+    /// own, a cfg set where the build names one; [`Build::Plain`] without
+    /// the host's default features, under its arm's name.
     fn built(self, root: &Path) -> Result<PathBuf> {
-        let (_, dir, cfg) = self.spec();
+        let (name, dir, cfg) = self.spec();
+        let (package, binary) = (CLI.package(), CLI.binary);
+        if self == Build::Plain {
+            let into = profile::featured(root, name);
+            return profile::released_bare(root, (&package, binary), &into);
+        }
         let on = dir.map(|_| format!("{BUNDLE}/{}", Lane::FEATURE));
         let into = dir.map(|dir| profile::featured(root, dir));
-        let (package, binary) = (CLI.package(), CLI.binary);
         let into = (into.as_deref(), cfg);
         profile::released(root, (&package, binary), on.as_deref(), into)
     }
