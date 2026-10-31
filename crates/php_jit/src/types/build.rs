@@ -4317,6 +4317,50 @@ impl<'a> Builder<'a> {
     /// numbers, which holds its overflow itself, so the guard the phi
     /// held at the header each turn is held within it, rerunning it where
     /// it overflows. The guard it holds, where it is one.
+    ///
+    /// The back edge brings the last value php's trace SSA numbers in the
+    /// slot, and a line after `back`'s that reads it and may take a
+    /// counted owner of it, an `INIT_ARRAY` or `ADD_ARRAY_ELEMENT` of it,
+    /// a `SEND_VAR`, the `$c` of `$y = $c`, numbers it anew under
+    /// `ZEND_SSA_RC_INFERENCE` ([`Builder::writes_anew`]). Its definition
+    /// is that line, which `is_checked_guard` holds nothing of, so the
+    /// phi keeps its guard at the header, #3712's program, whose array
+    /// takes `$c` after the `+=`:
+    ///
+    /// ```php
+    /// function f() { $x = [1, 2]; $r = &$x; $c = 0; for ($i = 0; $i < 100; $i++) { $c += $x[1]; $x = [$i, $c]; if ($i > 50) { $c++; } } return $c; }
+    /// echo f(), "\n";
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 1.2676506002282E+30
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:3
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %s:2
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 8 f() %s:2
+    /// ---- TRACE 2 start (side trace 1/8) f() %s:2
+    /// ---- TRACE 2 stop (link to 1)
+    /// ---- TRACE 2 compiled
+    ///
+    ///      TRACE 2 exit 0 f() %s:2
+    /// ---- TRACE 3 start (side trace 2/0) f() %s:2
+    /// ---- TRACE 3 stop (link to 1)
+    /// ---- TRACE 3 compiled
+    ///
+    ///      TRACE 1 exit 5 f() %s:2
+    /// ---- TRACE 4 start (side trace 1/5) f() %s:2
+    /// ---- TRACE 4 stop (link to 1)
+    /// ---- TRACE 4 compiled
+    ///
+    ///      TRACE 1 exit 1 f() %s:2
+    /// ---- TRACE 5 start (side trace 1/1) f() %s:2
+    /// ---- TRACE 5 stop (return)
+    /// ---- TRACE 5 compiled
+    /// ```
     fn checked_guard(&self, back: ValueId) -> Option<Placed> {
         let made = *self.val(back);
         if made.types.meets(Types::REF) || !made.types.meets(Types::LONG) {
@@ -4326,6 +4370,13 @@ impl<'a> Builder<'a> {
         let Some(Op::Line(line)) = self.ops.get(def.index()) else {
             return None;
         };
+        let later = self.ops.get(def.index() + 1..).unwrap_or_default();
+        if later
+            .iter()
+            .any(|op| matches!(op, Op::Line(after) if self.writes_anew(after, made.slot)))
+        {
+            return None;
+        }
         // A constant that is a number, or a value that may be one.
         let number = |operand: Operand| match operand {
             Operand::Constant(Constant::Long(_) | Constant::Double(_)) => true,

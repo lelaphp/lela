@@ -200,7 +200,7 @@ impl Builder<'_> {
 
     /// Whether `line` writes `slot` anew in php's trace SSA: an operand
     /// in it that it [`Builder::defines`], or its `out` slot.
-    fn writes_anew(&self, line: &Line, slot: Slot) -> bool {
+    pub(super) fn writes_anew(&self, line: &Line, slot: Slot) -> bool {
         let in_slot = |operand: Operand| matches!(operand, Operand::Value(held) if self.val(held).slot == slot);
         let [op1, op2, data] = self.defines(line);
         (op1 && in_slot(line.op1))
