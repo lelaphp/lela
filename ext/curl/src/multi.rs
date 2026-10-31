@@ -505,6 +505,37 @@ fn curl_multi_select(
 /// from the callable
 /// int(2)
 /// ```
+///
+/// The code is saved even where writing the count raised, as php's
+/// `SAVE_CURLM_ERROR` follows `ZEND_TRY_ASSIGN_REF_LONG` whatever it
+/// threw: a call from inside the multi's own transfer answers
+/// `CURLM_RECURSIVE_API_CALL`, and a typed reference refuses the count.
+///
+/// ```php
+/// declare(strict_types=1);
+/// class C { public string $r = ''; }
+/// $f = tempnam(sys_get_temp_dir(), 'curl');
+/// file_put_contents($f, 'x');
+/// $m = curl_multi_init();
+/// $d = curl_init("file://$f");
+/// curl_setopt($d, CURLOPT_WRITEFUNCTION, function ($d, $data) use ($m) {
+///     $c = new C;
+///     try {
+///         curl_multi_exec($m, $c->r);
+///     } catch (TypeError $e) {
+///         echo $e->getMessage(), "\n";
+///     }
+///     var_dump(curl_multi_errno($m));
+///     return strlen($data);
+/// });
+/// curl_multi_add_handle($m, $d);
+/// do { $status = curl_multi_exec($m, $active); } while ($active && $status == CURLM_OK);
+/// unlink($f);
+/// ```
+/// ```expect
+/// Cannot assign int to reference held by property C::$r of type string
+/// int(8)
+/// ```
 #[php_function]
 fn curl_multi_exec(
     req: &mut Request,
@@ -545,9 +576,10 @@ fn curl_multi_exec(
     let answered = match performed {
         Some(Ok((code, running))) => pending
             .step(req, |req, _| {
-                still_running.set(req, Untyped(Value::int(running)))?;
+                // `SAVE_CURLM_ERROR` whatever the assignment raised.
+                let assigned = still_running.set(req, Untyped(Value::int(running)));
                 mh(req, multi_handle)?.err = code;
-                Ok(code)
+                assigned.map(|()| code)
             })
             .unwrap_or(Ok(code)),
         Some(Err(thrown)) => Err(thrown),
