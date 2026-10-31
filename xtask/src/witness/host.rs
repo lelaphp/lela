@@ -25,7 +25,7 @@
 //! modes = { "t.php" = 0o000 }
 //! stdin = "a\n"                        # a pipe; without it, /dev/null
 //! head = 4096                          # stdout's first bytes, then killed
-//!                                      # (or once it writes nothing for 2s)
+//!                                      # (or once it waits 2s, writing nothing)
 //! streams = "merged"                   # "pipes", the default, "merged" or "files"
 //! mask = [['\((\d+)\): ', '(<pid>): ']]  # a pattern and what stands for each match
 //! [line.serve]                         # a server: started, asked, then stopped
@@ -53,7 +53,7 @@ use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -79,7 +79,8 @@ pub(crate) const LINES: &str = "tests/lines.toml";
 const PATIENCE: Duration = Duration::from_secs(10);
 
 /// How long a line with a `head` may write nothing after its last byte
-/// before it is taken to wait and is killed.
+/// before it is taken to wait and is killed, where no process of its group
+/// is runnable then.
 const QUIET: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Deserialize)]
@@ -535,27 +536,65 @@ fn served(serve: &Serve, pid: u32, dir: &Path, port: u16) -> Result<Vec<String>>
 /// since its last byte. Before its first it has [`PATIENCE`], a server's
 /// time to be ready: on a loaded machine a program may not have run at
 /// all by [`QUIET`], and one killed then reads as one that wrote nothing
-/// (#3616). One that writes nothing at all is killed at [`PATIENCE`], and
-/// one whose group has ended is waited for no longer.
+/// (#3616). After it, one still runnable when [`QUIET`] runs out has not
+/// reached its input, being busy or not yet scheduled, and is given a
+/// further [`QUIET`] (#3779); one asleep or reading is killed there. Each
+/// gap is bounded at [`PATIENCE`], and one whose group has ended is waited
+/// for no longer.
 fn headed(running: &Running<'_>, head: u64) -> Result<()> {
     let group = Pid::from_raw(i32::try_from(running.pid).context("a process id past pid_t")?);
     // A program that ended on its own leaves a group of processes not yet
     // reaped, which answers ESRCH, or EPERM on macOS; its ending is held
     // as any line's is.
     let ended = |sent| matches!(sent, Err(Errno::ESRCH | Errno::EPERM));
-    let (mut written, mut since) = (running.written(), Instant::now());
-    let quiet = |written| if written == 0 { PATIENCE } else { QUIET };
-    while written < head && since.elapsed() < quiet(written) && !ended(killpg(group, None)) {
+    let (mut written, mut since, mut quiet) = (running.written(), Instant::now(), Instant::now());
+    while written < head && since.elapsed() < PATIENCE && !ended(killpg(group, None)) {
+        if written > 0 && quiet.elapsed() >= QUIET {
+            if !runnable(group) {
+                break;
+            }
+            quiet = Instant::now();
+        }
         std::thread::sleep(Duration::from_millis(10));
         let now = running.written();
         if now != written {
-            (written, since) = (now, Instant::now());
+            (written, since, quiet) = (now, Instant::now(), Instant::now());
         }
     }
     match killpg(group, Signal::SIGKILL) {
         Err(e) if !ended(Err(e)) => Err(e).with_context(|| format!("killing the group {group}")),
         _ => Ok(()),
     }
+}
+
+/// Whether a process of `group` is runnable, or in an uninterruptible
+/// wait, as `ps` reads its state (`R`, `D` on Linux, `U` on macOS); one
+/// asleep, reading its input or stopped is not, and none is where `ps`
+/// does not answer within [`QUIET`], which is then killed.
+fn runnable(group: Pid) -> bool {
+    let Ok(mut ps) = Command::new("ps")
+        .args(["-A", "-o", "pgid=,stat="])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let asked = Instant::now();
+    while matches!(ps.try_wait(), Ok(None)) && asked.elapsed() < QUIET {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    ps.kill().ok();
+    let listed = match ps.wait_with_output() {
+        Ok(listed) if listed.status.success() => listed.stdout,
+        _ => return false,
+    };
+    let group = group.to_string();
+    String::from_utf8_lossy(&listed).lines().any(|row| {
+        let mut row = row.split_whitespace();
+        row.next() == Some(group.as_str())
+            && row.next().is_some_and(|s| s.starts_with(['R', 'D', 'U']))
+    })
 }
 
 /// `signal` sent to the program `pid`.
@@ -826,7 +865,10 @@ mod tests {
     /// first byte comes later than [`super::QUIET`] after it starts, as a
     /// program the machine has not yet run, keeps it (#3616); one that
     /// writes nothing at all is killed all the same, and fails where the
-    /// other host wrote; one that ends on its own is not waited for.
+    /// other host wrote; one that ends on its own is not waited for. One
+    /// runnable through a gap past [`super::QUIET`] between two writes, as
+    /// a program busy or starved, keeps its next write (#3779), one asleep
+    /// through it is cut there, and one that spins for good is still killed.
     #[test]
     fn a_line_s_head_ends_a_program_that_does_not_end_on_its_own() {
         if !oracle() {
@@ -835,11 +877,18 @@ mod tests {
         let hosts = Tree::new("host-line-head").unwrap();
         let text = "[[line]]\nname = \"one\"\nargs = []\nhead = 8\n";
         const { assert!(super::QUIET.as_secs() + 1 < super::PATIENCE.as_secs()) };
-        let late = format!("sleep {}; echo x; sleep 60", super::QUIET.as_secs() + 1);
+        let gap = super::QUIET.as_secs() + 1;
+        let late = format!("sleep {gap}; echo x; sleep 60");
+        let busy = format!(
+            "echo x; yes >/dev/null & s=$!; sleep {gap}; kill $s; wait $s 2>/dev/null; echo y; sleep 60"
+        );
+        let asleep = format!("echo x; sleep {gap}; echo y; sleep 60");
+        let both = "echo x; echo y; sleep 60";
         for (name, pinned, engine) in [
             ("loops", "yes x", "yes x"),
             ("waits", "echo x; sleep 60", "echo x; sleep 60"),
             ("late", "echo x; sleep 60", late.as_str()),
+            ("busy", both, busy.as_str()),
         ] {
             let pin = pin(&host(&hosts, "php-cgi", pinned), None);
             let (judgement, note) = judged(text, &pin, &host(&hosts, name, engine));
@@ -852,9 +901,21 @@ mod tests {
         let (judgement, note) = judged(text, &ends, &host(&hosts, "ends", "exit 3"));
         assert_eq!(judgement, Judgement::Pass, "ends: {note}");
         assert!(began.elapsed() < super::PATIENCE, "ends: {note}");
+        let (waits, began) = (
+            pin(&host(&hosts, "php-cgi", "echo x; sleep 60"), None),
+            Instant::now(),
+        );
+        let (judgement, note) = judged(
+            text,
+            &waits,
+            &host(&hosts, "spins", "echo x; yes >/dev/null"),
+        );
+        assert_eq!(judgement, Judgement::Pass, "spins: {note}");
+        assert!(began.elapsed() < 2 * super::PATIENCE, "spins: {note}");
         for (name, pinned, engine, differs) in [
             ("otherwise", "yes x", "yes y", "+y\n+y\n+y\n+y"),
             ("mute", "echo x; sleep 60", "sleep 60", "-x"),
+            ("asleep", both, asleep.as_str(), "-y"),
         ] {
             let pin = pin(&host(&hosts, "php-cgi", pinned), None);
             let (judgement, note) = judged(text, &pin, &host(&hosts, name, engine));
