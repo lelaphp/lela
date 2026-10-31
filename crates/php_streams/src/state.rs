@@ -104,6 +104,10 @@ pub(crate) struct State {
     /// `php_fopen_primary_script` opened it ([`crate::zend`]'s
     /// `open_primary`), until the engine destroys it.
     pub(crate) primary: Option<crate::api::request::ScannerFile>,
+    /// The `zend_file_handle`s of the includes being compiled, innermost last, each
+    /// `None` where its file did not open, until the engine closes it
+    /// ([`crate::zend`]'s `close_include`).
+    pub(crate) including: Vec<Option<crate::api::request::ScannerFile>>,
 }
 
 /// The idle entries the persistent pool keeps (design §4.10). php's list
@@ -182,6 +186,7 @@ impl Default for State {
             persistent: Vec::new(),
             engine: None,
             primary: None,
+            including: Vec::new(),
         }
     }
 }

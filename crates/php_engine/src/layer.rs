@@ -53,8 +53,16 @@ pub struct StreamHooks {
     /// STREAM_OPEN_FOR_INCLUDE)` and the whole read after it: the file a
     /// path names read through its wrapper, with the `*opened_path` its
     /// opener set; `None` for the open or the read that failed, which
-    /// warned. The `Err` is what the open threw.
+    /// warned. The `Err` is what the open threw. An `Ok` leaves its
+    /// `zend_file_handle` held, opened or not, for
+    /// [`StreamHooks::close_include`].
     pub open: StreamOpenHook,
+    /// `zend_destroy_file_handle` over what the last
+    /// [`StreamHooks::open`] that answered `Ok` held, as `compile_filename`
+    /// destroys it once `zend_compile_file` is done: its stream closed,
+    /// or left among the request's resources where a fatal is ending the
+    /// request, since `zend_bailout` jumps past the destroy.
+    pub close_include: fn(&mut Request),
     /// `php_resolve_path_for_zend`: `zend_resolve_path` past every
     /// extension's own
     /// ([`ExtensionBuilder::resolve_path`](crate::api::abi::ExtensionBuilder::resolve_path)).

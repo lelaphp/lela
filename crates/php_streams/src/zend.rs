@@ -17,6 +17,7 @@ use crate::streams::{Located, OpenOptions, StreamLayer};
 /// the plain files wrapper in its `MINIT`.
 pub const STREAM_HOOKS: StreamHooks = StreamHooks {
     open,
+    close_include,
     resolve_path,
     timestamp,
     spend,
@@ -35,29 +36,40 @@ pub const STREAM_HOOKS: StreamHooks = StreamHooks {
 
 /// `php_stream_open_for_zend_ex` and `zend_stream_fixup` for an include
 /// ([`ScannerFile`]): the file read whole, with the `*opened_path` its
-/// opener set. A read that bailed out leaves the file open, as
-/// `zend_bailout` leaves `zend_destroy_file_handle` unreached: its
-/// stream stands among the request's resources, which close it at
-/// shutdown.
+/// opener set, its `zend_file_handle` held for [`close_include`] once the
+/// engine has compiled it; a read that raised destroys it here.
 fn open(req: &mut Request, path: &[u8]) -> Result<Option<IncludeSource>, Thrown> {
     let Some(mut fh) = ScannerFile::open(req, path)? else {
+        req.streams().including.push(None);
         return Ok(None);
     };
-    let read = match fh.load(req) {
-        Ok(Some(source)) => Ok(Some(source.to_vec())),
-        Ok(None) => Ok(None),
-        Err(thrown) => Err(thrown),
+    let source = match fh.load(req) {
+        Ok(source) => source.map(<[u8]>::to_vec),
+        Err(thrown) => {
+            if !req.diagnostics().bailing_out() {
+                fh.destroy(req);
+            }
+            return Err(thrown);
+        }
     };
     let opened_path = fh.opened_path().map(|p| p.as_bytes().to_vec());
-    if !req.diagnostics().bailing_out() {
+    req.streams().including.push(Some(fh));
+    Ok(source.map(|source| IncludeSource {
+        source,
+        opened_path,
+    }))
+}
+
+/// [`StreamHooks::close_include`]: the `zend_file_handle` [`open`] held
+/// last destroyed, or, where a fatal is ending the request, left unreached as
+/// `zend_bailout` leaves `zend_destroy_file_handle`: its stream stands
+/// among the request's resources, which close it at shutdown.
+fn close_include(req: &mut Request) {
+    if let Some(fh) = req.streams().including.pop().flatten()
+        && !req.diagnostics().bailing_out()
+    {
         fh.destroy(req);
     }
-    read.map(|source| {
-        source.map(|source| IncludeSource {
-            source,
-            opened_path,
-        })
-    })
 }
 
 /// [`StreamHooks::open_primary`]: the program opened as
