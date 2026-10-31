@@ -910,6 +910,27 @@ impl Request {
     /// }
     /// ```
     ///
+    /// A read that threw closes the stream with its throwable standing,
+    /// so the wrapper's `stream_close` is refused, and the destructor the
+    /// close serves runs whole and chains its throwable onto the read's,
+    /// as `zend_objects_destroy_object` does:
+    ///
+    /// ```php
+    /// class W { public $context;
+    ///     function stream_open($p, $m, $o, &$op) { return true; }
+    ///     function stream_read($n) { throw new Exception('read'); }
+    ///     function stream_stat() { return []; }
+    ///     function stream_close() { echo "close\n"; }
+    ///     function stream_set_option($o, $a, $b) { return false; }
+    ///     function __destruct() { echo "dtor ", str_pad('a', 3, 'b'), "\n"; throw new Exception('dtor'); } }
+    /// stream_wrapper_register('ww', 'W');
+    /// try { include 'ww://x'; } catch (Exception $e) { echo $e->getMessage(), " <- ", $e->getPrevious()?->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// dtor abb
+    /// dtor <- read
+    /// ```
+    ///
     /// A read that fails, as one through a filter that answers
     /// `PSFS_ERR_FATAL` fails, is the file php could not open
     /// (`zend_stream_fixup`, [`crate::layer::StreamHooks::open`]).
@@ -944,11 +965,11 @@ impl Request {
         self.include.including = outer;
         let read = read?;
         // `compile_file` compiles nothing and reports the file it could not
-        // open or read only where nothing is pending (`if (!EG(exception))`).
-        let compiled = if self.stream_thrown.is_some() {
-            Ok(Opened::Failed)
-        } else {
-            self.compile_read(kind, written, path, read)
+        // open or read only where nothing is pending (`if (!EG(exception))`):
+        // what the open or the read threw stands as the compile's.
+        let compiled = match self.stream_thrown.take() {
+            Some(thrown) => Err(thrown),
+            None => self.compile_read(kind, written, path, read),
         };
         // `zend_destroy_file_handle` once the compile is done, with what it
         // threw standing in `EG(exception)`, so the wrapper's `stream_close`
