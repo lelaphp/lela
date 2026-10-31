@@ -57,12 +57,13 @@ fn permit(root: &Path, input: &str, args: &[&str]) -> Ran {
     Run::at(root).args(["permit"]).args(args).stdin(input).go()
 }
 
-/// The call itself, as the `Bash` tool runs it, in `root`. A commit the
+/// The call itself, as the `Bash` tool runs it, in `root`: by bash, not
+/// `sh`, which on Linux is dash and has no `pushd` (#3615). A commit the
 /// call makes takes its identity from the environment, so the command's
 /// words stay the call's and a runner with no global git identity (CI)
 /// commits as any other host does.
 fn shell(root: &Path, command: &str) {
-    let out = Command::new("sh")
+    let out = Command::new("bash")
         .args(["-c", command])
         .current_dir(root)
         .env("GIT_AUTHOR_NAME", "x")
