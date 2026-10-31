@@ -457,10 +457,10 @@ fn an_add_seeds_the_worktrees_target_from_the_clones_and_builds_the_workspace_al
             "the workspace's own crates are the worktree's build, not the clone's: {out}"
         );
     } else {
+        // The clone holds no build, so the line is the add's "holds no
+        // build, so it starts cold", worded so since #3622 (#3615).
         assert_eq!(
-            out.lines()
-                .filter(|l| l.contains("the worktree starts cold"))
-                .count(),
+            out.lines().filter(|l| l.contains("starts cold")).count(),
             1,
             "one line says the seeding failed: {out}"
         );
@@ -508,21 +508,10 @@ fn an_add_seeds_the_worktrees_target_from_the_clones_and_builds_the_workspace_al
 /// the add takes; where it does not, the clone holds no build and the add
 /// says it starts cold.
 fn warm_clone(root: &Path) -> bool {
-    let target = root.join("target");
-    fs::create_dir_all(&target).unwrap();
-    let sample = target.join("clones");
-    let clones = Command::new("cp")
-        .arg("-c")
-        .arg(root.join("Cargo.toml"))
-        .arg(&sample)
-        .output()
-        .unwrap()
-        .status
-        .success();
-    fs::remove_file(&sample).ok();
-    if !clones {
+    if !clones(root) {
         return false;
     }
+    let target = root.join("target");
     // A sweep mid-copy fails the copy with the files it took; the build
     // below compiles them, so the copy's exit is not this test's.
     Command::new("cp")
@@ -552,6 +541,26 @@ fn warm_clone(root: &Path) -> bool {
         String::from_utf8_lossy(&built.stderr)
     );
     true
+}
+
+/// Whether the volume `root` stands on clones a file with `cp -c`, the
+/// copy the add's and the queue's seeding make: macOS's `cp` on APFS
+/// does, and GNU coreutils' `cp` refuses the option, so on the Linux
+/// runner each build is seeded cold.
+fn clones(root: &Path) -> bool {
+    let target = root.join("target");
+    fs::create_dir_all(&target).unwrap();
+    let sample = target.join("clones");
+    let clones = Command::new("cp")
+        .arg("-c")
+        .arg(root.join("Cargo.toml"))
+        .arg(&sample)
+        .output()
+        .unwrap()
+        .status
+        .success();
+    fs::remove_file(&sample).ok();
+    clones
 }
 
 /// The retire half: a worktree's readings live in its own `target/harness/`
@@ -1124,7 +1133,8 @@ fn commit_all(root: &Path, message: &str) -> String {
 /// the clone on `staging`, cut from `main`, owned by the calling session,
 /// each build the merge lanes run seeded from main's with main's harness
 /// binary taken out of it; the same session's second call claims it as it
-/// stands, and another session's is refused.
+/// stands, and another session's is refused. Where the volume does not
+/// clone ([`clones`]), each build starts cold, one line saying so (#3615).
 #[test]
 fn the_queue_lays_the_merge_worktree_on_staging_owned_and_seeded_from_mains() {
     let root = repository("queue");
@@ -1133,6 +1143,7 @@ fn the_queue_lays_the_merge_worktree_on_staging_owned_and_seeded_from_mains() {
         write(&root, &format!("target/{build}/seeded"), build);
         write(&root, &format!("target/{build}/xtask"), "main's harness");
     }
+    let clones = clones(&root);
     let (code, out) = by("the-coordinator", &root, "queue");
     assert_eq!(code, 0, "{out}");
     let dir = worktree_of(&root, "_merge");
@@ -1149,7 +1160,13 @@ fn the_queue_lays_the_merge_worktree_on_staging_owned_and_seeded_from_mains() {
     );
     for build in builds {
         let seeded = dir.join(format!("target/{build}"));
-        assert_eq!(fs::read_to_string(seeded.join("seeded")).unwrap(), build);
+        if clones {
+            assert_eq!(fs::read_to_string(seeded.join("seeded")).unwrap(), build);
+        } else {
+            assert!(!seeded.join("seeded").exists(), "{build}: {out}");
+            let cold = format!("target/{build} of the worktree starts cold");
+            assert_eq!(out.matches(&cold).count(), 1, "{build}: {out}");
+        }
         assert_ne!(
             fs::read_to_string(seeded.join("xtask")).ok().as_deref(),
             Some("main's harness"),
