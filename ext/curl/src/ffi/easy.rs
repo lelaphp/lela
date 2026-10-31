@@ -463,9 +463,11 @@ impl EasyId {
         self.with(req, None, |handle| Some(Address::of(handle.raw())))
     }
 
-    /// The library's pointer, for a call that serves no callback.
-    pub(super) fn raw(self, req: &mut Request) -> Option<*mut sys::CURL> {
-        self.with(req, None, |handle| Some(handle.raw()))
+    /// The library's pointer, for a call that holds it: resolved inside
+    /// the hold (`MultiId::call`), so it stays live to
+    /// the call's end whatever PHP code the call serves.
+    pub(super) fn raw(self, req: &mut Request) -> Option<NonNull<sys::CURL>> {
+        self.with(req, None, |handle| Some(handle.raw))
     }
 
     /// What a transfer over `easies` holds: each `CURL *`, and each

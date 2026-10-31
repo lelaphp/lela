@@ -24,9 +24,12 @@
 //!
 //! **Callbacks.** libcurl calls back from inside `curl_easy_perform`,
 //! `curl_multi_perform`, `curl_easy_pause`, the calls that free a MIME
-//! tree, and `curl_easy_setopt`, whose `infof` and `failf` lines reach
-//! the debug callable and the `CURLOPT_STDERR` file: a `CURL *` is set
-//! only through `Live`, which `EasyId::call` makes holding it. Each such
+//! tree, and `curl_easy_setopt` and `curl_multi_remove_handle`, whose
+//! `infof` and `failf` lines reach the debug callable and the
+//! `CURLOPT_STDERR` file: a `CURL *` is set only through `Live`, which
+//! `EasyId::call` makes holding it, and a `CURLM *` adds, removes and
+//! performs only through `LiveMulti`, which `MultiId::call` makes
+//! holding it and the `CURL *`s it reaches. Each such
 //! call is made through [`Session::enter`], which leaves
 //! the request where a trampoline finds it for the length of the call and
 //! hands back what a callback threw, which the library cannot carry. A
