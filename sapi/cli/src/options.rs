@@ -44,7 +44,7 @@ pub enum Each {
 /// What `do_cli` prints in a request of its own with no program:
 /// php's `PHP_CLI_MODE_REFLECTION_*` and `PHP_CLI_MODE_SHOW_INI_*`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Report {
+pub enum Listing {
     /// `--rf`: `ReflectionFunction`, or `ReflectionMethod` for a name
     /// with `::` in it.
     Function(Vec<u8>),
@@ -70,7 +70,7 @@ enum Mode {
     Strip,
     Direct,
     ProcessStdin,
-    Report,
+    Listing,
 }
 
 /// What the command line asks the binary for once the engine's own
@@ -104,9 +104,9 @@ pub enum Ask {
     /// `-B`, `-R`, `-F` and `-E` over stdin's lines, with the words after
     /// the switches as `$argv[1..]`.
     Lines(Lines, Vec<OsString>),
-    /// A report printed in a request of its own; the file a bare word
+    /// A listing printed in a request of its own; the file a bare word
     /// named is opened first, as `do_repeat` opens it, and not served.
-    Report(Report, Option<PathBuf>),
+    Listing(Listing, Option<PathBuf>),
     /// `-S`: the built-in web server.
     Server(Server),
     /// `-a`: the interactive shell, the file a bare word or `-f` named
@@ -159,7 +159,7 @@ pub struct Options {
     /// `num_repeats`, `atoi` of the value.
     pub repeat: i64,
     /// `-a` taken, which `do_cli` answers with `Interactive shell` and
-    /// a blank line on stdout before it serves whatever the mode is.
+    /// a blank line on stdout before it serves whatever the `behavior` is.
     pub interactive: bool,
     pub ask: Ask,
 }
@@ -223,8 +223,8 @@ const OPTIONS: &[Opt] = &[
     opt(16, 1, "repeat"),
 ];
 
-/// What `do_cli`'s second pass settled: the mode, the program `-f` or
-/// `-r` named, the process-stdin switches, the report, the last
+/// What `do_cli`'s second pass settled: the `behavior`, the program `-f` or
+/// `-r` named, the process-stdin switches, the listing, the last
 /// `param_error` (each assignment overwrites the one before), the repeat
 /// count and where the switches ended.
 struct Settled {
@@ -232,7 +232,7 @@ struct Settled {
     script_file: Option<Vec<u8>>,
     direct: Option<Vec<u8>>,
     lines: Lines,
-    report: Option<Report>,
+    listing: Option<Listing>,
     param_error: Option<&'static str>,
     /// `-a` taken, php's `interactive`.
     interactive: bool,
@@ -343,7 +343,7 @@ impl Options {
                     refused: None,
                 }
             }
-            Mode::Report => Ask::Report(settled.report.unwrap_or(Report::IniFiles), file),
+            Mode::Listing => Ask::Listing(settled.listing.unwrap_or(Listing::IniFiles), file),
             Mode::ProcessStdin => {
                 let mut lines = settled.lines;
                 if lines.each.is_none()
@@ -367,7 +367,7 @@ impl Options {
 
     /// `main`'s loop over the line (`php_cli.c:1290-1325`), `show_err`
     /// set: the ini switches onto `self`, `-S` choosing the server's
-    /// module, and what ends it early; `-i`, `-v` and `-m` are the CLI's
+    /// `sapi_module`, and what ends it early; `-i`, `-v` and `-m` are the CLI's
     /// whatever came before them.
     fn main_pass(&mut self, argv: &[Vec<u8>]) -> Result<Host, Refused> {
         let mut getopt = Getopt::new(OPTIONS, 0);
@@ -419,7 +419,7 @@ impl Options {
 
 impl Settled {
     /// `-B`, `-R`, `-F` and `-E` (`php_cli.c:700-790`): each makes the
-    /// mode `PHP_CLI_MODE_PROCESS_STDIN` from the standard one, and one
+    /// `behavior` `PHP_CLI_MODE_PROCESS_STDIN` from the standard one, and one
     /// that repeats is php's sentence, `-R` and `-F` counting as one.
     fn process_stdin(&mut self, code: u8, value: Vec<u8>) {
         let taken = match code {
@@ -450,7 +450,7 @@ impl Settled {
     }
 }
 
-/// `do_cli`'s second loop (`php_cli.c:666-832`): the mode, the program
+/// `do_cli`'s second loop (`php_cli.c:666-832`): the `behavior`, the program
 /// and the rest of what the switches name, each switch read as php reads
 /// it, `-a` under whether the started modules have a `shell`. A
 /// `param_error` does not end the loop: the last one set is the one
@@ -461,7 +461,7 @@ fn mode_pass(argv: &[Vec<u8>], shell: bool) -> Settled {
         script_file: None,
         direct: None,
         lines: Lines::default(),
-        report: None,
+        listing: None,
         param_error: None,
         interactive: false,
         repeat: 1,
@@ -524,19 +524,19 @@ fn mode_pass(argv: &[Vec<u8>], shell: bool) -> Settled {
                 }
             }
             10..=14 => {
-                settled.mode = Mode::Report;
-                settled.report = Some(match code {
-                    10 => Report::Function(value),
-                    11 => Report::Class(value),
-                    12 => Report::Extension(value),
-                    13 => Report::ZendExtension(value),
-                    _ => Report::ExtensionInfo(value),
+                settled.mode = Mode::Listing;
+                settled.listing = Some(match code {
+                    10 => Listing::Function(value),
+                    11 => Listing::Class(value),
+                    12 => Listing::Extension(value),
+                    13 => Listing::ZendExtension(value),
+                    _ => Listing::ExtensionInfo(value),
                 });
             }
             15 => match given.as_deref() {
                 None => {
-                    settled.mode = Mode::Report;
-                    settled.report = Some(Report::IniFiles);
+                    settled.mode = Mode::Listing;
+                    settled.listing = Some(Listing::IniFiles);
                 }
                 // `PHP_CLI_MODE_SHOW_INI_DIFF`, the entries set away from
                 // their built-in defaults: the engine keeps no default
@@ -1098,32 +1098,32 @@ mod tests {
     fn the_reports_take_their_name_and_a_bare_word_as_the_file_to_open() {
         assert_eq!(
             ask(&["-n", "--rf", "strlen"]),
-            Ok(Ask::Report(Report::Function(code("strlen")), None))
+            Ok(Ask::Listing(Listing::Function(code("strlen")), None))
         );
         assert_eq!(
             ask(&["-n", "--rc", "Foo", "x.php"]),
-            Ok(Ask::Report(
-                Report::Class(code("Foo")),
+            Ok(Ask::Listing(
+                Listing::Class(code("Foo")),
                 Some(PathBuf::from("x.php"))
             ))
         );
         assert_eq!(
             ask(&["-n", "--rextension=json"]),
-            Ok(Ask::Report(Report::Extension(code("json")), None))
+            Ok(Ask::Listing(Listing::Extension(code("json")), None))
         );
         assert_eq!(
             ask(&["-n", "--rz", "x"]),
-            Ok(Ask::Report(Report::ZendExtension(code("x")), None))
+            Ok(Ask::Listing(Listing::ZendExtension(code("x")), None))
         );
         assert_eq!(
             ask(&["-n", "--ri", "json"]),
-            Ok(Ask::Report(Report::ExtensionInfo(code("json")), None))
+            Ok(Ask::Listing(Listing::ExtensionInfo(code("json")), None))
         );
         // `--ini` takes no value from the word after it, `-d`'s among
         // them (`sapi/cli/tests/gh21901.phpt`).
         assert_eq!(
             ask(&["-n", "-d", "foo=bar", "--ini"]),
-            Ok(Ask::Report(Report::IniFiles, None))
+            Ok(Ask::Listing(Listing::IniFiles, None))
         );
     }
 

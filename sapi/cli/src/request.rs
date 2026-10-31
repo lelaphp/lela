@@ -1,6 +1,6 @@
 //! The requests `do_cli` serves (`Z/sapi/cli/php_cli.c:840-1180`): the
 //! request description `do_repeat` builds for a program, the sink on the
-//! process's two streams, and each mode served on it, a program, `-r`'s
+//! process's two streams, and each `behavior` served on it, a program, `-r`'s
 //! code and stdin's lines, a lint, a highlight or a strip, and the
 //! reports `do_cli` prints in a request of their own.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
@@ -16,7 +16,7 @@ use php_sapi::{
 };
 
 use crate::NAME;
-use crate::options::{Each, Lines, Program, Report};
+use crate::options::{Each, Lines, Listing, Program};
 
 /// The sink on the process's streams, php's CLI: body bytes on stdout,
 /// the header block nowhere, since `sapi_cli_send_headers` sends none,
@@ -332,23 +332,23 @@ pub fn lint(
     (if served.exit_code == 0 { 0 } else { 255 }, sink)
 }
 
-/// A report `do_cli` prints in a request of its own
+/// A listing `do_cli` prints in a request of its own
 /// (`php_cli.c:1036-1131`), the file a bare word named opened first as
 /// `do_repeat` opens it: php's C there constructs the reflector, prints
-/// it or the exception's message, or prints `php_info_print_module` or
+/// it or the `ReflectionException`'s message, or prints `php_info_print_module` or
 /// the configuration files; served here as the same calls in PHP, which
 /// is what `xtask crosscheck` holds `--re` and `--ri` to the oracle's
 /// bytes through; the exit code.
-pub fn report(engine: &Engine, report: &Report, file: Option<&Path>) -> i32 {
-    let code: Vec<u8> = match report {
-        Report::Function(name) if name.windows(2).any(|pair| pair == b"::") => {
+pub fn listing(engine: &Engine, listing: &Listing, file: Option<&Path>) -> i32 {
+    let code: Vec<u8> = match listing {
+        Listing::Function(name) if name.windows(2).any(|pair| pair == b"::") => {
             reflect(b"\\ReflectionMethod::createFromMethodName(", name)
         }
-        Report::Function(name) => reflect(b"new \\ReflectionFunction(", name),
-        Report::Class(name) => reflect(b"new \\ReflectionClass(", name),
-        Report::Extension(name) => reflect(b"new \\ReflectionExtension(", name),
-        Report::ZendExtension(name) => reflect(b"new \\ReflectionZendExtension(", name),
-        Report::ExtensionInfo(name) => {
+        Listing::Function(name) => reflect(b"new \\ReflectionFunction(", name),
+        Listing::Class(name) => reflect(b"new \\ReflectionClass(", name),
+        Listing::Extension(name) => reflect(b"new \\ReflectionExtension(", name),
+        Listing::ZendExtension(name) => reflect(b"new \\ReflectionZendExtension(", name),
+        Listing::ExtensionInfo(name) => {
             let name = quoted(name);
             [
                 &b"if (\\extension_loaded("[..],
@@ -361,13 +361,7 @@ pub fn report(engine: &Engine, report: &Report, file: Option<&Path>) -> i32 {
             ]
             .concat()
         }
-        Report::IniFiles => {
-            b"printf(\"Configuration File (php.ini) Path: \\\"%s\\\"\\n\", PHP_CONFIG_FILE_PATH); \
-            echo \"Loaded Configuration File:         (none)\\n\", \
-            \"Scan for additional .ini files in: (none)\\n\", \
-            \"Additional .ini files parsed:      (none)\\n\";"
-                .to_vec()
-        }
+        Listing::IniFiles => ini_files(engine),
     };
     match describe(file, &[], false) {
         Ok(mut description) => {
@@ -377,6 +371,40 @@ pub fn report(engine: &Engine, report: &Report, file: Option<&Path>) -> i32 {
         }
         Err(code) => code,
     }
+}
+
+/// `PHP_CLI_MODE_SHOW_INI_CONFIG` (`Z/sapi/cli/php_cli.c:1127-1142`):
+/// the paths quoted where present, `(none)` only for NULL, and the
+/// scanned files joined with comma-newlines and their final newline,
+/// before the listing's own newline. Serve the bytes in the listing's
+/// request so its startup, `ob_` buffering and shutdown are the CLI's.
+fn ini_files(engine: &Engine) -> Vec<u8> {
+    let files = engine.ini_files();
+    let path = |path: Option<&[u8]>| {
+        path.map_or_else(
+            || b"(none)".to_vec(),
+            |path| [b"\"".as_slice(), path, b"\""].concat(),
+        )
+    };
+    let scanned: Vec<_> = files.scanned().collect();
+    let scanned = if scanned.is_empty() {
+        b"(none)".to_vec()
+    } else {
+        [scanned.join(b",\n".as_slice()), b"\n".to_vec()].concat()
+    };
+    let body = [
+        b"Configuration File (php.ini) Path: \"".as_slice(),
+        files.ini_path(),
+        b"\"\nLoaded Configuration File:         ",
+        &path(files.loaded()),
+        b"\nScan for additional .ini files in: ",
+        &path(files.scan_dir()),
+        b"\nAdditional .ini files parsed:      ",
+        &scanned,
+        b"\n",
+    ]
+    .concat();
+    [b"echo ".as_slice(), &quoted(&body), b";"].concat()
 }
 
 /// `-i`, `do_cli`'s first loop (`php_cli.c:622-630`): `php_print_info`
@@ -666,8 +694,8 @@ mod tests {
     const FAILED: &str = "\nFatal error: Uncaught Error: rinit threw in [no active file]:0\nStack trace:\n#0 {main}\n  thrown in [no active file] on line 0\n";
 
     /// A request whose start failed ends as `do_cli` ends it: what the
-    /// failure displayed, `Could not startup.` after it, and 1, the code
-    /// never run (`php_cli.c:919-922`, `:1188-1191`).
+    /// failure displayed, `Could not startup.` after it, and 1, the program
+    /// never started (`php_cli.c:919-922`, `:1188-1191`).
     #[test]
     fn a_failed_start_is_could_not_startup_and_status_one() {
         let engine = failing_start();

@@ -522,9 +522,12 @@ fn tickets_counts_the_weeks_closes_in_the_main_worktrees_store_and_the_checkouts
         .unwrap();
 
     let md = status(&checkout, &["--section", "tickets"]).ok();
+    // The tracker's line follows, unknown where the scratch has no
+    // GitHub to ask (#3619).
     assert_eq!(
         md,
-        "the last 7 days: 3 closes, 1 of them withdrawals, opened 3 tickets, 1.00 per close\n"
+        "the last 7 days: 3 closes, 1 of them withdrawals, opened 3 tickets, 1.00 per close\n\
+         on the tracker: unknown: GitHub could not be asked\n"
     );
     let json = status(&checkout, &["--section", "tickets", "--format", "json"]).ok();
     let json: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -868,28 +871,22 @@ Read CONTEXT.md first.
         "the local file is laid down from its template"
     );
     let template = std::fs::read_to_string(&local).unwrap();
-    for name in [
-        "budget",
-        "phpt",
-        "witness",
-        "mutants",
-        "divergence",
-        "permits",
-        "git",
-    ] {
+    for name in ["budget", "phpt", "witness", "port-map", "divergence", "git"] {
         assert!(
             template.contains(&format!("--section {name}\" volatile name={name}")),
             "{name} is a volatile region of the local file: {template}"
         );
     }
+    for name in ["mutants", "permits"] {
+        assert!(
+            !template.contains(&format!("name={name}")),
+            "{name} is rendered by name, not in the local file: {template}"
+        );
+    }
     assert!(text.contains("unrendered"), "{text}");
     assert!(text.contains("computed trust"), "{text}");
 
-    std::fs::write(
-        &local,
-        "# Local\n\n<!-- computed exec cmd=\"x\" volatile name=budget -->\n| crate |\n<!-- /computed in=a out=b -->\n",
-    )
-    .unwrap();
+    std::fs::write(&local, rendered(&template)).unwrap();
     let text = status(&root, &["--session"]).ok();
     assert!(
         text.contains(
@@ -903,12 +900,12 @@ Read CONTEXT.md first.
     // As JSON, the two blocks the function hook hands the engine (#64):
     // the map as the file is, the facts with the note that they are
     // unrendered; the Markdown is the two joined.
-    std::fs::write(&local, "# Local\n\n<!-- /computed -->\n").unwrap();
+    std::fs::write(&local, &template).unwrap();
     let json = status(&root, &["--session", "--format", "json"]).ok();
     let blocks: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(blocks["map"], "# The map\n\nRead CONTEXT.md first.\n");
     let facts = blocks["facts"].as_str().unwrap();
-    assert!(facts.starts_with("# Local\n"), "{facts}");
+    assert!(facts.starts_with("# Local facts\n"), "{facts}");
     assert!(facts.contains("unrendered"), "{facts}");
     let text = status(&root, &["--session"]).stdout;
     assert_eq!(
@@ -924,6 +921,54 @@ Read CONTEXT.md first.
         0,
         "one of --section and --session is required: {ran}"
     );
+}
+
+/// A local file as `computed` renders one: each region's body between its
+/// opener and a closer carrying sums.
+fn rendered(template: &str) -> String {
+    template.replace(
+        "<!-- /computed -->\n",
+        "\n| crate |\n\n<!-- /computed in=a out=b -->\n",
+    )
+}
+
+/// A clone keeps its local file across sessions, so a template that moved,
+/// a section dropped or added, reached only a clone that had none: the
+/// main checkout carried `mutants` and lacked `port-map` long after both
+/// changed (#3620 D1). `--session` lays the file down again whenever what
+/// was laid differs from the template, and leaves a rendering of the
+/// template as it stands.
+#[test]
+fn session_lays_the_local_file_down_again_when_the_template_moved() {
+    let root = scratch("session-relay");
+    std::fs::write(root.join("AGENTS.md"), "# The map\n").unwrap();
+    let local = root.join(".claude/harness.local.md");
+    status(&root, &["--session"]).ok();
+    let template = std::fs::read_to_string(&local).unwrap();
+
+    let current = rendered(&template);
+    std::fs::write(&local, &current).unwrap();
+    let text = status(&root, &["--session"]).ok();
+    assert_eq!(std::fs::read_to_string(&local).unwrap(), current);
+    assert!(
+        text.contains("| crate |") && !text.contains("unrendered"),
+        "{text}"
+    );
+
+    let older = current.replace(
+        "\n## git\n",
+        "\n## mutants\n\n<!-- computed exec cmd=\"cargo xtask status --section mutants\" volatile name=mutants | do not edit; run computed -->\n\n| crate |\n\n<!-- /computed in=a out=b -->\n\n## git\n",
+    );
+    assert_ne!(older, current);
+    std::fs::write(&local, &older).unwrap();
+    let text = status(&root, &["--session"]).ok();
+    assert_eq!(
+        std::fs::read_to_string(&local).unwrap(),
+        template,
+        "a file laid from an older template is laid down again"
+    );
+    assert!(text.contains("unrendered"), "{text}");
+    assert!(!text.contains("name=mutants"), "{text}");
 }
 
 /// permit judges by three rules of its own beside the manifest's, the
@@ -952,6 +997,14 @@ fn permits_separates_the_calls_denied_from_the_calls_handed_to_the_next_candidat
     handed_on.session = session.into();
     store.record(std::slice::from_ref(&handed_on)).unwrap();
 
+    // A diff judged at pre-commit is that caller's, never an agent's
+    // denial (#3619).
+    let mut at_pre_commit = Reading::new("permit", "pre-commit/computed.region-body");
+    at_pre_commit.rule = "computed.region-body".into();
+    at_pre_commit.status = Status::Fail;
+    at_pre_commit.session = "pre-commit".into();
+    store.record(std::slice::from_ref(&at_pre_commit)).unwrap();
+
     let mut unjudged = Reading::new("permit", "permit.unjudged-call");
     unjudged.rule = "permit.unjudged-call".into();
     unjudged.status = Status::Fail;
@@ -977,10 +1030,13 @@ fn permits_separates_the_calls_denied_from_the_calls_handed_to_the_next_candidat
     assert_eq!(walked_past["denials"], 1, "{walked_past}");
     assert_eq!(walked_past["handed_on"], 0, "{walked_past}");
     row("computed.region-body");
+    let person = row("computed.region-body");
+    assert_eq!(person["denials"], 0, "{person}");
+    assert_eq!(person["at_pre_commit"], 1, "{person}");
 
     let md = status(&root, &["--section", "permits"]).ok();
     assert!(
-        md.contains("| denials | handed on |"),
+        md.contains("| denials | judged | at pre-commit | handed on |"),
         "the two are two columns:\n{md}"
     );
     let line = md
@@ -1006,6 +1062,7 @@ tool = "Bash"
 with = ["git add", "git commit"]
 require_argv = "--"
 text = "An agent stages and commits by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: the index is shared with every session in the checkout."
+remedy = "`git add -- <paths>` and `git commit -F <file> -- <paths>`"
 "#
                     .parse::<toml::Table>()
                     .unwrap(),
@@ -1073,10 +1130,12 @@ fn permits_renders_the_bench_reading_as_before() {
     );
 }
 
-/// The query behind CI's §7 section (harness-design.md): readings and
-/// failures per instrument from the log, and an instrument with readings
-/// but no failure in fourteen days is a candidate for silent; one whose
-/// fixture failed within the window is not.
+/// The query behind CI's §7 section (harness-design.md): readings,
+/// failures, the last reading and the last failure per instrument from the
+/// log. An instrument read within fourteen days with no failure in them is
+/// a candidate for silent; one whose fixture failed within the window is
+/// not, nor one with no reading in it, nor `usage`, whose reading cannot
+/// fail (#3619).
 #[test]
 fn permits_lists_the_instruments_and_the_candidates_for_silent() {
     let root = scratch("silent");
@@ -1093,6 +1152,7 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
     let mut budget = Reading::new("budget", "php_heap");
     budget.status = Status::Pass;
     store.record(std::slice::from_ref(&budget)).unwrap();
+    budget.at = xtask::reading::now().unwrap();
     store.record(std::slice::from_ref(&budget)).unwrap();
 
     let mut vocab = Reading::new("vocab", "php_heap");
@@ -1106,11 +1166,23 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
     let mut old = Reading::new("clippy", "php_heap");
     old.status = Status::Fail;
     store.record(std::slice::from_ref(&old)).unwrap();
+    old.status = Status::Pass;
+    old.at = xtask::reading::now().unwrap();
+    store.record(std::slice::from_ref(&old)).unwrap();
+
+    let mut quiet = Reading::new("test", "php_heap");
+    quiet.status = Status::Pass;
+    store.record(std::slice::from_ref(&quiet)).unwrap();
+
+    let mut usage = Reading::new("usage", "3619");
+    usage.status = Status::Pass;
+    usage.at = xtask::reading::now().unwrap();
+    store.record(std::slice::from_ref(&usage)).unwrap();
 
     let md = status(&root, &["--section", "permits"]).ok();
     assert!(
-        !md.contains(" silent |") && md.contains("silent_days"),
-        "no window in the manifest: no silent column, and the key is named: {md}"
+        md.contains("| last reading | last failure |") && md.contains("silent_days"),
+        "no window in the manifest: no candidates, and the key is named: {md}"
     );
     let json = status(&root, &["--section", "permits", "--format", "json"]).ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1125,13 +1197,19 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
             .to_owned()
     };
     assert!(row("budget").contains("| 2 | 0 |"), "{}", row("budget"));
-    assert!(row("budget").contains("candidate"), "{}", row("budget"));
     assert!(row("vocab").contains("| 2 | 1 |"), "{}", row("vocab"));
-    assert!(!row("vocab").contains("candidate"), "{}", row("vocab"));
     assert!(
-        row("clippy").contains("candidate"),
-        "a failure at the epoch is not one in the window: {}",
+        row("clippy").contains("| 2 | 1 | 20") && row("clippy").contains("| 1970-01-01"),
+        "the last reading is today's and the last failure the epoch's: {}",
         row("clippy")
+    );
+    let named = md
+        .lines()
+        .find(|l| l.starts_with("The candidates for silent"))
+        .unwrap_or_else(|| panic!("{md}"));
+    assert!(
+        named.contains(": budget, clippy. `usage` is never one"),
+        "a failure at the epoch is not one in the window, and an instrument unread in it is not quiet: {named}"
     );
 
     let json = status(&root, &["--section", "permits", "--format", "json"]).ok();
@@ -1149,6 +1227,8 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
     assert_eq!(of("budget")["silent"], true);
     assert_eq!(of("vocab")["failures"], 1);
     assert_eq!(of("vocab")["silent"], false);
+    assert_eq!(of("test")["silent"], false);
+    assert_eq!(of("usage")["silent"], serde_json::Value::Null);
 }
 
 /// The weekly bar table is gone (#2934, #2973): `--section week` and

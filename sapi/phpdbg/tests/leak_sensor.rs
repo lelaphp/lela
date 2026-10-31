@@ -1,5 +1,5 @@
 //! The request leak sensor (#1992) over phpdbg's own natives: a debug
-//! binary is armed unless `PHP_SENSE_LEAKS=0` turns it off, so a run that
+//! binary is armed unless `PHP_SENSE_LEAKS=0` turns it off, so a program that
 //! keeps a block ends in the `InternalError` naming it.
 #![cfg(debug_assertions)]
 
@@ -7,7 +7,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 /// What `phpdbg -qIb -n`, armed as a debug binary is by default, wrote
-/// on stdout for a program of `source`, run and quit.
+/// on stdout for a program of `source`, served and quit.
 fn armed(name: &str, source: &str) -> String {
     let dir = std::env::temp_dir().join(format!("sapi-phpdbg-leak-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();

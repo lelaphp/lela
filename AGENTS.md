@@ -6,12 +6,12 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 
 | directory | crates | behind a feature |
 |---|---|---|
-| crates/ | 15 | 1 |
+| crates/ | 16 | 1 |
 | ext/ | 59 | 31 |
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=a19c84200708273ac709ce8a5dbd1c20b9d5c0ea7f15d7ec19321609683aa041 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=aa9b9592f32cb0a7b4698fe9634e16a51d1f183910fcbccd6b3cd3c937938e59 out=6ba0892c9255d463a40e6c1df9a6c86358dea5a0b2a04df470497c174dc89391 -->
 
 ## What makes the third engine special?
 
@@ -38,8 +38,8 @@ I want Zend's design with better tooling, and nothing beside it. No second execu
 
 ## The five ways to hurt yourself
 
-1. **Editing the harness's own files.** `seams.toml`, `oracle.toml` and `docs/divergence.toml` are a person's to decide, and `permit` denies you the edit. While nothing is settled, propose a rule or a divergence row in the commit message, never in the file. Once a person has settled the row on a ticket, land it with `cargo xtask steer <file> --from <proposal>`, which writes only where the proposal adds: one changed ceiling, one widened edge, one dropped rule and nothing is written, because a change to what already binds is a person's hand.
-2. **Hand-editing a computed region.** Run `computed run <file>` to refresh it. `computed run --force` discards a hand edit, and a person decides that.
+1. **Editing the harness's own files.** `seams.toml`, `oracle.toml` and `docs/divergence.toml` are a person's to decide, and `permit` denies you the edit. While nothing is settled, propose a rule or a divergence row in the commit message, never in the file. Once a person has settled the row on a ticket, land it with `cargo xtask steer <file> --from <proposal>`, which writes only where the proposal adds: one changed ceiling, one widened edge, one dropped rule and nothing is written, because a change to what already binds takes a person's hand.
+2. **Hand-editing a computed region.** Run `computed run <file>` to refresh it. `computed run --force` discards a hand edit, and only a person runs it.
 3. **Authoring a witness verdict.** `exit=` in a witness is captured by `xtask witness --accept`, never typed. Read the diff it produces and say in the commit that you did.
 4. **Skipping the hook.** `git commit --no-verify` is not available to you.
 5. **Running a nightly lane locally.** The full corpus, the compile identity, the differential fuzz and the bench run in CI only. Run the per-crate subset the instrument names.
@@ -50,38 +50,29 @@ I want Zend's design with better tooling, and nothing beside it. No second execu
 
 ## Finish the whole task
 
-A session here runs on its own: the turn ends at the Stop hook, not at a question, and nobody is waiting to type "go ahead".
+A session here runs on its own, and a turn ends at a hold, never at a question. The holds, by layer:
 
-You are operating autonomously. The user is not watching in real time and cannot answer questions mid-task, so asking 'Want me to…?' or 'Shall I…?' will block the work. For reversible actions that follow from the original request, proceed without asking. Stop only for destructive actions or genuine scope changes the user must decide. Offering follow-ups after the task is done is fine; asking permission before doing the work is not.
+- **The Claude hooks bind.** `permit` judges each Edit, Write and Bash call before it runs; `done` holds the turn at the Stop and warns at `SubagentStop`.
+- **The git hooks measure.** pre-commit runs the instruments over what is staged, and pre-push runs `done`.
+- **The ticket instrument closes.** `xtask ticket ready` refuses while `done` is unmet in the builder's worktree, and only `xtask ticket close` closes a ticket.
 
-Exception: when the user is describing a problem, asking a question, or thinking out loud rather than requesting a change, the deliverable is your assessment. Report your findings and stop. Don't apply a fix until they ask for one.
+The request sets the scope, and all of it is the deliverable. Take each reversible step it implies without asking. A problem described or a question asked gets an assessment, and the tree changes only when a change is asked for. Before a command changes the system's state, check that the evidence supports that act. End on finished work: a last paragraph that plans, promises or asks is work to do now, with tool calls. Where one part is blocked, finish the rest and say what waits on what.
 
-Before ending your turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done ('I'll…', 'let me know when…'), do that work now with tool calls. That includes retrying after errors and gathering missing information yourself. Do not stop because the context or session is long. End your turn only when the task is complete or you are blocked on input only the user can provide.
-
-Before running a command that changes system state (such as restarts, deletes, or config edits), check that the evidence actually supports that specific action. A signal that pattern-matches to a known failure may have a different cause.
-
-What a session stops for here is listed, not judged in the moment: an edit `permit` denies, and an act that is a person's alone (harness §11) — a manifest row, a divergence reason, an oracle bump, the sentence a design revision states. Each of those is a `for-a-person` ticket, filed, with the work that waits on it wired to wait; asking in the reply instead ends the turn with nothing filed and nothing running.
-
-The user's request — or the plan they approved — sets the scope, and the scope is the deliverable: don't quietly narrow, widen, or swap it. Read ambiguity the way a careful colleague would: make routine judgment calls yourself, and check in only when different readings would lead to materially different work. If you see a real problem with the task as specified, say so in a sentence or two and keep building under stated assumptions; if the user hears the concern and reaffirms, that is their decision, so deliver the full request.
-
-If a question comes up partway, first do everything that doesn't depend on the answer; then state the assumption you made, or — when going ahead on a wrong guess would be unsafe or would make the work useless — put the question at the end of a turn that also delivers that progress. If one part turns out to be blocked, complete every other part in full and say exactly what you left out and why — the whole task is the deliverable, and scaling it down is the user's call, not yours. A step you have decided on is something to run, not to announce: describing the next step and ending the turn leaves it undone until the user replies.
-
-Keep changes to what the request needs. Something else you notice worth doing — cleanup or documentation the task didn't call for, a change to a file the task didn't require — is a suggestion to make at the end, not a change to make; actions clearly beyond what the ask implies, and risky or destructive ones, still need the user's go-ahead.
-
-Where those paragraphs say *suggestion* or *follow-up*, this repository says ticket. A thing found and not done is a ticket, filed before the turn ends: `ready-for-agent` when an agent may take it, `for-a-person` when the act is a person's alone (harness §11); the reply that names it and files nothing is what `ticket.reply-unfiled` holds you to (CONTEXT.md, Ticket). Filing one is the exception and never the shape of the work — the task is finished whole, and what a ticket carries is what the task did not ask for.
+A session stops where `permit` denies an edit, and at an act harness §11 gives a person, such as a manifest row, a divergence reason or an oracle bump. File each as a `for-a-person` ticket, name its number, and wire the work that waits on it with `gh issue edit <ticket> --add-blocking <n>`. Whatever else you find beyond the task, file a ticket and name its number before the turn ends, `ready-for-agent` when an agent may take it. A ticket carries what the task did not ask for, never a part of it.
 
 ## Verifying and committing
 
 - `cargo xtask <instrument>` runs one instrument; `cargo xtask --help` lists the ones built so far. The smallest proof is the instrument for the crate you touched. The harness itself is tested by `cargo test -p xtask`, and every manifest rule has a fixture under `xtask/fixtures/` that must fail.
 - A change to behaviour comes with a witness beside the kernel or native, pinned by `--accept`. The witness is the test; write it before the body when you can. The phpt subset for an extension is every `.phpt` under `php-src/ext/<name>`, as run-tests.php walks the directory. A bench number is a claim a person signs off, with the A/A control read by a person: state the measurement, never the conclusion.
-- Stage and commit by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: the index is shared with every session in the checkout, and `git add -A`, `git add .` or a commit that names no path takes what another session staged. The shell is zsh, which does not split an unquoted `$P`: write the paths out, or use an array, `P=(a b)` and `git add -- "${P[@]}"`. A merge, cherry-pick, revert or rebase in progress commits the whole index, whoever staged it; where one stands that you did not start, `permit` refuses the git commands that write its index or step it, so wait for it to end or work in your own worktree. The message file is named for the branch or its ticket, never `msg.txt`: the scratchpad is shared across the checkout's worktrees, so a generic name is whichever session wrote it last. Commits are plain language, one concern, the change in one sentence: `xtask vocab: the glossary as a sensor`. If the message says "also", split it. The lock line, the witness and the regenerated `ext/clippy.toml` travel with the code that needs them. A rule you want, or a divergence you found, is a paragraph in the message proposing it, with the fixture that would fail. What the work opened is the close's `--opens`, recorded as a reading, not a trailer in the message. A ticket's acceptance criteria are boxes its own label can tick. Where the work waits on a decision, the decision is a `for-a-person` ticket of its own and the work is wired to wait on it; a box in an agent's ticket that reads *a person decides* closes nothing however finished the code is.
+- Stage and commit by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: `git add -A`, `git add .` or a commit that names no path takes whatever else stands in the index, a person's work among it. One session writes in a checkout, its owner: `xtask worktree add` records the session that lays a worktree down, `xtask worktree own` claims main's checkout or the merge worktree and `--release` lets one go, and `permit` and pre-commit refuse another session's writes and commits there. Your subagents are your session; a person is refused nowhere. The shell is zsh, which does not split an unquoted `$P`: write the paths out, or use an array, `P=(a b)` and `git add -- "${P[@]}"`. A merge, cherry-pick, revert or rebase in progress commits the whole index, and it is its checkout's owner's to commit or abort; in a checkout you do not own, `permit` refuses the git commands that write its index or step it, so work in your own worktree. The message file is named for the branch or its ticket, never `msg.txt`: the scratchpad is shared across the checkout's worktrees, so a generic name is whichever session wrote it last. Commits are plain language, one concern, the change in one sentence: `xtask vocab: the glossary as a sensor`. If the message says "also", split it. The lock line, the witness and the regenerated `ext/clippy.toml` travel with the code that needs them. A rule you want, or a divergence you found, is a paragraph in the message proposing it, with the fixture that would fail. What the work opened is the close's `--opens`, recorded as a reading, not a trailer in the message. A ticket's acceptance criteria are boxes its own label can tick. Where the work waits on a decision, the decision is a `for-a-person` ticket of its own and the work is wired to wait on it; a box in an agent's ticket that waits on a person's decision closes nothing however finished the code is.
 
 ## Documentation and where code lives
 
-- `third-engine-design.md` is the design of record, `jit-design.md` the compiled tier, `harness-design.md` the harness: living documents with a ledger on top, cited by section. What a revision says is a person's; typing it is not. Where a ticket carries the sentence a person has settled, landing it with its ledger row is yours, and the commit names the ticket that settled it. A revision that states what a ruled ticket built, and reverses, widens or adds to no ruling, is yours to word and land, with its ledger row naming the ruling and the ticket; the person reads that row at the merge, and a sentence they revert becomes a ticket of theirs. A deletion-test argument, an ADR, and a sentence answering a question the design is silent on stay a person's, and any other revision nobody has settled stays a question you file. `research/` holds the earlier revisions and the research behind them, read for history only. `docs/adr/` is the list of reversals; read the ADR before touching what it names.
+- `third-engine-design.md` is the design of record, `jit-design.md` the compiled tier, `harness-design.md` the harness: living documents with a ledger on top, cited by section. What a revision says belongs to a person; typing it does not. Where a ticket carries the sentence a person has settled, landing it with its ledger row is yours, and the commit names the ticket that settled it. A revision that states what a ruled ticket built, and reverses, widens or adds to no ruling, is yours to word and land, with its ledger row naming the ruling and the ticket; the person reads that row at the merge, and a sentence they revert becomes a ticket of theirs. A deletion-test argument, an ADR, and a sentence answering a question the design is silent on stay a person's, and any other revision nobody has settled stays a question you file. `research/` holds the earlier revisions and the research behind them, read for history only. `docs/adr/` is the list of reversals; read the ADR before touching what it names.
 - Design documents carry no numbers of their own; budgets and interfaces live in `seams.toml`, the oracle in `oracle.toml`. A fact that changes is a region, rendered by `computed run` and held by `computed check`. No tickets, plans or agent scratch files in the repository; keep working material in your scratchpad.
 - `crates/php_syntax`, `php_compile` and `php_unit` take source to a unit; `php_heap` is the memory model and the stacks, and `php_process` the process and its file descriptors (`fork`, the signal pool, `LC_CTYPE`, the process identity, the fd calls), each an `unsafe` home the `unsafe.homes` rule names; `php_engine` holds the kernels, dispatch, `execute`, the linker, `serve` and `api`, with `php_jit` the compiled tier behind a feature; `php_ext` is the facade every extension depends on and `php_bundle` the enabled set; `php_proto` is the codecs and `php_sapi` the facade every host depends on.
 - `ext/<name>` is one crate per extension, laid down by `cargo xtask new-ext`; read `ext/AGENTS.md` before touching one. `sapi/<name>` is one crate per host, each its binary (`sapi/cli` builds `php`, `sapi/cgi` `php-cgi`; ADR-0008). `xtask` is the harness and `xtask/fixtures/` its negative controls. `data/` holds the censuses and extraction records the design cites. Most of `crates/` is not created yet; the layout regions below say what exists.
+- Finding code: a Rust name you know, or who calls it, is `cq`'s: `cq find <name>`, then `cq body <handle>` to read it and `cq refs <handle>` for its callers, and `cq area <path>` for what is around a path. Text, strings, docs, TOML and php-src's C are grep's, since cq matches names and not bodies. A brief to a subagent carries this line.
 
 ## Taste
 
@@ -98,7 +89,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=3a65c0b818c13f91e3caf780e6680cab1de2a335cb5bfadc22628e55c10e1fee out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=e8d8b9de4f6e25fdf1f3561d1e008060e68afda44be96474ede296046298f112 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -117,24 +108,26 @@ third-engine-design.md
 - ADR-0014 (accepted, 2026-10-09): A request's heap is lent to C for the length of one call
 - ADR-0015 (accepted, 2026-10-21): The compiled tier keeps php's function-level analysis, computed on a trace's first pass through an op array, in a crate of its own below the tier
 - ADR-0016 (accepted, 2026-10-25): The binaries are named after the product from one constant, with `php` an opt-in symlink
+- ADR-0017 (accepted, 2026-10-31): The compiled tier is refused as the default on G3: tracing stays opt-in, and Cranelift stands
 
-<!-- /computed in=2ad9516678eaa32cbac935d4a9d5f9862936c8241996321f9a9d7f1d7b5f905a out=059605fab045f8a0e0476a5fbe57a17446b44e77150f840f41eef3b197833fa8 -->
+<!-- /computed in=34988da3010119b7a6587d5a7defdc3917400f9f81928f7756a2e866bec24881 out=505c842c422e5cf0dbefccae4eb1489aed874733945edcc8cac26bedb9aee9d3 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md --tracked" inputs=seams.toml,crates/**/*.lock,xtask/xtask.lock,xtask/src/status.rs name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling |
 |---|---|---|---|
-| heap | heap.lock | 515 |  |
+| heap | heap.lock | 518 |  |
 | process | process.lock | 40 |  |
-| unit | unit.lock | 125 |  |
+| unit | unit.lock | 158 |  |
 | link | link.lock | 62 |  |
 | ops | ops.lock | 209 |  |
-| api | api.lock | 1522 | 1525 |
+| api | api.lock | 1526 | 1550 |
 | sapi | sapi.lock | 60 |  |
-| tier | tier.lock | 204 |  |
-| layer | layer.lock | 38 |  |
-| harness | xtask.lock | 428 |  |
+| tier | tier.lock | 228 |  |
+| ssa | ssa.lock | 114 |  |
+| layer | layer.lock | 37 |  |
+| harness | xtask.lock | 447 |  |
 
-<!-- /computed in=e057eb1f8a881434979ff9a8aa48a4295bbeba1279874d83ca1c76e6e865308c out=65bcd3810f4b52504b908539d66709be9110fbc0afbb41a4fba74bed36cd83d9 -->
+<!-- /computed in=87b1b658ca3f5eb5bb905bb6086d1098290c3cd0a631961ad6d0d93ad925448a out=066091a6cb9e3d6c342ab4fe516ebda6ecbe7d12760ccb4f1ebe32a0074cc87b -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -147,7 +140,7 @@ Commands:
   permit             Judge one intended call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
   done               The definition of done: the conditions unmet since the base, and exit 1 while any is; the Stop hook, pre-push and CI read the list
   track              Say the branch, the commit it was taken off main at, the store and the branch's ticket; as text or as one object. Writes no reading
-  worktree           A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>, `retire` appends its log into the store and removes it. Writes no reading
+  worktree           A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>, `retire` removes it, `own` and `whose` say its owner, `queue` and `land` run the merge queue
   ticket             A ticket, one GitHub issue: `read <n>` holds it to its acceptance criteria, `close <n>` closes it naming what it opened, `parent <n>` says whether a chart sheet is at the cap
   usage              What a session spent per turn: `record` reads the plugin's `SessionUsage` on stdin and writes one `usage` reading under the branch's ticket, or the session id
   regions            Render the named files' regions with `computed run` and say what it did, one line per file, for pre-commit to re-stage. Writes no reading
@@ -177,7 +170,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=d05da8617b72a80410efb42f93a6378192eb70564c868f0c33eb72f1a8690ebe out=f75906f17b5734883eb8cab7c977ae1cd12d0f5abd2810e819387650464a5b08 -->
+<!-- /computed in=9a5244e8a38eb1c30d80d3b5dbaea20cce90d633fdddb59b5526593380570126 out=7d36360474ef686aa1dbccf693f6c58be3e09ee20203fbcf67b49f6bd0e36f2b -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
@@ -193,12 +186,13 @@ Options:
 ├── php_process
 ├── php_proto
 ├── php_sapi
+├── php_ssa
 ├── php_streams
 ├── php_syntax
 ├── php_unit
 └── timelib_sys
 ```
-<!-- /computed in=70b3b7eca9690068316f014f00bdd615bc6f89449cdfd3567d5ee9f795b18194 out=b73614d2eac7f713540dbdf7f6b1b890c6288f77445621d7a7118414d6885560 -->
+<!-- /computed in=9658ec9f1437b147db08254f39be027100720d383cb2755361228e4fae66d65a out=d92203a48d53e6c6b64fca99ec784fc36a1c0b46849b43e148ef89dc27b4ec4d -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .

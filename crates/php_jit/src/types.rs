@@ -77,12 +77,16 @@ mod opcodes;
 #[cfg(test)]
 mod tests;
 
-use php_engine::tier::{ClassId, FuncRef, MapPtrRaw, PlainCall, UnitView};
+use std::num::{NonZeroU32, NonZeroUsize};
+
+use php_engine::tier::{ClassId, FramelessAt, FuncRef, MapPtrRaw, PlainCall, UnitView};
 use php_heap::ZvalType;
+use php_ssa::Range;
 use php_unit::{ConstIdx, Opcode, OplineIdx};
 
 pub(crate) use lattice::Types;
 
+use crate::analysis::Analysed;
 use crate::record::{Began, Callee, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 
@@ -208,6 +212,8 @@ pub(crate) struct ValueId(pub(crate) u32);
 pub(crate) struct Value {
     pub(crate) slot: Slot,
     pub(crate) types: Types,
+    /// What php's inference knows of the long it holds, where it knows.
+    pub(crate) range: Option<Range>,
     pub(crate) def: Def,
     pub(crate) home: Home,
 }
@@ -267,12 +273,15 @@ pub(crate) enum Op {
     /// `Z/ext/opcache/jit/zend_jit_trace.c:3169-3180`).
     Enter { frame: Frame, stores: Vec<ValueId> },
     /// A return lands in `frame`, and `out` is what the call's slot holds
-    /// after it, where the call keeps one. A return past the trace's
-    /// lowest frame `escapes` unless the interpreter stands at that
-    /// opline of that op array after it, php's IP guard in
-    /// `zend_jit_leave_func` (`Z/ext/opcache/jit/zend_jit_ir.c:11188-11224`):
-    /// no exit, the frame left to the handler of the opline it stands
-    /// at ([`crate::lower::ESCAPED`]).
+    /// after it, where the call keeps one. A `RETURN` php compiles with
+    /// `zend_jit_return` past the trace's lowest frame `escapes` unless
+    /// the interpreter stands at that opline of that op array after it,
+    /// php's IP guard in `zend_jit_leave_func`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:11188-11224`): no exit, the frame
+    /// left to the handler of the opline it stands at
+    /// ([`crate::lower::ESCAPED`]). A return php hands to its handler
+    /// escapes nowhere: its line holds that opline with a `Check::Stands`
+    /// and an exit, as php's `zend_jit_trace_handler` does.
     Back {
         frame: Frame,
         out: Option<ValueId>,
@@ -325,6 +334,67 @@ pub(crate) enum Fused {
     Jmpnz,
 }
 
+/// What a call made in place checks of its arguments before its
+/// activation passes over the `RECV`s that would check them, as php's
+/// trace compiles `zend_jit_recv` with the check inline where its stack
+/// map does not know the argument of a type the parameter takes
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10873`): per argument, from
+/// the first, the types its `RECV` takes untouched, php's `op2.num`, one
+/// bit per `IS_*` type, held to what the argument holds, through a
+/// reference where it is one; `None` where the trace knows the argument
+/// of such a type or the parameter checks none. A call with a check past
+/// [`ArgChecks::ARGS`] is the call kernel's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ArgChecks([Option<NonZeroU32>; ArgChecks::ARGS]);
+
+impl ArgChecks {
+    /// The arguments a call checks in place at most.
+    pub(crate) const ARGS: usize = 8;
+
+    /// These checks with argument `at`, from zero, held to `mask`; none
+    /// past [`ArgChecks::ARGS`].
+    pub(crate) fn with(mut self, at: usize, mask: NonZeroU32) -> Option<ArgChecks> {
+        *self.0.get_mut(at)? = Some(mask);
+        Some(self)
+    }
+
+    /// Each argument checked, from zero, and the mask it is held to.
+    pub(crate) fn each(self) -> impl Iterator<Item = (u32, NonZeroU32)> {
+        (0u32..)
+            .zip(self.0)
+            .filter_map(|(at, mask)| Some((at, mask?)))
+    }
+}
+
+/// What a call made in place copies into the parameters it is passed no
+/// argument for, as php's trace compiles `zend_jit_recv_init` past the
+/// arguments its frame knows were passed (`jit_ZVAL_COPY_CONST`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:10886-10950`): per parameter, from
+/// the first, the address of its `RECV_INIT`'s default among the op
+/// array's constants, which the trace's epoch holds, a constant no
+/// reference counts; `None` for one passed. A call with a default that
+/// names a constant expression, is counted, or stands past
+/// [`ArgChecks::ARGS`] is the call kernel's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Defaults([Option<NonZeroUsize>; ArgChecks::ARGS]);
+
+impl Defaults {
+    /// These defaults with parameter `at`, from zero, given the constant
+    /// at `address`; none past [`ArgChecks::ARGS`].
+    pub(crate) fn with(mut self, at: usize, address: NonZeroUsize) -> Option<Defaults> {
+        *self.0.get_mut(at)? = Some(address);
+        Some(self)
+    }
+
+    /// Each parameter given its default, from zero, and the address of
+    /// the constant copied into it.
+    pub(crate) fn each(self) -> impl Iterator<Item = (u32, NonZeroUsize)> {
+        (0u32..)
+            .zip(self.0)
+            .filter_map(|(at, address)| Some((at, address?)))
+    }
+}
+
 /// What an opline names beside its operands, where its inline form reads
 /// it: php's `op2.num` of a send, an `UNUSED` operand that is a number,
 /// and the operator an `ASSIGN_OP`'s `extended_value` names.
@@ -345,15 +415,25 @@ pub(crate) enum Imm {
     /// opline reads it.
     Make {
         returns: Option<u32>,
+        checks: ArgChecks,
+        defaults: Defaults,
     },
     /// A `RETURN` compiled code leaves its frame by in place
     /// (`zend_jit_leave_func`, `Z/ext/opcache/jit/zend_jit_ir.c:11035-11263`):
     /// a function's frame, with no observer declared; what it hands its
-    /// caller, and the variables it gives up as it leaves ([`Owners`]).
+    /// caller, the variables it gives up as it leaves ([`Owners`]), and
+    /// whether its frame may have a receiver, which it gives up after
+    /// them ([`php_engine::tier::UnitView::receives`]).
     Leave {
         owners: Owners,
         value: Returned,
+        receives: bool,
     },
+    /// The native a `FRAMELESS_ICALL_*` calls, its place in the engine's
+    /// frameless table, the opline's `extended_value`, php's
+    /// `ZEND_FLF_HANDLER(opline)`, which compiled code hands the
+    /// `frameless` kernel so it reads no opline.
+    Frameless(FramelessAt),
     /// The types a `TYPE_CHECK` asks for, its `extended_value`: one bit
     /// per type, `1 << IS_*`, php's `MAY_BE_*` mask.
     Mask(u32),
@@ -366,6 +446,71 @@ pub(crate) enum Imm {
     Property {
         slot: Slotted,
         binary: Option<Opcode>,
+    },
+    /// A method's call pushed in place under the guard on the pair its
+    /// own runtime-cache slot holds ([`Line::map_ptr`]), as php's code
+    /// reads `CACHED_PTR(opline->result.num)` and the callee past it
+    /// before it pushes (`zend_jit_init_method_call`,
+    /// `zend_jit_init_static_method_call`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:9025-9056`, `:9255-9265`): the
+    /// callee the pair is held to, and the class.
+    Pair {
+        function: PairCallee,
+        class: PairClass,
+    },
+}
+
+/// The callee the pair in a call's runtime-cache slot is held to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PairCallee {
+    /// A published method's number, the same in every request of the
+    /// epoch ([`php_engine::tier::CalleeSlot::function`]), compared as a
+    /// constant.
+    Number(u32),
+    /// A request-scoped class's own method, numbered by each request for
+    /// itself: the pair's record compared with the record of the header
+    /// the request laid out for the call, which names the method the
+    /// request found for the class's name over the op array the trace
+    /// recorded, as php's `zend_jit_func_guard` holds a function that is
+    /// not immutable by its opcodes (`Z/ext/opcache/jit/zend_jit_ir.c:8999-9024`).
+    Record,
+}
+
+/// The class the pair in a call's runtime-cache slot is held to, and so
+/// where the called scope of the call pushed in place comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PairClass {
+    /// The receiver's, of a request-scoped class an `INIT_METHOD_CALL`
+    /// calls a method on: the pair's class compared with `obj->ce`, as
+    /// php compares `CACHED_PTR(opline->result.num)` with it, and the
+    /// called scope written from it.
+    Receiver,
+    /// This published class, the one an `INIT_STATIC_METHOD_CALL` names,
+    /// which the call's header names as its called scope in every
+    /// request, as php takes an immutable linked class as a constant.
+    Published(ClassId),
+    /// The request-scoped class an `INIT_STATIC_METHOD_CALL` names,
+    /// whatever its request resolved the name to: the called scope
+    /// written from the pair, as php reads it from the slot.
+    Named,
+    /// The class `self` or `parent` names, which the scope of the op array
+    /// fixes, so the pair's class is not compared, as php reads `fbc`
+    /// alone from the slot of an `UNUSED` class operand; a static callee,
+    /// whose called scope is the calling frame's own, forwarded, as php's
+    /// `zend_jit_init_static_method_call` takes `EX(This)`'s
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:9340-9358`).
+    Forwarded,
+    /// A callee that takes `$this`, called by a static call's syntax: the
+    /// calling frame's `$this`, lent, held to be of `receiver`, a
+    /// published class and the call's called scope, as php's
+    /// `zend_jit_push_this_method_call_frame` passes `This` where it is an
+    /// instance of the class named (`Z/ext/opcache/jit/zend_jit_helpers.c:262-273`);
+    /// and the pair's class compared with `named` where the opline names a
+    /// published class, and with nothing where `self` or `parent` or a
+    /// request-scoped name names it.
+    This {
+        named: Option<ClassId>,
+        receiver: ClassId,
     },
 }
 
@@ -510,6 +655,11 @@ pub(crate) enum Check {
     Type { value: ValueId, tag: ZvalType },
     /// The slot holds a reference, and what it refers to is of this type.
     Deref { value: ValueId, tag: ZvalType },
+    /// The slot holds a reference still, of whatever it refers to, php's
+    /// `zend_jit_guard_reference` (`Z/ext/opcache/jit/zend_jit_ir.c:16990-17019`):
+    /// an `ASSIGN` to a variable the recording saw through a reference,
+    /// which writes through it. Its exit goes back to the opline.
+    Reference { value: ValueId },
     /// The `VAR` holds the address of a zval, `IS_INDIRECT`, as a fetch
     /// for writing leaves it, and that zval is of this type, php's
     /// `zend_jit_fetch_indirect_var` (`Z/ext/opcache/jit/zend_jit_ir.c:17087-17141`):
@@ -553,6 +703,12 @@ pub(crate) enum Check {
     /// a published class, whose id names the one linked class in every
     /// request of the trace's epoch.
     Class { object: Object, class: ClassId },
+    /// The call the stepped `INIT_*` before it pushed through its handler
+    /// serves this op array, php's `zend_jit_func_guard` on `call->func`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:9283-9300`), so the trace's
+    /// plain call of it is the call made. Its exit goes on where the
+    /// interpreter stands, the call pushed.
+    Callee { func: FuncRef },
     /// A table's jump went elsewhere than this opline: php's exit per
     /// target of `zend_jit_switch`, taken where the stepped jump went
     /// there and landing where it went, so exit-fuzz fails it never.
@@ -665,6 +821,15 @@ pub(crate) enum Stored {
     /// way it is read, hold the element's address in registers of their
     /// own (`zend_jit_fetch_dim_read`).
     Copied { value: ValueId, read: Read },
+    /// `null`, which the fetch that found no element wrote to its slot
+    /// before it left, as php's stack map holds it, `null(type_only)`.
+    Null,
+    /// The double an `ADD` or a `SUB` of `1` overflowed to, past
+    /// `ZEND_LONG_MAX` where it went `up` and below `ZEND_LONG_MIN`
+    /// otherwise, which the site writes to the slot in its own frame
+    /// before it leaves, as php's frame-relative stack map holds it as a
+    /// constant, `float(9.22337e+18)` (`zend_jit_math_long_long`).
+    Overflowed { up: bool },
 }
 
 /// How a zval is read: in place, through the reference it is, or
@@ -956,7 +1121,14 @@ pub(crate) fn on_declared_slot(opcode: Opcode) -> bool {
     )
 }
 
-/// The trace `rec` builds, read through `view`, or why it builds none.
-pub(crate) fn build(rec: &TraceRecord, view: &UnitView) -> Result<TraceIr, Abort> {
-    build::build(rec, view)
+/// The trace `rec` builds, read through `view` and what php's analysis
+/// of each op array it passes through learned, or why it builds none.
+pub(crate) fn build(
+    rec: &TraceRecord,
+    view: &UnitView,
+    analysed: &Analysed,
+) -> Result<TraceIr, Abort> {
+    let tables = analysed.tables(rec, view);
+    let inference = tables.frames();
+    build::build(rec, view, analysed, &inference)
 }

@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use php_heap::ZvalType;
 use php_link::LinkedClass;
-use php_unit::decl::{Parameter, Type};
+use php_unit::decl::{Bare, ClassDecl, FunctionDecl, HookKind, Name, Parameter, Type, Visibility};
 use php_unit::{CacheSlot, MapPtrOffset, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::published::SEALED;
@@ -67,7 +67,19 @@ impl Epoch {
     /// past its last opline.
     #[must_use]
     pub fn lay_landing(&self, f: FuncRef, at: OplineIdx) -> Option<&Word> {
-        self.func(f)?.lay_landing(at)
+        match f.0 {
+            MapPtrOffset::Engine(offset) => self.0.lay_landing(offset, at),
+            MapPtrOffset::Request(_) => None,
+        }
+    }
+
+    /// Where compiled code finds the landing words of the op arrays this
+    /// epoch holds, the ones it published and the preload's
+    /// (`jit-design.md` §4.9): what a trace's escape reads, laid down
+    /// where it was not.
+    #[must_use]
+    pub fn landing_index(&self) -> super::LandingIndex {
+        self.0.landing_index()
     }
 
     /// The op array `f` names, held by this epoch for as long as the
@@ -279,6 +291,17 @@ fn own_row<'r>(
     }
 }
 
+/// The op array `frame` runs and the [`FuncRef`] of the cache it reads,
+/// where it reads its op array's own cache and every frame that runs the
+/// op array runs it in one scope ([`super::published::Func::fixes_scope`]):
+/// so it is no closure's and no trait method's copy's, and a slot of its
+/// cache answers each frame alike.
+fn scoped_code(req: &Request, frame: FrameRef) -> Option<(FuncRef, &OpArray)> {
+    let header = req.vm().at(frame)?;
+    let func = own_row(req, header).filter(|func| func.fixes_scope())?;
+    Some((FuncRef(header.runtime_cache().offset()), func.op_array()?))
+}
+
 /// The op array `frame` serves; none for a frame that serves none.
 #[must_use]
 pub fn func(req: &Request, frame: FrameRef) -> Option<FuncRef> {
@@ -468,6 +491,59 @@ impl PropertySlot {
     }
 }
 
+/// The class and the callee a method's call over constant names resolved
+/// together, from one op array ([`UnitView::hold_callee`]): the pair the
+/// handler wrote into the opline's runtime-cache slot,
+/// `CACHE_POLYMORPHIC_PTR(opline->result.num, ce, fbc)`, a published
+/// method's or a request-scoped class's own, which compiled code holds
+/// the slot of the request it runs in
+/// to before it pushes the call in place, as php's code reads
+/// `CACHED_PTR(opline->result.num)` and the callee past it
+/// (`zend_jit_init_method_call`, `zend_jit_init_static_method_call`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:9025-9056`, `:9255-9265`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalleeSlot {
+    func: FuncRef,
+    at: OplineIdx,
+    class: ClassId,
+    function: crate::api::call::Function,
+    instance: bool,
+    cached: MapPtrRaw,
+}
+
+impl CalleeSlot {
+    /// The class the pair was resolved on: the receiver's, or the one an
+    /// `INIT_STATIC_METHOD_CALL` names, the recording's request's number
+    /// for a class that is not [`ClassId::is_published`].
+    #[must_use]
+    pub fn class(self) -> ClassId {
+        self.class
+    }
+
+    /// The callee's number as the slot holds it, a published method's,
+    /// the same in every request of the epoch
+    /// ([`PlaceLayout::pair_function`](super::PlaceLayout::pair_function));
+    /// none for a request-scoped class's own method, numbered by each
+    /// request for itself, which compiled code holds the slot to by the
+    /// callee's record ([`PlaceLayout::pair_record`](super::PlaceLayout::pair_record)).
+    #[must_use]
+    pub fn function(self) -> Option<u32> {
+        self.function.published_number()
+    }
+
+    /// Whether the callee takes `$this`, php's `ZEND_ACC_STATIC` clear.
+    #[must_use]
+    pub fn instance(self) -> bool {
+        self.instance
+    }
+
+    /// The runtime-cache slot compiled code reads the pair from.
+    #[must_use]
+    pub fn cached(self) -> MapPtrRaw {
+        self.cached
+    }
+}
+
 /// What a trace may read of the op arrays, literals and published
 /// classes it touched (`jit-design.md` §4.1, §5.3): built by the recorder
 /// from the request, it holds the request's epoch once and the ids it
@@ -484,12 +560,156 @@ pub struct UnitView {
     calls: Vec<super::PlainCall>,
     /// The property places the recording took ([`UnitView::hold_place`]).
     places: Vec<PropertySlot>,
+    /// The pairs of a method's call the recording took
+    /// ([`UnitView::hold_callee`]).
+    callees: Vec<CalleeSlot>,
     /// Whether an observer of calls was declared ([`UnitView::observed`]).
     observed: bool,
     /// What the natives of the frameless calls the recording served
     /// declare they return, by their row of the engine's frameless table
     /// ([`UnitView::hold_frameless`]).
     frameless: Vec<(u32, Option<Type>)>,
+    /// `zend_flf_functions` by name, the engine's frameless table, taken
+    /// when the view first holds an op array that calls through it.
+    frameless_names: Vec<Name>,
+    /// The classes php's analysis of each held op array binds by name
+    /// ([`UnitView::class_named`]), bound as the view accepts it.
+    named: Vec<(FuncRef, Box<[u8]>, ClassId)>,
+    /// The engine's own classes the declared types of what the view
+    /// holds name ([`UnitView::engine_class`]).
+    engine_named: Vec<(Box<[u8]>, ClassId)>,
+    /// The class each held op array is declared in ([`UnitView::scope`]).
+    scopes: Vec<(FuncRef, ClassId)>,
+    /// Each class bound for the analysis with its parent
+    /// ([`UnitView::parent`]).
+    related: Vec<(ClassId, Option<ClassId>)>,
+    /// The declarations of the engine's own classes bound for the
+    /// analysis, which the epoch does not keep ([`UnitView::class_decl`]).
+    engine_decls: Vec<(ClassId, ClassDecl)>,
+    /// The request-scoped classes bound for the analysis, each's linked
+    /// record and declaration as the request linked it, which the epoch
+    /// does not hold ([`UnitView::hold_own`]).
+    own: Vec<(ClassId, LinkedClass<ClassId>, ClassDecl)>,
+    /// The op arrays whose analysis binds one of `own`
+    /// ([`UnitView::binds_request_class`]).
+    request_bound: Vec<FuncRef>,
+    /// The functions the calls of each held op array reach, bound as the
+    /// view accepts it ([`UnitView::called`]).
+    called: Vec<(FuncRef, Site, CalledFunction)>,
+}
+
+/// What a view bound for php's analysis of one op array
+/// ([`UnitView::bindings`]): the class the op array is declared in, the
+/// classes its literals name, the engine's own classes declared types
+/// name, and the functions its calls reach, each by its identity. php
+/// rebuilds the analysis at every trace's build against the tables as
+/// they stand then (`zend_jit_trace_build_ssa`); two builds that bind
+/// the same find the same in them, so an analysis kept under one
+/// binding set is the one php would build at the next build that binds
+/// it (ADR-0015, as amended on #3571; #3579).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bindings {
+    scope: Option<ClassId>,
+    named: Vec<(Box<[u8]>, ClassId)>,
+    engine_named: Vec<(Box<[u8]>, ClassId)>,
+    called: Vec<(Site, CalledFunction)>,
+}
+
+/// Where [`UnitView::called`] looks a callee up, owned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Site {
+    Function(Box<[u8]>),
+    Method(ClassId, Box<[u8]>),
+    Frameless(u32),
+    ParentHook(Box<[u8]>, HookKind),
+}
+
+impl Site {
+    /// The site as [`UnitView::called`] is asked for it.
+    fn as_call_site(&self) -> CallSite<'_> {
+        match self {
+            Site::Function(name) => CallSite::Function(name),
+            Site::Method(class, name) => CallSite::Method(*class, name),
+            Site::Frameless(index) => CallSite::Frameless(*index),
+            Site::ParentHook(name, kind) => CallSite::ParentHook(name, *kind),
+        }
+    }
+}
+
+/// What php's analysis of an op array asks [`UnitView::called`] for: a
+/// function by its lower-cased name, a method of a class by its
+/// lower-cased name, the native of a row of the engine's frameless
+/// table, or the hook of a kind the parent of the op array's class holds
+/// for a property by its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallSite<'a> {
+    Function(&'a [u8]),
+    Method(ClassId, &'a [u8]),
+    Frameless(u32),
+    ParentHook(&'a [u8], HookKind),
+}
+
+/// A function a call of a held op array reaches, as php's call analysis
+/// reads it (`zend_optimizer_get_called_func`, `zend_get_func_info`):
+/// its name, its declared return, the op array a user function's call
+/// serves, and a method's class and flags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalledFunction {
+    /// `common.function_name`, as declared.
+    pub name: Name,
+    pub return_type: Option<Type>,
+    pub returns_by_ref: bool,
+    pub generator: bool,
+    /// The op array a user function's call serves; none for a native.
+    pub body: Option<FuncRef>,
+    /// A method's class and flags; none for a function.
+    pub method: Option<CalledMethod>,
+}
+
+/// A method's `common.scope` and the `fn_flags` php's call analysis
+/// reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct CalledMethod {
+    /// The class that declares it.
+    pub scope: ClassId,
+    pub visibility: Visibility,
+    pub is_final: bool,
+    pub is_abstract: bool,
+    /// The tentative bit of a native's declared return type.
+    pub tentative_return: bool,
+}
+
+/// What [`UnitView::declaration`] reads of an op array: the declaration
+/// it is the body of, none for a file's own code, and the name of the
+/// class a method or a property hook is declared in.
+#[derive(Debug, Clone, Copy)]
+pub struct Declaration<'a> {
+    pub function: Option<&'a FunctionDecl>,
+    pub scope: Option<&'a Name>,
+}
+
+/// What [`CalledFunction`] holds of `func`, a function the request links.
+fn called(
+    req: &Request,
+    func: crate::api::call::Function,
+    method: Option<CalledMethod>,
+) -> Option<CalledFunction> {
+    let decl = req.symbols().function_decl(func)?;
+    let body = match req.user_function(func) {
+        Some(user) => Some(FuncRef(
+            crate::exec::body_of(&user.unit, user.body)?.runtime_cache,
+        )),
+        None => None,
+    };
+    Some(CalledFunction {
+        name: decl.name.clone(),
+        return_type: decl.return_type.clone(),
+        returns_by_ref: decl.returns_by_ref,
+        generator: decl.is_generator,
+        body,
+        method,
+    })
 }
 
 /// A view and an epoch hold leave the request's thread with a claim and
@@ -512,8 +732,18 @@ impl UnitView {
             classes: Vec::new(),
             calls: Vec::new(),
             places: Vec::new(),
+            callees: Vec::new(),
             observed: crate::observer::observing(req),
             frameless: Vec::new(),
+            frameless_names: Vec::new(),
+            named: Vec::new(),
+            engine_named: Vec::new(),
+            scopes: Vec::new(),
+            related: Vec::new(),
+            engine_decls: Vec::new(),
+            own: Vec::new(),
+            request_bound: Vec::new(),
+            called: Vec::new(),
         }
     }
 
@@ -527,8 +757,318 @@ impl UnitView {
         }
         if !self.funcs.contains(&f) {
             self.funcs.push(f);
+            let frameless = (self.epoch.func(f).and_then(|func| func.op_array()))
+                .is_some_and(|body| body.oplines.iter().any(|op| op.opcode.is_frameless_icall()));
+            if frameless && self.frameless_names.is_empty() {
+                self.frameless_names = req.shared.frameless_names();
+            }
+            self.bind_names(req, f);
         }
         true
+    }
+
+    /// Bind what php's analysis of the op array `f` names may look up
+    /// when a trace's build analyses it (`zend_jit_trace_build_ssa`, its
+    /// `script` null): each string constant that names a class the
+    /// request's table holds, the engine's own or one declared in the op array's
+    /// file (`zend_optimizer_get_class_entry`, `zend_optimizer_ignore_class`);
+    /// the class it is declared in; and each of the engine's classes a
+    /// declared type names, which bind whatever the file
+    /// (`zend_convert_type`). Each bound class is held with its parents,
+    /// so the analysis reads them on a thread with no request. A class
+    /// only the request holds binds as it stands in the request, as
+    /// php's `op_array->scope` and `EG(class_table)` name the request's, and
+    /// marks the op array's analysis as the request's
+    /// ([`UnitView::binds_request_class`]).
+    fn bind_names(&mut self, req: &Request, f: FuncRef) {
+        let epoch = self.epoch.clone();
+        let Some(func) = epoch.func(f) else {
+            return;
+        };
+        let Some(body) = func.op_array() else {
+            return;
+        };
+        let (decl, scope) = func.declaration().unwrap_or_default();
+        let lookup = |name: &[u8]| {
+            (!name.is_empty() && !name.starts_with(b"\\"))
+                .then(|| req.class_named(Bare::resolved(name)))?
+        };
+        if let Some(scope) = scope.and_then(|name| lookup(&name.0))
+            && self.relate(req, scope)
+        {
+            self.scopes.push((f, scope));
+            self.mark_own(f, scope);
+        }
+        for name in body
+            .literals
+            .iter()
+            .filter_map(|literal| literal.str_bytes())
+        {
+            let Some(class) = lookup(name) else {
+                continue;
+            };
+            let own = req.native_class_at(class).is_some()
+                || req
+                    .symbols()
+                    .class_decl(class)
+                    .is_some_and(|d| d.file.0 == body.filename.0);
+            if own && self.relate(req, class) {
+                self.named
+                    .push((f, name.to_ascii_lowercase().into_boxed_slice(), class));
+                self.mark_own(f, class);
+            }
+        }
+        let mut types = Vec::new();
+        if let Some(decl) = decl {
+            types.extend(decl.parameters.iter().filter_map(|p| p.ty.as_ref()));
+            types.extend(decl.return_type.as_ref());
+        }
+        self.bind_engine_types(req, &types);
+        for name in [&b"closure"[..], b"traversable"] {
+            self.bind_engine_type(req, name);
+        }
+        self.bind_calls(req, f, body);
+    }
+
+    /// Bind the functions the calls of `body`, the op array `f` names,
+    /// reach, as php's call analysis finds them when it builds the
+    /// analysis ([`UnitView::called`]): an `INIT_FCALL`'s function, a
+    /// native or one declared in the same file
+    /// (`zend_optimizer_ignore_function`); the method a constant name
+    /// names of the op array's class or of a class it names; and a
+    /// frameless call's native.
+    fn bind_calls(&mut self, req: &Request, f: FuncRef, body: &OpArray) {
+        let literal = |n: u32| body.literals.get(n as usize).and_then(|z| z.str_bytes());
+        let mut classes: Vec<ClassId> = self.scope(f).into_iter().collect();
+        classes.extend(
+            (self.named.iter())
+                .filter(|(func, ..)| *func == f)
+                .map(|(.., c)| *c),
+        );
+        let mut sites = Vec::new();
+        for op in &body.oplines {
+            match op.opcode {
+                Opcode::InitFcall => {
+                    sites.extend(literal(op.op2).map(|n| Site::Function(n.into())));
+                }
+                Opcode::InitMethodCall | Opcode::InitStaticMethodCall
+                    if op.op2_type == OperandKind::Const
+                        && (op.opcode == Opcode::InitStaticMethodCall
+                            || op.op1_type == OperandKind::Unused) =>
+                {
+                    // php finds the method of an `INIT_METHOD_CALL` on
+                    // `$this` alone (`zend_optimizer_get_called_func`).
+                    let Some(name) = literal(op.op2 + 1) else {
+                        continue;
+                    };
+                    sites.extend(classes.iter().map(|&c| Site::Method(c, name.into())));
+                }
+                Opcode::InitParentPropertyHookCall => {
+                    let kind = if op.op2 == 0 {
+                        HookKind::Get
+                    } else {
+                        HookKind::Set
+                    };
+                    sites.extend(literal(op.op1).map(|n| Site::ParentHook(n.into(), kind)));
+                }
+                _ if op.opcode.is_frameless_icall() => {
+                    sites.push(Site::Frameless(op.extended_value));
+                }
+                _ => {}
+            }
+        }
+        for site in sites {
+            if self
+                .called
+                .iter()
+                .any(|(func, held, _)| *func == f && *held == site)
+            {
+                continue;
+            }
+            let found = match &site {
+                Site::Function(name) => req.function_named(Bare::resolved(name)).and_then(|func| {
+                    let user = req.user_function(func);
+                    let elsewhere = user.is_some_and(|user| {
+                        crate::exec::body_of(&user.unit, user.body)
+                            .is_none_or(|code| code.filename != body.filename)
+                    });
+                    (!elsewhere).then(|| called(req, func, None)).flatten()
+                }),
+                Site::Method(class, name) => {
+                    req.symbols().method_named(*class, name).and_then(|func| {
+                        let decl = req.method_decl(func)?;
+                        let method = CalledMethod {
+                            scope: req.method_class(func)?,
+                            visibility: decl.visibility,
+                            is_final: decl.is_final,
+                            is_abstract: decl.is_abstract,
+                            tentative_return: decl.tentative_return,
+                        };
+                        called(req, func, Some(method))
+                    })
+                }
+                Site::Frameless(index) => req
+                    .frameless_entry(*index)
+                    .and_then(|(func, _)| called(req, func, None)),
+                // `zend_get_property_info` on the parent of the op array's
+                // class, a property it may read that is not private, and
+                // its hook of that kind.
+                Site::ParentHook(name, kind) => {
+                    let parent = self.scope(f).and_then(|c| req.symbols().class_parent(c));
+                    parent.and_then(|parent| {
+                        let (_, property) = req.property_info_of(parent, name)?;
+                        if property.visibility == Visibility::Private {
+                            return None;
+                        }
+                        let hooked = req.row_hooked(parent, name)?;
+                        let func = match kind {
+                            HookKind::Get => hooked.get,
+                            HookKind::Set => hooked.set,
+                        }?;
+                        called(req, func, None)
+                    })
+                }
+            };
+            if let Some(found) = found {
+                self.called.push((f, site, found));
+            }
+        }
+    }
+
+    /// Bind the engine's own classes `types` name ([`UnitView::bind_names`]).
+    fn bind_engine_types(&mut self, req: &Request, types: &[&Type]) {
+        let mut names = Vec::new();
+        let mut walk: Vec<&Type> = types.to_vec();
+        while let Some(ty) = walk.pop() {
+            match ty {
+                Type::Named(name) => names.push(&name.0),
+                Type::Nullable(inner) => walk.push(inner),
+                Type::Union(members) | Type::Intersection(members) => walk.extend(members),
+                _ => {}
+            }
+        }
+        for name in names {
+            self.bind_engine_type(req, name);
+        }
+    }
+
+    /// Bind the engine's own class `name` ([`UnitView::bind_names`]).
+    fn bind_engine_type(&mut self, req: &Request, name: &[u8]) {
+        let lcname = name.to_ascii_lowercase();
+        if self.engine_named.iter().any(|(held, _)| **held == *lcname) || name.starts_with(b"\\") {
+            return;
+        }
+        if let Some(class) = req.class_named(Bare::resolved(name))
+            && req.native_class_at(class).is_some()
+            && self.relate(req, class)
+        {
+            self.engine_named.push((lcname.into_boxed_slice(), class));
+        }
+    }
+
+    /// Hold class `c` for the analysis with its parents, the engine's
+    /// declaration of it where it is one of the engine's own, and the
+    /// engine's classes its properties' and constants' types name;
+    /// `false` where the request has not linked it
+    /// ([`UnitView::hold_class`], [`UnitView::hold_own`]).
+    fn relate(&mut self, req: &Request, c: ClassId) -> bool {
+        if self.related.iter().any(|(class, _)| *class == c) {
+            return true;
+        }
+        if !self.hold_class(req, c) && !self.hold_own(req, c) {
+            return false;
+        }
+        let at = self.related.len();
+        self.related.push((c, None));
+        let Some(decl) = req.symbols().class_decl(c) else {
+            return true;
+        };
+        if req.native_class_at(c).is_some() {
+            self.engine_decls.push((c, decl.clone()));
+        }
+        let types: Vec<&Type> = (decl.properties.iter().filter_map(|p| p.ty.as_ref()))
+            .chain(decl.constants.iter().filter_map(|c| c.ty.as_ref()))
+            .collect();
+        self.bind_engine_types(req, &types);
+        if let Some(parent) = req.symbols().class_parent(c)
+            && self.relate(req, parent)
+            && let Some((_, held)) = self.related.get_mut(at)
+        {
+            *held = Some(parent);
+        }
+        true
+    }
+
+    /// Hold the request-scoped class `c` for the analysis as the request
+    /// linked it, its linked record and declaration copied, since no
+    /// other request reads it; `false` for a shared one and one the
+    /// request has not linked.
+    fn hold_own(&mut self, req: &Request, c: ClassId) -> bool {
+        if !self.epoch.of(req) || c.is_published() {
+            return false;
+        }
+        let (Some(linked), Some(decl)) = (req.linked_class(c), req.symbols().class_decl(c)) else {
+            return false;
+        };
+        self.own.push((c, linked.clone(), decl.clone()));
+        true
+    }
+
+    /// Mark the analysis of `f` as the request's where `c`, a class it
+    /// binds, is held for the request alone.
+    fn mark_own(&mut self, f: FuncRef, c: ClassId) {
+        if self.own.iter().any(|(class, ..)| *class == c) && !self.request_bound.contains(&f) {
+            self.request_bound.push(f);
+        }
+    }
+
+    /// Whether the analysis of the op array `f` names binds a class only
+    /// the request holds, its declaring class or one it names: what it
+    /// learns is this request's, so it is built anew at each trace's
+    /// build, as php builds every one, and kept for no other.
+    #[must_use]
+    pub fn binds_request_class(&self, f: FuncRef) -> bool {
+        self.request_bound.contains(&f)
+    }
+
+    /// What the view bound for php's analysis of the op array `f` names,
+    /// the key the epoch keeps its analysis under: an analysis built
+    /// under one [`Bindings`] is read only where a later build's view
+    /// binds the same.
+    #[must_use]
+    pub fn bindings(&self, f: FuncRef) -> Bindings {
+        let mut engine_named = self.engine_named.clone();
+        engine_named.sort_unstable();
+        Bindings {
+            scope: self.scope(f),
+            named: (self.named.iter())
+                .filter(|(func, ..)| *func == f)
+                .map(|(_, name, class)| (name.clone(), *class))
+                .collect(),
+            engine_named,
+            called: (self.called.iter())
+                .filter(|(func, ..)| *func == f)
+                .map(|(_, site, called)| (site.clone(), called.clone()))
+                .collect(),
+        }
+    }
+
+    /// The function the call `site` of the op array `f` names reaches, as
+    /// the view bound it when it accepted the op array; none where php's
+    /// call analysis finds none.
+    #[must_use]
+    pub fn called(&self, f: FuncRef, site: CallSite<'_>) -> Option<&CalledFunction> {
+        (self.called.iter())
+            .find(|(func, held, _)| *func == f && held.as_call_site() == site)
+            .map(|(.., called)| called)
+    }
+
+    /// `zend_flf_functions` by name, as the dump of an op array the view
+    /// holds names the native a `FRAMELESS_ICALL_*` calls; empty until
+    /// [`UnitView::hold`] accepts an op array with such a call.
+    #[must_use]
+    pub fn frameless_names(&self) -> &[Name] {
+        &self.frameless_names
     }
 
     /// Accept class `c` where every request shares it, the engine's own
@@ -573,17 +1113,10 @@ impl UnitView {
         at: OplineIdx,
         class: ClassId,
     ) -> bool {
-        let Some(header) = req.vm().at(frame) else {
+        let Some((f, code)) = scoped_code(req, frame) else {
             return false;
         };
-        let Some(func) = own_row(req, header).filter(|func| func.fixes_scope()) else {
-            return false;
-        };
-        let f = FuncRef(header.runtime_cache().offset());
-        let Some(op) = func
-            .op_array()
-            .and_then(|code| code.oplines.get(at.0 as usize))
-        else {
+        let Some(op) = code.oplines.get(at.0 as usize) else {
             return false;
         };
         // `CACHE_ADDR(opline->extended_value & ~ZEND_FETCH_OBJ_FLAGS)`, an
@@ -598,10 +1131,7 @@ impl UnitView {
             | Opcode::PreDecObj
             | Opcode::PostIncObj
             | Opcode::PostDecObj => CacheSlot(op.extended_value),
-            Opcode::AssignObjOp => match func
-                .op_array()
-                .and_then(|code| code.oplines.get(at.0 as usize + 1))
-            {
+            Opcode::AssignObjOp => match code.oplines.get(at.0 as usize + 1) {
                 Some(data) => CacheSlot(data.extended_value),
                 None => return false,
             },
@@ -657,6 +1187,68 @@ impl UnitView {
         true
     }
 
+    /// Take the class and the callee the `INIT_METHOD_CALL` over a
+    /// constant name, or the `INIT_STATIC_METHOD_CALL` over a constant
+    /// name and a class a constant, `self` or `parent` names, at `at` of the op array `frame` serves wrote into
+    /// its runtime-cache slot, as the handler wrote it on this pass
+    /// ([`Request::cached_callee`]), so a trace that recorded the call
+    /// pushes it in place where the slot of the request it runs in holds
+    /// the same pair. Taken only where every frame that runs the op array
+    /// reads the pair one way, as [`UnitView::hold_place`] takes a place;
+    /// `false`, taking nothing, for any other, and where the slot holds no
+    /// pair.
+    pub fn hold_callee(&mut self, req: &Request, frame: FrameRef, at: OplineIdx) -> bool {
+        let Some((f, code)) = scoped_code(req, frame) else {
+            return false;
+        };
+        let Some(op) = code.oplines.get(at.0 as usize) else {
+            return false;
+        };
+        let named = match op.opcode {
+            Opcode::InitMethodCall => op.op2_type == OperandKind::Const,
+            Opcode::InitStaticMethodCall => {
+                op.op2_type == OperandKind::Const && crate::exec::class_fixed(op.op1_type, op.op1)
+            }
+            _ => false,
+        };
+        let slot = CacheSlot(op.out);
+        if !named || !self.hold(req, f) {
+            return false;
+        }
+        let Some(cached) = self.cache_slot(f, slot) else {
+            return false;
+        };
+        let crate::exec::Cached::ClassAndCallee {
+            class,
+            function,
+            instance,
+            ..
+        } = req.cached_in_scope(frame, slot)
+        else {
+            return false;
+        };
+        let pair = CalleeSlot {
+            func: f,
+            at,
+            class,
+            function,
+            instance,
+            cached,
+        };
+        self.callees.retain(|held| (held.func, held.at) != (f, at));
+        self.callees.push(pair);
+        true
+    }
+
+    /// The pair the call at `at` of the op array `f` resolved; none
+    /// unless [`UnitView::hold_callee`] took it.
+    #[must_use]
+    pub fn callee_at(&self, f: FuncRef, at: OplineIdx) -> Option<CalleeSlot> {
+        (self.callees.iter())
+            .find(|pair| pair.func == f && pair.at == at)
+            .copied()
+    }
+
     /// The declared slot the property opline at `at` of the op array `f`
     /// names on an object of `class`; none unless
     /// [`UnitView::hold_place`] took it.
@@ -676,16 +1268,20 @@ impl UnitView {
     }
 
     /// Take the call being built at `call` where it is a plain call
-    /// ([`super::plain_call`]) to an op array the view holds, so a trace
-    /// that recorded it writes it in place; `false`, taking nothing, for
-    /// any other.
+    /// ([`super::plain_call`]) to an op array the view holds, or to a
+    /// request-scoped class's own method whose op array is the request's,
+    /// which the view never holds and the call names by its class's name
+    /// and its own (#3561, #3570), so a trace that recorded it writes it
+    /// in place; `false`, taking nothing, for any other.
     pub fn hold_call(&mut self, req: &Request, call: FrameRef) -> bool {
         let Some(plain) = super::plain_call(req, call) else {
             return false;
         };
-        if let Some(callee) = plain.callee()
-            && !self.hold(req, callee)
-        {
+        let held = match plain.callee() {
+            Some(callee) => self.hold(req, callee),
+            None => plain.is_native() || plain.own_class().is_some(),
+        };
+        if !held {
             return false;
         }
         if !self.calls.contains(&plain) {
@@ -725,13 +1321,11 @@ impl UnitView {
             .and_then(|(_, returns)| returns.as_ref())
     }
 
-    /// The plain call to the op array `f` names with `count` arguments;
-    /// none unless [`UnitView::hold_call`] took one.
-    #[must_use]
-    pub fn call(&self, f: FuncRef, count: u32) -> Option<&super::PlainCall> {
-        self.calls
-            .iter()
-            .find(|call| call.callee() == Some(f) && call.count() == count)
+    /// The plain calls to the op array `f` names with `count` arguments
+    /// [`UnitView::hold_call`] took: a function's, and a method's of each
+    /// called scope ([`super::PlainCall::scope`]).
+    pub fn calls_of(&self, f: FuncRef, count: u32) -> impl Iterator<Item = &super::PlainCall> {
+        (self.calls.iter()).filter(move |call| call.callee() == Some(f) && call.count() == count)
     }
 
     /// The plain call to the native named `name`, lowered, with `count`
@@ -739,7 +1333,26 @@ impl UnitView {
     #[must_use]
     pub fn native_call(&self, name: &[u8], count: u32) -> Option<&super::PlainCall> {
         (self.calls.iter())
-            .find(|call| call.callee().is_none() && call.name() == name && call.count() == count)
+            .find(|call| call.is_native() && call.name() == name && call.count() == count)
+    }
+
+    /// The plain call [`UnitView::hold_call`] took to the method `name`,
+    /// lowered, of the request-scoped class `scope`, with `count`
+    /// arguments, whose op array is the request's own; none unless it
+    /// took one.
+    #[must_use]
+    pub fn request_call(
+        &self,
+        scope: ClassId,
+        name: &[u8],
+        count: u32,
+    ) -> Option<&super::PlainCall> {
+        (self.calls.iter()).find(|call| {
+            call.is_request()
+                && call.scope() == Some(scope)
+                && call.name() == name
+                && call.count() == count
+        })
     }
 
     /// The op array `f` names; none unless [`UnitView::hold`] accepted it.
@@ -763,6 +1376,31 @@ impl UnitView {
         Some(self.epoch.func(f)?.is_main())
     }
 
+    /// Whether the op array `f` names is a property hook's body, php's
+    /// `op_array.prop_info`, which php's recorder stops at a call into
+    /// (`ZEND_JIT_TRACE_STOP_PROP_HOOK_CALL`); none unless
+    /// [`UnitView::hold`] accepted it.
+    #[must_use]
+    pub fn is_hook(&self, f: FuncRef) -> Option<bool> {
+        if !self.funcs.contains(&f) {
+            return None;
+        }
+        Some(self.epoch.func(f)?.is_hook())
+    }
+
+    /// Whether a frame that runs the op array `f` names may have a
+    /// receiver, `EX(This)`, which its leave gives up: a method's, a
+    /// closure's, a hook's and a file's own code's, which an include
+    /// from a method runs with its includer's; never a function's. None
+    /// unless [`UnitView::hold`] accepted it.
+    #[must_use]
+    pub fn receives(&self, f: FuncRef) -> Option<bool> {
+        if !self.funcs.contains(&f) {
+            return None;
+        }
+        Some(self.epoch.func(f)?.receives())
+    }
+
     /// The parameters the declaration of the op array `f` names lists,
     /// php's `arg_info`, with their types and whether each is passed by
     /// reference; none unless [`UnitView::hold`] accepted it, and an
@@ -775,10 +1413,82 @@ impl UnitView {
         self.epoch.func(f)?.parameters()
     }
 
+    /// The declaration the op array `f` names is the body of and the class
+    /// it is declared in, php's `function_name` and `scope`, which
+    /// php's analysis of the op array reads; none unless [`UnitView::hold`]
+    /// accepted it.
+    #[must_use]
+    pub fn declaration(&self, f: FuncRef) -> Option<Declaration<'_>> {
+        if !self.funcs.contains(&f) {
+            return None;
+        }
+        let (function, scope) = self.epoch.func(f)?.declaration()?;
+        Some(Declaration { function, scope })
+    }
+
+    /// The class `lcname`, in lower case, binds for php's analysis of the
+    /// op array `f` names: the engine's own, or one declared in the op
+    /// array's file, as the request's table held it when the view
+    /// accepted the op array (`zend_optimizer_get_class_entry`, its
+    /// `script` null); none for any other.
+    #[must_use]
+    pub fn class_named(&self, f: FuncRef, lcname: &[u8]) -> Option<ClassId> {
+        (self.named.iter())
+            .find(|(func, name, _)| *func == f && **name == *lcname)
+            .map(|(_, _, class)| *class)
+    }
+
+    /// The engine's own class `lcname`, in lower case, where a declared
+    /// type of what the view holds names it, or it is `Closure` or
+    /// `Traversable`, which php's analysis names itself.
+    #[must_use]
+    pub fn engine_class(&self, lcname: &[u8]) -> Option<ClassId> {
+        (self.engine_named.iter())
+            .find(|(name, _)| **name == *lcname)
+            .map(|(_, class)| *class)
+    }
+
+    /// The class the op array `f` names is declared in, php's
+    /// `op_array->scope`, where the view holds it.
+    #[must_use]
+    pub fn scope(&self, f: FuncRef) -> Option<ClassId> {
+        (self.scopes.iter())
+            .find(|(func, _)| *func == f)
+            .map(|(_, class)| *class)
+    }
+
+    /// `ce->parent` of a class bound for the analysis.
+    #[must_use]
+    pub fn parent(&self, c: ClassId) -> Option<ClassId> {
+        (self.related.iter())
+            .find(|(class, _)| *class == c)
+            .and_then(|(_, parent)| *parent)
+    }
+
+    /// The declaration of class `c`; none unless [`UnitView::hold_class`]
+    /// accepted it, and for one of the engine's own the analysis did not
+    /// bind.
+    #[must_use]
+    pub fn class_decl(&self, c: ClassId) -> Option<&ClassDecl> {
+        if let Some((.., decl)) = self.own.iter().find(|(class, ..)| *class == c) {
+            return Some(decl);
+        }
+        if !self.classes.contains(&c) {
+            return None;
+        }
+        match self.engine_decls.iter().find(|(class, _)| *class == c) {
+            Some((_, decl)) => Some(decl),
+            None => self.epoch.0.class(c)?.decl(),
+        }
+    }
+
     /// The linked record of class `c`; none unless
     /// [`UnitView::hold_class`] accepted it.
     #[must_use]
     pub fn class(&self, c: ClassId) -> Option<&LinkedClass<ClassId>> {
+        if let Some((_, linked, _)) = self.own.iter().find(|(class, ..)| *class == c) {
+            return Some(linked);
+        }
         if !self.classes.contains(&c) {
             return None;
         }

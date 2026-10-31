@@ -13,10 +13,14 @@
 //! command an instrument spawns, so a test that runs `xtask` inside the
 //! seated `test` takes no second seat and cannot wait on its own parent.
 //! A seat that cannot be taken at all, a directory that cannot be made, is
-//! no seat and never a failed run.
+//! no seat and never a failed run. A seat is also a share of the machine:
+//! a seated instrument runs [`jobs`] at once, its cores divided among the
+//! seats, and hands cargo that share as `CARGO_BUILD_JOBS`, so three seats
+//! ask for the machine once and not three times (#3624).
 
 use std::fs::File;
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +28,10 @@ use std::time::{Duration, Instant};
 
 /// Set on a seated instrument's children, which take no seat of their own.
 const SEATED: &str = "XTASK_SEATED";
+
+/// The share of the machine cargo builds with, which a seated instrument
+/// hands its children.
+const JOBS: &str = "CARGO_BUILD_JOBS";
 
 /// Whether this process holds a seat, so what it spawns is marked.
 static HELD: AtomicBool = AtomicBool::new(false);
@@ -62,10 +70,7 @@ impl Seats {
     /// The seats the environment names, or none where this process is a
     /// seated instrument's child.
     pub(crate) fn of_env() -> Seats {
-        let count = std::env::var("XTASK_SEATS")
-            .ok()
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(3);
+        let count = machine_seats();
         let dir = std::env::var_os("XTASK_SEAT_DIR")
             .map_or_else(|| PathBuf::from("/tmp/xtask-seats"), PathBuf::from);
         let seated = std::env::var_os(SEATED).is_some();
@@ -165,11 +170,36 @@ pub(crate) fn of_command(command: &crate::cli::Command) -> Option<Seat> {
     Some(Seats::of_env().take(instrument))
 }
 
+/// How many seats the machine has, `XTASK_SEATS` or three, whether or not
+/// this process is a seated instrument's child.
+fn machine_seats() -> usize {
+    std::env::var("XTASK_SEATS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(3)
+}
+
+/// How many jobs a seated instrument runs at once unless told: the share
+/// `CARGO_BUILD_JOBS` names, which a seated parent hands its children, and
+/// otherwise the machine's cores divided among its seats (#3624).
+pub(crate) fn jobs() -> NonZeroUsize {
+    let cores = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
+    share(std::env::var(JOBS).ok().as_deref(), cores, machine_seats())
+}
+
+/// The share of `cores` one of `seats` runs, or the one `named` says; zero
+/// seats divide nothing, and a share is never less than one job.
+fn share(named: Option<&str>, cores: NonZeroUsize, seats: usize) -> NonZeroUsize {
+    named.and_then(|n| n.parse().ok()).unwrap_or_else(|| {
+        NonZeroUsize::new(cores.get() / seats.max(1)).unwrap_or(NonZeroUsize::MIN)
+    })
+}
+
 /// `command` marked as a seated instrument's child, where this process
-/// holds a seat.
+/// holds a seat, and given the seat's share of the machine to build with.
 pub(crate) fn lend(command: &mut Command) {
     if HELD.load(Ordering::Relaxed) {
-        command.env(SEATED, "1");
+        command.env(SEATED, "1").env(JOBS, jobs().to_string());
     }
 }
 
@@ -214,6 +244,19 @@ mod tests {
         let seat = seats.try_take("test").unwrap().unwrap();
         assert!(seat.held.is_none());
         assert!(!seats.dir.exists());
+    }
+
+    #[test]
+    fn a_seat_runs_its_share_of_the_cores_unless_cargo_is_given_one() {
+        let cores = NonZeroUsize::new(12).unwrap();
+        let share = |named, seats| share(named, cores, seats).get();
+        assert_eq!(share(None, 3), 4);
+        assert_eq!(share(None, 5), 2);
+        assert_eq!(share(None, 24), 1);
+        assert_eq!(share(None, 0), 12);
+        assert_eq!(share(Some("6"), 3), 6);
+        assert_eq!(share(Some("0"), 3), 4);
+        assert_eq!(share(Some("many"), 3), 4);
     }
 
     #[test]

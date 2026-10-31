@@ -2,6 +2,7 @@
 //! trampoline `multi.c` installs, and `CURLSH *`.
 
 use std::ffi::{c_int, c_void};
+use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
@@ -75,6 +76,59 @@ pub(crate) struct MultiId(ForeignId<MultiHandle>);
 /// given, and what a `CURLM *` its owner gave up answers here.
 const BAD_HANDLE: i64 = 1;
 
+/// `CURLM_BAD_EASY_HANDLE`, what a `CURL *` its owner gave up answers.
+const BAD_EASY: i64 = 2;
+
+/// A `CURLM *` the library may call back from inside, held for one call
+/// with the `CURL *`s it reaches and the shares they point at, the
+/// request lent to the callbacks meanwhile ([`MultiId::call`]). It is the
+/// only value `curl_multi_add_handle`, `curl_multi_remove_handle` and
+/// `curl_multi_perform` are called through. libcurl logs from inside
+/// the remove, `closing connection` reaching the debug callable of the
+/// `CURL *` taken out, so a call made inside [`MultiId::with`] would
+/// serve PHP code a second `&mut Request` while the `&mut MultiHandle`
+/// borrowed from the first is live, over objects that code could free.
+/// `'h` is the span it is reached for.
+#[derive(Clone, Copy)]
+struct LiveMulti<'h> {
+    raw: NonNull<sys::CURLM>,
+    span: PhantomData<&'h mut MultiHandle>,
+}
+
+/// A `CURL *` held for the span of a [`LiveMulti`], what it adds and
+/// removes.
+#[derive(Clone, Copy)]
+struct Member<'h> {
+    raw: NonNull<sys::CURL>,
+    span: PhantomData<&'h mut MultiHandle>,
+}
+
+impl<'h> LiveMulti<'h> {
+    /// `curl_multi_add_handle`.
+    fn add(self, easy: Member<'h>) -> i64 {
+        // SAFETY: two objects held for the call; the multi does not
+        // outlive the easy one's use, which `remove` or the easy's
+        // cleanup ends.
+        i64::from(unsafe { sys::curl_multi_add_handle(self.raw.as_ptr(), easy.raw.as_ptr()) })
+    }
+
+    /// `curl_multi_remove_handle`.
+    fn remove(self, easy: Member<'h>) -> i64 {
+        // SAFETY: two objects held for the call; the callbacks find the
+        // request `enter` leaves.
+        i64::from(unsafe { sys::curl_multi_remove_handle(self.raw.as_ptr(), easy.raw.as_ptr()) })
+    }
+
+    /// `curl_multi_perform`: the code and the transfers still going.
+    fn perform(self, running: c_int) -> (i64, i64) {
+        let mut running = running;
+        // SAFETY: an object held for the call and a live out-count; the
+        // callbacks find the request `enter` leaves.
+        let code = unsafe { sys::curl_multi_perform(self.raw.as_ptr(), &raw mut running) };
+        (i64::from(code), i64::from(running))
+    }
+}
+
 /// One `CURLMsg` of `curl_multi_info_read`: the message, the transfer's
 /// code and which `CURL *` it is, with how many more are queued.
 pub(crate) struct Done {
@@ -117,66 +171,92 @@ impl Multi {
 }
 
 impl MultiId {
+    /// `f` over the `CURLM *` while its owner keeps it, `gone` otherwise:
+    /// for a call that serves no callback, which [`LiveMulti`] keeps out.
     fn with<R>(self, req: &mut Request, gone: R, f: impl FnOnce(&mut MultiHandle) -> R) -> R {
         req.memory_mut().foreign(self.0).map_or(gone, f)
     }
 
-    /// `curl_multi_add_handle`.
-    pub(crate) fn add(self, req: &mut Request, easy: EasyId) -> i64 {
-        let Some(easy) = easy.raw(req) else {
-            return i64::from(sys::CURLM_BAD_EASY_HANDLE);
+    /// `f`, a call into the library that may call back, over the `CURLM *`
+    /// as [`LiveMulti`] and each of `easies` its owner still keeps as a
+    /// [`Member`], in order: the `CURLM *`, those `CURL *`s and the
+    /// shares they point at held ([`Memory::holding`]), so a callback
+    /// that frees one's object leaves the cleanup to the call's end, with
+    /// no request lent ([`Session::holding`]), and the request lent to
+    /// the callbacks meanwhile ([`Session::enter`]), what one threw
+    /// handed back beside `f`'s answer; `gone` where the owner gave the
+    /// `CURLM *` up. The one way the binding calls the library with a
+    /// `CURLM *` that can call back, as [`EasyId::call`] is with a
+    /// `CURL *`.
+    ///
+    /// [`Memory::holding`]: php_ext::request::Memory::holding
+    fn call<R>(
+        self,
+        req: &mut Request,
+        easies: &[EasyId],
+        gone: R,
+        f: impl for<'h> FnOnce(LiveMulti<'h>, &[Member<'h>]) -> R,
+    ) -> (R, Option<Thrown>) {
+        let Some(session) = self.with(req, None, |multi| Some(multi.tag().session.clone())) else {
+            return (gone, None);
         };
-        self.with(req, BAD_HANDLE, |multi| {
-            // SAFETY: two live handles; the multi does not outlive the easy
-            // one's use, which `remove` or the easy's cleanup ends.
-            i64::from(unsafe { sys::curl_multi_add_handle(multi.raw(), easy) })
+        let (handles, shares) = EasyId::held_by(req, easies);
+        let held = session.holding(req, self.0, |req, held| {
+            let live = LiveMulti {
+                raw: held.get(req)?.raw,
+                span: PhantomData,
+            };
+            let mut body = Some(|req: &mut Request| {
+                // Inside every hold, so each pointer stays live to the
+                // call's end; one its owner gave up is not reached.
+                let members: Vec<Member<'_>> = easies
+                    .iter()
+                    .filter_map(|easy| easy.raw(req))
+                    .map(|raw| Member {
+                        raw,
+                        span: PhantomData,
+                    })
+                    .collect();
+                session.enter(req, || f(live, &members))
+            });
+            let mut with_shares = Some(|req: &mut Request| holding_all(req, &shares, &mut body));
+            holding_all(req, &handles, &mut with_shares).flatten()
+        });
+        match held.flatten() {
+            Some(called) => called,
+            None => (gone, None),
+        }
+    }
+
+    /// `curl_multi_add_handle`, and what a callback threw during it.
+    pub(crate) fn add(self, req: &mut Request, easy: EasyId) -> (i64, Option<Thrown>) {
+        self.call(req, &[easy], BAD_HANDLE, |multi, members| match members {
+            [easy] => multi.add(*easy),
+            _ => BAD_EASY,
         })
     }
 
-    /// `curl_multi_remove_handle`.
-    pub(crate) fn remove(self, req: &mut Request, easy: EasyId) -> i64 {
-        let Some(easy) = easy.raw(req) else {
-            return i64::from(sys::CURLM_BAD_EASY_HANDLE);
-        };
-        self.with(req, BAD_HANDLE, |multi| {
-            // SAFETY: two live handles.
-            i64::from(unsafe { sys::curl_multi_remove_handle(multi.raw(), easy) })
+    /// `curl_multi_remove_handle`, and what a callback threw during it:
+    /// libcurl's `closing connection` reaches the debug callable there.
+    pub(crate) fn remove(self, req: &mut Request, easy: EasyId) -> (i64, Option<Thrown>) {
+        self.call(req, &[easy], BAD_HANDLE, |multi, members| match members {
+            [easy] => multi.remove(*easy),
+            _ => BAD_EASY,
         })
     }
 
     /// `curl_multi_perform`, the request reachable by every transfer's
     /// callbacks, with the `CURLM *`, each of `easies` and the shares they
     /// point at held for the call: the code and the transfers still
-    /// running.
+    /// going.
     pub(crate) fn perform(
         self,
         req: &mut Request,
         easies: &[EasyId],
         running: c_int,
     ) -> ((i64, i64), Option<Thrown>) {
-        let gone = ((BAD_HANDLE, i64::from(running)), None);
-        let Some(session) = self.with(req, None, |multi| Some(multi.tag().session.clone())) else {
-            return gone;
-        };
-        let (handles, shares) = EasyId::held_by(req, easies);
-        // What the holds keep is cleaned up as they end with no request
-        // lent ([`Session::holding`]).
-        let held = session.holding(req, self.0, |req, held| {
-            let raw = held.get(req)?.raw();
-            let mut call = Some(|req: &mut Request| {
-                session.enter(req, || {
-                    let mut running = running;
-                    // SAFETY: a live handle held for the call and a live
-                    // out-count; the callbacks find the request `enter`
-                    // leaves.
-                    let code = unsafe { sys::curl_multi_perform(raw, &raw mut running) };
-                    (i64::from(code), i64::from(running))
-                })
-            });
-            let mut with_shares = Some(|req: &mut Request| holding_all(req, &shares, &mut call));
-            holding_all(req, &handles, &mut with_shares).flatten()
-        });
-        held.flatten().unwrap_or(gone)
+        let gone = (BAD_HANDLE, i64::from(running));
+        self.call(req, easies, gone, |multi, _| multi.perform(running))
     }
 
     /// `curl_multi_wait(mh->multi, NULL, 0, timeout, &numfds)`, which

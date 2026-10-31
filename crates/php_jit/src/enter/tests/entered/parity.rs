@@ -238,6 +238,12 @@ fn compiled(ir: &TraceIr, step: bool) -> Option<Compiled> {
         Kernel::Find => (super::super::super::wrapped::find as *const ()).addr(),
         Kernel::Lookup => (super::super::super::wrapped::lookup as *const ()).addr(),
         Kernel::Leave => (super::super::super::wrapped::leave as *const ()).addr(),
+        Kernel::Frameless => (super::super::super::wrapped::frameless as *const ()).addr(),
+        Kernel::FreeThis => (super::super::super::wrapped::free_this as *const ()).addr(),
+        Kernel::MakeRef => (super::super::super::wrapped::make_ref as *const ()).addr(),
+        Kernel::CallNative => (super::super::super::wrapped::call_native as *const ()).addr(),
+        Kernel::PopCall => (super::super::super::wrapped::pop_call as *const ()).addr(),
+        Kernel::Interrupt => (super::super::super::wrapped::interrupt as *const ()).addr(),
     });
     let backend = Backend::new(&testing::policy(&[]), symbols).ok()?;
     backend
@@ -247,6 +253,7 @@ fn compiled(ir: &TraceIr, step: bool) -> Option<Compiled> {
                 at: b"parity".to_vec().into_boxed_slice(),
                 line: 1,
             },
+            None,
             None,
         )
         .ok()
@@ -369,7 +376,11 @@ fn make_in_place(req: &mut Request, f: FrameRef) -> Option<Read> {
         call,
         Opcode::DoUcall,
         Operand::Unused,
-        Imm::Make { returns },
+        Imm::Make {
+            returns,
+            checks: crate::types::ArgChecks::default(),
+            defaults: crate::types::Defaults::default(),
+        },
     );
     made.unwind = Some(crate::types::UnwindId(0));
     let ops = vec![
@@ -431,7 +442,11 @@ fn make_over_handled_push(req: &mut Request, f: FrameRef) -> Option<Read> {
         call,
         Opcode::DoUcall,
         Operand::Unused,
-        Imm::Make { returns },
+        Imm::Make {
+            returns,
+            checks: crate::types::ArgChecks::default(),
+            defaults: crate::types::Defaults::default(),
+        },
     );
     made.unwind = Some(crate::types::UnwindId(0));
     let ops = vec![
@@ -493,6 +508,7 @@ fn leave_in_place(req: &mut Request, g: FrameRef) -> Option<(FrameRef, Read)> {
         Imm::Leave {
             owners: Owners::Each(both),
             value,
+            receives: false,
         },
     );
     leave.unwind = Some(UnwindId(0));

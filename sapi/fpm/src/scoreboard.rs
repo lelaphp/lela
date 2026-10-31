@@ -1,12 +1,12 @@
-//! `fpm_scoreboard.c`: each pool's scoreboard in memory the master maps
+//! `fpm_scoreboard.c`: each pool's `scoreboard` in memory the master maps
 //! shared before it forks, a header of the pool's counts and a slot per
-//! child it may run, which the children write their request's stage and
+//! child it may fork, which the children write their request's stage and
 //! details into and the master and the status page read. Every field is
-//! an atomic, and the locks are php's: the header's reader count and
-//! writer flag, each changed under a short guard, and a spinning flag per
+//! an atomic, and the spinlocks are php's: the header's reader count and
+//! `writer_active`, each changed under a short guard, and a spinlock per
 //! slot. A process can be killed holding any of them, so the master never
 //! waits on one without end: it frees a dead child's slot without the
-//! lock, as php zeroes it, reads a slot by trying its lock once, and
+//! spinlock, as php zeroes it, reads a slot by trying its spinlock once, and
 //! waits a bounded while on the header's, as php does (#2777).
 
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
@@ -54,7 +54,7 @@ impl Stage {
     }
 }
 
-/// A fixed-length string of the scoreboard, as `strlcpy` fills it.
+/// A fixed-length string of the `scoreboard`, as `strlcpy` fills it.
 pub(crate) struct Text<const N: usize>([AtomicU8; N]);
 
 impl<const N: usize> Text<N> {
@@ -78,7 +78,7 @@ impl<const N: usize> Text<N> {
 pub(crate) struct Board {
     /// The guard the two below change under.
     lock: AtomicU32,
-    /// A writer between `fpm_scoreboard_update_begin` and `_commit`.
+    /// A process updating it between `fpm_scoreboard_update_begin` and `_commit`.
     writer_active: AtomicU32,
     /// The readers between `fpm_scoreboard_acquire` and `_release`.
     reader_count: AtomicU32,
@@ -189,15 +189,15 @@ pub(crate) struct BoardView {
     pub(crate) procs: Vec<ProcView>,
 }
 
-/// A pool's scoreboard: its header and its slots, in shared memory.
+/// A pool's `scoreboard`: its header and its slots, in shared memory.
 #[derive(Clone, Copy)]
 pub(crate) struct Scoreboard {
     pub(crate) board: &'static Board,
     pub(crate) procs: &'static [Proc],
 }
 
-/// `sizeof(struct fpm_scoreboard_s)` and `sizeof(struct
-/// fpm_scoreboard_proc_s)` on an LP64 target with `HAVE_TIMES`, as the
+/// `sizeof(struct fpm_scoreboard_s)` and
+/// `sizeof(struct fpm_scoreboard_proc_s)` on an LP64 target with `HAVE_TIMES`, as the
 /// oracle's: what `fpm_shm_alloc` counts for a pool, which `%zu bytes
 /// have been reserved in SHM` reports. This host lays its slots out in
 /// atomics of its own, so the count is php's, not this layout's.
@@ -215,7 +215,7 @@ pub(crate) fn clock_tick() -> i64 {
 /// `FPM_SCOREBOARD_SPINLOCK_MAX_RETRIES`.
 const MAX_RETRIES: u32 = 50_000;
 
-/// How a spinning flag is taken: `fpm_spinlock` trying once or looping
+/// How a spinlock is taken: `fpm_spinlock` trying once or looping
 /// until it holds, and `fpm_spinlock_with_max_retries`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Wait {
@@ -224,7 +224,7 @@ enum Wait {
     Retries,
 }
 
-/// A spinning flag taken as `wait` says: whether it is held.
+/// A spinlock taken as `wait` says: whether it is held.
 fn lock(flag: &AtomicU32, wait: Wait) -> bool {
     let mut retries = 0;
     loop {
@@ -253,7 +253,7 @@ fn unlock(flag: &AtomicU32) {
 }
 
 impl Board {
-    /// The guard over the reader count and the writer flag. php tries it
+    /// The guard over the reader count and `writer_active`. php tries it
     /// once and goes on whether it took it or not; here it is waited for
     /// a bounded while and gone on past the same way, so a process killed
     /// holding it costs the next one a wait and never the master its loop,
@@ -271,10 +271,10 @@ impl Board {
         unlock(&self.lock);
     }
 
-    /// `fpm_scoreboard_update_begin`: the writer flag held once no reader
+    /// `fpm_scoreboard_update_begin`: `writer_active` held once no reader
     /// is counted, a reader that stays counted past the retries taken for
-    /// one that crashed, and a writer that holds the flag past them for
-    /// one that did, whose flag this writer then goes on under.
+    /// one that crashed, and an updater that holds it past them for
+    /// one that did, whose hold this updater then goes on under.
     fn update_begin(&self) {
         let mut retries = 0;
         loop {
@@ -305,9 +305,9 @@ impl Board {
     }
 
     /// `fpm_scoreboard_acquire` with `FPM_SCOREBOARD_LOCK_NOHANG`: this
-    /// reader counted once no writer is active, and none past the retries.
+    /// reader counted once no update is active, and none past the retries.
     /// php then counts a reader down that it never counted; this counts
-    /// down nothing, since what it waited for was a writer.
+    /// down nothing, since what it waited for was an update.
     fn acquire(&self) -> bool {
         let mut retries = 0;
         loop {
@@ -526,14 +526,14 @@ impl Scoreboard {
         }
     }
 
-    /// The slot, where it is one of the board's.
+    /// The slot, where it is one of the `scoreboard`'s.
     pub(crate) fn proc(&self, at: usize) -> Option<&'static Proc> {
         self.procs.get(at)
     }
 
     /// `fpm_scoreboard_copy`: the header read as a counted reader and,
-    /// where `procs` says, every slot, each read whole under its lock;
-    /// none where a writer stays active past the retries.
+    /// where `procs` says, every slot, each read whole under its spinlock;
+    /// none where an update stays active past the retries.
     pub(crate) fn copy(&self, procs: bool) -> Option<BoardView> {
         if !self.board.acquire() {
             zlog!(Error @ fpm_scoreboard_copy:359, "scoreboard: failed to lock (already locked)");
@@ -548,7 +548,7 @@ impl Scoreboard {
     }
 
     /// The header as it stands, read as php's access log reads
-    /// `fpm_scoreboard_get()`, under no lock.
+    /// `fpm_scoreboard_get()`, under no spinlock.
     pub(crate) fn header(&self) -> BoardView {
         let b = self.board;
         BoardView {
@@ -587,9 +587,9 @@ pub(crate) struct Info {
 }
 
 impl Proc {
-    /// Zeroed whole, its lock with it, as `fpm_scoreboard_proc_free`'s
+    /// Zeroed whole, its spinlock with it, as `fpm_scoreboard_proc_free`'s
     /// `memset` zeroes it: the master frees the slot of a child it has
-    /// buried, which may have died holding the lock, so it never waits for
+    /// buried, which may have died holding the spinlock, so it never waits for
     /// it (#2777).
     fn clear(&self) {
         self.used.store(0, Ordering::Relaxed);
@@ -625,20 +625,20 @@ impl Proc {
         unlock(&self.lock);
     }
 
-    /// The slot read whole, under its lock, waited for as a child waits
+    /// The slot read whole, under its spinlock, waited for as a child waits
     /// for its own (`FPM_SCOREBOARD_LOCK_HANG`).
     pub(crate) fn view(&self) -> ProcView {
         lock(&self.lock, Wait::Hang);
         self.read()
     }
 
-    /// The slot read whole, its lock tried once, as the master tries a
+    /// The slot read whole, its spinlock tried once, as the master tries a
     /// child's (`FPM_SCOREBOARD_LOCK_NOHANG`): none where it is held.
     pub(crate) fn view_once(&self) -> Option<ProcView> {
         lock(&self.lock, Wait::Once).then(|| self.read())
     }
 
-    /// The slot's fields, its lock held, and the lock let go.
+    /// The slot's fields, its spinlock held, and the spinlock let go.
     fn read(&self) -> ProcView {
         let view = ProcView {
             used: self.used.load(Ordering::Relaxed) != 0,
@@ -664,7 +664,7 @@ impl Proc {
         view
     }
 
-    /// The stage, read without the lock, as `fpm_request_is_idle` reads it.
+    /// The stage, read without the spinlock, as `fpm_request_is_idle` reads it.
     pub(crate) fn stage(&self) -> Stage {
         Stage::of(self.stage.load(Ordering::Relaxed))
     }
@@ -674,7 +674,7 @@ impl Proc {
         self.tv_us.load(Ordering::Relaxed)
     }
 
-    /// A stage written with the time it began, under the slot's lock.
+    /// A stage written with the time it began, under the slot's spinlock.
     pub(crate) fn set_stage(&self, stage: Stage, now_us: i64) {
         lock(&self.lock, Wait::Hang);
         self.stage.store(stage as u8, Ordering::Relaxed);
@@ -709,7 +709,7 @@ impl Proc {
     }
 
     /// Where the request now served keeps its frames' chain, the address
-    /// of the engine's word, under the slot's lock: what the master reads
+    /// of the engine's word, under the slot's spinlock: what the master reads
     /// the frames from once it has stopped the child (`fpm_php_trace`).
     pub(crate) fn set_chain_word(&self, word: u64) {
         lock(&self.lock, Wait::Hang);
@@ -771,7 +771,7 @@ mod tests {
     use crate::conf::Pm;
 
     /// `f` on a thread of its own, its answer within ten seconds, or the
-    /// test failed: a lock waited for without end spins past them.
+    /// test failed: a spinlock waited for without end spins past them.
     fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
         let (sent, received) = std::sync::mpsc::channel();
         std::thread::spawn(move || sent.send(f()).ok());
@@ -784,10 +784,10 @@ mod tests {
         Scoreboard::new(b"www", Pm::Dynamic, 2).expect("a scoreboard mapped")
     }
 
-    /// A child killed while it held its slot's lock, as `SIGTERM` finds one
+    /// A child killed while it held its slot's spinlock, as `SIGTERM` finds one
     /// writing its request's stage (#2777): the master buries it and frees
-    /// the slot without the lock, as `fpm_scoreboard_proc_free` zeroes it
-    /// whole, lock and all, so the slot serves the next child.
+    /// the slot without the spinlock, as `fpm_scoreboard_proc_free` zeroes it
+    /// whole, spinlock and all, so the slot serves the next child.
     #[test]
     fn a_slot_whose_dead_child_held_its_lock_is_freed() {
         let board = board();
@@ -800,7 +800,7 @@ mod tests {
         assert_eq!(proc.view_once().map(|view| view.pid), Some(0));
     }
 
-    /// The master reads a slot whose lock is held once, as
+    /// The master reads a slot whose spinlock is held once, as
     /// `fpm_request_check_timed_out` tries it, and answers none.
     #[test]
     fn a_held_slot_is_read_once_and_answers_none() {
@@ -810,8 +810,8 @@ mod tests {
         assert!(within(move || proc.view_once().is_none()));
     }
 
-    /// A writer that died between its update's begin and its commit leaves
-    /// `writer_active` set: the next writer waits a bounded while, warns,
+    /// An updater that died between its update's begin and its commit leaves
+    /// `writer_active` set: the next updater waits a bounded while, warns,
     /// and writes, and a reader gives up and answers no copy, as php's
     /// `fpm_scoreboard_update_begin` and `fpm_scoreboard_acquire` do.
     #[test]
@@ -834,7 +834,7 @@ mod tests {
         assert!(within(move || board.copy(false).is_none()));
     }
 
-    /// A reader that died holding its count leaves it raised: a writer
+    /// A reader that died holding its count leaves it raised: an updater
     /// takes it for a crashed reader after its retries, as php's does,
     /// counts it down and writes.
     #[test]

@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"sed -i '' -e s/one/two/ notes.txt","description":"Rewrite a file in place in a checkout another session owns"}}

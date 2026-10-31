@@ -36,6 +36,7 @@ use crate::api::abi::{
 };
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
+use crate::api::request::TierStatus;
 use crate::api::request::{
     BuildDefs, CoreQuantity, Ending, ExtensionId, HandlePath, Placed, PropertyInfo, Request,
     TypedIni, placed_of,
@@ -1796,6 +1797,9 @@ impl Shared {
     ) -> Fresh {
         let mut strings = self.interned.strings();
         let mut home = PermanentStrings::new(&self.interned.names, &mut strings, heap);
+        // A unit for every request is compiled on the thread that asked,
+        // no request's arena at hand, so it brings its own.
+        let mut arena = php_compile::syntax::Arena::default();
         let unit = compile(
             source,
             origin,
@@ -1803,10 +1807,8 @@ impl Shared {
             self.declared(),
             stack,
             &mut home,
-            // A unit for every request is compiled on the thread that
-            // asked, no request's arena at hand, so it brings its own.
             Laid {
-                arena: &mut php_compile::syntax::Arena::new(),
+                arena: &mut arena,
                 room: php_compile::Room::default(),
             },
         );
@@ -1815,7 +1817,12 @@ impl Shared {
             "a unit for every request holds a counted value"
         );
         let answers = home.settle(strings_kept(&unit));
-        Fresh { unit, answers }
+        let tree = arena.parsed();
+        Fresh {
+            unit,
+            answers,
+            tree,
+        }
     }
 
     /// `unit` published for every request: each op array given its
@@ -4554,6 +4561,34 @@ pub struct Engine {
     end: Arc<EngineEnd>,
 }
 
+/// What a request laid for a stage of the engine's start leaves the
+/// engine as it ends: what it raised, in order, what its handlers wrote
+/// to `stderr`, and `JIT_G` as `opcache.jit`'s handler left it, every
+/// later request's start. php's `JIT_G` is the process's, which
+/// `OnUpdateJit` writes at `ZEND_INI_STAGE_STARTUP` and, in php-fpm's
+/// child, at the pool's `ZEND_INI_STAGE_ACTIVATE`
+/// (`Z/ext/opcache/zend_accelerator_module.c:209`,
+/// `Z/sapi/fpm/fpm/fpm_php.c:24-88`).
+struct StartupLeft {
+    raised: Vec<(Level, Vec<u8>)>,
+    written: Vec<u8>,
+    setting: TierStatus,
+}
+
+impl StartupLeft {
+    /// What `req`, its stage over, leaves.
+    fn of(mut req: Box<Request>) -> StartupLeft {
+        let raised = req.end_startup();
+        let written = req.startup_stderr();
+        let setting = *req.tier_setting_held();
+        StartupLeft {
+            raised,
+            written,
+            setting,
+        }
+    }
+}
+
 /// Why [`Engine::alter_master_ini`] laid nothing: another clone of the
 /// engine stands, and the master values a clone reads are the engine's
 /// for as long as it does.
@@ -4750,10 +4785,11 @@ impl Engine {
         let modules_end = req.startup_raised_len();
         disable_warnings(&mut req);
         startup_directives(&mut req, &self.shared);
-        let raised = req.end_startup();
-        let written = req.startup_stderr();
-        let setting = *req.tier_setting_held();
-        drop(req);
+        let StartupLeft {
+            raised,
+            written,
+            setting,
+        } = StartupLeft::of(req);
         let Some(shared) = Arc::get_mut(&mut self.shared) else {
             return;
         };
@@ -4819,8 +4855,7 @@ impl Engine {
             (supplied.observers).retain(|(_, registered)| registered.is_none_or(|r| r(&start)));
             shared.observers = supplied.observers.count();
             shared.opcodes = crate::observer::ObservedOpcodes::start(&supplied.opcodes, &start);
-            shared.binding.setting = setting;
-            shared.binding = bind_loops(shared);
+            shared.binding = bind_loops(shared, setting);
         }
         shared.startup_raised = raised;
     }
@@ -4877,7 +4912,9 @@ impl Engine {
     /// startup's does (`zend_disable_functions`). None of it reaches the
     /// startup ini the extensions' engine starts read nor the
     /// post-startup, which ran before it under the master's ini, as php's
-    /// did: a pool's `opcache.preload` preloads nothing.
+    /// did: a pool's `opcache.preload` preloads nothing. What
+    /// `opcache.jit`'s handler leaves of `JIT_G` is every later request's
+    /// start, as php-fpm's child keeps its process's `JIT_G`.
     ///
     /// What the handlers wrote to `stderr`, for the host to write; what
     /// they raised is shown nowhere, as php-fpm's child shows nothing of
@@ -4921,9 +4958,9 @@ impl Engine {
             }
             taken.push((name, value));
         }
-        req.end_startup();
-        let written = req.startup_stderr();
-        drop(req);
+        let StartupLeft {
+            written, setting, ..
+        } = StartupLeft::of(req);
         let end = Arc::get_mut(&mut self.end).ok_or(NotAlone)?;
         // The end's own hold on what every request shares, let go while
         // the values are laid and taken again after.
@@ -4937,6 +4974,7 @@ impl Engine {
                     shared.set_ini_default(&name, Some(value));
                 }
                 shared.locked.extend(locked);
+                shared.binding.setting = setting;
                 Ok(written)
             }
             None => Err(NotAlone),
@@ -5016,6 +5054,13 @@ impl Engine {
     #[must_use]
     pub fn ini_get(&self, name: &[u8]) -> Option<Vec<u8>> {
         self.shared.ini.master(name).map(<[u8]>::to_vec)
+    }
+
+    /// The php.ini files read at startup, including the scan path even
+    /// where it contained no files, as `PHP_CLI_MODE_SHOW_INI_CONFIG` reads.
+    #[must_use]
+    pub fn ini_files(&self) -> &crate::api::request::IniFiles {
+        &self.shared.ini_files
     }
 
     /// `tsrm_realpath(path, NULL)` outside any request
@@ -5506,6 +5551,11 @@ impl Engine {
         // failed, and the host ends with status 1 before any request.
         if self.show_startup_raised(&mut req) {
             return Begun::Refused(ended(1), req.release_sink());
+        }
+        // The memory limit's fatal as the body was read bailed out of
+        // `php_request_startup`, which failed: no program is compiled.
+        if req.diagnostics().bailing_out() {
+            return Begun::Failed(req);
         }
         if let Err(thrown) = serve_rinits(&mut req, &self.shared.extensions) {
             // `zend_throw_exception_internal` with no frame standing
@@ -6431,6 +6481,7 @@ pub(crate) fn auto_file(req: &mut Request, name: &[u8]) -> bool {
     let file = file.to_vec();
     match req.require_kept(&file) {
         Ok(crate::api::request::Opened::Unit(unit)) => serve_unit(req, &unit),
+        Ok(crate::api::request::Opened::Declared(unit)) => serve_declared(req, &unit),
         Ok(_) => true,
         Err(thrown) => {
             req.leave_pending(&thrown);
@@ -6495,9 +6546,12 @@ pub(crate) fn auto_file(req: &mut Request, name: &[u8]) -> bool {
 /// declaration or an `exit`, each of which php leaves by `zend_bailout`,
 /// and not a throwable no handler took.
 pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit) -> bool {
-    if !note_compiled(req, unit, SourceKind::File) {
-        return false;
-    }
+    note_compiled(req, unit, SourceKind::File) && serve_declared(req, unit)
+}
+
+/// [`serve_unit`] past [`note_compiled`], for a unit whose compile
+/// declared it already ([`crate::api::request::Opened::Declared`]).
+fn serve_declared(req: &mut Request, unit: &PublishedUnit) -> bool {
     let standing = req.vm().depth();
     // The op array `zend_accel_load_script` copies out of the cache, or
     // `zend_compile` makes, and its runtime cache, the request's while

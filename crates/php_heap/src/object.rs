@@ -151,6 +151,14 @@ impl Obj {
     /// `properties_table`, each slot a zval past it: what the compiled
     /// tier reads and writes a declared property at, `OBJ_PROP_NUM`.
     pub const SLOTS_AT: usize = HEADER;
+    /// Where in the object the word its pins are counted in stands,
+    /// `extra_flags` ([`Obj::pins`]): what the compiled tier adds one to
+    /// as it pushes a method's call over `$this`, and takes one from as
+    /// its frame leaves, where that pin is not the last over an object
+    /// whose last owner went.
+    pub const PINS_AT: usize = std::mem::offset_of!(ObjHeader, extra_flags);
+    /// The bits of the word at [`Obj::PINS_AT`] that count the pins.
+    pub const PINS: u32 = gc::OBJ_PINS;
 
     fn header(&self) -> &ObjHeader {
         // SAFETY: an `Obj` names an object `init` laid down, live while

@@ -39,6 +39,7 @@ use php_engine::tier::{
 };
 use php_unit::Opcode;
 
+mod analysis;
 mod compiler;
 mod dispatch;
 use dispatch::JitRequest;
@@ -213,6 +214,9 @@ impl JitRequest {
             headers: crate::enter::Headers::default(),
             epoch: std::cell::OnceCell::new(),
             table: std::cell::OnceCell::new(),
+            owed: Cell::new(None),
+            #[cfg(test)]
+            escapes_crossed: Cell::new(0),
         }
     }
 }
@@ -319,6 +323,11 @@ impl Lines {
         self.debug
             .dump(&mut self.written, event)
             .unwrap_or_default();
+    }
+
+    /// `bytes` added as written, a dump that is its own lines.
+    pub(crate) fn push(&mut self, bytes: &[u8]) {
+        self.written.extend_from_slice(bytes);
     }
 
     /// The lines written to the request's error stream, where php's

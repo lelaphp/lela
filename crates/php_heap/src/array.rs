@@ -600,6 +600,9 @@ impl Arr {
     pub const DATA_AT: usize = std::mem::offset_of!(ArrHeader, data);
     /// Where `nNumUsed` is: past it a packed array has no slot.
     pub const USED_AT: usize = std::mem::offset_of!(ArrHeader, num_used);
+    /// Where `nNumOfElements` is, `zend_hash_num_elements`: its
+    /// `count()`, which an array's truth reads.
+    pub const ELEMENTS_AT: usize = std::mem::offset_of!(ArrHeader, num_elements);
 
     const fn header(&self) -> &ArrHeader {
         // SAFETY: an `Arr` names an array `init` laid down, live while

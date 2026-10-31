@@ -13,8 +13,10 @@ use super::argv::Line;
 use super::audit;
 use super::call::Call;
 use super::hand_off::hand_off;
+use super::ledger;
 use super::operation;
 use super::rules::{Judgement, Kind, deny_output, judge};
+use super::writes;
 use super::{INSTRUMENT, STALE_RULE, UNJUDGED_RULE};
 use crate::built::{self, Judge, Refusal};
 use crate::key::Snapshot;
@@ -24,17 +26,24 @@ use crate::reading::{Reading, Status, Store};
 /// Which adapter judges the call: the command hook records every
 /// finding; the function hook above it records a denial, which ends the
 /// call there, and leaves a note to the command hook beneath, which sees
-/// the same call and records it once (harness-design.md §4.4).
+/// the same call and records it once (harness-design.md §4.4). Pre-commit's
+/// `--diff` records every finding under its own caller, [`PRE_COMMIT`], so
+/// a diff's judgement is never counted as an agent's call (#3619).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Adapter {
     CommandHook,
     AboveTheCommandHook,
+    PreCommit,
 }
+
+/// The caller a diff judged at pre-commit is recorded under: its readings'
+/// session, and the head of their scope.
+pub(crate) const PRE_COMMIT: &str = "pre-commit";
 
 impl Adapter {
     fn records(self, kind: Kind) -> bool {
         match self {
-            Adapter::CommandHook => true,
+            Adapter::CommandHook | Adapter::PreCommit => true,
             Adapter::AboveTheCommandHook => kind == Kind::Deny,
         }
     }
@@ -81,10 +90,14 @@ pub(super) fn record(
             "{} {}: {}",
             call.tool_name,
             call.subject(root),
-            finding.text
+            finding.said()
         );
         reading.adr = finding.adr.first().cloned().unwrap_or_default();
         reading.session.clone_from(&call.session_id);
+        if adapter == Adapter::PreCommit {
+            reading.scope = format!("{PRE_COMMIT}/{}", finding.rule);
+            PRE_COMMIT.clone_into(&mut reading.session);
+        }
         readings.push(reading);
     }
     Store::of_workspace(root).record(&readings)?;
@@ -111,7 +124,7 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
     // them: the command hook from the transcript Claude Code writes, the
     // function hook from the records it read from the engine (#2247).
     call.evidence = match adapter {
-        Adapter::CommandHook => Evidence::Transcript,
+        Adapter::CommandHook | Adapter::PreCommit => Evidence::Transcript,
         Adapter::AboveTheCommandHook => Evidence::Engine,
     };
     // The blobs of harness.self's files before a Bash call, for the
@@ -152,7 +165,13 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
         Ok(manifest) => manifest,
         Err(refusal) => {
             record_the_refusal(&checkout, &call, &refusal);
-            return Err(refusal.into());
+            if refusal.hands_the_call_on() {
+                return Err(refusal.into());
+            }
+            // No rebuild judges it either, so the decision is this one's,
+            // and the walk ends here, the call recorded once (#3619).
+            println!("{}", unjudged_output(&call, refusal.why()));
+            return Ok(());
         }
     };
     match judge(&manifest, &workspace, &call) {
@@ -162,7 +181,10 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
             }
             record_the_approvals(&checkout, &call, &judgement);
             if adapter == Adapter::CommandHook {
-                record_the_operation(&workspace, &call, &judgement);
+                if let Err(err) = ledger::count(&checkout, &judgement.judged) {
+                    eprintln!("xtask permit: the calls judged were not counted: {err:#}");
+                }
+                record_the_write(&workspace, &call, &judgement);
             }
             if let Err(err) = record(&checkout, &call, &judgement, adapter) {
                 eprintln!("xtask permit: the decision stands but was not recorded: {err:#}");
@@ -171,6 +193,22 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
         Err(err) => unjudged(&err),
     }
     Ok(())
+}
+
+/// The decision on a call no build judges, with the error's first line:
+/// a write no judge saw is denied, and a `Bash` call passes with the note,
+/// since an agent repairs a broken harness with `Bash` (#16, harness-design.md
+/// §13 item 8).
+fn unjudged_output(call: &Call, why: &anyhow::Error) -> serde_json::Value {
+    let why = format!("{why:#}");
+    let first = why.lines().next().unwrap_or_default();
+    let said = format!("permit could not judge this call: {first}");
+    if call.tool_name == "Bash" {
+        serde_json::json!({"hookSpecificOutput": {
+            "hookEventName": super::rules::HOOK_EVENT, "additionalContext": said}})
+    } else {
+        deny_output(&said)
+    }
 }
 
 /// The deny a call this build could not judge is, printed: why, `err`.
@@ -199,27 +237,38 @@ fn record_the_approvals(checkout: &Path, call: &Call, judgement: &Judgement) {
     }
 }
 
-/// The session whose `git merge`, `rebase` or kin this admits, as the
-/// starter of the operation it begins ([`operation::record`]), whatever
-/// the manifest holds: an operation can bring the first `where =
-/// "operating"` rule into the working tree it stands in, and a starter
-/// recorded only under such a rule left that one foreign to every session
-/// (#2694). Best effort, as recording the decision is.
-///
-/// The command hook alone records it, the adapter that judges a call
-/// last: the function hook above it admits a call the command hook then
-/// judges again, and an `--abort` that admission dropped the record for
-/// was refused beneath it as foreign, with every later abort of its
-/// starter's (#2734).
-fn record_the_operation(root: &Path, call: &Call, judgement: &Judgement) {
-    let Some(command) = call.command() else {
-        return;
-    };
+/// The checkout an admitted writing call is placed in, kept under its
+/// session and agent for the Stop to hold (#3618 ruling 1): a file's by
+/// the file, a `Bash` line's where it runs from the call's directory
+/// ([`operation::ran_in`]) unless it only reads ([`writes::reads_only`]);
+/// a place in no checkout of the repository is none. Best effort, as
+/// recording the decision is.
+fn record_the_write(workspace: &Path, call: &Call, judgement: &Judgement) {
     if judgement.denial().is_some() {
         return;
     }
-    if let Err(err) = operation::record(root, call, &Line::read(command)) {
-        eprintln!("xtask permit: the operation's starter was not recorded: {err:#}");
+    let checkout = match (call.command(), call.path(workspace)) {
+        (Some(command), _) => {
+            let line = Line::read(command);
+            if writes::reads_only(&line, workspace) {
+                return;
+            }
+            let start = call.cwd.as_deref().map_or(workspace, Path::new);
+            operation::ran_in(start, Some(&line))
+        }
+        (None, Some(path)) => match path.ancestors().find(|dir| dir.is_dir()) {
+            Some(dir) => operation::ran_in(dir, None),
+            None => return,
+        },
+        (None, None) => return,
+    };
+    let ours = crate::track::worktrees(workspace).is_ok_and(|all| {
+        all.iter()
+            .any(|(dir, _)| dir.canonicalize().ok().as_ref() == Some(&checkout))
+    });
+    let agent = call.agent_id.as_deref().unwrap_or_default();
+    if ours && let Err(err) = ledger::wrote(workspace, &call.session_id, agent, checkout) {
+        eprintln!("xtask permit: the checkout this call wrote in was not recorded: {err:#}");
     }
 }
 
@@ -255,37 +304,50 @@ fn record_the_refusal(root: &Path, call: &Call, refusal: &Refusal) {
              same way.",
         )
     };
-    let recorded = Snapshot::disk_over(root, Path::new(manifest::FILE))
-        .and_then(|now| Reading::stamped_over(INSTRUMENT, rule, &now, Path::new(manifest::FILE)))
-        .and_then(|mut reading| {
-            rule.clone_into(&mut reading.rule);
-            reading.status = status;
-            reading.message = format!(
-                "{} {}: {what} {refusal}",
-                call.tool_name,
-                call.subject(root)
-            );
-            reading.session.clone_from(&call.session_id);
-            Store::of_workspace(root).record(&[reading])
-        });
+    let mut recorded = refusal_reading(root, call, rule, status, &format!("{what} {refusal}"));
+    // A run of calls handed on with none judged is the walk failing open:
+    // its last candidate never judged them, and the hook passed them on.
+    if refusal.hands_the_call_on()
+        && let Ok(within) = ledger::handed(root, &call.tool_use_id)
+        && within >= ledger::BURST
+    {
+        let what = format!(
+            "{within} calls were handed on within a minute and none was judged since: no \
+             candidate of the walk judges, and the hook passes a Bash call on unjudged."
+        );
+        recorded =
+            recorded.and_then(|()| refusal_reading(root, call, UNJUDGED_RULE, Status::Fail, &what));
+    }
     // The refusal is the exit already; the outcome of recording it is not.
     if let Err(err) = recorded {
         eprintln!("xtask permit: the refusal to judge was not recorded: {err:#}");
     }
 }
 
+/// One reading of permit's own `rule` over the manifest, for `call`.
+fn refusal_reading(root: &Path, call: &Call, rule: &str, status: Status, what: &str) -> Result<()> {
+    let now = Snapshot::disk_over(root, Path::new(manifest::FILE))?;
+    let mut reading = Reading::stamped_over(INSTRUMENT, rule, &now, Path::new(manifest::FILE))?;
+    rule.clone_into(&mut reading.rule);
+    reading.status = status;
+    reading.message = format!("{} {}: {what}", call.tool_name, call.subject(root));
+    reading.session.clone_from(&call.session_id);
+    Store::of_workspace(root).record(&[reading])?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[cfg(tracked)]
 mod tests {
-    use std::path::Path;
     use std::process::Command;
 
-    use super::{Call, Manifest, judge, record_the_operation};
-    use crate::manifest::Where;
+    use super::{Call, Manifest, judge};
+    use crate::owner::{self, SessionId};
     use crate::scratch::Tree;
 
-    /// A repository of one commit on `main`.
-    fn repository(name: &str) -> Tree {
+    /// A repository of one commit on `main`, owned by `owner`, with a
+    /// merge standing in it as git leaves one stopped before its commit.
+    fn merging(name: &str, owner: &str) -> Tree {
         let dir = Tree::new(name).unwrap();
         for args in [
             &["init", "-q", "-b", "main"][..],
@@ -304,6 +366,8 @@ mod tests {
                     .success()
             );
         }
+        owner::record(&dir, &SessionId::new(owner).unwrap()).unwrap();
+        std::fs::write(dir.join(".git/MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
         dir
     }
 
@@ -312,29 +376,16 @@ mod tests {
         Call::parse(&call.to_string()).unwrap()
     }
 
-    /// `session`'s `git merge` admitted and recorded under `manifest`, and
-    /// the merge it started then standing, as git leaves one stopped
-    /// before its commit.
-    fn started(manifest: &Manifest, dir: &Path, session: &str) {
-        let start = bash(session, "git merge --no-commit topic");
-        let admitted = judge(manifest, dir, &start).unwrap();
-        record_the_operation(dir, &start, &admitted);
-        std::fs::write(dir.join(".git/MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
-    }
-
-    /// The trap of #2694: a merge started under a manifest with no `where
-    /// = "operating"` rule, whose working tree then carries `git.operation`
-    /// as the merge that lands it does, is still its starter's to step,
-    /// abort and commit, and still another session's to be refused.
+    /// #3621: a merge standing in a checkout is its owner's to step, abort
+    /// and commit, under the manifest as it stands, and every other
+    /// session's to be refused, by `git.operation`'s more specific text
+    /// first; who started it is recorded nowhere, so no admission and no
+    /// adapter can leave it foreign to its owner (#2694, #2734).
     #[test]
-    fn a_merge_started_before_the_operating_row_landed_is_still_its_starters() {
+    fn a_merge_standing_in_an_owned_checkout_is_its_owners_to_end() {
         let workspace = crate::package_dir().parent().unwrap();
         let manifest = Manifest::load(workspace).unwrap();
-        let mut without = manifest.clone();
-        without.rules.retain(|r| r.within != Where::Operating);
-        let dir = repository("permit-operating");
-        started(&without, &dir, "s1");
-
+        let dir = merging("permit-operating", "s1");
         let judged = |session: &str, line: &str| {
             let judgement = judge(&manifest, &dir, &bash(session, line)).unwrap();
             judgement.denial().map(|f| f.rule.clone())
@@ -354,19 +405,18 @@ mod tests {
         }
     }
 
-    /// `git.operation` as the manifest carries it (#2530, #2617): its
-    /// `allow-starter-continue.json`, the starter's own `git merge
-    /// --continue`, passes the merge that session started, which the
+    /// `git.operation` as the manifest carries it: its
+    /// `allow-owner-continue.json`, the owner's own `git merge
+    /// --continue`, passes in the checkout that session owns, which the
     /// fixture walks cannot record, and the same line from another session
     /// is refused.
     #[test]
-    fn the_git_operation_row_lets_the_starter_conclude_its_own_merge() {
+    fn the_git_operation_row_lets_the_owner_conclude_its_merge() {
         let workspace = crate::package_dir().parent().unwrap();
         let manifest = Manifest::load(workspace).unwrap();
-        let fixture = "xtask/fixtures/rules/git.operation/allow-starter-continue.json";
+        let fixture = "xtask/fixtures/rules/git.operation/allow-owner-continue.json";
         let own = Call::parse(&std::fs::read_to_string(workspace.join(fixture)).unwrap()).unwrap();
-        let dir = repository("permit-operating-starter");
-        started(&manifest, &dir, &own.session_id);
+        let dir = merging("permit-operating-owner", &own.session_id);
         let judged = |call: &Call| {
             let judgement = judge(&manifest, &dir, call).unwrap();
             judgement.denial().map(|f| f.rule.clone())
@@ -374,56 +424,5 @@ mod tests {
         assert_eq!(judged(&own), None);
         let other = bash("another-hand", own.command().unwrap());
         assert_eq!(judged(&other).as_deref(), Some("git.operation"));
-    }
-
-    /// #2720 as it happened: an agent's `git merge` is admitted, and before
-    /// the merge writes its marker a sibling agent of the same session has
-    /// a line admitted that `cd`s into its own worktree past its first
-    /// command and, joined by `&&` (#2995), runs `git merge --ff-only`
-    /// there. The merge stays its
-    /// starter's: `allow-starter-commit.json` and the starter's abort pass,
-    /// and `deny-sibling-commit.json` and the sibling's abort are refused.
-    #[test]
-    fn a_sibling_s_line_between_a_start_and_its_marker_leaves_the_merge_its_starters() {
-        let workspace = crate::package_dir().parent().unwrap();
-        let manifest = Manifest::load(workspace).unwrap();
-        let fixture = |name: &str| {
-            let path = workspace
-                .join("xtask/fixtures/rules/git.operation")
-                .join(name);
-            Call::parse(&std::fs::read_to_string(path).unwrap()).unwrap()
-        };
-        let own = fixture("allow-starter-commit.json");
-        let sibling = fixture("deny-sibling-commit.json");
-        let saying = |call: &Call, line: &str| {
-            let mut call = call.clone();
-            call.tool_input.command = Some(line.to_owned());
-            call
-        };
-        let dir = repository("permit-operating-sibling");
-        let admit = |call: &Call| {
-            let admitted = judge(&manifest, &dir, call).unwrap();
-            assert!(admitted.denial().is_none(), "{admitted:?}");
-            record_the_operation(&dir, call, &admitted);
-        };
-        admit(&saying(&own, "git merge --no-ff --no-commit t2634"));
-        let elsewhere = format!(
-            "S=/var/empty; cat $S/owner; cd /var/empty/t2645 && git merge --ff-only main; \
-             cd {}; git log --oneline -3",
-            dir.display()
-        );
-        admit(&saying(&sibling, &elsewhere));
-        std::fs::write(dir.join(".git/MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
-
-        let judged = |call: &Call| {
-            let judgement = judge(&manifest, &dir, call).unwrap();
-            judgement.denial().map(|f| f.rule.clone())
-        };
-        let refused = Some("git.operation");
-        assert_eq!(judged(&own), None);
-        assert_eq!(judged(&saying(&own, "git merge --abort")), None);
-        assert_eq!(judged(&sibling).as_deref(), refused);
-        let abort = saying(&sibling, "git merge --abort");
-        assert_eq!(judged(&abort).as_deref(), refused);
     }
 }

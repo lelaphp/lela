@@ -4,9 +4,9 @@
 
 use php_sapi::tier::{FrameRef, Request};
 
-use crate::cmd::Param;
+use crate::cmd::Parameter;
 use crate::out::Out;
-use crate::prompt::{Here, Ret};
+use crate::prompt::{Here, Reply};
 use crate::read;
 use crate::session::Session;
 use crate::shown::{self, Key, Shown, TraceRow};
@@ -16,13 +16,13 @@ fn lossy(bytes: &[u8]) -> String {
 }
 
 /// `PHPDBG_INFO(break)`.
-pub fn breaks(s: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn breaks(s: &mut Session, _: &mut Here<'_>, _: &[Parameter]) -> Reply {
     s.breaks.print(&mut s.out);
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_INFO(files)`.
-pub fn files(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn files(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     let files = here
         .request()
         .map_or_else(Vec::new, |req| req.code().included_files());
@@ -31,7 +31,7 @@ pub fn files(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     for file in files {
         s.out.writeln(format!("File: {}", lossy(&file)).as_bytes());
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `phpdbg_print_class_name`'s type word.
@@ -44,7 +44,7 @@ fn class_word(shape: read::Shape) -> &'static str {
 }
 
 /// `PHPDBG_INFO(classes)`.
-pub fn classes(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn classes(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     let classes = here.request().map_or_else(Vec::new, read::user_classes);
     s.out
         .notice(format!("User Classes ({})", classes.len()).as_bytes());
@@ -71,11 +71,11 @@ pub fn classes(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
             format!("|---- in {} on line {}", lossy(&class.file), class.lines.0).as_bytes(),
         );
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_INFO(funcs)`.
-pub fn funcs(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn funcs(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     let functions = here
         .request()
         .map_or_else(Vec::new, |req| read::user_functions(req));
@@ -88,11 +88,11 @@ pub fn funcs(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
             format!(" in {} on line {}", lossy(&function.file), function.lines.0).as_bytes(),
         );
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_INFO(error)`.
-pub fn error(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn error(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     match here.request().and_then(read::last_error) {
         Some((message, file, line)) => s.out.writeln(
             format!(
@@ -104,7 +104,7 @@ pub fn error(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
         ),
         None => s.out.notice(b"No error found!"),
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `zend_get_type_by_const`.
@@ -160,11 +160,11 @@ fn variable_row(out: &mut Out, name: &[u8], refs: u32, value: &Shown, sigil: &st
 }
 
 /// `phpdbg_print_symbols(0)`.
-pub fn vars(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn vars(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     let executing = here.executing();
     let Some((req, frame)) = here.standing().filter(|_| executing) else {
         s.out.error(b"No active op array!");
-        return Ret::Success;
+        return Reply::Success;
     };
     let rows = shown::variables(req, frame);
     let title = match read::serves(req, frame) {
@@ -202,15 +202,15 @@ pub fn vars(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
             );
         }
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `phpdbg_print_symbols(1)`.
-pub fn globals(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn superglobals(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     let executing = here.executing();
     let Some((req, _)) = here.standing().filter(|_| executing) else {
         s.out.error(b"No active op array!");
-        return Ret::Success;
+        return Reply::Success;
     };
     let rows = shown::superglobals(req);
     s.out
@@ -229,11 +229,11 @@ pub fn globals(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
             );
         }
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_INFO(constants)`.
-pub fn constants(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn constants(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     let rows = here.request().map_or_else(Vec::new, shown::user_constants);
     s.out
         .notice(format!("User-defined constants ({})", rows.len()).as_bytes());
@@ -251,15 +251,15 @@ pub fn constants(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
             );
         }
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `PHPDBG_INFO(literal)`.
-pub fn literal(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn literals(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
     let executing = here.executing();
     let Some((req, frame)) = here.standing().filter(|_| executing) else {
         s.out.error(b"Not executing!");
-        return Ret::Success;
+        return Reply::Success;
     };
     let literals = shown::literals(req, frame);
     let count = literals.len().saturating_sub(1);
@@ -292,7 +292,7 @@ pub fn literal(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
         s.out.write(&flat(literal));
         s.out.out(b"]\n");
     }
-    Ret::Success
+    Reply::Success
 }
 
 /// `%.*G` with 14 places and php's exponent, as `phpdbg_short_zval_print`
@@ -501,7 +501,7 @@ pub fn stackframe(req: &mut Request, frame: FrameRef, above: u32) -> Option<Stri
 /// the innermost: a row per frame, each at the site the row before
 /// named, the first at `frame`'s, and `{main}` last. Each row's
 /// arguments are named as the function it calls declares them, a
-/// native's by its arginfo; a closure's, which no table holds by its
+/// native's by its `arginfo`; a closure's, which no table holds by its
 /// name, are not, and a variadic parameter's are written bare, as
 /// `num_args` counts no variadic one.
 ///

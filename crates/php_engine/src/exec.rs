@@ -750,6 +750,9 @@ impl Header {
     /// takes the return, `EX(run_time_cache)` and the annex.
     pub(crate) const THIS_AT: usize = std::mem::offset_of!(Header, this);
     pub(crate) const CLOSURE_AT: usize = std::mem::offset_of!(Header, closure);
+    /// Where the called scope stands, a half-word: the class's number
+    /// with every bit inverted, zero for none ([`ScopeAt`]).
+    pub(crate) const SCOPE_AT: usize = std::mem::offset_of!(Header, called_scope);
     pub(crate) const NUM_ARGS_AT: usize = std::mem::offset_of!(Header, num_args);
     pub(crate) const CALLER_AT: usize = std::mem::offset_of!(Header, caller);
     pub(crate) const RETURNS_TO_AT: usize = std::mem::offset_of!(Header, returns_to);
@@ -791,7 +794,7 @@ pub(crate) struct CallInfo(u32);
 
 impl CallInfo {
     /// `ZEND_CALL_RELEASE_THIS`: the frame owns its receiver.
-    const RELEASE_THIS: u32 = 1 << 0;
+    pub(crate) const RELEASE_THIS: u32 = 1 << 0;
     /// The frame is being popped: `zend_leave_helper` has written
     /// `EG(current_execute_data) = EX(prev_execute_data)` ahead of
     /// `i_free_compiled_variables`, so a destructor what it gives up
@@ -814,12 +817,12 @@ impl CallInfo {
     /// is not on.
     const CALL: u32 = 1 << 3;
     /// The call is being built, its `SEND_*` oplines placing arguments.
-    const BUILDING: u32 = 1 << 4;
+    pub(crate) const BUILDING: u32 = 1 << 4;
     /// `!USED_RET()` (`Z/Zend/zend_API.h`): the `DO_*CALL` serving the
     /// call writes its `result` to an `UNUSED` operand. A call
     /// `zend_call_function` makes reads it, as php's test finds the
     /// frame before the callee's internal.
-    const RETURN_UNUSED: u32 = 1 << 5;
+    pub(crate) const RETURN_UNUSED: u32 = 1 << 5;
     /// `ZEND_CALL_DYNAMIC`: the callee was named as the program served,
     /// by `INIT_DYNAMIC_CALL` or `INIT_USER_CALL`, which a native that
     /// reads its caller's frame refuses (`zend_forbid_dynamic_call`).
@@ -1757,13 +1760,20 @@ pub(crate) enum Cached {
     /// what was asked and what answered, never how the answer was
     /// found. And `instance` is whether the callee takes `$this`, the
     /// test of `fbc->common.fn_flags` php makes, read where the pair is
-    /// written, as php reads it off the callee it holds.
+    /// written, as php reads it off the callee it holds. `record` is
+    /// the callee's record, the word a frame serving it is pushed with
+    /// ([`Header::callee`]): what compiled code holds a request's own
+    /// method to, whose number is the request's alone, as php's
+    /// `zend_jit_func_guard` holds a function that is not immutable by
+    /// its opcodes rather than its address
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:8999-9024`).
     ClassAndCallee {
         class: ClassId,
         primed: PrimedFrom,
         function: Function,
         instance: bool,
-    },
+        record: crate::readable::CalleeAt,
+    } = CLASS_AND_CALLEE,
     /// The `static` property a fetch over a constant name found on its
     /// first pass, `CACHE_POLYMORPHIC_PTR(cache_slot, ce, result)` and
     /// `CACHE_PTR(cache_slot + 2, property_info)`
@@ -1856,6 +1866,10 @@ pub(crate) struct PrimedCall {
 /// before the handler's first pass.
 pub(crate) const UNPRIMED: u32 = 0;
 
+/// [`Cached::ClassAndCallee`]'s tag, which compiled code tests before it
+/// reads the pair.
+pub(crate) const CLASS_AND_CALLEE: u32 = 4;
+
 /// [`Cached::Property`]'s tag, which compiled code tests before it reads
 /// the place.
 pub(crate) const PROPERTY: u32 = 7;
@@ -1880,6 +1894,19 @@ struct PropertyRepr {
     place: PropertyPlace,
 }
 
+/// [`Cached::ClassAndCallee`] as RFC 2195 lays a variant of a
+/// `#[repr(u32)]` enum out: its tag, then its fields in their order as a
+/// `#[repr(C)]` struct, each of the variant's own type.
+#[repr(C)]
+struct PairRepr {
+    tag: u32,
+    class: ClassId,
+    primed: PrimedFrom,
+    function: Function,
+    instance: bool,
+    record: crate::readable::CalleeAt,
+}
+
 /// [`PropertyOffset::Declared`] as RFC 2195 lays it out.
 #[repr(C)]
 struct DeclaredRepr {
@@ -1893,6 +1920,15 @@ impl Cached {
     pub(crate) const TAG_AT: usize = std::mem::offset_of!(PropertyRepr, tag);
     /// Where [`Cached::Property`]'s place stands in a slot.
     pub(crate) const PLACE_AT: usize = std::mem::offset_of!(PropertyRepr, place);
+    /// Where [`Cached::ClassAndCallee`]'s class stands in a slot, its
+    /// number as `Obj::CLASS_AT` holds it.
+    pub(crate) const PAIR_CLASS_AT: usize = std::mem::offset_of!(PairRepr, class);
+    /// Where [`Cached::ClassAndCallee`]'s callee stands in a slot, its
+    /// number.
+    pub(crate) const PAIR_FUNCTION_AT: usize = std::mem::offset_of!(PairRepr, function);
+    /// Where [`Cached::ClassAndCallee`]'s callee's record stands in a
+    /// slot, a word.
+    pub(crate) const PAIR_RECORD_AT: usize = std::mem::offset_of!(PairRepr, record);
 }
 
 impl PropertyPlace {
@@ -1922,6 +1958,11 @@ const _: () = {
     assert!(size_of::<Cached>() == 40 && size_of::<Option<Cached>>() == 40);
     assert!(size_of::<PropertyRepr>() <= size_of::<Cached>());
     assert!(align_of::<PropertyRepr>() <= align_of::<Cached>());
+    assert!(size_of::<PairRepr>() <= size_of::<Cached>());
+    assert!(align_of::<PairRepr>() <= align_of::<Cached>());
+    assert!(size_of::<Function>() == 4);
+    assert!(Cached::PAIR_CLASS_AT == 4 && Cached::PAIR_FUNCTION_AT.is_multiple_of(4));
+    assert!(Cached::PAIR_RECORD_AT.is_multiple_of(8));
     assert!(Cached::TAG_AT == 0 && Cached::PLACE_AT == 4);
     assert!(size_of::<ClassId>() == 4 && size_of::<SlotType>() == 2);
     assert!(size_of::<DeclaredRepr>() == size_of::<PropertyOffset>());
@@ -1974,7 +2015,7 @@ impl Cached {
 /// (`zend_create_closure`, `Z/Zend/zend_closures.c:794`). Both read a
 /// cache of their own here too ([`init_runtime_cache`]), and the slot is
 /// still read back only from the scope that wrote it
-/// ([`crate::api::request::Request::cached_in_scope`]): a frame of the
+/// ([`Request::cached_in_scope`]): a frame of the
 /// function that wrote it without asking its scope, as
 /// [`Cached::Property`]'s `function` is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2923,12 +2964,36 @@ pub(crate) fn frameless_operand(
     };
     if kind != OperandKind::Cv {
         *slot = Zval::UNDEF;
-        return (z, true);
     }
-    if named {
-        z.addref();
+    frameless_owner(z, kind, named)
+}
+
+/// Whether a name reaches the variables of the frame `header` is, so a
+/// frameless call's `CV` operand takes one more owner
+/// ([`frameless_owner`]): a frame that carries an annex, its symbol
+/// table or its extra arguments, or none at all.
+pub(crate) fn frameless_named(header: Option<&Header>) -> bool {
+    header.is_none_or(|header| header.annex.is_some())
+}
+
+/// What a frameless call's record holds of the operand `z` of `kind`,
+/// read where it stands and neither `UNDEF` nor a reference, and whether
+/// it owns it, as [`frameless_operand`] reads it from its slot and
+/// compiled code hands it over: a `TMP` or a `VAR` moved out of its
+/// slot is owned, a `CONST` borrowed, and a `CV` borrowed but in a frame
+/// whose variables a name reaches (`named`), where it takes one more
+/// owner.
+pub(crate) fn frameless_owner(z: Zval, kind: OperandKind, named: bool) -> (Zval, bool) {
+    match kind {
+        OperandKind::Tmp | OperandKind::Var => (z, true),
+        OperandKind::Cv => {
+            if named {
+                z.addref();
+            }
+            (z, named)
+        }
+        OperandKind::Const | OperandKind::Unused => (z, false),
     }
-    (z, named)
 }
 
 /// `FREE_OP`: a `TMP` or a `VAR` operand read by [`operand`] and done
@@ -3940,6 +4005,27 @@ pub(crate) fn cached_class(
     }
     found
 }
+
+/// Whether the class operand `kind`/`at` names one class wherever a
+/// slot is read back: a constant, or `self` or `parent`, which the
+/// frame's scope fixes, and which a slot read back from the scope that
+/// wrote it ([`Request::cached_in_scope`]) needs not resolve again;
+/// `static` and a `FETCH_CLASS`'s are resolved on every pass.
+pub(crate) fn class_fixed(kind: php_unit::OperandKind, at: u32) -> bool {
+    kind == php_unit::OperandKind::Const
+        || kind == php_unit::OperandKind::Unused
+            && matches!(at & FETCH_CLASS_MASK, FETCH_CLASS_SELF | FETCH_CLASS_PARENT)
+}
+
+/// `ZEND_FETCH_CLASS_MASK` (`Z/Zend/zend_compile.h:1034`): the bits of a
+/// class operand's number that are its fetch type, the flags above them.
+pub(crate) const FETCH_CLASS_MASK: u32 = 0x0f;
+
+/// `ZEND_FETCH_CLASS_SELF` and `ZEND_FETCH_CLASS_PARENT`
+/// (`Z/Zend/zend_compile.h:1028`), the two fetch types a call on the class
+/// forwards the called scope through.
+pub(crate) const FETCH_CLASS_SELF: u32 = 1;
+pub(crate) const FETCH_CLASS_PARENT: u32 = 2;
 
 #[cfg(test)]
 mod tests {

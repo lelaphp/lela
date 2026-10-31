@@ -29,7 +29,6 @@
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-#[cfg(not(dispatch = "tailcall"))]
 use php_heap::Zval;
 
 /// What a tier declares its state with, as an extension does (design
@@ -38,9 +37,10 @@ pub use crate::api::abi::{Extension, ExtensionBuilder, Refusal, Start, StartupIn
 /// What a tier's request start answers where it fails, as an
 /// extension's `rinit` does.
 pub use crate::api::raising::Thrown;
-use crate::observer::{Declared, ObservedOpcodes, Telling, Untold};
+use crate::api::values::Value;
+use crate::observer::{Declared, ObservedOpcodes, OnThrow, Telling, Untold};
 use crate::{exec, interrupt};
-use php_unit::OpArray;
+use php_unit::{OpArray, OperandKind};
 
 pub use crate::api::request::Request;
 use crate::api::request::TierStatus;
@@ -61,14 +61,15 @@ mod frames;
 mod held;
 mod layout;
 pub(crate) mod published;
+pub use published::{LANDING_CHUNK_BITS, LandingIndex, LandingRows};
 mod sampled;
 mod strings;
 #[cfg(dispatch = "tailcall")]
 mod tail;
 mod view;
 pub use crossing::{
-    at_room, current, free_cv, free_operands, laid, primed, release, return_entry, room, stack,
-    stack_room, stand,
+    at_room, current, free_cv, free_operands, free_this, laid, make_ref, primed, release,
+    return_entry, room, stack, stack_room, stand,
 };
 pub use dims::{dim_key, lookup_element};
 pub use frames::{
@@ -81,13 +82,14 @@ pub use layout::{
     Activation, FRAME, FrameLayout, PLACE, PlaceLayout, PlainCall, call_image, plain_call,
 };
 pub use sampled::{
-    Building, Sample, building, building_call, class_number, native_returns, numbered_class,
-    on_heap, sample, this_class, under_way,
+    Building, Sample, building, building_call, class_number, class_published, native_returns,
+    numbered_class, on_heap, sample, this_class, under_way,
 };
 pub use strings::{assign_concat, concat, rope_end, rope_open, rope_push};
 pub use view::{
-    CachedSlot, Epoch, FuncRef, Held, MapPtrRaw, PropertySlot, UnitView, epoch, epoch_state,
-    frame_cache, func, jump_targets, landing, running_func, served, touch, touchable,
+    Bindings, CachedSlot, CallSite, CalledFunction, CalledMethod, CalleeSlot, Declaration, Epoch,
+    FuncRef, Held, MapPtrRaw, PropertySlot, UnitView, epoch, epoch_state, frame_cache, func,
+    jump_targets, landing, running_func, served, touch, touchable,
 };
 
 pub use crate::api::values::ClassId;
@@ -514,13 +516,19 @@ pub fn state<S: Any>(req: &Request) -> Option<&S> {
 }
 
 /// One safepoint's word (`jit-design.md` §3.2): two atomics, zero at
-/// publication, all ones when sealed.
+/// publication, all ones when sealed, laid in that order, as compiled
+/// code reads a landing's ([`LandingIndex`]).
+#[repr(C)]
 #[derive(Debug, Default)]
 pub struct Word {
     halves: [AtomicU32; 2],
 }
 
 impl Word {
+    /// Where the second half stands in a word, which compiled code reads
+    /// a landing's state at ([`LandingIndex`]).
+    pub const STATE_AT: usize = std::mem::offset_of!(Word, halves) + size_of::<AtomicU32>();
+
     /// The one accessor; the meaning of the bits is the tier's.
     #[must_use]
     pub fn halves(&self) -> &[AtomicU32; 2] {
@@ -934,8 +942,8 @@ pub(crate) type Loop = fn(&mut Request, FrameRef) -> Result<(), Fatal>;
 
 /// How an engine binds its tier's loops once its engine states are
 /// built and its declared opcodes fixed: [`Binding::bound`] for the
-/// tier.
-pub(crate) type BindLoops = fn(&crate::engine::Shared) -> Binding;
+/// tier, with `JIT_G` as the startup's handler of `opcache.jit` left it.
+pub(crate) type BindLoops = fn(&crate::engine::Shared, TierStatus) -> Binding;
 
 /// The loops an engine binds and what its tier answers whichever serves
 /// (ADR-0006, amended on #3301): the loops a request starts in, and
@@ -959,9 +967,9 @@ pub(crate) struct Binding {
     /// serves; read by the unit cache as it holds a unit.
     pub(crate) laid: fn(&Started<'_>, Option<&Request>) -> Laid,
     /// php's `JIT_G` as the engine's start left it, each request's to
-    /// start from ([`Tier::setting`]); before the tier binds, what
-    /// `opcache.jit`'s handler left it as the start served the host's
-    /// value.
+    /// start from ([`Tier::setting`]), and as a pool's value laid over the
+    /// started engine leaves it
+    /// ([`Engine::alter_master_ini`](crate::engine::Engine::alter_master_ini)).
     pub(crate) setting: TierStatus,
 }
 
@@ -969,8 +977,10 @@ impl Binding {
     /// `T`'s loops for the engine `shared` started, as `T` answers
     /// ([`Tier::bound`]), each told as the declared set says
     /// ([`Loops::told`]): a tier that holds a frame or hooks the compile
-    /// is bound from the start.
-    pub(crate) fn bound<T: Tier>(shared: &crate::engine::Shared) -> Binding {
+    /// is bound from the start. `setting` is `JIT_G` as the startup's
+    /// handler of `opcache.jit` left it, which `T` rewrites
+    /// ([`Tier::setting`]).
+    pub(crate) fn bound<T: Tier>(shared: &crate::engine::Shared, setting: TierStatus) -> Binding {
         let bound = if T::HOLDS || T::HOOKED != Hooked::NONE {
             Bound::On
         } else {
@@ -989,7 +999,7 @@ impl Binding {
             counting: AtomicBool::new(false),
             status: T::status,
             laid: T::laid,
-            setting: T::setting(&Started { shared }, shared.binding.setting),
+            setting: T::setting(&Started { shared }, setting),
         }
     }
 
@@ -1371,7 +1381,7 @@ fn serve_held<'u, T: Tier, D: Telling>(
         // A return to a frame the loop entered, which a scope that served
         // its callee hands back: its op array as the loop left it.
         let kept_body = if pushed { None } else { kept.returned(frame) };
-        let mut body = match kept_body.or_else(|| scope.own(&mut kept, frame)) {
+        let mut body = match kept_body.or_else(|| scope.own(req, &mut kept, frame)) {
             Some(code) => code,
             None => match units.enter(req, &mut kept, frame) {
                 Some(Entered::Held(code)) => code,
@@ -1799,6 +1809,115 @@ pub fn dispatch_held(req: &mut Request, frame: FrameRef, held: Held<'_>) -> Resu
             "InternalError: a handler compiled code serves in its frame went on elsewhere",
         )),
     }
+}
+
+/// The native the call on top of the stack, `call`, is to, served from
+/// compiled code as php's `zend_jit_do_fcall` calls an internal
+/// function's handler with the call and the address of the slot that
+/// takes its return (`Z/ext/opcache/jit/zend_jit_ir.c:10528-10575`):
+/// compiled code stood the caller at the `DO_ICALL` and made the call
+/// the one being served, `EG(current_execute_data) = call`, and makes
+/// the interrupt check, the call's pop and the throw's test after
+/// it, so this serves the native alone, its observer told where one is
+/// declared, and reads no opline. What the native returned, with its
+/// owner, the call still on the stack; `null`, as php's `ZVAL_NULL`
+/// before the handler leaves it, where it threw, the call then popped
+/// and the throwable left pending, as `DO_ICALL`'s handler leaves it
+/// ([`crate::handlers::thrown_on_call`]).
+///
+/// # Errors
+///
+/// The memory limit's fatal, raised where the native threw past it, and
+/// an internal error where `call` is no native's call on top, which no
+/// call compiled code makes is.
+pub fn call_native(req: &mut Request, call: FrameRef) -> Result<Zval, Fatal> {
+    debug_assert!(
+        req.vm().stack.top().is_some_and(|(top, _)| top == call),
+        "compiled code serves the call on top"
+    );
+    let function = req
+        .vm()
+        .at(call)
+        .filter(|header| header.info.serving_native())
+        .and_then(|header| header.function)
+        .ok_or_else(|| Fatal::error("InternalError: compiled code served no native's call"))?;
+    match req.serve_native(function, OnThrow::Nothing) {
+        Ok(value) => Ok(value.to_zval()),
+        Err(thrown) => {
+            native_threw(req, &thrown)?;
+            Ok(Zval::null())
+        }
+    }
+}
+
+/// [`call_native`]'s throw path, the handler's own
+/// ([`crate::handlers::thrown_on_call`]), kept out of the kernel's
+/// returning path, which the handler's inlining would otherwise lengthen.
+#[cold]
+fn native_threw(req: &mut Request, thrown: &Thrown) -> Result<(), Fatal> {
+    crate::handlers::thrown_on_call(req, thrown)
+}
+
+/// The call on top of the stack popped, `zend_vm_stack_free_args` and
+/// `zend_vm_stack_free_call_frame` ([`Request::pop_call`]), where the
+/// call compiled code made to a native ([`call_native`]) is not one it
+/// pops in place: an argument that counts owners, or a call that
+/// carries an annex, off the top page. A destructor an argument's
+/// release serves may leave a throwable pending.
+pub fn pop_call(req: &mut Request) {
+    req.pop_call();
+}
+
+/// The place of a native's row in the engine's frameless table, which a
+/// `FRAMELESS_ICALL_*`'s `extended_value` holds, as php's
+/// `ZEND_FLF_HANDLER(opline)` reads it, and compiled code hands the
+/// `frameless` kernel ([`frameless_call`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct FramelessAt(pub u32);
+
+/// The native at `at` of the engine's frameless table served over
+/// `operands` for the `FRAMELESS_ICALL_*` `frame` stands at, as php's
+/// compiled code calls the native's frameless handler with the operand
+/// zvals it addressed and the slot that takes its return
+/// (`jit_frameless_icall*`, `Z/ext/opcache/jit/zend_jit_ir.c:17868-18110`),
+/// with no opline read: each operand of the kind of its slot, as
+/// compiled code read it, neither `UNDEF`, which compiled code hands to
+/// the handler instead, nor a reference, which it reads through, a
+/// temporary moved out of
+/// its slot, and `Unused` past the native's arity. Its record is
+/// owned as [`crate::exec::frameless_owner`] says, and given up as the
+/// call ends ([`crate::handlers::frameless_served`]); compiled code
+/// makes the interrupt check after it, `jit_frameless_interrupt_check`.
+/// What the native returned, or `null` with the throwable left pending.
+///
+/// # Errors
+///
+/// The memory limit's fatal where the record's room is refused, and an
+/// internal error where `at` names no entry of the table.
+pub fn frameless_call(
+    req: &mut Request,
+    frame: FrameRef,
+    at: FramelessAt,
+    operands: [(Zval, OperandKind); 3],
+) -> Result<Zval, Fatal> {
+    let named = exec::frameless_named(req.vm().at(frame));
+    let mut held = [Zval::UNDEF; 3];
+    let mut owned = 0u8;
+    let mut count = 0;
+    for (place, (z, kind)) in operands.into_iter().enumerate() {
+        if kind == OperandKind::Unused {
+            break;
+        }
+        debug_assert!(!z.is_undef() && z.kind() != php_heap::ZvalType::Reference);
+        let own;
+        (held[place], own) = exec::frameless_owner(z, kind, named);
+        owned |= u8::from(own) << place;
+        count = place + 1;
+    }
+    let operands = held.get(..count).unwrap_or_default();
+    let returned = crate::handlers::frameless_served(req, at.0, operands, owned)?;
+    Ok(returned.map_or_else(Zval::null, Value::to_zval))
 }
 
 /// The `DO_UCALL`, `DO_FCALL` or `DO_FCALL_BY_NAME` at `frame`'s opline

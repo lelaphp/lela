@@ -1,13 +1,16 @@
 {
   "env": {
-    "BASH_MAX_TIMEOUT_MS": "2700000",
-    "CARGO_BUILD_JOBS": 4
+    "BASH_MAX_TIMEOUT_MS": "2700000"
   },
   "permissions": {
     "allow": [
       "Bash(gh issue edit:*)",
       "Bash(gh issue comment:*)",
       "Bash(~/Projects/dax-php/target/release/xtask ticket close:*)"
+    ],
+    "deny": [
+      "Edit(~/.claude.json)",
+      "Edit(~/.claude/**)"
     ]
   },
   "enabledPlugins": {

@@ -146,7 +146,8 @@ pub trait FromArgument: Sized {
     /// The argument the call passed at `position`, `given` as it stands
     /// on the call (`UNDEF` where the call gave none), held to the
     /// declaration: as it is where its type is one
-    /// [`FromArgument::MASK`] admits, and otherwise through
+    /// [`FromArgument::MASK`] admits, an int where it takes a float
+    /// converted ([`coerce::widened`]), and otherwise through
     /// [`coerce::argument`], with the 8.1 null deprecation and php's
     /// `TypeError`; `None` where the call gave none.
     #[inline(always)] // a type byte's test in every native's entry; the coercion is out of line
@@ -157,6 +158,9 @@ pub trait FromArgument: Sized {
         let plain = given.deref();
         if admits(Self::MASK, &plain) {
             return Self::from_value(req, plain).map(Some);
+        }
+        if let Some(widened) = coerce::widened(Self::MASK, &plain) {
+            return Self::from_value(req, widened).map(Some);
         }
         coerced(req, given, position).map(Some)
     }

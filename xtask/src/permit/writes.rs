@@ -19,6 +19,11 @@
 //! when the file's name stands in its text ([`names_file`]). What none of
 //! that shows, a binary that holds the path where no word or file spells
 //! it, the line cannot be read to write, and the sensor keeps the change.
+//!
+//! Whether a command can change the checkout it runs in at all is the
+//! other question asked here ([`changes`], #3621): what a rule with
+//! `writes = true` fires on, so that one session's writes in a checkout
+//! another owns are refused and its reads are not.
 
 use std::path::{Path, PathBuf};
 
@@ -82,6 +87,38 @@ const READERS: [(&str, &[&str]); 30] = [
     ("git ls-files", &[]),
     ("git add", &[]),
     ("git commit", &[]),
+];
+
+/// Commands that leave the checkout they run in as it was, beside
+/// [`READERS`]: a change of directory, what reads the repository's
+/// history or refs, and what reaches the tracker alone; each with the
+/// words that would make it write.
+const LEAVES: [(&str, &[&str]); 25] = [
+    ("cd", &[]),
+    ("pushd", &[]),
+    ("popd", &[]),
+    ("pwd", &[]),
+    ("true", &[]),
+    ("false", &[]),
+    ("sleep", &[]),
+    ("date", &[]),
+    ("which", &[]),
+    ("basename", &[]),
+    ("dirname", &[]),
+    ("realpath", &[]),
+    ("cut", &[]),
+    ("tr", &[]),
+    ("jq", &[]),
+    ("sort", &["-o", "--output"]),
+    ("gh", &["checkout", "clone"]),
+    ("git rev-parse", &[]),
+    ("git rev-list", &[]),
+    ("git merge-base", &[]),
+    ("git ls-tree", &[]),
+    ("git cat-file", &[]),
+    ("git describe", &[]),
+    ("git for-each-ref", &[]),
+    ("git fetch", &[]),
 ];
 
 /// Commands whose last operand is the one they write.
@@ -161,17 +198,78 @@ pub(super) fn can_write(line: &Line, place: &impl Place) -> bool {
         })
 }
 
+/// Whether `argv` can change the checkout it runs in (#3621): its working
+/// tree, its index or its history. Every command can but a reader that
+/// leaves the index alone ([`READERS`] less git's `add` and `commit`),
+/// `sed` without `-i`, and what [`LEAVES`] names; a redirection the line
+/// makes is the line's, and read beside its commands.
+pub(super) fn changes(argv: &Argv) -> bool {
+    let index = argv.runs("git add") || argv.runs("git commit");
+    let leaves = || {
+        LEAVES
+            .iter()
+            .any(|(phrase, writing)| argv.runs(phrase) && !carries(argv, writing))
+    };
+    index || !(operands_of(argv) == Operands::None || leaves())
+}
+
+/// Whether one of `argv`'s words is one of `options` or begins with one.
+fn carries(argv: &Argv, options: &[&str]) -> bool {
+    argv.words()
+        .iter()
+        .any(|w| options.iter().any(|option| w.starts_with(option)))
+}
+
+/// Commands beyond what [`changes`] reads as leaving a checkout alone that
+/// leave its diff as it was (#3619): the builds and instruments whose
+/// writes stay under `target/` and in the store; `cargo xtask` reads as
+/// `xtask`.
+const STILL: [&str; 8] = [
+    "uniq",
+    "git worktree",
+    "cargo build",
+    "cargo check",
+    "cargo test",
+    "cargo clippy",
+    "cargo tree",
+    "xtask",
+];
+
+/// The instruments and options of [`STILL`]'s that write tracked files.
+const WRITING: [&str; 8] = [
+    "regions", "steer", "generate", "new-ext", "new-sapi", "--accept", "--write", "--fix",
+];
+
+/// Whether `line` leaves every checkout's diff as it was, so the Stop does
+/// not hold its session for it (#3618 ruling 1): it redirects only to a
+/// device, a variable's directory or a path outside the directory the
+/// checkouts of `root` stand in, and runs only what does not [`change`]
+/// one, less a program text it interprets, and [`STILL`]. What it cannot
+/// be read to leave alone it writes, the side that holds.
+///
+/// [`change`]: changes
+pub(super) fn reads_only(line: &Line, root: &Path) -> bool {
+    let beside = root.parent().unwrap_or(root);
+    let elsewhere = |target: &String| {
+        target.starts_with("/dev/")
+            || target.starts_with('$')
+            || (target.starts_with('/') && !Path::new(target).starts_with(beside))
+    };
+    line.written().iter().all(elsewhere)
+        && line.commands().iter().all(|argv| {
+            let words = argv.words();
+            let still = STILL.iter().any(|phrase| argv.runs(phrase))
+                && !words.iter().any(|w| WRITING.contains(&w.as_str()));
+            words.is_empty() || still || !(changes(argv) || interprets(argv))
+        })
+}
+
 /// Which of the command's words it can write.
 fn operands_of(argv: &Argv) -> Operands {
     let words = argv.words();
-    let carries = |options: &[&str]| {
-        words
-            .iter()
-            .any(|w| options.iter().any(|option| w.starts_with(option)))
-    };
     if READERS
         .iter()
-        .any(|(phrase, writing)| argv.runs(phrase) && !carries(writing))
+        .any(|(phrase, writing)| argv.runs(phrase) && !carries(argv, writing))
     {
         return Operands::None;
     }
@@ -294,6 +392,45 @@ mod tests {
         assert!(can("./tool.sh", "docs/divergence.toml"));
     }
 
+    /// #3621: what a command can change in the checkout it runs in. git's
+    /// staging and committing write the index and the history though they
+    /// write no file; what reads, moves the shell or reaches the tracker
+    /// changes nothing.
+    #[test]
+    fn a_command_changes_the_checkout_unless_it_reads_it() {
+        let changes = |line: &str| Line::read(line).commands().iter().any(changes);
+        for line in [
+            "git add -- a",
+            "git commit -F m -- a",
+            "git merge --abort",
+            "git -C wt checkout -- a",
+            "git stash",
+            "sed -i '' -e s/a/b/ a",
+            "cargo xtask test --crate xtask",
+            "python3 -c 'print(1)'",
+            "touch a",
+            "rm -f a",
+            "gh pr checkout 1",
+            "sort -o a b",
+        ] {
+            assert!(changes(line), "{line}");
+        }
+        for line in [
+            "git status --short",
+            "git log --oneline -3",
+            "git -C wt diff --cached",
+            "git rev-parse HEAD",
+            "cat a | head -3",
+            "grep -n x a",
+            "sed -n 1,5p a",
+            "cd /tmp",
+            "gh issue view 3621",
+            "echo x",
+        ] {
+            assert!(!changes(line), "{line}");
+        }
+    }
+
     /// What names the file, or another of its name, and cannot write it:
     /// the calls a person's edit must outlive.
     #[test]
@@ -328,5 +465,34 @@ mod tests {
         ));
         assert!(!can("cat append.py", "docs/divergence.toml"));
         assert!(!can("computed run AGENTS.md", "seams.toml"));
+    }
+
+    /// What the Stop holds a session for (#3619): a line that only asks,
+    /// builds or measures leaves every diff as it was, and one that writes,
+    /// commits, interprets or redirects into the checkouts' directory does
+    /// not.
+    #[test]
+    fn a_line_that_asks_builds_or_measures_reads_only_and_one_that_writes_does_not() {
+        let root = Path::new("/p/dax-php");
+        let reads = |line: &str| reads_only(&Line::read(line), root);
+        for line in [
+            "git status --short | head -3",
+            "cd /p/dax-php-worktrees/t1 && git log --oneline -3; cat seams.toml",
+            "cargo xtask test --crate xtask > $S/out.txt 2>&1",
+            "gh issue view 3619 > /tmp/issue.md",
+            "sed -n 1,20p x.rs; grep -n fn y.rs 2>/dev/null",
+        ] {
+            assert!(reads(line), "{line}");
+        }
+        for line in [
+            "sed -i '' s/a/b/ x.rs",
+            "cargo fmt -p xtask",
+            "git add -- x.rs && git commit -F m -- x.rs",
+            "python3 - <<'EOF'\nopen('x','w')\nEOF",
+            "echo x > /p/dax-php-worktrees/t1/x.rs",
+            "cargo xtask witness --accept --crate x",
+        ] {
+            assert!(!reads(line), "{line}");
+        }
     }
 }

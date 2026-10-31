@@ -1853,7 +1853,7 @@ impl StreamOp<'_> {
     /// `show_err`: whether the kind would answer the cast, asked of it
     /// without flushing, seeking or converting the stream.
     pub(crate) fn can_cast(&mut self, cast: Cast) -> bool {
-        self.cast_as(cast, Ret::Null, false).is_some()
+        cast == Cast::Stdio || self.cast_as(cast, Ret::Null, false).is_some()
     }
 
     /// `_php_stream_cast` (`Z/main/streams/cast.c:194`) to a fd: with a
@@ -1887,10 +1887,17 @@ impl StreamOp<'_> {
                 self.fill_read_buffer(pending);
             }
         }
-        let (filtered, own) = self.with(|s| {
+        let (filtered, own, stdio) = self.with(|s| {
             let filtered = s.has_filters(Chain::Read) || s.has_filters(Chain::Write);
-            (filtered, s.res.map(Stream::of))
+            (filtered, s.res.map(Stream::of), s.is_stdio())
         })?;
+        // `PHP_STREAM_AS_STDIO` with `fopencookie` (`Z/main/streams/cast.c:211`):
+        // only an unfiltered stdio kind is asked; any other stream is the
+        // caller's cookie, as is one whose kind refuses.
+        if cast == Cast::Stdio && (filtered || !stdio) {
+            return None;
+        }
+        let warn = warn && cast != Cast::Stdio;
         if filtered {
             if warn {
                 let text = format!(
@@ -1927,6 +1934,7 @@ impl StreamOp<'_> {
                     Cast::Select => "select()able descriptor",
                     Cast::Socket => "Socket Descriptor",
                     Cast::Internal | Cast::Fd => "File Descriptor",
+                    Cast::Stdio => "STDIO FILE*",
                 };
                 let label = self.with(|s| s.ops.label()).unwrap_or("");
                 let text = format!(
@@ -1938,7 +1946,7 @@ impl StreamOp<'_> {
             return None;
         };
         let held = self.with(|s| s.writepos - s.readpos).unwrap_or(0);
-        if ret == Ret::Given && held > 0 && matches!(cast, Cast::Fd | Cast::Socket) {
+        if ret == Ret::Given && held > 0 && matches!(cast, Cast::Fd | Cast::Socket | Cast::Stdio) {
             let text = format!(
                 "{}(): {held} bytes of buffered data lost during stream conversion!",
                 self.req.frames().active_function_name()
@@ -3995,7 +4003,12 @@ pub(crate) trait StreamLayer {
         len: usize,
     ) -> Result<Option<Owner<PhpString>>, Thrown>;
     fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Owner<Stream>, Thrown>;
-    fn wrapper_register(&mut self, protocol: &[u8], class: ClassId, flags: i64) -> bool;
+    fn wrapper_register(
+        &mut self,
+        protocol: &[u8],
+        class: ClassId,
+        flags: i64,
+    ) -> Result<bool, Thrown>;
     fn wrapper_unregister(&mut self, protocol: &[u8]) -> bool;
     fn wrapper_restore(&mut self, protocol: &[u8]) -> bool;
 }
@@ -5054,22 +5067,33 @@ impl StreamLayer for Request {
         self.stream_alloc(stream)
     }
 
-    fn wrapper_register(&mut self, protocol: &[u8], class: ClassId, flags: i64) -> bool {
+    fn wrapper_register(
+        &mut self,
+        protocol: &[u8],
+        class: ClassId,
+        flags: i64,
+    ) -> Result<bool, Thrown> {
+        // `zend_register_resource(uwrap, le_protocols)` before the scheme
+        // is tried, its owner the payload's once the scheme takes it.
+        let factory = self.types().factory;
+        let owner = Resource::new(self, factory, userspace::Factory(None))?;
+        let resource = *owner;
         let valid = protocol
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'));
         let taken = self.wrapper_table().iter().any(|r| r.scheme == protocol);
         if valid && !taken {
-            let wrapper = Located::Space(userspace::UserWrapper::new(
-                class,
-                flags & 1 != 0,
-                protocol.to_vec(),
-            ));
+            if let Some(payload) = resource.native_mut::<userspace::Factory>(self) {
+                payload.0 = Some(owner);
+            } else {
+                owner.give_up(self);
+            }
+            let user = userspace::UserWrapper::new(class, flags & 1 != 0, resource);
             self.own_wrappers().push(Registered {
                 scheme: protocol.to_vec(),
-                wrapper,
+                wrapper: Located::Space(user),
             });
-            return true;
+            return Ok(true);
         }
         let shown = String::from_utf8_lossy(protocol);
         let text = if taken {
@@ -5086,7 +5110,9 @@ impl StreamLayer for Request {
             .concat()
         };
         crate::api::raising::docref(self, Level::Warning, &text);
-        false
+        // `zend_list_delete(rsrc)`.
+        owner.give_up(self);
+        Ok(false)
     }
 
     fn wrapper_unregister(&mut self, protocol: &[u8]) -> bool {
@@ -5099,7 +5125,12 @@ impl StreamLayer for Request {
             crate::api::raising::docref(self, Level::Warning, &text);
             return false;
         };
-        table.remove(at);
+        // `zend_list_delete(uwrap->resource)` for a user wrapper.
+        if let Located::Space(user) = table.remove(at).wrapper
+            && let Some(owner) = userspace::Factory::take(self, user.resource)
+        {
+            owner.give_up(self);
+        }
         true
     }
 
@@ -5144,10 +5175,11 @@ impl Stream {
 
     /// `php_stream_cast` to a fd, `PHP_STREAM_AS_FD_FOR_SELECT`
     /// for [`Cast::Select`], `PHP_STREAM_AS_SOCKETD` for
-    /// [`Cast::Socket`] and `PHP_STREAM_AS_FD` otherwise: the host
-    /// fd the stream's kind reads and writes, or `None` for a
-    /// kind with none, php's `Cannot represent a stream of type %s as a
-    /// %s` warning under `warn`. Short of [`Cast::Select`] the stream
+    /// [`Cast::Socket`], `PHP_STREAM_AS_STDIO` for [`Cast::Stdio`] and
+    /// `PHP_STREAM_AS_FD` otherwise: the host fd the stream's kind reads
+    /// and writes, or `None` for a kind with none, php's `Cannot
+    /// represent a stream of type %s as a %s` warning under `warn` but
+    /// for [`Cast::Stdio`], whose `None` is a cookie's. Short of [`Cast::Select`] the stream
     /// is flushed and sought to its position first, and a [`Cast::Fd`]
     /// that leaves bytes in the read buffer warns that they are lost.
     /// The fd is the stream's, open while the stream is.

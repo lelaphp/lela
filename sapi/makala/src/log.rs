@@ -144,7 +144,7 @@ impl Access {
 
     /// The response has ended, whole or cut: its line queued, the time,
     /// the peer, the request line, the status, the bytes in and out and
-    /// the time it took, as the module's example has it.
+    /// the time it took, as the line at this file's head has it.
     pub(crate) fn ended(&self) {
         let Some(logs) = LOGS.get() else {
             return;

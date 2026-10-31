@@ -1,5 +1,5 @@
 //! A `php -S` process for a test: started over a document root of its
-//! own on a free port, its log collected line by line as it is written,
+//! own on a free `port`, its log collected line by line as it is written,
 //! and stopped by `SIGINT`, as php's own server tests drive it.
 
 #![allow(
@@ -24,17 +24,17 @@ pub struct Server {
     log: Arc<Mutex<Vec<String>>>,
 }
 
-/// How many ports a server is offered: a port found free can be taken by
+/// How many `port` numbers a server is offered: one found free can be taken by
 /// another process before php binds it, which php then says and exits
 /// (#2653). php -S cannot be handed a socket already bound.
 const ATTEMPTS: usize = 3;
 
-/// What php -S says, and exits on, where another process holds its port.
+/// What php -S says, and exits on, where another process holds its `port`.
 const IN_USE: &str = "(reason: Address already in use)";
 
-/// A loopback port free when asked: bound and let go again, so it is
+/// A loopback `port` free when asked: bound and let go again, so it is
 /// free only until another process binds it.
-pub fn free_port() -> u16 {
+pub fn free_loopback() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .and_then(|probe| probe.local_addr())
         .map_or_else(|e| panic!("finding a free port: {e}"), |bound| bound.port())
@@ -45,11 +45,11 @@ impl Server {
     /// under a root named for `name`, and `env` set, once its first
     /// "started" line is written.
     pub fn start(name: &str, files: &[(&str, &str)], env: &[(&str, &str)]) -> Server {
-        Server::start_on(std::iter::repeat_with(free_port), name, files, env, &[])
+        Server::start_on(std::iter::repeat_with(free_loopback), name, files, env, &[])
     }
 
     /// [`Server::start`] with `args` before `-S`, on the first of `ports`
-    /// php binds: a port php says is in use is given up for the next,
+    /// php binds: a `port` php says is in use is given up for the next,
     /// [`ATTEMPTS`] at most.
     pub fn start_on(
         ports: impl IntoIterator<Item = u16>,

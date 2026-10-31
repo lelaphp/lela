@@ -20,8 +20,7 @@
 //! where the call acts, its `cwd` moved by the line's leading `cd`,
 //! `pushd` and `popd`, or by git's `-C` where every command past them is
 //! git and names one directory, at the top of its worktree
-//! ([`operation::ran_in`]), the resolution `where = "operating"` reads
-//! (#2607), and not the hook's own: a subagent's shell starts in the main
+//! ([`operation::ran_in`], #2607), and not the hook's own: a subagent's shell starts in the main
 //! checkout and `cd`s into its worktree, so the hook's checkout is often
 //! one the call never touched, and another session's merge may stand
 //! there (#2597). The line's words are read where its shell stands, the
@@ -39,7 +38,11 @@
 //!   ([`super::kept`]). Until a person commits it or restores it to
 //!   `HEAD`, it is one of `done`'s unmet conditions, which is where a
 //!   binary that hides the path is held; a person's lost edit would be
-//!   held by nothing.
+//!   held by nothing. That holds in main's checkout and in one no session
+//!   owns, where persons edit. In a linked worktree the call's session
+//!   owns ([`crate::owner`]), the change is the session's whichever of its
+//!   calls made it, a background one among them: where it differs from
+//!   `HEAD` it is put back and the call denied, saying so (#3644).
 //! - A file history carries (#3220): `HEAD` moved during the call, its
 //!   blob for the file moved with it, and the file stands at the blob
 //!   `HEAD` holds now, as another session's merge or commit in the
@@ -57,8 +60,8 @@
 //! - A file the merge, cherry-pick, revert or rebase in progress in the
 //!   checkout has staged, its index entry other than `HEAD`'s
 //!   ([`operation::staged`]): the operation's commit carries it, so even a
-//!   line that can write it does not put it back. It is kept and named,
-//!   and the commit that ends the operation settles the record. A path
+//!   line that can write it does not put it back. It is kept and named.
+//!   A path
 //!   the operation left conflicted, unmerged in the index, is not staged:
 //!   its markers are guarded as any file is, so the one hand that resolves
 //!   it is `steer`'s ([`crate::steer::Ground`], #2880).
@@ -72,7 +75,13 @@
 //!   act, and putting those back would undo the person.
 //! - What `steer` wrote: a call whose words run `xtask steer` is the
 //!   sanctioned writer, and a file it moved stands where steer's own
-//!   reading of that call says it wrote exactly that ([`steered`]).
+//!   reading of that call says it wrote exactly that ([`steered`]), as
+//!   judged by a build compiled from the sources the checkout carries that
+//!   reads the manifest it commits ([`Steering`], #3631): another
+//!   checkout's own build where this one is not that ([`handed`]), the
+//!   next build the hook runs where this one is stale, its record left for
+//!   it, and where no build is, every file is kept and the answer says it
+//!   could not judge.
 //! - A file the rule's `exempt` covers: `.claude/skills/**` is an ordinary
 //!   file (#626), so a `Bash` write there stands as an `Edit` there does,
 //!   but for what a `!` pattern takes back, a plugin laid in a skill (#3470).
@@ -101,6 +110,7 @@ use super::rules::{at, runs_in};
 use super::writes::{self, Place};
 use crate::key::Snapshot;
 use crate::manifest::OneOrMany;
+use crate::owner::{self, SessionId};
 use crate::reading::{self, Number, Reading, Status, Store, joined};
 use crate::{git, manifest, steer};
 
@@ -229,19 +239,6 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
     if call.tool_name != "Bash" {
         return Ok(());
     }
-    // The call ran: its operation's start is settled whatever was taken
-    // before it (#2723).
-    let since = began(&call, record_path(root, &call).as_deref());
-    if let Some(command) = call.command()
-        && let Err(err) = operation::settle(
-            &call.workspace(root),
-            &call,
-            &argv::Line::read(command),
-            since,
-        )
-    {
-        eprintln!("xtask permit --after: the operation's starter was not settled: {err:#}");
-    }
     let Some(file) = record_path(root, &call) else {
         eprintln!(
             "xtask permit --after: the call carries no session or tool-use id to pair it with \
@@ -256,11 +253,29 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
         );
         return Ok(());
     };
-    // The record is this call's alone and is spent whatever follows.
-    fs::remove_file(&file).ok();
     let record: Record = serde_json::from_str(&taken)
         .with_context(|| format!("reading the record at {}", file.display()))?;
-    let moved = sort_moved(&record, &call, &held(root, &call));
+    let checkout = held(root, &call);
+    let steering = runs_steer(&record.command);
+    let unread = match steering.then(|| Steering::of(root, &checkout)) {
+        Some(Steering::Newer(why)) => anyhow::bail!(
+            "{why}, so this build is no judge of steer's write; the record is left for the \
+             next build the hook runs, the last of which rebuilds"
+        ),
+        Some(Steering::Checkout(why)) => {
+            fs::remove_file(&file).ok();
+            if let Some(decision) = handed(&checkout, &call, &taken, &text) {
+                return std::io::Write::write_all(&mut std::io::stdout(), &decision)
+                    .context("printing the decision the checkout's build made");
+            }
+            Some(why)
+        }
+        Some(Steering::This(unread)) => unread,
+        None => None,
+    };
+    // The record is this call's alone and is spent whatever follows.
+    fs::remove_file(&file).ok();
+    let moved = sort_moved(&record, &call, &checkout, unread.as_deref());
     if moved.is_empty() {
         return Ok(());
     }
@@ -282,25 +297,14 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// When the call began, the clock's grace before it: its `duration_ms`
-/// before now, or, where the hook carries none, when [`before`] took its
-/// record; `None` where neither says.
-fn began(call: &Call, file: Option<&Path>) -> Option<SystemTime> {
-    const GRACE: Duration = Duration::from_secs(1);
-    let ran = call.duration_ms.map(Duration::from_millis).or_else(|| {
-        let record: Record = serde_json::from_str(&fs::read_to_string(file?).ok()?).ok()?;
-        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(record.at).ok()?);
-        SystemTime::now().duration_since(at).ok()
-    })?;
-    SystemTime::now().checked_sub(ran + GRACE)
-}
-
 /// Every file of the record in the checkout `held` whose blob moved and
 /// that steer did not write: kept where history carries it ([`landed_at`]),
 /// put back where the call's line can write it and no operation in
 /// progress staged it, kept otherwise. A word of the line is read where
-/// its shell stands ([`shell_at`]).
-fn sort_moved(record: &Record, call: &Call, held: &Path) -> Vec<Moved> {
+/// its shell stands ([`shell_at`]). Where the line runs steer and this
+/// build cannot read the manifest steer judges by, `unread` says why, and
+/// every file is kept: whether steer wrote it is not this build's to say.
+fn sort_moved(record: &Record, call: &Call, held: &Path, unread: Option<&str>) -> Vec<Moved> {
     let steering = runs_steer(&record.command);
     let line = argv::Line::read(&record.command);
     let mut moved = Vec::new();
@@ -309,6 +313,7 @@ fn sort_moved(record: &Record, call: &Call, held: &Path) -> Vec<Moved> {
         // A line that moves `HEAD` itself makes the history it would be
         // credited with, so it is credited with none.
         let credited = !moves_head(&line);
+        let owned = sessions_own(&guarded.checkout, &call.session_id);
         for (path, was) in &guarded.blobs {
             let file = guarded.checkout.join(path);
             if on_disk(&file) == *was {
@@ -325,13 +330,29 @@ fn sort_moved(record: &Record, call: &Call, held: &Path) -> Vec<Moved> {
             let landed = landed_at(guarded, tip.as_deref(), path, now.as_deref());
             let place = OnDisk::new(&cwd, &guarded.checkout, path);
             let writes = landed.is_none() && writes::can_write(&line, &place);
-            let approved = writes
+            // In a linked worktree the session owns, a change its line
+            // cannot be read to write is the session's all the same, where
+            // it now differs from `HEAD` (#3644 rulings 1 and 4).
+            let sessions = landed.is_none()
+                && !writes
+                && owned
+                && !matches!(kept::at_head(&guarded.checkout, path), Ok(true));
+            let answers = writes || sessions;
+            let approved = answers
                 .then(|| approved(&guarded.checkout, path, was.as_deref(), call))
                 .flatten();
-            let staged = writes
+            let staged = answers
                 .then(|| operation::staged(&guarded.checkout, path))
                 .flatten();
-            let (verdict, said) = if let Some(moved_to) = landed {
+            let (verdict, said) = if let Some(why) = unread {
+                let why = format!(
+                    "the line runs steer, and this build could not judge whether steer wrote \
+                     it, since it cannot read the manifest steer judges by ({why}); nothing is \
+                     put back and it is kept as it stands"
+                );
+                let said = kept_words(&guarded.checkout, path, &why, was.as_deref());
+                (Verdict::Kept, format!("{path}: {said}"))
+            } else if let Some(moved_to) = landed {
                 let why = format!(
                     "HEAD moved to {moved_to} during the call and holds it at this blob: history \
                      carries the change, so it is kept as it stands and settles nothing"
@@ -347,8 +368,27 @@ fn sort_moved(record: &Record, call: &Call, held: &Path) -> Vec<Moved> {
                 );
                 let said = kept_words(&guarded.checkout, path, &why, was.as_deref());
                 (Verdict::Kept, format!("{path}: {said}"))
-            } else if writes {
-                let what = restore(&guarded.checkout, path, was.as_deref(), now.as_deref());
+            } else if writes || sessions {
+                let by = if writes {
+                    "the call"
+                } else {
+                    "a call of this session"
+                };
+                let what = restore(&guarded.checkout, path, was.as_deref(), now.as_deref(), by);
+                let what = if writes {
+                    what
+                } else {
+                    format!(
+                        "changed while this call, {} `{}`, ran, whose line cannot be read to \
+                         write it, and it differs from HEAD; {} is a linked worktree this \
+                         session owns, so the change is the session's whichever of its calls \
+                         made it, and the write may have come from a background call (#3644); \
+                         {what}",
+                        call.tool_use_id,
+                        call.subject(held),
+                        guarded.checkout.display()
+                    )
+                };
                 (Verdict::PutBack, format!("{} {path}: {what}", guarded.text))
             } else {
                 let why = "its line cannot write it, so it is kept as it stands: a person's \
@@ -525,9 +565,9 @@ fn record_moved(root: &Path, call: &Call, moved: &[Moved]) -> Result<()> {
     Ok(())
 }
 
-/// Put `path` back as it was before the call, keeping what the call left
+/// Put `path` back as it was before the call, keeping what `by` left
 /// first; what was done, in words for the denial.
-fn restore(checkout: &Path, path: &str, was: Option<&str>, now: Option<&str>) -> String {
+fn restore(checkout: &Path, path: &str, was: Option<&str>, now: Option<&str>, by: &str) -> String {
     let target = checkout.join(path);
     let kept = match now {
         Some(_) => match hash_objects(checkout, &[path]) {
@@ -558,11 +598,25 @@ fn restore(checkout: &Path, path: &str, was: Option<&str>, now: Option<&str>) ->
     let done = done.unwrap_or_else(|err| format!("it could not be put back: {err:#}"));
     match kept {
         Some(id) => format!(
-            "the call wrote it, and it is {done}; what the call wrote is blob {id} \
+            "{by} wrote it, and it is {done}; what {by} wrote is blob {id} \
              (`git cat-file -p {id}`)"
         ),
-        None => format!("the call removed it, and it is {done}"),
+        None => format!("{by} removed it, and it is {done}"),
     }
+}
+
+/// Whether `checkout` is a linked worktree whose owner record names
+/// `session` (#3621): where a change to a guarded file is the session's
+/// whichever of its calls was running, and is put back (#3644 rulings 1
+/// and 4). Main's checkout, where a person edits, and a checkout no
+/// record names, or another's, are not.
+fn sessions_own(checkout: &Path, session: &str) -> bool {
+    let linked = git::own_dir(checkout)
+        .zip(git::common_dir(checkout))
+        .is_some_and(|(own, common)| own != common);
+    linked
+        && SessionId::new(session)
+            .is_some_and(|session| owner::of(checkout).ok().flatten() == Some(session))
 }
 
 /// Whether the file stands as steer wrote it in this call: the call runs
@@ -605,6 +659,62 @@ fn steered_by(checkout: &Path, path: &str, was: &str, since: i64) -> Option<()> 
         && reading.numbers.get("added") == Some(&Number::count(added.len()))
         && reading.message.ends_with(&added.join(", ")))
     .then_some(())
+}
+
+/// Which build judges a call that runs steer (#3631). Steer's write is
+/// judged with steer's own code and by the manifest the checkout commits,
+/// so a build compiled from other sources than the checkout carries, or
+/// one that cannot read that manifest, is no judge of it.
+enum Steering {
+    /// This build, with why it cannot read the manifest where it cannot,
+    /// and no other build of the checkout would.
+    This(Option<String>),
+    /// The build of the checkout the call ran in, another than the one
+    /// this build was asked about, and why this one is not.
+    Checkout(String),
+    /// A newer build of this checkout: this one is stale, and why.
+    Newer(String),
+}
+
+impl Steering {
+    fn of(root: &Path, checkout: &Path) -> Steering {
+        let sources = crate::inputs::sources_digest(checkout).ok();
+        let apart = checkout.join(crate::inputs::SOURCES_DIR).is_dir()
+            && sources.as_deref() != Some(crate::built::SOURCES);
+        let unread = steer::binding(checkout).err().map(|err| format!("{err:#}"));
+        let why = unread.clone().unwrap_or_else(|| {
+            let carries = checkout.join(crate::inputs::SOURCES_DIR);
+            format!(
+                "{} is not what this build was compiled from",
+                carries.display()
+            )
+        });
+        match (
+            apart,
+            unread.is_some(),
+            crate::built::same_directory(checkout, root),
+        ) {
+            (false, false, _) => Steering::This(None),
+            (_, _, false) => Steering::Checkout(why),
+            (true, _, true) => Steering::Newer(why),
+            (false, true, true) => Steering::This(unread),
+        }
+    }
+}
+
+/// The call handed to the build of `held`, the checkout it ran in: the
+/// record laid in `held`'s store, where its build looks for it, and what
+/// that build printed, whose decision is this one's (#1047, #3631). `None`
+/// where no build of it judged the call.
+fn handed(held: &Path, call: &Call, taken: &str, text: &str) -> Option<Vec<u8>> {
+    reading::replace(&record_path(held, call)?, taken.as_bytes()).ok()?;
+    super::hand_off::walk(
+        held,
+        super::Adapter::CommandHook,
+        &["permit", "--after"],
+        text,
+    )
+    .ok()
 }
 
 /// Whether one of the command's simple commands runs `xtask steer`,
@@ -889,7 +999,7 @@ mod tests {
     #[test]
     fn a_steer_reading_over_a_file_harness_self_does_not_name_is_no_steer_write() {
         let root = crate::scratch::Tree::new("after-steered").unwrap();
-        let manifest = "[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\nclean_build_release_s = 1\napi_items = 1\nbindings = 1\n[[rule]]\nid = \"harness.self\"\ntool = [\"Edit\", \"Write\"]\nscope = [\"seams.toml\", \"oracle.toml\"]\ndeny = true\ntext = \"harness.self\"\n";
+        let manifest = "[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\nclean_build_release_s = 1\napi_items = 1\nbindings = 1\n[[rule]]\nid = \"harness.self\"\ntool = [\"Edit\", \"Write\"]\nscope = [\"seams.toml\", \"oracle.toml\"]\ndeny = true\ntext = \"harness.self\"\nremedy = \"steer\"\n";
         let was = "[a]\nb = 1\n";
         fs::write(root.join("seams.toml"), manifest).unwrap();
         for file in ["oracle.toml", "notes.toml"] {

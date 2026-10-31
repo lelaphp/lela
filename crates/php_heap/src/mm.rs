@@ -1148,6 +1148,7 @@ impl Mm {
     /// `zend_mm_alloc_heap`: `size` usable bytes, from the bin its size
     /// falls in, sixteen at least as it raises it, from a `run` of pages,
     /// or from a huge block of its own.
+    #[inline] // `zend_always_inline`, its large and huge arms kept out of line
     fn alloc_heap(&mut self, size: usize) -> Result<NonNull<u8>, Refused> {
         let size = size.max(MIN_USEABLE_BIN_SIZE);
         if size <= MAX_SMALL_SIZE {
@@ -1426,6 +1427,7 @@ impl Mm {
 
     /// `zend_mm_alloc_small` (`Z/Zend/zend_alloc.c:1392`): the head of the
     /// bin's free list, or a fresh `run` when the list is empty.
+    #[inline] // `zend_always_inline`, its slow arm out of line
     fn alloc_small(&mut self, bin_num: usize) -> Result<NonNull<u8>, Refused> {
         self.size += BIN_DATA_SIZE[bin_num];
         self.peak = self.peak.max(self.size);
@@ -1454,6 +1456,8 @@ impl Mm {
     /// pages for this bin, threaded into a free list of its elements, and
     /// the first element returned. The accounting was done by the caller,
     /// as php's is, so a failure here undoes it.
+    #[cold]
+    #[inline(never)] // `zend_never_inline`, as php keeps it off the bin's fast path
     fn alloc_small_slow(&mut self, bin_num: usize) -> Result<NonNull<u8>, Refused> {
         let pages = BIN_PAGES[bin_num];
         let run = match self.alloc_pages(pages, PAGE_SIZE * pages as usize) {
@@ -1541,6 +1545,7 @@ impl Mm {
     /// the number a message names: outside `ZEND_DEBUG` php hands
     /// `zend_mm_alloc_pages` the page count alone, so both messages it
     /// raises name `ZEND_MM_PAGE_SIZE * pages_count`.
+    #[inline(never)] // off the bins' path, so a small block's needs no frame of its own
     fn alloc_large(&mut self, size: usize) -> Result<NonNull<u8>, Refused> {
         let pages_count = size.div_ceil(PAGE_SIZE) as u32;
         let at = self.alloc_pages(pages_count, PAGE_SIZE * pages_count as usize)?;
@@ -1643,6 +1648,7 @@ impl Mm {
     /// free and is not the main one leaves the list. The sweep passes
     /// `false`, because it deletes the chunk itself once it has walked
     /// the whole of it.
+    #[inline(never)] // off the bins' path, as `alloc_large` is
     fn free_pages(
         &mut self,
         chunk: NonNull<Chunk>,
@@ -1857,6 +1863,8 @@ impl Mm {
     /// mapping goes back and the fatal is the bin's. A size the rounding
     /// would carry past the top of memory is php's error before any of
     /// that, the limit not consulted ([`Mm::overflow_refusal`]).
+    #[cold]
+    #[inline(never)] // off the bins' path, as `alloc_large` is
     fn alloc_huge(&mut self, size: usize) -> Result<NonNull<u8>, Refused> {
         let page = real_page_size();
         let Some(new_size) = size.checked_next_multiple_of(page) else {
@@ -1900,6 +1908,8 @@ impl Mm {
     /// `zend_mm_free_huge` (`Z/Zend/zend_alloc.c:1988`): the node goes
     /// back to its bin in `zend_mm_del_huge_block`
     /// (`Z/Zend/zend_alloc.c:1856`), then the mapping and its bytes.
+    #[cold]
+    #[inline(never)] // as `alloc_huge`
     fn free_huge(&mut self, at: NonNull<u8>) {
         let Some(index) = self.huge.iter().position(|block| block.at == at) else {
             return;

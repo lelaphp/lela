@@ -5,7 +5,7 @@
 //! as `init_request_info` makes them, the ping and status pages answered
 //! by the host, and every other request served on the engine the child
 //! built with its pool's `php_value`s, through a sink that writes
-//! `FCGI_STDOUT` records; the scoreboard kept at each stage, the access
+//! `FCGI_STDOUT` records; the `scoreboard` kept at each stage, the access
 //! log written, and the child gone after `pm.max_requests`.
 
 use std::io::{Read, Write};
@@ -34,7 +34,7 @@ use crate::{zlog, zlog_sys};
 /// `sapi_module.name`: what `php_sapi_name()` answers.
 pub(crate) const NAME: &str = "fpm-fcgi";
 
-/// What a request writes through: the connection, the request's output
+/// What a request writes through: the connection, the request's `output`
 /// buffer, its body's input records, and what the access log reads of the
 /// response afterwards.
 struct Wire {
@@ -193,7 +193,7 @@ impl OutputSink for Response {
     }
 
     /// fd 1, the pipe the master logs, or `/dev/null` where the pool does
-    /// not catch its workers' output.
+    /// not catch its workers' stdout and stderr.
     fn write_stdout(&mut self, bytes: &[u8]) -> bool {
         std::io::stdout().lock().write_all(bytes).ok();
         std::io::stdout().lock().flush().ok();
@@ -265,7 +265,7 @@ fn allowed_clients(list: Option<&[u8]>) -> Option<Vec<IpAddr>> {
     Some(allowed)
 }
 
-/// A `.user.ini` cache entry, `user_config_cache_entry`.
+/// An entry of the `.user.ini` cache, `user_config_cache_entry`.
 struct UserConfig {
     expires: i64,
     entries: Vec<(Vec<u8>, Vec<u8>)>,
@@ -275,7 +275,7 @@ struct UserConfig {
 pub(crate) struct Worker {
     engine: Engine,
     scoreboard: Scoreboard,
-    /// The scoreboard the status page shows: the pool's, or the one a
+    /// The `scoreboard` the status page shows: the pool's, or the one a
     /// status pool serves the page of.
     status_board: Scoreboard,
     slot: usize,
@@ -436,7 +436,7 @@ fn lay(mut engine: Engine, config: &PoolConfig) -> Result<Engine, NotAlone> {
 }
 
 impl Worker {
-    /// The child's slot of its pool's scoreboard.
+    /// The child's slot of its pool's `scoreboard`.
     fn proc(&self) -> Option<&'static crate::scoreboard::Proc> {
         self.scoreboard.proc(self.slot)
     }
@@ -671,7 +671,7 @@ enum Served {
     /// It started, and ended with its access log line written.
     Ended,
     /// Its start failed, an extension's `rinit` having raised (#1775):
-    /// it ends before `fpm_request_end` writes the scoreboard and the
+    /// it ends before `fpm_request_end` writes the `scoreboard` and the
     /// access log, and the child ends after it
     /// (`Z/sapi/fpm/fpm/fpm_main.c:1838-1843`).
     StartFailed,
@@ -778,7 +778,7 @@ impl Worker {
         Served::Ended
     }
 
-    /// What the loop serves once `php_request_startup` has run
+    /// What the loop serves once `php_request_startup` has returned
     /// (`Z/sapi/fpm/fpm/fpm_main.c:1845-1903`): nothing for a request
     /// with no `REQUEST_METHOD`; the ping or the status page; `File not
     /// found.` for a request with no path translated, `Access denied.`
@@ -828,7 +828,7 @@ impl Worker {
         self.engine.ini_get(name).map_or(default, |v| truth(&v))
     }
 
-    /// The scoreboard the status page shows.
+    /// The `scoreboard` the status page shows.
     fn board(&self) -> Scoreboard {
         self.status_board
     }
@@ -1106,11 +1106,11 @@ fn unopened(path: &[u8], error: &std::io::Error) -> HostPage {
 
 #[cfg(test)]
 mod tests {
-    /// php-fpm denies a script whose open met `EACCES` and answers every
+    /// php-fpm denies a program whose open met `EACCES` and answers every
     /// other errno as no input file, `EPERM` among them, which macOS
     /// answers for a file under a directory the process may not read
     /// (#2876); `EACCES` itself is held against the pinned php-fpm by
-    /// tests/lines.toml's script of mode 0.
+    /// tests/lines.toml's program whose permissions are 0.
     #[test]
     fn a_script_that_does_not_open_with_eperm_is_no_input_file() {
         let page = |errno: i32| {

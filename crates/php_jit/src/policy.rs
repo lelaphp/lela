@@ -41,17 +41,20 @@ const PRIMED: Laid = Laid::Counting([PRIMED_HEAT, COLD]);
 /// ([`PRIMED`]).
 const PRIMED_HEAT: u32 = u32::MAX;
 
-/// The state bits of a word's second half.
-const STATE: u32 = 0b11;
+/// The state bits of a word's second half: [`decoded`] reads them, and
+/// so does compiled code where a trace escapes to a landing whose word
+/// reads [`COMPILED`] (`lower::Escapes`), the trace number above
+/// [`ID_SHIFT`].
+pub(crate) const STATE: u32 = 0b11;
 const COLD: u32 = 0;
 const RECORDING: u32 = 1;
-const COMPILED: u32 = 2;
+pub(crate) const COMPILED: u32 = 2;
 const BLACKLISTED: u32 = 3;
 /// Where the failed attempts stand, and how many the six bits hold.
 const ATTEMPTS_SHIFT: u32 = 2;
 const ATTEMPTS_MAX: u8 = 0x3F;
 /// Where the trace number stands.
-const ID_SHIFT: u32 = 8;
+pub(crate) const ID_SHIFT: u32 = 8;
 
 /// php's `ZEND_JIT_ON_HOT_TRACE`, the one trigger this tier runs.
 const HOT_TRACE: u32 = 5;
@@ -73,8 +76,8 @@ pub(crate) enum Mode {
 /// Where a trace compiles: on the engine's compile thread, or on the
 /// request's at the claim (`jit.compile`). `Force` and `ExitFuzz` imply
 /// `Inline`; so does, for one recording, the request's `opcache.jit_debug`
-/// where it asks for a root's end lines ([`JitDebug::ends`]), which php
-/// writes on the request in one order a worker could not keep
+/// where it asks for a line the compile writes ([`JitDebug::on_request`]),
+/// which php writes on the request in one order a worker could not keep
 /// (`compiler::Submitter::submit`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Compile {
@@ -88,6 +91,9 @@ pub(crate) enum Compile {
 pub(crate) struct JitDebug(u32);
 
 impl JitDebug {
+    /// php's analysis of each op array a compiled trace passes through,
+    /// `ZEND_JIT_DEBUG_SSA`.
+    pub(crate) const SSA: u32 = 1 << 1;
     /// A `/tmp/perf-<pid>.map` line per trace.
     pub(crate) const PERF: u32 = 1 << 4;
     /// A jitdump record per trace, where php writes one.
@@ -135,6 +141,15 @@ impl JitDebug {
                 | JitDebug::TRACE_ABORT
                 | JitDebug::TRACE_BLACKLIST,
         )
+    }
+
+    /// Whether the bits ask for a line a recording's compile writes: a
+    /// root's end lines ([`JitDebug::ends`]), or php's analysis of the op
+    /// arrays it passes through, which php's build of the trace writes on
+    /// the request (`zend_jit_trace_build_ssa`): where they do, the
+    /// recording compiles on the request.
+    pub(crate) fn on_request(self) -> bool {
+        self.ends() || self.any(JitDebug::SSA)
     }
 
     /// One of php's `TRACE` lines for `event`, where the bits ask for it
@@ -494,6 +509,7 @@ pub(crate) struct Policy {
     max_recursive_returns: u8,
     max_polymorphic_calls: u32,
     buffer_size: u64,
+    folds: crate::record::Folds,
     debug: JitDebug,
     /// How php's start leaves its tier under these directives and this
     /// host, which is where `zend_jit_check_support` runs and so where its
@@ -708,6 +724,7 @@ impl Policy {
             max_recursive_returns: small(ini, "opcache.jit_max_recursive_returns", 2, 0..=3),
             max_polymorphic_calls: count(ini, "opcache.jit_max_polymorphic_calls", 2),
             buffer_size: u64::try_from(buffer_size).unwrap_or(0),
+            folds: crate::record::Folds::of(long(ini, "opcache.optimization_level", 0x7FFE_BFFF)),
             debug,
             set_up,
             runs: match lane {
@@ -1068,6 +1085,12 @@ impl Policy {
     /// `opcache.jit_max_loop_unrolls`.
     pub(crate) fn max_loop_unrolls(&self) -> u8 {
         self.max_loop_unrolls
+    }
+
+    /// Whether `opcache.optimization_level` runs the passes that fold a
+    /// loop's constant condition ([`crate::record::Folds`]).
+    pub(crate) fn folds(&self) -> crate::record::Folds {
+        self.folds
     }
 
     /// `opcache.jit_max_recursive_calls`.

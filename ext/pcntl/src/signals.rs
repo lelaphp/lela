@@ -16,6 +16,7 @@ use php_ext::call::call;
 use php_ext::coerce::{is_callable, to_callable, value_name};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, fatal, leave_pending,
+    set_aside,
 };
 use php_ext::request::{Receiving, Request, Siginfo, take_signals};
 use php_ext::values::{Owner, PhpArray, Value, ValueRef, walk};
@@ -229,7 +230,7 @@ pub(crate) fn pcntl_signal_dispatch(req: &mut Request) -> Result<bool, Thrown> {
     Ok(true)
 }
 
-/// `pcntl_interrupt_function` (`pcntl.c:1922-1927`), pcntl's link of
+/// `pcntl_interrupt_function` (`pcntl.c:1969-1975`), pcntl's link of
 /// `zend_interrupt_function`: the signals taken dispatched
 /// ([`dispatch`]), what a handler threw left pending, and then the one it
 /// saved served.
@@ -243,7 +244,7 @@ pub(crate) fn interrupt(
     beneath.serve(req)
 }
 
-/// `pcntl_signal_dispatch()` the function (`pcntl.c:1366`): every signal
+/// `pcntl_signal_dispatch()` the function (`pcntl.c:1368`): every signal
 /// posted under a number the table holds, taken off the record in the
 /// order it arrived, and its handler called with the number and the
 /// `siginfo_t` array where the table holds a callable; one the table
@@ -253,6 +254,40 @@ pub(crate) fn interrupt(
 /// next dispatch, which under `pcntl_async_signals(true)` the interrupt
 /// raised again asks for once the throwable is handled (8.5.12). The
 /// engine's interrupt check serves it through [`interrupt`].
+///
+/// The check after a native that threw serves it with that throwable
+/// pending, and the handlers play with it set aside
+/// ([`set_aside`]), since no callback is called while one stands: it is
+/// pending again after them, or, where a handler threw, chained under
+/// what the handler threw, and an `exit` set aside is given up for that
+/// throwable (8.5.12). Here the second signal lands as the first
+/// dispatch ends, inside `pcntl_signal_dispatch()`, whose throw it is
+/// dispatched over:
+///
+/// ```php
+/// pcntl_signal(SIGUSR1, function () { pcntl_async_signals(true); posix_kill(posix_getpid(), SIGUSR2); throw new Exception("usr1"); });
+/// pcntl_signal(SIGUSR2, function () { throw new Exception("usr2"); });
+/// posix_kill(posix_getpid(), SIGUSR1);
+/// try { pcntl_signal_dispatch(); } catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect process
+/// usr2 after usr1
+/// ```
+///
+/// An `exit` a handler took is set aside the same way, and the request
+/// leaves by it once the handlers have played:
+///
+/// ```php
+/// pcntl_signal(SIGUSR1, function () { pcntl_async_signals(true); posix_kill(posix_getpid(), SIGUSR2); exit("exiting\n"); });
+/// pcntl_signal(SIGUSR2, function () { echo "usr2\n"; });
+/// posix_kill(posix_getpid(), SIGUSR1);
+/// pcntl_signal_dispatch();
+/// echo "unreached\n";
+/// ```
+/// ```expect process
+/// exiting
+/// usr2
+/// ```
 ///
 /// ```php
 /// $called = [];
@@ -318,7 +353,7 @@ pub(crate) fn dispatch(req: &mut Request) -> Result<(), Thrown> {
     // "Prevent switching fibers when handling signals".
     let played = req
         .code_mut()
-        .with_fiber_switch_blocked(|req| play(req, &mut queue));
+        .with_fiber_switch_blocked(|req| set_aside(req, |req| play(req, &mut queue)));
     let table = &mut req.state::<State>().signals;
     table.dispatching = false;
     // "Put back what the throwing handler did not get to, instead of

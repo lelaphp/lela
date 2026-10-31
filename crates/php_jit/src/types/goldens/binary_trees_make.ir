@@ -47,10 +47,10 @@ loop at 0, recursive return, interrupt none
   checks direction taken -> exit 3
 0004 f3 SUB #10, int(1) inline
   -> #11 f3.T1 [long] reg
-  checks #11 long -> exit 2
+  checks #11 long -> exit 4
 0005 f3 ASSIGN #12, #11 inline
   -> #13 f3.CV1 [long] reg
-  guard room 208 -> exit 4
+  guard room 208 -> exit 5
 0006 f3 INIT_FCALL_BY_NAME const#3 inline
      f3 init e1 in-place
 0007 f3 SEND_VAR #13 inline
@@ -62,9 +62,9 @@ loop at 0, recursive return, interrupt none
 0003 f4 RETURN const#1 inline in-place constant
      f3 back to #15
   -> #15 f3.T3 [packed array]
-0009 f3 INIT_ARRAY #15 step unwinds -> unwind 1
+0009 f3 INIT_ARRAY #15 step
   -> #16 f3.T4 [array]
-  guard room 208 -> exit 5
+  guard room 208 -> exit 6
 0010 f3 INIT_FCALL_BY_NAME const#5 inline
      f3 init e1 in-place
 0011 f3 SEND_VAR #13 inline
@@ -90,8 +90,9 @@ end: back to 0
 exit 0: f0 0010 plain f0.T4:array to vm
 exit 1: f0 0011 restore call f0.T4:array
 exit 2: f1 0004 plain f1.CV0:long
-exit 3: f3 0003 plain f3.CV0:long
-exit 4: f3 0006 plain f3.CV1=#13 f3.CV0:long f3.CV1:long to vm
-exit 5: f3 0010 plain f3.CV1=#13 f3.CV0:long f3.CV1:long f3.T4:array to vm
+exit 3: f3 0003 plain f3.CV0:long f3.CV1:undef
+exit 4: f3 0005 plain f3.T1=overflowed down f3.CV0:long f3.CV1:undef f3.T1:double
+exit 5: f3 0006 plain f3.CV1=#13 f3.CV0:long f3.CV1:long to vm
+exit 6: f3 0010 plain f3.CV1=#13 f3.CV0:long f3.CV1:long f3.T4:array to vm
 unwind 0:
 unwind 1: f3.CV1=#13

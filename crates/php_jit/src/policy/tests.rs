@@ -459,21 +459,24 @@ fn the_directives_take_phps_defaults_and_bounds_and_jit_mode_names_the_lane() {
         (policy.mode(), policy.compile()),
         (Mode::Tracing, Compile::Inline)
     );
-    // A root's end lines are written on its request, so bits that ask
-    // for one compile that request's recordings there
+    // A root's end lines and php's SSA dump are written on its request,
+    // so bits that ask for one compile that request's recordings there
     // (`compiler::Submitter::submit`); the start line or a `PERF` map
-    // alone does not, and the engine's worker stands whichever.
-    for (debug, ends) in [
-        ("8192", true),
-        ("65536", true),
-        ("4096", false),
-        ("16", false),
+    // alone does not, and the engine's worker stands whichever. The SSA
+    // dump alone ends no root with a line.
+    for (debug, ends, on_request) in [
+        ("8192", true, true),
+        ("65536", true, true),
+        ("2", false, true),
+        ("4096", false, false),
+        ("16", false, false),
     ] {
         let (policy, _) = read_ini(&[("opcache.jit", "tracing"), ("opcache.jit_debug", debug)]);
         assert_eq!(policy.compile(), Compile::Thread, "jit_debug={debug}");
+        let bits = JitDebug::of(debug.as_bytes());
         assert_eq!(
-            JitDebug::of(debug.as_bytes()).ends(),
-            ends,
+            (bits.ends(), bits.on_request()),
+            (ends, on_request),
             "jit_debug={debug}"
         );
     }

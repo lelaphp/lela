@@ -362,7 +362,7 @@ fn connection_close_is_honoured() {
 }
 
 /// `HEAD` sends `GET`'s fields and no content; the program runs to its
-/// end, its output going nowhere, as php's `headers_only` has it, and is
+/// end, what it writes going nowhere, as php's `headers_only` has it, and is
 /// never told its client has gone; the connection serves its next
 /// request.
 #[test]

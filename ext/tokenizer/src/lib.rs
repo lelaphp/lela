@@ -1501,7 +1501,7 @@ fn tokenize_parse(
             ..LexOptions::default()
         },
     };
-    let arena = syntax::Arena::new();
+    let arena = syntax::Arena::default();
     let parsed = syntax::parse(&arena, code, &options);
     for raised in &parsed.diagnostics {
         match raised.level {

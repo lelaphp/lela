@@ -243,6 +243,30 @@ pub(crate) fn lines(name: &[u8], args: usize, body: &OpArray, frameless: &[Name]
     out.0
 }
 
+/// `zend_dump_op` of the opline at `at` of `body` into `out`, in
+/// `block` where a CFG stands ([`InBlock`]).
+pub(crate) fn op_at(
+    out: &mut Vec<u8>,
+    body: &OpArray,
+    at: usize,
+    frameless: &[Name],
+    block: Option<InBlock<'_>>,
+) {
+    let Some(op) = body.oplines.get(at) else {
+        return;
+    };
+    let mut shown = Out(std::mem::take(out));
+    opline(&mut shown, body, op, frameless, block);
+    *out = shown.0;
+}
+
+/// `zend_dump_var` into `out`.
+pub(crate) fn var_into(out: &mut Vec<u8>, body: &OpArray, kind: OperandKind, number: u32) {
+    let mut shown = Out(std::mem::take(out));
+    var(&mut shown, body, kind, number);
+    *out = shown.0;
+}
+
 /// One op array in `shape`.
 fn shaped(
     out: &mut Out,
@@ -275,7 +299,7 @@ fn shaped(
             write!(out, "L{:04} ", op.lineno).ok();
         }
         write!(out, "{at:04} ").ok();
-        opline(out, body, op, frameless);
+        opline(out, body, op, frameless, None);
         out.push('\n');
     }
     if shape == Shape::BeforeOptimizer && !body.live_ranges.is_empty() {
@@ -308,18 +332,71 @@ fn shaped(
     }
 }
 
-/// `zend_dump_op` with no CFG and no SSA: the operand `result` names
-/// and ` = ` when its kind is `TMP`, `VAR` or `CV`, the name, a
-/// frameless call's function in parentheses, the `extended_value` by
-/// its shape, `op1`, `op2`, and the target an `extended_value` of the
-/// `JMP_ADDR` shape holds. A `result` of kind `UNUSED` opens nothing,
-/// whatever the number the field holds: a site's safepoint number, or
-/// the temporary php still numbered where `zend_do_free` set the mark.
-fn opline(out: &mut Out, body: &OpArray, op: &Opline, frameless: &[Name]) {
+/// The CFG and SSA `zend_dump_op` reads beside an opline where they are
+/// built over its op array, php's `b` and `ssa_op`: a jump target prints
+/// as the block it lands in, `BB3`, read from the block's successors in
+/// the order the operands name them, and a variable as the SSA variable
+/// the opline reads or writes, `#2.T1`, where an SSA stands.
+#[derive(Clone, Copy)]
+pub struct InBlock<'a> {
+    /// `b->successors` of the block the opline ends or stands in.
+    pub successors: &'a [u32],
+    /// `ssa_op` and how an SSA variable prints; none where no SSA was
+    /// built, as for a file's own code, whose CFG alone php builds.
+    pub ssa: Option<(SsaOperands, &'a dyn SsaVars)>,
+}
+
+/// `zend_ssa_op`'s six numbers for one opline as `zend_dump_op` reads
+/// them, none where php's holds -1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SsaOperands {
+    pub op1_use: Option<u32>,
+    pub op2_use: Option<u32>,
+    pub out_use: Option<u32>,
+    pub op1_def: Option<u32>,
+    pub op2_def: Option<u32>,
+    pub out_def: Option<u32>,
+}
+
+/// How an SSA variable prints, `zend_dump_ssa_var`: the analysis's
+/// numbering and what it knows of the variable, over the operand `kind`
+/// and frame slot `var` it renames.
+pub trait SsaVars {
+    fn ssa_var(&self, out: &mut Vec<u8>, ssa_var: u32, kind: OperandKind, var: u32);
+}
+
+/// Which operand field `zend_dump_op` prints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Op1,
+    Op2,
+}
+
+/// `zend_dump_op`: the operand `result` names and ` = ` when its kind is
+/// `TMP`, `VAR` or `CV` and no SSA reads it, the name, a frameless call's
+/// function in parentheses, the `extended_value` by its shape, `op1`,
+/// `op2`, the target an `extended_value` of the `JMP_ADDR` shape holds,
+/// and last a `result` an SSA reads as well as writes. A `result` of kind
+/// `UNUSED` opens nothing, whatever the number the field holds: a site's
+/// safepoint number, or the temporary php still numbered where
+/// `zend_do_free` set the mark. In `block`, a jump target is the block it
+/// lands in and a variable the SSA variable, as [`InBlock`] says.
+fn opline(
+    out: &mut Out,
+    body: &OpArray,
+    op: &Opline,
+    frameless: &[Name],
+    block: Option<InBlock<'_>>,
+) {
     let flags = op.opcode.flags();
     let name = op.opcode.name();
-    if op.out_type != OperandKind::Unused && op.out_type != OperandKind::Const {
-        var(out, body, op.out_type, op.out);
+    let ssa = block.and_then(|block| block.ssa);
+    let mut targets = block.map(|block| block.successors.iter());
+    if ssa.is_none_or(|(ssa_op, _)| ssa_op.out_use.is_none()) && is_var(op.out_type) {
+        match ssa.and_then(|(ssa_op, vars)| Some((ssa_op.out_def?, vars))) {
+            Some((def, vars)) => vars.ssa_var(&mut out.0, def, op.out_type, op.out),
+            None => var(out, body, op.out_type, op.out),
+        }
         out.push_str(" = ");
     }
     if name.is_empty() {
@@ -331,24 +408,42 @@ fn opline(out: &mut Out, body: &OpArray, op: &Opline, frameless: &[Name]) {
         frameless_name(out, op, frameless);
     }
     extended_value(out, op, flags);
-    operand(out, body, op, op.op1_type, op.op1, flags & 0xff, true);
-    operand(
-        out,
-        body,
-        op,
-        op.op2_type,
-        op.op2,
-        (flags >> 8) & 0xff,
-        false,
-    );
+    for field in [Field::Op1, Field::Op2] {
+        operand(out, body, op, field, ssa, &mut targets);
+    }
     if flags & ext::MASK == ext::JMP_ADDR {
-        write!(out, " {:04}", op.extended_value).ok();
+        target(out, &mut targets, op.extended_value);
     }
     // A constant `result`, which no opline of `zend_compile.c` has, is
     // printed last where php prints it.
     if op.out_type == OperandKind::Const {
         constant(out, body.literals.get(op.out as usize).copied());
+    } else if let Some((ssa_op, vars)) = ssa
+        && let Some(used) = ssa_op.out_use
+        && is_var(op.out_type)
+    {
+        out.push(' ');
+        vars.ssa_var(&mut out.0, used, op.out_type, op.out);
+        if let Some(def) = ssa_op.out_def {
+            out.push_str(" -> ");
+            vars.ssa_var(&mut out.0, def, op.out_type, op.out);
+        }
     }
+}
+
+/// Whether an operand of `kind` names a variable, php's
+/// `IS_CV|IS_VAR|IS_TMP_VAR`.
+fn is_var(kind: OperandKind) -> bool {
+    matches!(kind, OperandKind::Tmp | OperandKind::Var | OperandKind::Cv)
+}
+
+/// A jump target: the next of the block's successors where a CFG stands,
+/// `BB3`, and the opline number `at` otherwise.
+fn target(out: &mut Out, targets: &mut Option<std::slice::Iter<'_, u32>>, at: u32) {
+    match targets.as_mut().map(Iterator::next) {
+        Some(Some(block)) => write!(out, " BB{block}").ok(),
+        Some(None) | None => write!(out, " {at:04}").ok(),
+    };
 }
 
 /// `ZEND_FLF_FUNC(opline)->common.function_name` in parentheses, as
@@ -375,43 +470,70 @@ fn live_kind(kind: LiveKind) -> &'static str {
     }
 }
 
-/// One operand: the constant, the variable, or what an unused field says.
+/// One operand: the constant, the variable as the SSA reads and
+/// writes it where one stands, or what an unused field says, a jump
+/// target among it.
 fn operand(
     out: &mut Out,
     body: &OpArray,
     op: &Opline,
-    kind: OperandKind,
-    field: u32,
-    flags: u32,
-    first: bool,
+    field: Field,
+    ssa: Option<(SsaOperands, &dyn SsaVars)>,
+    targets: &mut Option<std::slice::Iter<'_, u32>>,
 ) {
+    let flags = op.opcode.flags();
+    let (kind, number, flags) = match field {
+        Field::Op1 => (op.op1_type, op.op1, flags & 0xff),
+        Field::Op2 => (op.op2_type, op.op2, (flags >> 8) & 0xff),
+    };
     match kind {
         OperandKind::Const => {
-            let value = body.literals.get(field as usize).copied();
-            if !first
+            let value = body.literals.get(number as usize).copied();
+            if field == Field::Op2
                 && matches!(
                     op.opcode,
                     Opcode::SwitchLong | Opcode::SwitchString | Opcode::Match
                 )
             {
-                jump_table(out, value);
+                jump_table(out, value, targets);
             } else {
                 constant(out, value);
             }
         }
         OperandKind::Tmp | OperandKind::Var | OperandKind::Cv => {
-            out.push(' ');
-            var(out, body, kind, field);
+            let Some((ssa_op, vars)) = ssa else {
+                out.push(' ');
+                var(out, body, kind, number);
+                return;
+            };
+            let (used, def) = match field {
+                Field::Op1 => (ssa_op.op1_use, ssa_op.op1_def),
+                Field::Op2 => (ssa_op.op2_use, ssa_op.op2_def),
+            };
+            if let Some(used) = used {
+                out.push(' ');
+                vars.ssa_var(&mut out.0, used, kind, number);
+            } else if def.is_none() {
+                out.push(' ');
+                var(out, body, kind, number);
+            }
+            if let Some(def) = def {
+                out.push_str(" -> ");
+                vars.ssa_var(&mut out.0, def, kind, number);
+            }
         }
         OperandKind::Unused => {
             if flags & op::MASK == op::JMP_ADDR {
                 // A `CATCH` that is the last of its try prints no target
                 // in `op2`, where php's compiler left none.
-                if first || op.opcode != Opcode::Catch || op.extended_value & LAST_CATCH == 0 {
-                    write!(out, " {field:04}").ok();
+                if field == Field::Op1
+                    || op.opcode != Opcode::Catch
+                    || op.extended_value & LAST_CATCH == 0
+                {
+                    target(out, targets, number);
                 }
             } else {
-                unused(out, op, field, flags);
+                unused(out, op, number, flags);
             }
         }
     }
@@ -422,7 +544,7 @@ fn operand(
 /// the table's order, a string key in `"` up to its first NUL as `%s`
 /// reads it, then ` default:`, whose target is the `extended_value`
 /// printed after it. A constant that is no array prints as one.
-fn jump_table(out: &mut Out, value: Option<Zval>) {
+fn jump_table(out: &mut Out, value: Option<Zval>, targets: &mut Option<std::slice::Iter<'_, u32>>) {
     let Some(table) = value.and_then(php_heap::Zval::as_arr) else {
         constant(out, value);
         return;
@@ -438,7 +560,9 @@ fn jump_table(out: &mut Out, value: Option<Zval>) {
                 out.push_str("\":");
             }
         }
-        write!(out, " {:04},", target.as_long().unwrap_or(0)).ok();
+        let at = u32::try_from(target.as_long().unwrap_or(0)).unwrap_or(0);
+        self::target(out, targets, at);
+        out.push(',');
     }
     out.push_str(" default:");
 }
@@ -598,7 +722,7 @@ fn extended_value(out: &mut Out, op: &Opline, flags: u32) {
             0x00c => out.push_str(" (bool)"),
             mask => {
                 out.push_str(" TYPE");
-                type_info(out, mask);
+                dump_type_info(&mut out.0, mask, None, false);
             }
         },
         ext::EVAL => out.push_str(match value {
@@ -653,39 +777,199 @@ fn extended_value(out: &mut Out, op: &Opline, flags: u32) {
     }
 }
 
-/// `zend_dump_type_info` over the bits a `TYPE_CHECK` mask can hold, the
-/// `MAY_BE_*` of the nine value types: `[bool, long, double, string]` for
-/// `is_scalar`. The array, class and reference detail of an inferred
-/// type never reaches an `extended_value`.
-fn type_info(out: &mut Out, info: u32) {
-    const ANY: u32 = 0x3fe;
-    let mut words: Vec<&str> = Vec::new();
-    if info & ANY == ANY {
-        words.push("any");
-    } else {
-        if info & 0x002 != 0 {
-            words.push("null");
+/// `zend_dump_type_info`: a `MAY_BE_*` mask (`Z/Zend/zend_type_info.h`)
+/// in brackets, the guard mark, `undef`, `ind`, `ref`, the reference
+/// counts where `rc` asks for them, then a class, `any`, or each type
+/// with an array's keys and values and an object's class, `class` the
+/// class's name and whether it may be a child of it. What a `TYPE_CHECK`
+/// mask prints past its named masks, and what php's SSA dump prints of a
+/// constraint and of an inferred type.
+pub fn dump_type_info(out: &mut Vec<u8>, info: u32, class: Option<(&[u8], bool)>, rc: bool) {
+    let mut words = Words::new(out);
+    words.out.push(b'[');
+    if info & may_be::GUARD != 0 {
+        words.out.push(b'!');
+    }
+    for (bit, word) in [
+        (may_be::UNDEF, "undef"),
+        (may_be::INDIRECT, "ind"),
+        (may_be::REF, "ref"),
+    ] {
+        if info & bit != 0 {
+            words.word(word);
         }
-        match (info & 0x004 != 0, info & 0x008 != 0) {
-            (true, true) => words.push("bool"),
-            (true, false) => words.push("false"),
-            (false, true) => words.push("true"),
-            (false, false) => {}
-        }
-        for (bit, word) in [
-            (0x010, "long"),
-            (0x020, "double"),
-            (0x040, "string"),
-            (0x080, "array"),
-            (0x100, "object"),
-            (0x200, "resource"),
-        ] {
+    }
+    if rc {
+        for (bit, word) in [(may_be::RC1, "rc1"), (may_be::RCN, "rcn")] {
             if info & bit != 0 {
-                words.push(word);
+                words.word(word);
             }
         }
     }
-    write!(out, " [{}]", words.join(", ")).ok();
+    if info & may_be::CLASS != 0 {
+        words.word("class");
+        class_of(words.out, class);
+    } else if info & may_be::ANY == may_be::ANY {
+        words.word("any");
+    } else {
+        if info & may_be::NULL != 0 {
+            words.word("null");
+        }
+        match (info & may_be::FALSE != 0, info & may_be::TRUE != 0) {
+            (true, true) => words.word("bool"),
+            (true, false) => words.word("false"),
+            (false, true) => words.word("true"),
+            (false, false) => {}
+        }
+        for (bit, word) in [
+            (may_be::LONG, "long"),
+            (may_be::DOUBLE, "double"),
+            (may_be::STRING, "string"),
+        ] {
+            if info & bit != 0 {
+                words.word(word);
+            }
+        }
+        if info & may_be::ARRAY != 0 {
+            words.word("");
+            array_info(words.out, info);
+        }
+        if info & may_be::OBJECT != 0 {
+            words.word("object");
+            class_of(words.out, class);
+        }
+        if info & may_be::RESOURCE != 0 {
+            words.word("resource");
+        }
+    }
+    words.out.push(b']');
+}
+
+/// The words of a bracketed list, `, ` between each two.
+struct Words<'a> {
+    out: &'a mut Vec<u8>,
+    first: bool,
+}
+
+impl<'a> Words<'a> {
+    fn new(out: &'a mut Vec<u8>) -> Words<'a> {
+        out.push(b' ');
+        Words { out, first: true }
+    }
+
+    fn word(&mut self, word: &str) {
+        if !std::mem::take(&mut self.first) {
+            self.out.extend_from_slice(b", ");
+        }
+        self.out.extend_from_slice(word.as_bytes());
+    }
+}
+
+/// An object's or a class's class where one is known, ` (Foo)`, or
+/// ` (instanceof Foo)` where it may be a child.
+fn class_of(out: &mut Vec<u8>, class: Option<(&[u8], bool)>) {
+    if let Some((name, instanceof)) = class {
+        out.extend_from_slice(if instanceof { b" (instanceof " } else { b" (" });
+        out.extend_from_slice(name);
+        out.push(b')');
+    }
+}
+
+/// An array's part of `zend_dump_type_info`: its layout, the word, its
+/// keys where they are of one kind, and what its elements may be.
+fn array_info(out: &mut Vec<u8>, info: u32) {
+    if info & may_be::PACKED_GUARD != 0 {
+        out.push(b'!');
+    }
+    let keys = info & may_be::KEY_ANY;
+    let hash = info & (may_be::NUMERIC_HASH | may_be::STRING_HASH) != 0;
+    if keys == may_be::EMPTY {
+        out.extend_from_slice(b"empty ");
+    } else if keys == may_be::PACKED {
+        out.extend_from_slice(b"packed ");
+    } else if hash && info & (may_be::PACKED | may_be::EMPTY) == 0 {
+        out.extend_from_slice(b"hash ");
+    } else if keys != may_be::KEY_ANY && keys != 0 {
+        let mut words = Words::new(out);
+        words.out.pop();
+        words.out.push(b'[');
+        for (held, word) in [
+            (info & may_be::EMPTY != 0, "empty"),
+            (info & may_be::PACKED != 0, "packed"),
+            (hash, "hash"),
+        ] {
+            if held {
+                words.word(word);
+            }
+        }
+        out.extend_from_slice(b"] ");
+    }
+    out.extend_from_slice(b"array");
+    let long = info & (may_be::PACKED | may_be::NUMERIC_HASH) != 0;
+    let string = info & may_be::STRING_HASH != 0;
+    if long != string {
+        out.extend_from_slice(if long { b" [long]" } else { b" [string]" });
+    }
+    if info & (may_be::OF_ANY | may_be::OF_REF) != 0 {
+        let mut words = Words::new(out);
+        words.out.extend_from_slice(b"of [");
+        if info & may_be::OF_ANY == may_be::OF_ANY {
+            words.word("any");
+        } else {
+            for (bit, word) in [
+                (may_be::NULL, "null"),
+                (may_be::FALSE, "false"),
+                (may_be::TRUE, "true"),
+                (may_be::LONG, "long"),
+                (may_be::DOUBLE, "double"),
+                (may_be::STRING, "string"),
+                (may_be::ARRAY, "array"),
+                (may_be::OBJECT, "object"),
+                (may_be::RESOURCE, "resource"),
+            ] {
+                if info & (bit << may_be::ARRAY_SHIFT) != 0 {
+                    words.word(word);
+                }
+            }
+        }
+        if info & may_be::OF_REF != 0 {
+            words.word("ref");
+        }
+        out.push(b']');
+    }
+}
+
+/// php's `MAY_BE_*` bits (`Z/Zend/zend_type_info.h`,
+/// `Z/Zend/Optimizer/zend_inference.h`), what [`dump_type_info`] reads.
+pub mod may_be {
+    pub const UNDEF: u32 = 1 << 0;
+    pub const NULL: u32 = 1 << 1;
+    pub const FALSE: u32 = 1 << 2;
+    pub const TRUE: u32 = 1 << 3;
+    pub const LONG: u32 = 1 << 4;
+    pub const DOUBLE: u32 = 1 << 5;
+    pub const STRING: u32 = 1 << 6;
+    pub const ARRAY: u32 = 1 << 7;
+    pub const OBJECT: u32 = 1 << 8;
+    pub const RESOURCE: u32 = 1 << 9;
+    pub const REF: u32 = 1 << 10;
+    pub const ANY: u32 = NULL | FALSE | TRUE | LONG | DOUBLE | STRING | ARRAY | OBJECT | RESOURCE;
+    /// `MAY_BE_ARRAY_SHIFT`: an element's type sits this far up.
+    pub const ARRAY_SHIFT: u32 = 10;
+    pub const OF_ANY: u32 = ANY << ARRAY_SHIFT;
+    pub const OF_REF: u32 = REF << ARRAY_SHIFT;
+    pub const PACKED: u32 = 1 << 21;
+    pub const NUMERIC_HASH: u32 = 1 << 22;
+    pub const STRING_HASH: u32 = 1 << 23;
+    pub const CLASS: u32 = 1 << 24;
+    pub const INDIRECT: u32 = 1 << 25;
+    pub const PACKED_GUARD: u32 = 1 << 27;
+    pub const GUARD: u32 = 1 << 28;
+    pub const EMPTY: u32 = 1 << 29;
+    pub const RC1: u32 = 1 << 30;
+    pub const RCN: u32 = 1 << 31;
+    /// `MAY_BE_ARRAY_KEY_ANY`.
+    pub const KEY_ANY: u32 = PACKED | NUMERIC_HASH | STRING_HASH | EMPTY;
 }
 
 /// `smart_str_append_escaped` with `"` escaped besides, as
@@ -801,7 +1085,7 @@ mod tests {
     fn line(body: &OpArray, at: usize) -> String {
         let mut out = Out::default();
         let op = body.oplines.get(at).expect("an opline at the index asked");
-        opline(&mut out, body, op, &[]);
+        opline(&mut out, body, op, &[], None);
         utf8(out.0)
     }
 
@@ -1532,7 +1816,7 @@ mod tests {
         let line = |at: usize| {
             let mut out = Out::default();
             if let Some(op) = body.oplines.get(at) {
-                opline(&mut out, &body, op, &table);
+                opline(&mut out, &body, op, &table, None);
             }
             utf8(out.0)
         };

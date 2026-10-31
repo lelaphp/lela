@@ -237,7 +237,7 @@ fn kill_idle_child(fpm: &mut Fpm, pool: usize, child: usize) {
 }
 
 /// `fpm_pctl_perform_idle_server_maintenance`: each pool's idle and
-/// active children counted into its scoreboard; an ondemand pool's
+/// active children counted into its `scoreboard`; an ondemand pool's
 /// oldest idle child ended once idle past `pm.process_idle_timeout`; a
 /// dynamic pool's spare children kept between `pm.min_spare_servers` and
 /// `pm.max_spare_servers`, spawning twice as many each second it falls
@@ -351,7 +351,7 @@ pub(crate) fn perform_idle_server_maintenance(fpm: &mut Fpm) -> Step {
 }
 
 /// The warning each time a pool first reaches its children's ceiling,
-/// counted into its scoreboard, from the call at `line`:
+/// counted into its `scoreboard`, from the call at `line`:
 /// `fpm_pctl_perform_idle_server_maintenance`'s two or
 /// `fpm_pctl_on_socket_accept`'s.
 fn reached_max_children(fpm: &mut Fpm, pool: usize, setting: &str, line: u32) {

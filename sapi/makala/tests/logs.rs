@@ -151,9 +151,9 @@ fn a_blocked_log_destination_does_not_delay_responses() {
 /// Each request php-fpm's loop refuses before it runs a program logs, in
 /// the error log, the line the pinned php-fpm writes for it on
 /// `FCGI_STDERR`, worded as its `zlog` words it (#2767): a path that names
-/// no script, a script past `security.limit_extensions`, a directory named
-/// `*.php`, which php's opener leaves `ENOENT`, and a script that may not
-/// be read, where the test's user is one the mode refuses.
+/// no file, a file past `security.limit_extensions`, a directory named
+/// `*.php`, which php's opener leaves `ENOENT`, and a file that may not
+/// be read, where the test's user is one the file's permission bits refuse.
 #[test]
 fn each_refused_request_logs_php_fpms_line_for_it() {
     use std::os::unix::fs::PermissionsExt;

@@ -12,7 +12,7 @@
 //! Each is one call into what the engine holds once for every host that
 //! declares it, `Response::finish_response` and `Variables::request_headers`,
 //! which php-fpm's and `php -S`'s declarations call too: a declaration is
-//! each host's, as each SAPI's is in php-src, and no crate both hosts may
+//! each host's, as each `sapi/` directory's is in php-src, and no crate both hosts may
 //! depend on declares natives (ADR-0008).
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]

@@ -325,7 +325,7 @@ fn what_the_scanner_hands_over_as_a_token_the_parser_names() {
 
 #[test]
 fn the_options_are_the_file_and_the_lexers() {
-    let arena = php_syntax::Arena::new();
+    let arena = php_syntax::Arena::default();
     let parsed = parse(
         &arena,
         b"<? echo 1 2;",

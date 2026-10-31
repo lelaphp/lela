@@ -53,7 +53,7 @@ fn connections_past_the_cap_wait_in_the_listen_queue_and_are_served_in_turn() {
 /// are each served, one at a time and in the order they came, none
 /// refused: while one runs, the next waits in the queue and the rest on
 /// their connections for room in it. The queue's bound is not seen from
-/// the socket; what is seen is that nothing is refused or run at once.
+/// the socket; what is seen is that nothing is refused or served at once.
 #[test]
 fn requests_beyond_the_pool_wait_in_the_queue_and_are_served_in_turn() {
     let root = common::root(

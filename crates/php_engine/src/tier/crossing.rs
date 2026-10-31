@@ -130,6 +130,18 @@ pub fn release(req: &mut Request, zval: Zval) {
     req.release(Value::of_slot(zval));
 }
 
+/// `ZVAL_MAKE_REF` of the variable at `place`, which holds no reference,
+/// as php's `zend_jit_send_ref` makes it in place
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:9792-9860`): a new reference over
+/// what it held, `null` for what nothing wrote, written back into the
+/// place, which keeps the one owner of it; `false` where the memory
+/// limit refused it: a fatal the request ends in, which the crossing
+/// answers as its unwinding, or, under a fallible scope, a refusal that
+/// ends nothing, whose send the handler then serves.
+pub fn make_ref(req: &mut Request, place: php_heap::ZvalRef) -> bool {
+    req.make_ref(place).is_ok()
+}
+
 /// php's `zend_jit_free_cv` of a variable of `frame`, which a `RETURN`
 /// compiled code leaves the frame by in place gives up where it is the
 /// last owner, or where it leaves owners of a value the collector may
@@ -143,6 +155,26 @@ pub fn free_cv(req: &mut Request, frame: FrameRef, zval: Zval) {
         header.info.set_leaving(true);
     }
     req.release(Value::of_slot(zval));
+}
+
+/// The receiver of `frame`, a method's frame a `RETURN` compiled code
+/// leaves by in place gives up, after its variables, where its owner or
+/// its pin is the last: `frame` off the chain a backtrace reads, as
+/// [`free_cv`] takes it, then `OBJ_RELEASE(Z_OBJ(execute_data->This))`
+/// under `ZEND_CALL_RELEASE_THIS`, as `zend_jit_leave_func` gives it up
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:11135-11160`), or the pin of a
+/// receiver the frame was lent let go ([`Request::give_up_receiver`]).
+/// A destructor it serves may leave a throwable pending.
+pub fn free_this(req: &mut Request, frame: FrameRef) {
+    let Some(header) = req.vm_mut().at_mut(frame) else {
+        return;
+    };
+    header.info.set_leaving(true);
+    let receiver = header.receiver();
+    header.set_receiver(None);
+    if let Some(receiver) = receiver {
+        req.give_up_receiver(receiver);
+    }
 }
 
 /// `FREE_OP1` and `FREE_OP2` of the opline at `at` of `frame`, as the

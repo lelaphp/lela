@@ -1411,7 +1411,7 @@ fn judged(
             Status::Fail,
             format!("{ticket}: {boxes}; closed already, nothing recorded"),
         ),
-        Act::Ready(successors) => match ready(gh, root, issue, &reading, &successors) {
+        Act::Ready(successors) => match ready(gh, (root, manifest), issue, &reading, &successors) {
             Ok(said) => (Status::Pass, format!("{ticket}: {boxes}; {said}")),
             Err(text) => (Status::Fail, format!("{ticket}: {boxes}; {text}")),
         },
@@ -1834,18 +1834,21 @@ pub fn stranded(root: &Path, store: &crate::reading::Store, base: &str) -> Resul
     Ok(unmet)
 }
 
-/// The branch ready to merge (#2311): every successor held as a close
-/// holds it, and the record written on the branch `HEAD` is on, which the
-/// merge reads to close the ticket. Nothing at the tracker changes.
+/// The branch ready to merge (#2311): `done` met in this worktree, every
+/// successor held as a close holds it, and the record written on the
+/// branch `HEAD` is on, which the merge reads to close the ticket. Nothing
+/// at the tracker changes.
 fn ready(
     gh: &Gh,
-    root: &Path,
+    (root, manifest): (&Path, &Manifest),
     issue: &Issue,
     reading: &Reading,
     successors: &Successors,
 ) -> std::result::Result<String, String> {
     let session_id = (!reading.session.is_empty()).then_some(reading.session.as_str());
     let opened = successors.describe(session_id);
+    unmet_here(root, manifest, reading)
+        .map_err(|err| format!("{err:#}; not ready, nothing recorded"))?;
     successors
         .held(gh, root, issue)
         .map_err(|err| format!("{err:#}; not ready, nothing recorded"))?;
@@ -1858,6 +1861,21 @@ fn ready(
         "{opened}; ready to merge at {}, recorded as {key}; the merge into main closes it",
         reading.commit
     ))
+}
+
+/// `done` over this worktree, refused while anything is unmet, naming the
+/// list (#3618 ruling 2). The boxes this reading holds are the ticket's
+/// condition, so it is recorded first, as the reading `done` reads.
+fn unmet_here(root: &Path, manifest: &Manifest, reading: &Reading) -> Result<()> {
+    let store = crate::reading::Store::of_workspace(root);
+    store.record(std::slice::from_ref(reading))?;
+    let registry = crate::divergence::Registry::load(root)?;
+    let snapshot = Snapshot::disk(root)?;
+    let verdict = crate::done::judge(&snapshot, manifest, &registry, &store, None, &[])?;
+    if !verdict.met() {
+        bail!("done is unmet in this worktree:\n{}", verdict.render());
+    }
+    Ok(())
 }
 
 /// The act at the tracker, the same for a close of work done and a

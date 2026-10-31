@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "cd ~/Projects/dax-php-worktrees/t2712; for i in $(seq 1 56); do [ -n \"$(git config --get-regexp 'branch.t1301.ready-')\" ] && break; sleep 30; done; git log --oneline main..t1301", "description": "Poll for t1301's ready record (a coordinator's wait, #3624)"}}

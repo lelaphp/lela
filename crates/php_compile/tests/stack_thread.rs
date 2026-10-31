@@ -62,7 +62,7 @@ fn refused_on_this_thread(on: &str) {
         ..Options::default()
     };
     let mut strings = php_heap::Strings::new();
-    match compile_source(&mut php_compile::syntax::Arena::new(), source.as_bytes(), &options, &mut strings) {
+    match compile_source(&mut php_compile::syntax::Arena::default(), source.as_bytes(), &options, &mut strings) {
         Err(err)
             if err.level == Level::CompileError
                 && err.line == 2

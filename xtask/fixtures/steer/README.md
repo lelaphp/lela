@@ -27,14 +27,29 @@ the working file holds its markers: `base.toml` is the merge base,
 `MERGE_HEAD`'s, and `merged-reworded.toml` that side rewording the
 base's reason as well. While the merge stands, steer judges a proposal
 against the blobs git keeps for the conflict, `HEAD`'s file among them,
-never the markers:
+never the markers. A side's own change over the base is part of the
+union, as it stands on that side (#3633):
 
 | `MERGE_HEAD` | proposal | the reading |
 |---|---|---|
 | `merged.toml` | `union.toml`: `HEAD`'s file and `MERGE_HEAD`'s row | written, judged against `HEAD`'s file, naming `divergence[trace:fixture-head]` and `divergence[trace:fixture-merged]` |
-| `merged-reworded.toml` | `union.toml` | refused at `divergence[trace:fixture-base].reason on MERGE_HEAD` |
+| `merged-reworded.toml` | `union-reworded.toml`: the union, with `MERGE_HEAD`'s reason | written, naming `divergence[trace:fixture-merged]` and `divergence[trace:fixture-base].reason` |
+| `merged-reworded.toml` | `union.toml`: the union, with the base's reason back | refused at `divergence[trace:fixture-base].reason` |
+| `merged-reworded.toml` | `changed-reason.toml`: the union, rewording that reason again | refused at `divergence[trace:fixture-base].reason` |
 | `merged.toml` | `changed-reason.toml`: the union, rewording the base's row | refused at `divergence[trace:fixture-base].reason` |
 | `merged.toml` | `neither.toml`: the union and a row neither side carries | refused at `divergence[trace:fixture-neither]` |
 
 `xtask/tests/steer.rs` lays each merge in a scratch repository and runs
-all four.
+all six.
+
+## An `[[owed]]` row (#3636)
+
+`owed/tracked.toml` is a slice of `seams.toml`'s `[[owed]]` rows, each
+named by its `instrument`. `owed/held-at.toml` is the control: `held_at`
+added to both rows, two additions, written. The negative controls beside
+it are refused with nothing written:
+
+| proposal | what it does | the path the refusal names |
+|---|---|---|
+| `owed/changed-when.toml` | changes a `when` the row already carries | `owed[crosscheck].when` |
+| `owed/second-row.toml` | adds a second row for an instrument already owed | `owed[phpt] twice` |

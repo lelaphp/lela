@@ -22094,7 +22094,7 @@ mod tests {
         let mut strings = php_heap::Strings::new();
         let options = Options::default();
         let parsed = Parsed::default();
-        let arena = Arena::new();
+        let arena = Arena::default();
         let mut emit = in_namespace(&arena, &parsed, &mut strings, &options);
         let read = Class {
             name: b"M".to_vec(),
@@ -22162,7 +22162,7 @@ mod tests {
         let answers = |source: &'static [u8]| {
             let mut strings = php_heap::Strings::new();
             let options = Options::default();
-            let arena = Arena::new();
+            let arena = Arena::default();
             let parsed = php_syntax::parse(&arena, source, &php_syntax::Options::default());
             let mut emit = in_namespace(&arena, &parsed, &mut strings, &options);
             emit.fold = Fold::EvalConstExpr;

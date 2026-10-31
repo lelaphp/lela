@@ -142,6 +142,11 @@ pub(crate) enum Command {
         /// An `[[owed]]` row names it, or the run is refused.
         #[arg(long = "not-run", value_name = "INSTRUMENT", conflicts_with = "hook")]
         not_run: Vec<String>,
+        /// Who asks, which the reading carries (#3619); CI where
+        /// `GITHUB_ACTIONS` is set, a hand otherwise. The hook's is the
+        /// event it came in on.
+        #[arg(long, value_enum, conflicts_with = "hook")]
+        caller: Option<crate::done::Caller>,
     },
     /// Say the branch, the commit it was taken off main at, the store
     /// and the branch's ticket; as text or as one object. Writes no
@@ -170,8 +175,11 @@ pub(crate) enum Command {
         command: Option<TrackCommand>,
     },
     /// A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>,
-    /// `retire` appends its log into the store and removes it. Writes no
-    /// reading.
+    /// `retire` removes it, `own` and `whose` say its owner, `queue` and
+    /// `land` run the merge queue.
+    ///
+    /// None writes a reading of its own; `land` asks `done`, which writes
+    /// one.
     ///
     /// `add` lays the worktree down ready to be worked in, the branch cut
     /// from `main` with the ticket it is for recorded on it, `xtask` built
@@ -456,15 +464,25 @@ pub(crate) enum Command {
     Witness(Witness),
     /// The glossary as a sensor: `_Avoid_` words in public item names and
     /// rustdoc prose, never in a lock; one reading per crate.
-    Vocab {
-        /// Only these crates, by manifest name; default every crate that exists.
-        #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]
-        crates: Vec<String>,
-        /// For pre-commit: leave out each crate whose reading passes and
-        /// was taken over what is staged, naming the reading (#1143).
-        #[arg(long)]
-        staged: bool,
-    },
+    Vocab(Vocab),
+}
+
+/// What one `vocab` run is asked for, flattened onto the command as
+/// [`Bench`] is, so the dispatch has one line for the instrument.
+#[derive(Debug, Args)]
+pub(crate) struct Vocab {
+    /// Only these crates, by manifest name; default every crate that exists.
+    #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]
+    pub crates: Vec<String>,
+    /// For pre-commit: leave out each crate whose reading passes and
+    /// was taken over what is staged, naming the reading (#1143).
+    #[arg(long)]
+    pub staged: bool,
+    /// For commit-msg: the message git is about to commit, noted against
+    /// the glossary each staged crate is held to; one reading, exit 0
+    /// whatever it finds (#3624, #3629).
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["crates", "staged"])]
+    pub message: Option<PathBuf>,
 }
 
 /// What one `bench` run is asked for, flattened onto the command so the
@@ -586,21 +604,11 @@ pub(crate) struct Phpt {
     /// test met there is not met here, and the exit is those readings'.
     #[arg(long, value_name = "COMMIT")]
     pub against: Option<String>,
-    /// Take the run `--against` holds each subset to at the merge base
-    /// with this ref, `main` unless named, as `done --base` takes it: the
-    /// subset named or every touched one the lane runs, run in a worktree
-    /// laid at the base with its hosts built, the runs kept in the main
-    /// worktree and the worktree removed (#2364).
-    #[arg(
-        long,
-        value_name = "REF",
-        num_args = 0..=1,
-        default_missing_value = "main",
-        conflicts_with_all = ["full", "jit", "engine", "control", "against", "unkept"]
-    )]
-    pub base: Option<String>,
-    /// How many tests run at once: the machine's cores unless named, and
-    /// one test at a time at 1. Tests that share a `--CONFLICTS--` key
+    #[command(flatten)]
+    pub baseline: PhptBase,
+    /// How many tests run at once: the seat's share of the machine unless
+    /// named, its cores divided among `XTASK_SEATS`, and one test at a time
+    /// at 1. Tests that share a `--CONFLICTS--` key
     /// never run at once whatever the number.
     #[arg(long, value_name = "N")]
     pub jobs: Option<std::num::NonZeroUsize>,
@@ -623,6 +631,28 @@ pub(crate) struct Phpt {
         conflicts_with_all = ["full", "jit", "engine", "control", "census", "against", "base", "unkept"]
     )]
     pub upstream: Vec<PathBuf>,
+}
+
+/// The selection of runs to recover at a published base.
+#[derive(Debug, Args)]
+pub(crate) struct PhptBase {
+    /// Take the run `--against` holds each subset to at the merge base
+    /// with this ref, `main` unless named, as `done --base` takes it: the
+    /// subset named or every touched one the lane runs, run in a worktree
+    /// laid at the base with its hosts built, the runs kept in the main
+    /// worktree and the worktree removed (#2364).
+    #[arg(
+        long,
+        value_name = "REF",
+        num_args = 0..=1,
+        default_missing_value = "main",
+        conflicts_with_all = ["full", "jit", "engine", "control", "against", "unkept"]
+    )]
+    pub base: Option<String>,
+    /// With `--base`, take every subset of the per-commit lane, including
+    /// untouched crates. This does not select the nightly corpus.
+    #[arg(long, requires = "base", conflicts_with_all = ["subset", "full"])]
+    pub per_commit: bool,
 }
 
 /// The binary under test one `phpt` run asks for, at most one of the two.
@@ -718,7 +748,7 @@ pub(crate) enum TrackCommand {
     },
 }
 
-/// The two halves of a ticket's worktree.
+/// A ticket's worktree laid down and retired, and whose a checkout is.
 #[derive(Debug, Subcommand)]
 pub(crate) enum WorktreeCommand {
     /// Lay the worktree for a branch down, ready to be worked in, with
@@ -738,6 +768,28 @@ pub(crate) enum WorktreeCommand {
         /// The branch a worktree is on.
         branch: String,
     },
+    /// Record the session that owns the checkout this runs in, the
+    /// calling session's own unless a person names one, or let it go;
+    /// refused where another session owns it (#3621).
+    Own {
+        /// The session to record, which only a person names.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+        /// Take the record away, so the checkout is no session's.
+        #[arg(long, conflicts_with = "session")]
+        release: bool,
+    },
+    /// Say whose the checkout this runs in is; exit 1 where another
+    /// session owns it, as pre-commit asks (#3621).
+    Whose,
+    /// Lay the merge queue's worktree down beside the checkout, `_merge`
+    /// on `staging`, its builds seeded from main's, owned by the calling
+    /// session; or claim the one that stands (#3622).
+    Queue,
+    /// Fast-forward `main` to `staging`'s head once `done` is met in
+    /// `_merge` since main's tip, landing `_merge`'s log in main's store
+    /// first; refused, `main` untouched, while anything is unmet (#3622).
+    Land,
 }
 
 /// Read the criteria, or read them and close.
@@ -887,8 +939,13 @@ pub enum Section {
     /// The last 7 days of `ticket` readings in the main worktree's store
     /// and this checkout's: the closes, the successors they opened, the
     /// withdrawals among them and the successors opened per close, in
-    /// one line (#1157).
+    /// one line (#1157); and the tracker's week beside it, tickets created
+    /// against closed and how many are open (#3619).
     Tickets,
+    /// Whether CI runs and passes on `main`: the last run that executed a
+    /// job and the last that passed, from GitHub, unknown where it cannot
+    /// be asked (#3619).
+    Ci,
     /// The last run of `xtask track work`: one row per ticket it worked,
     /// with the outcome, what its session spent and the commit its branch
     /// is at, and the run's own row last with the usd total.

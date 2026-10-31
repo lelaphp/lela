@@ -70,6 +70,65 @@ fn one_met() -> Tally {
     }
 }
 
+/// A derived subset with no tests holds nothing against a base (#3614).
+/// Named subsets, real tests and an unresolved corpus still need evidence.
+#[cfg(tracked)]
+#[test]
+fn only_derived_testless_subsets_omit_the_comparison() {
+    use crate::manifest::Crate;
+
+    let (tree, binary) = workspace_with_a_binary("against-testless");
+    let root: &Path = &tree;
+    let corpus = root.join("corpus");
+    fs::create_dir_all(corpus.join("ext/empty")).unwrap();
+    fs::create_dir_all(corpus.join("ext/ctype")).unwrap();
+    fs::write(corpus.join("ext/ctype/one.phpt"), "--TEST--\none\n").unwrap();
+    let mut manifest = Manifest::of([
+        Crate::named("ext/lexbor"),
+        Crate::named("ext/empty"),
+        Crate::named("ext/ctype"),
+        Crate::named("ext/named").with_phpt(&["ext/empty"]),
+    ]);
+    manifest.pin = Manifest::load(&crate::built_root())
+        .unwrap()
+        .pin
+        .map(|pin| pin.on_this_machine(Some(corpus)));
+    let runs = Runs::new(root, &manifest, Some("HEAD")).unwrap();
+    let runner = Runner::Engine(binary);
+    let after = |manifest: &Manifest, scope: &str| {
+        runs.after(
+            manifest,
+            &Scope::of(scope),
+            (&Tally::default(), &runner),
+            &Reading::new(INSTRUMENT, scope),
+            None,
+        )
+        .unwrap()
+    };
+    for scope in ["ext/lexbor", "ext/empty"] {
+        assert_eq!(after(&manifest, scope), None, "{scope}");
+    }
+    for scope in ["ext/ctype", "ext/named"] {
+        let reading = after(&manifest, scope).unwrap();
+        assert_eq!(reading.status, Status::Skip);
+        assert!(reading.message.contains("no run"), "{reading:?}");
+        assert!(answer(&[reading]).is_err());
+    }
+    // Losing the pin is not evidence that an extension has no tests.
+    manifest.pin = None;
+    assert!(!crate::phpt::testless(&manifest, "ext/lexbor"));
+    assert!(
+        runs.after(
+            &manifest,
+            &Scope::of("ext/lexbor"),
+            (&Tally::default(), &runner),
+            &Reading::new(INSTRUMENT, "ext/lexbor"),
+            None,
+        )
+        .is_err()
+    );
+}
+
 fn count(reading: &Reading, key: &str) -> i64 {
     match reading.numbers.get(key) {
         Some(crate::reading::Number::Int(n)) => *n,

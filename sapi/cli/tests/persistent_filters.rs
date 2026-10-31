@@ -1,7 +1,7 @@
 //! A persistent stream's filters end with the stream at the engine's end,
-//! as php's CLI frees `EG(persistent_list)` at module shutdown (#2861):
+//! as php's CLI frees `EG(persistent_list)` at `php_module_shutdown` (#2861):
 //! what the closing flush raises there is labelled `PHP Shutdown`, after
-//! the request's output. Held on the binary, since the engine's end is
+//! what the request wrote. Held on the binary, since the engine's end is
 //! the host's.
 
 use std::process::{Command, Stdio};

@@ -45,12 +45,13 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::AtomicBool;
 
 use php_engine::tier::{
-    self, CachedSlot, Epoch, Fatal, FrameRef, FuncRef, Held, Request, Stepped, TraceNum,
+    self, CachedSlot, Epoch, Fatal, FrameRef, FramelessAt, FuncRef, Held, Request, Stepped,
+    TraceNum,
 };
 use php_heap::{Arr, HeaderImage, Key, Scalar, Zval, ZvalRef, ZvalType};
 use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
 
-use crate::lower::{self, Stood, engine_offset};
+use crate::lower::{self, OperandKinds, Stood, engine_offset};
 use crate::table::{Exit, Trace};
 use crate::types::ExitId;
 
@@ -566,22 +567,41 @@ kernels! {
         RopeAdd => rope_add(rope: u64, word: u64, type_info: u32) = tier::rope_push;
         RopeEnd => rope_end(rope: u64, word: u64, type_info: u32) -> Zval = tier::rope_end;
         AssignConcat => assign_concat(place: u64, word: u64, type_info: u32) = tier::assign_concat;
-        Concat => concat(a: u64, a_info: u32, b: u64, b_info: u32, kinds: u32) -> Zval = tier::concat;
+        Concat => concat(a: u64, a_info: u32, b: u64, b_info: u32, kinds: OperandKinds) -> Zval = tier::concat;
         Find => find(array: u64, key: u64, key_info: u32, constant: u32) -> Zval;
         Lookup => lookup(array: u64, key: u64, key_info: u32, constant: u32) -> Zval = tier::lookup_element;
         Leave => leave(word: u64, type_info: u32) -> u64 = tier::return_entry;
+        Frameless => frameless(place: u32, at: FramelessAt, kinds: OperandKinds, a: u64, a_info: u32, b: u64, b_info: u32, c: u64, c_info: u32) -> Zval = tier::frameless_call;
+        FreeThis => free_this() = tier::free_this;
+        MakeRef => make_ref(place: u64) -> u64 = tier::make_ref;
+        CallNative => call_native(call: u32) -> Zval = tier::call_native;
+        PopCall => pop_call() = tier::pop_call;
+        Interrupt => interrupt() = tier::interrupted;
     }
 }
 
 /// The `step` kernel (`jit-design.md` §5.2): the opline at `at` of the op
 /// array the engine numbers `func`, which the trace recorded and its epoch
 /// holds, served whole over that op array ([`tier::step_held`]), and
-/// where the interpreter stands after it.
+/// where the interpreter stands after it: nowhere ([`Stood::NOWHERE`])
+/// where the opline left the serving's entry frame and the serving is
+/// over, as php's `zend_jit_leave_func_helper` and a `RETURN`'s handler
+/// answer the halt for a `ZEND_CALL_TOP` frame, which compiled code
+/// past an opline that leaves its frame reads (`Emit::halts`). No opline
+/// that ends a serving leaves a throwable pending as it does, its value
+/// handed over with no destructor called; one that did would be answered
+/// as a throw ([`answered`]) and unwound from a frame already returned,
+/// so it is refused as the internal error it is.
 fn step(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<Stood, Fatal> {
     let frame = standing(req, on.room, on.at)?;
     let (held, epoch) = held(on, func)?;
-    let stepped = tier::step_held(req, frame, held, epoch)?;
-    stood(req, stepped, (frame, func), on.holding)
+    match tier::step_held(req, frame, held, epoch)? {
+        Stepped::Done if req.unwinding() => Err(internal(
+            "a step that ended the serving a trace runs in left it unwinding",
+        )),
+        Stepped::Done => Ok(Stood::NOWHERE),
+        stepped => stood(req, stepped, (frame, func), on.holding),
+    }
 }
 
 /// The `handle` kernel: the opline at `at` of the op array the engine
@@ -594,6 +614,75 @@ fn handle(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<(), Fatal> {
     let frame = standing(req, on.room, on.at)?;
     let (held, _) = held(on, func)?;
     tier::dispatch_held(req, frame, held)
+}
+
+/// The `frameless` kernel: the native at `at` of the engine's
+/// frameless table, the `FRAMELESS_ICALL_*` at `on.at` of the frame at
+/// `place`, served over the three operand zvals compiled code read, each
+/// of the kind `kinds` names for it ([`OperandKinds`]), with no
+/// opline read ([`tier::frameless_call`]), as php's code calls the
+/// native's frameless handler; where the interpreter stands after it is
+/// compiled code's, and a throw is the request's pending throwable.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "php's frameless handler takes three operand zvals, each two words across the crossing"
+)]
+fn frameless(
+    req: &mut Request,
+    on: On<'_, '_>,
+    place: u32,
+    at: FramelessAt,
+    kinds: OperandKinds,
+    a: u64,
+    a_info: u32,
+    b: u64,
+    b_info: u32,
+    c: u64,
+    c_info: u32,
+) -> Result<Zval, Fatal> {
+    let frame = at_place(req, on.room, place);
+    let [a_kind, b_kind, c_kind] = operand_kinds(kinds)?;
+    let operands = [
+        (zval(a, a_info), a_kind),
+        (zval(b, b_info), b_kind),
+        (zval(c, c_info), c_kind),
+    ];
+    tier::frameless_call(req, frame, at, operands)
+}
+
+/// The `call_native` kernel: the native the call at `call` on the stack
+/// is to, the call on top and made the one being served by compiled code,
+/// served with no opline read ([`tier::call_native`]), as php's code calls
+/// the native's handler with the call; where the interpreter stands
+/// after it is compiled code's, and a throw is the request's pending
+/// throwable.
+fn call_native(req: &mut Request, _: On<'_, '_>, call: u32) -> Result<Zval, Fatal> {
+    tier::call_native(req, FrameRef(call))
+}
+
+/// The `pop_call` kernel: the call on top popped and its arguments given
+/// up ([`tier::pop_call`]), a destructor's throw left pending.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "a kernel answers as `kernels!` calls it, and this one never fails"
+)]
+fn pop_call(req: &mut Request, _: On<'_, '_>) -> Result<(), Fatal> {
+    tier::pop_call(req);
+    Ok(())
+}
+
+/// The `interrupt` kernel: the interrupt check after a native returned,
+/// php's `zend_fcall_interrupt` ([`tier::interrupted`]); a hook's throw is
+/// the request's pending throwable.
+fn interrupt(req: &mut Request, _: On<'_, '_>) -> Result<(), Fatal> {
+    tier::interrupted(req).map(drop)
+}
+
+/// The kinds `kinds` carries across, in operand order.
+fn operand_kinds(kinds: OperandKinds) -> Result<[OperandKind; 3], Fatal> {
+    kinds
+        .kinds()
+        .ok_or_else(|| internal("an operand of no operand kind"))
 }
 
 /// The `leave` kernel: the value the `RETURN` at `at`, which a trace ends
@@ -678,6 +767,16 @@ fn free_cv(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Resu
     Ok(())
 }
 
+/// The `free_this` kernel: the receiver of the method's frame a
+/// `RETURN` leaves in place, after its variables, where its owner or its
+/// pin is the last, that frame off the chain first
+/// ([`tier::free_this`]), a destructor's throw left pending.
+fn free_this(req: &mut Request, on: On<'_, '_>) -> Result<(), Fatal> {
+    let frame = standing(req, on.room, on.at)?;
+    tier::free_this(req, frame);
+    Ok(())
+}
+
 /// The `identical` kernel: php's `zend_is_identical` of two zvals of a
 /// scalar kind or a string, one or zero, as compiled code compares two
 /// strings' bytes; it reads nothing of the request and stands no frame,
@@ -759,8 +858,8 @@ fn assign_concat(
 }
 
 /// The `concat` kernel: `CONCAT` or `FAST_CONCAT` of two strings
-/// ([`tier::concat`]), `kinds` the left side's `IS_*` in its low byte and
-/// the right side's above it, the left one handed with its owner where it
+/// ([`tier::concat`]), `kinds` the two sides' `IS_*` ([`OperandKinds`]),
+/// the left one handed with its owner where it
 /// is a temporary; the joined string's zval, or `UNDEF` where the join
 /// refused and left its throwable pending, which the wrapper answers as
 /// one. Compiled code stood the frame at the opline first.
@@ -771,21 +870,11 @@ fn concat(
     a_info: u32,
     b: u64,
     b_info: u32,
-    kinds: u32,
+    kinds: OperandKinds,
 ) -> Result<Zval, Fatal> {
-    let kind = |byte: u32| {
-        [
-            OperandKind::Const,
-            OperandKind::Tmp,
-            OperandKind::Var,
-            OperandKind::Cv,
-        ]
-        .into_iter()
-        .find(|kind| u32::from(*kind as u8) == byte & 0xff)
-        .ok_or_else(|| internal("a side of a concatenation of no operand kind"))
-    };
-    let left = (zval(a, a_info), kind(kinds)?);
-    let right = (zval(b, b_info), kind(kinds >> 8)?);
+    let [a_kind, b_kind, _] = operand_kinds(kinds)?;
+    let left = (zval(a, a_info), a_kind);
+    let right = (zval(b, b_info), b_kind);
     Ok(tier::concat(req, left, right)?.unwrap_or(Zval::UNDEF))
 }
 
@@ -857,6 +946,33 @@ fn lookup(
     Ok(placed(laid))
 }
 
+/// The `make_ref` kernel: the reference a `SEND_REF` makes of the
+/// variable at `place` ([`tier::make_ref`]), as php's `zend_jit_send_ref`
+/// makes it, written into the place; one where it made it, zero where
+/// the memory limit refused it, the request ended in its fatal, which
+/// the wrapper answers as the request's unwinding, or a fallible scope's
+/// refusal, whose send the handler then serves.
+fn make_ref(req: &mut Request, on: On<'_, '_>, place: u64) -> Result<u64, Fatal> {
+    standing(req, on.room, on.at)?;
+    let place = zval(place, u32::from(ZvalType::Indirect as u8))
+        .as_indirect()
+        .ok_or_else(|| internal("compiled code's SEND_REF of no place"))?;
+    Ok(u64::from(tier::make_ref(req, place)))
+}
+
+/// The frame at `place` on the stack, which compiled code holds for the
+/// frame whose room it handed a kernel, so no frame is looked for by its
+/// room ([`standing`]); a debug build holds the two to one frame.
+fn at_place(req: &Request, room: Room, place: u32) -> FrameRef {
+    let frame = FrameRef(place);
+    debug_assert_eq!(
+        NonNull::new(room.0).and_then(|room| tier::at_room(req, room)),
+        Some(frame),
+        "compiled code's place of a frame is the place of the frame at its room"
+    );
+    frame
+}
+
 /// The frame whose room compiled code handed a kernel, stood at the
 /// opline the kernel serves: php's `SAVE_OPLINE()`, so what it raises is
 /// reported at that opline and a step serves it.
@@ -870,7 +986,10 @@ fn standing(req: &mut Request, room: Room, at: OplineIdx) -> Result<FrameRef, Fa
 
 /// Where the interpreter stands after a step of `stepped`'s opline in
 /// `frame`, which serves the op array the engine numbers `func`: the
-/// frame it goes on in, whatever the step pushed or popped.
+/// frame it goes on in, whatever the step pushed or popped. A step that
+/// ended the serving is the `step` kernel's to answer ([`step`]); the
+/// `push_call` and `call` kernels serve no opline that leaves its frame,
+/// so for them it is an internal error.
 fn stood(
     req: &mut Request,
     stepped: Stepped,
@@ -1399,9 +1518,18 @@ pub(crate) struct Headers {
     rows: std::cell::OnceCell<Rows>,
 }
 
-/// A call's header by the op array a user function's call serves, or
-/// the name a native's has, and the argument count.
-type CallKey = (Option<FuncRef>, Box<[u8]>, u32);
+/// A call's header by the op array a published user function's call
+/// serves, the name of the class a request-scoped class's own method's is
+/// found under, the call's own name, the argument count, and a method's
+/// called scope, which its header names: one image per call
+/// [`tier::PlainCall`]'s equality tells apart.
+type CallKey = (
+    Option<FuncRef>,
+    Box<[u8]>,
+    Box<[u8]>,
+    u32,
+    Option<tier::ClassId>,
+);
 
 #[derive(Debug, Default)]
 struct HeadersKept {
@@ -1536,12 +1664,14 @@ fn header_of(
     req: &Request,
     call: &tier::PlainCall,
 ) -> Option<usize> {
-    let named = if call.callee().is_none() {
-        call.name()
-    } else {
-        &[]
-    };
-    let key = (call.callee(), Box::<[u8]>::from(named), call.count());
+    let key = (
+        call.callee(),
+        Box::<[u8]>::from(call.own_class().unwrap_or_default()),
+        Box::<[u8]>::from(call.name()),
+        call.count(),
+        // The scope the image writes: a request-scoped class's is none.
+        call.scope().filter(|class| tier::class_published(*class)),
+    );
     if let Some(image) = calls.get(&key) {
         return Some(image.address());
     }
@@ -1635,20 +1765,6 @@ impl Rows {
     /// The first table's address, which compiled code reads past.
     fn base(&self) -> *const usize {
         self.firsts.as_ptr().cast()
-    }
-}
-
-/// The trace `landed`, compiled at the landing `frame` stands at, which
-/// `escaped` escaped to, written into a landing slot of `escaped`'s
-/// (`lower::LandingSlots`), keyed as its code reads where the frame stands
-/// after the return: the frame's own cache, which names its op array, and
-/// its opline. Nothing where the frame's op array is not the engine's.
-pub(crate) fn remembered(req: &Request, frame: FrameRef, escaped: &Trace, landed: &Trace) {
-    let func = tier::frame_cache(req, frame).and_then(engine_offset);
-    let opline = tier::frame(req, frame).map(|view| view.opline().0);
-    if let (Some(func), Some(opline)) = (func, opline) {
-        let key = lower::LandingSlots::key(lower::Stands { func, opline });
-        escaped.landings.remember(key, &landed.entrance);
     }
 }
 

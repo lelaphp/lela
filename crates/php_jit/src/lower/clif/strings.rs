@@ -13,11 +13,11 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
 use cranelift_codegen::ir::{BlockArg, InstBuilder, Value};
-use php_engine::tier::FRAME;
 use php_heap::{Str, ZvalType};
 use php_unit::{Opcode, OperandKind};
 
-use super::{Emit, Kernel, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
+use super::{EX_OPLINE, Emit, Kernel, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
+use crate::lower::OperandKinds;
 use crate::types::{
     Abort, Check, Constant, Frame, Fused, GuardAt, Home, Leave, Line, OpId, Operand,
 };
@@ -239,7 +239,11 @@ impl Emit<'_> {
     }
 
     /// The two words of the zval `operand` of `frame` names, as it stands.
-    fn zval_words(&mut self, frame: Frame, operand: Operand) -> Result<(Value, Value), Abort> {
+    pub(super) fn zval_words(
+        &mut self,
+        frame: Frame,
+        operand: Operand,
+    ) -> Result<(Value, Value), Abort> {
         let (base, at) = self.zval_place(frame, operand)?;
         let word = self.b.ins().load(I64, trusted(), base, at);
         let info = self.b.ins().load(I32, trusted(), base, at + TYPE_AT);
@@ -257,9 +261,7 @@ impl Emit<'_> {
     fn save_opline(&mut self, line: &Line) -> Result<(), Abort> {
         let room = self.room(line.frame)?;
         let opline = self.b.ins().iconst(I32, i64::from(line.opline.0));
-        let at =
-            i32::try_from(FRAME.opline()).map_err(|_| mismatch("an opline past an immediate"))?;
-        self.b.ins().store(trusted(), opline, room, at);
+        self.b.ins().store(trusted(), opline, room, EX_OPLINE);
         Ok(())
     }
 
@@ -467,7 +469,7 @@ impl Emit<'_> {
 
     /// The `IS_*` of the slot or constant `operand` names, as the handler
     /// reads its kind.
-    fn kind_of(&self, operand: Operand) -> Result<OperandKind, Abort> {
+    pub(super) fn kind_of(&self, operand: Operand) -> Result<OperandKind, Abort> {
         Ok(match operand {
             Operand::Value(value) => {
                 if self.is_temporary(self.value(value)?.slot)? {
@@ -530,8 +532,8 @@ impl Emit<'_> {
         let (b, b_info) = self.zval_words(line.frame, line.op2)?;
         self.save_opline(line)?;
         let [room, opline] = self.served(line)?;
-        let kinds = u32::from(a_kind as u8) | u32::from(b_kind as u8) << 8;
-        let kinds = self.b.ins().iconst(I32, i64::from(kinds));
+        let kinds = OperandKinds::of([a_kind, b_kind, OperandKind::Unused]);
+        let kinds = self.b.ins().iconst(I32, kinds.word());
         let slot = self.answer();
         let answer = self.b.ins().stack_addr(I64, slot, 0);
         self.call_freeing(

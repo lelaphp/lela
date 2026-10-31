@@ -79,7 +79,8 @@ pub(crate) fn build(
     features: Option<&str>,
     into: Option<&Path>,
 ) -> Result<PathBuf> {
-    built(root, LANE, (package, binary), features, (into, None))
+    let on = (features, true);
+    built(root, LANE, (package, binary), on, (into, None))
 }
 
 /// The same in `release`, the bench lane's profile: what a bar's arm of
@@ -95,16 +96,31 @@ pub(crate) fn released(
     features: Option<&str>,
     into: (Option<&Path>, Option<&str>),
 ) -> Result<PathBuf> {
-    built(root, Profile::Release, (package, binary), features, into)
+    let on = (features, true);
+    built(root, Profile::Release, (package, binary), on, into)
+}
+
+/// [`released`] with the package's default features off, under `into`:
+/// a host without the bundle's `jit`, which each host turns on by default
+/// (#3676), the build G1 holds the tier's door cost against, in a target
+/// directory of its own so the default one keeps the shipped build.
+pub(crate) fn released_bare(
+    root: &Path,
+    (package, binary): (&str, &str),
+    into: &Path,
+) -> Result<PathBuf> {
+    let (bare, into) = ((None, false), (Some(into), None));
+    built(root, Profile::Release, (package, binary), bare, into)
 }
 
 /// `binary` of `package` built in `profile`: the cargo line [`build`] and
-/// [`released`] each run in their profile, and where cargo put the binary.
+/// [`released`] each run in their profile, with the package's default
+/// features where `defaults` says so, and where cargo put the binary.
 fn built(
     root: &Path,
     profile: Profile,
     (package, binary): (&str, &str),
-    features: Option<&str>,
+    (features, defaults): (Option<&str>, bool),
     (into, cfg): (Option<&Path>, Option<&str>),
 ) -> Result<PathBuf> {
     let mut cargo = Command::new(cargo());
@@ -121,6 +137,9 @@ fn built(
     let mut added = Added::inherited();
     if let Some(cfg) = cfg {
         added = added.with_cfg(cfg);
+    }
+    if !defaults {
+        cargo.arg("--no-default-features");
     }
     cargo
         .args(features.into_iter().flat_map(|names| ["--features", names]))
@@ -144,9 +163,10 @@ fn built(
     Ok(built)
 }
 
-/// Where the engine turning the bundle's `feature` on is built: a target
+/// Where the engine turning the bundle's `feature` on, or a build named
+/// `feature` of other features than the default's, is built: a target
 /// directory of its own under `root`'s, so `target/<profile>/php` stays
-/// the binary under test's default build (#2029).
+/// the binary under test's default build (#2029, #3676).
 pub(crate) fn featured(root: &Path, feature: &str) -> PathBuf {
     root.join("target").join("featured").join(feature)
 }
@@ -179,10 +199,11 @@ pub(crate) fn build_hosts(root: &Path) -> Result<()> {
     run(root, &mut cargo, &Added::inherited(), &what)
 }
 
-/// `cargo`, a build line, run in `root` with `added` on it, refused
-/// naming `what` it builds where cargo fails.
+/// `cargo`, a build line, run in `root` with `added` on it and the seat's
+/// share of the machine, refused naming `what` it builds where cargo fails.
 fn run(root: &Path, cargo: &mut Command, added: &Added, what: &str) -> Result<()> {
     added.onto(cargo);
+    crate::seat::lend(cargo);
     let status = cargo
         .current_dir(root)
         .status()
@@ -379,6 +400,35 @@ mod tests {
             "{}",
             built.display()
         );
+    }
+
+    /// The bare build turns the package's default features off and lands
+    /// in the directory it is given, where the release build of the same
+    /// package keeps them (#3676): the probe prints whether its default
+    /// feature is on.
+    #[test]
+    fn the_bare_build_is_without_the_default_features_in_a_directory_of_its_own() {
+        let root = crate::scratch::Tree::new("profile-bare").unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"probe\"\npath = \"main.rs\"\n\n[features]\ndefault = [\"on\"]\non = []\n\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("main.rs"),
+            "fn main() {\n    print!(\"{}\", cfg!(feature = \"on\"));\n}\n",
+        )
+        .unwrap();
+        let printed = |built: &Path| {
+            let out = Command::new(built).output().unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        let into = root.join("target/featured/bare");
+        let bare = released_bare(&root, ("probe", "probe"), &into).unwrap();
+        assert!(bare.starts_with(&into), "{}", bare.display());
+        assert_eq!(printed(&bare), "false");
+        let full = released(&root, ("probe", "probe"), None, (None, None)).unwrap();
+        assert_eq!(printed(&full), "true");
     }
 
     /// A cfg a bench build names reaches rustc beside the flags of the

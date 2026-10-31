@@ -349,10 +349,9 @@ impl Beside {
     }
 
     /// How many of `all`, `krate`'s executables, run at once, and what each may
-    /// not run beside, in their order. Side by side, as many as the share of
-    /// the machine cargo was given, `CARGO_BUILD_JOBS`, where the session
-    /// sets one, and otherwise the cores, since each executable runs its
-    /// own tests on threads of its own. A key held for a name that is no
+    /// not run beside, in their order. Side by side, as many as the seat's
+    /// share of the machine ([`crate::seat::jobs`]), since each executable
+    /// runs its own tests on threads of its own. A key held for a name that is no
     /// executable of the crate is an error.
     fn schedule(&self, krate: &str, all: &[Executable]) -> Result<(NonZeroUsize, Vec<Apart>)> {
         let Beside::SideBySide { apart, own } = self else {
@@ -366,15 +365,12 @@ impl Beside {
                 );
             }
         }
-        let jobs = std::env::var("CARGO_BUILD_JOBS")
-            .ok()
-            .and_then(|j| j.parse().ok());
         let keys = |e: &Executable| apart.get(&e.name).cloned().unwrap_or_default();
         let held = all.iter().map(|e| Apart {
             keys: keys(e),
             ..Apart::default()
         });
-        Ok((jobs.unwrap_or_else(tally::cores), held.collect()))
+        Ok((crate::seat::jobs(), held.collect()))
     }
 }
 

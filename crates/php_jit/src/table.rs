@@ -49,14 +49,14 @@
 //! The copy is the asking process's to pay, at each fork, for the chunks
 //! in use alone.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use php_engine::tier::{self, Epoch, FuncRef, MapPtrRaw, PlainCall, Request, Word};
 use php_unit::OplineIdx;
 
 use crate::lower::{
-    Compiled, Entrance, EntrySlots, Fuzzed, LandingSlots, Linked, Mark, Stands, engine_offset,
+    Compiled, Entrance, EntrySlots, Escapes, Fuzzed, Linked, Mark, Stands, engine_offset,
 };
 use crate::policy::{Place, Policy};
 use crate::record::{Entered, Start, Stop};
@@ -75,8 +75,8 @@ use code::{Arena, Code, Pages};
 pub(crate) use perf::{Outputs, Perf, Usage, Used};
 
 /// The `Pages` adapter a trace's code is mapped through on this target
-/// (`jit-design.md` §4.4): `MAP_JIT` on macOS aarch64; one sealed `memfd`
-/// mapped twice on Linux x86-64 and aarch64; under Miri the heap adapter,
+/// (`jit-design.md` §4.4): `MAP_JIT` on macOS, one sealed `memfd` mapped
+/// twice on Linux, each on x86-64 and aarch64; under Miri the heap adapter,
 /// the only one it runs; elsewhere, where `build.rs` sets no
 /// `php_jit_arena`, none, so a table maps no arena and numbers each trace
 /// it publishes with no code.
@@ -176,10 +176,6 @@ pub(crate) struct Trace<P: Pages = Native> {
     /// One entry slot per exit, which its code reads where the exit jumps
     /// to its side trace, and which the publish of that side writes.
     pub(crate) slots: EntrySlots,
-    /// Its landing slots, which its code reads where it escapes, and
-    /// which the crossing writes as it enters a trace at a landing it
-    /// escaped to (`lower::LandingSlots`).
-    pub(crate) landings: LandingSlots,
     pub(crate) id: TraceId,
     #[cfg_attr(
         not(test),
@@ -440,6 +436,11 @@ struct Writer<P: Pages> {
 /// behind the one mutex a publish takes.
 pub(crate) struct TraceTable<P: Pages = Native> {
     segments: Box<[OnceLock<Segment<P>>]>,
+    /// The entrance of each trace by its number, php's `zend_jit_traces`
+    /// as a trace's escape reads it (`lower::Escapes`): null until the
+    /// publish that numbered the trace placed it, then the trace's
+    /// [`Entrance`], written once with release.
+    entrances: Box<[AtomicPtr<Entrance>]>,
     /// The id the next trace takes, php's `ZEND_JIT_TRACE_NUM`: written
     /// under the mutex after the trace's slot, read with nothing taken.
     next: AtomicU32,
@@ -451,6 +452,8 @@ pub(crate) struct TraceTable<P: Pages = Native> {
     /// What the published traces take, the counts of the `Perf` behind
     /// the compile mutex, read with nothing taken, as php reads `*dasm_ptr`.
     used: Arc<Used>,
+    /// php's analysis of each op array a trace was built through.
+    analyses: crate::analysis::Analyses,
 }
 
 impl<P: Pages> std::fmt::Debug for TraceTable<P> {
@@ -604,6 +607,9 @@ impl<P: Pages> TraceTable<P> {
         let used = perf.used();
         TraceTable {
             segments: (0..segments).map(|_| OnceLock::new()).collect(),
+            entrances: (0..bounds.traces)
+                .map(|_| AtomicPtr::new(std::ptr::null_mut()))
+                .collect(),
             next: AtomicU32::new(1),
             stopped: AtomicBool::new(false),
             bounds,
@@ -613,7 +619,14 @@ impl<P: Pages> TraceTable<P> {
                 perf,
             }),
             used,
+            analyses: crate::analysis::Analyses::default(),
         }
+    }
+
+    /// The analyses of the op arrays the epoch's traces were built
+    /// through ([`crate::analysis`]).
+    pub(crate) fn analyses(&self) -> &crate::analysis::Analyses {
+        &self.analyses
     }
 
     /// What the traces published into this epoch's table so far take
@@ -768,7 +781,6 @@ impl<P: Pages> TraceTable<P> {
                 trace: id.get(),
             },
             slots: compiled.slots,
-            landings: compiled.landings,
             id,
             kind: Kind::Trace,
             start,
@@ -788,12 +800,41 @@ impl<P: Pages> TraceTable<P> {
             links: links.into_boxed_slice(),
         });
         self.fill(id, trace)?;
+        self.enterable(id);
         self.open(start, id);
         writer.counts.count(admitted, exits);
         writer.perf.counted(bytes, oplines);
         self.next
             .store(id.get().saturating_add(1), Ordering::Release);
         Ok(id)
+    }
+
+    /// The trace `id` names entered through its entrance, written with
+    /// release once the trace is in its slot, where an escape to a
+    /// landing whose word names it reads it (`lower::Escapes`), as php's
+    /// root publish writes the landing opline's handler
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:7595`).
+    fn enterable(&self, id: TraceId) {
+        let slot = usize::try_from(id.get())
+            .ok()
+            .and_then(|at| self.entrances.get(at));
+        if let (Some(slot), Some(trace)) = (slot, self.get(id)) {
+            slot.store(
+                std::ptr::from_ref(&trace.entrance).cast_mut(),
+                Ordering::Release,
+            );
+        }
+    }
+
+    /// Where the code of a trace published into this table, the epoch's,
+    /// reads the trace compiled at a landing it escapes to: the epoch's
+    /// landing index and this table's entrances.
+    pub(crate) fn escapes(&self, epoch: &Epoch) -> Escapes {
+        Escapes {
+            landings: epoch.landing_index(),
+            entrances: self.entrances.as_ptr().expose_provenance(),
+            traces: u32::try_from(self.entrances.len()).unwrap_or(u32::MAX),
+        }
     }
 
     /// The entry slot of the exit `start` grew the trace `id` from set to

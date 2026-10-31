@@ -2,8 +2,8 @@
 //! host (#2340), refused from the head it parsed before a request reaches
 //! the request side.
 //!
-//! hyper's parser refuses with 400 and a close, before a service sees
-//! the request: a `Content-Length` that is not a run of digits, two that
+//! hyper's parser refuses with 400 and a close, before a `Service` sees
+//! the request: a `Content-Length` that is not all digits, two that
 //! differ, and one past `u64`; `chunked` not the last transfer coding;
 //! `Transfer-Encoding` on HTTP/1.0; a folded field, a bare CR, and
 //! whitespace before a colon. Where `Transfer-Encoding` and
@@ -20,7 +20,7 @@
 //! Two of the RFC's choices hyper makes for the host, with no option to
 //! make them otherwise: a request with both `Transfer-Encoding` and
 //! `Content-Length` is read by the coding and closed, never refused,
-//! since the length is gone before a service sees the head; and a bare LF
+//! since the length is gone before a `Service` sees the head; and a bare LF
 //! ending a line of the head is taken as its end (§2.2), which the RFC
 //! lets a recipient do and which no configuration of its parser refuses.
 //! One `Content-Length` sent twice alike is read as one (§6.3 rule 5).
@@ -36,7 +36,7 @@ pub(crate) fn refusal(parts: &Parts) -> Option<StatusCode> {
 
 /// §3.2: a server answers 400 to an HTTP/1.1 request with no `Host`, to
 /// any request with more than one, and to one whose value is not a host
-/// and port; an empty value is the one a target with no authority sends.
+/// and `port`; an empty value is the one a target with no authority sends.
 fn host_refused(parts: &Parts) -> Option<StatusCode> {
     let mut hosts = parts.headers.get_all(HOST).iter();
     let refused = match (hosts.next(), hosts.next()) {
@@ -47,7 +47,7 @@ fn host_refused(parts: &Parts) -> Option<StatusCode> {
     refused.then_some(StatusCode::BAD_REQUEST)
 }
 
-/// `uri-host [ ":" port ]` (RFC 3986 §3.2.2, §3.2.3): an IP literal in
+/// `uri-host [ ":" port ]` (RFC 3986 §3.2.2, §3.2.3): an `IP-literal` in
 /// brackets or a registered name of unreserved, sub-delimiting and
 /// percent-encoded bytes, then digits after a colon.
 fn is_host(value: &[u8]) -> bool {

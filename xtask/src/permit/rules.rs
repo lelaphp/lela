@@ -17,13 +17,16 @@ use super::argv::{Argv, Joint, Line, Move};
 use super::call::Call;
 use super::label;
 use super::operation;
+use super::owned::{self, Owned, Scope, redirected};
 use super::region::region_body;
 use super::unless;
-use crate::manifest::{Manifest, Rule, Where, scope_matches};
+use super::writes::changes;
+use crate::manifest::{Manifest, Rule, Runs, Where, scope_matches};
+use crate::owner::{self, SessionId};
 use crate::rust;
 
 /// The hook event the shipped adapter wires (§6).
-const HOOK_EVENT: &str = "PreToolUse";
+pub(super) const HOOK_EVENT: &str = "PreToolUse";
 
 /// A rule's verdict on one call: a deny stops the call, a note rides on
 /// the allow.
@@ -54,6 +57,39 @@ pub struct Finding {
     pub adr: Vec<String>,
     /// The person's approval that turned the rule's denial into this note.
     pub(crate) admission: Option<Admission>,
+    /// Where a denial judged the call, which its reason names.
+    pub(crate) placement: Option<Placement>,
+    /// What to do instead, the rule's `remedy`, which a denial names.
+    pub(crate) remedy: Option<String>,
+}
+
+/// Where permit judged a call it denies: the checkout it asked, or a line
+/// whose command it could not place, which it says rather than guess a
+/// checkout (#3619).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Placement {
+    In(PathBuf),
+    Unplaced(Unplaced),
+}
+
+/// A command a rule fires on that the walk places nowhere, and the change
+/// or the program past which it lost the line ([`Walk::lost_by`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Unplaced {
+    command: String,
+    past: String,
+}
+
+impl std::fmt::Display for Placement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Placement::In(checkout) => write!(f, "Judged in {}.", checkout.display()),
+            Placement::Unplaced(Unplaced { command, past }) => write!(
+                f,
+                "Not placed: permit cannot tell which checkout `{command}` runs in past `{past}`, which does not say where it goes; name the directory in the line, or run the command in a line of its own."
+            ),
+        }
+    }
 }
 
 impl Finding {
@@ -64,6 +100,8 @@ impl Finding {
             text: rule.text.clone(),
             adr: rule.adr.iter().map(str::to_owned).collect(),
             admission: None,
+            placement: None,
+            remedy: (kind == Kind::Deny).then(|| rule.remedy.clone()).flatten(),
         }
     }
 
@@ -76,15 +114,28 @@ impl Finding {
         }
     }
 
-    /// The sentence the model reads: the text, then the rule id and ADR
-    /// numbers in parentheses.
+    /// The sentence the model reads: what the finding says, then the
+    /// rule id and ADR numbers in parentheses.
     pub fn reason(&self) -> String {
         let mut tail = self.rule.clone();
         for adr in &self.adr {
             tail.push_str(", ADR-");
             tail.push_str(adr);
         }
-        format!("{} ({tail})", self.text)
+        format!("{} ({tail})", self.said())
+    }
+
+    /// The text, then what to do instead and where a denial judged the
+    /// call (#3618 ruling 3).
+    pub(crate) fn said(&self) -> String {
+        let mut said = self.text.clone();
+        if let Some(remedy) = &self.remedy {
+            said = format!("{said} Instead: {remedy}.");
+        }
+        match &self.placement {
+            Some(placement) => format!("{said} {placement}"),
+            None => said,
+        }
     }
 }
 
@@ -92,6 +143,13 @@ impl Finding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Judgement {
     pub findings: Vec<Finding>,
+    /// The rules that judged the call, whether or not they found: the
+    /// denominator a rule's denials are read against (#3619).
+    pub judged: Vec<String>,
+    /// What the person's files carry that does not validate, which the
+    /// decision notes beside itself while it judges by what loaded (#3618
+    /// ruling 4).
+    pub(crate) defects: Vec<String>,
 }
 
 impl Judgement {
@@ -108,9 +166,16 @@ impl Judgement {
     /// The hook's stdout: the deny, the allow with its notes, or nothing.
     pub fn hook_stdout(&self) -> Option<Value> {
         if let Some(denial) = self.denial() {
-            return Some(deny_output(&denial.reason()));
+            let reason = [denial.reason()]
+                .into_iter()
+                .chain(self.defects.iter().cloned());
+            return Some(deny_output(&reason.collect::<Vec<_>>().join("\n")));
         }
-        let notes: Vec<String> = self.notes().map(Finding::reason).collect();
+        let notes = self
+            .notes()
+            .map(Finding::reason)
+            .chain(self.defects.iter().cloned());
+        let notes: Vec<String> = notes.collect();
         if notes.is_empty() {
             return None;
         }
@@ -147,18 +212,40 @@ pub fn judge(manifest: &Manifest, root: &Path, call: &Call) -> Result<Judgement>
     let path = call.path(root);
     let line = call.command().map(Line::read);
     let mut findings = Vec::new();
+    let mut judged = Vec::new();
     if let Some(path) = &path {
         findings.extend(region_body(root, path, call));
     }
-    for rule in &manifest.rules {
+    for rule in manifest
+        .rules
+        .iter()
+        .filter(|r| applies(r, call, path.as_deref()))
+    {
+        judged.push(rule.id.clone());
         let finding = evaluate(manifest, root, rule, call, path.as_deref(), line.as_ref())?;
         findings.extend(finding);
     }
-    Ok(Judgement { findings })
+    let defects = manifest.defects().iter().map(ToString::to_string).collect();
+    Ok(Judgement {
+        findings,
+        judged,
+        defects,
+    })
 }
 
-/// One rule over the call, with the file it touches and the shell line it
-/// runs, each read once for every rule.
+/// Whether `rule` judges the call at all: its tool, a file its exempt does
+/// not cover and its scope does (#23), and a predicate that describes a
+/// call.
+fn applies(rule: &Rule, call: &Call, path: Option<&Path>) -> bool {
+    (rule.tool.is_empty() || rule.tool.iter().any(|t| t == call.tool_name))
+        && !(rule.runs == Runs::Foreground && call.in_background())
+        && !path.is_some_and(|path| rule.exempts(path))
+        && (rule.scope.is_empty() || path.is_some_and(|path| rule.covers(path)))
+        && rule.predicate.describes_a_call()
+}
+
+/// One rule that [`applies`] over the call, with the file it touches and
+/// the shell line it runs, each read once for every rule.
 fn evaluate(
     manifest: &Manifest,
     root: &Path,
@@ -167,26 +254,9 @@ fn evaluate(
     path: Option<&Path>,
     line: Option<&Line>,
 ) -> Result<Option<Finding>> {
-    if !rule.tool.is_empty() && !rule.tool.iter().any(|t| t == call.tool_name) {
-        return Ok(None);
-    }
-    // A file the rule's exempt covers is not judged by it, whatever the
-    // predicate; the grammar is the scope's (#23).
-    if path.is_some_and(|path| rule.exempts(path)) {
-        return Ok(None);
-    }
-    // A rule with a scope judges a file in it and nothing else.
-    if !rule.scope.is_empty() {
-        match path {
-            Some(path) if rule.covers(path) => {}
-            _ => return Ok(None),
-        }
-    }
     let p = &rule.predicate;
     let source = path.is_some_and(is_rust_source);
-    let fired = if !p.describes_a_call() {
-        return Ok(None);
-    } else if p.deny_argv.is_some() || p.require_argv.is_some() {
+    let fired = if p.deny_argv.is_some() || p.require_argv.is_some() {
         line.is_some_and(|l| l.commands().iter().any(|a| fires(rule, a)))
     } else if let Some(pattern) = &p.deny_pattern {
         let regex = Regex::new(pattern)
@@ -199,11 +269,11 @@ fn evaluate(
             .with_context(|| format!("rule \"{}\": unless_pattern is not a regex", rule.id))?;
         // A hit whose own command the `unless_pattern` matches is let
         // through; the rule fires on any other.
-        let unexcused = |subject: &str| {
-            regex.find_iter(subject).any(|hit| {
+        let unexcused = |subject: &str, hits: Vec<std::ops::Range<usize>>| {
+            hits.into_iter().any(|hit| {
                 unless_pattern
                     .as_ref()
-                    .is_none_or(|unless| !unless.is_match(command_around(subject, hit.range())))
+                    .is_none_or(|unless| !unless.is_match(command_around(subject, hit)))
             })
         };
         // A hit the rule's `unless` accounts for is the named instrument's
@@ -214,8 +284,9 @@ fn evaluate(
             })
         };
         // A shell line is what it would run, so the pattern is asked of
-        // its text less the heredoc bodies it carries as text: what a
-        // command quotes is not what it runs (#1771, #1832). A write is a
+        // its commands ([`Line::subject`]): less the heredoc bodies it
+        // carries as text, and no hit starting in a quote, since what a
+        // command quotes is not what it runs (#1771, #1832, #3635). A write is a
         // change to a file, so the pattern is asked of what the change
         // adds and not of what the file already carries (#510): a write
         // that leaves every hit where it stood adds none and fires on
@@ -224,13 +295,21 @@ fn evaluate(
         // own text does not hold, and a pattern over a block is never
         // whole in an edit inside it (#2413).
         match line {
-            Some(line) => unexcused(line.text()) && !excused(line.text()),
+            Some(line) => unexcused(line.subject(), line.hits(&regex)) && !excused(line.subject()),
             None => call.rewrite(root, path).is_some_and(|(before, after)| {
-                adds(&regex, &after, &before) && unexcused(&after) && !excused(&after)
+                let hits = regex.find_iter(&after).map(|hit| hit.range()).collect();
+                adds(&regex, &after, &before) && unexcused(&after, hits) && !excused(&after)
             }),
         }
     } else if p.deny == Some(true) {
         true
+    } else if p.writes == Some(true) {
+        // A write: an edit's or a write's file, or a shell line that
+        // changes a checkout by a command or a redirection (#3621).
+        match line {
+            Some(line) => line.commands().iter().any(changes) || !redirected(root, line).is_empty(),
+            None => call.tool_input.file_path.is_some(),
+        }
     } else if let Some(types) = &p.deny_types {
         // The file before and after the write, each read whole, since a
         // fragment of an edit cannot say whether it stands in a comment
@@ -260,12 +339,11 @@ fn evaluate(
     }
     // A rule scoped by `where` judges a call only in the checkout it
     // names ([`judges_where`]).
-    let mut foreign = None;
+    let mut standing = Standing::Judged;
     if fired {
-        match judges_where(root, rule, line, call) {
-            Standing::Outside => return Ok(None),
-            Standing::Judged => {}
-            Standing::Foreign(operation) => foreign = Some(operation),
+        standing = judges_where(root, rule, line, call)?;
+        if matches!(standing, Standing::Outside) {
+            return Ok(None);
         }
     }
     // A denial of the agent's hand on a harness file is lifted from the
@@ -278,9 +356,17 @@ fn evaluate(
     }
     Ok(fired.then(|| {
         let mut finding = Finding::of(Kind::of(rule), rule);
-        if let Some(foreign) = foreign {
-            finding.text = format!("{} {foreign}", rule.text);
+        if finding.kind == Kind::Note {
+            return finding;
         }
+        finding.placement = Some(match standing {
+            Standing::Foreign(foreign) => {
+                finding.text = format!("{} {foreign}", rule.text);
+                Placement::In(foreign.checkout)
+            }
+            Standing::Unplaced(lost) => Placement::Unplaced(lost),
+            Standing::Judged | Standing::Outside => Placement::In(judged_in(root, rule, line)),
+        });
         finding
     }))
 }
@@ -291,16 +377,20 @@ enum Standing {
     Outside,
     /// Inside them, a row without `where` among them.
     Judged,
-    /// Where an operation stands that the calling session did not start,
-    /// which the denial names (#2476).
-    Foreign(operation::Foreign),
+    /// In a checkout another session owns, an operation standing there
+    /// where the rule asks for one, which the denial names (#3621).
+    Foreign(Owned),
+    /// Past a change the line does not say where it goes, where the rule
+    /// would judge: the denial says so, and guesses no checkout.
+    Unplaced(Unplaced),
 }
 
 /// Where the call stands for the rule's `where`: asked where a command it
 /// fires on runs ([`fired_in`]), whose branch records a ticket, which is
-/// the main checkout (#2751), or where another session's operation
-/// stands.
-fn judges_where(root: &Path, rule: &Rule, line: Option<&Line>, call: &Call) -> Standing {
+/// the main checkout (#2751), which is the merge worktree (#3622), or
+/// whose checkout it is, and whether an operation stands there ([`owned`], #3621). An owner record that does
+/// not read is an error, so the call is judged by no build.
+fn judges_where(root: &Path, rule: &Rule, line: Option<&Line>, call: &Call) -> Result<Standing> {
     let judged = |inside: bool| {
         if inside {
             Standing::Judged
@@ -308,14 +398,88 @@ fn judges_where(root: &Path, rule: &Rule, line: Option<&Line>, call: &Call) -> S
             Standing::Outside
         }
     };
-    match rule.within {
-        Where::Anywhere => Standing::Judged,
-        Where::Ticketed => judged(ticketed(root, rule, line)),
-        Where::Operating => operation::foreign(root, line, call, |argv| fires(rule, argv))
-            .map_or(Standing::Outside, Standing::Foreign),
-        Where::Main => judged(in_main(root, rule, line)),
-        Where::Checkout => judged(in_a_checkout(root, line)),
+    let owned = |scope| {
+        let found = owned::owned(root, call, line, scope, |argv| fires(rule, argv))?;
+        Ok(found.map_or(Standing::Outside, Standing::Foreign))
+    };
+    let lost = line.and_then(|line| unplaced(root, line, |argv| fires(rule, argv)));
+    Ok(match (rule.within, lost) {
+        (Where::Anywhere, _) => Standing::Judged,
+        // Where each write lands is the owner record's to judge (#3621).
+        (Where::Owned, _) => return owned(Scope::Owned),
+        (Where::Operating, Some(lost)) if operating_elsewhere(root, call)? => {
+            Standing::Unplaced(lost)
+        }
+        (Where::Operating, Some(_)) => Standing::Outside,
+        (_, Some(lost)) => Standing::Unplaced(lost),
+        (Where::Ticketed, None) => judged(ticketed(root, rule, line)),
+        (Where::Operating, None) => return owned(Scope::Operating),
+        (Where::Main, None) => judged(in_main(root, rule, line)),
+        (Where::Staging, None) => judged(on_staging(root, rule, line)),
+        (Where::Checkout, None) => judged(in_a_checkout(root, line)),
+    })
+}
+
+/// Whether an operation stands in a checkout of `root`'s repository that
+/// another session than the caller's owns (#3621), or the repository
+/// cannot be listed: what makes an unplaced command one `where =
+/// "operating"` must refuse. A call that names no session is judged by no
+/// owner record, so it is none.
+fn operating_elsewhere(root: &Path, call: &Call) -> Result<bool> {
+    let Some(caller) = SessionId::new(&call.session_id) else {
+        return Ok(false);
+    };
+    let Ok(all) = crate::track::checkouts(root) else {
+        return Ok(true);
+    };
+    for checkout in all {
+        if operation::standing_in(&checkout).is_some()
+            && owner::another(&checkout, Some(&caller))?.is_some()
+        {
+            return Ok(true);
+        }
     }
+    Ok(false)
+}
+
+/// The first command of `line` that `fires` and that the walk places in
+/// no checkout: one past a change the line does not say where it goes,
+/// or one moved by its own words where they do not say ([`Walk::lost`]).
+/// Where no command fires on its words alone, the line fired whole, as a
+/// pattern over a redirection does, and the first command placed nowhere
+/// that changes no directory is the one named, so the line is never
+/// judged where the shell started (#3625).
+fn unplaced(root: &Path, line: &Line, fires: impl Fn(&Argv) -> bool) -> Option<Unplaced> {
+    let walk = Walk::of(root, Some(line));
+    let past = walk.lost_by.clone()?;
+    let lost = |argv: &&Argv| {
+        walk.places_of(argv).next().is_none() || argv.moves().contains(&Move::Unsaid)
+    };
+    let whole = !line.commands().iter().any(&fires);
+    let changes = |argv: &Argv| matches!(argv.program(), "cd" | "pushd" | "popd");
+    let command = line
+        .commands()
+        .iter()
+        .filter(|argv| if whole { !changes(argv) } else { fires(argv) })
+        .find(lost)?;
+    Some(Unplaced {
+        command: command.words().join(" "),
+        past,
+    })
+}
+
+/// The checkout a denial judged the call in: where the first command the
+/// rule fires on runs ([`fired_in`]) or else where the call acts
+/// ([`acts_in`]), at the top of its worktree.
+fn judged_in(root: &Path, rule: &Rule, line: Option<&Line>) -> PathBuf {
+    let fired = line.and_then(|line| {
+        fired_in(root, line, Places::Every, |argv| fires(rule, argv))
+            .into_iter()
+            .next()
+    });
+    let dir = fired.unwrap_or_else(|| acts_in(root, line));
+    let top = crate::git::rev_parse(&dir, &["--show-toplevel"]).map_or(dir, PathBuf::from);
+    fs::canonicalize(&top).unwrap_or(top)
 }
 
 /// Whether a shell line runs anything inside a checkout of `root`'s
@@ -379,9 +543,22 @@ fn ticketed(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
 
 /// Whether a command the rule fires on runs in the repository's main
 /// checkout rather than a linked worktree ([`linked`]), read where
-/// [`ticketed`] reads (#2751).
+/// [`ticketed`] reads (#2751). A directory under no `.git` is in no
+/// checkout at all, such as a scratch repository the line has yet to
+/// make, and not in main's (#3619).
 fn in_main(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
-    scoped_in(root, rule, line).iter().any(|dir| !linked(dir))
+    scoped_in(root, rule, line)
+        .iter()
+        .any(|dir| linked(dir) == Some(false))
+}
+
+/// Whether a command the rule fires on runs in the merge worktree, the
+/// checkout on [`crate::queue::STAGING`], read where [`ticketed`] reads
+/// (#3622).
+fn on_staging(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
+    scoped_in(root, rule, line)
+        .iter()
+        .any(|dir| crate::track::head_branch(dir).as_deref() == Some(crate::queue::STAGING))
 }
 
 /// Where a `where`-scoped rule asks: each checkout a command it fires on
@@ -399,12 +576,12 @@ fn scoped_in(root: &Path, rule: &Rule, line: Option<&Line>) -> Vec<PathBuf> {
 
 /// Whether `dir` stands in a linked worktree: the nearest `.git` above it
 /// is the file git writes there, where the main checkout's is a
-/// directory. A directory under no `.git` is not one.
-fn linked(dir: &Path) -> bool {
+/// directory. `None` for a directory under no `.git`, in no checkout.
+fn linked(dir: &Path) -> Option<bool> {
     dir.ancestors()
         .map(|dir| dir.join(".git"))
         .find(|git| git.exists())
-        .is_some_and(|git| git.is_file())
+        .map(|git| git.is_file())
 }
 
 /// Whether one command of a shell line is one the rule's argv predicate,
@@ -412,14 +589,20 @@ fn linked(dir: &Path) -> bool {
 /// `deny_pattern` fires on a command whose words it matches and its
 /// `unless_pattern` does not, so a `where` rule asks where the hit runs
 /// and not where its neighbours do (#2751); a rule judging by another
-/// predicate fires on the line whole.
+/// predicate fires on the line whole, and `writes` on a command that
+/// changes a checkout ([`changes`]).
 fn fires(rule: &Rule, argv: &Argv) -> bool {
     let p = &rule.predicate;
+    if p.writes.is_some() {
+        return changes(argv);
+    }
     match (&p.deny_argv, &p.require_argv, &p.deny_pattern) {
         (Some(denied), _, _) => argv.denies(denied, &p.with, p.unless_argv.as_ref()),
         (None, Some(separator), _) => argv.unbounded(separator, &p.with),
         (None, None, Some(pattern)) => {
-            let words = argv.words().join(" ");
+            // A separator among a command's words is one a quote held, and
+            // no command position (#3635).
+            let words = argv.words().join(" ").replace([';', '&', '|', '\n'], " ");
             let matches = |pattern: &str| Regex::new(pattern).map(|r| r.is_match(&words));
             matches(pattern).unwrap_or(true)
                 && !p
@@ -482,11 +665,11 @@ pub(super) fn runs_in(root: &Path, line: Option<&Line>) -> PathBuf {
 }
 
 /// The commands of `line` whose place is read, each with every place of
-/// it `asked` names, one pair per place ([`Walk::placed`]). What
-/// records whose operation stands in a checkout reads a command past a
-/// later change where that change took the shell, never where the shell
-/// started (#2720): an orchestrator's `cat $S/owner; cd <main>; git merge
-/// --no-commit t1955` started a merge no record named (#2723).
+/// it `asked` names, one pair per place ([`Walk::placed`]), a command
+/// past a later change read where that change took the shell, never
+/// where the shell started (#2720), as an orchestrator's
+/// `cat $S/owner; cd <main>; git merge --no-commit t1955` once was not
+/// (#2723).
 pub(super) fn placed<'a>(root: &Path, line: &'a Line, asked: Places) -> Vec<(&'a Argv, PathBuf)> {
     let walk = Walk::of(root, Some(line));
     let kept = walk.placed.into_iter();
@@ -582,8 +765,8 @@ pub(super) fn acts_in(root: &Path, line: Option<&Line>) -> PathBuf {
 
 /// The one reading of where a shell line's commands run, from which
 /// [`runs_in`], [`placed`], [`fired_in`] and [`acts_in`] are read, so
-/// `where = "ticketed"`, `where = "main"`, `where = "operating"`,
-/// `where = "checkout"`, the checkout `permit --after` holds and the
+/// `where = "ticketed"`, `where = "main"`, `where = "staging"`,
+/// `where = "operating"`, `where = "checkout"`, the checkout `permit --after` holds and the
 /// approvals it reads move together (#2597, #2607, #2995).
 ///
 /// Each `cd`, `pushd` and `popd` the line says the target of moves the
@@ -632,6 +815,9 @@ struct Walk<'a> {
     /// Whether the line makes a change, or moves a program, where it does
     /// not say.
     lost: bool,
+    /// The first such change or program, as the line spells it: what a
+    /// denial names when it cannot place a command past it.
+    lost_by: Option<String>,
 }
 
 /// One place the walk gives a command, and how it stands there, which
@@ -770,12 +956,12 @@ impl<'a> Walk<'a> {
                 && words.iter().skip(1).all(|w| w.contains('='));
             if changes && !apart && !shell.lost {
                 shell.change(at.clone(), argv);
-                walk.lost |= shell.lost;
+                walk.lose(shell.lost, argv);
             } else if !exports {
                 // It may fail, and a change past it in its chain not run.
                 shell.certain = false;
             }
-            walk.lost |= argv.moves().contains(&Move::Unsaid);
+            walk.lose(argv.moves().contains(&Move::Unsaid), argv);
             for (dir, via) in at.iter().flat_map(|dir| moved(dir, argv)) {
                 if changes || shell.lost {
                     continue;
@@ -805,6 +991,14 @@ impl<'a> Walk<'a> {
             walk.stands = top.sure;
         }
         walk
+    }
+
+    /// The walk lost where `argv` goes, when `lost` says it did.
+    fn lose(&mut self, lost: bool, argv: &Argv) {
+        if lost && !self.lost {
+            self.lost_by = Some(argv.words().join(" "));
+        }
+        self.lost |= lost;
     }
 
     /// Where the line stands: the one place its shell may stand at its

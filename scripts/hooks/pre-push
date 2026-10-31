@@ -39,9 +39,9 @@ while read -r _local local_sha remote_ref remote_sha; do
         fi
     fi
     if [ "$remote_sha" = "$zero" ]; then
-        cargo xtask done || status=1
+        cargo xtask done --caller pre-push || status=1
     else
-        cargo xtask done --base "$remote_sha" || status=1
+        cargo xtask done --caller pre-push --base "$remote_sha" || status=1
     fi
 done
 exit "$status"

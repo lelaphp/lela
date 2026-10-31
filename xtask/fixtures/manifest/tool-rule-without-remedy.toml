@@ -1,0 +1,18 @@
+# Must fail (#3619, #3618 ruling 3): a rule judged at a call, one with a
+# `tool`, carries a `remedy`, and this one carries none.
+[budget]
+total = 1
+new = 1
+docs = 1
+harness = 1
+lock_packages = 1
+clean_build_release_s = 1
+api_items = 1
+bindings = 1
+
+[[rule]]
+id = "git.no-amend"
+tool = "Bash"
+deny_argv = ["--amend"]
+with = "git commit"
+text = "A commit is never rewritten: make a new one."

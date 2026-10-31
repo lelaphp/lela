@@ -19,7 +19,7 @@ use php_unit::Opcode;
 
 use super::{Emit, KIND, Kind, Refuse, SLOT, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
 use crate::lower::IMAGES_AT;
-use crate::types::{Abort, ExitId, Imm, Line, Object, OpId, Operand, Slotted};
+use crate::types::{Abort, ExitId, Home, Imm, Line, Object, OpId, Operand, Slotted, ValueId};
 
 /// The engine's runtime-cache slot layout, as the guard on a request's own
 /// slot reads it.
@@ -28,7 +28,7 @@ const P: PlaceLayout = PLACE;
 impl Emit<'_> {
     /// The object `object` names, a `zend_object *`: `$this` of its frame,
     /// or what the value's slot holds, an object as its guard held it.
-    fn object(&mut self, object: Object) -> Result<Value, Abort> {
+    pub(super) fn object(&mut self, object: Object) -> Result<Value, Abort> {
         let (base, at) = match object {
             Object::This(frame) => (self.room(frame)?, imm(FRAME.this() as usize)),
             Object::Value(value) => self.place(self.value(value)?.slot)?,
@@ -200,11 +200,32 @@ impl Emit<'_> {
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`, and a method's
     /// call, `zend_jit_init_method_call`, `:9025-9056`). The tag is tested
     /// before anything past it is read; the slot's address is answered.
-    fn cache_guard(
+    pub(super) fn cache_guard(
         &mut self,
         line: &Line,
         (tag, class_at): (u32, u32),
         obj: Value,
+        refuse: Refuse,
+    ) -> Result<Value, Abort> {
+        let place = self.cached_slot(line, tag, refuse)?;
+        let class = self
+            .b
+            .ins()
+            .load(I32, trusted(), place, imm(class_at as usize));
+        let of = self.b.ins().load(I32, trusted(), obj, imm(Obj::CLASS_AT));
+        let other = self.b.ins().icmp(IntCC::NotEqual, class, of);
+        self.refuse_if(other, refuse)?;
+        Ok(place)
+    }
+
+    /// The address of the slot of the request's own runtime cache `line`
+    /// reads ([`IMAGES_AT`]), refused to `refuse` unless its tag is `tag`,
+    /// which is tested before anything past it is read: a slot the touch
+    /// has not answered reads a tag that names nothing.
+    pub(super) fn cached_slot(
+        &mut self,
+        line: &Line,
+        tag: u32,
         refuse: Refuse,
     ) -> Result<Value, Abort> {
         let map = line
@@ -228,13 +249,6 @@ impl Emit<'_> {
             .b
             .ins()
             .icmp_imm_u(IntCC::NotEqual, held, i64::from(tag));
-        self.refuse_if(other, refuse)?;
-        let class = self
-            .b
-            .ins()
-            .load(I32, trusted(), place, imm(class_at as usize));
-        let of = self.b.ins().load(I32, trusted(), obj, imm(Obj::CLASS_AT));
-        let other = self.b.ins().icmp(IntCC::NotEqual, class, of);
         self.refuse_if(other, refuse)?;
         Ok(place)
     }
@@ -293,6 +307,56 @@ impl Emit<'_> {
     /// Warning: Undefined property: A::$x in %s on line 4
     /// 1
     /// ```
+    ///
+    /// A typed property read through `$this` in a method the loop's trace
+    /// calls (#3665): php's analysis types the read by the declaration
+    /// (`zend_fetch_prop_info` on the method's scope), so the read holds
+    /// no guard and its value is kept in a register, which the read
+    /// defines from the slot as `zend_jit_zval_copy_deref_reg` does
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:14611-14616`):
+    ///
+    /// ```php
+    /// class P { public int $m = 0; function f() { return $this->m; } }
+    /// $p = new P;
+    /// for ($i = 1; $i < 4; $i++) { $p->m = $i; echo $p->f(), "\n"; }
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 1
+    /// 2
+    /// 3
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:3
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) $main() %s:4
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit %d $main() %s:4
+    /// ---- TRACE 2 start (side trace 1/%d) $main() %s:4
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    /// ```
+    ///
+    /// The same over every scalar a declaration types alone, an `int`
+    /// through a reference among them, read on the compiler's thread
+    /// once its trace is entered:
+    ///
+    /// ```php
+    /// class P {
+    ///     public int $m = 0; public float $d = 0.0; public bool $b = false;
+    ///     function m() { return $this->m; } function d() { return $this->d; } function b() { return $this->b; }
+    /// }
+    /// $p = new P; $r = new P; $q = &$r->m; $bad = 0;
+    /// for ($i = 1; $i < 200000; $i++) {
+    ///     $p->m = $i; $p->d = $i * 0.5; $p->b = ($i & 1) === 1; $q = $i;
+    ///     if ($p->m() !== $i || $p->d() !== $i * 0.5 || $p->b() !== (($i & 1) === 1) || $r->m() !== $i) { $bad++; }
+    /// }
+    /// echo $bad, "\n";
+    /// ```
+    /// ```expect regime=jit-tracing process
+    /// 0
+    /// ```
     pub(super) fn fetch_obj(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let exit = line
             .exit
@@ -308,17 +372,32 @@ impl Emit<'_> {
             .icmp_imm_s(IntCC::Equal, byte, tag(ZvalType::Undef));
         self.leave_if(undef, exit)?;
         match self.within(at).as_slice() {
-            [] => {
-                let zval = self.deref(zval);
-                let info = self.b.ins().load(I32, trusted(), zval, TYPE_AT);
-                let out_slot = self.value(out)?.slot;
-                self.copy(zval, info, out_slot)
-            }
-            [in_place, through] => self.held_element([*in_place, *through], zval, out),
+            [] => self.copy_deref(zval, out),
+            [in_place, through] => self.held_element(*in_place, Some(*through), zval, out),
             _ => Err(mismatch(
                 "a property fetch holds other guards than its value's two",
             )),
         }
+    }
+
+    /// The property's zval at `zval`, through the reference it may be,
+    /// written to `out`, the value of a fetch no guard holds because php's
+    /// analysis typed it by the declaration: read as the scalar of its
+    /// kind where `out` is kept in a register, as
+    /// `zend_jit_zval_copy_deref_reg` reads it, and copied to its slot
+    /// otherwise, as `zend_jit_zval_copy_deref` copies it
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:14611-14623`).
+    fn copy_deref(&mut self, zval: Value, out: ValueId) -> Result<(), Abort> {
+        let zval = self.deref(zval);
+        let held = self.value(out)?;
+        if held.home == Home::Register {
+            let kind =
+                Kind::of(held.types).ok_or_else(|| mismatch("a register of no scalar kind"))?;
+            let read = self.read(zval, 0, kind);
+            return self.define(out, read);
+        }
+        let info = self.b.ins().load(I32, trusted(), zval, TYPE_AT);
+        self.copy(zval, info, held.slot)
     }
 
     /// `FETCH_OBJ_W` of a declared slot with no type: the slot itself,

@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use php_engine::api::abi::{Admission, Lookup, Validation};
 use php_engine::api::request::TierStatus;
 use php_engine::test::{Capture, Engine, Served};
 use php_engine::tier::{
@@ -99,6 +100,29 @@ pub(crate) fn engine_on<T: Tier>(host: &'static str, ini: &[(&str, &str)]) -> En
     builder.build()
 }
 
+/// [`engine`] whose cache holds every file as opcache holds one under
+/// `opcache.validate_timestamps=0`, so a class a held file links as it
+/// runs is published through the inheritance cache, as php's is under
+/// opcache, and every request after shares it.
+pub(crate) fn engine_holding<T: Tier>(ini: &[(&str, &str)]) -> Engine {
+    let holding = ExtensionBuilder::default()
+        .admission(|_, _| Admission::Held {
+            validation: Validation::Never,
+            lookup: Lookup::Resolved,
+            protection: 0,
+            file_cache: None,
+        })
+        .build("holding");
+    let mut builder = Engine::builder()
+        .tier::<T>()
+        .extensions([holding])
+        .ini("opcache.file_update_protection", "0");
+    for (name, value) in ini {
+        builder = builder.ini(name, value);
+    }
+    builder.build()
+}
+
 /// `program` served once on a fresh engine bound to `T`.
 pub(crate) fn serve<T: Tier>(ini: &[(&str, &str)], program: &str) -> Served {
     Scratch::new().serve(&engine::<T>(ini), program)
@@ -177,7 +201,7 @@ pub(crate) fn switched(builder: ExtensionBuilder) -> ExtensionBuilder {
 /// all, which ext/opcache declares in the bundle and no engine of a
 /// tier's test has, declared by the test tier instead so the tier's
 /// start reads what a test sets.
-pub(crate) const OPCACHE: [&str; 21] = [
+pub(crate) const OPCACHE: [&str; 22] = [
     "opcache.enable",
     "opcache.enable_cli",
     "opcache.jit",
@@ -199,6 +223,7 @@ pub(crate) const OPCACHE: [&str; 21] = [
     "opcache.jit_max_polymorphic_calls",
     "opcache.jit_bisect_limit",
     "opcache.jit_prof_threshold",
+    "opcache.optimization_level",
 ];
 
 /// The compiled tier as a test binds it: `Jit`, its state declared with

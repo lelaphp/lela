@@ -521,6 +521,21 @@ impl Request {
     }
 
     /// [`Request::serve_call`] with no scope a write named standing.
+    ///
+    /// No call while anything stands in php's `EG(exception)`, an `exit`'s
+    /// unwind exit among it, as `zend_call_function` answers `SUCCESS`
+    /// at once then (`Z/Zend/zend_execute_API.c:843`): a native that goes
+    /// on past a handler's `exit` calls nothing after it.
+    ///
+    /// ```php
+    /// class U { function __toString(): string { echo "U called\n"; return "u"; } }
+    /// set_error_handler(function ($no, $str) { echo "handler: $str\n"; exit("exit\n"); });
+    /// echo implode(",", [[1], new U]), "\n";
+    /// ```
+    /// ```expect
+    /// handler: Array to string conversion
+    /// exit
+    /// ```
     fn serve_call_body(
         &mut self,
         target: Callee,
@@ -538,8 +553,9 @@ impl Request {
             Carried::Closure(closure) => Some(closure),
             Carried::Nothing | Carried::HookTrampoline(..) => None,
         };
-        // `if (EG(exception)) return SUCCESS;`: no call while one is pending.
-        if self.pending().is_some() {
+        // `if (EG(exception)) return SUCCESS;`: no call while a throwable
+        // or an exit stands.
+        if self.raised.is_some() {
             return Ok(Value::null());
         }
         // `EG(current_execute_data)` as the call finds it, which a user
@@ -817,8 +833,23 @@ impl Request {
     /// callback's last check is taken here, before the native that
     /// called it goes on. The timer's is the fatal;
     /// otherwise the extensions' hooks, and what they throw is what the
-    /// call hands back. A native that threw leaves the interrupt for the
-    /// next site, as the loop's own check after a call does.
+    /// call hands back. A callee that threw is checked after too, with
+    /// what it threw pending, as php 8.5.12 checks whatever
+    /// `EG(exception)` holds and the loop's own check after a call does
+    /// ([`crate::handlers::thrown_on_call`]): a signal the callee raised
+    /// before it threw is dispatched here, seen from the native that made
+    /// the call, which is gone from the stack by then:
+    ///
+    /// ```php
+    /// pcntl_signal(SIGUSR1, function () { pcntl_async_signals(true); posix_kill(posix_getpid(), SIGUSR2); throw new Exception("usr1"); });
+    /// pcntl_signal(SIGUSR2, function () { echo "usr2 from ", debug_backtrace()[1]['function'], "\n"; });
+    /// posix_kill(posix_getpid(), SIGUSR1);
+    /// try { iterator_apply(new ArrayIterator([1]), 'pcntl_signal_dispatch'); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect process
+    /// usr2 from iterator_apply
+    /// caught usr1
+    /// ```
     ///
     /// The signal here is sent by a forked child, and its ordering is
     /// fixed by construction: the child sends it only once it has read a
@@ -877,13 +908,24 @@ impl Request {
     }
 
     /// [`Request::checked_after_call`] past its load, where the interrupt
-    /// is raised: what the callee served handed on as it stands where it
-    /// threw, and otherwise the check's answer over it.
+    /// is raised: the check's answer over what the callee served, a
+    /// throwable it threw left pending for the check and taken back after.
+    /// A fatal leaving makes no check, since php's `zend_bailout` left the
+    /// callee before it, and a refusal that left nothing pending, a
+    /// fallible scope's, is handed back as it stands.
     #[cold]
     #[inline(never)]
     fn interrupted_after_call(&mut self, served: Result<Value, Thrown>) -> Result<Value, Thrown> {
-        let Ok(value) = served else {
-            return served;
+        let value = match served {
+            Ok(value) => value,
+            Err(thrown) if self.diagnostics().bailing_out() => return Err(thrown),
+            Err(thrown) => {
+                self.leave_pending(&thrown);
+                if !self.is_pending() {
+                    return Err(thrown);
+                }
+                Value::null()
+            }
         };
         match crate::interrupt::interrupted(self) {
             Ok(false) => Ok(value),
@@ -1554,6 +1596,28 @@ impl Request {
     /// [`Request::serve_native`] past the entry's lookup, for a caller
     /// that holds `function`'s entry already, as a frameless call's
     /// handler reads it off the frameless table (`ZEND_FLF_HANDLER`).
+    ///
+    /// What a user wrapper's method threw inside a stream op the native
+    /// asked for, kept by the stream layer ([`Diagnostics::stream_thrown`])
+    /// where php's leaves it in `EG(exception)`, is raised as the native
+    /// returns: a throwable the native answers after it is chained onto
+    /// it as `zend_throw_exception_internal` chains it, the kept one its
+    /// `previous`, and an exit or a fatal gives the kept one up
+    /// ([`Thrown::chain`]). `SimpleXMLElement` throws once libxml has
+    /// read the empty document and closed its stream:
+    ///
+    /// ```php
+    /// class W { public $context; function url_stat($p, $f) { return ['size' => 0]; } function stream_open($p, $m, $o, &$op) { return true; } function stream_read($n) { return ''; } function stream_eof() { return true; } function stream_close() { echo "close\n"; throw new Exception("close"); } }
+    /// stream_wrapper_register('ww', 'W');
+    /// try { new SimpleXMLElement('ww://x', LIBXML_NOERROR, true); }
+    /// catch (Exception $e) { echo $e->getMessage(), " <- ", $e->getPrevious()?->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// close
+    /// String could not be parsed as XML <- close
+    /// ```
+    ///
+    /// [`Diagnostics::stream_thrown`]: super::Diagnostics::stream_thrown
     #[inline(always)] // design §5.8: every native call's, frameless or not
     pub(crate) fn serve_entry(
         &mut self,
@@ -1577,17 +1641,20 @@ impl Request {
             crate::observer::native_returned(self, begun, &served, None, on_throw);
             return served;
         };
-        crate::observer::native_returned(self, begun, &served, Some(&deferred), on_throw);
+        if served.is_ok() {
+            crate::observer::native_returned(self, begun, &served, Some(&deferred), on_throw);
+        }
         match served {
             Ok(value) => {
                 self.release(value);
                 Err(deferred)
             }
+            // Thrown over the kept one, chained as php chains it where
+            // the native throws.
             Err(thrown) => {
-                if let Some(object) = deferred.exception() {
-                    self.release(object.as_value());
-                }
-                Err(thrown)
+                let served = Err(deferred.chain(self, thrown));
+                crate::observer::native_returned(self, begun, &served, None, on_throw);
+                served
             }
         }
     }
@@ -1684,11 +1751,15 @@ impl Request {
         }
     }
 
-    fn native_trampoline_as(
+    /// The native trampoline of `entry` under `name`, carrying
+    /// `reserved` where it is given; the one the request already made
+    /// with the same where it made one.
+    fn native_trampoline_as<T: std::any::Any + Copy + PartialEq + Send>(
         &mut self,
         name: &[u8],
         entry: crate::api::abi::Entry,
         is_instance: bool,
+        reserved: Option<T>,
     ) -> Option<Function> {
         self.trampoline_made(
             |made| {
@@ -1696,9 +1767,25 @@ impl Request {
                 if std::ptr::fn_addr_eq(made_entry, entry))
                     && *made.decl.function.name.0 == *name
                     && made.decl.is_instance == is_instance
+                    && match (&made.reserved, &reserved) {
+                        (Some(made), Some(reserved)) => made.is(reserved),
+                        (None, None) => true,
+                        _ => false,
+                    }
             },
-            |_| Some(CallTrampoline::native(entry, name, is_instance)),
+            move |_| {
+                let reserved = reserved.map(crate::trampoline::Reserved::new);
+                Some(CallTrampoline::native(entry, name, is_instance, reserved))
+            },
         )
+    }
+
+    /// What the native trampoline being served carries in `reserved[]`
+    /// ([`Symbols::native_trampoline_reserving`]), where it is a `T`.
+    pub(crate) fn active_reserved<T: std::any::Any + Copy>(&self) -> Option<T> {
+        let function = self.active_native_function()?;
+        let (made, _) = self.trampoline_of(function)?;
+        made.reserved.as_ref()?.get::<T>()
     }
 
     /// Whether `function` is a native [`Symbols::native_trampoline`]
@@ -1850,7 +1937,28 @@ impl Symbols<&mut Request> {
     /// [`ObjectHandlers::get_method`]: crate::api::abi::ObjectHandlers::get_method
     /// [`ObjectHandlers::get_closure`]: crate::api::abi::ObjectHandlers::get_closure
     pub fn native_trampoline(self, name: &[u8], entry: crate::api::abi::Entry) -> Option<Function> {
-        self.0.native_trampoline_as(name, entry, true)
+        self.0.native_trampoline_as::<()>(name, entry, true, None)
+    }
+
+    /// [`Symbols::native_trampoline`] carrying `reserved`, a value of
+    /// the extension's own its body reads back with
+    /// [`Frames::reserved`], as php's `internal_function.reserved[]`:
+    /// what `zend_ffi_cdata_get_closure` makes (`Z/ext/ffi/ffi.c:2139`),
+    /// the C function's type and address on the function, so the call
+    /// holds no receiver and the `FFI\CData` the callee was read from is
+    /// given up before the arguments are sent. One per entry, name and
+    /// reserved value: a value equal to one the request made a trampoline
+    /// with finds that one.
+    ///
+    /// [`Frames::reserved`]: crate::api::request::Frames::reserved
+    pub fn native_trampoline_reserving<T: std::any::Any + Copy + PartialEq + Send>(
+        self,
+        name: &[u8],
+        entry: crate::api::abi::Entry,
+        reserved: T,
+    ) -> Option<Function> {
+        self.0
+            .native_trampoline_as(name, entry, true, Some(reserved))
     }
 
     /// [`Symbols::native_trampoline`] for a call named on the class,
@@ -1864,7 +1972,7 @@ impl Symbols<&mut Request> {
         name: &[u8],
         entry: crate::api::abi::Entry,
     ) -> Option<Function> {
-        self.0.native_trampoline_as(name, entry, false)
+        self.0.native_trampoline_as::<()>(name, entry, false, None)
     }
 }
 

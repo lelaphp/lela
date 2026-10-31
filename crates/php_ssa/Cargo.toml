@@ -1,0 +1,22 @@
+# php_ssa: php's function-level analysis over one op array (ADR-0015), below
+# the compiled tier that alone calls it: Zend/Optimizer's CFG, DFG and SSA,
+# run as zend_jit_trace_build_ssa runs them. Reads the unit format and the
+# constants it carries.
+[package]
+name = "php_ssa"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "php's function-level analysis: the CFG, DFG and SSA of zend_cfg.c, zend_dfg.c and zend_ssa.c over one op array"
+
+[lints]
+workspace = true
+
+[dependencies]
+php_unit = { path = "../php_unit" }
+php_heap = { path = "../php_heap" }
+
+[build-dependencies]
+toml.workspace = true

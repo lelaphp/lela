@@ -133,9 +133,29 @@ fn judge_since(root: &Path, base: Option<&str>) -> Verdict {
     .unwrap()
 }
 
-/// `done --hook` over `root` with `event` on stdin, as the Stop hook runs it.
+/// `done --hook` over `root` with `event` on stdin, as the Stop hook runs
+/// it, the stopping session and agent having written in `root` as permit
+/// records it (#3619).
 fn hook(root: &Path, event: &str) -> Ran {
+    if let Ok(stop) = serde_json::from_str::<serde_json::Value>(event) {
+        let session = stop["session_id"].as_str().unwrap_or_default();
+        wrote_in(root, root, session, stop["agent_id"].as_str());
+    }
+    stop_hook(root, event)
+}
+
+/// `done --hook` over `root` with `event` on stdin, and nothing recorded.
+fn stop_hook(root: &Path, event: &str) -> Ran {
     Run::at(root).args(["done", "--hook"]).stdin(event).go()
+}
+
+/// A writing call of `agent` of `session` in `checkout`, admitted by the
+/// permit of `root`, which records where it wrote.
+fn wrote_in(root: &Path, checkout: &Path, session: &str, agent: Option<&str>) {
+    let call = serde_json::json!({"session_id": session, "agent_id": agent, "tool_name": "Bash",
+        "cwd": checkout.to_str().unwrap(), "tool_input": {"command": "touch written"}});
+    // A build that cannot judge records nothing, as the hook's would not.
+    Run::at(root).args(["permit"]).stdin(call.to_string()).go();
 }
 
 /// A passing reading of `instrument` over `scope`, stamped through the
@@ -279,6 +299,81 @@ fn the_harness_crate_is_asked_for_clippy_test_api_check_budget_and_unsafe_audit_
         store.record(&[fresh(&root, instrument, "xtask")]).unwrap();
     }
     assert!(judge(&root).unmet.is_empty(), "{:#?}", judge(&root));
+}
+
+/// A commit that changes `seams.toml` alone touches xtask, whose tests
+/// copy the manifest (`key::READ_BY_TESTS`, #3646): its `test` reading,
+/// taken before, no longer stands, and `done` names the file.
+#[test]
+fn a_change_to_the_manifest_alone_stales_the_harness_test_reading() {
+    let root = scratch("read-by-tests");
+    let package = "[package]\nname = \"xtask\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";
+    write(&root, "xtask/Cargo.toml", package);
+    write(&root, "xtask/src/lib.rs", "pub fn measure() {}\n");
+    Repo::at(&root).commit("the harness");
+    let store = Store::of_workspace(&root);
+    store.record(&[fresh(&root, "test", "xtask")]).unwrap();
+    assert!(judge(&root).crates.is_empty(), "{:#?}", judge(&root));
+
+    write(
+        &root,
+        "seams.toml",
+        &format!("{}# moved\n", read("seams.toml")),
+    );
+    Repo::at(&root).commit("a steer");
+    let verdict = judge_since(&root, Some("HEAD~1"));
+    assert_eq!(verdict.crates, ["xtask"]);
+    let stale =
+        "test: the reading for xtask is stale; xtask or seams.toml changed since it was taken";
+    assert!(
+        verdict.unmet.iter().any(|u| u.starts_with(stale)),
+        "{verdict:#?}"
+    );
+}
+
+/// A change to `ops.toml` alone, which `php_engine`'s `build.rs` reads
+/// (`key::READ_BY_BUILDS`, #3654), touches `php_engine` and stales its
+/// reading, naming the file, and stales the reading of `ext/reflection`,
+/// built from it, though nothing under either crate changed.
+#[test]
+fn a_change_to_a_file_read_at_build_stales_the_crates_built_from_it() {
+    let root = Tree::new("done-read-by-builds").unwrap();
+    xtask::scratch::repository(&fixtures().join("closure"), &root, &["."]).unwrap();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    for file in ["seams.toml", "oracle.toml", "ops.toml"] {
+        std::fs::copy(workspace().join(file), root.join(file)).unwrap();
+    }
+    let registry = fixtures().join("registry/empty.toml");
+    std::fs::copy(registry, root.join("docs/divergence.toml")).unwrap();
+    write(&root, ".gitignore", "target/\n");
+    write(
+        &root,
+        "ext/reflection/src/lib.rs",
+        "pub fn reflection() { }\n",
+    );
+    Repo::at(&root).commit("the harness's own files and the opcodes");
+    let store = Store::of_workspace(&root);
+    let readings = [("test", "php_engine"), ("witness", "ext/reflection")];
+    for (instrument, scope) in readings {
+        store.record(&[fresh(&root, instrument, scope)]).unwrap();
+    }
+    let stands = |u: &String| !u.contains("is stale");
+    assert!(judge_since(&root, Some("HEAD~1")).unmet.iter().all(stands));
+
+    write(&root, "ops.toml", &format!("{}# moved\n", read("ops.toml")));
+    let verdict = judge(&root);
+    assert_eq!(verdict.crates, ["php_engine"]);
+    let engine = "test: the reading for php_engine is stale; php_engine or ops.toml changed";
+    assert!(
+        verdict.unmet.iter().any(|u| u.starts_with(engine)),
+        "{verdict:#?}"
+    );
+    let verdict = judge_since(&root, Some("HEAD~1"));
+    let built = "witness: the reading for ext/reflection is stale";
+    assert!(
+        verdict.unmet.iter().any(|u| u.starts_with(built)),
+        "{verdict:#?}"
+    );
 }
 
 #[test]
@@ -524,6 +619,50 @@ fn on_a_ticket_branch(name: &str) -> (Tree, String) {
     Repo::at(&root).commit("main's own change");
     Repo::at(&root).git(&["checkout", "-q", "t9"]);
     (root, cut)
+}
+
+/// A row held at the merge (#3618 ruling 2) is the merge check's: a
+/// ticketed checkout renders it as delegated, and main's holds it.
+#[test]
+fn a_row_held_at_the_merge_is_delegated_in_a_ticketed_checkout_and_held_in_mains() {
+    let root = scratch("held-at-merge");
+    let text = std::fs::read_to_string(root.join("seams.toml")).unwrap();
+    let row = "instrument = \"crosscheck\"\n";
+    assert!(text.contains(row));
+    // The workspace's manifest holds the row at the merge once a person
+    // has landed the ruling; a second `held_at` would be a duplicate key.
+    let held = if text.contains(&format!("{row}held_at = \"merge\"")) {
+        text
+    } else {
+        text.replace(row, &format!("{row}held_at = \"merge\"\n"))
+    };
+    std::fs::write(root.join("seams.toml"), held).unwrap();
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let crosscheck =
+        |verdict: &Verdict| verdict.unmet.iter().any(|u| u.starts_with("crosscheck: "));
+
+    let on_main = judge(&root);
+    assert!(crosscheck(&on_main), "{on_main:#?}");
+    assert!(on_main.delegated.is_empty(), "{on_main:#?}");
+
+    Repo::at(&root).git(&["checkout", "-q", "-b", "t9"]);
+    Repo::at(&root).git(&["config", "branch.t9.ticket", "9"]);
+    let ticketed = judge(&root);
+    assert!(!crosscheck(&ticketed), "{ticketed:#?}");
+    assert!(
+        ticketed
+            .delegated
+            .iter()
+            .any(|d| d == "crosscheck for ext/pcre"),
+        "{ticketed:#?}"
+    );
+    // Other rows the manifest holds at the merge may come first.
+    let rendered = ticketed.render();
+    let list = rendered.split("delegated to the merge check:\n").nth(1);
+    assert!(
+        list.is_some_and(|list| list.contains("- crosscheck for ext/pcre\n")),
+        "{rendered}"
+    );
 }
 
 /// A bare `done` measures since the merge base with `main` (ADR-0009,
@@ -984,7 +1123,8 @@ fn changing_the_oracles_md5_a_closure_keg_or_a_recipe_ini_stales_every_run() {
     after_the_pin_moves("oracle-md5", oracle, true);
     let keg = |text: &str| {
         let moved = text.replacen("\nzstd = \"", "\nzstd = \"0", 1);
-        let refused = xtask::oracle::Pin::parse(&moved).unwrap_err().to_string();
+        let parsed = xtask::oracle::Pin::parse(&moved).unwrap();
+        let refused = parsed.defects().first().unwrap().clone();
         let (_, at) = refused.split_once("made against the closure ").unwrap();
         let (was, at) = at.split_once(", and the pin's [closure] is ").unwrap();
         moved.replace(was, at.split(',').next().unwrap())
@@ -1423,6 +1563,136 @@ fn the_hook_prints_nothing_when_done_is_met() {
     assert_eq!(out, "");
 }
 
+/// The Stop holds what the session wrote and nothing else (#3618 ruling
+/// 1): a change in the checkout that no call of the stopping session wrote
+/// passes it, whoever made the change.
+#[test]
+fn a_session_that_wrote_in_no_checkout_passes_the_stop() {
+    let root = scratch("hook-wrote-nothing");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let stop = "{\"session_id\":\"quiet\",\"stop_hook_active\":false}";
+    assert_eq!(
+        stop_hook(&root, stop).ok(),
+        "",
+        "the change is not this session's"
+    );
+    let reading = Store::of_workspace(&root)
+        .read("done", "workspace")
+        .unwrap()
+        .unwrap();
+    assert!(
+        reading
+            .message
+            .starts_with("stop: 0 unmet over the 0 checkouts"),
+        "{}",
+        reading.message
+    );
+
+    let out = hook(&root, stop).ok();
+    assert!(
+        out.contains("no reading for ext/pcre"),
+        "once it wrote there: {out}"
+    );
+}
+
+/// A subagent's writes are its own (#3619): they hold its own Stop and
+/// never its parent's, whose Stop with no write of its own passes.
+#[test]
+fn a_subagents_writes_hold_its_own_stop_and_not_its_parents() {
+    let root = scratch("hook-subagent");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    wrote_in(&root, &root, "s", Some("builder"));
+    let parent = "{\"session_id\":\"s\",\"hook_event_name\":\"Stop\"}";
+    assert_eq!(
+        stop_hook(&root, parent).ok(),
+        "",
+        "the parent wrote nothing"
+    );
+    let own =
+        "{\"session_id\":\"s\",\"agent_id\":\"builder\",\"hook_event_name\":\"SubagentStop\"}";
+    let out = stop_hook(&root, own).ok();
+    assert!(out.contains("no reading for ext/pcre"), "{out}");
+    let reading = Store::of_workspace(&root)
+        .read("done", "workspace")
+        .unwrap()
+        .unwrap();
+    assert!(
+        reading.message.starts_with("subagent-stop: "),
+        "{}",
+        reading.message
+    );
+}
+
+/// A checkout the session wrote in other than the one the hook stands in
+/// is judged by that checkout's own build, and a checkout with none that
+/// judges holds the turn naming it, never a silent pass (#3619).
+#[test]
+fn a_checkout_written_elsewhere_is_handed_to_its_own_build() {
+    let root = scratch("hook-elsewhere");
+    let tree = Tree::new("done-hook-elsewhere").unwrap();
+    let other = tree.join("t1");
+    Repo::at(&root).git(&["worktree", "add", "-q", "-b", "t1", other.to_str().unwrap()]);
+    wrote_in(&root, &other, "s", None);
+    // A directory in no checkout of the repository is none the Stop holds.
+    wrote_in(&root, tree.path(), "s", None);
+    let out = stop_hook(&root, "{\"session_id\":\"s\"}").ok();
+    let other = other.canonicalize().unwrap();
+    assert!(
+        out.contains(&format!("done could not judge {}", other.display())),
+        "{out}"
+    );
+}
+
+/// The second Stop releases a held turn and records that it did, with the
+/// count the block had (#3618 M4).
+#[test]
+fn a_block_the_second_stop_released_is_a_reading_with_its_count() {
+    let root = scratch("hook-released");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let stop = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
+    assert!(hook(&root, &stop).ok().contains("block"));
+    let store = Store::of_workspace(&root);
+    let held = store.read("done", "workspace").unwrap().unwrap();
+    let active = std::fs::read_to_string(fixtures().join("hooks/stop-active.json")).unwrap();
+    assert_eq!(stop_hook(&root, &active).ok(), "");
+    let release = store
+        .history("done")
+        .unwrap()
+        .readings
+        .into_iter()
+        .rfind(|r| r.scope == "released");
+    let release = release.expect("the release was recorded");
+    assert_eq!(release.status, Status::Fail);
+    assert_eq!(release.numbers["unmet"], held.numbers["unmet"]);
+    assert!(
+        release
+            .message
+            .starts_with("stop: the second Stop released"),
+        "{}",
+        release.message
+    );
+}
+
+/// Each reading names its caller (#3619): pre-push says so on the command
+/// line, and a run that names none is a hand's outside CI.
+#[test]
+fn a_done_reading_carries_its_caller() {
+    let root = scratch("caller");
+    let store = Store::of_workspace(&root);
+    xtask(&root, &["done", "--base", "HEAD", "--caller", "pre-push"]).ok();
+    let reading = store.read("done", "workspace").unwrap().unwrap();
+    assert!(
+        reading.message.starts_with("pre-push: "),
+        "{}",
+        reading.message
+    );
+    if std::env::var_os("GITHUB_ACTIONS").is_none() {
+        xtask(&root, &["done", "--base", "HEAD"]).ok();
+        let reading = store.read("done", "workspace").unwrap().unwrap();
+        assert!(reading.message.starts_with("hand: "), "{}", reading.message);
+    }
+}
+
 // ---------------------------------------------------------------- the reading
 
 #[test]
@@ -1438,7 +1708,7 @@ fn every_verdict_is_one_reading_of_done_over_the_workspace() {
     assert_eq!(reading.numbers["crates"], 1.into());
     assert_eq!(reading.numbers["changed"], 1.into());
     assert!(
-        reading.message.starts_with("9 unmet since "),
+        reading.message.contains(": 9 unmet since "),
         "{}",
         reading.message
     );
@@ -1631,7 +1901,7 @@ fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
 /// While `DAX_BUILD_RUNNER` is set the oracle job is skipped, and the done
 /// step names as `--not-run` exactly the instruments of condition 1 that
 /// job's steps run, so a lane added there is named here or `done` is red
-/// for its absence (#2477); and `fold`, which no runner takes, always.
+/// for its absence (#2477). No instrument without an owed row is named.
 #[test]
 fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -1664,16 +1934,12 @@ fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
         .skip(1)
         .filter_map(|rest| rest.split_whitespace().next())
         .collect();
-    // `fold` is named on every run, before the test of the oracle job:
-    // no runner is the aarch64 Mac it reads (#3384).
-    let mut asked = runs.clone();
-    asked.insert("fold");
-    assert_eq!(named, asked, "{step}");
-    let always = step
-        .find("set -- --not-run fold\n")
-        .expect("fold is named on every run");
+    assert_eq!(named, runs, "{step}");
+    let empty = step
+        .find("set --\n")
+        .expect("no instrument is excluded before the oracle job is tested");
     assert!(
-        always < step.find("if [ \"$ORACLE\" = skipped ]").unwrap(),
+        empty < step.find("if [ \"$ORACLE\" = skipped ]").unwrap(),
         "{step}"
     );
     assert!(

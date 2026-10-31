@@ -101,6 +101,238 @@ pub(crate) const NATIVE_CALL: Fixture = Fixture {
     ],
 };
 
+/// A frameless call in a loop, `class_exists` and `property_exists`,
+/// Core's frameless natives, over a constant, a variable and a
+/// temporary, made from compiled code as php's `jit_frameless_icall*`
+/// makes it (#3560).
+pub(crate) const FRAMELESS_CALL: Fixture = Fixture {
+    name: "frameless_call",
+    program: "frameless_call",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "1"),
+    ],
+};
+
+/// A call as nbody's main loop calls `advance`: two arrays sent by
+/// reference to typed parameters, an array and a float by value, made in
+/// place with each reference's `RECV` check inline (#3340).
+pub(crate) const REF_CALL: Fixture = Fixture {
+    name: "ref_call",
+    program: "ref_call",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A call passed fewer arguments than its callee has parameters, made in
+/// place with each default copied into its parameter (#3340).
+pub(crate) const DEFAULT_CALL: Fixture = Fixture {
+    name: "default_call",
+    program: "default_call",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A call whose default names a constant, its `RECV_INIT` served by the
+/// call kernel (#3340).
+pub(crate) const DEFAULT_CONSTANT: Fixture = Fixture {
+    name: "default_constant",
+    program: "default_call",
+    plan: &[
+        ("record.function", "c"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A method called on an object a variable holds, as `method_call`
+/// drives it: pushed in place under the class guard, the method's frame
+/// left in place, its receiver given up after its variables (#3343).
+pub(crate) const METHOD_CALL: Fixture = Fixture {
+    name: "method_call",
+    program: "method_call",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A method's call on the object a temporary holds, `(new Adder)->add()`:
+/// pushed in place under the class guard, the call taking the
+/// temporary's owner over (#3560).
+pub(crate) const TEMP_CALL: Fixture = Fixture {
+    name: "temp_call",
+    program: "temp_call",
+    plan: &[
+        ("record.function", "t"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A static method's call, as `static_call` drives it: pushed in place
+/// under the guard on the pair its runtime-cache slot holds, its class the
+/// published one it names, and by its handler where the slot holds
+/// another, the callee held by a guard after it; its sends, activation
+/// and leave in place (#3343, #3557).
+pub(crate) const STATIC_CALL: Fixture = Fixture {
+    name: "static_call",
+    program: "method_call",
+    plan: &[
+        ("record.function", "s"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// `new` with a constructor, as `new_object` drives it: the object made
+/// and the constructor's call pushed by `NEW`'s handler, the callee held
+/// by a guard after it, the call made and left in place (#3343).
+pub(crate) const NEW_CALL: Fixture = Fixture {
+    name: "new_call",
+    program: "method_call",
+    plan: &[
+        ("record.function", "n"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A published method a request-scoped class inherits, called on a
+/// variable's object: pushed in place under the guard on the pair its
+/// runtime-cache slot holds, its class the receiver's (#3558).
+pub(crate) const METHOD_SCOPED: Fixture = Fixture {
+    name: "method_scoped",
+    program: "scoped_calls",
+    plan: &[
+        ("record.function", "scoped"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A published static method called through a request-scoped class's
+/// name: pushed in place under the guard on the pair its runtime-cache
+/// slot holds, its called scope the class the pair names (#3557).
+pub(crate) const STATIC_SCOPED: Fixture = Fixture {
+    name: "static_scoped",
+    program: "scoped_calls",
+    plan: &[
+        ("record.function", "statics"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A static method called through `self`: pushed in place under the
+/// guard on the pair its runtime-cache slot holds, the pair's class not
+/// compared and its called scope the calling frame's (#3561).
+pub(crate) const STATIC_SELF: Fixture = Fixture {
+    name: "static_self",
+    program: "scope_calls",
+    plan: &[
+        ("record.function", "selfs"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A method that takes `$this` called through its class's name from an
+/// instance of it: pushed in place under the pair, with the calling
+/// frame's `$this` held to its class (#3561).
+pub(crate) const STATIC_THIS: Fixture = Fixture {
+    name: "static_this",
+    program: "scope_calls",
+    plan: &[
+        ("record.function", "named"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A method that takes `$this` called through `parent` (#3561).
+pub(crate) const PARENT_THIS: Fixture = Fixture {
+    name: "parent_this",
+    program: "scope_calls",
+    plan: &[
+        ("record.function", "parents"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A request-scoped class's own method called on a variable's object: pushed
+/// in place under the pair its runtime-cache slot holds, the callee held
+/// by its record (#3561).
+pub(crate) const METHOD_OWN: Fixture = Fixture {
+    name: "method_own",
+    program: "own_calls",
+    plan: &[
+        ("record.function", "owns"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A request-scoped class's own static method called through its name:
+/// pushed in place under the pair, the callee held by its record (#3561).
+pub(crate) const STATIC_OWN: Fixture = Fixture {
+    name: "static_own",
+    program: "own_calls",
+    plan: &[
+        ("record.function", "statics"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// An enum's own method called on its case: pushed in place under the
+/// pair, the callee held by its record (#3561).
+pub(crate) const ENUM_OWN: Fixture = Fixture {
+    name: "enum_own",
+    program: "own_calls",
+    plan: &[
+        ("record.function", "cases"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// An evaluated class's own method called on a variable's object: pushed
+/// in place under the pair its runtime-cache slot holds, the callee held
+/// by its record, and the trace stopped at the call, whose op array is the
+/// request's (#3561, #3570).
+pub(crate) const EVAL_OWN: Fixture = Fixture {
+    name: "eval_own",
+    program: "eval_calls",
+    plan: &[
+        ("record.function", "evals"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// An evaluated class's own static method called through its name:
+/// pushed in place under the pair, the trace stopped at the call (#3561,
+/// #3570).
+pub(crate) const EVAL_STATIC: Fixture = Fixture {
+    name: "eval_static",
+    program: "eval_calls",
+    plan: &[
+        ("record.function", "evalstatics"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
 /// A loop whose callee's variables own an array and a string as it
 /// returns: the `RETURN` left in place, freeing each (#3313).
 pub(crate) const OWNING_LEAVE: Fixture = Fixture {
@@ -453,7 +685,10 @@ pub(crate) fn record(fixture: Fixture) -> Result<TraceRecord, String> {
 /// The trace the fixture's golden record builds, read through the view
 /// of `recorded`.
 pub(crate) fn built(fixture: Fixture, recorded: &Recorded) -> Result<TraceIr, String> {
-    build(&record(fixture)?, &recorded.view).map_err(|abort| format!("{}: {abort:?}", fixture.name))
+    let record = record(fixture)?;
+    let analysed = crate::analysis::analysed(&record, &recorded.view);
+    build(&record, &recorded.view, &analysed)
+        .map_err(|abort| format!("{}: {abort:?}", fixture.name))
 }
 
 /// The trace `program` builds when recorded under `plan`, from its
@@ -462,5 +697,10 @@ pub(crate) fn traced(plan: &[(&str, &str)], program: &str) -> Result<TraceIr, St
     let (recorded, _) = recording(plan, program)?;
     let record = TraceRecord::parse(&recorded.record.dump())
         .map_err(|e| format!("the record's text: {e:?}"))?;
-    build(&record, &recorded.view).map_err(|abort| format!("{abort:?}"))
+    build(
+        &record,
+        &recorded.view,
+        &crate::analysis::analysed(&record, &recorded.view),
+    )
+    .map_err(|abort| format!("{abort:?}"))
 }

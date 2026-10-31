@@ -76,8 +76,9 @@ use crate::api::values::{
     ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
 };
 use crate::exec::{
-    self, Cached, E_FATAL_ERRORS, LAST_CATCH, cached_class, cleanup_live_vars,
-    cleanup_unfinished_calls, free_carried_value, has_only_fatal_errors, restore_silenced,
+    self, Cached, E_FATAL_ERRORS, FETCH_CLASS_MASK, FETCH_CLASS_PARENT, FETCH_CLASS_SELF,
+    LAST_CATCH, cached_class, class_fixed, cleanup_live_vars, cleanup_unfinished_calls,
+    free_carried_value, has_only_fatal_errors, restore_silenced,
 };
 use crate::observer::OnThrow;
 use crate::operand::{ByKind, Operand, Retval, RetvalByte, Var};
@@ -3643,7 +3644,13 @@ pub(crate) fn do_icall<T: Tier>(
     _: &OpArray,
     op: &Opline,
 ) -> Edge {
-    do_call(req, frame, op, "ZEND_DO_ICALL")
+    // `DO_ICALL` never tests the callee's flags, known here and not
+    // read off the opline.
+    let says = DoCall {
+        flagged: false,
+        ..DoCall::of(op)
+    };
+    do_call(req, frame, says, "ZEND_DO_ICALL")
 }
 
 /// `ZEND_DO_FCALL_BY_NAME`: serve the callee an `INIT_FCALL_BY_NAME`
@@ -3677,7 +3684,7 @@ pub(crate) fn do_fcall_by_name<T: Tier>(
         return edge;
     }
     req.vm_mut().stand(frame, at);
-    do_call(req, frame, op, "ZEND_DO_FCALL_BY_NAME")
+    do_call(req, frame, DoCall::of(op), "ZEND_DO_FCALL_BY_NAME")
 }
 
 /// `ZEND_DO_FCALL`: serve the callee an `INIT_STATIC_METHOD_CALL`, an
@@ -3711,7 +3718,7 @@ pub(crate) fn do_fcall<T: Tier>(
         return edge;
     }
     req.vm_mut().stand(frame, at);
-    do_call(req, frame, op, "ZEND_DO_FCALL")
+    do_call(req, frame, DoCall::of(op), "ZEND_DO_FCALL")
 }
 
 /// `ZEND_INCLUDE_OR_EVAL` (`Z/Zend/zend_vm_def.h:6545`), the four file
@@ -4094,8 +4101,9 @@ fn included(
         | exec::IncludeKind::Require
         | exec::IncludeKind::RequireOnce => req.include_file(kind, written),
     };
-    let unit = match opened {
-        Ok(Opened::Unit(unit)) => unit,
+    let (unit, declared) = match opened {
+        Ok(Opened::Unit(unit)) => (unit, false),
+        Ok(Opened::Declared(unit)) => (unit, true),
         Ok(Opened::Already) => return Ok(answered(req, returns_to, Value::bool(true))),
         Ok(Opened::Failed) => return Ok(answered(req, returns_to, Value::bool(false))),
         Err(thrown) => {
@@ -4106,7 +4114,7 @@ fn included(
         exec::IncludeKind::Eval => php_compile::SourceKind::EVAL,
         _ => php_compile::SourceKind::File,
     };
-    if !crate::engine::note_compiled(req, &unit, source) {
+    if !declared && !crate::engine::note_compiled(req, &unit, source) {
         return Ok(Included::Threw(frame));
     }
     // The op array `zend_accel_load_script` copies out of the cache, or
@@ -4201,7 +4209,7 @@ pub(crate) fn do_ucall<T: Tier>(
         return edge;
     }
     req.vm_mut().stand(frame, at);
-    do_call(req, frame, op, "ZEND_DO_UCALL")
+    do_call(req, frame, DoCall::of(op), "ZEND_DO_UCALL")
 }
 
 /// The inline path of `DO_UCALL`, and of `DO_FCALL` and
@@ -4242,12 +4250,11 @@ fn inline_enter(
 fn enter(
     req: &mut Request,
     frame: FrameRef,
-    op: &Opline,
+    says: DoCall,
     call: FrameRef,
     shape: crate::api::request::FrameShape,
 ) -> Edge {
-    let returns_to = (op.out_type != OperandKind::Unused).then_some(op.out);
-    let activated = req.activate_user(call, shape, returns_to, exec::Caller::Opline(frame))?;
+    let activated = req.activate_user(call, shape, says.into, exec::Caller::Opline(frame))?;
     Ok(Stepped::Pushed(activated.frame).into())
 }
 
@@ -5820,6 +5827,27 @@ pub(crate) fn new<T: Tier>(
 /// Call to private method A::p() from global scope
 /// ```
 ///
+/// A class the scope names, `self`, `parent` or `static`, or one a
+/// `FETCH_CLASS` left, is resolved on every pass, and the pair answers
+/// where it holds that pass's class, php's `CACHED_PTR(opline->result.num)
+/// == ce`: `static` names another class on each call below, and a
+/// trait's `self` the class that uses it, each looked up again where the
+/// pair holds the other.
+///
+/// ```php
+/// class P { static function name() { return "P"; } }
+/// class A extends P { static function f() { return "A" . static::g(); } static function g() { return "a"; } static function run() { $s = ""; for ($i = 0; $i < 2; $i++) { $s .= self::f() . parent::name() . static::g(); } return $s; } }
+/// class B extends A { static function g() { return "b"; } }
+/// class C extends P { static function f() { return "C"; } static function run() { $s = ""; for ($i = 0; $i < 2; $i++) { $s .= self::f() . parent::name(); } return $s; } }
+/// trait T { static function h() { return self::name(); } }
+/// class D { use T; static function name() { return "D"; } }
+/// class E { use T; static function name() { return "E"; } }
+/// echo A::run(), " ", B::run(), " ", C::run(), " ", D::h(), E::h(), D::h(), "\n";
+/// ```
+/// ```expect
+/// AaPaAaPa AbPbAbPb CPCP DED
+/// ```
+///
 /// A method named on a trait itself, and never one a class took from
 /// it, is php's deprecation on every pass, since php caches no such
 /// callee, and an abstract one is `zend_abstract_method_call`'s `Error`
@@ -5883,12 +5911,16 @@ pub(crate) fn init_static_method_call<T: Tier>(
         }
     };
     // The pair answers where it holds this pass's class and was written
-    // from this frame's scope ([`Request::cached_callee`]).
-    let cached_callee = match (op.op2_type, primed) {
-        (OperandKind::Const, Cached::ClassAndCallee { .. }) => {
-            req.cached_callee(frame, slot, class)
-        }
-        _ => None,
+    // from this frame's scope ([`Request::cached_callee`]): for a constant
+    // class, where the slot was found holding a pair; for any other,
+    // whichever pair it holds, php's `CACHED_PTR(opline->result.num) == ce`.
+    // One read of the pair, so the read stays inline in the handler.
+    let pair_read = op.op2_type == OperandKind::Const
+        && (op.op1_type != OperandKind::Const || matches!(primed, Cached::ClassAndCallee { .. }));
+    let cached_callee = if pair_read {
+        req.cached_callee(frame, slot, class)
+    } else {
+        None
     };
     if let Some((function, instance)) = cached_callee {
         return static_call_frame(req, frame, op, class, (function, instance));
@@ -5955,7 +5987,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // `ZEND_ACC_NEVER_CACHE` and one a trait declared, whose deprecation
     // is raised on every pass.
     let instance = looked_up.unwrap_or_else(|| req.takes_this(function));
-    if op.op1_type == OperandKind::Const && op.op2_type == OperandKind::Const && !uncached {
+    if op.op2_type == OperandKind::Const && !uncached {
         req.prime_callee(frame, slot, class, (function, instance));
     }
     static_call_frame(req, frame, op, class, (function, instance))
@@ -12528,31 +12560,10 @@ fn class_operand(
     ))
 }
 
-/// Whether the class operand `kind`/`at` names one class wherever a
-/// slot is read back: a constant, or `self` or `parent`, which the
-/// frame's scope fixes, and which a slot read back from the scope that
-/// wrote it ([`Request::cached_in_scope`]) needs not resolve again;
-/// `static` and a `FETCH_CLASS`'s are resolved on every pass.
-fn class_fixed(kind: OperandKind, at: u32) -> bool {
-    kind == OperandKind::Const
-        || kind == OperandKind::Unused
-            && matches!(at & FETCH_CLASS_MASK, FETCH_CLASS_SELF | FETCH_CLASS_PARENT)
-}
-
-/// `ZEND_FETCH_CLASS_MASK` (`Z/Zend/zend_compile.h:1034`): the bits of a
-/// class operand's number that are its fetch type, the flags above them.
-const FETCH_CLASS_MASK: u32 = 0x0f;
-
 /// `ZEND_FETCH_CLASS_NO_AUTOLOAD` and `ZEND_FETCH_CLASS_SILENT`
 /// (`Z/Zend/zend_compile.h:1035-1036`).
 const FETCH_CLASS_NO_AUTOLOAD: u32 = 0x80;
 const FETCH_CLASS_SILENT: u32 = 0x100;
-
-/// `ZEND_FETCH_CLASS_SELF` and `ZEND_FETCH_CLASS_PARENT`
-/// (`Z/Zend/zend_compile.h:1028`), the two fetch types a call on the class
-/// forwards the called scope through.
-const FETCH_CLASS_SELF: u32 = 1;
-const FETCH_CLASS_PARENT: u32 = 2;
 
 /// `zend_fetch_class(NULL, fetch_type)` (`Z/Zend/zend_execute_API.c:1712`)
 /// under `ZEND_FETCH_CLASS_EXCEPTION`, which every compiled reference
@@ -12799,18 +12810,39 @@ fn threw(req: &mut Request, frame: FrameRef, thrown: &Thrown) -> Edge {
     Ok(Stepped::Threw(frame).into())
 }
 
+/// What a `DO_*CALL` opline says of the call it makes: whether the
+/// callee's flags are tested before it is entered, `DO_FCALL`'s and
+/// `DO_FCALL_BY_NAME`'s ([`flagged_call`]), and the temporary of the
+/// caller's frame that takes what it returns, none where its `result`
+/// is `UNUSED`, php's `RETURN_VALUE_USED(opline)`.
+#[derive(Clone, Copy)]
+struct DoCall {
+    flagged: bool,
+    into: Option<u32>,
+}
+
+impl DoCall {
+    /// What the `DO_*CALL` `op` says of its call.
+    fn of(op: &Opline) -> DoCall {
+        DoCall {
+            flagged: matches!(op.opcode, Opcode::DoFcall | Opcode::DoFcallByName),
+            into: (op.out_type != OperandKind::Unused).then_some(op.out),
+        }
+    }
+}
+
 /// The body the `DO_*CALL` handlers share, `opcode` naming the one that
 /// found no call frame under it: the `ZEND_USER_FUNCTION` arm enters
 /// the callee's op array ([`enter`]), the `ZEND_INTERNAL_FUNCTION` arm
 /// serves the native on the call frame.
-fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edge {
-    if matches!(op.opcode, Opcode::DoFcall | Opcode::DoFcallByName)
-        && let Err(thrown) = flagged_call(req, op)
+fn do_call(req: &mut Request, frame: FrameRef, says: DoCall, opcode: &str) -> Edge {
+    if says.flagged
+        && let Err(thrown) = flagged_call(req, says)
     {
         req.pop_call();
         return threw(req, frame, &thrown);
     }
-    let Some((call, function)) = req.activate_call(op.out_type != OperandKind::Unused) else {
+    let Some((call, function)) = req.activate_call(says.into.is_some()) else {
         return Err(Fatal::error(format!(
             "InternalError: {opcode} with no call frame under it"
         )));
@@ -12823,7 +12855,7 @@ fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edg
         req.serve_entry(function, entry, OnThrow::Nothing)
     } else if let Some(user) = req.user_function(function) {
         let shape = user.shape;
-        return enter(req, frame, op, call, shape);
+        return enter(req, frame, says, call, shape);
     } else {
         let function = match crate::trampoline::hand_to_magic(req, function) {
             Ok(function) => function,
@@ -12834,48 +12866,89 @@ fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edg
         };
         if let Some(user) = req.user_function(function) {
             let shape = user.shape;
-            return enter(req, frame, op, call, shape);
+            return enter(req, frame, says, call, shape);
         }
         req.serve_native(function, OnThrow::Nothing)
+    };
+    let value = match served {
+        Ok(value) => value,
+        Err(thrown) => {
+            thrown_on_call(req, &thrown)?;
+            return Ok(Stepped::Threw(frame).into());
+        }
     };
     // `ZEND_VM_FCALL_INTERRUPT_CHECK(call)`: the check php makes after a
     // native returns, with the call still on the stack, which is where
     // a signal the native delivered to its own process is dispatched
-    // under `pcntl_async_signals(true)`. A native that threw leaves the
-    // interrupt raised for the next site, since php calls no PHP handler
-    // while `EG(exception)` stands, but for the memory limit: php checks
-    // before it reads `EG(exception)`, and `zend_handle_delayed_oom`
-    // gives up what the native threw for the unwind exit, so no `catch`
-    // takes it (a DOM parse lexbor stopped at the limit throws its
-    // `DOMException` and the limit's fatal is raised in its place).
-    let interrupted = match &served {
-        Ok(_) => crate::interrupt::check(req),
-        Err(thrown) if req.has_oom() && crate::interrupt::raised(req) => {
-            req.leave_pending(thrown);
-            let interrupted = crate::interrupt::interrupted(req);
-            req.pop_call();
-            return interrupted.map(|_| Stepped::Threw(frame).into());
+    // under `pcntl_async_signals(true)`.
+    let interrupted = crate::interrupt::check(req);
+    req.pop_call();
+    let threw = match interrupted {
+        Ok(threw) => threw,
+        Err(fatal) => {
+            req.release(value);
+            return Err(fatal);
         }
-        Err(_) => Ok(false),
+    };
+    let into = says.into.map(|slot| (frame, slot));
+    if handed_back(req, into, value) || threw {
+        return Ok(Stepped::Threw(frame).into());
+    }
+    Ok(advance(req, frame))
+}
+
+/// A native served on the call on top of the stack threw `thrown`, as
+/// `DO_*CALL`'s handler and the call compiled code makes
+/// ([`crate::tier::call_native`]) both meet it: the throwable left
+/// pending, the interrupt check made with the call still on the stack,
+/// and the call popped, its arguments given up with the throwable
+/// pending, as php's handler frees them on the throw's path too. php
+/// 8.5.12 makes `ZEND_VM_FCALL_INTERRUPT_CHECK` before it reads
+/// `EG(exception)`, so a signal the native raised before it threw is
+/// dispatched there, its handler served with the throwable set aside
+/// ([`crate::api::raising::set_aside`]), and seen from the native's
+/// call:
+///
+/// ```php
+/// pcntl_signal(SIGUSR1, function () { pcntl_async_signals(true); posix_kill(posix_getpid(), SIGUSR2); throw new Exception("usr1"); });
+/// pcntl_signal(SIGUSR2, function () { echo "usr2 from ", debug_backtrace()[1]['function'], "\n"; });
+/// posix_kill(posix_getpid(), SIGUSR1);
+/// try { pcntl_signal_dispatch(); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect process
+/// usr2 from pcntl_signal_dispatch
+/// caught usr1
+/// ```
+///
+/// The memory limit's is the `Err`: `zend_handle_delayed_oom` gives up
+/// what the native threw for the unwind exit, so no `catch` takes it (a
+/// DOM parse lexbor stopped at the limit throws its `DOMException` and
+/// the limit's fatal is raised in its place). A fatal leaving makes no
+/// check, since php's `zend_bailout` left the native before it.
+///
+/// An argument's destructor that throws as the call is popped chains
+/// what the native threw under its own, as `zend_objects_destroy_object`
+/// sets `EG(exception)` aside around it:
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class D { function __destruct() { throw new Exception("destructed"); } }
+/// function made() { return new D; }
+/// try { strlen(made(), 1); } catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// destructed after strlen() expects exactly 1 argument, 2 given
+/// ```
+#[inline(always)] // the handler's throw path, as it was before the tier shared it
+pub(super) fn thrown_on_call(req: &mut Request, thrown: &Thrown) -> Result<(), Fatal> {
+    req.leave_pending(thrown);
+    let checked = if req.diagnostics().bailing_out() {
+        Ok(false)
+    } else {
+        crate::interrupt::check(req)
     };
     req.pop_call();
-    match served {
-        Ok(value) => {
-            let threw = match interrupted {
-                Ok(threw) => threw,
-                Err(fatal) => {
-                    req.release(value);
-                    return Err(fatal);
-                }
-            };
-            let into = (op.out_type != OperandKind::Unused).then_some((frame, op.out));
-            if handed_back(req, into, value) || threw {
-                return Ok(Stepped::Threw(frame).into());
-            }
-            Ok(advance(req, frame))
-        }
-        Err(thrown) => threw(req, frame, &thrown),
-    }
+    checked.map(drop)
 }
 
 /// `DO_FCALL` and `DO_FCALL_BY_NAME` over a callee whose `fn_flags`
@@ -12885,7 +12958,7 @@ fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edg
 /// yet entered, which is why `zend_get_call_op` keeps such a callee off
 /// `DO_UCALL` and `DO_ICALL`, the two that never test. What a handler
 /// threw is the `Err`, and the call is never made.
-fn flagged_call(req: &mut Request, op: &Opline) -> Result<(), Thrown> {
+fn flagged_call(req: &mut Request, says: DoCall) -> Result<(), Thrown> {
     let Some(function) = req.building_call_function() else {
         return Ok(());
     };
@@ -12893,7 +12966,7 @@ fn flagged_call(req: &mut Request, op: &Opline) -> Result<(), Thrown> {
     if flags.deprecated {
         crate::attributes::deprecated_function(req, function)?;
     }
-    if flags.no_discard && op.out_type == OperandKind::Unused {
+    if flags.no_discard && says.into.is_none() {
         crate::attributes::no_discard_function(req, function)?;
     }
     Ok(())
@@ -13292,23 +13365,12 @@ fn frameless_call<const N: usize>(
     arguments: [(OperandKind, u32); N],
 ) -> Edge {
     // The frame stands at the call, and a `CV` is borrowed where no name
-    // reaches its variables, where it carries no annex
-    // ([`exec::frameless_operand`]).
-    let named = match req.vm_mut().at_mut(frame) {
-        Some(header) => {
-            header.opline = at;
-            header.annex.is_some()
-        }
-        None => true,
-    };
-    let Some((function, entry)) = req.frameless_entry(op.extended_value) else {
-        return Err(Fatal::error(format!(
-            "InternalError: {} indexes frameless entry {} and the engine's table has {} entries",
-            op.opcode.name(),
-            op.extended_value,
-            req.frameless_count()
-        )));
-    };
+    // reaches its variables ([`exec::frameless_named`]).
+    let header = req.vm_mut().at_mut(frame);
+    let named = exec::frameless_named(header.as_deref());
+    if let Some(header) = header {
+        header.opline = at;
+    }
     let mut operands = [Zval::UNDEF; N];
     let mut owned = 0u8;
     for (at, (operand, read)) in arguments.into_iter().zip(&mut operands).enumerate() {
@@ -13316,29 +13378,61 @@ fn frameless_call<const N: usize>(
         (*read, own) = exec::frameless_operand(req, frame, code, operand, named);
         owned |= u8::from(own) << at;
     }
-    if let Err(fatal) = req.push_frameless(function, &operands) {
-        for (at, &operand) in operands.iter().enumerate() {
-            if owned >> at & 1 != 0 {
-                req.release_zval_nogc(operand);
-            }
-        }
-        return Err(fatal);
+    let Some(value) = frameless_served(req, op.extended_value, &operands, owned)? else {
+        return Ok(Stepped::Threw(frame).into());
+    };
+    set_out(req, frame, op, value);
+    if crate::interrupt::check(req)? {
+        return Ok(Stepped::Threw(frame).into());
     }
-    // The call ends with the result whether the native threw or not, as
-    // php's frameless handler and its full call for an observed one do
-    // (`Z/Zend/zend_execute.c:1597`).
+    jump_to(at.saturating_add(if N == 3 { 2 } else { 1 }))
+}
+
+/// The native at `at` of the engine's frameless table served over
+/// `operands`, the bits of `owned` the ones its record owns, as the
+/// `FRAMELESS_ICALL_*` handlers and the frameless call compiled code
+/// makes ([`crate::tier::frameless_call`]) both serve it: its record
+/// laid down ([`Request::push_frameless`]), the native served, and the
+/// record popped, which gives up what it owns, whether the native threw
+/// or not, as php's frameless handler and its full call for an observed
+/// one do (`Z/Zend/zend_execute.c:1597`). What it returned, or none
+/// with the throwable left pending.
+#[inline(always)] // the handler's hot path, which it was before the tier shared it
+pub(super) fn frameless_served(
+    req: &mut Request,
+    at: u32,
+    operands: &[Zval],
+    owned: u8,
+) -> Result<Option<Value>, Fatal> {
+    let pushed = match req.frameless_entry(at) {
+        Some((function, entry)) => req
+            .push_frameless(function, operands)
+            .map(|_| (function, entry)),
+        None => Err(Fatal::error(format!(
+            "InternalError: ZEND_FRAMELESS_ICALL_{} indexes frameless entry {at} and the engine's table has {} entries",
+            operands.len(),
+            req.frameless_count()
+        ))),
+    };
+    let (function, entry) = match pushed {
+        Ok(pushed) => pushed,
+        Err(fatal) => {
+            for (at, &operand) in operands.iter().enumerate() {
+                if owned >> at & 1 != 0 {
+                    req.release_zval_nogc(operand);
+                }
+            }
+            return Err(fatal);
+        }
+    };
     let served = req.serve_entry(function, entry, OnThrow::ReturnValue);
     req.pop_frameless(owned);
-    let width = if N == 3 { 2 } else { 1 };
     match served {
-        Ok(value) => {
-            set_out(req, frame, op, value);
-            if crate::interrupt::check(req)? {
-                return Ok(Stepped::Threw(frame).into());
-            }
-            jump_to(at.saturating_add(width))
+        Ok(value) => Ok(Some(value)),
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            Ok(None)
         }
-        Err(thrown) => threw(req, frame, &thrown),
     }
 }
 

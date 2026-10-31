@@ -10,9 +10,15 @@ use php_engine::tier::{
 use php_unit::{MapPtrOffset, OplineIdx};
 
 use crate::policy::{self, Holder, Outcome, Policy};
-use crate::record::{self, Bailed, Recorded, Start, Stop, TraceRecord, header_at, returns, run};
+use crate::record::{
+    self, Bailed, Folds, Recorded, Start, Stop, TraceRecord, header_at, returns, run,
+};
 use crate::table::TraceId;
 use crate::testing::{self, function_of};
+
+/// What php's default `opcache.optimization_level` folds, which a test's
+/// engine runs under where it sets none ([`Folds::of`]).
+pub(crate) const DEFAULT_FOLDS: Folds = Folds(true);
 
 /// Where the recording tier starts, as the engine's ini says: the
 /// activation of the function `record.function` names (empty for the
@@ -185,7 +191,7 @@ pub(crate) fn settle_words(req: &mut Request) {
         .flatten()
         .map(|code| {
             let mut headers: Vec<SafepointIdx> = (0..code.oplines.len())
-                .filter_map(|at| header_at(code, OplineIdx(u32::try_from(at).ok()?)))
+                .filter_map(|at| header_at(code, OplineIdx(u32::try_from(at).ok()?), DEFAULT_FOLDS))
                 .collect();
             // The first is the outermost, whose body its back edge lands
             // on first, wherever php's trace roots it.
@@ -253,7 +259,9 @@ pub(crate) fn walk_to(
         else {
             return Err(Flow::Continue);
         };
-        let header = view.op_array(func).and_then(|code| header_at(code, at));
+        let header = view
+            .op_array(func)
+            .and_then(|code| header_at(code, at, DEFAULT_FOLDS));
         match (start, header) {
             (Start::Enter, _) => return Ok((frame, root(func, SafepointIdx::ENTRY))),
             (Start::Loop, Some(header)) if skip == 0 => return Ok((frame, root(func, header))),

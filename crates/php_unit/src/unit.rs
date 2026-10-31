@@ -5,7 +5,7 @@ use std::ops::Deref;
 use std::sync::{Arc, OnceLock, Weak};
 
 use crate::decl::{ClassDecl, ConstDecl, FunctionDecl, HookKind, Name};
-use crate::op::OpArray;
+use crate::op::{OpArray, OperandKind, OplineIdx};
 
 /// The unit a constant expression's closure belongs to
 /// ([`crate::decl::ConstExpr::Closure`]), as the engine shares it:
@@ -541,6 +541,27 @@ impl OpArray {
     #[must_use]
     pub fn dump_lines(&self, name: &[u8], args: usize, frameless: &[Name]) -> Vec<u8> {
         crate::dump::lines(name, args, self, frameless)
+    }
+
+    /// The opline at `at` as `zend_dump_op` prints it, appended to `out`
+    /// without the number before it or the newline after: in `block`, a
+    /// jump target names the block it lands in and a variable the SSA
+    /// variable that renames it, as php's SSA dump prints them
+    /// ([`crate::InBlock`]); with none, as [`OpArray::dump_lines`] does.
+    pub fn dump_op(
+        &self,
+        out: &mut Vec<u8>,
+        at: OplineIdx,
+        frameless: &[Name],
+        block: Option<crate::InBlock<'_>>,
+    ) {
+        crate::dump::op_at(out, self, at.0 as usize, frameless, block);
+    }
+
+    /// `zend_dump_var`: the variable of `kind` at frame slot `number`,
+    /// `CV0($n)`, `T3`, `V2`, or `X4` for any other, appended to `out`.
+    pub fn dump_var(&self, out: &mut Vec<u8>, kind: OperandKind, number: u32) {
+        crate::dump::var_into(out, self, kind, number);
     }
 }
 

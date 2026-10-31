@@ -10,7 +10,7 @@ use php_sapi::c_number::atoi;
 
 /// One parameter, `phpdbg_param_t` by its type.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Param {
+pub enum Parameter {
     /// `STR_PARAM`: a word, a quoted one unescaped.
     Str(Vec<u8>),
     /// `NUMERIC_PARAM`: digits as `atoi` reads them, or a truthy or
@@ -38,18 +38,18 @@ pub enum Param {
     Cond(Vec<u8>),
 }
 
-impl Param {
+impl Parameter {
     /// `phpdbg_get_param_type`.
     pub fn kind(&self) -> &'static str {
         match self {
-            Param::Str(_) => "string",
-            Param::Num(_) => "numeric",
-            Param::Addr(_) => "address",
-            Param::Method { .. } => "method",
-            Param::NumericFunction { .. } => "function opline",
-            Param::NumericMethod { .. } => "method opline",
-            Param::File { .. } => "file or file opline",
-            Param::Op(_) | Param::NumericFile { .. } | Param::Cond(_) => "unknown",
+            Parameter::Str(_) => "string",
+            Parameter::Num(_) => "numeric",
+            Parameter::Addr(_) => "address",
+            Parameter::Method { .. } => "method",
+            Parameter::NumericFunction { .. } => "function opline",
+            Parameter::NumericMethod { .. } => "method opline",
+            Parameter::File { .. } => "file or file opline",
+            Parameter::Op(_) | Parameter::NumericFile { .. } | Parameter::Cond(_) => "unknown",
         }
     }
 
@@ -58,15 +58,17 @@ impl Param {
         let mut text = String::new();
         let lossy = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
         match self {
-            Param::Str(s) | Param::Op(s) | Param::Cond(s) => write!(text, "{}", lossy(s)),
-            Param::Addr(addr) => write!(text, "{addr}"),
-            Param::Num(num) => write!(text, "{num}"),
-            Param::Method { class, name } => write!(text, "{}::{}", lossy(class), lossy(name)),
-            Param::File { name, line } | Param::NumericFile { name, line } => {
+            Parameter::Str(s) | Parameter::Op(s) | Parameter::Cond(s) => {
+                write!(text, "{}", lossy(s))
+            }
+            Parameter::Addr(addr) => write!(text, "{addr}"),
+            Parameter::Num(num) => write!(text, "{num}"),
+            Parameter::Method { class, name } => write!(text, "{}::{}", lossy(class), lossy(name)),
+            Parameter::File { name, line } | Parameter::NumericFile { name, line } => {
                 write!(text, "{}:{line}", lossy(name))
             }
-            Param::NumericFunction { name, num } => write!(text, "{}#{num}", lossy(name)),
-            Param::NumericMethod { class, name, num } => {
+            Parameter::NumericFunction { name, num } => write!(text, "{}#{num}", lossy(name)),
+            Parameter::NumericMethod { class, name, num } => {
                 write!(text, "{}::{}#{num}", lossy(class), lossy(name))
             }
         }
@@ -79,13 +81,13 @@ impl Param {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// A command by name and its parameters: the first is the name.
-    Params(Vec<Param>),
+    Params(Vec<Parameter>),
     /// `ev` and the raw code after it.
     Eval(Vec<u8>),
     /// `sh` and the raw line after it.
     Shell(Vec<u8>),
     /// `run` or `r` and what followed, raw, where something did.
-    Run(Option<Vec<u8>>),
+    Serve(Option<Vec<u8>>),
 }
 
 /// The lexer's tokens.
@@ -487,8 +489,8 @@ fn command(tokens: &[Token]) -> Result<Command, Malformed> {
             })
         }
         Some(Token::Run) => match tokens.get(1) {
-            None => Ok(Command::Run(None)),
-            Some(Token::Input(raw)) if tokens.len() == 2 => Ok(Command::Run(Some(raw.clone()))),
+            None => Ok(Command::Serve(None)),
+            Some(Token::Input(raw)) if tokens.len() == 2 => Ok(Command::Serve(Some(raw.clone()))),
             Some(other) => Err(unexpected(other)),
         },
         _ => parameters(&tokens).map(Command::Params),
@@ -498,7 +500,7 @@ fn command(tokens: &[Token]) -> Result<Command, Malformed> {
 /// `parameters`: each `parameter` of the grammar in turn, a `T_PROTO`
 /// read as the start of the file name after it, as the grammar joins
 /// the two.
-fn parameters(tokens: &[&Token]) -> Result<Vec<Param>, Malformed> {
+fn parameters(tokens: &[&Token]) -> Result<Vec<Parameter>, Malformed> {
     let mut joined: Vec<Token> = Vec::with_capacity(tokens.len());
     let mut rest = tokens.iter();
     while let Some(token) = rest.next() {
@@ -519,7 +521,7 @@ fn parameters(tokens: &[&Token]) -> Result<Vec<Param>, Malformed> {
         let param = match (token, next(1), next(2), next(3), next(4)) {
             (Token::Id(name), Some(Token::Colon), Some(Token::Digits(line)), _, _) => {
                 at += 3;
-                Param::File {
+                Parameter::File {
                     name: name.clone(),
                     line: *line,
                 }
@@ -532,7 +534,7 @@ fn parameters(tokens: &[&Token]) -> Result<Vec<Param>, Malformed> {
                 _,
             ) => {
                 at += 4;
-                Param::NumericFile {
+                Parameter::NumericFile {
                     name: name.clone(),
                     line: *line,
                 }
@@ -545,7 +547,7 @@ fn parameters(tokens: &[&Token]) -> Result<Vec<Param>, Malformed> {
                 Some(Token::Digits(num)),
             ) => {
                 at += 5;
-                Param::NumericMethod {
+                Parameter::NumericMethod {
                     class: class.clone(),
                     name: name.clone(),
                     num: *num,
@@ -553,37 +555,37 @@ fn parameters(tokens: &[&Token]) -> Result<Vec<Param>, Malformed> {
             }
             (Token::Id(class), Some(Token::DColon), Some(Token::Id(name)), _, _) => {
                 at += 3;
-                Param::Method {
+                Parameter::Method {
                     class: class.clone(),
                     name: name.clone(),
                 }
             }
             (Token::Id(name), Some(Token::Pound), Some(Token::Digits(num)), _, _) => {
                 at += 3;
-                Param::NumericFunction {
+                Parameter::NumericFunction {
                     name: name.clone(),
                     num: *num,
                 }
             }
             (Token::If, Some(Token::Input(raw)), _, _, _) => {
                 at += 2;
-                Param::Cond(raw.clone())
+                Parameter::Cond(raw.clone())
             }
             (Token::Opcode(op), ..) => {
                 at += 1;
-                Param::Op(op.clone())
+                Parameter::Op(op.clone())
             }
             (Token::Addr(addr), ..) => {
                 at += 1;
-                Param::Addr(*addr)
+                Parameter::Addr(*addr)
             }
             (Token::Truthy(n) | Token::Digits(n), ..) => {
                 at += 1;
-                Param::Num(*n)
+                Parameter::Num(*n)
             }
             (Token::Id(word), ..) => {
                 at += 1;
-                Param::Str(word.clone())
+                Parameter::Str(word.clone())
             }
             (other, ..) => return Err(unexpected(other)),
         };
@@ -596,7 +598,7 @@ fn parameters(tokens: &[&Token]) -> Result<Vec<Param>, Malformed> {
 mod tests {
     use super::*;
 
-    fn params(line: &str) -> Vec<Param> {
+    fn params(line: &str) -> Vec<Parameter> {
         match parse(&mut line.as_bytes().to_vec()).as_deref() {
             Ok([Command::Params(params), ..]) => params.clone(),
             _ => Vec::new(),
@@ -610,43 +612,49 @@ mod tests {
             Ok(vec![
                 Command::Eval(b"1 + 3 ".to_vec()),
                 Command::Eval(b"2 ** 3".to_vec()),
-                Command::Params(vec![Param::Str(b"q".to_vec())]),
+                Command::Params(vec![Parameter::Str(b"q".to_vec())]),
             ])
         );
         assert_eq!(
             parse(&mut b"r\n".to_vec()),
-            Ok(vec![Command::Params(vec![Param::Str(b"r".to_vec())])])
+            Ok(vec![Command::Params(vec![Parameter::Str(b"r".to_vec())])])
         );
         assert_eq!(
             parse(&mut b"r echo # quit\n".to_vec()),
             Ok(vec![
-                Command::Run(Some(b"echo ".to_vec())),
-                Command::Params(vec![Param::Str(b"quit".to_vec())]),
+                Command::Serve(Some(b"echo ".to_vec())),
+                Command::Params(vec![Parameter::Str(b"quit".to_vec())]),
             ])
         );
     }
 
     #[test]
     fn the_parameters_are_typed_as_phpdbg_types_them() {
-        assert_eq!(params("b 3"), [Param::Str(b"b".to_vec()), Param::Num(3)]);
+        assert_eq!(
+            params("b 3"),
+            [Parameter::Str(b"b".to_vec()), Parameter::Num(3)]
+        );
         assert_eq!(
             params("b breakpoints_002.php:4")[1],
-            Param::File {
+            Parameter::File {
                 name: b"breakpoints_002.php".to_vec(),
                 line: 4
             }
         );
         assert_eq!(
             params("b \\Foo\\Bar::Foo")[1],
-            Param::Method {
+            Parameter::Method {
                 class: b"\\Foo\\Bar".to_vec(),
                 name: b"Foo".to_vec()
             }
         );
-        assert_eq!(params("b ZEND_ECHO")[1], Param::Op(b"ZEND_ECHO".to_vec()));
+        assert_eq!(
+            params("b ZEND_ECHO")[1],
+            Parameter::Op(b"ZEND_ECHO".to_vec())
+        );
         assert_eq!(
             params("b Foo::bar#0")[1],
-            Param::NumericMethod {
+            Parameter::NumericMethod {
                 class: b"Foo".to_vec(),
                 name: b"bar".to_vec(),
                 num: 0
@@ -654,19 +662,22 @@ mod tests {
         );
         assert_eq!(
             params("b baz#0")[1],
-            Param::NumericFunction {
+            Parameter::NumericFunction {
                 name: b"baz".to_vec(),
                 num: 0
             }
         );
         assert_eq!(
             params("w r $b")[1..],
-            [Param::Str(b"r".to_vec()), Param::Str(b"$b".to_vec())]
+            [
+                Parameter::Str(b"r".to_vec()),
+                Parameter::Str(b"$b".to_vec())
+            ]
         );
-        assert_eq!(params("a';")[0], Param::Str(b"a".to_vec()));
+        assert_eq!(params("a';")[0], Parameter::Str(b"a".to_vec()));
         assert_eq!(
             params("var_dump \"a\" \"b\"")[1..],
-            [Param::Str(b"a".to_vec()), Param::Str(b"b".to_vec())]
+            [Parameter::Str(b"a".to_vec()), Parameter::Str(b"b".to_vec())]
         );
     }
 }

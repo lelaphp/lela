@@ -24,7 +24,7 @@ use crate::track::Ticket;
 
 pub use crate::layout::Layout;
 pub(crate) use owed::of_the_engine;
-pub use owed::{Instrument, Owed, When};
+pub use owed::{HeldAt, Instrument, Owed, When};
 
 mod owed;
 
@@ -80,9 +80,51 @@ pub struct Manifest {
     /// through [`Manifest::pin`].
     #[serde(skip)]
     pub pin: Option<Pin>,
+    /// Where the `[oracle]` row names a file the workspace lacks, the
+    /// refusal of reading it: a defect, which [`Manifest::pin`] refuses
+    /// with and loading does not (#3618 ruling 4, #3642).
+    #[serde(skip)]
+    pin_absent: Option<String>,
     /// The workspace the manifest was loaded from; empty for `parse`.
     #[serde(skip)]
     pub root: PathBuf,
+}
+
+/// Hold `rule` to carrying what to do instead where it is judged at a
+/// call, one with a `tool`: a `remedy`, which a denial renders after its
+/// text (#3618 ruling 3, #3627).
+fn remedied(rule: &Rule) -> Result<()> {
+    if !rule.tool.is_empty() && rule.remedy.as_deref().is_none_or(|r| r.trim().is_empty()) {
+        bail!(
+            "rule \"{}\" has a `tool` and no `remedy`; a denial says what to do instead, so a rule judged at a call carries one (#3618 ruling 3, #3627)",
+            rule.id
+        );
+    }
+    Ok(())
+}
+
+/// One thing a person's file carries that parses but does not validate,
+/// a cross-file check's refusal ([`Manifest::defects`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Defect {
+    /// The file, relative to the workspace.
+    pub file: String,
+    /// The check's refusal.
+    pub error: String,
+    /// Whether the file is absent, which nothing parsed (#3642).
+    absent: bool,
+}
+
+impl std::fmt::Display for Defect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let first = self.error.lines().next().unwrap_or_default();
+        let said = if self.absent {
+            "is absent"
+        } else {
+            "parses but does not validate"
+        };
+        write!(f, "{} {said}: {first}", self.file)
+    }
 }
 
 /// `[telemetry]`: the one number the silent-instrument query of
@@ -540,7 +582,8 @@ impl Edge {
 /// an issue rather than a file: the tracker's labels under which the rule
 /// does not judge the call (#341), which only a rule `permit` judges over
 /// a command may carry. `where` is the same idea for the checkout a call
-/// runs in ([`Where`]), and the same rules alone may carry it.
+/// runs in ([`Where`]), and the same rules alone may carry it; `runs` for
+/// whether the runtime runs a `Bash` call in the foreground ([`Runs`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -557,9 +600,16 @@ pub struct Rule {
     /// `where`: the checkouts the rule judges a call in (#1149).
     #[serde(default, rename = "where")]
     pub within: Where,
+    /// `runs`: the calls the rule judges by how the runtime runs them (#3624).
+    #[serde(default)]
+    pub runs: Runs,
     #[serde(default)]
     pub adr: OneOrMany,
     pub text: String,
+    /// What to do instead, which a denial renders after the text (#3618
+    /// ruling 3).
+    #[serde(default)]
+    pub remedy: Option<String>,
     #[serde(flatten)]
     pub predicate: Predicates,
 }
@@ -567,7 +617,7 @@ pub struct Rule {
 /// `where`: the checkouts a rule judges a call in. A builder works in a
 /// worktree whose branch records its ticket (`branch.<b>.ticket`, which
 /// `xtask worktree add --ticket` writes and `xtask track` reads), and the
-/// merge check runs in main's checkout, which records none; a rule on
+/// merge check runs in the merge worktree, which records none; a rule on
 /// what a builder may run is one on the first alone (#1145, #1149).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -579,18 +629,38 @@ pub enum Where {
     /// [`crate::track`]'s record; a record that is not a number is one.
     Ticketed,
     /// A checkout where a merge, cherry-pick, revert or rebase stands
-    /// that the calling session did not start (#2476), read in
-    /// `permit::operation`.
+    /// and another session than the calling one owns (#2476, #3621),
+    /// read by [`crate::owner`] and `permit::operation`.
     Operating,
+    /// A checkout another session than the calling one owns, by its
+    /// owner record ([`crate::owner`], #3618 M1, #3621).
+    Owned,
     /// The repository's main checkout, the one whose `.git` is a
-    /// directory, and never a linked worktree: where merges into `main`
-    /// are made (#2751).
+    /// directory, and never a linked worktree: what moves `main` (#2751).
     Main,
+    /// The merge worktree, the checkout on `staging`: where the merge
+    /// queue's merges are made (#3618 M2, #3622).
+    Staging,
     /// A checkout of the repository, the main one or a linked worktree,
     /// as `git worktree list` names them, and never a directory outside
     /// them, such as a scratch repository: read where each command of a
     /// shell line runs, and judged wherever `permit` cannot say (#2887).
     Checkout,
+}
+
+/// `runs`: whether a rule judges a `Bash` call the runtime runs in the
+/// background. A wait there blocks nothing, since the runtime notifies its
+/// end, so a rule on what a foreground wait holds judges the foreground
+/// alone (#3624).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Runs {
+    /// However the call runs: a row without `runs`.
+    #[default]
+    Either,
+    /// Only a call without `run_in_background`, and never a `Monitor`,
+    /// which runs in the background by construction (#3637).
+    Foreground,
 }
 
 /// The predicates of harness-design.md §4.1, which cites [`Self::NAMES`]
@@ -638,6 +708,11 @@ pub struct Predicates {
     pub with: OneOrMany,
     pub on: Option<String>,
     pub deny: Option<bool>,
+    /// `writes = true`: a call that writes, an `Edit`, a `Write`, or a
+    /// shell command that can change the checkout it runs in or a
+    /// redirection into a file (`permit::writes`); with `where = "owned"`
+    /// it is what one session per checkout refuses (#3621).
+    pub writes: Option<bool>,
     pub deny_lints: Option<Vec<String>>,
     /// The `deny_lints` lints a test may still trip, each rendered as
     /// clippy's own `allow-*-in-tests` key ([`IN_TESTS`]) into the
@@ -745,7 +820,7 @@ impl Predicates {
     /// and whether it describes one write or one command, so `permit` can
     /// judge it before the call runs (the other five read the tree after
     /// the write, harness-design.md §4.4).
-    const TABLE: [(&'static str, Carries, bool); 12] = [
+    const TABLE: [(&'static str, Carries, bool); 13] = [
         ("deny_types", |p| p.deny_types.is_some(), true),
         ("deny_methods", |p| p.deny_methods.is_some(), false),
         ("allow", |p| p.allow.is_some(), true),
@@ -754,6 +829,7 @@ impl Predicates {
         ("require_argv", |p| p.require_argv.is_some(), true),
         ("on", |p| p.on.is_some(), true),
         ("deny", |p| p.deny.is_some(), true),
+        ("writes", |p| p.writes.is_some(), true),
         ("deny_lints", |p| p.deny_lints.is_some(), false),
         ("check", |p| p.check.is_some(), false),
         ("avoid_from", |p| p.avoid_from.is_some(), false),
@@ -769,8 +845,8 @@ impl Predicates {
     }
 
     /// Whether the predicate describes one write or one command, so `permit`
-    /// can judge it before the call runs: `deny`, `deny_argv`, `require_argv`,
-    /// `deny_pattern`, `deny_types`, `allow`, `on`. The other five read the
+    /// can judge it before the call runs: `deny`, `writes`, `deny_argv`,
+    /// `require_argv`, `deny_pattern`, `deny_types`, `allow`, `on`. The other five read the
     /// tree after the write (harness-design.md §4.4).
     pub fn describes_a_call(&self) -> bool {
         Self::TABLE
@@ -1003,20 +1079,52 @@ impl Manifest {
         let path = root.join(FILE);
         let text = crate::read(&path)?;
         let mut manifest = Manifest::parse(&text).with_context(|| format!("{}", path.display()))?;
-        manifest.pin = (manifest.oracle.as_ref())
-            .map(|row| Pin::load(&root.join(&row.pin)))
-            .transpose()?;
+        let named = manifest.oracle.as_ref().map(|row| root.join(&row.pin));
+        if let Some(file) = named {
+            match fs::exists(&file) {
+                Ok(false) => {
+                    manifest.pin_absent =
+                        Some(format!("no oracle pin stands at {}", file.display()));
+                }
+                _ => manifest.pin = Some(Pin::load(&file)?),
+            }
+        }
         manifest.root = root.to_path_buf();
         Ok(manifest)
     }
 
     /// The oracle pin, which every instrument that runs php asks for here
     /// and nowhere else: refused, naming it, where the manifest has no
-    /// `[oracle]` row (#3181).
+    /// `[oracle]` row (#3181), and with its first defect where the file
+    /// the row names is absent or parses but does not validate (#3618
+    /// ruling 4, #3642).
     pub fn pin(&self) -> Result<&Pin> {
+        if let Some(defect) = self.defects().into_iter().next() {
+            bail!("{defect}");
+        }
         self.pin.as_ref().ok_or_else(|| {
             anyhow!("{FILE} has no `[oracle]` row, so no oracle pin names the php to run or the php-src it is held to")
         })
+    }
+
+    /// What the person's files carry that parses but does not validate,
+    /// apart from loading (#3618 ruling 4): a TOML or grammar error is
+    /// fatal to [`Manifest::load`], and this is the rest, each a refusal
+    /// of the instruments that read what failed; a pin the `[oracle]` row
+    /// names and the workspace lacks is one, absent (#3642).
+    pub fn defects(&self) -> Vec<Defect> {
+        let file = self.pin_file().unwrap_or_default();
+        let absent = self.pin_absent.iter().map(|error| Defect {
+            file: file.to_owned(),
+            error: error.clone(),
+            absent: true,
+        });
+        let pin = self.pin.iter().flat_map(Pin::defects).map(|error| Defect {
+            file: file.to_owned(),
+            error: error.clone(),
+            absent: false,
+        });
+        absent.chain(pin).collect()
     }
 
     /// The file the `[oracle]` row names, where the manifest has one.
@@ -1093,6 +1201,13 @@ impl Manifest {
                     named[0]
                 );
             }
+            let bash = !rule.tool.is_empty() && rule.tool.iter().all(|t| t == "Bash");
+            if rule.runs != Runs::Either && !bash {
+                bail!(
+                    "rule \"{}\" has `runs` beside a tool that is not Bash; only a Bash call runs in the background",
+                    rule.id
+                );
+            }
             bangs_in_place(rule)?;
             if !rule.exempt_label.is_empty() && !rule.predicate.describes_a_call() {
                 bail!(
@@ -1142,6 +1257,7 @@ impl Manifest {
                     rule.id
                 );
             }
+            remedied(rule)?;
         }
         manifest.parity.hold(&manifest.crates)?;
         owed::hold(&manifest.owed, &manifest.crates)?;
@@ -1232,6 +1348,19 @@ impl Manifest {
         self.crates
             .iter()
             .filter(|c| paths.iter().any(|p| p.as_ref().starts_with(c.path())))
+            .collect()
+    }
+
+    /// The crates a change to `paths` touches, in manifest order: those
+    /// [`Manifest::crates_of`] names and those whose tests or `build.rs`
+    /// read one of them as the tree at `root` holds it
+    /// ([`crate::key::read_by_tests`], #3646, #3654).
+    pub(crate) fn touched_by(&self, root: &Path, paths: &[&str]) -> Vec<&Crate> {
+        let touches = |c: &&Crate, p: &&str| {
+            Path::new(p).starts_with(c.path()) || crate::key::read_by_tests(root, &c.path(), p)
+        };
+        (self.crates.iter())
+            .filter(|c| paths.iter().any(|p| touches(c, p)))
             .collect()
     }
 

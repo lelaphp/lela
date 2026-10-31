@@ -1,7 +1,7 @@
 //! `fpm_sockets.c`: each pool's listening socket, made once per address
-//! and shared by the pools that name it, TCP by `host:port` or a port
+//! and shared by the pools that name it, TCP by `host:port` or a `port`
 //! alone, the IPv6 any-address first where no host is named, or a UNIX
-//! socket by path under the pool's owner, group and mode; the sockets a
+//! socket by path under the pool's owner, group and `listen.mode`; the sockets a
 //! reload inherits by the numbers `FPM_SOCKETS` names, and the variable
 //! written for the next exec.
 
@@ -146,7 +146,7 @@ impl Sockets {
         Some(fd)
     }
 
-    /// `fpm_socket_af_inet_listening_socket`: `host:port`, or a port
+    /// `fpm_socket_af_inet_listening_socket`: `host:port`, or a `port`
     /// alone bound to `::` and, where that fails, `0.0.0.0`.
     pub(crate) fn inet(&mut self, name: &[u8], address: &[u8], backlog: i32) -> Option<RawFd> {
         let (host, port_str) = match address.iter().rposition(|b| *b == b':') {
@@ -367,8 +367,8 @@ fn gai_text(e: &std::io::Error) -> String {
 
 /// `fpm_sockets_new_listening_socket`: the socket made, `SO_REUSEADDR`
 /// set, a UNIX path refused where another php-fpm answers on it and
-/// otherwise unlinked and bound under the pool's mode, owner and group,
-/// and listened on with the pool's backlog.
+/// otherwise unlinked and bound under the pool's `listen.mode`, owner and group,
+/// and listened on with the pool's `listen.backlog`.
 fn new_listening(
     address: &Address,
     name: &[u8],

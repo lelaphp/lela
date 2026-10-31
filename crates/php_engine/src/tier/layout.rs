@@ -20,7 +20,8 @@ use php_heap::{FrameRef, HEADER_AT, HeaderImage, ROOM_BYTES, StackLayout, VmStac
 use php_unit::MapPtrOffset;
 use php_unit::decl::Bare;
 
-use super::FuncRef;
+use super::{ClassId, FuncRef};
+use crate::api::call::Function;
 use crate::api::request::Request;
 use crate::exec::{CallInfo, Header};
 
@@ -47,6 +48,7 @@ pub struct FrameLayout {
     link: u32,
     header: u32,
     header_bytes: u32,
+    callee: u32,
     opline: u32,
     info: u32,
     num_args: u32,
@@ -56,8 +58,12 @@ pub struct FrameLayout {
     annex: u32,
     this: u32,
     closure: u32,
+    called_scope: u32,
     leaves_by_kernel: u32,
+    release_this: u32,
     send_by_ref: u32,
+    building: u32,
+    return_unused: u32,
     caller_loop: u32,
     numbered_from: u32,
     top: u32,
@@ -80,6 +86,7 @@ pub const FRAME: FrameLayout = FrameLayout {
     link: 0,
     header: word(HEADER_AT),
     header_bytes: word(size_of::<Header>()),
+    callee: word(HEADER_AT + Header::CALLEE_AT),
     opline: word(HEADER_AT + Header::OPLINE_AT),
     info: word(HEADER_AT + Header::INFO_AT),
     num_args: word(HEADER_AT + Header::NUM_ARGS_AT),
@@ -89,8 +96,12 @@ pub const FRAME: FrameLayout = FrameLayout {
     annex: word(HEADER_AT + Header::ANNEX_AT),
     this: word(HEADER_AT + Header::THIS_AT),
     closure: word(HEADER_AT + Header::CLOSURE_AT),
+    called_scope: word(HEADER_AT + Header::SCOPE_AT),
     leaves_by_kernel: CallInfo::LEAVES_BY_KERNEL,
+    release_this: CallInfo::RELEASE_THIS,
     send_by_ref: CallInfo::SEND_BY_REF,
+    building: CallInfo::BUILDING,
+    return_unused: CallInfo::RETURN_UNUSED,
     caller_loop: Header::CALLER_LOOP,
     numbered_from: Header::NUMBERED_FROM,
     top: word(STACK.top),
@@ -122,6 +133,7 @@ const _: () = {
     );
     assert!(FRAME.caller.is_multiple_of(4) && FRAME.returns_to.is_multiple_of(4));
     assert!(FRAME.cache.is_multiple_of(4) && FRAME.annex.is_multiple_of(4));
+    assert!(FRAME.called_scope.is_multiple_of(4));
     assert!(FRAME.this.is_multiple_of(8) && FRAME.closure.is_multiple_of(8));
 };
 
@@ -210,6 +222,15 @@ impl FrameLayout {
         self.annex
     }
 
+    /// `EX(func)` as another process reads it, a word: the address of
+    /// the callee's record, one per function in a request, which a call
+    /// a handler pushed is held to as php's `zend_jit_func_guard` holds
+    /// `call->func`.
+    #[must_use]
+    pub const fn callee(&self) -> u32 {
+        self.callee
+    }
+
     /// `Z_OBJ(EX(This))`, a word: zero for none.
     #[must_use]
     pub const fn this(&self) -> u32 {
@@ -222,12 +243,28 @@ impl FrameLayout {
         self.closure
     }
 
+    /// The called scope, `static`, a half-word: the number of its class,
+    /// as `php_heap::Obj::CLASS_AT` and a runtime-cache slot hold it, with
+    /// every bit inverted; zero for none.
+    #[must_use]
+    pub const fn called_scope(&self) -> u32 {
+        self.called_scope
+    }
+
     /// The flags of a frame whose leave the leave kernel serves: a call
     /// no `DO_*CALL` made a user frame of, and arguments moved past the
     /// declared parameters.
     #[must_use]
     pub const fn leaves_by_kernel(&self) -> u32 {
         self.leaves_by_kernel
+    }
+
+    /// `ZEND_CALL_RELEASE_THIS`: the frame owns one owner of its
+    /// receiver, [`FrameLayout::this`], which its leave gives up; with it
+    /// clear the receiver is pinned, and the leave lets the pin go.
+    #[must_use]
+    pub const fn release_this(&self) -> u32 {
+        self.release_this
     }
 
     /// The bit of a call being built that says the argument its last
@@ -237,6 +274,22 @@ impl FrameLayout {
     #[must_use]
     pub const fn send_by_ref(&self) -> u32 {
         self.send_by_ref
+    }
+
+    /// The bit of a call whose `SEND_*` oplines are placing its
+    /// arguments, which its `DO_*CALL` clears as it makes the call the one
+    /// being served, php's `EG(current_execute_data) = call`.
+    #[must_use]
+    pub const fn building(&self) -> u32 {
+        self.building
+    }
+
+    /// The bit of a call being served whose `DO_*CALL` reads nothing it
+    /// returns, `!RETURN_VALUE_USED(opline)`, which its activation writes
+    /// beside clearing [`FrameLayout::building`].
+    #[must_use]
+    pub const fn return_unused(&self) -> u32 {
+        self.return_unused
     }
 
     /// The caller's bit that says the call was served from outside the
@@ -330,7 +383,10 @@ impl FrameLayout {
 /// reads it in the request's own slot (`jit-design.md` §4.3, #3346), as
 /// php's code reads `CACHED_PTR(cache_slot)` and the offset past it for a
 /// class that is not immutable (`zend_jit_fetch_obj`,
-/// `Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`): offsets in bytes into
+/// `Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`), and a method's call
+/// its class and callee, as php's code reads `CACHED_PTR(result.num)`
+/// and the callee past it (`zend_jit_init_method_call`,
+/// `zend_jit_init_static_method_call`, `:9025-9056`, `:9255-9265`): offsets in bytes into
 /// one slot ([`touch`](super::touch)), the tags compiled code tests before
 /// it reads past them, and the bit of a slot's type that says it has
 /// none. One value, [`PLACE`], every offset `offset_of!` over the
@@ -340,6 +396,10 @@ pub struct PlaceLayout {
     tag: u32,
     unprimed: u32,
     property: u32,
+    pair: u32,
+    pair_class: u32,
+    pair_function: u32,
+    pair_record: u32,
     class: u32,
     offset_tag: u32,
     declared: u8,
@@ -356,6 +416,10 @@ pub const PLACE: PlaceLayout = {
         tag: word(Cached::TAG_AT),
         unprimed: crate::exec::UNPRIMED,
         property: crate::exec::PROPERTY,
+        pair: crate::exec::CLASS_AND_CALLEE,
+        pair_class: word(Cached::PAIR_CLASS_AT),
+        pair_function: word(Cached::PAIR_FUNCTION_AT),
+        pair_record: word(Cached::PAIR_RECORD_AT),
         class: word(Cached::PLACE_AT + PropertyPlace::CLASS_AT),
         offset_tag: word(offset + PropertyOffset::TAG_AT),
         declared: PropertyOffset::DECLARED,
@@ -382,6 +446,37 @@ impl PlaceLayout {
     #[must_use]
     pub const fn property(&self) -> u32 {
         self.property
+    }
+
+    /// The tag of a slot that holds the class and the callee a method's
+    /// call resolved together, php's `CACHE_POLYMORPHIC_PTR(num, ce, fbc)`.
+    #[must_use]
+    pub const fn pair(&self) -> u32 {
+        self.pair
+    }
+
+    /// Where the pair keeps its class, a half-word, the number
+    /// `php_heap::Obj::CLASS_AT` holds.
+    #[must_use]
+    pub const fn pair_class(&self) -> u32 {
+        self.pair_class
+    }
+
+    /// Where the pair keeps its callee, a half-word, its number
+    /// ([`CalleeSlot::function`](super::CalleeSlot::function)).
+    #[must_use]
+    pub const fn pair_function(&self) -> u32 {
+        self.pair_function
+    }
+
+    /// Where the pair keeps its callee's record, a word, the one a frame
+    /// serving the callee is pushed with
+    /// ([`FrameLayout::callee`](super::FrameLayout::callee)): how
+    /// compiled code holds the slot to a request's own method, whose
+    /// number is the request's alone.
+    #[must_use]
+    pub const fn pair_record(&self) -> u32 {
+        self.pair_record
     }
 
     /// Where a property's place keeps the class it was found on, a
@@ -438,6 +533,9 @@ impl PlaceLayout {
 const _: () = {
     assert!(PLACE.class.is_multiple_of(4) && PLACE.slot.is_multiple_of(4));
     assert!(PLACE.ty.is_multiple_of(2) && PLACE.unprimed != PLACE.property);
+    assert!(PLACE.pair_class.is_multiple_of(4) && PLACE.pair_function.is_multiple_of(4));
+    assert!(PLACE.pair_record.is_multiple_of(8));
+    assert!(PLACE.pair != PLACE.unprimed && PLACE.pair != PLACE.property);
 };
 
 /// A call to a user function as `push_call` laid it down and as a
@@ -451,23 +549,58 @@ const _: () = {
 /// are the request's.
 #[derive(Debug, Clone)]
 pub struct PlainCall {
-    /// The op array a user function's call serves; none for a native's,
-    /// which its name names.
-    callee: Option<FuncRef>,
+    serves: Serves,
     count: u32,
     /// The function's name as the function table holds it, lowered.
     name: Box<[u8]>,
     slots: u32,
     activation: Option<Activation>,
     checks: bool,
+    /// A method's call: the class of its receiver, its called scope, and
+    /// the method its methods answered. The class is published, or the
+    /// request's own, whose number the recording's request gave it and
+    /// compiled code reads where it runs.
+    method: Option<(ClassId, Method)>,
 }
 
-/// Two calls of one callee and one argument count are the same call: a
-/// user function by its op array, a native by its name.
+/// What a plain call serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Serves {
+    /// A native, which the call's name names.
+    Native,
+    /// A user function's op array, published.
+    Published(FuncRef),
+    /// An op array of the request's own, an evaluated class's own
+    /// method's: no number names it past the request, so each request
+    /// finds it under the call's names, and the call is held to the
+    /// room the recording's took ([`call_image`]; #3570).
+    Request,
+}
+
+/// The method a method's plain call serves, as a request that runs the
+/// code finds it ([`call_image`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Method {
+    /// A published method, the same number in every request of the epoch.
+    Published(Function),
+    /// A request-scoped class's own method, `zend_lazy_class_load`'s
+    /// copy's, an enum's, an evaluated class's: numbered by each request
+    /// for itself, so found in the request that runs the code under the
+    /// name of the class that answered it, lowered, and the call's own
+    /// name, and held there to the op array the call serves.
+    Own(Box<[u8]>),
+}
+
+/// Two calls of one callee, one argument count and one called scope are
+/// the same call: a published user function by its op array, a native
+/// and a request's own op array by its name, and a request-scoped class's
+/// own method by its class's name too.
 impl PartialEq for PlainCall {
     fn eq(&self, other: &PlainCall) -> bool {
-        (self.callee, self.count) == (other.callee, other.count)
-            && (self.callee.is_some() || self.name == other.name)
+        (self.serves, self.count) == (other.serves, other.count)
+            && self.scope() == other.scope()
+            && self.own_class() == other.own_class()
+            && (self.callee().is_some() || self.name == other.name)
     }
 }
 
@@ -515,10 +648,27 @@ impl Activation {
 }
 
 impl PlainCall {
-    /// The op array the call serves; none for a native's call.
+    /// The published op array the call serves; none for a native's call
+    /// and a request's own op array's.
     #[must_use]
     pub fn callee(&self) -> Option<FuncRef> {
-        self.callee
+        match self.serves {
+            Serves::Published(f) => Some(f),
+            Serves::Native | Serves::Request => None,
+        }
+    }
+
+    /// Whether the call serves a native.
+    #[must_use]
+    pub fn is_native(&self) -> bool {
+        self.serves == Serves::Native
+    }
+
+    /// Whether the call serves an op array of the request's own, one an
+    /// `eval` declared, which no trace names (`jit-design.md` §4.1).
+    #[must_use]
+    pub fn is_request(&self) -> bool {
+        self.serves == Serves::Request
     }
 
     /// The callee's name as the function table holds it, lowered.
@@ -540,9 +690,11 @@ impl PlainCall {
     }
 
     /// What the call's activation writes, where a `DO_*CALL`'s inline
-    /// path makes it with no `RECV*` to serve, or with `RECV`s that only
-    /// check ([`PlainCall::checks`]); none where the callee's activation
-    /// serves its prologue or reads a cache of its own.
+    /// path makes it with no `RECV*` to serve, with `RECV`s that only
+    /// check ([`PlainCall::checks`]), or with the `RECV_INIT`s of the
+    /// parameters past [`PlainCall::count`], whose defaults compiled code
+    /// copies or leaves the call to its kernel; none where the callee's
+    /// activation serves its prologue or reads a cache of its own.
     #[must_use]
     pub fn activation(&self) -> Option<Activation> {
         self.activation
@@ -556,12 +708,44 @@ impl PlainCall {
     pub fn checks(&self) -> bool {
         self.checks
     }
+
+    /// A method's call: the class of the receiver it was pushed over,
+    /// which its called scope is and whose table answered the method;
+    /// none for a function's. A class that is not
+    /// [`ClassId::is_published`] is the recording's request's own, the
+    /// one its number names there alone: compiled code that pushes the
+    /// call writes the called scope it reads in the request it runs in
+    /// ([`FrameLayout::called_scope`]), and the header [`call_image`]
+    /// lays out names none.
+    #[must_use]
+    pub fn scope(&self) -> Option<ClassId> {
+        self.method.as_ref().map(|(class, _)| *class)
+    }
+
+    /// The name, lowered, of the request-scoped class whose own method the
+    /// call serves, under which each request finds the method for itself
+    /// ([`call_image`]); none for a function's call and a published
+    /// method's.
+    #[must_use]
+    pub fn own_class(&self) -> Option<&[u8]> {
+        match &self.method {
+            Some((_, Method::Own(class))) => Some(class),
+            _ => None,
+        }
+    }
 }
 
 /// The plain call `call` is, the record on top of the stack being built:
 /// a call to a user function whose `INIT_*` found its entry plain, or to a
 /// native of the engine's table, given no receiver, closure, scope or
-/// annex, with no observer declared; none for any other.
+/// annex, with no observer declared; or to a method of a class a
+/// published method answered, over a receiver of that class or none,
+/// the class its called scope, as `INIT_METHOD_CALL`,
+/// `INIT_STATIC_METHOD_CALL` and `NEW` push it: a published class, or a
+/// request-scoped one whose method is published (#3558), one it inherits
+/// from a published class, or its own (#3561), the request's, numbered
+/// for it alone as php's `zend_lazy_class_load` copies each into the
+/// request ([`Method::Own`]); none for any other.
 #[must_use]
 pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let (top, laid) = req.vm().stack.top()?;
@@ -569,30 +753,46 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let function = header.function?;
     let plain = top == call
         && header.info.building()
-        && header.this().is_none()
         && header.closure.is_none()
-        && header.called_scope().is_none()
         && header.annex.is_none()
         && !crate::observer::observing(req);
     if !plain {
         return None;
     }
+    let method = match (header.called_scope(), header.this()) {
+        (None, None) => None,
+        (Some(class), this) if this.is_none_or(|this| this.class() == class) => {
+            let method = if function.published_number().is_some() {
+                Method::Published(function)
+            } else {
+                let name = req.symbols().class_name(class).to_ascii_lowercase();
+                Method::Own(name.into_boxed_slice())
+            };
+            Some((class, method))
+        }
+        _ => return None,
+    };
     let name = || {
         let decl = req.symbols().function_decl(function)?;
         Some(decl.name.0.to_ascii_lowercase().into_boxed_slice())
     };
-    let Some(user) = req.user_function(function) else {
+    let user = req.user_function(function);
+    if method.is_some() && user.is_none() {
+        return None;
+    }
+    let Some(user) = user else {
         // A native's call: its arguments' room and its record, as
         // `INIT_FCALL` pushes `fbc` (`init_native`).
         req.native_entry(function)?;
         req.shared.native_callee(function)?;
         return Some(PlainCall {
-            callee: None,
+            serves: Serves::Native,
             count: header.num_args,
             name: name()?,
             slots: u32::try_from(laid.len()).ok()?,
             activation: None,
             checks: false,
+            method: None,
         });
     };
     if !header.info.plain_entry() {
@@ -612,10 +812,17 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     // map knows the argument of a type the declaration holds
     // (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10873`, the skip in
     // `zend_jit_verify_arg_type` at `:10773-10781`).
-    let checks = shape.typed && count == shape.parameters && shape.entry == count;
+    // One `RECV*` per parameter: a function that declares a type keeps
+    // the passed ones' checks, and one passed fewer arguments than it has
+    // parameters keeps the `RECV_INIT`s of the rest, whose defaults
+    // compiled code copies where it can, as php's trace compiles
+    // `zend_jit_recv_init` (`Z/ext/opcache/jit/zend_jit_ir.c:10886-10950`).
+    let prologue = shape.entry == shape.parameters;
+    let checks = shape.typed && count <= shape.parameters && prologue;
+    let defaults = count < shape.parameters && prologue;
     let enters = count <= shape.parameters
         && slots >= shape.slots
-        && (opline == Some(shape.entry) || checks);
+        && (opline == Some(shape.entry) || checks || defaults);
     let activation = match shape.cache.offset() {
         MapPtrOffset::Engine(cache) if enters => {
             // What `enter_call` writes into the flags, applied to all of
@@ -639,38 +846,62 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
         }
         _ => None,
     };
+    let served = FuncRef::at(code.runtime_cache);
     Some(PlainCall {
-        callee: Some(FuncRef::at(code.runtime_cache)),
+        serves: match served.offset() {
+            MapPtrOffset::Engine(_) => Serves::Published(served),
+            MapPtrOffset::Request(_) => Serves::Request,
+        },
         count,
         name,
         slots,
         activation,
         checks,
+        method,
     })
 }
 
 /// The header `push_call` lays down for `call` in `req`, as compiled code
 /// that pushes it in place copies it: the function the request's table
 /// holds under the call's name, where it serves the call's op array, its
-/// record, and the flags its `INIT_*` writes. None where the request has
-/// declared no such function yet, or its entry is no longer plain.
+/// record, the flags its `INIT_*` writes, and a published class as its
+/// called scope, where compiled code writes a request-scoped one. None where the request has
+/// declared no such function yet, its entry is no longer plain, or its
+/// room is not the one the recording's request laid.
 #[must_use]
 pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
-    let function = req.function_named(Bare::resolved(&call.name))?;
+    let function = match &call.method {
+        Some((_, Method::Published(method))) => *method,
+        Some((_, Method::Own(class))) => {
+            let class = req.class_named(Bare::resolved(class))?;
+            req.symbols().method_named(class, &call.name)?
+        }
+        None => req.function_named(Bare::resolved(&call.name))?,
+    };
     let served = if let Some(user) = req.user_function(function) {
         let code = crate::exec::body_of(&user.unit, user.body)?;
-        Some(FuncRef::at(code.runtime_cache))
+        match code.runtime_cache {
+            MapPtrOffset::Engine(_) => Serves::Published(FuncRef::at(code.runtime_cache)),
+            MapPtrOffset::Request(_) => Serves::Request,
+        }
     } else {
         req.native_entry(function)?;
-        None
+        Serves::Native
     };
-    if served != call.callee {
+    if served != call.serves {
         return None;
     }
-    let (_, header) = req.laid_call(Header::call(function, call.count))?;
+    let mut header = Header::call(function, call.count);
+    header.set_called_scope(call.scope().filter(|class| class.is_published()));
+    let (room, header) = req.laid_call(header)?;
+    // The room compiled code lays is the recording's: a request's own op
+    // array another request found under the same names may take another.
+    if u32::try_from(room).ok() != Some(call.slots) {
+        return None;
+    }
     // A header with no record of its callee is one `push_call` completes
     // as it lays it down, and so not one to copy.
-    let plain = call.callee.is_none() || header.info.plain_entry();
+    let plain = call.is_native() || header.info.plain_entry();
     if !plain || header.callee.is_none() {
         return None;
     }

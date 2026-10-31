@@ -109,6 +109,7 @@ impl TraceRecord {
                     match callee {
                         Callee::User(f) => func(*f),
                         Callee::Native(returns) => format!("native:{:04x}", returns.bits()),
+                        Callee::Request => "request".to_owned(),
                     }
                 ),
                 Event::Enter { func: f } => writeln!(text, "enter {}", func(*f)),
@@ -326,6 +327,7 @@ fn parse_event(line: &str) -> Option<Event> {
                 native if native.starts_with("native:") => Callee::Native(Types::of_bits(
                     u16::from_str_radix(native.strip_prefix("native:")?, 16).ok()?,
                 )?),
+                "request" => Callee::Request,
                 f => Callee::User(parse_func(f)?),
             },
             began: if word == Began::Here.word() {

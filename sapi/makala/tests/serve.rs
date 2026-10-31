@@ -1,4 +1,4 @@
-//! The binary over a real socket (#2339): started on a port the system
+//! The binary over a real socket (#2339): started on a `port` the system
 //! picks, sent HTTP/1.1 requests as bytes, and held to what a client
 //! reads back, the status, the header lines and the body, and to what
 //! the PHP program saw.
@@ -56,7 +56,7 @@ fn a_get_is_answered_with_php_s_status_headers_and_body() {
 /// A path that names nothing under the root is a 404: a `.php` one is
 /// php-fpm's `File not found.`, as one that climbs out of the root to a
 /// file beside it is, and any other has no body; a file that is not PHP
-/// is served as itself, never run.
+/// is served as itself, never compiled.
 #[test]
 fn a_path_with_no_php_file_is_not_served_as_a_program() {
     let root = root("missing", &[("notes.txt", "<?php echo 'ran';")]);

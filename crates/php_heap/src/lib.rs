@@ -606,6 +606,8 @@ impl Heap {
     ///
     /// `at` is a block of this heap whose destruction is done, and
     /// nothing but a pin names it, which `pinned` says.
+    #[allow(clippy::inline_always)] // measured on #3448: a plain `#[inline]` left it a call at every free
+    #[inline(always)]
     pub(crate) unsafe fn give_back(&mut self, at: NonNull<u8>, pinned: bool) {
         if pinned {
             self.mm.retire(at);

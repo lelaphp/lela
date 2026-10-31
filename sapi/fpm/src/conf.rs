@@ -1,13 +1,11 @@
 //! `fpm_conf.c`: `php-fpm.conf` read as php reads it, a line at a time
-//! through php's INI grammar under the normal scanner ([`Engine::parse_ini`]),
+//! through php's INI grammar under the normal scanner ([`php_sapi::Engine::parse_ini`]),
 //! `[global]` and each `[pool]` section's entries set by the table of
 //! their names, `include` globbed after its line, arrays (`php_value[…]`,
 //! `env[…]`, `access.suppress_path[]`) kept newest first, `$pool` and
 //! `$prefix` expanded; then each pool checked and completed as
 //! `fpm_conf_process_all_pools` does, every refusal php's sentence in the
 //! log; and `-tt`'s dump of it all.
-//!
-//! [`Engine::parse_ini`]: php_sapi::Engine::parse_ini
 
 use std::os::unix::ffi::OsStrExt;
 
@@ -190,7 +188,7 @@ impl PoolConfig {
 pub(crate) struct Parsed {
     pub(crate) global: Global,
     pub(crate) pools: Vec<PoolConfig>,
-    /// For each pool, the pool whose scoreboard its status page shows:
+    /// For each pool, the pool whose `scoreboard` its status page shows:
     /// `wp->shared`.
     pub(crate) shared: Vec<Option<usize>>,
 }

@@ -9,13 +9,14 @@ use php_ext::abi::{FromArgument as _, Instance, Path, Raw, This};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, read_prop, write_prop};
 use php_ext::coerce::with_string;
-use php_ext::raising::{Level, Thrown, docref, while_pending};
+use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Opening, OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, PropertyScope, Value, ValueRef};
 
 use crate::ffi::{MimeBuilder, Posted};
 use crate::handle::{Curl, easy_of, made};
+use crate::throwables::Pending;
 
 /// `struct mime_data_cb_arg`: the path a `CURLFile` part reads and the
 /// stream open on it, opened again where a transfer finds it closed, an
@@ -387,31 +388,122 @@ fn keep_postfields(req: &mut Request, object: PhpObject, array: PhpArray) {
 /// int(0)
 /// ```
 ///
+/// An `exit` while an element is read stands as php's unwind exit does,
+/// and the walk goes on past it as past a throwable, so the form is still
+/// set:
+///
+/// ```php
+/// class X { function __toString(): string { exit("exit\n"); } }
+/// $h = curl_init('http://127.0.0.1:1/');
+/// register_shutdown_function(function () use ($h) { curl_exec($h); var_dump(curl_getinfo($h, CURLINFO_EFFECTIVE_METHOD)); });
+/// curl_setopt($h, CURLOPT_POSTFIELDS, ['a' => new X, 'b' => 'later']);
+/// echo "unreached\n";
+/// ```
+/// ```expect
+/// exit
+/// string(4) "POST"
+/// ```
+///
+/// The trees the `CURL *` held are let go of as the walk ends, before
+/// the new one is set, as php cleans `ch->to_free->post` before
+/// `curl_easy_setopt(CURLOPT_MIMEPOST)`; a walk that ends early
+/// (`goto out_string`) lets go of the new tree alone. Either free is made
+/// under what the walk left standing, so a file part's `free_cb`
+/// closing a stream through a wrapper calls nothing, as php's
+/// `zend_call_function` returns at once under `EG(exception)`.
+///
+/// ```php
+/// class Mem {
+///     public $context;
+///     private $at = 0;
+///     function stream_open($path, $mode, $options, &$opened) { echo "open $path\n"; return true; }
+///     function stream_read($n) { $r = substr("hello", $this->at, $n); $this->at += strlen($r); return $r; }
+///     function stream_eof() { return $this->at >= 5; }
+///     function stream_seek($to, $whence) { $this->at = $to; return true; }
+///     function stream_tell() { return $this->at; }
+///     function stream_stat() { return ['size' => 5]; }
+///     function stream_close() { echo "close\n"; }
+/// }
+/// stream_wrapper_register('mem', 'Mem');
+/// class S extends CURLStringFile {
+///     function __construct() { parent::__construct('d', 'p'); unset($this->postname); }
+///     function __get($n) { throw new Exception("read $n"); }
+/// }
+/// class T { function __toString(): string { throw new Exception("string"); } }
+/// $srv = stream_socket_server('tcp://127.0.0.1:0');
+/// $h = curl_init('http://' . stream_socket_get_name($srv, false) . '/');
+/// curl_setopt_array($h, [CURLOPT_RETURNTRANSFER => true, CURLOPT_HTTPHEADER => ['Expect:']]);
+/// curl_setopt($h, CURLOPT_POSTFIELDS, ['f' => new CURLFile('mem://x')]);
+/// $m = curl_multi_init();
+/// curl_multi_add_handle($m, $h);
+/// $conn = null; $got = '';
+/// do {
+///     curl_multi_exec($m, $running);
+///     $r = [$conn ?? $srv]; $w = $e = null;
+///     if ($conn !== false && stream_select($r, $w, $e, 0, 10000)) {
+///         if ($conn === null) { $conn = stream_socket_accept($srv); continue; }
+///         $got .= fread($conn, 8192);
+///         if (str_ends_with($got, "--\r\n")) {
+///             fwrite($conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+///             fclose($conn);
+///             $conn = false;
+///         }
+///     }
+///     curl_multi_select($m, 0.01);
+/// } while ($running);
+/// curl_multi_remove_handle($m, $h);
+/// echo "posted hello: ", var_export(str_contains($got, "\r\n\r\nhello\r\n"), true), ", answered ", curl_multi_getcontent($h), "\n";
+/// foreach ([['g' => new CURLFile('mem://y'), 's' => new S], ['t' => new T], ['z' => new CURLFile('mem://z')], ['a' => 'b']] as $form) {
+///     echo "set ", implode(',', array_keys($form)), "\n";
+///     try { var_dump(curl_setopt($h, CURLOPT_POSTFIELDS, $form)); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// echo "end\n";
+/// ```
+/// ```expect
+/// open mem://x
+/// posted hello: true, answered ok
+/// set g,s
+/// open mem://y
+/// read postname
+/// set t
+/// string
+/// set z
+/// open mem://z
+/// bool(true)
+/// set a
+/// close
+/// bool(true)
+/// end
+/// ```
+///
+/// What the walk leaves pending, and what the trees' frees or the set
+/// threw, is left in `pending`, which may stand already as the walk
+/// starts, an earlier option's in `curl_setopt_array`.
+///
 /// [`EasyId::post_form`]: crate::ffi::EasyId::post_form
 pub(crate) fn build_mime(
     req: &mut Request,
     object: PhpObject,
     array: PhpArray,
+    pending: &mut Pending,
 ) -> Result<bool, Thrown> {
     let easy = easy_of(req, object)?;
-    let mut pending = None;
-    let posted = easy.post_form(req, |req, mime| {
+    let posted = easy.post_form(req, pending, |req, mime, pending| {
         let mut form = Form {
             mime,
             object,
             array,
             error: 0,
-            pending: None,
+            pending,
         };
         let walked = form.fill(req);
         // `SAVE_CURL_ERROR(ch, error)` where the walk reached its end.
         if walked && let Some(curl) = object.native_mut::<Curl>(req) {
             curl.err = i64::from(form.error);
         }
-        pending = form.pending;
         walked && form.error == 0
     });
-    let Some((posted, thrown)) = posted else {
+    let Some(posted) = posted else {
         return Ok(false);
     };
     if let Posted::Set(code) = posted
@@ -419,26 +511,7 @@ pub(crate) fn build_mime(
     {
         curl.err = i64::from(code);
     }
-    let thrown = match thrown {
-        Some(later) => Some(raised(req, pending, later)),
-        None => pending,
-    };
-    match thrown {
-        Some(thrown) => Err(thrown),
-        None => Ok(posted == Posted::Set(0)),
-    }
-}
-
-/// `later` raised while `earlier` stands pending: chained onto it, as
-/// `zend_throw_exception_internal` chains one raised while another is
-/// pending. A call made while a throwable stands answers that same
-/// throwable, having served nothing, which is no second throwable.
-fn raised(req: &mut Request, earlier: Option<Thrown>, later: Thrown) -> Thrown {
-    match earlier {
-        Some(earlier) if earlier.exception() == later.exception() => earlier,
-        Some(earlier) => earlier.chain(req, later),
-        None => later,
-    }
+    Ok(posted == Posted::Set(0))
 }
 
 /// `build_mime_structure_from_hash`'s walk over `array`, the option's
@@ -450,7 +523,7 @@ struct Form<'m> {
     object: PhpObject,
     array: PhpArray,
     error: i32,
-    pending: Option<Thrown>,
+    pending: &'m mut Pending,
 }
 
 impl Form<'_> {
@@ -481,12 +554,12 @@ impl Form<'_> {
         match self.step(req, |req, _| is_a(req, value, b"CURLFile")) {
             Some(Some(file)) => return self.file(req, name, file),
             Some(None) => {}
-            None => return self.flow(),
+            None => return self.flow(req),
         }
         match self.step(req, |req, _| is_a(req, value, b"CURLStringFile")) {
             Some(Some(file)) => return self.string_file(req, name, file),
             Some(None) => {}
-            None => return self.flow(),
+            None => return self.flow(req),
         }
         if let ValueRef::Array(inner) = value.as_ref() {
             return self.list(req, name, inner);
@@ -498,6 +571,25 @@ impl Form<'_> {
     /// opened on it now, held by the part until its `free_cb`. Each
     /// property read that throws leaves the throwable pending and reads
     /// as no string, as php's `zend_read_property` answers then.
+    ///
+    /// A user wrapper's `stream_stat` that throws as the part's size is
+    /// read stands over the parts after it, so a `__toString` is not
+    /// called and a `CURLStringFile` ends the walk, as php's
+    /// `if (EG(exception)) goto out_string` does:
+    ///
+    /// ```php
+    /// class W { public $context; function stream_open($p,$m,$o,&$op){return true;} function stream_seek($o,$w){return true;} function stream_tell(){return 0;} function stream_stat(){ echo "stat\n"; throw new Exception("stat"); } function stream_close(){} }
+    /// stream_wrapper_register('ww', 'W');
+    /// class U { function __toString(): string { echo "U called\n"; return "u"; } }
+    /// $h = curl_init();
+    /// try { curl_setopt_array($h, [CURLOPT_POSTFIELDS => ['f' => new CURLFile('ww://x'), 'u' => new U, 's' => new CURLStringFile('d', 'n')], CURLOPT_PRIVATE => 'p']); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump(curl_getinfo($h, CURLINFO_PRIVATE));
+    /// ```
+    /// ```expect
+    /// stat
+    /// stat
+    /// bool(false)
+    /// ```
     fn file(&mut self, req: &mut Request, name: &[u8], file: PhpObject) -> ControlFlow<()> {
         let Some(path) = self.prop(req, file, b"name") else {
             let text = format!("Invalid filename for key {}", String::from_utf8_lossy(name));
@@ -505,7 +597,7 @@ impl Form<'_> {
                 docref(req, Level::Warning, &text);
                 Ok(())
             });
-            return self.flow();
+            return self.flow(req);
         };
         match self.step(req, |req, _| {
             Ok(req
@@ -516,7 +608,7 @@ impl Form<'_> {
             Some(true) => {}
             // `goto out_string`.
             Some(false) => return ControlFlow::Break(()),
-            None => return self.flow(),
+            None => return self.flow(req),
         }
         let kind = self.prop(req, file, b"mime").filter(|m| !m.is_empty());
         let postname = self.prop(req, file, b"postname").filter(|p| !p.is_empty());
@@ -547,7 +639,7 @@ impl Form<'_> {
             Ok((code, thrown))
         });
         let Some((code, thrown)) = added else {
-            return self.flow();
+            return self.flow(req);
         };
         if let Some(thrown) = thrown {
             self.park(req, thrown);
@@ -557,14 +649,14 @@ impl Form<'_> {
             Some(code) => self.error = code,
             None => return ControlFlow::Break(()),
         }
-        self.flow()
+        self.flow(req)
     }
 
     /// A `CURLStringFile` part: its data, file name and type.
     fn string_file(&mut self, req: &mut Request, name: &[u8], file: PhpObject) -> ControlFlow<()> {
         // `if (EG(exception)) goto out_string;` after each read, which
         // finds a throwable the walk left pending as well.
-        if self.pending.is_some() {
+        if self.pending.stands(req) {
             return ControlFlow::Break(());
         }
         let (object, array) = (self.object, self.array);
@@ -593,7 +685,7 @@ impl Form<'_> {
         if let Err(thrown) = walked {
             self.park(req, thrown);
         }
-        self.flow()
+        self.flow(req)
     }
 
     /// `add_simple_field`: a part named `name` holding `value`'s text,
@@ -607,26 +699,21 @@ impl Form<'_> {
         if added.is_none() {
             self.mime.add_data(name, b"");
         }
-        self.flow()
+        self.flow(req)
     }
 
     /// `step` taken as php takes it, with what the walk left pending
-    /// standing in `EG(exception)` ([`while_pending`]), so a call it
-    /// makes returns at once and a diagnostic it raises reaches no
-    /// handler; what it throws is left pending in turn, and `None`.
-    /// `None` too where what stands is a fatal or an `exit`, which
-    /// [`Form::flow`] ends the walk on before any further step.
+    /// standing in `EG(exception)` ([`Pending::step`]); what it throws is
+    /// left pending in turn, and `None`. `None` too where what stands is
+    /// a fatal, which [`Form::flow`] ends the walk on before any further
+    /// step.
     fn step<R>(
         &mut self,
         req: &mut Request,
         step: impl FnOnce(&mut Request, &mut MimeBuilder) -> Result<R, Thrown>,
     ) -> Option<R> {
         let mime = &mut *self.mime;
-        let taken = match &self.pending {
-            None => Some(step(req, mime)),
-            Some(pending) => while_pending(req, pending, |req| step(req, mime)),
-        };
-        match taken? {
+        match self.pending.step(req, |req, _| step(req, mime))? {
             Ok(answer) => Some(answer),
             Err(thrown) => {
                 self.park(req, thrown);
@@ -642,18 +729,19 @@ impl Form<'_> {
             .flatten()
     }
 
-    /// `thrown` left pending ([`raised`]).
+    /// `thrown` left pending ([`Pending::park`]).
     fn park(&mut self, req: &mut Request, thrown: Thrown) {
-        self.pending = Some(raised(req, self.pending.take(), thrown));
+        self.pending.park(req, thrown);
     }
 
-    /// Whether the walk goes on: past a throwable, as php's loop goes on
-    /// with `EG(exception)` set; not past a fatal or an `exit`, which
-    /// leave by `zend_bailout` at once.
-    fn flow(&self) -> ControlFlow<()> {
-        match &self.pending {
-            Some(thrown) if thrown.exception().is_none() => ControlFlow::Break(()),
-            _ => ControlFlow::Continue(()),
+    /// Whether the walk goes on: past a throwable or an `exit`, as php's
+    /// loop goes on with either in `EG(exception)`; not past a fatal,
+    /// which leaves by `zend_bailout` at once.
+    fn flow(&self, req: &Request) -> ControlFlow<()> {
+        if self.pending.fatal(req) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
         }
     }
 }

@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use xtask::divergence::Registry;
 use xtask::manifest::{Manifest, OneOrMany, Rule, Where};
 use xtask::oracle::Promise;
+use xtask::owner::SESSION_VARIABLE;
 use xtask::permit::{Call, Finding, Kind, judge, judged_at_the_call};
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
@@ -60,11 +61,13 @@ fn with_the_pathspec_rule(mut manifest: Manifest) -> Manifest {
     manifest
 }
 
+/// A `Bash` call from `another-session`, a session that owns none of the
+/// scratch checkouts ([`owned`]), so a rule scoped to a checkout another
+/// session owns judges it.
 fn bash(line: &str) -> Call {
-    Call::parse(
-        &serde_json::json!({"tool_name": "Bash", "tool_input": {"command": line}}).to_string(),
-    )
-    .unwrap()
+    let call = serde_json::json!({"tool_name": "Bash", "session_id": "another-session",
+        "tool_input": {"command": line}});
+    Call::parse(&call.to_string()).unwrap()
 }
 
 /// The `lanes.nightly-flags` row #3052 ruled and #3068 proposes, as a
@@ -77,6 +80,7 @@ deny_argv = ["--full", "--jit"]
 unless_argv = { "--jit" = "xtask phpt --subset" }   # grammar: unless_argv, a denied element let through where the phrase runs bounded by the option, as require_argv reads one: the tier's one-subset reading (#3052, #3068)
 with = ["xtask phpt", "xtask bench"]   # xtask however it is run: the cargo alias, cargo run -p xtask, a path, a variable the line assigns (#1860)
 text = "Nightly lanes run in CI only; run the per-crate subset, and the tier's `--jit` lane on one subset named by `--subset` (#3052)."
+remedy = "`cargo xtask phpt --subset <crate>`, with `--jit` on one subset"
 "#;
 
 /// The `git.no-verify` row #1001 proposes: `with` names git's `commit` and
@@ -242,6 +246,7 @@ tool = ["Edit", "Write"]
 scope = "only-here/**"
 deny = true
 text = "A file under only-here/ is refused by the worktree's manifest alone."
+remedy = "write it in your own worktree"
 "#
                 .parse::<toml::Table>()
                 .unwrap(),
@@ -313,9 +318,8 @@ text = "A file under only-here/ is refused by the worktree's manifest alone."
 
 /// A hand-off that does not run decides nothing, and nothing is allowed on
 /// its silence (#1047): the worktree here has no build to hand the call
-/// to, so the checkout's build exits without judging, as it did before
-/// there was a hand-off, and the call reaches the end of the hook's walk
-/// unjudged. Every candidate of that walk hands the call to the same
+/// to, so the call is unjudged, and the checkout's build denies it in its
+/// own words (#3619). Every candidate of that walk hands the call to the same
 /// worktree, so it is the failure no rebuild repairs, in the worktree's
 /// store, naming the worktree's manifest.
 #[test]
@@ -334,14 +338,15 @@ fn a_hand_off_that_does_not_run_leaves_the_call_unjudged() {
         &serde_json::json!({"file_path": beside.join("README.md").to_str().unwrap(),
             "content": "one\n"}),
     );
-    let ran = permit(&root, &stdin, &[]);
-    assert_ne!(ran.code(), 0, "the call was not judged: {ran}");
-    let out = ran.stdout;
-    let err = ran.stderr;
-    assert!(out.trim().is_empty(), "and nothing was decided: {out}");
+    // No rebuild judges it either, so the build says so in its own
+    // decision and exits 0, the walk ending here (#3619): a write no
+    // judge saw is denied, naming the error's first line.
+    let out = permit(&root, &stdin, &[]).ok();
+    assert!(out.contains("\"deny\""), "{out}");
+    assert!(out.contains("permit could not judge this call"), "{out}");
     assert!(
-        err.contains(&beside.join("seams.toml").display().to_string()),
-        "{err}"
+        out.contains(&beside.join("seams.toml").display().to_string()),
+        "{out}"
     );
     let reading = Store::of_workspace(&beside)
         .read("permit", "permit.unjudged-call")
@@ -658,23 +663,23 @@ fn above_the_command_hook_a_denial_is_recorded_and_a_note_is_left_to_it() {
     assert_eq!(reading.status, Status::Fail);
 }
 
-/// #2734 as it happened: an agent's merge stands in main's checkout, its
-/// starter recorded, and its line aborting it there and starting a merge
-/// in its own worktree is judged by both adapters, the function hook's
-/// first. That admission dropped the record, as the abort's own, and
-/// recorded the worktree's start, before the command hook beneath judged
-/// the same call; that one found the merge standing with no record,
-/// refused the abort, and every later abort of the starter's with it. The
-/// operation is recorded by the command hook alone, the adapter that
-/// judges a call last, so the abort is the starter's under both.
+/// #2734 as it happened: an agent's merge stands in main's checkout, and
+/// its line aborting it there and starting a merge in its own worktree is
+/// judged by both adapters, the function hook's first. When the start was
+/// recorded at the call, that admission dropped the record before the
+/// command hook beneath judged the same call, which refused the abort.
+/// Whose the merge is, is whose the checkout is (#3621), which no
+/// adapter writes: the owner's abort passes under both, and another
+/// session's is refused under both.
 #[test]
-fn an_abort_the_function_hook_admits_is_its_starter_s_under_the_command_hook_too() {
+fn an_abort_the_function_hook_admits_is_its_owner_s_under_the_command_hook_too() {
     let root = scratch("operation-adapters");
     let worktree = root.join("own");
     Repo::at(&root).git(&["worktree", "add", "-q", "-b", "own", "own"]);
-    let line = |command: &str| {
+    xtask::owner::record(&root, &xtask::owner::SessionId::new("s1").unwrap()).unwrap();
+    let line = |session: &str, command: &str| {
         serde_json::json!({
-            "session_id": "s1",
+            "session_id": session,
             "agent_id": "comp",
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
@@ -682,25 +687,26 @@ fn an_abort_the_function_hook_admits_is_its_starter_s_under_the_command_hook_too
         })
         .to_string()
     };
-    let admitted = |stdin: &str, args: &[&str], what: &str| {
-        let out = permit(&root, stdin, args).ok();
-        assert!(!out.contains("\"deny\""), "{what} {args:?}: {out}");
-    };
     let above: &[&str] = &["--above-the-command-hook"];
-    let start = line("git merge --no-ff --no-commit topic");
-    for adapter in [above, &[]] {
-        admitted(&start, adapter, "the start");
-    }
     std::fs::write(root.join(".git/MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
-    let abort = line(&format!(
+    let abort = format!(
         "C={}; git -C $C merge --abort; git -C $C status --short | head -3; \
          git -C $C log --oneline -1; W={}; git -C $W status --short | head; \
          git -C $W merge main 2>&1 | tail -3",
         root.display(),
         worktree.display()
-    ));
+    );
     for adapter in [above, &[]] {
-        admitted(&abort, adapter, "the starter's abort");
+        let out = permit(&root, &line("s1", &abort), adapter).ok();
+        assert!(
+            !out.contains("\"deny\""),
+            "the owner's abort {adapter:?}: {out}"
+        );
+        let out = permit(&root, &line("s2", &abort), adapter).ok();
+        assert!(
+            out.contains("git.operation"),
+            "another's abort {adapter:?}: {out}"
+        );
     }
 }
 
@@ -827,11 +833,14 @@ fn diff_judges_the_staged_files_and_refuses_a_denied_one_with_the_rule_id() {
         "the rule id is printed: {out}"
     );
     assert!(out.contains("ext/pcre/src/cache.rs"), "{out}");
+    // Recorded under pre-commit's own caller, never as an agent's call
+    // (#3619).
     let reading = Store::of_workspace(&root)
-        .read("permit", "ext.no-locks")
+        .read("permit", "pre-commit/ext.no-locks")
         .unwrap()
         .expect("the denial was recorded");
     assert_eq!(reading.status, Status::Fail);
+    assert_eq!(reading.session, "pre-commit");
     assert!(
         reading.message.starts_with("Write ext/pcre/src/cache.rs"),
         "{}",
@@ -853,16 +862,92 @@ fn diff_judges_the_staged_files_and_refuses_a_denied_one_with_the_rule_id() {
     Repo::at(&root).git(&["add", "ext/pcre/src/cache.rs"]);
     permit(&root, "", &["--diff"]).ok();
 
-    // The harness's own file: a note, since the hook cannot tell a person
-    // from an agent, and the commit goes through.
-    // A person's note.
+    // The harness's own file in a person's commit, one from no session: a
+    // note, and the commit goes through.
     Tracked::of(&root)
         .with_crate("php_heap", |row| row.budget += 1)
         .write(&root);
     Repo::at(&root).git(&["add", "seams.toml"]);
-    let out = permit(&root, "", &["--diff"]).ok();
+    let out = diff_from(&root, None).ok();
     assert!(out.contains("note seams.toml"), "{out}");
     assert!(out.contains("harness.self"), "{out}");
+}
+
+/// `permit --diff` from `session`, as an agent's commit hands its hook
+/// `CLAUDE_CODE_SESSION_ID`, or from none, a person's terminal.
+fn diff_from(root: &Path, session: Option<&str>) -> Ran {
+    let run = Run::at(root).args(["permit", "--diff"]);
+    match session {
+        Some(id) => run.env(SESSION_VARIABLE, id),
+        None => run.env_remove(SESSION_VARIABLE),
+    }
+    .go()
+}
+
+/// #3644 ruling 3: an agent's commit that stages a harness file is refused
+/// unless a steer reading covers what is staged, and the same staged file
+/// in a person's commit is a note. Steer's write is covered; an edit after
+/// it moves the staged blob from under the reading, and is refused again.
+/// A fixture's manifest is test data (ruling 2), and no harness file.
+#[test]
+fn an_agent_s_commit_of_a_harness_file_no_steer_covers_is_refused() {
+    let root = scratch("diff-agent");
+    let pin = "oracle.toml";
+    let was = std::fs::read_to_string(root.join(pin)).unwrap();
+    write(&root, pin, &format!("{was}\n# typed by an agent\n"));
+    Repo::at(&root).git(&["add", "--", pin]);
+    let ran = diff_from(&root, Some("an-agent"));
+    assert_eq!(ran.code(), 1, "{ran}");
+    assert!(
+        ran.stdout.contains(&format!("deny {pin}")) && ran.stdout.contains("#3644"),
+        "{ran}"
+    );
+    assert_eq!(diff_from(&root, None).code(), 0, "a person's commit");
+
+    Repo::at(&root).git(&["checkout", "HEAD", "--", pin]);
+    let proposal = format!("{was}\n[regime.ruling-3]\nini = [\"opcache.enable=0\"]\n");
+    write(&root, "proposal.toml", &proposal);
+    let from = root.join("proposal.toml");
+    xtask(&root, &["steer", pin, "--from", from.to_str().unwrap()]).ok();
+    Repo::at(&root).git(&["add", "--", pin]);
+    let ran = diff_from(&root, Some("an-agent"));
+    assert_eq!(ran.code(), 0, "steer's write is covered: {ran}");
+    write(&root, pin, &format!("{proposal}# and then typed\n"));
+    Repo::at(&root).git(&["add", "--", pin]);
+    assert_eq!(diff_from(&root, Some("an-agent")).code(), 1, "moved since");
+    Repo::at(&root).git(&["checkout", "HEAD", "--", pin]);
+
+    let fixture = "xtask/fixtures/rules/a-rule/seams.toml";
+    write(&root, fixture, &was);
+    Repo::at(&root).git(&["add", "--", fixture]);
+    let ran = diff_from(&root, Some("an-agent"));
+    assert_eq!(ran.code(), 0, "{ran}");
+    assert!(!ran.stdout.contains(fixture), "{ran}");
+}
+
+/// #3644 ruling 2: an Edit of a fixture's manifest, test data, is judged
+/// by the checkout's manifest and goes through; the checkout's own
+/// manifest is still denied as `harness.self`.
+#[test]
+fn an_edit_of_a_fixture_s_manifest_is_allowed_and_the_root_s_is_denied() {
+    let root = scratch("fixture-manifest");
+    let fixture = "xtask/fixtures/rules/a-rule/seams.toml";
+    let manifest = std::fs::read_to_string(root.join("seams.toml")).unwrap();
+    write(&root, fixture, &manifest);
+    let edit = |path: &str| {
+        let call = serde_json::json!({"session_id": "s", "tool_name": "Edit",
+            "cwd": root.to_str().unwrap(), "tool_input": {
+                "file_path": root.join(path).to_str().unwrap(),
+                "old_string": "[budget]", "new_string": "[budget]\n"}});
+        permit(&root, &call.to_string(), &[]).ok()
+    };
+    let out = edit(fixture);
+    assert!(!out.contains("\"deny\""), "{out}");
+    let out = edit("seams.toml");
+    assert!(
+        out.contains("\"deny\"") && out.contains("harness.self"),
+        "{out}"
+    );
 }
 
 /// A Mach-O header, a byte that is no UTF-8 anywhere, and the name
@@ -916,7 +1001,7 @@ fn diff_judges_a_staged_binary_file_by_its_path_alone() {
     }
 
     put(".claude/hooks/stand-in");
-    let out = permit(&root, "", &["--diff"]).ok();
+    let out = diff_from(&root, None).ok();
     assert!(out.contains("note .claude/hooks/stand-in"), "{out}");
     assert!(out.contains("harness.self"), "{out}");
 }
@@ -1353,11 +1438,148 @@ fn the_refusal_that_hands_the_call_on_is_a_skip_that_names_the_next_candidate() 
     );
 }
 
+/// The permits section of the scratch at `root`, as JSON, and the row of
+/// `rule` in it.
+fn permits_row(root: &Path, rule: &str) -> serde_json::Value {
+    let json = Run::at(root)
+        .args(["status", "--section", "permits", "--format", "json"])
+        .go()
+        .ok();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    value["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["rule"] == rule)
+        .unwrap_or_else(|| panic!("no row for {rule}:\n{json}"))
+        .clone()
+}
+
+/// The denominator (#3619): each call a rule judged is counted, whether or
+/// not it found, so a rule's deny rate is a reading. A call the rule's tool
+/// does not name is not one it judged.
+#[test]
+fn permit_counts_the_calls_each_rule_judged_beside_its_denials() {
+    let root = scratch("judged-count");
+    let call = |command: &str| {
+        serde_json::json!({"session_id": "s", "tool_name": "Bash", "cwd": root.to_str().unwrap(),
+            "tool_input": {"command": command}})
+        .to_string()
+    };
+    permit(&root, &call("git status"), &[]).ok();
+    permit(&root, &call("git commit --no-verify -m x"), &[]).ok();
+    let write = serde_json::json!({"session_id": "s", "tool_name": "Write",
+        "tool_input": {"file_path": root.join("a.txt").to_str().unwrap(), "content": "a\n"}});
+    permit(&root, &write.to_string(), &[]).ok();
+    let row = permits_row(&root, "git.no-verify");
+    assert_eq!(row["judged"], 2, "{row}");
+    assert_eq!(row["denials"], 1, "{row}");
+}
+
+/// A run of calls handed on with none judged is the walk failing open
+/// (#3619): the hook passes a Bash call on when no candidate judges it, so
+/// the third such call within a minute writes a failing reading; a call
+/// judged between them ends the run, and nothing fails.
+#[test]
+fn a_burst_of_calls_handed_on_writes_a_failing_reading_and_a_judged_call_ends_it() {
+    let stale = scratch_with_a_stale_manifest("burst");
+    let call = |id: &str| {
+        serde_json::json!({"session_id": "s", "tool_use_id": id, "tool_name": "Bash",
+            "tool_input": {"command": "git status"}})
+        .to_string()
+    };
+    for id in ["a", "b"] {
+        assert_ne!(permit(&stale, &call(id), &[]).code(), 0);
+    }
+    let unjudged = |root: &Path| {
+        Store::of_workspace(root)
+            .read("permit", "permit.unjudged-call")
+            .unwrap()
+    };
+    assert!(unjudged(&stale).is_none(), "two calls are not a burst");
+    permit(&stale, &call("c"), &[]);
+    let reading = unjudged(&stale).expect("the third is");
+    assert_eq!(reading.status, Status::Fail);
+    assert!(
+        reading.message.contains("none was judged"),
+        "{}",
+        reading.message
+    );
+
+    let quiet = scratch("burst-ended");
+    let fresh = std::fs::read_to_string(quiet.join("seams.toml")).unwrap();
+    for (i, id) in ["a", "b", "c", "d"].into_iter().enumerate() {
+        let manifest = if i == 2 {
+            fresh.clone()
+        } else {
+            stale_manifest()
+        };
+        std::fs::write(quiet.join("seams.toml"), manifest).unwrap();
+        permit(&quiet, &call(id), &[]);
+    }
+    assert!(unjudged(&quiet).is_none(), "a judged call ends the run");
+}
+
+/// A pin that parses but does not validate narrows the harness and does
+/// not blind it (#3618 ruling 4): a variant made against a closure the pin
+/// has moved past is a defect, so the pin refuses whoever asks for it,
+/// while permit judges by what loaded and notes the defect, `done` notes
+/// it and the session's facts list it.
+#[test]
+fn a_pin_that_does_not_validate_refuses_only_what_reads_it() {
+    let root = scratch("pin-defect");
+    let pin = std::fs::read_to_string(root.join("oracle.toml")).unwrap();
+    let named = regex_lite::Regex::new(r#"closure = "sha256:[0-9a-f]{64}""#).unwrap();
+    assert!(
+        named.is_match(&pin),
+        "the tracked pin names a macOS build's closure"
+    );
+    let moved = format!("closure = \"sha256:{}\"", "0".repeat(64));
+    std::fs::write(
+        root.join("oracle.toml"),
+        named.replace(&pin, moved.as_str()).as_ref(),
+    )
+    .unwrap();
+
+    let manifest = Manifest::load(&root).expect("the manifest loads");
+    let said = "oracle.toml parses but does not validate: [variant.";
+    assert!(
+        manifest
+            .defects()
+            .iter()
+            .any(|d| d.to_string().starts_with(said)),
+        "{:?}",
+        manifest.defects()
+    );
+    let refused = format!("{:#}", manifest.pin().unwrap_err());
+    assert!(refused.contains("predates the closure"), "{refused}");
+
+    let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let out = permit(&root, &stdin, &[]).ok();
+    assert!(
+        out.contains("harness.self") && out.contains(said),
+        "judged, with the note: {out}"
+    );
+    let bash = serde_json::json!({"session_id": "s", "tool_name": "Bash", "tool_input": {"command": "git status"}});
+    let out = permit(&root, &bash.to_string(), &[]).ok();
+    assert!(!out.contains("\"deny\"") && out.contains(said), "{out}");
+
+    let done = Run::at(&root).args(["done", "--base", "HEAD"]).go().stdout;
+    assert!(done.contains(said), "{done}");
+    std::fs::write(root.join("AGENTS.md"), "# map\n").unwrap();
+    let facts = Run::at(&root).args(["status", "--session"]).go().ok();
+    assert!(
+        facts.contains("## defects") && facts.contains(said),
+        "{facts}"
+    );
+}
+
 /// The outage of #16 was the loud staleness: a manifest no build reads at
 /// all. It exited without judging, which the fallback walks, and every
 /// candidate walked to did the same, so the call proceeded unjudged and
 /// `status --section permits` said the judge was up for the hour it was
-/// down. That one stays a failure, since no rebuild repairs it (#118). The
+/// down. That one stays a failure, since no rebuild repairs it (#118), and
+/// the build decides it in its own words (#3619). The
 /// manifest here is a fixture workspace's, the one place a build standing
 /// over the checkout it was compiled against still meets rules it cannot
 /// read (#57).
@@ -1380,16 +1602,23 @@ fn a_manifest_no_candidate_can_read_is_a_failure_the_build_records() {
         }
     })
     .to_string();
-    let ran = permit(&root, &stdin, &[]);
-    assert_ne!(
-        ran.code(),
-        0,
-        "the build that cannot judge exits non-zero: {ran}"
+    // The write is denied in permit's own words, with the error's first
+    // line, and the exit is 0: only a stale build exits non-zero, so the
+    // walk ends here and the call is recorded once (#3619).
+    let out = permit(&root, &stdin, &[]).ok();
+    assert!(out.contains("\"deny\""), "{out}");
+    assert!(out.contains("seams.toml"), "{out}");
+    // A shell stands in a workspace of its own only where it has a `.git`.
+    std::fs::create_dir(nested.join(".git")).unwrap();
+    let bash = serde_json::json!({"session_id": "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11",
+        "tool_name": "Bash", "cwd": nested.to_str().unwrap(), "tool_input": {"command": "true"}})
+    .to_string();
+    let out = permit(&root, &bash, &[]).ok();
+    assert!(
+        !out.contains("\"deny\""),
+        "a Bash call passes, with the note: {out}"
     );
-    let out = ran.stdout;
-    let err = ran.stderr;
-    assert!(out.trim().is_empty(), "and decides nothing: {out}");
-    assert!(err.contains("seams.toml"), "{err}");
+    assert!(out.contains("permit could not judge this call"), "{out}");
     let reading = Store::of_workspace(&root)
         .read("permit", "permit.unjudged-call")
         .unwrap()
@@ -2026,64 +2255,80 @@ fn checkout(name: &str, ticket: Option<u32>) -> Tree {
     dir
 }
 
-/// A scratch checkout with a merge in progress, as git leaves one stopped
-/// before its commit: `MERGE_HEAD` in its git dir.
-fn operating(name: &str) -> Tree {
+/// A scratch checkout `the-owner` owns, as `xtask worktree add` records
+/// it (#3621).
+fn owned(name: &str) -> Tree {
     let dir = checkout(name, None);
+    xtask::owner::record(&dir, &xtask::owner::SessionId::new("the-owner").unwrap()).unwrap();
+    dir
+}
+
+/// A scratch checkout `the-owner` owns with a merge in progress, as git
+/// leaves one stopped before its commit: `MERGE_HEAD` in its git dir.
+fn operating(name: &str) -> Tree {
+    let dir = owned(name);
     let git_dir = PathBuf::from(Repo::at(&dir).git(&["rev-parse", "--absolute-git-dir"]));
     std::fs::write(git_dir.join("MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
     dir
 }
 
-/// One line that starts a second merge, cherry-pick, revert or rebase in
-/// a checkout after the first is refused under `git.operation` though no
-/// operation stands yet (#3261): the hook can record the first start's
-/// base, `HEAD` as the line begins, and never the second's, so the second
-/// would stand foreign to its own starter, its commit and its `--abort`
-/// refused. The fixture is the line main's checkout ran; the control, one
-/// start on a line, is admitted in the same quiet checkout, and so is a
-/// second start in another checkout.
+/// A scratch checkout and its merge worktree, `_merge` on `staging`
+/// inside it, as `xtask worktree queue` lays one beside a clone (#3622).
+fn staging(name: &str) -> (Tree, PathBuf) {
+    let main = checkout(name, None);
+    Repo::at(&main).git(&["worktree", "add", "-q", "-b", "staging", "_merge"]);
+    let merge = main.path().join("_merge");
+    (main, merge)
+}
+
+/// #2991 and #3413 replayed (#3621): each call refused then, verbatim, a
+/// session's commit and its `git merge --abort` of the merge standing in
+/// the checkout it owned, a builder's worktree and main's checkout, now
+/// passes in a scratch checkout standing for that one, owned by that
+/// session with a merge standing in it; the same call from another
+/// session is refused by `git.operation`. Who started the merge is
+/// recorded nowhere: `caffeinate` hid #2991's start from the hook, and
+/// #3413's start ran before the build that judged its commit.
 #[test]
-fn a_line_that_starts_a_second_operation_in_one_checkout_is_refused() {
+fn the_owner_s_commit_and_abort_of_the_merge_in_its_checkout_pass() {
     let manifest = Manifest::load(workspace()).unwrap();
-    let quiet = checkout("two-starts", None);
-    let dir = fixtures().join("rules/git.operation");
-    let judged = judge(
-        &manifest,
-        quiet.path(),
-        &call(&dir.join("deny-two-starts.json")),
+    let main = operating("replay-main");
+    Repo::at(&main).git(&["worktree", "add", "-q", "-b", "t2891", "t2794"]);
+    let worktree = main.path().join("t2794");
+    let git_dir = Repo::at(&worktree).git(&["rev-parse", "--absolute-git-dir"]);
+    std::fs::write(
+        Path::new(git_dir.trim()).join("MERGE_HEAD"),
+        "0".repeat(40) + "\n",
     )
     .unwrap();
-    let denial = judged
-        .denial()
-        .unwrap_or_else(|| panic!("two starts on one line: {judged:?}"));
-    assert_eq!(denial.rule, "git.operation", "{denial:?}");
-    assert!(
-        denial.reason().contains("one operation per line"),
-        "{}",
-        denial.reason()
-    );
-
-    for line in [
-        "git merge --no-commit t3261w && git commit -q -F /var/empty/m.txt",
-        "git merge --abort && git merge --no-commit t3370",
+    let dir = fixtures().join("rules/git.operation");
+    for (name, checkout) in [
+        ("replay-2991-commit.json", &worktree),
+        ("replay-2991-abort.json", &worktree),
+        ("replay-3413-commit.json", &main.path().to_path_buf()),
+        ("replay-3413-abort.json", &main.path().to_path_buf()),
     ] {
-        let judged = judge(&manifest, quiet.path(), &bash(line)).unwrap();
-        assert!(
-            judged.findings.iter().all(|f| f.rule != "git.operation"),
-            "{line}: {judged:?}"
-        );
+        let mut replayed = call(&dir.join(name));
+        let line = replayed.tool_input.command.take().unwrap();
+        let line = line
+            .replace(
+                "~/Projects/dax-php-worktrees/t2794",
+                &worktree.display().to_string(),
+            )
+            .replace(
+                "~/Projects/dax-php",
+                &main.path().display().to_string(),
+            );
+        replayed.tool_input.command = Some(line);
+        let session = xtask::owner::SessionId::new(&replayed.session_id).unwrap();
+        xtask::owner::record(checkout, &session).unwrap();
+        let judged = judge(&manifest, main.path(), &replayed).unwrap();
+        assert!(judged.denial().is_none(), "{name}: {judged:?}");
+        replayed.session_id = "another-session".to_owned();
+        let judged = judge(&manifest, main.path(), &replayed).unwrap();
+        let denial = judged.denial().map(|f| f.rule.as_str());
+        assert_eq!(denial, Some("git.operation"), "{name}: {judged:?}");
     }
-    let other = checkout("two-starts-other", None);
-    let line = format!(
-        "git merge --no-commit a && git -C {} merge --no-commit b",
-        other.path().display()
-    );
-    let judged = judge(&manifest, quiet.path(), &bash(&line)).unwrap();
-    assert!(
-        judged.findings.iter().all(|f| f.rule != "git.operation"),
-        "{line}: {judged:?}"
-    );
 }
 
 /// A `Bash` rule denying `xtask phpt`, with its qualifiers set by `with`.

@@ -26,6 +26,7 @@ id = "lanes.nightly"
 tool = "Bash"
 deny_pattern = 'xtask (-- )?(phpt|bench) --full|run-tests\.php|compile-identity --corpus'
 text = "Nightly lanes run in CI only; run the per-crate subset."
+remedy = "`cargo xtask phpt --subset <crate>`"
 
 [[rule]]
 id = "harness.self"
@@ -33,3 +34,4 @@ tool = ["Edit", "Write"]
 scope = ["seams.toml", "oracle.toml", "docs/divergence.toml"]
 deny = true
 text = "Harness configuration, the oracle pin and the divergence registry are edited by a person."
+remedy = "propose it on a `for-a-person` ticket; an additive row a person settled lands with `cargo xtask steer`; to discard your change, file it, since `git restore` of these paths is denied too"

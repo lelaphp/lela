@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# commit-msg: the glossary over the message (#3620 D4, #3624). git hands
+# the hook the file that holds the message it is about to commit, and
+# `xtask vocab --message` reads it as rustdoc prose is read, against the
+# glossary each crate the commit stages is held to: the whole of
+# CONTEXT.md for an engine, extension or host crate, its Harness section
+# for xtask, nothing for a commit that stages no crate. git's `#` lines,
+# fenced blocks, inline code spans, trailers and the subject's leading
+# path are not prose. Each avoided word is printed with its line, and one
+# reading under `message` records them. The hook notes and refuses
+# nothing: Mitchell ruled on #3629 that refusal waits until these
+# readings show a low miss rate, after the `_Avoid_` lists are trimmed.
+# A `git commit -F` message pre-commit has already noted, before its
+# builds (#3630), is not read twice: the message git hands this hook is
+# compared, as git cleans it, with the one pre-commit recorded, and a `-m`
+# message, an editor's or one git changed is read here.
+# Installed per clone by the SessionStart hook, or by hand: `git config
+# core.hooksPath scripts/hooks`.
+set -u
+# git names the file relative to the top of the work tree, where it runs
+# the hook; the path is made whole before anything moves.
+case $1 in
+/*) message=$1 ;;
+*) message=$PWD/$1 ;;
+esac
+cd "$(git rev-parse --show-toplevel)" || exit 0
+# A builder's commit yields the cores to the merge, as pre-commit's does,
+# and a commit in the merge worktree on `staging` does not (#3622).
+[ -f .git ] && [ "$(git symbolic-ref --short -q HEAD)" != staging ] &&
+    renice -n 10 -p $$ >/dev/null 2>&1
+noted="$(git rev-parse --absolute-git-dir)/vocab-noted"
+if [ -f "$noted" ] &&
+    [ "$(git stripspace < "$message" | git hash-object --stdin)" = "$(cat "$noted")" ]; then
+    rm -f "$noted"
+    exit 0
+fi
+rm -f "$noted"
+cargo xtask vocab --message "$message"
+# A note, never a refusal (#3629): a build or a read that fails says so
+# above and the commit goes ahead.
+exit 0

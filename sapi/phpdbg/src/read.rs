@@ -327,9 +327,9 @@ pub fn function_named(req: &Request, name: &[u8]) -> Named {
 /// function a backtrace row names, `name` in `class`'s function table
 /// where the row names a class and in `EG(function_table)` where it does
 /// not, both case-insensitive, and the names of its first `num_args`
-/// parameters, a native's from its arginfo; none where no table holds
+/// parameters, a native's from its `arginfo`; none where no table holds
 /// the name, as none holds a closure's. php's `?=`, for a function with
-/// no arginfo, and its `[`, for a variadic parameter among the first
+/// no `arginfo`, and its `[`, for a variadic parameter among the first
 /// `num_args`, are never written: every declaration names its
 /// parameters, and `num_args` counts no variadic one
 /// (`Z/Zend/zend_compile.c:8005`, `Z/Zend/zend_API.c:3045`).

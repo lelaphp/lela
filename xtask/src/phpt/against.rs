@@ -332,6 +332,9 @@ impl Runs {
         let Some(base) = &self.base else {
             return Ok(None);
         };
+        if super::testless(manifest, &held_as.subset) {
+            return Ok(None);
+        }
         // A base with no run kept is a comparison that gives no verdict and
         // never a subset left unrun: the subset's own reading stands beside
         // it, and the skip says so with its counts (#1435).

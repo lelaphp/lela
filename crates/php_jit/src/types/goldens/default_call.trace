@@ -1,0 +1,17 @@
+start loop
+root e3
+op e3 9 long long - taken
+op e3 4 - - - -
+init e1
+op e3 5 long - - -
+op e3 6 - - - -
+enter e1
+op e1 4 long long - -
+op e1 5 long double - -
+op e1 6 string - - -
+op e1 7 double long - -
+op e1 8 double - - -
+back
+op e3 7 double double - -
+op e3 8 long - - -
+stop loop

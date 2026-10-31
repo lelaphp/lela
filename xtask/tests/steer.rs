@@ -45,7 +45,7 @@ fn naming(files: &[&str]) -> Manifest {
         .collect::<Vec<_>>()
         .join(", ");
     Manifest::parse(&format!(
-        "[oracle]\npin = \"oracle.toml\"\n[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\nclean_build_release_s = 1\napi_items = 1\nbindings = 1\n[[rule]]\nid = \"harness.self\"\ntool = [\"Edit\", \"Write\"]\nscope = [{scope}]\ndeny = true\ntext = \"harness.self\"\n"
+        "[oracle]\npin = \"oracle.toml\"\n[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\nclean_build_release_s = 1\napi_items = 1\nbindings = 1\n[[rule]]\nid = \"harness.self\"\ntool = [\"Edit\", \"Write\"]\nscope = [{scope}]\ndeny = true\ntext = \"harness.self\"\nremedy = \"steer\"\n"
     ))
     .expect("the manifest")
 }
@@ -483,18 +483,27 @@ fn merging_over(name: &str, base: &str, [head, merged]: [String; 2]) -> Tree {
 
 /// The union steered and written, the reading naming each side's row.
 fn steered_as_the_union(root: &Tree, union: &str) {
+    steered_bringing(root, union, &[]);
+}
+
+/// The same, the write bringing `taken` from `MERGE_HEAD` beside its row.
+fn steered_bringing(root: &Tree, union: &str, taken: &[&str]) {
     let file = xtask::divergence::FILE;
     let proposal = root.join("proposed.toml");
     fs::write(&proposal, union).expect("the proposal");
     let reading =
         steer::run(root, &harness(), file, &proposal, false).expect("the instrument runs");
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
-    assert_eq!(reading.numbers["added"], 1.into(), "{}", reading.message);
+    let brought = xtask::reading::Number::count(1 + taken.len());
+    assert_eq!(reading.numbers["added"], brought, "{}", reading.message);
     for named in [
         "judged against HEAD's file since a merge is in progress",
         "divergence[trace:fixture-head]",
         "divergence[trace:fixture-merged]",
-    ] {
+    ]
+    .iter()
+    .chain(taken)
+    {
         assert!(
             reading.message.contains(named),
             "the reading names {named}: {}",
@@ -534,10 +543,20 @@ fn a_conflicted_merge_over_a_base_of_no_row_is_resolved_by_their_union() {
     steered_as_the_union(&root, &format!("{empty}{head}{merged}"));
 }
 
+/// A side that rewords a reason the base carries, while each side appends
+/// a row: that side's reason is part of the union and written (#3633).
+#[test]
+fn a_conflicted_merge_takes_a_reason_one_side_reworded_over_the_base() {
+    let root = merging("union-reworded", "merge/merged-reworded.toml");
+    let union = fixture("merge/union-reworded.toml");
+    steered_bringing(&root, &union, &["divergence[trace:fixture-base].reason"]);
+}
+
 #[test]
 fn a_conflicted_merge_refuses_a_reworded_reason_and_a_row_neither_side_carries() {
     // The negative controls of the union (xtask/fixtures/steer/README.md):
-    // a side that rewords a reason the base carries, a proposal that does,
+    // a proposal that puts back a reason one side reworded, one that
+    // rewords it again, one that rewords a reason neither side touched,
     // and a row neither side carries; each is refused at the path it
     // names, and the conflicted file stands.
     let file = xtask::divergence::FILE;
@@ -545,7 +564,12 @@ fn a_conflicted_merge_refuses_a_reworded_reason_and_a_row_neither_side_carries()
         (
             "merge/merged-reworded.toml",
             "merge/union.toml",
-            "divergence[trace:fixture-base].reason on MERGE_HEAD",
+            "divergence[trace:fixture-base].reason",
+        ),
+        (
+            "merge/merged-reworded.toml",
+            "merge/changed-reason.toml",
+            "divergence[trace:fixture-base].reason",
         ),
         (
             "merge/merged.toml",
@@ -555,7 +579,7 @@ fn a_conflicted_merge_refuses_a_reworded_reason_and_a_row_neither_side_carries()
         (
             "merge/merged.toml",
             "merge/neither.toml",
-            "divergence[trace:fixture-neither], which neither side carries",
+            "divergence[trace:fixture-neither], which neither side adds over the base",
         ),
     ] {
         let name = format!("{merged}-{proposal}").replace(['/', '.'], "-");
@@ -576,5 +600,50 @@ fn a_conflicted_merge_refuses_a_reworded_reason_and_a_row_neither_side_carries()
             conflicted,
             "{name}: a refused proposal writes nothing"
         );
+    }
+}
+
+/// An `[[owed]]` row named by its instrument (#3636): `held_at` added to
+/// two rows is written, and the negative controls beside it, a changed
+/// `when` and a second row of one instrument, are refused with nothing
+/// written (xtask/fixtures/steer/README.md).
+#[test]
+fn a_key_added_to_an_owed_row_is_written_and_a_change_or_a_second_row_is_refused() {
+    let tracked = fixture("owed/tracked.toml");
+    let steered = |name: &str| {
+        let root = scratch_at(&format!("owed-{name}"), "seams.toml", &tracked);
+        let proposal = root.join("proposed.toml");
+        fs::write(&proposal, fixture(&format!("owed/{name}.toml"))).expect("the proposal");
+        let reading = steer::run(&root, &harness(), "seams.toml", &proposal, false)
+            .expect("the instrument runs");
+        let now = fs::read_to_string(root.join("seams.toml")).expect("the manifest");
+        (reading, now)
+    };
+    let (reading, now) = steered("held-at");
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert!(
+        reading
+            .message
+            .ends_with("owed[phpt].held_at, owed[crosscheck].held_at"),
+        "{}",
+        reading.message
+    );
+    assert_eq!(
+        now,
+        fixture("owed/held-at.toml"),
+        "the proposal is the file now"
+    );
+    for (name, path) in [
+        ("changed-when", "owed[crosscheck].when"),
+        ("second-row", "owed[phpt] twice"),
+    ] {
+        let (reading, now) = steered(name);
+        assert_eq!(reading.status, Status::Fail, "{name}: {}", reading.message);
+        assert!(
+            reading.message.contains(path),
+            "{name} is refused at {path}: {}",
+            reading.message
+        );
+        assert_eq!(now, tracked, "{name}: a refused proposal writes nothing");
     }
 }

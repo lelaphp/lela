@@ -19,6 +19,7 @@ use serde_json::{Map, Value, json};
 
 mod conditions;
 pub(crate) mod every;
+mod facts;
 mod graph;
 mod invocation;
 mod parity;
@@ -49,20 +50,23 @@ pub(crate) const LOCAL: &str = ".claude/harness.local.md";
 /// The volatile sections of the local file, in the order it renders them:
 /// §5's eight, the instrument readings first and `port-map` with them
 /// since #148, a reading that moves with the store like the others and is
-/// otherwise renderable only by name.
+/// otherwise renderable only by name. `mutants` waits on its instrument and
+/// `permits` is rendered by name, its "this session" line kept (#3620 D1).
+/// `ci` and `tickets` come last, which ask GitHub, so they are read where
+/// the local file renders and never at a prompt (#3619).
 pub(crate) const LOCAL_SECTIONS: [&str; 8] = [
     "budget",
     "phpt",
     "witness",
-    "mutants",
     "port-map",
     "divergence",
-    "permits",
     "git",
+    "ci",
+    "tickets",
 ];
 /// What `--session` says under a local file whose regions have no sums.
 const UNRENDERED: &str = "The local facts above are unrendered: `computed run .claude/harness.local.md` \
-fills them once a person has run `computed trust` for this clone (harness-design.md §11).";
+fills them, once a person has run `computed trust` for this clone where it has none (harness-design.md §11).";
 
 /// What a section is rendered against: this checkout, its store and what
 /// its machine holds, or the tree alone, as a tracked region carries it.
@@ -127,6 +131,7 @@ fn refuse_under_tracked(section: Section, against: Against<'_>) -> Result<()> {
             | Section::Corpus
             | Section::Parity
             | Section::Tickets
+            | Section::Ci
     );
     if alone && matches!(against, Against::Tree) {
         bail!(
@@ -166,7 +171,13 @@ pub fn render(
             fold_uncreated(budget(manifest, &readings), "crate")?,
             BUDGET,
         ),
-        Section::Divergence => return divergence(manifest, registry, format, uncut),
+        Section::Divergence => {
+            let out = divergence(manifest, registry, format, uncut)?;
+            return Ok(match format {
+                Table::Md => format!("{out}\n{}\n", facts::moves(root, registry, tickets::DAYS)),
+                Table::Json => out,
+            });
+        }
         Section::Phpt => {
             let rows = fold_uncreated(standing(manifest, against.checkout()?, root)?, "scope")?;
             match format {
@@ -184,7 +195,14 @@ pub fn render(
             (instrument(&readings, &every::name(s)), INSTRUMENT)
         }
         Section::Ticket => (instrument(&readings, "ticket"), TICKET),
-        Section::Tickets => return tickets::render(against.checkout()?, root, format),
+        Section::Tickets => {
+            let week = tickets::render(against.checkout()?, root, format)?;
+            return Ok(match format {
+                Table::Md => format!("{week}{}\n", facts::tracker(root, tickets::DAYS)),
+                Table::Json => week,
+            });
+        }
+        Section::Ci => return Ok(facts::ci(root)),
         Section::Track => (
             last_run(&against.checkout()?.history(track_work::INSTRUMENT)?),
             TRACK,
@@ -201,7 +219,7 @@ pub fn render(
             return permits(
                 manifest,
                 &readings,
-                &store.history(permit::INSTRUMENT)?,
+                (&store.history(permit::INSTRUMENT)?, &permit::judged(store)),
                 &store.tallies()?,
                 format,
                 session_id,
@@ -354,8 +372,10 @@ pub(crate) fn session_of_stdin() -> Option<String> {
 /// the two are one text, the map first; as JSON they are the object
 /// `{"map", "facts"}`, since the engine caps a context block and the hook
 /// hands them over as two (#64). The map is tracked and must exist; the
-/// local file is written from `local_template` when the clone has none,
-/// so the hook's `computed run` has a file to render next time.
+/// local file is written from `local_template` when the clone has none or
+/// its [`skeleton`] is not the template, so a template that moved reaches
+/// a clone that rendered the old one (#3620 D1), and the hook's `computed
+/// run` has the file to render next time.
 pub fn session(
     manifest: &Manifest,
     store: &Store,
@@ -369,9 +389,10 @@ pub fn session(
         map.push('\n');
     }
     let local_path = root.join(LOCAL);
-    if !local_path.exists() {
+    let template = local_template();
+    if !fs::read_to_string(&local_path).is_ok_and(|laid| skeleton(&laid) == template) {
         crate::make_parent(&local_path)?;
-        fs::write(&local_path, local_template()).with_context(|| format!("writing {LOCAL}"))?;
+        fs::write(&local_path, &template).with_context(|| format!("writing {LOCAL}"))?;
     }
     let mut facts = fs::read_to_string(&local_path).with_context(|| format!("reading {LOCAL}"))?;
     if !facts.ends_with('\n') {
@@ -382,16 +403,21 @@ pub fn session(
         facts.push_str(UNRENDERED);
         facts.push('\n');
     }
-    // A log the week cannot be read from costs the line, never the block.
-    let week = tickets::render(store, root, Table::Md);
-    let week = week.unwrap_or_else(|err| format!("unread: {err:#}\n"));
-    write!(facts, "\n## tickets\n\n{week}").ok();
+    // What a person's file carries that parses but does not validate, so
+    // an edit is seen before the next call meets it (#3618 ruling 4).
+    let defects = manifest.defects();
+    if !defects.is_empty() {
+        write!(facts, "\n## defects\n\n").ok();
+        for defect in defects {
+            writeln!(facts, "- {defect}").ok();
+        }
+    }
     if let Some(id) = session_id {
         let log = store.history(permit::INSTRUMENT)?;
         let rows: Vec<Row> = permit_rows(
             manifest,
             &store.readings()?.readings,
-            &log.readings,
+            (&log.readings, &BTreeMap::new()),
             Some(id),
         )
         .into_iter()
@@ -413,6 +439,24 @@ pub fn session(
         Table::Json => serde_json::to_string(&json!({ "map": map, "facts": facts }))?,
         Table::Md => format!("{map}\n{facts}"),
     })
+}
+
+/// A local file as it was laid: each region's body taken out and its
+/// closer's sums with it, so a rendering of the template is the template.
+fn skeleton(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut inside = false;
+    for line in text.lines() {
+        if line.starts_with("<!-- /computed") {
+            inside = false;
+            out.push_str("<!-- /computed -->\n");
+        } else if !inside {
+            inside = line.starts_with("<!-- computed ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// The local file with every region unrendered: one volatile `exec` per
@@ -989,13 +1033,13 @@ fn last_per_scope(log: &Log, instrument: &str) -> Vec<Row> {
 fn permits(
     manifest: &Manifest,
     readings: &[Reading],
-    log: &Log,
+    (log, judged): (&Log, &BTreeMap<String, u64>),
     tallies: &BTreeMap<String, Vec<(reading::Status, String)>>,
     format: Table,
     this: Option<&str>,
     uncut: bool,
 ) -> Result<String> {
-    let rules = permit_rows(manifest, readings, &log.readings, this);
+    let rules = permit_rows(manifest, readings, (&log.readings, judged), this);
     let window = manifest.telemetry.as_ref().map(|t| t.silent_days);
     let instruments = instruments(tallies, window)?;
     Ok(match format {
@@ -1024,27 +1068,42 @@ fn permits(
                 "instrument",
                 "readings",
                 "failures",
+                "last reading",
                 "last failure",
-                "silent",
             ];
-            let head = &head[..if window.is_some() { 5 } else { 4 }];
             out.push_str(&grid(
-                head,
+                &head,
                 instruments.iter().map(|i| {
-                    let candidate = i.silent.map(|s| if s { "candidate" } else { "" });
                     let (readings, failures) = (i.readings.to_string(), i.failures.to_string());
-                    let last = i.last_failure.clone().unwrap_or_default();
-                    [cell(&i.name), readings, failures, last]
-                        .into_iter()
-                        .chain(candidate.map(str::to_owned))
+                    let failed = i.last_failure.clone().unwrap_or_default();
+                    [
+                        cell(&i.name),
+                        readings,
+                        failures,
+                        i.last_reading.clone(),
+                        failed,
+                    ]
                 }),
             ));
-            if window.is_none() {
-                writeln!(
+            match window {
+                None => writeln!(
                     out,
                     "\nThe candidates for silent are not rendered: `[telemetry] silent_days` is unset in seams.toml (harness-design.md §7)."
-                ).ok();
+                ),
+                Some(days) => {
+                    let named: Vec<&str> = (instruments.iter())
+                        .filter(|i| i.silent == Some(true))
+                        .map(|i| i.name.as_str())
+                        .collect();
+                    let named = if named.is_empty() { "none".to_owned() } else { named.join(", ") };
+                    writeln!(
+                        out,
+                        "\nThe candidates for silent, read within {days} days with no failure in them (harness-design.md §7): {named}. `{}` is never one, since its reading cannot fail.",
+                        usage::INSTRUMENT
+                    )
+                }
             }
+            .ok();
             if let Some(note) = log.unreadable_note() {
                 writeln!(out, "\n{note}").ok();
             }
@@ -1063,11 +1122,13 @@ fn permits(
 /// them with one number: `denials` counts what a rule refused, `handed on`
 /// counts the calls a build passed to the candidate that rebuilds, which
 /// judged them. A walk is not a refusal, so the second never adds to the
-/// first.
+/// first. `judged` is the calls the rule judged, the denominator of its
+/// denials, and `at pre-commit` what a diff judged there was refused,
+/// never an agent's call (#3619).
 fn permit_rows(
     manifest: &Manifest,
     readings: &[Reading],
-    log: &[Reading],
+    (log, judged): (&[Reading], &BTreeMap<String, u64>),
     this: Option<&str>,
 ) -> Vec<Row> {
     let manifests = manifest
@@ -1085,8 +1146,12 @@ fn permit_rows(
     manifests
         .chain(permits)
         .map(|(id, adr)| {
-            let sessions = per_session(log, &id, reading::Status::Fail);
+            let (pre_commit, sessions): (Vec<_>, Vec<_>) =
+                per_session(log, &id, reading::Status::Fail)
+                    .into_iter()
+                    .partition(|(s, _)| s == permit::PRE_COMMIT);
             let denials: usize = sessions.iter().map(|(_, n)| n).sum();
+            let at_pre_commit: usize = pre_commit.iter().map(|(_, n)| n).sum();
             let handed_on: usize = per_session(log, &id, reading::Status::Skip)
                 .iter()
                 .map(|(_, n)| n)
@@ -1104,6 +1169,11 @@ fn permit_rows(
                     ("rule", json!(id)),
                     ("adr", json!(adr)),
                     ("denials", json!(denials)),
+                    (
+                        "judged",
+                        json!(judged.get(&id).copied().unwrap_or_default()),
+                    ),
+                    ("at_pre_commit", json!(at_pre_commit)),
                     ("handed_on", json!(handed_on)),
                     ("this_session", this_session),
                     (
@@ -1150,8 +1220,12 @@ struct InstrumentLine {
     name: String,
     readings: usize,
     failures: usize,
+    /// When the instrument was last read, failing or not.
+    last_reading: String,
     last_failure: Option<String>,
-    /// No failure within the manifest's window; none when it has no window.
+    /// Read within the manifest's window and no failure within it; none
+    /// when it has no window, and for an instrument whose reading cannot
+    /// fail, which is never quiet (#3619).
     silent: Option<bool>,
 }
 
@@ -1161,6 +1235,7 @@ impl InstrumentLine {
             "instrument": self.name,
             "readings": self.readings,
             "failures": self.failures,
+            "last_reading": self.last_reading,
             "last_failure": self.last_failure,
             "silent": self.silent,
         })
@@ -1168,9 +1243,9 @@ impl InstrumentLine {
 }
 
 /// The log per instrument, in name order: readings, failures, the last
-/// failure's time, and, when the manifest has a window, whether no failure
-/// lies within it of now; read off each line's status and time alone
-/// ([`Store::tallies`]).
+/// reading's and the last failure's time, and, when the manifest has a
+/// window, whether a reading and no failure lies within it of now; read
+/// off each line's status and time alone ([`Store::tallies`]).
 fn instruments(
     tallies: &BTreeMap<String, Vec<(reading::Status, String)>>,
     window_days: Option<u64>,
@@ -1191,23 +1266,32 @@ fn instruments(
                 .filter(|(status, _)| *status == reading::Status::Fail)
                 .map(|(_, at)| at.as_str())
                 .collect();
-            let silent = match since {
-                Some(since) => {
-                    let mut recent = false;
-                    for at in &failed {
-                        let at = at
-                            .parse()
-                            .context("a log line whose `at` is not a datetime")?;
-                        recent |= reading::epoch_seconds(&at)? >= since;
-                    }
-                    Some(!recent)
-                }
-                None => None,
-            };
+            let within =
+                |at: &str| -> Result<bool> {
+                    let at = at
+                        .parse()
+                        .context("a log line whose `at` is not a datetime")?;
+                    Ok(since
+                        .is_some_and(|since| reading::epoch_seconds(&at).is_ok_and(|s| s >= since)))
+                };
+            let mut recent = (false, false);
+            for (status, at) in lines {
+                let now = within(at)?;
+                recent.0 |= now;
+                recent.1 |= now && *status == reading::Status::Fail;
+            }
+            let silent =
+                (since.is_some() && name != usage::INSTRUMENT).then_some(recent == (true, false));
             Ok(InstrumentLine {
                 name: name.clone(),
                 readings: lines.len(),
                 failures: failed.len(),
+                last_reading: lines
+                    .iter()
+                    .map(|(_, at)| at.as_str())
+                    .max()
+                    .unwrap_or_default()
+                    .to_owned(),
                 last_failure: failed.iter().max().map(|at| (*at).to_owned()),
                 silent,
             })
@@ -1701,6 +1785,8 @@ const PERMITS: Columns = &[
     READING,
     AT,
     Fact("denials"),
+    Fact("judged"),
+    Cell("at pre-commit", |r| r.fact("at_pre_commit")),
     Cell("handed on", |r| r.fact("handed_on")),
     FIRED,
     Cell("sessions", |r| r.sessions(Some(SESSIONS_SHOWN))),
@@ -1755,7 +1841,7 @@ pub(crate) fn grid<R: IntoIterator<Item = String>>(
 #[cfg(test)]
 #[cfg(tracked)]
 mod tests {
-    use super::{LOCAL_SECTIONS, Row, compared, local_template, outermost, outlived};
+    use super::{LOCAL_SECTIONS, Row, compared, local_template, outermost, outlived, skeleton};
     use serde_json::json;
 
     /// The opener of a region by name, if the text has one.
@@ -1790,6 +1876,12 @@ mod tests {
             assert!(line.contains(" volatile "), "{line}");
             assert!(line.contains(&format!("status --section {name}")), "{line}");
         }
+        for name in ["mutants", "permits"] {
+            assert!(
+                opener(&template, name).is_none(),
+                "{name} is rendered by name"
+            );
+        }
         assert_eq!(
             template.matches("<!-- /computed -->").count(),
             LOCAL_SECTIONS.len()
@@ -1799,6 +1891,28 @@ mod tests {
             ignored.contains("/.claude/harness.local.md"),
             "the local file is gitignored"
         );
+    }
+
+    /// `computed` renders a region as its opener, a blank line, the body,
+    /// a blank line and a closer carrying its sums; the skeleton of that is
+    /// the template again, and the skeleton of a template with a section
+    /// more or less is not, which is what lays the local file down again.
+    #[test]
+    fn a_rendering_of_the_template_has_the_template_as_its_skeleton() {
+        let template = local_template();
+        let rendered = template.replace(
+            "<!-- /computed -->\n",
+            "\n| crate | lines |\n|---|---|\n| xtask | 1 |\n\n<!-- /computed in=ab out=cd -->\n",
+        );
+        assert_ne!(rendered, template);
+        assert_eq!(skeleton(&rendered), template);
+        let older = template.replace(
+            "\n## git\n",
+            "\n## mutants\n\n<!-- computed exec cmd=\"cargo xtask status --section mutants\" volatile name=mutants | do not edit; run computed -->\n<!-- /computed -->\n\n## git\n",
+        );
+        assert_ne!(skeleton(&older), template, "a section the template dropped");
+        let shorter = template.replace("\n## git\n", "\n");
+        assert_ne!(skeleton(&shorter), template);
     }
 
     /// A narrower run inside a subset the section shows folds away, its

@@ -400,8 +400,9 @@ pub struct Request {
     /// `Threw` edge.
     raised: Option<Raised>,
     /// The throwable [`Request::while_pending`]'s step stands in
-    /// `raised` for, which the slot names and the step's caller owns.
-    stepping_past: Option<PhpObject>,
+    /// `raised` for, which the step's caller owns, and whether the slot
+    /// holds the owner of its own the step gave it.
+    stepping_past: Option<pending::Stepping>,
     /// php's `zend_bailout` under way: a fatal was rendered where it was
     /// raised and the request is leaving for the `zend_try` that catches
     /// it, the outermost serving's end or the step of
@@ -595,11 +596,16 @@ enum Rows {
 /// a once form over a path the table already had, which answers `true`;
 /// `NULL`, a path nothing opened or an empty string to `eval`, which
 /// answers `false`; or the unit of the file or the string, whose main op
-/// array the handler serves on a frame of its own.
+/// array the handler serves on a frame of its own, `Declared` where its
+/// compile has declared what it declares and raised what it raised
+/// already, as `zend_compile_file` does for a stream's file before
+/// `compile_filename`'s `zend_destroy_file_handle`
+/// ([`Request::include_stream`]).
 pub(crate) enum Opened {
     Already,
     Failed,
     Unit(PublishedUnit),
+    Declared(PublishedUnit),
 }
 
 /// What `zend_get_property_offset` places a declared instance property
@@ -1046,7 +1052,7 @@ impl Declared {
     }
 
     /// The declaration the table holds for the class.
-    fn decl(&self) -> Option<&ClassDecl> {
+    pub(crate) fn decl(&self) -> Option<&ClassDecl> {
         match &self.composed {
             Some(composed) => Some(&composed.decl),
             None => self.unit.classes.get(usize::try_from(self.at).ok()?),
@@ -1230,7 +1236,7 @@ impl Request {
             links: linking::Links::default(),
             record: recording::Record::default(),
             keys_made: 0,
-            compile_arena: php_compile::syntax::Arena::new(),
+            compile_arena: php_compile::syntax::Arena::default(),
             spare_unit: None,
             compiling_host_string: false,
             no_extensions: false,
@@ -1391,7 +1397,63 @@ impl Hooks<'_> {
     /// close
     /// handler close
     /// ```
+    ///
+    /// A throwable a stream kept before the step began stands as
+    /// `EG(exception)` stands in php while the step is served, so a
+    /// destructor the step serves runs whole and chains its own throwable
+    /// onto it (`zend_objects_destroy_object`), and what stands after the
+    /// step is kept again for the native. A user wrapper's instance given
+    /// up after its `stream_close` threw is the witness, beside the user
+    /// stream's close in `php_streams`.
+    ///
+    /// An `exit` a stream kept stands in the slot already, and is taken
+    /// out of the stream's keeping for the step as a throwable is, so a
+    /// native the destructor calls returns as any other. The destructor's
+    /// throwable replaces it, `zend_exception_set_previous` giving the
+    /// unwind exit up, and is what the native raises then; the program
+    /// may catch it and go on, with the exit's status kept:
+    ///
+    /// ```php
+    /// class W { public $context;
+    ///     function stream_open($p, $m, $o, &$op) { return true; }
+    ///     function stream_close() { echo "close\n"; exit(4); }
+    ///     function __destruct() { echo "dtor ", str_pad('a', 3, 'b'), "\n"; throw new Exception('dtor'); } }
+    /// stream_wrapper_register('ww', 'W');
+    /// register_shutdown_function(function () { echo "shutdown\n"; });
+    /// $f = fopen('ww://x', 'r');
+    /// try { fclose($f); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    /// $f = fopen('ww://y', 'r');
+    /// try { $f = null; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    /// echo "end\n";
+    /// ```
+    /// ```expect exit=4
+    /// close
+    /// dtor abb
+    /// caught dtor
+    /// close
+    /// dtor abb
+    /// caught dtor
+    /// end
+    /// shutdown
+    /// ```
     fn released(&mut self, step: impl FnOnce(&mut Request) -> Result<(), Thrown>) {
+        let throwable = self.0.raised.is_none() && !self.0.bailout;
+        let exit = self.0.unwind_exit();
+        let kept = (self.0.stream_thrown).take_if(|kept| match kept.exception() {
+            Some(_) => throwable,
+            None => exit,
+        });
+        if let Some(kept) = kept {
+            self.0.leave_pending(&kept);
+            self.released(step);
+            match self.0.take_pending_view() {
+                Some(object) => self.0.stream_thrown = Some(Thrown::of(Some(object))),
+                // The exit standing still, or a fatal raised over it.
+                None if kept.exception().is_none() => self.0.stream_thrown = Some(kept),
+                None => {}
+            }
+            return;
+        }
         let parked = self.0.stream_thrown.is_some();
         let answered = step(self.0);
         if !parked && let Some(thrown) = self.0.stream_thrown.take() {

@@ -32,14 +32,14 @@
 //! the response's end, and what the client still sends is read and
 //! dropped until it closes its side or [`LINGER`] has passed. A socket
 //! let go outside the runtime, or as the runtime is dropped at the
-//! drain's deadline (#2344), closes at once. A lingering socket holds its descriptor, and its connection's
+//! drain's deadline (#2344), closes at once. A lingering socket holds its fd, and its connection's
 //! slot under the cap, for that second beyond its connection. A TLS
 //! connection's write side is shut by its `close_notify` first.
 //!
 //! A socket carries its bytes clear or under TLS ([`Wire`], #2343), and
-//! its clocks and the 408 run on what TLS carries. A clear connection
+//! its clocks and the 408 count on what TLS carries. A clear connection
 //! whose first byte is a TLS record's, `0x16`, a handshake sent to the
-//! clear port, is refused: its read fails, so hyper drops it unanswered,
+//! clear listener, is refused: its read fails, so hyper drops it unanswered,
 //! as Bandit and Kestrel close one, and the error log says why
 //! (research/production-server.r2.md M19).
 

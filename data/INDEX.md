@@ -12,6 +12,7 @@ The data files the design cites and the extraction records behind them; each is 
 ├── documents-2829
 ├── extract.log
 ├── fileinfo
+├── func-infos.toml
 ├── mbstring-2831
 ├── ops-extraction.md
 ├── port-map.v0.toml
@@ -21,4 +22,4 @@ The data files the design cites and the extraction records behind them; each is 
 ├── syntax-extraction.md
 └── uri-storage-2832
 ```
-<!-- /computed in=513a9a7733b748d1a4c71ebb5d7a92af2cadfc1472e070f1fa72664b7151efcf out=e750f05882b6dfa908d77fc5fc6a7d790dd26759d2783ccfbc93f585138f70f3 -->
+<!-- /computed in=30b3dc262989a4ab754f809671a1d50766d66f3580115a5aae848301a3b3a0de out=b3bcbf2b5c1f77fdc01b0e5dfe507ba378f4b7d7d7df461841507d7320df8c2c -->

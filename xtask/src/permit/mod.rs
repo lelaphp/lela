@@ -21,7 +21,8 @@
 //! their twins run on save and per commit (§6). A Bash line is read as the
 //! argv of each simple command it runs, quotes removed and heredoc bodies
 //! skipped, in [`argv`] (#1001), and a `deny_pattern` reads the same line
-//! less the heredoc bodies that reading skips as text (#1832); what a shell
+//! less the heredoc bodies that reading skips as text (#1832), with no
+//! quoted argument read as a command position (#3635); what a shell
 //! can hide beyond that is `done`'s to find at pre-push and in CI.
 //!
 //! The interface is four things: [`judge`], one call against the manifest;
@@ -38,8 +39,9 @@
 //! change in [`approval`], the audit record of each change it admitted in
 //! [`audit`], whether a line can write one of them in [`writes`], the
 //! `unless` qualifier's sensor in [`unless`], the `exempt_label`
-//! qualifier's in [`label`], the operation in progress in a checkout and
-//! whose it is, which `where = "operating"` reads, in [`operation`], the
+//! qualifier's in [`label`], the operation in progress in a checkout in
+//! [`operation`], whose a checkout is, which `where = "owned"` and `where
+//! = "operating"` read, in [`owned`], the
 //! adapters and the
 //! recording in [`adapters`], the call handed to a worktree's own build in
 //! [`hand_off`], the diff judge in [`diff`] and the bench of
@@ -58,12 +60,15 @@ mod diff;
 mod hand_off;
 mod kept;
 mod label;
+mod ledger;
 mod operation;
+mod owned;
 mod region;
 mod rules;
 mod unless;
 mod writes;
 
+pub(crate) use adapters::PRE_COMMIT;
 pub use adapters::{Adapter, run};
 pub use after::after;
 pub(crate) use argv::Element;
@@ -71,7 +76,9 @@ pub(crate) use bench::{BAR_MS, run_bench, scratch_workspace};
 pub use call::{Arguments, Call};
 pub(crate) use diff::judge_files;
 pub(crate) use diff::{run_diff, working_files};
+pub(crate) use hand_off::walk;
 pub(crate) use kept::kept_changes;
+pub(crate) use ledger::{judged, written};
 pub use rules::{Finding, Judgement, Kind, judge, judged_at_the_call};
 
 /// The instrument name every reading of permit carries.

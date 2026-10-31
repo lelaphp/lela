@@ -1,12 +1,12 @@
 //! TLS over a real socket against the binary (#2343): a PHP request served
 //! over TLS 1.3 and 1.2 and TLS 1.1 refused, each host's certificate
 //! through SNI, and a TLS listener with no certificate refused at
-//! startup. A TLS handshake on the clear port is held in `framing.rs`.
+//! startup. A TLS handshake on the clear listener is held in `framing.rs`.
 //!
 //! The certificates are fixtures under `tests/tls/`, made once with the
 //! `openssl` command, a test CA and a leaf for each of `a.test` and
 //! `b.test` signed by it, P-256 and valid until 2126: checked in rather
-//! than made at run time, since no crate in the lock makes a certificate
+//! than made as the test starts, since no crate in `Cargo.lock` makes a certificate
 //! and a test that runs `openssl` holds the machine's build of it too.
 //! Their keys guard nothing but these tests.
 
@@ -255,7 +255,7 @@ fn tls_without_a_certificate_refuses_to_start() {
     }
 }
 
-/// A client that connects to the TLS port and never begins its handshake
+/// A client that connects to the TLS listener and never begins its handshake
 /// is closed at the handshake timeout, and the error log says so.
 #[test]
 fn a_handshake_past_the_handshake_timeout_is_closed_and_logged() {

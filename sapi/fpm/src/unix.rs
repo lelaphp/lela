@@ -1,5 +1,5 @@
 //! `fpm_unix.c`: the users and groups a pool names, read from the
-//! system's databases; a UNIX socket's owner and mode; the limits and
+//! system's databases; a UNIX socket's owner and `listen.mode`; the limits and
 //! the priority; the daemonizing fork and the session; and a child's
 //! chroot, working directory and credentials.
 
@@ -26,7 +26,7 @@ enum Whose {
 
 /// `fpm_unix_parse_uid` and `fpm_unix_parse_gid`, php 8.5.12's
 /// (gh19320): the digits as `strtoumax` reads them, refused where they
-/// run past `uintmax_t` or past a `uid_t`'s or `gid_t`'s range, the
+/// go past `uintmax_t` or past a `uid_t`'s or `gid_t`'s range, the
 /// `(uid_t) -1` that means none among them, with the log line naming the
 /// pool and the ID as written.
 fn id(pool: &[u8], name: &[u8], kind: Whose) -> Option<u32> {
@@ -139,7 +139,7 @@ fn check_listen_address(config: &PoolConfig, domain: Domain) -> bool {
     false
 }
 
-/// `fpm_unix_resolve_socket_permissions`: the mode, 0660 unless
+/// `fpm_unix_resolve_socket_permissions`: the `listen.mode`, 0660 unless
 /// `listen.mode` names one, and the owner and group `listen.owner` and
 /// `listen.group` name.
 pub(crate) fn socket_permissions(config: &PoolConfig) -> Option<Permissions> {

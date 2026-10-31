@@ -13,18 +13,24 @@ use std::path::PathBuf;
 
 use cranelift_codegen::isa;
 
+use php_heap::ZvalType;
+use php_unit::Opcode;
+
 use super::{Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupported};
 use crate::table::TraceName;
 use crate::testing::goldens::{
-    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
-    DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FIB, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET,
-    HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, NATIVE_CALL, NBODY, NESTED_READ,
-    NESTED_WRITE, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_WRITE, SIEVE,
-    SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
+    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DEFAULT_CALL, DIM_AND, DIM_CONCAT,
+    DIM_DIV, DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, ENUM_OWN, EVAL_OWN, EVAL_STATIC, FIB,
+    FRAMELESS_CALL, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET, HASH_READ, HASH_WRITE,
+    INDIRECT_REF_WRITE, MANDELBROT, METHOD_CALL, METHOD_OWN, METHOD_SCOPED, NATIVE_CALL, NBODY,
+    NESTED_READ, NESTED_WRITE, NEW_CALL, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE,
+    PARENT_THIS, REF_CALL, REF_WRITE, SIEVE, SPECTRALNORM, STATIC_CALL, STATIC_OWN, STATIC_SCOPED,
+    STATIC_SELF, STATIC_THIS, STRING_BUILD, STRING_MATCH, TEMP_CALL, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
-    Check, Constant, End, Form, Guard, GuardAt, Imm, Interrupt, Op, Operand, Returned, TraceIr,
+    Check, Constant, End, Form, Guard, GuardAt, Home, Imm, Interrupt, Op, Operand, Place, Returned,
+    TraceIr,
 };
 
 /// Where `lower`'s goldens are.
@@ -59,29 +65,33 @@ fn named(fixture: Fixture) -> TraceName {
 /// holds what the code does with it.
 fn constants_named(ir: &TraceIr, clif: &str) -> String {
     let mut named = clif.to_owned();
-    let returned = ir.ops.iter().filter_map(|op| match op {
+    let returned = ir.ops.iter().flat_map(|op| match op {
         Op::Line(line) => match line.imm {
             Imm::Leave {
                 value: Returned::Constant(address),
                 ..
-            } => Some(address),
-            _ => None,
+            } => vec![address],
+            // The defaults a call made in place copies.
+            Imm::Make { defaults, .. } => defaults.each().map(|(_, at)| at.get()).collect(),
+            _ => Vec::new(),
         },
-        _ => None,
+        _ => Vec::new(),
     });
     // A constant no scalar is, which an inline form copies from its op
-    // array's table.
+    // array's table, and which a frameless call hands its native.
     let copied = ir.ops.iter().flat_map(|op| match op {
-        Op::Line(line) if line.form == Form::Inline => [line.op1, line.op2, line.data]
-            .into_iter()
-            .filter_map(|operand| match operand {
-                Operand::Constant(Constant::Other(idx)) => ir
-                    .frames
-                    .get(usize::from(line.frame.0))
-                    .map(|frame| frame.literals + 16 * idx.0 as usize),
-                _ => None,
-            })
-            .collect::<Vec<_>>(),
+        Op::Line(line) if line.form == Form::Inline || line.opcode.is_frameless_icall() => {
+            [line.op1, line.op2, line.data]
+                .into_iter()
+                .filter_map(|operand| match operand {
+                    Operand::Constant(Constant::Other(idx)) => ir
+                        .frames
+                        .get(usize::from(line.frame.0))
+                        .map(|frame| frame.literals + 16 * idx.0 as usize),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        }
         _ => Vec::new(),
     });
     let mut seen = Vec::new();
@@ -137,7 +147,7 @@ fn lowered(fixture: Fixture) -> Result<TraceIr, String> {
     let host = Backend::new(&policy(&[]), symbols()).map_err(|e| format!("{e:?}"))?;
     for backend in [&backend, &host] {
         let compiled = backend
-            .compile(&ir, named(fixture), None)
+            .compile(&ir, named(fixture), None, None)
             .map_err(|abort| format!("{}: {abort:?}", fixture.name))?;
         assert!(!compiled.bytes.is_empty());
         assert!(compiled.align.is_power_of_two());
@@ -292,12 +302,25 @@ fn an_element_write_lowers_inline_and_steps_where_it_cannot() -> Result<(), Stri
     Ok(())
 }
 
-/// A native's call pushed in place and its `DO_ICALL` served by the
-/// `handle` kernel, the `Stood` written past it (#2963).
+/// A native's call pushed in place and its `DO_ICALL` made from
+/// compiled code: the call made the one served, the native served
+/// through [`Kernel::CallNative`], the interrupt tested, the call popped
+/// in place and the throw tested, the `Stood` written past it (#2963,
+/// #3560).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_natives_call_lowers_in_place() -> Result<(), String> {
     lowered(NATIVE_CALL).map(drop)
+}
+
+/// A frameless call made from compiled code: the operand zvals handed
+/// to [`Kernel::Frameless`], which reads no opline, then the interrupt
+/// tested; a variable that may be unset or hold a reference tested
+/// first, its handler's through [`Kernel::Handle`] where it is (#3560).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_frameless_call_lowers_in_place() -> Result<(), String> {
+    lowered(FRAMELESS_CALL).map(drop)
 }
 
 /// Strings compared, measured and cast inline: the comparison of two
@@ -382,6 +405,7 @@ fn compiled(plan: &[(&str, &str)], program: &str) -> Result<(TraceIr, String), S
                     at: b"f".as_slice().into(),
                     line: 1,
                 },
+                None,
                 None,
             )
             .map_err(|abort| format!("{abort:?}"))?;
@@ -502,8 +526,9 @@ fn a_link_answers_its_last_exit() -> Result<(), String> {
 }
 
 /// A native's call is pushed in place, its sends of constants stepped,
-/// the operands they read stored first, and its `DO_ICALL` served by its
-/// handler through [`Kernel::Handle`] (#2963).
+/// the operands they read stored first, and its `DO_ICALL` made in
+/// place, the native alone served through [`Kernel::CallNative`], with
+/// no opline read and no dispatch (#2963, #3340, #3560).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_natives_call_is_served_by_its_handler() -> Result<(), String> {
@@ -517,7 +542,8 @@ fn a_natives_call_is_served_by_its_handler() -> Result<(), String> {
         $x = [1]; echo f($x, 3), \"\\n\";",
     )?;
     assert!(!calls_of(&clif, Kernel::Step).is_empty(), "{clif}");
-    assert!(!calls_of(&clif, Kernel::Handle).is_empty(), "{clif}");
+    assert!(!calls_of(&clif, Kernel::CallNative).is_empty(), "{clif}");
+    assert!(calls_of(&clif, Kernel::Handle).is_empty(), "{clif}");
     Ok(())
 }
 
@@ -765,10 +791,15 @@ fn a_side_trace_returning_an_array_its_parent_knew_compiles() -> Result<(), Stri
          op e2 23 array.packed - - -\nop e2 24 array.packed - - -\nstop return\n",
     )
     .map_err(|e| format!("{e:?}"))?;
-    let ir = crate::types::build(&record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let ir = crate::types::build(
+        &record,
+        &recorded.view,
+        &crate::analysis::analysed(&record, &recorded.view),
+    )
+    .map_err(|abort| format!("{abort:?}"))?;
     let backend = golden_backend().map_err(|e| format!("{e:?}"))?;
     backend
-        .compile(&ir, named(SPECTRALNORM), None)
+        .compile(&ir, named(SPECTRALNORM), None, None)
         .map(|_| ())
         .map_err(|abort| format!("{abort:?}\n{}", super::dump::render(&ir)))
 }
@@ -819,40 +850,6 @@ fn a_body_entry_reads_where_the_frame_stands() -> Result<(), String> {
         "the stood is read after the entry branches:\n{clif}"
     );
     Ok(())
-}
-
-/// A trace's landing slots (`jit-design.md` §4.9): each written once, to
-/// the first trace entered at its landing, every key tagged so none is a
-/// free slot's zero, and a landing past the slots left to the crossing.
-#[test]
-fn a_landing_slot_names_the_first_trace_entered_at_its_landing() {
-    use super::{Entrance, LANDING_TAG, LANDINGS, LandingSlots, Stands};
-    let entrance = |trace| Entrance {
-        body: 0x1000,
-        trace,
-    };
-    let (first, second, third) = (entrance(1), entrance(2), entrance(3));
-    let slots = LandingSlots::new();
-    let key = LandingSlots::key(Stands { func: 0, opline: 0 });
-    assert_eq!(
-        key, LANDING_TAG,
-        "the first opline of op array 0 is no free slot"
-    );
-    slots.remember(key, &first);
-    slots.remember(key, &second);
-    let at = |entrance: &Entrance| std::ptr::from_ref(entrance).addr();
-    assert_eq!(slots.landed(key), Some(at(&first)));
-    let other = LandingSlots::key(Stands { func: 7, opline: 9 });
-    assert_eq!(other, 7 | 9 << 32 | LANDING_TAG);
-    slots.remember(other, &second);
-    assert_eq!(slots.landed(other), Some(at(&second)));
-    assert_eq!(LANDINGS, 2);
-    let past = LandingSlots::key(Stands {
-        func: 7,
-        opline: 10,
-    });
-    slots.remember(past, &third);
-    assert_eq!(slots.landed(past), None);
 }
 
 /// A link the trace was compiled against is a jump in its own bytes
@@ -922,6 +919,135 @@ fn a_link_jumps_to_the_trace_it_links_to() -> Result<(), String> {
         reads(&tested),
         reads(&clif) + 1,
         "a side's link to its looping root tests the interrupt:\n{tested}"
+    );
+    Ok(())
+}
+
+/// A typed property read through `$this` in a method the loop's trace
+/// calls: php's analysis types the read by the declaration, so it holds no
+/// guard and its value is kept in a register, which the read defines as
+/// it reads the slot; a register read before anything defined it would
+/// be refused as `COMPILER_ERROR`, never read as zero (#3665).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_typed_property_read_through_this_defines_its_register() -> Result<(), String> {
+    let program = "class P { public int $m = 0; function f() { return $this->m; } }
+        function g($p) { $s = 0; for ($i = 1; $i < 40; $i++) { $p->m = $i; $s += $p->f(); } return $s; }
+        echo g(new P), \"\\n\";";
+    let plan = [
+        ("record.function", "g"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ];
+    let (ir, _) = compiled(&plan, program)?;
+    let read = (ir.ops.iter().enumerate())
+        .find_map(|(at, op)| match op {
+            Op::Line(line) if line.opcode == Opcode::FetchObjR => Some((at, line)),
+            _ => None,
+        })
+        .ok_or("the trace reads no property")?;
+    let out = read.1.out.ok_or("the read writes nothing")?;
+    let held = ir.values.get(out.0 as usize).ok_or("the read's value")?;
+    assert_eq!(held.home, Home::Register, "{}", super::dump::render(&ir));
+    assert!(
+        !(ir.guards.iter())
+            .any(|guard| matches!(guard.at, GuardAt::Within(op) if op.0 as usize == read.0)),
+        "{}",
+        super::dump::render(&ir)
+    );
+    Ok(())
+}
+
+/// A return trace past a `RETURN_BY_REF` the handler serves: the frame it
+/// lands in, below the trace's root, is named by the caller its header
+/// held before the step, as a `RETURN`'s is, and goes on to call `h()` in
+/// place, whose header takes that place as its caller. A frame's place
+/// read before anything defined it would be refused as `COMPILER_ERROR`,
+/// never read as zero, the stack's first frame (#3685).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_by_reference_names_the_frame_it_lands_in() -> Result<(), String> {
+    let program = "function h() { return 1; }
+        function &p($n) { static $z = 0; if ($n == 0) { return $z; } $x = &p($n - 1); h(); return $x; }
+        $r = &p(6); echo $r, \"\\n\";";
+    let plan = [("record.function", "p"), ("record.start", "return")];
+    let (ir, _) = compiled(&plan, program)?;
+    let shown = super::dump::render(&ir);
+    let stepped = (ir.ops.iter())
+        .position(|op| {
+            matches!(op, Op::Line(line)
+                if line.opcode == Opcode::ReturnByRef && line.form == Form::Step)
+        })
+        .ok_or_else(|| format!("the trace steps no RETURN_BY_REF:\n{shown}"))?;
+    let Some(&Op::Back { frame: landed, .. }) = ir.ops.get(stepped + 1) else {
+        return Err(format!("no return lands past the RETURN_BY_REF:\n{shown}"));
+    };
+    let below = (ir.frames.get(usize::from(landed.0))).map(|frame| frame.place);
+    assert!(matches!(below, Some(Place::Caller(_))), "{shown}");
+    assert!(
+        (ir.ops.iter().skip(stepped)).any(|op| matches!(op, Op::Line(line)
+            if line.frame == landed && matches!(line.imm, Imm::Make { .. }))),
+        "the frame landed in makes no call in place:\n{shown}"
+    );
+    Ok(())
+}
+
+/// An element fetch no guard holds keeps its value in its slot, or in a
+/// register that is a constant: php's analysis types every read of an
+/// array's element as what the array holds or `null`, so the one scalar
+/// such a fetch's types can be is `null`, and a long, a double or a
+/// boolean in a register is always held by a guard within the fetch,
+/// which defines it (#3674). An array of `null`s read by a long key, by
+/// a string and through `??`, and an empty one through `??`, reach the
+/// first; arrays of longs, doubles and booleans, and one a parameter
+/// holds, the second. Each trace compiles, where `Emit::copied_element`
+/// would refuse a register that carries a value.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_element_fetch_no_guard_holds_keeps_no_value_in_a_register() -> Result<(), String> {
+    let programs = [
+        "function f($n) { $a = [null, null]; $s = 0; for ($i = 0; $i < $n; $i++) { if ($a[$i & 1] === null) { $s++; } } return $s; }",
+        "function f($n) { $a = ['x' => null, 'y' => null]; $s = 0; for ($i = 0; $i < $n; $i++) { $v = $a['x']; if ($v === null) { $s++; } } return $s; }",
+        "function f($n) { $a = [null, null]; $s = 0; for ($i = 0; $i < $n; $i++) { $s += $a[$i & 1] ?? 5; } return $s; }",
+        "function f($n) { $e = []; $s = 0; for ($i = 0; $i < $n; $i++) { $s += $e[$i] ?? 1; } return $s; }",
+        "function f($n) { $a = [1, 2, 3]; $s = 0; for ($i = 0; $i < $n; $i++) { $s += $a[$i % 3]; } return $s; }",
+        "function f($n) { $a = [1.5, 2.5]; $s = 0.0; for ($i = 0; $i < $n; $i++) { $s += $a[$i & 1]; } return $s; }",
+        "function f($n) { $a = [true, false]; $s = 0; for ($i = 0; $i < $n; $i++) { if ($a[$i & 1]) { $s++; } } return $s; }",
+        "function f($n) { $l = [1, 2, 3]; $s = 0; for ($i = 0; $i < $n; $i++) { $s += $l[$i] ?? 1; } return $s; }",
+    ];
+    let plan = [("record.function", "f"), ("record.start", "loop")];
+    let (mut constant, mut guarded) = (0, 0);
+    for program in programs {
+        let program = format!("{program}\necho f(10), \"\\n\";");
+        let (ir, _) = compiled(&plan, &program)?;
+        let rendered = super::dump::render(&ir);
+        for (at, op) in ir.ops.iter().enumerate() {
+            let Op::Line(line) = op else {
+                continue;
+            };
+            if !matches!(line.opcode, Opcode::FetchDimR | Opcode::FetchDimIs) {
+                continue;
+            }
+            let out = line.out.ok_or("a fetch that writes nothing")?;
+            let held = ir.values.get(out.0 as usize).ok_or("the fetch's value")?;
+            let within = (ir.guards.iter())
+                .any(|guard| matches!(guard.at, GuardAt::Within(op) if op.0 as usize == at));
+            if within {
+                guarded += usize::from(held.home == Home::Register);
+                continue;
+            }
+            let carries = held.home == Home::Register
+                && !matches!(
+                    held.types.tag(),
+                    Some(ZvalType::Null | ZvalType::False | ZvalType::True)
+                );
+            assert!(!carries, "{program}\n{rendered}");
+            constant += usize::from(held.home == Home::Register);
+        }
+    }
+    assert!(
+        constant >= 4 && guarded >= 3,
+        "{constant} constant, {guarded} guarded"
     );
     Ok(())
 }
@@ -1104,7 +1230,8 @@ fn a_hashs_dimension_oplines_lower_through_the_lookup_kernels() -> Result<(), St
 /// and a fetch for writing through the `VAR` a fetch for writing left
 /// indirect, and a write to the array a reference holds, through the
 /// lookup kernels, the handler called only where a write is not made in
-/// place and nothing stepped but the `COALESCE`, as php calls its handler.
+/// place and for the `COALESCE` over a temporary, as php calls its
+/// handler, and nothing stepped.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_lowers_in_place()
@@ -1115,8 +1242,8 @@ fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_lowers_in_place()
             &[
                 (Kernel::Find, 5),
                 (Kernel::Release, 3),
-                (Kernel::Step, 1),
-                (Kernel::Handle, 0),
+                (Kernel::Step, 0),
+                (Kernel::Handle, 1),
             ],
         ),
         (
@@ -1148,6 +1275,558 @@ fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_lowers_in_place()
                 fixture.name
             );
         }
+    }
+    Ok(())
+}
+
+/// A call that sends arrays by reference is made in place: its
+/// `SEND_REF`s copy the references with an owner more, the reference
+/// made in place where the variable holds none, its handler cold where
+/// the memory limit refuses it (#3560), and the call's two checks
+/// read each reference's value as the frame is activated (#3340), the
+/// `RECV`'s handler cold where one fails (#3560).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_by_reference_lowers_its_sends_and_checks() -> Result<(), String> {
+    lowered(REF_CALL)?;
+    let clif =
+        std::fs::read_to_string(goldens_dir().join("ref_call.clif")).map_err(|e| e.to_string())?;
+    let calls = |kernel: Kernel| {
+        let address = format!("{:#x}", symbols().address(kernel)).replace("0x7000", "0x7000_");
+        (clif.lines())
+            .filter(|line| line.contains("call_indirect") && line.contains(&address))
+            .count()
+    };
+    // Each `SEND_REF`'s reference made in place, its refused arm, each
+    // check's `RECV` handed to its handler where it fails (#3560), and
+    // each `ASSIGN_DIM_OP`'s of the callee.
+    assert_eq!(calls(Kernel::MakeRef), 2, "{clif}");
+    assert_eq!(calls(Kernel::Handle), 6, "{clif}");
+    // The made call's cold arm, where the interrupt is raised or the
+    // cache not laid down.
+    assert_eq!(calls(Kernel::Call), 1, "{clif}");
+    // The push's and the leave's cold arms, and no send stepped.
+    assert_eq!(calls(Kernel::Step), 2, "{clif}");
+    Ok(())
+}
+
+/// A method's leave in place gives its receiver up after its variables:
+/// one owner fewer in place, and [`Kernel::FreeThis`] cold where that is
+/// the last or the collector may take the object as a root (#3343).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_methods_leave_gives_its_receiver_up() -> Result<(), String> {
+    lowered(METHOD_CALL)?;
+    let clif = std::fs::read_to_string(goldens_dir().join("method_call.clif"))
+        .map_err(|e| e.to_string())?;
+    let address =
+        format!("{:#x}", symbols().address(Kernel::FreeThis)).replace("0x7000", "0x7000_");
+    let freed = (clif.lines())
+        .filter(|line| line.contains("call_indirect") && line.contains(&address))
+        .count();
+    assert_eq!(freed, 1, "{clif}");
+    Ok(())
+}
+
+/// The calls `k`, `s`, `n` and `t` make: `k`'s and `t`'s methods pushed in place with
+/// their receivers, and `s`'s and `n`'s held to their callee after the
+/// handler pushed them, each made in place with no send stepped, the
+/// call kernel cold (#3343).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn method_calls_lower_their_push_call_and_leave() -> Result<(), String> {
+    for fixture in [METHOD_CALL, STATIC_CALL, NEW_CALL, TEMP_CALL] {
+        lowered(fixture)?;
+        let clif = std::fs::read_to_string(goldens_dir().join(format!("{}.clif", fixture.name)))
+            .map_err(|e| e.to_string())?;
+        let calls = |kernel: Kernel| {
+            let address = format!("{:#x}", symbols().address(kernel)).replace("0x7000", "0x7000_");
+            (clif.lines())
+                .filter(|line| line.contains("call_indirect") && line.contains(&address))
+                .count()
+        };
+        assert_eq!(calls(Kernel::Call), 1, "{}: {clif}", fixture.name);
+        assert_eq!(calls(Kernel::FreeThis), 1, "{}: {clif}", fixture.name);
+    }
+    Ok(())
+}
+
+/// The calls pushed in place under the pair their runtime-cache slot
+/// holds lower to the guard on the slot, read past the trace's headers,
+/// and one cold arm where the handler pushes the call, which no other
+/// kernel serves (#3557, #3558).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_pushed_under_its_slots_pair_lowers_one_handler_arm() -> Result<(), String> {
+    for fixture in [
+        STATIC_CALL,
+        METHOD_SCOPED,
+        STATIC_SCOPED,
+        STATIC_SELF,
+        STATIC_THIS,
+        PARENT_THIS,
+        METHOD_OWN,
+        STATIC_OWN,
+        ENUM_OWN,
+    ] {
+        let ir = lowered(fixture)?;
+        let clif = std::fs::read_to_string(goldens_dir().join(format!("{}.clif", fixture.name)))
+            .map_err(|e| e.to_string())?;
+        let at = (ir.ops.iter())
+            .position(|op| matches!(op, Op::Line(line) if matches!(line.imm, Imm::Pair { .. })))
+            .ok_or_else(|| format!("{}: no push under a pair", fixture.name))?;
+        let address =
+            format!("{:#x}", symbols().address(Kernel::Step)).replace("0x7000", "0x7000_");
+        let stepped = (clif.lines())
+            .filter(|line| line.starts_with(&format!("@{at:04x} ")))
+            .filter(|line| line.contains("call_indirect") && line.contains(&address))
+            .count();
+        assert_eq!(stepped, 1, "{}: {clif}", fixture.name);
+        assert_eq!(
+            calls_of(&clif, Kernel::Call).len(),
+            1,
+            "{}: {clif}",
+            fixture.name
+        );
+    }
+    Ok(())
+}
+
+/// A trace that pushes a static method's call in place, entered on a
+/// request whose serving of the op array has not primed the call's slot: the
+/// slot holds no pair, so the handler pushes the call, looking the class
+/// and the method up as php's `zend_jit_find_static_method_helper` does,
+/// the callee is held after it, and every pass after, the slot primed,
+/// pushes it in place; the call's `static` is the class the request
+/// resolved the name to (#3557).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_empty_slot_sends_a_static_call_to_its_handler() {
+    let scratch = testing::Scratch::new();
+    let engine = testing::engine::<Lane>(&[
+        ("jit.mode", "force"),
+        ("jit.compile", "inline"),
+        ("opcache.jit_debug", "258048"),
+    ]);
+    let program = "class Getter { public static function twice($v) { return static::class === 'Child' ? $v + $v : -1; } }
+        eval('class Base extends Getter { }');
+        class Child extends Base { }
+        class Pub { public static function three($v) { return 3 * $v; } }
+        function k($m) { $t = 0; for ($i = 0; $i < $m; $i++) { if ($i > 0) { $t += Child::twice($i) + Pub::three($i); } } return $t; }
+        echo k(20), \"\\n\";";
+    let first = scratch.serve(&engine, program);
+    assert_eq!(testing::stdout(&first), "950\n");
+    let second = scratch.serve(&engine, program);
+    assert_eq!(testing::stdout(&second), "950\n");
+    let lines = String::from_utf8_lossy(&second.stderr);
+    // The second request links into the loop trace the first compiled,
+    // TRACE 2, whose first push finds its slot empty, and the cold arm's
+    // handler serves it: the loop never leaves through an exit of its own.
+    assert!(lines.contains("(link to 2)"), "{lines}");
+    assert!(!lines.contains("TRACE 2 exit"), "{lines}");
+    let exits = lines.lines().filter(|line| line.contains(" exit ")).count();
+    assert!(exits <= 2, "{lines}");
+}
+
+/// A trace that pushes a request-scoped class's inherited method in place
+/// under its slot's pair serves an object of another request-scoped class
+/// through the handler where the slot names the class it resolved the
+/// name on last, and in place once it names the object's own; the callee,
+/// the one method both inherit, holds, and each call's `static` is its
+/// receiver's class (#3558).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_slot_that_names_another_class_sends_a_methods_call_to_its_handler() {
+    let scratch = testing::Scratch::new();
+    let engine = testing::engine::<Lane>(&[
+        ("jit.mode", "force"),
+        ("jit.compile", "inline"),
+        ("opcache.jit_debug", "258048"),
+    ]);
+    let program = "class Getter { public $b = 1; public function get($v) { return static::class === 'A' ? $this->b + $v : $v; } }
+        eval('class A extends Getter { } class B extends Getter { public $b = 9; }');
+        function k($o, $p, $m) { $t = 0; for ($i = 0; $i < $m; $i++) { $t += $o->get($i); $o = $i % 2 ? $p : $o; } return $t; }
+        echo k(new A, new B, 10), ' ', k(new B, new A, 10), \"\\n\";";
+    let served = scratch.serve(&engine, program);
+    assert_eq!(testing::stdout(&served), "47 53\n");
+}
+
+/// An evaluated class's own method's call pushed in place under its
+/// slot's pair lowers to the guard on the slot and one cold arm where the
+/// handler pushes it, and makes no call: the trace stops at the call,
+/// which the interpreter makes (#3561, #3570).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_evaluated_classs_call_lowers_its_push_and_no_call() -> Result<(), String> {
+    for fixture in [EVAL_OWN, EVAL_STATIC] {
+        let ir = lowered(fixture)?;
+        let clif = std::fs::read_to_string(goldens_dir().join(format!("{}.clif", fixture.name)))
+            .map_err(|e| e.to_string())?;
+        let at = (ir.ops.iter())
+            .position(|op| matches!(op, Op::Line(line) if matches!(line.imm, Imm::Pair { .. })))
+            .ok_or_else(|| format!("{}: no push under a pair", fixture.name))?;
+        let address =
+            format!("{:#x}", symbols().address(Kernel::Step)).replace("0x7000", "0x7000_");
+        let stepped = (clif.lines())
+            .filter(|line| line.starts_with(&format!("@{at:04x} ")))
+            .filter(|line| line.contains("call_indirect") && line.contains(&address))
+            .count();
+        assert_eq!(stepped, 1, "{}: {clif}", fixture.name);
+        assert!(
+            calls_of(&clif, Kernel::Call).is_empty(),
+            "{}: {clif}",
+            fixture.name
+        );
+    }
+    Ok(())
+}
+
+/// A call passed fewer arguments than its callee has parameters lowers
+/// to its activation in place, each default copied from the op array's
+/// constants, the call kernel cold where the call is refused (#3340).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_passed_fewer_arguments_lowers_its_defaults() -> Result<(), String> {
+    lowered(DEFAULT_CALL)?;
+    let clif = std::fs::read_to_string(goldens_dir().join("default_call.clif"))
+        .map_err(|e| e.to_string())?;
+    let calls = |kernel: Kernel| {
+        let address = format!("{:#x}", symbols().address(kernel)).replace("0x7000", "0x7000_");
+        (clif.lines())
+            .filter(|line| line.contains("call_indirect") && line.contains(&address))
+            .count()
+    };
+    assert_eq!(calls(Kernel::Call), 1, "{clif}");
+    assert_eq!(calls(Kernel::Handle), 0, "{clif}");
+    Ok(())
+}
+
+/// A trace one request compiled through a call into the function its
+/// `eval` declared, entered by a request whose `eval` declares another
+/// function under the same name and the same request-scoped number, by
+/// reference and with another arity: the trace left at the call the
+/// first time, so the second request's call is its own handler's, and
+/// each request writes what the interpreter writes, under force and
+/// where every guard fails once (#3570).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_trace_through_an_evaled_call_serves_another_requests_function() {
+    for mode in ["force", "exit-fuzz"] {
+        let scratch = testing::Scratch::new();
+        let engine = testing::engine::<Lane>(&[
+            ("jit.mode", mode),
+            ("jit.compile", "inline"),
+            ("opcache.jit_debug", "258048"),
+        ]);
+        let declare = |code: &str| {
+            let written =
+                std::fs::write(scratch.0.join("h.php"), format!("<?php return '{code}';"));
+            assert!(written.is_ok(), "{written:?}");
+        };
+        let program = "eval(include __DIR__ . '/h.php');
+            function f($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $a = $i; $t += h($a); $t += $a; } return $t; }
+            echo f(20), \"\\n\";";
+        declare("function h($a) { return $a + 1; }");
+        let first = scratch.serve(&engine, program);
+        assert_eq!(testing::stdout(&first), "400\n", "{mode}");
+        let lines = String::from_utf8_lossy(&first.stderr);
+        assert!(
+            lines.contains("stop (exit to VM interpreter)"),
+            "{mode}: {lines}"
+        );
+        declare("function h(&$a, $b = 10) { $a = $a * 2; return $a + $b; }");
+        let second = scratch.serve(&engine, program);
+        assert_eq!(testing::stdout(&second), "960\n", "{mode}");
+        let lines = String::from_utf8_lossy(&second.stderr);
+        assert!(
+            !lines.contains("start (loop) f()"),
+            "{mode}: the first request's trace serves: {lines}"
+        );
+    }
+}
+
+/// A trace one request compiled through a call pushed in place to an
+/// evaluated class's own method, entered by a request whose `eval`
+/// declares the class under the same name with another method of the same
+/// name: by reference and with another room, which the request's header
+/// refuses, so the handler pushes it; and by reference with the same
+/// room, pushed in place and its argument sent by its handler. Each
+/// request writes what the interpreter writes, under force and where every
+/// guard fails once (#3561, #3570).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_push_of_an_evaluated_classs_method_serves_another_requests_class() {
+    for mode in ["force", "exit-fuzz"] {
+        let scratch = testing::Scratch::new();
+        let engine = testing::engine::<Lane>(&[
+            ("jit.mode", mode),
+            ("jit.compile", "inline"),
+            ("opcache.jit_debug", "258048"),
+        ]);
+        let declare = |code: &str| {
+            let written =
+                std::fs::write(scratch.0.join("h.php"), format!("<?php return '{code}';"));
+            assert!(written.is_ok(), "{written:?}");
+        };
+        let program = "eval(include __DIR__ . '/h.php');
+            function g($o, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $a = $i; $t += $o->get($a); $t += $a; } return $t; }
+            echo g(new E, 20), \"\\n\";";
+        declare("class E { function get($a) { return $a + 1; } }");
+        let first = scratch.serve(&engine, program);
+        assert_eq!(testing::stdout(&first), "400\n", "{mode}");
+        for code in [
+            "class E { function get(&$a, $b = 10) { $c = 0; $a = $a * 2; return $a + $b + $c; } }",
+            "class E { function get(&$a) { $a = $a * 2; return $a + 10; } }",
+        ] {
+            declare(code);
+            let next = scratch.serve(&engine, program);
+            assert_eq!(testing::stdout(&next), "960\n", "{mode}: {code}");
+            let lines = String::from_utf8_lossy(&next.stderr);
+            assert!(
+                !lines.contains("start (loop) g()"),
+                "{mode}: the first request's trace serves: {lines}"
+            );
+        }
+    }
+}
+
+/// A recording begun at the return out of an `eval`'s frame goes on into
+/// a function called from the frame below, at the `eval` frame's number:
+/// the loop's scope for the `eval` takes that frame up through the
+/// function's op array, not its own, which stood it past its end.
+#[test]
+fn a_recording_begun_at_an_evals_return_calls_on_at_its_frames_number() {
+    let scratch = testing::Scratch::new();
+    let engine = testing::engine::<Lane>(&[
+        ("opcache.enable_cli", "1"),
+        ("opcache.jit", "tracing"),
+        ("opcache.jit_buffer_size", "64M"),
+        ("jit.compile", "inline"),
+        ("opcache.jit_debug", "258048"),
+        ("opcache.jit_hot_loop", "1"),
+        ("opcache.jit_hot_func", "1"),
+        ("opcache.jit_hot_return", "1"),
+        ("opcache.jit_hot_side_exit", "1"),
+    ]);
+    let served = scratch.serve(
+        &engine,
+        "eval('function h($a) { return $a + 1; } $declared = true;');
+function f($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += h($i); } return $t; }
+echo f(100), \"\\n\";",
+    );
+    let lines = String::from_utf8_lossy(&served.stderr);
+    assert_eq!(testing::stdout(&served), "5050\n", "{lines}");
+    assert!(lines.contains("TRACE 2 start (loop) f()"), "{lines}");
+}
+
+/// A `while (true)` under `opcache.optimization_level=0` is rooted at its
+/// `while`, the condition php's optimizer leaves unfolded, where at the
+/// default level it is rooted at its body (`record::Folds`, #3578).
+#[test]
+fn a_while_true_is_rooted_where_the_optimization_level_leaves_its_condition() {
+    let program = "function f() {
+    $i = 0;
+    while (true) {
+        if ($i === 10) {
+            return $i;
+        }
+        $i++;
+    }
+}
+echo f(), \"\\n\";";
+    for (level, line) in [("0", "body.php:4"), ("0x7FFEBFFF", "body.php:5")] {
+        let served = testing::serve::<Lane>(
+            &[
+                ("opcache.enable_cli", "1"),
+                ("opcache.jit", "tracing"),
+                ("opcache.jit_buffer_size", "64M"),
+                ("jit.compile", "inline"),
+                ("opcache.optimization_level", level),
+                ("opcache.jit_debug", "258048"),
+                ("opcache.jit_hot_loop", "1"),
+                ("opcache.jit_hot_func", "1"),
+                ("opcache.jit_hot_return", "1"),
+                ("opcache.jit_hot_side_exit", "1"),
+            ],
+            program,
+        );
+        let lines = String::from_utf8_lossy(&served.stderr);
+        assert_eq!(testing::stdout(&served), "10\n", "{level}: {lines}");
+        let root = lines.lines().find(|l| l.contains("start (loop) f()"));
+        assert!(root.is_some_and(|l| l.ends_with(line)), "{level}: {lines}");
+    }
+}
+
+/// A child's `get` hook calling its parent's, read in a loop, under
+/// `opcache.optimization_level=0`: the hook's trace stops at the call into
+/// the parent's with `property hook call`, and the parent's and the
+/// return trace past the call are php's, as the pinned php writes them
+/// (#3577). The loop's exit numbers wait on the analysis's guards (#3575),
+/// so the lines past the fourth trace are not held here.
+#[test]
+fn a_parent_property_hooks_call_stops_the_trace_that_reaches_it() {
+    let served = testing::serve::<Lane>(
+        &[
+            ("opcache.enable_cli", "1"),
+            ("opcache.jit", "tracing"),
+            ("opcache.jit_buffer_size", "64M"),
+            ("jit.compile", "inline"),
+            ("opcache.optimization_level", "0"),
+            ("opcache.jit_debug", "258048"),
+            ("opcache.jit_hot_loop", "1"),
+            ("opcache.jit_hot_func", "1"),
+            ("opcache.jit_hot_return", "1"),
+            ("opcache.jit_hot_side_exit", "1"),
+        ],
+        "class P { public int $x = 2 { get => $this->x + 1; } }
+class C extends P {
+    public int $x = 2 {
+        get => parent::$x::get() * 2;
+    }
+}
+function f($c) { $s = 0; for ($i = 0; $i < 5; $i++) { $s += $c->x; } return $s; }
+echo f(new C), \"\\n\";",
+    );
+    let lines = String::from_utf8_lossy(&served.stderr);
+    assert_eq!(testing::stdout(&served), "30\n", "{lines}");
+    let traced: Vec<&str> = lines
+        .lines()
+        .map(|line| line.split_once(" /").map_or(line, |(head, _)| head))
+        .take(16)
+        .collect();
+    assert_eq!(
+        traced,
+        [
+            "---- TRACE 1 start (enter) $main()",
+            "---- TRACE 1 abort (inner loop)",
+            "---- TRACE 1 start (loop) f()",
+            "---- TRACE 1 stop (loop)",
+            "---- TRACE 1 compiled",
+            "",
+            "---- TRACE 2 start (enter) C::$x::get()",
+            "---- TRACE 2 stop (property hook call)",
+            "---- TRACE 2 compiled",
+            "",
+            "---- TRACE 3 start (enter) P::$x::get()",
+            "---- TRACE 3 stop (return)",
+            "---- TRACE 3 compiled",
+            "",
+            "---- TRACE 4 start (return) C::$x::get()",
+            "---- TRACE 4 stop (return)",
+        ],
+        "{lines}"
+    );
+}
+
+/// A return trace recorded where the lowest frame it returns past has a
+/// user caller, `p`'s under the loop, runs again under an error handler,
+/// whose outermost `p` is the entry of the serving `trigger_error` began:
+/// the `RETURN` stepped there ends that serving and the trace halts, as
+/// php's `jit_stub_trace_halt` (`Emit::halts`), where it raised
+/// `InternalError: a kernel's step ended the serving a trace runs in`
+/// (#3689).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_trace_past_a_servings_entry_halts() {
+    for mode in ["force", "exit-fuzz"] {
+        let served = testing::serve::<Lane>(
+            &[
+                ("opcache.enable_cli", "1"),
+                ("opcache.jit", "tracing"),
+                ("opcache.jit_buffer_size", "64M"),
+                ("jit.mode", mode),
+                ("opcache.jit_hot_loop", "1"),
+                ("opcache.jit_hot_func", "1"),
+                ("opcache.jit_hot_return", "1"),
+                ("opcache.jit_hot_side_exit", "1"),
+            ],
+            "function h() { return 1; }
+function p($n) { if ($n <= 0) return true; $x = p($n - 1); h(); return $x; }
+for ($i = 0; $i < 3; $i++) p(6);
+set_error_handler('p');
+trigger_error(\"x\", E_USER_WARNING);
+echo \"done\\n\";",
+        );
+        assert_eq!(testing::stdout(&served), "done\n", "under {mode}");
+    }
+}
+
+/// The place a return lands in is read off its frame's caller half-word
+/// as `exec::CallerAt::caller` reads it, [`FrameLayout::caller_loop`]
+/// masked off before [`FrameLayout::numbered_from`] is taken away, so a
+/// frame an error handler's serving began, whose caller is the loop's,
+/// names no place 2^31 records away (#3691). The trace is the return
+/// trace `a_return_trace_past_a_servings_entry_halts` serves under the
+/// handler: each half-word it loads becomes a place only through the mask.
+///
+/// [`FrameLayout::caller_loop`]: php_engine::tier::FrameLayout::caller_loop
+/// [`FrameLayout::numbered_from`]: php_engine::tier::FrameLayout::numbered_from
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_returns_caller_is_masked_of_the_loop_bit_before_its_place() -> Result<(), String> {
+    let layout = php_engine::tier::FRAME;
+    let (_, clif) = compiled(
+        &[("record.function", "p"), ("record.start", "return")],
+        "function h() { return 1; }
+function p($n) { if ($n <= 0) return true; $x = p($n - 1); h(); return $x; }
+for ($i = 0; $i < 3; $i++) p(6);
+set_error_handler('p');
+trigger_error(\"x\", E_USER_WARNING);
+echo \"done\\n\";",
+    )?;
+    let lines: Vec<&str> = clif.lines().map(instruction).collect();
+    // Each `to = op a, b  ; b = constant` as the value it defines, its opcode less
+    // the type, its first operand and the constant its second names.
+    let ops: Vec<(&str, &str, &str, &str)> = (lines.iter())
+        .filter_map(|line| {
+            let (to, rest) = line.split_once(" = ")?;
+            let (op, operands) = rest.split_once(' ')?;
+            let op = op.split('.').next()?;
+            let (operands, constant) = operands.split_once("  ; ").unwrap_or((operands, ""));
+            let first = operands.split([',', '+']).next()?.trim();
+            let constant = constant.split_once(" = ").map_or("", |(_, value)| value);
+            Some((to, op, first, constant))
+        })
+        .collect();
+    let half_word = format!("+{}", layout.caller());
+    let loads: Vec<&str> = (lines.iter())
+        .filter_map(|line| {
+            let (to, rest) = line.split_once(" = ")?;
+            (rest.starts_with("load.i32") && rest.ends_with(&half_word)).then_some(to)
+        })
+        .collect();
+    let callers: Vec<&str> = (ops.iter())
+        .filter(|(_, op, first, _)| *op == "uextend" && loads.contains(first))
+        .map(|(to, ..)| *to)
+        .collect();
+    assert!(!callers.is_empty(), "no caller half-word is read:\n{clif}");
+    let mask = format!("{:#x}", !layout.caller_loop()).replace("0x7fff", "0x7fff_");
+    let less = format!("-{}", layout.numbered_from());
+    let applied = |op: &str, to: &str, constant: &str| -> Vec<&str> {
+        (ops.iter())
+            .filter(|(_, o, first, c)| *o == op && *first == to && *c == constant)
+            .map(|(to, ..)| *to)
+            .collect()
+    };
+    for caller in callers {
+        assert!(
+            applied("iadd", caller, &less).is_empty(),
+            "{caller}, a caller half-word, becomes a place unmasked:\n{clif}"
+        );
+        let masked = applied("band", caller, &mask);
+        assert_eq!(
+            masked.len(),
+            1,
+            "{caller}'s loop bit is masked once:\n{clif}"
+        );
+        let places = masked
+            .iter()
+            .flat_map(|frame| applied("iadd", frame, &less));
+        assert_eq!(
+            places.count(),
+            1,
+            "{caller}'s place is taken once, off the masked half-word:\n{clif}"
+        );
     }
     Ok(())
 }

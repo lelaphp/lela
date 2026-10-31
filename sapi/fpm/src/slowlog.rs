@@ -137,7 +137,7 @@ pub(crate) fn trace(fpm: &mut Fpm, p: usize, c: usize) {
 }
 
 /// `fpm_php_trace_dump`: the head, the time, the pool and the pid and
-/// the program the request runs as the scoreboard holds it, then the
+/// the program the request runs as the `scoreboard` holds it, then the
 /// request's frames read out of the stopped child ([`frames`]), and
 /// `+++ dump failed` where a read of them failed.
 fn dump(fpm: &Fpm, p: usize, c: usize, memory: &crate::ffi::trace::Memory) -> Vec<u8> {

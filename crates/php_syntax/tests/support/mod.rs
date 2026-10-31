@@ -25,7 +25,7 @@ pub fn parse_lossless(src: impl AsRef<[u8]>) -> php_syntax::Parsed<'static> {
     let src = src.as_ref();
     // The parse is the fixture's for the rest of the test: its arena,
     // and the source in it, are kept.
-    let arena: &'static php_syntax::Arena = Box::leak(Box::new(php_syntax::Arena::new()));
+    let arena: &'static php_syntax::Arena = Box::leak(Box::new(php_syntax::Arena::default()));
     let source: &'static [u8] = Box::leak(src.into());
     let parsed = php_syntax::parse(arena, source, &php_syntax::Options::default());
     let text: Vec<u8> = parsed

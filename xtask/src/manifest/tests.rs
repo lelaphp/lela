@@ -117,3 +117,31 @@ fn a_suite_ruled_out_twice_or_inside_another_is_refused_naming_both() {
     );
     assert!(Manifest::parse(&apart).is_ok());
 }
+
+/// A pin the `[oracle]` row names and the workspace lacks is a defect and
+/// not a refusal to load (#3618 ruling 4, #3642): the manifest loads,
+/// `defects` names the file as absent, and `pin` refuses with it; the
+/// stale fixture, whose row names a pin it does not carry, loads so, as
+/// `permit --diff` and `done` load it to judge a change under it.
+#[test]
+fn a_pin_the_workspace_lacks_is_a_defect_and_only_pin_refuses() {
+    let root = crate::scratch::Tree::new("manifest-pin-absent").unwrap();
+    std::fs::write(root.join(super::FILE), MINIMAL).unwrap();
+    let manifest = Manifest::load(&root).expect("the manifest loads");
+    let defects = manifest.defects();
+    assert_eq!(defects.len(), 1, "{defects:?}");
+    let said = defects[0].to_string();
+    assert!(
+        said.starts_with("oracle.toml is absent: no oracle pin stands at"),
+        "{said}"
+    );
+    let refused = format!("{:#}", manifest.pin().unwrap_err());
+    assert_eq!(refused, said);
+    assert!(manifest.pin.is_none() && manifest.pin_digest().is_empty());
+
+    let stale = crate::built_root().join("xtask/fixtures/stale");
+    assert!(!stale.join("oracle.toml").exists());
+    let manifest = Manifest::load(&stale).expect("the stale fixture loads");
+    assert!(manifest.rule("lanes.nightly").is_some());
+    assert!(manifest.pin().is_err());
+}

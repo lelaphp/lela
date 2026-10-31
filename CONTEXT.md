@@ -178,6 +178,26 @@ _Avoid_: config (php's `PHP_CONFIG_FILE_PATH`, `PHP_CONFIG_FILE_SCAN_DIR`), rule
 The one-shaped value an instrument writes after a run: instrument, scope, rule, status, numbers, message, ADR, the scope's key (§4.2), commit, time. Everything an agent or a person reads about the state of the engine is a rendering of readings by `xtask status`.
 _Avoid_: result, artefact, report, telemetry (the manifest's `[telemetry]` table: the field `telemetry` and `Telemetry`, its type), output (php's `OutputOp`, `output_buffer_op`, `output_started_at`; seam 4's `OutputSink`)
 
+**Caller**:
+Who asked `done` for its verdict, which each `done` reading names at the head of its message: the Stop hook, the `SubagentStop` hook, pre-push, CI, or a hand at the command line (`done::Caller`). The Stop's verdict is over the checkouts the stopping session and agent wrote in, as permit recorded them; pre-push's and CI's is over the checkout they run in.
+_Avoid_: invoker, requester
+
+**Released**:
+Said of a block the second Stop let through (`stop_hook_active`): the turn ends with the conditions unmet, and a `done` reading over `released` records the count the block had.
+_Avoid_: forgiven
+
+**Owed**:
+Said of a reading a crate must have fresh and passing before `done`: what an `[[owed]]` row of the manifest names for the crates it covers. A row with `held_at = "merge"` is **delegated** in a checkout whose branch records a ticket: `done` there lists it under the merge check's name and does not hold it, and main's checkout holds it.
+_Avoid_: obligatory
+
+**Remedy**:
+What a denied call does instead, a rule's `remedy` in the manifest, which a denial renders after the rule's text and before the checkout it judged.
+_Avoid_: suggestion
+
+**Defect**:
+What a person's file carries that parses but does not validate across files, such as a variant's build made against a closure the pin has moved past (`manifest::Defect`). Only the instruments that read the failing part refuse; permit and `done` judge by what loaded and note it, and the session's facts list it. A file that does not parse is no defect: loading it fails.
+_Avoid_: broken pin, invalid pin
+
 **Seat**:
 One of the machine's few places a building instrument runs in, `XTASK_SEATS` of them (three unless set), each an exclusive lock on a file under `XTASK_SEAT_DIR` that the operating system gives back however its holder ends. `clippy`, `test`, `miri`, `phpt`, `compile-identity`, `crosscheck`, `trace-dump`, `fold`, `fpm-compare`, `soak`, `witness` and `bench` take one before they build and wait while every one is held; what a seated instrument spawns sits in its seat (`seat`, #2982).
 _Avoid_: lease
@@ -191,11 +211,11 @@ The tickets that carry one `track:<name>` label, worked toward the destination o
 _Avoid_: workstream, experiment branch, a track's branch (ADR-0009)
 
 **Ticket**:
-One GitHub issue in this repository: what happened, what to build, its acceptance criteria and what blocks it, filed once and closed by the commit whose `Ticket:` trailer names it. A thing found and not done is a ticket of its own, filed before the turn ends; the only question it raises is whose, and that is a label, not a noun: `ready-for-agent` for an act an agent may take, `for-a-person` for one that is a person's alone (harness §11): a manifest row, a divergence reason, an oracle bump, the decision a design revision states. A branch records the ticket its work is for. The prose no sensor reads is the commit message and the ticket itself, where a person reads the word before anything closes, and the harness's own rustdoc until the manifest holds `xtask` to this section (#63); that is acceptable because the entry's words are two, and a person reads both places. A sentence the map borrows is read as its source wrote it, and the paragraph beside it says what its words are here: *follow-up* and *suggestion* are a ticket, *the user* is a person. At the end of a whole task a session may leave to a ticket: a defect it found outside the ticket's scope, a decision that is a person's alone, a blocker outside the work, and cleanup or refactoring it noticed and was not asked for. It may not leave to a ticket any box of the ticket it works, the witness or test its own change needs, a regression its own change caused, or the lock line, design sentence or region its change makes stale.
+One GitHub issue in this repository: what happened, what to build, its acceptance criteria and what blocks it, filed once, recorded ready on its branch by `xtask ticket ready`, and closed when its work is on `main`: the merge's hook runs `xtask ticket merged`, which closes each ticket the merge's subject names through `xtask ticket close`. A `Ticket:` trailer names the ticket a commit settles and closes nothing. A thing found and not done is a ticket of its own, filed before the turn ends; the only question it raises is whose, and that is a label, not a noun: `ready-for-agent` for an act an agent may take, `for-a-person` for one that is a person's alone (harness §11): a manifest row, a divergence reason, an oracle bump, the decision a design revision states. A branch records the ticket its work is for. The prose no sensor reads is the ticket itself, where a person reads the word before anything closes, and the harness's own rustdoc until the manifest holds `xtask` to this section (#63); that is acceptable because the entry's words are two, and a person reads the ticket. The commit message is read by commit-msg, against the glossary each crate the commit stages is held to (#3624), which notes what it finds and refuses nothing until a person rules otherwise (#3629). At the end of a whole task a session may leave to a ticket: a defect it found outside the ticket's scope, a decision that is a person's alone, a blocker outside the work, and cleanup or refactoring it noticed and was not asked for. It may not leave to a ticket any box of the ticket it works, the witness or test its own change needs, a regression its own change caused, or the lock line, design sentence or region its change makes stale.
 _Avoid_: leftover (hides whether the thing was filed), follow-up (hides whose it is)
 
 **Map**:
-`AGENTS.md` at the workspace root: what an agent reads first, a person's prose and the rest rendered as computed regions, handed to a session by the function hook's `prompt.context` as the `map` block of `xtask status --session`. §5 has called it the map since revision 1 and the harness spells the word in its own code, so the map is this file and nothing else. It says where a session starts and never where the track is going; that is the track's chart.
+`AGENTS.md` at the workspace root: what an agent reads first, a person's prose and the rest rendered as computed regions, loaded into every session by the runtime itself, through `CLAUDE.md`'s `@AGENTS.md` (harness-design.md §5). §5 has called it the map since revision 1 and the harness spells the word in its own code, so the map is this file and nothing else. It says where a session starts and never where the track is going; that is the track's chart.
 _Avoid_: context file, system prompt, a track's map (the chart is that, and the two were one word until revision 22)
 
 **Frontier**:

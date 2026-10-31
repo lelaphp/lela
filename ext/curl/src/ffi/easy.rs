@@ -3,11 +3,13 @@
 //! `build_mime_structure_from_hash` builds.
 
 use std::ffi::{c_char, c_double, c_int, c_void};
+use std::marker::PhantomData;
+use std::os::fd::RawFd;
 use std::ptr::{self, NonNull};
 
 use php_ext::raising::Thrown;
-use php_ext::request::{Foreign, ForeignId, Request};
-use php_ext::values::PhpObject;
+use php_ext::request::{Foreign, ForeignId, Request, Stream};
+use php_ext::values::{Owner, PhpObject, Value};
 
 use super::multi::ShareHandle;
 use super::sys::{self, curl_mime, curl_mimepart};
@@ -18,6 +20,7 @@ use super::{
 use crate::callbacks;
 use crate::constants as c;
 use crate::file::Source;
+use crate::throwables::Pending;
 
 /// An option number as the library's `CURLoption`.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -28,6 +31,12 @@ const fn opt(option: i64) -> sys::CURLoption {
 /// `CURLE_BAD_FUNCTION_ARGUMENT`, what the library answers a `CURL *` it
 /// was not given, and what a `CURL *` its owner gave up answers here.
 const GONE: i32 = 43;
+
+/// What a call into the library that may call back answers: the
+/// library's code, and what a callback threw during it, which php leaves
+/// pending in `EG(exception)` as `zend_call_known_fcc` returns and goes
+/// on past.
+pub(crate) type Called = (i32, Option<Thrown>);
 
 /// What the library keeps a pointer to from one `CURL *`, freed after
 /// the `CURL *` is: its object, the error buffer, the `CURLOPT_STDERR`
@@ -79,6 +88,11 @@ impl Drop for Tag {
     }
 }
 
+/// The `CURLOPT_STDERR` a copy of a `CURL *` that has a file points at:
+/// the file opened again as the copy's own, or the process's `stderr`,
+/// `None`, where it would not open.
+struct Reopened(Option<CFile>);
+
 /// One `CURL *` the request keeps, with its tag.
 pub(super) struct Handle {
     raw: NonNull<sys::CURL>,
@@ -95,7 +109,7 @@ impl Drop for Handle {
             unsafe { sys::curl_easy_cleanup(self.raw.as_ptr()) };
         } else {
             // The library frees it after this, its data pointing nowhere.
-            self.unpoint();
+            self.owned().unpoint();
         }
         // SAFETY: the tag `Handle::make` leaked, freed once the handle
         // that pointed into it is gone.
@@ -150,6 +164,23 @@ pub(crate) enum Info {
     Certs(Vec<Vec<Vec<u8>>>),
 }
 
+/// A `CURL *` the library may call back from inside: held for one call
+/// with the request lent to the callbacks ([`EasyId::call`]), or owned
+/// by value while it is made or dropped ([`Handle::owned`]). It is the
+/// only value `curl_easy_setopt` is called through. libcurl logs from
+/// inside that call, `infof`'s and `failf`'s lines (`lib/setopt.c`,
+/// `lib/easy.c`) reaching the debug callable and the `CURLOPT_STDERR`
+/// file, so a set made inside [`EasyId::with`] would serve PHP code a
+/// second `&mut Request` while the `&mut Handle` borrowed from the first
+/// is live, over a `CURL *` that code could free. `'h` is the span it is
+/// reached for.
+#[derive(Clone, Copy)]
+struct Live<'h> {
+    raw: NonNull<sys::CURL>,
+    tag: NonNull<Tag>,
+    span: PhantomData<&'h mut Handle>,
+}
+
 impl Handle {
     fn make(raw: NonNull<sys::CURL>, session: Session, object: PhpObject, owned: bool) -> Handle {
         let tag = Box::into_raw(Box::new(Tag {
@@ -164,8 +195,8 @@ impl Handle {
         }));
         // SAFETY: `into_raw` never answers null.
         let tag = unsafe { NonNull::new_unchecked(tag) };
-        let handle = Handle { raw, tag, owned };
-        handle.point();
+        let mut handle = Handle { raw, tag, owned };
+        handle.owned().point();
         handle
     }
 
@@ -185,11 +216,41 @@ impl Handle {
         unsafe { self.tag.as_mut() }
     }
 
+    /// This `CURL *` as [`Live`] while it is owned by value: being made,
+    /// before the request keeps it, or being dropped, after. No borrow
+    /// of the request's table reaches it and no PHP code can free it, and
+    /// only the pointers at its tag are set on it, which libcurl takes
+    /// without a line (`setopt_pointers`).
+    fn owned(&mut self) -> Live<'_> {
+        Live {
+            raw: self.raw,
+            tag: self.tag,
+            span: PhantomData,
+        }
+    }
+
+    /// For a copy of this `CURL *`, which points at this one's file and
+    /// does not keep it: the file opened again as its own, or `None`, the
+    /// process's `stderr`, where it would not open; nothing where there
+    /// is no file.
+    fn stderr_again(&self) -> Option<Reopened> {
+        let tag = self.tag();
+        tag.stderr
+            .as_ref()
+            .map(|file| Reopened(file.reopen(&tag.session)))
+    }
+}
+
+impl Live<'_> {
+    fn raw(self) -> *mut sys::CURL {
+        self.raw.as_ptr()
+    }
+
     /// The error buffer, the three data pointers and the hooks' data
     /// pointed at this `CURL *`'s tag: what `_php_curl_set_default_options`
     /// and `_php_setup_easy_copy_handlers` point, and what a copy's options
     /// must stop pointing at the original's.
-    fn point(&self) {
+    fn point(self) {
         let tag = arg(self.tag);
         // SAFETY: a live tag, whose array field is borrowed for the address.
         let error = unsafe { (*self.tag.as_ptr()).error.as_mut_ptr() };
@@ -198,7 +259,7 @@ impl Handle {
     }
 
     /// Every data pointer at `data`.
-    fn point_data(&self, data: *mut c_void) {
+    fn point_data(self, data: *mut c_void) {
         for option in [
             c::CURLOPT_FILE,
             c::CURLOPT_INFILE,
@@ -213,26 +274,34 @@ impl Handle {
         }
     }
 
-    /// The error buffer and every data pointer off the tag, for a pushed
-    /// `CURL *` the library frees once the tag is gone.
-    fn unpoint(&self) {
+    /// The error buffer, the `CURLOPT_STDERR` file and every data pointer
+    /// off the tag, for a pushed `CURL *` the library frees once the tag
+    /// is gone.
+    fn unpoint(self) {
         self.set_ptr(sys::CURLOPT_ERRORBUFFER.into(), ptr::null_mut());
+        self.set_ptr(c::CURLOPT_STDERR, ptr::null_mut());
         self.point_data(ptr::null_mut());
     }
 
-    fn set_ptr(&self, option: i64, value: *mut c_void) -> i32 {
+    fn set_ptr(self, option: i64, value: *mut c_void) -> i32 {
         // SAFETY: a live handle and an option the library reads as a
         // pointer, which outlives the handle or is null.
         code(unsafe { sys::curl_easy_setopt(self.raw(), opt(option), value) })
     }
 
-    fn set_long(&self, option: i64, value: i64) -> i32 {
+    fn set_long(self, option: i64, value: i64) -> i32 {
         // SAFETY: a live handle and an option the library reads as a
         // `long`.
         code(unsafe { sys::curl_easy_setopt(self.raw(), opt(option), c_long(value)) })
     }
 
-    fn set_str(&self, option: i64, value: Option<&[u8]>) -> i32 {
+    fn set_off(self, option: i64, value: i64) -> i32 {
+        // SAFETY: a live handle and an option the library reads as a
+        // `curl_off_t`.
+        code(unsafe { sys::curl_easy_setopt(self.raw(), opt(option), value) })
+    }
+
+    fn set_str(self, option: i64, value: Option<&[u8]>) -> i32 {
         let value = value.map(c_string);
         let raw = value.as_ref().map_or(ptr::null(), |value| value.as_ptr());
         // SAFETY: a live handle, an option the library copies a string of,
@@ -240,33 +309,98 @@ impl Handle {
         code(unsafe { sys::curl_easy_setopt(self.raw(), opt(option), raw) })
     }
 
-    /// `CURLOPT_STDERR` at `file`, held in place of the one it held.
-    fn set_stderr(&mut self, file: Option<CFile>) -> i32 {
-        let raw = file
-            .as_ref()
-            .map_or(ptr::null_mut(), |file| file.0.as_ptr());
-        let code = self.set_ptr(c::CURLOPT_STDERR, raw.cast());
-        self.tag_mut().stderr = file;
-        code
+    /// A blob option under `CURL_BLOB_COPY`.
+    fn set_blob(self, option: i64, value: &[u8]) -> i32 {
+        let mut blob = sys::curl_blob {
+            data: value.as_ptr().cast_mut().cast(),
+            len: value.len(),
+            flags: 1,
+        };
+        // SAFETY: a live handle and a blob the library copies before the
+        // call returns.
+        code(unsafe { sys::curl_easy_setopt(self.raw(), opt(option), &raw mut blob) })
     }
 
-    /// A list option at `list`, held in place of the one it held.
-    fn set_slist(&mut self, option: i64, list: Option<Slist>) -> i32 {
-        let raw = list
-            .as_ref()
-            .map_or(ptr::null_mut(), |list| list.0.as_ptr());
-        let code = self.set_ptr(option, raw.cast());
-        let tag = self.tag_mut();
-        let (old, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut tag.slists)
-            .into_iter()
-            .partition(|(held, _)| *held == option);
-        tag.slists = kept;
-        if let Some(list) = list {
-            tag.slists.push((option, list));
+    /// `CURLOPT_POSTFIELDSIZE` then `CURLOPT_COPYPOSTFIELDS`.
+    fn set_post_fields(self, body: &[u8]) -> i32 {
+        let size = i64::try_from(body.len()).unwrap_or(i64::MAX);
+        self.set_long(sys::CURLOPT_POSTFIELDSIZE.into(), size);
+        // SAFETY: a live handle and `len` bytes the library copies; the
+        // size set first says how many.
+        code(unsafe {
+            sys::curl_easy_setopt(
+                self.raw(),
+                sys::CURLOPT_COPYPOSTFIELDS,
+                body.as_ptr().cast::<c_char>(),
+            )
+        })
+    }
+
+    /// `CURLOPT_DEBUGFUNCTION` at `curl_debug`, or at nothing.
+    fn set_debug(self, on: bool) {
+        let f: Option<sys::curl_debug_callback> = if on { Some(debug) } else { None };
+        // SAFETY: a live handle and the trampoline, or null.
+        unsafe { sys::curl_easy_setopt(self.raw(), opt(c::CURLOPT_DEBUGFUNCTION), f) };
+        let data = if on { arg(self.tag) } else { ptr::null_mut() };
+        self.set_ptr(sys::CURLOPT_DEBUGDATA.into(), data);
+    }
+
+    /// A hook's `*FUNCTION` at its trampoline and its data at the tag.
+    fn set_hook(self, hook: Hook) {
+        let raw = self.raw();
+        match hook {
+            Hook::Progress => {
+                let f: sys::curl_progress_callback = progress;
+                // SAFETY: a live handle and the trampoline for the option.
+                unsafe { sys::curl_easy_setopt(raw, opt(c::CURLOPT_PROGRESSFUNCTION), f) };
+            }
+            Hook::Xferinfo => {
+                let f: sys::curl_xferinfo_callback = xferinfo;
+                // SAFETY: as above.
+                unsafe { sys::curl_easy_setopt(raw, opt(c::CURLOPT_XFERINFOFUNCTION), f) };
+            }
+            Hook::Fnmatch => {
+                let f: sys::curl_fnmatch_callback = fnmatch;
+                // SAFETY: as above.
+                unsafe { sys::curl_easy_setopt(raw, opt(c::CURLOPT_FNMATCH_FUNCTION), f) };
+            }
+            Hook::Debug => self.set_debug(true),
+            Hook::Prereq => {
+                let f: sys::curl_prereq_callback = prereq;
+                // SAFETY: as above.
+                unsafe { sys::curl_easy_setopt(raw, opt(c::CURLOPT_PREREQFUNCTION), f) };
+            }
+            Hook::SshHostkey => {
+                let f: sys::curl_sshhostkeycallback = ssh_hostkey;
+                // SAFETY: as above.
+                unsafe { sys::curl_easy_setopt(raw, opt(c::CURLOPT_SSH_HOSTKEYFUNCTION), f) };
+            }
         }
-        let old = old.into_iter().map(|(_, list)| list).collect();
-        self.tag().let_go(old, Vec::new());
-        code
+        self.point();
+    }
+
+    /// `_php_curl_set_default_options`' sets.
+    fn defaults(self, cainfo: Option<&[u8]>) {
+        self.set_long(c::CURLOPT_NOPROGRESS, 1);
+        self.set_long(c::CURLOPT_VERBOSE, 0);
+        self.point();
+        let raw = self.raw();
+        let write: sys::curl_write_callback = write_body;
+        let read: sys::curl_read_callback = read_body;
+        let header: sys::curl_write_callback = write_header;
+        // SAFETY: a live handle and the trampolines, which take the tag
+        // `point` set as their data.
+        unsafe { sys::curl_easy_setopt(raw, opt(c::CURLOPT_WRITEFUNCTION), write) };
+        // SAFETY: as above.
+        unsafe { sys::curl_easy_setopt(raw, opt(c::CURLOPT_READFUNCTION), read) };
+        // SAFETY: as above.
+        unsafe { sys::curl_easy_setopt(raw, opt(c::CURLOPT_HEADERFUNCTION), header) };
+        self.set_long(c::CURLOPT_DNS_CACHE_TIMEOUT, 120);
+        self.set_long(c::CURLOPT_MAXREDIRS, 20);
+        if let Some(cainfo) = cainfo {
+            self.set_str(c::CURLOPT_CAINFO, Some(cainfo));
+        }
+        self.set_long(c::CURLOPT_NOSIGNAL, 1);
     }
 }
 
@@ -330,9 +464,11 @@ impl EasyId {
         self.with(req, None, |handle| Some(Address::of(handle.raw())))
     }
 
-    /// The library's pointer, for a call that serves no callback.
-    pub(super) fn raw(self, req: &mut Request) -> Option<*mut sys::CURL> {
-        self.with(req, None, |handle| Some(handle.raw()))
+    /// The library's pointer, for a call that holds it: resolved inside
+    /// the hold (`MultiId::call`), so it stays live to
+    /// the call's end whatever PHP code the call serves.
+    pub(super) fn raw(self, req: &mut Request) -> Option<NonNull<sys::CURL>> {
+        self.with(req, None, |handle| Some(handle.raw))
     }
 
     /// What a transfer over `easies` holds: each `CURL *`, and each
@@ -362,19 +498,25 @@ impl EasyId {
         let (raw, session, stderr) = self.with(req, None, |handle| {
             // SAFETY: a live handle.
             let raw = NonNull::new(unsafe { sys::curl_easy_duphandle(handle.raw()) })?;
-            let tag = handle.tag_mut();
-            tag.copied = true;
-            let stderr = tag.stderr.as_ref().map(CFile::reopen);
-            Some((raw, tag.session.clone(), stderr))
+            handle.tag_mut().copied = true;
+            Some((raw, handle.tag().session.clone(), handle.stderr_again()))
         })?;
-        let mut copy = Handle::make(raw, session, object, true);
-        // The copy points at the original's file, which it does not
-        // keep: at one of its own, or at the process's `stderr` where
-        // the file would not open again.
-        if let Some(stderr) = stderr {
-            copy.set_stderr(stderr);
+        let copy = Easy(
+            req.memory_mut()
+                .adopt(Handle::make(raw, session, object, true)),
+        );
+        if let Some(Reopened(stderr)) = stderr {
+            copy.id().point_stderr(req, stderr);
         }
-        Some(Easy(req.memory_mut().adopt(copy)))
+        Some(copy)
+    }
+
+    /// A pushed `CURL *`, which the library made a copy of `parent`'s,
+    /// given a `CURLOPT_STDERR` file of its own, as a copy is.
+    pub(crate) fn stderr_from(self, req: &mut Request, parent: EasyId) {
+        if let Some(Reopened(stderr)) = parent.with(req, None, |handle| handle.stderr_again()) {
+            self.point_stderr(req, stderr);
+        }
     }
 
     /// The pushed `CURL *` accepted: the multi owns it from here, as any.
@@ -393,92 +535,108 @@ impl EasyId {
     /// defaults php sets, `cainfo` where one is configured, and
     /// `CURLOPT_NOSIGNAL` as php's ZTS build sets it, since requests here
     /// are served on threads.
-    pub(crate) fn defaults(self, req: &mut Request, cainfo: Option<&[u8]>) {
-        self.with(req, (), |handle| {
-            handle.set_long(c::CURLOPT_NOPROGRESS, 1);
-            handle.set_long(c::CURLOPT_VERBOSE, 0);
-            handle.point();
-            let raw = handle.raw();
-            let write: sys::curl_write_callback = write_body;
-            let read: sys::curl_read_callback = read_body;
-            let header: sys::curl_write_callback = write_header;
-            // SAFETY: a live handle and the trampolines, which take the tag
-            // `point` set as their data.
-            unsafe { sys::curl_easy_setopt(raw, opt(c::CURLOPT_WRITEFUNCTION), write) };
-            // SAFETY: as above.
-            unsafe { sys::curl_easy_setopt(raw, opt(c::CURLOPT_READFUNCTION), read) };
-            // SAFETY: as above.
-            unsafe { sys::curl_easy_setopt(raw, opt(c::CURLOPT_HEADERFUNCTION), header) };
-            handle.set_long(c::CURLOPT_DNS_CACHE_TIMEOUT, 120);
-            handle.set_long(c::CURLOPT_MAXREDIRS, 20);
-            if let Some(cainfo) = cainfo {
-                handle.set_str(c::CURLOPT_CAINFO, Some(cainfo));
-            }
-            handle.set_long(c::CURLOPT_NOSIGNAL, 1);
-        });
+    pub(crate) fn defaults(self, req: &mut Request, cainfo: Option<&[u8]>) -> Option<Thrown> {
+        self.call(req, (), |live| live.defaults(cainfo)).1
     }
 
     /// `curl_easy_setopt(ch->cp, option, (long) value)`.
-    pub(crate) fn set_long(self, req: &mut Request, option: i64, value: i64) -> i32 {
-        self.with(req, GONE, |handle| handle.set_long(option, value))
+    pub(crate) fn set_long(self, req: &mut Request, option: i64, value: i64) -> Called {
+        self.call(req, GONE, |live| live.set_long(option, value))
     }
 
     /// `curl_easy_setopt(ch->cp, option, (curl_off_t) value)`.
-    pub(crate) fn set_off(self, req: &mut Request, option: i64, value: i64) -> i32 {
-        self.with(req, GONE, |handle| {
-            // SAFETY: a live handle and an option the library reads as a
-            // `curl_off_t`.
-            code(unsafe { sys::curl_easy_setopt(handle.raw(), opt(option), value) })
-        })
+    pub(crate) fn set_off(self, req: &mut Request, option: i64, value: i64) -> Called {
+        self.call(req, GONE, |live| live.set_off(option, value))
     }
 
     /// `curl_easy_setopt(ch->cp, option, str)`, `NULL` for `None`; the
     /// library copies the string.
-    pub(crate) fn set_str(self, req: &mut Request, option: i64, value: Option<&[u8]>) -> i32 {
-        self.with(req, GONE, |handle| handle.set_str(option, value))
+    pub(crate) fn set_str(self, req: &mut Request, option: i64, value: Option<&[u8]>) -> Called {
+        self.call(req, GONE, |live| live.set_str(option, value))
     }
 
     /// A blob option under `CURL_BLOB_COPY`.
-    pub(crate) fn set_blob(self, req: &mut Request, option: i64, value: &[u8]) -> i32 {
-        self.with(req, GONE, |handle| {
-            let mut blob = sys::curl_blob {
-                data: value.as_ptr().cast_mut().cast(),
-                len: value.len(),
-                flags: 1,
-            };
-            // SAFETY: a live handle and a blob the library copies before the
-            // call returns.
-            code(unsafe { sys::curl_easy_setopt(handle.raw(), opt(option), &raw mut blob) })
-        })
+    pub(crate) fn set_blob(self, req: &mut Request, option: i64, value: &[u8]) -> Called {
+        self.call(req, GONE, |live| live.set_blob(option, value))
     }
 
     /// `CURLOPT_POSTFIELDSIZE` then `CURLOPT_COPYPOSTFIELDS`.
-    pub(crate) fn set_post_fields(self, req: &mut Request, body: &[u8]) -> i32 {
-        self.with(req, GONE, |handle| {
-            let size = i64::try_from(body.len()).unwrap_or(i64::MAX);
-            handle.set_long(sys::CURLOPT_POSTFIELDSIZE.into(), size);
-            // SAFETY: a live handle and `len` bytes the library copies; the
-            // size set first says how many.
-            code(unsafe {
-                sys::curl_easy_setopt(
-                    handle.raw(),
-                    sys::CURLOPT_COPYPOSTFIELDS,
-                    body.as_ptr().cast::<c_char>(),
-                )
-            })
-        })
+    pub(crate) fn set_post_fields(self, req: &mut Request, body: &[u8]) -> Called {
+        self.call(req, GONE, |live| live.set_post_fields(body))
     }
 
     /// A list option: the list the library is pointed at, held by the
-    /// `CURL *` in place of the one the option held.
-    pub(crate) fn set_slist(self, req: &mut Request, option: i64, list: Option<Slist>) -> i32 {
-        self.with(req, GONE, |handle| handle.set_slist(option, list))
+    /// `CURL *` in place of the one the option held, which is let go of
+    /// once the call is over ([`Tag::let_go`]).
+    pub(crate) fn set_slist(self, req: &mut Request, option: i64, list: Option<Slist>) -> Called {
+        let Some(session) = self.with(req, None, |handle| Some(handle.tag().session.clone()))
+        else {
+            return (GONE, None);
+        };
+        let raw = list
+            .as_ref()
+            .map_or(ptr::null_mut(), |list| list.0.as_ptr());
+        let (code, thrown) = self.call(req, GONE, |live| live.set_ptr(option, raw.cast()));
+        let Some(handle) = req.memory_mut().foreign(self.0) else {
+            // Cleaned up as the call's hold ended; a copy made meanwhile
+            // may still point at the list.
+            session.keep(list.into_iter().collect(), Vec::new());
+            return (code, thrown);
+        };
+        let tag = handle.tag_mut();
+        let (old, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut tag.slists)
+            .into_iter()
+            .partition(|(held, _)| *held == option);
+        tag.slists = kept;
+        if let Some(list) = list {
+            tag.slists.push((option, list));
+        }
+        let old = old.into_iter().map(|(_, list)| list).collect();
+        tag.let_go(old, Vec::new());
+        (code, thrown)
     }
 
     /// `CURLOPT_STDERR`: the file the library writes its verbose lines
-    /// to, the process's `stderr` for `None`.
-    pub(crate) fn set_stderr(self, req: &mut Request, file: Option<CFile>) -> i32 {
-        self.with(req, GONE, |handle| handle.set_stderr(file))
+    /// to, what php's cast makes of the stream and the fd
+    /// [`Cast::Stdio`](php_ext::request::Cast::Stdio) answered for it
+    /// ([`CFile::of`]), the process's `stderr` for `None`.
+    pub(crate) fn set_stderr(
+        self,
+        req: &mut Request,
+        to: Option<(Stream, Option<RawFd>)>,
+    ) -> Called {
+        let Some(session) = self.with(req, None, |handle| Some(handle.tag().session.clone()))
+        else {
+            return (GONE, None);
+        };
+        let file = to.and_then(|(stream, fd)| CFile::of(&session, stream, fd));
+        self.point_stderr(req, file)
+    }
+
+    /// `CURLOPT_STDERR` at `file`, held in place of the one it held,
+    /// which is let go of once the call is over, as
+    /// [`Session::let_file_go`] says.
+    fn point_stderr(self, req: &mut Request, file: Option<CFile>) -> Called {
+        let raw = file.as_ref().map_or(ptr::null_mut(), CFile::as_ptr);
+        let (code, thrown) = self.call(req, GONE, |live| {
+            live.set_ptr(c::CURLOPT_STDERR, raw.cast())
+        });
+        if let Some(handle) = req.memory_mut().foreign(self.0) {
+            let tag = handle.tag_mut();
+            if let Some(old) = std::mem::replace(&mut tag.stderr, file) {
+                tag.session.let_file_go(old);
+            }
+        }
+        (code, thrown)
+    }
+
+    /// The `CURLOPT_STDERR` stream's value let go of as
+    /// [`Session::let_stream_go`] says, or now where the `CURL *` is gone.
+    pub(crate) fn let_stream_go(self, req: &mut Request, value: Owner<Value>) {
+        match self.with(req, None, |handle| Some(handle.tag().session.clone())) {
+            Some(session) => session.let_stream_go(req, value),
+            None => value.give_up(req),
+        }
     }
 
     /// The `CURLOPT_STDERR` file, flushed, as `php_stream_flush` flushes
@@ -493,73 +651,46 @@ impl EasyId {
 
     /// `CURLOPT_SHARE` at `share`, which the `CURL *` holds across a
     /// transfer, or counts, while it points at it.
-    pub(crate) fn set_share(self, req: &mut Request, share: ShareRef) -> i32 {
+    pub(crate) fn set_share(self, req: &mut Request, share: ShareRef) -> Called {
         let raw = match &share {
             ShareRef::Request(id) => id.raw(req),
             ShareRef::Persistent(persistent) => Some(persistent.raw()),
         };
         let Some(raw) = raw else {
-            return GONE;
+            return (GONE, None);
         };
-        self.with(req, GONE, |handle| {
-            let code = handle.set_ptr(c::CURLOPT_SHARE, raw.cast());
+        let called = self.call(req, GONE, |live| live.set_ptr(c::CURLOPT_SHARE, raw.cast()));
+        if let Some(handle) = req.memory_mut().foreign(self.0) {
             handle.tag_mut().share = Some(share);
-            code
-        })
+        }
+        called
     }
 
     /// A hook's `*FUNCTION` pointed at its trampoline and its data at the
     /// tag, as `HANDLE_CURL_OPTION_CALLABLE` does whatever the callable.
-    pub(crate) fn set_hook(self, req: &mut Request, hook: Hook) {
-        self.with(req, (), |handle| {
-            let raw = handle.raw();
-            match hook {
-                Hook::Progress => {
-                    let f: sys::curl_progress_callback = progress;
-                    // SAFETY: a live handle and the trampoline for the option.
-                    unsafe { sys::curl_easy_setopt(raw, opt(c::CURLOPT_PROGRESSFUNCTION), f) };
-                }
-                Hook::Xferinfo => {
-                    let f: sys::curl_xferinfo_callback = xferinfo;
-                    // SAFETY: as above.
-                    unsafe { sys::curl_easy_setopt(raw, opt(c::CURLOPT_XFERINFOFUNCTION), f) };
-                }
-                Hook::Fnmatch => {
-                    let f: sys::curl_fnmatch_callback = fnmatch;
-                    // SAFETY: as above.
-                    unsafe { sys::curl_easy_setopt(raw, opt(c::CURLOPT_FNMATCH_FUNCTION), f) };
-                }
-                Hook::Debug => set_debug(handle, true),
-                Hook::Prereq => {
-                    let f: sys::curl_prereq_callback = prereq;
-                    // SAFETY: as above.
-                    unsafe { sys::curl_easy_setopt(raw, opt(c::CURLOPT_PREREQFUNCTION), f) };
-                }
-                Hook::SshHostkey => {
-                    let f: sys::curl_sshhostkeycallback = ssh_hostkey;
-                    // SAFETY: as above.
-                    unsafe { sys::curl_easy_setopt(raw, opt(c::CURLOPT_SSH_HOSTKEYFUNCTION), f) };
-                }
-            }
-            handle.point();
-        });
+    pub(crate) fn set_hook(self, req: &mut Request, hook: Hook) -> Option<Thrown> {
+        self.call(req, (), |live| live.set_hook(hook)).1
     }
 
     /// `CURLOPT_DEBUGFUNCTION` at `curl_debug`, or at nothing.
-    pub(crate) fn set_debug(self, req: &mut Request, on: bool) {
-        self.with(req, (), |handle| set_debug(handle, on));
+    pub(crate) fn set_debug(self, req: &mut Request, on: bool) -> Option<Thrown> {
+        self.call(req, (), |live| live.set_debug(on)).1
     }
 
-    /// `f`, a call into the library that serves the callbacks, over the
-    /// `CURL *` held with the share it points at ([`Memory::holding`]),
+    /// `f`, a call into the library that may call back, over the `CURL *`
+    /// as [`Live`]: held with the share it points at ([`Memory::holding`]),
     /// so a callback that frees either's object leaves the cleanup to the
-    /// call's end, with no request lent ([`Session::holding`]); the
-    /// request reachable by the callbacks meanwhile.
-    fn transfer(
+    /// call's end, with no request lent ([`Session::holding`]), and the
+    /// request lent to the callbacks meanwhile ([`Session::enter`]), what
+    /// one threw handed back beside `f`'s answer, `gone` where the owner
+    /// gave the `CURL *` up. The one way the binding calls the library
+    /// with a `CURL *` that can call back.
+    fn call<R>(
         self,
         req: &mut Request,
-        f: impl FnOnce(*mut sys::CURL) -> i32,
-    ) -> (i32, Option<Thrown>) {
+        gone: R,
+        f: impl for<'h> FnOnce(Live<'h>) -> R,
+    ) -> (R, Option<Thrown>) {
         let Some((session, share)) = self.with(req, None, |handle| {
             let share = match handle.tag().share {
                 Some(ShareRef::Request(id)) => Some(id.0),
@@ -567,48 +698,69 @@ impl EasyId {
             };
             Some((handle.tag().session.clone(), share))
         }) else {
-            return (GONE, None);
+            return (gone, None);
         };
         let held = session.holding(req, self.0, |req, held| {
-            let raw = held.get(req)?.raw();
-            let mut body = Some(|req: &mut Request| session.enter(req, || f(raw)));
+            let handle = held.get(req)?;
+            let live = Live {
+                raw: handle.raw,
+                tag: handle.tag,
+                span: PhantomData,
+            };
+            let mut body = Some(|req: &mut Request| session.enter(req, || f(live)));
             let ids: &[ForeignId<ShareHandle>] = share.as_slice();
             holding_all(req, ids, &mut body)
         });
-        held.flatten().unwrap_or((GONE, None))
+        match held.flatten() {
+            Some(called) => called,
+            None => (gone, None),
+        }
     }
 
     /// `curl_easy_perform`, the request reachable by the callbacks. The
     /// transfer's waits are libcurl's and lend nothing (#2595, `ffi`'s
     /// *Waits*).
-    pub(crate) fn perform(self, req: &mut Request) -> (i32, Option<Thrown>) {
-        // SAFETY: a handle held for the call; its callbacks find the
-        // request `enter` leaves.
-        self.transfer(req, |raw| code(unsafe { sys::curl_easy_perform(raw) }))
+    pub(crate) fn perform(self, req: &mut Request) -> Called {
+        self.call(req, GONE, |live| {
+            // SAFETY: a handle held for the call; its callbacks find the
+            // request `enter` leaves.
+            code(unsafe { sys::curl_easy_perform(live.raw()) })
+        })
     }
 
     /// `curl_easy_pause`, which may deliver what was held back.
-    pub(crate) fn pause(self, req: &mut Request, bitmask: i64) -> (i32, Option<Thrown>) {
+    pub(crate) fn pause(self, req: &mut Request, bitmask: i64) -> Called {
         #[allow(clippy::cast_possible_truncation)]
         let bitmask = bitmask as c_int;
-        self.transfer(req, |raw| {
+        self.call(req, GONE, |live| {
             // SAFETY: as in `perform`.
-            code(unsafe { sys::curl_easy_pause(raw, bitmask) })
+            code(unsafe { sys::curl_easy_pause(live.raw(), bitmask) })
         })
     }
 
     /// `curl_easy_upkeep`.
-    pub(crate) fn upkeep(self, req: &mut Request) -> (i32, Option<Thrown>) {
-        // SAFETY: as in `perform`.
-        self.transfer(req, |raw| code(unsafe { sys::curl_easy_upkeep(raw) }))
+    pub(crate) fn upkeep(self, req: &mut Request) -> Called {
+        self.call(req, GONE, |live| {
+            // SAFETY: as in `perform`.
+            code(unsafe { sys::curl_easy_upkeep(live.raw()) })
+        })
     }
 
     /// `curl_easy_reset`, the defaults to be laid again by the caller.
-    pub(crate) fn reset(self, req: &mut Request) {
-        self.with(req, (), |handle| {
-            // SAFETY: a live handle.
-            unsafe { sys::curl_easy_reset(handle.raw()) };
-        });
+    /// The library frees its copy of a MIME tree there, whose file parts'
+    /// `free_cb` closes what they opened.
+    pub(crate) fn reset(self, req: &mut Request) -> Option<Thrown> {
+        // SAFETY: a handle held for the call.
+        let ((), thrown) = self.call(req, (), |live| unsafe { sys::curl_easy_reset(live.raw()) });
+        // The library writes to `stderr` again, and a copy made from here
+        // on must not open the file again.
+        if let Some(handle) = req.memory_mut().foreign(self.0) {
+            let tag = handle.tag_mut();
+            if let Some(old) = tag.stderr.take() {
+                tag.session.let_file_go(old);
+            }
+        }
+        thrown
     }
 
     /// The error buffer's text up to its NUL.
@@ -665,57 +817,68 @@ impl EasyId {
         self.with(req, None, |handle| info_of(handle.raw(), info))
     }
 
-    /// `curl_mime_init(ch->cp)` filled by `fill`, then, as `fill`
-    /// answers, pointed at by `CURLOPT_MIMEPOST` ([`EasyId::set_mime`])
-    /// or freed with the request lent, so its file parts close what they
-    /// opened (`out_mime`). The tree never leaves this call, so no way
-    /// out of `fill` leaves it standing. `None` where the library made no
-    /// tree; beside where the tree went, what its set or its free threw.
+    /// `curl_mime_init(ch->cp)` filled by `fill`, then, where `fill`
+    /// answers that the walk reached its end with no error, set in place
+    /// of the trees the `CURL *` held ([`EasyId::set_mime`]), and freed
+    /// otherwise (`out_mime`). Each free runs under what stands in
+    /// `pending` ([`Mime::let_go`]), and what a free or the set threw is
+    /// left there. The tree never leaves this call, so no way out of
+    /// `fill` leaves it standing. `None` where the library made no tree.
     pub(crate) fn post_form(
         self,
         req: &mut Request,
-        fill: impl FnOnce(&mut Request, &mut MimeBuilder) -> bool,
-    ) -> Option<(Posted, Option<Thrown>)> {
-        let mut mime = self.mime(req)?;
-        if fill(req, &mut mime) {
-            let (code, thrown) = self.set_mime(req, mime.mime);
-            return Some((Posted::Set(code), thrown));
+        pending: &mut Pending,
+        fill: impl FnOnce(&mut Request, &mut MimeBuilder, &mut Pending) -> bool,
+    ) -> Option<Posted> {
+        let mut built = self.mime(req)?;
+        if fill(req, &mut built, pending) {
+            return Some(self.set_mime(req, built.mime, pending));
         }
-        Some((Posted::Freed, mime.discard(req)))
+        built.mime.let_go(req, pending);
+        Some(Posted::Freed)
     }
 
-    /// A MIME tree made on this `CURL *` and pointed at by
-    /// `CURLOPT_MIMEPOST`, held by the `CURL *` in place of the ones it
-    /// held; the code is the library's.
-    fn set_mime(self, req: &mut Request, mime: Mime) -> (i32, Option<Thrown>) {
+    /// The trees the `CURL *` held let go of, then `CURLOPT_MIMEPOST`
+    /// pointed at `mime`, which the `CURL *` holds in their place: php's
+    /// `zend_llist_clean(&ch->to_free->post)` before the set, skipped
+    /// where a copy may still point at them (`(*ch->clone) == 1`), whose
+    /// trees are kept to the link's end. The frees and the set are made under
+    /// what stands in `pending`, an `exit` among it as php's unwind exit
+    /// stands; where a free leaves a fatal there, the set is not made and
+    /// `mime` is freed, as `zend_bailout` leaves before it.
+    fn set_mime(self, req: &mut Request, mime: Mime, pending: &mut Pending) -> Posted {
+        let Some(handle) = req.memory_mut().foreign(self.0) else {
+            mime.let_go(req, pending);
+            return Posted::Set(GONE);
+        };
+        let tag = handle.tag_mut();
+        let mut old = std::mem::take(&mut tag.mimes);
+        if tag.copied {
+            tag.session.keep(Vec::new(), std::mem::take(&mut old));
+        }
+        for tree in old {
+            tree.let_go(req, pending);
+        }
         let tree = mime.raw.as_ptr();
-        let Some((raw, session)) = self.with(req, None, |handle| {
-            Some((handle.raw(), handle.tag().session.clone()))
-        }) else {
-            return (GONE, mime.free(req));
-        };
-        let (code, thrown) = session.enter(req, || {
-            // SAFETY: a live handle and a tree that outlives the pointer,
-            // held below; replacing the tree the handle had may free a
-            // copy whose parts call back.
-            code(unsafe { sys::curl_easy_setopt(raw, sys::CURLOPT_MIMEPOST, tree) })
+        // Replacing the tree a copy of a `CURL *` points at frees the
+        // library's copy of it, whose parts call back.
+        let set = pending.step(req, |req, _| {
+            self.call(req, GONE, |live| {
+                live.set_ptr(sys::CURLOPT_MIMEPOST.into(), tree.cast())
+            })
         });
-        let old = match req.memory_mut().foreign(self.0) {
-            Some(handle) => {
-                let tag = handle.tag_mut();
-                let old = std::mem::take(&mut tag.mimes);
-                tag.mimes.push(mime);
-                if tag.copied {
-                    tag.session.keep(Vec::new(), old);
-                    Vec::new()
-                } else {
-                    old
-                }
-            }
-            None => vec![mime],
+        let Some((code, thrown)) = set else {
+            mime.let_go(req, pending);
+            return Posted::Freed;
         };
-        let ((), dropped) = session.enter(req, || drop(old));
-        (code, thrown.or(dropped))
+        if let Some(thrown) = thrown {
+            pending.park(req, thrown);
+        }
+        match req.memory_mut().foreign(self.0) {
+            Some(handle) => handle.tag_mut().mimes.push(mime),
+            None => mime.let_go(req, pending),
+        }
+        Posted::Set(code)
     }
 
     /// `curl_mime_init(ch->cp)`, `None` where the library made none.
@@ -733,15 +896,6 @@ impl EasyId {
             })
         })
     }
-}
-
-/// `CURLOPT_DEBUGFUNCTION` at `curl_debug`, or at nothing.
-fn set_debug(handle: &Handle, on: bool) {
-    let f: Option<sys::curl_debug_callback> = if on { Some(debug) } else { None };
-    // SAFETY: a live handle and the trampoline, or null.
-    unsafe { sys::curl_easy_setopt(handle.raw(), opt(c::CURLOPT_DEBUGFUNCTION), f) };
-    let data = if on { arg(handle.tag) } else { ptr::null_mut() };
-    handle.set_ptr(sys::CURLOPT_DEBUGDATA.into(), data);
 }
 
 /// `curl_easy_getinfo(raw, info, &out)` read as the type the number
@@ -835,6 +989,27 @@ impl Mime {
         let link = self.link;
         let ((), thrown) = link.enter(req, || drop(self));
         thrown
+    }
+
+    /// The tree freed ([`Mime::free`]) as php frees one, under what
+    /// stands in `pending` ([`Pending::release`]), so a file part's
+    /// `free_cb` closing a stream through a wrapper calls nothing while a
+    /// throwable stands, as `zend_call_function` returns at once under
+    /// `EG(exception)`. What a callback the free served threw is left
+    /// pending, and so is what a wrapper's `stream_close` threw as a file
+    /// part's stream closed, which the stream layer kept
+    /// ([`Pending::release`]), so it stands over the steps after the free.
+    fn let_go(self, req: &mut Request, pending: &mut Pending) {
+        let mut tree = Some(self);
+        let mut threw = None;
+        pending.release(req, |req| {
+            if let Some(tree) = tree.take() {
+                threw = tree.free(req);
+            }
+        });
+        if let Some(thrown) = threw {
+            pending.park(req, thrown);
+        }
     }
 
     /// Each file part's source closed, as its `free_cb` closes it, the
@@ -968,14 +1143,6 @@ impl MimeBuilder {
         } else {
             rc
         }))
-    }
-
-    /// The tree given up, freed with the request reachable so its file
-    /// parts close what they opened.
-    fn discard(self, req: &mut Request) -> Option<Thrown> {
-        let session = self.session.clone();
-        let ((), thrown) = session.enter(req, || drop(self));
-        thrown
     }
 }
 

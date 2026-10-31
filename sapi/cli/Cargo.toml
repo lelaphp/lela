@@ -31,6 +31,14 @@ path = "src/linked.rs"
 required-features = ["linked"]
 
 [features]
+# The compiled tier in every build that keeps the default features, the
+# release build among them: the bundle's `jit`, which binds `php_jit::Jit`
+# on the four targets its row names, with `opcache.jit` defaulting to
+# `disable` as php's does, so a request traces only where `opcache.jit`
+# asks, and tracing is experimental (ADR-0017, #3676). Without the default
+# features the host is built with no tier, the build G1 holds the door
+# cost against (`xtask bench`'s `no-jit-feature` arm).
+default = ["php_bundle/jit"]
 # `php-linked`: the bundle's `linked` set, this host's own and the two
 # extensions no host links, so every extension feature (harness §8,
 # revision 84; #3081).

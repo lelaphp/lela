@@ -1,0 +1,66 @@
+fib:
+     ; (lines=18, args=1, vars=1, tmps=6, ssa_vars=12)
+     ; (JIT)
+     ; fib.php:14-20
+     ; return  [long]
+     ; #0.CV0($n) NOVAL [undef]
+BB0:
+     ; start lines=[0-0]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 #1.CV0($n) [long] RANGE[MIN..MAX] = RECV 1
+
+BB1:
+     ; recv follow entry lines=[1-2]
+     ; from=(BB0)
+     ; to=(BB3, BB2)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB2, BB3)
+0001 #2.T1 [bool] = IS_SMALLER #1.CV0($n) [long] RANGE[MIN..MAX] int(2)
+0002 JMPZ #2.T1 [bool] BB3
+
+BB2:
+     ; follow exit lines=[3-4]
+     ; from=(BB1)
+     ; idom=BB1
+     ; level=2
+     #4.CV0($n) [long] RANGE[MIN..1] = Pi<BB1>(#1.CV0($n) [long] RANGE[MIN..MAX] & RANGE[-- .. 1])
+0003 VERIFY_RETURN_TYPE #4.CV0($n) [long] RANGE[MIN..1] -> #5.CV0($n) [long]
+0004 RETURN #5.CV0($n) [long]
+
+BB3:
+     ; target lines=[5-8]
+     ; from=(BB1)
+     ; to=(BB4)
+     ; idom=BB1
+     ; level=2
+     ; children=(BB4)
+     #3.CV0($n) [long] RANGE[2..MAX] = Pi<BB1>(#1.CV0($n) [long] RANGE[MIN..MAX] & RANGE[2 .. ++])
+0005 INIT_FCALL_BY_NAME 1 string("fib")
+0006 #6.T2 [long] RANGE[1..9223372036854775806] = SUB #3.CV0($n) [long] RANGE[2..MAX] int(1)
+0007 SEND_VAL_EX #6.T2 [long] RANGE[1..9223372036854775806] 1
+0008 #7.V3 [ref, rc1, rcn, any] = DO_FCALL_BY_NAME
+
+BB4:
+     ; follow entry lines=[9-12]
+     ; from=(BB3)
+     ; to=(BB5)
+     ; idom=BB3
+     ; level=3
+     ; children=(BB5)
+0009 INIT_FCALL_BY_NAME 1 string("fib")
+0010 #8.T4 [long] RANGE[0..9223372036854775805] = SUB #3.CV0($n) [long] RANGE[2..MAX] int(2)
+0011 SEND_VAL_EX #8.T4 [long] RANGE[0..9223372036854775805] 1
+0012 #9.V5 [ref, rc1, rcn, any] = DO_FCALL_BY_NAME
+
+BB5:
+     ; follow exit entry lines=[13-15]
+     ; from=(BB4)
+     ; idom=BB4
+     ; level=4
+0013 #10.T6 [rc1, false, long, double, array of [any, ref], object] = ADD #7.V3 [ref, rc1, rcn, any] #9.V5 [ref, rc1, rcn, any]
+0014 VERIFY_RETURN_TYPE #10.T6 [rc1, false, long, double, array of [any, ref], object] -> #11.T6 [long]
+0015 RETURN #11.T6 [long]
+

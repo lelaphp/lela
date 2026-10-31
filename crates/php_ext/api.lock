@@ -527,6 +527,7 @@ raising::pending
 raising::raise
 raising::raise_at
 raising::raise_while_pending
+raising::set_aside
 raising::startup
 raising::throw
 raising::throw_at
@@ -717,6 +718,7 @@ request::Frames::forbid_dynamic_call
 request::Frames::frameless
 request::Frames::of
 request::Frames::op_array
+request::Frames::reserved
 request::Frames::return_value_used
 request::Frames::scope
 request::Frames::set_caller_var
@@ -1092,6 +1094,7 @@ request::Symbols::method_row
 request::Symbols::method_rows
 request::Symbols::native_static_trampoline
 request::Symbols::native_trampoline
+request::Symbols::native_trampoline_reserving
 request::Symbols::property_info_row
 request::Symbols::property_info_rows
 request::Symbols::register_constant
@@ -1158,7 +1161,7 @@ syntax::Arena
 syntax::Arena::concat
 syntax::Arena::copy
 syntax::Arena::lowercase
-syntax::Arena::new
+syntax::Arena::parsed
 syntax::Arena::reset
 syntax::Arena::vec
 syntax::Diagnostic
@@ -1213,6 +1216,7 @@ test::Engine::dump_before_optimizer
 test::Engine::frameless
 test::Engine::has_shell
 test::Engine::highlight
+test::Engine::ini_files
 test::Engine::ini_get
 test::Engine::ini_value
 test::Engine::lint

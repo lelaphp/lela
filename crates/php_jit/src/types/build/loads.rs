@@ -23,6 +23,7 @@ use php_heap::ZvalType;
 use php_unit::{Opcode, OperandKind, Opline};
 
 use super::{Builder, Placed};
+use crate::analysis::Defined;
 use crate::types::lattice::{self, Types};
 use crate::types::opcodes::{ISEMPTY, MAX_ARG_FLAG_NUM};
 use crate::types::{Check, Frame, GuardAt, Line, Op, OpId, Operand, Slot, ValueId};
@@ -199,7 +200,7 @@ impl Builder<'_> {
 
     /// Whether `line` writes `slot` anew in php's trace SSA: an operand
     /// in it that it [`Builder::defines`], or its `out` slot.
-    fn writes_anew(&self, line: &Line, slot: Slot) -> bool {
+    pub(super) fn writes_anew(&self, line: &Line, slot: Slot) -> bool {
         let in_slot = |operand: Operand| matches!(operand, Operand::Value(held) if self.val(held).slot == slot);
         let [op1, op2, data] = self.defines(line);
         (op1 && in_slot(line.op1))
@@ -209,13 +210,13 @@ impl Builder<'_> {
     }
 
     /// Whether the use of `value` at `part` of `line` is its last in a
-    /// register, `ZREG_LAST_USE` (`zend_jit_trace_use_var` and the
-    /// operands' kinds in `zend_jit_trace_allocate_registers`): the op
-    /// writes the variable anew, or no use follows, or the next writes
-    /// over it without reading it, where php asks its function-level SSA
-    /// (`zend_ssa_is_last_use`), which this tier does not keep (#3149);
-    /// and a temporary is read once, but where a `foreach`, a `switch`
-    /// or a rope keeps it beyond the opline.
+    /// register, `ZREG_LAST_USE`, as `zend_jit_trace_use_var` marks it
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:2828-2856`) on an interval
+    /// loaded at entry: the op writes the variable anew, or no use
+    /// follows; where the next use writes over it without reading it,
+    /// php's analysis of the op array says (`zend_ssa_is_last_use`,
+    /// [`crate::analysis::Analysed::is_last_use`]), and no mark where it
+    /// has no SSA.
     fn last_use(&self, line: &Line, part: Part, value: ValueId, next: Option<Use>) -> bool {
         let at = |operand: Operand| operand == Operand::Value(value);
         let [op1, op2, data] = self.defines(line);
@@ -223,34 +224,20 @@ impl Builder<'_> {
             Part::Opline => (at(line.op1) && op1) || (at(line.op2) && op2),
             Part::Data => data,
         };
-        if redefined || next.is_none_or(|next| self.no_val_at(next, value)) {
-            return true;
+        match next {
+            _ if redefined => return true,
+            None => return true,
+            Some(next) if !self.no_val_at(next, value) => return false,
+            Some(_) => {}
         }
-        if part == Part::Data {
-            return (self.opline_of_data(line))
-                .is_some_and(|data| data.op1_type != OperandKind::Cv);
-        }
-        let Some(op) = self.opline_of(line) else {
-            return false;
+        let (opline, which) = match part {
+            Part::Opline if at(line.op1) => (line.opline.0, Defined::Op1),
+            Part::Opline => (line.opline.0, Defined::Op2),
+            Part::Data => (line.opline.0 + 1, Defined::Op1),
         };
-        let kept = matches!(
-            line.opcode,
-            Opcode::Case
-                | Opcode::CaseStrict
-                | Opcode::SwitchLong
-                | Opcode::Match
-                | Opcode::FetchListR
-                | Opcode::CopyTmp
-                | Opcode::SwitchString
-                | Opcode::FeFetchR
-                | Opcode::FeFetchRw
-                | Opcode::FetchListW
-                | Opcode::VerifyReturnType
-                | Opcode::BindLexical
-                | Opcode::RopeAdd
-        );
-        (at(line.op1) && op.op1_type != OperandKind::Cv && !kept)
-            || (at(line.op2) && op.op2_type != OperandKind::Cv)
+        let func = self.frames[usize::from(line.frame.0)].func;
+        let code = self.meta(line.frame).code;
+        (self.analysed.is_last_use(func, code, opline, which)).unwrap_or(false)
     }
 
     /// The opline a line serves.

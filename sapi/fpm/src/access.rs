@@ -84,7 +84,7 @@ impl AccessLog {
 }
 
 /// What a line of the access log reads from the request besides its
-/// scoreboard slot.
+/// `scoreboard` slot.
 pub(crate) struct Request<'r> {
     pub(crate) pool: &'r BoardView,
     pub(crate) proc: &'r ProcView,

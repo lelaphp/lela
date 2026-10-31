@@ -1,0 +1,15 @@
+start loop
+root e5
+op e5 9 long long - taken
+op e5 4 - - - -
+init e2
+op e5 5 long - - -
+op e5 6 - - - -
+enter e2
+op e2 1 object#42 - - -
+op e2 2 long long - -
+op e2 3 long - - -
+back
+op e5 7 long long - -
+op e5 8 long - - -
+stop loop

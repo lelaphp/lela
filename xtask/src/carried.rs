@@ -5,8 +5,11 @@
 //! `php_bundle`, outside php's default `./configure`; it does not say which
 //! builds turn that feature on. Each building crate says so itself, in the
 //! `features` of its `php_bundle` dependency, most often by naming a set
-//! the bundle defines, `host` (#3081), and this module reads the
-//! declaration there and the set's members in the bundle and nowhere else,
+//! the bundle defines, `host` (#3081), or in its own `default` as
+//! `php_bundle/<feature>`, as each host turns the tier's `jit` on so that
+//! `--no-default-features` builds it without (#3676), and this module
+//! reads the declaration there and the set's members in the bundle and
+//! nowhere else,
 //! so no list in the harness is a second copy of either. A row with no
 //! `feature` is the bundle's default set, which every build carries.
 //!
@@ -83,23 +86,25 @@ impl Carried {
     }
 
     /// The features a crate's `Cargo.toml` turns on in its `php_bundle`
-    /// dependency.
+    /// dependency, and those its `default` names as `php_bundle/<feature>`
+    /// (#3676); a feature of its own it does not turn on by default is not
+    /// read, as `linked` is [`Carried::linked`]'s.
     pub(crate) fn declared(text: &str) -> Result<Carried> {
         let table: toml::Table = toml::from_str(text).context("not TOML")?;
         let bundle = table
             .get("dependencies")
             .and_then(|deps| deps.get(BUNDLE))
             .with_context(|| format!("no `{BUNDLE}` dependency"))?;
-        let features = bundle
-            .get("features")
-            .and_then(Value::as_array)
-            .map(|on| {
-                on.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let named = |on: Option<&Value>| -> Vec<String> {
+            let on = on.and_then(Value::as_array).into_iter().flatten();
+            on.filter_map(Value::as_str).map(str::to_owned).collect()
+        };
+        let mut features: BTreeSet<String> = named(bundle.get("features")).into_iter().collect();
+        let defaults = named(table.get("features").and_then(|own| own.get("default")));
+        features.extend(defaults.iter().filter_map(|entry| {
+            let feature = entry.strip_prefix(BUNDLE)?.strip_prefix('/')?;
+            Some(feature.to_owned())
+        }));
         Ok(Carried { features })
     }
 
@@ -192,6 +197,20 @@ mod tests {
         assert!(carried.carries(&Crate::named("ext/openssl").with_feature("openssl")));
         assert!(carried.carries(&Crate::named("ext/bz2").with_feature("bz2")));
         assert!(!carried.carries(&Crate::named("ext/curl").with_feature("curl")));
+    }
+
+    /// A feature of the bundle the crate's `default` turns on is carried,
+    /// and one only another of its own features turns on is not (#3676).
+    #[test]
+    fn a_build_carries_what_its_default_features_turn_on_in_the_bundle() {
+        let carried = Carried::declared(
+            "[features]\ndefault = [\"php_bundle/jit\"]\nlinked = [\"php_bundle/zend_test\"]\n\n\
+             [dependencies]\nphp_bundle = { path = \"x\", features = [\"bz2\"] }\n",
+        )
+        .unwrap();
+        assert_eq!(carried, Carried::turning_on(&["bz2", "jit"]));
+        assert!(carried.carries(&Crate::named("php_jit").with_feature("jit")));
+        assert!(!carried.carries(&Crate::named("ext/zend_test").with_feature("zend_test")));
     }
 
     #[test]

@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "until grep -qE \"^\\s*Finished|^error\" /private/tmp/claude-501/scratchpad/t2779b/build-base.log; do sleep 10; done; tail -2 /private/tmp/claude-501/scratchpad/t2779b/build-base.log", "description": "Wait for the base build (a seat, #3624)"}}

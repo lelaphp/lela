@@ -26,7 +26,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use php_engine::tier::{self, Epoch, Parked};
 
-use crate::lower::{Compiled, Linked};
+use crate::lower::{Compiled, Escapes, Linked};
 use crate::policy::{self, Claim, Compile, Mode, Outcome, Policy, State, TraceEvent};
 use crate::record::{self, Recorded, Start, Stop};
 use crate::table::{self, Table, TraceName, Unpublished};
@@ -136,13 +136,13 @@ impl Submitter {
 
     /// `job` through the [`pipeline`]: here, its lines added to `lines`,
     /// and what it settled the claim with, where the request has no
-    /// worker or its bits ask for a root's end lines
-    /// ([`policy::JitDebug::ends`]); or queued for the worker, which
+    /// worker or its bits ask for a line the compile writes
+    /// ([`policy::JitDebug::on_request`]); or queued for the worker, which
     /// writes no line, and none. Where the system refuses the worker a
     /// thread, the queue is served here.
     pub(crate) fn submit(&self, shared: &Shared, job: Job, lines: &mut Lines) -> Option<Outcome> {
         let threaded = match &self.0 {
-            Some(threaded) if !lines.debug().ends() => threaded,
+            Some(threaded) if !lines.debug().on_request() => threaded,
             _ => return Some(pipeline(shared, job, lines)),
         };
         threaded.queue.held().jobs.push_back(job);
@@ -266,11 +266,11 @@ pub(crate) fn pipeline(shared: &Shared, job: Job, lines: &mut Lines) -> Outcome 
     match &shared.backend {
         Some(backend) => pipeline_with(
             shared,
-            |ir, name, linked| backend.compile(ir, name, linked),
+            |ir, name, linked, escapes| backend.compile(ir, name, linked, escapes),
             job,
             lines,
         ),
-        None => pipeline_with(shared, |_, _, _| Err(no_backend()), job, lines),
+        None => pipeline_with(shared, |_, _, _, _| Err(no_backend()), job, lines),
     }
 }
 
@@ -278,7 +278,7 @@ pub(crate) fn pipeline(shared: &Shared, job: Job, lines: &mut Lines) -> Outcome 
 /// tests drive each stage's failure through.
 fn pipeline_with(
     shared: &Shared,
-    compile: impl Fn(&TraceIr, TraceName, Option<Linked>) -> Result<Compiled, Abort>,
+    compile: impl Fn(&TraceIr, TraceName, Option<Linked>, Option<Escapes>) -> Result<Compiled, Abort>,
     job: Job,
     lines: &mut Lines,
 ) -> Outcome {
@@ -297,7 +297,23 @@ fn pipeline_with(
             }
             let start = claim.start();
             catch_unwind(AssertUnwindSafe(|| {
-                published(&recorded, name, &compile, table, start)
+                // `zend_jit_trace_build_tssa` analyses the op arrays first.
+                let opt_level = shared.policy.start_setting().opt_level;
+                let (record, view) = (&recorded.record, &recorded.view);
+                let Some(analysed) =
+                    crate::analysis::build(record, view, table.analyses(), opt_level, lines)
+                else {
+                    return Outcome::Abort(Stop::CompilerError);
+                };
+                published(
+                    &recorded,
+                    &analysed,
+                    name,
+                    &compile,
+                    table,
+                    claim.epoch(),
+                    start,
+                )
             }))
             .unwrap_or(Outcome::Abort(Stop::CompilerError))
         }
@@ -338,7 +354,7 @@ fn pipeline_with(
 /// (`zend_jit_trace_setup_ret_counter`, `Z/ext/opcache/jit/zend_jit_trace.c:3404-3418`;
 /// `jit-design.md` §2.2, #3036).
 fn arm_landings(recorded: &Recorded, epoch: &Epoch, policy: &Policy) {
-    for (func, at) in record::landings(&recorded.record, &recorded.view) {
+    for (func, at) in record::landings(&recorded.record, &recorded.view, policy.folds()) {
         if let Some(word) = epoch.lay_landing(func, at) {
             policy::arm(word, policy);
         }
@@ -347,22 +363,26 @@ fn arm_landings(recorded: &Recorded, epoch: &Epoch, policy: &Policy) {
 
 /// The pipeline's middle: the record built through its view, the trace
 /// compiled under `name`, its link a jump to the trace it links to where
-/// `table` holds that trace's code (`jit-design.md` §4.3), and the code
-/// published into `table`, or the failure of the first stage that failed.
+/// `table` holds that trace's code (`jit-design.md` §4.3) and its escape
+/// read through the landing index of `epoch`, the table's (§4.9), and the
+/// code published into `table`, or the failure of the first stage that
+/// failed.
 fn published(
     recorded: &Recorded,
+    analysed: &crate::analysis::Analysed,
     name: TraceName,
-    compile: &impl Fn(&TraceIr, TraceName, Option<Linked>) -> Result<Compiled, Abort>,
+    compile: &impl Fn(&TraceIr, TraceName, Option<Linked>, Option<Escapes>) -> Result<Compiled, Abort>,
     table: &Table,
+    epoch: &Epoch,
     start: Start,
 ) -> Outcome {
-    let compiled = types::build(&recorded.record, &recorded.view).and_then(|ir| {
+    let compiled = types::build(&recorded.record, &recorded.view, analysed).and_then(|ir| {
         let link = match ir.end {
             End::Leave(end) => ir.exits.get(usize::from(end.0)).and_then(|exit| exit.link),
             End::Loop(_) | End::Return(_) => None,
         };
         let linked = link.and_then(|link| table.linked(link, start));
-        compile(&ir, name, linked)
+        compile(&ir, name, linked, Some(table.escapes(epoch)))
     });
     match compiled.map(|compiled| table.publish(compiled, start)) {
         Ok(Ok(trace)) => Outcome::Published(trace),

@@ -14,10 +14,10 @@ use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, StackSlot, Value};
 use php_heap::{Arr, ZvalType};
 use php_unit::Opcode;
 
-use super::{COUNTED, Emit, KIND, Kernel, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
+use super::{COUNTED, Emit, KIND, Kernel, Kind, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
 use crate::types::{
-    Abort, Check, Constant, ExitId, Fused, GuardAt, Imm, Layout, Leave, Line, OpId, Operand, Read,
-    Types, ValueId, cannot_raise,
+    Abort, Check, Constant, ExitId, Fused, GuardAt, Home, Imm, Layout, Leave, Line, OpId, Operand,
+    Read, Slot, Types, ValueId, cannot_raise,
 };
 
 /// Where a read goes on that finds no element ([`Emit::reached`]): the
@@ -248,11 +248,14 @@ impl Emit<'_> {
     /// `FETCH_DIM_IS`, the read an `isset()` chain, an `empty()` or a `??`
     /// makes, as php's `zend_jit_fetch_dim_read` compiles it over an array
     /// a variable or a temporary holds under `BP_VAR_IS`: the element
-    /// copied as `ZVAL_COPY_DEREF` copies it, and `null` where the array
-    /// has not got the key, or a packed array holds a hole there, with
-    /// nothing raised (`Z/ext/opcache/jit/zend_jit_ir.c:12101-12200`); a
-    /// temporary freed after, as the handler frees it, a destructor's throw
-    /// unwinding.
+    /// copied as `ZVAL_COPY_DEREF` copies it, or held to the type the next
+    /// opline holds it to ([`Emit::read_element`]), and `null` where the
+    /// array has not got the key, or a packed array holds a hole there,
+    /// with nothing raised (`Z/ext/opcache/jit/zend_jit_ir.c:12101-12200`),
+    /// leaving past the fetch through the opline's exit where its element
+    /// is held, php's `not_found_exit_addr` (`:12576-12610`), the one exit
+    /// `types` gives this opline; a temporary freed after, as the handler
+    /// frees it, a destructor's throw unwinding.
     ///
     /// A hash and a packed array read by `??` and in `isset()`'s chain, the
     /// key there and not, an element a reference and one `null`:
@@ -334,26 +337,174 @@ impl Emit<'_> {
     /// ```expect regime=jit-exit-fuzz process
     /// 1110 29
     /// ```
+    ///
+    /// An element the next fetch or test holds the type of, not found, a
+    /// reference and of another type, each leaving past the fetch, the
+    /// one not found with `null` in its slot, a temporary's freed where
+    /// it lands (revision 114), under force and where every guard fails
+    /// once:
+    ///
+    /// ```php
+    /// function f($h, $n) {
+    ///     $s = 0; $r = ['b' => 7];
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         if (isset($h['a']['b'])) { $s += 1; }
+    ///         $s += $h['a']['b'] ?? 100;
+    ///         $s += isset([$i => ['b' => 1]][$i % 2]['b']) ? 10 : 1000;
+    ///         if ($i == 3) { unset($h['a']); }
+    ///         if ($i == 5) { $h['a'] = &$r; }
+    ///         if ($i == 7) { $h['a'] = 5; }
+    ///     }
+    ///     return $s;
+    /// }
+    /// echo f(['a' => ['b' => 2]], 12), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 10648
+    /// ```
+    ///
+    /// ```php
+    /// function f($h, $n) {
+    ///     $s = 0; $r = ['b' => 7];
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         if (isset($h['a']['b'])) { $s += 1; }
+    ///         $s += $h['a']['b'] ?? 100;
+    ///         $s += isset([$i => ['b' => 1]][$i % 2]['b']) ? 10 : 1000;
+    ///         if ($i == 3) { unset($h['a']); }
+    ///         if ($i == 5) { $h['a'] = &$r; }
+    ///         if ($i == 7) { $h['a'] = 5; }
+    ///     }
+    ///     return $s;
+    /// }
+    /// echo f(['a' => ['b' => 2]], 12), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 10648
+    /// ```
     pub(super) fn fetch_is(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
-        let out = line
-            .out
-            .ok_or_else(|| mismatch("a fetch that writes nothing"))?;
-        let out = self.value(out)?.slot;
         let (missed, done) = (self.b.create_block(), self.b.create_block());
-        let element = self.reached(at, line, Missing::To(missed, &[]))?;
-        let element = self.deref(element);
-        let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
-        self.copy(element, info, out)?;
+        let out = self.read_element(at, line, Missing::To(missed, &[]))?;
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(missed);
         self.b.seal_block(missed);
         let (room, out_at) = self.place(out)?;
         let null = self.b.ins().iconst(I32, tag(ZvalType::Null));
         self.b.ins().store(trusted(), null, room, out_at + TYPE_AT);
-        self.b.ins().jump(done, &[]);
+        // Past the fetch with the `null`, where a guard holds the element
+        // to another type, as php's not-found exit leaves.
+        let (to, args) = match line.exit {
+            Some(exit) => self.guard_exit(exit)?,
+            None => (done, Vec::new()),
+        };
+        self.b.ins().jump(to, &args);
         self.b.switch_to_block(done);
         self.b.seal_block(done);
         self.free_temp(line, line.op1)
+    }
+
+    /// The element a read reaches ([`Emit::reached`]), on as `missing`
+    /// says where there is none, written to the slot the fetch writes:
+    /// copied as `ZVAL_COPY_DEREF` copies it ([`Emit::copied_element`]),
+    /// or held to its type by its one or two guards
+    /// ([`Emit::held_element`]). The slot it wrote.
+    fn read_element(&mut self, at: OpId, line: &Line, missing: Missing<'_>) -> Result<Slot, Abort> {
+        let out = line
+            .out
+            .ok_or_else(|| mismatch("a fetch that writes nothing"))?;
+        let element = self.reached(at, line, missing)?;
+        match self.within(at).as_slice() {
+            [] => self.copied_element(element, out)?,
+            [in_place] => self.held_element(*in_place, None, element, out)?,
+            [in_place, through] => self.held_element(*in_place, Some(*through), element, out)?,
+            _ => {
+                return Err(mismatch(
+                    "a fetch holds other guards than its element's one or two",
+                ));
+            }
+        }
+        Ok(self.value(out)?.slot)
+    }
+
+    /// An element no guard holds, at `element`, copied through the
+    /// reference it may be to the slot of `out`, as php's
+    /// `zend_jit_fetch_dim_read` copies one with no `MAY_BE_GUARD`
+    /// (`ZVAL_COPY_DEREF`, `Z/ext/opcache/jit/zend_jit_ir.c:12695-12704`).
+    ///
+    /// Its value is never one a register carries, so the slot is all it
+    /// writes. php's analysis types every read of an array's element as
+    /// what the array holds or `null` (`zend_array_element_type`,
+    /// `Z/Zend/Optimizer/zend_inference.c:2147-2151`, `php_ssa`'s
+    /// `element_type`), and `types` compiles a fetch inline only over an
+    /// array, so the types of one no guard holds are one scalar only where
+    /// they are `null` alone, which `types` keeps in a register that is a
+    /// constant and defines nothing. A long, a double or a boolean is kept
+    /// in a register only under the guard within the fetch that holds it
+    /// to the type the trace recorded, which [`Emit::held_element`]
+    /// defines. php comes to the same: it keeps a fetched element's
+    /// register under its `MAY_BE_GUARD` too
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:3051-3062`), but gives a
+    /// register to a long or a double alone (`zend_jit_var_supports_reg`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:17724-17728`), which an unguarded
+    /// fetch, typed with `null` beside what the array holds, never is.
+    /// Such a register here would be a fetch that wrote its slot alone,
+    /// #3665's defect, so it is refused as php's `COMPILER_ERROR`.
+    ///
+    /// Elements of an array of `null`s, by a long key and by a string, the
+    /// second through `??`, each kept in a register that is a constant:
+    ///
+    /// ```php
+    /// function f($n) {
+    ///     $z = [null, null]; $h = ['k' => null];
+    ///     for ($i = 0; $i < $n; $i++) { echo $z[$i & 1] === null ? "null" : "set", " ", $h['k'] ?? $i, "\n"; }
+    /// }
+    /// f(3);
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// null 0
+    /// null 1
+    /// null 2
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:6
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %s:4
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 2 f() %s:5
+    /// ---- TRACE 2 start (side trace 1/2) f() %s:5
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    /// ```
+    ///
+    /// The same beside the elements a guard holds, a long, a double and a
+    /// boolean, each read on the compiler's thread once its trace is
+    /// entered, none read wrong:
+    ///
+    /// ```php
+    /// function f($n) {
+    ///     $z = [null, null]; $h = ['k' => null]; $l = [0, 0, 0]; $d = ['x' => 0.0]; $b = [false, true]; $bad = 0;
+    ///     for ($i = 1; $i < $n; $i++) {
+    ///         $l[$i % 3] = $i; $d['x'] = $i * 0.5;
+    ///         if ($z[$i & 1] !== null || ($h['k'] ?? -1) !== -1 || $l[$i % 3] !== $i || $d['x'] !== $i * 0.5 || $b[$i & 1] !== (($i & 1) === 1)) { $bad++; }
+    ///     }
+    ///     return $bad;
+    /// }
+    /// echo f(200000), "\n";
+    /// ```
+    /// ```expect regime=jit-tracing process
+    /// 0
+    /// ```
+    fn copied_element(&mut self, element: Value, out: ValueId) -> Result<(), Abort> {
+        let held = self.value(out)?;
+        if held.home == Home::Register && Kind::of(held.types).is_some_and(Kind::carries) {
+            return Err(mismatch(
+                "an element no guard holds kept in a register that carries a value",
+            ));
+        }
+        let element = self.deref(element);
+        let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
+        self.copy(element, info, held.slot)
     }
 
     /// The element `key` names in the array `arr`, through `kernel`,
@@ -457,24 +608,7 @@ impl Emit<'_> {
         let exit = line
             .exit
             .ok_or_else(|| mismatch("a fetch that cannot leave"))?;
-        let out = line
-            .out
-            .ok_or_else(|| mismatch("a fetch that writes nothing"))?;
-        let element = self.reached(at, line, Missing::Exit(exit))?;
-        match self.within(at).as_slice() {
-            [] => {
-                let element = self.deref(element);
-                let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
-                let out_slot = self.value(out)?.slot;
-                self.copy(element, info, out_slot)?;
-            }
-            [in_place, through] => self.held_element([*in_place, *through], element, out)?,
-            _ => {
-                return Err(mismatch(
-                    "a fetch holds other guards than its element's two",
-                ));
-            }
-        }
+        self.read_element(at, line, Missing::Exit(exit))?;
         // `FREE_OP1`, as the interpreter takes it.
         self.free_temp(line, line.op1)
     }

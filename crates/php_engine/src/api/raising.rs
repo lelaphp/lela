@@ -230,6 +230,33 @@ pub fn while_pending<R>(
     req.while_pending(pending, step)
 }
 
+/// `step` taken with php's `EG(exception)` empty, what stood there, a
+/// throwable or an exit, set aside for it and put back after, as
+/// `pcntl_signal_dispatch` does at 8.5.12 around the signals' handlers
+/// (`Z/ext/pcntl/pcntl.c:1402-1415`, `:1452-1461`): the interrupt check
+/// after a native that threw serves the interrupt hooks with what it
+/// threw still pending, and `zend_call_function` calls nothing while a
+/// throwable stands (`Z/Zend/zend_execute_API.c:822`). Where the step
+/// threw, its throwable is what stands after, the one set aside chained
+/// onto the end of its `previous` chain and an exit set aside given up
+/// (`zend_exception_set_previous`), and it is the `Err`; otherwise what
+/// was set aside stands again. With nothing pending the step is taken as
+/// it is. pcntl's dispatch is the witness, in `ext/pcntl`.
+pub fn set_aside<R>(
+    req: &mut Request,
+    step: impl FnOnce(&mut Request) -> Result<R, Thrown>,
+) -> Result<R, Thrown> {
+    let Some(aside) = req.take_raised() else {
+        return step(req);
+    };
+    let taken = step(req);
+    if let Err(thrown) = &taken {
+        req.leave_pending(thrown);
+    }
+    req.raise_under(aside);
+    taken.map_err(|_| Thrown::of(req.take_pending_view()))
+}
+
 /// `zend_error` while php starts, before any request (`zend_startup`,
 /// `php_module_startup`, the `ZEND_INI_STAGE_STARTUP` rules of the ini
 /// entries): the message as given, at `Unknown` on line 0, and displayed

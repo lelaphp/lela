@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "cd ~/Projects/dax-php-worktrees/t2794 && until ! pgrep -f \"cargo build --release -p php_sapi_cli --bin php\" >/dev/null; do sleep 10; done; cat /private/tmp/claude-501/tasks/b1.output", "description": "Wait for the release build to end (a seat, #3624)"}}

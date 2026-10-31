@@ -11,14 +11,22 @@ impl Request {
     /// `include_path` as `php_stream_open_for_zend_ex(USE_PATH |
     /// STREAM_OPEN_FOR_INCLUDE)` opens it, with no warning where nothing
     /// opens it, and a stream wrapper's URL opened by its wrapper, as
-    /// `Phar::webPhar` has an entry of its archive served; a path `EG(included_files)` has already is left alone
-    /// (`zend_hash_add` failing), and any other is added before the
-    /// compile; the unit compiled through the unit cache as a `require`
+    /// `Phar::webPhar` has an entry of its archive served
+    /// ([`Request::load_stream`]); a path `EG(included_files)` has already
+    /// is left alone (`zend_hash_add` failing), and any other is added
+    /// before the compile; the unit compiled through the unit cache as a `require`
     /// is and served on a top-level code frame, `ZEND_CALL_TOP_CODE`,
     /// that shares the innermost user frame's variables
     /// (`zend_rebuild_symbol_table`) and has no `$this` and no scope, as
     /// `zend_execute` gives the frame of a native none.
-    pub(crate) fn load_file(&mut self, written: &[u8]) -> Result<bool, Thrown> {
+    ///
+    /// A stream wrapper's URL is opened in `spl_autoload`'s order where
+    /// `autoloading` says ([`Request::load_stream`]), and otherwise in
+    /// `phar_file_action`'s, `Phar::webPhar`'s
+    /// (`Z/ext/phar/phar_object.c:237-268`): the table asked first, the
+    /// file required as an include requires it, its open warning, and its
+    /// stream closed before the file is served.
+    pub(crate) fn load_file(&mut self, written: &[u8], autoloading: bool) -> Result<bool, Thrown> {
         if written.contains(&0) {
             return Ok(false);
         }
@@ -32,31 +40,157 @@ impl Request {
             }
             Err(super::Unresolved::Missing(_)) => return Ok(false),
         };
+        let stream = super::is_wrapper_url(&path);
+        if stream && autoloading {
+            return self.load_stream(written, &path);
+        }
         if self.included_files.contains(&path) {
             return Ok(false);
         }
         self.note_included(&path)?;
-        let unit = if super::is_wrapper_url(&path) {
+        let unit = if stream {
+            // Declared by its compile, before its stream closed.
             let opened = self.include_stream(exec::IncludeKind::Require, written, &path)?;
-            let super::Opened::Unit(unit) = opened else {
+            let super::Opened::Declared(unit) = opened else {
                 return Ok(false);
             };
             unit
         } else {
-            match self.compile_file(&path, Some(written), super::HandlePath::Opened)? {
+            let unit = match self.compile_file(&path, Some(written), super::HandlePath::Opened)? {
                 Some(Ok(unit)) => unit,
                 Some(Err(refused)) => {
                     let kind = php_compile::SourceKind::File;
                     return Err(self.refused_include(&refused, &path, kind));
                 }
                 None => return Ok(false),
+            };
+            if !crate::engine::note_compiled(self, &unit, php_compile::SourceKind::File) {
+                return Err(Thrown::of(self.take_pending_view()));
             }
+            unit
         };
-        if !crate::engine::note_compiled(self, &unit, php_compile::SourceKind::File) {
-            return Err(Thrown::of(self.take_pending_view()));
-        }
         self.serve_top_code(unit)?;
         Ok(true)
+    }
+
+    /// [`Request::load_file`] over a stream wrapper's URL, in
+    /// `spl_autoload`'s order: the stream opened first, and
+    /// `EG(included_files)` asked by the name the open gave it, the
+    /// `*opened_path` its opener set or the path, a name it holds closed
+    /// unread (`zend_hash_add` failing); then the file compiled as a
+    /// `require`, its diagnostics raised and its classes declared
+    /// ([`Request::compile_stream`]), and served by `zend_execute` before
+    /// `zend_destroy_file_handle` closes the stream. So the wrapper's
+    /// `stream_close` and destructor come after what the file printed, what
+    /// the file threw refuses `stream_close` and is what the destructor
+    /// chains onto, and a close that throws after the file was served leaves
+    /// its class declared.
+    ///
+    /// ```php
+    /// class W { public $context; private $d = false; static $src; static $throw = false; public $p;
+    ///     function stream_open($p, $m, $o, &$op) { $this->p = $p; echo "open $p\n"; return true; }
+    ///     function stream_read($n) { if ($this->d) return ''; $this->d = true; return self::$src; }
+    ///     function stream_eof() { return $this->d; }
+    ///     function stream_stat() { return []; }
+    ///     function stream_close() { echo "close {$this->p}\n"; if (self::$throw) throw new Exception('close'); }
+    ///     function stream_set_option($o, $a, $b) { return false; }
+    ///     function __destruct() { echo "dtor {$this->p}\n"; } }
+    /// stream_wrapper_register('ww', 'W');
+    /// W::$src = "<?php class Foo {} echo 'ran foo', PHP_EOL;";
+    /// spl_autoload('ww://Foo', '.inc');
+    /// spl_autoload('ww://Foo', '.inc');
+    /// W::$src = "<?php class Bar {} echo 'ran bar', PHP_EOL; throw new Exception('run');";
+    /// try { spl_autoload('ww://Bar', '.inc'); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    /// W::$throw = true;
+    /// W::$src = "<?php class Baz {} echo 'ran baz', PHP_EOL;";
+    /// try { spl_autoload('ww://Baz', '.inc'); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    /// var_dump(class_exists('Bar', false), class_exists('Baz', false), count(get_included_files()));
+    /// ```
+    /// ```expect
+    /// open ww://foo.inc
+    /// ran foo
+    /// close ww://foo.inc
+    /// dtor ww://foo.inc
+    /// open ww://foo.inc
+    /// close ww://foo.inc
+    /// dtor ww://foo.inc
+    /// open ww://bar.inc
+    /// ran bar
+    /// dtor ww://bar.inc
+    /// caught run
+    /// open ww://baz.inc
+    /// ran baz
+    /// close ww://baz.inc
+    /// dtor ww://baz.inc
+    /// caught close
+    /// bool(true)
+    /// bool(true)
+    /// int(4)
+    /// ```
+    ///
+    /// The open is `php_stream_open_for_zend_ex(USE_PATH |
+    /// STREAM_OPEN_FOR_INCLUDE)`, which leaves out the bit that warns: a
+    /// file that does not open is passed over in silence, put in no table,
+    /// and the next extension is tried.
+    ///
+    /// ```php
+    /// class W { public $context; private $d = false; public $p;
+    ///     function stream_open($p, $m, $o, &$op) { $this->p = $p; echo "open $p\n"; return $p !== 'ww://nope.inc'; }
+    ///     function stream_read($n) { if ($this->d) return ''; $this->d = true; return "<?php echo 'ran ', __FILE__, PHP_EOL;"; }
+    ///     function stream_eof() { return $this->d; }
+    ///     function stream_stat() { return []; }
+    ///     function stream_close() { echo "close {$this->p}\n"; }
+    ///     function stream_set_option($o, $a, $b) { return false; }
+    ///     function __destruct() { echo "dtor {$this->p}\n"; } }
+    /// stream_wrapper_register('ww', 'W');
+    /// spl_autoload('ww://Nope');
+    /// var_dump(get_included_files()[1]);
+    /// ```
+    /// ```expect
+    /// open ww://nope.inc
+    /// dtor ww://nope.inc
+    /// open ww://nope.php
+    /// ran ww://nope.php
+    /// close ww://nope.php
+    /// dtor ww://nope.php
+    /// string(13) "ww://nope.php"
+    /// ```
+    fn load_stream(&mut self, written: &[u8], path: &[u8]) -> Result<bool, Thrown> {
+        let Some(hooks) = self.stream_hooks() else {
+            return Ok(false);
+        };
+        // `php_stream_open_for_zend_ex` with no bit that warns: a file that
+        // does not open is passed over in silence.
+        let named = (hooks.open)(self, path, false)?;
+        let served = self.serve_stream(written, named, hooks.read_include);
+        match self.close_stream(hooks.close_include, served.as_ref().err()) {
+            Some(thrown) => Err(thrown),
+            None => served,
+        }
+    }
+
+    /// [`Request::load_stream`] over the file the open `named`, before its
+    /// `zend_file_handle` is destroyed: `false` for a file that did not
+    /// open, or that the table holds, and `true` once the file was compiled
+    /// and served.
+    fn serve_stream(
+        &mut self,
+        written: &[u8],
+        named: Option<Vec<u8>>,
+        read: fn(&mut Request) -> Result<Option<Vec<u8>>, Thrown>,
+    ) -> Result<bool, Thrown> {
+        let Some(named) = named else {
+            return self.stream_thrown.take().map_or(Ok(false), Err);
+        };
+        if self.included_files.contains(&named) {
+            return Ok(false);
+        }
+        self.note_included(&named)?;
+        let kind = exec::IncludeKind::Require;
+        match self.compile_stream(kind, written, Some(named), read)? {
+            super::Opened::Declared(unit) => self.serve_top_code(unit).map(|()| true),
+            _ => Ok(false),
+        }
     }
 
     /// `zend_execute` over a unit's main op array from a native: a frame

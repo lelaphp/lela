@@ -15,7 +15,7 @@ use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, SmartStr, TypeTag, 
 
 use crate::State;
 use crate::ffi::{Easy, EasyId, Hook};
-use crate::throwables::Throwables;
+use crate::throwables::{Pending, Throwables};
 
 /// A callable kept past the call it was given to, `zend_fcc_dup`
 /// (`Z/ext/curl/interface.c:1224`, `multi.c:493`): its value's owner and
@@ -303,19 +303,52 @@ const REFUSALS: Refusals = Refusals::NONE
     .comparison();
 
 impl ObjectHandlers for Handlers {
-    /// `curl_free_obj`: the `CURL *` cleaned up with the request
-    /// reachable, or as the transfer holding it ends, then everything the
-    /// `CurlHandle` held let go, the share's object last, as php releases
-    /// `ch->share` after `curl_easy_cleanup`.
+    /// `curl_free_obj`: the streams verified silently
+    /// ([`verify_before_cleanup`]), the `CURL *` cleaned up with the
+    /// request reachable, under what the verify left pending as the
+    /// multi's cleanup is, or as the transfer holding it ends, then
+    /// everything the `CurlHandle` held let go, the share's object last,
+    /// as php releases `ch->share` after `curl_easy_cleanup`; what a
+    /// callback threw is left pending, as php leaves it in
+    /// `EG(exception)`.
+    ///
+    /// A form's file part closed by the cleanup through a user wrapper
+    /// whose `stream_close` throws leaves that throwable standing over
+    /// the values let go after it, so a destructor among them chains onto
+    /// it:
+    ///
+    /// ```php
+    /// class W { public $context; function stream_open($p,$m,$o,&$op){return true;} function stream_read($n){return '';} function stream_eof(){return true;} function stream_stat(){return ['size'=>0];} function stream_close(){ echo "close\n"; throw new Exception("close"); } }
+    /// stream_wrapper_register('ww', 'W');
+    /// class D { function __invoke() {} function __destruct() { echo "dtor\n"; throw new Exception("dtor"); } }
+    /// $h = curl_init('file:///nonexistent');
+    /// curl_setopt($h, CURLOPT_POSTFIELDS, ['f' => new CURLFile('ww://x')]);
+    /// curl_setopt($h, CURLOPT_WRITEFUNCTION, new D);
+    /// try { $h = null; } catch (Exception $e) { echo $e->getMessage(), " <- ", $e->getPrevious()->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// close
+    /// dtor
+    /// dtor <- close
+    /// ```
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let Some(curl) = object.native_mut::<Curl>(req).map(std::mem::take) else {
-            return;
-        };
-        let mut curl = curl;
-        if let Some(easy) = curl.easy.take() {
-            let _ = easy.close(req);
+        let mut pending = Pending::default();
+        verify_before_cleanup(req, object, &mut pending);
+        let mut curl = object.native_mut::<Curl>(req).map(std::mem::take);
+        let mut easy = curl.as_mut().and_then(|curl| curl.easy.take());
+        let mut closed = None;
+        pending.release(req, |req| {
+            closed = easy.take().and_then(|easy| easy.close(req));
+        });
+        if let Some(thrown) = closed {
+            pending.park(req, thrown);
         }
-        curl.release_values(req);
+        pending.release(req, |req| {
+            if let Some(curl) = curl.take() {
+                curl.release_values(req);
+            }
+        });
+        pending.leave(req);
     }
 
     fn refusals(&self) -> Refusals {
@@ -458,16 +491,21 @@ fn copied(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thro
         let _ = easy.close(req);
         dup.release_values(req);
     }
-    if let Some(array) = postfields
-        && crate::file::build_mime(req, *copy, array).is_err()
-    {
-        return Err(failed(req, copy));
+    if let Some(array) = postfields {
+        let mut pending = Pending::default();
+        let built = crate::file::build_mime(req, *copy, array, &mut pending);
+        if pending.answer(req, built).is_err() {
+            return Err(failed(req, copy));
+        }
     }
     Ok(copy)
 }
 
 /// `_php_setup_easy_copy_handlers`: the three channels, the six
-/// callables and the private value, each with one more owner.
+/// callables and the private value, each with one more owner; and the
+/// `CURLOPT_STDERR` stream, which php's copy does not hold though its
+/// `CURL *` writes to the stream's `FILE *`, held, so the copy's file is
+/// never left over a stream the original let go of.
 pub(crate) fn copy_handlers(req: &mut Request, object: PhpObject) -> Result<Curl, Thrown> {
     object.native_mut_or_fatal::<Curl>(req)?;
     let mut copy = Curl {
@@ -487,14 +525,16 @@ pub(crate) fn copy_handlers(req: &mut Request, object: PhpObject) -> Result<Curl
     for (slot, hook) in copy.hooks.iter_mut().zip(hooks) {
         *slot = hook;
     }
-    let (private, postfields) = match object.native::<Curl>(req) {
+    let (private, postfields, stderr) = match object.native::<Curl>(req) {
         Some(from) => (
             from.private.as_deref().copied(),
             from.postfields.as_deref().copied(),
+            from.stderr.as_deref().copied(),
         ),
-        None => (None, None),
+        None => (None, None, None),
     };
     copy.private = private.map(|private| Owner::take(req, private));
+    copy.stderr = stderr.map(|stderr| Owner::take(req, stderr));
     copy.postfields = postfields.map(|postfields| Owner::take(req, postfields));
     Ok(copy)
 }
@@ -512,22 +552,26 @@ fn channel<M: Copy + Default>(
 }
 
 /// `_php_curl_set_default_options` over `easy`, with the CA file
-/// `openssl.cafile` or `curl.cainfo` names.
-pub(crate) fn set_defaults(req: &mut Request, easy: EasyId) {
+/// `openssl.cafile` or `curl.cainfo` names; what a callback threw
+/// during the sets.
+pub(crate) fn set_defaults(req: &mut Request, easy: EasyId) -> Option<Thrown> {
     let cainfo = [b"openssl.cafile".as_slice(), crate::CAINFO]
         .into_iter()
         .find_map(|name| req.ini().get(name).filter(|value| !value.is_empty()))
         .map(<[u8]>::to_vec);
-    easy.defaults(req, cainfo.as_deref());
+    easy.defaults(req, cainfo.as_deref())
 }
 
 /// `_php_curl_verify_handlers(ch, reporterror)`: a stream the `CurlHandle`
 /// names that was closed meanwhile let go, the channel reset to its
-/// default, with php's warning where `report`.
-pub(crate) fn verify_handlers(req: &mut Request, object: PhpObject, report: bool) {
-    let Some(curl) = object.native::<Curl>(req) else {
-        return;
-    };
+/// default, with php's warning where `report`; what a callback threw
+/// as `CURLOPT_STDERR` was set back.
+pub(crate) fn verify_handlers(
+    req: &mut Request,
+    object: PhpObject,
+    report: bool,
+) -> Option<Thrown> {
+    let curl = object.native::<Curl>(req)?;
     let gone = |stream: &Option<Owner<Value>>| {
         stream
             .as_deref()
@@ -546,6 +590,7 @@ pub(crate) fn verify_handlers(req: &mut Request, object: PhpObject, report: bool
         "CURLOPT_WRITEHEADER resource has gone away, resetting to default",
         "CURLOPT_FILE resource has gone away, resetting to default",
     ];
+    let mut thrown = None;
     for (which, (stale, message)) in stale.into_iter().zip(messages).enumerate() {
         if !stale {
             continue;
@@ -554,7 +599,7 @@ pub(crate) fn verify_handlers(req: &mut Request, object: PhpObject, report: bool
             docref(req, Level::Warning, message);
         }
         let Some(curl) = object.native_mut::<Curl>(req) else {
-            return;
+            return thrown;
         };
         let released = match which {
             0 => curl.stderr.take(),
@@ -568,15 +613,33 @@ pub(crate) fn verify_handlers(req: &mut Request, object: PhpObject, report: bool
                 curl.write.stream.take()
             }
         };
-        if which == 0
-            && let Some(easy) = easy
-        {
-            easy.set_stderr(req, None);
-        }
-        if let Some(value) = released {
-            value.give_up(req);
+        match (released, easy) {
+            (Some(value), Some(easy)) if which == 0 => {
+                (_, thrown) = easy.set_stderr(req, None);
+                easy.let_stream_go(req, value);
+            }
+            (Some(value), _) => value.give_up(req),
+            (None, _) => {}
         }
     }
+    thrown
+}
+
+/// `_php_curl_verify_handlers(ch, /* reporterror */ false)`, as
+/// `curl_free_obj` and `curl_multi_free_obj` call it before the cleanup
+/// that may write a last line: a stream closed meanwhile let go and its
+/// channel reset without a warning, so the line reaches the process's
+/// `stderr` and not a stream gone. Taken as a step under what `pending`
+/// holds, which what a callback threw joins. A `CurlHandle` whose free is
+/// under way, php's `IS_OBJ_FREE_CALLED`, has had its payload taken by
+/// its `free_obj` or dropped after it, so it names no stream and is
+/// passed over, as php's walk passes it.
+pub(crate) fn verify_before_cleanup(req: &mut Request, object: PhpObject, pending: &mut Pending) {
+    pending.step(req, |req, pending| {
+        if let Some(thrown) = verify_handlers(req, object, false) {
+            pending.park(req, thrown);
+        }
+    });
 }
 
 /// `_php_curl_cleanup_handle`: what the last transfer left, cleared.
@@ -621,14 +684,20 @@ fn curl_init(
         );
         return Ok(OrFalse::False);
     };
-    set_defaults(req, easy.id());
+    let defaulted = set_defaults(req, easy.id());
     match object.native_mut::<Curl>(req) {
         Some(curl) => curl.easy = Some(easy),
         None => drop(easy.close(req)),
     }
+    if let Some(thrown) = defaulted {
+        object.give_up(req);
+        return Err(thrown);
+    }
     if let Some(url) = url {
         let url = url.as_bytes().to_vec();
-        match crate::options::set_url(req, *object, &url) {
+        let mut pending = Pending::default();
+        let answered = crate::options::set_url(req, *object, &url, &mut pending);
+        match pending.answer(req, answered) {
             Ok(true) => {}
             Ok(false) => {
                 object.give_up(req);
@@ -756,14 +825,20 @@ fn reset_handlers(req: &mut Request, object: PhpObject) {
         curl.write.stream.take(),
         curl.header.stream.take(),
         curl.read.stream.take(),
-        curl.stderr.take(),
     ]
     .into_iter()
     .flatten()
     .collect();
+    let stderr = curl.stderr.take();
+    let easy = curl.easy.as_ref().map(Easy::id);
     let hooks: Vec<Handler> = curl.hooks.iter_mut().filter_map(Option::take).collect();
     for value in released {
         value.give_up(req);
+    }
+    match (stderr, easy) {
+        (Some(value), Some(easy)) => easy.let_stream_go(req, value),
+        (Some(value), None) => value.give_up(req),
+        (None, _) => {}
     }
     for handler in hooks {
         handler.give_up(req);
@@ -818,10 +893,18 @@ fn curl_reset(req: &mut Request, handle: Instance<CurlHandle>) -> Result<(), Thr
         ));
     }
     let easy = easy_of(req, handle.object())?;
-    easy.reset(req);
-    reset_handlers(req, handle.object());
-    set_defaults(req, easy);
-    Ok(())
+    let mut pending = Pending::default();
+    if let Some(thrown) = easy.reset(req) {
+        pending.park(req, thrown);
+    }
+    pending.step(req, |req, _| reset_handlers(req, handle.object()));
+    if let Some(thrown) = pending
+        .step(req, |req, _| set_defaults(req, easy))
+        .flatten()
+    {
+        pending.park(req, thrown);
+    }
+    pending.answer(req, Ok(()))
 }
 
 /// `curl_exec(CurlHandle $handle): string|bool`: the transfer, its body
@@ -872,7 +955,9 @@ fn curl_exec(
     handle: Instance<CurlHandle>,
 ) -> Result<Union<Owner<PhpString>, bool>, Thrown> {
     let object = handle.object();
-    verify_handlers(req, object, true);
+    if let Some(thrown) = verify_handlers(req, object, true) {
+        return Err(thrown);
+    }
     cleanup_handle(req, object);
     let easy = easy_of(req, object)?;
     let (code, thrown) = easy.perform(req);

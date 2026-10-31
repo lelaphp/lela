@@ -981,10 +981,11 @@ fn phpt_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_it() {
 /// The negative controls of the closure (#2935), one fixture each under
 /// `xtask/fixtures/oracle/closure/`: a macOS build naming no closure, a
 /// Linux build naming one, and a macOS build made against a `[closure]`
-/// the pin has moved past. Each pin is refused on load, on any machine,
-/// naming the variant's table and the person's re-pin.
+/// the pin has moved past. Each pin loads and carries the refusal as its
+/// defect, on any machine, naming the variant's table and the person's
+/// re-pin: only what reads the pin refuses with it (#3618 ruling 4).
 #[test]
-fn the_fixtures_whose_build_the_closure_does_not_hold_are_refused_on_load() {
+fn the_fixtures_whose_build_the_closure_does_not_hold_carry_the_refusal_as_a_defect() {
     let moved = "was made against the closure sha256:f3f950ce43447203da79ea7a1a4391bdbdc1963bf63528f58b46da443e68e2b8, and the pin's [closure] is sha256:f22ee36557db677d4e720a3e315fa3aa26230a9d9e6c0489eee4826a4bae71e4, so its build predates the closure";
     for (name, key, refusal) in [
         (
@@ -996,7 +997,7 @@ fn the_fixtures_whose_build_the_closure_does_not_hold_are_refused_on_load() {
         ("moved", "darwin-arm64", moved),
     ] {
         let path = fixture("closure").join(format!("{name}.toml"));
-        let err = format!("{:#}", Pin::load(&path).unwrap_err());
+        let err = Pin::load(&path).unwrap().defects().join("\n");
         let at = format!("[variant.closure.{key}] ");
         let repin = format!("`scripts/oracle-build.py build {key} closure` is a person's act");
         assert!(

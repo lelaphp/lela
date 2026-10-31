@@ -321,10 +321,7 @@ jobs:
         env:
           ORACLE: ${{ needs.oracle.result }}
         run: |
-          # `xtask fold` reads an aarch64 Mac's disassembly, which no runner
-          # here is, so its reading is the one a toolchain bump's author
-          # takes and `done` here names it not run (#3384).
-          set -- --not-run fold
+          set --
           if [ "$ORACLE" = skipped ]; then
             set -- "$@" --not-run witness --not-run crosscheck
             said="the oracle job was skipped while DAX_BUILD_RUNNER is set, so done judged no witness or crosscheck reading (scripts/ci/README.md)"

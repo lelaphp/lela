@@ -1,0 +1,234 @@
+$_main:
+     ; (lines=81, args=0, vars=18, tmps=64, ssa_vars=0)
+     ; (JIT)
+     ; mandelbrot.php:1-68
+     ; return  [] RANGE[0..0]
+BB0:
+     ; start lines=[0-8]
+     ; to=(BB16)
+     ; level=0
+     ; children=(BB16)
+0000 ASSIGN CV0($N) int(20)
+0001 ASSIGN CV1($iter) int(50)
+0002 ASSIGN CV2($limit) float(2)
+0003 T21 = MUL CV2($limit) CV2($limit)
+0004 ASSIGN CV3($limit2) T21
+0005 ASSIGN CV4($checksum) int(0)
+0006 ASSIGN CV5($bytesOut) int(0)
+0007 ASSIGN CV6($y) int(0)
+0008 JMP BB16
+
+BB1:
+     ; target lines=[9-16]
+     ; from=(BB16)
+     ; to=(BB12)
+     ; idom=BB16
+     ; level=2
+     ; loop_header=16
+     ; children=(BB12)
+0009 T26 = MUL CV6($y) float(2)
+0010 T27 = DIV T26 CV0($N)
+0011 T28 = SUB T27 float(1)
+0012 ASSIGN CV7($ci) T28
+0013 ASSIGN CV8($bitNum) int(0)
+0014 ASSIGN CV9($byteAcc) int(0)
+0015 ASSIGN CV10($x) int(0)
+0016 JMP BB12
+
+BB2:
+     ; target lines=[17-27]
+     ; from=(BB12)
+     ; to=(BB6)
+     ; idom=BB12
+     ; level=4
+     ; loop_header=12
+     ; children=(BB6)
+0017 T33 = MUL CV10($x) float(2)
+0018 T34 = DIV T33 CV0($N)
+0019 T35 = SUB T34 float(1.5)
+0020 ASSIGN CV11($cr) T35
+0021 ASSIGN CV12($zr) float(0)
+0022 ASSIGN CV13($zi) float(0)
+0023 ASSIGN CV14($zrzr) float(0)
+0024 ASSIGN CV15($zizi) float(0)
+0025 ASSIGN CV16($escaped) bool(false)
+0026 ASSIGN CV17($i) int(0)
+0027 JMP BB6
+
+BB3:
+     ; target lines=[28-41]
+     ; from=(BB6)
+     ; to=(BB5, BB4)
+     ; idom=BB6
+     ; level=6
+     ; loop_header=6
+     ; children=(BB4, BB5)
+0028 T43 = MUL CV12($zr) float(2)
+0029 T44 = MUL CV13($zi) T43
+0030 T45 = ADD T44 CV7($ci)
+0031 ASSIGN CV13($zi) T45
+0032 T47 = SUB CV14($zrzr) CV15($zizi)
+0033 T48 = ADD T47 CV11($cr)
+0034 ASSIGN CV12($zr) T48
+0035 T50 = MUL CV12($zr) CV12($zr)
+0036 ASSIGN CV14($zrzr) T50
+0037 T52 = MUL CV13($zi) CV13($zi)
+0038 ASSIGN CV15($zizi) T52
+0039 T54 = ADD CV14($zrzr) CV15($zizi)
+0040 T55 = IS_SMALLER CV3($limit2) T54
+0041 JMPZ T55 BB5
+
+BB4:
+     ; follow lines=[42-43]
+     ; from=(BB3)
+     ; to=(BB7)
+     ; idom=BB3
+     ; level=7
+     ; loop_header=12
+0042 ASSIGN CV16($escaped) bool(true)
+0043 JMP BB7
+
+BB5:
+     ; target lines=[44-44]
+     ; from=(BB3)
+     ; to=(BB6)
+     ; idom=BB3
+     ; level=7
+     ; loop_header=6
+0044 PRE_INC CV17($i)
+
+BB6:
+     ; follow target loop_header lines=[45-46]
+     ; from=(BB2, BB5)
+     ; to=(BB3, BB7)
+     ; idom=BB2
+     ; level=5
+     ; loop_header=12
+     ; children=(BB3, BB7)
+0045 T58 = IS_SMALLER CV17($i) CV1($iter)
+0046 JMPNZ T58 BB3
+
+BB7:
+     ; follow target lines=[47-49]
+     ; from=(BB4, BB6)
+     ; to=(BB9, BB8)
+     ; idom=BB6
+     ; level=6
+     ; loop_header=12
+     ; children=(BB8, BB9)
+0047 ASSIGN_OP (SL) CV9($byteAcc) int(1)
+0048 T60 = BOOL_NOT CV16($escaped)
+0049 JMPZ T60 BB9
+
+BB8:
+     ; follow lines=[50-50]
+     ; from=(BB7)
+     ; to=(BB9)
+     ; idom=BB7
+     ; level=7
+     ; loop_header=12
+0050 ASSIGN_OP (BW_OR) CV9($byteAcc) int(1)
+
+BB9:
+     ; follow target lines=[51-53]
+     ; from=(BB7, BB8)
+     ; to=(BB11, BB10)
+     ; idom=BB7
+     ; level=7
+     ; loop_header=12
+     ; children=(BB10, BB11)
+0051 PRE_INC CV8($bitNum)
+0052 T63 = IS_IDENTICAL CV8($bitNum) int(8)
+0053 JMPZ T63 BB11
+
+BB10:
+     ; follow lines=[54-59]
+     ; from=(BB9)
+     ; to=(BB11)
+     ; idom=BB9
+     ; level=8
+     ; loop_header=12
+0054 T64 = ADD CV4($checksum) CV9($byteAcc)
+0055 T65 = BW_AND T64 int(4294967295)
+0056 ASSIGN CV4($checksum) T65
+0057 PRE_INC CV5($bytesOut)
+0058 ASSIGN CV9($byteAcc) int(0)
+0059 ASSIGN CV8($bitNum) int(0)
+
+BB11:
+     ; follow target lines=[60-60]
+     ; from=(BB9, BB10)
+     ; to=(BB12)
+     ; idom=BB9
+     ; level=8
+     ; loop_header=12
+0060 PRE_INC CV10($x)
+
+BB12:
+     ; follow target loop_header lines=[61-62]
+     ; from=(BB1, BB11)
+     ; to=(BB2, BB13)
+     ; idom=BB1
+     ; level=3
+     ; loop_header=16
+     ; children=(BB2, BB13)
+0061 T71 = IS_SMALLER CV10($x) CV0($N)
+0062 JMPNZ T71 BB2
+
+BB13:
+     ; follow lines=[63-64]
+     ; from=(BB12)
+     ; to=(BB15, BB14)
+     ; idom=BB12
+     ; level=4
+     ; loop_header=16
+     ; children=(BB14, BB15)
+0063 T72 = IS_NOT_IDENTICAL CV8($bitNum) int(0)
+0064 JMPZ T72 BB15
+
+BB14:
+     ; follow lines=[65-70]
+     ; from=(BB13)
+     ; to=(BB15)
+     ; idom=BB13
+     ; level=5
+     ; loop_header=16
+0065 T73 = SUB int(8) CV8($bitNum)
+0066 ASSIGN_OP (SL) CV9($byteAcc) T73
+0067 T75 = ADD CV4($checksum) CV9($byteAcc)
+0068 T76 = BW_AND T75 int(4294967295)
+0069 ASSIGN CV4($checksum) T76
+0070 PRE_INC CV5($bytesOut)
+
+BB15:
+     ; follow target lines=[71-71]
+     ; from=(BB13, BB14)
+     ; to=(BB16)
+     ; idom=BB13
+     ; level=5
+     ; loop_header=16
+0071 PRE_INC CV6($y)
+
+BB16:
+     ; follow target loop_header lines=[72-73]
+     ; from=(BB0, BB15)
+     ; to=(BB1, BB17)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB1, BB17)
+0072 T80 = IS_SMALLER CV6($y) CV0($N)
+0073 JMPNZ T80 BB1
+
+BB17:
+     ; follow exit lines=[74-80]
+     ; from=(BB16)
+     ; idom=BB16
+     ; level=2
+0074 INIT_FCALL 4 144 string("printf")
+0075 SEND_VAL string("N=%d bytes=%d checksum=%d\n") 1
+0076 SEND_VAR CV0($N) 2
+0077 SEND_VAR CV5($bytesOut) 3
+0078 SEND_VAR CV4($checksum) 4
+0079 DO_ICALL
+0080 RETURN int(1)
+

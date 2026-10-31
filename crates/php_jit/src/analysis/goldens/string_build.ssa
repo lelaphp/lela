@@ -1,0 +1,81 @@
+k:
+     ; (lines=22, args=2, vars=5, tmps=14, ssa_vars=29)
+     ; (JIT)
+     ; string_build.php:5-12
+     ; return  [long] RANGE[0..MAX]
+     ; #0.CV0($a) NOVAL [undef]
+     ; #1.CV1($n) NOVAL [undef]
+     ; #2.CV2($blob) NOVAL [undef]
+     ; #3.CV3($i) NOVAL [undef]
+     ; #4.CV4($path) NOVAL [undef]
+BB0:
+     ; start lines=[0-0]
+     ; to=(BB1)
+     ; level=0
+     ; children=(BB1)
+0000 #5.CV0($a) [rc1, rcn, any] = RECV 1
+
+BB1:
+     ; recv follow entry lines=[1-1]
+     ; from=(BB0)
+     ; to=(BB2)
+     ; idom=BB0
+     ; level=1
+     ; children=(BB2)
+0001 #6.CV1($n) [rc1, rcn, any] = RECV 2
+
+BB2:
+     ; recv follow entry lines=[2-4]
+     ; from=(BB1)
+     ; to=(BB4)
+     ; idom=BB1
+     ; level=2
+     ; children=(BB4)
+0002 ASSIGN #2.CV2($blob) NOVAL [undef] -> #7.CV2($blob) [rc1, rcn, string] string("")
+0003 ASSIGN #3.CV3($i) NOVAL [undef] -> #8.CV3($i) [long] RANGE[0..0] int(0)
+0004 JMP BB4
+
+BB3:
+     ; target lines=[5-16]
+     ; from=(BB4)
+     ; to=(BB4)
+     ; idom=BB4
+     ; level=4
+     ; loop_header=4
+     #14.CV1($n) [rc1, rcn, any] RANGE[1..++] = Pi<BB4>(#9.CV1($n) [rc1, rcn, any] & RANGE[#11.CV3($i) [long, double] RANGE[0..++] + 1 .. ++])
+     #15.CV3($i) [long, double] RANGE[0..++] = Pi<BB4>(#11.CV3($i) [long, double] RANGE[0..++] & RANGE[-- .. #9.CV1($n) [rc1, rcn, any] - 1])
+0005 #16.T7 [rc1, rcn, string] = CONCAT string("/api/") #5.CV0($a) [rc1, rcn, any]
+0006 #17.T8 [rc1, rcn, string] = CONCAT #16.T7 [rc1, rcn, string] string("-x")
+0007 ASSIGN #12.CV4($path) NOVAL [undef, rc1, rcn, string] -> #18.CV4($path) [rc1, rcn, string] #17.T8 [rc1, rcn, string]
+0008 #19.T11 [rc1, rcn, string] = ROPE_INIT 7 string("  ")
+0009 #20.T11 [rc1, rcn, string] = ROPE_ADD 1 #19.T11 [rc1, rcn, string] #15.CV3($i) [long, double] RANGE[0..++]
+0010 #21.T11 [rc1, rcn, string] = ROPE_ADD 2 #20.T11 [rc1, rcn, string] string(" , ")
+0011 #22.T11 [rc1, rcn, string] = ROPE_ADD 3 #21.T11 [rc1, rcn, string] #5.CV0($a) [rc1, rcn, any]
+0012 #23.T11 [rc1, rcn, string] = ROPE_ADD 4 #22.T11 [rc1, rcn, string] string(" ,")
+0013 #24.T11 [rc1, rcn, string] = ROPE_ADD 5 #23.T11 [rc1, rcn, string] #18.CV4($path) [rc1, rcn, string]
+0014 #25.T10 [rc1, rcn, string] = ROPE_END 6 #24.T11 [rc1, rcn, string] string(" , ok  \n")
+0015 ASSIGN_OP (CONCAT) #10.CV2($blob) [rc1, rcn, string] -> #26.CV2($blob) [rc1, rcn, string] #25.T10 [rc1, rcn, string]
+0016 PRE_INC #15.CV3($i) [long, double] RANGE[0..++] -> #27.CV3($i) [long, double] RANGE[1..++]
+
+BB4:
+     ; follow target loop_header lines=[17-18]
+     ; from=(BB2, BB3)
+     ; to=(BB3, BB5)
+     ; idom=BB2
+     ; level=3
+     ; children=(BB3, BB5)
+     #9.CV1($n) [rc1, rcn, any] = Phi(#6.CV1($n) [rc1, rcn, any], #14.CV1($n) [rc1, rcn, any] RANGE[1..++])
+     #10.CV2($blob) [rc1, rcn, string] = Phi(#7.CV2($blob) [rc1, rcn, string], #26.CV2($blob) [rc1, rcn, string])
+     #11.CV3($i) [long, double] RANGE[0..++] = Phi(#8.CV3($i) [long] RANGE[0..0], #27.CV3($i) [long, double] RANGE[1..++])
+     #12.CV4($path) NOVAL [undef, rc1, rcn, string] = Phi(#4.CV4($path) NOVAL [undef], #18.CV4($path) [rc1, rcn, string])
+0017 #13.T17 [bool] = IS_SMALLER #11.CV3($i) [long, double] RANGE[0..++] #9.CV1($n) [rc1, rcn, any]
+0018 JMPNZ #13.T17 [bool] BB3
+
+BB5:
+     ; follow exit lines=[19-20]
+     ; from=(BB4)
+     ; idom=BB4
+     ; level=4
+0019 #28.T18 [long] RANGE[0..MAX] = STRLEN #10.CV2($blob) [rc1, rcn, string]
+0020 RETURN #28.T18 [long] RANGE[0..MAX]
+

@@ -257,6 +257,45 @@ fn ready_records_each_ticket_of_the_branch_with_its_successors_and_closes_nothin
     assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
 }
 
+/// `ticket ready` runs `done` over its own worktree and refuses, naming the
+/// list, while anything is unmet (#3618 ruling 2): a change to the harness
+/// with no reading of it holds the ticket, and nothing is recorded.
+#[test]
+fn ready_refuses_while_done_is_unmet_in_its_worktree() {
+    let root = repository("ticket-ready-unmet");
+    Repo::at(&root).git(&["checkout", "-q", "-b", "t7"]);
+    std::fs::create_dir_all(root.join("xtask/src")).unwrap();
+    std::fs::write(root.join("xtask/src/lib.rs"), "pub fn measure() {}\n").unwrap();
+    let tracker = Tracker::empty("ready-unmet");
+    tracker.with_issue(&with_body(7, TICKED));
+    let refused = run(
+        &root,
+        &tracked_manifest(),
+        &tracker.gh(),
+        Act::Ready(Successors::Nothing),
+        Ticket::new(7),
+        None,
+    )
+    .unwrap();
+    assert_eq!(refused.status, Status::Fail, "{}", refused.message);
+    assert!(
+        refused.message.contains("done is unmet in this worktree"),
+        "{}",
+        refused.message
+    );
+    assert!(
+        refused.message.contains("clippy: no reading for xtask"),
+        "{}",
+        refused.message
+    );
+    let recorded = std::process::Command::new("git")
+        .args(["config", "branch.t7.ready-7"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(!recorded.status.success(), "nothing recorded");
+}
+
 /// The merge into `main` closes every open ticket its subject names with
 /// the successors that ticket's ready record names (#2311), a bundle's
 /// three tickets readied on one branch all three (#2358); one with no
@@ -1804,4 +1843,49 @@ mod tracked {
             reading.message
         );
     }
+}
+
+/// The merge queue (#3622): a merge on `staging` closes nothing there,
+/// since `staging` is not `main`, and the fast-forward of `main` to it
+/// closes the ticket its subject names, read since `ORIG_HEAD` as
+/// post-merge reads it, with the successors the branch's ready record
+/// names.
+#[test]
+fn a_staging_fast_forward_closes_the_tickets_its_merges_name() {
+    let root = repository("ticket-staging");
+    let repo = Repo::at(&root);
+    repo.git(&["checkout", "-q", "-b", "t7"]);
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "the work"]);
+    repo.git(&["config", "branch.t7.ready-7", "nothing"]);
+    let tracker = Tracker::empty("staging");
+    tracker.with_issue(&with_body(7, TICKED));
+    repo.git(&["checkout", "-q", "-b", "staging", "main"]);
+    repo.git(&[
+        "merge",
+        "-q",
+        "--no-ff",
+        "t7",
+        "-m",
+        "Merge t7: the work (#7)",
+    ]);
+    let on_staging = merged(&root, &manifest(), &tracker.gh(), "HEAD^1").unwrap();
+    assert!(on_staging.is_empty(), "{on_staging:#?}");
+    assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
+
+    repo.git(&["checkout", "-q", "main"]);
+    repo.git(&["merge", "-q", "--ff-only", "staging"]);
+    let (readings, _) = tickets_merged_since(&root, &tracker, "ORIG_HEAD");
+    let closed: Vec<(&str, Status)> = readings
+        .iter()
+        .map(|r| (r.scope.as_str(), r.status))
+        .collect();
+    assert_eq!(closed, [("7", Status::Pass)], "{readings:#?}");
+    assert!(
+        tracker
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("issue close 7 ")),
+        "{:?}",
+        tracker.calls()
+    );
 }

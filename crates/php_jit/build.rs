@@ -1,10 +1,10 @@
 //! `php_jit_arena`, set where the target has a `Pages` adapter that maps
-//! code (`jit-design.md` §4.4): macOS on aarch64, one `MAP_JIT` mapping,
-//! and Linux on x86-64 and aarch64, one sealed `memfd` mapped twice. This
-//! is the one place in the code the set is named; the adapters, the
-//! `Native` alias and the tests that enter published code read it. A
-//! dependency cannot hang on it in Cargo, so `Cargo.toml`'s Linux table, which
-//! brings `rustix` for the `memfd`, says the Linux half of the set again.
+//! code (`jit-design.md` §4.4), the four targets §4.3 names: macOS, one
+//! `MAP_JIT` mapping, and Linux, one sealed `memfd` mapped twice, each on
+//! x86-64 and aarch64. This is the one place in the code the set is named;
+//! the adapters, the `Native` alias and the tests that enter published code
+//! read it. A dependency cannot hang on it in Cargo, so `Cargo.toml`'s Linux
+//! table, which brings `rustix` for the `memfd`, says the Linux half again.
 //!
 //! Beside it, the cfg names only the bench's builds set, added to the
 //! workspace's rustflags by a `--config` line, into target directories of
@@ -27,7 +27,7 @@ fn main() {
     );
     if matches!(
         (os.as_str(), arch.as_str()),
-        ("macos", "aarch64") | ("linux", "x86_64" | "aarch64")
+        ("macos" | "linux", "x86_64" | "aarch64")
     ) {
         println!("cargo::rustc-cfg=php_jit_arena");
     }

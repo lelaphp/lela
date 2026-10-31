@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 #
 # The CLI, CGI and FPM hosts built from this checkout, and the image that
 # stands in for php's official apache image, with the checkout as the build
@@ -18,17 +18,31 @@
 # oracle links (packages.txt), which the Debian release php's official
 # images are built on does not ship.
 
-ARG UBUNTU=ubuntu:26.04
+ARG UBUNTU=ubuntu:26.04@sha256:19fcd1bf268f02b60aca3bd30bd8a6d9a11759a430e32921833e65f16d87348a
 # Where php's official images keep php.ini, $PHP_INI_DIR, with conf.d in it.
 ARG PHP_INI_DIR=/usr/local/etc/php
 # The hosts' names, `$NAME`, `$NAME-cgi` and `$NAME-fpm`, as ADR-0016 derives
 # them from one constant; php's until #3464 renames them.
 ARG NAME=php
 
+# --- distribution inputs, held without another checkout -----------------
+# Keep ini verification independent of the compiler and platform libraries.
+# inputs.py holds the dist-local pins to oracle.toml and rust-toolchain.toml
+# before either download runs; see dist/README.md for verification bounds.
+FROM --platform=$BUILDPLATFORM ${UBUNTU} AS inputs
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN apt-get update -qq; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+        ca-certificates curl python3; \
+    rm -rf /var/lib/apt/lists/*
+COPY dist/inputs.py dist/inputs.toml /opt/dist/
+COPY oracle.toml rust-toolchain.toml /opt/
+RUN python3 /opt/dist/inputs.py check
+
 # --- the toolchain and the platform libraries CI installs -----------------
 # The libraries' -dev packages are the target's, through Ubuntu's multiarch,
 # and the compilers and pkg-config the builder's.
-FROM --platform=$BUILDPLATFORM ${UBUNTU} AS toolchain
+FROM inputs AS toolchain
 ARG BUILDARCH
 ARG TARGETARCH
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
@@ -58,10 +72,15 @@ RUN case "$TARGETARCH" in amd64) arch=x86_64 ;; arm64) arch=aarch64 ;; \
         ca-certificates curl build-essential "${cross[@]}"; \
     rm -rf /var/lib/apt/lists/*
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
-COPY rust-toolchain.toml /tmp/toolchain/rust-toolchain.toml
-RUN curl -sSf https://sh.rustup.rs | sh -s -- -y -q --no-modify-path --profile minimal --default-toolchain none; \
+# Verify the BUILDARCH installer before executing it, then let rustup
+# verify the release's components. Do not let rustup update itself later.
+RUN python3 /opt/dist/inputs.py rustup "$BUILDARCH" /tmp/rustup-init; \
+    chmod 0755 /tmp/rustup-init; \
+    /tmp/rustup-init -y -q --no-modify-path --profile minimal --default-toolchain none; \
+    rm /tmp/rustup-init; \
+    rustup set auto-self-update disable; \
     . /usr/local/share/dax-target.env; \
-    cd /tmp/toolchain; rustup toolchain install; rustup target add "$CARGO_BUILD_TARGET"
+    cd /opt; rustup toolchain install; rustup target add "$CARGO_BUILD_TARGET"
 
 # --- the hosts, laid out as php's official images lay them ----------------
 FROM toolchain AS build
@@ -85,12 +104,14 @@ ENV PHP_CONFIG_FILE_PATH=${PHP_INI_DIR} \
     PHP_BUILD_PROVIDER=${BUILD_PROVIDER}
 WORKDIR /src
 COPY . .
-# The compiled tier is built in, php_bundle's `jit` feature, as the macOS
-# binaries have it; it stays off until opcache.jit asks, as php's does.
+# The compiled tier is built in from the hosts' own manifests, each of which
+# turns php_bundle's `jit` on by default, and php-cgi shares the bundle's
+# features with them on this one cargo line; it stays off until opcache.jit
+# asks, as php's does, and tracing is experimental (ADR-0017, #3676).
 RUN --mount=type=cache,id=${CACHE}-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=${CACHE}-target-${TARGETARCH},target=/src/target \
     . /usr/local/share/dax-target.env; \
-    cargo build --release --locked --features php_bundle/jit \
+    cargo build --release --locked \
         -p php_sapi_cli -p php_sapi_cgi -p php_sapi_fpm \
         --bin "$NAME" --bin "$NAME-cgi" --bin "$NAME-fpm"; \
     release="target/$CARGO_BUILD_TARGET/release"; \
@@ -117,17 +138,10 @@ RUN . /usr/local/share/dax-target.env; \
     cat /out/runtime-packages.txt
 
 # --- php.ini-development and php.ini-production ---------------------------
-# Of the php-src commit oracle.toml pins, as php's official images ship
-# them in $PHP_INI_DIR: fetched at that commit, so they move with the pin.
-# What holds them is the commit oracle.toml abbreviates, not a checksum.
-FROM toolchain AS ini
-COPY oracle.toml /tmp/oracle.toml
-RUN commit="$(sed -n '/^\[source\]/,/^\[/s/^commit = "\([0-9a-f]*\)".*/\1/p' /tmp/oracle.toml)"; \
-    [ -n "$commit" ] || { echo "oracle.toml names no [source] commit" >&2; exit 1; }; \
-    mkdir /ini; \
-    for ini in php.ini-development php.ini-production; do \
-        curl -fsSL -o "/ini/$ini" "https://raw.githubusercontent.com/php/php-src/$commit/$ini"; \
-    done
+# From the full php-src commit in dist/inputs.toml, with each SHA-256 held
+# before the files reach /ini. An oracle move refuses stale pins.
+FROM inputs AS ini
+RUN python3 /opt/dist/inputs.py ini /ini
 
 # --- the binaries, as a tarball's contents: `--output <dir>` --------------
 FROM scratch AS binaries

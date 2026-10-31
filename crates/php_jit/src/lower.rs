@@ -67,15 +67,15 @@ pub(crate) mod dump;
 mod tests;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
 use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::ir::SourceLoc;
 use cranelift_codegen::isa::{self, OwnedTargetIsa};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::{Context, Final, MachSrcLoc};
-use php_engine::tier::{FuncRef, MapPtrRaw, PlainCall};
-use php_unit::{MapPtrOffset, OplineIdx};
+use php_engine::tier::{FuncRef, LandingIndex, MapPtrRaw, PlainCall};
+use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
 
 use crate::policy::{Mode, Policy};
 use crate::record::{Began, Stop};
@@ -141,8 +141,6 @@ pub(crate) struct Compiled {
     /// jump to its side trace; the code holds their address, so they live
     /// as long as it.
     pub(crate) slots: EntrySlots,
-    /// Its landing slots, which the code reads where it escapes.
-    pub(crate) landings: LandingSlots,
     /// The plain calls the code pushes in place, in the order it reads
     /// their headers in, the request's, at [`IMAGES_AT`].
     pub(crate) calls: Box<[PlainCall]>,
@@ -300,97 +298,23 @@ impl EntrySlots {
     }
 }
 
-/// A trace's landing slots (`jit-design.md` §4.9): where a trace escapes,
-/// a return that leaves its lowest frame at an opline it does not go on at,
-/// php's `jit_stub_trace_escape`, which goes on into the handler of that
-/// opline, the trace compiled there where one is
-/// (`Z/ext/opcache/jit/zend_jit_ir.c:11188-11250`), its code compares where
-/// the frame stands, its op array and opline, with each slot and jumps to
-/// the trace the slot names where one holds it, and answers
-/// [`ESCAPED`] as before where none does. A slot is written once, its
-/// place before its trace with release, by the crossing the first time it
-/// enters a trace compiled at a landing the trace escaped to
-/// ([`LandingSlots::remember`]); a landing's word that reads compiled
-/// reads so for as long as the table stands, so the slot names what the
-/// interpreter would have entered there. [`LANDINGS`] of them, the
-/// landings first entered; an escape to another is answered as before.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct LandingSlots(Arc<[LandingSlot]>);
-
-/// One landing slot: the trace entered there, and where, as
-/// [`LandingSlots::key`] writes it, zero while the slot is free.
-#[repr(C)]
-#[derive(Debug, Default)]
-pub(crate) struct LandingSlot {
-    entrance: AtomicPtr<Entrance>,
-    key: AtomicU64,
-}
-
-/// How many landing slots a trace has.
-pub(crate) const LANDINGS: usize = 2;
-
-/// Where compiled code reads a landing slot's fields, and its stride.
-pub(crate) const LANDING_ENTRANCE: i32 = 0;
-pub(crate) const LANDING_KEY: i32 = 8;
-pub(crate) const LANDING_BYTES: usize = 16;
-const _: () = assert!(
-    std::mem::offset_of!(LandingSlot, entrance) == LANDING_ENTRANCE.unsigned_abs() as usize
-        && std::mem::offset_of!(LandingSlot, key) == LANDING_KEY.unsigned_abs() as usize
-        && size_of::<LandingSlot>() == LANDING_BYTES
-);
-
-/// The bit every written key carries, so no key is zero, a free slot's.
-pub(crate) const LANDING_TAG: u64 = 1 << 63;
-
-impl LandingSlots {
-    /// [`LANDINGS`] slots, none written.
-    pub(crate) fn new() -> LandingSlots {
-        LandingSlots((0..LANDINGS).map(|_| LandingSlot::default()).collect())
-    }
-
-    /// The address of the first slot, which the code reads past.
-    fn base(&self) -> usize {
-        self.0.as_ptr().addr()
-    }
-
-    /// The key of the landing where `stands` says: the word a `Stood`
-    /// holds it in, with [`LANDING_TAG`]. An op array's oplines are
-    /// numbered below `2^31`.
-    pub(crate) fn key(stands: Stands) -> u64 {
-        stands.word() | LANDING_TAG
-    }
-
-    /// `landed` remembered as the trace compiled at the landing `key`
-    /// names, in the first free slot, once: nothing where a slot holds the
-    /// landing already or none is free.
-    pub(crate) fn remember(&self, key: u64, landed: &Entrance) {
-        if self
-            .0
-            .iter()
-            .any(|slot| slot.key.load(Ordering::Relaxed) == key)
-        {
-            return;
-        }
-        let claimed = self.0.iter().find(|slot| {
-            slot.key
-                .compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-        });
-        if let Some(slot) = claimed {
-            slot.entrance
-                .store(std::ptr::from_ref(landed).cast_mut(), Ordering::Release);
-        }
-    }
-
-    /// The entrance the slot holding `key` names, none where no slot does.
-    #[cfg(test)]
-    pub(crate) fn landed(&self, key: u64) -> Option<usize> {
-        let slot = self
-            .0
-            .iter()
-            .find(|slot| slot.key.load(Ordering::Relaxed) == key)?;
-        Some(slot.entrance.load(Ordering::Acquire).addr())
-    }
+/// Where a trace's escape reads the landing it escaped to
+/// (`jit-design.md` §4.9, #3299's ruling): a return that leaves its
+/// lowest frame at an opline the trace does not go on at runs, as php's
+/// escape stub runs the handler of the opline the frame stands at
+/// (`zend_jit_trace_escape_stub`, `Z/ext/opcache/jit/zend_jit_ir.c:2488-2497`),
+/// which the root's publish wrote (`zend_jit_trace.c:7595`), the trace
+/// compiled there: its code reads the landing's word through the
+/// epoch's `landings` index, and where the word reads compiled, enters
+/// the trace it names through `entrances`, the table's entrance of each
+/// trace number below `traces`; it answers [`ESCAPED`] where either is
+/// not there. Both stand as long as the table, so a trace keeps no state
+/// of the landings it escapes to.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Escapes {
+    pub(crate) landings: LandingIndex,
+    pub(crate) entrances: usize,
+    pub(crate) traces: u32,
 }
 
 /// The trace a link jumps to (`jit-design.md` §4.3), published before the
@@ -470,7 +394,9 @@ pub(crate) const DECLINED: u32 = u32::MAX - 3;
 /// [`ABANDONED`], [`UNWOUND`], [`INTERRUPTED`] and [`DECLINED`]. Nothing is
 /// stored, since the trace knows nothing of the frame it returned into;
 /// `enter` hands back the frame that stands, at the opline the return
-/// left it, whose handler `dispatch` runs as php's interpreter does.
+/// left it, whose handler `dispatch` runs as php's interpreter does: where
+/// the code found no trace compiled there it could go on into
+/// ([`Escapes`]).
 pub(crate) const ESCAPED: u32 = u32::MAX - 4;
 
 /// What compiled code answers where the `RETURN` its trace ends at left
@@ -629,6 +555,50 @@ fn stub_at(ir: &TraceIr) -> Option<OplineIdx> {
     }
 }
 
+/// The kinds of the operands compiled code hands a kernel, at most
+/// three, which the crossing carries as one `i32`, a byte each in
+/// operand order: the `frameless` and `concat` kernels' (`jit-design.md`
+/// §4.3). `lower` makes it from the kinds and `enter` reads them back at
+/// the crossing, so the encoding is this type's alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub(crate) struct OperandKinds(u32);
+
+impl OperandKinds {
+    /// `kinds` in operand order, each one `Unused` past the operands a
+    /// kernel takes.
+    pub(crate) fn of(kinds: [OperandKind; 3]) -> OperandKinds {
+        OperandKinds(
+            kinds
+                .iter()
+                .rev()
+                .fold(0, |word, kind| word << 8 | u32::from(*kind as u8)),
+        )
+    }
+
+    /// The word compiled code passes.
+    pub(crate) fn word(self) -> i64 {
+        i64::from(self.0)
+    }
+
+    /// The kinds in operand order; none where a byte names no kind,
+    /// which compiled code never writes.
+    pub(crate) fn kinds(self) -> Option<[OperandKind; 3]> {
+        let kind = |at: u32| {
+            [
+                OperandKind::Unused,
+                OperandKind::Const,
+                OperandKind::Tmp,
+                OperandKind::Var,
+                OperandKind::Cv,
+            ]
+            .into_iter()
+            .find(|kind| u32::from(*kind as u8) == self.0 >> (8 * at) & 0xff)
+        };
+        Some([kind(0)?, kind(1)?, kind(2)?])
+    }
+}
+
 /// A kernel compiled code calls (`jit-design.md` §4.6, §5.2), by the
 /// wrapper `enter`'s `kernels!` list makes of it. Every wrapper is
 /// `extern "C"` on the host's convention, takes the `ExitCtx`, the room
@@ -732,11 +702,58 @@ pub(crate) enum Kernel {
     /// (`php_engine::tier::return_entry`), `left` then one; zero, with
     /// nothing done, for any other frame.
     Leave,
+    /// `frameless(cx, frame, opline: u32, place: u32, at: u32, kinds:
+    /// u32, a: u64, a_info: u32, b: u64, b_info: u32, c: u64, c_info: u32,
+    /// out: *mut Zval)`: the native at `at` of the engine's frameless
+    /// table, a `FRAMELESS_ICALL_*`'s of the frame at `place` on the
+    /// stack, served over the operand zvals compiled code read, each of
+    /// the `OperandKind` its byte of `kinds` names, `Unused` past the
+    /// native's arity, with no opline read
+    /// (`php_engine::tier::frameless_call`), as php's `jit_frameless_icall*`
+    /// calls the native's frameless handler with the operands' addresses;
+    /// what it returned written to `out`, `null` where it threw, its
+    /// throw, and what user code it calls back throws, answered as one.
+    Frameless,
+    /// `free_this(cx, frame, opline: u32)`: the receiver of the method's
+    /// frame a `RETURN` leaves in place, after its variables, where the
+    /// owner the frame holds or the pin it was lent is the last
+    /// (`php_engine::tier::free_this`), as `zend_jit_leave_func`'s
+    /// `OBJ_RELEASE(Z_OBJ(execute_data->This))` gives it up; its
+    /// destructor's throw is the status's.
+    FreeThis,
+    /// `make_ref(cx, frame, opline: u32, place: u64, made: *mut u64)`:
+    /// `ZVAL_MAKE_REF` of the variable at `place`, which holds no
+    /// reference, a `SEND_REF`'s, as php's `zend_jit_send_ref` makes it
+    /// (`php_engine::tier::make_ref`), written into the place; `made` one
+    /// where it made it, zero where the memory limit refused it: the
+    /// request's fatal, answered as its unwinding, or a fallible scope's
+    /// refusal, whose send the handler then serves.
+    MakeRef,
+    /// `call_native(cx, frame, opline: u32, call: u32, out: *mut Zval)`:
+    /// the native the call at `call` on the stack, on top and made the
+    /// one being served by compiled code, is to, served with no opline
+    /// read (`php_engine::tier::call_native`), as php's `zend_jit_do_fcall`
+    /// calls a native's handler with the call and the address of the slot
+    /// that takes its return: what it returned written to `out`, the call
+    /// still on top; `null`, the call popped and the throw answered as
+    /// one, where it threw.
+    CallNative,
+    /// `pop_call(cx, frame, opline: u32)`: the call on top popped, its
+    /// arguments given up (`php_engine::tier::pop_call`), where compiled
+    /// code does not pop a native's call in place; a destructor's throw
+    /// is the status's.
+    PopCall,
+    /// `interrupt(cx, frame, opline: u32)`: the interrupt check php's
+    /// `zend_fcall_interrupt` makes once a native returned, where
+    /// compiled code found the interrupt raised
+    /// (`php_engine::tier::interrupted`); a hook's throw is the status's,
+    /// and the timeout's fatal an exit.
+    Interrupt,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 15] = [
+    pub(crate) const ALL: [Kernel; 21] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
@@ -752,6 +769,12 @@ impl Kernel {
         Kernel::Find,
         Kernel::Lookup,
         Kernel::Leave,
+        Kernel::Frameless,
+        Kernel::FreeThis,
+        Kernel::MakeRef,
+        Kernel::CallNative,
+        Kernel::PopCall,
+        Kernel::Interrupt,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].
@@ -801,7 +824,10 @@ pub(crate) struct Stood {
 }
 
 impl Stood {
-    /// Where nothing stood: a null frame and call, and no room.
+    /// Where nothing stood: a null frame and call, and no room. What an
+    /// `ExitCtx` holds before its first kernel, and what [`Kernel::Step`]
+    /// answers where its opline ended the serving the trace runs in, the
+    /// frame null being php's halted IP.
     pub(crate) const NOWHERE: Stood = Stood {
         frame: std::ptr::null_mut(),
         call: std::ptr::null_mut(),
@@ -890,7 +916,8 @@ impl Backend {
     /// `ir` in final bytes, named `name`: the prologue, then the body
     /// [`clif::lower`] builds, compiled for the host, with a [`Mark`] per
     /// recorded opline, its link a jump to `linked` where it links to a
-    /// trace with code. Bytes that would need relocating are php's
+    /// trace with code, and its escape a jump to the trace compiled at
+    /// the landing, read through `escapes`, where it has them. Bytes that would need relocating are php's
     /// `COMPILER_ERROR`, as is any refusal of Cranelift's: kernel
     /// addresses, the entry slots' and a link's are constants, so a trace's
     /// bytes work wherever the arena places them.
@@ -899,14 +926,14 @@ impl Backend {
         ir: &TraceIr,
         name: TraceName,
         linked: Option<Linked>,
+        escapes: Option<Escapes>,
     ) -> Result<Compiled, Abort> {
         let config = self.isa.frontend_config();
         let (calls, callee_caches) = in_place(ir);
         let slots = EntrySlots::new(ir.exits.len());
-        let landings = LandingSlots::new();
         let joins = clif::Joins {
             slots: slots.base(),
-            landings: landings.base(),
+            escapes,
             linked,
         };
         // Under exit-fuzz a first pass counts the guards, one byte each.
@@ -951,7 +978,6 @@ impl Backend {
             name,
             fuzzed,
             slots,
-            landings,
             callee_caches,
             calls,
         })
@@ -969,7 +995,19 @@ impl Backend {
         let (calls, _) = in_place(ir);
         let joins = clif::Joins {
             slots: 0x6000_0000,
-            landings: 0x6100_0000,
+            escapes: Some(Escapes {
+                landings: LandingIndex {
+                    chunks: 0x6100_0000,
+                    own: php_engine::tier::LandingRows {
+                        first: 0x10,
+                        held: 1 << 23,
+                        place: 0,
+                    },
+                    preloaded: None,
+                },
+                entrances: 0x6200_0000,
+                traces: 1024,
+            }),
             linked,
         };
         clif::lower(

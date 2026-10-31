@@ -9,7 +9,7 @@ loop at 0, recursive call, interrupt stub
   #1 f0.CV0 [packed array] = phi(#0, #7)
   guard #1 packed -> exit 2
 0001 f0 FETCH_DIM_R #1, int(0) inline leaves -> exit 1
-  -> #2 f0.T0 [ref, any]
+  -> #2 f0.T0 [any]
 0002 f0 TYPE_CHECK #2 fused inline unwinds -> unwind 0
   checks direction taken -> exit 3
   guard room 224 -> exit 4
@@ -26,7 +26,7 @@ loop at 0, recursive call, interrupt stub
   -> #4 f1.CV0 [packed array]
   guard #4 packed -> exit 2
 0001 f1 FETCH_DIM_R #4, int(0) inline leaves -> exit 1
-  -> #5 f1.T0 [ref, any]
+  -> #5 f1.T0 [any]
 0002 f1 TYPE_CHECK #5 fused inline unwinds -> unwind 0
   checks direction taken -> exit 3
   guard room 224 -> exit 4

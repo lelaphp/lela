@@ -64,6 +64,8 @@ divergence::Status::as_str
 divergence::reason
 done::Base
 done::Base::of
+done::Caller
+done::Caller::ambient
 done::Verdict
 done::Verdict::met
 done::Verdict::render
@@ -89,12 +91,14 @@ manifest::Crate::subsets
 manifest::Crate::with_feature
 manifest::Crate::with_oracle
 manifest::Crate::with_phpt
+manifest::Defect
 manifest::DivergenceTable
 manifest::Edge
 manifest::Edge::between
 manifest::FILE
 manifest::Generated
 manifest::Generated::files
+manifest::HeldAt
 manifest::Instrument
 manifest::Instrument::name
 manifest::Layout
@@ -105,6 +109,7 @@ manifest::Manifest::adr_title
 manifest::Manifest::crate_named
 manifest::Manifest::crate_of
 manifest::Manifest::crates_of
+manifest::Manifest::defects
 manifest::Manifest::generated_files
 manifest::Manifest::layout
 manifest::Manifest::load
@@ -138,6 +143,7 @@ manifest::Rule
 manifest::Rule::covers
 manifest::Rule::exempts
 manifest::Rule::named
+manifest::Runs
 manifest::SCRIPTS
 manifest::Scripts
 manifest::Scripts::new
@@ -183,6 +189,7 @@ oracle::PROMISE_VARIABLE
 oracle::Param
 oracle::Piece
 oracle::Pin
+oracle::Pin::defects
 oracle::Pin::digest
 oracle::Pin::digests_asserted
 oracle::Pin::fastcgi
@@ -235,6 +242,13 @@ oracle::normalise
 oracle::normalise_in
 oracle::run_by
 oracle::verdict
+owner::SESSION_VARIABLE
+owner::SessionId
+owner::SessionId::as_str
+owner::SessionId::current
+owner::SessionId::new
+owner::of
+owner::record
 package_dir
 permit::Adapter
 permit::Arguments
@@ -263,6 +277,8 @@ port_map::CENSUS
 port_map::INSTRUMENT
 port_map::SEED
 port_map::command
+queue::claim
+queue::land
 reading::Chain
 reading::Chain::of_head
 reading::Chain::standing
@@ -418,6 +434,7 @@ usage::reading
 usage::record
 usage::scope_of
 vocab::hold
+vocab::message
 vocab::run
 witness::Accept
 witness::Ask
@@ -425,4 +442,6 @@ witness::Scope
 witness::record_accepted
 witness::run
 worktree::add
+worktree::own
 worktree::retire
+worktree::whose

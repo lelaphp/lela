@@ -1,1 +1,1 @@
-{"tool_name":"Bash","tool_input":{"command":"S=/var/empty; R=(results/x.md); git -C /tmp add -- \"${R[@]}\" && git -C /tmp commit -q -F $S/m.txt -- \"${R[@]}\"","description":"Commit by pathspec in another repository, placed by -C (#3257)"}}
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"S=/var/empty; R=(results/x.md); git -C /tmp add -- \"${R[@]}\" && git -C /tmp commit -q -F $S/m.txt -- \"${R[@]}\"","description":"Commit by pathspec in another repository, placed by -C (#3257)"}}

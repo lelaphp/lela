@@ -11,15 +11,16 @@
 //! maintenance between its two views, with three adapters: [`HeapPages`],
 //! the test adapter, one allocation of `UnsafeCell<u8>` with nothing to
 //! maintain, which tests the arena's bookkeeping under Miri; `MapJit`,
-//! macOS on aarch64, one `MAP_JIT` anonymous mapping whose two views are
-//! one address and the per-thread `pthread_jit_write_protect_np` toggle
-//! around each write, with `sys_icache_invalidate` over the bytes written;
-//! and `Memfd`, Linux on x86-64 and aarch64, one sealed `memfd` file
-//! mapped twice, written through the one view and executed through the
-//! other, with §4.4's cache maintenance over the executable addresses on
-//! aarch64. Where the build sets no `php_jit_arena` (`build.rs`),
-//! [`Unmapped`] maps nothing, and a table over it compiles nothing. Each
-//! mapping an adapter makes is one [`Mapping`], unmapped when it drops.
+//! macOS on x86-64 and aarch64, one `MAP_JIT` anonymous mapping whose two
+//! views are one address and, on Apple silicon, the per-thread
+//! `pthread_jit_write_protect_np` toggle around each write, with
+//! `sys_icache_invalidate` over the bytes written; and `Memfd`, Linux on
+//! x86-64 and aarch64, one sealed `memfd` file mapped twice, written
+//! through the one view and executed through the other, with §4.4's cache
+//! maintenance over the executable addresses on aarch64. Where the build
+//! sets no `php_jit_arena` (`build.rs`), [`Unmapped`] maps nothing, and a
+//! table over it compiles nothing. Each mapping an adapter makes is one
+//! [`Mapping`], unmapped when it drops.
 //!
 //! Beside the arena, the system's page its size is rounded to, and the
 //! three calls the `PERF_DUMP` record needs that only `unsafe` reaches:
@@ -619,10 +620,17 @@ pub(crate) fn thread_id() -> u32 {
 
 /// The macOS adapter (`jit-design.md` §4.4, `research/jit-research.r1.md`
 /// §B.8): one `MAP_JIT` mapping, the one span the platform allows, its
-/// two views one address. A thread writes it only between its own
-/// `pthread_jit_write_protect_np(0)` and `(1)`; every other thread sees it
-/// executable throughout, so there is no process-wide protection change
-/// after `map_pair`.
+/// two views one address, and no process-wide protection change after
+/// `map_pair`. Where the system has the per-thread write protection, as
+/// Apple silicon does, a thread writes the mapping only between its own
+/// `pthread_jit_write_protect_np(0)` and `(1)`, and every other thread
+/// sees it executable throughout. Where it has none, as Intel does, the
+/// mapping stays writable and executable on every thread as `mmap` made
+/// it, as php's ZTS buffer is only between `zend_jit_unprotect` and
+/// `zend_jit_protect`: php's `mprotect` back to `PROT_READ | PROT_EXEC`
+/// is the process-wide change §4.4 refuses, and Linux's write view
+/// stands writable the same way. `MAP_JIT` is what a hardened runtime with the
+/// `allow-jit` entitlement maps it under (#3524).
 #[cfg(all(php_jit_arena, target_os = "macos"))]
 mod mac {
     use std::io;
@@ -631,6 +639,7 @@ mod mac {
 
     use super::{Mapping, Pages};
 
+    #[cfg(target_arch = "aarch64")]
     unsafe extern "C" {
         /// libSystem's cache maintenance over freshly written code:
         /// `<libkern/OSCacheControl.h>`.
@@ -638,7 +647,47 @@ mod mac {
     }
 
     /// One `MAP_JIT` anonymous mapping.
-    pub(crate) struct MapJit(Mapping);
+    pub(crate) struct MapJit {
+        map: Mapping,
+        protection: Protection,
+    }
+
+    /// What the system does about a `MAP_JIT` mapping's protection, read
+    /// once from `pthread_jit_write_protect_supported_np`, as php's
+    /// `zend_jit_startup` reads it into `zend_write_protect`.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Protection {
+        /// Apple silicon: executable on every thread but one that opened
+        /// it for writing with `pthread_jit_write_protect_np(0)`.
+        PerThread,
+        /// Intel: writable and executable on every thread as `mmap` made
+        /// it, with nothing to open.
+        None,
+    }
+
+    /// The mapping open for writing on this thread until it drops.
+    struct Opened(Protection);
+
+    impl Opened {
+        fn new(protection: Protection) -> Opened {
+            if protection == Protection::PerThread {
+                // SAFETY: opens this thread's view of `MAP_JIT` regions
+                // alone; every other thread still sees them executable.
+                unsafe { libc::pthread_jit_write_protect_np(0) };
+            }
+            Opened(protection)
+        }
+    }
+
+    impl Drop for Opened {
+        fn drop(&mut self) {
+            if self.0 == Protection::PerThread {
+                // SAFETY: closes it again, before anything on this thread
+                // runs code in the region.
+                unsafe { libc::pthread_jit_write_protect_np(1) };
+            }
+        }
+    }
 
     impl Pages for MapJit {
         fn map_pair(len: usize) -> io::Result<Self> {
@@ -648,22 +697,23 @@ mod mac {
                 libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_JIT,
                 None,
             )?;
-            Ok(MapJit(map))
+            // SAFETY: reads whether the system has the protection, nothing else.
+            let protection = match unsafe { libc::pthread_jit_write_protect_supported_np() } {
+                0 => Protection::None,
+                _ => Protection::PerThread,
+            };
+            Ok(MapJit { map, protection })
         }
 
         unsafe fn write(&self, at: usize, bytes: &[u8]) {
-            // SAFETY: opens the `MAP_JIT` region for writing on this thread
-            // alone; every other thread still sees it executable.
-            unsafe { libc::pthread_jit_write_protect_np(0) };
+            let _opened = Opened::new(self.protection);
             let to = self.rx(at).as_ptr();
             // SAFETY: the caller hands a range inside the mapping that no
             // thread executes or reads, and `bytes` is not in it.
             unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), to, bytes.len()) };
-            // SAFETY: closes it again, before anything on this thread runs
-            // code in the region.
-            unsafe { libc::pthread_jit_write_protect_np(1) };
         }
 
+        #[cfg(target_arch = "aarch64")]
         unsafe fn sync(&self, range: Range<usize>) {
             let start = self.rx(range.start).as_ptr().cast::<libc::c_void>();
             // SAFETY: the caller hands a range inside the mapping, which
@@ -671,8 +721,15 @@ mod mac {
             unsafe { sys_icache_invalidate(start, range.len()) };
         }
 
+        /// Nothing, as on Linux: x86-64's instruction caches are coherent
+        /// with stores, so php's `ir_mem_flush` does nothing there, its
+        /// `__builtin___clear_cache` emitting no instruction and its
+        /// `sys_icache_invalidate` on Apple aarch64 alone.
+        #[cfg(not(target_arch = "aarch64"))]
+        unsafe fn sync(&self, _: Range<usize>) {}
+
         fn rx(&self, at: usize) -> NonNull<u8> {
-            self.0.at(at)
+            self.map.at(at)
         }
 
         /// Nothing: a `MAP_PRIVATE` mapping is copied on write by a fork.

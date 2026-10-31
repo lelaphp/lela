@@ -26,11 +26,11 @@ use std::fmt::{self, Write as _};
 use php_engine::tier;
 use php_heap::ZvalType;
 
-use crate::record::func_name as func;
+use crate::record::{Callee, func_name as func};
 use crate::types::{
     Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Imm, Interrupt,
-    Landing, Layout, Object, Op, OpId, Operand, Owners, Place, Pointee, Read, Repeat, Returned,
-    Slot, Slotted, Store, Stored, TraceIr, Types, Unwind, ValueId,
+    Landing, Layout, Object, Op, OpId, Operand, Owners, PairCallee, PairClass, Place, Pointee,
+    Read, Repeat, Returned, Slot, Slotted, Store, Stored, TraceIr, Types, Unwind, ValueId,
 };
 
 /// The text of `ir`.
@@ -194,7 +194,11 @@ impl<'a> Dump<'a> {
                 began,
                 plain,
             } => {
-                let target = callee.user().map_or("native".to_owned(), func);
+                let target = match callee {
+                    Callee::User(f) => func(*f),
+                    Callee::Native(_) => "native".to_owned(),
+                    Callee::Request => "request".to_owned(),
+                };
                 let in_place = if plain.is_some() { " in-place" } else { "" };
                 writeln!(
                     text,
@@ -294,6 +298,9 @@ impl<'a> Dump<'a> {
                         format!("copied #{} through an indirect reference", value.0)
                     }
                 },
+                Stored::Null => "null".to_owned(),
+                Stored::Overflowed { up: true } => "overflowed up".to_owned(),
+                Stored::Overflowed { up: false } => "overflowed down".to_owned(),
             };
             write!(text, " {}={from}", self.slot(store.slot))?;
         }
@@ -362,6 +369,7 @@ fn check(check: Check) -> String {
     match check {
         Check::Type { value, tag: t } => format!("#{} {}", value.0, tag(t)),
         Check::Deref { value, tag: t } => format!("#{} ref to {}", value.0, tag(t)),
+        Check::Reference { value } => format!("#{} ref", value.0),
         Check::Indirect {
             value,
             tag: t,
@@ -389,6 +397,7 @@ fn check(check: Check) -> String {
         }
         Check::Stands { func: f, opline } => format!("stands {} {:04}", func(f), opline.0),
         Check::Arm { opline } => format!("arm {:04}", opline.0),
+        Check::Callee { func: f } => format!("callee {}", func(f)),
         Check::Room { bytes } => format!("room {bytes}"),
         Check::Class { object, class } => {
             let of = match object {
@@ -405,7 +414,18 @@ fn check(check: Check) -> String {
 /// the variables it frees.
 fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
     let (value, owners) = match imm {
-        Imm::Make { .. } => return write!(text, " in-place"),
+        Imm::Make {
+            checks, defaults, ..
+        } => {
+            write!(text, " in-place")?;
+            for (at, mask) in checks.each() {
+                write!(text, " checks arg {} {mask:#x}", at + 1)?;
+            }
+            for (at, _) in defaults.each() {
+                write!(text, " copies arg {}", at + 1)?;
+            }
+            return Ok(());
+        }
         Imm::Property {
             slot: Slotted::Declared(slot),
             ..
@@ -414,7 +434,36 @@ fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
             slot: Slotted::Cached,
             ..
         } => return write!(text, " cached"),
-        Imm::Leave { value, owners } => (value, owners),
+        Imm::Pair { function, class } => {
+            match function {
+                PairCallee::Number(function) => write!(text, " pair fn {function}")?,
+                PairCallee::Record => write!(text, " pair fn own")?,
+            }
+            return match class {
+                PairClass::Receiver => write!(text, " of receiver"),
+                PairClass::Published(class) => {
+                    write!(text, " of class {}", tier::class_number(class))
+                }
+                PairClass::Named => write!(text, " of named"),
+                PairClass::Forwarded => write!(text, " of scope"),
+                PairClass::This { named, receiver } => {
+                    if let Some(named) = named {
+                        write!(text, " of class {}", tier::class_number(named))?;
+                    }
+                    write!(text, " this {}", tier::class_number(receiver))
+                }
+            };
+        }
+        Imm::Leave {
+            value,
+            owners,
+            receives,
+        } => {
+            if receives {
+                write!(text, " receives")?;
+            }
+            (value, owners)
+        }
         _ => return Ok(()),
     };
     match value {

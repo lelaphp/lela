@@ -70,7 +70,7 @@ fn requests(events: &Events) -> Vec<Vec<String>> {
 /// The child: phpdbg over the program `PROGRAM` names, the observers
 /// beside the bundle, the commands on stdin; what it recorded, a request
 /// to a line of its events joined by tabs, written where `EVENTS_TO`
-/// names. A run of the test binary that sets neither does nothing.
+/// names. The test binary, where neither is set, does nothing.
 #[test]
 #[ignore = "the phpdbg the other tests spawn, run by them alone"]
 fn child() {
@@ -79,7 +79,7 @@ fn child() {
     }
 }
 
-/// The child's run, over `program` and into the file `to`.
+/// The child's pass, over `program` and into the file `to`.
 fn recorded(to: &OsStr, program: &OsStr) {
     let rec = Recording::start();
     let argv = [
@@ -148,7 +148,7 @@ fn debugged(dir: &Path, commands: &str) -> (Vec<Vec<String>>, String) {
     (requests, String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// What the request's output and log were handed.
+/// What the request's sink and log were handed.
 #[derive(Default)]
 struct Kept(Vec<u8>);
 
@@ -170,7 +170,7 @@ impl OutputSink for Kept {
 }
 
 /// Each request's events the plain loop raised over `t.php` of `dir`,
-/// served as phpdbg's run serves it, bare and under phpdbg's name, with
+/// served as phpdbg's `run` serves it, bare and under phpdbg's name, with
 /// the bundle and the observers.
 fn plain(dir: &Path) -> Vec<Vec<String>> {
     let rec = Recording::start();
@@ -197,9 +197,9 @@ fn plain(dir: &Path) -> Vec<Vec<String>> {
     requests(&rec.events())
 }
 
-/// The run's request: the first the host served that observed anything,
-/// since the session's own requests before it run no program. The cycle
-/// after it, held at the context's first opline until `q`, observes
+/// The `run`'s request: the first the host served that observed anything,
+/// since the session's own requests before it serve no program. The cycle
+/// after it, held at the `exec` file's first opline until `q`, observes
 /// nothing, as php executes nothing there (#2359).
 fn the_run(requests: &[Vec<String>]) -> &[String] {
     requests
@@ -209,8 +209,8 @@ fn the_run(requests: &[Vec<String>]) -> &[String] {
 }
 
 /// `source` debugged under each of `sessions`, the commands the prompt
-/// reads, each run's events held to the plain loop's, and each session's
-/// output to hold every line of `shown` among its own.
+/// reads, each `run`'s events held to the plain loop's, and each session's
+/// writes to hold every line of `shown` among its own.
 fn held_to_the_loop(name: &str, source: &str, sessions: &[(&str, &[&str])]) {
     let dir = laid(name, source);
     let plain = plain(&dir);
@@ -238,7 +238,7 @@ fn held_to_the_loop(name: &str, source: &str, sessions: &[(&str, &[&str])]) {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Calls two deep, run whole, and stepped into and over from a
+/// Calls two deep, served whole, and stepped into and over from a
 /// breakpoint: every begin and end the loop raises, each end with what
 /// the frame returned.
 #[test]
@@ -261,7 +261,7 @@ fn calls_raise_the_loop_s_events() {
 }
 
 /// A throwable a caller catches, through a `finally`: the frames it
-/// leaves end with nothing returned, run whole and stepped through.
+/// leaves end with nothing returned, served whole and stepped through.
 #[test]
 fn a_caught_unwind_raises_the_loop_s_events() {
     held_to_the_loop(
@@ -278,7 +278,7 @@ fn a_caught_unwind_raises_the_loop_s_events() {
 }
 
 /// A throwable nothing catches: the host stops at it, says so, and the
-/// run ends in it; every frame it leaves ends with nothing returned.
+/// `run` ends in it; every frame it leaves ends with nothing returned.
 #[test]
 fn an_uncaught_unwind_raises_the_loop_s_events() {
     held_to_the_loop(
@@ -318,11 +318,11 @@ fn a_fatal_raises_the_loop_s_events() {
     );
 }
 
-/// The execution context held at the prompt is compiled and not
+/// The `exec` file held at the prompt is compiled and not
 /// executed, as php's `phpdbg_compile` leaves it until `run`'s
 /// `zend_execute` (#2359): a session that quits there hands an observer
-/// nothing of the main file, nor does the cycle held again after a run;
-/// and the run's begin of the main file comes after what the prompt
+/// nothing of the main file, nor does the cycle held again after a `run`;
+/// and the `run`'s begin of the main file comes after what the prompt
 /// served before `r`, here an `ev`'s code.
 #[test]
 fn a_held_context_raises_nothing_until_run() {

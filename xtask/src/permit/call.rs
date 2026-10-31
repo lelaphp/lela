@@ -42,9 +42,6 @@ pub struct Call {
     pub transcript_path: Option<String>,
     /// The subagent the call runs in, absent on the main loop.
     pub agent_id: Option<String>,
-    /// How long the call ran, which the `PostToolUse` hook carries: what
-    /// began during it began no earlier than this before the hook.
-    pub(super) duration_ms: Option<u64>,
     /// The hook event the call came in on, which the hook's answer names
     /// again: `PostToolUse`, or `PostToolUseFailure` for a `Bash` call that
     /// exited non-zero, which gets no `PostToolUse` (#2762).
@@ -71,6 +68,14 @@ pub struct Arguments {
     pub replace_all: bool,
     pub content: Option<String>,
     pub command: Option<String>,
+    /// A `Bash` call the runtime runs in the background and notifies the
+    /// end of, which a `runs = "foreground"` rule does not judge (#3624).
+    #[serde(default)]
+    pub run_in_background: bool,
+    /// A `Monitor` call's deadline, an argument no `Bash` call carries:
+    /// the runtime hands a `Monitor` to the hook as `Bash`, and runs it in
+    /// the background by construction (#3637).
+    pub timeout_ms: Option<f64>,
 }
 
 impl Call {
@@ -171,6 +176,14 @@ impl Call {
         Some((vec![standing], after))
     }
 
+    /// Whether the runtime runs the call in the background and notifies
+    /// its end: a `Bash` call with `run_in_background`, or a `Monitor`,
+    /// by its name or its `timeout_ms` (#3637).
+    pub(super) fn in_background(&self) -> bool {
+        let input = &self.tool_input;
+        input.run_in_background || self.tool_name == "Monitor" || input.timeout_ms.is_some()
+    }
+
     pub(super) fn command(&self) -> Option<&str> {
         self.tool_input.command.as_deref()
     }
@@ -220,11 +233,28 @@ impl Call {
     /// ancestor with a manifest that also has a `.git`: a `Bash` call whose
     /// shell stands in a fixture directory is the checkout's, whose
     /// manifest carries the shell rules, since a fixture's manifest
-    /// describes the fixture's sources and not what a shell may run.
+    /// describes the fixture's sources and not what a shell may run. A
+    /// fixture's manifest itself, one in a directory with no `.git`, is
+    /// test data and not that workspace's harness file, so it is placed
+    /// from the directory above (#3644 ruling 2): the guard on a negative
+    /// control is its test, every rule having a fixture that must fail.
     pub(super) fn nested(&self, root: &Path) -> Option<PathBuf> {
         let root = canonical(root);
         match (self.tool_input.file_path.as_deref(), self.cwd.as_deref()) {
-            (Some(file), _) => nearest(&root, &canonical(&root.join(file)), &[manifest::FILE]),
+            (Some(file), _) => {
+                let file = canonical(&root.join(file));
+                let place = match file.parent() {
+                    Some(dir)
+                        if file.file_name() == Some(manifest::FILE.as_ref())
+                            && dir != root
+                            && !dir.join(".git").exists() =>
+                    {
+                        dir.parent().unwrap_or(dir)
+                    }
+                    _ => &file,
+                };
+                nearest(&root, place, &[manifest::FILE])
+            }
             (None, Some(cwd)) => nearest(
                 &root,
                 &canonical(&root.join(cwd)),

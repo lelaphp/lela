@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"the-owner","tool_input":{"command":"git merge --continue","description":"Conclude the merge standing in the checkout this session owns"}}
