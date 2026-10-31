@@ -11,6 +11,16 @@ Run those builds sequentially on small builders. The default Cargo job count is
 one. The installer runs on BUILDARCH; the compiled hosts and their libraries
 follow TARGETARCH. Product naming remains governed by ADR-0016.
 
+## The compiled tier
+
+The hosts carry the compiled tier: `sapi/cli`, `sapi/fpm` and `sapi/makala`
+each turn `php_bundle`'s `jit` feature on by default, so the release build
+needs no flag for it. `opcache.jit` defaults to `disable`, as php's does, so a
+request runs on the interpreter until `opcache.jit=tracing` (with
+`opcache.enable_cli=1` in the CLI) asks for the tier. Tracing is experimental:
+it sits outside every supported combination (ADR-0017). A host built with
+`--no-default-features` carries no tier.
+
 ## Verify and refresh
 
 `dist/inputs.toml` holds the full php-src commit, both ini SHA-256 values, the

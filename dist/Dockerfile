@@ -104,12 +104,14 @@ ENV PHP_CONFIG_FILE_PATH=${PHP_INI_DIR} \
     PHP_BUILD_PROVIDER=${BUILD_PROVIDER}
 WORKDIR /src
 COPY . .
-# The compiled tier is built in, php_bundle's `jit` feature, as the macOS
-# binaries have it; it stays off until opcache.jit asks, as php's does.
+# The compiled tier is built in from the hosts' own manifests, each of which
+# turns php_bundle's `jit` on by default, and php-cgi shares the bundle's
+# features with them on this one cargo line; it stays off until opcache.jit
+# asks, as php's does, and tracing is experimental (ADR-0017, #3676).
 RUN --mount=type=cache,id=${CACHE}-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=${CACHE}-target-${TARGETARCH},target=/src/target \
     . /usr/local/share/dax-target.env; \
-    cargo build --release --locked --features php_bundle/jit \
+    cargo build --release --locked \
         -p php_sapi_cli -p php_sapi_cgi -p php_sapi_fpm \
         --bin "$NAME" --bin "$NAME-cgi" --bin "$NAME-fpm"; \
     release="target/$CARGO_BUILD_TARGET/release"; \

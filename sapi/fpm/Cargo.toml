@@ -22,6 +22,12 @@ workspace = true
 name = "php-fpm"
 path = "src/main.rs"
 
+[features]
+# The compiled tier in every build that keeps the default features, the
+# release build among them, `opcache.jit=disable` its default and tracing
+# experimental, as `sapi/cli`'s says (ADR-0017, #3676).
+default = ["php_bundle/jit"]
+
 [dependencies]
 # The bundle's default set and `one_thread`, the set a host serving on
 # one thread links, whose comment and `host`'s say why each (#1477, #3081).
