@@ -1302,6 +1302,16 @@ fn opcache_is_script_cached_in_file_cache(
 /// opcache.jit_max_polymorphic_calls => 2 => 2
 /// opcache.jit_max_trace_length => 1024 => 1024
 /// ```
+///
+/// The `JIT` row is the tier's `JIT_G`, `On` while it traces:
+///
+/// ```php
+/// ob_start(); (new ReflectionExtension('Zend OPcache'))->info();
+/// echo implode("\n", preg_grep('/^JIT /', explode("\n", ob_get_clean()))), "\n";
+/// ```
+/// ```expect regime=jit-tracing process
+/// JIT => On
+/// ```
 fn info(req: &mut Request) {
     info_rows(req).ok();
     display_ini_entries(req);
@@ -1315,6 +1325,7 @@ fn info_rows(req: &mut Request) -> Result<(), Thrown> {
     let started = on && startup == Startup::Ok;
     let optimising = started && long(req, "opcache.optimization_level") != 0;
     let file_cache = !value(req, "opcache.file_cache").is_empty();
+    let jit = *req.code_mut().unit_cache().tier_setting();
     let mut rows: Vec<(String, String)> = Vec::new();
     for (name, shown) in [
         (
@@ -1341,7 +1352,14 @@ fn info_rows(req: &mut Request) -> Result<(), Thrown> {
             "File Cache",
             if file_cache { "Enabled" } else { "Disabled" },
         ),
-        ("JIT", "Disabled"),
+        (
+            "JIT",
+            match (jit.enabled, jit.on) {
+                (false, _) => "Disabled",
+                (true, true) => "On",
+                (true, false) => "Off",
+            },
+        ),
     ] {
         rows.push((name.to_owned(), shown.to_owned()));
     }
