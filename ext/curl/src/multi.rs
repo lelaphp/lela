@@ -184,6 +184,30 @@ fn curl_multi_init(req: &mut Request) -> Result<Owner<Instance<CurlMultiHandle>>
 /// int(7)
 /// int(7)
 /// ```
+///
+/// What `_php_curl_verify_handlers` raised stays pending while the
+/// `CurlHandle` is added, as php goes on to `curl_multi_add_handle` with
+/// it in `EG(exception)`.
+///
+/// ```php
+/// set_error_handler(function ($no, $text) { throw new Exception($text); });
+/// $h = curl_init();
+/// $fp = fopen('php://memory', 'w');
+/// curl_setopt($h, CURLOPT_FILE, $fp);
+/// fclose($fp);
+/// $m = curl_multi_init();
+/// try {
+///     curl_multi_add_handle($m, $h);
+/// } catch (Exception $e) {
+///     echo $e->getMessage(), "\n";
+/// }
+/// var_dump(curl_multi_get_handles($m) === [$h], curl_multi_errno($m));
+/// ```
+/// ```expect
+/// curl_multi_add_handle(): CURLOPT_FILE resource has gone away, resetting to default
+/// bool(true)
+/// int(0)
+/// ```
 #[php_function]
 fn curl_multi_add_handle(
     req: &mut Request,
@@ -191,25 +215,33 @@ fn curl_multi_add_handle(
     handle: Instance<CurlHandle>,
 ) -> Result<i64, Thrown> {
     let object = handle.object();
+    let mut pending = Pending::default();
     if let Some(thrown) = verify_handlers(req, object, true) {
-        return Err(thrown);
+        pending.park(req, thrown);
     }
-    cleanup_handle(req, object);
-    let multi = multi_of(req, multi_handle)?;
-    let easy = easy_of(req, object)?;
-    let code = multi.add(req, easy);
-    mh(req, multi_handle)?.err = code;
-    if code == 0 {
-        let held = Owner::take(req, object);
-        match mh(req, multi_handle) {
-            Ok(mh) => mh.easy.push(held),
-            Err(thrown) => {
-                held.give_up(req);
-                return Err(thrown);
+    let added = pending.step(req, |req, pending| {
+        cleanup_handle(req, object);
+        let multi = multi_of(req, multi_handle)?;
+        let easy = easy_of(req, object)?;
+        let (code, thrown) = multi.add(req, easy);
+        if let Some(thrown) = thrown {
+            pending.park(req, thrown);
+        }
+        mh(req, multi_handle)?.err = code;
+        if code == 0 {
+            let held = Owner::take(req, object);
+            match mh(req, multi_handle) {
+                Ok(mh) => mh.easy.push(held),
+                Err(thrown) => {
+                    held.give_up(req);
+                    return Err(thrown);
+                }
             }
         }
-    }
-    Ok(code)
+        Ok(code)
+    });
+    // `None` only where a fatal stands, which is the answer then.
+    pending.answer(req, added.unwrap_or(Ok(0)))
 }
 
 /// `curl_multi_remove_handle(CurlMultiHandle $multi_handle, CurlHandle $handle): int`.
@@ -224,6 +256,85 @@ fn curl_multi_add_handle(
 /// int(0)
 /// int(0)
 /// ```
+///
+/// libcurl logs from inside the remove: taking out a transfer that has a
+/// connection writes `closing connection` to its debug callable, which
+/// the request is lent to for the call.
+///
+/// ```php
+/// $h = curl_init('http://127.0.0.1:1/');
+/// curl_setopt($h, CURLOPT_VERBOSE, 1);
+/// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) { echo "debug: $data"; });
+/// $m = curl_multi_init();
+/// curl_multi_add_handle($m, $h);
+/// curl_multi_exec($m, $r);
+/// echo "exec\n";
+/// curl_multi_remove_handle($m, $h);
+/// echo "removed\n";
+/// ```
+/// ```expect
+/// exec
+/// debug: closing connection #0
+/// removed
+/// ```
+///
+/// What the callable throws there is this native's throwable, and the
+/// `CurlHandle` is taken out all the same, as php leaves it pending past
+/// `zend_llist_del_element`.
+///
+/// ```php
+/// $h = curl_init('http://127.0.0.1:1/');
+/// curl_setopt($h, CURLOPT_VERBOSE, 1);
+/// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) {
+///     echo "debug: $data";
+///     throw new Exception('from the callable');
+/// });
+/// $m = curl_multi_init();
+/// curl_multi_add_handle($m, $h);
+/// curl_multi_exec($m, $r);
+/// try {
+///     curl_multi_remove_handle($m, $h);
+/// } catch (Exception $e) {
+///     echo get_class($e), ': ', $e->getMessage(), "\n";
+/// }
+/// var_dump(count(curl_multi_get_handles($m)), curl_multi_errno($m));
+/// ```
+/// ```expect
+/// debug: closing connection #0
+/// Exception: from the callable
+/// int(0)
+/// int(0)
+/// ```
+///
+/// From inside another transfer's write callback, the line reaches the
+/// callable through the request that callback was lent.
+///
+/// ```php
+/// $h = curl_init('http://127.0.0.1:1/');
+/// curl_setopt($h, CURLOPT_VERBOSE, 1);
+/// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) { echo "debug: $data"; });
+/// $other = curl_multi_init();
+/// curl_multi_add_handle($other, $h);
+/// curl_multi_exec($other, $r);
+/// $f = tempnam(sys_get_temp_dir(), 'curl');
+/// file_put_contents($f, 'x');
+/// $m = curl_multi_init();
+/// $d = curl_init("file://$f");
+/// curl_setopt($d, CURLOPT_WRITEFUNCTION, function ($d, $data) use ($other, $h) {
+///     var_dump(curl_multi_remove_handle($other, $h));
+///     return strlen($data);
+/// });
+/// curl_multi_add_handle($m, $d);
+/// do { $status = curl_multi_exec($m, $active); } while ($active && $status == CURLM_OK);
+/// var_dump($status, count(curl_multi_get_handles($other)));
+/// unlink($f);
+/// ```
+/// ```expect
+/// debug: closing connection #0
+/// int(0)
+/// int(0)
+/// int(0)
+/// ```
 #[php_function]
 fn curl_multi_remove_handle(
     req: &mut Request,
@@ -233,19 +344,29 @@ fn curl_multi_remove_handle(
     let object = handle.object();
     let multi = multi_of(req, multi_handle)?;
     let easy = easy_of(req, object)?;
-    let code = multi.remove(req, easy);
-    let mh = mh(req, multi_handle)?;
-    mh.err = code;
-    if code == 0
-        && let Some(at) = mh
-            .easy
-            .iter()
-            .position(|held| held.index() == object.index())
-    {
-        let held = mh.easy.remove(at);
-        held.give_up(req);
+    let (code, thrown) = multi.remove(req, easy);
+    let mut pending = Pending::default();
+    if let Some(thrown) = thrown {
+        pending.park(req, thrown);
     }
-    Ok(code)
+    // `SAVE_CURLM_ERROR` and `zend_llist_del_element`, with what the
+    // callable threw standing, as php goes on past it.
+    let taken = pending.step(req, |req, _| {
+        let mh = mh(req, multi_handle)?;
+        mh.err = code;
+        if code == 0
+            && let Some(at) = mh
+                .easy
+                .iter()
+                .position(|held| held.index() == object.index())
+        {
+            let held = mh.easy.remove(at);
+            held.give_up(req);
+        }
+        Ok(code)
+    });
+    // `None` only where a fatal stands, which is the answer then.
+    pending.answer(req, taken.unwrap_or(Ok(code)))
 }
 
 /// `curl_multi_get_handles(CurlMultiHandle $multi_handle): array`.
@@ -353,6 +474,68 @@ fn curl_multi_select(
 ///
 /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate %d bytes) in %s on line 12
 /// ```
+///
+/// What a callable threw during the transfer is this native's throwable,
+/// and the count of transfers still going is written all the same, as
+/// php's `ZEND_TRY_ASSIGN_REF_LONG` follows `curl_multi_perform` with it
+/// pending.
+///
+/// ```php
+/// $a = curl_init('http://127.0.0.1:1/');
+/// $b = curl_init('http://127.0.0.1:1/');
+/// curl_setopt($b, CURLOPT_VERBOSE, 1);
+/// curl_setopt($b, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) {
+///     static $n = 0;
+///     if ($n++ === 0) {
+///         throw new Exception('from the callable');
+///     }
+/// });
+/// $m = curl_multi_init();
+/// curl_multi_add_handle($m, $a);
+/// curl_multi_add_handle($m, $b);
+/// $running = 'not assigned';
+/// try {
+///     curl_multi_exec($m, $running);
+/// } catch (Exception $e) {
+///     echo $e->getMessage(), "\n";
+/// }
+/// var_dump($running);
+/// ```
+/// ```expect
+/// from the callable
+/// int(2)
+/// ```
+///
+/// The code is saved even where writing the count raised, as php's
+/// `SAVE_CURLM_ERROR` follows `ZEND_TRY_ASSIGN_REF_LONG` whatever it
+/// threw: a call from inside the multi's own transfer answers
+/// `CURLM_RECURSIVE_API_CALL`, and a typed reference refuses the count.
+///
+/// ```php
+/// declare(strict_types=1);
+/// class C { public string $r = ''; }
+/// $f = tempnam(sys_get_temp_dir(), 'curl');
+/// file_put_contents($f, 'x');
+/// $m = curl_multi_init();
+/// $d = curl_init("file://$f");
+/// curl_setopt($d, CURLOPT_WRITEFUNCTION, function ($d, $data) use ($m) {
+///     $c = new C;
+///     try {
+///         curl_multi_exec($m, $c->r);
+///     } catch (TypeError $e) {
+///         echo $e->getMessage(), "\n";
+///     }
+///     var_dump(curl_multi_errno($m));
+///     return strlen($data);
+/// });
+/// curl_multi_add_handle($m, $d);
+/// do { $status = curl_multi_exec($m, $active); } while ($active && $status == CURLM_OK);
+/// unlink($f);
+/// ```
+/// ```expect
+/// Cannot assign int to reference held by property C::$r of type string
+/// int(8)
+/// ```
 #[php_function]
 fn curl_multi_exec(
     req: &mut Request,
@@ -360,30 +543,49 @@ fn curl_multi_exec(
     still_running: Ref<Untyped<Value>>,
 ) -> Result<i64, Thrown> {
     let handles = handles(mh(req, multi_handle)?);
+    let mut pending = Pending::default();
     let mut held: Vec<EasyId> = Vec::with_capacity(handles.len());
     for handle in &handles {
-        if let Some(thrown) = verify_handlers(req, *handle, true) {
-            return Err(thrown);
-        }
+        pending.step(req, |req, pending| {
+            if let Some(thrown) = verify_handlers(req, *handle, true) {
+                pending.park(req, thrown);
+            }
+        });
         if let Ok(easy) = easy_of(req, *handle) {
             held.push(easy);
         }
     }
-    let running = match still_running.get() {
-        Some(Untyped(value)) => to_long(req, &value.deref())?,
-        None => 0,
+    let performed = pending.step(req, |req, pending| {
+        let running = match still_running.get() {
+            Some(Untyped(value)) => to_long(req, &value.deref())?,
+            None => 0,
+        };
+        let multi = multi_of(req, multi_handle)?;
+        let was = std::mem::replace(&mut mh(req, multi_handle)?.running, true);
+        #[allow(clippy::cast_possible_truncation)]
+        let (performed, thrown) = multi.perform(req, &held, running as i32);
+        mh(req, multi_handle)?.running = was;
+        if let Some(thrown) = thrown {
+            pending.park(req, thrown);
+        }
+        Ok(performed)
+    });
+    // The count and `SAVE_CURLM_ERROR` as a step of their own, with what
+    // the transfer threw standing; `None` only where a fatal stands,
+    // which is the answer then.
+    let answered = match performed {
+        Some(Ok((code, running))) => pending
+            .step(req, |req, _| {
+                // `SAVE_CURLM_ERROR` whatever the assignment raised.
+                let assigned = still_running.set(req, Untyped(Value::int(running)));
+                mh(req, multi_handle)?.err = code;
+                assigned.map(|()| code)
+            })
+            .unwrap_or(Ok(code)),
+        Some(Err(thrown)) => Err(thrown),
+        None => Ok(0),
     };
-    let multi = multi_of(req, multi_handle)?;
-    let was = std::mem::replace(&mut mh(req, multi_handle)?.running, true);
-    #[allow(clippy::cast_possible_truncation)]
-    let ((code, running), thrown) = multi.perform(req, &held, running as i32);
-    mh(req, multi_handle)?.running = was;
-    if let Some(thrown) = thrown {
-        return Err(thrown);
-    }
-    still_running.set(req, Untyped(Value::int(running)))?;
-    mh(req, multi_handle)?.err = code;
-    Ok(code)
+    pending.answer(req, answered)
 }
 
 /// `curl_multi_getcontent(CurlHandle $handle): ?string`: what
@@ -521,6 +723,38 @@ fn easy_id(req: &Request, handle: PhpObject) -> Option<EasyId> {
 /// array(0) {
 /// }
 /// ```
+///
+/// Each remove lends the request to the callables, and what the first
+/// throws stands over the rest, whose callables are then not called, as
+/// php's `zend_call_function` returns at once with `EG(exception)` set.
+///
+/// ```php
+/// $m = curl_multi_init();
+/// foreach (['a', 'b'] as $name) {
+///     $h = curl_init('http://127.0.0.1:1/');
+///     curl_setopt($h, CURLOPT_VERBOSE, 1);
+///     curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) use ($name) {
+///         if (str_starts_with($data, 'closing')) {
+///             echo "$name: $data";
+///             throw new Exception($name);
+///         }
+///     });
+///     curl_multi_add_handle($m, $h);
+/// }
+/// curl_multi_exec($m, $r);
+/// try {
+///     curl_multi_close($m);
+/// } catch (Exception $e) {
+///     echo 'thrown: ', $e->getMessage(), "\n";
+/// }
+/// var_dump(curl_multi_get_handles($m));
+/// ```
+/// ```expect
+/// a: closing connection #0
+/// thrown: a
+/// array(0) {
+/// }
+/// ```
 #[php_function]
 fn curl_multi_close(
     req: &mut Request,
@@ -535,15 +769,31 @@ fn curl_multi_close(
         return Err(throw_error(req, ce.error, &text));
     }
     let multi = multi_of(req, multi_handle)?;
-    let handles = std::mem::take(&mut mh(req, multi_handle)?.easy);
+    let mut handles = std::mem::take(&mut mh(req, multi_handle)?.easy);
     let mut pending = Pending::default();
+    for handle in &handles {
+        let removed = pending.step(req, |req, pending| {
+            if let Some(thrown) = verify_handlers(req, **handle, true) {
+                pending.park(req, thrown);
+            }
+            if let Ok(easy) = easy_of(req, **handle)
+                && let (_, Some(thrown)) = multi.remove(req, easy)
+            {
+                pending.park(req, thrown);
+            }
+        });
+        if removed.is_none() {
+            break;
+        }
+    }
+    // `zend_llist_clean`, after every remove, with what stands pending;
+    // where a fatal stands the owners are given up all the same.
+    pending.step(req, |req, _| {
+        for handle in handles.drain(..) {
+            handle.give_up(req);
+        }
+    });
     for handle in handles {
-        if let Some(thrown) = verify_handlers(req, *handle, true) {
-            pending.park(req, thrown);
-        }
-        if let Ok(easy) = easy_of(req, *handle) {
-            multi.remove(req, easy);
-        }
         handle.give_up(req);
     }
     pending.answer(req, Ok(()))
