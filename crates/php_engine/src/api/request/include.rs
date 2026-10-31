@@ -931,6 +931,36 @@ impl Request {
     /// dtor <- read
     /// ```
     ///
+    /// What the compile raised is raised, and what it declares declared,
+    /// before the stream closes, as `zend_compile_file` raises and declares
+    /// inside the compile: a file whose close throws has its functions
+    /// declared.
+    ///
+    /// ```php
+    /// class W { public $context; static $src; private $d = false;
+    ///     function stream_open($p, $m, $o, &$op) { return true; }
+    ///     function stream_read($n) { if ($this->d) return ''; $this->d = true; return self::$src; }
+    ///     function stream_eof() { return $this->d; }
+    ///     function stream_stat() { return []; }
+    ///     function stream_close() { echo "close\n"; }
+    ///     function stream_set_option($o, $a, $b) { return false; } }
+    /// class X extends W { function stream_close() { echo "close x\n"; throw new Exception('x'); } }
+    /// stream_wrapper_register('ww', 'W'); stream_wrapper_register('xx', 'X');
+    /// W::$src = "<?php\nfunction f(\$a = 1, \$b) {}\necho 'ran', PHP_EOL;\n";
+    /// include 'ww://a';
+    /// W::$src = "<?php\nfunction g() {}\n";
+    /// try { include 'xx://b'; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump(function_exists('g'));
+    /// ```
+    /// ```expect
+    /// Deprecated: f(): Optional parameter $a declared before required parameter $b is implicitly treated as a required parameter in ww://a on line 2
+    /// close
+    /// ran
+    /// close x
+    /// x
+    /// bool(true)
+    /// ```
+    ///
     /// A read that fails, as one through a filter that answers
     /// `PSFS_ERR_FATAL` fails, is the file php could not open
     /// (`zend_stream_fixup`, [`crate::layer::StreamHooks::open`]).
@@ -984,11 +1014,15 @@ impl Request {
             return Err(thrown);
         }
         (hooks.close_include)(self);
-        // What the read or the close threw, which the layer kept.
-        match self.stream_thrown.take() {
-            Some(thrown) => Err(thrown),
-            None => compiled,
+        // What the close threw, which the layer kept: the unit compiled
+        // before it is the handler's `destroy_op_array` then.
+        let Some(thrown) = self.stream_thrown.take() else {
+            return compiled;
+        };
+        if let Ok(Opened::Declared(unit)) = &compiled {
+            self.release_unit_strings(Some(unit));
         }
+        Err(thrown)
     }
 
     /// [`Request::include_stream`]'s `compile_file` over what the open
@@ -1031,7 +1065,12 @@ impl Request {
             None => return self.failed_opening(kind, written),
         };
         self.note_compiled_file(path, &unit)?;
-        Ok(Opened::Unit(unit))
+        // `zend_compile_file` raises what it recorded and declares the
+        // file's functions and classes before the handle is destroyed.
+        if !crate::engine::note_compiled(self, &unit, SourceKind::File) {
+            return Err(Thrown::of(self.take_pending_view()));
+        }
+        Ok(Opened::Declared(unit))
     }
 
     /// `zend_include_or_eval`'s `ZEND_EVAL` arm

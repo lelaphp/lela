@@ -596,11 +596,16 @@ enum Rows {
 /// a once form over a path the table already had, which answers `true`;
 /// `NULL`, a path nothing opened or an empty string to `eval`, which
 /// answers `false`; or the unit of the file or the string, whose main op
-/// array the handler serves on a frame of its own.
+/// array the handler serves on a frame of its own, `Declared` where its
+/// compile has declared what it declares and raised what it raised
+/// already, as `zend_compile_file` does for a stream's file before
+/// `compile_filename`'s `zend_destroy_file_handle`
+/// ([`Request::include_stream`]).
 pub(crate) enum Opened {
     Already,
     Failed,
     Unit(PublishedUnit),
+    Declared(PublishedUnit),
 }
 
 /// What `zend_get_property_offset` places a declared instance property
