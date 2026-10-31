@@ -133,6 +133,27 @@ enum At {
         out: ValueId,
         left: Left,
     },
+    /// After an `ADD` or a `SUB` of `1` whose long sum overflowed:
+    /// the opline past it with the double it went to in its slot
+    /// ([`Within::Overflowed`]).
+    Overflowed {
+        op: OplineIdx,
+        out: ValueId,
+        up: bool,
+    },
+}
+
+impl At {
+    /// Where an inline arithmetic leaves whose `out` a guard holds
+    /// within it, as `kind` says: at its opline `op`, which the
+    /// interpreter serves again, or past it with `out` the double it
+    /// overflowed to.
+    fn overflowing(kind: Within, op: OplineIdx, out: ValueId) -> At {
+        match kind {
+            Within::Overflowed { up } => At::Overflowed { op, out, up },
+            Within::Rerun | Within::Fetched { .. } => At::Opline(op),
+        }
+    }
 }
 
 /// What a fetch that leaves past itself left in its slot: the element,
@@ -2898,28 +2919,30 @@ impl<'a> Builder<'a> {
         let held = *self.val(value);
         let computed = match (held.def, tag) {
             (Def::Op(def), Some(tag)) => match self.ops.get(def.index()) {
-                Some(Op::Line(line)) if line.form == Form::Inline => within(line.opcode, tag)
-                    .filter(|kind| {
-                        matches!(kind, Within::Fetched { .. })
-                            || !self.over_aliased(line.op1, line.op2)
-                    })
-                    .map(|kind| {
-                        // A dimension's element is read through a reference
-                        // only where php's analysis says the array may hold
-                        // one, `zend_jit_guard_fetch_result_type`'s `deref`
-                        // (`Z/ext/opcache/jit/zend_jit_ir.c:12678-12679`).
-                        let deref = line.opcode == Opcode::FetchObjR
-                            || (self.types_of(line.frame, line.op1).info()).has(Php::OF_REF);
-                        (
-                            def,
-                            line.frame,
-                            line.opline,
-                            kind,
-                            line.op1,
-                            line.op2,
-                            deref,
-                        )
-                    }),
+                Some(Op::Line(line)) if line.form == Form::Inline => {
+                    within(line.opcode, tag, line.op2)
+                        .filter(|kind| {
+                            matches!(kind, Within::Fetched { .. })
+                                || !self.over_aliased(line.op1, line.op2)
+                        })
+                        .map(|kind| {
+                            // A dimension's element is read through a reference
+                            // only where php's analysis says the array may hold
+                            // one, `zend_jit_guard_fetch_result_type`'s `deref`
+                            // (`Z/ext/opcache/jit/zend_jit_ir.c:12678-12679`).
+                            let deref = line.opcode == Opcode::FetchObjR
+                                || (self.types_of(line.frame, line.op1).info()).has(Php::OF_REF);
+                            (
+                                def,
+                                line.frame,
+                                line.opline,
+                                kind,
+                                line.op1,
+                                line.op2,
+                                deref,
+                            )
+                        })
+                }
                 _ => None,
             },
             _ => None,
@@ -2943,8 +2966,10 @@ impl<'a> Builder<'a> {
                     left,
                 };
                 let to = match kind {
-                    Within::Rerun => At::Opline(opline),
                     Within::Fetched { .. } => fetched(Left::Copied(Read::InPlace)),
+                    Within::Rerun | Within::Overflowed { .. } => {
+                        At::overflowing(kind, opline, value)
+                    }
                 };
                 if let (Within::Fetched { missed }, Some(tag)) = (kind, tag) {
                     then = deref.then_some(Placed {
@@ -4348,16 +4373,21 @@ impl<'a> Builder<'a> {
         } else {
             false
         };
-        let inline = line.form == Form::Inline
-            && within(line.opcode, ZvalType::Long) == Some(Within::Rerun)
-            && !self.over_aliased(line.op1, line.op2);
-        (checked && inline).then(|| Placed {
+        let kind = within(line.opcode, ZvalType::Long, line.op2)
+            .filter(|kind| matches!(kind, Within::Rerun | Within::Overflowed { .. }));
+        let inline = line.form == Form::Inline && !self.over_aliased(line.op1, line.op2);
+        let kind = kind.filter(|_| checked && inline)?;
+        Some(Placed {
             at: GuardAt::Within(def),
             check: Check::Type {
                 value: back,
                 tag: ZvalType::Long,
             },
-            exit: draft(Point::Before(def), line.frame, At::Opline(line.opline)),
+            exit: draft(
+                Point::Before(def),
+                line.frame,
+                At::overflowing(kind, line.opline, back),
+            ),
         })
     }
 
@@ -4404,6 +4434,13 @@ impl<'a> Builder<'a> {
                     restores_call: calls,
                 };
                 (Some(OplineIdx(fetch.0 + 1)), landing, Some(copied))
+            }
+            At::Overflowed { op, out, up } => {
+                let overflowed = Store {
+                    slot: self.val(out).slot,
+                    from: Stored::Overflowed { up },
+                };
+                (Some(OplineIdx(op.0 + 1)), restored(calls), Some(overflowed))
             }
         }
     }
@@ -4512,6 +4549,20 @@ impl<'a> Builder<'a> {
                 })
             })
             .collect();
+        // A double an overflow left in its slot is known one, as php's
+        // `zend_jit_math_long_long` sets the slot's stack type before it
+        // takes the exit.
+        if let Some(Store {
+            slot,
+            from: Stored::Overflowed { .. },
+        }) = extra
+        {
+            known.retain(|known| known.slot != slot);
+            known.push(Known {
+                slot,
+                tag: ZvalType::Double,
+            });
+        }
         known.sort_by_key(|known| known.slot);
         ExitSpec {
             frame: draft.frame,
@@ -4867,7 +4918,9 @@ struct Exits {
 /// with the same types known, is one exit; so it is here, since an exit
 /// lands in whichever frame is current. The stores stay as they are: a
 /// register value lives in one frame's slot, so two places that store
-/// one leave from one frame.
+/// one leave from one frame; but the double an overflow left is a
+/// constant its site writes in its own frame, as php's stack map holds
+/// it, so it is named by its slot in the frame alone.
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct Reused {
     level: Level,
@@ -4896,6 +4949,15 @@ impl Reused {
             level,
             spec: ExitSpec {
                 frame: Frame::ROOT,
+                stores: (spec.stores.iter())
+                    .map(|store| match store.from {
+                        Stored::Overflowed { .. } => Store {
+                            slot: relative(store.slot),
+                            ..*store
+                        },
+                        _ => *store,
+                    })
+                    .collect(),
                 known: (spec.known.iter())
                     .map(|known| Known {
                         slot: relative(known.slot),

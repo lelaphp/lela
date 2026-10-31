@@ -299,6 +299,8 @@ impl<'a> Dump<'a> {
                     }
                 },
                 Stored::Null => "null".to_owned(),
+                Stored::Overflowed { up: true } => "overflowed up".to_owned(),
+                Stored::Overflowed { up: false } => "overflowed down".to_owned(),
             };
             write!(text, " {}={from}", self.slot(store.slot))?;
         }
