@@ -1392,7 +1392,25 @@ impl Hooks<'_> {
     /// close
     /// handler close
     /// ```
+    ///
+    /// A throwable a stream kept before the step began stands as
+    /// `EG(exception)` stands in php while the step is served, so a
+    /// destructor the step serves runs whole and chains its own throwable
+    /// onto it (`zend_objects_destroy_object`), and what stands after the
+    /// step is kept again for the native. A user wrapper's instance given
+    /// up after its `stream_close` threw is the witness, beside the user
+    /// stream's close in `php_streams`.
     fn released(&mut self, step: impl FnOnce(&mut Request) -> Result<(), Thrown>) {
+        let standing = self.0.raised.is_none() && !self.0.bailout;
+        let kept = (self.0.stream_thrown).take_if(|kept| standing && kept.exception().is_some());
+        if let Some(kept) = kept {
+            self.0.leave_pending(&kept);
+            self.released(step);
+            if let Some(object) = self.0.take_pending_view() {
+                self.0.stream_thrown = Some(Thrown::of(Some(object)));
+            }
+            return;
+        }
         let parked = self.0.stream_thrown.is_some();
         let answered = step(self.0);
         if !parked && let Some(thrown) = self.0.stream_thrown.take() {
