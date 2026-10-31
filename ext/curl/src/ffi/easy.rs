@@ -995,7 +995,10 @@ impl Mime {
     /// stands in `pending` ([`Pending::release`]), so a file part's
     /// `free_cb` closing a stream through a wrapper calls nothing while a
     /// throwable stands, as `zend_call_function` returns at once under
-    /// `EG(exception)`; what the free threw is left pending.
+    /// `EG(exception)`. What a callback the free served threw is left
+    /// pending. A wrapper's `stream_close` that throws is not among that:
+    /// the stream layer keeps it and raises it as the native returns, so
+    /// it does not yet stand over the steps after the free (#3708).
     fn let_go(self, req: &mut Request, pending: &mut Pending) {
         let mut tree = Some(self);
         let mut threw = None;
