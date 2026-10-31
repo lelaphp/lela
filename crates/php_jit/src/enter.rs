@@ -587,11 +587,18 @@ kernels! {
 /// where the opline left the serving's entry frame and the serving is
 /// over, as php's `zend_jit_leave_func_helper` and a `RETURN`'s handler
 /// answer the halt for a `ZEND_CALL_TOP` frame, which compiled code
-/// past an opline that leaves its frame reads (`Emit::halts`).
+/// past an opline that leaves its frame reads (`Emit::halts`). No opline
+/// that ends a serving leaves a throwable pending as it does, its value
+/// handed over with no destructor called; one that did would be answered
+/// as a throw ([`answered`]) and unwound from a frame already returned,
+/// so it is refused as the internal error it is.
 fn step(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<Stood, Fatal> {
     let frame = standing(req, on.room, on.at)?;
     let (held, epoch) = held(on, func)?;
     match tier::step_held(req, frame, held, epoch)? {
+        Stepped::Done if req.unwinding() => Err(internal(
+            "a step that ended the serving a trace runs in left it unwinding",
+        )),
         Stepped::Done => Ok(Stood::NOWHERE),
         stepped => stood(req, stepped, (frame, func), on.holding),
     }
@@ -979,7 +986,10 @@ fn standing(req: &mut Request, room: Room, at: OplineIdx) -> Result<FrameRef, Fa
 
 /// Where the interpreter stands after a step of `stepped`'s opline in
 /// `frame`, which serves the op array the engine numbers `func`: the
-/// frame it goes on in, whatever the step pushed or popped.
+/// frame it goes on in, whatever the step pushed or popped. A step that
+/// ended the serving is the `step` kernel's to answer ([`step`]); the
+/// `push_call` and `call` kernels serve no opline that leaves its frame,
+/// so for them it is an internal error.
 fn stood(
     req: &mut Request,
     stepped: Stepped,
