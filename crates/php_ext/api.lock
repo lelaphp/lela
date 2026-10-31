@@ -527,6 +527,7 @@ raising::pending
 raising::raise
 raising::raise_at
 raising::raise_while_pending
+raising::set_aside
 raising::startup
 raising::throw
 raising::throw_at
