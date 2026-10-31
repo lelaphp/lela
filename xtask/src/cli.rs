@@ -499,6 +499,11 @@ pub(crate) struct Bench {
     /// Measured reps per arm, after the protocol's discarded warm-up.
     #[arg(long, default_value_t = crate::bench::REPS, value_name = "N")]
     pub reps: usize,
+    /// What the run may assume of the machine: `dedicated` holds every
+    /// seat and measures each bar only below a 1-minute load of 2,
+    /// waiting for it, as dax-build is held for the bench (#3767).
+    #[arg(long, value_enum, default_value = "shared")]
+    pub machine: crate::bench::Machine,
     /// The standing the numbers are offered with (protocol §8).
     #[arg(long, value_enum, default_value = "unlabelled")]
     pub label: crate::bench::Label,

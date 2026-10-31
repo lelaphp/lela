@@ -56,7 +56,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
@@ -142,6 +142,127 @@ impl Label {
     fn needs_note(self) -> bool {
         matches!(self, Label::Provisional | Label::BaselineOfRecord)
     }
+}
+
+/// What a run may assume of the machine it measures on (#3767).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum Machine {
+    /// Shared with other work: one seat taken, and the load recorded as
+    /// it is found and not controlled (§7).
+    #[default]
+    Shared,
+    /// Held for the bench while it runs, as dax-build is: every seat
+    /// taken ([`crate::seat`]), and each bar measured only once the
+    /// 1-minute load is below [`QUIET`], waited for (#3767, #2714).
+    Dedicated,
+}
+
+/// The 1-minute load below which a dedicated machine measures a bar.
+const QUIET: f64 = 2.0;
+
+/// How long a dedicated machine waits for the load to fall below
+/// [`QUIET`] before a bar, and how often it looks.
+const PATIENCE: Duration = Duration::from_mins(15);
+const LOOK: Duration = Duration::from_secs(15);
+
+/// §7's hardware and load where a bar's reps start: the machine as the
+/// reading names it, the load averages, and on a dedicated machine what
+/// it waited out first, how long and the highest 1-minute load it read.
+#[derive(Debug, Clone, PartialEq)]
+struct Conditions {
+    hardware: String,
+    load: Option<[f64; 3]>,
+    waited: Option<(Duration, f64)>,
+}
+
+impl Conditions {
+    /// The conditions as a rendering and a reading say them.
+    fn text(&self) -> String {
+        let waited = (self.waited).map_or_else(String::new, |(took, highest)| {
+            format!(
+                ", after {}s waiting for the 1-minute load to fall below {QUIET} from {highest:.2} (#3767)",
+                took.as_secs()
+            )
+        });
+        format!(
+            "load {}{waited}; on {}",
+            load_text(self.load),
+            self.hardware
+        )
+    }
+}
+
+impl Machine {
+    /// The conditions a bar starts under on this machine, its load as
+    /// `read` finds it: on a dedicated machine only below [`QUIET`],
+    /// looked for again after each `sleep` of [`LOOK`] until [`PATIENCE`]
+    /// has passed, and otherwise why the bar is not measured.
+    fn settle(
+        self,
+        hardware: &str,
+        mut read: impl FnMut() -> Option<[f64; 3]>,
+        mut sleep: impl FnMut(Duration),
+    ) -> Result<Conditions, String> {
+        let hardware = hardware.to_owned();
+        if self == Machine::Shared {
+            let load = read();
+            return Ok(Conditions {
+                hardware,
+                load,
+                waited: None,
+            });
+        }
+        let (mut took, mut highest) = (Duration::ZERO, None::<f64>);
+        loop {
+            let Some(load) = read() else {
+                return Err(format!(
+                    "the machine states no load average, so none is known to be below {QUIET} (#3767)"
+                ));
+            };
+            if load[0] < QUIET {
+                let waited = highest.map(|highest| (took, highest));
+                return Ok(Conditions {
+                    hardware,
+                    load: Some(load),
+                    waited,
+                });
+            }
+            highest = Some(highest.map_or(load[0], |h| h.max(load[0])));
+            if took >= PATIENCE {
+                return Err(format!(
+                    "the 1-minute load stayed at {QUIET} or above for {}s, at most {:.2} and last {}, so the dedicated machine measures nothing (#3767)",
+                    took.as_secs(),
+                    highest.unwrap_or(load[0]),
+                    load_text(Some(load))
+                ));
+            }
+            sleep(LOOK);
+            took += LOOK;
+        }
+    }
+}
+
+/// §7's hardware: the processor, its cores and the kernel (#3774).
+fn hardware() -> String {
+    let said = |program: &str, args: &[&str]| {
+        let out = Command::new(program).args(args).output().ok()?;
+        let text = String::from_utf8(out.stdout).ok()?;
+        Some(text.trim().to_owned()).filter(|t| out.status.success() && !t.is_empty())
+    };
+    let cpu = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|info| {
+            let named = info.lines().find(|line| line.starts_with("model name"))?;
+            Some(named.split_once(':')?.1.trim().to_owned())
+        });
+    let cpu = cpu.or_else(|| said("sysctl", &["-n", "machdep.cpu.brand_string"]));
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let kernel = said("uname", &["-sr"]);
+    format!(
+        "{}, {cores} cores, {}",
+        cpu.as_deref().unwrap_or("a processor it does not name"),
+        kernel.as_deref().unwrap_or("a kernel it does not name")
+    )
 }
 
 /// One arm of a bar: the program a rep runs once, its arguments, what it
@@ -845,15 +966,9 @@ fn measure(id: &str, [a, b]: &mut [Box<dyn Side>; 2], reps: usize) -> Result<Mea
     })
 }
 
-/// A bar's arms measured, pair by pair: what they took, the two arms'
-/// names, and the load where the reps start, after the arms were built
-/// and started (§7).
-fn measure_each(
-    id: &str,
-    arms: Arms,
-    reps: usize,
-) -> Result<(Took, [String; 2], Option<[f64; 3]>)> {
-    let load = load_average();
+/// A bar's arms measured, pair by pair: what they took and the two arms'
+/// names.
+fn measure_each(id: &str, arms: Arms, reps: usize) -> Result<(Took, [String; 2])> {
     let mut pairs = match arms {
         Arms::Pair(pair) => vec![(None, pair)],
         Arms::Set(set) => set.into_iter().map(|(p, pair)| (Some(p), pair)).collect(),
@@ -864,7 +979,7 @@ fn measure_each(
         rows.push((program.clone(), measure(&row, pair, reps)?));
     }
     let names = (pairs.first()).map(|(_, [a, b])| [a.name(), b.name()].map(str::to_owned));
-    Ok((Took { rows }, names.unwrap_or_default(), load))
+    Ok((Took { rows }, names.unwrap_or_default()))
 }
 
 /// §6's second end: each program as it is now against the pin taken at the
@@ -1060,13 +1175,13 @@ pub(crate) fn refuse_a_hosted_runner(environment: Option<&str>) -> Result<()> {
 /// A bar held to a tolerance reads its earlier nights and its baseline
 /// from `log` where one is handed, the published history, since each
 /// nightly job starts from an empty store; and from the store's own
-/// otherwise.
+/// otherwise. On a dedicated `machine` each bar waits for a quiet load.
 pub fn run(
     root: &Path,
     store: &Store,
     bar: Option<&str>,
     from: Option<&Path>,
-    reps: usize,
+    (reps, machine): (usize, Machine),
     (label, note): (Label, &str),
     log: Option<&Path>,
 ) -> Result<()> {
@@ -1099,28 +1214,35 @@ pub fn run(
             log
         }
     };
+    let hardware = hardware();
+    let mut settle = || machine.settle(&hardware, load_average, std::thread::sleep);
     measure_bars(
         store,
         &snapshot,
         bars,
         &tolerances,
         &log,
-        reps,
+        (reps, &mut settle),
         (label, note),
     )
 }
 
+/// The conditions [`measure_bars`] starts each bar under, or why it is
+/// not measured there ([`Machine::settle`]).
+type Settle<'a> = dyn FnMut() -> Result<Conditions, String> + 'a;
+
 /// [`run`]'s measurement of `bars`, once read: each measured, held to its
 /// row of `tolerances` and its earlier nights in `log`, rendered and
-/// recorded, a regressed series's ticket left for the lane. The bars are
-/// handed in, so a test feeds the arms' timings from a stub.
+/// recorded, a regressed series's ticket left for the lane. The bars and
+/// the machine's load are handed in, so a test feeds the arms' timings
+/// and the load from a stub.
 fn measure_bars(
     store: &Store,
     snapshot: &Snapshot,
     bars: Vec<Declared>,
     tolerances: &[Tolerance],
     log: &[Reading],
-    reps: usize,
+    (reps, settle): (usize, &mut Settle<'_>),
     (label, note): (Label, &str),
 ) -> Result<()> {
     let failed = store.root().join(FAILED);
@@ -1131,12 +1253,19 @@ fn measure_bars(
         // A bar whose arms this machine cannot run is a skip, and one whose
         // run refused (§1) is a failing reading that names why; either way
         // the next bar runs, and a refusal is the command's error once all
-        // have run, so a refused run never reads as a measurement.
-        let measured = start().and_then(|sides| match sides {
-            Err(why) => Ok(Err(why)),
-            Ok(arms) => measure_each(&id, arms, reps).map(Ok),
-        });
-        let (measured, names, load) = match measured {
+        // have run, so a refused run never reads as a measurement. A
+        // dedicated machine too loud to measure on is a skip that says so.
+        let measured =
+            start().and_then(
+                |sides| match sides.and_then(|arms| settle().map(|c| (arms, c))) {
+                    Err(why) => Ok(Err(why)),
+                    Ok((arms, conditions)) => {
+                        let (took, names) = measure_each(&id, arms, reps)?;
+                        Ok(Ok((took, names, conditions)))
+                    }
+                },
+            );
+        let (measured, names, conditions) = match measured {
             Ok(Ok(measured)) => measured,
             Ok(Err(why)) => {
                 readings.push(unmeasured(&id, Status::Skip, &why, snapshot)?);
@@ -1157,8 +1286,8 @@ fn measure_bars(
             names: [&names[0], &names[1]],
             row,
         };
-        print!("{}", rendered(&bar, &measured, reps, label, load));
-        let mut reading = recorded(&bar, &measured, (reps, label, note), load, snapshot)?;
+        print!("{}", rendered(&bar, &measured, reps, label, &conditions));
+        let mut reading = recorded(&bar, &measured, (reps, label, note), &conditions, snapshot)?;
         let held = (row.filter(|_| held == Held::Series))
             .map(|tolerance| series::hold(tolerance, log, &mut reading));
         readings.push(reading);
@@ -1232,7 +1361,7 @@ fn rendered(
     took: &Took,
     reps: usize,
     label: Label,
-    load: Option<[f64; 3]>,
+    conditions: &Conditions,
 ) -> String {
     let rows: Vec<String> = (took.rows.iter()).map(|(program, row)| {
         let unit = row.unit.suffix();
@@ -1248,10 +1377,10 @@ fn rendered(
         format!("{program}{a}{b}  {}\n", delta_text(row))
     }).collect();
     format!(
-        "bench {}: {}; {reps} reps (+{WARMUP} warm-up) per arm, order alternated; load {}\n{}  {}{}\n",
+        "bench {}: {}; {reps} reps (+{WARMUP} warm-up) per arm, order alternated; {}\n{}  {}{}\n",
         bar.id,
         label.spelled(),
-        load_text(load),
+        conditions.text(),
         rows.concat(),
         geomean(took),
         held_by(bar, took),
@@ -1395,7 +1524,7 @@ fn recorded(
     bar: &Shown<'_>,
     took: &Took,
     (reps, label, note): (usize, Label, &str),
-    load: Option<[f64; 3]>,
+    conditions: &Conditions,
     snapshot: &Snapshot,
 ) -> Result<Reading> {
     let mut reading = Reading::stamped_over(INSTRUMENT, bar.id, snapshot, Path::new("."))?;
@@ -1435,10 +1564,16 @@ fn recorded(
             reading.numbers.insert(key, rounded(value).into());
         }
     }
-    if let Some(l) = load {
+    if let Some(l) = conditions.load {
         for (key, value) in [("load_1", l[0]), ("load_5", l[1]), ("load_15", l[2])] {
             reading.numbers.insert((*key).to_owned(), value.into());
         }
+    }
+    if let Some((took, highest)) = conditions.waited {
+        reading.count("waited_s", took.as_secs())?;
+        reading
+            .numbers
+            .insert("waited_load_1".to_owned(), highest.into());
     }
     let reservation = if note.trim().is_empty() {
         String::new()
@@ -1463,10 +1598,10 @@ fn recorded(
         ),
     };
     reading.message = format!(
-        "{}: {measured}; {}{reservation}; load {} ({PROTOCOL} §4.3, §7)",
+        "{}: {measured}; {}{reservation}; {} ({PROTOCOL} §4.3, §7)",
         bar.about,
         label.spelled(),
-        load_text(load),
+        conditions.text(),
     );
     Ok(reading)
 }
@@ -1811,7 +1946,7 @@ mod tests {
             names: ["a", "b"],
             row: None,
         };
-        let shown = super::rendered(&bar, &took, 12, super::Label::Smoke, None);
+        let shown = super::rendered(&bar, &took, 12, super::Label::Smoke, &shared().unwrap());
         let said = format!("n 12); per request: absent: {}", super::spent::ABSENT);
         assert!(shown.contains(&said), "{shown}");
     }
@@ -1838,6 +1973,66 @@ mod tests {
         );
         assert!(refuse_a_hosted_runner(Some("self-hosted")).is_ok());
         assert!(refuse_a_hosted_runner(None).is_ok());
+    }
+
+    /// A shared machine's conditions, at a load a loaded machine reads.
+    fn shared() -> Result<super::Conditions, String> {
+        super::Machine::Shared.settle("a stub machine", || Some([9.0, 8.0, 7.0]), |_| {})
+    }
+
+    /// A dedicated machine measures a bar only below a 1-minute load of 2
+    /// (#3767): a load that falls is waited out and named; one that never
+    /// falls, or a machine that states none, refuses the bar, which reads
+    /// skip naming the load and measures nothing; a shared machine
+    /// measures at any load and never waits.
+    #[test]
+    fn a_dedicated_machine_measures_a_bar_only_below_a_load_of_two() {
+        use super::{LOOK, Machine, PATIENCE};
+        let mut looks = [7.5, 3.0, 1.5].into_iter();
+        let mut slept = std::time::Duration::ZERO;
+        let read = || looks.next().map(|l| [l, 1.0, 0.5]);
+        let quiet = Machine::Dedicated
+            .settle("hw", read, |d| slept += d)
+            .unwrap();
+        assert_eq!(quiet.load, Some([1.5, 1.0, 0.5]));
+        assert_eq!((quiet.waited, slept), (Some((LOOK * 2, 7.5)), LOOK * 2));
+        assert!(
+            quiet
+                .text()
+                .contains("after 30s waiting for the 1-minute load to fall below 2 from 7.50"),
+            "{}",
+            quiet.text()
+        );
+        let mut slept = std::time::Duration::ZERO;
+        let loud = Machine::Dedicated.settle("hw", || Some([2.0, 2.0, 2.0]), |d| slept += d);
+        let loud = loud.unwrap_err();
+        assert!(
+            loud.contains("stayed at 2 or above") && loud.contains("2.00 2.00 2.00"),
+            "{loud}"
+        );
+        assert_eq!(slept, PATIENCE);
+        assert!(Machine::Dedicated.settle("hw", || None, |_| {}).is_err());
+        let shared = Machine::Shared.settle("hw", || Some([44.0; 3]), |_| unreachable!());
+        assert_eq!(shared.unwrap().load, Some([44.0; 3]));
+        // Through the run: the refused bar's reading is a skip saying why.
+        let (_tree, store, snapshot) = scratch("bench-loud");
+        let arms: [Stubbed; 2] = [("a", |_| 10.0), ("b", |_| 10.0)];
+        let bars = vec![stubbed("aa-loud", Held::Control, arms)];
+        let mut loud = || Machine::Dedicated.settle("hw", || Some([3.0; 3]), |_| {});
+        let ask = (super::Label::Smoke, "");
+        super::measure_bars(&store, &snapshot, bars, &[], &[], (6, &mut loud), ask).unwrap();
+        let reading = store.read("bench", "aa-loud").unwrap().unwrap();
+        assert_eq!(reading.status, Status::Skip, "{}", reading.message);
+        assert!(
+            reading.message.contains("3.00 3.00 3.00"),
+            "{}",
+            reading.message
+        );
+        assert!(
+            !reading.numbers.contains_key("reps"),
+            "{:?}",
+            reading.numbers
+        );
     }
 
     /// A stub arm's name and what each of its reps takes, by the rep.
@@ -1921,7 +2116,7 @@ mod tests {
             bars,
             &[],
             &[],
-            6,
+            (6, &mut shared),
             (super::Label::Smoke, ""),
         )
         .unwrap();
@@ -1950,7 +2145,7 @@ mod tests {
             bars,
             &[],
             &[],
-            6,
+            (6, &mut shared),
             (super::Label::Smoke, ""),
         )
         .unwrap();
@@ -2004,7 +2199,7 @@ mod tests {
                 bars,
                 std::slice::from_ref(&tolerance),
                 log,
-                6,
+                (6, &mut shared),
                 ask,
             )
         };
