@@ -1405,14 +1405,52 @@ impl Hooks<'_> {
     /// step is kept again for the native. A user wrapper's instance given
     /// up after its `stream_close` threw is the witness, beside the user
     /// stream's close in `php_streams`.
+    ///
+    /// An `exit` a stream kept stands in the slot already, and is taken
+    /// out of the stream's keeping for the step as a throwable is, so a
+    /// native the destructor calls returns as any other. The destructor's
+    /// throwable replaces it, `zend_exception_set_previous` giving the
+    /// unwind exit up, and is what the native raises then; the program
+    /// may catch it and go on, with the exit's status kept:
+    ///
+    /// ```php
+    /// class W { public $context;
+    ///     function stream_open($p, $m, $o, &$op) { return true; }
+    ///     function stream_close() { echo "close\n"; exit(4); }
+    ///     function __destruct() { echo "dtor ", str_pad('a', 3, 'b'), "\n"; throw new Exception('dtor'); } }
+    /// stream_wrapper_register('ww', 'W');
+    /// register_shutdown_function(function () { echo "shutdown\n"; });
+    /// $f = fopen('ww://x', 'r');
+    /// try { fclose($f); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    /// $f = fopen('ww://y', 'r');
+    /// try { $f = null; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    /// echo "end\n";
+    /// ```
+    /// ```expect exit=4
+    /// close
+    /// dtor abb
+    /// caught dtor
+    /// close
+    /// dtor abb
+    /// caught dtor
+    /// end
+    /// shutdown
+    /// ```
     fn released(&mut self, step: impl FnOnce(&mut Request) -> Result<(), Thrown>) {
-        let standing = self.0.raised.is_none() && !self.0.bailout;
-        let kept = (self.0.stream_thrown).take_if(|kept| standing && kept.exception().is_some());
+        let throwable = self.0.raised.is_none() && !self.0.bailout;
+        let exit = self.0.unwind_exit();
+        let kept = (self.0.stream_thrown).take_if(|kept| match kept.exception() {
+            Some(_) => throwable,
+            None => exit,
+        });
         if let Some(kept) = kept {
             self.0.leave_pending(&kept);
             self.released(step);
-            if let Some(object) = self.0.take_pending_view() {
-                self.0.stream_thrown = Some(Thrown::of(Some(object)));
+            match self.0.take_pending_view() {
+                Some(object) => self.0.stream_thrown = Some(Thrown::of(Some(object))),
+                // The exit standing still, or a fatal raised over it.
+                None if kept.exception().is_none() => self.0.stream_thrown = Some(kept),
+                None => {}
             }
             return;
         }
