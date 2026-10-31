@@ -27,7 +27,7 @@ harness = 4800                             # harness §12 item 6: `.claude/**` a
 harness-desk = 1300                        # harness §12 item 6: `harness-plugins/desk/**` hand-written, tests included; 1300 for the desk's estimated 980 and its tests (#3491, ruled 2026-10-25)
 lock_packages = 190                        # design §4.1: third-party `Cargo.lock` packages (those with a `source`); a workspace crate is held by its [[crate]] row and ceiling (#1335); 164 is stage 1's TLS as #2333 ruled, 190 adds the compiled tier's Cranelift core set and rustix as #2945 ruled
 clean_build_release_s = 90                 # design §10: `cargo build --release` from clean on the dev machine
-api_items = 1525                           # design §4.4, §4.5: public items of php_ext, measured on api.lock (revision 34; #697); 1525 for #3359's frameless entries (#3360, 2026-10-24)
+api_items = 1550                           # design §4.4, §4.5: public items of php_ext, measured on api.lock (revision 34; #697); 1550 for the open-source gate's face items, #3548's reserved[] and #3509's set_aside, with room for the next (#3666, 2026-10-30)
 api_private_items = 16                     # design §4.4 (revision 34, D1 of #947): api::__private, the helpers only a macro expansion names, capped apart from api_items
 bindings = 32000                           # design §4.1: `ext/*/src/ffi/**` pooled across every extension
 # Lines are non-blank, non-comment, tests excluded (`xtask budget`).
@@ -103,7 +103,7 @@ budget = 10000                              # php's main/streams/ and main/netwo
 phpt = ["ext/standard/tests/streams"]
 [[crate]]
 name = "xtask"
-budget = 45500                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here; 36k for #1975's host-bytes instrument (#2468, option C); 38k for #2597's permit --after fix and the harness tickets after it (2026-10-10); 40k for the harness tickets this wave's rulings asked for (#2707, 2026-10-12); 42k for the testing tier's harness work (#3082, 2026-10-20); 44k after #3279's dedupe found 166 lines (#3357, 2026-10-24); 45.5k for #3619, #3621, #3622 and #3624 (2026-10-30)
+budget = 46200                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here; 36k for #1975's host-bytes instrument (#2468, option C); 38k for #2597's permit --after fix and the harness tickets after it (2026-10-10); 40k for the harness tickets this wave's rulings asked for (#2707, 2026-10-12); 42k for the testing tier's harness work (#3082, 2026-10-20); 44k after #3279's dedupe found 166 lines (#3357, 2026-10-24); 45.5k for #3619, #3621, #3622 and #3624 (2026-10-30); 46.2k for #2140's framework lane and #3607's fuzz instrument, the room #3612's 45k gave them that #3619–#3624 spent (#3672, 2026-10-31)
 lock = "xtask.lock"                        # harness §4.1, revision 16: the harness holds its own interface
 
 # ---------------------------------------------------------------- ext/
@@ -280,7 +280,7 @@ budget = 6000     # dba.c with the flatfile, inifile and cdb handlers, php's own
 feature = "dba"
 [[crate]]
 name = "ext/zip"
-budget = 10000    # php_zip.c and zip_stream.c, ZipArchive and the zip:// wrapper, over the `zip` crate, pure Rust with no src/ffi/; php's --with-zip; 3,897 lines of C by #727's rule, and room for the libzip behaviour revision 70 re-derives in Rust, which the rule does not count (#1515, #1544)
+budget = 10000    # php_zip.c and zip_stream.c, ZipArchive and the zip:// wrapper, libzip's behaviour re-derived in Rust over the platform's zlib, liblzma and libzstd, bound in src/ffi/; php's --with-zip; 3,897 lines of C by #727's rule, and room for the re-derivation the rule does not count (#1515, #1544, #1657, #3529)
 feature = "zip"
 [[crate]]
 name = "ext/gmp"
