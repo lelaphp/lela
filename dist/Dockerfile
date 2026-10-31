@@ -152,14 +152,17 @@ COPY --from=ini /ini/ /etc/
 
 # --- the drop-in for php's apache image -----------------------------------
 # Apache's prefork MPM in front of php-fpm over a unix socket, where php's
-# image loads mod_php: the engine has no apache2handler yet. php's image
-# also sets PHP_VERSION; this one does not, since the engine's version is
-# the engine's to say (`php -r 'echo PHP_VERSION;'`) and a second
-# statement of it here would drift.
+# image loads mod_php: the engine has no apache2handler yet.
 FROM ${UBUNTU} AS apache
 ARG PHP_INI_DIR
+# The version php's image sets, which a Dockerfile written for it reads in
+# its own RUN steps: the pinned php's, so a plain build sets it. xtask's
+# tests hold this literal to oracle.toml's version, and the build fails
+# below where the built php says another (#3533).
+ARG PHP_VERSION=8.5.12
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ENV PHP_INI_DIR=${PHP_INI_DIR} \
+    PHP_VERSION=${PHP_VERSION} \
     APACHE_CONFDIR=/etc/apache2 \
     APACHE_ENVVARS=/etc/apache2/envvars
 COPY --from=build /out/runtime-packages.txt /tmp/runtime-packages.txt
@@ -200,7 +203,9 @@ COPY dist/apache/bin/ /usr/local/bin/
 RUN cd /usr/local/bin; \
     ln -s docker-php-ext-install docker-php-ext-enable; \
     for name in pear peardev phpize php-config; do ln -s pecl "$name"; done; \
-    php -v; php-fpm -t; apache2ctl -t
+    php -v; php-fpm -t; apache2ctl -t; \
+    built="$(php -r 'echo PHP_VERSION;')"; \
+    [ "$built" = "$PHP_VERSION" ] || { echo "PHP_VERSION is $PHP_VERSION, and the built php says $built" >&2; exit 1; }
 ENTRYPOINT ["docker-php-entrypoint"]
 WORKDIR /var/www/html
 STOPSIGNAL SIGWINCH

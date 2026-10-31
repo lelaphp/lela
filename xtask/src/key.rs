@@ -457,7 +457,8 @@ pub(crate) const DEPLOYMENT_TARGET: &str = "MACOSX_DEPLOYMENT_TARGET";
 /// touches the crate for `done` and pre-commit ([`read_by_tests`], #3646).
 /// xtask's tests copy the manifest, pin, registry and glossary into
 /// scratch trees, run the hooks and scripts, and read the workflows, the
-/// plugin's hooks and four crates' files. Left out: the Markdown regions
+/// plugin's hooks, four crates' files and the apache image's Dockerfile,
+/// whose `PHP_VERSION` they hold to the pin (#3533). Left out: the Markdown regions
 /// they hold, which pre-commit renders and `computed check` holds, and
 /// `Cargo.lock`, whose pins reach a crate through `sources::lock_moved`.
 pub(crate) const READ_BY_TESTS: [(&str, &[&str]); 2] = [
@@ -479,6 +480,7 @@ pub(crate) const READ_BY_TESTS: [(&str, &[&str]); 2] = [
             "crates/php_compile/tests/support/skip.rs",
             "crates/php_process",
             "sapi/cli/Cargo.toml",
+            "dist/Dockerfile",
         ],
     ),
     // The crash test reads the zend-test variant's binary from the pin.
