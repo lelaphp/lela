@@ -755,6 +755,75 @@ fn easy_id(req: &Request, handle: PhpObject) -> Option<EasyId> {
 /// array(0) {
 /// }
 /// ```
+///
+/// The list is walked in place and emptied after every remove, as
+/// `zend_llist_clean` empties it, so a callable inside a remove reads it
+/// whole.
+///
+/// ```php
+/// $m = curl_multi_init();
+/// $h = curl_init('http://127.0.0.1:1/');
+/// curl_setopt($h, CURLOPT_VERBOSE, 1);
+/// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) use ($m) {
+///     if (str_starts_with($data, 'closing')) { echo "debug: ", count(curl_multi_get_handles($m)), "\n"; }
+/// });
+/// curl_multi_add_handle($m, $h);
+/// curl_multi_exec($m, $r);
+/// curl_multi_close($m);
+/// var_dump(count(curl_multi_get_handles($m)));
+/// ```
+/// ```expect
+/// debug: 1
+/// int(0)
+/// ```
+///
+/// A fatal inside a remove leaves the list whole, as php's `zend_bailout`
+/// leaves `easyh`, for `curl_multi_free_obj` to give up as the request
+/// ends; an `exit` stands pending as php's unwind exit does, and the
+/// list is emptied past it.
+///
+/// ```php
+/// $m = curl_multi_init();
+/// $h = curl_init('http://127.0.0.1:1/');
+/// curl_setopt($h, CURLOPT_VERBOSE, 1);
+/// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) {
+///     if (str_starts_with($data, 'closing')) { echo "debug: $data"; trigger_error('boom', E_USER_ERROR); }
+/// });
+/// curl_multi_add_handle($m, $h);
+/// curl_multi_add_handle($m, curl_init());
+/// register_shutdown_function(function () use ($m) { var_dump(count(curl_multi_get_handles($m))); });
+/// curl_multi_exec($m, $r);
+/// curl_multi_close($m);
+/// echo "unreached\n";
+/// ```
+/// ```expect exit=255
+/// debug: closing connection #0
+///
+/// Deprecated: Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead in %s on line 6
+///
+/// Fatal error: boom in %s on line 6
+/// int(2)
+/// ```
+///
+/// ```php
+/// $m = curl_multi_init();
+/// $h = curl_init('http://127.0.0.1:1/');
+/// curl_setopt($h, CURLOPT_VERBOSE, 1);
+/// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) {
+///     if (str_starts_with($data, 'closing')) { echo "debug: $data"; exit("exit\n"); }
+/// });
+/// curl_multi_add_handle($m, $h);
+/// curl_multi_add_handle($m, curl_init());
+/// register_shutdown_function(function () use ($m) { var_dump(count(curl_multi_get_handles($m))); });
+/// curl_multi_exec($m, $r);
+/// curl_multi_close($m);
+/// echo "unreached\n";
+/// ```
+/// ```expect
+/// debug: closing connection #0
+/// exit
+/// int(0)
+/// ```
 #[php_function]
 fn curl_multi_close(
     req: &mut Request,
@@ -769,34 +838,50 @@ fn curl_multi_close(
         return Err(throw_error(req, ce.error, &text));
     }
     let multi = multi_of(req, multi_handle)?;
-    let mut handles = std::mem::take(&mut mh(req, multi_handle)?.easy);
     let mut pending = Pending::default();
-    for handle in &handles {
-        let removed = pending.step(req, |req, pending| {
-            if let Some(thrown) = verify_handlers(req, **handle, true) {
+    // `zend_llist_get_next_ex`: the list read in place at each step, so
+    // a `CurlHandle` a callable added meanwhile is walked too.
+    let mut at = 0;
+    while let Some(handle) = listed(req, multi_handle, at) {
+        at += 1;
+        pending.step(req, |req, pending| {
+            if let Some(thrown) = verify_handlers(req, handle, true) {
                 pending.park(req, thrown);
             }
-            if let Ok(easy) = easy_of(req, **handle)
+            if let Ok(easy) = easy_of(req, handle)
                 && let (_, Some(thrown)) = multi.remove(req, easy)
             {
                 pending.park(req, thrown);
             }
         });
-        if removed.is_none() {
+        if pending.fatal(req) {
+            // `zend_bailout` leaves `easyh` whole, for
+            // `curl_multi_free_obj` to give up as the request ends.
+            return pending.answer(req, Ok(()));
+        }
+        if pending.leaving() {
+            // An `exit`, which serves no step after it here, and past
+            // which php's walk goes on to `zend_llist_clean`.
             break;
         }
     }
-    // `zend_llist_clean`, after every remove, with what stands pending;
-    // where a fatal stands the owners are given up all the same.
-    pending.step(req, |req, _| {
+    // `zend_llist_clean`, after every remove, with what stands pending.
+    let mut handles = match mh(req, multi_handle) {
+        Ok(mh) => std::mem::take(&mut mh.easy),
+        Err(thrown) => return pending.answer(req, Err(thrown)),
+    };
+    pending.release(req, |req| {
         for handle in handles.drain(..) {
             handle.give_up(req);
         }
     });
-    for handle in handles {
-        handle.give_up(req);
-    }
     pending.answer(req, Ok(()))
+}
+
+/// The `CurlHandle` at `at` in `easyh`, read where it stands now.
+fn listed(req: &Request, multi: Instance<CurlMultiHandle>, at: usize) -> Option<PhpObject> {
+    let mh = multi.object().native::<Mh>(req)?;
+    mh.easy.get(at).map(|held| **held)
 }
 
 /// `curl_multi_errno(CurlMultiHandle $multi_handle): int`.

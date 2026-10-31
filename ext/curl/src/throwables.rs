@@ -5,7 +5,7 @@
 
 use php_ext::abi::{Refusal, Start};
 use php_ext::attr::php_class;
-use php_ext::raising::{self, Thrown, while_pending};
+use php_ext::raising::{self, Cause, Thrown, while_pending};
 use php_ext::request::Request;
 use php_ext::values::ClassId;
 
@@ -83,6 +83,15 @@ impl Pending {
             .is_some_and(|thrown| thrown.exception().is_none())
     }
 
+    /// Whether what stands is a fatal, which leaves by `zend_bailout`
+    /// past every line of php's body after it, where an `exit` stands as
+    /// the unwind exit php's body goes on past.
+    pub(crate) fn fatal(&self, req: &Request) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|thrown| matches!(thrown.cause(req), Cause::Fatal))
+    }
+
     /// `thrown` left pending ([`raised`]).
     pub(crate) fn park(&mut self, req: &mut Request, thrown: Thrown) {
         self.0 = Some(raised(req, self.0.take(), thrown));
@@ -103,6 +112,16 @@ impl Pending {
         match self.0.clone() {
             None => Some(step(req, self)),
             Some(standing) => while_pending(req, &standing, |req| step(req, self)),
+        }
+    }
+
+    /// `release`, which gives owners up, taken as [`Pending::step`] takes
+    /// a step, and taken all the same where a fatal or an `exit` stands:
+    /// what php's `zend_bailout` leaves to the request's end is given
+    /// back here, so no owner outlives the request's heap.
+    pub(crate) fn release(&mut self, req: &mut Request, mut release: impl FnMut(&mut Request)) {
+        if self.step(req, |req, _| release(req)).is_none() {
+            release(req);
         }
     }
 
