@@ -33,6 +33,7 @@
 //! `~/.claude/sessions/<pid>.json`. A record whose pid no process has now,
 //! or one started at another time, a reused pid, is no session's. A
 //! record with no process, the harness's for a session not yet started
+//! (which `xtask track work` takes away once that session ends, #3782)
 //! and every one written before, and one whose process `ps` cannot
 //! judge, stands: the lock fails closed.
 
