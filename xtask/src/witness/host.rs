@@ -74,11 +74,12 @@ use crate::scratch::Tree;
 /// Where a host crate keeps its lines, under the crate.
 pub(crate) const LINES: &str = "tests/lines.toml";
 
-/// How long a server has to listen, or to write what `ready` waits for.
+/// How long a server has to listen, or to write what `ready` waits for,
+/// and a line with a `head` its first byte.
 const PATIENCE: Duration = Duration::from_secs(10);
 
-/// How long a line with a `head` may write nothing before it is taken to
-/// wait and is killed.
+/// How long a line with a `head` may write nothing after its last byte
+/// before it is taken to wait and is killed.
 const QUIET: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Deserialize)]
@@ -530,11 +531,15 @@ fn served(serve: &Serve, pid: u32, dir: &Path, port: u16) -> Result<Vec<String>>
 
 /// A program that does not end on its own, a session that loops or one
 /// that waits at a prompt with nothing more to read, killed with its group
-/// once it has written `head` bytes to stdout or once it has written
-/// nothing for [`QUIET`].
+/// once it has written `head` bytes to stdout, or nothing for [`QUIET`]
+/// since its last byte. Before its first it has [`PATIENCE`], a server's
+/// time to be ready: on a loaded machine a program may not have run at
+/// all by [`QUIET`], and one killed then reads as one that wrote nothing
+/// (#3616). One that writes nothing at all is killed at [`PATIENCE`].
 fn headed(running: &Running<'_>, head: u64) -> Result<()> {
     let (mut written, mut since) = (running.written(), Instant::now());
-    while written < head && since.elapsed() < QUIET {
+    let quiet = |written| if written == 0 { PATIENCE } else { QUIET };
+    while written < head && since.elapsed() < quiet(written) {
         std::thread::sleep(Duration::from_millis(10));
         let now = running.written();
         if now != written {
@@ -814,27 +819,37 @@ mod tests {
 
     /// A program that does not end on its own is cut at the line's `head`
     /// and killed there, and one that waits at its input is killed once it
-    /// has written nothing for a while: both held as any line is.
+    /// has written nothing for a while: both held as any line is. One whose
+    /// first byte comes later than [`super::QUIET`] after it starts, as a
+    /// program the machine has not yet run, keeps it (#3616); one that
+    /// writes nothing at all is killed all the same, and fails where the
+    /// other host wrote.
     #[test]
     fn a_line_s_head_ends_a_program_that_does_not_end_on_its_own() {
         if !oracle() {
             return;
         }
         let hosts = Tree::new("host-line-head").unwrap();
-        for (name, body) in [("loops", "yes x"), ("waits", "echo x; sleep 60")] {
-            let pinned = host(&hosts, "php-cgi", body);
-            let pin = pin(&pinned, None);
-            let engine = host(&hosts, name, body);
-            let text = "[[line]]\nname = \"one\"\nargs = []\nhead = 8\n";
-            let (judgement, note) = judged(text, &pin, &engine);
+        let text = "[[line]]\nname = \"one\"\nargs = []\nhead = 8\n";
+        let late = format!("sleep {}; echo x; sleep 60", super::QUIET.as_secs() + 1);
+        for (name, pinned, engine) in [
+            ("loops", "yes x", "yes x"),
+            ("waits", "echo x; sleep 60", "echo x; sleep 60"),
+            ("late", "echo x; sleep 60", late.as_str()),
+        ] {
+            let pin = pin(&host(&hosts, "php-cgi", pinned), None);
+            let (judgement, note) = judged(text, &pin, &host(&hosts, name, engine));
             assert_eq!(judgement, Judgement::Pass, "{name}: {note}");
         }
-        let pin = pin(&host(&hosts, "php-cgi", "yes x"), None);
-        let engine = host(&hosts, "otherwise", "yes y");
-        let text = "[[line]]\nname = \"one\"\nargs = []\nhead = 8\n";
-        let (judgement, note) = judged(text, &pin, &engine);
-        assert_eq!(judgement, Judgement::Fail, "{note}");
-        assert!(note.contains("+y\n+y\n+y\n+y"), "{note}");
+        for (name, pinned, engine, differs) in [
+            ("otherwise", "yes x", "yes y", "+y\n+y\n+y\n+y"),
+            ("mute", "echo x; sleep 60", "sleep 60", "-x"),
+        ] {
+            let pin = pin(&host(&hosts, "php-cgi", pinned), None);
+            let (judgement, note) = judged(text, &pin, &host(&hosts, name, engine));
+            assert_eq!(judgement, Judgement::Fail, "{name}: {note}");
+            assert!(note.contains(differs), "{name}: {note}");
+        }
     }
 
     /// A server's port taken by another process between the probe and the
