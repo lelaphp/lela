@@ -474,6 +474,37 @@ fn curl_multi_select(
 ///
 /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate %d bytes) in %s on line 12
 /// ```
+///
+/// What a callable threw during the transfer is this native's throwable,
+/// and the count of transfers still going is written all the same, as
+/// php's `ZEND_TRY_ASSIGN_REF_LONG` follows `curl_multi_perform` with it
+/// pending.
+///
+/// ```php
+/// $a = curl_init('http://127.0.0.1:1/');
+/// $b = curl_init('http://127.0.0.1:1/');
+/// curl_setopt($b, CURLOPT_VERBOSE, 1);
+/// curl_setopt($b, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) {
+///     static $n = 0;
+///     if ($n++ === 0) {
+///         throw new Exception('from the callable');
+///     }
+/// });
+/// $m = curl_multi_init();
+/// curl_multi_add_handle($m, $a);
+/// curl_multi_add_handle($m, $b);
+/// $running = 'not assigned';
+/// try {
+///     curl_multi_exec($m, $running);
+/// } catch (Exception $e) {
+///     echo $e->getMessage(), "\n";
+/// }
+/// var_dump($running);
+/// ```
+/// ```expect
+/// from the callable
+/// int(2)
+/// ```
 #[php_function]
 fn curl_multi_exec(
     req: &mut Request,
@@ -481,30 +512,48 @@ fn curl_multi_exec(
     still_running: Ref<Untyped<Value>>,
 ) -> Result<i64, Thrown> {
     let handles = handles(mh(req, multi_handle)?);
+    let mut pending = Pending::default();
     let mut held: Vec<EasyId> = Vec::with_capacity(handles.len());
     for handle in &handles {
-        if let Some(thrown) = verify_handlers(req, *handle, true) {
-            return Err(thrown);
-        }
+        pending.step(req, |req, pending| {
+            if let Some(thrown) = verify_handlers(req, *handle, true) {
+                pending.park(req, thrown);
+            }
+        });
         if let Ok(easy) = easy_of(req, *handle) {
             held.push(easy);
         }
     }
-    let running = match still_running.get() {
-        Some(Untyped(value)) => to_long(req, &value.deref())?,
-        None => 0,
+    let performed = pending.step(req, |req, pending| {
+        let running = match still_running.get() {
+            Some(Untyped(value)) => to_long(req, &value.deref())?,
+            None => 0,
+        };
+        let multi = multi_of(req, multi_handle)?;
+        let was = std::mem::replace(&mut mh(req, multi_handle)?.running, true);
+        #[allow(clippy::cast_possible_truncation)]
+        let (performed, thrown) = multi.perform(req, &held, running as i32);
+        mh(req, multi_handle)?.running = was;
+        if let Some(thrown) = thrown {
+            pending.park(req, thrown);
+        }
+        Ok(performed)
+    });
+    // The count and `SAVE_CURLM_ERROR` as a step of their own, with what
+    // the transfer threw standing; `None` only where a fatal stands,
+    // which is the answer then.
+    let answered = match performed {
+        Some(Ok((code, running))) => pending
+            .step(req, |req, _| {
+                still_running.set(req, Untyped(Value::int(running)))?;
+                mh(req, multi_handle)?.err = code;
+                Ok(code)
+            })
+            .unwrap_or(Ok(code)),
+        Some(Err(thrown)) => Err(thrown),
+        None => Ok(0),
     };
-    let multi = multi_of(req, multi_handle)?;
-    let was = std::mem::replace(&mut mh(req, multi_handle)?.running, true);
-    #[allow(clippy::cast_possible_truncation)]
-    let ((code, running), thrown) = multi.perform(req, &held, running as i32);
-    mh(req, multi_handle)?.running = was;
-    if let Some(thrown) = thrown {
-        return Err(thrown);
-    }
-    still_running.set(req, Untyped(Value::int(running)))?;
-    mh(req, multi_handle)?.err = code;
-    Ok(code)
+    pending.answer(req, answered)
 }
 
 /// `curl_multi_getcontent(CurlHandle $handle): ?string`: what
