@@ -357,46 +357,36 @@ impl Request {
         handled
     }
 
-    /// What `php://input` reads (`Z/ext/standard/php_fopen_wrapper.c:77`):
-    /// the body the form reader buffered, with what the host has not
-    /// handed out read after it, which becomes the request's body; empty
-    /// where a reader took the body and kept none of it, as multipart
-    /// does.
-    ///
-    /// Read as `php_stream_input_read` reads, a chunk at a time: the host
-    /// is asked for more only while what it has handed out falls short of
-    /// the chunk wanted, so a body the form reader stopped reading part way
-    /// is read no further.
-    pub(crate) fn input_bytes(&mut self) -> Vec<u8> {
-        const CHUNK: usize = 8192;
-        // `php_stream_url_wrap_php`'s `input`: the form reader's stream,
-        // or one made for the body where no reader made one.
-        let mut stream = match self.post.request_body.take() {
-            Some(stream) => stream,
-            None => match self.open_request_body() {
-                Ok(stream) => stream,
-                Err(_) => return Vec::new(),
-            },
+    /// `php_stream_url_wrap_php`'s `input` (`Z/ext/standard/php_fopen_wrapper.c:225`):
+    /// `SG(request_info).request_body`, the stream the form reader
+    /// buffered the body in, or one made for the body where no reader
+    /// made one, which becomes the request's body; `None` where the
+    /// engine keeps the body as bytes, built with no stream layer.
+    pub(crate) fn input_body(&mut self) -> Result<Option<Resource>, Thrown> {
+        let body = match self.post.request_body.take() {
+            Some(body) => body,
+            None => self.open_request_body()?,
         };
-        let mut body = self.request_body_bytes(&stream);
-        let mut out = Vec::new();
-        loop {
-            let position = out.len();
-            if !self.post.done && self.post.read < position + CHUNK {
-                let block = self.read_post_block(CHUNK);
-                if !block.is_empty() {
-                    self.append_request_body(&mut stream, &block);
-                }
-                body.extend_from_slice(&block);
-            }
-            let end = (position + CHUNK).min(body.len());
-            if end <= position {
-                break;
-            }
-            out.extend_from_slice(&body[position..end]);
+        let stream = match &body {
+            RequestBody::Stream(stream) => Some(*stream),
+            RequestBody::Bytes(_) => None,
+        };
+        self.post.request_body = Some(body);
+        Ok(stream)
+    }
+
+    /// `php_stream_input_read`'s ask of the host
+    /// (`Z/ext/standard/php_fopen_wrapper.c:82`): where the host has not
+    /// ended the body and has handed out less of it than `end`, the
+    /// stream's position and the `count` it was asked for, one
+    /// `sapi_read_post_block` of up to `count` bytes; nothing otherwise,
+    /// so a body the form reader stopped reading part way, or one the
+    /// program reads only the head of, is read no further.
+    pub(crate) fn input_block(&mut self, end: usize, count: usize) -> Vec<u8> {
+        if self.post.done || self.post.read >= end {
+            return Vec::new();
         }
-        self.post.request_body = Some(stream);
-        out
+        self.read_post_block(count)
     }
 
     /// `SG(request_info).request_body` made: the stream layer's temp

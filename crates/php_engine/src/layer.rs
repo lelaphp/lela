@@ -175,8 +175,12 @@ pub trait Face: sealed::Sealed {
     fn host_fds_are_process(&self) -> bool;
     /// `fclose()` reaching the stream a standard stream's constant holds.
     fn close_host_fd(&mut self, standard: Standard);
-    /// What `php://input` reads.
-    fn input_bytes(&mut self) -> Vec<u8>;
+    /// The request's body as `php://input` opens it,
+    /// `SG(request_info).request_body`, made where no reader made it.
+    fn input_body(&mut self) -> Result<Option<Resource>, Thrown>;
+    /// `php_stream_input_read`'s ask of the host: up to `count` bytes of
+    /// the body where the host has handed out less than `end`.
+    fn input_block(&mut self, end: usize, count: usize) -> Vec<u8>;
     /// The heap's memory limit in bytes, `PG(memory_limit)`.
     fn heap_memory_limit(&self) -> usize;
     /// `php_open_temporary_fd_ex`: the file made and its path.
@@ -241,8 +245,11 @@ impl Face for Request {
     fn close_host_fd(&mut self, standard: Standard) {
         Request::close_host_fd(self, standard);
     }
-    fn input_bytes(&mut self) -> Vec<u8> {
-        Request::input_bytes(self)
+    fn input_body(&mut self) -> Result<Option<Resource>, Thrown> {
+        Request::input_body(self)
+    }
+    fn input_block(&mut self, end: usize, count: usize) -> Vec<u8> {
+        Request::input_block(self, end, count)
     }
     fn heap_memory_limit(&self) -> usize {
         Request::heap_memory_limit(self)

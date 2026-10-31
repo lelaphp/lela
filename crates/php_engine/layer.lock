@@ -5,7 +5,8 @@ layer::Face::close_host_fd
 layer::Face::heap_memory_limit
 layer::Face::host_fd
 layer::Face::host_fds_are_process
-layer::Face::input_bytes
+layer::Face::input_block
+layer::Face::input_body
 layer::Face::instantiable
 layer::Face::is_pending
 layer::Face::keep_in_list

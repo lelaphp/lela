@@ -26,7 +26,7 @@
 //! spills to a file past its `PHP_STREAM_MAX_MEM`, and the plain files
 //! wrapper opens directories as `php_plain_files_dirstream_ops`.
 //!
-//! What is not here: the lazy body under `php://input` (#544), `php://fd/` and `php://filter/`, the filter chains, and the
+//! What is not here: `php://fd/` and `php://filter/`, the filter chains, and the
 //! read buffer's `DETECT_EOL` arm.
 
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -2021,20 +2021,13 @@ const S_IFREG: i64 = 0o100_000;
 
 /// `php_stream_memory_data` under `php_stream_memory_ops`
 /// (`Z/main/streams/memory.c:36`): the bytes, the position in them, and
-/// which of the three ways it was opened. The label is `MEMORY` for
-/// `php://memory`; `php://input` reads the request's body through the
-/// same bytes under the label of the kind php reads it with, and
-/// `php://stdin` through [`HostFd`] under a host that handed no fd 0,
-/// since nothing in the engine reads a body lazily yet (#544).
+/// which of the three ways it was opened.
 struct Memory {
     data: MemBytes,
     fpos: usize,
     mode: TempMode,
-    label: &'static str,
     /// The `php_stream_memory_data` php `emalloc`s, [`MEMORY_DATA_SIZE`]
-    /// bytes on the request's heap from [`Ops::lay_down`] to the close;
-    /// none for `php://input` and a host's standard input, which php
-    /// reads through kinds of their own.
+    /// bytes on the request's heap from [`Ops::lay_down`] to the close.
     own: Option<Emalloc>,
 }
 
@@ -2050,10 +2043,6 @@ enum MemBytes {
     /// `zend_string_realloc`ed by a write past its end and
     /// `zend_string_truncate`d by a shorter `ftruncate`.
     Own(crate::api::values::FreshString),
-    /// What the host handed the request, `php://input`'s body and a
-    /// host's standard input, which php keeps in streams of their own
-    /// and never in a memory stream's data.
-    Host(Vec<u8>),
 }
 
 impl MemBytes {
@@ -2061,7 +2050,6 @@ impl MemBytes {
         match self {
             MemBytes::Empty => &[],
             MemBytes::Own(s) => s.bytes(),
-            MemBytes::Host(bytes) => bytes,
         }
     }
 
@@ -2069,7 +2057,6 @@ impl MemBytes {
         match self {
             MemBytes::Empty => &mut [],
             MemBytes::Own(s) => s.bytes_mut(),
-            MemBytes::Host(bytes) => bytes,
         }
     }
 
@@ -2103,11 +2090,6 @@ impl MemBytes {
             MemBytes::Empty => FreshString::new(req, len),
             MemBytes::Own(s) if len >= s.len() => s.extend(req, len),
             MemBytes::Own(s) => s.truncate(req, len),
-            MemBytes::Host(mut bytes) => {
-                bytes.resize(len, 0);
-                *self = MemBytes::Host(bytes);
-                return Ok(());
-            }
         };
         *self = MemBytes::Own(resized?);
         Ok(())
@@ -2123,7 +2105,7 @@ impl MemBytes {
 
 impl Ops for Memory {
     fn label(&self) -> &'static str {
-        self.label
+        "MEMORY"
     }
 
     /// `_php_stream_memory_create`'s `self = emalloc(sizeof(*self))`;
@@ -2143,9 +2125,6 @@ impl Ops for Memory {
     /// 32
     /// ```
     fn lay_down(&mut self, req: &mut Request) -> Result<(), Thrown> {
-        if matches!(self.data, MemBytes::Host(_)) {
-            return Ok(());
-        }
         self.own = Some(Emalloc::new(req, MEMORY_DATA_SIZE)?);
         Ok(())
     }
@@ -2212,9 +2191,6 @@ impl Ops for Memory {
     /// bytes released, then the struct `efree`d.
     fn close(&mut self, req: &mut Request) -> i32 {
         self.data.release(req);
-        if let MemBytes::Host(_) = self.data {
-            self.data = MemBytes::Empty;
-        }
         if let Some(own) = self.own.take() {
             own.free(req);
         }
@@ -2302,7 +2278,7 @@ impl Ops for Memory {
     }
 
     fn memory_buffer(&self) -> Option<&[u8]> {
-        (self.label == "MEMORY").then_some(self.data.bytes())
+        Some(self.data.bytes())
     }
 }
 
@@ -2379,7 +2355,6 @@ fn memory(mode: TempMode) -> PhpStream {
             fpos: 0,
             mode,
             own: None,
-            label: "MEMORY",
         }),
         mode.as_mode(),
     );
@@ -3247,8 +3222,9 @@ struct HostFd {
 
 /// Which of the host's three a [`HostFd`] is.
 enum HostEnd {
-    /// fd 0 under a host that handed none, over the body it reads.
-    Stdin(Memory),
+    /// fd 0 under a host that handed none, which reads as empty and
+    /// takes no write, as a read-only memory stream.
+    Stdin,
     /// fd 1 and fd 2, each with the label php's kind over the host's fd
     /// has: `tcp_socket` over a socket, as `php_stream_url_wrap_php`
     /// swaps the ops, and `STDIO` otherwise.
@@ -3263,7 +3239,7 @@ impl HostFd {
 
     fn standard(&self) -> Standard {
         match self.end {
-            HostEnd::Stdin(_) => Standard::Stdin,
+            HostEnd::Stdin => Standard::Stdin,
             HostEnd::Stdout(_) => Standard::Stdout,
             HostEnd::Stderr(_) => Standard::Stderr,
         }
@@ -3280,7 +3256,7 @@ impl HostFd {
 impl Ops for HostFd {
     fn label(&self) -> &'static str {
         match self.end {
-            HostEnd::Stdin(_) => "STDIO",
+            HostEnd::Stdin => "STDIO",
             HostEnd::Stdout(label) | HostEnd::Stderr(label) => label,
         }
     }
@@ -3300,7 +3276,7 @@ impl Ops for HostFd {
 
     fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
         match &mut self.end {
-            HostEnd::Stdin(body) => body.write(req, buf),
+            HostEnd::Stdin => None,
             HostEnd::Stdout(_) => {
                 req.response_mut().write_stdout(buf);
                 Some(buf.len())
@@ -3313,8 +3289,9 @@ impl Ops for HostFd {
     }
 
     fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
-        if let HostEnd::Stdin(body) = &mut self.end {
-            return body.read(req, buf, eof);
+        if let HostEnd::Stdin = self.end {
+            *eof = true;
+            return Some(0);
         }
         let text = format!(
             "{}(): Read of {} bytes failed with errno={EBADF} Bad file descriptor",
@@ -3329,10 +3306,7 @@ impl Ops for HostFd {
         if let Some(data) = self.data.take() {
             data.free(req);
         }
-        match &mut self.end {
-            HostEnd::Stdin(body) => body.close(req),
-            HostEnd::Stdout(_) | HostEnd::Stderr(_) => 0,
-        }
+        0
     }
 
     fn seekable(&self) -> bool {
@@ -3590,13 +3564,7 @@ pub(crate) fn open_standard(
         return standard_open(req, standard, mode);
     }
     let end = match standard {
-        Standard::Stdin => HostEnd::Stdin(Memory {
-            data: MemBytes::Host(Vec::new()),
-            fpos: 0,
-            mode: TempMode::ReadOnly,
-            label: "STDIO",
-            own: None,
-        }),
+        Standard::Stdin => HostEnd::Stdin,
         Standard::Stdout => HostEnd::Stdout(host_label(req, Standard::Stdout)),
         Standard::Stderr => HostEnd::Stderr(host_label(req, Standard::Stderr)),
     };
@@ -3648,18 +3616,215 @@ pub(crate) fn open_fd(
 }
 
 /// [`Streams::input_stream`](crate::api::request::Streams::input_stream):
-/// `php://input`, `php_stream_input_ops` over the request's body
-/// (`Z/ext/standard/php_fopen_wrapper.c:58-146`), read whole, read only,
-/// and sought as `php_stream_input_seek` seeks it.
+/// `php://input` (`Z/ext/standard/php_fopen_wrapper.c:225`), the input
+/// kind over the request's body rewound, read only.
 pub(crate) fn open_input(req: &mut Request) -> Result<Owner<Stream>, Thrown> {
-    let kind = Memory {
-        data: MemBytes::Host(req.input_bytes()),
-        fpos: 0,
-        mode: TempMode::ReadOnly,
-        label: "Input",
+    let body = (req.input_body()?).and_then(|body| Stream::from_value(req, &body.as_value()));
+    if let Some(body) = body {
+        body.seek(req, 0, Whence::Set);
+    }
+    let kind = Input {
+        body,
+        position: 0,
         own: None,
     };
     req.stream_alloc(PhpStream::new(Box::new(kind), b"rb"))
+}
+
+/// `sizeof(php_stream_input_t)` on the pinned 64-bit build: `body` and
+/// `position` (`Z/ext/standard/php_fopen_wrapper.c:64`).
+const INPUT_DATA_SIZE: usize = 16;
+
+/// `php_stream_input_t` under `php_stream_input_ops`
+/// (`Z/ext/standard/php_fopen_wrapper.c:64-146`): the request's body,
+/// `SG(request_info).request_body`, which the request's resource list
+/// keeps to its end, and the position in it. A read asks the host for a
+/// block only where what it has handed out falls short of the position
+/// and the count asked, and appends the block to the body, so the body
+/// is read as the program reads it and not when `php://input` opens. A
+/// body that holds what was read is read again by every `php://input`
+/// opened after, each from its own position.
+///
+/// The body is laid down empty by the first open and filled by the
+/// reads, one fill of the stream's buffer, [`CHUNK_SIZE`], at a time; a
+/// seek reads nothing of the host, and a second `php://input` reads the
+/// same body from its own position:
+///
+/// ```php
+/// function body() { foreach (get_resources('stream') as $r) if (stream_get_meta_data($r)['stream_type'] === 'TEMP') return fstat($r)['size']; return -1; }
+/// echo body(), "\n"; $f = fopen('php://input', 'r'); echo body(), "\n";
+/// var_dump(fread($f, 10), ftell($f), body(), fseek($f, 20), ftell($f), body(), fread($f, 5), body());
+/// $g = fopen('php://input', 'r'); var_dump(fread($g, 4), ftell($f), stream_get_contents($f), feof($f));
+/// var_dump(fflush($f), fwrite($f, 'x'), fstat($f));
+/// $m = stream_get_meta_data($f); unset($m['uri']); echo json_encode($m), "\n";
+/// ```
+/// ```request
+/// --ENV--
+/// REQUEST_METHOD=PUT
+/// --POST_RAW--
+/// Content-Type: text/plain
+/// abcdefghijklmnopqrstuvwxyz
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.12
+/// Content-type: text/html; charset=UTF-8
+///
+/// -1
+/// 0
+/// string(10) "abcdefghij"
+/// int(10)
+/// int(26)
+/// int(0)
+/// int(20)
+/// int(26)
+/// string(5) "uvwxy"
+/// int(26)
+/// string(4) "abcd"
+/// int(25)
+/// string(1) "z"
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// {"timed_out":false,"blocked":true,"eof":true,"wrapper_type":"PHP","stream_type":"Input","mode":"rb","unread_bytes":0,"seekable":true}
+/// ```
+///
+/// A negative `CONTENT_LENGTH`, which php-cgi reads to the body's end,
+/// is read as lazily: a multipart body that names no boundary is refused
+/// by its handler before a byte is read, and `php://input` reads it as it
+/// is asked:
+///
+/// ```php
+/// function body() { foreach (get_resources('stream') as $r) if (stream_get_meta_data($r)['stream_type'] === 'TEMP') return fstat($r)['size']; return -1; }
+/// $f = fopen('php://input', 'r'); echo body(), "\n";
+/// var_dump(fread($f, 10), ftell($f), body(), stream_get_contents($f), body());
+/// ```
+/// ```request
+/// --ENV--
+/// CONTENT_TYPE=multipart/form-data
+/// CONTENT_LENGTH=-1
+/// --POST--
+/// abcdefghijklmnopqrstuvwxyz
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.12
+/// Content-type: text/html; charset=UTF-8
+///
+///
+/// Warning: PHP Request Startup: Missing boundary in multipart/form-data POST data in Unknown on line 0
+/// 0
+/// string(10) "abcdefghij"
+/// int(10)
+/// int(26)
+/// string(16) "klmnopqrstuvwxyz"
+/// int(26)
+/// ```
+///
+/// What php `ecalloc`s for the kind's data, [`INPUT_DATA_SIZE`] bytes on
+/// the request's heap from the open to the close, and the body's bytes as
+/// the read appends them:
+///
+/// ```php
+/// $w = fopen('php://input', 'r'); fclose($w); unset($w);
+/// $m = memory_get_usage(); $f = fopen('php://input', 'r'); echo memory_get_usage() - $m, "\n";
+/// fread($f, 1); echo memory_get_usage() - $m, "\n";
+/// fclose($f); unset($f); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```request
+/// --ENV--
+/// REQUEST_METHOD=PUT
+/// --POST_RAW--
+/// Content-Type: text/plain
+/// hello
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.12
+/// Content-type: text/html; charset=UTF-8
+///
+/// 288
+/// 8624
+/// 144
+/// ```
+struct Input {
+    /// `input->body`; `None` under an engine that keeps the body as bytes.
+    body: Option<Stream>,
+    /// `input->position`.
+    position: usize,
+    /// The `php_stream_input_t` php `ecalloc`s, laid down by
+    /// [`Ops::lay_down`] and freed by the close.
+    own: Option<Emalloc>,
+}
+
+impl Ops for Input {
+    fn label(&self) -> &'static str {
+        "Input"
+    }
+
+    fn lay_down(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        self.own = Some(Emalloc::new(req, INPUT_DATA_SIZE)?);
+        Ok(())
+    }
+
+    /// `php_stream_input_write`: `-1`.
+    fn write(&mut self, _req: &mut Request, _buf: &[u8]) -> Option<usize> {
+        None
+    }
+
+    /// `php_stream_input_read` (`Z/ext/standard/php_fopen_wrapper.c:77`):
+    /// the host's next block appended to the body where the body falls
+    /// short of the position and the count asked
+    /// ([`Face::input_block`](crate::api::layer::Face::input_block)), then
+    /// the body read from the position; eof where nothing was read. `-1`
+    /// with no body, and eof where the program closed the body's stream,
+    /// which `get_resources()` names.
+    fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
+        let body = self.body?;
+        let block = req.input_block(self.position.saturating_add(buf.len()), buf.len());
+        if !block.is_empty() {
+            body.seek(req, 0, Whence::End);
+            body.write(req, &block);
+        }
+        let at = i64::try_from(self.position).unwrap_or(i64::MAX);
+        body.seek(req, at, Whence::Set);
+        let read = body.read_into(req, buf);
+        self.position += read.unwrap_or(0);
+        *eof |= read.is_none_or(|n| n == 0);
+        read
+    }
+
+    fn close(&mut self, req: &mut Request) -> i32 {
+        if let Some(own) = self.own.take() {
+            own.free(req);
+        }
+        0
+    }
+
+    /// `php_stream_input_flush`: `-1`.
+    fn flush(&mut self, _req: &mut Request) -> bool {
+        false
+    }
+
+    /// `php_stream_input_seek` (`Z/ext/standard/php_fopen_wrapper.c:121`):
+    /// the body sought, and the position where the body stands after.
+    fn seek(
+        &mut self,
+        req: &mut Request,
+        offset: i64,
+        whence: Option<Whence>,
+        position: &mut i64,
+    ) -> Option<bool> {
+        let Some(body) = self.body else {
+            return Some(false);
+        };
+        let sought = body.seek(req, offset, whence);
+        *position = body.tell(req);
+        self.position = usize::try_from(*position).unwrap_or(0);
+        Some(sought)
+    }
+
+    fn seekable(&self) -> bool {
+        true
+    }
 }
 
 /// [`Streams::memory_stream`](crate::api::request::Streams::memory_stream):
