@@ -89,14 +89,64 @@ impl Request {
 
     /// A step of php's body with `EG(exception)` set: `step` meets the
     /// throwable `pending` carries standing in php's slot, and the slot
-    /// is given back after, so the `Thrown` stays the one owner. A user
-    /// error handler is handed nothing then, since `zend_call_function`
+    /// is given back after, so the `Thrown` stays the caller's owner. A
+    /// user error handler is handed nothing then, since `zend_call_function`
     /// returns at once while a throwable is pending
     /// (`Z/Zend/zend_execute_API.c:822`), the built-in handler renders a
     /// diagnostic where no handler stands, and a stream's wrapper errors
     /// are kept quiet. A fatal or an exit runs nothing and answers
     /// `None`: php's `zend_bailout` left before the step. What a step's
     /// call answers is [`crate::api::raising::while_pending`]'s to say.
+    ///
+    /// The slot holds an owner of its own for the step, as `EG(exception)`
+    /// holds one, so what the step serves that chains onto what stands, a
+    /// destructor's throwable as `zend_objects_destroy_object` chains it
+    /// or a stream close's as `zend_throw_exception_internal` does, takes
+    /// the slot's owner and leaves the caller's. What the step raised
+    /// over it stands in the slot after the step, with the caller's
+    /// throwable as its `previous`. A step's answer that takes the
+    /// throwable out of the slot names it with no owner, the slot's given
+    /// up there ([`Request::take_pending_view`]); the slot's owner is
+    /// given up as the step ends where it still holds the throwable.
+    ///
+    /// `hash_update_file` hashes its file after its `$stream_context`
+    /// was refused, and the user wrapper's object that the open makes
+    /// with the `TypeError` pending is freed at once, its destructor
+    /// served, as `user_stream_create_object` frees it:
+    ///
+    /// ```php
+    /// class W { public $context; function __destruct() { echo "dtor\n"; throw new Exception("dtor"); } }
+    /// stream_wrapper_register('ww', 'W');
+    /// try { hash_update_file(hash_init('md5'), 'ww://x', fopen('php://memory', 'r')); }
+    /// catch (Exception $e) { echo $e->getMessage(), " <- ", $e->getPrevious()::class, "\n"; }
+    /// ```
+    /// ```expect
+    /// dtor
+    /// dtor <- TypeError
+    /// ```
+    ///
+    /// Where the slot holds the throwable already, a destructor's an
+    /// earlier step left there and the caller has named since, the slot's
+    /// owner is its own as it stands: the step is taken with it there, its
+    /// answers naming it again take no owner, and the slot keeps it after.
+    /// pdo's fetch into an object writes each column past the destructor's
+    /// throwable the first column's write left, and the refused typed
+    /// columns after it leave nothing kept:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "dtor\n"; throw new Exception("dtor"); } }
+    /// class R { public $b; public int $a; public int $c; }
+    /// $st = (new PDO('sqlite::memory:'))->query("select 'y' as b, 'x' as a, 'z' as c");
+    /// $r = new R; $r->b = new D;
+    /// $st->setFetchMode(PDO::FETCH_INTO, $r);
+    /// try { $st->fetch(); } catch (Exception $e) { echo $e->getMessage(), " ", var_export($e->getPrevious(), true), "\n"; $w = WeakReference::create($e); }
+    /// unset($e); var_dump($w->get());
+    /// ```
+    /// ```expect
+    /// dtor
+    /// dtor NULL
+    /// NULL
+    /// ```
     pub(crate) fn while_pending<R>(
         &mut self,
         pending: &Thrown,
@@ -104,24 +154,40 @@ impl Request {
     ) -> Option<R> {
         let object = pending.exception().copied()?;
         if self.raised.is_some() || self.bailout {
-            return Some(step(self));
+            if self.pending() != Some(object) || self.stepping_past(object) {
+                return Some(step(self));
+            }
+            let outer = self.stepping_past.replace(Stepping {
+                object,
+                owned: true,
+            });
+            let answer = step(self);
+            self.stepping_past = outer;
+            return Some(answer);
         }
+        self.addref(&object.as_value());
         self.raised = Some(Raised::Throwable(object));
-        let outer = self.stepping_past.replace(object);
+        let outer = self.stepping_past.replace(Stepping {
+            object,
+            owned: true,
+        });
         let answer = step(self);
-        self.stepping_past = outer;
+        let stepped = std::mem::replace(&mut self.stepping_past, outer);
         if self.raised == Some(Raised::Throwable(object)) {
             self.raised = None;
+            if stepped.is_some_and(|stepped| stepped.owned) {
+                self.release_nogc(object.as_value());
+            }
         }
         Some(answer)
     }
 
     /// Whether `object`, standing in `EG(exception)`, is the throwable a
-    /// [`Request::while_pending`] step stands it in for, which the slot
-    /// names with no owner of its own: what the step answers naming it
-    /// takes none either.
+    /// [`Request::while_pending`] step stands it in for, which the step's
+    /// caller owns: what the step answers naming it takes no owner.
     pub(crate) fn stepping_past(&self, object: PhpObject) -> bool {
-        self.stepping_past == Some(object)
+        self.stepping_past
+            .is_some_and(|stepping| stepping.object == object)
     }
 
     /// `zend_throw_exception_internal`'s chain
@@ -156,7 +222,7 @@ impl Request {
             && old.index() == ran_on.index()
             && old.index() != new.index()
         {
-            self.raised = None;
+            self.take_pending_view();
             self.set_previous(new, old);
         }
         thrown
@@ -820,9 +886,20 @@ impl Request {
 
     /// What [`take_pending`](Self::take_pending) takes, its one owner not
     /// yet named.
+    ///
+    /// The throwable a [`Request::while_pending`] step stands in the slot
+    /// is taken with no owner as well: the slot's own is given up here,
+    /// and the step's caller holds the one left.
     pub(crate) fn take_pending_view(&mut self) -> Option<PhpObject> {
         let object = self.pending()?;
         self.raised = None;
+        if let Some(stepping) = &mut self.stepping_past
+            && stepping.object == object
+            && stepping.owned
+        {
+            stepping.owned = false;
+            self.release_nogc(object.as_value());
+        }
         Some(object)
     }
 }
@@ -859,6 +936,15 @@ impl Diagnostics<&mut Request> {
 pub(super) enum Saved {
     Raised(Option<Raised>),
     TheObject,
+}
+
+/// The throwable a [`Request::while_pending`] step stands in php's slot,
+/// and whether the slot still holds the owner the step gave it, which
+/// the step's end gives up.
+#[derive(Clone, Copy)]
+pub(crate) struct Stepping {
+    object: PhpObject,
+    owned: bool,
 }
 
 /// What stands in php's `EG(exception)`: a throwable, or one of the two

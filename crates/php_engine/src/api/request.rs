@@ -400,8 +400,9 @@ pub struct Request {
     /// `Threw` edge.
     raised: Option<Raised>,
     /// The throwable [`Request::while_pending`]'s step stands in
-    /// `raised` for, which the slot names and the step's caller owns.
-    stepping_past: Option<PhpObject>,
+    /// `raised` for, which the step's caller owns, and whether the slot
+    /// holds the owner of its own the step gave it.
+    stepping_past: Option<pending::Stepping>,
     /// php's `zend_bailout` under way: a fatal was rendered where it was
     /// raised and the request is leaving for the `zend_try` that catches
     /// it, the outermost serving's end or the step of

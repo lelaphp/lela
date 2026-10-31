@@ -1570,6 +1570,28 @@ impl Request {
     /// [`Request::serve_native`] past the entry's lookup, for a caller
     /// that holds `function`'s entry already, as a frameless call's
     /// handler reads it off the frameless table (`ZEND_FLF_HANDLER`).
+    ///
+    /// What a user wrapper's method threw inside a stream op the native
+    /// asked for, kept by the stream layer ([`Diagnostics::stream_thrown`])
+    /// where php's leaves it in `EG(exception)`, is raised as the native
+    /// returns: a throwable the native answers after it is chained onto
+    /// it as `zend_throw_exception_internal` chains it, the kept one its
+    /// `previous`, and an exit or a fatal gives the kept one up
+    /// ([`Thrown::chain`]). `SimpleXMLElement` throws once libxml has
+    /// read the empty document and closed its stream:
+    ///
+    /// ```php
+    /// class W { public $context; function url_stat($p, $f) { return ['size' => 0]; } function stream_open($p, $m, $o, &$op) { return true; } function stream_read($n) { return ''; } function stream_eof() { return true; } function stream_close() { echo "close\n"; throw new Exception("close"); } }
+    /// stream_wrapper_register('ww', 'W');
+    /// try { new SimpleXMLElement('ww://x', LIBXML_NOERROR, true); }
+    /// catch (Exception $e) { echo $e->getMessage(), " <- ", $e->getPrevious()?->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// close
+    /// String could not be parsed as XML <- close
+    /// ```
+    ///
+    /// [`Diagnostics::stream_thrown`]: super::Diagnostics::stream_thrown
     #[inline(always)] // design §5.8: every native call's, frameless or not
     pub(crate) fn serve_entry(
         &mut self,
@@ -1593,17 +1615,20 @@ impl Request {
             crate::observer::native_returned(self, begun, &served, None, on_throw);
             return served;
         };
-        crate::observer::native_returned(self, begun, &served, Some(&deferred), on_throw);
+        if served.is_ok() {
+            crate::observer::native_returned(self, begun, &served, Some(&deferred), on_throw);
+        }
         match served {
             Ok(value) => {
                 self.release(value);
                 Err(deferred)
             }
+            // Thrown over the kept one, chained as php chains it where
+            // the native throws.
             Err(thrown) => {
-                if let Some(object) = deferred.exception() {
-                    self.release(object.as_value());
-                }
-                Err(thrown)
+                let served = Err(deferred.chain(self, thrown));
+                crate::observer::native_returned(self, begun, &served, None, on_throw);
+                served
             }
         }
     }
