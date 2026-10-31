@@ -11,6 +11,52 @@ Run those builds sequentially on small builders. The default Cargo job count is
 one. The installer runs on BUILDARCH; the compiled hosts and their libraries
 follow TARGETARCH. Product naming remains governed by ADR-0016.
 
+## A release by hand
+
+Until CD builds the release (#3526), a person builds it on an Apple silicon
+Mac with Docker, from a clean checkout of the tagged commit (#3525's
+2026-10-31 ruling): `darwin-arm64` with cargo, and `linux-aarch64` and
+`linux-x86_64` from the `binaries` target above. Each platform is one
+tarball, `<name>-<version>-<platform>.tar.gz`, holding one directory of
+that name, and `SHA256SUMS` is written over them by `scripts/dist-sums.sh`:
+
+```sh
+dist/release.sh 0.1.0-beta.1 /tmp/release
+(cd /tmp/release && shasum -a 256 -c SHA256SUMS)
+```
+
+The script refuses a tree with changes and prints the commit it built.
+Name platforms after `<out>` to build only those. Docker
+Desktop's default VM (about 4 GiB) links one host at a time, so
+`CARGO_BUILD_JOBS` stays at its default of one (#3213).
+
+Smoke each tarball on its platform before publishing it: `dist/smoke.sh`
+runs `-v`, `-r`, a file with arguments, code on stdin, `php-cgi` on a file
+and `php-fpm -t`, and exits nonzero at the first wrong answer. On the Mac:
+
+```sh
+mkdir -p /tmp/smoke
+tar -xzf /tmp/release/php-0.1.0-beta.1-darwin-arm64.tar.gz -C /tmp/smoke
+dist/smoke.sh /tmp/smoke/php-0.1.0-beta.1-darwin-arm64
+```
+
+A Linux tarball runs in the Ubuntu image the Dockerfile builds on, with its
+`runtime-packages.txt` installed; `linux/amd64` runs under emulation on an
+arm64 Mac:
+
+```sh
+ubuntu=$(sed -n 's/^ARG UBUNTU=//p' dist/Dockerfile)
+docker run --rm --platform linux/arm64 -v /tmp/release:/release:ro -v "$PWD/dist:/dist:ro" "$ubuntu" bash -c '
+    tar -xzf /release/php-0.1.0-beta.1-linux-aarch64.tar.gz -C /tmp
+    d=/tmp/php-0.1.0-beta.1-linux-aarch64
+    apt-get update -qq && xargs -a "$d/runtime-packages.txt" apt-get install -y -qq --no-install-recommends >/dev/null
+    /dist/smoke.sh "$d"'
+```
+
+The macOS binaries carry the linker's ad-hoc signature, with no Developer
+ID and no notarization (#3525). Nothing here tags, pushes or publishes;
+that is a person's.
+
 ## The compiled tier
 
 The hosts carry the compiled tier: `sapi/cli`, `sapi/fpm` and `sapi/makala`

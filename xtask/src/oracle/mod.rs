@@ -24,6 +24,8 @@
 
 pub(crate) mod built_from;
 mod closure;
+#[cfg(test)]
+mod dockerfile;
 pub(crate) mod expect;
 mod fastcgi;
 pub(crate) mod hosts;
