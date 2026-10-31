@@ -1686,7 +1686,11 @@ pub fn class_unserialize(
 /// included files, compiled as a `require` (a `ParseError` is the `Err`)
 /// and executed to its end on a frame that shares the calling user
 /// frame's variables and has no `$this` and no scope. `true` once the
-/// file ran; the `Err` is what it threw.
+/// file ran; the `Err` is what it threw. A stream wrapper's URL is
+/// opened and closed in `spl_autoload`'s order where `autoloading` says,
+/// its file served before its stream closes and a failed open raising
+/// nothing, and otherwise as `Phar::webPhar` requires an entry of its
+/// archive, as an include does.
 ///
 /// ```php
 /// $dir = sys_get_temp_dir() . '/witness_load_file_' . getmypid();
@@ -1704,8 +1708,8 @@ pub fn class_unserialize(
 /// bool(true)
 /// int(1)
 /// ```
-pub fn load_file(req: &mut Request, path: &[u8]) -> Result<bool, Thrown> {
-    req.load_file(path)
+pub fn load_file(req: &mut Request, path: &[u8], autoloading: bool) -> Result<bool, Thrown> {
+    req.load_file(path, autoloading)
 }
 
 /// `object_init_ex`: an instance with its declared properties' defaults

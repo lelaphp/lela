@@ -19,7 +19,14 @@ impl Request {
     /// that shares the innermost user frame's variables
     /// (`zend_rebuild_symbol_table`) and has no `$this` and no scope, as
     /// `zend_execute` gives the frame of a native none.
-    pub(crate) fn load_file(&mut self, written: &[u8]) -> Result<bool, Thrown> {
+    ///
+    /// A stream wrapper's URL is opened in `spl_autoload`'s order where
+    /// `autoloading` says ([`Request::load_stream`]), and otherwise in
+    /// `phar_file_action`'s, `Phar::webPhar`'s
+    /// (`Z/ext/phar/phar_object.c:237-268`): the table asked first, the
+    /// file required as an include requires it, its open warning, and its
+    /// stream closed before the file is served.
+    pub(crate) fn load_file(&mut self, written: &[u8], autoloading: bool) -> Result<bool, Thrown> {
         if written.contains(&0) {
             return Ok(false);
         }
@@ -33,24 +40,35 @@ impl Request {
             }
             Err(super::Unresolved::Missing(_)) => return Ok(false),
         };
-        if super::is_wrapper_url(&path) {
+        let stream = super::is_wrapper_url(&path);
+        if stream && autoloading {
             return self.load_stream(written, &path);
         }
         if self.included_files.contains(&path) {
             return Ok(false);
         }
         self.note_included(&path)?;
-        let unit = match self.compile_file(&path, Some(written), super::HandlePath::Opened)? {
-            Some(Ok(unit)) => unit,
-            Some(Err(refused)) => {
-                let kind = php_compile::SourceKind::File;
-                return Err(self.refused_include(&refused, &path, kind));
+        let unit = if stream {
+            // Declared by its compile, before its stream closed.
+            let opened = self.include_stream(exec::IncludeKind::Require, written, &path)?;
+            let super::Opened::Declared(unit) = opened else {
+                return Ok(false);
+            };
+            unit
+        } else {
+            let unit = match self.compile_file(&path, Some(written), super::HandlePath::Opened)? {
+                Some(Ok(unit)) => unit,
+                Some(Err(refused)) => {
+                    let kind = php_compile::SourceKind::File;
+                    return Err(self.refused_include(&refused, &path, kind));
+                }
+                None => return Ok(false),
+            };
+            if !crate::engine::note_compiled(self, &unit, php_compile::SourceKind::File) {
+                return Err(Thrown::of(self.take_pending_view()));
             }
-            None => return Ok(false),
+            unit
         };
-        if !crate::engine::note_compiled(self, &unit, php_compile::SourceKind::File) {
-            return Err(Thrown::of(self.take_pending_view()));
-        }
         self.serve_top_code(unit)?;
         Ok(true)
     }

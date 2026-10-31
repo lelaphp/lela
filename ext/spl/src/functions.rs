@@ -263,7 +263,7 @@ fn spl_autoload(
             .map(|b| if *b == b'\\' { b'/' } else { *b })
             .collect();
         file.extend_from_slice(extension);
-        if php_ext::call::load_file(req, &file)? && lookup_class(req, &lowered)?.is_some() {
+        if php_ext::call::load_file(req, &file, true)? && lookup_class(req, &lowered)?.is_some() {
             break;
         }
     }
