@@ -1404,7 +1404,7 @@ fn a_return_trace_guards_the_caller_it_lands_in() -> Result<(), String> {
 /// `RETURN_BY_REF`'s: each return past its root holds the landing with an
 /// exit within its line and escapes nowhere, as php's
 /// `zend_jit_trace_handler` takes an exit point past the handler. Each
-/// exit names no opline and stores nothing, and they are numbered as the
+/// exit names no opline, stores nothing and knows no type, and they are numbered as the
 /// pinned php's `TRACE 3 exit info` numbers them, after the stack check
 /// of the call to `h()`: `exit_1` and `exit_2`, `----/----/0` (#3688).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -1440,10 +1440,60 @@ fn a_stepped_return_past_the_root_holds_its_landing_with_an_exit() -> Result<(),
         };
         assert_eq!(opline, first.opline, "{shown}");
         let exit = (ir.exits.get(usize::from(held.exit.0))).ok_or("an exit past the trace's")?;
-        assert_eq!((exit.opline, exit.stores.len()), (None, 0), "{shown}");
+        assert_eq!(
+            (exit.opline, exit.stores.len(), exit.known.len()),
+            (None, 0, 0),
+            "{shown}"
+        );
         exits.push(held.exit.0);
     }
     assert_eq!(exits, [1, 2], "{shown}");
+    Ok(())
+}
+
+/// A recursive return trace whose `RETURN` of a string this tier steps,
+/// which php compiles with `zend_jit_return`: each return past its root
+/// escapes, as `zend_jit_leave_func` takes no exit, and its line holds
+/// no guard of its own (#3688).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_stepped_return_php_compiles_in_place_escapes() -> Result<(), String> {
+    let ir = built(
+        &[("record.function", "p"), ("record.start", "return")],
+        "function h() { return 1; }
+        function p($n) { if ($n == 0) { return \"\"; } $x = p($n - 1); h(); $x .= \"a\"; return $x; }
+        echo strlen(p(8)), \"\\n\";",
+    )?;
+    let shown = dump::render(&ir);
+    assert_eq!(ir.entry.stop, Stop::RecursiveRet, "{shown}");
+    let mut past_root = 0;
+    for (at, op) in ir.ops.iter().enumerate() {
+        let Op::Back { frame, escapes, .. } = op else {
+            continue;
+        };
+        if (ir.ops.iter().take(at)).any(|op| matches!(op, Op::Line(line) if line.frame == *frame)) {
+            continue;
+        }
+        let line = OpId(u32::try_from(at).map_err(|e| e.to_string())? - 1);
+        let Some(Op::Line(returned)) = ir.ops.get(line.index()) else {
+            return Err(format!("no line before a return:\n{shown}"));
+        };
+        assert_eq!(
+            (returned.opcode, returned.form),
+            (Opcode::Return, Form::Step),
+            "{shown}"
+        );
+        assert!(
+            escapes.is_some(),
+            "a return php compiles in place takes an exit:\n{shown}"
+        );
+        assert!(
+            !(ir.guards.iter()).any(|guard| guard.at == GuardAt::Within(line)),
+            "{shown}"
+        );
+        past_root += 1;
+    }
+    assert!(past_root > 0, "no return past the root:\n{shown}");
     Ok(())
 }
 
