@@ -104,6 +104,10 @@ pub(crate) struct State {
     /// `php_fopen_primary_script` opened it ([`crate::zend`]'s
     /// `open_primary`), until the engine destroys it.
     pub(crate) primary: Option<crate::api::request::ScannerFile>,
+    /// The `zend_file_handle`s of the includes being compiled, innermost last, each
+    /// `None` where its file did not open, until the engine closes it
+    /// ([`crate::zend`]'s `close_include`).
+    pub(crate) including: Vec<Option<crate::api::request::ScannerFile>>,
 }
 
 /// The idle entries the persistent pool keeps (design §4.10). php's list
@@ -144,15 +148,17 @@ pub(crate) fn engine_end(req: &mut Request) {
     }
 }
 
-/// The four resource types `PHP_MINIT(streams)`, `PHP_MINIT(file)` and
-/// `PHP_MINIT(user_filters)` register: `le_stream`, `le_pstream`,
-/// `le_stream_context` and `le_stream_filter`.
+/// The five resource types `PHP_MINIT(streams)`, `PHP_MINIT(file)`,
+/// `PHP_MINIT(user_filters)` and `PHP_MINIT(user_streams)` register:
+/// `le_stream`, `le_pstream`, `le_stream_context`, `le_stream_filter`
+/// and `le_protocols`.
 #[derive(Clone, Copy)]
 pub(crate) struct Types {
     pub(crate) stream: ResourceType,
     pub(crate) pstream: ResourceType,
     pub(crate) context: ResourceType,
     pub(crate) filter: ResourceType,
+    pub(crate) factory: ResourceType,
 }
 
 impl Default for State {
@@ -180,6 +186,7 @@ impl Default for State {
             persistent: Vec::new(),
             engine: None,
             primary: None,
+            including: Vec::new(),
         }
     }
 }
@@ -202,7 +209,7 @@ pub(crate) trait Layer {
     fn streams(&mut self) -> &mut State;
     /// The state, read; `None` before the request touched a stream.
     fn streams_ref(&self) -> Option<&State>;
-    /// The three resource types, registered as the state is built.
+    /// The layer's resource types, registered as the state is built.
     fn types(&mut self) -> Types;
     /// `fclose()` reaching one of the constants' streams: the host's fd
     /// under it closed, and the constant's stream forgotten.
@@ -215,7 +222,7 @@ pub(crate) trait Layer {
 }
 
 impl Layer for Request {
-    /// The state is built with the three resource types registered, as
+    /// The state is built with the layer's resource types registered, as
     /// `php_module_startup` registers them before any request, so
     /// `get_resources('stream')` names a type once the extension that
     /// registers the plain files wrapper has started.
@@ -278,11 +285,16 @@ fn register_types(req: &mut Request) -> Types {
         .memory_mut()
         .resources()
         .register_type(b"stream filter", None);
+    let factory = req.memory_mut().resources().register_type(
+        b"stream factory",
+        Some(crate::streams::userspace::factory_dtor),
+    );
     Types {
         stream,
         pstream,
         context,
         filter,
+        factory,
     }
 }
 

@@ -859,6 +859,57 @@ impl Request {
     /// closed
     /// ```
     ///
+    /// The stream is closed once the compile is done, as
+    /// `zend_destroy_file_handle` follows `zend_compile_file`: a file whose
+    /// close throws is among the included files, and a `ParseError`
+    /// stands while the stream closes, so `zend_call_function` refuses
+    /// the wrapper's `stream_close`.
+    ///
+    /// ```php
+    /// class W { public $context; function url_stat($p, $f) { return ['size' => 10]; } function stream_open($p, $m, $o, &$op) { return true; } function stream_read($n) { static $d = false; if ($d) return ''; $d = true; return "<?php echo 'inc'\n"; } function stream_eof() { return true; } function stream_stat() { return ['size'=>10]; } function stream_close() { echo "close\n"; throw new Exception("close"); } function stream_set_option($o, $a, $b) { return false; } }
+    /// stream_wrapper_register('ww', 'W');
+    /// try { include 'ww://x'; } catch (Throwable $e) { echo $e::class, ": ", $e->getMessage(), " <- [", $e->getPrevious()?->getMessage(), "]\n"; }
+    /// echo "after\n";
+    /// ```
+    /// ```expect
+    /// ParseError: syntax error, unexpected end of file <- []
+    /// after
+    /// ```
+    ///
+    /// ```php
+    /// class W { public $context; static $src; private $d = false;
+    ///     function stream_open($p, $m, $o, &$op) { return true; }
+    ///     function stream_read($n) { if ($this->d) return ''; $this->d = true; return self::$src; }
+    ///     function stream_eof() { return $this->d; }
+    ///     function stream_stat() { return []; }
+    ///     function stream_close() { echo "close\n"; }
+    ///     function stream_set_option($o, $a, $b) { return false; } }
+    /// class X extends W { function stream_close() { echo "close x\n"; throw new Exception('x'); } }
+    /// stream_wrapper_register('ww', 'W'); stream_wrapper_register('xx', 'X');
+    /// W::$src = "<?php echo 'ran', PHP_EOL;";
+    /// include 'ww://a';
+    /// W::$src = "<?php echo 'not run';";
+    /// try { include 'xx://b'; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// W::$src = "<?php echo 'x'; )";
+    /// try { require_once 'ww://c'; } catch (ParseError $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump(array_slice(get_included_files(), 1));
+    /// ```
+    /// ```expect
+    /// close
+    /// ran
+    /// close x
+    /// x
+    /// Unmatched ')'
+    /// array(3) {
+    ///   [0]=>
+    ///   string(6) "ww://a"
+    ///   [1]=>
+    ///   string(6) "xx://b"
+    ///   [2]=>
+    ///   string(6) "ww://c"
+    /// }
+    /// ```
+    ///
     /// A read that fails, as one through a filter that answers
     /// `PSFS_ERR_FATAL` fails, is the file php could not open
     /// (`zend_stream_fixup`, [`crate::layer::StreamHooks::open`]).
@@ -892,11 +943,43 @@ impl Request {
         let read = (hooks.open)(self, path);
         self.include.including = outer;
         let read = read?;
-        // `compile_file` reports the file it could not open or read only
-        // where nothing is pending (`if (!EG(exception))`).
-        if let Some(thrown) = self.stream_thrown.take() {
+        // `compile_file` compiles nothing and reports the file it could not
+        // open or read only where nothing is pending (`if (!EG(exception))`).
+        let compiled = if self.stream_thrown.is_some() {
+            Ok(Opened::Failed)
+        } else {
+            self.compile_read(kind, written, path, read)
+        };
+        // `zend_destroy_file_handle` once the compile is done, with what it
+        // threw standing in `EG(exception)`, so the wrapper's `stream_close`
+        // is refused as `zend_call_function` refuses it.
+        if let Err(thrown) = compiled {
+            if self
+                .while_pending(&thrown, |req| (hooks.close_include)(req))
+                .is_none()
+            {
+                (hooks.close_include)(self);
+            }
             return Err(thrown);
         }
+        (hooks.close_include)(self);
+        // What the read or the close threw, which the layer kept.
+        match self.stream_thrown.take() {
+            Some(thrown) => Err(thrown),
+            None => compiled,
+        }
+    }
+
+    /// [`Request::include_stream`]'s `compile_file` over what the open
+    /// read: the bytes compiled under the path the opener named, and
+    /// `compile_file`'s message where the open or the read failed.
+    fn compile_read(
+        &mut self,
+        kind: IncludeKind,
+        written: &[u8],
+        path: &[u8],
+        read: Option<crate::layer::IncludeSource>,
+    ) -> Result<Opened, Thrown> {
         let Some(crate::layer::IncludeSource {
             source,
             opened_path,
