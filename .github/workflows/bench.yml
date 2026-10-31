@@ -1,0 +1,142 @@
+# The bench on dax-build, by hand (#3774), as Mitchell ruled on #3767: G4's
+# bars, the fpm bars (#2714), makala against php-fpm at 8 clients (#2660)
+# and the server memory bar (#3386), run on the Linux server, held for the
+# bench while they run, and never on this Mac, whose load read 6 to 44 with
+# sessions sharing it.
+#
+# - `baseline` builds php 8.5.12 and its php-fpm on dax-build from the
+#   pinned tag, with the main oracle's configure line, through
+#   scripts/oracle-build.py and ci/oracle/Dockerfile: the build #3385 pins
+#   and #3741's capture-only Linux variant needs, so it is built once. It is
+#   a performance baseline and not an oracle: the one-oracle rule (#2253,
+#   #3741) is unchanged. The job prints both binaries' md5 and the tables
+#   the pin would carry, and uploads them; landing them in the pin is
+#   #3385's, through `xtask steer`.
+# - `bench` runs `xtask bench --machine dedicated`: every seat held, so no
+#   other instrument builds there while it measures, and each bar measured
+#   only below a 1-minute load of 2, waited for, its reading naming the
+#   load, how long it waited and the machine (processor, cores, kernel).
+#   A bar file kept on dax-build (protocol §11) is measured with `from`.
+#
+# Both jobs take the literal label and never DAX_BUILD_RUNNER: a hosted
+# reading is noise, and `xtask bench` refuses a GitHub-hosted runner
+# whatever job runs it (#2477). One runner runs one job at a time, so
+# nothing of harness.yml or dashboard.yml runs beside them. A bench number
+# is a claim a person signs off beside its A/A control (harness §4.2,
+# §11): the job states the measurement, and fails only where a bar refused
+# the run (protocol §1).
+name: bench
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Build php 8.5.12 and its php-fpm from the pinned tag first
+        type: boolean
+        default: true
+      bench:
+        description: Run the bench after the baseline
+        type: boolean
+        default: true
+      bar:
+        description: Only this bar, by name; empty runs every declared bar
+        default: ""
+      from:
+        description: A bar file on dax-build, by its absolute path, in place of the declared bars
+        default: ""
+      reps:
+        description: Measured reps per arm, after the protocol's discarded warm-up
+        default: "12"
+concurrency:
+  group: bench
+  cancel-in-progress: false
+# bash with pipefail, so a step that tees what it prints fails as it does.
+defaults:
+  run:
+    shell: bash
+jobs:
+  baseline:
+    name: php 8.5.12 and its php-fpm, built on dax-build from the pinned tag
+    if: ${{ inputs.baseline }}
+    runs-on: [self-hosted, linux, dax-build]
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+      - uses: ./.github/actions/workspace
+      # The pinned php-src, checked out at the tag the harness names; the
+      # recipe archives the pinned commit out of it, whatever is sparse.
+      - uses: ./.github/actions/corpus
+        id: corpus
+        with:
+          promise: tree
+      - name: php 8.5.12 and its php-fpm, from the pinned tag
+        env:
+          TREE: ${{ steps.corpus.outputs.tree }}
+        run: |
+          python3 scripts/oracle-build.py --tree "$TREE" build linux-x86_64 main --jobs "$(nproc)" | tee "$RUNNER_TEMP/baseline.txt"
+          {
+            echo "### php 8.5.12 and its php-fpm, built on dax-build from the pinned tag"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/baseline.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: baseline
+          path: |
+            target/oracle/linux-x86_64/main/pin.toml
+            target/oracle/linux-x86_64/main/sapi.toml
+            target/oracle/linux-x86_64/main/installed.txt
+          if-no-files-found: error
+          retention-days: 90
+
+  bench:
+    name: the bench, every seat held and each bar below a load of 2
+    needs: baseline
+    if: ${{ !cancelled() && inputs.bench && needs.baseline.result != 'failure' }}
+    runs-on: [self-hosted, linux, dax-build]
+    timeout-minutes: 600
+    permissions:
+      contents: read
+    env:
+      XTASK: cargo run --release --quiet --package xtask --
+      BAR: ${{ inputs.bar }}
+      FROM: ${{ inputs.from }}
+      REPS: ${{ inputs.reps }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+          fetch-depth: 0
+      - uses: ./.github/actions/workspace
+      # The platform libraries the arms' builds link, from the one list
+      # the action reads (design §7.2; #1300).
+      - uses: ./.github/actions/platform-libraries
+      - name: the bench, on the dedicated machine
+        run: |
+          ask=(--machine dedicated --reps "$REPS")
+          [ -z "$BAR" ] || ask+=(--bar "$BAR")
+          [ -z "$FROM" ] || ask+=(--from "$FROM")
+          $XTASK bench "${ask[@]}" | tee "$RUNNER_TEMP/bench.txt"
+      - name: the readings, as the job's summary
+        if: always()
+        run: |
+          {
+            echo "### xtask bench on dax-build, every seat held, each bar below a 1-minute load of 2"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/bench.txt" 2>/dev/null || echo "the bench printed nothing"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench
+          path: target/harness/log/
+          if-no-files-found: warn
+          retention-days: 90
