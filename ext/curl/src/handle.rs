@@ -303,19 +303,27 @@ const REFUSALS: Refusals = Refusals::NONE
     .comparison();
 
 impl ObjectHandlers for Handlers {
-    /// `curl_free_obj`: the `CURL *` cleaned up with the request
-    /// reachable, or as the transfer holding it ends, then everything the
-    /// `CurlHandle` held let go, the share's object last, as php releases
-    /// `ch->share` after `curl_easy_cleanup`.
+    /// `curl_free_obj`: the streams verified silently
+    /// ([`verify_before_cleanup`]), the `CURL *` cleaned up with the
+    /// request reachable, or as the transfer holding it ends, then
+    /// everything the `CurlHandle` held let go, the share's object last,
+    /// as php releases `ch->share` after `curl_easy_cleanup`; what a
+    /// callback threw is left pending, as php leaves it in
+    /// `EG(exception)`.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let Some(curl) = object.native_mut::<Curl>(req).map(std::mem::take) else {
-            return;
-        };
-        let mut curl = curl;
-        if let Some(easy) = curl.easy.take() {
-            let _ = easy.close(req);
+        let mut pending = Pending::default();
+        verify_before_cleanup(req, object, &mut pending);
+        let mut curl = object.native_mut::<Curl>(req).map(std::mem::take);
+        let easy = curl.as_mut().and_then(|curl| curl.easy.take());
+        if let Some(thrown) = easy.and_then(|easy| easy.close(req)) {
+            pending.park(req, thrown);
         }
-        curl.release_values(req);
+        pending.release(req, |req| {
+            if let Some(curl) = curl.take() {
+                curl.release_values(req);
+            }
+        });
+        pending.leave(req);
     }
 
     fn refusals(&self) -> Refusals {
@@ -590,6 +598,23 @@ pub(crate) fn verify_handlers(
         }
     }
     thrown
+}
+
+/// `_php_curl_verify_handlers(ch, /* reporterror */ false)`, as
+/// `curl_free_obj` and `curl_multi_free_obj` call it before the cleanup
+/// that may write a last line: a stream closed meanwhile let go and its
+/// channel reset without a warning, so the line reaches the process's
+/// `stderr` and not a stream gone. Taken as a step under what `pending`
+/// holds, which what a callback threw joins. A `CurlHandle` whose free is
+/// under way, php's `IS_OBJ_FREE_CALLED`, has had its payload taken by
+/// its `free_obj` or dropped after it, so it names no stream and is
+/// passed over, as php's walk passes it.
+pub(crate) fn verify_before_cleanup(req: &mut Request, object: PhpObject, pending: &mut Pending) {
+    pending.step(req, |req, pending| {
+        if let Some(thrown) = verify_handlers(req, object, false) {
+            pending.park(req, thrown);
+        }
+    });
 }
 
 /// `_php_curl_cleanup_handle`: what the last transfer left, cleared.
