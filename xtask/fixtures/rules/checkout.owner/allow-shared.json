@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"date && git worktree list && git config --get branch.main.ticket; cargo xtask track && cargo xtask status --section git && cargo xtask worktree whose","description":"Read or write only what the checkouts share from one another session owns (#3755)"}}

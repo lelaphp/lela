@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"cargo xtask worktree add x","description":"Lay a worktree of its own down from a checkout another session owns, the refusal's remedy (#3755)"}}
