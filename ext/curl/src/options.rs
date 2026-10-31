@@ -1131,13 +1131,14 @@ fn curl_setopt(
 /// ```
 ///
 /// An `exit` a callable takes stands as php's unwind exit does, and the
-/// options after it are set:
+/// options after it are set, the debug callable a later option's
+/// diagnostic would serve called no more:
 ///
 /// ```php
 /// $h = curl_init();
 /// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) { echo $data; exit("exit\n"); });
 /// register_shutdown_function(function () use ($h) { var_dump(curl_getinfo($h, CURLINFO_PRIVATE)); });
-/// curl_setopt_array($h, [CURLOPT_VERBOSE => 2, CURLOPT_PRIVATE => 'p']);
+/// curl_setopt_array($h, [CURLOPT_VERBOSE => 2, CURLOPT_FAILONERROR => 3, CURLOPT_PRIVATE => 'p']);
 /// echo "unreached\n";
 /// ```
 /// ```expect

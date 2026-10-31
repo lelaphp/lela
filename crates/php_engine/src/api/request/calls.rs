@@ -521,6 +521,21 @@ impl Request {
     }
 
     /// [`Request::serve_call`] with no scope a write named standing.
+    ///
+    /// No call while anything stands in php's `EG(exception)`, an `exit`'s
+    /// unwind exit among it, as `zend_call_function` answers `SUCCESS`
+    /// at once then (`Z/Zend/zend_execute_API.c:843`): a native that goes
+    /// on past a handler's `exit` calls nothing after it.
+    ///
+    /// ```php
+    /// class U { function __toString(): string { echo "U called\n"; return "u"; } }
+    /// set_error_handler(function ($no, $str) { echo "handler: $str\n"; exit("exit\n"); });
+    /// echo implode(",", [[1], new U]), "\n";
+    /// ```
+    /// ```expect
+    /// handler: Array to string conversion
+    /// exit
+    /// ```
     fn serve_call_body(
         &mut self,
         target: Callee,
@@ -538,8 +553,9 @@ impl Request {
             Carried::Closure(closure) => Some(closure),
             Carried::Nothing | Carried::HookTrampoline(..) => None,
         };
-        // `if (EG(exception)) return SUCCESS;`: no call while one is pending.
-        if self.pending().is_some() {
+        // `if (EG(exception)) return SUCCESS;`: no call while a throwable
+        // or an exit stands.
+        if self.raised.is_some() {
             return Ok(Value::null());
         }
         // `EG(current_execute_data)` as the call finds it, which a user
