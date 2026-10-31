@@ -53,7 +53,7 @@ use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -570,16 +570,27 @@ fn headed(running: &Running<'_>, head: u64) -> Result<()> {
 /// Whether a process of `group` is runnable, or in an uninterruptible
 /// wait, as `ps` reads its state (`R`, `D` on Linux, `U` on macOS); one
 /// asleep, reading its input or stopped is not, and none is where `ps`
-/// does not answer.
+/// does not answer within [`QUIET`], which is then killed.
 fn runnable(group: Pid) -> bool {
-    let Ok(ps) = Command::new("ps")
+    let Ok(mut ps) = Command::new("ps")
         .args(["-A", "-o", "pgid=,stat="])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
     else {
         return false;
     };
+    let asked = Instant::now();
+    while matches!(ps.try_wait(), Ok(None)) && asked.elapsed() < QUIET {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    ps.kill().ok();
+    let listed = match ps.wait_with_output() {
+        Ok(listed) if listed.status.success() => listed.stdout,
+        _ => return false,
+    };
     let group = group.to_string();
-    String::from_utf8_lossy(&ps.stdout).lines().any(|row| {
+    String::from_utf8_lossy(&listed).lines().any(|row| {
         let mut row = row.split_whitespace();
         row.next() == Some(group.as_str())
             && row.next().is_some_and(|s| s.starts_with(['R', 'D', 'U']))
@@ -868,7 +879,9 @@ mod tests {
         const { assert!(super::QUIET.as_secs() + 1 < super::PATIENCE.as_secs()) };
         let gap = super::QUIET.as_secs() + 1;
         let late = format!("sleep {gap}; echo x; sleep 60");
-        let busy = format!("echo x; yes >/dev/null & s=$!; sleep {gap}; kill $s; echo y; sleep 60");
+        let busy = format!(
+            "echo x; yes >/dev/null & s=$!; sleep {gap}; kill $s; wait $s 2>/dev/null; echo y; sleep 60"
+        );
         let asleep = format!("echo x; sleep {gap}; echo y; sleep 60");
         let both = "echo x; echo y; sleep 60";
         for (name, pinned, engine) in [
