@@ -1717,3 +1717,36 @@ echo f(new C), \"\\n\";",
         "{lines}"
     );
 }
+
+/// A return trace recorded where the lowest frame it returns past has a
+/// user caller, `p`'s under the loop, runs again under an error handler,
+/// whose outermost `p` is the entry of the serving `trigger_error` began:
+/// the `RETURN` stepped there ends that serving and the trace halts, as
+/// php's `jit_stub_trace_halt` (`Emit::halts`), where it raised
+/// `InternalError: a kernel's step ended the serving a trace runs in`
+/// (#3689).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_trace_past_a_servings_entry_halts() {
+    for mode in ["force", "exit-fuzz"] {
+        let served = testing::serve::<Lane>(
+            &[
+                ("opcache.enable_cli", "1"),
+                ("opcache.jit", "tracing"),
+                ("opcache.jit_buffer_size", "64M"),
+                ("jit.mode", mode),
+                ("opcache.jit_hot_loop", "1"),
+                ("opcache.jit_hot_func", "1"),
+                ("opcache.jit_hot_return", "1"),
+                ("opcache.jit_hot_side_exit", "1"),
+            ],
+            "function h() { return 1; }
+function p($n) { if ($n <= 0) return true; $x = p($n - 1); h(); return $x; }
+for ($i = 0; $i < 3; $i++) p(6);
+set_error_handler('p');
+trigger_error(\"x\", E_USER_WARNING);
+echo \"done\\n\";",
+        );
+        assert_eq!(testing::stdout(&served), "done\n", "under {mode}");
+    }
+}
