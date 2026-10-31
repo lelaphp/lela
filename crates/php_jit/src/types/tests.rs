@@ -1400,6 +1400,53 @@ fn a_return_trace_guards_the_caller_it_lands_in() -> Result<(), String> {
     Ok(())
 }
 
+/// A recursive return trace whose returns the step kernel serves, a
+/// `RETURN_BY_REF`'s: each return past its root holds the landing with an
+/// exit within its line and escapes nowhere, as php's
+/// `zend_jit_trace_handler` takes an exit point past the handler. Each
+/// exit names no opline and stores nothing, and they are numbered as the
+/// pinned php's `TRACE 3 exit info` numbers them, after the stack check
+/// of the call to `h()`: `exit_1` and `exit_2`, `----/----/0` (#3688).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_stepped_return_past_the_root_holds_its_landing_with_an_exit() -> Result<(), String> {
+    let ir = built(
+        &[("record.function", "p"), ("record.start", "return")],
+        "function h() { return 1; }
+        function &p($n) { static $z = 0; if ($n == 0) { return $z; } $x = &p($n - 1); h(); return $x; }
+        $r = &p(6); echo $r, \"\\n\";",
+    )?;
+    let shown = dump::render(&ir);
+    assert_eq!(ir.entry.stop, Stop::RecursiveRet, "{shown}");
+    let Some(Op::Line(first)) = ir.ops.first() else {
+        return Err(format!("no first opline:\n{shown}"));
+    };
+    let mut exits = Vec::new();
+    for (at, op) in ir.ops.iter().enumerate() {
+        let Op::Back { frame, escapes, .. } = op else {
+            continue;
+        };
+        // A return past the root lands in a frame no opline ran in before.
+        if (ir.ops.iter().take(at)).any(|op| matches!(op, Op::Line(line) if line.frame == *frame)) {
+            continue;
+        }
+        assert_eq!(*escapes, None, "a stepped return escapes:\n{shown}");
+        let line = OpId(u32::try_from(at).map_err(|e| e.to_string())? - 1);
+        let held = (ir.guards.iter())
+            .find(|guard| guard.at == GuardAt::Within(line))
+            .ok_or_else(|| format!("a return past the root holds nothing:\n{shown}"))?;
+        let Check::Stands { opline, .. } = held.check else {
+            return Err(format!("a return past the root holds no landing:\n{shown}"));
+        };
+        assert_eq!(opline, first.opline, "{shown}");
+        let exit = (ir.exits.get(usize::from(held.exit.0))).ok_or("an exit past the trace's")?;
+        assert_eq!((exit.opline, exit.stores.len()), (None, 0), "{shown}");
+        exits.push(held.exit.0);
+    }
+    assert_eq!(exits, [1, 2], "{shown}");
+    Ok(())
+}
+
 /// A return trace rooted inside an argument of an outer call opens with
 /// that call's fake init, and each return past its root escapes unless
 /// the caller stands at the send past it, as php's code steps over a

@@ -1736,6 +1736,81 @@ impl<'a> Builder<'a> {
     /// ```expect regime=jit-tracing process
     /// 1021
     /// ```
+    ///
+    /// What served the return decides how the guard leaves. A `RETURN`
+    /// left in place escapes, taking no exit, as `zend_jit_leave_func`
+    /// jumps to `jit_stub_trace_escape`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:11199-11240`). A return the step
+    /// kernel served, a `RETURN_BY_REF` or a `RETURN` php's trace hands to
+    /// its handler, holds the opline with an exit within its line, where
+    /// `zend_jit_trace_handler` takes an exit point past the handler
+    /// (`:17200-17330`). That exit names no opline, so no other place takes
+    /// it, and it stores nothing: the frame it lands in is the caller the
+    /// step left the interpreter in, which the trace has not written. A
+    /// return trace whose `RETURN_BY_REF` returns into the file's code,
+    /// away from its recursion's header, takes that exit and grows a side
+    /// trace there. The file's code reads the reference only once its
+    /// loop is done: an `ECHO` of it in the loop is held by a guard php
+    /// does not take (#3695).
+    ///
+    /// ```php
+    /// function h() { return 1; }
+    /// function &p($n) { static $z = 0; if ($n == 0) { return $z; } $x = &p($n - 1); h(); return $x; }
+    /// $r = &p(6);
+    /// for ($i = 0; $i < 5; $i++) { $r = &p(8); }
+    /// echo $r, "\n", "done\n";
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 0
+    /// done
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:4
+    /// ---- TRACE 1 abort (deep recursion)
+    ///
+    /// ---- TRACE 1 start (enter) p() %s:3
+    /// ---- TRACE 1 stop (recursive call)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 1 p() %s:3
+    /// ---- TRACE 2 start (side trace 1/1) p() %s:3
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    ///
+    /// ---- TRACE 3 start (return) p() %s:3
+    /// ---- TRACE 3 stop (recursive return)
+    /// ---- TRACE 3 compiled
+    ///
+    ///      TRACE 3 exit 2 $main() %s:4
+    /// ---- TRACE 4 start (side trace 3/2) $main() %s:4
+    /// ---- TRACE 4 stop (link to 1)
+    /// ---- TRACE 4 compiled
+    ///
+    ///      TRACE 4 exit 0 $main() %s:5
+    /// ---- TRACE 5 start (side trace 4/0) $main() %s:5
+    /// ---- TRACE 5 stop (link to 1)
+    /// ---- TRACE 5 compiled
+    ///
+    ///      TRACE 5 exit 3 $main() %s:6
+    /// ---- TRACE 6 start (side trace 5/3) $main() %s:6
+    /// ---- TRACE 6 stop (return)
+    /// ---- TRACE 6 compiled
+    /// ```
+    ///
+    /// The same where every guard fails once, the exit landing the
+    /// interpreter in each caller a return past the root steps into:
+    ///
+    /// ```php
+    /// function h() { return 1; }
+    /// function &p($n) { static $z = 0; if ($n == 0) { return $z; } $x = &p($n - 1); h(); return $x; }
+    /// $r = &p(6);
+    /// for ($i = 0; $i < 5; $i++) { $r = &p(8); }
+    /// echo $r, "\n", "done\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 0
+    /// done
+    /// ```
     fn back(&mut self, ahead: &[Event]) -> Result<(), Abort> {
         let idx = self.begin();
         let from = self.running()?;
@@ -1758,6 +1833,28 @@ impl<'a> Builder<'a> {
                 .map(OplineIdx);
             (caller, call_at, next_op)
         };
+        // The return's line, just before: a step served it, or it left its
+        // frame in place.
+        let escapes = match guard {
+            Some((func, opline)) => {
+                let at = OpId(idx.0.wrapping_sub(1));
+                let form = match self.ops.get(at.index()) {
+                    Some(Op::Line(line)) if line.frame == from => line.form,
+                    _ => return Err(mismatch("a return past the lowest frame with no line")),
+                };
+                if form == Form::Step {
+                    self.guards.push(Placed {
+                        at: GuardAt::Within(at),
+                        check: Check::Stands { func, opline },
+                        exit: draft(Point::After(idx), caller, At::Stands),
+                    });
+                    None
+                } else {
+                    guard
+                }
+            }
+            None => None,
+        };
         let code = self.meta(caller).code;
         let out = call_at
             .and_then(|at| code.oplines.get(at.0 as usize))
@@ -1771,7 +1868,7 @@ impl<'a> Builder<'a> {
         self.ops.push(Op::Back {
             frame: caller,
             out,
-            escapes: guard,
+            escapes,
         });
         Ok(())
     }
