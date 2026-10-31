@@ -13,7 +13,7 @@ use crate::constants as c;
 use crate::ffi::{Address, Cx, Easy, EasyId, Multi, MultiId, multi_strerror};
 use crate::handle::{
     Curl, CurlHandle, Handler, WriteTo, cast_object, cleanup_handle, copy_handlers, curl, easy_of,
-    hand_out, made, verify_handlers,
+    hand_out, made, verify_before_cleanup, verify_handlers,
 };
 use crate::info::Assoc;
 use crate::throwables::{Pending, Throwables};
@@ -91,6 +91,32 @@ impl CurlMultiHandle {}
 /// thrown: from the callable
 /// end
 /// ```
+///
+/// Each `CurlHandle` in the list is verified silently before
+/// `curl_multi_cleanup`, so a `CURLOPT_STDERR` stream closed meanwhile
+/// is let go and the file reset to the process's `stderr`, which the
+/// cleanup's line then reaches. libcurl writes it through the C
+/// library's `stderr`, the process's and not the request's, so the fence
+/// is served in a process of its own.
+///
+/// ```php
+/// $h = curl_init('http://127.0.0.1:1/');
+/// curl_setopt($h, CURLOPT_VERBOSE, 1);
+/// $fp = fopen('php://memory', 'w+');
+/// curl_setopt($h, CURLOPT_STDERR, $fp);
+/// $m = curl_multi_init();
+/// curl_multi_add_handle($m, $h);
+/// curl_multi_exec($m, $r);
+/// fclose($fp);
+/// unset($m);
+/// echo "end\n";
+/// ```
+/// ```expect process
+/// end
+/// ```
+/// ```stderr
+/// * closing connection #0
+/// ```
 pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
@@ -103,14 +129,26 @@ const REFUSALS: Refusals = Refusals::NONE
     .comparison();
 
 impl ObjectHandlers for Handlers {
-    /// `curl_multi_free_obj`: `curl_multi_cleanup` with `easyh` whole,
-    /// then the `CurlHandle`s and the push callable let go under what its
-    /// callables threw, which is left pending for the release that freed
-    /// the object to raise, as php leaves it in `EG(exception)`.
+    /// `curl_multi_free_obj`: each `CurlHandle` in `easyh` verified
+    /// silently ([`verify_before_cleanup`]), `curl_multi_cleanup` with
+    /// `easyh` whole, then the `CurlHandle`s and the push callable let go
+    /// under what its callables threw, which is left pending for the
+    /// release that freed the object to raise, as php leaves it in
+    /// `EG(exception)`.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let mut pending = Pending::default();
-        let multi = object.native_mut::<Mh>(req).and_then(|mh| mh.multi.take());
-        if let Some(thrown) = multi.and_then(|multi| multi.close(req)) {
+        let mut multi = object.native_mut::<Mh>(req).and_then(|mh| mh.multi.take());
+        if multi.is_some() {
+            let easy = object.native::<Mh>(req).map(handles).unwrap_or_default();
+            for handle in easy {
+                verify_before_cleanup(req, handle, &mut pending);
+            }
+        }
+        let mut closed = None;
+        pending.release(req, |req| {
+            closed = multi.take().and_then(|multi| multi.close(req));
+        });
+        if let Some(thrown) = closed {
             pending.park(req, thrown);
         }
         if let Some(mh) = object.native_mut::<Mh>(req).map(std::mem::take) {
