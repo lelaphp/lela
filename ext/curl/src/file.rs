@@ -388,7 +388,79 @@ fn keep_postfields(req: &mut Request, object: PhpObject, array: PhpArray) {
 /// int(0)
 /// ```
 ///
-/// What the walk leaves pending, and what the tree's set or free
+/// The trees the `CURL *` held are let go of as the walk ends, before
+/// the new one is set, as php cleans `ch->to_free->post` before
+/// `curl_easy_setopt(CURLOPT_MIMEPOST)`; a walk that ends early
+/// (`goto out_string`) lets go of the new tree alone. Either free is made
+/// under what the walk left standing, so a file part's `free_cb`
+/// closing a stream through a wrapper calls nothing, as php's
+/// `zend_call_function` returns at once under `EG(exception)`.
+///
+/// ```php
+/// class Mem {
+///     public $context;
+///     private $at = 0;
+///     function stream_open($path, $mode, $options, &$opened) { echo "open $path\n"; return true; }
+///     function stream_read($n) { $r = substr("hello", $this->at, $n); $this->at += strlen($r); return $r; }
+///     function stream_eof() { return $this->at >= 5; }
+///     function stream_seek($to, $whence) { $this->at = $to; return true; }
+///     function stream_tell() { return $this->at; }
+///     function stream_stat() { return ['size' => 5]; }
+///     function stream_close() { echo "close\n"; }
+/// }
+/// stream_wrapper_register('mem', 'Mem');
+/// class S extends CURLStringFile {
+///     function __construct() { parent::__construct('d', 'p'); unset($this->postname); }
+///     function __get($n) { throw new Exception("read $n"); }
+/// }
+/// class T { function __toString(): string { throw new Exception("string"); } }
+/// $srv = stream_socket_server('tcp://127.0.0.1:0');
+/// $h = curl_init('http://' . stream_socket_get_name($srv, false) . '/');
+/// curl_setopt_array($h, [CURLOPT_RETURNTRANSFER => true, CURLOPT_HTTPHEADER => ['Expect:']]);
+/// curl_setopt($h, CURLOPT_POSTFIELDS, ['f' => new CURLFile('mem://x')]);
+/// $m = curl_multi_init();
+/// curl_multi_add_handle($m, $h);
+/// $conn = null; $got = '';
+/// do {
+///     curl_multi_exec($m, $running);
+///     $r = [$conn ?? $srv]; $w = $e = null;
+///     if ($conn !== false && stream_select($r, $w, $e, 0, 10000)) {
+///         if ($conn === null) { $conn = stream_socket_accept($srv); continue; }
+///         $got .= fread($conn, 8192);
+///         if (str_ends_with($got, "--\r\n")) {
+///             fwrite($conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+///             fclose($conn);
+///             $conn = false;
+///         }
+///     }
+///     curl_multi_select($m, 0.01);
+/// } while ($running);
+/// curl_multi_remove_handle($m, $h);
+/// echo "posted hello: ", var_export(str_contains($got, "\r\n\r\nhello\r\n"), true), ", answered ", curl_multi_getcontent($h), "\n";
+/// foreach ([['g' => new CURLFile('mem://y'), 's' => new S], ['t' => new T], ['z' => new CURLFile('mem://z')], ['a' => 'b']] as $form) {
+///     echo "set ", implode(',', array_keys($form)), "\n";
+///     try { var_dump(curl_setopt($h, CURLOPT_POSTFIELDS, $form)); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// echo "end\n";
+/// ```
+/// ```expect
+/// open mem://x
+/// posted hello: true, answered ok
+/// set g,s
+/// open mem://y
+/// read postname
+/// set t
+/// string
+/// set z
+/// open mem://z
+/// bool(true)
+/// set a
+/// close
+/// bool(true)
+/// end
+/// ```
+///
+/// What the walk leaves pending, and what the trees' frees or the set
 /// threw, is left in `pending`, which may stand already as the walk
 /// starts, an earlier option's in `curl_setopt_array`.
 ///
@@ -400,13 +472,13 @@ pub(crate) fn build_mime(
     pending: &mut Pending,
 ) -> Result<bool, Thrown> {
     let easy = easy_of(req, object)?;
-    let posted = easy.post_form(req, |req, mime| {
+    let posted = easy.post_form(req, pending, |req, mime, pending| {
         let mut form = Form {
             mime,
             object,
             array,
             error: 0,
-            pending: &mut *pending,
+            pending,
         };
         let walked = form.fill(req);
         // `SAVE_CURL_ERROR(ch, error)` where the walk reached its end.
@@ -415,16 +487,13 @@ pub(crate) fn build_mime(
         }
         walked && form.error == 0
     });
-    let Some((posted, thrown)) = posted else {
+    let Some(posted) = posted else {
         return Ok(false);
     };
     if let Posted::Set(code) = posted
         && let Some(curl) = object.native_mut::<Curl>(req)
     {
         curl.err = i64::from(code);
-    }
-    if let Some(thrown) = thrown {
-        pending.park(req, thrown);
     }
     Ok(posted == Posted::Set(0))
 }

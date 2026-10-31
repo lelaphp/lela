@@ -20,6 +20,7 @@ use super::{
 use crate::callbacks;
 use crate::constants as c;
 use crate::file::Source;
+use crate::throwables::Pending;
 
 /// An option number as the library's `CURLoption`.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -816,55 +817,68 @@ impl EasyId {
         self.with(req, None, |handle| info_of(handle.raw(), info))
     }
 
-    /// `curl_mime_init(ch->cp)` filled by `fill`, then, as `fill`
-    /// answers, pointed at by `CURLOPT_MIMEPOST` ([`EasyId::set_mime`])
-    /// or freed with the request lent, so its file parts close what they
-    /// opened (`out_mime`). The tree never leaves this call, so no way
-    /// out of `fill` leaves it standing. `None` where the library made no
-    /// tree; beside where the tree went, what its set or its free threw.
+    /// `curl_mime_init(ch->cp)` filled by `fill`, then, where `fill`
+    /// answers that the walk reached its end with no error, set in place
+    /// of the trees the `CURL *` held ([`EasyId::set_mime`]), and freed
+    /// otherwise (`out_mime`). Each free runs under what stands in
+    /// `pending` ([`Mime::let_go`]), and what a free or the set threw is
+    /// left there. The tree never leaves this call, so no way out of
+    /// `fill` leaves it standing. `None` where the library made no tree.
     pub(crate) fn post_form(
         self,
         req: &mut Request,
-        fill: impl FnOnce(&mut Request, &mut MimeBuilder) -> bool,
-    ) -> Option<(Posted, Option<Thrown>)> {
-        let mut mime = self.mime(req)?;
-        if fill(req, &mut mime) {
-            let (code, thrown) = self.set_mime(req, mime.mime);
-            return Some((Posted::Set(code), thrown));
+        pending: &mut Pending,
+        fill: impl FnOnce(&mut Request, &mut MimeBuilder, &mut Pending) -> bool,
+    ) -> Option<Posted> {
+        let mut built = self.mime(req)?;
+        if fill(req, &mut built, pending) {
+            return Some(self.set_mime(req, built.mime, pending));
         }
-        Some((Posted::Freed, mime.discard(req)))
+        built.mime.let_go(req, pending);
+        Some(Posted::Freed)
     }
 
-    /// A MIME tree made on this `CURL *` and pointed at by
-    /// `CURLOPT_MIMEPOST`, held by the `CURL *` in place of the ones it
-    /// held; the code is the library's.
-    fn set_mime(self, req: &mut Request, mime: Mime) -> (i32, Option<Thrown>) {
+    /// The trees the `CURL *` held let go of, then `CURLOPT_MIMEPOST`
+    /// pointed at `mime`, which the `CURL *` holds in their place: php's
+    /// `zend_llist_clean(&ch->to_free->post)` before the set, skipped
+    /// where a copy may still point at them (`(*ch->clone) == 1`), whose
+    /// trees are kept to the link's end. The frees and the set are made under
+    /// what stands in `pending`; where a free leaves a fatal or an `exit`
+    /// there, the set is not made and `mime` is freed, as `zend_bailout`
+    /// leaves before it.
+    fn set_mime(self, req: &mut Request, mime: Mime, pending: &mut Pending) -> Posted {
+        let Some(handle) = req.memory_mut().foreign(self.0) else {
+            mime.let_go(req, pending);
+            return Posted::Set(GONE);
+        };
+        let tag = handle.tag_mut();
+        let mut old = std::mem::take(&mut tag.mimes);
+        if tag.copied {
+            tag.session.keep(Vec::new(), std::mem::take(&mut old));
+        }
+        for tree in old {
+            tree.let_go(req, pending);
+        }
         let tree = mime.raw.as_ptr();
-        let Some(session) = self.with(req, None, |handle| Some(handle.tag().session.clone()))
-        else {
-            return (GONE, mime.free(req));
-        };
-        // Replacing the tree the handle had may free a copy whose parts
-        // call back.
-        let (code, thrown) = self.call(req, GONE, |live| {
-            live.set_ptr(sys::CURLOPT_MIMEPOST.into(), tree.cast())
+        // Replacing the tree a copy of a `CURL *` points at frees the
+        // library's copy of it, whose parts call back.
+        let set = pending.step(req, |req, _| {
+            self.call(req, GONE, |live| {
+                live.set_ptr(sys::CURLOPT_MIMEPOST.into(), tree.cast())
+            })
         });
-        let old = match req.memory_mut().foreign(self.0) {
-            Some(handle) => {
-                let tag = handle.tag_mut();
-                let old = std::mem::take(&mut tag.mimes);
-                tag.mimes.push(mime);
-                if tag.copied {
-                    tag.session.keep(Vec::new(), old);
-                    Vec::new()
-                } else {
-                    old
-                }
-            }
-            None => vec![mime],
+        let Some((code, thrown)) = set else {
+            mime.let_go(req, pending);
+            return Posted::Freed;
         };
-        let ((), dropped) = session.enter(req, || drop(old));
-        (code, thrown.or(dropped))
+        if let Some(thrown) = thrown {
+            pending.park(req, thrown);
+        }
+        match req.memory_mut().foreign(self.0) {
+            Some(handle) => handle.tag_mut().mimes.push(mime),
+            None => mime.let_go(req, pending),
+        }
+        Posted::Set(code)
     }
 
     /// `curl_mime_init(ch->cp)`, `None` where the library made none.
@@ -975,6 +989,27 @@ impl Mime {
         let link = self.link;
         let ((), thrown) = link.enter(req, || drop(self));
         thrown
+    }
+
+    /// The tree freed ([`Mime::free`]) as php frees one, under what
+    /// stands in `pending` ([`Pending::release`]), so a file part's
+    /// `free_cb` closing a stream through a wrapper calls nothing while a
+    /// throwable stands, as `zend_call_function` returns at once under
+    /// `EG(exception)`. What a callback the free served threw is left
+    /// pending. A wrapper's `stream_close` that throws is not among that:
+    /// the stream layer keeps it and raises it as the native returns, so
+    /// it does not yet stand over the steps after the free (#3708).
+    fn let_go(self, req: &mut Request, pending: &mut Pending) {
+        let mut tree = Some(self);
+        let mut threw = None;
+        pending.release(req, |req| {
+            if let Some(tree) = tree.take() {
+                threw = tree.free(req);
+            }
+        });
+        if let Some(thrown) = threw {
+            pending.park(req, thrown);
+        }
     }
 
     /// Each file part's source closed, as its `free_cb` closes it, the
@@ -1108,14 +1143,6 @@ impl MimeBuilder {
         } else {
             rc
         }))
-    }
-
-    /// The tree given up, freed with the request reachable so its file
-    /// parts close what they opened.
-    fn discard(self, req: &mut Request) -> Option<Thrown> {
-        let session = self.session.clone();
-        let ((), thrown) = session.enter(req, || drop(self));
-        thrown
     }
 }
 
