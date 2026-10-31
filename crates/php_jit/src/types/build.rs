@@ -2394,9 +2394,9 @@ impl<'a> Builder<'a> {
         operands: [Operand; 3],
         samples: [Option<Sample>; 3],
     ) -> Seen {
-        let t1 = self.types_of(frame, operands[0]);
+        let types = operands.map(|operand| self.types_of(frame, operand));
         let mut held: [Option<(Types, Read)>; 3] = [None; 3];
-        let sites = guard_sites(op, data_line, samples, t1, self.meta(frame).code);
+        let sites = guard_sites(op, data_line, samples, types, self.meta(frame).code);
         for site in checked_order(op.opcode)
             .iter()
             .filter(|site| sites.contains(site))
@@ -2420,7 +2420,13 @@ impl<'a> Builder<'a> {
             inferred: [Types::NONE; 3],
         };
         for (at, operand) in operands.into_iter().enumerate() {
-            let types = self.types_of(frame, operand);
+            let mut types = self.types_of(frame, operand);
+            // A reference no guard held is read as php's trace SSA reads
+            // it, `IS_UNKNOWN` (`Z/ext/opcache/jit/zend_jit_trace.c:1819-1833`):
+            // a reference to anything, whatever the slot's types say.
+            if samples[at].is_some_and(|s| Read::sampled(s) == Read::Through) {
+                types = types.or(Types::REF);
+            }
             (seen.types[at], seen.read[at]) = held[at].unwrap_or((types, Read::InPlace));
             seen.inferred[at] = match operand {
                 Operand::Value(value) if self.aliased(self.val(value).slot) => types,
@@ -2487,8 +2493,8 @@ impl<'a> Builder<'a> {
     /// php's `ADD_OP_GUARD` on one operand, `zend_jit_trace_add_op_guard`:
     /// a type guard where the recorded type is narrower than the value's,
     /// narrowing the value unless a symbol table reaches it or a register
-    /// holds it; a reference's inner type at every read, which php's code
-    /// generator holds where its TSSA adds nothing; and the type of what
+    /// holds it; a reference's inner type, where php's code generator
+    /// fetches the reference ([`guard_sites`]); and the type of what
     /// an indirect `VAR` points at, at the element write that reads it,
     /// as php's `zend_jit_fetch_indirect_var` holds it (`Z/ext/opcache/jit/zend_jit_ir.c:17087-17141`),
     /// leaving at the opline. What the opline sees of the operand after

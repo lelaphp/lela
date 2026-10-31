@@ -1497,6 +1497,80 @@ fn a_stepped_return_php_compiles_in_place_escapes() -> Result<(), String> {
     Ok(())
 }
 
+/// A reference is held by a guard only where php's code generator
+/// fetches it (`zend_jit_fetch_reference`), and read as a reference to
+/// anything everywhere else, as php's trace SSA reads it `IS_UNKNOWN`
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:1819-1833`): the increment, the
+/// comparison and the `ECHO` of `$r` take no guard and are its handlers'
+/// (#3695), and the `ADD` that reads it after them holds it, the one
+/// php's code generator fetches.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_reference_is_held_only_where_php_fetches_it() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f(&$r, $n) {
+            $s = 0;
+            for ($i = 0; $i < $n; $i++) { $r++; if ($r < 1000) { echo $r; } $s = $s + $r; }
+            return $s;
+        }
+        $g = 0; echo f($g, 3), \"\\n\";",
+    )?;
+    let shown = dump::render(&ir);
+    // `$r` is CV0.
+    let reads = |opcode: Opcode| {
+        (ir.ops.iter().enumerate())
+            .filter_map(|(at, op)| match op {
+                Op::Line(line) if line.opcode == opcode => Some((at, line)),
+                _ => None,
+            })
+            .filter_map(|(at, line)| {
+                [line.op1, line.op2]
+                    .into_iter()
+                    .find_map(|operand| match operand {
+                        Operand::Value(value) if ir.values[value.0 as usize].slot.var == 0 => {
+                            Some((OpId(u32::try_from(at).ok()?), line.form, value))
+                        }
+                        _ => None,
+                    })
+            })
+            .collect::<Vec<_>>()
+    };
+    let held = |at: OpId, read: ValueId| {
+        (ir.guards.iter()).any(|guard| {
+            guard.at == GuardAt::Before(at)
+                && matches!(
+                    guard.check,
+                    Check::Deref { value, .. } | Check::Type { value, .. } if value == read
+                )
+        })
+    };
+    for opcode in [Opcode::PreInc, Opcode::IsSmaller, Opcode::Echo] {
+        let read = reads(opcode);
+        assert!(!read.is_empty(), "no {opcode:?} of $r:\n{shown}");
+        for (at, form, value) in read {
+            assert!(!held(at, value), "{opcode:?} holds $r:\n{shown}");
+            assert_eq!(form, Form::Step, "{opcode:?} of $r:\n{shown}");
+            // What the increment wrote is still a reference to anything.
+            assert!(
+                ir.values[value.0 as usize].types.meets(Types::REF),
+                "{opcode:?} reads $r as {}:\n{shown}",
+                ir.values[value.0 as usize].types
+            );
+        }
+    }
+    let added = reads(Opcode::Add);
+    assert!(!added.is_empty(), "no ADD of $r:\n{shown}");
+    for (at, _, value) in added {
+        assert!(
+            (ir.guards.iter()).any(|guard| guard.at == GuardAt::Before(at)
+                && matches!(guard.check, Check::Deref { value: v, .. } if v == value)),
+            "the ADD holds $r:\n{shown}"
+        );
+    }
+    Ok(())
+}
+
 /// A return trace rooted inside an argument of an outer call opens with
 /// that call's fake init, and each return past its root escapes unless
 /// the caller stands at the send past it, as php's code steps over a
@@ -2164,7 +2238,10 @@ fn a_trace_that_stops_at_a_return_leaves_the_frame_in_place() -> Result<(), Stri
 /// the pinned php's `TRACE 1 exit info` lists five exits and no `/VM` one,
 /// its interrupt test taking the stub; with no reference, seven, the last
 /// the interrupt test's `0006/VM` (under `opcache.optimization_level=0`,
-/// #3277).
+/// #3277). Of the five, this tier numbers four: the `BOOL_NOT` holds the
+/// reference by no guard, as php's does not (#3695), and the `ASSIGN`
+/// to it takes none where php's `zend_jit_guard_reference` takes
+/// `exit_4` at `0006` (#3704).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_loop_keeps_the_initial_pointer_where_its_first_opline_may_call_the_runtime()
@@ -2173,7 +2250,7 @@ fn a_loop_keeps_the_initial_pointer_where_its_first_opline_may_call_the_runtime(
         (
             "$done = false; $r = &$done; $n = 0;
             while (!$done) { $n++; $done = $n > 50; } echo $n, \"\\n\";",
-            5,
+            4,
             true,
         ),
         (
