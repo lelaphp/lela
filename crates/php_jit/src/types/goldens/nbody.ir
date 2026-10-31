@@ -122,32 +122,32 @@ loop at 0, loop, interrupt exit 45
   -> #57 f0.T33 [double] reg
   guard #1 ref to array -> exit 39
 0043 f0 ASSIGN_DIM_OP #1, #24, #57 inline unwinds -> unwind 6
-  -> #58 f0.CV3 [ref, array]
+  -> #58 f0.CV3 [ref, any]
 0045 f0 MUL #33, #53 inline
   -> #59 f0.T35 [double] reg
   guard #3 ref to array -> exit 40
 0046 f0 ASSIGN_DIM_OP #3, #24, #59 inline unwinds -> unwind 6
-  -> #60 f0.CV4 [ref, array]
+  -> #60 f0.CV4 [ref, any]
 0048 f0 MUL #38, #53 inline
   -> #61 f0.T37 [double] reg
   guard #5 ref to array -> exit 41
 0049 f0 ASSIGN_DIM_OP #5, #24, #61 inline unwinds -> unwind 6
-  -> #62 f0.CV5 [ref, array]
+  -> #62 f0.CV5 [ref, any]
 0051 f0 MUL #28, #56 inline
   -> #63 f0.T39 [double] reg
   guard #58 ref to array -> exit 42
 0052 f0 ASSIGN_DIM_OP #58, #7, #63 inline unwinds -> unwind 6
-  -> #64 f0.CV3 [ref, array]
+  -> #64 f0.CV3 [ref, any]
 0054 f0 MUL #33, #56 inline
   -> #65 f0.T41 [double] reg
   guard #60 ref to array -> exit 43
 0055 f0 ASSIGN_DIM_OP #60, #7, #65 inline unwinds -> unwind 6
-  -> #66 f0.CV4 [ref, array]
+  -> #66 f0.CV4 [ref, any]
 0057 f0 MUL #38, #56 inline
   -> #67 f0.T43 [double] reg
   guard #62 ref to array -> exit 44
 0058 f0 ASSIGN_DIM_OP #62, #7, #67 inline unwinds -> unwind 6
-  -> #68 f0.CV5 [ref, array]
+  -> #68 f0.CV5 [ref, any]
 0060 f0 PRE_INC #7 inline
   -> #69 f0.CV10 [long] reg
 end: back to 0

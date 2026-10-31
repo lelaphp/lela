@@ -13,12 +13,12 @@ loop at 0, loop, interrupt exit 6
   checks direction taken -> exit 2
   guard #1 ref to array -> exit 3
 0004 f0 ASSIGN_DIM #1, const#1, #3 inline unwinds -> unwind 0
-  -> #5 f0.CV0 [ref, array]
+  -> #5 f0.CV0 [ref, any]
 0006 f0 BW_AND #3, int(3) inline
   -> #6 f0.T2 [long] reg
   guard #5 ref to array -> exit 4
 0007 f0 ASSIGN_DIM #5, #6, #3 inline unwinds -> unwind 0
-  -> #7 f0.CV0 [ref, array]
+  -> #7 f0.CV0 [ref, any]
 0009 f0 PRE_INC #3 inline
   -> #8 f0.CV2 [long] reg
   checks #8 long -> exit 5
