@@ -2132,6 +2132,36 @@ impl<'a> Builder<'a> {
     /// ```expect regime=jit-exit-fuzz process
     /// 1060 29
     /// ```
+    ///
+    /// A variable a guard held a reference keeps php's `guarded_reference`
+    /// across a native's call, which defines no variable of its caller,
+    /// so the `ASSIGN` to it after `str_repeat` takes no exit of its own,
+    /// and the direction's is php's exit 5:
+    ///
+    /// ```php
+    /// function f() { $x = 0; $r = &$x; $c = 0; for ($i = 0; $i < 100; $i++) { $x = $i; $c += strlen(str_repeat("a", 2)); $x = $c; if ($i > 80) { $c++; } } return $c + $x; }
+    /// echo f(), "\n";
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 437
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:3
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %s:2
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 5 f() %s:2
+    /// ---- TRACE 2 start (side trace 1/5) f() %s:2
+    /// ---- TRACE 2 stop (link to 1)
+    /// ---- TRACE 2 compiled
+    ///
+    ///      TRACE 1 exit 2 f() %s:2
+    /// ---- TRACE 3 start (side trace 1/2) f() %s:2
+    /// ---- TRACE 3 stop (return)
+    /// ---- TRACE 3 compiled
+    /// ```
     fn clobber(&mut self, idx: OpId) {
         let live: Vec<Frame> = self.stack.clone();
         for frame in live {
@@ -2149,6 +2179,12 @@ impl<'a> Builder<'a> {
                         Types::UNKNOWN.without(Types::UNDEF)
                     };
                     let reloaded = self.value(slot, types, Def::Reload(idx), Home::Memory);
+                    // php's `guarded_reference` is the SSA variable's, and
+                    // a call defines no variable of its caller: a variable
+                    // a guard held a reference holds one still.
+                    if self.held_references.contains(&value) {
+                        self.held_references.insert(reloaded);
+                    }
                     self.set(slot, reloaded);
                 }
             }
