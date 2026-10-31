@@ -119,6 +119,11 @@ enum At {
     Opline(OplineIdx),
     /// The frame stands where it goes on.
     Stands,
+    /// Where a return past the trace's lowest frame left the interpreter,
+    /// in a caller the guard found other than the one recorded: the trace
+    /// knows nothing of that frame's slots and holds nothing of its own
+    /// there, so the exit stores nothing and knows no type.
+    Landed,
     /// After a fetch whose element's type a guard holds: the opline past
     /// it with what `left` says in the fetch's slot, the temporaries it
     /// read freed, and a call under way restored.
@@ -1736,6 +1741,91 @@ impl<'a> Builder<'a> {
     /// ```expect regime=jit-tracing process
     /// 1021
     /// ```
+    ///
+    /// How php compiles the return decides how the guard leaves
+    /// ([`Builder::handled`]). A `RETURN` php compiles with
+    /// `zend_jit_return` escapes, taking no exit, as `zend_jit_leave_func`
+    /// jumps to `jit_stub_trace_escape`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:11199-11240`), whether this tier
+    /// leaves its frame in place or steps it. A return php hands to its
+    /// handler holds the opline with an exit within its line, where
+    /// `zend_jit_trace_handler` takes an exit point past the handler
+    /// (`:17200-17330`). That exit names no opline, so no other place takes
+    /// it, and it stores nothing and knows no type ([`At::Landed`]): where
+    /// it is taken, the caller the interpreter stands in is not the one
+    /// the trace recorded. A
+    /// return trace whose `RETURN_BY_REF` returns into the file's code,
+    /// away from its recursion's header, takes that exit and grows a side
+    /// trace there, #3688's program:
+    ///
+    /// ```php
+    /// function h() { return 1; }
+    /// function &p($n) { static $z = 0; if ($n == 0) { return $z; } $x = &p($n - 1); h(); return $x; }
+    /// $r = &p(6); echo $r, "\n";
+    /// for ($i = 0; $i < 5; $i++) { $r = &p(8); echo $r, "\n"; }
+    /// echo "done\n";
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// done
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:4
+    /// ---- TRACE 1 abort (deep recursion)
+    ///
+    /// ---- TRACE 1 start (enter) p() %s:3
+    /// ---- TRACE 1 stop (recursive call)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 1 p() %s:3
+    /// ---- TRACE 2 start (side trace 1/1) p() %s:3
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    ///
+    /// ---- TRACE 3 start (return) p() %s:3
+    /// ---- TRACE 3 stop (recursive return)
+    /// ---- TRACE 3 compiled
+    ///
+    ///      TRACE 3 exit 2 $main() %s:4
+    /// ---- TRACE 4 start (side trace 3/2) $main() %s:4
+    /// ---- TRACE 4 stop (link to 1)
+    /// ---- TRACE 4 compiled
+    ///
+    ///      TRACE 4 exit 0 $main() %s:5
+    /// ---- TRACE 5 start (side trace 4/0) $main() %s:5
+    /// ---- TRACE 5 stop (link to 1)
+    /// ---- TRACE 5 compiled
+    ///
+    ///      TRACE 5 exit 3 $main() %s:6
+    /// ---- TRACE 6 start (side trace 5/3) $main() %s:6
+    /// ---- TRACE 6 stop (return)
+    /// ---- TRACE 6 compiled
+    /// ```
+    ///
+    /// The same where every guard fails once, the exit landing the
+    /// interpreter in each caller a return past the root steps into:
+    ///
+    /// ```php
+    /// function h() { return 1; }
+    /// function &p($n) { static $z = 0; if ($n == 0) { return $z; } $x = &p($n - 1); h(); return $x; }
+    /// $r = &p(6); echo $r, "\n";
+    /// for ($i = 0; $i < 5; $i++) { $r = &p(8); echo $r, "\n"; }
+    /// echo "done\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// done
+    /// ```
     fn back(&mut self, ahead: &[Event]) -> Result<(), Abort> {
         let idx = self.begin();
         let from = self.running()?;
@@ -1758,6 +1848,28 @@ impl<'a> Builder<'a> {
                 .map(OplineIdx);
             (caller, call_at, next_op)
         };
+        // The return's line, just before: a step served it, or it left its
+        // frame in place.
+        let escapes = match guard {
+            Some((func, opline)) => {
+                let at = OpId(idx.0.wrapping_sub(1));
+                let handled = match self.ops.get(at.index()) {
+                    Some(Op::Line(line)) if line.frame == from => self.handled(line),
+                    _ => return Err(mismatch("a return past the lowest frame with no line")),
+                };
+                if handled {
+                    self.guards.push(Placed {
+                        at: GuardAt::Within(at),
+                        check: Check::Stands { func, opline },
+                        exit: draft(Point::After(idx), caller, At::Landed),
+                    });
+                    None
+                } else {
+                    guard
+                }
+            }
+            None => None,
+        };
         let code = self.meta(caller).code;
         let out = call_at
             .and_then(|at| code.oplines.get(at.0 as usize))
@@ -1771,9 +1883,79 @@ impl<'a> Builder<'a> {
         self.ops.push(Op::Back {
             frame: caller,
             out,
-            escapes: guard,
+            escapes,
         });
         Ok(())
+    }
+
+    /// Whether php's trace hands the return `line` to its handler,
+    /// `zend_jit_trace_handler`, and not to `zend_jit_return` and
+    /// `zend_jit_leave_func`: a `RETURN_BY_REF`, which it compiles no
+    /// other way, and a `RETURN` of a file's own code or of an operand
+    /// that may be undefined (`Z/ext/opcache/jit/zend_jit_trace.c:5580-5595`),
+    /// whether this tier steps the return or leaves its frame in place.
+    /// The `RETURN` of `eval`'d code php hands it too is never recorded
+    /// here (revision 120).
+    ///
+    /// A return trace whose `RETURN` of a string this tier steps, as it
+    /// steps every `RETURN` of a value it does not hold to one scalar:
+    /// php compiles it with `zend_jit_return`, so where it returns into
+    /// the file's loop, away from its recursion's header, it escapes and
+    /// writes no exit line, and php's interpreter goes on to root a trace
+    /// at the loop:
+    ///
+    /// ```php
+    /// function h() { return 1; }
+    /// function p($n) { if ($n == 0) { return ""; } $x = p($n - 1); h(); $x .= "a"; return $x; }
+    /// for ($i = 0; $i < 5; $i++) { $r = p(8); }
+    /// echo strlen($r), "\n";
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 8
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:4
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) $main() %s:4
+    /// ---- TRACE 1 abort (deep recursion)
+    ///
+    /// ---- TRACE 1 start (enter) p() %s:3
+    /// ---- TRACE 1 stop (recursive call)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 1 p() %s:3
+    /// ---- TRACE 2 start (side trace 1/1) p() %s:3
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    ///
+    /// ---- TRACE 3 start (return) p() %s:3
+    /// ---- TRACE 3 stop (recursive return)
+    /// ---- TRACE 3 compiled
+    ///
+    /// ---- TRACE 4 start (loop) $main() %s:4
+    /// ---- TRACE 4 stop (link to 1)
+    /// ---- TRACE 4 compiled
+    ///
+    /// ---- TRACE 5 start (return) $main() %s:4
+    /// ---- TRACE 5 stop (link to 4)
+    /// ---- TRACE 5 compiled
+    ///
+    ///      TRACE 4 exit 1 $main() %s:5
+    /// ---- TRACE 6 start (side trace 4/1) $main() %s:5
+    /// ---- TRACE 6 stop (return)
+    /// ---- TRACE 6 compiled
+    /// ```
+    fn handled(&self, line: &Line) -> bool {
+        match line.opcode {
+            Opcode::ReturnByRef => true,
+            Opcode::Return => {
+                let func = self.frames[usize::from(line.frame.0)].func;
+                self.view.is_main(func) != Some(false)
+                    || matches!(line.op1, Operand::Value(value)
+                        if self.val(value).types.meets(Types::UNDEF))
+            }
+            _ => false,
+        }
     }
 
     /// The clobber rule (`jit-design.md` §4.2): after a call-effect
@@ -2220,9 +2402,9 @@ impl<'a> Builder<'a> {
         operands: [Operand; 3],
         samples: [Option<Sample>; 3],
     ) -> Seen {
-        let t1 = self.types_of(frame, operands[0]);
+        let types = operands.map(|operand| self.types_of(frame, operand));
         let mut held: [Option<(Types, Read)>; 3] = [None; 3];
-        let sites = guard_sites(op, data_line, samples, t1, self.meta(frame).code);
+        let sites = guard_sites(op, data_line, samples, types, self.meta(frame).code);
         for site in checked_order(op.opcode)
             .iter()
             .filter(|site| sites.contains(site))
@@ -2246,7 +2428,13 @@ impl<'a> Builder<'a> {
             inferred: [Types::NONE; 3],
         };
         for (at, operand) in operands.into_iter().enumerate() {
-            let types = self.types_of(frame, operand);
+            let mut types = self.types_of(frame, operand);
+            // A reference no guard held is read as php's trace SSA reads
+            // it, `IS_UNKNOWN` (`Z/ext/opcache/jit/zend_jit_trace.c:1819-1833`):
+            // a reference to anything, whatever the slot's types say.
+            if samples[at].is_some_and(|s| Read::sampled(s) == Read::Through) {
+                types = types.or(Types::REF);
+            }
             (seen.types[at], seen.read[at]) = held[at].unwrap_or((types, Read::InPlace));
             seen.inferred[at] = match operand {
                 Operand::Value(value) if self.aliased(self.val(value).slot) => types,
@@ -2313,8 +2501,8 @@ impl<'a> Builder<'a> {
     /// php's `ADD_OP_GUARD` on one operand, `zend_jit_trace_add_op_guard`:
     /// a type guard where the recorded type is narrower than the value's,
     /// narrowing the value unless a symbol table reaches it or a register
-    /// holds it; a reference's inner type at every read, which php's code
-    /// generator holds where its TSSA adds nothing; and the type of what
+    /// holds it; a reference's inner type, where php's code generator
+    /// fetches the reference ([`guard_sites`]); and the type of what
     /// an indirect `VAR` points at, at the element write that reads it,
     /// as php's `zend_jit_fetch_indirect_var` holds it (`Z/ext/opcache/jit/zend_jit_ir.c:17087-17141`),
     /// leaving at the opline. What the opline sees of the operand after
@@ -3920,6 +4108,41 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// Where `draft` lands the interpreter, how, and the store its landing
+    /// adds beside the trace's registers: past a fetch whose element's
+    /// type a guard holds, the element it copied, as php's guard on a
+    /// fetched element leaves for the opline after it with the copy in
+    /// its stack map (`zend_jit_guard_fetch_result_type`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:8067-8085`), and with a call
+    /// under way restored, as `zend_jit_trace_get_exit_point` adds
+    /// `ZEND_JIT_EXIT_RESTORE_CALL` to any exit taken while one is
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:144-147`).
+    fn lands(&self, draft: &Draft, calls: bool) -> (Option<OplineIdx>, Landing, Option<Store>) {
+        match draft.at {
+            At::Opline(at) => (Some(at), restored(calls), draft.extra),
+            At::Stands | At::Landed => (None, restored(calls), draft.extra),
+            At::Fetched {
+                fetch,
+                frees,
+                out,
+                left,
+            } => {
+                let copied = Store {
+                    slot: self.val(out).slot,
+                    from: match left {
+                        Left::Copied(read) => Stored::Copied { value: out, read },
+                        Left::Null => Stored::Null,
+                    },
+                };
+                let landing = Landing {
+                    frees,
+                    restores_call: calls,
+                };
+                (Some(OplineIdx(fetch.0 + 1)), landing, Some(copied))
+            }
+        }
+    }
+
     /// One exit's spec from its draft and the state it leaves, the values
     /// in `known` held by a guard before it.
     fn spec(
@@ -3931,38 +4154,21 @@ impl<'a> Builder<'a> {
         let empty = Snapshot::default();
         let snapshot = self.snapshot_at(draft.point).unwrap_or(&empty);
         let calls = snapshot.calls > 0;
-        let mut extra = draft.extra;
-        let (opline, landing) = match draft.at {
-            At::Opline(at) => (Some(at), restored(calls)),
-            At::Stands => (None, restored(calls)),
-            At::Fetched {
-                fetch,
-                frees,
-                out,
-                left,
-            } => {
-                // Past the fetch, with the element it copied, as php's
-                // guard on a fetched element leaves for the opline after
-                // it with the copy in its stack map
-                // (`zend_jit_guard_fetch_result_type`,
-                // `Z/ext/opcache/jit/zend_jit_ir.c:8067-8085`), and with a
-                // call under way restored, as `zend_jit_trace_get_exit_point`
-                // adds `ZEND_JIT_EXIT_RESTORE_CALL` to any exit taken while
-                // one is (`Z/ext/opcache/jit/zend_jit_trace.c:144-147`).
-                extra = Some(Store {
-                    slot: self.val(out).slot,
-                    from: match left {
-                        Left::Copied(read) => Stored::Copied { value: out, read },
-                        Left::Null => Stored::Null,
-                    },
-                });
-                let landing = Landing {
-                    frees,
-                    restores_call: calls,
-                };
-                (Some(OplineIdx(fetch.0 + 1)), landing)
-            }
-        };
+        let (opline, landing, extra) = self.lands(draft, calls);
+        // A frame a return past the root landed in is one the trace
+        // holds nothing of ([`At::Landed`]).
+        if matches!(draft.at, At::Landed) {
+            return ExitSpec {
+                frame: draft.frame,
+                opline,
+                landing,
+                stores: Vec::new(),
+                known: Vec::new(),
+                grows: draft.grows,
+                link: draft.link,
+                layout: false,
+            };
+        }
         // A caller's register value is in its slot from the call into the
         // frame above it on, which stored it there (`Op::Enter`'s
         // `stores`), so an exit from a frame above stores none of it, as

@@ -273,12 +273,15 @@ pub(crate) enum Op {
     /// `Z/ext/opcache/jit/zend_jit_trace.c:3169-3180`).
     Enter { frame: Frame, stores: Vec<ValueId> },
     /// A return lands in `frame`, and `out` is what the call's slot holds
-    /// after it, where the call keeps one. A return past the trace's
-    /// lowest frame `escapes` unless the interpreter stands at that
-    /// opline of that op array after it, php's IP guard in
-    /// `zend_jit_leave_func` (`Z/ext/opcache/jit/zend_jit_ir.c:11188-11224`):
-    /// no exit, the frame left to the handler of the opline it stands
-    /// at ([`crate::lower::ESCAPED`]).
+    /// after it, where the call keeps one. A `RETURN` php compiles with
+    /// `zend_jit_return` past the trace's lowest frame `escapes` unless
+    /// the interpreter stands at that opline of that op array after it,
+    /// php's IP guard in `zend_jit_leave_func`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:11188-11224`): no exit, the frame
+    /// left to the handler of the opline it stands at
+    /// ([`crate::lower::ESCAPED`]). A return php hands to its handler
+    /// escapes nowhere: its line holds that opline with a `Check::Stands`
+    /// and an exit, as php's `zend_jit_trace_handler` does.
     Back {
         frame: Frame,
         out: Option<ValueId>,

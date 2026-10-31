@@ -600,6 +600,232 @@ fn named(op: &Opline, code: &OpArray) -> bool {
             .is_some_and(|name| !name.bytes().is_empty())
 }
 
+/// The operands whose type php holds at an opline, which the code
+/// generator holds in [`checked_order`]: those its trace SSA adds a guard
+/// for ([`traced`]), and the reference its code generator fetches
+/// ([`fetched_reference`]). An operand the recording saw through a
+/// reference is php's `IS_UNKNOWN` to its trace SSA, whose
+/// `ADD_OP_GUARD` adds nothing for that type
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:403-407`, `:1819-1833`), so it
+/// is held only where the code generator fetches it.
+pub(super) fn guard_sites(
+    op: &Opline,
+    data: Option<&Opline>,
+    samples: [Option<Sample>; 3],
+    types: [Types; 3],
+    code: &OpArray,
+) -> Vec<Site> {
+    let through = |site: Site| samples[site as usize].is_some_and(|s| s.reference && !s.indirect);
+    let fetched = fetched_reference(op, data, samples, types, code);
+    let mut sites: Vec<Site> = traced(op, data, samples, types[0], code)
+        .into_iter()
+        .filter(|site| !through(*site))
+        .collect();
+    sites.extend(fetched.filter(|site| !sites.contains(site)));
+    sites
+}
+
+/// The operand whose reference php's code generator holds at `op`,
+/// `zend_jit_fetch_reference` (`Z/ext/opcache/jit/zend_jit_ir.c:17021-17085`):
+/// the reference and its inner type, by one exit, where it compiles the
+/// opline itself over an operand the recording saw through a reference,
+/// over `types`, what php's inference knows of the three operands, its
+/// `info & (MAY_BE_ANY|MAY_BE_UNDEF)` the kinds beside the reference. Its
+/// callers in `zend_jit_trace`'s switch (`Z/ext/opcache/jit/zend_jit_trace.c`):
+/// `ADD`, `SUB` and `MUL` over two operands that may be numbers, or two
+/// arrays an `ADD` joins, the one variable of the two that is a reference
+/// (`:4553-4612`); `ASSIGN_DIM_OP` whose `out` slot is unused, of an
+/// operator `zend_jit_supported_binary_op` serves, and not of the array
+/// into itself (`:4736-4775`); an object's increment and decrement of a
+/// named property (`:4794-4846`); `ASSIGN_OBJ_OP` as `ASSIGN_DIM_OP`
+/// (`:4878-4940`); `ASSIGN_OBJ` of a named property (`:4974-5023`);
+/// `ASSIGN_DIM` not of the array into itself (`:5064-5095`);
+/// `ISSET_ISEMPTY_CV` and `ISSET_ISEMPTY_DIM_OBJ` but for `empty()`
+/// (`:5767-5785`, `:5954-5972`); `FETCH_DIM_R`, `FETCH_DIM_IS` and
+/// `FETCH_LIST_R` (`:5845-5864`); `FETCH_DIM_W`, `FETCH_DIM_RW` and
+/// `FETCH_LIST_W` of a variable (`:5902-5935`); `FETCH_OBJ_R`,
+/// `FETCH_OBJ_IS` and `FETCH_OBJ_W` of a named property (`:6047-6097`);
+/// `STRLEN` of a string and `COUNT` of an array the recording saw as no packed one,
+/// as php's recorder marks `IS_TRACE_PACKED` behind a reference too
+/// (`:6224-6259`, `Z/ext/opcache/jit/zend_jit_vm_helpers.c:835-845`); and
+/// `INIT_METHOD_CALL` by a constant name (`:6358-6391`). Each object
+/// opline but `INIT_METHOD_CALL` is over an operand php's inference says
+/// may be an object, and each fetches `op1` but the arithmetic, which
+/// fetches the one that is a reference. A temporary is not held here
+/// (`Builder::guard_use` refuses it). Every other case reads a reference with
+/// `CHECK_OP_TRACE_TYPE`, which holds nothing of an `IS_UNKNOWN` type
+/// (`:411-427`): `QM_ASSIGN` (`:5240-5248`), the comparisons
+/// (`:5431-5444`, `:5481-5492`), `RETURN` (`:5580-5582`), `BOOL` and
+/// `BOOL_NOT` (`:5658-5661`), the jumps (`:5670-5675`), `ECHO`
+/// (`:6214-6223`), `FE_RESET_R` and `FE_FETCH_R` (`:6310-6322`), the
+/// increments and decrements, `ASSIGN_OP`, the sends and the rest, and
+/// the cases above for an operand they do not fetch.
+///
+/// The program #3688 found, a reference `ECHO` reads in a side trace
+/// that php's trace holds by no guard, so the exit after it is php's
+/// third, not a fourth:
+///
+/// ```php
+/// function h() { return 1; }
+/// function &p($n) { static $z = 0; if ($n == 0) { return $z; } $x = &p($n - 1); h(); return $x; }
+/// $r = &p(6); echo $r, "\n";
+/// for ($i = 0; $i < 5; $i++) { $r = &p(8); echo $r, "\n"; }
+/// echo "done\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 0
+/// 0
+/// 0
+/// 0
+/// 0
+/// 0
+/// done
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:4
+/// ---- TRACE 1 abort (deep recursion)
+///
+/// ---- TRACE 1 start (enter) p() %s:3
+/// ---- TRACE 1 stop (recursive call)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 1 p() %s:3
+/// ---- TRACE 2 start (side trace 1/1) p() %s:3
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+/// ---- TRACE 3 start (return) p() %s:3
+/// ---- TRACE 3 stop (recursive return)
+/// ---- TRACE 3 compiled
+///
+///      TRACE 3 exit 2 $main() %s:4
+/// ---- TRACE 4 start (side trace 3/2) $main() %s:4
+/// ---- TRACE 4 stop (link to 1)
+/// ---- TRACE 4 compiled
+///
+///      TRACE 4 exit 0 $main() %s:5
+/// ---- TRACE 5 start (side trace 4/0) $main() %s:5
+/// ---- TRACE 5 stop (link to 1)
+/// ---- TRACE 5 compiled
+///
+///      TRACE 5 exit 3 $main() %s:6
+/// ---- TRACE 6 start (side trace 5/3) $main() %s:6
+/// ---- TRACE 6 stop (return)
+/// ---- TRACE 6 compiled
+/// ```
+///
+/// A `COUNT` of a reference to a packed array is its handler's, taking
+/// no exit, so the loop's direction is php's second exit, not a third:
+///
+/// ```php
+/// function f(array &$a) { $s = 0; for ($i = 0; $i < count($a); $i++) { $s += $a[$i]; } return $s; }
+/// $b = [1,2,3,4,5,6,7,8,9,10]; echo f($b), "\n";
+/// for ($k = 0; $k < 3; $k++) { $b[] = $k; echo f($b), "\n"; }
+/// ```
+/// ```expect regime=jit-inline process
+/// 55
+/// 55
+/// 56
+/// 58
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:3
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) f() %s:2
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 2 f() %s:2
+/// ---- TRACE 2 start (side trace 1/2) f() %s:2
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+/// ---- TRACE 3 start (loop) $main() %s:4
+/// ---- TRACE 3 stop (link to 1)
+/// ---- TRACE 3 compiled
+///
+/// ---- TRACE 4 start (return) $main() %s:4
+/// ---- TRACE 4 stop (link to 3)
+/// ---- TRACE 4 compiled
+///
+///      TRACE 3 exit 1 $main() %s:4
+/// ---- TRACE 5 start (side trace 3/1) $main() %s:4
+/// ---- TRACE 5 stop (return)
+/// ---- TRACE 5 compiled
+/// ```
+#[allow(
+    clippy::match_same_arms,
+    reason = "php's callers, case for case and in its order"
+)]
+fn fetched_reference(
+    op: &Opline,
+    data: Option<&Opline>,
+    samples: [Option<Sample>; 3],
+    types: [Types; 3],
+    code: &OpArray,
+) -> Option<Site> {
+    let through = |at: usize| samples[at].is_some_and(|s| s.reference && !s.indirect);
+    let cv = |kind: OperandKind| kind == OperandKind::Cv;
+    let [t1, t2, td] = types.map(Types::kinds);
+    let unused = op.out_type == OperandKind::Unused;
+    let object = op.op1_type != OperandKind::Unused && t1.meets(Types::OBJECT);
+    let into_itself = cv(op.op1_type) && data.is_some_and(|d| cv(d.op1_type) && d.op1 == op.op1);
+    let served =
+        || lattice::binary_of(op.extended_value).is_some_and(|binary| supported(binary, td));
+    let fetched = match op.opcode {
+        Opcode::Add | Opcode::Sub | Opcode::Mul => {
+            let joined = op.opcode == Opcode::Add
+                && t1.kinds() == Types::ARRAY
+                && t2.kinds() == Types::ARRAY;
+            let numbers = t1.meets(Types::NUMBER) && t2.meets(Types::NUMBER);
+            if t1.meets(Types::UNDEF) || t2.meets(Types::UNDEF) || !(joined || numbers) {
+                return None;
+            }
+            return match (through(0), through(1)) {
+                (true, false) if cv(op.op1_type) => Some(Site::Op1),
+                (false, true) if cv(op.op2_type) => Some(Site::Op2),
+                _ => None,
+            };
+        }
+        Opcode::AssignDimOp => unused && served() && !into_itself,
+        Opcode::PreIncObj | Opcode::PreDecObj | Opcode::PostIncObj | Opcode::PostDecObj => {
+            named(op, code) && object
+        }
+        Opcode::AssignObjOp => unused && named(op, code) && !into_itself && served() && object,
+        Opcode::AssignObj => named(op, code) && object,
+        Opcode::AssignDim => !into_itself,
+        Opcode::IssetIsemptyCv | Opcode::IssetIsemptyDimObj => op.extended_value & ISEMPTY == 0,
+        Opcode::FetchDimR | Opcode::FetchDimIs | Opcode::FetchListR => true,
+        Opcode::FetchDimW | Opcode::FetchDimRw | Opcode::FetchListW => cv(op.op1_type),
+        Opcode::FetchObjR | Opcode::FetchObjIs | Opcode::FetchObjW => named(op, code) && object,
+        Opcode::Strlen => samples[0].is_some_and(|s| s.kind == ZvalType::String),
+        Opcode::Count => samples[0].is_some_and(|s| s.kind == ZvalType::Array && !s.packed),
+        Opcode::InitMethodCall => {
+            op.op1_type != OperandKind::Unused
+                && op.op2_type == OperandKind::Const
+                && (code.literals.get(op.op2 as usize)).is_some_and(|name| name.as_str().is_some())
+        }
+        _ => false,
+    };
+    (fetched && through(0)).then_some(Site::Op1)
+}
+
+/// php's `zend_jit_supported_binary_op` of a compound write's operator
+/// over anything and the value `td` it writes (`Z/ext/opcache/jit/zend_jit.c:1395-1425`).
+fn supported(binary: Opcode, td: Types) -> bool {
+    if td.meets(Types::UNDEF) {
+        return false;
+    }
+    match binary {
+        Opcode::Add | Opcode::Sub | Opcode::Mul => td.meets(Types::NUMBER),
+        Opcode::BwOr | Opcode::BwAnd | Opcode::BwXor | Opcode::Sl | Opcode::Sr | Opcode::Mod => {
+            td.meets(Types::LONG)
+        }
+        Opcode::Concat => td.meets(Types::STRING),
+        _ => false,
+    }
+}
+
 /// The operands php's switch in `zend_jit_trace_build_tssa` adds a guard
 /// for (`ADD_OP1_TRACE_GUARD`, `ADD_OP2_TRACE_GUARD`,
 /// `ADD_OP1_DATA_TRACE_GUARD`), in its order, which marks them; the code
@@ -613,7 +839,7 @@ fn named(op: &Opline, code: &OpArray) -> bool {
     clippy::match_same_arms,
     reason = "php's switch, case for case and in its order"
 )]
-pub(super) fn guard_sites(
+fn traced(
     op: &Opline,
     data: Option<&Opline>,
     samples: [Option<Sample>; 3],
