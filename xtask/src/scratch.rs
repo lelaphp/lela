@@ -309,12 +309,31 @@ fn volume(path: &Path) -> PathBuf {
 /// `scripts/worktree-add.sh` and `worktree-retire.sh` fall back to in a
 /// clone with no build and always call from its root, runs that binary
 /// rooted there in the same way. Any other `cargo` call goes to the
-/// `cargo` this process was started by. The one test that holds the
-/// build itself, the seeded worktree's, runs without it.
+/// `cargo` this process was started by, or to the one on `PATH` where
+/// `CARGO` names none by its absolute path (#3683). The one test that
+/// holds the build itself, the seeded worktree's, runs without it.
 pub fn cargo(dir: &Path, xtask: &Path) -> Result<std::ffi::OsString> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    stand_in(dir, xtask, std::env::var_os("CARGO"), &path)
+}
+
+/// [`cargo`] with its `CARGO` and `PATH` given. A bare `CARGO=cargo`, as a
+/// test run by the bare harness binary was handed, is resolved on `path`
+/// before the stand-in's directory goes first on it, and one that resolves
+/// to the stand-in itself is refused: the stand-in once execed itself for
+/// 75 minutes (#3683).
+fn stand_in(
+    dir: &Path,
+    xtask: &Path,
+    named: Option<std::ffi::OsString>,
+    path: &std::ffi::OsStr,
+) -> Result<std::ffi::OsString> {
     use std::os::unix::fs::PermissionsExt;
 
-    let cargo = std::env::var_os("CARGO").context("no CARGO to hand other calls on to")?;
+    let cargo = absolute_cargo(named, path).context("no cargo to hand other calls on to")?;
+    if cargo == dir.join("cargo") {
+        anyhow::bail!("{} would hand other calls on to itself", cargo.display());
+    }
     let (xtask, cargo) = (
         xtask.display().to_string(),
         Path::new(&cargo).display().to_string(),
@@ -345,10 +364,24 @@ pub fn cargo(dir: &Path, xtask: &Path) -> Result<std::ffi::OsString> {
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))
         .with_context(|| format!("marking the cargo stand-in {} executable", file.display()))?;
     let mut paths = vec![dir.to_path_buf()];
-    paths.extend(std::env::split_paths(
-        &std::env::var_os("PATH").unwrap_or_default(),
-    ));
+    paths.extend(std::env::split_paths(path));
     std::env::join_paths(paths).context("joining the stand-in's directory onto PATH")
+}
+
+/// The cargo `named` says, as an absolute path: `named` itself where it is
+/// one, and otherwise the first file of that name on `path`; `cargo` where
+/// nothing is named. None where `path` holds none.
+pub(crate) fn absolute_cargo(
+    named: Option<std::ffi::OsString>,
+    path: &std::ffi::OsStr,
+) -> Option<PathBuf> {
+    let named = PathBuf::from(named.unwrap_or_else(|| "cargo".into()));
+    if named.is_absolute() {
+        return Some(named);
+    }
+    std::env::split_paths(path)
+        .map(|dir| dir.join(&named))
+        .find(|candidate| candidate.is_absolute() && candidate.is_file())
 }
 
 /// A program copied into a scratch tree of its own and held there for as
@@ -973,6 +1006,42 @@ mod tests {
             "first\n",
             "the path replaced between two spawns"
         );
+    }
+
+    /// The stand-in never names itself (#3683): built with `CARGO=cargo`
+    /// and then first on `PATH`, it hands `cargo --version` on to the cargo
+    /// that `PATH` held before it, which answers within the minute where the
+    /// stand-in once execed itself for 75; built again with its own
+    /// directory already first, so that `cargo` would be itself, it is
+    /// refused.
+    #[test]
+    fn a_bare_cargo_reaches_the_real_cargo_and_never_the_stand_in() {
+        use std::time::{Duration, Instant};
+        let dir = Tree::new("cargo-bare").unwrap();
+        let xtask = std::path::Path::new("/nonexistent/xtask");
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let first = super::stand_in(&dir, xtask, Some("cargo".into()), &path).unwrap();
+        let mut child = std::process::Command::new(dir.join("cargo"))
+            .arg("--version")
+            .env("PATH", &first)
+            .env_remove("CARGO")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_mins(1);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() > deadline {
+                child.kill().ok();
+                child.wait().ok();
+                panic!("`cargo --version` through the stand-in ran past a minute: it loops");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert!(out.stdout.starts_with(b"cargo "), "{out:?}");
+        let again = super::stand_in(&dir, xtask, Some("cargo".into()), &first);
+        assert!(again.is_err(), "the stand-in named itself: {again:?}");
     }
 
     /// A sweep never meets a lock before it is held (#1252): one thread
