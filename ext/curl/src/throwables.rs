@@ -8,7 +8,7 @@ use std::mem;
 use php_ext::abi::{Refusal, Start};
 use php_ext::attr::php_class;
 use php_ext::raising::{self, Cause, Thrown, leave_pending};
-use php_ext::request::{Raised, Request};
+use php_ext::request::Request;
 use php_ext::values::ClassId;
 
 /// Core's `Error`.
@@ -104,17 +104,12 @@ impl Pending {
 
     /// Whether what stands is a fatal, which leaves by `zend_bailout`
     /// past every line of php's body after it, where an `exit` stands as
-    /// the unwind exit php's body goes on past ([`Pending::step`]).
+    /// the unwind exit php's body goes on past ([`Pending::step`]). A
+    /// fatal raised after an `exit` leaves past it as well, so a fatal
+    /// leaving is one whatever the slot holds.
     pub(crate) fn fatal(&self, req: &Request) -> bool {
-        match &self.0 {
-            Standing::Here(standing) => standing
-                .as_ref()
-                .is_some_and(|thrown| matches!(thrown.cause(req), Cause::Fatal)),
-            Standing::Slot => {
-                req.diagnostics().bailing_out()
-                    && req.diagnostics().raised() != Some(Raised::UnwindExit)
-            }
-        }
+        req.diagnostics().bailing_out()
+            || matches!(&self.0, Standing::Here(Some(thrown)) if matches!(thrown.cause(req), Cause::Fatal))
     }
 
     /// `thrown` left pending ([`raised`]): chained onto what stands here,
@@ -158,6 +153,25 @@ impl Pending {
     /// dtor
     /// dtor <- debug
     /// ```
+    ///
+    /// A destructor's throwable replaces an `exit` standing, as
+    /// `zend_exception_set_previous` gives the unwind exit up for it, and
+    /// the steps after it go on under that throwable, not under a fatal:
+    ///
+    /// ```php
+    /// class D { function __invoke() {} function __destruct() { echo "dtor\n"; throw new Exception("dtor"); } }
+    /// $h = curl_init();
+    /// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $t, $d) { exit("exit\n"); });
+    /// curl_setopt($h, CURLOPT_WRITEFUNCTION, new D);
+    /// register_shutdown_function(function () use ($h) { var_dump(curl_getinfo($h, CURLINFO_PRIVATE)); });
+    /// try { curl_setopt_array($h, [CURLOPT_VERBOSE => 2, CURLOPT_WRITEFUNCTION => null, CURLOPT_PRIVATE => 'p']); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// exit
+    /// dtor
+    /// caught dtor
+    /// string(1) "p"
+    /// ```
     pub(crate) fn step<R>(
         &mut self,
         req: &mut Request,
@@ -166,17 +180,25 @@ impl Pending {
         if self.fatal(req) {
             return None;
         }
-        let slot_taken = matches!(self.0, Standing::Slot)
-            || req.diagnostics().raised().is_some()
-            || req.diagnostics().bailing_out();
-        if slot_taken {
-            return Some(step(req, self));
-        }
-        if let Standing::Here(Some(standing)) = mem::replace(&mut self.0, Standing::Slot) {
-            leave_pending(req, standing);
-        }
-        let answer = step(req, self);
-        self.0 = Standing::Here(raising::pending(req).err());
+        let answer = if matches!(self.0, Standing::Slot) || req.diagnostics().raised().is_some() {
+            let exit =
+                matches!(&self.0, Standing::Here(Some(thrown)) if thrown.exception().is_none());
+            let answer = step(req, self);
+            if exit {
+                // A destructor the step served may have thrown over the
+                // exit, which `zend_exception_set_previous` gives up for
+                // it: what stands is what the slot holds now.
+                self.0 = Standing::Here(raising::pending(req).err());
+            }
+            answer
+        } else {
+            if let Standing::Here(Some(standing)) = mem::replace(&mut self.0, Standing::Slot) {
+                leave_pending(req, standing);
+            }
+            let answer = step(req, self);
+            self.0 = Standing::Here(raising::pending(req).err());
+            answer
+        };
         Some(answer)
     }
 
