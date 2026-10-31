@@ -1571,6 +1571,105 @@ fn a_reference_is_held_only_where_php_fetches_it() -> Result<(), String> {
     Ok(())
 }
 
+/// The table `guard_sites` is, held at the sites the review of #3695
+/// read in php's source: an `ADD` fetches its reference where php's
+/// inference, the kinds beside `MAY_BE_REF`, says it may be a number
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:4572-4612`), and not over a
+/// reference to a string; a `COUNT` fetches a reference to an array the
+/// recording saw as no packed one, `orig_op1_type == (IS_TRACE_REFERENCE|IS_ARRAY)`
+/// (`:6248`); an `ECHO` fetches none (`:6214-6223`); and an operand the
+/// recording saw in place is guarded where the trace SSA guards it.
+#[test]
+fn a_reference_is_a_guard_site_where_php_fetches_it() {
+    use super::opcodes::{Site, guard_sites};
+    use php_unit::{OpArray, OperandKind};
+    let code = OpArray::default();
+    let line = |opcode, op2_type| php_unit::Opline {
+        opcode,
+        op1_type: OperandKind::Cv,
+        op2_type,
+        op1: 0,
+        op2: 1,
+        ..php_unit::Opline::default()
+    };
+    let sample = |kind, reference, packed| {
+        Some(php_engine::tier::Sample {
+            kind,
+            indirect: false,
+            reference,
+            packed,
+            class: None,
+        })
+    };
+    let referenced = Types::UNKNOWN.without(Types::UNDEF);
+    let add = line(Opcode::Add, OperandKind::Cv);
+    let to_string = sample(ZvalType::String, true, false);
+    let long = sample(ZvalType::Long, false, false);
+    assert_eq!(
+        guard_sites(
+            &add,
+            None,
+            [to_string, long, None],
+            [referenced, Types::LONG, Types::NONE],
+            &code
+        ),
+        vec![Site::Op2, Site::Op1],
+        "an ADD over a reference to anything fetches it, beside the long it adds"
+    );
+    assert_eq!(
+        guard_sites(
+            &add,
+            None,
+            [to_string, long, None],
+            [
+                Types::STRING.or(Types::REF),
+                Types::UNKNOWN.without(Types::UNDEF),
+                Types::NONE
+            ],
+            &code
+        ),
+        vec![Site::Op2],
+        "an ADD over a reference to a string is its handler's, and holds the other operand"
+    );
+    let count = line(Opcode::Count, OperandKind::Unused);
+    for (packed, sites) in [(false, vec![Site::Op1]), (true, vec![])] {
+        assert_eq!(
+            guard_sites(
+                &count,
+                None,
+                [sample(ZvalType::Array, true, packed), None, None],
+                [referenced, Types::NONE, Types::NONE],
+                &code
+            ),
+            sites,
+            "a COUNT of a reference to an array, packed: {packed}"
+        );
+    }
+    let echo = line(Opcode::Echo, OperandKind::Unused);
+    assert_eq!(
+        guard_sites(
+            &echo,
+            None,
+            [to_string, None, None],
+            [referenced, Types::NONE, Types::NONE],
+            &code
+        ),
+        vec![],
+        "an ECHO fetches no reference"
+    );
+    assert_eq!(
+        guard_sites(
+            &echo,
+            None,
+            [sample(ZvalType::String, false, false), None, None],
+            [Types::UNKNOWN, Types::NONE, Types::NONE],
+            &code
+        ),
+        vec![Site::Op1],
+        "an ECHO of a value in place is guarded as the trace SSA guards it"
+    );
+}
+
 /// A return trace rooted inside an argument of an outer call opens with
 /// that call's fake init, and each return past its root escapes unless
 /// the caller stands at the send past it, as php's code steps over a

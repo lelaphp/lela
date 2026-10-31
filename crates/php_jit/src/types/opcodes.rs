@@ -629,7 +629,8 @@ pub(super) fn guard_sites(
 /// `zend_jit_fetch_reference` (`Z/ext/opcache/jit/zend_jit_ir.c:17021-17085`):
 /// the reference and its inner type, by one exit, where it compiles the
 /// opline itself over an operand the recording saw through a reference,
-/// over `types`, what php's inference knows of the three operands. Its
+/// over `types`, what php's inference knows of the three operands, its
+/// `info & (MAY_BE_ANY|MAY_BE_UNDEF)` the kinds beside the reference. Its
 /// callers in `zend_jit_trace`'s switch (`Z/ext/opcache/jit/zend_jit_trace.c`):
 /// `ADD`, `SUB` and `MUL` over two operands that may be numbers, or two
 /// arrays an `ADD` joins, the one variable of the two that is a reference
@@ -644,10 +645,14 @@ pub(super) fn guard_sites(
 /// `FETCH_LIST_R` (`:5845-5864`); `FETCH_DIM_W`, `FETCH_DIM_RW` and
 /// `FETCH_LIST_W` of a variable (`:5902-5935`); `FETCH_OBJ_R`,
 /// `FETCH_OBJ_IS` and `FETCH_OBJ_W` of a named property (`:6047-6097`);
-/// `STRLEN` of a string and `COUNT` of an array (`:6224-6259`); and
-/// `INIT_METHOD_CALL` by a constant name (`:6358-6391`). Each is over
-/// an object where php's inference says `op1` may be one, and each
-/// fetches `op1`. Every other case reads a reference with
+/// `STRLEN` of a string and `COUNT` of an array the recording saw as no packed one,
+/// as php's recorder marks `IS_TRACE_PACKED` behind a reference too
+/// (`:6224-6259`, `Z/ext/opcache/jit/zend_jit_vm_helpers.c:835-845`); and
+/// `INIT_METHOD_CALL` by a constant name (`:6358-6391`). Each object
+/// opline but `INIT_METHOD_CALL` is over an operand php's inference says
+/// may be an object, and each fetches `op1` but the arithmetic, which
+/// fetches the one that is a reference. A temporary is not held here
+/// (`Builder::guard_use` refuses it). Every other case reads a reference with
 /// `CHECK_OP_TRACE_TYPE`, which holds nothing of an `IS_UNKNOWN` type
 /// (`:411-427`): `QM_ASSIGN` (`:5240-5248`), the comparisons
 /// (`:5431-5444`, `:5481-5492`), `RETURN` (`:5580-5582`), `BOOL` and
@@ -708,6 +713,46 @@ pub(super) fn guard_sites(
 /// ---- TRACE 6 stop (return)
 /// ---- TRACE 6 compiled
 /// ```
+///
+/// A `COUNT` of a reference to a packed array is its handler's, taking
+/// no exit, so the loop's direction is php's second exit, not a third:
+///
+/// ```php
+/// function f(array &$a) { $s = 0; for ($i = 0; $i < count($a); $i++) { $s += $a[$i]; } return $s; }
+/// $b = [1,2,3,4,5,6,7,8,9,10]; echo f($b), "\n";
+/// for ($k = 0; $k < 3; $k++) { $b[] = $k; echo f($b), "\n"; }
+/// ```
+/// ```expect regime=jit-inline process
+/// 55
+/// 55
+/// 56
+/// 58
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:3
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) f() %s:2
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 2 f() %s:2
+/// ---- TRACE 2 start (side trace 1/2) f() %s:2
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+/// ---- TRACE 3 start (loop) $main() %s:4
+/// ---- TRACE 3 stop (link to 1)
+/// ---- TRACE 3 compiled
+///
+/// ---- TRACE 4 start (return) $main() %s:4
+/// ---- TRACE 4 stop (link to 3)
+/// ---- TRACE 4 compiled
+///
+///      TRACE 3 exit 1 $main() %s:4
+/// ---- TRACE 5 start (side trace 3/1) $main() %s:4
+/// ---- TRACE 5 stop (return)
+/// ---- TRACE 5 compiled
+/// ```
 #[allow(
     clippy::match_same_arms,
     reason = "php's callers, case for case and in its order"
@@ -721,7 +766,7 @@ fn fetched_reference(
 ) -> Option<Site> {
     let through = |at: usize| samples[at].is_some_and(|s| s.reference && !s.indirect);
     let cv = |kind: OperandKind| kind == OperandKind::Cv;
-    let [t1, t2, td] = types.map(lattice::deref);
+    let [t1, t2, td] = types.map(Types::kinds);
     let unused = op.out_type == OperandKind::Unused;
     let object = op.op1_type != OperandKind::Unused && t1.meets(Types::OBJECT);
     let into_itself = cv(op.op1_type) && data.is_some_and(|d| cv(d.op1_type) && d.op1 == op.op1);
@@ -754,7 +799,7 @@ fn fetched_reference(
         Opcode::FetchDimW | Opcode::FetchDimRw | Opcode::FetchListW => cv(op.op1_type),
         Opcode::FetchObjR | Opcode::FetchObjIs | Opcode::FetchObjW => named(op, code) && object,
         Opcode::Strlen => samples[0].is_some_and(|s| s.kind == ZvalType::String),
-        Opcode::Count => samples[0].is_some_and(|s| s.kind == ZvalType::Array),
+        Opcode::Count => samples[0].is_some_and(|s| s.kind == ZvalType::Array && !s.packed),
         Opcode::InitMethodCall => {
             op.op1_type != OperandKind::Unused
                 && op.op2_type == OperandKind::Const
