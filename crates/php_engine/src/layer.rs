@@ -51,10 +51,12 @@ pub use php_process::{
 pub struct StreamHooks {
     /// `zend_stream_open` for an include,
     /// `php_stream_open_for_zend_ex(USE_PATH | REPORT_ERRORS |
-    /// STREAM_OPEN_FOR_INCLUDE)`: the file a path names opened through its
-    /// wrapper, and the name its `zend_file_handle` takes, the
-    /// `*opened_path` its opener set or the path where it set none; `None`
-    /// for the open that failed, which warned. The `Err` is what the open
+    /// STREAM_OPEN_FOR_INCLUDE)`, or with the bit that warns left out where
+    /// the `bool` is `false`, as `spl_autoload` opens its file: the file a
+    /// path names opened through its wrapper, and the name its
+    /// `zend_file_handle` takes, the `*opened_path` its opener set or the
+    /// path where it set none; `None` for the open that failed, which
+    /// warned where the bit was set. The `Err` is what the open
     /// threw. An `Ok` leaves its `zend_file_handle` held, opened or not,
     /// for [`StreamHooks::read_include`] and [`StreamHooks::close_include`].
     pub open: StreamOpenHook,
@@ -137,8 +139,9 @@ pub struct StreamHooks {
     pub engine_end: fn(&mut Request),
 }
 
-/// [`StreamHooks::open`].
-pub type StreamOpenHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u8>>, Thrown>;
+/// [`StreamHooks::open`], whose `bool` says whether an open that fails
+/// warns.
+pub type StreamOpenHook = fn(&mut Request, &[u8], bool) -> Result<Option<Vec<u8>>, Thrown>;
 
 /// [`StreamHooks::standard_handles`].
 /// Each stream's one owner the caller's, which the constant it registers

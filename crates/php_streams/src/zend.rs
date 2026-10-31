@@ -35,12 +35,13 @@ pub const STREAM_HOOKS: StreamHooks = StreamHooks {
     engine_end: crate::state::engine_end,
 };
 
-/// `zend_stream_open` for an include ([`ScannerFile`]): the name its
+/// `zend_stream_open` for an include ([`ScannerFile`]), warning where it
+/// fails only where it `warns`: the name its
 /// `zend_file_handle` takes, the `*opened_path` its opener set or `path`,
 /// `None` where it did not open; the `zend_file_handle` held either way for
 /// [`read_include`] and [`close_include`].
-fn open(req: &mut Request, path: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
-    let fh = ScannerFile::open(req, path)?;
+fn open(req: &mut Request, path: &[u8], warns: bool) -> Result<Option<Vec<u8>>, Thrown> {
+    let fh = ScannerFile::open(req, path, warns)?;
     let named = (fh.as_ref())
         .map(|fh| (fh.opened_path()).map_or_else(|| path.to_vec(), |p| p.as_bytes().to_vec()));
     req.streams().including.push(fh);

@@ -1023,7 +1023,7 @@ impl Request {
             return self.failed_opening(kind, written);
         };
         let outer = self.include.including.replace((kind, self.vm.depth()));
-        let opened = (hooks.open)(self, path);
+        let opened = (hooks.open)(self, path, true);
         self.include.including = outer;
         let named = opened?;
         let compiled = self.compile_stream(kind, written, named, hooks.read_include);

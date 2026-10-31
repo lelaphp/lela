@@ -109,11 +109,41 @@ impl Request {
     /// bool(true)
     /// int(4)
     /// ```
+    ///
+    /// The open is `php_stream_open_for_zend_ex(USE_PATH |
+    /// STREAM_OPEN_FOR_INCLUDE)`, which leaves out the bit that warns: a
+    /// file that does not open is passed over in silence, put in no table,
+    /// and the next extension is tried.
+    ///
+    /// ```php
+    /// class W { public $context; private $d = false; public $p;
+    ///     function stream_open($p, $m, $o, &$op) { $this->p = $p; echo "open $p\n"; return $p !== 'ww://nope.inc'; }
+    ///     function stream_read($n) { if ($this->d) return ''; $this->d = true; return "<?php echo 'ran ', __FILE__, PHP_EOL;"; }
+    ///     function stream_eof() { return $this->d; }
+    ///     function stream_stat() { return []; }
+    ///     function stream_close() { echo "close {$this->p}\n"; }
+    ///     function stream_set_option($o, $a, $b) { return false; }
+    ///     function __destruct() { echo "dtor {$this->p}\n"; } }
+    /// stream_wrapper_register('ww', 'W');
+    /// spl_autoload('ww://Nope');
+    /// var_dump(get_included_files()[1]);
+    /// ```
+    /// ```expect
+    /// open ww://nope.inc
+    /// dtor ww://nope.inc
+    /// open ww://nope.php
+    /// ran ww://nope.php
+    /// close ww://nope.php
+    /// dtor ww://nope.php
+    /// string(13) "ww://nope.php"
+    /// ```
     fn load_stream(&mut self, written: &[u8], path: &[u8]) -> Result<bool, Thrown> {
         let Some(hooks) = self.stream_hooks() else {
             return Ok(false);
         };
-        let named = (hooks.open)(self, path)?;
+        // `php_stream_open_for_zend_ex` with no bit that warns: a file that
+        // does not open is passed over in silence.
+        let named = (hooks.open)(self, path, false)?;
         let served = self.serve_stream(written, named, hooks.read_include);
         match self.close_stream(hooks.close_include, served.as_ref().err()) {
             Some(thrown) => Err(thrown),
