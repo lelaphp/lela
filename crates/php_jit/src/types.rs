@@ -655,6 +655,11 @@ pub(crate) enum Check {
     Type { value: ValueId, tag: ZvalType },
     /// The slot holds a reference, and what it refers to is of this type.
     Deref { value: ValueId, tag: ZvalType },
+    /// The slot holds a reference still, of whatever it refers to, php's
+    /// `zend_jit_guard_reference` (`Z/ext/opcache/jit/zend_jit_ir.c:16990-17019`):
+    /// an `ASSIGN` to a variable the recording saw through a reference,
+    /// which writes through it. Its exit goes back to the opline.
+    Reference { value: ValueId },
     /// The `VAR` holds the address of a zval, `IS_INDIRECT`, as a fetch
     /// for writing leaves it, and that zval is of this type, php's
     /// `zend_jit_fetch_indirect_var` (`Z/ext/opcache/jit/zend_jit_ir.c:17087-17141`):

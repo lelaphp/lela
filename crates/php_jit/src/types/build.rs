@@ -17,11 +17,11 @@ use php_unit::{Effects, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::lattice::{self, Types};
 use super::opcodes::{
-    Declared, ISEMPTY, MAX_ARG_FLAG_NUM, Within, arith, assigned, check_sites, checked_order,
-    compiled_inline, compound_in_place, constant, constant_types, goes_one_way, guard_sites,
-    held_as_is, inline_may_leave, is_call, keeps_temporaries, keyed, may_exit, packed_guard,
-    param_types, params, reads, reads_by_name, recv_exits, referenced, slot_of, within, written,
-    written_through,
+    Carried, Declared, Hold, ISEMPTY, MAX_ARG_FLAG_NUM, Within, arith, assigned, carried,
+    check_sites, checked_order, compiled_inline, compound_in_place, constant, constant_types,
+    goes_one_way, guard_sites, held_as_is, inline_may_leave, is_call, keeps_temporaries, keyed,
+    may_exit, packed_guard, param_types, params, reads, reads_by_name, recv_exits, referenced,
+    slot_of, within, written, written_through,
 };
 use super::{
     Abort, ArgChecks, BodyEntry, Check, Constant, Def, Defaults, End, Entry, ExitId, ExitSpec,
@@ -177,12 +177,13 @@ struct Seen {
 }
 
 /// What one opline wrote: its `out` slot, and the values it wrote there
-/// and to its variable operands.
+/// and to its variable operands, its `OP_DATA`'s among them.
 struct Written {
     slot: Option<Slot>,
     out: Option<ValueId>,
     op1: Option<ValueId>,
     op2: Option<ValueId>,
+    data: Option<ValueId>,
 }
 
 /// A guard before its exit is numbered.
@@ -348,6 +349,15 @@ struct Builder<'a> {
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:14317-14335`): an object's class
     /// never changes, and a value read again is a value of its own.
     classed: HashMap<Object, ClassId>,
+    /// The values of variables no symbol table reaches that the trace read
+    /// through a reference a guard of it held, and what an opline that read
+    /// one so wrote back to its variable: php's `guarded_reference` on the
+    /// trace SSA's variable (`Z/Zend/Optimizer/zend_ssa.h:129`), set where
+    /// its code generator fetches the reference and kept as
+    /// [`Carried`] says, which spares an `ASSIGN` its guard
+    /// ([`Hold::Held`]). A loop's phi and a value the trace entered with
+    /// are no such value, as php's are not.
+    held_references: HashSet<ValueId>,
 }
 
 /// Where a property opline is served in place: the object it reads, the
@@ -408,6 +418,7 @@ impl<'a> Builder<'a> {
             entry_reads: Vec::new(),
             sampled: HashMap::new(),
             classed: HashMap::new(),
+            held_references: HashSet::new(),
         };
         let begins = rec.events.iter().find_map(|event| match event {
             Event::Op { opline, .. } => Some(*opline),
@@ -829,6 +840,12 @@ impl<'a> Builder<'a> {
             form,
             fused.is_some(),
         );
+        self.carry_references(
+            (&op, data_line.as_ref(), code),
+            [op1, op2, data],
+            (samples, seen),
+            &written,
+        );
         // The object a property opline writes through is the one it read,
         // of the class a guard held it of (`COPY_SSA_OBJ_TYPE`).
         if on_declared_slot(op.opcode)
@@ -1051,11 +1068,13 @@ impl<'a> Builder<'a> {
             }
             _ => None,
         };
-        if let (Some(data), Some(held)) = (data_line, inferred.data)
+        let data = if let (Some(data), Some(held)) = (data_line, inferred.data)
             && let Some(slot) = slot_of(frame, data.op1_type, data.op1)
         {
-            self.define(slot, (held.types, held.range), idx, Form::Step);
-        }
+            Some(self.define(slot, (held.types, held.range), idx, Form::Step))
+        } else {
+            None
+        };
         if op.opcode == Opcode::Return {
             self.returned = if op.op1_type == OperandKind::Unused {
                 Types::NULL
@@ -1068,6 +1087,7 @@ impl<'a> Builder<'a> {
             out,
             op1,
             op2,
+            data,
         }
     }
 
@@ -2404,21 +2424,27 @@ impl<'a> Builder<'a> {
     ) -> Seen {
         let types = operands.map(|operand| self.types_of(frame, operand));
         let mut held: [Option<(Types, Read)>; 3] = [None; 3];
-        let sites = guard_sites(op, data_line, samples, types, self.meta(frame).code);
-        for site in checked_order(op.opcode)
+        let referenced = match operands[0] {
+            Operand::Value(value) => self.held_references.contains(&value),
+            _ => false,
+        };
+        let code = self.meta(frame).code;
+        let sites = guard_sites(op, data_line, samples, (types, referenced), code);
+        for (site, hold) in checked_order(op.opcode)
             .iter()
-            .filter(|site| sites.contains(site))
+            .filter_map(|site| sites.iter().find(|(held, _)| held == site))
         {
             let at = *site as usize;
             // php follows an indirect `VAR` for the element writes alone.
             let sample = samples[at].filter(|s| !s.indirect || written_through(op.opcode));
-            if let Some(guarded) = self.guard_use(idx, here, operands[at], sample) {
+            if let Some(guarded) = self.guard_use(idx, here, operands[at], (sample, *hold)) {
                 held[at] = Some(guarded);
+                self.hold_reference(operands[at], guarded.1);
             }
         }
         for site in check_sites(op, samples) {
             let at = site as usize;
-            if !sites.contains(&site) {
+            if sites.iter().all(|(held, _)| *held != site) {
                 self.check_use(idx, here, operands[at], samples[at]);
             }
         }
@@ -2498,11 +2524,65 @@ impl<'a> Builder<'a> {
         seen
     }
 
+    /// Marks `operand`'s value held a reference where the opline reads it
+    /// through one a guard held, and its variable is one no symbol table
+    /// reaches, php's `guarded_reference = 1` past `zend_jit_fetch_reference`
+    /// and `zend_jit_guard_reference` (`Z/ext/opcache/jit/zend_jit_trace.c:4589-4607`,
+    /// `:5155-5167`, `:5853-5860`, and the rest of their callers).
+    fn hold_reference(&mut self, operand: Operand, read: Read) {
+        if let Operand::Value(value) = operand
+            && read == Read::Through
+            && !self.is_temp(operand)
+            && !self.aliased(self.val(value).slot)
+        {
+            self.held_references.insert(value);
+        }
+    }
+
+    /// What an opline leaves marked of the values it wrote back to the
+    /// variables it read ([`Builder::held_references`]): the value its
+    /// variable `op1` read through a reference a guard held is written
+    /// back marked, as php marks the `op1_def` of each fetch that defines
+    /// one; and [`carried`] keeps or sets the mark of the others.
+    fn carry_references(
+        &mut self,
+        (op, data_line, code): (&Opline, Option<&Opline>, &OpArray),
+        operands: [Operand; 3],
+        (samples, seen): ([Option<Sample>; 3], Seen),
+        written: &Written,
+    ) {
+        let defs = [written.op1, written.op2, written.data];
+        let mark = |builder: &mut Self, at: usize| {
+            if let Some(def) = defs[at]
+                && !builder.aliased(builder.val(def).slot)
+            {
+                builder.held_references.insert(def);
+            }
+        };
+        if seen.read[0] == Read::Through && self.is_marked(operands[0]) {
+            mark(self, 0);
+        }
+        match carried(op, data_line, samples, seen.types[0], code) {
+            Some(Carried::Kept(site)) if self.is_marked(operands[site as usize]) => {
+                mark(self, site as usize);
+            }
+            Some(Carried::Marked(site)) => mark(self, site as usize),
+            Some(Carried::Kept(_)) | None => {}
+        }
+    }
+
+    /// Whether `operand` is a value [`Builder::held_references`] marks.
+    fn is_marked(&self, operand: Operand) -> bool {
+        matches!(operand, Operand::Value(value) if self.held_references.contains(&value))
+    }
+
     /// php's `ADD_OP_GUARD` on one operand, `zend_jit_trace_add_op_guard`:
     /// a type guard where the recorded type is narrower than the value's,
     /// narrowing the value unless a symbol table reaches it or a register
     /// holds it; a reference's inner type, where php's code generator
-    /// fetches the reference ([`guard_sites`]); and the type of what
+    /// fetches the reference ([`guard_sites`]); that a variable an
+    /// `ASSIGN` writes is a reference still, where no guard before held it
+    /// one ([`Hold::Reference`], [`Hold::Held`]); and the type of what
     /// an indirect `VAR` points at, at the element write that reads it,
     /// as php's `zend_jit_fetch_indirect_var` holds it (`Z/ext/opcache/jit/zend_jit_ir.c:17087-17141`),
     /// leaving at the opline. What the opline sees of the operand after
@@ -2530,7 +2610,7 @@ impl<'a> Builder<'a> {
         idx: OpId,
         here: OplineIdx,
         operand: Operand,
-        sample: Option<Sample>,
+        (sample, hold): (Option<Sample>, Hold),
     ) -> Option<(Types, Read)> {
         let (Operand::Value(value), Some(sample)) = (operand, sample) else {
             return None;
@@ -2549,26 +2629,37 @@ impl<'a> Builder<'a> {
         // follows it, and a variable's reference to what it refers to; a
         // temporary that is a reference is the handler's.
         let read = Read::sampled(sample);
-        let check = match (read, temporary) {
-            (Read::InPlace, _) => None,
-            (Read::Indirect(pointee), true) => Some(Check::Indirect {
+        // php's `op1_info &= ~MAY_BE_REF` past `zend_jit_guard_reference`:
+        // what the variable refers to, of what its inference knows.
+        let referred = (self.val(value).types.without(Types::REF), Read::Through);
+        let check = match (hold, read, temporary) {
+            (Hold::Held, Read::Through, false) => return Some(referred),
+            (Hold::Reference, Read::Through, false) => {
+                self.guards.push(Placed {
+                    check: Check::Reference { value },
+                    ..before
+                });
+                return Some(referred);
+            }
+            (_, Read::InPlace, _) => None,
+            (_, Read::Indirect(pointee), true) => Some(Check::Indirect {
                 value,
                 tag,
                 pointee,
             }),
-            (Read::Through, false) => Some(Check::Deref { value, tag }),
-            (Read::Indirect(_) | Read::Through, _) => return None,
+            (Hold::Fetched, Read::Through, false) => Some(Check::Deref { value, tag }),
+            (_, Read::Indirect(_) | Read::Through, _) => return None,
         };
         if let Some(check) = check {
             self.guards.push(Placed { check, ..before });
             return Some((Types::of_tag(tag), read));
         }
-        let held = *self.val(value);
-        let types = held.types;
+        let current = *self.val(value);
+        let types = current.types;
         if types.tag() == Some(tag) {
             return None;
         }
-        if self.aliased(slot) || held.home == Home::Register {
+        if self.aliased(slot) || current.home == Home::Register {
             self.guards.push(before);
             return Some((types.narrowed(tag), Read::InPlace));
         }
@@ -3663,6 +3754,7 @@ impl<'a> Builder<'a> {
         match check {
             Check::Type { value, .. }
             | Check::Deref { value, .. }
+            | Check::Reference { value }
             | Check::Indirect { value, .. }
             | Check::Layout { value, .. }
             | Check::Class {
@@ -4793,8 +4885,8 @@ impl Narrowed {
 /// The type a guard's exit and every exit after it know its slot holds,
 /// php's `SET_STACK_TYPE` past a guard: a type's, an array's held in place;
 /// none for a reference or an indirect `VAR`, whose type no stack map
-/// keeps, as php's `zend_jit_fetch_reference` and
-/// `zend_jit_fetch_indirect_var` set none, nor for a guard on no slot.
+/// keeps, as php's `zend_jit_fetch_reference`, `zend_jit_guard_reference`
+/// and `zend_jit_fetch_indirect_var` set none, nor for a guard on no slot.
 fn stack_type(check: Check) -> Option<(ValueId, ZvalType)> {
     match check {
         Check::Type { value, tag } => Some((value, tag)),
@@ -4808,6 +4900,7 @@ fn stack_type(check: Check) -> Option<(ValueId, ZvalType)> {
             ..
         }
         | Check::Deref { .. }
+        | Check::Reference { .. }
         | Check::Indirect { .. }
         | Check::Class { .. }
         | Check::Direction { .. }

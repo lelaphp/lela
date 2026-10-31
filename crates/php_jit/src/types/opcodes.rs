@@ -600,28 +600,49 @@ fn named(op: &Opline, code: &OpArray) -> bool {
             .is_some_and(|name| !name.bytes().is_empty())
 }
 
-/// The operands whose type php holds at an opline, which the code
-/// generator holds in [`checked_order`]: those its trace SSA adds a guard
-/// for ([`traced`]), and the reference its code generator fetches
-/// ([`fetched_reference`]). An operand the recording saw through a
-/// reference is php's `IS_UNKNOWN` to its trace SSA, whose
+/// What php holds of an operand at an opline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Hold {
+    /// The type the recording saw of it, in place or where the indirect
+    /// `VAR` points: the trace SSA's guard ([`traced`]).
+    Recorded,
+    /// The reference and the type it refers to, by one exit, php's
+    /// `zend_jit_fetch_reference` (`Z/ext/opcache/jit/zend_jit_ir.c:17021-17085`).
+    Fetched,
+    /// That it is a reference still, by an exit of its own, php's
+    /// `zend_jit_guard_reference` (`:16990-17019`) with `add_ref_guard`.
+    Reference,
+    /// Read through the reference an earlier guard of the trace held,
+    /// taking no exit: `zend_jit_guard_reference` without `add_ref_guard`.
+    Held,
+}
+
+/// The operands whose type php holds at an opline, and what it holds of
+/// each, which the code generator holds in [`checked_order`]: those its
+/// trace SSA adds a guard for ([`traced`]), and the reference its code
+/// generator fetches ([`fetched_reference`]). An operand the recording
+/// saw through a reference is php's `IS_UNKNOWN` to its trace SSA, whose
 /// `ADD_OP_GUARD` adds nothing for that type
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:403-407`, `:1819-1833`), so it
-/// is held only where the code generator fetches it.
+/// is held only where the code generator fetches it. `held` says whether
+/// a guard earlier in the trace held `op1`'s value a reference, php's
+/// `guarded_reference` on its SSA variable, which elides the guard of an
+/// `ASSIGN` (`:5155-5167`).
 pub(super) fn guard_sites(
     op: &Opline,
     data: Option<&Opline>,
     samples: [Option<Sample>; 3],
-    types: [Types; 3],
+    (types, held): ([Types; 3], bool),
     code: &OpArray,
-) -> Vec<Site> {
+) -> Vec<(Site, Hold)> {
     let through = |site: Site| samples[site as usize].is_some_and(|s| s.reference && !s.indirect);
-    let fetched = fetched_reference(op, data, samples, types, code);
-    let mut sites: Vec<Site> = traced(op, data, samples, types[0], code)
+    let fetched = fetched_reference(op, data, samples, (types, held), code);
+    let mut sites: Vec<(Site, Hold)> = traced(op, data, samples, types[0], code)
         .into_iter()
         .filter(|site| !through(*site))
+        .map(|site| (site, Hold::Recorded))
         .collect();
-    sites.extend(fetched.filter(|site| !sites.contains(site)));
+    sites.extend(fetched.filter(|(site, _)| sites.iter().all(|(other, _)| other != site)));
     sites
 }
 
@@ -652,7 +673,12 @@ pub(super) fn guard_sites(
 /// opline but `INIT_METHOD_CALL` is over an operand php's inference says
 /// may be an object, and each fetches `op1` but the arithmetic, which
 /// fetches the one that is a reference. A temporary is not held here
-/// (`Builder::guard_use` refuses it). Every other case reads a reference with
+/// (`Builder::guard_use` refuses it).
+/// An `ASSIGN` to a variable holds the reference alone, php's
+/// `zend_jit_guard_reference` (`:5155-5167`), and by no exit where
+/// `held`, an earlier guard having held the variable's value one
+/// ([`Hold::Held`]); a fetch takes its exit whether or not, its type
+/// guard asking for it (`add_type_guard`). Every other case reads a reference with
 /// `CHECK_OP_TRACE_TYPE`, which holds nothing of an `IS_UNKNOWN` type
 /// (`:411-427`): `QM_ASSIGN` (`:5240-5248`), the comparisons
 /// (`:5431-5444`, `:5481-5492`), `RETURN` (`:5580-5582`), `BOOL` and
@@ -753,6 +779,36 @@ pub(super) fn guard_sites(
 /// ---- TRACE 5 stop (return)
 /// ---- TRACE 5 compiled
 /// ```
+///
+/// An `ASSIGN` to a variable recorded through a reference takes an exit
+/// that holds the reference, and the `ASSIGN` after it in the same turn
+/// none, its guard held already, so the loop's direction is php's exit
+/// 3, not a second or a fourth:
+///
+/// ```php
+/// function f() { $x = 0; $r = &$x; $c = 0; for ($i = 0; $i < 100; $i++) { $x = $i; $x = $c; if ($i > 50) { $c++; } } return $c + $x; }
+/// echo f(), "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 97
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:3
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) f() %s:2
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 3 f() %s:2
+/// ---- TRACE 2 start (side trace 1/3) f() %s:2
+/// ---- TRACE 2 stop (link to 1)
+/// ---- TRACE 2 compiled
+///
+///      TRACE 1 exit 1 f() %s:2
+/// ---- TRACE 3 start (side trace 1/1) f() %s:2
+/// ---- TRACE 3 stop (return)
+/// ---- TRACE 3 compiled
+/// ```
 #[allow(
     clippy::match_same_arms,
     reason = "php's callers, case for case and in its order"
@@ -761,9 +817,9 @@ fn fetched_reference(
     op: &Opline,
     data: Option<&Opline>,
     samples: [Option<Sample>; 3],
-    types: [Types; 3],
+    (types, held): ([Types; 3], bool),
     code: &OpArray,
-) -> Option<Site> {
+) -> Option<(Site, Hold)> {
     let through = |at: usize| samples[at].is_some_and(|s| s.reference && !s.indirect);
     let cv = |kind: OperandKind| kind == OperandKind::Cv;
     let [t1, t2, td] = types.map(Types::kinds);
@@ -782,10 +838,13 @@ fn fetched_reference(
                 return None;
             }
             return match (through(0), through(1)) {
-                (true, false) if cv(op.op1_type) => Some(Site::Op1),
-                (false, true) if cv(op.op2_type) => Some(Site::Op2),
+                (true, false) if cv(op.op1_type) => Some((Site::Op1, Hold::Fetched)),
+                (false, true) if cv(op.op2_type) => Some((Site::Op2, Hold::Fetched)),
                 _ => None,
             };
+        }
+        Opcode::Assign if cv(op.op1_type) && through(0) => {
+            return Some((Site::Op1, if held { Hold::Held } else { Hold::Reference }));
         }
         Opcode::AssignDimOp => unused && served() && !into_itself,
         Opcode::PreIncObj | Opcode::PreDecObj | Opcode::PostIncObj | Opcode::PostDecObj => {
@@ -807,7 +866,71 @@ fn fetched_reference(
         }
         _ => false,
     };
-    (fetched && through(0)).then_some(Site::Op1)
+    (fetched && through(0)).then_some((Site::Op1, Hold::Fetched))
+}
+
+/// What php's code generator leaves of `guarded_reference` on the value an
+/// opline writes back to a variable it reads by value or binds, past the
+/// reads [`fetched_reference`] names, which mark what they read and write
+/// back themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Carried {
+    /// The operand's new value is marked as its old one was.
+    Kept(Site),
+    /// The operand's new value is marked: a reference the opline bound.
+    Marked(Site),
+}
+
+/// [`Carried`] at `op`, where php's code generator compiles it and so
+/// reaches the mark (`Z/ext/opcache/jit/zend_jit_trace.c`): an `ASSIGN`'s
+/// variable value (`:5228-5233`), a `QM_ASSIGN`'s operand and a `CAST`'s
+/// to the type the recording saw (`:5235-5286`), a send's by value
+/// (`:5338-5383`), an `ASSIGN_OBJ`'s and an `ASSIGN_DIM`'s `OP_DATA`
+/// (`:5058-5062`, `:5112-5116`); a `SEND_REF`'s variable and a
+/// `BIND_GLOBAL`'s are marked (`:5323-5336`, `:6157-6168`).
+pub(super) fn carried(
+    op: &Opline,
+    data: Option<&Opline>,
+    samples: [Option<Sample>; 3],
+    t1: Types,
+    code: &OpArray,
+) -> Option<Carried> {
+    let cv = |kind: OperandKind| kind == OperandKind::Cv;
+    let named_args = op.op2_type == OperandKind::Const;
+    let carried = match op.opcode {
+        Opcode::Assign if cv(op.op1_type) && cv(op.op2_type) => Carried::Kept(Site::Op2),
+        Opcode::Cast
+            if kind_of(samples[0]).is_some_and(|k| op.extended_value == u32::from(k as u8)) =>
+        {
+            Carried::Kept(Site::Op1)
+        }
+        Opcode::QmAssign => Carried::Kept(Site::Op1),
+        Opcode::SendVarEx | Opcode::SendVarNoRefEx if op.op2 > MAX_ARG_FLAG_NUM => return None,
+        Opcode::SendVar
+        | Opcode::SendVarEx
+        | Opcode::SendVarNoRef
+        | Opcode::SendVarNoRefEx
+        | Opcode::SendFuncArg
+            if !named_args =>
+        {
+            Carried::Kept(Site::Op1)
+        }
+        Opcode::SendRef if !named_args => Carried::Marked(Site::Op1),
+        Opcode::BindGlobal => Carried::Marked(Site::Op1),
+        Opcode::AssignDim
+            if !(cv(op.op1_type) && data.is_some_and(|d| cv(d.op1_type) && d.op1 == op.op1)) =>
+        {
+            Carried::Kept(Site::Data)
+        }
+        Opcode::AssignObj
+            if named(op, code)
+                && (op.op1_type == OperandKind::Unused || t1.kinds().meets(Types::OBJECT)) =>
+        {
+            Carried::Kept(Site::Data)
+        }
+        _ => return None,
+    };
+    Some(carried)
 }
 
 /// php's `zend_jit_supported_binary_op` of a compound write's operator

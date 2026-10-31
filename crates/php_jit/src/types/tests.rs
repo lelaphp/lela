@@ -1581,7 +1581,7 @@ fn a_reference_is_held_only_where_php_fetches_it() -> Result<(), String> {
 /// recording saw in place is guarded where the trace SSA guards it.
 #[test]
 fn a_reference_is_a_guard_site_where_php_fetches_it() {
-    use super::opcodes::{Site, guard_sites};
+    use super::opcodes::{Hold, Site, guard_sites};
     use php_unit::{OpArray, OperandKind};
     let code = OpArray::default();
     let line = |opcode, op2_type| php_unit::Opline {
@@ -1601,73 +1601,113 @@ fn a_reference_is_a_guard_site_where_php_fetches_it() {
             class: None,
         })
     };
+    let sites = |op: &php_unit::Opline, samples, types, held| {
+        guard_sites(op, None, samples, (types, held), &code)
+    };
     let referenced = Types::UNKNOWN.without(Types::UNDEF);
     let add = line(Opcode::Add, OperandKind::Cv);
     let to_string = sample(ZvalType::String, true, false);
     let long = sample(ZvalType::Long, false, false);
     assert_eq!(
-        guard_sites(
+        sites(
             &add,
-            None,
             [to_string, long, None],
             [referenced, Types::LONG, Types::NONE],
-            &code
+            false
         ),
-        vec![Site::Op2, Site::Op1],
+        vec![(Site::Op2, Hold::Recorded), (Site::Op1, Hold::Fetched)],
         "an ADD over a reference to anything fetches it, beside the long it adds"
     );
     assert_eq!(
-        guard_sites(
+        sites(
             &add,
-            None,
             [to_string, long, None],
             [
                 Types::STRING.or(Types::REF),
                 Types::UNKNOWN.without(Types::UNDEF),
                 Types::NONE
             ],
-            &code
+            false
         ),
-        vec![Site::Op2],
+        vec![(Site::Op2, Hold::Recorded)],
         "an ADD over a reference to a string is its handler's, and holds the other operand"
     );
     let count = line(Opcode::Count, OperandKind::Unused);
-    for (packed, sites) in [(false, vec![Site::Op1]), (true, vec![])] {
+    for (packed, held) in [(false, vec![(Site::Op1, Hold::Fetched)]), (true, vec![])] {
         assert_eq!(
-            guard_sites(
+            sites(
                 &count,
-                None,
                 [sample(ZvalType::Array, true, packed), None, None],
                 [referenced, Types::NONE, Types::NONE],
-                &code
+                false
             ),
-            sites,
+            held,
             "a COUNT of a reference to an array, packed: {packed}"
         );
     }
     let echo = line(Opcode::Echo, OperandKind::Unused);
     assert_eq!(
-        guard_sites(
+        sites(
             &echo,
-            None,
             [to_string, None, None],
             [referenced, Types::NONE, Types::NONE],
-            &code
+            false
         ),
         vec![],
         "an ECHO fetches no reference"
     );
     assert_eq!(
-        guard_sites(
+        sites(
             &echo,
-            None,
             [sample(ZvalType::String, false, false), None, None],
             [Types::UNKNOWN, Types::NONE, Types::NONE],
-            &code
+            false
         ),
-        vec![Site::Op1],
+        vec![(Site::Op1, Hold::Recorded)],
         "an ECHO of a value in place is guarded as the trace SSA guards it"
     );
+}
+
+/// An `ASSIGN` to a variable recorded through a reference holds the
+/// reference alone, past its value's guard, by an exit of its own unless
+/// an earlier guard held the value one, php's `zend_jit_guard_reference`
+/// with `!guarded_reference` (`Z/ext/opcache/jit/zend_jit_trace.c:5121-5167`,
+/// #3704).
+#[test]
+fn an_assign_to_a_reference_holds_it_unless_a_guard_held_it() {
+    use super::opcodes::{Hold, Site, guard_sites};
+    use php_unit::{OpArray, OperandKind};
+    let assign = php_unit::Opline {
+        opcode: Opcode::Assign,
+        op1_type: OperandKind::Cv,
+        op2_type: OperandKind::Cv,
+        op1: 0,
+        op2: 1,
+        ..php_unit::Opline::default()
+    };
+    let sample = |reference| {
+        Some(php_engine::tier::Sample {
+            kind: ZvalType::Long,
+            indirect: false,
+            reference,
+            packed: false,
+            class: None,
+        })
+    };
+    let any = Types::UNKNOWN.without(Types::UNDEF);
+    for (held, hold) in [(false, Hold::Reference), (true, Hold::Held)] {
+        assert_eq!(
+            guard_sites(
+                &assign,
+                None,
+                [sample(true), sample(false), None],
+                ([any, any, Types::NONE], held),
+                &OpArray::default()
+            ),
+            vec![(Site::Op2, Hold::Recorded), (Site::Op1, hold)],
+            "an ASSIGN to a reference holds it, held before: {held}"
+        );
+    }
 }
 
 /// A return trace rooted inside an argument of an outer call opens with
@@ -2337,10 +2377,11 @@ fn a_trace_that_stops_at_a_return_leaves_the_frame_in_place() -> Result<(), Stri
 /// the pinned php's `TRACE 1 exit info` lists five exits and no `/VM` one,
 /// its interrupt test taking the stub; with no reference, seven, the last
 /// the interrupt test's `0006/VM` (under `opcache.optimization_level=0`,
-/// #3277). Of the five, this tier numbers four: the `BOOL_NOT` holds the
-/// reference by no guard, as php's does not (#3695), and the `ASSIGN`
-/// to it takes none where php's `zend_jit_guard_reference` takes
-/// `exit_4` at `0006` (#3704).
+/// #3277). The `BOOL_NOT` holds the reference by no guard, as php's
+/// does not (#3695), and the `ASSIGN` to it takes `exit_4` at `0006`
+/// past its value's `exit_3`, php's `zend_jit_guard_reference`, which a
+/// file's own code takes at every `ASSIGN`, its variables all aliased
+/// (#3704).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_loop_keeps_the_initial_pointer_where_its_first_opline_may_call_the_runtime()
@@ -2349,7 +2390,7 @@ fn a_loop_keeps_the_initial_pointer_where_its_first_opline_may_call_the_runtime(
         (
             "$done = false; $r = &$done; $n = 0;
             while (!$done) { $n++; $done = $n > 50; } echo $n, \"\\n\";",
-            4,
+            5,
             true,
         ),
         (

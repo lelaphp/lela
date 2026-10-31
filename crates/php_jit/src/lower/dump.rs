@@ -367,6 +367,7 @@ fn check(check: Check) -> String {
     match check {
         Check::Type { value, tag: t } => format!("#{} {}", value.0, tag(t)),
         Check::Deref { value, tag: t } => format!("#{} ref to {}", value.0, tag(t)),
+        Check::Reference { value } => format!("#{} ref", value.0),
         Check::Indirect {
             value,
             tag: t,
