@@ -38,7 +38,9 @@ check "$NAME-cgi" "cgi-fcgi" "$cgi" -n -q "$scratch/sapi.php"
 printf '[global]\nerror_log = %s/fpm.log\n[www]\nlisten = %s/fpm.sock\npm = static\npm.max_children = 1\n' \
 	"$scratch" "$scratch" > "$scratch/fpm.conf"
 # As root, php-fpm runs a pool only when -R allows it, as php's does.
+# macOS's bash 3.2 calls an empty array unbound under `set -u`, and the
+# EXIT trap then exits 0, so the empty case expands to nothing by hand.
 root=()
 [ "$(id -u)" -ne 0 ] || root=(-R)
-"$fpm" -n -t -y "$scratch/fpm.conf" "${root[@]}"
+"$fpm" -n -t -y "$scratch/fpm.conf" ${root[@]+"${root[@]}"}
 echo "$NAME-fpm -t: exit 0"

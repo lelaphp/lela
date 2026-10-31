@@ -60,8 +60,13 @@ for platform in "${platforms[@]}"; do
 		exit 2
 		;;
 	esac
-	# No AppleDouble files or extended attributes from a Mac's tar.
-	COPYFILE_DISABLE=1 tar --no-xattrs -czf "$out/$base.tar.gz" -C "$out" "$base"
+	# buildx makes its local output 0700, and tar would record the
+	# builder's user, which root's extraction restores on Linux: the
+	# directory is 0755 and every entry root's. No AppleDouble files or
+	# extended attributes from a Mac's tar.
+	chmod 0755 "$stage"
+	COPYFILE_DISABLE=1 tar --no-xattrs --uid 0 --gid 0 --uname root --gname root \
+		-czf "$out/$base.tar.gz" -C "$out" "$base"
 done
 
 scripts/dist-sums.sh "$out"
