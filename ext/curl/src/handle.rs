@@ -305,7 +305,8 @@ const REFUSALS: Refusals = Refusals::NONE
 impl ObjectHandlers for Handlers {
     /// `curl_free_obj`: the streams verified silently
     /// ([`verify_before_cleanup`]), the `CURL *` cleaned up with the
-    /// request reachable, or as the transfer holding it ends, then
+    /// request reachable, under what the verify left pending as the
+    /// multi's cleanup is, or as the transfer holding it ends, then
     /// everything the `CurlHandle` held let go, the share's object last,
     /// as php releases `ch->share` after `curl_easy_cleanup`; what a
     /// callback threw is left pending, as php leaves it in
@@ -314,8 +315,12 @@ impl ObjectHandlers for Handlers {
         let mut pending = Pending::default();
         verify_before_cleanup(req, object, &mut pending);
         let mut curl = object.native_mut::<Curl>(req).map(std::mem::take);
-        let easy = curl.as_mut().and_then(|curl| curl.easy.take());
-        if let Some(thrown) = easy.and_then(|easy| easy.close(req)) {
+        let mut easy = curl.as_mut().and_then(|curl| curl.easy.take());
+        let mut closed = None;
+        pending.release(req, |req| {
+            closed = easy.take().and_then(|easy| easy.close(req));
+        });
+        if let Some(thrown) = closed {
             pending.park(req, thrown);
         }
         pending.release(req, |req| {
