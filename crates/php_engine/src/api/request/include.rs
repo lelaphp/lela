@@ -1027,22 +1027,9 @@ impl Request {
         self.include.including = outer;
         let named = opened?;
         let compiled = self.compile_stream(kind, written, named, hooks.read_include);
-        // `zend_destroy_file_handle` once the compile is done, with what it
-        // threw standing in `EG(exception)`, so the wrapper's `stream_close`
-        // is refused as `zend_call_function` refuses it.
-        if let Err(thrown) = compiled {
-            if self
-                .while_pending(&thrown, |req| (hooks.close_include)(req))
-                .is_none()
-            {
-                (hooks.close_include)(self);
-            }
-            return Err(thrown);
-        }
-        (hooks.close_include)(self);
-        // What the close threw, which the layer kept: the unit compiled
-        // before it is the handler's `destroy_op_array` then.
-        let Some(thrown) = self.stream_thrown.take() else {
+        // What the close threw: the unit compiled before it is the
+        // handler's `destroy_op_array` then.
+        let Some(thrown) = self.close_stream(hooks.close_include, compiled.as_ref().err()) else {
             return compiled;
         };
         if let Ok(Opened::Declared(unit)) = &compiled {
@@ -1051,13 +1038,34 @@ impl Request {
         Err(thrown)
     }
 
+    /// `zend_destroy_file_handle` over what the last
+    /// [`crate::layer::StreamHooks::open`] held, `close`, once what came
+    /// before it threw `thrown` or nothing: the throwable standing in
+    /// `EG(exception)`, so the wrapper's `stream_close` is refused as
+    /// `zend_call_function` refuses it and its destructor chains onto it,
+    /// and otherwise what the close threw, which the layer kept.
+    pub(super) fn close_stream(
+        &mut self,
+        close: fn(&mut Request),
+        thrown: Option<&Thrown>,
+    ) -> Option<Thrown> {
+        let Some(thrown) = thrown else {
+            close(self);
+            return self.stream_thrown.take();
+        };
+        if self.while_pending(thrown, close).is_none() {
+            close(self);
+        }
+        None
+    }
+
     /// [`Request::include_stream`] over the file the open `named`, before
     /// `zend_destroy_file_handle`: a once form's `EG(included_files)` asked
     /// by that name, `ZEND_FAKE_OP_ARRAY` for one it holds, which is read
     /// nothing of, and the name put in it before the compile otherwise;
     /// then `compile_file` over the file read whole, compiled under the
     /// name, and its message where the open or the read failed.
-    fn compile_stream(
+    pub(super) fn compile_stream(
         &mut self,
         kind: IncludeKind,
         written: &[u8],
