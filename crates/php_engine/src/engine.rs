@@ -6481,6 +6481,7 @@ pub(crate) fn auto_file(req: &mut Request, name: &[u8]) -> bool {
     let file = file.to_vec();
     match req.require_kept(&file) {
         Ok(crate::api::request::Opened::Unit(unit)) => serve_unit(req, &unit),
+        Ok(crate::api::request::Opened::Declared(unit)) => serve_declared(req, &unit),
         Ok(_) => true,
         Err(thrown) => {
             req.leave_pending(&thrown);
@@ -6545,9 +6546,12 @@ pub(crate) fn auto_file(req: &mut Request, name: &[u8]) -> bool {
 /// declaration or an `exit`, each of which php leaves by `zend_bailout`,
 /// and not a throwable no handler took.
 pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit) -> bool {
-    if !note_compiled(req, unit, SourceKind::File) {
-        return false;
-    }
+    note_compiled(req, unit, SourceKind::File) && serve_declared(req, unit)
+}
+
+/// [`serve_unit`] past [`note_compiled`], for a unit whose compile
+/// declared it already ([`crate::api::request::Opened::Declared`]).
+fn serve_declared(req: &mut Request, unit: &PublishedUnit) -> bool {
     let standing = req.vm().depth();
     // The op array `zend_accel_load_script` copies out of the cache, or
     // `zend_compile` makes, and its runtime cache, the request's while

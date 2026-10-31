@@ -17,7 +17,6 @@ layer::Face::state_ref
 layer::Face::thrown_without_frame
 layer::Face::unguarded_host_path
 layer::Face::wrapper_warning
-layer::IncludeSource
 layer::Readiness
 layer::SockOpt
 layer::StandardHandlesHook

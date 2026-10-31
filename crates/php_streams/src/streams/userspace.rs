@@ -839,7 +839,30 @@ impl Ops for UserStream {
     }
 
     /// `php_userstreamop_close` (`Z/main/streams/userspace.c:699`):
-    /// `stream_close` where it is there, then the instance given up.
+    /// `stream_close` where it is there, then the instance given up, with
+    /// what `stream_close` threw standing as php leaves it in
+    /// `EG(exception)`, so the destructor runs whole and chains its
+    /// throwable onto the close's (`zend_objects_destroy_object`):
+    ///
+    /// ```php
+    /// class W { public $context;
+    ///     function stream_open($p, $m, $o, &$op) { return true; }
+    ///     function stream_close() { echo "close\n"; throw new Exception('close'); }
+    ///     function __destruct() { echo "dtor ", str_pad('a', 3, 'b'), "\n"; throw new Exception('dtor'); } }
+    /// stream_wrapper_register('ww', 'W');
+    /// $f = fopen('ww://x', 'r');
+    /// try { fclose($f); } catch (Exception $e) { echo $e->getMessage(), " <- ", $e->getPrevious()?->getMessage(), "\n"; }
+    /// $f = fopen('ww://y', 'r');
+    /// try { $f = null; } catch (Exception $e) { echo $e->getMessage(), " <- ", $e->getPrevious()?->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// close
+    /// dtor abb
+    /// dtor <- close
+    /// close
+    /// dtor abb
+    /// dtor <- close
+    /// ```
     fn close(&mut self, req: &mut Request) -> i32 {
         if self.share == Share::Stream
             && let Called::Value(value) = call(req, self.object, b"stream_close", &[])

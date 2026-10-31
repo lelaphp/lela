@@ -596,11 +596,16 @@ enum Rows {
 /// a once form over a path the table already had, which answers `true`;
 /// `NULL`, a path nothing opened or an empty string to `eval`, which
 /// answers `false`; or the unit of the file or the string, whose main op
-/// array the handler serves on a frame of its own.
+/// array the handler serves on a frame of its own, `Declared` where its
+/// compile has declared what it declares and raised what it raised
+/// already, as `zend_compile_file` does for a stream's file before
+/// `compile_filename`'s `zend_destroy_file_handle`
+/// ([`Request::include_stream`]).
 pub(crate) enum Opened {
     Already,
     Failed,
     Unit(PublishedUnit),
+    Declared(PublishedUnit),
 }
 
 /// What `zend_get_property_offset` places a declared instance property
@@ -1392,7 +1397,25 @@ impl Hooks<'_> {
     /// close
     /// handler close
     /// ```
+    ///
+    /// A throwable a stream kept before the step began stands as
+    /// `EG(exception)` stands in php while the step is served, so a
+    /// destructor the step serves runs whole and chains its own throwable
+    /// onto it (`zend_objects_destroy_object`), and what stands after the
+    /// step is kept again for the native. A user wrapper's instance given
+    /// up after its `stream_close` threw is the witness, beside the user
+    /// stream's close in `php_streams`.
     fn released(&mut self, step: impl FnOnce(&mut Request) -> Result<(), Thrown>) {
+        let standing = self.0.raised.is_none() && !self.0.bailout;
+        let kept = (self.0.stream_thrown).take_if(|kept| standing && kept.exception().is_some());
+        if let Some(kept) = kept {
+            self.0.leave_pending(&kept);
+            self.released(step);
+            if let Some(object) = self.0.take_pending_view() {
+                self.0.stream_thrown = Some(Thrown::of(Some(object)));
+            }
+            return;
+        }
         let parked = self.0.stream_thrown.is_some();
         let answered = step(self.0);
         if !parked && let Some(thrown) = self.0.stream_thrown.take() {

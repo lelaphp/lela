@@ -4,7 +4,7 @@
 //! with `ExtensionBuilder::stream_hooks`, and the CLI's standard handles
 //! `do_cli` registers and reads.
 
-use crate::api::layer::{Face as _, IncludeSource, StreamHooks, scheme_length};
+use crate::api::layer::{Face as _, StreamHooks, scheme_length};
 
 use crate::api::raising::Thrown;
 use crate::api::request::{Request, ScannerFile, Stream, Streams, Unresolved, UrlStat, Whence};
@@ -17,6 +17,7 @@ use crate::streams::{Located, OpenOptions, StreamLayer};
 /// the plain files wrapper in its `MINIT`.
 pub const STREAM_HOOKS: StreamHooks = StreamHooks {
     open,
+    read_include,
     close_include,
     resolve_path,
     timestamp,
@@ -34,30 +35,27 @@ pub const STREAM_HOOKS: StreamHooks = StreamHooks {
     engine_end: crate::state::engine_end,
 };
 
-/// `php_stream_open_for_zend_ex` and `zend_stream_fixup` for an include
-/// ([`ScannerFile`]): the file read whole, with the `*opened_path` its
-/// opener set, its `zend_file_handle` held for [`close_include`] once the
-/// engine has compiled it; a read that raised destroys it here.
-fn open(req: &mut Request, path: &[u8]) -> Result<Option<IncludeSource>, Thrown> {
-    let Some(mut fh) = ScannerFile::open(req, path)? else {
-        req.streams().including.push(None);
-        return Ok(None);
-    };
-    let source = match fh.load(req) {
-        Ok(source) => source.map(<[u8]>::to_vec),
-        Err(thrown) => {
-            if !req.diagnostics().bailing_out() {
-                fh.destroy(req);
-            }
-            return Err(thrown);
-        }
-    };
-    let opened_path = fh.opened_path().map(|p| p.as_bytes().to_vec());
-    req.streams().including.push(Some(fh));
-    Ok(source.map(|source| IncludeSource {
-        source,
-        opened_path,
-    }))
+/// `zend_stream_open` for an include ([`ScannerFile`]): the name its
+/// `zend_file_handle` takes, the `*opened_path` its opener set or `path`,
+/// `None` where it did not open; the `zend_file_handle` held either way for
+/// [`read_include`] and [`close_include`].
+fn open(req: &mut Request, path: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+    let fh = ScannerFile::open(req, path)?;
+    let named = (fh.as_ref())
+        .map(|fh| (fh.opened_path()).map_or_else(|| path.to_vec(), |p| p.as_bytes().to_vec()));
+    req.streams().including.push(fh);
+    Ok(named)
+}
+
+/// [`StreamHooks::read_include`]: `zend_stream_fixup` over what [`open`]
+/// held last, the file read whole, `None` for the read that failed.
+fn read_include(req: &mut Request) -> Result<Option<Vec<u8>>, Thrown> {
+    let mut fh = req.streams().including.pop().flatten();
+    let source = fh
+        .as_mut()
+        .map_or(Ok(None), |fh| Ok(fh.load(req)?.map(<[u8]>::to_vec)));
+    req.streams().including.push(fh);
+    source
 }
 
 /// [`StreamHooks::close_include`]: the `zend_file_handle` [`open`] held

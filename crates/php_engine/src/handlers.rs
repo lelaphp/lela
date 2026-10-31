@@ -4101,8 +4101,9 @@ fn included(
         | exec::IncludeKind::Require
         | exec::IncludeKind::RequireOnce => req.include_file(kind, written),
     };
-    let unit = match opened {
-        Ok(Opened::Unit(unit)) => unit,
+    let (unit, declared) = match opened {
+        Ok(Opened::Unit(unit)) => (unit, false),
+        Ok(Opened::Declared(unit)) => (unit, true),
         Ok(Opened::Already) => return Ok(answered(req, returns_to, Value::bool(true))),
         Ok(Opened::Failed) => return Ok(answered(req, returns_to, Value::bool(false))),
         Err(thrown) => {
@@ -4113,7 +4114,7 @@ fn included(
         exec::IncludeKind::Eval => php_compile::SourceKind::EVAL,
         _ => php_compile::SourceKind::File,
     };
-    if !crate::engine::note_compiled(req, &unit, source) {
+    if !declared && !crate::engine::note_compiled(req, &unit, source) {
         return Ok(Included::Threw(frame));
     }
     // The op array `zend_accel_load_script` copies out of the cache, or
