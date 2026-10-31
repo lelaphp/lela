@@ -1021,6 +1021,9 @@ impl<'a> Emit<'a> {
                 Check::Indirect { .. } => {
                     return Err(mismatch("an indirect `VAR` held as a trace enters"));
                 }
+                Check::Reference { .. } => {
+                    return Err(mismatch("an assignment's reference held as a trace enters"));
+                }
                 Check::Deref { value, tag: t } => {
                     let (room, at) = self.place(self.value(value)?.slot)?;
                     let byte = self.b.ins().load(I8, trusted(), room, at + TYPE_AT);
@@ -1285,20 +1288,20 @@ impl<'a> Emit<'a> {
                 let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, tag(t));
                 self.leave_if(other, guard.exit)?;
             }
-            Check::Deref { value, tag: t } => {
+            Check::Deref { value, .. } | Check::Reference { value } => {
                 let held = self.value(value)?;
                 let (room, at) = self.place(held.slot)?;
                 let byte = self.b.ins().load(I8, trusted(), room, at + TYPE_AT);
                 let reference = tag(ZvalType::Reference);
                 let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, reference);
                 self.leave_if(other, guard.exit)?;
-                let reference = self.b.ins().load(I64, trusted(), room, at);
-                let inner =
-                    self.b
-                        .ins()
-                        .load(I8, trusted(), reference, imm(Ref::VALUE_AT) + TYPE_AT);
-                let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, inner, tag(t));
-                self.leave_if(other, guard.exit)?;
+                if let Check::Deref { tag: t, .. } = guard.check {
+                    let reference = self.b.ins().load(I64, trusted(), room, at);
+                    let inner = imm(Ref::VALUE_AT) + TYPE_AT;
+                    let inner = self.b.ins().load(I8, trusted(), reference, inner);
+                    let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, inner, tag(t));
+                    self.leave_if(other, guard.exit)?;
+                }
             }
             Check::Indirect {
                 value,
@@ -2528,6 +2531,7 @@ impl<'a> Emit<'a> {
                 }
                 Check::Type { .. }
                 | Check::Deref { .. }
+                | Check::Reference { .. }
                 | Check::Indirect { .. }
                 | Check::Layout { .. }
                 | Check::Room { .. }
