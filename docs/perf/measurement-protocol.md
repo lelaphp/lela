@@ -176,6 +176,16 @@ every rendering of a number prints the load beside it. A number taken under
 load is not void and not automatically valid; the load is recorded, not
 controlled.
 
+A machine held for the bench is controlled, as Mitchell ruled on
+#3767 for dax-build: `xtask bench --machine dedicated` takes every seat
+before it builds, so no other instrument builds there while it measures,
+and starts a bar's reps only once the 1-minute load is below 2. Above it
+the run waits, looking again every 15 s, and the reading names how long it
+waited and the highest load it waited out; a load still at 2 or above after
+15 minutes leaves the bar unmeasured, a skip that names the load. Every
+rendering and reading also names the machine: its processor, its cores and
+its kernel.
+
 ## 8. Status labels
 
 What standing the numbers are offered with, carried by the reading:

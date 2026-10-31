@@ -2,6 +2,7 @@ api_check::defining_modules
 api_check::hold
 api_check::run
 bench::Label
+bench::Machine
 bench::REPS
 bench::run
 budget::run

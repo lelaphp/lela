@@ -17,8 +17,12 @@ and `--tree DIR` builds from another checkout of the pinned tag than
       Build for `darwin-arm64` here, or for `linux-x86_64` or
       `linux-aarch64` in Docker (ci/oracle/Dockerfile); the binary lands at
       target/oracle/<platform>/<variant>/php, and the last line is the
-      platform's table for the pin. On macOS a person lays it at the
-      table's path, the prefix, which is root's (`sudo mkdir -p` and `cp`).
+      platform's table for the pin. On Linux php-fpm lands beside it, and
+      for `main` its `[sapi.<platform>]` table is printed before that line
+      and written to sapi.toml (#3385): the php-fpm the bench's tables
+      take as their baseline on dax-build (#3774). On macOS a person lays
+      it at the table's path, the prefix, which is root's (`sudo mkdir -p`
+      and `cp`).
       The darwin-arm64 table names the digest of the pin's `[closure]`, the
       Homebrew kegs the build is made against, beside its md5 (#2935).
   scripts/oracle-build.py closure
@@ -287,6 +291,12 @@ def build(pin: Pin, plat: str, jobs: int, fresh: bool) -> None:
     table = f'path = "{PREFIX}/{pin.variant}/bin/php", md5 = "{digest}", {made}'
     (out / "pin.toml").write_text(f"{plat} = {{ {table} }}\n")
     print(f"{digest}  {out / 'php'}")
+    if plat != "darwin-arm64" and pin.variant == "main":
+        fpm = md5(out / "php-fpm")
+        sapi = f'[sapi.{plat}]\nfpm = {{ path = "{PREFIX}/main/sbin/php-fpm", md5 = "{fpm}", {made} }}\n'
+        (out / "sapi.toml").write_text(sapi)
+        print(f"{fpm}  {out / 'php-fpm'}")
+        print(sapi, end="")
     print(f"{plat} = {{ {table} }}")
 
 
@@ -357,6 +367,7 @@ def build_linux(pin: Pin, plat: str, commit: str, epoch: str, args: list[str], j
     ).stdout.strip()
     try:
         run(["docker", "cp", f"{container}:{PREFIX}/{pin.variant}/bin/php", out / "php"])
+        run(["docker", "cp", f"{container}:{PREFIX}/{pin.variant}/sbin/php-fpm", out / "php-fpm"])
         run(["docker", "cp", f"{container}:{BUILD}/installed.txt", out / "installed.txt"])
     finally:
         subprocess.run(["docker", "rm", container], capture_output=True)

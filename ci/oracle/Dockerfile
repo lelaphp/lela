@@ -12,8 +12,8 @@
 # are written beside the tree, and the recipe copies them out with `php`.
 # `build` lays the tree at the path every platform builds at (the recipe's
 # BUILD, /tmp/dax-php-oracle, spelled here as there) and installs
-# `php` at the variant's prefix, where a runner takes it out of the image
-# (#1948).
+# `php` and `php-fpm` at the variant's prefix, where a runner takes them out
+# of the image (#1948; php-fpm for the bench's baseline, #3385, #3774).
 ARG BASE
 FROM ${BASE} AS deps
 ARG SNAPSHOT
@@ -66,4 +66,5 @@ RUN set -eu; \
     "$@" ./buildconf --force; \
     xargs -d '\n' -a ../configure.args "$@" ./configure; \
     "$@" make -j"$JOBS"; \
-    "$@" make install-cli
+    "$@" make install-cli; \
+    "$@" make install-fpm
