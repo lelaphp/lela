@@ -843,9 +843,9 @@ impl EasyId {
     /// `zend_llist_clean(&ch->to_free->post)` before the set, skipped
     /// where a copy may still point at them (`(*ch->clone) == 1`), whose
     /// trees are kept to the link's end. The frees and the set are made under
-    /// what stands in `pending`; where a free leaves a fatal or an `exit`
-    /// there, the set is not made and `mime` is freed, as `zend_bailout`
-    /// leaves before it.
+    /// what stands in `pending`, an `exit` among it as php's unwind exit
+    /// stands; where a free leaves a fatal there, the set is not made and
+    /// `mime` is freed, as `zend_bailout` leaves before it.
     fn set_mime(self, req: &mut Request, mime: Mime, pending: &mut Pending) -> Posted {
         let Some(handle) = req.memory_mut().foreign(self.0) else {
             mime.let_go(req, pending);

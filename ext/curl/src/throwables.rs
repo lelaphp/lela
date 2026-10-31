@@ -63,9 +63,11 @@ impl Throwables {
 
 /// What a native's body left in php's `EG(exception)` and went on past:
 /// the throwable that stands, with what was raised after it chained onto
-/// it, or the fatal or `exit` that leaves at once. A callable the library
-/// called back leaves its throwable here as `zend_call_known_fcc` leaves
-/// it, and so does a `__toString` a walk converts with.
+/// it; the unwind exit an `exit` throws (`zend_throw_unwind_exit`), which
+/// stands as a throwable does and gives up what is raised after it; or
+/// the fatal that leaves at once. A callable the library called back
+/// leaves what it threw here as `zend_call_known_fcc` leaves it, and so
+/// does a `__toString` a walk converts with.
 #[derive(Default)]
 pub(crate) struct Pending(Option<Thrown>);
 
@@ -75,17 +77,9 @@ impl Pending {
         self.0.is_some()
     }
 
-    /// Whether what stands is a fatal or an `exit`, which leaves by
-    /// `zend_bailout` at once, past every step after it.
-    pub(crate) fn leaving(&self) -> bool {
-        self.0
-            .as_ref()
-            .is_some_and(|thrown| thrown.exception().is_none())
-    }
-
     /// Whether what stands is a fatal, which leaves by `zend_bailout`
     /// past every line of php's body after it, where an `exit` stands as
-    /// the unwind exit php's body goes on past.
+    /// the unwind exit php's body goes on past ([`Pending::step`]).
     pub(crate) fn fatal(&self, req: &Request) -> bool {
         self.0
             .as_ref()
@@ -100,8 +94,10 @@ impl Pending {
     /// `step` taken as php takes it, with what stands in `EG(exception)`
     /// ([`while_pending`]), so a call it makes returns at once and a
     /// diagnostic it raises reaches no handler; `step` may leave more
-    /// pending in turn. `None`, with nothing taken, where what stands is a
-    /// fatal or an `exit`.
+    /// pending in turn. An `exit` stands in the request's slot already,
+    /// as php's unwind exit stands in `EG(exception)` while the C body
+    /// goes on past it, so the step is taken with it there. `None`, with
+    /// nothing taken, where what stands is a fatal.
     pub(crate) fn step<R>(
         &mut self,
         req: &mut Request,
@@ -109,14 +105,18 @@ impl Pending {
     ) -> Option<R> {
         // A copy naming the throwable, for the step to stand it in; the
         // owner stays this one.
-        match self.0.clone() {
-            None => Some(step(req, self)),
-            Some(standing) => while_pending(req, &standing, |req| step(req, self)),
+        let Some(standing) = self.0.clone() else {
+            return Some(step(req, self));
+        };
+        match standing.cause(req) {
+            Cause::Throwable(_) => while_pending(req, &standing, |req| step(req, self)),
+            Cause::Exit => Some(step(req, self)),
+            Cause::Fatal => None,
         }
     }
 
     /// `release`, which gives owners up, taken as [`Pending::step`] takes
-    /// a step, and taken all the same where a fatal or an `exit` stands:
+    /// a step, and taken all the same where a fatal stands:
     /// what php's `zend_bailout` leaves to the request's end is given
     /// back here, so no owner outlives the request's heap.
     pub(crate) fn release(&mut self, req: &mut Request, mut release: impl FnMut(&mut Request)) {

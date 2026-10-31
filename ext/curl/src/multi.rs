@@ -413,6 +413,28 @@ fn curl_multi_add_handle(
 /// int(0)
 /// int(0)
 /// ```
+///
+/// An `exit` the callable takes inside the remove stands as php's unwind
+/// exit does, and the `CurlHandle` is taken off the list past it.
+///
+/// ```php
+/// $h = curl_init('http://127.0.0.1:1/');
+/// curl_setopt($h, CURLOPT_VERBOSE, 1);
+/// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) {
+///     if (str_starts_with($data, 'closing')) { echo "debug: $data"; exit("exit\n"); }
+/// });
+/// $m = curl_multi_init();
+/// curl_multi_add_handle($m, $h);
+/// curl_multi_exec($m, $r);
+/// register_shutdown_function(function () use ($m) { var_dump(count(curl_multi_get_handles($m))); });
+/// curl_multi_remove_handle($m, $h);
+/// echo "unreached\n";
+/// ```
+/// ```expect
+/// debug: closing connection #0
+/// exit
+/// int(0)
+/// ```
 #[php_function]
 fn curl_multi_remove_handle(
     req: &mut Request,
@@ -613,6 +635,31 @@ fn curl_multi_select(
 /// ```expect
 /// Cannot assign int to reference held by property C::$r of type string
 /// int(8)
+/// ```
+///
+/// An `exit` a callable takes inside the transfer stands as php's unwind
+/// exit does, and the count is written past it.
+///
+/// ```php
+/// $f = tempnam(sys_get_temp_dir(), 'curl');
+/// file_put_contents($f, 'x');
+/// $h = curl_init("file://$f");
+/// curl_setopt($h, CURLOPT_WRITEFUNCTION, function ($h, $data) { echo "write: $data\n"; exit("exit\n"); });
+/// $m = curl_multi_init();
+/// curl_multi_add_handle($m, $h);
+/// $running = 'not assigned';
+/// register_shutdown_function(function () use ($m, $h, $f, &$running) {
+///     var_dump($running);
+///     curl_multi_remove_handle($m, $h);
+///     unlink($f);
+/// });
+/// curl_multi_exec($m, $running);
+/// echo "unreached\n";
+/// ```
+/// ```expect
+/// write: x
+/// exit
+/// int(0)
 /// ```
 #[php_function]
 fn curl_multi_exec(
@@ -883,8 +930,9 @@ fn easy_id(req: &Request, handle: PhpObject) -> Option<EasyId> {
 ///
 /// A fatal inside a remove leaves the list whole, as php's `zend_bailout`
 /// leaves `easyh`, for `curl_multi_free_obj` to give up as the request
-/// ends; an `exit` stands pending as php's unwind exit does, and the
-/// list is emptied past it.
+/// ends; an `exit` stands pending as php's unwind exit does, and the walk
+/// goes on past it, removing every `CurlHandle` after it with its
+/// callable serving nothing, before the list is emptied.
 ///
 /// ```php
 /// $m = curl_multi_init();
@@ -911,22 +959,28 @@ fn easy_id(req: &Request, handle: PhpObject) -> Option<EasyId> {
 ///
 /// ```php
 /// $m = curl_multi_init();
-/// $h = curl_init('http://127.0.0.1:1/');
-/// curl_setopt($h, CURLOPT_VERBOSE, 1);
-/// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) {
-///     if (str_starts_with($data, 'closing')) { echo "debug: $data"; exit("exit\n"); }
+/// foreach ([1, 2] as $i) {
+///     $h[$i] = curl_init('http://127.0.0.1:1/');
+///     curl_setopt($h[$i], CURLOPT_VERBOSE, 1);
+///     curl_setopt($h[$i], CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) use ($i) {
+///         if (str_starts_with($data, 'closing')) { echo "debug $i: $data"; if ($i === 1) { exit("exit\n"); } }
+///     });
+///     curl_multi_add_handle($m, $h[$i]);
+/// }
+/// register_shutdown_function(function () use ($m, $h) {
+///     var_dump(count(curl_multi_get_handles($m)), curl_exec($h[2]), curl_errno($h[2]));
 /// });
-/// curl_multi_add_handle($m, $h);
-/// curl_multi_add_handle($m, curl_init());
-/// register_shutdown_function(function () use ($m) { var_dump(count(curl_multi_get_handles($m))); });
 /// curl_multi_exec($m, $r);
 /// curl_multi_close($m);
 /// echo "unreached\n";
 /// ```
 /// ```expect
-/// debug: closing connection #0
+/// debug 1: closing connection #0
 /// exit
+/// debug 2: closing connection #0
 /// int(0)
+/// bool(false)
+/// int(7)
 /// ```
 #[php_function]
 fn curl_multi_close(
@@ -965,11 +1019,6 @@ fn curl_multi_close(
             // `zend_bailout` leaves `easyh` whole, for
             // `curl_multi_free_obj` to give up as the request ends.
             return pending.answer(req, Ok(()));
-        }
-        if pending.leaving() {
-            // An `exit`, which serves no step after it here, and past
-            // which php's walk goes on to `zend_llist_clean`.
-            break;
         }
     }
     // `zend_llist_clean`, after every remove, with what stands pending.

@@ -1111,6 +1111,22 @@ fn curl_setopt(
 /// curl_setopt_array(): Argument #2 ($options) contains an invalid cURL option
 /// curl_setopt_array(): Argument #2 ($options) must contain only valid cURL options
 /// ```
+///
+/// An `exit` a callable takes stands as php's unwind exit does, and the
+/// options after it are set:
+///
+/// ```php
+/// $h = curl_init();
+/// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) { echo $data; exit("exit\n"); });
+/// register_shutdown_function(function () use ($h) { var_dump(curl_getinfo($h, CURLINFO_PRIVATE)); });
+/// curl_setopt_array($h, [CURLOPT_VERBOSE => 2, CURLOPT_PRIVATE => 'p']);
+/// echo "unreached\n";
+/// ```
+/// ```expect
+/// boolean setopt(41) got unsupported argument 2, treated as 1
+/// exit
+/// string(1) "p"
+/// ```
 #[php_function]
 fn curl_setopt_array(
     req: &mut Request,
@@ -1140,7 +1156,7 @@ fn curl_setopt_array(
         });
         match set {
             Some(Ok(true)) => Ok(ControlFlow::Continue(())),
-            // A fatal or an `exit` standing leaves at once.
+            // A fatal standing leaves at once.
             Some(Ok(false)) | None => Ok(ControlFlow::Break(false)),
             Some(Err(thrown)) => Err(thrown),
         }
