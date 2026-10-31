@@ -7,6 +7,10 @@
       "Bash(gh issue edit:*)",
       "Bash(gh issue comment:*)",
       "Bash(~/Projects/dax-php/target/release/xtask ticket close:*)"
+    ],
+    "deny": [
+      "Edit(~/.claude.json)",
+      "Edit(~/.claude/**)"
     ]
   },
   "enabledPlugins": {
