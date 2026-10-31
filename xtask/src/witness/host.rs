@@ -535,24 +535,26 @@ fn served(serve: &Serve, pid: u32, dir: &Path, port: u16) -> Result<Vec<String>>
 /// since its last byte. Before its first it has [`PATIENCE`], a server's
 /// time to be ready: on a loaded machine a program may not have run at
 /// all by [`QUIET`], and one killed then reads as one that wrote nothing
-/// (#3616). One that writes nothing at all is killed at [`PATIENCE`].
+/// (#3616). One that writes nothing at all is killed at [`PATIENCE`], and
+/// one whose group has ended is waited for no longer.
 fn headed(running: &Running<'_>, head: u64) -> Result<()> {
+    let group = Pid::from_raw(i32::try_from(running.pid).context("a process id past pid_t")?);
+    // A program that ended on its own leaves a group of processes not yet
+    // reaped, which answers ESRCH, or EPERM on macOS; its ending is held
+    // as any line's is.
+    let ended = |sent| matches!(sent, Err(Errno::ESRCH | Errno::EPERM));
     let (mut written, mut since) = (running.written(), Instant::now());
     let quiet = |written| if written == 0 { PATIENCE } else { QUIET };
-    while written < head && since.elapsed() < quiet(written) {
+    while written < head && since.elapsed() < quiet(written) && !ended(killpg(group, None)) {
         std::thread::sleep(Duration::from_millis(10));
         let now = running.written();
         if now != written {
             (written, since) = (now, Instant::now());
         }
     }
-    let group = Pid::from_raw(i32::try_from(running.pid).context("a process id past pid_t")?);
     match killpg(group, Signal::SIGKILL) {
-        // A program that ended on its own before its `head` leaves a group
-        // of processes not yet reaped, which answers ESRCH, or EPERM on
-        // macOS; its ending is held as any line's is.
-        Ok(()) | Err(Errno::ESRCH | Errno::EPERM) => Ok(()),
-        Err(e) => Err(e).with_context(|| format!("killing the group {group}")),
+        Err(e) if !ended(Err(e)) => Err(e).with_context(|| format!("killing the group {group}")),
+        _ => Ok(()),
     }
 }
 
@@ -681,6 +683,7 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    use std::time::Instant;
 
     use super::{Held, Judgement, hosts};
     use crate::divergence::Registry;
@@ -823,7 +826,7 @@ mod tests {
     /// first byte comes later than [`super::QUIET`] after it starts, as a
     /// program the machine has not yet run, keeps it (#3616); one that
     /// writes nothing at all is killed all the same, and fails where the
-    /// other host wrote.
+    /// other host wrote; one that ends on its own is not waited for.
     #[test]
     fn a_line_s_head_ends_a_program_that_does_not_end_on_its_own() {
         if !oracle() {
@@ -831,6 +834,7 @@ mod tests {
         }
         let hosts = Tree::new("host-line-head").unwrap();
         let text = "[[line]]\nname = \"one\"\nargs = []\nhead = 8\n";
+        const { assert!(super::QUIET.as_secs() + 1 < super::PATIENCE.as_secs()) };
         let late = format!("sleep {}; echo x; sleep 60", super::QUIET.as_secs() + 1);
         for (name, pinned, engine) in [
             ("loops", "yes x", "yes x"),
@@ -841,6 +845,13 @@ mod tests {
             let (judgement, note) = judged(text, &pin, &host(&hosts, name, engine));
             assert_eq!(judgement, Judgement::Pass, "{name}: {note}");
         }
+        let (ends, began) = (
+            pin(&host(&hosts, "php-cgi", "exit 3"), None),
+            Instant::now(),
+        );
+        let (judgement, note) = judged(text, &ends, &host(&hosts, "ends", "exit 3"));
+        assert_eq!(judgement, Judgement::Pass, "ends: {note}");
+        assert!(began.elapsed() < super::PATIENCE, "ends: {note}");
         for (name, pinned, engine, differs) in [
             ("otherwise", "yes x", "yes y", "+y\n+y\n+y\n+y"),
             ("mute", "echo x; sleep 60", "sleep 60", "-x"),
