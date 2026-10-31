@@ -970,23 +970,29 @@ impl Emit<'_> {
         Ok(self.b.ins().icmp_imm_s(IntCC::NotEqual, counted, 0))
     }
 
-    /// The place of the frame `line`'s return leaves to, read off its
-    /// header's caller before it leaves, for the `Op::Back` after it.
-    pub(super) fn returns_to(&mut self, line: &Line) -> Result<Option<Value>, Abort> {
+    /// The caller `line`'s frame names in its header, read before it
+    /// leaves, and the place of the frame its return leaves to, for the
+    /// `Op::Back` after it: the half-word decoded as `exec::CallerAt::caller`
+    /// decodes it, [`FrameLayout::caller_loop`] masked off before
+    /// [`FrameLayout::numbered_from`] is taken away, so a frame served
+    /// from outside the loop names its caller's place too (#3691). The one
+    /// decoding of the half-word compiled code turns into a place.
+    pub(super) fn returns_to(&mut self, line: &Line) -> Result<Option<(Value, Value)>, Abort> {
         if self.stack.is_none() {
             return Ok(None);
         }
         let room = self.room(line.frame)?;
         let caller = self.b.ins().load(I32, trusted(), room, at(L.caller()));
         let caller = self.b.ins().uextend(I64, caller);
+        let frame = self.b.ins().band_imm_u(caller, i64::from(!L.caller_loop()));
         let place = self
             .b
             .ins()
-            .iadd_imm_s(caller, -i64::from(L.numbered_from()));
+            .iadd_imm_s(frame, -i64::from(L.numbered_from()));
         let var = self.b.declare_var(I64);
         self.b.def_var(var, place);
         self.returned_to = Some(var);
-        Ok(Some(caller))
+        Ok(Some((caller, place)))
     }
 
     /// A function's `RETURN` that leaves its frame in place, as
@@ -1054,7 +1060,7 @@ impl Emit<'_> {
         };
         let returned = self.returned(id, line)?;
         let stack = self.stack()?;
-        let caller = self
+        let (caller, place) = self
             .returns_to(line)?
             .ok_or_else(|| mismatch("a leave in place with no caller read"))?;
         let room = self.room(line.frame)?;
@@ -1069,10 +1075,6 @@ impl Emit<'_> {
         self.divert_if(refused, slow);
         // The caller's place, and the slot of its that takes the return,
         // which holds nothing counted.
-        let place = self
-            .b
-            .ins()
-            .iadd_imm_s(caller, -i64::from(L.numbered_from()));
         let callers = self.record_word(frames, place, L.record_at());
         let named = self.b.ins().load(I32, trusted(), room, at(L.returns_to()));
         let returns = self.b.ins().uextend(I64, named);
