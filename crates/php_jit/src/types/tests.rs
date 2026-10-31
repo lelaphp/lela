@@ -1710,6 +1710,63 @@ fn an_assign_to_a_reference_holds_it_unless_a_guard_held_it() {
     }
 }
 
+/// A `FETCH_DIM_R` of the `VAR` an `array &h()` returns, recorded
+/// through the reference it is, holds the reference and what it refers
+/// to, `Check::Deref`, and the array's layout read through it, as php's
+/// `zend_jit_fetch_reference` and the packed guard after it hold them
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:5845-5890`), and is inline; no
+/// layout is held in place on the slot that holds the reference, whose
+/// flags are the `zend_reference`'s (#3706).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_temporary_recorded_through_a_reference_is_fetched_through_it() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function &h(): array { static $a = [1, 2, 3]; return $a; }
+        function f() { $s = 0; for ($i = 0; $i < 100; $i++) { $s += h()[1]; } return $s; }
+        echo f(), \"\\n\";",
+    )?;
+    let shown = dump::render(&ir);
+    let fetches: Vec<(OpId, &Line)> = (ir.ops.iter().enumerate())
+        .filter_map(|(at, op)| match op {
+            Op::Line(line) if line.opcode == Opcode::FetchDimR => {
+                Some((OpId(u32::try_from(at).ok()?), line))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fetches.len(), 1, "{shown}");
+    for (at, line) in fetches {
+        let Operand::Value(array) = line.op1 else {
+            return Err(format!("a fetch of no value:\n{shown}"));
+        };
+        let before = |check: &dyn Fn(Check) -> bool| {
+            (ir.guards.iter()).any(|guard| guard.at == GuardAt::Before(at) && check(guard.check))
+        };
+        assert!(
+            before(
+                &|check| matches!(check, Check::Deref { value, tag: ZvalType::Array } if value == array)
+            ),
+            "the fetch holds its reference:\n{shown}"
+        );
+        assert!(
+            before(
+                &|check| matches!(check, Check::Layout { value, read: super::Read::Through, .. } if value == array)
+            ),
+            "the fetch holds the layout through the reference:\n{shown}"
+        );
+        assert!(
+            !(ir.guards.iter()).any(|guard| matches!(
+                guard.check,
+                Check::Layout { value, read: super::Read::InPlace, .. } if value == array
+            )),
+            "no layout is held in place on the reference's slot:\n{shown}"
+        );
+        assert_eq!(line.form, Form::Inline, "{shown}");
+    }
+    Ok(())
+}
+
 /// A return trace rooted inside an argument of an outer call opens with
 /// that call's fake init, and each return past its root escapes unless
 /// the caller stands at the send past it, as php's code steps over a

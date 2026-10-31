@@ -672,8 +672,9 @@ pub(super) fn guard_sites(
 /// `INIT_METHOD_CALL` by a constant name (`:6358-6391`). Each object
 /// opline but `INIT_METHOD_CALL` is over an operand php's inference says
 /// may be an object, and each fetches `op1` but the arithmetic, which
-/// fetches the one that is a reference. A temporary is not held here
-/// (`Builder::guard_use` refuses it).
+/// fetches the one that is a reference; a temporary is fetched as a
+/// variable is, the `VAR` a `DO_FCALL` of a `function &f()` writes among
+/// them, at each site but the arithmetic's and those of a variable alone.
 /// An `ASSIGN` to a variable holds the reference alone, php's
 /// `zend_jit_guard_reference` (`:5155-5167`), and by no exit where
 /// `held`, an earlier guard having held the variable's value one

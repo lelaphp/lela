@@ -1082,6 +1082,13 @@ impl<'a> Builder<'a> {
                 assigned(t1)
             };
         }
+        // A `RETURN_BY_REF` propagates no type, as php's trace SSA sets
+        // `return_value_info` at a `RETURN` alone (`Z/ext/opcache/jit/zend_jit_trace.c:2190-2210`),
+        // so what the caller's call writes is the reference to anything
+        // php's inference types it, and no exit's stack map knows its type.
+        if op.opcode == Opcode::ReturnByRef {
+            self.returned = Types::ANY.or(Types::REF);
+        }
         Written {
             slot,
             out,
@@ -2472,6 +2479,11 @@ impl<'a> Builder<'a> {
         {
             let types = self.val(value).types;
             let slot = self.val(value).slot;
+            // A slot the recording saw holding a reference is held to no
+            // layout in place, whatever its own types say: what it holds
+            // is the reference, and an array's flags are read through it
+            // or not at all.
+            let in_place = samples[0].is_none_or(|s| Read::sampled(s) != Read::Through);
             if seen.read[0] == Read::Through {
                 // An array read through a reference, held to its layout at
                 // this read and narrowed for this opline alone, as its type
@@ -2489,7 +2501,7 @@ impl<'a> Builder<'a> {
                         exit: draft(Point::Before(idx), slot.frame, At::Opline(here)),
                     });
                 }
-            } else if types.either_layout() && !self.aliased(slot) {
+            } else if in_place && types.either_layout() && !self.aliased(slot) {
                 self.val_mut(value).types = types.laid_out(layout);
                 seen.types[0] = types.laid_out(layout);
                 seen.inferred[0] = types.laid_out(layout);
@@ -2499,7 +2511,8 @@ impl<'a> Builder<'a> {
                     read: Read::InPlace,
                 };
                 self.place(idx, here, value, check, None);
-            } else if self.aliased(slot)
+            } else if in_place
+                && self.aliased(slot)
                 && seen.types[0].either_layout()
                 && matches!(
                     op.opcode,
@@ -2605,6 +2618,91 @@ impl<'a> Builder<'a> {
     /// ```expect regime=jit-tracing process
     /// 500000
     /// ```
+    ///
+    /// The `VAR` a `function &f()` returns, recorded through the reference
+    /// it is, is fetched where php's code generator fetches it, a
+    /// `COUNT` of a packed array its handler's and a `FETCH_DIM_R` held to
+    /// the reference and its array's layout read through it (#3706):
+    ///
+    /// ```php
+    /// function &f() { static $a = [1, 2, 3]; return $a; } $s = 0; for ($i = 0; $i < 100; $i++) { $s += count(f()) + f()[1]; } echo $s, "\n";
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 500
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:2
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) $main() %s:2
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 2 $main() %s:2
+    /// ---- TRACE 2 start (side trace 1/2) $main() %s:2
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    /// ```
+    ///
+    /// The same in a function, under a condition that turns, so the
+    /// exits the inline `FETCH_DIM_R` takes, the reference's, the missing
+    /// element's, the layout's and its element's, number the direction
+    /// php's exit 9:
+    ///
+    /// ```php
+    /// function &f(): array { static $a = [1, 2, 3]; return $a; }
+    /// function g() { $s = 0; for ($i = 0; $i < 100; $i++) { $s += f()[1]; if ($i > 50) { $s++; } } return $s; }
+    /// echo g(), "\n";
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 249
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:4
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) g() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 9 g() %s:3
+    /// ---- TRACE 2 start (side trace 1/9) g() %s:3
+    /// ---- TRACE 2 stop (link to 1)
+    /// ---- TRACE 2 compiled
+    ///
+    ///      TRACE 1 exit 2 g() %s:3
+    /// ---- TRACE 3 start (side trace 1/2) g() %s:3
+    /// ---- TRACE 3 stop (return)
+    /// ---- TRACE 3 compiled
+    /// ```
+    ///
+    /// And a `COUNT` of a hash the reference holds, held as php's
+    /// `zend_jit_fetch_reference` holds it, by an exit before the
+    /// direction's, php's exit 5:
+    ///
+    /// ```php
+    /// function &f() { static $a = ['x' => 1, 'y' => 2]; return $a; }
+    /// function g() { $s = 0; for ($i = 0; $i < 100; $i++) { $s += count(f()); if ($i > 50) { $s++; } } return $s; }
+    /// echo g(), "\n";
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 249
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:4
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) g() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 5 g() %s:3
+    /// ---- TRACE 2 start (side trace 1/5) g() %s:3
+    /// ---- TRACE 2 stop (link to 1)
+    /// ---- TRACE 2 compiled
+    ///
+    ///      TRACE 1 exit 2 g() %s:3
+    /// ---- TRACE 3 start (side trace 1/2) g() %s:3
+    /// ---- TRACE 3 stop (return)
+    /// ---- TRACE 3 compiled
+    /// ```
     fn guard_use(
         &mut self,
         idx: OpId,
@@ -2626,8 +2724,8 @@ impl<'a> Builder<'a> {
         // An indirect `VAR` is followed to what it points at, as php's
         // `zend_jit_fetch_indirect_var` follows it, and on to what that
         // refers to where it is a reference, as `zend_jit_fetch_reference`
-        // follows it, and a variable's reference to what it refers to; a
-        // temporary that is a reference is the handler's.
+        // follows it, and a reference a variable or a temporary holds to
+        // what it refers to, the `VAR` a `function &f()` returns among them.
         let read = Read::sampled(sample);
         // php's `op1_info &= ~MAY_BE_REF` past `zend_jit_guard_reference`:
         // what the variable refers to, of what its inference knows.
@@ -2647,7 +2745,7 @@ impl<'a> Builder<'a> {
                 tag,
                 pointee,
             }),
-            (Hold::Fetched, Read::Through, false) => Some(Check::Deref { value, tag }),
+            (Hold::Fetched, Read::Through, _) => Some(Check::Deref { value, tag }),
             (_, Read::Indirect(_) | Read::Through, _) => return None,
         };
         if let Some(check) = check {
