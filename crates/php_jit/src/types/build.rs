@@ -2451,6 +2451,44 @@ impl<'a> Builder<'a> {
     /// An operand no guard of its own narrowed is seen as its value
     /// stands once the others held, so `$i * $i` sees both operands as
     /// the one guard on its second narrowed them.
+    ///
+    /// What php's inference reads of an operand the recording saw
+    /// through a reference is what its trace SSA holds of the variable, a
+    /// reference to anything, whatever a guard held of it for this opline
+    /// alone, as `zend_jit_fetch_reference` (`Z/ext/opcache/jit/zend_jit_ir.c:17021-17085`)
+    /// and an `ASSIGN`'s `op1_info &= ~MAY_BE_REF` past
+    /// `zend_jit_guard_reference` (`Z/ext/opcache/jit/zend_jit_trace.c:5155-5161`)
+    /// narrow the code generator's `op1_info` and no SSA variable's. So what an
+    /// `ASSIGN` writes through one is a reference to anything,
+    /// `UPDATE_SSA_TYPE`'s widening, a variable assigned from it holds no
+    /// type the trace knows, and the `ASSIGN` that reads that variable
+    /// next holds it by an exit, php's exit 2, so the loop's direction is
+    /// php's exit 3 (#3711):
+    ///
+    /// ```php
+    /// function f() { $x = 0; $y = 0; $r = &$x; $c = 0; for ($i = 0; $i < 100; $i++) { $x = $i; $y = $x; $x = $y; if ($i > 50) { $c++; } } return $c + $x; }
+    /// echo f(), "\n";
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 148
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:3
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %s:2
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 3 f() %s:2
+    /// ---- TRACE 2 start (side trace 1/3) f() %s:2
+    /// ---- TRACE 2 stop (link to 1)
+    /// ---- TRACE 2 compiled
+    ///
+    ///      TRACE 1 exit 0 f() %s:2
+    /// ---- TRACE 3 start (side trace 1/0) f() %s:2
+    /// ---- TRACE 3 stop (return)
+    /// ---- TRACE 3 compiled
+    /// ```
     #[allow(
         clippy::too_many_arguments,
         reason = "the one place the opline's parts meet"
@@ -2500,13 +2538,15 @@ impl<'a> Builder<'a> {
             let mut types = self.types_of(frame, operand);
             // A reference no guard held is read as php's trace SSA reads
             // it, `IS_UNKNOWN` (`Z/ext/opcache/jit/zend_jit_trace.c:1819-1833`):
-            // a reference to anything, whatever the slot's types say.
-            if samples[at].is_some_and(|s| Read::sampled(s) == Read::Through) {
+            // a reference to anything, whatever the slot's types say. Its
+            // inference reads it so where a guard held it too.
+            let through = samples[at].is_some_and(|s| Read::sampled(s) == Read::Through);
+            if through {
                 types = types.or(Types::REF);
             }
             (seen.types[at], seen.read[at]) = held[at].unwrap_or((types, Read::InPlace));
             seen.inferred[at] = match operand {
-                Operand::Value(value) if self.aliased(self.val(value).slot) => types,
+                Operand::Value(value) if through || self.aliased(self.val(value).slot) => types,
                 _ => seen.types[at],
             };
         }
@@ -2526,7 +2566,6 @@ impl<'a> Builder<'a> {
                 // is (`zend_jit_fetch_reference`, `Z/ext/opcache/jit/zend_jit_ir.c:16952-17010`).
                 if seen.types[0].either_layout() {
                     seen.types[0] = seen.types[0].laid_out(layout);
-                    seen.inferred[0] = seen.types[0];
                     self.guards.push(Placed {
                         at: GuardAt::Before(idx),
                         check: Check::Layout {
