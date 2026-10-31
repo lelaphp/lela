@@ -1750,3 +1750,83 @@ echo \"done\\n\";",
         assert_eq!(testing::stdout(&served), "done\n", "under {mode}");
     }
 }
+
+/// The place a return lands in is read off its frame's caller half-word
+/// as `exec::CallerAt::caller` reads it, [`FrameLayout::caller_loop`]
+/// masked off before [`FrameLayout::numbered_from`] is taken away, so a
+/// frame an error handler's serving began, whose caller is the loop's,
+/// names no place 2^31 records away (#3691). The trace is the return
+/// trace `a_return_trace_past_a_servings_entry_halts` serves under the
+/// handler: each half-word it loads becomes a place only through the mask.
+///
+/// [`FrameLayout::caller_loop`]: php_engine::tier::FrameLayout::caller_loop
+/// [`FrameLayout::numbered_from`]: php_engine::tier::FrameLayout::numbered_from
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_returns_caller_is_masked_of_the_loop_bit_before_its_place() -> Result<(), String> {
+    let layout = php_engine::tier::FRAME;
+    let (_, clif) = compiled(
+        &[("record.function", "p"), ("record.start", "return")],
+        "function h() { return 1; }
+function p($n) { if ($n <= 0) return true; $x = p($n - 1); h(); return $x; }
+for ($i = 0; $i < 3; $i++) p(6);
+set_error_handler('p');
+trigger_error(\"x\", E_USER_WARNING);
+echo \"done\\n\";",
+    )?;
+    let lines: Vec<&str> = clif.lines().map(instruction).collect();
+    // Each `to = op a, b  ; b = constant` as the value it defines, its opcode less
+    // the type, its first operand and the constant its second names.
+    let ops: Vec<(&str, &str, &str, &str)> = (lines.iter())
+        .filter_map(|line| {
+            let (to, rest) = line.split_once(" = ")?;
+            let (op, operands) = rest.split_once(' ')?;
+            let op = op.split('.').next()?;
+            let (operands, constant) = operands.split_once("  ; ").unwrap_or((operands, ""));
+            let first = operands.split([',', '+']).next()?.trim();
+            let constant = constant.split_once(" = ").map_or("", |(_, value)| value);
+            Some((to, op, first, constant))
+        })
+        .collect();
+    let half_word = format!("+{}", layout.caller());
+    let loads: Vec<&str> = (lines.iter())
+        .filter_map(|line| {
+            let (to, rest) = line.split_once(" = ")?;
+            (rest.starts_with("load.i32") && rest.ends_with(&half_word)).then_some(to)
+        })
+        .collect();
+    let callers: Vec<&str> = (ops.iter())
+        .filter(|(_, op, first, _)| *op == "uextend" && loads.contains(first))
+        .map(|(to, ..)| *to)
+        .collect();
+    assert!(!callers.is_empty(), "no caller half-word is read:\n{clif}");
+    let mask = format!("{:#x}", !layout.caller_loop()).replace("0x7fff", "0x7fff_");
+    let less = format!("-{}", layout.numbered_from());
+    let applied = |op: &str, to: &str, constant: &str| -> Vec<&str> {
+        (ops.iter())
+            .filter(|(_, o, first, c)| *o == op && *first == to && *c == constant)
+            .map(|(to, ..)| *to)
+            .collect()
+    };
+    for caller in callers {
+        assert!(
+            applied("iadd", caller, &less).is_empty(),
+            "{caller}, a caller half-word, becomes a place unmasked:\n{clif}"
+        );
+        let masked = applied("band", caller, &mask);
+        assert_eq!(
+            masked.len(),
+            1,
+            "{caller}'s loop bit is masked once:\n{clif}"
+        );
+        let places = masked
+            .iter()
+            .flat_map(|frame| applied("iadd", frame, &less));
+        assert_eq!(
+            places.count(),
+            1,
+            "{caller}'s place is taken once, off the masked half-word:\n{clif}"
+        );
+    }
+    Ok(())
+}
