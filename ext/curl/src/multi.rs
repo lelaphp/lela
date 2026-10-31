@@ -817,6 +817,32 @@ fn easy_id(req: &Request, handle: PhpObject) -> Option<EasyId> {
 /// int(0)
 /// ```
 ///
+/// A callable inside a remove that adds to the multi or removes from
+/// it is answered `CURLM_RECURSIVE_API_CALL`, and the list stands as it
+/// was, as php's add and remove change `easyh` only on `CURLM_OK`.
+///
+/// ```php
+/// $m = curl_multi_init();
+/// $x = curl_init();
+/// $b = curl_init('http://127.0.0.1:1/');
+/// curl_setopt($b, CURLOPT_VERBOSE, 1);
+/// curl_setopt($b, CURLOPT_DEBUGFUNCTION, function ($ch, $t, $d) use ($m, $b, $x) {
+///     if (str_starts_with($d, 'closing')) {
+///         var_dump(curl_multi_add_handle($m, $x), curl_multi_remove_handle($m, $b), count(curl_multi_get_handles($m)));
+///     }
+/// });
+/// curl_multi_add_handle($m, $b);
+/// curl_multi_exec($m, $r);
+/// curl_multi_close($m);
+/// var_dump(count(curl_multi_get_handles($m)));
+/// ```
+/// ```expect
+/// int(8)
+/// int(8)
+/// int(1)
+/// int(0)
+/// ```
+///
 /// A fatal inside a remove leaves the list whole, as php's `zend_bailout`
 /// leaves `easyh`, for `curl_multi_free_obj` to give up as the request
 /// ends; an `exit` stands pending as php's unwind exit does, and the
@@ -879,8 +905,11 @@ fn curl_multi_close(
     }
     let multi = multi_of(req, multi_handle)?;
     let mut pending = Pending::default();
-    // `zend_llist_get_next_ex`: the list read in place at each step, so
-    // a `CurlHandle` a callable added meanwhile is walked too.
+    // `zend_llist_get_next_ex`: the list read in place at each step. A
+    // callable inside a remove adds to it or takes from it nothing, since
+    // libcurl answers its add or remove on this multi
+    // `CURLM_RECURSIVE_API_CALL`; a `curl_multi_close` it makes empties
+    // it, which ends the walk.
     let mut at = 0;
     while let Some(handle) = listed(req, multi_handle, at) {
         at += 1;
