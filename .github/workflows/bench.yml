@@ -9,9 +9,9 @@
 #   scripts/oracle-build.py and ci/oracle/Dockerfile: the build #3385 pins
 #   and #3741's capture-only Linux variant needs, so it is built once. It is
 #   a performance baseline and not an oracle: the one-oracle rule (#2253,
-#   #3741) is unchanged. The job prints both binaries' md5 and the tables
-#   the pin would carry, and uploads them; landing them in the pin is
-#   #3385's, through `xtask steer`.
+#   #3741) is unchanged. The job's summary is both binaries' md5 and the
+#   tables the pin would carry, which it stashes; landing them in the pin
+#   is #3385's, through `xtask steer`.
 # - `bench` runs `xtask bench --machine dedicated`: every seat held, so no
 #   other instrument builds there while it measures, and each bar measured
 #   only below a 1-minute load of 2, waited for, its reading naming the
@@ -77,16 +77,34 @@ jobs:
         id: corpus
         with:
           promise: tree
+      # The build's whole output is the log's: what it printed was 1405k in
+      # run 41242977836, and GitHub refuses a step summary over 1024k.
       - name: php 8.5.12 and its php-fpm, from the pinned tag
+        id: build
         env:
           TREE: ${{ steps.corpus.outputs.tree }}
         run: |
-          python3 scripts/oracle-build.py --tree "$TREE" build linux-x86_64 main --jobs "$(nproc)" | tee "$RUNNER_TEMP/baseline.txt"
+          python3 scripts/oracle-build.py --tree "$TREE" build linux-x86_64 main --jobs "$(nproc)" 2>&1 | tee "$RUNNER_TEMP/baseline.txt"
+      # The summary is the two md5 lines and the tables the build wrote, read
+      # from its files only where this run's build passed, since the runner
+      # keeps target/ between runs; a failed build's is its last lines, cut.
+      - name: the md5s and the tables, as the job's summary
+        if: always() && steps.build.outcome != 'skipped'
+        env:
+          BUILT: ${{ steps.build.outcome }}
+        run: |
+          out=target/oracle/linux-x86_64/main
           {
             echo "### php 8.5.12 and its php-fpm, built on dax-build from the pinned tag"
             echo
             echo '```'
-            cat "$RUNNER_TEMP/baseline.txt"
+            if [ "$BUILT" = success ]; then
+              md5sum "$out/php" "$out/php-fpm"
+              cat "$out/sapi.toml" "$out/pin.toml"
+            else
+              echo "the build did not pass; its last 40 lines, each cut at 400 bytes, and the job's log carries the rest:"
+              tail -n 40 "$RUNNER_TEMP/baseline.txt" 2>/dev/null | cut -c1-400
+            fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: the tables the pin would carry, gathered for the stash
@@ -97,8 +115,12 @@ jobs:
             target/oracle/linux-x86_64/main/installed.txt \
             "$RUNNER_TEMP/baseline/"
       # Kept on dax-build, as every hand-off is (#3554), not as a GitHub
-      # artifact, which the account's storage quota refuses.
+      # artifact, which the account's storage quota refuses. Until a person
+      # sets DAX_STASH (#3696) the action falls back to that artifact, so a
+      # refused hand-off fails no job: the md5s and the tables are in the
+      # log and the summary either way, and no later job reads this one.
       - uses: ./.github/actions/stash
+        continue-on-error: ${{ env.DAX_STASH == '' }}
         with:
           put: baseline
           path: ${{ runner.temp }}/baseline/
@@ -135,15 +157,30 @@ jobs:
       - name: the readings, as the job's summary
         if: always()
         run: |
+          # The readings alone, which `xtask bench` prints on stdout, cut at
+          # 512 KiB so the summary stays under GitHub's 1024k.
+          readings=$RUNNER_TEMP/bench.txt
+          limit=524288
           {
             echo "### xtask bench on dax-build, every seat held, each bar below a 1-minute load of 2"
             echo
             echo '```'
-            cat "$RUNNER_TEMP/bench.txt" 2>/dev/null || echo "the bench printed nothing"
+            if [ -s "$readings" ]; then
+              head -c "$limit" "$readings"
+              if [ "$(wc -c <"$readings")" -gt "$limit" ]; then
+                echo
+                echo "[cut at 512 KiB; the job's log carries every reading]"
+              fi
+            else
+              echo "the bench printed nothing"
+            fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      # As the baseline's: no job fails on a refused artifact while
+      # DAX_STASH is unset (#3696), and no later job reads this one.
       - uses: ./.github/actions/stash
         if: always()
+        continue-on-error: ${{ env.DAX_STASH == '' }}
         with:
           put: bench
           path: target/harness/log/
