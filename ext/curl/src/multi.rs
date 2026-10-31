@@ -63,6 +63,34 @@ pub(crate) struct CurlMultiHandle;
 impl CurlMultiHandle {}
 
 /// `curl_multi_handlers`.
+///
+/// What a callable throws from inside `curl_multi_cleanup` is left
+/// pending past `curl_multi_free_obj`, as php leaves it in
+/// `EG(exception)`, and the statement that freed the multi raises it.
+///
+/// ```php
+/// $h = curl_init('http://127.0.0.1:1/');
+/// curl_setopt($h, CURLOPT_VERBOSE, 1);
+/// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) {
+///     echo "debug: $data";
+///     throw new Exception('from the callable');
+/// });
+/// $m = curl_multi_init();
+/// curl_multi_add_handle($m, $h);
+/// curl_multi_exec($m, $r);
+/// try {
+///     unset($m);
+///     echo "after unset\n";
+/// } catch (Exception $e) {
+///     echo 'thrown: ', $e->getMessage(), "\n";
+/// }
+/// echo "end\n";
+/// ```
+/// ```expect
+/// debug: closing connection #0
+/// thrown: from the callable
+/// end
+/// ```
 pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
@@ -75,21 +103,28 @@ const REFUSALS: Refusals = Refusals::NONE
     .comparison();
 
 impl ObjectHandlers for Handlers {
-    /// `curl_multi_free_obj`: `curl_multi_cleanup`, then the `CurlHandle`s and
-    /// the push callable let go.
+    /// `curl_multi_free_obj`: `curl_multi_cleanup` with `easyh` whole,
+    /// then the `CurlHandle`s and the push callable let go under what its
+    /// callables threw, which is left pending for the release that freed
+    /// the object to raise, as php leaves it in `EG(exception)`.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let Some(mh) = object.native_mut::<Mh>(req).map(std::mem::take) else {
-            return;
-        };
-        if let Some(multi) = mh.multi {
-            let _ = multi.close(req);
+        let mut pending = Pending::default();
+        let multi = object.native_mut::<Mh>(req).and_then(|mh| mh.multi.take());
+        if let Some(thrown) = multi.and_then(|multi| multi.close(req)) {
+            pending.park(req, thrown);
         }
-        for easy in mh.easy {
-            easy.give_up(req);
+        if let Some(mh) = object.native_mut::<Mh>(req).map(std::mem::take) {
+            let (mut easy, mut push) = (mh.easy, mh.push);
+            pending.release(req, |req| {
+                for held in easy.drain(..) {
+                    held.give_up(req);
+                }
+                if let Some(push) = push.take() {
+                    push.give_up(req);
+                }
+            });
         }
-        if let Some(push) = mh.push {
-            push.give_up(req);
-        }
+        pending.leave(req);
     }
 
     fn refusals(&self) -> Refusals {
@@ -167,7 +202,12 @@ fn curl_multi_init(req: &mut Request) -> Result<Owner<Instance<CurlMultiHandle>>
     };
     match object.native_mut::<Mh>(req) {
         Some(mh) => mh.multi = Some(multi),
-        None => drop(multi.close(req)),
+        None => {
+            if let Some(thrown) = multi.close(req) {
+                object.give_up(req);
+                return Err(thrown);
+            }
+        }
     }
     Ok(object.into_instance())
 }

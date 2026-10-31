@@ -5,7 +5,7 @@
 
 use php_ext::abi::{Refusal, Start};
 use php_ext::attr::php_class;
-use php_ext::raising::{self, Cause, Thrown, while_pending};
+use php_ext::raising::{self, Cause, Thrown, leave_pending, while_pending};
 use php_ext::request::Request;
 use php_ext::values::ClassId;
 
@@ -122,6 +122,16 @@ impl Pending {
     pub(crate) fn release(&mut self, req: &mut Request, mut release: impl FnMut(&mut Request)) {
         if self.step(req, |req, _| release(req)).is_none() {
             release(req);
+        }
+    }
+
+    /// What stands left in php's `EG(exception)` where the step that
+    /// served it answers nothing, a `free_obj`, for the release that freed
+    /// the object to raise ([`leave_pending`]); a fatal or an `exit` is
+    /// the request's already.
+    pub(crate) fn leave(self, req: &mut Request) {
+        if let Some(thrown) = self.0 {
+            leave_pending(req, thrown);
         }
     }
 
