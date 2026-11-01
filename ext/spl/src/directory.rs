@@ -21,6 +21,7 @@ use php_ext::coerce::coerce_param;
 use php_ext::decl::Type as DeclType;
 use php_ext::raising::{
     Thrown, arg_type_error, arg_value_error, throw, throw_error, throw_exception_ex, type_error,
+    while_pending,
 };
 use php_ext::request::{OwnedStream, Request, Stream, Streams as _, Whence};
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
@@ -2456,6 +2457,21 @@ fn info_class(req: &mut Request, chosen: Option<ClassId>) -> Result<ClassId, Thr
 /// `path`, its constructor served where it is not `SplFileInfo`'s own
 /// (`ce->constructor->common.scope != spl_ce_SplFileInfo`), a user
 /// class's or an extension's, as phar's `PharFileInfo` declares one.
+/// An object whose constructor threw is given up with what it threw
+/// pending, as php's `return_value` is freed by its caller with
+/// `EG(exception)` set (`Z/ext/spl/spl_directory.c:489`), so a destructor
+/// that throws there chains it as its `previous`:
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class D { function __destruct() { throw new Exception("destructed"); } }
+/// class FI extends SplFileInfo { public $d; function __construct($p) { $this->d = new D; throw new Exception("constructed"); } }
+/// try { (new SplFileInfo(__FILE__))->getFileInfo('FI'); }
+/// catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// destructed after constructed
+/// ```
 fn create_info(req: &mut Request, path: &[u8], class: ClassId) -> Result<Owner<PhpObject>, Thrown> {
     let object = new_object(req, class)?;
     if crate::overridden(req, *object, b"__construct") || declares_constructor(req, class)? {
@@ -2465,7 +2481,14 @@ fn create_info(req: &mut Request, path: &[u8], class: ClassId) -> Result<Owner<P
         match served {
             Ok(answered) => answered.give_up(req),
             Err(thrown) => {
-                object.give_up(req);
+                // php's `return_value`, freed by the caller with what the
+                // constructor threw in `EG(exception)`.
+                match thrown.exception() {
+                    Some(_) => {
+                        while_pending(req, &thrown, |req| object.give_up(req));
+                    }
+                    None => object.give_up(req),
+                }
                 return Err(thrown);
             }
         }
