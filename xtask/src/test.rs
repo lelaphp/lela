@@ -10,7 +10,11 @@
 //! `skipped_unpromised`, the tests among the passed that skipped for a
 //! fact this machine did not promise, read off the file each executable
 //! is handed under [`SKIPPED_VARIABLE`] (#3085); a crate whose tests do
-//! not build has none and fails all the same.
+//! not build has none and fails all the same. An executable that ends
+//! badly before its `test result:` line, as the engine's hard timeout ends
+//! one, counts each `... FAILED` line it printed, and a failing reading's
+//! message names every run that failed and its failed tests ahead of the
+//! tail of what they printed ([`Runs::judge`], #3698).
 //!
 //! A run is three steps over every crate at once, as `cargo test` would
 //! take them one crate at a time (#2165), and a crate with a binary takes
@@ -51,10 +55,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -120,7 +125,7 @@ fn measure(
     let (builds, mut ran) = (batch::Builds::hold(root), Vec::new());
     for run in batch::runs(root, &crates)? {
         let built = Run::of(root, &["build", "--keep-going"], &run, Targets::Tests)?;
-        let docs = doctests(root, &built, &run)?;
+        let mut docs = doctests(root, &built, &run)?;
         let missed = Pin::missed(root, &built, &run)?;
         for krate in run {
             let missed = missed.get(&krate.name).map_or(&[][..], Vec::as_slice);
@@ -128,7 +133,7 @@ fn measure(
                 &snapshot,
                 krate,
                 &built,
-                (docs.get(&krate.name), missed),
+                (docs.remove(&krate.name), missed),
                 staged,
             )?;
             if left_out.is_empty() || reading.status != Status::Pass {
@@ -162,36 +167,148 @@ pub fn run_staged(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec
     measure(root, manifest, &measured, Some(&staged))
 }
 
+/// How one test executable, or one crate's doctests, ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    Passed,
+    /// Badly, once its `test result:` line was read.
+    Failed,
+    /// Badly, with this status, before any `test result:` line: the
+    /// engine's hard timeout ending it, a crash or a signal (#3698).
+    Cut(ExitStatus),
+}
+
 /// What one test executable, or one crate's doctests, did: the counts its
-/// `test result:` lines carry, whether it ended well, and what it printed.
-#[derive(Debug, Default)]
+/// `test result:` lines carry, the tests it printed `... FAILED` for, how
+/// it ended, and what it printed.
+#[derive(Debug)]
 struct Ran {
     counts: Counts,
-    passed: bool,
+    failed: Vec<String>,
+    ending: Ending,
     text: String,
 }
 
 impl Ran {
-    /// `other` summed into this: its counts added, and what it printed
-    /// kept where it did not end well.
-    fn add(&mut self, other: &Ran) {
-        self.counts.add(&other.counts);
-        if !other.passed {
-            self.passed = false;
-            self.text.push_str(&other.text);
+    /// What a run that printed `text` did, `status` its own exit, or none
+    /// for a crate's doctests in cargo's one run, which its `test result:`
+    /// line alone judges. Where it ended badly before any such line, each
+    /// `... FAILED` line it printed is a failed test, since none counts them.
+    fn read(text: String, status: Option<ExitStatus>) -> Ran {
+        let mut counts = Counts::of(&text);
+        let failed: Vec<String> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("test ")?.strip_suffix(" ... FAILED"))
+            .map(str::to_owned)
+            .collect();
+        let bad = status.filter(|s| !s.success());
+        let said_failed = text.lines().any(|l| l.starts_with("test result: FAILED"));
+        let ending = match bad {
+            Some(status) if counts.binaries == 0 => {
+                counts.failed = failed.len() as u64;
+                Ending::Cut(status)
+            }
+            Some(_) => Ending::Failed,
+            None if said_failed => Ending::Failed,
+            None => Ending::Passed,
+        };
+        Ran {
+            counts,
+            failed,
+            ending,
+            text,
         }
+    }
+
+    /// This run, `named`, in one line: how it ended and its failed tests.
+    fn said(&self, named: &str) -> String {
+        let cut = match self.ending {
+            Ending::Cut(status) => format!(" ended with {status} before its `test result:` line;"),
+            _ => String::new(),
+        };
+        let failed = match self.failed.len() {
+            0 => "no test printed FAILED".to_owned(),
+            n => format!("{n} failed: {}", self.failed.join(", ")),
+        };
+        format!("{named}:{cut} {failed}")
+    }
+}
+
+/// What a crate's test executables, doctests and missed pins did: their
+/// counts summed, and each run that did not end well by its name, in the
+/// order they were read.
+#[derive(Debug, Default)]
+struct Runs {
+    counts: Counts,
+    failing: Vec<(String, Ran)>,
+}
+
+impl Runs {
+    fn add(&mut self, named: String, ran: Ran) {
+        self.counts.add(&ran.counts);
+        if ran.ending != Ending::Passed {
+            self.failing.push((named, ran));
+        }
+    }
+
+    /// The crate `name`'s status, numbers and message: pass when every run
+    /// ended well; fail otherwise, with a line naming each run that did
+    /// not and its failed tests, then the tail of what those printed.
+    /// `untracked` is what its build left out under `cfg(tracked)`, and why.
+    fn judge(
+        &self,
+        name: &str,
+        untracked: Option<(u64, String)>,
+        reading: &mut Reading,
+    ) -> Result<()> {
+        let counts = &self.counts;
+        counts.count(reading)?;
+        let passed = self.failing.is_empty();
+        reading.status = Status::of(passed);
+        let (n, verb) = if passed {
+            (counts.passed, "passed")
+        } else {
+            (counts.failed, "failed")
+        };
+        let s = plural(usize::try_from(n).unwrap_or(usize::MAX));
+        let mut message = format!("{name}: {n} test{s} {verb}");
+        if counts.skipped_unpromised > 0 {
+            let of_them = if passed { " of them" } else { "" };
+            let skipped = counts.skipped_unpromised;
+            write!(
+                message,
+                ", {skipped}{of_them} skipped for a fact this machine did not promise"
+            )
+            .ok();
+        }
+        if let Some((unbuilt, why)) = untracked {
+            reading.count("skipped_untracked", unbuilt)?;
+            write!(message, "; {why}").ok();
+        }
+        let mut text = String::new();
+        for (named, ran) in &self.failing {
+            message.push('\n');
+            message.push_str(&ran.said(named));
+            text.push_str(&ran.text);
+        }
+        if !passed {
+            message.push('\n');
+            message.push_str(&tail(&text, 40));
+        }
+        reading.message = message;
+        Ok(())
     }
 }
 
 /// One crate's reading: pass when every test executable of the crate and
-/// its doctests ended well and no pinned code was `missed`, fail with the
-/// tail of what the ones that did not printed otherwise, each missed pin
-/// a failed test, the numbers summed over all of them either way.
+/// its doctests ended well and no pinned code was `missed`, fail
+/// otherwise, each missed pin a failed test, the numbers summed over all
+/// of them either way ([`Runs::judge`]).
 fn reading(
     snapshot: &Snapshot,
     krate: &Crate,
     run: &Run,
-    (doc, missed): (Option<&Ran>, &[String]),
+    (doc, missed): (Option<Ran>, &[String]),
     staged: Option<&[String]>,
 ) -> Result<(Reading, Vec<String>)> {
     let name = &krate.name;
@@ -225,10 +342,7 @@ fn reading(
             runs
         })
         .unzip();
-    let mut all = Ran {
-        passed: true,
-        ..Ran::default()
-    };
+    let mut runs = Runs::default();
     let mut took = BTreeMap::new();
     let each = |executable: &Executable| {
         let started = Instant::now();
@@ -237,8 +351,8 @@ fn reading(
         Ok((named, millis(started.elapsed()), ran))
     };
     let on = |(named, ms, ran): (String, u64, Ran)| {
-        took.insert(named, Number::count(ms));
-        all.add(&ran);
+        took.insert(named.clone(), Number::count(ms));
+        runs.add(named, ran);
     };
     let batch = NonZeroUsize::MIN;
     tally::pool(&executables, jobs, batch, &apart, each, on)?;
@@ -248,42 +362,21 @@ fn reading(
     reading.count("ms", millis(started.elapsed()))?;
     reading.groups = took;
     if let Some(doc) = doc {
-        all.add(doc);
+        runs.add("doctests".to_owned(), doc);
     }
-    for pin in missed {
-        all.counts.failed += 1;
-        all.passed = false;
-        all.text.push_str(pin);
-        all.text.push('\n');
+    if !missed.is_empty() {
+        let pins = Ran {
+            counts: Counts {
+                failed: missed.len() as u64,
+                ..Counts::default()
+            },
+            failed: missed.to_vec(),
+            ending: Ending::Failed,
+            text: String::new(),
+        };
+        runs.add("pinned error codes".to_owned(), pins);
     }
-    let Ran { counts, passed, .. } = &all;
-    counts.count(&mut reading)?;
-    let (n, verb) = if *passed {
-        reading.status = Status::Pass;
-        (counts.passed, "passed")
-    } else {
-        reading.status = Status::Fail;
-        (counts.failed, "failed")
-    };
-    let s = plural(usize::try_from(n).unwrap_or(usize::MAX));
-    reading.message = format!("{name}: {n} test{s} {verb}");
-    if counts.skipped_unpromised > 0 {
-        let (skipped, of_them) = (
-            counts.skipped_unpromised,
-            if *passed { " of them" } else { "" },
-        );
-        reading.message = format!(
-            "{}, {skipped}{of_them} skipped for a fact this machine did not promise",
-            reading.message
-        );
-    }
-    if let Some((unbuilt, why)) = not_built(snapshot.root(), krate)? {
-        reading.count("skipped_untracked", unbuilt)?;
-        reading.message = format!("{}; {why}", reading.message);
-    }
-    if !passed {
-        reading.message = format!("{}\n{}", reading.message, tail(&all.text, 40));
-    }
+    runs.judge(name, not_built(snapshot.root(), krate)?, &mut reading)?;
     Ok((reading, left_out))
 }
 
@@ -420,7 +513,7 @@ fn execute(executable: &Executable, built: &Built, run: &Run) -> Result<Ran> {
         .with_context(|| format!("running {}", executable.path.display()))?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let mut counts = Counts::of(&stdout);
+    let mut ran = Ran::read(format!("{stdout}{stderr}"), Some(out.status));
     let text = match fs::read_to_string(&skipped) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         read => read.with_context(|| format!("reading {}", skipped.display()))?,
@@ -429,12 +522,8 @@ fn execute(executable: &Executable, built: &Built, run: &Run) -> Result<Ran> {
         .lines()
         .filter_map(|line| line.split_once('\t').map(|(test, _)| test))
         .collect();
-    counts.skipped_unpromised = tests.len() as u64;
-    Ok(Ran {
-        counts,
-        passed: out.status.success(),
-        text: format!("{stdout}{stderr}"),
-    })
+    ran.counts.skipped_unpromised = tests.len() as u64;
+    Ok(ran)
 }
 
 /// The `CARGO` a test executable is handed: the one this run was started
@@ -524,8 +613,13 @@ fn environment(executable: &Executable, built: &Built, run: &Run) -> Vec<(&'stat
 /// `cargo test --doc` over `crates` at `root` with `args` after them,
 /// both streams written to one file, where a test's line, cargo's
 /// `Doc-tests <lib>` and the compiler's words stand in the order they were
-/// written: whether it ended well, and the file's text.
-fn doc_run(root: &Path, run: &Run, crates: &[&Crate], args: Vec<String>) -> Result<(bool, String)> {
+/// written: how it ended, and the file's text.
+fn doc_run(
+    root: &Path,
+    run: &Run,
+    crates: &[&Crate],
+    args: Vec<String>,
+) -> Result<(ExitStatus, String)> {
     let dir = &run.target_dir;
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let written = dir.join(format!("xtask-doctests-{}.out", std::process::id()));
@@ -546,7 +640,7 @@ fn doc_run(root: &Path, run: &Run, crates: &[&Crate], args: Vec<String>) -> Resu
     let status = command.status().context("running cargo test --doc");
     let text = fs::read_to_string(&written).unwrap_or_default();
     fs::remove_file(&written).ok();
-    Ok((status?.success(), text))
+    Ok((status?, text))
 }
 
 /// Every built crate's doctests in one `cargo test --doc`, read back by
@@ -590,23 +684,17 @@ fn doctests(root: &Path, run: &Run, crates: &[&Crate]) -> Result<BTreeMap<String
     let mut ran = BTreeMap::new();
     for krate in &with {
         let section = sections.remove(&krate.name).unwrap_or_default();
-        let counts = Counts::of(&section);
         // A crate's run that reported no result, in a run that failed,
         // is one cargo never reached: what cargo said is its text.
-        let reached = counts.binaries > 0 || ended;
-        let passed = reached
-            && !section
-                .lines()
-                .any(|l| l.starts_with("test result: FAILED"));
-        let text = if reached { section } else { tail(&text, 40) };
-        ran.insert(
-            krate.name.clone(),
+        let doc = if Counts::of(&section).binaries > 0 || ended.success() {
+            Ran::read(section, None)
+        } else {
             Ran {
-                counts,
-                passed,
-                text,
-            },
-        );
+                text: tail(&text, 40),
+                ..Ran::read(section, Some(ended))
+            }
+        };
+        ran.insert(krate.name.clone(), doc);
     }
     Ok(ran)
 }
@@ -825,10 +913,13 @@ impl Counts {
 mod tests {
     use std::collections::BTreeSet;
     use std::fs;
+    use std::os::unix::process::ExitStatusExt;
     use std::path::{Path, PathBuf};
+    use std::process::ExitStatus;
 
-    use super::{Beside, Counts, Executable, Pin};
+    use super::{Beside, Counts, Executable, Pin, Ran, Runs};
     use crate::batch::Package;
+    use crate::reading::{Reading, Status};
 
     /// The files a module tree loads, from the root `file` down, as
     /// rustc resolves `mod` and `#[path]`: a file module's path against
@@ -949,6 +1040,59 @@ mod tests {
                 skipped_unpromised: 0,
             }
         );
+    }
+
+    /// Exited with `code`, as a wait status says it.
+    fn exited(code: i32) -> ExitStatus {
+        ExitStatus::from_raw(code << 8)
+    }
+
+    /// The engine's hard timeout ends an executable after two `... FAILED`
+    /// lines and before its `test result:` line: each is a failed test,
+    /// and the message names the exit (#3698).
+    #[test]
+    fn an_executable_ended_before_its_result_line_fails_each_test_it_printed_failed() {
+        let text = "\nrunning 4 tests\ntest a ... FAILED\ntest b ... ok\ntest c ... FAILED\nFatal error: Maximum execution time of 30+2 seconds exceeded (terminated)\n";
+        let mut runs = Runs::default();
+        runs.add(
+            "test threads".into(),
+            Ran::read(text.into(), Some(exited(124))),
+        );
+        let mut reading = Reading::new("test", "ext/ffi");
+        runs.judge("ext/ffi", None, &mut reading).unwrap();
+        assert_eq!(reading.status, Status::Fail);
+        assert_eq!(reading.int("failed"), Some(2), "{}", reading.message);
+        assert!(
+            reading.message.contains(
+                "test threads: ended with exit status: 124 before its `test result:` line; 2 failed: a, c"
+            ),
+            "{}",
+            reading.message
+        );
+    }
+
+    /// Two executables fail, the first printing more than the tail's 40
+    /// lines: the message names both and each one's failed tests ahead of
+    /// the tail, which holds only the second's (#3698).
+    #[test]
+    fn every_failing_executable_is_named_ahead_of_the_tail() {
+        let mut first = String::from(
+            "\nrunning 3 tests\ntest x::one ... FAILED\ntest x::two ... FAILED\ntest x::three ... ok\n\nfailures:\n",
+        );
+        first.extend((0..50).map(|n| format!("    panicked at line {n}\n")));
+        first.push_str("test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s\n");
+        let second = "\nrunning 1 test\ntest y::only ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n";
+        let mut runs = Runs::default();
+        runs.add("test worktree".into(), Ran::read(first, Some(exited(101))));
+        runs.add(
+            "lib xtask".into(),
+            Ran::read(second.into(), Some(exited(101))),
+        );
+        let mut reading = Reading::new("test", "xtask");
+        runs.judge("xtask", None, &mut reading).unwrap();
+        assert_eq!(reading.int("failed"), Some(3));
+        let head = "xtask: 3 tests failed\ntest worktree: 2 failed: x::one, x::two\nlib xtask: 1 failed: y::only\n";
+        assert!(reading.message.starts_with(head), "{}", reading.message);
     }
 
     #[test]
