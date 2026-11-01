@@ -262,21 +262,45 @@ fn clone_under(
     doc: Option<Node>,
     recursive: bool,
 ) -> Result<Option<Node>, Thrown> {
+    match copy_under(req, mapper, src, outer, doc, recursive) {
+        Ok(true) => Ok(Some(outer)),
+        Ok(false) => {
+            outer.free();
+            Ok(None)
+        }
+        Err(thrown) => {
+            outer.free();
+            Err(thrown)
+        }
+    }
+}
+
+/// [`clone_under`]'s copy, which frees nothing: `false` where a
+/// document's internal subset could not be copied, and the `Err` the
+/// memory limit, `outer` left to its owner either way, as a document's
+/// copy is its [`NewDoc`]'s (#3842).
+fn copy_under(
+    req: &mut Request,
+    mapper: &mut Mapper,
+    src: Node,
+    outer: Node,
+    doc: Option<Node>,
+    recursive: bool,
+) -> Result<bool, Thrown> {
     if !recursive
         || !matches!(
             src.kind(),
             Kind::Element | Kind::Fragment | Kind::Document | Kind::HtmlDocument
         )
     {
-        return Ok(Some(outer));
+        return Ok(true);
     }
     let mut dst_doc = doc;
     if src.kind().is_document() {
         dst_doc = Some(outer);
         if let Some(subset) = src.int_subset() {
             let Some(copy) = subset.copy_dtd(Some(outer)) else {
-                outer.free();
-                return Ok(None);
+                return Ok(false);
             };
             outer.set_int_subset(Some(copy));
             copy.set_parent(Some(outer));
@@ -288,13 +312,7 @@ fn clone_under(
     let mut at = src.children();
     while let Some(n) = at {
         let cloned = match n.kind() {
-            Kind::Element => match clone_container(req, mapper, n, dst_doc) {
-                Ok(cloned) => cloned,
-                Err(thrown) => {
-                    outer.free();
-                    return Err(thrown);
-                }
-            },
+            Kind::Element => clone_container(req, mapper, n, dst_doc)?,
             Kind::Dtd => None,
             _ => n.copy(dst_doc, 1),
         };
@@ -323,10 +341,10 @@ fn clone_under(
         let mut up = n;
         at = loop {
             let Some(p) = up.parent() else {
-                return Ok(Some(outer));
+                return Ok(true);
             };
             if p == src {
-                return Ok(Some(outer));
+                return Ok(true);
             }
             if let Some(cp) = cloned_parent.parent() {
                 cloned_parent = cp;
@@ -337,7 +355,7 @@ fn clone_under(
             up = p;
         };
     }
-    Ok(Some(outer))
+    Ok(true)
 }
 
 /// `dom_clone_node` with a namespace mapper, as a document that follows
@@ -391,7 +409,8 @@ pub(crate) fn clone_node_modern(
 /// [`clone_node_modern`] over a document, whose copy is a document no
 /// reference counts yet, for the object that takes its first reference:
 /// `dom_clone_container_helper`'s `xmlDocCopyNode(src, NULL, 0)` is
-/// `xmlCopyDoc(src, 0)` for a document.
+/// `xmlCopyDoc(src, 0)` for a document. Where the copy fails part way,
+/// the copied tree is freed as `copy` drops.
 pub(crate) fn clone_document_modern(
     req: &mut Request,
     mapper: &mut Mapper,
@@ -403,10 +422,10 @@ pub(crate) fn clone_document_modern(
     };
     let outer = copy.node();
     outer.set_ns(document.ns());
-    let Some(clone) = clone_under(req, mapper, document, outer, document.doc(), recursive)? else {
+    if !copy_under(req, mapper, document, outer, document.doc(), recursive)? {
         return Ok(None);
-    };
-    reconcile_clone(req, mapper, document, clone)?;
+    }
+    reconcile(req, mapper, document, outer)?;
     Ok(Some(copy))
 }
 
@@ -419,6 +438,20 @@ fn reconcile_clone(
     node: Node,
     clone: Node,
 ) -> Result<Node, Thrown> {
+    if let Err(thrown) = reconcile(req, mapper, node, clone) {
+        clone.free();
+        return Err(thrown);
+    }
+    Ok(clone)
+}
+
+/// [`reconcile_clone`]'s pointing, which frees nothing.
+fn reconcile(
+    req: &mut Request,
+    mapper: &mut Mapper,
+    node: Node,
+    clone: Node,
+) -> Result<(), Thrown> {
     if clone.doc() != node.doc() {
         let doc = clone.doc();
         let reconciled = if matches!(
@@ -437,12 +470,9 @@ fn reconcile_clone(
         } else {
             mapper.reconcile(req, doc, clone)
         };
-        if let Err(thrown) = reconciled {
-            clone.free();
-            return Err(thrown);
-        }
+        reconciled?;
     }
-    Ok(clone)
+    Ok(())
 }
 
 /// The document of the `Dom\` classes a document node's copy is handed out

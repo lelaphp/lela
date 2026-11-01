@@ -191,13 +191,12 @@ fn derives(req: &mut Request, class: ClassId, base: ClassId) -> bool {
 /// `php_libxml_increment_doc_ref(sxe, docp)` and the root element taken:
 /// the object counts the document from here and frees it with itself.
 /// An object with no libxml half counts nothing, so the document is
-/// freed here.
+/// freed here, as `doc` drops.
 fn adopt(req: &mut Request, object: PhpObject, doc: NewDoc, ns: Option<Ns>) {
     if let Some(s) = sxe_mut(req, object) {
         s.ns = ns;
     }
     let Some(mut obj) = sxe::libxml_half(req, object) else {
-        doc.free();
         return;
     };
     let root = doc.node().root();
@@ -233,7 +232,8 @@ fn parse(
 /// arguments: the object of `class` for what the parse made. A tree made
 /// past a throw is the object's as any other, and the object is given up
 /// with the throw pending, its destructor called, as php gives its return
-/// value up past `EG(exception)`.
+/// value up past `EG(exception)`. Where no object can be made, the tree
+/// is freed as `doc` drops.
 ///
 /// ```php
 /// libxml_set_external_entity_loader(function () { throw new Exception('loader'); });
@@ -263,7 +263,6 @@ fn load(
     let made = match new_object(req, class) {
         Ok(made) => made,
         Err(later) => {
-            doc.free();
             return Err(match settled {
                 Ok(()) => later,
                 Err(thrown) => thrown.chain(req, later),

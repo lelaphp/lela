@@ -502,28 +502,29 @@ fn serialize_response_call2(
 }
 
 /// A fresh document, `xmlNewDoc("1.0")` with php's `UTF-8` encoding, and
-/// its envelope in the version's namespace.
+/// its envelope in the version's namespace: the message's to free by hand
+/// from here, where it is sent or abandoned; on the `Err` it is freed as
+/// `made` drops.
 fn new_envelope(version: i64) -> Res<(Node, Node, Option<Ns>)> {
-    let Some(doc) = Node::new_doc(Some(b"1.0")).map(|made| made.node()) else {
+    let Some(made) = Node::new_doc(Some(b"1.0")) else {
         return Err(soap_error("Unknown SOAP version"));
     };
+    let doc = made.node();
     doc.set_doc_string(php_ext_libxml::ffi::DocString::Encoding, Some(b"UTF-8"));
     let (href, prefix) = if version == SOAP_1_1 {
         (SOAP_1_1_ENV_NAMESPACE, SOAP_1_1_ENV_NS_PREFIX)
     } else if version == SOAP_1_2 {
         (SOAP_1_2_ENV_NAMESPACE, SOAP_1_2_ENV_NS_PREFIX)
     } else {
-        doc.free_document();
         return Err(soap_error("Unknown SOAP version"));
     };
     let Some(envelope) = Node::new_element(Some(doc), None, b"Envelope", None) else {
-        doc.free_document();
         return Err(soap_error("Unknown SOAP version"));
     };
     let ns = envelope.new_ns(href, Some(prefix));
     envelope.set_ns_call(ns);
     doc.set_root(envelope);
-    Ok((doc, envelope, ns))
+    Ok((made.freed_by_hand(), envelope, ns))
 }
 
 /// The namespaces and `encodingStyle` an encoded message declares on its

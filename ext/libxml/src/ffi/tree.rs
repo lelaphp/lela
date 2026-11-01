@@ -7,6 +7,7 @@
 
 use std::ffi::{c_char, c_int, c_void};
 use std::marker::PhantomData;
+use std::mem::ManuallyDrop;
 use std::ptr::{self, NonNull};
 
 use php_ext::raising::{Thrown, fatal};
@@ -1601,12 +1602,22 @@ impl Library {
 /// A document no reference counts yet, its maker's to own: what
 /// `xmlNewDoc`, `htmlNewDocNoDtD`, `xmlCopyDoc`, the parsers and libxslt's
 /// transformation answer. It is neither `Copy` nor `Clone`, so it is given
-/// up once, to [`DocOf::first`] for an object's first reference or to
-/// [`NewDoc::free`]; [`NewDoc::node`] names the tree meanwhile, to build
-/// on (#3819).
+/// up once (#3819): to [`DocOf::first`] for an object's first reference,
+/// to [`NewDoc::taken_by_object`] where `php_dom_create_object` took it,
+/// or to [`NewDoc::freed_by_hand`] for code that frees it itself. Dropped
+/// any other way, an early return's among them, it frees the tree, so no
+/// path leaves one uncounted (#3842). [`NewDoc::node`] names the tree
+/// meanwhile, to build on.
 #[derive(Debug)]
 #[must_use]
 pub struct NewDoc(Node);
+
+/// `xmlFreeDoc`: the tree given back, where no object took it.
+impl Drop for NewDoc {
+    fn drop(&mut self) {
+        self.0.free_document();
+    }
+}
 
 impl NewDoc {
     /// The document, named while this value owns it.
@@ -1615,9 +1626,37 @@ impl NewDoc {
         self.0
     }
 
-    /// `xmlFreeDoc`: the tree given back, where no object took it.
-    pub fn free(self) {
-        self.0.free_document();
+    /// The tree, given up by this value without being freed.
+    fn into_node(self) -> Node {
+        ManuallyDrop::new(self).0
+    }
+
+    /// The tree given up to the object `php_dom_create_object` made for
+    /// the document, which counts it from the first reference
+    /// [`DocOf::under`] found no other object holding, as php hands a tree
+    /// it made to `DOM_RET_OBJ`. Where no object counts the document, none
+    /// took the tree, and it is freed here.
+    pub fn taken_by_object(self) {
+        let raw = self.0.raw().cast::<sys::xmlDoc>();
+        let counted = self
+            .0
+            .wrapper()
+            .as_deref()
+            .filter(|o| o.document() == raw)
+            .and_then(NodeObject::shared_doc)
+            .is_some();
+        if counted {
+            self.into_node();
+        }
+    }
+
+    /// The tree, given up to code that frees it itself with
+    /// [`Node::free_document`] once it is done with it, as ext/soap
+    /// builds a message and frees it where it is sent or abandoned:
+    /// nothing frees it on a drop from here.
+    #[must_use]
+    pub fn freed_by_hand(self) -> Node {
+        self.into_node()
     }
 
     /// A `NewDoc` for the `xmlDocPtr` a library over libxml2 answered, as
@@ -1693,7 +1732,8 @@ impl<'d> DocOf<'d> {
     /// counting no document yet. Only a [`NewDoc`] gives one, and it is
     /// given up to this, so no document another object counts takes a
     /// second first reference, whose owner would free the tree under the
-    /// other's (#3819).
+    /// other's (#3819). The tree is taken and never freed here: the
+    /// object that counts it frees it with itself (#3842).
     ///
     /// ```compile_fail,E0308
     /// # use php_ext_libxml::ffi::{DocOf, Node};
@@ -1709,13 +1749,9 @@ impl<'d> DocOf<'d> {
     ///     (of, of)
     /// }
     /// ```
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "taken, so the document takes one first reference"
-    )]
     pub fn first(node: NewDoc) -> DocOf<'d> {
         DocOf {
-            node: node.0,
+            node: node.into_node(),
             counted: Counted::First,
             read_off: PhantomData,
         }
@@ -1890,5 +1926,116 @@ impl Node {
             n.ns = copy.raw();
         });
         Some(node)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! A [`NewDoc`]'s tree counted where libxml2 frees it: the request's
+    //! leak sensor does not see libxml2's allocations, so each test lays
+    //! its own count in the document's `psvi`, which nothing else of the
+    //! engine's sets on a document, and libxml2's deregistration callback
+    //! adds one as `xmlFreeDoc` frees it (#3842).
+
+    use super::*;
+
+    /// `xmlDeregisterNodeFunc`.
+    type Freed = unsafe extern "C" fn(*mut sys::xmlNode);
+
+    unsafe extern "C" {
+        /// The callback a thread starts with, replaced, the old one
+        /// answered; it also sets the switch under which libxml2 calls a
+        /// thread's own callback at all (`__xmlRegisterCallbacks`).
+        fn xmlThrDefDeregisterNodeDefault(f: Option<Freed>) -> Option<Freed>;
+        /// The calling thread's own callback, where `xmlFreeDoc` reads it
+        /// (`xmlDeregisterNodeDefault` sets the main thread's alone).
+        fn __xmlDeregisterNodeDefaultValue() -> *mut Option<Freed>;
+    }
+
+    /// The callback: a document freed whose `psvi` names a count adds one
+    /// to it.
+    unsafe extern "C" fn freed(node: *mut sys::xmlNode) {
+        // SAFETY: libxml2 calls this with the live node it is freeing.
+        let kind = unsafe { (*node).type_ };
+        if kind != sys::XML_DOCUMENT_NODE && kind != sys::XML_HTML_DOCUMENT_NODE {
+            return;
+        }
+        // SAFETY: a document node is an `xmlDoc`, live as above.
+        let count = unsafe { (*node.cast::<sys::xmlDoc>()).psvi }.cast::<usize>();
+        if !count.is_null() {
+            // SAFETY: the count `frees` laid there, live across `body`.
+            unsafe { *count += 1 };
+        }
+    }
+
+    /// The documents freed while `body` takes `made`, beside what it
+    /// answered.
+    fn frees<R>(made: Option<NewDoc>, body: impl FnOnce(NewDoc) -> R) -> (usize, R) {
+        let Some(made) = made else {
+            panic!("libxml2 made no document");
+        };
+        let mut count = 0usize;
+        let doc = made.node().raw().cast::<sys::xmlDoc>();
+        // SAFETY: the live document made above, its `psvi` naming the
+        // count for the callback.
+        unsafe { (*doc).psvi = ptr::from_mut(&mut count).cast() };
+        // SAFETY: no pointer argument; the default put back below.
+        let start = unsafe { xmlThrDefDeregisterNodeDefault(None) };
+        // SAFETY: as above, the default as it was, the switch left set.
+        unsafe { xmlThrDefDeregisterNodeDefault(start) };
+        // SAFETY: no argument; the address of the calling thread's slot.
+        let slot = unsafe { __xmlDeregisterNodeDefaultValue() };
+        // SAFETY: the thread's own slot, read and written on its thread,
+        // the callback put back below.
+        let old = unsafe { (*slot).replace(freed) };
+        let answer = body(made);
+        // SAFETY: as above.
+        unsafe { *slot = old };
+        (count, answer)
+    }
+
+    /// A first reference taken where a settle answered no throw, the
+    /// `NewDoc` dropped on the `?` where it answered one, as #3829's parse
+    /// once dropped it.
+    fn settled(made: NewDoc, thrown: Result<(), ()>) -> Result<DocOf<'static>, ()> {
+        thrown?;
+        Ok(DocOf::first(made))
+    }
+
+    #[test]
+    fn a_new_doc_dropped_frees_its_tree() {
+        assert_eq!(frees(Node::new_doc(None), drop).0, 1);
+        assert_eq!(frees(Node::new_html_doc(), drop).0, 1);
+    }
+
+    #[test]
+    fn an_early_return_frees_the_tree_no_object_took() {
+        assert_eq!(
+            frees(Node::new_doc(None), |made| settled(made, Err(()))).0,
+            1
+        );
+    }
+
+    #[test]
+    fn the_first_reference_frees_nothing() {
+        let (count, of) = frees(Node::new_doc(None), |made| settled(made, Ok(())));
+        assert_eq!(count, 0);
+        let Ok(of) = of else {
+            panic!("no first reference");
+        };
+        assert!(matches!(of.counted, Counted::First));
+        of.node.free_document();
+    }
+
+    #[test]
+    fn a_tree_freed_by_hand_is_not_freed_on_the_drop() {
+        let (count, node) = frees(Node::new_doc(None), NewDoc::freed_by_hand);
+        assert_eq!(count, 0);
+        node.free_document();
+    }
+
+    #[test]
+    fn a_tree_no_object_took_is_freed_where_it_is_given_to_one() {
+        assert_eq!(frees(Node::new_doc(None), NewDoc::taken_by_object).0, 1);
     }
 }
