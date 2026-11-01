@@ -1062,7 +1062,7 @@ impl Loops {
             entry: execute::<T, D>,
             reenter: reenter::<T, D>,
             resume: resume::<T, D>,
-            handed: serve_frame::<T, D>,
+            handed: |req, first| serve_frame::<T, D>(req, first, held::here()),
             lay: state_of::<T>,
         }
     }
@@ -1165,7 +1165,7 @@ pub(crate) fn resume<T: Tier, D: Telling>(req: &mut Request, frame: FrameRef) ->
     } else {
         Stepped::Same(frame)
     };
-    let outcome = serve_frame::<T, D>(req, first);
+    let outcome = serve_frame::<T, D>(req, first, held::here());
     req.stack_left(reentered);
     crate::observer::loop_left(req, &outcome);
     req.stack_mut().pop_entry(guard);
@@ -1187,7 +1187,7 @@ fn serving<T: Tier, D: Telling>(req: &mut Request, frame: FrameRef) -> Result<()
 /// own site (design §4.3 seam 8).
 fn serve<T: Tier, D: Telling>(req: &mut Request, entry: FrameRef) -> Result<(), Fatal> {
     if interrupt::check(req)? {
-        return serve_frame::<T, D>(req, Stepped::Threw(entry));
+        return serve_frame::<T, D>(req, Stepped::Threw(entry), held::here());
     }
     // A throwable raised before any opline of the entry frame ran, where
     // php clears `EG(opline_before_exception)` so that
@@ -1216,7 +1216,7 @@ fn serve<T: Tier, D: Telling>(req: &mut Request, entry: FrameRef) -> Result<(), 
     if first == Stepped::Done {
         return Ok(());
     }
-    serve_frame::<T, D>(req, first)
+    serve_frame::<T, D>(req, first, held::here())
 }
 
 /// `execute_ex`'s own check (`Z/Zend/zend_vm_execute.h:116244`), after
@@ -1295,11 +1295,19 @@ fn refused_at_entry(req: &mut Request) -> bool {
 /// served in a scope of its own ([`serve_took`]), which gives that unit
 /// back as the edge leaves the frame, so the loop around it never lets
 /// its own units go for it.
-fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
+///
+/// `above` is where the stack stood at the call that began the serving,
+/// from which the request's first serving measures the loop's frame
+/// ([`Scope::measured`]).
+fn serve_frame<T: Tier, D: Telling>(
+    req: &mut Request,
+    first: Stepped,
+    above: usize,
+) -> Result<(), Fatal> {
     let mut stepped = first;
     let mut units = req.units_left.take();
     loop {
-        let served = serve_held::<T, D>(req, stepped, &units, Scope::Whole)?;
+        let served = serve_held::<T, D>(req, stepped, &units, Scope::Whole { above })?;
         if let Some(again) = served {
             units.give_back(req);
             stepped = again;

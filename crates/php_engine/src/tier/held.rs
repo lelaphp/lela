@@ -47,7 +47,8 @@ const BLOCKS: usize = 16;
 /// moves this far below it ([`php_compile::StackLimit::nested`]), so a
 /// scope costs a native's recursion below it none of php's budget. An
 /// optimised loop's frame is about 1,800 bytes (#3051); an unoptimised
-/// one's, with every handler in line, about 450 KiB.
+/// one's, with every handler in line, 193,200 bytes on macOS arm64
+/// (#3830). The request's first serving measures it before any scope.
 const FIRST_SCOPE_CHARGE: usize = if cfg!(debug_assertions) {
     512 * 1024
 } else {
@@ -138,7 +139,10 @@ pub(super) enum Entered<'u> {
 #[derive(Clone, Copy)]
 pub(super) enum Scope<'u> {
     /// Every frame of the serving, its units held in [`Units`].
-    Whole,
+    Whole {
+        /// Where the stack stood at the call that began the serving.
+        above: usize,
+    },
     /// A scope of its own ([`Scope::took`]).
     Took {
         /// The frame the scope serves first, the lowest it serves.
@@ -169,17 +173,19 @@ impl<'u> Scope<'u> {
         }
     }
 
-    /// A scope's body begun: where it is the request's first, what it
-    /// took of the stack since the call that began it noted as every
-    /// next scope's charge ([`Request::note_scope_cost`]). Nothing for
-    /// the whole serving.
+    /// A serving's or a scope's body begun: where it is the request's
+    /// first, what it took of the stack since the call that began it,
+    /// the loop's frame, noted as every next scope's charge and what the
+    /// loop's entry counts ([`Request::note_loop_frame`]).
     #[inline]
     pub(super) fn measured(self, req: &mut Request) {
-        if let Scope::Took { above, .. } = self
-            && let Some(cost) = req.scope_unmeasured().then(|| above.saturating_sub(here()))
+        let (Scope::Whole { above } | Scope::Took { above, .. }) = self;
+        if let Some(cost) = req
+            .loop_frame_unmeasured()
+            .then(|| above.saturating_sub(here()))
             && let Some(cost) = std::num::NonZeroUsize::new(cost)
         {
-            req.note_scope_cost(cost);
+            req.note_loop_frame(cost);
         }
     }
 
@@ -221,7 +227,7 @@ impl<'u> Scope<'u> {
     #[inline]
     pub(super) fn left(self, frame: FrameRef) -> bool {
         match self {
-            Scope::Whole => false,
+            Scope::Whole { .. } => false,
             Scope::Took { base, .. } => frame.0 < base.0,
         }
     }

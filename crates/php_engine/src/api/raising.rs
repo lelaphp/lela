@@ -850,9 +850,11 @@ pub fn call_stack_end(req: &mut Request) -> Result<(), Thrown> {
 /// (`php_compile::StackLimit::entry_overflowed`): the same `Error`, held
 /// under detect to the whole of the thread a host sized for that
 /// re-entry rather than php's budget, and naming php's budget either way.
+/// It is asked before the loop's frame is laid, so what that frame was
+/// measured to take ([`Request::loop_frame`]) is counted with it (#3830).
 pub(crate) fn call_stack_entry(req: &mut Request) -> Result<(), Thrown> {
     let stack = req.stack_limit();
-    if !stack.entry_overflowed() {
+    if !stack.entry_overflowed(req.loop_frame()) {
         return Ok(());
     }
     Err(call_stack_size_error(req, stack.max_stack_size()))

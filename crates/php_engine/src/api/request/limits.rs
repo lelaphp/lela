@@ -222,9 +222,10 @@ pub(super) struct LimitsState {
     /// thread a callback C made took the lent request on, that thread
     /// ([`Request::stack_for_this_thread`]); none before the start.
     stack_thread: Option<ThreadId>,
-    /// The stack the request's first scope of the loop was measured to
-    /// take ([`Request::note_scope_cost`]), none before it.
-    scope_cost: Option<std::num::NonZeroUsize>,
+    /// The stack the loop's frame was measured to take, at the
+    /// request's first serving or first scope
+    /// ([`Request::note_loop_frame`]), none before it.
+    loop_frame: Option<std::num::NonZeroUsize>,
     /// php's `EG(jit_trace_num)`, the running execution's trace number
     /// ([`crate::tier::trace_num`]), kept here beside the stack limit
     /// because a fiber switch swaps both ([`Request::switch_execution`]).
@@ -256,7 +257,7 @@ impl LimitsState {
             interrupt,
             stack_limit: StackLimit::UNCHECKED,
             stack_thread: None,
-            scope_cost: None,
+            loop_frame: None,
             trace_num: TraceNum::NONE,
             reentry: None,
         }
@@ -348,32 +349,44 @@ impl Request {
     /// by what the scope takes, until [`Self::stack_left`] puts it back;
     /// none where the thread has no room for one, and on a fiber's
     /// stack, whose limit cannot move.
-    /// The charge is what a scope was measured to take, `first` before
-    /// one was; the room left below it at least `room` and twice the
+    /// The charge is what the loop's frame was measured to take, `first`
+    /// before it was; the room left below it at least `room` and twice the
     /// charge, for what the scope's frames call, a native's call back
     /// into the loop among them, whose frame is the size of a scope's.
     pub(crate) fn stack_nested(&mut self, first: usize, room: usize) -> Option<Reentered> {
         let charge = self
             .limits
-            .scope_cost
+            .loop_frame
             .map_or(first, std::num::NonZeroUsize::get);
         let room = room.max(charge.saturating_mul(2));
         self.limits.stack_limit.nested(charge, room)
     }
 
-    /// Whether a scope of the loop is still to be measured: the first
-    /// of the request.
-    pub(crate) fn scope_unmeasured(&self) -> bool {
-        self.limits.scope_cost.is_none()
+    /// Whether the loop's frame is still to be measured: before the
+    /// request's first serving or scope.
+    pub(crate) fn loop_frame_unmeasured(&self) -> bool {
+        self.limits.loop_frame.is_none()
     }
 
-    /// `cost`, the stack the request's first scope of the loop took from
-    /// the call that began it to its body: what every scope after it is
-    /// charged: the loop's bodies are near one size, one scope's frame
-    /// for each of the binary's tiers and observers (1,760 to 1,792
-    /// bytes measured on #3051), and the room twice the charge.
-    pub(crate) fn note_scope_cost(&mut self, cost: std::num::NonZeroUsize) {
-        self.limits.scope_cost = Some(cost);
+    /// `cost`, the stack the request's first serving or scope of the loop
+    /// took from the call that began it to its body: what every scope
+    /// after it is charged, and what the loop's entry counts below the
+    /// frame it is asked from ([`Request::loop_frame`]). The loop's
+    /// bodies are near one size, one frame for each of the binary's
+    /// tiers and observers: 1,760 to 1,792 bytes optimised (#3051), and
+    /// 193,200 unoptimised, every handler in line (#3830).
+    pub(crate) fn note_loop_frame(&mut self, cost: std::num::NonZeroUsize) {
+        self.limits.loop_frame = Some(cost);
+    }
+
+    /// What the loop's frame was measured to take
+    /// ([`Request::note_loop_frame`]), zero before it was: the request's
+    /// first serving stands at the stack's base, where one frame more is
+    /// never the last.
+    pub(crate) fn loop_frame(&self) -> usize {
+        self.limits
+            .loop_frame
+            .map_or(0, std::num::NonZeroUsize::get)
     }
 
     /// The serving [`Self::stack_reentered`] or the scope
@@ -752,7 +765,7 @@ mod tests {
         });
         assert!(!asked);
         assert!(refused.overflowed());
-        assert!(refused.entry_overflowed());
+        assert!(refused.entry_overflowed(0));
         assert_eq!(refused.max_stack_size(), 0);
         if let Some(bounds) = php_heap::call_stack_bounds() {
             let init = || StackLimit::init(0, 0);
