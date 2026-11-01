@@ -264,6 +264,10 @@ impl Iter {
 /// `zend_call_function` a filled `zend_fcall_info_cache` takes, which
 /// is a function with no scope, a method with its scope and receiver,
 /// or a closure through its payload.
+///
+/// A serve on a thread C called back from, with the request lent to it,
+/// is held to that thread's own stack limit for its length
+/// ([`Request::stack_for_this_thread`], #3742).
 fn serve(
     req: &mut Request,
     target: Target,
@@ -271,6 +275,7 @@ fn serve(
     arguments: &[Value],
     extra_named: &[(PhpString, Value)],
 ) -> Result<Value, Thrown> {
+    let aside = req.stack_for_this_thread();
     let served = match target {
         Target::Function(function) => req.serve_function(function, family, arguments, extra_named),
         Target::Method {
@@ -286,7 +291,9 @@ fn serve(
         ),
         Target::Closure(object) => req.serve_closure(object, family, arguments, extra_named),
     };
-    without_frame(req, served)
+    let served = without_frame(req, served);
+    req.stack_given_back(aside);
+    served
 }
 
 /// The tail of `zend_call_function` (`Z/Zend/zend_execute_API.c:1069`):

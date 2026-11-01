@@ -163,6 +163,10 @@ pub struct Reentry {
     address: AtomicUsize,
     /// The last generation a lend took.
     lends: AtomicUsize,
+    /// How many callbacks hold a lend now, taken and not yet given back:
+    /// one, or more where a callback lent the request again and another
+    /// took that lend ([`Reentry::held`]).
+    holds: AtomicUsize,
     deferred: Pool<Deferred, DEFERRED>,
     /// The calls threads other than the request's wait on.
     waits: [Wait; WAITS],
@@ -284,6 +288,7 @@ impl Reentry {
             lent: AtomicUsize::new(0),
             address: AtomicUsize::new(0),
             lends: AtomicUsize::new(0),
+            holds: AtomicUsize::new(0),
             deferred: Pool::new(Deferred {
                 callback: 0,
                 words: [0; DEFERRED_WORDS],
@@ -337,7 +342,9 @@ impl Reentry {
         if generation == 0 {
             return None;
         }
-        NonZeroUsize::new(self.address.load(Ordering::Relaxed)).map(|at| Lent { generation, at })
+        let at = NonZeroUsize::new(self.address.load(Ordering::Relaxed))?;
+        self.holds.fetch_add(1, Ordering::AcqRel);
+        Some(Lent { generation, at })
     }
 
     /// What [`Reentry::take_lent`] took, given back as the callback
@@ -347,8 +354,17 @@ impl Reentry {
         reason = "taking the request ends the hold, so it is given back once"
     )]
     pub fn give_back(&self, lent: Lent) {
+        self.holds.fetch_sub(1, Ordering::AcqRel);
         self.lent.store(lent.generation, Ordering::Release);
         self.wake_posted();
+    }
+
+    /// Whether a callback holds the request now, on whichever thread it
+    /// took it: what a serve asks before it looks for the thread it
+    /// stands on ([`crate::api::request::Request::stack_for_this_thread`]),
+    /// so a request no callback holds asks nothing more.
+    pub(crate) fn held(&self) -> bool {
+        self.holds.load(Ordering::Acquire) != 0
     }
 
     /// One call posted, `fill` writing it, and the request's interrupt
@@ -510,12 +526,15 @@ mod tests {
         assert!(reentry.take_lent().is_none());
         let at = NonZeroUsize::MIN.saturating_add(7);
         let lending = reentry.lend(at);
+        assert!(!reentry.held());
         let taken = reentry.take_lent();
         assert_eq!(taken.as_ref().map(Lent::at), Some(at));
+        assert!(reentry.held());
         assert!(reentry.take_lent().is_none());
         if let Some(taken) = taken {
             reentry.give_back(taken);
         }
+        assert!(!reentry.held());
         reentry.reclaim(lending);
         assert!(reentry.take_lent().is_none());
         assert!(reentry.defer(|deferred| deferred.callback = 1));
