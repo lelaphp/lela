@@ -164,17 +164,30 @@ pub(crate) fn sniff_charset_from_string(header: &[u8]) -> Option<Vec<u8>> {
 /// bool(true)
 /// string(4) "c3a4"
 /// ```
+///
+/// `stream->wrapperdata` is read off the stream ([`Stream::wrapper_data`]),
+/// so no method of a user wrapper runs, its `stream_eof` among them: the
+/// one warning below is the parse's own read.
+///
+/// ```php
+/// class W { public $context; function stream_open($p,$m,$o,&$op){return true;} function stream_read($n){ static $d = 0; return $d++ ? '' : "<a>x</a>"; } function stream_close(){} function stream_stat(){return [];} function url_stat($p,$f){return [];} }
+/// stream_wrapper_register('ww', 'W');
+/// $d = new DOMDocument; var_dump($d->load('ww://x'));
+/// ```
+/// ```expect
+/// Warning: DOMDocument::load(): W::stream_eof is not implemented! Assuming EOF in %SCRATCH%/witness.php on line 4
+///
+/// Warning: DOMDocument::load(): Document is empty in ww://x, line: 1 in %SCRATCH%/witness.php on line 4
+/// bool(false)
+/// ```
 pub fn sniff_charset_from_stream(
     req: &mut Request,
     stream: Stream,
 ) -> Result<Option<Vec<u8>>, Thrown> {
-    let meta = stream.meta_data(req)?;
-    let headers = meta
-        .find(b"wrapper_data")
+    let headers = stream
+        .wrapper_data(req)
         .and_then(|data| data.deref().as_array());
-    let charset = headers.and_then(|headers| charset_of_headers(req, headers));
-    meta.give_up(req);
-    Ok(charset)
+    Ok(headers.and_then(|headers| charset_of_headers(req, headers)))
 }
 
 /// The charset of the last `Content-Type:` line among the wrapper's
