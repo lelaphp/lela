@@ -1357,6 +1357,39 @@ fn a_lock_that_differs_must_be_in_the_diff_and_a_lock_in_the_diff_needs_its_read
     );
 }
 
+/// What `worktree land` carries is the reading condition 3 reads (#3802):
+/// `_merge`'s `api-check` pass over a lock in the diff reaches main's
+/// store as a line of the log and an entry of the index, while main's file
+/// of the seam stays the pass main took over the lock before. Before the
+/// land the lock's reading predates it; after it the lock is met, with no
+/// `api-check` taken again in main.
+#[test]
+fn a_lock_whose_pass_worktree_land_carried_is_met_in_main() {
+    let root = scratch("landed-lock");
+    let store = Store::of_workspace(&root);
+    let pass = |root: &Path| {
+        let manifest = Manifest::load(root).unwrap();
+        let now = xtask::key::Snapshot::disk(root).unwrap();
+        let mut reading = Reading::for_scope("api-check", "heap", &manifest, &now).unwrap();
+        reading.status = Status::Pass;
+        reading
+    };
+    store.record(&[pass(&root)]).unwrap();
+    write(&root, "crates/php_heap/heap.lock", "Gc\n");
+    let predates = "crates/php_heap/heap.lock is in the diff and its api-check reading predates it";
+    let verdict = judge(&root);
+    assert!(verdict.unmet.contains(&predates.into()), "{verdict:#?}");
+
+    let merge = Tree::new("done-landed-lock-merge").unwrap();
+    Store::of_workspace(&merge).record(&[pass(&root)]).unwrap();
+    assert_eq!(store.land(&Store::of_workspace(&merge)).unwrap(), 1);
+    let verdict = judge(&root);
+    assert!(
+        verdict.unmet.iter().all(|l| !l.contains(".lock")),
+        "{verdict:#?}"
+    );
+}
+
 // ---------------------------------------------------------------- 4
 
 #[test]
