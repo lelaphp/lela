@@ -4,7 +4,7 @@
 //! layer reading the one below as `zip_source_read` does, until its
 //! buffer is full or the layer below has ended.
 
-use crate::archive::{Archive, Input};
+use crate::archive::{Archive, Input, SourceLink};
 use crate::codec::{Attributes, Compressor, Sealer};
 use crate::error::Status;
 
@@ -110,6 +110,12 @@ impl Pipe {
         })?;
         self.written += n as u64;
         Ok(n)
+    }
+
+    /// The added entry's source below the layers, which the copy holds
+    /// open; `None` for an unchanged entry's data.
+    pub(crate) fn source(&self) -> Option<SourceLink> {
+        self.lower.input.source()
     }
 
     /// `copy_source`'s progress at a full buffer: `zip_source_tell` of

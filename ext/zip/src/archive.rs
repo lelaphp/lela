@@ -232,9 +232,9 @@ pub(crate) enum Source {
 }
 
 /// `zip_source_file` and `zip_source_filep`: the file, by its name, the
-/// window on it, what it stated when made, and how many streams hold it
-/// open (`open_count`), under which one over a device or a pipe, which
-/// cannot seek, is not opened again.
+/// window on it, what it stated when made, and how many hold it open
+/// (`open_count`), its streams and the close's copy, under which one over
+/// a device or a pipe, which cannot seek, is not opened again.
 #[derive(Debug)]
 pub(crate) struct FileSource {
     /// Its name, which the window of each stream over it names it by.
@@ -314,6 +314,8 @@ impl FileSource {
 /// The close's read of a file source opened (`ZIP_SOURCE_READ`): on to
 /// the window's end, or to the file's where the window has none.
 pub(crate) struct FileInput {
+    /// The source, which the copy holds open while it reads.
+    link: FileLink,
     file: File,
     /// What is left of the window, `None` where it has none.
     left: Option<u64>,
@@ -377,9 +379,9 @@ pub(crate) fn read_file(file: &mut File, buf: &mut [u8]) -> Result<usize, Status
 
 /// `zip_source_buffer`: its bytes, which the window of each stream over
 /// it shares and names it by, where its reading stands (`in->offset`),
-/// which a window's read seeks it to and moves on, and how many streams
-/// hold it open (`open_count`), under which the close's read does not
-/// rewind it.
+/// which a window's read seeks it to and moves on, and how many hold it
+/// open (`open_count`), its streams and the close's copy, under which the
+/// close's read does not rewind it.
 #[derive(Debug)]
 pub(crate) struct Buffer {
     data: Arc<[u8]>,
@@ -609,6 +611,10 @@ impl Source {
                 })
             }
             Source::File(f) => Ok(Input::File(FileInput {
+                link: FileLink {
+                    entry,
+                    path: Arc::clone(&f.path),
+                },
                 file: f.open()?,
                 left: f.len.map(NonZeroU64::get),
                 read: 0,
@@ -632,6 +638,18 @@ pub(crate) enum Input {
         reader: Reader,
         read: u64,
     },
+}
+
+impl Input {
+    /// The added entry's source it reads, which the close's copy holds
+    /// open; `None` for an unchanged entry's data.
+    pub(crate) fn source(&self) -> Option<SourceLink> {
+        match self {
+            Input::Buffer { link, .. } => Some(SourceLink::Buffer(link.clone())),
+            Input::File(f) => Some(SourceLink::File(f.link.clone())),
+            Input::Unchanged { .. } => None,
+        }
+    }
 }
 
 /// `time(NULL)`.
@@ -1943,9 +1961,35 @@ impl Archive {
     }
 
     /// `zip_source_open` of the source `link` names, by a stream over it
-    /// as the stream opens: a stream holds its source open from
-    /// `zip_fopen` to `zip_fclose`, where a read made and done within one
-    /// call leaves only where it read to.
+    /// as the stream opens, or by the close as its copy of the entry
+    /// starts: a stream holds its source open from `zip_fopen` to
+    /// `zip_fclose`, where a read made and done within one call leaves
+    /// only where it read to, and the close from `copy_source`'s open to
+    /// its close (zip_close.c:676-717). So a progress callback inside the
+    /// copy of an entry over a device, which cannot seek, is refused it,
+    /// whether it reads the entry or opens a stream on it, and the
+    /// archive keeps the error once the copy has let the source go:
+    ///
+    /// ```php
+    /// $z = new ZipArchive; $z->open('hold-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    /// $z->addFile('/dev/zero', 'z', 0, 100000); $z->setCompressionName('z', ZipArchive::CM_STORE);
+    /// $z->registerProgressCallback(0.1, function ($r) use ($z) {
+    ///     $g = @$z->getFromName('z'); $s = @$z->getStream('z'); $n = $s === false ? false : strlen(stream_get_contents($s)); if ($s) fclose($s);
+    ///     echo round($r, 3), ' ', var_export($g === false ? false : strlen($g), true), ' ', var_export($n, true), ' ', $z->getStatusString(), "\n"; });
+    /// var_dump($z->close(), $z->getStatusString()); unlink('hold-witness.zip');
+    /// ```
+    /// ```expect
+    /// 0 100000 100000 No error
+    /// 0.164 false false Resource still in use
+    /// 0.328 false false Resource still in use
+    /// 0.492 false false Resource still in use
+    /// 0.655 false false Resource still in use
+    /// 0.819 false false Resource still in use
+    /// 0.983 false false Resource still in use
+    /// 1 100000 100000 Resource still in use
+    /// bool(true)
+    /// string(8) "No error"
+    /// ```
     pub(crate) fn open_source(&mut self, link: &SourceLink) {
         if let Some(opens) = self.opens_of(link) {
             *opens += 1;
@@ -1953,7 +1997,7 @@ impl Archive {
     }
 
     /// `zip_source_close` of the source `link` names, by a stream over it
-    /// as the stream closes.
+    /// as the stream closes, or by the close as its copy ends.
     pub(crate) fn close_source(&mut self, link: &SourceLink) {
         if let Some(opens) = self.opens_of(link) {
             *opens = opens.saturating_sub(1);
