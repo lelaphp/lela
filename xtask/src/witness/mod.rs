@@ -311,6 +311,10 @@ pub(crate) struct Tally {
     /// the oracle's run failed does, so its natives are no witness short,
     /// and the reading names why it did not serve (#1535).
     pub unserved: Vec<String>,
+    /// What each server's line that missed saw, as `id: what`
+    /// ([`host::seen`]): the reading's message keeps it, so a miss that
+    /// does not come again on a rerun can still be read (#3846).
+    pub saw: Vec<String>,
 }
 
 impl Tally {
@@ -469,6 +473,12 @@ fn tail(tally: &Tally) -> String {
             "fence",
             "s",
             format!("held to the engine alone: {}", covered.join("; ")),
+        ),
+        (
+            tally.saw.len() as u64,
+            "server's line",
+            "s",
+            format!("missed, and saw: {}", tally.saw.join("; ")),
         ),
     ];
     let said = clauses.into_iter().filter(|(n, ..)| *n > 0);
@@ -876,8 +886,13 @@ fn serve_all(
     let judged = tally::Tally::judge_beside(&lines, |(at, held, line)| {
         Ok(held.judge(ready[*at].oracle, binary.host(held.host()), registry, line))
     })?;
-    for ((at, _, _), judged) in lines.iter().zip(judged.judged) {
+    for ((at, _, line), judged) in lines.iter().zip(judged.judged) {
         if let Some(tally) = finished.get_mut(*at) {
+            if line.serves() && tally::Judgement::counts_against(judged.judgement) {
+                let differs = judged.judgement == Judgement::Fail;
+                let what = host::seen(&judged.note, differs);
+                tally.saw.push(format!("{}: {what}", judged.id));
+            }
             tally.witnesses.judged.push(judged);
             tally.witnesses.found += 1;
         }
@@ -1251,6 +1266,7 @@ fn finish(
         reproduced,
         oracle_absent: prepared.oracle_absent,
         unserved,
+        saw: Vec::new(),
     }
 }
 
