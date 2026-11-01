@@ -31,7 +31,7 @@
 //! [line.serve]                         # a server: started, asked, then stopped
 //! listen = "{dir}/fpm.sock"            # a path is a Unix socket, else host:port
 //! ready = ["fpm.log", "ready to handle connections"]  # waited for in a file
-//! stop = "SIGQUIT"
+//! stop = "SIGQUIT"                     # sent again while it stands asleep 2s after
 //! settled = ["fpm.log", '(?s)started.*started']  # matched once answered, before the stop
 //! [[line.serve.request]]
 //! http = "GET / HTTP/1.0\r\n\r\n"      # or `params` and `body`, as FastCGI records
@@ -518,8 +518,8 @@ fn files(dir: &Path) -> Result<BTreeMap<String, String>> {
 }
 
 /// A server's run while it stands: ready, asked each request in turn, and
-/// sent its stop; the answers. Where any of it fails the server is killed
-/// rather than left to the recipe's limit.
+/// sent its stop until it ends ([`stopped`]); the answers. Where any of it
+/// fails the server is killed rather than left to the recipe's limit.
 fn served(serve: &Serve, pid: u32, dir: &Path, port: u16) -> Result<Vec<String>> {
     let answers = asked(serve, dir, port);
     let signal = match answers {
@@ -527,7 +527,35 @@ fn served(serve: &Serve, pid: u32, dir: &Path, port: u16) -> Result<Vec<String>>
         Err(_) => Signal::SIGKILL,
     };
     signalled(pid, signal)?;
+    if signal != Signal::SIGKILL {
+        stopped(pid, signal)?;
+    }
     answers
+}
+
+/// A server sent `signal` as its stop, sent it again while it stands
+/// [`QUIET`] after the last with none of its group runnable, until it ends
+/// or [`PATIENCE`] runs out. php-cgi's accept loop reads `in_shutdown` and
+/// then blocks in `accept` (`Z/main/fastcgi.c:1361-1368`), so a stop
+/// handled between the two sets a flag already read, and the process
+/// waits in `accept` for a connection that never comes, as the engine's
+/// loop does too; under load that reads as a run past the recipe's limit
+/// (#3846). A second stop interrupts the `accept` and ends it as the first
+/// would have; php-fpm's master ignores a stop it is already acting on.
+fn stopped(pid: u32, signal: Signal) -> Result<()> {
+    let host = Pid::from_raw(i32::try_from(pid).context("a process id past pid_t")?);
+    // The host leads its group, and a group that ended and is not yet
+    // reaped answers ESRCH, or EPERM on macOS.
+    let ended = || matches!(killpg(host, None), Err(Errno::ESRCH | Errno::EPERM));
+    let (since, mut sent) = (Instant::now(), Instant::now());
+    while !ended() && since.elapsed() < PATIENCE {
+        if sent.elapsed() >= QUIET && !runnable(host) {
+            kill(host, signal).ok();
+            sent = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
 }
 
 /// A program that does not end on its own, a session that loops or one
@@ -1006,6 +1034,34 @@ mod tests {
         let settled = line("settled = [\"log\", \"^done\"]\n");
         let (judgement, note) = judged(&settled, &pin, &engine);
         assert_eq!(judgement, Judgement::Pass, "{note}");
+    }
+
+    /// A stop the server loses, as php-cgi's accept loop loses one handled
+    /// between its `in_shutdown` read and its `accept` (#3846), is sent
+    /// again once the server stands asleep [`super::QUIET`] after it: the
+    /// engine's stand-in ends only on its second `SIGTERM` and the pinned
+    /// one on its first, and the line passes well inside the recipe's
+    /// limit, which it ran to while the stop was sent once.
+    #[test]
+    fn a_stop_the_server_loses_is_sent_again() {
+        if !oracle() {
+            return;
+        }
+        let hosts = Tree::new("host-line-lost-stop").unwrap();
+        let waits = "echo up > up; while :; do /bin/sleep 1 & wait $!; done";
+        let pinned = host(&hosts, "php-cgi", &format!("trap 'exit 0' TERM; {waits}"));
+        let lost = format!("trap 'trap \"exit 0\" TERM' TERM; {waits}");
+        let engine = host(&hosts, "engine", &lost);
+        let text = "[[line]]\nname = \"one\"\nargs = []\n[line.serve]\nlisten = \"127.0.0.1:1\"\n\
+                    ready = [\"up\", \"up\"]\nstop = \"SIGTERM\"\n";
+        let started = Instant::now();
+        let (judgement, note) = judged(text, &pin(&pinned, None), &engine);
+        assert_eq!(judgement, Judgement::Pass, "{note}");
+        assert!(
+            started.elapsed() < super::PATIENCE * 2,
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     /// A file of lines is refused whole for a name given twice, a mask
