@@ -102,15 +102,21 @@ impl Drop for Listening {
 /// php-cgi left among them, is replaced by the one bound; a step of [`bound`] that
 /// fails is said with its own line. The `port` is [`short_port`]'s, so
 /// one whose low 16 bits are 0, `65536` among them, names no `port` and
-/// the whole address is a Unix socket's path.
+/// the whole address is a Unix socket's path. A host of `MAXPATHLEN`
+/// bytes or more makes it one too, as php's `(s-path) < MAXPATHLEN` keeps
+/// it out of `host[MAXPATHLEN]` (`Z/main/fastcgi.c:661`), so the address
+/// is refused as a path too long and never resolved. The bound is the
+/// engine's one `MAXPATHLEN`, the host's `PATH_MAX`, which
+/// `PHP_MAXPATHLEN` says.
 fn listen(path: &[u8], backlog: i32) -> Option<Listening> {
     use nix::sys::socket::{AddressFamily, Backlog, SockaddrIn, UnixAddr};
+    use php_ext::request::MAXPATHLEN;
     let tcp = match path.iter().position(|b| *b == b':') {
-        Some(at) => short_port(&path[at + 1..]).map(|port| (&path[..at], port)),
+        Some(at) if at < MAXPATHLEN => short_port(&path[at + 1..]).map(|port| (&path[..at], port)),
         None if !path.is_empty() && path.iter().all(u8::is_ascii_digit) => {
             short_port(path).map(|port| (&b""[..], port))
         }
-        None => None,
+        Some(_) | None => None,
     };
     let backlog = Backlog::new(backlog).ok()?;
     if let Some((host, port)) = tcp {
