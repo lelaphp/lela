@@ -62,8 +62,8 @@ use php_ext::request::{MAXPATHLEN, Request};
 use php_ext::values::walk;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{
-    Borrowed, ClassType, DocProps, Exported, Kind, Name, Node, NodeObject, Ns, SharedDoc, Switches,
-    XML_ATTRIBUTE_ID,
+    Borrowed, ClassType, DocOf, DocProps, Exported, Kind, Name, Node, NodeObject, Ns, SharedDoc,
+    Switches, XML_ATTRIBUTE_ID,
 };
 
 use document::{XML_NS, XMLNS_NS};
@@ -433,8 +433,12 @@ fn import_simplexml_common(
     let base = class(req, name)?;
     let class = exported.mapped(base);
     let made = new_object(req, class)?;
+    let Some(of) = DocOf::exported(&exported) else {
+        made.give_up(req);
+        return Err(uncounted(req));
+    };
     if let Some(mut obj) = libxml_half(req, *made) {
-        obj.attach(req, node, exported.document());
+        obj.attach(req, of);
     }
     if old != ClassType::Modern
         && new_class == ClassType::Modern
@@ -734,7 +738,7 @@ fn object_for(
     context: Option<PhpObject>,
 ) -> Result<Owner<Value>, Thrown> {
     let parent = context.and_then(|c| libxml_half(req, c));
-    made_over(req, node, parent.as_deref())
+    made_over(req, node, parent.as_deref(), parent.as_deref())
 }
 
 /// `php_dom_create_object` as `xml_common.h` exports it (`PHP_DOM_EXPORT`)
@@ -777,18 +781,22 @@ pub fn create_object_in(
     node: Node,
     doc: &NodeObject,
 ) -> Result<Owner<Value>, Thrown> {
-    made_over(req, node, Some(doc))
+    made_over(req, node, Some(doc), Some(doc))
 }
 
 /// `php_dom_create_object(obj, return_value, domobj)` over `domobj`'s
 /// libxml half, `parent`: the object standing for `node`, one more owner
 /// of it where one exists, otherwise a fresh one of the node's class,
 /// the modern family where `parent`'s document is modern, mapped by its
-/// `registerNodeClass` table, made by [`instantiate`].
+/// `registerNodeClass` table, made by [`instantiate`] counting the node's
+/// document under the reference `counted` holds, `parent` where
+/// `php_dom_instantiate_object_helper` reads `parent->document` and the
+/// evaluation's count of it where a `DOMXPath` node set's objects are made.
 fn made_over(
     req: &mut Request,
     node: Node,
     parent: Option<&NodeObject>,
+    counted: Option<&NodeObject>,
 ) -> Result<Owner<Value>, Thrown> {
     if let Some(existing) = node.object() {
         return Ok(Owner::take(req, existing.as_value()));
@@ -805,7 +813,41 @@ fn made_over(
     };
     let base = class(req, name)?;
     let class = parent.map_or(base, |p| p.mapped(base));
-    instantiate(req, class, node, parent)
+    instantiate(req, class, node, counted)
+}
+
+/// [`made_over`] the object `context`, counting the node's document
+/// under the reference `counted` holds: how a `DOMXPath` evaluation makes its
+/// node set's objects, the class from the object php's
+/// `dom_xpath_intern_for_doc` answers for each node and the document the
+/// node's own, which the evaluation holds for the loop (#3541).
+pub(crate) fn object_counting(
+    req: &mut Request,
+    node: Node,
+    context: PhpObject,
+    counted: Option<&NodeObject>,
+) -> Result<Owner<Value>, Thrown> {
+    let parent = libxml_half(req, context);
+    made_over(req, node, parent.as_deref(), counted)
+}
+
+/// [`DocOf::under`], or where no reference to the node's document is in
+/// reach, the `InternalError` fatal: an object that stood for the node
+/// counting another document would outlive the node's (#3541).
+pub(crate) fn doc_of<'d>(
+    req: &mut Request,
+    node: Node,
+    by: Option<&'d NodeObject>,
+) -> Result<DocOf<'d>, Thrown> {
+    DocOf::under(node, by).ok_or_else(|| uncounted(req))
+}
+
+/// The fatal [`doc_of`] raises.
+fn uncounted(req: &mut Request) -> Thrown {
+    fatal(
+        req,
+        "InternalError: no object counts the document of the node an object is made for",
+    )
 }
 
 /// `php_dom_create_nullable_object`.
@@ -821,19 +863,27 @@ fn nullable_object(
 }
 
 /// `php_dom_instantiate_object_helper`: a fresh object of `class` over
-/// `node`, counting the document of `parent`, a dom object's libxml half,
-/// where one is given and the node has a document. `parent`'s document is
-/// read once the object is made, as php reads `parent->document` after
-/// `object_init_ex`.
+/// `node`, counting the node's own document, under the reference
+/// `counted`, a dom object's libxml half, counts where it is that
+/// document's. The reference is read once the object is made, as php
+/// reads `parent->document` after `object_init_ex`, since making it can
+/// serve an autoloader.
 fn instantiate(
     req: &mut Request,
     class: ClassId,
     node: Node,
-    parent: Option<&NodeObject>,
+    counted: Option<&NodeObject>,
 ) -> Result<Owner<Value>, Thrown> {
     let object = new_object(req, class)?;
+    let of = match doc_of(req, node, counted) {
+        Ok(of) => of,
+        Err(thrown) => {
+            object.give_up(req);
+            return Err(thrown);
+        }
+    };
     if let Some(mut obj) = libxml_half(req, *object) {
-        obj.attach(req, node, parent.and_then(NodeObject::shared_doc));
+        obj.attach(req, of);
     }
     Ok(object.into_value())
 }
@@ -858,14 +908,17 @@ pub(crate) fn libxml_half(req: &mut Request, object: PhpObject) -> Option<Borrow
 }
 
 /// A constructor's bind: the node the object stood for let go of, and
-/// `node` taken, `php_libxml_increment_node_ptr` with no document.
-fn rebind(req: &mut Request, object: PhpObject, node: Node) {
+/// `node`, which a constructor makes in no document, taken,
+/// `php_libxml_increment_node_ptr` with no document.
+fn rebind(req: &mut Request, object: PhpObject, node: Node) -> Result<(), Thrown> {
+    let of = doc_of(req, node, None)?;
     if let Some(mut obj) = libxml_half(req, object) {
         if obj.is_bound() {
             obj.decrement_resource(req);
         }
-        obj.attach(req, node, None);
+        obj.attach(req, of);
     }
+    Ok(())
 }
 
 /// The slots `dom_object_handlers` overrides, shared by every dom table.
@@ -1479,39 +1532,13 @@ fn copy_document_ref(req: &mut Request, from: PhpObject, to: PhpObject) -> Resul
 /// ```
 fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let node = node_of(req, object);
-    let mut payload = crate::object::Dom::default();
-    let mut copied = None;
     if let Some(n) = node
         && n.kind() == Kind::NamespaceDecl
     {
-        let parent_obj = match dom(req, object).map(|d| &d.extra) {
-            Some(Extra::NamespaceParent(p)) => Some(**p),
-            _ => None,
-        };
-        if let Some(p) = parent_obj {
-            payload.extra = Extra::NamespaceParent(Owner::take(req, p));
-        }
-        let ns = n.ns();
-        // The element is the one the object's owner names, which is none
-        // once a removal took its node away (`xinclude()` among them),
-        // never the declaration's own parent pointer, which can dangle
-        // then (php 8.5.12).
-        let parent = parent_obj.and_then(|p| node_of(req, p));
-        if let Some(cloned) = Node::fake_namespace_decl(
-            parent,
-            parent.map_or(n.doc(), Node::doc),
-            ns.and_then(Ns::href).as_deref(),
-            ns.and_then(Ns::prefix).as_deref(),
-        ) {
-            let shared = shared_doc(req, object);
-            payload.obj.attach(req, cloned, shared);
-        }
-        let clone = object.clone_with(req, payload)?;
-        if let Some(d) = dom_mut(req, *clone) {
-            d.obj.set_object(*clone);
-        }
-        return Ok(clone);
+        return clone_namespace_decl(req, object, n);
     }
+    let mut payload = crate::object::Dom::default();
+    let mut copied = None;
     let mut fresh = None;
     if (instance_of(req, object, "DOMNode") || instance_of(req, object, "Dom\\Node"))
         && let Some(n) = node
@@ -1542,12 +1569,19 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>
             clone_node(n, n.doc(), true)
         };
         if let Some(cloned) = cloned {
-            let shared = if cloned.doc() == n.doc() {
-                shared_doc(req, object)
-            } else {
-                None
+            // A clone of a document is a document of its own, which takes
+            // its first reference.
+            let half = libxml_half(req, object).filter(|_| cloned.doc() == n.doc());
+            let of = match doc_of(req, cloned, half.as_deref()) {
+                Ok(of) => of,
+                Err(thrown) => {
+                    if let Some(private) = fresh {
+                        private.free(req);
+                    }
+                    return Err(thrown);
+                }
             };
-            payload.obj.attach(req, cloned, shared);
+            payload.obj.attach(req, of);
             copied = Some((n, cloned));
         }
     }
@@ -1578,6 +1612,45 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>
             Some(mut obj) => obj.set_private_data(req, Box::new(private)),
             None => private.free(req),
         }
+    }
+    Ok(clone)
+}
+
+/// [`clone_object`] of a namespace node: a declaration of its own, made
+/// under the element the object's owner names, which the clone's owner
+/// names too.
+fn clone_namespace_decl(
+    req: &mut Request,
+    object: PhpObject,
+    n: Node,
+) -> Result<Owner<PhpObject>, Thrown> {
+    let mut payload = crate::object::Dom::default();
+    let parent_obj = match dom(req, object).map(|d| &d.extra) {
+        Some(Extra::NamespaceParent(p)) => Some(**p),
+        _ => None,
+    };
+    let ns = n.ns();
+    // The element is the one the object's owner names, which is none
+    // once a removal took its node away (`xinclude()` among them),
+    // never the declaration's own parent pointer, which can dangle
+    // then (php 8.5.12).
+    let parent = parent_obj.and_then(|p| node_of(req, p));
+    if let Some(cloned) = Node::fake_namespace_decl(
+        parent,
+        parent.map_or(n.doc(), Node::doc),
+        ns.and_then(Ns::href).as_deref(),
+        ns.and_then(Ns::prefix).as_deref(),
+    ) {
+        let half = libxml_half(req, object);
+        let of = doc_of(req, cloned, half.as_deref())?;
+        payload.obj.attach(req, of);
+    }
+    if let Some(p) = parent_obj {
+        payload.extra = Extra::NamespaceParent(Owner::take(req, p));
+    }
+    let clone = object.clone_with(req, payload)?;
+    if let Some(d) = dom_mut(req, *clone) {
+        d.obj.set_object(*clone);
     }
     Ok(clone)
 }

@@ -32,6 +32,9 @@ ffi::C14nTarget
 ffi::Called
 ffi::ClassRows
 ffi::ClassType
+ffi::DocOf
+ffi::DocOf::exported
+ffi::DocOf::under
 ffi::DocProps
 ffi::DocProps::class_rows
 ffi::DocProps::copy_classmap
@@ -233,6 +236,7 @@ ffi::NodeObject::attach
 ffi::NodeObject::borrow
 ffi::NodeObject::bound
 ffi::NodeObject::class_type
+ffi::NodeObject::count_document
 ffi::NodeObject::decrement_doc_ref
 ffi::NodeObject::decrement_node_ptr
 ffi::NodeObject::decrement_resource

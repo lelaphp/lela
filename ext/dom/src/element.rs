@@ -963,8 +963,7 @@ impl DOMElement {
         if let Some(v) = value.filter(|v| !v.is_empty()) {
             node.set_content_len(v.as_bytes());
         }
-        crate::rebind(req, this, node);
-        Ok(())
+        crate::rebind(req, this, node)
     }
 
     /// `DOMElement::getAttribute(string $qualifiedName): string`.
