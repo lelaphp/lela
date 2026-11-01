@@ -7,7 +7,7 @@
 
 use php_ext::abi::{Beneath, Callable, chain};
 use php_ext::coerce::{callable_checked, to_double, to_long, truthy, value_name, with_string};
-use php_ext::raising::{Thrown, fatal, while_pending};
+use php_ext::raising::{Thrown, fatal, set_aside, while_pending};
 use php_ext::request::Request;
 use php_ext::values::{Owner, Value, ValueRef};
 
@@ -737,6 +737,51 @@ fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
 /// loop 4499998500000
 /// done
 /// ```
+///
+/// The check after a native that threw serves the calls with that
+/// throwable pending, and they are served with it set aside
+/// ([`set_aside`]), as pcntl's dispatch serves its handlers, since no
+/// callable is called while one stands: it is pending again after them.
+/// php called the callable inside the native, before it threw, so the
+/// callable runs before the `catch` takes the throwable either way.
+/// Here the virtual timer fires while `json_decode` reads the spaces:
+///
+/// ```php
+/// $ffi = FFI::cdef("typedef void (*handler)(int); handler signal(int sig, handler h); typedef struct { long s; long us; } tv; int setitimer(int which, tv t[2], tv *old);");
+/// $ffi->signal(SIGVTALRM, function ($sig) { echo "handler\n"; });
+/// $s = str_repeat(" ", 20000000) . "x";
+/// $t = $ffi->new("tv[2]"); $t[1]->us = 2000;
+/// $ffi->setitimer(1, $t, null);
+/// try { json_decode($s, flags: JSON_THROW_ON_ERROR); } catch (JsonException $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect process
+/// handler
+/// caught Syntax error
+/// ```
+///
+/// A callable that throws there ends the request in php's fatal, as
+/// ever, and the warning names its throwable alone, as php's does, where
+/// the native had not thrown yet: the one set aside is given up with the
+/// request.
+///
+/// ```php
+/// $ffi = FFI::cdef("typedef void (*handler)(int); handler signal(int sig, handler h); typedef struct { long s; long us; } tv; int setitimer(int which, tv t[2], tv *old);");
+/// $ffi->signal(SIGVTALRM, function ($sig) { throw new Exception("handler"); });
+/// $s = str_repeat(" ", 20000000) . "x";
+/// $t = $ffi->new("tv[2]"); $t[1]->us = 2000;
+/// $ffi->setitimer(1, $t, null);
+/// try { json_decode($s, flags: JSON_THROW_ON_ERROR); } catch (JsonException $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect process exit=255
+/// Warning: Uncaught Exception: handler in %s:3
+/// Stack trace:
+/// #0 [internal function]: {closure:%s:3}(%d)
+/// #1 %s(7): json_decode('               ...', NULL, 512, 4194304)
+/// #2 {main}
+///   thrown in %s on line 3
+///
+/// Fatal error: Throwing from FFI callbacks is not allowed in %s on line 7
+/// ```
 pub(crate) fn serve_deferred(
     req: &mut Request,
     beneath: Beneath<'_, chain::Interrupt>,
@@ -744,19 +789,22 @@ pub(crate) fn serve_deferred(
     if req.state::<State>().callbacks.is_empty() {
         return beneath.serve(req);
     }
-    let reentry = req.limits_mut().reentry();
-    reentry.serve_waiting(|call| ffi::serve_waiting(req, call));
-    for mut deferred in reentry.take_deferred() {
-        let Some(addrs) = req
-            .state::<State>()
-            .callbacks
-            .get(deferred.callback)
-            .map(|callback| callback.closure.args_in(&mut deferred))
-        else {
-            continue;
-        };
-        callback(req, deferred.callback, 0, &addrs);
-    }
+    set_aside(req, |req| {
+        let reentry = req.limits_mut().reentry();
+        reentry.serve_waiting(|call| ffi::serve_waiting(req, call));
+        for mut deferred in reentry.take_deferred() {
+            let Some(addrs) = req
+                .state::<State>()
+                .callbacks
+                .get(deferred.callback)
+                .map(|callback| callback.closure.args_in(&mut deferred))
+            else {
+                continue;
+            };
+            callback(req, deferred.callback, 0, &addrs);
+        }
+        Ok(())
+    })?;
     beneath.serve(req)
 }
 

@@ -22,8 +22,11 @@
 //! `trace:ffi-callback-thread-stack-limit` (#3697, #3742), so it is
 //! served wherever the thread stands and refused at that thread's own
 //! depth. Each test serves the request on a thread of its own and gives
-//! C one started before it or after it, whichever stands where the test
-//! asks ([`Stands`]), rather than the order the platform maps them in.
+//! C one of several started before it and after it, whichever stands
+//! where the test asks ([`Stands`]), rather than the order the platform
+//! maps them in: a stack another test's thread gave back may be mapped
+//! again on either side, so one thread laid on each side may both land
+//! on the same one.
 //! C is handed the callback with a pointer to the channel C's thread
 //! waits on, as a C library takes its user data.
 
@@ -38,6 +41,8 @@ use std::time::{Duration, Instant};
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_function;
+use php_ext::raising::{Thrown, value_error};
+use php_ext::request::Request;
 use php_ext::test::{Capture, Engine, Files};
 
 /// The callback's type as C sees it.
@@ -72,10 +77,23 @@ fn hold_unlent(seconds: f64) {
     std::thread::sleep(Duration::from_secs_f64(seconds));
 }
 
-/// The test's own extension, which carries [`hold_unlent`].
+/// `hold_unlent_and_throw(float $seconds): void`: [`hold_unlent`], then
+/// a `ValueError` thrown, so the call posted while it held is served at
+/// the interrupt check after a native that threw (#3658).
+#[php_function]
+fn hold_unlent_and_throw(req: &mut Request, seconds: f64) -> Result<(), Thrown> {
+    std::thread::sleep(Duration::from_secs_f64(seconds));
+    Err(value_error(req, "thrown after the hold"))
+}
+
+/// The test's own extension, which carries [`hold_unlent`] and
+/// [`hold_unlent_and_throw`].
 fn holding() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![hold_unlent::declared()])
+        .functions(vec![
+            hold_unlent::declared(),
+            hold_unlent_and_throw::declared(),
+        ])
         .build("ffi_threads_hold")
 }
 
@@ -116,6 +134,11 @@ fn thread(size: Option<usize>) -> (usize, Sender<Job>) {
     (at, hand)
 }
 
+/// How many threads [`served_with`] lays on each side of the request's,
+/// each kept standing until C's is chosen, so none is mapped on a stack
+/// another of them gave back; those not chosen end with the choice.
+const LAID: usize = 8;
+
 /// [`served_with`] C's thread above the request's, as php serves it on
 /// either platform, at the platform's own size.
 fn served(name: &str, source: &str) -> (String, Option<String>) {
@@ -146,11 +169,12 @@ fn served_with(
     let source = format!(
         "<?php\n$ffi = FFI::cdef('typedef int (*cb)(int); typedef void (*later)(cb, void *);');\n$later = fn ($f) => $ffi->cast('later', {at})($f, $ffi->cast('void *', {to}));\n{source}"
     );
-    let before = thread(size);
+    let before: Vec<_> = (0..LAID).map(|_| thread(size)).collect();
     let (stands, request) = thread(None);
-    let after = thread(size);
-    let Some((_, c_thread)) = [before, after]
+    let after: Vec<_> = (0..LAID).map(|_| thread(size)).collect();
+    let Some((_, c_thread)) = before
         .into_iter()
+        .chain(after)
         .find(|(at, _)| (*at > stands) == (c == Stands::Above))
     else {
         panic!("no thread started around the request's stands {c:?} it");
@@ -310,6 +334,23 @@ echo "closed $code\n";
 "#,
     );
     assert_eq!(stdout, "called 21 inside the wait\nclosed 0\n");
+    assert_eq!(returned.as_deref(), Some("42"));
+}
+
+/// The thread calls back while the request holds in a native that
+/// never lends it and then throws: the interrupt check after the throw
+/// serves the call with the throwable set aside, so the callback runs
+/// before the `catch` takes it and C reads what it returned, as php,
+/// which calls the callable on C's thread at once, has it (#3658).
+#[test]
+fn a_callback_posted_while_a_native_that_throws_holds_is_served_before_the_catch() {
+    let (stdout, returned) = served(
+        "thrown",
+        r#"$later(function ($x) { echo "called $x\n"; return $x * 2; });
+try { hold_unlent_and_throw(0.6); } catch (ValueError $e) { echo "caught ", $e->getMessage(), "\n"; }
+"#,
+    );
+    assert_eq!(stdout, "called 21\ncaught thrown after the hold\n");
     assert_eq!(returned.as_deref(), Some("42"));
 }
 
