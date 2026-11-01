@@ -1672,3 +1672,16 @@ fn a_crate_unread_before_the_run_is_journaled_as_failed() {
         "the journal: {journaled}"
     );
 }
+
+/// A server's line that missed is named in its crate's reading with what
+/// it saw (#3846), so a miss a rerun does not repeat can still be read.
+#[test]
+fn a_reading_keeps_what_a_server_s_line_that_missed_saw() {
+    let saw = "sapi/cgi/tests/lines.toml#one: -== run 1 ended with exit status: 0";
+    let tally = Tally {
+        saw: vec![saw.to_owned()],
+        ..Tally::default()
+    };
+    let said = super::tail(&tally);
+    assert_eq!(said, format!("; 1 server's line missed, and saw: {saw}"));
+}

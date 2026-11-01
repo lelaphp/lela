@@ -284,6 +284,11 @@ impl Held {
 }
 
 impl Line {
+    /// Whether the line is a server's, started, asked and stopped.
+    pub(crate) fn serves(&self) -> bool {
+        self.serve.is_some()
+    }
+
     /// The line's masks, each pattern compiled.
     fn masks(&self) -> Result<Vec<(Regex, &str)>> {
         self.mask
@@ -421,9 +426,15 @@ fn ran(oracle: &Oracle<'_>, binary: &Path, line: &Line, dir: &Path, port: u16) -
         if serve.is_some() && in_use(port, [&ended.stdout, &ended.stderr], dir)? {
             return Err(InUse(port).into());
         }
+        let during = ended
+            .during
+            .with_context(|| format!("{} serving", binary.display()));
         let Some(exit) = ended.exit else {
+            // A request whose answer never came waits out its minute, which
+            // takes the run past the limit: what it met is the cause.
+            let met = during.err().map(|e| format!(": {e:#}")).unwrap_or_default();
             bail!(
-                "{} ran past the recipe's limit of {} s on line {:?}",
+                "{} ran past the recipe's limit of {} s on line {:?}{met}",
                 binary.display(),
                 limit.as_secs(),
                 line.name
@@ -442,7 +453,7 @@ fn ran(oracle: &Oracle<'_>, binary: &Path, line: &Line, dir: &Path, port: u16) -
             shown(&ended.stderr)
         )
         .ok();
-        for (asked, answer) in ended.during?.into_iter().enumerate() {
+        for (asked, answer) in during?.into_iter().enumerate() {
             writeln!(out, "== run {run} request {}\n{answer}", asked + 1).ok();
         }
     }
@@ -450,6 +461,28 @@ fn ran(oracle: &Oracle<'_>, binary: &Path, line: &Line, dir: &Path, port: u16) -
         writeln!(out, "== file {name}\n{bytes}").ok();
     }
     Ok(out)
+}
+
+/// How much of what a server's line saw a reading keeps, in characters.
+const SEEN: usize = 1500;
+
+/// What a server's line that missed saw, as its reading keeps it (#3846):
+/// where the two hosts' renderings `differs`, the note's `==` headings and
+/// the lines only one host wrote, each request's answer among them, and
+/// otherwise the note whole, a refused connection's or an unread answer's
+/// error; on one line, at most [`SEEN`] characters of it.
+pub(crate) fn seen(note: &str, differs: bool) -> String {
+    let kept = note.lines().filter(|line| {
+        !differs
+            || line.starts_with(['-', '+'])
+            || line.get(1..).is_some_and(|l| l.starts_with("== "))
+    });
+    let mut said = kept.collect::<Vec<_>>().join(" | ");
+    if let Some((at, _)) = said.char_indices().nth(SEEN) {
+        said.truncate(at);
+        said.push_str(" ...");
+    }
+    said
 }
 
 /// Bytes as text: as they are where they are UTF-8, escaped where not, so
@@ -640,13 +673,18 @@ fn asked(serve: &Serve, dir: &Path, port: u16) -> Result<Vec<String>> {
     }
     let listen = fill(&serve.listen, dir, port);
     let mut answers = Vec::new();
-    for request in &serve.request {
+    for (n, request) in serve.request.iter().enumerate() {
         let answer = loop {
             match answered(request, &listen, &|text| fill(text, dir, port)) {
                 Err(refused) if refused.is::<Refused>() && started.elapsed() < PATIENCE => {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                other => break other?,
+                other => {
+                    break other.with_context(|| {
+                        let at = started.elapsed().as_secs_f32();
+                        format!("request {} at {listen}, {at:.1}s after the start", n + 1)
+                    })?;
+                }
             }
         };
         answers.push(answer);
@@ -1062,6 +1100,20 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    /// What a server's line that missed keeps for its reading (#3846): a
+    /// difference's headings and changed lines, any other note whole, on
+    /// one line and no longer than [`super::SEEN`] characters.
+    #[test]
+    fn a_server_s_line_that_missed_keeps_what_it_saw() {
+        let diff = " == run 1 stdout\n \n == run 1 request 1\n-Status: 404\n+Status: 200\n same\n";
+        let kept = " == run 1 stdout |  == run 1 request 1 | -Status: 404 | +Status: 200";
+        assert_eq!(super::seen(diff, true), kept);
+        let refused = "php-cgi serving: request 1 at 127.0.0.1:5: not listening\n- refused";
+        assert_eq!(super::seen(refused, false), refused.replace('\n', " | "));
+        let long = super::seen(&"x".repeat(super::SEEN * 2), false);
+        assert_eq!(long.chars().count(), super::SEEN + " ...".len());
     }
 
     /// A file of lines is refused whole for a name given twice, a mask
