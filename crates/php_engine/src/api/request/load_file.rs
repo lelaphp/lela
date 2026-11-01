@@ -24,8 +24,46 @@ impl Request {
     /// `autoloading` says ([`Request::load_stream`]), and otherwise in
     /// `phar_file_action`'s, `Phar::webPhar`'s
     /// (`Z/ext/phar/phar_object.c:237-268`): the table asked first, the
-    /// file required as an include requires it, its open warning, and its
-    /// stream closed before the file is served.
+    /// file compiled as a `require` from the native, so its open warning
+    /// names the native, the name taken out of the table again where the
+    /// compile made no unit, and its stream closed before the file is
+    /// served.
+    ///
+    /// ```php
+    /// $p = new Phar($f = __DIR__ . '/w.phar');
+    /// $p['bad.php'] = '<?php echo 1 +;';
+    /// $p['gone.php'] = $gone = '<?php echo "ran\n";';
+    /// $p['gone.php']->compress(Phar::GZ);
+    /// $p->setSignatureAlgorithm(Phar::SHA256);
+    /// $p->setStub('<?php
+    /// foreach (["/bad.php", "/gone.php"] as $e) {
+    ///     try { Phar::webPhar(null, "index.php", null, [], fn () => $e); } catch (Error $t) { echo get_class($t), "\n"; }
+    /// }
+    /// var_dump(preg_grep("/bad|gone/", get_included_files()));
+    /// __HALT_COMPILER();');
+    /// unset($p);
+    /// // gone.php's crc32 broken in a copy, signed again.
+    /// $b = str_replace(pack('V', crc32($gone)), pack('V', crc32($gone) ^ 1), substr(file_get_contents($f), 0, -40));
+    /// file_put_contents($f = __DIR__ . '/v.phar', $b . hash('sha256', $b, true) . pack('V', Phar::SHA256) . 'GBMB');
+    /// include $f;
+    /// ```
+    /// ```request
+    /// --ENV--
+    /// SCRIPT_NAME=/v.phar
+    /// REQUEST_URI=/v.phar/bad.php
+    /// PATH_INFO=/bad.php
+    /// ```
+    /// ```expect regime=phar-writable
+    /// X-Powered-By: PHP/8.5.12
+    /// Content-type: text/html; charset=UTF-8
+    ///
+    /// ParseError
+    ///
+    /// Warning: Phar::webPhar(phar://%s/v.phar/gone.php): Failed to open stream: phar error: internal corruption of phar "%s/v.phar" (crc32 mismatch on file "gone.php") in %s/v.phar on line 3
+    /// Error
+    /// array(0) {
+    /// }
+    /// ```
     pub(crate) fn load_file(&mut self, written: &[u8], autoloading: bool) -> Result<bool, Thrown> {
         if written.contains(&0) {
             return Ok(false);
@@ -49,12 +87,16 @@ impl Request {
         }
         self.note_included(&path)?;
         let unit = if stream {
-            // Declared by its compile, before its stream closed.
-            let opened = self.include_stream(exec::IncludeKind::Require, written, &path)?;
-            let super::Opened::Declared(unit) = opened else {
-                return Ok(false);
-            };
-            unit
+            // Declared by its compile, before its stream closed; a compile
+            // that made none leaves the table without the name
+            // (`zend_hash_str_del`, `Z/ext/phar/phar_object.c:255-257`).
+            match self.include_stream(exec::IncludeKind::Require, written, &path) {
+                Ok(super::Opened::Declared(unit)) => unit,
+                failed => {
+                    self.forget_included(&path);
+                    return failed.map(|_| false);
+                }
+            }
         } else {
             let unit = match self.compile_file(&path, Some(written), super::HandlePath::Opened)? {
                 Some(Ok(unit)) => unit,

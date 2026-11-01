@@ -100,11 +100,15 @@ enum Until {
 impl Request {
     /// Whether the code being served is an include's open, which
     /// `php_verror` names by the construct (`include()`) as it names a
-    /// native by the native.
+    /// native by the native: php reads the construct off a user frame's
+    /// `INCLUDE_OR_EVAL` opline, so a native that compiles a file as a
+    /// `require`, `phar_file_action`'s `zend_compile_file`, is named
+    /// itself ([`Request::load_file`]).
     pub(crate) fn serving_include(&self) -> bool {
         self.include
             .including
             .is_some_and(|(_, depth)| depth == self.vm.depth())
+            && !self.vm_serving_native()
     }
 
     /// The construct of the include being opened where the code being
@@ -1651,6 +1655,15 @@ impl Request {
         }
         let held = self.string(path)?;
         self.note_included_held(held)
+    }
+
+    /// `zend_hash_str_del(&EG(included_files), path)`: `path` taken out
+    /// of the table and its string given up, as `phar_file_action` takes
+    /// out the file whose compile made no op array. The row's value is
+    /// the null every row holds, which owns nothing.
+    pub(super) fn forget_included(&mut self, path: &[u8]) {
+        let rows = self.included_files.0.arr();
+        self.heap.array_str_take(rows, path);
     }
 
     /// The string a once form put in `EG(included_files)` for the file
