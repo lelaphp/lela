@@ -13,7 +13,7 @@ use crate::text::{new_string, on_heap, substitute};
 use php_ext::abi::{OrFalse, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{ContentType, Ini, Input, Request};
+use php_ext::request::{ContentType, DataSource, Ini, Input, Request};
 use php_ext::values::{Emalloc, Owner, PhpArray, PhpString, Value};
 use php_ext_pcre::Regex;
 
@@ -214,7 +214,7 @@ fn variables(
 pub(crate) fn treat_data(
     req: &mut Request,
     input: Input,
-    source: &[u8],
+    mut source: DataSource<'_>,
 ) -> Result<Option<Variables>, Thrown> {
     let (translate, to, from_list) = {
         let s = settings(req);
@@ -247,6 +247,9 @@ pub(crate) fn treat_data(
     if input != Input::Post {
         state.illegal_chars = 0;
     }
+    // `php_stream_copy_to_mem`: a form body copied only here, under
+    // `mbstring.encoding_translation`.
+    let source = source.bytes(req);
     let mut variables: Variables = Vec::new();
     let detected = encoding_handler(
         req,

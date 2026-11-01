@@ -219,15 +219,19 @@ fn a_form_is_read_a_block_at_a_time_and_a_variable_a_block_cuts_is_whole() {
 
 /// Where an extension treats data, as mbstring's `php_mb_post_handler`
 /// stands in for `php_std_post_handler`, the form body is handed to it
-/// whole, every block the form reader buffered; one that leaves the body
-/// leaves it to the standard handler, which reads it as if no extension
-/// had looked.
+/// whole, every block the form reader buffered, once it asks for its
+/// bytes; one that leaves the body without asking leaves it uncopied to
+/// the standard handler, which reads it as if no extension had looked.
 #[test]
 fn a_data_treater_is_handed_the_form_body_whole_and_may_leave_it() {
     use crate::api::request::Input;
-    let counted: crate::api::abi::TreatDataHook = |_, input, source| {
-        Ok((input == Input::Post)
-            .then(|| vec![(b"len".to_vec(), source.len().to_string().into_bytes())]))
+    let counted: crate::api::abi::TreatDataHook = |req, input, mut source| {
+        Ok((input == Input::Post).then(|| {
+            vec![(
+                b"len".to_vec(),
+                source.bytes(req).len().to_string().into_bytes(),
+            )]
+        }))
     };
     let declined: crate::api::abi::TreatDataHook = |_, _, _| Ok(None);
     let program = "<?php echo $_POST['len'] ?? '-', ' ', $_POST['b'] ?? '-', ' ', strlen($_POST['big'] ?? ''), \"\\n\";";

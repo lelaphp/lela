@@ -710,12 +710,17 @@ mod tests {
 
     /// The treater that upper-cases the query string, and the one that
     /// reverses it.
-    const UPPER: TreatDataHook = |_, input, source| {
-        Ok((input == Input::Get).then(|| vec![(b"q".to_vec(), source.to_ascii_uppercase())]))
-    };
-    const REVERSE: TreatDataHook = |_, input, source| {
+    const UPPER: TreatDataHook = |req, input, mut source| {
         Ok((input == Input::Get)
-            .then(|| vec![(b"q".to_vec(), source.iter().rev().copied().collect())]))
+            .then(|| vec![(b"q".to_vec(), source.bytes(req).to_ascii_uppercase())]))
+    };
+    const REVERSE: TreatDataHook = |req, input, mut source| {
+        Ok((input == Input::Get).then(|| {
+            vec![(
+                b"q".to_vec(),
+                source.bytes(req).iter().rev().copied().collect(),
+            )]
+        }))
     };
 
     /// `$_GET['q']` as an engine of `extensions`, with `host` as the
