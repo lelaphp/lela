@@ -2042,10 +2042,11 @@ fn implode_array(
 /// that is neither a string nor an int: its text, or `None`, the empty
 /// string, where the conversion threw, its throwable kept in `thrown`
 /// for the walk to go on past, as php's `EG(exception)` keeps it
-/// ([`Carrying`]): with one kept, a `__toString` is not called and a
-/// warning reaches no handler. A throwable a warning's handler left on
-/// the request is kept as the conversion's. The `Err` is a fatal or an
-/// `exit`, which leaves at once, what was kept given up.
+/// ([`Carrying`]), and so too where it took an `exit`, the unwind exit
+/// kept: with one kept, a `__toString` is not called and a warning
+/// reaches no handler. A throwable a warning's handler left on the
+/// request is kept as the conversion's. The `Err` is a fatal, which
+/// leaves at once, what was kept given up.
 fn piece_text(
     req: &mut Request,
     piece: &Value,

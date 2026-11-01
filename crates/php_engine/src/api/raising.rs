@@ -48,12 +48,14 @@ impl Thrown {
     /// `php_session_decode` does in its `zend_catch`
     /// (`Z/ext/session/session.c:289-302`), matches on
     /// [`Cause::Fatal`] and hands the `Thrown` on. The session's decode
-    /// is the witness, in `ext/session`.
+    /// is the witness, in `ext/session`. A fatal raised while the unwind
+    /// exit stands is a fatal, as `zend_bailout` leaves whatever stands
+    /// in `EG(exception)`.
     #[must_use]
     pub fn cause(&self, req: &Request) -> Cause<'_> {
         match &self.pending {
             Some(throwable) => Cause::Throwable(throwable),
-            None if req.unwind_exit() => Cause::Exit,
+            None if req.unwind_exit() && !req.diagnostics().bailing_out() => Cause::Exit,
             None => Cause::Fatal,
         }
     }
@@ -206,9 +208,12 @@ pub fn raise_while_pending(
 /// throwable is pending is skipped and kept quiet here, a diagnostic
 /// raised as [`raise_while_pending`] raises one and a stream's `Failed
 /// to open stream` among what `php_stream_display_wrapper_errors` keeps
-/// quiet. `None`, with nothing taken, where `pending` carries a fatal or
-/// an exit, which unwind at once. `pending` is the native's still, to
-/// hand on once the step is done. `hash_update_file`, which opens and
+/// quiet. Where `pending` carries the unwind exit, which stands on the
+/// request already, the step is taken as php's C code goes on past an
+/// `exit` a callback took, `zend_is_unwind_exit` in `EG(exception)`;
+/// `None`, with nothing taken, where it carries a fatal, which leaves at
+/// once. `pending` is the native's still, to hand on once the step is
+/// done. `hash_update_file`, which opens and
 /// hashes its file after `zend_fetch_resource_ex` threw over its
 /// `$stream_context`, is the witness, in `ext/hash`.
 ///
@@ -234,16 +239,34 @@ pub fn while_pending<R>(
 }
 
 /// What a native's walk keeps in php's `EG(exception)` while it goes on
-/// past a throwable a step left there, as php's C code carries on with
-/// one set: `php_implode` converting each piece after one whose
-/// `__toString` threw, `umsg_format_helper` each argument, `do_fetch`
-/// writing each column of an object's row. Nothing is kept until a step
-/// throws; from there each step is served while the kept throwable
-/// stands pending ([`while_pending`]), and what a step throws anew is
-/// chained over it ([`Thrown::chain`]). A fatal or an `exit` leaves at
-/// once, what was kept given up. ext/standard's `implode` is the
-/// witness: a piece after one that threw is converted with no
-/// `__toString` called and its warning reaching no handler.
+/// past what a step left there, as php's C code carries on with one set:
+/// `php_implode` converting each piece after one whose `__toString`
+/// threw or took an `exit`, `umsg_format_helper` each argument,
+/// `do_fetch` writing each column of an object's row. Nothing is kept
+/// until a step throws or exits; from there each step is served while
+/// what is kept stands pending ([`while_pending`]): a throwable, with
+/// what a step throws anew chained over it ([`Thrown::chain`]), or the
+/// unwind exit, which `zend_is_unwind_exit` keeps in `EG(exception)` and
+/// a throwable raised past gives itself up to. A fatal leaves at once,
+/// what was kept given up. ext/standard's `implode` is a witness: a
+/// piece after one that threw is converted with no `__toString` called
+/// and its warning reaching no handler. A piece after one whose
+/// `__toString` took an `exit` is converted so too, and with no handler
+/// set its warning is rendered before the shutdown functions are served:
+///
+/// ```php
+/// class X { function __toString(): string { exit("exiting\n"); } }
+/// class Y { function __toString(): string { echo "Y called\n"; return "y"; } }
+/// register_shutdown_function(function () { echo "shutdown\n"; });
+/// implode(',', [new X, [], new Y, 'z']);
+/// echo "unreached\n";
+/// ```
+/// ```expect
+/// exiting
+///
+/// Warning: Array to string conversion in %SCRATCH%/witness.php on line 5
+/// shutdown
+/// ```
 #[derive(Debug, Default)]
 pub struct Carrying {
     kept: Option<Thrown>,
@@ -251,15 +274,15 @@ pub struct Carrying {
 
 impl Carrying {
     /// One step of the walk: `Ok(Some)` its value, `Ok(None)` where it
-    /// threw, the throwable kept from there on. With a throwable kept the
-    /// step is taken while it stands pending, so php's refusals stand: a
-    /// call into the program serves nothing and answers the kept
-    /// throwable back, which is told from one raised anew and stays as it
-    /// is kept.
+    /// threw or exited, what it left kept from there on. With anything
+    /// kept the step is taken while it stands pending, so php's refusals
+    /// stand: a call into the program serves nothing and answers what is
+    /// kept back, which is told from a throwable raised anew and stays as
+    /// it is kept.
     ///
     /// # Errors
-    /// A fatal or an `exit` the step raised, which leaves at once, with
-    /// what was kept given up.
+    /// A fatal the step raised, which leaves at once, with what was kept
+    /// given up.
     pub fn serve<T>(
         &mut self,
         req: &mut Request,
@@ -268,8 +291,8 @@ impl Carrying {
         let answered = match self.kept.take() {
             None => step(req),
             Some(kept) => {
-                // `keep` holds a throwable only, which `while_pending`
-                // serves; were it a fatal or an exit, it leaves.
+                // `keep` holds a throwable or the unwind exit, which
+                // `while_pending` serves the step past; a fatal leaves.
                 let Some(answered) = while_pending(req, &kept, step) else {
                     return Err(kept);
                 };
@@ -285,20 +308,22 @@ impl Carrying {
 
     /// What a step taken outside [`Carrying::serve`] threw, or left on
     /// the request, kept as `serve` keeps it: chained over what is kept,
-    /// the kept throwable answered back staying as it is.
+    /// what is kept answered back staying as it is, and the unwind exit
+    /// kept over a throwable, as `zend_exception_set_previous` keeps it.
     ///
     /// # Errors
-    /// `thrown` where it is a fatal or an `exit`, which leaves at once,
-    /// with what was kept given up.
+    /// `thrown` where it is a fatal, which leaves at once, with what was
+    /// kept given up.
     pub fn keep(&mut self, req: &mut Request, thrown: Thrown) -> Result<(), Thrown> {
         let kept = match self.kept.take() {
             None => thrown,
-            // The kept throwable answered back, named with no owner of
-            // its own ([`while_pending`]).
+            // What is kept answered back: the throwable named with no
+            // owner of its own ([`while_pending`]), or the exit, which
+            // names nothing.
             Some(kept) if kept.exception() == thrown.exception() => kept,
             Some(kept) => kept.chain(req, thrown),
         };
-        if kept.exception().is_none() {
+        if kept.cause(req) == Cause::Fatal {
             return Err(kept);
         }
         self.kept = Some(kept);

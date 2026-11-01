@@ -835,7 +835,37 @@ fn columns(
 /// One column of an object's row, `zend_update_property_ex`: a write
 /// that throws leaves the throwable pending, chained onto one already
 /// there, for the row's later columns to be written past
-/// ([`Carrying::serve`]); a fatal or an `exit` is the `Err`.
+/// ([`Carrying::serve`]); a fatal is the `Err`. A write whose `__set`
+/// took an `exit` leaves the unwind exit pending, and the later columns
+/// are written past it as `do_fetch` writes them with
+/// `zend_is_unwind_exit` in `EG(exception)`: a declared property is
+/// written, its old value's destructor served, a `__set` is not called,
+/// and a typed property refuses its value with nothing raised:
+///
+/// ```php
+/// class E { function __destruct() { echo "E dtor\n"; } }
+/// class R { public $c; public int $d;
+///   function __set($n, $v) { echo "set $n\n"; if ($n == 'a') exit("exiting\n"); } }
+/// register_shutdown_function(function () { echo "shutdown\n"; var_dump($GLOBALS['r']); });
+/// $st = (new PDO('sqlite::memory:'))->query("select 'y' as b, 'x' as a, 'q' as e, 'z' as c, 'w' as d");
+/// $r = new R; $r->c = new E;
+/// $st->setFetchMode(PDO::FETCH_INTO, $r);
+/// $st->fetch();
+/// echo "unreached\n";
+/// ```
+/// ```expect
+/// set b
+/// set a
+/// exiting
+/// E dtor
+/// shutdown
+/// object(R)#4 (1) {
+///   ["c"]=>
+///   string(1) "z"
+///   ["d"]=>
+///   uninitialized(int)
+/// }
+/// ```
 fn write_column(
     req: &mut Request,
     pending: &mut Carrying,

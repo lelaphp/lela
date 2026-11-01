@@ -516,7 +516,24 @@ fn quoted(head: &str, bytes: &[u8], tail: &str) -> Vec<u8> {
 /// the walk goes on past as php's loop does: `zval_get_tmp_string`
 /// leaves the throwable pending and answers the empty string, and the
 /// later conversions are served as php serves them with one pending
-/// ([`Carrying`]).
+/// ([`Carrying`]). An argument whose `__toString` took an `exit` leaves
+/// the unwind exit pending, and the walk goes on past it so too: a later
+/// `__toString` is not called, and an array's warning is rendered:
+///
+/// ```php
+/// class X { function __toString(): string { exit("exiting\n"); } }
+/// class Y { function __toString(): string { echo "Y called\n"; return "y"; } }
+/// register_shutdown_function(function () { echo "shutdown\n"; });
+/// $f = new MessageFormatter('en', '{0} {1} {2}');
+/// var_dump($f->format([new X, new Y, []]));
+/// echo "unreached\n";
+/// ```
+/// ```expect
+/// exiting
+///
+/// Warning: Array to string conversion in %SCRATCH%/witness.php on line 6
+/// shutdown
+/// ```
 struct Converting<'s, 'a> {
     site: &'s mut Site<'a>,
     pending: Carrying,

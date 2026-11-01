@@ -8,7 +8,7 @@
 //! loader read them.
 
 use crate::api::call::{Function, write_prop};
-use crate::api::raising::{Level, Thrown};
+use crate::api::raising::{Cause, Level, Thrown};
 use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Value};
 use crate::engine::Known;
 use php_unit::decl::Bare;
@@ -94,9 +94,11 @@ impl Request {
     /// returns at once while a throwable is pending
     /// (`Z/Zend/zend_execute_API.c:822`), the built-in handler renders a
     /// diagnostic where no handler stands, and a stream's wrapper errors
-    /// are kept quiet. A fatal or an exit runs nothing and answers
-    /// `None`: php's `zend_bailout` left before the step. What a step's
-    /// call answers is [`crate::api::raising::while_pending`]'s to say.
+    /// are kept quiet. The unwind exit stands in the slot already, as php's
+    /// C code goes on past it with `EG(exception)` set, so its step is
+    /// served as it stands. A fatal runs nothing and answers `None`: php's
+    /// `zend_bailout` left before the step. What a step's call answers is
+    /// [`crate::api::raising::while_pending`]'s to say.
     ///
     /// The slot holds an owner of its own for the step, as `EG(exception)`
     /// holds one, so what the step serves that chains onto what stands, a
@@ -152,7 +154,11 @@ impl Request {
         pending: &Thrown,
         step: impl FnOnce(&mut Request) -> R,
     ) -> Option<R> {
-        let object = pending.exception().copied()?;
+        let object = match pending.cause(self) {
+            Cause::Throwable(object) => *object,
+            Cause::Exit => return Some(step(self)),
+            Cause::Fatal => return None,
+        };
         if self.raised.is_some() || self.bailout {
             if self.pending() != Some(object) || self.stepping_past(object) {
                 return Some(step(self));
