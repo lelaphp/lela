@@ -1284,11 +1284,32 @@ enum Found<'a> {
 }
 
 impl Found<'_> {
-    /// `zend_is_true` over the value, read without copying it.
-    fn truth(self) -> bool {
+    /// What `zend_is_true` reads off the value, read without copying it.
+    fn truth(self) -> Truth {
         match self {
-            Found::Declared(scalar) => scalar.is_true(),
-            Found::Defined(value) => truth(value),
+            Found::Declared(Scalar::Double(d)) if d.is_nan() => Truth::Nan,
+            Found::Declared(scalar) => Truth::Is(scalar.is_true()),
+            Found::Defined(value) => Truth::of(value),
+        }
+    }
+}
+
+/// What `zend_is_true` reads off a constant the compile asks: a NAN,
+/// which is true and over which `i_zend_is_true` warns
+/// (`Z/Zend/zend_operators.h:425`), or the truth of anything else
+/// ([`Emit::is_true`]).
+#[derive(Clone, Copy)]
+pub(crate) enum Truth {
+    Nan,
+    Is(bool),
+}
+
+impl Truth {
+    pub(crate) fn of(value: Zval) -> Truth {
+        if value.as_double().is_some_and(f64::is_nan) {
+            Truth::Nan
+        } else {
+            Truth::Is(truth(value))
         }
     }
 }
@@ -2248,6 +2269,19 @@ impl<'a> Emit<'a> {
             line: self.line,
             message: message.into(),
         });
+    }
+
+    /// `zend_is_true` as the compile calls it over a constant: a NAN is
+    /// true, and the warning `i_zend_is_true` raises over it is the
+    /// compilation's ([`Self::raise`]).
+    pub(crate) fn is_true(&mut self, truth: Truth) -> bool {
+        match truth {
+            Truth::Nan => {
+                self.raise(Level::Warning, "unexpected NAN value was coerced to bool");
+                true
+            }
+            Truth::Is(held) => held,
+        }
     }
 
     /// The constant string for these bytes, interned into whichever home
@@ -19886,11 +19920,11 @@ impl<'a> Emit<'a> {
 
     /// [`Self::named_constant`] read once and destroyed, `zval_ptr_dtor`
     /// of the copy, as `zend_compile_func_in_array` reads a `$strict`
-    /// written as a constant: its truth, and nothing where the name is
-    /// left to the fetch.
-    pub(crate) fn named_constant_truth(&self, token: TokenId) -> Option<bool> {
+    /// written as a constant: what `zend_is_true` reads off it, and
+    /// nothing where the name is left to the fetch.
+    pub(crate) fn named_constant_truth(&self, token: TokenId) -> Option<Truth> {
         if let Some(value) = self.constant_name(token) {
-            return Some(truth(value));
+            return Some(Truth::of(value));
         }
         let resolved = self.constant_resolved(self.text(token));
         self.ct_found(&resolved.resolved().0).map(Found::truth)
