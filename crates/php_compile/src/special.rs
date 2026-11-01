@@ -38,7 +38,7 @@ use php_heap::{Key, Zval, ZvalType, numeric_prefix};
 use php_unit::Opcode;
 
 use crate::CompileError;
-use crate::emit::{CastTo, Emit, Fetch, Source, Where, truth};
+use crate::emit::{CastTo, Emit, Fetch, Source, Truth, Where};
 use php_syntax::tree;
 
 /// What php's compiler makes of one name in the table.
@@ -804,14 +804,39 @@ impl Emit<'_> {
     /// (`ZEND_AST_ZVAL`) or over a constant `zend_try_ct_eval_const`
     /// substitutes (`ZEND_AST_CONST`), and nothing for any other
     /// argument, a constant left to the program among them.
+    ///
+    /// A `NAN` warns as `zend_is_true` reads it, while the file
+    /// compiles, so before the first statement and before the handler
+    /// is set; it warns where the haystack then leaves `in_array` a
+    /// call, whose native warns again:
+    ///
+    /// ```php
+    /// set_error_handler(function ($no, $message) { echo "handled: $message\n"; return true; });
+    /// echo "start\n";
+    /// $a = [1];
+    /// var_dump(in_array(1, [1], NAN), in_array(1, [], \NAN), in_array(1, $a, NAN));
+    /// ```
+    /// ```expect
+    /// Warning: unexpected NAN value was coerced to bool in %s on line 5
+    ///
+    /// Warning: unexpected NAN value was coerced to bool in %s on line 5
+    ///
+    /// Warning: unexpected NAN value was coerced to bool in %s on line 5
+    /// start
+    /// handled: unexpected NAN value was coerced to bool
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// ```
     fn in_array_flag(&mut self, flag: Source) -> Result<Option<bool>, CompileError> {
         let Some(flag) = flag.tree() else {
             return Ok(None);
         };
-        if let tree::Expr::NameRef(token) = self.peel(flag) {
-            return Ok(self.named_constant_truth(token));
-        }
-        Ok(self.written(flag)?.map(truth))
+        let truth = match self.peel(flag) {
+            tree::Expr::NameRef(token) => self.named_constant_truth(token),
+            _ => self.written(flag)?.map(Truth::of),
+        };
+        Ok(truth.map(|truth| self.is_true(truth)))
     }
 
     /// `zend_compile_func_chr`: the one-byte string for a long written

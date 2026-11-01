@@ -23,9 +23,8 @@ use std::collections::HashMap;
 
 use php_heap::{Made, Zval, ZvalType};
 use php_syntax::tree::{self, NodeId};
-use php_unit::Level;
 
-use super::{Emit, Fold, Operated, truth};
+use super::{Emit, Fold, Operated, Truth, truth};
 use crate::{CompileError, Raise};
 
 /// What a fold of a node answers where it has no value for it: the node
@@ -466,13 +465,10 @@ impl Emit<'_> {
                 return Err(unfolded.of_node("a conditional over a condition that does not fold"));
             }
         };
-        if value.as_double().is_some_and(f64::is_nan) {
-            self.raise(Level::Warning, "unexpected NAN value was coerced to bool");
-        }
         // The condition is destroyed once a side replaces the node, its
         // claims given back ([`Self::consume`]); `?:` over a true one is
         // the condition's own value, which keeps them.
-        let side = match (truth(value), then) {
+        let side = match (self.is_true(Truth::of(value)), then) {
             (true, None) => return Ok(value),
             (true, Some(then)) => then,
             (false, _) => otherwise,
