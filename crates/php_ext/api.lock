@@ -495,6 +495,10 @@ process::euid
 process::gid
 process::groups
 process::uid
+raising::Carrying
+raising::Carrying::keep
+raising::Carrying::serve
+raising::Carrying::take
 raising::Cause
 raising::Level
 raising::Level::bit

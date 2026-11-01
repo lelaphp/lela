@@ -29,7 +29,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::Type;
 use php_ext::raising::{
-    Level, Thrown, arg_value_error, argument_error, docref, type_error, while_pending,
+    Carrying, Level, Thrown, arg_value_error, argument_error, docref, type_error,
 };
 use php_ext::request::Request;
 use php_ext::values::{Charset, Key, Layout, Owner, PhpArray, PhpString, Value};
@@ -1998,7 +1998,7 @@ fn implode_array(
     }
     let mut out = Vec::new();
     let mut utf8 = glue_utf8;
-    let mut thrown = None;
+    let mut thrown = Carrying::default();
     for (i, element) in elements.iter().enumerate() {
         if i > 0 {
             out.extend_from_slice(glue);
@@ -2020,7 +2020,7 @@ fn implode_array(
     // len, 0, fallible: true)` since 8.5.12, asked whatever a piece
     // threw, and `RETURN_OOM()` where the memory limit refused it.
     let asked = req.memory_mut().fallible(|req| PhpString::new(req, &out));
-    let joined = match (asked, thrown) {
+    let joined = match (asked, thrown.take()) {
         (Ok(Some(joined)), None) => joined,
         (Ok(None), None) => return PhpString::new(req, b""),
         (Ok(joined), Some(thrown)) => {
@@ -2041,60 +2041,28 @@ fn implode_array(
 /// `zval_get_string_func(tmp)` over one piece of `php_implode`'s walk
 /// that is neither a string nor an int: its text, or `None`, the empty
 /// string, where the conversion threw, its throwable kept in `thrown`
-/// for the walk to go on past, as php's `EG(exception)` keeps it. With
-/// one kept, the piece is converted while it stands pending
-/// ([`while_pending`]), so a `__toString` is not called and a warning
-/// reaches no handler; a throwable a warning's handler left on the
-/// request is taken as the conversion's. The `Err` is a fatal or an
-/// `exit`, which leaves at once, what was kept given up
-/// ([`Thrown::chain`]).
+/// for the walk to go on past, as php's `EG(exception)` keeps it
+/// ([`Carrying`]): with one kept, a `__toString` is not called and a
+/// warning reaches no handler. A throwable a warning's handler left on
+/// the request is kept as the conversion's. The `Err` is a fatal or an
+/// `exit`, which leaves at once, what was kept given up.
 fn piece_text(
     req: &mut Request,
     piece: &Value,
-    thrown: &mut Option<Thrown>,
+    thrown: &mut Carrying,
 ) -> Result<Option<Owner<PhpString>>, Thrown> {
-    let Some(standing) = thrown.take() else {
-        let made = match php_ext::coerce::to_string(req, piece) {
-            Ok(made) => made,
-            Err(threw) if threw.exception().is_some() => {
-                *thrown = Some(threw);
-                return Ok(None);
-            }
-            Err(leaving) => return Err(leaving),
-        };
-        // The text stands, as `zval_get_string_func` answers it with
-        // the handler's throwable in `EG(exception)`.
-        if let Err(handled) = php_ext::raising::pending(req) {
-            if handled.exception().is_none() {
-                made.give_up(req);
-                return Err(handled);
-            }
-            *thrown = Some(handled);
-        }
-        return Ok(Some(made));
+    let Some(made) = thrown.serve(req, |req| php_ext::coerce::to_string(req, piece))? else {
+        return Ok(None);
     };
-    let answered = while_pending(req, &standing, |req| php_ext::coerce::to_string(req, piece));
-    match answered {
-        Some(Ok(made)) => {
-            *thrown = Some(standing);
-            Ok(Some(made))
-        }
-        // Raised anew over the one standing, which is its `previous`.
-        Some(Err(later)) if later.exception() != standing.exception() => {
-            let chained = standing.chain(req, later);
-            if chained.exception().is_none() {
-                return Err(chained);
-            }
-            *thrown = Some(chained);
-            Ok(None)
-        }
-        // The standing throwable answered back, which the call it
-        // refused names with no owner of its own.
-        _ => {
-            *thrown = Some(standing);
-            Ok(None)
-        }
+    // The text stands, as `zval_get_string_func` answers it with the
+    // handler's throwable in `EG(exception)`.
+    if let Err(handled) = php_ext::raising::pending(req)
+        && let Err(leaving) = thrown.keep(req, handled)
+    {
+        made.give_up(req);
+        return Err(leaving);
     }
+    Ok(Some(made))
 }
 
 /// `strtok(string $string, ?string $token = null): string|false`, over

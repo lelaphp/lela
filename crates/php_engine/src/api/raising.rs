@@ -216,21 +216,100 @@ pub fn raise_while_pending(
 /// itself, a second `Thrown` naming the same object with no owner of its
 /// own, which the caller neither chains under `pending` nor releases,
 /// and tells from a throwable the step raised anew by
-/// `answered.exception() == pending.exception()`, as ext/intl's message
-/// formatter does. Two steps answer so: a call the step makes into the
-/// program, a `__toString`, a user stream wrapper's method, which serves
-/// nothing, as php's `zend_call_function` returns at once while a
-/// throwable is pending (`Z/Zend/zend_execute_API.c:822`); and a write
-/// the engine refuses while the throwable is pending, a typed property's
-/// `TypeError`, which raises nothing over it
-/// (`zend_verify_property_type_error`), as ext/pdo's fetch into a class
-/// meets it.
+/// `answered.exception() == pending.exception()`, as [`Carrying`] does
+/// for a native that walks on past a throwable. Two steps answer so: a
+/// call the step makes into the program, a `__toString`, a user stream
+/// wrapper's method, which serves nothing, as php's `zend_call_function`
+/// returns at once while a throwable is pending
+/// (`Z/Zend/zend_execute_API.c:822`); and a write the engine refuses
+/// while the throwable is pending, a typed property's `TypeError`, which
+/// raises nothing over it (`zend_verify_property_type_error`), as ext/pdo's
+/// fetch into a class meets it.
 pub fn while_pending<R>(
     req: &mut Request,
     pending: &Thrown,
     step: impl FnOnce(&mut Request) -> R,
 ) -> Option<R> {
     req.while_pending(pending, step)
+}
+
+/// What a native's walk keeps in php's `EG(exception)` while it goes on
+/// past a throwable a step left there, as php's C code carries on with
+/// one set: `php_implode` converting each piece after one whose
+/// `__toString` threw, `umsg_format_helper` each argument, `do_fetch`
+/// writing each column of an object's row. Nothing is kept until a step
+/// throws; from there each step is served while the kept throwable
+/// stands pending ([`while_pending`]), and what a step throws anew is
+/// chained over it ([`Thrown::chain`]). A fatal or an `exit` leaves at
+/// once, what was kept given up. ext/standard's `implode` is the
+/// witness: a piece after one that threw is converted with no
+/// `__toString` called and its warning reaching no handler.
+#[derive(Debug, Default)]
+pub struct Carrying {
+    kept: Option<Thrown>,
+}
+
+impl Carrying {
+    /// One step of the walk: `Ok(Some)` its value, `Ok(None)` where it
+    /// threw, the throwable kept from there on. With a throwable kept the
+    /// step is taken while it stands pending, so php's refusals stand: a
+    /// call into the program serves nothing and answers the kept
+    /// throwable back, which is told from one raised anew and stays as it
+    /// is kept.
+    ///
+    /// # Errors
+    /// A fatal or an `exit` the step raised, which leaves at once, with
+    /// what was kept given up.
+    pub fn serve<T>(
+        &mut self,
+        req: &mut Request,
+        step: impl FnOnce(&mut Request) -> Result<T, Thrown>,
+    ) -> Result<Option<T>, Thrown> {
+        let answered = match self.kept.take() {
+            None => step(req),
+            Some(kept) => {
+                // `keep` holds a throwable only, which `while_pending`
+                // serves; were it a fatal or an exit, it leaves.
+                let Some(answered) = while_pending(req, &kept, step) else {
+                    return Err(kept);
+                };
+                self.kept = Some(kept);
+                answered
+            }
+        };
+        match answered {
+            Ok(value) => Ok(Some(value)),
+            Err(thrown) => self.keep(req, thrown).map(|()| None),
+        }
+    }
+
+    /// What a step taken outside [`Carrying::serve`] threw, or left on
+    /// the request, kept as `serve` keeps it: chained over what is kept,
+    /// the kept throwable answered back staying as it is.
+    ///
+    /// # Errors
+    /// `thrown` where it is a fatal or an `exit`, which leaves at once,
+    /// with what was kept given up.
+    pub fn keep(&mut self, req: &mut Request, thrown: Thrown) -> Result<(), Thrown> {
+        let kept = match self.kept.take() {
+            None => thrown,
+            // The kept throwable answered back, named with no owner of
+            // its own ([`while_pending`]).
+            Some(kept) if kept.exception() == thrown.exception() => kept,
+            Some(kept) => kept.chain(req, thrown),
+        };
+        if kept.exception().is_none() {
+            return Err(kept);
+        }
+        self.kept = Some(kept);
+        Ok(())
+    }
+
+    /// What is kept, taken: the native's `Err` as its walk ends, or the
+    /// throwable a later failure is raised over.
+    pub fn take(&mut self) -> Option<Thrown> {
+        self.kept.take()
+    }
 }
 
 /// `step` taken with php's `EG(exception)` empty, what stood there, a
