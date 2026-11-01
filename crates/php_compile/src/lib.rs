@@ -59,7 +59,8 @@ pub mod syntax {
     pub use php_syntax::tree::{Element, TokenId, Tree};
     pub use php_syntax::{
         Arena, Colours, Diagnostic, FileId, Level, LexOptions, Lexed, Options, Parsed, Position,
-        ScannedToken, SyntaxKind, Token, highlight, html_puts, lex, parse, scanned, strip,
+        ScannedToken, ScannerHeap, SyntaxKind, Token, highlight, html_puts, lex, parse, scanned,
+        strip, take_scanner_heap,
     };
 }
 
@@ -885,6 +886,9 @@ fn compile_scanned<'p>(
     scanning: Option<multibyte::Scanning<'p>>,
     room: Room,
 ) -> Result<Unit, CompileError> {
+    // What php's scanner laid, which the caller charges where the compile
+    // is a request's ([`php_syntax::take_scanner_heap`]).
+    php_syntax::note_scanner_heap(arena, parsed.source, parsed.tokens);
     // `Parsed::diagnostics` is in php's order (design §6.1): the
     // scanner's and the parser's by position, the compiler's one after
     // them all. php's scanner raises as it scans and its parser stops at

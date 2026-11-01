@@ -64,7 +64,7 @@ pub use lexer::{LexOptions, Lexed, Position, Token, lex};
 pub use line_index::{LineCol, LineIndex};
 pub use output::{Filtered, filter_tokens, token_text};
 pub use php_names::{amp_name, cast_name, int_overflows, magic_const_name, operator_name};
-pub use scanner::{ScannedToken, scanned};
+pub use scanner::{ScannedToken, ScannerHeap, note_scanner_heap, scanned, take_scanner_heap};
 pub use source::{Diagnostic, FileId, Level, MAX_FILE_LEN, Span, TextRange, load_bytes};
 pub use tree::{Missing, Tree};
 pub use value::{Holder, TokenValue};

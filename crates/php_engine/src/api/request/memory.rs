@@ -147,6 +147,9 @@ impl Intern for RequestStrings<'_> {
         {
             return Ok(frozen);
         }
+        if let Some(opened) = self.made.opened_name(bytes) {
+            return Ok(opened);
+        }
         if self.asks_table()
             && let Some(held) = self.shared.existing_interned(bytes)
         {

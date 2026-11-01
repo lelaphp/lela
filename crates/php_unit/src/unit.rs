@@ -160,6 +160,13 @@ pub struct Unit {
     /// kept by the request that compiled the unit to its end
     /// (`shutdown_compiler`).
     pub delayed_fetches: u32,
+    /// The most names `FC(seen_symbols)` held while the unit compiled:
+    /// each function's, closure's, named class's and `const`'s the file
+    /// declared (`zend_register_seen_symbol`, `Z/Zend/zend_compile.c:438`),
+    /// one bucket each of the table `zend_file_context_begin` makes
+    /// (`:411`), which a `namespace` empties and `zend_file_context_end`
+    /// destroys once the main op array stands (`:418`).
+    pub seen_symbols: u32,
     /// The cell every closure of the unit's constant expressions reaches
     /// the unit through, bound when the unit is published.
     pub cell: UnitCell,

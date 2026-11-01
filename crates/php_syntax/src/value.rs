@@ -159,7 +159,7 @@ impl TokenValue {
 
 /// `T_NUM_STRING`'s value: `[0]|([1-9][0-9]*)` that `ZEND_STRTOL` takes
 /// without `ERANGE` is a long, and anything else the text.
-fn offset(text: &[u8]) -> TokenValue {
+pub(crate) fn offset(text: &[u8]) -> TokenValue {
     let canonical = text == b"0"
         || (text.first().is_some_and(|b| (b'1'..=b'9').contains(b))
             && text.iter().all(u8::is_ascii_digit));
@@ -741,7 +741,7 @@ fn utf8_of(value: u32) -> ([u8; 4], usize) {
 /// Deprecated: The backtick (`) operator is deprecated, use shell_exec() instead in %s on line 2
 /// 92 34 96 36
 /// ```
-fn unescape(text: &[u8], quote: Quote) -> Vec<u8> {
+pub(crate) fn unescape(text: &[u8], quote: Quote) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len());
     let mut i = 0;
     while i < text.len() {
@@ -760,7 +760,7 @@ fn unescape(text: &[u8], quote: Quote) -> Vec<u8> {
 /// The bytes of a `SINGLE_QUOTED` token: the `b` prefix and the quotes
 /// dropped, `\\` and `\'` the one byte, and any other `\` kept with the
 /// byte after it, which is the whole of php's `'…'` rule.
-fn single_quoted(text: &[u8]) -> Vec<u8> {
+pub(crate) fn single_quoted(text: &[u8]) -> Vec<u8> {
     let body = text
         .strip_prefix(b"b")
         .or_else(|| text.strip_prefix(b"B"))

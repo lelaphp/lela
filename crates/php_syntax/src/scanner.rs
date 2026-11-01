@@ -30,6 +30,7 @@
 //! What `token_get_all` decides on its own, the stop three tokens after
 //! `T_HALT_COMPILER` that `tokenize()` counts, stays with `ext/tokenizer`.
 
+use crate::value::{Quote, single_quoted, unescape};
 use crate::{
     SyntaxKind, Token, amp_name, cast_name, int_overflows, magic_const_name, operator_name,
 };
@@ -83,9 +84,132 @@ pub fn scanned(source: &[u8], tokens: &[Token]) -> Vec<ScannedToken> {
         quotes: Vec::new(),
         line: 1,
         counted_to: 0,
+        heap: None,
     };
     walk.all();
     walk.out
+}
+
+/// What php's scanner lays on the request's heap as it scans one source
+/// under `zend_compile`, and holds until the compile ends: the
+/// `zend_string` each token that carries a string is given
+/// (`zend_copy_value`, `ZVAL_STRINGL`), which the tree holds until
+/// `zend_ast_destroy` (`Z/Zend/zend_language_scanner.l:632`), and the
+/// deepest its two `zend_stack`s go, which `zend_restore_lexical_state`
+/// destroys after it. A string of no byte or one is php's interned one,
+/// and lays nothing.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ScannerHeap {
+    /// The bytes of each string, one after another.
+    bytes: Vec<u8>,
+    /// Each string: the length `zend_string_alloc` was asked for, the
+    /// bytes scanned before an escape was read, and where its bytes end
+    /// in `bytes`.
+    strings: Vec<(usize, usize)>,
+    /// The deepest `SCNG(nest_location_stack)` goes: `enter_nesting` at
+    /// each `(`, `[`, `#[`, `{`, `{$` and `${`, `exit_nesting` at each
+    /// `)`, `]` and `}` (`:1273-1300`).
+    pub nesting: usize,
+    /// The deepest `SCNG(state_stack)` goes: `yy_push_state` at each `{`,
+    /// `{$` and `${`, popped at its `}`, and for the name after each `->`
+    /// and `?->` and the offset after a variable in a string (`:164`).
+    pub states: usize,
+}
+
+impl ScannerHeap {
+    /// Each string as its length asked of `zend_string_alloc`, and its
+    /// bytes, its escapes read.
+    pub fn strings(&self) -> impl Iterator<Item = (usize, &[u8])> {
+        let mut from = 0;
+        self.strings.iter().map(move |&(len, end)| {
+            let bytes = self.bytes.get(from..end).unwrap_or(&[]);
+            from = end;
+            (len, bytes)
+        })
+    }
+
+    /// A string of `len` bytes scanned whose value is `value`, where it
+    /// lays one.
+    fn string(&mut self, len: usize, value: &[u8]) {
+        if len > 1 {
+            self.bytes.extend_from_slice(value);
+            self.strings.push((len, self.bytes.len()));
+        }
+    }
+}
+
+/// What php's scanner lays scanning `source` ([`ScannerHeap`]), read
+/// off the lexer's `tokens` of it and kept in `arena` until
+/// [`take_scanner_heap`] takes it, for the request whose compile in the
+/// arena scanned it to charge. A function of the
+/// crate's, not a method of the arena, so the facade extensions build
+/// on, which names the arena, does not carry the compiler's bookkeeping.
+pub fn note_scanner_heap(arena: &crate::Arena, source: &[u8], tokens: &[Token]) {
+    arena.note_scanned(scanner_heap(source, tokens));
+}
+
+/// What [`note_scanner_heap`] kept in `arena` last, taken out.
+#[must_use]
+pub fn take_scanner_heap(arena: &crate::Arena) -> ScannerHeap {
+    arena.take_scanned()
+}
+
+/// [`ScannerHeap`] for `source`, read off the lexer's `tokens` of it as
+/// [`scanned`] reads php's tokens: a name, a variable's without its `$`,
+/// a quoted string's between its quotes, a stretch of string text and a
+/// stretch of inline HTML, each laid at the length scanned and holding
+/// its bytes once its escapes are read.
+fn scanner_heap(source: &[u8], tokens: &[Token]) -> ScannerHeap {
+    let mut walk = Walk {
+        source,
+        tokens,
+        out: Vec::new(),
+        contexts: vec![Context::Scripting],
+        run: None,
+        quotes: Vec::new(),
+        line: 1,
+        counted_to: 0,
+        heap: Some(Laying::default()),
+    };
+    walk.all();
+    walk.heap.map(|laying| laying.heap).unwrap_or_default()
+}
+
+/// [`ScannerHeap`] as a walk lays it, with how deep each stack stands.
+#[derive(Default)]
+struct Laying {
+    heap: ScannerHeap,
+    nesting: usize,
+    states: usize,
+}
+
+impl Laying {
+    /// One more on the nesting stack.
+    fn enter(&mut self) {
+        self.nesting += 1;
+        self.heap.nesting = self.heap.nesting.max(self.nesting);
+    }
+
+    /// One fewer on the nesting stack.
+    fn exit(&mut self) {
+        self.nesting = self.nesting.saturating_sub(1);
+    }
+
+    /// One more on the state stack.
+    fn push(&mut self) {
+        self.states += 1;
+        self.heap.states = self.heap.states.max(self.states);
+    }
+
+    /// One fewer on the state stack.
+    fn pop(&mut self) {
+        self.states = self.states.saturating_sub(1);
+    }
+
+    /// One pushed and popped again before the next token stands.
+    fn pass(&mut self) {
+        self.heap.states = self.heap.states.max(self.states + 1);
+    }
 }
 
 /// One of Zend's scanner states this walk must know to name a token: the
@@ -126,6 +250,8 @@ struct Walk<'a> {
     quotes: Vec<usize>,
     line: u32,
     counted_to: usize,
+    /// What the scanner lays, where [`scanner_heap`] asks.
+    heap: Option<Laying>,
 }
 
 impl Walk<'_> {
@@ -175,6 +301,9 @@ impl Walk<'_> {
     }
 
     fn push(&mut self, name: Option<&'static str>, start: usize, end: usize) {
+        if let Some(name) = name {
+            self.lay_token(name, start, end);
+        }
         let line = self.line_at(start);
         self.out.push(ScannedToken {
             name,
@@ -199,6 +328,15 @@ impl Walk<'_> {
         if let Some(run) = self.run.take()
             && run.end > run.start
         {
+            if let Some(laying) = &mut self.heap {
+                let quote = match self.contexts.last() {
+                    Some(Context::Quoted(SyntaxKind::BACKQUOTE)) => Quote::Backquote,
+                    Some(Context::Heredoc) => Quote::Heredoc,
+                    _ => Quote::Double,
+                };
+                let text = self.source.get(run.start..run.end).unwrap_or(&[]);
+                laying.heap.string(text.len(), &unescape(text, quote));
+            }
             self.out.push(ScannedToken {
                 name: Some("T_ENCAPSED_AND_WHITESPACE"),
                 start: run.start,
@@ -278,6 +416,7 @@ impl Walk<'_> {
             return self.offset_token(i);
         }
         self.flush();
+        self.lay_stacks(kind);
         if kind.is_keyword() {
             return self.keyword(i);
         }
@@ -293,6 +432,9 @@ impl Walk<'_> {
                 self.named("T_VARIABLE", i);
                 if self.in_string() && self.adjacent(i) && self.tokens[i + 1].kind == K::L_BRACK {
                     self.contexts.push(Context::VarOffset);
+                    if let Some(laying) = &mut self.heap {
+                        laying.push();
+                    }
                 }
             }
             K::IDENT => self.ident(i),
@@ -457,6 +599,9 @@ impl Walk<'_> {
             K::R_BRACK => {
                 self.character(i);
                 self.contexts.pop();
+                if let Some(laying) = &mut self.heap {
+                    laying.pop();
+                }
             }
             K::ENCAPS_INT => self.named("T_NUM_STRING", i),
             K::IDENT => self.named("T_STRING", i),
@@ -473,6 +618,64 @@ impl Walk<'_> {
     fn leave_offset(&mut self) {
         if self.top() == Context::VarOffset {
             self.contexts.pop();
+            if let Some(laying) = &mut self.heap {
+                laying.pop();
+            }
+        }
+    }
+
+    /// The string php's scanner lays for the token `name` over
+    /// `start..end`, where [`scanner_heap`] asks: `zend_copy_value` past
+    /// the `$` of a variable and the `\` or `namespace\` of a name
+    /// (`RETURN_TOKEN_WITH_STR`), the bytes between the quotes of a `'…'`
+    /// with its two escapes read, and an offset in a string that is not
+    /// a whole number a long holds.
+    fn lay_token(&mut self, name: &'static str, start: usize, end: usize) {
+        let Some(laying) = &mut self.heap else {
+            return;
+        };
+        let text = self.source.get(start..end).unwrap_or(&[]);
+        if name == "T_NUM_STRING" && matches!(crate::value::offset(text), crate::TokenValue::Int(_))
+        {
+            return;
+        }
+        let skip = match name {
+            "T_STRING" | "T_NAME_QUALIFIED" | "T_STRING_VARNAME" | "T_INLINE_HTML"
+            | "T_NUM_STRING" => 0,
+            "T_VARIABLE" | "T_NAME_FULLY_QUALIFIED" => 1,
+            "T_NAME_RELATIVE" => b"namespace\\".len(),
+            "T_CONSTANT_ENCAPSED_STRING" => {
+                let prefixed = matches!(text.first(), Some(b'b' | b'B'));
+                let inner = text.len().saturating_sub(2 + usize::from(prefixed));
+                laying.heap.string(inner, &single_quoted(text));
+                return;
+            }
+            _ => return,
+        };
+        let text = text.get(skip..).unwrap_or(&[]);
+        laying.heap.string(text.len(), text);
+    }
+
+    /// The scanner's two stacks at a token of `kind` in `ST_IN_SCRIPTING`,
+    /// where [`scanner_heap`] asks.
+    fn lay_stacks(&mut self, kind: SyntaxKind) {
+        use SyntaxKind as K;
+        let Some(laying) = &mut self.heap else {
+            return;
+        };
+        match kind {
+            K::L_PAREN | K::L_BRACK | K::ATTRIBUTE_OPEN => laying.enter(),
+            K::R_PAREN | K::R_BRACK => laying.exit(),
+            K::L_CURLY | K::DOLLAR_L_CURLY => {
+                laying.enter();
+                laying.push();
+            }
+            K::R_CURLY => {
+                laying.exit();
+                laying.pop();
+            }
+            K::ARROW | K::NULLSAFE_ARROW => laying.pass(),
+            _ => {}
         }
     }
 

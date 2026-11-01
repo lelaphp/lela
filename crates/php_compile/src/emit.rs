@@ -1949,6 +1949,7 @@ pub(crate) fn unit(
         halt_offset: emit.halted,
         loop_vars: emit.loop_var_peak,
         delayed_fetches,
+        seen_symbols: emit.imports.seen_peak(),
         cell: emit.cell,
     })
 }
@@ -4308,6 +4309,7 @@ impl<'a> Emit<'a> {
     /// [`Self::closure_uses`] emits.
     fn closure(&mut self, closure: &Closure) -> Result<Where, CompileError> {
         let name = self.closure_name(closure.function.line);
+        self.imports.see_closure(&name);
         let at = u32::try_from(self.dynamic.len()).unwrap_or(u32::MAX);
         self.dynamic.push(None);
         let offset = u32::try_from(self.dynamic_func_defs.len()).unwrap_or(u32::MAX);
@@ -9279,6 +9281,7 @@ impl<'a> Emit<'a> {
             return Err(self.compile_error("Cannot use(...) variables in constant expression"));
         }
         let name = self.closure_name(closure.function.line);
+        self.imports.see_closure(&name);
         let at = u32::try_from(self.dynamic.len()).unwrap_or(u32::MAX);
         self.dynamic.push(None);
         let flags = FnFlags {

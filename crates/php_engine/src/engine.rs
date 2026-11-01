@@ -1869,10 +1869,16 @@ impl Shared {
         // and from a function of its own cost a copy of its 600 bytes
         // each way.
         let mut made = self.compiled_for(req, source, filename, kind);
+        // The compiler's stacks, which its compile grew and the request
+        // keeps, then what else php's compile laid, charged in its order
+        // while the strings this one made are still the compile's.
+        if let Ok(unit) = &made {
+            req.note_pushed(crate::api::request::Pushed::of(unit));
+        }
+        let alone = req.charge_compile(made.as_ref().ok());
         let room = match &mut made {
             Ok(unit) => {
                 req.count_keys_made(crate::unit_cache::keys_of(unit));
-                req.note_pushed(crate::api::request::Pushed::of(unit));
                 req.ready_unit(unit)
             }
             Err(_) => None,
@@ -1884,6 +1890,9 @@ impl Shared {
                 let unit = unit.published(room);
                 req.hold_published(&unit);
                 req.hold_compiled(&unit);
+                if let Some(alone) = alone {
+                    req.hold_alone(&unit, alone);
+                }
                 Ok(unit)
             }
             // What the refused compile had declared stands in the
@@ -6550,9 +6559,9 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit) -> bool {
 fn serve_declared(req: &mut Request, unit: &PublishedUnit) -> bool {
     let standing = req.vm().depth();
     // The op array `zend_accel_load_script` copies out of the cache, or
-    // `zend_compile` makes, and its runtime cache, the request's while
+    // `zend_compile` made, and its runtime cache, the request's while
     // the file runs, as an include's are (design §6.3).
-    let Ok(copy) = crate::api::values::Emalloc::new(req, crate::exec::OP_ARRAY_SIZE) else {
+    let Ok(copy) = req.main_op_array(unit) else {
         return false;
     };
     let program = crate::api::request::CodeFrom::Top(None);

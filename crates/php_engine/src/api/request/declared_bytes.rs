@@ -45,6 +45,7 @@ use super::unit_strings::OpArrayStrings;
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, Emalloc, PhpArray, Value};
 use crate::unit_cache::{Level, Optimizer};
+use php_compile::syntax::ScannerHeap;
 
 /// `sizeof(zend_op)`.
 pub(super) const OPLINE: usize = 32;
@@ -67,6 +68,16 @@ const INITIAL_OPLINES: usize = 64;
 const POINTER: usize = 8;
 /// `lookup_cv`'s step: sixteen more names at a time.
 const VARS_STEP: usize = 16;
+/// `zend_add_literal`'s step: sixteen more constants at a time.
+const LITERALS_STEP: usize = 16;
+/// `STACK_BLOCK_SIZE`, the elements `zend_stack_push` grows a stack by
+/// (`Z/Zend/zend_stack.h:31`).
+const STACK_BLOCK: usize = 16;
+/// `sizeof(int)`, an element of the scanner's `state_stack`.
+const SCANNER_STATE: usize = 4;
+/// `sizeof(zend_nest_location)`, an element of the scanner's
+/// `nest_location_stack` (`Z/Zend/zend_language_scanner.h:72`).
+const NEST_LOCATION: usize = 8;
 /// `sizeof(zend_arg_info)`.
 const ARG_INFO: usize = 32;
 /// `sizeof(zend_live_range)`.
@@ -77,6 +88,9 @@ const TRY_CATCH: usize = 16;
 const REFCOUNT: usize = 4;
 /// The size `zend_initialize_class_data` gives each of a class's tables.
 const CLASS_TABLE: u32 = 8;
+/// The size `zend_file_context_begin` gives `FC(seen_symbols)`
+/// (`Z/Zend/zend_compile.c:411`).
+const SEEN_SYMBOLS: u32 = 8;
 /// `sizeof(zend_ast_ref)`, the counted header `zend_ast_copy` lays
 /// before the tree it copies.
 const AST_REF: usize = 8;
@@ -856,8 +870,39 @@ fn op_array(
     code: &OpArray,
     declared: Option<(&FunctionDecl, bool)>,
 ) -> Result<(), Thrown> {
-    let args = declared.map_or(0, |(decl, method)| arg_infos(decl, method));
+    let grown = init_op_array(req, blocks, code)?;
+    compiled(req, blocks, code, declared, grown)
+}
+
+/// `init_op_array`'s refcount and `INITIAL_OP_ARRAY_SIZE` oplines for
+/// `code` (`Z/Zend/zend_opcode.c:54`, `:57`), the oplines grown fourfold
+/// as `get_next_op` grows them while the compile fills them
+/// (`Z/Zend/zend_compile.c:157`), handed back for `pass_two`
+/// ([`compiled`]).
+fn init_op_array(
+    req: &mut Request,
+    blocks: &mut Blocks,
+    code: &OpArray,
+) -> Result<Emalloc, Thrown> {
     blocks.emalloced.push(Emalloc::new(req, REFCOUNT)?);
+    let mut grown = INITIAL_OPLINES;
+    while code.oplines.len() > grown {
+        grown = grown.saturating_mul(4);
+    }
+    Emalloc::new(req, grown * OPLINE)
+}
+
+/// What the compile of `code` lays after [`init_op_array`], `grown`
+/// being its oplines, and what `pass_two` makes of it ([`op_array`]).
+fn compiled(
+    req: &mut Request,
+    blocks: &mut Blocks,
+    code: &OpArray,
+    declared: Option<(&FunctionDecl, bool)>,
+    grown: Emalloc,
+) -> Result<(), Thrown> {
+    let args = declared.map_or(0, |(decl, method)| arg_infos(decl, method));
+    let last = code.oplines.len();
     // `op_array->attributes`, the function's and its parameters' in one
     // table (`zend_compile_params`' offset).
     if let Some((decl, _)) = declared {
@@ -869,40 +914,29 @@ fn op_array(
             false,
         )?;
     }
-    // `get_next_op` grows the oplines fourfold from
-    // `INITIAL_OP_ARRAY_SIZE`, and `pass_two` reallocates them to the
-    // oplines with the constants after them, aligned to 16
-    // (`ZEND_MM_ALIGNED_SIZE_EX`, `Z/Zend/zend_opcode.c:1117`).
-    let last = code.oplines.len();
-    let mut grown = INITIAL_OPLINES;
-    while last > grown {
-        grown = grown.saturating_mul(4);
-    }
-    let grown = Emalloc::new(req, grown * OPLINE)?;
+    // The constants, which `zend_add_literal` grows sixteen at a time
+    // (`Z/Zend/zend_compile.c:597`), and the variables' names, which
+    // `lookup_cv` grows sixteen at a time (`:556`).
     let literals = code.literals.len();
-    blocks.oplines.push(Oplines {
-        block: grown.resize(req, packed(last, literals))?,
-        lines: last,
-        literals,
-        merge: Merge::of(&code.literals),
-    });
-    // `lookup_cv` grows the names sixteen at a time, and `pass_two`
-    // reallocates them to their number where it is not a multiple.
+    let constants = match literals {
+        0 => None,
+        literals => Some(Emalloc::new(
+            req,
+            literals.next_multiple_of(LITERALS_STEP) * ZVAL,
+        )?),
+    };
     let vars = code.vars.len();
-    if vars > 0 {
-        let names = Emalloc::new(req, vars.next_multiple_of(VARS_STEP) * POINTER)?;
-        let names = if vars.is_multiple_of(VARS_STEP) {
-            names
-        } else {
-            names.resize(req, vars * POINTER)?
-        };
-        blocks.emalloced.push(names);
-    }
+    let names = match vars {
+        0 => None,
+        vars => Some(Emalloc::new(
+            req,
+            vars.next_multiple_of(VARS_STEP) * POINTER,
+        )?),
+    };
     // One block each, which a reallocation one element at a time leaves
     // in the bin of its last size.
     for len in [
         args * ARG_INFO,
-        code.live_ranges.len() * LIVE_RANGE,
         code.try_catch.len() * TRY_CATCH,
         code.dynamic_func_defs.len() * POINTER,
     ] {
@@ -932,6 +966,33 @@ fn op_array(
         let statics = req.fatal_of(laid)?;
         blocks.arrays.push(statics);
         add_rows(req, statics, code.bound_vars.len())?;
+    }
+    // `pass_two`: the names reallocated to their number where it is not
+    // a multiple (`Z/Zend/zend_opcode.c:1103`); the oplines reallocated
+    // to hold the constants after them, aligned to 16
+    // (`ZEND_MM_ALIGNED_SIZE_EX`, `:1117`), beside the constants until
+    // they are copied in and freed (`:1123`); and the live ranges
+    // `zend_calc_live_ranges` lays (`:1251`).
+    if let Some(names) = names {
+        let names = if vars.is_multiple_of(VARS_STEP) {
+            names
+        } else {
+            names.resize(req, vars * POINTER)?
+        };
+        blocks.emalloced.push(names);
+    }
+    blocks.oplines.push(Oplines {
+        block: grown.resize(req, packed(last, literals))?,
+        lines: last,
+        literals,
+        merge: Merge::of(&code.literals),
+    });
+    if let Some(constants) = constants {
+        constants.free(req);
+    }
+    let live_ranges = code.live_ranges.len() * LIVE_RANGE;
+    if live_ranges > 0 {
+        blocks.emalloced.push(Emalloc::new(req, live_ranges)?);
     }
     Ok(())
 }
@@ -1814,6 +1875,182 @@ pub(super) fn with_tree<T>(
         block.free(req);
     }
     charged
+}
+
+/// The main op array of a unit the request compiled for itself, as
+/// `zend_compile` leaves it on the request's heap: its `zend_op_array`
+/// (`Z/Zend/zend_language_scanner.l:607`), until the frame that runs it
+/// holds it ([`Request::main_op_array`]), and what `init_op_array`, the
+/// compile and `pass_two` laid for it ([`op_array`]), which
+/// `destroy_op_array` gives back as its execution ends.
+#[derive(Default)]
+pub(crate) struct MainOpArray {
+    op_array: Option<Emalloc>,
+    blocks: Blocks,
+}
+
+impl MainOpArray {
+    /// The `zend_op_array`, where no frame has taken it yet.
+    pub(super) fn take_op_array(&mut self) -> Option<Emalloc> {
+        self.op_array.take()
+    }
+
+    /// Its blocks, to be given back with what else is over.
+    pub(super) fn into_blocks(self) -> Blocks {
+        let mut blocks = self.blocks;
+        blocks.emalloced.extend(self.op_array);
+        blocks
+    }
+}
+
+/// What [`alone`] laid that stands after the compile: the main op
+/// array's, and what the unit declares ([`of_unit`]), each held by the
+/// unit once it is the request's ([`Request::hold_alone`]).
+pub(crate) struct Alone {
+    pub(super) main: MainOpArray,
+    pub(super) declared: Laid,
+}
+
+/// php's compile of a source it compiles for the request alone and
+/// persists nothing of, `zend_compile` under `compile_file` or
+/// `compile_string` (`Z/Zend/zend_language_scanner.l:591`), charged in
+/// its order once the engine's compile has ended: `CG(ast_arena)` over the
+/// tree ([`with_tree`]); in it what the scanner laid as it read the
+/// source ([`ScannerHeap`]), the string of each token whose bytes the
+/// compile kept no string of, `unkept`, which `zend_ast_destroy` gives
+/// back before the arena (`:632`), and its two stacks, which
+/// `zend_restore_lexical_state` destroys after it
+/// (`Z/Zend/zend_language_scanner.l:264`, `:267`); and, where the compile
+/// made `unit`, its main op array ([`MainOpArray`]) and what it declares
+/// ([`Alone`]), which stand after them. So the program's peak is where `pass_two` reallocates its
+/// oplines beside the constants and the tree, and its first line reads
+/// the main op array's blocks a file opcache persists has none of (the
+/// program written within `opcache.file_update_protection`, whose
+/// compile opcache leaves to php's own):
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/w3805-' . getmypid() . '.php';
+/// foreach (['', '$abcdef = [1, 2]; ', 'if (strlen("abc")) { $o = new stdClass; $o->p = "xyz"; } ', 'class C {} function f() {} '] as $code) {
+///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
+///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
+///     touch($f, time() - 10);
+///     $cached = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
+///     [$usage, $peak] = explode(' ', trim($fresh));
+///     echo $usage - (int) $cached, ' ', $peak - $usage, "\n";
+/// }
+/// unlink($f);
+/// ```
+/// ```expect process
+/// 400 35312
+/// 728 35312
+/// 720 35016
+/// 464 37392
+/// ```
+pub(super) fn alone(
+    req: &mut Request,
+    unit: Option<&Unit>,
+    tree: usize,
+    scanned: &ScannerHeap,
+    unkept: Vec<usize>,
+) -> Result<Option<Alone>, Thrown> {
+    let strings = unkept.into_iter().map(|len| STRING_HEADER + len + 1);
+    let stacks = [
+        (scanned.nesting, NEST_LOCATION),
+        (scanned.states, SCANNER_STATE),
+    ]
+    .into_iter()
+    .filter(|(depth, _)| *depth > 0)
+    .map(|(depth, element)| depth.next_multiple_of(STACK_BLOCK) * element);
+    let mut stacks_laid = Vec::new();
+    let laid = with_tree(req, tree, |req| {
+        let mut strings_laid = Vec::new();
+        let main = lay_each(req, &mut strings_laid, strings)
+            .and_then(|()| lay_each(req, &mut stacks_laid, stacks))
+            .and_then(|()| unit.map(|unit| main_op_array(req, unit)).transpose());
+        for string in strings_laid {
+            string.free(req);
+        }
+        main
+    });
+    for stack in stacks_laid {
+        stack.free(req);
+    }
+    laid
+}
+
+/// A block of each of `sizes` laid into `laid`, up to the first the
+/// heap refuses.
+fn lay_each(
+    req: &mut Request,
+    laid: &mut Vec<Emalloc>,
+    sizes: impl Iterator<Item = usize>,
+) -> Result<(), Thrown> {
+    for size in sizes {
+        laid.push(Emalloc::new(req, size)?);
+    }
+    Ok(())
+}
+
+/// `zend_compile`'s main op array of `unit`, laid in its order
+/// ([`MainOpArray`]), and between its `init_op_array` and its
+/// `pass_two` the file's `FC(seen_symbols)`, a bucket per name its
+/// declarations registered ([`Unit::seen_symbols`],
+/// `Z/Zend/zend_compile.c:438`), and what the compile of the functions
+/// and classes it declares carves and lays ([`carve`], [`of_unit`]); the
+/// table is destroyed after `pass_two`, by `zend_file_context_end`
+/// (`:418`).
+fn main_op_array(req: &mut Request, unit: &Unit) -> Result<Alone, Thrown> {
+    let mut main = MainOpArray {
+        op_array: Some(Emalloc::new(req, crate::exec::OP_ARRAY_SIZE)?),
+        blocks: Blocks::default(),
+    };
+    let mut declared = Laid::default();
+    let mut seen = Blocks {
+        embedded: vec![php_heap::EmbeddedArr::new(SEEN_SYMBOLS)],
+        ..Blocks::default()
+    };
+    let laid = init_op_array(req, &mut main.blocks, &unit.main).and_then(|grown| {
+        lay_each(req, &mut seen.emalloced, seen_keys(unit))?;
+        if let Some(table) = seen.embedded.first() {
+            add_rows(req, table.arr(), unit.seen_symbols as usize)?;
+        }
+        carve(req, unit)?;
+        declared = of_unit(req, unit)?;
+        compiled(req, &mut main.blocks, &unit.main, None, grown)
+    });
+    seen.free(req);
+    match laid {
+        Ok(()) => Ok(Alone { main, declared }),
+        Err(thrown) => {
+            main.into_blocks().free(req);
+            declared.free(req);
+            Err(thrown)
+        }
+    }
+}
+
+/// The keys of `FC(seen_symbols)` the table holds the only reference
+/// to: the lowered name `zend_string_tolower` copies of a closure's
+/// name (`Z/Zend/zend_compile.c:8395`) and of a named class's
+/// (`:9276`) that holds an upper-case letter, which nothing keeps but
+/// the table, the class's being interned anew (`:9299`). A function's
+/// lowered name is kept by the function table or by the constant of the
+/// `DECLARE_FUNCTION` that binds it, and a constant's is its name.
+fn seen_keys(unit: &Unit) -> impl Iterator<Item = usize> {
+    let closures = unit
+        .dynamic
+        .iter()
+        .map(|(decl, _)| &decl.name.0)
+        .filter(|name| name.starts_with(b"{closure:"));
+    let classes = unit
+        .classes
+        .iter()
+        .filter(|class| !class.flags.is_anonymous)
+        .map(|class| &class.name.0);
+    closures
+        .chain(classes)
+        .filter(|name| name.iter().any(u8::is_ascii_uppercase))
+        .map(|name| STRING_HEADER + name.len() + 1)
 }
 
 /// [`of_unit`]'s blocks, laid into `laid` one by one.

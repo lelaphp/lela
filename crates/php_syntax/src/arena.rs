@@ -36,6 +36,9 @@ pub struct Arena {
     scratch: RefCell<Scratch>,
     /// The elements of the last tree parsed into it ([`Arena::parsed`]).
     parsed: Cell<usize>,
+    /// What php's scanner laid for the last source a compile scanned in
+    /// it ([`crate::note_scanner_heap`]).
+    scanned: RefCell<crate::ScannerHeap>,
 }
 
 impl std::fmt::Debug for Arena {
@@ -106,6 +109,19 @@ impl Arena {
     #[must_use]
     pub fn parsed(&self) -> usize {
         self.parsed.get()
+    }
+
+    /// What php's scanner laid scanning the source a compile in the
+    /// arena read last ([`crate::take_scanner_heap`]), taken out, which a
+    /// reset keeps until it is.
+    pub(crate) fn take_scanned(&self) -> crate::ScannerHeap {
+        self.scanned.take()
+    }
+
+    /// `heap`, what php's scanner laid for the source a compile in the
+    /// arena reads, kept for [`Arena::take_scanned`].
+    pub(crate) fn note_scanned(&self, heap: crate::ScannerHeap) {
+        self.scanned.replace(heap);
     }
 
     /// The shape of a tree parsed into the arena, `elements` long.

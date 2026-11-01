@@ -91,7 +91,13 @@ impl Symbol {
 /// kinds as bits. Laid down on the first write, so a file that imports
 /// and declares nothing, an eval of a statement, holds none of them.
 #[derive(Default)]
-pub(super) struct Imports(Option<Box<Tables>>);
+pub(super) struct Imports {
+    tables: Option<Box<Tables>>,
+    /// The most names `FC(seen_symbols)` has held: `zend_hash_clean`
+    /// empties it at a `namespace` and keeps what it grew to
+    /// ([`php_unit::Unit::seen_symbols`]).
+    seen_peak: u32,
+}
 
 #[derive(Default)]
 struct Tables {
@@ -109,7 +115,7 @@ type ByName<V> = HashMap<Vec<u8>, V, php_link::NameHasher>;
 
 impl Imports {
     fn tables(&mut self) -> &mut Tables {
-        self.0.get_or_insert_default()
+        self.tables.get_or_insert_default()
     }
 
     fn table(&mut self, kind: Symbol) -> &mut ByName<Vec<u8>> {
@@ -123,17 +129,32 @@ impl Imports {
 
     /// `zend_reset_import_tables`, which a `namespace` statement runs.
     pub(super) fn reset(&mut self) {
-        *self = Imports::default();
+        self.tables = None;
     }
 
     /// `zend_register_seen_symbol`.
     fn see(&mut self, key: Vec<u8>, kind: Symbol) {
-        *self.tables().seen.entry(key).or_default() |= kind.bit();
+        let seen = &mut self.tables().seen;
+        *seen.entry(key).or_default() |= kind.bit();
+        let held = u32::try_from(seen.len()).unwrap_or(u32::MAX);
+        self.seen_peak = self.seen_peak.max(held);
+    }
+
+    /// A closure's name registered as `zend_begin_func_decl` registers
+    /// every function's, lowered (`Z/Zend/zend_compile.c:8417`), which no
+    /// import can name.
+    pub(super) fn see_closure(&mut self, name: &[u8]) {
+        self.see(name.to_ascii_lowercase(), Symbol::Function);
+    }
+
+    /// The most names `FC(seen_symbols)` has held.
+    pub(super) fn seen_peak(&self) -> u32 {
+        self.seen_peak
     }
 
     /// `zend_have_seen_symbol`.
     fn have_seen(&self, key: &[u8], kind: Symbol) -> bool {
-        self.0
+        self.tables
             .as_ref()
             .and_then(|tables| tables.seen.get(key))
             .is_some_and(|bits| bits & kind.bit() != 0)
@@ -149,7 +170,7 @@ impl Imports {
 
     /// The class name `alias` imports, whatever its case.
     fn class(&self, alias: &[u8]) -> Option<&[u8]> {
-        let tables = self.0.as_ref().filter(|t| !t.classes.is_empty())?;
+        let tables = self.tables.as_ref().filter(|t| !t.classes.is_empty())?;
         tables
             .classes
             .get(&alias.to_ascii_lowercase())
@@ -158,7 +179,7 @@ impl Imports {
 
     /// The function name `alias` imports, whatever its case.
     fn function(&self, alias: &[u8]) -> Option<&[u8]> {
-        let tables = self.0.as_ref().filter(|t| !t.functions.is_empty())?;
+        let tables = self.tables.as_ref().filter(|t| !t.functions.is_empty())?;
         tables
             .functions
             .get(&alias.to_ascii_lowercase())
@@ -167,7 +188,7 @@ impl Imports {
 
     /// The constant name `alias` imports, the case as written.
     fn constant(&self, alias: &[u8]) -> Option<&[u8]> {
-        self.0.as_ref()?.consts.get(alias).map(Vec::as_slice)
+        self.tables.as_ref()?.consts.get(alias).map(Vec::as_slice)
     }
 }
 
