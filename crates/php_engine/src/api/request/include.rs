@@ -434,15 +434,14 @@ impl Request {
     /// ```
     fn close_held(&mut self, until: Until) {
         let held = std::mem::take(&mut self.include.held);
+        let entered = self.diagnostics().bailing_out();
         for held in held {
             if until == Until::Served && held.until == Until::Ended {
                 self.include.held.push(held);
                 continue;
             }
-            let Some(hooks) = self
-                .stream_hooks()
-                .filter(|_| !self.diagnostics().bailing_out())
-            else {
+            let left = !entered && self.diagnostics().bailing_out();
+            let Some(hooks) = self.stream_hooks().filter(|_| !left) else {
                 continue;
             };
             match held.holder {
