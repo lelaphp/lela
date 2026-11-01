@@ -11,6 +11,7 @@
 use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 
+use crate::ffi::Nap;
 use crate::throwables::Throwables;
 use php_ext::abi::{Callable, NamedVariadic, OrFalse, Path, Ref, True, Union, Untyped, Variadic};
 use php_ext::attr::{php_const, php_function};
@@ -559,9 +560,12 @@ fn getopt_in(
     Ok(OrFalse::Value(result))
 }
 
-/// `time_nanosleep(int $seconds, int $nanoseconds): array|bool`: `true`
-/// after the sleep; a count of nanoseconds past 999 999 999 is the
-/// `EINVAL` php turns into its `ValueError`.
+/// `time_nanosleep(int $seconds, int $nanoseconds): array|bool`, php's
+/// `PHP_FUNCTION(time_nanosleep)` (`Z/ext/standard/basic_functions.c:1171`):
+/// one `nanosleep(2)`, and `true` after the whole sleep; a signal with a
+/// handler cuts it short, and what was left is the array php answers; a
+/// count of nanoseconds past 999 999 999 is the `EINVAL` php turns into
+/// its `ValueError`.
 ///
 /// ```php
 /// var_dump(time_nanosleep(0, 1000));
@@ -575,27 +579,64 @@ fn getopt_in(
 /// time_nanosleep(): Argument #2 ($nanoseconds) must be greater than or equal to 0
 /// Nanoseconds was not in the range 0 to 999 999 999 or seconds was negative
 /// ```
+///
+/// A child's `SIGUSR1` 200 ms into three seconds: the handler is served at
+/// the next interrupt check, before the answer is dumped.
+///
+/// ```php
+/// pcntl_async_signals(true);
+/// pcntl_signal(SIGUSR1, function ($signo) { echo "handled\n"; });
+/// $parent = getmypid();
+/// if (($child = pcntl_fork()) === 0) { usleep(200000); posix_kill($parent, SIGUSR1); exit(0); }
+/// $start = microtime(true);
+/// $left = time_nanosleep(3, 0);
+/// var_dump(array_keys($left), $left["seconds"] + $left["nanoseconds"] / 1e9 > 1);
+/// var_dump(microtime(true) - $start < 2);
+/// pcntl_waitpid($child, $status);
+/// ```
+/// ```expect process
+/// handled
+/// array(2) {
+///   [0]=>
+///   string(7) "seconds"
+///   [1]=>
+///   string(11) "nanoseconds"
+/// }
+/// bool(true)
+/// bool(true)
+/// ```
 #[php_function]
 fn time_nanosleep(
     req: &mut Request,
     seconds: i64,
     nanoseconds: i64,
-) -> Result<Union<PhpArray, bool>, Thrown> {
-    let Ok(seconds) = u64::try_from(seconds) else {
+) -> Result<Union<Owner<PhpArray>, bool>, Thrown> {
+    if seconds < 0 {
         return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
-    };
-    let Ok(nanoseconds) = u32::try_from(nanoseconds) else {
+    }
+    if nanoseconds < 0 {
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
-    };
-    if nanoseconds > 999_999_999 {
-        return Err(value_error(
+    }
+    match req
+        .limits_mut()
+        .blocking(|| crate::ffi::nanosleep(seconds, nanoseconds))
+    {
+        Nap::Slept => Ok(Union::B(true)),
+        Nap::Woken {
+            seconds,
+            nanoseconds,
+        } => {
+            let mut left = PhpArray::new(req)?;
+            left.set_str(req, b"seconds", Owner::int(seconds))?;
+            left.set_str(req, b"nanoseconds", Owner::int(nanoseconds))?;
+            Ok(Union::A(left))
+        }
+        Nap::Invalid => Err(value_error(
             req,
             "Nanoseconds was not in the range 0 to 999 999 999 or seconds was negative",
-        ));
+        )),
+        Nap::Failed => Ok(Union::B(false)),
     }
-    req.limits_mut()
-        .blocking(|| std::thread::sleep(std::time::Duration::new(seconds, nanoseconds)));
-    Ok(Union::B(true))
 }
 
 /// `set_include_path(string $include_path): string|false`: the old
@@ -1165,8 +1206,10 @@ fn flush(req: &mut Request) {
     req.response_mut().flush();
 }
 
-/// `usleep(int $microseconds): void`: the thread asleep that long; a
-/// count below zero is php's `ValueError`.
+/// `usleep(int $microseconds): void`, php's `PHP_FUNCTION(usleep)`
+/// (`Z/ext/standard/basic_functions.c:1150`): one `usleep(3)`, which a
+/// signal with a handler cuts short, and nothing said of it; a count
+/// below zero is php's `ValueError`.
 ///
 /// ```php
 /// usleep(10); var_dump(usleep(0));
@@ -1176,6 +1219,25 @@ fn flush(req: &mut Request) {
 /// NULL
 /// usleep(): Argument #1 ($microseconds) must be greater than or equal to 0
 /// ```
+///
+/// A child's `SIGUSR1` 200 ms into three seconds, the handler served by
+/// `pcntl_signal_dispatch` after the wait:
+///
+/// ```php
+/// pcntl_signal(SIGUSR1, function ($signo) { echo "handled\n"; });
+/// $parent = getmypid();
+/// if (($child = pcntl_fork()) === 0) { usleep(200000); posix_kill($parent, SIGUSR1); exit(0); }
+/// $start = microtime(true);
+/// var_dump(usleep(3000000));
+/// var_dump(microtime(true) - $start < 2);
+/// pcntl_signal_dispatch();
+/// pcntl_waitpid($child, $status);
+/// ```
+/// ```expect process
+/// NULL
+/// bool(true)
+/// handled
+/// ```
 #[php_function]
 fn usleep(req: &mut Request, microseconds: i64) -> Result<(), Thrown> {
     let micros = microseconds;
@@ -1183,9 +1245,9 @@ fn usleep(req: &mut Request, microseconds: i64) -> Result<(), Thrown> {
         return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
     };
     // `usleep((unsigned int)num)`: the count as C's cast leaves it.
-    let micros = micros & u64::from(u32::MAX);
-    req.limits_mut()
-        .blocking(|| std::thread::sleep(std::time::Duration::from_micros(micros)));
+    #[allow(clippy::cast_possible_truncation)]
+    let micros = micros as u32;
+    req.limits_mut().blocking(|| crate::ffi::usleep(micros));
     Ok(())
 }
 
@@ -2617,6 +2679,27 @@ fn constant(req: &mut Request, name: PhpString) -> Result<Owner<Value>, Thrown> 
 /// int(0)
 /// ```
 ///
+/// A child's `SIGUSR1` 200 ms into three seconds: the seconds `sleep(3)`
+/// says it did not sleep, and the handler served at the next interrupt
+/// check, before they are dumped.
+///
+/// ```php
+/// pcntl_async_signals(true);
+/// pcntl_signal(SIGUSR1, function ($signo) { echo "handled\n"; });
+/// $parent = getmypid();
+/// if (($child = pcntl_fork()) === 0) { usleep(200000); posix_kill($parent, SIGUSR1); exit(0); }
+/// $start = microtime(true);
+/// $left = sleep(3);
+/// var_dump($left >= 2 && $left <= 3);
+/// var_dump(microtime(true) - $start < 2);
+/// pcntl_waitpid($child, $status);
+/// ```
+/// ```expect process
+/// handled
+/// bool(true)
+/// bool(true)
+/// ```
+///
 /// ```php
 /// sleep(-1);
 /// ```
@@ -2632,7 +2715,9 @@ fn sleep(req: &mut Request, seconds: i64) -> Result<i64, Thrown> {
     let Ok(seconds) = u64::try_from(seconds) else {
         return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
     };
-    req.limits_mut()
-        .blocking(|| std::thread::sleep(std::time::Duration::from_secs(seconds)));
-    Ok(0)
+    // `php_sleep((unsigned int)num)`: the count as C's cast leaves it.
+    #[allow(clippy::cast_possible_truncation)]
+    let seconds = seconds as u32;
+    let left = req.limits_mut().blocking(|| crate::ffi::sleep(seconds));
+    Ok(i64::from(left))
 }
