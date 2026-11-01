@@ -738,7 +738,7 @@ fn object_for(
     context: Option<PhpObject>,
 ) -> Result<Owner<Value>, Thrown> {
     let parent = context.and_then(|c| libxml_half(req, c));
-    made_over(req, node, parent.as_deref())
+    made_over(req, node, parent.as_deref(), parent.as_deref())
 }
 
 /// `php_dom_create_object` as `xml_common.h` exports it (`PHP_DOM_EXPORT`)
@@ -781,18 +781,22 @@ pub fn create_object_in(
     node: Node,
     doc: &NodeObject,
 ) -> Result<Owner<Value>, Thrown> {
-    made_over(req, node, Some(doc))
+    made_over(req, node, Some(doc), Some(doc))
 }
 
 /// `php_dom_create_object(obj, return_value, domobj)` over `domobj`'s
 /// libxml half, `parent`: the object standing for `node`, one more owner
 /// of it where one exists, otherwise a fresh one of the node's class,
 /// the modern family where `parent`'s document is modern, mapped by its
-/// `registerNodeClass` table, made by [`instantiate`].
+/// `registerNodeClass` table, made by [`instantiate`] counting the node's
+/// document under the reference `counted` holds, `parent` where
+/// `php_dom_instantiate_object_helper` reads `parent->document` and the
+/// evaluation's count of it where a `DOMXPath` node set's objects are made.
 fn made_over(
     req: &mut Request,
     node: Node,
     parent: Option<&NodeObject>,
+    counted: Option<&NodeObject>,
 ) -> Result<Owner<Value>, Thrown> {
     if let Some(existing) = node.object() {
         return Ok(Owner::take(req, existing.as_value()));
@@ -809,7 +813,22 @@ fn made_over(
     };
     let base = class(req, name)?;
     let class = parent.map_or(base, |p| p.mapped(base));
-    instantiate(req, class, node, parent)
+    instantiate(req, class, node, counted)
+}
+
+/// [`made_over`] the object `context`, counting the node's document
+/// under the reference `counted` holds: how a `DOMXPath` evaluation makes its
+/// node set's objects, the class from the object php's
+/// `dom_xpath_intern_for_doc` answers for each node and the document the
+/// node's own, which the evaluation holds for the loop (#3541).
+pub(crate) fn object_counting(
+    req: &mut Request,
+    node: Node,
+    context: PhpObject,
+    counted: Option<&NodeObject>,
+) -> Result<Owner<Value>, Thrown> {
+    let parent = libxml_half(req, context);
+    made_over(req, node, parent.as_deref(), counted)
 }
 
 /// [`DocOf::under`], or where no reference to the node's document is in

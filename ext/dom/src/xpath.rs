@@ -15,7 +15,7 @@ use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, SmartStr, Value, ValueRef};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{
-    self, Answer, Called, Item, Name, Node, Operand, Returned, Route, Scope,
+    self, Answer, Called, Item, Name, Node, NodeObject, Operand, Returned, Route, Scope,
 };
 
 use crate::document::{DOMDocument, Document};
@@ -922,6 +922,80 @@ fn node_list(
     items: Vec<Item>,
     modern: bool,
 ) -> Result<Owner<Value>, Thrown> {
+    let documents = Documents::held(req, this, &items)?;
+    let listed = node_objects(req, this, items, modern, &documents);
+    documents.release(req);
+    listed
+}
+
+/// The node-set's documents, one count of each taken before the first
+/// node's object is made and held while the objects are made, so each
+/// node's object counts its own node's document (#3541). php reads
+/// `dom_xpath_intern_for_doc`'s object again for each node and counts its
+/// document, which an autoloader served while an object is made can
+/// change: one that constructs the evaluator anew lets the values the
+/// callbacks keep go, a document only they held with them, and the
+/// evaluator then counts another document than the nodes after.
+struct Documents(Vec<NodeObject>);
+
+impl Documents {
+    /// One count of each document the items are of, under the reference
+    /// the object `dom_xpath_intern_for_doc` answers for it counts, read
+    /// while the kept values are as the evaluation left them.
+    fn held(req: &mut Request, this: PhpObject, items: &[Item]) -> Result<Documents, Thrown> {
+        let mut documents = Documents(Vec::new());
+        for doc in items.iter().filter_map(item_doc) {
+            if documents.of(Some(doc)).is_some() {
+                continue;
+            }
+            let by = intern_for_doc(req, this, Some(doc));
+            let half = crate::libxml_half(req, by);
+            let of = match crate::doc_of(req, doc, half.as_deref()) {
+                Ok(of) => of,
+                Err(thrown) => {
+                    documents.release(req);
+                    return Err(thrown);
+                }
+            };
+            let mut count = NodeObject::default();
+            count.count_document(req, of);
+            documents.0.push(count);
+        }
+        Ok(documents)
+    }
+
+    /// The count held of `doc`.
+    fn of(&self, doc: Option<Node>) -> Option<&NodeObject> {
+        let doc = doc?;
+        self.0.iter().find(|h| h.document_node() == Some(doc))
+    }
+
+    /// Each count given back, the last owner of a document freeing it.
+    fn release(self, req: &mut Request) {
+        for mut hold in self.0 {
+            hold.release(req);
+        }
+    }
+}
+
+/// The document an item's object counts: a node's, and a namespace
+/// node's element's.
+fn item_doc(item: &Item) -> Option<Node> {
+    match item {
+        Item::Node(node) => node.doc(),
+        Item::Namespace { parent, .. } => parent.and_then(Node::doc),
+    }
+}
+
+/// [`node_list`]'s objects, each counting its node's document under the
+/// count `documents` holds of it.
+fn node_objects(
+    req: &mut Request,
+    this: PhpObject,
+    items: Vec<Item>,
+    modern: bool,
+    documents: &Documents,
+) -> Result<Owner<Value>, Thrown> {
     let mut array = if items.is_empty() {
         Owner::take(req, PhpArray::empty())
     } else {
@@ -939,20 +1013,18 @@ fn node_list(
         }
         // A namespace node's parent is made over the evaluator's own
         // object (`php_dom_create_object(nsparent, .., &intern->dom)`).
+        // The object a node is made over gives its class; the document it
+        // counts is its own, held, since making an object can serve an
+        // autoloader that lets the object made over go.
         let parent = match &item {
             Item::Node(node) => intern_for_doc(req, this, node.doc()),
             Item::Namespace { .. } => this,
         };
-        // The object it is made over held while the node's is made, which
-        // can serve PHP code (an autoloader `new_object` runs) that lets
-        // every kept value go; php reads `parent->document` freed there.
-        let held = Owner::take(req, parent.as_value());
         let made = item_object(
             req,
-            &mut |req, node| object_for(req, node, Some(parent)),
+            &mut |req, node| crate::object_counting(req, node, parent, documents.of(node.doc())),
             item,
         );
-        held.give_up(req);
         let v = match made {
             Ok(v) => v,
             Err(thrown) => {
@@ -1016,9 +1088,12 @@ fn node_list(
 /// class not loaded yet runs the autoloader on its first instance, and
 /// one that constructs the evaluator anew lets every kept value go. The
 /// nodes after it are made over the evaluator, which counts the new
-/// document and none of its classes. Every node is then made counting
-/// the evaluator's new document, not its own, as php makes them, so the
-/// list goes before the document its nodes are of:
+/// document and maps none of its classes, so their class is php's. Each
+/// node's object counts its own node's document, which the evaluation
+/// holds while it makes them ([`Documents`]); php's counts the
+/// evaluator's new document, and aborts at shutdown on some runs where
+/// the list outlives that document, so this program lets the list go
+/// first:
 ///
 /// ```php
 /// class MyEl extends DOMElement { public $x = Foo::BAR; }
