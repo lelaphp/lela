@@ -263,9 +263,10 @@ impl Held {
             .pinned_host(self.host)
             .and_then(|pinned| Ok((pinned, engine?)))
             .and_then(|(pinned, engine)| both(oracle, &pinned, &engine, line));
-        let (judgement, note) = match ran {
+        let again = ran.as_ref().is_ok_and(|(.., again)| *again);
+        let (judgement, mut note) = match ran {
             Err(trouble) => (Judgement::Bork, format!("{trouble:#}")),
-            Ok((theirs, ours)) => {
+            Ok((theirs, ours, _)) => {
                 match oracle::compare(registry, &id, theirs.as_bytes(), ours.as_bytes()) {
                     Verdict::Same => (Judgement::Pass, String::new()),
                     Verdict::Diverged(row) => (Judgement::Diverged, row.reason),
@@ -274,6 +275,9 @@ impl Held {
                 }
             }
         };
+        if again {
+            note = [note.as_str(), AGAIN].join(if note.is_empty() { "" } else { "\n" });
+        }
         Judged::new(&id, &id, judgement, note)
     }
 
@@ -304,13 +308,14 @@ impl Line {
 
 /// The line under `pinned` and under `engine`, each in the same directory
 /// laid afresh and on the same port, rendered and masked: the oracle's
-/// rendering and the engine's.
+/// rendering and the engine's, and whether the engine's host ended only on
+/// its stop sent again ([`stopped`]).
 fn both(
     oracle: &Oracle<'_>,
     pinned: &Path,
     engine: &Path,
     line: &Line,
-) -> Result<(String, String)> {
+) -> Result<(String, String, bool)> {
     let dir = Tree::new("line")?;
     let masks = line.masks()?;
     let masked = |text: String| {
@@ -322,12 +327,12 @@ fn both(
     for _ in 0..ATTEMPTS {
         let port = free_port()?;
         let renderings = ran(oracle, pinned, line, dir.path(), port)
-            .and_then(|theirs| Ok((theirs, ran(oracle, engine, line, dir.path(), port)?)));
+            .and_then(|(theirs, _)| Ok((theirs, ran(oracle, engine, line, dir.path(), port)?)));
         match renderings {
             Err(err) if err.is::<InUse>() => taken.push(port.to_string()),
             renderings => {
-                let (theirs, ours) = renderings?;
-                return Ok((masked(theirs), masked(ours)));
+                let (theirs, (ours, again)) = renderings?;
+                return Ok((masked(theirs), masked(ours), again));
             }
         }
     }
@@ -391,13 +396,20 @@ fn fill(text: &str, dir: &Path, port: u16) -> String {
 
 /// The line run by `binary` over `dir` laid afresh: each command line's
 /// streams and ending, each request's answer, and every file the
-/// directory holds after, rendered as one text.
-fn ran(oracle: &Oracle<'_>, binary: &Path, line: &Line, dir: &Path, port: u16) -> Result<String> {
+/// directory holds after, rendered as one text; and whether a server's
+/// stop was sent again ([`stopped`]).
+fn ran(
+    oracle: &Oracle<'_>,
+    binary: &Path,
+    line: &Line,
+    dir: &Path,
+    port: u16,
+) -> Result<(String, bool)> {
     lay(line, dir, port)?;
     let recipe = &oracle.pin().recipe;
     let limit = Duration::from_secs(recipe.limits.timeout_s);
     let stdin = line.stdin.as_deref().map(|text| fill(text, dir, port));
-    let mut out = String::new();
+    let (mut out, mut again) = (String::new(), false);
     let runs = std::iter::once((&line.args, None))
         .chain(line.then.iter().map(|then| (&then.args, Some(&then.env))));
     for (n, (args, own)) in runs.enumerate() {
@@ -419,8 +431,8 @@ fn ran(oracle: &Oracle<'_>, binary: &Path, line: &Line, dir: &Path, port: u16) -
         let mut ended = oracle.to_end(cmd, line.streams.into(), fed, limit, |running| {
             match (serve, line.head) {
                 (Some(serve), _) => served(serve, running.pid, dir, port),
-                (None, Some(head)) => headed(running, head).map(|()| Vec::new()),
-                (None, None) => Ok(Vec::new()),
+                (None, Some(head)) => headed(running, head).map(|()| (Vec::new(), false)),
+                (None, None) => Ok((Vec::new(), false)),
             }
         })?;
         if serve.is_some() && in_use(port, [&ended.stdout, &ended.stderr], dir)? {
@@ -453,14 +465,16 @@ fn ran(oracle: &Oracle<'_>, binary: &Path, line: &Line, dir: &Path, port: u16) -
             shown(&ended.stderr)
         )
         .ok();
-        for (asked, answer) in during?.into_iter().enumerate() {
+        let (answers, resent) = during?;
+        again |= resent;
+        for (asked, answer) in answers.into_iter().enumerate() {
             writeln!(out, "== run {run} request {}\n{answer}", asked + 1).ok();
         }
     }
     for (name, bytes) in files(dir)? {
         writeln!(out, "== file {name}\n{bytes}").ok();
     }
-    Ok(out)
+    Ok((out, again))
 }
 
 /// How much of what a server's line saw a reading keeps, in characters.
@@ -551,45 +565,55 @@ fn files(dir: &Path) -> Result<BTreeMap<String, String>> {
 }
 
 /// A server's run while it stands: ready, asked each request in turn, and
-/// sent its stop until it ends ([`stopped`]); the answers. Where any of it
-/// fails the server is killed rather than left to the recipe's limit.
-fn served(serve: &Serve, pid: u32, dir: &Path, port: u16) -> Result<Vec<String>> {
+/// sent its stop until it ends ([`stopped`]); the answers, and whether the
+/// stop was sent again. Where any of it fails the server is killed rather
+/// than left to the recipe's limit.
+fn served(serve: &Serve, pid: u32, dir: &Path, port: u16) -> Result<(Vec<String>, bool)> {
     let answers = asked(serve, dir, port);
     let signal = match answers {
         Ok(_) => Signal::from_str(&serve.stop)?,
         Err(_) => Signal::SIGKILL,
     };
     signalled(pid, signal)?;
-    if signal != Signal::SIGKILL {
-        stopped(pid, signal)?;
-    }
-    answers
+    let again = signal != Signal::SIGKILL && stopped(pid, signal)?;
+    Ok((answers?, again))
 }
 
 /// A server sent `signal` as its stop, sent it again while it stands
 /// [`QUIET`] after the last with none of its group runnable, until it ends
-/// or [`PATIENCE`] runs out. php-cgi's accept loop reads `in_shutdown` and
+/// or [`PATIENCE`] runs out; whether it was sent again.
+///
+/// The resend is for php-cgi's accept loop, which reads `in_shutdown` and
 /// then blocks in `accept` (`Z/main/fastcgi.c:1361-1368`), so a stop
-/// handled between the two sets a flag already read, and the process
-/// waits in `accept` for a connection that never comes, as the engine's
-/// loop does too; under load that reads as a run past the recipe's limit
-/// (#3846). A second stop interrupts the `accept` and ends it as the first
-/// would have; php-fpm's master ignores a stop it is already acting on.
-fn stopped(pid: u32, signal: Signal) -> Result<()> {
+/// handled between the two is lost, and the process waits in `accept` for
+/// a connection that never comes; under load that reads as a line past the
+/// recipe's limit (#3846), 2 in 1000 in #3869's control. A second stop
+/// interrupts the `accept` and ends it as the first would have; php-fpm's
+/// master ignores a stop it is already acting on. The engine's loop ends on
+/// a stop handled in that window since #3869, its `accept` failing on a
+/// socket that listens on nothing, so the engine's host sent its stop again
+/// has lost one it should not have, and its line's note says so
+/// ([`AGAIN`]; #3879).
+fn stopped(pid: u32, signal: Signal) -> Result<bool> {
     let host = Pid::from_raw(i32::try_from(pid).context("a process id past pid_t")?);
     // The host leads its group, and a group that ended and is not yet
     // reaped answers ESRCH, or EPERM on macOS.
     let ended = || matches!(killpg(host, None), Err(Errno::ESRCH | Errno::EPERM));
-    let (since, mut sent) = (Instant::now(), Instant::now());
+    let (since, mut sent, mut again) = (Instant::now(), Instant::now(), false);
     while !ended() && since.elapsed() < PATIENCE {
         if sent.elapsed() >= QUIET && !runnable(host) {
-            kill(host, signal).ok();
+            again = kill(host, signal).is_ok() || again;
             sent = Instant::now();
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    Ok(())
+    Ok(again)
 }
+
+/// What a server's line's note says, last, where the engine's host ended
+/// only on its stop sent again ([`stopped`]): a loss its loop has not had
+/// since #3869, which the line's reading names (#3879).
+pub(crate) const AGAIN: &str = "the engine's host ended only on its stop sent again";
 
 /// A program that does not end on its own, a session that loops or one
 /// that waits at a prompt with nothing more to read, killed with its group
@@ -1079,7 +1103,10 @@ mod tests {
     /// again once the server stands asleep [`super::QUIET`] after it: the
     /// engine's stand-in ends only on its second `SIGTERM` and the pinned
     /// one on its first, and the line passes well inside the recipe's
-    /// limit, which it ran to while the stop was sent once.
+    /// limit, which it ran to while the stop was sent once. The pass's
+    /// note says the engine's host was sent its stop again, a loss its
+    /// loop has not had since #3869 (#3879), and a pinned host's lost stop
+    /// sent again is said nowhere, php-cgi's loop losing one as it stands.
     #[test]
     fn a_stop_the_server_loses_is_sent_again() {
         if !oracle() {
@@ -1087,19 +1114,22 @@ mod tests {
         }
         let hosts = Tree::new("host-line-lost-stop").unwrap();
         let waits = "echo up > up; while :; do /bin/sleep 1 & wait $!; done";
-        let pinned = host(&hosts, "php-cgi", &format!("trap 'exit 0' TERM; {waits}"));
+        let ends = host(&hosts, "php-cgi", &format!("trap 'exit 0' TERM; {waits}"));
         let lost = format!("trap 'trap \"exit 0\" TERM' TERM; {waits}");
-        let engine = host(&hosts, "engine", &lost);
+        let loses = host(&hosts, "engine", &lost);
         let text = "[[line]]\nname = \"one\"\nargs = []\n[line.serve]\nlisten = \"127.0.0.1:1\"\n\
                     ready = [\"up\", \"up\"]\nstop = \"SIGTERM\"\n";
         let started = Instant::now();
-        let (judgement, note) = judged(text, &pin(&pinned, None), &engine);
+        let (judgement, note) = judged(text, &pin(&ends, None), &loses);
         assert_eq!(judgement, Judgement::Pass, "{note}");
         assert!(
             started.elapsed() < super::PATIENCE * 2,
             "{:?}",
             started.elapsed()
         );
+        assert_eq!(note, "the engine's host ended only on its stop sent again");
+        let (judgement, note) = judged(text, &pin(&loses, None), &ends);
+        assert_eq!((judgement, note.as_str()), (Judgement::Pass, ""));
     }
 
     /// What a server's line that missed keeps for its reading (#3846): a
