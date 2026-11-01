@@ -1120,12 +1120,13 @@ fn convert_document(
                         seen: parsed.observations(),
                     }));
                 }
-                Ok(Err(failed)) => {
-                    doc.free();
-                    failed
-                }
+                // The tree is freed as `doc` drops, before the private
+                // data and the template contents it holds, as
+                // `lexbor_libxml2_bridge_convert_document` frees it before
+                // its caller's `php_dom_private_data_destroy`.
+                Ok(Err(failed)) => failed,
                 Err(thrown) => {
-                    doc.free();
+                    drop(doc);
                     private.free(req);
                     return Err(thrown);
                 }

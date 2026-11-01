@@ -43,8 +43,8 @@ pub(crate) fn follows_spec(req: &Request, object: PhpObject) -> bool {
 /// `php_dom_private_data_create`. The one private data a document has
 /// is the one handed in, so a caller that filled a mapper keeps it. The
 /// `Err` gives `private` and `doc` up, and an object with no libxml half
-/// to lay it on gives `private` up; `doc` takes its first reference
-/// ([`f::DocOf::first`]) and no other.
+/// to lay them on gives both up, `doc` freed as it drops; otherwise `doc`
+/// takes its first reference ([`f::DocOf::first`]) and no other.
 ///
 /// ```php
 /// $d = Dom\XMLDocument::createEmpty();
@@ -65,7 +65,6 @@ pub(crate) fn document_object(
         Ok(object) => object,
         Err(thrown) => {
             private.free(req);
-            doc.free();
             return Err(thrown);
         }
     };
@@ -212,12 +211,7 @@ pub(crate) fn xml_load(
             override_encoding.as_deref(),
         )
     };
-    if let Err(thrown) = Errors::settle(req, raised, thrown) {
-        if let Parsed::Document(Some(doc)) = parsed {
-            doc.free();
-        }
-        return Err(thrown);
-    }
+    Errors::settle(req, raised, thrown)?;
     let made = match parsed {
         Parsed::Document(Some(made)) => made,
         Parsed::Malformed => {

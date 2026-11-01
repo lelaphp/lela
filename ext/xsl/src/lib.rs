@@ -589,10 +589,8 @@ fn transform(
     };
     let (result, raised, thrown) = ctxt.apply(req, state.profile, &mut handler);
     Errors::route(req, routed(raised));
+    // A tree made past a throw is freed as `result` drops.
     if let Some(thrown) = thrown {
-        if let Some(result) = result {
-            result.free();
-        }
         return Err(thrown);
     }
     Ok(result)
@@ -968,19 +966,19 @@ impl XSLTProcessor {
         };
         let Some(class) = class else {
             // The object counts the result's first reference, `DocOf::under`
-            // finding no object counting it (#3541).
-            return Ok(
-                match php_ext_dom::create_object(req, result.node(), None)?.into_object() {
-                    Ok(object) => OrFalse::Value(object),
-                    Err(value) => {
-                        value.give_up(req);
-                        OrFalse::False
-                    }
-                },
-            );
+            // finding no object counting it (#3541); where none is made,
+            // the tree is freed as `result` drops.
+            let made = php_ext_dom::create_object(req, result.node(), None)?;
+            result.taken_by_object();
+            return Ok(match made.into_object() {
+                Ok(object) => OrFalse::Value(object),
+                Err(value) => {
+                    value.give_up(req);
+                    OrFalse::False
+                }
+            });
         };
         if !compatible(req, class, document.class()) {
-            result.free();
             let (current, given) = (class_name(req, document.class()), class_name(req, class));
             let tail = format!("be a class name compatible with {current}, {given} given");
             return Err(arg_type_error(req, 2, &tail));
@@ -1026,7 +1024,6 @@ impl XSLTProcessor {
                 return Ok(-1);
             };
             let (n, raised, thrown) = sheet.save_to_file(req, uri.0.as_bytes(), result.node());
-            result.free();
             Errors::settle(req, raised, thrown).map(|()| n)
         })
     }
@@ -1090,11 +1087,7 @@ impl XSLTProcessor {
     ) -> Result<Option<OrFalse<Owner<PhpString>>>, Thrown> {
         let this = this.object();
         let saved = apply(req, this, document, "transformToXml", |_, sheet, made| {
-            Ok(made.and_then(|r| {
-                let saved = sheet.save_to_string(r.node());
-                r.free();
-                saved
-            }))
+            Ok(made.and_then(|r| sheet.save_to_string(r.node())))
         })?;
         match saved {
             None => Ok(Some(OrFalse::False)),
@@ -1419,7 +1412,6 @@ mod tests {
             panic!("xmlNewDoc made no document");
         };
         assert!(main_document(given.node(), None, |_| None).is_none());
-        given.free();
     }
 
     /// The reference read: the transformation runs over the given
@@ -1432,7 +1424,6 @@ mod tests {
         let counted = DocOf::under(given.node(), None);
         let main = main_document(given.node(), counted, |_| panic!("copied"));
         assert!(main.is_some_and(|(doc, _)| doc == given.node()));
-        given.free();
     }
 
     /// The copy made: the transformation runs over it, under its first
@@ -1448,6 +1439,5 @@ mod tests {
         if let Some(m) = main {
             m.free_document();
         }
-        given.free();
     }
 }

@@ -11,7 +11,9 @@ use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject, PhpString, Value};
 use php_ext_libxml::Errors;
-use php_ext_libxml::ffi::{DocString, Kind, Name, Node, Ns, Parser, Utf8, XML_ATTRIBUTE_ID};
+use php_ext_libxml::ffi::{
+    DocString, Kind, Name, NewDoc, Node, Ns, Parser, Utf8, XML_ATTRIBUTE_ID,
+};
 
 use crate::element::DOMElement;
 use crate::modern::follows_spec;
@@ -292,11 +294,10 @@ impl DOMImplementation {
                 Err(code) => return Err(dom_throw(req, code)),
             }
         }
-        // The object made below counts the document's first reference,
-        // `DocOf::under` finding no object counting it (#3541).
-        let Some(doc) = Node::new_doc(None).map(|made| made.node()) else {
+        let Some(made) = Node::new_doc(None) else {
             return Err(dom_throw(req, Code::InvalidState));
         };
+        let doc = made.node();
         if let Some(dtd) = doctype {
             doc.set_int_subset(Some(dtd));
             dtd.set_parent(Some(doc));
@@ -306,12 +307,22 @@ impl DOMImplementation {
         }
         if let Some((local, ns)) = parts {
             let Some(root) = Node::new_element(Some(doc), ns, &local, None) else {
+                without_doctype(made, doctype);
                 return Err(dom_throw(req, Code::InvalidState));
             };
             root.set_ns_def(ns);
             doc.set_root(root);
         }
-        let value = object_for(req, doc, None)?;
+        // The object made here counts the document's first reference,
+        // `DocOf::under` finding no object counting it (#3541).
+        let value = match object_for(req, doc, None) {
+            Ok(value) => value,
+            Err(thrown) => {
+                without_doctype(made, doctype);
+                return Err(thrown);
+            }
+        };
+        made.taken_by_object();
         if let (Some(dtd), Some(object)) = (doctype, value.as_object()) {
             let half = crate::libxml_half(req, object);
             if let Some(by) = half.as_deref().filter(|b| b.has_document()) {
@@ -328,6 +339,17 @@ impl DOMImplementation {
         }
         returned(value)
     }
+}
+
+/// `DOMImplementation::createDocument`'s arm where no object took the
+/// document: the doctype, its own object's node, unlinked before the tree
+/// is freed as `made` drops, as php unlinks it before `xmlFreeDoc`.
+fn without_doctype(made: NewDoc, doctype: Option<Node>) {
+    if let Some(dtd) = doctype {
+        dtd.unlink();
+        dtd.set_tree_doc(None);
+    }
+    drop(made);
 }
 
 /// `DOMDocumentFragment::appendXML(string $data): bool`.
@@ -953,13 +975,7 @@ impl Implementation {
             return Err(dom_throw(req, Code::InvalidState));
         };
         let document = made.node();
-        let mut private = match Private::new(req) {
-            Ok(private) => private,
-            Err(thrown) => {
-                made.free();
-                return Err(thrown);
-            }
-        };
+        let mut private = Private::new(req)?;
         document.set_doc_string(DocString::Encoding, Some(b"UTF-8"));
         let mut element = None;
         if !qualified_name.is_empty() {
@@ -974,20 +990,17 @@ impl Implementation {
                     let ns = match ns {
                         Ok(ns) => ns,
                         Err(thrown) => {
-                            made.free();
                             private.free(req);
                             return Err(thrown);
                         }
                     };
                     let Some(e) = Node::new_element(Some(document), ns, &local, None) else {
-                        made.free();
                         private.free(req);
                         return Err(dom_throw(req, Code::InvalidState));
                     };
                     element = Some(e);
                 }
                 Err(code) => {
-                    made.free();
                     private.free(req);
                     return Err(dom_throw(req, code));
                 }
@@ -1049,7 +1062,6 @@ impl Implementation {
         let html_ns = match private.mapper.html(req, Some(doc)) {
             Ok(ns) => ns,
             Err(thrown) => {
-                made.free();
                 private.free(req);
                 return Err(thrown);
             }
@@ -1070,7 +1082,6 @@ impl Implementation {
         };
         let body = html.and_then(|h| element(b"body", h));
         if dtd.is_none() || head.is_none() || !title_ok || body.is_none() {
-            made.free();
             private.free(req);
             return Err(dom_throw(req, Code::InvalidState));
         }
