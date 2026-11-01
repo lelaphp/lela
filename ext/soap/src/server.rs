@@ -13,7 +13,7 @@ use php_ext::call::{call, lookup_class, lookup_function};
 use php_ext::coerce::{callable_checked, value_name, with_string};
 use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, clear, docref, exit, leave_pending, pending,
-    throw_error, throw_value,
+    throw_error, throw_value, while_pending,
 };
 use php_ext::request::{Ini, OutputOp, OwnedStream as _, Request, StartHandler, Streams as _};
 use php_ext::values::{
@@ -1402,6 +1402,69 @@ fn called_pending(req: &mut Request, called: R<Owner<Value>>) -> R<Owner<Value>>
     Ok(value)
 }
 
+/// `zval_ptr_dtor(soap_obj)` with what `thrown` carries in
+/// `EG(exception)`: the object a `SOAP_CLASS` call made given up while
+/// the throwable stands pending, so a destructor that throws there
+/// chains it as its `previous`, and what is pending after, as php's
+/// `EG(exception)` reads it, is answered. A `thrown` that carries a fatal
+/// or an `exit` gives the object up as it stands.
+///
+/// A header's handler that threw has the object given up after
+/// `_soap_server_exception` (`Z/ext/soap/soap.c:1583`), so past an
+/// `Exception` it left pending and after the fault it wrote for an
+/// `Error`, which it cleared; the function's own is given up straight
+/// after its call (`:1601`), with what it threw pending and before what
+/// was echoed is discarded:
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class Svc {
+///     static $throws;
+///     function h() { $c = self::$throws; throw new $c("header"); }
+///     function f() { throw new Exception("function"); }
+///     function __destruct() { echo "destructed\n"; throw new Exception("destructed"); }
+/// }
+/// $headed = '<?xml version="1.0"?><E:Envelope xmlns:E="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="u"><E:Header><ns1:h/></E:Header><E:Body><ns1:f/></E:Body></E:Envelope>';
+/// foreach ([[$headed, 'Exception'], [$headed, 'Error'], [str_replace('<ns1:h/>', '', $headed), null]] as [$request, Svc::$throws]) {
+///     $s = new SoapServer(null, ['uri' => 'u']);
+///     $s->setClass('Svc');
+///     ob_start();
+///     try { $s->handle($request); } catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()?->getMessage() ?? "nothing", "\n"; }
+///     echo preg_replace('~<\?xml.*<faultstring>(.*)</faultstring>.*\n~sU', "fault $1\n", ob_get_clean());
+/// }
+/// ```
+/// ```expect
+/// destructed
+/// destructed after header
+/// fault header
+/// destructed
+/// destructed after nothing
+/// destructed after function
+/// ```
+fn made_given_up_past(
+    req: &mut Request,
+    thrown: Thrown,
+    made: &mut Option<Owner<Value>>,
+) -> Thrown {
+    let Some(object) = made.take() else {
+        return thrown;
+    };
+    if thrown.exception().is_none() {
+        object.give_up(req);
+        return thrown;
+    }
+    while_pending(req, &thrown, |req| object.give_up(req));
+    match pending(req) {
+        Ok(()) => thrown,
+        // What the destructor threw holds `thrown`'s throwable as its
+        // `previous`; `thrown`'s own owner of it is given up.
+        Err(over) => match clear(req, thrown) {
+            Ok(()) => over,
+            Err(thrown) => thrown,
+        },
+    }
+}
+
 /// `sizeof(zval)`.
 const ZVAL_SIZE: usize = 16;
 
@@ -1848,9 +1911,18 @@ fn serve(
                         old.give_up(req);
                     }
                     Err(t) => {
+                        // `_soap_server_exception`, then `zval_ptr_dtor
+                        // (soap_obj)` with what it left in `EG(exception)`:
+                        // nothing past a `SoapFault` or an `Error` it
+                        // answered, the throwable past anything else.
                         discard(req);
-                        release_made(req, &mut made);
-                        return server_exception(req, this, sdl, function, t).map_err(Error::from);
+                        return match server_exception(req, this, sdl, function, t) {
+                            Ok(()) => {
+                                release_made(req, &mut made);
+                                Ok(())
+                            }
+                            Err(t) => Err(Error::from(made_given_up_past(req, t, &mut made))),
+                        };
                     }
                 }
                 let retval = parsed.headers[i].retval.deref();
@@ -1897,10 +1969,16 @@ fn serve(
             // limit's fatal, raised at the call's entry, leaves php's
             // unwind exit and no answer (8.5.12).
             let called = call(req, &callable, &params);
-            let called = called_pending(req, called);
-            if kind == ServiceKind::Class {
-                release_made(req, &mut made);
-            }
+            // `zval_ptr_dtor(soap_obj)` straight after the call, a
+            // `SOAP_CLASS`'s one owner, `made`, with what the function
+            // threw in `EG(exception)`.
+            let called = match called_pending(req, called) {
+                Ok(v) => {
+                    release_made(req, &mut made);
+                    Ok(v)
+                }
+                Err(t) => Err(made_given_up_past(req, t, &mut made)),
+            };
             match called {
                 Ok(v) => retval = v,
                 Err(t) => {

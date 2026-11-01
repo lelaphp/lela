@@ -235,6 +235,37 @@ pub(crate) fn fetch_array(req: &mut Request, on: On, mode: i64) -> Result<Fetche
 /// `mysqli_fetch_object`: the row as properties of a new `class`, written
 /// as `zend_merge_properties` writes them, then its constructor served
 /// with the arguments given.
+///
+/// An object whose constructor threw is given up with what it threw
+/// pending, as php leaves it in `return_value` for the caller to free
+/// with `EG(exception)` set (`Z/ext/mysqli/mysqli.c:802`), no
+/// `zend_object_store_ctor_failed` marking it: its own destructor is
+/// served, and a destructor that throws there, its own or one of what
+/// the constructor wrote into it, chains it as its `previous`:
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class D { function __destruct() { throw new Exception("destructed"); } }
+/// class R { public $a, $d; function __construct() { $this->d = new D; throw new Exception("constructed"); } }
+/// class S { public $a; function __construct() { throw new Exception("constructed"); } function __destruct() { echo "S destructed\n"; throw new Exception("destructed"); } }
+/// $m = new mysqli('127.0.0.1', 'root', '', '', 3306);
+/// foreach (['R', 'S'] as $class) {
+///     $r = $m->query("SELECT 1 AS a");
+///     try { $r->fetch_object($class); }
+///     catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()?->getMessage(), "\n"; }
+///     $r = $m->query("SELECT 1 AS a");
+///     try { mysqli_fetch_object($r, $class); }
+///     catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()?->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect mysql
+/// destructed after constructed
+/// destructed after constructed
+/// S destructed
+/// destructed after constructed
+/// S destructed
+/// destructed after constructed
+/// ```
 pub(crate) fn fetch_object(
     req: &mut Request,
     on: On,
@@ -287,7 +318,14 @@ pub(crate) fn fetch_object(
             match call_array(req, &callable, args) {
                 Ok(answered) => answered.give_up(req),
                 Err(thrown) => {
-                    made.give_up(req);
+                    // `return_value` freed by the caller with what the
+                    // constructor threw in `EG(exception)`.
+                    match thrown.exception() {
+                        Some(_) => {
+                            while_pending(req, &thrown, |req| made.give_up(req));
+                        }
+                        None => made.give_up(req),
+                    }
                     return Err(thrown);
                 }
             }
