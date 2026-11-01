@@ -1046,7 +1046,9 @@ pub fn scopes_of(root: &Path, instrument: &str, krate: &Crate) -> Result<Vec<Str
 /// Condition 3: a lock that differs is in the diff, and a lock in the diff
 /// has a fresh `api-check` reading that passes. A seam reading that is
 /// stale says nothing here: the crate the lock lives with changed, and
-/// condition 1 lists its `api-check` reading as stale.
+/// condition 1 lists its `api-check` reading as stale. The fresh one is
+/// found by the seam's key now, in the scope's file or the index, where
+/// `worktree land` puts `_merge`'s and leaves the file main's (#3802).
 fn locks(
     snapshot: &Snapshot,
     manifest: &Manifest,
@@ -1068,7 +1070,7 @@ fn locks(
         let file = dir.join(&seam.lock);
         let shown = file.display().to_string();
         let in_diff = changed.iter().any(|c| Path::new(&c.path) == file);
-        let Some(reading) = store.read(api_check::INSTRUMENT, &seam.name)? else {
+        let Some(last) = store.last_of(api_check::INSTRUMENT, &seam.name)? else {
             if in_diff {
                 unmet.push(format!(
                     "{shown} is in the diff and has no api-check reading"
@@ -1076,10 +1078,10 @@ fn locks(
             }
             continue;
         };
-        let tree = snapshot.key(&dir)?;
-        let fresh = reading.fresh_for(&tree, manifest.pin_digest());
-        match reading.status {
-            Status::Fail if fresh => unmet.push(format!(
+        let now = BTreeMap::from([(seam.name.clone(), snapshot.key(&dir)?)]);
+        let fresh = store.latest_over(api_check::INSTRUMENT, &now, manifest.pin_digest())?;
+        match fresh.into_values().next() {
+            Some(reading) if reading.status == Status::Fail => unmet.push(format!(
                 "{shown}: {}{}",
                 reading.message,
                 if in_diff {
@@ -1088,7 +1090,7 @@ fn locks(
                     "; the lock is not in the diff"
                 }
             )),
-            Status::Pass if in_diff && !fresh => unmet.push(format!(
+            None if in_diff && last.status == Status::Pass => unmet.push(format!(
                 "{shown} is in the diff and its api-check reading predates it"
             )),
             _ => {}

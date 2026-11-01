@@ -148,8 +148,18 @@ fn what_accept_wrote_permit_diff_permits_over_the_same_tree() {
     let out = xtask(&root, &["permit", "--diff"]).ok();
     assert!(!out.contains("deny "), "{out}");
 
+    // The reading taken away whole, its file, its index and its lines of
+    // the log, since a reading over the tree in any of them covers the
+    // line (#3802); the record's stay.
     let store = Store::of_workspace(&root);
-    std::fs::remove_file(store.path("witness", CRATE).unwrap()).unwrap();
+    let reading = store.path("witness", CRATE).unwrap();
+    std::fs::remove_file(&reading).unwrap();
+    std::fs::remove_dir_all(reading.with_extension("")).unwrap();
+    let log = store.root().join("log/witness.jsonl");
+    let scope = format!("\"scope\":\"{CRATE}\"");
+    let text = std::fs::read_to_string(&log).unwrap();
+    let kept: Vec<&str> = text.lines().filter(|l| !l.contains(&scope)).collect();
+    std::fs::write(&log, kept.join("\n") + "\n").unwrap();
     let out = xtask(&root, &["permit", "--diff"]).ok();
     assert!(!out.contains("deny "), "the record stands: {out}");
 

@@ -2087,6 +2087,37 @@ fn a_verdict_a_branch_captured_stands_on_main_after_the_merge_and_a_typed_one_do
     );
 }
 
+/// What `worktree land` carries is evidence in main (#3802): `_merge`'s
+/// `witness` reading over the merged tree reaches main's store as a line
+/// of the log and an entry of the index, while main's file of the scope
+/// stays the reading main took over its tree before. `permit --diff` in
+/// main over the same tree permits the verdict `done` met in `_merge`.
+/// The control: before the land, main's file alone, it is denied.
+#[test]
+fn a_witness_reading_worktree_land_carried_covers_the_verdict_in_main() {
+    let root = scratch("landed-witness");
+    let repo = Repo::at(&root);
+    lay_down(&root, &block("exit"));
+    repo.git(&["add", "--", CRATE]);
+    repo.git(&["commit", "-q", "-m", "the fence"]);
+    witness_reading(&root);
+    write(&root, FILE, &block("exit=3"));
+    repo.git(&["add", "--", FILE]);
+    let ran = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(ran.code(), 1, "main's file alone: {ran}");
+    assert!(ran.stdout.contains(EXIT_AUTHORED), "{ran}");
+
+    let merge = Tree::new("permit-landed-witness-merge").unwrap();
+    let now = xtask::key::Snapshot::disk(&root).unwrap();
+    let mut reading = Reading::stamped_over("witness", CRATE, &now, Path::new(CRATE)).unwrap();
+    reading.status = Status::Pass;
+    Store::of_workspace(&merge).record(&[reading]).unwrap();
+    let main = Store::of_workspace(&root);
+    assert_eq!(main.land(&Store::of_workspace(&merge)).unwrap(), 1);
+    let out = xtask(&root, &["permit", "--diff"]).ok();
+    assert!(!out.contains("deny "), "{out}");
+}
+
 /// The content of one of the rule's `Write` fixtures, the file whole.
 fn fixture_text(name: &str) -> String {
     call(&fixtures().join("rules/witness.exit-authored").join(name))
