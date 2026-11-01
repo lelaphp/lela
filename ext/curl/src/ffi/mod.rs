@@ -14,9 +14,10 @@
 //! error buffer, the `CURLOPT_STDERR` file, a header list, a MIME tree)
 //! is held by the `CURL *`'s `Tag`, freed after `curl_easy_cleanup`.
 //! `curl_easy_duphandle` copies the pointers to the lists and the MIME
-//! tree's file parts, as php's copies share `to_free` with its `clone`
-//! count: from then on the original lets nothing of the kind go before
-//! the request's [`Session`] does, which outlives every `CURL *`. A
+//! tree's file parts, so the lists and trees are shared by a `CURL *`
+//! and its copies, as php's copies share `to_free` with its `clone`
+//! count: a set lets go of what it replaces only where no copy shares
+//! it, and the last `CURL *` of them given up frees them all. A
 //! persistent share is not the request's: it passes from one request to
 //! the next through the engine's pool, one request at a time, and only
 //! once no `CURL *` of the request that held it points at it
@@ -125,17 +126,15 @@ struct Link {
     req: *mut Request,
     /// What a callback threw during the call in progress, the first one.
     pending: Option<Thrown>,
-    /// The lists and MIME trees a `CURL *` let go of where a copy of it
-    /// may still point at them, or where the file parts could not be
-    /// closed for want of a request, and the `CURLOPT_STDERR` files let
-    /// go of during a call, freed with the link.
+    /// The MIME trees let go of where the file parts could not be closed
+    /// for want of a request, and the `CURLOPT_STDERR` files let go of
+    /// during a call, freed with the link.
     kept: Kept,
 }
 
 /// What [`Link`] keeps to its own end.
 #[derive(Default)]
 struct Kept {
-    lists: Vec<Slist>,
     trees: Vec<easy::Mime>,
     /// A file let go of while the library may be inside a write to it, a
     /// cookie's that runs PHP code which sets the option again.
@@ -211,15 +210,21 @@ impl Session {
         self.0
     }
 
-    /// `trees` and `lists` let go of by a `CURL *` whose copies may still
-    /// point at them, or with no request to close a file part through:
-    /// kept to the link's end, their file parts closed by
-    /// [`Session::close_kept`].
-    fn keep(&self, lists: Vec<Slist>, trees: Vec<easy::Mime>) {
+    /// MIME trees let go of: freed now where a call in progress lends the
+    /// request their file parts close through, and kept to the link's
+    /// end otherwise, their file parts closed by [`Session::close_kept`].
+    fn let_trees_go(&self, trees: Vec<easy::Mime>) {
+        if self.entered() {
+            drop(trees);
+        } else {
+            self.keep(trees);
+        }
+    }
+
+    /// `trees` kept to the link's end.
+    fn keep(&self, trees: Vec<easy::Mime>) {
         // SAFETY: an owner's allocation; the field is written alone.
-        let kept = unsafe { &mut (*self.0.0.as_ptr()).kept };
-        kept.lists.extend(lists);
-        kept.trees.extend(trees);
+        unsafe { (*self.0.0.as_ptr()).kept.trees.extend(trees) };
     }
 
     /// A `CURLOPT_STDERR` file let go of: closed now between calls, and
@@ -264,7 +269,7 @@ impl Session {
         for tree in &trees {
             tree.close_files(req);
         }
-        self.keep(Vec::new(), trees);
+        self.keep(trees);
     }
 
     /// `f` served with the request left where a callback finds it, and
