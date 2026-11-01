@@ -48,7 +48,7 @@ const BLOCKS: usize = 16;
 /// scope costs a native's recursion below it none of php's budget. An
 /// optimised loop's frame is about 1,800 bytes (#3051); an unoptimised
 /// one's, with every handler in line, 193,200 bytes on macOS arm64
-/// (#3830). The request's first serving measures it before any scope.
+/// (#3830).
 const FIRST_SCOPE_CHARGE: usize = if cfg!(debug_assertions) {
     512 * 1024
 } else {
@@ -175,17 +175,24 @@ impl<'u> Scope<'u> {
 
     /// A serving's or a scope's body begun: where it is the request's
     /// first, what it took of the stack since the call that began it,
-    /// the loop's frame, noted as every next scope's charge and what the
-    /// loop's entry counts ([`Request::note_loop_frame`]).
+    /// noted for a serving as what the loop's entry counts
+    /// ([`Request::note_loop_frame`]) and for a scope as every next
+    /// scope's charge ([`Request::note_scope_cost`]).
     #[inline]
     pub(super) fn measured(self, req: &mut Request) {
-        let (Scope::Whole { above } | Scope::Took { above, .. }) = self;
-        if let Some(cost) = req
-            .loop_frame_unmeasured()
-            .then(|| above.saturating_sub(here()))
-            && let Some(cost) = std::num::NonZeroUsize::new(cost)
-        {
-            req.note_loop_frame(cost);
+        match self {
+            Scope::Whole { above } => {
+                if req.loop_frame() == 0 {
+                    req.note_loop_frame(above.saturating_sub(here()));
+                }
+            }
+            Scope::Took { above, .. } => {
+                if let Some(cost) = req.scope_unmeasured().then(|| above.saturating_sub(here()))
+                    && let Some(cost) = std::num::NonZeroUsize::new(cost)
+                {
+                    req.note_scope_cost(cost);
+                }
+            }
         }
     }
 
