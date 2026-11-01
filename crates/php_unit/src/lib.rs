@@ -33,8 +33,8 @@ pub use dump::{InBlock, SsaOperands, SsaVars, dump_type_info, may_be};
 pub use enum_methods::{enum_methods, written_methods};
 pub use frameless::{FramelessEntry, frameless_table};
 pub use op::{
-    BoundVar, CacheSlot, ConstIdx, Effects, LiveKind, LiveRange, MapPtrOffset, OpArray,
-    OperandKind, Opline, OplineIdx, Safepoints, TryCatch,
+    BoundVar, CacheSlot, ConstIdx, Declares, Effects, Grown, LiveKind, LiveRange, MapPtrOffset,
+    Nested, OpArray, OperandKind, Opline, OplineIdx, Safepoints, TryCatch,
 };
 pub use opcode::{Handler, Opcode};
 pub use types::{type_to_string, type_to_string_called};

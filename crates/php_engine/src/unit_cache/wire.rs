@@ -20,9 +20,9 @@ use php_unit::decl::{
     PropertyHooks, Radix, TraitAdaptation, TraitMethodRef, Type, UnitValue, Visibility,
 };
 use php_unit::{
-    AutoGlobal, BoundVar, ConstIdx, Diagnostic, Handler, HookBody, Level, LiveKind, LiveRange,
-    MapPtrOffset, MethodBody, OpArray, Opcode, OperandKind, Opline, OplineIdx, Safepoints,
-    TopLevel, TryCatch, Unit, UnitCell,
+    AutoGlobal, BoundVar, ConstIdx, Declares, Diagnostic, Grown, Handler, HookBody, Level,
+    LiveKind, LiveRange, MapPtrOffset, MethodBody, Nested, OpArray, Opcode, OperandKind, Opline,
+    OplineIdx, Safepoints, TopLevel, TryCatch, Unit, UnitCell,
 };
 
 /// The unit's bytes; none where a constant of an op array is of a kind
@@ -403,8 +403,10 @@ record! {
     OpArray {
         oplines, literals, const_exprs, vars, num_cvs, num_tmps, try_catch, live_ranges,
         safepoints, filename, line_start, line_end, cache_size, cache_room, runtime_cache,
-        dynamic_func_defs, bound_vars, no_receiver, strict_types, return_mask, numeric_dims,
+        dynamic_func_defs, nested, bound_vars, no_receiver, strict_types, return_mask, numeric_dims,
     }
+    Nested { declares, grown }
+    Grown { oplines, constants, vars, dynamic_func_defs }
     AttributeArgument { name, value }
     Attribute { name, arguments, line, strict, own_name }
     Parameter { name, ty, by_ref, prefer_ref, promoted, variadic, default, attributes }
@@ -488,6 +490,39 @@ impl Wire for Type {
             101 => Type::Nullable(Wire::take(r)?),
             102 => Type::Union(Wire::take(r)?),
             103 => Type::Intersection(Wire::take(r)?),
+            _ => return None,
+        })
+    }
+}
+
+impl Wire for Declares {
+    fn put(&self, out: &mut Vec<u8>) -> Option<()> {
+        match self {
+            Declares::Function(at) => (0u8, at).put(out),
+            Declares::Class(at) => (1u8, at).put(out),
+            Declares::Dynamic(at) => (2u8, at).put(out),
+            Declares::Method { class, method } => (3u8, (class, method)).put(out),
+            Declares::Hook {
+                class,
+                property,
+                kind,
+            } => (4u8, (class, (property, kind))).put(out),
+        }
+    }
+    fn take(r: &mut Reader<'_>) -> Option<Self> {
+        Some(match u8::take(r)? {
+            0 => Declares::Function(u32::take(r)?),
+            1 => Declares::Class(u32::take(r)?),
+            2 => Declares::Dynamic(u32::take(r)?),
+            3 => Declares::Method {
+                class: u32::take(r)?,
+                method: u32::take(r)?,
+            },
+            4 => Declares::Hook {
+                class: u32::take(r)?,
+                property: u32::take(r)?,
+                kind: HookKind::take(r)?,
+            },
             _ => return None,
         })
     }
