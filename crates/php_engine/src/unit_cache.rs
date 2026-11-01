@@ -517,11 +517,13 @@ pub(crate) struct Asked<'a> {
 /// runs none of its passes over what executes (design §6.1); of pass 11,
 /// `zend_optimizer_compact_literals`, it keeps the runtime cache size the
 /// pass counts, as the room each op array's cache takes of a request's
-/// heap ([`php_unit::OpArray::cache_room`], [`compact`]). So where the
-/// accelerator holds a file, sites naming one function or one class
-/// share one slot, and so do the sites naming one constant, and one
-/// property or one method of `$this` where the op array is sure of it, a
-/// method's or a closure's written in one; a closure's own cache,
+/// heap ([`php_unit::OpArray::cache_room`], [`compact`]); and of what
+/// the passes lay on the request's heap as they work, the bytes
+/// (`declared_bytes::optimized`). So where the accelerator holds a file,
+/// sites naming one function or one class share one slot, and so do the
+/// sites naming one constant, and one property or one method of `$this`
+/// where the op array is sure of it, a method's or a closure's written
+/// in one; a closure's own cache,
 /// `emalloc`ed at that size, reads one bin however many it holds. A file
 /// compiled without the accelerator keeps the compiler's slot per site.
 /// Under the plain recipe each closure below takes one site of each
@@ -563,17 +565,48 @@ pub(crate) struct Asked<'a> {
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Optimizer {
-    /// No pass: `opcache.optimization_level` leaves pass 11 out.
+    /// No `zend_optimize_script`: php compiling without the accelerator,
+    /// or no extension declaring `opcache.optimization_level`.
     Off,
-    /// Pass 11's count, from the first slot past the op array
+    /// `zend_optimize_script` under the passes `level` names, pass 11
+    /// counting from `first`, the first slot past the op array
     /// extensions' (`zend_op_array_extension_handles * sizeof(void*)`).
-    CompactLiterals { first: u32 },
+    On { level: Level, first: u32 },
+}
+
+/// `opcache.optimization_level`: the passes `zend_optimize_script` runs,
+/// one bit each (`Z/Zend/Optimizer/zend_optimizer.h:30-45`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Level(pub(crate) i64);
+
+impl Level {
+    /// `ZEND_OPTIMIZER_PASS_5`, the CFG pass.
+    const PASS_5: i64 = 1 << 4;
+    /// `ZEND_OPTIMIZER_PASS_6`, the DFA pass.
+    const PASS_6: i64 = 1 << 5;
+    /// `ZEND_OPTIMIZER_PASS_7`, the call graph.
+    const PASS_7: i64 = 1 << 6;
+    /// `ZEND_OPTIMIZER_PASS_11`, `zend_optimizer_compact_literals`.
+    const PASS_11: i64 = 1 << 10;
+
+    /// Whether the CFG pass runs, `zend_optimize_cfg`.
+    pub(crate) fn cfg(self) -> bool {
+        self.0 & Level::PASS_5 != 0
+    }
+
+    /// Whether the passes walk the call graph, every op array
+    /// reverted before any is redone (`Z/Zend/Optimizer/zend_optimizer.c:1612`).
+    pub(crate) fn call_graph(self) -> bool {
+        self.0 & Level::PASS_6 != 0 && self.0 & Level::PASS_7 != 0
+    }
+
+    /// Whether pass 11 merges equal constants and counts the slots.
+    pub(crate) fn compacts_literals(self) -> bool {
+        self.0 & Level::PASS_11 != 0
+    }
 }
 
 impl Optimizer {
-    /// `ZEND_OPTIMIZER_PASS_11` (`Z/Zend/Optimizer/zend_optimizer.h:38`).
-    pub(crate) const PASS_11: i64 = 1 << 10;
-
     /// The passes on a miss `persistent_compile_file` compiled under
     /// `validation`: these with the accelerator on (every validation but
     /// `EveryHit`) where it optimizes what it compiled, `optimizing`,
@@ -591,7 +624,9 @@ impl Optimizer {
     /// What the passes leave of `unit`'s op arrays' caches, before the
     /// unit is published.
     pub(crate) fn optimized(self, mut unit: Unit) -> Unit {
-        if let Optimizer::CompactLiterals { first } = self {
+        if let Optimizer::On { level, first } = self
+            && level.compacts_literals()
+        {
             for code in crate::exec::op_arrays_mut(&mut unit) {
                 code.cache_room = compact::cache_size(code, first);
             }
@@ -1023,7 +1058,7 @@ impl UnitCache {
         caller: &mut A,
         files: &Files,
         asked: Asked<'_>,
-        compile: impl FnOnce(&mut A, &[u8]) -> Fresh,
+        compile: impl FnOnce(&mut A, &[u8], Optimizer) -> Fresh,
         decode: impl FnOnce(&[u8]) -> Option<Unit>,
         share: impl FnOnce(Unit) -> PublishedUnit,
         publish: impl FnOnce(&mut A, &PublishedUnit) -> EarlyBound,
@@ -1123,7 +1158,10 @@ impl UnitCache {
         let Some(source) = source_or_read(handed, path) else {
             return (None, Filed::Unheld, None);
         };
-        let Fresh { unit, answers, .. } = compile(caller, &source);
+        // What `cache_script_in_shared_memory` and
+        // `cache_script_in_file_cache` will run over what compiles.
+        let optimizer = optimizer.on_miss(validation, disk.is_some() || !files.restart_pending());
+        let Fresh { unit, answers, .. } = compile(caller, &source, optimizer);
         let size = u64::try_from(source.len()).unwrap_or(u64::MAX);
         if answers == Answers::Asker || named_by_request(validation, &unit) {
             return alone(unit, Filed::Compiled);
@@ -1132,7 +1170,6 @@ impl UnitCache {
         let Ok(unit) = unit else {
             return alone(unit, Filed::Compiled);
         };
-        let optimizer = optimizer.on_miss(validation, disk.is_some() || !files.restart_pending());
         let unit = optimizer.optimized(unit);
         // `cache_script_in_shared_memory` looks for the path's copy before
         // it asks for room or writes the file cache.

@@ -444,3 +444,20 @@ args = ["-n", "-d", "opcache.file_update_protection=0"]
 env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "POST", SCRIPT_FILENAME = "{dir}/m.php", CONTENT_TYPE = "application/json; charset=utf-8", CONTENT_LENGTH = "7" }
 files = { "m.php" = "<?php echo memory_get_usage(), \"\\n\";\n" }
 stdin = "x=hello"
+
+# And what a form `POST` peaks at by the program's first line, as php-cgi
+# 8.5.12 counts it (#3793): not the form's reading, whose temp stream and
+# variables stand below it, but opcache's compile of the program, whose
+# `zend_optimize_script` lays its arena, `zend_arena_create(64 * 1024)`
+# (`Z/Zend/Optimizer/zend_optimizer.c:1606`), beside the op arrays it
+# optimizes, the primary file's buffer and the compiler's stacks; a `GET`
+# peaks there too.
+[[line]]
+name = "a-form-post-peaks-where-php-cgi-s-optimizer-does"
+args = ["-n", "-d", "opcache.file_update_protection=0"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "POST", SCRIPT_FILENAME = "{dir}/m.php", CONTENT_TYPE = "application/x-www-form-urlencoded", CONTENT_LENGTH = "7" }
+files = { "m.php" = "<?php echo memory_get_peak_usage(), \"\\n\";\n" }
+stdin = "x=hello"
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=0"]
+env = { REQUEST_METHOD = "GET", CONTENT_TYPE = "", CONTENT_LENGTH = "" }

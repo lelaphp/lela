@@ -332,7 +332,9 @@ impl Request {
         }
         let source = std::fs::read(String::from_utf8_lossy(path).as_ref()).ok()?;
         let shared = Arc::clone(&self.shared);
-        let unit = self.compile_for_cache(&source, path).unit;
+        // Optimized as the preload's whole, after every script compiled
+        // (`preload_optimize`), and not as each compiles.
+        let unit = (self.compile_for_cache(&source, path, crate::unit_cache::Optimizer::Off)).unit;
         if let Ok(unit) = &unit {
             self.count_keys_made(crate::unit_cache::keys_of(unit));
         }

@@ -44,6 +44,7 @@ use super::Request;
 use super::unit_strings::OpArrayStrings;
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, Emalloc, PhpArray, Value};
+use crate::unit_cache::{Level, Optimizer};
 
 /// `sizeof(zend_op)`.
 pub(super) const OPLINE: usize = 32;
@@ -190,6 +191,88 @@ impl Laid {
             blocks.free(req);
         }
     }
+
+    /// Each op array's oplines taken out, as `zend_foreach_op_array`
+    /// walks them after the main op array: its dynamic definitions, then
+    /// the functions, then the methods and hooks.
+    fn take_oplines(&mut self) -> Vec<Oplines> {
+        let dynamic = self
+            .dynamic
+            .iter_mut()
+            .flat_map(|(blocks, _)| blocks.oplines.drain(..));
+        dynamic.chain(self.tables.oplines.drain(..)).collect()
+    }
+}
+
+/// One op array's oplines with its constants after them, the block
+/// `pass_two` reallocates them into (`Z/Zend/zend_opcode.c:1117`), and
+/// how many of each it holds.
+pub(super) struct Oplines {
+    block: Emalloc,
+    lines: usize,
+    literals: usize,
+    /// How pass 11 would lay its table of the constants.
+    merge: Merge,
+}
+
+/// How `zend_optimizer_compact_literals` lays its table of an op array's
+/// constants, `zend_hash_init`ed to their number, at least eight and a
+/// power of two (`Z/Zend/Optimizer/compact_literals.c:272`): by the first
+/// it keys, a whole number below the table's size keying it packed and
+/// any other whole number, string or float keying it as a hash; and a
+/// string or a float after a packed start turns it into a hash. A
+/// `null`, a boolean or an array is merged without it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Merge {
+    Unkeyed,
+    Hash,
+    Packed,
+    Converted,
+}
+
+impl Merge {
+    /// The table for `literals` constants.
+    fn of(literals: &[php_heap::Zval]) -> Merge {
+        use php_heap::ZvalType;
+        let size = table_size(literals.len());
+        literals.iter().fold(Merge::Unkeyed, |merge, literal| {
+            let below = literal
+                .as_long()
+                .and_then(|long| usize::try_from(long).ok())
+                .is_some_and(|long| long < size);
+            match (merge, literal.kind()) {
+                (Merge::Unkeyed, ZvalType::Long) if below => Merge::Packed,
+                (Merge::Unkeyed, ZvalType::Long | ZvalType::Double | ZvalType::String) => {
+                    Merge::Hash
+                }
+                (Merge::Packed, ZvalType::Double | ZvalType::String) => Merge::Converted,
+                (merge, _) => merge,
+            }
+        })
+    }
+
+    /// The bytes of the table laid as this for `count` entries: a hash's
+    /// buckets and its two slots each (`HT_SIZE_EX`), a packed table's
+    /// values and its two slots of hash (`HT_PACKED_SIZE_EX`).
+    fn bytes(self, count: usize) -> usize {
+        let size = table_size(count);
+        match self {
+            Merge::Packed => size * ZVAL + 2 * HASH_SLOT,
+            _ => size * BUCKET + 2 * size * HASH_SLOT,
+        }
+    }
+}
+
+/// `zend_hash_check_size`: at least eight, and a power of two.
+fn table_size(count: usize) -> usize {
+    count.next_power_of_two().max(8)
+}
+
+/// `pass_two`'s block for `oplines` oplines and `literals` constants:
+/// the oplines aligned to 16 (`ZEND_MM_ALIGNED_SIZE_EX`) and the
+/// constants after them.
+fn packed(oplines: usize, literals: usize) -> usize {
+    (oplines * OPLINE).next_multiple_of(16) + literals * ZVAL
 }
 
 /// One class's blocks: the three tables `zend_initialize_class_data`
@@ -316,6 +399,7 @@ impl ClassBlocks {
         emalloced.extend(self.copies.into_iter().flat_map(|copied| copied.blocks));
         Blocks {
             emalloced,
+            oplines: Vec::new(),
             arrays: Vec::new(),
             embedded: vec![self.functions, self.properties, self.constants],
         }
@@ -514,6 +598,8 @@ pub(super) struct Linking {
 pub(super) struct Blocks {
     /// Blocks `emalloc` lays down alone.
     emalloced: Vec<Emalloc>,
+    /// Each op array's oplines with its constants after them.
+    oplines: Vec<Oplines>,
     /// Tables `zend_new_array` lays down, the header `emalloc`'d.
     arrays: Vec<php_heap::Arr>,
     /// Tables `zend_hash_init` lays down inside the `zend_class_entry`,
@@ -524,7 +610,10 @@ pub(super) struct Blocks {
 impl Blocks {
     /// Whether it holds no block.
     fn is_empty(&self) -> bool {
-        self.emalloced.is_empty() && self.arrays.is_empty() && self.embedded.is_empty()
+        self.emalloced.is_empty()
+            && self.oplines.is_empty()
+            && self.arrays.is_empty()
+            && self.embedded.is_empty()
     }
 
     /// Every block given back: each table's rows, its data and, for one
@@ -533,6 +622,9 @@ impl Blocks {
     pub(super) fn free(self, req: &mut Request) {
         for block in self.emalloced {
             block.free(req);
+        }
+        for oplines in self.oplines {
+            oplines.block.free(req);
         }
         for table in self.arrays {
             req.release(Value::array(PhpArray::of(table)));
@@ -549,6 +641,7 @@ impl Blocks {
     /// `others`' blocks added to these.
     fn take(&mut self, others: Blocks) {
         self.emalloced.extend(others.emalloced);
+        self.oplines.extend(others.oplines);
         self.arrays.extend(others.arrays);
         self.embedded.extend(others.embedded);
     }
@@ -785,9 +878,14 @@ fn op_array(
     while last > grown {
         grown = grown.saturating_mul(4);
     }
-    let oplines = Emalloc::new(req, grown * OPLINE)?;
-    let packed = (last * OPLINE).next_multiple_of(16) + code.literals.len() * ZVAL;
-    blocks.emalloced.push(oplines.resize(req, packed)?);
+    let grown = Emalloc::new(req, grown * OPLINE)?;
+    let literals = code.literals.len();
+    blocks.oplines.push(Oplines {
+        block: grown.resize(req, packed(last, literals))?,
+        lines: last,
+        literals,
+        merge: Merge::of(&code.literals),
+    });
     // `lookup_cv` grows the names sixteen at a time, and `pass_two`
     // reallocates them to their number where it is not a multiple.
     let vars = code.vars.len();
@@ -1477,8 +1575,10 @@ pub(super) fn carve(req: &mut Request, unit: &Unit) -> Result<(), Thrown> {
 /// a `zend_ast_zval`, 24 bytes either, for each of the `tree` elements of
 /// the engine's tree, whose shape is not php's; its carves ([`carve`]), held to
 /// the request's end; and the op arrays' and the classes' blocks it
-/// `emalloc`s ([`of_unit`]), which `zend_persist` copies into shared
-/// memory before the request's copies are given back with the tree. So a
+/// `emalloc`s ([`of_unit`]), the main op array's last, which stand
+/// after the tree is given back, through what opcache lays while the
+/// `optimizer` runs ([`optimized`]), until `zend_persist` has copied them
+/// into shared memory and the request's copies are given back. So a
 /// file too large for the limit meets it in its compile, at the hard
 /// limit as php's does (`oom_hard_limit_exceeded_during_complilation.phpt`),
 /// and a large include leaves php's carves standing, its peak above
@@ -1498,22 +1598,211 @@ pub(super) fn carve(req: &mut Request, unit: &Unit) -> Result<(), Thrown> {
 /// ```expect regime=immutable-literals
 /// 2359392 above
 /// ```
-pub(super) fn persisted(req: &mut Request, unit: &Unit, tree: usize) -> Result<(), Thrown> {
-    with_tree(req, tree, |req| {
+pub(super) fn persisted(
+    req: &mut Request,
+    unit: &Unit,
+    tree: usize,
+    optimizer: Optimizer,
+) -> Result<(), Thrown> {
+    let (mut main, mut laid) = with_tree(req, tree, |req| {
         carve(req, unit)?;
-        of_unit(req, unit)?.free(req);
+        let laid = of_unit(req, unit)?;
+        let mut main = Blocks::default();
+        match op_array(req, &mut main, &unit.main, None) {
+            Ok(()) => Ok((main, laid)),
+            Err(thrown) => {
+                main.free(req);
+                laid.free(req);
+                Err(thrown)
+            }
+        }
+    })?;
+    let held = match optimizer {
+        Optimizer::On { level, .. } => {
+            let mut op_arrays = std::mem::take(&mut main.oplines);
+            op_arrays.extend(laid.take_oplines());
+            let tables = [unit.functions.len(), unit.classes.len()];
+            optimized(req, tables, level, op_arrays)
+        }
+        Optimizer::Off => Ok(()),
+    };
+    main.free(req);
+    laid.free(req);
+    held
+}
+
+/// `sizeof(zend_persistent_script)`, in the 512-byte bin.
+const PERSISTENT_SCRIPT: usize = 512;
+/// `zend_arena_create(64 * 1024)`, the optimizer's arena.
+const OPTIMIZER_ARENA: usize = 64 * 1024;
+/// `sizeof(Bucket)`.
+const BUCKET: usize = 32;
+/// `sizeof(uint32_t)`, a slot of a table's hash.
+const HASH_SLOT: usize = 4;
+
+/// What opcache lays on the request's heap after the compile of a file it
+/// persists and before it gives the request's op arrays back: the
+/// `zend_persistent_script` that `create_persistent_script` `emalloc`s
+/// for them (`Z/ext/opcache/zend_accelerator_util_funcs.c:37`), with its
+/// function and class tables, each `zend_hash_extend`ed to the `tables`
+/// the compile declared as they are moved into it (`:89`, `:120`); and
+/// `zend_optimize_script` (`Z/Zend/Optimizer/zend_optimizer.c:1599`)
+/// over `op_arrays` under `level`, main's first. That is its arena,
+/// `zend_arena_create(64 * 1024)` (`:1606`), whatever the level, and
+/// per op array the copy of its constants `zend_revert_pass_two` takes
+/// out of the block `pass_two` packed them into (`:1192`); the CFG
+/// pass's oplines, which `assemble_code_blocks` lays and puts in the
+/// place of the op array's (`Z/Zend/Optimizer/block_pass.c:1058`); pass
+/// 11's table of the constants it merges, `zend_hash_init` over their
+/// number and laid as its first key lays it
+/// (`Z/Zend/Optimizer/compact_literals.c:272`); and `zend_redo_pass_two`,
+/// which grows the oplines to hold the constants again and gives the
+/// copy back. Over the call graph every op array is reverted and passed
+/// before pass 11 and the redo walk them all (`:1612-1714`); else each is
+/// redone before the next. The passes' own work is in the arena, and
+/// what else they lay, a few words each, is not laid here; nor does the
+/// engine pass them, so the oplines and constants are the compiler's, as
+/// the engine's op arrays hold them. So a program opcache compiled reads the peak the
+/// arena set at its first line, whatever the level, and the merge's table
+/// past it where a whole number keyed it packed before a string turned it
+/// into a hash:
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/w3793-' . getmypid() . '.php';
+/// foreach (['', '$x = 5; '] as $code) {
+///     file_put_contents($f, "<?php {$code}echo memory_get_peak_usage() - memory_get_usage(), \"\\n\";");
+///     touch($f, time() - 10);
+///     foreach (['', ' -d opcache.optimization_level=0'] as $level) {
+///         echo shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1$level " . escapeshellarg($f));
+///     }
+/// }
+/// unlink($f);
+/// ```
+/// ```expect process
+/// 66448
+/// 66192
+/// 66704
+/// 66288
+/// ```
+fn optimized(
+    req: &mut Request,
+    tables: [usize; 2],
+    level: Level,
+    op_arrays: Vec<Oplines>,
+) -> Result<(), Thrown> {
+    let script = Emalloc::new(req, PERSISTENT_SCRIPT)?;
+    let mut moved = Vec::new();
+    for declared in tables.into_iter().filter(|declared| *declared > 0) {
+        moved.push(Emalloc::new(req, Merge::Hash.bytes(declared))?);
+    }
+    let arena = Emalloc::new(req, OPTIMIZER_ARENA)?;
+    let mut redone = Vec::with_capacity(op_arrays.len());
+    let mut reverted = Vec::new();
+    for oplines in op_arrays {
+        let passed = Reverted::passed(req, oplines, level)?;
+        if level.call_graph() {
+            reverted.push(passed);
+        } else {
+            passed.merged(req, level)?;
+            redone.push(passed.redone(req)?);
+        }
+    }
+    for passed in &reverted {
+        passed.merged(req, level)?;
+    }
+    for passed in reverted {
+        redone.push(passed.redone(req)?);
+    }
+    arena.free(req);
+    for oplines in redone {
+        oplines.block.free(req);
+    }
+    for table in moved {
+        table.free(req);
+    }
+    script.free(req);
+    Ok(())
+}
+
+/// One op array between `zend_revert_pass_two` and `zend_redo_pass_two`:
+/// its oplines as the passes left them, and the copy of its constants.
+struct Reverted {
+    oplines: Oplines,
+    constants: Option<Emalloc>,
+}
+
+impl Reverted {
+    /// `oplines` reverted, and passed by the CFG pass where `level` runs it.
+    fn passed(req: &mut Request, oplines: Oplines, level: Level) -> Result<Reverted, Thrown> {
+        let constants = match oplines.literals {
+            0 => None,
+            literals => Some(Emalloc::new(req, literals * ZVAL)?),
+        };
+        let oplines = if level.cfg() {
+            let assembled = Emalloc::new(req, oplines.lines * OPLINE)?;
+            oplines.block.free(req);
+            Oplines {
+                block: assembled,
+                ..oplines
+            }
+        } else {
+            oplines
+        };
+        Ok(Reverted { oplines, constants })
+    }
+
+    /// Pass 11's table where `level` runs it, laid as [`Merge`] says and
+    /// given back once the constants are merged.
+    fn merged(&self, req: &mut Request, level: Level) -> Result<(), Thrown> {
+        if !level.compacts_literals() {
+            return Ok(());
+        }
+        let literals = self.oplines.literals;
+        match self.oplines.merge {
+            Merge::Unkeyed => {}
+            merge @ (Merge::Hash | Merge::Packed) => {
+                Emalloc::new(req, merge.bytes(literals))?.free(req);
+            }
+            // `zend_hash_packed_to_hash` lays the hash before it gives
+            // the packed table back.
+            Merge::Converted => {
+                let packed = Emalloc::new(req, Merge::Packed.bytes(literals))?;
+                let hash = Emalloc::new(req, Merge::Hash.bytes(literals))?;
+                packed.free(req);
+                hash.free(req);
+            }
+        }
         Ok(())
-    })
+    }
+
+    /// `zend_redo_pass_two`: the oplines grown to hold the constants after
+    /// them, and the copy given back.
+    fn redone(self, req: &mut Request) -> Result<Oplines, Thrown> {
+        let Oplines {
+            block,
+            lines,
+            literals,
+            ..
+        } = self.oplines;
+        let block = block.resize(req, packed(lines, literals))?;
+        if let Some(constants) = self.constants {
+            constants.free(req);
+        }
+        Ok(Oplines {
+            block,
+            ..self.oplines
+        })
+    }
 }
 
 /// `CG(ast_arena)` over a tree of `elements` laid on the heap while
 /// `then` runs, and given back after it, as `zend_compile` destroys it
 /// once the file's op arrays stand (`Z/Zend/zend_language_scanner.l:599`).
-pub(super) fn with_tree(
+pub(super) fn with_tree<T>(
     req: &mut Request,
     elements: usize,
-    then: impl FnOnce(&mut Request) -> Result<(), Thrown>,
-) -> Result<(), Thrown> {
+    then: impl FnOnce(&mut Request) -> Result<T, Thrown>,
+) -> Result<T, Thrown> {
     let mut ast = Vec::new();
     let charged = (0..(elements * AST_NODE).div_ceil(AST_BLOCK).max(1))
         .try_for_each(|_| {
