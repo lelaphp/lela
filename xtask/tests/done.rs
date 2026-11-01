@@ -1314,6 +1314,39 @@ fn a_porting_crates_crosscheck_readings_are_the_ports_meter() {
     );
 }
 
+/// What `worktree land` carries is what the porting note reads (#3804):
+/// `_merge`'s two passing `crosscheck` columns over a `porting = true`
+/// extension reach main's index and no file, and the note that the key
+/// excuses nothing is said from them.
+#[test]
+fn the_porting_note_reads_the_columns_worktree_land_carried() {
+    let root = scratch("landed-porting");
+    write(
+        &root,
+        "ext/standard/Cargo.toml",
+        "[package]\nname = \"php_ext_standard\"\n",
+    );
+    write(&root, "ext/standard/src/lib.rs", "pub fn str_repeat() {}\n");
+    Tracked::of(&root)
+        .with_crate("ext/standard", |row| row.porting = true)
+        .write(&root);
+    Repo::at(&root).commit("ext/standard, its port partial");
+    let said = |root: &Path| {
+        let passing =
+            "ext/standard (an extension whose two `crosscheck` columns are fresh and pass)";
+        judge(root).notes.iter().any(|note| note.contains(passing))
+    };
+    assert!(!said(&root), "{:#?}", judge(&root));
+
+    let merge = Tree::new("done-landed-porting-merge").unwrap();
+    let merged = Store::of_workspace(&merge);
+    for scope in ["ext/standard", "ext/standard/ri"] {
+        merged.record(&[fresh(&root, "crosscheck", scope)]).unwrap();
+    }
+    Store::of_workspace(&root).land(&merged).unwrap();
+    assert!(said(&root), "{:#?}", judge(&root));
+}
+
 #[test]
 fn a_kernel_or_native_without_a_witness_is_unmet_from_the_witness_reading() {
     let root = scratch("missing");
