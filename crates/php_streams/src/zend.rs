@@ -4,7 +4,7 @@
 //! with `ExtensionBuilder::stream_hooks`, and the CLI's standard handles
 //! `do_cli` registers and reads.
 
-use crate::api::layer::{Face as _, StreamHooks, scheme_length};
+use crate::api::layer::{Face as _, IncludeFile, StreamHooks, scheme_length};
 
 use crate::api::raising::Thrown;
 use crate::api::request::{Request, ScannerFile, Stream, Streams, Unresolved, UrlStat, Whence};
@@ -36,35 +36,76 @@ pub const STREAM_HOOKS: StreamHooks = StreamHooks {
 };
 
 /// `zend_stream_open` for an include ([`ScannerFile`]), warning where it
-/// fails only where it `warns`: the name its
-/// `zend_file_handle` takes, the `*opened_path` its opener set or `path`,
-/// `None` where it did not open; the `zend_file_handle` held either way for
-/// [`read_include`] and [`close_include`].
-fn open(req: &mut Request, path: &[u8], warns: bool) -> Result<Option<Vec<u8>>, Thrown> {
-    let fh = ScannerFile::open(req, path, warns)?;
-    let named = (fh.as_ref())
-        .map(|fh| (fh.opened_path()).map_or_else(|| path.to_vec(), |p| p.as_bytes().to_vec()));
-    req.streams().including.push(fh);
-    Ok(named)
+/// fails only where it `warns`: the `zend_file_handle`, handed to the
+/// frame that opened it to hold for [`read_include`] and [`close_include`],
+/// and the name it takes, the `*opened_path` its opener set or `path`;
+/// `None` where it did not open.
+fn open(
+    req: &mut Request,
+    path: &[u8],
+    warns: bool,
+) -> Result<Option<(IncludeFile, Vec<u8>)>, Thrown> {
+    let Some(fh) = ScannerFile::open(req, path, warns)? else {
+        return Ok(None);
+    };
+    let named = (fh.opened_path()).map_or_else(|| path.to_vec(), |p| p.as_bytes().to_vec());
+    Ok(Some((IncludeFile(Box::new(fh)), named)))
 }
 
-/// [`StreamHooks::read_include`]: `zend_stream_fixup` over what [`open`]
-/// held last, the file read whole, `None` for the read that failed.
-fn read_include(req: &mut Request) -> Result<Option<Vec<u8>>, Thrown> {
-    let mut fh = req.streams().including.pop().flatten();
-    let source = fh
-        .as_mut()
-        .map_or(Ok(None), |fh| Ok(fh.load(req)?.map(<[u8]>::to_vec)));
-    req.streams().including.push(fh);
-    source
+/// [`StreamHooks::read_include`]: `zend_stream_fixup` over the file
+/// [`open`] held, read whole, `None` for the read that failed.
+fn read_include(req: &mut Request, file: &mut IncludeFile) -> Result<Option<Vec<u8>>, Thrown> {
+    let Some(fh) = file.0.downcast_mut::<ScannerFile>() else {
+        return Ok(None);
+    };
+    Ok(fh.load(req)?.map(<[u8]>::to_vec))
 }
 
 /// [`StreamHooks::close_include`]: the `zend_file_handle` [`open`] held
-/// last destroyed, or, where a fatal is ending the request, left unreached as
+/// destroyed, or, where a fatal is ending the request, left unreached as
 /// `zend_bailout` leaves `zend_destroy_file_handle`: its stream stands
-/// among the request's resources, which close it at shutdown.
-fn close_include(req: &mut Request) {
-    if let Some(fh) = req.streams().including.pop().flatten()
+/// among the request's resources, which close it at shutdown. The frame
+/// that opened it closes it, as php's C frame holds its own
+/// `zend_file_handle`, so two fibers' autoloaded files whose tops suspend
+/// are each closed as their own fiber resumes, whichever opened last.
+///
+/// ```php
+/// class W { public $context; private $d = false; public $p;
+///     function stream_open($p, $m, $o, &$op) { $this->p = $p; echo "open $p\n"; return true; }
+///     function stream_read($n) { if ($this->d) return ''; $this->d = true; return "<?php echo 'ran {$this->p}', PHP_EOL; " . (str_ends_with($this->p, ".inc") ? "Fiber::suspend();" : "") . " echo 'resumed {$this->p}', PHP_EOL;"; }
+///     function stream_eof() { return $this->d; }
+///     function stream_stat() { return []; }
+///     function stream_close() { echo "close {$this->p}\n"; }
+///     function stream_set_option($o, $a, $b) { return false; }
+///     function __destruct() { echo "dtor {$this->p}\n"; } }
+/// stream_wrapper_register('ww', 'W');
+/// $a = new Fiber(fn () => spl_autoload('ww://A', '.inc'));
+/// $b = new Fiber(fn () => spl_autoload('ww://B', '.inc'));
+/// $a->start(); $b->start();
+/// include "ww://c";
+/// $a->resume(); $b->resume();
+/// echo "end\n";
+/// ```
+/// ```expect
+/// open ww://a.inc
+/// ran ww://a.inc
+/// open ww://b.inc
+/// ran ww://b.inc
+/// open ww://c
+/// close ww://c
+/// dtor ww://c
+/// ran ww://c
+/// resumed ww://c
+/// resumed ww://a.inc
+/// close ww://a.inc
+/// dtor ww://a.inc
+/// resumed ww://b.inc
+/// close ww://b.inc
+/// dtor ww://b.inc
+/// end
+/// ```
+fn close_include(req: &mut Request, file: IncludeFile) {
+    if let Ok(fh) = file.0.downcast::<ScannerFile>()
         && !req.diagnostics().bailing_out()
     {
         fh.destroy(req);

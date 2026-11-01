@@ -18,6 +18,8 @@ layer::Face::state_ref
 layer::Face::thrown_without_frame
 layer::Face::unguarded_host_path
 layer::Face::wrapper_warning
+layer::IncludeFile
+layer::IncludeReadHook
 layer::Readiness
 layer::SockOpt
 layer::StandardHandlesHook

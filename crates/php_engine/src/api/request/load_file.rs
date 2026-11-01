@@ -5,6 +5,7 @@
 use super::Request;
 use crate::api::raising::Thrown;
 use crate::exec;
+use crate::layer::{IncludeFile, IncludeReadHook};
 
 impl Request {
     /// [`crate::api::call::load_file`]: the path resolved along the
@@ -203,25 +204,25 @@ impl Request {
         };
         // `php_stream_open_for_zend_ex` with no bit that warns: a file that
         // does not open is passed over in silence.
-        let named = (hooks.open)(self, path, false)?;
-        let served = self.serve_stream(written, named, hooks.read_include);
-        match self.close_stream(hooks.close_include, served.as_ref().err()) {
+        let (mut file, named) = (hooks.open)(self, path, false)?.unzip();
+        let served = self.serve_stream(written, file.as_mut().zip(named), hooks.read_include);
+        match self.close_stream(hooks.close_include, file, served.as_ref().err()) {
             Some(thrown) => Err(thrown),
             None => served,
         }
     }
 
-    /// [`Request::load_stream`] over the file the open `named`, before its
-    /// `zend_file_handle` is destroyed: `false` for a file that did not
-    /// open, or that the table holds, and `true` once the file was compiled
-    /// and served.
+    /// [`Request::load_stream`] over the file the open held and the name
+    /// it gave it, `opened`, before its `zend_file_handle` is destroyed:
+    /// `false` for a file that did not open, or that the table holds, and
+    /// `true` once the file was compiled and served.
     fn serve_stream(
         &mut self,
         written: &[u8],
-        named: Option<Vec<u8>>,
-        read: fn(&mut Request) -> Result<Option<Vec<u8>>, Thrown>,
+        opened: Option<(&mut IncludeFile, Vec<u8>)>,
+        read: IncludeReadHook,
     ) -> Result<bool, Thrown> {
-        let Some(named) = named else {
+        let Some((file, named)) = opened else {
             return self.stream_thrown.take().map_or(Ok(false), Err);
         };
         if self.included_files.contains(&named) {
@@ -229,7 +230,7 @@ impl Request {
         }
         self.note_included(&named)?;
         let kind = exec::IncludeKind::Require;
-        match self.compile_stream(kind, written, Some(named), read)? {
+        match self.compile_stream(kind, written, Some((file, named)), read)? {
             super::Opened::Declared(unit) => self.serve_top_code(unit).map(|()| true),
             _ => Ok(false),
         }
