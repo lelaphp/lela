@@ -186,6 +186,22 @@ pub(crate) fn double_to_str(req: &mut Request, f: f64) -> Result<PhpString, Thro
 /// ```expect
 /// -42|22
 /// ```
+///
+/// With a throwable pending, php throws no `Error` over it
+/// (`if (!EG(exception))` in `zval_get_string_func`): what stands is the
+/// answer, so a native that converts on past a piece that threw, as
+/// `implode` does, hands on the piece's throwable alone.
+///
+/// ```php
+/// class T { function __toString(): string { throw new Exception("thrown"); } }
+/// try { implode(',', [new T, new stdClass, 'x']); } catch (Exception $e) { echo "caught ", $e->getMessage(), " ", var_export($e->getPrevious(), true), "\n"; }
+/// set_error_handler(function ($no, $str) { throw new Exception("handled: $str"); });
+/// try { implode(',', [[], new stdClass]); } catch (Exception $e) { echo "caught ", $e->getMessage(), " ", var_export($e->getPrevious(), true), "\n"; }
+/// ```
+/// ```expect
+/// caught thrown NULL
+/// caught handled: Array to string conversion NULL
+/// ```
 pub(crate) fn object_to_string(
     req: &mut Request,
     object: crate::api::values::PhpObject,
@@ -199,6 +215,10 @@ pub(crate) fn object_to_string(
         }
         returned.give_up(req);
     }
+    // `if (!EG(exception))`: what stands pending, a throwable the
+    // conversion is served past or one a handler left, is the answer,
+    // and nothing is thrown over it.
+    crate::api::raising::pending(req)?;
     let message = bytes!(
         b"Object of class ",
         req.symbols().class_name(class),
