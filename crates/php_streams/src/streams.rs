@@ -398,7 +398,7 @@ pub(crate) struct PhpStream {
     /// `stream->wrapper->wops->label`.
     wrapper: &'static str,
     /// `stream->mode`.
-    mode: Mode,
+    pub(crate) mode: Mode,
     /// `stream->orig_path`: the path `php_stream_open_wrapper_ex` opened,
     /// after `include_path`, and `None` for a stream no wrapper opened by
     /// path, a directory stream among them.
@@ -506,7 +506,7 @@ const _: () = assert!(
 /// `stream->mode`, php's `char mode[16]`: what `php_stream_alloc` was
 /// handed, cut to the fifteen bytes before its NUL.
 #[derive(Clone, Copy)]
-struct Mode([u8; 16]);
+pub(crate) struct Mode([u8; 16]);
 
 impl Mode {
     /// `strlcpy(ret->mode, mode, sizeof(ret->mode))`.
@@ -518,7 +518,7 @@ impl Mode {
     }
 
     /// The bytes before the NUL.
-    fn bytes(&self) -> &[u8] {
+    pub(crate) fn bytes(&self) -> &[u8] {
         let len = self.0.iter().position(|b| *b == 0).unwrap_or(16);
         &self.0[..len]
     }

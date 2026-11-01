@@ -974,6 +974,7 @@ request::Stream::is_dir
 request::Stream::is_stdio
 request::Stream::meta_data
 request::Stream::no_fclose
+request::Stream::opened_as
 request::Stream::orig_path
 request::Stream::pclose
 request::Stream::read

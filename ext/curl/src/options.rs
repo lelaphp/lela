@@ -619,15 +619,11 @@ fn stream_of(req: &mut Request, value: &Value) -> Result<(Stream, Option<RawFd>)
     Ok((stream, stream.cast(req, Cast::Stdio, true)))
 }
 
-/// `what->mode[0] != 'r' || what->mode[1] == '+'`.
-fn writable(req: &mut Request, stream: Stream) -> Result<bool, Thrown> {
-    let meta = stream.meta_data(req)?;
-    let mode = meta
-        .find(b"mode")
-        .and_then(|mode| mode.deref().as_str_bytes().map(<[u8]>::to_vec))
-        .unwrap_or_default();
-    meta.give_up(req);
-    Ok(mode.first() != Some(&b'r') || mode.get(1) == Some(&b'+'))
+/// `what->mode[0] != 'r' || what->mode[1] == '+'`, read off the stream
+/// as php reads the field ([`Stream::opened_as`]).
+fn writable(req: &Request, stream: Stream) -> bool {
+    let opened = stream.opened_as(req).unwrap_or_default();
+    opened.first() != Some(&b'r') || opened.get(1) == Some(&b'+')
 }
 
 /// A stream option set.
@@ -649,6 +645,24 @@ fn writable(req: &mut Request, stream: Stream) -> Result<bool, Thrown> {
 /// close
 /// ValueError <- close
 /// ```
+///
+/// Whether the stream is writable is read off the stream, as
+/// `_php_curl_setopt` reads `what->mode`, so no method of a user wrapper
+/// runs, its `stream_eof` among them:
+///
+/// ```php
+/// class W { public $context; function stream_open($p,$m,$o,&$op){return true;} function stream_write($d){return strlen($d);} function stream_close(){} }
+/// stream_wrapper_register('ww', 'W');
+/// $h = curl_init();
+/// var_dump(curl_setopt($h, CURLOPT_FILE, fopen('ww://x', 'w')));
+/// try { curl_setopt($h, CURLOPT_STDERR, fopen('ww://x', 'r')); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(curl_setopt($h, CURLOPT_WRITEHEADER, fopen('ww://x', 'r+')));
+/// ```
+/// ```expect
+/// bool(true)
+/// curl_setopt(): The provided file handle must be writable
+/// bool(true)
+/// ```
 fn set_stream(
     req: &mut Request,
     object: PhpObject,
@@ -664,7 +678,7 @@ fn set_stream(
     };
     if let Some((stream, _)) = what
         && which != StreamOpt::Infile
-        && !writable(req, stream)?
+        && !writable(req, stream)
     {
         let text = format!(
             "{}(): The provided file handle must be writable",
