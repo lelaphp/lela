@@ -6,7 +6,7 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::cdir::{self, Local};
@@ -227,17 +227,91 @@ fn clone_of(orig: Option<&Dirent>) -> Dirent {
 #[derive(Debug)]
 pub(crate) enum Source {
     Buffer(Buffer),
-    File {
-        path: PathBuf,
-        /// The file `ZipArchive::FL_OPEN_FILE_NOW` opened.
-        file: Option<File>,
-        start: u64,
-        len: u64,
-        mtime: i64,
-        mode: u32,
-        /// Whether it is a regular file, whose source libzip seeks in.
-        regular: bool,
-    },
+    File(FileSource),
+}
+
+/// `zip_source_file` and `zip_source_filep`: the file, by its name, the
+/// window on it, what it stated when made, and how many streams hold it
+/// open (`open_count`), under which one over a device or a pipe, which
+/// cannot seek, is not opened again.
+#[derive(Debug)]
+pub(crate) struct FileSource {
+    /// Its name, which the window of each stream over it names it by.
+    path: Arc<Path>,
+    /// The file `ZipArchive::FL_OPEN_FILE_NOW` opened.
+    file: Option<File>,
+    start: u64,
+    /// The window's length, `0` for one over a device or a pipe given
+    /// none, which states no size.
+    len: u64,
+    mtime: i64,
+    mode: u32,
+    /// Whether it is a regular file, whose source libzip seeks in.
+    regular: bool,
+    opens: u32,
+}
+
+impl FileSource {
+    /// `ZIP_SOURCE_OPEN` under `zip_source_open`: `ZIP_ER_INUSE` while a
+    /// stream holds a source over a device or a pipe open, as it cannot
+    /// seek (zip_source_open.c:46-51); then the file `zip_source_filep`
+    /// was given, or the file opened anew, sought to the window's start
+    /// only where it is past 0 (zip_source_file_common.c:236-249), as a
+    /// pipe cannot seek at all. So a second stream, a read past the
+    /// stream, and the close each fail while one is open; closed, the
+    /// file is opened anew:
+    ///
+    /// ```php
+    /// $z = new ZipArchive; $z->open('inuse-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE); $z->addFile('/dev/zero', 'z', 10, 50);
+    /// $s = $z->getStream('z'); var_dump(strlen(fread($s, 10)), $z->getStream('z'), $z->getStatusString(), $z->getFromName('z'), @$z->close(), $z->getStatusString()); fclose($s);
+    /// $z = new ZipArchive; $z->open('inuse-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE); $z->addFile('/dev/zero', 'z', 10, 50);
+    /// $s = $z->getStream('z'); var_dump(fseek($s, 0)); fclose($s); var_dump(strlen($z->getFromName('z')), $z->close());
+    /// $z->open('inuse-witness.zip'); var_dump($z->statName('z')['size']); $z->close(); unlink('inuse-witness.zip');
+    /// ```
+    /// ```expect
+    /// int(10)
+    /// bool(false)
+    /// string(21) "Resource still in use"
+    /// bool(false)
+    /// bool(false)
+    /// string(21) "Resource still in use"
+    ///
+    /// Warning: fseek(): Stream does not support seeking in %SCRATCH%/witness.php on line 5
+    /// int(-1)
+    /// int(50)
+    /// bool(true)
+    /// int(50)
+    /// ```
+    fn open(&self) -> Result<File, Status> {
+        if self.opens > 0 && !self.regular {
+            return Err(Status::new(Er::Inuse));
+        }
+        let mut f = match &self.file {
+            Some(f) => f.try_clone(),
+            None => File::open(&*self.path),
+        }
+        .map_err(|e| Status::os(Er::Open, &e))?;
+        if self.start > 0 {
+            f.seek(SeekFrom::Start(self.start))
+                .map_err(|e| Status::os(Er::Seek, &e))?;
+        }
+        Ok(f)
+    }
+}
+
+/// `zip_source_read` of a file source: `buf` filled from `file`, short
+/// only at its end.
+pub(crate) fn read_file(file: &mut File, buf: &mut [u8]) -> Result<usize, Status> {
+    let mut got = 0;
+    while got < buf.len() {
+        match file.read(&mut buf[got..]) {
+            Ok(0) => break,
+            Ok(n) => got += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(Status::os(Er::Read, &e)),
+        }
+    }
+    Ok(got)
 }
 
 /// `zip_source_buffer`: its bytes, which the window of each stream over
@@ -273,6 +347,22 @@ impl BufferLink {
     pub(crate) fn data(&self) -> &[u8] {
         &self.data
     }
+}
+
+/// The file source over a device or a pipe a window on an added entry
+/// reads: its entry, and its name, by which it is told from a source the
+/// entry is given since.
+#[derive(Clone)]
+pub(crate) struct FileLink {
+    entry: usize,
+    path: Arc<Path>,
+}
+
+/// The source of an added entry a stream's window reads and holds open.
+#[derive(Clone)]
+pub(crate) enum SourceLink {
+    Buffer(BufferLink),
+    File(FileLink),
 }
 
 impl Source {
@@ -316,15 +406,16 @@ impl Source {
                 length = meta.len() - start;
             }
         }
-        Ok(Some(Source::File {
-            path,
+        Ok(Some(Source::File(FileSource {
+            path: path.into(),
             file,
             start,
             len: length,
             mtime: meta.mtime(),
             mode: meta.mode(),
             regular: meta.is_file(),
-        }))
+            opens: 0,
+        })))
     }
 
     /// The source's `ZIP_SOURCE_STAT`.
@@ -336,9 +427,9 @@ impl Source {
                 mtime: b.mtime,
                 ..Stat::default()
             },
-            Source::File { len, mtime, .. } => Stat {
-                size: *len,
-                mtime: *mtime,
+            Source::File(f) => Stat {
+                size: f.len,
+                mtime: f.mtime,
                 ..Stat::default()
             },
         }
@@ -349,18 +440,17 @@ impl Source {
     pub(crate) fn attributes(&self) -> Option<(u8, u32)> {
         match self {
             Source::Buffer(_) => None,
-            Source::File { mode, .. } => Some((3, (mode << 16) | u32::from(mode & 0o200 == 0))),
+            Source::File(f) => Some((3, (f.mode << 16) | u32::from(f.mode & 0o200 == 0))),
         }
     }
 
     /// `zip_source_supports_reopen`: a buffer's, where libzip's source
     /// over a regular file seeks in it and cannot be opened again, so an
     /// entry a file is given cannot be read before the close writes it.
-    /// One over a device or a pipe can (zip_source_file_common.c:125-152),
-    /// though with no length given it states no size, so the window
+    /// One over a device or a pipe can (zip_source_file_common.c:125-152):
+    /// with no length given it states no size, so the window
     /// `zip_source_zip_file_create` makes over it runs past its compressed
-    /// size; one given a length is not modelled, and reads as a regular
-    /// file's:
+    /// size, and given one, the window reads the device through it:
     ///
     /// ```php
     /// file_put_contents('reopen-witness.txt', 'file data');
@@ -368,7 +458,11 @@ impl Source {
     /// var_dump($z->getFromName('f'), $z->getStatusString(), $z->getStream('f'), $z->close());
     /// $z->open('reopen-witness.zip'); var_dump($z->getFromName('f')); $z->close();
     /// $z->open('reopen-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE); $z->addFile('/dev/null', 'n');
-    /// var_dump($z->getStream('n'), $z->getStatusString(), $z->close()); unlink('reopen-witness.zip'); unlink('reopen-witness.txt');
+    /// var_dump($z->getStream('n'), $z->getStatusString(), $z->close());
+    /// $z->open('reopen-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE); $z->addFile('/dev/zero', 'z', 0, 100);
+    /// var_dump(strlen($z->getFromName('z')), strlen(fread($z->getStream('z'), 1000)), $z->close());
+    /// $z->open('reopen-witness.zip'); var_dump($z->getFromName('z') === str_repeat("\0", 100)); $z->close();
+    /// unlink('reopen-witness.zip'); unlink('reopen-witness.txt');
     /// ```
     /// ```expect
     /// bool(false)
@@ -379,11 +473,15 @@ impl Source {
     /// bool(false)
     /// string(96) "Zip archive inconsistent: entry 0: compressed and uncompressed sizes don't match for stored file"
     /// bool(true)
+    /// int(100)
+    /// int(100)
+    /// bool(true)
+    /// bool(true)
     /// ```
     pub(crate) fn supports_reopen(&self) -> bool {
         match self {
             Source::Buffer(_) => true,
-            Source::File { regular, len, .. } => !regular && *len == 0,
+            Source::File(f) => !f.regular,
         }
     }
 
@@ -438,26 +536,11 @@ impl Source {
                     offset: b.offset,
                 })
             }
-            Source::File {
-                path,
-                file,
-                start,
-                len,
-                ..
-            } => {
-                let mut f = match file {
-                    Some(f) => f.try_clone(),
-                    None => File::open(&*path),
-                }
-                .map_err(|e| Status::os(Er::Open, &e))?;
-                f.seek(SeekFrom::Start(*start))
-                    .map_err(|e| Status::os(Er::Seek, &e))?;
-                Ok(Input::File {
-                    file: f,
-                    left: *len,
-                    read: 0,
-                })
-            }
+            Source::File(f) => Ok(Input::File {
+                file: f.open()?,
+                left: f.len,
+                read: 0,
+            }),
         }
     }
 }
@@ -1722,20 +1805,9 @@ impl Archive {
                 }
             }
             Input::File { file, left, read } => {
-                let mut got = 0;
-                while got < buf.len() && *left > 0 {
-                    let room = buf.len() - got;
-                    let want = usize::try_from(*left).map_or(room, |l| l.min(room));
-                    match file.read(&mut buf[got..got + want]) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            got += n;
-                            *left -= n as u64;
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                        Err(e) => return Err(Status::os(Er::Read, &e)),
-                    }
-                }
+                let want = usize::try_from(*left).map_or(buf.len(), |l| l.min(buf.len()));
+                let got = read_file(file, &mut buf[..want])?;
+                *left -= got as u64;
                 *read += got as u64;
                 Ok(got)
             }
@@ -1791,21 +1863,38 @@ impl Archive {
         }
     }
 
-    /// `zip_source_open` of the buffer `link` names, by a stream over it
-    /// as the stream opens: a stream holds its source open from
-    /// `zip_fopen` to `zip_fclose`, where a read made and done within one
-    /// call leaves only where it read to.
-    pub(crate) fn open_buffer(&mut self, link: &BufferLink) {
-        if let Some(b) = self.buffer_of(link) {
-            b.opens += 1;
+    /// The file source `link` names, where its entry still has it.
+    fn file_of(&mut self, link: &FileLink) -> Option<&mut FileSource> {
+        match &mut self.entries.get_mut(link.entry)?.source {
+            Some(Source::File(f)) if Arc::ptr_eq(&f.path, &link.path) => Some(f),
+            _ => None,
         }
     }
 
-    /// `zip_source_close` of the buffer `link` names, by a stream over it
+    /// The `open_count` of the source `link` names, where its entry still
+    /// has it.
+    fn opens_of(&mut self, link: &SourceLink) -> Option<&mut u32> {
+        match link {
+            SourceLink::Buffer(l) => self.buffer_of(l).map(|b| &mut b.opens),
+            SourceLink::File(l) => self.file_of(l).map(|f| &mut f.opens),
+        }
+    }
+
+    /// `zip_source_open` of the source `link` names, by a stream over it
+    /// as the stream opens: a stream holds its source open from
+    /// `zip_fopen` to `zip_fclose`, where a read made and done within one
+    /// call leaves only where it read to.
+    pub(crate) fn open_source(&mut self, link: &SourceLink) {
+        if let Some(opens) = self.opens_of(link) {
+            *opens += 1;
+        }
+    }
+
+    /// `zip_source_close` of the source `link` names, by a stream over it
     /// as the stream closes.
-    pub(crate) fn close_buffer(&mut self, link: &BufferLink) {
-        if let Some(b) = self.buffer_of(link) {
-            b.opens = b.opens.saturating_sub(1);
+    pub(crate) fn close_source(&mut self, link: &SourceLink) {
+        if let Some(opens) = self.opens_of(link) {
+            *opens = opens.saturating_sub(1);
         }
     }
 
@@ -1859,11 +1948,19 @@ impl Archive {
         let opened = if changed_data {
             match &self.entries[idx].source {
                 Some(Source::Buffer(b)) => Ok(Reader::over_buffer(BufferLink::new(idx, &b.data))),
-                // `zip_source_zip_new.c:188`: a size it does not know is
-                // past any window's.
-                Some(Source::File { .. }) => {
+                // `zip_source_zip_new.c:188`: a size it does not know, one
+                // over a device or a pipe given no length, is past any
+                // window's.
+                Some(Source::File(f)) if f.len == 0 => {
                     Err(Status::incons(Detail::StoredSizeMismatch, Some(idx)))
                 }
+                Some(Source::File(f)) => f.open().map(|file| {
+                    let link = FileLink {
+                        entry: idx,
+                        path: Arc::clone(&f.path),
+                    };
+                    Reader::over_file(link, file, f.len)
+                }),
                 None => Err(Status::new(Er::Internal)),
             }
         } else if flags & FL_COMPRESSED != 0 {

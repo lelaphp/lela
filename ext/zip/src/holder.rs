@@ -22,7 +22,7 @@ use php_ext::values::{Owner, Value, ValueRef};
 
 use php_ext::abi::Callable;
 
-use crate::archive::{Archive, BufferLink};
+use crate::archive::{Archive, SourceLink};
 use crate::c;
 use crate::error::{Er, Status};
 use crate::read::{Reader, Stdio};
@@ -115,14 +115,14 @@ pub(crate) fn create(req: &mut Request, mut za: Archive) -> ArchiveId {
 
 /// A stream's count of archive `id` (`self->archive`), whether its
 /// `zip_file_t` reads the archive's own file, which a close's commit is
-/// refused under, and the buffer source of an added entry it holds open
+/// refused under, and the source of an added entry it holds open
 /// otherwise: taken by [`hold`] once the stream is made, given back by
 /// [`Hold::let_go`].
 #[derive(Clone)]
 pub(crate) struct Hold {
     pub(crate) id: ArchiveId,
     reads_file: bool,
-    buffer: Option<BufferLink>,
+    source: Option<SourceLink>,
 }
 
 impl Hold {
@@ -130,7 +130,7 @@ impl Hold {
         Hold {
             id,
             reads_file: zf.reads_archive(),
-            buffer: zf.on_buffer().map(|(link, _)| link),
+            source: zf.source(),
         }
     }
 
@@ -139,8 +139,8 @@ impl Hold {
     pub(crate) fn let_go(self, req: &mut Request) {
         if let Some(h) = get(req, self.id) {
             h.readers = h.readers.saturating_sub(u32::from(self.reads_file));
-            if let (Some(za), Some(link)) = (h.za.live(), &self.buffer) {
-                za.close_buffer(link);
+            if let (Some(za), Some(link)) = (h.za.live(), &self.source) {
+                za.close_source(link);
             }
         }
         release(req, self.id);
@@ -149,13 +149,13 @@ impl Hold {
 
 /// `php_zip_archive_addref` for the stream `hold` is, counted among its
 /// archive's readers where it reads the archive's own file, and holding
-/// the buffer it reads open where it reads one.
+/// the added entry's source it reads open where it reads one.
 pub(crate) fn hold(req: &mut Request, hold: &Hold) {
     if let Some(h) = get(req, hold.id) {
         h.refcount += 1;
         h.readers += u32::from(hold.reads_file);
-        if let (Some(za), Some(link)) = (h.za.live(), &hold.buffer) {
-            za.open_buffer(link);
+        if let (Some(za), Some(link)) = (h.za.live(), &hold.source) {
+            za.open_source(link);
         }
     }
 }

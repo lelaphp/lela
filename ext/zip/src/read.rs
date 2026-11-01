@@ -12,7 +12,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::fs::FileExt;
 
-use crate::archive::{BufferLink, Encryption};
+use crate::archive::{self, BufferLink, Encryption, FileLink, SourceLink};
 use crate::codec::{Method, PkwareKeys, Turn, WinzipAes, copy_from};
 use crate::error::{Detail, Er, Status};
 use crate::{xz, zstd};
@@ -806,6 +806,8 @@ enum Body {
     /// The window on an added entry's buffer source, whose bytes it
     /// shares.
     Buffer { link: BufferLink, offset: usize },
+    /// The window on an added entry's file source over a device or a pipe.
+    File(FileWindow),
     /// A window read as it is: stored data, or the raw bytes
     /// `ZIP_FL_COMPRESSED` asks for.
     Window(Window),
@@ -824,6 +826,7 @@ impl Body {
                 *offset += n;
                 Ok(n)
             }
+            Body::File(w) => w.read_some(buf),
             Body::Window(w) => w.read_some(buf),
             Body::Decrypted(raw) => read_raw(raw, buf),
             Body::Compressed(d) => d.read_some(buf),
@@ -835,6 +838,7 @@ impl Body {
         match self {
             Body::Empty => Some((0, 0)),
             Body::Buffer { link, offset } => Some((*offset as u64, link.data().len() as u64)),
+            Body::File(w) => Some((w.offset, w.end)),
             Body::Window(w) => Some((w.offset, w.len)),
             Body::Decrypted(_) | Body::Compressed(_) => None,
         }
@@ -844,8 +848,35 @@ impl Body {
         match self {
             Body::Buffer { offset, .. } => *offset = usize::try_from(to).unwrap_or(usize::MAX),
             Body::Window(w) => w.offset = to,
-            Body::Empty | Body::Decrypted(_) | Body::Compressed(_) => {}
+            Body::Empty | Body::File(_) | Body::Decrypted(_) | Body::Compressed(_) => {}
         }
+    }
+}
+
+/// `zip_source_window` over a file source over a device or a pipe, whose
+/// source is not seekable and so neither is the window: it reads on from
+/// where the file stands, to the length the source was given, and a file
+/// that ends first fails it with `ZIP_ER_EOF`.
+struct FileWindow {
+    link: FileLink,
+    file: File,
+    offset: u64,
+    end: u64,
+}
+
+impl FileWindow {
+    fn read_some(&mut self, buf: &mut [u8]) -> Result<usize, Status> {
+        let left = self.end - self.offset;
+        let want = usize::try_from(left).map_or(buf.len(), |l| l.min(buf.len()));
+        if want == 0 {
+            return Ok(0);
+        }
+        let n = archive::read_file(&mut self.file, &mut buf[..want])?;
+        if n == 0 {
+            return Err(Status::new(Er::Eof));
+        }
+        self.offset += n as u64;
+        Ok(n)
     }
 }
 
@@ -922,6 +953,28 @@ impl Reader {
     /// source `link` names.
     pub(crate) fn over_buffer(link: BufferLink) -> Reader {
         Reader::new(Body::Buffer { link, offset: 0 }, None, true)
+    }
+
+    /// The window `zip_source_zip_file_create` lays over the file source
+    /// `link` names, over a device or a pipe opened as `file`, `len` long.
+    pub(crate) fn over_file(link: FileLink, file: File, len: u64) -> Reader {
+        let window = FileWindow {
+            link,
+            file,
+            offset: 0,
+            end: len,
+        };
+        Reader::new(Body::File(window), None, false)
+    }
+
+    /// The source of an added entry the window reads, which a stream over
+    /// it holds open.
+    pub(crate) fn source(&self) -> Option<SourceLink> {
+        match &self.body {
+            Body::Buffer { link, .. } => Some(SourceLink::Buffer(link.clone())),
+            Body::File(w) => Some(SourceLink::File(w.link.clone())),
+            Body::Empty | Body::Window(_) | Body::Decrypted(_) | Body::Compressed(_) => None,
+        }
     }
 
     /// The buffer a window on an added entry's buffer reads, and where
@@ -1025,7 +1078,7 @@ impl Reader {
     /// The window the entry is read through, where it has one.
     fn window_mut(&mut self) -> Option<&mut Window> {
         match &mut self.body {
-            Body::Empty | Body::Buffer { .. } => None,
+            Body::Empty | Body::Buffer { .. } | Body::File(_) => None,
             Body::Window(w) => Some(w),
             Body::Decrypted(raw) => Some(raw.window()),
             Body::Compressed(d) => Some(d.lower.window()),
