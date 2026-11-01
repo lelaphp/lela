@@ -16,7 +16,7 @@ use php_ext::abi::{
     Path as PathArg, Raw, Ref, Refusals, Std, This, Union, Untyped, Variadic,
 };
 use php_ext::attr::php_class;
-use php_ext::call::{Function, autoload, call_method, instantiate, lookup_class, new_object};
+use php_ext::call::{Function, autoload, call_method, create_object, instantiate, lookup_class};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::Type as DeclType;
 use php_ext::raising::{
@@ -2472,8 +2472,32 @@ fn info_class(req: &mut Request, chosen: Option<ClassId>) -> Result<ClassId, Thr
 /// ```expect
 /// destructed after constructed
 /// ```
+///
+/// The object is made as `spl_filesystem_object_new` makes it, refusing
+/// no class, so an abstract info class is instantiated where `new`
+/// refuses it, by `getFileInfo`, `getPathInfo` and a filesystem
+/// iterator's `current()`, and the copy is cloned as php's
+/// `spl_filesystem_object_clone` makes it:
+///
+/// ```php
+/// abstract class I extends SplFileInfo {}
+/// $f = new SplFileInfo(__FILE__); $f->setInfoClass('I');
+/// var_dump(get_class($f->getFileInfo()), get_class($f->getPathInfo()), get_class(clone $f->getFileInfo()));
+/// $d = new FilesystemIterator(__DIR__); $d->setInfoClass('I');
+/// var_dump(get_class($d->current()));
+/// foreach ($d as $v) { var_dump(get_class($v)); break; }
+/// try { new I(__FILE__); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(1) "I"
+/// string(1) "I"
+/// string(1) "I"
+/// string(1) "I"
+/// string(1) "I"
+/// Cannot instantiate abstract class I
+/// ```
 fn create_info(req: &mut Request, path: &[u8], class: ClassId) -> Result<Owner<PhpObject>, Thrown> {
-    let object = new_object(req, class)?;
+    let object = create_object(req, class)?;
     if crate::overridden(req, *object, b"__construct") || declares_constructor(req, class)? {
         let arg = crate::string_value(req, path)?;
         let served = call_method(req, &object, b"__construct", &[*arg]);
