@@ -28,7 +28,9 @@ use php_ext::abi::{OrFalse, Passed, Raw, Ref, Union, Untyped};
 use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::Type;
-use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, type_error};
+use php_ext::raising::{
+    Level, Thrown, arg_value_error, argument_error, docref, type_error, while_pending,
+};
 use php_ext::request::Request;
 use php_ext::values::{Charset, Key, Layout, Owner, PhpArray, PhpString, Value};
 use php_ext_random::Rng;
@@ -1942,6 +1944,46 @@ fn not_an_array(req: &mut Request) -> Thrown {
 /// string(2) "aa"
 /// string(1) "7"
 /// ```
+///
+/// Every piece is converted before the string is asked for, a piece
+/// whose conversion threw among them: its throwable stays pending, its
+/// text is the empty string, and the walk goes on, so a later array
+/// still warns where no handler is set and a later object's
+/// `__toString` is not called ([`piece_text`]). A warning whose handler
+/// threw leaves its throwable pending the same way.
+///
+/// ```php
+/// class T { function __toString(): string { throw new Exception("thrown"); } }
+/// class U { function __toString(): string { echo "unreached\n"; return "u"; } }
+/// try { implode(',', [new T, [], new U, 1.5]); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// try { implode(',', [new stdClass, [], new T]); } catch (Error $e) { echo $e->getMessage(), " ", var_export($e->getPrevious(), true), "\n"; }
+/// set_error_handler(function ($no, $str) { throw new Exception("handled: $str"); });
+/// try { var_dump(implode(',', [[], [], new T])); } catch (Exception $e) { echo $e->getMessage(), " ", var_export($e->getPrevious(), true), "\n"; }
+/// ```
+/// ```expect
+/// Warning: Array to string conversion in %SCRATCH%/witness.php on line 4
+/// caught thrown
+///
+/// Warning: Array to string conversion in %SCRATCH%/witness.php on line 5
+/// Object of class stdClass could not be converted to string NULL
+/// handled: Array to string conversion NULL
+/// ```
+///
+/// The string is still asked for after a piece threw, fallibly, so where
+/// the memory limit refuses it the limit's fatal is raised as the call
+/// returns, in place of what the piece threw:
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// class T { function __toString(): string { throw new Exception("thrown"); } }
+/// $a = array_fill(0, 100, str_repeat('x', 30000));
+/// $a[] = new T;
+/// try { implode(',', $a); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// echo "after\n";
+/// ```
+/// ```expect exit=255
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 6
+/// ```
 fn implode_array(
     req: &mut Request,
     glue: &[u8],
@@ -1956,6 +1998,7 @@ fn implode_array(
     }
     let mut out = Vec::new();
     let mut utf8 = glue_utf8;
+    let mut thrown = None;
     for (i, element) in elements.iter().enumerate() {
         if i > 0 {
             out.extend_from_slice(glue);
@@ -1966,8 +2009,7 @@ fn implode_array(
             utf8 &= s.is_valid_utf8();
         } else if let Some(n) = element.as_int() {
             out.extend_from_slice(Decimal::of(n).as_bytes());
-        } else {
-            let made = php_ext::coerce::to_string(req, &element)?;
+        } else if let Some(made) = piece_text(req, &element, &mut thrown)? {
             out.extend_from_slice(made.as_bytes());
             utf8 &= made.is_valid_utf8();
             made.give_up(req);
@@ -1975,15 +2017,84 @@ fn implode_array(
     }
     // "The glue is repeated once per element, so the result can dwarf
     // the input": `zend_string_safe_falloc(numelems - 1, ZSTR_LEN(glue),
-    // len, 0, fallible: true)` since 8.5.12, `RETURN_OOM()` where the
-    // memory limit refused it.
-    let Some(joined) = req.memory_mut().fallible(|req| PhpString::new(req, &out))? else {
-        return PhpString::new(req, b"");
+    // len, 0, fallible: true)` since 8.5.12, asked whatever a piece
+    // threw, and `RETURN_OOM()` where the memory limit refused it.
+    let asked = req.memory_mut().fallible(|req| PhpString::new(req, &out));
+    let joined = match (asked, thrown) {
+        (Ok(Some(joined)), None) => joined,
+        (Ok(None), None) => return PhpString::new(req, b""),
+        (Ok(joined), Some(thrown)) => {
+            if let Some(joined) = joined {
+                joined.give_up(req);
+            }
+            return Err(thrown);
+        }
+        (Err(later), Some(thrown)) => return Err(thrown.chain(req, later)),
+        (Err(later), None) => return Err(later),
     };
     if utf8 {
         joined.mark_valid_utf8();
     }
     Ok(joined)
+}
+
+/// `zval_get_string_func(tmp)` over one piece of `php_implode`'s walk
+/// that is neither a string nor an int: its text, or `None`, the empty
+/// string, where the conversion threw, its throwable kept in `thrown`
+/// for the walk to go on past, as php's `EG(exception)` keeps it. With
+/// one kept, the piece is converted while it stands pending
+/// ([`while_pending`]), so a `__toString` is not called and a warning
+/// reaches no handler; a throwable a warning's handler left on the
+/// request is taken as the conversion's. The `Err` is a fatal or an
+/// `exit`, which leaves at once, what was kept given up
+/// ([`Thrown::chain`]).
+fn piece_text(
+    req: &mut Request,
+    piece: &Value,
+    thrown: &mut Option<Thrown>,
+) -> Result<Option<Owner<PhpString>>, Thrown> {
+    let Some(standing) = thrown.take() else {
+        let made = match php_ext::coerce::to_string(req, piece) {
+            Ok(made) => made,
+            Err(threw) if threw.exception().is_some() => {
+                *thrown = Some(threw);
+                return Ok(None);
+            }
+            Err(leaving) => return Err(leaving),
+        };
+        // The text stands, as `zval_get_string_func` answers it with
+        // the handler's throwable in `EG(exception)`.
+        if let Err(handled) = php_ext::raising::pending(req) {
+            if handled.exception().is_none() {
+                made.give_up(req);
+                return Err(handled);
+            }
+            *thrown = Some(handled);
+        }
+        return Ok(Some(made));
+    };
+    let answered = while_pending(req, &standing, |req| php_ext::coerce::to_string(req, piece));
+    match answered {
+        Some(Ok(made)) => {
+            *thrown = Some(standing);
+            Ok(Some(made))
+        }
+        // Raised anew over the one standing, which is its `previous`.
+        Some(Err(later)) if later.exception() != standing.exception() => {
+            let chained = standing.chain(req, later);
+            if chained.exception().is_none() {
+                return Err(chained);
+            }
+            *thrown = Some(chained);
+            Ok(None)
+        }
+        // The standing throwable answered back, which the call it
+        // refused names with no owner of its own.
+        _ => {
+            *thrown = Some(standing);
+            Ok(None)
+        }
+    }
 }
 
 /// `strtok(string $string, ?string $token = null): string|false`, over
