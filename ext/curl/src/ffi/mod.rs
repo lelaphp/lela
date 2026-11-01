@@ -143,6 +143,9 @@ struct Kept {
     /// kept file names until its write ends, given up by
     /// [`Session::close_kept`].
     streams: Vec<Owner<Value>>,
+    /// The `to_free` and `clone` blocks of lists whose last share was
+    /// dropped with no request at hand, freed by [`Session::close_kept`].
+    counted: Vec<easy::Counted>,
 }
 
 /// One owner of the request's [`Link`].
@@ -227,6 +230,12 @@ impl Session {
         unsafe { (*self.0.0.as_ptr()).kept.trees.extend(trees) };
     }
 
+    /// `counted` kept to the request's end, for [`Session::close_kept`].
+    fn keep_counted(&self, counted: easy::Counted) {
+        // SAFETY: an owner's allocation; the field is written alone.
+        unsafe { (*self.0.0.as_ptr()).kept.counted.push(counted) };
+    }
+
     /// A `CURLOPT_STDERR` file let go of: closed now between calls, and
     /// kept to the link's end during one, which may be inside a write to
     /// it ([`stdio`]).
@@ -254,9 +263,14 @@ impl Session {
     /// What `curl_easy_cleanup` and `curl_mime_free` would have closed of
     /// the kept trees' file parts, closed with the request at its end,
     /// once no `CURL *` that may read them is left (`post_deactivate`),
-    /// and the kept stream values given up; the memory goes with the
-    /// link.
+    /// the kept stream values given up and the kept blocks freed; the
+    /// memory goes with the link.
     pub(crate) fn close_kept(&self, req: &mut Request) {
+        // SAFETY: an owner's allocation; the blocks are taken off it alone.
+        let counted = unsafe { std::mem::take(&mut (*self.0.0.as_ptr()).kept.counted) };
+        for counted in counted {
+            counted.free(req);
+        }
         // SAFETY: an owner's allocation; the values are taken off it
         // alone, so giving one up reaches no field.
         let streams = unsafe { std::mem::take(&mut (*self.0.0.as_ptr()).kept.streams) };

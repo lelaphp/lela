@@ -201,8 +201,11 @@ pub(crate) struct Curl {
     pub(crate) returned: Body,
     /// `handlers.std_err`, the `CURLOPT_STDERR` stream.
     pub(crate) stderr: Option<Owner<Value>>,
-    /// The six callables [`Hook`] names.
-    hooks: [Option<Handler>; 6],
+    /// The six callables [`Hook`] names, by [`slot`], laid down as the
+    /// first is set: kept off the payload so that it fits the bytes
+    /// `zend_object_alloc(sizeof(php_curl), ce)` lays beside the
+    /// `zend_object`, which php's six `zend_fcall_info_cache`s are part of.
+    hooks: Vec<Option<Handler>>,
     /// `header.str`, the last request's headers as `CURLINFO_HEADER_OUT`
     /// kept them.
     pub(crate) header_out: Option<Vec<u8>>,
@@ -217,6 +220,9 @@ pub(crate) struct Curl {
     pub(crate) share: Option<Owner<PhpObject>>,
 }
 
+/// The callables [`Hook`] names.
+const HOOKS: usize = 6;
+
 const fn slot(hook: Hook) -> usize {
     match hook {
         Hook::Progress => 0,
@@ -230,10 +236,13 @@ const fn slot(hook: Hook) -> usize {
 
 impl Curl {
     pub(crate) fn hook(&self, hook: Hook) -> Option<&Handler> {
-        self.hooks[slot(hook)].as_ref()
+        self.hooks.get(slot(hook)).and_then(Option::as_ref)
     }
 
     pub(crate) fn hook_mut(&mut self, hook: Hook) -> &mut Option<Handler> {
+        if self.hooks.len() < HOOKS {
+            self.hooks.resize_with(HOOKS, || None);
+        }
         &mut self.hooks[slot(hook)]
     }
 
@@ -279,9 +288,17 @@ impl Curl {
 /// object(CurlHandle)#3 (0) {
 /// }
 /// ```
+///
+/// An object is `sizeof(php_curl)`, 680 bytes on a 64-bit build against
+/// libcurl 7.84 or later, with `init_curl_handle`'s `ecalloc`s of
+/// `handlers.write` and `handlers.write_header` (`php_curl_write`, 88)
+/// and `handlers.read` (`php_curl_read`, 80) beside it; `to_free` and
+/// `clone`, which a copy shares, are the `CURL *`'s ([`Easy::init`]).
 #[php_class(
     final,
     not_serializable,
+    size = 680,
+    beside(88, 88, 80),
     payload = Curl,
     handlers = HANDLERS,
     dynamic_properties = forbidden
@@ -641,9 +658,7 @@ pub(crate) fn copy_handlers(req: &mut Request, object: PhpObject) -> Result<Curl
             .collect(),
         None => Vec::new(),
     };
-    for (slot, hook) in copy.hooks.iter_mut().zip(hooks) {
-        *slot = hook;
-    }
+    copy.hooks = hooks;
     let (private, postfields, stderr) = match object.native::<Curl>(req) {
         Some(from) => (
             from.private.as_deref().copied(),
@@ -787,6 +802,35 @@ pub(crate) fn cleanup_handle(req: &mut Request, object: PhpObject) {
 /// string(32) "file:///nonexistent-curl-witness"
 /// curl_init(): cURL option must not contain any null bytes
 /// ```
+///
+/// What `memory_get_usage()` counts of a `CurlHandle` is php's: the
+/// object with the channels beside it ([`CurlHandle`]), and the
+/// `to_free` lists and `clone` count its `CURL *` keeps; a multi's
+/// `easyh` element is counted as `curl_multi_add_handle` adds it. The
+/// verbose line is libcurl's, written to the process's `stderr`, so the
+/// fence is served in a process of its own.
+///
+/// ```php
+/// $b = memory_get_usage(); $h = curl_init('http://127.0.0.1:1/'); echo memory_get_usage() - $b, "\n";
+/// $m = curl_multi_init(); echo memory_get_usage() - $b, "\n";
+/// curl_setopt($h, CURLOPT_VERBOSE, 1); echo memory_get_usage() - $b, "\n";
+/// curl_multi_add_handle($m, $h); echo memory_get_usage() - $b, "\n";
+/// curl_multi_exec($m, $r); echo memory_get_usage() - $b, "\n";
+/// curl_multi_remove_handle($m, $h); echo memory_get_usage() - $b, "\n";
+/// unset($h, $m); echo memory_get_usage() - $b, "\n";
+/// ```
+/// ```expect process
+/// 1248
+/// 1440
+/// 1440
+/// 1480
+/// 1512
+/// 1472
+/// 64
+/// ```
+/// ```stderr
+/// * closing connection #0
+/// ```
 #[php_function]
 fn curl_init(
     req: &mut Request,
@@ -794,7 +838,14 @@ fn curl_init(
 ) -> Result<OrFalse<Owner<Instance<CurlHandle>>>, Thrown> {
     let object = made(req, b"CurlHandle")?;
     let session = req.state::<State>().session.clone();
-    let Some(easy) = Easy::init(req, session, *object) else {
+    let made_easy = match Easy::init(req, session, *object) {
+        Ok(made_easy) => made_easy,
+        Err(thrown) => {
+            object.give_up(req);
+            return Err(thrown);
+        }
+    };
+    let Some(easy) = made_easy else {
         object.give_up(req);
         docref(
             req,
@@ -886,6 +937,26 @@ fn curl_init(
 /// set
 /// close
 /// end
+/// ```
+///
+/// The `to_free` and `clone` blocks are shared too, so a copy or a clone
+/// costs the object and its channels alone, and the last `CurlHandle`
+/// freed gives the shared blocks back:
+///
+/// ```php
+/// $h = curl_init();
+/// $b = memory_get_usage(); $c = curl_copy_handle($h); echo memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); $d = clone $h; echo memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); unset($h); echo memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); unset($c); echo memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); unset($d); echo memory_get_usage() - $b, "\n";
+/// ```
+/// ```expect
+/// 1040
+/// 1040
+/// -1040
+/// -1040
+/// -1248
 /// ```
 #[php_function]
 fn curl_copy_handle(
