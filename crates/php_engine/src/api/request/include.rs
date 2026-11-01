@@ -391,11 +391,47 @@ impl Request {
     /// ```
     pub(crate) fn close_listed_files(&mut self) {
         self.close_held(Until::Ended);
+        // `zend_try` around `zend_stream_shutdown`.
+        self.catch_bailout();
         self.destroy_primary_handle();
     }
 
     /// Every held file that closes by `until`, in the order each was
-    /// opened, a stream through the layer.
+    /// opened, a stream through the layer, until a close is fatal: that
+    /// `zend_bailout` leaves the walk, and a stream the rest held is left
+    /// to the request's resources, which close it newest first:
+    ///
+    /// ```php
+    /// class W { public $context; private $d = false; public $p;
+    ///     function stream_open($p, $m, $o, &$op) { $this->p = $p; echo "open $p\n"; return true; }
+    ///     function stream_read($n) { if ($this->d) return ''; $this->d = true;
+    ///         return $this->p === 'ww://b' ? "<?php function strlen() {}" : "<?php function f(\$a = 1, \$b) {} echo 'ran a', PHP_EOL;"; }
+    ///     function stream_eof() { return $this->d; }
+    ///     function stream_stat() { return []; }
+    ///     function stream_close() { echo "close {$this->p}\n"; @trigger_error("Bail {$this->p}", E_USER_ERROR); }
+    ///     function stream_set_option($o, $a, $b) { return false; } }
+    /// stream_wrapper_register('ww', 'W');
+    /// set_error_handler(function ($no, $str) { if ($no == E_USER_ERROR) return false; echo "handler: $str\n"; include 'ww://b'; return true; });
+    /// $r = fopen('ww://r', 'r');
+    /// include 'ww://a';
+    /// ```
+    /// ```expect exit=255
+    /// open ww://r
+    /// open ww://a
+    /// handler: f(): Optional parameter $a declared before required parameter $b is implicitly treated as a required parameter
+    /// open ww://b
+    ///
+    /// Fatal error: Cannot redeclare function strlen() in ww://b on line 1
+    /// close ww://a
+    ///
+    /// Fatal error: Cannot redeclare function strlen() in ww://b on line 1
+    /// close ww://b
+    ///
+    /// Fatal error: Bail ww://b in %SCRATCH%/witness.php on line 8
+    /// close ww://r
+    ///
+    /// Fatal error: Bail ww://r in %SCRATCH%/witness.php on line 8
+    /// ```
     fn close_held(&mut self, until: Until) {
         let held = std::mem::take(&mut self.include.held);
         for held in held {
@@ -403,7 +439,10 @@ impl Request {
                 self.include.held.push(held);
                 continue;
             }
-            let Some(hooks) = self.stream_hooks() else {
+            let Some(hooks) = self
+                .stream_hooks()
+                .filter(|_| !self.diagnostics().bailing_out())
+            else {
                 continue;
             };
             match held.holder {
@@ -1170,7 +1209,8 @@ impl Request {
     /// `open_file_for_scanning` over the file `file` holds:
     /// `zend_stream_fixup`, `read`, then the file put on `CG(open_files)`
     /// whether the read failed or not, as php lists it; a fatal in the
-    /// read leaves it unlisted.
+    /// read, a wrapper's callback's among them, jumps past the list and
+    /// leaves the file's stream to the request's resources.
     fn scan(
         &mut self,
         file: &mut FileHandle,
@@ -1180,6 +1220,9 @@ impl Request {
             return Ok(None);
         };
         let source = read(self, opened)?;
+        if self.diagnostics().bailing_out() {
+            return Ok(source);
+        }
         let listed = Listed(self.include.listed);
         self.include.listed += 1;
         if let FileHandle::Opened(opened) = std::mem::replace(file, FileHandle::Listed(listed)) {
