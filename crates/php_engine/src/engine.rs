@@ -1743,23 +1743,19 @@ impl Shared {
     }
 
     /// What opcache's optimizer makes of a unit the accelerator persists
-    /// ([`crate::unit_cache::Optimizer`]): pass 11's count where the
-    /// startup's `opcache.optimization_level` has its bit, from past the
+    /// ([`crate::unit_cache::Optimizer`]): the passes the startup's
+    /// `opcache.optimization_level` names, pass 11 counting from past the
     /// op array extensions' slots, which is where the compiler's first
-    /// slot stands too; no pass where it has not, or where no extension
-    /// declares the entry.
+    /// slot stands too; none where no extension declares the entry.
     pub(crate) fn optimizer(&self) -> crate::unit_cache::Optimizer {
-        use crate::unit_cache::Optimizer;
-        let level = self
-            .ini
-            .master(b"opcache.optimization_level")
+        use crate::unit_cache::{Level, Optimizer};
+        let Some(value) = self.ini.master(b"opcache.optimization_level") else {
+            return Optimizer::Off;
+        };
+        Optimizer::On {
             // The one reading of a whole-number entry, without the
             // sentence `Request::ini_quantity_warn` raises.
-            .map_or(0, |value| crate::ini_quantity::parse(value).0);
-        if level & Optimizer::PASS_11 == 0 {
-            return Optimizer::Off;
-        }
-        Optimizer::CompactLiterals {
+            level: Level(crate::ini_quantity::parse(value).0),
             first: self.op_array_extensions().saturating_mul(exec::SLOT_BYTES),
         }
     }
@@ -2037,7 +2033,7 @@ impl Shared {
             &mut (),
             &arena.files,
             asked,
-            |(), source| {
+            |(), source, _| {
                 let request = ForRequest::none(self.unbound());
                 self.compile_file(source, path, cwd, stack, request, CompileHeap::Engine)
             },

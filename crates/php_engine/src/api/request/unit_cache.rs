@@ -25,7 +25,7 @@ use crate::exec::IncludeKind;
 use crate::supplied::chain::FileArgs;
 use crate::supplied::tell;
 use crate::unit_cache::{
-    Asked, Cached, Disk, Filed, Fresh, Held, Levels, Stamp, Stat, UnitKey, full_path,
+    Asked, Cached, Disk, Filed, Fresh, Held, Levels, Optimizer, Stamp, Stat, UnitKey, full_path,
 };
 
 /// What the `zend_file_handle` a file is compiled through holds when
@@ -738,9 +738,15 @@ impl Request {
             self,
             &arena.files,
             asked,
-            |req, source| {
-                let compiled = req.compile_for_cache(source, path);
-                scanned.set(Some(Scanned::of(source, &compiled.unit)));
+            |req, source, optimizer| {
+                // The primary file compiled through the host's handle,
+                // which `zend_stream_fixup` reads it into and
+                // `CG(open_files)` lists as the compile opens it.
+                if handle == HandlePath::Host {
+                    req.fill_primary_handle(source.len()).ok();
+                }
+                let compiled = req.compile_for_cache(source, path, optimizer);
+                scanned.set(Some(Scanned::of(&compiled.unit)));
                 compiled
             },
             |body| shared.decode_kept(body),
@@ -754,16 +760,8 @@ impl Request {
             return self.compiled_alone(args, &full);
         }
         let scanned = scanned.get();
-        self.note_pushed(scanned.map_or_else(super::Pushed::default, |scanned| scanned.pushed));
         let cached = crate::unit_cache::served(compiled, |unit| self.take_unit(unit));
         self.count_keys_made(keys_counted(scanned, validation, &cached));
-        // The primary file compiled through the host's handle, which
-        // `zend_stream_fixup` reads it into and `CG(open_files)` lists.
-        if handle == HandlePath::Host
-            && let Some(scanned) = scanned
-        {
-            self.fill_primary_handle(scanned.len).ok();
-        }
         if matches!(cached, Some(Ok(_))) {
             self.tell_compiled(&full, validation, filed);
         }
@@ -884,7 +882,12 @@ impl Request {
     /// 128M 16000000 bytes
     /// 128M 16000000 bytes
     /// ```
-    pub(crate) fn compile_for_cache(&mut self, source: &[u8], path: &[u8]) -> Fresh {
+    pub(crate) fn compile_for_cache(
+        &mut self,
+        source: &[u8],
+        path: &[u8],
+        optimizer: Optimizer,
+    ) -> Fresh {
         let shared = Arc::clone(&self.shared);
         let stack = self.stack_limit();
         let bound = crate::multibyte::bound(self, shared.compile_multibyte());
@@ -908,10 +911,12 @@ impl Request {
                 CompileHeap::Request(heap),
             )
         });
-        // What the compile laid on the heap before its persist; one that
-        // meets the hard limit has ended the request.
+        // What the compile laid on the heap before its persist, its
+        // stacks held to the request's end; one that meets the hard
+        // limit has ended the request.
         if let Ok(unit) = &fresh.unit {
-            super::declared_bytes::persisted(self, unit, fresh.tree).ok();
+            self.note_pushed(super::Pushed::of(unit));
+            super::declared_bytes::persisted(self, unit, fresh.tree, optimizer).ok();
         }
         fresh
     }
@@ -1391,17 +1396,12 @@ fn disk<'a>(file_cache: &'a FileCache, build: &'a [u8; crate::unit_cache::BUILD]
     }
 }
 
-/// What a compile [`Request::cached_source`] ran read and made: the
-/// source's length, which the primary file's `zend_stream_fixup` reads
-/// it into, the most php's compiler stacks held ([`super::Pushed`]),
-/// and the runtime
+/// What a compile [`Request::cached_source`] ran made: the runtime
 /// definition keys an accepted unit made, which opcache's miss leaves
 /// counted in `CG(rtd_key_counter)`. A refusal's keys are counted as it
 /// is raised ([`Request::declare_refused`]), so none are here.
 #[derive(Clone, Copy)]
 struct Scanned {
-    len: usize,
-    pushed: super::Pushed,
     keys: u32,
 }
 
@@ -1419,13 +1419,10 @@ fn keys_counted(scanned: Option<Scanned>, validation: Validation, cached: &Cache
 }
 
 impl Scanned {
-    /// What compiling `source` to `compiled` read and made.
-    fn of(source: &[u8], compiled: &Result<php_unit::Unit, php_compile::CompileError>) -> Scanned {
-        let unit = compiled.as_ref().ok();
+    /// What a compile to `compiled` made.
+    fn of(compiled: &Result<php_unit::Unit, php_compile::CompileError>) -> Scanned {
         Scanned {
-            len: source.len(),
-            pushed: unit.map_or_else(super::Pushed::default, super::Pushed::of),
-            keys: unit.map_or(0, crate::unit_cache::keys_of),
+            keys: (compiled.as_ref()).map_or(0, crate::unit_cache::keys_of),
         }
     }
 }
@@ -1516,7 +1513,7 @@ mod tests {
         ] {
             let mut req = start(limit);
             let before = req.heap.memory_usage(false);
-            let fresh = req.compile_for_cache(&source, &path);
+            let fresh = req.compile_for_cache(&source, &path, crate::unit_cache::Optimizer::Off);
             assert_eq!(fresh.answers, answers, "under {limit}");
             assert_eq!(
                 fresh.unit.is_ok(),
@@ -1653,20 +1650,20 @@ mod tests {
             &mut *second,
             &arena.files,
             asked(&held_second),
-            |second, source| {
+            |second, source, optimizer| {
                 // The first request holds the path while the second
                 // compiles it.
                 let (_, filed, _) = shared.units.file(
                     &mut *first,
                     &arena.files,
                     asked(&held_first),
-                    |first, source| first.compile_for_cache(source, &path),
+                    |first, source, optimizer| first.compile_for_cache(source, &path, optimizer),
                     |body| shared.decode_kept(body),
                     |unit| shared.publish_compiled(unit),
                     |first, unit| first.publish_unit(unit),
                 );
                 assert_eq!(filed, Filed::Held, "the first request holds it");
-                second.compile_for_cache(source, &path)
+                second.compile_for_cache(source, &path, optimizer)
             },
             |body| shared.decode_kept(body),
             |unit| shared.publish_compiled(unit),
