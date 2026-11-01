@@ -636,12 +636,15 @@ impl Drop for Closure {
 }
 
 /// `zend_ffi_callback_trampoline`'s entry from C: the thunk and the
-/// argument addresses. Where the request is lent, during a call into C
-/// or a native that blocks, the callback takes it and calls PHP code at
-/// once, as php does. At any other time the request runs PHP code, and
-/// C called it from a signal handler that interrupted the request's own
-/// thread, or from another thread. The first is deferred, its arguments
-/// copied and the return zeroed for C, and served at the request's
+/// argument addresses. The return is zeroed first, so C reads zero from
+/// any call whose callable's return is not written: one that threw, one
+/// made while the request is ending on a fatal, or one deferred, which
+/// C returns from before it is served. Where the request is lent,
+/// during a call into C or a native that blocks, the callback takes it
+/// and calls PHP code at once, as php does. At any other time the
+/// request runs PHP code, and C called it from a signal handler that
+/// interrupted the request's own thread, or from another thread. The
+/// first is deferred, its arguments copied, and served at the request's
 /// interrupt check; nothing in it allocates, so a signal handler may
 /// enter it. The second is posted with its arguments where C passed
 /// them and the thread held until the request serves it at its check,
@@ -665,15 +668,15 @@ extern "C" fn enter(
         // cif the closure was prepared with.
         unsafe { std::slice::from_raw_parts(args, thunk.arity) }
     };
-    if let Some(lent) = thunk.reentry.take_lent() {
-        serve_lent(&lent, thunk.callback, thunk.data, ret, addrs);
-        thunk.reentry.give_back(lent);
-        return;
-    }
     if thunk.returns != 0 {
         // SAFETY: libffi's return buffer holds a struct's size, or a
         // scalar widened to `ffi_arg`, which `returns` is.
         unsafe { std::ptr::write_bytes(ret.cast::<u8>(), 0, thunk.returns) };
+    }
+    if let Some(lent) = thunk.reentry.take_lent() {
+        serve_lent(&lent, thunk.callback, thunk.data, ret, addrs);
+        thunk.reentry.give_back(lent);
+        return;
     }
     if thread() != thunk.thread {
         // The thunk may be freed with the request while this thread
