@@ -381,6 +381,7 @@ call::clone_members
 call::clone_with
 call::closure_from_callable
 call::constant
+call::create_object
 call::eval_const_expr
 call::eval_declared
 call::fetch_constant

@@ -1728,6 +1728,20 @@ pub fn new_object(req: &mut Request, class: ClassId) -> Result<Owner<PhpObject>,
     adopted(new_object_made(req, class))
 }
 
+/// `ce->create_object(ce)`, what [`new_object`] serves past
+/// `object_init_ex`'s refusal: an instance with its declared properties'
+/// defaults and no constructor call, the caller's with one owner, made
+/// whatever the class's flags say. An extension makes the objects of its
+/// own class this way where php allocates them directly, as
+/// `php_sxe_object_new` and `spl_filesystem_object_new` do, so a
+/// program's abstract class derived from the extension's is instantiated
+/// as php instantiates it. Which classes may reach it is the caller's to
+/// hold, as php's callers hold it with the class they were handed.
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn create_object(req: &mut Request, class: ClassId) -> Result<Owner<PhpObject>, Thrown> {
+    adopted(req.new_object(class))
+}
+
 /// What [`new_object`] makes, its one owner not yet named.
 pub(crate) fn new_object_made(req: &mut Request, class: ClassId) -> Result<PhpObject, Thrown> {
     req.instantiable(class)?;

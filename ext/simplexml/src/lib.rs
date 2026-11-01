@@ -32,7 +32,7 @@ use php_ext::abi::{
     Raw, This, Union,
 };
 use php_ext::attr::{php_class, php_function};
-use php_ext::call::{autoload, lookup_class, new_object};
+use php_ext::call::{autoload, create_object, lookup_class};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::Type as DeclType;
 use php_ext::raising::{
@@ -244,6 +244,23 @@ fn parse(
 /// destruct e
 /// caught loader
 /// ```
+///
+/// The object is made as `php_sxe_object_new` makes it, refusing no
+/// class, so an abstract class derived from `SimpleXMLElement` is
+/// instantiated where `new` refuses it:
+///
+/// ```php
+/// abstract class A extends SimpleXMLElement { abstract function f(); }
+/// var_dump(get_class(simplexml_load_string('<a/>', 'A')));
+/// $f = tempnam(sys_get_temp_dir(), 'sx'); file_put_contents($f, '<b/>');
+/// var_dump(get_class(simplexml_load_file($f, 'A'))); unlink($f);
+/// try { new A('<a/>'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(1) "A"
+/// string(1) "A"
+/// Cannot instantiate abstract class A
+/// ```
 fn load(
     req: &mut Request,
     source: Source<'_>,
@@ -260,7 +277,7 @@ fn load(
         settled?;
         return Ok(OrFalse::False);
     };
-    let made = match new_object(req, class) {
+    let made = match create_object(req, class) {
         Ok(made) => made,
         Err(later) => {
             return Err(match settled {
@@ -354,6 +371,8 @@ fn simplexml_load_string(
 /// echo $d->saveXML($d->documentElement), "\n";
 /// var_dump(simplexml_import_dom($d->createTextNode('t')));
 /// try { simplexml_import_dom(new stdClass); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// abstract class A extends SimpleXMLElement {}
+/// var_dump(get_class(simplexml_import_dom($d, 'A')));
 /// ```
 /// ```expect
 /// <r><a>2</a></r>
@@ -361,6 +380,7 @@ fn simplexml_load_string(
 /// Warning: simplexml_import_dom(): Invalid Nodetype to import in %s on line 7
 /// NULL
 /// simplexml_import_dom(): Argument #1 ($node) must be a valid XML node
+/// string(1) "A"
 /// ```
 #[php_function]
 fn simplexml_import_dom(
@@ -388,7 +408,7 @@ fn simplexml_import_dom(
         docref(req, Level::Warning, "Invalid Nodetype to import");
         return Ok(None);
     };
-    let made = new_object(req, class)?;
+    let made = create_object(req, class)?;
     let Some(of) = DocOf::exported(&exported) else {
         made.give_up(req);
         return Err(DocOf::uncounted(req));
