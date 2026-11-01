@@ -1735,6 +1735,39 @@ enum IoBuf<'a> {
 /// `php_openssl_load_stream_cafile`: the certificates of a CA file read
 /// as a stream, one `BEGIN`/`END CERTIFICATE` block at a time, each added
 /// to the `context`'s store; how many were.
+///
+/// A stream a URL wrapper opened is refused, as `stream->wrapper->is_url`
+/// reads it ([`Stream::is_url`]), off the stream, so no method of a user
+/// wrapper runs: a user wrapper registered with `STREAM_IS_URL` is refused
+/// before any read, and `data:` with it, while one without is read.
+///
+/// ```php
+/// class W { public $context; function stream_open($p,$m,$o,&$op){return true;} function stream_read($n){ static $d = 0; return $d++ % 2 ? '' : "x\n"; } function stream_close(){} function stream_stat(){return [];} function url_stat($p,$f){return [];} }
+/// stream_wrapper_register('ww', 'W', STREAM_IS_URL);
+/// stream_wrapper_register('wl', 'W');
+/// $srv = stream_socket_server('tcp://127.0.0.1:0');
+/// $addr = stream_socket_get_name($srv, false);
+/// set_error_handler(function ($no, $str) use ($addr) { echo str_replace($addr, 'ADDR', $str), "\n"; return true; });
+/// foreach (['ww://ca', 'wl://ca', 'data://text/plain,x'] as $ca) {
+///     $c = stream_context_create(['ssl' => ['cafile' => $ca]]);
+///     var_dump(stream_socket_client("tls://$addr", $e, $s, 1, STREAM_CLIENT_CONNECT, $c));
+/// }
+/// ```
+/// ```expect
+/// remote cafile streams are disabled for security purposes
+/// stream_socket_client(): Failed to enable crypto
+/// stream_socket_client(): Unable to connect to tls://ADDR (Unknown error)
+/// bool(false)
+/// stream_socket_client(): W::stream_eof is not implemented! Assuming EOF
+/// no valid certs found cafile stream: `wl://ca'
+/// stream_socket_client(): Failed to enable crypto
+/// stream_socket_client(): Unable to connect to tls://ADDR (Unknown error)
+/// bool(false)
+/// remote cafile streams are disabled for security purposes
+/// stream_socket_client(): Failed to enable crypto
+/// stream_socket_client(): Unable to connect to tls://ADDR (Unknown error)
+/// bool(false)
+/// ```
 fn load_stream_cafile(req: &mut Request, ctx: &Ctx, cafile: &[u8]) -> usize {
     let shown = c_str(cafile);
     // `php_stream_open_wrapper(cafile, "rb", 0, NULL)`: options 0, so a
@@ -1757,15 +1790,7 @@ fn load_stream_cafile(req: &mut Request, ctx: &Ctx, cafile: &[u8]) -> usize {
         );
         return 0;
     };
-    let remote = stream.meta_data(req).is_ok_and(|meta| {
-        let found = meta.find(b"wrapper_type").and_then(|v| {
-            v.as_php_string()
-                .map(|s| matches!(s.as_bytes(), b"http" | b"ftp"))
-        });
-        meta.give_up(req);
-        found.unwrap_or(false)
-    });
-    if remote {
+    if stream.is_url(req) {
         stream.free(req);
         raise(
             req,

@@ -972,6 +972,7 @@ request::Stream::glob_count
 request::Stream::glob_path
 request::Stream::is_dir
 request::Stream::is_stdio
+request::Stream::is_url
 request::Stream::meta_data
 request::Stream::no_fclose
 request::Stream::opened_as
@@ -996,6 +997,7 @@ request::Stream::stat
 request::Stream::tell
 request::Stream::truncate
 request::Stream::unread
+request::Stream::wrapper_data
 request::Stream::write
 request::StreamCtx
 request::StreamCtx::alloc
