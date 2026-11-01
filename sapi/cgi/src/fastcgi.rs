@@ -77,12 +77,13 @@ impl Listening {
 
 /// `fcgi_listen(path, backlog)`: `host:port` and a bare `port` bind TCP,
 /// every address where the host is empty or `*`, and anything else names
-/// a Unix socket, which is opened to everyone (`chmod(path, 0777)`).
+/// a Unix socket, which is opened to everyone (`chmod(path, 0777)`). A
+/// path `sun_path` cannot hold is refused with `Listening socket's path
+/// name is too long.` before a socket is made, as php's
+/// `path_len >= sizeof(sa.sa_unix.sun_path)` refuses it, and a step of
+/// [`bound`] that fails with its own line.
 fn listen(path: &[u8], backlog: i32) -> Option<Listening> {
-    use nix::sys::socket::{
-        AddressFamily, Backlog, SockFlag, SockType, SockaddrIn, UnixAddr, bind, setsockopt, socket,
-        sockopt,
-    };
+    use nix::sys::socket::{AddressFamily, Backlog, SockaddrIn, UnixAddr};
     let tcp = match path.iter().position(|b| *b == b':') {
         Some(at) => {
             let port = (C_NUMBER.atoi)(&path[at + 1..]);
@@ -102,36 +103,56 @@ fn listen(path: &[u8], backlog: i32) -> Option<Listening> {
         } else {
             resolve(host)?
         };
-        let fd = socket(
-            AddressFamily::Inet,
-            SockType::Stream,
-            SockFlag::empty(),
-            None,
-        )
-        .ok()?;
-        setsockopt(&fd, sockopt::ReuseAddr, &true).ok()?;
-        bind(
-            fd.as_raw_fd(),
-            &SockaddrIn::from(std::net::SocketAddrV4::new(ip, port)),
-        )
-        .ok()?;
-        nix::sys::socket::listen(&fd, backlog).ok()?;
+        let address = SockaddrIn::from(std::net::SocketAddrV4::new(ip, port));
+        let fd = bound(AddressFamily::Inet, &address, backlog)?;
         crate::ffi::shutdown_on_term();
         return Some(Listening::Tcp(TcpListener::from(fd)));
     }
     let name = php_sapi::cgi::path_of(path);
-    let fd = socket(
-        AddressFamily::Unix,
-        SockType::Stream,
-        SockFlag::empty(),
-        None,
-    )
-    .ok()?;
-    bind(fd.as_raw_fd(), &UnixAddr::new(&name).ok()?).ok()?;
-    nix::sys::socket::listen(&fd, backlog).ok()?;
+    // `UnixAddr::new` refuses a path of `sun_path`'s length or more, as
+    // php's check does, and nothing else a command line can hold.
+    let Ok(address) = UnixAddr::new(&name) else {
+        eprintln!("Listening socket's path name is too long.");
+        return None;
+    };
+    let fd = bound(AddressFamily::Unix, &address, backlog)?;
     std::fs::set_permissions(&name, std::os::unix::fs::PermissionsExt::from_mode(0o777)).ok();
     crate::ffi::shutdown_on_term();
     Some(Listening::Unix(UnixListener::from(fd)))
+}
+
+/// `fcgi_listen`'s `socket`, `setsockopt(SO_REUSEADDR)`, `bind` and
+/// `listen`, in that order: the socket listening, or `Cannot bind/listen
+/// socket - [<errno>] <strerror>.` where a step fails, as php writes it
+/// after `close(listen_socket)`. That `close` leaves a failed `bind`'s or
+/// `listen`'s errno standing, and where `socket` itself failed it is
+/// `close(-1)`, so the errno php prints is its `EBADF`.
+fn bound(
+    family: nix::sys::socket::AddressFamily,
+    address: &dyn nix::sys::socket::SockaddrLike,
+    backlog: nix::sys::socket::Backlog,
+) -> Option<std::os::fd::OwnedFd> {
+    use nix::errno::Errno;
+    use nix::sys::socket::{SockFlag, SockType, bind, setsockopt, socket, sockopt};
+    let made = socket(family, SockType::Stream, SockFlag::empty(), None)
+        .map_err(|_| Errno::EBADF)
+        .and_then(|fd| {
+            setsockopt(&fd, sockopt::ReuseAddr, &true)?;
+            bind(fd.as_raw_fd(), address)?;
+            nix::sys::socket::listen(&fd, backlog)?;
+            Ok(fd)
+        });
+    match made {
+        Ok(fd) => Some(fd),
+        Err(errno) => {
+            eprintln!(
+                "Cannot bind/listen socket - [{}] {}.",
+                errno as i32,
+                php_sapi::strerror(&std::io::Error::from(errno))
+            );
+            None
+        }
+    }
 }
 
 /// `inet_addr(host)`, and `gethostbyname` where it is no address:
