@@ -568,17 +568,6 @@ pub(crate) fn wrapper() -> StreamWrapper {
     }
 }
 
-/// `stream->mode`, as `stream_get_meta_data` reads it out.
-fn stream_mode(req: &mut Request, stream: Stream) -> Result<Vec<u8>, Thrown> {
-    let meta = stream.meta_data(req)?;
-    let mode = meta
-        .find(b"mode")
-        .and_then(|v| v.deref().as_str_bytes().map(<[u8]>::to_vec))
-        .unwrap_or_default();
-    meta.give_up(req);
-    Ok(mode)
-}
-
 /// `bzopen($file, string $mode)`, the stream as a resource or `false`:
 /// a file name opened as the wrapper opens it, under `REPORT_ERRORS`; or
 /// a stream opened in `r`, `rb`, `w`, `a` or `x` with `b` at most, cast
@@ -719,12 +708,31 @@ fn bzopen(
 /// bool(true)
 /// string(7) "payload"
 /// ```
+///
+/// `stream->mode` is read off the stream ([`Stream::opened_as`]), so no
+/// method of a user wrapper runs, its `stream_eof` among them:
+///
+/// ```php
+/// class W { public $context; function stream_open($p,$m,$o,&$op){return true;} function stream_write($d){return strlen($d);} function stream_close(){} }
+/// stream_wrapper_register('ww', 'W');
+/// var_dump(bzopen(fopen('ww://x', 'r+'), 'w'));
+/// var_dump(bzopen(fopen('ww://x', 'w'), 'w'));
+/// ```
+/// ```expect
+/// Warning: bzopen(): Cannot use stream opened in mode 'r+' in %s on line 4
+/// bool(false)
+///
+/// Warning: bzopen(): W::stream_cast is not implemented! in %s on line 5
+///
+/// Warning: bzopen(): Cannot represent a stream of type user-space as a File Descriptor in %s on line 5
+/// bool(false)
+/// ```
 fn open_stream(
     req: &mut Request,
     stream: Stream,
     mode: &[u8],
 ) -> Result<Option<Owner<Stream>>, Thrown> {
-    let stream_mode = stream_mode(req, stream)?;
+    let stream_mode = stream.opened_as(req).unwrap_or_default();
     let primary = match stream_mode.as_slice() {
         [only] => Some(*only),
         [b'b', primary] | [primary, b'b'] => Some(*primary),
