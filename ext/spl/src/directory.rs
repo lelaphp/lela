@@ -685,6 +685,30 @@ impl SplFileInfo {
     /// Cannot use SplFileObject with directories
     /// SplFileInfo::openFile(): Argument #3 ($context) must be of type resource or null, array given
     /// ```
+    ///
+    /// The object is made as `spl_filesystem_object_create_type` makes
+    /// it, refusing no class, so an abstract file class is instantiated
+    /// where `new` refuses it; a class with a constructor of its own is
+    /// served the name and the `fopen()` letters alone, and the file is opened under
+    /// `openFile`'s name otherwise, the path the source's:
+    ///
+    /// ```php
+    /// abstract class F extends SplFileObject {}
+    /// class G extends SplFileObject { function __construct(...$a) { echo count($a), " ", $a[1], "\n"; parent::__construct(...$a); } }
+    /// $i = new SplFileInfo(__FILE__); $i->setFileClass('F');
+    /// $o = $i->openFile(); var_dump(get_class($o), $o->getPath() === __DIR__);
+    /// $i->setFileClass('G'); var_dump(get_class($i->openFile('r', false)));
+    /// try { (new SplFileInfo(__DIR__ . '/nope'))->openFile(); } catch (RuntimeException $e) { echo str_replace(__DIR__, '', $e->getMessage()), "\n"; }
+    /// try { new F(__FILE__); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// string(1) "F"
+    /// bool(true)
+    /// 2 r
+    /// string(1) "G"
+    /// SplFileInfo::openFile(/nope): Failed to open stream: No such file or directory
+    /// Cannot instantiate abstract class F
+    /// ```
     #[php(tentative)]
     fn openFile(
         req: &mut Request,
@@ -709,18 +733,14 @@ impl SplFileInfo {
                 "Could not open file",
             ));
         }
-        let name = file_name(req, this)?;
-        let name_value = crate::string_value(req, &name)?;
-        let mode_value = Owner::take(req, Value::string(mode));
-        let opened = instantiate(
-            req,
-            class,
-            &[*name_value, *mode_value, Value::bool(useIncludePath)],
-            &[],
-        );
-        name_value.give_up(req);
-        mode_value.give_up(req);
-        opened.map(Owner::into_instance)
+        let object = create_object(req, class)?;
+        match create_file(req, this, &object, class, mode, useIncludePath) {
+            Ok(()) => Ok(object.into_instance()),
+            Err(thrown) => {
+                give_up_pending(req, object, &thrown);
+                Err(thrown)
+            }
+        }
     }
 
     /// `setFileClass(string $class = SplFileObject::class): void`: an
@@ -2498,21 +2518,16 @@ fn info_class(req: &mut Request, chosen: Option<ClassId>) -> Result<ClassId, Thr
 /// ```
 fn create_info(req: &mut Request, path: &[u8], class: ClassId) -> Result<Owner<PhpObject>, Thrown> {
     let object = create_object(req, class)?;
-    if crate::overridden(req, *object, b"__construct") || declares_constructor(req, class)? {
+    if crate::overridden(req, *object, b"__construct")
+        || declares_constructor(req, class, b"SplFileInfo")?
+    {
         let arg = crate::string_value(req, path)?;
         let served = call_method(req, &object, b"__construct", &[*arg]);
         arg.give_up(req);
         match served {
             Ok(answered) => answered.give_up(req),
             Err(thrown) => {
-                // php's `return_value`, freed by the caller with what the
-                // constructor threw in `EG(exception)`.
-                match thrown.exception() {
-                    Some(_) => {
-                        while_pending(req, &thrown, |req| object.give_up(req));
-                    }
-                    None => object.give_up(req),
-                }
+                give_up_pending(req, object, &thrown);
                 return Err(thrown);
             }
         }
@@ -2522,11 +2537,52 @@ fn create_info(req: &mut Request, path: &[u8], class: ClassId) -> Result<Owner<P
     Ok(object)
 }
 
-/// Whether a class from `class` up to `SplFileInfo`, that one aside,
-/// declares its own `__construct`: `ce->constructor->common.scope !=
-/// spl_ce_SplFileInfo`.
-fn declares_constructor(req: &mut Request, class: ClassId) -> Result<bool, Thrown> {
-    let base = linked(req, b"SplFileInfo")?;
+/// `spl_filesystem_object_create_type`'s `SPL_FS_FILE` branch over
+/// `object`, just made of the file class `class` for `source`: the
+/// class's own constructor, where it is not `SplFileObject`'s, served
+/// the name and the `fopen()` letters alone; otherwise the source's path taken and
+/// the file opened as `spl_filesystem_file_open` opens it, its warnings
+/// the `RuntimeException` under `openFile`'s name.
+fn create_file(
+    req: &mut Request,
+    source: PhpObject,
+    object: &Owner<PhpObject>,
+    class: ClassId,
+    mode: PhpString,
+    include: bool,
+) -> Result<(), Thrown> {
+    let name = file_name(req, source)?;
+    if crate::overridden(req, **object, b"__construct")
+        || declares_constructor(req, class, b"SplFileObject")?
+    {
+        let name_value = crate::string_value(req, &name)?;
+        let mode_value = Owner::take(req, Value::string(mode));
+        let served = call_method(req, object, b"__construct", &[*name_value, *mode_value]);
+        name_value.give_up(req);
+        mode_value.give_up(req);
+        return served.map(|answered| answered.give_up(req));
+    }
+    let path = object_path(req, source)?;
+    fs(req, **object, |it| it.path = path)?;
+    file_open(req, **object, &name, mode.as_bytes(), include)
+}
+
+/// An object made for a caller that threw before answering it, php's
+/// `return_value` freed by the caller with what was thrown in
+/// `EG(exception)`, so a destructor that throws there chains it.
+fn give_up_pending(req: &mut Request, object: Owner<PhpObject>, thrown: &Thrown) {
+    match thrown.exception() {
+        Some(_) => {
+            while_pending(req, thrown, |req| object.give_up(req));
+        }
+        None => object.give_up(req),
+    }
+}
+
+/// Whether a class from `class` up to `base`, that one aside, declares
+/// its own `__construct`: `ce->constructor->common.scope != base`.
+fn declares_constructor(req: &mut Request, class: ClassId, base: &[u8]) -> Result<bool, Thrown> {
+    let base = linked(req, base)?;
     Ok(req
         .symbols()
         .method_row(class, b"__construct")
