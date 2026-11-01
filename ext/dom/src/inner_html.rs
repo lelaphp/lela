@@ -188,10 +188,9 @@ fn xml_fragment(
         Fragment::Document(None) => return Ok(None),
         Fragment::Document(Some(parsed)) => parsed,
     };
-    let root = match parsed.children() {
+    let root = match parsed.node().children() {
         Some(root) if root.next().is_none() => root,
         _ => {
-            parsed.free_document();
             return Err(dom_throw_message(
                 req,
                 Code::Syntax,
@@ -206,16 +205,17 @@ fn xml_fragment(
         if let Some(first) = first {
             fragment.add_child_list(first);
         }
-        let marked = crate::modern::convert_to_modern(req, object, parsed);
+        let marked = crate::modern::convert_to_modern(req, object, parsed.node());
         root.set_children(None);
         root.set_last(None);
         if let Err(thrown) = marked {
-            parsed.free_document();
+            // The parsed tree goes before the fragment its children were
+            // handed to; on every other way out it goes as it drops.
+            drop(parsed);
             fragment.free();
             return Err(thrown);
         }
     }
-    parsed.free_document();
     Ok(fragment)
 }
 

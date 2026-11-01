@@ -917,11 +917,10 @@ pub enum Fragment {
     /// The markup was not well formed, or not namespace well formed: the
     /// tree is already freed.
     Malformed,
-    /// The document the parser built, the caller's to free
-    /// ([`Node::free_document`]), its dictionary unset since that one
-    /// belongs to the document the markup was parsed for; none where the
-    /// parser built none.
-    Document(Option<Node>),
+    /// The document the parser built, freed as it drops, its dictionary
+    /// unset since that one belongs to the document the markup was parsed
+    /// for; none where the parser built none.
+    Document(Option<NewDoc>),
 }
 
 /// `XML_MAX_DICTIONARY_LIMIT`.
@@ -1004,7 +1003,9 @@ impl Parser {
                 // document's and is not freed with it.
                 unsafe { (*built).dict = ptr::null_mut() };
             }
-            Fragment::Document(Node::from_raw(built.cast()))
+            // SAFETY: the built document or null, no reference counting it
+            // and the context that made it freed above.
+            Fragment::Document(unsafe { NewDoc::from_ptr(built.cast()) })
         });
         (answer, raised)
     }
