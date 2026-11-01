@@ -13415,22 +13415,60 @@ fn frameless_call<const N: usize>(
 /// `:18002` and `:18106`), so the handler and
 /// the tier's `frameless` kernel make it alike.
 ///
-/// No witness pins it yet, and the reason is the engine's, not php's:
-/// php's case is deterministic, and the engine does not yet reach it.
-/// The interrupt has to be raised inside the native after its last
-/// callback, since `zend_call_function`'s own check after each callback
-/// takes whatever the callback raised (the engine's `call_function`
-/// likewise), so a signal or a timeout landing there is a race. The one
-/// frameless native php 8.5.12 lets raise it there is `implode`, which
-/// converts every piece, walking on past one whose `__toString` threw,
-/// and then asks for its string fallibly, which records the delayed OOM
-/// (`Z/ext/standard/string.c:1036`): at `memory_limit=4M`, `implode`
-/// of a hundred 30000-byte strings and an object whose `__toString`
-/// throws ends php on the limit's fatal at the call, before the `catch`.
-/// ext/standard's `implode` returns at the piece that threw and asks for
-/// nothing, so the engine meets no limit there; #3792 makes it walk on,
-/// and pins that program here, under the default recipe and under
-/// `regime=jit-force`.
+/// The one frameless native php 8.5.12 lets raise the interrupt there is
+/// `implode`, deterministically: a signal or a timeout would have to land
+/// inside the native after its last callback, since `zend_call_function`'s
+/// own check after each callback takes whatever the callback raised (the
+/// engine's `call_function` likewise). `implode` converts every piece,
+/// walking on past one whose `__toString` threw, and then asks for its
+/// string fallibly, which records the delayed OOM
+/// (`Z/ext/standard/string.c:1036`), so the check made with the piece's
+/// throwable pending raises the limit's fatal in its place, before the
+/// `catch`:
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// class T { function __toString(): string { throw new Exception("thrown"); } }
+/// function f($all) {
+///     foreach ($all as $a) {
+///         try { echo strlen(implode(',', $a)), "\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+///     }
+/// }
+/// $a = array_fill(0, 100, str_repeat('x', 30000));
+/// $a[] = new T;
+/// f([['a', 'b'], ['c'], ['d', 'e'], $a]);
+/// echo "after\n";
+/// ```
+/// ```expect exit=255
+/// 3
+/// 1
+/// 3
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 6
+/// ```
+///
+/// The same where a trace serves the loop:
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// class T { function __toString(): string { throw new Exception("thrown"); } }
+/// function f($all) {
+///     foreach ($all as $a) {
+///         try { echo strlen(implode(',', $a)), "\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+///     }
+/// }
+/// $a = array_fill(0, 100, str_repeat('x', 30000));
+/// $a[] = new T;
+/// f([['a', 'b'], ['c'], ['d', 'e'], $a]);
+/// echo "after\n";
+/// ```
+/// ```expect exit=255 regime=jit-force process
+/// 3
+/// 1
+/// 3
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 6
+/// ```
 #[inline(always)] // the handler's hot path, which it was before the tier shared it
 pub(super) fn frameless_served(
     req: &mut Request,
