@@ -468,9 +468,8 @@ fn apply<R>(
         let profile =
             profiling.filter(|p| req.environment_mut().check_open_basedir(p, true).is_ok());
         let mut holder = NodeObject::default();
-        let made = match main_document(shared, || doc.copy_doc(true)) {
-            Some(main) => {
-                let doc = main.node();
+        let made = match main_document(doc, shared, |d| d.copy_doc(true)) {
+            Some((doc, main)) => {
                 holder.count_document(req, main);
                 let state = State {
                     doc,
@@ -499,20 +498,25 @@ fn apply<R>(
     })
 }
 
-/// The document a transformation runs over, as the count its holder
-/// takes: the given one under the reference its object counts, or,
-/// where `has_keys` left no such reference to read, the copy `copy`
-/// makes under its first. `None` where that copy failed: php's
+/// The document a transformation runs over, and the count its holder
+/// takes for it: `given`, the document of the node handed in, under the
+/// reference that node's object counts, `counted`, or, where `has_keys`
+/// left no such reference to read, the copy `copy` makes of it under its
+/// first. `None` where that copy failed: php's
 /// `xmlCopyDoc` answers null there, `php_libxml_increment_doc_ref`
 /// counts nothing over it and libxslt makes no document of it, so no
 /// transformation runs, and the given document is never counted under a
 /// first reference, which would free its tree under the object that
 /// counts it (#3819).
 fn main_document(
-    given: Option<DocOf<'_>>,
-    copy: impl FnOnce() -> Option<NewDoc>,
-) -> Option<DocOf<'_>> {
-    given.or_else(|| copy().map(DocOf::first))
+    given: Node,
+    counted: Option<DocOf<'_>>,
+    copy: impl FnOnce(Node) -> Option<NewDoc>,
+) -> Option<(Node, DocOf<'_>)> {
+    match counted {
+        Some(of) => Some((given, of)),
+        None => copy(given).map(|c| (c.node(), DocOf::first(c))),
+    }
 }
 
 /// What one transformation reads off its object.
@@ -1411,7 +1415,24 @@ mod tests {
     /// given document was counted under a first reference (#3819).
     #[test]
     fn a_failed_copy_counts_no_document() {
-        assert!(main_document(None, || None).is_none());
+        let Some(given) = Node::new_doc(None) else {
+            panic!("xmlNewDoc made no document");
+        };
+        assert!(main_document(given.node(), None, |_| None).is_none());
+        given.free();
+    }
+
+    /// The reference read: the transformation runs over the given
+    /// document, the document of the node handed in, and copies nothing.
+    #[test]
+    fn a_counted_document_is_the_main_document() {
+        let Some(given) = Node::new_doc(None) else {
+            panic!("xmlNewDoc made no document");
+        };
+        let counted = DocOf::under(given.node(), None);
+        let main = main_document(given.node(), counted, |_| panic!("copied"));
+        assert!(main.is_some_and(|(doc, _)| doc == given.node()));
+        given.free();
     }
 
     /// The copy made: the transformation runs over it, under its first
@@ -1421,8 +1442,8 @@ mod tests {
         let Some(given) = Node::new_doc(None) else {
             panic!("xmlNewDoc made no document");
         };
-        let copied = main_document(None, || given.node().copy_doc(true));
-        let main = copied.map(|of| of.node());
+        let copied = main_document(given.node(), None, |d| d.copy_doc(true));
+        let main = copied.map(|(doc, _)| doc);
         assert!(main.is_some_and(|m| m != given.node() && m.kind().is_document()));
         if let Some(m) = main {
             m.free_document();

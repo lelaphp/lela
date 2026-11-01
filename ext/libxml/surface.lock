@@ -35,7 +35,6 @@ ffi::ClassType
 ffi::DocOf
 ffi::DocOf::exported
 ffi::DocOf::first
-ffi::DocOf::node
 ffi::DocOf::share_document
 ffi::DocOf::transfer_document
 ffi::DocOf::uncounted

@@ -1721,12 +1721,6 @@ impl<'d> DocOf<'d> {
         }
     }
 
-    /// The node the object stands for, or whose document it holds.
-    #[must_use]
-    pub fn node(&self) -> Node {
-        self.node
-    }
-
     /// The `InternalError` fatal where no reference to the node's document
     /// is in reach: an object standing for the node, or holding its
     /// document, while counting another document would outlive the
