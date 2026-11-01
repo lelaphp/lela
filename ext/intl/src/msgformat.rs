@@ -654,20 +654,44 @@ impl Converting<'_, '_> {
         Ok(Some(Formattable::Int64(n)))
     }
 
-    /// A date argument's milliseconds; where the value is no date,
-    /// `umsg_format_helper`'s message set over the one
-    /// `intl_zval_to_millis` set, with what that threw chained beneath.
+    /// A date argument's milliseconds, `NAN` where `getTimestamp()`
+    /// threw, as `intl_datetime_decompose` leaves them; where the value is
+    /// no date, `umsg_format_helper`'s message set over the one
+    /// `intl_zval_to_millis` set. The conversion is served as the others
+    /// are ([`Carrying::serve`]), so past a throwable an earlier argument
+    /// left pending a `DateTimeInterface`'s `getTimestamp()` is not
+    /// called, as `zend_call_known_function` returns at once
+    /// (`Z/Zend/zend_execute_API.c:822`), and the date is `NAN`:
+    ///
+    /// ```php
+    /// class T { function __toString(): string { throw new Exception('t'); } }
+    /// class D extends DateTime { function getTimestamp(): int { echo "D::getTimestamp\n"; return 0; } }
+    /// class E extends DateTime { function getTimestamp(): int { throw new Exception('e'); } }
+    /// try { var_dump(MessageFormatter::formatMessage('en', '{0} {1,date}', [new T, new D('@0')])); } catch (Exception $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// try { var_dump(MessageFormatter::formatMessage('en', '{0} {1,date} {2}', [new T, new E('@0'), new T])); } catch (Exception $e) { echo get_class($e), ': ', $e->getMessage(), ' ', var_export($e->getPrevious(), true), "\n"; }
+    /// try { var_dump(MessageFormatter::formatMessage('en', '{0,date} {1}', [new E('@0'), new D('@0')])); } catch (Exception $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// var_dump(MessageFormatter::formatMessage('en', '{0,date,yyyy}', [new D('@0')]));
+    /// ini_set('intl.use_exceptions', 1);
+    /// try { MessageFormatter::formatMessage('en', '{0} {1,date}', [new T, 'x']); } catch (Exception $e) { for (; $e; $e = $e->getPrevious()) echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Exception: t
+    /// Exception: t NULL
+    /// Exception: e
+    /// D::getTimestamp
+    /// string(4) "1970"
+    /// IntlException: MessageFormatter::formatMessage(): The argument for key '1' cannot be used as a date or time
+    /// IntlException: MessageFormatter::formatMessage(): string 'x' is not numeric, which would be required for it to be a valid date
+    /// Exception: t
+    /// ```
     fn date(&mut self, req: &mut Request, value: Value, name: &[u16]) -> Answer<Formattable> {
-        let millis = zval_to_millis(req, value, &mut self.site.outside());
+        let site = &mut *self.site;
+        let millis = self
+            .pending
+            .serve(req, |req| zval_to_millis(req, value, &mut site.outside()))?;
         let code = self.code(req);
         if !code.is_failure() {
-            return match millis {
-                Ok(d) => Ok(Some(Formattable::Date(d))),
-                Err(thrown) => self.keep(req, thrown).map(|()| None),
-            };
-        }
-        if let Err(thrown) = millis {
-            self.keep(req, thrown)?;
+            return Ok(Some(Formattable::Date(millis.unwrap_or(f64::NAN))));
         }
         let Ok(key) = ffi::to_utf8(name) else {
             return Ok(None);
