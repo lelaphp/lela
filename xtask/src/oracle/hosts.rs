@@ -29,20 +29,40 @@ impl EngineHost {
         layout::package(self.krate)
     }
 
-    /// The host of this kind a run hands a test to: the one `[sapi]` pins
-    /// where `binary` is the pinned php or the run is the control, and
-    /// otherwise the engine's own beside `binary`, which the lane's runner
-    /// held to the tree with it (`oracle::Runner::resolve`). `None` where
-    /// the pin names none or none is at its path, or none was built beside
-    /// `binary`, which upstream's runner answers with a skip
+    /// The host of this kind a run hands a test to, [`Whose`] it is: the
+    /// one `[sapi]` pins, or the engine's own beside `binary`, which the
+    /// lane's runner held to the tree with it (`oracle::Runner::resolve`).
+    /// `None` where the pin names none or none is at its path, or none was
+    /// built beside `binary`, which upstream's runner answers with a skip
     /// (run-tests.php:1894-1896, 1914; `php-fpm binary not found`).
     pub(crate) fn for_run(self, pin: &Pin, binary: &Path, control: bool) -> Option<PathBuf> {
-        let host = if control || binary == pin.oracle.path {
-            pin.sapi.of(self).map(|pinned| pinned.path.clone())
-        } else {
-            Some(binary.with_file_name(self.binary))
+        let host = match Whose::of(pin, binary, control) {
+            Whose::Pinned => pin.sapi.of(self).map(|pinned| pinned.path.clone()),
+            Whose::Built => Some(binary.with_file_name(self.binary)),
         };
         host.filter(|path| path.is_file())
+    }
+}
+
+/// Whose hosts a run hands its tests to, which says what one absent is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Whose {
+    /// The ones `[sapi]` pins, where the binary is the pinned php or the
+    /// run is the control: one absent is the oracle's environment.
+    Pinned,
+    /// The engine's own beside the binary under test: one absent is a
+    /// build the run is missing, not an environment's skip (#3763).
+    Built,
+}
+
+impl Whose {
+    /// Whose hosts a run of `binary` hands its tests to.
+    pub(crate) fn of(pin: &Pin, binary: &Path, control: bool) -> Whose {
+        if control || binary == pin.oracle.path {
+            Whose::Pinned
+        } else {
+            Whose::Built
+        }
     }
 }
 

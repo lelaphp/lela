@@ -841,8 +841,13 @@ pub(crate) fn diff(was: &Run, run: &Run, target: Option<&Target>) -> Result<Diff
         if then.met() {
             diff.held += 1;
             // The compiler refusing a test it read there is a loss as a
-            // failure is, and so is a skip: neither meets a test (#725).
-            if now.counts_against() || matches!(now, Judgement::Unread | Judgement::Skip) {
+            // failure is, and so is a skip or a build missing its host:
+            // none meets a test (#725, #3763).
+            let unmet = matches!(
+                now,
+                Judgement::Unread | Judgement::Skip | Judgement::Unbuilt
+            );
+            if now.counts_against() || unmet {
                 diff.regressed.push((id.clone(), *now));
             }
         } else if then.counts_against() && now.met() {
