@@ -80,8 +80,11 @@ impl Listening {
 /// a Unix socket, which is opened to everyone (`chmod(path, 0777)`). A
 /// path `sun_path` cannot hold is refused with `Listening socket's path
 /// name is too long.` before a socket is made, as php's
-/// `path_len >= sizeof(sa.sa_unix.sun_path)` refuses it, and a step of
-/// [`bound`] that fails with its own line.
+/// `path_len >= sizeof(sa.sa_unix.sun_path)` refuses it. A path it holds
+/// is unlinked before the socket is made, as php's `unlink(path)` is
+/// (`Z/main/fastcgi.c:744`), so a file left there, a socket a killed
+/// php-cgi left among them, is replaced by the one bound; a step of [`bound`] that
+/// fails is said with its own line.
 fn listen(path: &[u8], backlog: i32) -> Option<Listening> {
     use nix::sys::socket::{AddressFamily, Backlog, SockaddrIn, UnixAddr};
     let tcp = match path.iter().position(|b| *b == b':') {
@@ -115,6 +118,9 @@ fn listen(path: &[u8], backlog: i32) -> Option<Listening> {
         eprintln!("Listening socket's path name is too long.");
         return None;
     };
+    // php ignores `unlink`'s failure: what cannot be removed, a directory,
+    // is left for `bind` to refuse.
+    std::fs::remove_file(&name).ok();
     let fd = bound(AddressFamily::Unix, &address, backlog)?;
     std::fs::set_permissions(&name, std::os::unix::fs::PermissionsExt::from_mode(0o777)).ok();
     crate::ffi::shutdown_on_term();
