@@ -41,6 +41,8 @@ use std::time::{Duration, Instant};
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_function;
+use php_ext::raising::{Thrown, value_error};
+use php_ext::request::Request;
 use php_ext::test::{Capture, Engine, Files};
 
 /// The callback's type as C sees it.
@@ -75,10 +77,23 @@ fn hold_unlent(seconds: f64) {
     std::thread::sleep(Duration::from_secs_f64(seconds));
 }
 
-/// The test's own extension, which carries [`hold_unlent`].
+/// `hold_unlent_and_throw(float $seconds): void`: [`hold_unlent`], then
+/// a `ValueError` thrown, so the call posted while it held is served at
+/// the interrupt check after a native that threw (#3658).
+#[php_function]
+fn hold_unlent_and_throw(req: &mut Request, seconds: f64) -> Result<(), Thrown> {
+    std::thread::sleep(Duration::from_secs_f64(seconds));
+    Err(value_error(req, "thrown after the hold"))
+}
+
+/// The test's own extension, which carries [`hold_unlent`] and
+/// [`hold_unlent_and_throw`].
 fn holding() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![hold_unlent::declared()])
+        .functions(vec![
+            hold_unlent::declared(),
+            hold_unlent_and_throw::declared(),
+        ])
         .build("ffi_threads_hold")
 }
 
@@ -319,6 +334,23 @@ echo "closed $code\n";
 "#,
     );
     assert_eq!(stdout, "called 21 inside the wait\nclosed 0\n");
+    assert_eq!(returned.as_deref(), Some("42"));
+}
+
+/// The thread calls back while the request holds in a native that
+/// never lends it and then throws: the interrupt check after the throw
+/// serves the call with the throwable set aside, so the callback runs
+/// before the `catch` takes it and C reads what it returned, as php,
+/// which calls the callable on C's thread at once, has it (#3658).
+#[test]
+fn a_callback_posted_while_a_native_that_throws_holds_is_served_before_the_catch() {
+    let (stdout, returned) = served(
+        "thrown",
+        r#"$later(function ($x) { echo "called $x\n"; return $x * 2; });
+try { hold_unlent_and_throw(0.6); } catch (ValueError $e) { echo "caught ", $e->getMessage(), "\n"; }
+"#,
+    );
+    assert_eq!(stdout, "called 21\ncaught thrown after the hold\n");
     assert_eq!(returned.as_deref(), Some("42"));
 }
 
