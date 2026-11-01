@@ -232,6 +232,27 @@ fn met(store: &Store, root: &Path, instrument: &str, scope: &str) {
     }
 }
 
+/// No reading of `instrument` over `scope` left in `store`: its file and
+/// its index's entries, the files named for a key, since condition 1 finds
+/// a reading over the key now in either (#3804). Another scope's file
+/// beside them, the `--ri` column's `ri.toml`, stays.
+fn forget(store: &Store, instrument: &str, scope: &str) {
+    let file = store.path(instrument, scope).unwrap();
+    std::fs::remove_file(&file).unwrap();
+    let Ok(listing) = std::fs::read_dir(file.with_extension("")) else {
+        return;
+    };
+    for path in listing.map(|entry| entry.unwrap().path()) {
+        let stem = path.file_stem().unwrap().to_string_lossy();
+        if stem
+            .get(..40)
+            .is_some_and(|key| key.chars().all(|c| c.is_ascii_hexdigit()))
+        {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+}
+
 /// The line condition 1 gives a subset with no run kept at the tree now.
 fn unrun(scope: &str) -> impl Fn(&String) -> bool {
     let head = format!("phpt: no run of {scope} is kept at this tree's engine (");
@@ -941,6 +962,29 @@ fn a_refused_commits_readings_over_another_tree_do_not_shadow_the_pass_over_the_
     assert!(verdict.met(), "{verdict:#?}");
 }
 
+/// What `worktree land` carries is the reading condition 1 reads for a
+/// scope main's store has no file of (#3804): `_merge`'s passes over a
+/// crate main never measured reach main's store as lines of the log and
+/// entries of the index, and no file. Before the land each is missing;
+/// after it the crate is met, with nothing taken again in main.
+#[test]
+fn a_pass_worktree_land_carried_for_a_scope_main_has_no_file_of_is_met_in_main() {
+    let root = scratch("landed-unmeasured");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let merge = Tree::new("done-landed-unmeasured-merge").unwrap();
+    let merged = Store::of_workspace(&merge);
+    record_asked(&merged, &root, "ext/pcre");
+    let unmet = judge(&root).unmet;
+    assert!(
+        unmet.contains(&"test: no reading for ext/pcre".into()),
+        "{unmet:#?}"
+    );
+
+    Store::of_workspace(&root).land(&merged).unwrap();
+    let verdict = judge(&root);
+    assert!(verdict.met(), "{verdict:#?}");
+}
+
 /// The constructor and `done` agree on the path a scope's tree is hashed
 /// over: a reading written through it is fresh for its scope, and one
 /// byte under that scope makes every one of them stale (harness-design.md
@@ -1262,12 +1306,45 @@ fn a_porting_crates_crosscheck_readings_are_the_ports_meter() {
     );
     assert!(unmet[1].starts_with("phpt: ext/standard: 1 of 1 tests met at "));
 
-    std::fs::remove_file(store.path("crosscheck", "ext/standard").unwrap()).unwrap();
+    forget(&store, "crosscheck", "ext/standard");
     assert!(
         judge(&root)
             .unmet
             .contains(&"crosscheck: no reading for ext/standard".to_owned())
     );
+}
+
+/// What `worktree land` carries is what the porting note reads (#3804):
+/// `_merge`'s two passing `crosscheck` columns over a `porting = true`
+/// extension reach main's index and no file, and the note that the key
+/// excuses nothing is said from them.
+#[test]
+fn the_porting_note_reads_the_columns_worktree_land_carried() {
+    let root = scratch("landed-porting");
+    write(
+        &root,
+        "ext/standard/Cargo.toml",
+        "[package]\nname = \"php_ext_standard\"\n",
+    );
+    write(&root, "ext/standard/src/lib.rs", "pub fn str_repeat() {}\n");
+    Tracked::of(&root)
+        .with_crate("ext/standard", |row| row.porting = true)
+        .write(&root);
+    Repo::at(&root).commit("ext/standard, its port partial");
+    let said = |root: &Path| {
+        let passing =
+            "ext/standard (an extension whose two `crosscheck` columns are fresh and pass)";
+        judge(root).notes.iter().any(|note| note.contains(passing))
+    };
+    assert!(!said(&root), "{:#?}", judge(&root));
+
+    let merge = Tree::new("done-landed-porting-merge").unwrap();
+    let merged = Store::of_workspace(&merge);
+    for scope in ["ext/standard", "ext/standard/ri"] {
+        merged.record(&[fresh(&root, "crosscheck", scope)]).unwrap();
+    }
+    Store::of_workspace(&root).land(&merged).unwrap();
+    assert!(said(&root), "{:#?}", judge(&root));
 }
 
 #[test]
@@ -2754,7 +2831,7 @@ mod tracked {
             "{verdict:#?}"
         );
 
-        std::fs::remove_file(store.path("crosscheck", "ext/pcre/ri").unwrap()).unwrap();
+        forget(&store, "crosscheck", "ext/pcre/ri");
         let verdict = judge(&root);
         assert_eq!(
             verdict.unmet,
@@ -2789,7 +2866,7 @@ mod tracked {
         let store = Store::of_workspace(&root);
         record_asked(&store, &root, "ext/pcre");
         assert!(judge(&root).met(), "{:#?}", judge(&root));
-        std::fs::remove_file(store.path("clippy", "ext/pcre/release").unwrap()).unwrap();
+        forget(&store, "clippy", "ext/pcre/release");
         let verdict = judge(&root);
         assert_eq!(
             verdict.unmet,

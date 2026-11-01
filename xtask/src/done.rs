@@ -691,27 +691,20 @@ fn porting_meter(krate: &Crate, instrument: &str) -> bool {
 /// something (#2726, as #2717 ruled). Since #725 the key excuses
 /// `crosscheck` alone ([`porting_meter`]), so on a crate that is no
 /// extension, which no `crosscheck` is asked of, it binds nothing, and on
-/// one whose two columns, `columns`, are both fresh over `key` and pass,
-/// it excuses nothing; a column failing or never taken is what it is
-/// for. What `done` notes so slack keys cannot pile up again, never
-/// unmet: the drop is a person's edit of `seams.toml`.
-fn slack_porting(
-    krate: &Crate,
-    columns: &[Option<Reading>],
-    key: &str,
-    pin: &str,
-) -> Option<Slack> {
+/// one whose two columns, `columns`, the readings over the crate's key
+/// now, both pass, it excuses nothing; a column failing, stale or never
+/// taken, `None`, is what it is for. What `done` notes so slack keys
+/// cannot pile up again, never unmet: the drop is a person's edit of
+/// `seams.toml`.
+fn slack_porting(krate: &Crate, columns: &[Option<Reading>]) -> Option<Slack> {
     if !krate.porting {
         return None;
     }
     if !krate.name.starts_with("ext/") {
         return Some(Slack::NoExtension);
     }
-    let passes = |column: &Option<Reading>| {
-        column
-            .as_ref()
-            .is_some_and(|r| r.status == Status::Pass && r.fresh_for(key, pin))
-    };
+    let passes =
+        |column: &Option<Reading>| column.as_ref().is_some_and(|r| r.status == Status::Pass);
     columns.iter().all(passes).then_some(Slack::Passing)
 }
 
@@ -735,7 +728,9 @@ impl Slack {
 }
 
 /// The note on every row whose `porting = true` excuses nothing
-/// ([`slack_porting`]), the rows of one cause named in one line.
+/// ([`slack_porting`]), the rows of one cause named in one line. Each
+/// column is found by the crate's key now in the scope's file or the
+/// index, where `worktree land` puts `_merge`'s (#3804).
 fn slack_porting_notes(
     snapshot: &Snapshot,
     manifest: &Manifest,
@@ -745,14 +740,16 @@ fn slack_porting_notes(
     let mut slack: BTreeMap<Slack, Vec<&str>> = BTreeMap::new();
     for krate in manifest.crates.iter().filter(|k| k.porting) {
         let mut columns = Vec::new();
-        let mut key = String::new();
         if krate.name.starts_with("ext/") {
-            for scope in scopes_of(snapshot.root(), "crosscheck", krate)? {
-                columns.push(store.read("crosscheck", &scope)?);
-            }
-            key = snapshot.key(&krate.path())?;
+            let key = snapshot.key(&krate.path())?;
+            let keys: BTreeMap<String, String> = (scopes_of(snapshot.root(), "crosscheck", krate)?)
+                .into_iter()
+                .map(|scope| (scope, key.clone()))
+                .collect();
+            let mut fresh = store.latest_over("crosscheck", &keys, manifest.pin_digest())?;
+            columns = keys.keys().map(|scope| fresh.remove(scope)).collect();
         }
-        if let Some(why) = slack_porting(krate, &columns, &key, manifest.pin_digest()) {
+        if let Some(why) = slack_porting(krate, &columns) {
             slack.entry(why).or_default().push(&krate.name);
         }
     }
@@ -929,9 +926,11 @@ fn fresh_readings(
     let key = &now.key;
     let name = &krate.name;
     // The scope's file holds the last reading written, which a refused
-    // commit's can be, taken over another key; where it is, the latest
-    // one over the key now stands before it, found in the index (#1312).
-    // A scope with no file has no reading, whatever the log holds.
+    // commit's can be, taken over another key; the latest one over the key
+    // now stands before it, found in the index (#1312), where `worktree
+    // land` puts `_merge`'s and leaves no file of a scope main never
+    // measured (#3804). Where neither holds one, the scope's last reading,
+    // file or index, is the stale one said.
     let mut asked = Vec::new();
     let mut phpt = false;
     for instrument in owed(asking.manifest, krate, asking.carried) {
@@ -949,20 +948,16 @@ fn fresh_readings(
             asked.push((instrument, scope));
         }
     }
-    let mut read = BTreeMap::new();
-    for (instrument, scope) in &asked {
-        if let Some(reading) = store.read(instrument, scope)? {
-            read.insert(((*instrument).to_owned(), scope.clone()), reading);
-        }
-    }
-    let stale: Vec<(String, String, String)> = read
-        .iter()
-        .filter(|(_, reading)| !reading.fresh_for(key, pin))
-        .map(|((instrument, scope), _)| (instrument.clone(), scope.clone(), key.clone()))
+    let sought: Vec<(String, String, String)> = (asked.iter())
+        .map(|(instrument, scope)| ((*instrument).to_owned(), scope.clone(), key.clone()))
         .collect();
-    read.extend(store.latest_over_each(&stale, pin)?);
+    let mut read = store.latest_over_each(&sought, pin)?;
     for (instrument, scope) in asked {
-        let Some(reading) = read.remove(&(instrument.to_owned(), scope.clone())) else {
+        let found = match read.remove(&(instrument.to_owned(), scope.clone())) {
+            Some(reading) => Some(reading),
+            None => store.last_of(instrument, &scope)?,
+        };
+        let Some(reading) = found else {
             if not_run.iter().any(|n| n == instrument) {
                 not_judged.push(format!("{instrument} for {scope}"));
             } else {
@@ -1886,33 +1881,31 @@ crates = ["php_heap"]                      # design §9's memory model; also wha
             krate.porting = true;
             krate
         };
-        // A reading's key is the empty one, the key the column is fresh
-        // over; any other key now is one it is stale for.
+        // A column is the reading over the key now; a stale one is none.
         let column = |status: Status| {
             let mut reading = Reading::new("crosscheck", "ext/zip");
             reading.status = status;
-            reading.recipe = Some("pin".to_owned());
             Some(reading)
         };
-        let said = |krate: &Crate, columns: &[Option<Reading>], key: &str| {
-            slack_porting(krate, columns, key, "pin")
-        };
         assert_eq!(
-            said(&porting("sapi/cli"), &[], ""),
+            slack_porting(&porting("sapi/cli"), &[]),
             Some(Slack::NoExtension)
         );
         let passing = [column(Status::Pass), column(Status::Pass)];
         assert_eq!(
-            said(&porting("ext/zip"), &passing, ""),
+            slack_porting(&porting("ext/zip"), &passing),
             Some(Slack::Passing)
         );
-        assert_eq!(said(&Crate::named("ext/zip"), &passing, ""), None);
-        assert_eq!(said(&porting("ext/zip"), &passing, "moved"), None);
+        assert_eq!(slack_porting(&Crate::named("ext/zip"), &passing), None);
         for columns in [
             [column(Status::Pass), column(Status::Fail)],
             [column(Status::Pass), None],
         ] {
-            assert_eq!(said(&porting("ext/zip"), &columns, ""), None, "{columns:?}");
+            assert_eq!(
+                slack_porting(&porting("ext/zip"), &columns),
+                None,
+                "{columns:?}"
+            );
         }
     }
 
