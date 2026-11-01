@@ -36,7 +36,9 @@
 //! with, its owner record is taken away once the session has ended: the
 //! run wrote it before the session started, so it names no process to
 //! lapse with (#3755), and a worktree left standing is no session's, the
-//! next session to write there admitted (#3782). A worktree left
+//! next session to write there admitted (#3782). A worktree laid down
+//! not ready stops the run before its session starts, and its record
+//! goes the same way (#3789). A worktree left
 //! standing is not the loop's again, whatever becomes of its ticket: a
 //! run lays down, and retires, only the worktree its own session ran in,
 //! and a standing one is retired by /specs or a person with `xtask
@@ -106,7 +108,7 @@ use crate::ticket::{self, Gh, State};
 use crate::track::{Ticket, rev, short};
 use crate::track_next::{self, Next};
 use crate::usage::{Spent, Total};
-use crate::worktree::{self, say};
+use crate::worktree::{self, NotReady, say};
 
 /// The prefix of every line printed, so a person reads whose line it is.
 const WORK: &str = "track work";
@@ -615,9 +617,21 @@ pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
     // worktree's owner before it starts, so its writes there are its own.
     // The record names no process, since none ran when it was written, so
     // it would never lapse (#3755): once the session has ended, or never
-    // started, the record goes, and the worktree is no session's (#3782).
+    // started, the record goes, and the worktree is no session's (#3782);
+    // a worktree laid down not ready stops the run before it starts (#3789).
     let id = SessionId::fresh()?;
-    let dir = worktree::add(root, &branch, Some(ticket), Some(&id))?;
+    let added = worktree::add(root, &branch, Some(ticket), Some(&id));
+    if let Err(err) = &added
+        && let Some(NotReady { dir }) = err.downcast_ref()
+    {
+        owner::release(dir)?;
+        say!(
+            WORK,
+            "{} is no session's: no session starts there",
+            dir.display()
+        );
+    }
+    let dir = added?;
     let prompt = Session::prompt(skill, ticket);
     run.session.announce(&dir, &prompt, Some(&id));
     let ran = run.session.run(&dir, &prompt, Some(&id));

@@ -609,6 +609,35 @@ fn a_ticket_left_open_leaves_the_worktree_standing() {
     assert_eq!(out.matches("computed trust").count(), 1, "{out}");
 }
 
+/// A worktree laid down but not ready, the stand-in build failing, stops
+/// the run before any session starts, the exit a not-ready add's: the
+/// worktree stands, and is no session's, since the id its record named
+/// never ran and names no process to lapse with (#3789).
+#[test]
+fn a_worktree_that_is_not_ready_stops_the_run_and_is_no_sessions() {
+    let scratch = Scratch::lay("not-ready");
+    scratch.tracker(&[20], 20);
+    let (cargo, built) = (scratch.dir.join("bin/cargo"), scratch.dir.join("bin/built"));
+    fs::rename(&cargo, &built).unwrap();
+    let failing = format!(
+        "#!/bin/sh\n[ \"$*\" = 'build -p xtask' ] && exit 101\nexec '{}' \"$@\"\n",
+        built.display()
+    );
+    fs::write(&cargo, failing).unwrap();
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 3, "{out}");
+    assert!(out.contains("not ready to be worked in"), "{out}");
+    let worktree = scratch.worktree("t20");
+    assert!(worktree.is_dir(), "{out}");
+    assert_eq!(scratch.wrote("session.args"), "", "no session: {out}");
+    assert_eq!(xtask::owner::of(&worktree).unwrap(), None, "{out}");
+    assert_eq!(
+        Scratch::whose(&worktree),
+        format!("worktree whose: {} is no session's", worktree.display())
+    );
+}
+
 /// A ticket closed with nothing committed, as a withdrawn one is, is
 /// closed all the same: the close is the one signal (#115), so the
 /// worktree is retired and the branch, at `main`'s own commit, left with
