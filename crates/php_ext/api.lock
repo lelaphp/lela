@@ -606,6 +606,8 @@ request::CryptoSocket::set_blocking
 request::CryptoSocket::shutdown
 request::CryptoSocket::wait
 request::DEFERRED_WORDS
+request::DataSource
+request::DataSource::bytes
 request::Deferred
 request::Diagnostics
 request::Diagnostics::bailing_out

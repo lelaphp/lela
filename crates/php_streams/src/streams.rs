@@ -3779,10 +3779,10 @@ impl Ops for Input {
     /// which `get_resources()` names.
     fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
         let body = self.body?;
-        let block = req.input_block(self.position.saturating_add(buf.len()), buf.len());
-        if !block.is_empty() {
+        let read = req.input_block(self.position.saturating_add(buf.len()), buf);
+        if read > 0 {
             body.seek(req, 0, Whence::End);
-            body.write(req, &block);
+            body.write(req, &buf[..read]);
         }
         let at = i64::try_from(self.position).unwrap_or(i64::MAX);
         body.seek(req, at, Whence::Set);

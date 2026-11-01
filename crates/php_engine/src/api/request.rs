@@ -170,7 +170,7 @@ pub use variables::Variables;
 mod zone;
 pub use post::{ReadPost, Upload};
 pub use variables::url_decode;
-pub use variables::{BodyLimits, Input};
+pub use variables::{BodyLimits, DataSource, Input};
 pub use zone::Zone;
 
 pub(crate) use hooks::parent_hook_trampolines;

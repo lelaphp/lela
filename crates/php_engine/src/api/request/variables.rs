@@ -65,6 +65,36 @@ pub enum Input {
     String,
 }
 
+/// What a data treater reads ([`crate::api::abi::ExtensionBuilder::treat_data`]):
+/// a query string, a cookie header or `parse_str()`'s string as it stands,
+/// or a form body, copied whole out of the request's body only where the
+/// treater asks for its bytes, as `php_mb_post_handler` copies it
+/// (`php_stream_copy_to_mem`, `Z/ext/mbstring/mb_gpc.c:313`) and
+/// `php_std_post_handler`, which a treater that leaves the body leaves it
+/// to, never does.
+#[derive(Debug)]
+pub struct DataSource<'a>(Data<'a>);
+
+/// What a [`DataSource`] holds.
+#[derive(Debug)]
+enum Data<'a> {
+    /// The bytes as they stand.
+    Bytes(&'a [u8]),
+    /// The request's body, with its copy once the treater asked for one.
+    Body(Option<Vec<u8>>),
+}
+
+impl DataSource<'_> {
+    /// The bytes the source holds: a form body copied out of the
+    /// request's body the first time they are asked for.
+    pub fn bytes(&mut self, req: &mut Request) -> &[u8] {
+        match &mut self.0 {
+            Data::Bytes(bytes) => bytes,
+            Data::Body(copy) => copy.get_or_insert_with(|| req.request_body_copy()),
+        }
+    }
+}
+
 /// The limits a request's variables are read under: the ini entries, or
 /// what `request_parse_body()` was handed in their place
 /// (`REQUEST_PARSE_BODY_OPTION_GET`, `Z/main/SAPI.h:130`).
@@ -859,7 +889,7 @@ impl Request {
         let Some(source) = source.filter(|source| !source.is_empty()) else {
             return Ok(());
         };
-        if self.treated(input, source, into)? {
+        if self.treated(input, DataSource(Data::Bytes(source)), into)? {
             return Ok(());
         }
         let source = crate::c_number::c_str(source);
@@ -928,14 +958,14 @@ impl Request {
     /// over the form body: split on `&` alone, every piece counted, an
     /// empty one too, and the warning past `max_input_vars` ending it; a
     /// name and a value each `php_url_decode`d, handed to the input
-    /// filter and registered.
+    /// filter and registered. Where an extension treats data, the body is
+    /// its first ([`DataSource`]).
     pub(crate) fn add_post_vars(
         &mut self,
         into: PhpArray,
-        body: &[u8],
         limits: &BodyLimits,
     ) -> Result<(), Thrown> {
-        if self.treated(Input::Post, body, into)? {
+        if self.treated(Input::Post, DataSource(Data::Body(None)), into)? {
             return Ok(());
         }
         let max_input_vars = limits
@@ -952,15 +982,23 @@ impl Request {
             max_input_vars,
         };
         let step = usize::try_from(crate::layer::BUFSIZ).unwrap_or(8192);
+        let mut block = vec![0; step];
         let parsed = (|| {
             let mut appended = false;
-            for chunk in body.chunks(step) {
-                held.append(self, chunk)?;
-                appended = true;
-                if self.has_oom() || !self.add_post_vars_held(into, &mut held, &mut vars, false)? {
-                    return Ok(());
+            let mut at = 0;
+            loop {
+                let read = self.request_body_read(at, &mut block);
+                at += read;
+                if read > 0 {
+                    held.append(self, &block[..read])?;
+                    appended = true;
+                    if self.has_oom()
+                        || !self.add_post_vars_held(into, &mut held, &mut vars, false)?
+                    {
+                        return Ok(());
+                    }
                 }
-                if chunk.len() != step {
+                if read != step {
                     break;
                 }
             }
@@ -996,9 +1034,9 @@ impl Request {
                 None if eof => bytes.len(),
                 None => break,
             };
-            let var = bytes[at..end].to_vec();
+            let var = &bytes[at..end];
             at = end + usize::from(end != bytes.len());
-            if !self.add_post_var(into, &var)? {
+            if !self.add_post_var(into, var)? {
                 return Ok(false);
             }
             vars.count += 1;
@@ -1050,7 +1088,12 @@ impl Request {
     /// each to `sapi_module.input_filter` and `php_register_variable_safe`;
     /// `false` where none takes the source, which is then
     /// `php_default_treat_data`'s.
-    fn treated(&mut self, input: Input, source: &[u8], into: PhpArray) -> Result<bool, Thrown> {
+    fn treated(
+        &mut self,
+        input: Input,
+        source: DataSource<'_>,
+        into: PhpArray,
+    ) -> Result<bool, Thrown> {
         let shared = std::sync::Arc::clone(&self.shared);
         let Some(variables) = shared
             .supplied

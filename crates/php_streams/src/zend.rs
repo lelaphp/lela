@@ -147,18 +147,13 @@ fn body_discard(req: &mut Request, body: Resource) {
     }
 }
 
-/// [`StreamHooks::body_read`]: the stream read whole from its start.
-fn body_read(req: &mut Request, body: Resource) -> Vec<u8> {
+/// [`StreamHooks::body_read`]: the stream read from `at` into `buf`.
+fn body_read(req: &mut Request, body: Resource, at: usize, buf: &mut [u8]) -> usize {
     let Some(stream) = Stream::from_value(req, &body.as_value()) else {
-        return Vec::new();
+        return 0;
     };
-    stream.seek(req, 0, Whence::Set);
-    let mut bytes = Vec::new();
-    let mut block = [0; 8192];
-    while let Some(n) = stream.read_into(req, &mut block).filter(|n| *n > 0) {
-        bytes.extend_from_slice(&block[..n]);
-    }
-    bytes
+    stream.seek(req, i64::try_from(at).unwrap_or(i64::MAX), Whence::Set);
+    stream.read_into(req, buf).unwrap_or(0)
 }
 
 /// [`StreamHooks::body_close`]: the stream closed.

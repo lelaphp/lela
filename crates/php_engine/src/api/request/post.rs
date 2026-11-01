@@ -244,12 +244,15 @@ impl Request {
         let Ok(mut body) = self.open_request_body() else {
             return;
         };
+        // `char buffer[SAPI_POST_BLOCK_SIZE]`: each block read into it and
+        // written on to the body's stream.
+        let mut block = [0; POST_BLOCK_SIZE];
         loop {
-            let block = self.read_post_block(POST_BLOCK_SIZE);
+            let read = self.read_post_block(&mut block);
             // A body the stream did not take whole is lost whole, the
             // stream emptied; a spill into `upload_tmp_dir` that could not
             // be made has warned of it already.
-            if !block.is_empty() && !self.append_request_body(&mut body, &block) {
+            if read > 0 && !self.append_request_body(&mut body, &block[..read]) {
                 self.discard_request_body(&mut body);
                 docref(
                     self,
@@ -270,51 +273,49 @@ impl Request {
                 );
                 break;
             }
-            if block.len() < POST_BLOCK_SIZE {
+            if read < POST_BLOCK_SIZE {
                 break;
             }
         }
         self.post.request_body = Some(body);
     }
 
-    /// `sapi_read_post_block` (`Z/main/SAPI.c:232`): up to `max` bytes of
-    /// the body the host has not handed out, and the body counted read
-    /// once it hands out fewer.
-    pub(crate) fn read_post_block(&mut self, max: usize) -> Vec<u8> {
-        let block = self.read_post(max);
-        if block.len() < max {
+    /// `sapi_read_post_block` (`Z/main/SAPI.c:232`): up to `buf.len()`
+    /// bytes of the body the host has not handed out, into `buf`, and how
+    /// many; the body counted read once the host hands out fewer.
+    pub(crate) fn read_post_block(&mut self, buf: &mut [u8]) -> usize {
+        let read = self.read_post(buf);
+        if read < buf.len() {
             self.post.done = true;
         }
-        block
+        read
     }
 
-    /// `sapi_module.read_post`: up to `max` bytes of the body from the
-    /// reader that serves it ([`ReadPost`]), `SG(read_post_bytes)` moved
-    /// on; nothing, and the host's warning raised, where it could not read
-    /// the body.
-    pub(crate) fn read_post(&mut self, max: usize) -> Vec<u8> {
+    /// `sapi_module.read_post`: up to `buf.len()` bytes of the body from
+    /// the reader that serves it ([`ReadPost`]) into `buf`, and how many,
+    /// `SG(read_post_bytes)` moved on; none, and the host's warning
+    /// raised, where it could not read the body.
+    pub(crate) fn read_post(&mut self, buf: &mut [u8]) -> usize {
         let Some(web) = self.description.web.as_mut() else {
-            return Vec::new();
+            return 0;
         };
         if let Body::Refused(warning) = &web.body {
             let warning = warning.clone();
             crate::api::raising::warning(self, &warning);
-            return Vec::new();
+            return 0;
         }
         let mut body = std::mem::take(&mut web.body);
-        let mut block = vec![0; max];
         // The reader is handed the request it serves, and out of it while
         // it reads.
         let filled = match &mut body {
-            Body::Stream(reader) => reader.read_post(self, &mut block).min(max),
+            Body::Stream(reader) => reader.read_post(self, buf).min(buf.len()),
             Body::Refused(_) => 0,
         };
         if let Some(web) = self.description.web.as_mut() {
             web.body = body;
         }
-        block.truncate(filled);
         self.post.read = self.post.read.saturating_add(filled);
-        block
+        filled
     }
 
     /// `sapi_handle_post` (`Z/main/SAPI.c:161`): the handler the content
@@ -332,17 +333,7 @@ impl Request {
         };
         let content_type = block.bytes()[..block.len() - 1].to_vec();
         let handled = match entry {
-            PostEntry::Form => {
-                let body = match self.post.request_body.take() {
-                    Some(stream) => {
-                        let bytes = self.request_body_bytes(&stream);
-                        self.post.request_body = Some(stream);
-                        bytes
-                    }
-                    None => Vec::new(),
-                };
-                self.add_post_vars(array, &body, limits)
-            }
+            PostEntry::Form => self.add_post_vars(array, limits),
             PostEntry::Multipart => {
                 crate::rfc1867::post_handler(self, &content_type, array, limits)
             }
@@ -378,15 +369,15 @@ impl Request {
     /// `php_stream_input_read`'s ask of the host
     /// (`Z/ext/standard/php_fopen_wrapper.c:82`): where the host has not
     /// ended the body and has handed out less of it than `end`, the
-    /// stream's position and the `count` it was asked for, one
-    /// `sapi_read_post_block` of up to `count` bytes; nothing otherwise,
-    /// so a body the form reader stopped reading part way, or one the
-    /// program reads only the head of, is read no further.
-    pub(crate) fn input_block(&mut self, end: usize, count: usize) -> Vec<u8> {
+    /// stream's position and the count it was asked for, one
+    /// `sapi_read_post_block` into the read's own `buf`, and how many;
+    /// none otherwise, so a body the form reader stopped reading part
+    /// way, or one the program reads only the head of, is read no further.
+    pub(crate) fn input_block(&mut self, end: usize, buf: &mut [u8]) -> usize {
         if self.post.done || self.post.read >= end {
-            return Vec::new();
+            return 0;
         }
-        self.read_post_block(count)
+        self.read_post_block(buf)
     }
 
     /// `SG(request_info).request_body` made: the stream layer's temp
@@ -429,14 +420,37 @@ impl Request {
         }
     }
 
-    /// What the request's body holds.
-    fn request_body_bytes(&mut self, body: &RequestBody) -> Vec<u8> {
-        match body {
-            RequestBody::Bytes(bytes) => bytes.clone(),
-            RequestBody::Stream(stream) => self
-                .stream_hooks()
-                .map(|hooks| (hooks.body_read)(self, *stream))
-                .unwrap_or_default(),
+    /// Up to `buf.len()` bytes of the request's body from `at` into
+    /// `buf`, and how many, as `php_std_post_handler` reads
+    /// `SG(request_info).request_body` a block at a time; none where the
+    /// form reader made no body.
+    pub(super) fn request_body_read(&mut self, at: usize, buf: &mut [u8]) -> usize {
+        match &self.post.request_body {
+            None => 0,
+            Some(RequestBody::Bytes(bytes)) => {
+                let held = bytes.get(at..).unwrap_or_default();
+                let read = held.len().min(buf.len());
+                buf[..read].copy_from_slice(&held[..read]);
+                read
+            }
+            Some(RequestBody::Stream(stream)) => {
+                let stream = *stream;
+                (self.stream_hooks()).map_or(0, |hooks| (hooks.body_read)(self, stream, at, buf))
+            }
+        }
+    }
+
+    /// `php_stream_copy_to_mem` of the request's body: what it holds,
+    /// whole, as `php_mb_post_handler` hands it on.
+    pub(super) fn request_body_copy(&mut self) -> Vec<u8> {
+        let mut whole = Vec::new();
+        let mut block = [0; POST_BLOCK_SIZE];
+        loop {
+            let read = self.request_body_read(whole.len(), &mut block);
+            if read == 0 {
+                return whole;
+            }
+            whole.extend_from_slice(&block[..read]);
         }
     }
 
@@ -576,7 +590,8 @@ impl Request {
         // block at a time and kept by no one, so a FastCGI connection
         // carries none of it into its next request.
         if self.post.request_body.is_none() && !self.post.done && self.web().is_some() {
-            while self.read_post_block(POST_BLOCK_SIZE).len() == POST_BLOCK_SIZE {}
+            let mut block = [0; POST_BLOCK_SIZE];
+            while self.read_post_block(&mut block) == POST_BLOCK_SIZE {}
         }
         self.free_content_type();
         self.destroy_uploaded_files();

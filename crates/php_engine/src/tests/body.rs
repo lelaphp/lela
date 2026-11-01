@@ -175,6 +175,81 @@ fn a_form_that_arrives_in_pieces_is_post_as_php_reads_it() {
     assert!(reads > 5, "the body was read in its pieces: {reads} reads");
 }
 
+/// A form is read from the request's body a `BUFSIZ` block at a time, as
+/// `php_std_post_handler` reads `SG(request_info).request_body`: a body
+/// exactly two blocks long ends at its second, a variable a block's end
+/// cuts is registered whole, and `max_input_vars` counts across the
+/// blocks. php-cgi 8.5.12 `-n -d html_errors=0`, handed the same bodies on
+/// its standard input where `BUFSIZ` is 1024, writes `2 2042 1 -`, `1001 0
+/// 2 999` after the warning at 1000, and `501 0 - -` after the warning at
+/// 500 under `-d max_input_vars=500`.
+#[test]
+fn a_form_is_read_a_block_at_a_time_and_a_variable_a_block_cuts_is_whole() {
+    let step = usize::try_from(crate::layer::BUFSIZ).expect("BUFSIZ");
+    let form = "application/x-www-form-urlencoded";
+    let program = "<?php $n = 0; foreach ($_POST as $v) { $n++; } echo $n, ' ', strlen($_POST['a'] ?? ''), ' ', $_POST['b'] ?? '-', ' ', $_POST['v999'] ?? '-', \"\\n\";";
+    let engine = Engine::cli_builder().build();
+    let mut exact = b"a=".to_vec();
+    exact.resize(2 * step - 4, b'x');
+    exact.extend_from_slice(b"&b=1");
+    assert_eq!(
+        posted(&engine, form, &exact, program).0,
+        format!("2 {} 1 -\n", 2 * step - 6)
+    );
+    let many = (0..1000)
+        .map(|i| format!("v{i}={i}&"))
+        .collect::<Vec<_>>()
+        .concat()
+        + "b=2";
+    let exceeded = |n: i32| {
+        format!(
+            "\nWarning: PHP Request Startup: Input variables exceeded {n}. To increase the limit change max_input_vars in php.ini. in Unknown on line 0\n"
+        )
+    };
+    assert_eq!(
+        posted(&engine, form, many.as_bytes(), program).0,
+        format!("{}1001 0 2 999\n", exceeded(1000))
+    );
+    let engine = Engine::cli_builder().ini("max_input_vars", "500").build();
+    assert_eq!(
+        posted(&engine, form, many.as_bytes(), program).0,
+        format!("{}501 0 - -\n", exceeded(500))
+    );
+}
+
+/// Where an extension treats data, as mbstring's `php_mb_post_handler`
+/// stands in for `php_std_post_handler`, the form body is handed to it
+/// whole, every block the form reader buffered, once it asks for its
+/// bytes; one that leaves the body without asking leaves it uncopied to
+/// the standard handler, which reads it as if no extension had looked.
+#[test]
+fn a_data_treater_is_handed_the_form_body_whole_and_may_leave_it() {
+    use crate::api::request::Input;
+    let counted: crate::api::abi::TreatDataHook = |req, input, mut source| {
+        Ok((input == Input::Post).then(|| {
+            vec![(
+                b"len".to_vec(),
+                source.bytes(req).len().to_string().into_bytes(),
+            )]
+        }))
+    };
+    let declined: crate::api::abi::TreatDataHook = |_, _, _| Ok(None);
+    let program = "<?php echo $_POST['len'] ?? '-', ' ', $_POST['b'] ?? '-', ' ', strlen($_POST['big'] ?? ''), \"\\n\";";
+    let under = |hook| {
+        let treater = ExtensionBuilder::default().treat_data(hook).build("t");
+        let engine = Engine::cli_builder().extensions(&[treater]).build();
+        posted(
+            &engine,
+            "application/x-www-form-urlencoded",
+            &form(),
+            program,
+        )
+        .0
+    };
+    assert_eq!(under(counted), "20014 - 0\n");
+    assert_eq!(under(declined), "- two 20000\n");
+}
+
 /// A `POST` body no content type's reader takes is swallowed whole as it
 /// arrives (`php_default_post_reader`), and `$_POST` is empty: php-cgi
 /// answers `0 20014` for `count($_POST), ' ',

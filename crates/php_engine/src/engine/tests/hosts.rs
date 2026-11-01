@@ -79,8 +79,9 @@ fn error_log_syslog_without_a_registered_syslog_reaches_the_host_s_log() {
 #[test]
 fn a_treat_data_hook_reads_the_sources_it_takes_and_leaves_the_rest() {
     use crate::api::request::Input;
-    let upper: crate::api::abi::TreatDataHook = |_, input, source| {
-        Ok((input == Input::Get).then(|| vec![(b"q".to_vec(), source.to_ascii_uppercase())]))
+    let upper: crate::api::abi::TreatDataHook = |req, input, mut source| {
+        Ok((input == Input::Get)
+            .then(|| vec![(b"q".to_vec(), source.bytes(req).to_ascii_uppercase())]))
     };
     let extension = crate::api::abi::ExtensionBuilder::default()
         .treat_data(upper)

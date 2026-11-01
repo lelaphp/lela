@@ -730,7 +730,7 @@ pub(crate) type UploadHook = fn(&mut Request, Beneath<'_, chain::Upload>) -> Res
 pub(crate) type TreatDataHook = fn(
     &mut Request,
     crate::api::request::Input,
-    &[u8],
+    crate::api::request::DataSource<'_>,
 ) -> Result<Option<Vec<(Vec<u8>, Vec<u8>)>>, Thrown>;
 /// The input filter, php's `sapi_module.input_filter`:
 /// [`ExtensionBuilder::input_filter`].
@@ -1800,7 +1800,9 @@ impl ExtensionBuilder {
     /// `MINIT` registers `mbstr_treat_data` (`sapi_register_treat_data`),
     /// with the form body's post handler it registers beside it: a query
     /// string's, a cookie header's, a form body's and `parse_str()`'s
-    /// source is handed to `hook` first, which answers the variables it
+    /// source is handed to `hook` first, a form body copied out of the
+    /// request's body only where `hook` asks for its bytes
+    /// ([`DataSource::bytes`](crate::api::request::DataSource::bytes)), which answers the variables it
     /// read, each name and value as they are to be registered; the
     /// engine hands each to the input filter and registers what the
     /// filter keeps, as `_php_mb_encoding_handler_ex` does. `None` leaves
