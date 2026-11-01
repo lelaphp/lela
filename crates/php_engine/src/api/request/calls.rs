@@ -640,8 +640,7 @@ impl Request {
             }
         }
         if may_have_undef && let Err(thrown) = crate::api::call::handle_undef_args(self, call) {
-            self.pop_call();
-            return Err(thrown);
+            return Err(self.popped_pending(thrown));
         }
         // A user function is no trampoline, so it is served as itself;
         // a trampoline hands its call to the magic method it stands for.
@@ -664,8 +663,47 @@ impl Request {
         // `zend_call_function` ends an observed native with `fci->retval`
         // whether it threw or not (`Z/Zend/zend_execute_API.c:1039`).
         let served = self.serve_native(function, OnThrow::ReturnValue);
-        self.pop_call();
+        let served = match served {
+            Ok(value) => {
+                self.pop_call();
+                Ok(value)
+            }
+            Err(thrown) => Err(self.popped_pending(thrown)),
+        };
         self.checked_after_call(served)
+    }
+
+    /// A call [`Request::serve_call_body`] pushed, popped with `thrown`
+    /// pending, as `zend_call_function` frees the arguments with
+    /// `EG(exception)` set, a native's after it threw
+    /// (`Z/Zend/zend_execute_API.c:1070`) and an undefined argument's
+    /// where its default threw (`:1009`); the throwable standing after
+    /// is handed back. So an argument's destructor that throws there
+    /// chains `thrown` as its `previous`. `array_walk`'s argument is the
+    /// reference the call wrapped, all that holds the `D` the callback
+    /// wrote, and `f`'s is the `D` its first default made:
+    ///
+    /// ```php
+    /// ini_set('zend.exception_ignore_args', 1);
+    /// class D { function __destruct() { throw new Exception("destructed"); } }
+    /// function f($a = new D, $b = NOPE, $c = 0) {}
+    /// $cuf = 'call_user_func';
+    /// try { @$cuf('array_walk', [1], function (&$v) { $v = new D; throw new Exception("walked"); }); }
+    /// catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()->getMessage(), "\n"; }
+    /// try { $cuf('f', c: 1); } catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// destructed after walked
+    /// destructed after Undefined constant "NOPE"
+    /// ```
+    fn popped_pending(&mut self, thrown: Thrown) -> Thrown {
+        if thrown.exception().is_none() || self.diagnostics().bailing_out() {
+            self.pop_call();
+            return thrown;
+        }
+        self.leave_pending(&thrown);
+        self.pop_call();
+        Thrown::of(self.take_pending_view())
     }
 
     /// `zend_call_function`'s walk of `fci->params`
