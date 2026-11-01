@@ -153,8 +153,9 @@ pub use mail::{build_headers as php_mail_build_headers, php_mail};
 use php_ext::abi::{
     Dependency, DependencyKind, Extension, ExtensionBuilder, LongHandler, OnModify,
 };
-use php_ext::raising::{Thrown, arg_value_error};
+use php_ext::raising::{Thrown, arg_value_error, while_pending};
 use php_ext::request::{EngineWrapper, Request, STREAM_HOOKS, Streams};
+use php_ext::values::{Owner, View};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -796,6 +797,22 @@ pub fn extension() -> Extension {
         .rshutdown(rshutdown)
         .rinit(rinit)
         .build("standard")
+}
+
+/// `owner` given up past `thrown`, as php's `zval_ptr_dtor` and
+/// `zend_array_destroy` after a `zend_call_function` that threw free it
+/// with `EG(exception)` set: a destructor that throws there chains the
+/// callback's throwable as its `previous`, and that is what is pending
+/// after, `thrown` given up as the native's `Err` meets it. A `thrown`
+/// that carries no throwable, a fatal, an `exit` or one the slot holds
+/// already, gives `owner` up as it stands.
+pub(crate) fn given_up_past<T: View>(req: &mut Request, thrown: &Thrown, owner: Owner<T>) {
+    match thrown.exception() {
+        Some(_) => {
+            while_pending(req, thrown, |req| owner.give_up(req));
+        }
+        None => owner.give_up(req),
+    }
 }
 
 /// The `on_modify` of each entry that has one, php's `PHP_INI_MH` at
