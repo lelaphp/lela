@@ -15,7 +15,7 @@ use php_ext::call::{
     read_class_prop_silent, update_class_constants, write_static_prop,
 };
 use php_ext::decl::{ClassKind, MethodDecl, Name, TraitAdaptation, Visibility};
-use php_ext::raising::{Thrown, deprecated, throw_error, throw_exception_ex};
+use php_ext::raising::{Thrown, deprecated, throw_error, throw_exception_ex, while_pending};
 use php_ext::request::{MethodRow, Request};
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 
@@ -253,6 +253,26 @@ fn method_bits(decl: &MethodDecl) -> i64 {
 /// Error: Cannot directly construct Directory, use dir() instead
 /// Error: Cannot instantiate trait T
 /// ```
+///
+/// An object whose constructor threw is marked as php's
+/// `zend_object_store_ctor_failed` marks it and given up with what the
+/// constructor threw pending, as the caller frees `return_value` with
+/// `EG(exception)` set: what the constructor wrote into it is freed there,
+/// and a destructor that throws then chains it as its `previous`.
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class D { function __destruct() { throw new Exception("destructed"); } }
+/// class C { public $d; function __construct() { $this->d = new D; throw new Exception("constructed"); } }
+/// try { (new ReflectionClass('C'))->newInstance(); }
+/// catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()?->getMessage(), "\n"; }
+/// try { (new ReflectionClass('C'))->newInstanceArgs([]); }
+/// catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// destructed after constructed
+/// destructed after constructed
+/// ```
 fn new_instance(
     req: &mut Request,
     class: ClassId,
@@ -304,8 +324,15 @@ fn new_instance(
             Ok(object)
         }
         Err(thrown) => {
+            // `zend_object_store_ctor_failed`, and `return_value` freed by
+            // the caller with what the constructor threw in `EG(exception)`.
             object.mark_destructor_called();
-            object.give_up(req);
+            match thrown.exception() {
+                Some(_) => {
+                    while_pending(req, &thrown, |req| object.give_up(req));
+                }
+                None => object.give_up(req),
+            }
             Err(thrown)
         }
     }
