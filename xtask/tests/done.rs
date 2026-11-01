@@ -1540,7 +1540,10 @@ fn a_crate_whose_only_exit_is_one_accept_wrote_is_done() {
     let verdict = judge(&root);
     assert!(verdict.met(), "{verdict:#?}");
 
-    std::fs::remove_file(store.path("witness", "ext/pcre").unwrap()).unwrap();
+    // No witness reading at all: the scope's file, its index and the log,
+    // since a reading over the tree in any of them is evidence (#3802).
+    std::fs::remove_dir_all(store.root().join("witness")).unwrap();
+    std::fs::remove_file(store.root().join("log/witness.jsonl")).unwrap();
     let verdict = judge(&root);
     let denied = verdict
         .unmet

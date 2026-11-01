@@ -13,7 +13,11 @@
 //! crate the file lies in has a reading of the named instrument stamped
 //! with the crate's tree hash now. `witness` constructs its reading after
 //! `--accept` has written, so the line it captured is inside the tree the
-//! reading is over.
+//! reading is over. It is found by that hash in any store of the clone,
+//! its file, its index or its log, as every kind of evidence below is:
+//! `worktree land` lands `_merge`'s log and index in main's store and
+//! leaves main's file of the scope as it was, so a sensor that read the
+//! file alone denied in main what `done` in `_merge` met (#3802).
 //!
 //! **The record of what `--accept` took.** Every `--accept`, a run over
 //! the crate or one narrowed to a file or an item, records each verdict it
@@ -36,10 +40,11 @@
 //! the file: each hit's block, its line and the lines around it up to a
 //! blank one, as the file stood at a commit whose crate a reading of the
 //! instrument was taken over, the commit's tree hash read from its objects.
-//! The readings are this workspace's store, its file and its log, where
-//! `worktree retire` appends a branch's, and the store of every other
-//! worktree of the clone, where a branch merged before its retire keeps
-//! them. A block typed by hand stands in no commit an instrument measured.
+//! The readings are this workspace's store, its file, its index and its
+//! log, where `worktree retire` appends a branch's, and the store of every
+//! other worktree of the clone, where a branch merged before its retire
+//! keeps them. A block typed by hand stands in no commit an instrument
+//! measured.
 //!
 //! **Who asks.** The diff judge, which measures a write against the base
 //! and not against the file: a line `--accept` wrote stands in the tree and
@@ -87,7 +92,7 @@ use regex_lite::Regex;
 
 use crate::git;
 use crate::key::Snapshot;
-use crate::manifest::Manifest;
+use crate::manifest::{Crate, Manifest};
 use crate::reading::Store;
 
 /// Whether every hit of the row's pattern in `written` was captured by the
@@ -115,14 +120,12 @@ pub(super) fn captured(
     let Some(krate) = manifest.crate_of(path) else {
         return false;
     };
-    let fresh = match (
-        Store::of_workspace(root).read(instrument, &krate.name),
-        Snapshot::disk_over(root, &krate.path()).and_then(|now| now.key(&krate.path())),
-    ) {
-        (Ok(Some(reading)), Ok(tree)) => !reading.key().is_empty() && reading.key() == tree,
-        _ => false,
-    };
-    if fresh {
+    let stores = stores(root);
+    let now = Snapshot::disk_over(root, &krate.path()).and_then(|now| now.key(&krate.path()));
+    if let Ok(tree) = now
+        && measured(&stores, instrument, &krate.name, &BTreeSet::from([tree]))
+            .is_some_and(|found| !found.is_empty())
+    {
         return true;
     }
     // Each hit is the instrument's where any one kind of evidence covers
@@ -132,17 +135,9 @@ pub(super) fn captured(
     if open.is_empty() {
         return false;
     }
-    accepted(root, instrument, &krate.name, written, &mut open);
+    accepted(&stores, instrument, &krate.name, written, &mut open);
     if !open.is_empty() {
-        carried(
-            root,
-            instrument,
-            &krate.name,
-            &krate.path(),
-            regex,
-            path,
-            &mut open,
-        );
+        carried(root, &stores, instrument, krate, regex, path, &mut open);
     }
     open.is_empty()
 }
@@ -157,7 +152,7 @@ pub(super) fn captured(
 /// block or a merge that moves the crate on leaves it standing. A verdict
 /// typed by hand is a block no record names; a store that cannot be read
 /// takes out nothing.
-fn accepted(root: &Path, instrument: &str, scope: &str, written: &str, open: &mut Vec<Hit>) {
+fn accepted(stores: &[Store], instrument: &str, scope: &str, written: &str, open: &mut Vec<Hit>) {
     let verdicts: BTreeMap<usize, String> = (open.iter())
         .filter_map(|hit| Some((hit.line, crate::witness::fence::verdict(written, hit.line)?)))
         .collect();
@@ -166,13 +161,9 @@ fn accepted(root: &Path, instrument: &str, scope: &str, written: &str, open: &mu
         return;
     }
     let scope = crate::witness::accepted_scope(scope);
-    let mut found = BTreeSet::new();
-    for store in stores(root) {
-        match store.measured_over(instrument, &scope, &wanted) {
-            Ok(those) => found.extend(those),
-            Err(_) => return,
-        }
-    }
+    let Some(found) = measured(stores, instrument, &scope, &wanted) else {
+        return;
+    };
     open.retain(|hit| !verdicts.get(&hit.line).is_some_and(|v| found.contains(v)));
 }
 
@@ -183,9 +174,9 @@ fn accepted(root: &Path, instrument: &str, scope: &str, written: &str, open: &mu
 const COMMITS: usize = 64;
 
 /// Takes out of `open` each hit whose block stands in the file at `path`
-/// as it was at a commit whose sources of the crate at `under` a reading
-/// of `instrument` at `scope` was taken over, in this workspace's store
-/// or the store of another worktree of the clone (#1448). The evidence travels with the commits: a line
+/// as it was at a commit whose sources of `krate` a reading of
+/// `instrument` over the crate was taken over, in any of `stores`
+/// (#1448). The evidence travels with the commits: a line
 /// `--accept` captured on a branch is in the branch's commit, the
 /// commit's crate is what the branch's reading measured, and the reading
 /// reaches the main checkout's store at `worktree retire`, so a merge that
@@ -197,9 +188,9 @@ const COMMITS: usize = 64;
 /// cannot read takes out nothing.
 fn carried(
     root: &Path,
+    stores: &[Store],
     instrument: &str,
-    scope: &str,
-    under: &Path,
+    krate: &Crate,
     regex: &Regex,
     path: &Path,
     open: &mut Vec<Hit>,
@@ -213,19 +204,16 @@ fn carried(
     };
     let mut commits = Vec::new();
     for commit in log.lines().filter(|c| !c.is_empty()) {
-        let Ok(tree) = Snapshot::commit(root, commit).and_then(|then| then.key(under)) else {
+        let Ok(tree) = Snapshot::commit(root, commit).and_then(|then| then.key(&krate.path()))
+        else {
             return;
         };
         commits.push((commit, tree));
     }
     let trees: BTreeSet<String> = commits.iter().map(|(_, tree)| tree.clone()).collect();
-    let mut measured = BTreeSet::new();
-    for store in stores(root) {
-        match store.measured_over(instrument, scope, &trees) {
-            Ok(found) => measured.extend(found),
-            Err(_) => return,
-        }
-    }
+    let Some(measured) = measured(stores, instrument, &krate.name, &trees) else {
+        return;
+    };
     for (commit, tree) in &commits {
         if !measured.contains(tree) {
             continue;
@@ -252,6 +240,22 @@ fn stores(root: &Path) -> Vec<Store> {
         }
     }
     roots.iter().map(|r| Store::of_workspace(r)).collect()
+}
+
+/// Which of `keys` a reading of `instrument` over `scope` was taken over
+/// in any of `stores` ([`Store::measured_over`]); none where one cannot be
+/// read, which is no evidence.
+fn measured(
+    stores: &[Store],
+    instrument: &str,
+    scope: &str,
+    keys: &BTreeSet<String>,
+) -> Option<BTreeSet<String>> {
+    let mut found = BTreeSet::new();
+    for store in stores {
+        found.extend(store.measured_over(instrument, scope, keys).ok()?);
+    }
+    Some(found)
 }
 
 /// One hit of the row's pattern in a text: its line, by which a fence's
