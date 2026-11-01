@@ -801,8 +801,9 @@ fn a_return_roots_at_the_landing_past_the_eval_its_trace_stopped_at() {
 /// exits of their own, each knowing the types those before it held, as
 /// php's stack map does; the interrupt test through its own, numbered
 /// last and growing no side trace, php's `ZEND_JIT_EXIT_TO_VM`; the
-/// `+=`'s and the increment's overflow guards through theirs, where php
-/// holds the guards of the loop's phis (#3135); then the loop runs
+/// `+=`'s overflow guard through its own, where php holds the guards of
+/// the loop's phis (#3135), and the increment's never, since its exit
+/// lands past it, right only where it overflowed (#3720); then the loop runs
 /// compiled to its end, through php's `exit 3`, the trace starting at the
 /// loop's condition and meeting the jump's direction before the body
 /// (#3134). Each exit but the interrupt test's, taken once, grows a side
@@ -832,7 +833,7 @@ fn under_exit_fuzz_every_guard_fails_once_and_the_output_is_forces() {
     assert_eq!(testing::stdout(&fuzz), "45190\n");
     assert_eq!(
         exits(&fuzz),
-        [0, 1, 2, 6, 4, 5, 3].map(|exit| format!("     TRACE 1 exit {exit} a() body.php:2"))
+        [0, 1, 2, 6, 4, 3].map(|exit| format!("     TRACE 1 exit {exit} a() body.php:2"))
     );
 }
 

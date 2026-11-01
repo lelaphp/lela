@@ -43,7 +43,7 @@ exit 5: f0 0005 plain f0.CV2=#3 f0.CV3=#5 f0.CV0:object f0.CV1:long f0.CV2:long 
 exit 6: f0 0006 plain f0.CV2=#3 f0.CV3=#5 f0.T2=copied #7 f0.CV0:object f0.CV1:long f0.CV2:long f0.CV3:long
 exit 7: f0 0006 plain f0.CV2=#3 f0.CV3=#5 f0.T2=copied #7 through a reference f0.CV0:object f0.CV1:long f0.CV2:long f0.CV3:long
 exit 8: f0 0006 plain f0.CV2=#3 f0.CV3=#5 f0.T2=#7 f0.CV0:object f0.CV1:long f0.CV2:long f0.CV3:long f0.T2:long
-exit 9: f0 0014 plain f0.CV2=#8 f0.CV3=#5 f0.CV0:object f0.CV1:long f0.CV2:long f0.CV3:long
+exit 9: f0 0015 plain f0.CV2=#8 f0.CV3=overflowed up f0.CV0:object f0.CV1:long f0.CV2:long f0.CV3:double
 exit 10: f0 0015 plain f0.CV2=#3 f0.CV3=#5 f0.CV0:object f0.CV1:long f0.CV2:long f0.CV3:long to vm
 unwind 0: f0.CV2=#8 f0.CV3=#5
 map 0: offset 1 slot 0

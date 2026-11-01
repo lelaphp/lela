@@ -1425,9 +1425,9 @@ impl<'a> Emit<'a> {
                     },
                     Some(Kind::Long),
                 ) => {
-                    if let Some(up) = self.overflowed_to(guard.exit) {
-                        let slot = self.value(value)?.slot;
-                        self.leave_overflowed(overflowed, guard.exit, (slot, up))?;
+                    if self.overflows_past(guard.exit) {
+                        let frame = self.value(value)?.slot.frame;
+                        self.leave_overflowed(overflowed, guard.exit, frame)?;
                     } else {
                         self.leave_if(overflowed, guard.exit)?;
                     }
@@ -1543,32 +1543,29 @@ impl<'a> Emit<'a> {
         Ok(())
     }
 
-    /// Whether `exit` lands past an arithmetic with the double it
-    /// overflowed to (`Stored::Overflowed`), and which way it went.
-    fn overflowed_to(&self, exit: ExitId) -> Option<bool> {
-        let spec = self.ir.exits.get(usize::from(exit.0))?;
-        (spec.stores.iter()).find_map(|store| match store.from {
-            Stored::Overflowed { up } => Some(up),
-            _ => None,
-        })
+    /// Whether `exit` lands past an arithmetic with what it overflowed
+    /// to in its slots (`Stored::Overflowed`, `Stored::Limit`).
+    fn overflows_past(&self, exit: ExitId) -> bool {
+        (self.ir.exits.get(usize::from(exit.0)))
+            .is_some_and(|spec| (spec.stores.iter()).any(|store| store.from.constant().is_some()))
     }
 
     /// Leave through `exit` where `cond`, the overflow of an `ADD` or a
-    /// `SUB` of `1`, is not zero, writing first the double it went to,
-    /// `(double)ZEND_LONG_MAX + 1.0` where it went `up` and
+    /// `SUB` of `1`, an increment or a decrement, is not zero, writing
+    /// first each constant the exit names to its slot in `frame`, the
+    /// one this site runs in, which is the one the exit lands in at
+    /// whichever inlined level takes it, as php's frame-relative stack
+    /// map holds the constant: the double it went to,
+    /// `(double)ZEND_LONG_MAX + 1.0` where it went up and
     /// `(double)ZEND_LONG_MIN - 1.0`, which rounds to `ZEND_LONG_MIN`'s
-    /// double, otherwise, to `slot` in the frame this site runs in, which
-    /// is the one the exit lands in at whichever inlined level takes it,
-    /// as php's frame-relative stack map holds the constant. Never failed
-    /// by exit-fuzz: the exit lands past the op, right only where it
-    /// overflowed.
-    fn leave_overflowed(
-        &mut self,
-        cond: Value,
-        exit: ExitId,
-        (slot, up): (Slot, bool),
-    ) -> Result<(), Abort> {
+    /// double, otherwise, and the long a `POST_*` read, in its `out`.
+    /// Never failed by exit-fuzz: the exit lands past the op, right only
+    /// where it overflowed.
+    fn leave_overflowed(&mut self, cond: Value, exit: ExitId, frame: Frame) -> Result<(), Abort> {
         let (to, args) = self.guard_exit(exit)?;
+        let stores = (self.ir.exits.get(usize::from(exit.0)))
+            .map(|spec| spec.stores.clone())
+            .unwrap_or_default();
         let (writes, on) = (self.b.create_block(), self.b.create_block());
         self.b.set_cold_block(writes);
         self.b.ins().brif(cond, writes, &[], on, &[]);
@@ -1578,13 +1575,30 @@ impl<'a> Emit<'a> {
             let (room, at) = self.place(kept.slot)?;
             self.write_num(room, at, kept.num);
         }
-        let double = if up {
-            9_223_372_036_854_775_808.0
-        } else {
-            -9_223_372_036_854_775_808.0
-        };
-        let double = self.b.ins().f64const(double);
-        self.store(slot, Scalar::Double(double))?;
+        for store in stores {
+            let held = match store.from {
+                Stored::Overflowed { up } => {
+                    let double = if up {
+                        9_223_372_036_854_775_808.0
+                    } else {
+                        -9_223_372_036_854_775_808.0
+                    };
+                    Scalar::Double(self.b.ins().f64const(double))
+                }
+                Stored::Limit { up } => {
+                    let long = if up { i64::MAX } else { i64::MIN };
+                    Scalar::Long(self.b.ins().iconst(I64, long))
+                }
+                Stored::Value(_) | Stored::Copied { .. } | Stored::Null => continue,
+            };
+            self.store(
+                Slot {
+                    frame,
+                    ..store.slot
+                },
+                held,
+            )?;
+        }
         self.b.ins().jump(to, &args);
         self.b.switch_to_block(on);
         self.b.seal_block(on);
@@ -1773,8 +1787,11 @@ impl<'a> Emit<'a> {
                     }
                 }
                 // Its site wrote the slot before it branched here
-                // ([`Emit::leave_overflowed`] the double).
-                Stored::Copied { .. } | Stored::Null | Stored::Overflowed { .. } => {}
+                // ([`Emit::leave_overflowed`] the constants).
+                Stored::Copied { .. }
+                | Stored::Null
+                | Stored::Overflowed { .. }
+                | Stored::Limit { .. } => {}
             }
         }
         Ok(())
@@ -3028,7 +3045,7 @@ impl<'a> Emit<'a> {
             ) || self.ir.exits.iter().any(|exit| {
                 exit.stores.iter().any(|store| match store.from {
                     Stored::Value(v) | Stored::Copied { value: v, .. } => v == value,
-                    Stored::Null | Stored::Overflowed { .. } => false,
+                    Stored::Null | Stored::Overflowed { .. } | Stored::Limit { .. } => false,
                 })
             });
         Ok((!named).then_some(reader))
