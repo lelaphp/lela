@@ -359,13 +359,18 @@ impl StackLimit {
     /// at its entry, the loop's re-entry from a native: the limit where
     /// a size was given, and under detect the floor, the whole of the
     /// thread the host sized for the loop's re-entry (design §5.6).
+    /// php asks from inside `execute_ex`'s frame; the engine asks before
+    /// the loop's frame is laid down, so `frame`, what that frame takes,
+    /// is counted below the calling one, and the frame never lays itself
+    /// past the thread's end, however large an unoptimised build makes
+    /// it (#3830).
     #[must_use]
-    pub fn entry_overflowed(&self) -> bool {
+    pub fn entry_overflowed(&self, frame: usize) -> bool {
         let at = match self.allowed {
             Allowed::Fixed | Allowed::Fiber => self.limit,
             Allowed::Detected { .. } => self.floor,
         };
-        position() <= at
+        position().saturating_sub(frame) <= at
     }
 
     /// `EG(stack_limit)` itself: the address a frame at or below has
@@ -655,7 +660,7 @@ mod tests {
             .spawn(|| {
                 let mut stack = StackLimit::init(0, 0);
                 let at_init = stack;
-                let clear = !stack.overflowed() && !stack.entry_overflowed();
+                let clear = !stack.overflowed() && !stack.entry_overflowed(0);
                 let reentered = stack.reentered();
                 let moved = stack;
                 stack.left(reentered);

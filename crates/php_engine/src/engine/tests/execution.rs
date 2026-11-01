@@ -292,3 +292,68 @@ fn a_call_activates_its_frame_once_and_a_recv_that_throws_never_does() {
         "two calls activated and returned, the third never activated"
     );
 }
+
+/// `array_map` over one array as ext/standard maps it, for the test
+/// below: the callback called back for each element through
+/// [`crate::api::call::call`], php's `zend_call_function`, so each call
+/// enters the loop afresh (`tier::reenter`). Its answers are dropped.
+#[php_macros::php_function]
+fn array_map(
+    req: &mut Request,
+    callback: crate::api::abi::Callable,
+    array: crate::api::values::PhpArray,
+) -> Result<(), crate::api::raising::Thrown> {
+    use crate::api::values::walk;
+    walk::foreach(req, array, walk::Hold::None, |req, row| -> walk::Step {
+        let answer = crate::api::call::call(req, &callback, &[*row.value()])?;
+        answer.give_up(req);
+        Ok(std::ops::ControlFlow::Continue(()))
+    })?;
+    Ok(())
+}
+
+/// An unbounded recursion through a native's callback is refused at
+/// the loop's entry with php's stack-limit `Error`, on the test
+/// harness's own thread, in the debug build too, whose loop frame,
+/// every handler in line, is many times `zend.reserved_stack_size`:
+/// the entry counts that frame below the one it is asked from, so the
+/// frame is never laid past the thread's end (#3830). The number is
+/// the thread's, so it is masked; the depth is whatever the thread
+/// held.
+#[test]
+fn an_unbounded_recursion_through_array_map_is_refused_not_overflowed() {
+    let engine = Engine::cli_builder()
+        .additional_extension(
+            crate::api::abi::ExtensionBuilder::default()
+                .functions(vec![array_map::declared()])
+                .build("standard"),
+        )
+        .build();
+    let (body, observables) = served(
+        &engine,
+        "<?php\n$depth = 0;\n$down = function () use (&$down, &$depth) { $depth++; return array_map($down, [0]); };\ntry { $down(); } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\necho $depth, \"\\n\";",
+    );
+    let (sentence, depth) = body.split_once('\n').unwrap_or_default();
+    let (said, number) = (
+        sentence.split(" bytes").next().unwrap_or_default(),
+        sentence.split_once(" bytes").map(|(_, rest)| rest),
+    );
+    assert_eq!(
+        said.strip_prefix("Maximum call stack size of ")
+            .map(|n| n.parse::<u64>().is_ok()),
+        Some(true),
+        "{body}"
+    );
+    assert_eq!(
+        number,
+        Some(
+            " (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?"
+        ),
+        "{body}"
+    );
+    assert!(
+        depth.trim_end().parse::<u32>().is_ok_and(|depth| depth > 1),
+        "{body}"
+    );
+    assert_eq!(observables.exit_code, 0);
+}

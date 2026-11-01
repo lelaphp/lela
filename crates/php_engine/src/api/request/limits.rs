@@ -225,6 +225,9 @@ pub(super) struct LimitsState {
     /// The stack the request's first scope of the loop was measured to
     /// take ([`Request::note_scope_cost`]), none before it.
     scope_cost: Option<std::num::NonZeroUsize>,
+    /// The stack the request's first serving's loop frame was measured
+    /// to take ([`Request::note_loop_frame`]), zero before it.
+    loop_frame: usize,
     /// php's `EG(jit_trace_num)`, the running execution's trace number
     /// ([`crate::tier::trace_num`]), kept here beside the stack limit
     /// because a fiber switch swaps both ([`Request::switch_execution`]).
@@ -257,6 +260,7 @@ impl LimitsState {
             stack_limit: StackLimit::UNCHECKED,
             stack_thread: None,
             scope_cost: None,
+            loop_frame: 0,
             trace_num: TraceNum::NONE,
             reentry: None,
         }
@@ -374,6 +378,25 @@ impl Request {
     /// bytes measured on #3051), and the room twice the charge.
     pub(crate) fn note_scope_cost(&mut self, cost: std::num::NonZeroUsize) {
         self.limits.scope_cost = Some(cost);
+    }
+
+    /// `frame`, the stack the request's first serving took from the call
+    /// that began it to the loop's body: what the loop's entry counts
+    /// below the frame it is asked from ([`Request::loop_frame`]),
+    /// 193,200 bytes unoptimised, every handler in line (#3830). Kept
+    /// apart from a scope's charge, which an optimised build measures
+    /// from inside the loop's body and which this measurement, from the
+    /// frame that called the loop, would understate there.
+    pub(crate) fn note_loop_frame(&mut self, frame: usize) {
+        self.limits.loop_frame = frame;
+    }
+
+    /// What the loop's frame was measured to take
+    /// ([`Request::note_loop_frame`]), zero before it was: the request's
+    /// first serving stands at the stack's base, where one frame more is
+    /// never the last.
+    pub(crate) fn loop_frame(&self) -> usize {
+        self.limits.loop_frame
     }
 
     /// The serving [`Self::stack_reentered`] or the scope
@@ -752,7 +775,7 @@ mod tests {
         });
         assert!(!asked);
         assert!(refused.overflowed());
-        assert!(refused.entry_overflowed());
+        assert!(refused.entry_overflowed(0));
         assert_eq!(refused.max_stack_size(), 0);
         if let Some(bounds) = php_heap::call_stack_bounds() {
             let init = || StackLimit::init(0, 0);
