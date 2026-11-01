@@ -9,7 +9,7 @@ use php_ext::abi::{
     ClassIterator, CloneObj, DimensionRead, GcTable, ObjectHandlers, PropertyPlace, PropertyRead,
     PropertyTest, Std,
 };
-use php_ext::call::{call_method, lookup_class, new_object};
+use php_ext::call::{call_method, create_object, lookup_class};
 use php_ext::coerce::{to_double, to_long, to_number, to_string, value_name, with_string};
 use php_ext::raising::{Level, Thrown, docref, throw_error, type_error, value_error};
 use php_ext::request::Request;
@@ -311,7 +311,24 @@ pub(crate) fn match_ns(node: Node, ns: Option<&Ns>) -> bool {
 }
 
 /// `node_as_zval`: a fresh object of `of`'s class standing for `node` under
-/// `walk`, sharing `of`'s document.
+/// `walk`, sharing `of`'s document, made as `php_sxe_object_new` makes it
+/// whatever that class is, abstract among them.
+///
+/// ```php
+/// abstract class A extends SimpleXMLElement {}
+/// $s = simplexml_load_string('<a><c>x</c><c><d/></c></a>', 'A');
+/// var_dump(get_class($s->c), get_class($s->c[1]), get_class($s->c[1]->d));
+/// foreach ($s->children() as $v) echo get_class($v), "\n";
+/// var_dump(get_class(((array) $s)['c'][1]));
+/// ```
+/// ```expect
+/// string(1) "A"
+/// string(1) "A"
+/// string(1) "A"
+/// A
+/// A
+/// string(1) "A"
+/// ```
 pub(crate) fn wrap(
     req: &mut Request,
     of: PhpObject,
@@ -319,7 +336,7 @@ pub(crate) fn wrap(
     walk: Walk,
     ns: Option<Ns>,
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let made = new_object(req, of.class())?;
+    let made = create_object(req, of.class())?;
     let by = libxml_half(req, of);
     let Some(counted) = DocOf::under(node, by.as_deref()) else {
         made.give_up(req);
@@ -1523,7 +1540,18 @@ impl ClassIterator for Loop {
 
 /// `sxe_object_clone`: a root element's clone holds a copy of the whole
 /// document, any other node's a copy of the node in the same document,
-/// standing apart from it.
+/// standing apart from it. The copy is of the object's class, abstract
+/// or not, as `php_sxe_object_new` makes it.
+///
+/// ```php
+/// abstract class A extends SimpleXMLElement {}
+/// $s = simplexml_load_string('<a><c>x</c></a>', 'A');
+/// var_dump(get_class(clone $s), (string) (clone $s->c));
+/// ```
+/// ```expect
+/// string(1) "A"
+/// string(1) "x"
+/// ```
 fn clone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let view = View::of(req, object);
     let doc = sxe(req, object).and_then(|s| s.obj.document_node());
@@ -1531,7 +1559,7 @@ fn clone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Throw
         .node
         .and_then(Node::parent)
         .is_some_and(|p| p.kind().is_document());
-    let made = new_object(req, object.class())?;
+    let made = create_object(req, object.class())?;
     let by = libxml_half(req, object);
     let counted = match doc
         .filter(|_| !root)
