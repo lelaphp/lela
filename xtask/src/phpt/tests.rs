@@ -2566,6 +2566,82 @@ fn a_run_counts_the_targets_misses_the_engine_skipped() {
     );
 }
 
+/// The fixture at `xtask/fixtures/phpt/unhosted` (#3763), run on an engine
+/// with no php-cgi or phpdbg built beside it: its CGI-shaped and its
+/// debugger's test are `unbuilt`, a build the run is missing, and held to a
+/// target that holds them the reading fails naming each host, where a run
+/// that skipped them counted them among `missed_skipped` and read pass. The
+/// negative control is a target whose oracle skipped both: they stand
+/// outside it, and the reading passes.
+#[test]
+fn a_target_test_no_host_of_ours_stands_beside_the_engine_for_fails_the_reading() {
+    use crate::reading::Number;
+    let Some(php) = oracle() else { return };
+    let (_tree, subset) = fixture_subset("unhosted");
+    let beside = Tree::new("phpt-unhosted-engine").unwrap();
+    std::os::unix::fs::symlink(&php, beside.join("php")).unwrap();
+    let (manifest, locks) = (manifest(), Tree::new("phpt-locks").unwrap());
+    let (runner, pin) = (Runner::Engine(beside.join("php")), manifest.pin().unwrap());
+    let under = Under::of(&runner, locks.path());
+    let (tally, _) = run_subset(&pin.oracle(), &registry(""), &subset, under).unwrap();
+    let mut went: Vec<_> = (went(&tally).into_iter())
+        .map(|(name, j)| (name.trim_start_matches("ext/fixture/tests/"), j))
+        .collect();
+    went.sort_by_key(|(name, _)| *name);
+    let unbuilt = [
+        ("debugger.phpt", Judgement::Unbuilt),
+        ("get.phpt", Judgement::Unbuilt),
+    ];
+    assert_eq!(
+        went,
+        [unbuilt[0], unbuilt[1], ("plain.phpt", Judgement::Pass)],
+        "{tally:#?}"
+    );
+    let held = |oracle: &str| {
+        let target = [
+            ("debugger.phpt", oracle),
+            ("get.phpt", oracle),
+            ("plain.phpt", "pass"),
+        ];
+        let outcome = tally.outcome(&runner);
+        let reading = Reading::new(INSTRUMENT, "ext/fixture");
+        let mut reading = tally.reading(reading, &outcome, String::new()).unwrap();
+        let target = fixture_target(&target);
+        let kept = (Some(&target), false, None);
+        held_to(
+            &mut reading,
+            (&tally, "ext/fixture"),
+            kept,
+            &registry(""),
+            (&runner, pin),
+        )
+        .unwrap();
+        reading
+    };
+
+    let reading = held("pass");
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(
+        number(&reading, "missed_unbuilt"),
+        Some(Number::Int(2)),
+        "{reading:#?}"
+    );
+    assert_eq!(
+        number(&reading, "missed_skipped"),
+        Some(Number::Int(0)),
+        "{reading:#?}"
+    );
+    let said = &reading.message;
+    assert!(
+        said.contains("php-cgi") && said.contains("phpdbg"),
+        "{said}"
+    );
+
+    let reading = held("skip");
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(number(&reading, "missed_unbuilt"), None, "{reading:#?}");
+}
+
 /// A subset the lane could not run is refused, a fail whose message is
 /// the cause; one a full volume kept from running is not refused but not
 /// measured, a skip naming the volume, so the session reads the disk and

@@ -29,6 +29,7 @@
 //! before its run kept the skips' reasons does not stand, so `--unkept`
 //! takes it again.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -39,7 +40,7 @@ use super::miss::Signature;
 use super::{CORPUS, Judgement, Subset, redirect};
 use crate::divergence::Registry;
 use crate::oracle::Pin;
-use crate::reading::{Reading, listed, plural};
+use crate::reading::{Reading, Status, listed, plural};
 
 /// What names the pin a target is kept under: the corpus's tag and the
 /// oracle's digest.
@@ -245,13 +246,14 @@ impl Target {
     /// with `note`. A test the engine came to `Diverged` on is met, since
     /// a registry row accepted its difference, under its own id or, in the
     /// served subset, a `makala:` one (#2644); one the lane left out is
-    /// outside, whatever the oracle did, for the note's reason.
+    /// outside, whatever the oracle did, for the note's reason, but one it
+    /// had no build for that the target holds, which is a miss (#3763).
     pub(crate) fn standing(
         &self,
         registry: &Registry,
         (id, engine, note): (&str, Judgement, &str),
     ) -> Standing {
-        if matches!(engine, Judgement::Unsent | Judgement::Unbuilt) {
+        if engine == Judgement::Unsent || (engine == Judgement::Unbuilt && !self.holds(id)) {
             return Standing::Outside(LeftOut::Unlaned(note.to_owned()));
         }
         match self.0.verdicts.get(id) {
@@ -286,6 +288,9 @@ pub(crate) struct Measure {
     pub missed: Vec<String>,
     /// Of `missed`, those the engine skipped (#1834).
     pub missed_skipped: u64,
+    /// Of `missed`, those the engine had no build for, by why: each fails
+    /// the reading (#3763).
+    pub missed_unbuilt: BTreeMap<String, u64>,
 }
 
 impl Measure {
@@ -302,9 +307,13 @@ impl Measure {
     /// on every reading held to a target from #1834 on, so a reading
     /// without it is one from before the count was kept.
     pub(crate) const MISSED_SKIPPED: &str = "missed_skipped";
+    /// The key that counts the target's misses the engine had no build
+    /// for, written only where there are any.
+    pub(crate) const MISSED_UNBUILT: &str = "missed_unbuilt";
 
     /// The measure written into the reading's numbers, under the keys
-    /// above.
+    /// above, and the reading failed where the target misses a test the
+    /// engine had no build for (#3763).
     pub(crate) fn write(&self, reading: &mut Reading) -> Result<()> {
         reading.count(Self::TARGET, self.target)?;
         reading.count(Self::MET, u64::try_from(self.met.len())?)?;
@@ -312,6 +321,11 @@ impl Measure {
         reading.count(Self::MISSED_SKIPPED, self.missed_skipped)?;
         if self.predated > 0 {
             reading.count(Self::PREDATED, self.predated)?;
+        }
+        let unbuilt = self.missed_unbuilt.values().sum();
+        if unbuilt > 0 {
+            reading.count(Self::MISSED_UNBUILT, unbuilt)?;
+            reading.status = Status::Fail;
         }
         Ok(())
     }
@@ -335,8 +349,12 @@ impl Measure {
                 Standing::Missed => {
                     measure.target += 1;
                     measure.missed.push(id.to_owned());
-                    if engine == Judgement::Skip {
-                        measure.missed_skipped += 1;
+                    match engine {
+                        Judgement::Skip => measure.missed_skipped += 1,
+                        Judgement::Unbuilt => {
+                            *measure.missed_unbuilt.entry(note.to_owned()).or_default() += 1;
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -363,6 +381,16 @@ impl Measure {
             format!(
                 "; the target's misses: {}",
                 listed(&in_corpus(&self.missed))
+            )
+        };
+        let unbuilt = (self.missed_unbuilt.iter()).map(|(why, n)| format!("{n} as {why}"));
+        let unbuilt: Vec<String> = unbuilt.collect();
+        let missed = if unbuilt.is_empty() {
+            missed
+        } else {
+            format!(
+                "{missed}; unbuilt of them, failing the reading: {}",
+                unbuilt.join(", ")
             )
         };
         let pointed_to = if target_named && self.outside.len() <= NAMED {
@@ -552,31 +580,43 @@ mod tests {
 
     /// A test the engine came to `Diverged` on is met, though no `phpt:`
     /// row holds it, since a `makala:` row accepted it in the served lane;
-    /// and one the lane left out, served (#2644) or routed to a variant
-    /// that cannot build for it (#3312), is outside the target whatever
-    /// the oracle did, named with why.
+    /// one the lane left out served (#2644) is outside the target whatever
+    /// the oracle did, and one it had no build for (#3312) where the
+    /// target does not hold it, named with why; one it had no build for
+    /// that the target holds is a miss (#3763).
     #[test]
     fn a_diverged_test_is_met_and_one_the_lane_left_out_is_outside() {
         let target = Target::of(fixture("control.json"));
         let test = id("kept.phpt");
         let standing = target.standing(&Registry::default(), (&test, Judgement::Diverged, ""));
         assert_eq!(standing, Standing::Met);
-        for (left, why) in [
+        for (name, left, why) in [
             (
+                "kept.phpt",
                 Judgement::Unsent,
                 "its --ENV-- sets X, which no HTTP field carries",
             ),
-            (Judgement::Unbuilt, "it needs the feature ffi"),
+            (
+                "oracle-skip.phpt",
+                Judgement::Unbuilt,
+                "it needs the feature ffi",
+            ),
         ] {
+            let test = id(name);
             let standing = target.standing(&Registry::default(), (&test, left, why));
             assert_eq!(
                 standing,
                 Standing::Outside(LeftOut::Unlaned(why.to_owned()))
             );
             let measure = Measure::of(&target, &Registry::default(), [(test.as_str(), left, why)]);
-            let said = format!("left out of the lane, {why}: ext/fixture/tests/kept.phpt");
+            let said = format!("left out of the lane, {why}: ext/fixture/tests/{name}");
             assert!(measure.words(kept(), "").contains(&said), "{measure:?}");
         }
+        let unbuilt = (test.as_str(), Judgement::Unbuilt, "it runs through php-cgi");
+        assert_eq!(
+            target.standing(&Registry::default(), unbuilt),
+            Standing::Missed
+        );
     }
 
     /// Met-of-target: the engine's verdict equal to the oracle's, an expected

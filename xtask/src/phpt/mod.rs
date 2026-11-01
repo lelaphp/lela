@@ -181,7 +181,7 @@ use crate::carried::{BINARY, BUNDLE, Carried};
 use crate::divergence::Registry;
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
-use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, PHPDBG};
+use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, PHPDBG, Whose};
 use crate::oracle::{ENGINE, Oracle, Oracles, Pin, Runner, Source, profile};
 use crate::reading::{Reading, listed, plural};
 use crate::scratch::{self, Full, Tree};
@@ -650,7 +650,10 @@ pub(crate) enum Judgement {
     Unsent,
     /// A test routed to a variant's subset that the lane cannot build
     /// for, needing another feature or a host ([`route::Unbuilt`]): left
-    /// out of the lane, outside the target, and never run (#3312).
+    /// out of the lane, outside the target, and never run (#3312). Or a
+    /// test whose host the engine has none of beside it, a build the run is
+    /// missing: never run, and a miss that fails the reading where the
+    /// target holds it (#3763).
     Unbuilt,
 }
 
@@ -1944,6 +1947,7 @@ fn run_tests(
         cgi: host(CGI),
         phpdbg: host(PHPDBG),
         http,
+        whose: Whose::of(oracle.pin(), binary, control),
     };
     let adapter = Adapter::new(oracle, registry, binary, hosts, lane);
     let items = adapter.listed(subset, tests)?;

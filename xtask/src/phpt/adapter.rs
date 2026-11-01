@@ -34,6 +34,7 @@ use super::{Judged, Judgement, Lane, Subset, borked};
 use super::{cgi, http};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
+use crate::oracle::hosts::{CGI, PHPDBG, Whose};
 use crate::oracle::{
     self, Ended, Invocation, Observation, Oracle, PastLimit, Pin, Program, Stdin, Streams,
     Verdict as Compared,
@@ -59,12 +60,13 @@ pub(super) struct Adapter<'a> {
 /// The hosts beside the binary under test a test of another shape runs
 /// through: the CGI host and the debugger host, and for the served subset
 /// the production server a CGI-shaped test is served to over HTTP in the
-/// CGI host's place (the `http` module, #2348).
-#[derive(Debug, Default)]
+/// CGI host's place (the `http` module, #2348); and whose they are.
+#[derive(Debug)]
 pub(super) struct Hosts {
     pub(super) cgi: Option<PathBuf>,
     pub(super) phpdbg: Option<PathBuf>,
     pub(super) http: Option<PathBuf>,
+    pub(super) whose: Whose,
 }
 
 impl Hosts {
@@ -282,8 +284,8 @@ impl<'a> Adapter<'a> {
                 why.to_string(),
             )));
         }
-        if let Some(why) = unhosted(phpt, &self.hosts) {
-            return Ok(Err(Judged::new(id, name, Judgement::Skip, why)));
+        if let Some((judgement, why)) = unhosted(phpt, &self.hosts, self.binary) {
+            return Ok(Err(Judged::new(id, name, judgement, why)));
         }
         if let Some(why) = (self.hosts.http.as_ref()).and_then(|_| http::unsent(phpt, &test.file)) {
             return Ok(Err(Judged::new(id, name, Judgement::Unsent, why)));
@@ -637,16 +639,30 @@ pub(super) fn loaded_extensions(oracle: &Oracle<'_>, binary: &Path) -> Result<Ve
 }
 
 /// Why this runner cannot host a test: a CGI-shaped one where no CGI host
-/// stands beside the binary, and a debugger's where no debugger host
-/// does, as upstream's runner skips each (run-tests.php:1894-1896, 1914).
-fn unhosted(phpt: &Phpt, hosts: &Hosts) -> Option<String> {
-    if phpt.is_cgi() && hosts.cgi.is_none() && hosts.http.is_none() {
-        return Some("CGI not available".into());
-    }
-    if phpt.has("PHPDBG") && hosts.phpdbg.is_none() {
-        return Some("phpdbg not available".into());
-    }
-    None
+/// stands beside `binary`, and a debugger's where no debugger host does.
+/// Where the hosts are the pin's, a skip in upstream's words
+/// (run-tests.php:1894-1896, 1914); where they are the engine's own,
+/// `unbuilt`, a build the run is missing (#3763).
+fn unhosted(phpt: &Phpt, hosts: &Hosts, binary: &Path) -> Option<(Judgement, String)> {
+    let (host, upstream) = if phpt.is_cgi() && hosts.cgi.is_none() && hosts.http.is_none() {
+        (CGI, "CGI")
+    } else if phpt.has("PHPDBG") && hosts.phpdbg.is_none() {
+        (PHPDBG, "phpdbg")
+    } else {
+        return None;
+    };
+    Some(match hosts.whose {
+        Whose::Pinned => (Judgement::Skip, format!("{upstream} not available")),
+        Whose::Built => (
+            Judgement::Unbuilt,
+            format!(
+                "it runs through {}, and none is built beside {} (`{}` builds it)",
+                host.binary,
+                binary.display(),
+                oracle::engine_build()
+            ),
+        ),
+    })
 }
 
 /// The construct the compiler could not read, when what the program wrote
