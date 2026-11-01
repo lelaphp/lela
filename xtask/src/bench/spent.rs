@@ -13,11 +13,13 @@
 //! rep; for a process arm, over its life, read once it has exited and
 //! before it is reaped. An arm's figure is the median over its reps. The
 //! call is macOS's, read in `read`, xtask's one `unsafe` home (#3062's
-//! ruling); elsewhere every such arm says its figures are absent.
+//! ruling); elsewhere every such arm says its figures are absent. A
+//! process arm's peak memory is read there too, on macOS and on Linux,
+//! each as its platform states it, which [`Peak`] names.
 
 use super::stats;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[allow(
     unsafe_code,
     reason = "seams.toml rule unsafe.homes: xtask::bench::spent::read"
@@ -68,20 +70,6 @@ impl Retired {
         None
     }
 
-    /// What the child `pid` retired over its life, and its peak physical
-    /// footprint in bytes, waited for until it exits and left unreaped for
-    /// its owner's wait; none where it cannot be read.
-    #[cfg(target_os = "macos")]
-    pub(crate) fn exited(pid: u32) -> Option<(Retired, u64)> {
-        read::exited(pid).map(|(figures, peak)| (Retired(figures), peak))
-    }
-
-    /// None: this platform has no `proc_pid_rusage`.
-    #[cfg(not(target_os = "macos"))]
-    pub(crate) fn exited(_pid: u32) -> Option<(Retired, u64)> {
-        None
-    }
-
     /// What each of `n` units retired from `self` to `after`; a total
     /// that went back, a process of the server having ended in the rep,
     /// is no figure at all.
@@ -95,6 +83,111 @@ impl Retired {
             per[i] = spent as f64 / scale / n.max(1.0);
         }
         Spent::Per(each, per)
+    }
+}
+
+/// What the child `pid` retired over its life, and its peak memory in
+/// bytes as [`Peak::HERE`] names it, waited for until it exits and left
+/// unreaped for its owner's wait; each none where it cannot be read.
+#[cfg(target_os = "macos")]
+pub(crate) fn exited(pid: u32) -> (Option<Retired>, Option<u64>) {
+    read::exited(pid)
+        .map(|(figures, peak)| (Retired(figures), peak))
+        .unzip()
+}
+
+/// [`exited`] on Linux: no figures, and the child's peak resident set
+/// where it stands above the spawner's own high-water mark, read once the
+/// child has exited. At the exec Linux takes the spawning map's high-water
+/// mark into the child's `ru_maxrss` (`fs/exec.c`'s `exec_mmap`), and a
+/// `posix_spawn`ed child's map is its spawner's, so a peak no higher than
+/// the spawner's own may be the spawner's, and is none (#3798).
+#[cfg(target_os = "linux")]
+pub(crate) fn exited(pid: u32) -> (Option<Retired>, Option<u64>) {
+    let peak = read::exited(pid);
+    let own = own_high_water();
+    (None, peak.filter(|&peak| own.is_some_and(|own| peak > own)))
+}
+
+/// [`exited`] elsewhere: neither.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub(crate) fn exited(_pid: u32) -> (Option<Retired>, Option<u64>) {
+    (None, None)
+}
+
+/// Before a process arm is spawned, on Linux: the spawner's own resident
+/// high-water mark set back to what it holds now, `5` to `clear_refs`
+/// (`proc(5)`), so the floor [`exited`] holds a peak above is its resident
+/// set at the spawn and not its peak over the whole bench. A write that
+/// fails leaves the floor high, and a peak below it is none.
+pub(crate) fn spawning() {
+    if cfg!(target_os = "linux") {
+        std::fs::write("/proc/self/clear_refs", "5").ok();
+    }
+}
+
+/// This process's `VmHWM`, in bytes, where `/proc` states it.
+#[cfg(any(test, target_os = "linux"))]
+fn own_high_water() -> Option<u64> {
+    high_water(&std::fs::read_to_string("/proc/self/status").ok()?)
+}
+
+/// The `VmHWM` line of a `/proc/<pid>/status` text, in bytes.
+#[cfg(any(test, target_os = "linux"))]
+fn high_water(status: &str) -> Option<u64> {
+    let kib = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))?;
+    let kib = kib
+        .trim()
+        .strip_suffix("kB")?
+        .trim_end()
+        .parse::<u64>()
+        .ok()?;
+    kib.checked_mul(1024)
+}
+
+/// Which peak of a process's memory the platform states, and so the one a
+/// peak bar's reading names. They are not one measure (#3368): the
+/// footprint leaves out the clean pages of the binary that the resident
+/// set counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Peak {
+    /// macOS's `ri_lifetime_max_phys_footprint` from `proc_pid_rusage`.
+    Footprint,
+    /// Linux's `ru_maxrss` from `waitid`, the kernel's `VmHWM` at the
+    /// exit (#3798).
+    Resident,
+}
+
+impl Peak {
+    /// The peak this platform states, or none where it states neither.
+    pub(crate) const HERE: Option<Peak> = if cfg!(target_os = "macos") {
+        Some(Peak::Footprint)
+    } else if cfg!(target_os = "linux") {
+        Some(Peak::Resident)
+    } else {
+        None
+    };
+
+    /// The peak as a reading names it, with its source.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Peak::Footprint => "peak physical footprint (ri_lifetime_max_phys_footprint)",
+            Peak::Resident => {
+                "peak resident set (ru_maxrss, VmHWM; it counts the binary's clean pages, which macOS's footprint leaves out)"
+            }
+        }
+    }
+
+    /// Why a run states no peak of this kind.
+    pub(crate) fn absent(self) -> &'static str {
+        match self {
+            Peak::Footprint => "proc_pid_rusage could not read the run's peak physical footprint",
+            Peak::Resident => {
+                "waitid could not read the run's ru_maxrss, or it stood no higher than xtask's own resident set at the spawn, which a spawned child's ru_maxrss carries"
+            }
+        }
     }
 }
 
@@ -270,6 +363,49 @@ mod tests {
         assert!(arm.numbers("b").is_empty());
         assert_eq!(Spent::median(&[Spent::Unasked]), Spent::Unasked);
         assert_eq!(Spent::Unasked.text(), None);
+    }
+
+    /// A child that held a known allocation peaks above it by no more than
+    /// its own image, read once it has exited and before it is reaped, as
+    /// [`Peak::HERE`] names the peak (#3798). The child is this test binary
+    /// run again on this test alone, holding the MiB `HOLD` names; on Linux
+    /// it holds 64 MiB more than this process does, so its peak stands
+    /// above the floor [`exited`] holds it to.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn an_exited_child_s_peak_is_the_memory_it_held() {
+        const HOLD: &str = "XTASK_TEST_PEAK_HOLD_MIB";
+        if let Ok(mib) = std::env::var(HOLD) {
+            let held = vec![1_u8; mib.parse::<usize>().unwrap() << 20];
+            std::hint::black_box(&held);
+            return;
+        }
+        spawning();
+        let hold = own_high_water().unwrap_or(0) / (1 << 20) + 64;
+        let path = module_path!().split_once("::").unwrap().1;
+        let test = format!("{path}::an_exited_child_s_peak_is_the_memory_it_held");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test, "--test-threads=1"])
+            .env(HOLD, hold.to_string())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let (_, peak) = exited(child.id());
+        assert!(child.wait().unwrap().success());
+        let (peak, bytes) = (peak.unwrap(), hold << 20);
+        assert!(
+            peak >= bytes && peak < bytes + (64 << 20),
+            "{peak} held {bytes}"
+        );
+    }
+
+    /// `VmHWM` is read in KiB and stated in bytes; a text without it is
+    /// none.
+    #[test]
+    fn a_status_text_s_high_water_mark_is_its_vmhwm_line_in_bytes() {
+        let status = "Name:\tphp\nVmPeak:\t  300000 kB\nVmHWM:\t  206152 kB\nVmRSS:\t    1352 kB\n";
+        assert_eq!(high_water(status), Some(206_152 * 1024));
+        assert_eq!(high_water("Name:\tphp\nState:\tZ (zombie)\n"), None);
     }
 
     /// A process arm's run states what it retired over its life, and the

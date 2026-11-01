@@ -1,10 +1,12 @@
-//! The reader behind [`Retired::of`](super::Retired::of) on macOS, xtask's
-//! one `unsafe` home (`unsafe.homes`, #3062's ruling): what a process and
-//! its children had retired, from `proc_pid_rusage(RUSAGE_INFO_V4)` over
-//! the process and each pid `proc_listchildpids` names, summed. Apple
-//! silicon states user, system and runnable time in mach ticks, so each is
-//! taken to nanoseconds through `mach_timebase_info`; on Intel the
-//! timebase is one, and the conversion is the identity.
+//! The reader behind [`Retired::of`](super::Retired::of) on macOS and
+//! [`exited`](super::exited) on macOS and Linux, xtask's one `unsafe` home
+//! (`unsafe.homes`, #3062's ruling): what a process and its children had
+//! retired, from `proc_pid_rusage(RUSAGE_INFO_V4)` over the process and
+//! each pid `proc_listchildpids` names, summed. Apple silicon states user,
+//! system and runnable time in mach ticks, so each is taken to nanoseconds
+//! through `mach_timebase_info`; on Intel the timebase is one, and the
+//! conversion is the identity. Linux states none of these figures here,
+//! only an exited child's peak resident set (#3798).
 #![deny(
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block
@@ -14,12 +16,14 @@ use nix::libc;
 
 /// The most children of one server read: php-fpm's pool of eight, with
 /// room to spare.
+#[cfg(target_os = "macos")]
 const CHILDREN: usize = 64;
 
 /// What `pid` and its children had retired, summed: instructions, cycles,
 /// CPU (user and system) and runnable nanoseconds. None where `pid` itself
 /// or its children cannot be read; a child that ended between the listing
 /// and its read is left out, and the total that went back says so.
+#[cfg(target_os = "macos")]
 pub(super) fn totals(pid: u32) -> Option<[u64; 4]> {
     let pid = libc::pid_t::try_from(pid).ok()?;
     let mut children: [libc::pid_t; CHILDREN] = [0; CHILDREN];
@@ -46,6 +50,7 @@ pub(super) fn totals(pid: u32) -> Option<[u64; 4]> {
 /// `proc_pid_rusage` reads the zombie's totals, as `time -l` reads them.
 /// None where either call fails; a wait a signal cut short is waited
 /// again.
+#[cfg(target_os = "macos")]
 pub(super) fn exited(pid: u32) -> Option<([u64; 4], u64)> {
     let id = libc::id_t::from(pid);
     loop {
@@ -77,6 +82,7 @@ pub(super) fn exited(pid: u32) -> Option<([u64; 4], u64)> {
 
 /// One process's instructions, cycles, CPU (user and system) and runnable
 /// nanoseconds, its ticks taken to nanoseconds through the timebase `base`.
+#[cfg(target_os = "macos")]
 fn figures(info: &libc::rusage_info_v4, (numer, denom): (u32, u32)) -> [u64; 4] {
     let ns = |ticks: u64| ticks.saturating_mul(u64::from(numer)) / u64::from(denom);
     let cpu = info.ri_user_time.saturating_add(info.ri_system_time);
@@ -89,6 +95,7 @@ fn figures(info: &libc::rusage_info_v4, (numer, denom): (u32, u32)) -> [u64; 4] 
 }
 
 /// The process `pid`'s `rusage_info_v4`, or none where it cannot be read.
+#[cfg(target_os = "macos")]
 fn usage(pid: libc::pid_t) -> Option<libc::rusage_info_v4> {
     // SAFETY: `rusage_info_v4` is integers and bytes, for which every bit
     // pattern, zero among them, is a value.
@@ -100,6 +107,7 @@ fn usage(pid: libc::pid_t) -> Option<libc::rusage_info_v4> {
 }
 
 /// The mach timebase, a tick's nanoseconds as `numer / denom`.
+#[cfg(target_os = "macos")]
 #[allow(
     deprecated,
     reason = "libc points at mach2, which the lock does not hold"
@@ -111,7 +119,49 @@ fn timebase() -> Option<(u32, u32)> {
     (status == 0 && base.denom != 0).then_some((base.numer, base.denom))
 }
 
-#[cfg(test)]
+/// The most memory the child `pid` held resident at once, in bytes, read
+/// once it has exited and before it is reaped: the raw `waitid` with
+/// `WNOWAIT` and a `rusage`, which glibc's wrapper does not pass, fills it
+/// from the zombie as `wait4` would and leaves the child for the caller's
+/// own wait (`kernel/exit.c`'s `wait_task_zombie`). Its `ru_maxrss` is the
+/// most of the high-water marks the kernel kept for it, in KiB: its own
+/// `VmHWM` at the exit, and the spawning map's at the exec, which
+/// [`exited`](super::exited) holds it above. `VmHWM` in `/proc/<pid>/status`
+/// is not read: a zombie has no memory map, and a read before the exit
+/// misses what the run grew after it. None where the call fails; a wait a
+/// signal cut short is waited again.
+#[cfg(target_os = "linux")]
+pub(super) fn exited(pid: u32) -> Option<u64> {
+    let pid = libc::pid_t::try_from(pid).ok()?;
+    loop {
+        // Written by the call and never read.
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::uninit();
+        // SAFETY: `rusage` is integers, for which every bit pattern, zero
+        // among them, is a value.
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` and `usage` are room for the `siginfo_t` and the
+        // `rusage` the syscall writes, and outlive it; the other arguments
+        // are integers.
+        let waited = unsafe {
+            libc::syscall(
+                libc::SYS_waitid,
+                libc::P_PID,
+                pid,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+                &raw mut usage,
+            )
+        };
+        if waited == 0 {
+            return u64::try_from(usage.ru_maxrss).ok()?.checked_mul(1024);
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return None;
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use std::time::{Duration, Instant};
 

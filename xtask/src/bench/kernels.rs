@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use super::spent::Peak;
 use super::{
     Arm, Arms, Counted, Declared, Environment, Held, PRODUCTION, Sample, Side, Sides, Spawned,
     Unit, ran, second,
@@ -118,7 +119,7 @@ pub(crate) enum Read {
     /// Its time and what its process retired, per opline of the count
     /// [`counted`] takes of the program (#2946).
     PerOpline,
-    /// Its process's peak physical footprint (G4, #2961).
+    /// Its process's peak memory, as [`Peak::HERE`] names it (G4, #2961).
     Peak,
     /// Its traces' code per opline they compiled ([`code_per_opline`],
     /// G4, #2961).
@@ -204,10 +205,12 @@ fn tracing(
         ("-aa", ["jit-off", "jit-off"], Held::Control),
     ]
     .map(|(aa, [a, b], held)| {
+        let peak = Peak::HERE.map_or("peak memory", Peak::as_str);
+        let peak = format!("by {peak} over the seven kernels");
         let over = match read {
             Read::Time => "over the seven kernels and Zend/bench.php",
             Read::PerOpline => "per opline over the seven kernels",
-            Read::Peak => "by peak footprint over the seven kernels",
+            Read::Peak => &peak,
             Read::Code => "by code per opline compiled over the seven kernels",
         };
         let about = format!("{whose} under [regime.{a}] against [regime.{b}] {over}");
@@ -452,9 +455,10 @@ pub(crate) fn stepping(root: &Path) -> [Declared; 2] {
 }
 
 /// G4, memory and code (#2961, `research/jit-research.r1.md` §E.11), on
-/// the seven kernels, from [`Build::Usage`]: its peak physical footprint
-/// with the tier compiling, under `jit-tracing`, against the
-/// interpreter's, under `jit-off`, the bar `g4-rss` and its control; and
+/// the seven kernels, from [`Build::Usage`]: its peak memory, as
+/// [`Peak::HERE`] names it, the footprint on macOS and the resident set on
+/// Linux (#3798), with the tier compiling, under `jit-tracing`, against
+/// the interpreter's, under `jit-off`, the bar `g4-rss` and its control; and
 /// `g4-code`, the bytes its traces take per opline they compiled against
 /// the pinned php's under `jit-tracing`, each as its own `jit_debug`
 /// lines state them ([`code_per_opline`]).
@@ -536,12 +540,14 @@ impl Side for Parsed {
     }
 }
 
-/// A run's peak physical footprint in bytes.
+/// A run's peak memory in bytes, as [`Peak::HERE`] names it.
 #[allow(clippy::cast_precision_loss)]
 fn peak(ran: &Sample, _: &[u8]) -> Result<f64> {
-    let peak = ran
-        .peak
-        .context("this platform states no process's peak footprint")?;
+    let absent = Peak::HERE.map_or(
+        "this platform states no process's peak memory",
+        Peak::absent,
+    );
+    let peak = ran.peak.context(absent)?;
     Ok(peak as f64)
 }
 
@@ -659,6 +665,11 @@ mod tests {
             runtime(root),
         ];
         let bars = bars.map(|b| b.map(|b| (b.id, b.held)));
+        let named = Peak::HERE.map_or("peak memory", Peak::as_str);
+        assert!(
+            g4(root)[0].about.contains(named),
+            "the reading names its peak"
+        );
         let g4 = g4(root).map(|b| (b.id, b.held));
         let rss = [("g4-rss", Held::Series), ("g4-rss-aa", Held::Control)];
         let g4_ids = rss.into_iter().chain([("g4-code", Held::Series)]);

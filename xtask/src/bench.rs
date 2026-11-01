@@ -449,8 +449,9 @@ pub(crate) struct Sample {
     pub(crate) value: f64,
     pub(crate) wrote: Vec<u8>,
     pub(crate) spent: Spent,
-    /// A process arm's peak physical footprint in bytes, where it asked
-    /// for what its process retired and the platform states it (#2961).
+    /// A process arm's peak memory in bytes, as [`spent::Peak::HERE`]
+    /// names it, where it asked for what its process retired and the
+    /// platform states it (#2961, #3798).
     pub(crate) peak: Option<u64>,
 }
 
@@ -833,6 +834,9 @@ fn ran(arm: &Arm, program: &Path) -> Result<(Sample, Vec<u8>)> {
     if arm.env.clear {
         command.env_clear();
     }
+    if arm.retired {
+        spent::spawning();
+    }
     let start = Instant::now();
     let mut child = command
         .envs(&arm.env.set)
@@ -852,7 +856,7 @@ fn ran(arm: &Arm, program: &Path) -> Result<(Sample, Vec<u8>)> {
     }
     let (done, value, (spent, peak)) = if arm.retired {
         let (stdout, stderr) = (drained(child.stdout.take()), drained(child.stderr.take()));
-        let (retired, peak) = spent::Retired::exited(child.id()).unzip();
+        let (retired, peak) = spent::exited(child.id());
         let value = start.elapsed().as_secs_f64() * 1000.0;
         let status = child.wait();
         let status = status.with_context(|| format!("waiting for the arm {}", arm.name))?;
