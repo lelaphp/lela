@@ -2426,6 +2426,51 @@ fn a_trace_that_stops_at_a_return_leaves_the_frame_in_place() -> Result<(), Stri
     Ok(())
 }
 
+/// A variable that holds a reference, returned, is held by no guard, as
+/// php's trace SSA reads it `IS_UNKNOWN`, and leaves in place read
+/// through the reference and shared with the caller
+/// ([`super::Returned::Shared`]), as `zend_jit_return` copies it
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:11360-11380`): where a trace stops at
+/// the return of a long (#3827), and where a loop's trace returns a
+/// string through it to the loop.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_through_a_reference_is_shared_in_place() -> Result<(), String> {
+    let stops = built(
+        &[("record.function", "f"), ("record.start", "enter")],
+        "function f($i) { $x = $i; $r = &$x; return $x; }
+        $s = 0; for ($i = 0; $i < 100; $i++) { $s += f($i); } echo $s, \"\\n\";",
+    )?;
+    let inlined = built(
+        &[("record.function", "k"), ("record.start", "loop")],
+        "function g($i) { $x = \"b$i\"; $r = &$x; return $x; }
+        function k($n) { $s = []; for ($i = 0; $i < $n; $i++) { $s[] = g($i); } return $s; }
+        echo k(9)[8], \"\\n\";",
+    )?;
+    assert_eq!(stops.entry.stop, Stop::Return, "{}", dump::render(&stops));
+    for ir in [stops, inlined] {
+        let rendered = dump::render(&ir);
+        let returned = (ir.ops.iter())
+            .find_map(|op| match op {
+                Op::Line(line) if line.opcode == Opcode::Return => Some(line),
+                _ => None,
+            })
+            .ok_or_else(|| format!("no return: {rendered}"))?;
+        assert_eq!(returned.form, Form::Inline, "{rendered}");
+        assert!(
+            matches!(
+                returned.imm,
+                Imm::Leave {
+                    value: super::Returned::Shared,
+                    ..
+                }
+            ),
+            "{rendered}"
+        );
+    }
+    Ok(())
+}
+
 /// A loop whose first opline php compiles inline but whose code may call
 /// into php's runtime keeps php's initial instruction pointer, the code
 /// standing the frame at that opline first (`jit_SET_EX_OPLINE`,
