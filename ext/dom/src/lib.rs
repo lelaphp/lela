@@ -397,7 +397,7 @@ fn import_simplexml_common(
 ) -> Result<Owner<Value>, Thrown> {
     let ce = throwables::Throwables::of(req)?;
     let exported = php_ext_libxml::import_node(req, object)
-        .filter(|e| e.document().is_some())
+        .filter(Exported::has_document)
         .filter(|e| matches!(e.node().kind(), Kind::Element | Kind::Attribute));
     let Some(exported) = exported else {
         return Err(argument_error(

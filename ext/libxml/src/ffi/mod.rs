@@ -1339,7 +1339,7 @@ impl NodeObject {
     /// The document this counts, as a value another object can share:
     /// php's `intern->document` read, no count taken.
     #[must_use]
-    pub fn shared_doc(&self) -> Option<SharedDoc> {
+    pub(crate) fn shared_doc(&self) -> Option<SharedDoc> {
         // SAFETY: the wrapper this owns.
         NonNull::new(unsafe { (*self.w()).document }).map(SharedDoc)
     }
@@ -1683,32 +1683,13 @@ impl NodeObject {
 }
 
 /// A document reference handed from one object to another, php's
-/// `php_libxml_ref_obj *` copied: it counts nothing itself.
+/// `php_libxml_ref_obj *` copied: it counts nothing itself. It stays in
+/// this crate: another reaches a document's reference only as the
+/// [`DocOf`] checked against its node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SharedDoc(NonNull<DocRef>);
+pub(crate) struct SharedDoc(NonNull<DocRef>);
 
 impl SharedDoc {
-    /// The switches, php's defaults where the document has none yet.
-    ///
-    /// # Safety
-    /// Some live object counts the document.
-    #[must_use]
-    pub unsafe fn props(self) -> Switches {
-        // SAFETY: the caller's contract.
-        unsafe { (*self.0.as_ptr()).props.as_ref() }
-            .map(|p| p.switches)
-            .unwrap_or_default()
-    }
-
-    /// `php_libxml_invalidate_node_list_cache`.
-    ///
-    /// # Safety
-    /// Some live object counts the document.
-    pub unsafe fn invalidate(self) {
-        // SAFETY: the caller's contract.
-        unsafe { (*self.0.as_ptr()).modification += 1 };
-    }
-
     /// The document the reference names, `ref->ptr`.
     ///
     /// # Safety
@@ -1745,11 +1726,18 @@ impl Exported {
         self.node
     }
 
-    /// The document reference the object counts, to share with an object
-    /// standing for the node; `None` is php's `nodeobj->document == NULL`.
+    /// The document reference the object counts, which [`DocOf::exported`]
+    /// checks against the node; `None` is php's `nodeobj->document == NULL`.
     #[must_use]
-    pub fn document(&self) -> Option<SharedDoc> {
+    pub(crate) fn document(&self) -> Option<SharedDoc> {
         self.document.map(SharedDoc)
+    }
+
+    /// Whether the object counts a document at all, php's
+    /// `nodeobj->document != NULL`.
+    #[must_use]
+    pub fn has_document(&self) -> bool {
+        self.document.is_some()
     }
 
     /// `nodeobj->document->class_type`.

@@ -63,7 +63,7 @@ ffi::Emitter::write_dtd_entity
 ffi::Expanded
 ffi::Exported
 ffi::Exported::class_type
-ffi::Exported::document
+ffi::Exported::has_document
 ffi::Exported::mapped
 ffi::Exported::node
 ffi::Exported::of
@@ -265,7 +265,6 @@ ffi::NodeObject::set_modification
 ffi::NodeObject::set_object
 ffi::NodeObject::set_private_data
 ffi::NodeObject::set_quirks
-ffi::NodeObject::shared_doc
 ffi::NodeObject::take_node
 ffi::NodeObject::take_props
 ffi::Ns
@@ -335,9 +334,6 @@ ffi::Sax::start_element_ns
 ffi::Sax::unparsed_entity_decl
 ffi::Schema
 ffi::Scope
-ffi::SharedDoc
-ffi::SharedDoc::invalidate
-ffi::SharedDoc::props
 ffi::Source
 ffi::Switches
 ffi::TextReader
