@@ -5,7 +5,9 @@
 use super::Request;
 use crate::api::raising::Thrown;
 use crate::exec;
-use crate::layer::{IncludeFile, IncludeReadHook};
+use crate::layer::IncludeReadHook;
+
+use super::include::FileHandle;
 
 impl Request {
     /// [`crate::api::call::load_file`]: the path resolved along the
@@ -204,7 +206,8 @@ impl Request {
         };
         // `php_stream_open_for_zend_ex` with no bit that warns: a file that
         // does not open is passed over in silence.
-        let (mut file, named) = (hooks.open)(self, path, false)?.unzip();
+        let (file, named) = (hooks.open)(self, path, false)?.unzip();
+        let mut file = file.map(FileHandle::Opened);
         let served = self.serve_stream(written, file.as_mut().zip(named), hooks.read_include);
         match self.close_stream(hooks.close_include, file, served.as_ref().err()) {
             Some(thrown) => Err(thrown),
@@ -219,7 +222,7 @@ impl Request {
     fn serve_stream(
         &mut self,
         written: &[u8],
-        opened: Option<(&mut IncludeFile, Vec<u8>)>,
+        opened: Option<(&mut FileHandle, Vec<u8>)>,
         read: IncludeReadHook,
     ) -> Result<bool, Thrown> {
         let Some((file, named)) = opened else {

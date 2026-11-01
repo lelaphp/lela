@@ -62,12 +62,10 @@ fn read_include(req: &mut Request, file: &mut IncludeFile) -> Result<Option<Vec<
 }
 
 /// [`StreamHooks::close_include`]: the `zend_file_handle` [`open`] held
-/// destroyed, or, where a fatal is ending the request, left unreached as
-/// `zend_bailout` leaves `zend_destroy_file_handle`: its stream stands
-/// among the request's resources, which close it at shutdown. The frame
-/// that opened it closes it, as php's C frame holds its own
-/// `zend_file_handle`, so two fibers' autoloaded files whose tops suspend
-/// are each closed as their own fiber resumes, whichever opened last.
+/// destroyed. The frame that opened it closes it, as php's C frame holds
+/// its own `zend_file_handle`, so two fibers' autoloaded files whose tops
+/// suspend are each closed as their own fiber resumes, whichever opened
+/// last; one a fatal left listed is closed at shutdown.
 ///
 /// ```php
 /// class W { public $context; private $d = false; public $p;
@@ -105,9 +103,7 @@ fn read_include(req: &mut Request, file: &mut IncludeFile) -> Result<Option<Vec<
 /// end
 /// ```
 fn close_include(req: &mut Request, file: IncludeFile) {
-    if let Ok(fh) = file.0.downcast::<ScannerFile>()
-        && !req.diagnostics().bailing_out()
-    {
+    if let Ok(fh) = file.0.downcast::<ScannerFile>() {
         fh.destroy(req);
     }
 }

@@ -58,6 +58,8 @@ pub(super) struct Include {
     /// The files the request's `zend_file_handle`s hold open, in the
     /// order each was opened ([`Held`]).
     held: Vec<Held>,
+    /// The include files listed so far ([`Listed`]), which names the next.
+    listed: u64,
 }
 
 /// A file one of the request's `zend_file_handle`s holds open past the
@@ -66,7 +68,9 @@ pub(super) struct Include {
 /// it (#2458, #2492): the program's file as its host hands it over
 /// ([`ProgramFile`]), and `auto_prepend_file`'s, `auto_append_file`'s and
 /// the built-in server's router's as `php_execute_script_ex` and
-/// `php_cli_server_dispatch_router` keep theirs ([`HandlePath::Kept`]).
+/// `php_cli_server_dispatch_router` keep theirs ([`HandlePath::Kept`]);
+/// and an include's stream from its read until its frame destroys it,
+/// as `CG(open_files)` lists it ([`FileHandle`]).
 struct Held {
     holder: Holder,
     until: Until,
@@ -82,7 +86,56 @@ enum Holder {
     /// `EG(included_files)` holds the program under
     /// ([`StreamHooks::open_primary`](crate::layer::StreamHooks::open_primary)).
     Stream(PhpString),
+    /// An include's file, listed where its frame put it ([`FileHandle`]).
+    Include(Listed, IncludeFile),
 }
+
+/// An include's `zend_file_handle` as the frame that opened it holds it,
+/// as `compile_filename`'s and `spl_autoload`'s C frames hold theirs: the
+/// file [`StreamHooks::open`](crate::layer::StreamHooks::open) held, until
+/// `open_file_for_scanning` lists it on `CG(open_files)` once
+/// `zend_stream_fixup` has read it, and then its place there, which the
+/// frame's `zend_destroy_file_handle` takes it off
+/// ([`Request::close_stream`]). A fatal jumps past the destroy, so what it
+/// leaves listed stands until `zend_stream_shutdown` closes it, oldest
+/// first, before the request's resources ([`Request::close_listed_files`]).
+/// The list holds the file, not the frame, so one a suspended fiber's
+/// `spl_autoload` holds is closed there too, though no frame of that fiber
+/// is left again:
+///
+/// ```php
+/// class W { public $context; private $d = false; public $p;
+///     function stream_open($p, $m, $o, &$op) { $this->p = $p; echo "open $p\n"; return true; }
+///     function stream_read($n) { if ($this->d) return ''; $this->d = true;
+///         return $this->p === 'ww://b' ? "<?php function strlen() {}" : "<?php echo 'ran {$this->p}', PHP_EOL; Fiber::suspend();"; }
+///     function stream_eof() { return $this->d; }
+///     function stream_stat() { return []; }
+///     function stream_close() { echo "close {$this->p}\n"; }
+///     function stream_set_option($o, $a, $b) { return false; } }
+/// stream_wrapper_register('ww', 'W');
+/// register_shutdown_function(function () { echo "shutdown\n"; });
+/// $a = new Fiber(fn () => spl_autoload('ww://A', '.inc'));
+/// $a->start();
+/// include 'ww://b';
+/// ```
+/// ```expect exit=255
+/// open ww://a.inc
+/// ran ww://a.inc
+/// open ww://b
+///
+/// Fatal error: Cannot redeclare function strlen() in ww://b on line 1
+/// shutdown
+/// close ww://a.inc
+/// close ww://b
+/// ```
+pub(super) enum FileHandle {
+    Opened(IncludeFile),
+    Listed(Listed),
+}
+
+/// An include file's place among the request's [`Held`] files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Listed(u64);
 
 /// When the request closes a file it holds ([`Held`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +147,7 @@ enum Until {
     /// (`Z/main/main.c:2650-2656`), each before the shutdown functions.
     Served,
     /// As the request ends, after its shutdown functions
-    /// ([`ProgramFile::Listed`]).
+    /// ([`ProgramFile::Listed`], [`FileHandle`]).
     Ended,
 }
 
@@ -244,7 +297,7 @@ impl Request {
     pub(super) fn primary_opened_path(&self) -> Option<PhpString> {
         self.include.held.iter().find_map(|held| match held.holder {
             Holder::Stream(opened_path) => Some(opened_path),
-            Holder::File { .. } => None,
+            Holder::File { .. } | Holder::Include(..) => None,
         })
     }
 
@@ -302,23 +355,61 @@ impl Request {
     /// (`Z/Zend/zend_execute_API.c:410`): `CG(open_files)` destroyed, so
     /// a program's file php-fpm left listed is closed and its
     /// `zend_file_handle`'s buffer, element and name freed ([`ProgramFile::Listed`]), after
-    /// the shutdown functions and the destructors.
+    /// the shutdown functions and the destructors; and so is every
+    /// include's file a fatal left listed ([`FileHandle`]), oldest first,
+    /// before the request's resources would close them newest first. An
+    /// error handler that includes a file whose compile is fatal leaves two:
+    ///
+    /// ```php
+    /// class W { public $context; private $d = false; public $p;
+    ///     function stream_open($p, $m, $o, &$op) { $this->p = $p; echo "open $p\n"; return true; }
+    ///     function stream_read($n) { if ($this->d) return ''; $this->d = true;
+    ///         return $this->p === 'ww://b' ? "<?php function strlen() {}" : "<?php function f(\$a = 1, \$b) {} echo 'ran a', PHP_EOL;"; }
+    ///     function stream_eof() { return $this->d; }
+    ///     function stream_stat() { return []; }
+    ///     function stream_close() { echo "close {$this->p}\n"; }
+    ///     function stream_set_option($o, $a, $b) { return false; }
+    ///     function __destruct() { echo "dtor {$this->p}\n"; } }
+    /// stream_wrapper_register('ww', 'W');
+    /// set_error_handler(function ($no, $str) { echo "handler: $str\n"; include 'ww://b'; return true; });
+    /// register_shutdown_function(function () { echo "shutdown\n"; });
+    /// $r = fopen('ww://r', 'r');
+    /// include 'ww://a';
+    /// echo "end\n";
+    /// ```
+    /// ```expect exit=255
+    /// open ww://r
+    /// open ww://a
+    /// handler: f(): Optional parameter $a declared before required parameter $b is implicitly treated as a required parameter
+    /// open ww://b
+    ///
+    /// Fatal error: Cannot redeclare function strlen() in ww://b on line 1
+    /// shutdown
+    /// close ww://a
+    /// close ww://b
+    /// close ww://r
+    /// ```
     pub(crate) fn close_listed_files(&mut self) {
         self.close_held(Until::Ended);
         self.destroy_primary_handle();
     }
 
-    /// Every held file that closes by `until`, a stream through the
-    /// layer.
+    /// Every held file that closes by `until`, in the order each was
+    /// opened, a stream through the layer.
     fn close_held(&mut self, until: Until) {
         let held = std::mem::take(&mut self.include.held);
         for held in held {
             if until == Until::Served && held.until == Until::Ended {
                 self.include.held.push(held);
-            } else if let Holder::Stream(_) = held.holder
-                && let Some(hooks) = self.stream_hooks()
-            {
-                (hooks.close_primary)(self);
+                continue;
+            }
+            let Some(hooks) = self.stream_hooks() else {
+                continue;
+            };
+            match held.holder {
+                Holder::File { .. } => {}
+                Holder::Stream(_) => (hooks.close_primary)(self),
+                Holder::Include(_, file) => (hooks.close_include)(self, file),
             }
         }
     }
@@ -1030,7 +1121,8 @@ impl Request {
         let outer = self.include.including.replace((kind, self.vm.depth()));
         let opened = (hooks.open)(self, path, true);
         self.include.including = outer;
-        let (mut file, named) = opened?.unzip();
+        let (file, named) = opened?.unzip();
+        let mut file = file.map(FileHandle::Opened);
         let opened = file.as_mut().zip(named);
         let compiled = self.compile_stream(kind, written, opened, hooks.read_include);
         // What the close threw: the unit compiled before it is the
@@ -1051,14 +1143,20 @@ impl Request {
     /// throwable standing in `EG(exception)`, so the wrapper's
     /// `stream_close` is refused as `zend_call_function` refuses it and its
     /// destructor chains onto it, and otherwise what the close threw, which
-    /// the layer kept.
+    /// the layer kept. A fatal ending the request jumps past it: a file
+    /// listed stays listed ([`FileHandle`]), and one not yet listed leaves
+    /// its stream among the request's resources.
     pub(super) fn close_stream(
         &mut self,
         close: fn(&mut Request, IncludeFile),
-        mut file: Option<IncludeFile>,
+        mut file: Option<FileHandle>,
         thrown: Option<&Thrown>,
     ) -> Option<Thrown> {
-        let mut destroy = |req: &mut Request| file.take().map(|file| close(req, file));
+        let mut destroy = |req: &mut Request| {
+            let file = file.take().filter(|_| !req.diagnostics().bailing_out());
+            file.and_then(|file| req.unlist(file))
+                .map(|file| close(req, file))
+        };
         let Some(thrown) = thrown else {
             destroy(self);
             return self.stream_thrown.take();
@@ -1069,18 +1167,59 @@ impl Request {
         None
     }
 
+    /// `open_file_for_scanning` over the file `file` holds:
+    /// `zend_stream_fixup`, `read`, then the file put on `CG(open_files)`
+    /// whether the read failed or not, as php lists it; a fatal in the
+    /// read leaves it unlisted.
+    fn scan(
+        &mut self,
+        file: &mut FileHandle,
+        read: IncludeReadHook,
+    ) -> Result<Option<Vec<u8>>, Thrown> {
+        let FileHandle::Opened(opened) = file else {
+            return Ok(None);
+        };
+        let source = read(self, opened)?;
+        let listed = Listed(self.include.listed);
+        self.include.listed += 1;
+        if let FileHandle::Opened(opened) = std::mem::replace(file, FileHandle::Listed(listed)) {
+            self.include.held.push(Held {
+                holder: Holder::Include(listed, opened),
+                until: Until::Ended,
+            });
+        }
+        Ok(source)
+    }
+
+    /// `zend_destroy_file_handle`'s `zend_llist_del_element`: the file
+    /// `file` holds, taken off `CG(open_files)` where it was listed.
+    fn unlist(&mut self, file: FileHandle) -> Option<IncludeFile> {
+        let listed = match file {
+            FileHandle::Opened(file) => return Some(file),
+            FileHandle::Listed(listed) => listed,
+        };
+        let held = &mut self.include.held;
+        let at = held
+            .iter()
+            .position(|held| matches!(held.holder, Holder::Include(at, _) if at == listed))?;
+        match held.remove(at).holder {
+            Holder::Include(_, file) => Some(file),
+            Holder::File { .. } | Holder::Stream(_) => None,
+        }
+    }
+
     /// [`Request::include_stream`] over the file the open held and the
     /// name it gave it, `opened`, before `zend_destroy_file_handle`: a once
     /// form's `EG(included_files)` asked by that name, `ZEND_FAKE_OP_ARRAY`
     /// for one it holds, which is read nothing of, and the name put in it
     /// before the compile otherwise; then `compile_file` over the file
-    /// `read` whole, compiled under the name, and its message where the
-    /// open or the read failed.
+    /// `read` whole and listed ([`FileHandle`]), compiled under the name,
+    /// and its message where the open or the read failed.
     pub(super) fn compile_stream(
         &mut self,
         kind: IncludeKind,
         written: &[u8],
-        mut opened: Option<(&mut IncludeFile, Vec<u8>)>,
+        mut opened: Option<(&mut FileHandle, Vec<u8>)>,
         read: IncludeReadHook,
     ) -> Result<Opened, Thrown> {
         if kind.once()
@@ -1094,7 +1233,7 @@ impl Request {
         let source = match &mut opened {
             Some((file, _)) if self.stream_thrown.is_none() => {
                 let outer = self.include.including.replace((kind, self.vm.depth()));
-                let source = read(self, file);
+                let source = self.scan(file, read);
                 self.include.including = outer;
                 source?
             }
