@@ -748,6 +748,7 @@ remedy = "`computed run <file>` to refresh the region; a hand edit to keep is a 
 [[rule]]
 id = "harness.self"
 tool = ["Edit", "Write"]
+where = "checkout"   # as harness.self-shell: a checkout of this repository, never a scratch repository outside them (#3885)
 scope = [".claude/**", ".claude-plugin/marketplace.json", "harness-plugins/*/hooks/**", "harness-plugins/*/.claude-plugin/**", "seams.toml", "oracle.toml", "docs/divergence.toml"]
 # A skill is an ordinary file, held by review and the [budget] harness
 # ceiling (#626); a plugin laid inside one is not, since a project skill's
