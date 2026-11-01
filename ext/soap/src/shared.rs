@@ -178,7 +178,24 @@ pub(crate) fn add_soap_fault_ex(
 
 /// `add_soap_fault`: [`add_soap_fault_ex`] for a caller that only keeps
 /// the fault where it is kept, the caller's owner given up,
-/// `zval_ptr_dtor(&fault)`.
+/// `zval_ptr_dtor(&fault)`. The fault's message shares its
+/// `$faultstring`, as [`set_soap_fault`] writes it, and its `$lang` is
+/// `soap_lang_en`, interned at the engine's start, so the request's
+/// first fault costs it nothing. The call's bytes are counted past an
+/// `Exception`'s, whose `$file` and trace take what the file's path
+/// takes:
+///
+/// ```php
+/// $o = ['location' => 'ftp://127.0.0.1/x', 'uri' => 'urn:x', 'exceptions' => false];
+/// $b = new SoapClient(null, $o);
+/// $m = memory_get_usage(); $e = new Exception('x'); $x = memory_get_usage() - $m;
+/// $m = memory_get_usage(); $r = $b->__soapCall('f', []); echo memory_get_usage() - $m - $x, "\n";
+/// echo $r->faultcode, ': ', $r->faultstring, "\n";
+/// ```
+/// ```expect
+/// 2144
+/// HTTP: Unknown protocol. Only http and https are allowed.
+/// ```
 pub(crate) fn add_soap_fault(
     req: &mut Request,
     obj: PhpObject,

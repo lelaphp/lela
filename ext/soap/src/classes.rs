@@ -270,7 +270,26 @@ impl SoapFault {
     /// `SoapFault::__construct(array|string|null $code, string $string,
     /// ?string $actor = null, mixed $details = null, ?string $name = null,
     /// mixed $headerFault = null, string $lang = "")`: the properties
-    /// cleared and set again, the language always `en`.
+    /// cleared and set again, the language always `en`. `Exception::$message`
+    /// is `$faultstring`'s string and `$_name` the argument's, one more
+    /// owner of each, where every other string is `ZVAL_STRING`'s copy,
+    /// made even for the empty string and one byte. `$lang` is
+    /// `soap_lang_en`, interned at the engine's start, so the request's
+    /// first fault costs what every later one does. Each line is the
+    /// fault's bytes past an `Exception`'s, whose `$file` and trace take
+    /// what the file's path takes:
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); $e = new Exception('Nope Here'); $x = memory_get_usage() - $m;
+    /// $m = memory_get_usage(); $f = new SoapFault('HTTP', 'Nope Here'); echo memory_get_usage() - $m - $x, "\n";
+    /// $m = memory_get_usage(); $g = new SoapFault('X', '', 'actor', null, 'nm'); echo memory_get_usage() - $m - $x, "\n";
+    /// $m = memory_get_usage(); $h = new SoapFault(['urn:x', 'C'], 'Nope Here'); echo memory_get_usage() - $m - $x, "\n";
+    /// ```
+    /// ```expect
+    /// 232
+    /// 256
+    /// 264
+    /// ```
     fn __construct(
         req: &mut Request,
         this: This<Self>,
@@ -311,9 +330,7 @@ impl SoapFault {
         }
         let object = this.object();
         clear_fault(req, object)?;
-        let name = name
-            .filter(|n| !n.is_empty())
-            .map(|n| n.as_bytes().to_vec());
+        let name = name.filter(|n| !n.is_empty());
         let details =
             (!matches!(details.as_ref(), ValueRef::Null | ValueRef::Undef)).then_some(details);
         set_soap_fault(
@@ -325,10 +342,16 @@ impl SoapFault {
                 string: Some(string.as_bytes()),
                 actor: actor.as_ref().map(PhpString::as_bytes),
                 detail: details,
-                name: name.as_deref(),
+                name: None,
                 lang: b"en",
             },
         )?;
+        // `ZVAL_STR_COPY(Z_FAULT_NAME_P(obj), name)`: the argument's
+        // string, one more owner, never a copy of its bytes.
+        if let Some(name) = name {
+            let n = Owner::take(req, Value::string(name));
+            set_fault_slot(req, object, FaultSlot::Name, n)?;
+        }
         if !matches!(headerFault.as_ref(), ValueRef::Null | ValueRef::Undef) {
             let h = Owner::take(req, headerFault.deref());
             set_fault_slot(req, object, FaultSlot::HeaderFault, h)?;
@@ -442,9 +465,11 @@ fn clear_fault(req: &mut Request, object: PhpObject) -> R<()> {
 /// mapped by the SOAP version running, the actor, detail, name and
 /// language written into `object`.
 pub(crate) fn set_soap_fault(req: &mut Request, object: PhpObject, f: &Fault<'_>) -> R<()> {
-    let text = string(req, f.string.unwrap_or_default())?;
+    let text = init(req, f.string.unwrap_or_default())?;
     set_fault_slot(req, object, FaultSlot::String, text)?;
-    let message = string(req, f.string.unwrap_or_default())?;
+    // `zend_update_property_ex(..., Z_FAULT_STRING_P(obj))`: the string
+    // just written, one more owner.
+    let message = Owner::take(req, crate::shared::fault_slot(object, FaultSlot::String));
     php_ext::call::write_prop(req, &object, b"message", message)?;
     if let Some(code) = f.code {
         let version = req.state::<State>().soap_version;
@@ -470,16 +495,16 @@ pub(crate) fn set_soap_fault(req: &mut Request, object: PhpObject, f: &Fault<'_>
             (code, None)
         };
         if version == SOAP_1_1 || version == SOAP_1_2 || f.code_ns.is_some() {
-            let c = string(req, code)?;
+            let c = init(req, code)?;
             set_fault_slot(req, object, FaultSlot::Code, c)?;
             if let Some(ns) = ns {
-                let n = string(req, ns)?;
+                let n = init(req, ns)?;
                 set_fault_slot(req, object, FaultSlot::CodeNs, n)?;
             }
         }
     }
     if let Some(actor) = f.actor {
-        let a = string(req, actor)?;
+        let a = init(req, actor)?;
         set_fault_slot(req, object, FaultSlot::Actor, a)?;
     }
     if let Some(detail) = f.detail
@@ -489,11 +514,31 @@ pub(crate) fn set_soap_fault(req: &mut Request, object: PhpObject, f: &Fault<'_>
         set_fault_slot(req, object, FaultSlot::Detail, d)?;
     }
     if let Some(name) = f.name {
-        let n = string(req, name)?;
+        let n = init(req, name)?;
         set_fault_slot(req, object, FaultSlot::Name, n)?;
     }
-    let lang = string(req, f.lang)?;
+    let lang = lang(req, f.lang)?;
     set_fault_slot(req, object, FaultSlot::Lang, lang)
+}
+
+/// `ZVAL_STRING`, `zend_string_init`: a string of the request's own
+/// whatever its length, the empty string and one byte among them, which
+/// [`string`] hands out interned.
+fn init(req: &mut Request, bytes: &[u8]) -> R<Owner<Value>> {
+    Ok(PhpString::filled(req, bytes.len(), |b| b.copy_from_slice(bytes))?.into_value())
+}
+
+/// `ZVAL_STR_COPY(Z_FAULT_LANG_P(obj), lang)`: `en` is `soap_lang_en`,
+/// which `PHP_MINIT` interns and which costs php's request nothing, here
+/// the string the engine's start interns as the extension names it; the
+/// empty string is `ZSTR_EMPTY_ALLOC()`; any other is the string
+/// `parse_packet_soap` made of a response's `xml:lang`.
+fn lang(req: &mut Request, bytes: &[u8]) -> R<Owner<Value>> {
+    if bytes == b"en" || bytes.is_empty() {
+        let kept = PhpString::interned(req, bytes)?;
+        return Ok(Owner::take(req, Value::string(kept)));
+    }
+    init(req, bytes)
 }
 
 // ---- SoapVar
