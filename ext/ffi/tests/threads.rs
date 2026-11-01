@@ -22,8 +22,11 @@
 //! `trace:ffi-callback-thread-stack-limit` (#3697, #3742), so it is
 //! served wherever the thread stands and refused at that thread's own
 //! depth. Each test serves the request on a thread of its own and gives
-//! C one started before it or after it, whichever stands where the test
-//! asks ([`Stands`]), rather than the order the platform maps them in.
+//! C one of several started before it and after it, whichever stands
+//! where the test asks ([`Stands`]), rather than the order the platform
+//! maps them in: a stack another test's thread gave back may be mapped
+//! again on either side, so one thread laid on each side may both land
+//! on the same one.
 //! C is handed the callback with a pointer to the channel C's thread
 //! waits on, as a C library takes its user data.
 
@@ -116,6 +119,11 @@ fn thread(size: Option<usize>) -> (usize, Sender<Job>) {
     (at, hand)
 }
 
+/// How many threads [`served_with`] lays on each side of the request's,
+/// each kept standing until C's is chosen, so none is mapped on a stack
+/// another of them gave back; those not chosen end with the choice.
+const LAID: usize = 8;
+
 /// [`served_with`] C's thread above the request's, as php serves it on
 /// either platform, at the platform's own size.
 fn served(name: &str, source: &str) -> (String, Option<String>) {
@@ -146,11 +154,12 @@ fn served_with(
     let source = format!(
         "<?php\n$ffi = FFI::cdef('typedef int (*cb)(int); typedef void (*later)(cb, void *);');\n$later = fn ($f) => $ffi->cast('later', {at})($f, $ffi->cast('void *', {to}));\n{source}"
     );
-    let before = thread(size);
+    let before: Vec<_> = (0..LAID).map(|_| thread(size)).collect();
     let (stands, request) = thread(None);
-    let after = thread(size);
-    let Some((_, c_thread)) = [before, after]
+    let after: Vec<_> = (0..LAID).map(|_| thread(size)).collect();
+    let Some((_, c_thread)) = before
         .into_iter()
+        .chain(after)
         .find(|(at, _)| (*at > stands) == (c == Stands::Above))
     else {
         panic!("no thread started around the request's stands {c:?} it");
