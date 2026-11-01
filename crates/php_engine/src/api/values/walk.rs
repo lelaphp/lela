@@ -1531,6 +1531,21 @@ fn object_row(
 /// dtor: [1,2,3]
 /// dtor: [1,2,3]
 /// ```
+///
+/// Where the body threw, the array the variable held is given up with
+/// the throwable pending, as `php_usort` frees it with `EG(exception)`
+/// set, so a destructor that throws there chains it:
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class D { function __destruct() { throw new Exception("destructed"); } }
+/// $a = [3, 1, 2];
+/// try { usort($a, function ($x, $y) use (&$a) { $a = [new D]; throw new Exception("cb"); }); }
+/// catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// destructed after cb
+/// ```
 pub fn detached<T>(
     req: &mut Request,
     holder: &Ref<PhpArray>,
@@ -1544,9 +1559,15 @@ pub fn detached<T>(
     }
     let mut copy = held.copy(req)?;
     let answered = copy.written(|copy| body(req, copy));
-    match holder.reference() {
+    let swapped = |req: &mut Request| match holder.reference() {
         Some(cell) => cell.convert(req, copy.into_value()),
         None => copy.give_up(req),
+    };
+    match answered {
+        Ok(answer) => {
+            swapped(req);
+            Ok(Some(answer))
+        }
+        Err(thrown) => Err(req.free_pending(thrown, swapped)),
     }
-    answered.map(Some)
 }
