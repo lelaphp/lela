@@ -1425,13 +1425,14 @@ fn soap_call_body(
             let done = do_request(
                 req,
                 this,
-                request,
+                request.node(),
                 &loc,
                 action.as_deref(),
                 soap_version,
                 one_way,
             );
-            request.free_document();
+            // php's `xmlFreeDoc(request)` once it is sent.
+            drop(request);
             let (ok, response) = done?;
             ret = ok;
             if let Some(resp) = response {
@@ -1508,13 +1509,14 @@ fn soap_call_body(
             let done = do_request(
                 req,
                 this,
-                request,
+                request.node(),
                 location.unwrap_or_default(),
                 Some(&action),
                 soap_version,
                 false,
             );
-            request.free_document();
+            // php's `xmlFreeDoc(request)` once it is sent.
+            drop(request);
             let (ok, response) = done?;
             ret = ok;
             if let Some(resp) = response {

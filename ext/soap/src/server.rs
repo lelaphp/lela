@@ -477,12 +477,9 @@ fn soap_server_fault_ex(
             None
         }
     };
+    // The fault is freed as `d` drops, once it is dumped.
     let buf = doc
-        .and_then(|d| {
-            let (dumped, _) = Save::doc(d, 0, false, None);
-            d.free_document();
-            dumped
-        })
+        .and_then(|d| Save::doc(d.node(), 0, false, None).0)
         .unwrap_or_default();
     let flash = server_var(req, b"HTTP_USER_AGENT").is_some_and(|a| a == b"Shockwave Flash");
     if !flash {
@@ -1971,8 +1968,8 @@ fn serve(
         };
         discard(req);
         if let Some(doc) = doc_return {
-            let (buf, _) = Save::doc(doc, 0, false, None);
-            doc.free_document();
+            let (buf, _) = Save::doc(doc.node(), 0, false, None);
+            drop(doc);
             let buf = buf.unwrap_or_default();
             if buf.is_empty() {
                 return Err(docref_error(req, "Dump memory failed"));

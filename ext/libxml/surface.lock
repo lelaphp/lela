@@ -112,7 +112,6 @@ ffi::Name::valid
 ffi::Name::valid_ncname
 ffi::Name::valid_qname
 ffi::NewDoc
-ffi::NewDoc::freed_by_hand
 ffi::NewDoc::from_ptr
 ffi::NewDoc::node
 ffi::NewDoc::taken_by_object
