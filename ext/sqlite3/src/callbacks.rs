@@ -8,7 +8,7 @@
 use php_ext::abi::Callable;
 use php_ext::call::call;
 use php_ext::coerce::with_string;
-use php_ext::raising::{Level, Thrown, docref};
+use php_ext::raising::{Level, Thrown, docref, while_pending};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpString, Value, ValueRef};
 use php_ext_pdo_sqlite::ffi::{
@@ -112,7 +112,23 @@ impl Callbacks for Sqlite3 {
 
     /// `php_sqlite3_callback_step`: the row counted first, then the
     /// aggregate's value, the count and the arguments handed over, and
-    /// what the step returns kept as the value.
+    /// what the step returns kept as the value. A step that threw has the
+    /// value given up with what it threw pending, as php frees
+    /// `agg_context->zval_context` with `EG(exception)` set
+    /// (`Z/ext/sqlite3/sqlite3.c:898`), so a destructor that throws there
+    /// chains it as its `previous`:
+    ///
+    /// ```php
+    /// ini_set('zend.exception_ignore_args', 1);
+    /// class D { function __destruct() { throw new Exception("destructed"); } }
+    /// $db = new SQLite3(':memory:');
+    /// $db->createAggregate('agg', function ($c, $n, $v) { if ($v == 2) throw new Exception("stepped"); return new D; }, fn ($c, $n) => 1);
+    /// try { @$db->querySingle('select agg(x) from (select 1 as x union all select 2)'); }
+    /// catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()?->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// destructed after stepped
+    /// ```
     fn step(
         &self,
         req: &mut Request,
@@ -137,8 +153,19 @@ impl Callbacks for Sqlite3 {
             Ok(value) => (value, None),
             Err(thrown) => (Owner::null(), Some(thrown)),
         };
-        std::mem::replace(&mut held.value, kept).give_up(req);
-        thrown.map_or(Ok(()), Err)
+        let old = std::mem::replace(&mut held.value, kept);
+        match thrown {
+            // `zval_ptr_dtor(&agg_context->zval_context)` with what the step
+            // threw in `EG(exception)`.
+            Some(thrown) if thrown.exception().is_some() => {
+                while_pending(req, &thrown, |req| old.give_up(req));
+                Err(thrown)
+            }
+            thrown => {
+                old.give_up(req);
+                thrown.map_or(Ok(()), Err)
+            }
+        }
     }
 
     /// `php_sqlite3_callback_final`: the value and a count of zero, the
