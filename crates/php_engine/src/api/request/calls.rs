@@ -1617,6 +1617,38 @@ impl Request {
     /// String could not be parsed as XML <- close
     /// ```
     ///
+    /// A fatal the native raises past the kept one renders it first, as
+    /// `zend_error` renders what `EG(exception)` holds: "Uncaught ..." at
+    /// `E_WARNING`, given up, and no trace fetched for the fatal
+    /// (`Z/Zend/zend.c:1503-1526`), so nothing is kept here as it
+    /// returns. `SoapClient` reads a WSDL with no `<definitions>`, the
+    /// stream closed, and raises `soap_error` at `E_ERROR`; under a client
+    /// that throws, the soap handler drops the warning while a WSDL is
+    /// parsed, and the fault leaves with no `previous`:
+    ///
+    /// ```php
+    /// ini_set('fatal_error_backtraces', '1');
+    /// class W { public $context; public $d = '<x/>'; function url_stat($p, $f) { return ['size' => 4]; } function stream_open($p, $m, $o, &$op) { return true; } function stream_read($n) { [$r, $this->d] = [$this->d, '']; return $r; } function stream_eof() { return $this->d === ''; } function stream_close() { echo "close\n"; throw new Exception("close"); } }
+    /// stream_wrapper_register('ww', 'W');
+    /// try { new SoapClient('ww://x'); } catch (SoapFault $e) { echo $e->getMessage(), "\n"; var_dump($e->getPrevious()); }
+    /// new SoapClient('ww://x', ['exceptions' => false]);
+    /// ```
+    /// ```expect exit=255
+    /// close
+    /// SOAP-ERROR: Parsing WSDL: Couldn't find <definitions> in 'ww://x'
+    /// NULL
+    /// close
+    ///
+    /// Warning: Uncaught Exception: close in %s:3
+    /// Stack trace:
+    /// #0 [internal function]: W->stream_close()
+    /// #1 %s(6): SoapClient->__construct('ww://x', Array)
+    /// #2 {main}
+    ///   thrown in %s on line 3
+    ///
+    /// Fatal error: SOAP-ERROR: Parsing WSDL: Couldn't find <definitions> in 'ww://x' in %s on line 6
+    /// ```
+    ///
     /// [`Diagnostics::stream_thrown`]: super::Diagnostics::stream_thrown
     #[inline(always)] // design §5.8: every native call's, frameless or not
     pub(crate) fn serve_entry(

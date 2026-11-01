@@ -644,6 +644,18 @@ impl Request {
         // `EG(exception)` while the limit's fatal is raised, and is no
         // throwable to report (`Z/Zend/zend.c:1513` at 8.5.12).
         let handling = *self.heap.delayed_oom() == php_heap::DelayedOom::Handling;
+        // A throwable a stream's user code threw inside the op a native
+        // asked for, kept for the native's return, is php's
+        // `EG(exception)` as much as what the slot holds: a fatal the
+        // native raises past it renders it, from the slot.
+        if fatal_errors(level)
+            && !handling
+            && let Some(kept) = self
+                .stream_thrown
+                .take_if(|kept| kept.exception().is_some())
+        {
+            self.leave_pending(&kept);
+        }
         if let Some(Raised::Throwable(pending)) = self.raised {
             let throwable = self
                 .class_named(Bare::resolved(b"Throwable"))
