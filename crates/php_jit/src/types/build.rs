@@ -20,8 +20,8 @@ use super::opcodes::{
     Carried, Declared, Hold, ISEMPTY, MAX_ARG_FLAG_NUM, Within, arith, assigned, carried,
     check_sites, checked_order, compiled_inline, compound_in_place, constant, constant_types,
     goes_one_way, guard_sites, held_as_is, inline_may_leave, is_call, keeps_temporaries, keyed,
-    may_exit, packed_guard, param_types, params, reads, reads_by_name, recv_exits, referenced,
-    slot_of, within, written, written_through,
+    may_exit, needs_call_chain, packed_guard, param_types, params, reads, reads_by_name,
+    recv_exits, referenced, slot_of, within, written, written_through,
 };
 use super::{
     Abort, ArgChecks, BodyEntry, Check, Constant, Def, Defaults, End, Entry, ExitId, ExitSpec,
@@ -92,12 +92,14 @@ struct Meta<'a> {
     begins: Option<OplineIdx>,
 }
 
-/// What the trace held before one op: every value of a live frame, and
-/// how many calls compiled code began are under way.
+/// What the trace held before one op: every value of a live frame, how
+/// many calls compiled code began are under way, and whether it holds one
+/// of them apart from its frame's call chain ([`Call::delayed`]).
 #[derive(Default, Clone)]
 struct Snapshot {
     values: Vec<(Slot, ValueId)>,
     calls: usize,
+    delayed: bool,
 }
 
 /// Whose state an exit's stores are read from.
@@ -297,6 +299,10 @@ struct Placed {
 /// and what each argument was sent as, where the send says.
 struct Call {
     inline: bool,
+    /// Whether compiled code holds it apart from its frame's call chain
+    /// until it is made, php's `delayed_call_chain`: an inline `INIT_*`
+    /// that [`needs_call_chain`] lets delay the link.
+    delayed: bool,
     /// Per argument, what its send wrote, where it sent a value.
     args: Vec<Sent>,
     /// For a native's call, what its declaration says it returns.
@@ -621,7 +627,7 @@ impl<'a> Builder<'a> {
                     data,
                     branch,
                 } => self.line(*func, *opline, [*op1, *op2, *data], *branch, ahead)?,
-                Event::InitCall { callee, began } => self.init_call(*callee, *began)?,
+                Event::InitCall { callee, began } => self.init_call(*callee, *began, ahead)?,
                 Event::Enter { func } => self.enter(*func)?,
                 Event::Back => self.back(ahead)?,
             }
@@ -1457,14 +1463,26 @@ impl<'a> Builder<'a> {
     }
 
     /// A call an `INIT_*` began, here or before the trace reached the
-    /// frame, whose arguments sent before it the trace knows nothing of.
-    fn init_call(&mut self, callee: Callee, began: Began) -> Result<(), Abort> {
+    /// frame, whose arguments sent before it the trace knows nothing of;
+    /// `ahead`, the events after it, say whether compiled code links it
+    /// into the frame's call chain at once.
+    fn init_call(&mut self, callee: Callee, began: Began, ahead: &[Event]) -> Result<(), Abort> {
         let frame = self.running()?;
-        let inline = began == Began::Here
-            && matches!(
-                self.ops.last(),
-                Some(Op::Line(line)) if line.form == Form::Inline
-            );
+        let init = match self.ops.last() {
+            Some(Op::Line(line)) if began == Began::Here && line.form == Form::Inline => {
+                Some(line.opcode)
+            }
+            _ => None,
+        };
+        let inline = init.is_some();
+        let code = self.meta(frame).code;
+        let after = (ahead.iter())
+            .filter(|event| !matches!(event, Event::InitCall { .. }))
+            .map_while(|event| match event {
+                Event::Op { opline, .. } => code.oplines.get(opline.0 as usize).map(|op| op.opcode),
+                Event::InitCall { .. } | Event::Enter { .. } | Event::Back => None,
+            });
+        let delayed = init.is_some_and(|init| !needs_call_chain(init, after));
         let plain = self
             .pushing
             .take()
@@ -1487,6 +1505,7 @@ impl<'a> Builder<'a> {
         self.begin();
         self.calls.push(Call {
             inline,
+            delayed,
             args: Vec::new(),
             returns: match callee {
                 Callee::Native(returns) => Some(returns),
@@ -2326,6 +2345,7 @@ impl<'a> Builder<'a> {
         Snapshot {
             values,
             calls: self.calls.iter().filter(|call| call.inline).count(),
+            delayed: self.calls.iter().any(|call| call.delayed),
         }
     }
 
@@ -4634,14 +4654,15 @@ impl<'a> Builder<'a> {
     /// fetched element leaves for the opline after it with the copy in
     /// its stack map (`zend_jit_guard_fetch_result_type`,
     /// `Z/ext/opcache/jit/zend_jit_ir.c:8067-8085`), and with a call
-    /// under way restored, as `zend_jit_trace_get_exit_point` adds
-    /// `ZEND_JIT_EXIT_RESTORE_CALL` to any exit taken while one is
+    /// compiled code holds apart restored, as
+    /// `zend_jit_trace_get_exit_point` adds `ZEND_JIT_EXIT_RESTORE_CALL`
+    /// to any exit taken while the call chain is delayed
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:144-147`).
-    fn lands(&self, draft: &Draft, calls: bool) -> (Option<OplineIdx>, Landing, Vec<Store>) {
+    fn lands(&self, draft: &Draft, delayed: bool) -> (Option<OplineIdx>, Landing, Vec<Store>) {
         let extra = || draft.extra.into_iter().collect();
         match draft.at {
-            At::Opline(at) => (Some(at), restored(calls), extra()),
-            At::Stands | At::Landed => (None, restored(calls), extra()),
+            At::Opline(at) => (Some(at), restored(delayed), extra()),
+            At::Stands | At::Landed => (None, restored(delayed), extra()),
             At::Fetched {
                 fetch,
                 frees,
@@ -4657,7 +4678,7 @@ impl<'a> Builder<'a> {
                 };
                 let landing = Landing {
                     frees,
-                    restores_call: calls,
+                    restores_call: delayed,
                 };
                 (Some(OplineIdx(fetch.0 + 1)), landing, vec![copied])
             }
@@ -4668,7 +4689,7 @@ impl<'a> Builder<'a> {
                         from,
                     })
                     .collect();
-                (Some(OplineIdx(op.0 + 1)), restored(calls), overflowed)
+                (Some(OplineIdx(op.0 + 1)), restored(delayed), overflowed)
             }
             At::Stayed { op, wrote } => {
                 let stayed = (wrote.stayed().into_iter().flatten())
@@ -4677,7 +4698,7 @@ impl<'a> Builder<'a> {
                         from,
                     })
                     .collect();
-                (Some(OplineIdx(op.0 + 1)), restored(calls), stayed)
+                (Some(OplineIdx(op.0 + 1)), restored(delayed), stayed)
             }
         }
     }
@@ -4692,8 +4713,7 @@ impl<'a> Builder<'a> {
     ) -> ExitSpec {
         let empty = Snapshot::default();
         let snapshot = self.snapshot_at(draft.point).unwrap_or(&empty);
-        let calls = snapshot.calls > 0;
-        let (opline, landing, extra) = self.lands(draft, calls);
+        let (opline, landing, extra) = self.lands(draft, snapshot.delayed);
         // A frame a return past the root landed in is one the trace
         // holds nothing of ([`At::Landed`]).
         if matches!(draft.at, At::Landed) {
@@ -5388,8 +5408,8 @@ fn stack_type(check: Check) -> Option<(ValueId, ZvalType)> {
     }
 }
 
-fn restored(calls: bool) -> Landing {
-    if calls {
+fn restored(delayed: bool) -> Landing {
+    if delayed {
         Landing::RESTORE_CALL
     } else {
         Landing::PLAIN
