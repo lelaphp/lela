@@ -66,7 +66,7 @@ use php_ext::request::{ForeignId, Held, Request};
 use php_ext::values::{Owner, Value};
 
 pub(crate) use easy::{Address, Called, Easy, EasyId, Hook, Info, MimeBuilder, Posted};
-pub(crate) use multi::{Multi, MultiId, Persistent, Share, ShareRef, Shared};
+pub(crate) use multi::{Multi, MultiId, Persistent, Share, ShareRef};
 use stdio::CFile;
 
 use sys::CURL_ERROR_SIZE as ERROR_SIZE;

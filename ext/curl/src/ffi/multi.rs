@@ -454,6 +454,11 @@ impl Share {
     pub(crate) fn close(self, req: &mut Request) {
         drop(req.memory_mut().disown(self.0));
     }
+
+    /// The share as `CURLOPT_SHARE` points a `CURL *` at it.
+    pub(crate) fn as_ref(&self) -> ShareRef {
+        ShareRef::Request(ShareId(self.0.id()))
+    }
 }
 
 impl ShareId {
@@ -467,9 +472,11 @@ impl ShareId {
 /// A persistent `CURLSH *`, `CURL_G(persistent_curlsh)`'s: not the
 /// request's but the engine's pool's, lent to one request at a time
 /// (ADR-0005's amendment). One owner is the pool's or the lending
-/// request's, and one more is each `CurlSharePersistentHandle` and each
-/// `CURL *` pointing at it, so the count says when nothing of the request
-/// that held it reaches it ([`Persistent::alone`]).
+/// request's, and one more is each `CURL *` pointing at it, so the count
+/// says when nothing of the request that held it reaches it
+/// ([`Persistent::alone`]). A `CurlSharePersistentHandle` owns none: it
+/// names the lending request's by the options it was made with, and is
+/// freed before the request gives its shares back.
 #[derive(Clone)]
 pub(crate) struct Persistent(Arc<Pooled>);
 
@@ -487,7 +494,7 @@ impl Persistent {
         Some(Persistent(Arc::new(Pooled(ShareHandle::init()?))))
     }
 
-    /// The share where nothing else holds it, no object and no `CURL *`:
+    /// The share where nothing else holds it, no `CURL *`:
     /// one that may be lent to another request, on another thread.
     pub(crate) fn alone(self) -> Option<Persistent> {
         (Arc::strong_count(&self.0) == 1).then_some(self)
@@ -500,12 +507,6 @@ impl Persistent {
     pub(super) fn raw(&self) -> *mut sys::CURLSH {
         self.0.0.raw.as_ptr()
     }
-}
-
-/// A `CurlShareHandle`'s or `CurlSharePersistentHandle`'s share.
-pub(crate) enum Shared {
-    Request(Share),
-    Persistent(Persistent),
 }
 
 /// A share as `CURLOPT_SHARE` points a `CURL *` at it.
@@ -525,24 +526,6 @@ impl ShareRef {
                 .foreign(id.0)
                 .map_or(1, |share| share.set_long(option, value)),
             ShareRef::Persistent(persistent) => persistent.set_long(option, value),
-        }
-    }
-}
-
-impl Shared {
-    pub(crate) fn as_ref(&self) -> ShareRef {
-        match self {
-            Shared::Request(share) => ShareRef::Request(ShareId(share.0.id())),
-            Shared::Persistent(persistent) => ShareRef::Persistent(persistent.clone()),
-        }
-    }
-
-    /// `curl_share_free_obj`: a request's share cleaned up, a persistent
-    /// one's owner let go.
-    pub(crate) fn close(self, req: &mut Request) {
-        match self {
-            Shared::Request(share) => share.close(req),
-            Shared::Persistent(persistent) => drop(persistent),
         }
     }
 }
