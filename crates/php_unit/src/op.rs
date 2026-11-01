@@ -422,6 +422,10 @@ pub struct OpArray {
     /// every other op array, and for an arrow function that reads none,
     /// whose table is never laid.
     pub implicit_uses: u32,
+    /// The loops and `switch`es its compile began, an element of
+    /// `CG(context).brk_cont_array` each (`zend_begin_loop`,
+    /// `Z/Zend/zend_compile.c:714`), which stands through its `pass_two`.
+    pub loops: u32,
     /// `ZEND_ACC_STATIC` on the op array (`Z/Zend/zend_compile.h:283`):
     /// a closure written `static function` or `static fn`, which
     /// `ZEND_DECLARE_LAMBDA_FUNCTION` reads to bind it no receiver. A
@@ -495,14 +499,15 @@ pub enum Declares {
     Dynamic(u32),
 }
 
-/// How many oplines, constants, variables and `dynamic_func_defs` an
-/// op array under compile holds.
+/// How many oplines, constants, variables, `dynamic_func_defs` and
+/// loops ([`OpArray::loops`]) an op array under compile holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Grown {
     pub oplines: u32,
     pub constants: u32,
     pub vars: u32,
     pub dynamic_func_defs: u32,
+    pub loops: u32,
 }
 
 /// An op array's safepoints (design §5.7), numbered by place: the

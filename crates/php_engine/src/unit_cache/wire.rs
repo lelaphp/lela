@@ -403,11 +403,11 @@ record! {
     OpArray {
         oplines, literals, const_exprs, vars, num_cvs, num_tmps, try_catch, live_ranges,
         safepoints, filename, line_start, line_end, cache_size, cache_room, runtime_cache,
-        dynamic_func_defs, nested, bound_vars, implicit_uses, no_receiver, strict_types,
+        dynamic_func_defs, nested, bound_vars, implicit_uses, loops, no_receiver, strict_types,
         return_mask, numeric_dims,
     }
     Nested { declares, grown }
-    Grown { oplines, constants, vars, dynamic_func_defs }
+    Grown { oplines, constants, vars, dynamic_func_defs, loops }
     AttributeArgument { name, value }
     Attribute { name, arguments, line, strict, own_name }
     Parameter { name, ty, by_ref, prefer_ref, promoted, variadic, default, attributes }

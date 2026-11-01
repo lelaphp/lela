@@ -573,3 +573,22 @@ files = { "a.php" = "<?php $f = fn () => $b; echo memory_get_usage(), \" \", mem
 [[line.then]]
 args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/f.php" }
+
+# A loop or `switch` of such a program (#3823): php's compile grows
+# `CG(context).brk_cont_array` an element at each, which stands through
+# the op array's `pass_two` and is freed by `zend_oparray_context_end`, so
+# the first program's peak is that block's 24 bytes above the window's.
+# The second nests a `for` and a `switch` in a `foreach`, four elements in
+# one 80-byte block; the third writes, inside a loop, a closure with two
+# of its own, whose `pass_two` stands beside the main op array's element.
+[[line]]
+name = "an-uncached-loop-lays-its-brk-cont-element"
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/a.php" }
+files = { "a.php" = "<?php for (;;) { break; } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "b.php" = "<?php foreach ([1, 2] as $a) { for ($i = 0; $i < 2; $i++) { switch ($i) { case 0: break; default: continue 2; } } while (false) {} } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "c.php" = "<?php for (;;) { $f = function () { while (false) {} do {} while (false); }; break; } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/b.php" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/c.php" }
