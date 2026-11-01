@@ -41,7 +41,8 @@ use php_ext::raising::{
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Layout, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{
-    Answer, ClassType, Exported, Item, Kind, Name, Node, Parser, Returned, Scope, Source, XPath,
+    Answer, ClassType, DocOf, Exported, Item, Kind, Name, Node, Parser, Returned, Scope, Source,
+    XPath,
 };
 use php_ext_libxml::{Errors, import_node, register_export};
 
@@ -331,14 +332,14 @@ fn simplexml_import_dom(
         return Err(arg_type_error(req, 1, "be a valid XML node"));
     };
     let mut target = Some(exported.node());
-    let Some(doc) = exported.node().doc() else {
+    if exported.node().doc().is_none() {
         docref(
             req,
             Level::Warning,
             "Imported Node must have associated Document",
         );
         return Ok(None);
-    };
+    }
     if exported.node().kind().is_document() {
         target = exported.node().root();
     }
@@ -347,8 +348,12 @@ fn simplexml_import_dom(
         return Ok(None);
     };
     let made = new_object(req, class)?;
+    let Some(of) = DocOf::exported(&exported) else {
+        made.give_up(req);
+        return Err(DocOf::uncounted(req));
+    };
     if let Some(mut obj) = sxe::libxml_half(req, *made) {
-        obj.share(req, exported.document(), doc);
+        obj.count_document(req, of);
         obj.hold_node(req, target);
     }
     Ok(Some(made.into_instance()))

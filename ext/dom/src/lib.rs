@@ -62,8 +62,8 @@ use php_ext::request::{MAXPATHLEN, Request};
 use php_ext::values::walk;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{
-    Borrowed, ClassType, DocOf, DocProps, Exported, Kind, Name, Node, NodeObject, Ns, SharedDoc,
-    Switches, XML_ATTRIBUTE_ID,
+    Borrowed, ClassType, DocOf, DocProps, Exported, Kind, Name, Node, NodeObject, Ns, Switches,
+    XML_ATTRIBUTE_ID,
 };
 
 use document::{XML_NS, XMLNS_NS};
@@ -397,7 +397,7 @@ fn import_simplexml_common(
 ) -> Result<Owner<Value>, Thrown> {
     let ce = throwables::Throwables::of(req)?;
     let exported = php_ext_libxml::import_node(req, object)
-        .filter(|e| e.document().is_some())
+        .filter(Exported::has_document)
         .filter(|e| matches!(e.node().kind(), Kind::Element | Kind::Attribute));
     let Some(exported) = exported else {
         return Err(argument_error(
@@ -435,7 +435,7 @@ fn import_simplexml_common(
     let made = new_object(req, class)?;
     let Some(of) = DocOf::exported(&exported) else {
         made.give_up(req);
-        return Err(uncounted(req));
+        return Err(DocOf::uncounted(req));
     };
     if let Some(mut obj) = libxml_half(req, *made) {
         obj.attach(req, of);
@@ -480,11 +480,6 @@ fn dom_mut(req: &mut Request, object: PhpObject) -> Option<&mut Dom> {
 /// `dom_object_get_node`.
 fn node_of(req: &Request, object: PhpObject) -> Option<Node> {
     dom(req, object).and_then(|d| d.obj.bound())
-}
-
-/// The document reference an object counts, to share with another.
-fn shared_doc(req: &Request, object: PhpObject) -> Option<SharedDoc> {
-    dom(req, object).and_then(|d| d.obj.shared_doc())
 }
 
 /// `dom_get_doc_props_read_only(obj->document)`.
@@ -839,15 +834,7 @@ pub(crate) fn doc_of<'d>(
     node: Node,
     by: Option<&'d NodeObject>,
 ) -> Result<DocOf<'d>, Thrown> {
-    DocOf::under(node, by).ok_or_else(|| uncounted(req))
-}
-
-/// The fatal [`doc_of`] raises.
-fn uncounted(req: &mut Request) -> Thrown {
-    fatal(
-        req,
-        "InternalError: no object counts the document of the node an object is made for",
-    )
+    DocOf::under(node, by).ok_or_else(|| DocOf::uncounted(req))
 }
 
 /// `php_dom_create_nullable_object`.
@@ -1401,44 +1388,56 @@ fn hierarchy_ok(parent: Node, child: Node) -> bool {
 }
 
 /// `dom_set_document_ref_pointers`: every object standing for a node of
-/// the subtree that counts no document counts `document`.
-fn set_document_ref_pointers(req: &mut Request, node: Node, document: Option<SharedDoc>) {
-    let Some(document) = document else {
-        return;
+/// the subtree that counts no document counts the node's own, under the
+/// reference `by`, the inserting object's libxml half, counts, as
+/// [`doc_of`] checks it; nothing where `by` counts none.
+fn set_document_ref_pointers(
+    req: &mut Request,
+    node: Node,
+    by: Option<&NodeObject>,
+) -> Result<(), Thrown> {
+    let Some(by) = by.filter(|b| b.has_document()) else {
+        return Ok(());
     };
-    let single = |req: &mut Request, n: Node| -> bool {
-        if !n.share_document(req, document) {
-            return false;
+    let single = |req: &mut Request, n: Node| -> Result<bool, Thrown> {
+        if !doc_of(req, n, Some(by))?.share_document(req) {
+            return Ok(false);
         }
         if n.kind() == Kind::Element {
             let mut attr = n.properties();
             while let Some(a) = attr {
-                set_document_ref_pointers_attr(req, a, document);
+                set_document_ref_pointers_attr(req, a, by)?;
                 attr = a.next();
             }
         }
-        true
+        Ok(true)
     };
-    if !single(req, node) {
-        return;
+    if !single(req, node)? {
+        return Ok(());
     }
     let mut at = node.children();
     while let Some(n) = at {
-        if !single(req, n) {
+        if !single(req, n)? {
             break;
         }
         at = next_in_tree_order(n, node);
     }
+    Ok(())
 }
 
-/// `dom_set_document_ref_pointers_attr`.
-fn set_document_ref_pointers_attr(req: &mut Request, attr: Node, document: SharedDoc) {
-    attr.share_document(req, document);
+/// `dom_set_document_ref_pointers_attr`, under the reference `by` counts.
+fn set_document_ref_pointers_attr(
+    req: &mut Request,
+    attr: Node,
+    by: &NodeObject,
+) -> Result<(), Thrown> {
+    doc_of(req, attr, Some(by))?.share_document(req);
     let mut child = attr.children();
     while let Some(c) = child {
-        c.share_document(req, document);
+        doc_of(req, c, Some(by))?.share_document(req);
         child = c.next();
     }
+    Ok(())
 }
 
 /// `php_dom_reconcile_attribute_namespace_after_insertion`.
@@ -1974,28 +1973,30 @@ fn adopt(req: &mut Request, doc_obj: PhpObject, node: Node, doc: Node) -> Result
         }
         node.undict(old, doc);
         undict_subtree(node, old, doc);
-        if let Some(shared) = crate::shared_doc(req, doc_obj) {
-            let transfer = |req: &mut Request, n: Node| {
-                n.transfer_document(req, shared);
+        let half = libxml_half(req, doc_obj);
+        if let Some(by) = half.as_deref().filter(|b| b.has_document()) {
+            let transfer = |req: &mut Request, n: Node| -> Result<(), Thrown> {
+                doc_of(req, n, Some(by))?.transfer_document(req);
                 if n.kind() == Kind::Element {
                     let mut attr = n.properties();
                     while let Some(a) = attr {
-                        a.transfer_document(req, shared);
+                        doc_of(req, a, Some(by))?.transfer_document(req);
                         // An attribute's value nodes a wrapper names go
                         // with it (php 8.5.12, GH-23352).
                         let mut child = a.children();
                         while let Some(c) = child {
-                            c.transfer_document(req, shared);
+                            doc_of(req, c, Some(by))?.transfer_document(req);
                             child = c.next();
                         }
                         attr = a.next();
                     }
                 }
+                Ok(())
             };
-            transfer(req, node);
+            transfer(req, node)?;
             let mut at = node.children();
             while let Some(n) = at {
-                transfer(req, n);
+                transfer(req, n)?;
                 at = crate::next_in_tree_order(n, node);
             }
         }

@@ -1252,10 +1252,11 @@ impl DOMXPath {
             return Err(crate::dom_throw(req, Code::InvalidState));
         };
         discard(req, this);
-        let shared = crate::shared_doc(req, doc_obj);
+        let by = crate::libxml_half(req, doc_obj);
+        let of = crate::doc_of(req, doc, by.as_deref())?;
         if let Some(mut obj) = crate::libxml_half(req, this) {
             obj.decrement_doc_ref(req);
-            obj.share(req, shared, doc);
+            obj.count_document(req, of);
         }
         let state = XPathState {
             ctx: req.memory_mut().adopt(ctx),
