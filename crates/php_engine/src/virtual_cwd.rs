@@ -712,6 +712,13 @@ mod tests {
     /// is asked lets it go before the fork copies the process, which waits
     /// for it, so the child neither copies the mutex held nor keeps an
     /// entry.
+    ///
+    /// The holder stands until the fork has returned, and only then ends:
+    /// a Rust thread that ends takes std's own mutex for its stack
+    /// overflow record (`thread_info::delete_current_info`), which the
+    /// child's `std::process::exit` takes again, so a holder ending as
+    /// the process was copied left the child that mutex held, and the
+    /// child waited in `__psynch_mutexwait` for good (#3880).
     #[test]
     #[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
     fn a_fork_waits_out_a_held_realpath_cache_and_its_child_empties_it() {
@@ -720,6 +727,7 @@ mod tests {
         in_a_process_apart(NAME, "child 0, forked after the release", || {
             let cache = filled();
             let (locked, holds) = mpsc::channel();
+            let (end, ends) = mpsc::channel::<()>();
             let buckets = Arc::clone(&cache.buckets);
             let holder = std::thread::spawn(move || {
                 let guard = held(&buckets);
@@ -727,10 +735,12 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(200));
                 let released = Instant::now();
                 drop(guard);
+                ends.recv().ok();
                 released
             });
             holds.recv().expect("the holder holds the mutex");
             let (entries, forked) = entries_in_child(&cache);
+            drop(end);
             let released = holder.join().expect("the holder ends");
             assert!(
                 forked >= released,
