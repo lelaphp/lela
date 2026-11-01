@@ -351,6 +351,16 @@ struct Kept {
     num: Num,
 }
 
+/// The longs an arithmetic made that a site writes before it leaves past
+/// itself ([`Emit::leave_past`]): the long it went to, and the long an
+/// increment or a decrement read, which a `POST_*` that did not overflow
+/// writes to its `out` (`Stored::Stayed`).
+#[derive(Debug, Clone, Copy)]
+struct Wrote {
+    long: Value,
+    read: Option<Value>,
+}
+
 /// Where a kernel serving `line` leaves: its exit, where an inline form
 /// has one, else its unwind.
 fn leave_of(line: &Line) -> Option<Leave> {
@@ -1390,9 +1400,17 @@ impl<'a> Emit<'a> {
     /// the one held, and is the long where every value it writes is typed
     /// long alone, which php's ranges proved cannot overflow, as php's
     /// `zend_jit_math_long_long` checks no overflow where `may_overflow`
-    /// is false (`Z/ext/opcache/jit/zend_jit_ir.c:5059-5200`).
-    fn settle(&mut self, at: OpId, defs: &[ValueId], num: Num) -> Result<Num, Abort> {
-        let num = self.held(at, defs, num)?;
+    /// is false (`Z/ext/opcache/jit/zend_jit_ir.c:5059-5200`). `read` is
+    /// the long an increment or a decrement read, which a `POST_*` that
+    /// leaves past itself writes to its `out`.
+    fn settle(
+        &mut self,
+        at: OpId,
+        defs: &[ValueId],
+        num: Num,
+        read: Option<Value>,
+    ) -> Result<Num, Abort> {
+        let num = self.held(at, defs, num, read)?;
         if let Num::Either { long, .. } = num
             && !defs.is_empty()
         {
@@ -1408,8 +1426,14 @@ impl<'a> Emit<'a> {
     }
 
     /// What an op computed, held to the type guards it holds on the values
-    /// in `defs`.
-    fn held(&mut self, at: OpId, defs: &[ValueId], num: Num) -> Result<Num, Abort> {
+    /// in `defs`, `read` the long an increment or a decrement read.
+    fn held(
+        &mut self,
+        at: OpId,
+        defs: &[ValueId],
+        num: Num,
+        read: Option<Value>,
+    ) -> Result<Num, Abort> {
         let mut num = num;
         for guard in self.within(at) {
             let Check::Type { value, tag: t } = guard.check else {
@@ -1425,9 +1449,10 @@ impl<'a> Emit<'a> {
                     },
                     Some(Kind::Long),
                 ) => {
-                    if self.overflows_past(guard.exit) {
+                    if self.leaves_past(guard.exit) {
                         let frame = self.value(value)?.slot.frame;
-                        self.leave_overflowed(overflowed, guard.exit, frame)?;
+                        let wrote = Wrote { long, read };
+                        self.leave_past(overflowed, guard.exit, frame, wrote)?;
                     } else {
                         self.leave_if(overflowed, guard.exit)?;
                     }
@@ -1435,12 +1460,20 @@ impl<'a> Emit<'a> {
                 }
                 (
                     Num::Either {
-                        overflowed, double, ..
+                        overflowed,
+                        long,
+                        double,
                     },
                     Some(Kind::Double),
                 ) => {
                     let exact = self.b.ins().icmp_imm_s(IntCC::Equal, overflowed, 0);
-                    self.leave_if(exact, guard.exit)?;
+                    if self.leaves_past(guard.exit) {
+                        let frame = self.value(value)?.slot.frame;
+                        let wrote = Wrote { long, read };
+                        self.leave_past(exact, guard.exit, frame, wrote)?;
+                    } else {
+                        self.leave_if(exact, guard.exit)?;
+                    }
                     Num::Double(double)
                 }
                 (Num::Long(_), Some(Kind::Long)) | (Num::Double(_), Some(Kind::Double)) => num,
@@ -1544,24 +1577,34 @@ impl<'a> Emit<'a> {
     }
 
     /// Whether `exit` lands past an arithmetic with what it overflowed
-    /// to in its slots (`Stored::Overflowed`, `Stored::Limit`).
-    fn overflows_past(&self, exit: ExitId) -> bool {
+    /// to in its slots (`Stored::Overflowed`, `Stored::Limit`), or with
+    /// the longs a step wrote that did not overflow (`Stored::Stayed`).
+    fn leaves_past(&self, exit: ExitId) -> bool {
         (self.ir.exits.get(usize::from(exit.0)))
-            .is_some_and(|spec| (spec.stores.iter()).any(|store| store.from.constant().is_some()))
+            .is_some_and(|spec| (spec.stores.iter()).any(|store| store.from.stack_type().is_some()))
     }
 
-    /// Leave through `exit` where `cond`, the overflow of an `ADD` or a
-    /// `SUB` of `1`, an increment or a decrement, is not zero, writing
-    /// first each constant the exit names to its slot in `frame`, the
+    /// Leave through `exit` where `cond` is not zero, the overflow of an
+    /// `ADD` or a `SUB` of `1`, an increment or a decrement held long, or
+    /// for a step held a double that it did not overflow, writing first
+    /// each value the exit names the site's to its slot in `frame`, the
     /// one this site runs in, which is the one the exit lands in at
     /// whichever inlined level takes it, as php's frame-relative stack
-    /// map holds the constant: the double it went to,
+    /// map holds it: the double it went to,
     /// `(double)ZEND_LONG_MAX + 1.0` where it went up and
     /// `(double)ZEND_LONG_MIN - 1.0`, which rounds to `ZEND_LONG_MIN`'s
-    /// double, otherwise, and the long a `POST_*` read, in its `out`.
-    /// Never failed by exit-fuzz: the exit lands past the op, right only
-    /// where it overflowed.
-    fn leave_overflowed(&mut self, cond: Value, exit: ExitId, frame: Frame) -> Result<(), Abort> {
+    /// double, otherwise, and the long a `POST_*` read at the limit, in
+    /// its `out`; or the long a step went to, and the long a `POST_*`
+    /// read in its `out`, from `wrote`. Never failed by exit-fuzz: the
+    /// exit lands past the op, right only where it went the way `cond`
+    /// says.
+    fn leave_past(
+        &mut self,
+        cond: Value,
+        exit: ExitId,
+        frame: Frame,
+        wrote: Wrote,
+    ) -> Result<(), Abort> {
         let (to, args) = self.guard_exit(exit)?;
         let stores = (self.ir.exits.get(usize::from(exit.0)))
             .map(|spec| spec.stores.clone())
@@ -1588,6 +1631,10 @@ impl<'a> Emit<'a> {
                 Stored::Limit { up } => {
                     let long = if up { i64::MAX } else { i64::MIN };
                     Scalar::Long(self.b.ins().iconst(I64, long))
+                }
+                Stored::Stayed { read: false, .. } => Scalar::Long(wrote.long),
+                Stored::Stayed { read: true, .. } => {
+                    Scalar::Long((wrote.read).ok_or_else(|| mismatch("a step's out read no long"))?)
                 }
                 Stored::Value(_) | Stored::Copied { .. } | Stored::Null => continue,
             };
@@ -1787,11 +1834,12 @@ impl<'a> Emit<'a> {
                     }
                 }
                 // Its site wrote the slot before it branched here
-                // ([`Emit::leave_overflowed`] the constants).
+                // ([`Emit::leave_past`] the constants and a step's longs).
                 Stored::Copied { .. }
                 | Stored::Null
                 | Stored::Overflowed { .. }
-                | Stored::Limit { .. } => {}
+                | Stored::Limit { .. }
+                | Stored::Stayed { .. } => {}
             }
         }
         Ok(())
@@ -2958,7 +3006,7 @@ impl<'a> Emit<'a> {
             }
             (a, b) => self.dispatched(at, line, (op, &defs), [a, b], raises)?,
         };
-        let num = self.settle(at, &defs, num)?;
+        let num = self.settle(at, &defs, num, None)?;
         if let ([value], Num::Either { .. }) = (defs.as_slice(), num)
             && let Some(reader) = self.keeps(at, *value)?
         {
@@ -3044,7 +3092,9 @@ impl<'a> Emit<'a> {
                 |v| matches!(v.def, Def::Phi { entry, back } if entry == value || back == value),
             ) || self.ir.exits.iter().any(|exit| {
                 exit.stores.iter().any(|store| match store.from {
-                    Stored::Value(v) | Stored::Copied { value: v, .. } => v == value,
+                    Stored::Value(v)
+                    | Stored::Copied { value: v, .. }
+                    | Stored::Stayed { value: v, .. } => v == value,
                     Stored::Null | Stored::Overflowed { .. } | Stored::Limit { .. } => false,
                 })
             });
@@ -3168,7 +3218,7 @@ impl<'a> Emit<'a> {
             let a = read(self, either[0], ka, fixed[0])?;
             let b = read(self, either[1], kb, fixed[1])?;
             let num = self.binary(op, a, b, raises)?;
-            let num = self.held(at, defs, num)?;
+            let num = self.held(at, defs, num, None)?;
             let args = self.carried(made, num)?;
             self.b.ins().jump(join, &args);
         }
@@ -3282,7 +3332,11 @@ impl<'a> Emit<'a> {
         if pre {
             defs.extend(line.out);
         }
-        let new = self.settle(at, &defs, new)?;
+        let read = match old {
+            Scalar::Long(x) => Some(x),
+            _ => None,
+        };
+        let new = self.settle(at, &defs, new, read)?;
         for value in defs {
             self.define_num(value, new)?;
         }
