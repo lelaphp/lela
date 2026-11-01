@@ -14,7 +14,9 @@
 #   is #3385's, through `xtask steer`.
 # - The hand-off is target/: the runner keeps it between the two jobs, and
 #   the recipe lands the build at target/oracle/linux-x86_64/main/, `php`
-#   beside `pin.toml`, its table. On Linux `g4-code`, `oracle-jit` and
+#   beside `pin.toml`, its table, and `runtime.txt`, the packages whose
+#   libraries it links, which `bench` installs and holds with `ldd` before
+#   a bar runs (#3825). On Linux `g4-code`, `oracle-jit` and
 #   `oracle-jit-aa` take that `php` as the pinned one, held to the md5 its
 #   `pin.toml` records, and refuse, naming the path and the md5, where it
 #   is absent or another (#3799). A run with `baseline` off measures the
@@ -163,6 +165,32 @@ jobs:
           out=target/oracle/linux-x86_64/main
           md5sum "$out/php" 2>&1 || true
           cat "$out/pin.toml" 2>&1 || true
+      # The libraries that php and its php-fpm link, from the packages the
+      # image that built them names, runtime.txt beside them (#3825): the
+      # image is this host's release, so its names are the host's. The
+      # baseline is built in that image and run here, and packages.txt
+      # lists only what the workspace links. A library `ldd` still cannot
+      # find fails the job here, before a bar runs php and refuses on it.
+      # Where no php stands, the bars that run it refuse, naming the path.
+      - name: the libraries the php built from the pinned tag links
+        run: |
+          out=target/oracle/linux-x86_64/main
+          if [ ! -e "$out/php" ]; then
+            echo "no php at $out; the bars that run it refuse the run, naming the path"
+            exit 0
+          fi
+          if [ ! -s "$out/runtime.txt" ]; then
+            echo "::error::$out/runtime.txt is absent: the php there was built before its image named its runtime packages (#3825); run with baseline on"
+            exit 1
+          fi
+          mapfile -t packages < <(sed -e '/^$/d' "$out/runtime.txt")
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends "${packages[@]}"
+          ldd "$out/php" "$out/php-fpm" | tee "$RUNNER_TEMP/ldd.txt"
+          if grep -F 'not found' "$RUNNER_TEMP/ldd.txt"; then
+            echo "::error::a library php or php-fpm links is not found on this host after runtime.txt's packages; the bars that run it would refuse"
+            exit 1
+          fi
       - name: the bench, on the dedicated machine
         run: |
           ask=(--machine dedicated --reps "$REPS")
