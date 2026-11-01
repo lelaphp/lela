@@ -45,17 +45,17 @@ impl Listening {
     /// `fcgi_accept_request`'s `accept`: a connection and its peer, which
     /// a Unix socket's names none; `None` once a `SIGTERM` has asked the
     /// process to finish or the socket fails.
+    ///
+    /// A stop handled after the check and before `accept` has made the
+    /// number name a socket listening on nothing
+    /// ([`crate::ffi::accepting_on`]), so `accept` fails and the loop ends
+    /// as the check would have ended it.
     fn accept(&self) -> Option<(Conn, Option<IpAddr>)> {
-        use std::os::fd::AsFd as _;
         loop {
             if crate::ffi::shutting_down() {
                 return None;
             }
-            let fd = match self {
-                Listening::Tcp(socket) => socket.as_fd(),
-                Listening::Unix(socket) => socket.as_fd(),
-            };
-            match crate::ffi::accept(fd) {
+            match crate::ffi::accept(self.fd()) {
                 Ok(fd) => match self {
                     Listening::Tcp(_) => {
                         let s = std::net::TcpStream::from(fd);
@@ -72,6 +72,22 @@ impl Listening {
                 Err(_) => return None,
             }
         }
+    }
+
+    fn fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        use std::os::fd::AsFd as _;
+        match self {
+            Listening::Tcp(socket) => socket.as_fd(),
+            Listening::Unix(socket) => socket.as_fd(),
+        }
+    }
+}
+
+impl Drop for Listening {
+    /// The number handed back before it is closed, so a stop handled
+    /// after it touches nothing the number names next.
+    fn drop(&mut self) {
+        crate::ffi::not_accepting_on(self.fd());
     }
 }
 
@@ -370,6 +386,7 @@ pub(crate) fn serve(engine: &Engine, path: &[u8], env: &Environment) -> i32 {
         );
         return FAILURE;
     };
+    crate::ffi::accepting_on(listening.fd());
     let Some(limits) = Limits::read(env) else {
         return FAILURE;
     };
