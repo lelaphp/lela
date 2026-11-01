@@ -13544,6 +13544,35 @@ impl<'a> Emit<'a> {
     /// bool(false)
     /// bool(true)
     /// ```
+    ///
+    /// Each constant side is read through `zend_is_true`
+    /// ([`Self::is_true`]) as often as php reads it, so a `NAN` warns
+    /// while the file compiles: once on the left of an `&&`, which it
+    /// does not settle, twice on the left of an `||`, which it settles,
+    /// and once on a right side the left one leaves the answer to:
+    ///
+    /// ```php
+    /// echo "start\n";
+    /// $x = 1;
+    /// var_dump(NAN && $x);
+    /// var_dump(NAN || $x);
+    /// var_dump(0 || NAN, 1 || NAN, 0 && NAN);
+    /// ```
+    /// ```expect
+    /// Warning: unexpected NAN value was coerced to bool in %SCRATCH%/witness.php on line 4
+    ///
+    /// Warning: unexpected NAN value was coerced to bool in %SCRATCH%/witness.php on line 5
+    ///
+    /// Warning: unexpected NAN value was coerced to bool in %SCRATCH%/witness.php on line 5
+    ///
+    /// Warning: unexpected NAN value was coerced to bool in %SCRATCH%/witness.php on line 6
+    /// start
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// ```
     fn short_circuit_from(
         &mut self,
         or: bool,
@@ -13551,13 +13580,15 @@ impl<'a> Emit<'a> {
         right: impl FnOnce(&mut Self) -> Result<Where, CompileError>,
     ) -> Result<Where, CompileError> {
         if let Where::Constant(value) = left {
-            let held = truth(value);
-            if held == or {
-                return Ok(Where::Constant(Zval::bool(held)));
+            // php asks `zend_is_true` of a settling left side twice, once
+            // to test it and once for `ZVAL_BOOL`.
+            let held = Truth::of(value);
+            if self.is_true(held) == or {
+                return Ok(Where::Constant(Zval::bool(self.is_true(held))));
             }
             let right = right(self)?;
             if let Where::Constant(value) = right {
-                return Ok(Where::Constant(Zval::bool(truth(value))));
+                return Ok(Where::Constant(Zval::bool(self.is_true(Truth::of(value)))));
             }
             return Ok(self.emit_unary(Opcode::Bool, right, 0));
         }
@@ -15693,8 +15724,9 @@ impl<'a> Emit<'a> {
                 Ordering::Equal => 0,
                 Ordering::Greater => 1,
             }),
-            // An arithmetic operator and `xor` are [`fold`]'s and a `.`
-            // is [`Emit::concat_fold`]'s; none of them reaches here.
+            // An arithmetic operator is [`fold`]'s, an `xor`
+            // [`Emit::bool_xor`]'s and a `.` [`Emit::concat_fold`]'s;
+            // none of them reaches here.
             BinaryOp::Add
             | BinaryOp::Sub
             | BinaryOp::Mul
@@ -17349,6 +17381,9 @@ impl<'a> Emit<'a> {
                 ))?;
             return Ok(Operated::Made(made));
         }
+        if op == BinaryOp::BoolXor {
+            return Ok(Operated::Kept(self.bool_xor(left, right)));
+        }
         if bitwise(op) {
             return self
                 .bitwise_made(op, left, right)?
@@ -17363,6 +17398,41 @@ impl<'a> Emit<'a> {
             .ok_or(Unfolded::NoConstant(
                 "arithmetic this compiler cannot fold yet",
             ))
+    }
+
+    /// `boolean_xor_function` (`Z/Zend/zend_operators.c:1575`) under
+    /// `zend_try_ct_eval_binary_op`: each side read through
+    /// `zend_is_true` ([`Self::is_true`]), the left one first, whatever
+    /// its kind. `zend_binary_op_produces_error` lets every pair
+    /// through, so every pair of constants folds, and a `NAN` warns as
+    /// the file compiles, once per side it stands on:
+    ///
+    /// ```php
+    /// echo "start\n";
+    /// const C = NAN xor 0;
+    /// var_dump(NAN xor 1);
+    /// var_dump(NAN xor NAN, [1] xor NAN, C);
+    /// ```
+    /// ```expect
+    /// Warning: unexpected NAN value was coerced to bool in %SCRATCH%/witness.php on line 3
+    ///
+    /// Warning: unexpected NAN value was coerced to bool in %SCRATCH%/witness.php on line 4
+    ///
+    /// Warning: unexpected NAN value was coerced to bool in %SCRATCH%/witness.php on line 5
+    ///
+    /// Warning: unexpected NAN value was coerced to bool in %SCRATCH%/witness.php on line 5
+    ///
+    /// Warning: unexpected NAN value was coerced to bool in %SCRATCH%/witness.php on line 5
+    /// start
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    fn bool_xor(&mut self, left: Zval, right: Zval) -> Zval {
+        let left = self.is_true(Truth::of(left));
+        let right = self.is_true(Truth::of(right));
+        Zval::bool(left != right)
     }
 
     /// `zend_eval_const_expr`'s `ZEND_AST_DIM` arm
@@ -21672,9 +21742,10 @@ fn produces_error(op: BinaryOp, a: Number, b: Number) -> bool {
             (long_compatible(a), long_compatible(b)),
             (Some(_), Some(by)) if by >= 0
         ),
-        // A `.` is [`Emit::concat_fold`]'s and a comparison
-        // [`Emit::compare_fold`]'s; neither reaches here.
-        BinaryOp::Concat => true,
+        // A `.` is [`Emit::concat_fold`]'s, an `xor`
+        // [`Emit::bool_xor`]'s and a comparison [`Emit::compare_fold`]'s;
+        // none reaches here.
+        BinaryOp::Concat | BinaryOp::BoolXor => true,
         _ => compares(op),
     }
 }
@@ -21685,12 +21756,6 @@ fn produces_error(op: BinaryOp, a: Number, b: Number) -> bool {
 /// through the same `add_function` and its kin, and folds unless
 /// `zend_binary_op_produces_error` says the opcode would throw or warn.
 fn fold(op: BinaryOp, left: Zval, right: Zval) -> Option<Zval> {
-    // `boolean_xor_function` reads both sides as `zend_is_true` reads
-    // them, whatever their kind, and never fails, so
-    // `zend_try_ct_eval_binary_op` folds every constant pair.
-    if op == BinaryOp::BoolXor {
-        return Some(Zval::bool(truth(left) != truth(right)));
-    }
     let (a, b) = (number(left)?, number(right)?);
     if produces_error(op, a, b) {
         return None;

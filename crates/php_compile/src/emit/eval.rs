@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use php_heap::{Made, Zval, ZvalType};
 use php_syntax::tree::{self, NodeId};
 
-use super::{Emit, Fold, Operated, Truth, truth};
+use super::{Emit, Fold, Operated, Truth};
 use crate::{CompileError, Raise};
 
 /// What a fold of a node answers where it has no value for it: the node
@@ -500,6 +500,53 @@ impl Emit<'_> {
     /// compile's fold the right side is not read where the left one
     /// settles it, as `zend_compile_short_circuiting` does not compile
     /// it.
+    ///
+    /// Each side's truth is read once, through `zend_is_true`
+    /// ([`Self::is_true`]), so a `NAN` the evaluator reads warns once as
+    /// the file compiles. An array element is evaluated before its
+    /// compile, so a `NAN` that does not settle is read again where the
+    /// element compiles, and one that does stands as the bool it folded
+    /// to:
+    ///
+    /// ```php
+    /// echo "start\n";
+    /// const B = NAN && 1;
+    /// const E = NAN || 0;
+    /// class K { const A = NAN && NAN; const Z = 0 || NAN; }
+    /// $x = 1;
+    /// var_dump([NAN && $x], [NAN || $x]);
+    /// var_dump(B, E, K::A, K::Z);
+    /// ```
+    /// ```expect
+    /// Warning: unexpected NAN value was coerced to bool in %SCRATCH%/witness.php on line 3
+    ///
+    /// Warning: unexpected NAN value was coerced to bool in %SCRATCH%/witness.php on line 4
+    ///
+    /// Warning: unexpected NAN value was coerced to bool in %SCRATCH%/witness.php on line 5
+    ///
+    /// Warning: unexpected NAN value was coerced to bool in %SCRATCH%/witness.php on line 5
+    ///
+    /// Warning: unexpected NAN value was coerced to bool in %SCRATCH%/witness.php on line 5
+    ///
+    /// Warning: unexpected NAN value was coerced to bool in %SCRATCH%/witness.php on line 7
+    ///
+    /// Warning: unexpected NAN value was coerced to bool in %SCRATCH%/witness.php on line 7
+    ///
+    /// Warning: unexpected NAN value was coerced to bool in %SCRATCH%/witness.php on line 7
+    /// start
+    /// array(1) {
+    ///   [0]=>
+    ///   bool(true)
+    /// }
+    /// array(1) {
+    ///   [0]=>
+    ///   bool(true)
+    /// }
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// ```
     pub(super) fn short_circuit_fold(
         &mut self,
         id: NodeId<tree::BinaryExpr>,
@@ -514,11 +561,13 @@ impl Emit<'_> {
                     .map(Operated::Kept)
             });
         }
-        let held = truth(self.constant_expr(left)?);
-        if held == or {
-            return Ok(Zval::bool(held));
+        // `zend_compile_short_circuiting`'s reads ([`Self::short_circuit_from`]).
+        let held = Truth::of(self.constant_expr(left)?);
+        if self.is_true(held) == or {
+            return Ok(Zval::bool(self.is_true(held)));
         }
-        Ok(Zval::bool(truth(self.constant_expr(right)?)))
+        let right = Truth::of(self.constant_expr(right)?);
+        Ok(Zval::bool(self.is_true(right)))
     }
 
     /// [`Self::short_circuit_fold`]'s two children under
@@ -532,14 +581,19 @@ impl Emit<'_> {
         left: tree::Expr,
         right: tree::Expr,
     ) -> Result<Zval, Unfolded> {
+        let why = "a short circuit over a side that does not fold";
         let left = self.child(left)?;
         let right = self.child(right)?;
-        match (left, right) {
-            (Child::Folded(held), _) if truth(held) == or => Ok(Zval::bool(truth(held))),
-            (Child::Folded(_), Child::Folded(right)) => Ok(Zval::bool(truth(right))),
-            (Child::Unfolded(unfolded), _) | (Child::Folded(_), Child::Unfolded(unfolded)) => {
-                Err(unfolded.of_node("a short circuit over a side that does not fold"))
-            }
+        let held = match left {
+            Child::Folded(held) => held,
+            Child::Unfolded(unfolded) => return Err(unfolded.of_node(why)),
+        };
+        if self.is_true(Truth::of(held)) == or {
+            return Ok(Zval::bool(or));
+        }
+        match right {
+            Child::Folded(right) => Ok(Zval::bool(self.is_true(Truth::of(right)))),
+            Child::Unfolded(unfolded) => Err(unfolded.of_node(why)),
         }
     }
 
