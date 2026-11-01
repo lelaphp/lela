@@ -479,11 +479,43 @@ pub(super) fn goes_one_way(opcode: Opcode, held: Types) -> bool {
 
 /// The oplines whose handler leaves a temporary it reads alive: a
 /// `switch`'s or a `match`'s subject, a `foreach`'s iterator, a `list()`'s
-/// array, a copied temporary, a coalescing jump's value.
+/// array, a copied temporary, a coalescing jump's value, the closure a
+/// `use` binds a variable into (`ZEND_BIND_LEXICAL`,
+/// `Z/Zend/zend_vm_def.h:9108-9140`).
+///
+/// The closure a loop binds and then assigns is the one its
+/// `DECLARE_LAMBDA_FUNCTION` made, so the trace holds no guard on that
+/// temporary at entry and numbers its exits as php's:
+///
+/// ```php
+/// function f() { $s = "a"; $n = 0; $g = null; for ($i = 0; $i < 100; $i++) { $g = function () use ($s) { return $s; }; if ($i > 50) { $n++; } } return $n . $g(); }
+/// echo f(), "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 49a
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:3
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) f() %s:2
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 1 f() %s:2
+/// ---- TRACE 2 start (side trace 1/1) f() %s:2
+/// ---- TRACE 2 stop (link to 1)
+/// ---- TRACE 2 compiled
+///
+///      TRACE 1 exit 0 f() %s:2
+/// ---- TRACE 3 start (side trace 1/0) f() %s:2
+/// ---- TRACE 3 stop (return)
+/// ---- TRACE 3 compiled
+/// ```
 pub(super) fn keeps_temporaries(opcode: Opcode) -> bool {
     matches!(
         opcode,
         Opcode::Case
+            | Opcode::BindLexical
             | Opcode::CaseStrict
             | Opcode::SwitchLong
             | Opcode::SwitchString
