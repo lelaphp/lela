@@ -44,11 +44,31 @@ use php_ext::values::{FreshString, Owner, PhpArray, PhpString};
 struct State {}
 
 /// `iconv.stub.php`'s four constants, `ICONV_IMPL` and `ICONV_VERSION`
-/// as php's build against libiconv answers them.
+/// the `iconv(3)` linked, as `iconv.c` names it (`ffi::linked`): the
+/// macOS system libiconv, 1.11, as the oracle's; and the same two the
+/// rows of `--ri iconv` print, as `PHP_MINFO` reads them back.
+///
+/// ```php
+/// var_dump(ICONV_IMPL, ICONV_VERSION);
+/// ob_start(); (new ReflectionExtension('iconv'))->info(); $info = ob_get_clean();
+/// var_dump(str_contains($info, "iconv implementation => " . ICONV_IMPL . "\n"), str_contains($info, "iconv library version => " . ICONV_VERSION . "\n"));
+/// ```
+/// ```expect
+/// string(8) "libiconv"
+/// string(4) "1.11"
+/// bool(true)
+/// bool(true)
+/// ```
 #[php_const]
 mod constants {
-    pub(crate) const ICONV_IMPL: &str = "libiconv";
-    pub(crate) const ICONV_VERSION: &str = "1.11";
+    use crate::ffi::linked;
+
+    /// `PHP_ICONV_IMPL_VALUE`, as `configure` named the library linked.
+    pub(crate) const ICONV_IMPL: &str = linked::IMPL;
+    /// `get_iconv_version()`, the library's own, read at startup.
+    pub(crate) fn ICONV_VERSION() -> String {
+        linked::version()
+    }
     pub(crate) const ICONV_MIME_DECODE_STRICT: i64 = 1;
     pub(crate) const ICONV_MIME_DECODE_CONTINUE_ON_ERROR: i64 = 2;
 }
@@ -194,10 +214,11 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
 /// iconv.internal_encoding => no value => no value
 /// ```
 fn info(req: &mut Request) {
+    let version = ffi::linked::version();
     req.extensions_mut().info_table(&[
         &["iconv support", "enabled"],
-        &["iconv implementation", "libiconv"],
-        &["iconv library version", "1.11"],
+        &["iconv implementation", ffi::linked::IMPL],
+        &["iconv library version", &version],
     ]);
     let names = Kind::ALL.map(Kind::entry);
     req.ini_mut()
