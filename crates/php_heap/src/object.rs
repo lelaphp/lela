@@ -1053,14 +1053,18 @@ impl Heap {
             o.header().gc.set_refcount(1);
             Heap::object_free(hooks, o);
             o.header().gc.set_refcount(0);
-            let heap = hooks.heap();
-            heap.gc.remove_from_buffer(crate::collector::Node::Obj(o));
-            heap.store.add_to_free_list(handle);
+            hooks.heap().store.add_to_free_list(handle);
         }
+        // One freed already and owned since, as the cycle collector
+        // leaves an object a callable of its free kept, may have been
+        // offered as a possible root since: off the buffer, as php's
+        // `GC_REMOVE_FROM_BUFFER` before every `efree` takes it.
+        let heap = hooks.heap();
+        heap.gc.remove_from_buffer(crate::collector::Node::Obj(o));
         // SAFETY: the object came from `object_alloc`, its bucket is
         // invalid, its members are freed, its id is free and the root
         // buffer names it no more, so only a pin names it.
-        unsafe { hooks.heap().give_back(o.address(), o.pins() > 0) };
+        unsafe { heap.give_back(o.address(), o.pins() > 0) };
     }
 
     /// One pin [`Obj::pin`] took let go. The last one over an object

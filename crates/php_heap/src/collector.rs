@@ -1363,7 +1363,33 @@ impl Heap {
     /// destroyed; then, in a second pass, what is still garbage off the
     /// buffer and its bytes back to the heap, but for a value a pin
     /// stands over, whose bytes alone wait for the last pin
-    /// ([`Heap::give_back`]).
+    /// ([`Heap::give_back`]), and for one the program took an owner of
+    /// while the garbage was freed, whose bytes wait for that owner.
+    ///
+    /// A value the program took an owner of while the garbage was freed
+    /// stands, destroyed, until that owner gives it up: here the trace
+    /// of what the callable threw holds the object past the collection,
+    /// and the catch's `$e` gives it up at the request's end, where the
+    /// engine gives back the bytes it kept.
+    ///
+    /// ```php
+    /// $m = curl_multi_init();
+    /// $h = curl_init('http://127.0.0.1:1/');
+    /// curl_setopt($h, CURLOPT_VERBOSE, 1);
+    /// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $t, $d) use ($m) {
+    ///     if ($t == CURLINFO_TEXT && str_starts_with($d, 'closing')) { echo "debug: $d"; throw new Exception("debug"); }
+    /// });
+    /// curl_multi_add_handle($m, $h);
+    /// curl_multi_exec($m, $r);
+    /// unset($h, $m);
+    /// try { var_dump(gc_collect_cycles()); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// debug: closing connection #0
+    /// caught debug
+    /// end
+    /// ```
     fn gc_free_garbage(hooks: &mut dyn HeapHooks, end: u32) {
         for idx in FIRST_ROOT..end {
             let Some(Entry::Garbage(node)) = hooks.heap().gc.entry(idx) else {
@@ -1395,34 +1421,40 @@ impl Heap {
                 continue;
             };
             heap.gc.remove_from_roots(idx);
-            // Where a pin keeps the bytes, the value stands destroyed and
-            // of its own type, so what the pin names reads it so and an
-            // owner taken of it since gives it up as any value; the
-            // counts its garbage held of it went with that garbage.
-            let (at, pinned) = match node {
+            // The counts the garbage held of a value went with that
+            // garbage, so a count left is an owner the program took while
+            // the garbage was freed. Where an owner or a pin keeps the
+            // bytes, the value stands destroyed and of its own type, so
+            // what names it reads it so, and its last owner gives it up as
+            // any value, its destructor served already.
+            let owned = node.gc().refcount() != 0;
+            let (at, kept) = match node {
                 Node::Obj(o) => {
-                    let pinned = o.pins() > 0;
-                    if pinned {
+                    let kept = owned || o.pins() > 0;
+                    if kept {
                         o.gc().set_kind(ZvalType::Object);
+                        o.add_flag(gc::OBJ_DESTRUCTOR_CALLED);
                     }
-                    (o.address(), pinned)
+                    (o.address(), kept)
                 }
                 Node::Arr(a) => {
-                    let pinned = a.gc().pinned();
-                    if pinned {
+                    let kept = owned || a.gc().pinned();
+                    if kept {
                         a.emptied();
                     }
-                    (a.address(), pinned)
+                    (a.address(), kept)
                 }
                 Node::Ref(_) => continue,
             };
-            if pinned {
-                node.gc().set_refcount(0);
+            if kept {
+                // Its entry is unused now, so the header names none, and
+                // a release that leaves an owner may offer it again.
+                node.gc().set_place(None, Colour::Black);
             }
             // SAFETY: the value was garbage, freed of its contents above,
-            // out of the store and off the buffer, so only a pin names
-            // it.
-            unsafe { heap.give_back(at, pinned) };
+            // out of the store and off the buffer, so only a pin or an
+            // owner taken since names it, which `kept` says.
+            unsafe { heap.give_back(at, kept) };
         }
     }
 
@@ -1603,6 +1635,9 @@ mod tests {
         /// An object the destructor gives an owner to, php's
         /// `$GLOBALS['x'] = $this` in `__destruct`.
         keep: Option<u32>,
+        /// An object its own free gives an owner to, as a callable
+        /// `curl_free_obj` serves keeps the `CurlHandle` it is handed.
+        free_keep: Option<u32>,
         kept: Vec<Obj>,
         /// How many times the overflow warning was raised.
         overflows: u32,
@@ -1614,6 +1649,7 @@ mod tests {
                 heap: Heap::new(),
                 served: Vec::new(),
                 keep: None,
+                free_keep: None,
                 kept: Vec::new(),
                 overflows: 0,
             }
@@ -1631,7 +1667,12 @@ mod tests {
                 self.kept.push(obj);
             }
         }
-        fn free_native(&mut self, _: Obj) {}
+        fn free_native(&mut self, obj: Obj) {
+            if self.free_keep == Some(obj.id().0) {
+                obj.addref();
+                self.kept.push(obj);
+            }
+        }
         fn gc_children(&mut self, _: Obj, _: &mut dyn FnMut(Zval)) -> GcTable {
             GcTable::Properties
         }
@@ -1727,6 +1768,47 @@ mod tests {
         assert_eq!(Heap::gc_collect_cycles(&mut r), 2);
         assert_eq!(r.served, vec![1, 2]);
         assert_eq!(r.heap.objects(), 0);
+    }
+
+    /// An object its own free gives an owner to stands destroyed past
+    /// the collection, never freed under that owner: its id is free and
+    /// its bytes counted off at php's moment, it is of its own type again
+    /// and in no root entry, and its last owner gives its bytes back with
+    /// nothing served twice. A release that leaves it an owner offers it
+    /// as a possible root, and that entry is gone with its bytes.
+    #[test]
+    fn an_object_its_free_keeps_stands_until_its_last_owner_goes() {
+        let _alone = alone();
+        let mut r = Recorder::new();
+        let start = r.heap.memory_usage(false);
+        let a = r.heap.object_with(1, 1, 0, ()).expect("an object");
+        let b = r.heap.object(1, 1, 0).expect("an object");
+        Heap::object_set_slot(&mut r, a, 0, Zval::object(b));
+        b.addref();
+        Heap::object_set_slot(&mut r, b, 0, Zval::object(a));
+        a.addref();
+        r.free_keep = Some(a.id().0);
+        Heap::release(&mut r, Zval::object(a));
+        Heap::release(&mut r, Zval::object(b));
+        assert_eq!(Heap::gc_collect_cycles(&mut r), 2);
+        assert_eq!(r.served, vec![1, 2]);
+        assert_eq!(r.heap.objects(), 0);
+        assert_eq!(r.heap.memory_usage(false), start);
+        assert_eq!(r.heap.gc_status().roots, 0);
+        let kept = r.kept.pop().expect("the owner its free took");
+        assert!(kept.is_same(a));
+        assert_eq!(kept.refcount(), 1);
+        assert_eq!(kept.gc().kind(), ZvalType::Object as u32);
+        assert!(kept.gc().is_unplaced());
+        kept.addref();
+        Heap::release(&mut r, Zval::object(kept));
+        assert_eq!(r.heap.gc_status().roots, 1);
+        Heap::release(&mut r, Zval::object(kept));
+        assert_eq!(r.heap.gc_status().roots, 0);
+        assert_eq!(r.served, vec![1, 2]);
+        assert_eq!(r.heap.memory_usage(false), start);
+        #[cfg(debug_assertions)]
+        assert_eq!(r.heap.take_sensed(), None);
     }
 
     /// The `GC_TYPE_INFO` word compiled code reads at [`Zval::GC_INFO_AT`]
