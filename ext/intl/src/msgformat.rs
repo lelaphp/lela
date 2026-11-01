@@ -536,7 +536,7 @@ fn quoted(head: &str, bytes: &[u8], tail: &str) -> Vec<u8> {
 /// ```
 struct Converting<'s, 'a> {
     site: &'s mut Site<'a>,
-    pending: Carrying,
+    pending: &'s mut Carrying,
 }
 
 impl Converting<'_, '_> {
@@ -732,9 +732,10 @@ impl Converting<'_, '_> {
 /// `umsg_format_helper`: each argument named and typed by the pattern
 /// (or by its value where the pattern does not say), then
 /// `MessageFormat::format`; none where any step failed, its error set
-/// on the site. A conversion that throws leaves its throwable pending
-/// while the walk goes on, `MessageFormat::format` runs, and the native
-/// returns into it, so what the later arguments raise is raised:
+/// on the site. A conversion that throws leaves its throwable in
+/// `pending` while the walk goes on and `MessageFormat::format` runs,
+/// and the native returns into it ([`do_format`]), so what the later
+/// arguments raise is raised:
 ///
 /// ```php
 /// class T { function __toString(): string { throw new Exception('t'); } }
@@ -754,17 +755,19 @@ impl Converting<'_, '_> {
 /// IntlException: 4d657373616765466f726d61747465723a3a666f726d61744d65737361676528293a20496e76616c6964205554462d38206461746120696e20737472696e6720617267756d656e743a2027ff27
 /// Exception: 74
 /// ```
-fn format_helper(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer<Vec<u16>> {
+fn format_helper(
+    req: &mut Request,
+    site: &mut Site,
+    pending: &mut Carrying,
+    values: PhpArray,
+) -> Answer<Vec<u16>> {
     if site.code(req).is_failure() {
         return Ok(None);
     }
     let types = arg_types(req, site)?.unwrap_or_default();
     set_timezone(req, site)?;
     let mut args = Vec::with_capacity(values.len());
-    let mut converting = Converting {
-        site,
-        pending: Carrying::default(),
-    };
+    let mut converting = Converting { site, pending };
     // `ZEND_HASH_FOREACH_KEY_VAL(args, num_index, str_index, elem)` over
     // the argument, which holds the array while a conversion serves
     // `__toString` or a date argument's methods.
@@ -819,11 +822,7 @@ fn format_helper(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer
     if let Err(thrown) = walked {
         converting.keep(req, thrown)?;
     }
-    let formatted = formatted(req, &mut converting, &args);
-    match converting.pending.take() {
-        Some(pending) => Err(pending),
-        None => formatted,
-    }
+    formatted(req, &mut converting, &args)
 }
 
 /// `umsg_format_helper` after its walk: nothing where a row failed, else
@@ -856,19 +855,65 @@ fn formatted(
 }
 
 /// `msgfmt_do_format`: `umsg_format_helper`'s text in UTF-8, `false`
-/// where it or the conversion failed.
+/// where it or the conversion failed. A throwable a conversion left
+/// pending is returned into after the text is converted, so where the
+/// walk set no failure the request's code is set as
+/// `INTL_METHOD_RETVAL_UTF8` sets it with the throwable in
+/// `EG(exception)`, a stale failure reset to `U_ZERO_ERROR` and its
+/// message left standing as `intl_error_set_code` leaves it:
+///
+/// ```php
+/// class T { function __toString(): string { throw new Exception('t'); } }
+/// var_dump(MessageFormatter::formatMessage('en', '{0,date}', ['x']));
+/// var_dump(intl_get_error_code());
+/// try { var_dump(MessageFormatter::formatMessage('en', '{0}', [new T])); } catch (Exception $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// var_dump(intl_get_error_code(), intl_get_error_message());
+/// var_dump(MessageFormatter::formatMessage('en', '{0,date}', ['x']));
+/// try { var_dump(MessageFormatter::formatMessage('en', '{0} {1,date}', [new T, 'x'])); } catch (Exception $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// var_dump(intl_get_error_code(), intl_get_error_message());
+/// $f = new MessageFormatter('en', '{0}');
+/// var_dump(MessageFormatter::formatMessage('en', '{0,date}', ['x']));
+/// try { var_dump($f->format([new T])); } catch (Exception $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// var_dump(intl_get_error_code(), $f->getErrorCode(), $f->getErrorMessage());
+/// ```
+/// ```expect
+/// bool(false)
+/// int(1)
+/// Exception: t
+/// int(0)
+/// string(106) "MessageFormatter::formatMessage(): The argument for key '0' cannot be used as a date or time: U_ZERO_ERROR"
+/// bool(false)
+/// Exception: t
+/// int(1)
+/// string(118) "MessageFormatter::formatMessage(): The argument for key '1' cannot be used as a date or time: U_ILLEGAL_ARGUMENT_ERROR"
+/// bool(false)
+/// Exception: t
+/// int(0)
+/// int(0)
+/// string(12) "U_ZERO_ERROR"
+/// ```
 fn do_format(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer<Owner<PhpString>> {
-    let Some(units) = format_helper(req, site, values)? else {
-        return Ok(None);
+    let mut pending = Carrying::default();
+    let text = match format_helper(req, site, &mut pending, values)? {
+        // `INTL_METHOD_RETVAL_UTF8`, served past what is pending.
+        Some(units) => pending
+            .serve(req, |req| {
+                let converted = ffi::to_utf8(&units);
+                site.set_code(req, converted.as_ref().err().copied().unwrap_or(Code::ZERO));
+                if !site.check(req, "Error converting value to UTF-8")? {
+                    return Ok(None);
+                }
+                match converted {
+                    Ok(bytes) => PhpString::new(req, &bytes).map(Some),
+                    Err(_) => Ok(None),
+                }
+            })?
+            .flatten(),
+        None => None,
     };
-    let converted = ffi::to_utf8(&units);
-    site.set_code(req, converted.as_ref().err().copied().unwrap_or(Code::ZERO));
-    if !site.check(req, "Error converting value to UTF-8")? {
-        return Ok(None);
-    }
-    match converted {
-        Ok(bytes) => PhpString::new(req, &bytes).map(Some),
-        Err(_) => Ok(None),
+    match pending.take() {
+        Some(pending) => Err(pending),
+        None => Ok(text),
     }
 }
 
