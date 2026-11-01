@@ -66,9 +66,8 @@ pub struct StreamHooks {
     pub read_include: IncludeReadHook,
     /// `zend_destroy_file_handle` over the file an [`IncludeFile`]
     /// holds, as `compile_filename` destroys it once `zend_compile_file`
-    /// is done: its stream closed, or left among the request's resources
-    /// where a fatal is ending the request, since `zend_bailout` jumps
-    /// past the destroy.
+    /// is done, or `zend_stream_shutdown` where a fatal jumped past that:
+    /// its stream closed.
     pub close_include: fn(&mut Request, IncludeFile),
     /// `php_resolve_path_for_zend`: `zend_resolve_path` past every
     /// extension's own
