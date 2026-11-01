@@ -749,11 +749,11 @@ pub(super) fn to_xml_user(
             let parsed = parse_memory(req, &s);
             answer.give_up(req);
             let doc = parsed?;
-            if let Some(doc) = doc {
-                if let Some(first) = doc.children() {
-                    ret = first.copy(parent.doc(), 1);
-                }
-                doc.free_document();
+            // The parsed tree is freed as `doc` drops, past the copy.
+            if let Some(doc) = doc
+                && let Some(first) = doc.node().children()
+            {
+                ret = first.copy(parent.doc(), 1);
             }
         } else {
             answer.give_up(req);

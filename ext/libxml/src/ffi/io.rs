@@ -236,13 +236,14 @@ impl Parser {
     /// `comment` set to nothing), its warnings and errors silenced,
     /// `XML_PARSE_HUGE`, and the document parsed with the entity loader
     /// disabled; the tree where it was well formed, its `URL` the
-    /// parser's directory where it had none, and nothing otherwise. The
-    /// file is opened through `req`'s streams before the loader is
-    /// disabled, as php creates the parser first.
+    /// parser's directory where it had none, freed as it drops where no
+    /// caller kept it, and nothing otherwise. The file is opened through
+    /// `req`'s streams before the loader is disabled, as php creates the
+    /// parser first.
     pub fn soap(
         req: &mut Request,
         source: Source<'_>,
-    ) -> (Option<Node>, Vec<Raised>, Option<Thrown>) {
+    ) -> (Option<NewDoc>, Vec<Raised>, Option<Thrown>) {
         Library::init();
         let created = Routing::Parser {
             sax: ptr::null_mut(),
@@ -303,7 +304,9 @@ impl Parser {
                         d.URL = unsafe { sys::xmlStrdup(c.directory.cast::<u8>()) };
                     }
                 }
-                Node::from_raw(doc.cast())
+                // SAFETY: the tree the parse made, the caller's alone once
+                // the context is freed below, which does not free it.
+                unsafe { NewDoc::from_ptr(doc.cast()) }
             } else {
                 // SAFETY: the malformed tree, freed once; the context forgets it.
                 unsafe { sys::xmlFreeDoc(c.myDoc) };

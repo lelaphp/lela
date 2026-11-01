@@ -179,7 +179,9 @@ pub(crate) fn get_create_encoder(
 
 /// `schema_load_file`: an imported, included or redefined schema read
 /// once per location and loaded, its `targetNamespace` held to the one
-/// expected.
+/// expected. A document loaded is kept in `ctx.docs` and freed with
+/// `sdlCtx`; one refused is freed as it drops, where php's `xmlFreeDoc`
+/// precedes the error.
 fn schema_load_file(
     req: &mut Request,
     ctx: &mut Ctx,
@@ -202,8 +204,7 @@ fn schema_load_file(
             pending,
         ));
     };
-    let Some(schema) = get_node(doc.children(), b"schema", None) else {
-        doc.free_document();
+    let Some(schema) = get_node(doc.node().children(), b"schema", None) else {
         return Err(schema_error(&format!("can't import schema from '{loc}'")));
     };
     let new_tns = attribute(schema, b"targetNamespace");
@@ -221,7 +222,6 @@ fn schema_load_file(
                     lossy(&attr_content(t))
                 ),
             };
-            doc.free_document();
             return Err(schema_error(&text));
         }
         if ns.is_none()
@@ -231,7 +231,6 @@ fn schema_load_file(
                 "can't import schema from '{loc}', unexpected 'targetNamespace'='{}', expected no 'targetNamespace'",
                 lossy(&attr_content(t))
             );
-            doc.free_document();
             return Err(schema_error(&text));
         }
     } else {
@@ -240,7 +239,6 @@ fn schema_load_file(
                 schema.set_prop(b"targetNamespace", &attr_content(tns));
             }
             Some(t) if attr_content(tns) != attr_content(t) => {
-                doc.free_document();
                 return Err(schema_error(&format!(
                     "can't include schema from '{loc}', different 'targetNamespace'"
                 )));

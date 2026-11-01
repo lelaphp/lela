@@ -2038,4 +2038,24 @@ mod tests {
     fn a_tree_no_object_took_is_freed_where_it_is_given_to_one() {
         assert_eq!(frees(Node::new_doc(None), NewDoc::taken_by_object).0, 1);
     }
+
+    /// The tree `Parser::fragment` built, freed as it drops where its
+    /// caller is done with it, as ext/dom's `innerHTML` setter is (#3849).
+    #[test]
+    fn a_parsed_fragment_frees_its_tree_as_it_drops() {
+        let Some(context) = Node::new_doc(None) else {
+            panic!("libxml2 made no document");
+        };
+        let (parsed, _) =
+            super::super::Parser::fragment(context.node(), &[b"<r>".as_slice(), b"<a/>", b"</r>"]);
+        let super::super::Fragment::Document(Some(built)) = parsed else {
+            panic!("the fragment did not parse");
+        };
+        // The element's names are the context document's dictionary's, as
+        // ext/dom hands the tree to it before the parsed document goes.
+        if let Some(root) = built.node().children() {
+            root.set_tree_doc(Some(context.node()));
+        }
+        assert_eq!(frees(Some(built), drop).0, 1);
+    }
 }
