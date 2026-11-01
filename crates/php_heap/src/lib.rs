@@ -1371,6 +1371,70 @@ mod tests {
         heap.free_block(small);
     }
 
+    /// A huge block resized to a size the page rounding carries past the
+    /// top of memory is refused as a fresh one is, before the limit is
+    /// asked, and handed back whole: the same address, its bytes and its
+    /// count, still mapped. php's `zend_mm_realloc_huge` rounds without
+    /// the check (`Z/Zend/zend_alloc.c:1757`), so its rounding wraps to
+    /// zero and `zend_mm_chunk_truncate` unmaps the whole block it then
+    /// returns (#3602). Asked infallibly, the refusal is the allocator
+    /// panic; asked fallibly, as `SplFixedArray::setSize()` asks, it is
+    /// the refusal with the delayed fatal naming the overflow.
+    #[test]
+    fn a_huge_block_resized_past_the_rounding_is_refused_and_handed_back_whole() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let page = mm::real_page_size();
+        let len = 3_000_000;
+        let mut block = heap.block(len).expect("a huge block");
+        block.bytes_mut().fill(0x5a);
+        let at = block.bytes().as_ptr().addr();
+        let counted = (heap.memory_usage(false), heap.memory_usage(true));
+        for asked in [usize::MAX - 15, usize::MAX - page + 2, usize::MAX] {
+            let said = format!("Possible integer overflow in memory allocation ({asked} + {page})");
+            for fallible in [false, true] {
+                let was = heap.set_fallible(fallible);
+                let refused = heap.block_try_resize(block, asked);
+                heap.set_fallible(was);
+                let Err((kept, fatal)) = refused else {
+                    panic!("{asked}, fallible {fallible}: served");
+                };
+                if fallible {
+                    assert_eq!(fatal.into_reason(), FatalReason::Refused);
+                    assert!(heap.take_refused());
+                    assert!(
+                        matches!(heap.delayed_oom(), DelayedOom::Pending(oom) if oom.message == said),
+                        "{asked}: {:?}",
+                        heap.delayed_oom()
+                    );
+                    heap.reset_oom();
+                } else {
+                    assert_eq!(fatal.into_reason(), FatalReason::Panic(said.clone()));
+                    assert!(!heap.has_oom());
+                }
+                assert_eq!(kept.bytes().as_ptr().addr(), at, "{asked}: where it stood");
+                assert_eq!(kept.len(), len);
+                assert!(
+                    heap.holds(at) && heap.holds(at + len - 1),
+                    "{asked}: mapped"
+                );
+                assert!(
+                    kept.bytes().iter().all(|b| *b == 0x5a),
+                    "{asked}: its bytes"
+                );
+                assert_eq!(
+                    (heap.memory_usage(false), heap.memory_usage(true)),
+                    counted,
+                    "{asked}: its count"
+                );
+                block = kept;
+            }
+        }
+        let grown = heap.block_resize(block, 2 * len).expect("still resizable");
+        assert!(grown.bytes()[..len].iter().all(|b| *b == 0x5a));
+        heap.free_block(grown);
+    }
+
     /// `is_zend_ptr` answers for any address inside a chunk or a huge
     /// block, block or not, and no for addresses no list holds, the null
     /// one and the top of memory among them, without reading them

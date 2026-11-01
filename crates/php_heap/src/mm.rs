@@ -1351,6 +1351,14 @@ impl Mm {
     /// shutdown sees 6000000
     /// ```
     ///
+    /// A size the rounding would carry past the top of memory is refused
+    /// as [`Mm::alloc_huge`] refuses a fresh block of it, before the limit
+    /// is asked, and the block stands where it stood with its bytes and
+    /// its count ([`Mm::huge_rounding`]). php rounds here without that
+    /// check (`Z/Zend/zend_alloc.c:1757`): its rounding wraps to zero,
+    /// `zend_mm_chunk_truncate` unmaps the whole block, and the block is
+    /// returned unmapped (#3602).
+    ///
     /// # Safety
     ///
     /// `at` is a huge block of this heap holding `copy` readable bytes.
@@ -1365,7 +1373,7 @@ impl Mm {
         };
         let old_size = self.huge[index].size;
         if size > MAX_LARGE_SIZE {
-            let new_size = size.next_multiple_of(real_page_size());
+            let new_size = self.huge_rounding(size)?;
             if new_size == old_size {
                 return Ok(at);
             }
@@ -1862,16 +1870,11 @@ impl Mm {
     /// A node the bin cannot give ends php's request there; here the
     /// mapping goes back and the fatal is the bin's. A size the rounding
     /// would carry past the top of memory is php's error before any of
-    /// that, the limit not consulted ([`Mm::overflow_refusal`]).
+    /// that, the limit not consulted ([`Mm::huge_rounding`]).
     #[cold]
     #[inline(never)] // off the bins' path, as `alloc_large` is
     fn alloc_huge(&mut self, size: usize) -> Result<NonNull<u8>, Refused> {
-        let page = real_page_size();
-        let Some(new_size) = size.checked_next_multiple_of(page) else {
-            let message =
-                format!("Possible integer overflow in memory allocation ({size} + {page})");
-            return Err(Refused::Fatal(self.overflow_refusal(message)));
-        };
+        let new_size = self.huge_rounding(size)?;
         self.check_limit(new_size, true)?;
         let mapped = match huge_map(new_size) {
             Some(at) => Some(at),
@@ -1903,6 +1906,23 @@ impl Mm {
         self.size += new_size;
         self.peak = self.peak.max(self.size);
         Ok(at)
+    }
+
+    /// `ZEND_MM_ALIGNED_SIZE_EX(size, REAL_PAGE_SIZE)`, a huge block's
+    /// size rounded up to the page the machine reports, with
+    /// `zend_mm_alloc_huge`'s check on it (`Z/Zend/zend_alloc.c:2079`): a
+    /// size the rounding would carry past the top of memory is php's
+    /// `Possible integer overflow` with the size and the page in its
+    /// words ([`Mm::overflow_refusal`]). [`Mm::alloc_huge`] and
+    /// [`Mm::realloc_huge`] both round through this, so neither wraps;
+    /// php checks only the first.
+    fn huge_rounding(&mut self, size: usize) -> Result<usize, Refused> {
+        let page = real_page_size();
+        if let Some(rounded) = size.checked_next_multiple_of(page) {
+            return Ok(rounded);
+        }
+        let message = format!("Possible integer overflow in memory allocation ({size} + {page})");
+        Err(Refused::Fatal(self.overflow_refusal(message)))
     }
 
     /// `zend_mm_free_huge` (`Z/Zend/zend_alloc.c:1988`): the node goes
