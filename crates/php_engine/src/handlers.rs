@@ -12907,7 +12907,7 @@ fn do_call(req: &mut Request, frame: FrameRef, says: DoCall, opcode: &str) -> Ed
 /// `EG(exception)`, so a signal the native raised before it threw is
 /// dispatched there, its handler served with the throwable set aside
 /// ([`crate::api::raising::set_aside`]), and seen from the native's
-/// call:
+/// call ([`checked_after_throw`]):
 ///
 /// ```php
 /// pcntl_signal(SIGUSR1, function () { pcntl_async_signals(true); posix_kill(posix_getpid(), SIGUSR2); throw new Exception("usr1"); });
@@ -12919,12 +12919,6 @@ fn do_call(req: &mut Request, frame: FrameRef, says: DoCall, opcode: &str) -> Ed
 /// usr2 from pcntl_signal_dispatch
 /// caught usr1
 /// ```
-///
-/// The memory limit's is the `Err`: `zend_handle_delayed_oom` gives up
-/// what the native threw for the unwind exit, so no `catch` takes it (a
-/// DOM parse lexbor stopped at the limit throws its `DOMException` and
-/// the limit's fatal is raised in its place). A fatal leaving makes no
-/// check, since php's `zend_bailout` left the native before it.
 ///
 /// An argument's destructor that throws as the call is popped chains
 /// what the native threw under its own, as `zend_objects_destroy_object`
@@ -12941,14 +12935,28 @@ fn do_call(req: &mut Request, frame: FrameRef, says: DoCall, opcode: &str) -> Ed
 /// ```
 #[inline(always)] // the handler's throw path, as it was before the tier shared it
 pub(super) fn thrown_on_call(req: &mut Request, thrown: &Thrown) -> Result<(), Fatal> {
-    req.leave_pending(thrown);
-    let checked = if req.diagnostics().bailing_out() {
-        Ok(false)
-    } else {
-        crate::interrupt::check(req)
-    };
+    let checked = checked_after_throw(req, thrown);
     req.pop_call();
-    checked.map(drop)
+    checked
+}
+
+/// A native served at a call site threw `thrown`: the throwable left
+/// pending and the interrupt check made with it pending, as php 8.5.12's
+/// `ZEND_VM_FCALL_INTERRUPT_CHECK` comes before the handler reads
+/// `EG(exception)`, in `DO_*CALL`'s handler ([`thrown_on_call`]) and the
+/// `FRAMELESS_ICALL_*` ones ([`frameless_served`]) alike. The memory
+/// limit's is the `Err`: `zend_handle_delayed_oom` gives up what the
+/// native threw for the unwind exit, so no `catch` takes it (a DOM parse
+/// lexbor stopped at the limit throws its `DOMException` and the limit's
+/// fatal is raised in its place). A fatal leaving makes no check, since
+/// php's `zend_bailout` left the native before it.
+#[inline(always)] // both handlers' throw path
+fn checked_after_throw(req: &mut Request, thrown: &Thrown) -> Result<(), Fatal> {
+    req.leave_pending(thrown);
+    if req.diagnostics().bailing_out() {
+        return Ok(());
+    }
+    crate::interrupt::check(req).map(drop)
 }
 
 /// `DO_FCALL` and `DO_FCALL_BY_NAME` over a callee whose `fn_flags`
@@ -13397,6 +13405,32 @@ fn frameless_call<const N: usize>(
 /// or not, as php's frameless handler and its full call for an observed
 /// one do (`Z/Zend/zend_execute.c:1597`). What it returned, or none
 /// with the throwable left pending.
+///
+/// Where the native threw, the interrupt check is made here with the
+/// throwable pending ([`checked_after_throw`]), as each
+/// `FRAMELESS_ICALL_*` handler makes `ZEND_VM_FCALL_INTERRUPT_CHECK`
+/// before `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` and compiled code
+/// `jit_frameless_interrupt_check` before `zend_jit_check_exception`
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:17842`, made at `:17888`, `:17932`,
+/// `:18002` and `:18106`), so the handler and
+/// the tier's `frameless` kernel make it alike.
+///
+/// No witness pins it yet, and the reason is the engine's, not php's:
+/// php's case is deterministic, and the engine does not yet reach it.
+/// The interrupt has to be raised inside the native after its last
+/// callback, since `zend_call_function`'s own check after each callback
+/// takes whatever the callback raised (the engine's `call_function`
+/// likewise), so a signal or a timeout landing there is a race. The one
+/// frameless native php 8.5.12 lets raise it there is `implode`, which
+/// converts every piece, walking on past one whose `__toString` threw,
+/// and then asks for its string fallibly, which records the delayed OOM
+/// (`Z/ext/standard/string.c:1036`): at `memory_limit=4M`, `implode`
+/// of a hundred 30000-byte strings and an object whose `__toString`
+/// throws ends php on the limit's fatal at the call, before the `catch`.
+/// ext/standard's `implode` returns at the piece that threw and asks for
+/// nothing, so the engine meets no limit there; #3792 makes it walk on,
+/// and pins that program here, under the default recipe and under
+/// `regime=jit-force`.
 #[inline(always)] // the handler's hot path, which it was before the tier shared it
 pub(super) fn frameless_served(
     req: &mut Request,
@@ -13429,10 +13463,7 @@ pub(super) fn frameless_served(
     req.pop_frameless(owned);
     match served {
         Ok(value) => Ok(Some(value)),
-        Err(thrown) => {
-            req.leave_pending(&thrown);
-            Ok(None)
-        }
+        Err(thrown) => checked_after_throw(req, &thrown).map(|()| None),
     }
 }
 
