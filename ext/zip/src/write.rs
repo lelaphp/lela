@@ -1130,13 +1130,15 @@ impl Archive {
         // knows, a stored entry's compressed size its size, and what it
         // does not know as the dirent held it.
         de.bitflags &= !GPBF_DATA_DESCRIPTOR;
-        if de.comp_method == CM_STORE {
-            de.comp_size = before.size;
+        if let Some(size) = before.size {
+            if de.comp_method == CM_STORE {
+                de.comp_size = size;
+            }
+            de.uncomp_size = size;
         }
         if let Some(crc) = before.crc {
             de.crc = crc;
         }
-        de.uncomp_size = before.size;
         if de.changed & D_LAST_MOD == 0 {
             de.last_mod = match before.time {
                 Time::Dos(dos) => dos,
@@ -1159,11 +1161,14 @@ impl Archive {
                 )
             }
         };
-        // `ZIP_FL_FORCE_ZIP64` where what the entry compresses to could
-        // pass 32 bits, and so its local header holds room for it.
-        let forced = compressor
-            .as_ref()
-            .is_some_and(|c| c.maximum_size(before.size) > u64::from(u32::MAX));
+        // `ZIP_FL_FORCE_ZIP64` where the source states no size, or what
+        // the entry compresses to could pass 32 bits, and so its local
+        // header holds room for it (zip_close.c:364-396).
+        let forced = before.size.is_none_or(|size| {
+            compressor
+                .as_ref()
+                .is_some_and(|c| c.maximum_size(size) > u64::from(u32::MAX))
+        });
         let sealer = if de.encryption_method == EM_NONE {
             None
         } else {
@@ -1213,7 +1218,7 @@ impl Archive {
         if let Some(s) = &mut self.entries[i].source {
             let st = s.stat();
             let before = Before {
-                size: st.size,
+                size: s.size(),
                 crc: None,
                 time: Time::Mtime(st.mtime),
                 attributes: Attributes {
@@ -1242,7 +1247,7 @@ impl Archive {
             crc,
         };
         let before = Before {
-            size: o.uncomp_size,
+            size: Some(o.uncomp_size),
             crc,
             time: Time::Dos(o.last_mod),
             attributes: Attributes::unchanged(o),
@@ -1260,10 +1265,10 @@ struct Sourced {
 }
 
 /// What `add_data`'s `zip_source_stat` of its source says before the
-/// copy: the size, the CRC where the source knows one, the time the
+/// copy: the size and the CRC where the source knows them, the time the
 /// dirent takes where none was set, and the attributes the source gives.
 struct Before {
-    size: u64,
+    size: Option<u64>,
     crc: Option<u32>,
     time: Time,
     attributes: Attributes,
@@ -1354,7 +1359,7 @@ enum Time {
 /// ```
 fn data_end(end: &End, crc: u32, read: u64) -> Result<(), Status> {
     match *end {
-        End::Size(size)
+        End::Size(Some(size))
         | End::Entry {
             stored: true, size, ..
         } if read != size => Err(Status::new(Er::DataLength)),
@@ -1368,8 +1373,8 @@ fn data_end(end: &End, crc: u32, read: u64) -> Result<(), Status> {
 /// How the end of the data `add_data` copies is held, past the copy.
 enum End {
     /// A new source, by its CRC layer's stat: what it read must be the
-    /// size it stated.
-    Size(u64),
+    /// size it stated, where it stated one.
+    Size(Option<u64>),
     /// An unchanged entry, by its original dirent: stored data's length
     /// its size, then its CRC where it has one.
     Entry {

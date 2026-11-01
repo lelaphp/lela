@@ -27,8 +27,8 @@ pub(crate) struct Pipe {
     compressed_eof: bool,
     eof: bool,
     written: u64,
-    /// `data_length`: the source's stated size.
-    size: u64,
+    /// `data_length`: the source's stated size, where it states one.
+    size: Option<u64>,
     /// What the source gives below the layers.
     below: Attributes,
 }
@@ -53,7 +53,7 @@ fn fill(
 impl Pipe {
     pub(crate) fn new(
         input: Input,
-        size: u64,
+        size: Option<u64>,
         below: Attributes,
         compressor: Option<Compressor>,
         sealer: Option<Sealer>,
@@ -114,13 +114,14 @@ impl Pipe {
 
     /// `copy_source`'s progress at a full buffer: `zip_source_tell` of
     /// the source, asked of the archive then, over its stated size; `None`
-    /// where it states none.
+    /// where it states none, or 0 (`data_length > 0`).
     #[expect(
         clippy::cast_precision_loss,
         reason = "copy_source's progress as libzip's doubles"
     )]
     pub(crate) fn share(&self, za: &mut Archive) -> Option<f64> {
-        (self.size > 0).then(|| za.tell(&self.lower.input) as f64 / self.size as f64)
+        let size = self.size.filter(|&s| s > 0)?;
+        Some(za.tell(&self.lower.input) as f64 / size as f64)
     }
 
     /// `zip_source_get_file_attributes` of `src_final`: the compression

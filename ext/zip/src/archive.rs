@@ -6,6 +6,7 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -241,9 +242,10 @@ pub(crate) struct FileSource {
     /// The file `ZipArchive::FL_OPEN_FILE_NOW` opened.
     file: Option<File>,
     start: u64,
-    /// The window's length, `0` for one over a device or a pipe given
-    /// none, which states no size.
-    len: u64,
+    /// The window's length, where a read stops (`ctx->len`); `None` where
+    /// it has none, over a device or a pipe given none or a regular file
+    /// with nothing past `start`, which is read to the file's end.
+    len: Option<NonZeroU64>,
     mtime: i64,
     mode: u32,
     /// Whether it is a regular file, whose source libzip seeks in.
@@ -296,6 +298,65 @@ impl FileSource {
                 .map_err(|e| Status::os(Er::Seek, &e))?;
         }
         Ok(f)
+    }
+
+    /// The size its `ZIP_SOURCE_STAT` states: the window's length, `0`
+    /// for a regular file with nothing past `start`, and none for a
+    /// device or a pipe given no length (zip_source_file_common.c:121-170).
+    fn size(&self) -> Option<u64> {
+        match self.len {
+            Some(len) => Some(len.get()),
+            None => self.regular.then_some(0),
+        }
+    }
+}
+
+/// The close's read of a file source opened (`ZIP_SOURCE_READ`): on to
+/// the window's end, or to the file's where the window has none.
+pub(crate) struct FileInput {
+    file: File,
+    /// What is left of the window, `None` where it has none.
+    left: Option<u64>,
+    read: u64,
+}
+
+impl FileInput {
+    /// `buf` filled, short only at the window's end or the file's: a read
+    /// is capped at what is left of the window only where it has one
+    /// (`ctx->len > 0`, zip_source_file_common.c:265-272), so a device or
+    /// a pipe given no length is read until it ends, and its entry has
+    /// whatever it gave, with a Zip64 field in its local header as its
+    /// size was not known when that was written (zip_close.c:364-367):
+    ///
+    /// ```php
+    /// $d = getcwd(); $p = "$d/fifo-witness"; posix_mkfifo($p, 0600); touch($p, 1700000000);
+    /// $z = new ZipArchive; $z->open("$d/fifo-witness.zip", ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    /// var_dump($z->addFile($p, 'p'), $z->statName('p')['size'], $z->getFromName('p'));
+    /// $w = proc_open(['/bin/sh', '-c', 'printf hello > "$0"', $p], [], $pipes); var_dump($z->close()); proc_close($w);
+    /// $z->open("$d/fifo-witness.zip"); var_dump($z->getFromName('p'), $z->statName('p')['comp_size']); $z->close();
+    /// echo bin2hex(substr(file_get_contents("$d/fifo-witness.zip"), 4, 2)), ' ', filesize("$d/fifo-witness.zip"), "\n";
+    /// unlink("$d/fifo-witness.zip"); unlink($p);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// int(0)
+    /// bool(false)
+    /// bool(true)
+    /// string(5) "hello"
+    /// int(5)
+    /// 2d00 125
+    /// ```
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Status> {
+        let want = self
+            .left
+            .and_then(|l| usize::try_from(l).ok())
+            .map_or(buf.len(), |l| l.min(buf.len()));
+        let got = read_file(&mut self.file, &mut buf[..want])?;
+        if let Some(left) = &mut self.left {
+            *left -= got as u64;
+        }
+        self.read += got as u64;
+        Ok(got)
     }
 }
 
@@ -410,7 +471,7 @@ impl Source {
             path: path.into(),
             file,
             start,
-            len: length,
+            len: NonZeroU64::new(length),
             mtime: meta.mtime(),
             mode: meta.mode(),
             regular: meta.is_file(),
@@ -418,20 +479,31 @@ impl Source {
         })))
     }
 
-    /// The source's `ZIP_SOURCE_STAT`.
+    /// The source's `ZIP_SOURCE_STAT`, a size it does not state read as
+    /// `zip_stat_init` leaves it, 0.
     pub(crate) fn stat(&self) -> Stat {
+        let size = self.size().unwrap_or(0);
         match self {
             Source::Buffer(b) => Stat {
-                size: b.data.len() as u64,
-                comp_size: b.data.len() as u64,
+                size,
+                comp_size: size,
                 mtime: b.mtime,
                 ..Stat::default()
             },
             Source::File(f) => Stat {
-                size: f.len,
+                size,
                 mtime: f.mtime,
                 ..Stat::default()
             },
+        }
+    }
+
+    /// The size the source's `ZIP_SOURCE_STAT` states (`ZIP_STAT_SIZE`),
+    /// where it states one.
+    pub(crate) fn size(&self) -> Option<u64> {
+        match self {
+            Source::Buffer(b) => Some(b.data.len() as u64),
+            Source::File(f) => f.size(),
         }
     }
 
@@ -536,11 +608,11 @@ impl Source {
                     offset: b.offset,
                 })
             }
-            Source::File(f) => Ok(Input::File {
+            Source::File(f) => Ok(Input::File(FileInput {
                 file: f.open()?,
-                left: f.len,
+                left: f.len.map(NonZeroU64::get),
                 read: 0,
-            }),
+            })),
         }
     }
 }
@@ -555,11 +627,7 @@ pub(crate) enum Input {
         /// Where its reading stands, kept here once the entry has another.
         offset: usize,
     },
-    File {
-        file: File,
-        left: u64,
-        read: u64,
-    },
+    File(FileInput),
     Unchanged {
         reader: Reader,
         read: u64,
@@ -1804,13 +1872,7 @@ impl Archive {
                     Ok(n)
                 }
             }
-            Input::File { file, left, read } => {
-                let want = usize::try_from(*left).map_or(buf.len(), |l| l.min(buf.len()));
-                let got = read_file(file, &mut buf[..want])?;
-                *left -= got as u64;
-                *read += got as u64;
-                Ok(got)
-            }
+            Input::File(f) => f.read(buf),
             Input::Unchanged { reader, read } => {
                 let mut got = 0;
                 while got < buf.len() {
@@ -1851,7 +1913,7 @@ impl Archive {
                 let at = self.buffer_of(link).map_or(*offset, |b| b.offset);
                 at as u64
             }
-            Input::File { read, .. } | Input::Unchanged { read, .. } => *read,
+            Input::File(FileInput { read, .. }) | Input::Unchanged { read, .. } => *read,
         }
     }
 
@@ -1951,16 +2013,16 @@ impl Archive {
                 // `zip_source_zip_new.c:188`: a size it does not know, one
                 // over a device or a pipe given no length, is past any
                 // window's.
-                Some(Source::File(f)) if f.len == 0 => {
-                    Err(Status::incons(Detail::StoredSizeMismatch, Some(idx)))
-                }
-                Some(Source::File(f)) => f.open().map(|file| {
-                    let link = FileLink {
-                        entry: idx,
-                        path: Arc::clone(&f.path),
-                    };
-                    Reader::over_file(link, file, f.len)
-                }),
+                Some(Source::File(f)) => match f.len {
+                    None => Err(Status::incons(Detail::StoredSizeMismatch, Some(idx))),
+                    Some(len) => f.open().map(|file| {
+                        let link = FileLink {
+                            entry: idx,
+                            path: Arc::clone(&f.path),
+                        };
+                        Reader::over_file(link, file, len.get())
+                    }),
+                },
                 None => Err(Status::new(Er::Internal)),
             }
         } else if flags & FL_COMPRESSED != 0 {
