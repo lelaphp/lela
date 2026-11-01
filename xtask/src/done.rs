@@ -929,9 +929,11 @@ fn fresh_readings(
     let key = &now.key;
     let name = &krate.name;
     // The scope's file holds the last reading written, which a refused
-    // commit's can be, taken over another key; where it is, the latest
-    // one over the key now stands before it, found in the index (#1312).
-    // A scope with no file has no reading, whatever the log holds.
+    // commit's can be, taken over another key; the latest one over the key
+    // now stands before it, found in the index (#1312), where `worktree
+    // land` puts `_merge`'s and leaves no file of a scope main never
+    // measured (#3804). Where neither holds one, the scope's last reading,
+    // file or index, is the stale one said.
     let mut asked = Vec::new();
     let mut phpt = false;
     for instrument in owed(asking.manifest, krate, asking.carried) {
@@ -949,20 +951,16 @@ fn fresh_readings(
             asked.push((instrument, scope));
         }
     }
-    let mut read = BTreeMap::new();
-    for (instrument, scope) in &asked {
-        if let Some(reading) = store.read(instrument, scope)? {
-            read.insert(((*instrument).to_owned(), scope.clone()), reading);
-        }
-    }
-    let stale: Vec<(String, String, String)> = read
-        .iter()
-        .filter(|(_, reading)| !reading.fresh_for(key, pin))
-        .map(|((instrument, scope), _)| (instrument.clone(), scope.clone(), key.clone()))
+    let sought: Vec<(String, String, String)> = (asked.iter())
+        .map(|(instrument, scope)| ((*instrument).to_owned(), scope.clone(), key.clone()))
         .collect();
-    read.extend(store.latest_over_each(&stale, pin)?);
+    let mut read = store.latest_over_each(&sought, pin)?;
     for (instrument, scope) in asked {
-        let Some(reading) = read.remove(&(instrument.to_owned(), scope.clone())) else {
+        let found = match read.remove(&(instrument.to_owned(), scope.clone())) {
+            Some(reading) => Some(reading),
+            None => store.last_of(instrument, &scope)?,
+        };
+        let Some(reading) = found else {
             if not_run.iter().any(|n| n == instrument) {
                 not_judged.push(format!("{instrument} for {scope}"));
             } else {
