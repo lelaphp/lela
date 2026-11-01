@@ -32,13 +32,18 @@ struct Tag {
 pub(super) struct MultiHandle {
     raw: NonNull<sys::CURLM>,
     tag: NonNull<Tag>,
+    /// Whether [`MultiId::cleanup`] cleaned the `CURLM *` up, so that
+    /// nothing reaches it after and the drop frees only the tag.
+    cleaned: bool,
 }
 
 impl Drop for MultiHandle {
     fn drop(&mut self) {
-        // SAFETY: the live handle this value owns, cleaned up once; the
-        // easy handles in it are detached, not freed.
-        unsafe { sys::curl_multi_cleanup(self.raw.as_ptr()) };
+        if !self.cleaned {
+            // SAFETY: the live handle this value owns, cleaned up once;
+            // the easy handles in it are detached, not freed.
+            unsafe { sys::curl_multi_cleanup(self.raw.as_ptr()) };
+        }
         // SAFETY: the tag `init` leaked, freed after the handle.
         drop(unsafe { Box::from_raw(self.tag.as_ptr()) });
     }
@@ -82,12 +87,13 @@ const BAD_EASY: i64 = 2;
 /// A `CURLM *` the library may call back from inside, held for one call
 /// with the `CURL *`s it reaches and the shares they point at, the
 /// request lent to the callbacks meanwhile ([`MultiId::call`]). It is the
-/// only value `curl_multi_add_handle`, `curl_multi_remove_handle` and
-/// `curl_multi_perform` are called through. libcurl logs from inside
-/// the remove, `closing connection` reaching the debug callable of the
-/// `CURL *` taken out, so a call made inside [`MultiId::with`] would
-/// serve PHP code a second `&mut Request` while the `&mut MultiHandle`
-/// borrowed from the first is live, over objects that code could free.
+/// only value `curl_multi_add_handle`, `curl_multi_remove_handle`,
+/// `curl_multi_perform` and the free's `curl_multi_cleanup` are called
+/// through. libcurl logs from inside the remove, `closing connection`
+/// reaching the debug callable of the `CURL *` taken out, so a call made
+/// inside [`MultiId::with`] would serve PHP code a second `&mut Request`
+/// while the `&mut MultiHandle` borrowed from the first is live, over
+/// objects that code could free.
 /// `'h` is the span it is reached for.
 #[derive(Clone, Copy)]
 struct LiveMulti<'h> {
@@ -117,6 +123,16 @@ impl<'h> LiveMulti<'h> {
         // SAFETY: two objects held for the call; the callbacks find the
         // request `enter` leaves.
         i64::from(unsafe { sys::curl_multi_remove_handle(self.raw.as_ptr(), easy.raw.as_ptr()) })
+    }
+
+    /// `curl_multi_cleanup`: whether the library cleaned the `CURLM *`
+    /// up, which it refuses from inside one of its own callbacks.
+    fn cleanup(self) -> bool {
+        // SAFETY: an object held for the call; the easy handles in it are
+        // detached, not freed, and the hold's owner reaches it no more
+        // once this answers true.
+        let code = unsafe { sys::curl_multi_cleanup(self.raw.as_ptr()) };
+        i64::from(code) == c::CURLM_OK
     }
 
     /// `curl_multi_perform`: the code and the transfers still going.
@@ -149,7 +165,11 @@ impl Multi {
         }));
         // SAFETY: `into_raw` never answers null.
         let tag = unsafe { NonNull::new_unchecked(tag) };
-        Some(Multi(req.memory_mut().adopt(MultiHandle { raw, tag })))
+        Some(Multi(req.memory_mut().adopt(MultiHandle {
+            raw,
+            tag,
+            cleaned: false,
+        })))
     }
 
     pub(crate) fn id(&self) -> MultiId {
@@ -157,7 +177,8 @@ impl Multi {
     }
 
     /// The `CURLM *` given up, its object no longer served, as
-    /// [`Easy::close`](super::Easy::close).
+    /// [`Easy::close`](super::Easy::close): cleaned up as it is dropped,
+    /// where [`MultiId::cleanup`] has not cleaned it up already.
     pub(crate) fn close(self, req: &mut Request) -> Option<Thrown> {
         let session = req.memory_mut().foreign(self.0.id()).map(|handle| {
             let tag = handle.tag_mut();
@@ -171,10 +192,30 @@ impl Multi {
 }
 
 impl MultiId {
-    /// `f` over the `CURLM *` while its owner keeps it, `gone` otherwise:
-    /// for a call that serves no callback, which [`LiveMulti`] keeps out.
+    /// `f` over the `CURLM *` while its owner keeps it and it is not
+    /// cleaned up, `gone` otherwise: for a call that serves no callback,
+    /// which [`LiveMulti`] keeps out.
     fn with<R>(self, req: &mut Request, gone: R, f: impl FnOnce(&mut MultiHandle) -> R) -> R {
-        req.memory_mut().foreign(self.0).map_or(gone, f)
+        let multi = req.memory_mut().foreign(self.0);
+        multi.filter(|multi| !multi.cleaned).map_or(gone, f)
+    }
+
+    /// `curl_multi_cleanup(mh->multi)` as `curl_multi_free_obj` calls it,
+    /// with the `CURLM *` still its owner's and so reachable by name, as
+    /// php leaves `mh->multi` in place: a callable the cleanup calls back
+    /// that makes a `curl_multi_*` call on this multi reaches the library,
+    /// which answers `CURLM_RECURSIVE_API_CALL`. Made as [`MultiId::call`]
+    /// makes every call that can call back, with the `CURL *`s of
+    /// `easies` held, so a callable that gives one up meanwhile
+    /// (`curl_multi_close`) leaves its cleanup to the call's end. What a
+    /// callback threw is the answer; the owner's close then drops the
+    /// tag alone.
+    pub(crate) fn cleanup(self, req: &mut Request, easies: &[EasyId]) -> Option<Thrown> {
+        let (cleaned, thrown) = self.call(req, easies, false, |multi, _| multi.cleanup());
+        if let Some(multi) = req.memory_mut().foreign(self.0) {
+            multi.cleaned = cleaned;
+        }
+        thrown
     }
 
     /// `f`, a call into the library that may call back, over the `CURLM *`

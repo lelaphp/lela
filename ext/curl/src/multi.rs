@@ -117,6 +117,42 @@ impl CurlMultiHandle {}
 /// ```stderr
 /// * closing connection #0
 /// ```
+///
+/// The `CURLM *` stays the payload's over `curl_multi_cleanup`, as php
+/// leaves `mh->multi` in place, so a callable the cleanup calls back
+/// reaches it: here a collected cycle, the multi listing the
+/// `CurlHandle` and its callable holding the multi. libcurl answers a
+/// call on a multi from inside its callback `CURLM_RECURSIVE_API_CALL`,
+/// and `curl_multi_close` lets the list go as it would outside the
+/// cleanup.
+///
+/// ```php
+/// $m = curl_multi_init();
+/// $h = curl_init('http://127.0.0.1:1/');
+/// curl_setopt($h, CURLOPT_VERBOSE, 1);
+/// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) use ($m, $h) {
+///     if (!str_starts_with($data, 'closing')) {
+///         return;
+///     }
+///     echo "debug: $data";
+///     var_dump(curl_multi_remove_handle($m, $h), curl_multi_errno($m));
+///     curl_multi_close($m);
+///     var_dump(count(curl_multi_get_handles($m)));
+/// });
+/// curl_multi_add_handle($m, $h);
+/// curl_multi_exec($m, $r);
+/// unset($m, $h);
+/// var_dump(gc_collect_cycles());
+/// echo "end\n";
+/// ```
+/// ```expect
+/// debug: closing connection #0
+/// int(8)
+/// int(8)
+/// int(0)
+/// int(3)
+/// end
+/// ```
 pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
@@ -131,24 +167,35 @@ const REFUSALS: Refusals = Refusals::NONE
 impl ObjectHandlers for Handlers {
     /// `curl_multi_free_obj`: each `CurlHandle` in `easyh` verified
     /// silently ([`verify_before_cleanup`]), `curl_multi_cleanup` with
-    /// `easyh` whole, then the `CurlHandle`s and the push callable let go
-    /// under what its callables threw, which is left pending for the
-    /// release that freed the object to raise, as php leaves it in
-    /// `EG(exception)`.
+    /// `easyh` whole and the `CURLM *` still the payload's, as php leaves
+    /// `mh->multi` in place ([`MultiId::cleanup`]), then the `CURLM *`,
+    /// the `CurlHandle`s and the push callable let go under what its
+    /// callables threw, which is left pending for the release that freed
+    /// the object to raise, as php leaves it in `EG(exception)`.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let mut pending = Pending::default();
-        let mut multi = object.native_mut::<Mh>(req).and_then(|mh| mh.multi.take());
-        if multi.is_some() {
+        let multi = object
+            .native::<Mh>(req)
+            .and_then(|mh| mh.multi.as_ref().map(Multi::id));
+        let mut closed = (None, None);
+        if let Some(multi) = multi {
             let easy = object.native::<Mh>(req).map(handles).unwrap_or_default();
-            for handle in easy {
+            for &handle in &easy {
                 verify_before_cleanup(req, handle, &mut pending);
             }
+            // A `CurlHandle` whose free is under way has no `CURL *` left
+            // to hold, php's `IS_OBJ_FREE_CALLED`.
+            let easy: Vec<EasyId> = easy
+                .into_iter()
+                .filter_map(|handle| object_easy(req, handle))
+                .collect();
+            pending.release(req, |req| {
+                closed.0 = multi.cleanup(req, &easy);
+                let multi = object.native_mut::<Mh>(req).and_then(|mh| mh.multi.take());
+                closed.1 = multi.and_then(|multi| multi.close(req));
+            });
         }
-        let mut closed = None;
-        pending.release(req, |req| {
-            closed = multi.take().and_then(|multi| multi.close(req));
-        });
-        if let Some(thrown) = closed {
+        for thrown in [closed.0, closed.1].into_iter().flatten() {
             pending.park(req, thrown);
         }
         if let Some(mh) = object.native_mut::<Mh>(req).map(std::mem::take) {
@@ -204,6 +251,12 @@ fn mh(req: &mut Request, multi: Instance<CurlMultiHandle>) -> Result<&mut Mh, Th
 /// The `CurlHandle`s added, as views of the owners `easyh` holds.
 fn handles(mh: &Mh) -> Vec<PhpObject> {
     mh.easy.iter().map(|handle| **handle).collect()
+}
+
+/// The `CURL *` of a `CurlHandle` by name, `None` where it has none.
+fn object_easy(req: &mut Request, handle: PhpObject) -> Option<EasyId> {
+    let curl = handle.native::<Curl>(req)?;
+    curl.easy.as_ref().map(Easy::id)
 }
 
 /// The library's `CURLM *` of an argument, by name.
