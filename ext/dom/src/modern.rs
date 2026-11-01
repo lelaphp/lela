@@ -42,8 +42,9 @@ pub(crate) fn follows_spec(req: &Request, object: PhpObject) -> bool {
 /// and the `private_data` its caller made with
 /// `php_dom_private_data_create`. The one private data a document has
 /// is the one handed in, so a caller that filled a mapper keeps it. The
-/// `Err`, and an object with no libxml half to lay it on, give `private`
-/// up; on the `Err` `doc` is still the caller's.
+/// `Err` gives `private` and `doc` up, and an object with no libxml half
+/// to lay it on gives `private` up; `doc` takes its first reference
+/// ([`f::DocOf::first`]) and no other.
 ///
 /// ```php
 /// $d = Dom\XMLDocument::createEmpty();
@@ -57,19 +58,21 @@ pub(crate) fn follows_spec(req: &Request, object: PhpObject) -> bool {
 pub(crate) fn document_object(
     req: &mut Request,
     class: &str,
-    doc: f::Node,
+    doc: f::NewDoc,
     private: Private,
 ) -> Result<Owner<PhpObject>, Thrown> {
     let object = match crate::class(req, class).and_then(|c| php_ext::call::new_object(req, c)) {
         Ok(object) => object,
         Err(thrown) => {
             private.free(req);
+            doc.free();
             return Err(thrown);
         }
     };
     if let Some(mut obj) = crate::libxml_half(req, *object) {
-        obj.adopt_document(req, doc);
-        obj.take_node(req, doc);
+        let node = doc.node();
+        obj.count_document(req, f::DocOf::first(doc));
+        obj.take_node(req, node);
         obj.set_class_type(ClassType::Modern);
         obj.set_document_handlers(&crate::xml_serializer::MODERN);
         obj.set_private_data(req, Box::new(private));
@@ -211,12 +214,12 @@ pub(crate) fn xml_load(
     };
     if let Err(thrown) = Errors::settle(req, raised, thrown) {
         if let Parsed::Document(Some(doc)) = parsed {
-            doc.free_document();
+            doc.free();
         }
         return Err(thrown);
     }
-    let doc = match parsed {
-        Parsed::Document(Some(doc)) => doc,
+    let made = match parsed {
+        Parsed::Document(Some(made)) => made,
         Parsed::Malformed => {
             return Err(crate::dom_throw_message(
                 req,
@@ -234,6 +237,7 @@ pub(crate) fn xml_load(
             return Err(dom_throw(req, Code::InvalidState));
         }
     };
+    let doc = made.node();
     if doc.doc_encoding().is_none() {
         let encoding = override_encoding.unwrap_or_else(|| b"UTF-8".to_vec());
         doc.set_doc_string(DocString::Encoding, Some(&encoding));
@@ -247,7 +251,7 @@ pub(crate) fn xml_load(
         doc.set_doc_string(DocString::Url, Some(&fixed));
     }
     let private = Private::new(req)?;
-    let object = document_object(req, "Dom\\XMLDocument", doc, private)?;
+    let object = document_object(req, "Dom\\XMLDocument", made, private)?;
     if let Err(thrown) = convert_to_modern(req, *object, doc) {
         object.give_up(req);
         return Err(thrown);

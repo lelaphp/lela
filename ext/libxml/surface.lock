@@ -34,6 +34,7 @@ ffi::ClassRows
 ffi::ClassType
 ffi::DocOf
 ffi::DocOf::exported
+ffi::DocOf::first
 ffi::DocOf::share_document
 ffi::DocOf::transfer_document
 ffi::DocOf::uncounted
@@ -110,6 +111,10 @@ ffi::Name::split3
 ffi::Name::valid
 ffi::Name::valid_ncname
 ffi::Name::valid_qname
+ffi::NewDoc
+ffi::NewDoc::free
+ffi::NewDoc::from_ptr
+ffi::NewDoc::node
 ffi::Node
 ffi::Node::add_child
 ffi::Node::add_child_list
@@ -232,7 +237,6 @@ ffi::Node::unlink
 ffi::Node::wrapper
 ffi::NodeObject
 ffi::NodeObject::add_ns_tag
-ffi::NodeObject::adopt_document
 ffi::NodeObject::attach
 ffi::NodeObject::borrow
 ffi::NodeObject::bound

@@ -41,8 +41,8 @@ use php_ext::raising::{
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Layout, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{
-    Answer, ClassType, DocOf, Exported, Item, Kind, Name, Node, Parser, Returned, Scope, Source,
-    XPath,
+    Answer, ClassType, DocOf, Exported, Item, Kind, Name, NewDoc, Node, Parser, Returned, Scope,
+    Source, XPath,
 };
 use php_ext_libxml::{Errors, import_node, register_export};
 
@@ -189,13 +189,14 @@ fn derives(req: &mut Request, class: ClassId, base: ClassId) -> bool {
 }
 
 /// `php_libxml_increment_doc_ref(sxe, docp)` and the root element taken.
-fn adopt(req: &mut Request, object: PhpObject, doc: Node, ns: Option<Ns>) {
+fn adopt(req: &mut Request, object: PhpObject, doc: NewDoc, ns: Option<Ns>) {
     if let Some(s) = sxe_mut(req, object) {
         s.ns = ns;
     }
     if let Some(mut obj) = sxe::libxml_half(req, object) {
-        obj.adopt_document(req, doc);
-        if let Some(root) = doc.root() {
+        let root = doc.node().root();
+        obj.count_document(req, DocOf::first(doc));
+        if let Some(root) = root {
             obj.hold_node(req, root);
         }
     }
@@ -208,7 +209,7 @@ fn exceeds_int(n: i64) -> bool {
 
 /// The parse the functions and the constructor share, what libxml raised
 /// routed on.
-fn parse(req: &mut Request, source: Source<'_>, options: i64) -> Result<Option<Node>, Thrown> {
+fn parse(req: &mut Request, source: Source<'_>, options: i64) -> Result<Option<NewDoc>, Thrown> {
     let options = i32::try_from(options).unwrap_or_default();
     let (doc, raised, thrown) = Parser::read(req, source, options);
     Errors::settle(req, raised, thrown)?;

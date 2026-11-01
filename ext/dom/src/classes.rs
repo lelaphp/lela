@@ -292,7 +292,9 @@ impl DOMImplementation {
                 Err(code) => return Err(dom_throw(req, code)),
             }
         }
-        let Some(doc) = Node::new_doc(None) else {
+        // The object made below counts the document's first reference,
+        // `DocOf::under` finding no object counting it (#3541).
+        let Some(doc) = Node::new_doc(None).map(|made| made.node()) else {
             return Err(dom_throw(req, Code::InvalidState));
         };
         if let Some(dtd) = doctype {
@@ -947,13 +949,14 @@ impl Implementation {
             Some(o) => Some(fetch(req, o.object())?),
             None => None,
         };
-        let Some(document) = Node::new_doc(Some(b"1.0")) else {
+        let Some(made) = Node::new_doc(Some(b"1.0")) else {
             return Err(dom_throw(req, Code::InvalidState));
         };
+        let document = made.node();
         let mut private = match Private::new(req) {
             Ok(private) => private,
             Err(thrown) => {
-                document.free_document();
+                made.free();
                 return Err(thrown);
             }
         };
@@ -971,26 +974,26 @@ impl Implementation {
                     let ns = match ns {
                         Ok(ns) => ns,
                         Err(thrown) => {
-                            document.free_document();
+                            made.free();
                             private.free(req);
                             return Err(thrown);
                         }
                     };
                     let Some(e) = Node::new_element(Some(document), ns, &local, None) else {
-                        document.free_document();
+                        made.free();
                         private.free(req);
                         return Err(dom_throw(req, Code::InvalidState));
                     };
                     element = Some(e);
                 }
                 Err(code) => {
-                    document.free_document();
+                    made.free();
                     private.free(req);
                     return Err(dom_throw(req, code));
                 }
             }
         }
-        let object = crate::modern::document_object(req, "Dom\\XMLDocument", document, private)?;
+        let object = crate::modern::document_object(req, "Dom\\XMLDocument", made, private)?;
         if let Some(dtd) = doctype {
             if let Err(thrown) = crate::adopt(req, *object, dtd, document) {
                 if let Some(e) = element {
@@ -1036,16 +1039,17 @@ impl Implementation {
         #[php(default = null)] title: Option<Path>,
     ) -> Result<Owner<Raw<Instance<crate::html_document::HTMLDocument>>>, Thrown> {
         let title = title.map(|t| t.0.as_bytes().to_vec());
-        let Some(doc) = Node::new_html_doc() else {
+        let Some(made) = Node::new_html_doc() else {
             return Err(dom_throw(req, Code::InvalidState));
         };
+        let doc = made.node();
         doc.set_doc_string(DocString::Encoding, Some(b"UTF-8"));
         let dtd = Node::create_int_subset(Some(doc), b"html", None, None);
         let mut private = Private::new(req)?;
         let html_ns = match private.mapper.html(req, Some(doc)) {
             Ok(ns) => ns,
             Err(thrown) => {
-                doc.free_document();
+                made.free();
                 private.free(req);
                 return Err(thrown);
             }
@@ -1066,11 +1070,11 @@ impl Implementation {
         };
         let body = html.and_then(|h| element(b"body", h));
         if dtd.is_none() || head.is_none() || !title_ok || body.is_none() {
-            doc.free_document();
+            made.free();
             private.free(req);
             return Err(dom_throw(req, Code::InvalidState));
         }
-        let object = crate::modern::document_object(req, "Dom\\HTMLDocument", doc, private)?;
+        let object = crate::modern::document_object(req, "Dom\\HTMLDocument", made, private)?;
         returned(object.into_value())
     }
 }

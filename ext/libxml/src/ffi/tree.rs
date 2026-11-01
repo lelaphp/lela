@@ -1155,11 +1155,11 @@ fn doc_ptr(doc: Option<Node>) -> *mut sys::xmlDoc {
 }
 
 impl Node {
-    /// `xmlNewDoc(version)`.
-    pub fn new_doc(version: Option<&[u8]>) -> Option<Node> {
+    /// `xmlNewDoc(version)`: a document no reference counts yet.
+    pub fn new_doc(version: Option<&[u8]>) -> Option<NewDoc> {
         let v = version.map(cstr);
         // SAFETY: a version or null.
-        Node::from_raw(unsafe { sys::xmlNewDoc(opt_ptr(v.as_ref())) }.cast())
+        Node::from_raw(unsafe { sys::xmlNewDoc(opt_ptr(v.as_ref())) }.cast()).map(NewDoc)
     }
 
     /// `xmlNewDocNode(doc, ns, name, content)`.
@@ -1317,10 +1317,10 @@ impl Node {
         )
     }
 
-    /// `htmlNewDocNoDtD(NULL, NULL)`.
-    pub fn new_html_doc() -> Option<Node> {
+    /// `htmlNewDocNoDtD(NULL, NULL)`: a document no reference counts yet.
+    pub fn new_html_doc() -> Option<NewDoc> {
         // SAFETY: no argument.
-        Node::from_raw(unsafe { sys::htmlNewDocNoDtD(ptr::null(), ptr::null()) }.cast())
+        Node::from_raw(unsafe { sys::htmlNewDocNoDtD(ptr::null(), ptr::null()) }.cast()).map(NewDoc)
     }
 }
 
@@ -1395,13 +1395,15 @@ impl Node {
         taken(unsafe { sys::xmlEncodeEntitiesReentrant(doc_ptr(self.doc()), t.as_ptr()) })
     }
 
-    /// `xmlCopyDoc(doc, recursive)`: a document of the caller's own.
-    pub fn copy_doc(self, recursive: bool) -> Option<Node> {
+    /// `xmlCopyDoc(doc, recursive)`: a document of the caller's own, which
+    /// no reference counts yet.
+    pub fn copy_doc(self, recursive: bool) -> Option<NewDoc> {
         if !self.kind().is_document() {
             return None;
         }
         // SAFETY: a live document.
-        Node::from_raw(unsafe { sys::xmlCopyDoc(self.raw().cast(), c_int::from(recursive)) }.cast())
+        let copy = unsafe { sys::xmlCopyDoc(self.raw().cast(), c_int::from(recursive)) };
+        Node::from_raw(copy.cast()).map(NewDoc)
     }
 }
 
@@ -1596,15 +1598,55 @@ impl Library {
     }
 }
 
+/// A document no reference counts yet, its maker's to own: what
+/// `xmlNewDoc`, `htmlNewDocNoDtD`, `xmlCopyDoc`, the parsers and libxslt's
+/// transformation answer. It is neither `Copy` nor `Clone`, so it is given
+/// up once, to [`DocOf::first`] for an object's first reference or to
+/// [`NewDoc::free`]; [`NewDoc::node`] names the tree meanwhile, to build
+/// on (#3819).
+#[derive(Debug)]
+#[must_use]
+pub struct NewDoc(Node);
+
+impl NewDoc {
+    /// The document, named while this value owns it.
+    #[must_use]
+    pub fn node(&self) -> Node {
+        self.0
+    }
+
+    /// `xmlFreeDoc`: the tree given back, where no object took it.
+    pub fn free(self) {
+        self.0.free_document();
+    }
+
+    /// A `NewDoc` for the `xmlDocPtr` a library over libxml2 answered, as
+    /// libxslt answers the document a transformation made; `None` for its
+    /// null, or for a node that is no document.
+    ///
+    /// # Safety
+    /// `p` is null or a live node of libxml2's that no reference counts
+    /// and nothing else frees.
+    #[must_use]
+    pub unsafe fn from_ptr(p: *mut c_void) -> Option<NewDoc> {
+        Node::from_raw(p.cast())
+            .filter(|n| n.kind().is_document())
+            .map(NewDoc)
+    }
+}
+
 /// A node and the reference to its own document that an object standing
 /// for it counts: php's `intern->document` in
 /// `php_dom_instantiate_object_helper`, checked. Only [`DocOf::under`] and
 /// [`DocOf::exported`] build one, each by checking the reference against
-/// the node's document, so no object stands for a node of one document
+/// the node's document, and [`DocOf::first`], from a [`NewDoc`] no
+/// reference counts, so no object stands for a node of one document
 /// while counting another's, which lets the node's document go under the
-/// object with its last real owner (#3541). `'d` is the borrow of what the
-/// reference was read off, within one native call.
-#[derive(Debug, Clone, Copy)]
+/// object with its last real owner (#3541). It is neither `Copy` nor
+/// `Clone`, so one check makes one count, and a first reference is taken
+/// once (#3819). `'d` is the borrow of what the reference was read off,
+/// within one native call.
+#[derive(Debug)]
 pub struct DocOf<'d> {
     node: Node,
     counted: Counted,
@@ -1643,6 +1685,40 @@ impl<'d> DocOf<'d> {
         // document, within the native call that reads it.
         let shared = export.document().map(|s| (s, unsafe { s.doc() }));
         DocOf::checked(export.node(), shared, shared.is_none())
+    }
+
+    /// `node`, a document no reference counts, taking its first: php's
+    /// `php_libxml_increment_doc_ref(intern, docp)` over the tree a parse,
+    /// `xmlNewDoc`, `xmlCopyDoc` or a transformation made, the object
+    /// counting no document yet. Only a [`NewDoc`] gives one, and it is
+    /// given up to this, so no document another object counts takes a
+    /// second first reference, whose owner would free the tree under the
+    /// other's (#3819).
+    ///
+    /// ```compile_fail,E0308
+    /// # use php_ext_libxml::ffi::{DocOf, Node};
+    /// fn counted(given: Node) -> DocOf<'static> {
+    ///     DocOf::first(given)
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail,E0382
+    /// # use php_ext_libxml::ffi::{DocOf, NewDoc};
+    /// fn twice(doc: NewDoc) -> (DocOf<'static>, DocOf<'static>) {
+    ///     let of = DocOf::first(doc);
+    ///     (of, of)
+    /// }
+    /// ```
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "taken, so the document takes one first reference"
+    )]
+    pub fn first(node: NewDoc) -> DocOf<'d> {
+        DocOf {
+            node: node.0,
+            counted: Counted::First,
+            read_off: PhantomData,
+        }
     }
 
     /// The `InternalError` fatal where no reference to the node's document
@@ -1696,10 +1772,11 @@ impl NodeObject {
     /// document counted, as [`DocOf`] checked it, and the node's proxy
     /// taken, by the half of an object that counts no document yet.
     pub fn attach(&mut self, req: &mut Request, of: DocOf<'_>) {
+        let node = of.node;
         self.count_document(req, of);
         // SAFETY: a live node, and this is the half of the object standing
         // for it.
-        unsafe { self.increment_node_ptr(req, of.node.raw(), true) };
+        unsafe { self.increment_node_ptr(req, node.raw(), true) };
     }
 
     /// `intern->document = by->document; php_libxml_increment_doc_ref(intern,
@@ -1707,7 +1784,12 @@ impl NodeObject {
     /// taking no proxy: a count held as a node list, a `DOMXPath` or a
     /// transformation holds its document, and as a `SimpleXMLElement`
     /// holds the document of the node it holds, given back by
-    /// [`NodeObject::release`].
+    /// [`NodeObject::release`]; a document object's first reference to the
+    /// tree it parsed or made, from [`DocOf::first`].
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "taken, so one check makes one count"
+    )]
     pub fn count_document(&mut self, req: &mut Request, of: DocOf<'_>) {
         match of.counted {
             Counted::Nothing => {}
@@ -1717,18 +1799,11 @@ impl NodeObject {
                 unsafe { self.increment_doc_ref_shared(req, Some(s), ptr::null_mut()) };
             }
             Counted::First => {
-                // SAFETY: the node is a live document no reference counts.
+                // SAFETY: the node is a live document no reference counts:
+                // a `NewDoc` given up, or one `DocOf::under` checked.
                 unsafe { self.increment_doc_ref(req, of.node.raw().cast()) };
             }
         }
-    }
-
-    /// `intern->document = NULL; php_libxml_increment_doc_ref(intern, doc)`:
-    /// a first reference to a document nothing counts yet, as a document
-    /// object takes the tree it just parsed or made.
-    pub fn adopt_document(&mut self, req: &mut Request, doc: Node) {
-        // SAFETY: `doc` is a live document no reference counts yet.
-        unsafe { self.increment_doc_ref(req, doc.raw().cast()) };
     }
 
     /// `php_libxml_increment_node_ptr(intern, node, intern)`.

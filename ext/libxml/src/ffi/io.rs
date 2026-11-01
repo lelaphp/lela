@@ -11,7 +11,7 @@ use php_ext::request::Request;
 
 use super::{Alloc, Library, Raised, Routing, Sink, Tree, cstr, sys};
 
-use super::tree::Node;
+use super::tree::{NewDoc, Node};
 
 /// Where a parser reads from.
 #[derive(Debug, Clone, Copy)]
@@ -23,7 +23,7 @@ pub enum Source<'a> {
 }
 
 /// What `dom_document_parser` answers.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub enum Parsed {
     /// No parser could be made: `NULL`.
     Nothing,
@@ -32,7 +32,7 @@ pub enum Parsed {
     Malformed,
     /// The document, the caller's to own; none where the parser made
     /// none.
-    Document(Option<Node>),
+    Document(Option<NewDoc>),
 }
 
 /// `php_libxml_sanitize_parse_ctxt_options`.
@@ -175,7 +175,8 @@ impl Parser {
                         d.URL = unsafe { sys::xmlStrdup(c.directory.cast::<u8>()) };
                     }
                 }
-                Parsed::Document(Node::from_raw(doc.cast()))
+                // SAFETY: the tree the parser made, the caller's alone.
+                Parsed::Document(unsafe { NewDoc::from_ptr(doc.cast()) })
             } else {
                 // SAFETY: the malformed tree, freed once; the context forgets it.
                 unsafe { sys::xmlFreeDoc(c.myDoc) };
@@ -197,7 +198,7 @@ impl Parser {
         req: &mut Request,
         source: Source<'_>,
         options: c_int,
-    ) -> (Option<Node>, Vec<Raised>, Option<Thrown>) {
+    ) -> (Option<NewDoc>, Vec<Raised>, Option<Thrown>) {
         Library::init();
         let unconfigured = Routing::Parser {
             sax: ptr::null_mut(),
@@ -223,7 +224,9 @@ impl Parser {
                     unsafe { sys::xmlReadFile(p.as_ptr().cast(), ptr::null(), options) }
                 }
             });
-            Node::from_raw(doc.cast())
+            // SAFETY: the tree `xmlReadMemory` or `xmlReadFile` made, the
+            // caller's alone.
+            unsafe { NewDoc::from_ptr(doc.cast()) }
         })
     }
 
@@ -323,7 +326,7 @@ impl Parser {
         req: &mut Request,
         source: Source<'_>,
         options: c_int,
-    ) -> (Option<Node>, Vec<Raised>, Option<Thrown>) {
+    ) -> (Option<NewDoc>, Vec<Raised>, Option<Thrown>) {
         Library::init();
         Raised::capture_io(req, None, || {
             let created = Routing::Parser {
@@ -363,7 +366,8 @@ impl Parser {
             });
             // SAFETY: the context, freed once; the tree is the caller's.
             unsafe { sys::htmlFreeParserCtxt(ctxt) };
-            Node::from_raw(doc.cast())
+            // SAFETY: the tree the parser made, the caller's alone.
+            unsafe { NewDoc::from_ptr(doc.cast()) }
         })
     }
 

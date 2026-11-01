@@ -52,7 +52,7 @@ pub use sys::{
     XML_PARSE_NOWARNING, XML_PARSE_NSCLEAN, XML_PARSE_PEDANTIC, XML_PARSE_RECOVER,
     XML_PARSE_XINCLUDE, XML_SAVE_AS_XML, XML_SAVE_FORMAT, XML_SAVE_NO_DECL, XML_SAVE_NO_EMPTY,
 };
-pub use tree::{DocOf, DocString, DtdTable, HashTable, Kind, Name, Node, Ns, Utf8};
+pub use tree::{DocOf, DocString, DtdTable, HashTable, Kind, Name, NewDoc, Node, Ns, Utf8};
 pub use writer::Emitter;
 pub use xpath::{Answer, Called, Function, Handler, Item, Object, Operand, Returned, Scope, XPath};
 

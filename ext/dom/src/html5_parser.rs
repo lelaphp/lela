@@ -18,7 +18,7 @@ use php_ext_lexbor::ffi::html::{
 };
 use php_ext_lexbor::ffi::{self as lexbor, Lent, Owned as _};
 use php_ext_libxml::Errors;
-use php_ext_libxml::ffi::{DocString, Kind, Node, NodeObject, Ns, Quirks};
+use php_ext_libxml::ffi::{DocString, Kind, NewDoc, Node, NodeObject, Ns, Quirks};
 
 use crate::dom_throw;
 use crate::object::Code;
@@ -1074,7 +1074,7 @@ fn quirks_of(quirks: HtmlQuirks) -> Quirks {
 }
 
 /// `php_dom_create_html_doc`: an HTML document with no DTD.
-fn new_html_doc(req: &mut Request) -> Result<Node, Thrown> {
+fn new_html_doc(req: &mut Request) -> Result<NewDoc, Thrown> {
     match Node::new_html_doc() {
         Some(doc) => Ok(doc),
         None => Err(dom_throw(req, Code::InvalidState)),
@@ -1085,7 +1085,7 @@ fn new_html_doc(req: &mut Request) -> Result<Node, Thrown> {
 /// tree, its private data, the template elements whose namespaces are
 /// still to be tagged, and what the parser observed.
 struct Converted {
-    doc: Node,
+    doc: NewDoc,
     private: Private,
     templates: Vec<Node>,
     seen: Observations,
@@ -1110,7 +1110,8 @@ fn convert_document(
     let failed = match Node::new_html_doc() {
         Some(doc) => {
             let start = parsed.node().last_child();
-            match bridge(req, &mut private, start, doc, doc, create_default_ns) {
+            let node = doc.node();
+            match bridge(req, &mut private, start, node, node, create_default_ns) {
                 Ok(Ok(templates)) => {
                     return Ok(Some(Converted {
                         doc,
@@ -1120,11 +1121,11 @@ fn convert_document(
                     }));
                 }
                 Ok(Err(failed)) => {
-                    doc.free_document();
+                    doc.free();
                     failed
                 }
                 Err(thrown) => {
-                    doc.free_document();
+                    doc.free();
                     private.free(req);
                     return Err(thrown);
                 }
@@ -1172,18 +1173,13 @@ fn finish(
         templates,
         seen,
     } = converted;
-    post_process(doc, options, seen);
-    doc.set_doc_string(DocString::Encoding, Some(encoding.name()));
+    let node = doc.node();
+    post_process(node, options, seen);
+    node.set_doc_string(DocString::Encoding, Some(encoding.name()));
     if let Some(url) = url {
-        doc.set_doc_string(DocString::Url, Some(&url));
+        node.set_doc_string(DocString::Url, Some(&url));
     }
-    let object = match crate::modern::document_object(req, "Dom\\HTMLDocument", doc, private) {
-        Ok(object) => object,
-        Err(thrown) => {
-            doc.free_document();
-            return Err(thrown);
-        }
-    };
+    let object = crate::modern::document_object(req, "Dom\\HTMLDocument", doc, private)?;
     if let Some(mut obj) = crate::libxml_half(req, *object) {
         tag_templates(&mut obj, templates);
         obj.set_quirks(quirks_of(seen.quirks));
@@ -1454,7 +1450,8 @@ pub(crate) fn create_empty(req: &mut Request, encoding: &[u8]) -> Result<Owner<P
         return Err(arg_value_error(req, 1, "be a valid document encoding"));
     }
     let doc = new_html_doc(req)?;
-    doc.set_doc_string(DocString::Encoding, Some(encoding));
+    doc.node()
+        .set_doc_string(DocString::Encoding, Some(encoding));
     let private = crate::private::Private::new(req)?;
     crate::modern::document_object(req, "Dom\\HTMLDocument", doc, private)
 }

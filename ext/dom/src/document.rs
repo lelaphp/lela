@@ -356,10 +356,11 @@ pub(crate) const PROPS: &[Prop] = &[
 
 /// `php_dom_finish_loading_document`: the object takes the new tree, the
 /// old one let go of, the switches and the class map carried over.
-fn finish_loading(req: &mut Request, this: PhpObject, doc: Option<Node>) -> bool {
-    let Some(doc) = doc else {
+fn finish_loading(req: &mut Request, this: PhpObject, made: Option<f::NewDoc>) -> bool {
+    let Some(made) = made else {
         return false;
     };
+    let doc = made.node();
     if let Some(mut obj) = crate::libxml_half(req, this) {
         let mut class_type = php_ext_libxml::ffi::ClassType::Legacy;
         let mut modification = 0;
@@ -371,7 +372,7 @@ fn finish_loading(req: &mut Request, this: PhpObject, doc: Option<Node>) -> bool
             props = obj.take_props();
             obj.decrement_doc_ref(req);
         }
-        obj.adopt_document(req, doc);
+        obj.count_document(req, f::DocOf::first(made));
         obj.put_props(req, props);
         obj.set_class_type(class_type);
         obj.take_node(req, doc);
@@ -1282,15 +1283,16 @@ impl DOMDocument {
         #[php(default = "")] encoding: PhpString,
     ) -> Result<(), Thrown> {
         let this = this.object();
-        let Some(doc) = Node::new_doc(Some(version.as_bytes())) else {
+        let Some(made) = Node::new_doc(Some(version.as_bytes())) else {
             return Err(crate::dom_throw(req, Code::InvalidState));
         };
+        let doc = made.node();
         if !encoding.is_empty() {
             doc.set_doc_string(DocString::Encoding, Some(encoding.as_bytes()));
         }
         if let Some(mut obj) = crate::libxml_half(req, this) {
             obj.release(req);
-            obj.adopt_document(req, doc);
+            obj.count_document(req, f::DocOf::first(made));
             obj.take_node(req, doc);
         }
         Ok(())
@@ -2533,7 +2535,8 @@ impl XMLDocument {
         let Some(doc) = Node::new_doc(Some(version.as_bytes())) else {
             return Err(crate::dom_throw(req, Code::InvalidState));
         };
-        doc.set_doc_string(DocString::Encoding, Some(encoding));
+        doc.node()
+            .set_doc_string(DocString::Encoding, Some(encoding));
         let private = crate::private::Private::new(req)?;
         let made = crate::modern::document_object(req, "Dom\\XMLDocument", doc, private)?;
         Ok(made.into_instance())
