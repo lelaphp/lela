@@ -640,6 +640,28 @@ impl Stream {
         Some(req.stream_ref(self)?.mode.bytes().to_vec())
     }
 
+    /// `stream->wrapperdata`: what `stream_get_meta_data` answers under
+    /// `wrapper_data`, the header lines the http wrapper read or a
+    /// user-space stream's instance, read without asking the stream
+    /// anything, so no method of a user wrapper runs; the stream's own
+    /// value, no owner taken, and `None` where it holds none, for a
+    /// closed stream and one inside a call.
+    #[must_use]
+    pub fn wrapper_data(self, req: &Request) -> Option<Value> {
+        req.stream_ref(self)?.wrapper_data()
+    }
+
+    /// `stream->wrapper->is_url`: the wrapper that opened the stream is a
+    /// URL wrapper, `http`, `ftp`, `data` or one a program registered
+    /// with `STREAM_IS_URL`, read without asking the stream anything;
+    /// `false` for a stream no wrapper opened, a closed one and one
+    /// inside a call.
+    #[must_use]
+    pub fn is_url(self, req: &Request) -> bool {
+        req.stream_ref(self)
+            .is_some_and(|stream| stream.wrapper.is_url)
+    }
+
     /// `stream->orig_path = estrdup(path)` over a stream an extension
     /// made ([`Request::new_stream`]), which no path opened:
     /// `php_stream_zip_open` names an entry's stream by the entry, and

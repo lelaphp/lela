@@ -395,8 +395,8 @@ pub(crate) enum MetaData {
 /// prints.
 pub(crate) struct PhpStream {
     ops: Kind,
-    /// `stream->wrapper->wops->label`.
-    wrapper: &'static str,
+    /// `stream->wrapper`.
+    pub(crate) wrapper: OpenedBy,
     /// `stream->mode`.
     pub(crate) mode: Mode,
     /// `stream->orig_path`: the path `php_stream_open_wrapper_ex` opened,
@@ -432,6 +432,16 @@ pub(crate) struct PhpStream {
     /// What a wrapper set on the stream, boxed apart since a stream of
     /// the engine's own kinds has none of it.
     wrapped: Option<Box<Wrapped>>,
+}
+
+/// `stream->wrapper`, the wrapper that opened the stream, as the stream
+/// reads it: nothing for a stream no wrapper opened.
+#[derive(Default)]
+pub(crate) struct OpenedBy {
+    /// `wrapper->wops->label`, empty where no wrapper opened the stream.
+    label: &'static str,
+    /// `wrapper->is_url`.
+    pub(crate) is_url: bool,
 }
 
 /// The fields of `php_stream` a wrapper writes on a stream it opened
@@ -660,7 +670,7 @@ impl PhpStream {
     fn new(ops: Box<dyn Ops>, mode: &[u8]) -> PhpStream {
         PhpStream {
             ops: Kind::In(ops),
-            wrapper: "",
+            wrapper: OpenedBy::default(),
             mode: Mode::of(mode),
             orig_path: None,
             position: 0,
@@ -719,6 +729,13 @@ impl PhpStream {
         }
         wrapped.closer = closer;
         Some(())
+    }
+
+    /// `stream->wrapperdata`: what a wrapper set, else what the kind
+    /// keeps there, a user-space stream's instance.
+    pub(crate) fn wrapper_data(&self) -> Option<Value> {
+        let set = self.wrapped.as_ref().and_then(|w| w.wrapperdata.as_deref());
+        set.copied().or_else(|| self.ops.wrapper_data())
     }
 
     /// `stream->wrapperdata`: the value given in place, the one the
@@ -798,7 +815,7 @@ impl PhpStream {
     /// caller's buffer is full: `php_plain_files_wrapper`,
     /// `php_stream_memory_ops` and `php_stream_temp_ops`.
     fn greedy(&self) -> bool {
-        self.wrapper == PLAIN_FILES || matches!(self.ops.label(), "MEMORY" | "TEMP")
+        self.wrapper.label == PLAIN_FILES || matches!(self.ops.label(), "MEMORY" | "TEMP")
     }
 
     /// `_php_stream_search_delim` (`Z/main/streams/streams.c:1036`): where
@@ -2654,7 +2671,7 @@ pub(crate) fn temporary_file(
         }),
         b"r+b",
     );
-    stream.wrapper = PLAIN_FILES;
+    stream.wrapper.label = PLAIN_FILES;
     let stream = req.stream_alloc(stream)?;
     Ok(Some(orig_path_set(req, stream, &orig_path)?))
 }
@@ -4504,7 +4521,8 @@ impl StreamLayer for Request {
     ) -> Result<Option<OpenedNamed>, Thrown> {
         let use_path = options.use_path && !resolved;
         let (wrapper, path_to_open) = self.locate(to_open, options);
-        if options.use_url && !wrapper.is_url(self) {
+        let is_url = wrapper.is_url(self);
+        if options.use_url && !is_url {
             let text = format!(
                 "{}(): This function may only be used against URLs",
                 self.frames().active_function_name()
@@ -4569,7 +4587,7 @@ impl StreamLayer for Request {
             Ok(stream) => {
                 let labelled = self
                     .stream_op(*stream, |op| {
-                        op.with(|s| s.wrapper = label);
+                        op.with(|s| s.wrapper = OpenedBy { label, is_url });
                         op.set_orig_path(to_open)
                     })
                     .transpose();
@@ -4845,7 +4863,7 @@ impl StreamLayer for Request {
         match opened {
             Ok(stream) => {
                 self.stream_with(*stream, |s| {
-                    s.wrapper = label;
+                    s.wrapper.label = label;
                     s.flags.no_buffer = true;
                     s.flags.is_dir = true;
                 });
@@ -4875,7 +4893,7 @@ impl StreamLayer for Request {
                 return Err(thrown);
             }
         };
-        let head = if let Some(mut head) = self.kind_meta_data(stream) {
+        let mut entries = if let Some(mut head) = self.kind_meta_data(stream) {
             if let Some(crypto) = &crypto {
                 head.insert(0, (b"crypto".to_vec(), MetaValue::Value(**crypto)));
             }
@@ -4890,50 +4908,33 @@ impl StreamLayer for Request {
             meta_three(false, true, eof)
         };
         let read = self.stream_with(stream, |s| {
-            let wrapper_data = s
-                .wrapped
-                .as_ref()
-                .and_then(|w| w.wrapperdata.as_deref().copied())
-                .or_else(|| s.ops.wrapper_data());
+            if let Some(data) = s.wrapper_data() {
+                entries.push((b"wrapper_data".to_vec(), MetaValue::Value(data)));
+            }
+            let label = s.wrapper.label;
+            if !label.is_empty() {
+                entries.push((b"wrapper_type".to_vec(), MetaValue::Str(label.into())));
+            }
             let unread = i64::try_from(s.writepos - s.readpos).unwrap_or(i64::MAX);
             let seekable = s.ops.seekable() && !s.flags.no_seek;
-            let uri = s.orig_path().map(<[u8]>::to_vec);
-            let mode = s.mode.bytes().to_vec();
-            (
-                s.wrapper,
-                wrapper_data,
-                s.ops.label(),
-                mode,
-                unread,
-                seekable,
-                uri,
-            )
+            entries.extend([
+                (
+                    b"stream_type".to_vec(),
+                    MetaValue::Str(s.ops.label().into()),
+                ),
+                (b"mode".to_vec(), MetaValue::Str(s.mode.bytes().to_vec())),
+                (b"unread_bytes".to_vec(), MetaValue::Int(unread)),
+                (b"seekable".to_vec(), MetaValue::Bool(seekable)),
+            ]);
+            if let Some(uri) = s.orig_path() {
+                entries.push((b"uri".to_vec(), MetaValue::Str(uri.to_vec())));
+            }
         });
-        let Some((wrapper, wrapper_data, stream_type, mode, unread, seekable, uri)) = read else {
+        if read.is_none() {
             if let Some(crypto) = crypto {
                 crypto.give_up(self);
             }
             return Ok(out);
-        };
-        let mut entries = head;
-        if let Some(data) = wrapper_data {
-            entries.push((b"wrapper_data".to_vec(), MetaValue::Value(data)));
-        }
-        if !wrapper.is_empty() {
-            entries.push((
-                b"wrapper_type".to_vec(),
-                MetaValue::Str(wrapper.as_bytes().to_vec()),
-            ));
-        }
-        entries.push((
-            b"stream_type".to_vec(),
-            MetaValue::Str(stream_type.as_bytes().to_vec()),
-        ));
-        entries.push((b"mode".to_vec(), MetaValue::Str(mode)));
-        entries.push((b"unread_bytes".to_vec(), MetaValue::Int(unread)));
-        entries.push((b"seekable".to_vec(), MetaValue::Bool(seekable)));
-        if let Some(uri) = uri {
-            entries.push((b"uri".to_vec(), MetaValue::Str(uri)));
         }
         let written = meta_rows(self, &mut out, entries);
         if let Some(crypto) = crypto {
