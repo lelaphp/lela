@@ -420,20 +420,13 @@ unsafe extern "C" fn input_buffer(
     // An external transport's encoding: the charset of the http headers
     // the stream carries, where libxml was handed none.
     let mut enc = enc;
-    if enc == sys::XML_CHAR_ENCODING_NONE {
-        match crate::mime_sniff::sniff_charset_from_stream(req, *stream) {
-            Ok(Some(charset)) => {
-                let name = cstr(&charset);
-                // SAFETY: a NUL-terminated name that outlives the call.
-                let parsed = unsafe { sys::xmlParseCharEncoding(name.as_ptr().cast()) };
-                enc = parsed.max(sys::XML_CHAR_ENCODING_NONE);
-            }
-            Ok(None) => {}
-            Err(thrown) => {
-                // SAFETY: as above.
-                unsafe { keep(io, thrown) };
-            }
-        }
+    if enc == sys::XML_CHAR_ENCODING_NONE
+        && let Some(charset) = crate::mime_sniff::sniff_charset_from_stream(req, *stream)
+    {
+        let name = cstr(&charset);
+        // SAFETY: a NUL-terminated name that outlives the call.
+        let parsed = unsafe { sys::xmlParseCharEncoding(name.as_ptr().cast()) };
+        enc = parsed.max(sys::XML_CHAR_ENCODING_NONE);
     }
     let context = Box::into_raw(Box::new(stream)).cast::<c_void>();
     // SAFETY: the callbacks read the box this hands over; the buffer owns

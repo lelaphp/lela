@@ -1383,17 +1383,10 @@ pub(crate) fn create_from_file(
     };
     // The MIME sniff: the charset of the http headers the stream carries,
     // where no encoding was given and lexbor knows the one named.
-    let mut encoding = encoding;
-    if encoding.is_none() {
-        match php_ext_libxml::sniff_charset_from_stream(req, *stream) {
-            Ok(Some(charset)) => encoding = Encoding::by_name(&charset),
-            Ok(None) => {}
-            Err(thrown) => {
-                stream.free(req);
-                return Err(thrown);
-            }
-        }
-    }
+    let encoding = encoding.or_else(|| {
+        php_ext_libxml::sniff_charset_from_stream(req, *stream)
+            .and_then(|charset| Encoding::by_name(&charset))
+    });
     let mut source = Vec::new();
     let mut chunks = Vec::new();
     let read = loop {

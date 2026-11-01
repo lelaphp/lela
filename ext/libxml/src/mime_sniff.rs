@@ -5,7 +5,6 @@
 //! `wrapper_data`, which the input a URL gives libxml and
 //! `Dom\HTMLDocument::createFromFile` decode by.
 
-use php_ext::raising::Thrown;
 use php_ext::request::{Request, Stream};
 use php_ext::values::{Key, PhpArray, Value, ValueRef, walk};
 
@@ -180,14 +179,9 @@ pub(crate) fn sniff_charset_from_string(header: &[u8]) -> Option<Vec<u8>> {
 /// Warning: DOMDocument::load(): Document is empty in ww://x, line: 1 in %SCRATCH%/witness.php on line 4
 /// bool(false)
 /// ```
-pub fn sniff_charset_from_stream(
-    req: &mut Request,
-    stream: Stream,
-) -> Result<Option<Vec<u8>>, Thrown> {
-    let headers = stream
-        .wrapper_data(req)
-        .and_then(|data| data.deref().as_array());
-    Ok(headers.and_then(|headers| charset_of_headers(req, headers)))
+pub fn sniff_charset_from_stream(req: &Request, stream: Stream) -> Option<Vec<u8>> {
+    let headers = stream.wrapper_data(req)?.deref().as_array()?;
+    charset_of_headers(req, headers)
 }
 
 /// The charset of the last `Content-Type:` line among the wrapper's
