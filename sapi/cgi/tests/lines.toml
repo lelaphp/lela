@@ -295,6 +295,27 @@ params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
 
+# A `-b` address `fcgi_listen` cannot bind or listen on is said twice:
+# `fcgi_listen`'s `Cannot bind/listen socket - [<errno>] <strerror>.`
+# (`Z/main/fastcgi.c:756`), then cgi_main's `Couldn't create FastCGI listen
+# socket on port <address>`, and `FAILURE` (#3860): an address the host
+# cannot assign, and a Unix socket in a directory that does not exist.
+[[line]]
+name = "fastcgi-an-address-that-cannot-be-bound-is-said-before-the-refusal"
+args = ["-n", "-b", "192.0.2.1:{port}"]
+[[line.then]]
+args = ["-n", "-b", "{dir}/missing/php.sock"]
+
+# A Unix socket path `sun_path` cannot hold with its NUL, of its length or
+# more, is refused before a socket is made with `Listening socket's path
+# name is too long.` (`Z/main/fastcgi.c:733`, #3860): one far past it, and
+# one of exactly 104 bytes, `sun_path`'s length on macOS.
+[[line]]
+name = "fastcgi-a-unix-socket-path-past-sun-path-is-refused"
+args = ["-n", "-b", "{dir}/a-socket-path-far-past-what-sun-path-holds-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.sock"]
+[[line.then]]
+args = ["-n", "-b", "/tmp/a-path-of-exactly-sun-path-s-length-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+
 # What php displays while it starts goes to C's `stdout`, an `fwrite`
 # (`php_output_direct`, `php_output_stdout`), fully buffered where stdout is
 # a pipe, while the head and the body go out past it with `write(2)`
