@@ -277,10 +277,9 @@ impl Buffer {
         let mut total = 0;
         let want = self.size - self.len;
         if want > 0 {
-            let got = req.read_post(want);
-            self.bytes[self.len..self.len + got.len()].copy_from_slice(&got);
-            self.len += got.len();
-            total += got.len();
+            let got = req.read_post(&mut self.bytes[self.len..self.len + want]);
+            self.len += got;
+            total += got;
         }
         total
     }

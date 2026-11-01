@@ -121,8 +121,9 @@ pub struct StreamHooks {
     /// `php_stream_truncate_set_size(.., 0)` of that stream, the body lost
     /// whole as `sapi_read_standard_form_data` loses it.
     pub body_discard: fn(&mut Request, Resource),
-    /// What that stream holds, read from its start.
-    pub body_read: fn(&mut Request, Resource) -> Vec<u8>,
+    /// `php_stream_read` of that stream from `at` into the buffer, and
+    /// how much it read.
+    pub body_read: fn(&mut Request, Resource, usize, &mut [u8]) -> usize,
     /// `php_stream_close` of that stream, as php's `zend_test` closes the
     /// one its parse made.
     pub body_close: fn(&mut Request, Resource),
@@ -178,9 +179,10 @@ pub trait Face: sealed::Sealed {
     /// The request's body as `php://input` opens it,
     /// `SG(request_info).request_body`, made where no reader made it.
     fn input_body(&mut self) -> Result<Option<Resource>, Thrown>;
-    /// `php_stream_input_read`'s ask of the host: up to `count` bytes of
-    /// the body where the host has handed out less than `end`.
-    fn input_block(&mut self, end: usize, count: usize) -> Vec<u8>;
+    /// `php_stream_input_read`'s ask of the host: up to `buf.len()` bytes
+    /// of the body into `buf`, and how many, where the host has handed out
+    /// less than `end`.
+    fn input_block(&mut self, end: usize, buf: &mut [u8]) -> usize;
     /// The heap's memory limit in bytes, `PG(memory_limit)`.
     fn heap_memory_limit(&self) -> usize;
     /// `php_open_temporary_fd_ex`: the file made and its path.
@@ -248,8 +250,8 @@ impl Face for Request {
     fn input_body(&mut self) -> Result<Option<Resource>, Thrown> {
         Request::input_body(self)
     }
-    fn input_block(&mut self, end: usize, count: usize) -> Vec<u8> {
-        Request::input_block(self, end, count)
+    fn input_block(&mut self, end: usize, buf: &mut [u8]) -> usize {
+        Request::input_block(self, end, buf)
     }
     fn heap_memory_limit(&self) -> usize {
         Request::heap_memory_limit(self)

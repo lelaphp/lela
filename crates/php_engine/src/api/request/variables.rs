@@ -928,15 +928,19 @@ impl Request {
     /// over the form body: split on `&` alone, every piece counted, an
     /// empty one too, and the warning past `max_input_vars` ending it; a
     /// name and a value each `php_url_decode`d, handed to the input
-    /// filter and registered.
+    /// filter and registered. Where an extension treats data, the body is
+    /// copied whole and handed to it first, as `php_mb_post_handler`
+    /// copies it (`php_stream_copy_to_mem`, `Z/ext/mbstring/mb_gpc.c:313`).
     pub(crate) fn add_post_vars(
         &mut self,
         into: PhpArray,
-        body: &[u8],
         limits: &BodyLimits,
     ) -> Result<(), Thrown> {
-        if self.treated(Input::Post, body, into)? {
-            return Ok(());
+        if self.shared.supplied.treat_data.entry().is_some() {
+            let body = self.request_body_copy();
+            if self.treated(Input::Post, &body, into)? {
+                return Ok(());
+            }
         }
         let max_input_vars = limits
             .max_input_vars
@@ -952,15 +956,23 @@ impl Request {
             max_input_vars,
         };
         let step = usize::try_from(crate::layer::BUFSIZ).unwrap_or(8192);
+        let mut block = vec![0; step];
         let parsed = (|| {
             let mut appended = false;
-            for chunk in body.chunks(step) {
-                held.append(self, chunk)?;
-                appended = true;
-                if self.has_oom() || !self.add_post_vars_held(into, &mut held, &mut vars, false)? {
-                    return Ok(());
+            let mut at = 0;
+            loop {
+                let read = self.request_body_read(at, &mut block);
+                at += read;
+                if read > 0 {
+                    held.append(self, &block[..read])?;
+                    appended = true;
+                    if self.has_oom()
+                        || !self.add_post_vars_held(into, &mut held, &mut vars, false)?
+                    {
+                        return Ok(());
+                    }
                 }
-                if chunk.len() != step {
+                if read != step {
                     break;
                 }
             }
@@ -996,9 +1008,9 @@ impl Request {
                 None if eof => bytes.len(),
                 None => break,
             };
-            let var = bytes[at..end].to_vec();
+            let var = &bytes[at..end];
             at = end + usize::from(end != bytes.len());
-            if !self.add_post_var(into, &var)? {
+            if !self.add_post_var(into, var)? {
                 return Ok(false);
             }
             vars.count += 1;
