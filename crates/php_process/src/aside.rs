@@ -42,23 +42,55 @@ pub fn stand_aside() -> ! {
     leave()
 }
 
+/// What `start` answers, called with every signal blocked on the calling
+/// thread and the thread's own mask given back after, as `start` returns
+/// or unwinds: a thread `start` creates inherits the mask
+/// (`pthread_create(3)`), so it is out of every signal's way from its
+/// first instruction, and a signal sent to the process is delivered to a
+/// thread that does not block it, as php's one thread takes each (#3861).
+/// One sent meanwhile waits until the mask is given back, pending on the
+/// process (Linux) or on the oldest thread (XNU, see [`stand_aside`]).
+pub fn started_aside<T>(start: impl FnOnce() -> T) -> T {
+    let _given_back = GivenBack(block_every_signal());
+    start()
+}
+
+/// The mask a thread had before [`block_every_signal`], set again as this
+/// drops; `None` where the system refused the block, which changed nothing.
+struct GivenBack(Option<libc::sigset_t>);
+
+impl Drop for GivenBack {
+    fn drop(&mut self) {
+        if let Some(mask) = &self.0 {
+            // SAFETY: `pthread_sigmask(2)` reads the set it is handed, live
+            // for the call, and is handed no old set to write.
+            let _ = unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, mask, std::ptr::null_mut()) };
+        }
+    }
+}
+
 /// Every signal the system lets a thread block, blocked on the calling
-/// thread; where the system refuses, the mask stays as it was.
-fn block_every_signal() {
+/// thread, and the mask it had before; where the system refuses, the mask
+/// stays as it was and the answer is `None`.
+fn block_every_signal() -> Option<libc::sigset_t> {
     let mut all = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
     // SAFETY: `sigfillset(3)` writes the whole of the set it is handed,
     // live for the call.
     if unsafe { libc::sigfillset(all.as_mut_ptr()) } != 0 {
-        return;
+        return None;
     }
     // SAFETY: `sigfillset` answered 0, which it does once the set is
     // written.
     let all = unsafe { all.assume_init() };
-    // SAFETY: `pthread_sigmask(2)` reads the set it is handed, live for
-    // the call, and is handed no old set to write. It fails only on a
+    let mut before = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+    // SAFETY: `pthread_sigmask(2)` reads the set it is handed and writes
+    // the whole of the old one, both live for the call. It fails only on a
     // `how` it does not know, and SIG_SETMASK is one it knows.
-    let _ =
-        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const all, std::ptr::null_mut()) };
+    let blocked =
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const all, before.as_mut_ptr()) };
+    // SAFETY: `pthread_sigmask` answered 0, which it does once the old
+    // set is written.
+    (blocked == 0).then(|| unsafe { before.assume_init() })
 }
 
 /// XNU lands a signal every thread blocks on the oldest thread that has
@@ -82,5 +114,55 @@ fn leave() -> ! {
 fn leave() -> ! {
     loop {
         std::thread::park();
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test starts its own threads (seams.toml rule fork.threads)"
+)]
+mod tests {
+    use super::started_aside;
+
+    /// The calling thread's mask, with whether it blocks `signal`.
+    fn blocks(signal: libc::c_int) -> bool {
+        let mut mask = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        // SAFETY: SIG_BLOCK with no new set changes nothing and writes the
+        // whole of the old one, live for the call.
+        let read =
+            unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), mask.as_mut_ptr()) };
+        assert_eq!(read, 0, "pthread_sigmask read the mask");
+        // SAFETY: `pthread_sigmask` answered 0, having written the set.
+        let mask = unsafe { mask.assume_init() };
+        // SAFETY: `sigismember(3)` reads the set it is handed, live for the call.
+        let member = unsafe { libc::sigismember(&raw const mask, signal) };
+        member == 1
+    }
+
+    /// A thread started aside blocks every signal a process is sent to
+    /// stop or to call a handler, and the thread that started it blocks
+    /// none of them again once the start returns (#3861).
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not model a thread's signal mask")]
+    fn a_thread_started_aside_blocks_every_signal_and_its_starter_none() {
+        let signals = [
+            libc::SIGTERM,
+            libc::SIGINT,
+            libc::SIGUSR1,
+            libc::SIGALRM,
+            libc::SIGCHLD,
+        ];
+        assert!(
+            !signals.iter().any(|s| blocks(*s)),
+            "the test thread starts unmasked"
+        );
+        let started = started_aside(|| std::thread::spawn(move || signals.map(blocks)));
+        assert!(
+            !signals.iter().any(|s| blocks(*s)),
+            "the starter's mask is given back"
+        );
+        let on_it = started.join().expect("the thread answers");
+        assert_eq!(on_it, [true; 5], "the thread blocks each");
     }
 }
