@@ -14,7 +14,9 @@ use php_ext::raising::{
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, walk};
 use php_ext_libxml::Errors;
-use php_ext_libxml::ffi::{C14nOut, C14nSelect, C14nTarget, Kind, Node, Ns, Object, Save, XPath};
+use php_ext_libxml::ffi::{
+    C14nOut, C14nSelect, C14nTarget, Kind, NewDoc, Node, Ns, Object, Save, XPath,
+};
 
 use crate::document::{XML_NS, XMLNS_NS};
 use crate::modern::follows_spec;
@@ -245,6 +247,21 @@ fn clone_helper(
     let Some(outer) = clone_container(req, mapper, src, doc)? else {
         return Ok(None);
     };
+    clone_under(req, mapper, src, outer, doc, recursive)
+}
+
+/// `dom_clone_helper` past the container: with `recursive`, what hangs
+/// from `src`, an element, a fragment or a document, copied under
+/// `outer`, its copy, in tree order. The `Err` is the memory limit, and
+/// `outer` is freed where it is not answered.
+fn clone_under(
+    req: &mut Request,
+    mapper: &mut Mapper,
+    src: Node,
+    outer: Node,
+    doc: Option<Node>,
+    recursive: bool,
+) -> Result<Option<Node>, Thrown> {
     if !recursive
         || !matches!(
             src.kind(),
@@ -368,6 +385,40 @@ pub(crate) fn clone_node_modern(
     let Some(clone) = clone_helper(req, mapper, node, doc, recursive)? else {
         return Ok(None);
     };
+    reconcile_clone(req, mapper, node, clone).map(Some)
+}
+
+/// [`clone_node_modern`] over a document, whose copy is a document no
+/// reference counts yet, for the object that takes its first reference:
+/// `dom_clone_container_helper`'s `xmlDocCopyNode(src, NULL, 0)` is
+/// `xmlCopyDoc(src, 0)` for a document.
+pub(crate) fn clone_document_modern(
+    req: &mut Request,
+    mapper: &mut Mapper,
+    document: Node,
+    recursive: bool,
+) -> Result<Option<NewDoc>, Thrown> {
+    let Some(copy) = document.copy_doc(false) else {
+        return Ok(None);
+    };
+    let outer = copy.node();
+    outer.set_ns(document.ns());
+    let Some(clone) = clone_under(req, mapper, document, outer, document.doc(), recursive)? else {
+        return Ok(None);
+    };
+    reconcile_clone(req, mapper, document, clone)?;
+    Ok(Some(copy))
+}
+
+/// `clone`, a copy of `node`, pointed at the mapper's declarations where
+/// it landed in another document; the `Err` is the memory limit, the copy
+/// freed.
+fn reconcile_clone(
+    req: &mut Request,
+    mapper: &mut Mapper,
+    node: Node,
+    clone: Node,
+) -> Result<Node, Thrown> {
     if clone.doc() != node.doc() {
         let doc = clone.doc();
         let reconciled = if matches!(
@@ -391,7 +442,7 @@ pub(crate) fn clone_node_modern(
             return Err(thrown);
         }
     }
-    Ok(Some(clone))
+    Ok(clone)
 }
 
 /// The document of the `Dom\` classes a document node's copy is handed out
@@ -1194,8 +1245,8 @@ fn clone_node_of(
     if follows_spec(req, this) {
         if is_document {
             let mut private = Private::new(req)?;
-            let node = match clone_node_modern(req, &mut private.mapper, n, n.doc(), recursive) {
-                Ok(Some(node)) => node,
+            let copy = match clone_document_modern(req, &mut private.mapper, n, recursive) {
+                Ok(Some(copy)) => copy,
                 Ok(None) => {
                     private.free(req);
                     return Ok(Owner::bool(false));
@@ -1206,7 +1257,7 @@ fn clone_node_of(
                 }
             };
             let copy =
-                crate::modern::document_object(req, modern_document_class(n), node, private)?;
+                crate::modern::document_object(req, modern_document_class(n), copy, private)?;
             if let Err(thrown) = copy_document_ref(req, this, *copy) {
                 copy.give_up(req);
                 return Err(thrown);

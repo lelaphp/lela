@@ -504,7 +504,7 @@ fn serialize_response_call2(
 /// A fresh document, `xmlNewDoc("1.0")` with php's `UTF-8` encoding, and
 /// its envelope in the version's namespace.
 fn new_envelope(version: i64) -> Res<(Node, Node, Option<Ns>)> {
-    let Some(doc) = Node::new_doc(Some(b"1.0")) else {
+    let Some(doc) = Node::new_doc(Some(b"1.0")).map(|made| made.node()) else {
         return Err(soap_error("Unknown SOAP version"));
     };
     doc.set_doc_string(php_ext_libxml::ffi::DocString::Encoding, Some(b"UTF-8"));

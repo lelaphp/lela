@@ -21,7 +21,7 @@ use std::ptr::{self, NonNull};
 
 use php_ext::raising::Thrown;
 use php_ext::request::{Foreign, ForeignId, Held, Request};
-use php_ext_libxml::ffi::{Function, Handler, Node, Raised, XPath};
+use php_ext_libxml::ffi::{Function, Handler, NewDoc, Node, Raised, XPath};
 
 type SecurityCheck = unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_char) -> c_int;
 
@@ -404,7 +404,7 @@ impl<'s> Transform<'s> {
         req: &mut Request,
         profile: Option<&[u8]>,
         handler: &mut Handler<'_>,
-    ) -> (Option<Node>, Vec<Raised>, Option<Thrown>) {
+    ) -> (Option<NewDoc>, Vec<Raised>, Option<Thrown>) {
         let path = profile.map(cstr);
         let path_ptr = path
             .as_ref()
@@ -426,7 +426,8 @@ impl<'s> Transform<'s> {
         // SAFETY: the context's own `XPath` context, which libxslt leaves
         // the `userData` of to its caller.
         let (result, raised, thrown) = unsafe { XPath::lend(xpath, req, handler, run) };
-        // SAFETY: the result libxslt made, live until the caller frees it.
-        (unsafe { Node::from_ptr(result) }, raised, thrown)
+        // SAFETY: the result libxslt made, which nothing counts or frees
+        // until the caller does.
+        (unsafe { NewDoc::from_ptr(result) }, raised, thrown)
     }
 }

@@ -37,7 +37,7 @@ use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_dom::{CallbacksAt, XPathCallbacks};
-use php_ext_libxml::ffi::{ClassType, DocOf, Kind, Node, NodeObject, Ns, Raised, Route};
+use php_ext_libxml::ffi::{ClassType, DocOf, Kind, NewDoc, Node, NodeObject, Ns, Raised, Route};
 use php_ext_libxml::{Errors, import_node};
 
 use throwables::Throwables;
@@ -428,7 +428,7 @@ fn apply<R>(
     this: PhpObject,
     document: PhpObject,
     method: &str,
-    finish: impl for<'h> FnOnce(&mut Request, ffi::Compiled<'h>, Option<Node>) -> Result<R, Thrown>,
+    finish: impl for<'h> FnOnce(&mut Request, ffi::Compiled<'h>, Option<NewDoc>) -> Result<R, Thrown>,
 ) -> Result<R, Thrown> {
     let exported = import_node(req, document);
     let Some((exported, doc)) = exported.and_then(|e| e.node().doc().map(|d| (e, d))) else {
@@ -468,22 +468,21 @@ fn apply<R>(
         let profile =
             profiling.filter(|p| req.environment_mut().check_open_basedir(p, true).is_ok());
         let mut holder = NodeObject::default();
-        let doc = if let Some(of) = shared {
-            holder.count_document(req, of);
-            doc
-        } else {
-            let copy = doc.copy_doc(true).unwrap_or(doc);
-            holder.adopt_document(req, copy);
-            copy
+        let made = match main_document(shared, || doc.copy_doc(true)) {
+            Some(main) => {
+                let doc = main.node();
+                holder.count_document(req, main);
+                let state = State {
+                    doc,
+                    holder: &holder,
+                    params: &params,
+                    security,
+                    profile: profile.as_deref(),
+                };
+                transform(req, this, sheet, &state)
+            }
+            None => Ok(None),
         };
-        let state = State {
-            doc,
-            holder: &holder,
-            params: &params,
-            security,
-            profile: profile.as_deref(),
-        };
-        let made = transform(req, this, sheet, &state);
         at(this).clean_node_list(req);
         holder.decrement_doc_ref(req);
         if let Some(i) = intern(req, this) {
@@ -498,6 +497,22 @@ fn apply<R>(
         let ce = Throwables::of(req)?;
         Err(throw_error(req, ce.error, &message))
     })
+}
+
+/// The document a transformation runs over, as the count its holder
+/// takes: the given one under the reference its object counts, or,
+/// where `has_keys` left no such reference to read, the copy `copy`
+/// makes under its first. `None` where that copy failed: php's
+/// `xmlCopyDoc` answers null there, `php_libxml_increment_doc_ref`
+/// counts nothing over it and libxslt makes no document of it, so no
+/// transformation runs, and the given document is never counted under a
+/// first reference, which would free its tree under the object that
+/// counts it (#3819).
+fn main_document(
+    given: Option<DocOf<'_>>,
+    copy: impl FnOnce() -> Option<NewDoc>,
+) -> Option<DocOf<'_>> {
+    given.or_else(|| copy().map(DocOf::first))
 }
 
 /// What one transformation reads off its object.
@@ -516,7 +531,7 @@ fn transform(
     this: PhpObject,
     sheet: ffi::Compiled<'_>,
     state: &State<'_>,
-) -> Result<Option<Node>, Thrown> {
+) -> Result<Option<NewDoc>, Thrown> {
     let doc = state.doc;
     let Some(mut ctxt) = ffi::Transform::new(sheet, doc) else {
         return Ok(None);
@@ -572,7 +587,7 @@ fn transform(
     Errors::route(req, routed(raised));
     if let Some(thrown) = thrown {
         if let Some(result) = result {
-            result.free_document();
+            result.free();
         }
         return Err(thrown);
     }
@@ -948,8 +963,10 @@ impl XSLTProcessor {
             return Ok(OrFalse::False);
         };
         let Some(class) = class else {
+            // The object counts the result's first reference, `DocOf::under`
+            // finding no object counting it (#3541).
             return Ok(
-                match php_ext_dom::create_object(req, result, None)?.into_object() {
+                match php_ext_dom::create_object(req, result.node(), None)?.into_object() {
                     Ok(object) => OrFalse::Value(object),
                     Err(value) => {
                         value.give_up(req);
@@ -959,15 +976,16 @@ impl XSLTProcessor {
             );
         };
         if !compatible(req, class, document.class()) {
-            result.free_document();
+            result.free();
             let (current, given) = (class_name(req, document.class()), class_name(req, class));
             let tail = format!("be a class name compatible with {current}, {given} given");
             return Err(arg_type_error(req, 2, &tail));
         }
         let object = new_object(req, class)?;
         if let Some(mut half) = php_ext_libxml::node_object(req, *object) {
-            half.adopt_document(req, result);
-            half.take_node(req, result);
+            let node = result.node();
+            half.count_document(req, DocOf::first(result));
+            half.take_node(req, node);
         }
         Ok(OrFalse::Value(object))
     }
@@ -1003,8 +1021,8 @@ impl XSLTProcessor {
             let Some(result) = made else {
                 return Ok(-1);
             };
-            let (n, raised, thrown) = sheet.save_to_file(req, uri.0.as_bytes(), result);
-            result.free_document();
+            let (n, raised, thrown) = sheet.save_to_file(req, uri.0.as_bytes(), result.node());
+            result.free();
             Errors::settle(req, raised, thrown).map(|()| n)
         })
     }
@@ -1069,8 +1087,8 @@ impl XSLTProcessor {
         let this = this.object();
         let saved = apply(req, this, document, "transformToXml", |_, sheet, made| {
             Ok(made.and_then(|r| {
-                let saved = sheet.save_to_string(r);
-                r.free_document();
+                let saved = sheet.save_to_string(r.node());
+                r.free();
                 saved
             }))
         })?;
@@ -1380,5 +1398,35 @@ impl XSLTProcessor {
     #[php(tentative)]
     fn getSecurityPrefs(req: &mut Request, this: This<Self>) -> i64 {
         intern(req, this.object()).map_or(0, |i| i.security)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The copy `has_keys` asks for failing, as `xmlCopyDoc` can where
+    /// libxml2's allocation fails, which the oracle cannot be made to
+    /// show: nothing is counted and no transformation runs, where the
+    /// given document was counted under a first reference (#3819).
+    #[test]
+    fn a_failed_copy_counts_no_document() {
+        assert!(main_document(None, || None).is_none());
+    }
+
+    /// The copy made: the transformation runs over it, under its first
+    /// reference, and never over the given document.
+    #[test]
+    fn a_copy_is_the_main_document() {
+        let Some(given) = Node::new_doc(None) else {
+            panic!("xmlNewDoc made no document");
+        };
+        let copied = main_document(None, || given.node().copy_doc(true));
+        let main = copied.map(|of| of.node());
+        assert!(main.is_some_and(|m| m != given.node() && m.kind().is_document()));
+        if let Some(m) = main {
+            m.free_document();
+        }
+        given.free();
     }
 }

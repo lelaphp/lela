@@ -1548,10 +1548,11 @@ fn clone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Throw
     };
     let doc = if root {
         let copy = doc.and_then(|d| d.copy_doc(true));
-        if let Some(c) = copy {
-            obj.adopt_document(req, c);
-        }
-        copy
+        copy.map(|c| {
+            let node = c.node();
+            obj.count_document(req, DocOf::first(c));
+            node
+        })
     } else {
         if let Some(counted) = counted {
             obj.count_document(req, counted);
