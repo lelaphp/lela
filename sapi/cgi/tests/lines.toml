@@ -498,3 +498,18 @@ files = { "a.php" = "<?php $abcdef = 1; function f() {} class D { function m() {
 [[line.then]]
 args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/h.php" }
+
+# An arrow function of such a program that reads a variable (#3837): php's
+# compile lays `find_implicit_binds`' table at the first name it adds and
+# keeps it while the arrow function's variables grow to its parameters and
+# binds, giving it back before the body, so the peak is that table beside
+# the variables. The second program's arrow function binds a parameter of
+# the function it is written in.
+[[line]]
+name = "an-uncached-arrow-function-lays-its-implicit-binds-table"
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/a.php" }
+files = { "a.php" = "<?php $f = fn () => $b; echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "f.php" = "<?php function f($a) { return fn () => $a; } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/f.php" }

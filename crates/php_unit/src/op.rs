@@ -414,6 +414,14 @@ pub struct OpArray {
     /// of the body. The values a request binds live in the request, per
     /// closure object or per function, never here.
     pub bound_vars: Vec<BoundVar>,
+    /// The names `find_implicit_binds` put in an arrow function's
+    /// `info.uses` (`Z/Zend/zend_compile.c:8146`): each variable its
+    /// body reads but `$this` and the names `zend_is_auto_global`
+    /// answers for, its own parameters among them until the compile
+    /// drops them, and the `use` list of a closure inside it. 0 for
+    /// every other op array, and for an arrow function that reads none,
+    /// whose table is never laid.
+    pub implicit_uses: u32,
     /// `ZEND_ACC_STATIC` on the op array (`Z/Zend/zend_compile.h:283`):
     /// a closure written `static function` or `static fn`, which
     /// `ZEND_DECLARE_LAMBDA_FUNCTION` reads to bind it no receiver. A

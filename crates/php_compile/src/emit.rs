@@ -4329,7 +4329,7 @@ impl<'a> Emit<'a> {
             op2: offset,
             ..Opline::default()
         });
-        let binds = self.closure_binds(closure)?;
+        let (binds, implicit_uses) = self.closure_binds(closure)?;
         let written = self.line;
         for bind in &binds {
             // `CG(zend_lineno) = zend_ast_get_lineno(var_name_ast)`.
@@ -4361,6 +4361,10 @@ impl<'a> Emit<'a> {
             &binds,
             closure.arrow.map(Short::Return),
         );
+        let outcome = outcome.map(|(decl, mut code)| {
+            code.implicit_uses = implicit_uses;
+            (decl, code)
+        });
         self.end_body(saved);
         if let Some(slot) = self.dynamic.get_mut(at as usize) {
             *slot = Some(outcome?);
@@ -4400,10 +4404,11 @@ impl<'a> Emit<'a> {
     /// `op_array->static_variables`: the `use` list as written for a
     /// closure (`zend_compile_closure_binding`), and for an arrow
     /// function the variables its body reads that its parameters do not
-    /// declare (`find_implicit_binds`). php's three compile errors are
-    /// raised here, where `zend_hash_add` and the two name tests raise
-    /// them.
-    fn closure_binds(&mut self, closure: &Closure) -> Result<Vec<Bind>, CompileError> {
+    /// declare (`find_implicit_binds`), beside the names that function's
+    /// `info.uses` held ([`OpArray::implicit_uses`]). php's three compile
+    /// errors are raised here, where `zend_hash_add` and the two name
+    /// tests raise them.
+    fn closure_binds(&mut self, closure: &Closure) -> Result<(Vec<Bind>, u32), CompileError> {
         if let Some(body) = closure.arrow {
             return Ok(self.implicit_binds(&closure.function, body));
         }
@@ -4429,7 +4434,7 @@ impl<'a> Emit<'a> {
                 line: used.line,
             });
         }
-        Ok(binds)
+        Ok((binds, 0))
     }
 
     /// `find_implicit_binds` (`Z/Zend/zend_compile.c:8089-8135`): the
@@ -4438,17 +4443,20 @@ impl<'a> Emit<'a> {
     /// `zend_is_auto_global` answers for, which need no import. A closure written inside it contributes its
     /// `use` list and not its body; an arrow function inside it
     /// contributes its body. Every one is bound by value and implicitly,
-    /// so a variable the enclosing scope has not is no warning.
-    fn implicit_binds(&self, function: &Function, body: tree::Expr) -> Vec<Bind> {
+    /// so a variable the enclosing scope has not is no warning. The
+    /// count is of the names before the parameters are dropped, what
+    /// `info.uses` held (`zend_hash_del`, `Z/Zend/zend_compile.c:8158`).
+    fn implicit_binds(&self, function: &Function, body: tree::Expr) -> (Vec<Bind>, u32) {
         let mut names: Vec<Vec<u8>> = Vec::new();
         self.implicit_uses(&mut names, body);
+        let held = u32::try_from(names.len()).unwrap_or(u32::MAX);
         names.retain(|name| {
             !function
                 .parameters
                 .iter()
                 .any(|parameter| parameter.name == *name)
         });
-        names
+        let binds = names
             .into_iter()
             .enumerate()
             .map(|(slot, name)| Bind {
@@ -4458,7 +4466,8 @@ impl<'a> Emit<'a> {
                 implicit: true,
                 line: function.line,
             })
-            .collect()
+            .collect();
+        (binds, held)
     }
 
     /// `zend_compile_closure_uses` and `zend_compile_implicit_closure_uses`
@@ -6087,6 +6096,7 @@ impl<'a> Emit<'a> {
             dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs),
             nested: std::mem::take(&mut self.nested),
             bound_vars: std::mem::take(&mut self.static_vars),
+            implicit_uses: 0,
             no_receiver: self.fn_flags.is_static,
             strict_types: self.typing == Typing::Strict,
             return_mask: self.return_type.as_ref().map_or(0, Type::mask),
