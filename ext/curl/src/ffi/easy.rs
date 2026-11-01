@@ -9,7 +9,7 @@ use std::ptr::{self, NonNull};
 
 use php_ext::raising::Thrown;
 use php_ext::request::{Foreign, ForeignId, Request, Stream};
-use php_ext::values::{Owner, PhpObject, Value};
+use php_ext::values::{Emalloc, Owner, PhpObject, Value};
 
 use super::multi::ShareHandle;
 use super::sys::{self, curl_mime, curl_mimepart};
@@ -73,11 +73,51 @@ struct Tag {
 /// `--(*ch->clone) == 0`).
 struct ToFree(NonNull<Lists>);
 
+/// `sizeof(struct _php_curl_free)`: two `zend_llist`s and a `HashTable`,
+/// 56 bytes each on a 64-bit build.
+const TO_FREE: usize = 168;
+
+/// `sizeof(uint32_t)`, what `ch->clone` points at.
+const CLONE: usize = 4;
+
+/// What `init_curl_handle` `emalloc`s for the shares of one [`ToFree`]
+/// to point at, `ch->to_free` and `ch->clone`, on the request's heap so
+/// that `memory_get_usage()` counts them as php's does, and given back
+/// by the last share.
+pub(super) struct Counted {
+    to_free: Emalloc,
+    clone: Emalloc,
+}
+
+impl Counted {
+    /// The two `emalloc`s; the `Err` is the memory limit's fatal.
+    fn new(req: &mut Request) -> Result<Counted, Thrown> {
+        let to_free = Emalloc::new(req, TO_FREE)?;
+        match Emalloc::new(req, CLONE) {
+            Ok(clone) => Ok(Counted { to_free, clone }),
+            Err(thrown) => {
+                to_free.free(req);
+                Err(thrown)
+            }
+        }
+    }
+
+    /// `efree(ch->to_free)` and `efree(ch->clone)`.
+    pub(super) fn free(self, req: &mut Request) {
+        self.to_free.free(req);
+        self.clone.free(req);
+    }
+}
+
 /// What the shares of one [`ToFree`] point at, php's
 /// `struct _php_curl_free` with the count beside it.
 struct Lists {
     /// `*ch->clone`, the shares.
     clone: usize,
+    /// The two blocks php's shares point at, `None` once the last share
+    /// took them to give back, and for a pushed `CURL *`, which shares its
+    /// parent's from [`EasyId::copied_from`] on.
+    counted: Option<Counted>,
     /// `to_free->post`, each tree with its file parts' arguments,
     /// `to_free->stream`.
     trees: Vec<Mime>,
@@ -89,9 +129,10 @@ struct Lists {
 
 impl ToFree {
     /// `init_curl_handle`'s, one `CURL *`'s alone.
-    fn new(session: Session) -> ToFree {
+    fn new(session: Session, counted: Option<Counted>) -> ToFree {
         let lists = Box::into_raw(Box::new(Lists {
             clone: 1,
+            counted,
             trees: Vec::new(),
             slists: Vec::new(),
             session,
@@ -112,6 +153,17 @@ impl ToFree {
     fn alone(&self) -> bool {
         // SAFETY: a share's allocation; the field is read, nothing held.
         unsafe { (*self.0.as_ptr()).clone == 1 }
+    }
+
+    /// The blocks `curl_free_obj` frees with `--(*ch->clone) == 0`, taken
+    /// where this is the last share, for the caller to give back once it
+    /// has given this share up; none otherwise.
+    fn last(&self) -> Option<Counted> {
+        if !self.alone() {
+            return None;
+        }
+        // SAFETY: a share's allocation; the field is taken alone.
+        unsafe { (*self.0.as_ptr()).counted.take() }
     }
 
     /// `zend_llist_clean(&ch->to_free->post)` where one `CURL *` holds a
@@ -167,11 +219,16 @@ impl Drop for ToFree {
         // SAFETY: the allocation `new` leaked, freed by its last share.
         let lists = unsafe { Box::from_raw(lists) };
         let Lists {
+            counted,
             trees,
             slists,
             session,
             ..
         } = *lists;
+        // Blocks no close took ([`Easy::close`]) wait for a request.
+        if let Some(counted) = counted {
+            session.keep_counted(counted);
+        }
         session.let_trees_go(trees);
         drop(slists);
     }
@@ -509,21 +566,34 @@ impl Live<'_> {
 }
 
 impl Easy {
-    /// `curl_easy_init()` for `object`, kept by the request; `None` where
-    /// the library made none.
-    pub(crate) fn init(req: &mut Request, session: Session, object: PhpObject) -> Option<Easy> {
+    /// `curl_easy_init()` for `object`, kept by the request, with the
+    /// `to_free` and `clone` blocks `init_curl_handle` `emalloc`s for it
+    /// ([`Counted`]); `Ok(None)` where the library made none, and the
+    /// `Err` the memory limit's fatal.
+    pub(crate) fn init(
+        req: &mut Request,
+        session: Session,
+        object: PhpObject,
+    ) -> Result<Option<Easy>, Thrown> {
+        let counted = Counted::new(req)?;
         // SAFETY: no argument.
-        let raw = NonNull::new(unsafe { sys::curl_easy_init() })?;
-        let to_free = ToFree::new(session.clone());
-        Some(Easy(
+        let Some(raw) = NonNull::new(unsafe { sys::curl_easy_init() }) else {
+            counted.free(req);
+            return Ok(None);
+        };
+        let to_free = ToFree::new(session.clone(), Some(counted));
+        Ok(Some(Easy(
             req.memory_mut()
                 .adopt(Handle::make(raw, session, to_free, object, true)),
-        ))
+        )))
     }
 
     /// A pushed `CURL *` the library made, served for `object`, kept by
     /// the request; not owned until the push is accepted
-    /// ([`EasyId::accept`]).
+    /// ([`EasyId::accept`]). Its lists are its parent's from
+    /// [`EasyId::copied_from`] on, so it lays down no blocks of its own,
+    /// where php's `init_curl_handle` lays them and
+    /// `_php_setup_easy_copy_handlers` frees them.
     pub(super) fn adopt(
         req: &mut Request,
         raw: *mut sys::CURL,
@@ -531,7 +601,7 @@ impl Easy {
         object: PhpObject,
     ) -> Option<Easy> {
         let raw = NonNull::new(raw)?;
-        let to_free = ToFree::new(session.clone());
+        let to_free = ToFree::new(session.clone(), None);
         Some(Easy(
             req.memory_mut()
                 .adopt(Handle::make(raw, session, to_free, object, false)),
@@ -546,11 +616,23 @@ impl Easy {
     /// The `CURL *` given up: dropped now with the request reachable and
     /// its object still served, cleaned up unless [`Easy::free`] cleaned
     /// it up; or, its object no longer served, as the call that holds it
-    /// ends, when the object may be gone.
+    /// ends, when the object may be gone. Where this is the last share of
+    /// `to_free`, its blocks ([`Counted`]) are given back after the drop,
+    /// or as the owner gives it up where a call holds it, as
+    /// `curl_free_obj` frees them with `--(*ch->clone) == 0`.
     pub(crate) fn close(self, req: &mut Request) -> Option<Thrown> {
-        let handle = self.disown(req)?;
-        let session = handle.tag().session.clone();
-        let ((), thrown) = session.enter(req, || drop(handle));
+        let counted = req
+            .memory_mut()
+            .foreign(self.0.id())
+            .and_then(|handle| handle.tag().to_free.last());
+        let mut thrown = None;
+        if let Some(handle) = self.disown(req) {
+            let session = handle.tag().session.clone();
+            thrown = session.enter(req, || drop(handle)).1;
+        }
+        if let Some(counted) = counted {
+            counted.free(req);
+        }
         thrown
     }
 
@@ -683,7 +765,16 @@ impl EasyId {
         }) else {
             return;
         };
-        self.with(req, (), |handle| handle.tag_mut().to_free = to_free);
+        let replaced = self.with(req, None, |handle| {
+            Some(std::mem::replace(&mut handle.tag_mut().to_free, to_free))
+        });
+        if let Some(replaced) = replaced {
+            let counted = replaced.last();
+            drop(replaced);
+            if let Some(counted) = counted {
+                counted.free(req);
+            }
+        }
         if let Some(Reopened(stderr)) = stderr {
             self.point_stderr(req, stderr);
         }
