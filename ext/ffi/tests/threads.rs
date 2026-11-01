@@ -10,6 +10,18 @@
 //! window in which a call stays posted is held open by a native of this
 //! test's own, `hold_unlent`, which blocks without lending and needs no
 //! server to wait on.
+//!
+//! A callback served on C's thread is held to the stack limit the
+//! request took on its own, as php holds it to `EG(stack_limit)`, so
+//! where C's thread stands in memory decides whether it is served: one
+//! below the request's thread is past the limit and refused, as every
+//! thread started later is on Linux, which maps each thread's stack
+//! below the ones before it, and one above is served, as every later
+//! thread is on macOS (#3615). So each test serves the request on one of
+//! two threads of its own and gives C the other, whichever stands where
+//! the test asks ([`Stands`]), rather than the order the platform maps
+//! them in. C is handed the callback with a pointer to the channel C's
+//! thread waits on, as a C library takes its user data.
 
 #![allow(
     clippy::disallowed_methods,
@@ -17,6 +29,7 @@
 )]
 
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
 use php_ext::abi::{Extension, ExtensionBuilder};
@@ -28,8 +41,7 @@ type Callback = extern "C" fn(i32) -> i32;
 
 /// Where the thread a test's C library starts writes what the callback
 /// returned to it: a file in `Files::new("ffi-threads-<name>", ..)`'s
-/// directory, named here alone since a C function reads nothing a test
-/// hands it.
+/// directory.
 fn returned_to(name: &str) -> PathBuf {
     std::env::temp_dir()
         .join(format!("dax-{}-ffi-threads-{name}", std::process::id()))
@@ -37,49 +49,15 @@ fn returned_to(name: &str) -> PathBuf {
 }
 
 /// A C library that keeps the callback and calls it from a thread of
-/// its own, `delay` after the call that handed it over, which has
-/// returned by then. What it returned is written under a name of its own
-/// and renamed into place, so [`served`]'s poll never reads the file
-/// between its creation and its write, which a plain `fs::write` lets it
-/// read as `""` (#2699).
-fn call_later(callback: Callback, delay: Duration, name: &'static str) {
-    std::thread::spawn(move || {
-        std::thread::sleep(delay);
-        let returned = callback(21);
-        let to = returned_to(name);
-        let written = to.with_extension("writing");
-        if std::fs::write(&written, returned.to_string()).is_ok() {
-            std::fs::rename(&written, &to).ok();
-        }
-    });
-}
-
-extern "C" fn later_sleeping(callback: Callback) {
-    call_later(callback, Duration::from_millis(100), "sleeping");
-}
-
-extern "C" fn later_ending(callback: Callback) {
-    call_later(callback, Duration::from_millis(100), "ending");
-}
-
-extern "C" fn later_closing(callback: Callback) {
-    call_later(callback, Duration::from_millis(100), "closing");
-}
-
-extern "C" fn later_reading(callback: Callback) {
-    call_later(callback, Duration::from_millis(100), "reading");
-}
-
-extern "C" fn later_selecting(callback: Callback) {
-    call_later(callback, Duration::from_millis(100), "selecting");
-}
-
-extern "C" fn later_select_arrays(callback: Callback) {
-    call_later(callback, Duration::from_millis(100), "select-arrays");
-}
-
-extern "C" fn later_imported(callback: Callback) {
-    call_later(callback, Duration::from_millis(100), "imported");
+/// its own 100 ms after the call that handed it over, which has returned
+/// by then: the callback is sent to that thread on `to`, the user data
+/// the test's PHP code passes beside it.
+#[allow(
+    improper_ctypes_definitions,
+    reason = "the user data is the test's own channel, which C passes through untouched"
+)]
+extern "C" fn later(callback: Callback, to: &Sender<Callback>) {
+    to.send(callback).ok();
 }
 
 /// `hold_unlent(float $seconds): void`: the request held for that long in
@@ -97,31 +75,105 @@ fn holding() -> Extension {
         .build("ffi_threads_hold")
 }
 
-/// One request that hands `later` a callback, and what the callback
-/// returned to C once the thread wrote it: `None` where the thread was
-/// still waiting ten seconds on.
-fn served(later: extern "C" fn(Callback), name: &str, source: &str) -> (String, Option<String>) {
+/// Where C's thread stands in memory against the request's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stands {
+    /// Above it, so every frame C's thread calls back from is above the
+    /// request's stack limit.
+    Above,
+    /// Below it, past that limit.
+    Below,
+}
+
+/// One job a [`thread`] does.
+type Job = Box<dyn FnOnce() + Send>;
+
+/// A thread on a stack of its own, which does the one job it is handed:
+/// where a local of its first frame stands, and where to hand the job.
+fn thread() -> (usize, Sender<Job>) {
+    let (stands, at) = mpsc::channel();
+    let (hand, job) = mpsc::channel::<Job>();
+    std::thread::spawn(move || {
+        let local = 0_u8;
+        stands.send(std::ptr::from_ref(&local).addr()).ok();
+        if let Ok(job) = job.recv() {
+            job();
+        }
+    });
+    let Ok(at) = at.recv() else {
+        panic!("the thread did not start");
+    };
+    (at, hand)
+}
+
+/// [`served_with`] C's thread above the request's, so the callback is
+/// served.
+fn served(name: &str, source: &str) -> (String, Option<String>) {
+    served_with(name, source, Stands::Above)
+}
+
+/// One request whose `$later` hands C a callback, served on a thread of
+/// its own with C's thread standing as `c` says, and what the callback
+/// returned to C once C's thread wrote it: `None` where the thread was
+/// still waiting ten seconds on. What it returned is written under a
+/// name of its own and renamed into place, so the poll never reads the
+/// file between its creation and its write, which a plain `fs::write`
+/// lets it read as `""` (#2699).
+fn served_with(name: &str, source: &str, c: Stands) -> (String, Option<String>) {
     let files = Files::new(&format!("ffi-threads-{name}"), &[]);
     let out = returned_to(name);
     assert_eq!(out.parent(), Some(files.path()));
-    let at = later as usize;
-    let source = format!(
-        "<?php\n$ffi = FFI::cdef('typedef int (*cb)(int); typedef void (*later)(cb);');\n$later = $ffi->cast('later', {at});\n{source}"
+    let (waiting, handed) = mpsc::channel::<Callback>();
+    let (at, to) = (
+        later as extern "C" fn(Callback, &Sender<Callback>) as usize,
+        std::ptr::from_ref(&waiting).expose_provenance(),
     );
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_uri::extension(),
-            php_ext_standard::extension(),
-            php_ext_sockets::extension(),
-            php_ext_ffi::extension(),
-            holding(),
-        ])
-        .ini("ffi.enable", "1")
-        .ini("html_errors", "0")
-        .build();
-    let served = engine.serve_capture(&source, Capture::default());
-    let stdout = served.stdout_text();
+    let source = format!(
+        "<?php\n$ffi = FFI::cdef('typedef int (*cb)(int); typedef void (*later)(cb, void *);');\n$later = fn ($f) => $ffi->cast('later', {at})($f, $ffi->cast('void *', {to}));\n{source}"
+    );
+    let (one, two) = (thread(), thread());
+    let ((_, request), (_, c_thread)) = if (one.0 > two.0) == (c == Stands::Above) {
+        (two, one)
+    } else {
+        (one, two)
+    };
+    let file = out.clone();
+    let calls: Job = Box::new(move || {
+        let Ok(callback) = handed.recv() else {
+            return;
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        let returned = callback(21);
+        let partial = file.with_extension("writing");
+        if std::fs::write(&partial, returned.to_string()).is_ok() {
+            std::fs::rename(&partial, &file).ok();
+        }
+    });
+    c_thread.send(calls).ok();
+    let (said, stdout) = mpsc::channel();
+    let serves: Job = Box::new(move || {
+        let engine = Engine::builder()
+            .extensions(&[
+                php_ext_lexbor::extension(),
+                php_ext_uri::extension(),
+                php_ext_standard::extension(),
+                php_ext_sockets::extension(),
+                php_ext_ffi::extension(),
+                holding(),
+            ])
+            .ini("ffi.enable", "1")
+            .ini("html_errors", "0")
+            .build();
+        let served = engine.serve_capture(&source, Capture::default());
+        said.send(served.stdout_text()).ok();
+    });
+    request.send(serves).ok();
+    let Ok(stdout) = stdout.recv() else {
+        panic!("the request's thread ended without its output");
+    };
+    // The request is over, and a callback it never handed over lets C's
+    // thread end.
+    drop(waiting);
     let until = Instant::now() + Duration::from_secs(10);
     while Instant::now() < until {
         if let Ok(returned) = std::fs::read_to_string(&out) {
@@ -138,7 +190,6 @@ fn served(later: extern "C" fn(Callback), name: &str, source: &str) -> (String, 
 #[test]
 fn a_callback_posted_while_the_request_sleeps_is_served_in_the_sleep() {
     let (stdout, returned) = served(
-        later_sleeping,
         "sleeping",
         r#"$t0 = hrtime(true);
 $later(function ($x) use ($t0) {
@@ -153,13 +204,56 @@ echo "slept\n";
     assert_eq!(returned.as_deref(), Some("42"));
 }
 
+/// The same sleep, with C's thread below the request's, as every thread
+/// a library starts stands on Linux: the callback's frames are past the
+/// stack limit the request took on its own thread, so the call is
+/// refused before the callable runs, php's "Maximum call stack size"
+/// error, and a throw out of a callback is php's fatal. php refuses it
+/// so on Linux (php 8.4.27 NTS in Docker, a library's thread calling
+/// back 100 ms into `usleep`: this text, 3 runs of 3, exit 255), and the
+/// pinned php on macOS, where the thread stands above, serves it (#3615).
+#[test]
+fn a_callback_from_a_thread_below_the_request_s_stack_limit_is_refused_as_in_php() {
+    let (stdout, returned) = served_with(
+        "below",
+        r#"$t0 = hrtime(true);
+$later(function ($x) use ($t0) {
+    echo "called $x ", hrtime(true) - $t0 < 600000000 ? "inside" : "after", " the sleep\n";
+    return $x * 2;
+});
+usleep(1200000);
+echo "slept\n";
+"#,
+        Stands::Below,
+    );
+    let Some((size, after)) = stdout
+        .strip_prefix("\nWarning: Uncaught Error: Maximum call stack size of ")
+        .and_then(|rest| rest.split_once(' '))
+    else {
+        panic!("{stdout}");
+    };
+    assert!(size.parse::<u64>().is_ok(), "{stdout}");
+    assert_eq!(
+        after,
+        "bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion? in Standard input code:5\n\
+         Stack trace:\n\
+         #0 [internal function]: {closure:Standard input code:5}(21)\n\
+         #1 Standard input code(9): usleep(1200000)\n\
+         #2 {main}\n  thrown in Standard input code on line 5\n\n\
+         Fatal error: Throwing from FFI callbacks is not allowed in Standard input code on line 9\n",
+        "{stdout}"
+    );
+    // What C reads after a fatal php ends the process in is not php's to
+    // say, which longjmps out of the callback; C's thread was answered.
+    assert!(returned.is_some(), "{stdout}");
+}
+
 /// The thread calls back while the request waits for a child in
 /// `proc_close`: the wait lends the request (#2401), so the callback runs
 /// inside it, on the thread, and C reads what it returned.
 #[test]
 fn a_callback_posted_while_proc_close_waits_is_served_in_the_wait() {
     let (stdout, returned) = served(
-        later_closing,
         "closing",
         r#"$t0 = hrtime(true);
 $later(function ($x) use ($t0) {
@@ -184,7 +278,6 @@ echo "closed $code\n";
 #[test]
 fn a_socket_closed_by_a_callback_in_its_own_read_is_closed_when_the_read_returns() {
     let (stdout, returned) = served(
-        later_reading,
         "reading",
         r#"socket_create_pair(AF_UNIX, SOCK_STREAM, 0, $p);
 socket_set_option($p[1], SOL_SOCKET, SO_RCVTIMEO, ['sec' => 3, 'usec' => 0]);
@@ -215,7 +308,6 @@ try { socket_write($p[1], "y"); } catch (Error $e) { echo $e->getMessage(), "\n"
 #[test]
 fn a_stream_closed_in_stream_select_keeps_its_fd_until_the_wait_returns() {
     let (stdout, returned) = served(
-        later_selecting,
         "selecting",
         r#"$p = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
 $later(function ($x) use ($p) { fclose($p[0]); fwrite($p[1], "x"); return $x * 2; });
@@ -238,7 +330,6 @@ echo hrtime(true) - $t0 < 2000000000 ? "woke" : "slept", "\n";
 #[test]
 fn stream_select_holds_its_arrays_across_the_wait() {
     let (stdout, returned) = served(
-        later_select_arrays,
         "select-arrays",
         r#"$p = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
 $r = [str_repeat('k', 3) => $p[0]]; $w = $e = null;
@@ -260,7 +351,6 @@ var_dump(stream_select($r, $w, $e, 3), array_keys($r), $r['kkk'] === $p[0]);
 #[test]
 fn a_stream_closed_under_its_imported_socket_s_read_keeps_its_fd() {
     let (stdout, returned) = served(
-        later_imported,
         "imported",
         r#"$p = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
 $s = socket_import_stream($p[0]);
@@ -279,7 +369,6 @@ var_dump(socket_read($s, 10));
 #[test]
 fn a_callback_still_posted_at_the_request_s_end_returns_zero() {
     let (stdout, returned) = served(
-        later_ending,
         "ending",
         r#"set_time_limit(1);
 $later(function ($x) { echo "called $x\n"; return $x * 2; });
@@ -318,7 +407,6 @@ fn a_callback_called_after_its_request_ended_faults_as_in_php() {
     let name = "a_callback_called_after_its_request_ended_faults_as_in_php";
     if std::env::var_os(CHILD).is_some() {
         let (stdout, returned) = served(
-            later_ending,
             "after-end",
             r#"$later(function ($x) { echo "called $x\n"; return $x * 2; });
 undefined_function();
