@@ -331,15 +331,50 @@ impl ObjectHandlers for Handlers {
     /// dtor
     /// dtor <- close
     /// ```
+    ///
+    /// The callables stay served over the cleanup: a collected cycle
+    /// frees each `CurlHandle` before the multi that lists it, and
+    /// `curl_easy_cleanup` detaching it serves its debug callable with
+    /// `closing connection`, as php dtors the `fcc` only after it:
+    ///
+    /// ```php
+    /// $m = curl_multi_init();
+    /// $a = curl_init('http://127.0.0.1:1/');
+    /// $b = curl_init('http://127.0.0.1:1/');
+    /// foreach ([$a, $b] as $i => $h) {
+    ///     curl_setopt($h, CURLOPT_VERBOSE, 1);
+    ///     curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $t, $d) use ($m, $i) {
+    ///         if ($t == CURLINFO_TEXT && str_starts_with($d, 'closing')) echo "$i: $d";
+    ///     });
+    ///     curl_multi_add_handle($m, $h);
+    /// }
+    /// curl_multi_exec($m, $r);
+    /// echo "unset\n";
+    /// unset($a, $b, $h);
+    /// unset($m);
+    /// var_dump(gc_collect_cycles());
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// unset
+    /// 0: closing connection #0
+    /// 1: closing connection #1
+    /// int(5)
+    /// end
+    /// ```
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let mut pending = Pending::default();
         verify_before_cleanup(req, object, &mut pending);
-        let mut curl = object.native_mut::<Curl>(req).map(std::mem::take);
-        let mut easy = curl.as_mut().and_then(|curl| curl.easy.take());
+        // The callables stay on the payload over the cleanup, which
+        // serves them, as php dtors each `fcc` after `curl_easy_cleanup`.
+        let mut easy = object
+            .native_mut::<Curl>(req)
+            .and_then(|curl| curl.easy.take());
         let mut closed = None;
         pending.release(req, |req| {
             closed = easy.take().and_then(|easy| easy.close(req));
         });
+        let mut curl = object.native_mut::<Curl>(req).map(std::mem::take);
         if let Some(thrown) = closed {
             pending.park(req, thrown);
         }

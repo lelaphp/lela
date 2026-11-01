@@ -534,17 +534,20 @@ impl Easy {
         EasyId(self.0.id())
     }
 
-    /// The `CURL *` given up, its object no longer served: cleaned up now
-    /// with the request reachable, so what the library frees with it
-    /// calls back where php's would, or as the call that holds it ends.
+    /// The `CURL *` given up: cleaned up now with the request reachable
+    /// and its object still served, so a callable the library calls back
+    /// under `curl_easy_cleanup` is served for it as `curl_free_obj`
+    /// serves it, its `fcc` let go only after the cleanup; or, its object
+    /// no longer served, as the call that holds it ends, when the object
+    /// may be gone.
     pub(crate) fn close(self, req: &mut Request) -> Option<Thrown> {
         let id = self.id();
-        let session = id.with(req, None, |handle| {
+        let (session, object) = id.with(req, None, |handle| {
             let tag = handle.tag_mut();
-            tag.object = None;
-            Some(tag.session.clone())
+            Some((tag.session.clone(), tag.object.take()))
         })?;
-        let handle = req.memory_mut().disown(self.0)?;
+        let mut handle = req.memory_mut().disown(self.0)?;
+        handle.tag_mut().object = object;
         let ((), thrown) = session.enter(req, || drop(handle));
         thrown
     }
