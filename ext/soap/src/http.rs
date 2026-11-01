@@ -26,7 +26,7 @@ use php_ext_standard::{UriParser, base64};
 use php_ext_uri::{Parser, UriStruct};
 
 use crate::Res;
-use crate::classes::{HeldUri, UrlPayload};
+use crate::classes::{HeldUri, Lang, UrlPayload};
 use crate::constants::{SOAP_1_2, SOAP_COMPRESSION_ACCEPT, SOAP_COMPRESSION_DEFLATE};
 use crate::shared::{
     ClientSlot, add_soap_fault, class_id, client_slot, instance_of, set_client_slot,
@@ -947,7 +947,7 @@ fn in_domain(host: &[u8], domain: &[u8]) -> bool {
 
 /// `add_soap_fault(this_ptr, "HTTP", text, NULL, NULL, soap_lang_en)`.
 fn fault(req: &mut Request, this: PhpObject, text: &[u8]) -> R<()> {
-    add_soap_fault(req, this, b"HTTP", text, None, None, b"en")
+    add_soap_fault(req, this, b"HTTP", text, None, None, Lang::En)
 }
 
 /// `ZVAL_NULL(Z_CLIENT_HTTPSOCKET_P(this_ptr)); php_stream_close(stream);`

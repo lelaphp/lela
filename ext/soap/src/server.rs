@@ -21,7 +21,7 @@ use php_ext::values::{
 };
 use php_ext_libxml::ffi::{Kind, NewDoc, Node, Save};
 
-use crate::classes::{Fault as FaultArgs, SoapFault, SoapHeader};
+use crate::classes::{Fault as FaultArgs, Lang, SoapFault, SoapHeader};
 use crate::encoding::{Cx, encode_finish, encode_reset_ns, master_to_zval};
 use crate::message::{
     HeaderCall, get_doc_function, get_function, serialize_response_call, soap_binding,
@@ -271,7 +271,7 @@ fn fatal_fault(
             actor: None,
             detail: detail.as_ref().map(|d| **d),
             name: None,
-            lang: b"en",
+            lang: Lang::En,
         },
     );
     if let Some(d) = detail {
@@ -405,7 +405,7 @@ pub(crate) fn soap_error_handler(req: &mut Request, beneath: Beneath<'_, chain::
                 beneath.message(),
                 None,
                 None,
-                b"en",
+                Lang::En,
             );
             let thrown = match made {
                 Ok(fault) => {
@@ -521,8 +521,8 @@ fn soap_server_fault(
     string: &[u8],
     actor: Option<&[u8]>,
     details: Option<Value>,
-    name: Option<&[u8]>,
-    lang: &[u8],
+    name: Option<PhpString>,
+    lang: Lang,
 ) -> Error {
     let made = new_fault(
         req,
@@ -558,7 +558,7 @@ fn server_fault_en(req: &mut Request, code: &str, string: &str) -> Error {
         None,
         None,
         None,
-        b"en",
+        Lang::En,
     )
 }
 
@@ -599,7 +599,7 @@ fn server_exception(
         } else {
             b"Internal Error".to_vec()
         };
-        let fault = add_soap_fault_ex(req, this, b"Server", &msg, None, None, b"en")?;
+        let fault = add_soap_fault_ex(req, this, b"Server", &msg, None, None, Lang::En)?;
         let value = fault.as_value();
         let written = soap_server_fault_ex(req, sdl, function, value, &[]);
         fault.give_up(req);
@@ -723,15 +723,15 @@ impl SoapServer {
             let old = std::mem::replace(&mut req.state::<State>().encoding, encoding);
             let details =
                 (!matches!(details.as_ref(), ValueRef::Null | ValueRef::Undef)).then_some(details);
-            let name = (!name.is_empty()).then(|| name.as_bytes().to_vec());
+            let name = (!name.is_empty()).then_some(name);
             let e = soap_server_fault(
                 req,
                 code.as_bytes(),
                 string.as_bytes(),
                 Some(actor.as_bytes()).filter(|a| !a.is_empty()),
                 details,
-                name.as_deref(),
-                lang.0.as_bytes(),
+                name,
+                Lang::Of(lang.0),
             );
             req.state::<State>().encoding = old;
             Err(e)

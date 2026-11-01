@@ -10,7 +10,7 @@ use php_ext::raising::{Thrown, fatal};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Owner, PhpObject, Value, ValueRef};
 
-use crate::classes::{Fault, FaultSlot, SdlPayload, set_soap_fault};
+use crate::classes::{Fault, FaultSlot, Lang, SdlPayload, set_soap_fault};
 use crate::model::Sdl;
 use crate::throwables::Throwables;
 
@@ -149,7 +149,7 @@ pub(crate) fn add_soap_fault_ex(
     string: &[u8],
     actor: Option<&[u8]>,
     detail: Option<Value>,
-    lang: &[u8],
+    lang: Lang,
 ) -> R<Owner<PhpObject>> {
     let fault = new_fault(
         req,
@@ -179,8 +179,8 @@ pub(crate) fn add_soap_fault_ex(
 /// `add_soap_fault`: [`add_soap_fault_ex`] for a caller that only keeps
 /// the fault where it is kept, the caller's owner given up,
 /// `zval_ptr_dtor(&fault)`. The fault's message shares its
-/// `$faultstring`, as [`set_soap_fault`] writes it, and its `$lang` is
-/// `soap_lang_en`, interned at the engine's start, so the request's
+/// `$faultstring`, as [`set_soap_fault`] writes it, and its `$lang` here
+/// is `soap_lang_en`, interned at the engine's start, so the request's
 /// first fault costs it nothing. The call's bytes are counted past an
 /// `Exception`'s, whose `$file` and trace take what the file's path
 /// takes:
@@ -203,7 +203,7 @@ pub(crate) fn add_soap_fault(
     string: &[u8],
     actor: Option<&[u8]>,
     detail: Option<Value>,
-    lang: &[u8],
+    lang: Lang,
 ) -> R<()> {
     let fault = add_soap_fault_ex(req, obj, code, string, actor, detail, lang)?;
     fault.give_up(req);

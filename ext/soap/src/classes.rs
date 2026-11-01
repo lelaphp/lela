@@ -342,16 +342,10 @@ impl SoapFault {
                 string: Some(string.as_bytes()),
                 actor: actor.as_ref().map(PhpString::as_bytes),
                 detail: details,
-                name: None,
-                lang: b"en",
+                name,
+                lang: Lang::En,
             },
         )?;
-        // `ZVAL_STR_COPY(Z_FAULT_NAME_P(obj), name)`: the argument's
-        // string, one more owner, never a copy of its bytes.
-        if let Some(name) = name {
-            let n = Owner::take(req, Value::string(name));
-            set_fault_slot(req, object, FaultSlot::Name, n)?;
-        }
         if !matches!(headerFault.as_ref(), ValueRef::Null | ValueRef::Undef) {
             let h = Owner::take(req, headerFault.deref());
             set_fault_slot(req, object, FaultSlot::HeaderFault, h)?;
@@ -439,8 +433,23 @@ pub(crate) struct Fault<'a> {
     pub(crate) string: Option<&'a [u8]>,
     pub(crate) actor: Option<&'a [u8]>,
     pub(crate) detail: Option<Value>,
-    pub(crate) name: Option<&'a [u8]>,
-    pub(crate) lang: &'a [u8],
+    pub(crate) name: Option<PhpString>,
+    pub(crate) lang: Lang,
+}
+
+/// `set_soap_fault`'s `zend_string *lang`, which php tells apart by the
+/// string and not its bytes: `soap_lang_en`, or a string the caller
+/// hands over and keeps its own owner of.
+#[derive(Clone, Copy)]
+pub(crate) enum Lang {
+    /// `soap_lang_en`, which `PHP_MINIT` interns and which costs php's
+    /// request nothing, here the string the engine's start interns as
+    /// the extension names it.
+    En,
+    /// The caller's string, one more owner taken: `ZSTR_EMPTY_ALLOC()`,
+    /// the string `parse_packet_soap` made of a response's `xml:lang`,
+    /// even `en`, or `SoapServer::fault`'s argument.
+    Of(PhpString),
 }
 
 /// `soap_fault_dtor_properties`: the eight slots back to their defaults.
@@ -513,11 +522,18 @@ pub(crate) fn set_soap_fault(req: &mut Request, object: PhpObject, f: &Fault<'_>
         let d = Owner::take(req, detail.deref());
         set_fault_slot(req, object, FaultSlot::Detail, d)?;
     }
+    // `ZVAL_STR_COPY(Z_FAULT_NAME_P(obj), name)`: the caller's string,
+    // one more owner, never a copy of its bytes.
     if let Some(name) = f.name {
-        let n = init(req, name)?;
+        let n = Owner::take(req, Value::string(name));
         set_fault_slot(req, object, FaultSlot::Name, n)?;
     }
-    let lang = lang(req, f.lang)?;
+    // `ZVAL_STR_COPY(Z_FAULT_LANG_P(obj), lang)`.
+    let lang = match f.lang {
+        Lang::En => PhpString::interned(req, b"en")?,
+        Lang::Of(s) => s,
+    };
+    let lang = Owner::take(req, Value::string(lang));
     set_fault_slot(req, object, FaultSlot::Lang, lang)
 }
 
@@ -526,19 +542,6 @@ pub(crate) fn set_soap_fault(req: &mut Request, object: PhpObject, f: &Fault<'_>
 /// [`string`] hands out interned.
 fn init(req: &mut Request, bytes: &[u8]) -> R<Owner<Value>> {
     Ok(PhpString::filled(req, bytes.len(), |b| b.copy_from_slice(bytes))?.into_value())
-}
-
-/// `ZVAL_STR_COPY(Z_FAULT_LANG_P(obj), lang)`: `en` is `soap_lang_en`,
-/// which `PHP_MINIT` interns and which costs php's request nothing, here
-/// the string the engine's start interns as the extension names it; the
-/// empty string is `ZSTR_EMPTY_ALLOC()`; any other is the string
-/// `parse_packet_soap` made of a response's `xml:lang`.
-fn lang(req: &mut Request, bytes: &[u8]) -> R<Owner<Value>> {
-    if bytes == b"en" || bytes.is_empty() {
-        let kept = PhpString::interned(req, bytes)?;
-        return Ok(Owner::take(req, Value::string(kept)));
-    }
-    init(req, bytes)
 }
 
 // ---- SoapVar

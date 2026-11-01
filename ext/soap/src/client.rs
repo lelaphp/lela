@@ -14,7 +14,7 @@ use php_ext::values::{
 };
 use php_ext_libxml::ffi::{Library, Node, Save};
 
-use crate::classes::SoapFault;
+use crate::classes::{Lang, SoapFault};
 use crate::message::{
     function_to_string, get_function, serialize_function_call, soap_binding, soap_create_typemap,
     type_to_string,
@@ -1236,7 +1236,7 @@ fn do_request(
             b"Error build soap request",
             None,
             None,
-            b"en",
+            Lang::En,
         )?;
         return Ok((false, None));
     };
@@ -1270,7 +1270,7 @@ fn do_request(
                 b"SoapClient::__doRequest() returned non string value",
                 None,
                 None,
-                b"en",
+                Lang::En,
             )?;
         }
         ret = false;
@@ -1458,7 +1458,7 @@ fn soap_call_body(
             let mut error = b"Function (\"".to_vec();
             error.extend_from_slice(function);
             error.extend_from_slice(b"\") is not a valid method for this service");
-            add_soap_fault(req, this, b"Client", &error, None, None, b"en")?;
+            add_soap_fault(req, this, b"Client", &error, None, None, Lang::En)?;
         }
     } else {
         let uri = client_slot(this, ClientSlot::Uri);
@@ -1470,7 +1470,7 @@ fn soap_call_body(
                 b"Error finding \"uri\" property",
                 None,
                 None,
-                b"en",
+                Lang::En,
             )?;
         } else if location.is_none() {
             add_soap_fault(
@@ -1480,7 +1480,7 @@ fn soap_call_body(
                 b"Error could not find \"location\" property",
                 None,
                 None,
-                b"en",
+                Lang::En,
             )?;
         } else {
             let call_uri = call_uri
@@ -1548,7 +1548,7 @@ fn soap_call_body(
         if fault.as_object().is_some() {
             Owner::take(req, fault)
         } else {
-            add_soap_fault_ex(req, this, b"Client", b"Unknown Error", None, None, b"en")?
+            add_soap_fault_ex(req, this, b"Client", b"Unknown Error", None, None, Lang::En)?
                 .into_value()
         }
     } else {
