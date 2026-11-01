@@ -203,7 +203,7 @@ fn unjudged_output(call: &Call, why: &anyhow::Error) -> serde_json::Value {
     let why = format!("{why:#}");
     let first = why.lines().next().unwrap_or_default();
     let said = format!("permit could not judge this call: {first}");
-    if call.tool_name == "Bash" {
+    if call.judged_as() == "Bash" {
         serde_json::json!({"hookSpecificOutput": {
             "hookEventName": super::rules::HOOK_EVENT, "additionalContext": said}})
     } else {
@@ -223,7 +223,7 @@ fn unjudged(err: &anyhow::Error) {
 /// `Write` ([`audit`]); a `Bash` line's is `permit --after`'s, once what
 /// it wrote stands. Best effort, as recording the decision is.
 fn record_the_approvals(checkout: &Path, call: &Call, judgement: &Judgement) {
-    if call.tool_name == "Bash" || judgement.denial().is_some() {
+    if call.judged_as() == "Bash" || judgement.denial().is_some() {
         return;
     }
     for admission in judgement

@@ -237,7 +237,7 @@ pub fn judge(manifest: &Manifest, root: &Path, call: &Call) -> Result<Judgement>
 /// not cover and its scope does (#23), and a predicate that describes a
 /// call.
 fn applies(rule: &Rule, call: &Call, path: Option<&Path>) -> bool {
-    (rule.tool.is_empty() || rule.tool.iter().any(|t| t == call.tool_name))
+    (rule.tool.is_empty() || rule.tool.iter().any(|t| t == call.judged_as()))
         && !(rule.runs == Runs::Foreground && call.in_background())
         && !path.is_some_and(|path| rule.exempts(path))
         && (rule.scope.is_empty() || path.is_some_and(|path| rule.covers(path)))
