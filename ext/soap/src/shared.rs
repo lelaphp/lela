@@ -179,14 +179,14 @@ pub(crate) fn add_soap_fault_ex(
 /// `add_soap_fault`: [`add_soap_fault_ex`] for a caller that only keeps
 /// the fault where it is kept, the caller's owner given up,
 /// `zval_ptr_dtor(&fault)`. The fault's message shares its
-/// `$faultstring`, as [`set_soap_fault`] writes it; a fault made first
-/// leaves `soap_lang_en` standing, which php interns at `PHP_MINIT`.
-/// The call's bytes are counted past an `Exception`'s, whose `$file`
-/// and trace take what the file's path takes:
+/// `$faultstring`, as [`set_soap_fault`] writes it, and its `$lang` is
+/// `soap_lang_en`, interned at the engine's start, so the request's
+/// first fault costs it nothing. The call's bytes are counted past an
+/// `Exception`'s, whose `$file` and trace take what the file's path
+/// takes:
 ///
 /// ```php
 /// $o = ['location' => 'ftp://127.0.0.1/x', 'uri' => 'urn:x', 'exceptions' => false];
-/// $a = new SoapClient(null, $o); $r = $a->__soapCall('f', []); $r = null;
 /// $b = new SoapClient(null, $o);
 /// $m = memory_get_usage(); $e = new Exception('x'); $x = memory_get_usage() - $m;
 /// $m = memory_get_usage(); $r = $b->__soapCall('f', []); echo memory_get_usage() - $m - $x, "\n";

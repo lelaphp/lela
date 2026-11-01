@@ -273,13 +273,13 @@ impl SoapFault {
     /// cleared and set again, the language always `en`. `Exception::$message`
     /// is `$faultstring`'s string and `$_name` the argument's, one more
     /// owner of each, where every other string is `ZVAL_STRING`'s copy,
-    /// made even for the empty string and one byte. A fault made first
-    /// leaves `soap_lang_en` standing, which php interns at `PHP_MINIT`.
-    /// Each line is the fault's bytes past an `Exception`'s, whose
-    /// `$file` and trace take what the file's path takes:
+    /// made even for the empty string and one byte. `$lang` is
+    /// `soap_lang_en`, interned at the engine's start, so the request's
+    /// first fault costs what every later one does. Each line is the
+    /// fault's bytes past an `Exception`'s, whose `$file` and trace take
+    /// what the file's path takes:
     ///
     /// ```php
-    /// $w = new SoapFault('Server', 'first');
     /// $m = memory_get_usage(); $e = new Exception('Nope Here'); $x = memory_get_usage() - $m;
     /// $m = memory_get_usage(); $f = new SoapFault('HTTP', 'Nope Here'); echo memory_get_usage() - $m - $x, "\n";
     /// $m = memory_get_usage(); $g = new SoapFault('X', '', 'actor', null, 'nm'); echo memory_get_usage() - $m - $x, "\n";
@@ -530,10 +530,9 @@ fn init(req: &mut Request, bytes: &[u8]) -> R<Owner<Value>> {
 
 /// `ZVAL_STR_COPY(Z_FAULT_LANG_P(obj), lang)`: `en` is `soap_lang_en`,
 /// which `PHP_MINIT` interns and which costs php's request nothing, here
-/// the string the request keeps for it, made by its first fault until an
-/// extension can intern at its engine start (#3873); the empty string is
-/// `ZSTR_EMPTY_ALLOC()`; any other is the string `parse_packet_soap` made
-/// of a response's `xml:lang`.
+/// the string the engine's start interns as the extension names it; the
+/// empty string is `ZSTR_EMPTY_ALLOC()`; any other is the string
+/// `parse_packet_soap` made of a response's `xml:lang`.
 fn lang(req: &mut Request, bytes: &[u8]) -> R<Owner<Value>> {
     if bytes == b"en" || bytes.is_empty() {
         let kept = PhpString::interned(req, bytes)?;
