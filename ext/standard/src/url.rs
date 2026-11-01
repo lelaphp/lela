@@ -81,6 +81,20 @@ pub(crate) mod constants {
 /// get_headers(): Argument #1 ($url) must not contain any null bytes
 /// ```
 ///
+/// `stream->wrapperdata` is read off the stream
+/// ([`Stream::wrapper_data`](php_ext::request::Stream::wrapper_data)), so
+/// no method of a user wrapper runs, its `stream_eof` among them: a
+/// wrapper with none answers `false` with no warning.
+///
+/// ```php
+/// class W { public $context; function stream_open($p,$m,$o,&$op){return true;} function stream_read($n){ return ''; } function stream_close(){} }
+/// stream_wrapper_register('ww', 'W', STREAM_IS_URL);
+/// var_dump(get_headers('ww://x'));
+/// ```
+/// ```expect
+/// bool(false)
+/// ```
+///
 /// ```php
 /// $srv = stream_socket_server('tcp://127.0.0.1:0');
 /// $addr = stream_socket_get_name($srv, false);
@@ -122,22 +136,19 @@ fn get_headers(
     else {
         return Ok(OrFalse::False);
     };
-    let meta = stream.meta_data(req)?;
-    let lines = meta
-        .find(b"wrapper_data")
+    let lines = stream
+        .wrapper_data(req)
         .and_then(|value| value.deref().as_array());
     let Some(lines) = lines else {
-        meta.give_up(req);
         stream.free(req);
         return Ok(OrFalse::False);
     };
-    // The lines read first, as bytes: what `add_header` writes is the
-    // answer, never the stream's `wrapper_data`, so the meta data is
-    // given up before the answer is built.
+    // The lines read first, as bytes: `stream->wrapperdata` is the
+    // stream's own value, no owner taken, and what `add_header` writes is
+    // the answer, so the stream is freed before the answer is built.
     let lines: Vec<Vec<u8>> = walk::rows(req, lines)
         .filter_map(|(_, line)| line.deref().as_str_bytes().map(<[u8]>::to_vec))
         .collect();
-    meta.give_up(req);
     stream.free(req);
     Ok(OrFalse::Value(header_array(req, &lines, associative)?))
 }
