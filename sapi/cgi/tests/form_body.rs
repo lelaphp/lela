@@ -3,9 +3,10 @@
 //! block at a time, as `php_std_post_handler` reads
 //! `SG(request_info).request_body`, so the body never stands in the
 //! process's memory whole, mbstring linked and its `encoding_translation`
-//! off (#3651). Held in a test binary of its own, since
+//! off (#3651); and one whose spill has nowhere to go spills where php's
+//! does. Held in a test binary of its own, since
 //! `getrusage(RUSAGE_CHILDREN)` is the peak of every child its process
-//! waited for.
+//! waited for, and the spill's child peaks far under the large form's.
 
 /// 251 MiB of form, 262144 variables of the same name, each a thousand
 /// bytes: `$_POST` holds one, and the process's peak resident set stays
@@ -78,5 +79,49 @@ fn a_spilled_form_is_parsed_without_holding_it_whole() {
     assert!(
         usize::try_from(peak).unwrap() < sent / 2,
         "php-cgi's peak resident set was {peak} bytes"
+    );
+}
+
+/// A form body past the 16 KiB a temp stream keeps in memory, whose
+/// `upload_tmp_dir` does not exist, spills into the system's temporary
+/// directory after php's notice, `php_open_temporary_fd_ex`'s, and the
+/// form handler then registers none of it, while `php://input` still
+/// reads it whole. The pinned php-cgi 8.5.12 writes the same bytes for
+/// the same body and switches (`-n -q -d html_errors=0`).
+#[test]
+fn a_form_whose_spill_directory_is_missing_spills_after_php_s_notice() {
+    use std::io::Write as _;
+
+    let dir = std::env::temp_dir().join(format!("sapi-cgi-spill-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("t.php");
+    std::fs::write(
+        &file,
+        "<?php var_dump(count($_POST), strlen(file_get_contents('php://input')));\n",
+    )
+    .unwrap();
+    let mut body = b"a=1&big=".to_vec();
+    body.resize(body.len() + 20_000, b'x');
+    body.extend_from_slice(b"&b=two");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_php-cgi"))
+        .env_clear()
+        .env("GATEWAY_INTERFACE", "CGI/1.1")
+        .env("REDIRECT_STATUS", "200")
+        .env("REQUEST_METHOD", "POST")
+        .env("CONTENT_TYPE", "application/x-www-form-urlencoded")
+        .env("CONTENT_LENGTH", body.len().to_string())
+        .env("SCRIPT_FILENAME", &file)
+        .args(["-n", "-q", "-d", "html_errors=0", "-d"])
+        .arg(format!("upload_tmp_dir={}", dir.join("missing").display()))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(&body).unwrap();
+    let out = child.wait_with_output().unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "Content-type: text/html; charset=UTF-8\r\n\r\n\nNotice: PHP Request Startup: file created in the system's temporary directory in Unknown on line 0\nint(0)\nint(20014)\n"
     );
 }
