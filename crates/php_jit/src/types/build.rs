@@ -142,29 +142,41 @@ enum At {
         up: bool,
         wrote: Overflow,
     },
+    /// After an increment or a decrement whose long a guard holds a
+    /// double, which did not overflow: the opline past it with the longs
+    /// it wrote in its slots ([`Within::Stayed`]).
+    Stayed {
+        op: OplineIdx,
+        wrote: Overflow,
+    },
 }
 
 impl At {
     /// Where an inline arithmetic `line` leaves whose `out` a guard
     /// holds within it, as `kind` says: at its opline, which the
-    /// interpreter serves again, or past it with what it overflowed to
-    /// in its slots.
+    /// interpreter serves again, or past it with what it overflowed to,
+    /// or the longs it wrote where it did not, in its slots.
     fn overflowing(kind: Within, line: &Line, out: ValueId) -> At {
         let op = line.opline;
-        let Within::Overflowed { up } = kind else {
-            return At::Opline(op);
-        };
         let wrote = match (line.opcode, line.op1_def) {
             (Opcode::PreInc | Opcode::PreDec, Some(var)) => Overflow::Pre { var, out: line.out },
             (Opcode::PostInc | Opcode::PostDec, Some(var)) => Overflow::Post { var, out: line.out },
             _ => Overflow::Sum { out },
         };
-        At::Overflowed { op, up, wrote }
+        match (kind, wrote) {
+            (Within::Overflowed { up }, _) => At::Overflowed { op, up, wrote },
+            (Within::Stayed, Overflow::Pre { .. } | Overflow::Post { .. }) => {
+                At::Stayed { op, wrote }
+            }
+            _ => At::Opline(op),
+        }
     }
 }
 
 /// What an op that overflowed left in its slots where it leaves past
-/// itself ([`At::Overflowed`]), each a constant php's stack map holds.
+/// itself ([`At::Overflowed`]), each a constant php's stack map holds,
+/// or what a step that did not left there ([`At::Stayed`]), each the
+/// long php's stack map holds in the step's register.
 #[derive(Clone, Copy)]
 enum Overflow {
     /// An `ADD` or a `SUB` of `1`: its `out` the double
@@ -191,6 +203,31 @@ impl Overflow {
             Overflow::Post { var, out } => [
                 Some((var, double)),
                 out.map(|out| (out, Stored::Limit { up })),
+            ],
+        }
+    }
+
+    /// The values a step that did not overflow wrote and what each is
+    /// written, its variable's or its `out`'s first: the long it went to,
+    /// and in a `POST_*`'s `out` the long the variable held
+    /// (`zend_jit_inc_dec`, `Z/ext/opcache/jit/zend_jit_ir.c:4824-4856`).
+    /// An `ADD` or a `SUB` writes none, as php's leaves at its opline.
+    fn stayed(self) -> [Option<(ValueId, Stored)>; 2] {
+        let went = |value| Stored::Stayed { value, read: false };
+        match self {
+            Overflow::Sum { .. } => [None, None],
+            Overflow::Pre { var, out } => [Some((var, went(var))), out.map(|out| (out, went(out)))],
+            Overflow::Post { var, out } => [
+                Some((var, went(var))),
+                out.map(|out| {
+                    (
+                        out,
+                        Stored::Stayed {
+                            value: out,
+                            read: true,
+                        },
+                    )
+                }),
             ],
         }
     }
@@ -3015,7 +3052,7 @@ impl<'a> Builder<'a> {
                 };
                 let to = match kind {
                     Within::Fetched { .. } => fetched(Left::Copied(Read::InPlace)),
-                    Within::Rerun | Within::Overflowed { .. } => overflowing,
+                    Within::Rerun | Within::Overflowed { .. } | Within::Stayed => overflowing,
                 };
                 if let (Within::Fetched { missed }, Some(tag)) = (kind, tag) {
                     then = deref.then_some(Placed {
@@ -4633,6 +4670,15 @@ impl<'a> Builder<'a> {
                     .collect();
                 (Some(OplineIdx(op.0 + 1)), restored(calls), overflowed)
             }
+            At::Stayed { op, wrote } => {
+                let stayed = (wrote.stayed().into_iter().flatten())
+                    .map(|(value, from)| Store {
+                        slot: self.val(value).slot,
+                        from,
+                    })
+                    .collect();
+                (Some(OplineIdx(op.0 + 1)), restored(calls), stayed)
+            }
         }
     }
 
@@ -4740,11 +4786,12 @@ impl<'a> Builder<'a> {
                 })
             })
             .collect();
-        // A constant an overflow left in its slot is known as what it
-        // is, as php's `zend_jit_math_long_long` and `zend_jit_inc_dec`
-        // set the slot's stack type before they take the exit.
+        // A constant an overflow left in its slot, and a long a step
+        // that did not overflow left there, is known as what it is, as
+        // php's `zend_jit_math_long_long` and `zend_jit_inc_dec` set the
+        // slot's stack type before they take the exit.
         for store in &extra {
-            if let Some(tag) = store.from.constant() {
+            if let Some(tag) = store.from.stack_type() {
                 known.retain(|known| known.slot != store.slot);
                 known.push(Known {
                     slot: store.slot,
@@ -5145,7 +5192,7 @@ impl Reused {
             spec: ExitSpec {
                 frame: Frame::ROOT,
                 stores: (spec.stores.iter())
-                    .map(|store| match store.from.constant() {
+                    .map(|store| match store.from.stack_type() {
                         Some(_) => Store {
                             slot: relative(store.slot),
                             ..*store

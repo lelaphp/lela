@@ -842,16 +842,29 @@ pub(crate) enum Stored {
     /// [`Stored::Overflowed`], as php's stack map holds it,
     /// `int(9223372036854775807)` (`zend_jit_inc_dec`).
     Limit { up: bool },
+    /// A long an increment or a decrement wrote where it did not
+    /// overflow and a guard held what it writes a double, the way its
+    /// record went: the long it went to, in its variable and in a
+    /// `PRE_*`'s `out`, or, `read`, the long the variable held, in a
+    /// `POST_*`'s `out`. The site writes it to the slot in its own frame
+    /// before it leaves, as php's stack map holds it as the step's
+    /// register, `int(x1)` (`zend_jit_inc_dec`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:4824-4856`); `value` is what the
+    /// step writes to that slot, so no other site's exit is this one.
+    Stayed { value: ValueId, read: bool },
 }
 
 impl Stored {
-    /// The type a constant the site writes before it leaves is known
-    /// as, php's `SET_STACK_TYPE` before `zend_jit_inc_dec` takes its
-    /// exit; none of a value the exit stores.
-    pub(crate) fn constant(self) -> Option<ZvalType> {
+    /// The type the site sets the slot to where it writes it before it
+    /// leaves, php's `SET_STACK_TYPE` before `zend_jit_inc_dec` and
+    /// `zend_jit_math_long_long` take their exits: the double an
+    /// overflow went to, the long a `POST_*` read at the limit, or the
+    /// long a step wrote that did not overflow; none of a value the exit
+    /// stores, nor of an element a fetch copied.
+    pub(crate) fn stack_type(self) -> Option<ZvalType> {
         match self {
             Stored::Overflowed { .. } => Some(ZvalType::Double),
-            Stored::Limit { .. } => Some(ZvalType::Long),
+            Stored::Limit { .. } | Stored::Stayed { .. } => Some(ZvalType::Long),
             Stored::Value(_) | Stored::Copied { .. } | Stored::Null => None,
         }
     }

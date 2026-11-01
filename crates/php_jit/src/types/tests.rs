@@ -20,8 +20,8 @@ use php_unit::{Opcode, OplineIdx};
 
 use super::{
     Check, Def, End, ExitId, Form, Frame, Frees, Grows, GuardAt, Home, Imm, Interrupt, Landing,
-    Line, Op, OpId, Operand, Pointee, Repeat, Slot, Slotted, Stored, TraceIr, Types, ValueId,
-    build, on_declared_slot,
+    Line, Op, OpId, Operand, Pointee, Repeat, Slot, Slotted, Store, Stored, TraceIr, Types,
+    ValueId, build, on_declared_slot,
 };
 use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
@@ -3864,5 +3864,82 @@ fn an_overflowing_step_leaves_past_itself_as_php_does() -> Result<(), String> {
             "{program}\n{rendered}"
         );
     }
+    Ok(())
+}
+
+/// A recursion whose second level's `$x++` overflowed as it was
+/// recorded holds that step a double, and the step leaves past itself
+/// where it does not overflow, with `$x` the long it went to and known
+/// one, as php's `zend_jit_inc_dec` takes that exit
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:4824-4856`): exit 7 lands at
+/// `0006`, line 4, where it landed at the step's own `0005` (#3828). The
+/// trace's exits are the pinned php's `TRACE 1 exit info` for #3828's
+/// program under the trace-dump regime with bits 19 and 20,
+/// exit by exit, its opline, whether it leaves to the VM and what it
+/// knows of each slot: `exit_3: 0006/0002/2 CV0($n):int(x0:1)
+/// CV1($x):float(9.22337e+18)`, the first level's overflow, and `exit_7:
+/// 0006/0013/2 CV0($n):int(x0:1) CV1($x):int(x1)`. php's `exit_10`, the
+/// loop's interrupt test, knows the last caller's slots, and its `exit_5`
+/// and `exit_9` restore no call; this tier's knows the root's and
+/// restores one, held apart (#3893, #3894).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_step_held_a_double_leaves_past_itself_where_it_did_not_overflow() -> Result<(), String> {
+    // Each exit's opline, frame, whether it leaves to the VM, and the
+    // type it knows of each slot by its number, as php lists it and as
+    // the trace holds it.
+    type Listed<'a> = (u32, u16, bool, &'a [(u32, ZvalType)]);
+    type Exit = (u32, u16, bool, Vec<(u32, ZvalType)>);
+    let ir = built(
+        &[("record.function", "r"), ("record.start", "enter")],
+        "function r($n, $x) { if ($n == 0) { return $x; }
+          $x++;
+          return r($n - 1, $x); }
+        var_dump(r(2, PHP_INT_MAX - 1));",
+    )?;
+    let rendered = dump::render(&ir);
+    let (long, double) = (ZvalType::Long, ZvalType::Double);
+    let php: [Listed<'_>; 11] = [
+        (2, 0, false, &[]),
+        (4, 0, false, &[(0, long)]),
+        (5, 0, false, &[(0, long)]),
+        (6, 0, false, &[(0, long), (1, double)]),
+        (6, 0, true, &[(0, long), (1, long)]),
+        (8, 0, false, &[(0, long), (1, long), (4, double)]),
+        (4, 1, false, &[(0, long), (1, long)]),
+        (6, 1, false, &[(0, long), (1, long)]),
+        (6, 1, true, &[(0, long), (1, double)]),
+        (8, 1, false, &[(0, long), (1, double), (4, double)]),
+        // php's knows the last caller's `(0, long), (1, double), (4, long)` (#3893).
+        (2, 0, true, &[(0, long), (1, long)]),
+    ];
+    let ours: Vec<Exit> = (ir.exits.iter())
+        .map(|exit| {
+            (
+                exit.opline.map_or(u32::MAX, |at| at.0),
+                exit.frame.0,
+                exit.grows == Grows::Never,
+                (exit.known.iter())
+                    .map(|known| (known.slot.var, known.tag))
+                    .collect(),
+            )
+        })
+        .collect();
+    let php: Vec<Exit> = (php.iter())
+        .map(|(opline, frame, vm, known)| (*opline, *frame, *vm, known.to_vec()))
+        .collect();
+    assert_eq!(ours, php, "{rendered}");
+    let stayed = (ir.exits.get(7).map(|exit| exit.stores.clone())).unwrap_or_default();
+    let x = (ir.exits.get(6).and_then(|exit| exit.known.get(1))).map(|known| known.slot);
+    assert!(
+        matches!(
+            (stayed.as_slice(), x),
+            ([Store {
+                slot,
+                from: Stored::Stayed { read: false, .. },
+            }], Some(x)) if *slot == x
+        ),
+        "{rendered}"
+    );
     Ok(())
 }

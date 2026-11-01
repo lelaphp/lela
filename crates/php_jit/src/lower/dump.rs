@@ -303,6 +303,8 @@ impl<'a> Dump<'a> {
                 Stored::Overflowed { up: false } => "overflowed down".to_owned(),
                 Stored::Limit { up: true } => "limit up".to_owned(),
                 Stored::Limit { up: false } => "limit down".to_owned(),
+                Stored::Stayed { value, read: false } => format!("stayed #{}", value.0),
+                Stored::Stayed { value, read: true } => format!("stayed #{} read", value.0),
             };
             write!(text, " {}={from}", self.slot(store.slot))?;
         }
