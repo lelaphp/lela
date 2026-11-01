@@ -10753,7 +10753,23 @@ fn read_dimension(
 /// since its `Undefined variable` warning may reach a handler that
 /// overwrites the variable the object is in, and given back after the
 /// class's handlers answered, `GC_DELREF(obj) == 0` and
-/// `zend_objects_store_del` at the last.
+/// `zend_objects_store_del` at the last, with what they threw in
+/// `EG(exception)`, so a destructor that throws there chains it:
+///
+/// ```php
+/// class A implements ArrayAccess {
+///     function __destruct() { throw new Exception("destructed"); }
+///     function offsetExists($k): bool { return true; } function offsetUnset($k): void {}
+///     function offsetGet($k): mixed { $GLOBALS['o'] = null; throw new Exception("get"); }
+///     function offsetSet($k, $v): void { $GLOBALS['o'] = null; throw new Exception("set"); }
+/// }
+/// try { $o = new A; $o[0]; } catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()->getMessage(), "\n"; }
+/// try { $o = new A; $o[0] = 1; } catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// destructed after get
+/// destructed after set
+/// ```
 ///
 /// ```php
 /// class A implements ArrayAccess {
@@ -10795,11 +10811,21 @@ fn read_dimension(
 /// destructed
 /// done
 /// ```
-fn object_held<T>(req: &mut Request, object: PhpObject, step: impl FnOnce(&mut Request) -> T) -> T {
+fn object_held<T>(
+    req: &mut Request,
+    object: PhpObject,
+    step: impl FnOnce(&mut Request) -> Result<T, Thrown>,
+) -> Result<T, Thrown> {
     let held = Owner::take(req, object.as_value());
-    let stepped = step(req);
-    held.let_go(req);
-    stepped
+    match step(req) {
+        Ok(stepped) => {
+            held.let_go(req);
+            Ok(stepped)
+        }
+        Err(thrown) => Err(req.free_pending(thrown, |req| {
+            held.let_go(req);
+        })),
+    }
 }
 
 /// The dimension a handler over an object reads, php's `if (OP2_TYPE ==
@@ -16387,6 +16413,27 @@ fn assign_to_place(
 /// Can only attach objects that implement the Iterator interface
 /// int(1)
 /// ```
+///
+/// The value is given up after `offsetSet` threw with the throwable
+/// pending, as `FREE_OP_DATA()` frees it, so a destructor that throws
+/// there chains it; an `ArrayObject` that overrides `offsetSet` is the
+/// same:
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class D { function __destruct() { throw new Exception("destructed"); } }
+/// class A implements ArrayAccess {
+///     function offsetExists($k): bool { return false; } function offsetGet($k): mixed { return null; }
+///     function offsetSet($k, $v): void { throw new Exception("set"); } function offsetUnset($k): void {}
+/// }
+/// class AO extends ArrayObject { function offsetSet($k, $v): void { throw new Exception("set"); } }
+/// try { $o = new A; $o[0] = new D; } catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()->getMessage(), "\n"; }
+/// try { $o = new AO; $o[] = new D; } catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// destructed after set
+/// destructed after set
+/// ```
 fn assign_object_dim(
     req: &mut Request,
     frame: FrameRef,
@@ -16399,16 +16446,15 @@ fn assign_object_dim(
     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
     let table = req.object_handlers(object.heap());
     let given = Owner::take(req, value);
-    let served = table.write_dimension(req, object, dim.as_ref(), given);
-    let answer = match served {
+    match table.write_dimension(req, object, dim.as_ref(), given) {
         Ok(()) => {
             write_out(req, frame, op, &value);
+            req.release(value);
             Ok(())
         }
-        Err(thrown) => Err(thrown),
-    };
-    req.release(value);
-    answer
+        // `FREE_OP_DATA()` with what `offsetSet` threw in `EG(exception)`.
+        Err(thrown) => Err(req.free_pending(thrown, |req| req.release(value))),
+    }
 }
 
 /// The arm `ZEND_ASSIGN_DIM` takes over a string: `$s[] = v` is php's
@@ -17554,6 +17600,48 @@ fn stepped_entry(
 /// ```expect
 /// Cannot access offset of type array on ArrayObject
 /// ```
+///
+/// What `offsetGet` answered is given up after `offsetSet`, and with
+/// what the operator or `offsetSet` threw pending, as the operator's
+/// own value is:
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class D { function __destruct() { echo "dtor\n"; throw new Exception("destructed"); } function __toString(): string { return "d"; } }
+/// class A implements ArrayAccess {
+///     function offsetExists($k): bool { return false; } function offsetGet($k): mixed { return $k ? [new D] : new D; }
+///     function offsetSet($k, $v): void { if ($k) throw new Exception("set"); echo "set $v\n"; } function offsetUnset($k): void {}
+/// }
+/// $o = new A;
+/// try { $o[0] .= "x"; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// try { $o[1] += []; } catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()->getMessage(), "\n"; }
+/// try { $o[1] += 1; } catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// set dx
+/// dtor
+/// destructed
+/// dtor
+/// destructed after set
+/// dtor
+/// destructed after Unsupported operand types: array + int
+/// ```
+///
+/// Where the class refused the read, the value is given up before the
+/// object, `FREE_OP` before `GC_DELREF(obj)`:
+///
+/// ```php
+/// class O { function __destruct() { echo "O dtor\n"; } }
+/// class D { function __destruct() { echo "D dtor\n"; } }
+/// set_error_handler(function () { $GLOBALS['o'] = null; return true; });
+/// $o = new O;
+/// try { $o[$u] += new D; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// D dtor
+/// O dtor
+/// Cannot use object of type O as array
+/// ```
 fn binary_assign_op_obj_dim(
     req: &mut Request,
     frame: FrameRef,
@@ -17582,25 +17670,37 @@ fn binary_assign_op_obj_dim(
                 ClassId::ERROR,
                 &bytes!(b"Cannot use object of type ", class, b" as array"),
             );
-            return Err(req.raised_over(error, ran_on));
+            // `FREE_OP_DATA` before `GC_DELREF(obj)`, the `Error` pending.
+            let error = req.raised_over(error, ran_on);
+            return Err(req.free_pending(error, |req| {
+                exec::free_operand(req, frame, data.op1_type, data.op1);
+            }));
         }
         Err(thrown) => return Err(thrown),
     };
-    let computed = kernel(req, &held, &value);
-    req.release(held);
-    // `if (zend_binary_op(...) == SUCCESS) write_dimension`, and
-    // `FREE_OP_DATA` after it: a destructor the value's release serves
-    // is served after `offsetSet`, and over what the operator raised.
-    let stepped = computed?;
+    // `if (zend_binary_op(...) == SUCCESS) write_dimension`, and then
+    // `rv`, `res` and `FREE_OP_DATA` given up in that order, with what
+    // the operator or `offsetSet` threw in `EG(exception)`.
     // `write_dimension` takes an owner of its own, where php's copies
-    // the value, so the one the temporary and the release below read
-    // stays.
-    let given = Owner::take(req, stepped);
-    let written = table.write_dimension(req, object, dim.as_ref(), given);
+    // the value, so the one the temporary and the release read stays.
+    let (stepped, written) = match kernel(req, &held, &value) {
+        Ok(stepped) => {
+            let given = Owner::take(req, stepped);
+            (
+                stepped,
+                table.write_dimension(req, object, dim.as_ref(), given),
+            )
+        }
+        Err(thrown) => (Value::null(), Err(thrown)),
+    };
     if let Err(thrown) = written {
-        req.release(stepped);
-        return Err(thrown);
+        return Err(req.free_pending(thrown, |req| {
+            req.release(held);
+            req.release(stepped);
+            exec::free_operand(req, frame, data.op1_type, data.op1);
+        }));
     }
+    req.release(held);
     write_out(req, frame, op, &stepped);
     req.release(stepped);
     exec::free_operand(req, frame, data.op1_type, data.op1);
