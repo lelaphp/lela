@@ -12953,6 +12953,14 @@ pub(super) fn thrown_on_call(req: &mut Request, thrown: &Thrown) -> Result<(), F
 #[inline(always)] // both handlers' throw path
 fn checked_after_throw(req: &mut Request, thrown: &Thrown) -> Result<(), Fatal> {
     req.leave_pending(thrown);
+    checked_while_pending(req)
+}
+
+/// [`checked_after_throw`]'s check, made with whatever throwable stands
+/// pending: the one a native threw, or one a warning's handler threw
+/// while a frameless native went on ([`frameless_served`]).
+#[inline(always)] // both handlers' throw path
+fn checked_while_pending(req: &mut Request) -> Result<(), Fatal> {
     if req.diagnostics().bailing_out() {
         return Ok(());
     }
@@ -13364,6 +13372,108 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// usr2
 /// after s
 /// ```
+///
+/// The check is followed by `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION`
+/// (`ZEND_VM_NEXT_OPCODE_EX(1, 2)` past an `OP_DATA`), so a native that
+/// went on past a warning whose handler threw, and returned, is unwound
+/// from at its call: what it returned is the temporary's, given up as
+/// `ZEND_HANDLE_EXCEPTION` frees the throwing opline's `result`, and
+/// nothing reads it.
+///
+/// ```php
+/// set_error_handler(function ($no, $str) { throw new Exception($str); });
+/// try { var_dump(trim(NAN)); } catch (Exception $e) { echo "1 caught ", $e->getMessage(), "\n"; }
+/// try { var_dump(str_contains(NAN, "N")); } catch (Exception $e) { echo "2 caught ", $e->getMessage(), "\n"; }
+/// try { var_dump(substr("abc", 0, 1.5)); } catch (Exception $e) { echo "3 caught ", $e->getMessage(), "\n"; }
+/// try { var_dump(implode(",", [[]])); } catch (Exception $e) { echo "4 caught ", $e->getMessage(), "\n"; }
+/// try { $r = trim(NAN); } catch (Exception $e) { echo "5 caught ", $e->getMessage(), "\n"; }
+/// var_dump(isset($r));
+/// ```
+/// ```expect
+/// 1 caught unexpected NAN value was coerced to string
+/// 2 caught unexpected NAN value was coerced to string
+/// 3 caught Implicit conversion from float 1.5 to int loses precision
+/// 4 caught Array to string conversion
+/// 5 caught unexpected NAN value was coerced to string
+/// bool(false)
+/// ```
+///
+/// The same where a trace serves the loop, its rows of one type so the
+/// call that warns is compiled code's, through the tier's `frameless`
+/// kernel ([`crate::tier::frameless_call`]):
+///
+/// ```php
+/// set_error_handler(function ($no, $str) { throw new Exception($str); });
+/// function f($rows) {
+///     foreach ($rows as [$a, $b, $c]) {
+///         try { echo trim($a), " ", str_contains("xyz", $b) ? "y" : "n", " ", substr("abcd", 1, $c), "\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+///     }
+/// }
+/// f([[1.0, 1.0, 1.0], [2.0, 2.0, 2.0], [NAN, 1.0, 3.0], [3.0, NAN, 1.0], [4.0, 1.0, 1.5], [5.0, 2.0, 3.0]]);
+/// echo "after\n";
+/// ```
+/// ```expect regime=jit-force process
+/// 1 n b
+/// 2 n bc
+/// caught unexpected NAN value was coerced to string
+/// 3 caught unexpected NAN value was coerced to string
+/// 4 n caught Implicit conversion from float 1.5 to int loses precision
+/// 5 n bcd
+/// after
+/// ```
+///
+/// The interrupt check comes first, made with the handler's throwable
+/// pending ([`frameless_served`]), so a signal that lands after the last
+/// check inside the native is dispatched before the `catch`: here each
+/// handler's signal lands as the dispatch that served it ends, `SIGHUP`
+/// after the check `zend_call_function` makes as the warning's handler
+/// returns.
+///
+/// ```php
+/// pcntl_async_signals(true);
+/// pcntl_signal(SIGUSR1, function () { echo "usr1\n"; posix_kill(posix_getpid(), SIGUSR2); });
+/// pcntl_signal(SIGUSR2, function () { echo "usr2\n"; posix_kill(posix_getpid(), SIGHUP); });
+/// pcntl_signal(SIGHUP, function () { echo "hup\n"; });
+/// set_error_handler(function ($no, $str) { $e = new Exception($str); posix_kill(posix_getpid(), SIGUSR1); throw $e; });
+/// function f($xs) {
+///     foreach ($xs as $x) {
+///         try { echo trim($x), "\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+///     }
+/// }
+/// f([1.0, 2.0, NAN, 3.0]);
+/// ```
+/// ```expect process
+/// 1
+/// 2
+/// usr1
+/// usr2
+/// hup
+/// caught unexpected NAN value was coerced to string
+/// 3
+/// ```
+///
+/// ```php
+/// pcntl_async_signals(true);
+/// pcntl_signal(SIGUSR1, function () { echo "usr1\n"; posix_kill(posix_getpid(), SIGUSR2); });
+/// pcntl_signal(SIGUSR2, function () { echo "usr2\n"; posix_kill(posix_getpid(), SIGHUP); });
+/// pcntl_signal(SIGHUP, function () { echo "hup\n"; });
+/// set_error_handler(function ($no, $str) { $e = new Exception($str); posix_kill(posix_getpid(), SIGUSR1); throw $e; });
+/// function f($xs) {
+///     foreach ($xs as $x) {
+///         try { echo trim($x), "\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+///     }
+/// }
+/// f([1.0, 2.0, NAN, 3.0]);
+/// ```
+/// ```expect regime=jit-force process
+/// 1
+/// 2
+/// usr1
+/// usr2
+/// hup
+/// caught unexpected NAN value was coerced to string
+/// 3
+/// ```
 #[inline(never)] // out of the loop's body, whose held state #3022 found at its optimum
 fn frameless_call<const N: usize>(
     req: &mut Request,
@@ -13390,7 +13500,9 @@ fn frameless_call<const N: usize>(
         return Ok(Stepped::Threw(frame).into());
     };
     set_out(req, frame, op, value);
-    if crate::interrupt::check(req)? {
+    // `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION`: a throwable a handler left
+    // pending while the native went on, its check already made.
+    if req.is_pending() || crate::interrupt::check(req)? {
         return Ok(Stepped::Threw(frame).into());
     }
     jump_to(at.saturating_add(if N == 3 { 2 } else { 1 }))
@@ -13403,11 +13515,14 @@ fn frameless_call<const N: usize>(
 /// laid down ([`Request::push_frameless`]), the native served, and the
 /// record popped, which gives up what it owns, whether the native threw
 /// or not, as php's frameless handler and its full call for an observed
-/// one do (`Z/Zend/zend_execute.c:1597`). What it returned, or none
-/// with the throwable left pending.
+/// one do (`Z/Zend/zend_execute.c:1597`). What it returned, with the
+/// throwable a warning's handler threw left pending where the native
+/// went on past one, or none with the throwable it threw left pending;
+/// the handler's pending test and the tier's wrapper find either.
 ///
-/// Where the native threw, the interrupt check is made here with the
-/// throwable pending ([`checked_after_throw`]), as each
+/// Where a throwable stands pending as the native leaves, thrown by it or
+/// by a handler, the interrupt check is made here with it pending
+/// ([`checked_after_throw`], [`checked_while_pending`]), as each
 /// `FRAMELESS_ICALL_*` handler makes `ZEND_VM_FCALL_INTERRUPT_CHECK`
 /// before `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` and compiled code
 /// `jit_frameless_interrupt_check` before `zend_jit_check_exception`
@@ -13500,6 +13615,19 @@ pub(super) fn frameless_served(
     let served = req.serve_entry(function, entry, OnThrow::ReturnValue);
     req.pop_frameless(owned);
     match served {
+        // The native went on past a warning whose handler threw, as php's
+        // body writes `return_value` whatever `EG(exception)` holds: the
+        // check is made with that throwable pending, as for one the native
+        // threw, and the value is the caller's to write before it unwinds.
+        Ok(value) if crate::interrupt::raised(req) && req.is_pending() => {
+            match checked_while_pending(req) {
+                Ok(()) => Ok(Some(value)),
+                Err(fatal) => {
+                    req.release(value);
+                    Err(fatal)
+                }
+            }
+        }
         Ok(value) => Ok(Some(value)),
         Err(thrown) => checked_after_throw(req, &thrown).map(|()| None),
     }

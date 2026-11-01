@@ -1890,14 +1890,17 @@ pub struct FramelessAt(pub u32);
 /// call ends ([`crate::handlers::frameless_served`]); compiled code
 /// makes the interrupt check after a native that returned,
 /// `jit_frameless_interrupt_check`, and this makes it after one that
-/// threw, with the throwable pending, before compiled code's throw guard.
-/// What the native returned, or `null` with the throwable left pending.
+/// threw, or returned with a throwable a warning's handler threw, with
+/// the throwable pending, before compiled code's throw guard. What the
+/// native returned, a handler's throwable left pending where one stands,
+/// or `null` with the throwable the native threw left pending.
 ///
 /// # Errors
 ///
 /// The memory limit's fatal where the record's room is refused, the
-/// interrupt check's fatal after a native that threw, and an internal
-/// error where `at` names no entry of the table.
+/// interrupt check's fatal after a native that threw or left a handler's
+/// throwable pending, and an internal error where `at` names no entry of
+/// the table.
 pub fn frameless_call(
     req: &mut Request,
     frame: FrameRef,
