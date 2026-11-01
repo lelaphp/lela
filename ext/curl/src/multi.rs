@@ -729,7 +729,9 @@ fn curl_multi_exec(
                 pending.park(req, thrown);
             }
         });
-        if let Ok(easy) = easy_of(req, *handle) {
+        // A `CurlHandle` whose free is under way has no `CURL *` left
+        // to hold, as in `curl_multi_free_obj`.
+        if let Some(easy) = object_easy(req, *handle) {
             held.push(easy);
         }
     }
@@ -1035,6 +1037,38 @@ fn easy_id(req: &Request, handle: PhpObject) -> Option<EasyId> {
 /// bool(false)
 /// int(7)
 /// ```
+///
+/// Called from a callable a `CurlHandle`'s own free serves, it passes
+/// that `CurlHandle` over, whose cleanup detaches it, and lets `easyh`
+/// go; the other `CurlHandle`, freed as `easyh` lets it go inside that
+/// cleanup, prints nothing, under php as here:
+///
+/// ```php
+/// $m = curl_multi_init();
+/// $a = curl_init('http://127.0.0.1:1/');
+/// $b = curl_init('http://127.0.0.1:1/');
+/// foreach ([$a, $b] as $i => $h) {
+///     curl_setopt($h, CURLOPT_VERBOSE, 1);
+///     curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $t, $d) use ($m, $i) {
+///         if ($t == CURLINFO_TEXT && str_starts_with($d, 'closing')) {
+///             echo "$i: $d";
+///             curl_multi_close($m);
+///             var_dump(count(curl_multi_get_handles($m)));
+///         }
+///     });
+///     curl_multi_add_handle($m, $h);
+/// }
+/// curl_multi_exec($m, $r);
+/// unset($a, $b, $h, $m);
+/// var_dump(gc_collect_cycles());
+/// echo "end\n";
+/// ```
+/// ```expect
+/// 0: closing connection #0
+/// int(0)
+/// int(5)
+/// end
+/// ```
 #[php_function]
 fn curl_multi_close(
     req: &mut Request,
@@ -1062,7 +1096,10 @@ fn curl_multi_close(
             if let Some(thrown) = verify_handlers(req, handle, true) {
                 pending.park(req, thrown);
             }
-            if let Ok(easy) = easy_of(req, handle)
+            // A `CurlHandle` whose free is under way has no `CURL *` to
+            // remove: its cleanup, which served this callable, detaches it,
+            // where php's remove is refused `CURLM_RECURSIVE_API_CALL`.
+            if let Some(easy) = object_easy(req, handle)
                 && let (_, Some(thrown)) = multi.remove(req, easy)
             {
                 pending.park(req, thrown);
