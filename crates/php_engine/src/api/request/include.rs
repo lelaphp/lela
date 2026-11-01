@@ -17,6 +17,7 @@ use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{ClassId, Owner, PhpString, Value};
 use crate::exec::IncludeKind;
+use crate::layer::{IncludeFile, IncludeReadHook};
 use crate::supplied::chain::{FileArgs, StringArgs};
 use crate::unit_cache::CompileRefused;
 
@@ -1029,11 +1030,13 @@ impl Request {
         let outer = self.include.including.replace((kind, self.vm.depth()));
         let opened = (hooks.open)(self, path, true);
         self.include.including = outer;
-        let named = opened?;
-        let compiled = self.compile_stream(kind, written, named, hooks.read_include);
+        let (mut file, named) = opened?.unzip();
+        let opened = file.as_mut().zip(named);
+        let compiled = self.compile_stream(kind, written, opened, hooks.read_include);
         // What the close threw: the unit compiled before it is the
         // handler's `destroy_op_array` then.
-        let Some(thrown) = self.close_stream(hooks.close_include, compiled.as_ref().err()) else {
+        let closed = self.close_stream(hooks.close_include, file, compiled.as_ref().err());
+        let Some(thrown) = closed else {
             return compiled;
         };
         if let Ok(Opened::Declared(unit)) = &compiled {
@@ -1042,52 +1045,56 @@ impl Request {
         Err(thrown)
     }
 
-    /// `zend_destroy_file_handle` over what the last
-    /// [`crate::layer::StreamHooks::open`] held, `close`, once what came
-    /// before it threw `thrown` or nothing: the throwable standing in
-    /// `EG(exception)`, so the wrapper's `stream_close` is refused as
-    /// `zend_call_function` refuses it and its destructor chains onto it,
-    /// and otherwise what the close threw, which the layer kept.
+    /// `zend_destroy_file_handle` over the file
+    /// [`crate::layer::StreamHooks::open`] held, `file`, where it opened,
+    /// `close`, once what came before it threw `thrown` or nothing: the
+    /// throwable standing in `EG(exception)`, so the wrapper's
+    /// `stream_close` is refused as `zend_call_function` refuses it and its
+    /// destructor chains onto it, and otherwise what the close threw, which
+    /// the layer kept.
     pub(super) fn close_stream(
         &mut self,
-        close: fn(&mut Request),
+        close: fn(&mut Request, IncludeFile),
+        mut file: Option<IncludeFile>,
         thrown: Option<&Thrown>,
     ) -> Option<Thrown> {
+        let mut destroy = |req: &mut Request| file.take().map(|file| close(req, file));
         let Some(thrown) = thrown else {
-            close(self);
+            destroy(self);
             return self.stream_thrown.take();
         };
-        if self.while_pending(thrown, close).is_none() {
-            close(self);
+        if self.while_pending(thrown, &mut destroy).is_none() {
+            destroy(self);
         }
         None
     }
 
-    /// [`Request::include_stream`] over the file the open `named`, before
-    /// `zend_destroy_file_handle`: a once form's `EG(included_files)` asked
-    /// by that name, `ZEND_FAKE_OP_ARRAY` for one it holds, which is read
-    /// nothing of, and the name put in it before the compile otherwise;
-    /// then `compile_file` over the file read whole, compiled under the
-    /// name, and its message where the open or the read failed.
+    /// [`Request::include_stream`] over the file the open held and the
+    /// name it gave it, `opened`, before `zend_destroy_file_handle`: a once
+    /// form's `EG(included_files)` asked by that name, `ZEND_FAKE_OP_ARRAY`
+    /// for one it holds, which is read nothing of, and the name put in it
+    /// before the compile otherwise; then `compile_file` over the file
+    /// `read` whole, compiled under the name, and its message where the
+    /// open or the read failed.
     pub(super) fn compile_stream(
         &mut self,
         kind: IncludeKind,
         written: &[u8],
-        named: Option<Vec<u8>>,
-        read: fn(&mut Request) -> Result<Option<Vec<u8>>, Thrown>,
+        mut opened: Option<(&mut IncludeFile, Vec<u8>)>,
+        read: IncludeReadHook,
     ) -> Result<Opened, Thrown> {
         if kind.once()
-            && let Some(named) = &named
+            && let Some((_, named)) = &opened
         {
             if self.included_files.contains(named) {
                 return Ok(Opened::Already);
             }
             self.note_included(named)?;
         }
-        let source = match &named {
-            Some(_) if self.stream_thrown.is_none() => {
+        let source = match &mut opened {
+            Some((file, _)) if self.stream_thrown.is_none() => {
                 let outer = self.include.including.replace((kind, self.vm.depth()));
-                let source = read(self);
+                let source = read(self, file);
                 self.include.including = outer;
                 source?
             }
@@ -1099,7 +1106,7 @@ impl Request {
         if let Some(thrown) = self.stream_thrown.take() {
             return Err(thrown);
         }
-        let (Some(path), Some(source)) = (named, source) else {
+        let (Some((_, path)), Some(source)) = (opened, source) else {
             // A read a fatal ended is no file php reports: the bailout
             // jumps past `compile_file`'s message.
             if self.diagnostics().bailing_out() {

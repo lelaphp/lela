@@ -57,19 +57,19 @@ pub struct StreamHooks {
     /// `zend_file_handle` takes, the `*opened_path` its opener set or the
     /// path where it set none; `None` for the open that failed, which
     /// warned where the bit was set. The `Err` is what the open
-    /// threw. An `Ok` leaves its `zend_file_handle` held, opened or not,
+    /// threw. A file that opened is held in the [`IncludeFile`] answered,
     /// for [`StreamHooks::read_include`] and [`StreamHooks::close_include`].
     pub open: StreamOpenHook,
-    /// `zend_stream_fixup` over what the last [`StreamHooks::open`] held:
-    /// the file read whole, `None` for the read that failed or a file
-    /// that did not open. The `Err` is the memory limit's fatal.
-    pub read_include: fn(&mut Request) -> Result<Option<Vec<u8>>, Thrown>,
-    /// `zend_destroy_file_handle` over what the last
-    /// [`StreamHooks::open`] that answered `Ok` held, as `compile_filename`
-    /// destroys it once `zend_compile_file` is done: its stream closed,
-    /// or left among the request's resources where a fatal is ending the
-    /// request, since `zend_bailout` jumps past the destroy.
-    pub close_include: fn(&mut Request),
+    /// `zend_stream_fixup` over the file an [`IncludeFile`] holds: the
+    /// file read whole into it, `None` for the read that failed. The `Err`
+    /// is the memory limit's fatal.
+    pub read_include: IncludeReadHook,
+    /// `zend_destroy_file_handle` over the file an [`IncludeFile`]
+    /// holds, as `compile_filename` destroys it once `zend_compile_file`
+    /// is done: its stream closed, or left among the request's resources
+    /// where a fatal is ending the request, since `zend_bailout` jumps
+    /// past the destroy.
+    pub close_include: fn(&mut Request, IncludeFile),
     /// `php_resolve_path_for_zend`: `zend_resolve_path` past every
     /// extension's own
     /// ([`ExtensionBuilder::resolve_path`](crate::api::abi::ExtensionBuilder::resolve_path)).
@@ -142,7 +142,20 @@ pub struct StreamHooks {
 
 /// [`StreamHooks::open`], whose `bool` says whether an open that fails
 /// warns.
-pub type StreamOpenHook = fn(&mut Request, &[u8], bool) -> Result<Option<Vec<u8>>, Thrown>;
+pub type StreamOpenHook =
+    fn(&mut Request, &[u8], bool) -> Result<Option<(IncludeFile, Vec<u8>)>, Thrown>;
+
+/// [`StreamHooks::read_include`].
+pub type IncludeReadHook = fn(&mut Request, &mut IncludeFile) -> Result<Option<Vec<u8>>, Thrown>;
+
+/// The `zend_file_handle` an include's [`StreamHooks::open`] held, which
+/// the frame that opened it holds as php's C frame holds its own and
+/// hands to [`StreamHooks::read_include`] and, once,
+/// [`StreamHooks::close_include`]: so two fibers whose files are open at
+/// once each close their own. The engine cannot name its type; the layer
+/// reads it back as the type it is.
+#[derive(Debug)]
+pub struct IncludeFile(pub Box<dyn Any + Send>);
 
 /// [`StreamHooks::standard_handles`].
 /// Each stream's one owner the caller's, which the constant it registers
