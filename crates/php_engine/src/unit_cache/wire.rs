@@ -435,7 +435,8 @@ record! {
     Diagnostic { level, line, message }
     Unit {
         main, functions, classes, runtime_keys, top_level, constants, methods, hooks, completed,
-        dynamic, diagnostics, arms, halt_offset, loop_vars, delayed_fetches, cell,
+        dynamic, diagnostics, arms, halt_offset, loop_vars, delayed_fetches, seen_symbols,
+        cell,
     }
 }
 
