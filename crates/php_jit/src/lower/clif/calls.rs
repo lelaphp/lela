@@ -79,12 +79,14 @@ enum Scope {
 }
 
 /// What a leave in place writes into the caller's slot: a scalar, or a
-/// zval's two words, copied from a constant or moved from a temporary.
+/// zval's two words, copied from a constant, moved from a temporary, or
+/// shared with a variable, the caller's an owner more of it.
 #[derive(Clone, Copy)]
 enum Out {
     Scalar(Scalar),
     Copied(Value, Value),
     Moved(Value, Value),
+    Shared(Value, Value),
 }
 
 /// The engine's frame layout, as compiled.
@@ -1096,6 +1098,12 @@ impl Emit<'_> {
             let dropped = self.b.ins().band(owned, unread);
             self.divert_if(dropped, slow);
         }
+        // What a variable holds the caller takes an owner of before the
+        // variables are given up, which may give up the last other, as
+        // php's `zend_jit_return` copies it before `zend_jit_free_cv`.
+        if let Out::Shared(word, info) = returned {
+            self.when(reads, |emit| emit.addref(word, info))?;
+        }
         // Nothing refuses the leave from here: what the variables own is
         // given up, and a destructor the kernel served may have grown the
         // frame table, whose records are read again after each kernel
@@ -1119,7 +1127,7 @@ impl Emit<'_> {
         self.when(reads, |emit| {
             match returned {
                 Out::Scalar(scalar) => emit.write(target, 0, scalar),
-                Out::Copied(word, info) | Out::Moved(word, info) => {
+                Out::Copied(word, info) | Out::Moved(word, info) | Out::Shared(word, info) => {
                     emit.b.ins().store(trusted(), word, target, 0);
                     emit.b.ins().store(trusted(), info, target, super::TYPE_AT);
                 }
@@ -1511,7 +1519,10 @@ impl Emit<'_> {
 
     /// What a `RETURN` left in place hands its caller ([`Returned`]): a
     /// scalar, `null` for none; a constant's two words, read from the op
-    /// array the trace's epoch holds; or a temporary's, moved. A tree's
+    /// array the trace's epoch holds; a temporary's, moved; or a
+    /// variable's, read through the reference it holds where it holds
+    /// one, `ZVAL_DEREF`, and shared (`zend_jit_return`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:11360-11380`). A tree's
     /// leaves returned as a constant and its nodes as the arrays built,
     /// read back, and returns no caller reads, given up:
     ///
@@ -1524,31 +1535,85 @@ impl Emit<'_> {
     /// ```expect regime=jit-force process
     /// 1024 50
     /// ```
+    ///
+    /// A side trace that stops at the return of a variable a reference
+    /// holds compiles it, as php's does (#3827):
+    ///
+    /// ```php
+    /// function f() { $x = 5; $r = &$x; for ($i = 0; $i < 100; $i++) {
+    ///   $x = 1; }
+    ///   return $x; }
+    /// var_dump(f());
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// int(1)
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:5
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %s:2
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 0 f() %s:4
+    /// ---- TRACE 2 start (side trace 1/0) f() %s:4
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    ///
+    /// ```
+    ///
+    /// A string shared through a reference the frame gives up its last
+    /// other owner of, returned to a loop and to none, and a long
+    /// returned to `array_map` through the leave kernel:
+    ///
+    /// ```php
+    /// function g($i) { $x = str_repeat("b", $i % 3 + 1); $r = &$x; return $x; }
+    /// function q($i) { $x = $i * 2; $r = &$x; return $x; }
+    /// function k($n) { $s = []; for ($i = 0; $i < $n; $i++) { $s[] = g($i); } return $s; }
+    /// function u($n) { for ($i = 0; $i < $n; $i++) { g($i); q($i); } return $i; }
+    /// echo implode(",", k(7)), " ", u(9), " ", implode(",", array_map('q', range(1, 4))), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// b,bb,bbb,b,bb,bbb,b 9 2,4,6,8
+    /// ```
+    ///
+    /// ```php
+    /// function g($i) { $x = str_repeat("b", $i % 3 + 1); $r = &$x; return $x; }
+    /// function q($i) { $x = $i * 2; $r = &$x; return $x; }
+    /// function k($n) { $s = []; for ($i = 0; $i < $n; $i++) { $s[] = g($i); } return $s; }
+    /// function u($n) { for ($i = 0; $i < $n; $i++) { g($i); q($i); } return $i; }
+    /// echo implode(",", k(7)), " ", u(9), " ", implode(",", array_map('q', range(1, 4))), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// b,bb,bbb,b,bb,bbb,b 9 2,4,6,8
+    /// ```
     fn returned(&mut self, id: OpId, line: &Line) -> Result<Out, Abort> {
         let Imm::Leave { value, .. } = line.imm else {
             return Err(mismatch("a leave in place with no value named"));
         };
-        let (zval, at, moved) = match (value, line.op1) {
+        let (zval, at, out): (_, _, fn(Value, Value) -> Out) = match (value, line.op1) {
             (Returned::Scalar, Operand::Unused) => return Ok(Out::Scalar(Scalar::Null)),
             (Returned::Scalar, operand) => return Ok(Out::Scalar(self.scalar(id, operand)?)),
             (Returned::Constant(address), _) => {
                 let address = i64::try_from(address)
                     .map_err(|_| mismatch("a constant past a 64-bit address"))?;
-                (self.b.ins().iconst(I64, address), 0, false)
+                (self.b.ins().iconst(I64, address), 0, Out::Copied)
             }
             (Returned::Moved, Operand::Value(value)) => {
                 let (room, at) = self.place(self.value(value)?.slot)?;
-                (room, at, true)
+                (room, at, Out::Moved)
             }
             (Returned::Moved, _) => return Err(mismatch("a temporary moved from no slot")),
+            (Returned::Shared, Operand::Value(value)) => {
+                let (room, at) = self.place(self.value(value)?.slot)?;
+                let held = self.b.ins().iadd_imm_s(room, i64::from(at));
+                (self.deref(held), 0, Out::Shared)
+            }
+            (Returned::Shared, _) => return Err(mismatch("a variable shared from no slot")),
         };
         let word = self.b.ins().load(I64, trusted(), zval, at);
         let info = self.b.ins().load(I32, trusted(), zval, at + super::TYPE_AT);
-        Ok(if moved {
-            Out::Moved(word, info)
-        } else {
-            Out::Copied(word, info)
-        })
+        Ok(out(word, info))
     }
 
     /// What the header of the frame in `room`, which leaves to `caller`,
@@ -1742,7 +1807,9 @@ impl Emit<'_> {
                 let info = self.b.ins().stack_load(I64, I32, slot, super::TYPE_AT);
                 (word, info)
             }
-            Out::Copied(word, info) | Out::Moved(word, info) => (word, info),
+            Out::Copied(word, info) | Out::Moved(word, info) | Out::Shared(word, info) => {
+                (word, info)
+            }
         };
         let [room, opline] = self.served(line)?;
         let left = self.b.ins().stack_addr(I64, slot, 0);
@@ -1759,6 +1826,11 @@ impl Emit<'_> {
         self.b.ins().brif(not, other, &[], returned_block, &[]);
         self.b.switch_to_block(returned_block);
         self.b.seal_block(returned_block);
+        // The variable keeps what it shares, the frame not yet given up,
+        // which the serving pops once it is over.
+        if let Out::Shared(word, info) = returned {
+            self.addref(word, info)?;
+        }
         // The temporary handed its value over, as the handler takes it.
         if let (Out::Moved(..), Operand::Value(value)) = (returned, line.op1) {
             let (room, at) = self.place(self.value(value)?.slot)?;

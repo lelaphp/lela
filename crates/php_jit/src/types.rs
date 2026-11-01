@@ -595,6 +595,11 @@ pub(crate) enum Returned {
     /// What a temporary holds, moved whole with its owner
     /// (`ZVAL_COPY_VALUE`), given up where the caller reads no return.
     Moved,
+    /// What a variable holds, read through the reference it holds where
+    /// it holds one (`ZVAL_DEREF`), and copied with an owner more where
+    /// it is counted (`ZVAL_COPY`) before the frame's variables are given
+    /// up; nothing where the caller reads no return.
+    Shared,
 }
 
 /// An operand as the op reads it.

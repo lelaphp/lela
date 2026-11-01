@@ -472,6 +472,7 @@ fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
         Returned::Scalar => write!(text, " in-place")?,
         Returned::Constant(_) => write!(text, " in-place constant")?,
         Returned::Moved => write!(text, " in-place moved")?,
+        Returned::Shared => write!(text, " in-place shared")?,
     }
     // The variables a leave frees, `zend_jit_free_cv`'s.
     match owners {

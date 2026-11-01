@@ -606,7 +606,10 @@ impl<'a> Builder<'a> {
     /// `Z/ext/opcache/jit/zend_jit_trace.c:6532-6556`). Here only where its
     /// frame leaves in place and its value, held as the opline's guard
     /// holds it ([`Builder::guard_use`]), is a scalar; otherwise the
-    /// interpreter serves it, through the trace's end.
+    /// interpreter serves it, through the trace's end. A variable the
+    /// recording saw holding a reference to a scalar is held by no guard
+    /// and copied through the reference ([`Returned::Shared`]) where the
+    /// trace knows it set, as the opline's form reads it.
     fn returns_in_place(&self, last: &Event) -> Result<bool, Abort> {
         let Event::Op {
             func, opline, op1, ..
@@ -625,18 +628,23 @@ impl<'a> Builder<'a> {
         {
             return Ok(false);
         }
-        let scalar = match (op.op1_type, op1) {
-            (OperandKind::Unused, _) => true,
-            (OperandKind::Const, _) => constant_types(constant(code, op.op1), code).scalar(),
-            (_, Some(sample)) if !sample.indirect => Types::of_tag(sample.kind).scalar(),
-            (kind, _) => slot_of(frame, kind, op.op1).is_some_and(|slot| {
-                let held = self.slots[usize::from(frame.0)].get(slot.var as usize);
-                match held {
+        let held = |kind| {
+            slot_of(frame, kind, op.op1).map(|slot| {
+                match self.slots[usize::from(frame.0)].get(slot.var as usize) {
                     Some(Some(value)) => self.val(*value).types,
                     _ => self.entry_types(slot),
                 }
-                .scalar()
-            }),
+            })
+        };
+        let scalar = match (op.op1_type, op1) {
+            (OperandKind::Unused, _) => true,
+            (OperandKind::Const, _) => constant_types(constant(code, op.op1), code).scalar(),
+            (OperandKind::Cv, Some(sample)) if Read::sampled(*sample) == Read::Through => {
+                Types::of_tag(sample.kind).scalar()
+                    && held(OperandKind::Cv).is_some_and(|types| !types.meets(Types::UNDEF))
+            }
+            (_, Some(sample)) if !sample.indirect => Types::of_tag(sample.kind).scalar(),
+            (kind, _) => held(kind).is_some_and(Types::scalar),
         };
         Ok(scalar)
     }
@@ -4901,8 +4909,13 @@ fn iterated(op: &Opline, t1: Types, read1: Read, branch: Option<bool>) -> bool {
 
 /// What a `RETURN` of `code` hands its caller where it leaves in place:
 /// a constant no reference counts, copied as it is; a temporary that is
-/// no reference, moved; a scalar otherwise, which the form holds it to
-/// (`zend_jit_return`, `Z/ext/opcache/jit/zend_jit_ir.c:11265-11400`).
+/// no reference, moved; a variable that may hold a reference, which no
+/// guard held (php's trace SSA reads it `IS_UNKNOWN`), copied through it
+/// with an owner more, where it is never unset, as php serves the
+/// `RETURN` of a value that may be unset through its handler; a scalar
+/// otherwise, which the form holds it to (`zend_jit_return`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:11265-11400`, and its caller,
+/// `Z/ext/opcache/jit/zend_jit_trace.c:5580-5607`).
 fn returned(op: &Opline, code: &OpArray, t1: Types) -> Returned {
     match op.op1_type {
         OperandKind::Const if !t1.scalar() => code
@@ -4914,6 +4927,7 @@ fn returned(op: &Opline, code: &OpArray, t1: Types) -> Returned {
             }),
         OperandKind::Tmp if !t1.scalar() => Returned::Moved,
         OperandKind::Var if !t1.scalar() && !t1.meets(Types::REF) => Returned::Moved,
+        OperandKind::Cv if t1.meets(Types::REF) && !t1.meets(Types::UNDEF) => Returned::Shared,
         _ => Returned::Scalar,
     }
 }
