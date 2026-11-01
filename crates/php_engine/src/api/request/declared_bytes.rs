@@ -2440,8 +2440,8 @@ impl Walk<'_> {
     }
 
     /// One op array laid into `holder`: [`init_op_array`], the op array
-    /// that declares it grown to where it `stood`, what it declares, and
-    /// [`compiled`].
+    /// that declares it grown to where it `stood` ([`begun`]), what it
+    /// declares, and [`compiled`].
     fn body(
         &mut self,
         req: &mut Request,
@@ -2452,9 +2452,7 @@ impl Walk<'_> {
     ) -> Result<(), Thrown> {
         let mut blocks = Blocks::default();
         let made = init_op_array(req, &mut blocks, code, declared).and_then(|mut growing| {
-            if let Some((declarer, grown)) = stood {
-                declarer.to(req, grown)?;
-            }
+            begun(req, code, declared, stood, &mut growing)?;
             self.nested(req, code, Some(&mut growing))?;
             compiled(req, &mut blocks, code, growing)
         });
@@ -2468,6 +2466,68 @@ impl Walk<'_> {
         }
         made
     }
+}
+
+/// What stands between an op array's [`init_op_array`] and its body:
+/// the op array declaring it grown to where it `stood`, and, for an
+/// arrow function whose body reads a variable, `find_implicit_binds`'
+/// `info.uses` (`Z/Zend/zend_compile.c:8151`), sized for its parameters
+/// and laid at the first name it adds. The table stands over the
+/// declarer's `BIND_LEXICAL`s (`compile_implicit_lexical_binds`,
+/// `:8492`) and over the arrow function's parameters and binds, its
+/// variables and its defaults' constants grown to hold them
+/// (`zend_compile_params`, `zend_compile_implicit_closure_uses`,
+/// `:8562`), and is given back before its body
+/// (`zend_hash_destroy(&info.uses)`, `:8563`):
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/w3837-' . getmypid() . '.php';
+/// foreach (['$f = fn () => $b; ', 'function f($a) { return fn () => $a; } ', '$f = fn ($a) => $a; ', '$f = fn ($a = 5) => $b; '] as $code) {
+///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
+///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
+///     [$usage, $peak] = explode(' ', trim($fresh));
+///     echo $peak - $usage, "\n";
+/// }
+/// unlink($f);
+/// ```
+/// ```expect process
+/// 36568
+/// 39376
+/// 37024
+/// 36776
+/// ```
+fn begun(
+    req: &mut Request,
+    code: &OpArray,
+    declared: Option<(&FunctionDecl, bool)>,
+    stood: Option<(&mut Growing, Grown)>,
+    growing: &mut Growing,
+) -> Result<(), Thrown> {
+    let parameters = declared.map_or(&[][..], |(decl, _)| decl.parameters.as_slice());
+    let mut uses = Blocks::default();
+    if code.implicit_uses > 0 {
+        let size = u32::try_from(parameters.len()).unwrap_or(u32::MAX);
+        uses.embedded.push(php_heap::EmbeddedArr::new(size));
+    }
+    let mut made = match uses.embedded.first() {
+        Some(table) => add_rows(req, table.arr(), code.implicit_uses as usize),
+        None => Ok(()),
+    };
+    if let (Ok(()), Some((declarer, grown))) = (&made, stood) {
+        made = declarer.to(req, grown);
+    }
+    if made.is_ok() && !uses.is_empty() {
+        let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let defaults = parameters.iter().filter(|p| p.default.expr().is_some());
+        let prologue = Grown {
+            constants: count(defaults.count()),
+            vars: count(parameters.len() + code.bound_vars.len()),
+            ..growing.grown
+        };
+        made = growing.to(req, prologue);
+    }
+    uses.free(req);
+    made
 }
 
 /// One table of a linked record.
