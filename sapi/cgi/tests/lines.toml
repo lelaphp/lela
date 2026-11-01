@@ -330,6 +330,20 @@ stop = "SIGTERM"
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
 
+# A `-b` port is read into `fcgi_listen`'s `short` (`Z/main/fastcgi.c:660`,
+# #3867), and `65536`'s low 16 bits are 0, which is no port: the whole
+# address names a Unix socket in the directory the process starts in, which
+# serves.
+[[line]]
+name = "fastcgi-a-port-whose-low-16-bits-are-0-names-a-unix-socket"
+args = ["-n", "-b", "127.0.0.1:65536"]
+files = { "t.php" = "<?php echo \"served\\n\";" }
+[line.serve]
+listen = "{dir}/127.0.0.1:65536"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
+
 # What php displays while it starts goes to C's `stdout`, an `fwrite`
 # (`php_output_direct`, `php_output_stdout`), fully buffered where stdout is
 # a pipe, while the head and the body go out past it with `write(2)`

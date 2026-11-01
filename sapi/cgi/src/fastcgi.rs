@@ -100,29 +100,26 @@ impl Drop for Listening {
 /// is unlinked before the socket is made, as php's `unlink(path)` is
 /// (`Z/main/fastcgi.c:744`), so a file left there, a socket a killed
 /// php-cgi left among them, is replaced by the one bound; a step of [`bound`] that
-/// fails is said with its own line.
+/// fails is said with its own line. The `port` is [`short_port`]'s, so
+/// one whose low 16 bits are 0, `65536` among them, names no `port` and
+/// the whole address is a Unix socket's path.
 fn listen(path: &[u8], backlog: i32) -> Option<Listening> {
     use nix::sys::socket::{AddressFamily, Backlog, SockaddrIn, UnixAddr};
     let tcp = match path.iter().position(|b| *b == b':') {
-        Some(at) => {
-            let port = (C_NUMBER.atoi)(&path[at + 1..]);
-            (port != 0).then(|| (&path[..at], port))
-        }
+        Some(at) => short_port(&path[at + 1..]).map(|port| (&path[..at], port)),
         None if !path.is_empty() && path.iter().all(u8::is_ascii_digit) => {
-            let port = (C_NUMBER.atoi)(path);
-            (port != 0).then_some((&b""[..], port))
+            short_port(path).map(|port| (&b""[..], port))
         }
         None => None,
     };
     let backlog = Backlog::new(backlog).ok()?;
     if let Some((host, port)) = tcp {
-        let port = u16::try_from(port).ok()?;
         let ip = if host.is_empty() || host.starts_with(b"*") {
             std::net::Ipv4Addr::UNSPECIFIED
         } else {
             resolve(host)?
         };
-        let address = SockaddrIn::from(std::net::SocketAddrV4::new(ip, port));
+        let address = SockaddrIn::from(std::net::SocketAddrV4::new(ip, port.get()));
         let fd = bound(AddressFamily::Inet, &address, backlog)?;
         crate::ffi::shutdown_on_term();
         return Some(Listening::Tcp(TcpListener::from(fd)));
@@ -141,6 +138,16 @@ fn listen(path: &[u8], backlog: i32) -> Option<Listening> {
     std::fs::set_permissions(&name, std::os::unix::fs::PermissionsExt::from_mode(0o777)).ok();
     crate::ffi::shutdown_on_term();
     Some(Listening::Unix(UnixListener::from(fd)))
+}
+
+/// `fcgi_listen`'s `short port = atoi(s+1)` (`Z/main/fastcgi.c:660`):
+/// `atoi`'s value kept to its low 16 bits, as the `short` keeps it and
+/// `htons` binds it, and `None` where those are 0, as `port != 0` judges
+/// the `short`. So `70000` binds 4464 and `-1` binds 65535, and `65536`
+/// is no `port` at all.
+fn short_port(digits: &[u8]) -> Option<std::num::NonZeroU16> {
+    let [low, high, ..] = (C_NUMBER.atoi)(digits).to_le_bytes();
+    std::num::NonZeroU16::new(u16::from_le_bytes([low, high]))
 }
 
 /// `fcgi_listen`'s `socket`, `setsockopt(SO_REUSEADDR)`, `bind` and
