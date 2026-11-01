@@ -10,7 +10,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{call_method, instantiate, lookup_class};
 use php_ext::coerce::{coerce_param, numeric_string, to_string};
 use php_ext::decl::Type;
-use php_ext::raising::{Thrown, fatal, throw_chained, throw_error};
+use php_ext::raising::{Thrown, fatal, pending, throw_chained, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
 use php_ext_date::{TzKind, ZoneParts};
@@ -92,6 +92,9 @@ pub(crate) fn is_a(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<
 /// `intl_datetime_decompose`: a `DateTimeInterface`'s instant in
 /// milliseconds, through its own `getTimestamp()`, and its zone where
 /// `want_zone`; none where either fails, with the error set on `outside`.
+/// Where a throwable stands pending, `zend_call_function` calls nothing
+/// and leaves the return `IS_UNDEF`, and the throwable is the `Err`, as
+/// php's `FAILURE` leaves it in `EG(exception)`.
 pub(crate) fn datetime_decompose(
     req: &mut Request,
     object: PhpObject,
@@ -103,6 +106,11 @@ pub(crate) fn datetime_decompose(
     }
     let class = String::from_utf8_lossy(&Std.get_class_name(req, object)).into_owned();
     let stamp = call_method(req, &object, b"getTimestamp", &[])?;
+    // `if (Z_TYPE(retval) == IS_UNDEF) return FAILURE;`
+    if let Err(thrown) = pending(req) {
+        stamp.give_up(req);
+        return Err(thrown);
+    }
     let Some(seconds) = stamp.as_int() else {
         stamp.give_up(req);
         let message = format!("{class}::getTimestamp() did not return an int");
