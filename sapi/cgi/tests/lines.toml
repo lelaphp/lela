@@ -316,6 +316,20 @@ args = ["-n", "-b", "{dir}/a-socket-path-far-past-what-sun-path-holds-xxxxxxxxxx
 [[line.then]]
 args = ["-n", "-b", "/tmp/a-path-of-exactly-sun-path-s-length-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
 
+# A Unix socket's path is unlinked before the socket is made (`unlink(path)`,
+# `Z/main/fastcgi.c:744`, #3866): a file left at the path, as a run that was
+# killed leaves its socket, is replaced by the socket bound, which serves, and
+# no regular file stands at the path after.
+[[line]]
+name = "fastcgi-a-file-at-the-unix-socket-path-is-replaced"
+args = ["-n", "-b", "{dir}/php.sock"]
+files = { "php.sock" = "stale\n", "t.php" = "<?php echo \"served\\n\";" }
+[line.serve]
+listen = "{dir}/php.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
+
 # What php displays while it starts goes to C's `stdout`, an `fwrite`
 # (`php_output_direct`, `php_output_stdout`), fully buffered where stdout is
 # a pipe, while the head and the body go out past it with `write(2)`
