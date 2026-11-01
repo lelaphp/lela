@@ -48,6 +48,7 @@
 //! paired rig is honest about it.
 
 pub(crate) mod kernels;
+mod pinned;
 pub(crate) mod row;
 mod series;
 pub(crate) mod spent;

@@ -12,6 +12,13 @@
 #   #3741) is unchanged. The job's summary is both binaries' md5 and the
 #   tables the pin would carry, which it stashes; landing them in the pin
 #   is #3385's, through `xtask steer`.
+# - The hand-off is target/: the runner keeps it between the two jobs, and
+#   the recipe lands the build at target/oracle/linux-x86_64/main/, `php`
+#   beside `pin.toml`, its table. On Linux `g4-code`, `oracle-jit` and
+#   `oracle-jit-aa` take that `php` as the pinned one, held to the md5 its
+#   `pin.toml` records, and refuse, naming the path and the md5, where it
+#   is absent or another (#3799). A run with `baseline` off measures the
+#   build an earlier run left there.
 # - `bench` runs `xtask bench --machine dedicated`: every seat held, so no
 #   other instrument builds there while it measures, and each bar measured
 #   only below a 1-minute load of 2, waited for, its reading naming the
@@ -148,6 +155,14 @@ jobs:
       # The platform libraries the arms' builds link, from the one list
       # the action reads (design §7.2; #1300).
       - uses: ./.github/actions/platform-libraries
+      # What the bench takes as the pinned php, said before it runs; the
+      # bench holds it to the md5 and refuses the bars that run it where
+      # it is absent or another, so this step fails nothing.
+      - name: the php built from the pinned tag, as the bench takes it
+        run: |
+          out=target/oracle/linux-x86_64/main
+          md5sum "$out/php" 2>&1 || true
+          cat "$out/pin.toml" 2>&1 || true
       - name: the bench, on the dedicated machine
         run: |
           ask=(--machine dedicated --reps "$REPS")

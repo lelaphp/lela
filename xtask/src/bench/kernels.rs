@@ -32,7 +32,7 @@ use anyhow::{Context, Result, bail};
 use super::spent::Peak;
 use super::{
     Arm, Arms, Counted, Declared, Environment, Held, PRODUCTION, Sample, Side, Sides, Spawned,
-    Unit, ran, second,
+    Unit, pinned, ran, second,
 };
 use crate::carried::BUNDLE;
 use crate::manifest::Manifest;
@@ -235,18 +235,12 @@ fn tracing(
     })
 }
 
-/// G3's denominator and its control (#2948): the pinned php's tier. A
-/// machine without the pinned php measures neither, each a skip that says
-/// so.
+/// G3's denominator and its control (#2948): the pinned php's tier, as
+/// [`pinned::php`] finds it on this machine. A Mac without the keg
+/// measures neither, each a skip that says so.
 pub(crate) fn oracle(root: &Path) -> [Declared; 2] {
     let bar = ("oracle-jit", "the pinned php");
-    tracing(root, bar, (PROGRAMS, Read::Time), |_, pin| {
-        if let Some(why) = pin.oracle.absent() {
-            return Ok(Err(why));
-        }
-        pin.oracle().asserted()?;
-        Ok(Ok(pin.oracle.path.clone()))
-    })
+    tracing(root, bar, (PROGRAMS, Read::Time), pinned::php)
 }
 
 /// G2 and its control (#2965): the tier of the engine built with its
@@ -476,10 +470,10 @@ pub(crate) fn g4(root: &Path) -> [Declared; 3] {
         about,
         Held::Series,
         |root, pin| {
-            if let Some(why) = pin.oracle.absent() {
-                return Ok(Err(why));
-            }
-            pin.oracle().asserted()?;
+            let pinned = match pinned::php(root, pin)? {
+                Ok(pinned) => pinned,
+                Err(why) => return Ok(Err(why)),
+            };
             let php = |name: &str, binary, debug: u32| Php {
                 name: name.to_owned(),
                 binary,
@@ -490,10 +484,7 @@ pub(crate) fn g4(root: &Path) -> [Declared; 3] {
             // Compiled where it is recorded, as php compiles, so the end's
             // count and the request's name the same traces.
             engine.ini.push("jit.compile=inline".to_owned());
-            Ok(Ok([
-                engine,
-                php("php", pin.oracle.path.clone(), SIZE | LISTED),
-            ]))
+            Ok(Ok([engine, php("php", pinned, SIZE | LISTED)]))
         },
     );
     [rss, rss_aa, code]
