@@ -10,10 +10,11 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::thread::ThreadId;
 
 use php_compile::{Reentered, StackLimit};
 
-use super::{Forked, Periodic, Receiving, Reentry, Request};
+use super::{CallStack, Forked, Periodic, Receiving, Reentry, Request};
 use crate::api::abi::{Beneath, chain};
 use crate::tier::TraceNum;
 
@@ -216,6 +217,11 @@ pub(super) struct LimitsState {
     /// (`zend_call_stack_init`) from the two `zend.*_stack_size`
     /// entries; what the compiler is held to (design §5.6).
     stack_limit: StackLimit,
+    /// The thread [`LimitsState::stack_limit`] was worked out on: the
+    /// request's own from its start, and for the length of a serve on a
+    /// thread a callback C made took the lent request on, that thread
+    /// ([`Request::stack_for_this_thread`]); none before the start.
+    stack_thread: Option<ThreadId>,
     /// The stack the request's first scope of the loop was measured to
     /// take ([`Request::note_scope_cost`]), none before it.
     scope_cost: Option<std::num::NonZeroUsize>,
@@ -249,6 +255,7 @@ impl LimitsState {
             deadlines: crate::interrupt::Deadlines::new(timer, &interrupt),
             interrupt,
             stack_limit: StackLimit::UNCHECKED,
+            stack_thread: None,
             scope_cost: None,
             trace_num: TraceNum::NONE,
             reentry: None,
@@ -262,6 +269,47 @@ impl Request {
     /// `zend.*_stack_size` entries.
     pub(super) fn start_stack_limit(&mut self) {
         self.limits.stack_limit = self.shared.stack_limit();
+        self.limits.stack_thread = Some(std::thread::current().id());
+    }
+
+    /// A serve on a thread C called back from, which took the request
+    /// lent to it ([`Limits::blocking`]): the stack limit
+    /// `zend_call_stack_init` works out on this thread stands in for the
+    /// request's own until [`Self::stack_given_back`], as a fiber's
+    /// stands in for its length ([`Self::swap_stack_limit`]), so a
+    /// recursion in the callback is refused at the serving thread's own
+    /// depth, the row `trace:ffi-callback-thread-stack-limit`.
+    ///
+    /// None on the thread the limit was worked out on, the request's own
+    /// or one a serve outside this one already moved it to, and where no
+    /// callback holds the request: a request no callback has taken asks
+    /// for no thread.
+    pub(crate) fn stack_for_this_thread(&mut self) -> Option<SetAside> {
+        if !self.limits.reentry.as_ref()?.held() {
+            return None;
+        }
+        let here = std::thread::current().id();
+        if self.limits.stack_thread == Some(here) {
+            return None;
+        }
+        let limit = serving_limit(php_heap::call_stack_bounds(), || self.shared.stack_limit());
+        Some(SetAside {
+            limit: std::mem::replace(&mut self.limits.stack_limit, limit),
+            thread: self.limits.stack_thread.replace(here),
+        })
+    }
+
+    /// The serve [`Self::stack_for_this_thread`] began is over: the limit
+    /// and its thread stand where they stood before it.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "taking what was set aside ends it, so it is put back once"
+    )]
+    pub(crate) fn stack_given_back(&mut self, aside: Option<SetAside>) {
+        if let Some(SetAside { limit, thread }) = aside {
+            self.limits.stack_limit = limit;
+            self.limits.stack_thread = thread;
+        }
     }
 
     /// The stack limit and `other`'s change places, as the execution
@@ -412,6 +460,30 @@ impl Request {
     /// armed for; zero, php's CLI default, arms none.
     pub(crate) fn max_execution_time(&self) -> i64 {
         i64::from(self.ini_number(b"max_execution_time", 0))
+    }
+}
+
+/// The stack limit and its thread as they stood before a serve on a
+/// thread C called back from ([`Request::stack_for_this_thread`]), which
+/// [`Request::stack_given_back`] puts back.
+#[derive(Debug)]
+#[must_use = "the request's own limit is put back when the serve is over"]
+pub(crate) struct SetAside {
+    limit: StackLimit,
+    thread: Option<ThreadId>,
+}
+
+/// `zend_call_stack_init` on a thread C called back from, `init`, where
+/// the platform describes the thread (`bounds`). Where it cannot, the
+/// call is refused. The limit is `zend.max_allowed_stack_size` of one
+/// byte, php's own arm for a size given, which stands above every
+/// frame of the serve: the callable is refused at its entry with php's
+/// stack-limit `Error`, naming 0 bytes, as php refuses every callback
+/// from a thread below the request's on Linux.
+fn serving_limit(bounds: Option<CallStack>, init: impl FnOnce() -> StackLimit) -> StackLimit {
+    match bounds {
+        Some(_) => init(),
+        None => StackLimit::init(1, 0),
     }
 }
 
@@ -632,8 +704,10 @@ impl<'r> Limits<&'r mut Request> {
     }
 
     /// `wait` called with the request lent to a callback C makes from
-    /// another thread meanwhile, which takes it, served on that thread,
-    /// and gives it back before this returns (#1640): what a call into C
+    /// another thread meanwhile, which takes it, served on that thread
+    /// and held to that thread's stack limit
+    /// ([`Request::stack_for_this_thread`]), and gives it back before
+    /// this returns (#1640): what a call into C
     /// and an engine native that blocks (`sleep`, `usleep`,
     /// `stream_select`, a blocking read, a child's wait, `flock`,
     /// `stream_socket_accept`, and
@@ -657,5 +731,34 @@ impl<'r> Limits<&'r mut Request> {
         let waited = wait();
         reentry.reclaim(lending);
         waited
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A thread the platform cannot describe is refused, not measured
+    /// from the calling frame: the limit stands above every frame below
+    /// the one that worked it out, at the loop's entry as at a native's
+    /// walk, and names 0 bytes; `init` is not asked. A thread it can
+    /// describe gets `init`'s limit, which this frame stands above.
+    #[test]
+    fn a_thread_the_platform_cannot_describe_is_refused() {
+        let mut asked = false;
+        let refused = serving_limit(None, || {
+            asked = true;
+            StackLimit::UNCHECKED
+        });
+        assert!(!asked);
+        assert!(refused.overflowed());
+        assert!(refused.entry_overflowed());
+        assert_eq!(refused.max_stack_size(), 0);
+        if let Some(bounds) = php_heap::call_stack_bounds() {
+            let init = || StackLimit::init(0, 0);
+            let served = serving_limit(Some(bounds), init);
+            assert_eq!(served, init());
+            assert!(!served.overflowed());
+        }
     }
 }

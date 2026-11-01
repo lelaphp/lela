@@ -11,17 +11,21 @@
 //! test's own, `hold_unlent`, which blocks without lending and needs no
 //! server to wait on.
 //!
-//! A callback served on C's thread is held to the stack limit the
-//! request took on its own, as php holds it to `EG(stack_limit)`, so
-//! where C's thread stands in memory decides whether it is served: one
-//! below the request's thread is past the limit and refused, as every
-//! thread started later is on Linux, which maps each thread's stack
-//! below the ones before it, and one above is served, as every later
-//! thread is on macOS (#3615). So each test serves the request on one of
-//! two threads of its own and gives C the other, whichever stands where
-//! the test asks ([`Stands`]), rather than the order the platform maps
-//! them in. C is handed the callback with a pointer to the channel C's
-//! thread waits on, as a C library takes its user data.
+//! php holds a callback served on C's thread to `EG(stack_limit)`, the
+//! limit the request took on its own thread, so where C's thread stands
+//! in memory decides what php does: one below the request's thread is
+//! past the limit and refused, as every thread started later is on
+//! Linux, which maps each thread's stack below the ones before it, and
+//! one above is checked against nothing, as every later thread is on
+//! macOS (#3615). This engine holds the serve to the limit
+//! `zend_call_stack_init` works out on C's thread, the row
+//! `trace:ffi-callback-thread-stack-limit` (#3697, #3742), so it is
+//! served wherever the thread stands and refused at that thread's own
+//! depth. Each test serves the request on a thread of its own and gives
+//! C one started before it or after it, whichever stands where the test
+//! asks ([`Stands`]), rather than the order the platform maps them in.
+//! C is handed the callback with a pointer to the channel C's thread
+//! waits on, as a C library takes its user data.
 
 #![allow(
     clippy::disallowed_methods,
@@ -88,38 +92,49 @@ enum Stands {
 /// One job a [`thread`] does.
 type Job = Box<dyn FnOnce() + Send>;
 
-/// A thread on a stack of its own, which does the one job it is handed:
-/// where a local of its first frame stands, and where to hand the job.
-fn thread() -> (usize, Sender<Job>) {
+/// A thread on a stack of its own, of `size` bytes where one is named,
+/// which does the one job it is handed: where a local of its first frame
+/// stands, and where to hand the job. A thread never handed one ends.
+fn thread(size: Option<usize>) -> (usize, Sender<Job>) {
     let (stands, at) = mpsc::channel();
     let (hand, job) = mpsc::channel::<Job>();
-    std::thread::spawn(move || {
+    let builder = match size {
+        Some(size) => std::thread::Builder::new().stack_size(size),
+        None => std::thread::Builder::new(),
+    };
+    let spawned = builder.spawn(move || {
         let local = 0_u8;
         stands.send(std::ptr::from_ref(&local).addr()).ok();
         if let Ok(job) = job.recv() {
             job();
         }
     });
+    assert!(spawned.is_ok(), "the thread did not spawn");
     let Ok(at) = at.recv() else {
         panic!("the thread did not start");
     };
     (at, hand)
 }
 
-/// [`served_with`] C's thread above the request's, so the callback is
-/// served.
+/// [`served_with`] C's thread above the request's, as php serves it on
+/// either platform, at the platform's own size.
 fn served(name: &str, source: &str) -> (String, Option<String>) {
-    served_with(name, source, Stands::Above)
+    served_with(name, source, Stands::Above, None)
 }
 
 /// One request whose `$later` hands C a callback, served on a thread of
-/// its own with C's thread standing as `c` says, and what the callback
-/// returned to C once C's thread wrote it: `None` where the thread was
-/// still waiting ten seconds on. What it returned is written under a
-/// name of its own and renamed into place, so the poll never reads the
-/// file between its creation and its write, which a plain `fs::write`
-/// lets it read as `""` (#2699).
-fn served_with(name: &str, source: &str, c: Stands) -> (String, Option<String>) {
+/// its own with C's thread standing as `c` says, of `size` bytes where
+/// one is named, and what the callback returned to C once C's thread
+/// wrote it: `None` where the thread was still waiting ten seconds on.
+/// What it returned is written under a name of its own and renamed into
+/// place, so the poll never reads the file between its creation and its
+/// write, which a plain `fs::write` lets it read as `""` (#2699).
+fn served_with(
+    name: &str,
+    source: &str,
+    c: Stands,
+    size: Option<usize>,
+) -> (String, Option<String>) {
     let files = Files::new(&format!("ffi-threads-{name}"), &[]);
     let out = returned_to(name);
     assert_eq!(out.parent(), Some(files.path()));
@@ -131,11 +146,14 @@ fn served_with(name: &str, source: &str, c: Stands) -> (String, Option<String>) 
     let source = format!(
         "<?php\n$ffi = FFI::cdef('typedef int (*cb)(int); typedef void (*later)(cb, void *);');\n$later = fn ($f) => $ffi->cast('later', {at})($f, $ffi->cast('void *', {to}));\n{source}"
     );
-    let (one, two) = (thread(), thread());
-    let ((_, request), (_, c_thread)) = if (one.0 > two.0) == (c == Stands::Above) {
-        (two, one)
-    } else {
-        (one, two)
+    let before = thread(size);
+    let (stands, request) = thread(None);
+    let after = thread(size);
+    let Some((_, c_thread)) = [before, after]
+        .into_iter()
+        .find(|(at, _)| (*at > stands) == (c == Stands::Above))
+    else {
+        panic!("no thread started around the request's stands {c:?} it");
     };
     let file = out.clone();
     let calls: Job = Box::new(move || {
@@ -205,15 +223,15 @@ echo "slept\n";
 }
 
 /// The same sleep, with C's thread below the request's, as every thread
-/// a library starts stands on Linux: the callback's frames are past the
-/// stack limit the request took on its own thread, so the call is
-/// refused before the callable runs, php's "Maximum call stack size"
-/// error, and a throw out of a callback is php's fatal. php refuses it
-/// so on Linux (php 8.4.27 NTS in Docker, a library's thread calling
-/// back 100 ms into `usleep`: this text, 3 runs of 3, exit 255), and the
-/// pinned php on macOS, where the thread stands above, serves it (#3615).
+/// a library starts stands on Linux: php refuses the call there before
+/// the callable runs, its frames past the stack limit the request took
+/// on its own thread (php 8.4.27 NTS in Docker, 3 runs of 3, #3615), and
+/// the pinned php on macOS, where the thread stands above, serves it
+/// unchecked. This engine holds the serve to the limit worked out on C's
+/// thread, so it is served wherever the thread stands
+/// (`trace:ffi-callback-thread-stack-limit`, #3697).
 #[test]
-fn a_callback_from_a_thread_below_the_request_s_stack_limit_is_refused_as_in_php() {
+fn a_callback_from_a_thread_below_the_request_s_stack_is_served_at_that_thread_s_limit() {
     let (stdout, returned) = served_with(
         "below",
         r#"$t0 = hrtime(true);
@@ -225,27 +243,53 @@ usleep(1200000);
 echo "slept\n";
 "#,
         Stands::Below,
+        None,
+    );
+    assert_eq!(stdout, "called 21 inside the sleep\nslept\n");
+    assert_eq!(returned.as_deref(), Some("42"));
+}
+
+/// `serialize()` of a nest deeper than the stack, in a callback served on
+/// C's thread, below the request's, of a size of this test's choosing:
+/// refused with php's stack-limit `Error` at that thread's own depth,
+/// which the callable catches and returns from. The size the sentence
+/// names is the thread's less `zend.reserved_stack_size`, which is
+/// 32 KiB on macOS and 48 KiB elsewhere, and less a guard page the
+/// platform may deduct.
+#[test]
+fn a_deep_recursion_in_a_callback_on_a_library_s_thread_is_refused_at_that_thread_s_depth() {
+    const SIZE: usize = 4 << 20;
+    let (stdout, returned) = served_with(
+        "deep",
+        r#"$later(function ($x) {
+    $a = []; for ($i = 0; $i < 100000; $i++) { $a = [$a]; }
+    try { serialize($a); echo "whole\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    return $x * 2;
+});
+usleep(1200000);
+echo "slept\n";
+"#,
+        Stands::Below,
+        Some(SIZE),
     );
     let Some((size, after)) = stdout
-        .strip_prefix("\nWarning: Uncaught Error: Maximum call stack size of ")
+        .strip_prefix("Maximum call stack size of ")
         .and_then(|rest| rest.split_once(' '))
     else {
         panic!("{stdout}");
     };
-    assert!(size.parse::<u64>().is_ok(), "{stdout}");
+    let size: usize = size.parse().unwrap_or(0);
+    assert!(
+        (SIZE - (256 << 10)..=SIZE).contains(&size),
+        "{size} is not the thread's {SIZE} less its reserve: {stdout}"
+    );
     assert_eq!(
         after,
-        "bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion? in Standard input code:5\n\
-         Stack trace:\n\
-         #0 [internal function]: {closure:Standard input code:5}(21)\n\
-         #1 Standard input code(9): usleep(1200000)\n\
-         #2 {main}\n  thrown in Standard input code on line 5\n\n\
-         Fatal error: Throwing from FFI callbacks is not allowed in Standard input code on line 9\n",
+        "bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?\n\
+         slept\n",
         "{stdout}"
     );
-    // What C reads after a fatal php ends the process in is not php's to
-    // say, which longjmps out of the callback; C's thread was answered.
-    assert!(returned.is_some(), "{stdout}");
+    assert_eq!(returned.as_deref(), Some("42"), "{stdout}");
 }
 
 /// The thread calls back while the request waits for a child in
