@@ -84,6 +84,9 @@ const ARG_INFO: usize = 32;
 const LIVE_RANGE: usize = 12;
 /// `sizeof(zend_try_catch_element)`.
 const TRY_CATCH: usize = 16;
+/// `sizeof(zend_brk_cont_element)`, four `int`s and a `bool`
+/// (`Z/Zend/zend_compile.h:160`).
+const BRK_CONT: usize = 20;
 /// `sizeof(uint32_t)`, the op array's refcount.
 const REFCOUNT: usize = 4;
 /// The size `zend_initialize_class_data` gives each of a class's tables.
@@ -897,6 +900,10 @@ struct Growing {
     /// `op_array->dynamic_func_defs`: one pointer more for each function
     /// `zend_add_dynamic_func_def` adds (`:8336`).
     defs: Option<Emalloc>,
+    /// `CG(context).brk_cont_array`: one `zend_brk_cont_element` more
+    /// for each loop and `switch` `zend_begin_loop` begins
+    /// (`get_next_brk_cont_element`, `:171`).
+    loops: Option<Emalloc>,
     grown: Grown,
 }
 
@@ -923,11 +930,15 @@ impl Growing {
         for size in steps(self.grown.dynamic_func_defs, to.dynamic_func_defs, 1) {
             regrow(req, &mut self.defs, size * POINTER)?;
         }
+        for size in steps(self.grown.loops, to.loops, 1) {
+            regrow(req, &mut self.loops, size * BRK_CONT)?;
+        }
         self.grown = Grown {
             oplines: self.grown.oplines.max(to.oplines),
             constants: self.grown.constants.max(to.constants),
             vars: self.grown.vars.max(to.vars),
             dynamic_func_defs: self.grown.dynamic_func_defs.max(to.dynamic_func_defs),
+            loops: self.grown.loops.max(to.loops),
         };
         Ok(())
     }
@@ -950,6 +961,7 @@ fn grown(code: &OpArray) -> Grown {
         constants: count(code.literals.len()),
         vars: count(code.vars.len()),
         dynamic_func_defs: count(code.dynamic_func_defs.len()),
+        loops: code.loops,
     }
 }
 
@@ -978,6 +990,7 @@ fn init_op_array(
         constants: None,
         names: None,
         defs: None,
+        loops: None,
         grown: Grown::default(),
     };
     if let Some((decl, method)) = declared {
@@ -1017,7 +1030,30 @@ fn init_op_array(
 /// reallocated to hold the constants after them, aligned to 16
 /// (`ZEND_MM_ALIGNED_SIZE_EX`, `:1117`), beside the constants until they
 /// are copied in and freed (`:1123`), and the live ranges
-/// `zend_calc_live_ranges` lays (`:1251`).
+/// `zend_calc_live_ranges` lays (`:1251`); and last its
+/// `CG(context).brk_cont_array`, an element for each loop and `switch`
+/// ([`Growing`]), which `pass_two` reads for each `BRK` and `CONT`
+/// (`zend_get_brk_cont_target`, `Z/Zend/zend_opcode.c:721`) and
+/// `zend_oparray_context_end` frees after it (`Z/Zend/zend_compile.c:355`).
+/// So a loop of the main op array stands under the `pass_two` of a
+/// closure written in it:
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/w3823-' . getmypid() . '.php';
+/// foreach (['', 'for (;;) { break; } ', 'foreach ([1] as $a) { for (;;) { switch ($a) { default: break 2; } } while (0) {} } ', 'for (;;) { $c = function () { while (0) {} do {} while (0); }; break; } '] as $code) {
+///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
+///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
+///     [$usage, $peak] = explode(' ', trim($fresh));
+///     echo $peak - $usage, "\n";
+/// }
+/// unlink($f);
+/// ```
+/// ```expect process
+/// 35312
+/// 35400
+/// 35440
+/// 36896
+/// ```
 fn compiled(
     req: &mut Request,
     blocks: &mut Blocks,
@@ -1057,6 +1093,9 @@ fn compiled(
     let live_ranges = code.live_ranges.len() * LIVE_RANGE;
     if live_ranges > 0 {
         blocks.emalloced.push(Emalloc::new(req, live_ranges)?);
+    }
+    if let Some(loops) = growing.loops {
+        loops.free(req);
     }
     Ok(())
 }

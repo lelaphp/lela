@@ -5967,6 +5967,7 @@ impl<'a> Emit<'a> {
             constants: count(self.constants.len()),
             vars: count(self.vars.len()),
             dynamic_func_defs: count(self.dynamic_func_defs.len()),
+            loops: count(self.loops.len()),
         };
         self.nested.push(Nested { declares, grown });
     }
@@ -6097,6 +6098,7 @@ impl<'a> Emit<'a> {
             nested: std::mem::take(&mut self.nested),
             bound_vars: std::mem::take(&mut self.static_vars),
             implicit_uses: 0,
+            loops: u32::try_from(self.loops.len()).unwrap_or(u32::MAX),
             no_receiver: self.fn_flags.is_static,
             strict_types: self.typing == Typing::Strict,
             return_mask: self.return_type.as_ref().map_or(0, Type::mask),
