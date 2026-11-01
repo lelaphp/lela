@@ -470,8 +470,8 @@ env = { REQUEST_METHOD = "GET", CONTENT_TYPE = "", CONTENT_LENGTH = "" }
 # oplines beside them, so the peak is that window's and the usage is the
 # main op array's blocks after it, its filename the string
 # `EG(included_files)` keeps. The second program declares a class and a
-# function before any statement, which php compiles at their place and the
-# window lays first (#3822). The protection here is long enough that the
+# function before any statement, which php compiles at their place, as the
+# window lays them (#3822). The protection here is long enough that the
 # file laid before the run is new to both binaries.
 [[line]]
 name = "a-get-of-a-program-php-cgi-compiles-without-persisting-it"
@@ -481,3 +481,20 @@ files = { "m.php" = "<?php echo memory_get_usage(), \" \", memory_get_peak_usage
 [[line.then]]
 args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/d.php" }
+
+# The declarations of such a program laid at their place among its
+# statements (#3822): php compiles a function where it stands, with the
+# variable and the constant the statement before it laid standing in the
+# main op array, and a closure inside a method while the method's oplines
+# stand, so the peak is the closure's `pass_two` beside the method's
+# 2048-byte oplines and the main op array's variables. The second program
+# declares a hooked property before the method, whose hook php compiles,
+# and whose written name it gives back, before the method.
+[[line]]
+name = "an-uncached-program-lays-each-declaration-at-its-place"
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/a.php" }
+files = { "a.php" = "<?php $abcdef = 1; function f() {} class D { function m() { return function () {}; } } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "h.php" = "<?php class C { public $p { get => 1; } function m() { return function () {}; } } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/h.php" }

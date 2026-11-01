@@ -38,7 +38,7 @@ use php_link::Row;
 use php_unit::decl::{
     Attribute, ClassDecl, ConstExpr, FunctionDecl, PropertyDecl, TraitAdaptation, Visibility,
 };
-use php_unit::{OpArray, Unit};
+use php_unit::{Declares, Grown, OpArray, Unit};
 
 use super::Request;
 use super::unit_strings::OpArrayStrings;
@@ -184,13 +184,15 @@ pub(super) struct Gone {
     pub(super) strings: OpArrayStrings,
 }
 
-/// What a unit declares, laid down: a function's and its methods' and
-/// hooks' blocks together, each class's apart, and each dynamic
-/// definition's apart with the op array that declares it.
+/// What a unit declares, laid down: the functions' blocks together, the
+/// methods' and hooks' together, each class's apart by its place in
+/// `Unit::classes`, and each dynamic definition's apart with the op
+/// array that declares it.
 #[derive(Default)]
 pub(super) struct Laid {
     tables: Blocks,
-    classes: Vec<ClassBlocks>,
+    members: Blocks,
+    classes: Vec<Option<ClassBlocks>>,
     dynamic: Vec<(Blocks, Declarer)>,
 }
 
@@ -198,7 +200,8 @@ impl Laid {
     /// Every block given back.
     pub(super) fn free(self, req: &mut Request) {
         self.tables.free(req);
-        for class in self.classes {
+        self.members.free(req);
+        for class in self.classes.into_iter().flatten() {
             class.into_blocks().free(req);
         }
         for (blocks, _) in self.dynamic {
@@ -214,7 +217,9 @@ impl Laid {
             .dynamic
             .iter_mut()
             .flat_map(|(blocks, _)| blocks.oplines.drain(..));
-        dynamic.chain(self.tables.oplines.drain(..)).collect()
+        (dynamic.chain(self.tables.oplines.drain(..)))
+            .chain(self.members.oplines.drain(..))
+            .collect()
     }
 }
 
@@ -703,7 +708,8 @@ impl Declared {
     /// holds it stands.
     pub(super) fn hold(&mut self, laid: Laid) {
         self.tables.take(laid.tables);
-        self.classes = laid.classes.into_iter().map(Some).collect();
+        self.tables.take(laid.members);
+        self.classes = laid.classes;
         for (at, (blocks, declarer)) in laid.dynamic.into_iter().enumerate() {
             if let Some(dynamic) = self.definition_laid(at) {
                 dynamic.blocks.take(blocks);
@@ -870,42 +876,111 @@ fn op_array(
     code: &OpArray,
     declared: Option<(&FunctionDecl, bool)>,
 ) -> Result<(), Thrown> {
-    let grown = init_op_array(req, blocks, code)?;
-    compiled(req, blocks, code, declared, grown)
+    let growing = init_op_array(req, blocks, code, declared)?;
+    compiled(req, blocks, code, growing)
 }
 
-/// `init_op_array`'s refcount and `INITIAL_OP_ARRAY_SIZE` oplines for
-/// `code` (`Z/Zend/zend_opcode.c:54`, `:57`), the oplines grown fourfold
-/// as `get_next_op` grows them while the compile fills them
-/// (`Z/Zend/zend_compile.c:157`), handed back for `pass_two`
-/// ([`compiled`]).
+/// An op array between its `init_op_array` and its `pass_two`, its
+/// tables grown as php's compile grows them while it is
+/// `CG(active_op_array)`.
+struct Growing {
+    /// `op_array->opcodes`: `INITIAL_OP_ARRAY_SIZE` oplines, four times
+    /// as many each time `get_next_op` fills them
+    /// (`Z/Zend/zend_compile.c:157`).
+    oplines: Option<Emalloc>,
+    /// `op_array->literals`: sixteen more each time `zend_add_literal`
+    /// fills them (`:597`).
+    constants: Option<Emalloc>,
+    /// `op_array->vars`: sixteen more names each time `lookup_cv` fills
+    /// them (`:556`).
+    names: Option<Emalloc>,
+    /// `op_array->dynamic_func_defs`: one pointer more for each function
+    /// `zend_add_dynamic_func_def` adds (`:8336`).
+    defs: Option<Emalloc>,
+    grown: Grown,
+}
+
+impl Growing {
+    /// The tables grown, one `erealloc` a step, to hold what `to` counts.
+    fn to(&mut self, req: &mut Request, to: Grown) -> Result<(), Thrown> {
+        let mut size = (self.oplines.as_ref().map_or(0, Emalloc::len) / OPLINE).max(1);
+        while (to.oplines as usize) > size {
+            size = size.saturating_mul(4);
+            regrow(req, &mut self.oplines, size * OPLINE)?;
+        }
+        let steps = |from: u32, to: u32, step: usize| {
+            let from = (from as usize).next_multiple_of(step);
+            (from..(to as usize).next_multiple_of(step))
+                .step_by(step)
+                .map(move |at| at + step)
+        };
+        for size in steps(self.grown.constants, to.constants, LITERALS_STEP) {
+            regrow(req, &mut self.constants, size * ZVAL)?;
+        }
+        for size in steps(self.grown.vars, to.vars, VARS_STEP) {
+            regrow(req, &mut self.names, size * POINTER)?;
+        }
+        for size in steps(self.grown.dynamic_func_defs, to.dynamic_func_defs, 1) {
+            regrow(req, &mut self.defs, size * POINTER)?;
+        }
+        self.grown = Grown {
+            oplines: self.grown.oplines.max(to.oplines),
+            constants: self.grown.constants.max(to.constants),
+            vars: self.grown.vars.max(to.vars),
+            dynamic_func_defs: self.grown.dynamic_func_defs.max(to.dynamic_func_defs),
+        };
+        Ok(())
+    }
+}
+
+/// `erealloc(block, len)`, an `emalloc` where there is none yet.
+fn regrow(req: &mut Request, block: &mut Option<Emalloc>, len: usize) -> Result<(), Thrown> {
+    *block = Some(match block.take() {
+        Some(laid) => laid.resize(req, len)?,
+        None => Emalloc::new(req, len)?,
+    });
+    Ok(())
+}
+
+/// How far `code` grew by its `pass_two`: all it holds.
+fn grown(code: &OpArray) -> Grown {
+    let count = |len: usize| u32::try_from(len).unwrap_or(u32::MAX);
+    Grown {
+        oplines: count(code.oplines.len()),
+        constants: count(code.literals.len()),
+        vars: count(code.vars.len()),
+        dynamic_func_defs: count(code.dynamic_func_defs.len()),
+    }
+}
+
+/// What php's compile of `code` lays before its body
+/// (`zend_compile_func_decl_ex`, `Z/Zend/zend_compile.c:8442`), handed
+/// back as it grows ([`Growing`]): `init_op_array`'s refcount and
+/// `INITIAL_OP_ARRAY_SIZE` oplines (`Z/Zend/zend_opcode.c:54`, `:57`);
+/// for a function declared as `declared`, its `attributes`, the
+/// function's and its parameters' in one table
+/// (`zend_compile_attributes`, `zend_compile.c:8511`), its `arg_info`,
+/// one an entry for each parameter and one for its return type
+/// (`zend_compile_params`, `:8555`), and the copy of each default the
+/// compile left a tree, which the `RECV_INIT`'s constant keeps
+/// (`zend_const_expr_to_zval`); and its static and bound variables'
+/// table, `zend_new_array(8)` at the first and a bucket each
+/// (`zend_compile_static_var_common`, `zend_compile_closure_binding`).
 fn init_op_array(
     req: &mut Request,
     blocks: &mut Blocks,
     code: &OpArray,
-) -> Result<Emalloc, Thrown> {
-    blocks.emalloced.push(Emalloc::new(req, REFCOUNT)?);
-    let mut grown = INITIAL_OPLINES;
-    while code.oplines.len() > grown {
-        grown = grown.saturating_mul(4);
-    }
-    Emalloc::new(req, grown * OPLINE)
-}
-
-/// What the compile of `code` lays after [`init_op_array`], `grown`
-/// being its oplines, and what `pass_two` makes of it ([`op_array`]).
-fn compiled(
-    req: &mut Request,
-    blocks: &mut Blocks,
-    code: &OpArray,
     declared: Option<(&FunctionDecl, bool)>,
-    grown: Emalloc,
-) -> Result<(), Thrown> {
-    let args = declared.map_or(0, |(decl, method)| arg_infos(decl, method));
-    let last = code.oplines.len();
-    // `op_array->attributes`, the function's and its parameters' in one
-    // table (`zend_compile_params`' offset).
-    if let Some((decl, _)) = declared {
+) -> Result<Growing, Thrown> {
+    blocks.emalloced.push(Emalloc::new(req, REFCOUNT)?);
+    let growing = Growing {
+        oplines: Some(Emalloc::new(req, INITIAL_OPLINES * OPLINE)?),
+        constants: None,
+        names: None,
+        defs: None,
+        grown: Grown::default(),
+    };
+    if let Some((decl, method)) = declared {
         let parameters = decl.parameters.iter().flat_map(|p| &p.attributes);
         attributes(
             req,
@@ -913,67 +988,50 @@ fn compiled(
             decl.attributes.iter().chain(parameters),
             false,
         )?;
-    }
-    // The constants, which `zend_add_literal` grows sixteen at a time
-    // (`Z/Zend/zend_compile.c:597`), and the variables' names, which
-    // `lookup_cv` grows sixteen at a time (`:556`).
-    let literals = code.literals.len();
-    let constants = match literals {
-        0 => None,
-        literals => Some(Emalloc::new(
-            req,
-            literals.next_multiple_of(LITERALS_STEP) * ZVAL,
-        )?),
-    };
-    let vars = code.vars.len();
-    let names = match vars {
-        0 => None,
-        vars => Some(Emalloc::new(
-            req,
-            vars.next_multiple_of(VARS_STEP) * POINTER,
-        )?),
-    };
-    // One block each, which a reallocation one element at a time leaves
-    // in the bin of its last size.
-    for len in [
-        args * ARG_INFO,
-        code.try_catch.len() * TRY_CATCH,
-        code.dynamic_func_defs.len() * POINTER,
-    ] {
-        if len > 0 {
-            blocks.emalloced.push(Emalloc::new(req, len)?);
+        let args = arg_infos(decl, method) * ARG_INFO;
+        if args > 0 {
+            blocks.emalloced.push(Emalloc::new(req, args)?);
         }
-    }
-    // Each parameter's default the compile left a tree, copied as the
-    // `RECV_INIT`'s literal (`zend_compile_params`' `zend_const_expr_to_zval`),
-    // which the op array keeps.
-    let defaults = declared.map_or(&[][..], |(decl, _)| &decl.parameters);
-    for default in defaults
-        .iter()
-        .filter_map(|parameter| parameter.default.expr())
-    {
-        if !super::linking::is_literal(default) {
+        let defaults = decl.parameters.iter().filter_map(|p| p.default.expr());
+        for default in defaults.filter(|default| !super::linking::is_literal(default)) {
             for len in AstCopy::of(default).blocks() {
                 blocks.emalloced.push(Emalloc::new(req, len)?);
             }
         }
     }
-    // `zend_new_array(8)` at the first `static` or bound variable, and
-    // one bucket each (`zend_compile_static_var_common`,
-    // `zend_compile_closure_binding`).
     if !code.bound_vars.is_empty() {
         let laid = req.heap.array_sized(CLASS_TABLE);
         let statics = req.fatal_of(laid)?;
         blocks.arrays.push(statics);
         add_rows(req, statics, code.bound_vars.len())?;
     }
-    // `pass_two`: the names reallocated to their number where it is not
-    // a multiple (`Z/Zend/zend_opcode.c:1103`); the oplines reallocated
-    // to hold the constants after them, aligned to 16
-    // (`ZEND_MM_ALIGNED_SIZE_EX`, `:1117`), beside the constants until
-    // they are copied in and freed (`:1123`); and the live ranges
-    // `zend_calc_live_ranges` lays (`:1251`).
-    if let Some(names) = names {
+    Ok(growing)
+}
+
+/// What the compile of `code` lays after [`init_op_array`] and what
+/// `pass_two` makes of it: its tables grown to all they hold
+/// ([`Growing`]) and its `try`/`catch` elements, one block, which a
+/// reallocation one element at a time leaves in the bin of its last
+/// size; then `pass_two`, the names reallocated to their number where it
+/// is not a multiple (`Z/Zend/zend_opcode.c:1103`), the oplines
+/// reallocated to hold the constants after them, aligned to 16
+/// (`ZEND_MM_ALIGNED_SIZE_EX`, `:1117`), beside the constants until they
+/// are copied in and freed (`:1123`), and the live ranges
+/// `zend_calc_live_ranges` lays (`:1251`).
+fn compiled(
+    req: &mut Request,
+    blocks: &mut Blocks,
+    code: &OpArray,
+    mut growing: Growing,
+) -> Result<(), Thrown> {
+    growing.to(req, grown(code))?;
+    let try_catch = code.try_catch.len() * TRY_CATCH;
+    if try_catch > 0 {
+        blocks.emalloced.push(Emalloc::new(req, try_catch)?);
+    }
+    blocks.emalloced.extend(growing.defs);
+    if let Some(names) = growing.names {
+        let vars = code.vars.len();
         let names = if vars.is_multiple_of(VARS_STEP) {
             names
         } else {
@@ -981,13 +1039,19 @@ fn compiled(
         };
         blocks.emalloced.push(names);
     }
+    let last = code.oplines.len();
+    let literals = code.literals.len();
+    let oplines = match growing.oplines {
+        Some(oplines) => oplines.resize(req, packed(last, literals))?,
+        None => Emalloc::new(req, packed(last, literals))?,
+    };
     blocks.oplines.push(Oplines {
-        block: grown.resize(req, packed(last, literals))?,
+        block: oplines,
         lines: last,
         literals,
         merge: Merge::of(&code.literals),
     });
-    if let Some(constants) = constants {
+    if let Some(constants) = growing.constants {
         constants.free(req);
     }
     let live_ranges = code.live_ranges.len() * LIVE_RANGE;
@@ -1594,14 +1658,7 @@ fn lay_class(req: &mut Request, blocks: &mut ClassBlocks, class: &ClassDecl) -> 
 /// 304
 /// ```
 pub(super) fn of_unit(req: &mut Request, unit: &Unit) -> Result<Laid, Thrown> {
-    let mut laid = Laid::default();
-    match lay(req, unit, &mut laid) {
-        Ok(()) => Ok(laid),
-        Err(thrown) => {
-            laid.free(req);
-            Err(thrown)
-        }
-    }
+    in_order(req, unit, None)
 }
 
 /// What php's compile of `unit` carves from `CG(arena)`, which nothing
@@ -1953,7 +2010,20 @@ pub(super) fn alone(
     scanned: &ScannerHeap,
     unkept: Vec<usize>,
 ) -> Result<Option<Alone>, Thrown> {
-    let strings = unkept.into_iter().map(|len| STRING_HEADER + len + 1);
+    // The name written for each hook, given back as the hook has
+    // compiled (`zend_compile_property_hooks`' `zend_string_release(name)`,
+    // `Z/Zend/zend_compile.c:8814`), `get` and `set` alike three bytes.
+    let mut hooks = unit.map_or(0, |unit| unit.hooks.len());
+    let (names, strings): (Vec<usize>, Vec<usize>) = unkept.into_iter().partition(|len| {
+        let name = *len == 3 && hooks > 0;
+        hooks -= usize::from(name);
+        name
+    });
+    let string = |len| STRING_HEADER + len + 1;
+    let (names, strings) = (
+        names.into_iter().map(string),
+        strings.into_iter().map(string),
+    );
     let stacks = [
         (scanned.nesting, NEST_LOCATION),
         (scanned.states, SCANNER_STATE),
@@ -1963,11 +2033,14 @@ pub(super) fn alone(
     .map(|(depth, element)| depth.next_multiple_of(STACK_BLOCK) * element);
     let mut stacks_laid = Vec::new();
     let laid = with_tree(req, tree, |req| {
-        let mut strings_laid = Vec::new();
+        let (mut strings_laid, mut names_laid) = (Vec::new(), Vec::new());
         let main = lay_each(req, &mut strings_laid, strings)
+            .and_then(|()| lay_each(req, &mut names_laid, names))
             .and_then(|()| lay_each(req, &mut stacks_laid, stacks))
-            .and_then(|()| unit.map(|unit| main_op_array(req, unit)).transpose());
-        for string in strings_laid {
+            .and_then(|()| {
+                (unit.map(|unit| main_op_array(req, unit, &mut names_laid))).transpose()
+            });
+        for string in strings_laid.into_iter().chain(names_laid) {
             string.free(req);
         }
         main
@@ -1995,11 +2068,16 @@ fn lay_each(
 /// ([`MainOpArray`]), and between its `init_op_array` and its
 /// `pass_two` the file's `FC(seen_symbols)`, a bucket per name its
 /// declarations registered ([`Unit::seen_symbols`],
-/// `Z/Zend/zend_compile.c:438`), and what the compile of the functions
-/// and classes it declares carves and lays ([`carve`], [`of_unit`]); the
-/// table is destroyed after `pass_two`, by `zend_file_context_end`
-/// (`:418`).
-fn main_op_array(req: &mut Request, unit: &Unit) -> Result<Alone, Thrown> {
+/// `Z/Zend/zend_compile.c:438`), what the compile of the functions and
+/// classes it declares carves ([`carve`]), and each of them laid at its
+/// place among the main op array's statements, which grow it
+/// ([`in_order`]); the table is destroyed after `pass_two`, by
+/// `zend_file_context_end` (`:418`).
+fn main_op_array(
+    req: &mut Request,
+    unit: &Unit,
+    hook_names: &mut Vec<Emalloc>,
+) -> Result<Alone, Thrown> {
     let mut main = MainOpArray {
         op_array: Some(Emalloc::new(req, crate::exec::OP_ARRAY_SIZE)?),
         blocks: Blocks::default(),
@@ -2009,14 +2087,14 @@ fn main_op_array(req: &mut Request, unit: &Unit) -> Result<Alone, Thrown> {
         embedded: vec![php_heap::EmbeddedArr::new(SEEN_SYMBOLS)],
         ..Blocks::default()
     };
-    let laid = init_op_array(req, &mut main.blocks, &unit.main).and_then(|grown| {
+    let laid = init_op_array(req, &mut main.blocks, &unit.main, None).and_then(|mut growing| {
         lay_each(req, &mut seen.emalloced, seen_keys(unit))?;
         if let Some(table) = seen.embedded.first() {
             add_rows(req, table.arr(), unit.seen_symbols as usize)?;
         }
         carve(req, unit)?;
-        declared = of_unit(req, unit)?;
-        compiled(req, &mut main.blocks, &unit.main, None, grown)
+        declared = in_order(req, unit, Some((&mut growing, hook_names)))?;
+        compiled(req, &mut main.blocks, &unit.main, growing)
     });
     seen.free(req);
     match laid {
@@ -2053,35 +2131,88 @@ fn seen_keys(unit: &Unit) -> impl Iterator<Item = usize> {
         .map(|name| STRING_HEADER + name.len() + 1)
 }
 
-/// [`of_unit`]'s blocks, laid into `laid` one by one.
-fn lay(req: &mut Request, unit: &Unit, laid: &mut Laid) -> Result<(), Thrown> {
-    for (decl, code) in &unit.functions {
-        op_array(req, &mut laid.tables, code, Some((decl, false)))?;
+/// What `unit` declares laid in the order php's compile lays it, each
+/// declaration at its place in the op array it is compiled in
+/// ([`php_unit::Nested`]), which `main`, the main op array as it grows
+/// where the request compiled the unit for itself, is one of: php
+/// compiles the file's statements one by one (`zend_compile_top_stmt`,
+/// `Z/Zend/zend_compile.c:11657`), a function where it stands
+/// (`:11674`) and a class where it stands (`:11678`), its methods and
+/// hooks inside it (`zend_compile_class_decl`'s `zend_compile_stmt`,
+/// `:9351`); a function's `init_op_array` comes first
+/// (`zend_compile_func_decl_ex`, `:8463`), then what
+/// `zend_begin_func_decl` adds to the op array that declares it, a
+/// pointer of its `dynamic_func_defs` (`zend_add_dynamic_func_def`,
+/// `:8420`) and the `DECLARE_FUNCTION` or `DECLARE_LAMBDA_FUNCTION`
+/// (`:8489`), then its body, every function and class written in it
+/// compiled while its oplines stand (`:8604`), and its `pass_two` last
+/// (`:8624`). So the variable and the constant a statement before a
+/// function laid, and a method's 2048-byte oplines under the closure it
+/// returns, stand at the declaration's `pass_two`, the compile's peak:
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/w3822-' . getmypid() . '.php';
+/// foreach (['$abcdef = 1; function f() {} ', 'class C { function m() { return function () {}; } } ', '$abcdef = 1; class D { function m() { return function () {}; } } function g() {} '] as $code) {
+///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
+///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
+///     [$usage, $peak] = explode(' ', trim($fresh));
+///     echo $peak - $usage, "\n";
+/// }
+/// unlink($f);
+/// ```
+/// ```expect process
+/// 37664
+/// 39376
+/// 39616
+/// ```
+///
+/// A function, class or dynamic definition no record reaches, as in a
+/// unit built by hand, is laid after, in the unit's order.
+fn in_order(
+    req: &mut Request,
+    unit: &Unit,
+    main: Option<(&mut Growing, &mut Vec<Emalloc>)>,
+) -> Result<Laid, Thrown> {
+    let (main, hook_names) = match main {
+        Some((main, names)) => (Some(main), names),
+        None => (None, &mut Vec::new()),
+    };
+    let mut walk = Walk {
+        unit,
+        laid: Laid {
+            classes: unit.classes.iter().map(|_| None).collect(),
+            dynamic: declarers(unit)
+                .into_iter()
+                .map(|declarer| (Blocks::default(), declarer))
+                .collect(),
+            ..Laid::default()
+        },
+        functions: vec![false; unit.functions.len()],
+        methods: places(unit.methods.iter().map(|m| (m.class, m.method, 0))),
+        hooks: places(
+            unit.hooks
+                .iter()
+                .map(|h| (h.class, h.property, hook_key(h.kind))),
+        ),
+        dynamic: vec![false; unit.dynamic.len()],
+        hook_names: std::mem::take(hook_names),
+    };
+    let made = walk
+        .nested(req, &unit.main, main)
+        .and_then(|()| walk.rest(req));
+    *hook_names = walk.hook_names;
+    match made {
+        Ok(()) => Ok(walk.laid),
+        Err(thrown) => {
+            walk.laid.free(req);
+            Err(thrown)
+        }
     }
-    for decl in &unit.classes {
-        let blocks = class(req, decl)?;
-        laid.classes.push(blocks);
-    }
-    for method in &unit.methods {
-        let decl = unit
-            .classes
-            .get(method.class as usize)
-            .and_then(|class| class.methods.get(method.method as usize));
-        let declared = decl.map(|decl| (&decl.function, true));
-        op_array(req, &mut laid.tables, &method.body, declared)?;
-    }
-    for hook in &unit.hooks {
-        let decl = unit
-            .classes
-            .get(hook.class as usize)
-            .and_then(|class| class.properties.get(hook.property as usize))
-            .and_then(|property| property.hooks.as_deref())
-            .and_then(|hooks| hooks.of(hook.kind));
-        let declared = decl.map(|decl| (&decl.function, true));
-        op_array(req, &mut laid.tables, &hook.body, declared)?;
-    }
-    // Each definition's declarer: the main op array, another dynamic
-    // definition, or else what the request's tables hold.
+}
+
+/// Each dynamic definition's declarer: the main op array, another
+/// dynamic definition, or else what the request's tables hold.
+fn declarers(unit: &Unit) -> Vec<Declarer> {
     let mut declarers = vec![Declarer::Table; unit.dynamic.len()];
     let mut declared_in = |defs: &[u32], declarer: Declarer| {
         for &at in defs {
@@ -2094,13 +2225,249 @@ fn lay(req: &mut Request, unit: &Unit, laid: &mut Laid) -> Result<(), Thrown> {
     for (at, (_, code)) in unit.dynamic.iter().enumerate() {
         declared_in(&code.dynamic_func_defs, Declarer::Dynamic(at));
     }
-    for ((decl, code), declarer) in unit.dynamic.iter().zip(declarers) {
-        let mut blocks = Blocks::default();
-        let made = op_array(req, &mut blocks, code, Some((decl, false)));
-        laid.dynamic.push((blocks, declarer));
-        made?;
+    declarers
+}
+
+/// [`in_order`]'s walk: what it laid, and which functions, methods,
+/// hooks and dynamic definitions it reached, a class being reached where
+/// its slot is laid.
+struct Walk<'u> {
+    unit: &'u Unit,
+    laid: Laid,
+    functions: Vec<bool>,
+    methods: Places,
+    hooks: Places,
+    dynamic: Vec<bool>,
+    /// The strings of the names written for the unit's hooks, where the
+    /// request compiled it, one given back as each hook has compiled.
+    hook_names: Vec<Emalloc>,
+}
+
+/// A method's or a hook's place in its unit's table by its class, its
+/// method or property and its kind, sorted, and whether it was reached.
+type Places = Vec<((u32, u32, u8), usize, bool)>;
+
+/// `keys`, each at its place, sorted.
+fn places(keys: impl Iterator<Item = (u32, u32, u8)>) -> Places {
+    let mut places: Places = keys.enumerate().map(|(at, key)| (key, at, false)).collect();
+    places.sort_unstable();
+    places
+}
+
+/// The member keyed `key`'s place, the first time it is asked for.
+fn reach(places: &mut Places, key: (u32, u32, u8)) -> Option<usize> {
+    let found = places.binary_search_by_key(&key, |(key, _, _)| *key).ok()?;
+    let (_, at, reached) = places.get_mut(found)?;
+    (!std::mem::replace(reached, true)).then_some(*at)
+}
+
+/// The member at `place` of `places`, where nothing reached it yet.
+fn unreached(places: &mut Places, place: usize) -> Option<usize> {
+    let (_, at, reached) = places.get_mut(place)?;
+    (!std::mem::replace(reached, true)).then_some(*at)
+}
+
+/// A hook's kind as [`Places`] keys it.
+fn hook_key(kind: php_unit::decl::HookKind) -> u8 {
+    u8::from(kind == php_unit::decl::HookKind::Set)
+}
+
+/// Where an op array's blocks are held.
+#[derive(Clone, Copy)]
+enum Holder {
+    Function,
+    Member,
+    Dynamic(usize),
+}
+
+impl Walk<'_> {
+    /// What `code` declares, each at its place: `declarer`, `code` as it
+    /// grows where it is laid, grown to where it stood as the
+    /// declaration began.
+    fn nested(
+        &mut self,
+        req: &mut Request,
+        code: &OpArray,
+        mut declarer: Option<&mut Growing>,
+    ) -> Result<(), Thrown> {
+        for nested in &code.nested {
+            let stood = declarer
+                .as_deref_mut()
+                .map(|declarer| (declarer, nested.grown));
+            match nested.declares {
+                Declares::Class(at) => {
+                    if let Some((declarer, grown)) = stood {
+                        declarer.to(req, grown)?;
+                    }
+                    self.class(req, at as usize)?;
+                }
+                Declares::Function(at) => self.function(req, at as usize, stood)?,
+                Declares::Method { class, method } => {
+                    if let Some(at) = reach(&mut self.methods, (class, method, 0)) {
+                        self.method(req, at, stood)?;
+                    }
+                }
+                Declares::Hook {
+                    class,
+                    property,
+                    kind,
+                } => {
+                    if let Some(at) = reach(&mut self.hooks, (class, property, hook_key(kind))) {
+                        self.hook(req, at, stood)?;
+                    }
+                }
+                Declares::Dynamic(at) => self.dynamic(req, at as usize, stood)?,
+            }
+        }
+        Ok(())
     }
-    Ok(())
+
+    /// What no record reached, in the unit's order.
+    fn rest(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        for at in 0..self.unit.functions.len() {
+            self.function(req, at, None)?;
+        }
+        for at in 0..self.unit.classes.len() {
+            self.class(req, at)?;
+        }
+        for place in 0..self.methods.len() {
+            if let Some(at) = unreached(&mut self.methods, place) {
+                self.method(req, at, None)?;
+            }
+        }
+        for place in 0..self.hooks.len() {
+            if let Some(at) = unreached(&mut self.hooks, place) {
+                self.hook(req, at, None)?;
+            }
+        }
+        for at in 0..self.unit.dynamic.len() {
+            self.dynamic(req, at, None)?;
+        }
+        Ok(())
+    }
+
+    /// The top-level function at `at`, once.
+    fn function(
+        &mut self,
+        req: &mut Request,
+        at: usize,
+        stood: Option<(&mut Growing, Grown)>,
+    ) -> Result<(), Thrown> {
+        let unit = self.unit;
+        let (Some((decl, code)), Some(reached)) =
+            (unit.functions.get(at), self.functions.get_mut(at))
+        else {
+            return Ok(());
+        };
+        if std::mem::replace(reached, true) {
+            return Ok(());
+        }
+        self.body(req, code, Some((decl, false)), stood, Holder::Function)
+    }
+
+    /// The dynamic definition at `at`, once.
+    fn dynamic(
+        &mut self,
+        req: &mut Request,
+        at: usize,
+        stood: Option<(&mut Growing, Grown)>,
+    ) -> Result<(), Thrown> {
+        let unit = self.unit;
+        let (Some((decl, code)), Some(reached)) = (unit.dynamic.get(at), self.dynamic.get_mut(at))
+        else {
+            return Ok(());
+        };
+        if std::mem::replace(reached, true) {
+            return Ok(());
+        }
+        self.body(req, code, Some((decl, false)), stood, Holder::Dynamic(at))
+    }
+
+    /// The class at `at`, once: its tables ([`class`]), the methods and
+    /// hooks its declaration compiles recorded after it.
+    fn class(&mut self, req: &mut Request, at: usize) -> Result<(), Thrown> {
+        let Some(decl) = self.unit.classes.get(at) else {
+            return Ok(());
+        };
+        if !matches!(self.laid.classes.get(at), Some(None)) {
+            return Ok(());
+        }
+        let blocks = class(req, decl)?;
+        if let Some(slot) = self.laid.classes.get_mut(at) {
+            *slot = Some(blocks);
+        }
+        Ok(())
+    }
+
+    /// The method at `at` of the unit's methods.
+    fn method(
+        &mut self,
+        req: &mut Request,
+        at: usize,
+        stood: Option<(&mut Growing, Grown)>,
+    ) -> Result<(), Thrown> {
+        let unit = self.unit;
+        let Some(method) = unit.methods.get(at) else {
+            return Ok(());
+        };
+        let declared = (unit.classes.get(method.class as usize))
+            .and_then(|class| class.methods.get(method.method as usize))
+            .map(|decl| (&decl.function, true));
+        self.body(req, &method.body, declared, stood, Holder::Member)
+    }
+
+    /// The hook at `at` of the unit's hooks.
+    fn hook(
+        &mut self,
+        req: &mut Request,
+        at: usize,
+        stood: Option<(&mut Growing, Grown)>,
+    ) -> Result<(), Thrown> {
+        let unit = self.unit;
+        let Some(hook) = unit.hooks.get(at) else {
+            return Ok(());
+        };
+        let declared = (unit.classes.get(hook.class as usize))
+            .and_then(|class| class.properties.get(hook.property as usize))
+            .and_then(|property| property.hooks.as_deref())
+            .and_then(|hooks| hooks.of(hook.kind))
+            .map(|decl| (&decl.function, true));
+        let made = self.body(req, &hook.body, declared, stood, Holder::Member);
+        if let Some(name) = self.hook_names.pop() {
+            name.free(req);
+        }
+        made
+    }
+
+    /// One op array laid into `holder`: [`init_op_array`], the op array
+    /// that declares it grown to where it `stood`, what it declares, and
+    /// [`compiled`].
+    fn body(
+        &mut self,
+        req: &mut Request,
+        code: &OpArray,
+        declared: Option<(&FunctionDecl, bool)>,
+        stood: Option<(&mut Growing, Grown)>,
+        holder: Holder,
+    ) -> Result<(), Thrown> {
+        let mut blocks = Blocks::default();
+        let made = init_op_array(req, &mut blocks, code, declared).and_then(|mut growing| {
+            if let Some((declarer, grown)) = stood {
+                declarer.to(req, grown)?;
+            }
+            self.nested(req, code, Some(&mut growing))?;
+            compiled(req, &mut blocks, code, growing)
+        });
+        match holder {
+            Holder::Function => self.laid.tables.take(blocks),
+            Holder::Member => self.laid.members.take(blocks),
+            Holder::Dynamic(at) => match self.laid.dynamic.get_mut(at) {
+                Some((held, _)) => held.take(blocks),
+                None => blocks.free(req),
+            },
+        }
+        made
+    }
 }
 
 /// One table of a linked record.
