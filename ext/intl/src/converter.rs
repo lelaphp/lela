@@ -7,7 +7,7 @@
 use php_ext::abi::{CloneObj, ObjectHandlers, OrFalse, Ref, This, Union, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with, lookup_class};
-use php_ext::raising::{Thrown, arg_value_error, leave_pending, throw_error};
+use php_ext::raising::{Thrown, arg_value_error, leave_pending, throw_error, while_pending};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef, walk};
 
@@ -1070,6 +1070,35 @@ impl Served<'_> {
     /// `zend_call_known_fcc` with four arguments, the last `$error` by
     /// reference: what the method answered, nothing where it threw or one
     /// is pending, and ICU's status as the reference holds it after.
+    ///
+    /// The arguments of a callback that threw are given up with what it
+    /// threw pending, as php's `zval_ptr_dtor(&zargs[3])` follows the call
+    /// (`Z/ext/intl/converter/converter.c:249`, `:326`), so a destructor
+    /// that throws over what the callback wrote into `&$error` chains it
+    /// as its `previous`:
+    ///
+    /// ```php
+    /// ini_set('zend.exception_ignore_args', 1);
+    /// class D { function __destruct() { throw new Exception("destructed"); } }
+    /// class C extends UConverter {
+    ///   function toUCallback($reason, $source, $codeUnits, &$error): string|int|array|null {
+    ///     if ($reason > UConverter::REASON_IRREGULAR) return null;
+    ///     $error = new D; throw new Exception("to");
+    ///   }
+    ///   function fromUCallback($reason, $source, $codePoint, &$error): string|int|array|null {
+    ///     if ($reason > UConverter::REASON_IRREGULAR) return null;
+    ///     $error = new D; throw new Exception("from");
+    ///   }
+    /// }
+    /// try { (new C('utf-8', 'ascii'))->convert("\x80"); }
+    /// catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()?->getMessage(), "\n"; }
+    /// try { (new C('ascii', 'utf-8'))->convert("\u{e9}"); }
+    /// catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()?->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// destructed after to
+    /// destructed after from
+    /// ```
     fn call(
         &mut self,
         method: &[u8],
@@ -1100,12 +1129,26 @@ impl Served<'_> {
         if let ValueRef::Int(n) = error.get().as_ref() {
             *status = crate::code_of(n);
         }
-        for value in [one, two, error.into_value()] {
-            value.give_up(req);
-        }
+        let given = [one, two, error.into_value()];
+        let give_up = |req: &mut Request| {
+            for value in given {
+                value.give_up(req);
+            }
+        };
         match answer {
-            Ok(answer) => Some(answer),
+            Ok(answer) => {
+                give_up(req);
+                Some(answer)
+            }
             Err(thrown) => {
+                // `zval_ptr_dtor(&zargs[..])` after `zend_call_known_fcc`,
+                // with what the callback threw in `EG(exception)`.
+                match thrown.exception() {
+                    Some(_) => {
+                        while_pending(req, &thrown, give_up);
+                    }
+                    None => give_up(req),
+                }
                 self.pending.keep(req, thrown);
                 None
             }
