@@ -401,6 +401,10 @@ pub struct OpArray {
     /// [`crate::Unit::dynamic`], and the entry is its index there, so
     /// no part of a unit points into another.
     pub dynamic_func_defs: Vec<u32>,
+    /// The functions, closures and classes php compiles while this op
+    /// array is `CG(active_op_array)`, in the order it began them, each
+    /// with how far this op array had grown by then ([`Nested`]).
+    pub nested: Vec<Nested>,
     /// `op_array->static_variables` (`Z/Zend/zend_compile.h:534`): the
     /// variables the op array binds through `BIND_STATIC`, in the order
     /// `zend_compile_static_var_common` added them to the table, which
@@ -443,6 +447,54 @@ pub struct OpArray {
     /// string `"10"` where `$a['10']` is the key `10` (bug #63217). The
     /// slots are ascending, as the compiler lays them down.
     pub numeric_dims: Vec<ConstIdx>,
+}
+
+/// A declaration php compiles at its place in another op array's
+/// compile: `zend_compile_func_decl` and `zend_compile_class_decl` begin
+/// where the statement stands, so the declarer's oplines, constants,
+/// variables and `dynamic_func_defs` stand as the statements before it
+/// grew them, and an op array declared inside another is compiled while
+/// the other's oplines stand. What an uncached compile lays on the heap
+/// is laid in that order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Nested {
+    pub declares: Declares,
+    /// The declarer as its body began, past what `zend_begin_func_decl`
+    /// emitted into it for this one.
+    pub grown: Grown,
+}
+
+/// What a [`Nested`] declares, by its index in its [`crate::Unit`]'s
+/// table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Declares {
+    /// A top-level function of [`crate::Unit::functions`].
+    Function(u32),
+    /// A class of [`crate::Unit::classes`], its tables, before the
+    /// methods and hooks its declaration compiles.
+    Class(u32),
+    /// The method at `method` of the class at `class`, its body in
+    /// [`crate::Unit::methods`].
+    Method { class: u32, method: u32 },
+    /// The `kind` hook of the property at `property` of the class at
+    /// `class`, its body in [`crate::Unit::hooks`].
+    Hook {
+        class: u32,
+        property: u32,
+        kind: crate::decl::HookKind,
+    },
+    /// A function of [`crate::Unit::dynamic`], a closure among them.
+    Dynamic(u32),
+}
+
+/// How many oplines, constants, variables and `dynamic_func_defs` an
+/// op array under compile holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Grown {
+    pub oplines: u32,
+    pub constants: u32,
+    pub vars: u32,
+    pub dynamic_func_defs: u32,
 }
 
 /// An op array's safepoints (design §5.7), numbered by place: the
@@ -582,6 +634,7 @@ impl OpArray {
         self.live_ranges.shrink_to_fit();
         self.safepoints.shrink_to_fit();
         self.dynamic_func_defs.shrink_to_fit();
+        self.nested.shrink_to_fit();
         self.bound_vars.shrink_to_fit();
         self.numeric_dims.shrink_to_fit();
     }

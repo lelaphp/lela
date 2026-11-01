@@ -113,8 +113,9 @@ use php_unit::decl::{
     TraitMethodRef, Type, UnitValue, Visibility,
 };
 use php_unit::{
-    AutoGlobal, BoundVar, ConstIdx, Diagnostic, FramelessEntry, HookBody, Level, MethodBody,
-    OpArray, Opcode, OperandKind, Opline, OplineIdx, Safepoints, TopLevel, TryCatch, Unit,
+    AutoGlobal, BoundVar, ConstIdx, Declares, Diagnostic, FramelessEntry, Grown, HookBody, Level,
+    MethodBody, Nested, OpArray, Opcode, OperandKind, Opline, OplineIdx, Safepoints, TopLevel,
+    TryCatch, Unit,
 };
 
 use php_syntax::magic_const_name;
@@ -666,6 +667,10 @@ pub(crate) struct Emit<'a> {
     /// which entries of [`Emit::dynamic`] it declares, in the order a
     /// `DECLARE_FUNCTION`'s `op2` indexes them.
     dynamic_func_defs: Vec<u32>,
+    /// [`OpArray::nested`] of the op array being compiled: each function,
+    /// closure and class begun while it is the active one, with how far
+    /// it had grown by then.
+    nested: Vec<Nested>,
     /// The numeric-dimension pairs of the op array being compiled,
     /// [`OpArray::numeric_dims`]: the slot of every constant dimension
     /// `zend_handle_numeric_dim` folded, in the order they were laid
@@ -1722,6 +1727,7 @@ impl<'a> Emit<'a> {
             cell: php_unit::UnitCell::default(),
             function_callables: 0,
             dynamic_func_defs: Vec::new(),
+            nested: Vec::new(),
             static_vars: Vec::new(),
             fold: Fold::Compile,
             rewrites: eval::Rewrites::default(),
@@ -1981,6 +1987,7 @@ struct Saved {
     return_type: Option<Type>,
     returns_by_ref: bool,
     dynamic_func_defs: Vec<u32>,
+    nested: Vec<Nested>,
     static_vars: Vec<BoundVar>,
     fn_flags: FnFlags,
     numeric_dims: Vec<ConstIdx>,
@@ -5878,7 +5885,12 @@ impl<'a> Emit<'a> {
     /// `zend_oparray_context_begin` with a fresh op array as
     /// `CG(active_op_array)`: the state of the one being compiled set
     /// aside, and the emitter over an empty one whose entry safepoint
-    /// stands at opline zero until the prologue is known.
+    /// stands at opline zero until the prologue is known. The function
+    /// is recorded in the enclosing op array's [`OpArray::nested`] as it
+    /// stands now, past the `DECLARE_FUNCTION` or
+    /// `DECLARE_LAMBDA_FUNCTION` and the binds `zend_begin_func_decl` and
+    /// `zend_compile_closure_binding` emitted into it; a method or a hook
+    /// after its class, in the order the class's members were written.
     fn begin_body(
         &mut self,
         function: ActiveFunction,
@@ -5886,6 +5898,24 @@ impl<'a> Emit<'a> {
         fn_flags: FnFlags,
     ) -> Saved {
         self.loop_var_pushed();
+        let index = |at: usize| u32::try_from(at).unwrap_or(u32::MAX);
+        self.began(match function.at {
+            crate::FunctionAt::Top(at) => Declares::Function(index(at)),
+            crate::FunctionAt::Dynamic(at) => Declares::Dynamic(index(at)),
+            crate::FunctionAt::Method { class, method } => Declares::Method {
+                class: index(class),
+                method: index(method),
+            },
+            crate::FunctionAt::Hook {
+                class,
+                property,
+                kind,
+            } => Declares::Hook {
+                class: index(class),
+                property: index(property),
+                kind,
+            },
+        });
         Saved {
             return_type: self.return_type.take(),
             returns_by_ref: std::mem::take(&mut self.returns_by_ref),
@@ -5908,6 +5938,7 @@ impl<'a> Emit<'a> {
             active_function: self.active_function.replace(function),
             this_in_scope: std::mem::replace(&mut self.this_in_scope, this_in_scope),
             dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs),
+            nested: std::mem::take(&mut self.nested),
             static_vars: std::mem::take(&mut self.static_vars),
             fn_flags: std::mem::replace(&mut self.fn_flags, fn_flags),
             numeric_dims: std::mem::take(&mut self.numeric_dims),
@@ -5916,6 +5947,19 @@ impl<'a> Emit<'a> {
             active_property: self.active_property.take(),
             active_hook: self.active_hook.take(),
         }
+    }
+
+    /// `declares` begun at this place of the active op array, recorded
+    /// with how far the op array has grown ([`Nested`]).
+    fn began(&mut self, declares: Declares) {
+        let count = |len: usize| u32::try_from(len).unwrap_or(u32::MAX);
+        let grown = Grown {
+            oplines: count(self.oplines.len()),
+            constants: count(self.constants.len()),
+            vars: count(self.vars.len()),
+            dynamic_func_defs: count(self.dynamic_func_defs.len()),
+        };
+        self.nested.push(Nested { declares, grown });
     }
 
     /// `zend_oparray_context_end`: the enclosing op array's state back
@@ -5949,6 +5993,7 @@ impl<'a> Emit<'a> {
         self.return_type = saved.return_type;
         self.returns_by_ref = saved.returns_by_ref;
         self.dynamic_func_defs = saved.dynamic_func_defs;
+        self.nested = saved.nested;
         self.static_vars = saved.static_vars;
         self.fn_flags = saved.fn_flags;
         self.numeric_dims = saved.numeric_dims;
@@ -6040,6 +6085,7 @@ impl<'a> Emit<'a> {
             cache_room: cache_size,
             runtime_cache: php_unit::MapPtrOffset::default(),
             dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs),
+            nested: std::mem::take(&mut self.nested),
             bound_vars: std::mem::take(&mut self.static_vars),
             no_receiver: self.fn_flags.is_static,
             strict_types: self.typing == Typing::Strict,
@@ -6307,6 +6353,8 @@ impl<'a> Emit<'a> {
         // so `self` in an attribute of the class is the class, an
         // anonymous one's inside a method among them.
         let at = self.classes.len();
+        // `zend_compile_class_decl` at its place in the active op array.
+        self.began(Declares::Class(u32::try_from(at).unwrap_or(u32::MAX)));
         let enclosing = (self.active_class)
             .replace(ActiveClass::entered(&name, class.kind, at, anonymous, None));
         let enclosing_parent = std::mem::replace(&mut self.active_parent, parent.clone());
@@ -22155,6 +22203,7 @@ mod tests {
             cell: php_unit::UnitCell::default(),
             function_callables: 0,
             dynamic_func_defs: Vec::new(),
+            nested: Vec::new(),
             static_vars: Vec::new(),
             fold: Fold::Compile,
             rewrites: eval::Rewrites::default(),

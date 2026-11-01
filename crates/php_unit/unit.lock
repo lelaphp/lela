@@ -5,6 +5,7 @@ AutoGlobal::of
 BoundVar
 CacheSlot
 ConstIdx
+Declares
 Diagnostic
 Effects
 Effects::ALLOC
@@ -14,6 +15,7 @@ Effects::NONE
 Effects::THROW
 Effects::contains
 FramelessEntry
+Grown
 Handler
 HookBody
 InBlock
@@ -23,6 +25,7 @@ LiveKind
 LiveRange
 MapPtrOffset
 MethodBody
+Nested
 OpArray
 OpArray::dimension_written
 OpArray::dump_lines
