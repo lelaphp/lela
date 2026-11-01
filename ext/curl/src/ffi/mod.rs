@@ -283,14 +283,18 @@ impl Session {
     /// `body` served with the object `id` names held
     /// ([`Memory::holding`]) and no request where a callback finds it,
     /// whatever call into the library this one is made inside, that
-    /// call's request put back after. The only way the binding holds the
-    /// library's objects: one given up during the hold is dropped as the
-    /// hold ends, inside `holding`, which still borrows the request, so a
-    /// trampoline its cleanup reaches (a file part's `free_cb` under
-    /// `curl_easy_cleanup` or `curl_mime_free`) finds no request, as at
-    /// the top level, and not the one an enclosing transfer lent. What
-    /// `body` calls the library with lends the request again
-    /// ([`Session::enter`]).
+    /// call's request put back after. The outermost hold of every call
+    /// into the library that can call back: the holds such a call takes
+    /// beside it, [`holding_all`]'s of the shares and of the `CURL *`s a
+    /// `CURLM *` reaches, are taken inside `body`, so each hold ends with
+    /// no request where a callback finds it. One given up during a hold
+    /// is dropped as the hold ends, inside [`Memory::holding`], which
+    /// still borrows the request, so a trampoline its cleanup reaches (a
+    /// file part's `free_cb` under `curl_easy_cleanup` or
+    /// `curl_mime_free`) finds no request, as at the top level, and not
+    /// the one an enclosing transfer lent. What `body` calls the library
+    /// with lends the request again ([`Session::enter`]), inside every
+    /// hold.
     fn holding<T: Send + 'static, R>(
         &self,
         req: &mut Request,
@@ -338,10 +342,12 @@ impl Lent {
         // which that call does not touch until the library returns, so
         // this is the one live mutable borrow of it. Nothing reaches the
         // request through the link while a `Memory::holding` that ends a
-        // hold is on the stack: the binding holds the library's objects
-        // through `Session::holding` alone, so between the `enter`s a hold
-        // serves, where the hold's end drops what was given up, the link
-        // holds null and not an enclosing call's request.
+        // hold is on the stack: `Session::holding` is the outermost hold
+        // of every call that can call back, and `holding_all`, which holds
+        // through `Memory::holding` itself, is called only inside one, so
+        // where any hold ends and drops what was given up, outside the
+        // `enter`s it serves, the link holds null and not an enclosing
+        // call's request.
         unsafe { req.as_mut() }
     }
 
@@ -419,8 +425,10 @@ impl Cx<'_> {
 
 /// `body` served with each object `ids` names held ([`Memory::holding`]),
 /// the ones no owner keeps any more passed over: what a call into the
-/// library holds of the handles it may reach, inside the
-/// [`Session::holding`] of the `CURL *` or `CURLM *` it calls with.
+/// library holds of the handles it may reach. Called only inside the
+/// [`Session::holding`] of the `CURL *` or `CURLM *` that call is made
+/// with, never as its outermost hold, so each of these holds ends where
+/// the link holds no request, as that one's does ([`Lent::request`]).
 fn holding_all<T: Send + 'static, R>(
     req: &mut Request,
     ids: &[ForeignId<T>],
