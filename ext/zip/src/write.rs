@@ -643,26 +643,7 @@ fn write_all(
                     }
                 }
             }
-            Data::Add(added) => {
-                let mut buf = [0u8; BUFSIZE];
-                loop {
-                    let za = program.live()?;
-                    let n = added
-                        .pipe
-                        .read(za, &mut buf)
-                        .inspect_err(|s| za.error = *s)?;
-                    if n == 0 {
-                        break;
-                    }
-                    out.write(&buf[..n])?;
-                    if n == BUFSIZE
-                        && let Some(share) = added.pipe.share(program.live()?)
-                        && progress.update(program, share)
-                    {
-                        return Err(program.cancelled());
-                    }
-                }
-            }
+            Data::Add(added) => added.copy(program, out, progress)?,
         }
         program.live()?.finish(*i, &entry, at, out)?;
     }
@@ -706,6 +687,54 @@ struct Zip64 {
 }
 
 impl Added {
+    /// `copy_source`: the source held open, as `zip_source_open` holds
+    /// it, while its data is read through the layers and written, and let
+    /// go however the copy ends, before anything past it.
+    fn copy(
+        &mut self,
+        program: &mut dyn Program,
+        out: &mut Out,
+        progress: &mut Progress,
+    ) -> Result<(), Status> {
+        let held = self.pipe.source();
+        if let Some(link) = &held {
+            program.live()?.open_source(link);
+        }
+        let copied = self.write_out(program, out, progress);
+        if let (Some(za), Some(link)) = (program.archive(), &held) {
+            za.close_source(link);
+        }
+        copied
+    }
+
+    /// `copy_source`'s loop: a buffer at a time, the progress callback
+    /// told after each full one how far the source has been read.
+    fn write_out(
+        &mut self,
+        program: &mut dyn Program,
+        out: &mut Out,
+        progress: &mut Progress,
+    ) -> Result<(), Status> {
+        let mut buf = [0u8; BUFSIZE];
+        loop {
+            let za = program.live()?;
+            let n = self
+                .pipe
+                .read(za, &mut buf)
+                .inspect_err(|s| za.error = *s)?;
+            if n == 0 {
+                return Ok(());
+            }
+            out.write(&buf[..n])?;
+            if n == BUFSIZE
+                && let Some(share) = self.pipe.share(program.live()?)
+                && progress.update(program, share)
+            {
+                return Err(program.cancelled());
+            }
+        }
+    }
+
     /// `zip_source_stat` of `src_final` once the data is written, and the
     /// attributes it gives then.
     fn settled(&self) -> Settled {
