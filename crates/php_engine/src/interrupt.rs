@@ -203,7 +203,7 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// main thread takes it. Ending wakes the thread rather than waiting out
 /// its deadline, so a join costs a wake and an exit, never the seconds
 /// left. That is what a fork stands on (ADR-0010, Threads): the thread
-/// is one [`crate::fork::spawn`] started, which no fork happens beside,
+/// is one [`crate::fork::spawn_aside`] started, which no fork happens beside,
 /// and the engine's one home for fork (#1807) joins every engine's timer
 /// thread first ([`Timers::stop`]) and starts each again after in the
 /// parent over the same schedule ([`Stopped::resume`]), whose deadlines
@@ -485,7 +485,7 @@ impl Control {
         self.shared.held().phase = Phase::Starting;
         let shared = Arc::clone(&self.shared);
         let builder = std::thread::Builder::new().name("php-timer".to_owned());
-        let Ok(thread) = crate::fork::spawn(builder, move || shared.serve()) else {
+        let Ok(thread) = crate::fork::spawn_aside(builder, move || shared.serve()) else {
             return;
         };
         self.shared.started();

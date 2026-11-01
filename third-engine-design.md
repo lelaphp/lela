@@ -714,7 +714,7 @@ The set is declared once in `seams.toml`, as its `[[seam]]` rows, and `xtask sta
 | seam | lock | items | ceiling |
 |---|---|---|---|
 | heap | heap.lock | 518 |  |
-| process | process.lock | 40 |  |
+| process | process.lock | 41 |  |
 | unit | unit.lock | 161 |  |
 | link | link.lock | 62 |  |
 | ops | ops.lock | 209 |  |
@@ -725,7 +725,7 @@ The set is declared once in `seams.toml`, as its `[[seam]]` rows, and `xtask sta
 | layer | layer.lock | 40 |  |
 | harness | xtask.lock | 448 |  |
 
-<!-- /computed in=e89605c6a3a861458b9c923b6d90cb8d538fbc11c482756682174b0b1cf644c8 out=c8f3eece91176ce28ed31946b2a192c708ecee230a30e5bbdc06a872615386c2 -->
+<!-- /computed in=c49beb3acc77334fe0aff1e717e2dc0f345fcbeb4081ddd9d29f5dcf812a5d2f out=61763008cf2e1afded45a61fb818a2b1bcb3dc3ddfd1fb1a54798533f225f415 -->
 
 What a lock holds that its row does not say. `heap.lock` carries the VM stack's entry slot and its peers, `VmStack::entry`, `push_entry`, `current` and `MapTable::base`. `tier.lock` is the widening of `php_engine` toward the tier, in two sections: the face, a few dozen items reviewed one by one, and the kernels named by `php_jit`'s `kernels!` list, about three hundred, generated from the list and diffed as one section. `process.lock` is `php_process`'s surface, whose one consumer is `php_engine`. `link.lock` is `php_link`'s surface, the linker and the linked class record that the compiler and the engine both call (ADR-0012). Dax's `effects.lock` is retired, its content being `ops.lock`'s effects column. A lock is one of three kinds, and `xtask api-check` regenerates each from what it is a lock of: the public items of the crate the lock lives with (`heap.lock`, `process.lock`, `unit.lock`, `link.lock`, `api.lock`, and the harness's own `xtask.lock`), or of one module of its producer (`layer.lock`, where a crate outside the seam's consumers that `use`s the module fails); what the consumers import from the producer (`sapi.lock`, `tier.lock`, which is why both are headers carrying nothing until a consumer exists); or the rows of the file the seam is generated from (`ops.lock`, rendered from `ops.toml`'s `[[op]]` rows). All three fail on any difference; adding an item means committing the new lock line with the code. This is how "smallest possible codebase" is measured at the interface, where callers pay, not only in lines.
 

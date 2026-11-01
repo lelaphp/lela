@@ -37,4 +37,5 @@ select_fds
 set_fd_blocking
 set_sockopt
 stand_aside
+started_aside
 sync_fd

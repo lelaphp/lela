@@ -13,7 +13,8 @@
 //!   thread's;
 //! - [`stand_aside`], a host's main thread out of every signal's way once
 //!   the thread `php_engine` moved the process's work onto stands for it
-//!   (design §5.6, #3067);
+//!   (design §5.6, #3067), and [`started_aside`], a thread the engine
+//!   starts for itself out of it from its first instruction (#3861);
 //! - [`process`], the process's identity, its real user and group and its
 //!   supplementary groups (revision 41);
 //! - the calls on the process's file descriptors that `std` has no answer
@@ -49,7 +50,7 @@ mod locale;
 pub mod post;
 pub mod process;
 
-pub use aside::stand_aside;
+pub use aside::{stand_aside, started_aside};
 pub use fd::{
     BUFSIZ, Readiness, SockOpt, bind_fd, connect_fd, dup_fd, fd_table_size, inherit_fd, listen_fd,
     new_socket, peek_fd, poll_fd, select_fds, set_fd_blocking, set_sockopt, sync_fd,
