@@ -4277,6 +4277,10 @@ fn permanent_names(
         names
             .intern(&extension.name.as_bytes().to_ascii_lowercase())
             .ok();
+        // What its `MINIT` interns, `zend_string_init_interned(..., 1)`.
+        for bytes in &extension.interned {
+            names.intern(bytes).ok();
+        }
     }
     let declared = functions
         .iter()

@@ -16,7 +16,7 @@ use php_ext::values::walk::Hold;
 use php_ext::values::{
     Key as PhpKey, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk,
 };
-use php_ext_libxml::ffi::{Node, Ns};
+use php_ext_libxml::ffi::{NewDoc, Node, Ns};
 
 use crate::classes::FaultSlot;
 use crate::encoding::{Cx, encode_add_ns, encode_finish, encode_reset_ns, master_to_xml};
@@ -502,10 +502,9 @@ fn serialize_response_call2(
 }
 
 /// A fresh document, `xmlNewDoc("1.0")` with php's `UTF-8` encoding, and
-/// its envelope in the version's namespace: the message's to free by hand
-/// from here, where it is sent or abandoned; on the `Err` it is freed as
-/// `made` drops.
-fn new_envelope(version: i64) -> Res<(Node, Node, Option<Ns>)> {
+/// its envelope in the version's namespace: the message, freed as it
+/// drops wherever it is sent or abandoned.
+fn new_envelope(version: i64) -> Res<(NewDoc, Node, Option<Ns>)> {
     let Some(made) = Node::new_doc(Some(b"1.0")) else {
         return Err(soap_error("Unknown SOAP version"));
     };
@@ -524,7 +523,7 @@ fn new_envelope(version: i64) -> Res<(Node, Node, Option<Ns>)> {
     let ns = envelope.new_ns(href, Some(prefix));
     envelope.set_ns_call(ns);
     doc.set_root(envelope);
-    Ok((made.freed_by_hand(), envelope, ns))
+    Ok((made, envelope, ns))
 }
 
 /// The namespaces and `encodingStyle` an encoded message declares on its
@@ -554,7 +553,7 @@ pub(crate) fn serialize_response_call(
     ret: Value,
     headers: &[HeaderCall<'_>],
     version: i64,
-) -> Res<Option<Node>> {
+) -> Res<Option<NewDoc>> {
     let mut cx = Cx::default();
     encode_reset_ns(req, &mut cx);
     let built = serialize_response_body(
@@ -570,12 +569,7 @@ pub(crate) fn serialize_response_call(
     );
     encode_finish(req, &mut cx);
     let built = match req.state::<crate::State>().pending.take() {
-        Some(t) => {
-            if let Ok((doc, ..)) = &built {
-                doc.free_document();
-            }
-            Err(crate::Error::Thrown(t))
-        }
+        Some(t) => Err(crate::Error::Thrown(t)),
         None => built,
     };
     let (doc, body, head) = built?;
@@ -584,7 +578,6 @@ pub(crate) fn serialize_response_call(
         && body.children().is_none()
         && head.is_none()
     {
-        doc.free_document();
         return Ok(None);
     }
     Ok(Some(doc))
@@ -601,13 +594,10 @@ fn serialize_response_body(
     ret: Value,
     headers: &[HeaderCall<'_>],
     version: i64,
-) -> Res<(Node, Node, Option<Node>)> {
+) -> Res<(NewDoc, Node, Option<Node>)> {
     let ce = Throwables::of(req)?;
-    let (doc, envelope, ns) = new_envelope(version)?;
-    let fail = |e| {
-        doc.free_document();
-        e
-    };
+    let (made, envelope, ns) = new_envelope(version)?;
+    let doc = made.node();
     let mut use_ = Use::Literal;
     let mut head: Option<Node> = None;
     let ret = ret.deref();
@@ -652,7 +642,7 @@ fn serialize_response_body(
                 hdr_ret = (!is_null(&data)).then_some(data);
             }
             let Some(head_node) = head else {
-                return Err(fail(soap_error("Encoding: no header")));
+                return Err(soap_error("Encoding: no header"));
             };
             if let Some(hf) = first.function {
                 let used = serialize_response_call2(
@@ -667,8 +657,7 @@ fn serialize_response_body(
                     version,
                     false,
                     None,
-                )
-                .map_err(fail)?;
+                )?;
                 // php sets `use` from the header here, and the fault below
                 // sets it again before it is read.
                 let _ = used;
@@ -680,8 +669,7 @@ fn serialize_response_body(
                     hdr_ret.unwrap_or_else(Value::unpassed),
                     hdr_use,
                     head_node,
-                )
-                .map_err(fail)?;
+                )?;
                 if let Some(x) = xml_hdr {
                     if let Some(n) = &hdr_name {
                         x.set_name(n);
@@ -694,11 +682,11 @@ fn serialize_response_body(
             }
         }
         let Some(b) = envelope.new_child(ns, b"Body", None) else {
-            return Err(fail(soap_error("Encoding: no body")));
+            return Err(soap_error("Encoding: no body"));
         };
         body = b;
         let Some(param) = body.new_child(ns, b"Fault", None) else {
-            return Err(fail(soap_error("Encoding: no fault")));
+            return Err(soap_error("Encoding: no fault"));
         };
         let mut fault_ns = fault_str_of(fault, FaultSlot::CodeNs);
         use_ = Use::Literal;
@@ -745,8 +733,7 @@ fn serialize_response_body(
         };
         if version == SOAP_1_1 {
             if let Some(code) = fault_str_of(fault, FaultSlot::Code) {
-                let str = php_ext_standard::escape_html_entities(req, &code, false, 0, None, true)
-                    .map_err(fail_thrown(doc))?;
+                let str = php_ext_standard::escape_html_entities(req, &code, false, 0, None, true)?;
                 if let Some(node) = Node::new_element(Some(doc), None, b"faultcode", None) {
                     param.add_child(node);
                     if let Some(fns) = &fault_ns {
@@ -768,8 +755,7 @@ fn serialize_response_body(
                     fs,
                     Use::Literal,
                     param,
-                )
-                .map_err(fail)?;
+                )?;
                 if let Some(n) = node {
                     n.set_name(b"faultstring");
                 }
@@ -783,16 +769,14 @@ fn serialize_response_body(
                     fa,
                     Use::Literal,
                     param,
-                )
-                .map_err(fail)?;
+                )?;
                 if let Some(n) = node {
                     n.set_name(b"faultactor");
                 }
             }
         } else {
             if let Some(code) = fault_str_of(fault, FaultSlot::Code) {
-                let str = php_ext_standard::escape_html_entities(req, &code, false, 0, None, true)
-                    .map_err(fail_thrown(doc))?;
+                let str = php_ext_standard::escape_html_entities(req, &code, false, 0, None, true)?;
                 if let Some(node) = param
                     .new_child(ns, b"Code", None)
                     .and_then(|c| c.new_child(ns, b"Value", None))
@@ -818,8 +802,7 @@ fn serialize_response_body(
                     fs,
                     Use::Literal,
                     reason,
-                )
-                .map_err(fail)?;
+                )?;
                 if let Some(n) = node {
                     n.set_name(b"Text");
                     n.set_ns_call(ns);
@@ -840,7 +823,7 @@ fn serialize_response_body(
                 if let (Some(dv), Some(element)) = (detail, element)
                     && let ValueRef::Object(obj) = dv.as_ref()
                 {
-                    let props = obj.props(req).map_err(fail_thrown(doc))?;
+                    let props = obj.props(req)?;
                     if props.len() == 1
                         && let Some(name) = &element.name
                         && let Some((_, v)) = props.iter().find(
@@ -860,8 +843,7 @@ fn serialize_response_body(
                     None,
                     use_,
                     node,
-                )
-                .map_err(fail)?;
+                )?;
                 if let Some(x) = x {
                     if let Some(fnb) = soap_binding(sdl, function) {
                         if fnb.style == Style::Rpc && element.is_none() {
@@ -886,14 +868,14 @@ fn serialize_response_body(
         } else {
             let d = fault_slot(fault, FaultSlot::Detail);
             if !is_null(&d) {
-                serialize_zval(req, cx, sdl, d, None, detail_name, use_, param).map_err(fail)?;
+                serialize_zval(req, cx, sdl, d, None, detail_name, use_, param)?;
             }
         }
     } else {
         if !headers.is_empty() {
             head = envelope.new_child(ns, b"Header", None);
             let Some(head_node) = head else {
-                return Err(fail(soap_error("Encoding: no header")));
+                return Err(soap_error("Encoding: no header"));
             };
             for h in headers {
                 if matches!(h.retval.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
@@ -943,8 +925,7 @@ fn serialize_response_body(
                         version,
                         false,
                         Some(&mut xml_hdr),
-                    )
-                    .map_err(fail)?;
+                    )?;
                     if used == Use::Encoded {
                         use_ = Use::Encoded;
                     }
@@ -959,8 +940,7 @@ fn serialize_response_body(
                         hdr_ret.unwrap_or_else(Value::unpassed),
                         hdr_use,
                         head_node,
-                    )
-                    .map_err(fail)?;
+                    )?;
                     if let Some(x) = xml_hdr {
                         if let Some(n) = &hdr_name {
                             x.set_name(n);
@@ -982,7 +962,7 @@ fn serialize_response_body(
             }
         }
         let Some(b) = envelope.new_child(ns, b"Body", None) else {
-            return Err(fail(soap_error("Encoding: no body")));
+            return Err(soap_error("Encoding: no body"));
         };
         body = b;
         let used = serialize_response_call2(
@@ -997,8 +977,7 @@ fn serialize_response_body(
             version,
             true,
             None,
-        )
-        .map_err(fail)?;
+        )?;
         if used == Use::Encoded {
             use_ = Use::Encoded;
         }
@@ -1012,15 +991,7 @@ fn serialize_response_body(
             envelope.new_ns(SOAP_1_2_ENC_NAMESPACE, Some(SOAP_1_2_ENC_NS_PREFIX));
         }
     }
-    Ok((doc, body, head))
-}
-
-/// A throwable leaving the response's build: the document freed first.
-fn fail_thrown(doc: Node) -> impl Fn(Thrown) -> crate::Error {
-    move |t| {
-        doc.free_document();
-        crate::Error::Thrown(t)
-    }
+    Ok((made, body, head))
 }
 
 /// A string slot's bytes.
@@ -1045,16 +1016,17 @@ pub(crate) fn serialize_function_call(
     arguments: &[Value],
     version: i64,
     soap_headers: Option<&[Value]>,
-) -> Res<Node> {
+) -> Res<NewDoc> {
     let mut cx = Cx::default();
     encode_reset_ns(req, &mut cx);
-    let (doc, envelope, ns) = match new_envelope(version) {
+    let (made, envelope, ns) = match new_envelope(version) {
         Ok(made) => made,
         Err(e) => {
             encode_finish(req, &mut cx);
             return Err(e);
         }
     };
+    let doc = made.node();
     let built = (|| -> Res<()> {
         let head = soap_headers.and_then(|_| envelope.new_child(ns, b"Header", None));
         let Some(body) = envelope.new_child(ns, b"Body", None) else {
@@ -1193,13 +1165,7 @@ pub(crate) fn serialize_function_call(
         Some(t) => Err(crate::Error::Thrown(t)),
         None => built,
     };
-    match built {
-        Ok(()) => Ok(doc),
-        Err(e) => {
-            doc.free_document();
-            Err(e)
-        }
-    }
+    built.map(|()| made)
 }
 
 // ---- __getFunctions() and __getTypes()

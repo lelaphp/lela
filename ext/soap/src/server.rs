@@ -19,7 +19,7 @@ use php_ext::request::{Ini, OutputOp, OwnedStream as _, Request, StartHandler, S
 use php_ext::values::{
     ClassId, Emalloc, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk,
 };
-use php_ext_libxml::ffi::{Kind, Node, Save};
+use php_ext_libxml::ffi::{Kind, NewDoc, Node, Save};
 
 use crate::classes::{Fault as FaultArgs, SoapFault, SoapHeader};
 use crate::encoding::{Cx, encode_finish, encode_reset_ns, master_to_zval};
@@ -477,12 +477,9 @@ fn soap_server_fault_ex(
             None
         }
     };
+    // The fault is freed as `d` drops, once it is dumped.
     let buf = doc
-        .and_then(|d| {
-            let (dumped, _) = Save::doc(d, 0, false, None);
-            d.free_document();
-            dumped
-        })
+        .and_then(|d| Save::doc(d.node(), 0, false, None).0)
         .unwrap_or_default();
     let flash = server_var(req, b"HTTP_USER_AGENT").is_some_and(|a| a == b"Shockwave Flash");
     if !flash {
@@ -1545,8 +1542,8 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
     let Some(doc_request) = doc_request else {
         return Err(server_fault_en(req, "Client", "Bad Request"));
     };
-    if doc_request.int_subset().is_some() {
-        if let Some(env) = get_node(doc_request.children(), b"Envelope", None)
+    if doc_request.node().int_subset().is_some() {
+        if let Some(env) = get_node(doc_request.node().children(), b"Envelope", None)
             && let Some(ns) = env.ns()
         {
             let h = crate::xml::href(ns);
@@ -1556,7 +1553,7 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
                 req.state::<State>().soap_version = SOAP_1_2;
             }
         }
-        doc_request.free_document();
+        drop(doc_request);
         return Err(server_fault_en(
             req,
             "Server",
@@ -1734,21 +1731,23 @@ fn has_function(
 }
 
 /// The request served: `deserialize_function_call`, the headers'
-/// functions, the function, and the response or fault written.
+/// functions, the function, and the response or fault written. The parsed
+/// request is freed once it is read, as php's `xmlFreeDoc(doc_request)`
+/// follows `deserialize_function_call`.
 #[expect(clippy::too_many_lines, reason = "one C function, kept whole")]
 fn serve(
     req: &mut Request,
     this: PhpObject,
     sdl: Option<&Sdl>,
-    doc_request: Node,
+    doc_request: NewDoc,
     actor: Option<&[u8]>,
     soap_action: Option<&[u8]>,
     kind: ServiceKind,
     uri: Option<&[u8]>,
 ) -> Res<()> {
     let ce = Throwables::of(req)?;
-    let parsed = deserialize_function_call(req, sdl, doc_request, actor, soap_action);
-    doc_request.free_document();
+    let parsed = deserialize_function_call(req, sdl, doc_request.node(), actor, soap_action);
+    drop(doc_request);
     let mut parsed = match parsed {
         Ok(c) => c,
         Err(Error::Thrown(t)) => {
@@ -1969,8 +1968,8 @@ fn serve(
         };
         discard(req);
         if let Some(doc) = doc_return {
-            let (buf, _) = Save::doc(doc, 0, false, None);
-            doc.free_document();
+            let (buf, _) = Save::doc(doc.node(), 0, false, None);
+            drop(doc);
             let buf = buf.unwrap_or_default();
             if buf.is_empty() {
                 return Err(docref_error(req, "Dump memory failed"));

@@ -425,10 +425,35 @@ impl Request {
         Err(crate::api::raising::error(self, &message))
     }
 
+    /// `zend_abstract_method_call` (`Z/Zend/zend_object_handlers.c:1932`)
+    /// where a lookup's end meets a method declared abstract, the
+    /// instance one's `exit:` (`zend_std_get_method`) and the static
+    /// one's alike: `Cannot call abstract method A::f()`, named by the
+    /// class that declares it.
+    pub(crate) fn refuse_abstract(&mut self, function: Function) -> Result<(), Thrown> {
+        let Some(name) = self
+            .method_decl(function)
+            .filter(|decl| decl.is_abstract)
+            .map(|decl| decl.function.name.clone())
+        else {
+            return Ok(());
+        };
+        let class = self.method_class(function);
+        let class = class.map_or(&b""[..], |class| self.symbols().class_name(class));
+        let message = bytes!(
+            b"Cannot call abstract method ",
+            class,
+            b"::",
+            &name.0[..],
+            b"()"
+        );
+        Err(crate::api::raising::error(self, &message))
+    }
+
     /// The end of `zend_std_get_static_method`
     /// (`Z/Zend/zend_object_handlers.c:2066`), once the method is found
     /// and the scope may reach it: an abstract method is
-    /// `zend_abstract_method_call`'s `Error`, and one whose scope is a
+    /// [`Request::refuse_abstract`]'s `Error`, and one whose scope is a
     /// trait, which is a method named on the trait itself and never one
     /// a class took from it, is php's deprecation, after which a
     /// handler that threw stops the call. The answer is whether the
@@ -439,12 +464,10 @@ impl Request {
         &mut self,
         function: Function,
     ) -> Result<StaticFound, Thrown> {
-        let Some((is_abstract, takes_this)) = self
-            .method_decl(function)
-            .map(|decl| (decl.is_abstract, decl.is_instance))
-        else {
+        let Some(takes_this) = self.method_decl(function).map(|decl| decl.is_instance) else {
             return Ok(StaticFound::default());
         };
+        self.refuse_abstract(function)?;
         let plain = StaticFound {
             of_trait: false,
             takes_this,
@@ -453,9 +476,9 @@ impl Request {
             return Ok(plain);
         };
         let is_trait = self.class_is(class, ClassKind::Trait);
-        // The name is spelled only for the `Error` or the deprecation:
-        // nearly every call is neither, and makes no string.
-        if !is_abstract && !is_trait {
+        // The name is spelled only for the deprecation: nearly every
+        // call makes no string.
+        if !is_trait {
             return Ok(plain);
         }
         let name = self
@@ -463,25 +486,17 @@ impl Request {
             .map(|decl| decl.function.name.clone())
             .unwrap_or_default();
         let shown = bytes!(self.symbols().class_name(class), b"::", &name.0[..]);
-        if is_abstract {
-            return Err(crate::api::raising::error(
-                self,
-                &bytes!(b"Cannot call abstract method ", shown, b"()"),
-            ));
-        }
-        if is_trait {
-            crate::api::raising::deprecated(
-                self,
-                &bytes!(
-                    b"Calling static trait method ",
-                    shown,
-                    b" is deprecated, it should only be called on a class using the trait"
-                ),
-            );
-            none_pending(self)?;
-        }
+        crate::api::raising::deprecated(
+            self,
+            &bytes!(
+                b"Calling static trait method ",
+                shown,
+                b" is deprecated, it should only be called on a class using the trait"
+            ),
+        );
+        none_pending(self)?;
         Ok(StaticFound {
-            of_trait: is_trait,
+            of_trait: true,
             takes_this,
         })
     }

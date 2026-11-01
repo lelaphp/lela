@@ -156,7 +156,38 @@ impl Builder<'_> {
     /// with (`Z/ext/opcache/jit/zend_jit_trace.c:1331`,
     /// `Z/Zend/Optimizer/zend_ssa.c:544-800`): what the opline writes, and
     /// a variable it reads and may take a counted owner of, a sent or
-    /// copied variable and an assigned one among them.
+    /// copied variable and an assigned one among them, and the variable a
+    /// closure's `use` binds, by value as by reference (`:754-760`).
+    ///
+    /// A loop whose `+=` a closure captures by value after it, #3721's
+    /// program: the back edge brings the `BIND_LEXICAL`'s `$c`, which
+    /// `is_checked_guard` holds nothing of, so the phi keeps its guard at
+    /// the header, and the `$i > 50` side trace grows from php's exit:
+    ///
+    /// ```php
+    /// function f() { $c = 0; $g = null; for ($i = 0; $i < 100; $i++) { $c += 2; $g = function () use ($c) { return $c; }; if ($i > 50) { $c++; } } return $c + $g(); }
+    /// echo f(), "\n";
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 497
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:3
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %s:2
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 2 f() %s:2
+    /// ---- TRACE 2 start (side trace 1/2) f() %s:2
+    /// ---- TRACE 2 stop (link to 1)
+    /// ---- TRACE 2 compiled
+    ///
+    ///      TRACE 1 exit 0 f() %s:2
+    /// ---- TRACE 3 start (side trace 1/0) f() %s:2
+    /// ---- TRACE 3 stop (return)
+    /// ---- TRACE 3 compiled
+    /// ```
     fn defines(&self, line: &Line) -> [bool; 3] {
         let Some(op) = self.opline_of(line) else {
             return [false; 3];
@@ -183,7 +214,8 @@ impl Builder<'_> {
                             | Opcode::Yield
                     )));
         let op2 = line.op2_def.is_some()
-            || (cv(op.op2_type) && (frameless || line.opcode == Opcode::Assign));
+            || (cv(op.op2_type)
+                && (frameless || matches!(line.opcode, Opcode::Assign | Opcode::BindLexical)));
         let data = matches!(
             line.opcode,
             Opcode::AssignDim

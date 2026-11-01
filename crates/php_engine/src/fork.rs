@@ -188,6 +188,43 @@ pub(crate) fn spawn<T: Send + 'static>(
     })
 }
 
+/// `body` on the thread `builder` describes, as [`spawn`] starts one, out
+/// of every signal's way from its first instruction
+/// ([`php_process::started_aside`]): a thread the engine starts for
+/// itself that runs no PHP, its timer and a [`Worker`]'s, so a signal sent
+/// to the process is delivered to the thread doing the request's work and
+/// interrupts its blocking call, as php's one thread takes it (#3861).
+///
+/// ```php
+/// set_time_limit(30);
+/// pcntl_signal(SIGUSR1, function ($signo) { echo "handled\n"; });
+/// $parent = getmypid();
+/// if (($child = pcntl_fork()) === 0) {
+///     usleep(200000);
+///     posix_kill($parent, SIGUSR1);
+///     exit(0);
+/// }
+/// [$here, $there] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+/// $read = [$here];
+/// $write = $except = null;
+/// $start = microtime(true);
+/// var_dump(@stream_select($read, $write, $except, 5));
+/// var_dump(microtime(true) - $start < 4);
+/// pcntl_signal_dispatch();
+/// pcntl_waitpid($child, $status);
+/// ```
+/// ```expect process
+/// bool(false)
+/// bool(true)
+/// handled
+/// ```
+pub(crate) fn spawn_aside<T: Send + 'static>(
+    builder: thread::Builder,
+    body: impl FnOnce() -> T + Send + 'static,
+) -> io::Result<Thread<T>> {
+    php_process::started_aside(|| spawn(builder, body))
+}
+
 /// A thread a host serves requests on, each through its own
 /// [`Engine::serve`](crate::Engine::serve), as a server that keeps a pool
 /// of request threads does (design §5.14): started through the engine's
@@ -297,10 +334,11 @@ pub trait Parked: Send + Sync + 'static {
 
 /// The one thread a [`Parked`] body runs on, an engine's thread as
 /// ADR-0010's Threads has them: started on demand through the engine's
-/// one home ([`spawn`]), so a fork counts it, parked in its body
-/// between jobs, joined before every fork, a host's and a request's
-/// alike, and started again after it in the process that asked, as the
-/// engine's timer thread is (#2541), and joined when the worker drops.
+/// one home, out of every signal's way ([`spawn_aside`]), so a fork
+/// counts it, parked in its body between jobs, joined before every fork,
+/// a host's and a request's alike, and started again after it in the
+/// process that asked, as the engine's timer thread is (#2541), and
+/// joined when the worker drops.
 /// A child forked meanwhile has no thread for it until it wakes one.
 pub struct Worker {
     name: String,
@@ -356,7 +394,7 @@ impl Worker {
         if thread.is_none() {
             let parked = Arc::clone(&self.parked);
             let builder = thread::Builder::new().name(self.name.clone());
-            *thread = spawn(builder, move || parked.run()).ok();
+            *thread = spawn_aside(builder, move || parked.run()).ok();
         }
         thread.is_some()
     }

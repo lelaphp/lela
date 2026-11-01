@@ -304,8 +304,9 @@ const REFUSALS: Refusals = Refusals::NONE
 
 impl ObjectHandlers for Handlers {
     /// `curl_free_obj`: the streams verified silently
-    /// ([`verify_before_cleanup`]), the `CURL *` cleaned up with the
-    /// request reachable, under what the verify left pending as the
+    /// ([`verify_before_cleanup`]), the `CURL *` cleaned up where it
+    /// stands on the payload with the request reachable
+    /// ([`Easy::free`]), under what the verify left pending as the
     /// multi's cleanup is, or as the transfer holding it ends, then
     /// everything the `CurlHandle` held let go, the share's object last,
     /// as php releases `ch->share` after `curl_easy_cleanup`; what a
@@ -362,19 +363,102 @@ impl ObjectHandlers for Handlers {
     /// int(5)
     /// end
     /// ```
+    ///
+    /// The `CURL *` stays the payload's over the cleanup too, so a
+    /// callable the cleanup serves reaches it through its `CurlHandle`,
+    /// as php's reaches `ch->cp`: libcurl refuses a multi call from
+    /// inside the callback `CURLM_RECURSIVE_API_CALL`, and the `CURL *`
+    /// answers what it still holds:
+    ///
+    /// ```php
+    /// $m = curl_multi_init();
+    /// $a = curl_init('http://127.0.0.1:1/');
+    /// $b = curl_init('http://127.0.0.1:1/');
+    /// foreach ([$a, $b] as $i => $h) {
+    ///     curl_setopt($h, CURLOPT_VERBOSE, 1);
+    ///     curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $t, $d) use ($m, $i) {
+    ///         if ($t == CURLINFO_TEXT && str_starts_with($d, "closing")) { echo "$i: $d"; var_dump(curl_multi_remove_handle($m, $ch), curl_getinfo($ch, CURLINFO_RESPONSE_CODE)); }
+    ///     });
+    ///     curl_multi_add_handle($m, $h);
+    /// }
+    /// curl_multi_exec($m, $r);
+    /// echo "unset\n";
+    /// unset($a, $b, $h);
+    /// unset($m);
+    /// var_dump(gc_collect_cycles());
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// unset
+    /// 0: closing connection #0
+    /// int(8)
+    /// int(0)
+    /// 1: closing connection #1
+    /// int(8)
+    /// int(0)
+    /// int(5)
+    /// end
+    /// ```
+    ///
+    /// Every other native on the `CurlHandle` answers there as php's
+    /// does: a transfer refused `CURLE_RECURSIVE_API_CALL` (93), a pause
+    /// `CURLE_BAD_FUNCTION_ARGUMENT` (43), an option set and read back, a
+    /// copy made, and a reset refused as from any callback:
+    ///
+    /// ```php
+    /// $m = curl_multi_init();
+    /// $h = curl_init('http://127.0.0.1:1/');
+    /// curl_setopt($h, CURLOPT_VERBOSE, 1);
+    /// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $t, $d) use ($m) {
+    ///     if ($t != CURLINFO_TEXT || !str_starts_with($d, 'closing')) {
+    ///         return;
+    ///     }
+    ///     echo $d;
+    ///     var_dump(curl_exec($ch), curl_errno($ch), curl_pause($ch, CURLPAUSE_ALL), curl_upkeep($ch));
+    ///     var_dump(curl_setopt($ch, CURLOPT_PRIVATE, 'p'), curl_getinfo($ch, CURLINFO_PRIVATE), curl_escape($ch, 'a b'));
+    ///     var_dump(curl_getinfo(curl_copy_handle($ch), CURLINFO_EFFECTIVE_URL), curl_multi_add_handle($m, $ch));
+    ///     try { curl_reset($ch); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// });
+    /// curl_multi_add_handle($m, $h);
+    /// curl_multi_exec($m, $r);
+    /// unset($m, $h);
+    /// var_dump(gc_collect_cycles());
+    /// ```
+    /// ```expect
+    /// closing connection #0
+    /// bool(false)
+    /// int(93)
+    /// int(43)
+    /// bool(false)
+    /// bool(true)
+    /// string(1) "p"
+    /// string(5) "a%20b"
+    /// string(19) "http://127.0.0.1:1/"
+    /// int(8)
+    /// curl_reset(): Attempt to reset cURL handle from a callback
+    /// int(3)
+    /// ```
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let mut pending = Pending::default();
         verify_before_cleanup(req, object, &mut pending);
         // The callables stay on the payload over the cleanup, which
-        // serves them, as php dtors each `fcc` after `curl_easy_cleanup`.
-        let mut easy = object
-            .native_mut::<Curl>(req)
-            .and_then(|curl| curl.easy.take());
+        // serves them, as php dtors each `fcc` after `curl_easy_cleanup`,
+        // and so does the `CURL *`, as php leaves `ch->cp` in place.
         let mut closed = None;
+        pending.release(req, |req| {
+            closed = Easy::free(req, |req| {
+                object.native_mut::<Curl>(req).map(|curl| &mut curl.easy)
+            });
+        });
+        if let Some(thrown) = closed.take() {
+            pending.park(req, thrown);
+        }
+        // `ch->to_free` let go under what the cleanup's callables threw.
+        let mut curl = object.native_mut::<Curl>(req).map(std::mem::take);
+        let mut easy = curl.as_mut().and_then(|curl| curl.easy.take());
         pending.release(req, |req| {
             closed = easy.take().and_then(|easy| easy.close(req));
         });
-        let mut curl = object.native_mut::<Curl>(req).map(std::mem::take);
         if let Some(thrown) = closed {
             pending.park(req, thrown);
         }

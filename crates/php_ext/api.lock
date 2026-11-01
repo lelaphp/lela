@@ -133,6 +133,7 @@ abi::ExtensionBuilder::info
 abi::ExtensionBuilder::ini
 abi::ExtensionBuilder::input_filter
 abi::ExtensionBuilder::intercept
+abi::ExtensionBuilder::interned
 abi::ExtensionBuilder::interrupt
 abi::ExtensionBuilder::observer
 abi::ExtensionBuilder::observer_when

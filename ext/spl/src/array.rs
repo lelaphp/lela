@@ -26,7 +26,9 @@ use php_ext::abi::{
     Std, This, True, Union,
 };
 use php_ext::attr::php_class;
-use php_ext::call::{autoload, call, call_method, clone_with, instantiate, lookup_class};
+use php_ext::call::{
+    autoload, call, call_method, clone_with, create_object, instantiate, lookup_class,
+};
 use php_ext::coerce::{callable_checked, compare, to_long, truthy};
 use php_ext::raising::{
     Level, Thrown, deprecated, illegal_container_offset, throw, throw_error, throw_exception_ex,
@@ -882,6 +884,35 @@ impl ArrayObject {
     /// }
     /// a=1;b=2;c=3;
     /// ```
+    ///
+    /// The object is made as `spl_array_object_new_ex` makes it, refusing
+    /// no class, so an abstract iterator class set by the constructor or
+    /// `setIteratorClass` is instantiated where `new` refuses it, and a
+    /// clone of it is made as `spl_array_object_clone` makes it:
+    ///
+    /// ```php
+    /// abstract class AI extends ArrayIterator {}
+    /// $a = new ArrayObject([1, 2], 0, 'AI');
+    /// var_dump(get_class($a->getIterator()));
+    /// $b = new ArrayObject([3]); $b->setIteratorClass('AI');
+    /// $it = $b->getIterator(); $c = clone $it;
+    /// var_dump(get_class($it), iterator_to_array($it), get_class($c), get_class((clone $b)->getIterator()));
+    /// foreach ($a as $k => $v) echo "$k=$v;";
+    /// echo "\n";
+    /// try { new AI([1]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// string(2) "AI"
+    /// string(2) "AI"
+    /// array(1) {
+    ///   [0]=>
+    ///   int(3)
+    /// }
+    /// string(2) "AI"
+    /// string(2) "AI"
+    /// 0=1;1=2;
+    /// Cannot instantiate abstract class AI
+    /// ```
     #[php(tentative)]
     fn getIterator(
         req: &mut Request,
@@ -904,7 +935,7 @@ impl ArrayObject {
                 }
             },
         };
-        let iterator = php_ext::call::new_object(req, class)?;
+        let iterator = create_object(req, class)?;
         let held = Owner::take(req, this);
         let old = with(req, *iterator, |p| {
             p.flags = flags & CLONE_MASK;

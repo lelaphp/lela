@@ -183,8 +183,8 @@ impl ObjectHandlers for Handlers {
             for &handle in &easy {
                 verify_before_cleanup(req, handle, &mut pending);
             }
-            // A `CurlHandle` whose free is under way has no `CURL *` left
-            // to hold, php's `IS_OBJ_FREE_CALLED`.
+            // A `CurlHandle` whose free has cleaned its `CURL *` up has
+            // none left to hold, php's `IS_OBJ_FREE_CALLED`.
             let easy: Vec<EasyId> = easy
                 .into_iter()
                 .filter_map(|handle| object_easy(req, handle))
@@ -729,8 +729,10 @@ fn curl_multi_exec(
                 pending.park(req, thrown);
             }
         });
-        // A `CurlHandle` whose free is under way has no `CURL *` left
-        // to hold, as in `curl_multi_free_obj`.
+        // A `CurlHandle` whose free has cleaned its `CURL *` up has none
+        // left to hold, as in `curl_multi_free_obj`; one under its
+        // cleanup is held, and libcurl refuses the perform from inside
+        // the callback.
         if let Some(easy) = object_easy(req, *handle) {
             held.push(easy);
         }
@@ -1038,10 +1040,11 @@ fn easy_id(req: &Request, handle: PhpObject) -> Option<EasyId> {
 /// int(7)
 /// ```
 ///
-/// Called from a callable a `CurlHandle`'s own free serves, it passes
-/// that `CurlHandle` over, whose cleanup detaches it, and lets `easyh`
-/// go; the other `CurlHandle`, freed as `easyh` lets it go inside that
-/// cleanup, prints nothing, under php as here:
+/// Called from a callable a `CurlHandle`'s own free serves, it lets
+/// `easyh` go, its remove of that `CurlHandle` refused
+/// `CURLM_RECURSIVE_API_CALL` while the cleanup detaches it; the other
+/// `CurlHandle`, freed as `easyh` lets it go inside that cleanup, prints
+/// nothing, under php as here:
 ///
 /// ```php
 /// $m = curl_multi_init();
@@ -1096,9 +1099,9 @@ fn curl_multi_close(
             if let Some(thrown) = verify_handlers(req, handle, true) {
                 pending.park(req, thrown);
             }
-            // A `CurlHandle` whose free is under way has no `CURL *` to
-            // remove: its cleanup, which served this callable, detaches it,
-            // where php's remove is refused `CURLM_RECURSIVE_API_CALL`.
+            // A `CurlHandle` whose free has cleaned its `CURL *` up has
+            // none to remove; one under its cleanup, which served this
+            // callable, is refused `CURLM_RECURSIVE_API_CALL`, as php's.
             if let Some(easy) = object_easy(req, handle)
                 && let (_, Some(thrown)) = multi.remove(req, easy)
             {

@@ -6,7 +6,9 @@
 //! `SIGTERM`, `SIGINT` and `SIGQUIT`, which put `SIGTERM` back to
 //! `fcgi_setup_signals`'s handler and send it to the whole process group,
 //! the parent among it, so the children and the parent end together. And
-//! `accept` itself, which a signal interrupts here, where std's retries.
+//! `accept` itself, which a signal interrupts here, where std's retries,
+//! and which a stop handled after the loop's check fails at once
+//! ([`accepting_on`]).
 // seams.toml rule unsafe.one-op: every unsafe block is one operation with
 // a SAFETY comment.
 #![deny(
@@ -26,12 +28,70 @@ static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 static GROUP: AtomicI32 = AtomicI32::new(0);
 /// `exit_signal`: the parent was told to stop.
 static EXIT: AtomicBool = AtomicBool::new(false);
+/// The number the accept loop accepts on, which [`on_term`] takes from
+/// the listening socket; -1 where none is named or it was taken.
+static LISTENING: AtomicI32 = AtomicI32::new(-1);
 
-/// `fcgi_signal_handler`.
+/// `fcgi_signal_handler`, and php-fpm's `sig_soft_quit` after it
+/// ([`stop_accepting`]).
 extern "C" fn on_term(signo: libc::c_int) {
     if signo == libc::SIGTERM || signo == libc::SIGUSR1 {
         SHUTDOWN.store(true, Ordering::Relaxed);
+        stop_accepting();
     }
+}
+
+/// php-fpm's `sig_soft_quit` (`Z/sapi/fpm/fpm/fpm_signals.c:142-153`):
+/// the number the accept loop accepts on made to name a socket that
+/// listens on nothing, so an `accept` the loop enters after its
+/// `in_shutdown` check fails at once where it would wait for the next
+/// connection. php-cgi's handler sets `in_shutdown` alone, and a stop handled
+/// between the check and `accept` is lost until a connection comes
+/// (#3869). The socket itself is kept open under another number until the
+/// process ends, as php-cgi keeps it, so a web server's connection is
+/// queued and reset at the exit as php-cgi's is, and a sibling child's
+/// `accept` is untouched. errno is left as the handler found it.
+fn stop_accepting() {
+    let fd = LISTENING.swap(-1, Ordering::Relaxed);
+    if fd < 0 {
+        return;
+    }
+    let errno = nix::errno::Errno::last_raw();
+    // SAFETY: `fcntl(F_DUPFD_CLOEXEC)` is async-signal-safe; the number it
+    // opens is never closed, which keeps the socket listening until the
+    // process ends.
+    unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    // SAFETY: `socket` is async-signal-safe and touches no memory.
+    let unbound = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if unbound >= 0 {
+        // SAFETY: `dup2` is async-signal-safe; `fd` is the number the
+        // listening value owns, which now names the unbound socket and
+        // which that value closes as its own.
+        unsafe { libc::dup2(unbound, fd) };
+        // SAFETY: `close` of the number `socket` just opened, which nothing
+        // else names.
+        unsafe { libc::close(unbound) };
+    }
+    nix::errno::Errno::set_raw(errno);
+}
+
+/// The listening socket the accept loop accepts on, from its first
+/// `in_shutdown` check on, which [`on_term`] takes the number from.
+pub(crate) fn accepting_on(listening: BorrowedFd<'_>) {
+    LISTENING.store(listening.as_raw_fd(), Ordering::Relaxed);
+}
+
+/// The listening socket no longer accepted on, its number about to be
+/// closed: [`on_term`] leaves it alone.
+pub(crate) fn not_accepting_on(listening: BorrowedFd<'_>) {
+    LISTENING
+        .compare_exchange(
+            listening.as_raw_fd(),
+            -1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
+        .ok();
 }
 
 /// `fastcgi_cleanup`: `sigaction(SIGTERM, &old_term, 0)`, `old_term`

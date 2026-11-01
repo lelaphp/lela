@@ -18,17 +18,10 @@ use crate::shared::add_soap_fault;
 use crate::xml::{attr_content, attr_is_equal, get_attribute, get_node, node_is_equal};
 use crate::{Res, SOAP_1_1, SOAP_1_2};
 
-/// The fault a malformed response is answered with, the document freed.
-fn bad(
-    req: &mut Request,
-    this: PhpObject,
-    doc: Option<Node>,
-    code: &[u8],
-    text: &[u8],
-) -> Res<(bool, Owner<Value>)> {
-    if let Some(d) = doc {
-        d.free_document();
-    }
+/// The fault a malformed response is answered with; the caller's document
+/// is freed as it returns, after the fault, as php's `xmlFreeDoc` follows
+/// `add_soap_fault`.
+fn bad(req: &mut Request, this: PhpObject, code: &[u8], text: &[u8]) -> Res<(bool, Owner<Value>)> {
     add_soap_fault(req, this, code, text, None, None, b"en")?;
     Ok((false, Owner::null()))
 }
@@ -87,23 +80,14 @@ fn parse(
     if buffer.is_empty() {
         return Ok((true, Owner::null()));
     }
-    let Some(response) = crate::xml::parse_memory(req, buffer)? else {
-        return bad(
-            req,
-            this,
-            None,
-            b"Client",
-            b"looks like we got no XML document",
-        );
+    let Some(parsed) = crate::xml::parse_memory(req, buffer)? else {
+        return bad(req, this, b"Client", b"looks like we got no XML document");
     };
+    // The tree is freed as `parsed` drops, where `parse_packet_soap`
+    // returns, as php's `xmlFreeDoc(response)` precedes each return.
+    let response = parsed.node();
     if response.int_subset().is_some() {
-        return bad(
-            req,
-            this,
-            Some(response),
-            b"Client",
-            b"DTD are not supported by SOAP",
-        );
+        return bad(req, this, b"Client", b"DTD are not supported by SOAP");
     }
     let mut env = None;
     let mut envelope_ns: &[u8] = b"";
@@ -122,13 +106,7 @@ fn parse(
                 envelope_ns = SOAP_1_2_ENV_NAMESPACE;
                 soap_version = SOAP_1_2;
             } else {
-                return bad(
-                    req,
-                    this,
-                    Some(response),
-                    b"VersionMismatch",
-                    b"Wrong Version",
-                );
+                return bad(req, this, b"VersionMismatch", b"Wrong Version");
             }
         }
         trav = t.next();
@@ -137,7 +115,6 @@ fn parse(
         return bad(
             req,
             this,
-            Some(response),
             b"Client",
             b"looks like we got XML without \"Envelope\" element",
         );
@@ -148,7 +125,6 @@ fn parse(
             return bad(
                 req,
                 this,
-                Some(response),
                 b"Client",
                 b"A SOAP Envelope element cannot have non Namespace qualified attributes",
             );
@@ -157,18 +133,11 @@ fn parse(
                 return bad(
                     req,
                     this,
-                    Some(response),
                     b"Client",
                     b"encodingStyle cannot be specified on the Envelope",
                 );
             } else if attr_content(a) != SOAP_1_1_ENC_NAMESPACE {
-                return bad(
-                    req,
-                    this,
-                    Some(response),
-                    b"Client",
-                    b"Unknown data encoding style",
-                );
+                return bad(req, this, b"Client", b"Unknown data encoding style");
             }
         }
         attr = a.next();
@@ -194,7 +163,6 @@ fn parse(
         return bad(
             req,
             this,
-            Some(response),
             b"Client",
             b"Body must be present in a SOAP envelope",
         );
@@ -206,7 +174,6 @@ fn parse(
                 return bad(
                     req,
                     this,
-                    Some(response),
                     b"Client",
                     b"A SOAP Body element cannot have non Namespace qualified attributes",
                 );
@@ -216,18 +183,11 @@ fn parse(
                 return bad(
                     req,
                     this,
-                    Some(response),
                     b"Client",
                     b"encodingStyle cannot be specified on the Body",
                 );
             } else if attr_content(a) != SOAP_1_1_ENC_NAMESPACE {
-                return bad(
-                    req,
-                    this,
-                    Some(response),
-                    b"Client",
-                    b"Unknown data encoding style",
-                );
+                return bad(req, this, b"Client", b"Unknown data encoding style");
             }
         }
         attr = a.next();
@@ -236,7 +196,6 @@ fn parse(
         return bad(
             req,
             this,
-            Some(response),
             b"Client",
             b"A SOAP 1.2 envelope can contain only Header and Body",
         );
@@ -248,7 +207,6 @@ fn parse(
                 return bad(
                     req,
                     this,
-                    Some(response),
                     b"Client",
                     b"A SOAP Header element cannot have non Namespace qualified attributes",
                 );
@@ -257,18 +215,11 @@ fn parse(
                     return bad(
                         req,
                         this,
-                        Some(response),
                         b"Client",
                         b"encodingStyle cannot be specified on the Header",
                     );
                 } else if attr_content(a) != SOAP_1_1_ENC_NAMESPACE {
-                    return bad(
-                        req,
-                        this,
-                        Some(response),
-                        b"Client",
-                        b"Unknown data encoding style",
-                    );
+                    return bad(req, this, b"Client", b"Unknown data encoding style");
                 }
             }
             attr = a.next();
@@ -277,12 +228,12 @@ fn parse(
     // A fault.
     if let Some(fault) = get_node(body.children(), b"Fault", Some(envelope_ns)) {
         let r = read_fault(req, cx, this, fault, soap_version);
-        response.free_document();
+        drop(parsed);
         r?;
         return Ok((false, Owner::null()));
     }
     let r = read_body(req, cx, body, head, fn_, sdl, soap_headers);
-    response.free_document();
+    drop(parsed);
     r.map(|v| (true, v))
 }
 

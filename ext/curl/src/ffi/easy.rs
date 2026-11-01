@@ -189,14 +189,18 @@ pub(super) struct Handle {
     /// False for a `CURL *` the library frees itself, a pushed one it was
     /// told to deny.
     owned: bool,
+    /// Whether [`Easy::free`] cleaned the `CURL *` up, so that nothing
+    /// reaches it after and the drop frees only the tag.
+    cleaned: bool,
 }
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        if self.owned {
+        // A cleaned one was cleaned up by `curl_free_obj`'s cleanup.
+        if self.owned && !self.cleaned {
             // SAFETY: the live handle this value owns, cleaned up once.
             unsafe { sys::curl_easy_cleanup(self.raw.as_ptr()) };
-        } else {
+        } else if !self.owned {
             // The library frees it after this, its data pointing nowhere.
             self.owned().unpoint();
         }
@@ -290,7 +294,12 @@ impl Handle {
         }));
         // SAFETY: `into_raw` never answers null.
         let tag = unsafe { NonNull::new_unchecked(tag) };
-        let mut handle = Handle { raw, tag, owned };
+        let mut handle = Handle {
+            raw,
+            tag,
+            owned,
+            cleaned: false,
+        };
         handle.owned().point();
         handle
     }
@@ -534,29 +543,81 @@ impl Easy {
         EasyId(self.0.id())
     }
 
-    /// The `CURL *` given up: cleaned up now with the request reachable
-    /// and its object still served, so a callable the library calls back
-    /// under `curl_easy_cleanup` is served for it as `curl_free_obj`
-    /// serves it, its `fcc` let go only after the cleanup; or, its object
-    /// no longer served, as the call that holds it ends, when the object
-    /// may be gone.
+    /// The `CURL *` given up: dropped now with the request reachable and
+    /// its object still served, cleaned up unless [`Easy::free`] cleaned
+    /// it up; or, its object no longer served, as the call that holds it
+    /// ends, when the object may be gone.
     pub(crate) fn close(self, req: &mut Request) -> Option<Thrown> {
-        let id = self.id();
-        let (session, object) = id.with(req, None, |handle| {
-            let tag = handle.tag_mut();
-            Some((tag.session.clone(), tag.object.take()))
-        })?;
-        let mut handle = req.memory_mut().disown(self.0)?;
-        handle.tag_mut().object = object;
+        let handle = self.disown(req)?;
+        let session = handle.tag().session.clone();
         let ((), thrown) = session.enter(req, || drop(handle));
         thrown
+    }
+
+    /// `curl_easy_cleanup(ch->cp)` as `curl_free_obj` calls it, on the
+    /// `CURL *` in the payload's slot `cp` reaches, left in place over
+    /// it as php leaves `ch->cp`: a callable the cleanup calls back that
+    /// calls a `curl_*` native on its own `CurlHandle` reaches the
+    /// `CURL *` under `curl_easy_cleanup`, as php's does. Made as
+    /// [`EasyId::call`] makes every call that can call back, and what a
+    /// callback threw is the answer. The cleaned `CURL *` stays in the
+    /// slot, for the caller to give up ([`Easy::close`]) under what was
+    /// thrown, as php frees `ch->to_free` with `EG(exception)` set; its
+    /// drop then frees only the tag. Where a transfer holds it, the
+    /// library is inside it, so it is given up as [`Easy::close`] gives
+    /// it up, and the hold's end cleans it up.
+    pub(crate) fn free(
+        req: &mut Request,
+        cp: impl for<'r> Fn(&'r mut Request) -> Option<&'r mut Option<Easy>>,
+    ) -> Option<Thrown> {
+        let handle = cp(req).and_then(Option::take)?.disown(req)?;
+        let owned = handle.owned;
+        // Handed back, so no transfer holds it: kept again, under a new
+        // owner, for the length of the cleanup.
+        let easy = Easy(req.memory_mut().adopt(handle));
+        let id = easy.id();
+        let Some(slot) = cp(req) else {
+            return easy.close(req);
+        };
+        *slot = Some(easy);
+        if !owned {
+            // A pushed `CURL *` the library frees itself, after the drop.
+            return None;
+        }
+        let (cleaned, thrown) = id.call(req, false, |live| {
+            // SAFETY: a handle held for the call, freed here once; the
+            // owner's drop frees only the tag once `cleaned` is set, and
+            // nothing reaches the `CURL *` after.
+            unsafe { sys::curl_easy_cleanup(live.raw()) };
+            true
+        });
+        if let Some(handle) = req.memory_mut().foreign(id.0) {
+            handle.cleaned = cleaned;
+        }
+        thrown
+    }
+
+    /// The `CURL *` given up by its owner, its object kept off the tag
+    /// meanwhile: handed back with its object where no call holds it, and
+    /// `None` where one does, whose end drops it with its object no
+    /// longer served, when the object may be gone.
+    fn disown(self, req: &mut Request) -> Option<Handle> {
+        let object = req
+            .memory_mut()
+            .foreign(self.0.id())
+            .map(|handle| handle.tag_mut().object.take())?;
+        let mut handle = req.memory_mut().disown(self.0)?;
+        handle.tag_mut().object = object;
+        Some(handle)
     }
 }
 
 impl EasyId {
-    /// `f` over the `CURL *` while its owner keeps it, `gone` otherwise.
+    /// `f` over the `CURL *` while its owner keeps it and it is not
+    /// cleaned up, `gone` otherwise.
     fn with<R>(self, req: &mut Request, gone: R, f: impl FnOnce(&mut Handle) -> R) -> R {
-        req.memory_mut().foreign(self.0).map_or(gone, f)
+        let handle = req.memory_mut().foreign(self.0);
+        handle.filter(|handle| !handle.cleaned).map_or(gone, f)
     }
 
     /// Which `CURL *` this is.

@@ -222,6 +222,63 @@ pub(super) fn nice(increment: i32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(0)
 }
 
+/// `sleep(3)`, called once, as `php_sleep` is: the seconds left
+/// unslept, which a signal with a handler leaves, and zero when nothing
+/// woke it.
+pub(super) fn sleep(seconds: u32) -> u32 {
+    // SAFETY: `sleep` takes a number and suspends the calling thread,
+    // touching nothing in this program's memory.
+    unsafe { libc::sleep(seconds) }
+}
+
+/// `usleep(3)`, called once; php discards its answer, so a signal with
+/// a handler ends the wait early and nothing says so.
+pub(super) fn usleep(micros: u32) {
+    // SAFETY: `usleep` takes a number and suspends the calling thread,
+    // touching nothing in this program's memory.
+    unsafe { libc::usleep(micros) };
+}
+
+/// What one `nanosleep(2)` answered.
+pub(super) enum Nap {
+    /// The whole time slept.
+    Slept,
+    /// `EINTR`: a signal with a handler woke it, this much left.
+    Woken { seconds: i64, nanoseconds: i64 },
+    /// `EINVAL`: nanoseconds past 999 999 999, or seconds below zero.
+    Invalid,
+    /// Any other failure.
+    Failed,
+}
+
+/// `nanosleep(2)`, called once, as `PHP_FUNCTION(time_nanosleep)` calls
+/// it, with what is left read only where it answers `EINTR`.
+pub(super) fn nanosleep(seconds: i64, nanoseconds: i64) -> Nap {
+    // `(time_t) tv_sec` and `(long) tv_nsec`, each 64 bits as `zend_long`
+    // is on every host php builds for here.
+    let wanted = libc::timespec {
+        tv_sec: seconds,
+        tv_nsec: nanoseconds,
+    };
+    let mut left = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: both pointers are to live `timespec`s of this frame; the
+    // call reads the first and writes only the second.
+    if unsafe { libc::nanosleep(&raw const wanted, &raw mut left) } == 0 {
+        return Nap::Slept;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::EINTR) => Nap::Woken {
+            seconds: left.tv_sec,
+            nanoseconds: left.tv_nsec,
+        },
+        Some(libc::EINVAL) => Nap::Invalid,
+        _ => Nap::Failed,
+    }
+}
+
 /// `openlog(3)` with `ident`, which the caller keeps alive until the
 /// matching [`closelog`], since the C library keeps the pointer.
 pub(super) fn openlog(ident: &CString, option: i32, facility: i32) {
