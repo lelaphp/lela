@@ -4,9 +4,8 @@
 //! converter is opened for one call of a native and closed before it
 //! returns, or held by one stream filter of one request and closed when
 //! the filter leaves its chain; never shared, so no request sees
-//! another's shift state. The
-//! oracle's `--ri iconv` reads libiconv 1.11, the macOS system library,
-//! which is the library linked here.
+//! another's shift state. Which `iconv(3)` that is, and its version,
+//! [`linked`] says, as php's `configure` and `iconv.c` name it.
 #![allow(unsafe_code)]
 // `libc` marks its iconv bindings deprecated, meaning to drop them at 1.0.
 #![allow(deprecated)]
@@ -18,6 +17,73 @@
 use std::ffi::CString;
 
 pub(crate) mod heap;
+
+/// The `iconv(3)` linked on macOS, the system's libiconv, which
+/// `config.m4`'s `for iconv implementation` finds as `"GNU
+/// libiconv"` by its `_libiconv_version`: `ICONV_IMPL` and `--ri`'s
+/// implementation row are `PHP_ICONV_IMPL`, `"libiconv"`, and
+/// `get_iconv_version()` prints the library's own `_libiconv_version`
+/// as `"%d.%d"`, the high byte and the low, read when asked: `"1.11"`,
+/// Apple's.
+#[cfg(target_vendor = "apple")]
+pub(super) mod linked {
+    /// `PHP_ICONV_IMPL` for `"GNU libiconv"`.
+    pub(crate) const IMPL: &str = "libiconv";
+
+    // SAFETY: libiconv exports `_libiconv_version` as an `int` it sets
+    // once and never writes, which `libc` links as `-liconv` here too.
+    #[link(name = "iconv")]
+    unsafe extern "C" {
+        #[link_name = "_libiconv_version"]
+        static LIBICONV_VERSION: libc::c_int;
+    }
+
+    /// `get_iconv_version()` under `HAVE_LIBICONV`.
+    pub(crate) fn version() -> String {
+        // SAFETY: the library's `int`, initialised before any code of
+        // ours runs and never written after.
+        let version = unsafe { LIBICONV_VERSION };
+        format!("{}.{}", version >> 8, version & 0xff)
+    }
+}
+
+/// The `iconv(3)` linked under glibc, glibc's own, which `config.m4`
+/// finds first, by linking `gnu_get_libc_version()`: `PHP_ICONV_IMPL` is
+/// `"glibc"`, and `get_iconv_version()` under `HAVE_GLIBC_ICONV` answers
+/// `gnu_get_libc_version()`, the C library's version read when asked.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(super) mod linked {
+    use std::ffi::CStr;
+
+    /// `PHP_ICONV_IMPL` for `glibc`.
+    pub(crate) const IMPL: &str = "glibc";
+
+    /// `get_iconv_version()` under `HAVE_GLIBC_ICONV`.
+    pub(crate) fn version() -> String {
+        // SAFETY: takes nothing and answers a static NUL-terminated string.
+        let version = unsafe { libc::gnu_get_libc_version() };
+        // SAFETY: that string lives as long as the process and is never
+        // written.
+        let version = unsafe { CStr::from_ptr(version) };
+        version.to_string_lossy().into_owned()
+    }
+}
+
+/// Any other `iconv(3)`, musl's or a BSD's own, which `config.m4` finds
+/// as none of glibc's, libiconv, the BSD iconv of `iconv_ccs_init` or
+/// IBM's: `iconv.c`'s `PHP_ICONV_IMPL_VALUE` and `get_iconv_version()`
+/// both fall back on `"unknown"`.
+#[cfg(not(any(target_vendor = "apple", all(target_os = "linux", target_env = "gnu"))))]
+pub(super) mod linked {
+    /// `PHP_ICONV_IMPL_VALUE` with neither `PHP_ICONV_IMPL` nor
+    /// `HAVE_LIBICONV`.
+    pub(crate) const IMPL: &str = "unknown";
+
+    /// `get_iconv_version()` with neither library.
+    pub(crate) fn version() -> String {
+        "unknown".to_owned()
+    }
+}
 
 /// `errno` as `iconv_open` and `iconv` leave it, decoded once, here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
