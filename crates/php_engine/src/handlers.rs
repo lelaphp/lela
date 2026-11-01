@@ -6702,7 +6702,33 @@ enum Undefined {
 /// none; one a receiver answers is called whatever its visibility, as
 /// `spl_dual_it_get_method` finds it in the inner class's function
 /// table with no rule. A class's handler that refuses the call raises
-/// here.
+/// here, and so does a method the object's own class answers that is
+/// abstract, as `zend_std_get_method`'s `exit:` refuses one once
+/// `__call` has had the inaccessible ones; an object of an abstract
+/// class is one simplexml makes as `php_sxe_object_new` makes it.
+///
+/// ```php
+/// abstract class A extends SimpleXMLElement { abstract function f(); }
+/// $s = simplexml_load_string('<a/>', 'A');
+/// foreach ([fn () => $s->f(), fn () => [$s, 'f'](), fn () => call_user_func([$s, 'f']), fn () => Closure::fromCallable([$s, 'f'])()] as $call) {
+///     try { var_dump($call()); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// var_dump(is_callable([$s, 'f']));
+/// try { (new ReflectionMethod($s, 'f'))->invoke($s); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// abstract class B extends SimpleXMLElement { abstract function __call($n, $a); }
+/// $b = simplexml_load_string('<a/>', 'B');
+/// var_dump($b->g(), [$b, 'g']());
+/// ```
+/// ```expect
+/// Cannot call abstract method A::f()
+/// Cannot call abstract method A::f()
+/// call_user_func(): Argument #1 ($callback) must be a valid callback, cannot call abstract method A::f()
+/// Failed to create closure from callable: cannot call abstract method A::f()
+/// bool(false)
+/// Trying to invoke abstract method A::f()
+/// NULL
+/// NULL
+/// ```
 ///
 /// ```php
 /// class Deep extends ArrayIterator { function deep() { return get_class($this); } }
@@ -6752,15 +6778,27 @@ fn method_on(
             written.as_str_bytes().unwrap_or_default(),
         ));
     };
-    if receiver.is_some() || req.method_accessible(function) {
+    if receiver.is_some() {
         return Ok((function, receiver));
     }
-    // The scope may not call it: `__call` takes the call where the class
-    // has one, and otherwise the access rule's `Error`.
-    let function = req
-        .call_trampoline(object.class(), bytes, false)
-        .unwrap_or(function);
-    req.check_method_access(function, bytes)?;
+    let function = if req.method_accessible(function) {
+        // `__call`'s trampoline for a method the class has none of is
+        // answered before `exit:`, whatever `__call` is declared.
+        if req.trampoline_of(function).is_some() {
+            return Ok((function, None));
+        }
+        function
+    } else {
+        // The scope may not call it: `__call` takes the call where the
+        // class has one, and otherwise the access rule's `Error`.
+        let function = req
+            .call_trampoline(object.class(), bytes, false)
+            .unwrap_or(function);
+        req.check_method_access(function, bytes)?;
+        function
+    };
+    // `zend_std_get_method`'s `exit:`: an abstract method is refused.
+    req.refuse_abstract(function)?;
     Ok((function, None))
 }
 
