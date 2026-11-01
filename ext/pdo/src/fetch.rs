@@ -11,8 +11,8 @@ use php_ext::call::{autoload, call, call_array, known_method, lookup_class, new_
 use php_ext::coerce::{callable_checked, to_long, to_string, truthy, value_name, with_string};
 use php_ext::decl::Name;
 use php_ext::raising::{
-    Level, Thrown, arg_count_error, argument_error, docref, throw_error, type_error, value_error,
-    while_pending,
+    Carrying, Level, Thrown, arg_count_error, argument_error, docref, throw_error, type_error,
+    value_error,
 };
 use php_ext::request::{Request, Streams as _};
 use php_ext::values::{
@@ -777,7 +777,7 @@ fn columns(
         }
         next += 1;
     }
-    let mut pending: Option<Thrown> = None;
+    let mut pending = Carrying::default();
     let mut at = next;
     while usize::try_from(at).is_ok_and(|a| a < count) {
         let fetched = value(req, object, at, None)?;
@@ -810,7 +810,7 @@ fn columns(
         }
         at += 1;
     }
-    if let Some(thrown) = pending {
+    if let Some(thrown) = pending.take() {
         return Err(thrown);
     }
     if kind == Kind::Class
@@ -834,37 +834,18 @@ fn columns(
 
 /// One column of an object's row, `zend_update_property_ex`: a write
 /// that throws leaves the throwable pending, chained onto one already
-/// there, for the row's later columns to be written past; a fatal or an
-/// `exit` is the `Err`.
+/// there, for the row's later columns to be written past
+/// ([`Carrying::serve`]); a fatal or an `exit` is the `Err`.
 fn write_column(
     req: &mut Request,
-    pending: &mut Option<Thrown>,
+    pending: &mut Carrying,
     made: PhpObject,
     scope: PropertyScope,
     name: PhpString,
     fetched: Owner<Value>,
 ) -> Result<(), Thrown> {
     let name = Owner::take(req, name);
-    let wrote = match pending {
-        Some(standing) => while_pending(req, standing, |req| {
-            made.write_prop_in(req, scope, name, fetched)
-        })
-        .unwrap_or(Ok(())),
-        None => made.write_prop_in(req, scope, name, fetched),
-    };
-    let Err(thrown) = wrote else {
-        return Ok(());
-    };
-    if thrown.exception().is_none() {
-        return Err(thrown);
-    }
-    *pending = Some(match pending.take() {
-        // The write refused past the standing throwable answers it, with
-        // no owner of its own ([`while_pending`]).
-        Some(earlier) if earlier.exception() == thrown.exception() => earlier,
-        Some(earlier) => earlier.chain(req, thrown),
-        None => thrown,
-    });
+    pending.serve(req, |req| made.write_prop_in(req, scope, name, fetched))?;
     Ok(())
 }
 

@@ -16,7 +16,7 @@ use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Raw, This, Union
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, to_string};
-use php_ext::raising::{Thrown, fatal, throw_error, while_pending};
+use php_ext::raising::{Carrying, Thrown, fatal, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Layout, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -515,49 +515,28 @@ fn quoted(head: &str, bytes: &[u8], tail: &str) -> Vec<u8> {
 /// are set on, and what a conversion threw, php's `EG(exception)`, which
 /// the walk goes on past as php's loop does: `zval_get_tmp_string`
 /// leaves the throwable pending and answers the empty string, and the
-/// later conversions are served as php serves them with one pending.
+/// later conversions are served as php serves them with one pending
+/// ([`Carrying`]).
 struct Converting<'s, 'a> {
     site: &'s mut Site<'a>,
-    pending: Option<Thrown>,
+    pending: Carrying,
 }
 
 impl Converting<'_, '_> {
     /// A conversion that can call PHP code: its value, or `None` where it
-    /// threw, the throwable pending from there on. With one pending
-    /// already it is served while that one stands, so a `__toString` is
-    /// refused and a warning raised past the handlers, and what it
-    /// throws besides is chained over it.
+    /// threw, the throwable pending from there on ([`Carrying::serve`]).
     fn serve<T>(
         &mut self,
         req: &mut Request,
         step: impl FnOnce(&mut Request) -> Result<T, Thrown>,
-    ) -> Option<T> {
-        let Some(pending) = self.pending.take() else {
-            return step(req).map_err(|thrown| self.pending = Some(thrown)).ok();
-        };
-        let answer = while_pending(req, &pending, step);
-        match answer {
-            Some(Ok(value)) => {
-                self.pending = Some(pending);
-                Some(value)
-            }
-            Some(Err(thrown)) if thrown.exception() != pending.exception() => {
-                self.pending = Some(pending.chain(req, thrown));
-                None
-            }
-            _ => {
-                self.pending = Some(pending);
-                None
-            }
-        }
+    ) -> Answer<T> {
+        self.pending.serve(req, step)
     }
 
-    /// What a step threw, chained over what is pending.
-    fn keep(&mut self, req: &mut Request, thrown: Thrown) {
-        self.pending = Some(match self.pending.take() {
-            Some(pending) => pending.chain(req, thrown),
-            None => thrown,
-        });
+    /// What a step threw, chained over what is pending
+    /// ([`Carrying::keep`]).
+    fn keep(&mut self, req: &mut Request, thrown: Thrown) -> Result<(), Thrown> {
+        self.pending.keep(req, thrown)
     }
 
     /// `intl_errors_set(&err, code, message)`, its `IntlException`
@@ -584,7 +563,7 @@ impl Converting<'_, '_> {
     /// served for an object, the empty string where that threw; a
     /// failure's message set with `None`.
     fn string(&mut self, req: &mut Request, value: &Value) -> Answer<Formattable> {
-        let Some(text) = self.serve(req, |req| to_string(req, value)) else {
+        let Some(text) = self.serve(req, |req| to_string(req, value))? else {
             return Ok(Some(Formattable::String(Vec::new())));
         };
         let converted = ffi::to_utf16(text.as_bytes());
@@ -604,8 +583,9 @@ impl Converting<'_, '_> {
     }
 
     /// `zval_get_double`.
-    fn double(&mut self, req: &mut Request, value: &Value) -> Formattable {
-        Formattable::Double(self.serve(req, |req| to_double(req, value)).unwrap_or(0.0))
+    fn double(&mut self, req: &mut Request, value: &Value) -> Result<Formattable, Thrown> {
+        let d = self.serve(req, |req| to_double(req, value))?;
+        Ok(Formattable::Double(d.unwrap_or(0.0)))
     }
 
     /// A `zend_long` or `double` held to the range of a 32-bit argument,
@@ -631,7 +611,7 @@ impl Converting<'_, '_> {
                 };
                 n
             }
-            _ => self.serve(req, |req| to_long(req, value)).unwrap_or(0) as i32,
+            _ => self.serve(req, |req| to_long(req, value))?.unwrap_or(0) as i32,
         };
         Ok(Some(Formattable::Long(n)))
     }
@@ -652,7 +632,7 @@ impl Converting<'_, '_> {
             }
             ValueRef::Float(d) => d as i64,
             ValueRef::Int(n) => n,
-            _ => self.serve(req, |req| to_long(req, value)).unwrap_or(0),
+            _ => self.serve(req, |req| to_long(req, value))?.unwrap_or(0),
         };
         Ok(Some(Formattable::Int64(n)))
     }
@@ -666,14 +646,11 @@ impl Converting<'_, '_> {
         if !code.is_failure() {
             return match millis {
                 Ok(d) => Ok(Some(Formattable::Date(d))),
-                Err(thrown) => {
-                    self.keep(req, thrown);
-                    Ok(None)
-                }
+                Err(thrown) => self.keep(req, thrown).map(|()| None),
             };
         }
         if let Err(thrown) = millis {
-            self.keep(req, thrown);
+            self.keep(req, thrown)?;
         }
         let Ok(key) = ffi::to_utf8(name) else {
             return Ok(None);
@@ -745,7 +722,7 @@ fn format_helper(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer
     let mut args = Vec::with_capacity(values.len());
     let mut converting = Converting {
         site,
-        pending: None,
+        pending: Carrying::default(),
     };
     // `ZEND_HASH_FOREACH_KEY_VAL(args, num_index, str_index, elem)` over
     // the argument, which holds the array while a conversion serves
@@ -779,7 +756,7 @@ fn format_helper(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer
         };
         let arg = match stored.copied().unwrap_or(ArgType::Object) {
             ArgType::String => converting.string(req, &value)?,
-            ArgType::Double => Some(converting.double(req, &value)),
+            ArgType::Double => Some(converting.double(req, &value)?),
             ArgType::Long => converting.long(req, &value)?,
             ArgType::Int64 => converting.int64(req, &value)?,
             ArgType::Date => converting.date(req, value, &name)?,
@@ -799,10 +776,10 @@ fn format_helper(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer
         Ok(ControlFlow::Continue(()))
     });
     if let Err(thrown) = walked {
-        converting.keep(req, thrown);
+        converting.keep(req, thrown)?;
     }
     let formatted = formatted(req, &mut converting, &args);
-    match converting.pending {
+    match converting.pending.take() {
         Some(pending) => Err(pending),
         None => formatted,
     }
@@ -825,8 +802,7 @@ fn formatted(
     let Some(formatter) = converting.site.formatter(req) else {
         let message = "Found unconstructed MessageFormatter";
         let thrown = throw_error(req, ce.error, message);
-        converting.keep(req, thrown);
-        return Ok(None);
+        return converting.keep(req, thrown).map(|()| None);
     };
     let mut status = Code::ZERO;
     let text = formatter.umsgf.format(args, &mut status);
