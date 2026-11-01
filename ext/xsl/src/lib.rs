@@ -37,7 +37,7 @@ use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_dom::{CallbacksAt, XPathCallbacks};
-use php_ext_libxml::ffi::{ClassType, Kind, Node, NodeObject, Ns, Raised, Route};
+use php_ext_libxml::ffi::{ClassType, DocOf, Kind, Node, NodeObject, Ns, Raised, Route};
 use php_ext_libxml::{Errors, import_node};
 
 use throwables::Throwables;
@@ -451,6 +451,16 @@ fn apply<R>(
         let ce = Throwables::of(req)?;
         return Err(throw_error(req, ce.error, &message));
     };
+    // The reference the given document's object counts, checked against
+    // it, where the transformation runs over that document and no copy.
+    let shared = if has_keys {
+        None
+    } else {
+        let Some(of) = DocOf::exported(&exported) else {
+            return Err(DocOf::uncounted(req));
+        };
+        Some(of)
+    };
     let answer = id.held(req, |req, sheet| {
         if let Some(i) = intern(req, this) {
             i.transform_depth += 1;
@@ -458,13 +468,13 @@ fn apply<R>(
         let profile =
             profiling.filter(|p| req.environment_mut().check_open_basedir(p, true).is_ok());
         let mut holder = NodeObject::default();
-        let doc = if has_keys {
+        let doc = if let Some(of) = shared {
+            holder.count_document(req, of);
+            doc
+        } else {
             let copy = doc.copy_doc(true).unwrap_or(doc);
             holder.adopt_document(req, copy);
             copy
-        } else {
-            holder.share(req, exported.document(), doc);
-            doc
         };
         let state = State {
             doc,
@@ -807,9 +817,13 @@ impl XSLTProcessor {
             copy.give_up(req);
             return Err(arg_type_error(req, 1, "be a valid XML node"));
         };
-        let Some(shared) = half.shared_doc() else {
+        if !half.has_document() {
             copy.give_up(req);
             return Err(arg_type_error(req, 1, "be a valid XML node"));
+        }
+        let Some(shared) = DocOf::under(newdoc, Some(&*half)) else {
+            copy.give_up(req);
+            return Err(DocOf::uncounted(req));
         };
         // A copy `__clone` kept a name of, the object or a node of its
         // document, would see its tree compiled from under it.
@@ -834,7 +848,7 @@ impl XSLTProcessor {
         // The tree is the sheet's now: the copy's reference lets go of it
         // and is counted once more, for the mappings its nodes name.
         let mut doc_ref = NodeObject::default();
-        doc_ref.share(req, Some(shared), newdoc);
+        doc_ref.count_document(req, shared);
         half.detach_document();
         copy.give_up(req);
         // `cloneDocument`, or an `xsl:key` at the stylesheet's top level,

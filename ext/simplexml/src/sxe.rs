@@ -15,7 +15,7 @@ use php_ext::raising::{Level, Thrown, docref, throw_error, type_error, value_err
 use php_ext::request::Request;
 use php_ext::values::walk::{self};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
-use php_ext_libxml::ffi::{Borrowed, Kind, Node, NodeObject, XPath};
+use php_ext_libxml::ffi::{Borrowed, DocOf, Kind, Node, NodeObject, XPath};
 
 /// `SXE_ITER`: what an object walks from the node it holds, matched
 /// exhaustively wherever php switches on `iter.type`.
@@ -319,12 +319,14 @@ pub(crate) fn wrap(
     walk: Walk,
     ns: Option<Ns>,
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let shared = sxe(req, of).and_then(|s| s.obj.shared_doc());
     let made = new_object(req, of.class())?;
+    let by = libxml_half(req, of);
+    let Some(counted) = DocOf::under(node, by.as_deref()) else {
+        made.give_up(req);
+        return Err(DocOf::uncounted(req));
+    };
     if let Some(mut obj) = libxml_half(req, *made) {
-        if let (Some(shared), Some(doc)) = (shared, node.doc()) {
-            obj.share(req, Some(shared), doc);
-        }
+        obj.count_document(req, counted);
         obj.hold_node(req, node);
     }
     if let Some(s) = sxe_mut(req, *made) {
@@ -1524,13 +1526,23 @@ impl ClassIterator for Loop {
 /// standing apart from it.
 fn clone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let view = View::of(req, object);
-    let shared = sxe(req, object).and_then(|s| s.obj.shared_doc());
     let doc = sxe(req, object).and_then(|s| s.obj.document_node());
     let root = view
         .node
         .and_then(Node::parent)
         .is_some_and(|p| p.kind().is_document());
     let made = new_object(req, object.class())?;
+    let by = libxml_half(req, object);
+    let counted = match doc
+        .filter(|_| !root)
+        .map(|d| DocOf::under(d, by.as_deref()))
+    {
+        Some(None) => {
+            made.give_up(req);
+            return Err(DocOf::uncounted(req));
+        }
+        counted => counted.flatten(),
+    };
     let Some(mut obj) = libxml_half(req, *made) else {
         return Ok(made);
     };
@@ -1541,8 +1553,8 @@ fn clone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Throw
         }
         copy
     } else {
-        if let (Some(shared), Some(d)) = (shared, doc) {
-            obj.share(req, Some(shared), d);
+        if let Some(counted) = counted {
+            obj.count_document(req, counted);
         }
         doc
     };

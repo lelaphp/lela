@@ -34,6 +34,9 @@ ffi::ClassRows
 ffi::ClassType
 ffi::DocOf
 ffi::DocOf::exported
+ffi::DocOf::share_document
+ffi::DocOf::transfer_document
+ffi::DocOf::uncounted
 ffi::DocOf::under
 ffi::DocProps
 ffi::DocProps::class_rows
@@ -223,9 +226,7 @@ ffi::Node::set_prop
 ffi::Node::set_properties
 ffi::Node::set_root
 ffi::Node::set_tree_doc
-ffi::Node::share_document
 ffi::Node::text_concat
-ffi::Node::transfer_document
 ffi::Node::undict
 ffi::Node::unlink
 ffi::Node::wrapper
@@ -264,11 +265,9 @@ ffi::NodeObject::set_modification
 ffi::NodeObject::set_object
 ffi::NodeObject::set_private_data
 ffi::NodeObject::set_quirks
-ffi::NodeObject::share
 ffi::NodeObject::shared_doc
 ffi::NodeObject::take_node
 ffi::NodeObject::take_props
-ffi::NodeObject::transfer_document
 ffi::Ns
 ffi::Ns::clear
 ffi::Ns::free

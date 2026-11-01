@@ -25,9 +25,9 @@ use crate::throwables::Throwables;
 use crate::{
     StackGuard, StackRefusal, children_valid, class_name, clone_node, copy_document_ref, dom_error,
     dom_error_message, fetch, has_feature, hierarchy_ok, instance_of, invalidate, is_equal_attr,
-    is_equal_node, is_read_only, normalize, nullable_object, object_for,
+    is_equal_node, is_read_only, libxml_half, normalize, nullable_object, object_for,
     reconcile_attribute_namespace, reconcile_ns, reconcile_ns_list, returned,
-    set_document_ref_pointers, shared_doc, strict,
+    set_document_ref_pointers, strict,
 };
 
 /// `dom_insert_fragment`: the fragment's children moved in between
@@ -149,8 +149,8 @@ pub(crate) fn replace_child(
     }
     if new_child.doc().is_none() && parent.doc().is_some() {
         new_child.set_tree_doc(parent.doc());
-        let shared = shared_doc(req, this);
-        set_document_ref_pointers(req, new_child, shared);
+        let half = libxml_half(req, this);
+        set_document_ref_pointers(req, new_child, half.as_deref())?;
     }
     if new_child.kind() == Kind::Fragment {
         let prev = old_child.prev();
@@ -929,8 +929,8 @@ fn append_child(
     }
     if child.doc().is_none() && parent.doc().is_some() {
         child.set_tree_doc(parent.doc());
-        let shared = shared_doc(req, this);
-        set_document_ref_pointers(req, child, shared);
+        let half = libxml_half(req, this);
+        set_document_ref_pointers(req, child, half.as_deref())?;
     }
     if child.parent().is_some() {
         child.unlink();
@@ -1041,8 +1041,8 @@ fn insert_before(
     };
     if child.doc().is_none() && parent.doc().is_some() {
         child.set_tree_doc(parent.doc());
-        let shared = shared_doc(req, this);
-        set_document_ref_pointers(req, child, shared);
+        let half = libxml_half(req, this);
+        set_document_ref_pointers(req, child, half.as_deref())?;
     }
     invalidate(req, this);
     let new_child = if let Some(refp) = refp {

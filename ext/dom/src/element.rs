@@ -731,13 +731,16 @@ fn set_attribute_node(
     if attr.parent().is_some() {
         attr.unlink();
     }
-    if attr.doc().is_none()
-        && elem.doc().is_some()
-        && let Some(shared) = crate::shared_doc(req, this)
-    {
-        crate::set_document_ref_pointers_attr(req, attr, shared);
-    }
+    let unowned = attr.doc().is_none() && elem.doc().is_some();
     elem.add_child(attr);
+    // Counted once `xmlAddChild` has set the attribute's document, which
+    // the reference is checked against.
+    if unowned {
+        let half = crate::libxml_half(req, this);
+        if let Some(by) = half.as_deref().filter(|b| b.has_document()) {
+            crate::set_document_ref_pointers_attr(req, attr, by)?;
+        }
+    }
     if modern {
         register_attribute_id(req, this, attr);
     } else {

@@ -9,6 +9,7 @@ use std::ffi::{c_char, c_int, c_void};
 use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 
+use php_ext::raising::{Thrown, fatal};
 use php_ext::request::Request;
 
 use super::{Alloc, Exported, Library, NodeObject, SharedDoc, Tree, cstr, sys};
@@ -1644,6 +1645,17 @@ impl<'d> DocOf<'d> {
         DocOf::checked(export.node(), shared, shared.is_none())
     }
 
+    /// The `InternalError` fatal where no reference to the node's document
+    /// is in reach: an object standing for the node, or holding its
+    /// document, while counting another document would outlive the
+    /// node's (#3541).
+    pub fn uncounted(req: &mut Request) -> Thrown {
+        fatal(
+            req,
+            "InternalError: no object counts the document of the node an object is made for",
+        )
+    }
+
     /// The check, with `shared` a reference beside the document it names.
     fn checked(
         node: Node,
@@ -1690,9 +1702,12 @@ impl NodeObject {
         unsafe { self.increment_node_ptr(req, of.node.raw(), true) };
     }
 
-    /// `php_libxml_increment_doc_ref` over the document of `of`'s node,
-    /// standing for no node: a count held as a node list holds its
-    /// document, given back by [`NodeObject::release`].
+    /// `intern->document = by->document; php_libxml_increment_doc_ref(intern,
+    /// doc)` over the document of `of`'s node, as [`DocOf`] checked it,
+    /// taking no proxy: a count held as a node list, a `DOMXPath` or a
+    /// transformation holds its document, and as a `SimpleXMLElement`
+    /// holds the document of the node it holds, given back by
+    /// [`NodeObject::release`].
     pub fn count_document(&mut self, req: &mut Request, of: DocOf<'_>) {
         match of.counted {
             Counted::Nothing => {}
@@ -1716,16 +1731,6 @@ impl NodeObject {
         unsafe { self.increment_doc_ref(req, doc.raw().cast()) };
     }
 
-    /// `intern->document = docobj->document;
-    /// php_libxml_increment_doc_ref(intern, doc)`: one more owner of the
-    /// document another object counts, as `DOMXPath` takes its
-    /// document's, and a first reference to `doc` where there is none.
-    pub fn share(&mut self, req: &mut Request, shared: Option<SharedDoc>, doc: Node) {
-        // SAFETY: `shared` was read off a live object's reference in the
-        // same native call, and `doc` is a live document.
-        unsafe { self.increment_doc_ref_shared(req, shared, doc.raw().cast()) };
-    }
-
     /// `php_libxml_increment_node_ptr(intern, node, intern)`.
     pub fn take_node(&mut self, req: &mut Request, node: Node) {
         // SAFETY: a live node the object will stand for.
@@ -1741,28 +1746,41 @@ impl NodeObject {
     }
 }
 
-impl Node {
-    /// `dom_set_document_ref_obj_single`: the object standing for the node,
-    /// where one counts no document, counting `document`; `false` where one
-    /// counts another already.
-    pub fn share_document(self, req: &mut Request, document: SharedDoc) -> bool {
-        let Some(mut wrapper) = self.wrapper() else {
+impl DocOf<'_> {
+    /// `dom_set_document_ref_obj_single`: the object standing for the
+    /// node, where one counts no document, counting the node's own as
+    /// [`DocOf`] checked it; `false` where one counts one already.
+    pub fn share_document(self, req: &mut Request) -> bool {
+        let Some(mut wrapper) = self.node.wrapper() else {
             return true;
         };
         if wrapper.has_document() {
             return false;
         }
-        // SAFETY: `document` is counted by the live object the caller read
-        // it off, and this object counts none.
-        unsafe { wrapper.increment_doc_ref_shared(req, Some(document), ptr::null_mut()) };
+        wrapper.count_document(req, self);
         true
     }
 
-    /// `php_dom_transfer_document_ref_single_node`.
-    pub fn transfer_document(self, req: &mut Request, document: SharedDoc) {
-        if let Some(mut wrapper) = self.wrapper() {
-            // SAFETY: as above.
-            unsafe { wrapper.transfer_document(req, document) };
+    /// `php_dom_transfer_document_ref_single_node`: the object standing
+    /// for the node, where there is one, counting the node's own document
+    /// as [`DocOf`] checked it in place of the one it counted.
+    pub fn transfer_document(self, req: &mut Request) {
+        let Some(mut wrapper) = self.node.wrapper() else {
+            return;
+        };
+        match self.counted {
+            Counted::Shared(s) => {
+                // SAFETY: `DocOf` read `s` off a live object within this
+                // call and checked that it names the node's document.
+                unsafe { wrapper.transfer_document(req, s) };
+            }
+            // No reference to count before the old is let go of: a node of
+            // no document counts none, and a document no object counts is
+            // not the one this counted.
+            Counted::Nothing | Counted::First => {
+                wrapper.decrement_doc_ref(req);
+                wrapper.count_document(req, self);
+            }
         }
     }
 }

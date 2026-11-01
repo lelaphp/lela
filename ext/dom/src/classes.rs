@@ -310,10 +310,19 @@ impl DOMImplementation {
             doc.set_root(root);
         }
         let value = object_for(req, doc, None)?;
-        if let (Some(dtd), Some(object)) = (doctype, value.as_object())
-            && let Some(shared) = crate::shared_doc(req, object)
-        {
-            dtd.share_document(req, shared);
+        if let (Some(dtd), Some(object)) = (doctype, value.as_object()) {
+            let half = crate::libxml_half(req, object);
+            if let Some(by) = half.as_deref().filter(|b| b.has_document()) {
+                match crate::doc_of(req, dtd, Some(by)) {
+                    Ok(of) => {
+                        of.share_document(req);
+                    }
+                    Err(thrown) => {
+                        value.give_up(req);
+                        return Err(thrown);
+                    }
+                }
+            }
         }
         returned(value)
     }

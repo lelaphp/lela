@@ -1373,7 +1373,7 @@ impl NodeObject {
     ///
     /// # Safety
     /// `to` is a document some live object counts.
-    pub unsafe fn transfer_document(&mut self, req: &mut Request, to: SharedDoc) {
+    pub(crate) unsafe fn transfer_document(&mut self, req: &mut Request, to: SharedDoc) {
         // SAFETY: the caller's contract.
         unsafe { (*to.0.as_ptr()).refcount += 1 };
         self.decrement_doc_ref(req);
