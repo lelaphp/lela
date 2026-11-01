@@ -9,6 +9,7 @@
 
 use std::time::Duration;
 
+use php_ext::abi::Callable;
 use php_ext::call::{call, lookup_function, new_object};
 use php_ext::coerce::{atoi, c_str, is_space, numeric_string, to_callable};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
@@ -17,14 +18,15 @@ use php_ext::request::{
     Streams as _, Xport,
 };
 use php_ext::values::{
-    FreshString, Key, Owner, PhpArray, PhpObject, PhpString, SmartStr, Value, ValueRef, walk,
+    Emalloc, FreshString, Key, Owner, PhpArray, PhpObject, PhpString, SmartStr, Value, ValueRef,
+    walk,
 };
 use php_ext_standard::md5::Md5;
 use php_ext_standard::{UriParser, base64};
 use php_ext_uri::{Parser, UriStruct};
 
 use crate::Res;
-use crate::classes::UrlPayload;
+use crate::classes::{HeldUri, UrlPayload};
 use crate::constants::{SOAP_1_2, SOAP_COMPRESSION_ACCEPT, SOAP_COMPRESSION_DEFLATE};
 use crate::shared::{
     ClientSlot, add_soap_fault, class_id, client_slot, instance_of, set_client_slot,
@@ -192,11 +194,6 @@ const SSL_METHOD_SSLV23: i64 = crate::constants::SOAP_SSL_METHOD_SSLv23;
 /// `char headerbuf[8192]`: what one `php_stream_gets` fills, the line
 /// cut at 8191 bytes.
 const HEADER_BUF: usize = 8192;
-
-/// How much one read of a body asks for at most: php reads into the
-/// string it sized to the whole length, which the bytes are the same
-/// for read a block at a time.
-const READ_BLOCK: usize = 8192;
 
 /// The byte at `i` of a NUL-terminated string, its NUL past the end.
 fn at(b: &[u8], i: usize) -> u8 {
@@ -389,17 +386,6 @@ fn getc(req: &mut Request, stream: Stream) -> Option<u8> {
     }
 }
 
-/// `php_stream_read` into the end of `buf`, at most `len` bytes and a
-/// block at a time: how many it took, none for a read that took nothing.
-fn read_more(req: &mut Request, stream: Stream, buf: &mut Vec<u8>, len: usize) -> Option<usize> {
-    let start = buf.len();
-    buf.resize(start + len.min(READ_BLOCK), 0);
-    let read = stream.read_into(req, &mut buf[start..]);
-    let got = read.filter(|n| *n > 0);
-    buf.truncate(start + got.unwrap_or(0));
-    got
-}
-
 /// Whether a header line is the blank one that ends a head.
 fn is_blank_line(line: &[u8]) -> bool {
     line.starts_with(b"\r\n") || line.first() == Some(&b'\n')
@@ -407,18 +393,30 @@ fn is_blank_line(line: &[u8]) -> bool {
 
 /// `get_http_headers`: the response's head, each line up to the blank
 /// one as the stream gave it, gathered in a `smart_str` on the request's
-/// heap; none where the stream ended first, where the blank line came
-/// before any, or, since 8.5.12, once the memory limit was met after a
-/// line (`ZEND_HAS_OOM()`).
-fn get_http_headers(req: &mut Request, stream: Stream) -> R<Option<Vec<u8>>> {
+/// heap and handed out as that string, `tmp_response.s`, at the room its
+/// appends grew it to, which the caller holds until php releases its
+/// `http_headers`; none where the stream ended first, where the blank
+/// line came before any, or, since 8.5.12, once the memory limit was met
+/// after a line (`ZEND_HAS_OOM()`).
+fn get_http_headers(req: &mut Request, stream: Stream) -> R<Option<Owner<PhpString>>> {
     // `smart_str` holds no string until the first append.
     let mut response = SmartStr::default();
     let mut any = false;
-    while let Some(line) = gets(req, stream)? {
+    loop {
+        let line = match gets(req, stream) {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(thrown) => {
+                response.free(req);
+                return Err(thrown);
+            }
+        };
         if is_blank_line(&line) {
-            let head = any.then(|| response.as_bytes().to_vec());
-            response.free(req);
-            return Ok(head);
+            if !any {
+                response.free(req);
+                return Ok(None);
+            }
+            return response.finish(req).map(Some);
         }
         if let Err(thrown) = response.append(req, c_str(&line)) {
             response.free(req);
@@ -476,10 +474,15 @@ fn get_http_header_value(headers: &[u8], name: &[u8]) -> Option<Vec<u8>> {
 /// string's aligned header and terminator.
 const ZSTR_MAX_LEN: usize = usize::MAX - 32;
 
-/// `http_buf`, the string php 8.5.12 reads a body into, laid on the
-/// request's heap at its sizes beside the bytes the engine reads: asked
-/// for, and grown, fallibly where php's are.
-struct HttpBuf(Option<FreshString>);
+/// `http_buf` and `http_buf_size`: the string php 8.5.12 reads a body
+/// into, on the request's heap, asked for and grown fallibly where php's
+/// is, and how many bytes were read into it. The string is the body php
+/// hands on, at the room its growths left it.
+#[derive(Default)]
+struct HttpBuf {
+    string: Option<FreshString>,
+    size: usize,
+}
 
 impl HttpBuf {
     /// The buffer grown to `len` bytes, `zend_string_falloc` or
@@ -487,7 +490,7 @@ impl HttpBuf {
     /// `zend_string_alloc`; `false` where the memory limit refused it, the
     /// buffer then gone as php's `zend_string_release` lets it go.
     fn grow(&mut self, req: &mut Request, len: usize, fallibly: bool) -> R<bool> {
-        let held = self.0.take();
+        let held = self.string.take();
         let ask = |req: &mut Request| match held {
             None => FreshString::new(req, len),
             Some(held) => held.extend(req, len),
@@ -498,28 +501,107 @@ impl HttpBuf {
             Some(ask(req)?)
         };
         let refused = grown.is_none();
-        self.0 = grown;
+        self.string = grown;
         Ok(!refused)
+    }
+
+    /// `php_stream_read(stream, http_buf->val + http_buf_size, len)`, at
+    /// most `len` bytes into the room past those read: how many it took,
+    /// none for a read that took nothing.
+    fn read(&mut self, req: &mut Request, stream: Stream, len: usize) -> Option<usize> {
+        let string = self.string.as_mut()?;
+        let room = string.bytes_mut().get_mut(self.size..self.size + len)?;
+        let read = stream.read_into(req, room).filter(|n| *n > 0)?;
+        self.size += read;
+        Some(read)
+    }
+
+    /// `http_buf->len = http_buf_size` and the string handed on, its room
+    /// kept; `ZSTR_EMPTY_ALLOC()` where none was asked for.
+    fn finish(self, req: &mut Request) -> R<Owner<PhpString>> {
+        match self.string {
+            Some(mut string) => {
+                string.set_len(self.size);
+                Ok(string.finish())
+            }
+            None => PhpString::new(req, b""),
+        }
     }
 
     /// The buffer let go, `zend_string_release`.
     fn free(self, req: &mut Request) {
-        if let Some(held) = self.0 {
+        if let Some(held) = self.string {
             held.free(req);
         }
     }
 }
 
 /// `get_http_body`: the response's body, chunked, of its
-/// `Content-Length` or to the end of a connection that closes; none
-/// where it can be read none of these ways, its chunks are broken, or,
-/// since 8.5.12, the memory limit refused its buffer's room.
+/// `Content-Length` or to the end of a connection that closes, read into
+/// `http_buf` and handed on as that string; none where it can be read
+/// none of these ways, its chunks are broken, or, since 8.5.12, the
+/// memory limit refused its buffer's room.
+///
+/// The bytes a call holds at its peak and after it are php's: the body's
+/// string, the head's `smart_str` and the status's words held through
+/// the read, and the client's `Soap\Url`:
+///
+/// ```php
+/// $srv = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; $c = stream_socket_accept($s, 10); $n = 0;'
+///     . ' while (($l = fgets($c)) !== false && rtrim($l) !== "") if (preg_match("/^Content-Length: (\d+)/i", $l, $m)) $n = (int) $m[1];'
+///     . ' if ($n) fread($c, $n); fwrite($c, $argv[1]); for ($i = 0; $i < (int) $argv[3]; $i++) fwrite($c, $argv[2]); fwrite($c, $argv[4]); fclose($c);';
+/// foreach ([["Content-Length: 10", str_repeat("x", 10), "1", ""], ["Content-Length: 1000", str_repeat("x", 1000), "1", ""], ["Content-Length: 300000", str_repeat("x", 1000), "300", ""], ["Transfer-Encoding: chunked", "1000\r\n" . str_repeat("x", 0x1000) . "\r\n", "73", "0\r\n\r\n"]] as [$head, $piece, $count, $tail]) {
+///     $p = proc_open([PHP_BINARY, '-n', '-r', $srv, "HTTP/1.1 200 OK\r\n$head\r\n\r\n", $piece, $count, $tail], [1 => ['pipe', 'w']], $pipes);
+///     $uri = 'http://' . trim(fgets($pipes[1]));
+///     $c = new SoapClient(null, ['location' => $uri, 'uri' => 'u']);
+///     memory_reset_peak_usage(); $m = memory_get_usage();
+///     $r = $c->__doRequest('<E/>', $uri, 'f', SOAP_1_1);
+///     echo strlen($r), ' ', memory_get_peak_usage() - $m, ' ', memory_get_usage() - $m, "\n";
+///     unset($r, $c); proc_close($p);
+/// }
+/// ```
+/// ```expect process
+/// 10 9144 8904
+/// 1000 10384 10112
+/// 300000 312208 311936
+/// 299008 312208 311936
+/// ```
+///
+/// A body read to the close grows 4096 bytes past what it read until
+/// `php_stream_eof` says the peer closed, which asks without waiting:
+/// where the peer's close came before the last read, no growth follows
+/// it; where the peer holds the connection open past its last byte, one
+/// more does, and the string handed on keeps that room. Which of the two
+/// a peer that closes as it writes meets is the scheduler's, under the
+/// oracle and this engine alike, so each peer here orders its close:
+///
+/// ```php
+/// $srv = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; $c = stream_socket_accept($s, 10);'
+///     . ' while (($l = fgets($c)) !== false && rtrim($l) !== "") {} fread($c, 4); $close = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";'
+///     . ' if ($argv[1] === "first") { fwrite($c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" . $close . str_repeat("x", 12272)); stream_socket_shutdown($c, STREAM_SHUT_WR); while (fgets($c) !== false); }'
+///     . ' else { fwrite($c, $close); for ($i = 0; $i < 300; $i++) fwrite($c, str_repeat("x", 1000)); usleep(1000000); }'
+///     . ' fclose($c);';
+/// foreach (["first", "held"] as $peer) {
+///     $p = proc_open([PHP_BINARY, '-n', '-r', $srv, $peer], [1 => ['pipe', 'w']], $pipes);
+///     $uri = 'http://' . trim(fgets($pipes[1]));
+///     $c = new SoapClient(null, ['location' => $uri, 'uri' => 'u']);
+///     if ($peer === 'first') { $c->__doRequest('<E/>', $uri, 'f', SOAP_1_1); usleep(100000); }
+///     memory_reset_peak_usage(); $m = memory_get_usage();
+///     $r = $c->__doRequest('<E/>', $uri, 'f', SOAP_1_1);
+///     echo $peer, ' ', strlen($r), ' ', memory_get_peak_usage() - $m, ' ', memory_get_usage() - $m, "\n";
+///     unset($r, $c); proc_close($p);
+/// }
+/// ```
+/// ```expect process
+/// first 12272 16656 7768
+/// held 300000 316304 307384
+/// ```
 fn get_http_body(
     req: &mut Request,
     stream: Stream,
     close: bool,
     headers: &[u8],
-) -> R<Option<Vec<u8>>> {
+) -> R<Option<Owner<PhpString>>> {
     let mut header_close = close;
     if !close
         && let Some(header) = get_http_header_value(headers, b"Connection:")
@@ -534,7 +616,7 @@ fn get_http_body(
         header_length = atoi(&header);
         if header_length == 0 && !chunked {
             // Empty response.
-            return Ok(Some(Vec::new()));
+            return PhpString::new(req, b"").map(Some);
         }
     }
     if chunked {
@@ -546,41 +628,37 @@ fn get_http_body(
         let Ok(want) = usize::try_from(header_length) else {
             return Ok(None);
         };
-        let mut buf = HttpBuf(None);
+        let mut buf = HttpBuf::default();
         if !buf.grow(req, want, true)? {
             return Ok(None);
         }
-        let mut body = Vec::new();
-        while body.len() < want {
-            let left = want - body.len();
-            if read_more(req, stream, &mut body, left).is_none() {
+        while buf.size < want {
+            let left = want - buf.size;
+            if buf.read(req, stream, left).is_none() {
                 break;
             }
         }
-        buf.free(req);
-        return Ok(Some(body));
+        return buf.finish(req).map(Some);
     }
     if header_close {
-        let mut buf = HttpBuf(None);
-        let mut body = Vec::new();
+        let mut buf = HttpBuf::default();
         loop {
             // The first room is `zend_string_alloc(4096)`, each one after
             // it grown by 4096 fallibly and bounded, since 8.5.12.
-            let first = buf.0.is_none();
-            if !first && body.len() >= ZSTR_MAX_LEN - 4096 {
+            let first = buf.string.is_none();
+            if !first && buf.size >= ZSTR_MAX_LEN - 4096 {
                 buf.free(req);
                 return Ok(None);
             }
-            if !buf.grow(req, body.len() + 4096, !first)? {
+            if !buf.grow(req, buf.size + 4096, !first)? {
                 return Ok(None);
             }
-            read_more(req, stream, &mut body, 4096);
+            buf.read(req, stream, 4096);
             if stream.eof(req) {
                 break;
             }
         }
-        buf.free(req);
-        return Ok(Some(body));
+        return buf.finish(req).map(Some);
     }
     Ok(None)
 }
@@ -591,16 +669,24 @@ fn get_http_body(
 /// again from what the last `gets` left, as php's buffer keeps it. Since
 /// 8.5.12 the size is unsigned, refused past `ZSTR_MAX_LEN`, and each
 /// chunk's room asked for fallibly.
-fn chunked_body(req: &mut Request, stream: Stream) -> R<Option<Vec<u8>>> {
-    let mut buf = HttpBuf(None);
-    let body = chunks(req, stream, &mut buf);
-    buf.free(req);
-    body
+fn chunked_body(req: &mut Request, stream: Stream) -> R<Option<Owner<PhpString>>> {
+    let mut buf = HttpBuf::default();
+    match chunks(req, stream, &mut buf) {
+        Ok(true) => buf.finish(req).map(Some),
+        Ok(false) => {
+            buf.free(req);
+            Ok(None)
+        }
+        Err(thrown) => {
+            buf.free(req);
+            Err(thrown)
+        }
+    }
 }
 
-/// [`chunked_body`]'s reads, into `buf`'s room.
-fn chunks(req: &mut Request, stream: Stream, buf: &mut HttpBuf) -> R<Option<Vec<u8>>> {
-    let mut body: Option<Vec<u8>> = None;
+/// [`chunked_body`]'s reads, into `buf`'s room: `false` where php
+/// answers none.
+fn chunks(req: &mut Request, stream: Stream, buf: &mut HttpBuf) -> R<bool> {
     let mut size_line: Vec<u8> = Vec::new();
     let mut done = false;
     while !done {
@@ -609,21 +695,19 @@ fn chunks(req: &mut Request, stream: Stream, buf: &mut HttpBuf) -> R<Option<Vec<
         }
         let Some(buf_size) = scan_hex(&size_line) else {
             // Something wrong in chunked encoding.
-            return Ok(None);
+            return Ok(false);
         };
         if buf_size > 0 {
-            let have = body.as_ref().map_or(0, Vec::len);
             let want = usize::try_from(buf_size).unwrap_or(usize::MAX);
-            if want >= ZSTR_MAX_LEN - have {
-                return Ok(None);
+            if want >= ZSTR_MAX_LEN - buf.size {
+                return Ok(false);
             }
-            if !buf.grow(req, have + want, true)? {
-                return Ok(None);
+            if !buf.grow(req, buf.size + want, true)? {
+                return Ok(false);
             }
-            let body = body.get_or_insert_with(Vec::new);
             let mut len_size = 0;
             while len_size < want {
-                let Some(read) = read_more(req, stream, body, want - len_size) else {
+                let Some(read) = buf.read(req, stream, want - len_size) else {
                     // Error or EOF.
                     done = true;
                     break;
@@ -637,7 +721,7 @@ fn chunks(req: &mut Request, stream: Stream, buf: &mut HttpBuf) -> R<Option<Vec<
             }
             if ch != Some(b'\n') {
                 // Something wrong in chunked encoding.
-                return Ok(None);
+                return Ok(false);
             }
         }
         if buf_size == 0 {
@@ -650,7 +734,7 @@ fn chunks(req: &mut Request, stream: Stream, buf: &mut HttpBuf) -> R<Option<Vec<
             break;
         }
     }
-    Ok(Some(body.unwrap_or_default()))
+    Ok(true)
 }
 
 /// `FG(default_socket_timeout)` as `php_stream_xport_create` makes it
@@ -814,7 +898,12 @@ fn connect(
     head.extend_from_slice(b"\r\n");
     let connected = stream.write(req, &head) == Some(head.len())
         && match get_http_headers(req, *stream) {
-            Ok(headers) => headers.is_some(),
+            // `zend_string_free(http_headers)`.
+            Ok(Some(headers)) => {
+                headers.give_up(req);
+                true
+            }
+            Ok(None) => false,
             Err(thrown) => {
                 stream.free(req);
                 return Err(thrown);
@@ -901,14 +990,19 @@ fn string(req: &mut Request, bytes: &[u8]) -> R<Owner<Value>> {
     Ok(PhpString::new(req, bytes)?.into_value())
 }
 
-/// `call_user_function` of the function named, over a string and
-/// integers: the string it answers, none for anything else. A name no
+/// The function named, as `call_user_function` finds it: a name no
 /// function has is php's `Error` "Invalid callback".
-fn call_by_name(req: &mut Request, name: &[u8], data: &[u8], ints: &[i64]) -> R<Option<Vec<u8>>> {
+fn callable_named(req: &mut Request, name: &[u8]) -> R<Callable> {
     let named = string(req, name)?;
     let callable = to_callable(req, &named);
     named.give_up(req);
-    let callable = callable?;
+    callable
+}
+
+/// `call_user_function` of the function named, over a string and
+/// integers: the string it answers, none for anything else.
+fn call_by_name(req: &mut Request, name: &[u8], data: &[u8], ints: &[i64]) -> R<Option<Vec<u8>>> {
+    let callable = callable_named(req, name)?;
     let text = string(req, data)?;
     let mut args = vec![*text];
     args.extend(ints.iter().map(|n| Value::int(*n)));
@@ -940,6 +1034,7 @@ fn same_target(
     let Some(orig) = object
         .native::<UrlPayload>(req)
         .and_then(|payload| payload.uri.as_ref())
+        .map(|held| &held.uri)
     else {
         return false;
     };
@@ -955,7 +1050,59 @@ fn same_target(
 enum Sent {
     Failed,
     Done,
-    Body(Vec<u8>),
+    Body(Owner<PhpString>),
+}
+
+/// What an exchange holds on the request's heap where php holds it: the
+/// response's head, `http_headers`; the words after its status,
+/// `http_msg`; and its body, `http_body`. Each is let go where php lets
+/// it go, and whatever is held as the exchange ends with it.
+#[derive(Default)]
+struct Held {
+    headers: Option<Owner<PhpString>>,
+    msg: Option<Emalloc>,
+    body: Option<Owner<PhpString>>,
+}
+
+impl Held {
+    /// `zend_string_release_ex(http_headers, 0)`.
+    fn release_headers(&mut self, req: &mut Request) {
+        if let Some(headers) = self.headers.take() {
+            headers.give_up(req);
+        }
+    }
+
+    /// `zend_string_release_ex(http_body, 0)`.
+    fn release_body(&mut self, req: &mut Request) {
+        if let Some(body) = self.body.take() {
+            body.give_up(req);
+        }
+    }
+
+    /// `efree(http_msg); http_msg = estrdup(text)`.
+    fn set_msg(&mut self, req: &mut Request, text: &[u8]) -> R<()> {
+        if let Some(msg) = self.msg.take() {
+            msg.free(req);
+        }
+        let mut msg = Emalloc::new(req, text.len() + 1)?;
+        msg.bytes_mut()[..text.len()].copy_from_slice(text);
+        self.msg = Some(msg);
+        Ok(())
+    }
+
+    /// `http_msg`'s text, without its NUL.
+    fn msg(&self) -> &[u8] {
+        self.msg.as_ref().map_or(&[][..], |msg| c_str(msg.bytes()))
+    }
+
+    /// All of it let go.
+    fn release_all(&mut self, req: &mut Request) {
+        self.release_headers(req);
+        self.release_body(req);
+        if let Some(msg) = self.msg.take() {
+            msg.free(req);
+        }
+    }
 }
 
 /// `make_http_soap_request`: the response body, or none where php
@@ -969,7 +1116,7 @@ pub(crate) fn make_http_soap_request(
     soapaction: Option<&[u8]>,
     soap_version: i64,
     uri_parser_class: Option<&[u8]>,
-) -> Res<Option<Vec<u8>>> {
+) -> Res<Option<Owner<PhpString>>> {
     let call = Call {
         buf,
         location,
@@ -1049,10 +1196,19 @@ fn compress(
     }
 }
 
+/// `make_http_soap_request` over what its exchange holds, all of it let
+/// go however the exchange ends.
+fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
+    let mut held = Held::default();
+    let sent = exchange(req, this, call, &mut held);
+    held.release_all(req);
+    sent
+}
+
 /// The body of `make_http_soap_request`, its `try_again` the loop: one
 /// exchange per turn, a redirect or a digest challenge the next.
 #[allow(clippy::too_many_lines)] // php's one function, its stretches kept in order
-fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
+fn exchange(req: &mut Request, this: PhpObject, call: &Call<'_>, held: &mut Held) -> Res<Sent> {
     let mut soap_headers_z = Vec::new();
     let Some(request) = compress(req, this, call.buf, &mut soap_headers_z)? else {
         return Ok(Sent::Failed);
@@ -1093,7 +1249,6 @@ fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
             _ => {}
         }
     }
-    let mut http_msg: Option<Vec<u8>> = None;
     loop {
         let Some(mut uri_now) = uri.take().filter(|u: &UriStruct| u.host.is_some()) else {
             fault(req, this, b"Unable to parse URL")?;
@@ -1178,7 +1333,8 @@ fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
             fault(req, this, b"Failed Sending HTTP SOAP request")?;
             return Ok(Sent::Failed);
         }
-        let mut http_headers = Vec::new();
+        // `http_headers`, held in `held` until php releases it.
+        let mut head: Option<PhpString> = None;
         let mut http_1_1 = false;
         let mut http_status = 0;
         if call.want_body || client_trace {
@@ -1188,27 +1344,31 @@ fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
                     fault(req, this, b"Error Fetching http headers")?;
                     return Ok(Sent::Failed);
                 };
+                let view = **held.headers.insert(headers);
                 if client_trace {
-                    set_string_slot(req, this, ClientSlot::LastResponseHeaders, &headers)?;
+                    // `ZVAL_STR_COPY`: the trace shares the head.
+                    let kept = Owner::take(req, Value::string(view));
+                    set_client_slot(req, this, ClientSlot::LastResponseHeaders, kept)?;
                 }
                 // Check to see what HTTP status was sent.
                 http_1_1 = false;
                 http_status = 0;
-                if let Some(version) = get_http_header_value(&headers, b"HTTP/") {
+                if let Some(version) = get_http_header_value(view.as_bytes(), b"HTTP/") {
                     http_1_1 = strncmp_eq(&version, b"1.1", 3);
                     if let Some(sp) = find(&version, b' ') {
                         let rest = &version[sp + 1..];
                         http_status = atoi(rest);
                         if let Some(sp) = find(rest, b' ') {
-                            http_msg = Some(c_str(&rest[sp + 1..]).to_vec());
+                            held.set_msg(req, c_str(&rest[sp + 1..]))?;
                         }
                     }
                 }
-                http_headers = headers;
-                // Try and get headers again.
                 if http_status != 100 {
+                    head = Some(view);
                     break;
                 }
+                // Try and get headers again.
+                held.release_headers(req);
             }
         }
         if !call.want_body {
@@ -1216,6 +1376,11 @@ fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
             drop_connection(req, this, s, false)?;
             return Ok(Sent::Done);
         }
+        // A call that wants the body has read a head above.
+        let Some(head) = head else {
+            return Ok(Sent::Failed);
+        };
+        let http_headers = head.as_bytes();
         // Grab and send back every cookie.
         let mut from = 0;
         while let Some((value, len)) = header_value_at(&http_headers[from..], b"Set-Cookie:") {
@@ -1226,7 +1391,7 @@ fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
         // See if the server requested a close.
         let proxied = use_proxy && !use_ssl;
         let says = |name: &[u8], word: &[u8]| {
-            get_http_header_value(&http_headers, name)
+            get_http_header_value(http_headers, name)
                 .is_some_and(|value| strncasecmp_eq(&value, word, word.len()))
         };
         let http_close = if http_1_1 {
@@ -1235,8 +1400,9 @@ fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
             !((proxied && says(b"Proxy-Connection:", b"Keep-Alive"))
                 || says(b"Connection:", b"Keep-Alive"))
         };
-        let Some(http_body) = get_http_body(req, s, http_close, &http_headers)? else {
+        let Some(http_body) = get_http_body(req, s, http_close, http_headers)? else {
             drop_connection(req, this, s, false)?;
+            held.release_headers(req);
             fault(
                 req,
                 this,
@@ -1244,17 +1410,20 @@ fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
             )?;
             return Ok(Sent::Failed);
         };
+        held.body = Some(http_body);
         if http_close {
             drop_connection(req, this, s, false)?;
             stream = None;
         }
         // Process HTTP status codes.
         if (300..400).contains(&http_status) {
-            if let Some(location) = get_http_header_value(&http_headers, b"Location:") {
+            if let Some(location) = get_http_header_value(http_headers, b"Location:") {
                 let Some(parser) = uri_parser(call.uri_parser_class) else {
                     return Err(arg_value_error(req, 6, "be a valid URI parser name").into());
                 };
                 if let Some(new_uri) = parser.parse(req, c_str(&location))? {
+                    held.release_headers(req);
+                    held.release_body(req);
                     uri = Some(redirected(new_uri, &uri_now));
                     redirect_max -= 1;
                     if redirect_max < 1 {
@@ -1264,18 +1433,13 @@ fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
                     continue;
                 }
             }
-        } else if http_status == 401 && digest_challenge(req, this, &http_headers)? {
+        } else if http_status == 401 && digest_challenge(req, this, http_headers)? {
+            held.release_headers(req);
+            held.release_body(req);
             uri = Some(uri_now);
             continue;
         }
-        return answer(
-            req,
-            this,
-            &http_headers,
-            http_body,
-            http_status,
-            http_msg.as_deref(),
-        );
+        return answer(req, this, held, head, http_status);
     }
 }
 
@@ -1313,8 +1477,17 @@ fn request_headers(
     }
     let class = class_id(req, "Soap\\Url")?;
     let url = new_object(req, class)?;
-    if let Some(payload) = url.native_mut::<UrlPayload>(req) {
-        payload.uri = Some(uri.clone());
+    // `url_obj->uri = uri`: the `php_uri` is the object's from here.
+    let held = match HeldUri::new(req, uri.clone()) {
+        Ok(held) => held,
+        Err(thrown) => {
+            url.give_up(req);
+            return Err(thrown);
+        }
+    };
+    match url.native_mut::<UrlPayload>(req) {
+        Some(payload) => payload.uri = Some(held),
+        None => held.free(req),
     }
     set_client_slot(req, this, ClientSlot::HttpUrl, url.into_value())?;
     let http_1_1 = match context {
@@ -1821,11 +1994,11 @@ fn digest_challenge(req: &mut Request, this: PhpObject, headers: &[u8]) -> R<boo
 fn answer(
     req: &mut Request,
     this: PhpObject,
-    http_headers: &[u8],
-    http_body: Vec<u8>,
+    held: &mut Held,
+    head: PhpString,
     http_status: i32,
-    http_msg: Option<&[u8]>,
 ) -> Res<Sent> {
+    let http_headers = head.as_bytes();
     // Check and see if the server even sent a xml document.
     let content_type_xml =
         get_http_header_value(http_headers, b"Content-Type:").is_some_and(|ct| {
@@ -1833,6 +2006,9 @@ fn answer(
             let cmplen = find(ct, b';').unwrap_or(ct.len());
             strncmp_eq(ct, b"text/xml", cmplen) || strncmp_eq(ct, b"application/soap+xml", cmplen)
         });
+    let Some(http_body) = held.body.take() else {
+        return Ok(Sent::Failed);
+    };
     // Decompress response.
     let body = match get_http_header_value(http_headers, b"Content-Encoding:") {
         Some(encoding) => {
@@ -1844,10 +2020,26 @@ fn answer(
             } else if encoding == b"deflate" && lookup_function(req, b"gzuncompress").is_some() {
                 b"gzuncompress"
             } else {
+                http_body.give_up(req);
+                held.release_all(req);
                 fault(req, this, b"Unknown Content-Encoding")?;
                 return Ok(Sent::Failed);
             };
-            let Some(body) = call_by_name(req, function, &http_body, &[])? else {
+            // The body string itself is the argument, `ZVAL_STR`, and
+            // the string answered is the body handed on.
+            let answered = callable_named(req, function)
+                .and_then(|callable| call(req, &callable, &[Value::string(*http_body)]));
+            let decompressed = answered.map(|answered| {
+                let kept = match answered.as_ref() {
+                    ValueRef::Str(s) => Some(Owner::take(req, s)),
+                    _ => None,
+                };
+                answered.give_up(req);
+                kept
+            });
+            http_body.give_up(req);
+            let Some(body) = decompressed? else {
+                held.release_headers(req);
                 fault(req, this, b"Can't uncompress compressed response")?;
                 return Ok(Sent::Failed);
             };
@@ -1855,10 +2047,14 @@ fn answer(
         }
         None => http_body,
     };
+    // `zend_string_release_ex(http_headers, 0)`.
+    held.release_headers(req);
     if http_status >= 400 {
-        let error = body.is_empty() || (!content_type_xml && !starts_xml(&body));
+        let text = body.as_bytes();
+        let error = text.is_empty() || (!content_type_xml && !starts_xml(text));
         if error {
-            fault(req, this, http_msg.unwrap_or_default())?;
+            body.give_up(req);
+            fault(req, this, held.msg())?;
             return Ok(Sent::Failed);
         }
     }
