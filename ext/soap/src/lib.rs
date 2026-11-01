@@ -227,6 +227,18 @@ fn ini_entry(name: &[u8], default: &[u8]) -> IniDecl {
 /// Warning: Invalid "soap.wsdl_cache_ttl" setting. Invalid quantity "1Dx": unknown multiplier "x", interpreting as "1" for backwards compatibility in Unknown on line 0
 /// 0
 /// ```
+///
+/// `PHP_MINIT_FUNCTION(soap)` interns `soap_lang_en`, the `en` every
+/// fault's `$lang` is, so the engine's start interns it and no request
+/// pays for it; an unserialized key of it is that string:
+///
+/// ```php
+/// debug_zval_dump(array_key_first(unserialize('a:1:{s:2:"en";i:1;}')), array_key_first(unserialize('a:1:{s:2:"fr";i:1;}')));
+/// ```
+/// ```expect
+/// string(2) "en" interned
+/// string(2) "fr" refcount(1)
+/// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
         .functions(vec![
@@ -242,6 +254,7 @@ pub fn extension() -> Extension {
         .class::<classes::Url>()
         .class::<classes::Sdl>()
         .constants(constants::declared())
+        .interned(b"en")
         .ini(vec![
             ini_entry(ini::CACHE_ENABLED, b"1"),
             ini_entry(ini::CACHE_DIR, b"/tmp"),
