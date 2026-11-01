@@ -6,11 +6,12 @@
 //! the same test of `->type`.
 
 use std::ffi::{c_char, c_int, c_void};
+use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 
 use php_ext::request::Request;
 
-use super::{Alloc, Library, NodeObject, SharedDoc, Tree, cstr, sys};
+use super::{Alloc, Exported, Library, NodeObject, SharedDoc, Tree, cstr, sys};
 
 /// A NUL-terminated copy or null, for a C argument php passes as `NULL`.
 fn opt_ptr(bytes: Option<&Vec<u8>>) -> *const u8 {
@@ -1594,19 +1595,117 @@ impl Library {
     }
 }
 
-impl NodeObject {
-    /// `php_dom_instantiate_object_helper`'s libxml half: the document
-    /// counted (shared with `shared` where one is given) where the node has
-    /// one, and the node's proxy taken.
-    pub fn attach(&mut self, req: &mut Request, node: Node, shared: Option<SharedDoc>) {
-        if let Some(doc) = node.doc() {
-            // SAFETY: `shared` was read off a live object's reference in the
-            // same native call, and `doc` is the live node's document.
-            unsafe { self.increment_doc_ref_shared(req, shared, doc.raw().cast()) };
+/// A node and the reference to its own document that an object standing
+/// for it counts: php's `intern->document` in
+/// `php_dom_instantiate_object_helper`, checked. Only [`DocOf::under`] and
+/// [`DocOf::exported`] build one, each by checking the reference against
+/// the node's document, so no object stands for a node of one document
+/// while counting another's, which lets the node's document go under the
+/// object with its last real owner (#3541). `'d` is the borrow of what the
+/// reference was read off, within one native call.
+#[derive(Debug, Clone, Copy)]
+pub struct DocOf<'d> {
+    node: Node,
+    counted: Counted,
+    read_off: PhantomData<&'d NodeObject>,
+}
+
+/// What an object standing for a [`DocOf`]'s node counts.
+#[derive(Debug, Clone, Copy)]
+enum Counted {
+    /// Nothing: the node is of no document.
+    Nothing,
+    /// The reference to the node's document a live object counts.
+    Shared(SharedDoc),
+    /// A first reference: the node is a document no object counts yet.
+    First,
+}
+
+impl<'d> DocOf<'d> {
+    /// `node` counted under the reference `by` counts where that is the
+    /// node's document's, otherwise under the one the object standing
+    /// for the node's document counts; a document node no object counts
+    /// takes its first reference where `by` counts nothing. `None` where
+    /// no reference to the node's document is in reach, so no object can
+    /// stand for the node without counting another document.
+    #[must_use]
+    pub fn under(node: Node, by: Option<&'d NodeObject>) -> Option<DocOf<'d>> {
+        let shared = by.and_then(|b| b.shared_doc().map(|s| (s, b.document())));
+        DocOf::checked(node, shared, shared.is_none())
+    }
+
+    /// The node an export names, counted under the reference its object
+    /// counts, checked as [`DocOf::under`] checks it.
+    #[must_use]
+    pub fn exported(export: &'d Exported) -> Option<DocOf<'d>> {
+        // SAFETY: an export is made off a live object that counts the
+        // document, within the native call that reads it.
+        let shared = export.document().map(|s| (s, unsafe { s.doc() }));
+        DocOf::checked(export.node(), shared, shared.is_none())
+    }
+
+    /// The check, with `shared` a reference beside the document it names.
+    fn checked(
+        node: Node,
+        shared: Option<(SharedDoc, *mut sys::xmlDoc)>,
+        fresh: bool,
+    ) -> Option<DocOf<'d>> {
+        let made = |counted| {
+            Some(DocOf {
+                node,
+                counted,
+                read_off: PhantomData,
+            })
+        };
+        let Some(doc) = node.doc() else {
+            return made(Counted::Nothing);
+        };
+        let raw = doc.raw().cast::<sys::xmlDoc>();
+        if let Some((s, _)) = shared.filter(|&(_, d)| d == raw) {
+            return made(Counted::Shared(s));
         }
+        let own = doc.wrapper();
+        if let Some(s) = own
+            .as_deref()
+            .filter(|o| o.document() == raw)
+            .and_then(NodeObject::shared_doc)
+        {
+            return made(Counted::Shared(s));
+        }
+        if fresh && node == doc && own.is_none() {
+            return made(Counted::First);
+        }
+        None
+    }
+}
+
+impl NodeObject {
+    /// `php_dom_instantiate_object_helper`'s libxml half: the node's own
+    /// document counted, as [`DocOf`] checked it, and the node's proxy
+    /// taken, by the half of an object that counts no document yet.
+    pub fn attach(&mut self, req: &mut Request, of: DocOf<'_>) {
+        self.count_document(req, of);
         // SAFETY: a live node, and this is the half of the object standing
         // for it.
-        unsafe { self.increment_node_ptr(req, node.raw(), true) };
+        unsafe { self.increment_node_ptr(req, of.node.raw(), true) };
+    }
+
+    /// `php_libxml_increment_doc_ref` over the document of `of`'s node,
+    /// standing for no node: a count held as a node list holds its
+    /// document, given back by [`NodeObject::release`].
+    pub fn count_document(&mut self, req: &mut Request, of: DocOf<'_>) {
+        match of.counted {
+            Counted::Nothing => {}
+            Counted::Shared(s) => {
+                // SAFETY: `DocOf` read `s` off a live object within this
+                // call and checked that it names the node's document.
+                unsafe { self.increment_doc_ref_shared(req, Some(s), ptr::null_mut()) };
+            }
+            Counted::First => {
+                // SAFETY: the node is a live document no reference counts.
+                unsafe { self.increment_doc_ref(req, of.node.raw().cast()) };
+            }
+        }
     }
 
     /// `intern->document = NULL; php_libxml_increment_doc_ref(intern, doc)`:

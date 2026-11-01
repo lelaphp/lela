@@ -52,7 +52,7 @@ pub use sys::{
     XML_PARSE_NOWARNING, XML_PARSE_NSCLEAN, XML_PARSE_PEDANTIC, XML_PARSE_RECOVER,
     XML_PARSE_XINCLUDE, XML_SAVE_AS_XML, XML_SAVE_FORMAT, XML_SAVE_NO_DECL, XML_SAVE_NO_EMPTY,
 };
-pub use tree::{DocString, DtdTable, HashTable, Kind, Name, Node, Ns, Utf8};
+pub use tree::{DocOf, DocString, DtdTable, HashTable, Kind, Name, Node, Ns, Utf8};
 pub use writer::Emitter;
 pub use xpath::{Answer, Called, Function, Handler, Item, Object, Operand, Returned, Scope, XPath};
 
@@ -1707,6 +1707,15 @@ impl SharedDoc {
     pub unsafe fn invalidate(self) {
         // SAFETY: the caller's contract.
         unsafe { (*self.0.as_ptr()).modification += 1 };
+    }
+
+    /// The document the reference names, `ref->ptr`.
+    ///
+    /// # Safety
+    /// Some live object counts the document.
+    pub(crate) unsafe fn doc(self) -> *mut sys::xmlDoc {
+        // SAFETY: the caller's contract.
+        unsafe { (*self.0.as_ptr()).doc }
     }
 }
 

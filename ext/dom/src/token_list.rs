@@ -413,11 +413,18 @@ pub(crate) fn create(req: &mut Request, element_object: PhpObject) -> Result<Own
     let class = crate::class(req, "Dom\\TokenList")?;
     let object = php_ext::call::new_object(req, class)?;
     let node = crate::node_of(req, element_object);
-    let shared = crate::shared_doc(req, element_object);
-    if let Some(mut obj) = crate::libxml_half(req, *object)
-        && let Some(n) = node
-    {
-        obj.attach(req, n, shared);
+    if let Some(n) = node {
+        let element = crate::libxml_half(req, element_object);
+        let of = match crate::doc_of(req, n, element.as_deref()) {
+            Ok(of) => of,
+            Err(thrown) => {
+                object.give_up(req);
+                return Err(thrown);
+            }
+        };
+        if let Some(mut obj) = crate::libxml_half(req, *object) {
+            obj.attach(req, of);
+        }
     }
     if let Some(d) = dom_mut(req, *object) {
         d.extra = Extra::TokenList(Box::default());

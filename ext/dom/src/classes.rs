@@ -184,10 +184,7 @@ fn replace_data(
 /// php's invalid state where libxml made none.
 fn construct(req: &mut Request, this: PhpObject, node: Option<Node>) -> Result<(), Thrown> {
     match node {
-        Some(node) => {
-            crate::rebind(req, this, node);
-            Ok(())
-        }
+        Some(node) => crate::rebind(req, this, node),
         None => Err(dom_throw(req, Code::InvalidState)),
     }
 }
