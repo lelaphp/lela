@@ -68,7 +68,8 @@ pub(super) fn reads_by_name(code: &OpArray) -> bool {
 
 /// What an opline writes beside its `out` slot: a variable `op1`, an
 /// `op2`, the `OP_DATA`'s `op1` (php's `_zend_ssa_rename_op`, less the
-/// writes reference-count inference alone adds).
+/// writes reference-count inference alone adds, save one: the object an
+/// `ASSIGN_OBJ_REF` binds a property of).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Writes {
     pub(super) op1: bool,
@@ -76,6 +77,42 @@ pub(super) struct Writes {
     pub(super) data: bool,
 }
 
+/// What `op` writes ([`Writes`]).
+///
+/// php's trace SSA numbers an `ASSIGN_OBJ_REF`'s object anew under
+/// `ZEND_SSA_RC_INFERENCE` (`Z/Zend/Optimizer/zend_ssa.c:610-615`) and
+/// types it from what the trace recorded it as (`zend_update_type_info`,
+/// `Z/Zend/Optimizer/zend_inference.c:3169-3177`). A loop that binds a
+/// property of a variable it writes nowhere else then takes a phi of it,
+/// which no guard holds, and a test of the variable after the binding
+/// reads an object and holds no guard of its type at the loop's entry
+/// (#3862):
+///
+/// ```php
+/// class C { public $p; }
+/// function f($o) { $x = 0; $n = 0; for ($i = 0; $i < 100; $i++) { $o->p = &$x; if ($o) { $n += 2; } if ($i > 50) { $n++; } } return $n + $x; }
+/// echo f(new C), "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 249
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:4
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) f() %s:3
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 5 f() %s:3
+/// ---- TRACE 2 start (side trace 1/5) f() %s:3
+/// ---- TRACE 2 stop (link to 1)
+/// ---- TRACE 2 compiled
+///
+///      TRACE 1 exit 1 f() %s:3
+/// ---- TRACE 3 start (side trace 1/1) f() %s:3
+/// ---- TRACE 3 stop (return)
+/// ---- TRACE 3 compiled
+/// ```
 pub(super) fn writes(op: &Opline, data: Option<&Opline>) -> Writes {
     let cv1 = op.op1_type == OperandKind::Cv;
     let op1 = match op.opcode {
@@ -88,6 +125,7 @@ pub(super) fn writes(op: &Opline, data: Option<&Opline>) -> Writes {
         | Opcode::AssignRef
         | Opcode::AssignDim
         | Opcode::AssignObj
+        | Opcode::AssignObjRef
         | Opcode::AssignDimOp
         | Opcode::AssignObjOp
         | Opcode::AssignOp
