@@ -443,6 +443,30 @@ impl StreamFilter for UserFilter {
     /// NULL
     /// end
     /// ```
+    ///
+    /// What a `filter()` that threw wrote into `$consumed` is given up
+    /// with what it threw pending, as php's `zval_ptr_dtor(&args[2])`
+    /// follows the call (`Z/ext/standard/user_filters.c:231`), so a
+    /// destructor that throws there chains it as its `previous`:
+    ///
+    /// ```php
+    /// ini_set('zend.exception_ignore_args', 1);
+    /// class D { function __destruct() { throw new Exception("destructed"); } }
+    /// class F extends php_user_filter {
+    ///     function filter($in, $out, &$consumed, $closing): int {
+    ///         while ($b = stream_bucket_make_writeable($in)) stream_bucket_append($out, $b);
+    ///         if (!$closing) { $consumed = [new D]; throw new Exception("filtered"); }
+    ///         return PSFS_PASS_ON;
+    ///     }
+    /// }
+    /// stream_filter_register('f', 'F');
+    /// $m = fopen('php://memory', 'w');
+    /// stream_filter_append($m, 'f', STREAM_FILTER_WRITE);
+    /// try { fwrite($m, 'x'); } catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()?->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// destructed after filtered
+    /// ```
     fn filter(
         &mut self,
         req: &mut Request,
@@ -512,7 +536,12 @@ impl StreamFilter for UserFilter {
             }
             Ok(status)
         })();
-        count.give_up(req);
+        // `zval_ptr_dtor(&args[2])` with the throwable `filter()` threw in
+        // `EG(exception)`: what it wrote into `$consumed` is freed there.
+        match &called {
+            Err(thrown) => crate::given_up_past(req, thrown, count),
+            Ok(_) => count.give_up(req),
+        }
         in_res.give_up(req);
         out_res.give_up(req);
         let status = match finished {

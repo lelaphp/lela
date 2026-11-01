@@ -21,6 +21,7 @@ use super::constants::{ARRAY_FILTER_USE_BOTH, ARRAY_FILTER_USE_KEY};
 use super::copied;
 use super::pointer::ArrayOrObject;
 use super::sort::key_value;
+use crate::given_up_past;
 use crate::throwables::Throwables;
 
 /// `array_walk(array|object &$array, callable $callback, mixed $arg = UNKNOWN): true`,
@@ -469,6 +470,21 @@ fn visit(req: &mut Request, reference: PhpRef, key: &Key, walk: &Walk) -> Result
 /// string(5) "empty"
 /// array_reduce(): Argument #2 ($callback) must be a valid callback, function "nope" not found or invalid function name
 /// ```
+///
+/// The carry handed to a callback that threw is given up with what it
+/// threw pending, as php's `zval_ptr_dtor(&args[0])` follows
+/// `zend_call_function` (`Z/ext/standard/array.c:6633`), so a destructor
+/// that throws there chains it as its `previous`:
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class D { function __destruct() { throw new Exception("destructed"); } }
+/// try { array_reduce([1, 2], function ($c, $v) { if ($v == 2) throw new Exception("cb"); return new D; }); }
+/// catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// destructed after cb
+/// ```
 #[php_function]
 fn array_reduce(
     req: &mut Request,
@@ -484,9 +500,18 @@ fn array_reduce(
         let Some(held) = carry.take() else {
             return Ok(ControlFlow::Break(()));
         };
-        let answer = call(req, &callback, &[*held, *row.value()]);
-        held.give_up(req);
-        let mut next = answer?;
+        // `zval_ptr_dtor(&args[0])` after `zend_call_function`, with the
+        // callback's throwable in `EG(exception)` where it threw.
+        let mut next = match call(req, &callback, &[*held, *row.value()]) {
+            Ok(next) => {
+                held.give_up(req);
+                next
+            }
+            Err(thrown) => {
+                given_up_past(req, &thrown, held);
+                return Err(thrown);
+            }
+        };
         if let Some(reference) = next.as_php_ref() {
             let inner = Owner::take(req, reference.get());
             next.give_up(req);
@@ -840,6 +865,24 @@ fn array_all(req: &mut Request, array: PhpArray, callback: Callable) -> Result<b
 ///
 /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 8404992 bytes) in %s on line 3
 /// ```
+///
+/// The answer built before a callback threw is given up with what it
+/// threw pending, as php's `zend_array_destroy` of `return_value` follows
+/// `zend_call_function` (`Z/ext/standard/array.c:6917`, `:6941`, `:7064`), over
+/// one array and over several, so a destructor that throws there chains
+/// it as its `previous`:
+///
+/// ```php
+/// class D { function __destruct() { throw new Exception("destructed"); } }
+/// try { array_map(function ($v) { if ($v == 2) throw new Exception("one"); return new D; }, [1, 2]); }
+/// catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()?->getMessage(), "\n"; }
+/// try { array_map(function ($v, $w) { if ($v == 2) throw new Exception("several"); return new D; }, [1, 2], [3, 4]); }
+/// catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// destructed after one
+/// destructed after several
+/// ```
 #[php_function]
 fn array_map(
     req: &mut Request,
@@ -949,7 +992,7 @@ fn mapped(
             return Ok(None);
         }
         Err(thrown) => {
-            out.give_up(req);
+            given_up_past(req, &thrown, out);
             return Err(thrown);
         }
     }
@@ -1013,7 +1056,7 @@ fn mapped_together(
             Ok(None)
         }
         Err(thrown) => {
-            out.give_up(req);
+            given_up_past(req, &thrown, out);
             Err(thrown)
         }
     }
