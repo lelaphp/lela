@@ -1081,9 +1081,12 @@ impl Stream {
         if let Some(unheld) = held {
             unheld.give_up(req);
         }
-        match req.diagnostics_mut().stream_thrown().take() {
-            Some(thrown) => Err(thrown),
-            None => Ok(Some(res)),
+        // `RETURN_RES` with a throwable pending: the caller's owner is
+        // freed with the return value, the chain's kept.
+        if let Some(thrown) = req.diagnostics_mut().stream_thrown().take() {
+            res.give_up(req);
+            return Err(thrown);
         }
+        Ok(Some(res))
     }
 }

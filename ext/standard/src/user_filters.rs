@@ -100,7 +100,7 @@ use php_ext::abi::{ConstValue, Instance, OrFalse, Passed, Ref, This, Untyped};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{autoload, call_method, lookup_class, new_object, write_prop};
 use php_ext::coerce::{is_callable, to_long};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, type_error};
+use php_ext::raising::{Carrying, Level, Thrown, arg_value_error, docref, type_error};
 use php_ext::request::{
     Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Streams as _,
 };
@@ -598,6 +598,41 @@ impl StreamFilter for UserFilter {
 /// called, its `filtername` and `params` set, and `onCreate()`, whose
 /// `false` refuses the filter.
 ///
+/// An `onCreate()` that threw leaves php's `retval` `IS_UNDEF`, so the
+/// filter is made and attached with the throwable pending
+/// (`Z/ext/standard/user_filters.c:325-343`); the next chain's filter is
+/// made under it with no `onCreate()` called, as
+/// `zend_call_method_if_exists` calls nothing while one is pending, and
+/// both are closed with the stream:
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class D { function __destruct() { echo "destructed\n"; } }
+/// class G extends php_user_filter {
+///     public $d;
+///     function onCreate(): bool { echo "onCreate\n"; $this->d = new D; throw new Exception("create"); }
+///     function onClose(): void { echo "onClose\n"; }
+/// }
+/// stream_filter_register('g', 'G');
+/// $s = fopen('php://memory', 'w+');
+/// try { var_dump(stream_filter_append($s, 'g')); } catch (Exception $e) { echo $e->getMessage(), "\n"; var_dump($e->getPrevious()); }
+/// var_dump(fwrite($s, 'x'));
+/// fclose($s);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// onCreate
+/// create
+/// NULL
+///
+/// Warning: fwrite(): Unprocessed filter buckets remaining on input brigade in %s on line 12
+/// bool(false)
+/// onClose
+/// destructed
+/// onClose
+/// end
+/// ```
+///
 /// The class named is `zend_lookup_class`, which asks the autoloaders.
 ///
 /// ```php
@@ -670,26 +705,37 @@ fn user_filter_factory(
         return Ok(None);
     };
     let object = new_object(req, class)?;
-    match created(req, *object, name, params) {
-        Ok(Some(value)) if matches!(value.as_ref(), ValueRef::Bool(false)) => {
-            value.give_up(req);
+    // The stream layer's pending throwable is php's `EG(exception)`: what
+    // the object is made under, and what `onCreate()` throws is kept
+    // over it, the filter made either way.
+    let mut pending = Carrying::default();
+    let mut made = Ok(());
+    if let Some(thrown) = req.diagnostics_mut().stream_thrown().take() {
+        made = pending.keep(req, thrown);
+    }
+    let made = made.and_then(|()| pending.serve(req, |req| created(req, *object, name, params)));
+    let answered = match made {
+        Ok(answered) => answered.flatten(),
+        Err(fatal) => {
             object.give_up(req);
-            Ok(None)
+            return Err(fatal);
         }
-        Ok(value) => {
-            if let Some(value) = value {
-                value.give_up(req);
-            }
-            Ok(Some(Box::new(UserFilter {
-                object: Some(object),
-                held: Held::Chain,
-            })))
-        }
-        Err(thrown) => {
+    };
+    if let Some(thrown) = pending.take() {
+        *req.diagnostics_mut().stream_thrown() = Some(thrown);
+    }
+    if let Some(value) = answered {
+        let refused = matches!(value.as_ref(), ValueRef::Bool(false));
+        value.give_up(req);
+        if refused {
             object.give_up(req);
-            Err(thrown)
+            return Ok(None);
         }
     }
+    Ok(Some(Box::new(UserFilter {
+        object: Some(object),
+        held: Held::Chain,
+    })))
 }
 
 /// The new filter object's `filtername` and `params` set, and what
