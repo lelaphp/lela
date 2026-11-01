@@ -1888,13 +1888,16 @@ pub struct FramelessAt(pub u32);
 /// its slot, and `Unused` past the native's arity. Its record is
 /// owned as [`crate::exec::frameless_owner`] says, and given up as the
 /// call ends ([`crate::handlers::frameless_served`]); compiled code
-/// makes the interrupt check after it, `jit_frameless_interrupt_check`.
+/// makes the interrupt check after a native that returned,
+/// `jit_frameless_interrupt_check`, and this makes it after one that
+/// threw, with the throwable pending, before compiled code's throw guard.
 /// What the native returned, or `null` with the throwable left pending.
 ///
 /// # Errors
 ///
-/// The memory limit's fatal where the record's room is refused, and an
-/// internal error where `at` names no entry of the table.
+/// The memory limit's fatal where the record's room is refused, the
+/// interrupt check's fatal after a native that threw, and an internal
+/// error where `at` names no entry of the table.
 pub fn frameless_call(
     req: &mut Request,
     frame: FrameRef,
