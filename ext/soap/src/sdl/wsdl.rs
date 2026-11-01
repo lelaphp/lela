@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use php_ext::raising::{Thrown, leave_pending};
 use php_ext::request::{Request, StreamCtx};
 use php_ext::values::{Owner, Value, ValueRef};
-use php_ext_libxml::ffi::{Node, Raised};
+use php_ext_libxml::ffi::{NewDoc, Node, Raised};
 
 use crate::classes::string;
 use crate::model::{
@@ -41,7 +41,7 @@ const SOAP_TRANSPORT_HTTP: i32 = 1;
 /// `sdl_set_uri_credentials` changed, with the header it had.
 pub(crate) struct Ctx {
     pub(crate) sdl: Sdl,
-    pub(crate) docs: Table<Node>,
+    pub(crate) docs: Table<NewDoc>,
     messages: Table<Node>,
     bindings: Table<Node>,
     port_types: Table<Node>,
@@ -78,11 +78,11 @@ impl Ctx {
 }
 
 impl Drop for Ctx {
-    /// `delete_document` over `ctx.docs`, on every way out.
+    /// `delete_document` over `ctx.docs`, on every way out: each tree
+    /// freed as its `NewDoc` drops, in the order they were read, before
+    /// the rest of `sdlCtx`.
     fn drop(&mut self) {
-        for doc in self.docs.values() {
-            doc.free_document();
-        }
+        drop(std::mem::take(&mut self.docs));
     }
 }
 
@@ -249,20 +249,18 @@ fn sdl_restore_uri_credentials(req: &mut Request, ctx: &mut Ctx) -> Result<(), T
 /// `sdl_set_uri_credentials` and `sdl_restore_uri_credentials`: none
 /// where it was not well formed, beside what a stream wrapper threw
 /// meanwhile ([`parse_file_before_fatal`]). Where the restore fails, the
-/// parse is given back first, the throwable left pending.
+/// parse is freed first, the throwable left pending.
 pub(crate) fn parse_with_credentials(
     req: &mut Request,
     ctx: &mut Ctx,
     uri: &[u8],
-) -> Res<(Option<Node>, Option<Thrown>)> {
+) -> Res<(Option<NewDoc>, Option<Thrown>)> {
     sdl_set_uri_credentials(req, ctx, uri)?;
     let parsed = parse_file_before_fatal(req, uri);
     let restored = sdl_restore_uri_credentials(req, ctx);
     let (doc, pending) = parsed?;
     if let Err(thrown) = restored {
-        if let Some(d) = doc {
-            d.free_document();
-        }
+        drop(doc);
         if let Some(pending) = pending {
             leave_pending(req, pending);
         }
@@ -306,9 +304,9 @@ fn load_wsdl_ex(req: &mut Request, struri: &[u8], ctx: &mut Ctx, include: bool) 
             pending,
         ));
     };
+    let root = wsdl.node().children();
     ctx.docs.add(Key::Str(struri.to_vec()), wsdl);
 
-    let root = wsdl.children();
     let Some(definitions) = get_node(root, b"definitions", Some(WSDL_NAMESPACE)) else {
         if include && let Some(schema) = get_node(root, b"schema", Some(XSD_NAMESPACE)) {
             return load_schema(req, ctx, schema);

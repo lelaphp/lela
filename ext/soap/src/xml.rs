@@ -5,7 +5,7 @@
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext_libxml::Errors;
-use php_ext_libxml::ffi::{Kind, Node, Ns, Parser, Raised, Source};
+use php_ext_libxml::ffi::{Kind, NewDoc, Node, Ns, Parser, Raised, Source};
 
 /// `is_blank`: only spaces, tabs, newlines and carriage returns.
 fn is_blank(s: &[u8]) -> bool {
@@ -121,7 +121,9 @@ impl Iterator for Walk {
 /// `soap_xmlParseFile`: the document at `filename`, opened through the
 /// request's streams, cleaned of insignificant nodes, the walk made
 /// without recursing; none where it was not well formed or nests deeper
-/// than [`SOAP_MAX_XML_DEPTH`], for which the reason is empty.
+/// than [`SOAP_MAX_XML_DEPTH`], for which the reason is empty. A tree
+/// answered is freed as its [`NewDoc`] drops, and one not answered is
+/// freed here, where php's `xmlFreeDoc` frees it.
 ///
 /// ```php
 /// $f = tempnam(sys_get_temp_dir(), 'wsdl');
@@ -159,26 +161,22 @@ impl Iterator for Walk {
 /// Fatal error: SOAP-ERROR: Parsing WSDL: Couldn't load from '/nonexistent.wsdl' : failed to load external entity "/nonexistent.wsdl"
 ///  in %s on line 5
 /// ```
-pub(crate) fn parse_file(req: &mut Request, filename: &[u8]) -> Result<Option<Node>, Thrown> {
+pub(crate) fn parse_file(req: &mut Request, filename: &[u8]) -> Result<Option<NewDoc>, Thrown> {
     let (doc, raised, thrown) = Parser::soap(req, Source::File(filename));
     if let Some(t) = thrown {
-        if let Some(d) = doc {
-            d.free_document();
-        }
         return Err(t);
     }
     Errors::route(req, raised);
     let Some(d) = doc else {
         return Ok(None);
     };
-    if is_nesting_too_deep(d) {
+    if is_nesting_too_deep(d.node()) {
         // php_sdl.c reports `xmlGetLastError()` as the reason, and libxml
         // did not fail here, so the error an earlier parse left is dropped.
         Raised::reset_last();
-        d.free_document();
         return Ok(None);
     }
-    cleanup_xml_node(d);
+    cleanup_xml_node(d.node());
     Ok(Some(d))
 }
 
@@ -222,7 +220,7 @@ pub(crate) fn parse_file(req: &mut Request, filename: &[u8]) -> Result<Option<No
 pub(crate) fn parse_file_before_fatal(
     req: &mut Request,
     filename: &[u8],
-) -> Result<(Option<Node>, Option<Thrown>), Thrown> {
+) -> Result<(Option<NewDoc>, Option<Thrown>), Thrown> {
     match parse_file(req, filename) {
         Ok(doc) => Ok((doc, None)),
         Err(t) if t.exception().is_some() => Ok((None, Some(t))),
@@ -230,9 +228,10 @@ pub(crate) fn parse_file_before_fatal(
     }
 }
 
-/// `soap_xmlParseMemory`: the document in `buf`, not cleaned; none where
-/// it nests deeper than [`SOAP_MAX_XML_DEPTH`], which a server answers
-/// as a request it could not read.
+/// `soap_xmlParseMemory`: the document in `buf`, not cleaned, freed as
+/// its [`NewDoc`] drops; none where it nests deeper than
+/// [`SOAP_MAX_XML_DEPTH`], the tree freed here, which a server answers as
+/// a request it could not read.
 ///
 /// ```php
 /// function test($arg) { return 'ok'; }
@@ -250,21 +249,12 @@ pub(crate) fn parse_file_before_fatal(
 /// <?xml version="1.0" encoding="UTF-8"?>
 /// <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Client</faultcode><faultstring>Bad Request</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
 /// ```
-pub(crate) fn parse_memory(req: &mut Request, buf: &[u8]) -> Result<Option<Node>, Thrown> {
+pub(crate) fn parse_memory(req: &mut Request, buf: &[u8]) -> Result<Option<NewDoc>, Thrown> {
     let (doc, _raised, thrown) = Parser::soap(req, Source::Memory(buf));
     if let Some(t) = thrown {
-        if let Some(d) = doc {
-            d.free_document();
-        }
         return Err(t);
     }
-    match doc {
-        Some(d) if is_nesting_too_deep(d) => {
-            d.free_document();
-            Ok(None)
-        }
-        doc => Ok(doc),
-    }
+    Ok(doc.filter(|d| !is_nesting_too_deep(d.node())))
 }
 
 /// `node_find_ns`: the node's namespace, or the default one in scope.

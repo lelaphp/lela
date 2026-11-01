@@ -1603,11 +1603,12 @@ impl Library {
 /// `xmlNewDoc`, `htmlNewDocNoDtD`, `xmlCopyDoc`, the parsers and libxslt's
 /// transformation answer. It is neither `Copy` nor `Clone`, so it is given
 /// up once (#3819): to [`DocOf::first`] for an object's first reference,
-/// to [`NewDoc::taken_by_object`] where `php_dom_create_object` took it,
-/// or to [`NewDoc::freed_by_hand`] for code that frees it itself. Dropped
-/// any other way, an early return's among them, it frees the tree, so no
-/// path leaves one uncounted (#3842). [`NewDoc::node`] names the tree
-/// meanwhile, to build on.
+/// or to [`NewDoc::taken_by_object`] where `php_dom_create_object` took
+/// it. Dropped any other way, an early return's among them, it frees the
+/// tree, so no path leaves one uncounted (#3842), and a tree its maker
+/// keeps for itself, as ext/soap keeps a message or a WSDL, is freed where
+/// the value goes (#3849). [`NewDoc::node`] names the tree meanwhile, to
+/// build on.
 #[derive(Debug)]
 #[must_use]
 pub struct NewDoc(Node);
@@ -1648,15 +1649,6 @@ impl NewDoc {
         if counted {
             self.into_node();
         }
-    }
-
-    /// The tree, given up to code that frees it itself with
-    /// [`Node::free_document`] once it is done with it, as ext/soap
-    /// builds a message and frees it where it is sent or abandoned:
-    /// nothing frees it on a drop from here.
-    #[must_use]
-    pub fn freed_by_hand(self) -> Node {
-        self.into_node()
     }
 
     /// A `NewDoc` for the `xmlDocPtr` a library over libxml2 answered, as
@@ -2028,14 +2020,27 @@ mod tests {
     }
 
     #[test]
-    fn a_tree_freed_by_hand_is_not_freed_on_the_drop() {
-        let (count, node) = frees(Node::new_doc(None), NewDoc::freed_by_hand);
-        assert_eq!(count, 0);
-        node.free_document();
-    }
-
-    #[test]
     fn a_tree_no_object_took_is_freed_where_it_is_given_to_one() {
         assert_eq!(frees(Node::new_doc(None), NewDoc::taken_by_object).0, 1);
+    }
+
+    /// The tree `Parser::fragment` built, freed as it drops where its
+    /// caller is done with it, as ext/dom's `innerHTML` setter is (#3849).
+    #[test]
+    fn a_parsed_fragment_frees_its_tree_as_it_drops() {
+        let Some(context) = Node::new_doc(None) else {
+            panic!("libxml2 made no document");
+        };
+        let (parsed, _) =
+            super::super::Parser::fragment(context.node(), &[b"<r>".as_slice(), b"<a/>", b"</r>"]);
+        let super::super::Fragment::Document(Some(built)) = parsed else {
+            panic!("the fragment did not parse");
+        };
+        // The element's names are the context document's dictionary's, as
+        // ext/dom hands the tree to it before the parsed document goes.
+        if let Some(root) = built.node().children() {
+            root.set_tree_doc(Some(context.node()));
+        }
+        assert_eq!(frees(Some(built), drop).0, 1);
     }
 }
