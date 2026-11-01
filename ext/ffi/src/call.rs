@@ -562,8 +562,8 @@ pub(crate) fn create_callback(
 
 /// `zend_ffi_callback_trampoline`: C called a callback; its arguments
 /// are read into PHP values, the callable called, and its return
-/// written back where C reads it, unless `ret` is zero because C was
-/// given a zeroed return already. A throwable the callable leaves is
+/// written back where C reads it, unless `ret` is zero because C read
+/// its zeroed return already. A throwable the callable leaves is
 /// php's fatal, since it cannot unwind through C, and the fatal reports
 /// it first as a warning, as `zend_error_noreturn` does with
 /// `EG(exception)` set, whether C called the callback inside a call
@@ -606,7 +606,38 @@ pub(crate) fn create_callback(
 ///
 /// Fatal error: Throwing from FFI callbacks is not allowed in %s on line 4
 /// ```
+///
+/// Once the request is ending on a fatal, a call C makes serves nothing,
+/// and C reads the zeroed return it was given on entry. php's
+/// `zend_bailout` jumps out of the C function, so `qsort` calls the
+/// callback no more; here C runs on to its own return, and each later
+/// call it makes returns at once without running PHP code, until the
+/// call into C returns to the request that leaves:
+///
+/// ```php
+/// $ffi = FFI::cdef('void qsort(void *base, size_t nmemb, size_t size, int (*compar)(const void *, const void *));', 'libSystem.B.dylib');
+/// $a = $ffi->new('int[3]'); $a[0] = 3; $a[1] = 1; $a[2] = 2;
+/// register_shutdown_function(function () { echo "shutdown\n"; });
+/// try { $ffi->qsort(FFI::addr($a), 3, 4, function ($x, $y) { echo "cmp\n"; throw new Exception("cmp"); }); } catch (Throwable $e) { echo "caught\n"; }
+/// echo "after\n";
+/// ```
+/// ```expect exit=255
+/// cmp
+///
+/// Warning: Uncaught Exception: cmp in %s:5
+/// Stack trace:
+/// #0 %s(5): {closure:%s:5}(Object(FFI\CData:void*), Object(FFI\CData:void*))
+/// #1 %s(5): FFI->qsort(Object(FFI\CData:int32_t(*)[3]), 3, 4, Object(Closure))
+/// #2 {main}
+///   thrown in %s on line 5
+///
+/// Fatal error: Throwing from FFI callbacks is not allowed in %s on line 5
+/// shutdown
+/// ```
 fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
+    if req.diagnostics().bailing_out() {
+        return;
+    }
     let Some((callable, ty)) = req
         .state::<State>()
         .callbacks
