@@ -20,6 +20,6 @@ end: back to 0
 exit 0: f0 0007 plain
 exit 1: f0 0007 plain f0.CV0:long f0.CV1:array
 exit 2: f0 0009 plain f0.CV2=#3 f0.CV0:long f0.CV1:array f0.CV2:long
-exit 3: f0 0006 plain f0.CV2=#3 f0.CV0:long f0.CV1:array f0.CV2:long
+exit 3: f0 0007 plain f0.CV2=overflowed up f0.CV0:long f0.CV1:array f0.CV2:double
 exit 4: f0 0007 plain f0.CV2=#3 f0.CV0:long f0.CV1:array f0.CV2:long to vm
 unwind 0: f0.CV2=#3

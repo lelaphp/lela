@@ -1273,9 +1273,12 @@ pub(super) fn packed_guard(
 /// `(double)ZEND_LONG_MAX + 1.0` where it went `up` and
 /// `(double)ZEND_LONG_MIN - 1.0` where it went down, as php's
 /// `zend_jit_math_long_long` takes that exit at `opline + 1` with the
-/// constant in its stack map (`Z/ext/opcache/jit/zend_jit_ir.c:5086-5117`);
-/// a fetch checks the element's type, leaving past itself with the element
-/// copied, and, where `missed` says, an element it does not find leaves
+/// constant in its stack map (`Z/ext/opcache/jit/zend_jit_ir.c:5086-5117`),
+/// and so does an increment or a decrement held long, with its variable
+/// the double and its `out`, where it is used, the same double for a
+/// `PRE_*` and the long the variable held for a `POST_*`, as php's
+/// `zend_jit_inc_dec` takes that exit (`:4775-4810`); a fetch checks the
+/// element's type, leaving past itself with the element copied, and, where `missed` says, an element it does not find leaves
 /// past it `null` first, `FETCH_DIM_IS`'s `not_found_exit_addr` where the
 /// type held is not `null` (`zend_jit_fetch_dim_read`,
 /// `Z/ext/opcache/jit/zend_jit_ir.c:12576-12610`).
@@ -1308,6 +1311,77 @@ pub(super) fn packed_guard(
 /// ---- TRACE 3 stop (return)
 /// ---- TRACE 3 compiled
 /// ```
+///
+/// And an increment that overflows leaves past itself, so its side trace
+/// starts at the `+=` on the line after it, as php's does (#3720):
+///
+/// ```php
+/// function f() { $x = PHP_INT_MAX - 60; $c = 0; for ($i = 0; $i < 100; $i++) {
+///   $x++;
+///   $c += 1; }
+///   return $x; }
+/// var_dump(f());
+/// ```
+/// ```expect regime=jit-inline process
+/// float(9.223372036854776E+18)
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:6
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) f() %SCRATCH%/witness.php:2
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 3 f() %SCRATCH%/witness.php:4
+/// ---- TRACE 2 start (side trace 1/3) f() %SCRATCH%/witness.php:4
+/// ---- TRACE 2 stop (link to 1)
+/// ---- TRACE 2 compiled
+///
+///      TRACE 1 exit 0 f() %SCRATCH%/witness.php:2
+/// ---- TRACE 3 start (side trace 1/0) f() %SCRATCH%/witness.php:2
+/// ---- TRACE 3 stop (link to 1)
+/// ---- TRACE 3 compiled
+///
+///      TRACE 3 exit 0 f() %SCRATCH%/witness.php:5
+/// ---- TRACE 4 start (side trace 3/0) f() %SCRATCH%/witness.php:5
+/// ---- TRACE 4 stop (return)
+/// ---- TRACE 4 compiled
+/// ```
+///
+/// As a decrement toward `PHP_INT_MIN` does:
+///
+/// ```php
+/// function f() { $x = PHP_INT_MIN + 60; $c = 0; for ($i = 0; $i < 100; $i++) {
+///   $x--;
+///   $c += 1; }
+///   return $x; }
+/// var_dump(f());
+/// ```
+/// ```expect regime=jit-inline process
+/// float(-9.223372036854776E+18)
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:6
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) f() %SCRATCH%/witness.php:2
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 3 f() %SCRATCH%/witness.php:4
+/// ---- TRACE 2 start (side trace 1/3) f() %SCRATCH%/witness.php:4
+/// ---- TRACE 2 stop (link to 1)
+/// ---- TRACE 2 compiled
+///
+///      TRACE 1 exit 0 f() %SCRATCH%/witness.php:2
+/// ---- TRACE 3 start (side trace 1/0) f() %SCRATCH%/witness.php:2
+/// ---- TRACE 3 stop (link to 1)
+/// ---- TRACE 3 compiled
+///
+///      TRACE 3 exit 0 f() %SCRATCH%/witness.php:5
+/// ---- TRACE 4 start (side trace 3/0) f() %SCRATCH%/witness.php:5
+/// ---- TRACE 4 stop (return)
+/// ---- TRACE 4 compiled
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Within {
     Rerun,
@@ -1324,6 +1398,13 @@ pub(super) fn within(opcode: Opcode, tag: ZvalType, op2: Operand) -> Option<With
         {
             Some(Within::Overflowed {
                 up: opcode == Opcode::Add,
+            })
+        }
+        Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec
+            if tag == ZvalType::Long =>
+        {
+            Some(Within::Overflowed {
+                up: matches!(opcode, Opcode::PreInc | Opcode::PostInc),
             })
         }
         Opcode::Add

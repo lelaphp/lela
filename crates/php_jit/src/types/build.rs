@@ -133,25 +133,65 @@ enum At {
         out: ValueId,
         left: Left,
     },
-    /// After an `ADD` or a `SUB` of `1` whose long sum overflowed:
-    /// the opline past it with the double it went to in its slot
+    /// After an `ADD` or a `SUB` of `1`, an increment or a decrement
+    /// whose long overflowed, past `ZEND_LONG_MAX` where it went `up`:
+    /// the opline past it with what `wrote` says in its slots
     /// ([`Within::Overflowed`]).
     Overflowed {
         op: OplineIdx,
-        out: ValueId,
         up: bool,
+        wrote: Overflow,
     },
 }
 
 impl At {
-    /// Where an inline arithmetic leaves whose `out` a guard holds
-    /// within it, as `kind` says: at its opline `op`, which the
-    /// interpreter serves again, or past it with `out` the double it
-    /// overflowed to.
-    fn overflowing(kind: Within, op: OplineIdx, out: ValueId) -> At {
-        match kind {
-            Within::Overflowed { up } => At::Overflowed { op, out, up },
-            Within::Rerun | Within::Fetched { .. } => At::Opline(op),
+    /// Where an inline arithmetic `line` leaves whose `out` a guard
+    /// holds within it, as `kind` says: at its opline, which the
+    /// interpreter serves again, or past it with what it overflowed to
+    /// in its slots.
+    fn overflowing(kind: Within, line: &Line, out: ValueId) -> At {
+        let op = line.opline;
+        let Within::Overflowed { up } = kind else {
+            return At::Opline(op);
+        };
+        let wrote = match (line.opcode, line.op1_def) {
+            (Opcode::PreInc | Opcode::PreDec, Some(var)) => Overflow::Pre { var, out: line.out },
+            (Opcode::PostInc | Opcode::PostDec, Some(var)) => Overflow::Post { var, out: line.out },
+            _ => Overflow::Sum { out },
+        };
+        At::Overflowed { op, up, wrote }
+    }
+}
+
+/// What an op that overflowed left in its slots where it leaves past
+/// itself ([`At::Overflowed`]), each a constant php's stack map holds.
+#[derive(Clone, Copy)]
+enum Overflow {
+    /// An `ADD` or a `SUB` of `1`: its `out` the double
+    /// (`zend_jit_math_long_long`, `Z/ext/opcache/jit/zend_jit_ir.c:5086-5117`).
+    Sum { out: ValueId },
+    /// A `PRE_INC` or a `PRE_DEC`: its variable the double, and its
+    /// `out`, where it is used, the double too (`zend_jit_inc_dec`,
+    /// `:4775-4810`).
+    Pre { var: ValueId, out: Option<ValueId> },
+    /// A `POST_INC` or a `POST_DEC`: its variable the double, and its
+    /// `out`, where it is used, the long the variable held,
+    /// `ZEND_LONG_MAX` or `ZEND_LONG_MIN` (`:4775-4810`).
+    Post { var: ValueId, out: Option<ValueId> },
+}
+
+impl Overflow {
+    /// The values written and what each is written, its variable's or
+    /// its `out`'s first.
+    fn stores(self, up: bool) -> [Option<(ValueId, Stored)>; 2] {
+        let double = Stored::Overflowed { up };
+        match self {
+            Overflow::Sum { out } => [Some((out, double)), None],
+            Overflow::Pre { var, out } => [Some((var, double)), out.map(|out| (out, double))],
+            Overflow::Post { var, out } => [
+                Some((var, double)),
+                out.map(|out| (out, Stored::Limit { up })),
+            ],
         }
     }
 }
@@ -2937,9 +2977,9 @@ impl<'a> Builder<'a> {
                                 line.frame,
                                 line.opline,
                                 kind,
-                                line.op1,
-                                line.op2,
+                                (line.op1, line.op2),
                                 deref,
+                                At::overflowing(kind, line, value),
                             )
                         })
                 }
@@ -2955,7 +2995,7 @@ impl<'a> Builder<'a> {
             {
                 (GuardAt::Entry, self.start())
             }
-            (_, Some((def, frame, opline, kind, op1, op2, deref))) => {
+            (_, Some((def, frame, opline, kind, (op1, op2), deref, overflowing))) => {
                 let fetched = |left| At::Fetched {
                     fetch: opline,
                     frees: Frees {
@@ -2967,9 +3007,7 @@ impl<'a> Builder<'a> {
                 };
                 let to = match kind {
                     Within::Fetched { .. } => fetched(Left::Copied(Read::InPlace)),
-                    Within::Rerun | Within::Overflowed { .. } => {
-                        At::overflowing(kind, opline, value)
-                    }
+                    Within::Rerun | Within::Overflowed { .. } => overflowing,
                 };
                 if let (Within::Fetched { missed }, Some(tag)) = (kind, tag) {
                     then = deref.then_some(Placed {
@@ -4437,7 +4475,7 @@ impl<'a> Builder<'a> {
             exit: draft(
                 Point::Before(def),
                 line.frame,
-                At::overflowing(kind, line.opline, back),
+                At::overflowing(kind, line, back),
             ),
         })
     }
@@ -4463,10 +4501,11 @@ impl<'a> Builder<'a> {
     /// under way restored, as `zend_jit_trace_get_exit_point` adds
     /// `ZEND_JIT_EXIT_RESTORE_CALL` to any exit taken while one is
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:144-147`).
-    fn lands(&self, draft: &Draft, calls: bool) -> (Option<OplineIdx>, Landing, Option<Store>) {
+    fn lands(&self, draft: &Draft, calls: bool) -> (Option<OplineIdx>, Landing, Vec<Store>) {
+        let extra = || draft.extra.into_iter().collect();
         match draft.at {
-            At::Opline(at) => (Some(at), restored(calls), draft.extra),
-            At::Stands | At::Landed => (None, restored(calls), draft.extra),
+            At::Opline(at) => (Some(at), restored(calls), extra()),
+            At::Stands | At::Landed => (None, restored(calls), extra()),
             At::Fetched {
                 fetch,
                 frees,
@@ -4484,14 +4523,16 @@ impl<'a> Builder<'a> {
                     frees,
                     restores_call: calls,
                 };
-                (Some(OplineIdx(fetch.0 + 1)), landing, Some(copied))
+                (Some(OplineIdx(fetch.0 + 1)), landing, vec![copied])
             }
-            At::Overflowed { op, out, up } => {
-                let overflowed = Store {
-                    slot: self.val(out).slot,
-                    from: Stored::Overflowed { up },
-                };
-                (Some(OplineIdx(op.0 + 1)), restored(calls), Some(overflowed))
+            At::Overflowed { op, up, wrote } => {
+                let overflowed = (wrote.stores(up).into_iter().flatten())
+                    .map(|(value, from)| Store {
+                        slot: self.val(value).slot,
+                        from,
+                    })
+                    .collect();
+                (Some(OplineIdx(op.0 + 1)), restored(calls), overflowed)
             }
         }
     }
@@ -4539,9 +4580,9 @@ impl<'a> Builder<'a> {
                 from: Stored::Value(*value),
             })
             .collect();
-        if let Some(extra) = extra {
+        for extra in &extra {
             stores.retain(|store| store.slot != extra.slot);
-            stores.push(extra);
+            stores.push(*extra);
         }
         stores.sort_by_key(|store| store.slot);
         // What the trace knows of the frame's slots there: a value's type
@@ -4600,19 +4641,17 @@ impl<'a> Builder<'a> {
                 })
             })
             .collect();
-        // A double an overflow left in its slot is known one, as php's
-        // `zend_jit_math_long_long` sets the slot's stack type before it
-        // takes the exit.
-        if let Some(Store {
-            slot,
-            from: Stored::Overflowed { .. },
-        }) = extra
-        {
-            known.retain(|known| known.slot != slot);
-            known.push(Known {
-                slot,
-                tag: ZvalType::Double,
-            });
+        // A constant an overflow left in its slot is known as what it
+        // is, as php's `zend_jit_math_long_long` and `zend_jit_inc_dec`
+        // set the slot's stack type before they take the exit.
+        for store in &extra {
+            if let Some(tag) = store.from.constant() {
+                known.retain(|known| known.slot != store.slot);
+                known.push(Known {
+                    slot: store.slot,
+                    tag,
+                });
+            }
         }
         known.sort_by_key(|known| known.slot);
         ExitSpec {
@@ -4969,7 +5008,7 @@ struct Exits {
 /// with the same types known, is one exit; so it is here, since an exit
 /// lands in whichever frame is current. The stores stay as they are: a
 /// register value lives in one frame's slot, so two places that store
-/// one leave from one frame; but the double an overflow left is a
+/// one leave from one frame; but what an overflow left is a
 /// constant its site writes in its own frame, as php's stack map holds
 /// it, so it is named by its slot in the frame alone.
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -5001,12 +5040,12 @@ impl Reused {
             spec: ExitSpec {
                 frame: Frame::ROOT,
                 stores: (spec.stores.iter())
-                    .map(|store| match store.from {
-                        Stored::Overflowed { .. } => Store {
+                    .map(|store| match store.from.constant() {
+                        Some(_) => Store {
                             slot: relative(store.slot),
                             ..*store
                         },
-                        _ => *store,
+                        None => *store,
                     })
                     .collect(),
                 known: (spec.known.iter())

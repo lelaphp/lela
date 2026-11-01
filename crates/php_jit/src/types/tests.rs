@@ -3731,3 +3731,93 @@ fn an_evaluated_classs_own_method_is_pushed_under_its_slots_pair() -> Result<(),
     }
     Ok(())
 }
+
+/// An increment or a decrement whose long a guard holds leaves past
+/// itself where it overflows, with its variable the double it went to
+/// and its `out` as php's `zend_jit_inc_dec` holds it: the same double
+/// for a `PRE_*`, the long the variable held for a `POST_*`
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:4775-4810`). So each trace's
+/// exit 3 lands at `0005`, past the step at `0004`, as the pinned php's
+/// `TRACE 1 exit info` under the trace-dump regime lists it: `CV0($x)`
+/// the double, and `X7` the double or the long, known as each is
+/// (#3720).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_overflowing_step_leaves_past_itself_as_php_does() -> Result<(), String> {
+    let from = |start: &str, step: &str| {
+        format!(
+            "function f() {{ $x = {start}; $c = 0; for ($i = 0; $i < 100; $i++) {{ {step}; $c += 1; }} return $x; }}
+            var_dump(f());"
+        )
+    };
+    let (max, min) = ("PHP_INT_MAX - 60", "PHP_INT_MIN + 60");
+    let x = Slot {
+        frame: Frame::ROOT,
+        var: 0,
+    };
+    let result = Slot {
+        frame: Frame::ROOT,
+        var: 7,
+    };
+    for (up, step, out, php) in [
+        (true, "$x++", None, ZvalType::Double),
+        (false, "$x--", None, ZvalType::Double),
+        (
+            true,
+            "$y = $x++",
+            Some(Stored::Limit { up: true }),
+            ZvalType::Long,
+        ),
+        (
+            true,
+            "$y = ++$x",
+            Some(Stored::Overflowed { up: true }),
+            ZvalType::Double,
+        ),
+        (
+            false,
+            "$y = $x--",
+            Some(Stored::Limit { up: false }),
+            ZvalType::Long,
+        ),
+        (
+            false,
+            "$y = --$x",
+            Some(Stored::Overflowed { up: false }),
+            ZvalType::Double,
+        ),
+    ] {
+        let program = from(if up { max } else { min }, step);
+        let ir = built(&IN_F, &program)?;
+        let rendered = dump::render(&ir);
+        let exit = ir
+            .exits
+            .get(3)
+            .ok_or_else(|| format!("{program}\n{rendered}"))?;
+        let stored = |slot: Slot| {
+            (exit.stores.iter())
+                .find(|store| store.slot == slot)
+                .map(|store| store.from)
+        };
+        let known = |slot: Slot| {
+            (exit.known.iter())
+                .find(|known| known.slot == slot)
+                .map(|known| known.tag)
+        };
+        assert_eq!(
+            (exit.opline.map(|at| at.0), stored(x), known(x)),
+            (
+                Some(5),
+                Some(Stored::Overflowed { up }),
+                Some(ZvalType::Double)
+            ),
+            "{program}\n{rendered}"
+        );
+        assert_eq!(
+            (stored(result), known(result)),
+            (out, out.map(|_| php)),
+            "{program}\n{rendered}"
+        );
+    }
+    Ok(())
+}

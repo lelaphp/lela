@@ -824,12 +824,32 @@ pub(crate) enum Stored {
     /// `null`, which the fetch that found no element wrote to its slot
     /// before it left, as php's stack map holds it, `null(type_only)`.
     Null,
-    /// The double an `ADD` or a `SUB` of `1` overflowed to, past
-    /// `ZEND_LONG_MAX` where it went `up` and below `ZEND_LONG_MIN`
-    /// otherwise, which the site writes to the slot in its own frame
-    /// before it leaves, as php's frame-relative stack map holds it as a
-    /// constant, `float(9.22337e+18)` (`zend_jit_math_long_long`).
+    /// The double an `ADD` or a `SUB` of `1`, an increment or a
+    /// decrement overflowed to, past `ZEND_LONG_MAX` where it went `up`
+    /// and below `ZEND_LONG_MIN` otherwise, which the site writes to the
+    /// slot in its own frame before it leaves, as php's frame-relative
+    /// stack map holds it as a constant, `float(9.22337e+18)`
+    /// (`zend_jit_math_long_long`, `zend_jit_inc_dec`).
     Overflowed { up: bool },
+    /// The long a `POST_INC` or a `POST_DEC` that overflowed read, and
+    /// writes to its `out`: `ZEND_LONG_MAX` where it went `up`,
+    /// `ZEND_LONG_MIN` otherwise, which the site writes as it writes
+    /// [`Stored::Overflowed`], as php's stack map holds it,
+    /// `int(9223372036854775807)` (`zend_jit_inc_dec`).
+    Limit { up: bool },
+}
+
+impl Stored {
+    /// The type a constant the site writes before it leaves is known
+    /// as, php's `SET_STACK_TYPE` before `zend_jit_inc_dec` takes its
+    /// exit; none of a value the exit stores.
+    pub(crate) fn constant(self) -> Option<ZvalType> {
+        match self {
+            Stored::Overflowed { .. } => Some(ZvalType::Double),
+            Stored::Limit { .. } => Some(ZvalType::Long),
+            Stored::Value(_) | Stored::Copied { .. } | Stored::Null => None,
+        }
+    }
 }
 
 /// How a zval is read: in place, through the reference it is, or

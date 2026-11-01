@@ -42,7 +42,7 @@ exit 3: f0 0008 plain f0.CV3=#3 f0.CV0:long f0.CV2:array f0.CV3:long
 exit 4: f0 0011 plain f0.CV3=#3 f0.CV0:long f0.CV2:array f0.CV3:long
 exit 5: f0 0015 plain f0.CV3=#3 f0.T11=#9 f0.CV0:long f0.CV2:array f0.CV3:long f0.T11:long
 exit 6: f0 0016 plain f0.CV3=#3 f0.T11=#9 f0.CV0:long f0.CV2:array f0.CV3:long f0.T11:long
-exit 7: f0 0018 plain f0.CV3=#3 f0.CV0:long f0.CV2:array f0.CV3:long
+exit 7: f0 0019 plain f0.CV3=overflowed up f0.CV0:long f0.CV2:array f0.CV3:double
 exit 8: f0 0019 plain f0.CV3=#3 f0.CV0:long f0.CV2:array f0.CV3:long to vm
 unwind 0: f0.CV3=#3
 unwind 1: f0.CV3=#3 f0.T11=#9

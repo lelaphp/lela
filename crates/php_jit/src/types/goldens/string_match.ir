@@ -69,6 +69,6 @@ exit 10: f0 0012 plain f0.CV2=#1 f0.CV3=#3 f0.T6=#13 f0.CV0:array f0.CV1:long f0
 exit 11: f0 0015 plain f0.CV2=#1 f0.CV3=#3 f0.CV5=#14 f0.T8=#15 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.CV4:string f0.CV5:true f0.T8:long f0.T9:long
 exit 12: f0 0018 plain f0.CV2=#1 f0.CV3=#3 f0.CV5=#14 f0.T10=#17 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.CV4:string f0.CV5:true f0.T10:long f0.T12:long
 exit 13: f0 0019 plain f0.CV2=#1 f0.CV3=#3 f0.CV5=#14 f0.T13=#20 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.CV4:string f0.CV5:true f0.T13:long
-exit 14: f0 0020 plain f0.CV2=#21 f0.CV3=#3 f0.CV5=#14 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.CV4:string f0.CV5:true
+exit 14: f0 0021 plain f0.CV2=#21 f0.CV3=overflowed up f0.CV5=#14 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:double f0.CV4:string f0.CV5:true
 exit 15: f0 0021 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long to vm
 unwind 0: f0.CV2=#1 f0.CV3=#3

@@ -44,6 +44,6 @@ exit 4: f0 0011 plain f0.CV2=#1 f0.CV4=#3 f0.CV1:long f0.CV2:long f0.CV4:long
 exit 5: f0 0011 plain f0.CV2=#1 f0.CV4=#3 f0.CV1:long f0.CV2:long f0.CV4:long f0.T4:true
 exit 6: f0 0012 plain f0.CV2=#1 f0.CV4=#3 f0.CV1:long f0.CV2:long f0.CV4:long
 exit 7: f0 0012 plain f0.CV2=#1 f0.CV4=#3 f0.CV1:long f0.CV2:long f0.CV4:long f0.T8:long
-exit 8: f0 0013 plain f0.CV2=#13 f0.CV4=#3 f0.CV1:long f0.CV2:long f0.CV4:long
+exit 8: f0 0014 plain f0.CV2=#13 f0.CV4=overflowed up f0.CV1:long f0.CV2:long f0.CV4:double
 exit 9: f0 0014 plain f0.CV2=#1 f0.CV4=#3 f0.CV1:long f0.CV2:long f0.CV4:long to vm
 unwind 0: f0.CV2=#1 f0.CV4=#3
