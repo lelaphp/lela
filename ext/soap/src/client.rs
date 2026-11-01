@@ -31,10 +31,41 @@ type R<T> = Result<T, Thrown>;
 
 /// `SoapClient`'s payload: the typemap its `typemap` option made, which
 /// php keeps as pointers in the `typemap` property's array.
+///
+/// php's client is a plain `zend_object`, `zend_objects_new` with no
+/// struct of its own, so the payload is one pointer, which the bin php
+/// takes leaves room for: the header and 36 slots are 616 bytes of a
+/// 640-byte bin, and a subclass's slots, 16 bytes each, leave eight at
+/// least in each bin above, all multiples of 16. The client reads
+/// php's 640 beside the 152 of the `stream_context` its constructor
+/// allocates, where the typemap's table laid in the object took it to
+/// the 768-byte bin:
+///
+/// ```php
+/// $o = ['location' => 'http://localhost/x', 'uri' => 'urn:x'];
+/// $b = new SoapClient(null, $o); $b = null;
+/// $m = memory_get_usage(); $b = new SoapClient(null, $o); echo 'made ', memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $b = null; echo 'freed ', $m - memory_get_usage(), "\n";
+/// class C extends SoapClient { public $x, $y; }
+/// $b = new C(null, $o); $b = null;
+/// $m = memory_get_usage(); $b = new C(null, $o); echo 'made ', memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $b = null; echo 'freed ', $m - memory_get_usage(), "\n";
+/// ```
+/// ```expect
+/// made 792
+/// freed 760
+/// made 888
+/// freed 888
+/// ```
 #[derive(Default)]
 pub(crate) struct Client {
-    pub(crate) typemap: Option<crate::Typemap>,
+    pub(crate) typemap: Option<Box<crate::Typemap>>,
 }
+
+const _: () = assert!(
+    size_of::<Client>() <= 8,
+    "SoapClient's payload outgrew the room php's bin leaves past its slots"
+);
 
 /// The typemap held, given back with the object.
 pub(crate) struct Handlers;
@@ -47,7 +78,7 @@ impl php_ext::abi::ObjectHandlers for Handlers {
             .native_mut::<Client>(req)
             .and_then(|c| c.typemap.take());
         if let Some(t) = typemap {
-            t.release(req);
+            (*t).release(req);
         }
         php_ext::abi::Std.free_obj(req, object);
     }
@@ -1157,7 +1188,7 @@ fn construct(
                     return Err(thrown);
                 }
                 let old = match this.native_mut::<Client>(req) {
-                    Some(c) => c.typemap.replace(t),
+                    Some(c) => c.typemap.replace(Box::new(t)).map(|old| *old),
                     None => Some(t),
                 };
                 if let Some(old) = old {
@@ -1320,7 +1351,7 @@ fn do_soap_call(
     let sdl = this_sdl(req, this);
     let typemap = this
         .native::<Client>(req)
-        .and_then(|c| c.typemap.as_ref().map(Typemap::view));
+        .and_then(|c| c.typemap.as_deref().map(Typemap::view));
     // `clear_soap_fault`.
     set_client_slot(req, this, ClientSlot::SoapFault, Owner::null())?;
     let encoding = client_slot(this, ClientSlot::Encoding)
