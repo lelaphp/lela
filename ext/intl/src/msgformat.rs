@@ -894,26 +894,26 @@ fn formatted(
 /// ```
 fn do_format(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer<Owner<PhpString>> {
     let mut pending = Carrying::default();
-    let text = match format_helper(req, site, &mut pending, values)? {
+    let bytes = match format_helper(req, site, &mut pending, values)? {
         // `INTL_METHOD_RETVAL_UTF8`, served past what is pending.
         Some(units) => pending
             .serve(req, |req| {
                 let converted = ffi::to_utf8(&units);
                 site.set_code(req, converted.as_ref().err().copied().unwrap_or(Code::ZERO));
-                if !site.check(req, "Error converting value to UTF-8")? {
-                    return Ok(None);
-                }
-                match converted {
-                    Ok(bytes) => PhpString::new(req, &bytes).map(Some),
-                    Err(_) => Ok(None),
-                }
+                Ok(site
+                    .check(req, "Error converting value to UTF-8")?
+                    .then_some(converted.ok())
+                    .flatten())
             })?
             .flatten(),
         None => None,
     };
-    match pending.take() {
-        Some(pending) => Err(pending),
-        None => Ok(text),
+    // The string is made only where it is returned; with a throwable
+    // pending php's return value is never read.
+    match (pending.take(), bytes) {
+        (Some(pending), _) => Err(pending),
+        (None, Some(bytes)) => PhpString::new(req, &bytes).map(Some),
+        (None, None) => Ok(None),
     }
 }
 
