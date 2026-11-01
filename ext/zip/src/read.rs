@@ -9,7 +9,7 @@
 //! not the entry; an error is met at the read that reaches it.
 
 use std::fs::File;
-use std::io::{self, Read};
+use std::io;
 use std::os::unix::fs::FileExt;
 
 use crate::archive::{self, BufferLink, Encryption, FileLink, SourceLink};
@@ -23,22 +23,6 @@ const BUFSIZE: usize = 8192;
 /// The most one `zip_fread` hands its layers at once; php's buffer is
 /// the whole length asked for, and a longer one is read in turns.
 const ONE_READ: usize = 1 << 24;
-
-/// A libzip error carried up through a codec's `io::Error`.
-#[derive(Debug)]
-struct Carried(Status);
-
-impl std::fmt::Display for Carried {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "libzip error {}", self.0.er.code())
-    }
-}
-
-impl std::error::Error for Carried {}
-
-fn carry(status: Status) -> io::Error {
-    io::Error::other(Carried(status))
-}
 
 /// The stdio `FILE` libzip reads an archive through
 /// (`zip_source_file_stdio.c`), as the system's stdio buffers it: one
@@ -226,12 +210,6 @@ impl Window {
     }
 }
 
-impl Read for Window {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.read_some(buf).map_err(carry)
-    }
-}
-
 /// `zip_source_winzip_aes_decode`'s layer: the data between the header
 /// and the authentication code, which the read past the data checks.
 struct Aes {
@@ -269,11 +247,21 @@ impl Aes {
     }
 }
 
-/// The entry's stored bytes, decrypted where they are encrypted.
+/// The bytes a reader's upper layers read: an entry's stored data,
+/// decrypted where it is encrypted, or the window
+/// `zip_source_zip_file_create` lays over an added entry's source.
 enum Raw {
     Plain(Window),
     Pkware(Window, PkwareKeys),
     Aes(Box<Aes>),
+    /// The window on an added entry's buffer source, whose bytes it
+    /// shares.
+    Buffer {
+        link: BufferLink,
+        offset: usize,
+    },
+    /// The window on an added entry's file source over a device or a pipe.
+    File(FileWindow),
 }
 
 impl Raw {
@@ -356,46 +344,82 @@ impl Raw {
     }
 }
 
-impl Read for Raw {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+impl Raw {
+    /// `zip_source_read` on the layer: up to `buf.len()` bytes.
+    fn read_some(&mut self, buf: &mut [u8]) -> Result<usize, Status> {
         match self {
-            Raw::Plain(w) => w.read(buf),
+            Raw::Plain(w) => w.read_some(buf),
             Raw::Pkware(w, keys) => {
-                let n = w.read(buf)?;
+                let n = w.read_some(buf)?;
                 keys.decrypt(&mut buf[..n]);
                 Ok(n)
             }
-            Raw::Aes(a) => a.read_some(buf).map_err(carry),
+            Raw::Aes(a) => a.read_some(buf),
+            Raw::Buffer { link, offset } => {
+                let n = copy_from(link.data(), *offset, buf);
+                *offset += n;
+                Ok(n)
+            }
+            Raw::File(w) => w.read_some(buf),
         }
     }
-}
 
-impl Raw {
-    fn window(&mut self) -> &mut Window {
+    /// Whether `zip_fseek` can move it: a window on the archive's data
+    /// read as it is, or on a buffer.
+    fn seekable(&self) -> bool {
+        matches!(self, Raw::Plain(_) | Raw::Buffer { .. })
+    }
+
+    /// Where it stands and how long it is, where it knows both.
+    fn span(&self) -> Option<(u64, u64)> {
         match self {
-            Raw::Plain(w) | Raw::Pkware(w, _) => w,
-            Raw::Aes(a) => &mut a.window,
+            Raw::Plain(w) => Some((w.offset, w.len)),
+            Raw::Buffer { link, offset } => Some((*offset as u64, link.data().len() as u64)),
+            Raw::File(w) => Some((w.offset, w.end.unwrap_or(w.offset))),
+            Raw::Pkware(..) | Raw::Aes(_) => None,
         }
     }
-}
 
-/// `zip_source_read` on the stored bytes: up to `buf.len()` of them.
-fn read_raw(lower: &mut Raw, buf: &mut [u8]) -> Result<usize, Status> {
-    loop {
-        return match lower.read(buf) {
-            Ok(n) => Ok(n),
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => Err(e
-                .get_ref()
-                .and_then(|i| i.downcast_ref::<Carried>())
-                .map_or(Status::new(Er::Read), |c| c.0)),
-        };
+    fn set_offset(&mut self, to: u64) {
+        match self {
+            Raw::Plain(w) => w.offset = to,
+            Raw::Buffer { offset, .. } => *offset = usize::try_from(to).unwrap_or(usize::MAX),
+            Raw::Pkware(..) | Raw::Aes(_) | Raw::File(_) => {}
+        }
+    }
+
+    /// The window on the archive's own data, where it reads that.
+    fn window(&mut self) -> Option<&mut Window> {
+        match self {
+            Raw::Plain(w) | Raw::Pkware(w, _) => Some(w),
+            Raw::Aes(a) => Some(&mut a.window),
+            Raw::Buffer { .. } | Raw::File(_) => None,
+        }
+    }
+
+    /// The added entry's source it reads, where it reads one.
+    fn source(&self) -> Option<SourceLink> {
+        match self {
+            Raw::Buffer { link, .. } => Some(SourceLink::Buffer(link.clone())),
+            Raw::File(w) => Some(SourceLink::File(w.link.clone())),
+            Raw::Plain(_) | Raw::Pkware(..) | Raw::Aes(_) => None,
+        }
     }
 }
 
 /// How far a stream's running total moved.
 fn moved(before: u64, after: u64) -> usize {
     usize::try_from(after - before).unwrap_or(usize::MAX)
+}
+
+/// `zip_source_decompress`'s refusal of a method it has no algorithm
+/// for, `ZIP_ER_COMPNOTSUPP`.
+fn supported(method: u16) -> Result<(), Status> {
+    if matches!(method, 0 | 8 | 12 | 14 | 93 | 95) {
+        Ok(())
+    } else {
+        Err(Status::new(Er::Compnotsupp))
+    }
 }
 
 /// `zip_compression_algorithm_t` decompressing, over the zlib the crate
@@ -508,7 +532,7 @@ impl Decompressor {
 
     /// `zip_source_read` on the layer below.
     fn read_lower(&mut self, len: usize) -> Result<usize, Status> {
-        read_raw(&mut self.lower, &mut self.buffer[..len])
+        self.lower.read_some(&mut self.buffer[..len])
     }
 
     /// `compress_read`.
@@ -803,16 +827,10 @@ impl Decompressor {
 enum Body {
     /// No data at all.
     Empty,
-    /// The window on an added entry's buffer source, whose bytes it
-    /// shares.
-    Buffer { link: BufferLink, offset: usize },
-    /// The window on an added entry's file source over a device or a pipe.
-    File(FileWindow),
-    /// A window read as it is: stored data, or the raw bytes
-    /// `ZIP_FL_COMPRESSED` asks for.
-    Window(Window),
-    /// Stored data, decrypted.
-    Decrypted(Raw),
+    /// Bytes read as they are: stored data, decrypted where it is
+    /// encrypted, the raw bytes `ZIP_FL_COMPRESSED` asks for, or an added
+    /// entry's source whose method is store.
+    Stored(Raw),
     /// Compressed data, decompressed as libzip decompresses it.
     Compressed(Box<Decompressor>),
 }
@@ -821,14 +839,7 @@ impl Body {
     fn read_some(&mut self, buf: &mut [u8]) -> Result<usize, Status> {
         match self {
             Body::Empty => Ok(0),
-            Body::Buffer { link, offset } => {
-                let n = copy_from(link.data(), *offset, buf);
-                *offset += n;
-                Ok(n)
-            }
-            Body::File(w) => w.read_some(buf),
-            Body::Window(w) => w.read_some(buf),
-            Body::Decrypted(raw) => read_raw(raw, buf),
+            Body::Stored(raw) => raw.read_some(buf),
             Body::Compressed(d) => d.read_some(buf),
         }
     }
@@ -837,18 +848,31 @@ impl Body {
     fn span(&self) -> Option<(u64, u64)> {
         match self {
             Body::Empty => Some((0, 0)),
-            Body::Buffer { link, offset } => Some((*offset as u64, link.data().len() as u64)),
-            Body::File(w) => Some((w.offset, w.end)),
-            Body::Window(w) => Some((w.offset, w.len)),
-            Body::Decrypted(_) | Body::Compressed(_) => None,
+            Body::Stored(raw) => raw.span(),
+            Body::Compressed(_) => None,
         }
     }
 
     fn set_offset(&mut self, to: u64) {
+        if let Body::Stored(raw) = self {
+            raw.set_offset(to);
+        }
+    }
+
+    /// The layer the body reads at its bottom.
+    fn raw(&self) -> Option<&Raw> {
         match self {
-            Body::Buffer { offset, .. } => *offset = usize::try_from(to).unwrap_or(usize::MAX),
-            Body::Window(w) => w.offset = to,
-            Body::Empty | Body::File(_) | Body::Decrypted(_) | Body::Compressed(_) => {}
+            Body::Empty => None,
+            Body::Stored(raw) => Some(raw),
+            Body::Compressed(d) => Some(&d.lower),
+        }
+    }
+
+    fn raw_mut(&mut self) -> Option<&mut Raw> {
+        match self {
+            Body::Empty => None,
+            Body::Stored(raw) => Some(raw),
+            Body::Compressed(d) => Some(&mut d.lower),
         }
     }
 }
@@ -856,23 +880,26 @@ impl Body {
 /// `zip_source_window` over a file source over a device or a pipe, whose
 /// source is not seekable and so neither is the window: it reads on from
 /// where the file stands, to the length the source was given, and a file
-/// that ends first fails it with `ZIP_ER_EOF`.
+/// that ends first fails it with `ZIP_ER_EOF`; given none, which only a
+/// decompressor over it is (`end_valid` clear), to the file's end.
 struct FileWindow {
     link: FileLink,
     file: File,
     offset: u64,
-    end: u64,
+    end: Option<u64>,
 }
 
 impl FileWindow {
     fn read_some(&mut self, buf: &mut [u8]) -> Result<usize, Status> {
-        let left = self.end - self.offset;
-        let want = usize::try_from(left).map_or(buf.len(), |l| l.min(buf.len()));
+        let want = self
+            .end
+            .and_then(|end| usize::try_from(end - self.offset).ok())
+            .map_or(buf.len(), |l| l.min(buf.len()));
         if want == 0 {
             return Ok(0);
         }
         let n = archive::read_file(&mut self.file, &mut buf[..want])?;
-        if n == 0 {
+        if n == 0 && self.end.is_some() {
             return Err(Status::new(Er::Eof));
         }
         self.offset += n as u64;
@@ -950,38 +977,40 @@ impl Reader {
     }
 
     /// The window `zip_source_zip_file_create` lays over the buffer
-    /// source `link` names.
-    pub(crate) fn over_buffer(link: BufferLink) -> Reader {
-        Reader::new(Body::Buffer { link, offset: 0 }, None, true)
+    /// source `link` names, decompressed as `l` says.
+    pub(crate) fn over_buffer(link: BufferLink, l: &Layers<'_>) -> Result<Reader, Status> {
+        Reader::layered(Raw::Buffer { link, offset: 0 }, l, None)
     }
 
     /// The window `zip_source_zip_file_create` lays over the file source
-    /// `link` names, over a device or a pipe opened as `file`, `len` long.
-    pub(crate) fn over_file(link: FileLink, file: File, len: u64) -> Reader {
+    /// `link` names, over a device or a pipe opened as `file`, `len` long
+    /// where it is given one, decompressed as `l` says.
+    pub(crate) fn over_file(
+        link: FileLink,
+        file: File,
+        len: Option<u64>,
+        l: &Layers<'_>,
+    ) -> Result<Reader, Status> {
         let window = FileWindow {
             link,
             file,
             offset: 0,
             end: len,
         };
-        Reader::new(Body::File(window), None, false)
+        Reader::layered(Raw::File(window), l, None)
     }
 
     /// The source of an added entry the window reads, which a stream over
     /// it holds open.
     pub(crate) fn source(&self) -> Option<SourceLink> {
-        match &self.body {
-            Body::Buffer { link, .. } => Some(SourceLink::Buffer(link.clone())),
-            Body::File(w) => Some(SourceLink::File(w.link.clone())),
-            Body::Empty | Body::Window(_) | Body::Decrypted(_) | Body::Compressed(_) => None,
-        }
+        self.body.raw().and_then(Raw::source)
     }
 
     /// The buffer a window on an added entry's buffer reads, and where
     /// the window stands.
     pub(crate) fn on_buffer(&self) -> Option<(BufferLink, usize)> {
-        match &self.body {
-            Body::Buffer { link, offset } => Some((link.clone(), *offset)),
+        match self.body.raw() {
+            Some(Raw::Buffer { link, offset }) => Some((link.clone(), *offset)),
             _ => None,
         }
     }
@@ -996,7 +1025,7 @@ impl Reader {
 
     /// A window read as it is, its CRC checked where `crc` gives one.
     pub(crate) fn window(window: Window, crc: Option<(u32, u64)>) -> Reader {
-        Reader::new(Body::Window(window), crc, true)
+        Reader::new(Body::Stored(Raw::Plain(window)), crc, true)
     }
 
     /// `zip_source_zip_file_create` past the stat, for an unchanged
@@ -1017,9 +1046,7 @@ impl Reader {
             }
         };
         let decrypt = key.is_some();
-        if !matches!(l.method, 0 | 8 | 12 | 14 | 93 | 95) {
-            return Err(Status::new(Er::Compnotsupp));
-        }
+        supported(l.method)?;
         // The decryption layer's refusal as libzip 1.12 creates it, before
         // the empty data's shortcut: a compressed size the stat does not
         // know, or one short of twelve bytes of PKWARE header, or of
@@ -1048,11 +1075,17 @@ impl Reader {
             }
             _ => Raw::Plain(window),
         };
+        Reader::layered(raw, l, crc)
+    }
+
+    /// The layers over `raw` opened: none where `l`'s method is store,
+    /// the method's decompressor otherwise, under the CRC where `crc`
+    /// gives one.
+    fn layered(raw: Raw, l: &Layers<'_>, crc: Option<(u32, u64)>) -> Result<Reader, Status> {
+        supported(l.method)?;
         if l.method == 0 {
-            return Ok(match raw {
-                Raw::Plain(w) => Reader::new(Body::Window(w), crc, true),
-                raw => Reader::new(Body::Decrypted(raw), crc, false),
-            });
+            let seekable = raw.seekable();
+            return Ok(Reader::new(Body::Stored(raw), crc, seekable));
         }
         let algorithm = match l.method {
             8 => Algorithm::Deflate(flate2::Decompress::new(false)),
@@ -1077,12 +1110,7 @@ impl Reader {
 
     /// The window the entry is read through, where it has one.
     fn window_mut(&mut self) -> Option<&mut Window> {
-        match &mut self.body {
-            Body::Empty | Body::Buffer { .. } | Body::File(_) => None,
-            Body::Window(w) => Some(w),
-            Body::Decrypted(raw) => Some(raw.window()),
-            Body::Compressed(d) => Some(d.lower.window()),
-        }
+        self.body.raw_mut().and_then(Raw::window)
     }
 
     /// Whether the entry is read from the archive's own file, as an

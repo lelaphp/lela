@@ -1960,6 +1960,66 @@ impl Archive {
         }
     }
 
+    /// `zip_source_zip_file_create` over an added entry's source: the
+    /// window on it, decompressed by the method the stat states, the
+    /// dirent's where one is set, or once the close wrote the entry, the
+    /// method it wrote. Its bytes are what was added, so a read of an
+    /// entry the close has compressed, from a progress callback, inflates
+    /// bytes that are not deflate data, as libzip's does:
+    ///
+    /// ```php
+    /// foreach (['s' => fn($z) => $z->addFromString('s', str_repeat('s', 100)), 'z' => fn($z) => $z->addFile('/dev/zero', 'z', 0, 100)] as $n => $add) {
+    ///     $z = new ZipArchive; $z->open('added-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE); $add($z);
+    ///     $z->registerProgressCallback(0.0001, function ($r) use ($z, $n) { $g = @$z->getFromName($n); echo round($r, 2), ' ', var_export($g === false ? false : strlen($g), true), ' ', $z->getStatusString(), "\n"; });
+    ///     var_dump($z->close());
+    /// }
+    /// $z->open('added-witness.zip', ZipArchive::OVERWRITE); $z->addFromString('d', gzdeflate('hello')); $z->setCompressionName('d', ZipArchive::CM_DEFLATE);
+    /// $z->addFile('/dev/zero', 'n'); $z->setCompressionName('n', ZipArchive::CM_BZIP2);
+    /// var_dump($z->getFromName('d'), @$z->getFromName('n'), $z->getStatusString()); $z->unchangeAll(); $z->close(); @unlink('added-witness.zip');
+    /// ```
+    /// ```expect
+    /// 0 100 No error
+    /// 1 99 No error
+    /// bool(true)
+    /// 0 100 No error
+    /// 1 false No error
+    /// bool(true)
+    /// string(5) "hello"
+    /// bool(false)
+    /// string(8) "No error"
+    /// ```
+    fn added(&mut self, idx: usize, flags: u32, st: &Stat) -> Result<Reader, Status> {
+        let de = self.dirent(idx, flags).map_err(Status::new)?;
+        let layers = Layers {
+            method: st.comp_method,
+            encryption: EM_NONE,
+            password: None,
+            size: st.size,
+            comp_size: None,
+            crc: None,
+            dostime: de.last_mod.time,
+            bitflags: de.bitflags,
+            check: self.open_flags & CHECKCONS != 0,
+        };
+        match &self.entries[idx].source {
+            Some(Source::Buffer(b)) => Reader::over_buffer(BufferLink::new(idx, &b.data), &layers),
+            // `zip_source_zip_new.c:188`: read as it is, a size it does not
+            // know, one over a device or a pipe given no length, is past
+            // any window's; a decompressor reads it to its end.
+            Some(Source::File(f)) if f.len.is_none() && st.comp_method == 0 => {
+                Err(Status::incons(Detail::StoredSizeMismatch, Some(idx)))
+            }
+            Some(Source::File(f)) => {
+                let link = FileLink {
+                    entry: idx,
+                    path: Arc::clone(&f.path),
+                };
+                Reader::over_file(link, f.open()?, f.len.map(NonZeroU64::get), &layers)
+            }
+            None => Err(Status::new(Er::Internal)),
+        }
+    }
+
     /// `zip_fopen_index_encrypted`: entry `idx` opened for reading,
     /// decrypted with `password` or the archive's, decompressed as it is
     /// read, its CRC checked at the end.
@@ -2008,23 +2068,7 @@ impl Archive {
         }
         let crc_valid = self.entries[idx].orig.as_ref().is_some_and(|o| o.crc_valid);
         let opened = if changed_data {
-            match &self.entries[idx].source {
-                Some(Source::Buffer(b)) => Ok(Reader::over_buffer(BufferLink::new(idx, &b.data))),
-                // `zip_source_zip_new.c:188`: a size it does not know, one
-                // over a device or a pipe given no length, is past any
-                // window's.
-                Some(Source::File(f)) => match f.len {
-                    None => Err(Status::incons(Detail::StoredSizeMismatch, Some(idx))),
-                    Some(len) => f.open().map(|file| {
-                        let link = FileLink {
-                            entry: idx,
-                            path: Arc::clone(&f.path),
-                        };
-                        Reader::over_file(link, file, len.get())
-                    }),
-                },
-                None => Err(Status::new(Er::Internal)),
-            }
+            self.added(idx, flags, &st)
         } else if flags & FL_COMPRESSED != 0 {
             let crc = (st.comp_method == 0 && crc_valid).then_some((st.crc, st.size));
             self.window(idx).map(|w| Reader::window(w, crc))
