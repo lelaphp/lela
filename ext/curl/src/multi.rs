@@ -1186,7 +1186,7 @@ fn curl_multi_setopt(
 /// with the push's headers; kept by the `CURLM *` where the callable
 /// accepts it. The library made the pushed `CURL *` a copy of its
 /// parent's, which points at the parent's lists and file parts from
-/// then on.
+/// then on and shares them as a copy does.
 pub(crate) fn push(
     cx: &mut Cx<'_>,
     multi: PhpObject,
@@ -1197,9 +1197,6 @@ pub(crate) fn push(
     let Some(parent) = find(cx.req, multi, parent) else {
         return false;
     };
-    if let Some(easy) = easy_id(cx.req, parent) {
-        easy.copied(cx.req);
-    }
     let Some(callable) = multi
         .native::<Mh>(cx.req)
         .and_then(|mh| mh.push.as_ref().map(|push| (**push).clone()))
@@ -1214,7 +1211,7 @@ pub(crate) fn push(
         return false;
     };
     if let Some(from) = easy_id(cx.req, parent) {
-        easy.id().stderr_from(cx.req, from);
+        easy.id().copied_from(cx.req, from);
     }
     match copy_handlers(cx.req, parent) {
         Ok(mut copied) => {

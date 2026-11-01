@@ -725,6 +725,49 @@ fn curl_init(
 /// string(4) "kept"
 /// string(9) "file:///a"
 /// ```
+///
+/// The copy shares the lists and MIME trees of the `CurlHandle` it
+/// copies, php's `to_free` counted by `clone`: a `CURLOPT_POSTFIELDS`
+/// array lets go of the trees it replaces only once the copies are
+/// freed, and the last `CurlHandle` freed lets go of the rest. The
+/// copy's own tree for the file is built again, and replacing the
+/// library's copy of the original's frees a part over the same stream.
+///
+/// ```php
+/// class W {
+///     public $context;
+///     function stream_open($p, $m, $o, &$opened) { echo "open $p\n"; return true; }
+///     function stream_read($n) { return ''; }
+///     function stream_eof() { return true; }
+///     function stream_seek($o, $w) { return true; }
+///     function stream_tell() { return 0; }
+///     function stream_stat() { return ['size' => 0]; }
+///     function stream_close() { echo "close\n"; }
+/// }
+/// stream_wrapper_register('mem', 'W');
+/// $a = curl_init();
+/// curl_setopt($a, CURLOPT_POSTFIELDS, ['f' => new CURLFile('mem://a')]);
+/// $b = curl_copy_handle($a);
+/// echo "copied\n";
+/// unset($b);
+/// echo "freed\n";
+/// curl_setopt($a, CURLOPT_POSTFIELDS, ['g' => new CURLFile('mem://c')]);
+/// echo "set\n";
+/// unset($a);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// open mem://a
+/// open mem://a
+/// close
+/// copied
+/// freed
+/// open mem://c
+/// close
+/// set
+/// close
+/// end
+/// ```
 #[php_function]
 fn curl_copy_handle(
     req: &mut Request,

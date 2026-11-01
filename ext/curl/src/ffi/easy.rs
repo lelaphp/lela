@@ -39,8 +39,9 @@ const GONE: i32 = 43;
 pub(crate) type Called = (i32, Option<Thrown>);
 
 /// What the library keeps a pointer to from one `CURL *`, freed after
-/// the `CURL *` is: its object, the error buffer, the `CURLOPT_STDERR`
-/// file, the lists, the MIME trees and the share it points at.
+/// the `CURL *` is: its object, the error buffer, the lists and MIME
+/// trees it shares with its copies, the `CURLOPT_STDERR` file and the
+/// share it points at.
 struct Tag {
     /// The `CurlHandle` a callback is served for, `None` once it is being
     /// freed.
@@ -49,42 +50,130 @@ struct Tag {
     /// it: `char` is `i8` on some targets and `u8` on others, and the
     /// text is bytes on all of them.
     error: [u8; ERROR_SIZE + 1],
+    /// `ch->to_free`, given up before the file and the share, as
+    /// `curl_free_obj` cleans it before the handlers' streams.
+    to_free: ToFree,
     stderr: Option<CFile>,
-    slists: Vec<(i64, Slist)>,
-    mimes: Vec<Mime>,
     /// The share `CURLOPT_SHARE` points at: a request's, held across a
     /// transfer with the `CURL *`, or a persistent one, counted so the
     /// pool never lends it on while this points at it.
     share: Option<ShareRef>,
-    /// Whether `curl_easy_duphandle` copied this `CURL *`, whose copies
-    /// point at its lists and its trees' file parts from then on, as
-    /// php's `clone` count above one keeps `to_free` whole.
-    copied: bool,
     /// Dropped last, after what it keeps.
     session: Session,
 }
 
-impl Tag {
-    /// The lists and trees let go of: kept by the request's link where a
-    /// copy may still point at them, and a tree where no call in progress
-    /// lends the request its file parts close through; freed here
-    /// otherwise.
-    fn let_go(&self, lists: Vec<Slist>, trees: Vec<Mime>) {
-        if self.copied {
-            self.session.keep(lists, trees);
-        } else if !trees.is_empty() && !self.session.entered() {
-            self.session.keep(Vec::new(), trees);
+/// One `CURL *`'s share of php's `ch->to_free`, counted by `ch->clone`:
+/// the lists and MIME trees the `CURL *` and its copies point at, since
+/// `curl_easy_duphandle` copies the pointers to the lists and to the
+/// trees' file parts. A copy shares its original's
+/// (`_php_setup_easy_copy_handlers`, `(*source->clone)++`); a set lets go
+/// of what it replaces only where one `CURL *` holds a share
+/// (`(*ch->clone) == 1`), and keeps it beside the new value otherwise;
+/// and the last share given up frees them all (`curl_free_obj`,
+/// `--(*ch->clone) == 0`).
+struct ToFree(NonNull<Lists>);
+
+/// What the shares of one [`ToFree`] point at, php's
+/// `struct _php_curl_free` with the count beside it.
+struct Lists {
+    /// `*ch->clone`, the shares.
+    clone: usize,
+    /// `to_free->post`, each tree with its file parts' arguments,
+    /// `to_free->stream`.
+    trees: Vec<Mime>,
+    /// `to_free->slist`, by the option each was set for.
+    slists: Vec<(i64, Slist)>,
+    /// The request's link, which the trees are let go of through.
+    session: Session,
+}
+
+impl ToFree {
+    /// `init_curl_handle`'s, one `CURL *`'s alone.
+    fn new(session: Session) -> ToFree {
+        let lists = Box::into_raw(Box::new(Lists {
+            clone: 1,
+            trees: Vec::new(),
+            slists: Vec::new(),
+            session,
+        }));
+        // SAFETY: `into_raw` never answers null.
+        ToFree(unsafe { NonNull::new_unchecked(lists) })
+    }
+
+    /// Another share, a copy's.
+    fn share(&self) -> ToFree {
+        // SAFETY: `self` is a share, so the allocation is live, and no
+        // other reference to it is held across this write.
+        unsafe { (*self.0.as_ptr()).clone += 1 };
+        ToFree(self.0)
+    }
+
+    /// `(*ch->clone) == 1`: no copy may point at what is held.
+    fn alone(&self) -> bool {
+        // SAFETY: a share's allocation; the field is read, nothing held.
+        unsafe { (*self.0.as_ptr()).clone == 1 }
+    }
+
+    /// `zend_llist_clean(&ch->to_free->post)` where one `CURL *` holds a
+    /// share: the trees taken, to be freed by the caller; none otherwise.
+    fn clean(&self) -> Vec<Mime> {
+        if !self.alone() {
+            return Vec::new();
         }
+        // SAFETY: a share's allocation; the field is taken alone.
+        unsafe { std::mem::take(&mut (*self.0.as_ptr()).trees) }
+    }
+
+    /// `zend_llist_add_element(&ch->to_free->post, &mime)`.
+    fn hold_tree(&self, tree: Mime) {
+        // SAFETY: a share's allocation; the field is written alone.
+        unsafe { (*self.0.as_ptr()).trees.push(tree) };
+    }
+
+    /// `list` held for `option`: in place of the lists held for it where
+    /// one `CURL *` holds a share (`zend_hash_index_update_ptr`), which
+    /// are answered for the caller to free once the set is made, and
+    /// beside them otherwise (`zend_hash_next_index_insert_ptr`).
+    fn hold_list(&self, option: i64, list: Option<Slist>) -> Vec<Slist> {
+        let alone = self.alone();
+        // SAFETY: a share's allocation; the field is written alone.
+        let slists = unsafe { &mut (*self.0.as_ptr()).slists };
+        let replaced = if alone {
+            let (old, kept): (Vec<_>, Vec<_>) = std::mem::take(slists)
+                .into_iter()
+                .partition(|(held, _)| *held == option);
+            *slists = kept;
+            old.into_iter().map(|(_, list)| list).collect()
+        } else {
+            Vec::new()
+        };
+        slists.extend(list.map(|list| (option, list)));
+        replaced
     }
 }
 
-impl Drop for Tag {
+impl Drop for ToFree {
     fn drop(&mut self) {
-        let lists = std::mem::take(&mut self.slists)
-            .into_iter()
-            .map(|(_, list)| list);
-        let trees = std::mem::take(&mut self.mimes);
-        self.let_go(lists.collect(), trees);
+        let lists = self.0.as_ptr();
+        // SAFETY: as in `share`.
+        let left = unsafe {
+            let lists = &mut *lists;
+            lists.clone -= 1;
+            lists.clone
+        };
+        if left > 0 {
+            return;
+        }
+        // SAFETY: the allocation `new` leaked, freed by its last share.
+        let lists = unsafe { Box::from_raw(lists) };
+        let Lists {
+            trees,
+            slists,
+            session,
+            ..
+        } = *lists;
+        session.let_trees_go(trees);
+        drop(slists);
     }
 }
 
@@ -182,15 +271,21 @@ struct Live<'h> {
 }
 
 impl Handle {
-    fn make(raw: NonNull<sys::CURL>, session: Session, object: PhpObject, owned: bool) -> Handle {
+    /// A `CURL *` kept with its tag, sharing `to_free`, its original's
+    /// for a copy and its own otherwise.
+    fn make(
+        raw: NonNull<sys::CURL>,
+        session: Session,
+        to_free: ToFree,
+        object: PhpObject,
+        owned: bool,
+    ) -> Handle {
         let tag = Box::into_raw(Box::new(Tag {
             object: Some(object),
             error: [0; ERROR_SIZE + 1],
+            to_free,
             stderr: None,
-            slists: Vec::new(),
-            mimes: Vec::new(),
             share: None,
-            copied: false,
             session,
         }));
         // SAFETY: `into_raw` never answers null.
@@ -410,9 +505,10 @@ impl Easy {
     pub(crate) fn init(req: &mut Request, session: Session, object: PhpObject) -> Option<Easy> {
         // SAFETY: no argument.
         let raw = NonNull::new(unsafe { sys::curl_easy_init() })?;
+        let to_free = ToFree::new(session.clone());
         Some(Easy(
             req.memory_mut()
-                .adopt(Handle::make(raw, session, object, true)),
+                .adopt(Handle::make(raw, session, to_free, object, true)),
         ))
     }
 
@@ -426,9 +522,10 @@ impl Easy {
         object: PhpObject,
     ) -> Option<Easy> {
         let raw = NonNull::new(raw)?;
+        let to_free = ToFree::new(session.clone());
         Some(Easy(
             req.memory_mut()
-                .adopt(Handle::make(raw, session, object, false)),
+                .adopt(Handle::make(raw, session, to_free, object, false)),
         ))
     }
 
@@ -492,18 +589,19 @@ impl EasyId {
 
     /// `curl_easy_duphandle(ch->cp)` for `object`, kept by the request.
     /// The copy points at this `CURL *`'s lists and its trees' file parts,
-    /// which this one keeps from here to the request's end
-    /// ([`Tag::let_go`]); its `CURLOPT_STDERR` file is its own.
+    /// which it shares from here ([`ToFree`]); its `CURLOPT_STDERR` file
+    /// is its own.
     pub(crate) fn duplicate(self, req: &mut Request, object: PhpObject) -> Option<Easy> {
-        let (raw, session, stderr) = self.with(req, None, |handle| {
+        let (raw, session, to_free, stderr) = self.with(req, None, |handle| {
             // SAFETY: a live handle.
             let raw = NonNull::new(unsafe { sys::curl_easy_duphandle(handle.raw()) })?;
-            handle.tag_mut().copied = true;
-            Some((raw, handle.tag().session.clone(), handle.stderr_again()))
+            let tag = handle.tag();
+            let (session, to_free) = (tag.session.clone(), tag.to_free.share());
+            Some((raw, session, to_free, handle.stderr_again()))
         })?;
         let copy = Easy(
             req.memory_mut()
-                .adopt(Handle::make(raw, session, object, true)),
+                .adopt(Handle::make(raw, session, to_free, object, true)),
         );
         if let Some(Reopened(stderr)) = stderr {
             copy.id().point_stderr(req, stderr);
@@ -511,10 +609,18 @@ impl EasyId {
         Some(copy)
     }
 
-    /// A pushed `CURL *`, which the library made a copy of `parent`'s,
-    /// given a `CURLOPT_STDERR` file of its own, as a copy is.
-    pub(crate) fn stderr_from(self, req: &mut Request, parent: EasyId) {
-        if let Some(Reopened(stderr)) = parent.with(req, None, |handle| handle.stderr_again()) {
+    /// A pushed `CURL *`, which the library made a copy of `parent`'s, set
+    /// up as a copy is (`_php_setup_easy_copy_handlers`): sharing
+    /// `parent`'s lists and trees ([`ToFree`]), and given a
+    /// `CURLOPT_STDERR` file of its own.
+    pub(crate) fn copied_from(self, req: &mut Request, parent: EasyId) {
+        let Some((to_free, stderr)) = parent.with(req, None, |handle| {
+            Some((handle.tag().to_free.share(), handle.stderr_again()))
+        }) else {
+            return;
+        };
+        self.with(req, (), |handle| handle.tag_mut().to_free = to_free);
+        if let Some(Reopened(stderr)) = stderr {
             self.point_stderr(req, stderr);
         }
     }
@@ -522,13 +628,6 @@ impl EasyId {
     /// The pushed `CURL *` accepted: the multi owns it from here, as any.
     pub(crate) fn accept(self, req: &mut Request) {
         self.with(req, (), |handle| handle.owned = true);
-    }
-
-    /// `curl_easy_duphandle`'s copy made by the library for a push: the
-    /// pushed `CURL *` points at this one's lists and file parts, as a copy
-    /// does.
-    pub(crate) fn copied(self, req: &mut Request) {
-        self.with(req, (), |handle| handle.tag_mut().copied = true);
     }
 
     /// `_php_curl_set_default_options`: the trampolines installed, the
@@ -565,35 +664,22 @@ impl EasyId {
         self.call(req, GONE, |live| live.set_post_fields(body))
     }
 
-    /// A list option: the list the library is pointed at, held by the
-    /// `CURL *` in place of the one the option held, which is let go of
-    /// once the call is over ([`Tag::let_go`]).
+    /// A list option: the list the library is pointed at, held before the
+    /// set with what the `CURL *` shares with its copies
+    /// ([`ToFree::hold_list`]), and the lists it replaces freed once the
+    /// call is over.
     pub(crate) fn set_slist(self, req: &mut Request, option: i64, list: Option<Slist>) -> Called {
-        let Some(session) = self.with(req, None, |handle| Some(handle.tag().session.clone()))
-        else {
-            return (GONE, None);
-        };
         let raw = list
             .as_ref()
             .map_or(ptr::null_mut(), |list| list.0.as_ptr());
-        let (code, thrown) = self.call(req, GONE, |live| live.set_ptr(option, raw.cast()));
-        let Some(handle) = req.memory_mut().foreign(self.0) else {
-            // Cleaned up as the call's hold ended; a copy made meanwhile
-            // may still point at the list.
-            session.keep(list.into_iter().collect(), Vec::new());
-            return (code, thrown);
+        let Some(replaced) = self.with(req, None, |handle| {
+            Some(handle.tag().to_free.hold_list(option, list))
+        }) else {
+            return (GONE, None);
         };
-        let tag = handle.tag_mut();
-        let (old, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut tag.slists)
-            .into_iter()
-            .partition(|(held, _)| *held == option);
-        tag.slists = kept;
-        if let Some(list) = list {
-            tag.slists.push((option, list));
-        }
-        let old = old.into_iter().map(|(_, list)| list).collect();
-        tag.let_go(old, Vec::new());
-        (code, thrown)
+        let called = self.call(req, GONE, |live| live.set_ptr(option, raw.cast()));
+        drop(replaced);
+        called
     }
 
     /// `CURLOPT_STDERR`: the file the library writes its verbose lines
@@ -839,23 +925,19 @@ impl EasyId {
     }
 
     /// The trees the `CURL *` held let go of, then `CURLOPT_MIMEPOST`
-    /// pointed at `mime`, which the `CURL *` holds in their place: php's
-    /// `zend_llist_clean(&ch->to_free->post)` before the set, skipped
-    /// where a copy may still point at them (`(*ch->clone) == 1`), whose
-    /// trees are kept to the link's end. The frees and the set are made under
-    /// what stands in `pending`, an `exit` among it as php's unwind exit
-    /// stands; where a free leaves a fatal there, the set is not made and
-    /// `mime` is freed, as `zend_bailout` leaves before it.
+    /// pointed at `mime`, which the `CURL *` holds in their place or
+    /// beside them: php's `zend_llist_clean(&ch->to_free->post)` before
+    /// the set where no copy shares them ([`ToFree::clean`]), and freed
+    /// with the last share otherwise. The frees and the set are made
+    /// under what stands in `pending`, an `exit` among it as php's unwind
+    /// exit stands; where a free leaves a fatal there, the set is not made
+    /// and `mime` is freed, as `zend_bailout` leaves before it.
     fn set_mime(self, req: &mut Request, mime: Mime, pending: &mut Pending) -> Posted {
         let Some(handle) = req.memory_mut().foreign(self.0) else {
             mime.let_go(req, pending);
             return Posted::Set(GONE);
         };
-        let tag = handle.tag_mut();
-        let mut old = std::mem::take(&mut tag.mimes);
-        if tag.copied {
-            tag.session.keep(Vec::new(), std::mem::take(&mut old));
-        }
+        let old = handle.tag().to_free.clean();
         for tree in old {
             tree.let_go(req, pending);
         }
@@ -875,7 +957,7 @@ impl EasyId {
             pending.park(req, thrown);
         }
         match req.memory_mut().foreign(self.0) {
-            Some(handle) => handle.tag_mut().mimes.push(mime),
+            Some(handle) => handle.tag().to_free.hold_tree(mime),
             None => mime.let_go(req, pending),
         }
         Posted::Set(code)
