@@ -630,6 +630,16 @@ impl Stream {
         req.stream_ref(self)?.orig_path().map(<[u8]>::to_vec)
     }
 
+    /// `stream->mode`: the bytes the stream was opened as (`fopen`'s
+    /// `$mode`), cut to fifteen as php's `char mode[16]` holds them,
+    /// which `stream_get_meta_data` answers under `mode`, read without
+    /// asking the stream anything, so no method of a user wrapper runs;
+    /// `None` for a closed stream and one inside a call.
+    #[must_use]
+    pub fn opened_as(self, req: &Request) -> Option<Vec<u8>> {
+        Some(req.stream_ref(self)?.mode.bytes().to_vec())
+    }
+
     /// `stream->orig_path = estrdup(path)` over a stream an extension
     /// made ([`Request::new_stream`]), which no path opened:
     /// `php_stream_zip_open` names an entry's stream by the entry, and
