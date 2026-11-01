@@ -665,35 +665,34 @@ impl SoapClient {
         }
         let parser = uriParserClass.as_ref().map(PhpString::as_bytes);
         let action = Some(action.as_bytes());
-        let answered = if one_way {
-            crate::http::make_http_soap_request_one_way(
-                req,
-                object,
-                request.as_bytes(),
-                location.as_bytes(),
-                action,
-                version,
-                parser,
-            )
-            .map(|ok| ok.then(Vec::new))
-        } else {
-            crate::http::make_http_soap_request(
-                req,
-                object,
-                request.as_bytes(),
-                location.as_bytes(),
-                action,
-                version,
-                parser,
-            )
-        };
         // An `E_ERROR` reaches the soap handler only while a client or a
         // server runs; called on its own it is the plain fatal.
-        let answered = raised(req, answered)?;
-        match answered {
-            Some(body) => Ok(Some(PhpString::new(req, &body)?)),
-            None => Ok(None),
+        if one_way {
+            let sent = crate::http::make_http_soap_request_one_way(
+                req,
+                object,
+                request.as_bytes(),
+                location.as_bytes(),
+                action,
+                version,
+                parser,
+            );
+            if !raised(req, sent)? {
+                return Ok(None);
+            }
+            return PhpString::new(req, b"").map(Some);
         }
+        // The body is the string the response was read into.
+        let answered = crate::http::make_http_soap_request(
+            req,
+            object,
+            request.as_bytes(),
+            location.as_bytes(),
+            action,
+            version,
+            parser,
+        );
+        raised(req, answered)
     }
 
     /// `SoapClient::__setCookie(string $name, ?string $value = null):

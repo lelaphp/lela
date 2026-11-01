@@ -10,7 +10,7 @@ use php_ext::call::{call_method, read_prop};
 use php_ext::coerce::{to_long, to_string};
 use php_ext::raising::{Thrown, arg_value_error, argument_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use php_ext::values::{Emalloc, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 use crate::model;
 use crate::throwables::Throwables;
@@ -601,8 +601,66 @@ impl SoapVar {
 /// one its kept connection goes to; none until a request made one.
 #[derive(Default)]
 pub(crate) struct UrlPayload {
-    /// `uri`, php's `php_uri`, its `port` defaulted for the scheme.
-    pub(crate) uri: Option<php_ext_uri::UriStruct>,
+    /// `uri`, php's `php_uri *`, its `port` defaulted for the scheme.
+    pub(crate) uri: Option<Box<HeldUri>>,
+}
+
+/// `sizeof(php_uri)`: seven `zend_string *` and one `zend_long`.
+const PHP_URI: usize = 64;
+
+/// `_ZSTR_HEADER_SIZE`: what a `zend_string` takes before its bytes.
+const ZSTR_HEADER: usize = 24;
+
+/// A `php_uri` where php keeps it, on the request's heap: the struct
+/// `php_uri_parse_to_struct` `ecalloc`s and the `zend_string` of each
+/// component it read, at php's sizes, beside the components the client
+/// reads; all of it freed with the object, as `soap_url_object_free`
+/// calls `php_uri_struct_free`.
+pub(crate) struct HeldUri {
+    pub(crate) uri: php_ext_uri::UriStruct,
+    blocks: Vec<Emalloc>,
+}
+
+impl HeldUri {
+    /// `uri` laid on the heap; the `Err` is the memory limit's fatal,
+    /// with what was laid down so far given back.
+    pub(crate) fn new(req: &mut Request, uri: php_ext_uri::UriStruct) -> R<Box<HeldUri>> {
+        let parts = [
+            &uri.scheme,
+            &uri.user,
+            &uri.password,
+            &uri.host,
+            &uri.path,
+            &uri.query,
+            &uri.fragment,
+        ];
+        let sizes: Vec<usize> = std::iter::once(PHP_URI)
+            .chain(
+                parts
+                    .into_iter()
+                    .flatten()
+                    .map(|s| ZSTR_HEADER + s.len() + 1),
+            )
+            .collect();
+        let mut blocks = Vec::with_capacity(sizes.len());
+        for size in sizes {
+            match Emalloc::new(req, size) {
+                Ok(block) => blocks.push(block),
+                Err(thrown) => {
+                    HeldUri { uri, blocks }.free(req);
+                    return Err(thrown);
+                }
+            }
+        }
+        Ok(Box::new(HeldUri { uri, blocks }))
+    }
+
+    /// `php_uri_struct_free`.
+    pub(crate) fn free(self, req: &mut Request) {
+        for block in self.blocks {
+            block.free(req);
+        }
+    }
 }
 
 /// `soap_sdl_object`: the description a client was made with.
@@ -638,6 +696,17 @@ impl ObjectHandlers for UrlHandlers {
             return Ok(Some(Owner::take(req, id)));
         }
         Std.cast_object(req, object, to)
+    }
+
+    /// `soap_url_object_free`: the `php_uri` given back with the object.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        let held = object
+            .native_mut::<UrlPayload>(req)
+            .and_then(|payload| payload.uri.take());
+        if let Some(held) = held {
+            held.free(req);
+        }
+        Std.free_obj(req, object);
     }
 }
 
@@ -684,10 +753,30 @@ impl ObjectHandlers for UrlHandlers {
 /// Trying to clone an uncloneable object of class Soap\Url
 /// Serialization of 'Soap\Url' is not allowed
 /// ```
+///
+/// The one a call kept holds php's bytes, given back as the slot lets it
+/// go: the object, its `php_uri` and a string per component the URL has,
+/// here the scheme, host, path and query:
+///
+/// ```php
+/// $srv = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; $c = stream_socket_accept($s, 10);'
+///     . ' while (($l = fgets($c)) !== false && rtrim($l) !== "") {} fread($c, 4); fwrite($c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"); fclose($c);';
+/// $p = proc_open([PHP_BINARY, '-n', '-r', $srv], [1 => ['pipe', 'w']], $pipes);
+/// $uri = 'http://' . trim(fgets($pipes[1])) . '/a/b?q';
+/// $c = new SoapClient(null, ['location' => $uri, 'uri' => 'u']);
+/// $c->__doRequest('<E/>', $uri, 'f', SOAP_1_1);
+/// $url = new ReflectionProperty($c, 'httpurl');
+/// $m = memory_get_usage(); $url->setValue($c, null); echo $m - memory_get_usage(), "\n";
+/// proc_close($p);
+/// ```
+/// ```expect process
+/// 248
+/// ```
 #[php_class(
     namespace(Soap),
     final,
     not_serializable,
+    size = 64,
     payload = UrlPayload,
     handlers = URL_HANDLERS,
     dynamic_properties = forbidden
