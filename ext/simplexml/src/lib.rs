@@ -36,7 +36,8 @@ use php_ext::call::{autoload, create_object, lookup_class};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::Type as DeclType;
 use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, throw, throw_error,
+    Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, pending, throw,
+    throw_chained, throw_error,
 };
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Layout, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -870,6 +871,21 @@ impl SimpleXMLElement {
     /// caught loader
     /// e
     /// ```
+    ///
+    /// Where the parse made no tree, php throws its own `Exception`
+    /// with `EG(exception)` set, so what the entity loader threw, or an
+    /// error handler threw on what the parse raised, is its `previous`.
+    ///
+    /// ```php
+    /// libxml_set_external_entity_loader(function () { throw new Exception('loader'); });
+    /// try { new SimpleXMLElement('<!DOCTYPE e SYSTEM "e.dtd"><e', LIBXML_DTDLOAD); } catch (Exception $e) { echo get_class($e), ': ', $e->getMessage(), ' / ', $e->getPrevious()?->getMessage() ?? '-', "\n"; }
+    /// set_error_handler(function ($n, $s) { throw new Exception('handler'); });
+    /// try { new SimpleXMLElement('<r'); } catch (Exception $e) { echo get_class($e), ': ', $e->getMessage(), ' / ', $e->getPrevious()?->getMessage() ?? '-', "\n"; }
+    /// ```
+    /// ```expect
+    /// Exception: String could not be parsed as XML / loader
+    /// Exception: String could not be parsed as XML / handler
+    /// ```
     fn __construct(
         req: &mut Request,
         this: This<Self>,
@@ -891,12 +907,13 @@ impl SimpleXMLElement {
         };
         let (doc, settled) = parse(req, source, options);
         let Some(doc) = doc else {
-            settled?;
-            return Err(throw(
-                req,
-                ce.exception,
-                "String could not be parsed as XML",
-            ));
+            // What the loader threw comes back from settling; what a
+            // handler threw on a routed error stands pending past it.
+            let message = "String could not be parsed as XML";
+            return Err(match settled.and_then(|()| pending(req)) {
+                Ok(()) => throw(req, ce.exception, message),
+                Err(earlier) => throw_chained(req, earlier, ce.exception, message),
+            });
         };
         if let Some(s) = sxe_mut(req, this) {
             s.xpath = None;
