@@ -22,7 +22,9 @@ and `--tree DIR` builds from another checkout of the pinned tag than
       and written to sapi.toml (#3385): the php-fpm the bench's tables
       take as their baseline on dax-build (#3774). On macOS a person lays
       it at the table's path, the prefix, which is root's (`sudo mkdir -p`
-      and `cp`).
+      and `cp`). On Linux runtime.txt lands beside the binary too: the
+      packages that ship the libraries php and php-fpm link, which a host
+      running them out of the image installs (#3825).
       The darwin-arm64 table names the digest of the pin's `[closure]`, the
       Homebrew kegs the build is made against, beside its md5 (#2935).
   scripts/oracle-build.py closure
@@ -369,6 +371,7 @@ def build_linux(pin: Pin, plat: str, commit: str, epoch: str, args: list[str], j
         run(["docker", "cp", f"{container}:{PREFIX}/{pin.variant}/bin/php", out / "php"])
         run(["docker", "cp", f"{container}:{PREFIX}/{pin.variant}/sbin/php-fpm", out / "php-fpm"])
         run(["docker", "cp", f"{container}:{BUILD}/installed.txt", out / "installed.txt"])
+        run(["docker", "cp", f"{container}:{BUILD}/{pin.variant}/runtime.txt", out / "runtime.txt"])
     finally:
         subprocess.run(["docker", "rm", container], capture_output=True)
     built = subprocess.run(

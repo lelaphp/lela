@@ -13,7 +13,8 @@
 # `build` lays the tree at the path every platform builds at (the recipe's
 # BUILD, /tmp/dax-php-oracle, spelled here as there) and installs
 # `php` and `php-fpm` at the variant's prefix, where a runner takes them out
-# of the image (#1948; php-fpm for the bench's baseline, #3385, #3774).
+# of the image (#1948; php-fpm for the bench's baseline, #3385, #3774),
+# with runtime.txt, the packages that ship the libraries they link (#3825).
 ARG BASE
 FROM ${BASE} AS deps
 ARG SNAPSHOT
@@ -68,3 +69,17 @@ RUN set -eu; \
     "$@" make -j"$JOBS"; \
     "$@" make install-cli; \
     "$@" make install-fpm
+# The runtime packages the build links, one per line beside the tree: the
+# package that ships each library `ldd` resolves for php and php-fpm, which
+# a host running them outside the image installs (the bench job, #3825).
+# Taken from the binaries, not typed beside the list above, so a flag that
+# links another library names its package with no second list to drift. A
+# library `ldd` cannot find fails the build. Where ldd's path is not the one
+# dpkg recorded, as /lib for /usr/lib, the directory's real path is.
+RUN set -eu; \
+    ldd sapi/cli/php sapi/fpm/php-fpm > ../ldd.txt; \
+    if grep -F 'not found' ../ldd.txt; then exit 1; fi; \
+    for lib in $(awk '$2 == "=>" && $3 ~ /^\// { print $3 }' ../ldd.txt | sort -u); do \
+        dpkg -S "$lib" 2>/dev/null || dpkg -S "$(realpath "${lib%/*}")/${lib##*/}"; \
+    done > ../owners.txt; \
+    sed -e 's/: .*//' -e 's/, /\n/g' ../owners.txt | sort -u > ../runtime.txt
