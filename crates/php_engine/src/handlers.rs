@@ -4118,8 +4118,8 @@ fn included(
         return Ok(Included::Threw(frame));
     }
     // The op array `zend_accel_load_script` copies out of the cache, or
-    // `zend_compile` makes, the request's while the file runs.
-    let copy = match crate::api::values::Emalloc::new(req, exec::OP_ARRAY_SIZE) {
+    // `zend_compile` made, the request's while the file runs.
+    let copy = match req.main_op_array(&unit) {
         Ok(copy) => copy,
         Err(thrown) => {
             return Ok(Included::threw(req, frame, &thrown));

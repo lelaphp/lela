@@ -28,6 +28,7 @@
 
 use std::collections::HashMap;
 
+use php_compile::syntax::ScannerHeap;
 use php_compile::values::Holder;
 use php_compile::{Named, SourceKind};
 use php_heap::{Sizing, Str, Zval};
@@ -36,9 +37,9 @@ use php_unit::decl::TraitAdaptation;
 use php_unit::{OperandKind, PublishedUnit, Unit, WeakUnit};
 
 use super::Request;
-use super::declared_bytes::{self, Blocks, ClassBlocks, Declared, Gone};
+use super::declared_bytes::{self, Alone, Blocks, ClassBlocks, Declared, Gone, MainOpArray};
 use crate::api::raising::Thrown;
-use crate::api::values::{PhpString, Value};
+use crate::api::values::{Emalloc, PhpString, Value};
 
 /// `ZEND_BIND_EXPLICIT` (`Z/Zend/zend_compile.h:1196`): the bit of the
 /// `extended_value` of the `BIND_STATIC` a closure's body binds a `use`
@@ -203,6 +204,9 @@ struct Held {
     /// php's blocks for the op arrays and classes it declared
     /// ([`super::declared_bytes`]).
     declared: Declared,
+    /// php's blocks for its main op array, given back as its execution
+    /// ends ([`MainOpArray`]).
+    main_op_array: MainOpArray,
 }
 
 /// What holds a request-only unit's declarations, and so its strings,
@@ -246,6 +250,41 @@ impl Compiling {
     /// for the unit.
     pub(super) fn add(&mut self, z: Zval) {
         self.made.push(z);
+    }
+
+    /// The string the file under compile was opened under, where `bytes`
+    /// are its, one owner more of it kept as one this compile made: the
+    /// op arrays' `filename` and `__FILE__` are `opened_path` itself
+    /// (`zend_string_copy`, `Z/Zend/zend_language_scanner.l:576`), so the
+    /// compile lays no string of its own for them.
+    pub(super) fn opened_name(&mut self, bytes: &[u8]) -> Option<Str> {
+        let opened = self.opened.filter(|opened| opened.as_bytes() == bytes)?;
+        let z = Zval::string(opened.heap());
+        z.addref();
+        self.made.push(z);
+        Some(opened.heap())
+    }
+
+    /// The length scanned of each string of `scanned` whose bytes this
+    /// compile kept no string of, one string it made standing for one
+    /// token's: php's tree held the token's own string, which
+    /// `zend_ast_destroy` gave back, a name the engine's table interned
+    /// and a token the compile read and kept nothing of among them.
+    pub(super) fn unkept(&self, scanned: &ScannerHeap) -> Vec<usize> {
+        let made: Vec<Str> = self.made.iter().filter_map(|z| z.as_str()).collect();
+        let mut kept: HashMap<&[u8], usize> = HashMap::with_capacity(made.len());
+        for s in &made {
+            *kept.entry(s.bytes()).or_default() += 1;
+        }
+        (scanned.strings())
+            .filter_map(|(len, bytes)| match kept.get_mut(bytes) {
+                Some(count) if *count > 0 => {
+                    *count -= 1;
+                    None
+                }
+                _ => Some(len),
+            })
+            .collect()
     }
 
     /// The next of the names the compile handed over.
@@ -557,14 +596,19 @@ impl UnitStrings {
         let mut files = std::mem::take(&mut self.dead_files);
         let spare = &mut self.spare;
         let gone = &mut self.gone;
+        let dead_blocks = &mut self.dead_blocks;
         self.units.retain_mut(|held| {
             let alive = held.unit.strong_count() > 0;
             let ends = ended == Some(held.unit.as_ptr());
             if alive && !ends && !held.over {
                 return true;
             }
-            if !std::mem::replace(&mut held.over, true) && held.declared.laid() {
-                held.declared.main_over(gone);
+            if !std::mem::replace(&mut held.over, true) {
+                let main = std::mem::take(&mut held.main_op_array);
+                dead_blocks.push(main.into_blocks());
+                if held.declared.laid() {
+                    held.declared.main_over(gone);
+                }
             }
             constants.append(&mut held.main);
             found.extend(held.found_main.drain(..).flatten());
@@ -702,6 +746,7 @@ impl UnitStrings {
             file: None,
             found_main: spare.found_main,
             declared: Declared::default(),
+            main_op_array: MainOpArray::default(),
         });
         self.units.len() - 1
     }
@@ -1540,6 +1585,54 @@ impl Request {
         Some((self.unit_strings.position(unit)?, dynamic))
     }
 
+    /// php's compile of the source the request's arena last read, which
+    /// made `unit` or was refused, charged as `zend_compile` lays it
+    /// ([`declared_bytes::alone`]): the tree, what php's scanner laid
+    /// reading the source past the strings this compile kept
+    /// ([`Compiling::unkept`]), and the main op array and what the unit
+    /// declares, handed back for the unit to hold once it is the request's
+    /// ([`Request::hold_alone`]). One that meets the hard limit has ended
+    /// the request.
+    pub(crate) fn charge_compile(&mut self, unit: Option<&Unit>) -> Option<Alone> {
+        let tree = self.compile_arena.parsed();
+        let scanned = php_compile::syntax::take_scanner_heap(&self.compile_arena);
+        let unkept = self.unit_strings.compiling.unkept(&scanned);
+        declared_bytes::alone(self, unit, tree, &scanned, unkept)
+            .ok()
+            .flatten()
+    }
+
+    /// What the compile of `unit` laid, held by the unit: its main op
+    /// array's blocks until its execution ends, and what it declares as
+    /// [`Request::lay_declared`] holds it, which lays nothing more.
+    pub(crate) fn hold_alone(&mut self, unit: &PublishedUnit, alone: Alone) {
+        let Alone { main, declared } = alone;
+        let Some(held) = self.unit_strings.held_mut(PublishedUnit::as_ptr(unit)) else {
+            main.into_blocks().free(self);
+            return declared.free(self);
+        };
+        held.main_op_array = main;
+        if held.declared.lay() {
+            declared.free(self);
+        } else {
+            held.declared.hold(declared);
+        }
+    }
+
+    /// The `zend_op_array` of `unit`'s main op array the frame that runs
+    /// it holds ([`crate::exec::HeapOpArray`]): the one `zend_compile`
+    /// laid for a unit the request compiled for itself, else the copy
+    /// `zend_accel_load_script` makes of the cache's. The `Err` is the
+    /// memory limit.
+    pub(crate) fn main_op_array(&mut self, unit: &PublishedUnit) -> Result<Emalloc, Thrown> {
+        let laid = (self.unit_strings.held_mut(PublishedUnit::as_ptr(unit)))
+            .and_then(|held| held.main_op_array.take_op_array());
+        match laid {
+            Some(laid) => Ok(laid),
+            None => Emalloc::new(self, crate::exec::OP_ARRAY_SIZE),
+        }
+    }
+
     /// Every request-only unit's strings given up at the request's end,
     /// as `shutdown_executor` destroys the op arrays that hold them.
     pub(crate) fn release_all_unit_strings(&mut self) {
@@ -1562,6 +1655,7 @@ impl Request {
             blocks.free(self);
         }
         for held in held.units {
+            held.main_op_array.into_blocks().free(self);
             names.extend(held.names.into_iter().chain(held.file));
             constants.extend(held.main);
             constants.extend(held.constants);

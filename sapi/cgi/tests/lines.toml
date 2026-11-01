@@ -461,3 +461,23 @@ stdin = "x=hello"
 [[line.then]]
 args = ["-n", "-d", "opcache.file_update_protection=0"]
 env = { REQUEST_METHOD = "GET", CONTENT_TYPE = "", CONTENT_LENGTH = "" }
+
+# And what a `GET` reads at the program's first line where php-cgi 8.5.12
+# compiles the program without persisting it, as it does a file written
+# within `opcache.file_update_protection` (#3805): `zend_compile` lays
+# `CG(ast_arena)`, the scanner's strings and stacks, the main op array, its
+# oplines and literals and `FC(seen_symbols)`, and `pass_two` packs the
+# oplines beside them, so the peak is that window's and the usage is the
+# main op array's blocks after it, its filename the string
+# `EG(included_files)` keeps. The second program declares a class and a
+# function before any statement, which php compiles at their place and the
+# window lays first (#3822). The protection here is long enough that the
+# file laid before the run is new to both binaries.
+[[line]]
+name = "a-get-of-a-program-php-cgi-compiles-without-persisting-it"
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/m.php" }
+files = { "m.php" = "<?php echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "d.php" = "<?php class C {} function f() {} echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/d.php" }

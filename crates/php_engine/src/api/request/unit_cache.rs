@@ -1007,7 +1007,13 @@ impl Request {
         if args.handle == HandlePath::Host {
             self.fill_primary_handle(source.len()).ok();
         }
-        if let Some(opened) = self.opened_once(full) {
+        let opened = match args.handle {
+            HandlePath::Host => {
+                (self.primary_opened_path()).or_else(|| self.included_files.held(full))
+            }
+            _ => self.opened_once(full),
+        };
+        if let Some(opened) = opened {
             self.compile_opened(opened);
         }
         let shared = Arc::clone(&self.shared);
