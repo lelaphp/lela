@@ -1007,6 +1007,8 @@ pub(crate) struct ExtensionEntry {
     /// `zend_module_entry.version`, what [`ExtensionBuilder::version`]
     /// declared, `PHP_VERSION` where it declared none.
     pub(crate) version: &'static str,
+    /// What [`ExtensionBuilder::interned`] was handed.
+    pub(crate) interned: Vec<&'static [u8]>,
     pub(crate) ini: Vec<IniDecl>,
     pub(crate) on_modify: Vec<(Vec<u8>, IniHandler)>,
     pub(crate) dependencies: Vec<Dependency>,
@@ -1977,6 +1979,29 @@ impl ExtensionBuilder {
                 .into_iter()
                 .map(|(method, entry)| (Name(class.into()), method, entry)),
         );
+        self
+    }
+
+    /// A string the engine's start interns beside the names the bundle
+    /// declares, php's `zend_string_init_interned(..., 1)` in an
+    /// extension's `MINIT`, as soap's interns `soap_lang_en`: no request
+    /// pays for it, so [`PhpString::interned`] of these bytes is the
+    /// engine's string and costs nothing, and so is an unserialized key
+    /// of them (`zend_string_init_existing_interned`). Each call names
+    /// one string. ext/soap names `en`, so an array keyed by it costs the
+    /// request less than one keyed by `fr`, whose key is the request's:
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); $a = unserialize('a:1:{s:2:"en";i:1;}'); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $b = unserialize('a:1:{s:2:"fr";i:1;}'); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 376
+    /// 416
+    /// ```
+    #[must_use]
+    pub fn interned(mut self, bytes: &'static [u8]) -> ExtensionBuilder {
+        self.entry.interned.push(bytes);
         self
     }
 
