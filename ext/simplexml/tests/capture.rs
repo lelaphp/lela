@@ -28,3 +28,31 @@ echo @current($x), @key($x), @next($x), @reset($x), @end($x), @prev($x), "\n";"#
     );
     served.assert_clean("1b212\n");
 }
+
+/// A tree libxml made past a throw, a program's entity loader's as
+/// libxml loaded a DTD through it, is the object's as any other, as
+/// php's is: the object counts it and frees it with itself, so no tree
+/// is left uncounted. `simplexml_load_string` gives its object up with
+/// the throw pending, the destructor reading the tree's root, and a
+/// constructor called again stands for the new tree (#3829). The
+/// request leak sensor does not see libxml2's allocations; the
+/// destructor's read and the name are what count the tree.
+#[test]
+fn a_tree_made_past_a_throw_is_counted_by_its_object() {
+    let engine = support::engine();
+    let served = engine.serve_capture(
+        r#"<?php
+libxml_set_external_entity_loader(function () { throw new Exception('loader'); });
+class X extends SimpleXMLElement { function __destruct() { echo 'destruct ', $this->getName(), "\n"; } }
+$xml = '<!DOCTYPE e SYSTEM "e.dtd"><e/>';
+try { simplexml_load_string($xml, 'X', LIBXML_DTDLOAD); } catch (Exception $e) { echo 'caught ', $e->getMessage(), "\n"; }
+$s = new SimpleXMLElement('<old/>');
+try { $s->__construct($xml, LIBXML_DTDLOAD); } catch (Exception $e) { echo 'caught ', $e->getMessage(), "\n"; }
+echo $s->getName(), "\n";"#,
+        Capture::default(),
+    );
+    assert_eq!(
+        served.stdout_text(),
+        "destruct e\ncaught loader\ncaught loader\ne\n"
+    );
+}

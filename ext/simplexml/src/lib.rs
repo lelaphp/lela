@@ -188,17 +188,22 @@ fn derives(req: &mut Request, class: ClassId, base: ClassId) -> bool {
     req.symbols().lineage(class).any(|at| at == base)
 }
 
-/// `php_libxml_increment_doc_ref(sxe, docp)` and the root element taken.
+/// `php_libxml_increment_doc_ref(sxe, docp)` and the root element taken:
+/// the object counts the document from here and frees it with itself.
+/// An object with no libxml half counts nothing, so the document is
+/// freed here.
 fn adopt(req: &mut Request, object: PhpObject, doc: NewDoc, ns: Option<Ns>) {
     if let Some(s) = sxe_mut(req, object) {
         s.ns = ns;
     }
-    if let Some(mut obj) = sxe::libxml_half(req, object) {
-        let root = doc.node().root();
-        obj.count_document(req, DocOf::first(doc));
-        if let Some(root) = root {
-            obj.hold_node(req, root);
-        }
+    let Some(mut obj) = sxe::libxml_half(req, object) else {
+        doc.free();
+        return;
+    };
+    let root = doc.node().root();
+    obj.count_document(req, DocOf::first(doc));
+    if let Some(root) = root {
+        obj.hold_node(req, root);
     }
 }
 
@@ -208,16 +213,37 @@ fn exceeds_int(n: i64) -> bool {
 }
 
 /// The parse the functions and the constructor share, what libxml raised
-/// routed on.
-fn parse(req: &mut Request, source: Source<'_>, options: i64) -> Result<Option<NewDoc>, Thrown> {
+/// routed on: the tree it made, if it made one, beside what settling
+/// answered. php raises inside `xmlReadMemory` and `xmlReadFile`, and a
+/// tree made past a throw (a program's entity loader's, as libxml loaded
+/// a DTD through it) is still returned to the caller, which hands it to
+/// an object as it would any other: the object counts it and frees it
+/// with itself, so a throw drops no tree uncounted (#3829).
+fn parse(
+    req: &mut Request,
+    source: Source<'_>,
+    options: i64,
+) -> (Option<NewDoc>, Result<(), Thrown>) {
     let options = i32::try_from(options).unwrap_or_default();
     let (doc, raised, thrown) = Parser::read(req, source, options);
-    Errors::settle(req, raised, thrown)?;
-    Ok(doc)
+    (doc, Errors::settle(req, raised, thrown))
 }
 
 /// `simplexml_load_string` and `simplexml_load_file` after their
-/// arguments: the object of `class` for what the parse made.
+/// arguments: the object of `class` for what the parse made. A tree made
+/// past a throw is the object's as any other, and the object is given up
+/// with the throw pending, its destructor called, as php gives its return
+/// value up past `EG(exception)`.
+///
+/// ```php
+/// libxml_set_external_entity_loader(function () { throw new Exception('loader'); });
+/// class X extends SimpleXMLElement { function __destruct() { echo 'destruct ', $this->getName(), "\n"; } }
+/// try { simplexml_load_string('<!DOCTYPE e SYSTEM "e.dtd"><e/>', 'X', LIBXML_DTDLOAD); } catch (Exception $e) { echo 'caught ', $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// destruct e
+/// caught loader
+/// ```
 fn load(
     req: &mut Request,
     source: Source<'_>,
@@ -229,11 +255,26 @@ fn load(
         let ce = Throwables::of(req)?;
         return Err(argument_error(req, ce.value_error, 3, "is too large"));
     }
-    let Some(doc) = parse(req, source, options)? else {
+    let (doc, settled) = parse(req, source, options);
+    let Some(doc) = doc else {
+        settled?;
         return Ok(OrFalse::False);
     };
-    let made = new_object(req, class)?;
+    let made = match new_object(req, class) {
+        Ok(made) => made,
+        Err(later) => {
+            doc.free();
+            return Err(match settled {
+                Ok(()) => later,
+                Err(thrown) => thrown.chain(req, later),
+            });
+        }
+    };
     adopt(req, *made, doc, ns);
+    if let Err(thrown) = settled {
+        made.give_up(req);
+        return Err(thrown);
+    }
     Ok(OrFalse::Value(made.into_instance()))
 }
 
@@ -794,6 +835,22 @@ impl SimpleXMLElement {
     /// 1
     /// Exception: String could not be parsed as XML
     /// ```
+    ///
+    /// A tree made past a throw is the object's all the same, as php's
+    /// constructor takes `docp` with `EG(exception)` set: a constructor
+    /// called again replaces the document it stood for, and `new` gives
+    /// the object up with the tree.
+    ///
+    /// ```php
+    /// libxml_set_external_entity_loader(function () { throw new Exception('loader'); });
+    /// $s = new SimpleXMLElement('<old/>');
+    /// try { $s->__construct('<!DOCTYPE e SYSTEM "e.dtd"><e/>', LIBXML_DTDLOAD); } catch (Exception $e) { echo 'caught ', $e->getMessage(), "\n"; }
+    /// echo $s->getName(), "\n";
+    /// ```
+    /// ```expect
+    /// caught loader
+    /// e
+    /// ```
     fn __construct(
         req: &mut Request,
         this: This<Self>,
@@ -813,7 +870,9 @@ impl SimpleXMLElement {
         } else {
             Source::Memory(data.as_bytes())
         };
-        let Some(doc) = parse(req, source, options)? else {
+        let (doc, settled) = parse(req, source, options);
+        let Some(doc) = doc else {
+            settled?;
             return Err(throw(
                 req,
                 ce.exception,
@@ -832,7 +891,7 @@ impl SimpleXMLElement {
         }
         let ns = Ns::of(Some(namespaceOrPrefix.as_bytes()), isPrefix);
         adopt(req, this, doc, ns);
-        Ok(())
+        settled
     }
 
     /// `addChild(string $qualifiedName, ?string $value = null, ?string $namespace = null): ?SimpleXMLElement`:
