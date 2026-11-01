@@ -65,7 +65,10 @@ impl Thrown {
     /// `Z/Zend/zend_exceptions.c:103`). A fatal or an `exit` is not
     /// chained: where `later` is one, this throwable is given up and
     /// `later` is what leaves; where this is one, `later` could not have
-    /// been raised past it and is given up. A dump of a `DOMNode` no
+    /// been raised past it and is given up. A fatal renders the throwable
+    /// the slot or a stream's keeping holds as it is raised; one held
+    /// apart from both is given up unrendered here, so its holder raises
+    /// the fatal with [`fatal_while_pending`]. A dump of a `DOMNode` no
     /// constructor made is the witness, in `ext/dom`: each property's
     /// reader fails in turn and the throwables leave as one chain.
     #[must_use]
