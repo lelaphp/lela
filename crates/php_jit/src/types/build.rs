@@ -4275,7 +4275,7 @@ impl<'a> Builder<'a> {
         }
         for at in 0..self.guards.len() {
             let Placed {
-                at: GuardAt::Before(_),
+                at: GuardAt::Before(reader),
                 check,
                 ..
             } = self.guards[at]
@@ -4293,6 +4293,7 @@ impl<'a> Builder<'a> {
             if entered.def != Def::Entry
                 || entered.slot.frame != Frame::ROOT
                 || self.aliased(phi.slot)
+                || self.renumbered(phi.slot, reader)
             {
                 continue;
             }
@@ -4343,17 +4344,107 @@ impl<'a> Builder<'a> {
                 exit: self.start(),
             };
         }
+        self.home_phis();
+        Ok(())
+    }
+
+    /// Each phi in a register where it is one scalar no symbol table
+    /// reaches and its back edge brings a register's value; a phi a type
+    /// guard holds within the loop's body stays in its slot, where the
+    /// guard reads its tag, since a register holds none.
+    fn home_phis(&mut self) {
         for at in 0..self.phis.len() {
             let phi = self.phis[at];
             let Value {
                 slot, types, def, ..
             } = *self.val(phi);
             let Def::Phi { back, .. } = def else { continue };
-            if !self.aliased(slot) && types.scalar() && self.val(back).home == Home::Register {
+            let held_within = self.guards.iter().any(|placed| {
+                matches!(placed, Placed {
+                    at: GuardAt::Before(_),
+                    check: Check::Type { value, .. },
+                    ..
+                } if *value == phi)
+            });
+            if !self.aliased(slot)
+                && types.scalar()
+                && !held_within
+                && self.val(back).home == Home::Register
+            {
                 self.val_mut(phi).home = Home::Register;
             }
         }
-        Ok(())
+    }
+
+    /// Whether php's trace SSA reads another number than the loop phi of
+    /// `slot` at `reader`: a line between the header and `reader` writes
+    /// the slot anew ([`Builder::writes_anew`]), as a line that reads the
+    /// variable and may take a counted owner of it does under
+    /// `ZEND_SSA_RC_INFERENCE` (`Z/Zend/Optimizer/zend_ssa.c:544-800`),
+    /// though `types` makes no value of that write. A guard at `reader` is
+    /// then php's on that number, which `zend_jit_trace_build_tssa` marks
+    /// `MAY_BE_GUARD` in the phi's stead, so its phi propagation
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:2690-2760`) moves nothing to
+    /// the loop's entry and the guard stays at `reader`, its exit numbered
+    /// there (#3865).
+    ///
+    /// A closure that takes `$c` by value before the loop's `+=`:
+    ///
+    /// ```php
+    /// function f() { $c = 0; $g = null; for ($i = 0; $i < 100; $i++) { $g = function () use ($c) { return $c; }; $c += 2; if ($i > 50) { $c++; } } return $c + $g(); }
+    /// echo f(), "\n";
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 495
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:3
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %s:2
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 2 f() %s:2
+    /// ---- TRACE 2 start (side trace 1/2) f() %s:2
+    /// ---- TRACE 2 stop (link to 1)
+    /// ---- TRACE 2 compiled
+    ///
+    ///      TRACE 1 exit 0 f() %s:2
+    /// ---- TRACE 3 start (side trace 1/0) f() %s:2
+    /// ---- TRACE 3 stop (return)
+    /// ---- TRACE 3 compiled
+    /// ```
+    ///
+    /// An array that takes `$c` as its element before the `+=`:
+    ///
+    /// ```php
+    /// function f() { $c = 0; $y = null; for ($i = 0; $i < 100; $i++) { $y = [$c]; $c += 2; if ($i > 50) { $c++; } } return $c + $y[0]; }
+    /// echo f(), "\n";
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 495
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:3
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %s:2
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 2 f() %s:2
+    /// ---- TRACE 2 start (side trace 1/2) f() %s:2
+    /// ---- TRACE 2 stop (link to 1)
+    /// ---- TRACE 2 compiled
+    ///
+    ///      TRACE 1 exit 0 f() %s:2
+    /// ---- TRACE 3 start (side trace 1/0) f() %s:2
+    /// ---- TRACE 3 stop (return)
+    /// ---- TRACE 3 compiled
+    /// ```
+    fn renumbered(&self, slot: Slot, reader: OpId) -> bool {
+        let between = self.ops.get(self.header.index()..reader.index());
+        (between.unwrap_or_default().iter())
+            .any(|op| matches!(op, Op::Line(line) if self.writes_anew(line, slot)))
     }
 
     /// php's `is_checked_guard` (`Z/ext/opcache/jit/zend_jit_trace.c:1182-1260`)
