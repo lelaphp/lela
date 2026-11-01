@@ -200,7 +200,7 @@ impl Verdict {
 /// already recorded keeps its first record, which both adapters take
 /// before the call runs.
 pub(super) fn before(root: &Path, call: &Call) -> Result<()> {
-    if call.tool_name != "Bash" {
+    if call.judged_as() != "Bash" {
         return Ok(());
     }
     let Some(file) = record_path(root, call) else {
@@ -236,7 +236,7 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
             return Ok(());
         }
     };
-    if call.tool_name != "Bash" {
+    if call.judged_as() != "Bash" {
         return Ok(());
     }
     let Some(file) = record_path(root, &call) else {

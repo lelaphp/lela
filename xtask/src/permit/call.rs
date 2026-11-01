@@ -57,8 +57,8 @@ pub struct Call {
     approvals: OnceCell<Approvals>,
 }
 
-/// The fields of `tool_input` a rule can read: an `Edit`'s, a `Write`'s or
-/// a `Bash` call's.
+/// The fields of `tool_input` a rule can read: an `Edit`'s, a `Write`'s, a
+/// `Bash` call's or a `Monitor`'s.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Arguments {
     pub file_path: Option<String>,
@@ -72,10 +72,6 @@ pub struct Arguments {
     /// end of, which a `runs = "foreground"` rule does not judge (#3624).
     #[serde(default)]
     pub run_in_background: bool,
-    /// A `Monitor` call's deadline, an argument no `Bash` call carries:
-    /// the runtime hands a `Monitor` to the hook as `Bash`, and runs it in
-    /// the background by construction (#3637).
-    pub timeout_ms: Option<f64>,
 }
 
 impl Call {
@@ -178,10 +174,24 @@ impl Call {
 
     /// Whether the runtime runs the call in the background and notifies
     /// its end: a `Bash` call with `run_in_background`, or a `Monitor`,
-    /// by its name or its `timeout_ms` (#3637).
+    /// which runs so by construction (#3637). A `Monitor` is known only by
+    /// its name: the runtime hands a hook whose matcher names `Bash` alone
+    /// the `Monitor`'s `command` and `description` under the name `Bash`,
+    /// nothing else of it, which no judge tells from a foreground call, and
+    /// hands one whose matcher names `Monitor` the call as it is (#3781).
     pub(super) fn in_background(&self) -> bool {
-        let input = &self.tool_input;
-        input.run_in_background || self.tool_name == "Monitor" || input.timeout_ms.is_some()
+        self.tool_input.run_in_background || self.tool_name == "Monitor"
+    }
+
+    /// The name a rule's `tool` reads the call by: a `Monitor` that runs a
+    /// command is the `Bash` call it runs, as the runtime reads it when it
+    /// matches a hook, so every shell rule judges what a `Monitor` runs;
+    /// every other call goes by its `tool_name` (#3781).
+    pub(super) fn judged_as(&self) -> &str {
+        match (self.tool_name.as_str(), self.command()) {
+            ("Monitor", Some(_)) => "Bash",
+            (name, _) => name,
+        }
     }
 
     pub(super) fn command(&self) -> Option<&str> {

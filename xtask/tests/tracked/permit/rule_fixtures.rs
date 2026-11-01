@@ -92,6 +92,9 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
                     fires.display()
                 );
             }
+            if rule.tool.iter().any(|t| t == "Bash") {
+                fires_as_a_monitor(&manifest, workspace(), rule, fires);
+            }
         }
         // `allow-main.json` is a neighbour in main's checkout, where a
         // ticketed rule does not judge, and an `allow-excused*.json` one
@@ -112,6 +115,26 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
             );
         }
     }
+}
+
+/// A `Monitor` is judged as the `Bash` call it runs (#3781): a shell
+/// rule's control that runs a command, handed over under the `Monitor`'s
+/// own name, fires as the `Bash` call does, except under a foreground
+/// rule, which never judges a `Monitor`.
+fn fires_as_a_monitor(manifest: &Manifest, workspace: &Path, rule: &Rule, fires: &Path) {
+    let mut monitor = call(fires);
+    if monitor.tool_input.command.is_none() {
+        return;
+    }
+    "Monitor".clone_into(&mut monitor.tool_name);
+    let judgement = judge(manifest, workspace, &monitor).unwrap();
+    assert_eq!(
+        judgement.findings.iter().any(|f| f.rule == rule.id),
+        rule.runs != xtask::manifest::Runs::Foreground,
+        "{}: {} as a Monitor: {judgement:?}",
+        rule.id,
+        fires.display()
+    );
 }
 
 /// Every rule with a `tool` or a `scope` is either judged here, with its
