@@ -16,17 +16,21 @@
 //! register, which php's side reuses and loads nothing for (`:2896-2905`,
 //! `:4291`); here an exit stores every register it holds, and its side
 //! knows the type of what the exit stored, so no guard is held on it to
-//! begin with.
+//! begin with. The same allocator decides where a property fetch php
+//! compiles inline holds the type of what it fetched
+//! ([`Builder::hold_in_fetch`]).
 
 use php_engine::tier::Sample;
 use php_heap::ZvalType;
 use php_unit::{Opcode, OperandKind, Opline};
 
-use super::{Builder, Placed};
+use super::{At, Builder, Left, Placed, Point, draft};
 use crate::analysis::Defined;
 use crate::types::lattice::{self, Types};
 use crate::types::opcodes::{ISEMPTY, MAX_ARG_FLAG_NUM};
-use crate::types::{Check, Frame, GuardAt, Line, Op, OpId, Operand, Slot, ValueId};
+use crate::types::{
+    Check, Def, Form, Frame, Frees, GuardAt, Line, Op, OpId, Operand, Read, Slot, ValueId,
+};
 
 impl Builder<'_> {
     /// In a trace that does not loop, each guard [`Builder::place`] held
@@ -47,6 +51,102 @@ impl Builder<'_> {
                     ..placed
                 };
             }
+        }
+    }
+
+    /// Each guard [`Builder::place`] held before the op that reads what a
+    /// stepped `FETCH_OBJ_R` wrote, held within the fetch instead where
+    /// php's allocator keeps what the fetch writes in a register: a long
+    /// or a double, of a fetch and read by an op whose code keeps it in
+    /// one (`zend_jit_trace_allocate_registers`,
+    /// `Z/ext/opcache/jit/zend_jit_trace.c:2958-3058`). php compiles a
+    /// fetch by a constant name inline, of a property it finds no
+    /// declaration of too, and where it writes a register,
+    /// `zend_jit_fetch_obj` holds the type as it reads the property, in
+    /// place and through the reference it may be, by two exits past the
+    /// fetch (`Z/ext/opcache/jit/zend_jit_ir.c:14607-14687`, and
+    /// `:8024-8090`, `zend_jit_guard_fetch_result_type`), where a fetch
+    /// that writes memory is held by the op that reads it, by one. Here
+    /// the fetch is the handler's, which writes no reference, and the
+    /// guards read the slot it wrote; the exits land past it as php's
+    /// do, with nothing to free, which the handler freed.
+    ///
+    /// A loop adding a dynamic property of a local `stdClass` to a sum
+    /// takes php's two exits at the fetch, so the `$i > 50` side trace
+    /// grows from php's exit 5 (#3884):
+    ///
+    /// ```php
+    /// function f() { $o = new stdClass; $o->q = 1; $x = 0; $n = 0; for ($i = 0; $i < 100; $i++) { $n += $o->q; if ($i > 50) { $n++; } } return $n + $x; }
+    /// echo f(), "\n";
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 149
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:3
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %s:2
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 5 f() %s:2
+    /// ---- TRACE 2 start (side trace 1/5) f() %s:2
+    /// ---- TRACE 2 stop (link to 1)
+    /// ---- TRACE 2 compiled
+    ///
+    ///      TRACE 1 exit 1 f() %s:2
+    /// ---- TRACE 3 start (side trace 1/1) f() %s:2
+    /// ---- TRACE 3 stop (return)
+    /// ---- TRACE 3 compiled
+    /// ```
+    pub(super) fn hold_in_fetch(&mut self) {
+        for at in 0..self.guards.len() {
+            let Some(placed) = self.guards.get(at).copied() else {
+                continue;
+            };
+            let (GuardAt::Before(reader), Check::Type { value, tag }) = (placed.at, placed.check)
+            else {
+                continue;
+            };
+            let Def::Op(fetch) = self.val(value).def else {
+                continue;
+            };
+            let (Some(fetched), Some(read)) = (self.line_at(fetch), self.line_at(reader)) else {
+                continue;
+            };
+            let held = matches!(tag, ZvalType::Long | ZvalType::Double)
+                && fetched.opcode == Opcode::FetchObjR
+                && fetched.form == Form::Step
+                && fetched.out == Some(value)
+                && self.supports_reg(fetch, fetched)
+                && self.supports_reg(reader, read);
+            if !held {
+                continue;
+            }
+            let (frame, opline) = (fetched.frame, fetched.opline);
+            let past = |left| {
+                let at = At::Fetched {
+                    fetch: opline,
+                    frees: Frees::NONE,
+                    out: value,
+                    left,
+                };
+                draft(Point::Before(fetch), frame, at)
+            };
+            let (in_place, through) = (
+                past(Left::Copied(Read::InPlace)),
+                past(Left::Copied(Read::Through)),
+            );
+            self.guards[at] = Placed {
+                at: GuardAt::Within(fetch),
+                check: placed.check,
+                exit: in_place,
+            };
+            self.guards.push(Placed {
+                at: GuardAt::Within(fetch),
+                check: Check::Deref { value, tag },
+                exit: through,
+            });
         }
     }
 

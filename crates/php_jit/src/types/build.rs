@@ -3659,6 +3659,7 @@ impl<'a> Builder<'a> {
         }
         let closes = self.closes();
         self.load_at_entry();
+        self.hold_in_fetch();
         let numbered = self.number(closes)?;
         let end = numbered
             .end
