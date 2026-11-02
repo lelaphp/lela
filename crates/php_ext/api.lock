@@ -1552,6 +1552,7 @@ values::walk::Unwritten
 values::walk::detached
 values::walk::foreach
 values::walk::foreach_guarded
+values::walk::foreach_read
 values::walk::live
 values::walk::properties
 values::walk::rows
