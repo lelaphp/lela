@@ -519,9 +519,35 @@ pub struct ZendExtension {
 }
 
 pub(crate) use crate::api::__private::Entry;
-use crate::api::__private::{NativeClassConst, NativeFunction, NativeMethod, NativeProperty};
+use crate::api::__private::{
+    NativeClass, NativeClassConst, NativeFunction, NativeMethod, NativeProperty,
+};
 /// Builds one extension's request state at request start.
 pub(crate) type StateBuilder = (TypeId, fn() -> Box<dyn Any + Send>);
+
+/// A native class's static entries, `C`'s as `#[php_class]` laid them
+/// down, which [`ExtensionBuilder::class`] hands to the one function
+/// that registers every native class.
+#[derive(Clone, Copy)]
+struct Natives {
+    name: &'static [u8],
+    header: Option<&'static NativeClass>,
+    constants: &'static [NativeClassConst],
+    properties: &'static [NativeProperty],
+    methods: &'static [NativeMethod],
+}
+
+impl Natives {
+    fn of<C: Header + Members>() -> Natives {
+        Natives {
+            name: C::NAME,
+            header: C::HEADER,
+            constants: C::CONSTANTS,
+            properties: C::PROPERTIES,
+            methods: C::METHODS,
+        }
+    }
+}
 
 /// What [`ExtensionBuilder::constants_with`] was handed: the declared
 /// constants rewritten with every value the bundle registered.
@@ -1239,7 +1265,7 @@ impl ExtensionBuilder {
     /// what makes a forgotten member impl a build error on this line.
     #[must_use]
     pub fn class<C: Header + Members>(self) -> ExtensionBuilder {
-        self.class_reshaped::<C>(|_| {})
+        self.native_class(Natives::of::<C>(), None)
     }
 
     /// [`ExtensionBuilder::class`], the declaration then reshaped by
@@ -1257,26 +1283,50 @@ impl ExtensionBuilder {
         self,
         reshape: impl FnOnce(&mut ClassDecl),
     ) -> ExtensionBuilder {
-        let constants = C::CONSTANTS.iter().map(NativeClassConst::declaration);
-        let mut methods: Vec<(MethodDecl, Entry)> =
-            C::METHODS.iter().map(NativeMethod::declaration).collect();
-        let Some(header) = C::HEADER else {
-            let builder = self.class_constants(C::NAME, constants.collect());
+        let mut reshape = Some(reshape);
+        let mut once = |class: &mut ClassDecl| {
+            if let Some(reshape) = reshape.take() {
+                reshape(class);
+            }
+        };
+        self.native_class(Natives::of::<C>(), Some(&mut once))
+    }
+
+    /// What [`ExtensionBuilder::class`] and
+    /// [`ExtensionBuilder::class_reshaped`] register, one function over
+    /// the static entries rather than one per class, as php's
+    /// `zend_register_internal_class_ex` is one function every
+    /// `register_class_*` calls.
+    fn native_class(
+        self,
+        natives: Natives,
+        reshape: Option<&mut dyn FnMut(&mut ClassDecl)>,
+    ) -> ExtensionBuilder {
+        let constants = natives.constants.iter().map(NativeClassConst::declaration);
+        let mut methods: Vec<(MethodDecl, Entry)> = natives
+            .methods
+            .iter()
+            .map(NativeMethod::declaration)
+            .collect();
+        let Some(header) = natives.header else {
+            let builder = self.class_constants(natives.name, constants.collect());
             return if methods.is_empty() {
                 builder
             } else {
-                builder.trampolines(C::NAME, methods)
+                builder.trampolines(natives.name, methods)
             };
         };
         let mut class = header.declaration();
         class.constants.extend(constants);
-        (class.properties).extend(C::PROPERTIES.iter().map(NativeProperty::declaration));
-        let seen = methods.iter().map(|(method, _)| method.clone()).collect();
-        let header_methods = std::mem::replace(&mut class.methods, seen);
-        reshape(&mut class);
-        let reshaped = std::mem::replace(&mut class.methods, header_methods);
-        for ((method, _), reshaped) in methods.iter_mut().zip(reshaped) {
-            *method = reshaped;
+        (class.properties).extend(natives.properties.iter().map(NativeProperty::declaration));
+        if let Some(reshape) = reshape {
+            let seen = methods.iter().map(|(method, _)| method.clone()).collect();
+            let header_methods = std::mem::replace(&mut class.methods, seen);
+            reshape(&mut class);
+            let reshaped = std::mem::replace(&mut class.methods, header_methods);
+            for ((method, _), reshaped) in methods.iter_mut().zip(reshaped) {
+                *method = reshaped;
+            }
         }
         class.properties = class
             .properties
