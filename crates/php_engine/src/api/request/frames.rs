@@ -1181,11 +1181,23 @@ impl Request {
         let Some(primed) = cached.primed_from() else {
             return cached;
         };
-        let same = primed.function.is_some()
+        if self.reads_back(state, primed) {
+            cached
+        } else {
+            exec::Cached::Unprimed
+        }
+    }
+
+    /// Whether `state` reads back a slot written from `primed`: a frame
+    /// of the function that wrote it, no closure's, or one of the scope
+    /// it was written from.
+    #[inline(always)] // part of every scoped slot's hit path
+    fn reads_back(&self, state: exec::FrameAt<'_>, primed: exec::PrimedFrom) -> bool {
+        let header = state.header();
+        primed.function.is_some()
             && header.closure().is_none()
             && header.function == primed.function
-            || primed.scope == self.scope_of(state);
-        if same { cached } else { exec::Cached::Unprimed }
+            || primed.scope == self.scope_of(state)
     }
 
     /// `CACHE_PTR(num, ptr)` for a slot whose answer the access rule
@@ -1219,25 +1231,44 @@ impl Request {
     /// `CACHED_PTR(num) == ce ? CACHED_PTR(num + sizeof(void *)) : NULL`
     /// for a method call's pair (`Z/Zend/zend_vm_def.h:3671`, `:3779`):
     /// the callee [`exec::Cached::ClassAndCallee`] at `slot` holds, with
-    /// whether it takes `$this`, where it holds `class` and `frame`
-    /// reads it back ([`Request::cached_in_scope`]). None otherwise,
-    /// which is the pass that looks the method up.
-    #[inline]
+    /// whether it takes `$this`, where it holds `class`, or any class
+    /// where `class` is none, which an `INIT_STATIC_METHOD_CALL` naming
+    /// its class by a constant passes, and `frame` reads it back
+    /// ([`Request::cached_in_scope`]); and the push the slot after it
+    /// keeps for that callee, php's `fbc` slot. Both are read in place.
+    /// None otherwise, which is the pass that looks the method up.
+    #[inline(always)] // the hit path of both method INITs, which an outlined call costs a prologue
     pub(crate) fn cached_callee(
         &self,
         frame: FrameRef,
         slot: CacheSlot,
-        class: crate::api::values::ClassId,
-    ) -> Option<(Function, bool)> {
-        match self.cached_in_scope(frame, slot) {
-            exec::Cached::ClassAndCallee {
-                class: held,
-                function,
-                instance,
-                ..
-            } if held == class => Some((function, instance)),
-            _ => None,
+        class: Option<crate::api::values::ClassId>,
+    ) -> Option<exec::MethodCallee> {
+        let state = self.frame_at(frame)?;
+        let cache = self.map.get(state.header().runtime_cache())?;
+        let &exec::Cached::ClassAndCallee {
+            class: held,
+            primed,
+            function,
+            instance,
+            ..
+        } = cache.slot(slot)?
+        else {
+            return None;
+        };
+        if class.is_some_and(|class| class != held) || !self.reads_back(state, primed) {
+            return None;
         }
+        let push = match cache.slot(exec::callee_slot(slot)) {
+            Some(&exec::Cached::Call(call)) if call.function == function => Some(call),
+            _ => None,
+        };
+        Some(exec::MethodCallee {
+            class: held,
+            function,
+            instance,
+            push,
+        })
     }
 
     /// `CACHE_POLYMORPHIC_PTR(num, ce, fbc)` (`Z/Zend/zend_vm_def.h:3695`,

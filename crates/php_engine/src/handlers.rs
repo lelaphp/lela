@@ -5955,6 +5955,15 @@ pub(crate) fn init_static_method_call<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let slot = CacheSlot(op.out);
+    // Both named by constants: the pair answers with the class it holds,
+    // the one the name resolved to when it was written, and the push
+    // beside it ([`Request::cached_callee`]).
+    if op.op1_type == OperandKind::Const
+        && op.op2_type == OperandKind::Const
+        && let Some(callee) = req.cached_callee(frame, slot, None)
+    {
+        return static_call_frame(req, frame, op, callee);
+    }
     // The slot holds the class php resolved off a constant pair; a class
     // reference of the scope, or one a `FETCH_CLASS` left, is resolved on
     // every pass, since `static` and a computed name differ between them.
@@ -5983,20 +5992,15 @@ pub(crate) fn init_static_method_call<T: Tier>(
             class
         }
     };
-    // The pair answers where it holds this pass's class and was written
-    // from this frame's scope ([`Request::cached_callee`]): for a constant
-    // class, where the slot was found holding a pair; for any other,
-    // whichever pair it holds, php's `CACHED_PTR(opline->result.num) == ce`.
-    // One read of the pair, so the read stays inline in the handler.
-    let pair_read = op.op2_type == OperandKind::Const
-        && (op.op1_type != OperandKind::Const || matches!(primed, Cached::ClassAndCallee { .. }));
-    let cached_callee = if pair_read {
-        req.cached_callee(frame, slot, class)
-    } else {
-        None
-    };
-    if let Some((function, instance)) = cached_callee {
-        return static_call_frame(req, frame, op, class, (function, instance));
+    // The pair answers a class resolved on every pass where it holds
+    // this pass's class and was written from this frame's scope
+    // ([`Request::cached_callee`]), php's `CACHED_PTR(opline->result.num)
+    // == ce`; a constant class's pair was asked above.
+    if op.op2_type == OperandKind::Const
+        && op.op1_type != OperandKind::Const
+        && let Some(callee) = req.cached_callee(frame, slot, Some(class))
+    {
+        return static_call_frame(req, frame, op, callee);
     }
     let mut uncached = false;
     // Whether the callee takes `$this`, where the lookup read it.
@@ -6060,10 +6064,16 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // `ZEND_ACC_NEVER_CACHE` and one a trait declared, whose deprecation
     // is raised on every pass.
     let instance = looked_up.unwrap_or_else(|| req.takes_this(function));
-    if op.op2_type == OperandKind::Const && !uncached {
+    let writes = op.op2_type == OperandKind::Const && !uncached;
+    if writes {
         req.prime_callee(frame, slot, class, (function, instance));
     }
-    static_call_frame(req, frame, op, class, (function, instance))
+    let method = exec::MethodCallee::found(class, function, instance);
+    let edge = static_call_frame(req, frame, op, method);
+    if writes && edge.is_ok() {
+        prime_push(req, frame, op);
+    }
+    edge
 }
 
 /// `zend_std_get_static_method` (`Z/Zend/zend_object_handlers.c:2040`)
@@ -6154,7 +6164,8 @@ fn static_call_named(
     let found = static_method(req, class, &method.lowered(), &method.written, this);
     let edge = match found {
         Ok(callee) => {
-            static_call_frame(req, frame, op, class, (callee.function, callee.takes_this))
+            let callee = exec::MethodCallee::found(class, callee.function, callee.takes_this);
+            static_call_frame(req, frame, op, callee)
         }
         Err(thrown) => threw(req, frame, &thrown),
     };
@@ -6166,16 +6177,23 @@ fn static_call_named(
 /// callee, whether the slot answered or the tables did: php's
 /// `!(fbc->common.fn_flags & ZEND_ACC_STATIC)` rule, which is applied
 /// on every pass and not only the one that resolved, and the call frame
-/// over the class as its called scope. `callee` is the function with
+/// over the class as its called scope. `method` is the callee with
 /// whether it takes `$this`, which the cache slot holds beside it and
-/// a pass that looked it up read once ([`Request::takes_this`]).
+/// a pass that looked it up read once ([`Request::takes_this`]), and the
+/// push the slot after it keeps, which the frame is pushed with where
+/// there is one ([`push_method_call`]).
 fn static_call_frame(
     req: &mut Request,
     frame: FrameRef,
     op: &Opline,
-    class: crate::api::values::ClassId,
-    (function, instance): (Function, bool),
+    method: exec::MethodCallee,
 ) -> Edge {
+    let exec::MethodCallee {
+        class,
+        function,
+        instance,
+        ..
+    } = method;
     // `if (!(fbc->common.fn_flags & ZEND_ACC_STATIC))`: an instance
     // method takes the calling frame's `$this` where it is an instance
     // of the class, and is php's `Error` otherwise; a static one called
@@ -6204,10 +6222,14 @@ fn static_call_frame(
     } else {
         (None, class)
     };
-    let mut header = exec::Header::call(function, op.extended_value);
-    header.set_receiver(this);
-    header.set_called_scope(Some(called));
-    pushed(req, frame, header)
+    if method.push.is_none() {
+        let mut header = exec::Header::call(function, op.extended_value);
+        header.set_receiver(this);
+        header.set_called_scope(Some(called));
+        return pushed(req, frame, header);
+    }
+    push_method_call(req, method, op.extended_value, this, called)?;
+    Ok(advance(req, frame))
 }
 
 /// `ZEND_INIT_PARENT_PROPERTY_HOOK_CALL` (`Z/Zend/zend_vm_def.h:9897`),
@@ -6541,20 +6563,16 @@ fn inline_init_method_call(req: &mut Request, frame: FrameRef, op: &Opline) -> O
         Some(at) => PhpObject::of(req.slots_mut(frame).get(at)?.as_obj()?),
     };
     let class = object.class();
-    let (function, instance) = req.cached_callee(frame, CacheSlot(op.out), class)?;
-    if !instance {
+    let callee = req.cached_callee(frame, CacheSlot(op.out), Some(class))?;
+    if !callee.instance {
         return None;
     }
-    let (room, callee, sent) = req.call_room(function, op.extended_value);
-    let mut header = exec::Header::call(function, op.extended_value);
-    header.callee = callee;
-    header.info.join(sent);
-    header.set_called_scope(Some(class));
-    header.set_receiver(Some(match at {
+    let receiver = match at {
         None => exec::Receiver::lent(object),
         Some(_) => exec::Receiver::Owned(object),
-    }));
-    if let Err(fatal) = req.push_room(room, header) {
+    };
+    let pushed = push_method_call(req, callee, op.extended_value, Some(receiver), class);
+    if let Err(fatal) = pushed {
         return Some(Err(fatal));
     }
     match (op.op1_type, at) {
@@ -6569,6 +6587,66 @@ fn inline_init_method_call(req: &mut Request, frame: FrameRef, op: &Opline) -> O
         _ => {}
     }
     Some(Ok(advanced()))
+}
+
+/// The call to the callee a method call's slots answered with
+/// ([`Request::cached_callee`]), `count` arguments passed, over
+/// `receiver` and the called scope `called`, pushed: with the push the
+/// second slot keeps, read off no row and laid in place, as `INIT_FCALL`
+/// pushes off its slot ([`exec::Header::primed`]), and, where it keeps
+/// none, with the callee's room and record read off its row
+/// ([`Request::call_room`]).
+#[inline(always)] // the hit path of both method INITs
+fn push_method_call(
+    req: &mut Request,
+    method: exec::MethodCallee,
+    count: u32,
+    receiver: Option<exec::Receiver>,
+    called: crate::api::values::ClassId,
+) -> Result<FrameRef, Fatal> {
+    if let Some(call) = method.push {
+        return req.push_laid(call.room as usize, move || {
+            let mut header = exec::Header::primed(call, count);
+            header.set_receiver(receiver);
+            header.set_called_scope(Some(called));
+            header
+        });
+    }
+    let (room, record, sent) = req.call_room(method.function, count);
+    let mut header = exec::Header::call(method.function, count);
+    header.callee = record;
+    header.info.join(sent);
+    header.set_receiver(receiver);
+    header.set_called_scope(Some(called));
+    req.push_room(room, header)
+}
+
+/// `CACHE_PTR(opline->result.num + sizeof(void *), fbc)` as this engine
+/// keeps it: the push of the callee the pair at `op`'s slot holds,
+/// written into the slot after it once a pass has looked the callee up
+/// and pushed it, the push having laid the callee's runtime cache down,
+/// as `INIT_FCALL`'s slot is written ([`primed_call`]). Every pass after
+/// that reads both slots and pushes with no row read
+/// ([`push_method_call`]); a pass that finds the pair holding another
+/// callee writes the push again.
+///
+/// ```php
+/// class P { function m($a, $b = 2) { return $a + $b; } static function s($a) { return $a * 2; } }
+/// class Q extends P { function m($a, $b = 3) { return $a - $b; } }
+/// $t = 0;
+/// foreach ([new P, new P, new Q, new Q, new P] as $o) { $t = $t * 10 + $o->m(5) + P::s(1); }
+/// echo $t, "\n";
+/// ```
+/// ```expect
+/// 99449
+/// ```
+fn prime_push(req: &mut Request, frame: FrameRef, op: &Opline) {
+    let slot = CacheSlot(op.out);
+    let Some(&Cached::ClassAndCallee { function, .. }) = req.cached_in_place(frame, slot) else {
+        return;
+    };
+    let push = primed_call(req, function, op.extended_value);
+    req.prime(frame, exec::callee_slot(slot), push);
 }
 
 /// `INIT_METHOD_CALL` past its inline path: the name, the receiver and
@@ -6654,7 +6732,11 @@ fn method_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     let mut header = exec::Header::call(function, op.extended_value);
     header.set_receiver(this);
     header.set_called_scope(Some(called));
-    pushed(req, frame, header)
+    let edge = pushed(req, frame, header);
+    if op.op2_type == OperandKind::Const && edge.is_ok() {
+        prime_push(req, frame, op);
+    }
+    edge
 }
 
 /// The call's owner of `object`, the receiver `INIT_METHOD_CALL` read
@@ -6733,8 +6815,8 @@ fn method_of_call(
     let slot = CacheSlot(op.out);
     let class = object.class();
     let named = op.op2_type == OperandKind::Const;
-    if named && let Some((function, instance)) = req.cached_callee(frame, slot, class) {
-        return Ok((function, None, instance));
+    if named && let Some(callee) = req.cached_callee(frame, slot, Some(class)) {
+        return Ok((callee.function, None, callee.instance));
     }
     let (function, receiver) = method_on(
         req,

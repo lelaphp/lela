@@ -1974,6 +1974,40 @@ pub(crate) struct PrimedCall {
     pub(crate) opline: u32,
 }
 
+/// The callee a method `INIT` pushes a call to, over the class it was
+/// found on, whether it takes `$this`, and the push its slots keep for
+/// it: what the two slots answer on a pass whose class and scope they
+/// hold ([`Request::cached_callee`]), or a lookup found, which keeps no
+/// push, and none for a callee that is no user function or before a
+/// pass that looked the callee up has pushed it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MethodCallee {
+    pub(crate) class: ClassId,
+    pub(crate) function: Function,
+    pub(crate) instance: bool,
+    pub(crate) push: Option<PrimedCall>,
+}
+
+impl MethodCallee {
+    /// A callee a lookup found on `class`, which keeps no push.
+    pub(crate) fn found(class: ClassId, function: Function, instance: bool) -> Self {
+        MethodCallee {
+            class,
+            function,
+            instance,
+            push: None,
+        }
+    }
+}
+
+/// `num + sizeof(void *)`: the second of the two slots an
+/// `INIT_METHOD_CALL` or `INIT_STATIC_METHOD_CALL` over a constant name
+/// takes, php's `fbc` beside the class at `slot`, which keeps the push
+/// of the callee the pair holds ([`PrimedCall`]).
+pub(crate) fn callee_slot(slot: CacheSlot) -> CacheSlot {
+    CacheSlot(slot.0.saturating_add(SLOT_BYTES))
+}
+
 /// [`Cached::Unprimed`]'s tag, what a slot compiled code reads holds
 /// before the handler's first pass.
 pub(crate) const UNPRIMED: u32 = 0;
