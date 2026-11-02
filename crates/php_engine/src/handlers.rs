@@ -9001,6 +9001,22 @@ fn dynamic_bucket(
 /// [`Request::prime_property`] for a property opcode whose name is a
 /// constant, at cache slot `slot`: `zend_get_property_offset` given the
 /// opline's `cache_slot`, which a computed name's site passes as `NULL`.
+/// A slot that holds the object's class already answers with no lookup
+/// (`ce == CACHED_PTR_EX(cache_slot)`,
+/// `Z/Zend/zend_object_handlers.c:371`), so a fetch its inline path
+/// leaves to the kernel, a `__get`'s or an unset slot's, is not placed
+/// again on every pass:
+///
+/// ```php
+/// class M { public $d = 1; function __get($n) { return "get:$n"; } }
+/// class N extends M { public $e = 2; }
+/// $m = new M; unset($m->d); $n = new N;
+/// for ($i = 0; $i < 3; $i++) { foreach ([$m, $n, $m] as $o) { echo $o->d, ",", $o->missing, ";"; } }
+/// echo "\n";
+/// ```
+/// ```expect
+/// get:d,get:missing;1,get:missing;get:d,get:missing;get:d,get:missing;1,get:missing;get:d,get:missing;get:d,get:missing;1,get:missing;get:d,get:missing;
+/// ```
 fn prime_constant(
     req: &mut Request,
     frame: FrameRef,
@@ -9010,6 +9026,7 @@ fn prime_constant(
     name: &Value,
 ) {
     if op.op2_type == OperandKind::Const
+        && req.cached_property(frame, slot, object.class()).is_none()
         && let Some(bytes) = name.as_str_bytes()
     {
         req.prime_property(frame, slot, object, bytes);
