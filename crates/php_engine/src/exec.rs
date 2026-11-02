@@ -526,8 +526,9 @@ pub(crate) struct Header {
     /// reaches through `EX(func)->op_array.static_variables_ptr`, since
     /// the op array a closure serves is the closure's own copy. The
     /// `BIND_STATIC` prologue of the body reads its bound variables off
-    /// this and nothing else does; none for every other frame.
-    pub(crate) closure: Option<PhpObject>,
+    /// this and nothing else does; none for every other frame. Written
+    /// with [`CallInfo::CLOSURE`] beside it ([`Header::set_closure`]).
+    closure: Option<PhpObject>,
     /// The frame's identity, given the first time an extension keeps it
     /// ([`crate::api::request::FrameId`]) and never given again in the
     /// request; none until then. It moves with the header, so a
@@ -565,8 +566,9 @@ pub(crate) struct Header {
     /// a function called twice reads on its second call what its first
     /// primed.
     run_time_cache: CacheAt,
-    /// What the frame owns beyond words, where it owns anything.
-    pub(crate) annex: Option<AnnexId>,
+    /// What the frame owns beyond words, where it owns anything. Written
+    /// with [`CallInfo::ANNEX`] beside it ([`Header::set_annex`]).
+    annex: Option<AnnexId>,
 }
 
 // The header fills the room php's `zend_execute_data` leaves past the
@@ -693,11 +695,47 @@ impl Header {
         })
     }
 
-    /// `EX(This)` and `ZEND_CALL_RELEASE_THIS` written from `receiver`.
+    /// `EX(This)`, `ZEND_CALL_HAS_THIS` and `ZEND_CALL_RELEASE_THIS`
+    /// written from `receiver`.
     pub(crate) fn set_receiver(&mut self, receiver: Option<Receiver>) {
         self.this = receiver.map(Receiver::object);
+        self.info.set(CallInfo::HAS_THIS, receiver.is_some());
         self.info
             .set_release_this(matches!(receiver, Some(Receiver::Owned(_))));
+    }
+
+    /// The `Closure` object whose call pushed the frame.
+    pub(crate) fn closure(&self) -> Option<PhpObject> {
+        self.closure
+    }
+
+    /// The closure and `ZEND_CALL_CLOSURE` written from `closure`.
+    pub(crate) fn set_closure(&mut self, closure: Option<PhpObject>) {
+        self.closure = closure;
+        self.info.set(CallInfo::CLOSURE, closure.is_some());
+    }
+
+    /// The closure taken off the frame, which holds none from here.
+    pub(crate) fn take_closure(&mut self) -> Option<PhpObject> {
+        self.info.set(CallInfo::CLOSURE, false);
+        self.closure.take()
+    }
+
+    /// The frame's annex, where it has one.
+    pub(crate) fn annex(&self) -> Option<AnnexId> {
+        self.annex
+    }
+
+    /// The annex and [`CallInfo::ANNEX`] written from `annex`.
+    pub(crate) fn set_annex(&mut self, annex: Option<AnnexId>) {
+        self.annex = annex;
+        self.info.set(CallInfo::ANNEX, annex.is_some());
+    }
+
+    /// The annex taken off the frame, which names none from here.
+    pub(crate) fn take_annex(&mut self) -> Option<AnnexId> {
+        self.info.set(CallInfo::ANNEX, false);
+        self.annex.take()
     }
 
     /// `Z_OBJ(EX(This))`: the receiver, a view.
@@ -784,6 +822,18 @@ impl Header {
     /// The bit of the caller's half-word that says the call was served
     /// from outside the loop ([`Caller::Loop`]).
     pub(crate) const CALLER_LOOP: u32 = CallerAt::LOOP;
+}
+
+/// How a frame's leave goes, as its flags decide it ([`CallInfo::leave`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Leave {
+    /// A user function's frame holding nothing past its slots.
+    Plain,
+    /// A user function's frame holding a receiver or a closure, which
+    /// the leave gives up after the CVs.
+    Held,
+    /// Any other: a call, extra arguments, an annex.
+    Kernel,
 }
 
 /// `ZEND_CALL_INFO`'s flags as this engine's frame has them, one bit
@@ -885,6 +935,25 @@ impl CallInfo {
     /// debug assertions holds each laid entry to the function's row as
     /// `enter_call` takes it.
     const LAID_ENTRY: u32 = 1 << 25;
+    /// `ZEND_CALL_HAS_THIS`: the frame holds a receiver, owned or lent
+    /// ([`Header::set_receiver`]), which its leave gives up or lets go.
+    pub(crate) const HAS_THIS: u32 = 1 << 26;
+    /// `ZEND_CALL_CLOSURE`: the frame holds an owner of the `Closure` it
+    /// was made through ([`Header::set_closure`]).
+    const CLOSURE: u32 = 1 << 27;
+    /// The frame names an [`Annex`] ([`Header::set_annex`]): what php
+    /// spreads over `ZEND_CALL_CODE`, `ZEND_CALL_HAS_SYMBOL_TABLE`,
+    /// `ZEND_CALL_HAS_EXTRA_NAMED_PARAMS` and `ZEND_CALL_ALLOCATED`, the
+    /// arms of `zend_leave_helper` past its first. A file's frame always
+    /// has one, which holds its unit.
+    const ANNEX: u32 = 1 << 28;
+    /// The `INIT` found the callee a user function none of whose
+    /// parameters, the variadic's included, takes its argument by
+    /// reference ([`crate::api::request::FrameShape::sent`]): every
+    /// argument of the call goes by value, whatever its number, which
+    /// php's `SEND_VAL_EX_SIMPLE` and `SEND_VAR_EX_SIMPLE` read off
+    /// `quick_arg_flags` one argument at a time.
+    const BY_VALUE: u32 = 1 << 29;
 
     /// The flags as another process read them ([`crate::readable`]).
     pub(crate) fn of(bits: u32) -> CallInfo {
@@ -897,9 +966,28 @@ impl CallInfo {
     }
 
     /// The flags a frame [`crate::api::request::Request::leave_plainly`]
-    /// refuses to leave with no lookup: a call not made a user frame, and
-    /// arguments moved past the declared parameters.
-    pub(crate) const LEAVES_BY_KERNEL: u32 = Self::CALL | Self::EXTRA_ARGS;
+    /// refuses to leave with no lookup, the first test of
+    /// `zend_leave_helper` (`Z/Zend/zend_vm_def.h:2963`): a call not made
+    /// a user frame, arguments moved past the declared parameters, and an
+    /// annex, which a file's frame always has.
+    pub(crate) const LEAVES_BY_KERNEL: u32 = Self::CALL | Self::EXTRA_ARGS | Self::ANNEX;
+
+    /// The flags of what a plain leave gives up past the CVs, a receiver
+    /// or a closure, `ZEND_CALL_RELEASE_THIS` and `ZEND_CALL_CLOSURE`.
+    const HELD: u32 = Self::HAS_THIS | Self::CLOSURE;
+
+    /// How `zend_leave_helper` leaves a frame with these flags, read off
+    /// the one word ([`Leave`]).
+    #[inline(always)] // once per return, in the loop's RETURN arms
+    pub(crate) fn leave(self) -> Leave {
+        if self.0 & Self::LEAVES_BY_KERNEL != 0 {
+            Leave::Kernel
+        } else if self.0 & Self::HELD != 0 {
+            Leave::Held
+        } else {
+            Leave::Plain
+        }
+    }
 
     pub(crate) fn top_code(self) -> bool {
         self.has(Self::TOP_CODE)
@@ -1022,6 +1110,23 @@ impl CallInfo {
     pub(crate) fn sends_by_value(self, number: u32) -> bool {
         let at = number.wrapping_sub(1);
         at < Self::QUICK && self.0 & 1 << (Self::BY_VALUE_AT + at) != 0
+    }
+
+    /// [`CallInfo::sent`] with [`CallInfo::BY_VALUE`] where `by_value`.
+    pub(crate) fn with_by_value(self, by_value: bool) -> CallInfo {
+        CallInfo(if by_value {
+            self.0 | Self::BY_VALUE
+        } else {
+            self.0
+        })
+    }
+
+    /// A call being built whose every argument goes by value
+    /// ([`CallInfo::BY_VALUE`]), one test of the word: a `SEND_*_EX` by
+    /// number writes its slot with no parameter read.
+    #[inline(always)] // once per `SEND_*_EX`, in the loop's arms
+    pub(crate) fn sends_simply(self) -> bool {
+        self.0 & (Self::BUILDING | Self::BY_VALUE) == Self::BUILDING | Self::BY_VALUE
     }
 
     /// [`CallInfo::sent`] with [`CallInfo::LAID_ENTRY`] where `laid`.

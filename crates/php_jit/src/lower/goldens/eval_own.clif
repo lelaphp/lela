@@ -130,18 +130,18 @@ function u0:0(i64, i64) -> i32 tail {
 @0001                               store notrap aligned v82, v59+68
 @0001                               v83 = load.i64 notrap aligned v29+80
 @0001                               store notrap aligned v83, v59+16
-@0001                               v84 = load.i32 notrap aligned v83
-@0001                               v85 = iconst.i32 0x7fff_ffff
-@0001                               v86 = band v84, v85  ; v85 = 0x7fff_ffff
-@0001                               v87 = iconst.i32 0x7fff_ffff
-@0001                               v88 = icmp ne v86, v87  ; v87 = 0x7fff_ffff
-@0001                               v89 = uextend.i32 v88
-@0001                               v90 = iadd v84, v89
-@0001                               store notrap aligned v90, v83
-@0001                               v91 = load.i32 notrap aligned v59+44
-@0001                               v92 = iconst.i32 1
-@0001                               v93 = bor v91, v92  ; v92 = 1
-@0001                               store notrap aligned v93, v59+44
+@0001                               v84 = load.i32 notrap aligned v59+44
+@0001                               v85 = iconst.i32 0x0400_0001
+@0001                               v86 = bor v84, v85  ; v85 = 0x0400_0001
+@0001                               store notrap aligned v86, v59+44
+@0001                               v87 = load.i32 notrap aligned v83
+@0001                               v88 = iconst.i32 0x7fff_ffff
+@0001                               v89 = band v87, v88  ; v88 = 0x7fff_ffff
+@0001                               v90 = iconst.i32 0x7fff_ffff
+@0001                               v91 = icmp ne v89, v90  ; v90 = 0x7fff_ffff
+@0001                               v92 = uextend.i32 v91
+@0001                               v93 = iadd v87, v92
+@0001                               store notrap aligned v93, v83
 @0001                               store.i64 notrap aligned v59, v2+104
 @0001                               v94 = load.i64 notrap aligned v2+72
 @0001                               v95 = iconst.i64 32

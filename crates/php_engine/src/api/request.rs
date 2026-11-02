@@ -828,8 +828,9 @@ pub(crate) struct FrameShape {
     /// What the `INIT` of a call to the function writes into the call's
     /// flags: php's `quick_arg_flags`, which of the first twelve
     /// arguments it takes by value, for the `SEND_*_EX` oplines to test
-    /// with no lookup ([`exec::CallInfo::sends_by_value`]); and whether
-    /// its activation is plain, no `#[\Deprecated]` or `#[\NoDiscard]`
+    /// with no lookup ([`exec::CallInfo::sends_by_value`]), and whether
+    /// it takes every one by value ([`exec::CallInfo::sends_simply`]);
+    /// and whether its activation is plain, no `#[\Deprecated]` or `#[\NoDiscard]`
     /// to raise ([`exec::CallInfo::plain_entry`]).
     pub(crate) sent: exec::CallInfo,
 }
@@ -850,6 +851,7 @@ impl FrameShape {
         observed: bool,
     ) -> FrameShape {
         let declared = decl.parameters.iter().filter(|p| !p.variadic).count();
+        let by_ref = decl.parameters.iter().any(|p| p.by_ref);
         FrameShape {
             parameters: u32::try_from(declared).unwrap_or(u32::MAX),
             typed: decl.parameters.iter().any(|p| p.ty.is_some()),
@@ -861,14 +863,15 @@ impl FrameShape {
                 exec::CacheAt::of(code.runtime_cache)
             }),
             cache_size: code.map_or_else(exec::CacheSize::default, exec::CacheSize::of),
-            by_ref: decl.parameters.iter().any(|p| p.by_ref),
+            by_ref,
             sent: exec::CallInfo::sent(|number| {
                 sent_parameter(decl, number).is_some_and(|parameter| parameter.by_ref)
             })
             .with_plain_entry({
                 let flags = crate::attributes::Flags::of(&decl.attributes);
                 !flags.deprecated && !flags.no_discard
-            }),
+            })
+            .with_by_value(!by_ref),
         }
     }
 }

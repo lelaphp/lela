@@ -417,8 +417,8 @@ function u0:0(i64, i64) -> i32 tail {
 @000b                               v244 = icmp ne v242, v243  ; v243 = 0
 @000b                               v245 = load.i32 notrap aligned v165+76
 @000b                               v246 = load.i32 notrap aligned v165+44
-@000b                               v247 = iconst.i32 520
-@000b                               v248 = band v246, v247  ; v247 = 520
+@000b                               v247 = iconst.i32 0x1000_0208
+@000b                               v248 = band v246, v247  ; v247 = 0x1000_0208
 @000b                               v249 = bor v245, v248
 @000b                               v250 = iconst.i32 0
 @000b                               v251 = icmp ne v249, v250  ; v250 = 0

@@ -608,7 +608,7 @@ impl Request {
             exec::Header::call(function, u32::try_from(arguments.len()).unwrap_or(u32::MAX));
         header.set_receiver(receiver);
         header.set_called_scope(called_scope);
-        header.closure = closure;
+        header.set_closure(closure);
         header.info.set_serving();
         let call = match self.push_call(header) {
             Ok(call) => call,

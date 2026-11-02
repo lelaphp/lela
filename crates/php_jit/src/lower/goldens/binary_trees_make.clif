@@ -258,8 +258,8 @@ function u0:0(i64, i64) -> i32 tail {
 @0007                               v156 = icmp ne v154, v155  ; v155 = 0
 @0007                               v157 = load.i32 notrap aligned v128+76
 @0007                               v158 = load.i32 notrap aligned v128+44
-@0007                               v159 = iconst.i32 520
-@0007                               v160 = band v158, v159  ; v159 = 520
+@0007                               v159 = iconst.i32 0x1000_0208
+@0007                               v160 = band v158, v159  ; v159 = 0x1000_0208
 @0007                               v161 = bor v157, v160
 @0007                               v162 = iconst.i32 0
 @0007                               v163 = icmp ne v161, v162  ; v162 = 0
@@ -406,8 +406,8 @@ function u0:0(i64, i64) -> i32 tail {
 @000a                               v263 = icmp ne v261, v262  ; v262 = 0
 @000a                               v264 = load.i32 notrap aligned v239+76
 @000a                               v265 = load.i32 notrap aligned v239+44
-@000a                               v266 = iconst.i32 520
-@000a                               v267 = band v265, v266  ; v266 = 520
+@000a                               v266 = iconst.i32 0x1000_0208
+@000a                               v267 = band v265, v266  ; v266 = 0x1000_0208
 @000a                               v268 = bor v264, v267
 @000a                               v269 = iconst.i32 0
 @000a                               v270 = icmp ne v268, v269  ; v269 = 0
@@ -1006,8 +1006,8 @@ function u0:0(i64, i64) -> i32 tail {
 @001b                               v637 = icmp ne v635, v636  ; v636 = 0
 @001b                               v638 = load.i32 notrap aligned v612+76
 @001b                               v639 = load.i32 notrap aligned v612+44
-@001b                               v640 = iconst.i32 520
-@001b                               v641 = band v639, v640  ; v640 = 520
+@001b                               v640 = iconst.i32 0x1000_0208
+@001b                               v641 = band v639, v640  ; v640 = 0x1000_0208
 @001b                               v642 = bor v638, v641
 @001b                               v643 = iconst.i32 0
 @001b                               v644 = icmp ne v642, v643  ; v643 = 0
@@ -1347,8 +1347,8 @@ function u0:0(i64, i64) -> i32 tail {
 @0024                               v862 = icmp ne v860, v861  ; v861 = 0
 @0024                               v863 = load.i32 notrap aligned v837+76
 @0024                               v864 = load.i32 notrap aligned v837+44
-@0024                               v865 = iconst.i32 520
-@0024                               v866 = band v864, v865  ; v865 = 520
+@0024                               v865 = iconst.i32 0x1000_0208
+@0024                               v866 = band v864, v865  ; v865 = 0x1000_0208
 @0024                               v867 = bor v863, v866
 @0024                               v868 = iconst.i32 0
 @0024                               v869 = icmp ne v867, v868  ; v868 = 0
@@ -1494,8 +1494,8 @@ function u0:0(i64, i64) -> i32 tail {
 @0027                               v969 = icmp ne v967, v968  ; v968 = 0
 @0027                               v970 = load.i32 notrap aligned v945+76
 @0027                               v971 = load.i32 notrap aligned v945+44
-@0027                               v972 = iconst.i32 520
-@0027                               v973 = band v971, v972  ; v972 = 520
+@0027                               v972 = iconst.i32 0x1000_0208
+@0027                               v973 = band v971, v972  ; v972 = 0x1000_0208
 @0027                               v974 = bor v970, v973
 @0027                               v975 = iconst.i32 0
 @0027                               v976 = icmp ne v974, v975  ; v975 = 0
@@ -1651,8 +1651,8 @@ function u0:0(i64, i64) -> i32 tail {
 @002a                               v1083 = icmp ne v1081, v1082  ; v1082 = 0
 @002a                               v1084 = load.i32 notrap aligned v1059+76
 @002a                               v1085 = load.i32 notrap aligned v1059+44
-@002a                               v1086 = iconst.i32 520
-@002a                               v1087 = band v1085, v1086  ; v1086 = 520
+@002a                               v1086 = iconst.i32 0x1000_0208
+@002a                               v1087 = band v1085, v1086  ; v1086 = 0x1000_0208
 @002a                               v1088 = bor v1084, v1087
 @002a                               v1089 = iconst.i32 0
 @002a                               v1090 = icmp ne v1088, v1089  ; v1089 = 0
