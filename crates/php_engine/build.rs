@@ -836,7 +836,6 @@ const INLINE_PATHS: &[&str] = &[
     "pre_inc",
     "qm_assign",
     "sub",
-    "verify_return_type",
 ];
 
 /// The inline path the loop's arm for `variant` serves first, over the

@@ -4989,10 +4989,11 @@ pub(crate) fn verify_return_type<T: Tier>(
 /// [`verify_return_type`]'s first test, `ZEND_TYPE_CONTAINS_CODE`: the
 /// type of the value a `CV`, a `TMP` or a `VAR` holds where it stands,
 /// a reference followed, one bit tested in the op array's
-/// [`OpArray::return_mask`]. It reads the frame's slots and the op
-/// array alone, so the loop serves it over the slots it holds
-/// ([`inline_path::verify_return_type`]), and a function returning a
-/// scalar its declaration names is checked without the frame looked up:
+/// [`OpArray::return_mask`], over the frame's slots and the op array
+/// alone. The loop does not serve it over the slots it holds: as an
+/// inline path in its body it cut fib's cycles and raised nbody's,
+/// mandelbrot's and fannkuch's, which never serve it (#3978's closing
+/// comment). A function returning a scalar its declaration names:
 ///
 /// ```php
 /// function i(int $n): int { return $n < 2 ? $n : i($n - 1) + i($n - 2); }
@@ -5015,7 +5016,7 @@ pub(crate) fn verify_return_type<T: Tier>(
 /// int(3)
 /// int(4)
 /// ```
-#[inline(always)] // in the loop and in the handler
+#[inline(always)] // the handler's first test, as php's is
 fn return_mask_holds(slots: &mut [Zval], code: &OpArray, op: &Opline) -> bool {
     if op.op1_type == OperandKind::Const {
         return false;
@@ -27174,8 +27175,7 @@ pub(crate) mod inline_path {
     use super::branch::Branch;
     use super::{
         inline_arith, inline_assign, inline_assign_op, inline_branch, inline_compare,
-        inline_fetch_dim_r, inline_identical, inline_incdec, return_mask_holds,
-        write_owning_nothing,
+        inline_fetch_dim_r, inline_identical, inline_incdec, write_owning_nothing,
     };
     #[cfg(not(dispatch = "tailcall"))]
     use php_heap::FrameRef;
@@ -27382,18 +27382,6 @@ pub(crate) mod inline_path {
         }
         write_owning_nothing(slots, op, z)?;
         Some(Inline::ADVANCE)
-    }
-
-    /// `ZEND_VERIFY_RETURN_TYPE` of a value whose type the declared
-    /// return type names outright ([`super::return_mask_holds`]).
-    #[inline(always)] // in the loop and in the handler
-    pub(crate) fn verify_return_type(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        _: u32,
-    ) -> Option<Inline> {
-        return_mask_holds(slots, code, op).then_some(Inline::ADVANCE)
     }
 
     /// `ZEND_FETCH_DIM_R` of an element an array holds.
