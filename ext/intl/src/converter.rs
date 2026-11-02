@@ -1068,14 +1068,17 @@ struct Served<'a> {
 
 impl Served<'_> {
     /// `zend_call_known_fcc` with four arguments, the last `$error` by
-    /// reference: what the method answered, nothing where it threw or one
-    /// is pending, and ICU's status as the reference holds it after.
+    /// reference, and what the method answered appended by `append`:
+    /// nothing is appended where it threw or one is pending, and ICU's
+    /// status is what the reference holds after.
     ///
-    /// The arguments of a callback that threw are given up with what it
-    /// threw pending, as php's `zval_ptr_dtor(&zargs[3])` follows the call
-    /// (`Z/ext/intl/converter/converter.c:249`, `:326`), so a destructor
-    /// that throws over what the callback wrote into `&$error` chains it
-    /// as its `previous`:
+    /// The answer is appended first, and the answer and the arguments
+    /// are given up after it with what the callback threw, or the append
+    /// raised, pending, as php's `php_converter_to_u_callback` and
+    /// `php_converter_from_u_callback` free `retval` and then `zargs`
+    /// (`Z/ext/intl/converter/converter.c:235-249`, `:312-326`). So a
+    /// destructor that throws over what the callback wrote into `&$error`
+    /// chains what is pending as its `previous`. Where the callback threw:
     ///
     /// ```php
     /// ini_set('zend.exception_ignore_args', 1);
@@ -1099,18 +1102,49 @@ impl Served<'_> {
     /// destructed after to
     /// destructed after from
     /// ```
+    ///
+    /// Where the answer cannot be appended, its warning under
+    /// `intl.error_level` is raised before the destructor is served:
+    ///
+    /// ```php
+    /// ini_set('zend.exception_ignore_args', 1);
+    /// class D { function __destruct() { echo "dtor\n"; throw new Exception("destructed"); } }
+    /// class C extends UConverter {
+    ///   function toUCallback($reason, $source, $codeUnits, &$error): string|int|array|null {
+    ///     if ($reason > UConverter::REASON_IRREGULAR) return null;
+    ///     $error = new D; return -1;
+    ///   }
+    ///   function fromUCallback($reason, $source, $codePoint, &$error): string|int|array|null {
+    ///     if ($reason > UConverter::REASON_IRREGULAR) return null;
+    ///     $error = new D; return [1.5];
+    ///   }
+    /// }
+    /// set_error_handler(function ($n, $m) { if ($n == E_WARNING) echo "warning: $m\n"; return true; });
+    /// ini_set('intl.error_level', E_WARNING);
+    /// try { (new C('utf-8', 'ascii'))->convert("\x80"); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// try { (new C('ascii', 'utf-8'))->convert("\u{e9}"); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// warning: UConverter::convert(): Invalid codepoint U+ffffffffffffffff
+    /// dtor
+    /// destructed
+    /// warning: UConverter::convert(): fromUCallback() specified illegal type for substitution character
+    /// dtor
+    /// destructed
+    /// ```
     fn call(
         &mut self,
         method: &[u8],
         reason: Reason,
         middle: [Owner<Value>; 2],
         status: &mut Code,
-    ) -> Option<Owner<Value>> {
+        append: impl FnOnce(&mut Self, Value),
+    ) {
         if self.pending.is_set() {
             for v in middle {
                 v.give_up(self.req);
             }
-            return None;
+            return;
         }
         let req = &mut *self.req;
         let error = match PhpRef::new(req, Owner::int(i64::from(status.0))) {
@@ -1120,7 +1154,7 @@ impl Served<'_> {
                     v.give_up(req);
                 }
                 self.pending.keep(req, thrown);
-                return None;
+                return;
             }
         };
         let [one, two] = middle;
@@ -1129,29 +1163,34 @@ impl Served<'_> {
         if let ValueRef::Int(n) = error.get().as_ref() {
             *status = crate::code_of(n);
         }
-        let given = [one, two, error.into_value()];
+        let answer = match answer {
+            Ok(answer) => {
+                append(self, *answer);
+                Some(answer)
+            }
+            Err(thrown) => {
+                self.pending.keep(self.req, thrown);
+                None
+            }
+        };
+        let given = answer.into_iter().chain([one, two, error.into_value()]);
+        self.give_up_past(given);
+    }
+
+    /// `zval_ptr_dtor` over each value in order, with what is pending in
+    /// php's `EG(exception)` standing there while each is given up.
+    fn give_up_past(&mut self, given: impl IntoIterator<Item = Owner<Value>>) {
+        let req = &mut *self.req;
         let give_up = |req: &mut Request| {
             for value in given {
                 value.give_up(req);
             }
         };
-        match answer {
-            Ok(answer) => {
-                give_up(req);
-                Some(answer)
+        match self.pending.0.as_ref() {
+            Some(thrown) if thrown.exception().is_some() => {
+                while_pending(req, thrown, give_up);
             }
-            Err(thrown) => {
-                // `zval_ptr_dtor(&zargs[..])` after `zend_call_known_fcc`,
-                // with what the callback threw in `EG(exception)`.
-                match thrown.exception() {
-                    Some(_) => {
-                        while_pending(req, &thrown, give_up);
-                    }
-                    None => give_up(req),
-                }
-                self.pending.keep(req, thrown);
-                None
-            }
+            _ => give_up(req),
         }
     }
 
@@ -1273,10 +1312,15 @@ impl Callbacks for Served<'_> {
             source.give_up(self.req);
             return;
         };
-        if let Some(answer) = self.call(b"toUCallback", reason, [source, units], status) {
-            self.append_to_unicode(*answer, target);
-            answer.give_up(self.req);
-        }
+        self.call(
+            b"toUCallback",
+            reason,
+            [source, units],
+            status,
+            |served, answer| {
+                served.append_to_unicode(answer, target);
+            },
+        );
     }
 
     /// `php_converter_from_u_callback`: the code units as code points,
@@ -1306,10 +1350,15 @@ impl Callbacks for Served<'_> {
             }
         }
         let middle = [source.into_value(), Owner::int(i64::from(code_point))];
-        if let Some(answer) = self.call(b"fromUCallback", reason, middle, status) {
-            self.append_from_unicode(*answer, target);
-            answer.give_up(self.req);
-        }
+        self.call(
+            b"fromUCallback",
+            reason,
+            middle,
+            status,
+            |served, answer| {
+                served.append_from_unicode(answer, target);
+            },
+        );
     }
 }
 
