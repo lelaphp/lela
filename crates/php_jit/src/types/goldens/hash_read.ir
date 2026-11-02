@@ -11,7 +11,7 @@ entry
   guard #4 long -> exit 2
   guard #0 long -> exit 3
   guard #2 long -> exit 4
-loop at 0, loop, interrupt exit 19
+loop at 0, loop, interrupt exit 18
   #1 f0.CV2 [long] reg = phi(#0, #12)
   #3 f0.CV4 [long] reg = phi(#2, #13)
 0013 f0 IS_SMALLER #3, #4 fused inline
@@ -39,7 +39,6 @@ loop at 0, loop, interrupt exit 19
   checks #12 long -> exit 17
 0012 f0 PRE_INC #3 inline
   -> #13 f0.CV4 [long] reg
-  checks #13 long -> exit 18
 end: back to 0
 exit 0: f0 0013 plain
 exit 1: f0 0013 plain f0.CV0:array packed guard
@@ -59,5 +58,4 @@ exit 14: f0 0010 plain f0.CV2=#1 f0.CV4=#3 f0.T5=#9 f0.T6=copied #10 f0.CV0:arra
 exit 15: f0 0010 plain f0.CV2=#1 f0.CV4=#3 f0.T5=#9 f0.T6=copied #10 through a reference f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T5:long
 exit 16: f0 0010 plain f0.CV2=#1 f0.CV4=#3 f0.T5=#9 f0.T6=#10 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T5:long f0.T6:long
 exit 17: f0 0011 plain f0.CV2=#1 f0.CV4=#3 f0.T7=#11 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T7:long
-exit 18: f0 0013 plain f0.CV2=#12 f0.CV4=overflowed up f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:double
-exit 19: f0 0013 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long to vm
+exit 18: f0 0013 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long to vm

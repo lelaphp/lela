@@ -10,7 +10,7 @@ entry
   guard #4 long -> exit 2
   guard #0 long -> exit 3
   guard #2 long -> exit 4
-loop at 0, loop, interrupt exit 8
+loop at 0, loop, interrupt exit 7
   #1 f0.CV2 [long] reg = phi(#0, #7)
   #3 f0.CV3 [long] reg = phi(#2, #8)
 0011 f0 IS_SMALLER #3, #4 fused inline
@@ -26,7 +26,6 @@ loop at 0, loop, interrupt exit 8
   checks #7 long -> exit 6
 0010 f0 PRE_INC #3 inline
   -> #8 f0.CV3 [long] reg
-  checks #8 long -> exit 7
 end: back to 0
 exit 0: f0 0011 plain to vm
 exit 1: f0 0011 plain
@@ -35,6 +34,5 @@ exit 3: f0 0011 plain f0.CV0:string f0.CV1:long
 exit 4: f0 0011 plain f0.CV0:string f0.CV1:long f0.CV2:long
 exit 5: f0 0013 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:string f0.CV1:long f0.CV2:long f0.CV3:long
 exit 6: f0 0009 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:string f0.CV1:long f0.CV2:long f0.CV3:long f0.T2:long
-exit 7: f0 0011 plain f0.CV2=#7 f0.CV3=overflowed up f0.CV0:string f0.CV1:long f0.CV2:long f0.CV3:double
-exit 8: f0 0011 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:string f0.CV1:long f0.CV2:long f0.CV3:long to vm
+exit 7: f0 0011 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:string f0.CV1:long f0.CV2:long f0.CV3:long to vm
 unwind 0: f0.CV2=#1 f0.CV3=#3

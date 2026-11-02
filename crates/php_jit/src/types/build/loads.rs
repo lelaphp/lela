@@ -288,7 +288,7 @@ impl Builder<'_> {
     /// ---- TRACE 3 stop (return)
     /// ---- TRACE 3 compiled
     /// ```
-    fn defines(&self, line: &Line) -> [bool; 3] {
+    pub(super) fn defines(&self, line: &Line) -> [bool; 3] {
         let Some(op) = self.opline_of(line) else {
             return [false; 3];
         };
@@ -373,7 +373,7 @@ impl Builder<'_> {
     }
 
     /// The opline a line serves.
-    fn opline_of(&self, line: &Line) -> Option<Opline> {
+    pub(super) fn opline_of(&self, line: &Line) -> Option<Opline> {
         let code = self.meta(line.frame).code;
         code.oplines.get(line.opline.0 as usize).copied()
     }

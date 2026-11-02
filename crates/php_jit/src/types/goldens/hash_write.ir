@@ -7,7 +7,7 @@ entry
   #6 f0.CV2 [string]
   guard #4 long -> exit 0
   guard #2 long -> exit 1
-loop at 0, loop, interrupt exit 4
+loop at 0, loop, interrupt exit 3
   #1 f0.CV1 [hash array] = phi(#0, #9)
   #3 f0.CV3 [long] reg = phi(#2, #10)
 0013 f0 IS_SMALLER #3, #4 fused inline
@@ -22,11 +22,9 @@ loop at 0, loop, interrupt exit 4
   -> #9 f0.CV1 [hash array]
 0012 f0 PRE_INC #3 inline
   -> #10 f0.CV3 [long] reg
-  checks #10 long -> exit 3
 end: back to 0
 exit 0: f0 0013 plain
 exit 1: f0 0013 plain f0.CV0:long f0.CV1:array f0.CV2:string
 exit 2: f0 0015 plain f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV2:string f0.CV3:long
-exit 3: f0 0013 plain f0.CV3=overflowed up f0.CV0:long f0.CV1:array f0.CV2:string f0.CV3:double
-exit 4: f0 0013 plain f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV2:string f0.CV3:long to vm
+exit 3: f0 0013 plain f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV2:string f0.CV3:long to vm
 unwind 0: f0.CV3=#3

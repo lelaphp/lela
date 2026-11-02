@@ -9,7 +9,7 @@ entry
   guard #6 long -> exit 1
   guard #2 long -> exit 2
   guard #4 long -> exit 3
-loop at 0, loop, interrupt exit 13
+loop at 0, loop, interrupt exit 12
   #1 f0.CV0 [object] = phi(#0, #15)
   #3 f0.CV2 [long] reg = phi(#2, #16)
   #5 f0.CV3 [long] reg = phi(#4, #17)
@@ -42,7 +42,6 @@ loop at 0, loop, interrupt exit 13
   checks #16 long -> exit 11
 0018 f0 PRE_INC #5 inline
   -> #17 f0.CV3 [long] reg
-  checks #17 long -> exit 12
 end: back to 0
 exit 0: f0 0019 plain
 exit 1: f0 0019 plain f0.CV0:object
@@ -56,6 +55,5 @@ exit 8: f0 0006 plain f0.CV2=#3 f0.CV3=#5 f0.T2=copied #7 through a reference f0
 exit 9: f0 0006 plain f0.CV2=#3 f0.CV3=#5 f0.T2=#7 f0.CV0:object f0.CV1:long f0.CV2:long f0.CV3:long f0.T2:long
 exit 10: f0 0017 plain f0.CV2=#8 f0.CV3=#5 f0.CV0:object f0.CV1:long f0.CV2:long f0.CV3:long
 exit 11: f0 0017 plain f0.CV2=#8 f0.CV3=#5 f0.CV0:object f0.CV1:long f0.CV2:long f0.CV3:long f0.T9:long
-exit 12: f0 0019 plain f0.CV2=#16 f0.CV3=overflowed up f0.CV0:object f0.CV1:long f0.CV2:long f0.CV3:double
-exit 13: f0 0019 plain f0.CV2=#3 f0.CV3=#5 f0.CV0:object f0.CV1:long f0.CV2:long f0.CV3:long to vm
+exit 12: f0 0019 plain f0.CV2=#3 f0.CV3=#5 f0.CV0:object f0.CV1:long f0.CV2:long f0.CV3:long to vm
 unwind 0: f0.CV2=#8 f0.CV3=#5

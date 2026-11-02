@@ -6,7 +6,7 @@ entry
   #4 f0.CV1 [long]
   guard #4 long -> exit 0
   guard #2 long -> exit 1
-loop at 0, loop, interrupt exit 6
+loop at 0, loop, interrupt exit 5
   #1 f0.CV0 [ref, any] = phi(#0, #7)
   #3 f0.CV2 [long] reg = phi(#2, #8)
 0010 f0 IS_SMALLER #3, #4 fused inline
@@ -21,13 +21,11 @@ loop at 0, loop, interrupt exit 6
   -> #7 f0.CV0 [ref, any]
 0009 f0 PRE_INC #3 inline
   -> #8 f0.CV2 [long] reg
-  checks #8 long -> exit 5
 end: back to 0
 exit 0: f0 0010 plain
 exit 1: f0 0010 plain f0.CV1:long
 exit 2: f0 0012 plain f0.CV2=#3 f0.CV1:long f0.CV2:long
 exit 3: f0 0004 plain f0.CV2=#3 f0.CV1:long f0.CV2:long
 exit 4: f0 0007 plain f0.CV2=#3 f0.T2=#6 f0.CV1:long f0.CV2:long f0.T2:long
-exit 5: f0 0010 plain f0.CV2=overflowed up f0.CV1:long f0.CV2:double
-exit 6: f0 0010 plain f0.CV2=#3 f0.CV1:long f0.CV2:long to vm
+exit 5: f0 0010 plain f0.CV2=#3 f0.CV1:long f0.CV2:long to vm
 unwind 0: f0.CV2=#3
