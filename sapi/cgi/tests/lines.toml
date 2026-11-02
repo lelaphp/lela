@@ -610,3 +610,18 @@ env = { SCRIPT_FILENAME = "{dir}/b.php" }
 [[line.then]]
 args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/c.php" }
+
+# A class's methods' table of such a program, laid at its first method
+# (#3838): `zend_initialize_class_data` lays no table's data, and
+# `zend_begin_method_decl` lays `ce->function_table` as it adds the first
+# method's row, so a hook written above the method compiles, its
+# `pass_two` among it, without the table standing. The second program
+# writes the method first, whose table stands under the hook.
+[[line]]
+name = "an-uncached-class-lays-its-methods-table-at-its-first-method"
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/a.php" }
+files = { "a.php" = "<?php class C { public $p { set { } } function m() {} } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "b.php" = "<?php class C { function m() {} public $p { set { } } } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/b.php" }

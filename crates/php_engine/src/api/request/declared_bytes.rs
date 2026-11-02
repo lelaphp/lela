@@ -1482,8 +1482,13 @@ impl AstCopy {
 /// 648
 /// 1600
 /// ```
-fn class(req: &mut Request, class: &ClassDecl) -> Result<ClassBlocks, Thrown> {
-    ClassBlocks::laid(req, |req, blocks| lay_class(req, blocks, class))
+///
+/// The rows of the `bodies` methods with a body are left to the walk,
+/// which lays each as its method begins ([`Walk::method`]).
+fn class(req: &mut Request, class: &ClassDecl, bodies: usize) -> Result<ClassBlocks, Thrown> {
+    let mut compiled = Compiled::of(class);
+    compiled.written.methods = compiled.written.methods.saturating_sub(bodies);
+    ClassBlocks::laid(req, |req, blocks| lay_class(req, blocks, class, compiled))
 }
 
 /// `zend_lazy_class_load`'s copy of a class of a file the cache keeps,
@@ -1589,8 +1594,13 @@ fn lay_tables(
 /// ```expect regime=jit-off
 /// 936
 /// ```
-fn lay_class(req: &mut Request, blocks: &mut ClassBlocks, class: &ClassDecl) -> Result<(), Thrown> {
-    lay_tables(req, blocks, Compiled::of(class))?;
+fn lay_class(
+    req: &mut Request,
+    blocks: &mut ClassBlocks,
+    class: &ClassDecl,
+    compiled: Compiled,
+) -> Result<(), Thrown> {
+    lay_tables(req, blocks, compiled)?;
     // `ce->attributes`, and each property's and constant's own.
     attributes(req, &mut blocks.emalloced, class.attributes.iter(), false)?;
     let properties = class
@@ -2580,14 +2590,36 @@ impl Walk<'_> {
         if !matches!(self.laid.classes.get(at), Some(None)) {
             return Ok(());
         }
-        let blocks = class(req, decl)?;
+        let bodies = self.unit.methods.iter().filter(|m| m.class as usize == at);
+        let blocks = class(req, decl, bodies.count())?;
         if let Some(slot) = self.laid.classes.get_mut(at) {
             *slot = Some(blocks);
         }
         Ok(())
     }
 
-    /// The method at `at` of the unit's methods.
+    /// The method at `at` of the unit's methods, and its row of its
+    /// class's methods' table, which `zend_begin_method_decl` adds as the
+    /// method begins (`Z/Zend/zend_compile.c:8318`): php lays the table
+    /// at the first method, not with the class
+    /// (`zend_initialize_class_data` lays no table's data), so a hook
+    /// written before it compiles without it. A hooked property before a
+    /// method, then after it:
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3838-' . getmypid() . '.php';
+    /// foreach (['class C { public $p { set { } } function m() {} } ', 'class C { function m() {} public $p { set { } } } '] as $code) {
+    ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
+    ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
+    ///     [$usage, $peak] = explode(' ', trim($fresh));
+    ///     echo $peak - $usage, "\n";
+    /// }
+    /// unlink($f);
+    /// ```
+    /// ```expect process
+    /// 37392
+    /// 37472
+    /// ```
     fn method(
         &mut self,
         req: &mut Request,
@@ -2598,6 +2630,10 @@ impl Walk<'_> {
         let Some(method) = unit.methods.get(at) else {
             return Ok(());
         };
+        self.class(req, method.class as usize)?;
+        if let Some(Some(class)) = self.laid.classes.get(method.class as usize) {
+            add_rows(req, class.table(Table::Methods), 1)?;
+        }
         let declared = (unit.classes.get(method.class as usize))
             .and_then(|class| class.methods.get(method.method as usize))
             .map(|decl| (&decl.function, true));
