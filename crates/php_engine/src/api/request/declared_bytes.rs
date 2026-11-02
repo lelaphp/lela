@@ -2901,7 +2901,7 @@ fn begun(
     stood: Option<(&mut Growing, Grown)>,
     growing: &mut Growing,
 ) -> Result<(), Thrown> {
-    let parameters = declared.map_or(&[][..], |(decl, _)| decl.parameters.as_slice());
+    let parameters = declared.map_or(&[][..], |(decl, _)| &decl.parameters[..]);
     let mut uses = Blocks::default();
     if code.implicit_uses > 0 {
         let size = u32::try_from(parameters.len()).unwrap_or(u32::MAX);

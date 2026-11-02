@@ -1321,7 +1321,9 @@ impl ExtensionBuilder {
             };
         };
         let mut class = header.declaration();
+        class.constants.reserve_exact(natives.constants.len());
         class.constants.extend(constants);
+        (class.properties).reserve_exact(natives.properties.len());
         (class.properties).extend(natives.properties.iter().map(NativeProperty::declaration));
         if let Some(reshape) = reshape {
             let seen = methods.iter().map(|(method, _)| method.clone()).collect();

@@ -1241,7 +1241,7 @@ const INVOKE: &[u8] = b"__invoke";
 /// reflector and a diagnostic read.
 pub(crate) fn trampolines() -> Vec<(Name, MethodDecl, Entry)> {
     let invoke = FunctionDecl {
-        parameters: vec![variadic(b"args", Some(Type::Mixed))],
+        parameters: vec![variadic(b"args", Some(Type::Mixed))].into(),
         return_type: Some(Type::Mixed),
         ..native_function(INVOKE)
     };

@@ -156,7 +156,7 @@ impl CallTrampoline {
         // characters".
         let name = name.split(|byte| *byte == 0).next().unwrap_or_default();
         let function = FunctionDecl {
-            parameters: vec![variadic(b"arguments", Some(Type::Mixed))],
+            parameters: vec![variadic(b"arguments", Some(Type::Mixed))].into(),
             returns_by_ref: of.function.returns_by_ref,
             attributes: of.function.attributes.clone(),
             ..native_function(name)
