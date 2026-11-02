@@ -1730,7 +1730,8 @@ pub(crate) enum Cached {
     #[default]
     Unprimed = UNPRIMED,
     /// The constant a `FETCH_CONSTANT` found on its first pass, where it
-    /// is not deprecated (`zend_quick_get_constant`'s `CACHE_PTR`).
+    /// is not deprecated, or a `DEFINED` found, deprecated or not
+    /// (`zend_quick_get_constant`'s `CACHE_PTR`).
     Constant(crate::api::request::ConstantAt),
     /// The callee an `INIT_FCALL`, `INIT_FCALL_BY_NAME` or
     /// `INIT_NS_FCALL_BY_NAME` resolved on its first pass, where it is
@@ -1832,6 +1833,11 @@ pub(crate) enum Cached {
     /// `ZEND_JMP_FL_HIT`: the table has not the name in the namespace,
     /// so the jump lands on the frameless call over the global one.
     Hit,
+    /// What a `DEFINED` keeps for a name no constant answered, the count
+    /// of the table it was looked up in
+    /// (`ENCODE_SPECIAL_CACHE_NUM(zend_hash_num_elements(EG(zend_constants)))`),
+    /// which answers `false` while the table holds as many.
+    Undefined(crate::api::request::ConstantCount),
 }
 
 /// A call to a user function as an `INIT_*`'s slot keeps it, read off
@@ -2000,7 +2006,8 @@ impl Cached {
             | Cached::Class(_)
             | Cached::Property { .. }
             | Cached::Miss
-            | Cached::Hit => None,
+            | Cached::Hit
+            | Cached::Undefined(_) => None,
         }
     }
 }
