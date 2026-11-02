@@ -414,6 +414,7 @@ Strings::known
 Strings::naming_classes
 Strings::new
 Strings::publish
+Strings::with_capacity
 Suspensions
 Switched
 TableRow
