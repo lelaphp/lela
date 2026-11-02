@@ -23963,23 +23963,35 @@ pub(crate) fn defined<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let slot = CacheSlot(op.extended_value);
-    let computed = unary_kernel(req, frame, code, op, |req, value| {
-        Ok(Value::bool(defined_through(req, frame, slot, value)))
-    });
+    let computed = match defined_cached(req, frame, slot) {
+        Some(answer) => Ok(Value::bool(answer)),
+        None => unary_kernel(req, frame, code, op, |req, value| {
+            Ok(Value::bool(defined_looked_up(req, frame, slot, value)))
+        }),
+    };
     smart_branch::<T, branch::Peeked>(req, frame, code, op, computed)
 }
 
-/// [`defined`]'s answer for the name `name` holds: the slot's where it
-/// answers, and otherwise the lookup, `CACHE_PTR` of the constant found
+/// What [`defined`]'s cache slot answers, read before the name is, as
+/// php's handler reads `CACHED_PTR(opline->extended_value)` first
+/// (`Z/Zend/zend_vm_def.h:8869`): `true` for a constant that still
+/// stands, `false` for a count the table still holds, none otherwise.
+/// The name is a `CONST` operand, so a hit leaves nothing to free.
+#[inline]
+fn defined_cached(req: &Request, frame: FrameRef, slot: CacheSlot) -> Option<bool> {
+    match req.cached(frame, slot) {
+        Cached::Constant(at) if req.constant_at(at).is_some() => Some(true),
+        Cached::Undefined(count) if count == req.constant_count() => Some(false),
+        _ => None,
+    }
+}
+
+/// [`defined`] where its slot does not answer: the lookup of the name
+/// `name` holds, and `CACHE_PTR` of the constant found
 /// (`zend_quick_check_constant`) or of the table's count where none was
 /// (`Z/Zend/zend_vm_def.h:8879-8880`).
-#[inline]
-fn defined_through(req: &mut Request, frame: FrameRef, slot: CacheSlot, name: &Value) -> bool {
-    match req.cached(frame, slot) {
-        Cached::Constant(at) if req.constant_at(at).is_some() => return true,
-        Cached::Undefined(count) if count == req.constant_count() => return false,
-        _ => {}
-    }
+#[inline(never)]
+fn defined_looked_up(req: &mut Request, frame: FrameRef, slot: CacheSlot, name: &Value) -> bool {
     let name = name.as_str_bytes().unwrap_or_default();
     let primed = match req.constant_found(name) {
         Some((at, _, _)) => Cached::Constant(at),
