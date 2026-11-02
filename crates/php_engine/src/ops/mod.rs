@@ -3478,7 +3478,7 @@ pub(crate) fn is_smaller_or_equal(
 }
 
 /// `is_equal_function` (`Z/Zend/zend_operators.c:2522`): whether
-/// [`compare`] orders the two sides the same, which is what
+/// [`loose_equal`] finds the two sides equal, which is what
 /// `ZEND_IS_EQUAL` leaves and what `==` reads: `1 == "1"`, `"1e3" ==
 /// "1000"` and `null == false` through the same conversions `<` makes,
 /// and a non-numeric string against a number by the number's text
@@ -3499,7 +3499,105 @@ pub(crate) fn is_smaller_or_equal(
 /// bool(true)
 /// ```
 pub(crate) fn is_equal(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
-    Ok(Value::bool(compare(req, left, right)? == Ordering::Equal))
+    Ok(Value::bool(loose_equal(req, left, right)?))
+}
+
+/// `==` as `ZEND_IS_EQUAL`'s handler and `fast_equal_check_function`
+/// (`Z/Zend/zend_operators.h:930`) answer it: a pair no code of the
+/// program can answer read first ([`loose_equal_read`]), two strings by
+/// `zend_fast_equal_strings` among them, and every other pair
+/// [`compare`] finding the two sides equal. Two strings compare as
+/// numbers only where both open as one, so a string whose first byte
+/// is past `'9'` on either side is compared by its bytes alone, never
+/// read as a number; two numeric strings, written as integers, doubles
+/// or exponents, with leading whitespace or trailing, are equal where
+/// their numbers are, and a leading-numeric string is no number.
+///
+/// ```php
+/// $pairs = [["abc", "abc"], ["abc", "ABC"], ["1e3", "1000"], ["10", "1e1"], ["01", "1"], [" 1", "1"], ["1 ", "1"], ["1abc", "1"], ["1abc", "1abc"], ["", "0"], ["", ""], ["9.0", "9"], ["abc", "0"], ["0x1A", "26"], ["1e1000", "2e1000"], ["9223372036854775808", "9223372036854775809"], ["-0", "0"], [".5", "0.5"], ["z1", "z1"], ["INF", "1e1000"]];
+/// foreach ($pairs as [$a, $b]) {
+///     echo json_encode($a), " ", json_encode($b), ": ", var_export($a == $b, true), " ", var_export($a != $b, true), "\n";
+/// }
+/// switch ("1e1") { case "10": echo "case 10\n"; break; default: echo "default\n"; }
+/// ```
+/// ```expect
+/// "abc" "abc": true false
+/// "abc" "ABC": false true
+/// "1e3" "1000": true false
+/// "10" "1e1": true false
+/// "01" "1": true false
+/// " 1" "1": true false
+/// "1 " "1": true false
+/// "1abc" "1": false true
+/// "1abc" "1abc": true false
+/// "" "0": false true
+/// "" "": true false
+/// "9.0" "9": true false
+/// "abc" "0": false true
+/// "0x1A" "26": false true
+/// "1e1000" "2e1000": false true
+/// "9223372036854775808" "9223372036854775809": false true
+/// "-0" "0": true false
+/// ".5" "0.5": true false
+/// "z1" "z1": true false
+/// "INF" "1e1000": false true
+/// case 10
+/// ```
+pub(crate) fn loose_equal(req: &mut Request, left: &Value, right: &Value) -> Result<bool, Thrown> {
+    if let Some(equal) = loose_equal_read(req.ini().precision(), left, right) {
+        return Ok(equal);
+    }
+    Ok(compare(req, left, right)? == Ordering::Equal)
+}
+
+/// [`loose_equal`] over a pair no code of the program can answer, two
+/// scalars, read with nothing but the request's `precision`, which a
+/// double against a non-numeric string is printed at: two strings as
+/// `zend_fast_equal_strings` (`Z/Zend/zend_operators.h:919`) compares
+/// them, the same string, or either's first byte past `'9'` and then the
+/// bytes alone, or else `zendi_smart_streq`, which [`php_heap::compare`]'s
+/// numeric reading answers; any other two scalars as [`php_heap::compare`]
+/// orders them. `None` for an array, an object, a resource or a
+/// reference on either side, whose comparison is [`compare`]'s.
+///
+/// `in_array` reads each scalar element through it: a null, a bool, an
+/// int, a float and a string against each other, a float against a
+/// numeric string as numbers and against a non-numeric one by the
+/// float's text, a NAN equal to nothing.
+///
+/// ```php
+/// $h = [null, false, 0, 0.0, "", "0", "1.5", "abc", 1.5, true];
+/// foreach ([null, 0, "0", "", 1.5, "1.50", "abc", true, 0.1 + 0.2] as $n) echo implode(",", array_keys(array_filter($h, fn ($v) => in_array($n, [$v])))), "\n";
+/// ini_set('precision', '3'); var_dump(in_array(1.23456, ["1.23"]), in_array(INF, ["INF"]), in_array(NAN, ["NAN"]));
+/// ```
+/// ```expect
+/// 0,1,2,3,4
+/// 0,1,2,3,5
+/// 1,2,3,5
+/// 0,1,4
+/// 6,8,9
+/// 6,8,9
+/// 7,9
+/// 6,7,8,9
+/// 9
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// ```
+#[inline]
+pub(crate) fn loose_equal_read(precision: i32, left: &Value, right: &Value) -> Option<bool> {
+    Some(match (scalar(left)?, scalar(right)?) {
+        (Scalar::Str(a), Scalar::Str(b)) => {
+            if std::ptr::eq(a, b) {
+                true
+            } else if a.first() > Some(&b'9') || b.first() > Some(&b'9') {
+                a == b
+            } else {
+                php_heap::compare(Scalar::Str(a), Scalar::Str(b), precision) == Ordering::Equal
+            }
+        }
+        (a, b) => php_heap::compare(a, b, precision) == Ordering::Equal,
+    })
 }
 
 /// `is_not_equal_function` (`Z/Zend/zend_operators.c:2529`): the
@@ -3525,7 +3623,7 @@ pub(crate) fn is_not_equal(
     left: &Value,
     right: &Value,
 ) -> Result<Value, Thrown> {
-    Ok(Value::bool(compare(req, left, right)? != Ordering::Equal))
+    Ok(Value::bool(!loose_equal(req, left, right)?))
 }
 
 /// `compare_function` (`Z/Zend/zend_operators.c:2253`): [`compare`]'s
@@ -3609,6 +3707,28 @@ pub(crate) fn identical(req: &mut Request, left: &Value, right: &Value) -> Resul
         return identical_arrays(req, a, b);
     }
     Ok(identical_values(&left, &right))
+}
+
+/// [`identical`] past two arrays, a reference on either side followed:
+/// what it answers with no request, and `None` for two arrays, whose
+/// walk is [`identical`]'s. `in_array` under `$strict` reads each
+/// element that is not an array against a needle through it:
+///
+/// ```php
+/// $o = new stdClass; $f = fopen('php://memory', 'r'); $x = 1;
+/// $h = [null, false, 0, 0.0, "0", $o, $f, &$x, [1]];
+/// foreach ([null, false, 0, 0.0, "0", 1, new stdClass, $o, $f, [1]] as $n) echo json_encode(array_search($n, $h, true)), " ";
+/// echo "\n";
+/// ```
+/// ```expect
+/// 0 1 2 3 4 7 false 5 6 8
+/// ```
+pub(crate) fn identical_read(left: &Value, right: &Value) -> Option<bool> {
+    let (left, right) = (left.deref(), right.deref());
+    if left.as_array().is_some() && right.as_array().is_some() {
+        return None;
+    }
+    Some(identical_values(&left, &right))
 }
 
 /// [`identical`] past two arrays, which it never sees: a call of its

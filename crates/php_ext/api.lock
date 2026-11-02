@@ -436,12 +436,14 @@ coerce::float_format
 coerce::float_to_long
 coerce::gcvt
 coerce::identical
+coerce::identical_read
 coerce::int_to_string
 coerce::is_callable
 coerce::is_space
 coerce::is_type
 coerce::key_of
 coerce::loose_eq
+coerce::loose_eq_read
 coerce::numeric_string
 coerce::strict_types
 coerce::strtol
@@ -1551,6 +1553,7 @@ values::walk::Unwritten
 values::walk::detached
 values::walk::foreach
 values::walk::foreach_guarded
+values::walk::foreach_read
 values::walk::live
 values::walk::properties
 values::walk::rows
