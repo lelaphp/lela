@@ -156,7 +156,7 @@ impl Request {
     ) -> Option<R> {
         let object = match pending.cause(self) {
             Cause::Throwable(object) => *object,
-            Cause::Exit => return Some(step(self)),
+            Cause::Exit | Cause::Taken => return Some(step(self)),
             Cause::Fatal => return None,
         };
         if self.raised.is_some() || self.bailout {

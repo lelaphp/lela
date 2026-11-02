@@ -1495,7 +1495,7 @@ impl Request {
             Cause::Throwable(_) => {
                 crate::api::raising::fatal_while_pending(self, thrown, NOT_AN_ARRAY)
             }
-            Cause::Exit => crate::api::raising::fatal(self, NOT_AN_ARRAY),
+            Cause::Exit | Cause::Taken => crate::api::raising::fatal(self, NOT_AN_ARRAY),
         }
     }
 
