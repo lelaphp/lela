@@ -232,31 +232,31 @@ enum Phase {
 /// ```
 pub fn extension() -> Extension {
     let builder = ExtensionBuilder::default()
-        .constants(constants::declared())
-        .functions(vec![
-            session_name::declared(),
-            session_module_name::declared(),
-            session_save_path::declared(),
-            session_id::declared(),
-            session_create_id::declared(),
-            session_regenerate_id::declared(),
-            session_decode::declared(),
-            session_encode::declared(),
-            session_destroy::declared(),
-            session_unset::declared(),
-            session_gc::declared(),
-            session_get_cookie_params::declared(),
-            session_write_close::declared(),
-            session_abort::declared(),
-            session_reset::declared(),
-            session_status::declared(),
-            session_register_shutdown::declared(),
-            session_commit::declared(),
-            session_set_save_handler::declared(),
-            session_cache_limiter::declared(),
-            session_cache_expire::declared(),
-            session_set_cookie_params::declared(),
-            session_start::declared(),
+        .constants(constants::DECLARED)
+        .functions(&[
+            session_name::DECLARED,
+            session_module_name::DECLARED,
+            session_save_path::DECLARED,
+            session_id::DECLARED,
+            session_create_id::DECLARED,
+            session_regenerate_id::DECLARED,
+            session_decode::DECLARED,
+            session_encode::DECLARED,
+            session_destroy::DECLARED,
+            session_unset::DECLARED,
+            session_gc::DECLARED,
+            session_get_cookie_params::DECLARED,
+            session_write_close::DECLARED,
+            session_abort::DECLARED,
+            session_reset::DECLARED,
+            session_status::DECLARED,
+            session_register_shutdown::DECLARED,
+            session_commit::DECLARED,
+            session_set_save_handler::DECLARED,
+            session_cache_limiter::DECLARED,
+            session_cache_expire::DECLARED,
+            session_set_cookie_params::DECLARED,
+            session_start::DECLARED,
         ])
         .ini(ini::declared())
         .dependencies(vec![Dependency {

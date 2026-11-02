@@ -93,17 +93,21 @@ fn a_frameless_jump_primes_a_miss_once_and_falls_through_on_it_after() {
 /// arity zero, which no native of php's declares: what
 /// `FRAMELESS_ICALL_0` needs to be reached at all.
 fn with_a_nullary_frameless_native() -> Engine {
+    use crate::api::__private::NativeFunction;
     use crate::api::abi::ExtensionBuilder;
-    use php_unit::decl::FunctionDecl;
     fn seven(_: &mut Request) -> Result<Owner<Value>, Thrown> {
         Ok(Owner::int(7))
     }
-    let decl = FunctionDecl {
-        frameless: vec![0],
-        ..php_unit::decl::native_function(b"seven")
+    const SEVEN: NativeFunction = NativeFunction {
+        name: b"seven",
+        parameters: &[],
+        return_type: || None,
+        frameless: &[0],
+        attributes: &[],
+        entry: seven,
     };
     let extension = ExtensionBuilder::default()
-        .functions(vec![(decl, seven as crate::api::abi::Entry)])
+        .functions(&[SEVEN])
         .build("nullary");
     Engine::cli_builder().extensions(&[extension]).build()
 }

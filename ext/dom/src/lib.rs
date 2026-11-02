@@ -161,11 +161,12 @@ impl DOMException {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            dom_import_simplexml::declared(),
-            modern::import_simplexml::declared(),
+        .functions(&[
+            dom_import_simplexml::DECLARED,
+            modern::import_simplexml::DECLARED,
         ])
-        .constants([constants::declared(), modern_constants::declared()].concat())
+        .constants(constants::DECLARED)
+        .constants(modern_constants::DECLARED)
         .register(
             php_ext_libxml::register_export(b"DOMNode", export_node).with_node_object(libxml_half),
         )

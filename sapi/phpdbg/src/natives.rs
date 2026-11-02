@@ -56,20 +56,20 @@ mod constants {
 /// The extension, named `phpdbg`, its natives in the stub's order.
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            phpdbg_break_next::declared(),
-            phpdbg_break_file::declared(),
-            phpdbg_break_method::declared(),
-            phpdbg_break_function::declared(),
-            phpdbg_color::declared(),
-            phpdbg_prompt::declared(),
-            phpdbg_exec::declared(),
-            phpdbg_clear::declared(),
-            phpdbg_start_oplog::declared(),
-            phpdbg_end_oplog::declared(),
-            phpdbg_get_executable::declared(),
+        .functions(&[
+            phpdbg_break_next::DECLARED,
+            phpdbg_break_file::DECLARED,
+            phpdbg_break_method::DECLARED,
+            phpdbg_break_function::DECLARED,
+            phpdbg_color::DECLARED,
+            phpdbg_prompt::DECLARED,
+            phpdbg_exec::DECLARED,
+            phpdbg_clear::DECLARED,
+            phpdbg_start_oplog::DECLARED,
+            phpdbg_end_oplog::DECLARED,
+            phpdbg_get_executable::DECLARED,
         ])
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .fatal_logged(crate::debugger::fatal_logged)
         .compile_file(crate::list::compile_file)
         .build(crate::NAME)

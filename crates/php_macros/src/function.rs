@@ -151,7 +151,10 @@ pub(crate) fn unself(ty: &Type, class: Option<&Ident>) -> Tokens {
     class.map_or_else(|| quote!(#ty), |class| walk(quote!(#ty), class))
 }
 
-/// The parameters' declarations, `vec![..]` of `Parameter`s.
+/// The parameters' static entries, `&[..]` of `NativeParameter`s: each
+/// one's facts read off its Rust type's `FromArgument` consts and its
+/// declared type as that type's `declared`, shared by every native that
+/// names the type.
 pub(crate) fn declared_parameters(params: &[Param]) -> syn::Result<Tokens> {
     let root = root();
     let mut each = Vec::new();
@@ -159,33 +162,28 @@ pub(crate) fn declared_parameters(params: &[Param]) -> syn::Result<Tokens> {
         let name = bytes(&php_name(&param.ident));
         let ty = &param.ty;
         let default = param.default.as_ref().map_or_else(
-            || {
-                quote! {
-                    if <#ty as #root::abi::FromArgument>::PASSED {
-                        #root::decl::ParameterDefault::Unshown
-                    } else {
-                        #root::decl::ParameterDefault::None
-                    }
-                }
-            },
+            || quote!(None),
             |default| {
                 let expr = &default.expr;
-                quote!(#root::decl::ParameterDefault::Expr(#expr))
+                quote!(Some(|| #expr))
             },
         );
         let prefer_ref = param.keys.has("prefer_ref");
-        let attributes = expr::attributes(&param.keys)?;
-        each.push(quote! {{
-            let mut parameter = #root::__private::parameter(#name, <#ty as #root::abi::FromArgument>::declared());
-            parameter.by_ref = <#ty as #root::abi::FromArgument>::BY_REF;
-            parameter.prefer_ref = #prefer_ref;
-            parameter.variadic = <#ty as #root::abi::FromArgument>::VARIADIC;
-            parameter.default = #default;
-            parameter.attributes = vec![#(#attributes),*];
-            parameter
-        }});
+        let attributes = expr::built(&expr::attributes(&param.keys)?);
+        each.push(quote! {
+            #root::__private::NativeParameter {
+                name: #name,
+                ty: <#ty as #root::abi::FromArgument>::declared,
+                by_ref: <#ty as #root::abi::FromArgument>::BY_REF,
+                prefer_ref: #prefer_ref,
+                variadic: <#ty as #root::abi::FromArgument>::VARIADIC,
+                passed: <#ty as #root::abi::FromArgument>::PASSED,
+                default: #default,
+                attributes: #attributes,
+            }
+        });
     }
-    Ok(quote!(vec![#(#each),*]))
+    Ok(quote!(&[#(#each),*]))
 }
 
 /// The `const` assertions over a signature's types, each evaluated where
@@ -386,6 +384,7 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
         .into_iter()
         .map(|check| quote!(#(#cfg)* #check))
         .collect();
+    let attributes = expr::built(&attributes);
     // php registers an alias as a `ZEND_RAW_FENTRY` with no frameless
     // infos (`join`, `strchr`), so the native's arities are its own name's.
     let module = |module: &Ident, php: &str, frameless: &[u32]| {
@@ -396,16 +395,17 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
             pub(crate) mod #module {
                 #[allow(unused_imports)]
                 use super::*;
-                /// The declaration and its entry, what
-                /// `ExtensionBuilder::functions` takes.
-                pub(crate) fn declared() -> (#root::decl::FunctionDecl, #root::__private::Entry) {
-                    let mut declaration = #root::__private::native_function(#php);
-                    declaration.parameters = #parameters;
-                    declaration.return_type = <#output as #root::abi::IntoReturn>::declared();
-                    declaration.frameless = vec![#(#frameless),*];
-                    declaration.attributes = vec![#(#attributes),*];
-                    (declaration, entry as #root::__private::Entry)
-                }
+                /// The static entry, what `ExtensionBuilder::functions`
+                /// takes.
+                pub(crate) const DECLARED: #root::__private::NativeFunction =
+                    #root::__private::NativeFunction {
+                        name: #php,
+                        parameters: #parameters,
+                        return_type: <#output as #root::abi::IntoReturn>::declared,
+                        frameless: &[#(#frameless),*],
+                        attributes: #attributes,
+                        entry,
+                    };
                 fn entry(__request: &mut #root::request::Request) -> Result<#root::values::Owner<#root::values::Value>, #root::raising::Thrown> {
                     #prologue
                     #root::abi::IntoReturn::into_return(super::#ident(#request #(#arguments),*), __request)

@@ -363,6 +363,12 @@ pub(crate) fn attributes(keys: &Keys) -> syn::Result<Vec<Tokens>> {
     Ok(out)
 }
 
+/// The attributes as a static entry holds them, `&[..]` of the
+/// functions that build each.
+pub(crate) fn built(attributes: &[Tokens]) -> Tokens {
+    quote!(&[#(|| #attributes),*])
+}
+
 fn attribute(php: &str, arguments: &[Tokens]) -> Tokens {
     let root = root();
     let php = bytes(php);

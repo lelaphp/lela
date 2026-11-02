@@ -65,22 +65,22 @@ const DEFAULT_HANDLER: &[u8] = b"dba.default_handler";
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            natives::dba_popen::declared(),
-            natives::dba_open::declared(),
-            natives::dba_close::declared(),
-            natives::dba_exists::declared(),
-            natives::dba_fetch::declared(),
-            natives::dba_key_split::declared(),
-            natives::dba_firstkey::declared(),
-            natives::dba_nextkey::declared(),
-            natives::dba_delete::declared(),
-            natives::dba_insert::declared(),
-            natives::dba_replace::declared(),
-            natives::dba_optimize::declared(),
-            natives::dba_sync::declared(),
-            natives::dba_handlers::declared(),
-            natives::dba_list::declared(),
+        .functions(&[
+            natives::dba_popen::DECLARED,
+            natives::dba_open::DECLARED,
+            natives::dba_close::DECLARED,
+            natives::dba_exists::DECLARED,
+            natives::dba_fetch::DECLARED,
+            natives::dba_key_split::DECLARED,
+            natives::dba_firstkey::DECLARED,
+            natives::dba_nextkey::DECLARED,
+            natives::dba_delete::DECLARED,
+            natives::dba_insert::DECLARED,
+            natives::dba_replace::DECLARED,
+            natives::dba_optimize::DECLARED,
+            natives::dba_sync::DECLARED,
+            natives::dba_handlers::DECLARED,
+            natives::dba_list::DECLARED,
         ])
         .class::<Connection>()
         .request_state::<State>()

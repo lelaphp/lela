@@ -30,9 +30,11 @@ use php_unit::decl::{
 };
 use php_unit::{FramelessEntry, PublishedUnit, Unit, frameless_table};
 
+use crate::api::__private::NativeFunction;
 use crate::api::abi::{
-    Declarations, DependencyKind, EndFunction, Entry, Extension, ExtensionEntry, IniHandler,
-    IniStage, NativeNew, ObjectHandlers, Refusal, Start, StartupIni, States, Validation,
+    Declarations, DependencyKind, EndFunction, Entry, Extension, ExtensionEntry, FunctionRow,
+    IniHandler, IniStage, NativeNew, ObjectHandlers, Refusal, Start, StartupIni, States,
+    Validation,
 };
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
@@ -3205,7 +3207,7 @@ fn function_table(
     extensions: &[ExtensionEntry],
     declarations: &mut [Declarations],
     registered: &[usize],
-    additional: Vec<(FunctionDecl, Entry)>,
+    additional: Vec<FunctionRow>,
     ini: &IniTable,
 ) -> (Vec<Option<ExtensionId>>, Vec<(FunctionDecl, Entry)>) {
     let list = ini.master(b"disable_functions").unwrap_or_default();
@@ -3223,7 +3225,7 @@ fn function_table(
             .map(|declared| std::mem::take(&mut declared.functions))
             .unwrap_or_default()
     };
-    let mut table: Vec<(Option<ExtensionId>, (FunctionDecl, Entry))> = take(0)
+    let mut table: Vec<(Option<ExtensionId>, FunctionRow)> = take(0)
         .into_iter()
         .map(|native| (Some(ExtensionId::CORE), native))
         .collect();
@@ -3258,9 +3260,12 @@ fn function_table(
     // A host's natives go under `standard` once every module has
     // started (`Z/main/main.c:2359-2366`).
     table.extend(additional.into_iter().map(|native| (standard, native)));
+    // `zend_register_functions` over each entry left: the declaration
+    // built from it, a disabled one never registered.
     table
         .into_iter()
-        .filter(|(_, (decl, _))| !disabled.contains(&decl.name.0.to_ascii_lowercase().as_slice()))
+        .filter(|(_, row)| !disabled.contains(&row.native.name.to_ascii_lowercase().as_slice()))
+        .map(|(module, row)| (module, row.declaration()))
         .unzip()
 }
 
@@ -3269,16 +3274,15 @@ fn function_table(
 /// function it names, whichever side declared that one, and at the end
 /// where the stub's neighbour is not in the list.
 fn at_stub_places(
-    engine: Vec<(StubPlace, (FunctionDecl, Entry))>,
-    own: impl Iterator<Item = (FunctionDecl, Entry)>,
-) -> Vec<(FunctionDecl, Entry)> {
+    engine: Vec<(StubPlace, FunctionRow)>,
+    own: impl Iterator<Item = FunctionRow>,
+) -> Vec<FunctionRow> {
     let mut waiting = engine;
-    let mut placed: Vec<(FunctionDecl, Entry)> = Vec::new();
-    let settle = |waiting: &mut Vec<(StubPlace, (FunctionDecl, Entry))>,
-                  placed: &mut Vec<(FunctionDecl, Entry)>| {
+    let mut placed: Vec<FunctionRow> = Vec::new();
+    let settle = |waiting: &mut Vec<(StubPlace, FunctionRow)>, placed: &mut Vec<FunctionRow>| {
         while let Some(at) = waiting
             .iter()
-            .position(|(place, _)| place.follows(placed.last().map(|(decl, _)| decl)))
+            .position(|(place, _)| place.follows(placed.last().map(|row| row.native.name)))
         {
             let (_, native) = waiting.remove(at);
             placed.push(native);
@@ -3354,7 +3358,7 @@ pub struct EngineBuilder {
     /// Where the engine end writes ([`EngineBuilder::ends_into`]).
     ends_into: Option<Box<dyn OutputSink + Send>>,
     additional_extension: Option<Extension>,
-    additional_functions: Vec<(FunctionDecl, Entry)>,
+    additional_functions: Vec<FunctionRow>,
     shebang: php_compile::Shebang,
     shebang_while: Option<&'static str>,
     cli_shell: bool,
@@ -3535,8 +3539,8 @@ impl EngineBuilder {
     /// the order given (`Z/main/main.c:2359-2366`), and under no
     /// extension where the bundle has no `standard`.
     #[must_use]
-    pub fn additional_functions(mut self, natives: Vec<(FunctionDecl, Entry)>) -> EngineBuilder {
-        self.additional_functions.extend(natives);
+    pub fn additional_functions(mut self, natives: &'static [NativeFunction]) -> EngineBuilder {
+        (self.additional_functions).extend(natives.iter().map(FunctionRow::of));
         self
     }
 

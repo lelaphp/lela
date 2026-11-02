@@ -133,17 +133,17 @@ struct State {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            procedural::zip_open::declared(),
-            procedural::zip_close::declared(),
-            procedural::zip_read::declared(),
-            procedural::zip_entry_open::declared(),
-            procedural::zip_entry_close::declared(),
-            procedural::zip_entry_read::declared(),
-            procedural::zip_entry_name::declared(),
-            procedural::zip_entry_compressedsize::declared(),
-            procedural::zip_entry_filesize::declared(),
-            procedural::zip_entry_compressionmethod::declared(),
+        .functions(&[
+            procedural::zip_open::DECLARED,
+            procedural::zip_close::DECLARED,
+            procedural::zip_read::DECLARED,
+            procedural::zip_entry_open::DECLARED,
+            procedural::zip_entry_close::DECLARED,
+            procedural::zip_entry_read::DECLARED,
+            procedural::zip_entry_name::DECLARED,
+            procedural::zip_entry_compressedsize::DECLARED,
+            procedural::zip_entry_filesize::DECLARED,
+            procedural::zip_entry_compressionmethod::DECLARED,
         ])
         .class::<object::ZipArchive>()
         .dependencies(vec![Dependency {

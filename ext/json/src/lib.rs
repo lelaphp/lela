@@ -117,13 +117,13 @@ struct State {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .constants(constants::declared())
-        .functions(vec![
-            json_encode::declared(),
-            json_decode::declared(),
-            json_validate::declared(),
-            json_last_error::declared(),
-            json_last_error_msg::declared(),
+        .constants(constants::DECLARED)
+        .functions(&[
+            json_encode::DECLARED,
+            json_decode::DECLARED,
+            json_validate::DECLARED,
+            json_last_error::DECLARED,
+            json_last_error_msg::DECLARED,
         ])
         .class::<JsonSerializable>()
         .class::<JsonException>()

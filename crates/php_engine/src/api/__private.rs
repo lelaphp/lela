@@ -4,12 +4,14 @@
 //! item and held to a cap of its own; an extension's source never names
 //! `__private` (`ext.no-private`).
 
+use php_heap::{Fatal, Heap, Obj};
 use php_unit::decl::{
-    Attribute, AttributeArgument, Bare, ClassDecl, ClassKind, ConstExpr, MethodDecl, Name,
+    Attribute, AttributeArgument, Bare, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
+    ConstDecl, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault,
     PropertyDecl, Type, Visibility,
 };
 
-use crate::api::abi::{Cases, Class, ClassRef, ExtensionBuilder, ObjectHandlers};
+use crate::api::abi::{Cases, Class, ClassRef, NativeNew, ObjectHandlers};
 use crate::api::raising::{Thrown, fatal};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Owner, Value, ValueRef};
@@ -21,11 +23,277 @@ use crate::api::values::{ClassId, Owner, Value, ValueRef};
 /// lets a backtrace taken inside it print them.
 pub type Entry = fn(&mut Request) -> Result<Owner<Value>, Thrown>;
 
-pub use php_unit::decl::{native_function, parameter};
+/// A native function as `#[php_function]` lays it down: a `const` of
+/// static data, php's `zend_function_entry` with its
+/// `zend_internal_arg_info` rows, which the engine reads once as it
+/// registers the function and builds the declaration model of
+/// ([`NativeFunction::declaration`]), as
+/// `zend_register_functions` walks an extension's entry array. What is
+/// a tree in the model, a declared type, a default expression, a php
+/// attribute, is the function that builds it: a type's is its Rust
+/// type's `FromArgument::declared` or `IntoReturn::declared`, one per
+/// type and shared by every native that names it, and a default's or an
+/// attribute's is the expansion's own.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeFunction {
+    /// The PHP name, namespace included.
+    pub name: &'static [u8],
+    pub parameters: &'static [NativeParameter],
+    pub return_type: fn() -> Option<Type>,
+    /// `zend_frameless_function_info`'s arities ([`FunctionDecl::frameless`]).
+    pub frameless: &'static [u32],
+    pub attributes: &'static [fn() -> Attribute],
+    pub entry: Entry,
+}
+
+/// One parameter of a [`NativeFunction`], php's `zend_internal_arg_info`:
+/// the facts of its Rust type (`FromArgument`'s `BY_REF`, `VARIADIC` and
+/// `PASSED`) and of its `#[php(..)]`.
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)] // the ZEND_SEND_* bits of a slot and its type's `Passed`, each one fact
+pub struct NativeParameter {
+    pub name: &'static [u8],
+    pub ty: fn() -> Option<Type>,
+    pub by_ref: bool,
+    pub prefer_ref: bool,
+    pub variadic: bool,
+    /// The type is `Passed`: optional, its absence the body's to see,
+    /// which the declaration shows as `Unshown` where no default is
+    /// written.
+    pub passed: bool,
+    /// The `#[php(default = ..)]` expression.
+    pub default: Option<fn() -> ConstExpr>,
+    pub attributes: &'static [fn() -> Attribute],
+}
+
+/// A native method as `#[php_class]` lays it down on its member impl:
+/// a [`NativeFunction`] with the `ZEND_ACC_*` bits php's method entry
+/// carries ([`MethodDecl`]).
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)] // the ZEND_ACC_* bits of a method, each one fact
+pub struct NativeMethod {
+    pub function: NativeFunction,
+    pub visibility: Visibility,
+    pub is_instance: bool,
+    pub is_abstract: bool,
+    pub is_final: bool,
+    pub tentative_return: bool,
+}
+
+/// A native class's header as `#[php_class]` lays it down on its struct
+/// or enum: static data, php's `zend_class_entry` as `INIT_CLASS_ENTRY`
+/// and a `register_class_*` function fill it, which the engine builds
+/// the declaration model from as the class registers
+/// ([`NativeClass::declaration`]). An enum's cases and its `name` and
+/// `value` properties are its header's, every other member its member
+/// impl's (`abi::Members`).
+#[derive(Clone, Copy)]
+pub struct NativeClass {
+    /// The PHP name, namespace included.
+    pub name: &'static [u8],
+    pub kind: ClassKind,
+    pub flags: ClassFlags,
+    pub parent: Option<&'static [u8]>,
+    pub interfaces: &'static [&'static [u8]],
+    pub implementors: &'static [&'static [u8]],
+    pub aliases: &'static [&'static [u8]],
+    pub backing: EnumBacking,
+    pub constants: &'static [NativeClassConst],
+    pub properties: &'static [NativeProperty],
+    pub attributes: &'static [fn() -> Attribute],
+    /// `size = N` ([`ClassDecl::object_size`]).
+    pub object_size: u32,
+    /// `beside(..)` ([`ClassDecl::object_beside`]).
+    pub object_beside: &'static [u32],
+    /// How its objects are made: none where the class takes its
+    /// parent's, as php inherits `create_object`; else the handler table
+    /// the kernels dispatch to, `Std` where the header names none, and
+    /// the class's `create_object` where its objects carry a payload of
+    /// its own ([`create_object`]).
+    pub objects: Option<(&'static dyn ObjectHandlers, Option<NativeNew>)>,
+}
+
+/// A class constant, an enum's case among them, as the attribute lays
+/// it down: its type its Rust type's `IntoConst::declared`, its value
+/// the function that builds it.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeClassConst {
+    pub name: &'static [u8],
+    pub visibility: Visibility,
+    pub is_final: bool,
+    pub is_case: bool,
+    pub ty: fn() -> Option<Type>,
+    pub value: fn() -> ConstExpr,
+    pub attributes: &'static [fn() -> Attribute],
+}
+
+/// A property as the attribute lays it down, php's
+/// `zend_declare_typed_property` arguments.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeProperty {
+    pub name: &'static [u8],
+    pub visibility: Visibility,
+    pub is_instance: bool,
+    pub is_readonly: bool,
+    pub is_virtual: bool,
+    pub ty: fn() -> Option<Type>,
+    pub default: Option<fn() -> ConstExpr>,
+    pub attributes: &'static [fn() -> Attribute],
+}
+
+/// A constant as `#[php_const]` lays it down, php's
+/// `REGISTER_*_CONSTANT` row: its name, the function that builds its
+/// value, and its attributes'.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeConst {
+    /// The PHP name, namespace included.
+    pub name: &'static [u8],
+    pub value: fn() -> ConstExpr,
+    pub attributes: &'static [fn() -> Attribute],
+}
+
+impl NativeConst {
+    /// The declaration model of the constant.
+    pub(crate) fn declaration(&self) -> ConstDecl {
+        ConstDecl {
+            name: Name(self.name.into()),
+            value: (self.value)(),
+            attributes: self
+                .attributes
+                .iter()
+                .map(|attribute| attribute())
+                .collect(),
+        }
+    }
+}
+
+impl NativeClass {
+    /// The declaration model of the header, its own constants and
+    /// properties in it and the member impl's still to add.
+    pub(crate) fn declaration(&self) -> ClassDecl {
+        let names = |names: &[&[u8]]| names.iter().map(|name| Name((*name).into())).collect();
+        ClassDecl {
+            flags: self.flags,
+            parent: self.parent.map(|parent| Name(parent.into())),
+            interfaces: names(self.interfaces),
+            implementors: names(self.implementors),
+            aliases: names(self.aliases),
+            backing: self.backing,
+            constants: (self.constants.iter())
+                .map(NativeClassConst::declaration)
+                .collect(),
+            properties: (self.properties.iter())
+                .map(NativeProperty::declaration)
+                .collect(),
+            attributes: self
+                .attributes
+                .iter()
+                .map(|attribute| attribute())
+                .collect(),
+            object_size: self.object_size,
+            object_beside: self.object_beside.into(),
+            ..class(self.name, self.kind)
+        }
+    }
+}
+
+impl NativeClassConst {
+    pub(crate) fn declaration(&self) -> ClassConstDecl {
+        ClassConstDecl {
+            name: Name(self.name.into()),
+            visibility: self.visibility,
+            is_final: self.is_final,
+            is_case: self.is_case,
+            ty: (self.ty)(),
+            value: (self.value)(),
+            attributes: self
+                .attributes
+                .iter()
+                .map(|attribute| attribute())
+                .collect(),
+            doc_comment: None,
+        }
+    }
+}
+
+impl NativeProperty {
+    pub(crate) fn declaration(&self) -> PropertyDecl {
+        PropertyDecl {
+            visibility: self.visibility,
+            is_instance: self.is_instance,
+            is_readonly: self.is_readonly,
+            is_virtual: self.is_virtual,
+            default: self.default.map(|default| default()),
+            attributes: self
+                .attributes
+                .iter()
+                .map(|attribute| attribute())
+                .collect(),
+            ..property(self.name, (self.ty)())
+        }
+    }
+}
+
+impl NativeFunction {
+    /// The declaration model of the function, built as
+    /// `zend_register_functions` builds a `zend_internal_function` from
+    /// its entry: no file, line zero, by value.
+    pub(crate) fn declaration(&self) -> FunctionDecl {
+        FunctionDecl {
+            parameters: (self.parameters.iter())
+                .map(NativeParameter::declaration)
+                .collect(),
+            return_type: (self.return_type)(),
+            attributes: self
+                .attributes
+                .iter()
+                .map(|attribute| attribute())
+                .collect(),
+            frameless: self.frameless.to_vec(),
+            ..php_unit::decl::native_function(self.name)
+        }
+    }
+}
+
+impl NativeParameter {
+    fn declaration(&self) -> Parameter {
+        let default = match self.default {
+            Some(expr) => ParameterDefault::Expr(expr()),
+            None if self.passed => ParameterDefault::Unshown,
+            None => ParameterDefault::None,
+        };
+        Parameter {
+            by_ref: self.by_ref,
+            prefer_ref: self.prefer_ref,
+            variadic: self.variadic,
+            default,
+            attributes: self
+                .attributes
+                .iter()
+                .map(|attribute| attribute())
+                .collect(),
+            ..php_unit::decl::parameter(self.name, (self.ty)())
+        }
+    }
+}
+
+impl NativeMethod {
+    /// The method's declaration model and its entry.
+    pub(crate) fn declaration(&self) -> (MethodDecl, Entry) {
+        let method = MethodDecl {
+            function: self.function.declaration(),
+            visibility: self.visibility,
+            is_instance: self.is_instance,
+            is_abstract: self.is_abstract,
+            is_final: self.is_final,
+            tentative_return: self.tentative_return,
+        };
+        (method, self.function.entry)
+    }
+}
 
 /// A public instance property named `name` of type `ty`, no default.
-#[must_use]
-pub fn property(name: &[u8], ty: Option<Type>) -> PropertyDecl {
+fn property(name: &[u8], ty: Option<Type>) -> PropertyDecl {
     PropertyDecl {
         name: Name(name.into()),
         visibility: Visibility::Public,
@@ -43,10 +311,10 @@ pub fn property(name: &[u8], ty: Option<Type>) -> PropertyDecl {
     }
 }
 
-/// A class declaration named `name` of `kind`, the rest for the
-/// expansion to fill.
+/// A class declaration named `name` of `kind`, the rest for its declarer
+/// to fill: a header's, and a class the engine declares by hand.
 #[must_use]
-pub fn class(name: &[u8], kind: ClassKind) -> ClassDecl {
+pub(crate) fn class(name: &[u8], kind: ClassKind) -> ClassDecl {
     ClassDecl {
         name: Name(name.into()),
         kind,
@@ -192,25 +460,15 @@ pub fn case_of<E: Cases>(req: &mut Request, value: &Value) -> Result<E, Thrown> 
     ))
 }
 
-/// A class whose objects carry `C::Payload`, laid down by
-/// [`Class::new_payload`] for the class `new` names: php's
-/// `create_object` beside the handler table.
-#[must_use]
-pub fn class_new<C: Class>(
-    builder: ExtensionBuilder,
-    class: ClassDecl,
-    methods: Vec<(MethodDecl, Entry)>,
-    handlers: &'static dyn ObjectHandlers,
-) -> ExtensionBuilder {
-    builder.class_created(class, methods, handlers, new_by::<C>)
-}
-
-fn new_by<C: Class>(
-    heap: &mut php_heap::Heap,
+/// `create_object` of a class whose objects carry `C::Payload`, laid
+/// down by [`Class::new_payload`] for the class `new` names, beside the
+/// handler table.
+pub fn create_object<C: Class>(
+    heap: &mut Heap,
     class: u32,
     slots: u32,
     custom: usize,
-) -> Result<php_heap::Obj, php_heap::Fatal> {
+) -> Result<Obj, Fatal> {
     heap.object_with(
         class,
         slots,

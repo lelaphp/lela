@@ -2,17 +2,20 @@
 # 374 items: values 102, raising 21, coerce 23, call 29, request 112, decl 17, abi 28, syntax 28, attr 4, test 9, Nop 1 (ceiling 400); regenerated from the crate on 2026-09-17 (#271)
 Nop
 __private::Entry
+__private::NativeClass
+__private::NativeClassConst
+__private::NativeConst
+__private::NativeFunction
+__private::NativeMethod
+__private::NativeParameter
+__private::NativeProperty
 __private::abstract_entry
 __private::arguments
 __private::attribute
 __private::case_of
 __private::case_value
-__private::class
-__private::class_new
+__private::create_object
 __private::entered
-__private::native_function
-__private::parameter
-__private::property
 abi::Absent
 abi::Admission
 abi::AfterLog
@@ -127,6 +130,7 @@ abi::ExtensionBuilder::fiber_destroy
 abi::ExtensionBuilder::fiber_init
 abi::ExtensionBuilder::fiber_switch
 abi::ExtensionBuilder::function_declared_observer
+abi::ExtensionBuilder::function_reshaped
 abi::ExtensionBuilder::functions
 abi::ExtensionBuilder::gc_collect
 abi::ExtensionBuilder::info
@@ -176,8 +180,7 @@ abi::FromArgument::from_value
 abi::FromArgument::hold
 abi::GcTable
 abi::Header
-abi::Header::header
-abi::Header::register
+abi::Header::HEADER
 abi::HoldsCoroutine
 abi::HoldsCoroutine::coroutine
 abi::IniStage
@@ -203,7 +206,9 @@ abi::Lent::hold
 abi::LongHandler
 abi::Lookup
 abi::Members
-abi::Members::members
+abi::Members::CONSTANTS
+abi::Members::METHODS
+abi::Members::PROPERTIES
 abi::Multibyte
 abi::Multibyte::char_len
 abi::Multibyte::http_input
