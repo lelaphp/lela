@@ -65,6 +65,7 @@ pub(crate) use class_data::PropertyNames;
 mod classes;
 use classes::AccelServed;
 pub use classes::Symbols;
+pub(crate) use classes::ce_cache;
 mod constants;
 mod declared_bytes;
 pub(crate) use constants::{ConstantAt, ConstantCount, halt_offset_key};
@@ -442,6 +443,11 @@ pub struct Request {
     /// in the order declared, the preload's first and then the
     /// request's, each in the bucket it stands in.
     declared: Keyed<Named>,
+    /// php's class caches in `CG(map_ptr_base)`, `ZSTR_GET_CE_CACHE`'s
+    /// slots: the class each name that carries one found last
+    /// ([`classes::ce_cache`]), laid down empty with the request, as
+    /// `zend_map_ptr_reset` lays php's table ([`Request::ce_cached`]).
+    ce_caches: php_heap::MapTable<Option<ClassId>>,
     /// The classes the units this request served declared, each the
     /// unit that holds it and the index of its declaration, in the
     /// order declared: the rows a `ClassId` of the request's own counts
@@ -1233,6 +1239,7 @@ impl Request {
             objects: objects::Objects::default(),
             returned: Value::null(),
             declared: tables.classes,
+            ce_caches: php_heap::MapTable::new(),
             own_classes: Vec::new(),
             arena,
             classes: classes::Classes::default(),
