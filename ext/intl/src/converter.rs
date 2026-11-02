@@ -84,9 +84,10 @@ impl Pending {
 
     /// `later` raised with this pending. A throw that the handler
     /// `set_exception_handler()` set took, with no frame standing, leaves
-    /// php's `EG(exception)` empty, and nothing is kept for it.
+    /// php's `EG(exception)` empty, [`Cause::Taken`], and nothing is kept
+    /// for it.
     fn keep(&mut self, req: &mut Request, later: Thrown) {
-        if later.cause(req) == Cause::Fatal && !req.diagnostics().bailing_out() {
+        if later.cause(req) == Cause::Taken {
             return;
         }
         self.0 = Some(match self.0.take() {
