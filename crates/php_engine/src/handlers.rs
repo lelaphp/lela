@@ -4942,17 +4942,51 @@ pub(crate) fn verify_return_type<T: Tier>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if op.op1_type != OperandKind::Const {
-        let operand = ByKind(op.op1_type).read(req.slots_mut(frame), code, op.op1);
-        let returned = crate::operand::deref(operand);
-        // `MAY_BE_ANY` keeps the codes a value can have: an `IS_INDIRECT`
-        // would test bit 12, which is `callable`'s.
-        let code_bit = 1u32 << (returned.kind() as u32);
-        if code.return_mask & php_unit::decl::Type::MAY_BE_ANY & code_bit != 0 {
-            return Ok(advanced());
-        }
+    if return_mask_holds(req.slots_mut(frame), code, op) {
+        return Ok(advanced());
     }
     return_mask_missed(req, (frame, at), code, op)
+}
+
+/// [`verify_return_type`]'s first test, `ZEND_TYPE_CONTAINS_CODE`: the
+/// type of the value a `CV`, a `TMP` or a `VAR` holds where it stands,
+/// a reference followed, one bit tested in the op array's
+/// [`OpArray::return_mask`]. It reads the frame's slots and the op
+/// array alone, so the loop serves it over the slots it holds
+/// ([`inline_path::verify_return_type`]), and a function returning a
+/// scalar its declaration names is checked without the frame looked up:
+///
+/// ```php
+/// function i(int $n): int { return $n < 2 ? $n : i($n - 1) + i($n - 2); }
+/// function f(float $x): float { return $x * 2; }
+/// function s(string $s): string { $t = $s . "!"; return $t; }
+/// function b(int $n): bool { return $n > 1; }
+/// function n(?int $n): ?int { return $n; }
+/// function u(int $n): int|string { return $n ? $n : "zero"; }
+/// function r(int &$v): int { return $v; }
+/// $v = 4;
+/// var_dump(i(10), f(1.25), s("a"), b(2), n(null), u(0), u(3), r($v));
+/// ```
+/// ```expect
+/// int(55)
+/// float(2.5)
+/// string(2) "a!"
+/// bool(true)
+/// NULL
+/// string(4) "zero"
+/// int(3)
+/// int(4)
+/// ```
+#[inline(always)] // in the loop and in the handler
+fn return_mask_holds(slots: &mut [Zval], code: &OpArray, op: &Opline) -> bool {
+    if op.op1_type == OperandKind::Const {
+        return false;
+    }
+    let returned = crate::operand::deref(ByKind(op.op1_type).read(slots, code, op.op1));
+    // `MAY_BE_ANY` keeps the codes a value can have: an `IS_INDIRECT`
+    // would test bit 12, which is `callable`'s.
+    let code_bit = 1u32 << (returned.kind() as u32);
+    code.return_mask & php_unit::decl::Type::MAY_BE_ANY & code_bit != 0
 }
 
 /// [`verify_return_type`] past its mask, the frame stood at `at`
@@ -27102,7 +27136,8 @@ pub(crate) mod inline_path {
     use super::branch::Branch;
     use super::{
         inline_arith, inline_assign, inline_assign_op, inline_branch, inline_compare,
-        inline_fetch_dim_r, inline_identical, inline_incdec, write_owning_nothing,
+        inline_fetch_dim_r, inline_identical, inline_incdec, return_mask_holds,
+        write_owning_nothing,
     };
     #[cfg(not(dispatch = "tailcall"))]
     use php_heap::FrameRef;
@@ -27309,6 +27344,18 @@ pub(crate) mod inline_path {
         }
         write_owning_nothing(slots, op, z)?;
         Some(Inline::ADVANCE)
+    }
+
+    /// `ZEND_VERIFY_RETURN_TYPE` of a value whose type the declared
+    /// return type names outright ([`super::return_mask_holds`]).
+    #[inline(always)] // in the loop and in the handler
+    pub(crate) fn verify_return_type(
+        slots: &mut [Zval],
+        code: &OpArray,
+        op: &Opline,
+        _: u32,
+    ) -> Option<Inline> {
+        return_mask_holds(slots, code, op).then_some(Inline::ADVANCE)
     }
 
     /// `ZEND_FETCH_DIM_R` of an element an array holds.
