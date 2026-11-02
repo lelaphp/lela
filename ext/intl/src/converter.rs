@@ -8,7 +8,7 @@ use php_ext::abi::{CloneObj, ObjectHandlers, OrFalse, Ref, This, Union, Untyped}
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with, lookup_class};
 use php_ext::raising::{
-    Thrown, arg_value_error, clear, leave_pending, pending, throw_error, while_pending,
+    Cause, Thrown, arg_value_error, clear, leave_pending, pending, throw_error, while_pending,
 };
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef, walk};
@@ -82,8 +82,13 @@ impl Pending {
         self.0.is_some()
     }
 
-    /// `later` raised with this pending.
+    /// `later` raised with this pending. A throw that the handler
+    /// `set_exception_handler()` set took, with no frame standing, leaves
+    /// php's `EG(exception)` empty, and nothing is kept for it.
     fn keep(&mut self, req: &mut Request, later: Thrown) {
+        if later.cause(req) == Cause::Fatal && !req.diagnostics().bailing_out() {
+            return;
+        }
         self.0 = Some(match self.0.take() {
             Some(earlier) => earlier.chain(req, later),
             None => later,
@@ -100,7 +105,7 @@ impl Pending {
             None => Outside::Request,
         };
         if let Err(thrown) = outside.set_over(req, self.0.take(), code, message) {
-            self.0 = Some(thrown);
+            self.keep(req, thrown);
         }
     }
 
