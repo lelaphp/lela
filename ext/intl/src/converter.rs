@@ -7,11 +7,13 @@
 use php_ext::abi::{CloneObj, ObjectHandlers, OrFalse, Ref, This, Union, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with, lookup_class};
-use php_ext::raising::{Thrown, arg_value_error, leave_pending, throw_error, while_pending};
+use php_ext::raising::{
+    Thrown, arg_value_error, clear, leave_pending, pending, throw_error, while_pending,
+};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef, walk};
 
-use crate::error::{self, Carrier, IntlError};
+use crate::error::{self, Carrier, IntlError, Outside};
 use crate::ffi::converter::{
     self as ucnv, Callbacks, Converter, ConverterId, Live, Reason, Target,
 };
@@ -86,6 +88,48 @@ impl Pending {
             Some(earlier) => earlier.chain(req, later),
             None => later,
         });
+    }
+
+    /// `php_converter_throw_failure` on `object`, or on the request
+    /// alone, with this pending: its warning raised while this stands,
+    /// and its `IntlException` chained over this, as php's C runs on past
+    /// `EG(exception)`.
+    fn fail(&mut self, req: &mut Request, object: Option<PhpObject>, code: Code, message: &str) {
+        let mut outside = match object {
+            Some(object) => Outside::of::<ConverterObject>(object),
+            None => Outside::Request,
+        };
+        if let Err(thrown) = outside.set_over(req, self.0.take(), code, message) {
+            self.0 = Some(thrown);
+        }
+    }
+
+    /// `THROW_UFAILURE(obj, error)` with this pending, as [`Pending::fail`].
+    fn failure(&mut self, req: &mut Request, object: Option<PhpObject>, code: Code) {
+        let message = format!("returned error {}: {}", code.0, code.name());
+        self.fail(req, object, code, &message);
+    }
+
+    /// What a step that answers nothing left standing on the request, a
+    /// destructor's throwable, taken as what is pending: where it was
+    /// served while this stood, it holds this as its `previous` already,
+    /// and this owner of it is given up.
+    fn stood(&mut self, req: &mut Request) {
+        let Err(over) = pending(req) else {
+            return;
+        };
+        match self.0.take() {
+            Some(earlier) if earlier.exception().is_some() => {
+                self.0 = Some(over);
+                if let Err(left) = clear(req, earlier) {
+                    self.keep(req, left);
+                }
+            }
+            earlier => {
+                self.0 = earlier;
+                self.keep(req, over);
+            }
+        }
     }
 
     /// What a raise that may throw came to.
@@ -975,7 +1019,7 @@ fn convert_with(
 ) -> Answer<Option<Owner<PhpString>>> {
     let (needed, code) = lend(req, object, pending, |cb| src.decode(&mut [], text, cb));
     if code.is_failure() && code != Code::BUFFER_OVERFLOW {
-        failure(req, object, code)?;
+        pending.failure(req, object, code);
         return Ok(None);
     }
     let capacity = usize::try_from(needed).unwrap_or(0) + 1;
@@ -1001,13 +1045,13 @@ fn encoded(
     let room = &mut temp.as_mut_slice()[..capacity];
     let (len, code) = lend(req, object, pending, |cb| src.decode(room, text, cb));
     if code.is_failure() {
-        failure(req, object, code)?;
+        pending.failure(req, object, code);
         return Ok(None);
     }
     let units = &temp.as_slice()[..usize::try_from(len).unwrap_or(0).min(capacity)];
     let (needed, code) = lend(req, object, pending, |cb| dest.encode(&mut [], units, cb));
     if code.is_failure() && code != Code::BUFFER_OVERFLOW {
-        failure(req, object, code)?;
+        pending.failure(req, object, code);
         return Ok(None);
     }
     let mut out = vec![0u8; usize::try_from(needed).unwrap_or(0) + 1];
@@ -1020,7 +1064,7 @@ fn encoded(
         if let Some(made) = made {
             made.give_up(req);
         }
-        failure(req, object, code)?;
+        pending.failure(req, object, code);
         return Ok(None);
     }
     Ok(made)
@@ -1103,8 +1147,12 @@ impl Served<'_> {
     /// destructed after from
     /// ```
     ///
-    /// Where the answer cannot be appended, its warning under
-    /// `intl.error_level` is raised before the destructor is served:
+    /// Where the answer cannot be appended, its `IntlException` under
+    /// `intl.use_exceptions`, or its warning under `intl.error_level`,
+    /// comes before the destructor is served. What the destructor throws
+    /// is the conversion's pending throwable from there on: the
+    /// conversion's own failure chains over it, or raises its warning to
+    /// no handler, and no further callback is served:
     ///
     /// ```php
     /// ini_set('zend.exception_ignore_args', 1);
@@ -1119,18 +1167,52 @@ impl Served<'_> {
     ///     $error = new D; return [1.5];
     ///   }
     /// }
+    /// function chain($e) { for ($s = []; $e; $e = $e->getPrevious()) $s[] = $e->getMessage(); return implode(" <- ", $s); }
     /// set_error_handler(function ($n, $m) { if ($n == E_WARNING) echo "warning: $m\n"; return true; });
-    /// ini_set('intl.error_level', E_WARNING);
-    /// try { (new C('utf-8', 'ascii'))->convert("\x80"); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
-    /// try { (new C('ascii', 'utf-8'))->convert("\u{e9}"); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// foreach ([1, 0] as $ex) {
+    ///   ini_set('intl.use_exceptions', $ex);
+    ///   ini_set('intl.error_level', $ex ? 0 : E_WARNING);
+    ///   try { (new C('utf-8', 'ascii'))->convert("\x80"); } catch (Exception $e) { echo chain($e), "\n"; }
+    ///   try { (new C('ascii', 'utf-8'))->convert("\u{e9}"); } catch (Exception $e) { echo chain($e), "\n"; }
+    /// }
     /// ```
     /// ```expect
+    /// dtor
+    /// UConverter::convert(): returned error 12: U_ILLEGAL_CHAR_FOUND <- destructed <- UConverter::convert(): Invalid codepoint U+ffffffffffffffff
+    /// dtor
+    /// UConverter::convert(): returned error 10: U_INVALID_CHAR_FOUND <- destructed <- UConverter::convert(): fromUCallback() specified illegal type for substitution character
     /// warning: UConverter::convert(): Invalid codepoint U+ffffffffffffffff
     /// dtor
     /// destructed
     /// warning: UConverter::convert(): fromUCallback() specified illegal type for substitution character
     /// dtor
     /// destructed
+    /// ```
+    ///
+    /// A callback that answers for every reason is served at the close as
+    /// well; the first destructor's throwable stops the callbacks after
+    /// it, and is what is left uncaught:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "dtor\n"; throw new Exception("destructed"); } }
+    /// class C extends UConverter {
+    ///   function toUCallback($reason, $source, $codeUnits, &$error): string|int|array|null { $error = new D; return -1; }
+    /// }
+    /// $c = new C('utf-8', 'ascii');
+    /// try { $c->convert("\x80"); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// echo "end\n";
+    /// ```
+    /// ```expect exit=255
+    /// dtor
+    /// destructed
+    /// end
+    /// dtor
+    ///
+    /// Fatal error: Uncaught Exception: destructed in %s:2
+    /// Stack trace:
+    /// #0 [internal function]: D->__destruct()
+    /// #1 {main}
+    ///   thrown in %s on line 2
     /// ```
     fn call(
         &mut self,
@@ -1192,13 +1274,14 @@ impl Served<'_> {
             }
             _ => give_up(req),
         }
+        self.pending.stood(self.req);
     }
 
     /// A failure a callback's answer met, `php_converter_throw_failure`
     /// on the object; a throwable it raised stops the PHP code after it.
     fn fail(&mut self, code: Code, message: &str) {
-        let raised = error::errors_set::<ConverterObject>(self.req, self.object, code, message);
-        self.pending.raised(self.req, raised);
+        self.pending
+            .fail(self.req, Some(self.object), code, message);
     }
 
     /// `TARGET_CHECK`: whether `needed` units fit, the overrun set where not.
