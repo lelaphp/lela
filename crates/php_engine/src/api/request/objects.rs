@@ -39,6 +39,9 @@ pub(super) struct Objects {
     /// table stops, and the objects then standing are marked destructed
     /// in the heap, `zend_objects_store_mark_destructed`.
     shutdown_walk_ended: bool,
+    /// Whether the walks of `zend_call_destructors` are under way, inside
+    /// the `zend_try` whose `zend_catch` ends them.
+    walking: bool,
 }
 
 impl Request {
@@ -855,6 +858,7 @@ impl Request {
     /// d3
     /// ```
     pub(crate) fn shutdown_destructors(&mut self) {
+        self.objects.walking = true;
         let Some(arr) = self.symbol_arr(crate::exec::TableId::GLOBAL) else {
             return;
         };
@@ -917,6 +921,19 @@ impl Request {
     pub(crate) fn call_destructors(&mut self) {
         Heap::call_destructors(&mut Hooks(self));
         self.uncaught().ok();
+        self.objects.walking = false;
+    }
+
+    /// `shutdown_destructors`'s `zend_catch` over a `zend_bailout` under
+    /// either walk: the walks end and every object standing is marked
+    /// destructed, `zend_objects_store_mark_destructed`, so what the
+    /// native that left by it gives up after it serves no destructor, as
+    /// php's `longjmp` left it never given up.
+    pub(super) fn caught_under_walk(&mut self) {
+        if self.objects.walking {
+            self.objects.shutdown_walk_ended = true;
+            self.heap.mark_destructed();
+        }
     }
 
     /// `zend_objects_store_free_object_storage`, in `shutdown_executor`

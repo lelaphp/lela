@@ -1515,9 +1515,65 @@ pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
 /// php chains the new one over and returns before the hook, nor where
 /// nothing executes, which php renders without it.
 ///
+/// Where nothing is pending and no frame stands, `!EG(current_execute_data)`
+/// (`Z/Zend/zend_exceptions.c:209-227`), the throw is settled at once
+/// ([`Request::thrown_without_frame`]): rendered as the uncaught fatal
+/// and left by `zend_bailout`, so nothing the native would serve after
+/// it is served, or handed to the handler `set_exception_handler()` set,
+/// after which nothing is pending. The `Thrown` names nothing then. A
+/// `ParseError` or a `CompileError` is left pending, for the compile
+/// that threw it to render. A `UConverter` subclass's callback served at
+/// the close of its converters, at the request's end, throws so where
+/// its answer cannot be appended, before what it wrote into `&$error`
+/// is given up:
+///
+/// ```php
+/// ini_set('intl.use_exceptions', 1);
+/// ini_set('zend.exception_ignore_args', 1);
+/// class D { function __destruct() { echo "dtor\n"; throw new Exception("destructed"); } }
+/// class C extends UConverter { function toUCallback($reason, $source, $codeUnits, &$error): string|int|array|null { $error = new D; return -1; } }
+/// $c = new C('utf-8', 'ascii');
+/// try { $c->convert("\x80"); } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " after ", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect exit=255
+/// dtor
+/// IntlException: UConverter::convert(): returned error 12: U_ILLEGAL_CHAR_FOUND after destructed
+///
+/// Fatal error: Uncaught IntlException: Invalid codepoint U+ffffffffffffffff in [no active file]:0
+/// Stack trace:
+/// #0 {main}
+///   thrown in [no active file] on line 0
+/// ```
+///
+/// With a handler set, each converter's close is handed to it in turn,
+/// and the native goes on:
+///
+/// ```php
+/// ini_set('intl.use_exceptions', 1);
+/// set_exception_handler(function ($e) { echo "handler: ", $e->getMessage(), "\n"; });
+/// class D { function __destruct() { echo "dtor\n"; } }
+/// class C extends UConverter { function toUCallback($reason, $source, $codeUnits, &$error): string|int|array|null { $error = new D; return -1; } }
+/// $c = new C('utf-8', 'ascii');
+/// echo "end\n";
+/// ```
+/// ```expect
+/// end
+/// handler: Invalid codepoint U+ffffffffffffffff
+/// dtor
+/// handler: Invalid codepoint U+ffffffffffffffff
+/// dtor
+/// ```
+///
 /// [`ExtensionBuilder::thrown`]: crate::api::abi::ExtensionBuilder::thrown
 pub(crate) fn throw_object(req: &mut Request, object: PhpObject) -> Thrown {
     let thrown = Thrown::of(Some(object));
+    let compiling = [ClassId::PARSE_ERROR, ClassId::COMPILE_ERROR].contains(&object.class());
+    if !req.is_pending() && !req.frames().executing() && !compiling {
+        if let Ok(undef) = req.thrown_without_frame(&thrown) {
+            req.release(undef);
+        }
+        return Thrown::of(None);
+    }
     // A bundle that set no hook pays nothing more for a throw.
     if req.shared.supplied.thrown.links().is_empty()
         || req.is_pending()
