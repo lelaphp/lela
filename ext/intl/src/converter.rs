@@ -11,7 +11,9 @@ use php_ext::raising::{
     Cause, Thrown, arg_value_error, clear, leave_pending, pending, throw_error, while_pending,
 };
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef, walk};
+use php_ext::values::{
+    Layout, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef, walk,
+};
 
 use crate::error::{self, Carrier, IntlError, Outside};
 use crate::ffi::converter::{
@@ -1372,9 +1374,15 @@ impl Served<'_> {
         }
     }
 
-    /// The bytes as a string argument, or nothing where it cannot be made.
-    fn string(&mut self, bytes: &[u8]) -> Option<Owner<Value>> {
-        match PhpString::new(self.req, bytes) {
+    /// The bytes as a string argument, `ZVAL_STRINGL`'s string of the heap
+    /// at every length, or `ZVAL_EMPTY_STRING`'s interned one where ICU
+    /// handed no bytes; nothing where it cannot be made.
+    fn string(&mut self, bytes: Option<&[u8]>) -> Option<Owner<Value>> {
+        let made = match bytes {
+            Some(bytes) => PhpString::filled(self.req, bytes.len(), |b| b.copy_from_slice(bytes)),
+            None => PhpString::new(self.req, b""),
+        };
+        match made {
             Ok(s) => Some(s.into_value()),
             Err(thrown) => {
                 self.pending.keep(self.req, thrown);
@@ -1385,12 +1393,52 @@ impl Served<'_> {
 }
 
 impl Callbacks for Served<'_> {
-    /// `php_converter_to_u_callback`.
+    /// `php_converter_to_u_callback`: `$source` and `$codeUnits` each
+    /// `ZVAL_STRINGL`, `zend_string_init`, which lays a string of the
+    /// heap at every length, the empty string and one byte among them,
+    /// and `ZVAL_EMPTY_STRING`, the interned one, only where ICU hands no
+    /// pointer, as it does at a reset
+    /// (`Z/ext/intl/converter/converter.c:218-227`). So one illegal byte
+    /// with nothing after it is two strings of 32 bytes. `fromUCallback`'s
+    /// `$source` is `array_init_size` with `zend_hash_real_init_packed`
+    /// (`:296-297`), its packed data laid even where it holds no code
+    /// point, as at a reset. Each conversion is a converter of its own,
+    /// and the failure the first leaves on intl's own error is cleared by
+    /// a plain `UConverter` before the second measures, so neither
+    /// failure's message moves what the second reads:
+    ///
+    /// ```php
+    /// class F extends UConverter {
+    ///   function toUCallback($reason, $source, $codeUnits, &$error): string|int|array|null {
+    ///     if ($reason != UConverter::REASON_CLOSE) echo "to ", UConverter::reasonText($reason), " ", memory_get_usage() - $GLOBALS['m'], "\n";
+    ///     return null;
+    ///   }
+    ///   function fromUCallback($reason, $source, $codePoint, &$error): string|int|array|null {
+    ///     if ($reason != UConverter::REASON_CLOSE) echo "from ", UConverter::reasonText($reason), " ", memory_get_usage() - $GLOBALS['m'], "\n";
+    ///     return null;
+    ///   }
+    /// }
+    /// $a = new F('ASCII', 'UTF-8');
+    /// $b = new F('ASCII', 'UTF-8');
+    /// $m = memory_get_usage();
+    /// $a->convert("ab\u{100}");
+    /// (new UConverter('ASCII', 'UTF-8'))->convert("ab");
+    /// $m = memory_get_usage();
+    /// $b->convert("ab\xff", true);
+    /// ```
+    /// ```expect
+    /// to REASON_RESET 64
+    /// to REASON_RESET 80
+    /// from REASON_RESET 296
+    /// from REASON_UNASSIGNED 296
+    /// to REASON_RESET 32
+    /// to REASON_ILLEGAL 96
+    /// ```
     fn decoding(
         &mut self,
         reason: Reason,
-        source: &[u8],
-        units: &[u8],
+        source: Option<&[u8]>,
+        units: Option<&[u8]>,
         status: &mut Code,
         target: &mut Target<'_, u16>,
     ) {
@@ -1412,8 +1460,11 @@ impl Callbacks for Served<'_> {
         );
     }
 
-    /// `php_converter_from_u_callback`: the code units as code points,
-    /// `U16_NEXT` over them.
+    /// `php_converter_from_u_callback`: `$source` laid as
+    /// `array_init_size` and `zend_hash_real_init_packed` lay it, for as
+    /// many elements as there are code units and with its packed data
+    /// even where there are none, then the code units as code points,
+    /// `U16_NEXT` over them. The fence on `decoding` pins its size.
     fn encoding(
         &mut self,
         reason: Reason,
@@ -1422,7 +1473,8 @@ impl Callbacks for Served<'_> {
         status: &mut Code,
         target: &mut Target<'_, u8>,
     ) {
-        let mut source = match PhpArray::new(self.req) {
+        let size = u32::try_from(units.len()).unwrap_or(u32::MAX);
+        let mut source = match PhpArray::sized(self.req, size, Layout::Packed) {
             Ok(array) => array,
             Err(thrown) => {
                 self.pending.keep(self.req, thrown);
