@@ -1056,7 +1056,7 @@ fn init_op_array(
 /// closure written in it:
 ///
 /// ```php
-/// $f = sys_get_temp_dir() . '/w3823-' . getmypid() . '.php';
+/// $f = sys_get_temp_dir() . '/w3823-' . sprintf('%010d', getmypid()) . '.php';
 /// foreach (['', 'for (;;) { break; } ', 'foreach ([1] as $a) { for (;;) { switch ($a) { default: break 2; } } while (0) {} } ', 'for (;;) { $c = function () { while (0) {} do {} while (0); }; break; } '] as $code) {
 ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
 ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
@@ -1793,7 +1793,7 @@ pub(super) fn carve(req: &mut Request, unit: &Unit) -> Result<(), Thrown> {
 /// them:
 ///
 /// ```php
-/// $f = sys_get_temp_dir() . '/w3479-' . getmypid() . '.php';
+/// $f = sys_get_temp_dir() . '/w3479-' . sprintf('%010d', getmypid()) . '.php';
 /// $src = "<?php\n";
 /// for ($i = 0; $i < 2000; $i++) { $src .= "class C$i { public \$a; public \$b; function f() {} function g() {} }\n"; }
 /// file_put_contents($f, $src);
@@ -1876,7 +1876,7 @@ const HASH_SLOT: usize = 4;
 /// into a hash:
 ///
 /// ```php
-/// $f = sys_get_temp_dir() . '/w3793-' . getmypid() . '.php';
+/// $f = sys_get_temp_dir() . '/w3793-' . sprintf('%010d', getmypid()) . '.php';
 /// foreach (['', '$x = 5; '] as $code) {
 ///     file_put_contents($f, "<?php {$code}echo memory_get_peak_usage() - memory_get_usage(), \"\\n\";");
 ///     touch($f, time() - 10);
@@ -2076,7 +2076,7 @@ pub(crate) struct Alone {
 /// compile opcache leaves to php's own):
 ///
 /// ```php
-/// $f = sys_get_temp_dir() . '/w3805-' . getmypid() . '.php';
+/// $f = sys_get_temp_dir() . '/w3805-' . sprintf('%010d', getmypid()) . '.php';
 /// foreach (['', '$abcdef = [1, 2]; ', 'if (strlen("abc")) { $o = new stdClass; $o->p = "xyz"; } ', 'class C {} function f() {} '] as $code) {
 ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
 ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
@@ -2225,7 +2225,7 @@ fn main_op_array(
 /// `pass_two`, the compile's peak:
 ///
 /// ```php
-/// $f = sys_get_temp_dir() . '/w3836-' . getmypid() . '.php';
+/// $f = sys_get_temp_dir() . '/w3836-' . sprintf('%010d', getmypid()) . '.php';
 /// foreach (['$abcdef = [1, 2]; ', 'class C {} function f() {} $abcdef = [1, 2]; ', 'function f() {} $abcdef = "abcdefghijklmnopqrstuvwxyz" . PHP_EOL; ', 'namespace a; function f() {} ', 'namespace A; function f() {} '] as $code) {
 ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
 ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
@@ -2343,7 +2343,7 @@ fn seen_keys(unit: &Unit) -> impl Iterator<Item = usize> {
 /// returns, stand at the declaration's `pass_two`, the compile's peak:
 ///
 /// ```php
-/// $f = sys_get_temp_dir() . '/w3822-' . getmypid() . '.php';
+/// $f = sys_get_temp_dir() . '/w3822-' . sprintf('%010d', getmypid()) . '.php';
 /// foreach (['$abcdef = 1; function f() {} ', 'class C { function m() { return function () {}; } } ', '$abcdef = 1; class D { function m() { return function () {}; } } function g() {} '] as $code) {
 ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
 ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
@@ -2634,7 +2634,7 @@ impl Walk<'_> {
     /// (`Z/Zend/zend_inheritance.c:2302`), so they stand at the peak alone:
     ///
     /// ```php
-    /// $f = sys_get_temp_dir() . '/w3901-' . getmypid() . '.php';
+    /// $f = sys_get_temp_dir() . '/w3901-' . sprintf('%010d', getmypid()) . '.php';
     /// foreach (['interface I {} class C implements I {} ', 'interface i {} class C implements i {} ', 'interface I {} interface J {} class C implements I, J {} ', 'enum E: int implements Countable { case A = 1; function count(): int { return 1; } } ', 'class C { function __toString(): string { return ""; } } '] as $code) {
     ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
     ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
@@ -2647,8 +2647,8 @@ impl Walk<'_> {
     /// 35792
     /// 35728
     /// 35872
-    /// 37472
-    /// 37344
+    /// 37456
+    /// 37328
     /// ```
     fn interfaces(&mut self, req: &mut Request, at: usize, to: usize) -> Result<(), Thrown> {
         let (Some(keys), Some(block), Some(decl)) = (
@@ -2681,7 +2681,7 @@ impl Walk<'_> {
     /// method, then after it:
     ///
     /// ```php
-    /// $f = sys_get_temp_dir() . '/w3838-' . getmypid() . '.php';
+    /// $f = sys_get_temp_dir() . '/w3838-' . sprintf('%010d', getmypid()) . '.php';
     /// foreach (['class C { public $p { set { } } function m() {} } ', 'class C { function m() {} public $p { set { } } } '] as $code) {
     ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
     ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
@@ -2731,7 +2731,7 @@ impl Walk<'_> {
     /// only after the compile ([`Request::hold_unit_names`]):
     ///
     /// ```php
-    /// $f = sys_get_temp_dir() . '/w3900-' . getmypid() . '.php';
+    /// $f = sys_get_temp_dir() . '/w3900-' . sprintf('%010d', getmypid()) . '.php';
     /// foreach (['function foo() {} ', 'function Foo() {} ', 'class C { function doit() {} } ', 'class C { function doIt() {} } ', 'class C { function Count() {} } ', 'interface I { function doIt(); } '] as $code) {
     ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
     ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
@@ -2795,7 +2795,7 @@ impl Walk<'_> {
     /// a method and before it, and an enum's:
     ///
     /// ```php
-    /// $f = sys_get_temp_dir() . '/w3907-' . getmypid() . '.php';
+    /// $f = sys_get_temp_dir() . '/w3907-' . sprintf('%010d', getmypid()) . '.php';
     /// foreach (['class C { const K = 1; public $p = 1; function m() {} } ', 'class C { function m() {} const K = 1; public $p = 1; } ', 'class C { function m() {} public static $s = 1; } ', 'enum E { function m() {} case A; const K = self::A; } ', 'enum E { case A; const K = 1; function m() {} } '] as $code) {
     ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
     ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
@@ -2808,8 +2808,8 @@ impl Walk<'_> {
     /// 37392
     /// 36736
     /// 37056
-    /// 36776
-    /// 37272
+    /// 36760
+    /// 37256
     /// ```
     fn member(
         &mut self,
@@ -2879,7 +2879,7 @@ impl Walk<'_> {
 /// (`zend_hash_destroy(&info.uses)`, `:8563`):
 ///
 /// ```php
-/// $f = sys_get_temp_dir() . '/w3837-' . getmypid() . '.php';
+/// $f = sys_get_temp_dir() . '/w3837-' . sprintf('%010d', getmypid()) . '.php';
 /// foreach (['$f = fn () => $b; ', 'function f($a) { return fn () => $a; } ', '$f = fn ($a) => $a; ', '$f = fn ($a = 5) => $b; '] as $code) {
 ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
 ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
