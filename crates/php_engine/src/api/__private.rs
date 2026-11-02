@@ -23,6 +23,32 @@ use crate::api::values::{ClassId, Owner, Value, ValueRef};
 /// lets a backtrace taken inside it print them.
 pub type Entry = fn(&mut Request) -> Result<Owner<Value>, Thrown>;
 
+/// One frameless arity's entry, php's `zflf_*` beside its `zif_*`
+/// (`ZEND_FRAMELESS_FUNCTION`, design §7.1): the native's own parameters
+/// held off the `N` operands of a `ZEND_FRAMELESS_ICALL_N` by position,
+/// with no call record and no count check, as `#[php_function]` lays it
+/// down for each arity `frameless(..)` declares.
+#[derive(Debug, Clone, Copy)]
+pub enum Frameless {
+    Zero(fn(&mut Request, &[Value; 0]) -> Result<Owner<Value>, Thrown>),
+    One(fn(&mut Request, &[Value; 1]) -> Result<Owner<Value>, Thrown>),
+    Two(fn(&mut Request, &[Value; 2]) -> Result<Owner<Value>, Thrown>),
+    Three(fn(&mut Request, &[Value; 3]) -> Result<Owner<Value>, Thrown>),
+}
+
+impl Frameless {
+    /// The number of operands the entry takes,
+    /// `zend_frameless_function_info.num_args`.
+    pub(crate) fn arity(self) -> u32 {
+        match self {
+            Frameless::Zero(_) => 0,
+            Frameless::One(_) => 1,
+            Frameless::Two(_) => 2,
+            Frameless::Three(_) => 3,
+        }
+    }
+}
+
 /// A native function as `#[php_function]` lays it down: a `const` of
 /// static data, php's `zend_function_entry` with its
 /// `zend_internal_arg_info` rows, which the engine reads once as it
@@ -40,8 +66,9 @@ pub struct NativeFunction {
     pub name: &'static [u8],
     pub parameters: &'static [NativeParameter],
     pub return_type: fn() -> Option<Type>,
-    /// `zend_frameless_function_info`'s arities ([`FunctionDecl::frameless`]).
-    pub frameless: &'static [u32],
+    /// `zend_frameless_function_info`: one entry per arity, whose
+    /// arities the declaration lists ([`FunctionDecl::frameless`]).
+    pub frameless: &'static [Frameless],
     pub attributes: &'static [fn() -> Attribute],
     pub entry: Entry,
 }
@@ -249,7 +276,7 @@ impl NativeFunction {
                 .iter()
                 .map(|attribute| attribute())
                 .collect(),
-            frameless: self.frameless.to_vec(),
+            frameless: self.frameless.iter().map(|entry| entry.arity()).collect(),
             ..php_unit::decl::native_function(self.name)
         }
     }

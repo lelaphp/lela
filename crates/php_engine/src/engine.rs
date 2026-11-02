@@ -804,6 +804,9 @@ pub(crate) struct Shared {
     /// which a `FRAMELESS_ICALL_*`'s `extended_value` indexes. Computed
     /// from `functions` by the one function the compiler numbers by.
     pub(crate) frameless: Vec<FramelessEntry>,
+    /// `zend_flf_handlers`: the entry of each row of `frameless`, the
+    /// one `#[php_function]` generated for that arity (design §7.1).
+    pub(crate) frameless_entries: Vec<crate::api::__private::Frameless>,
     /// The classes Zend declares and then each extension's, in bundle
     /// order, each with its methods on it: what a `ClassId` below the
     /// request's own declarations indexes.
@@ -3211,7 +3214,10 @@ fn function_table(
     registered: &[usize],
     additional: Vec<FunctionRow>,
     ini: &IniTable,
-) -> (Vec<Option<ExtensionId>>, Vec<(FunctionDecl, Entry)>) {
+) -> (
+    Vec<Option<ExtensionId>>,
+    Vec<(FunctionDecl, crate::api::abi::FunctionEntries)>,
+) {
     let list = ini.master(b"disable_functions").unwrap_or_default();
     let disabled = disabled_functions(list);
     // `module_registry` numbers Core 0 and the bundle from 1.
@@ -3704,14 +3710,16 @@ impl EngineBuilder {
             Some(name) if on(name) => php_compile::Shebang::Skipped,
             _ => self.shebang,
         };
-        let (function_modules, natives): (_, Vec<(FunctionDecl, Entry)>) = function_table(
+        let (function_modules, natives) = function_table(
             &extensions,
             &mut declarations,
             &registered,
             additional,
             &ini,
         );
-        let (functions, mut entries): (Vec<FunctionDecl>, Vec<Entry>) = natives.into_iter().unzip();
+        let (functions, natives): (Vec<FunctionDecl>, Vec<_>) = natives.into_iter().unzip();
+        let (mut entries, frameless_entries): (Vec<Entry>, Vec<_>) = natives.into_iter().unzip();
+        let frameless_entries = frameless_entries.into_iter().flatten().copied().collect();
         let Intercepted {
             replaced,
             by: intercepted_by,
@@ -3804,6 +3812,7 @@ impl EngineBuilder {
                 function_modules,
                 function_flags,
                 frameless,
+                frameless_entries,
                 classes,
                 class_keys,
                 class_modules,

@@ -1555,85 +1555,91 @@ impl Request {
         Some((room, header))
     }
 
-    /// The call of the frameless native `function` over `operands`,
-    /// `FRAMELESS_ICALL_*`'s, laid down being served: php's
-    /// full call where the native is observed
-    /// ([`crate::observer::frameless_observed`]), on the VM stack as
-    /// [`Request::push_call`] pushes it, and any other off the stack's
-    /// pages ([`php_heap::VmStack::push_frameless`]), since php serves it
-    /// over no frame and it takes no room php's call does not.
-    /// An observed frameless native's call takes one slot per operand
-    /// and the observer's, as [`Request::call_room`] sizes any native's
-    /// call.
-    #[inline(always)] // the one call site is the frameless handler's
-    pub(crate) fn push_frameless(
+    /// `ZEND_FRAMELESS_ICALL_*`'s call of the arity's own entry, php's
+    /// `zflf_*` handler, over `operands` as the handler read them, with
+    /// no call record: what the native reads of the call it serves is
+    /// read off the caller's opline ([`Request::frameless_serving`]), as
+    /// `zend_active_function_ex` reads it. What a coercion made beside an
+    /// operand is the call's until the entry returns, php's `str_tmp`
+    /// that `Z_FLF_PARAM_FREE_STR` frees at the body's end
+    /// ([`Request::replace_argument`]), and a throwable a stream op kept
+    /// is raised as it returns, as [`Request::serve_entry`] raises it.
+    #[inline(always)] // the frameless handler's hot path
+    pub(crate) fn serve_frameless(
+        &mut self,
+        function: Function,
+        entry: crate::api::__private::Frameless,
+        operands: &[php_heap::Zval],
+    ) -> Result<Value, Thrown> {
+        use crate::api::__private::Frameless;
+        let made = self.calls_coerced();
+        #[cfg(debug_assertions)]
+        let outer = self
+            .function_origin(function)
+            .map(|extension| self.heap.set_origin(extension.origin()));
+        let served = match (entry, operands) {
+            (Frameless::Zero(entry), &[]) => entry(self, &[]),
+            (Frameless::One(entry), &[a]) => entry(self, &[Value::of_zval(a)]),
+            (Frameless::Two(entry), &[a, b]) => entry(self, &[a, b].map(Value::of_zval)),
+            (Frameless::Three(entry), &[a, b, c]) => entry(self, &[a, b, c].map(Value::of_zval)),
+            _ => Err(crate::api::raising::fatal(
+                self,
+                "InternalError: a frameless call of another arity than its entry's",
+            )),
+        };
+        #[cfg(debug_assertions)]
+        if let Some(outer) = outer {
+            self.heap.set_origin(outer);
+        }
+        // The origin a debug build tags allocations with is all
+        // `function` names here.
+        #[cfg(not(debug_assertions))]
+        let _ = function;
+        self.release_coerced(made);
+        let served = served.map(crate::api::values::Owner::hand_on);
+        let Some(deferred) = self.stream_thrown.take() else {
+            return served;
+        };
+        match served {
+            Ok(value) => {
+                self.release(value);
+                Err(deferred)
+            }
+            Err(thrown) => Err(deferred.chain(self, thrown)),
+        }
+    }
+
+    /// `zend_frameless_observed_call` (`Z/Zend/zend_execute.c:1577-1597`):
+    /// a frameless call of a native an observer watches is the framed
+    /// entry's full call, its operands copied into a call laid down on
+    /// the VM stack as [`Request::push_call`] lays one, served as
+    /// `DO_ICALL` serves it, observer and all, and popped, which gives
+    /// the copies up. The call takes one slot per operand and the
+    /// observer's, as [`Request::call_room`] sizes any native's call.
+    pub(crate) fn serve_frameless_observed(
         &mut self,
         function: Function,
         operands: &[php_heap::Zval],
-    ) -> Result<FrameRef, Fatal> {
+    ) -> Result<Result<Value, Thrown>, Fatal> {
         let count = u32::try_from(operands.len()).unwrap_or(u32::MAX);
         let mut header = exec::Header::call(function, count);
         header.info.set_serving();
-        header.info.set_frameless(true);
-        if !crate::observer::frameless_observed(self, function) {
-            return self.vm.push_frameless(operands, header);
-        }
         let call = self.push_room(self.native_room(count) as usize, header)?;
         let slots = self
             .vm
             .stack
             .frame_mut(call)
             .map(exec::HeapFrame::slots_mut);
+        // `ZVAL_COPY_DEREF` of each operand, read through already.
         if let Some(slots) = slots.and_then(|slots| slots.get_mut(..operands.len())) {
-            slots.copy_from_slice(operands);
-        }
-        Ok(call)
-    }
-
-    /// The frameless call on top popped ([`Request::push_frameless`]),
-    /// the operands it owns, the bits of `owned`, given up as php's
-    /// `FREE_OP*` after the frameless handler frees them,
-    /// `zval_ptr_dtor_nogc`, once the call is on no chain; an operand
-    /// it borrowed is the caller's ([`exec::frameless_operand`]). A
-    /// frameless call is pushed with no receiver and no closure, and an
-    /// annex only where an argument's coercion kept a value there; a
-    /// record carrying one is popped as any call is
-    /// ([`Request::pop_call`]), its borrowed operands left out.
-    #[inline(always)] // the one call site is the frameless handler's
-    pub(crate) fn pop_frameless(&mut self, owned: u8) {
-        /// `ZEND_FRAMELESS_ICALL_3`'s, the most operands a frameless
-        /// call passes.
-        const OPERANDS: usize = 3;
-        let call = self.vm.stack.current();
-        let Some(frame) = self.vm.stack.frame_mut(call) else {
-            return;
-        };
-        let header = frame.header_mut();
-        debug_assert!(header.closure().is_none() && header.receiver().is_none());
-        header.info.set_leaving(true);
-        let carries = header.annex().is_some();
-        let slots = frame.slots_mut();
-        if carries {
-            for (at, slot) in slots.iter_mut().enumerate() {
-                if owned >> at & 1 == 0 {
-                    *slot = php_heap::Zval::UNDEF;
-                }
-            }
-            return self.pop_call();
-        }
-        if owned != 0 {
-            let mut operands = [php_heap::Zval::UNDEF; OPERANDS];
-            let count = slots.len().min(OPERANDS);
-            for (at, (operand, slot)) in operands.iter_mut().zip(slots).enumerate() {
-                if owned >> at & 1 != 0 {
-                    *operand = *slot;
-                }
-            }
-            for &operand in operands.get(..count).unwrap_or_default() {
-                self.release_zval_nogc(operand);
+            for (slot, &operand) in slots.iter_mut().zip(operands) {
+                operand.addref();
+                *slot = operand;
             }
         }
-        self.vm.stack.pop_frame(&mut self.heap);
+        let served = self.serve_native(function, crate::observer::OnThrow::ReturnValue);
+        self.pop_call();
+        Ok(served)
     }
 
     /// A call pushed with `room` slots past its header, its record named,
@@ -2501,13 +2507,6 @@ impl Request {
         // `zend_vm_stack_free_args`, whose `zval_ptr_dtor_nogc` makes no
         // argument a possible root; the receiver and the closure after
         // them are `OBJ_RELEASE`, which does.
-        for value in annex
-            .as_mut()
-            .map(|annex| std::mem::take(&mut annex.coerced))
-            .unwrap_or_default()
-        {
-            self.release_nogc(value);
-        }
         self.release_arguments(call);
         if let Some(trampoline) = annex.as_mut().and_then(|annex| annex.trampoline.take()) {
             self.release(Value::string(trampoline.name));

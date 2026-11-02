@@ -882,11 +882,6 @@ impl CallInfo {
     /// takes it by reference, which the `_FUNC_ARG` fetch and the
     /// `SEND_FUNC_ARG` after it serve as a write or as a read by.
     pub(crate) const SEND_BY_REF: u32 = 1 << 7;
-    /// A `FRAMELESS_ICALL_*`'s call, whose arguments are the opline's
-    /// operands: a coercion of one is kept in the [`Annex`] and not
-    /// written over the argument, as `Z_FLF_PARAM_STR` converts in a
-    /// temporary of the body's and a trace still reads the operand.
-    const FRAMELESS: u32 = 1 << 8;
     /// `ZEND_CALL_FREE_EXTRA_ARGS`: the activation moved arguments past
     /// the declared parameters beyond the CVs and the temporaries
     /// (`zend_copy_extra_args`), which the frame's leave gives up.
@@ -1086,10 +1081,6 @@ impl CallInfo {
         self.set(Self::SEND_BY_REF, on);
     }
 
-    pub(crate) fn frameless(self) -> bool {
-        self.has(Self::FRAMELESS)
-    }
-
     /// The by-value bits of a function whose argument numbered `n` is
     /// taken by reference where `by_ref(n)` says so
     /// ([`CallInfo::BY_VALUE_AT`]), what its `INIT` writes.
@@ -1179,10 +1170,6 @@ impl CallInfo {
     pub(crate) fn join(&mut self, more: CallInfo) {
         self.0 |= more.0;
     }
-
-    pub(crate) fn set_frameless(&mut self, on: bool) {
-        self.set(Self::FRAMELESS, on);
-    }
 }
 
 /// What a frame owns beyond the words of its [`Header`], made only for a
@@ -1243,9 +1230,6 @@ pub(crate) struct Annex {
     pub(crate) op_array: Option<HeapOpArray>,
     /// What a hook trampoline's call serves, none for every other call.
     pub(crate) trampoline: Option<HookTrampoline>,
-    /// php's `str_tmp`: what a coercion made for a frameless call, freed
-    /// with the call as `Z_FLF_PARAM_FREE_STR` frees it at the body's end.
-    pub(crate) coerced: Vec<Value>,
     /// How far down its native's chain of interceptions the call is
     /// served: zero for the entry the function table holds, the last
     /// interception's, and one more for each
@@ -1532,6 +1516,73 @@ impl<'a> FrameAt<'a> {
     /// The file of the op array the frame serves.
     pub(crate) fn file(self) -> Option<&'a [u8]> {
         self.code().map(|code| code.filename.0.as_ref())
+    }
+
+    /// The frameless call the frame stands at, where its opline is a
+    /// `FRAMELESS_ICALL_*` (`ZEND_OP_IS_FRAMELESS_ICALL(EX(opline))`):
+    /// the row of the engine's frameless table its `extended_value`
+    /// names, and its operands as `zend_get_zval_ptr` reads each where it
+    /// stands, `op1`, `op2` and the `OP_DATA`'s `op1`, views, `UNDEF`
+    /// where a temporary was freed already. What php reads off a user
+    /// frame in place of the record a frameless call never pushes
+    /// (`zend_active_function_ex`, `zend_fetch_debug_backtrace`).
+    pub(crate) fn frameless_call(self) -> Option<FramelessCall> {
+        let code = self.code()?;
+        let op = opline_at(code, self.opline())?;
+        let arity = match op.opcode {
+            php_unit::Opcode::FramelessIcall0 => 0,
+            php_unit::Opcode::FramelessIcall1 => 1,
+            php_unit::Opcode::FramelessIcall2 => 2,
+            php_unit::Opcode::FramelessIcall3 => 3,
+            _ => return None,
+        };
+        let data = opline_at(code, self.opline().saturating_add(1));
+        let read = |kind: OperandKind, field: u32| match kind {
+            OperandKind::Const => code
+                .literals
+                .get(field as usize)
+                .map_or(Value::null(), |z| Value::of_zval(*z)),
+            OperandKind::Cv | OperandKind::Tmp | OperandKind::Var => {
+                Value::of_slot(self.frame.slot(php_heap::Slot(field)))
+            }
+            OperandKind::Unused => Value::undef(),
+        };
+        let operands = [
+            (op.op1_type, op.op1),
+            (op.op2_type, op.op2),
+            data.map_or((OperandKind::Unused, 0), |data| (data.op1_type, data.op1)),
+        ];
+        let mut read = operands.map(|(kind, field)| read(kind, field));
+        for undefined in read.iter_mut().skip(arity) {
+            *undefined = Value::undef();
+        }
+        Some(FramelessCall {
+            row: op.extended_value,
+            arity,
+            operands: read,
+            used: op.out_type != OperandKind::Unused,
+        })
+    }
+}
+
+/// A frameless call read off the opline its caller stands at
+/// ([`FrameAt::frameless_call`]).
+#[derive(Clone, Copy)]
+pub(crate) struct FramelessCall {
+    /// `ZEND_FLF_FUNC(opline)`'s row of the engine's frameless table.
+    pub(crate) row: u32,
+    /// `ZEND_FLF_NUM_ARGS(opline->opcode)`.
+    pub(crate) arity: usize,
+    /// The operands, `UNDEF` past the arity.
+    pub(crate) operands: [Value; 3],
+    /// Whether the opline's `result` is read, `RETURN_VALUE_USED`.
+    pub(crate) used: bool,
+}
+
+impl FramelessCall {
+    /// The operands up to the arity.
+    pub(crate) fn arguments(&self) -> &[Value] {
+        self.operands.get(..self.arity).unwrap_or_default()
     }
 }
 
@@ -2533,18 +2584,6 @@ impl Vm {
         self.stack.push_frame(heap, slots, extra_args, || header)
     }
 
-    /// The frame of an unobserved frameless call, off the VM stack's
-    /// pages ([`php_heap::VmStack::push_frameless`]): its slots the
-    /// `operands`; more than three is the engine's error.
-    #[inline(always)] // the one call site is the frameless handler's
-    pub(crate) fn push_frameless(
-        &mut self,
-        operands: &[Zval],
-        header: Header,
-    ) -> Result<FrameRef, Fatal> {
-        self.stack.push_frameless(operands, header)
-    }
-
     /// A frame that was off the stack back on top of it, the half of a
     /// generator's resumption that is the engine's, and the calls its
     /// body was building when it yielded back on the stack above it,
@@ -3062,19 +3101,20 @@ pub(crate) fn key_value(req: &mut Request, key: php_heap::Key) -> Value {
 }
 
 /// `GET_OP*_ZVAL_PTR_DEREF(BP_VAR_R)` as a frameless call reads its
-/// operand into its record (`ZEND_FRAMELESS_ICALL_*`,
-/// `Z/Zend/zend_vm_def.h:9794`): the zval as it stands, and whether the
-/// record owns it. A `TMP` or a `VAR` is moved, its slot left `UNDEF`,
-/// and the record's owner is the one php's `FREE_OP*` gives up after the
-/// call. A `CONST` is borrowed, as php reads its pointer, and so is a
-/// `CV` of a frame no name reaches, since only the frame's own code
-/// writes one and none runs while the native does; a `CV` of a frame
-/// whose variables a symbol table names (`named`, the main file's or
-/// one a `$GLOBALS` write, an `include` or `extract` reaches) takes one
-/// more owner, since the native may serve code that writes over the
-/// variable while it reads the value. A `CV` nothing wrote, and a
-/// reference in any slot, are read as [`take_operand`] reads them, the
-/// warning and the value the reference holds, which the record owns.
+/// operand (`ZEND_FRAMELESS_ICALL_*`, `Z/Zend/zend_vm_def.h:9794`): the
+/// zval as it stands, left in its slot, and whether the handler holds an
+/// owner of its own to give up after the call. A `TMP` or a `VAR` stays
+/// its slot's, freed there after the call as php's `FREE_OP*` frees it
+/// ([`free_operand`]), so a trace taken while the native runs reads it
+/// off the opline as php's does. A `CONST` is borrowed, as php reads its
+/// pointer, and so is a `CV` of a frame no name reaches, since only the
+/// frame's own code writes one and none runs while the native does; a
+/// `CV` of a frame whose variables a symbol table names (`named`, the
+/// main file's or one a `$GLOBALS` write, an `include` or `extract`
+/// reaches) takes one more owner, since the native may serve code that
+/// writes over the variable while it reads the value. A `CV` nothing
+/// wrote is the warning and `null`, and a reference in any slot is read
+/// through, the value it holds with one more owner.
 ///
 /// The owner a `CV`'s string takes keeps it for the call when the
 /// autoloader the native serves writes over the variable, and a
@@ -3103,26 +3143,21 @@ pub(crate) fn frameless_operand(
     (kind, field): (OperandKind, u32),
     named: bool,
 ) -> (Zval, bool) {
-    let at = match kind {
-        OperandKind::Const => {
-            let z = code.literals.get(field as usize).copied();
-            return (z.unwrap_or_else(Zval::null), false);
-        }
-        OperandKind::Cv | OperandKind::Tmp | OperandKind::Var => field as usize,
-        OperandKind::Unused => usize::MAX,
-    };
-    let slot = req.slots_mut(frame).get_mut(at);
-    let z = slot.as_deref().copied().unwrap_or(Zval::UNDEF);
-    let (false, Some(slot)) = (
-        z.is_undef() || z.kind() == php_heap::ZvalType::Reference,
-        slot,
-    ) else {
-        return (take_operand(req, frame, code, kind, field).to_zval(), true);
-    };
-    if kind != OperandKind::Cv {
-        *slot = Zval::UNDEF;
+    if kind == OperandKind::Const {
+        let z = code.literals.get(field as usize).copied();
+        return (z.unwrap_or_else(Zval::null), false);
     }
-    frameless_owner(z, kind, named)
+    let z = (req.slots_mut(frame).get(field as usize).copied()).unwrap_or(Zval::UNDEF);
+    if kind != OperandKind::Unused && !z.is_undef() && z.kind() != php_heap::ZvalType::Reference {
+        let own = kind == OperandKind::Cv && named;
+        if own {
+            z.addref();
+        }
+        return (z, own);
+    }
+    let value = operand(req, frame, code, kind, field).deref();
+    req.addref(&value);
+    (value.to_zval(), true)
 }
 
 /// Whether a name reaches the variables of the frame `header` is, so a
@@ -3133,7 +3168,7 @@ pub(crate) fn frameless_named(header: Option<&Header>) -> bool {
     header.is_none_or(|header| header.annex.is_some())
 }
 
-/// What a frameless call's record holds of the operand `z` of `kind`,
+/// What a frameless call is handed of the operand `z` of `kind`,
 /// read where it stands and neither `UNDEF` nor a reference, and whether
 /// it owns it, as [`frameless_operand`] reads it from its slot and
 /// compiled code hands it over: a `TMP` or a `VAR` moved out of its

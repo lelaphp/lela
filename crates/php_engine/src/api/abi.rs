@@ -1058,6 +1058,10 @@ pub(crate) struct ExtensionEntry {
     pub(crate) info: Option<Info>,
 }
 
+/// A native's entry and its frameless arities' entries, `zif_*` and
+/// the `zflf_*` beside it.
+pub(crate) type FunctionEntries = (Entry, &'static [crate::api::__private::Frameless]);
+
 /// One native function as an extension registers it: the static entry
 /// its attribute laid down and, where [`ExtensionBuilder::function_reshaped`]
 /// registered it, what reshapes the declaration built from it. The
@@ -1076,14 +1080,14 @@ impl FunctionRow {
         }
     }
 
-    /// The declaration model and the entry, `zend_register_functions`'
-    /// one step over an entry.
-    pub(crate) fn declaration(&self) -> (FunctionDecl, Entry) {
+    /// The declaration model, the entry and the frameless entries,
+    /// `zend_register_functions`' one step over an entry.
+    pub(crate) fn declaration(&self) -> (FunctionDecl, FunctionEntries) {
         let mut declaration = self.native.declaration();
         if let Some(reshape) = self.reshape {
             reshape(&mut declaration);
         }
-        (declaration, self.native.entry)
+        (declaration, (self.native.entry, self.native.frameless))
     }
 }
 

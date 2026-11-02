@@ -521,9 +521,22 @@ fn moved(
 ///   - Return [ mixed ]
 /// }
 /// ```
-#[php_function(frameless(2))]
+#[php_function(frameless(2 = min_frameless))]
 fn min(req: &mut Request, value: Value, values: Variadic<Value>) -> Result<Value, Thrown> {
     extreme(req, value, values, Ordering::Less)
+}
+
+/// `ZEND_FRAMELESS_FUNCTION(min, 2)` (`Z/ext/standard/array.c:1282`),
+/// which answers a NaN otherwise than `PHP_FUNCTION(min)`, so the
+/// frameless arity is this function's ([`frameless_extreme`]).
+#[allow(clippy::needless_pass_by_value)] // the parameters `min` declares, as its frameless entry hands them on
+fn min_frameless(
+    req: &mut Request,
+    value: Value,
+    values: Variadic<Value>,
+) -> Result<Value, Thrown> {
+    let other = values.first().copied().unwrap_or_else(Value::null);
+    frameless_extreme(req, value, other, Ordering::Less)
 }
 
 /// `max(mixed $value, mixed ...$values): mixed`, php's
@@ -582,6 +595,24 @@ fn min(req: &mut Request, value: Value, values: Variadic<Value>) -> Result<Value
 /// string(2) "10"
 /// ```
 ///
+/// The framed body answers a NaN as `PHP_FUNCTION(max)` and `(min)`
+/// do, whatever the count, so a call of two by name, which the
+/// compiler makes a framed call, keeps the number the frameless arity
+/// would not:
+///
+/// ```php
+/// $f = 'max'; $g = 'min';
+/// var_dump($f(1, NAN), $f(NAN, 1), $g(NAN, 1), $g(1, NAN), max(1, NAN), min(NAN, 1));
+/// ```
+/// ```expect
+/// int(1)
+/// float(NAN)
+/// float(NAN)
+/// int(1)
+/// float(NAN)
+/// int(1)
+/// ```
+///
 /// The framed walk of more than two compares directly over a stretch of
 /// numbers and, from the first argument that leaves it, through
 /// `zend_compare` to the last, which orders a NaN above everything:
@@ -598,9 +629,22 @@ fn min(req: &mut Request, value: Value, values: Variadic<Value>) -> Result<Value
 /// float(NAN)
 /// float(1.5)
 /// ```
-#[php_function(frameless(2))]
+#[php_function(frameless(2 = max_frameless))]
 fn max(req: &mut Request, value: Value, values: Variadic<Value>) -> Result<Value, Thrown> {
     extreme(req, value, values, Ordering::Greater)
+}
+
+/// `ZEND_FRAMELESS_FUNCTION(max, 2)` (`Z/ext/standard/array.c:1410`),
+/// which answers a NaN otherwise than `PHP_FUNCTION(max)`, so the
+/// frameless arity is this function's ([`frameless_extreme`]).
+#[allow(clippy::needless_pass_by_value)] // the parameters `max` declares, as its frameless entry hands them on
+fn max_frameless(
+    req: &mut Request,
+    value: Value,
+    values: Variadic<Value>,
+) -> Result<Value, Thrown> {
+    let other = values.first().copied().unwrap_or_else(Value::null);
+    frameless_extreme(req, value, other, Ordering::Greater)
 }
 
 /// The walk `min` and `max` share; `wanted` is the answer of
@@ -611,12 +655,6 @@ fn extreme(
     values: Variadic<Value>,
     wanted: Ordering,
 ) -> Result<Value, Thrown> {
-    // The frameless arity's two operands, read before anything else.
-    if let [other] = values[..]
-        && req.frames().frameless()
-    {
-        return frameless_extreme(req, value, other, wanted);
-    }
     if values.is_empty() {
         // One argument is the array to walk, held to `array` as php's
         // `IS_ARRAY` check past `Z_PARAM_VARIADIC` refuses it, where the

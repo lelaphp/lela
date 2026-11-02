@@ -164,6 +164,15 @@ pub trait FromArgument: Sized {
         }
         coerced(req, given, position).map(Some)
     }
+    /// A variadic tail held off a frameless call's operands, `given`
+    /// those from the tail's `position` on, each held as [`Self::hold`]
+    /// holds an argument, what the entry `#[php_function]` generates for
+    /// a frameless arity reads in place of the call's count (design
+    /// §7.1); an internal error for a type that is no tail.
+    fn tail(req: &mut Request, given: &[Value], position: u32) -> Result<Self, Thrown> {
+        let _ = (given, position);
+        mismatch(req, "variadic tail")
+    }
     /// The absent argument: the declaration's default, `absent` as the
     /// entry lays it down, evaluated in `scope`, the declaring class, and
     /// held to the declared type ([`Absent`]).
@@ -980,6 +989,19 @@ impl<T: FromArgument> FromArgument for Variadic<T> {
     fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
         let count = req.variadic_count()?;
         tail(req, given, position, count).map(Some)
+    }
+    /// A frameless call's operands from `position` on, none or one held
+    /// in place and more on the heap, as a framed call's are.
+    fn tail(req: &mut Request, given: &[Value], position: u32) -> Result<Self, Thrown> {
+        let mut held = match given {
+            [] => return Ok(Variadic(Tail::Few(None))),
+            &[one] => return Ok(Variadic(Tail::Few(T::hold(req, one, position)?))),
+            many => Vec::with_capacity(many.len()),
+        };
+        for (at, &value) in (position..).zip(given) {
+            held.extend(T::hold(req, value, at)?);
+        }
+        Ok(Variadic(Tail::Many(held)))
     }
 }
 

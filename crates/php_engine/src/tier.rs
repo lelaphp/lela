@@ -1889,13 +1889,15 @@ pub struct FramelessAt(pub u32);
 /// compiled code calls the native's frameless handler with the operand
 /// zvals it addressed and the slot that takes its return
 /// (`jit_frameless_icall*`, `Z/ext/opcache/jit/zend_jit_ir.c:17868-18110`),
-/// with no opline read: each operand of the kind of its slot, as
-/// compiled code read it, neither `UNDEF`, which compiled code hands to
-/// the handler instead, nor a reference, which it reads through, a
-/// temporary moved out of
-/// its slot, and `Unused` past the native's arity. Its record is
-/// owned as [`crate::exec::frameless_owner`] says, and given up as the
-/// call ends ([`crate::handlers::frameless_served`]); compiled code
+/// each operand of the kind of its slot, as compiled code read it,
+/// neither `UNDEF`, which compiled code hands to the handler instead,
+/// nor a reference, which it reads through, and `Unused` past the
+/// native's arity. A temporary compiled code moved out of its slot is
+/// put back where the opline the frame stands at names it, so a trace
+/// taken while the native runs reads it there as the handler leaves it
+/// and php's code does, and freed there as the call ends; a variable is
+/// held as [`crate::exec::frameless_owner`] says
+/// ([`crate::handlers::frameless_served`]); compiled code
 /// makes the interrupt check after a native that returned,
 /// `jit_frameless_interrupt_check`, and this makes it after one that
 /// threw, or returned with a throwable a warning's handler threw, with
@@ -1916,7 +1918,16 @@ pub fn frameless_call(
     operands: [(Zval, OperandKind); 3],
 ) -> Result<Zval, Fatal> {
     let named = exec::frameless_named(req.vm().at(frame));
+    // The slots the opline names its operands by, `op1`, `op2` and the
+    // `OP_DATA`'s `op1`.
+    let fields = req.frame_at(frame).and_then(|state| {
+        let code = state.code()?;
+        let op = exec::opline_at(code, state.opline())?;
+        let data = exec::opline_at(code, state.opline().saturating_add(1));
+        Some([op.op1, op.op2, data.map_or(0, |data| data.op1)])
+    });
     let mut held = [Zval::UNDEF; 3];
+    let mut slots = [(OperandKind::Const, 0); 3];
     let mut owned = 0u8;
     let mut count = 0;
     for (place, (z, kind)) in operands.into_iter().enumerate() {
@@ -1924,13 +1935,28 @@ pub fn frameless_call(
             break;
         }
         debug_assert!(!z.is_undef() && z.kind() != php_heap::ZvalType::Reference);
+        let field = fields.map(|fields| fields[place]);
         let own;
-        (held[place], own) = exec::frameless_owner(z, kind, named);
+        (held[place], own) = match (kind, field) {
+            (OperandKind::Tmp | OperandKind::Var, Some(field)) => {
+                if let Some(slot) = req.slots_mut(frame).get_mut(field as usize) {
+                    *slot = z;
+                }
+                slots[place] = (kind, field);
+                (z, false)
+            }
+            _ => exec::frameless_owner(z, kind, named),
+        };
         owned |= u8::from(own) << place;
         count = place + 1;
     }
-    let operands = held.get(..count).unwrap_or_default();
-    let returned = crate::handlers::frameless_served(req, at.0, operands, owned)?;
+    let held = crate::handlers::Operands {
+        frame,
+        zvals: held.get(..count).unwrap_or_default(),
+        owned,
+        slots: slots.get(..count).unwrap_or_default(),
+    };
+    let returned = crate::handlers::frameless_served(req, at.0, held)?;
     Ok(returned.map_or_else(Zval::null, Value::to_zval))
 }
 

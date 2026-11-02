@@ -255,8 +255,9 @@ impl Request {
     /// what the call was given writes nothing. A frameless call's
     /// argument is the opline's operand, which php's `Z_FLF_PARAM_STR`
     /// never writes: it converts a temporary of the body's and frees it
-    /// at the body's end, so the frame keeps `value` beside the argument
-    /// and a trace taken after the coercion prints the operand as passed.
+    /// at the body's end, so the request keeps `value` until the entry
+    /// returns ([`Request::serve_frameless`]) and a trace taken after the
+    /// coercion prints the operand as passed.
     pub(crate) fn replace_argument(&mut self, position: u32, value: Value) {
         let Some(index) = position
             .checked_sub(1)
@@ -265,17 +266,14 @@ impl Request {
             return;
         };
         let Some(call) = self.vm.serving_at() else {
+            if self.frameless_serving().is_some() {
+                self.keep_coerced(value);
+            }
             return;
         };
         let Some(header) = self.vm.at(call) else {
             return;
         };
-        if header.info.frameless() {
-            if let Some(annex) = self.annex_mut(call) {
-                annex.coerced.push(value);
-            }
-            return;
-        }
         if index >= header.num_args as usize {
             return;
         }
@@ -379,7 +377,48 @@ impl Request {
     /// raisers render its declared name and its parameters' names off
     /// the declaration, never off the caller's spelling.
     pub(crate) fn active_native_function(&self) -> Option<Function> {
-        self.serving_call()?.function()
+        match self.serving_call() {
+            Some(call) => call.function(),
+            None => self.frameless_serving().map(|(function, _)| function),
+        }
+    }
+
+    /// `zend_active_function_ex`'s frameless half
+    /// (`Z/Zend/zend_execute_API.c:605`): where `EG(current_execute_data)`
+    /// is user code standing at a `FRAMELESS_ICALL_*`, the native the
+    /// engine's frameless table holds at its `extended_value`, and the
+    /// call as the opline reads ([`exec::FrameAt::frameless_call`]). A
+    /// frameless call pushes no record, so this is what the raisers'
+    /// function name, the arguments a native reads back and whether its
+    /// return is read come from while one is served. Its regime is the
+    /// frame's own, `ZEND_FLF_ARG_USES_STRICT_TYPES()`, which is
+    /// [`Request::strict_types`]'s innermost frame where no call is
+    /// served, and the trace a throw out of it takes holds the row php
+    /// adds for the call:
+    ///
+    /// ```php
+    /// declare(strict_types=1);
+    /// function f($p) { return preg_match($p, "abc"); }
+    /// var_dump(f("abc"));
+    /// function g($n) { return str_contains($n, "1"); }
+    /// try { var_dump(g(12)); } catch (TypeError $e) { echo $e->getMessage(), "\n", $e->getTraceAsString(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Warning: preg_match(): Delimiter must not be alphanumeric, backslash, or NUL byte in %s on line 3
+    /// bool(false)
+    /// str_contains(): Argument #1 ($haystack) must be of type string, int given
+    /// #0 %s(5): str_contains(12, '1')
+    /// #1 %s(6): g(12)
+    /// #2 {main}
+    /// ```
+    pub(crate) fn frameless_serving(&self) -> Option<(Function, exec::FramelessCall)> {
+        let state = self.frame_at(self.vm.current_at()?)?;
+        if !state.info().user() {
+            return None;
+        }
+        let call = state.frameless_call()?;
+        let row = self.shared.frameless.get(call.row as usize)?;
+        Some((Function(row.function), call))
     }
 
     /// Whether a native is being served, [`Request::active_native_function`]
@@ -765,18 +804,6 @@ impl<'r> Frames<&'r Request> {
         self.0.innermost_frame().map_or(0, exec::FrameAt::line)
     }
 
-    /// Whether the call being served is a frameless one, a
-    /// `FRAMELESS_ICALL_*` the compiler emitted for a declared arity: php
-    /// serves such a call with the native's `ZEND_FRAMELESS_FUNCTION`
-    /// body, which for `min` and `max` answers a tie differently from
-    /// the framed body, so the native reads which one it is.
-    #[must_use]
-    pub fn frameless(self) -> bool {
-        self.0
-            .serving_call()
-            .is_some_and(|call| call.info().frameless())
-    }
-
     /// `USED_RET()` (`Z/Zend/zend_API.h`): whether the caller reads what
     /// the native returns, false only for a call written as a statement,
     /// whose `DO_*CALL` writes its return to an `UNUSED` operand; a call
@@ -785,18 +812,20 @@ impl<'r> Frames<&'r Request> {
     /// decides when the removed elements' destructors are served.
     #[must_use]
     pub fn return_value_used(self) -> bool {
-        self.0
-            .serving_call()
-            .is_none_or(|call| call.info().return_used())
+        match self.0.serving_call() {
+            Some(call) => call.info().return_used(),
+            None => self.0.frameless_serving().is_none_or(|(_, call)| call.used),
+        }
     }
 
     /// `ZEND_NUM_ARGS()`: how many arguments the call being served was
     /// given, and zero outside a native's body.
     #[must_use]
     pub fn argument_count(self) -> usize {
-        self.0
-            .serving_call()
-            .map_or(0, |call| call.num_args() as usize)
+        match self.0.serving_call() {
+            Some(call) => call.num_args() as usize,
+            None => self.0.frameless_serving().map_or(0, |(_, call)| call.arity),
+        }
     }
 
     /// `ZEND_CALL_ARG(execute_data, position)`: the argument at
@@ -807,8 +836,11 @@ impl<'r> Frames<&'r Request> {
     /// its slot before coercing it.
     #[must_use]
     pub fn argument(self, position: u32) -> Option<Value> {
-        let call = self.0.serving_call()?;
         let index = position.checked_sub(1)?;
+        let Some(call) = self.0.serving_call() else {
+            let (_, call) = self.0.frameless_serving()?;
+            return call.arguments().get(index as usize).copied();
+        };
         (index < call.num_args()).then(|| Value::of_zval(call.frame.slot(Slot(index))))
     }
 

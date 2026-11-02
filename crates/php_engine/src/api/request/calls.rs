@@ -51,6 +51,11 @@ pub(super) struct Calls {
     /// `None` records nothing, and is what a request holds unless its
     /// engine or its test asked (#2168).
     trace: Option<Vec<crate::trace::Entered>>,
+    /// php's `str_tmp`: what a coercion made for a frameless call's
+    /// argument, which php's `Z_FLF_PARAM_STR` never writes back into the
+    /// operand, kept until the entry returns, as `Z_FLF_PARAM_FREE_STR`
+    /// frees it at the body's end ([`Request::serve_frameless`]).
+    coerced: Vec<Value>,
 }
 
 /// What a call carries beyond its function and arguments, never two of
@@ -1755,7 +1760,7 @@ impl Request {
     /// none for a closure's or a trampoline's entry that no extension
     /// declares, which allocates as its caller.
     #[cfg(debug_assertions)]
-    fn function_origin(&self, function: Function) -> Option<ExtensionId> {
+    pub(super) fn function_origin(&self, function: Function) -> Option<ExtensionId> {
         let intercepted = usize::try_from(function.0)
             .ok()
             .and_then(|at| self.shared.intercepted_by.get(at).copied().flatten());
@@ -1788,6 +1793,30 @@ impl Request {
     #[inline]
     pub(crate) fn tracing_natives(&self) -> bool {
         self.calls.trace.is_some()
+    }
+
+    /// How many coercions a frameless call has kept so far, the mark the
+    /// one about to be served gives back to ([`Request::release_coerced`]).
+    #[inline(always)] // the frameless handler's hot path
+    pub(super) fn calls_coerced(&self) -> usize {
+        self.calls.coerced.len()
+    }
+
+    /// What a coercion made for a frameless call's argument kept to its
+    /// end ([`Request::replace_argument`]).
+    pub(super) fn keep_coerced(&mut self, value: Value) {
+        self.calls.coerced.push(value);
+    }
+
+    /// The coercions kept past `made` given up, as the frameless entry
+    /// that made them returns.
+    #[inline(always)] // the frameless handler's hot path, a length's test
+    pub(super) fn release_coerced(&mut self, made: usize) {
+        while self.calls.coerced.len() > made {
+            if let Some(value) = self.calls.coerced.pop() {
+                self.release_nogc(value);
+            }
+        }
     }
 
     /// The natives recorded, given up at the request's end; none where

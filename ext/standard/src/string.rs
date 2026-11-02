@@ -1843,15 +1843,12 @@ fn explode(
 ///
 /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 32522240 bytes) in %s on line 3
 /// ```
-#[php_function(frameless(1, 2), aliases(join))]
+#[php_function(frameless(1 = implode_frameless, 2 = implode_frameless), aliases(join))]
 fn implode(
     req: &mut Request,
     separator: Raw<Union<PhpArray, PhpString>>,
     #[php(default = null)] array: Raw<Option<PhpArray>>,
 ) -> Result<Owner<PhpString>, Thrown> {
-    if req.frames().frameless() {
-        return implode_frameless(req, separator, array);
-    }
     let (separator, array) = (separator.hold(req)?, array.hold(req)?);
     let (glue, pieces) = match (separator, array) {
         (Union::A(array), None) => (None, array),
