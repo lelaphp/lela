@@ -940,11 +940,18 @@ impl Request {
         // `zend_leave_helper`'s first test, one word of `ZEND_CALL_INFO`:
         // no call, extra argument or annex, which a file's frame always
         // has, and whether a receiver or a closure is given up after the
-        // CVs, which is read only where the word says one is held.
-        let held = match header.info.leave() {
-            exec::Leave::Plain => false,
-            exec::Leave::Held if held_kept(header.receiver(), header.closure()) => true,
-            exec::Leave::Held | exec::Leave::Kernel => return None,
+        // CVs, which is read only where the word says one is held. A
+        // receiver held alone, a method's, is given up on the way out
+        // below, as php's `ZEND_CALL_RELEASE_THIS` test does before the
+        // frame is freed.
+        let (held, receiver) = match header.info.leave() {
+            exec::Leave::Plain => (false, None),
+            exec::Leave::Held => match (header.receiver(), header.closure()) {
+                (Some(receiver), None) if receiver_kept(receiver) => (true, Some(receiver)),
+                (receiver, closure) if held_kept(receiver, closure) => (true, None),
+                _ => return None,
+            },
+            exec::Leave::Kernel => return None,
         };
         debug_assert!(
             header.function.is_some()
@@ -974,26 +981,38 @@ impl Request {
         if owners && !owners_kept(owned) {
             return None;
         }
-        if owners || held {
-            let leave = PlainLeave {
-                caller,
-                returns_to,
-                cvs: if owners { cvs } else { 0 },
-                held,
-            };
+        let leave = PlainLeave {
+            caller,
+            returns_to,
+            cvs: if owners { cvs } else { 0 },
+            held,
+        };
+        if owners || held && receiver.is_none() {
             return self.leave_owning(leave, returned);
         }
         let into = below.get_mut(caller.0 as usize)?;
-        match returns_to {
+        let into_slot = match returns_to {
             Some(slot) => {
                 let slot = into.slots_mut().get_mut(slot as usize)?;
                 if slot.is_refcounted() {
                     return None;
                 }
-                *slot = returned;
+                Some(slot)
             }
             None if returned.is_refcounted() => return None,
-            None => {}
+            None => None,
+        };
+        // `OBJ_RELEASE(Z_OBJ(execute_data->This))`, another owner standing,
+        // or a lent receiver's pin let go: no CV owned anything, so this is
+        // all the frame gives up. The collector's buffer, where it must be
+        // run first, is the owning leave's.
+        if let Some(receiver) = receiver
+            && !let_go_kept(&mut self.heap, receiver)
+        {
+            return self.leave_owning(leave, returned);
+        }
+        if let Some(slot) = into_slot {
+            *slot = returned;
         }
         let header = into.header_mut();
         header.opline = header.opline.wrapping_add(1);
@@ -2554,15 +2573,56 @@ fn kept_by_another(z: Zval) -> bool {
 }
 
 /// Whether a leaving frame's receiver and closure, where it has them, are
-/// given up with no destructor due: lent, or with another owner standing
-/// ([`kept_by_another`]).
+/// given up with no destructor due ([`receiver_kept`], [`kept_by_another`]).
 #[inline(never)]
 fn held_kept(receiver: Option<exec::Receiver>, closure: Option<PhpObject>) -> bool {
-    let receiver = match receiver {
-        None | Some(exec::Receiver::Lent(_)) => true,
-        Some(exec::Receiver::Owned(object)) => kept_by_another(object.as_value().to_zval()),
-    };
-    receiver && closure.is_none_or(|closure| kept_by_another(closure.as_value().to_zval()))
+    receiver.is_none_or(receiver_kept)
+        && closure.is_none_or(|closure| kept_by_another(closure.as_value().to_zval()))
+}
+
+/// Whether a leaving frame's receiver is given up with no destructor
+/// due: lent, or owned with another owner standing, read off the
+/// object's own header.
+#[inline(always)] // part of the plain leave's first test
+fn receiver_kept(receiver: exec::Receiver) -> bool {
+    match receiver {
+        exec::Receiver::Lent(_) => true,
+        exec::Receiver::Owned(object) => object.heap().refcount() > 1,
+    }
+}
+
+/// A receiver [`receiver_kept`] found given up with no destructor due,
+/// given up in `heap`: one owner, `OBJ_RELEASE` with the object a possible
+/// root as php's leaves it ([`php_heap::Heap::release_kept`]), or a lent
+/// one's pin let go. False, with nothing given up, where the collector's
+/// buffer must be collected first.
+///
+/// A method's frame that owns nothing else gives its receiver up this
+/// way, owned off a CV or lent to `$this->m()`, and the object a cycle
+/// keeps is the one possible root php's `OBJ_RELEASE` leaves it, however
+/// many calls gave it up; a receiver whose last owner the frame holds
+/// is destroyed on the owning leave, before the call's value is read:
+///
+/// ```php
+/// class N { public $self; function __construct(public $n) {} function m() { return $this->n; } function own() { return $this->m(); } function __destruct() { echo "[{$this->n}]"; } }
+/// $o = new N(1); $o->self = $o; $s = 0;
+/// for ($i = 0; $i < 3; $i++) { $s += $o->m() + $o->own(); }
+/// echo $s, " ", gc_status()['roots'], " ", (new N(2))->m(), "\n";
+/// unset($o); echo gc_collect_cycles(), "\n";
+/// ```
+/// ```expect
+/// 6 1 [2]2
+/// [1]1
+/// ```
+#[inline(always)] // part of the plain leave of a method's frame
+fn let_go_kept(heap: &mut php_heap::Heap, receiver: exec::Receiver) -> bool {
+    match receiver {
+        exec::Receiver::Owned(object) => heap.release_kept(object.as_value().to_zval()),
+        exec::Receiver::Lent(object) => {
+            heap.unpin(object.heap());
+            true
+        }
+    }
 }
 
 /// Whether every owner among `cvs` is given up with no destructor due: a
