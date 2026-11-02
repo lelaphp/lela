@@ -1040,6 +1040,19 @@ impl PhpArray {
         adopted(req.array_dup(self.0).map(PhpArray::of))
     }
 
+    /// `src`'s values appended in one pass where both are packed lists,
+    /// after `SEPARATE_ARRAY` ([`php_heap::Heap::array_fill_packed`]);
+    /// the face's is the owner's, [`Owner::fill_packed`].
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn fill_packed(&mut self, req: &mut Request, src: PhpArray) -> Result<bool, Thrown> {
+        if !self.is_packed() || !src.is_packed() {
+            return Ok(false);
+        }
+        self.separate(req)?;
+        let filled = req.heap_mut().array_fill_packed(self.0, src.0);
+        req.fatal_of(filled)
+    }
+
     /// The first live element at or past the bucket `position`, with
     /// the bucket it stands at: what a hash iterator's `pos` reads
     /// (`zend_hash_get_current_data_ex` after
