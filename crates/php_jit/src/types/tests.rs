@@ -1013,33 +1013,39 @@ fn a_fetched_elements_guard_leaves_past_the_fetch_under_a_call() -> Result<(), S
     Ok(())
 }
 
-/// A fetched element's guard under a call under way, over a temporary
-/// array, leaves past the fetch with the call to restore and the
-/// temporary to free, both: the two halves of the landing
-/// `a_fetched_elements_guard_leaves_past_the_fetch_under_a_call` and
-/// `a_fetched_elements_guard_frees_the_temporary_it_read` take apart, so
-/// a landing that dropped the free under a call would leak the array, or
-/// call its destructor late, at every such exit (#3438).
+/// A fetched element's guard over the temporary array a call returned,
+/// as an argument of a call begun before it, leaves past the fetch with
+/// the temporary to free and no call to restore: the `INIT_FCALL` of `g`
+/// after `strcmp`'s links `strcmp`'s call into the call chain at once
+/// (`zend_jit_needs_call_chain`, `Z/ext/opcache/jit/zend_jit.c:259-330`),
+/// and the pinned php's `TRACE 1 exit info` under the trace-dump regime
+/// with bits 19 and 20 lists the guard's exit as `exit_5:
+/// 0008/0016/7/FREE_OP1`, where this tier restored a call there too
+/// (#3438, #3894). A landing that dropped the free would leak the array,
+/// or call its destructor late, at every such exit.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
-fn a_fetched_elements_guard_under_a_call_frees_the_temporary_it_read() -> Result<(), String> {
+fn a_fetched_elements_guard_past_a_linked_call_frees_the_temporary_it_read() -> Result<(), String> {
     let ir = built(
         &IN_F,
         "function g() { $a = []; $a[] = 'b'; return $a; }
         function f(int $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += strcmp(g()[0], 'b'); } return $t; }
         echo f(10), \"\\n\";",
     )?;
-    let freeing_under_a_call = Landing {
+    let freeing = Landing {
         frees: Frees {
             op1: true,
             op2: false,
         },
-        restores_call: true,
+        restores_call: false,
     };
     assert!(
-        ir.exits
-            .iter()
-            .any(|exit| exit.landing == freeing_under_a_call),
+        ir.exits.iter().any(|exit| exit.landing == freeing),
+        "{}",
+        dump::render(&ir)
+    );
+    assert!(
+        !(ir.exits.iter()).any(|exit| exit.landing.restores_call),
         "{}",
         dump::render(&ir)
     );
@@ -3879,9 +3885,8 @@ fn an_overflowing_step_leaves_past_itself_as_php_does() -> Result<(), String> {
 /// knows of each slot: `exit_3: 0006/0002/2 CV0($n):int(x0:1)
 /// CV1($x):float(9.22337e+18)`, the first level's overflow, and `exit_7:
 /// 0006/0013/2 CV0($n):int(x0:1) CV1($x):int(x1)`. php's `exit_10`, the
-/// loop's interrupt test, knows the last caller's slots, and its `exit_5`
-/// and `exit_9` restore no call; this tier's knows the root's and
-/// restores one, held apart (#3893, #3894).
+/// loop's interrupt test, knows the last caller's slots; this tier's
+/// knows the root's, held apart (#3893).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_step_held_a_double_leaves_past_itself_where_it_did_not_overflow() -> Result<(), String> {
@@ -3941,5 +3946,80 @@ fn a_step_held_a_double_leaves_past_itself_where_it_did_not_overflow() -> Result
         ),
         "{rendered}"
     );
+    Ok(())
+}
+
+/// Each exit's opline and whether it restores a call, as `ir` holds them.
+fn restoring(ir: &TraceIr) -> Vec<(u32, bool)> {
+    (ir.exits.iter())
+        .map(|exit| {
+            (
+                exit.opline.map_or(u32::MAX, |at| at.0),
+                exit.landing.restores_call,
+            )
+        })
+        .collect()
+}
+
+/// An `INIT_FCALL_BY_NAME` followed by a `SUB` before its sends saves
+/// the call chain at once, as php's `zend_jit_needs_call_chain` says of
+/// any opline but a send or a call after an `INIT_*` other than
+/// `INIT_FCALL`, whose `zend_may_throw` is the init's own
+/// (`Z/ext/opcache/jit/zend_jit.c:259-330`), so no exit restores a call
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:144-147`). The pinned php's
+/// `TRACE 1 exit info` for #3828's program under the trace-dump regime
+/// with bits 19 and 20 lists the `SUB`'s overflow exit of each level as
+/// `exit_5: 0008/0006/5` and `exit_9: 0008/0017/5`, and no exit `/CALL`;
+/// this tier's restored a call at both (#3894).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_exit_after_an_init_that_saves_the_chain_restores_no_call() -> Result<(), String> {
+    let ir = built(
+        &[("record.function", "r"), ("record.start", "enter")],
+        "function r($n, $x) { if ($n == 0) { return $x; }
+          $x++;
+          return r($n - 1, $x); }
+        var_dump(r(2, PHP_INT_MAX - 1));",
+    )?;
+    let php = [
+        (2, false),
+        (4, false),
+        (5, false),
+        (6, false),
+        (6, false),
+        (8, false),
+        (4, false),
+        (6, false),
+        (6, false),
+        (8, false),
+        (2, false),
+    ];
+    assert_eq!(restoring(&ir), php, "{}", dump::render(&ir));
+    Ok(())
+}
+
+/// An `INIT_FCALL` followed by sends and inline arithmetic before its
+/// call delays the call chain, as php's `zend_jit_needs_call_chain`
+/// passes over any opline after an `INIT_FCALL` whose `zend_may_throw`,
+/// asked of the init's own opline, says it cannot
+/// (`Z/ext/opcache/jit/zend_jit.c:259-330`,
+/// `Z/Zend/Optimizer/zend_inference.c:5049-5051`), so each `ADD`'s
+/// overflow exit restores the call: the pinned php's `TRACE 1 exit info`
+/// under the trace-dump regime with bits 19 and 20 lists them as `exit_7:
+/// 0007/0015/5/CALL` and `exit_8: 0010/0020/8/CALL`.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_exit_after_an_init_fcall_that_delays_the_chain_restores_the_call() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($s, $n, $k) { $t = 0; for ($i = 1; $i < $n; $i++) { $t += strncmp($i + $k, $s, $i + $k); } return $t; }
+        echo f('a', 20, 2), \"\\n\";",
+    )?;
+    // The exits between the `INIT_FCALL` at `0006` and its `DO_ICALL` at
+    // `0012`.
+    let between: Vec<(u32, bool)> = (restoring(&ir).into_iter())
+        .filter(|(opline, _)| (7..12).contains(opline))
+        .collect();
+    assert_eq!(between, [(7, true), (10, true)], "{}", dump::render(&ir));
     Ok(())
 }

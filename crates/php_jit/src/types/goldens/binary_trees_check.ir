@@ -47,9 +47,9 @@ exit 1: f0 0001 plain f0.CV0:array to vm
 exit 2: f0 0001 plain f0.CV0:array packed guard
 exit 3: f0 0004 plain f0.CV0:array
 exit 4: f0 0005 plain f0.CV0:array to vm
-exit 5: f0 0007 restore call f0.CV0:array to vm
-exit 6: f0 0008 restore call f0.T2=copied #3 f0.CV0:array
-exit 7: f0 0008 restore call f0.T2=copied #3 through a reference f0.CV0:array
-exit 8: f1 0008 restore call f1.T2=copied #6 f1.CV0:array
-exit 9: f1 0008 restore call f1.T2=copied #6 through a reference f1.CV0:array
+exit 5: f0 0007 plain f0.CV0:array to vm
+exit 6: f0 0008 plain f0.T2=copied #3 f0.CV0:array
+exit 7: f0 0008 plain f0.T2=copied #3 through a reference f0.CV0:array
+exit 8: f1 0008 plain f1.T2=copied #6 f1.CV0:array
+exit 9: f1 0008 plain f1.T2=copied #6 through a reference f1.CV0:array
 unwind 0:
