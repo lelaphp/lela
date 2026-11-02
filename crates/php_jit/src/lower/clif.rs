@@ -2608,8 +2608,9 @@ impl<'a> Emit<'a> {
     }
 
     /// What follows a stepped `line`: a call it made off the calls under
-    /// way, and the way a jump it served went held to its guards, read off
-    /// the `Stood` the kernel, or the code that served it in place, wrote.
+    /// way, the way a jump it served went held to its guards, read off
+    /// the `Stood` the kernel, or the code that served it in place, wrote,
+    /// and what a property fetch wrote held to its type.
     fn after_step(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         if matches!(
             line.opcode,
@@ -2647,6 +2648,23 @@ impl<'a> Emit<'a> {
                         .ins()
                         .icmp_imm_u(IntCC::Equal, went, i64::from(opline.0));
                     self.leave_where(there, guard.exit)?;
+                }
+                // What a property fetch wrote, held where php's inline
+                // fetch holds it (`types`' `hold_in_fetch`): read from
+                // the slot the handler wrote, which it dereferenced.
+                Check::Type { value, tag: t } | Check::Deref { value, tag: t }
+                    if line.opcode == Opcode::FetchObjR && line.out == Some(value) =>
+                {
+                    let (room, offset) = self.place(self.value(value)?.slot)?;
+                    let byte = self.b.ins().load(I8, trusted(), room, offset + TYPE_AT);
+                    let other = match guard.check {
+                        Check::Deref { .. } => {
+                            let reference = tag(ZvalType::Reference);
+                            self.b.ins().icmp_imm_s(IntCC::Equal, byte, reference)
+                        }
+                        _ => self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, tag(t)),
+                    };
+                    self.leave_if(other, guard.exit)?;
                 }
                 Check::Type { .. }
                 | Check::Deref { .. }
