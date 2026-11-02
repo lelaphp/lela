@@ -2365,12 +2365,14 @@ fn in_order(
         dynamic: vec![false; unit.dynamic.len()],
         hook_names: std::mem::take(hook_names),
         keys: main.is_some().then(Vec::new),
+        interface_names: unit.classes.iter().map(|_| None).collect(),
     };
     let made = walk
         .nested(req, &unit.main, main)
         .and_then(|()| walk.rest(req));
     *hook_names = walk.hook_names;
     hook_names.extend(walk.keys.into_iter().flatten());
+    hook_names.extend(walk.interface_names.into_iter().flatten());
     match made {
         Ok(()) => Ok(walk.laid),
         Err(thrown) => {
@@ -2414,6 +2416,8 @@ struct Walk<'u> {
     /// The keys of the top-level functions and the methods laid as each
     /// begins, where the request compiled the unit ([`Walk::key`]).
     keys: Option<Vec<Emalloc>>,
+    /// Each class's `ce->interface_names` ([`Walk::interfaces`]).
+    interface_names: Vec<Option<Emalloc>>,
 }
 
 /// A method's or a hook's place in its unit's table by its class, its
@@ -2443,6 +2447,16 @@ fn unreached(places: &mut Places, place: usize) -> Option<usize> {
 /// A hook's kind as [`Places`] keys it.
 fn hook_key(kind: php_unit::decl::HookKind) -> u8 {
     u8::from(kind == php_unit::decl::HookKind::Set)
+}
+
+/// Whether `class`'s last interface is the `Stringable` its `__toString`
+/// adds as it begins (`add_stringable_interface`), after the ones
+/// written; one written last as `Stringable` reads as added.
+fn stringable(class: &ClassDecl) -> bool {
+    let last = class.interfaces.last().map(|name| &*name.0);
+    class.kind != php_unit::decl::ClassKind::Trait
+        && last == Some(b"Stringable".as_slice())
+        && (class.methods.iter()).any(|m| m.function.name.0.eq_ignore_ascii_case(b"__tostring"))
 }
 
 /// Where an op array's blocks are held.
@@ -2558,8 +2572,8 @@ impl Walk<'_> {
         self.body(req, code, Some((decl, false)), stood, Holder::Dynamic(at))
     }
 
-    /// The class at `at`, once: its tables ([`class`]), the methods and
-    /// hooks its declaration compiles recorded after it.
+    /// The class at `at`, once: its tables ([`class`]), [`Walk::interfaces`],
+    /// the methods and hooks its declaration compiles recorded after it.
     fn class(&mut self, req: &mut Request, at: usize) -> Result<(), Thrown> {
         let Some(decl) = self.unit.classes.get(at) else {
             return Ok(());
@@ -2571,6 +2585,56 @@ impl Walk<'_> {
         let blocks = class(req, decl, bodies.count())?;
         if let Some(slot) = self.laid.classes.get_mut(at) {
             *slot = Some(blocks);
+        }
+        let begun = decl.interfaces.len() - usize::from(stringable(decl));
+        self.interfaces(req, at, begun)
+    }
+
+    /// `ce->interface_names` of the class at `at` grown to its first `to`
+    /// interfaces where the request compiled the unit, and the strings made
+    /// for each: a written one's lowered name where it holds an upper-case
+    /// letter (`zend_compile_implements`, `Z/Zend/zend_compile.c:9197`), an
+    /// enum's `unitenum` and `backedenum` (`Z/Zend/zend_enum.c:184`, whose
+    /// second `erealloc` of the names no peak sees, so it is one step
+    /// here), and both of the `Stringable` a `__toString` adds as it begins
+    /// (`add_stringable_interface`, `:8242`). The link gives them back
+    /// (`Z/Zend/zend_inheritance.c:2302`), so they stand at the peak alone:
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3901-' . getmypid() . '.php';
+    /// foreach (['interface I {} class C implements I {} ', 'interface i {} class C implements i {} ', 'interface I {} interface J {} class C implements I, J {} ', 'enum E: int implements Countable { case A = 1; function count(): int { return 1; } } ', 'class C { function __toString(): string { return ""; } } '] as $code) {
+    ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
+    ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
+    ///     [$usage, $peak] = explode(' ', trim($fresh));
+    ///     echo $peak - $usage, "\n";
+    /// }
+    /// unlink($f);
+    /// ```
+    /// ```expect process
+    /// 35792
+    /// 35728
+    /// 35872
+    /// 37472
+    /// 37344
+    /// ```
+    fn interfaces(&mut self, req: &mut Request, at: usize, to: usize) -> Result<(), Thrown> {
+        let (Some(keys), Some(block), Some(decl)) = (
+            &mut self.keys,
+            self.interface_names.get_mut(at),
+            self.unit.classes.get(at),
+        ) else {
+            return Ok(());
+        };
+        let from = block.as_ref().map_or(0, Emalloc::len) / CLASS_NAME;
+        let to = to.min(decl.interfaces.len());
+        let named = usize::from(to == decl.interfaces.len() && stringable(decl));
+        if to > from {
+            regrow(req, block, to * CLASS_NAME)?;
+        }
+        for name in decl.interfaces.get(from..to).unwrap_or_default() {
+            for _ in 0..named + usize::from(name.0.iter().any(u8::is_ascii_uppercase)) {
+                keys.push(Emalloc::new(req, STRING_HEADER + name.0.len() + 1)?);
+            }
         }
         Ok(())
     }
@@ -2616,6 +2680,9 @@ impl Walk<'_> {
         }
         if let Some(Some(class)) = self.laid.classes.get(method.class as usize) {
             add_rows(req, class.table(Table::Methods), 1)?;
+        }
+        if declared.is_some_and(|(decl, _)| decl.name.0.eq_ignore_ascii_case(b"__tostring")) {
+            self.interfaces(req, method.class as usize, usize::MAX)?;
         }
         self.body(req, &method.body, declared, stood, Holder::Member)
     }

@@ -638,3 +638,22 @@ files = { "a.php" = "<?php class C { function doIt() {} } echo memory_get_usage(
 [[line.then]]
 args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/b.php" }
+
+# A class of such a program that implements an interface (#3901), which
+# no top-level class early-binds: `zend_compile_implements` lays its
+# `interface_names` and lowers `I` as the class begins, both standing
+# through the compile's peak until the link gives them back, and its
+# `DECLARE_CLASS` carries the runtime definition key `zend_strpprintf`
+# prints, trimmed to `zend_string_finit`'s size. An enum is a `UnitEnum`
+# by `zend_enum_add_interfaces`.
+[[line]]
+name = "an-uncached-class-lays-its-interfaces-names-as-it-begins"
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/a.php" }
+files = { "a.php" = "<?php interface I {} class C implements I {} echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "b.php" = "<?php interface I {} class C implements I { function m() {} } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "c.php" = "<?php enum E { case A; function m() {} } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/b.php" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/c.php" }
