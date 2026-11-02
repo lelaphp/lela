@@ -23707,7 +23707,24 @@ pub(crate) fn bw_xor<T: Tier>(
 }
 
 /// `ZEND_BW_AND` (`Z/Zend/zend_vm_def.h:863`), what `&` compiles to:
-/// [`crate::ops::bitwise_and`] the same way.
+/// [`crate::ops::bitwise_and`] the same way. Its arm is in the loop's
+/// body (#3982): two longs are served inline, and every other pair
+/// by the kernel.
+///
+/// ```php
+/// $s = 0; for ($i = -3; $i < 20; $i++) { $s += $i & 7; }
+/// $a = "12"; $b = 10; $n = -1; $f = 6.0; $g = 6.5;
+/// var_dump($s, $a & $b, "ab" & "a", $n & PHP_INT_MAX, $f & 3, $g & 3);
+/// ```
+/// ```expect
+/// Deprecated: Implicit conversion from float 6.5 to int loses precision in %SCRATCH%/witness.php on line 4
+/// int(80)
+/// int(8)
+/// string(1) "a"
+/// int(9223372036854775807)
+/// int(2)
+/// int(2)
+/// ```
 pub(crate) fn bw_and<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
