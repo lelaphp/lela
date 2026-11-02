@@ -295,10 +295,12 @@ impl Request {
     /// over `unit`'s classes, for [`Request::declare_classes_through`]
     /// and [`Request::declare_delayed`].
     pub(crate) fn class_load(&mut self, unit: &PublishedUnit) -> ClassLoad {
-        let delayed: Vec<Vec<u8>> = unit
-            .main
-            .oplines
-            .iter()
+        // Only a class under a runtime definition key reads `delayed`
+        // ([`Request::declare_class_at`]), so a unit with none, most of
+        // them, walks no opline of its main op array for it.
+        let keyed = !unit.runtime_keys.is_empty();
+        let delayed: Vec<Vec<u8>> = (unit.main.oplines.iter())
+            .take_while(|_| keyed)
             .filter(|op| op.opcode == Opcode::DeclareClassDelayed)
             .filter_map(|op| {
                 let key = usize::try_from(op.op1).ok()?.checked_add(1)?;
