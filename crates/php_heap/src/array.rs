@@ -517,6 +517,23 @@ pub enum Key {
     Str(Str),
 }
 
+/// What [`Heap::array_sort`] leaves of the keys once the buckets are
+/// ordered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortKeys {
+    /// Every key kept and the chains rebuilt, `zend_hash_sort`'s
+    /// `renumber` false (`asort()`).
+    Keep,
+    /// Every key dropped and the table packed, `renumber` true
+    /// (`sort()`).
+    Renumber,
+    /// `array_multisort`'s restructure (`Z/ext/standard/array.c:6302`):
+    /// the integer keys numbered from zero in the order found, the
+    /// string keys kept, `nNextFreeElement` the element count, and the
+    /// table packed where no string key is left (`zend_hash_to_packed`).
+    RenumberIntegers,
+}
+
 /// One element as `zend_hash_sort` hands it to the comparison: php's
 /// `Bucket`, its key and value, with `Z_EXTRA(val)` set to the position
 /// the element held before the sort, which is what the stable
@@ -2551,12 +2568,15 @@ impl crate::Heap {
     /// each element handed to `compare` with the position it held, the
     /// buckets ordered as php's hybrid orders them for any comparison,
     /// the internal pointer reset, and then the chains rebuilt where the
-    /// keys are kept, or under `renumber` the keys dropped, `nNextFreeElement`
-    /// set past the last, and the table laid down packed in a fresh
-    /// allocation with the hash table's given back. Nothing here is
-    /// stable of itself: php's stable order is the caller's comparison
-    /// falling back to [`SortEntry::position`], `RETURN_STABLE_SORT`, and
-    /// a caller that wants `zend_sort`'s own order leaves it out. The
+    /// keys are kept, or under [`SortKeys::Renumber`] the keys dropped,
+    /// `nNextFreeElement` set past the last, and the table laid down packed
+    /// in a fresh allocation with the hash table's given back; under
+    /// [`SortKeys::RenumberIntegers`] only the integer keys are numbered
+    /// again, and a table left no string key is packed as a renumbered
+    /// one. Nothing here is stable of itself: php's stable order is the
+    /// caller's comparison falling back to [`SortEntry::position`],
+    /// `RETURN_STABLE_SORT`, and a caller that wants `zend_sort`'s own
+    /// order leaves it out. The
     /// hooks carry the comparison to the code it may serve, a `usort`
     /// callback, and are the heap after it. An empty table is left as it
     /// is; one element is renumbered where php renumbers it.
@@ -2603,11 +2623,11 @@ impl crate::Heap {
     pub fn array_sort<H: HeapHooks + ?Sized>(
         hooks: &mut H,
         a: Arr,
-        renumber: bool,
+        keys: SortKeys,
         compare: &mut dyn FnMut(&mut H, &SortEntry, &SortEntry) -> Ordering,
     ) -> Result<(), Fatal> {
         // `!(nNumOfElements > 1) && !(renumber && nNumOfElements > 0)`.
-        if a.len() <= 1 && (!renumber || a.is_empty()) {
+        if a.len() <= 1 && (keys == SortKeys::Keep || a.is_empty()) {
             return Ok(());
         }
         if a.is_packed() {
@@ -2633,10 +2653,15 @@ impl crate::Heap {
             })
             .collect();
         zend_sort(&mut entries, &mut |x, y| compare(hooks, x, y));
+        // php's restructure repacks a table it left no string key in.
+        let renumber = keys == SortKeys::Renumber
+            || (keys == SortKeys::RenumberIntegers
+                && entries.iter().all(|e| matches!(e.key, Key::Long(_))));
         let header = a.header();
         header.num_used.set(entries.len() as u32);
         let used = entries.len() as u32;
         let heap = hooks.heap();
+        let mut integers = 0u64;
         for (i, entry) in entries.into_iter().enumerate() {
             let (h, key) = match entry.key {
                 Key::Str(s) if renumber => {
@@ -2644,6 +2669,10 @@ impl crate::Heap {
                     (i as u64, None)
                 }
                 Key::Long(_) if renumber => (i as u64, None),
+                Key::Long(_) if keys == SortKeys::RenumberIntegers => {
+                    integers += 1;
+                    (integers - 1, None)
+                }
                 Key::Str(s) => (s.hash(), Some(s)),
                 Key::Long(n) => (n.cast_unsigned(), None),
             };
@@ -2658,6 +2687,9 @@ impl crate::Heap {
         }
         header.internal_pointer.set(0);
         if !renumber {
+            if keys == SortKeys::RenumberIntegers {
+                header.next_free.set(i64::from(used));
+            }
             a.rehash(Some(&mut hooks.heap().iterators));
             return Ok(());
         }
@@ -3550,7 +3582,7 @@ mod tests {
         }
         assert!(Heap::array_del(&mut nothing, a, Key::Long(2)));
         a.end();
-        let sorted = Heap::array_sort(&mut nothing, a, false, &mut |_, x, y| {
+        let sorted = Heap::array_sort(&mut nothing, a, SortKeys::Keep, &mut |_, x, y| {
             x.val
                 .as_long()
                 .cmp(&y.val.as_long())
@@ -3577,7 +3609,7 @@ mod tests {
             ));
         }
         assert!(Heap::array_del(&mut nothing, a, Key::Long(1)));
-        let sorted = Heap::array_sort(&mut nothing, a, true, &mut |_, x, y| {
+        let sorted = Heap::array_sort(&mut nothing, a, SortKeys::Renumber, &mut |_, x, y| {
             x.val.as_long().cmp(&y.val.as_long())
         });
         assert!(sorted.is_ok());

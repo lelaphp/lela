@@ -379,6 +379,7 @@ Sizing
 Sizing::bytes
 Slot
 SortEntry
+SortKeys
 StackLayout
 StackRefused
 StandaloneHeap

@@ -11,7 +11,9 @@ use std::sync::Arc;
 /// the request's is allocated from (`zend_test_gh18756`).
 pub use php_heap::StandaloneHeap;
 pub use php_heap::{Allocation, AllocationObserverId, ObserveAllocations};
-use php_heap::{Arr, Fatal, Heap, Intern, Key, Ref, Sizing, SortEntry, Str, Zval, ZvalRef};
+use php_heap::{
+    Arr, Fatal, Heap, Intern, Key, Ref, Sizing, SortEntry, SortKeys, Str, Zval, ZvalRef,
+};
 pub use php_heap::{ecalloc, efree, emalloc, erealloc};
 
 use crate::api::abi::{Beneath, chain};
@@ -758,14 +760,14 @@ impl Request {
 
     /// `zend_hash_sort` over `a`, which has one owner: the comparison
     /// carried through seam 1, since a `usort` callback runs PHP code,
-    /// and the keys dropped under `renumber`.
+    /// and the keys left as `keys` says.
     pub(crate) fn array_sort(
         &mut self,
         a: Arr,
-        renumber: bool,
+        keys: SortKeys,
         compare: &mut dyn FnMut(&mut Request, &SortEntry, &SortEntry) -> std::cmp::Ordering,
     ) -> Result<(), Thrown> {
-        let sorted = Heap::array_sort(&mut Hooks(self), a, renumber, &mut |hooks, x, y| {
+        let sorted = Heap::array_sort(&mut Hooks(self), a, keys, &mut |hooks, x, y| {
             compare(hooks.0, x, y)
         });
         self.fatal_of(sorted)
