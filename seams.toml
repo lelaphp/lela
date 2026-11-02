@@ -209,7 +209,7 @@ budget = 2500     # bz2.c and bz2_filter.c; pure Rust first, held to the oracle'
 feature = "bz2"
 [[crate]]
 name = "ext/opcache"
-budget = 2000     # zend_accelerator_module.c and zend_accelerator_blacklist.c: the ini entries, the natives and the status and configuration arrays; the unit cache they answer from is php_engine's (design §6.3), so the shared allocator, persist and file cache are not ported here (#1163)
+budget = 2200     # zend_accelerator_module.c and zend_accelerator_blacklist.c: the ini entries, the natives and the status and configuration arrays; the unit cache they answer from is php_engine's (design §6.3), so the shared allocator, persist and file cache are not ported here (#1163)
 [[crate]]
 name = "ext/calendar"
 budget = 2000     # calendar.c, cal_unix.c, dow.c, easter.c, french.c, gregor.c, jewish.c, julian.c; pure arithmetic, php's own C ported, no library (#1163)
