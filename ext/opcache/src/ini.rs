@@ -5,7 +5,7 @@
 //! entry holds is its text; what php's handler stored, `accel_directives`
 //! and `jit_globals`, is [`Stored`], read off the text when asked.
 
-use php_ext::abi::{ExtensionBuilder, IniStage, LongHandler};
+use php_ext::abi::{ExtensionBuilder, FileCache, IniStage, LongHandler};
 use php_ext::coerce::atoi;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Thrown, warning};
@@ -269,6 +269,74 @@ impl Entry {
     }
 }
 
+/// `ZCG(accel_directives)`'s fields an include reads, as each entry's
+/// handler stored them: laid from the entries in force as the request
+/// starts and kept by [`modify`], so [`crate::admission`] reads no entry
+/// by name, as `persistent_compile_file` reads `ZCG(accel_directives)`.
+/// `ini_set()` and `ini_restore()` take effect on the next include:
+///
+/// ```php
+/// $f = __DIR__ . '/kept.inc'; file_put_contents($f, '<?php return 1;'); touch($f, time() - 60);
+/// var_dump(include $f, opcache_is_script_cached($f));
+/// file_put_contents($f, '<?php return 2;'); touch($f, time() - 30);
+/// ini_set('opcache.revalidate_freq', 60); var_dump(include $f);
+/// ini_restore('opcache.revalidate_freq'); ini_set('opcache.revalidate_freq', '0x');
+/// var_dump(include $f, ini_set('opcache.validate_timestamps', 0));
+/// file_put_contents($f, '<?php return 3;'); touch($f, time() - 20);
+/// var_dump(include $f, ini_set('opcache.enable', 0), include $f);
+/// unlink($f);
+/// ```
+/// ```expect regime=jit-off
+/// int(1)
+/// bool(true)
+/// int(1)
+///
+/// Warning: Invalid "opcache.revalidate_freq" setting. Invalid quantity "0x": no digits after base prefix, interpreting as "0" for backwards compatibility in %s on line 6
+/// int(2)
+/// string(1) "1"
+/// int(2)
+/// string(1) "1"
+/// int(3)
+/// ```
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Directives {
+    pub(crate) enable: bool,
+    pub(crate) validate_timestamps: bool,
+    pub(crate) revalidate_path: bool,
+    pub(crate) revalidate_freq: i64,
+    pub(crate) file_update_protection: i64,
+    pub(crate) max_file_size: i64,
+    /// `opcache.file_cache`, where it names a directory, with
+    /// `opcache.file_cache_read_only`.
+    pub(crate) file_cache: Option<FileCache>,
+}
+
+impl Directives {
+    /// Each entry's value in force for `req`, but the entry `changed`
+    /// names, whose handler has just taken the value beside it.
+    pub(crate) fn of(req: &Request, changed: Option<(&str, &[u8])>) -> Directives {
+        let read = |name: &str| match changed {
+            Some((entry, taken)) if entry == name => taken,
+            _ => value(req, name),
+        };
+        let flag = |name| Ini::parse_bool(read(name));
+        let long = |name| Ini::parse_quantity(read(name)).0;
+        let directory = read("opcache.file_cache");
+        Directives {
+            enable: flag("opcache.enable"),
+            validate_timestamps: flag("opcache.validate_timestamps"),
+            revalidate_path: flag("opcache.revalidate_path"),
+            revalidate_freq: long("opcache.revalidate_freq"),
+            file_update_protection: long("opcache.file_update_protection"),
+            max_file_size: long("opcache.max_file_size"),
+            file_cache: (!directory.is_empty()).then(|| FileCache {
+                directory: String::from_utf8_lossy(directory).into_owned().into(),
+                read_only: flag("opcache.file_cache_read_only"),
+            }),
+        }
+    }
+}
+
 /// The entry's value in force for this request.
 pub(crate) fn value<'r>(req: &'r Request, name: &str) -> &'r [u8] {
     let fallback = named(name)
@@ -323,10 +391,11 @@ pub(crate) fn modify<const AT: usize>(
             false
         }
     };
-    Ok(match entry.kind {
+    let taken = match entry.kind {
         Kind::Bool | Kind::Text | Kind::FileCache | Kind::Real => true,
         Kind::Unempty => !value.is_empty(),
-        // A `Kind::Long` entry's handler is the engine's ([`handler`]).
+        // A [`Directives`] entry's; any other `Kind::Long` entry's handler
+        // is the engine's ([`handler`]).
         Kind::Long => {
             quantity(req, name, value);
             true
@@ -402,7 +471,12 @@ pub(crate) fn modify<const AT: usize>(
             MAX_TRACE_LENGTH,
             &format!(". Should be between 4 and {MAX_TRACE_LENGTH}"),
         ),
-    })
+    };
+    // What the handler took, [`Directives`] keeps.
+    if taken {
+        req.state::<State>().directives = Directives::of(req, Some((name, value)));
+    }
+    Ok(taken)
 }
 
 /// `MAX_INTERNED_STRINGS_BUFFER_SIZE` on a 64-bit build: what
@@ -736,10 +810,16 @@ macro_rules! handlers {
 pub(crate) use handlers;
 
 /// Entry `AT`'s handler on `builder`: `OnUpdateLong`, which the engine
-/// serves, for a [`Kind::Long`] entry, and [`modify`] for the rest.
+/// serves, for a [`Kind::Long`] entry [`Directives`] does not keep, and
+/// [`modify`], which serves the same quantity, for the rest.
 pub(crate) fn handler<const AT: usize>(builder: ExtensionBuilder) -> ExtensionBuilder {
+    let kept = [
+        "opcache.revalidate_freq",
+        "opcache.file_update_protection",
+        "opcache.max_file_size",
+    ];
     match ENTRIES.get(AT) {
-        Some(entry) if entry.kind == Kind::Long => {
+        Some(entry) if entry.kind == Kind::Long && !kept.contains(&entry.name) => {
             builder.on_update_long(entry.name.as_bytes(), LongHandler::Any)
         }
         Some(entry) => builder.on_modify(entry.name.as_bytes(), modify::<AT>),
