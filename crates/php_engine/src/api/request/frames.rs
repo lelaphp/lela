@@ -929,6 +929,32 @@ impl Request {
         cvs: u32,
         operand: impl FnOnce(&[Zval]) -> Option<(Zval, Option<usize>)>,
     ) -> Option<Stepped> {
+        self.leave_as::<false>(frame, cvs, operand)
+    }
+
+    /// [`Request::leave_plainly`] of a frame whose call-info word says it
+    /// holds a receiver or a closure, out of the loop's RETURN arms, so
+    /// the leave of a frame that holds neither is compiled with no test
+    /// of what one holds.
+    #[inline(never)]
+    fn leave_held(
+        &mut self,
+        frame: FrameRef,
+        cvs: u32,
+        operand: impl FnOnce(&[Zval]) -> Option<(Zval, Option<usize>)>,
+    ) -> Option<Stepped> {
+        self.leave_as::<true>(frame, cvs, operand)
+    }
+
+    /// The body of [`Request::leave_plainly`], `HELD` where the frame's
+    /// word says a receiver or a closure is held ([`Request::leave_held`]).
+    #[inline(always)]
+    fn leave_as<const HELD: bool>(
+        &mut self,
+        frame: FrameRef,
+        cvs: u32,
+        operand: impl FnOnce(&[Zval]) -> Option<(Zval, Option<usize>)>,
+    ) -> Option<Stepped> {
         // The frame and its caller below it lent together, one look at
         // the frame table for both, as php's `zend_leave_helper` reaches
         // `execute_data` and `EX(prev_execute_data)` off two registers.
@@ -944,15 +970,17 @@ impl Request {
         // receiver held alone, a method's, is given up on the way out
         // below, as php's `ZEND_CALL_RELEASE_THIS` test does before the
         // frame is freed.
-        let (held, receiver) = match header.info.leave() {
-            exec::Leave::Plain => (false, None),
+        let gives = match header.info.leave() {
+            exec::Leave::Plain => Gives::Nothing,
+            exec::Leave::Held if !HELD => return self.leave_held(frame, cvs, operand),
             exec::Leave::Held => match (header.receiver(), header.closure()) {
-                (Some(receiver), None) if receiver_kept(receiver) => (true, Some(receiver)),
-                (receiver, closure) if held_kept(receiver, closure) => (true, None),
+                (Some(receiver), None) if receiver_kept(receiver) => Gives::Receiver,
+                (receiver, closure) if held_kept(receiver, closure) => Gives::Owning,
                 _ => return None,
             },
             exec::Leave::Kernel => return None,
         };
+        let held = gives != Gives::Nothing;
         debug_assert!(
             header.function.is_some()
                 && header.annex().is_none()
@@ -981,6 +1009,11 @@ impl Request {
         if owners && !owners_kept(owned) {
             return None;
         }
+        // A receiver held alone, read only in the held leave.
+        let receiver = match gives {
+            Gives::Receiver if HELD && !owners => laid.header().receiver(),
+            _ => None,
+        };
         let leave = PlainLeave {
             caller,
             returns_to,
@@ -1005,7 +1038,7 @@ impl Request {
         // `OBJ_RELEASE(Z_OBJ(execute_data->This))`, another owner standing,
         // or a lent receiver's pin let go: no CV owned anything, so this is
         // all the frame gives up. The collector's buffer, where it must be
-        // run first, is the owning leave's.
+        // collected first, is the owning leave's.
         if let Some(receiver) = receiver
             && !let_go_kept(&mut self.heap, receiver)
         {
@@ -2632,6 +2665,18 @@ fn let_go_kept(heap: &mut php_heap::Heap, receiver: exec::Receiver) -> bool {
 fn owners_kept(cvs: &[Zval]) -> bool {
     cvs.iter()
         .all(|z| !z.is_refcounted() || z.kind() == ZvalType::String || kept_by_another(*z))
+}
+
+/// What a frame [`Request::leave_plainly`] gives up besides its CVs,
+/// read off its call-info word and header once: nothing; a receiver
+/// held alone, lent or with another owner standing, which the held leave
+/// gives up ([`Request::leave_held`]); or a receiver and a closure the
+/// owning leave gives up.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gives {
+    Nothing,
+    Receiver,
+    Owning,
 }
 
 /// A frame [`Request::leave_plainly`] found leaves with no destructor
