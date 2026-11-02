@@ -5,10 +5,13 @@
 //! `__private` (`ext.no-private`).
 
 use php_heap::{Fatal, Heap, Obj};
+/// One parameter of a [`NativeFunction`], php's `zend_internal_arg_info`,
+/// which the declaration borrows ([`Parameters::native`]).
+pub use php_unit::decl::NativeParameter;
 use php_unit::decl::{
     Attribute, AttributeArgument, Bare, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
-    ConstDecl, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault,
-    PropertyDecl, Type, Visibility,
+    ConstDecl, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name, Parameters, PropertyDecl,
+    Type, Visibility,
 };
 
 use crate::api::abi::{Cases, Class, ClassRef, NativeNew, ObjectHandlers};
@@ -53,7 +56,8 @@ impl Frameless {
 /// static data, php's `zend_function_entry` with its
 /// `zend_internal_arg_info` rows, which the engine reads once as it
 /// registers the function and builds the declaration model of
-/// ([`NativeFunction::declaration`]), as
+/// ([`NativeFunction::declaration`]), its parameters borrowed from the
+/// rows rather than built ([`Parameters::native`]), as
 /// `zend_register_functions` walks an extension's entry array. What is
 /// a tree in the model, a declared type, a default expression, a php
 /// attribute, is the function that builds it: a type's is its Rust
@@ -71,26 +75,6 @@ pub struct NativeFunction {
     pub frameless: &'static [Frameless],
     pub attributes: &'static [fn() -> Attribute],
     pub entry: Entry,
-}
-
-/// One parameter of a [`NativeFunction`], php's `zend_internal_arg_info`:
-/// the facts of its Rust type (`FromArgument`'s `BY_REF`, `VARIADIC` and
-/// `PASSED`) and of its `#[php(..)]`.
-#[derive(Debug, Clone, Copy)]
-#[allow(clippy::struct_excessive_bools)] // the ZEND_SEND_* bits of a slot and its type's `Passed`, each one fact
-pub struct NativeParameter {
-    pub name: &'static [u8],
-    pub ty: fn() -> Option<Type>,
-    pub by_ref: bool,
-    pub prefer_ref: bool,
-    pub variadic: bool,
-    /// The type is `Passed`: optional, its absence the body's to see,
-    /// which the declaration shows as `Unshown` where no default is
-    /// written.
-    pub passed: bool,
-    /// The `#[php(default = ..)]` expression.
-    pub default: Option<fn() -> ConstExpr>,
-    pub attributes: &'static [fn() -> Attribute],
 }
 
 /// A native method as `#[php_class]` lays it down on its member impl:
@@ -267,9 +251,7 @@ impl NativeFunction {
     /// its entry: no file, line zero, by value.
     pub(crate) fn declaration(&self) -> FunctionDecl {
         FunctionDecl {
-            parameters: (self.parameters.iter())
-                .map(NativeParameter::declaration)
-                .collect(),
+            parameters: Parameters::native(self.parameters),
             return_type: (self.return_type)(),
             attributes: self
                 .attributes
@@ -278,28 +260,6 @@ impl NativeFunction {
                 .collect(),
             frameless: self.frameless.iter().map(|entry| entry.arity()).collect(),
             ..php_unit::decl::native_function(self.name)
-        }
-    }
-}
-
-impl NativeParameter {
-    fn declaration(&self) -> Parameter {
-        let default = match self.default {
-            Some(expr) => ParameterDefault::Expr(expr()),
-            None if self.passed => ParameterDefault::Unshown,
-            None => ParameterDefault::None,
-        };
-        Parameter {
-            by_ref: self.by_ref,
-            prefer_ref: self.prefer_ref,
-            variadic: self.variadic,
-            default,
-            attributes: self
-                .attributes
-                .iter()
-                .map(|attribute| attribute())
-                .collect(),
-            ..php_unit::decl::parameter(self.name, (self.ty)())
         }
     }
 }

@@ -935,6 +935,181 @@ impl Parameter {
     }
 }
 
+/// One parameter of a native as `#[php_function]` lays it down, php's
+/// `zend_internal_arg_info`: static data, the facts of its Rust type
+/// (`FromArgument`'s `BY_REF`, `VARIADIC` and `PASSED`) and of its
+/// `#[php(..)]`, a tree of the model (a type, a default, an attribute)
+/// the function that builds it.
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)] // the ZEND_SEND_* bits of a slot and its type's `Passed`, each one fact
+pub struct NativeParameter {
+    pub name: &'static [u8],
+    pub ty: fn() -> Option<Type>,
+    pub by_ref: bool,
+    pub prefer_ref: bool,
+    pub variadic: bool,
+    /// The type is `Passed`: optional, its absence the body's to see,
+    /// which the declaration shows as `Unshown` where no default is
+    /// written.
+    pub passed: bool,
+    /// The `#[php(default = ..)]` expression.
+    pub default: Option<fn() -> ConstExpr>,
+    pub attributes: &'static [fn() -> Attribute],
+}
+
+impl NativeParameter {
+    /// The slot the entry declares.
+    fn declaration(&self) -> Parameter {
+        let default = match self.default {
+            Some(expr) => ParameterDefault::Expr(expr()),
+            None if self.passed => ParameterDefault::Unshown,
+            None => ParameterDefault::None,
+        };
+        Parameter {
+            by_ref: self.by_ref,
+            prefer_ref: self.prefer_ref,
+            variadic: self.variadic,
+            default,
+            attributes: (self.attributes.iter())
+                .map(|attribute| attribute())
+                .collect(),
+            ..parameter(self.name, (self.ty)())
+        }
+    }
+}
+
+/// A function's parameter slots, php's `arg_info`: those a program's
+/// declaration wrote, or a native's static entries, which the first
+/// reader builds into the model and every later one reads as built. php
+/// points a `zend_internal_function` at its `zend_internal_arg_info`
+/// rows and copies none of them (`zend_register_functions`), so
+/// registering a native allocates nothing per parameter here either;
+/// a native whose slots no program reads never has them built.
+///
+/// ```php
+/// $p = (new ReflectionFunction('str_pad'))->getParameters();
+/// echo count($p), ' ', $p[3], "\n";
+/// echo (new ReflectionMethod('ArrayObject', '__construct'))->getParameters()[1], "\n";
+/// ```
+/// ```expect
+/// 4 Parameter #3 [ <optional> int $pad_type = STR_PAD_RIGHT ]
+/// Parameter #1 [ <optional> int $flags = 0 ]
+/// ```
+#[derive(Clone, Default)]
+pub struct Parameters {
+    /// A native's entries while no reader has built them, and empty
+    /// once one has, or where a program wrote the slots.
+    native: &'static [NativeParameter],
+    built: std::sync::OnceLock<Box<[Parameter]>>,
+}
+
+impl Parameters {
+    /// A native's slots, borrowed from its static entries until read.
+    #[must_use]
+    pub const fn native(entries: &'static [NativeParameter]) -> Parameters {
+        Parameters {
+            native: entries,
+            built: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The static entries a native's slots stand in while no reader has
+    /// built them, for a walk over every native that reads one fact of
+    /// each slot and keeps none; none once they are built, or where a
+    /// program wrote them.
+    #[must_use]
+    pub fn unbuilt(&self) -> Option<&'static [NativeParameter]> {
+        self.built.get().is_none().then_some(self.native)
+    }
+}
+
+impl std::ops::Deref for Parameters {
+    type Target = [Parameter];
+
+    fn deref(&self) -> &[Parameter] {
+        self.built.get_or_init(|| {
+            (self.native.iter())
+                .map(NativeParameter::declaration)
+                .collect()
+        })
+    }
+}
+
+/// The slots to change: a native's built first, and from then on the
+/// slots as changed, never the entries again.
+impl std::ops::DerefMut for Parameters {
+    fn deref_mut(&mut self) -> &mut [Parameter] {
+        let _: &[Parameter] = self;
+        self.native = &[];
+        match self.built.get_mut() {
+            Some(built) => built,
+            None => &mut [],
+        }
+    }
+}
+
+impl From<Vec<Parameter>> for Parameters {
+    fn from(written: Vec<Parameter>) -> Parameters {
+        Parameters {
+            native: &[],
+            built: std::sync::OnceLock::from(written.into_boxed_slice()),
+        }
+    }
+}
+
+impl FromIterator<Parameter> for Parameters {
+    fn from_iter<I: IntoIterator<Item = Parameter>>(written: I) -> Parameters {
+        Parameters::from(written.into_iter().collect::<Vec<_>>())
+    }
+}
+
+impl IntoIterator for Parameters {
+    type Item = Parameter;
+    type IntoIter = std::vec::IntoIter<Parameter>;
+
+    fn into_iter(self) -> std::vec::IntoIter<Parameter> {
+        match self.built.into_inner() {
+            Some(built) => built.into_vec().into_iter(),
+            None => (self.native.iter())
+                .map(NativeParameter::declaration)
+                .collect::<Vec<_>>()
+                .into_iter(),
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a Parameters {
+    type Item = &'a Parameter;
+    type IntoIter = std::slice::Iter<'a, Parameter>;
+
+    fn into_iter(self) -> std::slice::Iter<'a, Parameter> {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Parameters {
+    type Item = &'a mut Parameter;
+    type IntoIter = std::slice::IterMut<'a, Parameter>;
+
+    fn into_iter(self) -> std::slice::IterMut<'a, Parameter> {
+        self.iter_mut()
+    }
+}
+
+/// Two lists are equal where their slots are, however each was made.
+impl PartialEq for Parameters {
+    fn eq(&self, other: &Parameters) -> bool {
+        **self == **other
+    }
+}
+
+/// The slots as a list, as a `Vec` of them prints.
+impl std::fmt::Debug for Parameters {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
 /// A function's declaration: its signature, doc comment and site; the
 /// body is the unit's op array of the same index.
 ///
@@ -966,7 +1141,7 @@ impl Parameter {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDecl {
     pub name: Name,
-    pub parameters: Vec<Parameter>,
+    pub parameters: Parameters,
     pub return_type: Option<Type>,
     pub returns_by_ref: bool,
     pub is_generator: bool,
@@ -987,7 +1162,7 @@ pub struct FunctionDecl {
 pub fn native_function(name: &[u8]) -> FunctionDecl {
     FunctionDecl {
         name: Name(name.into()),
-        parameters: Vec::new(),
+        parameters: Parameters::default(),
         return_type: None,
         returns_by_ref: false,
         is_generator: false,
@@ -1288,7 +1463,52 @@ pub struct IniDecl {
 
 #[cfg(test)]
 mod tests {
-    use super::{Bare, Name};
+    use super::{Bare, ConstExpr, Name, NativeParameter, ParameterDefault, Parameters, Type};
+
+    const ENTRIES: &[NativeParameter] = &[
+        NativeParameter {
+            name: b"string",
+            ty: || Some(Type::String),
+            by_ref: false,
+            prefer_ref: false,
+            variadic: false,
+            passed: false,
+            default: None,
+            attributes: &[],
+        },
+        NativeParameter {
+            name: b"flags",
+            ty: || Some(Type::Int),
+            by_ref: false,
+            prefer_ref: false,
+            variadic: false,
+            passed: true,
+            default: Some(|| ConstExpr::long(0)),
+            attributes: &[],
+        },
+    ];
+
+    #[test]
+    fn a_natives_slots_are_its_entries_until_a_reader_builds_them() {
+        let slots = Parameters::native(ENTRIES);
+        assert_eq!(slots.unbuilt().map(<[_]>::len), Some(2));
+        assert_eq!(slots[0].name.0.as_ref(), b"string");
+        assert_eq!(slots[1].default, ParameterDefault::Expr(ConstExpr::long(0)));
+        assert!(slots.unbuilt().is_none());
+        assert_eq!(slots, Parameters::from(slots.to_vec()));
+    }
+
+    #[test]
+    fn a_natives_slots_changed_are_never_its_entries_again() {
+        let mut slots = Parameters::native(ENTRIES);
+        for slot in &mut slots {
+            slot.ty = None;
+        }
+        assert!(slots.unbuilt().is_none());
+        let kept: Vec<_> = slots.clone().into_iter().map(|slot| slot.ty).collect();
+        assert_eq!(kept, [None, None]);
+        assert_eq!(slots.len(), 2);
+    }
 
     #[test]
     fn a_bare_name_drops_one_leading_backslash_once() {

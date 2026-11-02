@@ -103,10 +103,14 @@ decl::IniDecl
 decl::MethodDecl
 decl::Name
 decl::NameKind
+decl::NativeParameter
 decl::Parameter
 decl::Parameter::is_required
 decl::ParameterDefault
 decl::ParameterDefault::expr
+decl::Parameters
+decl::Parameters::native
+decl::Parameters::unbuilt
 decl::PropertyDecl
 decl::PropertyHooks
 decl::PropertyHooks::of

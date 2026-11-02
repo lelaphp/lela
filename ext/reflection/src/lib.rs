@@ -6858,7 +6858,7 @@ fn closure_invoke(req: &mut Request, closure: Option<Function>) -> Option<Linked
     let scope = lookup_class(req, b"Closure").ok().flatten()?;
     let empty = || FunctionDecl {
         name: Name::default(),
-        parameters: Vec::new(),
+        parameters: Vec::new().into(),
         return_type: None,
         returns_by_ref: false,
         is_generator: false,

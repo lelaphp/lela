@@ -1153,7 +1153,9 @@ fn link_enum_methods(decl: &mut ClassDecl, class: ClassId, methods: &mut Vec<Nat
     if decl.kind != php_unit::decl::ClassKind::Enum {
         return;
     }
-    for method in php_unit::enum_methods(decl.backing) {
+    let given = php_unit::enum_methods(decl.backing);
+    decl.methods.reserve_exact(given.len());
+    for method in given {
         let lowered = method.function.name.0.to_ascii_lowercase();
         let Some(served) = crate::enums::EnumMethod::of(&lowered, decl.backing) else {
             continue;
@@ -1187,11 +1189,21 @@ fn link_classes(declarations: &mut [Declarations]) -> LinkedClasses {
     // `zend_register_internal_class_with_flags` and `zend_register_functions`
     // over the class's methods: each declaration takes its methods,
     // and each method's entry is numbered in the order it is met.
-    let mut classes: Vec<ClassDecl> = Vec::new();
-    let mut modules = Vec::new();
-    let mut handlers = Vec::new();
-    let mut natives = Vec::new();
-    let mut methods = Vec::new();
+    // Each table laid down at the length it ends at, and each class's
+    // methods at theirs, as the rows are a native's for the process.
+    let count = declarations
+        .iter()
+        .map(|declared| declared.classes.len())
+        .sum();
+    let entries = (declarations.iter())
+        .flat_map(|declared| &declared.classes)
+        .map(|(_, entries, _, _)| entries.len())
+        .sum();
+    let mut classes: Vec<ClassDecl> = Vec::with_capacity(count);
+    let mut modules = Vec::with_capacity(count);
+    let mut handlers = Vec::with_capacity(count);
+    let mut natives = Vec::with_capacity(count);
+    let mut methods = Vec::with_capacity(entries);
     for (at, declared) in declarations.iter_mut().enumerate() {
         for (mut decl, entries, table, native) in std::mem::take(&mut declared.classes) {
             // A debug build serves an extension's table as the extension
@@ -1206,6 +1218,7 @@ fn link_classes(declarations: &mut [Declarations]) -> LinkedClasses {
             natives.push(native);
             modules.push(ExtensionId::at(at));
             let class = ClassId(u32::try_from(classes.len()).unwrap_or(u32::MAX));
+            decl.methods.reserve_exact(entries.len());
             for (method, entry) in entries {
                 // A method the declaration carries already is the one the
                 // entry serves, so the table holds the name once, as
@@ -1475,23 +1488,36 @@ fn parameter_classes(
     trampolines: &[MethodDecl],
     class_at: impl Fn(&[u8]) -> Option<ClassId>,
 ) -> Vec<Box<[Option<ClassId>]>> {
+    let class_of = |ty: Option<&Type>| {
+        let named = match ty? {
+            Type::Named(name) => name,
+            Type::Nullable(inner) => match &**inner {
+                Type::Named(name) => name,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        class_at(&named.0)
+    };
+    // A native's types read off its entries, its slots left unbuilt,
+    // and the row cut after its last class, so a native that names
+    // none holds nothing.
     let of = |decl: Option<&FunctionDecl>| -> Box<[Option<ClassId>]> {
-        decl.map_or_else(Box::default, |decl| {
-            decl.parameters
-                .iter()
-                .map(|parameter| {
-                    let named = match parameter.ty.as_ref()? {
-                        Type::Named(name) => name,
-                        Type::Nullable(inner) => match &**inner {
-                            Type::Named(name) => name,
-                            _ => return None,
-                        },
-                        _ => return None,
-                    };
-                    class_at(&named.0)
-                })
-                .collect()
-        })
+        let Some(decl) = decl else {
+            return Box::default();
+        };
+        let mut row: Vec<Option<ClassId>> = match decl.parameters.unbuilt() {
+            Some(entries) => (entries.iter())
+                .map(|entry| class_of((entry.ty)().as_ref()))
+                .collect(),
+            None => (decl.parameters.iter())
+                .map(|parameter| class_of(parameter.ty.as_ref()))
+                .collect(),
+        };
+        while row.last().is_some_and(Option::is_none) {
+            row.pop();
+        }
+        row.into_boxed_slice()
     };
     let method_decl = |method: &NativeMethod| native_method_decl(classes, trampolines, method.at);
     functions
@@ -3216,7 +3242,8 @@ fn function_table(
     ini: &IniTable,
 ) -> (
     Vec<Option<ExtensionId>>,
-    Vec<(FunctionDecl, crate::api::abi::FunctionEntries)>,
+    Vec<FunctionDecl>,
+    Vec<crate::api::abi::FunctionEntries>,
 ) {
     let list = ini.master(b"disable_functions").unwrap_or_default();
     let disabled = disabled_functions(list);
@@ -3269,12 +3296,19 @@ fn function_table(
     // started (`Z/main/main.c:2359-2366`).
     table.extend(additional.into_iter().map(|native| (standard, native)));
     // `zend_register_functions` over each entry left: the declaration
-    // built from it, a disabled one never registered.
-    table
-        .into_iter()
-        .filter(|(_, row)| !disabled.contains(&row.native.name.to_ascii_lowercase().as_slice()))
-        .map(|(module, row)| (module, row.declaration()))
-        .unzip()
+    // built from it, a disabled one never registered, each column laid
+    // down at the length it ends at.
+    table.retain(|(_, row)| !disabled.contains(&row.native.name.to_ascii_lowercase().as_slice()));
+    let mut modules = Vec::with_capacity(table.len());
+    let mut functions = Vec::with_capacity(table.len());
+    let mut entries = Vec::with_capacity(table.len());
+    for (module, row) in table {
+        let (decl, entry) = row.declaration();
+        modules.push(module);
+        functions.push(decl);
+        entries.push(entry);
+    }
+    (modules, functions, entries)
 }
 
 /// `ext/standard`'s natives in its own order with the engine's
@@ -3710,14 +3744,13 @@ impl EngineBuilder {
             Some(name) if on(name) => php_compile::Shebang::Skipped,
             _ => self.shebang,
         };
-        let (function_modules, natives) = function_table(
+        let (function_modules, functions, natives) = function_table(
             &extensions,
             &mut declarations,
             &registered,
             additional,
             &ini,
         );
-        let (functions, natives): (Vec<FunctionDecl>, Vec<_>) = natives.into_iter().unzip();
         let (mut entries, frameless_entries): (Vec<Entry>, Vec<_>) = natives.into_iter().unzip();
         let frameless_entries = frameless_entries.into_iter().flatten().copied().collect();
         let Intercepted {
@@ -3761,12 +3794,20 @@ impl EngineBuilder {
         // so Zend's constants stand before the bundle's, as
         // `zend_register_standard_constants` runs before any `MINIT`.
         extensions.insert(0, core);
-        let (constant_modules, constants): (Vec<ExtensionId>, Vec<ConstDecl>) =
-            (declarations.into_iter().enumerate())
-                .flat_map(|(at, declared)| {
-                    (declared.constants.into_iter()).map(move |decl| (ExtensionId::at(at), decl))
-                })
-                .unzip();
+        // Each column laid down at the length it ends at.
+        let count = declarations
+            .iter()
+            .map(|declared| declared.constants.len())
+            .sum();
+        let mut constant_modules: Vec<ExtensionId> = Vec::with_capacity(count);
+        let mut constants: Vec<ConstDecl> = Vec::with_capacity(count);
+        for (at, declared) in declarations.into_iter().enumerate() {
+            constant_modules.extend(std::iter::repeat_n(
+                ExtensionId::at(at),
+                declared.constants.len(),
+            ));
+            constants.extend(declared.constants);
+        }
         let mut names = permanent_names(&extensions, &functions, &classes, &constants, &ini);
         // What the host set for an entry its `on_modify` takes as the
         // engine starts, interned as `zend_register_ini_entries_ex`
@@ -4029,10 +4070,22 @@ fn default_strings(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings
             .iter()
             .flat_map(|decl| decl.methods.iter().map(|method| &method.function)),
     );
+    // A native's defaults read off its entries, its slots left unbuilt.
     for function in declared {
-        for parameter in &function.parameters {
-            if let ParameterDefault::Expr(ConstExpr::Str(written)) = &parameter.default {
-                strings.intern(written).ok();
+        match function.parameters.unbuilt() {
+            Some(entries) => {
+                for default in entries.iter().filter_map(|entry| entry.default) {
+                    if let ConstExpr::Str(written) = default() {
+                        strings.intern(&written).ok();
+                    }
+                }
+            }
+            None => {
+                for parameter in &function.parameters {
+                    if let ParameterDefault::Expr(ConstExpr::Str(written)) = &parameter.default {
+                        strings.intern(written).ok();
+                    }
+                }
             }
         }
     }

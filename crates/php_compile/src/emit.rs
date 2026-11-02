@@ -5279,7 +5279,7 @@ impl<'a> Emit<'a> {
         Ok((
             FunctionDecl {
                 name: Name(name.into()),
-                parameters,
+                parameters: parameters.into(),
                 return_type: self.return_type.clone(),
                 returns_by_ref: function.by_ref,
                 is_generator: function.generator,
@@ -18300,7 +18300,7 @@ impl<'a> Emit<'a> {
                     .get(index)
                     .map(|decl| {
                         (
-                            decl.parameters.as_slice(),
+                            &decl.parameters[..],
                             attributes::deprecated_or_no_discard(&decl.attributes),
                         )
                     })

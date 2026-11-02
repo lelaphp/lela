@@ -1138,7 +1138,7 @@ mod tests {
             ..parameter(b"x", None)
         };
         let decl = FunctionDecl {
-            parameters: vec![x(false), x(false), x(true)],
+            parameters: vec![x(false), x(false), x(true)].into(),
             file: Name::from("a.php"),
             line: 4,
             end_line: 6,

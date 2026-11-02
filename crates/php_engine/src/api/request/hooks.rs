@@ -880,7 +880,7 @@ pub(crate) fn parent_hook_trampolines() -> Vec<(HookKind, MethodDecl, Entry)> {
             };
             let name = format!("$::{}", kind.name());
             let function = FunctionDecl {
-                parameters,
+                parameters: parameters.into(),
                 ..native_function(name.as_bytes())
             };
             let method = public_method(function, true);

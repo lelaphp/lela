@@ -174,6 +174,18 @@ impl<T: Wire> Wire for Vec<T> {
     }
 }
 
+/// Written as the vector of slots it reads as: a unit's slots are
+/// always a program's, never a native's entries.
+impl Wire for php_unit::decl::Parameters {
+    fn put(&self, out: &mut Vec<u8>) -> Option<()> {
+        put_len(self.len(), out)?;
+        self.iter().try_for_each(|item| item.put(out))
+    }
+    fn take(r: &mut Reader<'_>) -> Option<Self> {
+        Vec::<php_unit::decl::Parameter>::take(r).map(Self::from)
+    }
+}
+
 /// Written as the vector it reads as, so a file the cache wrote before
 /// the table stood inline reads back the same.
 impl Wire for Safepoints {

@@ -56,7 +56,7 @@ pub fn written_methods(class: &ClassDecl) -> &[MethodDecl] {
 fn method(name: &[u8], parameters: Vec<Parameter>, returns: Type) -> MethodDecl {
     MethodDecl {
         function: FunctionDecl {
-            parameters,
+            parameters: parameters.into(),
             return_type: Some(returns),
             ..native_function(name)
         },
