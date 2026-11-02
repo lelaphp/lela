@@ -20142,6 +20142,24 @@ pub(crate) fn unset_obj<T: Tier>(
 /// int(216)
 /// int(376)
 /// ```
+///
+/// An array of constants never reaches this handler: the compiler
+/// folds it to one immutable array of the unit's, as `zend_try_ct_eval_array`
+/// does, so returning it allocates nothing and the first write
+/// separates it at php's size:
+///
+/// ```php
+/// function leaf() { return [null, null]; }
+/// $b = memory_get_usage(); $x = leaf(); $y = leaf(); $kept = memory_get_usage() - $b;
+/// $x[] = 1; $separated = memory_get_usage() - $b - $kept;
+/// var_dump($kept, $separated, leaf() === [null, null], count($y));
+/// ```
+/// ```expect
+/// int(0)
+/// int(216)
+/// bool(true)
+/// int(2)
+/// ```
 pub(crate) fn init_array<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
