@@ -633,7 +633,7 @@ function u0:0(i64, i64) -> i32 tail {
                                 block69:
 @0009                               store.i64 notrap aligned v262, v3+80
 @0009                               v364 = load.i64 notrap aligned v231
-@0009                               store notrap aligned v364, v3+104
+@0009                               store notrap aligned v364, v3+96
 @0009                               store.i64 notrap aligned v231, v3+56
 @0009                               v365 = iconst.i64 -80
 @0009                               v366 = iadd.i64 v359, v365  ; v365 = -80

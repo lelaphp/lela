@@ -178,7 +178,7 @@ function u0:0(i64, i64) -> i32 tail {
 @0002                               brif v109, block23, block25
 
                                 block25:
-@0002                               v110 = load.i64 notrap aligned v3+104
+@0002                               v110 = load.i64 notrap aligned v3+96
 @0002                               store notrap aligned v110, v100
 @0002                               v111 = load.i64 notrap aligned v0+64
 @0002                               v112 = load.i64 notrap aligned v111
@@ -219,7 +219,7 @@ function u0:0(i64, i64) -> i32 tail {
 @0002                               store notrap aligned v122, v100+200  ; v122 = 0
 @0002                               store notrap aligned v122, v100+208  ; v122 = 0
 @0002                               store notrap aligned v122, v100+216  ; v122 = 0
-@0002                               store.i64 notrap aligned v100, v3+104
+@0002                               store.i64 notrap aligned v100, v3+96
 @0002                               v123 = load.i64 notrap aligned v3+72
 @0002                               v124 = iconst.i64 32
 @0002                               v125 = imul.i64 v105, v124  ; v124 = 32
@@ -622,7 +622,7 @@ function u0:0(i64, i64) -> i32 tail {
 @000b                               brif v379, block66, block68
 
                                 block68:
-@000b                               v380 = load.i64 notrap aligned v3+104
+@000b                               v380 = load.i64 notrap aligned v3+96
 @000b                               store notrap aligned v380, v370
 @000b                               v381 = load.i64 notrap aligned v0+64
 @000b                               v382 = load.i64 notrap aligned v381
@@ -663,7 +663,7 @@ function u0:0(i64, i64) -> i32 tail {
 @000b                               store notrap aligned v392, v370+200  ; v392 = 0
 @000b                               store notrap aligned v392, v370+208  ; v392 = 0
 @000b                               store notrap aligned v392, v370+216  ; v392 = 0
-@000b                               store.i64 notrap aligned v370, v3+104
+@000b                               store.i64 notrap aligned v370, v3+96
 @000b                               v393 = load.i64 notrap aligned v3+72
 @000b                               v394 = iconst.i64 32
 @000b                               v395 = imul.i64 v375, v394  ; v394 = 32
