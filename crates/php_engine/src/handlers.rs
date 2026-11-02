@@ -14039,11 +14039,94 @@ fn inline_assign_op(
     Some(Inline::ADVANCE)
 }
 
+/// `.=` over a CV holding a string, by a string, both of them non-empty:
+/// php's `concat_function` with `result == op1`
+/// (`Z/Zend/zend_operators.c:2125-2155`), the CV's owner handed to
+/// `zend_string_extend`, which grows a string the CV alone holds where it
+/// stands and copies one with other holders or an interned one
+/// ([`Request::string_append`]), the joined string written back into the
+/// CV and, under `RETURN_VALUE_USED`, copied into the temporary, then
+/// `FREE_OP2`. The memory limit refusing the growth leaves the CV holding
+/// the string it held. `None`, with nothing touched, for every other
+/// pair: a reference, an operand that is no string, or an empty side,
+/// which `concat_function` hands the other side on for.
+///
+/// A loop of `.=` grows one allocation through the bins as `erealloc`
+/// grows it, so `memory_get_usage()` reads php's after each append; a
+/// string a second variable holds is copied and left to it, an interned
+/// one is copied, and a string appended to itself reads its own bytes:
+///
+/// ```php
+/// function f() {
+///     $s = str_repeat('a', 20); $m = memory_get_usage(); $d = [];
+///     for ($i = 0; $i < 12; $i++) { $s .= 'bcdefgh'; $d[] = memory_get_usage() - $m; }
+///     $t = $s; $s .= '!'; $d[] = memory_get_usage() - $m;
+///     $k = 'lit'; $k .= $s; $s .= $s; $d[] = memory_get_usage() - $m;
+///     $u = $s .= 'z';
+///     echo implode(' ', $d), "\n", strlen($s), ' ', strlen($k), ' ', strlen($t), ' ', $t . '!' === substr($s, 0, 105) ? 'y' : 'n', ' ', $u === $s ? 'y' : 'n', "\n";
+/// }
+/// f();
+/// ```
+/// ```expect
+/// 8 240 240 240 256 256 272 272 288 448 480 480 640 896
+/// 211 108 104 y y
+/// ```
+///
+/// Past the limit the variable holds what php's `zend_string_extend`
+/// left there, which a shutdown function reads after the fatal:
+///
+/// ```php
+/// ini_set('memory_limit', '7M');
+/// $s = str_repeat('x', 3000000);
+/// register_shutdown_function(function () { var_dump(strlen($GLOBALS['s'])); });
+/// $s .= $s;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 2998272 bytes) in %SCRATCH%/witness.php on line 5
+/// int(6000000)
+/// ```
+#[inline(always)] // the front of [`assigned_op`], out of the loop's body
+fn appended(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Option<Edge> {
+    if op.op1_type != OperandKind::Cv || !is_concat(op.extended_value) {
+        return None;
+    }
+    let slots = req.slots_mut(frame);
+    let left = slots.get(op.op1 as usize)?.as_str()?;
+    let right = match op.op2_type {
+        OperandKind::Const => code.literals.get(op.op2 as usize)?.as_str()?,
+        OperandKind::Cv | OperandKind::Tmp | OperandKind::Var => {
+            slots.get(op.op2 as usize)?.as_str()?
+        }
+        OperandKind::Unused => return None,
+    };
+    if left.is_empty() || right.is_empty() {
+        return None;
+    }
+    // The CV's owner is the append's: the string it hands back is the
+    // CV's, and one it refused stands where it was.
+    let joined = req.string_append(PhpString::of(left), PhpString::of(right));
+    exec::free_operand(req, frame, op.op2_type, op.op2);
+    Some(match joined {
+        Ok(joined) => {
+            let joined = Value::string(joined);
+            if let Some(slot) = req.slots_mut(frame).get_mut(op.op1 as usize) {
+                *slot = joined.to_zval();
+            }
+            write_out(req, frame, op, &joined);
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => threw(req, frame, &thrown),
+    })
+}
+
 /// `ASSIGN_OP` past its inline path: both operands read as values, the
 /// kernel over them, and what it came to written to the place
 /// ([`assign_to_place`]). A call of its own, as [`assigned_dim_op`] is.
 #[inline(never)]
 fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+    if let Some(edge) = appended(req, frame, code, op) {
+        return edge;
+    }
     let Some(kernel) = binary_op_of(op.extended_value) else {
         return Err(Fatal::error(format!(
             "InternalError: ZEND_ASSIGN_OP over the operator {}, which is no binary operation",
