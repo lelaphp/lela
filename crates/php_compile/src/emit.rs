@@ -8419,8 +8419,9 @@ impl<'a> Emit<'a> {
     /// line, `$` and the file's count of keys so far in hex, which is
     /// what the class is filed under ([`Unit::runtime_keys`]) and what
     /// `do_bind_class` finds it by, so that no two declarations of one
-    /// name are one class. The constants are added in php's order, the
-    /// parent's first.
+    /// name are one class. The key is `zend_strpprintf`'s, laid at
+    /// `zend_string_finit`'s size ([`Self::own_string`]). The constants
+    /// are added in php's order, the parent's first.
     ///
     /// A top-level class with no interface and no trait is one php's
     /// opcache delays (`ZEND_COMPILE_DELAYED_BINDING`, set by
@@ -8454,7 +8455,7 @@ impl<'a> Emit<'a> {
         key.extend_from_slice(format!(":{line}${:x}", self.keys_made()).as_bytes());
         let lowered = self.class_key(at, own, name)?;
         let op1 = self.literal(lowered);
-        let filed = self.string(&key)?;
+        let filed = self.own_string(&key, Sizing::Finit)?;
         self.literal(filed);
         self.runtime_keys.push((
             Name(key.into_boxed_slice()),
