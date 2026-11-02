@@ -536,6 +536,11 @@ pub enum SortAlgorithm {
     Hash,
     /// `zend_array_sort`: a hold, then a release that may offer a root.
     Array,
+    /// `array_multisort`'s restructure of a table its native separated
+    /// and holds (`HT_ALLOW_COW_VIOLATION`): no copy, no hold, and under
+    /// `renumber` only the integer keys numbered again, the string keys
+    /// kept and the next free element the count.
+    Multisort,
 }
 
 /// How a table [`PhpArray::sized`] lays down is laid out: php's packed
@@ -1082,7 +1087,8 @@ impl PhpArray {
     /// takes the copy with the write, and the table sorted is given up
     /// after, destroyed where nothing else holds it and otherwise offered
     /// to the collector. Under [`SortAlgorithm::Hash`] it is sorted as it
-    /// stands, held by nothing and offered to no collector.
+    /// stands, held by nothing and offered to no collector, and under
+    /// [`SortAlgorithm::Multisort`] too, its native holding it.
     ///
     /// ```php
     /// function resize_arr() { global $arr; for ($i = 0; $i < 4; $i++) { $arr[$i] = $i; } }
@@ -1116,10 +1122,17 @@ impl PhpArray {
             (&Key, &Value),
         ) -> Result<Ordering, Thrown>,
     ) -> Result<(), Thrown> {
-        self.separate(req)?;
+        if algorithm != SortAlgorithm::Multisort || self.0.is_immutable() {
+            self.separate(req)?;
+        }
         let held = (algorithm == SortAlgorithm::Array).then(|| Owner::take(req, self.to_value()));
+        let keys = match (algorithm, renumber) {
+            (_, false) => php_heap::SortKeys::Keep,
+            (SortAlgorithm::Multisort, true) => php_heap::SortKeys::RenumberIntegers,
+            (_, true) => php_heap::SortKeys::Renumber,
+        };
         let mut pending: Option<Thrown> = None;
-        let sorted = req.array_sort(self.0, renumber, &mut |req, x, y| {
+        let sorted = req.array_sort(self.0, keys, &mut |req, x, y| {
             let ordering = if pending.is_some() {
                 Ordering::Equal
             } else {
