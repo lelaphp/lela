@@ -2449,16 +2449,6 @@ fn hook_key(kind: php_unit::decl::HookKind) -> u8 {
     u8::from(kind == php_unit::decl::HookKind::Set)
 }
 
-/// Whether `class`'s last interface is the `Stringable` its `__toString`
-/// adds as it begins (`add_stringable_interface`), after the ones
-/// written; one written last as `Stringable` reads as added.
-fn stringable(class: &ClassDecl) -> bool {
-    let last = class.interfaces.last().map(|name| &*name.0);
-    class.kind != php_unit::decl::ClassKind::Trait
-        && last == Some(b"Stringable".as_slice())
-        && (class.methods.iter()).any(|m| m.function.name.0.eq_ignore_ascii_case(b"__tostring"))
-}
-
 /// Where an op array's blocks are held.
 #[derive(Clone, Copy)]
 enum Holder {
@@ -2586,7 +2576,7 @@ impl Walk<'_> {
         if let Some(slot) = self.laid.classes.get_mut(at) {
             *slot = Some(blocks);
         }
-        let begun = decl.interfaces.len() - usize::from(stringable(decl));
+        let begun = decl.interfaces.len() - usize::from(decl.flags.stringable_added);
         self.interfaces(req, at, begun)
     }
 
@@ -2627,7 +2617,7 @@ impl Walk<'_> {
         };
         let from = block.as_ref().map_or(0, Emalloc::len) / CLASS_NAME;
         let to = to.min(decl.interfaces.len());
-        let named = usize::from(to == decl.interfaces.len() && stringable(decl));
+        let named = usize::from(to == decl.interfaces.len() && decl.flags.stringable_added);
         if to > from {
             regrow(req, block, to * CLASS_NAME)?;
         }
