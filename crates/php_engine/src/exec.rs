@@ -1943,6 +1943,15 @@ pub(crate) enum Cached {
     /// (`ENCODE_SPECIAL_CACHE_NUM(zend_hash_num_elements(EG(zend_constants)))`),
     /// which answers `false` while the table holds as many.
     Undefined(crate::api::request::ConstantCount),
+    /// What a `NEW` over a constant name made its object of on a pass
+    /// that pushed its constructor: the class, which that pass found may
+    /// be instantiated, and the push of its constructor, a public user
+    /// method the standard handlers answer, as `INIT_FCALL`'s slot keeps
+    /// a call ([`PrimedCall`]). php reads `ce->constructor` off the class
+    /// its slot holds, and `object_init_ex` tests the class's flags,
+    /// neither of which a linked class changes, so the slot answers every
+    /// pass after.
+    Constructed { class: ClassId, call: PrimedCall },
 }
 
 /// A call to a user function as an `INIT_*`'s slot keeps it, read off
@@ -2143,6 +2152,7 @@ impl Cached {
             | Cached::Function(_)
             | Cached::Call(_)
             | Cached::Class(_)
+            | Cached::Constructed { .. }
             | Cached::Property { .. }
             | Cached::Miss
             | Cached::Hit
@@ -4138,8 +4148,11 @@ pub(crate) fn cached_class(
     at: u32,
     slot: Option<CacheSlot>,
 ) -> Option<crate::api::values::ClassId> {
-    if let Some(Cached::Class(class) | Cached::ClassConstant { class, .. }) =
-        slot.map(|slot| req.cached(frame, slot))
+    if let Some(
+        Cached::Class(class)
+        | Cached::Constructed { class, .. }
+        | Cached::ClassConstant { class, .. },
+    ) = slot.map(|slot| req.cached(frame, slot))
     {
         return Some(class);
     }

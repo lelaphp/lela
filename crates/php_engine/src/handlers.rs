@@ -5742,6 +5742,12 @@ pub(crate) fn new<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if op.op1_type == OperandKind::Const
+        && let Some(&Cached::Constructed { class, call }) =
+            req.cached_in_place(frame, CacheSlot(op.op2))
+    {
+        return constructed(req, frame, op, class, call);
+    }
     let class = match class_operand(
         req,
         frame,
@@ -5782,7 +5788,84 @@ pub(crate) fn new<T: Tier>(
     let mut header = exec::Header::call(function, op.extended_value);
     header.set_receiver(this.map(exec::Receiver::Owned));
     header.set_called_scope(constructor.map(|_| class));
-    pushed(req, frame, header)
+    let edge = pushed(req, frame, header);
+    if op.op1_type == OperandKind::Const
+        && edge.is_ok()
+        && let Some(constructor) = constructor
+    {
+        prime_constructed(req, frame, op, class, constructor);
+    }
+    edge
+}
+
+/// `NEW` off its slot ([`Cached::Constructed`]): the object made of the
+/// class the slot holds, with no test of its flags, into `result`, and
+/// its constructor's call pushed as the slot keeps it, the object its
+/// receiver with one more owner (`Z_ADDREF_P(result)`), with no lookup
+/// of the constructor or its row.
+///
+/// ```php
+/// class Q { public $a; function __construct($a) { $this->a = $a; } function __destruct() { echo "d{$this->a}|"; } }
+/// class R { public $n; private function __construct($n) { $this->n = $n; } static function make($n) { return new R($n); } }
+/// for ($i = 0; $i < 3; $i++) { $o = new Q($i); echo $o->a, ","; }
+/// echo "\n", R::make(1)->n, R::make(2)->n, "\n";
+/// try { new R(3); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// unset($o); echo "end\n";
+/// ```
+/// ```expect
+/// 0,d0|1,d1|2,
+/// 12
+/// Call to private R::__construct() from global scope
+/// d2|end
+/// ```
+fn constructed(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    class: crate::api::values::ClassId,
+    call: exec::PrimedCall,
+) -> Edge {
+    let object = match req.new_object(class) {
+        Ok(object) => object,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    set_out(req, frame, op, object.as_value());
+    object.heap().addref();
+    let count = op.extended_value;
+    req.push_laid(call.room as usize, move || {
+        let mut header = exec::Header::primed(call, count);
+        header.set_receiver(Some(exec::Receiver::Owned(object)));
+        header.set_called_scope(Some(class));
+        header
+    })?;
+    Ok(advance(req, frame))
+}
+
+/// What a `NEW` over a constant name keeps once it has pushed
+/// `constructor` on `class`: the push ([`Cached::Constructed`]), where
+/// the constructor is a public user method and the standard handlers
+/// answer it, so no scope and no table of the class's own decides it on
+/// a later pass; nothing otherwise, the slot holding the class alone.
+fn prime_constructed(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    class: crate::api::values::ClassId,
+    constructor: Function,
+) {
+    let public = req
+        .method_decl(constructor)
+        .is_some_and(|decl| decl.visibility == php_unit::decl::Visibility::Public);
+    if !public || req.own_handlers(class).is_some() {
+        return;
+    }
+    if let Cached::Call(call) = primed_call(req, constructor, op.extended_value) {
+        req.prime(
+            frame,
+            CacheSlot(op.op2),
+            Cached::Constructed { class, call },
+        );
+    }
 }
 
 /// `ZEND_INIT_STATIC_METHOD_CALL` (`Z/Zend/zend_vm_def.h:3739`) over a
@@ -13312,6 +13395,7 @@ pub(crate) fn jmp_frameless<T: Tier>(
         | Cached::Function(_)
         | Cached::Call(_)
         | Cached::Class(_)
+        | Cached::Constructed { .. }
         | Cached::ClassAndCallee { .. }
         | Cached::Property { .. }
         | Cached::StaticProperty { .. }
