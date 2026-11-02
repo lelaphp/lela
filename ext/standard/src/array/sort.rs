@@ -940,9 +940,10 @@ fn array_multisort(
 ) -> Result<True, Thrown> {
     use php_ext::raising::{arg_type_error, value_error};
     let given: Vec<Ref<Untyped<Value>>> = std::iter::once(array).chain(rest).collect();
-    // Each array as separated in its variable, and the comparison each
-    // array is sorted by, `(flags, descending)`.
+    // Each array as separated in its variable, whether it came in one,
+    // and the comparison each array is sorted by, `(flags, descending)`.
     let mut arrays: Vec<PhpArray> = Vec::new();
+    let mut written: Vec<bool> = Vec::new();
     let mut sorts: Vec<(i64, bool)> = Vec::new();
     let (mut order, mut kind) = (SORT_ASC, SORT_REGULAR);
     let (mut order_allowed, mut kind_allowed) = (false, false);
@@ -955,8 +956,9 @@ fn array_multisort(
                 order = SORT_ASC;
                 kind = SORT_REGULAR;
             }
-            let separated = argument.separated(req)?.unwrap_or(array);
-            arrays.push(separated);
+            let separated = argument.separated(req)?;
+            written.push(separated.is_some());
+            arrays.push(separated.unwrap_or(array));
             order_allowed = true;
             kind_allowed = true;
         } else if let Some(flag) = value.as_int() {
@@ -1018,7 +1020,7 @@ fn array_multisort(
         .iter()
         .map(|array| Owner::take(req, *array))
         .collect();
-    let sorted = multisort(req, &arrays, &sorts, size);
+    let sorted = multisort(req, &arrays, &written, &sorts, size);
     for owner in held {
         owner.give_up(req);
     }
@@ -1026,13 +1028,16 @@ fn array_multisort(
 }
 
 /// `array_multisort`'s sort over the tables it holds, and each table
-/// restructured in the order found where it stands, held, as php's
-/// `hashes[i]` are: a variable the program wrote over while the sort ran
-/// keeps what the program wrote, and the table it let go of is the one
-/// reordered.
+/// that came in a variable restructured in the order found where it
+/// stands, held, as php's `hashes[i]` are: a variable the program wrote
+/// over while the sort ran keeps what the program wrote, and the table it
+/// let go of is the one reordered. An array passed as a value is sorted
+/// as a column and left as it is, php's copy of it in the call's slot
+/// being one no program reads.
 fn multisort(
     req: &mut Request,
     arrays: &[PhpArray],
+    written: &[bool],
     sorts: &[(i64, bool)],
     size: usize,
 ) -> Result<(), Thrown> {
@@ -1076,9 +1081,10 @@ fn multisort(
     // naming one bucket of its table, and a table passed twice laid once,
     // as php's second pass lays it the same.
     for (index, (array, column)) in arrays.iter().zip(&columns).enumerate() {
-        if arrays[..index]
-            .iter()
-            .any(|earlier| earlier.is_same(*array))
+        if !written[index]
+            || arrays[..index]
+                .iter()
+                .any(|earlier| earlier.is_same(*array))
         {
             continue;
         }

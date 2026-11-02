@@ -539,7 +539,8 @@ pub enum SortAlgorithm {
     /// `array_multisort`'s restructure of a table its native separated
     /// and holds (`HT_ALLOW_COW_VIOLATION`): no copy, no hold, and under
     /// `renumber` only the integer keys numbered again, the string keys
-    /// kept and the next free element the count.
+    /// kept and the next free element the count; an immutable table is
+    /// left as it is.
     Multisort,
 }
 
@@ -1122,8 +1123,10 @@ impl PhpArray {
             (&Key, &Value),
         ) -> Result<Ordering, Thrown>,
     ) -> Result<(), Thrown> {
-        if algorithm != SortAlgorithm::Multisort || self.0.is_immutable() {
-            self.separate(req)?;
+        match algorithm {
+            SortAlgorithm::Multisort if self.0.is_immutable() => return Ok(()),
+            SortAlgorithm::Multisort => {}
+            _ => self.separate(req)?,
         }
         let held = (algorithm == SortAlgorithm::Array).then(|| Owner::take(req, self.to_value()));
         let keys = match (algorithm, renumber) {
