@@ -145,7 +145,7 @@ function u0:0(i64, i64) -> i32 tail {
 @0001                               brif v57, block12, block14
 
                                 block14:
-@0001                               v58 = load.i64 notrap aligned v3+104
+@0001                               v58 = load.i64 notrap aligned v3+96
 @0001                               store notrap aligned v58, v48
 @0001                               v59 = load.i64 notrap aligned v0+64
 @0001                               v60 = load.i64 notrap aligned v59
@@ -182,7 +182,7 @@ function u0:0(i64, i64) -> i32 tail {
 @0001                               store notrap aligned v70, v48+168  ; v70 = 0
 @0001                               store notrap aligned v70, v48+176  ; v70 = 0
 @0001                               store notrap aligned v70, v48+184  ; v70 = 0
-@0001                               store.i64 notrap aligned v48, v3+104
+@0001                               store.i64 notrap aligned v48, v3+96
 @0001                               v71 = load.i64 notrap aligned v3+72
 @0001                               v72 = iconst.i64 32
 @0001                               v73 = imul.i64 v53, v72  ; v72 = 32
@@ -1144,7 +1144,7 @@ function u0:0(i64, i64) -> i32 tail {
                                 block117:
 @000c                               store.i64 notrap aligned v531, v3+80
 @000c                               v700 = load.i64 notrap aligned v500
-@000c                               store notrap aligned v700, v3+104
+@000c                               store notrap aligned v700, v3+96
 @000c                               store.i64 notrap aligned v500, v3+56
 @000c                               v701 = iconst.i64 -80
 @000c                               v702 = iadd.i64 v693, v701  ; v701 = -80
