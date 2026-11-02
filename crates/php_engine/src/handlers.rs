@@ -2126,6 +2126,28 @@ fn sent(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge
 /// |1.5|
 /// string(3) "ss!" refcount(2)
 /// ```
+///
+/// A callee its `INIT` found taking nothing by reference is sent every
+/// argument by value with no parameter read, past the twelve php's
+/// `quick_arg_flags` covers too; one taking a parameter by reference
+/// still binds it, whether the compiler knew the callee or not:
+///
+/// ```php
+/// function sum(...$a) { return array_sum($a); }
+/// function fib($n) { return $n < 2 ? $n : fib($n - 1) + fib($n - 2); }
+/// echo sum(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14), " ", fib(15), "\n";
+/// function late() { return bump(2, $v) . " " . $v; }
+/// function bump($x, &$r) { $r = $x * 10; return $x; }
+/// echo late(), "\n";
+/// class C { function m($a, &$b) { $b = $a; } }
+/// $o = new C; $o->m(str_repeat("z", 2), $w);
+/// var_dump($w);
+/// ```
+/// ```expect
+/// 105 610
+/// 2 20
+/// string(2) "zz"
+/// ```
 #[inline(always)] // the handler's fast half, as php's is in the handler
 fn inline_send(
     req: &mut Request,
@@ -2141,6 +2163,22 @@ fn inline_send(
     let to = (op.op2 as usize).checked_sub(1)?;
     let (call, from) = req.vm_mut().stack.top_and_frame_mut(frame)?;
     let header = call.header();
+    // php's `_SIMPLE` specialisations (`Z/Zend/zend_vm_def.h:10403-10453`):
+    // a send the compiler knows goes by value, or a `_EX` to a callee its
+    // `INIT` found taking nothing by reference, writes the slot with no
+    // parameter read, one test of the call's flags.
+    let simple = match sending {
+        Sending::Value => header.info.building(),
+        Sending::Declared => header.info.sends_simply(),
+        Sending::Checked => false,
+    };
+    if simple {
+        debug_assert!(
+            to < header.num_args as usize,
+            "an argument sent by number past the count its INIT wrote"
+        );
+        return sent_into(from.slots_mut(), call.slots_mut().get_mut(to)?, code, op, a);
+    }
     let (info, num_args, function) = (header.info, header.num_args, header.function);
     if !info.building() || to >= num_args as usize {
         return None;

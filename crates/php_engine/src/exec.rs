@@ -947,6 +947,13 @@ impl CallInfo {
     /// arms of `zend_leave_helper` past its first. A file's frame always
     /// has one, which holds its unit.
     const ANNEX: u32 = 1 << 28;
+    /// The `INIT` found the callee a user function none of whose
+    /// parameters, the variadic's included, takes its argument by
+    /// reference ([`crate::api::request::FrameShape::sent`]): every
+    /// argument of the call goes by value, whatever its number, which
+    /// php's `SEND_VAL_EX_SIMPLE` and `SEND_VAR_EX_SIMPLE` read off
+    /// `quick_arg_flags` one argument at a time.
+    const BY_VALUE: u32 = 1 << 29;
 
     /// The flags as another process read them ([`crate::readable`]).
     pub(crate) fn of(bits: u32) -> CallInfo {
@@ -1103,6 +1110,23 @@ impl CallInfo {
     pub(crate) fn sends_by_value(self, number: u32) -> bool {
         let at = number.wrapping_sub(1);
         at < Self::QUICK && self.0 & 1 << (Self::BY_VALUE_AT + at) != 0
+    }
+
+    /// [`CallInfo::sent`] with [`CallInfo::BY_VALUE`] where `by_value`.
+    pub(crate) fn with_by_value(self, by_value: bool) -> CallInfo {
+        CallInfo(if by_value {
+            self.0 | Self::BY_VALUE
+        } else {
+            self.0
+        })
+    }
+
+    /// A call being built whose every argument goes by value
+    /// ([`CallInfo::BY_VALUE`]), one test of the word: a `SEND_*_EX` by
+    /// number writes its slot with no parameter read.
+    #[inline(always)] // once per `SEND_*_EX`, in the loop's arms
+    pub(crate) fn sends_simply(self) -> bool {
+        self.0 & (Self::BUILDING | Self::BY_VALUE) == Self::BUILDING | Self::BY_VALUE
     }
 
     /// [`CallInfo::sent`] with [`CallInfo::LAID_ENTRY`] where `laid`.
