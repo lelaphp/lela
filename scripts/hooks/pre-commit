@@ -44,11 +44,10 @@
 # When a path under harness-plugins/ is staged, the function-hook declarations are rewritten
 # first (#62): harness-plugins/types is a tracked generated file, written
 # by the committer's own Claude Code as `declarations` below says, and
-# staged; `tsc` then holds every plugin's modules to it, and for each
-# plugin under harness-plugins/ (the harness and the desk, #3490) `plugin
-# validate --strict` reads the manifest, hooks.json and the module and
-# `plugin test` runs its tests (#2247; `tsc` leaves them to the engine,
-# whose kit types them).
+# staged; `tsc` then holds every plugin's modules and tests to it (#3831),
+# and for each plugin under harness-plugins/ (the harness and the desk,
+# #3490) `plugin validate --strict` reads the manifest, hooks.json and the
+# module and `plugin test` runs its tests (#2247).
 # Without `claude` on PATH that step is skipped by name and the commit
 # goes on: CI holds the module to the committed file. A `claude` that is
 # not logged in, or whose run extracts no declarations, is named the same
