@@ -4768,6 +4768,7 @@ pub(crate) enum Offset {
 /// #0 {main}
 ///   thrown in %s on line 2
 /// ```
+#[inline]
 pub(crate) fn add_array_element(
     req: &mut Request,
     array: PhpArray,

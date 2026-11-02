@@ -1757,9 +1757,29 @@ impl Arr {
         z
     }
 
+    /// `_zend_hash_index_add_or_update_i`'s `add_to_packed` arm under
+    /// `HASH_ADD_NEXT` where nothing else of it is taken: a packed list
+    /// whose next free element is the slot past its last and inside its
+    /// room, so `z` lands there with no hole to lay, no table to grow and
+    /// nothing to convert. `None` is every other table, for
+    /// [`write_long`] to take whole; nothing is written then.
+    #[inline]
+    fn append_in_room(self, z: Zval) -> Option<u32> {
+        let header = self.header();
+        let used = header.num_used.get();
+        let next = header.next_free.get();
+        let next = if next == i64::MIN { 0 } else { next };
+        if !self.is_packed() || next != i64::from(used) || used >= header.table_size.get() {
+            return None;
+        }
+        self.add_to_packed(used, z);
+        Some(used)
+    }
+
     /// The `add_to_packed` arm: the slots between `nNumUsed` and `h`
     /// become holes, and `h + 1` is both the used count and the next
     /// free element.
+    #[inline]
     fn add_to_packed(self, h: u32, z: Zval) {
         let header = self.header();
         let used = self.num_used();
@@ -1899,6 +1919,7 @@ impl crate::Heap {
     /// `zend_hash_check_size(size, heap->fallible)` over this heap: the
     /// table's size, and its overflow the heap's refusal or its end
     /// ([`Mm::overflow_refusal`]).
+    #[inline]
     fn table_size(&mut self, size: u32) -> Result<u32, Fatal> {
         check_size(size).map_err(|said| self.mm.overflow_refusal(said))
     }
@@ -1906,6 +1927,7 @@ impl crate::Heap {
     /// `zend_new_array(size)`, `array_init_size`: the header, with the
     /// first data allocation sized for `size` elements through
     /// `zend_hash_check_size`.
+    #[inline]
     pub fn array_sized(&mut self, size: u32) -> Result<Arr, Fatal> {
         let size = self.table_size(size)?;
         let at = self.mm.alloc(HEADER)?;
@@ -2036,8 +2058,40 @@ impl crate::Heap {
 
     /// `zend_hash_next_index_insert`, `$a[] = z`: `false`, and `z` still
     /// the caller's, when `nNextFreeElement` is `ZEND_LONG_MAX` and taken.
-    /// Nothing is replaced, so nothing here can reach user code.
+    /// Nothing is replaced, so nothing here can reach user code. A packed
+    /// list with room takes `z` here, inline in the caller
+    /// ([`Arr::append_in_room`]); every other table goes out of line: a
+    /// list whose last slots were unset, which lays its holes, a hash, a
+    /// list out of room, which grows at php's sizes, and a table never
+    /// written.
+    ///
+    /// ```php
+    /// $a = [1, 2]; $a[] = 3;
+    /// $b = [1, 2, 3]; unset($b[2]); $b[] = 4;
+    /// $c = [1, 2]; array_pop($c); $c[] = 5;
+    /// $d = [5 => 1]; $d[] = 2;
+    /// $e = []; for ($i = 0; $i < 9; $i++) { $e[] = $i; }
+    /// echo json_encode([$a, $b, $c, $d, $e]), "\n";
+    /// $n = 1; $m = memory_get_usage(); $f = [$n, 2]; $f[] = 3; $g = memory_get_usage() - $m;
+    /// for ($i = 0; $i < 6; $i++) { $f[] = $i; } $h = memory_get_usage() - $m;
+    /// var_dump($g, $h);
+    /// ```
+    /// ```expect
+    /// [[1,2,3],{"0":1,"1":2,"3":4},[1,5],{"5":1,"6":2},[0,1,2,3,4,5,6,7,8]]
+    /// int(216)
+    /// int(376)
+    /// ```
+    #[inline]
     pub fn array_append(&mut self, a: Arr, z: Zval) -> Result<bool, Fatal> {
+        if a.append_in_room(z).is_some() {
+            return Ok(true);
+        }
+        self.array_append_out_of_room(a, z)
+    }
+
+    /// [`Heap::array_append`] past the packed list with room.
+    #[inline(never)]
+    fn array_append_out_of_room(&mut self, a: Arr, z: Zval) -> Result<bool, Fatal> {
         Ok(self.array_write_long(a, a.next_free(), z, Write::Next)? != Written::Refused)
     }
 
@@ -2091,7 +2145,17 @@ impl crate::Heap {
     /// entry appended, in place, holding `null`; `None` where
     /// `nNextFreeElement` is `ZEND_LONG_MAX` and taken, which is
     /// `zend_cannot_add_element`'s `Error` at the site.
+    #[inline]
     pub fn array_next_entry(&mut self, a: Arr) -> Result<Option<ZvalRef>, Fatal> {
+        if let Some(slot) = a.append_in_room(Zval::null()) {
+            return Ok(Some(ZvalRef::new(a.value_ptr(Pos::Slot(slot)))));
+        }
+        self.array_next_entry_out_of_room(a)
+    }
+
+    /// [`Heap::array_next_entry`] past the packed list with room.
+    #[inline(never)]
+    fn array_next_entry_out_of_room(&mut self, a: Arr) -> Result<Option<ZvalRef>, Fatal> {
         let index = a.next_free();
         let index = if index == i64::MIN { 0 } else { index };
         Ok(
@@ -2787,6 +2851,11 @@ impl crate::Heap {
     /// released
     /// ```
     pub(crate) fn destroy(hooks: &mut dyn HeapHooks, first: Last) {
+        if let Last::Table(a) = first
+            && hooks.heap().array_destroy_flat(a)
+        {
+            return;
+        }
         // The heap's room for the walk, taken for its length and put back
         // emptied, so a walk allocates nothing after the request's first.
         let mut walk = std::mem::take(&mut hooks.heap().destroying);
@@ -2847,15 +2916,7 @@ impl crate::Heap {
                     let a = *a;
                     let Some((val, k)) = a.element_from(at) else {
                         walk.pop();
-                        Heap::array_free_data(hooks.heap(), a);
-                        let pinned = a.gc().pinned();
-                        if pinned {
-                            a.emptied();
-                        }
-                        // SAFETY: the header came from `array_sized`, its
-                        // last owner has given it up and its contents are
-                        // freed, so only a pin names it.
-                        unsafe { hooks.heap().give_back(a.address(), pinned) };
+                        hooks.heap().array_give_back(a);
                         continue;
                     };
                     next = Heap::release_within(hooks, val);
@@ -2908,6 +2969,47 @@ impl crate::Heap {
         Heap::array_free_data(hooks.heap(), a);
     }
 
+    /// [`Heap::destroy`] of a table no element of which has an owner to
+    /// give up: a packed list of uncounted values, or a table never
+    /// written. php's `zend_array_destroy` walks it and releases nothing,
+    /// so the walk is left out and the table goes as the walk would let it
+    /// go, out of the root buffer, then its data and its header. `false`,
+    /// and nothing done, for every other table, the walk's.
+    ///
+    /// ```php
+    /// $b = memory_get_usage();
+    /// $a = [1, 2.5, true, null, 'interned']; $a[] = 6; $h = [3 => 1, 9 => 2];
+    /// $a = null; $h = null;
+    /// $c = [[1, 2], [3]]; $c = null;
+    /// var_dump(memory_get_usage() - $b);
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// ```
+    fn array_destroy_flat(&mut self, a: Arr) -> bool {
+        if a.gc().kind() == ZvalType::Null as u32 || !a.holds_nothing_counted() {
+            return false;
+        }
+        self.gc.remove_from_buffer(crate::collector::Node::Arr(a));
+        a.gc().set_kind(ZvalType::Null);
+        self.array_give_back(a);
+        true
+    }
+
+    /// The end of `zend_array_destroy` once every element is released:
+    /// the data back to the heap, then the header, or what a pin over it
+    /// reads as an emptied table.
+    fn array_give_back(&mut self, a: Arr) {
+        Heap::array_free_data(self, a);
+        let pinned = a.gc().pinned();
+        if pinned {
+            a.emptied();
+        }
+        // SAFETY: the header came from `array_sized`, its last owner has
+        // given it up and its contents are freed, so only a pin names it.
+        unsafe { self.give_back(a.address(), pinned) };
+    }
+
     /// The end of `zend_array_destroy` and `zend_hash_destroy` once
     /// every element is released: the iterators unregistered and the
     /// data back to the heap.
@@ -2932,6 +3034,15 @@ pub(crate) enum Emptying {
 }
 
 impl Arr {
+    /// Whether giving the table up releases nothing: an uninitialised
+    /// table, or a packed list none of whose slots holds a counted value.
+    fn holds_nothing_counted(self) -> bool {
+        if self.is_uninitialized() {
+            return true;
+        }
+        self.is_packed() && (0..self.num_used()).all(|idx| !self.read_slot(idx).is_refcounted())
+    }
+
     /// The next element of a table being destroyed at or past `*at`,
     /// its value and its string key, and `*at` moved past it: a packed
     /// table's slots, a hash's buckets less the tombstones, and nothing
