@@ -243,6 +243,27 @@ impl Fused {
     }
 }
 
+/// Whether an arithmetic opline is fused to the opline after it, the
+/// `ASSIGN` of its temporary to a CV whose `out` nothing reads
+/// ([`Opline::assigned_by`]): the handler of the arithmetic serves both
+/// oplines where the loop dispatches it, as a comparison's serves the
+/// jump fused to it (design §5.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Assigned {
+    No,
+    Cv,
+}
+
+impl Assigned {
+    /// What `op` is fused to, `next` the opline after it.
+    pub(crate) fn of(op: &Opline, next: Option<&Opline>) -> Assigned {
+        match next {
+            Some(assign) if op.assigned_by(assign) => Assigned::Cv,
+            _ => Assigned::No,
+        }
+    }
+}
+
 /// The kind of the value an assignment's `OP_DATA` carries, `next` the
 /// opline after the assignment; none where `next` is no `OP_DATA`.
 pub(crate) fn data_kind(next: Option<&Opline>) -> Option<OperandKind> {
@@ -264,6 +285,20 @@ impl Opline {
             && self.out_type == OperandKind::Tmp
             && jump.op1_type == OperandKind::Tmp
             && jump.op1 == self.out
+    }
+
+    /// Whether `assign`, the opline after this one, is the `ASSIGN` of
+    /// this opline's temporary to a CV with its `out` unread
+    /// (`ZEND_ASSIGN_SPEC_CV_TMP_RETVAL_UNUSED`), which is what
+    /// `$x = $a + $b;` compiles to.
+    #[must_use]
+    pub(crate) fn assigned_by(&self, assign: &Opline) -> bool {
+        assign.opcode == Opcode::Assign
+            && self.out_type == OperandKind::Tmp
+            && assign.op1_type == OperandKind::Cv
+            && assign.op2_type == OperandKind::Tmp
+            && assign.op2 == self.out
+            && assign.out_type == OperandKind::Unused
     }
     /// The opline the jump lands on, read from the one field whose shape
     /// is `JMP_ADDR` in `zend_vm_opcodes_flags`: `op1` for a `JMP`, `op2`
@@ -901,6 +936,71 @@ mod tests {
         assert_eq!(
             resolved(vec![over(Opcode::Add, OperandKind::Unused, cv)]),
             [Handler::AddUnlisted]
+        );
+    }
+
+    /// `ADD`, `SUB`, `MUL` and `DIV` are resolved over whether the
+    /// opline after them assigns their temporary to a CV and leaves its
+    /// `out` unread, and the `ASSIGN` keeps its own handler, which a jump
+    /// to it serves.
+    #[test]
+    fn publication_resolves_arithmetic_over_the_assign_of_its_temporary_after_it() {
+        let (cv, konst, tmp, unused) = (
+            OperandKind::Cv,
+            OperandKind::Const,
+            OperandKind::Tmp,
+            OperandKind::Unused,
+        );
+        let assign = |op2, out_type| Opline {
+            opcode: Opcode::Assign,
+            op1_type: cv,
+            op1: 0,
+            op2_type: tmp,
+            op2,
+            out_type,
+            ..Opline::default()
+        };
+        assert_eq!(
+            resolved(vec![over(Opcode::Add, tmp, cv), assign(3, unused)]),
+            [Handler::AddTmpCvAssignCv, Handler::AssignCvTmpRetvalUnused]
+        );
+        assert_eq!(
+            resolved(vec![over(Opcode::Mul, cv, cv), assign(3, unused)]),
+            [Handler::MulCvCvAssignCv, Handler::AssignCvTmpRetvalUnused]
+        );
+        assert_eq!(
+            resolved(vec![over(Opcode::Sub, tmp, konst), assign(3, unused)]),
+            [
+                Handler::SubTmpConstAssignCv,
+                Handler::AssignCvTmpRetvalUnused
+            ]
+        );
+        assert_eq!(
+            resolved(vec![over(Opcode::Div, cv, tmp), assign(3, unused)]),
+            [Handler::DivAssignCv, Handler::AssignCvTmpRetvalUnused]
+        );
+        assert_eq!(
+            resolved(vec![over(Opcode::Add, tmp, cv), assign(4, unused)]),
+            [Handler::AddTmpCv, Handler::AssignCvTmpRetvalUnused],
+            "an assignment of another temporary is no fused assignment"
+        );
+        assert_eq!(
+            resolved(vec![over(Opcode::Add, tmp, cv), assign(3, tmp)]),
+            [Handler::AddTmpCv, Handler::AssignCvTmpRetvalUsed],
+            "nor is one whose `out` is read"
+        );
+        assert_eq!(
+            resolved(vec![over(Opcode::Mod, cv, cv), assign(3, unused)]),
+            [Handler::Mod, Handler::AssignCvTmpRetvalUnused],
+            "nor one after an opcode the list does not name"
+        );
+        assert_eq!(
+            resolved(vec![
+                over(Opcode::Add, OperandKind::Unused, cv),
+                assign(3, unused)
+            ]),
+            [Handler::AddUnlisted, Handler::AssignCvTmpRetvalUnused],
+            "and the kinds a row does not list keep their one variant"
         );
     }
 
