@@ -61,6 +61,7 @@ pub struct FrameLayout {
     called_scope: u32,
     leaves_by_kernel: u32,
     release_this: u32,
+    has_this: u32,
     send_by_ref: u32,
     building: u32,
     return_unused: u32,
@@ -99,6 +100,7 @@ pub const FRAME: FrameLayout = FrameLayout {
     called_scope: word(HEADER_AT + Header::SCOPE_AT),
     leaves_by_kernel: CallInfo::LEAVES_BY_KERNEL,
     release_this: CallInfo::RELEASE_THIS,
+    has_this: CallInfo::HAS_THIS,
     send_by_ref: CallInfo::SEND_BY_REF,
     building: CallInfo::BUILDING,
     return_unused: CallInfo::RETURN_UNUSED,
@@ -265,6 +267,15 @@ impl FrameLayout {
     #[must_use]
     pub const fn release_this(&self) -> u32 {
         self.release_this
+    }
+
+    /// `ZEND_CALL_HAS_THIS`: the frame holds a receiver,
+    /// [`FrameLayout::this`], owned or pinned, which compiled code that
+    /// writes one in place sets beside it, as the interpreter's leave
+    /// reads the flags alone to find it.
+    #[must_use]
+    pub const fn has_this(&self) -> u32 {
+        self.has_this
     }
 
     /// The bit of a call being built that says the argument its last
@@ -753,8 +764,8 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let function = header.function?;
     let plain = top == call
         && header.info.building()
-        && header.closure.is_none()
-        && header.annex.is_none()
+        && header.closure().is_none()
+        && header.annex().is_none()
         && !crate::observer::observing(req);
     if !plain {
         return None;

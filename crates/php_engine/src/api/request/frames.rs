@@ -254,7 +254,7 @@ impl Request {
             let user = self.user_function(function)?;
             Some((&user.unit, user.body))
         } else {
-            let unit = self.annexes.get(header.annex?)?.unit.as_ref()?;
+            let unit = self.annexes.get(header.annex()?)?.unit.as_ref()?;
             Some((unit, exec::Body::Main))
         }
     }
@@ -284,12 +284,12 @@ impl Request {
 
     /// The [`exec::Annex`] of `frame`, made where it has none.
     pub(crate) fn annex_mut(&mut self, frame: FrameRef) -> Option<&mut exec::Annex> {
-        let id = if let Some(id) = self.vm.at(frame)?.annex {
+        let id = if let Some(id) = self.vm.at(frame)?.annex() {
             id
         } else {
             let id = self.annexes.insert(exec::Annex::default());
             if let Some(header) = self.vm.at_mut(frame) {
-                header.annex = Some(id);
+                header.set_annex(Some(id));
             }
             id
         };
@@ -298,7 +298,7 @@ impl Request {
 
     /// The [`exec::Annex`] of `frame`, where it has one.
     pub(crate) fn annex_of(&self, frame: FrameRef) -> Option<&exec::Annex> {
-        self.annexes.get(self.vm.at(frame)?.annex?)
+        self.annexes.get(self.vm.at(frame)?.annex()?)
     }
 
     /// The fast-call cell of `frame`'s temporary `var`
@@ -310,7 +310,7 @@ impl Request {
     /// A frame's [`exec::Annex`] given up with the frame: its place
     /// given back, and what it owns handed to the caller.
     pub(crate) fn take_annex(&mut self, header: &exec::Header) -> Option<exec::Annex> {
-        self.annexes.take(header.annex?)
+        self.annexes.take(header.annex()?)
     }
 
     /// A generator's frame back on the stack with the calls it was
@@ -705,7 +705,7 @@ impl Request {
             statics,
             ..exec::Annex::default()
         });
-        header.annex = Some(annex);
+        header.set_annex(Some(annex));
         header.callee = self.annexes.callee(annex);
         let frame = match self.vm.push(&mut self.heap, slots, 0, header) {
             Ok(frame) => frame,
@@ -769,7 +769,7 @@ impl Request {
         frame: FrameRef,
         copy: crate::api::values::Emalloc,
     ) -> Result<(), Thrown> {
-        let annex = self.vm.at(frame).and_then(|header| header.annex);
+        let annex = self.vm.at(frame).and_then(exec::Header::annex);
         let size = (annex.and_then(|id| self.annexes.get(id)))
             .and_then(|extra| extra.unit.as_ref())
             .map_or(0, |unit| unit.main.cache_room);
@@ -884,6 +884,44 @@ impl Request {
     /// 6 1 20001
     /// int(0)
     /// ```
+    ///
+    /// The flags alone decide which leave a frame takes: a closure's
+    /// frame gives up its closure, an owned receiver is given up and a
+    /// lent one let go after the CVs, and a file's frame, which always
+    /// has an annex, is the kernel's, its value handed to the includer:
+    ///
+    /// ```php
+    /// class D {
+    ///     function __construct(public $n) {}
+    ///     function __destruct() { echo "[{$this->n}]"; }
+    ///     function me() { return $this->n; }
+    ///     function lent() { return $this->me(); }
+    /// }
+    /// $c = function ($a) { return $a * 2; };
+    /// $t = 0;
+    /// for ($i = 0; $i < 3; $i++) { $t += $c($i); }
+    /// echo $t, "\n";
+    /// echo (new D('tmp'))->me(), "\n";
+    /// $d = new D('kept');
+    /// echo $d->lent(), "\n";
+    /// (function () { $o = new D('closure'); return 1; })();
+    /// echo "\n";
+    /// $f = tempnam(sys_get_temp_dir(), 'leave');
+    /// file_put_contents($f, '<?php $x = new D("file"); return 7;');
+    /// var_dump(include $f);
+    /// unlink($f);
+    /// unset($d);
+    /// echo "\n";
+    /// ```
+    /// ```expect
+    /// 6
+    /// [tmp]tmp
+    /// kept
+    /// [closure]
+    /// int(7)
+    /// [kept]
+    /// [file]
+    /// ```
     #[inline(always)] // once per return, in the loop's RETURN arms
     pub(crate) fn leave_plainly(
         &mut self,
@@ -899,16 +937,21 @@ impl Request {
             return None;
         }
         let header = laid.header();
-        // Each test evaluated, none short of the others, so the words are
-        // read side by side and folded, as php's leave tests one word of
-        // `ZEND_CALL_INFO`: a branch apiece measured 26 instructions.
-        let held = header.this().is_some() | header.closure.is_some();
-        let plain = header.function.is_some()
-            & header.annex.is_none()
-            & (header.info.bits() & exec::CallInfo::LEAVES_BY_KERNEL == 0);
-        if !plain || held && !held_kept(header.receiver(), header.closure) {
-            return None;
-        }
+        // `zend_leave_helper`'s first test, one word of `ZEND_CALL_INFO`:
+        // no call, extra argument or annex, which a file's frame always
+        // has, and whether a receiver or a closure is given up after the
+        // CVs, which is read only where the word says one is held.
+        let held = match header.info.leave() {
+            exec::Leave::Plain => false,
+            exec::Leave::Held if held_kept(header.receiver(), header.closure()) => true,
+            exec::Leave::Held | exec::Leave::Kernel => return None,
+        };
+        debug_assert!(
+            header.function.is_some()
+                && header.annex().is_none()
+                && held == (header.this().is_some() || header.closure().is_some()),
+            "a frame's flags disagree with its header at a plain leave"
+        );
         let caller = header.caller().frame()?;
         let returns_to = header.returns_to();
         let slots = laid.slots();
@@ -1054,7 +1097,7 @@ impl Request {
         };
         let receiver = header.receiver();
         header.set_receiver(None);
-        let closure = header.closure.take();
+        let closure = header.take_closure();
         match receiver {
             Some(exec::Receiver::Owned(object))
                 if self.heap.release_kept(object.as_value().to_zval()) => {}
@@ -1139,7 +1182,7 @@ impl Request {
             return cached;
         };
         let same = primed.function.is_some()
-            && header.closure.is_none()
+            && header.closure().is_none()
             && header.function == primed.function
             || primed.scope == self.scope_of(state);
         if same { cached } else { exec::Cached::Unprimed }
@@ -1167,7 +1210,7 @@ impl Request {
             function: self
                 .vm
                 .at(frame)
-                .filter(|header| header.closure.is_none())
+                .filter(|header| header.closure().is_none())
                 .and_then(|header| header.function),
             scope: self.frame_scope(frame),
         }
@@ -1241,7 +1284,7 @@ impl Request {
             return None;
         };
         let same = held == class
-            && header.closure.is_none()
+            && header.closure().is_none()
             && header.function == function
             && !self.fakes_scope()
             && (function.is_some() || self.frame_scope(frame) == scope);
@@ -1261,7 +1304,11 @@ impl Request {
         object: PhpObject,
         name: &[u8],
     ) {
-        let Some(header) = self.vm.at(frame).filter(|header| header.closure.is_none()) else {
+        let Some(header) = self
+            .vm
+            .at(frame)
+            .filter(|header| header.closure().is_none())
+        else {
             return;
         };
         let function = header.function;
@@ -1385,7 +1432,7 @@ impl Request {
             return Err(Fatal::error("InternalError: a call pushed with no callee"));
         };
         if header.info.building()
-            && header.closure.is_none()
+            && header.closure().is_none()
             && let Some(function) = header.function
         {
             self.init_func_run_time_cache(function)?;
@@ -1461,9 +1508,9 @@ impl Request {
             return;
         };
         let header = frame.header_mut();
-        debug_assert!(header.closure.is_none() && header.receiver().is_none());
+        debug_assert!(header.closure().is_none() && header.receiver().is_none());
         header.info.set_leaving(true);
-        let carries = header.annex.is_some();
+        let carries = header.annex().is_some();
         let slots = frame.slots_mut();
         if carries {
             for (at, slot) in slots.iter_mut().enumerate() {
@@ -1799,7 +1846,7 @@ impl Request {
             return None;
         }
         let cache = self
-            .closure_own_cache(header.closure)
+            .closure_own_cache(header.closure())
             .unwrap_or(shape.cache);
         if passed > shape.parameters || len < shape.slots as usize || !self.map.laid(cache) {
             return None;
@@ -1832,7 +1879,7 @@ impl Request {
     ) -> Result<exec::Activated, Fatal> {
         let (num_args, len, closure) = self.vm.stack.frame(call).map_or((0, 0, None), |frame| {
             let header = frame.header();
-            (header.num_args, frame.len(), header.closure)
+            (header.num_args, frame.len(), header.closure())
         });
         // A closure with a cache of its own reads it in place of its
         // function's (`zend_create_closure_ex`).
@@ -1952,7 +1999,7 @@ impl Request {
         // `zend_execute` has returned.
         let top = header.info.top_code();
         let statics = (header.function.is_none())
-            .then(|| self.leaving_statics(header.annex))
+            .then(|| self.leaving_statics(header.annex()))
             .flatten();
         if let Some(of) = statics.filter(|_| !top) {
             self.destroy_file_statics(of);
@@ -1966,8 +2013,8 @@ impl Request {
         header.info.set_leaving(true);
         let receiver = header.receiver();
         header.set_receiver(None);
-        let closure = header.closure.take();
-        let (function, annex, num_args) = (header.function, header.annex, header.num_args);
+        let closure = header.take_closure();
+        let (function, annex, num_args) = (header.function, header.annex(), header.num_args);
         if !self.bailout {
             self.release_frame(frame, function, annex, num_args, receiver, closure);
         }
@@ -2012,7 +2059,7 @@ impl Request {
     /// are none unless a serving left its frames.
     pub(crate) fn drop_frames(&mut self, dropped: Vec<exec::Header>) {
         for header in dropped {
-            if let Some(annex) = header.annex.and_then(|id| self.annexes.take(id)) {
+            if let Some(annex) = header.annex().and_then(|id| self.annexes.take(id)) {
                 self.give_up_annex(annex, false);
             }
         }
@@ -2321,7 +2368,7 @@ impl Request {
             return;
         };
         header.info.set_leaving(true);
-        if header.annex.is_some() || header.closure.is_some() || header.receiver().is_some() {
+        if header.annex().is_some() || header.closure().is_some() || header.receiver().is_some() {
             return self.pop_carrying(call);
         }
         self.release_arguments(call);
@@ -2336,7 +2383,7 @@ impl Request {
     /// `zend_vm_stack_free_call_frame` then frees the frame alone. None
     /// for a call made through no closure.
     pub(crate) fn take_call_closure(&mut self, call: FrameRef) -> Option<PhpObject> {
-        self.vm.at_mut(call)?.closure.take()
+        self.vm.at_mut(call)?.take_closure()
     }
 
     /// [`Request::pop_call`] of a call that carries a receiver, a
@@ -2348,8 +2395,8 @@ impl Request {
         };
         let receiver = header.receiver();
         header.set_receiver(None);
-        let closure = header.closure.take();
-        let mut annex = header.annex.take().and_then(|id| self.annexes.take(id));
+        let closure = header.take_closure();
+        let mut annex = header.take_annex().and_then(|id| self.annexes.take(id));
         // `zend_vm_stack_free_args`, whose `zval_ptr_dtor_nogc` makes no
         // argument a possible root; the receiver and the closure after
         // them are `OBJ_RELEASE`, which does.

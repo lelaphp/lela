@@ -2991,7 +2991,7 @@ fn dynamic_header(target: &DynamicTarget, count: u32) -> exec::Header {
     let mut header = exec::Header::call(target.function, count);
     header.set_receiver(target.receiver);
     header.set_called_scope(target.called_scope);
-    header.closure = target.closure.map(|(closure, _)| closure);
+    header.set_closure(target.closure.map(|(closure, _)| closure));
     header.info.set_dynamic(true);
     header
         .info

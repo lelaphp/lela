@@ -476,7 +476,7 @@ impl Request {
         let Some(function) = state.function else {
             return Vec::new();
         };
-        if state.closure.is_none() {
+        if state.closure().is_none() {
             return self.qualified_name_of(function);
         }
         let name = self.declared_name(function);

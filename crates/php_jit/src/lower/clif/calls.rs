@@ -727,32 +727,39 @@ impl Emit<'_> {
     /// ```
     fn receive(&mut self, this: Value, taken: Taken, top: Value) {
         self.b.ins().store(trusted(), this, top, at(L.this()));
-        if let Taken::Moved = taken {
-            let info = self.b.ins().load(I32, trusted(), top, at(L.info()));
-            let info = self.b.ins().bor_imm_u(info, i64::from(L.release_this()));
-            self.b.ins().store(trusted(), info, top, at(L.info()));
-        } else if let Taken::Shared = taken {
+        // `ZEND_CALL_HAS_THIS` beside it, and `ZEND_CALL_RELEASE_THIS`
+        // where the frame owns it.
+        let flags = match taken {
+            Taken::Moved | Taken::Shared => L.has_this() | L.release_this(),
+            Taken::Lent => L.has_this(),
+        };
+        let info = self.b.ins().load(I32, trusted(), top, at(L.info()));
+        let info = self.b.ins().bor_imm_u(info, i64::from(flags));
+        self.b.ins().store(trusted(), info, top, at(L.info()));
+        match taken {
+            // The temporary's owner moved, its slot left undefined.
+            Taken::Moved => {}
             // `GC_ADDREF`, the count kept below the bit above it.
-            let count = self.b.ins().load(I32, trusted(), this, COUNT_AT);
-            let bits = self.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
-            let room =
-                (self.b.ins()).icmp_imm_u(IntCC::NotEqual, bits, i64::from(Zval::COUNT_BITS));
-            let room = self.b.ins().uextend(I32, room);
-            let more = self.b.ins().iadd(count, room);
-            self.b.ins().store(trusted(), more, this, COUNT_AT);
-            let info = self.b.ins().load(I32, trusted(), top, at(L.info()));
-            let info = self.b.ins().bor_imm_u(info, i64::from(L.release_this()));
-            self.b.ins().store(trusted(), info, top, at(L.info()));
-        } else {
-            let word = self.b.ins().load(I32, trusted(), this, PINS_AT);
-            let pins = self.b.ins().band_imm_u(word, i64::from(Obj::PINS));
-            let room = self
-                .b
-                .ins()
-                .icmp_imm_u(IntCC::NotEqual, pins, i64::from(Obj::PINS));
-            let room = self.b.ins().uextend(I32, room);
-            let word = self.b.ins().iadd(word, room);
-            self.b.ins().store(trusted(), word, this, PINS_AT);
+            Taken::Shared => {
+                let count = self.b.ins().load(I32, trusted(), this, COUNT_AT);
+                let bits = self.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
+                let room =
+                    (self.b.ins()).icmp_imm_u(IntCC::NotEqual, bits, i64::from(Zval::COUNT_BITS));
+                let room = self.b.ins().uextend(I32, room);
+                let more = self.b.ins().iadd(count, room);
+                self.b.ins().store(trusted(), more, this, COUNT_AT);
+            }
+            Taken::Lent => {
+                let word = self.b.ins().load(I32, trusted(), this, PINS_AT);
+                let pins = self.b.ins().band_imm_u(word, i64::from(Obj::PINS));
+                let room = self
+                    .b
+                    .ins()
+                    .icmp_imm_u(IntCC::NotEqual, pins, i64::from(Obj::PINS));
+                let room = self.b.ins().uextend(I32, room);
+                let word = self.b.ins().iadd(word, room);
+                self.b.ins().store(trusted(), word, this, PINS_AT);
+            }
         }
     }
 

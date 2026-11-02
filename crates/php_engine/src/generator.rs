@@ -850,7 +850,7 @@ pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::
     let (function, closure) = req
         .vm()
         .at(frame)
-        .map_or((None, None), |state| (state.function, state.closure));
+        .map_or((None, None), |state| (state.function, state.closure()));
     if let Some(extra) = req.annex_mut(frame) {
         extra.generator = Some(object);
     }
@@ -861,7 +861,7 @@ pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::
     let lent = req.vm_mut().at_mut(frame).and_then(|state| {
         state.set_returns_to(None);
         match state.receiver() {
-            Some(crate::exec::Receiver::Lent(this)) if state.closure.is_none() => {
+            Some(crate::exec::Receiver::Lent(this)) if state.closure().is_none() => {
                 state.set_receiver(Some(crate::exec::Receiver::Owned(this)));
                 Some(this)
             }

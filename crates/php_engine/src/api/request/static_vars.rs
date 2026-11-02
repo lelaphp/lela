@@ -110,14 +110,14 @@ impl Request {
             Some(exec::FileStatics::Own(number)) => Statics::Own(number),
             _ => Statics::Main(code.runtime_cache),
         };
-        if let Some(object) = state.closure
+        if let Some(object) = state.closure()
             && object.closure(self).is_some_and(|closure| !closure.fake)
         {
             return StaticsAt::Closure(object);
         }
         match state.function {
             Some(function) => StaticsAt::Table(Statics::Function(function)),
-            None => StaticsAt::Table(file(state.annex)),
+            None => StaticsAt::Table(file(state.annex())),
         }
     }
 
