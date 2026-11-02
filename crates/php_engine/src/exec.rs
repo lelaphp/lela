@@ -267,21 +267,25 @@ impl ReturnSlot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ScopeAt(std::num::NonZeroU32);
 
-/// `EX(func)` in the header's half-word: none, or the function one more
-/// than its number, as [`ReturnSlot`] is, so the `Option` costs nothing
-/// and the half-word it saves holds [`Header::cache_base`]. A request's
-/// functions are numbered far below `u32::MAX`.
+/// `EX(func)` in the header's half-word: none, or the function two more
+/// than its number, wrapping, so the `Option` costs nothing and the
+/// half-word it saves holds [`Header::cache_base`]. [`Function::PASS`],
+/// php's `zend_pass_function` at `u32::MAX`, is one; the one number left
+/// out is the one below it, which no function takes, since a request's
+/// functions are numbered from zero far below it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FunctionAt(Option<std::num::NonZeroU32>);
 
 impl FunctionAt {
     fn of(function: Option<Function>) -> FunctionAt {
-        FunctionAt(function.map(|function| std::num::NonZeroU32::MIN.saturating_add(function.0)))
+        FunctionAt(
+            function.and_then(|function| std::num::NonZeroU32::new(function.0.wrapping_add(2))),
+        )
     }
 
     #[inline(always)]
     fn function(self) -> Option<Function> {
-        self.0.map(|at| Function(at.get() - 1))
+        self.0.map(|at| Function(at.get().wrapping_sub(2)))
     }
 }
 
@@ -4289,6 +4293,21 @@ mod tests {
     use crate::api::call::Function;
     use crate::api::request::Request;
     use crate::engine::{Engine, RequestDescription};
+
+    /// The header's `EX(func)` half-word gives back every function it was
+    /// given, `zend_pass_function`'s number at `u32::MAX` among them, and
+    /// none for none.
+    #[test]
+    fn the_header_s_function_half_word_gives_back_what_it_was_given() {
+        for function in [
+            Some(Function(0)),
+            Some(Function(7)),
+            Some(Function::PASS),
+            None,
+        ] {
+            assert_eq!(super::FunctionAt::of(function).function(), function);
+        }
+    }
 
     /// A unit whose main op array has no oplines and `cache_size` bytes
     /// of runtime cache.
