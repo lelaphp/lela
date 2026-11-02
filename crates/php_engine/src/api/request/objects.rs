@@ -697,10 +697,29 @@ impl Request {
     /// #1 {main}
     ///   thrown in %s on line 5
     /// ```
+    ///
+    /// Where `set_exception_handler()` set a handler, the throwable is
+    /// handed to it and `zend_throw_exception_internal` returns with no
+    /// `zend_bailout`, so the walk goes on to the next destructor:
+    ///
+    /// ```php
+    /// class A { function __destruct() { echo "a\n"; throw new Exception("from a"); } }
+    /// class B { function __destruct() { echo "b\n"; } }
+    /// set_exception_handler(function ($e) { echo "handler: ", $e->getMessage(), "\n"; });
+    /// $b = new B;
+    /// $a = new A;
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// end
+    /// a
+    /// handler: from a
+    /// b
+    /// ```
     fn end_the_walk(&mut self) {
-        self.objects.shutdown_walk_ended = true;
-        self.heap.mark_destructed();
         if self.uncaught().is_err() {
+            self.objects.shutdown_walk_ended = true;
+            self.heap.mark_destructed();
             self.bail_out();
         }
     }
