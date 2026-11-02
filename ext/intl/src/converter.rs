@@ -221,6 +221,7 @@ impl ObjectHandlers for Handlers {
         for converter in given_up.into_iter().flatten().flatten() {
             converter.close(req);
         }
+        error::free::<ConverterObject>(req, object);
         pending.leave(req);
     }
 }

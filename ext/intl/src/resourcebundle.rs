@@ -473,6 +473,12 @@ impl ObjectHandlers for Handlers {
     fn iterator_size(&self) -> usize {
         144
     }
+
+    /// `ResourceBundle_object_free`: the error's message freed before
+    /// `zend_object_std_dtor`.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        error::free::<BundleObject>(req, object);
+    }
 }
 
 /// `zend_illegal_container_offset(ce->name, offset, type)`.

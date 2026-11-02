@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::ops::ControlFlow;
 
-use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Raw, This, Union, Untyped};
+use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Raw, Std, This, Union, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, to_string};
@@ -159,6 +159,13 @@ impl ObjectHandlers for Handlers {
     fn clone_obj(&self) -> Option<CloneObj> {
         Some(clone_formatter)
     }
+
+    /// `MessageFormatter_object_free`: `zend_object_std_dtor`, then
+    /// `msgformat_data_free`, which frees the error's message.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        Std.free_obj(req, object);
+        error::free::<MessageFormatterObject>(req, object);
+    }
 }
 
 /// `MessageFormatter_object_clone`: the members, the pattern and
@@ -303,13 +310,17 @@ fn construct(
         }
     };
     let locale = c_string(&locale_or_default(req, locale));
-    if let Some(data) = site.data(req) {
-        // `msgformat_data_free` where a constructor ran before.
-        if data.pattern.is_some() {
+    // `msgformat_data_free` where a constructor ran before.
+    let freed = site.data(req).and_then(|data| {
+        let freed = data.pattern.is_some().then(|| {
             data.formatter = None;
-            data.error.reset();
-        }
+            data.error.reset()
+        });
         data.pattern = Some(pattern.into());
+        freed
+    });
+    if let Some(message) = freed {
+        message.free(req);
     }
     let mut parse_error = ParseError::default();
     let mut status = Code::ZERO;
@@ -974,7 +985,10 @@ fn format_message(
         return Ok(answer(None));
     }
     local.formatter = umsgf.map(Formatter::new);
-    do_format(req, &mut Site::Local(&mut local), values).map(answer)
+    let formatted = do_format(req, &mut Site::Local(&mut local), values);
+    // `msgformat_data_free`: what the call set on its formatter freed.
+    local.error.reset().free(req);
+    formatted.map(answer)
 }
 
 /// One parsed value as `umsg_parse_helper` answers it: a date in
@@ -1067,10 +1081,14 @@ fn parse_message(
     local.formatter = umsg::open(units.as_deref(), &locale, None, &mut status).map(Formatter::new);
     local.error.code = status;
     let mut site = Site::Local(&mut local);
-    if !site.check(req, "Creating message formatter failed")? {
-        return Ok(answer(None));
-    }
-    do_parse(req, &mut site, source).map(answer)
+    let parsed = match site.check(req, "Creating message formatter failed") {
+        Ok(true) => do_parse(req, &mut site, source),
+        Ok(false) => Ok(None),
+        Err(thrown) => Err(thrown),
+    };
+    // `clean:`'s `msgformat_data_free`.
+    local.error.reset().free(req);
+    parsed.map(answer)
 }
 
 /// `msgfmt_set_pattern`: the pattern applied, kept as given and the

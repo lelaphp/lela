@@ -38,6 +38,12 @@ impl ObjectHandlers for Handlers {
     fn clone_obj(&self) -> Option<CloneObj> {
         Some(clone_generator)
     }
+
+    /// `IntlDatePatternGenerator_object_free`: the error's message freed
+    /// before `zend_object_std_dtor`.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        error::free::<GeneratorObject>(req, object);
+    }
 }
 
 /// `IntlDatePatternGenerator_object_clone`: the members and the

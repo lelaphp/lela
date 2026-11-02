@@ -199,6 +199,12 @@ impl ObjectHandlers for Handlers {
         let rows = zone(req, object).map(debug_rows);
         debug_table(req, rows).map(|table| Some(table.into()))
     }
+
+    /// `TimeZone_objects_free`: the error's message freed before
+    /// `zend_object_std_dtor`.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        error::free::<TimeZoneObject>(req, object);
+    }
 }
 
 /// What `TimeZone_get_debug_info` reads of a zone: its id, and its raw

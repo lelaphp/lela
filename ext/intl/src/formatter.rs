@@ -3,7 +3,9 @@
 //! here with it, handed the object and how many places the function's
 //! arguments stand after the method's (one: the object).
 
-use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Raw, Ref, This, Union, Untyped};
+use php_ext::abi::{
+    CloneObj, Instance, ObjectHandlers, OrFalse, Raw, Ref, Std, This, Union, Untyped,
+};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long};
@@ -42,6 +44,13 @@ pub(crate) static HANDLERS: Handlers = Handlers;
 impl ObjectHandlers for Handlers {
     fn clone_obj(&self) -> Option<CloneObj> {
         Some(clone_formatter)
+    }
+
+    /// `NumberFormatter_object_free`: `zend_object_std_dtor`, then
+    /// `formatter_data_free`, which frees the error's message.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        Std.free_obj(req, object);
+        error::free::<FormatterObject>(req, object);
     }
 }
 
