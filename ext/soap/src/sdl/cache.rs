@@ -16,12 +16,12 @@ use std::sync::Arc;
 
 use php_ext::coerce::atoi;
 use php_ext::request::{Ini, MAXPATHLEN, Request, StreamCtx};
-use php_ext::values::{Owner, PhpObject, Value, ValueRef};
+use php_ext::values::{Owner, PhpObject, SmartStr, Value, ValueRef};
 use php_ext_standard::md5::Md5;
 use php_ext_standard::php_get_current_user;
 
 use crate::classes::string;
-use crate::http::{basic_authentication, http_context_headers, proxy_authentication};
+use crate::http::{Written, basic_authentication, http_context_headers, proxy_authentication};
 use crate::ini;
 use crate::model::{
     AttrUse, Attribute, Binding, BindingType, Body, Content, ContentKind, ContentModel,
@@ -1359,7 +1359,7 @@ fn client_context(
     this: PhpObject,
     uri: &[u8],
     uri_len: usize,
-    headers: &mut Vec<u8>,
+    headers: &mut SmartStr,
     context: &mut Option<Owner<StreamCtx>>,
 ) -> Res<(bool, bool)> {
     let tmp = client_slot(this, ClientSlot::StreamCtx);
@@ -1370,9 +1370,9 @@ fn client_context(
     }
     let agent = client_slot(this, ClientSlot::UserAgent);
     if let Some(a) = agent.as_str_bytes().filter(|a| !a.is_empty()) {
-        headers.extend_from_slice(b"User-Agent: ");
-        headers.extend_from_slice(a);
-        headers.extend_from_slice(b"\r\n");
+        headers.append(req, b"User-Agent: ")?;
+        headers.append(req, a)?;
+        headers.append(req, b"\r\n")?;
     }
     let mut has_proxy_authorization = false;
     let proxy_host = client_slot(this, ClientSlot::ProxyHost);
@@ -1398,9 +1398,9 @@ fn client_context(
         if !https {
             ctx.set_option(req, b"http", b"request_fulluri", &Value::bool(true))?;
         }
-        has_proxy_authorization = proxy_authentication(this, headers);
+        has_proxy_authorization = proxy_authentication(req, this, headers)?;
     }
-    let has_authorization = basic_authentication(this, headers);
+    let has_authorization = basic_authentication(req, this, headers)?;
     Ok((has_authorization, has_proxy_authorization))
 }
 
@@ -1409,7 +1409,8 @@ fn client_context(
 /// code; both put back after.
 fn fetch(req: &mut Request, this: PhpObject, uri: &[u8], uri_len: usize) -> Res<Sdl> {
     let old_error_code = req.state::<State>().error_code;
-    let mut headers = Vec::new();
+    // `headers`, the `smart_str` the `http.header` option is made of.
+    let mut headers = SmartStr::default();
     // The context libxml loads with, one owner, the switch's below.
     let mut context: Option<Owner<StreamCtx>> = None;
     let mut has_proxy_authorization = false;
@@ -1434,28 +1435,34 @@ fn fetch(req: &mut Request, this: PhpObject, uri: &[u8], uri_len: usize) -> Res<
             Err(e)
         }
     };
-    let ctx = made?;
+    let ctx = match made {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            headers.free(req);
+            return Err(e);
+        }
+    };
     let options = (|| -> Res<()> {
         if ctx.option(req, b"http", b"protocol_version").is_none() {
             ctx.set_option(req, b"http", b"protocol_version", &Value::float(1.1))?;
-            headers.extend_from_slice(b"Connection: close\r\n");
+            headers.append(req, b"Connection: close\r\n")?;
         }
-        if !headers.is_empty() {
-            http_context_headers(
-                req,
-                Some(*ctx),
-                has_authorization,
-                has_proxy_authorization,
-                false,
-                &mut headers,
-            );
-            let value = string(req, &headers)?;
+        if !headers.as_bytes().is_empty() {
+            let written = Written {
+                authorization: has_authorization,
+                proxy_authorization: has_proxy_authorization,
+                cookies: false,
+            };
+            http_context_headers(req, Some(*ctx), written, &mut headers)?;
+            // `smart_str_extract`: the option is the string itself.
+            let value = std::mem::take(&mut headers).extract(req)?.into_value();
             let set = ctx.set_option(req, b"http", b"header", &value);
             value.give_up(req);
             set?;
         }
         Ok(())
     })();
+    headers.free(req);
     if let Err(e) = options {
         ctx.give_up(req);
         return Err(e);

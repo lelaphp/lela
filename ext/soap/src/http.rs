@@ -35,68 +35,93 @@ use crate::throwables::Throwables;
 
 type R<T> = Result<T, Thrown>;
 
-/// `Authorization: Basic` or `Proxy-Authorization: Basic` over `login`
-/// and an optional password.
-fn basic(soap_headers: &mut Vec<u8>, header: &[u8], login: &[u8], password: Option<&[u8]>) {
+/// `Authorization: Basic` or `Proxy-Authorization: Basic`, the `prefix`,
+/// over `login` and an optional password, appended to `soap_headers`.
+fn basic(
+    req: &mut Request,
+    soap_headers: &mut SmartStr,
+    prefix: &[u8],
+    login: &[u8],
+    password: Option<&[u8]>,
+) -> R<()> {
     let mut auth = login.to_vec();
     auth.push(b':');
     if let Some(p) = password {
         auth.extend_from_slice(p);
     }
-    soap_headers.extend_from_slice(header);
-    soap_headers.extend_from_slice(b": Basic ");
-    soap_headers.extend_from_slice(&base64::encode(&auth));
-    soap_headers.extend_from_slice(b"\r\n");
+    soap_headers.append(req, prefix)?;
+    soap_headers.append(req, &base64::encode(&auth))?;
+    soap_headers.append(req, b"\r\n")
 }
 
 /// `proxy_authentication`: the client's `proxy_login` and
 /// `proxy_password` as `Proxy-Authorization: Basic`, where it has a
 /// login.
-pub(crate) fn proxy_authentication(this: PhpObject, soap_headers: &mut Vec<u8>) -> bool {
+pub(crate) fn proxy_authentication(
+    req: &mut Request,
+    this: PhpObject,
+    soap_headers: &mut SmartStr,
+) -> R<bool> {
     let login = client_slot(this, ClientSlot::ProxyLogin);
     let Some(login) = login.as_str_bytes() else {
-        return false;
+        return Ok(false);
     };
     let password = client_slot(this, ClientSlot::ProxyPassword);
     basic(
+        req,
         soap_headers,
-        b"Proxy-Authorization",
+        b"Proxy-Authorization: Basic ",
         login,
         password.as_str_bytes(),
-    );
-    true
+    )?;
+    Ok(true)
 }
 
 /// `basic_authentication`: the client's `login` and `password` as
 /// `Authorization: Basic`, where it has a login and does not use digest.
-pub(crate) fn basic_authentication(this: PhpObject, soap_headers: &mut Vec<u8>) -> bool {
+pub(crate) fn basic_authentication(
+    req: &mut Request,
+    this: PhpObject,
+    soap_headers: &mut SmartStr,
+) -> R<bool> {
     let login = client_slot(this, ClientSlot::Login);
     let digest = client_slot(this, ClientSlot::UseDigest);
     let Some(login) = login.as_str_bytes() else {
-        return false;
+        return Ok(false);
     };
     if matches!(digest.as_ref(), ValueRef::Bool(true)) {
-        return false;
+        return Ok(false);
     }
     let password = client_slot(this, ClientSlot::Password);
     basic(
+        req,
         soap_headers,
-        b"Authorization",
+        b"Authorization: Basic ",
         login,
         password.as_str_bytes(),
-    );
-    true
+    )?;
+    Ok(true)
+}
+
+/// Which of the headers a client writes itself [`http_context_headers`]
+/// leaves out of the `http.header` option, beside `Host`, `Connection`,
+/// `User-Agent`, `Content-Length` and `Content-Type`, which it always
+/// leaves out.
+#[derive(Clone, Copy)]
+pub(crate) struct Written {
+    pub(crate) authorization: bool,
+    pub(crate) proxy_authorization: bool,
+    pub(crate) cookies: bool,
 }
 
 /// `http_context_add_header`: each `name: value` line of `s` appended,
 /// but the headers the client writes itself.
 fn http_context_add_header(
+    req: &mut Request,
     s: &[u8],
-    has_authorization: bool,
-    has_proxy_authorization: bool,
-    has_cookies: bool,
-    soap_headers: &mut Vec<u8>,
-) {
+    written: Written,
+    soap_headers: &mut SmartStr,
+) -> R<()> {
     let mut at = 0;
     while at < s.len() {
         while at < s.len() && matches!(s[at], b' ' | b'\t' | b'\r' | b'\n') {
@@ -130,50 +155,45 @@ fn http_context_add_header(
                 || is(b"user-agent")
                 || is(b"content-length")
                 || is(b"content-type")
-                || (has_cookies && is(b"cookie"))
-                || (has_authorization && is(b"authorization"))
-                || (has_proxy_authorization && is(b"proxy-authorization"));
+                || (written.cookies && is(b"cookie"))
+                || (written.authorization && is(b"authorization"))
+                || (written.proxy_authorization && is(b"proxy-authorization"));
             if !skipped {
-                soap_headers.extend_from_slice(&s[start..p]);
-                soap_headers.extend_from_slice(b"\r\n");
+                soap_headers.append(req, &s[start..p])?;
+                soap_headers.append(req, b"\r\n")?;
             }
         }
         at = if p < s.len() { p + 1 } else { p };
     }
+    Ok(())
 }
 
 /// `http_context_headers`: the `http.header` option of `context`, a
 /// string or an array of strings, through [`http_context_add_header`].
 pub(crate) fn http_context_headers(
-    req: &Request,
+    req: &mut Request,
     context: Option<StreamCtx>,
-    has_authorization: bool,
-    has_proxy_authorization: bool,
-    has_cookies: bool,
-    soap_headers: &mut Vec<u8>,
-) {
+    written: Written,
+    soap_headers: &mut SmartStr,
+) -> R<()> {
     let Some(context) = context else {
-        return;
+        return Ok(());
     };
     let Some(header) = context.option(req, b"http", b"header") else {
-        return;
+        return Ok(());
     };
-    let flags = (has_authorization, has_proxy_authorization, has_cookies);
-    match header.as_ref() {
-        ValueRef::Str(s) if !s.is_empty() => {
-            http_context_add_header(s.as_bytes(), flags.0, flags.1, flags.2, soap_headers);
-        }
-        ValueRef::Array(a) => {
-            for (_, value) in walk::rows(req, a) {
-                if let ValueRef::Str(s) = value.deref().as_ref()
-                    && !s.is_empty()
-                {
-                    http_context_add_header(s.as_bytes(), flags.0, flags.1, flags.2, soap_headers);
-                }
-            }
-        }
-        _ => {}
+    // The strings are the option's, which the appends leave standing.
+    let lines: Vec<PhpString> = match header.as_ref() {
+        ValueRef::Str(s) => vec![s],
+        ValueRef::Array(a) => walk::rows(req, a)
+            .filter_map(|(_, value)| value.deref().as_php_string())
+            .collect(),
+        _ => Vec::new(),
+    };
+    for line in lines.iter().filter(|s| !s.is_empty()) {
+        http_context_add_header(req, line.as_bytes(), written, soap_headers)?;
     }
+    Ok(())
 }
 
 // ---- the C string reads php_http.c makes
@@ -354,19 +374,20 @@ fn uri_parser(name: Option<&[u8]>) -> Option<UriParser> {
 
 /// The request target: the path, `/` for none, then the query and the
 /// fragment, as the request line and the digest's `uri` write it.
-fn target(uri: &UriStruct, out: &mut Vec<u8>) {
+fn target(req: &mut Request, uri: &UriStruct, out: &mut SmartStr) -> R<()> {
     match &uri.path {
-        Some(path) => out.extend_from_slice(c_str(path)),
-        None => out.push(b'/'),
+        Some(path) => out.append(req, c_str(path))?,
+        None => out.append(req, b"/")?,
     }
     if let Some(query) = &uri.query {
-        out.push(b'?');
-        out.extend_from_slice(c_str(query));
+        out.append(req, b"?")?;
+        out.append(req, c_str(query))?;
     }
     if let Some(fragment) = &uri.fragment {
-        out.push(b'#');
-        out.extend_from_slice(c_str(fragment));
+        out.append(req, b"#")?;
+        out.append(req, c_str(fragment))?;
     }
+    Ok(())
 }
 
 // ---- the stream
@@ -885,18 +906,15 @@ fn connect(
         peer_name.give_up(req);
         set?;
     }
-    let target_port = port_of(uri);
-    let mut head = b"CONNECT ".to_vec();
-    head.extend_from_slice(c_str(host_of(uri)));
-    head.extend_from_slice(format!(":{} HTTP/1.1\r\nHost: ", unsigned_of(target_port)).as_bytes());
-    head.extend_from_slice(c_str(host_of(uri)));
-    if target_port != 80 {
-        head.extend_from_slice(format!(":{}", unsigned_of(target_port)).as_bytes());
+    let mut head = SmartStr::default();
+    if let Err(thrown) = connect_head(req, this, uri, &mut head) {
+        head.free(req);
+        stream.free(req);
+        return Err(thrown);
     }
-    head.extend_from_slice(b"\r\n");
-    proxy_authentication(this, &mut head);
-    head.extend_from_slice(b"\r\n");
-    let connected = stream.write(req, &head) == Some(head.len())
+    let written = stream.write(req, head.as_bytes()) == Some(head.as_bytes().len());
+    head.free(req);
+    let connected = written
         && match get_http_headers(req, *stream) {
             // `zend_string_free(http_headers)`.
             Ok(Some(headers)) => {
@@ -931,6 +949,27 @@ fn connect(
         return Ok(None);
     }
     Ok(Some(stream))
+}
+
+/// The `CONNECT` a proxy is asked to tunnel through with, `soap_headers`
+/// in `http_connect`: the request line, `Host`, the proxy's credentials
+/// and the blank line.
+fn connect_head(req: &mut Request, this: PhpObject, uri: &UriStruct, head: &mut SmartStr) -> R<()> {
+    let port = unsigned_of(port_of(uri)).to_string();
+    head.append(req, b"CONNECT ")?;
+    head.append(req, c_str(host_of(uri)))?;
+    head.append(req, b":")?;
+    head.append(req, port.as_bytes())?;
+    head.append(req, b" HTTP/1.1\r\n")?;
+    head.append(req, b"Host: ")?;
+    head.append(req, c_str(host_of(uri)))?;
+    if port_of(uri) != 80 {
+        head.append(req, b":")?;
+        head.append(req, port.as_bytes())?;
+    }
+    head.append(req, b"\r\n")?;
+    proxy_authentication(req, this, head)?;
+    head.append(req, b"\r\n")
 }
 
 /// `in_domain`: whether a cookie's `domain` covers `host`, a leading
@@ -999,17 +1038,32 @@ fn callable_named(req: &mut Request, name: &[u8]) -> R<Callable> {
     callable
 }
 
-/// `call_user_function` of the function named, over a string and
-/// integers: the string it answers, none for anything else.
-fn call_by_name(req: &mut Request, name: &[u8], data: &[u8], ints: &[i64]) -> R<Option<Vec<u8>>> {
-    let callable = callable_named(req, name)?;
-    let text = string(req, data)?;
+/// `call_user_function` of the function named, over the request, shared
+/// as `ZVAL_STR_COPY` shares it, and integers: the string it answers,
+/// one owner the caller's, none for anything else. The name is a string
+/// held across the call, php's `func`.
+fn call_by_name(
+    req: &mut Request,
+    name: &[u8],
+    data: PhpString,
+    ints: &[i64],
+) -> R<Option<Owner<PhpString>>> {
+    let func = string(req, name)?;
+    let callable = match to_callable(req, &func) {
+        Ok(callable) => callable,
+        Err(thrown) => {
+            func.give_up(req);
+            return Err(thrown);
+        }
+    };
+    let text = Owner::take(req, Value::string(data));
     let mut args = vec![*text];
     args.extend(ints.iter().map(|n| Value::int(*n)));
     let answered = call(req, &callable, &args);
     text.give_up(req);
+    func.give_up(req);
     let answered = answered?;
-    let out = answered.as_str_bytes().map(<[u8]>::to_vec);
+    let out = answered.as_php_string().map(|s| Owner::take(req, s));
     answered.give_up(req);
     Ok(out)
 }
@@ -1054,17 +1108,28 @@ enum Sent {
 }
 
 /// What an exchange holds on the request's heap where php holds it: the
+/// compression's headers, `soap_headers_z`; the request, `request`; the
 /// response's head, `http_headers`; the words after its status,
 /// `http_msg`; and its body, `http_body`. Each is let go where php lets
 /// it go, and whatever is held as the exchange ends with it.
 #[derive(Default)]
 struct Held {
+    soap_headers_z: SmartStr,
+    request: Option<Outgoing>,
     headers: Option<Owner<PhpString>>,
     msg: Option<Emalloc>,
     body: Option<Owner<PhpString>>,
 }
 
 impl Held {
+    /// `if (request != buf) zend_string_release_ex(request, 0)`: the
+    /// compressed request let go; the given one is the caller's.
+    fn release_request(&mut self, req: &mut Request) {
+        if let Some(Outgoing::Compressed(request)) = self.request.take() {
+            request.give_up(req);
+        }
+    }
+
     /// `zend_string_release_ex(http_headers, 0)`.
     fn release_headers(&mut self, req: &mut Request) {
         if let Some(headers) = self.headers.take() {
@@ -1097,6 +1162,8 @@ impl Held {
 
     /// All of it let go.
     fn release_all(&mut self, req: &mut Request) {
+        self.release_request(req);
+        self.soap_headers_z.free(req);
         self.release_headers(req);
         self.release_body(req);
         if let Some(msg) = self.msg.take() {
@@ -1111,7 +1178,7 @@ impl Held {
 pub(crate) fn make_http_soap_request(
     req: &mut Request,
     this: PhpObject,
-    buf: &[u8],
+    buf: PhpString,
     location: &[u8],
     soapaction: Option<&[u8]>,
     soap_version: i64,
@@ -1138,7 +1205,7 @@ pub(crate) fn make_http_soap_request(
 pub(crate) fn make_http_soap_request_one_way(
     req: &mut Request,
     this: PhpObject,
-    buf: &[u8],
+    buf: PhpString,
     location: &[u8],
     soapaction: Option<&[u8]>,
     soap_version: i64,
@@ -1157,7 +1224,7 @@ pub(crate) fn make_http_soap_request_one_way(
 
 /// What `make_http_soap_request` is called with.
 struct Call<'a> {
-    buf: &'a [u8],
+    buf: PhpString,
     location: &'a [u8],
     soapaction: Option<&'a [u8]>,
     soap_version: i64,
@@ -1166,34 +1233,81 @@ struct Call<'a> {
     want_body: bool,
 }
 
+/// php's `request`: the string the call was given, `buf`, or the one
+/// `gzcompress` or `gzencode` answered for it, which php holds on the
+/// request's heap until it releases it (`request != buf`).
+enum Outgoing {
+    Given(PhpString),
+    Compressed(Owner<PhpString>),
+}
+
+impl Outgoing {
+    /// `request->val` over `request->len`.
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Outgoing::Given(s) => s.as_bytes(),
+            Outgoing::Compressed(s) => s.as_bytes(),
+        }
+    }
+}
+
 /// The request compressed as the client's `compression` asks, with the
-/// headers that say so: `Accept-Encoding` where it accepts, and the
-/// body through `gzcompress` or `gzencode`, `Content-Encoding` naming
-/// which. None where the function answered no string.
+/// headers that say so appended to `soap_headers_z`: `Accept-Encoding`
+/// where it accepts, and the body through `gzcompress` or `gzencode`,
+/// `Content-Encoding` naming which. None where the function answered no
+/// string.
+///
+/// The request is handed to the function as php shares it, not copied,
+/// and the string answered is php's `request`, held on the request's heap
+/// until the response's body is read; the compression's headers are
+/// php's `soap_headers_z`, a `smart_str` beside it:
+///
+/// ```php
+/// $srv = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; $c = stream_socket_accept($s, 10); $n = 0;'
+///     . ' while (($l = fgets($c)) !== false && rtrim($l) !== "") if (preg_match("/^Content-Length: (\d+)/i", $l, $m)) $n = (int) $m[1];'
+///     . ' $b = ""; while ($n > 0 && ($d = fread($c, $n)) !== false && $d !== "") { $n -= strlen($d); $b .= $d; } fwrite(STDERR, strlen($b) . "\n"); fwrite($c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"); fclose($c);';
+/// $mix = function ($n) { $s = ''; for ($i = 0; strlen($s) < $n; $i++) $s .= md5((string) $i, true); return substr($s, 0, $n); };
+/// foreach ([['gzip', SOAP_COMPRESSION_GZIP | 9, 100], ['gzip', SOAP_COMPRESSION_ACCEPT | SOAP_COMPRESSION_GZIP | 9, 100000], ['deflate', SOAP_COMPRESSION_DEFLATE | 1, 1000000]] as [$kind, $compression, $size]) {
+///     $p = proc_open([PHP_BINARY, '-n', '-r', $srv], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+///     $uri = 'http://' . trim(fgets($pipes[1]));
+///     $c = new SoapClient(null, ['location' => $uri, 'uri' => 'u', 'compression' => $compression]);
+///     $q = $mix($size);
+///     memory_reset_peak_usage(); $m = memory_get_usage();
+///     $r = $c->__doRequest($q, $uri, 'f', SOAP_1_1);
+///     echo $kind, ' ', $size, ' ', $r, ' ', memory_get_peak_usage() - $m, ' ', memory_get_usage() - $m, ' ', trim(stream_get_contents($pipes[2])), "\n";
+///     unset($r, $c); proc_close($p);
+/// }
+/// ```
+/// ```expect process
+/// gzip 100 ok 401864 9056 123
+/// gzip 100000 ok 504104 8864 100038
+/// deflate 1000000 ok 2007936 8864 1000161
+/// ```
 fn compress(
     req: &mut Request,
     this: PhpObject,
-    buf: &[u8],
-    soap_headers_z: &mut Vec<u8>,
-) -> R<Option<Vec<u8>>> {
+    buf: PhpString,
+    soap_headers_z: &mut SmartStr,
+) -> R<Option<Outgoing>> {
     let Some(compression) = client_slot(this, ClientSlot::Compression).as_int() else {
-        return Ok(Some(buf.to_vec()));
+        return Ok(Some(Outgoing::Given(buf)));
     };
     let level = (compression & 0x0f).min(9);
     let kind = compression & SOAP_COMPRESSION_DEFLATE;
     if compression & SOAP_COMPRESSION_ACCEPT != 0 {
-        soap_headers_z.extend_from_slice(b"Accept-Encoding: gzip, deflate\r\n");
+        soap_headers_z.append(req, b"Accept-Encoding: gzip, deflate\r\n")?;
     }
     if level == 0 {
-        return Ok(Some(buf.to_vec()));
+        return Ok(Some(Outgoing::Given(buf)));
     }
-    if kind == SOAP_COMPRESSION_DEFLATE {
-        soap_headers_z.extend_from_slice(b"Content-Encoding: deflate\r\n");
-        call_by_name(req, b"gzcompress", buf, &[level])
+    let answered = if kind == SOAP_COMPRESSION_DEFLATE {
+        soap_headers_z.append(req, b"Content-Encoding: deflate\r\n")?;
+        call_by_name(req, b"gzcompress", buf, &[level])?
     } else {
-        soap_headers_z.extend_from_slice(b"Content-Encoding: gzip\r\n");
-        call_by_name(req, b"gzencode", buf, &[level, 0x1f])
-    }
+        soap_headers_z.append(req, b"Content-Encoding: gzip\r\n")?;
+        call_by_name(req, b"gzencode", buf, &[level, 0x1f])?
+    };
+    Ok(answered.map(Outgoing::Compressed))
 }
 
 /// `make_http_soap_request` over what its exchange holds, all of it let
@@ -1207,12 +1321,39 @@ fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
 
 /// The body of `make_http_soap_request`, its `try_again` the loop: one
 /// exchange per turn, a redirect or a digest challenge the next.
+///
+/// The request goes out as php's `soap_headers`, a `smart_str` on the
+/// request's heap: the head, then a copy of the request appended to it,
+/// let go once written. So a call's peak holds the copy, and `trace`
+/// keeps a copy of the head taken before the request is appended:
+///
+/// ```php
+/// $srv = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; $c = stream_socket_accept($s, 10); $n = 0;'
+///     . ' while (($l = fgets($c)) !== false && rtrim($l) !== "") if (preg_match("/^Content-Length: (\d+)/i", $l, $m)) $n = (int) $m[1];'
+///     . ' while ($n > 0 && ($d = fread($c, $n)) !== false && $d !== "") $n -= strlen($d); fwrite($c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"); fclose($c);';
+/// foreach ([[100, false], [100000, false], [1000000, false], [100000, true]] as [$size, $trace]) {
+///     $p = proc_open([PHP_BINARY, '-n', '-r', $srv], [1 => ['pipe', 'w']], $pipes);
+///     $uri = 'http://' . trim(fgets($pipes[1]));
+///     $c = new SoapClient(null, ['location' => $uri, 'uri' => 'u', 'trace' => $trace]);
+///     $q = str_repeat('x', $size);
+///     memory_reset_peak_usage(); $m = memory_get_usage();
+///     $r = $c->__doRequest($q, $uri, 'f', SOAP_1_1);
+///     echo $size, ' ', var_export($trace, true), ' ', $r, ' ', memory_get_peak_usage() - $m, ' ', memory_get_usage() - $m, ' ', strlen((string) $c->__getLastRequestHeaders()), "\n";
+///     unset($r, $c); proc_close($p);
+/// }
+/// ```
+/// ```expect process
+/// 100 false ok 9192 8896 0
+/// 100000 false ok 103040 8864 0
+/// 1000000 false ok 1004160 8864 0
+/// 100000 true ok 103264 9344 175
+/// ```
 #[allow(clippy::too_many_lines)] // php's one function, its stretches kept in order
 fn exchange(req: &mut Request, this: PhpObject, call: &Call<'_>, held: &mut Held) -> Res<Sent> {
-    let mut soap_headers_z = Vec::new();
-    let Some(request) = compress(req, this, call.buf, &mut soap_headers_z)? else {
+    let Some(request) = compress(req, this, call.buf, &mut held.soap_headers_z)? else {
         return Ok(Sent::Failed);
     };
+    held.request = Some(request);
     let mut stream = None;
     let mut use_proxy = false;
     let socket = client_slot(this, ClientSlot::HttpSocket);
@@ -1251,6 +1392,7 @@ fn exchange(req: &mut Request, this: PhpObject, call: &Call<'_>, held: &mut Held
     }
     loop {
         let Some(mut uri_now) = uri.take().filter(|u: &UriStruct| u.host.is_some()) else {
+            held.release_request(req);
             fault(req, this, b"Unable to parse URL")?;
             return Ok(Sent::Failed);
         };
@@ -1258,6 +1400,7 @@ fn exchange(req: &mut Request, this: PhpObject, call: &Call<'_>, held: &mut Held
             Some(b"https") => true,
             Some(b"http") => false,
             _ => {
+                held.release_request(req);
                 fault(
                     req,
                     this,
@@ -1267,6 +1410,7 @@ fn exchange(req: &mut Request, this: PhpObject, call: &Call<'_>, held: &mut Held
             }
         };
         if use_ssl && !req.stream_wrappers().iter().any(|w| w == "https") {
+            held.release_request(req);
             fault(req, this, b"SSL support is not available in this build")?;
             return Ok(Sent::Failed);
         }
@@ -1292,6 +1436,7 @@ fn exchange(req: &mut Request, this: PhpObject, call: &Call<'_>, held: &mut Held
         if stream.is_none() {
             let Some(s) = http_connect(req, this, &uri_now, use_ssl, context, &mut use_proxy)?
             else {
+                held.release_request(req);
                 fault(req, this, b"Could not connect to host")?;
                 return Ok(Sent::Failed);
             };
@@ -1315,24 +1460,43 @@ fn exchange(req: &mut Request, this: PhpObject, call: &Call<'_>, held: &mut Held
             fault(req, this, b"Failed to create stream??")?;
             return Ok(Sent::Failed);
         };
+        let request = held.request.as_ref().map_or(&[][..], Outgoing::as_bytes);
         let request_head = Head {
             uri: &uri_now,
             use_ssl,
             use_proxy,
             context,
-            soap_headers_z: &soap_headers_z,
+            soap_headers_z: held.soap_headers_z.as_bytes(),
             request_len: request.len(),
         };
-        let mut soap_headers = request_headers(req, this, call, &request_head)?;
-        if client_trace {
-            set_string_slot(req, this, ClientSlot::LastRequestHeaders, &soap_headers)?;
+        // `soap_headers`: the head, then the request after it.
+        let mut soap_headers = SmartStr::default();
+        let mut written = request_headers(req, this, call, &request_head, &mut soap_headers);
+        if client_trace && written.is_ok() {
+            // The last head let go, then a copy of this one, as the
+            // request is appended after it.
+            written = set_client_slot(req, this, ClientSlot::LastRequestHeaders, Owner::null())
+                .and_then(|()| {
+                    set_string_slot(
+                        req,
+                        this,
+                        ClientSlot::LastRequestHeaders,
+                        soap_headers.as_bytes(),
+                    )
+                });
         }
-        soap_headers.extend_from_slice(&request);
-        if s.write(req, &soap_headers) != Some(soap_headers.len()) {
+        if let Err(thrown) = written.and_then(|()| soap_headers.append(req, request)) {
+            soap_headers.free(req);
+            return Err(thrown.into());
+        }
+        if s.write(req, soap_headers.as_bytes()) != Some(soap_headers.as_bytes().len()) {
+            // php lets `soap_headers` go only at the request's end here.
+            held.release_request(req);
             drop_connection(req, this, s, true)?;
             fault(req, this, b"Failed Sending HTTP SOAP request")?;
             return Ok(Sent::Failed);
         }
+        soap_headers.free(req);
         // `http_headers`, held in `held` until php releases it.
         let mut head: Option<PhpString> = None;
         let mut http_1_1 = false;
@@ -1340,6 +1504,7 @@ fn exchange(req: &mut Request, this: PhpObject, call: &Call<'_>, held: &mut Held
         if call.want_body || client_trace {
             loop {
                 let Some(headers) = get_http_headers(req, s)? else {
+                    held.release_request(req);
                     drop_connection(req, this, s, false)?;
                     fault(req, this, b"Error Fetching http headers")?;
                     return Ok(Sent::Failed);
@@ -1401,6 +1566,7 @@ fn exchange(req: &mut Request, this: PhpObject, call: &Call<'_>, held: &mut Held
                 || says(b"Connection:", b"Keep-Alive"))
         };
         let Some(http_body) = get_http_body(req, s, http_close, http_headers)? else {
+            held.release_request(req);
             drop_connection(req, this, s, false)?;
             held.release_headers(req);
             fault(
@@ -1411,6 +1577,12 @@ fn exchange(req: &mut Request, this: PhpObject, call: &Call<'_>, held: &mut Held
             return Ok(Sent::Failed);
         };
         held.body = Some(http_body);
+        // The request's string is given up here, but where a redirect or a
+        // digest challenge may send the request again it is kept until
+        // the exchange answers.
+        if !((300..400).contains(&http_status) || http_status == 401) {
+            held.release_request(req);
+        }
         if http_close {
             drop_connection(req, this, s, false)?;
             stream = None;
@@ -1427,6 +1599,7 @@ fn exchange(req: &mut Request, this: PhpObject, call: &Call<'_>, held: &mut Held
                     uri = Some(redirected(new_uri, &uri_now));
                     redirect_max -= 1;
                     if redirect_max < 1 {
+                        held.release_request(req);
                         fault(req, this, b"Redirection limit reached, aborting")?;
                         return Ok(Sent::Failed);
                     }
@@ -1439,6 +1612,8 @@ fn exchange(req: &mut Request, this: PhpObject, call: &Call<'_>, held: &mut Held
             uri = Some(uri_now);
             continue;
         }
+        held.release_request(req);
+        held.soap_headers_z.free(req);
         return answer(req, this, held, head, http_status);
     }
 }
@@ -1455,20 +1630,22 @@ struct Head<'a> {
     request_len: usize,
 }
 
-/// The head of one request, as `make_http_soap_request` writes it into
-/// `soap_headers`: the request line, `Host`, `Connection`, `User-Agent`,
-/// the compression's headers, `Content-Type` with the action, or
-/// `SOAPAction`, `Content-Length`, the credentials, the cookies, the
-/// stream's own `http.header` lines and the blank line: what `trace`
-/// keeps as `__last_request_headers`. Err where the digest's nonce could
-/// not be drawn, php's `RandomException` thrown.
+/// The head of one request, as `make_http_soap_request` appends it to
+/// `soap_headers`, one append for each of php's: the request line,
+/// `Host`, `Connection`, `User-Agent`, the compression's headers,
+/// `Content-Type` with the action, or `SOAPAction`, `Content-Length`,
+/// the credentials, the cookies, the stream's own `http.header` lines and
+/// the blank line: what `trace` keeps as `__last_request_headers`. Err
+/// where the digest's nonce could not be drawn, php's `RandomException`
+/// thrown, or where the memory limit refused the string's room.
 #[allow(clippy::too_many_lines)] // php's one stretch of its function
 fn request_headers(
     req: &mut Request,
     this: PhpObject,
     call: &Call<'_>,
     head: &Head<'_>,
-) -> R<Vec<u8>> {
+    h: &mut SmartStr,
+) -> R<()> {
     let uri = head.uri;
     let context = head.context;
     let set_url = client_slot(this, ClientSlot::HttpUrl);
@@ -1500,127 +1677,152 @@ fn request_headers(
         None => true,
     };
     let port = port_of(uri);
-    let mut h = b"POST ".to_vec();
+    let port_text = unsigned_of(port).to_string();
+    h.append(req, b"POST ")?;
     if head.use_proxy && !head.use_ssl {
-        h.extend_from_slice(c_str(uri.scheme.as_deref().unwrap_or_default()));
-        h.extend_from_slice(b"://");
-        h.extend_from_slice(c_str(host_of(uri)));
-        h.extend_from_slice(format!(":{}", unsigned_of(port)).as_bytes());
+        h.append(req, c_str(uri.scheme.as_deref().unwrap_or_default()))?;
+        h.append(req, b"://")?;
+        h.append(req, c_str(host_of(uri)))?;
+        h.append(req, b":")?;
+        h.append(req, port_text.as_bytes())?;
     }
-    target(uri, &mut h);
-    h.extend_from_slice(if http_1_1 {
-        b" HTTP/1.1\r\n"
-    } else {
-        b" HTTP/1.0\r\n"
-    });
-    h.extend_from_slice(b"Host: ");
-    h.extend_from_slice(c_str(host_of(uri)));
+    target(req, uri, h)?;
+    h.append(
+        req,
+        if http_1_1 {
+            b" HTTP/1.1\r\n"
+        } else {
+            b" HTTP/1.0\r\n"
+        },
+    )?;
+    h.append(req, b"Host: ")?;
+    h.append(req, c_str(host_of(uri)))?;
     if port != if head.use_ssl { 443 } else { 80 } {
-        h.extend_from_slice(format!(":{}", unsigned_of(port)).as_bytes());
+        h.append(req, b":")?;
+        h.append(req, port_text.as_bytes())?;
     }
     let keep_alive = client_slot(this, ClientSlot::KeepAlive);
     if !http_1_1 || matches!(keep_alive.as_ref(), ValueRef::Bool(false)) {
-        h.extend_from_slice(b"\r\nConnection: close\r\n");
+        h.append(req, b"\r\nConnection: close\r\n")?;
     } else {
-        h.extend_from_slice(b"\r\nConnection: Keep-Alive\r\n");
+        h.append(req, b"\r\nConnection: Keep-Alive\r\n")?;
     }
-    user_agent(req, this, context, &mut h);
-    h.extend_from_slice(head.soap_headers_z);
+    user_agent(req, this, context, h)?;
+    // `smart_str_append_smart_str` appends nothing from an empty one.
+    if !head.soap_headers_z.is_empty() {
+        h.append(req, head.soap_headers_z)?;
+    }
     let content_type = match context {
         Some(context) => context
             .option(req, b"http", b"content_type")
-            .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
+            .and_then(|v| v.as_php_string())
             .filter(|v| !v.is_empty()),
         None => None,
     };
     if call.soap_version == SOAP_1_2 {
-        match &content_type {
+        match content_type {
             Some(content_type) => {
-                h.extend_from_slice(b"Content-Type: ");
-                h.extend_from_slice(content_type);
+                h.append(req, b"Content-Type: ")?;
+                h.append(req, content_type.as_bytes())?;
             }
-            None => h.extend_from_slice(b"Content-Type: application/soap+xml; charset=utf-8"),
+            None => h.append(req, b"Content-Type: application/soap+xml; charset=utf-8")?,
         }
         if let Some(action) = call.soapaction {
-            h.extend_from_slice(b"; action=\"");
-            h.extend_from_slice(c_str(action));
-            h.push(b'"');
+            h.append(req, b"; action=\"")?;
+            h.append(req, c_str(action))?;
+            h.append(req, b"\"")?;
         }
-        h.extend_from_slice(b"\r\n");
+        h.append(req, b"\r\n")?;
     } else {
-        match &content_type {
+        match content_type {
             Some(content_type) => {
-                h.extend_from_slice(b"Content-Type: ");
-                h.extend_from_slice(content_type);
-                h.extend_from_slice(b"\r\n");
+                h.append(req, b"Content-Type: ")?;
+                h.append(req, content_type.as_bytes())?;
+                h.append(req, b"\r\n")?;
             }
-            None => h.extend_from_slice(b"Content-Type: text/xml; charset=utf-8\r\n"),
+            None => h.append(req, b"Content-Type: text/xml; charset=utf-8\r\n")?,
         }
         if let Some(action) = call.soapaction {
-            h.extend_from_slice(b"SOAPAction: \"");
-            h.extend_from_slice(c_str(action));
-            h.extend_from_slice(b"\"\r\n");
+            h.append(req, b"SOAPAction: \"")?;
+            h.append(req, c_str(action))?;
+            h.append(req, b"\"\r\n")?;
         }
     }
-    h.extend_from_slice(format!("Content-Length: {}\r\n", head.request_len).as_bytes());
+    h.append(req, b"Content-Length: ")?;
+    h.append(req, head.request_len.to_string().as_bytes())?;
+    h.append(req, b"\r\n")?;
     // HTTP Authentication.
-    let mut has_authorization = false;
+    let mut written = Written {
+        authorization: false,
+        proxy_authorization: false,
+        cookies: false,
+    };
     let login = client_slot(this, ClientSlot::Login);
     if let Some(login) = login.as_str_bytes() {
-        has_authorization = true;
+        written.authorization = true;
         if client_slot(this, ClientSlot::Digest).as_array().is_none() {
             let password = client_slot(this, ClientSlot::Password);
-            basic(&mut h, b"Authorization", login, password.as_str_bytes());
+            basic(
+                req,
+                h,
+                b"Authorization: Basic ",
+                login,
+                password.as_str_bytes(),
+            )?;
         } else {
-            digest_authorization(req, this, uri, login, &mut h)?;
+            digest_authorization(req, this, uri, login, h)?;
         }
     }
     // Proxy HTTP Authentication.
-    let mut has_proxy_authorization = false;
     if head.use_proxy && !head.use_ssl {
-        has_proxy_authorization = proxy_authentication(this, &mut h);
+        written.proxy_authorization = proxy_authentication(req, this, h)?;
     }
     // Send cookies along with request.
-    let has_cookies = cookie_header(req, this, uri, head.use_ssl, &mut h);
-    http_context_headers(
-        req,
-        context,
-        has_authorization,
-        has_proxy_authorization,
-        has_cookies,
-        &mut h,
-    );
-    h.extend_from_slice(b"\r\n");
-    Ok(h)
+    written.cookies = cookie_header(req, this, uri, head.use_ssl, h)?;
+    http_context_headers(req, context, written, h)?;
+    h.append(req, b"\r\n")
 }
 
 /// `User-Agent`: the client's `user_agent`, none where it is empty; else
 /// the stream's `http.user_agent`, the same; else the `user_agent` ini
-/// entry where it has a value; else `PHP-SOAP/` and php's version.
-fn user_agent(req: &Request, this: PhpObject, context: Option<StreamCtx>, h: &mut Vec<u8>) {
-    let line = |h: &mut Vec<u8>, agent: &[u8]| {
-        h.extend_from_slice(b"User-Agent: ");
-        h.extend_from_slice(agent);
-        h.extend_from_slice(b"\r\n");
+/// entry where it has a value; else `PHP-SOAP/` and php's version, which
+/// php appends as one constant.
+fn user_agent(
+    req: &mut Request,
+    this: PhpObject,
+    context: Option<StreamCtx>,
+    h: &mut SmartStr,
+) -> R<()> {
+    let line = |req: &mut Request, h: &mut SmartStr, agent: &[u8]| -> R<()> {
+        h.append(req, b"User-Agent: ")?;
+        h.append(req, agent)?;
+        h.append(req, b"\r\n")
     };
-    if let Some(agent) = client_slot(this, ClientSlot::UserAgent).as_str_bytes() {
+    if let Some(agent) = client_slot(this, ClientSlot::UserAgent).as_php_string() {
         if !agent.is_empty() {
-            line(h, agent);
+            line(req, h, agent.as_bytes())?;
         }
-        return;
+        return Ok(());
     }
     if let Some(context) = context
         && let Some(agent) = context.option(req, b"http", b"user_agent")
-        && let Some(agent) = agent.as_str_bytes()
+        && let Some(agent) = agent.as_php_string()
     {
         if !agent.is_empty() {
-            line(h, agent);
+            line(req, h, agent.as_bytes())?;
         }
-        return;
+        return Ok(());
     }
-    match req.ini().value(b"user_agent") {
-        Some(agent) => line(h, c_str(agent)),
-        None => line(h, format!("PHP-SOAP/{PHP_VERSION}").as_bytes()),
+    match req
+        .ini()
+        .value(b"user_agent")
+        .map(|agent| c_str(agent).to_vec())
+    {
+        Some(agent) => line(req, h, &agent),
+        None => h.append(
+            req,
+            format!("User-Agent: PHP-SOAP/{PHP_VERSION}\r\n").as_bytes(),
+        ),
     }
 }
 
@@ -1634,7 +1836,7 @@ fn digest_authorization(
     this: PhpObject,
     uri: &UriStruct,
     login: &[u8],
-    h: &mut Vec<u8>,
+    h: &mut SmartStr,
 ) -> R<()> {
     let mut nonce = [0u8; 16];
     if let Err(why) = getrandom::fill(&mut nonce) {
@@ -1706,36 +1908,36 @@ fn digest_authorization(
     }
     parts.push(&ha2);
     let response = md5_hex(&parts);
-    h.extend_from_slice(b"Authorization: Digest username=\"");
-    h.extend_from_slice(login);
+    h.append(req, b"Authorization: Digest username=\"")?;
+    h.append(req, login)?;
     if let Some(realm) = &realm {
-        h.extend_from_slice(b"\", realm=\"");
-        h.extend_from_slice(realm);
+        h.append(req, b"\", realm=\"")?;
+        h.append(req, realm)?;
     }
     if let Some(nonce) = &nonce {
-        h.extend_from_slice(b"\", nonce=\"");
-        h.extend_from_slice(nonce);
+        h.append(req, b"\", nonce=\"")?;
+        h.append(req, nonce)?;
     }
-    h.extend_from_slice(b"\", uri=\"");
-    target(uri, h);
+    h.append(req, b"\", uri=\"")?;
+    target(req, uri, h)?;
     if qop.is_some() {
-        h.extend_from_slice(b"\", qop=auth, nc=");
-        h.extend_from_slice(&nc);
-        h.extend_from_slice(b", cnonce=\"");
-        h.extend_from_slice(&cnonce[..8]);
+        h.append(req, b"\", qop=auth")?;
+        h.append(req, b", nc=")?;
+        h.append(req, &nc)?;
+        h.append(req, b", cnonce=\"")?;
+        h.append(req, &cnonce[..8])?;
     }
-    h.extend_from_slice(b"\", response=\"");
-    h.extend_from_slice(&response);
+    h.append(req, b"\", response=\"")?;
+    h.append(req, &response)?;
     if let Some(opaque) = &opaque {
-        h.extend_from_slice(b"\", opaque=\"");
-        h.extend_from_slice(opaque);
+        h.append(req, b"\", opaque=\"")?;
+        h.append(req, opaque)?;
     }
     if let Some(algorithm) = &algorithm {
-        h.extend_from_slice(b"\", algorithm=\"");
-        h.extend_from_slice(algorithm);
+        h.append(req, b"\", algorithm=\"")?;
+        h.append(req, algorithm)?;
     }
-    h.extend_from_slice(b"\"\r\n");
-    Ok(())
+    h.append(req, b"\"\r\n")
 }
 
 /// `Cookie:`, each of the client's `_cookies` whose `path` the request's
@@ -1744,23 +1946,24 @@ fn digest_authorization(
 /// the header was written, which a cookie array that is a list or empty
 /// writes none of.
 fn cookie_header(
-    req: &Request,
+    req: &mut Request,
     this: PhpObject,
     uri: &UriStruct,
     use_ssl: bool,
-    h: &mut Vec<u8>,
-) -> bool {
+    h: &mut SmartStr,
+) -> R<bool> {
     let cookies = client_slot(this, ClientSlot::Cookies);
     let Some(cookies) = cookies.as_array() else {
-        return false;
+        return Ok(false);
     };
     if cookies.is_empty() || cookies.is_packed() {
-        return false;
+        return Ok(false);
     }
     let path = uri.path.as_deref().unwrap_or(b"/");
     let host = host_of(uri);
-    let mut first = true;
-    h.extend_from_slice(b"Cookie: ");
+    // The names and values are the array's, which the appends leave
+    // standing.
+    let mut sent: Vec<(PhpString, PhpString)> = Vec::new();
     for (key, data) in walk::rows(req, cookies) {
         let data = data.deref();
         let (Key::Str(name), Some(data)) = (key, data.as_array()) else {
@@ -1769,7 +1972,7 @@ fn cookie_header(
         let Some(value) = data.get(&Key::Int(0)) else {
             continue;
         };
-        let Some(value) = value.as_str_bytes() else {
+        let Some(value) = value.as_php_string() else {
             continue;
         };
         let path_ok = match data
@@ -1789,17 +1992,20 @@ fn cookie_header(
             None => true,
         };
         if path_ok && domain_ok && (use_ssl || data.get(&Key::Int(3)).is_none()) {
-            if !first {
-                h.extend_from_slice(b"; ");
-            }
-            first = false;
-            h.extend_from_slice(name.as_bytes());
-            h.push(b'=');
-            h.extend_from_slice(value);
+            sent.push((name, value));
         }
     }
-    h.extend_from_slice(b"\r\n");
-    true
+    h.append(req, b"Cookie: ")?;
+    for (i, (name, value)) in sent.iter().enumerate() {
+        if i > 0 {
+            h.append(req, b"; ")?;
+        }
+        h.append(req, name.as_bytes())?;
+        h.append(req, b"=")?;
+        h.append(req, value.as_bytes())?;
+    }
+    h.append(req, b"\r\n")?;
+    Ok(true)
 }
 
 /// One `Set-Cookie:` value kept in the client's `_cookies` under its
