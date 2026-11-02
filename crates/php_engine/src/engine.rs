@@ -890,7 +890,7 @@ pub(crate) struct Shared {
     pub(crate) shebang: php_compile::Shebang,
     /// The hooks the bound tier replaces ([`Tier::HOOKED`]), every unit
     /// compiled under them (design §4.3, revision 58).
-    hooked: php_compile::Hooked,
+    pub(crate) hooked: php_compile::Hooked,
     /// Whether every unit is compiled with extended info, which the
     /// host's `-e` asked for ([`EngineBuilder::extended_info`]).
     extended_info: bool,
