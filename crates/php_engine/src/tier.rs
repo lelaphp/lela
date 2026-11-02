@@ -1449,7 +1449,7 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     declared.before(req, frame, at, op.opcode);
                     slots = req.slots_mut(frame);
                 }
-                match dispatch::held!(req, slots, frame, body, op, at) {
+                match dispatch::held!(req, slots, frame, body, op, at, declared) {
                     Dispatched::Inline(Inline::On(places)) => {
                         at = at.wrapping_add(places);
                         continue;

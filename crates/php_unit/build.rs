@@ -339,8 +339,26 @@ fn dimensions(op: &Op) -> Result<(Vec<Dimension>, bool), String> {
                 .collect(),
         ));
     }
+    if ASSIGNED.contains(&op.name.as_str()) {
+        dimensions.push((
+            "Assigned::of(op, next)",
+            vec![
+                ("Assigned::No".to_owned(), String::new()),
+                ("Assigned::Cv".to_owned(), "AssignCv".to_owned()),
+            ],
+        ));
+    }
     Ok((dimensions, listed))
 }
+
+/// The arithmetic whose handler is resolved over whether the opline
+/// after it is the `ASSIGN` of its temporary to a CV (`Assigned`), so
+/// that the loop serves both oplines with one dispatch, as a comparison
+/// whose line says `SMART_BRANCH` is resolved over the jump after it
+/// (design §5.8). php fuses no such pair; the opcodes and the dump are
+/// php's, and the handler alone tells the pair apart. `php_engine`'s
+/// `build.rs` names the same variants from the same list.
+const ASSIGNED: [&str; 4] = ["ADD", "SUB", "MUL", "DIV"];
 
 /// What a `match` reads, and each value's pattern with the part of the
 /// variant's name it gives.
@@ -358,7 +376,9 @@ type Dimension = (&'static str, Vec<(String, String)>);
 /// unfused and fused to the `JMPZ` or the `JMPNZ` after it, as php's
 /// `_JMPZ` and `_JMPNZ` handlers are, with the jump forward or back,
 /// which php does not tell apart where it takes the jump and this
-/// resolves with the handler. `Unresolved`, the default, is what an
+/// resolves with the handler; and for the arithmetic of [`ASSIGNED`],
+/// each of those twice over, alone and fused to the `ASSIGN` of its
+/// temporary to a CV after it. `Unresolved`, the default, is what an
 /// opline holds until its unit is published, and what no opline of a
 /// `PublishedUnit` holds.
 fn handlers(ops: &[Op], out: &mut String) -> Result<(), String> {

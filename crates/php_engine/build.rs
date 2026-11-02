@@ -181,8 +181,10 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     // serves two variants, a `SEND_VAL` whose handler is generic over
     // `op1` alone, is one body under both.
     let mut calls: Vec<(String, Vec<String>)> = Vec::new();
-    // The inline path a call in the loop's body serves first, by the call.
-    let mut inlines: BTreeMap<String, String> = BTreeMap::new();
+    // The inline path a variant in the loop's body serves first, by the
+    // variant: one call may serve two, an arithmetic alone and fused to
+    // the `ASSIGN` after it ([`ASSIGNED`]), each by a path of its own.
+    let mut inlines: BTreeMap<String, Inlined> = BTreeMap::new();
     let mut serve = |variant: String, call: String| match calls
         .iter_mut()
         .find(|(served, _)| *served == call)
@@ -202,7 +204,7 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
             arms(handler, spec).map_err(|e| format!("{}: {e}", bodies.display()))?
         {
             if let Some(inline) = inline {
-                inlines.insert(call.clone(), inline);
+                inlines.insert(variant.clone(), inline);
             }
             serve(variant, call);
         }
@@ -254,17 +256,7 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     } else {
         String::new()
     };
-    let mut arms = String::new();
-    let mut held = String::new();
-    for (call, variants) in &calls {
-        let pattern = variants
-            .iter()
-            .map(|variant| format!("Handler::{variant}"))
-            .collect::<Vec<_>>()
-            .join("\n        | ");
-        writeln!(arms, "        {pattern} => {call},").ok();
-        held.push_str(&held_arm(&pattern, call, inlines.get(call)));
-    }
+    let (arms, held) = arms_of(&calls, &inlines);
     let held = held_macro(&held);
     Ok(format!(
         "/// The one dispatch (design §4.3 seam 7, §5.8), generated from\n\
@@ -315,10 +307,49 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     ))
 }
 
+/// The arms of `dispatch`'s `match`, one per call, and of `held!`'s, one
+/// per call and inline path among its variants (`inlines`, by the
+/// variant), so that an arithmetic alone and fused to the `ASSIGN` after
+/// it ([`ASSIGNED`]), which make one call, are two arms of the loop's.
+fn arms_of(
+    calls: &[(String, Vec<String>)],
+    inlines: &BTreeMap<String, Inlined>,
+) -> (String, String) {
+    let mut arms = String::new();
+    let mut held = String::new();
+    let pattern = |variants: &[&String]| {
+        variants
+            .iter()
+            .map(|variant| format!("Handler::{variant}"))
+            .collect::<Vec<_>>()
+            .join("\n        | ")
+    };
+    for (call, variants) in calls {
+        let all: Vec<&String> = variants.iter().collect();
+        writeln!(arms, "        {} => {call},", pattern(&all)).ok();
+        // The loop's arms, one per inline path among the call's variants.
+        let mut paths: Vec<Option<&Inlined>> = Vec::new();
+        for variant in variants {
+            let path = inlines.get(variant);
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        for path in paths {
+            let served: Vec<&String> = variants
+                .iter()
+                .filter(|variant| inlines.get(*variant) == path)
+                .collect();
+            held.push_str(&held_arm(&pattern(&served), call, path));
+        }
+    }
+    (arms, held)
+}
+
 /// One arm of [`held_macro`]'s `match`: `pattern`'s variants served by
 /// `call`, and first by the inline path `inline` where it has one, over
 /// the slots the loop holds.
-fn held_arm(pattern: &str, call: &str, inline: Option<&String>) -> String {
+fn held_arm(pattern: &str, call: &str, inline: Option<&Inlined>) -> String {
     let pattern = pattern.replace("Handler::", "php_unit::Handler::");
     let cold = format!(
         "{{\n\
@@ -328,9 +359,21 @@ fn held_arm(pattern: &str, call: &str, inline: Option<&String>) -> String {
          \x20               crate::tier::Dispatched::Cold({call})\n\
          \x20           }}"
     );
-    match inline {
+    // A fused path serves the `ASSIGN` after its opline unseen, so the
+    // loop of an engine whose observers declared `ASSIGN` serves the
+    // opline alone, through its handler, and tells them of the `ASSIGN`.
+    let guarded = |Inlined { path, assigned }: &Inlined| {
+        if *assigned {
+            format!(
+                "if $declared.tells(php_unit::Opcode::Assign) {{ None }} else {{ {path}(&mut *$slots, code, op, at) }}"
+            )
+        } else {
+            format!("{path}(&mut *$slots, code, op, at)")
+        }
+    };
+    match inline.map(guarded) {
         Some(inline) => format!(
-            "            {pattern} => match {inline}(&mut *$slots, code, op, at) {{\n\
+            "            {pattern} => match {inline} {{\n\
              \x20               Some(inline) => crate::tier::Dispatched::Inline(inline),\n\
              \x20               None => {cold},\n\
              \x20           }},\n"
@@ -344,7 +387,7 @@ fn held_macro(held: &str) -> String {
     format!(
         "\n\
          /// The same dispatch over the frame's slots the loop holds\n\
-         /// (design §5.8): `held!(req, slots, frame, code, op, at)`, a\n\
+         /// (design §5.8): `held!(req, slots, frame, code, op, at, declared)`, a\n\
          /// `match` written into the loop's own body, where the borrow\n\
          /// checker reads every arm with the loop. The arm of a handler\n\
          /// with an inline path (`crate::handlers::inline_path`) serves it\n\
@@ -356,7 +399,7 @@ fn held_macro(held: &str) -> String {
          /// no arm reads the slots after a handler that can move them.\n\
          #[cfg(not(dispatch = \"tailcall\"))]\n\
          macro_rules! held {{\n\
-         \x20   ($req:ident, $slots:ident, $frame:expr, $code:expr, $op:expr, $at:expr) => {{{{\n\
+         \x20   ($req:ident, $slots:ident, $frame:expr, $code:expr, $op:expr, $at:expr, $declared:expr) => {{{{\n\
          \x20       let (frame, code, op, at): (php_heap::FrameRef, &php_unit::OpArray, &php_unit::Opline, u32) =\n\
          \x20           ($frame, $code, $op, $at);\n\
          \x20       match op.handler {{\n\
@@ -475,12 +518,28 @@ struct Variant {
     /// Whether the `out` operand is read, the type in `crate::operand` the
     /// handler is served at, where the row says `RETVAL`.
     retval: Option<&'static str>,
+    /// Whether the variant is the one fused to the `ASSIGN` of its
+    /// temporary to a CV after it ([`ASSIGNED`]).
+    assigned: bool,
 }
 
 /// The two ways of a `RETVAL` opcode's `out`, each the part of the
 /// variant's name `php_unit` gives it and the type in `crate::operand`
 /// that serves it, which are one name.
 const RETVALS: [&str; 2] = ["RetvalUnused", "RetvalUsed"];
+
+/// The arithmetic `php_unit` resolves over whether the opline after it
+/// is the `ASSIGN` of its temporary to a CV, which its `build.rs` names
+/// in the same list: each such variant's call is its unfused one's, so
+/// that `dispatch`, which a stepping host and the tier's recorder serve
+/// an opline through, serves the arithmetic alone and the `ASSIGN` after
+/// it as php does, and the loop's arm serves both by the fused inline
+/// path where [`IN_THE_LOOP`] names the variant ([`inline_of`]).
+const ASSIGNED: [&str; 4] = ["ADD", "SUB", "MUL", "DIV"];
+
+/// The two ways of an arithmetic of [`ASSIGNED`], each the part of the
+/// variant's name `php_unit` gives it and whether it is fused.
+const ASSIGNS: [(&str, bool); 2] = [("", false), ("AssignCv", true)];
 
 /// The branches of a `SMART_BRANCH` comparison, each the part of the
 /// variant's name `php_unit` gives it and the type the handler is served
@@ -506,12 +565,23 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
         _ => None,
     };
     let ways: &[(&str, &str)] = if spec.smart { &BRANCHES } else { &[("", "")] };
+    // One of [`ASSIGNED`]'s arithmetic, over which `php_unit` resolves
+    // each handler twice, alone and fused to the `ASSIGN` after it.
+    let assigns: &[(&str, bool)] = if ASSIGNED.iter().any(|name| camel(name) == spec.variant) {
+        &ASSIGNS
+    } else {
+        &[("", false)]
+    };
     let branched = |name: String, kinds: Option<Vec<String>>, retval: Option<&'static str>| {
-        ways.iter().map(move |(part, ty)| Variant {
-            name: format!("{name}{part}"),
-            kinds: kinds.clone(),
-            branch: (!ty.is_empty()).then_some(*ty),
-            retval,
+        ways.iter().flat_map(move |(part, ty)| {
+            let (name, kinds) = (name.clone(), kinds.clone());
+            assigns.iter().map(move |(fused, assigned)| Variant {
+                name: format!("{name}{part}{fused}"),
+                kinds: kinds.clone(),
+                branch: (!ty.is_empty()).then_some(*ty),
+                retval,
+                assigned: *assigned,
+            })
         })
     };
     let [spec1, spec2] = spec.zval_shaped.map(|bit| spec.specialise && bit);
@@ -570,6 +640,7 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
         kinds: None,
         branch: None,
         retval: None,
+        assigned: false,
     });
     Ok(out)
 }
@@ -580,7 +651,7 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
 /// handler at the kinds each variant names, with the internal-error
 /// fatal for the kinds the spec does not list, which no unit the
 /// compiler wrote has.
-fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String, Option<String>)>, String> {
+fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String, Option<Inlined>)>, String> {
     let unlisted =
         "Err(crate::tier::dispatch::refused(op, \"over operand kinds ops.toml does not list\"))";
     // The branch a handler generic over it is served at, after its kinds.
@@ -603,7 +674,7 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String, Option<St
             }
             let generics = branch(&variant)?;
             let call = call(handler, &variant.name, &generics);
-            let inline = inline_of(handler, &variant.name, &generics);
+            let inline = inline_of(handler, &variant, &generics);
             out.push((variant.name, call, inline));
         }
         return Ok(out);
@@ -651,7 +722,7 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String, Option<St
             }
         }
         let call = call(handler, &variant.name, &params);
-        let inline = inline_of(handler, &variant.name, &params);
+        let inline = inline_of(handler, &variant, &params);
         out.push((variant.name, call, inline));
     }
     Ok(out)
@@ -674,9 +745,12 @@ const IN_THE_LOOP: &[&str] = &[
     "AddConstVar",
     "AddCvConst",
     "AddCvCv",
+    "AddCvCvAssignCv",
     "AddTmpConst",
     "AddTmpCv",
+    "AddTmpCvAssignCv",
     "AddTmpTmp",
+    "AddTmpTmpAssignCv",
     "AddTmpVar",
     "AddVarVar",
     "ArrayKeyExists",
@@ -700,6 +774,7 @@ const IN_THE_LOOP: &[&str] = &[
     "AssignStaticProp",
     "Bool",
     "BoolNot",
+    "BwAnd",
     "Cast",
     "CheckFuncArg",
     "Coalesce",
@@ -708,6 +783,7 @@ const IN_THE_LOOP: &[&str] = &[
     "ConcatTmpConst",
     "ConcatTmpTmp",
     "Div",
+    "DivAssignCv",
     "DoFcall",
     "DoFcallByName",
     "DoIcall",
@@ -726,6 +802,7 @@ const IN_THE_LOOP: &[&str] = &[
     "FetchDimRCvTmp",
     "FetchDimRTmpCv",
     "FetchDimRwCvCv",
+    "FetchObjRCvConst",
     "FetchObjRUnusedConst",
     "FetchR",
     "FetchStaticPropR",
@@ -770,7 +847,9 @@ const IN_THE_LOOP: &[&str] = &[
     "Mod",
     "MulCvConst",
     "MulCvCv",
+    "MulCvCvAssignCv",
     "MulCvTmp",
+    "MulCvTmpAssignCv",
     "MulCvVar",
     "MulTmpConst",
     "MulTmpTmp",
@@ -802,6 +881,7 @@ const IN_THE_LOOP: &[&str] = &[
     "SubCvCv",
     "SubTmpConst",
     "SubTmpTmp",
+    "SubTmpTmpAssignCv",
     "TypeCheck",
     "VerifyReturnType",
 ];
@@ -816,9 +896,11 @@ const IN_THE_LOOP: &[&str] = &[
 /// the list leaves every other path served by its handler alone.
 const INLINE_PATHS: &[&str] = &[
     "add",
+    "add_assign_cv",
     "assign",
     "assign_op",
     "div",
+    "div_assign_cv",
     "fetch_dim_r",
     "is_equal",
     "is_identical",
@@ -832,18 +914,34 @@ const INLINE_PATHS: &[&str] = &[
     "jmpz",
     "jmpz_ex",
     "mul",
+    "mul_assign_cv",
     "pre_dec",
     "pre_inc",
     "qm_assign",
     "sub",
+    "sub_assign_cv",
 ];
+
+/// An inline path the loop's arm serves first: the function's path, and
+/// whether it serves the `ASSIGN` after its opline too ([`ASSIGNED`]).
+#[derive(PartialEq)]
+struct Inlined {
+    path: String,
+    assigned: bool,
+}
 
 /// The inline path the loop's arm for `variant` serves first, over the
 /// slots it holds: `handler`'s, at `generics` after the tier, where the
 /// variant is in the loop's body ([`IN_THE_LOOP`]) and the handler has
-/// one ([`INLINE_PATHS`]).
-fn inline_of(handler: &Handler, variant: &str, generics: &str) -> Option<String> {
-    if !IN_THE_LOOP.contains(&variant) || !INLINE_PATHS.contains(&handler.ident.as_str()) {
+/// one ([`INLINE_PATHS`]), and its `_assign_cv` path for a variant fused
+/// to the `ASSIGN` after it ([`ASSIGNED`]).
+fn inline_of(handler: &Handler, variant: &Variant, generics: &str) -> Option<Inlined> {
+    let path = if variant.assigned {
+        format!("{}_assign_cv", handler.ident)
+    } else {
+        handler.ident.clone()
+    };
+    if !IN_THE_LOOP.contains(&variant.name.as_str()) || !INLINE_PATHS.contains(&path.as_str()) {
         return None;
     }
     let generics = generics.trim_start_matches(", ");
@@ -852,10 +950,10 @@ fn inline_of(handler: &Handler, variant: &str, generics: &str) -> Option<String>
     } else {
         format!("::<{generics}>")
     };
-    Some(format!(
-        "crate::handlers::inline_path::{}{turbofish}",
-        handler.ident
-    ))
+    Some(Inlined {
+        path: format!("crate::handlers::inline_path::{path}{turbofish}"),
+        assigned: variant.assigned,
+    })
 }
 
 /// The call one arm makes to `handler` at `generics` for `variant`:

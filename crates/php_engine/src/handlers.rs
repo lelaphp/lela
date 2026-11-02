@@ -23724,7 +23724,24 @@ pub(crate) fn bw_xor<T: Tier>(
 }
 
 /// `ZEND_BW_AND` (`Z/Zend/zend_vm_def.h:863`), what `&` compiles to:
-/// [`crate::ops::bitwise_and`] the same way.
+/// [`crate::ops::bitwise_and`] the same way. Its arm is in the loop's
+/// body (#3982): two longs are served inline, and every other pair
+/// by the kernel.
+///
+/// ```php
+/// $s = 0; for ($i = -3; $i < 20; $i++) { $s += $i & 7; }
+/// $a = "12"; $b = 10; $n = -1; $f = 6.0; $g = 6.5;
+/// var_dump($s, $a & $b, "ab" & "a", $n & PHP_INT_MAX, $f & 3, $g & 3);
+/// ```
+/// ```expect
+/// Deprecated: Implicit conversion from float 6.5 to int loses precision in %SCRATCH%/witness.php on line 4
+/// int(80)
+/// int(8)
+/// string(1) "a"
+/// int(9223372036854775807)
+/// int(2)
+/// int(2)
+/// ```
 pub(crate) fn bw_and<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -25978,6 +25995,82 @@ fn inline_arith(
     Some(Inline::ADVANCE)
 }
 
+/// [`inline_arith`] fused to the `ASSIGN` of its temporary to a CV after
+/// it (`ZEND_ASSIGN_SPEC_CV_TMP_RETVAL_UNUSED`), which publication found
+/// there (`php_unit::Handler`'s `AssignCv` variants): the number written
+/// straight into a CV that holds nothing that counts owners, as
+/// `zend_assign_to_variable` copies a value over one, and on past both.
+/// The temporary is not written, since nothing reads it after the
+/// `ASSIGN` that would have moved it out, and a temporary holding a
+/// number owns nothing either way. A CV holding a reference or anything
+/// else that counts owners has the number written into the temporary
+/// as [`inline_arith`] writes it, and the loop goes on at the `ASSIGN`,
+/// whose handler serves it as it serves it unfused, a destructor or a
+/// typed reference's coercion among it. `None`, with nothing touched,
+/// where [`inline_arith`] stands aside. php fuses no such pair; it is
+/// one dispatch here and two oplines in the op array and the dump,
+/// which a stepping host and the tier's recorder serve one by one.
+/// Written as [`inline_assign`]'s path after [`inline_arith`]'s, it
+/// read 3.1 Gcyc for mandelbrot against 2.65 written as here (#3982).
+///
+/// ```php
+/// class D { function __destruct() { echo "gone\n"; } }
+/// class T { public int $p = 0; }
+/// $a = 6; $b = 7; $f = 1.5; $max = PHP_INT_MAX;
+/// $x = $a + $b; $y = $a * $f; $z = $max + 1; $w = $a / 4; $v = $a - $b; $u = $f - $f;
+/// $s = str_repeat('s', 2); $s = $a * $b;
+/// $r = 1; $ref = &$r; $r = $a - 1;
+/// $t = new T; $p = &$t->p; $p = $a * 2; $p = $f + 1;
+/// $d = new D; $d = $a + 1; echo "after\n";
+/// for ($i = 0, $n = 0; $i < 3; $i++) { $n = $n + $i; }
+/// var_dump($x, $y, $z, $w, $v, $u, $s, $ref, $t->p, $d, $n);
+/// try { $q = $a / 0; } catch (DivisionByZeroError $e) { echo $e->getMessage(), "\n"; }
+/// $o = $a + $undefined; var_dump($o, $q ?? null);
+/// ```
+/// ```expect
+/// Deprecated: Implicit conversion from float 2.5 to int loses precision in %SCRATCH%/witness.php on line 8
+/// gone
+/// after
+/// int(13)
+/// float(9)
+/// float(9.223372036854776E+18)
+/// float(1.5)
+/// int(-1)
+/// float(0)
+/// int(42)
+/// int(5)
+/// int(2)
+/// int(7)
+/// int(3)
+/// Division by zero
+///
+/// Warning: Undefined variable $undefined in %SCRATCH%/witness.php on line 13
+/// int(6)
+/// NULL
+/// ```
+#[inline(always)] // as `inline_arith`
+#[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
+fn inline_arith_assign(
+    slots: &mut [Zval],
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+    rule: impl inline::Operator,
+    kinds: (impl Operand, impl Operand),
+) -> Option<Inline> {
+    let (a, b) = kinds;
+    let computed = rule.apply(a.read(slots, code, op.op1), b.read(slots, code, op.op2))?;
+    let assign = exec::opline_at(code, exec::after(at));
+    if let Some(cv) = assign.and_then(|assign| slots.get_mut(assign.op1 as usize))
+        && !cv.is_refcounted()
+    {
+        *cv = computed;
+        return Some(Inline::On(2));
+    }
+    write_owning_nothing(slots, op, computed)?;
+    Some(Inline::ADVANCE)
+}
+
 /// The inline path of the comparisons that branch (`ZEND_IS_SMALLER`,
 /// `ZEND_IS_SMALLER_OR_EQUAL`, `ZEND_IS_EQUAL`, `ZEND_IS_NOT_EQUAL`):
 /// two numbers as they stand ordered by [`inline::order`], which reads
@@ -27549,6 +27642,8 @@ pub(crate) mod inline_path {
     use php_unit::{OpArray, Opline};
 
     use super::branch::Branch;
+    #[cfg(not(dispatch = "tailcall"))]
+    use super::inline_arith_assign;
     use super::{
         inline_arith, inline_assign, inline_assign_op, inline_branch, inline_compare,
         inline_fetch_dim_r, inline_identical, inline_incdec, write_owning_nothing,
@@ -27623,6 +27718,78 @@ pub(crate) mod inline_path {
     pub(crate) fn div(slots: &mut [Zval], code: &OpArray, op: &Opline, _: u32) -> Option<Inline> {
         let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
         inline_arith(slots, code, op, Binary::Div, kinds)
+    }
+
+    /// `ZEND_ADD` and the `ASSIGN` of its temporary to a CV fused to it.
+    /// The loop alone serves it: the handler serves the `ADD` alone.
+    #[inline(always)] // in the loop
+    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
+    pub(crate) fn add_assign_cv<A: Operand + Default, B: Operand + Default>(
+        slots: &mut [Zval],
+        code: &OpArray,
+        op: &Opline,
+        at: u32,
+    ) -> Option<Inline> {
+        inline_arith_assign(
+            slots,
+            code,
+            op,
+            at,
+            Arith::Add,
+            (A::default(), B::default()),
+        )
+    }
+
+    /// `ZEND_SUB` and the `ASSIGN` fused to it, as [`add_assign_cv`].
+    #[inline(always)] // in the loop
+    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
+    pub(crate) fn sub_assign_cv<A: Operand + Default, B: Operand + Default>(
+        slots: &mut [Zval],
+        code: &OpArray,
+        op: &Opline,
+        at: u32,
+    ) -> Option<Inline> {
+        inline_arith_assign(
+            slots,
+            code,
+            op,
+            at,
+            Arith::Sub,
+            (A::default(), B::default()),
+        )
+    }
+
+    /// `ZEND_MUL` and the `ASSIGN` fused to it, as [`add_assign_cv`].
+    #[inline(always)] // in the loop
+    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
+    pub(crate) fn mul_assign_cv<A: Operand + Default, B: Operand + Default>(
+        slots: &mut [Zval],
+        code: &OpArray,
+        op: &Opline,
+        at: u32,
+    ) -> Option<Inline> {
+        inline_arith_assign(
+            slots,
+            code,
+            op,
+            at,
+            Arith::Mul,
+            (A::default(), B::default()),
+        )
+    }
+
+    /// `ZEND_DIV` over the kinds its opline names and the `ASSIGN` fused
+    /// to it, as [`add_assign_cv`].
+    #[inline(always)] // in the loop
+    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
+    pub(crate) fn div_assign_cv(
+        slots: &mut [Zval],
+        code: &OpArray,
+        op: &Opline,
+        at: u32,
+    ) -> Option<Inline> {
+        let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
+        inline_arith_assign(slots, code, op, at, Binary::Div, kinds)
     }
 
     /// `ZEND_IS_SMALLER`, and the jump fused to it.
