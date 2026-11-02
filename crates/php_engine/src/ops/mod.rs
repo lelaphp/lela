@@ -3559,6 +3559,31 @@ pub(crate) fn loose_equal(req: &mut Request, left: &Value, right: &Value) -> Res
 /// numeric reading answers; any other two scalars as [`php_heap::compare`]
 /// orders them. `None` for an array, an object, a resource or a
 /// reference on either side, whose comparison is [`compare`]'s.
+///
+/// `in_array` reads each scalar element through it: a null, a bool, an
+/// int, a float and a string against each other, a float against a
+/// numeric string as numbers and against a non-numeric one by the
+/// float's text, a NAN equal to nothing.
+///
+/// ```php
+/// $h = [null, false, 0, 0.0, "", "0", "1.5", "abc", 1.5, true];
+/// foreach ([null, 0, "0", "", 1.5, "1.50", "abc", true, 0.1 + 0.2] as $n) echo implode(",", array_keys(array_filter($h, fn ($v) => in_array($n, [$v])))), "\n";
+/// ini_set('precision', '3'); var_dump(in_array(1.23456, ["1.23"]), in_array(INF, ["INF"]), in_array(NAN, ["NAN"]));
+/// ```
+/// ```expect
+/// 0,1,2,3,4
+/// 0,1,2,3,5
+/// 1,2,3,5
+/// 0,1,4
+/// 6,8,9
+/// 6,8,9
+/// 7,9
+/// 6,7,8,9
+/// 9
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// ```
 #[inline]
 pub(crate) fn loose_equal_read(precision: i32, left: &Value, right: &Value) -> Option<bool> {
     Some(match (scalar(left)?, scalar(right)?) {
@@ -3686,7 +3711,18 @@ pub(crate) fn identical(req: &mut Request, left: &Value, right: &Value) -> Resul
 
 /// [`identical`] past two arrays, a reference on either side followed:
 /// what it answers with no request, and `None` for two arrays, whose
-/// walk is [`identical`]'s.
+/// walk is [`identical`]'s. `in_array` under `$strict` reads each
+/// element that is not an array against a needle through it:
+///
+/// ```php
+/// $o = new stdClass; $f = fopen('php://memory', 'r'); $x = 1;
+/// $h = [null, false, 0, 0.0, "0", $o, $f, &$x, [1]];
+/// foreach ([null, false, 0, 0.0, "0", 1, new stdClass, $o, $f, [1]] as $n) echo json_encode(array_search($n, $h, true)), " ";
+/// echo "\n";
+/// ```
+/// ```expect
+/// 0 1 2 3 4 7 false 5 6 8
+/// ```
 pub(crate) fn identical_read(left: &Value, right: &Value) -> Option<bool> {
     let (left, right) = (left.deref(), right.deref());
     if left.as_array().is_some() && right.as_array().is_some() {
