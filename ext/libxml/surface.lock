@@ -317,6 +317,7 @@ ffi::Route
 ffi::Save
 ffi::Save::bare
 ffi::Save::c14n
+ffi::Save::c14n_file
 ffi::Save::doc
 ffi::Save::file
 ffi::Save::html_doc
