@@ -161,9 +161,9 @@ impl DOMException {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            dom_import_simplexml::declared(),
-            modern::import_simplexml::declared(),
+        .functions(&[
+            dom_import_simplexml::DECLARED,
+            modern::import_simplexml::DECLARED,
         ])
         .constants([constants::declared(), modern_constants::declared()].concat())
         .register(

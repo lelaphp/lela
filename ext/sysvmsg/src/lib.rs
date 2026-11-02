@@ -73,14 +73,14 @@ mod constants {
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
         .constants(constants::declared())
-        .functions(vec![
-            msg_get_queue::declared(),
-            msg_send::declared(),
-            msg_receive::declared(),
-            msg_remove_queue::declared(),
-            msg_stat_queue::declared(),
-            msg_set_queue::declared(),
-            msg_queue_exists::declared(),
+        .functions(&[
+            msg_get_queue::DECLARED,
+            msg_send::DECLARED,
+            msg_receive::DECLARED,
+            msg_remove_queue::DECLARED,
+            msg_stat_queue::DECLARED,
+            msg_set_queue::DECLARED,
+            msg_queue_exists::DECLARED,
         ])
         .class::<SysvMessageQueue>()
         .info(sysvmsg_info)

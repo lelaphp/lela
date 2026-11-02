@@ -2,12 +2,15 @@
 //! Rust item with an attribute on it and nothing else:
 //!
 //! - `#[php_function]` on a `fn` declares a function. It re-emits the
-//!   `fn` and a sibling `mod` of the same name whose `declared()` answers
-//!   the declaration and its entry, the pair `ExtensionBuilder::functions`
-//!   takes.
+//!   `fn` and a sibling `mod` of the same name whose `const DECLARED` is
+//!   the function's static entry, its declaration as data beside its
+//!   entry, which `ExtensionBuilder::functions` takes in a list and the
+//!   engine builds the declaration model from as it registers it, as php
+//!   registers a `zend_function_entry` array (#3355).
 //! - `#[php_class]` on a `struct` or an `enum` declares a class header,
 //!   and on an `impl` the class's members, registered together by
-//!   `ExtensionBuilder::class::<C>()`. A Rust `enum` is a PHP enum.
+//!   `ExtensionBuilder::class::<C>()`; its methods are static entries as
+//!   a function's is. A Rust `enum` is a PHP enum.
 //! - `#[php_const]` on a `const` or an inline `mod` declares constants.
 //!
 //! Beside them, `#[mirrors]` on an item of an extension's surface names

@@ -403,7 +403,7 @@ pub(crate) fn default_config(req: &mut Request, doc: &mut ffi::Doc) -> Result<()
 /// bool(false)
 /// ```
 pub fn extension() -> Extension {
-    ExtensionBuilder::default()
+    let builder = ExtensionBuilder::default()
         .ini(vec![
             IniDecl {
                 name: Name(DEFAULT_CONFIG.as_bytes().into()),
@@ -421,8 +421,8 @@ pub fn extension() -> Extension {
             },
         ])
         .on_modify(CLEAN_OUTPUT.as_bytes(), output::on_clean_output)
-        .constants(constants::declared())
-        .functions(doc::functions())
+        .constants(constants::declared());
+    doc::functions(builder)
         .class::<doc::class::tidy>()
         .class::<node::tidyNode>()
         .register(output::OB_TIDYHANDLER)

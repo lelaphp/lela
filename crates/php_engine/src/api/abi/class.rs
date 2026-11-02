@@ -7,7 +7,7 @@ use std::any::Any;
 
 use php_unit::decl::{ClassConstDecl, ClassDecl, ConstExpr, MethodDecl, PropertyDecl, Type};
 
-use crate::api::__private::Entry;
+use crate::api::__private::{Entry, NativeMethod};
 use crate::api::abi::ExtensionBuilder;
 use crate::api::abi::marshal::{FromArgument, Instance, Untyped};
 use crate::api::values::{ClassId, PhpArray, PhpString, Value};
@@ -50,13 +50,11 @@ pub trait Header: Class {
 /// each kind. A class with none still writes an empty impl, so a
 /// forgotten one is a build error at `.class::<C>()`.
 pub trait Members {
-    /// The constants, the properties and the methods with their entries.
-    #[allow(clippy::type_complexity)] // the three lists a class declaration holds
-    fn members() -> (
-        Vec<ClassConstDecl>,
-        Vec<PropertyDecl>,
-        Vec<(MethodDecl, Entry)>,
-    );
+    /// The methods, each the static entry the attribute lays down, php's
+    /// method entry array.
+    const METHODS: &'static [NativeMethod];
+    /// The constants and the properties.
+    fn members() -> (Vec<ClassConstDecl>, Vec<PropertyDecl>);
 }
 
 /// A `#[php_class]` enum's cases, each php name beside its Rust variant,

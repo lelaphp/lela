@@ -82,15 +82,15 @@ struct State {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            libxml_set_streams_context::declared(),
-            libxml_use_internal_errors::declared(),
-            libxml_get_last_error::declared(),
-            libxml_get_errors::declared(),
-            libxml_clear_errors::declared(),
-            libxml_disable_entity_loader::declared(),
-            libxml_set_external_entity_loader::declared(),
-            libxml_get_external_entity_loader::declared(),
+        .functions(&[
+            libxml_set_streams_context::DECLARED,
+            libxml_use_internal_errors::DECLARED,
+            libxml_get_last_error::DECLARED,
+            libxml_get_errors::DECLARED,
+            libxml_clear_errors::DECLARED,
+            libxml_disable_entity_loader::DECLARED,
+            libxml_set_external_entity_loader::DECLARED,
+            libxml_get_external_entity_loader::DECLARED,
         ])
         .constants(constants::declared())
         .class::<LibXMLError>()

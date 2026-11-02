@@ -2,6 +2,9 @@
 # 374 items: values 102, raising 21, coerce 23, call 29, request 112, decl 17, abi 28, syntax 28, attr 4, test 9, Nop 1 (ceiling 400); regenerated from the crate on 2026-09-17 (#271)
 Nop
 __private::Entry
+__private::NativeFunction
+__private::NativeMethod
+__private::NativeParameter
 __private::abstract_entry
 __private::arguments
 __private::attribute
@@ -10,8 +13,6 @@ __private::case_value
 __private::class
 __private::class_new
 __private::entered
-__private::native_function
-__private::parameter
 __private::property
 abi::Absent
 abi::Admission
@@ -127,6 +128,7 @@ abi::ExtensionBuilder::fiber_destroy
 abi::ExtensionBuilder::fiber_init
 abi::ExtensionBuilder::fiber_switch
 abi::ExtensionBuilder::function_declared_observer
+abi::ExtensionBuilder::function_reshaped
 abi::ExtensionBuilder::functions
 abi::ExtensionBuilder::gc_collect
 abi::ExtensionBuilder::info
@@ -203,6 +205,7 @@ abi::Lent::hold
 abi::LongHandler
 abi::Lookup
 abi::Members
+abi::Members::METHODS
 abi::Members::members
 abi::Multibyte
 abi::Multibyte::char_len

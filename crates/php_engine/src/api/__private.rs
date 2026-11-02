@@ -5,8 +5,8 @@
 //! `__private` (`ext.no-private`).
 
 use php_unit::decl::{
-    Attribute, AttributeArgument, Bare, ClassDecl, ClassKind, ConstExpr, MethodDecl, Name,
-    PropertyDecl, Type, Visibility,
+    Attribute, AttributeArgument, Bare, ClassDecl, ClassKind, ConstExpr, FunctionDecl, MethodDecl,
+    Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 
 use crate::api::abi::{Cases, Class, ClassRef, ExtensionBuilder, ObjectHandlers};
@@ -21,7 +21,120 @@ use crate::api::values::{ClassId, Owner, Value, ValueRef};
 /// lets a backtrace taken inside it print them.
 pub type Entry = fn(&mut Request) -> Result<Owner<Value>, Thrown>;
 
-pub use php_unit::decl::{native_function, parameter};
+/// A native function as `#[php_function]` lays it down: a `const` of
+/// static data, php's `zend_function_entry` with its
+/// `zend_internal_arg_info` rows, which the engine reads once as it
+/// registers the function and builds the declaration model of
+/// ([`NativeFunction::declaration`]), as
+/// `zend_register_functions` walks an extension's entry array. What is
+/// a tree in the model, a declared type, a default expression, a php
+/// attribute, is the function that builds it: a type's is its Rust
+/// type's `FromArgument::declared` or `IntoReturn::declared`, one per
+/// type and shared by every native that names it, and a default's or an
+/// attribute's is the expansion's own.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeFunction {
+    /// The PHP name, namespace included.
+    pub name: &'static [u8],
+    pub parameters: &'static [NativeParameter],
+    pub return_type: fn() -> Option<Type>,
+    /// `zend_frameless_function_info`'s arities ([`FunctionDecl::frameless`]).
+    pub frameless: &'static [u32],
+    pub attributes: &'static [fn() -> Attribute],
+    pub entry: Entry,
+}
+
+/// One parameter of a [`NativeFunction`], php's `zend_internal_arg_info`:
+/// the facts of its Rust type (`FromArgument`'s `BY_REF`, `VARIADIC` and
+/// `PASSED`) and of its `#[php(..)]`.
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)] // the ZEND_SEND_* bits of a slot and its type's `Passed`, each one fact
+pub struct NativeParameter {
+    pub name: &'static [u8],
+    pub ty: fn() -> Option<Type>,
+    pub by_ref: bool,
+    pub prefer_ref: bool,
+    pub variadic: bool,
+    /// The type is `Passed`: optional, its absence the body's to see,
+    /// which the declaration shows as `Unshown` where no default is
+    /// written.
+    pub passed: bool,
+    /// The `#[php(default = ..)]` expression.
+    pub default: Option<fn() -> ConstExpr>,
+    pub attributes: &'static [fn() -> Attribute],
+}
+
+/// A native method as `#[php_class]` lays it down on its member impl:
+/// a [`NativeFunction`] with the `ZEND_ACC_*` bits php's method entry
+/// carries ([`MethodDecl`]).
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)] // the ZEND_ACC_* bits of a method, each one fact
+pub struct NativeMethod {
+    pub function: NativeFunction,
+    pub visibility: Visibility,
+    pub is_instance: bool,
+    pub is_abstract: bool,
+    pub is_final: bool,
+    pub tentative_return: bool,
+}
+
+impl NativeFunction {
+    /// The declaration model of the function, built as
+    /// `zend_register_functions` builds a `zend_internal_function` from
+    /// its entry: no file, line zero, by value.
+    pub(crate) fn declaration(&self) -> FunctionDecl {
+        FunctionDecl {
+            parameters: (self.parameters.iter())
+                .map(NativeParameter::declaration)
+                .collect(),
+            return_type: (self.return_type)(),
+            attributes: self
+                .attributes
+                .iter()
+                .map(|attribute| attribute())
+                .collect(),
+            frameless: self.frameless.to_vec(),
+            ..php_unit::decl::native_function(self.name)
+        }
+    }
+}
+
+impl NativeParameter {
+    fn declaration(&self) -> Parameter {
+        let default = match self.default {
+            Some(expr) => ParameterDefault::Expr(expr()),
+            None if self.passed => ParameterDefault::Unshown,
+            None => ParameterDefault::None,
+        };
+        Parameter {
+            by_ref: self.by_ref,
+            prefer_ref: self.prefer_ref,
+            variadic: self.variadic,
+            default,
+            attributes: self
+                .attributes
+                .iter()
+                .map(|attribute| attribute())
+                .collect(),
+            ..php_unit::decl::parameter(self.name, (self.ty)())
+        }
+    }
+}
+
+impl NativeMethod {
+    /// The method's declaration model and its entry.
+    pub(crate) fn declaration(&self) -> (MethodDecl, Entry) {
+        let method = MethodDecl {
+            function: self.function.declaration(),
+            visibility: self.visibility,
+            is_instance: self.is_instance,
+            is_abstract: self.is_abstract,
+            is_final: self.is_final,
+            tentative_return: self.tentative_return,
+        };
+        (method, self.function.entry)
+    }
+}
 
 /// A public instance property named `name` of type `ty`, no default.
 #[must_use]

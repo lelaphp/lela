@@ -90,10 +90,7 @@ fn hold_unlent_and_throw(req: &mut Request, seconds: f64) -> Result<(), Thrown> 
 /// [`hold_unlent_and_throw`].
 fn holding() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            hold_unlent::declared(),
-            hold_unlent_and_throw::declared(),
-        ])
+        .functions(&[hold_unlent::DECLARED, hold_unlent_and_throw::DECLARED])
         .build("ffi_threads_hold")
 }
 

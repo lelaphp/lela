@@ -641,16 +641,16 @@ pub fn extension() -> Extension {
         .class::<Randomizer>()
         .class::<IntervalBoundary>()
         .constants(constants::declared())
-        .functions(vec![
-            lcg_value::declared(),
-            mt_srand::declared(),
-            srand::declared(),
-            rand::declared(),
-            mt_rand::declared(),
-            mt_getrandmax::declared(),
-            getrandmax::declared(),
-            random_bytes::declared(),
-            random_int::declared(),
+        .functions(&[
+            lcg_value::DECLARED,
+            mt_srand::DECLARED,
+            srand::DECLARED,
+            rand::DECLARED,
+            mt_rand::DECLARED,
+            mt_getrandmax::DECLARED,
+            getrandmax::DECLARED,
+            random_bytes::DECLARED,
+            random_int::DECLARED,
         ])
         .request_state::<Globals>()
         .engine_state(throwables::Throwables::start)

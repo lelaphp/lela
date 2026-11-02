@@ -332,18 +332,18 @@ fn limits(req: &mut Request) -> Limits {
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
         .constants(constants::declared())
-        .functions(vec![
-            matching::preg_match::declared(),
-            matching::preg_match_all::declared(),
-            replace::preg_replace::declared(),
-            replace::preg_filter::declared(),
-            replace::preg_replace_callback::declared(),
-            replace::preg_replace_callback_array::declared(),
-            split::preg_split::declared(),
-            preg_quote::declared(),
-            split::preg_grep::declared(),
-            preg_last_error::declared(),
-            preg_last_error_msg::declared(),
+        .functions(&[
+            matching::preg_match::DECLARED,
+            matching::preg_match_all::DECLARED,
+            replace::preg_replace::DECLARED,
+            replace::preg_filter::DECLARED,
+            replace::preg_replace_callback::DECLARED,
+            replace::preg_replace_callback_array::DECLARED,
+            split::preg_split::DECLARED,
+            preg_quote::DECLARED,
+            split::preg_grep::DECLARED,
+            preg_last_error::DECLARED,
+            preg_last_error_msg::DECLARED,
         ])
         .ini(
             INI.iter()

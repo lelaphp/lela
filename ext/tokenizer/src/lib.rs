@@ -68,7 +68,7 @@ struct State {}
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![token_get_all::declared(), token_name::declared()])
+        .functions(&[token_get_all::DECLARED, token_name::DECLARED])
         .class::<PhpToken>()
         .constants(constants::declared())
         .request_state::<State>()

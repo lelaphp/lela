@@ -100,11 +100,11 @@ pub fn extension() -> Extension {
             dependency("mbstring", DependencyKind::Optional),
         ])
         .constants(constants::declared())
-        .functions(vec![
-            exif_tagname::declared(),
-            exif_read_data::declared(),
-            exif_thumbnail::declared(),
-            exif_imagetype::declared(),
+        .functions(&[
+            exif_tagname::DECLARED,
+            exif_read_data::DECLARED,
+            exif_thumbnail::DECLARED,
+            exif_imagetype::DECLARED,
         ])
         .ini(
             INI.iter()

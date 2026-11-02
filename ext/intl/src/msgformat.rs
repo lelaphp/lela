@@ -1535,16 +1535,16 @@ fn msgfmt_get_error_message(req: &mut Request, formatter: Fmt) -> Result<Owner<P
 
 /// The `msgfmt_*` functions, in the stub's order.
 pub(crate) fn functions(builder: php_ext::abi::ExtensionBuilder) -> php_ext::abi::ExtensionBuilder {
-    builder.functions(vec![
-        msgfmt_create::declared(),
-        msgfmt_format::declared(),
-        msgfmt_format_message::declared(),
-        msgfmt_parse::declared(),
-        msgfmt_parse_message::declared(),
-        msgfmt_set_pattern::declared(),
-        msgfmt_get_pattern::declared(),
-        msgfmt_get_locale::declared(),
-        msgfmt_get_error_code::declared(),
-        msgfmt_get_error_message::declared(),
+    builder.functions(&[
+        msgfmt_create::DECLARED,
+        msgfmt_format::DECLARED,
+        msgfmt_format_message::DECLARED,
+        msgfmt_parse::DECLARED,
+        msgfmt_parse_message::DECLARED,
+        msgfmt_set_pattern::DECLARED,
+        msgfmt_get_pattern::DECLARED,
+        msgfmt_get_locale::DECLARED,
+        msgfmt_get_error_code::DECLARED,
+        msgfmt_get_error_message::DECLARED,
     ])
 }

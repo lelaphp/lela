@@ -80,10 +80,10 @@ pub(crate) struct RecursiveIterator;
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            simplexml_load_file::declared(),
-            simplexml_load_string::declared(),
-            simplexml_import_dom::declared(),
+        .functions(&[
+            simplexml_load_file::DECLARED,
+            simplexml_load_string::DECLARED,
+            simplexml_import_dom::DECLARED,
         ])
         .dependencies(vec![
             dependency("libxml", DependencyKind::Required),

@@ -519,6 +519,7 @@ pub struct ZendExtension {
 }
 
 pub(crate) use crate::api::__private::Entry;
+use crate::api::__private::{NativeFunction, NativeMethod};
 /// Builds one extension's request state at request start.
 pub(crate) type StateBuilder = (TypeId, fn() -> Box<dyn Any + Send>);
 
@@ -1031,13 +1032,42 @@ pub(crate) struct ExtensionEntry {
     pub(crate) info: Option<Info>,
 }
 
+/// One native function as an extension registers it: the static entry
+/// its attribute laid down and, where [`ExtensionBuilder::function_reshaped`]
+/// registered it, what reshapes the declaration built from it. The
+/// engine builds the declaration as it registers the function.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FunctionRow {
+    pub(crate) native: &'static NativeFunction,
+    pub(crate) reshape: Option<fn(&mut FunctionDecl)>,
+}
+
+impl FunctionRow {
+    pub(crate) fn of(native: &'static NativeFunction) -> FunctionRow {
+        FunctionRow {
+            native,
+            reshape: None,
+        }
+    }
+
+    /// The declaration model and the entry, `zend_register_functions`'
+    /// one step over an entry.
+    pub(crate) fn declaration(&self) -> (FunctionDecl, Entry) {
+        let mut declaration = self.native.declaration();
+        if let Some(reshape) = self.reshape {
+            reshape(&mut declaration);
+        }
+        (declaration, self.native.entry)
+    }
+}
+
 /// What one extension declares into the engine's tables, which the
 /// engine's build moves into them row by row, so no declaration is held
 /// twice: its functions, classes and constants, and what it adds to the
 /// classes of others.
 #[derive(Clone, Default)]
 pub(crate) struct Declarations {
-    pub(crate) functions: Vec<(FunctionDecl, Entry)>,
+    pub(crate) functions: Vec<FunctionRow>,
     pub(crate) classes: Vec<NativeClassDecl>,
     pub(crate) constants: Vec<ConstDecl>,
     /// What [`ExtensionBuilder::constants_with`] was handed.
@@ -1135,10 +1165,31 @@ pub struct ExtensionBuilder {
 }
 
 impl ExtensionBuilder {
-    /// The natives: each declaration with its entry.
+    /// The natives, each the static entry `#[php_function]` lays down,
+    /// `&[strlen::DECLARED, ..]`, registered in the order listed, as
+    /// `zend_register_functions` walks an entry array.
     #[must_use]
-    pub fn functions(mut self, functions: Vec<(FunctionDecl, Entry)>) -> ExtensionBuilder {
-        self.declarations.functions.extend(functions);
+    pub fn functions(mut self, functions: &'static [NativeFunction]) -> ExtensionBuilder {
+        (self.declarations.functions).extend(functions.iter().map(FunctionRow::of));
+        self
+    }
+
+    /// One native registered after the declaration its entry builds is
+    /// reshaped by what the attribute cannot say and php's stub writes
+    /// by hand: another name for the same body (`ZEND_RAW_FENTRY`, the
+    /// `_` gettext's `gettext` is also registered as), a doc comment
+    /// `@genstubs-expose-comment-block` keeps, a type `gen_stub.php`
+    /// cannot write.
+    #[must_use]
+    pub fn function_reshaped(
+        mut self,
+        function: &'static NativeFunction,
+        reshape: fn(&mut FunctionDecl),
+    ) -> ExtensionBuilder {
+        (self.declarations.functions).push(FunctionRow {
+            native: function,
+            reshape: Some(reshape),
+        });
         self
     }
 
@@ -1207,7 +1258,9 @@ impl ExtensionBuilder {
         reshape: impl FnOnce(&mut ClassDecl),
     ) -> ExtensionBuilder {
         let mut class = C::header();
-        let (constants, properties, mut methods) = C::members();
+        let (constants, properties) = C::members();
+        let mut methods: Vec<(MethodDecl, Entry)> =
+            C::METHODS.iter().map(NativeMethod::declaration).collect();
         class.constants.extend(constants);
         class.properties.extend(properties);
         let seen = methods.iter().map(|(method, _)| method.clone()).collect();

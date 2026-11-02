@@ -241,10 +241,7 @@ fn ini_entry(name: &[u8], default: &[u8]) -> IniDecl {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            use_soap_error_handler::declared(),
-            is_soap_fault::declared(),
-        ])
+        .functions(&[use_soap_error_handler::DECLARED, is_soap_fault::DECLARED])
         .class::<client::SoapClient>()
         .class::<classes::SoapVar>()
         .class::<server::SoapServer>()

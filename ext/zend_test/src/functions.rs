@@ -31,102 +31,125 @@ use crate::throwables::Throwables;
 /// `zend_test_internal_dnf_arguments`, which `MINIT` registers by hand,
 /// and `zend_iterable_legacy`, which it registers last.
 pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
-    let void = zend_test_aliased::declared;
-    let ns2 = |name: &str| format!("ZendTestNS2\\{name}");
-    let sub = |name: &str| format!("ZendTestNS2\\ZendSubNS\\{name}");
-    builder.functions(vec![
-        zend_trigger_bailout::declared(),
-        zend_test_array_return::declared(),
-        documented(zend_test_nullable_array_return::declared(), 4, "8.3"),
-        zend_test_void_return::declared(),
-        zend_test_compile_string::declared(),
-        zend_test_deprecated::declared(),
-        zend_test_deprecated_attr::declared(),
-        zend_test_nodiscard::declared(),
-        zend_test_deprecated_nodiscard::declared(),
-        void(),
-        alias(void(), "zend_test_deprecated_aliased", true),
-        zend_create_unterminated_string::declared(),
-        zend_terminate_string::declared(),
-        zend_leak_variable::declared(),
-        internals::zend_leak_bytes::declared(),
-        internals::zend_delref::declared(),
-        internals::zend_test_emalloc::declared(),
-        zend_test_callback::declared(),
-        zend_string_or_object::declared(),
-        zend_string_or_object_or_null::declared(),
-        zend_string_or_stdclass::declared(),
-        zend_string_or_stdclass_or_null::declared(),
-        zend_number_or_string::declared(),
-        zend_number_or_string_or_null::declared(),
-        zend_iterable::declared(),
-        zend_weakmap_attach::declared(),
-        zend_weakmap_remove::declared(),
-        zend_weakmap_dump::declared(),
-        zend_get_unit_enum::declared(),
-        zend_test_parameter_with_attribute::declared(),
-        zend_test_attribute_with_named_argument::declared(),
-        zend_get_current_func_name::declared(),
-        zend_call_method::declared(),
-        zend_object_init_with_constructor::declared(),
-        zend_call_method_if_exists::declared(),
-        zend_test_zend_ini_parse_quantity::declared(),
-        zend_test_zend_ini_parse_uquantity::declared(),
-        zend_test_zend_ini_str::declared(),
-        internals::zend_test_zend_call_stack_get::declared(),
-        internals::zend_test_zend_call_stack_use_all::declared(),
-        zend_test_is_string_marked_as_valid_utf8::declared(),
-        internals::zend_get_map_ptr_last::declared(),
-        internals::zend_test_crash::declared(),
-        internals::zend_test_raise_and_throw::declared(),
-        zend_test_fill_packed_array::declared(),
-        zend_test_create_throwing_resource::declared(),
-        get_open_basedir::declared(),
-        internals::zend_test_override_libxml_global_state::declared(),
-        internals::zend_test_is_pcre_bundled::declared(),
-        zend_test_cast_fread::declared(),
-        internals::zend_test_is_zend_ptr::declared(),
-        internals::zend_test_log_err_debug::declared(),
-        zend_test_compile_to_ast::declared(),
-        internals::zend_test_gh18756::declared(),
-        internals::zend_test_opcache_preloading::declared(),
-        internals::zend_test_uri_parser::declared(),
-        zend_test_gh19792::declared(),
-        zend_test_handle_post_data::declared(),
-        zend_new_singleton_array::declared(),
-        namespaced_func::declared(),
-        alias(void(), &ns2("namespaced_deprecated_func"), true),
-        alias(void(), &ns2("namespaced_aliased_func"), false),
-        alias(void(), &ns2("namespaced_deprecated_aliased_func"), true),
-        alias(namespaced_func::declared(), &sub("namespaced_func"), false),
-        alias(void(), &sub("namespaced_deprecated_func"), true),
-        alias(void(), &sub("namespaced_aliased_func"), false),
-        alias(void(), &sub("namespaced_deprecated_aliased_func"), true),
-        dnf(zend_test_internal_dnf_arguments::declared()),
-        zend_iterable_legacy::declared(),
-    ])
+    builder
+        .functions(&[
+            zend_trigger_bailout::DECLARED,
+            zend_test_array_return::DECLARED,
+        ])
+        .function_reshaped(&zend_test_nullable_array_return::DECLARED, |function| {
+            function.doc_comment = Some(lorem_ipsum(4, "8.3"));
+        })
+        .functions(&[
+            zend_test_void_return::DECLARED,
+            zend_test_compile_string::DECLARED,
+            zend_test_deprecated::DECLARED,
+            zend_test_deprecated_attr::DECLARED,
+            zend_test_nodiscard::DECLARED,
+            zend_test_deprecated_nodiscard::DECLARED,
+            zend_test_aliased::DECLARED,
+        ])
+        .function_reshaped(&zend_test_aliased::DECLARED, |function| {
+            deprecated_alias(function, "zend_test_deprecated_aliased");
+        })
+        .functions(&[
+            zend_create_unterminated_string::DECLARED,
+            zend_terminate_string::DECLARED,
+            zend_leak_variable::DECLARED,
+            internals::zend_leak_bytes::DECLARED,
+            internals::zend_delref::DECLARED,
+            internals::zend_test_emalloc::DECLARED,
+            zend_test_callback::DECLARED,
+            zend_string_or_object::DECLARED,
+            zend_string_or_object_or_null::DECLARED,
+            zend_string_or_stdclass::DECLARED,
+            zend_string_or_stdclass_or_null::DECLARED,
+            zend_number_or_string::DECLARED,
+            zend_number_or_string_or_null::DECLARED,
+            zend_iterable::DECLARED,
+            zend_weakmap_attach::DECLARED,
+            zend_weakmap_remove::DECLARED,
+            zend_weakmap_dump::DECLARED,
+            zend_get_unit_enum::DECLARED,
+            zend_test_parameter_with_attribute::DECLARED,
+            zend_test_attribute_with_named_argument::DECLARED,
+            zend_get_current_func_name::DECLARED,
+            zend_call_method::DECLARED,
+            zend_object_init_with_constructor::DECLARED,
+            zend_call_method_if_exists::DECLARED,
+            zend_test_zend_ini_parse_quantity::DECLARED,
+            zend_test_zend_ini_parse_uquantity::DECLARED,
+            zend_test_zend_ini_str::DECLARED,
+            internals::zend_test_zend_call_stack_get::DECLARED,
+            internals::zend_test_zend_call_stack_use_all::DECLARED,
+            zend_test_is_string_marked_as_valid_utf8::DECLARED,
+            internals::zend_get_map_ptr_last::DECLARED,
+            internals::zend_test_crash::DECLARED,
+            internals::zend_test_raise_and_throw::DECLARED,
+            zend_test_fill_packed_array::DECLARED,
+            zend_test_create_throwing_resource::DECLARED,
+            get_open_basedir::DECLARED,
+            internals::zend_test_override_libxml_global_state::DECLARED,
+            internals::zend_test_is_pcre_bundled::DECLARED,
+            zend_test_cast_fread::DECLARED,
+            internals::zend_test_is_zend_ptr::DECLARED,
+            internals::zend_test_log_err_debug::DECLARED,
+            zend_test_compile_to_ast::DECLARED,
+            internals::zend_test_gh18756::DECLARED,
+            internals::zend_test_opcache_preloading::DECLARED,
+            internals::zend_test_uri_parser::DECLARED,
+            zend_test_gh19792::DECLARED,
+            zend_test_handle_post_data::DECLARED,
+            zend_new_singleton_array::DECLARED,
+            namespaced_func::DECLARED,
+        ])
+        .function_reshaped(&zend_test_aliased::DECLARED, |function| {
+            deprecated_alias(function, "ZendTestNS2\\namespaced_deprecated_func");
+        })
+        .function_reshaped(&zend_test_aliased::DECLARED, |function| {
+            alias(function, "ZendTestNS2\\namespaced_aliased_func");
+        })
+        .function_reshaped(&zend_test_aliased::DECLARED, |function| {
+            deprecated_alias(function, "ZendTestNS2\\namespaced_deprecated_aliased_func");
+        })
+        .function_reshaped(&namespaced_func::DECLARED, |function| {
+            alias(function, "ZendTestNS2\\ZendSubNS\\namespaced_func");
+        })
+        .function_reshaped(&zend_test_aliased::DECLARED, |function| {
+            deprecated_alias(
+                function,
+                "ZendTestNS2\\ZendSubNS\\namespaced_deprecated_func",
+            );
+        })
+        .function_reshaped(&zend_test_aliased::DECLARED, |function| {
+            alias(function, "ZendTestNS2\\ZendSubNS\\namespaced_aliased_func");
+        })
+        .function_reshaped(&zend_test_aliased::DECLARED, |function| {
+            deprecated_alias(
+                function,
+                "ZendTestNS2\\ZendSubNS\\namespaced_deprecated_aliased_func",
+            );
+        })
+        .function_reshaped(&zend_test_internal_dnf_arguments::DECLARED, dnf)
+        .functions(&[zend_iterable_legacy::DECLARED])
 }
 
 /// A function entry under another name, as `ZEND_RAW_FENTRY` lays one
 /// down for an `@alias` or for a body two stub functions share: the
-/// same body, the stub's own name, and `@deprecated` where the stub
-/// says it.
-fn alias<E>(
-    (mut decl, entry): (FunctionDecl, E),
-    name: &str,
-    deprecated: bool,
-) -> (FunctionDecl, E) {
-    decl.name = Name(name.as_bytes().into());
-    if deprecated {
-        decl.attributes.push(Attribute {
-            name: Name(b"Deprecated".as_slice().into()),
-            arguments: Vec::new(),
-            line: 0,
-            strict: false,
-            own_name: true,
-        });
-    }
-    (decl, entry)
+/// same body, the stub's own name.
+fn alias(function: &mut FunctionDecl, name: &str) {
+    function.name = Name(name.as_bytes().into());
+}
+
+/// [`alias`], `@deprecated` where the stub says it.
+fn deprecated_alias(function: &mut FunctionDecl, name: &str) {
+    alias(function, name);
+    function.attributes.push(Attribute {
+        name: Name(b"Deprecated".as_slice().into()),
+        arguments: Vec::new(),
+        line: 0,
+        strict: false,
+        own_name: true,
+    });
 }
 
 /// The doc comment `@genstubs-expose-comment-block` keeps on a
@@ -141,15 +164,6 @@ pub(crate) fn lorem_ipsum(indent: usize, since: &str) -> Box<[u8]> {
     .into()
 }
 
-fn documented<E>(
-    (mut decl, entry): (FunctionDecl, E),
-    indent: usize,
-    since: &str,
-) -> (FunctionDecl, E) {
-    decl.doc_comment = Some(lorem_ipsum(indent, since));
-    (decl, entry)
-}
-
 /// `Iterator|(Traversable&Countable)`, `create_test_dnf_type`: the type
 /// `gen_stub.php` cannot write, laid on by hand.
 pub(crate) fn dnf_type() -> Type {
@@ -160,12 +174,11 @@ pub(crate) fn dnf_type() -> Type {
     ])
 }
 
-fn dnf<E>((mut decl, entry): (FunctionDecl, E)) -> (FunctionDecl, E) {
-    decl.return_type = Some(dnf_type());
-    for parameter in &mut decl.parameters {
+fn dnf(function: &mut FunctionDecl) {
+    function.return_type = Some(dnf_type());
+    for parameter in &mut function.parameters {
         parameter.ty = Some(dnf_type());
     }
-    (decl, entry)
 }
 
 /// `zend_trigger_bailout(): never`: the fatal `E_ERROR` it raises.

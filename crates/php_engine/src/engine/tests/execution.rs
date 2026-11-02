@@ -325,7 +325,7 @@ fn an_unbounded_recursion_through_array_map_is_refused_not_overflowed() {
     let engine = Engine::cli_builder()
         .additional_extension(
             crate::api::abi::ExtensionBuilder::default()
-                .functions(vec![array_map::declared()])
+                .functions(&[array_map::DECLARED])
                 .build("standard"),
         )
         .build();

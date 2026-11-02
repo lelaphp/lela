@@ -745,15 +745,14 @@ fn members(attribute: Tokens, mut block: ItemImpl) -> syn::Result<Tokens> {
         }
         #(#checks)*
         impl #root::abi::Members for #ident {
+            const METHODS: &'static [#root::__private::NativeMethod] = &[#(#declarations),*];
             fn members() -> (
                 Vec<#root::decl::ClassConstDecl>,
                 Vec<#root::decl::PropertyDecl>,
-                Vec<(#root::decl::MethodDecl, #root::__private::Entry)>,
             ) {
                 (
                     vec![#(#constant_decls),*],
                     vec![#(#property_decls),*],
-                    vec![#(#declarations),*],
                 )
             }
         }
@@ -896,29 +895,27 @@ fn method_pieces(
     let parameters = function::declared_parameters(&method.signature.params)?;
     let signature_output = &method.signature.output;
     let return_type = if structor {
-        quote!(None)
+        quote!(|| None)
     } else {
-        quote!(<#signature_output as #root::abi::IntoReturn>::declared())
+        quote!(<#signature_output as #root::abi::IntoReturn>::declared)
     };
     let visibility = visibility(&method.keys);
     let is_instance = method.signature.this.is_some();
-    let attributes = expr::attributes(&method.keys)?;
-    let declaration = quote!(#(#cfg)* {
-        let mut function = #root::__private::native_function(#name);
-        function.parameters = #parameters;
-        function.return_type = #return_type;
-        function.attributes = vec![#(#attributes),*];
-        (
-            #root::decl::MethodDecl {
-                function,
-                visibility: #visibility,
-                is_instance: #is_instance,
-                is_abstract: #is_abstract,
-                is_final: #is_final,
-                tentative_return: #tentative,
-            },
-            #entry_path,
-        )
+    let attributes = expr::built(&expr::attributes(&method.keys)?);
+    let declaration = quote!(#(#cfg)* #root::__private::NativeMethod {
+        function: #root::__private::NativeFunction {
+            name: #name,
+            parameters: #parameters,
+            return_type: #return_type,
+            frameless: &[],
+            attributes: #attributes,
+            entry: #entry_path,
+        },
+        visibility: #visibility,
+        is_instance: #is_instance,
+        is_abstract: #is_abstract,
+        is_final: #is_final,
+        tentative_return: #tentative,
     });
     let entry = method
         .body

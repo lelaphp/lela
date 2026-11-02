@@ -120,15 +120,15 @@ impl Accelerator {
 /// ```
 pub fn extension() -> Extension {
     let builder = ExtensionBuilder::default()
-        .functions(vec![
-            opcache_reset::declared(),
-            opcache_get_status::declared(),
-            opcache_compile_file::declared(),
-            opcache_invalidate::declared(),
-            opcache_jit_blacklist::declared(),
-            opcache_get_configuration::declared(),
-            opcache_is_script_cached::declared(),
-            opcache_is_script_cached_in_file_cache::declared(),
+        .functions(&[
+            opcache_reset::DECLARED,
+            opcache_get_status::DECLARED,
+            opcache_compile_file::DECLARED,
+            opcache_invalidate::DECLARED,
+            opcache_jit_blacklist::DECLARED,
+            opcache_get_configuration::DECLARED,
+            opcache_is_script_cached::DECLARED,
+            opcache_is_script_cached_in_file_cache::DECLARED,
         ])
         .ini(ini::declared());
     let builder = ini::handlers!(builder;

@@ -320,11 +320,11 @@ pub fn extension() -> Extension {
     // resourcebundle_*, intltz_*, transliterator_*.
     let builder = calendar::functions(builder);
     let builder = collator::functions(builder);
-    let builder = builder.functions(vec![
-        intl_get_error_code::declared(),
-        intl_get_error_message::declared(),
-        intl_is_failure::declared(),
-        intl_error_name::declared(),
+    let builder = builder.functions(&[
+        intl_get_error_code::DECLARED,
+        intl_get_error_message::DECLARED,
+        intl_is_failure::DECLARED,
+        intl_error_name::DECLARED,
     ]);
     let builder = dateformat::functions(builder);
     let builder = formatter::functions(builder);

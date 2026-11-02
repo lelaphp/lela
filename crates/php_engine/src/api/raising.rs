@@ -2189,9 +2189,10 @@ pub fn throwing_warnings<R>(
 
 #[cfg(test)]
 mod tests {
-    use php_unit::decl::{FunctionDecl, Parameter, Type};
+    use php_unit::decl::Type;
 
-    use crate::api::abi::{Entry, ExtensionBuilder};
+    use crate::api::__private::{Entry, NativeFunction, NativeParameter};
+    use crate::api::abi::ExtensionBuilder;
     use crate::api::request::Request;
     use crate::api::values::Value;
     use crate::engine::Engine;
@@ -2200,19 +2201,56 @@ mod tests {
     use super::{Thrown, arg_type_error, arg_value_error, throw_at};
     use crate::api::values::ClassId;
 
-    fn parameter(name: &[u8], ty: Type, variadic: bool) -> Parameter {
-        Parameter {
+    const fn parameter(
+        name: &'static [u8],
+        ty: fn() -> Option<Type>,
+        variadic: bool,
+    ) -> NativeParameter {
+        NativeParameter {
+            name,
+            ty,
+            by_ref: false,
+            prefer_ref: false,
             variadic,
-            ..php_unit::decl::parameter(name, Some(ty))
+            passed: false,
+            default: None,
+            attributes: &[],
         }
     }
 
-    fn declared(name: &[u8], parameters: Vec<Parameter>) -> FunctionDecl {
-        FunctionDecl {
+    const fn declared(
+        name: &'static [u8],
+        parameters: &'static [NativeParameter],
+        entry: Entry,
+    ) -> NativeFunction {
+        NativeFunction {
+            name,
             parameters,
-            ..php_unit::decl::native_function(name)
+            return_type: || None,
+            frameless: &[],
+            attributes: &[],
+            entry,
         }
     }
+
+    /// The natives below, declared as `#[php_function]` would lay them
+    /// down beside the core's.
+    const NATIVES: &[NativeFunction] = &[
+        declared(
+            b"str_repeat",
+            &[
+                parameter(b"string", || Some(Type::String), false),
+                parameter(b"times", || Some(Type::Int), false),
+            ],
+            str_repeat,
+        ),
+        declared(
+            b"array_merge",
+            &[parameter(b"arrays", || Some(Type::Array), true)],
+            array_merge,
+        ),
+        declared(b"refuse", &[], refuse),
+    ];
 
     /// `str_repeat(string $string, int $times)` as far as its one
     /// `ValueError` goes.
@@ -2240,26 +2278,7 @@ mod tests {
 
     fn served(source: &str) -> crate::test::Served {
         let extension = ExtensionBuilder::default()
-            .functions(vec![
-                (
-                    declared(
-                        b"str_repeat",
-                        vec![
-                            parameter(b"string", Type::String, false),
-                            parameter(b"times", Type::Int, false),
-                        ],
-                    ),
-                    str_repeat as Entry,
-                ),
-                (
-                    declared(
-                        b"array_merge",
-                        vec![parameter(b"arrays", Type::Array, true)],
-                    ),
-                    array_merge as Entry,
-                ),
-                (declared(b"refuse", Vec::new()), refuse as Entry),
-            ])
+            .functions(NATIVES)
             .build("raising");
         Engine::cli_builder()
             .extensions(&[extension])

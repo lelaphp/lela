@@ -836,12 +836,12 @@ fn resourcebundle_get_error_message(
 
 /// `php_intl.stub.php`'s `resourcebundle_*` block.
 pub(crate) fn functions(builder: php_ext::abi::ExtensionBuilder) -> php_ext::abi::ExtensionBuilder {
-    builder.functions(vec![
-        resourcebundle_create::declared(),
-        resourcebundle_get::declared(),
-        resourcebundle_count::declared(),
-        resourcebundle_locales::declared(),
-        resourcebundle_get_error_code::declared(),
-        resourcebundle_get_error_message::declared(),
+    builder.functions(&[
+        resourcebundle_create::DECLARED,
+        resourcebundle_get::DECLARED,
+        resourcebundle_count::DECLARED,
+        resourcebundle_locales::DECLARED,
+        resourcebundle_get_error_code::DECLARED,
+        resourcebundle_get_error_message::DECLARED,
     ])
 }

@@ -57,20 +57,19 @@ const MAX_MSGID_LENGTH: usize = 4096;
 /// bool(true)
 /// ```
 pub fn extension() -> Extension {
-    let mut underscore = gettext::declared();
-    underscore.0.name = Name::from("_");
     ExtensionBuilder::default()
-        .functions(vec![
-            textdomain::declared(),
-            gettext::declared(),
-            underscore,
-            dgettext::declared(),
-            dcgettext::declared(),
-            bindtextdomain::declared(),
-            ngettext::declared(),
-            dngettext::declared(),
-            dcngettext::declared(),
-            bind_textdomain_codeset::declared(),
+        .functions(&[textdomain::DECLARED, gettext::DECLARED])
+        .function_reshaped(&gettext::DECLARED, |underscore| {
+            underscore.name = Name::from("_");
+        })
+        .functions(&[
+            dgettext::DECLARED,
+            dcgettext::DECLARED,
+            bindtextdomain::DECLARED,
+            ngettext::DECLARED,
+            dngettext::DECLARED,
+            dcngettext::DECLARED,
+            bind_textdomain_codeset::DECLARED,
         ])
         .engine_state(Throwables::start)
         .info(info)

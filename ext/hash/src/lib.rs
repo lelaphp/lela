@@ -128,27 +128,27 @@ struct State {}
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            hash::declared(),
-            hash_file::declared(),
-            hash_hmac::declared(),
-            hash_hmac_file::declared(),
-            hash_init::declared(),
-            hash_update::declared(),
-            hash_update_stream::declared(),
-            hash_update_file::declared(),
-            hash_final::declared(),
-            hash_copy::declared(),
-            hash_algos::declared(),
-            hash_hmac_algos::declared(),
-            hash_pbkdf2::declared(),
-            hash_equals::declared(),
-            hash_hkdf::declared(),
-            mhash_get_block_size::declared(),
-            mhash_get_hash_name::declared(),
-            mhash_keygen_s2k::declared(),
-            mhash_count::declared(),
-            mhash::declared(),
+        .functions(&[
+            hash::DECLARED,
+            hash_file::DECLARED,
+            hash_hmac::DECLARED,
+            hash_hmac_file::DECLARED,
+            hash_init::DECLARED,
+            hash_update::DECLARED,
+            hash_update_stream::DECLARED,
+            hash_update_file::DECLARED,
+            hash_final::DECLARED,
+            hash_copy::DECLARED,
+            hash_algos::DECLARED,
+            hash_hmac_algos::DECLARED,
+            hash_pbkdf2::DECLARED,
+            hash_equals::DECLARED,
+            hash_hkdf::DECLARED,
+            mhash_get_block_size::DECLARED,
+            mhash_get_hash_name::DECLARED,
+            mhash_keygen_s2k::DECLARED,
+            mhash_count::DECLARED,
+            mhash::DECLARED,
         ])
         .class::<HashContext>()
         .constants(natives::constants::declared())
