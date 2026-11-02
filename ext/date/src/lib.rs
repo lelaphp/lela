@@ -207,7 +207,7 @@ pub fn extension() -> Extension {
         // `php_format_date`, what php's `main` and ext/standard call
         // into ext/date for (`php_date.h`).
         .register(php_ext::request::FormatDate(format::format_date))
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .functions(&[
             parse::strtotime::DECLARED,
             format::date::DECLARED,

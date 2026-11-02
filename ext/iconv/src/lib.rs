@@ -168,7 +168,7 @@ pub fn extension() -> Extension {
             iconv_set_encoding::DECLARED,
             iconv_get_encoding::DECLARED,
         ])
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .ini(Kind::ALL.map(ini).to_vec())
         .on_modify(b"iconv.input_encoding", on_input_encoding)
         .on_modify(b"iconv.output_encoding", on_output_encoding)

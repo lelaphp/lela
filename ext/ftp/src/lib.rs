@@ -93,7 +93,7 @@ const AUTORESUME: i64 = -1;
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .functions(&[
             ftp_connect::DECLARED,
             ftp_ssl_connect::DECLARED,

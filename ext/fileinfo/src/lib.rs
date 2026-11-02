@@ -65,7 +65,7 @@ pub fn extension() -> Extension {
             finfo_buffer::DECLARED,
             mime_content_type::DECLARED,
         ])
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .class::<class::finfo>()
         .engine_state(Throwables::start)
         .info(fileinfo_info)

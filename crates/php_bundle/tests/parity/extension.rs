@@ -766,8 +766,6 @@ impl ProtoLaid {
 }
 
 pub(crate) fn extension() -> php_ext::abi::Extension {
-    let mut constants = constants::declared();
-    constants.push(INSIDE::declared());
     ExtensionBuilder::default()
         .functions(&[
             strspn::DECLARED,
@@ -800,7 +798,8 @@ pub(crate) fn extension() -> php_ext::abi::Extension {
             #[cfg(windows)]
             sapi_windows_vt100_support::DECLARED,
         ])
-        .constants(constants)
+        .constants(constants::DECLARED)
+        .constants(&[INSIDE::DECLARED])
         .class::<RoundingMode>()
         .class::<php_user_filter>()
         .class::<SplFileInfo>()

@@ -69,7 +69,7 @@ pub fn extension() -> Extension {
             phpdbg_end_oplog::DECLARED,
             phpdbg_get_executable::DECLARED,
         ])
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .fatal_logged(crate::debugger::fatal_logged)
         .compile_file(crate::list::compile_file)
         .build(crate::NAME)

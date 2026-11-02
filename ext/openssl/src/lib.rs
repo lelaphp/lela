@@ -351,7 +351,7 @@ pub fn extension() -> Extension {
             ini("openssl.capath", None),
             ini("openssl.libctx", Some("custom")),
         ])
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .class::<x509::OpenSSLCertificate>()
         .class::<csr::OpenSSLCertificateSigningRequest>()
         .class::<key::OpenSSLAsymmetricKey>()

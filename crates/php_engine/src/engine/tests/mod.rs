@@ -35,16 +35,21 @@ fn served(engine: &Engine, source: &str) -> (String, Observables) {
 /// not: what the diagnostics tests and units.rs's cached unit echo to
 /// raise php's warning.
 fn declaring_nan(builder: EngineBuilder) -> EngineBuilder {
-    let constant = |name: &str, value: f64| php_unit::decl::ConstDecl {
-        name: Name::from(name),
-        value: php_unit::decl::ConstExpr::Double(value),
-        attributes: Vec::new(),
-    };
+    use crate::api::__private::NativeConst;
+    use php_unit::decl::ConstExpr;
     builder.additional_extension(
         crate::api::abi::ExtensionBuilder::default()
-            .constants(vec![
-                constant("INF", f64::INFINITY),
-                constant("NAN", f64::NAN),
+            .constants(&[
+                NativeConst {
+                    name: b"INF",
+                    value: || ConstExpr::Double(f64::INFINITY),
+                    attributes: &[],
+                },
+                NativeConst {
+                    name: b"NAN",
+                    value: || ConstExpr::Double(f64::NAN),
+                    attributes: &[],
+                },
             ])
             .build("standard"),
     )

@@ -7,7 +7,7 @@
 use php_heap::{Fatal, Heap, Obj};
 use php_unit::decl::{
     Attribute, AttributeArgument, Bare, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
-    ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault,
+    ConstDecl, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault,
     PropertyDecl, Type, Visibility,
 };
 
@@ -139,6 +139,32 @@ pub struct NativeProperty {
     pub ty: fn() -> Option<Type>,
     pub default: Option<fn() -> ConstExpr>,
     pub attributes: &'static [fn() -> Attribute],
+}
+
+/// A constant as `#[php_const]` lays it down, php's
+/// `REGISTER_*_CONSTANT` row: its name, the function that builds its
+/// value, and its attributes'.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeConst {
+    /// The PHP name, namespace included.
+    pub name: &'static [u8],
+    pub value: fn() -> ConstExpr,
+    pub attributes: &'static [fn() -> Attribute],
+}
+
+impl NativeConst {
+    /// The declaration model of the constant.
+    pub(crate) fn declaration(&self) -> ConstDecl {
+        ConstDecl {
+            name: Name(self.name.into()),
+            value: (self.value)(),
+            attributes: self
+                .attributes
+                .iter()
+                .map(|attribute| attribute())
+                .collect(),
+        }
+    }
 }
 
 impl NativeClass {

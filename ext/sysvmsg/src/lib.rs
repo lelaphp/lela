@@ -72,7 +72,7 @@ mod constants {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .functions(&[
             msg_get_queue::DECLARED,
             msg_send::DECLARED,

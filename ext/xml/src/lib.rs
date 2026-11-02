@@ -91,7 +91,7 @@ pub fn extension() -> Extension {
             natives::xml_parser_set_option::DECLARED,
             natives::xml_parser_get_option::DECLARED,
         ])
-        .constants(natives::constants::declared())
+        .constants(natives::constants::DECLARED)
         .dependencies(vec![Dependency {
             name: String::from("libxml"),
             kind: DependencyKind::Required,

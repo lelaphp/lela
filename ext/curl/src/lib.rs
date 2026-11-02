@@ -781,7 +781,7 @@ pub(crate) mod constants {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .functions(&[
             handle::curl_close::DECLARED,
             handle::curl_copy_handle::DECLARED,

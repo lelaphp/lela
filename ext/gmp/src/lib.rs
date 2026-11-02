@@ -26,7 +26,6 @@ mod throwables;
 use php_ext::abi::{Extension, ExtensionBuilder, Instance, OrFalse, Raw, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::{Exponent, float_format, is_space, strict_types, value_name};
-use php_ext::decl::{ConstDecl, ConstExpr, Name};
 use php_ext::raising::{
     Thrown, arg_null_deprecated, argument_error, deprecated, pending, throw_error,
 };
@@ -46,25 +45,6 @@ const INT_MAX: i64 = i32::MAX as i64;
 /// `GMP_NUMB_BITS`, a limb's bits on the 64-bit targets.
 const NUMB_BITS: i64 = 64;
 
-/// The constants `register_gmp_symbols` registers but `GMP_VERSION`,
-/// which is the library's and laid in by [`constants`].
-#[php_const]
-pub(crate) mod constants {
-    pub(crate) const GMP_ROUND_ZERO: i64 = 0;
-    pub(crate) const GMP_ROUND_PLUSINF: i64 = 1;
-    pub(crate) const GMP_ROUND_MINUSINF: i64 = 2;
-    pub(crate) const GMP_MSW_FIRST: i64 = 1;
-    pub(crate) const GMP_LSW_FIRST: i64 = 2;
-    pub(crate) const GMP_LITTLE_ENDIAN: i64 = 4;
-    pub(crate) const GMP_BIG_ENDIAN: i64 = 8;
-    pub(crate) const GMP_NATIVE_ENDIAN: i64 = 16;
-}
-
-use constants::{
-    GMP_BIG_ENDIAN, GMP_LITTLE_ENDIAN, GMP_LSW_FIRST, GMP_MSW_FIRST, GMP_NATIVE_ENDIAN,
-    GMP_ROUND_MINUSINF, GMP_ROUND_PLUSINF, GMP_ROUND_ZERO,
-};
-
 /// `gmp.stub.php`'s constants in its order, `GMP_VERSION` the string
 /// the linked libgmp reports, `gmp_version`.
 ///
@@ -78,16 +58,25 @@ use constants::{
 /// int(10)
 /// int(16)
 /// ```
-fn constants() -> Vec<ConstDecl> {
-    let mut all = constants::declared();
-    let version = ConstDecl {
-        name: Name(b"GMP_VERSION".as_slice().into()),
-        value: ConstExpr::Str(ffi::version().into_bytes().into()),
-        attributes: Vec::new(),
-    };
-    all.insert(all.len().min(3), version);
-    all
+#[php_const]
+pub(crate) mod constants {
+    pub(crate) const GMP_ROUND_ZERO: i64 = 0;
+    pub(crate) const GMP_ROUND_PLUSINF: i64 = 1;
+    pub(crate) const GMP_ROUND_MINUSINF: i64 = 2;
+    fn GMP_VERSION() -> String {
+        super::ffi::version()
+    }
+    pub(crate) const GMP_MSW_FIRST: i64 = 1;
+    pub(crate) const GMP_LSW_FIRST: i64 = 2;
+    pub(crate) const GMP_LITTLE_ENDIAN: i64 = 4;
+    pub(crate) const GMP_BIG_ENDIAN: i64 = 8;
+    pub(crate) const GMP_NATIVE_ENDIAN: i64 = 16;
 }
+
+use constants::{
+    GMP_BIG_ENDIAN, GMP_LITTLE_ENDIAN, GMP_LSW_FIRST, GMP_MSW_FIRST, GMP_NATIVE_ENDIAN,
+    GMP_ROUND_MINUSINF, GMP_ROUND_PLUSINF, GMP_ROUND_ZERO,
+};
 
 /// The request's state, `zend_gmp_globals` less the scratch numbers:
 /// the random state, made on first use and cleared with the request,
@@ -110,7 +99,7 @@ struct State {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .constants(constants())
+        .constants(constants::DECLARED)
         .functions(&[
             gmp_init::DECLARED,
             gmp_import::DECLARED,

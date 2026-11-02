@@ -99,7 +99,7 @@ pub fn extension() -> Extension {
             dependency("standard", DependencyKind::Required),
             dependency("mbstring", DependencyKind::Optional),
         ])
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .functions(&[
             exif_tagname::DECLARED,
             exif_read_data::DECLARED,

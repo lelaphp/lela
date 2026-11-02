@@ -463,7 +463,7 @@ mod constants {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .functions(&[
             natives::socket_select::DECLARED,
             natives::socket_create_listen::DECLARED,

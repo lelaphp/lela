@@ -94,7 +94,7 @@ struct State {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .functions(&[
             readline::DECLARED,
             readline_info::DECLARED,

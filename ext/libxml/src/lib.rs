@@ -92,7 +92,7 @@ pub fn extension() -> Extension {
             libxml_set_external_entity_loader::DECLARED,
             libxml_get_external_entity_loader::DECLARED,
         ])
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .class::<LibXMLError>()
         .dependencies(vec![Dependency {
             name: String::from("standard"),

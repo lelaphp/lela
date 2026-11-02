@@ -151,7 +151,7 @@ pub fn extension() -> Extension {
             mhash::DECLARED,
         ])
         .class::<HashContext>()
-        .constants(natives::constants::declared())
+        .constants(natives::constants::DECLARED)
         .info(natives::info)
         .request_state::<State>()
         .engine_state(throwables::Throwables::start)

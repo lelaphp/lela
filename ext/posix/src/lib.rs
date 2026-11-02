@@ -179,7 +179,7 @@ mod constants {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .functions(&[
             posix_kill::DECLARED,
             posix_getpid::DECLARED,

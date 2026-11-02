@@ -117,7 +117,7 @@ struct State {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .functions(&[
             json_encode::DECLARED,
             json_decode::DECLARED,

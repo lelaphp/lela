@@ -49,7 +49,6 @@ use php_ext::abi::{
     Refusals,
 };
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::decl::{ConstDecl, ConstExpr, Name, Radix};
 use php_ext::raising::{Level, Thrown, argument_error, arity, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, walk};
@@ -58,10 +57,36 @@ use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, walk};
 /// its NUL, the bound `libsodium.c`'s overflow checks are written over.
 const ZSTR_MAX_LEN: usize = usize::MAX - 25;
 
-/// The constants `register_libsodium_symbols` registers but the three
-/// the linked library answers, which [`constants`] lays in first.
+/// `libsodium.stub.php`'s constants in its order, the three
+/// `SODIUM_LIBRARY_*` the linked library's own: `sodium_version_string`,
+/// `sodium_library_version_major` and `sodium_library_version_minor`.
+///
+/// ```php
+/// var_dump(SODIUM_LIBRARY_VERSION === phpversion('sodium') ? 'php' : 'lib', SODIUM_LIBRARY_MAJOR_VERSION >= 10, SODIUM_CRYPTO_BOX_KEYPAIRBYTES, SODIUM_CRYPTO_PWHASH_STRPREFIX, SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_MESSAGEBYTES_MAX);
+/// $c = get_defined_constants(true)['sodium'];
+/// var_dump(count($c), array_key_first($c), array_key_last($c));
+/// ```
+/// ```expect
+/// string(3) "lib"
+/// bool(true)
+/// int(64)
+/// string(10) "$argon2id$"
+/// int(274877906816)
+/// int(102)
+/// string(22) "SODIUM_LIBRARY_VERSION"
+/// string(53) "SODIUM_CRYPTO_CORE_RISTRETTO255_NONREDUCEDSCALARBYTES"
+/// ```
 #[php_const]
 pub(crate) mod constants {
+    fn SODIUM_LIBRARY_VERSION() -> String {
+        super::ffi::version()
+    }
+    fn SODIUM_LIBRARY_MAJOR_VERSION() -> i64 {
+        super::ffi::version_major()
+    }
+    fn SODIUM_LIBRARY_MINOR_VERSION() -> i64 {
+        super::ffi::version_minor()
+    }
     pub(crate) const SODIUM_CRYPTO_AEAD_AES256GCM_KEYBYTES: i64 = 32;
     pub(crate) const SODIUM_CRYPTO_AEAD_AES256GCM_NSECBYTES: i64 = 0;
     pub(crate) const SODIUM_CRYPTO_AEAD_AES256GCM_NPUBBYTES: i64 = 12;
@@ -174,50 +199,6 @@ pub(crate) mod constants {
     pub(crate) const SODIUM_CRYPTO_CORE_RISTRETTO255_NONREDUCEDSCALARBYTES: i64 = 64;
 }
 
-/// `libsodium.stub.php`'s constants in its order, the three
-/// `SODIUM_LIBRARY_*` the linked library's own: `sodium_version_string`,
-/// `sodium_library_version_major` and `sodium_library_version_minor`.
-///
-/// ```php
-/// var_dump(SODIUM_LIBRARY_VERSION === phpversion('sodium') ? 'php' : 'lib', SODIUM_LIBRARY_MAJOR_VERSION >= 10, SODIUM_CRYPTO_BOX_KEYPAIRBYTES, SODIUM_CRYPTO_PWHASH_STRPREFIX, SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_MESSAGEBYTES_MAX);
-/// $c = get_defined_constants(true)['sodium'];
-/// var_dump(count($c), array_key_first($c), array_key_last($c));
-/// ```
-/// ```expect
-/// string(3) "lib"
-/// bool(true)
-/// int(64)
-/// string(10) "$argon2id$"
-/// int(274877906816)
-/// int(102)
-/// string(22) "SODIUM_LIBRARY_VERSION"
-/// string(53) "SODIUM_CRYPTO_CORE_RISTRETTO255_NONREDUCEDSCALARBYTES"
-/// ```
-fn constants() -> Vec<ConstDecl> {
-    let mut all = constants::declared();
-    let long = |value: i64| ConstExpr::Long {
-        value,
-        radix: Radix::Decimal,
-    };
-    let library = [
-        (
-            &b"SODIUM_LIBRARY_VERSION"[..],
-            ConstExpr::Str(ffi::version().into_bytes().into()),
-        ),
-        (b"SODIUM_LIBRARY_MAJOR_VERSION", long(ffi::version_major())),
-        (b"SODIUM_LIBRARY_MINOR_VERSION", long(ffi::version_minor())),
-    ];
-    for (at, (name, value)) in library.into_iter().enumerate() {
-        let decl = ConstDecl {
-            name: Name(name.into()),
-            value,
-            attributes: Vec::new(),
-        };
-        all.insert(at, decl);
-    }
-    all
-}
-
 /// Core's `Exception`, named for `extends`.
 #[php_class(extern)]
 pub(crate) struct Exception;
@@ -322,7 +303,7 @@ pub fn extension() -> Extension {
             rel: None,
             version: None,
         }])
-        .constants(constants())
+        .constants(constants::DECLARED)
         .functions(&[
             aead::sodium_crypto_aead_aes256gcm_is_available::DECLARED,
             aead::sodium_crypto_aead_aes256gcm_decrypt::DECLARED,

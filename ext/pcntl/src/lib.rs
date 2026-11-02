@@ -102,7 +102,7 @@ struct State {
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
         .class::<process::QosClass>()
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .functions(&[
             process::pcntl_fork::DECLARED,
             process::pcntl_waitpid::DECLARED,

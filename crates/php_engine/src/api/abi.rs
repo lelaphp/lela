@@ -520,7 +520,7 @@ pub struct ZendExtension {
 
 pub(crate) use crate::api::__private::Entry;
 use crate::api::__private::{
-    NativeClass, NativeClassConst, NativeFunction, NativeMethod, NativeProperty,
+    NativeClass, NativeClassConst, NativeConst, NativeFunction, NativeMethod, NativeProperty,
 };
 /// Builds one extension's request state at request start.
 pub(crate) type StateBuilder = (TypeId, fn() -> Box<dyn Any + Send>);
@@ -1355,10 +1355,11 @@ impl ExtensionBuilder {
         self
     }
 
-    /// The constants.
+    /// The constants, each the static entry `#[php_const]` lays down,
+    /// declared in order as php's `register_*_symbols` registers them.
     #[must_use]
-    pub fn constants(mut self, constants: Vec<ConstDecl>) -> ExtensionBuilder {
-        self.declarations.constants.extend(constants);
+    pub fn constants(mut self, constants: &'static [NativeConst]) -> ExtensionBuilder {
+        (self.declarations.constants).extend(constants.iter().map(NativeConst::declaration));
         self
     }
 

@@ -331,7 +331,7 @@ fn limits(req: &mut Request) -> Limits {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .functions(&[
             matching::preg_match::DECLARED,
             matching::preg_match_all::DECLARED,

@@ -148,7 +148,7 @@ pub fn extension() -> Extension {
             regex::mb_ereg_search_setpos::DECLARED,
             regex::mb_regex_set_options::DECLARED,
         ])
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .ini(settings::entries())
         .dependencies(vec![Dependency {
             name: "pcre".into(),

@@ -421,7 +421,7 @@ pub fn extension() -> Extension {
             },
         ])
         .on_modify(CLEAN_OUTPUT.as_bytes(), output::on_clean_output)
-        .constants(constants::declared());
+        .constants(constants::DECLARED);
     doc::functions(builder)
         .class::<doc::class::tidy>()
         .class::<node::tidyNode>()

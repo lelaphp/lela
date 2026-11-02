@@ -144,7 +144,7 @@ pub fn extension() -> Extension {
         .on_modify(output::COMPRESSION.as_bytes(), output::on_compression)
         .on_modify(output::HANDLER.as_bytes(), output::on_handler)
         .on_update_long(output::LEVEL.as_bytes(), LongHandler::Any)
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .functions(&[
             output::ob_gzhandler::DECLARED,
             output::zlib_get_coding_type::DECLARED,

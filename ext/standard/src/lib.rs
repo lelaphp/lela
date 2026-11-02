@@ -746,30 +746,23 @@ pub fn extension() -> Extension {
         // submodules' own, `file`, `user_filters`, `password`, `dir` and
         // `user_streams`; the image handlers' after all, where
         // `php_image_register_handler` adds them.
-        .constants(
-            [
-                array::constants::declared(),
-                assert::constants::declared(),
-                basic_functions::constants::declared(),
-                url::constants::declared(),
-                math::constants::declared(),
-                crypt::constants::declared(),
-                dns::constants::declared(),
-                html::constants::declared(),
-                image::constants::declared(),
-                info::constants::declared(),
-                syslog::constants::declared(),
-                string::constants::declared(),
-                file::constants::declared(),
-                user_filters::constants::declared(),
-                password::constants::declared(),
-                dir::constants::declared(),
-                userspace::constants::declared(),
-            ]
-            .into_iter()
-            .flatten()
-            .collect(),
-        )
+        .constants(array::constants::DECLARED)
+        .constants(assert::constants::DECLARED)
+        .constants(basic_functions::constants::DECLARED)
+        .constants(url::constants::DECLARED)
+        .constants(math::constants::DECLARED)
+        .constants(crypt::constants::DECLARED)
+        .constants(dns::constants::DECLARED)
+        .constants(html::constants::DECLARED)
+        .constants(image::constants::DECLARED)
+        .constants(info::constants::DECLARED)
+        .constants(syslog::constants::DECLARED)
+        .constants(string::constants::DECLARED)
+        .constants(file::constants::DECLARED)
+        .constants(user_filters::constants::DECLARED)
+        .constants(password::constants::DECLARED)
+        .constants(dir::constants::DECLARED)
+        .constants(userspace::constants::DECLARED)
         .constants_with::<ImageHandler>(image::link_constants)
         // The classes as `PHP_MINIT(basic)` registers them.
         .class::<var::__PHP_Incomplete_Class>()

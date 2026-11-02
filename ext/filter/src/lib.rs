@@ -515,7 +515,7 @@ fn find_filter(id: i64) -> (&'static str, FilterFn) {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .functions(&[
             filter_has_var::DECLARED,
             filter_input::DECLARED,

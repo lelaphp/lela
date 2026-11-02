@@ -640,7 +640,7 @@ pub fn extension() -> Extension {
         .class::<Secure>()
         .class::<Randomizer>()
         .class::<IntervalBoundary>()
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .functions(&[
             lcg_value::DECLARED,
             mt_srand::DECLARED,

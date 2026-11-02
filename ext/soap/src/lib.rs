@@ -250,7 +250,7 @@ pub fn extension() -> Extension {
         .class::<classes::SoapHeader>()
         .class::<classes::Url>()
         .class::<classes::Sdl>()
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .interned(b"en")
         .ini(vec![
             ini_entry(ini::CACHE_ENABLED, b"1"),

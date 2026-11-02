@@ -95,7 +95,7 @@ pub(crate) mod constants {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .functions(&[
             cal_days_in_month::DECLARED,
             cal_from_jd::DECLARED,

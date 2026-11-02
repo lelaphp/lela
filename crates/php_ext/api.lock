@@ -4,6 +4,7 @@ Nop
 __private::Entry
 __private::NativeClass
 __private::NativeClassConst
+__private::NativeConst
 __private::NativeFunction
 __private::NativeMethod
 __private::NativeParameter

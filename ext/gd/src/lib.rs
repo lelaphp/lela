@@ -183,7 +183,7 @@ pub fn extension() -> Extension {
             per_dir: true,
             system: true,
         }])
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .functions(&[
             gd_info::DECLARED,
             image::imageloadfont::DECLARED,

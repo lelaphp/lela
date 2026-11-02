@@ -232,7 +232,7 @@ enum Phase {
 /// ```
 pub fn extension() -> Extension {
     let builder = ExtensionBuilder::default()
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .functions(&[
             session_name::DECLARED,
             session_module_name::DECLARED,
