@@ -508,6 +508,8 @@ impl Wire for Declares {
                 property,
                 kind,
             } => (4u8, (class, (property, kind))).put(out),
+            Declares::Constant { class, constant } => (5u8, (class, constant)).put(out),
+            Declares::Property { class, property } => (6u8, (class, property)).put(out),
         }
     }
     fn take(r: &mut Reader<'_>) -> Option<Self> {
@@ -523,6 +525,14 @@ impl Wire for Declares {
                 class: u32::take(r)?,
                 property: u32::take(r)?,
                 kind: HookKind::take(r)?,
+            },
+            5 => Declares::Constant {
+                class: u32::take(r)?,
+                constant: u32::take(r)?,
+            },
+            6 => Declares::Property {
+                class: u32::take(r)?,
+                property: u32::take(r)?,
             },
             _ => return None,
         })
@@ -862,7 +872,7 @@ abstract class A implements \Countable {
 }
 trait T { function t($o = new \stdClass) { return fn() => static::class; } }
 enum E: string { case X = 'x'; const Y = self::X; }
-class B extends A { function g(): static { return $this; } function __toString() { return ''; } }
+class B extends A { function g(): static { return $this; } function __toString() { return ''; } function __construct(public $b = 1) {} }
 $x = new class { public $q = [1, 2]; };
 try { echo "{$x->q[0]}", __LINE__, E::X->value; } finally { echo 1 <=> 2; }
 $d = []; foreach ([1, 2] as $k => $v) { if ($k < 1) { $d[$k] = $v; } echo $k, $v; }
@@ -885,6 +895,7 @@ __halt_compiler(); data"#;
         assert_eq!(encode(&decoded), Some(bytes.clone()));
         assert_eq!(decoded.dump(&[]), unit.dump(&[]));
         assert_eq!(decoded.classes, unit.classes);
+        assert_eq!(decoded.main.nested, unit.main.nested);
         assert!(
             decode(&bytes[..bytes.len() - 1], &mut strings).is_none(),
             "a short unit is none"

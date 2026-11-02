@@ -483,7 +483,7 @@ pub enum Declares {
     /// A top-level function of [`crate::Unit::functions`].
     Function(u32),
     /// A class of [`crate::Unit::classes`], its tables, before the
-    /// methods and hooks its declaration compiles.
+    /// members its declaration compiles.
     Class(u32),
     /// The method at `method` of the class at `class`, its body in
     /// [`crate::Unit::methods`].
@@ -497,6 +497,31 @@ pub enum Declares {
     },
     /// A function of [`crate::Unit::dynamic`], a closure among them.
     Dynamic(u32),
+    /// The constant or case at `constant` of the class at `class`, which
+    /// `zend_declare_typed_class_constant` and, for a case,
+    /// `zend_declare_class_constant_ex` add to `ce->constants_table`
+    /// where the member is written (`Z/Zend/zend_compile.c:9053`,
+    /// `:9507`), after the closures its value declares.
+    Constant { class: u32, constant: u32 },
+    /// The property at `property` of the class at `class`, which
+    /// `zend_declare_typed_property` adds to `ce->properties_info`, with
+    /// its default slot, where the member is written (`:8967`), before
+    /// its hooks: a promoted one's among its constructor's parameters
+    /// (`:7985`), an enum's `name` and `value` as its declaration begins
+    /// (`zend_enum_register_props`, `:9348`).
+    Property { class: u32, property: u32 },
+}
+
+impl Declares {
+    /// Whether it declares an op array: a function, a method, a hook or
+    /// a dynamic definition, and not a class or one of its members.
+    #[must_use]
+    pub const fn is_body(self) -> bool {
+        !matches!(
+            self,
+            Declares::Class(_) | Declares::Constant { .. } | Declares::Property { .. }
+        )
+    }
 }
 
 /// How many oplines, constants, variables, `dynamic_func_defs` and

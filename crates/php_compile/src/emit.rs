@@ -4722,11 +4722,12 @@ impl<'a> Emit<'a> {
                     return Err(self.internal("a promoted property of a class the unit has not"));
                 }
             };
+        let (class_at, place) = self.property_began(at, declared_properties);
         let (hooks, is_virtual) = match &parameter.hooks {
             Some(hooks) => {
                 let hooked = hooks::Hooked {
-                    class: u32::try_from(at).unwrap_or(u32::MAX),
-                    property: u32::try_from(declared_properties).unwrap_or(u32::MAX),
+                    class: class_at,
+                    property: place,
                     class_name: &class_name,
                     kind,
                     name: &parameter.name,
@@ -5974,6 +5975,25 @@ impl<'a> Emit<'a> {
         self.nested.push(Nested { declares, grown });
     }
 
+    /// `decl` at `at` in the unit's classes, an enum's `name` and `value`
+    /// declared as its body begins (`zend_enum_register_props`).
+    fn class_pushed(&mut self, at: usize, decl: ClassDecl) {
+        for property in 0..decl.properties.len() {
+            self.property_began(at, property);
+        }
+        self.classes.push(decl);
+    }
+
+    /// The property at `property` of the class at `class` declared at
+    /// this place ([`Declares::Property`]), the two as the unit numbers
+    /// them.
+    fn property_began(&mut self, class: usize, property: usize) -> (u32, u32) {
+        let index = |at: usize| u32::try_from(at).unwrap_or(u32::MAX);
+        let (class, property) = (index(class), index(property));
+        self.began(Declares::Property { class, property });
+        (class, property)
+    }
+
     /// `zend_oparray_context_end`: the enclosing op array's state back
     /// on the emitter.
     fn end_body(&mut self, saved: Saved) {
@@ -6412,7 +6432,7 @@ impl<'a> Emit<'a> {
         // The class takes its place `at` in the unit before its body, so
         // a class a member declares, `new class {}` in a method or a
         // hook, takes the next place.
-        self.classes.push(decl);
+        self.class_pushed(at, decl);
         if anonymous {
             self.runtime_keys.push((
                 Name(name.to_ascii_lowercase().into_boxed_slice()),
@@ -7025,6 +7045,11 @@ impl<'a> Emit<'a> {
                 String::from_utf8_lossy(&constant.name)
             )));
         }
+        let declared = self.classes.get(at).map_or(0, |decl| decl.constants.len());
+        self.began(Declares::Constant {
+            class: u32::try_from(at).unwrap_or(u32::MAX),
+            constant: u32::try_from(declared).unwrap_or(u32::MAX),
+        });
         let attributes = self.case_attributes(constant)?;
         let Some(decl) = self.classes.get_mut(at) else {
             return Err(self.internal("a constant of a class the unit has not"));
@@ -7678,10 +7703,9 @@ impl<'a> Emit<'a> {
             String::from_utf8_lossy(&property.name)
         );
         self.active_property = Some(property.name.clone());
-        let ty = match property.ty {
-            Some(written) => Some(self.property_type(written, &member)?),
-            None => None,
-        };
+        let ty = (property.ty)
+            .map(|written| self.property_type(written, &member))
+            .transpose()?;
         if (self.classes.get(at))
             .is_some_and(|decl| decl.properties.iter().any(|p| *p.name.0 == *property.name))
         {
@@ -7707,11 +7731,12 @@ impl<'a> Emit<'a> {
             ty.is_some(),
             &member,
         )?;
+        let (class_at, place) = self.property_began(at, declared_before);
         let (hooks, is_virtual) = match &property.hooks {
             Some(hooks) => {
                 let hooked = hooks::Hooked {
-                    class: u32::try_from(at).unwrap_or(u32::MAX),
-                    property: u32::try_from(declared_before).unwrap_or(u32::MAX),
+                    class: class_at,
+                    property: place,
                     class_name: name,
                     kind,
                     name: &property.name,

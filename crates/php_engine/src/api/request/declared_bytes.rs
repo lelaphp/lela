@@ -1484,11 +1484,75 @@ impl AstCopy {
 /// ```
 ///
 /// The rows of the `bodies` methods with a body are left to the walk,
-/// which lays each as its method begins ([`Walk::method`]).
+/// which lays each as its method begins ([`Walk::method`]), and its
+/// constants and properties, each where it is written ([`Walk::member`]).
 fn class(req: &mut Request, class: &ClassDecl, bodies: usize) -> Result<ClassBlocks, Thrown> {
-    let mut compiled = Compiled::of(class);
-    compiled.written.methods = compiled.written.methods.saturating_sub(bodies);
+    let mut compiled = Compiled::default();
+    compiled.written.methods = php_unit::written_methods(class)
+        .len()
+        .saturating_sub(bodies);
     ClassBlocks::laid(req, |req, blocks| lay_class(req, blocks, class, compiled))
+}
+
+/// The constant at `at` of `class` as `zend_compile_class_const_decl`
+/// declares it: its expression copied out of the compile's arena
+/// (`zend_const_expr_to_zval`'s `zend_ast_copy`, `:9044`), a case's
+/// `ZEND_AST_CONST_ENUM_INIT` (`:9498`) and a constant's tree where the
+/// compile left one, which a value written out is not; its row; its
+/// attributes.
+fn constant(
+    req: &mut Request,
+    blocks: &mut ClassBlocks,
+    class: &ClassDecl,
+    at: usize,
+) -> Result<(), Thrown> {
+    let Some(constant) = class.constants.get(at) else {
+        return Ok(());
+    };
+    let copy = if constant.is_case {
+        Some(AstCopy::of_case(&constant.value))
+    } else {
+        (!super::linking::is_literal(&constant.value)).then(|| AstCopy::of(&constant.value))
+    };
+    if let Some(copy) = copy {
+        let copied = Copied::lay(req, CopyOf::Constant(at), &copy)?;
+        blocks.copies.push(copied);
+    }
+    add_rows(req, blocks.table(Table::Constants), 1)?;
+    let held = constant.attributes.iter();
+    attributes(req, &mut blocks.emalloced, held, false)
+}
+
+/// The property at `at` of `class` as `zend_compile_prop_decl` and
+/// `zend_compile_params` declare it: its default's tree copied where the
+/// compile left one (`:8920`); its slot of `default_properties_table`
+/// or `default_static_members_table`, one `perealloc` more, but for a
+/// virtual one; its row; its attributes.
+fn property(
+    req: &mut Request,
+    blocks: &mut ClassBlocks,
+    class: &ClassDecl,
+    at: usize,
+) -> Result<(), Thrown> {
+    let Some(property) = class.properties.get(at) else {
+        return Ok(());
+    };
+    let (of, slots) = if property.is_instance {
+        (CopyOf::Default(at), &mut blocks.defaults)
+    } else {
+        (CopyOf::Static(at), &mut blocks.statics)
+    };
+    if let Some(default) = (property.default.as_ref()).filter(|d| !super::linking::is_literal(d)) {
+        blocks
+            .copies
+            .push(Copied::lay(req, of, &AstCopy::of(default))?);
+    }
+    if !property.is_virtual {
+        slots.grow(req, 1)?;
+    }
+    add_rows(req, blocks.table(Table::Properties), 1)?;
+    let held = property.attributes.iter();
+    attributes(req, &mut blocks.emalloced, held, property.is_promoted)
 }
 
 /// `zend_lazy_class_load`'s copy of a class of a file the cache keeps,
@@ -1538,7 +1602,7 @@ fn lazy_copy(req: &mut Request, compiled: Compiled) -> Result<ClassBlocks, Throw
 /// What a class's compile fills its tables with: the rows its
 /// declarations write, an enum's `cases`, `from` and `tryFrom` being its
 /// link's, and the slots of its default tables.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct Compiled {
     written: Members,
     slots: SlotCounts,
@@ -1601,48 +1665,8 @@ fn lay_class(
     compiled: Compiled,
 ) -> Result<(), Thrown> {
     lay_tables(req, blocks, compiled)?;
-    // `ce->attributes`, and each property's and constant's own.
+    // `ce->attributes`.
     attributes(req, &mut blocks.emalloced, class.attributes.iter(), false)?;
-    let properties = class
-        .properties
-        .iter()
-        .map(|p| (&p.attributes, p.is_promoted));
-    let constants = class.constants.iter().map(|c| (&c.attributes, false));
-    for (held, again) in properties.chain(constants) {
-        attributes(req, &mut blocks.emalloced, held.iter(), again)?;
-    }
-    // Each constant expression, copied out of the compile's arena as its
-    // constant's or its property's value (`zend_const_expr_to_zval`'s
-    // `zend_ast_copy`, from `zend_compile_class_const_decl` and
-    // `zend_compile_prop_decl`): a case's `ZEND_AST_CONST_ENUM_INIT`, and
-    // a constant's or a default's tree where the compile left one, which
-    // a value written out is not.
-    for (at, constant) in class.constants.iter().enumerate() {
-        let copy = if constant.is_case {
-            AstCopy::of_case(&constant.value)
-        } else if super::linking::is_literal(&constant.value) {
-            continue;
-        } else {
-            AstCopy::of(&constant.value)
-        };
-        blocks
-            .copies
-            .push(Copied::lay(req, CopyOf::Constant(at), &copy)?);
-    }
-    for (at, property) in class.properties.iter().enumerate() {
-        let Some(default) = (property.default.as_ref()).filter(|d| !super::linking::is_literal(d))
-        else {
-            continue;
-        };
-        let of = if property.is_instance {
-            CopyOf::Default(at)
-        } else {
-            CopyOf::Static(at)
-        };
-        blocks
-            .copies
-            .push(Copied::lay(req, of, &AstCopy::of(default))?);
-    }
     // `zend_compile_use_trait`'s `trait_names`, a `zend_class_name` a
     // trait, reallocated a `use` at a time; the names themselves are the
     // unit's strings ([`Request::hold_unit_names`]).
@@ -2222,7 +2246,7 @@ fn held(
     main: &OpArray,
     scanned: &ScannerHeap,
 ) -> Vec<(u32, php_heap::Uncounted)> {
-    let body = |nested: &&php_unit::Nested| !matches!(nested.declares, Declares::Class(_));
+    let body = |nested: &&php_unit::Nested| nested.declares.is_body();
     let Some(from) = main
         .nested
         .iter()
@@ -2362,6 +2386,11 @@ fn in_order(
                 .iter()
                 .map(|h| (h.class, h.property, hook_key(h.kind))),
         ),
+        members: places(unit.classes.iter().zip(0..).flat_map(|(class, at)| {
+            let count = |members: usize| 0..u32::try_from(members).unwrap_or(u32::MAX);
+            (count(class.constants.len()).map(move |c| (at, c, 0)))
+                .chain(count(class.properties.len()).map(move |p| (at, p, 1)))
+        })),
         dynamic: vec![false; unit.dynamic.len()],
         hook_names: std::mem::take(hook_names),
         keys: main.is_some().then(Vec::new),
@@ -2409,6 +2438,8 @@ struct Walk<'u> {
     functions: Vec<bool>,
     methods: Places,
     hooks: Places,
+    /// The classes' constants, keyed 0, and properties, keyed 1.
+    members: Places,
     dynamic: Vec<bool>,
     /// The strings of the names written for the unit's hooks, where the
     /// request compiled it, one given back as each hook has compiled.
@@ -2494,6 +2525,14 @@ impl Walk<'_> {
                     }
                 }
                 Declares::Dynamic(at) => self.dynamic(req, at as usize, stood)?,
+                Declares::Constant {
+                    class,
+                    constant: at,
+                } => self.member(req, (class, at, 0), stood)?,
+                Declares::Property {
+                    class,
+                    property: at,
+                } => self.member(req, (class, at, 1), stood)?,
             }
         }
         Ok(())
@@ -2516,6 +2555,10 @@ impl Walk<'_> {
             if let Some(at) = unreached(&mut self.hooks, place) {
                 self.hook(req, at, None)?;
             }
+        }
+        let members: Vec<_> = self.members.iter().map(|(key, _, _)| *key).collect();
+        for key in members {
+            self.member(req, key, None)?;
         }
         for at in 0..self.unit.dynamic.len() {
             self.dynamic(req, at, None)?;
@@ -2740,6 +2783,58 @@ impl Walk<'_> {
             name.free(req);
         }
         made
+    }
+
+    /// The constant, keyed 0, or the property, keyed 1, at `at` of the
+    /// class at `class`, once, as php declares it where it is written, the
+    /// declarer grown to where it `stood`: its class's `constants_table`
+    /// and `properties_info` are laid at their first row
+    /// (`zend_initialize_class_data`, `Z/Zend/zend_compile.c:2050`, lays
+    /// neither's data), so a method written before them compiles without
+    /// them. A constant's, a case's and a property's place, written after
+    /// a method and before it, and an enum's:
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3907-' . getmypid() . '.php';
+    /// foreach (['class C { const K = 1; public $p = 1; function m() {} } ', 'class C { function m() {} const K = 1; public $p = 1; } ', 'class C { function m() {} public static $s = 1; } ', 'enum E { function m() {} case A; const K = self::A; } ', 'enum E { case A; const K = 1; function m() {} } '] as $code) {
+    ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
+    ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
+    ///     [$usage, $peak] = explode(' ', trim($fresh));
+    ///     echo $peak - $usage, "\n";
+    /// }
+    /// unlink($f);
+    /// ```
+    /// ```expect process
+    /// 37392
+    /// 36736
+    /// 37056
+    /// 36776
+    /// 37272
+    /// ```
+    fn member(
+        &mut self,
+        req: &mut Request,
+        (class, at, table): (u32, u32, u8),
+        stood: Option<(&mut Growing, Grown)>,
+    ) -> Result<(), Thrown> {
+        if reach(&mut self.members, (class, at, table)).is_none() {
+            return Ok(());
+        }
+        if let Some((declarer, grown)) = stood {
+            declarer.to(req, grown)?;
+        }
+        self.class(req, class as usize)?;
+        let unit = self.unit;
+        let (Some(decl), Some(Some(blocks))) = (
+            unit.classes.get(class as usize),
+            self.laid.classes.get_mut(class as usize),
+        ) else {
+            return Ok(());
+        };
+        match table {
+            0 => constant(req, blocks, decl, at as usize),
+            _ => property(req, blocks, decl, at as usize),
+        }
     }
 
     /// One op array laid into `holder`: [`init_op_array`], the op array

@@ -674,3 +674,23 @@ env = { SCRIPT_FILENAME = "{dir}/b.php" }
 [[line.then]]
 args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/c.php" }
+
+# A class's constants' and properties' tables of such a program, each laid
+# at its first row (#3907): `zend_initialize_class_data` lays neither's
+# data, and `zend_declare_typed_class_constant` and
+# `zend_declare_typed_property` lay `ce->constants_table` and
+# `ce->properties_info`, and the default slot, where the member is
+# written, so a method written above them compiles, its `pass_two` among
+# it, without them standing. The second program writes them first, the
+# third an enum's case and constant after a method.
+[[line]]
+name = "an-uncached-class-lays-its-constants-and-properties-where-written"
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/a.php" }
+files = { "a.php" = "<?php class C { function m() {} const K = 1; public $p = 1; } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "b.php" = "<?php class C { const K = 1; public $p = 1; function m() {} } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "c.php" = "<?php enum E { function m() {} case A; const K = self::A; } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/b.php" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/c.php" }

@@ -6,6 +6,7 @@ BoundVar
 CacheSlot
 ConstIdx
 Declares
+Declares::is_body
 Diagnostic
 Effects
 Effects::ALLOC
