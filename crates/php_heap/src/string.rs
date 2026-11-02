@@ -1230,6 +1230,8 @@ pub struct Pending {
     slots: HashMap<u64, Vec<PendingString>>,
     /// Each constant array beside the claims on it that stand.
     arrays: Vec<(Arr, u32)>,
+    /// How many strings the set has made, the next one's place.
+    made: u64,
 }
 
 /// One string a compile made and the asks it answered that were not
@@ -1238,6 +1240,9 @@ pub struct Pending {
 struct PendingString {
     s: Str,
     asks: u32,
+    /// Its place among the strings the set made, which the table takes
+    /// them in ([`Strings::publish`]).
+    at: u64,
     /// Whether the compile named a class by it ([`Pending::class_name`]).
     class_name: bool,
 }
@@ -1258,8 +1263,10 @@ impl Pending {
         chain.push(PendingString {
             s,
             asks: 1,
+            at: self.made,
             class_name: false,
         });
+        self.made += 1;
         Ok(s)
     }
 
@@ -1358,11 +1365,14 @@ impl Pending {
         self.slots.values().map(Vec::len).sum()
     }
 
-    /// Every string, taken out of the set, beside whether it names a
-    /// class.
+    /// Every string, taken out of the set in the order it made them,
+    /// beside whether it names a class, so a unit's strings take the same
+    /// class caches whichever way the set's chains are hashed.
     fn take_strings(&mut self) -> Vec<(Str, bool)> {
         let slots = std::mem::take(&mut self.slots);
-        (slots.into_values().flatten())
+        let mut held: Vec<PendingString> = slots.into_values().flatten().collect();
+        held.sort_unstable_by_key(|held| held.at);
+        (held.into_iter())
             .map(|held| (held.s, held.class_name))
             .collect()
     }
