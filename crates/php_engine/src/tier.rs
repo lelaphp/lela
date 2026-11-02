@@ -1508,7 +1508,7 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     let Some((function, start)) = req
                         .vm()
                         .at(callee)
-                        .and_then(|header| Some((header.function?, header.opline)))
+                        .and_then(|header| Some((header.function()?, header.opline)))
                     else {
                         break stepped;
                     };
@@ -1847,7 +1847,7 @@ pub fn call_native(req: &mut Request, call: FrameRef) -> Result<Zval, Fatal> {
         .vm()
         .at(call)
         .filter(|header| header.info.serving_native())
-        .and_then(|header| header.function)
+        .and_then(crate::exec::Header::function)
         .ok_or_else(|| Fatal::error("InternalError: compiled code served no native's call"))?;
     match req.serve_native(function, OnThrow::Nothing) {
         Ok(value) => Ok(value.to_zval()),

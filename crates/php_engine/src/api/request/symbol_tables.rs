@@ -331,7 +331,7 @@ impl Request {
         let annex = self.annexes.get(header.annex()?)?;
         let table = annex.symbol_table?;
         // A file's frame has its unit in the annex read already.
-        let (unit, body) = match (header.function, &annex.unit) {
+        let (unit, body) = match (header.function(), &annex.unit) {
             (None, Some(unit)) => (unit, exec::Body::Main),
             _ => self.unit_of(header)?,
         };

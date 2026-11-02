@@ -217,7 +217,7 @@ impl<'u> Scope<'u> {
             return None;
         }
         let header = req.vm().at(frame)?;
-        if header.function.is_some()
+        if header.function().is_some()
             || !req
                 .unit_of(header)
                 .is_some_and(|(served, _)| PublishedUnit::ptr_eq(served, unit))
@@ -322,14 +322,14 @@ impl Units {
         // A file's frame whose unit the request compiled for itself: an
         // `eval`'s, or a file no cache keeps. A function's unit is held by
         // the function table as long as the request is.
-        if header.function.is_none() && req.took_unit(unit) {
+        if header.function().is_none() && req.took_unit(unit) {
             let unit = PublishedUnit::clone(unit);
             return match req.stack_nested(FIRST_SCOPE_CHARGE, SCOPE_ROOM) {
                 Some(moved) => Some(Entered::Took(unit, moved)),
                 None => self.enter_held(kept, frame, &unit, (body, None), true),
             };
         }
-        self.enter_held(kept, frame, unit, (body, header.function), false)
+        self.enter_held(kept, frame, unit, (body, header.function()), false)
     }
 
     /// `frame`, serving `body` of `unit`, entered with its unit held

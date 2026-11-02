@@ -136,7 +136,7 @@ pub fn building(req: &Request) -> Option<Building> {
 /// native that declares none or returns by reference.
 #[must_use]
 pub fn native_returns(req: &Request, call: FrameRef) -> Option<php_unit::decl::Type> {
-    let function = req.vm().stack.frame(call)?.header().function?;
+    let function = req.vm().stack.frame(call)?.header().function()?;
     if req.user_function(function).is_some() {
         return None;
     }
@@ -181,7 +181,7 @@ pub fn under_way(req: &Request, frame: FrameRef) -> Vec<Building> {
 fn building_at(req: &Request, call: FrameRef) -> Option<Building> {
     let header = req.vm().stack.frame(call)?.header();
     let target = header
-        .function
+        .function()
         .and_then(|function| req.user_function(function))
         .and_then(|user| crate::exec::body_of(&user.unit, user.body))
         .map(|code| FuncRef::at(code.runtime_cache));

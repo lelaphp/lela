@@ -238,7 +238,7 @@ impl Request {
         }
         let callee = self.callee_at(function);
         if let Some(frame) = self.vm.stack.frame_mut(call) {
-            frame.header_mut().function = Some(function);
+            frame.header_mut().set_function(Some(function));
             frame.header_mut().callee = callee;
             frame.header_mut().num_args = u32::try_from(arguments.len()).unwrap_or(u32::MAX);
             frame.header_mut().info.unlay_entry();
@@ -512,7 +512,7 @@ impl Request {
         let Some(state) = self.vm.at(frame) else {
             return Vec::new();
         };
-        let Some(function) = state.function else {
+        let Some(function) = state.function() else {
             return Vec::new();
         };
         if state.closure().is_none() {

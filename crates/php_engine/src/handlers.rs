@@ -1973,14 +1973,15 @@ fn primed_call(req: &Request, function: Function, count: u32) -> Cached {
     };
     let shape = user.shape;
     let enters = shape.sent.plain_entry() && count <= shape.parameters;
-    let laid = enters && req.cache_laid(shape.cache);
+    let base = req.cache_base(shape.cache).filter(|_| enters);
+    let laid = base.is_some();
     // The words an entry not laid leaves as `Header::call` writes them,
     // so its push lays what a push in place copies.
-    let (cache, opline) = if laid {
+    let (cache, base, opline) = if let Some(base) = base {
         let skipped = exec::skipped_recv(count, shape.parameters, shape.typed, shape.entry);
-        (shape.cache, skipped.unwrap_or(0))
+        (shape.cache, base, skipped.unwrap_or(0))
     } else {
-        (exec::CacheAt::default(), 0)
+        (exec::CacheAt::default(), exec::CacheBase::NONE, 0)
     };
     Cached::Call(exec::PrimedCall {
         function,
@@ -1988,6 +1989,7 @@ fn primed_call(req: &Request, function: Function, count: u32) -> Cached {
         callee: user.callee_at(),
         sent: shape.sent.with_laid_entry(laid),
         cache,
+        base,
         opline,
     })
 }
@@ -2179,7 +2181,7 @@ fn inline_send(
         );
         return sent_into(from.slots_mut(), call.slots_mut().get_mut(to)?, code, op, a);
     }
-    let (info, num_args, function) = (header.info, header.num_args, header.function);
+    let (info, num_args, function) = (header.info, header.num_args, header.function());
     if !info.building() || to >= num_args as usize {
         return None;
     }
@@ -2372,7 +2374,7 @@ fn bound_at(req: &mut Request, at: php_heap::ZvalRef) -> Result<Value, Thrown> {
 fn send_mode(req: &Request, number: u32) -> (bool, bool) {
     match req.vm().building() {
         Some(call) if !call.info.sends_by_value(number) => {
-            call.function.map_or((false, false), |function| {
+            call.function().map_or((false, false), |function| {
                 req.arg_send_mode(function, number)
             })
         }
@@ -4530,7 +4532,7 @@ fn verified_arg(
     raw: &Value,
 ) -> Result<Option<Value>, Thrown> {
     let argument = &raw.deref();
-    let function = req.vm().at(frame).and_then(|state| state.function);
+    let function = req.vm().at(frame).and_then(crate::exec::Header::function);
     let Some(ty) = function
         .and_then(|function| req.symbols().function_decl(function))
         .and_then(|decl| decl.parameters.get(at))
@@ -4659,7 +4661,7 @@ pub(crate) fn recv_variadic<T: Tier>(
     let untyped = req
         .vm()
         .at(frame)
-        .and_then(|state| state.function)
+        .and_then(crate::exec::Header::function)
         .and_then(|function| req.symbols().function_decl(function))
         .and_then(|decl| decl.parameters.get(at))
         .is_none_or(|parameter| parameter.ty.is_none());
@@ -5122,7 +5124,7 @@ fn return_mask_missed(
 /// declares a return type: the type, borrowed where the request holds
 /// it, and whether the function returns by reference.
 fn declared_return(req: &Request, frame: FrameRef) -> Option<(&php_unit::decl::Type, bool)> {
-    let function = req.vm().at(frame)?.function?;
+    let function = req.vm().at(frame)?.function()?;
     let decl = req.symbols().function_decl(function)?;
     Some((decl.return_type.as_ref()?, decl.returns_by_ref))
 }
@@ -5441,7 +5443,7 @@ fn arg_type_error(
     ty: &php_unit::decl::Type,
     argument: &Value,
 ) -> Thrown {
-    let function = req.vm().at(frame).and_then(|state| state.function);
+    let function = req.vm().at(frame).and_then(crate::exec::Header::function);
     // `get_active_function_or_method_name`, which `%s` prints up to the
     // NUL an anonymous class's name holds: its class alone.
     let name = function.map_or_else(Vec::new, |function| match req.method_class(function) {
@@ -5513,7 +5515,7 @@ fn call_site(req: &Request, frame: FrameRef) -> Option<(String, u32)> {
 /// name whatever user frame happens to stand below the native, which
 /// is a call site the program never wrote.
 fn missing_argument(req: &mut Request, frame: FrameRef, passed: u32) -> Thrown {
-    let function = req.vm().at(frame).and_then(|state| state.function);
+    let function = req.vm().at(frame).and_then(crate::exec::Header::function);
     let name = req.frame_function_name(frame);
     let parameters: Vec<bool> = function
         .and_then(|function| req.symbols().function_decl(function))
@@ -6350,7 +6352,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
     let scope = req
         .vm()
         .at(frame)
-        .and_then(|state| state.function)
+        .and_then(crate::exec::Header::function)
         .and_then(|function| req.method_class(function));
     let Some(parent) = scope.and_then(|scope| req.symbols().class_parent(scope)) else {
         let thrown = crate::api::raising::throw_error(
