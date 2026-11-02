@@ -30,7 +30,7 @@ use crate::api::values::{ClassId, Owner, PhpObject, PhpString, TypeTag, Value};
 
 mod caches;
 
-pub(crate) use caches::{CacheAt, RuntimeCaches, op_arrays_mut};
+pub(crate) use caches::{CacheAt, CacheBase, RuntimeCaches, op_arrays_mut};
 
 /// The VM stack a request or a fiber runs on, its frames' headers the
 /// engine's ([`php_heap::VmStack`]).
@@ -266,6 +266,24 @@ impl ReturnSlot {
 /// class at `u32::MAX`, so every class has a non-zero inversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ScopeAt(std::num::NonZeroU32);
+
+/// `EX(func)` in the header's half-word: none, or the function one more
+/// than its number, as [`ReturnSlot`] is, so the `Option` costs nothing
+/// and the half-word it saves holds [`Header::cache_base`]. A request's
+/// functions are numbered far below `u32::MAX`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FunctionAt(Option<std::num::NonZeroU32>);
+
+impl FunctionAt {
+    fn of(function: Option<Function>) -> FunctionAt {
+        FunctionAt(function.map(|function| std::num::NonZeroU32::MIN.saturating_add(function.0)))
+    }
+
+    #[inline(always)]
+    fn function(self) -> Option<Function> {
+        self.0.map(|at| Function(at.get() - 1))
+    }
+}
 
 impl ScopeAt {
     fn of(scope: Option<ClassId>) -> Option<ScopeAt> {
@@ -542,8 +560,15 @@ pub(crate) struct Header {
     pub(crate) info: CallInfo,
     /// `EX(func)`: the linked function the frame serves; none for an
     /// included, evaluated or main file's op array, which is no
-    /// function and whose unit the frame's [`Annex`] holds.
-    pub(crate) function: Option<Function>,
+    /// function and whose unit the frame's [`Annex`] holds
+    /// ([`Header::function`]).
+    function: FunctionAt,
+    /// `EX(run_time_cache)` as php's frame holds it, the pointer the
+    /// activation read off the map pointer: where the cache of
+    /// [`Header::runtime_cache`] stands in the request's slab, which
+    /// `CACHED_PTR` reads off with no lookup ([`RuntimeCaches::slot`]);
+    /// [`CacheBase::NONE`] until the frame is activated.
+    cache_base: CacheBase,
     /// `ZEND_CALL_NUM_ARGS`: how many arguments the call that pushed the
     /// frame placed, which the `RECV*` prologue reads.
     pub(crate) num_args: u32,
@@ -557,14 +582,14 @@ pub(crate) struct Header {
     /// The called scope, `static`; none for the main op array or a
     /// function ([`Header::called_scope`]).
     called_scope: Option<ScopeAt>,
-    /// `EX(run_time_cache)`: where the op array's runtime cache stands
-    /// in the request's map table (design §5.6), read off the op array
-    /// as `RUN_TIME_CACHE(op_array)` reads it when the frame is
-    /// activated. The frame holds the pointer and never the cache: the
-    /// cache is the request's, laid down on the op array's first
-    /// activation ([`init_runtime_cache`]) and kept until request end, so
-    /// a function called twice reads on its second call what its first
-    /// primed.
+    /// `ZEND_MAP_PTR(op_array->run_time_cache)`: which entry of the
+    /// request's map table the op array's runtime cache is (design
+    /// §5.6), what names the cache, its observer slot and, to the
+    /// compiled tier, the op array. The frame holds the pointer and never
+    /// the cache: the cache is the request's, laid down on the op array's
+    /// first activation ([`init_runtime_cache`]) and kept until request
+    /// end, so a function called twice reads on its second call what its
+    /// first primed; where it stands is [`Header::cache_base`].
     run_time_cache: CacheAt,
     /// What the frame owns beyond words, where it owns anything. Written
     /// with [`CallInfo::ANNEX`] beside it ([`Header::set_annex`]).
@@ -586,7 +611,7 @@ impl Header {
     pub(crate) fn of(function: Option<Function>, code: &OpArray) -> Header {
         Header {
             callee: crate::readable::CalleeAt::default(),
-            function,
+            function: FunctionAt::of(function),
             this: None,
             closure: None,
             called_scope: None,
@@ -596,6 +621,7 @@ impl Header {
             opline: 0,
             num_args: 0,
             run_time_cache: CacheAt::of(code.runtime_cache),
+            cache_base: CacheBase::NONE,
             annex: None,
             info: CallInfo::default(),
         }
@@ -608,7 +634,7 @@ impl Header {
     pub(crate) fn fake() -> Header {
         Header {
             callee: crate::readable::CalleeAt::default(),
-            function: None,
+            function: FunctionAt::of(None),
             this: None,
             closure: None,
             called_scope: None,
@@ -618,6 +644,7 @@ impl Header {
             opline: 0,
             num_args: 0,
             run_time_cache: CacheAt::default(),
+            cache_base: CacheBase::NONE,
             annex: None,
             info: CallInfo::default(),
         }
@@ -631,7 +658,7 @@ impl Header {
         info.set(CallInfo::CALL | CallInfo::BUILDING, true);
         Header {
             callee: crate::readable::CalleeAt::default(),
-            function: Some(function),
+            function: FunctionAt::of(Some(function)),
             this: None,
             closure: None,
             called_scope: None,
@@ -641,16 +668,25 @@ impl Header {
             opline: 0,
             num_args: count,
             run_time_cache: CacheAt::default(),
+            cache_base: CacheBase::NONE,
             annex: None,
             info,
         }
     }
 
     /// A call made a user frame over `code`, `i_init_func_execute_data`:
-    /// the opline it stands at, the runtime cache it reads, and whether
+    /// the opline it stands at, the runtime cache it reads and where that
+    /// stands, read once here as php reads `RUN_TIME_CACHE(op_array)` into
+    /// `EX(run_time_cache)` (`Z/Zend/zend_execute.c:4446`), and whether
     /// it was passed arguments past its parameters.
-    pub(crate) fn activate(&mut self, run_time_cache: CacheAt, opline: u32, extra_args: bool) {
+    pub(crate) fn activate(
+        &mut self,
+        (run_time_cache, cache_base): (CacheAt, CacheBase),
+        opline: u32,
+        extra_args: bool,
+    ) {
         self.run_time_cache = run_time_cache;
+        self.cache_base = cache_base;
         self.opline = opline;
         self.info.set(
             CallInfo::CALL | CallInfo::BUILDING | CallInfo::LAID_ENTRY,
@@ -670,6 +706,7 @@ impl Header {
         header.callee = call.callee;
         header.info.join(call.sent);
         header.run_time_cache = call.cache;
+        header.cache_base = call.base;
         header.opline = call.opline;
         header
     }
@@ -743,9 +780,36 @@ impl Header {
         self.this
     }
 
-    /// `EX(run_time_cache)`.
+    /// `ZEND_MAP_PTR(op_array->run_time_cache)`: which cache the frame
+    /// reads.
     pub(crate) fn runtime_cache(&self) -> CacheAt {
         self.run_time_cache
+    }
+
+    /// `EX(run_time_cache)`: where the cache the frame reads stands,
+    /// which the activation read once.
+    #[inline(always)]
+    pub(crate) fn cache_base(&self) -> CacheBase {
+        self.cache_base
+    }
+
+    /// The base a push writes, the activation reading it again: a
+    /// file's frame, whose cache is laid as it is pushed
+    /// ([`init_runtime_cache`]), and a call whose callee's cache its
+    /// `INIT` laid or found laid, which the header compiled code copies
+    /// for the call holds too (`tier::call_image`).
+    pub(crate) fn set_cache_base(&mut self, base: CacheBase) {
+        self.cache_base = base;
+    }
+
+    /// `EX(func)`: the linked function the frame serves.
+    #[inline(always)]
+    pub(crate) fn function(&self) -> Option<Function> {
+        self.function.function()
+    }
+
+    pub(crate) fn set_function(&mut self, function: Option<Function>) {
+        self.function = FunctionAt::of(function);
     }
 
     /// `EX(prev_execute_data)` as far as a diagnostic reads it.
@@ -1390,7 +1454,7 @@ impl<'a> FrameAt<'a> {
     }
 
     pub(crate) fn function(self) -> Option<Function> {
-        self.header().function
+        self.header().function()
     }
 
     pub(crate) fn this(self) -> Option<PhpObject> {
@@ -1593,7 +1657,8 @@ impl FramelessCall {
 /// `cache_size`, every one [`Cached::Unprimed`] when laid down
 /// (`memset(run_time_cache, 0, cache_size)`) and kept until request
 /// end. The engine's slot is an enum where php's is a word, so the
-/// storage is the engine's and not the heap's; the table it stands in
+/// storage is the engine's and not the heap's: the slots stand in the
+/// request's slab ([`caches::Place`]), and the table this entry stands in
 /// is the heap's. Beside the slots stands the op array's observer slot
 /// (design §4.3 seam 9), php's `ZEND_OBSERVER_DATA` at the
 /// `zend_observer_fcall_op_array_extension` offset of the same cache,
@@ -1606,7 +1671,11 @@ impl FramelessCall {
 /// own, given back with the closure ([`RuntimeCache::room`]).
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeCache {
-    slots: Option<Box<[Cached]>>,
+    /// `RUN_TIME_CACHE(op_array)` not `NULL`: the cache was laid down.
+    laid: bool,
+    /// Where the slab carved the cache's slots, kept when the cache is
+    /// emptied, so the next lay over this entry lays over them.
+    place: Option<caches::Place>,
     /// A closure's own cache's `emalloc(cache_size)`
     /// (`zend_create_closure_ex`, `Z/Zend/zend_closures.c:813`), taken as
     /// the closure is made and given back with it; none for a cache the
@@ -1622,57 +1691,22 @@ pub(crate) struct RuntimeCache {
 }
 
 impl RuntimeCache {
-    /// `zend_arena_alloc(&CG(arena), cache_size)` and the `memset` after
-    /// it: `cache_size / sizeof(void *)` slots, all `Unprimed`, and the
-    /// observer slot unresolved, over whatever stood here.
-    fn lay_down(&mut self, cache_size: u32) {
-        let slots = usize::try_from(cache_size / SLOT_BYTES).unwrap_or(0);
-        self.slots = Some(vec![Cached::Unprimed; slots].into_boxed_slice());
+    /// Laid down over the slots at `place`, which the slab cleared or
+    /// carved, the observer slot unresolved.
+    fn lay(&mut self, place: Option<caches::Place>) {
+        self.laid = true;
+        self.place = place;
         self.observer = crate::observer::Slot::Unresolved;
     }
 
-    /// `CACHED_PTR(num)`: what the slot at `slot`, a byte offset as the
-    /// opline carries it, holds. A slot past `cache_size`, or a cache not
-    /// laid down, reads `Unprimed`, so a kernel over it looks the table
-    /// up every pass, which is the reading a program that was never
-    /// given the slot would have had; php's would be a read past the
-    /// allocation.
-    #[inline]
-    pub(crate) fn get(&self, slot: CacheSlot) -> Cached {
-        self.slot(slot).copied().unwrap_or_default()
-    }
-
-    /// The slot at `slot` as it stands, read in place: what
-    /// [`RuntimeCache::get`] copies out, none where it reads `Unprimed`
-    /// for want of a slot. A handler that reads a few fields of a wide
-    /// variant reads them here, off the slot, where the copy would make
-    /// it whole on the stack first.
-    #[inline]
-    pub(crate) fn slot(&self, slot: CacheSlot) -> Option<&Cached> {
-        self.slots
-            .as_ref()
-            .and_then(|slots| slots.get((slot.0 / SLOT_BYTES) as usize))
-    }
-
-    /// Where the slot at `slot` stands, which compiled code reads in
-    /// place (`tier::touch`): none for a cache not laid down and a slot
-    /// past it. The slots stand where they were laid until the cache is
-    /// laid again or given back, which a function's never is while the
-    /// request runs.
-    pub(crate) fn place_of(&self, slot: CacheSlot) -> Option<std::ptr::NonNull<Cached>> {
-        self.slot(slot).map(std::ptr::NonNull::from)
-    }
-
-    /// `CACHE_PTR(num, ptr)`: `value` into the slot at `slot`, where
-    /// every pass after reads it. A slot past `cache_size` takes nothing.
-    fn set(&mut self, slot: CacheSlot, value: Cached) {
-        if let Some(cell) = self
-            .slots
-            .as_mut()
-            .and_then(|slots| slots.get_mut((slot.0 / SLOT_BYTES) as usize))
-        {
-            *cell = value;
-        }
+    /// Emptied, as php frees a heap cache with its op array: not laid,
+    /// what was kept beside the slots gone, and the room a closure's own
+    /// took handed back; the slots' place kept for the next lay.
+    fn empty(&mut self) -> Option<php_heap::Block> {
+        let place = self.place;
+        let emptied = std::mem::take(self);
+        self.place = place;
+        emptied.room
     }
 }
 
@@ -1686,7 +1720,9 @@ pub(crate) fn observer_slot_of(
     map: &mut RuntimeCaches,
     ptr: CacheAt,
 ) -> Option<&mut crate::observer::Slot> {
-    map.get(ptr)?.slots.as_ref()?;
+    if !map.laid(ptr) {
+        return None;
+    }
     Some(&mut map.map(ptr).observer)
 }
 
@@ -1734,18 +1770,19 @@ pub(crate) fn observer_slot_of(
 /// does not, so [`Cached::ClassAndCallee`] carries the scope it was
 /// resolved from and answers no other.
 ///
-/// The `Err` is the memory limit's fatal, where the arena had not the
-/// room for a function's cache, and nothing is laid down.
+/// What the activation reads into `EX(run_time_cache)` is where the
+/// cache stands ([`CacheBase`]). The `Err` is the memory limit's fatal,
+/// where the arena had not the room for a function's cache, and nothing
+/// is laid down.
 pub(crate) fn init_runtime_cache(
     map: &mut RuntimeCaches,
     heap: &mut php_heap::Heap,
     code: &OpArray,
     body: Body,
-) -> Result<(), Fatal> {
+) -> Result<CacheBase, Fatal> {
     let at = CacheAt::of(code.runtime_cache);
     if body == Body::Main {
-        map.map(at).lay_down(code.cache_size);
-        return Ok(());
+        return Ok(map.lay_down(at, code.cache_size));
     }
     lay_runtime_cache(map, heap, at, CacheSize::of(code))
 }
@@ -1805,16 +1842,18 @@ impl CacheSize {
 /// 8189 65536
 /// ```
 ///
-/// The `Err` is the memory limit's fatal, with nothing laid down.
+/// What it answers is where the cache stands, laid or found laid, which
+/// an activation reads into `EX(run_time_cache)` ([`CacheBase`]). The
+/// `Err` is the memory limit's fatal, with nothing laid down.
 #[inline]
 pub(crate) fn lay_runtime_cache(
     map: &mut RuntimeCaches,
     heap: &mut php_heap::Heap,
     at: CacheAt,
     size: CacheSize,
-) -> Result<(), Fatal> {
-    if map.laid(at) {
-        return Ok(());
+) -> Result<CacheBase, Fatal> {
+    if let Some(base) = map.base(at) {
+        return Ok(base);
     }
     lay_down_cache(map, heap, at, size)
 }
@@ -1827,19 +1866,16 @@ fn lay_down_cache(
     heap: &mut php_heap::Heap,
     at: CacheAt,
     size: CacheSize,
-) -> Result<(), Fatal> {
+) -> Result<CacheBase, Fatal> {
     heap.carve(size.room as usize)?;
-    map.map(at).lay_down(size.slots);
-    Ok(())
+    Ok(map.lay_down(at, size.slots))
 }
 
 /// A closure's own cache laid down at its first call: its slots, the
 /// room php's `emalloc` takes having been taken as the closure was made
 /// ([`RuntimeCache::room`]).
-pub(crate) fn lay_own_cache(map: &mut RuntimeCaches, at: CacheAt, cache_size: u32) {
-    if !map.laid(at) {
-        map.map(at).lay_down(cache_size);
-    }
+pub(crate) fn lay_own_cache(map: &mut RuntimeCaches, at: CacheAt, cache_size: u32) -> CacheBase {
+    map.base(at).unwrap_or_else(|| map.lay_down(at, cache_size))
 }
 
 /// One `FAST_CALL`'s temporary while the `finally` block it entered
@@ -2031,6 +2067,9 @@ pub(crate) struct PrimedCall {
     pub(crate) callee: crate::readable::CalleeAt,
     pub(crate) sent: CallInfo,
     pub(crate) cache: CacheAt,
+    /// Where `cache` stands in the request, which the activation writes
+    /// ([`Header::cache_base`]).
+    pub(crate) base: CacheBase,
     pub(crate) opline: u32,
 }
 
@@ -2785,8 +2824,9 @@ impl Vm {
     }
 
     /// `CACHED_PTR(num)`: what the runtime cache of the op array `frame`
-    /// serves holds at `slot`, read off the request's map table
-    /// (`EX(run_time_cache)`, [`RuntimeCache::get`]).
+    /// serves holds at `slot`, read off `EX(run_time_cache)`, the base
+    /// the frame's activation read ([`RuntimeCaches::slot`]); `Unprimed`
+    /// for a frame not on the stack or with no cache.
     #[inline]
     pub(crate) fn cached(&self, map: &RuntimeCaches, frame: FrameRef, slot: CacheSlot) -> Cached {
         self.cached_in_place(map, frame, slot)
@@ -2794,7 +2834,21 @@ impl Vm {
             .unwrap_or_default()
     }
 
-    /// [`Vm::cached`] read in place ([`RuntimeCache::slot`]).
+    /// [`Vm::cached`] read in place: one read off the frame's
+    /// `EX(run_time_cache)` ([`RuntimeCaches::slot`]), as php's
+    /// `CACHED_PTR` is two loads, with no lookup of the map pointer.
+    ///
+    /// The base is resolved once per activation, so every frame of a
+    /// function reads the one cache, and a second call reads what the
+    /// first primed, a recursive one included:
+    ///
+    /// ```php
+    /// function f($n) { return $n ? strlen("ab") + f($n - 1) : 0; }
+    /// echo f(3), " ", f(2), "\n";
+    /// ```
+    /// ```expect
+    /// 6 4
+    /// ```
     #[inline]
     pub(crate) fn cached_in_place<'m>(
         &self,
@@ -2802,12 +2856,12 @@ impl Vm {
         frame: FrameRef,
         slot: CacheSlot,
     ) -> Option<&'m Cached> {
-        map.get(self.at(frame)?.runtime_cache())?.slot(slot)
+        map.slot(self.at(frame)?.cache_base(), slot)
     }
 
     /// `CACHE_PTR(num, ptr)`: `value` into the runtime cache of the op
-    /// array `frame` serves at `slot`, in the request's map table
-    /// ([`RuntimeCache::set`]).
+    /// array `frame` serves at `slot`, off its `EX(run_time_cache)`
+    /// ([`RuntimeCaches::set_slot`]).
     pub(crate) fn prime(
         &self,
         map: &mut RuntimeCaches,
@@ -2816,7 +2870,7 @@ impl Vm {
         value: Cached,
     ) {
         if let Some(header) = self.at(frame) {
-            map.map(header.runtime_cache()).set(slot, value);
+            map.set_slot(header.cache_base(), slot, value);
         }
     }
 
@@ -4229,7 +4283,9 @@ mod tests {
     use php_heap::FrameRef;
     use php_unit::{CacheSlot, MapPtrOffset, OpArray, PublishedUnit, Unit};
 
-    use super::{Body, CacheAt, Cached, RuntimeCaches, code_of, init_runtime_cache};
+    use super::{
+        Body, CacheAt, CacheBase, Cached, RuntimeCaches, SLOT_BYTES, code_of, init_runtime_cache,
+    };
     use crate::api::call::Function;
     use crate::api::request::Request;
     use crate::engine::{Engine, RequestDescription};
@@ -4304,24 +4360,38 @@ mod tests {
             assert!(init_runtime_cache(&mut map, &mut heap, code, Body::Function(0)).is_ok());
         }
         let ptr = CacheAt::of(code.runtime_cache);
-        let laid = map.get(ptr).and_then(|cache| cache.slots.as_ref());
-        assert_eq!(
-            laid.map(|slots| slots.len()),
-            Some(1),
+        let base = map.base(ptr).unwrap_or(CacheBase::NONE);
+        assert_ne!(base, CacheBase::NONE, "laid down");
+        assert!(map.place_of(ptr, CacheSlot(0)).is_some());
+        assert!(
+            map.place_of(ptr, CacheSlot(SLOT_BYTES)).is_none(),
             "one slot of eight bytes"
         );
-        map.map(ptr).set(CacheSlot(0), Cached::Miss);
-        assert!(init_runtime_cache(&mut map, &mut heap, code, Body::Function(0)).is_ok());
+        map.set_slot(base, CacheSlot(0), Cached::Miss);
         assert_eq!(
-            map.get(ptr).map(|cache| cache.get(CacheSlot(0))),
+            init_runtime_cache(&mut map, &mut heap, code, Body::Function(0)).ok(),
+            Some(base),
+            "the second activation finds the first's cache where it stands"
+        );
+        assert_eq!(
+            map.slot(base, CacheSlot(0)).copied(),
             Some(Cached::Miss),
             "the second activation finds the first's slot"
         );
-        assert!(init_runtime_cache(&mut map, &mut heap, code, Body::Main).is_ok());
         assert_eq!(
-            map.get(ptr).map(|cache| cache.get(CacheSlot(0))),
+            init_runtime_cache(&mut map, &mut heap, code, Body::Main).ok(),
+            Some(base),
+            "the main op array's activation lays over the same slots"
+        );
+        assert_eq!(
+            map.slot(base, CacheSlot(0)).copied(),
             Some(Cached::Unprimed),
             "the main op array's activation lays a fresh one down"
+        );
+        assert_eq!(
+            map.slot(CacheBase::NONE, CacheSlot(0)),
+            None,
+            "a frame with no cache reads nothing"
         );
 
         assert_eq!(
@@ -4373,11 +4443,10 @@ mod tests {
             [MapPtrOffset::Request(0), MapPtrOffset::Request(1)]
         );
         let mut heap = php_heap::Heap::new();
-        assert!(
-            init_runtime_cache(&mut caches, &mut heap, code_of(&first), Body::Function(0)).is_ok()
-        );
+        let base = init_runtime_cache(&mut caches, &mut heap, code_of(&first), Body::Function(0));
+        let base = base.unwrap_or(CacheBase::NONE);
         let at = CacheAt::of(first.main.runtime_cache);
-        caches.map(at).set(CacheSlot(0), Cached::Hit);
+        caches.set_slot(base, CacheSlot(0), Cached::Hit);
         let second = taken(&mut caches);
         assert_eq!(
             numbers(&second),
@@ -4395,9 +4464,25 @@ mod tests {
             [MapPtrOffset::Request(0), MapPtrOffset::Request(1)],
             "the numbers of a unit nothing holds are handed out again"
         );
-        assert!(
-            caches.get(at).is_some_and(|cache| cache.slots.is_none()),
-            "over a cache emptied"
+        assert!(!caches.laid(at), "over a cache emptied");
+        assert_eq!(
+            caches.slot(base, CacheSlot(0)).copied(),
+            Some(Cached::Hit),
+            "whose slots stand until a lay clears them"
+        );
+        let took = std::iter::once(&third.main)
+            .chain(third.functions.iter().map(|(_, code)| code))
+            .find(|code| CacheAt::of(code.runtime_cache) == at);
+        let relaid = took.map(|code| init_runtime_cache(&mut caches, &mut heap, code, Body::Main));
+        assert_eq!(
+            relaid.and_then(Result::ok),
+            Some(base),
+            "the next lay over the number lays over its slots, carving none anew"
+        );
+        assert_eq!(
+            caches.slot(base, CacheSlot(0)).copied(),
+            Some(Cached::Unprimed),
+            "every one of them unprimed"
         );
     }
 }

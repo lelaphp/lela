@@ -250,7 +250,7 @@ impl Request {
     /// function's through the function table, which holds the unit, a
     /// file's through the frame's [`exec::Annex`].
     pub(crate) fn unit_of(&self, header: &exec::Header) -> Option<(&PublishedUnit, exec::Body)> {
-        if let Some(function) = header.function {
+        if let Some(function) = header.function() {
             let user = self.user_function(function)?;
             Some((&user.unit, user.body))
         } else {
@@ -696,7 +696,8 @@ impl Request {
                 (Some(caller), scope, table)
             }
         };
-        exec::init_runtime_cache(&mut self.map, &mut self.heap, code, exec::Body::Main)?;
+        let base = exec::init_runtime_cache(&mut self.map, &mut self.heap, code, exec::Body::Main)?;
+        header.set_cache_base(base);
         let statics = Some(self.file_statics(&unit));
         let annex = self.annexes.insert(exec::Annex {
             unit: Some(unit),
@@ -807,7 +808,7 @@ impl Request {
         let code_frame = self
             .vm
             .at(frame)
-            .filter(|state| state.function.is_none())
+            .filter(|state| state.function().is_none())
             .map(|state| state.caller().frame());
         if code_frame.is_some() {
             self.detach_symbol_table(frame);
@@ -982,7 +983,7 @@ impl Request {
         };
         let held = gives != Gives::Nothing;
         debug_assert!(
-            header.function.is_some()
+            header.function().is_some()
                 && header.annex().is_none()
                 && held == (header.this().is_some() || header.closure().is_some()),
             "a frame's flags disagree with its header at a plain leave"
@@ -1185,7 +1186,7 @@ impl Request {
     /// `EX(func)`: the function `frame` serves, `None` for an included,
     /// evaluated or main file's op array, which is no function.
     pub(crate) fn frame_function(&self, frame: FrameRef) -> Option<Function> {
-        self.vm.at(frame).and_then(|state| state.function)
+        self.vm.at(frame).and_then(crate::exec::Header::function)
     }
 
     /// `CACHED_PTR(num)`: what the runtime cache of the op array `frame`
@@ -1225,11 +1226,9 @@ impl Request {
         let Some(state) = self.frame_at(frame) else {
             return exec::Cached::Unprimed;
         };
-        let header = state.header();
-        let cached = self
-            .map
-            .get(header.runtime_cache())
-            .map_or(exec::Cached::Unprimed, |cache| cache.get(slot));
+        let cached = (self.map.slot(state.header().cache_base(), slot))
+            .copied()
+            .unwrap_or_default();
         let Some(primed) = cached.primed_from() else {
             return cached;
         };
@@ -1248,7 +1247,7 @@ impl Request {
         let header = state.header();
         primed.function.is_some()
             && header.closure().is_none()
-            && header.function == primed.function
+            && header.function() == primed.function
             || primed.scope == self.scope_of(state)
     }
 
@@ -1275,7 +1274,7 @@ impl Request {
                 .vm
                 .at(frame)
                 .filter(|header| header.closure().is_none())
-                .and_then(|header| header.function),
+                .and_then(crate::exec::Header::function),
             scope: self.frame_scope(frame),
         }
     }
@@ -1297,21 +1296,21 @@ impl Request {
         class: Option<crate::api::values::ClassId>,
     ) -> Option<exec::MethodCallee> {
         let state = self.frame_at(frame)?;
-        let cache = self.map.get(state.header().runtime_cache())?;
+        let base = state.header().cache_base();
         let &exec::Cached::ClassAndCallee {
             class: held,
             primed,
             function,
             instance,
             ..
-        } = cache.slot(slot)?
+        } = self.map.slot(base, slot)?
         else {
             return None;
         };
         if class.is_some_and(|class| class != held) || !self.reads_back(state, primed) {
             return None;
         }
-        let push = match cache.slot(exec::callee_slot(slot)) {
+        let push = match self.map.slot(base, exec::callee_slot(slot)) {
             Some(&exec::Cached::Call(call)) if call.function == function => Some(call),
             _ => None,
         };
@@ -1365,13 +1364,13 @@ impl Request {
             function,
             scope,
             offset,
-        }) = self.map.get(header.runtime_cache())?.get(slot)
+        }) = self.map.slot(header.cache_base(), slot).copied()?
         else {
             return None;
         };
         let same = held == class
             && !self.fakes_scope()
-            && (function.is_some() && header.closure().is_none() && header.function == function
+            && (function.is_some() && header.closure().is_none() && header.function() == function
                 || self.frame_scope(frame) == scope);
         same.then_some(offset)
     }
@@ -1412,7 +1411,7 @@ impl Request {
         let Some(header) = self.vm.at(frame) else {
             return;
         };
-        let function = header.function.filter(|_| header.closure().is_none());
+        let function = header.function().filter(|_| header.closure().is_none());
         let scope = self.frame_scope(frame);
         if self.property_scope() != scope {
             return;
@@ -1529,14 +1528,19 @@ impl Request {
     /// ```
     #[inline(always)] // the push of every INIT's slow path, its header moved, not copied
     pub(crate) fn push_call(&mut self, header: exec::Header) -> Result<FrameRef, Fatal> {
-        let Some((room, header)) = self.laid_call(header) else {
+        let Some((room, mut header)) = self.laid_call(header) else {
             return Err(Fatal::error("InternalError: a call pushed with no callee"));
         };
         if header.info.building()
             && header.closure().is_none()
-            && let Some(function) = header.function
+            && let Some(function) = header.function()
+            && let Some(base) = self.init_func_run_time_cache(function)?
         {
-            self.init_func_run_time_cache(function)?;
+            // Where the cache it laid or found stands, which the call's
+            // activation reads again, written with the push, so the
+            // header compiled code copies for the same call is this one
+            // (`tier::call_image`).
+            header.set_cache_base(base);
         }
         self.push_room(room, header)
     }
@@ -1548,7 +1552,7 @@ impl Request {
     /// Compiled code that pushes the same call in place copies this header
     /// (`tier::call_image`).
     pub(crate) fn laid_call(&self, mut header: exec::Header) -> Option<(usize, exec::Header)> {
-        let function = header.function?;
+        let function = header.function()?;
         let (room, callee, sent) = self.call_room(function, header.num_args);
         header.callee = callee;
         header.info.join(sent);
@@ -1675,7 +1679,7 @@ impl Request {
     #[cold]
     #[inline(never)]
     fn lay_callee(&mut self, header: &mut exec::Header) {
-        if let Some(function) = header.function {
+        if let Some(function) = header.function() {
             header.callee = self.callee_at(function);
         }
     }
@@ -1725,7 +1729,7 @@ impl Request {
     /// The [`FrameShape`](crate::api::request::FrameShape) of the user
     /// function `call` names; none for a call to anything else.
     pub(crate) fn call_shape(&self, call: FrameRef) -> Option<crate::api::request::FrameShape> {
-        Some(self.user_function(self.vm.at(call)?.function?)?.shape)
+        Some(self.user_function(self.vm.at(call)?.function()?)?.shape)
     }
 
     /// The innermost user frame of the running stack ([`Vm::innermost_at`]).
@@ -1769,7 +1773,7 @@ impl Request {
     /// The callee of the call being built, which a `SEND_*_EX` reads the
     /// parameter's by-reference bit off (`ARG_MUST_BE_SENT_BY_REF`).
     pub(crate) fn building_call_function(&self) -> Option<Function> {
-        self.vm.building()?.function
+        self.vm.building()?.function()
     }
 
     /// The call being served where it is a native's ([`Vm::serving_at`]):
@@ -1793,7 +1797,7 @@ impl Request {
         let header = self.vm.at_mut(call)?;
         header.info.set_serving();
         header.info.set_return_used(return_used);
-        Some((call, header.function?))
+        Some((call, header.function()?))
     }
 
     /// `DO_UCALL`, and `DO_FCALL` or `DO_FCALL_BY_NAME` where `flagged`,
@@ -1883,7 +1887,7 @@ impl Request {
                 laid_entry_holds(
                     header,
                     top.len(),
-                    user_in(user_functions, arena, header.function?),
+                    user_in(user_functions, arena, header.function()?),
                     map
                 ),
                 "a call whose INIT laid its entry no longer holds what the activation would write"
@@ -1905,16 +1909,17 @@ impl Request {
         if !header.info.plain_entry() {
             return self.enter_flagged(returns_to, (caller, at), flagged);
         }
-        let function = header.function?;
+        let function = header.function()?;
         let passed = header.num_args;
         let shape = user_in(user_functions, arena, function)?.shape;
         // The `INIT` found the entry plain ([`exec::CallInfo::plain_entry`]):
         // the function's own cache, and no attribute to raise.
         let cache = shape.cache;
-        if passed > shape.parameters || top.len() < shape.slots as usize || !map.laid(cache) {
+        let base = map.base(cache)?;
+        if passed > shape.parameters || top.len() < shape.slots as usize {
             return None;
         }
-        entered_words((top, from), (caller, at), returns_to, shape, cache);
+        entered_words((top, from), (caller, at), returns_to, shape, (cache, base));
         Some(self.entered_top())
     }
 
@@ -1944,7 +1949,7 @@ impl Request {
     ) -> Option<FrameRef> {
         let (call, top) = self.vm.stack.top()?;
         let header = top.header();
-        let function = header.function?;
+        let function = header.function()?;
         let passed = header.num_args;
         let len = top.len();
         let user = self.user_function(function)?;
@@ -1955,11 +1960,12 @@ impl Request {
         let cache = self
             .closure_own_cache(header.closure())
             .unwrap_or(shape.cache);
-        if passed > shape.parameters || len < shape.slots as usize || !self.map.laid(cache) {
+        let base = self.map.base(cache)?;
+        if passed > shape.parameters || len < shape.slots as usize {
             return None;
         }
         let frames = self.vm.stack.top_and_frame_mut(caller)?;
-        entered_words(frames, (caller, at), returns_to, shape, cache);
+        entered_words(frames, (caller, at), returns_to, shape, (cache, base));
         crate::observer::call(self, call);
         Some(call)
     }
@@ -2008,9 +2014,17 @@ impl Request {
                 .stack
                 .grow_top(&mut self.heap, call, own + extra - len)?;
         }
+        // The cache laid before the header reads where it stands, as
+        // `zend_init_func_execute_data` lays it before
+        // `i_init_func_execute_data` reads it.
+        let base = if own_cache {
+            exec::lay_own_cache(&mut self.map, cache, shape.cache_size.slots)
+        } else {
+            exec::lay_runtime_cache(&mut self.map, &mut self.heap, cache, shape.cache_size)?
+        };
         if let Some(frame) = self.vm.stack.frame_mut(call) {
             let laid = frame.header_mut();
-            laid.activate(cache, opline, extra > 0);
+            laid.activate((cache, base), opline, extra > 0);
             laid.set_returns_to(returns_to);
             laid.set_caller(caller);
             let slots = frame.slots_mut();
@@ -2020,11 +2034,6 @@ impl Request {
                     left.fill(Zval::UNDEF);
                 }
             }
-        }
-        if own_cache {
-            exec::lay_own_cache(&mut self.map, cache, shape.cache_size.slots);
-        } else {
-            exec::lay_runtime_cache(&mut self.map, &mut self.heap, cache, shape.cache_size)?;
         }
         crate::observer::call(self, call);
         Ok(exec::Activated {
@@ -2105,7 +2114,7 @@ impl Request {
         // one, as `zend_leave_helper` destroys it; a top-level file's once
         // `zend_execute` has returned.
         let top = header.info.top_code();
-        let statics = (header.function.is_none())
+        let statics = (header.function().is_none())
             .then(|| self.leaving_statics(header.annex()))
             .flatten();
         if let Some(of) = statics.filter(|_| !top) {
@@ -2121,7 +2130,7 @@ impl Request {
         let receiver = header.receiver();
         header.set_receiver(None);
         let closure = header.take_closure();
-        let (function, annex, num_args) = (header.function, header.annex(), header.num_args);
+        let (function, annex, num_args) = (header.function(), header.annex(), header.num_args);
         if !self.bailout {
             self.release_frame(frame, function, annex, num_args, receiver, closure);
         }
@@ -2746,12 +2755,20 @@ impl Request {
         self.map.laid(at)
     }
 
+    /// `RUN_TIME_CACHE(op_array)` as an activation reads it: where the
+    /// cache at `at` stands, none where it is not laid down
+    /// ([`exec::RuntimeCaches::base`]).
+    pub(crate) fn cache_base(&self, at: exec::CacheAt) -> Option<exec::CacheBase> {
+        self.map.base(at)
+    }
+
     /// `init_func_run_time_cache` (`Z/Zend/zend_execute.c:4452`): the
     /// runtime cache of `function`, where it is a user function, laid
     /// down where the request has not yet ([`exec::lay_runtime_cache`]),
     /// as php lays it at the `INIT_*` that pushes its call and at the
-    /// lookup of it by name (`zend_fetch_function`). The `Err` is the
-    /// memory limit's fatal, with nothing laid down.
+    /// lookup of it by name (`zend_fetch_function`): where the cache
+    /// stands, none for a native. The `Err` is the memory limit's fatal,
+    /// with nothing laid down.
     ///
     /// So a closure made over a function before its first call shares
     /// its cache, by `g(...)`, `Closure::fromCallable`, a reflector and
@@ -2814,11 +2831,15 @@ impl Request {
     /// 384 384 384 384 384
     /// ```
     #[inline(always)] // every INIT's push: the function's shape, then whether its cache is laid
-    pub(crate) fn init_func_run_time_cache(&mut self, function: Function) -> Result<(), Fatal> {
+    pub(crate) fn init_func_run_time_cache(
+        &mut self,
+        function: Function,
+    ) -> Result<Option<exec::CacheBase>, Fatal> {
         let Some(shape) = self.user_function(function).map(|user| user.shape) else {
-            return Ok(());
+            return Ok(None);
         };
         exec::lay_runtime_cache(&mut self.map, &mut self.heap, shape.cache, shape.cache_size)
+            .map(Some)
     }
 
     /// `zend_fetch_function` (`Z/Zend/zend_execute.c:4468`): the function
@@ -2842,7 +2863,7 @@ impl Request {
         at: exec::CacheAt,
         slot: CacheSlot,
     ) -> Option<std::ptr::NonNull<exec::Cached>> {
-        self.map.get(at).and_then(|cache| cache.place_of(slot))
+        self.map.place_of(at, slot)
     }
 
     /// The scope the cache at `at` was laid down for by the first closure
@@ -2899,7 +2920,7 @@ fn laid_entry_holds(
     shape.sent.plain_entry()
         && header.num_args <= shape.parameters
         && len >= shape.slots as usize
-        && map.laid(shape.cache)
+        && map.base(shape.cache) == Some(header.cache_base())
         && header.runtime_cache() == shape.cache
         && header.opline == opline.unwrap_or(0)
 }
@@ -2918,7 +2939,7 @@ fn entered_words(
     (caller, at): (FrameRef, u32),
     returns_to: Option<u32>,
     shape: super::FrameShape,
-    cache: exec::CacheAt,
+    cache: (exec::CacheAt, exec::CacheBase),
 ) {
     from.header_mut().opline = at;
     let laid = top.header_mut();

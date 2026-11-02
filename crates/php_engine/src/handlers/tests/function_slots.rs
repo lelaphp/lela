@@ -238,7 +238,7 @@ fn called_twice(mut req: Box<Request>, unit: &PublishedUnit) {
 /// given up.
 fn popped_callee(req: &mut Request) -> Option<Function> {
     let call = req.building_call()?;
-    let callee = req.vm().at(call)?.function;
+    let callee = req.vm().at(call)?.function();
     req.pop_call();
     callee
 }

@@ -808,7 +808,7 @@ pub(crate) fn handle_undef_args(req: &mut Request, call: FrameRef) -> Result<(),
     let Some(header) = req.vm().at(call) else {
         return Ok(());
     };
-    let (Some(function), building) = (header.function, header.info.building()) else {
+    let (Some(function), building) = (header.function(), header.info.building()) else {
         return Ok(());
     };
     // `start_fake_frame`: the call current while its defaults are found.

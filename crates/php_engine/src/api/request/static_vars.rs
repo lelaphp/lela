@@ -115,7 +115,7 @@ impl Request {
         {
             return StaticsAt::Closure(object);
         }
-        match state.function {
+        match state.function() {
             Some(function) => StaticsAt::Table(Statics::Function(function)),
             None => StaticsAt::Table(file(state.annex())),
         }
