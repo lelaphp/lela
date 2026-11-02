@@ -80,13 +80,30 @@ const TO_FREE: usize = 168;
 /// `sizeof(uint32_t)`, what `ch->clone` points at.
 const CLONE: usize = 4;
 
+/// `sizeof(zend_llist_element) + sizeof(void *) - 1`, what
+/// `zend_llist_add_element` `emalloc`s for one pointer held in
+/// `to_free->post` or `to_free->stream`.
+const ELEMENT: usize = 31;
+
+/// `sizeof(struct mime_data_cb_arg)`, a file part's callback argument.
+const CB_ARG: usize = 16;
+
 /// What `init_curl_handle` `emalloc`s for the shares of one [`ToFree`]
-/// to point at, `ch->to_free` and `ch->clone`, on the request's heap so
-/// that `memory_get_usage()` counts them as php's does, and given back
-/// by the last share.
+/// to point at, `ch->to_free` and `ch->clone`, and what the lists in
+/// `to_free` lay down as they are filled, on the request's heap so that
+/// `memory_get_usage()` counts them as php's does, and given back by the
+/// last share.
 pub(super) struct Counted {
     to_free: Emalloc,
     clone: Emalloc,
+    /// `to_free->slist`'s data, [`Table::bytes`] of it, laid by its
+    /// first insert.
+    slist: Option<Emalloc>,
+    /// `to_free->post`'s elements, one per tree held.
+    post: Vec<Emalloc>,
+    /// `to_free->stream`'s: each file part's `mime_data_cb_arg` and its
+    /// element, freed with the last share whatever became of the tree.
+    stream: Vec<Emalloc>,
 }
 
 impl Counted {
@@ -94,7 +111,13 @@ impl Counted {
     fn new(req: &mut Request) -> Result<Counted, Thrown> {
         let to_free = Emalloc::new(req, TO_FREE)?;
         match Emalloc::new(req, CLONE) {
-            Ok(clone) => Ok(Counted { to_free, clone }),
+            Ok(clone) => Ok(Counted {
+                to_free,
+                clone,
+                slist: None,
+                post: Vec::new(),
+                stream: Vec::new(),
+            }),
             Err(thrown) => {
                 to_free.free(req);
                 Err(thrown)
@@ -102,10 +125,175 @@ impl Counted {
         }
     }
 
-    /// `efree(ch->to_free)` and `efree(ch->clone)`.
+    /// The table's data laid at `table` bytes, as a growth `emalloc`s
+    /// the new and frees the old, and one element per tree of `trees`,
+    /// as `zend_llist_clean` and `zend_llist_add_element` leave them; the
+    /// `Err` is the memory limit's fatal.
+    fn settle(&mut self, req: &mut Request, table: usize, trees: usize) -> Result<(), Thrown> {
+        if table != self.slist.as_ref().map_or(0, Emalloc::len) {
+            let laid = Emalloc::new(req, table)?;
+            if let Some(old) = self.slist.replace(laid) {
+                old.free(req);
+            }
+        }
+        while self.post.len() > trees {
+            if let Some(element) = self.post.pop() {
+                element.free(req);
+            }
+        }
+        while self.post.len() < trees {
+            self.post.push(Emalloc::new(req, ELEMENT)?);
+        }
+        Ok(())
+    }
+
+    /// `curl_free_obj`'s `zend_llist_clean`s and `zend_hash_destroy`,
+    /// then `efree(ch->to_free)` and `efree(ch->clone)`.
     pub(super) fn free(self, req: &mut Request) {
+        for block in self.post.into_iter().chain(self.stream).chain(self.slist) {
+            block.free(req);
+        }
         self.to_free.free(req);
         self.clone.free(req);
+    }
+}
+
+/// `to_free->slist`, the `HashTable` `zend_hash_init(…, 4, …)` lays out
+/// at eight slots: each list keyed by its option where one `CURL *`
+/// holds a share (`zend_hash_index_update_ptr`), by the next index
+/// otherwise (`zend_hash_next_index_insert_ptr`), and nothing ever
+/// deleted. Its shape is php's, as `_zend_hash_index_add_or_update_i`
+/// grows it, for the bytes its data takes ([`Table::bytes`]): packed
+/// where its first key is below eight, a copy's, and keyed by hash
+/// otherwise, doubled as it fills, a packed one turned to hash by the
+/// first option set where one `CURL *` holds a share.
+///
+/// ```php
+/// $c = curl_init();
+/// $d = curl_copy_handle($c);
+/// for ($i = 1; $i <= 40; $i++) {
+///     $b = memory_get_usage(); curl_setopt($i % 2 ? $c : $d, CURLOPT_HTTPHEADER, ["X: $i"]); $n = memory_get_usage() - $b;
+///     if ($n) echo "set $i ", $n, "\n";
+/// }
+/// $b = memory_get_usage(); unset($d); echo "unset d ", memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); curl_setopt($c, CURLOPT_PROXYHEADER, ['P: 1']); echo "alone ", memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); unset($c); echo "unset c ", memory_get_usage() - $b, "\n";
+/// $e = curl_init();
+/// foreach ([CURLOPT_HTTPHEADER, CURLOPT_QUOTE, CURLOPT_POSTQUOTE, CURLOPT_PREQUOTE, CURLOPT_HTTP200ALIASES, CURLOPT_MAIL_RCPT, CURLOPT_RESOLVE, CURLOPT_PROXYHEADER, CURLOPT_CONNECT_TO] as $k => $o) {
+///     $b = memory_get_usage(); curl_setopt($e, $o, ['x:1']); $n = memory_get_usage() - $b;
+///     if ($n) echo "option $k ", $n, "\n";
+/// }
+/// $b = memory_get_usage(); unset($e); echo "unset e ", memory_get_usage() - $b, "\n";
+/// ```
+/// ```expect
+/// set 1 160
+/// set 9 160
+/// set 17 320
+/// set 33 640
+/// unset d -1040
+/// alone 1280
+/// unset c -3808
+/// option 0 320
+/// option 8 320
+/// unset e -1888
+/// ```
+#[derive(Default)]
+struct Table {
+    entries: Vec<Entry>,
+    /// `nTableSize`, none while the table is not yet laid out.
+    size: usize,
+    packed: bool,
+    /// `nNumUsed`.
+    used: usize,
+    /// `nNextFreeElement`, `None` while it is `ZEND_LONG_MIN`.
+    next: Option<u64>,
+    /// A list whose key an option set where one `CURL *` holds a share
+    /// took over, set for another option: php's destructor frees it
+    /// while the `CURL *` may point at it still, and here it is kept to
+    /// the table's end.
+    aside: Vec<Slist>,
+}
+
+/// One list in a [`Table`], with the option it was set for.
+struct Entry {
+    key: u64,
+    option: i64,
+    list: Slist,
+}
+
+/// `HT_MIN_SIZE`.
+const MIN_SIZE: usize = 8;
+
+impl Table {
+    /// `HT_PACKED_SIZE_EX(nTableSize, HT_MIN_MASK)` for a packed table,
+    /// `HT_SIZE_EX(nTableSize, HT_SIZE_TO_MASK(nTableSize))` otherwise:
+    /// a slot of 16 or 32 bytes and two hash words of four per slot, or
+    /// two in all where packed.
+    fn bytes(&self) -> usize {
+        match (self.size, self.packed) {
+            (0, _) => 0,
+            (size, true) => size * 16 + 8,
+            (size, false) => size * 40,
+        }
+    }
+
+    /// `list`, set for `option`, held under `key`, the next index for
+    /// `None`: the list it replaces answered where it was set for the
+    /// same option, for the caller to free once the set is made.
+    fn put(&mut self, key: Option<u64>, option: i64, list: Slist) -> Option<Slist> {
+        let h = key.unwrap_or_else(|| self.next.unwrap_or(0));
+        let entry = Entry {
+            key: h,
+            option,
+            list,
+        };
+        if key.is_some()
+            && let Some(held) = self.entries.iter_mut().find(|held| held.key == h)
+        {
+            let old = std::mem::replace(held, entry);
+            if old.option == option {
+                return Some(old.list);
+            }
+            self.aside.push(old.list);
+            return None;
+        }
+        self.grow(h);
+        self.entries.push(entry);
+        None
+    }
+
+    /// The table laid out or grown for a new key `h`, and the key added.
+    fn grow(&mut self, h: u64) {
+        let size = self.size as u64;
+        if self.size == 0 {
+            self.size = MIN_SIZE;
+            self.packed = h < MIN_SIZE as u64;
+        } else if self.packed {
+            if h < self.used as u64 {
+                self.packed = false;
+            } else if h >= size {
+                if (h >> 1) < size && (size >> 1) < self.entries.len() as u64 {
+                    self.size *= 2;
+                } else {
+                    if self.used >= self.size {
+                        self.size *= 2;
+                    }
+                    self.packed = false;
+                }
+            }
+        } else if self.used >= self.size {
+            // Nothing is deleted, so a full table doubles.
+            self.size *= 2;
+        }
+        if self.packed {
+            self.used = usize::try_from(h).unwrap_or(usize::MAX).saturating_add(1);
+            self.next = Some(h + 1);
+        } else {
+            self.used += 1;
+            if self.next.is_none_or(|next| h >= next) {
+                self.next = Some(h.saturating_add(1));
+            }
+        }
     }
 }
 
@@ -114,15 +302,14 @@ impl Counted {
 struct Lists {
     /// `*ch->clone`, the shares.
     clone: usize,
-    /// The two blocks php's shares point at, `None` once the last share
+    /// The blocks php's shares point at, `None` once the last share
     /// took them to give back, and for a pushed `CURL *`, which shares its
     /// parent's from [`EasyId::copied_from`] on.
     counted: Option<Counted>,
-    /// `to_free->post`, each tree with its file parts' arguments,
-    /// `to_free->stream`.
+    /// `to_free->post`, each tree with its file parts' arguments.
     trees: Vec<Mime>,
-    /// `to_free->slist`, by the option each was set for.
-    slists: Vec<(i64, Slist)>,
+    /// `to_free->slist`.
+    slists: Table,
     /// The request's link, which the trees are let go of through.
     session: Session,
 }
@@ -134,7 +321,7 @@ impl ToFree {
             clone: 1,
             counted,
             trees: Vec::new(),
-            slists: Vec::new(),
+            slists: Table::default(),
             session,
         }));
         // SAFETY: `into_raw` never answers null.
@@ -182,25 +369,38 @@ impl ToFree {
         unsafe { (*self.0.as_ptr()).trees.push(tree) };
     }
 
-    /// `list` held for `option`: in place of the lists held for it where
-    /// one `CURL *` holds a share (`zend_hash_index_update_ptr`), which
-    /// are answered for the caller to free once the set is made, and
-    /// beside them otherwise (`zend_hash_next_index_insert_ptr`).
-    fn hold_list(&self, option: i64, list: Option<Slist>) -> Vec<Slist> {
-        let alone = self.alone();
+    /// `list` held for `option` where there is one: under the option
+    /// where one `CURL *` holds a share (`zend_hash_index_update_ptr`),
+    /// in place of the list held under it, which is answered for the
+    /// caller to free once the set is made, and under the next index
+    /// beside the rest otherwise (`zend_hash_next_index_insert_ptr`).
+    fn hold_list(&self, option: i64, list: Option<Slist>) -> Option<Slist> {
+        let key = if self.alone() {
+            Some(u64::try_from(option).unwrap_or(0))
+        } else {
+            None
+        };
         // SAFETY: a share's allocation; the field is written alone.
         let slists = unsafe { &mut (*self.0.as_ptr()).slists };
-        let replaced = if alone {
-            let (old, kept): (Vec<_>, Vec<_>) = std::mem::take(slists)
-                .into_iter()
-                .partition(|(held, _)| *held == option);
-            *slists = kept;
-            old.into_iter().map(|(_, list)| list).collect()
-        } else {
-            Vec::new()
-        };
-        slists.extend(list.map(|list| (option, list)));
-        replaced
+        slists.put(key, option, list?)
+    }
+
+    /// The blocks the shares point at, taken off them for the caller to
+    /// lay as the lists stand ([`Counted::settle`]) and put back
+    /// ([`ToFree::put_counted`]), with the table's bytes and the trees
+    /// held; none where the lists lay none down.
+    fn take_counted(&self) -> Option<(Counted, usize, usize)> {
+        // SAFETY: a share's allocation; the fields are read and taken
+        // alone.
+        let lists = unsafe { &mut *self.0.as_ptr() };
+        let counted = lists.counted.take()?;
+        Some((counted, lists.slists.bytes(), lists.trees.len()))
+    }
+
+    /// The blocks [`ToFree::take_counted`] took, put back.
+    fn put_counted(&self, counted: Counted) {
+        // SAFETY: a share's allocation; the field is written alone.
+        unsafe { (*self.0.as_ptr()).counted = Some(counted) };
     }
 }
 
@@ -821,20 +1021,55 @@ impl EasyId {
 
     /// A list option: the list the library is pointed at, held before the
     /// set with what the `CURL *` shares with its copies
-    /// ([`ToFree::hold_list`]), and the lists it replaces freed once the
-    /// call is over.
-    pub(crate) fn set_slist(self, req: &mut Request, option: i64, list: Option<Slist>) -> Called {
+    /// ([`ToFree::hold_list`]), the table's growth counted, and the list
+    /// it replaces freed once the call is over. The `Err` is the memory
+    /// limit's fatal.
+    pub(crate) fn set_slist(
+        self,
+        req: &mut Request,
+        option: i64,
+        list: Option<Slist>,
+    ) -> Result<Called, Thrown> {
         let raw = list
             .as_ref()
             .map_or(ptr::null_mut(), |list| list.0.as_ptr());
         let Some(replaced) = self.with(req, None, |handle| {
             Some(handle.tag().to_free.hold_list(option, list))
         }) else {
-            return (GONE, None);
+            return Ok((GONE, None));
         };
+        self.settle(req, Vec::new())?;
         let called = self.call(req, GONE, |live| live.set_ptr(option, raw.cast()));
         drop(replaced);
-        called
+        Ok(called)
+    }
+
+    /// The blocks the lists of this `CURL *` hold on the request's heap
+    /// ([`Counted`]) laid as the lists stand, with `stream`, a form's
+    /// `to_free->stream` entries, added to them; `stream` freed where the
+    /// `CURL *` is gone or its lists lay nothing down. The `Err` is the
+    /// memory limit's fatal.
+    fn settle(self, req: &mut Request, stream: Vec<Emalloc>) -> Result<(), Thrown> {
+        let Some((mut counted, table, trees)) =
+            self.with(req, None, |handle| handle.tag().to_free.take_counted())
+        else {
+            for block in stream {
+                block.free(req);
+            }
+            return Ok(());
+        };
+        counted.stream.extend(stream);
+        let settled = counted.settle(req, table, trees);
+        let mut back = Some(counted);
+        self.with(req, (), |handle| {
+            if let Some(counted) = back.take() {
+                handle.tag().to_free.put_counted(counted);
+            }
+        });
+        if let Some(counted) = back {
+            counted.free(req);
+        }
+        settled
     }
 
     /// `CURLOPT_STDERR`: the file the library writes its verbose lines
@@ -1064,7 +1299,9 @@ impl EasyId {
     /// otherwise (`out_mime`). Each free runs under what stands in
     /// `pending` ([`Mime::let_go`]), and what a free or the set threw is
     /// left there. The tree never leaves this call, so no way out of
-    /// `fill` leaves it standing. `None` where the library made no tree.
+    /// `fill` leaves it standing. The `to_free->stream` entries of its
+    /// file parts are held by the `CURL *`'s lists either way, to the
+    /// last share, as php's are. `None` where the library made no tree.
     pub(crate) fn post_form(
         self,
         req: &mut Request,
@@ -1072,11 +1309,20 @@ impl EasyId {
         fill: impl FnOnce(&mut Request, &mut MimeBuilder, &mut Pending) -> bool,
     ) -> Option<Posted> {
         let mut built = self.mime(req)?;
-        if fill(req, &mut built, pending) {
-            return Some(self.set_mime(req, built.mime, pending));
+        let walked = fill(req, &mut built, pending);
+        let MimeBuilder { mime, stream, .. } = built;
+        let posted = if walked {
+            self.set_mime(req, mime, pending)
+        } else {
+            mime.let_go(req, pending);
+            Posted::Freed
+        };
+        // The file parts' entries are held whatever became of the tree,
+        // and the post list's elements as it stands.
+        if let Err(fatal) = self.settle(req, stream) {
+            pending.park(req, fatal);
         }
-        built.mime.let_go(req, pending);
-        Some(Posted::Freed)
+        Some(posted)
     }
 
     /// The trees the `CURL *` held let go of, then `CURLOPT_MIMEPOST`
@@ -1130,6 +1376,7 @@ impl EasyId {
                     link: handle.tag().session.lent(),
                 },
                 session: handle.tag().session.clone(),
+                stream: Vec::new(),
             })
         })
     }
@@ -1297,6 +1544,9 @@ pub(crate) enum Posted {
 pub(crate) struct MimeBuilder {
     mime: Mime,
     session: Session,
+    /// Each file part's `mime_data_cb_arg` and `to_free->stream`
+    /// element, for the `CURL *`'s lists to hold once the walk is over.
+    stream: Vec<Emalloc>,
 }
 
 impl MimeBuilder {
@@ -1333,7 +1583,10 @@ impl MimeBuilder {
     /// A `CURLFile` part: read from `source` by the callbacks, of `size`
     /// bytes where it is known, seekable where its stream opened.
     /// A part not made, or not named, closes `source` here, as no
-    /// `free_cb` will.
+    /// `free_cb` will. A part made counts its `mime_data_cb_arg` and its
+    /// `to_free->stream` element whether or not it is named, as php
+    /// `emalloc`s the one and adds the other past every check; the `Err`
+    /// is the memory limit's fatal.
     pub(crate) fn add_file(
         &mut self,
         req: &mut Request,
@@ -1342,18 +1595,27 @@ impl MimeBuilder {
         size: Option<i64>,
         filename: &[u8],
         mime: &[u8],
-    ) -> Option<i32> {
+    ) -> Result<Option<i32>, Thrown> {
         let seekable = source.is_open();
         let Some(part) = self.part() else {
             source.close(req);
-            return None;
+            return Ok(None);
         };
+        for len in [CB_ARG, ELEMENT] {
+            match Emalloc::new(req, len) {
+                Ok(block) => self.stream.push(block),
+                Err(fatal) => {
+                    source.close(req);
+                    return Err(fatal);
+                }
+            }
+        }
         let name = c_string(name);
         // SAFETY: a live part and a NUL-terminated name the library copies.
         let rc = unsafe { sys::curl_mime_name(part.as_ptr(), name.as_ptr()) };
         if rc != sys::CURLE_OK {
             source.close(req);
-            return Some(code(rc));
+            return Ok(Some(code(rc)));
         }
         let file = Box::into_raw(Box::new(FilePart {
             link: self.session.lent(),
@@ -1375,11 +1637,11 @@ impl MimeBuilder {
                 arg(file),
             )
         };
-        Some(code(if rc == sys::CURLE_OK {
+        Ok(Some(code(if rc == sys::CURLE_OK {
             labels(part, filename, mime)
         } else {
             rc
-        }))
+        })))
     }
 }
 
