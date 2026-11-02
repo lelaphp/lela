@@ -43,7 +43,7 @@ impl Leaf {
 fn a_bodyless_fn_and_const_reach_the_attribute() {
     let methods = <Shape as Members>::METHODS;
     assert!(methods.len() == 1 && methods[0].is_abstract);
-    let (_, properties) = <Base as Members>::members();
+    let properties = <Base as Members>::PROPERTIES;
     assert_eq!(properties.len(), 1);
     assert!(properties[0].default.is_none());
     let methods = <Base as Members>::METHODS;

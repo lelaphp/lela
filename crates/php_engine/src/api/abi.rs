@@ -519,7 +519,7 @@ pub struct ZendExtension {
 }
 
 pub(crate) use crate::api::__private::Entry;
-use crate::api::__private::{NativeFunction, NativeMethod};
+use crate::api::__private::{NativeClassConst, NativeFunction, NativeMethod, NativeProperty};
 /// Builds one extension's request state at request start.
 pub(crate) type StateBuilder = (TypeId, fn() -> Box<dyn Any + Send>);
 
@@ -1257,16 +1257,24 @@ impl ExtensionBuilder {
         self,
         reshape: impl FnOnce(&mut ClassDecl),
     ) -> ExtensionBuilder {
-        let mut class = C::header();
-        let (constants, properties) = C::members();
+        let constants = C::CONSTANTS.iter().map(NativeClassConst::declaration);
         let mut methods: Vec<(MethodDecl, Entry)> =
             C::METHODS.iter().map(NativeMethod::declaration).collect();
+        let Some(header) = C::HEADER else {
+            let builder = self.class_constants(C::NAME, constants.collect());
+            return if methods.is_empty() {
+                builder
+            } else {
+                builder.trampolines(C::NAME, methods)
+            };
+        };
+        let mut class = header.declaration();
         class.constants.extend(constants);
-        class.properties.extend(properties);
+        (class.properties).extend(C::PROPERTIES.iter().map(NativeProperty::declaration));
         let seen = methods.iter().map(|(method, _)| method.clone()).collect();
-        let header = std::mem::replace(&mut class.methods, seen);
+        let header_methods = std::mem::replace(&mut class.methods, seen);
         reshape(&mut class);
-        let reshaped = std::mem::replace(&mut class.methods, header);
+        let reshaped = std::mem::replace(&mut class.methods, header_methods);
         for ((method, _), reshaped) in methods.iter_mut().zip(reshaped) {
             *method = reshaped;
         }
@@ -1275,11 +1283,15 @@ impl ExtensionBuilder {
             .into_iter()
             .map(declared_property)
             .collect();
-        C::register(self, class, methods)
+        match header.objects {
+            Some((handlers, Some(new))) => self.class_created(class, methods, handlers, new),
+            Some((handlers, None)) => self.class_with(class, methods, handlers),
+            None => self.classes(vec![(class, methods)]),
+        }
     }
 
     /// One native class with its handler table and its `create_object`,
-    /// what `__private::class_new` registers a payload class through.
+    /// what a header's `objects` with a `create_object` registers through.
     pub(crate) fn class_created(
         mut self,
         class: ClassDecl,

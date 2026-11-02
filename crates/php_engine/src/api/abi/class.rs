@@ -5,10 +5,9 @@
 
 use std::any::Any;
 
-use php_unit::decl::{ClassConstDecl, ClassDecl, ConstExpr, MethodDecl, PropertyDecl, Type};
+use php_unit::decl::{ConstExpr, Type};
 
-use crate::api::__private::{Entry, NativeMethod};
-use crate::api::abi::ExtensionBuilder;
+use crate::api::__private::{NativeClass, NativeClassConst, NativeMethod, NativeProperty};
 use crate::api::abi::marshal::{FromArgument, Instance, Untyped};
 use crate::api::values::{ClassId, PhpArray, PhpString, Value};
 
@@ -33,28 +32,24 @@ pub trait Class {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClassRef(pub ClassId);
 
-/// A class header's declaration and how it registers: the plain
-/// [`ExtensionBuilder::classes`] row, or a handler table and a payload.
+/// A class header: its static entry, the members left to [`Members`],
+/// and how its objects are made.
 pub trait Header: Class {
-    /// The declaration, members left to [`Members`].
-    fn header() -> ClassDecl;
-    /// The class with its methods onto `builder`.
-    fn register(
-        builder: ExtensionBuilder,
-        class: ClassDecl,
-        methods: Vec<(MethodDecl, Entry)>,
-    ) -> ExtensionBuilder;
+    /// The header, none for a class another extension or Core declares,
+    /// to which the member impl adds class constants and trampolines.
+    const HEADER: Option<&'static NativeClass>;
 }
 
 /// The members a `#[php_class]` impl declares, in source order within
 /// each kind. A class with none still writes an empty impl, so a
 /// forgotten one is a build error at `.class::<C>()`.
 pub trait Members {
-    /// The methods, each the static entry the attribute lays down, php's
-    /// method entry array.
+    /// The class constants, each the static entry the attribute lays down.
+    const CONSTANTS: &'static [NativeClassConst];
+    /// The properties.
+    const PROPERTIES: &'static [NativeProperty];
+    /// The methods, php's method entry array.
     const METHODS: &'static [NativeMethod];
-    /// The constants and the properties.
-    fn members() -> (Vec<ClassConstDecl>, Vec<PropertyDecl>);
 }
 
 /// A `#[php_class]` enum's cases, each php name beside its Rust variant,
