@@ -12,7 +12,7 @@ use php_ext::raising::{
 };
 use php_ext::request::Request;
 use php_ext::values::{
-    Layout, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef, walk,
+    FreshString, Layout, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef, walk,
 };
 
 use crate::error::{self, Carrier, IntlError, Outside};
@@ -1041,6 +1041,52 @@ fn convert_with(
 
 /// The UTF-16 of `text` decoded into `temp`, `capacity` units of it,
 /// then encoded into the string, which is asked for while `temp` is held.
+/// The string is laid at the preflight's length before the pass that
+/// writes it, as `zend_string_falloc(ret_len, 0, 1)` lays it ahead of the
+/// second `ucnv_fromUChars` (`Z/ext/intl/converter/converter.c:668-676`),
+/// so a `fromUCallback` served in that pass reads it in
+/// `memory_get_usage()`. ICU writes `ret_len + 1` bytes beside it, the
+/// room php's pass has with the NUL's, copied in after: a shorter length
+/// is `ZSTR_LEN` set where the allocation stands, and the one byte more
+/// a callback can add in the pass grows the string, where php's NUL
+/// holds it. Each conversion is a converter of its own, and a plain
+/// `UConverter` clears intl's error before the second baseline:
+///
+/// ```php
+/// class F extends UConverter {
+///   function toUCallback($reason, $source, $codeUnits, &$error): string|int|array|null {
+///     if ($reason != UConverter::REASON_CLOSE) echo "to ", UConverter::reasonText($reason), " ", memory_get_usage() - $GLOBALS['m'], "\n";
+///     $error = U_ZERO_ERROR;
+///     return null;
+///   }
+///   function fromUCallback($reason, $source, $codePoint, &$error): string|int|array|null {
+///     if ($reason != UConverter::REASON_CLOSE) echo "from ", UConverter::reasonText($reason), " ", memory_get_usage() - $GLOBALS['m'], "\n";
+///     $error = U_ZERO_ERROR;
+///     return null;
+///   }
+/// }
+/// $a = new F('ASCII', 'UTF-8');
+/// $b = new F('ASCII', 'UTF-8');
+/// $m = memory_get_usage();
+/// $a->convert("ab\u{100}");
+/// (new UConverter('ASCII', 'UTF-8'))->convert("ab");
+/// $m = memory_get_usage();
+/// $b->convert("ab\xff", true);
+/// ```
+/// ```expect
+/// to REASON_RESET 64
+/// to REASON_RESET 80
+/// from REASON_RESET 296
+/// from REASON_UNASSIGNED 296
+/// from REASON_RESET 328
+/// from REASON_UNASSIGNED 328
+/// to REASON_RESET 32
+/// to REASON_ILLEGAL 96
+/// to REASON_RESET 48
+/// to REASON_ILLEGAL 112
+/// from REASON_RESET 264
+/// from REASON_RESET 296
+/// ```
 fn encoded(
     req: &mut Request,
     object: Option<PhpObject>,
@@ -1062,20 +1108,27 @@ fn encoded(
         pending.failure(req, object, code);
         return Ok(None);
     }
-    let mut out = vec![0u8; usize::try_from(needed).unwrap_or(0) + 1];
-    let (len, code) = lend(req, object, pending, |cb| dest.encode(&mut out, units, cb));
-    out.truncate(usize::try_from(len).unwrap_or(0));
-    let made = req
+    let needed = usize::try_from(needed).unwrap_or(0);
+    let Some(mut made) = req
         .memory_mut()
-        .fallible(|req| PhpString::filled(req, out.len(), |b| b.copy_from_slice(&out)))?;
+        .fallible(|req| FreshString::new(req, needed))?
+    else {
+        return Ok(None);
+    };
+    let mut out = vec![0u8; needed + 1];
+    let (len, code) = lend(req, object, pending, |cb| dest.encode(&mut out, units, cb));
     if code.is_failure() {
-        if let Some(made) = made {
-            made.give_up(req);
-        }
         pending.failure(req, object, code);
+        made.free(req);
         return Ok(None);
     }
-    Ok(made)
+    let len = usize::try_from(len).unwrap_or(0).min(out.len());
+    if len > needed {
+        made = made.extend(req, len)?;
+    }
+    made.set_len(len);
+    made.bytes_mut().copy_from_slice(&out[..len]);
+    Ok(Some(made.finish()))
 }
 
 /// `op` with the object's callbacks lent where its class is a subclass of
