@@ -13,28 +13,30 @@
 //! take. Both follow php's own arithmetic, so an array or a string of a
 //! given length moves them by the same bytes php moves them by.
 //!
-//! Two departures, neither observable from PHP. php threads its chunks
-//! on a circular list inside the chunks themselves, because its heap
-//! struct lives in the first one; here the list is a `Vec` beside them,
-//! walked in the same order, so the chunk a `run` lands in is the chunk
-//! php's walk would have landed in. And php maps a chunk with `mmap`,
-//! which hands back zeroed pages; here a chunk comes from the system
-//! allocator aligned to its own size, which is what makes the chunk of
-//! an address a mask away, and the header is zeroed on the way in. A
-//! huge block is php's own mapping on a unix, aligned as php aligns it,
-//! because its tail is grown and cut where it stands.
+//! One departure, not observable from PHP: php threads its chunks on a
+//! circular list inside the chunks themselves, because its heap struct
+//! lives in the first one; here the list is a `Vec` beside them, walked
+//! in the same order, so the chunk a `run` lands in is the chunk php's
+//! walk would have landed in.
+//!
+//! A chunk and a huge block are each php's own mapping on a unix,
+//! aligned to a chunk as php aligns it, which is what makes the chunk
+//! of an address a mask away. A huge block's tail is grown and cut
+//! where it stands, and whether it can grow there depends on what is
+//! mapped after it, a chunk among the rest, so a chunk is mapped where
+//! php's would be and a peak moves as php's does ([`chunk_alloc_int`]).
 //!
 //! Miri cannot model that mapping. Its `munmap` is a deallocation of the
 //! whole allocation an `mmap` made, so php's unmapping of the slack
 //! around an aligned block, and of a cut tail, both of which the machine
 //! defines, is to Miri a deallocation of the wrong size, reported as
-//! undefined behaviour at the call. Under Miri a huge block therefore
-//! takes the arm of a platform with no `mmap`: the system allocator,
-//! aligned to a chunk, never grown or cut in place. Miri then sees each
-//! huge block's whole life, a use of one after its free included, and
-//! what it never checks is the mapping itself: the slack trim and the
-//! in-place grow and cut, with the accounting of the in-place arms of
-//! `realloc_huge`, which the native test lane covers.
+//! undefined behaviour at the call. Under Miri a chunk and a huge block
+//! therefore take the arm of a platform with no `mmap`: the system
+//! allocator, aligned to a chunk, a huge block never grown or cut in
+//! place. Miri then sees each one's whole life, a use after its free
+//! included, and what it never checks is the mapping itself: the slack
+//! trim and the in-place grow and cut, with the accounting of the
+//! in-place arms of `realloc_huge`, which the native test lane covers.
 //!
 //! Before it declares the limit reached or the system out of memory, php
 //! sweeps: `zend_mm_gc` (`Z/Zend/zend_alloc.c:2101`) counts the free slots
@@ -49,6 +51,7 @@
 // holds in a `uint32_t` for the same reason it does.
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+#[cfg(any(not(unix), miri))]
 use std::alloc::{Layout, alloc, dealloc};
 use std::num::NonZeroUsize;
 use std::ptr::NonNull;
@@ -399,7 +402,7 @@ impl Mm {
             .and_then(|cache| cache.take());
         let (main, cached, avg_chunks_count) = match kept {
             Some(kept) => (Some(kept.main), kept.cached, kept.avg_chunks_count),
-            None if zend => (chunk_alloc(CHUNK_SIZE), Vec::new(), 1.0),
+            None if zend => (chunk_alloc(), Vec::new(), 1.0),
             None => (None, Vec::new(), 1.0),
         };
         let mut mm = Mm {
@@ -528,7 +531,7 @@ impl Mm {
                 let Some(chunk) = self.cached.pop() else {
                     break;
                 };
-                chunk_free(chunk, CHUNK_SIZE);
+                chunk_free(chunk);
                 self.real_size -= CHUNK_SIZE;
             }
         }
@@ -1653,9 +1656,9 @@ impl Mm {
             if self.check_limit(CHUNK_SIZE, true)? {
                 continue;
             }
-            let mapped = match chunk_alloc(CHUNK_SIZE) {
+            let mapped = match chunk_alloc() {
                 Some(chunk) => Some(chunk),
-                None if self.gc_heap() != 0 => chunk_alloc(CHUNK_SIZE),
+                None if self.gc_heap() != 0 => chunk_alloc(),
                 None => None,
             };
             let Some(chunk) = mapped else {
@@ -1760,9 +1763,9 @@ impl Mm {
             num > cached_num
         });
         if newer {
-            chunk_free(chunk, CHUNK_SIZE);
+            chunk_free(chunk);
         } else if let Some(cached) = self.cached.pop() {
-            chunk_free(cached, CHUNK_SIZE);
+            chunk_free(cached);
             self.cached.push(chunk);
         }
     }
@@ -1901,9 +1904,9 @@ impl Mm {
     fn alloc_huge(&mut self, size: usize) -> Result<NonNull<u8>, Refused> {
         let new_size = self.huge_rounding(size)?;
         self.check_limit(new_size, true)?;
-        let mapped = match huge_map(new_size) {
+        let mapped = match chunk_alloc_int(new_size) {
             Some(at) => Some(at),
-            None if self.gc_heap() != 0 => huge_map(new_size),
+            None if self.gc_heap() != 0 => chunk_alloc_int(new_size),
             None => None,
         };
         let Some(at) = mapped else {
@@ -1915,7 +1918,7 @@ impl Mm {
         let node = match node {
             Ok(node) => node,
             Err(refused) => {
-                huge_unmap(at, new_size);
+                chunk_unmap(at, new_size);
                 return Err(refused);
             }
         };
@@ -1965,7 +1968,7 @@ impl Mm {
         unsafe { self.free_small(block.node, size_to_bin(HUGE_LIST_SIZE)) };
         self.real_size = self.real_size.saturating_sub(block.size);
         self.size = self.size.saturating_sub(block.size);
-        huge_unmap(block.at, block.size);
+        chunk_unmap(block.at, block.size);
     }
 }
 
@@ -2092,7 +2095,7 @@ impl Drop for Mm {
     /// unmapped where it has none.
     fn drop(&mut self) {
         for block in self.huge.drain(..) {
-            huge_unmap(block.at, block.size);
+            chunk_unmap(block.at, block.size);
         }
         #[cfg(debug_assertions)]
         for chunk in &self.chunks {
@@ -2103,7 +2106,7 @@ impl Drop for Mm {
             return;
         }
         for chunk in self.chunks.drain(..).chain(self.cached.drain(..)) {
-            chunk_free(chunk, CHUNK_SIZE);
+            chunk_free(chunk);
         }
     }
 }
@@ -2118,7 +2121,7 @@ impl Mm {
         let mut chunks = self.chunks.drain(..);
         let Some(main) = chunks.next() else {
             for chunk in self.cached.drain(..) {
-                chunk_free(chunk, CHUNK_SIZE);
+                chunk_free(chunk);
             }
             return;
         };
@@ -2131,7 +2134,7 @@ impl Mm {
             let Some(chunk) = self.cached.pop() else {
                 break;
             };
-            chunk_free(chunk, CHUNK_SIZE);
+            chunk_free(chunk);
         }
         // php clears a cached chunk's header, `memset(p, 0,
         // sizeof(zend_mm_chunk))`; its `num` is the one field read before
@@ -2259,40 +2262,53 @@ fn srun_free_counter(info: u32) -> u32 {
 #[cfg(test)]
 pub(crate) static MAPPINGS: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
-/// `zend_mm_chunk_alloc`: `size` bytes aligned to a chunk.
-fn chunk_alloc(size: usize) -> Option<NonNull<Chunk>> {
-    let layout = Layout::from_size_align(size, CHUNK_SIZE).ok()?;
-    // SAFETY: the layout has a non-zero size, which is what `alloc` asks.
-    let at = unsafe { alloc(layout) };
-    let at = NonNull::new(at).map(NonNull::cast);
-    #[cfg(test)]
-    if at.is_some() {
-        MAPPINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-    at
+/// `zend_mm_chunk_alloc(heap, ZEND_MM_CHUNK_SIZE, ZEND_MM_CHUNK_SIZE)`
+/// (`Z/Zend/zend_alloc.c:2183`): one chunk, mapped as a huge block is
+/// ([`chunk_alloc_int`]).
+fn chunk_alloc() -> Option<NonNull<Chunk>> {
+    chunk_alloc_int(CHUNK_SIZE).map(NonNull::cast)
 }
 
-/// `zend_mm_chunk_free`: `size` is what the mapping was asked for, a
-/// whole chunk or the rounded size of one huge block.
-fn chunk_free(chunk: NonNull<Chunk>, size: usize) {
-    let Ok(layout) = Layout::from_size_align(size, CHUNK_SIZE) else {
-        return;
-    };
-    #[cfg(test)]
-    MAPPINGS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-    // SAFETY: the chunk came from `chunk_alloc` with this layout and has
-    // left every list that named it.
-    unsafe { dealloc(chunk.as_ptr().cast(), layout) };
+/// `zend_mm_chunk_free(heap, chunk, ZEND_MM_CHUNK_SIZE)`: a chunk that has
+/// left every list that named it, unmapped.
+fn chunk_free(chunk: NonNull<Chunk>) {
+    chunk_unmap(chunk.cast(), CHUNK_SIZE);
 }
 
 /// `zend_mm_chunk_alloc_int(size, ZEND_MM_CHUNK_SIZE)`
-/// (`Z/Zend/zend_alloc.c:752`) for a huge block: a mapping of its own,
-/// as php's is, so that its tail can later be grown or cut where it
-/// stands. One the machine hands back off a chunk boundary is given up
-/// and asked for again a chunk wider, and the slack either side of the
-/// aligned block unmapped, php's arithmetic exactly.
+/// (`Z/Zend/zend_alloc.c:882`), for a chunk and for a huge block alike:
+/// a mapping of its own, as php's is, so that a huge block's tail can
+/// later be grown or cut where it stands, and so that each lands where
+/// php's would, beside the others. One the machine hands back off a
+/// chunk boundary is given up and asked for again a chunk wider, and the
+/// slack either side of the aligned block unmapped, php's arithmetic
+/// exactly. Which mapping stands after a huge block decides whether it
+/// grows in place ([`huge_extend`]), and with it the real peak a move
+/// adds, so a chunk taken from anywhere else moves a peak php's does
+/// not: an array doubled past 2 MiB while its strings fill chunks grows
+/// in place where the chunks are elsewhere, and is copied at every
+/// doubling where they are mapped after it, as php's are.
+///
+/// Where the machine puts each mapping is its own, and it moves from
+/// one process to the next in php as here: the array below grows in
+/// place in some of php's processes and is copied once in others, so its
+/// real peak is held to that bound, and its real usage, which no
+/// placement moves, to php's bytes:
+///
+/// ```php
+/// $r = memory_get_usage(true);
+/// $a = [];
+/// for ($i = 0; $i < 300000; $i++) { $a[] = "s$i"; }
+/// $held = memory_get_usage(true) - $r;
+/// $peak = memory_get_peak_usage(true) - $r;
+/// var_dump($held, $peak >= $held && $peak <= $held + 4210688);
+/// ```
+/// ```expect
+/// int(16793600)
+/// bool(true)
+/// ```
 #[cfg(all(unix, not(miri)))]
-fn huge_map(size: usize) -> Option<NonNull<u8>> {
+fn chunk_alloc_int(size: usize) -> Option<NonNull<u8>> {
     let at = mmap(std::ptr::null_mut(), size)?;
     let at = if at.as_ptr().addr() & (CHUNK_SIZE - 1) == 0 {
         at
@@ -2320,28 +2336,46 @@ fn huge_map(size: usize) -> Option<NonNull<u8>> {
 }
 
 /// A platform with no `mmap`, and Miri, whose `munmap` takes a mapping
-/// only whole (the note at the top of this file), keep the huge block on the system
-/// allocator, aligned to a chunk, and never grow or cut it in place.
+/// only whole (the note at the top of this file), take a chunk and a
+/// huge block from the system allocator, aligned to a chunk; a huge
+/// block there is never grown or cut in place.
 #[cfg(any(not(unix), miri))]
-fn huge_map(size: usize) -> Option<NonNull<u8>> {
-    chunk_alloc(size).map(NonNull::cast)
+fn chunk_alloc_int(size: usize) -> Option<NonNull<u8>> {
+    let layout = Layout::from_size_align(size, CHUNK_SIZE).ok()?;
+    // SAFETY: the layout has a non-zero size, which is what `alloc` asks.
+    let at = NonNull::new(unsafe { alloc(layout) });
+    #[cfg(test)]
+    if at.is_some() {
+        MAPPINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    at
 }
 
-/// `zend_mm_chunk_free` over a huge block: its whole mapping goes back.
+/// `zend_mm_chunk_free` (`Z/Zend/zend_alloc.c:954`): `size` is what the
+/// mapping holds, a whole chunk or a huge block's rounded size, and all
+/// of it goes back.
 #[cfg(all(unix, not(miri)))]
-fn huge_unmap(at: NonNull<u8>, size: usize) {
+fn chunk_unmap(at: NonNull<u8>, size: usize) {
     #[cfg(test)]
     MAPPINGS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     munmap(at.as_ptr(), size);
 }
 
-/// The system allocator's block goes back, as [`chunk_free`] does.
+/// The system allocator's block goes back with the layout
+/// [`chunk_alloc_int`] asked for.
 #[cfg(any(not(unix), miri))]
-fn huge_unmap(at: NonNull<u8>, size: usize) {
-    chunk_free(at.cast(), size);
+fn chunk_unmap(at: NonNull<u8>, size: usize) {
+    let Ok(layout) = Layout::from_size_align(size, CHUNK_SIZE) else {
+        return;
+    };
+    #[cfg(test)]
+    MAPPINGS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: the block came from `chunk_alloc_int` with this layout and
+    // has left every list that named it.
+    unsafe { dealloc(at.as_ptr(), layout) };
 }
 
-/// `zend_mm_chunk_extend` (`Z/Zend/zend_alloc.c:843`): the pages after a
+/// `zend_mm_chunk_extend` (`Z/Zend/zend_alloc.c:984`): the pages after a
 /// huge block asked for where they stand, `mremap` without
 /// `MREMAP_MAYMOVE` where the platform has it, and elsewhere
 /// `zend_mm_mmap_fixed`, a mapping hinted at the block's end and given
@@ -2376,7 +2410,7 @@ fn huge_extend(_at: NonNull<u8>, _old_size: usize, _new_size: usize) -> bool {
     false
 }
 
-/// `zend_mm_chunk_truncate` (`Z/Zend/zend_alloc.c:822`): the tail past
+/// `zend_mm_chunk_truncate` (`Z/Zend/zend_alloc.c:965`): the tail past
 /// `new_size` unmapped, the block standing where it is.
 #[cfg(all(unix, not(miri)))]
 fn huge_truncate(at: NonNull<u8>, old_size: usize, new_size: usize) -> bool {
@@ -2390,9 +2424,10 @@ fn huge_truncate(_at: NonNull<u8>, _old_size: usize, _new_size: usize) -> bool {
     false
 }
 
-/// `zend_mm_mmap` (`Z/Zend/zend_alloc.c:522`), with `hint` php's
-/// `zend_mm_mmap_fixed` address or null: `size` fresh, private,
-/// anonymous bytes, or `None` where the machine refuses them.
+/// `zend_mm_mmap` (`Z/Zend/zend_alloc.c:663`), with `hint` php's
+/// `zend_mm_mmap_fixed` address (`Z/Zend/zend_alloc.c:622`) or null:
+/// `size` fresh, private, anonymous bytes under php's [`MAPPING_TAG`], or
+/// `None` where the machine refuses them.
 #[cfg(all(unix, not(miri)))]
 fn mmap(hint: *mut u8, size: usize) -> Option<NonNull<u8>> {
     // SAFETY: an anonymous private mapping names no file and, without
@@ -2403,7 +2438,7 @@ fn mmap(hint: *mut u8, size: usize) -> Option<NonNull<u8>> {
             size,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_PRIVATE | libc::MAP_ANON,
-            -1,
+            MAPPING_TAG,
             0,
         )
     };
@@ -2412,6 +2447,18 @@ fn mmap(hint: *mut u8, size: usize) -> Option<NonNull<u8>> {
     }
     NonNull::new(at.cast())
 }
+
+/// `ZEND_MM_FD` (`Z/Zend/zend_alloc.c:125-133`): the file number an
+/// anonymous mapping passes, which macOS reads as the tag `vmmap` files the
+/// mapping under. php's is `VM_MAKE_TAG(250U)`, the tag in the top byte,
+/// one of those left to applications, so `vmmap` shows its chunks and
+/// huge blocks as `Memory Tag 250`, in its process and in this one.
+#[cfg(all(target_vendor = "apple", not(miri)))]
+const MAPPING_TAG: libc::c_int = (250_u32 << 24).cast_signed();
+
+/// Elsewhere an anonymous mapping passes no file, `-1`.
+#[cfg(all(unix, not(target_vendor = "apple"), not(miri)))]
+const MAPPING_TAG: libc::c_int = -1;
 
 /// `zend_mm_munmap`: `size` bytes at `at`, which this heap mapped and
 /// nothing names any more, given back to the machine.
