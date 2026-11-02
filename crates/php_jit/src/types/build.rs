@@ -39,6 +39,7 @@ mod infer;
 use infer::{Inferred, Reads};
 use php_ssa::{Range, Types as Php};
 mod loads;
+mod ranges;
 mod stack;
 
 /// php's `ZEND_JIT_TRACE_MAX_EXITS`: the most exits one trace has.
@@ -294,6 +295,15 @@ struct Placed {
     exit: Draft,
 }
 
+/// Where `is_checked_guard` holds a loop phi's long guard: within the
+/// arithmetic its back edge made, or nowhere, where that arithmetic is an
+/// increment or a decrement php's `zend_may_overflow` says cannot
+/// overflow.
+enum Checked {
+    Within(Placed),
+    Nowhere,
+}
+
 /// A call an `INIT_*` began: whether compiled code began it, which may
 /// leave the interpreter's call chain behind it until the call is made,
 /// and what each argument was sent as, where the send says.
@@ -462,6 +472,18 @@ struct Builder<'a> {
     /// ([`Hold::Held`]). A loop's phi and a value the trace entered with
     /// are no such value, as php's are not.
     held_references: HashSet<ValueId>,
+    /// The range php's code generator reads of a value where it is not
+    /// the value's own, read where a later opline is compiled and never
+    /// by the inference: what a comparison the trace compiled as a branch
+    /// left it holding on the way the trace went on, as the code generator
+    /// writes it over the trace SSA's range
+    /// (`zend_jit_trace_update_condition_ranges`), or the range, or none,
+    /// of what the line defines as the code generator propagates it once
+    /// it has compiled the line ([`Builder::refresh`]).
+    compiled: HashMap<ValueId, Option<Range>>,
+    /// The increments and decrements php's `zend_may_overflow` says
+    /// cannot overflow, which hold no guard on what they write.
+    bounded: HashSet<OpId>,
 }
 
 /// Where a property opline is served in place: the object it reads, the
@@ -523,6 +545,8 @@ impl<'a> Builder<'a> {
             sampled: HashMap::new(),
             classed: HashMap::new(),
             held_references: HashSet::new(),
+            compiled: HashMap::new(),
+            bounded: HashSet::new(),
         };
         let begins = rec.events.iter().find_map(|event| match event {
             Event::Op { opline, .. } => Some(*opline),
@@ -1022,6 +1046,19 @@ impl<'a> Builder<'a> {
             exit: None,
             unwind: None,
         }));
+        // php reads the range an increment's operand holds as it compiles
+        // the increment, then propagates what it wrote.
+        if matches!(
+            op.opcode,
+            Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec
+        ) && !self.may_overflow(&op, op1, written.op1)
+        {
+            self.bounded.insert(idx);
+        }
+        if let (Some(jump), Some(taken)) = (fused, branch) {
+            self.narrow_by_condition(&op, (op1, op2), jump == Fused::Jmpnz, taken);
+        }
+        self.refresh(idx, &reads);
         let fused = fused.is_some();
         let len = if fused || data_line.is_some() { 2 } else { 1 };
         let jump = if fused { after } else { Some(op) };
@@ -3052,6 +3089,17 @@ impl<'a> Builder<'a> {
             },
             _ => None,
         };
+        // An increment or a decrement php's `zend_may_overflow` says cannot
+        // overflow is compiled with no check: what it writes is a long the
+        // guard holds nowhere ([`Builder::may_overflow`]).
+        if let Some((def, _, _, Within::Overflowed { .. }, ..)) = computed
+            && self.bounded(def)
+        {
+            if !self.aliased(held.slot) && self.val(value).types.scalar() {
+                self.val_mut(value).home = Home::Register;
+            }
+            return;
+        }
         let mut then = None;
         let (at, exit) = match (held.def, computed) {
             (Def::Entry, _)
@@ -4379,7 +4427,9 @@ impl<'a> Builder<'a> {
                 if !self.aliased(slot) {
                     self.val_mut(back).home = Home::Register;
                 }
-                self.guards.push(held);
+                if let Checked::Within(placed) = held {
+                    self.guards.push(placed);
+                }
             }
             self.val_mut(entry).types = match narrowed {
                 Narrowed::Tag(tag) => entered.types.narrowed(tag),
@@ -4511,7 +4561,10 @@ impl<'a> Builder<'a> {
     /// `+=`, `-=` or `*=`, or an increment or a decrement made over
     /// numbers, which holds its overflow itself, so the guard the phi
     /// held at the header each turn is held within it, rerunning it where
-    /// it overflows. The guard it holds, where it is one.
+    /// it overflows. The guard it holds, where it is one, and none within
+    /// an increment or a decrement php's `zend_may_overflow` says cannot
+    /// overflow, which its code generator compiles with no check, so the
+    /// guard is held nowhere ([`Builder::may_overflow`]).
     ///
     /// The back edge brings the last value php's trace SSA numbers in the
     /// slot, and a line after `back`'s that reads it and may take a
@@ -4556,7 +4609,7 @@ impl<'a> Builder<'a> {
     /// ---- TRACE 5 stop (return)
     /// ---- TRACE 5 compiled
     /// ```
-    fn checked_guard(&self, back: ValueId) -> Option<Placed> {
+    fn checked_guard(&self, back: ValueId) -> Option<Checked> {
         let made = *self.val(back);
         if made.types.meets(Types::REF) || !made.types.meets(Types::LONG) {
             return None;
@@ -4623,7 +4676,10 @@ impl<'a> Builder<'a> {
             .filter(|kind| matches!(kind, Within::Rerun | Within::Overflowed { .. }));
         let inline = line.form == Form::Inline && !self.over_aliased(line.op1, line.op2);
         let kind = kind.filter(|_| checked && inline)?;
-        Some(Placed {
+        if step && self.bounded(def) {
+            return Some(Checked::Nowhere);
+        }
+        Some(Checked::Within(Placed {
             at: GuardAt::Within(def),
             check: Check::Type {
                 value: back,
@@ -4634,7 +4690,7 @@ impl<'a> Builder<'a> {
                 line.frame,
                 At::overflowing(kind, line, back),
             ),
-        })
+        }))
     }
 
     /// Whether a call into a frame above `value`'s stored it to its slot

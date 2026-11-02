@@ -4023,3 +4023,37 @@ fn an_exit_after_an_init_fcall_that_delays_the_chain_restores_the_call() -> Resu
     assert_eq!(between, [(7, true), (10, true)], "{}", dump::render(&ir));
     Ok(())
 }
+
+/// A loop's `$i++` takes no overflow exit where the loop's own
+/// `$i < $n` bounds the phi it reads below `ZEND_LONG_MAX`, as php's code
+/// generator narrows the phi's range past the comparison it compiles as
+/// the loop's branch (`zend_jit_trace_update_condition_ranges`,
+/// `Z/ext/opcache/jit/zend_jit_trace.c:3705-3827`) and `zend_may_overflow`
+/// reads that range's `max` (`Z/ext/opcache/jit/zend_jit.c:910-930`). Its
+/// trace SSA dumps the phi as `#15.CV4($i) [long] RANGE[1..++]`, as this
+/// tier's holds it, `[1..ZEND_LONG_MAX]` with `overflow`, so the narrowing
+/// is the difference. The pinned php's `TRACE 1 exit info` under the
+/// trace-dump regime with bits 19 and 20 lists the exits past the
+/// `INIT_FCALL` as `exit_6: 0007`, `exit_7: 0011`, `exit_8: 0014` and
+/// `exit_9: 0016/VM`, none past the `PRE_INC`; this tier's had one more,
+/// `0016` with `$i` overflowed (#3898). Whether `exit_7` restores the call
+/// is #3897's.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_counter_its_condition_bounds_takes_no_overflow_exit() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($s, $n, $k) { $t = 0; for ($i = 1; $i < $n; $i++) { $t += strncmp($i + $k, $s . $i, $i + $k); } return $t; }
+        echo f('a', 20, 2), \"\\n\";",
+    )?;
+    let oplines: Vec<u32> = (restoring(&ir).into_iter())
+        .map(|(opline, _)| opline)
+        .skip_while(|opline| *opline != 7)
+        .collect();
+    assert_eq!(oplines, [7, 11, 14, 16], "{}", dump::render(&ir));
+    let overflowed = (ir.exits.iter())
+        .flat_map(|exit| exit.stores.iter())
+        .any(|store| matches!(store.from, Stored::Overflowed { .. }));
+    assert!(!overflowed, "{}", dump::render(&ir));
+    Ok(())
+}

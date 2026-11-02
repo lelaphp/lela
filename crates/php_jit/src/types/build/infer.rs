@@ -173,6 +173,107 @@ impl Builder<'_> {
         }
     }
 
+    /// `zend_inference_propagate_range` of each variable the opline `at`
+    /// of `frame` defines in php's trace SSA, its `out`, `op1`, `op2` and
+    /// `OP_DATA`'s `op1` where `defs` says, over the ranges its operands
+    /// hold where php's code generator has compiled it
+    /// ([`Builder::compiled_range`]), as the code generator propagates
+    /// them once it has (`Z/ext/opcache/jit/zend_jit_trace.c:6666-6830`).
+    pub(super) fn compiled_propagation(
+        &self,
+        frame: Frame,
+        at: OplineIdx,
+        reads: &Reads<'_>,
+        defs: [bool; 4],
+    ) -> [Option<Range>; 4] {
+        let func = self.frames[usize::from(frame.0)].func;
+        let Reads { op, data, .. } = *reads;
+        let array = u32::from(frame.0);
+        let mut tssa = Tssa {
+            vars: Vec::new(),
+            info: Vec::new(),
+            ops: Vec::new(),
+        };
+        let alias = |var: u32| {
+            if self.aliased(crate::types::Slot { frame, var }) {
+                Alias::Symtable
+            } else {
+                Alias::None
+            }
+        };
+        let used =
+            |tssa: &mut Tssa, kind: OperandKind, field: u32, operand: Operand, types: Types| {
+                matches!(kind, OperandKind::Cv | OperandKind::Tmp | OperandKind::Var).then(|| {
+                    let info = VarInfo {
+                        types: types.info(),
+                        class: None,
+                        range: self.compiled_range(operand),
+                    };
+                    tssa.var(field, alias(field), None, info)
+                })
+            };
+        let defined = |tssa: &mut Tssa, kind: OperandKind, field: u32, at: u32| {
+            slot_of(frame, kind, field)
+                .map(|_| tssa.var(field, alias(field), Some(at), VarInfo::default()))
+        };
+        let [o1, o2, od] = reads.operands;
+        let [t1, t2, td] = reads.types;
+        let [out, op1, op2, data_def] = defs;
+        let mut main = SsaOp {
+            op1_use: used(&mut tssa, op.op1_type, op.op1, o1, t1),
+            op2_use: used(&mut tssa, op.op2_type, op.op2, o2, t2),
+            ..SsaOp::default()
+        };
+        if out {
+            main.out_def = defined(&mut tssa, op.out_type, op.out, 0);
+        }
+        if op1 {
+            main.op1_def = defined(&mut tssa, op.op1_type, op.op1, 0);
+        }
+        if op2 {
+            main.op2_def = defined(&mut tssa, op.op2_type, op.op2, 0);
+        }
+        tssa.ops.push(main);
+        let mut positions = vec![Position {
+            array,
+            opline: at.0,
+        }];
+        if let Some(data) = data {
+            let mut data_op = SsaOp {
+                op1_use: used(&mut tssa, data.op1_type, data.op1, od, td),
+                ..SsaOp::default()
+            };
+            if data_def {
+                data_op.op1_def = defined(&mut tssa, data.op1_type, data.op1, 1);
+            }
+            tssa.ops.push(data_op);
+            positions.push(Position {
+                array,
+                opline: at.0 + 1,
+            });
+        }
+        let data_def = tssa.ops.get(1).and_then(|data| data.op1_def);
+        let mut tssa = Ssa {
+            phis: Vec::new(),
+            block_phis: Vec::new(),
+            ops: tssa.ops,
+            vars: tssa.vars,
+            sccs: 0,
+            info: tssa.info,
+        };
+        let mut propagated = |i: usize, def: Option<SsaVar>| {
+            def.and_then(|def| {
+                (self.inference).propagate_range(func, &mut tssa, &positions, i, def)
+            })
+        };
+        [
+            propagated(0, main.out_def),
+            propagated(0, main.op1_def),
+            propagated(0, main.op2_def),
+            propagated(1, data_def),
+        ]
+    }
+
     /// The trace's SSA php's inference reads at the opline `at` of
     /// `frame`: the opline, its `OP_DATA`, and the opline `next` where it
     /// reads what this one defines; and where each stands, php's
@@ -434,7 +535,7 @@ impl Builder<'_> {
 }
 
 /// Two ranges met, as `zend_jit_trace_copy_ssa_var_range` meets them.
-fn met(a: Range, b: Range) -> Range {
+pub(super) fn met(a: Range, b: Range) -> Range {
     Range {
         min: a.min.max(b.min),
         max: a.max.min(b.max),
