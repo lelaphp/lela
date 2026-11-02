@@ -99,7 +99,7 @@ name = "php_sapi"
 budget = 2000                              # the hosts' facade and what php-src shares between its SAPIs (ADR-0008); the hosts' phpt subsets are their rows'
 [[crate]]
 name = "php_streams"
-budget = 10000                              # php's main/streams/ and main/network.c, split from php_engine (#1773, #1874)
+budget = 12000                             # php's main/streams/ and main/network.c, split from php_engine (#1773, #1874); 10k raised to 12k for #3664-#3870 (#3915, 2026-11-02)
 phpt = ["ext/standard/tests/streams"]
 [[crate]]
 name = "xtask"
