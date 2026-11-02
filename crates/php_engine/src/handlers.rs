@@ -4164,7 +4164,7 @@ fn included(
         }
     };
     let main = exec::code_of(&unit);
-    let hooked = req.shared.declared().hooked.user;
+    let hooked = req.shared.hooked.user;
     if !hooked
         && let [only] = &main.oplines[..]
         && only.opcode == Opcode::Return

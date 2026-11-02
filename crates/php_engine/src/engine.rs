@@ -869,6 +869,8 @@ pub(crate) struct Shared {
     pub(crate) state_slots: crate::api::request::StateSlots,
     /// `EG(ini_directives)`, each entry's master value ([`IniTable`]).
     pub(crate) ini: IniTable,
+    /// Where `include_path` stands in `ini`, found once.
+    pub(crate) include_path: Option<ini_table::DirectiveAt>,
     /// The typed entries `ini`'s master values give, which each request
     /// starts with ([`TypedIni`]).
     pub(crate) typed_ini: TypedIni,
@@ -890,7 +892,7 @@ pub(crate) struct Shared {
     pub(crate) shebang: php_compile::Shebang,
     /// The hooks the bound tier replaces ([`Tier::HOOKED`]), every unit
     /// compiled under them (design §4.3, revision 58).
-    hooked: php_compile::Hooked,
+    pub(crate) hooked: php_compile::Hooked,
     /// Whether every unit is compiled with extended info, which the
     /// host's `-e` asked for ([`EngineBuilder::extended_info`]).
     extended_info: bool,
@@ -3821,6 +3823,7 @@ impl EngineBuilder {
                 engine_states: States::new(),
                 state_slots: crate::api::request::StateSlots::default(),
                 typed_ini: TypedIni::of(|name| ini.master(name)),
+                include_path: ini.at(b"include_path"),
                 ini,
                 constant_values,
                 sapi_names,
@@ -6372,7 +6375,7 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &PublishedUnit, kind: Sourc
     // only where the entry recorded them); the compile that put the
     // script in the cache raised them, and a request php serves without
     // the cache compiles and raises them each time.
-    let replayed = !req.accel_hit(unit) || req.ini_flag(b"opcache.record_warnings");
+    let replayed = !req.accel_hit(unit) || req.typed_ini().record_warnings;
     for raised in unit.diagnostics.iter().filter(|_| replayed) {
         req.note_error_in(
             raised.level,

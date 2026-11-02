@@ -963,9 +963,7 @@ impl Request {
     /// may not reach is "Permission denied"), and the `require`'s fatal,
     /// at no file and no line, as php's startup raises them.
     pub(crate) fn preload_unopened(&mut self, script: &[u8]) {
-        let include_path =
-            String::from_utf8_lossy(self.ini().get(b"include_path").unwrap_or_default())
-                .into_owned();
+        let include_path = String::from_utf8_lossy(self.include_path()).into_owned();
         let path = self
             .environment()
             .cwd()
