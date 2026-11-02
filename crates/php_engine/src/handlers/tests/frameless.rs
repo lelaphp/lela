@@ -93,16 +93,20 @@ fn a_frameless_jump_primes_a_miss_once_and_falls_through_on_it_after() {
 /// arity zero, which no native of php's declares: what
 /// `FRAMELESS_ICALL_0` needs to be reached at all.
 fn with_a_nullary_frameless_native() -> Engine {
-    use crate::api::__private::NativeFunction;
+    use crate::api::__private::{Frameless, NativeFunction};
     use crate::api::abi::ExtensionBuilder;
     fn seven(_: &mut Request) -> Result<Owner<Value>, Thrown> {
+        Ok(Owner::int(7))
+    }
+    #[allow(clippy::trivially_copy_pass_by_ref)] // the frameless table's entry type, `Frameless::Zero`
+    fn frameless_seven(_: &mut Request, _: &[Value; 0]) -> Result<Owner<Value>, Thrown> {
         Ok(Owner::int(7))
     }
     const SEVEN: NativeFunction = NativeFunction {
         name: b"seven",
         parameters: &[],
         return_type: || None,
-        frameless: &[0],
+        frameless: &[Frameless::Zero(frameless_seven)],
         attributes: &[],
         entry: seven,
     };

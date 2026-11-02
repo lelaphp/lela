@@ -565,9 +565,9 @@ impl Request {
         }
     }
 
-    /// [`Request::release_nogc`] over a zval a slot or a call's record
-    /// held, the owner it held given up with no `Value` made of it: what
-    /// a frameless call's record gives up of its operands as the call
+    /// [`Request::release_nogc`] over a zval a slot or a call held, the
+    /// owner it held given up with no `Value` made of it: what a
+    /// frameless call gives up of the operands it owned as the call
     /// ends, `FREE_OP*`.
     #[cfg_attr(debug_assertions, track_caller)]
     #[inline]

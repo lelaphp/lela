@@ -2,6 +2,7 @@
 # 374 items: values 102, raising 21, coerce 23, call 29, request 112, decl 17, abi 28, syntax 28, attr 4, test 9, Nop 1 (ceiling 400); regenerated from the crate on 2026-09-17 (#271)
 Nop
 __private::Entry
+__private::Frameless
 __private::NativeClass
 __private::NativeClassConst
 __private::NativeConst
@@ -178,6 +179,7 @@ abi::FromArgument::declared
 abi::FromArgument::from_default
 abi::FromArgument::from_value
 abi::FromArgument::hold
+abi::FromArgument::tail
 abi::GcTable
 abi::Header
 abi::Header::HEADER
@@ -728,7 +730,6 @@ request::Frames::executing
 request::Frames::execution
 request::Frames::execution_trace
 request::Frames::forbid_dynamic_call
-request::Frames::frameless
 request::Frames::of
 request::Frames::op_array
 request::Frames::reserved

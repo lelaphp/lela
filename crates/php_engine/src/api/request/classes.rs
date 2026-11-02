@@ -2128,14 +2128,18 @@ impl Request {
 
     /// `ZEND_FLF_FUNC(opline)` and `ZEND_FLF_HANDLER(opline)`: the native
     /// the engine's frameless table holds at `at`, a `FRAMELESS_ICALL_*`'s
-    /// `extended_value`, and its entry, the interception's where an
-    /// extension intercepts it: a frameless row names a native function,
-    /// never a method, a trampoline or an enum's, so its entry is its own
-    /// row of the entries, as [`Request::serve_native`] finds it; none
-    /// past the table, which a unit this engine compiled never carries.
-    pub(crate) fn frameless_entry(&self, at: u32) -> Option<(Function, crate::api::abi::Entry)> {
+    /// `extended_value`, and the entry `#[php_function]` generated for
+    /// that arity, php's `zflf_*`, which an interception of the native's
+    /// framed entry leaves as it is, as php's `zend_flf_handlers` keeps
+    /// the handler registered; none past the table, which a unit this
+    /// engine compiled never carries.
+    #[inline(always)] // the frameless handler's hot path
+    pub(crate) fn frameless_entry(
+        &self,
+        at: u32,
+    ) -> Option<(Function, crate::api::__private::Frameless)> {
         let row = self.shared.frameless.get(at as usize)?;
-        let entry = self.shared.entries.get(row.function as usize)?;
+        let entry = self.shared.frameless_entries.get(at as usize)?;
         Some((Function(row.function), *entry))
     }
 

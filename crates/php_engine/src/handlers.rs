@@ -13427,23 +13427,23 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// engine's frameless table holds at `extended_value` (`ZEND_FLF_FUNC`,
 /// `ZEND_FLF_HANDLER`), served over the operands in `arguments`. php
 /// hands its frameless body the operands and a `return_value` and no
-/// frame; here the body is the native's one entry, which reads its
-/// arguments off the call it is being served from, so the operands are
-/// laid down as a call already serving, each read as the handler reads
-/// it (`GET_OP*_ZVAL_PTR_DEREF`) with one more owner where php holds a
-/// pointer, and the call is popped after the native returned, which
-/// frees each operand where php's `FREE_OP*` frees it. What the native
-/// returned is the temporary's, `ZVAL_NULL(result)` and then the
-/// body's write of it; a native that threw leaves the throwable
+/// frame; here the body is the entry `php_macros` generated for the
+/// arity, `zflf_*` beside `zif_*`, handed the operands each read as the
+/// handler reads it (`GET_OP*_ZVAL_PTR_DEREF`), with one more owner
+/// only where php's pointer is a named variable's that the native
+/// could reassign. No record is laid down: what one would answer is
+/// read off the caller's opline (#3302), and each operand is freed
+/// after the native returned where php's `FREE_OP*` frees it. What the
+/// native returned is the temporary's, `ZVAL_NULL(result)` and then
+/// the body's write of it; a native that threw leaves the throwable
 /// pending as `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` finds it. The loop
 /// steps past the opline and past the `OP_DATA` a third argument came
 /// in.
 ///
-/// php lays that call down only where an observer watches the native,
+/// php lays a call down only where an observer watches the native,
 /// `zend_frameless_observed_call` (`Z/Zend/zend_vm_def.h:9782`); any
-/// other is served over no frame, so here its record stands off the
-/// VM stack's pages ([`Request::push_frameless`]) and takes no room
-/// php's does not. A recursion that leaves its last frame one slot
+/// other is served over no frame and takes no room on the VM stack's
+/// pages. A recursion that leaves its last frame one slot
 /// short of a page's end opens the next page at the same depth whether
 /// its innermost frame then calls a frameless native or not, and
 /// `memory_get_peak_usage()` reads that page where php's reads it:
@@ -13651,7 +13651,13 @@ fn frameless_call<const N: usize>(
         (*read, own) = exec::frameless_operand(req, frame, code, operand, named);
         owned |= u8::from(own) << at;
     }
-    let Some(value) = frameless_served(req, op.extended_value, &operands, owned)? else {
+    let held = Operands {
+        frame,
+        zvals: &operands,
+        owned,
+        slots: &arguments,
+    };
+    let Some(value) = frameless_served(req, op.extended_value, held)? else {
         return Ok(Stepped::Threw(frame).into());
     };
     set_out(req, frame, op, value);
@@ -13663,14 +13669,14 @@ fn frameless_call<const N: usize>(
     jump_to(at.saturating_add(if N == 3 { 2 } else { 1 }))
 }
 
-/// The native at `at` of the engine's frameless table served over
-/// `operands`, the bits of `owned` the ones its record owns, as the
-/// `FRAMELESS_ICALL_*` handlers and the frameless call compiled code
-/// makes ([`crate::tier::frameless_call`]) both serve it: its record
-/// laid down ([`Request::push_frameless`]), the native served, and the
-/// record popped, which gives up what it owns, whether the native threw
-/// or not, as php's frameless handler and its full call for an observed
-/// one do (`Z/Zend/zend_execute.c:1597`). What it returned, with the
+/// The native at `at` of the engine's frameless table served over the
+/// operands `held` carries, as the `FRAMELESS_ICALL_*` handlers and the
+/// frameless call compiled code makes ([`crate::tier::frameless_call`])
+/// both serve it: its arity's entry called with no record, or the
+/// framed entry's full call where an observer watches it
+/// (`Z/Zend/zend_execute.c:1577-1597`), and then each operand given up,
+/// the ones `held` owns released and each temporary freed as `FREE_OP*`
+/// frees it, whether the native threw or not. What it returned, with the
 /// throwable a warning's handler threw left pending where the native
 /// went on past one, or none with the throwable it threw left pending;
 /// the handler's pending test and the tier's wrapper find either.
@@ -13743,33 +13749,29 @@ fn frameless_call<const N: usize>(
 pub(super) fn frameless_served(
     req: &mut Request,
     at: u32,
-    operands: &[Zval],
-    owned: u8,
+    held: Operands<'_>,
 ) -> Result<Option<Value>, Fatal> {
-    let pushed = match req.frameless_entry(at) {
-        Some((function, entry)) => req
-            .push_frameless(function, operands)
-            .map(|_| (function, entry)),
+    let served = match req.frameless_entry(at) {
+        Some((function, _)) if crate::observer::frameless_observed(req, function) => {
+            req.serve_frameless_observed(function, held.zvals)
+        }
+        Some((function, entry)) => Ok(req.serve_frameless(function, entry, held.zvals)),
         None => Err(Fatal::error(format!(
             "InternalError: ZEND_FRAMELESS_ICALL_{} indexes frameless entry {at} and the engine's table has {} entries",
-            operands.len(),
+            held.zvals.len(),
             req.frameless_count()
         ))),
     };
-    let (function, entry) = match pushed {
-        Ok(pushed) => pushed,
-        Err(fatal) => {
-            for (at, &operand) in operands.iter().enumerate() {
-                if owned >> at & 1 != 0 {
-                    req.release_zval_nogc(operand);
-                }
-            }
-            return Err(fatal);
+    // `FREE_OP*` once the native returned, whether it threw or not: an
+    // owner the handler took given up, and a temporary freed where it
+    // stands.
+    for (at, (&operand, &(kind, field))) in held.zvals.iter().zip(held.slots).enumerate() {
+        if held.owned >> at & 1 != 0 {
+            req.release_zval_nogc(operand);
         }
-    };
-    let served = req.serve_entry(function, entry, OnThrow::ReturnValue);
-    req.pop_frameless(owned);
-    match served {
+        exec::free_operand(req, held.frame, kind, field);
+    }
+    match served? {
         // The native went on past a warning whose handler threw, as php's
         // body writes `return_value` whatever `EG(exception)` holds: the
         // check is made with that throwable pending, as for one the native
@@ -13786,6 +13788,20 @@ pub(super) fn frameless_served(
         Ok(value) => Ok(Some(value)),
         Err(thrown) => checked_after_throw(req, &thrown).map(|()| None),
     }
+}
+
+/// The operands a frameless call is served over, as its handler read
+/// them ([`exec::frameless_operand`]) or compiled code handed them
+/// ([`crate::tier::frameless_call`]): the frame it stands in, each
+/// zval, the bits of `owned` the ones the caller holds an owner of, and
+/// each operand's kind and slot, a temporary's freed there after the
+/// call.
+#[derive(Clone, Copy)]
+pub(super) struct Operands<'a> {
+    pub(super) frame: FrameRef,
+    pub(super) zvals: &'a [Zval],
+    pub(super) owned: u8,
+    pub(super) slots: &'a [(OperandKind, u32)],
 }
 
 /// `ZEND_ASSIGN`, `zend_assign_to_variable`
