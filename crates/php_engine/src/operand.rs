@@ -42,10 +42,11 @@ pub(crate) trait Operand: Copy {
         // The zval copied out of the reference itself, never through an
         // `Option<Zval>`: inlined into every arm, such a temporary is a
         // stack slot of its own in the debug build's `serve_frame`.
-        match found {
-            Some(z) => *z,
-            None => Zval::UNDEF,
-        }
+        let Some(z) = found else {
+            std::hint::cold_path();
+            return Zval::UNDEF;
+        };
+        *z
     }
 }
 
