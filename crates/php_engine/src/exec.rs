@@ -1816,11 +1816,12 @@ pub(crate) enum Cached {
     /// scope that reaches it, and a name no class of the chain declares
     /// ([`crate::api::request::Request::cacheable_offset`]).
     ///
-    /// `function` and `scope` are the frame's that placed it: php's
-    /// cache is one per scope, and this engine's one per op array, so the
-    /// slot is read back only from a frame of the same function, which
-    /// fixes the scope, and for a frame of no function, an included or
-    /// evaluated file's, only where its scope is `scope` too.
+    /// `function` and `scope` are the frame's that placed it, its
+    /// function where it is no closure's: php's cache is one per scope,
+    /// and this engine's one per op array, so the slot is read back from
+    /// a frame of the same function, which fixes the scope, and from any
+    /// other, a closure's or an included or evaluated file's, only where
+    /// its scope is `scope` too.
     Property(PropertyPlace) = PROPERTY,
     /// The user function one of the same three resolved on its first
     /// pass, with what each pass after pushes its call with.
