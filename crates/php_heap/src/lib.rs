@@ -103,6 +103,12 @@ pub use zval::{PropBit, Zval, ZvalRef, ZvalType};
 use gc::Counted;
 use std::ptr::NonNull;
 
+/// The bytes [`Heap::uncount`] left out of `memory_get_usage()`, owed
+/// back by [`Heap::recount`].
+#[must_use]
+#[derive(Debug)]
+pub struct Uncounted(usize);
+
 /// The per-request heap (design §5.13): the allocator every string,
 /// array, object and frame passes through, and the only accountant of
 /// memory. `memory_get_usage()` reads it; no other item lets a native
@@ -292,6 +298,27 @@ impl Heap {
     /// `memory_reset_peak_usage()`: the peak becomes the current usage.
     pub fn reset_peak(&mut self) {
         self.mm.reset_peak();
+    }
+
+    /// `value`'s own blocks, a string's or an array's header and its
+    /// data, left out of `memory_get_usage()` while they stand, for a
+    /// value made before the moment php makes it: an uncached compile's
+    /// constant made ahead of the op arrays php lays before it. Nothing
+    /// of a value this heap holds no block of.
+    pub fn uncount(&mut self, value: Zval) -> Uncounted {
+        let array = value.as_arr();
+        let blocks = [
+            value.as_str().map(Str::address),
+            array.map(Arr::address),
+            array.and_then(Arr::data_addr),
+        ];
+        Uncounted(self.mm.uncount(blocks.into_iter().flatten()))
+    }
+
+    /// What [`Heap::uncount`] left out counted again, at the moment php
+    /// makes the value, the peak raised to it as an allocation's is.
+    pub fn recount(&mut self, Uncounted(bytes): Uncounted) {
+        self.mm.recount(bytes);
     }
 
     /// The `memory_limit` this request is held to, in bytes.

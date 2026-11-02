@@ -483,6 +483,31 @@ impl Mm {
         self.real_peak = self.real_size;
     }
 
+    /// [`crate::Heap::uncount`]: the blocks of `blocks` this heap holds
+    /// left out of the bin accounting, and their bytes.
+    pub(crate) fn uncount(&mut self, blocks: impl Iterator<Item = NonNull<u8>>) -> usize {
+        let bytes = blocks
+            .filter(|at| self.holds(at.as_ptr().addr()))
+            .map(|at| self.accounted(at))
+            .sum();
+        self.size = self.size.saturating_sub(bytes);
+        if matches!(self.allocator, Allocator::Tracked(_)) {
+            self.real_size = self.size;
+        }
+        bytes
+    }
+
+    /// [`crate::Heap::recount`]: `bytes` counted again, the peak raised
+    /// to them as an allocation raises it.
+    pub(crate) fn recount(&mut self, bytes: usize) {
+        self.size += bytes;
+        if matches!(self.allocator, Allocator::Tracked(_)) {
+            self.real_size = self.size;
+        } else {
+            self.peak = self.peak.max(self.size);
+        }
+    }
+
     /// The `memory_limit` this heap is held to.
     pub(crate) fn limit(&self) -> usize {
         self.limit
