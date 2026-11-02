@@ -625,3 +625,16 @@ files = { "a.php" = "<?php class C { public $p { set { } } function m() {} } ech
 [[line.then]]
 args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/b.php" }
+
+# A method's key of such a program, laid as the method begins (#3900):
+# `zend_begin_method_decl` lowers `doIt` to `doit` (`zend_string_tolower`),
+# a string of its own where opcache's table holds no such bytes, which
+# stands through the method's `pass_two`, as a function's key does.
+[[line]]
+name = "an-uncached-method-lays-its-key-as-it-begins"
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/a.php" }
+files = { "a.php" = "<?php class C { function doIt() {} } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "b.php" = "<?php class C { function doIt() {} } function g() {} echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/b.php" }

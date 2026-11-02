@@ -2411,8 +2411,8 @@ struct Walk<'u> {
     /// The strings of the names written for the unit's hooks, where the
     /// request compiled it, one given back as each hook has compiled.
     hook_names: Vec<Emalloc>,
-    /// The keys of the top-level functions laid as each begins, where
-    /// the request compiled the unit ([`Walk::function`]).
+    /// The keys of the top-level functions and the methods laid as each
+    /// begins, where the request compiled the unit ([`Walk::key`]).
     keys: Option<Vec<Emalloc>>,
 }
 
@@ -2519,27 +2519,8 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// The top-level function at `at`, once, and where the request
-    /// compiled the unit, the key `zend_begin_func_decl` lowers its name
-    /// to as it begins where the name holds an upper-case letter
-    /// (`zend_string_tolower`, `Z/Zend/zend_compile.c:8395`), a namespaced
-    /// function's among them, which the unit's own string stands for
-    /// only once the compile is over ([`Request::hold_unit_names`]):
-    ///
-    /// ```php
-    /// $f = sys_get_temp_dir() . '/w3836-key-' . getmypid() . '.php';
-    /// foreach (['function foo() {} ', 'function Foo() {} '] as $code) {
-    ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
-    ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
-    ///     [$usage, $peak] = explode(' ', trim($fresh));
-    ///     echo $peak - $usage, "\n";
-    /// }
-    /// unlink($f);
-    /// ```
-    /// ```expect process
-    /// 37360
-    /// 37360
-    /// ```
+    /// The top-level function at `at`, once, its key laid as it begins
+    /// ([`Walk::key`]).
     fn function(
         &mut self,
         req: &mut Request,
@@ -2555,11 +2536,7 @@ impl Walk<'_> {
         if std::mem::replace(reached, true) {
             return Ok(());
         }
-        if let Some(keys) = &mut self.keys
-            && decl.name.0.iter().any(u8::is_ascii_uppercase)
-        {
-            keys.push(Emalloc::new(req, STRING_HEADER + decl.name.0.len() + 1)?);
-        }
+        self.key(req, &decl.name.0, false)?;
         self.body(req, code, Some((decl, false)), stood, Holder::Function)
     }
 
@@ -2631,13 +2608,58 @@ impl Walk<'_> {
             return Ok(());
         };
         self.class(req, method.class as usize)?;
-        if let Some(Some(class)) = self.laid.classes.get(method.class as usize) {
-            add_rows(req, class.table(Table::Methods), 1)?;
-        }
         let declared = (unit.classes.get(method.class as usize))
             .and_then(|class| class.methods.get(method.method as usize))
             .map(|decl| (&decl.function, true));
+        if let Some((decl, _)) = declared {
+            self.key(req, &decl.name.0, true)?;
+        }
+        if let Some(Some(class)) = self.laid.classes.get(method.class as usize) {
+            add_rows(req, class.table(Table::Methods), 1)?;
+        }
         self.body(req, &method.body, declared, stood, Holder::Member)
+    }
+
+    /// The key `name` is lowered to as its function or method begins,
+    /// where the request compiled the unit and the name holds an
+    /// upper-case letter, standing until the compile is over: a
+    /// function's, a namespaced one's among them, made whatever the cache
+    /// holds (`zend_begin_func_decl`'s `zend_string_tolower`,
+    /// `Z/Zend/zend_compile.c:8395`), and a method's, abstract or not,
+    /// where the engine's table holds no string of its bytes
+    /// (`zend_begin_method_decl`'s, `:8315`), each the unit's own string
+    /// only after the compile ([`Request::hold_unit_names`]):
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3900-' . getmypid() . '.php';
+    /// foreach (['function foo() {} ', 'function Foo() {} ', 'class C { function doit() {} } ', 'class C { function doIt() {} } ', 'class C { function Count() {} } ', 'interface I { function doIt(); } '] as $code) {
+    ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
+    ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
+    ///     [$usage, $peak] = explode(' ', trim($fresh));
+    ///     echo $peak - $usage, "\n";
+    /// }
+    /// unlink($f);
+    /// ```
+    /// ```expect process
+    /// 37360
+    /// 37360
+    /// 37392
+    /// 37392
+    /// 37392
+    /// 37392
+    /// ```
+    fn key(&mut self, req: &mut Request, name: &[u8], interned: bool) -> Result<(), Thrown> {
+        if let Some(keys) = &mut self.keys
+            && name.iter().any(u8::is_ascii_uppercase)
+            && !(interned
+                && req
+                    .shared
+                    .existing_interned(&name.to_ascii_lowercase())
+                    .is_some())
+        {
+            keys.push(Emalloc::new(req, STRING_HEADER + name.len() + 1)?);
+        }
+        Ok(())
     }
 
     /// The hook at `at` of the unit's hooks.
