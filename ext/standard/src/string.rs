@@ -1891,6 +1891,22 @@ pub(crate) fn shortened(
 ///
 /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
+///
+/// Each piece is added as it is found and no offsets are kept; a string
+/// with no separator is its own one piece, `ZVAL_STR_COPY`, no copy made,
+/// and the pieces of a negative limit are counted out of the same walk.
+///
+/// ```php
+/// $s = str_repeat('a', 30);
+/// $m = memory_get_usage(); $a = explode(',', $s); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $b = explode(',', "$s,$s,$s"); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $c = explode(',', "$s,$s,$s", -1); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 216
+/// 408
+/// 328
+/// ```
 #[php_function]
 fn explode(
     req: &mut Request,
@@ -1911,43 +1927,29 @@ fn explode(
         }
         return Ok(array);
     }
-    let mut starts = vec![0usize];
-    let mut at = 0;
-    while let Some(found) = memnstr(s, d, at) {
-        at = found + d.len();
-        starts.push(at);
-        if limit > 1 && long(starts.len()) >= limit {
-            break;
-        }
-    }
-    // `starts[i]` opens piece `i`; the piece ends before the separator
-    // that opens the next, or at the end.
-    let piece = |i: usize| -> &[u8] {
-        let from = starts[i];
-        let to = starts.get(i + 1).map_or(s.len(), |next| next - d.len());
-        &s[from..to]
-    };
-    let pieces = starts.len();
-    let take = if limit > 1 {
-        pieces
-    } else if limit < 0 {
-        if pieces == 1 {
-            0
-        } else {
-            usize::try_from(long(pieces) + limit).unwrap_or(0)
-        }
-    } else {
-        1
-    };
     if limit == 0 || limit == 1 {
         let whole = Owner::take(req, string).into_value();
         array.append(req, whole)?;
         return Ok(array);
     }
-    // `php_explode` makes each piece with `zend_string_init_fast`
-    // (`Z/ext/standard/string.c:868`, `:876`), and
-    // `php_explode_negative_limit` with `ZVAL_STRINGL` (`:924`).
-    for i in 0..take {
+    let Some(mut p2) = memnstr(s, d, 0) else {
+        // `ZVAL_STR_COPY` of the string, one piece and no copy; a
+        // negative limit leaves the array empty.
+        if limit > 1 {
+            let whole = Owner::take(req, string).into_value();
+            array.append(req, whole)?;
+        }
+        return Ok(array);
+    };
+    if limit < 0 {
+        return explode_negative_limit(req, array, d, s, limit);
+    }
+    // `php_explode`: each piece added as it is found, with
+    // `zend_string_init_fast` (`Z/ext/standard/string.c:868`, `:876`),
+    // and no offsets kept.
+    let mut p1 = 0;
+    let mut limit = limit;
+    loop {
         // "Each piece costs a zval plus a zend_string, so stop once over
         // the limit" (8.5.12), before each piece, the array as far as it
         // was filled returned and the limit's fatal raised after the
@@ -1955,12 +1957,62 @@ fn explode(
         if req.memory().has_oom() {
             return Ok(array);
         }
-        let value = if limit < 0 {
-            PhpString::new(req, piece(i))?
-        } else {
-            PhpString::fast(req, piece(i))?
-        };
+        let value = PhpString::fast(req, &s[p1..p2])?;
         array.append(req, value.into_value())?;
+        p1 = p2 + d.len();
+        // `while (p2 != NULL && --limit > 1)`.
+        match memnstr(s, d, p1) {
+            Some(next)
+                if {
+                    limit -= 1;
+                    limit > 1
+                } =>
+            {
+                p2 = next;
+            }
+            _ => break,
+        }
+    }
+    let rest = PhpString::fast(req, &s[p1..])?;
+    array.append(req, rest.into_value())?;
+    Ok(array)
+}
+
+/// `php_explode_negative_limit`: every piece but the last `-limit`, each
+/// made with `ZVAL_STRINGL` (`Z/ext/standard/string.c:924`). php keeps
+/// the piece's offsets in an `emalloc`'d table that is freed as it
+/// returns; here the separators are counted first and the pieces found
+/// again, so nothing is kept.
+fn explode_negative_limit(
+    req: &mut Request,
+    mut array: Owner<PhpArray>,
+    d: &[u8],
+    s: &[u8],
+    limit: i64,
+) -> Result<Owner<PhpArray>, Thrown> {
+    let mut found = 1usize;
+    let mut at = 0;
+    while let Some(next) = memnstr(s, d, at) {
+        // "One pointer per delimiter, then a zval and a zend_string per
+        // piece."
+        if req.memory().has_oom() {
+            return Ok(array);
+        }
+        found += 1;
+        at = next + d.len();
+    }
+    let take = usize::try_from(long(found) + limit).unwrap_or(0);
+    let mut p1 = 0;
+    for _ in 0..take {
+        if req.memory().has_oom() {
+            break;
+        }
+        let Some(p2) = memnstr(s, d, p1) else {
+            break;
+        };
+        let value = PhpString::new(req, &s[p1..p2])?;
+        array.append(req, value.into_value())?;
+        p1 = p2 + d.len();
     }
     Ok(array)
 }
