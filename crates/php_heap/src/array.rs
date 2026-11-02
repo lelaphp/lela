@@ -1757,9 +1757,29 @@ impl Arr {
         z
     }
 
+    /// `_zend_hash_index_add_or_update_i`'s `add_to_packed` arm under
+    /// `HASH_ADD_NEXT` where nothing else of it is taken: a packed list
+    /// whose next free element is the slot past its last and inside its
+    /// room, so `z` lands there with no hole to lay, no table to grow and
+    /// nothing to convert. `None` is every other table, for
+    /// [`write_long`] to take whole; nothing is written then.
+    #[inline]
+    fn append_in_room(self, z: Zval) -> Option<u32> {
+        let header = self.header();
+        let used = header.num_used.get();
+        let next = header.next_free.get();
+        let next = if next == i64::MIN { 0 } else { next };
+        if !self.is_packed() || next != i64::from(used) || used >= header.table_size.get() {
+            return None;
+        }
+        self.add_to_packed(used, z);
+        Some(used)
+    }
+
     /// The `add_to_packed` arm: the slots between `nNumUsed` and `h`
     /// become holes, and `h + 1` is both the used count and the next
     /// free element.
+    #[inline]
     fn add_to_packed(self, h: u32, z: Zval) {
         let header = self.header();
         let used = self.num_used();
@@ -2036,8 +2056,40 @@ impl crate::Heap {
 
     /// `zend_hash_next_index_insert`, `$a[] = z`: `false`, and `z` still
     /// the caller's, when `nNextFreeElement` is `ZEND_LONG_MAX` and taken.
-    /// Nothing is replaced, so nothing here can reach user code.
+    /// Nothing is replaced, so nothing here can reach user code. A packed
+    /// list with room takes `z` here, inline in the caller
+    /// ([`Arr::append_in_room`]); every other table goes out of line: a
+    /// list whose last slots were unset, which lays its holes, a hash, a
+    /// list out of room, which grows at php's sizes, and a table never
+    /// written.
+    ///
+    /// ```php
+    /// $a = [1, 2]; $a[] = 3;
+    /// $b = [1, 2, 3]; unset($b[2]); $b[] = 4;
+    /// $c = [1, 2]; array_pop($c); $c[] = 5;
+    /// $d = [5 => 1]; $d[] = 2;
+    /// $e = []; for ($i = 0; $i < 9; $i++) { $e[] = $i; }
+    /// echo json_encode([$a, $b, $c, $d, $e]), "\n";
+    /// $n = 1; $m = memory_get_usage(); $f = [$n, 2]; $f[] = 3; $g = memory_get_usage() - $m;
+    /// for ($i = 0; $i < 6; $i++) { $f[] = $i; } $h = memory_get_usage() - $m;
+    /// var_dump($g, $h);
+    /// ```
+    /// ```expect
+    /// [[1,2,3],{"0":1,"1":2,"3":4},[1,5],{"5":1,"6":2},[0,1,2,3,4,5,6,7,8]]
+    /// int(216)
+    /// int(376)
+    /// ```
+    #[inline]
     pub fn array_append(&mut self, a: Arr, z: Zval) -> Result<bool, Fatal> {
+        if a.append_in_room(z).is_some() {
+            return Ok(true);
+        }
+        self.array_append_out_of_room(a, z)
+    }
+
+    /// [`Heap::array_append`] past the packed list with room.
+    #[inline(never)]
+    fn array_append_out_of_room(&mut self, a: Arr, z: Zval) -> Result<bool, Fatal> {
         Ok(self.array_write_long(a, a.next_free(), z, Write::Next)? != Written::Refused)
     }
 
@@ -2091,7 +2143,17 @@ impl crate::Heap {
     /// entry appended, in place, holding `null`; `None` where
     /// `nNextFreeElement` is `ZEND_LONG_MAX` and taken, which is
     /// `zend_cannot_add_element`'s `Error` at the site.
+    #[inline]
     pub fn array_next_entry(&mut self, a: Arr) -> Result<Option<ZvalRef>, Fatal> {
+        if let Some(slot) = a.append_in_room(Zval::null()) {
+            return Ok(Some(ZvalRef::new(a.value_ptr(Pos::Slot(slot)))));
+        }
+        self.array_next_entry_out_of_room(a)
+    }
+
+    /// [`Heap::array_next_entry`] past the packed list with room.
+    #[inline(never)]
+    fn array_next_entry_out_of_room(&mut self, a: Arr) -> Result<Option<ZvalRef>, Fatal> {
         let index = a.next_free();
         let index = if index == i64::MIN { 0 } else { index };
         Ok(
