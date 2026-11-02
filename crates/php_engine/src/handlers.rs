@@ -20228,6 +20228,7 @@ pub(crate) fn add_array_element<T: Tier>(
 ///
 /// Warning: r(): Argument #1 ($r) must be passed by reference, value given in %s on line 3
 /// ```
+#[inline]
 fn add_element(
     req: &mut Request,
     frame: FrameRef,
@@ -20236,43 +20237,65 @@ fn add_element(
     array: crate::api::values::PhpArray,
 ) -> Edge {
     let value = if op.extended_value & ARRAY_ELEMENT_REF != 0 {
-        let Some(at) = write_place(req, frame, op.op1_type, op.op1) else {
-            return Err(Fatal::error(
-                "InternalError: ADD_ARRAY_ELEMENT by reference over an operand php compiles no write over",
-            ));
-        };
-        let bound = bound_at(req, at);
-        // `FREE_OP1_VAR_PTR()`: a `VAR` holding a value of its own, what
-        // `FETCH_THIS` left for `[&$this]`, gives its owner up, so the
-        // cell the entry holds is the entry's alone.
-        if op.op1_type == OperandKind::Var {
-            exec::free_operand(req, frame, op.op1_type, op.op1);
-        }
-        match bound {
+        match element_reference(req, frame, op) {
             Ok(bound) => bound,
-            Err(thrown) => return threw(req, frame, &thrown),
+            Err(edge) => return edge,
         }
     } else {
         exec::take_operand(req, frame, code, op.op1_type, op.op1)
     };
-    let offset = if op.op2_type == OperandKind::Unused {
-        Offset::Next
+    let added = if op.op2_type == OperandKind::Unused {
+        crate::ops::add_array_element(req, array, Offset::Next, value)
     } else {
-        let key = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
-        if key.tag() == TypeTag::Undef {
-            exec::operand(req, frame, code, op.op2_type, op.op2);
-        }
-        Offset::At {
-            key,
-            constant: op.op2_type == OperandKind::Const,
-        }
+        add_keyed_element(req, frame, code, op, array, value)
     };
-    let added = crate::ops::add_array_element(req, array, offset, value);
-    exec::free_operand(req, frame, op.op2_type, op.op2);
     match added {
         Ok(()) => Ok(advance(req, frame)),
         Err(thrown) => threw(req, frame, &thrown),
     }
+}
+
+/// [`add_element`]'s `op1` under `ZEND_ARRAY_ELEMENT_REF`: the cell the
+/// place it names is bound to, or the edge the opline ends on.
+#[inline(never)]
+fn element_reference(req: &mut Request, frame: FrameRef, op: &Opline) -> Result<Value, Edge> {
+    let Some(at) = write_place(req, frame, op.op1_type, op.op1) else {
+        return Err(Err(Fatal::error(
+            "InternalError: ADD_ARRAY_ELEMENT by reference over an operand php compiles no write over",
+        )));
+    };
+    let bound = bound_at(req, at);
+    // `FREE_OP1_VAR_PTR()`: a `VAR` holding a value of its own, what
+    // `FETCH_THIS` left for `[&$this]`, gives its owner up, so the
+    // cell the entry holds is the entry's alone.
+    if op.op1_type == OperandKind::Var {
+        exec::free_operand(req, frame, op.op1_type, op.op1);
+    }
+    bound.map_err(|thrown| threw(req, frame, &thrown))
+}
+
+/// [`add_element`] with a key: `op2` read as it stands, the kernel over
+/// it, then `FREE_OP2`.
+#[inline(never)]
+fn add_keyed_element(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    array: crate::api::values::PhpArray,
+    value: Value,
+) -> Result<(), Thrown> {
+    let key = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
+    if key.tag() == TypeTag::Undef {
+        exec::operand(req, frame, code, op.op2_type, op.op2);
+    }
+    let offset = Offset::At {
+        key,
+        constant: op.op2_type == OperandKind::Const,
+    };
+    let added = crate::ops::add_array_element(req, array, offset, value);
+    exec::free_operand(req, frame, op.op2_type, op.op2);
+    added
 }
 
 /// `ZEND_ADD_ARRAY_UNPACK` (`Z/Zend/zend_vm_def.h:6335`), `...$x`

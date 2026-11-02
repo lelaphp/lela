@@ -629,6 +629,7 @@ impl Request {
     /// over it where the opline says the array cannot be packed
     /// (`ZEND_ARRAY_NOT_PACKED`); the memory limit as the fatal that ends
     /// the request.
+    #[inline]
     pub(crate) fn array_sized(&mut self, size: u32, packed: bool) -> Result<PhpArray, Thrown> {
         let allocated = if packed {
             self.heap.array_sized(size)
@@ -681,13 +682,25 @@ impl Request {
 
     /// `zend_hash_next_index_insert` over `a`, which has one owner:
     /// `false`, and `value` given up, when the next element is taken.
+    #[inline]
     pub(crate) fn array_append(&mut self, a: Arr, value: Value) -> Result<bool, Thrown> {
         let z = value.into_zval();
-        let appended = self.heap.array_append(a, z);
-        if appended == Ok(false) {
+        match self.heap.array_append(a, z) {
+            Ok(true) => Ok(true),
+            refused => self.append_refused(refused, z),
+        }
+    }
+
+    /// [`Request::array_append`] where `z` did not go in: given up when
+    /// the next element was taken, and the fatal the heap raised as the
+    /// request's.
+    #[cold]
+    #[inline(never)]
+    fn append_refused(&mut self, refused: Result<bool, Fatal>, z: Zval) -> Result<bool, Thrown> {
+        if refused == Ok(false) {
             Heap::release(&mut Hooks(self), z);
         }
-        self.fatal_of(appended)
+        self.fatal_of(refused)
     }
 
     /// `zend_hash_lookup` over `a`, which has one owner: the entry at
@@ -701,6 +714,7 @@ impl Request {
     /// `zend_hash_next_index_insert` of `null` over `a`, which has one
     /// owner: the entry appended, in place; `None` when the next element
     /// is taken.
+    #[inline]
     pub(crate) fn array_next_entry(&mut self, a: Arr) -> Result<Option<ZvalRef>, Thrown> {
         let entry = self.heap.array_next_entry(a);
         self.fatal_of(entry)
@@ -785,19 +799,22 @@ impl Request {
     /// fatal the allocator raised, recorded here where `zend_mm` leaves
     /// the request, as the `Thrown` carrying no throwable that ends the
     /// native.
+    #[inline]
     pub(crate) fn fatal_of<T>(&mut self, answered: Result<T, Fatal>) -> Result<T, Thrown> {
-        match answered {
-            Ok(value) => Ok(value),
-            // A fallible ask's refusal ends nothing: it is carried out to
-            // its scope ([`Memory::fallible`]).
-            Err(fatal) if *fatal.reason() == php_heap::FatalReason::Refused => {
-                Err(Thrown::of(None))
-            }
-            Err(fatal) => {
-                self.end_in(&fatal);
-                Err(Thrown::of(None))
-            }
+        answered.map_err(|fatal| self.thrown_of(&fatal))
+    }
+
+    /// [`Request::fatal_of`]'s refusal, out of the line of every answer
+    /// that is a value.
+    #[cold]
+    #[inline(never)]
+    fn thrown_of(&mut self, fatal: &Fatal) -> Thrown {
+        // A fallible ask's refusal ends nothing: it is carried out to
+        // its scope ([`Memory::fallible`]).
+        if *fatal.reason() != php_heap::FatalReason::Refused {
+            self.end_in(fatal);
         }
+        Thrown::of(None)
     }
 
     /// The limit the heap holds a request to from its start: what

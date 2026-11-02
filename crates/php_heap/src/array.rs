@@ -1919,6 +1919,7 @@ impl crate::Heap {
     /// `zend_hash_check_size(size, heap->fallible)` over this heap: the
     /// table's size, and its overflow the heap's refusal or its end
     /// ([`Mm::overflow_refusal`]).
+    #[inline]
     fn table_size(&mut self, size: u32) -> Result<u32, Fatal> {
         check_size(size).map_err(|said| self.mm.overflow_refusal(said))
     }
@@ -1926,6 +1927,7 @@ impl crate::Heap {
     /// `zend_new_array(size)`, `array_init_size`: the header, with the
     /// first data allocation sized for `size` elements through
     /// `zend_hash_check_size`.
+    #[inline]
     pub fn array_sized(&mut self, size: u32) -> Result<Arr, Fatal> {
         let size = self.table_size(size)?;
         let at = self.mm.alloc(HEADER)?;
