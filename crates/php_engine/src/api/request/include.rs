@@ -1613,9 +1613,7 @@ impl Request {
         kind: IncludeKind,
         written: &[u8],
     ) -> Result<Opened, Thrown> {
-        let include_path =
-            String::from_utf8_lossy(self.ini().get(b"include_path").unwrap_or_default())
-                .into_owned();
+        let include_path = String::from_utf8_lossy(self.include_path()).into_owned();
         let shown = String::from_utf8_lossy(crate::c_number::c_str(written)).into_owned();
         if kind.required() {
             return Err(crate::api::raising::error(

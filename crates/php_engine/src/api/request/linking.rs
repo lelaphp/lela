@@ -34,18 +34,21 @@ use crate::api::values::{ClassId, Key, Value, ValueRef, walk};
 /// The classes whose link is under way, `CG(delayed_autoloads)`, and
 /// the units the cache served the request from what it holds, whose
 /// declarations are php's immutable ones (`ZEND_ACC_IMMUTABLE`), the
-/// only ones the inheritance cache keeps a link of.
+/// only ones the inheritance cache keeps a link of: each by its address,
+/// which the unit it keeps holds, so a hit asks one lookup and not one
+/// comparison per unit served before it, as php reads
+/// `ZEND_ACC_IMMUTABLE` off the class.
 #[derive(Default)]
 pub(crate) struct Links {
     unlinked: Vec<Unlinked>,
     autoloads: Vec<Vec<u8>>,
-    held: Vec<PublishedUnit>,
+    held: super::WordMap<usize, PublishedUnit>,
 }
 
 impl Links {
     /// Whether the cache served this request `unit`.
     fn holds(&self, unit: &PublishedUnit) -> bool {
-        (self.held.iter()).any(|held| PublishedUnit::ptr_eq(held, unit))
+        self.held.contains_key(&PublishedUnit::as_ptr(unit).addr())
     }
 }
 
@@ -591,9 +594,8 @@ pub(super) struct Fetched {
 impl Request {
     /// A unit the cache served this request from what it holds.
     pub(super) fn note_held(&mut self, unit: &PublishedUnit) {
-        if !self.links.holds(unit) {
-            self.links.held.push(PublishedUnit::clone(unit));
-        }
+        let at = PublishedUnit::as_ptr(unit).addr();
+        (self.links.held.entry(at)).or_insert_with(|| PublishedUnit::clone(unit));
     }
 
     /// What `decl`'s link fetched, each a class every request shares;

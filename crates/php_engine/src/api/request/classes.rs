@@ -295,10 +295,12 @@ impl Request {
     /// over `unit`'s classes, for [`Request::declare_classes_through`]
     /// and [`Request::declare_delayed`].
     pub(crate) fn class_load(&mut self, unit: &PublishedUnit) -> ClassLoad {
-        let delayed: Vec<Vec<u8>> = unit
-            .main
-            .oplines
-            .iter()
+        // Only a class under a runtime definition key reads `delayed`
+        // ([`Request::declare_class_at`]), so a unit with none, most of
+        // them, walks no opline of its main op array for it.
+        let keyed = !unit.runtime_keys.is_empty();
+        let delayed: Vec<Vec<u8>> = (unit.main.oplines.iter())
+            .take_while(|_| keyed)
             .filter(|op| op.opcode == Opcode::DeclareClassDelayed)
             .filter_map(|op| {
                 let key = usize::try_from(op.op1).ok()?.checked_add(1)?;
@@ -402,7 +404,8 @@ impl Request {
         if let Some(existing) = self.class_named((&decl.name).into()) {
             let message = self.redeclaration(existing);
             let file = decl.file.0.to_vec();
-            self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
+            let level = self.redeclared_at(unit);
+            self.end_in_compile_time(level, &message, &file, decl.line);
             return None;
         }
         let published = load.early.as_ref().and_then(|early| *early.get(at)?);
@@ -1923,6 +1926,54 @@ impl Request {
         (0..unit.functions.len()).all(|at| self.declare_function(unit, at).is_some())
     }
 
+    /// The level a name `unit`'s load declares again is refused at:
+    /// `E_ERROR` where opcache serves the unit from what it holds, as
+    /// `zend_accel_load_script` copies a held unit's functions and
+    /// then its classes into the request's tables, one pass over each
+    /// with one lookup per name
+    /// (`Z/ext/opcache/zend_accelerator_util_funcs.c:146-172`,
+    /// `:208-216`); `E_COMPILE_ERROR` where php's compile meets the name
+    /// (`do_bind_function_error`, `zend_class_redeclaration_error`).
+    /// Served by the built-in server, whose requests share the cache, so
+    /// the second file of each pair is a hit:
+    ///
+    /// ```php
+    /// $dir = realpath(sys_get_temp_dir()) . '/redeclared' . bin2hex(random_bytes(8)); mkdir($dir);
+    /// foreach (['f' => 'function twice() {}', 'c' => 'class Twice {}'] as $k => $decl) { file_put_contents("$dir/{$k}a.inc", "<?php\n$decl\n"); file_put_contents("$dir/{$k}b.inc", "<?php\n\n$decl\n"); }
+    /// file_put_contents("$dir/index.php", '<?php register_shutdown_function(fn () => print("type " . (error_get_last()["type"] ?? 0) . "\n")); foreach (explode(",", $_GET["f"]) as $f) { include __DIR__ . "/$f.inc"; }');
+    /// foreach (glob("$dir/*") as $f) { touch($f, time() - 60); }
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable=1', '-d', 'opcache.jit=off', '-d', 'html_errors=0', '-S', '127.0.0.1:0', '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// $ready = [$pipes[2]]; $none = null;
+    /// $line = stream_select($ready, $none, $none, 30) ? fgets($pipes[2]) : '';
+    /// $port = preg_match('/:(\d+)\) started$/', rtrim($line), $m) ? $m[1] : 0;
+    /// foreach (['fa', 'fb', 'ca', 'cb', 'fa,fb', 'ca,cb'] as $f) { echo file_get_contents("http://127.0.0.1:$port/?f=$f"); }
+    /// proc_terminate($p); proc_close($p);
+    /// exec('rm -rf ' . escapeshellarg($dir));
+    /// ```
+    /// ```expect process
+    /// type 0
+    /// type 0
+    /// type 0
+    /// type 0
+    ///
+    /// Fatal error: Cannot redeclare function twice() (previously declared in %s/fa.inc:2) in %s/fb.inc on line 3
+    /// Stack trace:
+    /// #0 {main}
+    /// type 1
+    ///
+    /// Fatal error: Cannot redeclare class Twice (previously declared in %s/ca.inc:2) in %s/cb.inc on line 3
+    /// Stack trace:
+    /// #0 {main}
+    /// type 1
+    /// ```
+    fn redeclared_at(&self, unit: &PublishedUnit) -> Level {
+        if self.accel_hit(unit) {
+            Level::Error
+        } else {
+            Level::CompileError
+        }
+    }
+
     /// `do_bind_function`'s and `zend_begin_func_decl`'s redeclaration
     /// text: the function `name` redeclared over `earlier`, and the
     /// earlier one's site where it is a user function.
@@ -1964,7 +2015,8 @@ impl Request {
         if let Some(earlier) = self.function_named((&decl.name).into()) {
             let message = self.function_redeclaration(earlier, &decl.name.0);
             let file = decl.file.0.to_vec();
-            self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
+            let level = self.redeclared_at(unit);
+            self.end_in_compile_time(level, &message, &file, decl.line);
             return None;
         }
         let Some(declared) = Function::local(self.user_functions.len()) else {
