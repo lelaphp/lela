@@ -2849,6 +2849,11 @@ impl crate::Heap {
     /// released
     /// ```
     pub(crate) fn destroy(hooks: &mut dyn HeapHooks, first: Last) {
+        if let Last::Table(a) = first
+            && hooks.heap().array_destroy_flat(a)
+        {
+            return;
+        }
         // The heap's room for the walk, taken for its length and put back
         // emptied, so a walk allocates nothing after the request's first.
         let mut walk = std::mem::take(&mut hooks.heap().destroying);
@@ -2909,15 +2914,7 @@ impl crate::Heap {
                     let a = *a;
                     let Some((val, k)) = a.element_from(at) else {
                         walk.pop();
-                        Heap::array_free_data(hooks.heap(), a);
-                        let pinned = a.gc().pinned();
-                        if pinned {
-                            a.emptied();
-                        }
-                        // SAFETY: the header came from `array_sized`, its
-                        // last owner has given it up and its contents are
-                        // freed, so only a pin names it.
-                        unsafe { hooks.heap().give_back(a.address(), pinned) };
+                        hooks.heap().array_give_back(a);
                         continue;
                     };
                     next = Heap::release_within(hooks, val);
@@ -2970,6 +2967,47 @@ impl crate::Heap {
         Heap::array_free_data(hooks.heap(), a);
     }
 
+    /// [`Heap::destroy`] of a table no element of which has an owner to
+    /// give up: a packed list of uncounted values, or a table never
+    /// written. php's `zend_array_destroy` walks it and releases nothing,
+    /// so the walk is left out and the table goes as the walk would let it
+    /// go, out of the root buffer, then its data and its header. `false`,
+    /// and nothing done, for every other table, the walk's.
+    ///
+    /// ```php
+    /// $b = memory_get_usage();
+    /// $a = [1, 2.5, true, null, 'interned']; $a[] = 6; $h = [3 => 1, 9 => 2];
+    /// $a = null; $h = null;
+    /// $c = [[1, 2], [3]]; $c = null;
+    /// var_dump(memory_get_usage() - $b);
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// ```
+    fn array_destroy_flat(&mut self, a: Arr) -> bool {
+        if a.gc().kind() == ZvalType::Null as u32 || !a.holds_nothing_counted() {
+            return false;
+        }
+        self.gc.remove_from_buffer(crate::collector::Node::Arr(a));
+        a.gc().set_kind(ZvalType::Null);
+        self.array_give_back(a);
+        true
+    }
+
+    /// The end of `zend_array_destroy` once every element is released:
+    /// the data back to the heap, then the header, or what a pin over it
+    /// reads as an emptied table.
+    fn array_give_back(&mut self, a: Arr) {
+        Heap::array_free_data(self, a);
+        let pinned = a.gc().pinned();
+        if pinned {
+            a.emptied();
+        }
+        // SAFETY: the header came from `array_sized`, its last owner has
+        // given it up and its contents are freed, so only a pin names it.
+        unsafe { self.give_back(a.address(), pinned) };
+    }
+
     /// The end of `zend_array_destroy` and `zend_hash_destroy` once
     /// every element is released: the iterators unregistered and the
     /// data back to the heap.
@@ -2994,6 +3032,15 @@ pub(crate) enum Emptying {
 }
 
 impl Arr {
+    /// Whether giving the table up releases nothing: an uninitialised
+    /// table, or a packed list none of whose slots holds a counted value.
+    fn holds_nothing_counted(self) -> bool {
+        if self.is_uninitialized() {
+            return true;
+        }
+        self.is_packed() && (0..self.num_used()).all(|idx| !self.read_slot(idx).is_refcounted())
+    }
+
     /// The next element of a table being destroyed at or past `*at`,
     /// its value and its string key, and `*at` moved past it: a packed
     /// table's slots, a hash's buckets less the tombstones, and nothing
