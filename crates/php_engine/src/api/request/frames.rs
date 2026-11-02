@@ -1222,8 +1222,11 @@ impl Request {
     /// (`ZEND_FETCH_OBJ_R`, `ZEND_ASSIGN_OBJ`): where objects of `class`
     /// hold the property the fetch at `slot` placed on an earlier pass,
     /// where `frame` is one the placement holds for
-    /// ([`exec::Cached::Property`]) and no write names its own scope;
-    /// none otherwise, and the fetch places the name.
+    /// ([`exec::Cached::Property`]): a frame of the function that placed
+    /// it, no closure's, or one of the scope it was placed from, a
+    /// closure's among them, as [`Request::cached_in_scope`] reads a slot
+    /// back; and no write names its own scope. None otherwise, and the
+    /// fetch places the name.
     pub(crate) fn cached_property(
         &self,
         frame: FrameRef,
@@ -1241,10 +1244,9 @@ impl Request {
             return None;
         };
         let same = held == class
-            && header.closure.is_none()
-            && header.function == function
             && !self.fakes_scope()
-            && (function.is_some() || self.frame_scope(frame) == scope);
+            && (function.is_some() && header.closure.is_none() && header.function == function
+                || self.frame_scope(frame) == scope);
         same.then_some(offset)
     }
 
@@ -1252,8 +1254,28 @@ impl Request {
     /// fetch at `slot` in `frame`: where `name` is placed on objects of
     /// `object`'s class written into the runtime cache, where
     /// [`Request::cacheable_offset`] answers and the scope it was placed
-    /// from is the frame's own. A closure's frame is never written for,
-    /// since one op array serves closures bound to many scopes.
+    /// from is the frame's own. A closure's frame is written for as php
+    /// writes into the cache `zend_create_closure` gave the closure
+    /// (`Z/Zend/zend_closures.c:794`), with no function, so the place
+    /// is read back by a frame of the scope it was placed from
+    /// ([`Request::cached_property`]), whatever the closure is bound to:
+    ///
+    /// ```php
+    /// class A { private $p = 'A'; } class A2 extends A { public $p = 'a2'; } class B { private $p = 'B'; public $q = 'q'; }
+    /// $get = function () { return $this->p; };
+    /// $put = function ($v) { $this->q = $v; return $this->q; };
+    /// $a = Closure::bind($get, new A, A::class); $b = Closure::bind($get, new B, B::class);
+    /// $c = Closure::bind($get, new A2, A::class); $d = Closure::bind($get, new A2, null);
+    /// $u = Closure::bind($get, new B, null);
+    /// for ($i = 0; $i < 2; $i++) {
+    ///     echo $a(), $b(), $c(), $d(), $a(), Closure::bind($put, new B, null)($i), "|";
+    ///     try { echo $u(); } catch (Error $e) { echo $e->getMessage(), "|"; }
+    /// }
+    /// echo "\n";
+    /// ```
+    /// ```expect
+    /// ABAa2A0|Cannot access private property B::$p|ABAa2A1|Cannot access private property B::$p|
+    /// ```
     pub(crate) fn prime_property(
         &mut self,
         frame: FrameRef,
@@ -1261,10 +1283,10 @@ impl Request {
         object: PhpObject,
         name: &[u8],
     ) {
-        let Some(header) = self.vm.at(frame).filter(|header| header.closure.is_none()) else {
+        let Some(header) = self.vm.at(frame) else {
             return;
         };
-        let function = header.function;
+        let function = header.function.filter(|_| header.closure.is_none());
         let scope = self.frame_scope(frame);
         if self.property_scope() != scope {
             return;

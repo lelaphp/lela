@@ -9001,6 +9001,22 @@ fn dynamic_bucket(
 /// [`Request::prime_property`] for a property opcode whose name is a
 /// constant, at cache slot `slot`: `zend_get_property_offset` given the
 /// opline's `cache_slot`, which a computed name's site passes as `NULL`.
+/// A slot that holds the object's class already answers with no lookup
+/// (`ce == CACHED_PTR_EX(cache_slot)`,
+/// `Z/Zend/zend_object_handlers.c:371`), so a fetch its inline path
+/// leaves to the kernel, a `__get`'s or an unset slot's, is not placed
+/// again on every pass:
+///
+/// ```php
+/// class M { public $d = 1; function __get($n) { return "get:$n"; } }
+/// class N extends M { public $e = 2; }
+/// $m = new M; unset($m->d); $n = new N;
+/// for ($i = 0; $i < 3; $i++) { foreach ([$m, $n, $m] as $o) { echo $o->d, ",", $o->missing, ";"; } }
+/// echo "\n";
+/// ```
+/// ```expect
+/// get:d,get:missing;1,get:missing;get:d,get:missing;get:d,get:missing;1,get:missing;get:d,get:missing;get:d,get:missing;1,get:missing;get:d,get:missing;
+/// ```
 fn prime_constant(
     req: &mut Request,
     frame: FrameRef,
@@ -9010,6 +9026,7 @@ fn prime_constant(
     name: &Value,
 ) {
     if op.op2_type == OperandKind::Const
+        && req.cached_property(frame, slot, object.class()).is_none()
         && let Some(bytes) = name.as_str_bytes()
     {
         req.prime_property(frame, slot, object, bytes);
@@ -13144,7 +13161,8 @@ pub(crate) fn jmp_frameless<T: Tier>(
         | Cached::Property { .. }
         | Cached::StaticProperty { .. }
         | Cached::ClassConstant { .. }
-        | Cached::Constant(_) => {
+        | Cached::Constant(_)
+        | Cached::Undefined(_) => {
             let name = exec::constant(code, ConstIdx(op.op1));
             let found = name
                 .as_str_bytes()
@@ -23914,23 +23932,74 @@ fn string_isset_offset(req: &mut Request, offset: &Value) -> Option<i64> {
     }
 }
 
-/// `ZEND_DEFINED`: [`crate::ops::defined`] over the constant string
-/// `ZEND_DEFINED`: [`crate::ops::defined`] over the constant string
-/// `op1` names, into the temporary. The cache slot in `extended_value`
-/// is not read: php keeps the answer in the per-request opline cache
-/// (design §5.4), and the answer is the same whether or not it was
-/// kept, so the cache lands with the fetches whose cost it changes.
+/// `ZEND_DEFINED` (`Z/Zend/zend_vm_def.h:8864`): whether the constant
+/// string `op1` names is defined, into the temporary or the jump after
+/// it, read first off the cache slot in `extended_value`, as php's
+/// handler reads it: the constant a pass before found, which answers
+/// `true` while it stands, deprecated or not, or the count of the table
+/// a pass before found no constant in, which answers `false` while the
+/// table holds as many ([`exec::Cached::Undefined`]). Anything else is
+/// [`crate::ops::defined`]'s lookup, which writes the slot. A constant
+/// defined after a miss, of the name or another, moves the count, so
+/// the next pass looks again:
+///
+/// ```php
+/// #[\Deprecated] const DEP = 1;
+/// function probe() { $s = defined('LATE') ? 'L' : '-'; return $s . (int) defined('PHP_VERSION') . (int) defined('DEP') . (int) defined('Late'); }
+/// for ($i = 0; $i < 4; $i++) {
+///     echo probe(), " ";
+///     if ($i == 0) define('OTHER', 1);
+///     if ($i == 1) define('LATE', 2);
+/// }
+/// echo "\n";
+/// ```
+/// ```expect
+/// -110 -110 L110 L110
+/// ```
 pub(crate) fn defined<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let computed = unary_kernel(req, frame, code, op, |req, value| {
-        let name = value.as_str_bytes().unwrap_or_default();
-        Ok(Value::bool(crate::ops::defined(req, name)))
-    });
+    let slot = CacheSlot(op.extended_value);
+    let computed = match defined_cached(req, frame, slot) {
+        Some(answer) => Ok(Value::bool(answer)),
+        None => unary_kernel(req, frame, code, op, |req, value| {
+            Ok(Value::bool(defined_looked_up(req, frame, slot, value)))
+        }),
+    };
     smart_branch::<T, branch::Peeked>(req, frame, code, op, computed)
+}
+
+/// What [`defined`]'s cache slot answers, read before the name is, as
+/// php's handler reads `CACHED_PTR(opline->extended_value)` first
+/// (`Z/Zend/zend_vm_def.h:8869`): `true` for a constant that still
+/// stands, `false` for a count the table still holds, none otherwise.
+/// The name is a `CONST` operand, so a hit leaves nothing to free.
+#[inline]
+fn defined_cached(req: &Request, frame: FrameRef, slot: CacheSlot) -> Option<bool> {
+    match req.cached(frame, slot) {
+        Cached::Constant(at) if req.constant_at(at).is_some() => Some(true),
+        Cached::Undefined(count) if count == req.constant_count() => Some(false),
+        _ => None,
+    }
+}
+
+/// [`defined`] where its slot does not answer: the lookup of the name
+/// `name` holds, and `CACHE_PTR` of the constant found
+/// (`zend_quick_check_constant`) or of the table's count where none was
+/// (`Z/Zend/zend_vm_def.h:8879-8880`).
+#[inline(never)]
+fn defined_looked_up(req: &mut Request, frame: FrameRef, slot: CacheSlot, name: &Value) -> bool {
+    let name = name.as_str_bytes().unwrap_or_default();
+    let primed = match req.constant_found(name) {
+        Some((at, _, _)) => Cached::Constant(at),
+        None if crate::ops::defined(req, name) => return true,
+        None => Cached::Undefined(req.constant_count()),
+    };
+    req.prime(frame, slot, primed);
+    matches!(primed, Cached::Constant(_))
 }
 
 /// `ZEND_FUNC_GET_ARGS` (`Z/Zend/zend_vm_def.h:9646`), what php's

@@ -4542,9 +4542,9 @@ pub(crate) fn type_check(value: &Value, mask: u32) -> bool {
 /// name is looked up as written, then as one of `true`, `false` and
 /// `null` in any case (`zend_get_special_const`), which the opcode never
 /// asks for, since the compiler substitutes those, and the native does.
-/// php keeps the answer in the opline's cache slot (design §5.4); the
-/// slot is `extended_value` here and nothing reads it yet, since the
-/// answer is the same whether or not it was kept.
+/// php keeps the answer in the opline's cache slot (design §5.4), which
+/// the opcode's handler reads before it asks this
+/// ([`crate::handlers::defined`]).
 ///
 /// ```php
 /// var_dump(defined("NOPE"), defined("PHP_VERSION"), defined("E_ALL"), defined("php_version"), defined("PHP_EOL"), $n = "PHP_VERSION", defined($n), defined("\\PHP_VERSION"), defined("Foo\\PHP_VERSION"), defined("A::B"), defined("TRUE"), defined("nulL"), defined("\\true"), defined("\\"), defined(""), defined(1));
