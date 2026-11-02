@@ -38,7 +38,7 @@ use php_link::Row;
 use php_unit::decl::{
     Attribute, ClassDecl, ConstExpr, FunctionDecl, PropertyDecl, TraitAdaptation, Visibility,
 };
-use php_unit::{Declares, Grown, OpArray, Unit};
+use php_unit::{Declares, Grown, OpArray, Opcode, Unit};
 
 use super::Request;
 use super::unit_strings::OpArrayStrings;
@@ -905,11 +905,16 @@ struct Growing {
     /// (`get_next_brk_cont_element`, `:171`).
     loops: Option<Emalloc>,
     grown: Grown,
+    /// The main op array's constants php's compile has not made yet,
+    /// each by its place among them ([`held`]).
+    held: Vec<(u32, php_heap::Uncounted)>,
 }
 
 impl Growing {
-    /// The tables grown, one `erealloc` a step, to hold what `to` counts.
+    /// The tables grown, one `erealloc` a step, to hold what `to` counts,
+    /// after the constants it [`held`] that they hold are made.
     fn to(&mut self, req: &mut Request, to: Grown) -> Result<(), Thrown> {
+        self.made(req, to.constants);
         let mut size = (self.oplines.as_ref().map_or(0, Emalloc::len) / OPLINE).max(1);
         while (to.oplines as usize) > size {
             size = size.saturating_mul(4);
@@ -941,6 +946,17 @@ impl Growing {
             loops: self.grown.loops.max(to.loops),
         };
         Ok(())
+    }
+
+    /// Each constant it [`held`] whose place is below `below` counted.
+    fn made(&mut self, req: &mut Request, below: u32) {
+        let (made, held): (Vec<_>, Vec<_>) = std::mem::take(&mut self.held)
+            .into_iter()
+            .partition(|(at, _)| *at < below);
+        self.held = held;
+        for (_, value) in made {
+            req.heap_mut().recount(value);
+        }
     }
 }
 
@@ -992,6 +1008,7 @@ fn init_op_array(
         defs: None,
         loops: None,
         grown: Grown::default(),
+        held: Vec::new(),
     };
     if let Some((decl, method)) = declared {
         let parameters = decl.parameters.iter().flat_map(|p| &p.attributes);
@@ -2077,7 +2094,7 @@ pub(super) fn alone(
             .and_then(|()| lay_each(req, &mut names_laid, names))
             .and_then(|()| lay_each(req, &mut stacks_laid, stacks))
             .and_then(|()| {
-                (unit.map(|unit| main_op_array(req, unit, &mut names_laid))).transpose()
+                (unit.map(|unit| main_op_array(req, unit, scanned, &mut names_laid))).transpose()
             });
         for string in strings_laid.into_iter().chain(names_laid) {
             string.free(req);
@@ -2115,6 +2132,7 @@ fn lay_each(
 fn main_op_array(
     req: &mut Request,
     unit: &Unit,
+    scanned: &ScannerHeap,
     hook_names: &mut Vec<Emalloc>,
 ) -> Result<Alone, Thrown> {
     let mut main = MainOpArray {
@@ -2127,13 +2145,24 @@ fn main_op_array(
         ..Blocks::default()
     };
     let laid = init_op_array(req, &mut main.blocks, &unit.main, None).and_then(|mut growing| {
-        lay_each(req, &mut seen.emalloced, seen_keys(unit))?;
-        if let Some(table) = seen.embedded.first() {
-            add_rows(req, table.arr(), unit.seen_symbols as usize)?;
+        growing.held = held(req, &unit.main, scanned);
+        let walked = lay_each(req, &mut seen.emalloced, seen_keys(unit))
+            .and_then(|()| match seen.embedded.first() {
+                Some(table) => add_rows(req, table.arr(), unit.seen_symbols as usize),
+                None => Ok(()),
+            })
+            .and_then(|()| carve(req, unit))
+            .and_then(|()| in_order(req, unit, Some((&mut growing, hook_names))));
+        match walked {
+            Ok(laid) => {
+                declared = laid;
+                compiled(req, &mut main.blocks, &unit.main, growing)
+            }
+            Err(thrown) => {
+                growing.made(req, u32::MAX);
+                Err(thrown)
+            }
         }
-        carve(req, unit)?;
-        declared = in_order(req, unit, Some((&mut growing, hook_names)))?;
-        compiled(req, &mut main.blocks, &unit.main, growing)
     });
     seen.free(req);
     match laid {
@@ -2144,6 +2173,96 @@ fn main_op_array(
             Err(thrown)
         }
     }
+}
+
+/// The constants of `main` php's compile makes after a function, a
+/// closure, a method or a hook it declares has compiled, each by its
+/// place, left uncounted until the walk lays the op arrays php laid
+/// before them ([`in_order`]) and `main` grows to hold them
+/// ([`Growing::to`]): a constant array (`zend_try_ct_eval_array`,
+/// `Z/Zend/zend_compile.c:10089`), a string `zend_compile_binary_op`
+/// folds (`:10228`) and a call's names in a namespace
+/// (`zend_add_ns_func_name_literal`, `:630`), which php makes as it
+/// compiles the statement after the declaration's `pass_two`. One the
+/// constants alone own that is no string the scanner made is the
+/// compile's; the name a `DECLARE_CLASS` binds is made as its class
+/// begins (`zend_compile_class_decl`'s `zend_string_tolower`, `:9276`).
+/// So an array or a folded string after a function stands only past its
+/// `pass_two`, the compile's peak:
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/w3836-' . getmypid() . '.php';
+/// foreach (['$abcdef = [1, 2]; ', 'class C {} function f() {} $abcdef = [1, 2]; ', 'function f() {} $abcdef = "abcdefghijklmnopqrstuvwxyz" . PHP_EOL; ', 'namespace a; function f() {} ', 'namespace A; function f() {} '] as $code) {
+///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
+///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
+///     [$usage, $peak] = explode(' ', trim($fresh));
+///     echo $peak - $usage, "\n";
+/// }
+/// unlink($f);
+/// ```
+/// ```expect process
+/// 35312
+/// 37096
+/// 37312
+/// 37200
+/// 37104
+/// ```
+fn held(
+    req: &mut Request,
+    main: &OpArray,
+    scanned: &ScannerHeap,
+) -> Vec<(u32, php_heap::Uncounted)> {
+    let body = |nested: &&php_unit::Nested| !matches!(nested.declares, Declares::Class(_));
+    let Some(from) = main
+        .nested
+        .iter()
+        .find(body)
+        .map(|nested| nested.grown.constants)
+    else {
+        return Vec::new();
+    };
+    let scanned: std::collections::HashSet<&[u8]> =
+        scanned.strings().map(|(_, bytes)| bytes).collect();
+    let declares = |op: &&php_unit::Opline| {
+        matches!(
+            op.opcode,
+            Opcode::DeclareClass | Opcode::DeclareClassDelayed
+        )
+    };
+    let bound: Vec<u32> = main
+        .oplines
+        .iter()
+        .filter(declares)
+        .map(|op| op.op1)
+        .collect();
+    // How many of the constants hold each string: one the compile made
+    // is owned by them alone, its name and its lowered name where the
+    // two are one string.
+    let address = |s: php_heap::Str| s.bytes().as_ptr().addr();
+    let mut owners = std::collections::HashMap::<usize, u32>::new();
+    for s in main
+        .literals
+        .iter()
+        .filter(|z| z.is_refcounted())
+        .filter_map(|z| z.as_str())
+    {
+        *owners.entry(address(s)).or_default() += 1;
+    }
+    let mut held = Vec::new();
+    for (at, literal) in (0u32..).zip(&main.literals) {
+        let made = literal.is_refcounted()
+            && match (literal.as_str(), literal.as_arr()) {
+                (Some(s), _) => {
+                    owners.remove(&address(s)) == Some(s.refcount()) && !scanned.contains(s.bytes())
+                }
+                (_, Some(a)) => a.refcount() == 1,
+                _ => false,
+            };
+        if made && at >= from && !bound.contains(&at) {
+            held.push((at, req.heap_mut().uncount(*literal)));
+        }
+    }
+    held
 }
 
 /// The keys of `FC(seen_symbols)` the table holds the only reference
@@ -2235,11 +2354,13 @@ fn in_order(
         ),
         dynamic: vec![false; unit.dynamic.len()],
         hook_names: std::mem::take(hook_names),
+        keys: main.is_some().then(Vec::new),
     };
     let made = walk
         .nested(req, &unit.main, main)
         .and_then(|()| walk.rest(req));
     *hook_names = walk.hook_names;
+    hook_names.extend(walk.keys.into_iter().flatten());
     match made {
         Ok(()) => Ok(walk.laid),
         Err(thrown) => {
@@ -2280,6 +2401,9 @@ struct Walk<'u> {
     /// The strings of the names written for the unit's hooks, where the
     /// request compiled it, one given back as each hook has compiled.
     hook_names: Vec<Emalloc>,
+    /// The keys of the top-level functions laid as each begins, where
+    /// the request compiled the unit ([`Walk::function`]).
+    keys: Option<Vec<Emalloc>>,
 }
 
 /// A method's or a hook's place in its unit's table by its class, its
@@ -2385,7 +2509,27 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// The top-level function at `at`, once.
+    /// The top-level function at `at`, once, and where the request
+    /// compiled the unit, the key `zend_begin_func_decl` lowers its name
+    /// to as it begins where the name holds an upper-case letter
+    /// (`zend_string_tolower`, `Z/Zend/zend_compile.c:8395`), a namespaced
+    /// function's among them, which the unit's own string stands for
+    /// only once the compile is over ([`Request::hold_unit_names`]):
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3836-key-' . getmypid() . '.php';
+    /// foreach (['function foo() {} ', 'function Foo() {} '] as $code) {
+    ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
+    ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
+    ///     [$usage, $peak] = explode(' ', trim($fresh));
+    ///     echo $peak - $usage, "\n";
+    /// }
+    /// unlink($f);
+    /// ```
+    /// ```expect process
+    /// 37360
+    /// 37360
+    /// ```
     fn function(
         &mut self,
         req: &mut Request,
@@ -2400,6 +2544,11 @@ impl Walk<'_> {
         };
         if std::mem::replace(reached, true) {
             return Ok(());
+        }
+        if let Some(keys) = &mut self.keys
+            && decl.name.0.iter().any(u8::is_ascii_uppercase)
+        {
+            keys.push(Emalloc::new(req, STRING_HEADER + decl.name.0.len() + 1)?);
         }
         self.body(req, code, Some((decl, false)), stood, Holder::Function)
     }

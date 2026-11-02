@@ -975,7 +975,7 @@ impl Arr {
     }
 
     /// `HT_GET_DATA_ADDR`: the allocation, which starts at the hash slots.
-    fn data_addr(self) -> Option<NonNull<u8>> {
+    pub(crate) fn data_addr(self) -> Option<NonNull<u8>> {
         let data = NonNull::new(self.header().data.get())?;
         let hash = Arr::hash_size(self.mask());
         // SAFETY: the data pointer sits `hash` bytes into its allocation.

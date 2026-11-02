@@ -592,3 +592,21 @@ env = { SCRIPT_FILENAME = "{dir}/b.php" }
 [[line.then]]
 args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/c.php" }
+
+# A constant php's compile makes after a declaration of such a program
+# (#3836): the `[1, 2]` array `zend_try_ct_eval_array` makes, a call's
+# names in a namespace (`zend_add_ns_func_name_literal`) and a string
+# `zend_compile_binary_op` folds, each after the function's `pass_two`, so
+# none stands at the compile's peak; and a namespaced function's key,
+# `zend_begin_func_decl`'s `zend_string_tolower`, as the function begins.
+[[line]]
+name = "an-uncached-constant-after-a-declaration-is-made-past-its-pass-two"
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/a.php" }
+files = { "a.php" = "<?php class C {} function f() {} $abcdef = [1, 2]; echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "b.php" = "<?php namespace A; function f() {} echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "c.php" = "<?php class C {} function f() {} $abcdef = \"abcdefghijklmnopqrstuvwxyz\" . PHP_EOL; echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/b.php" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/c.php" }

@@ -192,6 +192,7 @@ Heap::oom_handled
 Heap::origin
 Heap::pin_block
 Heap::proptable_to_symtable
+Heap::recount
 Heap::reference
 Heap::reference_separate
 Heap::reference_set
@@ -236,6 +237,7 @@ Heap::take_pending_oom
 Heap::take_refused
 Heap::take_sensed
 Heap::trace_allocations
+Heap::uncount
 Heap::unobserve_allocations
 Heap::unpin
 Heap::unpin_block
@@ -410,6 +412,7 @@ Strings::publish
 Suspensions
 Switched
 TableRow
+Uncounted
 VmStack
 VmStack::LAYOUT
 VmStack::close
