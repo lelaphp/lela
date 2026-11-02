@@ -673,6 +673,9 @@ impl Request {
         }
         self.functions.clear_own();
         self.declared.clear_own();
+        // The classes found so far are numbered as the request's own,
+        // which the preload's publication numbers again.
+        self.ce_caches = php_heap::MapTable::new();
         self.aliases.clear_own();
         self.own_classes.clear();
         self.class_natives.clear();

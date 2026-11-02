@@ -1816,6 +1816,9 @@ impl Shared {
             !(unit.as_ref().ok()).is_some_and(php_compile::values::holds_counted_value),
             "a unit for every request holds a counted value"
         );
+        if let Ok(unit) = &unit {
+            home.name_classes(unit);
+        }
         let answers = home.settle(strings_kept(&unit));
         let tree = arena.parsed();
         Fresh {
@@ -2071,6 +2074,9 @@ impl Shared {
         let mut home =
             PermanentStrings::new(&self.interned.names, &mut strings, CompileHeap::Engine);
         let unit = crate::unit_cache::decode(body, &mut home);
+        if let Some(unit) = &unit {
+            home.name_classes(unit);
+        }
         home.settle(unit.is_some());
         unit
     }
@@ -3771,7 +3777,7 @@ impl EngineBuilder {
         let constant_values = constant_values(&constants, &mut names);
         let constant_names = Names::over(&constants);
         let default_strings = default_strings(&functions, &classes);
-        let mut strings = Strings::new();
+        let mut strings = names.beside();
         let sapi_names = crate::constants::host_names(&mut strings, self.sapi_name);
         let interned = crate::arena::Interned {
             names: Arc::new(names),
@@ -4162,6 +4168,19 @@ impl<'a> PermanentStrings<'a> {
         }
     }
 
+    /// Each class `unit` declares by name named a class's, so the string
+    /// the compile made of it takes a class cache as it is published, as
+    /// `zend_compile_class_decl` allocates one on `ce->name`
+    /// (`Z/Zend/zend_compile.c:9305`); an anonymous class's name, which
+    /// holds a NUL, takes none.
+    fn name_classes(&mut self, unit: &Unit) {
+        for decl in &unit.classes {
+            if !decl.name.0.contains(&0) {
+                self.made.class_name(&decl.name.0);
+            }
+        }
+    }
+
     /// The compile ended: the request's copies given back, as opcache's
     /// persist frees them once the unit is in its segment; what it made
     /// put in the table where its unit stands, `kept`, and given back
@@ -4278,7 +4297,9 @@ fn permanent_names(
     constants: &[ConstDecl],
     ini: &IniTable,
 ) -> Strings {
-    let mut names = Strings::new();
+    // Each class's name first, with the class cache
+    // `zend_register_internal_class_ex` allocates on it.
+    let mut names = Strings::naming_classes(classes.iter().map(|decl| &*decl.name.0));
     names.intern_known(&KNOWN_STRINGS.map(str::as_bytes));
     for extension in extensions {
         names

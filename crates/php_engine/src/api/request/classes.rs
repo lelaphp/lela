@@ -2040,6 +2040,21 @@ impl Request {
         class_in(&self.shared, &self.declared, &self.aliases, name.bytes())
     }
 
+    /// `GET_CE_CACHE` (`Z/Zend/zend_types.h:901`): the class a lookup by
+    /// the name whose slot is `at` found last in this request, read with
+    /// no table probed; none where no lookup has found one yet.
+    #[inline]
+    pub(crate) fn ce_cached(&self, at: CeCache) -> Option<ClassId> {
+        self.ce_caches.get(at).copied().flatten()
+    }
+
+    /// `SET_CE_CACHE` (`Z/Zend/zend_types.h:904`): `class` kept at the
+    /// slot `at`, which a lookup that found it fills, as
+    /// `zend_lookup_class_ex` fills it.
+    pub(crate) fn set_ce_cache(&mut self, at: CeCache, class: ClassId) {
+        *self.ce_caches.map(at) = Some(class);
+    }
+
     /// The home the units it compiles for itself make their constant
     /// strings in ([`super::memory::RequestStrings`]), which the unit
     /// keeps, beside its classes and its constants as the compiler asks
@@ -2702,6 +2717,18 @@ pub(super) fn mutable(class: ClassId) -> bool {
 /// lowered name is, the case folded by the table and nothing lowered: a
 /// class declared at `at` of the request's rows is the `ClassId` past
 /// the engine's classes.
+/// One name's class cache in a request's map table, the offset php
+/// keeps in an interned class name's `GC_REFCOUNT`.
+pub(crate) type CeCache = php_heap::MapPtr<Option<ClassId>>;
+
+/// `ZSTR_HAS_CE_CACHE(name)` (`Z/Zend/zend_types.h:885`) and the slot:
+/// the class cache an interned string that names a class carries, and
+/// none for any other string ([`php_heap::Str::ce_cache`]).
+#[inline]
+pub(crate) fn ce_cache(name: php_heap::Str) -> Option<CeCache> {
+    name.ce_cache().map(php_heap::MapPtr::new)
+}
+
 fn class_in(
     shared: &Shared,
     declared: &Keyed<Named>,

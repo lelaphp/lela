@@ -80,6 +80,12 @@ pub(crate) const INTERNED: u32 = gc::IMMUTABLE;
 /// which relives the request boundary.
 const PERMANENT: u32 = INTERNED | gc::PERSISTENT | gc::PERMANENT;
 
+/// `IS_STR_CLASS_NAME_MAP_PTR` (`Z/Zend/zend_types.h:860`), php's
+/// `GC_PROTECTED` on a string: an interned string that names a class,
+/// whose count word, which an interned string never counts with, holds
+/// the offset of its class cache in every request's map table.
+const CLASS_NAME_MAP_PTR: u32 = gc::PROTECTED;
+
 /// A request string fresh from `zend_string_alloc(len, 0)`, before it
 /// is handed out: one owner, the holder's, and nothing else naming it,
 /// so its bytes are written in place as a native writes `ZSTR_VAL` and
@@ -667,6 +673,27 @@ impl Str {
         self.header().gc.add_flags(gc::VALID_UTF8);
     }
 
+    /// `ZSTR_HAS_CE_CACHE` and the offset `GC_REFCOUNT` holds beside it
+    /// (`Z/Zend/zend_types.h:885`): where in a request's map table the
+    /// class this name last found stands, for a table's string that names
+    /// a class ([`Strings::naming_classes`], [`Pending::class_name`]),
+    /// and none for any other.
+    #[must_use]
+    pub fn ce_cache(&self) -> Option<u32> {
+        let gc = &self.header().gc;
+        (gc.flags() & CLASS_NAME_MAP_PTR != 0).then(|| gc.refcount())
+    }
+
+    /// `zend_alloc_ce_cache`'s last two lines (`Z/Zend/zend.c:2151`):
+    /// `IS_STR_CLASS_NAME_MAP_PTR` and the offset written, on a string
+    /// nothing else names yet,
+    /// so no thread reads the header while it is written.
+    fn alloc_ce_cache(self, offset: u32) {
+        let gc = &self.header().gc;
+        gc.set_refcount(offset);
+        gc.add_flags(CLASS_NAME_MAP_PTR);
+    }
+
     /// `zend_string_refcount`: an interned string reads as one owner
     /// whatever its header says.
     #[must_use]
@@ -1003,6 +1030,11 @@ pub struct Strings {
     /// The strings [`Strings::intern_known`] interned, by position:
     /// php's `zend_known_strings`, which `ZSTR_KNOWN(id)` indexes.
     known: Vec<Str>,
+    /// The class caches handed out, the next one's offset: php's
+    /// `CG(map_ptr_last)` as `zend_alloc_ce_cache` moves it, counting
+    /// from where the table this one was laid beside stopped
+    /// ([`Strings::beside`]).
+    ce_caches: u32,
 }
 
 impl Default for Strings {
@@ -1020,7 +1052,44 @@ impl Strings {
             arrays: Vec::new(),
             shadows: Vec::new(),
             known: Vec::new(),
+            ce_caches: 0,
         }
+    }
+
+    /// A table holding each of `classes`, a class's name, interned first
+    /// with a class cache of its own ([`Str::ce_cache`]), which
+    /// `zend_register_internal_class_ex` allocates for each class the
+    /// engine registers at startup (`Z/Zend/zend_API.c:3543`). A name
+    /// the frozen table holds takes none, as php's one-byte names are
+    /// permanent strings no slot is allocated on once startup is done.
+    #[must_use]
+    pub fn naming_classes<'a>(classes: impl IntoIterator<Item = &'a [u8]>) -> Strings {
+        let mut table = Strings::new();
+        for name in classes {
+            if frozen_string(name).is_some() {
+                continue;
+            }
+            let Ok(s) = table.intern(name) else {
+                break;
+            };
+            // Every string of the table was laid down here, so nothing
+            // else names it yet.
+            if s.ce_cache().is_none() {
+                s.alloc_ce_cache(table.ce_caches);
+                table.ce_caches += 1;
+            }
+        }
+        table
+    }
+
+    /// An empty table whose class caches are numbered past this one's,
+    /// so a request's one map table holds both tables' (`CG(map_ptr_last)`
+    /// carried on from startup into what opcache persists).
+    #[must_use]
+    pub fn beside(&self) -> Strings {
+        let mut table = Strings::new();
+        table.ce_caches = self.ce_caches;
+        table
     }
 
     /// What a compile made for a unit held for every request entering
@@ -1028,10 +1097,25 @@ impl Strings {
     /// string the persisted unit holds, and its constant arrays with it.
     /// A string whose bytes the table holds already stays the unit's,
     /// with the table, uncounted.
+    ///
+    /// A string the compile named a class's ([`Pending::class_name`])
+    /// takes a class cache as it enters, `zend_alloc_ce_cache` on
+    /// `ce->name` (`Z/Zend/zend_compile.c:9305`); a shadow takes the one
+    /// the table's string of its bytes holds, or one of its own.
     pub fn publish(&mut self, mut pending: Pending) {
-        for s in pending.take_strings() {
+        for (s, class_name) in pending.take_strings() {
             let hash = hash_func(s.bytes());
-            if self.table.find(hash, s.bytes()).is_some() {
+            let held = self.table.find(hash, s.bytes());
+            if class_name {
+                // `s` is the compile's alone until it enters the table
+                // below, so its header is written before anyone reads it.
+                let offset = held.and_then(|held| held.ce_cache()).unwrap_or_else(|| {
+                    self.ce_caches += 1;
+                    self.ce_caches - 1
+                });
+                s.alloc_ce_cache(offset);
+            }
+            if held.is_some() {
                 self.shadows.push(s);
             } else {
                 self.table.add(hash, s);
@@ -1154,6 +1238,8 @@ pub struct Pending {
 struct PendingString {
     s: Str,
     asks: u32,
+    /// Whether the compile named a class by it ([`Pending::class_name`]).
+    class_name: bool,
 }
 
 impl Pending {
@@ -1169,8 +1255,26 @@ impl Pending {
         if valid_utf8 {
             s.mark_valid_utf8();
         }
-        chain.push(PendingString { s, asks: 1 });
+        chain.push(PendingString {
+            s,
+            asks: 1,
+            class_name: false,
+        });
         Ok(s)
+    }
+
+    /// The string of `name` this set made, where it made one, named a
+    /// class's, `zend_alloc_ce_cache(ce->name)` of a class the compile
+    /// declared: it takes a class cache as it is published
+    /// ([`Strings::publish`]). A name the tables held already takes
+    /// none, as a string already shared is never written.
+    pub fn class_name(&mut self, name: &[u8]) {
+        let chain = self.slots.get_mut(&hash_func(name));
+        if let Some(held) =
+            chain.and_then(|chain| chain.iter_mut().find(|held| held.s.bytes() == name))
+        {
+            held.class_name = true;
+        }
     }
 
     /// One claim on `z` given back ([`Intern::give_back`]): a string
@@ -1254,10 +1358,13 @@ impl Pending {
         self.slots.values().map(Vec::len).sum()
     }
 
-    /// Every string, taken out of the set.
-    fn take_strings(&mut self) -> Vec<Str> {
+    /// Every string, taken out of the set, beside whether it names a
+    /// class.
+    fn take_strings(&mut self) -> Vec<(Str, bool)> {
         let slots = std::mem::take(&mut self.slots);
-        slots.into_values().flatten().map(|held| held.s).collect()
+        (slots.into_values().flatten())
+            .map(|held| (held.s, held.class_name))
+            .collect()
     }
 }
 
@@ -1268,7 +1375,7 @@ impl Drop for Pending {
         for (a, _) in self.arrays.drain(..) {
             free_persistent_array(a);
         }
-        for s in self.take_strings() {
+        for (s, _) in self.take_strings() {
             free_persistent(s);
         }
     }
@@ -1508,6 +1615,38 @@ mod tests {
         refused.intern(b"refused", false).expect("a string");
         drop(refused);
         assert!(table.find(b"refused").is_none());
+    }
+
+    /// A class's name takes a class cache where the table lays its
+    /// string down, the startup table's first and a unit table's
+    /// numbered past them; a name already shared takes none, a shadow
+    /// takes its table string's, and a string named no class's none.
+    #[test]
+    fn a_class_name_takes_a_class_cache_where_its_string_is_laid_down() {
+        let names = Strings::naming_classes([&b"stdClass"[..], b"A", b"Exception", b"stdClass"]);
+        let std_class = names.find(b"stdClass").and_then(|s| s.ce_cache());
+        assert_eq!(std_class, Some(0));
+        assert_eq!(names.find(b"A").and_then(|s| s.ce_cache()), None);
+        assert_eq!(names.find(b"Exception").and_then(|s| s.ce_cache()), Some(1));
+        let mut table = names.beside();
+        let shared = table.intern(b"Shared").expect("a table string");
+        let mut pending = Pending::default();
+        pending.intern(b"Foo", false).expect("a string");
+        pending.intern(b"echoed", false).expect("a string");
+        pending.intern(b"Shared", false).expect("a shadow");
+        pending.class_name(b"Foo");
+        pending.class_name(b"Shared");
+        pending.class_name(b"Absent");
+        table.publish(pending);
+        assert_eq!(table.find(b"Foo").and_then(|s| s.ce_cache()), Some(2));
+        assert_eq!(table.find(b"echoed").and_then(|s| s.ce_cache()), None);
+        assert!(table.find(b"Shared").is_some_and(|s| s.is_same(shared)));
+        assert_eq!(shared.ce_cache(), None);
+        let mut next = Pending::default();
+        next.intern(b"Bar", false).expect("a string");
+        next.class_name(b"Bar");
+        table.publish(next);
+        assert_eq!(table.find(b"Bar").and_then(|s| s.ce_cache()), Some(4));
     }
 
     /// A pending array takes over the asks on what it holds: given back,

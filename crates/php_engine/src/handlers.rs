@@ -12903,15 +12903,16 @@ pub(crate) fn fetch_class<T: Tier>(
         let value = exec::operand(req, frame, code, op.op2_type, op.op2).deref();
         let class = if let Some(object) = value.as_object() {
             Ok(Some(object.class()))
-        } else if let Some(name) = value.as_str_bytes() {
-            let name = name.to_vec();
+        } else if let Some(name) = value.as_php_string() {
+            // `zend_fetch_class`, which reads the name's class cache
+            // first, as `zend_lookup_class_ex` does.
             match (
                 op.op1 & FETCH_CLASS_SILENT,
                 op.op1 & FETCH_CLASS_NO_AUTOLOAD,
             ) {
-                (0, _) => crate::api::call::fetch_class(req, &name).map(Some),
-                (_, 0) => crate::api::call::autoload(req, &name),
-                _ => crate::api::call::lookup_class(req, &name),
+                (0, _) => crate::api::call::fetch_class_string(req, name).map(Some),
+                (_, 0) => crate::api::call::lookup_class_string(req, name, true),
+                _ => crate::api::call::lookup_class_string(req, name, false),
             }
         } else {
             Err(crate::api::raising::throw_error(
