@@ -3343,6 +3343,50 @@ fn pushed_under_its_class_guard(fixture: Fixture) -> Result<(), String> {
     Ok(())
 }
 
+/// A loop that calls a method on an object a variable or a temporary
+/// holds takes no stack check at its entry: php's recorder writes the
+/// receiver's class after the `INIT_METHOD_CALL`, so
+/// `zend_jit_trace_build_tssa` gives the loop's `used_stack` up
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:2629-2630`, #3905). `k`'s exits
+/// up to the call are numbered as php's exit info for its trace numbers
+/// them: `exit_0` and `exit_1` at `0012`, knowing none and `$n` and `$o`,
+/// `exit_2` the loop's way out at `0014`, `exit_3` the receiver's class
+/// guard at `0007`, then the call's. A static method's call carries no
+/// class, and its loop keeps the check, as php's `exit_0`
+/// `0009/----/0/VM` for `s` does.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_methods_call_on_an_object_takes_no_stack_check_at_entry() -> Result<(), String> {
+    let rooms = |ir: &TraceIr| {
+        (ir.guards.iter())
+            .filter(|guard| guard.at == GuardAt::Entry && matches!(guard.check, Check::Room { .. }))
+            .count()
+    };
+    for fixture in [METHOD_CALL, TEMP_CALL, METHOD_OWN, ENUM_OWN, METHOD_SCOPED] {
+        let ir = golden(fixture)?;
+        assert_eq!(rooms(&ir), 0, "{}\n{}", fixture.name, dump::render(&ir));
+    }
+    let ir = golden(METHOD_CALL)?;
+    let rendered = dump::render(&ir);
+    let exits: Vec<(Option<OplineIdx>, usize)> = (ir.exits.iter().take(5))
+        .map(|exit| (exit.opline, exit.known.len()))
+        .collect();
+    assert_eq!(
+        exits,
+        [
+            (Some(OplineIdx(12)), 0),
+            (Some(OplineIdx(12)), 2),
+            (Some(OplineIdx(14)), 3),
+            (Some(OplineIdx(7)), 3),
+            (None, 3),
+        ],
+        "{rendered}"
+    );
+    let ir = golden(STATIC_CALL)?;
+    assert_eq!(rooms(&ir), 1, "{}", dump::render(&ir));
+    Ok(())
+}
+
 /// `new`'s constructor is pushed by its handler, and a guard after it
 /// holds the callee the trace recorded, as php's `zend_jit_func_guard`
 /// does; the sends after it are compiled by value and the call made in

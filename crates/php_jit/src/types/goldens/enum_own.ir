@@ -6,26 +6,25 @@ entry
   #2 f0.CV3 [long]
   #4 f0.CV1 [long]
   #5 f0.CV0 [object]
-  guard room 112 -> exit 0
-  guard #5 object -> exit 1
-  guard #4 long -> exit 2
-  guard #2 long -> exit 3
-loop at 0, loop, interrupt exit 9
+  guard #5 object -> exit 0
+  guard #4 long -> exit 1
+  guard #2 long -> exit 2
+loop at 0, loop, interrupt exit 8
   #1 f0.CV2 [any] = phi(#0, #9)
   #3 f0.CV3 [long] reg = phi(#2, #10)
 0010 f0 IS_SMALLER #3, #4 fused inline
-  checks direction taken -> exit 4
+  checks direction taken -> exit 3
 0005 f0 INIT_METHOD_CALL #5, const#2 inline pair fn own of receiver map 0 unwinds -> unwind 0
-  checks callee e6 -> exit 5
+  checks callee e6 -> exit 4
      f0 init e6 in-place
 0006 f0 SEND_VAR #3 inline
 0007 f0 DO_FCALL inline in-place unwinds -> unwind 0
-  checks stands e6 0001 -> exit 6
+  checks stands e6 0001 -> exit 5
      f1 enter e6
   -> #6 f1.CV0 [long]
 0001 f1 MUL #6, int(2) inline
   -> #7 f1.T0 [long] reg
-  checks #7 long -> exit 7
+  checks #7 long -> exit 6
 0002 f1 RETURN #7 inline receives in-place unwinds -> unwind 0
      f0 back to #8
   -> #8 f0.T2 [long]
@@ -33,18 +32,17 @@ loop at 0, loop, interrupt exit 9
   -> #9 f0.CV2 [long] reg
 0009 f0 PRE_INC #3 inline
   -> #10 f0.CV3 [long] reg
-  checks #10 long -> exit 8
+  checks #10 long -> exit 7
 end: back to 0
-exit 0: f0 0010 plain to vm
-exit 1: f0 0010 plain
-exit 2: f0 0010 plain f0.CV0:object
-exit 3: f0 0010 plain f0.CV0:object f0.CV1:long
-exit 4: f0 0012 plain f0.CV3=#3 f0.CV0:object f0.CV1:long f0.CV3:long
-exit 5: f0 where it stands plain f0.CV3=#3 f0.CV0:object f0.CV1:long f0.CV3:long
-exit 6: f0 where it stands restore call f0.CV3=#3 f0.CV0:object f0.CV1:long f0.CV3:long
-exit 7: f1 0001 plain f0.CV3=#3 f1.CV0:long
-exit 8: f0 0010 plain f0.CV2=#9 f0.CV3=overflowed up f0.CV0:object f0.CV1:long f0.CV2:long f0.CV3:double
-exit 9: f0 0010 plain f0.CV3=#3 f0.CV0:object f0.CV1:long f0.CV3:long to vm
+exit 0: f0 0010 plain
+exit 1: f0 0010 plain f0.CV0:object
+exit 2: f0 0010 plain f0.CV0:object f0.CV1:long
+exit 3: f0 0012 plain f0.CV3=#3 f0.CV0:object f0.CV1:long f0.CV3:long
+exit 4: f0 where it stands plain f0.CV3=#3 f0.CV0:object f0.CV1:long f0.CV3:long
+exit 5: f0 where it stands restore call f0.CV3=#3 f0.CV0:object f0.CV1:long f0.CV3:long
+exit 6: f1 0001 plain f0.CV3=#3 f1.CV0:long
+exit 7: f0 0010 plain f0.CV2=#9 f0.CV3=overflowed up f0.CV0:object f0.CV1:long f0.CV2:long f0.CV3:double
+exit 8: f0 0010 plain f0.CV3=#3 f0.CV0:object f0.CV1:long f0.CV3:long to vm
 unwind 0: f0.CV3=#3
 unwind 1: f0.CV2=#9 f0.CV3=#3
 map 0: offset 3 slot 0
