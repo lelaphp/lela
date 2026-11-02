@@ -657,3 +657,20 @@ env = { SCRIPT_FILENAME = "{dir}/b.php" }
 [[line.then]]
 args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/c.php" }
+
+# A class of such a program that writes `implements Stringable` beside its
+# `__toString` (#3924): `zend_compile_implements` lays the name and lowers
+# it as the class begins, and `add_stringable_interface` finds it and adds
+# none, where a class that writes none has both of `Stringable`'s strings
+# laid as `__toString` begins. The unit says which (`stringable_added`).
+[[line]]
+name = "a-written-stringable-is-laid-as-the-class-begins"
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/a.php" }
+files = { "a.php" = "<?php class C implements Stringable { function __toString(): string { return \"\"; } } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "b.php" = "<?php class C { function __toString(): string { return \"\"; } } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "c.php" = "<?php interface I {} class C implements I, Stringable { function __toString(): string { return \"\"; } } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/b.php" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/c.php" }

@@ -425,7 +425,7 @@ record! {
     TraitMethodRef { trait_name, method }
     ClassFlags {
         is_abstract, is_final, is_readonly, is_anonymous, is_top_level, not_serializable,
-        dynamic_properties, use_guards, hooked_variance,
+        dynamic_properties, use_guards, hooked_variance, stringable_added,
     }
     ClassDecl {
         name, kind, flags, parent, interfaces, implementors, aliases, traits, adaptations,
@@ -862,7 +862,7 @@ abstract class A implements \Countable {
 }
 trait T { function t($o = new \stdClass) { return fn() => static::class; } }
 enum E: string { case X = 'x'; const Y = self::X; }
-class B extends A { function g(): static { return $this; } }
+class B extends A { function g(): static { return $this; } function __toString() { return ''; } }
 $x = new class { public $q = [1, 2]; };
 try { echo "{$x->q[0]}", __LINE__, E::X->value; } finally { echo 1 <=> 2; }
 $d = []; foreach ([1, 2] as $k => $v) { if ($k < 1) { $d[$k] = $v; } echo $k, $v; }

@@ -235,6 +235,29 @@ pub struct ClassFlags {
     /// class at its opline and never while the file compiles
     /// (`Z/Zend/zend_compile.c:9362`), an anonymous one included.
     pub hooked_variance: bool,
+    /// The last of `interfaces` is the `Stringable` the compile adds as
+    /// a `__toString` begins where the class wrote none
+    /// (`add_stringable_interface`, `Z/Zend/zend_compile.c:8233`), and
+    /// not one written. A written one's names stand from the class's
+    /// start, the added one's from the method's, both until the link
+    /// gives them back, so a compile's peak reads which it is:
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3924-' . getmypid() . '.php';
+    /// foreach (['class C implements Stringable { function __toString(): string { return ""; } } ', 'class C { function __toString(): string { return ""; } } ', 'interface I {} class C implements I, Stringable { function __toString(): string { return ""; } } '] as $code) {
+    ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
+    ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
+    ///     [$usage, $peak] = explode(' ', trim($fresh));
+    ///     echo $peak - $usage, "\n";
+    /// }
+    /// unlink($f);
+    /// ```
+    /// ```expect process
+    /// 37344
+    /// 37344
+    /// 37424
+    /// ```
+    pub stringable_added: bool,
 }
 
 /// What a class does with a write to a name it did not declare, php's

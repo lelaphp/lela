@@ -1534,6 +1534,7 @@ fn class_flags(
         },
         use_guards: false,
         hooked_variance: false,
+        stringable_added: false,
     }
 }
 
@@ -4861,6 +4862,7 @@ impl<'a> Emit<'a> {
                 .any(|interface| interface.0.eq_ignore_ascii_case(b"Stringable"))
         {
             decl.interfaces.push(Name(b"Stringable".as_slice().into()));
+            decl.flags.stringable_added = true;
         }
         let at = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
         decl.methods.push(declared);
