@@ -3870,24 +3870,73 @@ pub(crate) fn recv_passed(
     ) else {
         return start;
     };
-    let passed = frame.header().num_args;
-    let slots = frame.slots();
-    let taken = prologue
-        .iter()
-        .take_while(|op| {
-            op.opcode == php_unit::Opcode::Recv
-                && op.op1 <= passed
-                && slots.get(op.out as usize).is_some_and(|argument| {
-                    let kind = crate::operand::deref(*argument).kind();
-                    op.op2 & (1u32 << (kind as u32)) != 0
-                })
-        })
-        .count();
-    let at = start.saturating_add(u32::try_from(taken).unwrap_or(u32::MAX));
+    let at = start.saturating_add(passing(prologue, frame));
     if at != start {
         frame.header_mut().opline = at;
     }
     at
+}
+
+/// [`recv_passed`] over `frame`, the callee the loop holds, pushed
+/// standing at `start` in `code`: where every `RECV` up to `entry`
+/// passes, the frame stood at `entry` and its slots, which the loop goes
+/// on with, as php's `ZEND_VM_ENTER` goes on with `execute_data` in a
+/// register; none where one is left for the handlers, the frame stood
+/// past those that passed. A call to a typed function passed its
+/// argument, one passed none, one passed a string its `int` converts and
+/// one passed an array it refuses:
+///
+/// ```php
+/// function f(int $n, ?string $s = null) { return $n < 1 ? 0 : 1 + f($n - 1, $s); }
+/// function g(int $n) { return $n * 2; }
+/// echo f(3), " ", f(2, "x"), " ", g("21"), "\n";
+/// try { g([]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { g(); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// 3 2 42
+/// g(): Argument #1 ($n) must be of type int, array given, called in %s on line 5
+/// Too few arguments to function g(), 0 passed in %s on line 6 and exactly 1 expected
+/// ```
+#[inline(always)] // once per call edge, in the loop
+pub(crate) fn received<'f>(
+    frame: &'f mut HeapFrame,
+    code: &OpArray,
+    (start, entry): (u32, u32),
+) -> Option<(u32, &'f mut [Zval])> {
+    if start < entry {
+        let prologue = code.oplines.get(start as usize..entry as usize)?;
+        let at = start.saturating_add(passing(prologue, frame));
+        frame.header_mut().opline = at;
+        if at < entry {
+            return None;
+        }
+        return Some((at, frame.slots_mut()));
+    }
+    Some((start, frame.slots_mut()))
+}
+
+/// How many of the `RECV` oplines of `prologue`, the first `frame`
+/// stands at, pass on their first test ([`recv_passed`]).
+#[inline(always)] // in the call edge's two takings of a callee
+fn passing(prologue: &[Opline], frame: &HeapFrame) -> u32 {
+    let passed = frame.header().num_args;
+    let slots = frame.slots();
+    let mut taken = 0;
+    for op in prologue {
+        if op.opcode != php_unit::Opcode::Recv || op.op1 > passed {
+            break;
+        }
+        let Some(argument) = slots.get(op.out as usize) else {
+            break;
+        };
+        let kind = crate::operand::deref(*argument).kind();
+        if op.op2 & (1u32 << (kind as u32)) == 0 {
+            break;
+        }
+        taken += 1;
+    }
+    taken
 }
 
 /// The `RECV*` oplines of [`parameter_prologue`] from where `callee`

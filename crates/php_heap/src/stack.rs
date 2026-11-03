@@ -127,33 +127,50 @@ impl Kind {
 }
 
 /// Every cell `UNDEF`, as `i_init_func_execute_data` leaves the CVs a
-/// call did not pass: a frame of a few slots, nearly every one, written
-/// by stores of a known width in place, and only a larger one through
-/// `memset`, which costs more than the stores for a frame of one or
-/// two slots.
+/// call did not pass and `zend_init_cvs` writes them, one store a slot
+/// and no call: a frame of a few slots, nearly every one, by stores of
+/// a known width in place, and a larger one by a loop of them.
+///
+/// The value stored is [`UNDEF`] read once through a volatile load, so
+/// the optimiser cannot see it is zero: stores of a zero it can see are
+/// one `memset` to it, and in `serve_frame`, where the push is laid in
+/// several arms, it merged those of every width into one `bzero` call
+/// with the length from a table, 28 to 33 instructions a call; read
+/// through the load, a frame of one slot is 15 with the width's tests
+/// and no call (#4022, #3994). Every byte of every slot is still
+/// written, the value word with the type word, as the compiled tier's
+/// push writes them (`php_jit::lower`), so a slot over a page's fresh
+/// memory or an old header's room reads as the whole zval it is.
 #[inline(always)] // once per push, in the push's inline path
 #[allow(clippy::inline_always)]
 fn undefine(cells: &mut [Zval]) {
+    // SAFETY: `UNDEF` is a static, so its address is valid, aligned and
+    // initialised for a read of one zval, and nothing writes it.
+    let undef = unsafe { std::ptr::read_volatile(&raw const UNDEF) };
     match cells.len() {
         0 => {}
-        1 => undefine_first::<1>(cells),
-        2 => undefine_first::<2>(cells),
-        3 => undefine_first::<3>(cells),
-        4 => undefine_first::<4>(cells),
-        5 => undefine_first::<5>(cells),
-        6 => undefine_first::<6>(cells),
-        7 => undefine_first::<7>(cells),
-        8 => undefine_first::<8>(cells),
-        _ => cells.fill(Zval::UNDEF),
+        1 => undefine_first::<1>(cells, undef),
+        2 => undefine_first::<2>(cells, undef),
+        3 => undefine_first::<3>(cells, undef),
+        4 => undefine_first::<4>(cells, undef),
+        5 => undefine_first::<5>(cells, undef),
+        6 => undefine_first::<6>(cells, undef),
+        7 => undefine_first::<7>(cells, undef),
+        8 => undefine_first::<8>(cells, undef),
+        _ => cells.fill(undef),
     }
 }
 
-/// The first `N` cells `UNDEF`, a width the stores know.
+/// `Zval::UNDEF` where [`undefine`] reads it, out of the optimiser's
+/// sight.
+static UNDEF: Zval = Zval::UNDEF;
+
+/// The first `N` cells `undef`, a width the stores know.
 #[inline(always)] // as `undefine`
 #[allow(clippy::inline_always)]
-fn undefine_first<const N: usize>(cells: &mut [Zval]) {
+fn undefine_first<const N: usize>(cells: &mut [Zval], undef: Zval) {
     if let Some(first) = cells.first_chunk_mut::<N>() {
-        *first = [Zval::UNDEF; N];
+        *first = [undef; N];
     }
 }
 
@@ -721,14 +738,14 @@ impl<H> VmStack<H> {
         // top page has the room, which is every call in a loop.
         if used <= self.left() {
             let at = self.take_room(used);
-            return Ok(self.lay(at, slots, Placed::OnPage, header, undefine));
+            return Ok(self.lay(at, slots, Placed::OnPage, header));
         }
         // The room a page opens is found out of line and the frame laid
         // here, so what makes the header is never handed to the cold
         // half, which would hold it in memory for the hot one too.
         let placed = self.opening(heap, used)?;
         let at = self.take_room(used);
-        Ok(self.lay(at, slots, placed, header, undefine))
+        Ok(self.lay(at, slots, placed, header))
     }
 
     /// The room [`VmStack::push_frame`] takes where no page stands yet or
@@ -765,7 +782,7 @@ impl<H> VmStack<H> {
 
     /// A frame of `len` slots from `at` laid on top of the stack where
     /// `placed` says it stands, the header `header` makes written in the
-    /// room before `at` and its slots by `cells`, every one `UNDEF` as
+    /// room before `at` and its slots, every one `UNDEF` as
     /// `i_init_func_execute_data` finds them where the push has nothing
     /// to place ([`undefine`]); the room is the push's,
     /// `FRAME_HEADER_SLOTS` and `len` slots long, which nothing else names.
@@ -777,7 +794,6 @@ impl<H> VmStack<H> {
         len: usize,
         placed: Placed,
         header: impl FnOnce() -> H,
-        cells: impl FnOnce(&mut [Zval]),
     ) -> FrameRef {
         let () = Frame::<H>::FITS;
         let mut frame = Frame {
@@ -790,7 +806,7 @@ impl<H> VmStack<H> {
         // push gave the frame before its first CV, which `FITS` holds an
         // `H` to fit, aligned, and nothing else names.
         unsafe { frame.header_at().write(header()) };
-        cells(frame.cells_mut());
+        undefine(frame.cells_mut());
         self.stand(frame)
     }
 
