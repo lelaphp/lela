@@ -2002,6 +2002,52 @@ impl crate::Heap {
         Ok(())
     }
 
+    /// `ZEND_HASH_FILL_PACKED(dest)` over `ZEND_HASH_PACKED_FOREACH_VAL(src)`
+    /// after `zend_hash_extend(dest, ..., 1)`, the packed arm of
+    /// `php_array_merge` (`Z/ext/standard/array.c:4180`) and
+    /// `php_array_merge_wrapper`'s copy of a packed first argument: each
+    /// of `src`'s values, its holes stepped over, laid in the slots past
+    /// `dest`'s last, copied by [`Heap::dup_value`]'s rule with no source,
+    /// and `dest`'s counts and next free element moved past them once,
+    /// its internal pointer at its first element, as
+    /// `ZEND_HASH_FILL_FINISH` moves them. Room is made first for every
+    /// slot written, which a table sized for the merge's count already
+    /// has. Nothing is released, so nothing here reaches code of the
+    /// program. `false`, and nothing written, where either table is not a
+    /// packed list. `dest` has one owner.
+    pub fn array_fill_packed(&mut self, dest: Arr, src: Arr) -> Result<bool, Fatal> {
+        if !dest.is_packed() || !src.is_packed() {
+            return Ok(false);
+        }
+        let used = dest.num_used();
+        let src_used = src.num_used();
+        // A table holds fewer than `HT_MAX_SIZE` elements, so its count is
+        // a `u32`.
+        #[allow(clippy::cast_possible_truncation)]
+        let count = src.len() as u32;
+        let room = used.saturating_add(count);
+        if room > dest.table_size() {
+            self.array_extend(dest, room)?;
+        }
+        let mut at = used;
+        for idx in 0..src_used {
+            let z = src.read_slot(idx);
+            if z.is_undef() {
+                continue;
+            }
+            dest.write_slot(at, self.dup_value(z, None));
+            at += 1;
+        }
+        let header = dest.header();
+        header
+            .num_elements
+            .set(header.num_elements.get() + (at - used));
+        header.num_used.set(at);
+        header.next_free.set(i64::from(at));
+        header.internal_pointer.set(0);
+        Ok(true)
+    }
+
     /// `zend_new_array(size)` then `zend_hash_real_init_packed`: the
     /// header and the packed slots laid down at once, so a table php
     /// real-inits and leaves empty holds its slots and reads `packed` to

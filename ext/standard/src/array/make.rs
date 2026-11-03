@@ -19,7 +19,7 @@ use php_ext_random::Rng;
 
 use super::sort::key_value;
 use super::stack::Stack;
-use super::{HT_MAX_SIZE, copied, give_up_rows, returned};
+use super::{HT_MAX_SIZE, copied, returned};
 use crate::math::math_round;
 use crate::throwables::Throwables;
 
@@ -96,6 +96,26 @@ type Picked = Raw<Union<i64, Union<PhpString, PhpArray>>>;
 /// Recursion detected
 /// ```
 ///
+/// `php_array_merge_wrapper` is `array_merge`'s: of two arrays one of
+/// which is empty, the other is handed back as it is where nothing would
+/// be renumbered, and otherwise the first is copied into a table laid at
+/// the count of every argument's elements, a packed list in one pass.
+///
+/// ```php
+/// function mem($f) { $f(); $m = memory_get_usage(); memory_reset_peak_usage(); $t = $f(); echo memory_get_usage() - $m, ' ', memory_get_peak_usage() - $m, "\n"; }
+/// $h = ['x' => 1, 'y' => [2]]; $a = range(1, 6); $b = range(7, 12);
+/// mem(fn () => array_merge_recursive($h, []));
+/// mem(fn () => array_merge_recursive([], $a));
+/// mem(fn () => array_merge_recursive($a, $b));
+/// mem(fn () => array_merge_recursive($h, $a, $h));
+/// ```
+/// ```expect
+/// 0 72
+/// 0 0
+/// 376 408
+/// 1128 1160
+/// ```
+///
 /// The declarations of the array builders.
 ///
 /// ```php
@@ -155,42 +175,7 @@ fn array_merge_recursive(
     req: &mut Request,
     arrays: Variadic<PhpArray>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    super::merge_total(req, arrays.clone())?;
-    let mut rest = arrays;
-    let Some(first) = rest.next() else {
-        return Ok(Owner::take(req, PhpArray::empty()));
-    };
-    let mut dest = PhpArray::new(req)?;
-    // `php_array_merge_wrapper`'s copy of the first array
-    // (`ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(src, string_key, src_entry)`,
-    // `Z/ext/standard/array.c:4364`), which no code of the program reaches:
-    // the rows read under the borrowed request, each taken as php takes
-    // it, a reference with one owner followed, then written.
-    let rows: Vec<(Key, Owner<Value>)> = walk::rows(req, first)
-        .map(|(key, value)| (key, copied(req, value)))
-        .collect();
-    let mut rows = rows.into_iter();
-    while let Some((key, value)) = rows.next() {
-        let written = match key {
-            Key::Str(_) => {
-                let key = Owner::take(req, key);
-                dest.set(req, key, value)
-            }
-            Key::Int(_) => dest.append(req, value),
-        };
-        if let Err(thrown) = written {
-            give_up_rows(req, rows);
-            dest.give_up(req);
-            return Err(thrown);
-        }
-    }
-    for src in rest {
-        if let Err(thrown) = merge_recursive(req, &mut dest, src) {
-            dest.give_up(req);
-            return Err(thrown);
-        }
-    }
-    Ok(dest)
+    super::merge_wrapper(req, arrays, merge_recursive)
 }
 
 /// `php_array_merge_recursive`: `src`'s elements into `dest`.

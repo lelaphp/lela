@@ -119,6 +119,7 @@ Heap::array_clean
 Heap::array_del
 Heap::array_dup
 Heap::array_extend
+Heap::array_fill_packed
 Heap::array_lookup
 Heap::array_mixed
 Heap::array_next_entry

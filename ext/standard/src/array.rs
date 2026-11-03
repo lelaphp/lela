@@ -17,7 +17,7 @@ use php_ext::coerce::{compare, to_double, to_long, to_string, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, call_stack_end, call_stack_limit, docref};
 use php_ext::request::Request;
 use php_ext::values::walk::{self as rows, Hold};
-use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef, zend_sort};
+use php_ext::values::{Key, Layout, Owner, PhpArray, Value, ValueRef, zend_sort};
 
 use constants::{
     COUNT_NORMAL, COUNT_RECURSIVE, SORT_FLAG_CASE, SORT_LOCALE_STRING, SORT_NATURAL, SORT_NUMERIC,
@@ -98,19 +98,126 @@ pub(crate) struct Countable;
 /// elements a table may be sized for.
 const HT_MAX_SIZE: u64 = 0x4000_0000;
 
-/// `php_array_merge_wrapper`'s count (`Z/ext/standard/array.c:4268`):
+/// `php_array_merge_wrapper`'s count (`Z/ext/standard/array.c:4325`):
 /// the elements of every array added up before anything is merged, and
-/// php's `Error` where they reach `HT_MAX_SIZE`.
-fn merge_total(req: &mut Request, arrays: impl Iterator<Item = PhpArray>) -> Result<(), Thrown> {
+/// php's `Error` where they reach `HT_MAX_SIZE`; below it, the count.
+fn merge_total(req: &mut Request, arrays: impl Iterator<Item = PhpArray>) -> Result<u32, Thrown> {
     let count: u64 = arrays.map(|array| array.len() as u64).sum();
-    if count >= HT_MAX_SIZE {
-        let ce = Throwables::of(req)?;
-        return Err(php_ext::raising::throw_error(
-            req,
-            ce.error,
-            &format!("The total number of elements must be lower than {HT_MAX_SIZE}"),
-        ));
+    match u32::try_from(count) {
+        Ok(count) if u64::from(count) < HT_MAX_SIZE => Ok(count),
+        _ => {
+            let ce = Throwables::of(req)?;
+            Err(php_ext::raising::throw_error(
+                req,
+                ce.error,
+                &format!("The total number of elements must be lower than {HT_MAX_SIZE}"),
+            ))
+        }
     }
+}
+
+/// `php_array_merge_wrapper` (`Z/ext/standard/array.c:4325`), the body
+/// `array_merge` and `array_merge_recursive` share: no array is the empty
+/// array; the elements counted, and php's `Error` past `HT_MAX_SIZE`; of
+/// two arrays one of which is empty, the other handed back as it is with
+/// one more owner where nothing would be renumbered, which is a packed
+/// list without holes or a hash keyed by strings alone; and otherwise the
+/// first array copied into a table laid at the count ([`merge_first`]) and
+/// each later one merged into it by `merge`, php's `php_array_merge` or
+/// `php_array_merge_recursive`.
+fn merge_wrapper(
+    req: &mut Request,
+    arrays: Variadic<PhpArray>,
+    mut merge: impl FnMut(&mut Request, &mut Owner<PhpArray>, PhpArray) -> Result<(), Thrown>,
+) -> Result<Owner<PhpArray>, Thrown> {
+    let count = merge_total(req, arrays.clone())?;
+    let two = arrays.len() == 2;
+    let mut rest = arrays;
+    let Some(first) = rest.next() else {
+        return Ok(Owner::take(req, PhpArray::empty()));
+    };
+    if two && let Some(second) = rest.clone().next() {
+        let kept = if first.is_empty() {
+            Some(second)
+        } else if second.is_empty() {
+            Some(first)
+        } else {
+            None
+        };
+        // `HT_IS_PACKED` and `HT_IS_WITHOUT_HOLES`, or a hash every key of
+        // which is a string.
+        if let Some(kept) = kept
+            && if kept.is_packed() {
+                kept.is_list()
+            } else {
+                rows::rows(req, kept).all(|(key, _)| matches!(key, Key::Str(_)))
+            }
+        {
+            return Ok(Owner::take(req, kept));
+        }
+    }
+    let mut dest = merge_first(req, first, count)?;
+    for src in rest {
+        if let Err(thrown) = merge(req, &mut dest, src) {
+            dest.give_up(req);
+            return Err(thrown);
+        }
+    }
+    Ok(dest)
+}
+
+/// `php_array_merge` (`Z/ext/standard/array.c:4170`): two packed lists in
+/// one pass, and any other `src` walked row by row ([`merge_rows`]).
+fn merge_into(req: &mut Request, dest: &mut Owner<PhpArray>, src: PhpArray) -> Result<(), Thrown> {
+    if dest.fill_packed(req, src)? {
+        return Ok(());
+    }
+    merge_rows(req, dest, src)
+}
+
+/// `php_array_merge_wrapper`'s copy of the first array
+/// (`Z/ext/standard/array.c:4383`): a table of `array_init_size(count)`,
+/// packed and filled in one pass where the first array is packed, and
+/// otherwise a hash its rows are laid into, a string key kept and an
+/// integer key given the next index. Nothing runs code of the program,
+/// since no write replaces a value.
+fn merge_first(req: &mut Request, first: PhpArray, count: u32) -> Result<Owner<PhpArray>, Thrown> {
+    if first.is_packed() {
+        let mut dest = PhpArray::sized(req, count, Layout::Packed)?;
+        if let Err(thrown) = dest.fill_packed(req, first) {
+            dest.give_up(req);
+            return Err(thrown);
+        }
+        return Ok(dest);
+    }
+    let mut dest = PhpArray::sized(req, count, Layout::Hash)?;
+    if let Err(thrown) = merge_rows(req, &mut dest, first) {
+        dest.give_up(req);
+        return Err(thrown);
+    }
+    Ok(dest)
+}
+
+/// `php_array_merge`'s walk (`Z/ext/standard/array.c:4185`) where `src`
+/// or `dest` is not a packed list: each row taken as `zval_add_ref` takes
+/// it, a string key written in place where it is already there
+/// (`zend_hash_update`) and an integer key given the next index.
+fn merge_rows(req: &mut Request, dest: &mut Owner<PhpArray>, src: PhpArray) -> Result<(), Thrown> {
+    // `ZEND_HASH_FOREACH_STR_KEY_VAL(src, string_key, src_entry)`, no
+    // owner of the table taken: the argument holds it while an update's
+    // release serves a destructor.
+    rows::foreach(req, src, Hold::None, |req, row| -> rows::Step {
+        // `Z_ISREF_P(src_entry) && Z_REFCOUNT_P(src_entry) == 1`.
+        let value = copied(req, *row.value());
+        match row.key() {
+            Key::Str(_) => {
+                let key = Owner::take(req, row.key().clone());
+                dest.set(req, key, value)?;
+            }
+            Key::Int(_) => dest.append(req, value)?,
+        }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(())
 }
 
@@ -140,20 +247,23 @@ fn give_up_rows(req: &mut Request, rows: impl Iterator<Item = (Key, Owner<Value>
 }
 
 /// `array_merge(array ...$arrays): array`, php's `PHP_FUNCTION(array_merge)`
-/// over `php_array_merge_wrapper` (`Z/ext/standard/array.c:4268`) and
-/// `php_array_merge` (`Z/ext/standard/array.c:4113`): `Z_PARAM_VARIADIC`
+/// over `php_array_merge_wrapper` (`Z/ext/standard/array.c:4325`) and
+/// `php_array_merge` (`Z/ext/standard/array.c:4170`): `Z_PARAM_VARIADIC`
 /// and then each argument held to being an array in turn, the
 /// `TypeError` naming its number and no parameter name, since the
 /// variadic's slots have none; no argument is the empty array; of two
 /// arguments one of which is empty, the other is handed back as it is
 /// with one more owner where nothing would be renumbered, which is a
-/// packed array without holes or one keyed by strings alone; and
-/// otherwise a new array the first argument's elements are laid into,
-/// a string key kept and an integer key given the next index, and each
-/// later argument's the same way over it, a string key writing in
-/// place where it is already there (`zend_hash_update`). A reference
-/// with no other owner is followed into the copy (`Z_ISREF_P` with
-/// `Z_REFCOUNT_P` one) and any other is kept, one more owner.
+/// packed array without holes or a hash keyed by strings alone; and
+/// otherwise a new array laid at the count of every argument's
+/// elements, packed and filled in one pass where the first argument is
+/// packed, a hash its rows are laid into where it is not, a string key
+/// kept and an integer key given the next index, and each later
+/// argument's the same way over it, a packed list after a packed list in
+/// one pass, and a string key writing in place where it is already
+/// there (`zend_hash_update`). A reference with no other owner is
+/// followed into the copy (`Z_ISREF_P` with `Z_REFCOUNT_P` one) and any
+/// other is kept, one more owner.
 ///
 /// ```php
 /// var_dump(array_merge());
@@ -217,6 +327,37 @@ fn give_up_rows(req: &mut Request, rows: impl Iterator<Item = (Key, Owner<Value>
 ///   thrown in %s on line 2
 /// ```
 ///
+/// The table is laid at the count of every argument's elements, as
+/// `array_init_size(count)` lays it, packed or a hash as the first
+/// argument is, so `memory_get_usage()` and `memory_get_peak_usage()`
+/// read php's numbers past eight elements: a packed list grows nothing,
+/// a hash first holds no smaller table beside the one it ends in, a
+/// packed table a later hash writes into is converted as php's is, and
+/// three empty arrays make an empty hash of eight, a hash read as a list
+/// a new one.
+///
+/// ```php
+/// function mem($f) { $f(); $m = memory_get_usage(); memory_reset_peak_usage(); $t = $f(); echo memory_get_usage() - $m, ' ', memory_get_peak_usage() - $m, "\n"; }
+/// $a = range(1, 6); $b = range(7, 12); $h = ['a' => 1, 'b' => 2, 'c' => 3, 'd' => 4, 'e' => 5]; $k = [9 => 'x', 'k' => 'y'];
+/// $l = ['x' => 1]; unset($l['x']); $l[] = 5; $l[] = 6;
+/// mem(fn () => array_merge($a, $b));
+/// mem(fn () => array_merge($a, $b, [13]));
+/// mem(fn () => array_merge($h, $b));
+/// mem(fn () => array_merge($a, $h));
+/// mem(fn () => array_merge($k, $k, $k, $k, $k));
+/// mem(fn () => array_merge([], [], []));
+/// mem(fn () => array_merge($l, []));
+/// ```
+/// ```expect
+/// 376 480
+/// 376 408
+/// 696 728
+/// 696 1016
+/// 696 728
+/// 376 408
+/// 376 408
+/// ```
+///
 /// The elements of every array are counted before any is merged, and
 /// reaching `HT_MAX_SIZE` is php's `Error` (GHSA-h96m-rvf9-jgm2), for
 /// `array_merge_recursive` too.
@@ -235,46 +376,7 @@ fn array_merge(
     req: &mut Request,
     arrays: Variadic<PhpArray>,
 ) -> Result<Owner<Raw<PhpArray>>, Thrown> {
-    if arrays.len() == 0 {
-        return Ok(returned(Owner::take(req, Value::array(PhpArray::empty()))));
-    }
-    merge_total(req, arrays.clone())?;
-    let mut two = arrays.clone();
-    if let (2, Some(first), Some(second)) = (arrays.len(), two.next(), two.next()) {
-        let kept = if first.is_empty() {
-            Some(second)
-        } else if second.is_empty() {
-            Some(first)
-        } else {
-            None
-        };
-        // `HT_IS_PACKED` without holes, or every key a string: what a
-        // merge would lay down as it stands.
-        if let Some(kept) = kept
-            && (kept.is_list() || rows::rows(req, kept).all(|(key, _)| matches!(key, Key::Str(_))))
-        {
-            return Ok(returned(Owner::take(req, Value::array(kept))));
-        }
-    }
-    let mut merged = PhpArray::new(req)?;
-    for array in arrays {
-        // `php_array_merge`'s `ZEND_HASH_FOREACH_STR_KEY_VAL(src, string_key,
-        // src_entry)` (`Z/ext/standard/array.c:4131`), no owner of the table
-        // taken: the argument holds it while an update's release serves a
-        // destructor.
-        rows::foreach(req, array, Hold::None, |req, row| -> rows::Step {
-            // `Z_ISREF_P(src_entry) && Z_REFCOUNT_P(src_entry) == 1`.
-            let value = copied(req, *row.value());
-            match row.key() {
-                Key::Str(_) => {
-                    let key = Owner::take(req, row.key().clone());
-                    merged.set(req, key, value)?;
-                }
-                Key::Int(_) => merged.append(req, value)?,
-            }
-            Ok(ControlFlow::Continue(()))
-        })?;
-    }
+    let merged = merge_wrapper(req, arrays, merge_into)?;
     Ok(returned(merged.into_value()))
 }
 
