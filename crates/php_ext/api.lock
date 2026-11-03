@@ -1382,6 +1382,7 @@ values::PhpArray::len
 values::PhpArray::live_from
 values::PhpArray::new
 values::PhpArray::next_free
+values::PhpArray::packed_fill
 values::PhpArray::place
 values::PhpArray::protect
 values::PhpArray::replace

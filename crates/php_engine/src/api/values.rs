@@ -585,6 +585,37 @@ impl PhpArray {
         }
     }
 
+    /// `zend_hash_real_init_packed` and `ZEND_HASH_FILL_PACKED`
+    /// (`Z/Zend/zend_hash.h:1585`): a new packed list of eight slots
+    /// whose elements `next` makes one at a time, each laid in the slot
+    /// past the last with no separation asked of a table no one else
+    /// holds, the table grown as `ZEND_HASH_FILL_GROW` grows it, until
+    /// `next` answers `None`. A step of `next` that throws gives the list
+    /// up as far as it was made and hands the throwable on, as
+    /// [`PhpArray::filled`] does. `php_explode` lays its pieces so.
+    #[cfg_attr(debug_assertions, track_caller)]
+    #[inline]
+    pub fn packed_fill(
+        req: &mut Request,
+        mut next: impl FnMut(&mut Request) -> Result<Option<Owner<Value>>, Thrown>,
+    ) -> Result<Owner<PhpArray>, Thrown> {
+        let list = PhpArray::sized(req, 8, Layout::Packed)?;
+        let a = list.0;
+        loop {
+            let laid = match next(req) {
+                Ok(None) => return Ok(list),
+                // The table is this call's own, so it has one owner, and
+                // its next element is its count, never `ZEND_LONG_MAX`.
+                Ok(Some(value)) => req.array_append(a, value.hand_on()).map(|_| ()),
+                Err(thrown) => Err(thrown),
+            };
+            if let Err(thrown) = laid {
+                list.give_up(req);
+                return Err(thrown);
+            }
+        }
+    }
+
     /// `zend_new_array(size)` and `zend_hash_init(ht, size, ...)`, an
     /// empty array whose first write lays its table down for `size`
     /// elements, the size held to `zend_hash_check_size`: the header

@@ -1918,64 +1918,64 @@ fn explode(
     if delim.is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
     }
-    let mut array = PhpArray::new(req)?;
     let (d, s) = (delim.as_bytes(), string.as_bytes());
-    if s.is_empty() {
-        if limit >= 0 {
-            let empty = PhpString::new(req, b"")?.into_value();
-            array.append(req, empty)?;
-        }
-        return Ok(array);
-    }
-    if limit == 0 || limit == 1 {
-        let whole = Owner::take(req, string).into_value();
-        array.append(req, whole)?;
-        return Ok(array);
-    }
-    let Some(mut p2) = memnstr(s, d, 0) else {
-        // `ZVAL_STR_COPY` of the string, one piece and no copy; a
-        // negative limit leaves the array empty.
-        if limit > 1 {
-            let whole = Owner::take(req, string).into_value();
-            array.append(req, whole)?;
+    let p2 = if s.is_empty() || limit == 0 || limit == 1 {
+        None
+    } else {
+        memnstr(s, d, 0)
+    };
+    let Some(p2) = p2 else {
+        // `array_init` and one `zend_hash_next_index_insert_new` at most:
+        // the empty string a non-negative limit gives an empty subject,
+        // and otherwise the subject itself, `ZVAL_STR_COPY`, no copy
+        // made, where a limit of 0 or 1 or no separator leaves it whole
+        // and a negative limit leaves the array empty.
+        let mut array = PhpArray::new(req)?;
+        let piece = if s.is_empty() {
+            (limit >= 0)
+                .then(|| PhpString::new(req, b"").map(Owner::into_value))
+                .transpose()?
+        } else {
+            (limit >= 0).then(|| Owner::take(req, string).into_value())
+        };
+        if let Some(piece) = piece {
+            array.append(req, piece)?;
         }
         return Ok(array);
     };
     if limit < 0 {
+        let array = PhpArray::new(req)?;
         return explode_negative_limit(req, array, d, s, limit);
     }
-    // `php_explode`: each piece added as it is found, with
-    // `zend_string_init_fast` (`Z/ext/standard/string.c:868`, `:876`),
-    // and no offsets kept.
-    let mut p1 = 0;
-    let mut limit = limit;
-    loop {
+    // `php_explode`: `zend_hash_real_init_packed` and
+    // `ZEND_HASH_FILL_PACKED`, each piece laid as it is found with
+    // `zend_string_init_fast` (`Z/ext/standard/string.c:858`, `:868`,
+    // `:876`), and no offsets kept.
+    let (mut p1, mut p2, mut limit, mut rest) = (0, Some(p2), limit, true);
+    PhpArray::packed_fill(req, |req| {
+        let Some(end) = p2 else {
+            // `if (p1 <= endp)`: the rest after the last separator taken.
+            if !std::mem::take(&mut rest) {
+                return Ok(None);
+            }
+            return PhpString::fast(req, &s[p1..]).map(|piece| Some(piece.into_value()));
+        };
         // "Each piece costs a zval plus a zend_string, so stop once over
         // the limit" (8.5.12), before each piece, the array as far as it
         // was filled returned and the limit's fatal raised after the
         // call.
         if req.memory().has_oom() {
-            return Ok(array);
+            return Ok(None);
         }
-        let value = PhpString::fast(req, &s[p1..p2])?;
-        array.append(req, value.into_value())?;
-        p1 = p2 + d.len();
+        let piece = PhpString::fast(req, &s[p1..end])?;
+        p1 = end + d.len();
         // `while (p2 != NULL && --limit > 1)`.
-        match memnstr(s, d, p1) {
-            Some(next)
-                if {
-                    limit -= 1;
-                    limit > 1
-                } =>
-            {
-                p2 = next;
-            }
-            _ => break,
-        }
-    }
-    let rest = PhpString::fast(req, &s[p1..])?;
-    array.append(req, rest.into_value())?;
-    Ok(array)
+        p2 = memnstr(s, d, p1).filter(|_| {
+            limit -= 1;
+            limit > 1
+        });
+        Ok(Some(piece.into_value()))
+    })
 }
 
 /// `php_explode_negative_limit`: every piece but the last `-limit`, each
