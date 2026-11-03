@@ -12,11 +12,12 @@ use php_ext::coerce::strtol;
 use php_ext::decl::{Attribute, AttributeArgument, ConstExpr, Name};
 use php_ext::raising::{Cause, Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::PhpArray;
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 use crate::{
-    Format, Module, Phase, State, Status, absorb, bind_vars, files, headers_sent, ini, ini_bool,
-    pending, sent_error, serializers, session_array, shown, started_error, throw_error, user,
+    Format, Module, Phase, State, Status, absorb, bind_vars, files, forget_read, headers_sent, ini,
+    ini_bool, pending, sent_error, serializers, session_array, shown, started_error, throw_error,
+    user,
 };
 
 /// `PS_MAX_SID_LENGTH`.
@@ -325,8 +326,8 @@ pub(super) fn rinit_globals(req: &mut Request) {
     state.files = None;
     state.parent_open = false;
     state.define_sid = true;
-    state.session_vars = None;
-    state.vars = None;
+    crate::forget_read(req);
+    req.state::<State>().vars = None;
 }
 
 /// `php_rshutdown_session_globals`: the handler closed, the id, the
@@ -335,9 +336,9 @@ pub(super) fn rshutdown_globals(req: &mut Request) -> Result<(), Thrown> {
     crate::unbind(req);
     let closed = close(req);
     absorb(req, closed)?;
+    crate::forget_read(req);
     let state = req.state::<State>();
     state.id = None;
-    state.session_vars = None;
     state.class_name = None;
     state.started_at = None;
     state.status = Status::None;
@@ -528,6 +529,26 @@ fn find_id(req: &mut Request) {
 
 /// `php_session_initialize`: the handler opened, an id made or checked,
 /// the cookie and `SID`, the data read and decoded, garbage collected.
+///
+/// The data is read into a string of the request's, `zend_string_alloc`
+/// in the handler's read, which `lazy_write` keeps as `PS(session_vars)`
+/// while the session stands, so `memory_get_usage()` and the memory
+/// limit count it beside what it decodes to:
+///
+/// ```php
+/// ob_start(); $d = __DIR__; file_put_contents("$d/sess_readwitness", 'a|s:100000:"' . str_repeat('x', 100000) . '";');
+/// foreach ([0, 1] as $lazy) {
+///     $m = memory_get_usage();
+///     session_id("readwitness"); session_start(["save_path" => $d, "use_cookies" => 0, "cache_limiter" => "", "lazy_write" => $lazy]);
+///     echo intdiv(memory_get_usage() - $m, 100000), "\n";
+///     session_write_close(); $_SESSION = null;
+/// }
+/// unlink("$d/sess_readwitness"); ob_end_flush();
+/// ```
+/// ```expect
+/// 1
+/// 2
+/// ```
 pub(super) fn initialize(req: &mut Request) -> Result<bool, Thrown> {
     req.state::<State>().status = Status::Active;
     let Some(module) = req.state::<State>().module else {
@@ -592,9 +613,20 @@ pub(super) fn initialize(req: &mut Request) -> Result<bool, Thrown> {
         }
         return Ok(false);
     };
-    gc(req, false)?;
-    req.state::<State>().session_vars = ini_bool(req, b"session.lazy_write").then(|| val.clone());
-    decode(req, &val)?;
+    // `*val = zend_string_alloc(...)`: the data is the request's from the
+    // read on, kept for `lazy_write` while the session stands.
+    let val = PhpString::new(req, &val)?;
+    if let Err(thrown) = gc(req, false) {
+        val.give_up(req);
+        return Err(thrown);
+    }
+    forget_read(req);
+    if ini_bool(req, b"session.lazy_write") {
+        req.state::<State>().session_vars = Some(Owner::take(req, *val));
+    }
+    let decoded = decode(req, val.as_bytes());
+    val.give_up(req);
+    decoded?;
     let file = req.frames().current_file().map(<[u8]>::to_vec);
     let line = req.frames().current_line();
     req.state::<State>().started_at = file.map(|f| (f, line));
@@ -688,9 +720,14 @@ fn save_current_state(req: &mut Request, write_data: bool) -> Result<(), Thrown>
             let id = req.state::<State>().id.clone().unwrap_or_default();
             let encoded = encode(req)?;
             let lazy = ini_bool(req, b"session.lazy_write");
-            let read_back = req.state::<State>().session_vars.clone();
+            let unchanged = |val: &[u8], req: &mut Request| {
+                req.state::<State>()
+                    .session_vars
+                    .as_ref()
+                    .is_some_and(|read| read.as_bytes() == val)
+            };
             let done = match encoded {
-                Some(val) if lazy && read_back.as_deref() == Some(val.as_slice()) => {
+                Some(val) if lazy && unchanged(&val, req) => {
                     function = if class_name.is_some() {
                         "updateTimestamp"
                     } else {
