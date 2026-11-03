@@ -2429,7 +2429,7 @@ fn huge_truncate(_at: NonNull<u8>, _old_size: usize, _new_size: usize) -> bool {
 /// `size` fresh, private, anonymous bytes under php's [`MAPPING_TAG`], or
 /// `None` where the machine refuses them.
 #[cfg(all(unix, not(miri)))]
-fn mmap(hint: *mut u8, size: usize) -> Option<NonNull<u8>> {
+pub(crate) fn mmap(hint: *mut u8, size: usize) -> Option<NonNull<u8>> {
     // SAFETY: an anonymous private mapping names no file and, without
     // `MAP_FIXED`, replaces nothing already mapped; `hint` is a hint.
     let at = unsafe {
@@ -2463,7 +2463,7 @@ const MAPPING_TAG: libc::c_int = -1;
 /// `zend_mm_munmap`: `size` bytes at `at`, which this heap mapped and
 /// nothing names any more, given back to the machine.
 #[cfg(all(unix, not(miri)))]
-fn munmap(at: *mut u8, size: usize) {
+pub(crate) fn munmap(at: *mut u8, size: usize) {
     // SAFETY: the range is part of a mapping `mmap` made for this heap,
     // and the caller holds no name into it.
     unsafe { libc::munmap(at.cast(), size) };

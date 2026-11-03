@@ -39,6 +39,7 @@ use std::ptr::NonNull;
 use std::sync::OnceLock;
 
 use crate::array::{Arr, Key, free_persistent_array, persistent_array};
+use crate::bump::Bump;
 use crate::gc::{self, Counted, Refcounted};
 use crate::hooks::Fatal;
 use crate::mm::Mm;
@@ -1025,6 +1026,12 @@ impl Made {
 /// which the engine alone serialises; a request never grows it.
 pub struct Strings {
     table: Permanent,
+    /// Where the strings this table lays down itself are laid, one after
+    /// another, as opcache's `accel_copy_permanent_strings` lays php's
+    /// permanent ones in its buffer, and not one system allocation each;
+    /// a string a compile made ([`Strings::publish`]) stays where the
+    /// compile laid it.
+    bump: Bump,
     /// The constant arrays the units published into this engine hold,
     /// freed with the table.
     arrays: Vec<Arr>,
@@ -1059,11 +1066,13 @@ impl Strings {
     /// An empty table with room for `strings` strings before its slots
     /// are laid again, as `zend_hash_init` takes the size it starts at:
     /// a table whose strings are known in number before they are
-    /// interned is laid once.
+    /// interned is laid once, and their bytes in one chunk of its bump
+    /// laid at [`BYTES_PER_STRING`] a string.
     #[must_use]
     pub fn with_capacity(strings: usize) -> Strings {
         Strings {
             table: Permanent::with_capacity(strings),
+            bump: Bump::with_capacity(strings.saturating_mul(BYTES_PER_STRING)),
             arrays: Vec::new(),
             shadows: Vec::new(),
             known: Vec::new(),
@@ -1184,8 +1193,10 @@ impl Strings {
 impl Intern for Strings {
     /// php's `zend_string_init_interned_permanent`
     /// (`Z/Zend/zend_string.c:267-280`): the frozen table, then this one,
-    /// then a string on the system allocator, hashed and flagged before
-    /// it is published; a string of the engine's, so no request's size.
+    /// then a string laid in this table's bump, as opcache's
+    /// `accel_new_interned_string` lays it in its buffer, hashed and
+    /// flagged before it is published; a string of the engine's, so no
+    /// request's size.
     fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool, _: Sizing) -> Result<Str, Fatal> {
         if let Some(frozen) = frozen_string(bytes) {
             return Ok(frozen);
@@ -1194,7 +1205,7 @@ impl Intern for Strings {
         if let Some(held) = self.table.find(hash, bytes) {
             return Ok(held);
         }
-        let s = persistent(bytes)?;
+        let s = laid(&mut self.bump, bytes)?;
         if valid_utf8 {
             s.mark_valid_utf8();
         }
@@ -1214,15 +1225,18 @@ impl Intern for Strings {
 
 impl Drop for Strings {
     /// `zend_hash_destroy(&interned_strings_permanent)` with `_str_dtor`
-    /// as its destructor (`Z/Zend/zend_string.c:66-70`): every string the
-    /// table laid down goes back to the allocator it came from. The
-    /// engine outlives every request that can name one.
+    /// as its destructor (`Z/Zend/zend_string.c:66-70`): every string a
+    /// compile laid down goes back to the allocator it came from, and the
+    /// table's own go with its bump after this. The engine outlives
+    /// every request that can name one.
     fn drop(&mut self) {
         for a in self.arrays.drain(..) {
             free_persistent_array(a);
         }
         for s in self.table.strings() {
-            free_persistent(s);
+            if !self.bump.holds(s.address()) {
+                free_persistent(s);
+            }
         }
         for s in self.shadows.drain(..) {
             free_persistent(s);
@@ -1438,8 +1452,8 @@ unsafe impl Send for Strings {}
 // SAFETY: a shared table is only read: `find`, `count` and `known` take
 // `&self` and read the slots, the known list and the strings' cached
 // hashes and bytes, each string hashed before `Permanent::add` published
-// it, so no read writes; growing the table takes `&mut self`, which
-// excludes every reader.
+// it, so no read writes; growing the table, and laying a string in its
+// bump, takes `&mut self`, which excludes every reader.
 unsafe impl Sync for Strings {}
 
 impl std::fmt::Debug for Strings {
@@ -1698,6 +1712,9 @@ struct Frozen {
     empty: Option<Str>,
     /// `zend_one_char_string`, the string of each single byte.
     chars: [Option<Str>; 256],
+    /// Where the strings are laid, one chunk for the 257, never given
+    /// back.
+    _bump: Bump,
 }
 
 impl Frozen {
@@ -1705,11 +1722,13 @@ impl Frozen {
     /// `zend_interned_strings_init` lays them: the empty string, then the
     /// 256 of one byte, those below `0x80` known to be valid UTF-8.
     fn new() -> Frozen {
-        let empty = froze(b"");
+        // Each string is a header and two bytes rounded to a word.
+        let mut bump = Bump::with_capacity(257 * Str::allocation_size(1));
+        let empty = froze(&mut bump, b"");
         let mut chars = [None; 256];
         for (i, slot) in chars.iter_mut().enumerate() {
             let byte = [u8::try_from(i).unwrap_or(0)];
-            *slot = froze(&byte);
+            *slot = froze(&mut bump, &byte);
             if byte[0] >= 0x80 {
                 continue;
             }
@@ -1717,7 +1736,11 @@ impl Frozen {
                 s.mark_valid_utf8();
             }
         }
-        Frozen { empty, chars }
+        Frozen {
+            empty,
+            chars,
+            _bump: bump,
+        }
     }
 
     /// The frozen string for these bytes, php's `zend_string_init_fast`
@@ -1738,12 +1761,12 @@ unsafe impl Send for Frozen {}
 // SAFETY: see the `Send` above.
 unsafe impl Sync for Frozen {}
 
-/// One frozen string, hashed and marked valid UTF-8 as php marks the
-/// empty string, before anything can name it. Nothing frees it: the
-/// frozen table is never dropped, as php's permanent one stands for as
-/// long as a request can be served.
-fn froze(bytes: &[u8]) -> Option<Str> {
-    let s = persistent(bytes).ok()?;
+/// One frozen string, laid in the frozen table's bump, hashed and
+/// marked valid UTF-8 as php marks the empty string, before anything can
+/// name it. Nothing frees it: the frozen table is never dropped, as php's
+/// permanent one stands for as long as a request can be served.
+fn froze(bump: &mut Bump, bytes: &[u8]) -> Option<Str> {
+    let s = laid(bump, bytes).ok()?;
     s.cache_hash();
     if bytes.is_empty() {
         s.mark_valid_utf8();
@@ -1787,6 +1810,28 @@ fn persistent(bytes: &[u8]) -> Result<Str, Fatal> {
     // nothing else.
     Ok(unsafe { Str::init(at, bytes, PERMANENT) })
 }
+
+/// What a table lays a string of `bytes` at in its bump, as opcache's
+/// `accel_new_interned_string` copies one into its buffer
+/// (`Z/ext/opcache/ZendAccelerator.c:515`): interned, persistent and
+/// permanent, never freed alone, and gone with the bump.
+fn laid(bump: &mut Bump, bytes: &[u8]) -> Result<Str, Fatal> {
+    let size = Str::allocation_size(bytes.len());
+    let Some(at) = bump.alloc(size) else {
+        return Err(Fatal::out_of_memory(size));
+    };
+    // SAFETY: the bump handed out `size` bytes nobody else holds, aligned
+    // to the header's words, which is what `init` asks.
+    Ok(unsafe { Str::init(at, bytes, PERMANENT) })
+}
+
+/// What [`Strings::with_capacity`] lays its bump's first chunk at for
+/// each string it is sized for: the header's 24 bytes and the name, with
+/// room past the average for the longer ones and for a count asked short
+/// (the bundle's 9,637 startup strings take 427.7 KB at f39c7d0d5, 44
+/// bytes each on average). A page of the chunk no string reaches is
+/// never touched.
+const BYTES_PER_STRING: usize = 80;
 
 /// `pefree(s, 1)`: give a persistent string back to the system
 /// allocator. A frozen one never reaches here, because the frozen table
@@ -2017,6 +2062,36 @@ mod tests {
             let again = many.intern(bytes, false).expect("the same string");
             assert!(again.is_same(*s), "string {n} is found where it was made");
         }
+    }
+
+    /// A table sized for its strings lays them in its bump, as opcache's
+    /// `accel_copy_permanent_strings` lays php's permanent ones in its
+    /// buffer: a thousand names take one allocation between them, each
+    /// laid right after the last, and a string a compile published stays
+    /// the compile's, freed alone as the table drops with the bump.
+    #[test]
+    fn a_table_s_strings_are_laid_in_one_bump_and_not_one_allocation_each() {
+        let names: Vec<Vec<u8>> = (0..1000)
+            .map(|at| format!("startup_name_{at}").into_bytes())
+            .collect();
+        let mut table = Strings::with_capacity(names.len());
+        let mut last: Option<Str> = None;
+        for name in &names {
+            let s = table.intern(name).expect("a string");
+            if let Some(last) = last {
+                let after = last.address().as_ptr().addr() + Str::allocation_size(last.len());
+                assert_eq!(s.address().as_ptr().addr(), after, "laid after the last");
+            }
+            last = Some(s);
+        }
+        assert_eq!(table.bump.chunks(), 1, "one allocation for 1000 strings");
+        let mut pending = Pending::default();
+        pending.intern(b"published", false).expect("a string");
+        table.publish(pending);
+        let published = table.find(b"published").expect("published");
+        assert!(!table.bump.holds(published.address()));
+        assert!(names.iter().all(|name| table.find(name).is_some()));
+        assert_eq!(table.count(), 1001);
     }
 
     #[test]
