@@ -110,8 +110,8 @@ fn a_call_by_name_looks_the_table_up_once_and_reads_its_slot_after() {
     let strlen = req.function_named(Bare::resolved(b"strlen"));
     assert!(strlen.is_some());
     assert_eq!(
-        req.cached(frame, CacheSlot(init.out)),
-        Cached::Function(strlen.unwrap_or(Function::PASS)),
+        req.cached(frame, CacheSlot(init.out)).function(),
+        strlen,
         "and primes the slot with the callee"
     );
 
@@ -227,8 +227,8 @@ fn called_twice(mut req: Box<Request>, unit: &PublishedUnit) {
             "the first call looks the table up and the second reads the slot (call {call})"
         );
         assert_eq!(
-            req.cached(frame, CacheSlot(init.out)),
-            Cached::Function(strlen.unwrap_or(Function::PASS)),
+            req.cached(frame, CacheSlot(init.out)).function(),
+            strlen,
             "the slot is primed with the callee (call {call})"
         );
         assert_eq!(popped_callee(&mut req), strlen, "call {call}");
@@ -293,10 +293,7 @@ fn a_namespaced_call_by_name_looks_the_table_up_twice_once() {
         Ok(Stepped::Same(frame))
     );
     assert_eq!(req.vm().lookups, 2, "foo\\strlen misses, strlen hits");
-    assert_eq!(
-        req.cached(frame, CacheSlot(8)),
-        Cached::Function(strlen.unwrap_or(Function::PASS))
-    );
+    assert_eq!(req.cached(frame, CacheSlot(8)).function(), strlen);
     assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
     assert_eq!(

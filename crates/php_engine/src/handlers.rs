@@ -1971,10 +1971,33 @@ fn init_call(
     // (`init_func_run_time_cache`), so a call that enters plainly keeps
     // its entry laid from the first pass after this one.
     if looked_up {
-        let primed = primed_call(req, function, op.extended_value);
+        let primed = match primed_call(req, function, op.extended_value) {
+            Cached::Function(function) => primed_native(req, function, op.extended_value),
+            primed => primed,
+        };
         req.prime(frame, slot, primed);
     }
     Ok(advance(req, frame))
+}
+
+/// What an `INIT_*`'s slot keeps of a native of the engine's table: the
+/// push its call takes, the header [`init_native`] lays made once, so
+/// every pass after the first pushes it as a user function's call is
+/// pushed, as `INIT_FCALL` pushes `fbc` off `CACHED_PTR` with the size
+/// it cached; the native alone for any other callee, a trampoline's.
+fn primed_native(req: &Request, function: Function, count: u32) -> Cached {
+    let Some(callee) = req.shared.native_callee(function) else {
+        return Cached::Function(function);
+    };
+    Cached::Call(exec::PrimedCall {
+        function,
+        room: req.native_room(count),
+        callee,
+        info: exec::CallInfo::default().of_call_built(),
+        cache: exec::CacheAt::default(),
+        base: exec::CacheBase::NONE,
+        opline: 0,
+    })
 }
 
 /// What an `INIT_*`'s slot keeps of `function`, called with `count`
