@@ -70,7 +70,7 @@ name = "php_compile"
 budget = 24000
 [[crate]]
 name = "php_engine"
-budget = 88000                             # 86k raised to 88k for the compile-memory queue, #3806 and #3839-#3907, #3565's #3566 condition waived (#3915, 2026-11-02)
+budget = 89000                             # 86k raised to 88k for the compile-memory queue (#3915, 2026-11-02); 89k for a native call's glue, #4058 and #4062, and no raise after this one without #3566's dedupe landed (#4063, 2026-11-03)
 lock = ["api.lock", "sapi.lock", "tier.lock"]
 lock_from = { "api.lock" = "php_ext" }
 [[crate]]
