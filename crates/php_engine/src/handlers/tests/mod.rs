@@ -30,6 +30,15 @@ mod object_walk;
 mod safepoints;
 mod writes;
 
+/// A `RETURN`, which a fixture's op array ends on so that no opline goes
+/// on past the last, as publication holds it to (#3998).
+fn back() -> Opline {
+    Opline {
+        opcode: Opcode::Return,
+        ..Opline::default()
+    }
+}
+
 /// Interned `bytes` as a constant.
 fn interned(strings: &mut php_heap::Strings, bytes: &[u8]) -> php_heap::Zval {
     php_heap::Zval::string(strings.intern(bytes).expect("intern a constant"))
