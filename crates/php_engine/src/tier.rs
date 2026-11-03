@@ -1488,11 +1488,14 @@ fn serve_held<'u, T: Tier, D: Telling>(
             let way = tail::chain::<T, D>(req, frame, body, oplines, at, &declared)?.way();
             // What the loop takes up for the frame it goes on in: its
             // slots where a handler with the request in hand went on in
-            // it, its position with them where the edge went into another
-            // frame, and nothing where the edge handed them over. One
+            // it or a call's `RECV`s all passed, and its position with
+            // them where another edge went into another frame. One
             // take-up where the arms meet: the two edges into a frame
             // taking theirs up in their own arms and going on by
-            // `continue` measured the empty loop 72.9 -> 89.2 (#3345).
+            // `continue` measured the empty loop 72.9 -> 89.2 (#3345);
+            // the call edge going on so with its slots in hand left the
+            // loop one head the other arms branch to, and read fannkuch's
+            // cycles 9.8% higher (#4039).
             let took = match way {
                 Way::On(places) => {
                     at = at.wrapping_add(places);
@@ -1534,22 +1537,26 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     let entry = (start, called.entry);
                     // Where nothing is told of a `RECV`, no tier is bound
                     // and no interrupt is raised, the activation is the
-                    // passing `RECV`s alone, read over the frame in hand,
-                    // whose slots the loop goes on with (#4022).
+                    // passing `RECV`s alone, read over the frame in hand
+                    // (#4022), and the frame taken up where the arms meet
+                    // (#4039).
                     #[cfg(not(dispatch = "tailcall"))]
-                    if interpreted::<T>()
+                    let received = interpreted::<T>()
                         && !declared.tells(php_unit::Opcode::Recv)
                         && !interrupt.raised().load(Ordering::Relaxed)
-                        && let Some((to, held)) = exec::received(called_frame, body, entry)
-                    {
-                        at = to;
-                        slots = held;
-                        continue;
+                        && exec::received(called_frame, body, entry);
+                    #[cfg(dispatch = "tailcall")]
+                    let received = false;
+                    if received {
+                        // At its entry, or where it was pushed past it.
+                        at = start.max(called.entry);
+                        Took::Slots
+                    } else {
+                        if let Err(other) = entered::<T, D>(req, callee, body, entry, declared)? {
+                            break other;
+                        }
+                        Took::Standing
                     }
-                    if let Err(other) = entered::<T, D>(req, callee, body, entry, declared)? {
-                        break other;
-                    }
-                    Took::Standing
                 }
                 Way::Left(stepped) => break stepped,
             };

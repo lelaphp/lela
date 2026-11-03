@@ -306,12 +306,38 @@ impl Units {
     /// unit held, a function's found through the function table and a
     /// file's through the frame's annex ([`Request::unit_of`]), and kept
     /// for the return to the frame and for the next call to its
-    /// function. A file's frame whose unit the request compiled for
-    /// itself is served in a scope of its own ([`Entered::Took`]), where
-    /// the machine stack has room for one. None for a frame that stands
-    /// nowhere or serves nothing.
+    /// function. A frame of a function the loop entered before takes the
+    /// op array kept for its calls, as the loop's call edge does, with no
+    /// lookup and no search of the units held: the frame a tier resumes
+    /// in, which the loop forgot ([`Kept::forget`]), and the caller a
+    /// return pops to, which a trace pushed. A file's frame whose unit
+    /// the request compiled for itself is served in a scope of its own
+    /// ([`Entered::Took`]), where the machine stack has room for one.
+    /// None for a frame that stands nowhere or serves nothing.
     #[inline(never)]
     pub(super) fn enter<'u>(
+        &'u self,
+        req: &mut Request,
+        kept: &mut Kept<'u>,
+        frame: FrameRef,
+    ) -> Option<Entered<'u>> {
+        let called = req
+            .vm()
+            .at(frame)?
+            .function()
+            .and_then(|function| kept.called(function));
+        if let Some(called) = called {
+            kept.keep(frame, called.code);
+            return Some(Entered::Held(called.code));
+        }
+        self.enter_found(req, kept, frame)
+    }
+
+    /// [`Units::enter`] for a frame of no function the loop entered
+    /// before: its unit found through the function table or the frame's
+    /// annex, and held.
+    #[inline(never)]
+    fn enter_found<'u>(
         &'u self,
         req: &mut Request,
         kept: &mut Kept<'u>,
