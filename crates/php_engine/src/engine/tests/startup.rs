@@ -387,11 +387,6 @@ fn the_tables_build_and_link_classes_lay_are_each_one_allocation_at_its_length()
         ("methods", s.methods.len(), s.methods.capacity()),
         ("trampolines", s.trampolines.len(), s.trampolines.capacity()),
         (
-            "parameter_classes",
-            s.parameter_classes.len(),
-            s.parameter_classes.capacity(),
-        ),
-        (
             "method_functions",
             s.method_functions.len(),
             s.method_functions.capacity(),
@@ -421,7 +416,8 @@ fn the_tables_build_and_link_classes_lay_are_each_one_allocation_at_its_length()
         [] as [&(&str, usize, usize); 0],
         "laid past their length"
     );
-    assert_eq!(laid.len(), 23, "the tables build and link_classes lay");
+    // `parameter_classes` is two boxes, at their length as made (#4027).
+    assert_eq!(laid.len(), 22, "the tables build and link_classes lay");
     assert!(
         laid.iter().all(|(_, len, _)| *len > 0),
         "each holds Core's rows"

@@ -838,7 +838,7 @@ pub(crate) struct Shared {
     pub(crate) trampolines: Vec<MethodDecl>,
     /// The class each parameter of each native holds its argument to, by
     /// the native's number ([`parameter_classes`]).
-    pub(crate) parameter_classes: Vec<Box<[Option<ClassId>]>>,
+    pub(crate) parameter_classes: ParameterClasses,
     /// Each class's linked record, one row per row of `classes`
     /// ([`native_records`]): `ce->function_table` whole, in php's order.
     pub(crate) records: Arc<[LinkedClass<ClassId>]>,
@@ -1477,6 +1477,29 @@ fn trampoline_tables(
     tables
 }
 
+/// Each native's row of [`parameter_classes`], laid one after another
+/// in one table, each native's row from where the one before it ends.
+pub(crate) struct ParameterClasses {
+    /// Where each native's row ends, by its number.
+    ends: Box<[u32]>,
+    classes: Box<[Option<ClassId>]>,
+}
+
+impl ParameterClasses {
+    /// The class the parameter at `at` of native `native` holds its
+    /// argument to; none past its row.
+    pub(crate) fn of(&self, native: usize, at: usize) -> Option<ClassId> {
+        let start = native
+            .checked_sub(1)
+            .map_or(Some(&0), |before| self.ends.get(before))?;
+        let end = self.ends.get(native)?;
+        let row = self
+            .classes
+            .get(usize::try_from(*start).ok()?..usize::try_from(*end).ok()?)?;
+        *row.get(at)?
+    }
+}
+
 /// `zend_parse_arg_object`'s class for each parameter of each native, by
 /// the native's number among the functions and then the methods: the
 /// class a parameter's type names where it names one, `?Class` among
@@ -1490,7 +1513,7 @@ fn parameter_classes(
     classes: &[ClassDecl],
     trampolines: &[MethodDecl],
     class_at: impl Fn(&[u8]) -> Option<ClassId>,
-) -> Vec<Box<[Option<ClassId>]>> {
+) -> ParameterClasses {
     let class_of = |ty: Option<&Type>| {
         let named = match ty? {
             Type::Named(name) => name,
@@ -1505,33 +1528,28 @@ fn parameter_classes(
     // A native's types read off its entries, its slots left unbuilt,
     // and the row cut after its last class, so a native that names
     // none holds nothing.
-    let of = |decl: Option<&FunctionDecl>| -> Box<[Option<ClassId>]> {
-        let Some(decl) = decl else {
-            return Box::default();
-        };
-        let mut row: Vec<Option<ClassId>> = match decl.parameters.unbuilt() {
-            Some(entries) => (entries.iter())
-                .map(|entry| class_of((entry.ty)().as_ref()))
-                .collect(),
-            None => (decl.parameters.iter())
-                .map(|parameter| class_of(parameter.ty.as_ref()))
-                .collect(),
-        };
-        while row.last().is_some_and(Option::is_none) {
-            row.pop();
+    let mut laid: Vec<Option<ClassId>> = Vec::new();
+    let mut of = |decl: Option<&FunctionDecl>| -> u32 {
+        let start = laid.len();
+        if let Some(decl) = decl {
+            match decl.parameters.unbuilt() {
+                Some(entries) => laid.extend(entries.iter().map(|e| class_of((e.ty)().as_ref()))),
+                None => laid.extend(decl.parameters.iter().map(|p| class_of(p.ty.as_ref()))),
+            }
         }
-        row.into_boxed_slice()
+        while laid.len() > start && laid.last().is_some_and(Option::is_none) {
+            laid.pop();
+        }
+        u32::try_from(laid.len()).unwrap_or(u32::MAX)
     };
     let method_decl = |method: &NativeMethod| native_method_decl(classes, trampolines, method.at);
-    functions
-        .iter()
-        .map(|decl| of(Some(decl)))
-        .chain(
-            methods
-                .iter()
-                .map(|method| of(method_decl(method).map(|decl| &decl.function))),
-        )
-        .collect()
+    let mut ends = Vec::with_capacity(functions.len() + methods.len());
+    ends.extend(functions.iter().map(|decl| of(Some(decl))));
+    ends.extend((methods.iter()).map(|method| of(method_decl(method).map(|decl| &decl.function))));
+    ParameterClasses {
+        ends: ends.into_boxed_slice(),
+        classes: laid.into_boxed_slice(),
+    }
 }
 
 /// `zend_declare_class_constant_ex` over a class another extension
