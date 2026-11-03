@@ -171,7 +171,7 @@ fn a_kept_landing_reads_the_epochs_word_and_one_armed_since() {
     }
     let (epoch, func) = Epoch::fixture(Unit {
         main: OpArray {
-            oplines,
+            oplines: oplines.into(),
             safepoints: vec![OplineIdx(0), OplineIdx(3)].into(),
             ..OpArray::default()
         },
