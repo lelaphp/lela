@@ -54,6 +54,7 @@ mod dims;
 mod doors;
 mod objects;
 mod strings;
+mod unread;
 use crate::record::{Began, Callee, Stop, leaves, returns};
 use crate::types::{
     Abort, BodyEntry, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home,
@@ -117,6 +118,16 @@ enum CallRoom {
     Stood,
 }
 
+/// The variables [`Emit`] holds the [`Stood`] in, one per field.
+#[derive(Debug, Clone, Copy)]
+struct StoodVars {
+    frame: Variable,
+    call: Variable,
+    func: Variable,
+    opline: Variable,
+    room: Variable,
+}
+
 /// Where the code goes where the interrupt test finds the interrupt
 /// raised ([`Emit::interrupt_test`]).
 #[derive(Debug, Clone, Copy)]
@@ -168,7 +179,9 @@ pub(super) fn lower(
     emit.joins = joins;
     emit.trace()?;
     let sites = emit.fuzzed_sites;
+    let stood_loads = std::mem::take(&mut emit.stood_loads);
     emit.b.finalize(config);
+    unread::unread(&mut func, &stood_loads);
     Ok((func, sites))
 }
 
@@ -759,8 +772,16 @@ struct Emit<'a> {
     /// The address of the request's interrupt byte, read once as a
     /// looping trace whose header tests it enters.
     interrupt: Option<Value>,
-    /// Where a kernel writes where the interpreter stands.
+    /// Where a kernel writes where the interpreter stands, which compiled
+    /// code reads back into [`Emit::stood_vars`] past the call.
     stood: StackSlot,
+    /// Where the interpreter stands as compiled code knows it, the
+    /// [`Stood`] the last kernel wrote or code in place stood, held in
+    /// variables and never stored: a word no path reads costs nothing,
+    /// as php's code keeps `EX(opline)` and `EX(call)` in registers where
+    /// it knows them and stores them only for the handler that reads
+    /// them.
+    stood_vars: StoodVars,
     /// Where a kernel that answers a word or a zval writes it, made where
     /// one is first called.
     answer: Option<StackSlot>,
@@ -802,6 +823,9 @@ struct Emit<'a> {
     answers: Vec<Option<Block>>,
     /// The number the last inline arithmetic kept for the op after it.
     kept: Option<Kept>,
+    /// The loads made for a [`Stood`] word alone, dropped where no path
+    /// reads it ([`unread::unread`]).
+    stood_loads: Vec<cranelift_codegen::ir::Inst>,
 }
 
 impl<'a> Emit<'a> {
@@ -812,6 +836,13 @@ impl<'a> Emit<'a> {
         (symbols, held): (&'a Symbols, &'a [PlainCall]),
     ) -> Emit<'a> {
         let rooms = ir.frames.iter().map(|_| b.declare_var(I64)).collect();
+        let stood_vars = StoodVars {
+            frame: b.declare_var(I64),
+            call: b.declare_var(I64),
+            func: b.declare_var(I32),
+            opline: b.declare_var(I32),
+            room: b.declare_var(I64),
+        };
         let stood = b.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             u32::try_from(size_of::<Stood>()).unwrap_or(u32::MAX),
@@ -829,6 +860,7 @@ impl<'a> Emit<'a> {
             cx: None,
             interrupt: None,
             stood,
+            stood_vars,
             answer: None,
             rooms,
             regs: vec![None; ir.values.len()],
@@ -851,6 +883,7 @@ impl<'a> Emit<'a> {
             doors: vec![None; ir.exits.len()],
             answers: vec![None; ir.exits.len()],
             kept: None,
+            stood_loads: Vec::new(),
         }
     }
 
@@ -969,15 +1002,21 @@ impl<'a> Emit<'a> {
     /// down in `cx`, held as where the last kernel left it, for a trace
     /// whose code reads it ([`super::stood_at_entry`]): its frame, its
     /// call, in one word its op array and opline, and the stack's room,
-    /// laid out alike in both.
+    /// laid out alike in both. Nothing writes those words while the code
+    /// runs but a jump's last stores before it hands on, so they are read
+    /// as memory that does not change, and a word no path reads before a
+    /// kernel stands the frame anew is not read at all.
     fn stood_at_entry(&mut self, cx: Value) {
         if !super::stood_at_entry(self.ir) {
             return;
         }
-        for at in [STOOD_FRAME, STOOD_CALL, STOOD_FUNC, STOOD_ROOM] {
-            let word = self.b.ins().load(I64, trusted(), cx, STOOD_AT + at);
-            self.b.ins().stack_store(I64, word, self.stood, at);
-        }
+        let fixed = trusted().with_readonly().with_can_move();
+        let frame = self.b.ins().load(I64, fixed, cx, STOOD_AT + STOOD_FRAME);
+        let call = self.b.ins().load(I64, fixed, cx, STOOD_AT + STOOD_CALL);
+        let func = self.b.ins().load(I32, fixed, cx, STOOD_AT + STOOD_FUNC);
+        let opline = self.b.ins().load(I32, fixed, cx, STOOD_AT + STOOD_OPLINE);
+        let room = self.b.ins().load(I64, fixed, cx, STOOD_AT + STOOD_ROOM);
+        self.stand([frame, call, func, opline, room]);
     }
 
     /// The ops of `range`, the way in at the body (`body`: the entry, its
@@ -1961,9 +2000,65 @@ impl<'a> Emit<'a> {
         })
     }
 
-    /// A word of the [`Stood`] the last kernel wrote.
+    /// A word of the [`Stood`] the last kernel wrote, or code in place
+    /// stood: its frame, its call or the stack's room as an `I64`, its op
+    /// array or its opline as an `I32`, or both in one `I64` as the
+    /// struct lays them out, the op array in the low half.
     fn stood_word(&mut self, ty: Type, at: i32) -> Value {
-        self.b.ins().stack_load(I64, ty, self.stood, at)
+        let vars = self.stood_vars;
+        match (at, ty == I32) {
+            (STOOD_FUNC, true) => self.b.use_var(vars.func),
+            (STOOD_OPLINE, true) => self.b.use_var(vars.opline),
+            (STOOD_FUNC, false) => {
+                let func = self.b.use_var(vars.func);
+                let opline = self.b.use_var(vars.opline);
+                let low = self.b.ins().uextend(I64, func);
+                let high = self.b.ins().uextend(I64, opline);
+                let high = self.b.ins().ishl_imm_u(high, 32);
+                self.b.ins().bor(low, high)
+            }
+            (STOOD_FRAME, _) => self.b.use_var(vars.frame),
+            (STOOD_CALL, _) => self.b.use_var(vars.call),
+            _ => self.b.use_var(vars.room),
+        }
+    }
+
+    /// Where the interpreter stands as code in place left it: the frame,
+    /// the call under way in it, its op array and opline, and the room
+    /// the stack's top page has left.
+    fn stand(&mut self, [frame, call, func, opline, room]: [Value; 5]) {
+        let vars = self.stood_vars;
+        self.b.def_var(vars.frame, frame);
+        self.b.def_var(vars.call, call);
+        self.b.def_var(vars.func, func);
+        self.b.def_var(vars.opline, opline);
+        self.b.def_var(vars.room, room);
+    }
+
+    /// `loads`, made for a [`Stood`] word alone, dropped where no path
+    /// reads the word ([`unread::unread`]).
+    fn stood_loads<const N: usize>(&mut self, loads: [Value; N]) {
+        for load in loads {
+            if let Some(inst) = self.b.func.dfg.value_def(load).inst() {
+                self.stood_loads.push(inst);
+            }
+        }
+    }
+
+    /// The address of the [`Stood`] a kernel writes, for its call.
+    fn stood_out(&mut self) -> Value {
+        self.b.ins().stack_addr(I64, self.stood, 0)
+    }
+
+    /// Where the kernel just called stood the interpreter, read back from
+    /// what it wrote, on the path where it answered `Continue`.
+    fn stood_back(&mut self) {
+        let frame = self.b.ins().stack_load(I64, I64, self.stood, STOOD_FRAME);
+        let call = self.b.ins().stack_load(I64, I64, self.stood, STOOD_CALL);
+        let func = self.b.ins().stack_load(I64, I32, self.stood, STOOD_FUNC);
+        let opline = self.b.ins().stack_load(I64, I32, self.stood, STOOD_OPLINE);
+        let room = self.b.ins().stack_load(I64, I64, self.stood, STOOD_ROOM);
+        self.stand([frame, call, func, opline, room]);
     }
 
     /// `line` served whole by [`Kernel::Step`]: the operands it reads from
@@ -2197,15 +2292,16 @@ impl<'a> Emit<'a> {
         self.spill_operands(line)?;
         let [room, opline] = self.served(line)?;
         let func = self.func_of(line.frame)?;
-        let stood = self.b.ins().stack_addr(I64, self.stood, 0);
         match self.entered_by(at, line) {
             Some(callee) => {
                 let callee = self.func_of(callee)?;
+                let stood = self.stood_out();
                 self.call(
                     Kernel::Call,
                     &[room, opline, func, callee, stood],
                     leave_of(line),
                 )?;
+                self.stood_back();
             }
             None if let Some(onward) = Onward::of(line.opcode)
                 && onward.serves(&self.within(at)) =>
@@ -2213,7 +2309,9 @@ impl<'a> Emit<'a> {
                 self.handled(line, onward, [room, opline, func])?;
             }
             None => {
+                let stood = self.stood_out();
                 self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?;
+                self.stood_back();
                 if leaves(line.opcode) && self.may_be_top(line.frame)? {
                     self.halts();
                 }
@@ -2389,13 +2487,11 @@ impl<'a> Emit<'a> {
             Onward::Past(places) => self.b.ins().iconst(I32, i64::from(line.opline.0 + places)),
             Onward::Went => self.b.ins().load(I32, trusted(), room, EX_OPLINE),
         };
-        self.b.ins().stack_store(I64, func, self.stood, STOOD_FUNC);
-        self.b
-            .ins()
-            .stack_store(I64, next, self.stood, STOOD_OPLINE);
+        self.b.def_var(self.stood_vars.func, func);
+        self.b.def_var(self.stood_vars.opline, next);
         if line.opcode == Opcode::DoIcall {
             let call = self.call_left(line.frame)?;
-            self.b.ins().stack_store(I64, call, self.stood, STOOD_CALL);
+            self.b.def_var(self.stood_vars.call, call);
         }
         Ok(())
     }
@@ -4534,12 +4630,13 @@ impl<'a> Emit<'a> {
         let callee = self.b.ins().iconst(I32, i64::from(engine_offset(*callee)?));
         let [room, opline] = self.served(line)?;
         let func = self.func_of(line.frame)?;
-        let stood = self.b.ins().stack_addr(I64, self.stood, 0);
+        let stood = self.stood_out();
         self.call(
             Kernel::PushCall,
             &[room, opline, func, callee, stood],
             Some(Leave::Exit(exit)),
         )?;
+        self.stood_back();
         let call = self.stood_word(I64, STOOD_CALL);
         let refused = self.b.ins().icmp_imm_s(IntCC::Equal, call, 0);
         self.leave_where(refused, exit)?;

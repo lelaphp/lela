@@ -4722,11 +4722,12 @@ impl<'a> Emit<'a> {
                     return Err(self.internal("a promoted property of a class the unit has not"));
                 }
             };
+        let (class_at, place) = self.property_began(at, declared_properties);
         let (hooks, is_virtual) = match &parameter.hooks {
             Some(hooks) => {
                 let hooked = hooks::Hooked {
-                    class: u32::try_from(at).unwrap_or(u32::MAX),
-                    property: u32::try_from(declared_properties).unwrap_or(u32::MAX),
+                    class: class_at,
+                    property: place,
                     class_name: &class_name,
                     kind,
                     name: &parameter.name,
@@ -4750,7 +4751,7 @@ impl<'a> Emit<'a> {
             earlier,
         )?;
         let declared = PropertyDecl {
-            name: Name(parameter.name.clone().into_boxed_slice()),
+            name: Name(parameter.name.clone().into()),
             visibility: promoted.visibility,
             set_visibility,
             is_instance: true,
@@ -5278,7 +5279,7 @@ impl<'a> Emit<'a> {
         Ok((
             FunctionDecl {
                 name: Name(name.into()),
-                parameters,
+                parameters: parameters.into(),
                 return_type: self.return_type.clone(),
                 returns_by_ref: function.by_ref,
                 is_generator: function.generator,
@@ -5471,7 +5472,7 @@ impl<'a> Emit<'a> {
                 self.promoted_property(parameter, promoted, ty.as_ref(), &attrs)?;
             }
             parameters.push(Parameter {
-                name: Name(parameter.name.clone().into_boxed_slice()),
+                name: Name(parameter.name.clone().into()),
                 ty,
                 by_ref: parameter.by_ref,
                 prefer_ref: false,
@@ -5974,6 +5975,25 @@ impl<'a> Emit<'a> {
         self.nested.push(Nested { declares, grown });
     }
 
+    /// `decl` at `at` in the unit's classes, an enum's `name` and `value`
+    /// declared as its body begins (`zend_enum_register_props`).
+    fn class_pushed(&mut self, at: usize, decl: ClassDecl) {
+        for property in 0..decl.properties.len() {
+            self.property_began(at, property);
+        }
+        self.classes.push(decl);
+    }
+
+    /// The property at `property` of the class at `class` declared at
+    /// this place ([`Declares::Property`]), the two as the unit numbers
+    /// them.
+    fn property_began(&mut self, class: usize, property: usize) -> (u32, u32) {
+        let index = |at: usize| u32::try_from(at).unwrap_or(u32::MAX);
+        let (class, property) = (index(class), index(property));
+        self.began(Declares::Property { class, property });
+        (class, property)
+    }
+
     /// `zend_oparray_context_end`: the enclosing op array's state back
     /// on the emitter.
     fn end_body(&mut self, saved: Saved) {
@@ -6018,9 +6038,10 @@ impl<'a> Emit<'a> {
     /// an `eval` of one line in a loop always is, else made.
     fn file_name(&mut self) -> Name {
         match self.room_filename.take() {
-            Some(mut name) if name.0.len() == self.filename.len() => {
-                name.0.copy_from_slice(self.filename);
-                name
+            Some(name) if name.0.len() == self.filename.len() => {
+                let mut room = Box::<[u8]>::from(name.0);
+                room.copy_from_slice(self.filename);
+                Name(room.into())
             }
             _ => Name(self.filename.into()),
         }
@@ -6081,14 +6102,14 @@ impl<'a> Emit<'a> {
         let literals = std::mem::take(&mut self.constants);
         let cache_size = defaults_cached(&oplines, &literals, self.cache_slots);
         OpArray {
-            oplines,
-            literals,
+            oplines: oplines.into(),
+            literals: literals.into(),
             const_exprs: std::mem::take(&mut self.const_exprs),
             vars,
             num_cvs,
             num_tmps: self.temporaries,
-            try_catch: std::mem::take(&mut self.try_catch),
-            live_ranges,
+            try_catch: std::mem::take(&mut self.try_catch).into(),
+            live_ranges: live_ranges.into(),
             safepoints: std::mem::take(&mut self.safepoints),
             filename,
             line_start,
@@ -6096,15 +6117,15 @@ impl<'a> Emit<'a> {
             cache_size,
             cache_room: cache_size,
             runtime_cache: php_unit::MapPtrOffset::default(),
-            dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs),
-            nested: std::mem::take(&mut self.nested),
+            dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs).into(),
+            nested: std::mem::take(&mut self.nested).into(),
             bound_vars: std::mem::take(&mut self.static_vars),
             implicit_uses: 0,
             loops: u32::try_from(self.loops.len()).unwrap_or(u32::MAX),
             no_receiver: self.fn_flags.is_static,
             strict_types: self.typing == Typing::Strict,
             return_mask: self.return_type.as_ref().map_or(0, Type::mask),
-            numeric_dims: std::mem::take(&mut self.numeric_dims),
+            numeric_dims: std::mem::take(&mut self.numeric_dims).into(),
         }
     }
 
@@ -6378,16 +6399,11 @@ impl<'a> Emit<'a> {
         let (attributes, dynamic_properties) = attributes?;
         let is_enum = class.kind == ClassKind::Enum;
         let decl = ClassDecl {
-            name: Name(name.clone().into_boxed_slice()),
+            name: Name(name.clone().into()),
             kind: class.kind,
             flags: class_flags(class, dynamic_properties, anonymous),
-            parent: parent
-                .as_ref()
-                .map(|parent| Name(parent.clone().into_boxed_slice())),
-            interfaces: interfaces
-                .iter()
-                .map(|i| Name(i.clone().into_boxed_slice()))
-                .collect(),
+            parent: parent.as_ref().map(|parent| Name(parent.clone().into())),
+            interfaces: interfaces.iter().map(|i| Name(i.clone().into())).collect(),
             implementors: Vec::new(),
             aliases: Vec::new(),
             traits,
@@ -6412,10 +6428,10 @@ impl<'a> Emit<'a> {
         // The class takes its place `at` in the unit before its body, so
         // a class a member declares, `new class {}` in a method or a
         // hook, takes the next place.
-        self.classes.push(decl);
+        self.class_pushed(at, decl);
         if anonymous {
             self.runtime_keys.push((
-                Name(name.to_ascii_lowercase().into_boxed_slice()),
+                Name(name.to_ascii_lowercase().into()),
                 u32::try_from(at).unwrap_or(u32::MAX),
             ));
         }
@@ -6767,7 +6783,7 @@ impl<'a> Emit<'a> {
     ) -> Result<(Vec<Name>, Vec<TraitAdaptation>), CompileError> {
         let mut traits = Vec::new();
         let mut adaptations = Vec::new();
-        let as_name = |bytes: Vec<u8>| Name(bytes.into_boxed_slice());
+        let as_name = |bytes: Vec<u8>| Name(bytes.into());
         for used in &class.traits {
             self.line = used.line;
             for written in &used.names {
@@ -7025,12 +7041,17 @@ impl<'a> Emit<'a> {
                 String::from_utf8_lossy(&constant.name)
             )));
         }
+        let declared = self.classes.get(at).map_or(0, |decl| decl.constants.len());
+        self.began(Declares::Constant {
+            class: u32::try_from(at).unwrap_or(u32::MAX),
+            constant: u32::try_from(declared).unwrap_or(u32::MAX),
+        });
         let attributes = self.case_attributes(constant)?;
         let Some(decl) = self.classes.get_mut(at) else {
             return Err(self.internal("a constant of a class the unit has not"));
         };
         decl.constants.push(ClassConstDecl {
-            name: Name(constant.name.clone().into_boxed_slice()),
+            name: Name(constant.name.clone().into()),
             visibility: constant.visibility,
             is_final: constant.is_final,
             is_case: constant.is_case,
@@ -7358,7 +7379,7 @@ impl<'a> Emit<'a> {
                             ),
                         ));
                     }
-                    (Some(Name(named.clone().into_boxed_slice())), *expr)
+                    (Some(Name(named.clone().into())), *expr)
                 }
                 walk::AttrArgument::Positional(expr) => {
                     if arguments.iter().any(|earlier| earlier.name.is_some()) {
@@ -7378,7 +7399,7 @@ impl<'a> Emit<'a> {
             });
         }
         Ok(Attribute {
-            name: Name(name.into_boxed_slice()),
+            name: Name(name.into()),
             arguments,
             line: attribute.line,
             strict: self.typing == Typing::Strict,
@@ -7678,10 +7699,9 @@ impl<'a> Emit<'a> {
             String::from_utf8_lossy(&property.name)
         );
         self.active_property = Some(property.name.clone());
-        let ty = match property.ty {
-            Some(written) => Some(self.property_type(written, &member)?),
-            None => None,
-        };
+        let ty = (property.ty)
+            .map(|written| self.property_type(written, &member))
+            .transpose()?;
         if (self.classes.get(at))
             .is_some_and(|decl| decl.properties.iter().any(|p| *p.name.0 == *property.name))
         {
@@ -7707,11 +7727,12 @@ impl<'a> Emit<'a> {
             ty.is_some(),
             &member,
         )?;
+        let (class_at, place) = self.property_began(at, declared_before);
         let (hooks, is_virtual) = match &property.hooks {
             Some(hooks) => {
                 let hooked = hooks::Hooked {
-                    class: u32::try_from(at).unwrap_or(u32::MAX),
-                    property: u32::try_from(declared_before).unwrap_or(u32::MAX),
+                    class: class_at,
+                    property: place,
                     class_name: name,
                     kind,
                     name: &property.name,
@@ -7740,7 +7761,7 @@ impl<'a> Emit<'a> {
         self.active_property = None;
         let attributes = attributes?;
         let declared = PropertyDecl {
-            name: Name(property.name.clone().into_boxed_slice()),
+            name: Name(property.name.clone().into()),
             visibility: property.visibility,
             set_visibility,
             is_instance: !property.is_static,
@@ -8459,10 +8480,8 @@ impl<'a> Emit<'a> {
         let op1 = self.literal(lowered);
         let filed = self.own_string(&key, Sizing::Finit)?;
         self.literal(filed);
-        self.runtime_keys.push((
-            Name(key.into_boxed_slice()),
-            u32::try_from(at).unwrap_or(u32::MAX),
-        ));
+        self.runtime_keys
+            .push((Name(key.into()), u32::try_from(at).unwrap_or(u32::MAX)));
         if !delayed {
             self.push(Opline {
                 opcode: Opcode::DeclareClass,
@@ -8706,7 +8725,7 @@ impl<'a> Emit<'a> {
                             return Err(self.fatal("a written name that folded to nothing"));
                         };
                         return Ok(ConstExpr::DynamicClassConstant {
-                            class: Name(class.into_boxed_slice()),
+                            class: Name(class.into()),
                             class_kind,
                             name: Box::new(self.const_expr(expr)?),
                             line,
@@ -8721,7 +8740,7 @@ impl<'a> Emit<'a> {
                         return self.folded(value.kept());
                     }
                     Ok(ConstExpr::ClassConstant {
-                        class: Name(class.into_boxed_slice()),
+                        class: Name(class.into()),
                         class_kind,
                         name: Name(name.into()),
                         line,
@@ -9361,7 +9380,7 @@ impl<'a> Emit<'a> {
         }
         Ok(ConstExpr::Closure {
             at,
-            name: Name(name.into_boxed_slice()),
+            name: Name(name.into()),
             unit: self.cell.share(),
         })
     }
@@ -9458,7 +9477,7 @@ impl<'a> Emit<'a> {
         let at = self.function_callables;
         self.function_callables = self.function_callables.saturating_add(1);
         ConstExpr::FunctionCallable {
-            name: Name(name.into_boxed_slice()),
+            name: Name(name.into()),
             name_kind,
             line,
             at,
@@ -9522,8 +9541,8 @@ impl<'a> Emit<'a> {
             }
         };
         Ok(ConstExpr::MethodCallable {
-            class: Name(class.into_boxed_slice()),
-            method: Name(method.into_boxed_slice()),
+            class: Name(class.into()),
+            method: Name(method.into()),
             line,
         })
     }
@@ -9757,7 +9776,7 @@ impl<'a> Emit<'a> {
         };
         let at = u32::try_from(self.attributed_constants.len()).unwrap_or(u32::MAX);
         self.attributed_constants.push(ConstDecl {
-            name: Name(name.into_boxed_slice()),
+            name: Name(name.into()),
             value,
             attributes,
         });
@@ -18275,7 +18294,7 @@ impl<'a> Emit<'a> {
                     .get(index)
                     .map(|decl| {
                         (
-                            decl.parameters.as_slice(),
+                            &decl.parameters[..],
                             attributes::deprecated_or_no_discard(&decl.attributes),
                         )
                     })

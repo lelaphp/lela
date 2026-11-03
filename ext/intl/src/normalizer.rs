@@ -16,10 +16,10 @@ use crate::utf8;
 
 /// `normalizer_*` in the stub's order.
 pub(crate) fn functions(b: ExtensionBuilder) -> ExtensionBuilder {
-    b.functions(vec![
-        normalizer_normalize::declared(),
-        normalizer_is_normalized::declared(),
-        normalizer_get_raw_decomposition::declared(),
+    b.functions(&[
+        normalizer_normalize::DECLARED,
+        normalizer_is_normalized::DECLARED,
+        normalizer_get_raw_decomposition::DECLARED,
     ])
 }
 

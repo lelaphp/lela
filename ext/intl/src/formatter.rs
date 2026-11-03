@@ -1339,22 +1339,22 @@ fn numfmt_get_error_message(req: &mut Request, formatter: Fmt) -> Result<Owner<P
 
 /// The `numfmt_*` block of `php_intl.stub.php`.
 pub(crate) fn functions(b: php_ext::abi::ExtensionBuilder) -> php_ext::abi::ExtensionBuilder {
-    b.functions(vec![
-        numfmt_create::declared(),
-        numfmt_format::declared(),
-        numfmt_parse::declared(),
-        numfmt_format_currency::declared(),
-        numfmt_parse_currency::declared(),
-        numfmt_set_attribute::declared(),
-        numfmt_get_attribute::declared(),
-        numfmt_set_text_attribute::declared(),
-        numfmt_get_text_attribute::declared(),
-        numfmt_set_symbol::declared(),
-        numfmt_get_symbol::declared(),
-        numfmt_set_pattern::declared(),
-        numfmt_get_pattern::declared(),
-        numfmt_get_locale::declared(),
-        numfmt_get_error_code::declared(),
-        numfmt_get_error_message::declared(),
+    b.functions(&[
+        numfmt_create::DECLARED,
+        numfmt_format::DECLARED,
+        numfmt_parse::DECLARED,
+        numfmt_format_currency::DECLARED,
+        numfmt_parse_currency::DECLARED,
+        numfmt_set_attribute::DECLARED,
+        numfmt_get_attribute::DECLARED,
+        numfmt_set_text_attribute::DECLARED,
+        numfmt_get_text_attribute::DECLARED,
+        numfmt_set_symbol::DECLARED,
+        numfmt_get_symbol::DECLARED,
+        numfmt_set_pattern::DECLARED,
+        numfmt_get_pattern::DECLARED,
+        numfmt_get_locale::DECLARED,
+        numfmt_get_error_code::DECLARED,
+        numfmt_get_error_message::DECLARED,
     ])
 }

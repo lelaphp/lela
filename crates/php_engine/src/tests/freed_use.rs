@@ -133,11 +133,11 @@ fn freed_read(req: &mut Request) -> i64 {
 
 fn faulty() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            freed_read::declared(),
-            freed_addref::declared(),
-            freed_then_made::declared(),
-            freed_protected::declared(),
+        .functions(&[
+            freed_read::DECLARED,
+            freed_addref::DECLARED,
+            freed_then_made::DECLARED,
+            freed_protected::DECLARED,
         ])
         .build("freed_use")
 }
@@ -195,7 +195,7 @@ fn an_addref_of_a_freed_block_during_shutdown_is_raised_at_the_request_end() {
 fn a_request_a_sensed_refusal_ended_renders_no_second() {
     let engine = Engine::cli_builder()
         .extensions(&[ExtensionBuilder::default()
-            .functions(vec![freed_addref::declared()])
+            .functions(&[freed_addref::DECLARED])
             .rshutdown(freed_addref_at_rshutdown)
             .build("freed_use_twice")])
         .build();

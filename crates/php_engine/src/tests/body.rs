@@ -40,7 +40,7 @@ fn body_read(req: &mut Request) -> i64 {
 
 fn input() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![parse_body::declared(), body_read::declared()])
+        .functions(&[parse_body::DECLARED, body_read::DECLARED])
         .build("body")
 }
 

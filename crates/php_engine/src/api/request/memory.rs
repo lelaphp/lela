@@ -11,7 +11,9 @@ use std::sync::Arc;
 /// the request's is allocated from (`zend_test_gh18756`).
 pub use php_heap::StandaloneHeap;
 pub use php_heap::{Allocation, AllocationObserverId, ObserveAllocations};
-use php_heap::{Arr, Fatal, Heap, Intern, Key, Ref, Sizing, SortEntry, Str, Zval, ZvalRef};
+use php_heap::{
+    Arr, Fatal, Heap, Intern, Key, Ref, Sizing, SortEntry, SortKeys, Str, Zval, ZvalRef,
+};
 pub use php_heap::{ecalloc, efree, emalloc, erealloc};
 
 use crate::api::abi::{Beneath, chain};
@@ -413,6 +415,7 @@ impl Request {
     /// makes one, what [`PhpString::fast`] is: the interned string for
     /// the empty string and one byte, as [`Request::string`] hands out,
     /// and otherwise `zend_string_finit` ([`Request::string_finit`]).
+    #[inline] // `zend_string_init_fast` is `zend_always_inline`
     pub(crate) fn string_fast(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
         if bytes.len() <= 1
             && let Some(frozen) = self.shared.permanent(bytes)
@@ -425,12 +428,14 @@ impl Request {
     /// A string of `bytes` out of this request's heap whatever their
     /// length, php-8.5.12's `zend_string_finit`
     /// ([`php_heap::Heap::string_finit`]).
+    #[inline] // as `string_fast`
     pub(crate) fn string_finit(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
         self.string_sized(bytes, Sizing::Finit)
     }
 
     /// A string of `bytes` out of this request's heap whatever their
     /// length, laid at `sizing`'s size ([`php_heap::Heap::string_sized`]).
+    #[inline] // as `string_fast`
     pub(crate) fn string_sized(
         &mut self,
         bytes: &[u8],
@@ -457,6 +462,19 @@ impl Request {
         fill: impl FnOnce(&mut [u8]),
     ) -> Result<PhpString, Thrown> {
         let allocated = self.heap.string_with(len, fill);
+        self.allocated(allocated)
+    }
+
+    /// A string of `len` bytes laid from `parts` one after the other,
+    /// each byte written once ([`php_heap::Heap::string_joined`]): what
+    /// a concatenation and a rope's end lay.
+    #[inline]
+    pub(crate) fn string_joined<'a>(
+        &mut self,
+        len: usize,
+        parts: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<PhpString, Thrown> {
+        let allocated = self.heap.string_joined(len, parts);
         self.allocated(allocated)
     }
 
@@ -489,6 +507,7 @@ impl Request {
     /// What the heap answered, as the native sees it: the string, or the
     /// memory limit as php's fatal, which `zend_mm` raises where the
     /// allocation was asked for and which ends the request from there.
+    #[inline] // a test of the answer; the refusal is out of line
     fn allocated(&mut self, allocated: Result<php_heap::Str, Fatal>) -> Result<PhpString, Thrown> {
         self.fatal_of(allocated).map(PhpString::of)
     }
@@ -563,9 +582,9 @@ impl Request {
         }
     }
 
-    /// [`Request::release_nogc`] over a zval a slot or a call's record
-    /// held, the owner it held given up with no `Value` made of it: what
-    /// a frameless call's record gives up of its operands as the call
+    /// [`Request::release_nogc`] over a zval a slot or a call held, the
+    /// owner it held given up with no `Value` made of it: what a
+    /// frameless call gives up of the operands it owned as the call
     /// ends, `FREE_OP*`.
     #[cfg_attr(debug_assertions, track_caller)]
     #[inline]
@@ -627,6 +646,7 @@ impl Request {
     /// over it where the opline says the array cannot be packed
     /// (`ZEND_ARRAY_NOT_PACKED`); the memory limit as the fatal that ends
     /// the request.
+    #[inline]
     pub(crate) fn array_sized(&mut self, size: u32, packed: bool) -> Result<PhpArray, Thrown> {
         let allocated = if packed {
             self.heap.array_sized(size)
@@ -679,13 +699,25 @@ impl Request {
 
     /// `zend_hash_next_index_insert` over `a`, which has one owner:
     /// `false`, and `value` given up, when the next element is taken.
+    #[inline]
     pub(crate) fn array_append(&mut self, a: Arr, value: Value) -> Result<bool, Thrown> {
         let z = value.into_zval();
-        let appended = self.heap.array_append(a, z);
-        if appended == Ok(false) {
+        match self.heap.array_append(a, z) {
+            Ok(true) => Ok(true),
+            refused => self.append_refused(refused, z),
+        }
+    }
+
+    /// [`Request::array_append`] where `z` did not go in: given up when
+    /// the next element was taken, and the fatal the heap raised as the
+    /// request's.
+    #[cold]
+    #[inline(never)]
+    fn append_refused(&mut self, refused: Result<bool, Fatal>, z: Zval) -> Result<bool, Thrown> {
+        if refused == Ok(false) {
             Heap::release(&mut Hooks(self), z);
         }
-        self.fatal_of(appended)
+        self.fatal_of(refused)
     }
 
     /// `zend_hash_lookup` over `a`, which has one owner: the entry at
@@ -699,6 +731,7 @@ impl Request {
     /// `zend_hash_next_index_insert` of `null` over `a`, which has one
     /// owner: the entry appended, in place; `None` when the next element
     /// is taken.
+    #[inline]
     pub(crate) fn array_next_entry(&mut self, a: Arr) -> Result<Option<ZvalRef>, Thrown> {
         let entry = self.heap.array_next_entry(a);
         self.fatal_of(entry)
@@ -758,14 +791,14 @@ impl Request {
 
     /// `zend_hash_sort` over `a`, which has one owner: the comparison
     /// carried through seam 1, since a `usort` callback runs PHP code,
-    /// and the keys dropped under `renumber`.
+    /// and the keys left as `keys` says.
     pub(crate) fn array_sort(
         &mut self,
         a: Arr,
-        renumber: bool,
+        keys: SortKeys,
         compare: &mut dyn FnMut(&mut Request, &SortEntry, &SortEntry) -> std::cmp::Ordering,
     ) -> Result<(), Thrown> {
-        let sorted = Heap::array_sort(&mut Hooks(self), a, renumber, &mut |hooks, x, y| {
+        let sorted = Heap::array_sort(&mut Hooks(self), a, keys, &mut |hooks, x, y| {
             compare(hooks.0, x, y)
         });
         self.fatal_of(sorted)
@@ -783,19 +816,22 @@ impl Request {
     /// fatal the allocator raised, recorded here where `zend_mm` leaves
     /// the request, as the `Thrown` carrying no throwable that ends the
     /// native.
+    #[inline]
     pub(crate) fn fatal_of<T>(&mut self, answered: Result<T, Fatal>) -> Result<T, Thrown> {
-        match answered {
-            Ok(value) => Ok(value),
-            // A fallible ask's refusal ends nothing: it is carried out to
-            // its scope ([`Memory::fallible`]).
-            Err(fatal) if *fatal.reason() == php_heap::FatalReason::Refused => {
-                Err(Thrown::of(None))
-            }
-            Err(fatal) => {
-                self.end_in(&fatal);
-                Err(Thrown::of(None))
-            }
+        answered.map_err(|fatal| self.thrown_of(&fatal))
+    }
+
+    /// [`Request::fatal_of`]'s refusal, out of the line of every answer
+    /// that is a value.
+    #[cold]
+    #[inline(never)]
+    fn thrown_of(&mut self, fatal: &Fatal) -> Thrown {
+        // A fallible ask's refusal ends nothing: it is carried out to
+        // its scope ([`Memory::fallible`]).
+        if *fatal.reason() != php_heap::FatalReason::Refused {
+            self.end_in(fatal);
         }
+        Thrown::of(None)
     }
 
     /// The limit the heap holds a request to from its start: what

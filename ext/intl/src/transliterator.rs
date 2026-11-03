@@ -332,14 +332,14 @@ fn transliterator_get_error_message(
 
 /// The procedural functions, in `php_intl.stub.php`'s order.
 pub(crate) fn functions(b: php_ext::abi::ExtensionBuilder) -> php_ext::abi::ExtensionBuilder {
-    b.functions(vec![
-        transliterator_create::declared(),
-        transliterator_create_from_rules::declared(),
-        transliterator_list_ids::declared(),
-        transliterator_create_inverse::declared(),
-        transliterator_transliterate::declared(),
-        transliterator_get_error_code::declared(),
-        transliterator_get_error_message::declared(),
+    b.functions(&[
+        transliterator_create::DECLARED,
+        transliterator_create_from_rules::DECLARED,
+        transliterator_list_ids::DECLARED,
+        transliterator_create_inverse::DECLARED,
+        transliterator_transliterate::DECLARED,
+        transliterator_get_error_code::DECLARED,
+        transliterator_get_error_message::DECLARED,
     ])
 }
 

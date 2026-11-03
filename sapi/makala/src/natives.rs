@@ -26,10 +26,10 @@ use php_sapi::EngineBuilder;
 /// `builder` with the host's natives.
 #[must_use]
 pub(crate) fn declare(builder: EngineBuilder) -> EngineBuilder {
-    builder.additional_functions(vec![
-        fastcgi_finish_request::declared(),
-        apache_request_headers::declared(),
-        getallheaders::declared(),
+    builder.additional_functions(&[
+        fastcgi_finish_request::DECLARED,
+        apache_request_headers::DECLARED,
+        getallheaders::DECLARED,
     ])
 }
 

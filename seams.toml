@@ -59,7 +59,7 @@ budget = 700                               # fork, the signal pool, LC_CTYPE, th
 lock = "process.lock"
 [[crate]]
 name = "php_unit"
-budget = 3000                              # 2.5k raised to 3k for the unit format's parity growth (#3357, 2026-10-24)
+budget = 4000                              # 2.5k raised to 3k for the unit format's parity growth (#3357, 2026-10-24); 4k for the memory gate's unit persistence, declarations and the fitted view (#4018, 2026-11-03)
 lock = "unit.lock"
 [[crate]]
 name = "php_link"
@@ -70,7 +70,7 @@ name = "php_compile"
 budget = 24000
 [[crate]]
 name = "php_engine"
-budget = 86000                             # 84k raised to 86k for the tier's queue, #3559-#3561 and #3479 (#3565, 2026-10-26)
+budget = 89000                             # 86k raised to 88k for the compile-memory queue (#3915, 2026-11-02); 89k for a native call's glue, #4058 and #4062, and no raise after this one without #3566's dedupe landed (#4063, 2026-11-03)
 lock = ["api.lock", "sapi.lock", "tier.lock"]
 lock_from = { "api.lock" = "php_ext" }
 [[crate]]
@@ -99,7 +99,7 @@ name = "php_sapi"
 budget = 2000                              # the hosts' facade and what php-src shares between its SAPIs (ADR-0008); the hosts' phpt subsets are their rows'
 [[crate]]
 name = "php_streams"
-budget = 10000                              # php's main/streams/ and main/network.c, split from php_engine (#1773, #1874)
+budget = 12000                             # php's main/streams/ and main/network.c, split from php_engine (#1773, #1874); 10k raised to 12k for #3664-#3870 (#3915, 2026-11-02)
 phpt = ["ext/standard/tests/streams"]
 [[crate]]
 name = "xtask"
@@ -209,7 +209,7 @@ budget = 2500     # bz2.c and bz2_filter.c; pure Rust first, held to the oracle'
 feature = "bz2"
 [[crate]]
 name = "ext/opcache"
-budget = 2000     # zend_accelerator_module.c and zend_accelerator_blacklist.c: the ini entries, the natives and the status and configuration arrays; the unit cache they answer from is php_engine's (design §6.3), so the shared allocator, persist and file cache are not ported here (#1163)
+budget = 2200     # zend_accelerator_module.c and zend_accelerator_blacklist.c: the ini entries, the natives and the status and configuration arrays; the unit cache they answer from is php_engine's (design §6.3), so the shared allocator, persist and file cache are not ported here (#1163)
 [[crate]]
 name = "ext/calendar"
 budget = 2000     # calendar.c, cal_unix.c, dow.c, easter.c, french.c, gregor.c, jewish.c, julian.c; pure arithmetic, php's own C ported, no library (#1163)

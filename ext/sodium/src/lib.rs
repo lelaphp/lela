@@ -49,7 +49,6 @@ use php_ext::abi::{
     Refusals,
 };
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::decl::{ConstDecl, ConstExpr, Name, Radix};
 use php_ext::raising::{Level, Thrown, argument_error, arity, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, walk};
@@ -58,10 +57,36 @@ use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, walk};
 /// its NUL, the bound `libsodium.c`'s overflow checks are written over.
 const ZSTR_MAX_LEN: usize = usize::MAX - 25;
 
-/// The constants `register_libsodium_symbols` registers but the three
-/// the linked library answers, which [`constants`] lays in first.
+/// `libsodium.stub.php`'s constants in its order, the three
+/// `SODIUM_LIBRARY_*` the linked library's own: `sodium_version_string`,
+/// `sodium_library_version_major` and `sodium_library_version_minor`.
+///
+/// ```php
+/// var_dump(SODIUM_LIBRARY_VERSION === phpversion('sodium') ? 'php' : 'lib', SODIUM_LIBRARY_MAJOR_VERSION >= 10, SODIUM_CRYPTO_BOX_KEYPAIRBYTES, SODIUM_CRYPTO_PWHASH_STRPREFIX, SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_MESSAGEBYTES_MAX);
+/// $c = get_defined_constants(true)['sodium'];
+/// var_dump(count($c), array_key_first($c), array_key_last($c));
+/// ```
+/// ```expect
+/// string(3) "lib"
+/// bool(true)
+/// int(64)
+/// string(10) "$argon2id$"
+/// int(274877906816)
+/// int(102)
+/// string(22) "SODIUM_LIBRARY_VERSION"
+/// string(53) "SODIUM_CRYPTO_CORE_RISTRETTO255_NONREDUCEDSCALARBYTES"
+/// ```
 #[php_const]
 pub(crate) mod constants {
+    fn SODIUM_LIBRARY_VERSION() -> String {
+        super::ffi::version()
+    }
+    fn SODIUM_LIBRARY_MAJOR_VERSION() -> i64 {
+        super::ffi::version_major()
+    }
+    fn SODIUM_LIBRARY_MINOR_VERSION() -> i64 {
+        super::ffi::version_minor()
+    }
     pub(crate) const SODIUM_CRYPTO_AEAD_AES256GCM_KEYBYTES: i64 = 32;
     pub(crate) const SODIUM_CRYPTO_AEAD_AES256GCM_NSECBYTES: i64 = 0;
     pub(crate) const SODIUM_CRYPTO_AEAD_AES256GCM_NPUBBYTES: i64 = 12;
@@ -174,50 +199,6 @@ pub(crate) mod constants {
     pub(crate) const SODIUM_CRYPTO_CORE_RISTRETTO255_NONREDUCEDSCALARBYTES: i64 = 64;
 }
 
-/// `libsodium.stub.php`'s constants in its order, the three
-/// `SODIUM_LIBRARY_*` the linked library's own: `sodium_version_string`,
-/// `sodium_library_version_major` and `sodium_library_version_minor`.
-///
-/// ```php
-/// var_dump(SODIUM_LIBRARY_VERSION === phpversion('sodium') ? 'php' : 'lib', SODIUM_LIBRARY_MAJOR_VERSION >= 10, SODIUM_CRYPTO_BOX_KEYPAIRBYTES, SODIUM_CRYPTO_PWHASH_STRPREFIX, SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_MESSAGEBYTES_MAX);
-/// $c = get_defined_constants(true)['sodium'];
-/// var_dump(count($c), array_key_first($c), array_key_last($c));
-/// ```
-/// ```expect
-/// string(3) "lib"
-/// bool(true)
-/// int(64)
-/// string(10) "$argon2id$"
-/// int(274877906816)
-/// int(102)
-/// string(22) "SODIUM_LIBRARY_VERSION"
-/// string(53) "SODIUM_CRYPTO_CORE_RISTRETTO255_NONREDUCEDSCALARBYTES"
-/// ```
-fn constants() -> Vec<ConstDecl> {
-    let mut all = constants::declared();
-    let long = |value: i64| ConstExpr::Long {
-        value,
-        radix: Radix::Decimal,
-    };
-    let library = [
-        (
-            &b"SODIUM_LIBRARY_VERSION"[..],
-            ConstExpr::Str(ffi::version().into_bytes().into()),
-        ),
-        (b"SODIUM_LIBRARY_MAJOR_VERSION", long(ffi::version_major())),
-        (b"SODIUM_LIBRARY_MINOR_VERSION", long(ffi::version_minor())),
-    ];
-    for (at, (name, value)) in library.into_iter().enumerate() {
-        let decl = ConstDecl {
-            name: Name(name.into()),
-            value,
-            attributes: Vec::new(),
-        };
-        all.insert(at, decl);
-    }
-    all
-}
-
 /// Core's `Exception`, named for `extends`.
 #[php_class(extern)]
 pub(crate) struct Exception;
@@ -322,124 +303,124 @@ pub fn extension() -> Extension {
             rel: None,
             version: None,
         }])
-        .constants(constants())
-        .functions(vec![
-            aead::sodium_crypto_aead_aes256gcm_is_available::declared(),
-            aead::sodium_crypto_aead_aes256gcm_decrypt::declared(),
-            aead::sodium_crypto_aead_aes256gcm_encrypt::declared(),
-            aead::sodium_crypto_aead_aes256gcm_keygen::declared(),
+        .constants(constants::DECLARED)
+        .functions(&[
+            aead::sodium_crypto_aead_aes256gcm_is_available::DECLARED,
+            aead::sodium_crypto_aead_aes256gcm_decrypt::DECLARED,
+            aead::sodium_crypto_aead_aes256gcm_encrypt::DECLARED,
+            aead::sodium_crypto_aead_aes256gcm_keygen::DECLARED,
             #[cfg(libsodium_aegis)]
-            aead::aegis::sodium_crypto_aead_aegis128l_decrypt::declared(),
+            aead::aegis::sodium_crypto_aead_aegis128l_decrypt::DECLARED,
             #[cfg(libsodium_aegis)]
-            aead::aegis::sodium_crypto_aead_aegis128l_encrypt::declared(),
+            aead::aegis::sodium_crypto_aead_aegis128l_encrypt::DECLARED,
             #[cfg(libsodium_aegis)]
-            aead::aegis::sodium_crypto_aead_aegis128l_keygen::declared(),
+            aead::aegis::sodium_crypto_aead_aegis128l_keygen::DECLARED,
             #[cfg(libsodium_aegis)]
-            aead::aegis::sodium_crypto_aead_aegis256_decrypt::declared(),
+            aead::aegis::sodium_crypto_aead_aegis256_decrypt::DECLARED,
             #[cfg(libsodium_aegis)]
-            aead::aegis::sodium_crypto_aead_aegis256_encrypt::declared(),
+            aead::aegis::sodium_crypto_aead_aegis256_encrypt::DECLARED,
             #[cfg(libsodium_aegis)]
-            aead::aegis::sodium_crypto_aead_aegis256_keygen::declared(),
-            aead::sodium_crypto_aead_chacha20poly1305_decrypt::declared(),
-            aead::sodium_crypto_aead_chacha20poly1305_encrypt::declared(),
-            aead::sodium_crypto_aead_chacha20poly1305_keygen::declared(),
-            aead::sodium_crypto_aead_chacha20poly1305_ietf_decrypt::declared(),
-            aead::sodium_crypto_aead_chacha20poly1305_ietf_encrypt::declared(),
-            aead::sodium_crypto_aead_chacha20poly1305_ietf_keygen::declared(),
-            aead::sodium_crypto_aead_xchacha20poly1305_ietf_decrypt::declared(),
-            aead::sodium_crypto_aead_xchacha20poly1305_ietf_keygen::declared(),
-            aead::sodium_crypto_aead_xchacha20poly1305_ietf_encrypt::declared(),
-            hash::sodium_crypto_auth::declared(),
-            hash::sodium_crypto_auth_keygen::declared(),
-            hash::sodium_crypto_auth_verify::declared(),
-            keys::sodium_crypto_box::declared(),
-            keys::sodium_crypto_box_keypair::declared(),
-            keys::sodium_crypto_box_seed_keypair::declared(),
-            keys::sodium_crypto_box_keypair_from_secretkey_and_publickey::declared(),
-            keys::sodium_crypto_box_open::declared(),
-            keys::sodium_crypto_box_publickey::declared(),
-            keys::sodium_crypto_box_publickey_from_secretkey::declared(),
-            keys::sodium_crypto_box_seal::declared(),
-            keys::sodium_crypto_box_seal_open::declared(),
-            keys::sodium_crypto_box_secretkey::declared(),
-            hash::sodium_crypto_core_ristretto255_add::declared(),
-            hash::sodium_crypto_core_ristretto255_from_hash::declared(),
-            hash::sodium_crypto_core_ristretto255_is_valid_point::declared(),
-            hash::sodium_crypto_core_ristretto255_random::declared(),
-            hash::sodium_crypto_core_ristretto255_scalar_add::declared(),
-            hash::sodium_crypto_core_ristretto255_scalar_complement::declared(),
-            hash::sodium_crypto_core_ristretto255_scalar_invert::declared(),
-            hash::sodium_crypto_core_ristretto255_scalar_mul::declared(),
-            hash::sodium_crypto_core_ristretto255_scalar_negate::declared(),
-            hash::sodium_crypto_core_ristretto255_scalar_random::declared(),
-            hash::sodium_crypto_core_ristretto255_scalar_reduce::declared(),
-            hash::sodium_crypto_core_ristretto255_scalar_sub::declared(),
-            hash::sodium_crypto_core_ristretto255_sub::declared(),
-            keys::sodium_crypto_kx_keypair::declared(),
-            keys::sodium_crypto_kx_publickey::declared(),
-            keys::sodium_crypto_kx_secretkey::declared(),
-            keys::sodium_crypto_kx_seed_keypair::declared(),
-            keys::sodium_crypto_kx_client_session_keys::declared(),
-            keys::sodium_crypto_kx_server_session_keys::declared(),
-            hash::sodium_crypto_generichash::declared(),
-            hash::sodium_crypto_generichash_keygen::declared(),
-            hash::sodium_crypto_generichash_init::declared(),
-            hash::sodium_crypto_generichash_update::declared(),
-            hash::sodium_crypto_generichash_final::declared(),
-            hash::sodium_crypto_kdf_derive_from_key::declared(),
-            hash::sodium_crypto_kdf_keygen::declared(),
-            hash::sodium_crypto_pwhash::declared(),
-            hash::sodium_crypto_pwhash_str::declared(),
-            hash::sodium_crypto_pwhash_str_verify::declared(),
-            hash::sodium_crypto_pwhash_str_needs_rehash::declared(),
-            hash::sodium_crypto_pwhash_scryptsalsa208sha256::declared(),
-            hash::sodium_crypto_pwhash_scryptsalsa208sha256_str::declared(),
-            hash::sodium_crypto_pwhash_scryptsalsa208sha256_str_verify::declared(),
-            keys::sodium_crypto_scalarmult::declared(),
-            keys::sodium_crypto_scalarmult_ristretto255::declared(),
-            keys::sodium_crypto_scalarmult_ristretto255_base::declared(),
-            keys::sodium_crypto_secretbox::declared(),
-            keys::sodium_crypto_secretbox_keygen::declared(),
-            keys::sodium_crypto_secretbox_open::declared(),
-            hash::sodium_crypto_secretstream_xchacha20poly1305_keygen::declared(),
-            hash::sodium_crypto_secretstream_xchacha20poly1305_init_push::declared(),
-            hash::sodium_crypto_secretstream_xchacha20poly1305_push::declared(),
-            hash::sodium_crypto_secretstream_xchacha20poly1305_init_pull::declared(),
-            hash::sodium_crypto_secretstream_xchacha20poly1305_pull::declared(),
-            hash::sodium_crypto_secretstream_xchacha20poly1305_rekey::declared(),
-            hash::sodium_crypto_shorthash::declared(),
-            hash::sodium_crypto_shorthash_keygen::declared(),
-            keys::sodium_crypto_sign::declared(),
-            keys::sodium_crypto_sign_detached::declared(),
-            keys::sodium_crypto_sign_ed25519_pk_to_curve25519::declared(),
-            keys::sodium_crypto_sign_ed25519_sk_to_curve25519::declared(),
-            keys::sodium_crypto_sign_keypair::declared(),
-            keys::sodium_crypto_sign_keypair_from_secretkey_and_publickey::declared(),
-            keys::sodium_crypto_sign_open::declared(),
-            keys::sodium_crypto_sign_publickey::declared(),
-            keys::sodium_crypto_sign_secretkey::declared(),
-            keys::sodium_crypto_sign_publickey_from_secretkey::declared(),
-            keys::sodium_crypto_sign_seed_keypair::declared(),
-            keys::sodium_crypto_sign_verify_detached::declared(),
-            hash::sodium_crypto_stream::declared(),
-            hash::sodium_crypto_stream_keygen::declared(),
-            hash::sodium_crypto_stream_xor::declared(),
-            hash::sodium_crypto_stream_xchacha20::declared(),
-            hash::sodium_crypto_stream_xchacha20_keygen::declared(),
-            hash::sodium_crypto_stream_xchacha20_xor::declared(),
-            hash::sodium_crypto_stream_xchacha20_xor_ic::declared(),
-            sodium_add::declared(),
-            sodium_compare::declared(),
-            sodium_increment::declared(),
-            sodium_memcmp::declared(),
-            sodium_memzero::declared(),
-            sodium_pad::declared(),
-            sodium_unpad::declared(),
-            sodium_bin2hex::declared(),
-            sodium_hex2bin::declared(),
-            sodium_bin2base64::declared(),
-            sodium_base642bin::declared(),
-            keys::sodium_crypto_scalarmult_base::declared(),
+            aead::aegis::sodium_crypto_aead_aegis256_keygen::DECLARED,
+            aead::sodium_crypto_aead_chacha20poly1305_decrypt::DECLARED,
+            aead::sodium_crypto_aead_chacha20poly1305_encrypt::DECLARED,
+            aead::sodium_crypto_aead_chacha20poly1305_keygen::DECLARED,
+            aead::sodium_crypto_aead_chacha20poly1305_ietf_decrypt::DECLARED,
+            aead::sodium_crypto_aead_chacha20poly1305_ietf_encrypt::DECLARED,
+            aead::sodium_crypto_aead_chacha20poly1305_ietf_keygen::DECLARED,
+            aead::sodium_crypto_aead_xchacha20poly1305_ietf_decrypt::DECLARED,
+            aead::sodium_crypto_aead_xchacha20poly1305_ietf_keygen::DECLARED,
+            aead::sodium_crypto_aead_xchacha20poly1305_ietf_encrypt::DECLARED,
+            hash::sodium_crypto_auth::DECLARED,
+            hash::sodium_crypto_auth_keygen::DECLARED,
+            hash::sodium_crypto_auth_verify::DECLARED,
+            keys::sodium_crypto_box::DECLARED,
+            keys::sodium_crypto_box_keypair::DECLARED,
+            keys::sodium_crypto_box_seed_keypair::DECLARED,
+            keys::sodium_crypto_box_keypair_from_secretkey_and_publickey::DECLARED,
+            keys::sodium_crypto_box_open::DECLARED,
+            keys::sodium_crypto_box_publickey::DECLARED,
+            keys::sodium_crypto_box_publickey_from_secretkey::DECLARED,
+            keys::sodium_crypto_box_seal::DECLARED,
+            keys::sodium_crypto_box_seal_open::DECLARED,
+            keys::sodium_crypto_box_secretkey::DECLARED,
+            hash::sodium_crypto_core_ristretto255_add::DECLARED,
+            hash::sodium_crypto_core_ristretto255_from_hash::DECLARED,
+            hash::sodium_crypto_core_ristretto255_is_valid_point::DECLARED,
+            hash::sodium_crypto_core_ristretto255_random::DECLARED,
+            hash::sodium_crypto_core_ristretto255_scalar_add::DECLARED,
+            hash::sodium_crypto_core_ristretto255_scalar_complement::DECLARED,
+            hash::sodium_crypto_core_ristretto255_scalar_invert::DECLARED,
+            hash::sodium_crypto_core_ristretto255_scalar_mul::DECLARED,
+            hash::sodium_crypto_core_ristretto255_scalar_negate::DECLARED,
+            hash::sodium_crypto_core_ristretto255_scalar_random::DECLARED,
+            hash::sodium_crypto_core_ristretto255_scalar_reduce::DECLARED,
+            hash::sodium_crypto_core_ristretto255_scalar_sub::DECLARED,
+            hash::sodium_crypto_core_ristretto255_sub::DECLARED,
+            keys::sodium_crypto_kx_keypair::DECLARED,
+            keys::sodium_crypto_kx_publickey::DECLARED,
+            keys::sodium_crypto_kx_secretkey::DECLARED,
+            keys::sodium_crypto_kx_seed_keypair::DECLARED,
+            keys::sodium_crypto_kx_client_session_keys::DECLARED,
+            keys::sodium_crypto_kx_server_session_keys::DECLARED,
+            hash::sodium_crypto_generichash::DECLARED,
+            hash::sodium_crypto_generichash_keygen::DECLARED,
+            hash::sodium_crypto_generichash_init::DECLARED,
+            hash::sodium_crypto_generichash_update::DECLARED,
+            hash::sodium_crypto_generichash_final::DECLARED,
+            hash::sodium_crypto_kdf_derive_from_key::DECLARED,
+            hash::sodium_crypto_kdf_keygen::DECLARED,
+            hash::sodium_crypto_pwhash::DECLARED,
+            hash::sodium_crypto_pwhash_str::DECLARED,
+            hash::sodium_crypto_pwhash_str_verify::DECLARED,
+            hash::sodium_crypto_pwhash_str_needs_rehash::DECLARED,
+            hash::sodium_crypto_pwhash_scryptsalsa208sha256::DECLARED,
+            hash::sodium_crypto_pwhash_scryptsalsa208sha256_str::DECLARED,
+            hash::sodium_crypto_pwhash_scryptsalsa208sha256_str_verify::DECLARED,
+            keys::sodium_crypto_scalarmult::DECLARED,
+            keys::sodium_crypto_scalarmult_ristretto255::DECLARED,
+            keys::sodium_crypto_scalarmult_ristretto255_base::DECLARED,
+            keys::sodium_crypto_secretbox::DECLARED,
+            keys::sodium_crypto_secretbox_keygen::DECLARED,
+            keys::sodium_crypto_secretbox_open::DECLARED,
+            hash::sodium_crypto_secretstream_xchacha20poly1305_keygen::DECLARED,
+            hash::sodium_crypto_secretstream_xchacha20poly1305_init_push::DECLARED,
+            hash::sodium_crypto_secretstream_xchacha20poly1305_push::DECLARED,
+            hash::sodium_crypto_secretstream_xchacha20poly1305_init_pull::DECLARED,
+            hash::sodium_crypto_secretstream_xchacha20poly1305_pull::DECLARED,
+            hash::sodium_crypto_secretstream_xchacha20poly1305_rekey::DECLARED,
+            hash::sodium_crypto_shorthash::DECLARED,
+            hash::sodium_crypto_shorthash_keygen::DECLARED,
+            keys::sodium_crypto_sign::DECLARED,
+            keys::sodium_crypto_sign_detached::DECLARED,
+            keys::sodium_crypto_sign_ed25519_pk_to_curve25519::DECLARED,
+            keys::sodium_crypto_sign_ed25519_sk_to_curve25519::DECLARED,
+            keys::sodium_crypto_sign_keypair::DECLARED,
+            keys::sodium_crypto_sign_keypair_from_secretkey_and_publickey::DECLARED,
+            keys::sodium_crypto_sign_open::DECLARED,
+            keys::sodium_crypto_sign_publickey::DECLARED,
+            keys::sodium_crypto_sign_secretkey::DECLARED,
+            keys::sodium_crypto_sign_publickey_from_secretkey::DECLARED,
+            keys::sodium_crypto_sign_seed_keypair::DECLARED,
+            keys::sodium_crypto_sign_verify_detached::DECLARED,
+            hash::sodium_crypto_stream::DECLARED,
+            hash::sodium_crypto_stream_keygen::DECLARED,
+            hash::sodium_crypto_stream_xor::DECLARED,
+            hash::sodium_crypto_stream_xchacha20::DECLARED,
+            hash::sodium_crypto_stream_xchacha20_keygen::DECLARED,
+            hash::sodium_crypto_stream_xchacha20_xor::DECLARED,
+            hash::sodium_crypto_stream_xchacha20_xor_ic::DECLARED,
+            sodium_add::DECLARED,
+            sodium_compare::DECLARED,
+            sodium_increment::DECLARED,
+            sodium_memcmp::DECLARED,
+            sodium_memzero::DECLARED,
+            sodium_pad::DECLARED,
+            sodium_unpad::DECLARED,
+            sodium_bin2hex::DECLARED,
+            sodium_hex2bin::DECLARED,
+            sodium_bin2base64::DECLARED,
+            sodium_base642bin::DECLARED,
+            keys::sodium_crypto_scalarmult_base::DECLARED,
         ])
         .class::<SodiumException>()
         .engine_state(throwables::Throwables::start)

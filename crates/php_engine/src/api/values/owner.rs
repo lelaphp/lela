@@ -710,6 +710,45 @@ impl Owner<PhpArray> {
         self.written(|view| view.try_append(req, value))
     }
 
+    /// `src`'s values appended in one pass where both are packed lists,
+    /// php's `ZEND_HASH_FILL_PACKED` over `ZEND_HASH_PACKED_FOREACH_VAL`
+    /// after `SEPARATE_ARRAY` ([`php_heap::Heap::array_fill_packed`]):
+    /// what `php_array_merge_wrapper` copies a packed first argument
+    /// with and `php_array_merge` appends a packed list with, no call per
+    /// element. A hole of `src` is stepped over, so its values are
+    /// numbered again from this array's next slot, and a reference
+    /// nothing else holds is copied as its value. `false`, and nothing
+    /// written, where either is not a packed list. Nothing runs code of
+    /// the program; the `Err` is the memory limit.
+    ///
+    /// ```php
+    /// $p = [1, 2, 3]; unset($p[1]); $x = 5; $r = [&$x, 7];
+    /// $t = array_merge($p, $r, $p); $x = 6;
+    /// debug_zval_dump($t);
+    /// ```
+    /// ```expect
+    /// array(6) packed refcount(2){
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(3)
+    ///   [2]=>
+    ///   reference refcount(3) {
+    ///     int(6)
+    ///   }
+    ///   [3]=>
+    ///   int(7)
+    ///   [4]=>
+    ///   int(1)
+    ///   [5]=>
+    ///   int(3)
+    /// }
+    /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn fill_packed(&mut self, req: &mut Request, src: PhpArray) -> Result<bool, Thrown> {
+        self.written(|view| view.fill_packed(req, src))
+    }
+
     /// [`PhpArray::unset`].
     pub fn unset(&mut self, req: &mut Request, key: &Key) -> Result<bool, Thrown> {
         self.written(|view| view.unset(req, key))

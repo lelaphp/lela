@@ -562,7 +562,7 @@ fn frameless_probe(string: PhpString) -> bool {
 /// An extension declaring [`frameless_probe`] and nothing else.
 fn probe() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![frameless_probe::declared()])
+        .functions(&[frameless_probe::DECLARED])
         .build("observer_probe")
 }
 

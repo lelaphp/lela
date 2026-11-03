@@ -94,20 +94,20 @@ struct State {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .constants(constants::declared())
-        .functions(vec![
-            readline::declared(),
-            readline_info::declared(),
-            readline_add_history::declared(),
-            readline_clear_history::declared(),
-            readline_read_history::declared(),
-            readline_write_history::declared(),
-            readline_completion_function::declared(),
-            readline_callback_handler_install::declared(),
-            readline_callback_read_char::declared(),
-            readline_callback_handler_remove::declared(),
-            readline_redisplay::declared(),
-            readline_on_new_line::declared(),
+        .constants(constants::DECLARED)
+        .functions(&[
+            readline::DECLARED,
+            readline_info::DECLARED,
+            readline_add_history::DECLARED,
+            readline_clear_history::DECLARED,
+            readline_read_history::DECLARED,
+            readline_write_history::DECLARED,
+            readline_completion_function::DECLARED,
+            readline_callback_handler_install::DECLARED,
+            readline_callback_read_char::DECLARED,
+            readline_callback_handler_remove::DECLARED,
+            readline_redisplay::DECLARED,
+            readline_on_new_line::DECLARED,
         ])
         .request_state::<State>()
         .ini(vec![

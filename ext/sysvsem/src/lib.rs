@@ -59,11 +59,11 @@ const NOWAIT: i16 = libc::IPC_NOWAIT as i16;
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            sem_get::declared(),
-            sem_acquire::declared(),
-            sem_release::declared(),
-            sem_remove::declared(),
+        .functions(&[
+            sem_get::DECLARED,
+            sem_acquire::DECLARED,
+            sem_release::DECLARED,
+            sem_remove::DECLARED,
         ])
         .class::<SysvSemaphore>()
         .engine_state(throwables::Throwables::start)

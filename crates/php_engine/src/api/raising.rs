@@ -27,14 +27,26 @@ pub use php_unit::Level;
 pub struct Thrown {
     pending: Option<PhpObject>,
     /// Whether this answers a throw the handler took, [`Cause::Taken`].
-    taken: bool,
+    taken: Took,
+}
+
+/// Whether a [`Thrown`] answers a throw the handler took, a word wide:
+/// a `Result` of a value or a `Thrown`, what every entry answers, is
+/// then two words over two words, which LLVM moves as two loads and two
+/// stores, where a `bool` beside the throwable split the value's
+/// `info` word at its type byte on every move (#4062).
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(u64)]
+enum Took {
+    Raised,
+    Taken,
 }
 
 impl Thrown {
     pub(crate) const fn of(pending: Option<PhpObject>) -> Thrown {
         Thrown {
             pending,
-            taken: false,
+            taken: Took::Raised,
         }
     }
 
@@ -64,7 +76,7 @@ impl Thrown {
             Some(throwable) => Cause::Throwable(throwable),
             None if req.diagnostics().bailing_out() => Cause::Fatal,
             None if req.unwind_exit() => Cause::Exit,
-            None if self.taken => Cause::Taken,
+            None if self.taken == Took::Taken => Cause::Taken,
             None => Cause::Fatal,
         }
     }
@@ -86,10 +98,10 @@ impl Thrown {
     /// the throwables leave as one chain.
     #[must_use]
     pub fn chain(self, req: &mut Request, later: Thrown) -> Thrown {
-        if later.taken {
+        if later.taken == Took::Taken {
             return self;
         }
-        if self.taken {
+        if self.taken == Took::Taken {
             return later;
         }
         match (self.pending, later.pending) {
@@ -1626,7 +1638,7 @@ pub(crate) fn throw_object(req: &mut Request, object: PhpObject) -> Thrown {
                 req.release(undef);
                 Thrown {
                     pending: None,
-                    taken: true,
+                    taken: Took::Taken,
                 }
             }
             Err(fatal) => fatal,
@@ -2021,6 +2033,19 @@ pub(crate) fn arity_of(
     if given >= min && max.is_none_or(|max| given <= max) {
         return Ok(());
     }
+    Err(arity_refused(req, given, min, max))
+}
+
+/// [`arity_of`]'s refusal of a count outside `min..=max`, out of line,
+/// so an entry holds nothing it read across it.
+#[cold]
+#[inline(never)]
+pub(crate) fn arity_refused(
+    req: &mut Request,
+    given: usize,
+    min: usize,
+    max: Option<usize>,
+) -> Thrown {
     let (word, bound) = match max {
         Some(max) if max == min => ("exactly", min),
         _ if given < min => ("at least", min),
@@ -2028,10 +2053,10 @@ pub(crate) fn arity_of(
         None => ("at least", min),
     };
     let plural = if bound == 1 { "" } else { "s" };
-    Err(arg_count_error(
+    arg_count_error(
         req,
         &format!("{word} {bound} argument{plural}, {given} given"),
-    ))
+    )
 }
 
 /// `zend_param_must_be_nullable`: the 8.1 deprecation for `null` passed
@@ -2189,9 +2214,10 @@ pub fn throwing_warnings<R>(
 
 #[cfg(test)]
 mod tests {
-    use php_unit::decl::{FunctionDecl, Parameter, Type};
+    use php_unit::decl::Type;
 
-    use crate::api::abi::{Entry, ExtensionBuilder};
+    use crate::api::__private::{Entry, NativeFunction, NativeParameter};
+    use crate::api::abi::ExtensionBuilder;
     use crate::api::request::Request;
     use crate::api::values::Value;
     use crate::engine::Engine;
@@ -2200,19 +2226,56 @@ mod tests {
     use super::{Thrown, arg_type_error, arg_value_error, throw_at};
     use crate::api::values::ClassId;
 
-    fn parameter(name: &[u8], ty: Type, variadic: bool) -> Parameter {
-        Parameter {
+    const fn parameter(
+        name: &'static [u8],
+        ty: fn() -> Option<Type>,
+        variadic: bool,
+    ) -> NativeParameter {
+        NativeParameter {
+            name,
+            ty,
+            by_ref: false,
+            prefer_ref: false,
             variadic,
-            ..php_unit::decl::parameter(name, Some(ty))
+            passed: false,
+            default: None,
+            attributes: &[],
         }
     }
 
-    fn declared(name: &[u8], parameters: Vec<Parameter>) -> FunctionDecl {
-        FunctionDecl {
+    const fn declared(
+        name: &'static [u8],
+        parameters: &'static [NativeParameter],
+        entry: Entry,
+    ) -> NativeFunction {
+        NativeFunction {
+            name,
             parameters,
-            ..php_unit::decl::native_function(name)
+            return_type: || None,
+            frameless: &[],
+            attributes: &[],
+            entry,
         }
     }
+
+    /// The natives below, declared as `#[php_function]` would lay them
+    /// down beside the core's.
+    const NATIVES: &[NativeFunction] = &[
+        declared(
+            b"str_repeat",
+            &[
+                parameter(b"string", || Some(Type::String), false),
+                parameter(b"times", || Some(Type::Int), false),
+            ],
+            str_repeat,
+        ),
+        declared(
+            b"array_merge",
+            &[parameter(b"arrays", || Some(Type::Array), true)],
+            array_merge,
+        ),
+        declared(b"refuse", &[], refuse),
+    ];
 
     /// `str_repeat(string $string, int $times)` as far as its one
     /// `ValueError` goes.
@@ -2240,26 +2303,7 @@ mod tests {
 
     fn served(source: &str) -> crate::test::Served {
         let extension = ExtensionBuilder::default()
-            .functions(vec![
-                (
-                    declared(
-                        b"str_repeat",
-                        vec![
-                            parameter(b"string", Type::String, false),
-                            parameter(b"times", Type::Int, false),
-                        ],
-                    ),
-                    str_repeat as Entry,
-                ),
-                (
-                    declared(
-                        b"array_merge",
-                        vec![parameter(b"arrays", Type::Array, true)],
-                    ),
-                    array_merge as Entry,
-                ),
-                (declared(b"refuse", Vec::new()), refuse as Entry),
-            ])
+            .functions(NATIVES)
             .build("raising");
         Engine::cli_builder()
             .extensions(&[extension])

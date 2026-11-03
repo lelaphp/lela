@@ -718,6 +718,43 @@ fn indent(depth: usize) -> Vec<u8> {
 /// 109
 /// </file 'D/loop.php'>
 /// ```
+///
+/// An observed frameless call is the framed entry's full call,
+/// `zend_frameless_observed_call` (`Z/Zend/zend_execute.c:1577`), so
+/// `max` and `min` over a NaN answer as their framed bodies do, where the
+/// frameless arity unobserved answers the other way:
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/observed-frameless' . getmypid(); @mkdir($dir);
+/// file_put_contents("$dir/nan.php", '<?php
+/// var_dump(max(1, NAN), min(NAN, 1));
+/// $f = "max"; var_dump($f(1, NAN));');
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'zend_test.observer.enabled=1', '-d', 'zend_test.observer.observe_functions=1', "$dir/nan.php"], [1 => ['pipe', 'w']], $pipes);
+/// echo str_replace(realpath($dir), 'D', stream_get_contents($pipes[1])); proc_close($p);
+/// exec('rm -rf ' . escapeshellarg($dir));
+/// var_dump(max(1, NAN), min(NAN, 1));
+/// ```
+/// ```expect process
+/// <!-- init 'D/nan.php' -->
+/// <!-- init max() -->
+/// <max>
+/// </max>
+/// <!-- init min() -->
+/// <min>
+/// </min>
+/// <!-- init var_dump() -->
+/// <var_dump>
+/// int(1)
+/// float(NAN)
+/// </var_dump>
+/// <max>
+/// </max>
+/// <var_dump>
+/// int(1)
+/// </var_dump>
+/// float(NAN)
+/// int(1)
+/// ```
 fn fcall_init(observed: &mut Observed<'_>) -> ObserverHandlers {
     let switches = Switches::of(observed);
     if !switches.enabled {

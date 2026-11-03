@@ -19,8 +19,10 @@ fn jmp_frameless_over(strings: &mut php_heap::Strings, name: &[u8]) -> Published
                 },
                 Opline::default(),
                 Opline::default(),
-            ],
-            literals: vec![interned(strings, name)],
+                back(),
+            ]
+            .into(),
+            literals: vec![interned(strings, name)].into(),
             cache_size: 8,
             ..OpArray::default()
         },
@@ -93,17 +95,25 @@ fn a_frameless_jump_primes_a_miss_once_and_falls_through_on_it_after() {
 /// arity zero, which no native of php's declares: what
 /// `FRAMELESS_ICALL_0` needs to be reached at all.
 fn with_a_nullary_frameless_native() -> Engine {
+    use crate::api::__private::{Frameless, NativeFunction};
     use crate::api::abi::ExtensionBuilder;
-    use php_unit::decl::FunctionDecl;
     fn seven(_: &mut Request) -> Result<Owner<Value>, Thrown> {
         Ok(Owner::int(7))
     }
-    let decl = FunctionDecl {
-        frameless: vec![0],
-        ..php_unit::decl::native_function(b"seven")
+    #[allow(clippy::trivially_copy_pass_by_ref)] // the frameless table's entry type, `Frameless::Zero`
+    fn frameless_seven(_: &mut Request, _: &[Value; 0]) -> Result<Owner<Value>, Thrown> {
+        Ok(Owner::int(7))
+    }
+    const SEVEN: NativeFunction = NativeFunction {
+        name: b"seven",
+        parameters: &[],
+        return_type: || None,
+        frameless: &[Frameless::Zero(frameless_seven)],
+        attributes: &[],
+        entry: seven,
     };
     let extension = ExtensionBuilder::default()
-        .functions(vec![(decl, seven as crate::api::abi::Entry)])
+        .functions(&[SEVEN])
         .build("nullary");
     Engine::cli_builder().extensions(&[extension]).build()
 }
@@ -131,13 +141,17 @@ fn a_nullary_frameless_call_serves_the_native_into_its_temporary() {
     let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
     let unit = Unit {
         main: OpArray {
-            oplines: vec![Opline {
-                opcode: Opcode::FramelessIcall0,
-                out_type: OperandKind::Tmp,
-                out: 0,
-                extended_value: row,
-                ..Opline::default()
-            }],
+            oplines: vec![
+                Opline {
+                    opcode: Opcode::FramelessIcall0,
+                    out_type: OperandKind::Tmp,
+                    out: 0,
+                    extended_value: row,
+                    ..Opline::default()
+                },
+                back(),
+            ]
+            .into(),
             num_tmps: 1,
             ..OpArray::default()
         },
@@ -167,13 +181,17 @@ fn a_row_the_table_has_not_is_an_internal_error() {
     let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
     let unit = Unit {
         main: OpArray {
-            oplines: vec![Opline {
-                opcode: Opcode::FramelessIcall0,
-                out_type: OperandKind::Tmp,
-                out: 0,
-                extended_value: 1_000_000,
-                ..Opline::default()
-            }],
+            oplines: vec![
+                Opline {
+                    opcode: Opcode::FramelessIcall0,
+                    out_type: OperandKind::Tmp,
+                    out: 0,
+                    extended_value: 1_000_000,
+                    ..Opline::default()
+                },
+                back(),
+            ]
+            .into(),
             num_tmps: 1,
             ..OpArray::default()
         },

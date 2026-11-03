@@ -535,9 +535,45 @@ pub fn identical(req: &mut Request, a: &Value, b: &Value) -> Result<bool, Thrown
     crate::ops::identical(req, a, b)
 }
 
-/// `==`: [`compare`] finding the two sides equal.
+/// `==`: `fast_equal_check_function`, the one equality the kernels read
+/// ([`crate::ops::loose_equal`]), for a native: two scalars as
+/// [`loose_eq_read`] reads them, two strings by their bytes where
+/// either opens past `'9'`, and every other pair [`compare`] finding
+/// the two sides equal.
 pub fn loose_eq(req: &mut Request, a: &Value, b: &Value) -> Result<bool, Thrown> {
-    compare(req, a, b).map(|o| o == Ordering::Equal)
+    crate::ops::loose_equal(req, a, b)
+}
+
+/// [`loose_eq`] read under a borrow of the request, as the rows walk
+/// reads ([`crate::api::values::walk::foreach_read`]), for a pair no
+/// code of the program can answer: two scalars, a null, a bool, an int,
+/// a float or a string on each side. `None` for a pair with an array,
+/// an object, a resource or a reference on either side, whose
+/// comparison can reach a `__toString` or a comparison handler and is
+/// [`loose_eq`]'s, with the request.
+#[must_use]
+pub fn loose_eq_read(req: &Request, a: &Value, b: &Value) -> Option<bool> {
+    crate::ops::loose_equal_read(req.ini().precision(), a, b)
+}
+
+/// [`loose_eq`] over two strings' bytes, `zend_fast_equal_strings`,
+/// which `fast_equal_check_string` reads before the general comparison
+/// ([`php_heap::equal_strings`]).
+#[must_use]
+#[inline]
+pub fn equal_strings(a: &[u8], b: &[u8]) -> bool {
+    php_heap::equal_strings(a, b)
+}
+
+/// [`identical`] read with no request, for a pair it answers without
+/// walking two arrays, a reference on either side followed: the same
+/// scalar, the same object, the same resource, or two values of
+/// different types. `None` for two arrays, whose walk raises php's
+/// `Error` at an array that holds itself and is [`identical`]'s, with
+/// the request.
+#[must_use]
+pub fn identical_read(a: &Value, b: &Value) -> Option<bool> {
+    crate::ops::identical_read(a, b)
 }
 
 /// `<=>`: `zend_compare`, the one ordering the kernels read

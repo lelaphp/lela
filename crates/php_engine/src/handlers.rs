@@ -1792,6 +1792,34 @@ pub(crate) fn init_fcall<T: Tier, A: Operand + Default>(
 /// [`Request::call_room`] sizes otherwise. `INIT_FCALL_BY_NAME` and
 /// `INIT_NS_FCALL_BY_NAME` read their callee off the same slot once a
 /// first pass primed it, and take it too.
+///
+/// The push is php's: one compare of the room the top page has left
+/// and the top moved past the frame (`Z/Zend/zend_execute.h:350`), and
+/// the header laid as the slot keeps it, its flags word whole
+/// ([`exec::PrimedCall::info`]) and the half-words a call writes zero
+/// last ([`exec::Header`]), then its slots `UNDEF`. A call passed fewer
+/// arguments than it declares and one passed more, a variadic, a
+/// recursion across the stack's first page, a scope the frame keeps and
+/// a callee named before its declaration, `INIT_FCALL_BY_NAME`, read
+/// over every pass after the first:
+///
+/// ```php
+/// function a($x, $y = 2) { return func_num_args() . ':' . $x . $y; }
+/// function b() { return func_get_args(); }
+/// function d($n) { return $n ? d($n - 1) : count(debug_backtrace()); }
+/// class K { static function m() { return static::class; } }
+/// class L extends K { static function n() { return parent::m(); } }
+/// a(0);
+/// echo a(1), ' ', a(1, 3), ' ', implode(',', b(4, 5, 6)), ' ', d(2000), ' ', L::n(), "\n";
+/// $o = [];
+/// for ($i = 0; $i < 3; $i++) { $o[] = late($i); }
+/// echo implode(' ', $o), "\n";
+/// function late($v) { return $v * 2; }
+/// ```
+/// ```expect
+/// 1:12 2:13 4,5,6 2001 L
+/// 0 2 4
+/// ```
 #[inline(always)] // as `inline_send`
 fn inline_init_fcall(req: &mut Request, frame: FrameRef, op: &Opline, at: u32) -> Option<Edge> {
     // Read off the slot in place, so only the fields the push lays are
@@ -1943,10 +1971,33 @@ fn init_call(
     // (`init_func_run_time_cache`), so a call that enters plainly keeps
     // its entry laid from the first pass after this one.
     if looked_up {
-        let primed = primed_call(req, function, op.extended_value);
+        let primed = match primed_call(req, function, op.extended_value) {
+            Cached::Function(function) => primed_native(req, function, op.extended_value),
+            primed => primed,
+        };
         req.prime(frame, slot, primed);
     }
     Ok(advance(req, frame))
+}
+
+/// What an `INIT_*`'s slot keeps of a native of the engine's table: the
+/// push its call takes, the header [`init_native`] lays made once, so
+/// every pass after the first pushes it as a user function's call is
+/// pushed, as `INIT_FCALL` pushes `fbc` off `CACHED_PTR` with the size
+/// it cached; the native alone for any other callee, a trampoline's.
+fn primed_native(req: &Request, function: Function, count: u32) -> Cached {
+    let Some(callee) = req.shared.native_callee(function) else {
+        return Cached::Function(function);
+    };
+    Cached::Call(exec::PrimedCall {
+        function,
+        room: req.native_room(count),
+        callee,
+        info: exec::CallInfo::default().of_call_built(),
+        cache: exec::CacheAt::default(),
+        base: exec::CacheBase::NONE,
+        opline: 0,
+    })
 }
 
 /// What an `INIT_*`'s slot keeps of `function`, called with `count`
@@ -1973,21 +2024,23 @@ fn primed_call(req: &Request, function: Function, count: u32) -> Cached {
     };
     let shape = user.shape;
     let enters = shape.sent.plain_entry() && count <= shape.parameters;
-    let laid = enters && req.cache_laid(shape.cache);
+    let base = req.cache_base(shape.cache).filter(|_| enters);
+    let laid = base.is_some();
     // The words an entry not laid leaves as `Header::call` writes them,
     // so its push lays what a push in place copies.
-    let (cache, opline) = if laid {
+    let (cache, base, opline) = if let Some(base) = base {
         let skipped = exec::skipped_recv(count, shape.parameters, shape.typed, shape.entry);
-        (shape.cache, skipped.unwrap_or(0))
+        (shape.cache, base, skipped.unwrap_or(0))
     } else {
-        (exec::CacheAt::default(), 0)
+        (exec::CacheAt::default(), exec::CacheBase::NONE, 0)
     };
     Cached::Call(exec::PrimedCall {
         function,
         room: shape.room(count),
         callee: user.callee_at(),
-        sent: shape.sent.with_laid_entry(laid),
+        info: shape.sent.with_laid_entry(laid).of_call_built(),
         cache,
+        base,
         opline,
     })
 }
@@ -2126,6 +2179,28 @@ fn sent(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge
 /// |1.5|
 /// string(3) "ss!" refcount(2)
 /// ```
+///
+/// A callee its `INIT` found taking nothing by reference is sent every
+/// argument by value with no parameter read, past the twelve php's
+/// `quick_arg_flags` covers too; one taking a parameter by reference
+/// still binds it, whether the compiler knew the callee or not:
+///
+/// ```php
+/// function sum(...$a) { return array_sum($a); }
+/// function fib($n) { return $n < 2 ? $n : fib($n - 1) + fib($n - 2); }
+/// echo sum(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14), " ", fib(15), "\n";
+/// function late() { return bump(2, $v) . " " . $v; }
+/// function bump($x, &$r) { $r = $x * 10; return $x; }
+/// echo late(), "\n";
+/// class C { function m($a, &$b) { $b = $a; } }
+/// $o = new C; $o->m(str_repeat("z", 2), $w);
+/// var_dump($w);
+/// ```
+/// ```expect
+/// 105 610
+/// 2 20
+/// string(2) "zz"
+/// ```
 #[inline(always)] // the handler's fast half, as php's is in the handler
 fn inline_send(
     req: &mut Request,
@@ -2141,7 +2216,23 @@ fn inline_send(
     let to = (op.op2 as usize).checked_sub(1)?;
     let (call, from) = req.vm_mut().stack.top_and_frame_mut(frame)?;
     let header = call.header();
-    let (info, num_args, function) = (header.info, header.num_args, header.function);
+    // php's `_SIMPLE` specialisations (`Z/Zend/zend_vm_def.h:10403-10453`):
+    // a send the compiler knows goes by value, or a `_EX` to a callee its
+    // `INIT` found taking nothing by reference, writes the slot with no
+    // parameter read, one test of the call's flags.
+    let simple = match sending {
+        Sending::Value => header.info.building(),
+        Sending::Declared => header.info.sends_simply(),
+        Sending::Checked => false,
+    };
+    if simple {
+        debug_assert!(
+            to < header.num_args as usize,
+            "an argument sent by number past the count its INIT wrote"
+        );
+        return sent_into(from.slots_mut(), call.slots_mut().get_mut(to)?, code, op, a);
+    }
+    let (info, num_args, function) = (header.info, header.num_args, header.function());
     if !info.building() || to >= num_args as usize {
         return None;
     }
@@ -2334,7 +2425,7 @@ fn bound_at(req: &mut Request, at: php_heap::ZvalRef) -> Result<Value, Thrown> {
 fn send_mode(req: &Request, number: u32) -> (bool, bool) {
     match req.vm().building() {
         Some(call) if !call.info.sends_by_value(number) => {
-            call.function.map_or((false, false), |function| {
+            call.function().map_or((false, false), |function| {
                 req.arg_send_mode(function, number)
             })
         }
@@ -2991,7 +3082,7 @@ fn dynamic_header(target: &DynamicTarget, count: u32) -> exec::Header {
     let mut header = exec::Header::call(target.function, count);
     header.set_receiver(target.receiver);
     header.set_called_scope(target.called_scope);
-    header.closure = target.closure.map(|(closure, _)| closure);
+    header.set_closure(target.closure.map(|(closure, _)| closure));
     header.info.set_dynamic(true);
     header
         .info
@@ -4126,7 +4217,7 @@ fn included(
         }
     };
     let main = exec::code_of(&unit);
-    let hooked = req.shared.declared().hooked.user;
+    let hooked = req.shared.hooked.user;
     if !hooked
         && let [only] = &main.oplines[..]
         && only.opcode == Opcode::Return
@@ -4492,7 +4583,7 @@ fn verified_arg(
     raw: &Value,
 ) -> Result<Option<Value>, Thrown> {
     let argument = &raw.deref();
-    let function = req.vm().at(frame).and_then(|state| state.function);
+    let function = req.vm().at(frame).and_then(crate::exec::Header::function);
     let Some(ty) = function
         .and_then(|function| req.symbols().function_decl(function))
         .and_then(|decl| decl.parameters.get(at))
@@ -4621,7 +4712,7 @@ pub(crate) fn recv_variadic<T: Tier>(
     let untyped = req
         .vm()
         .at(frame)
-        .and_then(|state| state.function)
+        .and_then(crate::exec::Header::function)
         .and_then(|function| req.symbols().function_decl(function))
         .and_then(|decl| decl.parameters.get(at))
         .is_none_or(|parameter| parameter.ty.is_none());
@@ -4942,17 +5033,57 @@ pub(crate) fn verify_return_type<T: Tier>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if op.op1_type != OperandKind::Const {
-        let operand = ByKind(op.op1_type).read(req.slots_mut(frame), code, op.op1);
-        let returned = crate::operand::deref(operand);
-        // `MAY_BE_ANY` keeps the codes a value can have: an `IS_INDIRECT`
-        // would test bit 12, which is `callable`'s.
-        let code_bit = 1u32 << (returned.kind() as u32);
-        if code.return_mask & php_unit::decl::Type::MAY_BE_ANY & code_bit != 0 {
-            return Ok(advanced());
-        }
+    if return_mask_holds(req.slots_mut(frame), code, op) {
+        return Ok(advanced());
     }
     return_mask_missed(req, (frame, at), code, op)
+}
+
+/// [`verify_return_type`]'s first test, `ZEND_TYPE_CONTAINS_CODE(ret_info->type,
+/// Z_TYPE_P(retval_ref))` (`Z/Zend/zend_vm_def.h:4458`): the type of the
+/// zval a `CV`, a `TMP` or a `VAR` holds where it stands, one bit tested
+/// in the op array's [`OpArray::return_mask`], over the frame's slots
+/// and the op array alone. As php's, it follows no reference: a
+/// reference's code and an `IS_INDIRECT`'s are no bit of `MAY_BE_ANY`,
+/// so either misses here and is the handler's past its mask
+/// ([`return_mask_missed`]). The loop serves it over the slots it holds
+/// ([`inline_path::verify_return_type`]). A function returning a scalar
+/// its declaration names:
+///
+/// ```php
+/// function i(int $n): int { return $n < 2 ? $n : i($n - 1) + i($n - 2); }
+/// function f(float $x): float { return $x * 2; }
+/// function s(string $s): string { $t = $s . "!"; return $t; }
+/// function b(int $n): bool { return $n > 1; }
+/// function n(?int $n): ?int { return $n; }
+/// function u(int $n): int|string { return $n ? $n : "zero"; }
+/// function r(int &$v): int { return $v; }
+/// $v = 4;
+/// var_dump(i(10), f(1.25), s("a"), b(2), n(null), u(0), u(3), r($v));
+/// ```
+/// ```expect
+/// int(55)
+/// float(2.5)
+/// string(2) "a!"
+/// bool(true)
+/// NULL
+/// string(4) "zero"
+/// int(3)
+/// int(4)
+/// ```
+#[inline(always)] // in the loop and in the handler
+fn return_mask_holds(slots: &[Zval], code: &OpArray, op: &Opline) -> bool {
+    // A `CONST` and an `UNUSED` stand in no slot, and are the handler's.
+    let Some(returned) = ByKind(op.op1_type)
+        .slot(op.op1)
+        .and_then(|at| slots.get(at))
+    else {
+        return false;
+    };
+    // `MAY_BE_ANY` keeps the codes a value can have: an `IS_INDIRECT`
+    // would test bit 12, which is `callable`'s.
+    let code_bit = 1u32 << (returned.kind() as u32);
+    code.return_mask & php_unit::decl::Type::MAY_BE_ANY & code_bit != 0
 }
 
 /// [`verify_return_type`] past its mask, the frame stood at `at`
@@ -5049,7 +5180,7 @@ fn return_mask_missed(
 /// declares a return type: the type, borrowed where the request holds
 /// it, and whether the function returns by reference.
 fn declared_return(req: &Request, frame: FrameRef) -> Option<(&php_unit::decl::Type, bool)> {
-    let function = req.vm().at(frame)?.function?;
+    let function = req.vm().at(frame)?.function()?;
     let decl = req.symbols().function_decl(function)?;
     Some((decl.return_type.as_ref()?, decl.returns_by_ref))
 }
@@ -5368,7 +5499,7 @@ fn arg_type_error(
     ty: &php_unit::decl::Type,
     argument: &Value,
 ) -> Thrown {
-    let function = req.vm().at(frame).and_then(|state| state.function);
+    let function = req.vm().at(frame).and_then(crate::exec::Header::function);
     // `get_active_function_or_method_name`, which `%s` prints up to the
     // NUL an anonymous class's name holds: its class alone.
     let name = function.map_or_else(Vec::new, |function| match req.method_class(function) {
@@ -5440,7 +5571,7 @@ fn call_site(req: &Request, frame: FrameRef) -> Option<(String, u32)> {
 /// name whatever user frame happens to stand below the native, which
 /// is a call site the program never wrote.
 fn missing_argument(req: &mut Request, frame: FrameRef, passed: u32) -> Thrown {
-    let function = req.vm().at(frame).and_then(|state| state.function);
+    let function = req.vm().at(frame).and_then(crate::exec::Header::function);
     let name = req.frame_function_name(frame);
     let parameters: Vec<bool> = function
         .and_then(|function| req.symbols().function_decl(function))
@@ -5669,6 +5800,12 @@ pub(crate) fn new<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if op.op1_type == OperandKind::Const
+        && let Some(&Cached::Constructed { class, call }) =
+            req.cached_in_place(frame, CacheSlot(op.op2))
+    {
+        return constructed(req, frame, op, class, call);
+    }
     let class = match class_operand(
         req,
         frame,
@@ -5709,7 +5846,84 @@ pub(crate) fn new<T: Tier>(
     let mut header = exec::Header::call(function, op.extended_value);
     header.set_receiver(this.map(exec::Receiver::Owned));
     header.set_called_scope(constructor.map(|_| class));
-    pushed(req, frame, header)
+    let edge = pushed(req, frame, header);
+    if op.op1_type == OperandKind::Const
+        && edge.is_ok()
+        && let Some(constructor) = constructor
+    {
+        prime_constructed(req, frame, op, class, constructor);
+    }
+    edge
+}
+
+/// `NEW` off its slot ([`Cached::Constructed`]): the object made of the
+/// class the slot holds, with no test of its flags, into `result`, and
+/// its constructor's call pushed as the slot keeps it, the object its
+/// receiver with one more owner (`Z_ADDREF_P(result)`), with no lookup
+/// of the constructor or its row.
+///
+/// ```php
+/// class Q { public $a; function __construct($a) { $this->a = $a; } function __destruct() { echo "d{$this->a}|"; } }
+/// class R { public $n; private function __construct($n) { $this->n = $n; } static function make($n) { return new R($n); } }
+/// for ($i = 0; $i < 3; $i++) { $o = new Q($i); echo $o->a, ","; }
+/// echo "\n", R::make(1)->n, R::make(2)->n, "\n";
+/// try { new R(3); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// unset($o); echo "end\n";
+/// ```
+/// ```expect
+/// 0,d0|1,d1|2,
+/// 12
+/// Call to private R::__construct() from global scope
+/// d2|end
+/// ```
+fn constructed(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    class: crate::api::values::ClassId,
+    call: exec::PrimedCall,
+) -> Edge {
+    let object = match req.new_object(class) {
+        Ok(object) => object,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    set_out(req, frame, op, object.as_value());
+    object.heap().addref();
+    let count = op.extended_value;
+    req.push_laid(call.room as usize, move || {
+        let mut header = exec::Header::primed(call, count);
+        header.set_receiver(Some(exec::Receiver::Owned(object)));
+        header.set_called_scope(Some(class));
+        header
+    })?;
+    Ok(advance(req, frame))
+}
+
+/// What a `NEW` over a constant name keeps once it has pushed
+/// `constructor` on `class`: the push ([`Cached::Constructed`]), where
+/// the constructor is a public user method and the standard handlers
+/// answer it, so no scope and no table of the class's own decides it on
+/// a later pass; nothing otherwise, the slot holding the class alone.
+fn prime_constructed(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    class: crate::api::values::ClassId,
+    constructor: Function,
+) {
+    let public = req
+        .method_decl(constructor)
+        .is_some_and(|decl| decl.visibility == php_unit::decl::Visibility::Public);
+    if !public || req.own_handlers(class).is_some() {
+        return;
+    }
+    if let Cached::Call(call) = primed_call(req, constructor, op.extended_value) {
+        req.prime(
+            frame,
+            CacheSlot(op.op2),
+            Cached::Constructed { class, call },
+        );
+    }
 }
 
 /// `ZEND_INIT_STATIC_METHOD_CALL` (`Z/Zend/zend_vm_def.h:3739`) over a
@@ -5882,6 +6096,15 @@ pub(crate) fn init_static_method_call<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let slot = CacheSlot(op.out);
+    // Both named by constants: the pair answers with the class it holds,
+    // the one the name resolved to when it was written, and the push
+    // beside it ([`Request::cached_callee`]).
+    if op.op1_type == OperandKind::Const
+        && op.op2_type == OperandKind::Const
+        && let Some(callee) = req.cached_callee(frame, slot, None)
+    {
+        return static_call_frame(req, frame, op, callee);
+    }
     // The slot holds the class php resolved off a constant pair; a class
     // reference of the scope, or one a `FETCH_CLASS` left, is resolved on
     // every pass, since `static` and a computed name differ between them.
@@ -5910,20 +6133,15 @@ pub(crate) fn init_static_method_call<T: Tier>(
             class
         }
     };
-    // The pair answers where it holds this pass's class and was written
-    // from this frame's scope ([`Request::cached_callee`]): for a constant
-    // class, where the slot was found holding a pair; for any other,
-    // whichever pair it holds, php's `CACHED_PTR(opline->result.num) == ce`.
-    // One read of the pair, so the read stays inline in the handler.
-    let pair_read = op.op2_type == OperandKind::Const
-        && (op.op1_type != OperandKind::Const || matches!(primed, Cached::ClassAndCallee { .. }));
-    let cached_callee = if pair_read {
-        req.cached_callee(frame, slot, class)
-    } else {
-        None
-    };
-    if let Some((function, instance)) = cached_callee {
-        return static_call_frame(req, frame, op, class, (function, instance));
+    // The pair answers a class resolved on every pass where it holds
+    // this pass's class and was written from this frame's scope
+    // ([`Request::cached_callee`]), php's `CACHED_PTR(opline->result.num)
+    // == ce`; a constant class's pair was asked above.
+    if op.op2_type == OperandKind::Const
+        && op.op1_type != OperandKind::Const
+        && let Some(callee) = req.cached_callee(frame, slot, Some(class))
+    {
+        return static_call_frame(req, frame, op, callee);
     }
     let mut uncached = false;
     // Whether the callee takes `$this`, where the lookup read it.
@@ -5987,10 +6205,16 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // `ZEND_ACC_NEVER_CACHE` and one a trait declared, whose deprecation
     // is raised on every pass.
     let instance = looked_up.unwrap_or_else(|| req.takes_this(function));
-    if op.op2_type == OperandKind::Const && !uncached {
+    let writes = op.op2_type == OperandKind::Const && !uncached;
+    if writes {
         req.prime_callee(frame, slot, class, (function, instance));
     }
-    static_call_frame(req, frame, op, class, (function, instance))
+    let method = exec::MethodCallee::found(class, function, instance);
+    let edge = static_call_frame(req, frame, op, method);
+    if writes && edge.is_ok() {
+        prime_push(req, frame, op);
+    }
+    edge
 }
 
 /// `zend_std_get_static_method` (`Z/Zend/zend_object_handlers.c:2040`)
@@ -6081,7 +6305,8 @@ fn static_call_named(
     let found = static_method(req, class, &method.lowered(), &method.written, this);
     let edge = match found {
         Ok(callee) => {
-            static_call_frame(req, frame, op, class, (callee.function, callee.takes_this))
+            let callee = exec::MethodCallee::found(class, callee.function, callee.takes_this);
+            static_call_frame(req, frame, op, callee)
         }
         Err(thrown) => threw(req, frame, &thrown),
     };
@@ -6093,16 +6318,23 @@ fn static_call_named(
 /// callee, whether the slot answered or the tables did: php's
 /// `!(fbc->common.fn_flags & ZEND_ACC_STATIC)` rule, which is applied
 /// on every pass and not only the one that resolved, and the call frame
-/// over the class as its called scope. `callee` is the function with
+/// over the class as its called scope. `method` is the callee with
 /// whether it takes `$this`, which the cache slot holds beside it and
-/// a pass that looked it up read once ([`Request::takes_this`]).
+/// a pass that looked it up read once ([`Request::takes_this`]), and the
+/// push the slot after it keeps, which the frame is pushed with where
+/// there is one ([`push_method_call`]).
 fn static_call_frame(
     req: &mut Request,
     frame: FrameRef,
     op: &Opline,
-    class: crate::api::values::ClassId,
-    (function, instance): (Function, bool),
+    method: exec::MethodCallee,
 ) -> Edge {
+    let exec::MethodCallee {
+        class,
+        function,
+        instance,
+        ..
+    } = method;
     // `if (!(fbc->common.fn_flags & ZEND_ACC_STATIC))`: an instance
     // method takes the calling frame's `$this` where it is an instance
     // of the class, and is php's `Error` otherwise; a static one called
@@ -6131,10 +6363,14 @@ fn static_call_frame(
     } else {
         (None, class)
     };
-    let mut header = exec::Header::call(function, op.extended_value);
-    header.set_receiver(this);
-    header.set_called_scope(Some(called));
-    pushed(req, frame, header)
+    if method.push.is_none() {
+        let mut header = exec::Header::call(function, op.extended_value);
+        header.set_receiver(this);
+        header.set_called_scope(Some(called));
+        return pushed(req, frame, header);
+    }
+    push_method_call(req, method, op.extended_value, this, called)?;
+    Ok(advance(req, frame))
 }
 
 /// `ZEND_INIT_PARENT_PROPERTY_HOOK_CALL` (`Z/Zend/zend_vm_def.h:9897`),
@@ -6172,7 +6408,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
     let scope = req
         .vm()
         .at(frame)
-        .and_then(|state| state.function)
+        .and_then(crate::exec::Header::function)
         .and_then(|function| req.method_class(function));
     let Some(parent) = scope.and_then(|scope| req.symbols().class_parent(scope)) else {
         let thrown = crate::api::raising::throw_error(
@@ -6468,20 +6704,16 @@ fn inline_init_method_call(req: &mut Request, frame: FrameRef, op: &Opline) -> O
         Some(at) => PhpObject::of(req.slots_mut(frame).get(at)?.as_obj()?),
     };
     let class = object.class();
-    let (function, instance) = req.cached_callee(frame, CacheSlot(op.out), class)?;
-    if !instance {
+    let callee = req.cached_callee(frame, CacheSlot(op.out), Some(class))?;
+    if !callee.instance {
         return None;
     }
-    let (room, callee, sent) = req.call_room(function, op.extended_value);
-    let mut header = exec::Header::call(function, op.extended_value);
-    header.callee = callee;
-    header.info.join(sent);
-    header.set_called_scope(Some(class));
-    header.set_receiver(Some(match at {
+    let receiver = match at {
         None => exec::Receiver::lent(object),
         Some(_) => exec::Receiver::Owned(object),
-    }));
-    if let Err(fatal) = req.push_room(room, header) {
+    };
+    let pushed = push_method_call(req, callee, op.extended_value, Some(receiver), class);
+    if let Err(fatal) = pushed {
         return Some(Err(fatal));
     }
     match (op.op1_type, at) {
@@ -6496,6 +6728,66 @@ fn inline_init_method_call(req: &mut Request, frame: FrameRef, op: &Opline) -> O
         _ => {}
     }
     Some(Ok(advanced()))
+}
+
+/// The call to the callee a method call's slots answered with
+/// ([`Request::cached_callee`]), `count` arguments passed, over
+/// `receiver` and the called scope `called`, pushed: with the push the
+/// second slot keeps, read off no row and laid in place, as `INIT_FCALL`
+/// pushes off its slot ([`exec::Header::primed`]), and, where it keeps
+/// none, with the callee's room and record read off its row
+/// ([`Request::call_room`]).
+#[inline(always)] // the hit path of both method INITs
+fn push_method_call(
+    req: &mut Request,
+    method: exec::MethodCallee,
+    count: u32,
+    receiver: Option<exec::Receiver>,
+    called: crate::api::values::ClassId,
+) -> Result<FrameRef, Fatal> {
+    if let Some(call) = method.push {
+        return req.push_laid(call.room as usize, move || {
+            let mut header = exec::Header::primed(call, count);
+            header.set_receiver(receiver);
+            header.set_called_scope(Some(called));
+            header
+        });
+    }
+    let (room, record, sent) = req.call_room(method.function, count);
+    let mut header = exec::Header::call(method.function, count);
+    header.callee = record;
+    header.info.join(sent);
+    header.set_receiver(receiver);
+    header.set_called_scope(Some(called));
+    req.push_room(room, header)
+}
+
+/// `CACHE_PTR(opline->result.num + sizeof(void *), fbc)` as this engine
+/// keeps it: the push of the callee the pair at `op`'s slot holds,
+/// written into the slot after it once a pass has looked the callee up
+/// and pushed it, the push having laid the callee's runtime cache down,
+/// as `INIT_FCALL`'s slot is written ([`primed_call`]). Every pass after
+/// that reads both slots and pushes with no row read
+/// ([`push_method_call`]); a pass that finds the pair holding another
+/// callee writes the push again.
+///
+/// ```php
+/// class P { function m($a, $b = 2) { return $a + $b; } static function s($a) { return $a * 2; } }
+/// class Q extends P { function m($a, $b = 3) { return $a - $b; } }
+/// $t = 0;
+/// foreach ([new P, new P, new Q, new Q, new P] as $o) { $t = $t * 10 + $o->m(5) + P::s(1); }
+/// echo $t, "\n";
+/// ```
+/// ```expect
+/// 99449
+/// ```
+fn prime_push(req: &mut Request, frame: FrameRef, op: &Opline) {
+    let slot = CacheSlot(op.out);
+    let Some(&Cached::ClassAndCallee { function, .. }) = req.cached_in_place(frame, slot) else {
+        return;
+    };
+    let push = primed_call(req, function, op.extended_value);
+    req.prime(frame, exec::callee_slot(slot), push);
 }
 
 /// `INIT_METHOD_CALL` past its inline path: the name, the receiver and
@@ -6581,7 +6873,11 @@ fn method_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     let mut header = exec::Header::call(function, op.extended_value);
     header.set_receiver(this);
     header.set_called_scope(Some(called));
-    pushed(req, frame, header)
+    let edge = pushed(req, frame, header);
+    if op.op2_type == OperandKind::Const && edge.is_ok() {
+        prime_push(req, frame, op);
+    }
+    edge
 }
 
 /// The call's owner of `object`, the receiver `INIT_METHOD_CALL` read
@@ -6660,8 +6956,8 @@ fn method_of_call(
     let slot = CacheSlot(op.out);
     let class = object.class();
     let named = op.op2_type == OperandKind::Const;
-    if named && let Some((function, instance)) = req.cached_callee(frame, slot, class) {
-        return Ok((function, None, instance));
+    if named && let Some(callee) = req.cached_callee(frame, slot, Some(class)) {
+        return Ok((callee.function, None, callee.instance));
     }
     let (function, receiver) = method_on(
         req,
@@ -9001,6 +9297,22 @@ fn dynamic_bucket(
 /// [`Request::prime_property`] for a property opcode whose name is a
 /// constant, at cache slot `slot`: `zend_get_property_offset` given the
 /// opline's `cache_slot`, which a computed name's site passes as `NULL`.
+/// A slot that holds the object's class already answers with no lookup
+/// (`ce == CACHED_PTR_EX(cache_slot)`,
+/// `Z/Zend/zend_object_handlers.c:371`), so a fetch its inline path
+/// leaves to the kernel, a `__get`'s or an unset slot's, is not placed
+/// again on every pass:
+///
+/// ```php
+/// class M { public $d = 1; function __get($n) { return "get:$n"; } }
+/// class N extends M { public $e = 2; }
+/// $m = new M; unset($m->d); $n = new N;
+/// for ($i = 0; $i < 3; $i++) { foreach ([$m, $n, $m] as $o) { echo $o->d, ",", $o->missing, ";"; } }
+/// echo "\n";
+/// ```
+/// ```expect
+/// get:d,get:missing;1,get:missing;get:d,get:missing;get:d,get:missing;1,get:missing;get:d,get:missing;get:d,get:missing;1,get:missing;get:d,get:missing;
+/// ```
 fn prime_constant(
     req: &mut Request,
     frame: FrameRef,
@@ -9010,6 +9322,7 @@ fn prime_constant(
     name: &Value,
 ) {
     if op.op2_type == OperandKind::Const
+        && req.cached_property(frame, slot, object.class()).is_none()
         && let Some(bytes) = name.as_str_bytes()
     {
         req.prime_property(frame, slot, object, bytes);
@@ -12813,15 +13126,16 @@ pub(crate) fn fetch_class<T: Tier>(
         let value = exec::operand(req, frame, code, op.op2_type, op.op2).deref();
         let class = if let Some(object) = value.as_object() {
             Ok(Some(object.class()))
-        } else if let Some(name) = value.as_str_bytes() {
-            let name = name.to_vec();
+        } else if let Some(name) = value.as_php_string() {
+            // `zend_fetch_class`, which reads the name's class cache
+            // first, as `zend_lookup_class_ex` does.
             match (
                 op.op1 & FETCH_CLASS_SILENT,
                 op.op1 & FETCH_CLASS_NO_AUTOLOAD,
             ) {
-                (0, _) => crate::api::call::fetch_class(req, &name).map(Some),
-                (_, 0) => crate::api::call::autoload(req, &name),
-                _ => crate::api::call::lookup_class(req, &name),
+                (0, _) => crate::api::call::fetch_class_string(req, name).map(Some),
+                (_, 0) => crate::api::call::lookup_class_string(req, name, true),
+                _ => crate::api::call::lookup_class_string(req, name, false),
             }
         } else {
             Err(crate::api::raising::throw_error(
@@ -12896,9 +13210,10 @@ impl DoCall {
 }
 
 /// The body the `DO_*CALL` handlers share, `opcode` naming the one that
-/// found no call frame under it: the `ZEND_USER_FUNCTION` arm enters
-/// the callee's op array ([`enter`]), the `ZEND_INTERNAL_FUNCTION` arm
-/// serves the native on the call frame.
+/// found no call frame under it: the `ZEND_INTERNAL_FUNCTION` arm
+/// serves the native on the call frame ([`native_served`]), and every
+/// other callee is [`do_call_entered`]'s, out of line, so the native's
+/// path keeps to the registers it needs.
 fn do_call(req: &mut Request, frame: FrameRef, says: DoCall, opcode: &str) -> Edge {
     if says.flagged
         && let Err(thrown) = flagged_call(req, says)
@@ -12912,28 +13227,56 @@ fn do_call(req: &mut Request, frame: FrameRef, says: DoCall, opcode: &str) -> Ed
         )));
     };
     // A native function is served through the entry the engine's table
-    // holds, as `DO_ICALL` calls `fbc->internal_function.handler`; a
-    // user function is entered, and a trampoline is handed to its magic
-    // method first.
-    let served = if let Some(entry) = req.native_entry(function) {
-        req.serve_entry(function, entry, OnThrow::Nothing)
-    } else if let Some(user) = req.user_function(function) {
+    // holds, as `DO_ICALL` calls `fbc->internal_function.handler`.
+    if let Some(entry) = req.native_entry(function) {
+        let served = req.serve_entry(function, entry, OnThrow::Nothing);
+        return native_served(req, frame, says, served);
+    }
+    do_call_entered(req, frame, says, (call, function))
+}
+
+/// [`do_call`] over a callee that is no native function: a user
+/// function is entered, and a trampoline is handed to its magic method
+/// first, which is entered where it is a user method and served where it
+/// is a native one.
+#[inline(never)]
+fn do_call_entered(
+    req: &mut Request,
+    frame: FrameRef,
+    says: DoCall,
+    (call, function): (FrameRef, Function),
+) -> Edge {
+    if let Some(user) = req.user_function(function) {
         let shape = user.shape;
         return enter(req, frame, says, call, shape);
-    } else {
-        let function = match crate::trampoline::hand_to_magic(req, function) {
-            Ok(function) => function,
-            Err(thrown) => {
-                req.pop_call();
-                return threw(req, frame, &thrown);
-            }
-        };
-        if let Some(user) = req.user_function(function) {
-            let shape = user.shape;
-            return enter(req, frame, says, call, shape);
+    }
+    let function = match crate::trampoline::hand_to_magic(req, function) {
+        Ok(function) => function,
+        Err(thrown) => {
+            req.pop_call();
+            return threw(req, frame, &thrown);
         }
-        req.serve_native(function, OnThrow::Nothing)
     };
+    if let Some(user) = req.user_function(function) {
+        let shape = user.shape;
+        return enter(req, frame, says, call, shape);
+    }
+    let served = req.serve_native(function, OnThrow::Nothing);
+    native_served(req, frame, says, served)
+}
+
+/// What a native served on the call on top of the stack answered,
+/// handed back: the call popped and the value written into the
+/// temporary the call opline names, or given up where it names none
+/// ([`Request::pop_call_into`]); where the interrupt is raised,
+/// [`native_interrupted`] takes it out of line.
+#[inline(always)] // `do_call`'s native arm
+fn native_served(
+    req: &mut Request,
+    frame: FrameRef,
+    says: DoCall,
+    served: Result<Value, Thrown>,
+) -> Edge {
     let value = match served {
         Ok(value) => value,
         Err(thrown) => {
@@ -12941,21 +13284,35 @@ fn do_call(req: &mut Request, frame: FrameRef, says: DoCall, opcode: &str) -> Ed
             return Ok(Stepped::Threw(frame).into());
         }
     };
-    // `ZEND_VM_FCALL_INTERRUPT_CHECK(call)`: the check php makes after a
-    // native returns, with the call still on the stack, which is where
-    // a signal the native delivered to its own process is dispatched
-    // under `pcntl_async_signals(true)`.
-    let interrupted = crate::interrupt::check(req);
-    req.pop_call();
-    let threw = match interrupted {
+    if crate::interrupt::raised(req) {
+        return native_interrupted(req, frame, says, value);
+    }
+    req.pop_call_into(says.into.map(|slot| (frame, slot)), value);
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame).into());
+    }
+    Ok(advance(req, frame))
+}
+
+/// [`native_served`] where the interrupt is raised as the native
+/// returns: `ZEND_VM_FCALL_INTERRUPT_CHECK(call)`, the check php makes
+/// with the call still on the stack, which is where a signal the native
+/// delivered to its own process is dispatched under
+/// `pcntl_async_signals(true)`; then the call popped and its value handed
+/// back, or given up where the check raised a fatal.
+#[cold]
+#[inline(never)]
+fn native_interrupted(req: &mut Request, frame: FrameRef, says: DoCall, value: Value) -> Edge {
+    let threw = match crate::interrupt::check(req) {
         Ok(threw) => threw,
         Err(fatal) => {
+            req.pop_call();
             req.release(value);
             return Err(fatal);
         }
     };
-    let into = says.into.map(|slot| (frame, slot));
-    if handed_back(req, into, value) || threw {
+    req.pop_call_into(says.into.map(|slot| (frame, slot)), value);
+    if threw || req.is_pending() {
         return Ok(Stepped::Threw(frame).into());
     }
     Ok(advance(req, frame))
@@ -13140,11 +13497,13 @@ pub(crate) fn jmp_frameless<T: Tier>(
         | Cached::Function(_)
         | Cached::Call(_)
         | Cached::Class(_)
+        | Cached::Constructed { .. }
         | Cached::ClassAndCallee { .. }
         | Cached::Property { .. }
         | Cached::StaticProperty { .. }
         | Cached::ClassConstant { .. }
-        | Cached::Constant(_) => {
+        | Cached::Constant(_)
+        | Cached::Undefined(_) => {
             let name = exec::constant(code, ConstIdx(op.op1));
             let found = name
                 .as_str_bytes()
@@ -13336,23 +13695,23 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// engine's frameless table holds at `extended_value` (`ZEND_FLF_FUNC`,
 /// `ZEND_FLF_HANDLER`), served over the operands in `arguments`. php
 /// hands its frameless body the operands and a `return_value` and no
-/// frame; here the body is the native's one entry, which reads its
-/// arguments off the call it is being served from, so the operands are
-/// laid down as a call already serving, each read as the handler reads
-/// it (`GET_OP*_ZVAL_PTR_DEREF`) with one more owner where php holds a
-/// pointer, and the call is popped after the native returned, which
-/// frees each operand where php's `FREE_OP*` frees it. What the native
-/// returned is the temporary's, `ZVAL_NULL(result)` and then the
-/// body's write of it; a native that threw leaves the throwable
+/// frame; here the body is the entry `php_macros` generated for the
+/// arity, `zflf_*` beside `zif_*`, handed the operands each read as the
+/// handler reads it (`GET_OP*_ZVAL_PTR_DEREF`), with one more owner
+/// only where php's pointer is a named variable's that the native
+/// could reassign. No record is laid down: what one would answer is
+/// read off the caller's opline (#3302), and each operand is freed
+/// after the native returned where php's `FREE_OP*` frees it. What the
+/// native returned is the temporary's, `ZVAL_NULL(result)` and then
+/// the body's write of it; a native that threw leaves the throwable
 /// pending as `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` finds it. The loop
 /// steps past the opline and past the `OP_DATA` a third argument came
 /// in.
 ///
-/// php lays that call down only where an observer watches the native,
+/// php lays a call down only where an observer watches the native,
 /// `zend_frameless_observed_call` (`Z/Zend/zend_vm_def.h:9782`); any
-/// other is served over no frame, so here its record stands off the
-/// VM stack's pages ([`Request::push_frameless`]) and takes no room
-/// php's does not. A recursion that leaves its last frame one slot
+/// other is served over no frame and takes no room on the VM stack's
+/// pages. A recursion that leaves its last frame one slot
 /// short of a page's end opens the next page at the same depth whether
 /// its innermost frame then calls a frameless native or not, and
 /// `memory_get_peak_usage()` reads that page where php's reads it:
@@ -13547,39 +13906,105 @@ fn frameless_call<const N: usize>(
     arguments: [(OperandKind, u32); N],
 ) -> Edge {
     // The frame stands at the call, and a `CV` is borrowed where no name
-    // reaches its variables ([`exec::frameless_named`]).
-    let header = req.vm_mut().at_mut(frame);
-    let named = exec::frameless_named(header.as_deref());
-    if let Some(header) = header {
-        header.opline = at;
-    }
-    let mut operands = [Zval::UNDEF; N];
-    let mut owned = 0u8;
-    for (at, (operand, read)) in arguments.into_iter().zip(&mut operands).enumerate() {
-        let own;
-        (*read, own) = exec::frameless_operand(req, frame, code, operand, named);
-        owned |= u8::from(own) << at;
-    }
-    let Some(value) = frameless_served(req, op.extended_value, &operands, owned)? else {
-        return Ok(Stepped::Threw(frame).into());
+    // reaches its variables ([`exec::frameless_named`]): every operand
+    // read where it stands in the one look at the frame that writes the
+    // opline, and each read in turn ([`exec::frameless_operand`]) where
+    // one is `UNUSED`, `UNDEF` or a reference.
+    let (operands, owned) = if let Some(read) = frameless_read(req, frame, code, at, &arguments) {
+        read
+    } else {
+        let named = exec::frameless_named(req.vm().at(frame));
+        let mut operands = [Zval::UNDEF; N];
+        let mut owned = 0u8;
+        for (at, (operand, read)) in arguments.into_iter().zip(&mut operands).enumerate() {
+            let own;
+            (*read, own) = exec::frameless_operand(req, frame, code, operand, named);
+            owned |= u8::from(own) << at;
+        }
+        (operands, owned)
     };
+    let held = Operands {
+        frame,
+        zvals: &operands,
+        owned,
+        slots: &arguments,
+    };
+    let value = match frameless_entered(req, op.extended_value, held)? {
+        Ok(value) => value,
+        Err(thrown) => {
+            checked_after_throw(req, &thrown)?;
+            return Ok(Stepped::Threw(frame).into());
+        }
+    };
+    // The interrupt read once, as php's handler reads `EG(vm_interrupt)`
+    // once after the native, and its check out of line: made with a
+    // handler's throwable pending before the value is written, as
+    // [`frameless_served`] makes it, or after the write where none is.
+    let raised = crate::interrupt::raised(req);
+    if raised
+        && req.is_pending()
+        && let Err(fatal) = checked_while_pending(req)
+    {
+        req.release(value);
+        return Err(fatal);
+    }
     set_out(req, frame, op, value);
     // `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION`: a throwable a handler left
-    // pending while the native went on, its check already made.
-    if req.is_pending() || crate::interrupt::check(req)? {
+    // pending while the native went on, its check made.
+    if req.is_pending() || raised && crate::interrupt::interrupted(req)? {
         return Ok(Stepped::Threw(frame).into());
     }
     jump_to(at.saturating_add(if N == 3 { 2 } else { 1 }))
 }
 
-/// The native at `at` of the engine's frameless table served over
-/// `operands`, the bits of `owned` the ones its record owns, as the
-/// `FRAMELESS_ICALL_*` handlers and the frameless call compiled code
-/// makes ([`crate::tier::frameless_call`]) both serve it: its record
-/// laid down ([`Request::push_frameless`]), the native served, and the
-/// record popped, which gives up what it owns, whether the native threw
-/// or not, as php's frameless handler and its full call for an observed
-/// one do (`Z/Zend/zend_execute.c:1597`). What it returned, with the
+/// [`frameless_call`]'s operands read in one look at `frame`, which is
+/// made to stand at `at`: each as [`exec::frameless_operand`] reads one
+/// that is a constant or a value in its slot, a `CV` of a frame a name
+/// reaches taking one more owner; none, with only the opline written,
+/// where any is `UNUSED`, `UNDEF` or a reference.
+#[inline(always)] // the frameless handler's hot path
+fn frameless_read<const N: usize>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    at: u32,
+    arguments: &[(OperandKind, u32); N],
+) -> Option<([Zval; N], u8)> {
+    let state = req.vm_mut().stack.frame_mut(frame)?;
+    let header = state.header_mut();
+    header.opline = at;
+    let named = header.annex().is_some();
+    let slots = state.slots_mut();
+    let mut operands = [Zval::UNDEF; N];
+    let mut owned = 0u8;
+    for (at, (&(kind, field), read)) in arguments.iter().zip(&mut operands).enumerate() {
+        let z = match kind {
+            OperandKind::Const => *code.literals.get(field as usize)?,
+            OperandKind::Unused => return None,
+            _ => *slots.get(field as usize)?,
+        };
+        if z.is_undef() || z.kind() == php_heap::ZvalType::Reference {
+            return None;
+        }
+        *read = z;
+        owned |= u8::from(kind == OperandKind::Cv && named) << at;
+    }
+    for (at, z) in operands.iter().enumerate() {
+        if owned >> at & 1 != 0 {
+            z.addref();
+        }
+    }
+    Some((operands, owned))
+}
+
+/// The native at `at` of the engine's frameless table served over the
+/// operands `held` carries, as the `FRAMELESS_ICALL_*` handlers and the
+/// frameless call compiled code makes ([`crate::tier::frameless_call`])
+/// both serve it: its arity's entry called with no record, or the
+/// framed entry's full call where an observer watches it
+/// (`Z/Zend/zend_execute.c:1577-1597`), and then each operand given up,
+/// the ones `held` owns released and each temporary freed as `FREE_OP*`
+/// frees it, whether the native threw or not. What it returned, with the
 /// throwable a warning's handler threw left pending where the native
 /// went on past one, or none with the throwable it threw left pending;
 /// the handler's pending test and the tier's wrapper find either.
@@ -13648,37 +14073,12 @@ fn frameless_call<const N: usize>(
 ///
 /// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 6
 /// ```
-#[inline(always)] // the handler's hot path, which it was before the tier shared it
 pub(super) fn frameless_served(
     req: &mut Request,
     at: u32,
-    operands: &[Zval],
-    owned: u8,
+    held: Operands<'_>,
 ) -> Result<Option<Value>, Fatal> {
-    let pushed = match req.frameless_entry(at) {
-        Some((function, entry)) => req
-            .push_frameless(function, operands)
-            .map(|_| (function, entry)),
-        None => Err(Fatal::error(format!(
-            "InternalError: ZEND_FRAMELESS_ICALL_{} indexes frameless entry {at} and the engine's table has {} entries",
-            operands.len(),
-            req.frameless_count()
-        ))),
-    };
-    let (function, entry) = match pushed {
-        Ok(pushed) => pushed,
-        Err(fatal) => {
-            for (at, &operand) in operands.iter().enumerate() {
-                if owned >> at & 1 != 0 {
-                    req.release_zval_nogc(operand);
-                }
-            }
-            return Err(fatal);
-        }
-    };
-    let served = req.serve_entry(function, entry, OnThrow::ReturnValue);
-    req.pop_frameless(owned);
-    match served {
+    match frameless_entered(req, at, held)? {
         // The native went on past a warning whose handler threw, as php's
         // body writes `return_value` whatever `EG(exception)` holds: the
         // check is made with that throwable pending, as for one the native
@@ -13695,6 +14095,80 @@ pub(super) fn frameless_served(
         Ok(value) => Ok(Some(value)),
         Err(thrown) => checked_after_throw(req, &thrown).map(|()| None),
     }
+}
+
+/// [`frameless_served`] up to the native's answer: the entry served, or
+/// the framed one where an observer watches, and each operand given up,
+/// what the handler's tail and the tier's read the interrupt after.
+#[inline(always)] // the handler's hot path, which it was before the tier shared it
+fn frameless_entered(
+    req: &mut Request,
+    at: u32,
+    held: Operands<'_>,
+) -> Result<Result<Value, Thrown>, Fatal> {
+    // The aside's answer taken apart here: a fatal frees the operands as
+    // the served path does, and is the only answer that skips the rest.
+    let served = match req.frameless_entry(at) {
+        Some((function, entry)) if !crate::observer::frameless_observed(req, function) => {
+            req.serve_frameless(function, entry, held.zvals)
+        }
+        found => match frameless_aside(req, at, found, held.zvals) {
+            Ok(served) => served,
+            Err(fatal) => {
+                free_operands(req, held);
+                return Err(fatal);
+            }
+        },
+    };
+    free_operands(req, held);
+    Ok(served)
+}
+
+/// `FREE_OP*` once the native returned, whether it threw or not: an
+/// owner the handler took given up, and a temporary freed where it
+/// stands.
+#[inline(always)] // the frameless handler's hot path
+fn free_operands(req: &mut Request, held: Operands<'_>) {
+    for (at, (&operand, &(kind, field))) in held.zvals.iter().zip(held.slots).enumerate() {
+        if held.owned >> at & 1 != 0 {
+            req.release_zval_nogc(operand);
+        }
+        exec::free_operand(req, held.frame, kind, field);
+    }
+}
+
+/// [`frameless_entered`]'s entry where an observer watches the native,
+/// the framed entry's full call, or where `at` names no entry.
+#[cold]
+#[inline(never)]
+fn frameless_aside(
+    req: &mut Request,
+    at: u32,
+    found: Option<(Function, crate::api::__private::Frameless)>,
+    zvals: &[Zval],
+) -> Result<Result<Value, Thrown>, Fatal> {
+    match found {
+        Some((function, _)) => req.serve_frameless_observed(function, zvals),
+        None => Err(Fatal::error(format!(
+            "InternalError: ZEND_FRAMELESS_ICALL_{} indexes frameless entry {at} and the engine's table has {} entries",
+            zvals.len(),
+            req.frameless_count()
+        ))),
+    }
+}
+
+/// The operands a frameless call is served over, as its handler read
+/// them ([`exec::frameless_operand`]) or compiled code handed them
+/// ([`crate::tier::frameless_call`]): the frame it stands in, each
+/// zval, the bits of `owned` the ones the caller holds an owner of, and
+/// each operand's kind and slot, a temporary's freed there after the
+/// call.
+#[derive(Clone, Copy)]
+pub(super) struct Operands<'a> {
+    pub(super) frame: FrameRef,
+    pub(super) zvals: &'a [Zval],
+    pub(super) owned: u8,
+    pub(super) slots: &'a [(OperandKind, u32)],
 }
 
 /// `ZEND_ASSIGN`, `zend_assign_to_variable`
@@ -13948,11 +14422,94 @@ fn inline_assign_op(
     Some(Inline::ADVANCE)
 }
 
+/// `.=` over a CV holding a string, by a string, both of them non-empty:
+/// php's `concat_function` with `result == op1`
+/// (`Z/Zend/zend_operators.c:2125-2155`), the CV's owner handed to
+/// `zend_string_extend`, which grows a string the CV alone holds where it
+/// stands and copies one with other holders or an interned one
+/// ([`Request::string_append`]), the joined string written back into the
+/// CV and, under `RETURN_VALUE_USED`, copied into the temporary, then
+/// `FREE_OP2`. The memory limit refusing the growth leaves the CV holding
+/// the string it held. `None`, with nothing touched, for every other
+/// pair: a reference, an operand that is no string, or an empty side,
+/// which `concat_function` hands the other side on for.
+///
+/// A loop of `.=` grows one allocation through the bins as `erealloc`
+/// grows it, so `memory_get_usage()` reads php's after each append; a
+/// string a second variable holds is copied and left to it, an interned
+/// one is copied, and a string appended to itself reads its own bytes:
+///
+/// ```php
+/// function f() {
+///     $s = str_repeat('a', 20); $m = memory_get_usage(); $d = [];
+///     for ($i = 0; $i < 12; $i++) { $s .= 'bcdefgh'; $d[] = memory_get_usage() - $m; }
+///     $t = $s; $s .= '!'; $d[] = memory_get_usage() - $m;
+///     $k = 'lit'; $k .= $s; $s .= $s; $d[] = memory_get_usage() - $m;
+///     $u = $s .= 'z';
+///     echo implode(' ', $d), "\n", strlen($s), ' ', strlen($k), ' ', strlen($t), ' ', $t . '!' === substr($s, 0, 105) ? 'y' : 'n', ' ', $u === $s ? 'y' : 'n', "\n";
+/// }
+/// f();
+/// ```
+/// ```expect
+/// 8 240 240 240 256 256 272 272 288 448 480 480 640 896
+/// 211 108 104 y y
+/// ```
+///
+/// Past the limit the variable holds what php's `zend_string_extend`
+/// left there, which a shutdown function reads after the fatal:
+///
+/// ```php
+/// ini_set('memory_limit', '7M');
+/// $s = str_repeat('x', 3000000);
+/// register_shutdown_function(function () { var_dump(strlen($GLOBALS['s'])); });
+/// $s .= $s;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 2998272 bytes) in %SCRATCH%/witness.php on line 5
+/// int(6000000)
+/// ```
+#[inline(always)] // the front of [`assigned_op`], out of the loop's body
+fn appended(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Option<Edge> {
+    if op.op1_type != OperandKind::Cv || !is_concat(op.extended_value) {
+        return None;
+    }
+    let slots = req.slots_mut(frame);
+    let left = slots.get(op.op1 as usize)?.as_str()?;
+    let right = match op.op2_type {
+        OperandKind::Const => code.literals.get(op.op2 as usize)?.as_str()?,
+        OperandKind::Cv | OperandKind::Tmp | OperandKind::Var => {
+            slots.get(op.op2 as usize)?.as_str()?
+        }
+        OperandKind::Unused => return None,
+    };
+    if left.is_empty() || right.is_empty() {
+        return None;
+    }
+    // The CV's owner is the append's: the string it hands back is the
+    // CV's, and one it refused stands where it was.
+    let joined = req.string_append(PhpString::of(left), PhpString::of(right));
+    exec::free_operand(req, frame, op.op2_type, op.op2);
+    Some(match joined {
+        Ok(joined) => {
+            let joined = Value::string(joined);
+            if let Some(slot) = req.slots_mut(frame).get_mut(op.op1 as usize) {
+                *slot = joined.to_zval();
+            }
+            write_out(req, frame, op, &joined);
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => threw(req, frame, &thrown),
+    })
+}
+
 /// `ASSIGN_OP` past its inline path: both operands read as values, the
 /// kernel over them, and what it came to written to the place
 /// ([`assign_to_place`]). A call of its own, as [`assigned_dim_op`] is.
 #[inline(never)]
 fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+    if let Some(edge) = appended(req, frame, code, op) {
+        return edge;
+    }
     let Some(kernel) = binary_op_of(op.extended_value) else {
         return Err(Fatal::error(format!(
             "InternalError: ZEND_ASSIGN_OP over the operator {}, which is no binary operation",
@@ -20142,6 +20699,24 @@ pub(crate) fn unset_obj<T: Tier>(
 /// int(216)
 /// int(376)
 /// ```
+///
+/// An array of constants never reaches this handler: the compiler
+/// folds it to one immutable array of the unit's, as `zend_try_ct_eval_array`
+/// does, so returning it allocates nothing and the first write
+/// separates it at php's size:
+///
+/// ```php
+/// function leaf() { return [null, null]; }
+/// $b = memory_get_usage(); $x = leaf(); $y = leaf(); $kept = memory_get_usage() - $b;
+/// $x[] = 1; $separated = memory_get_usage() - $b - $kept;
+/// var_dump($kept, $separated, leaf() === [null, null], count($y));
+/// ```
+/// ```expect
+/// int(0)
+/// int(216)
+/// bool(true)
+/// int(2)
+/// ```
 pub(crate) fn init_array<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -20228,6 +20803,7 @@ pub(crate) fn add_array_element<T: Tier>(
 ///
 /// Warning: r(): Argument #1 ($r) must be passed by reference, value given in %s on line 3
 /// ```
+#[inline]
 fn add_element(
     req: &mut Request,
     frame: FrameRef,
@@ -20236,43 +20812,65 @@ fn add_element(
     array: crate::api::values::PhpArray,
 ) -> Edge {
     let value = if op.extended_value & ARRAY_ELEMENT_REF != 0 {
-        let Some(at) = write_place(req, frame, op.op1_type, op.op1) else {
-            return Err(Fatal::error(
-                "InternalError: ADD_ARRAY_ELEMENT by reference over an operand php compiles no write over",
-            ));
-        };
-        let bound = bound_at(req, at);
-        // `FREE_OP1_VAR_PTR()`: a `VAR` holding a value of its own, what
-        // `FETCH_THIS` left for `[&$this]`, gives its owner up, so the
-        // cell the entry holds is the entry's alone.
-        if op.op1_type == OperandKind::Var {
-            exec::free_operand(req, frame, op.op1_type, op.op1);
-        }
-        match bound {
+        match element_reference(req, frame, op) {
             Ok(bound) => bound,
-            Err(thrown) => return threw(req, frame, &thrown),
+            Err(edge) => return edge,
         }
     } else {
         exec::take_operand(req, frame, code, op.op1_type, op.op1)
     };
-    let offset = if op.op2_type == OperandKind::Unused {
-        Offset::Next
+    let added = if op.op2_type == OperandKind::Unused {
+        crate::ops::add_array_element(req, array, Offset::Next, value)
     } else {
-        let key = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
-        if key.tag() == TypeTag::Undef {
-            exec::operand(req, frame, code, op.op2_type, op.op2);
-        }
-        Offset::At {
-            key,
-            constant: op.op2_type == OperandKind::Const,
-        }
+        add_keyed_element(req, frame, code, op, array, value)
     };
-    let added = crate::ops::add_array_element(req, array, offset, value);
-    exec::free_operand(req, frame, op.op2_type, op.op2);
     match added {
         Ok(()) => Ok(advance(req, frame)),
         Err(thrown) => threw(req, frame, &thrown),
     }
+}
+
+/// [`add_element`]'s `op1` under `ZEND_ARRAY_ELEMENT_REF`: the cell the
+/// place it names is bound to, or the edge the opline ends on.
+#[inline(never)]
+fn element_reference(req: &mut Request, frame: FrameRef, op: &Opline) -> Result<Value, Edge> {
+    let Some(at) = write_place(req, frame, op.op1_type, op.op1) else {
+        return Err(Err(Fatal::error(
+            "InternalError: ADD_ARRAY_ELEMENT by reference over an operand php compiles no write over",
+        )));
+    };
+    let bound = bound_at(req, at);
+    // `FREE_OP1_VAR_PTR()`: a `VAR` holding a value of its own, what
+    // `FETCH_THIS` left for `[&$this]`, gives its owner up, so the
+    // cell the entry holds is the entry's alone.
+    if op.op1_type == OperandKind::Var {
+        exec::free_operand(req, frame, op.op1_type, op.op1);
+    }
+    bound.map_err(|thrown| threw(req, frame, &thrown))
+}
+
+/// [`add_element`] with a key: `op2` read as it stands, the kernel over
+/// it, then `FREE_OP2`.
+#[inline(never)]
+fn add_keyed_element(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    array: crate::api::values::PhpArray,
+    value: Value,
+) -> Result<(), Thrown> {
+    let key = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
+    if key.tag() == TypeTag::Undef {
+        exec::operand(req, frame, code, op.op2_type, op.op2);
+    }
+    let offset = Offset::At {
+        key,
+        constant: op.op2_type == OperandKind::Const,
+    };
+    let added = crate::ops::add_array_element(req, array, offset, value);
+    exec::free_operand(req, frame, op.op2_type, op.op2);
+    added
 }
 
 /// `ZEND_ADD_ARRAY_UNPACK` (`Z/Zend/zend_vm_def.h:6335`), `...$x`
@@ -22404,10 +23002,15 @@ fn inline_concat(
 /// ```
 #[inline(never)]
 fn concat_into(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
-    // Each operand is read once: a `CV` that is undefined warns where
-    // it is read.
-    let left = exec::operand(req, frame, code, op.op1_type, op.op1);
-    let right = exec::operand(req, frame, code, op.op2_type, op.op2);
+    // Each operand is read once, both off one lookup of the frame where
+    // both are defined; a `CV` that is undefined warns where it is read.
+    let (left, right) = match defined_pair(req, frame, code, op) {
+        Some(both) => both,
+        None => (
+            exec::operand(req, frame, code, op.op1_type, op.op1),
+            exec::operand(req, frame, code, op.op2_type, op.op2),
+        ),
+    };
     let computed = if let (Some(a), Some(b)) = (left.as_php_string(), right.as_php_string()) {
         if matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var) {
             // The temporary's owner is the join's now, and nothing
@@ -22422,6 +23025,28 @@ fn concat_into(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     };
     exec::free_operand(req, frame, op.op2_type, op.op2);
     computed_into(req, frame, op, computed)
+}
+
+/// Both operands of `op` as [`exec::operand`] reads them, off one lookup
+/// of the frame's slots, where neither is `UNDEF`; `None` otherwise, for
+/// the read that warns of an undefined `CV`.
+#[inline]
+fn defined_pair(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Option<(Value, Value)> {
+    let slots = req.slots_mut(frame);
+    let read = |kind, field: u32| match kind {
+        OperandKind::Const => code.literals.get(field as usize).copied(),
+        OperandKind::Cv | OperandKind::Tmp | OperandKind::Var => {
+            slots.get(field as usize).copied().filter(|z| !z.is_undef())
+        }
+        OperandKind::Unused => None,
+    };
+    let (left, right) = (read(op.op1_type, op.op1)?, read(op.op2_type, op.op2)?);
+    Some((Value::of_slot(left), Value::of_slot(right)))
 }
 
 /// `ZEND_FAST_CONCAT` (`Z/Zend/zend_vm_def.h:3285`): what an
@@ -23326,7 +23951,24 @@ pub(crate) fn bw_xor<T: Tier>(
 }
 
 /// `ZEND_BW_AND` (`Z/Zend/zend_vm_def.h:863`), what `&` compiles to:
-/// [`crate::ops::bitwise_and`] the same way.
+/// [`crate::ops::bitwise_and`] the same way. Its arm is in the loop's
+/// body (#3982): two longs are served inline, and every other pair
+/// by the kernel.
+///
+/// ```php
+/// $s = 0; for ($i = -3; $i < 20; $i++) { $s += $i & 7; }
+/// $a = "12"; $b = 10; $n = -1; $f = 6.0; $g = 6.5;
+/// var_dump($s, $a & $b, "ab" & "a", $n & PHP_INT_MAX, $f & 3, $g & 3);
+/// ```
+/// ```expect
+/// Deprecated: Implicit conversion from float 6.5 to int loses precision in %SCRATCH%/witness.php on line 4
+/// int(80)
+/// int(8)
+/// string(1) "a"
+/// int(9223372036854775807)
+/// int(2)
+/// int(2)
+/// ```
 pub(crate) fn bw_and<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -23914,23 +24556,74 @@ fn string_isset_offset(req: &mut Request, offset: &Value) -> Option<i64> {
     }
 }
 
-/// `ZEND_DEFINED`: [`crate::ops::defined`] over the constant string
-/// `ZEND_DEFINED`: [`crate::ops::defined`] over the constant string
-/// `op1` names, into the temporary. The cache slot in `extended_value`
-/// is not read: php keeps the answer in the per-request opline cache
-/// (design §5.4), and the answer is the same whether or not it was
-/// kept, so the cache lands with the fetches whose cost it changes.
+/// `ZEND_DEFINED` (`Z/Zend/zend_vm_def.h:8864`): whether the constant
+/// string `op1` names is defined, into the temporary or the jump after
+/// it, read first off the cache slot in `extended_value`, as php's
+/// handler reads it: the constant a pass before found, which answers
+/// `true` while it stands, deprecated or not, or the count of the table
+/// a pass before found no constant in, which answers `false` while the
+/// table holds as many ([`exec::Cached::Undefined`]). Anything else is
+/// [`crate::ops::defined`]'s lookup, which writes the slot. A constant
+/// defined after a miss, of the name or another, moves the count, so
+/// the next pass looks again:
+///
+/// ```php
+/// #[\Deprecated] const DEP = 1;
+/// function probe() { $s = defined('LATE') ? 'L' : '-'; return $s . (int) defined('PHP_VERSION') . (int) defined('DEP') . (int) defined('Late'); }
+/// for ($i = 0; $i < 4; $i++) {
+///     echo probe(), " ";
+///     if ($i == 0) define('OTHER', 1);
+///     if ($i == 1) define('LATE', 2);
+/// }
+/// echo "\n";
+/// ```
+/// ```expect
+/// -110 -110 L110 L110
+/// ```
 pub(crate) fn defined<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let computed = unary_kernel(req, frame, code, op, |req, value| {
-        let name = value.as_str_bytes().unwrap_or_default();
-        Ok(Value::bool(crate::ops::defined(req, name)))
-    });
+    let slot = CacheSlot(op.extended_value);
+    let computed = match defined_cached(req, frame, slot) {
+        Some(answer) => Ok(Value::bool(answer)),
+        None => unary_kernel(req, frame, code, op, |req, value| {
+            Ok(Value::bool(defined_looked_up(req, frame, slot, value)))
+        }),
+    };
     smart_branch::<T, branch::Peeked>(req, frame, code, op, computed)
+}
+
+/// What [`defined`]'s cache slot answers, read before the name is, as
+/// php's handler reads `CACHED_PTR(opline->extended_value)` first
+/// (`Z/Zend/zend_vm_def.h:8869`): `true` for a constant that still
+/// stands, `false` for a count the table still holds, none otherwise.
+/// The name is a `CONST` operand, so a hit leaves nothing to free.
+#[inline]
+fn defined_cached(req: &Request, frame: FrameRef, slot: CacheSlot) -> Option<bool> {
+    match req.cached(frame, slot) {
+        Cached::Constant(at) if req.constant_at(at).is_some() => Some(true),
+        Cached::Undefined(count) if count == req.constant_count() => Some(false),
+        _ => None,
+    }
+}
+
+/// [`defined`] where its slot does not answer: the lookup of the name
+/// `name` holds, and `CACHE_PTR` of the constant found
+/// (`zend_quick_check_constant`) or of the table's count where none was
+/// (`Z/Zend/zend_vm_def.h:8879-8880`).
+#[inline(never)]
+fn defined_looked_up(req: &mut Request, frame: FrameRef, slot: CacheSlot, name: &Value) -> bool {
+    let name = name.as_str_bytes().unwrap_or_default();
+    let primed = match req.constant_found(name) {
+        Some((at, _, _)) => Cached::Constant(at),
+        None if crate::ops::defined(req, name) => return true,
+        None => Cached::Undefined(req.constant_count()),
+    };
+    req.prime(frame, slot, primed);
+    matches!(primed, Cached::Constant(_))
 }
 
 /// `ZEND_FUNC_GET_ARGS` (`Z/Zend/zend_vm_def.h:9646`), what php's
@@ -25007,15 +25700,15 @@ pub(crate) fn copy_tmp<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_RETURN`: the return safepoint, then the operand taken as the
-/// caller's (`ZVAL_COPY` of a CV or a constant, a temporary moved), then
-/// the frame popped (design §4.3 seam 8, §5.8), its CVs, temporaries
-/// and receiver given up with it (`zend_leave_helper`), and the value
-/// written into the caller's slot where the call wanted it and given up
-/// where it did not (`RETURN_VALUE_USED`). The caller goes on after its
-/// call opline. The safepoint carries the number the compiler wrote in
-/// `result`, and is raised for every frame but the entry frame of this
-/// serving, which the stack's entry slot says.
+/// `ZEND_RETURN`: the operand taken as the caller's (`ZVAL_COPY` of a
+/// CV or a constant, a temporary moved), then the frame popped (design
+/// §4.3 seam 8, §5.8), its CVs, temporaries and receiver given up with
+/// it (`zend_leave_helper`), and the value written into the caller's
+/// slot where the call wanted it and given up where it did not
+/// (`RETURN_VALUE_USED`), then the return safepoint in the caller, which
+/// goes on after its call opline. The safepoint carries the number the
+/// compiler wrote in `result`, and is raised for every frame but the
+/// entry frame of this serving, which pops to no caller.
 ///
 /// ```php
 /// function f() { return; }
@@ -25042,19 +25735,16 @@ pub(crate) fn r#return<T: Tier, A: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if req.stack_mut().entry() != frame {
-        if let Some(edge) = raise_return::<T>(req, frame, code, op) {
-            return edge;
-        }
-        if let Some(edge) = inline_return(req, frame, code, op, A::default()) {
-            return edge;
-        }
+    if req.stack_mut().entry() != frame
+        && let Some(left) = inline_return(req, frame, code, op, A::default())
+    {
+        return raise_return::<T>(req, left, code, op);
     }
-    returned(req, frame, code, op, at)
+    let left = returned(req, frame, code, op, at);
+    raise_return::<T>(req, left, code, op)
 }
 
-/// `RETURN` past its return safepoint and its inline path: the frame
-/// stood at the return, the operand taken as the handler's own
+/// `RETURN` past its inline path: the frame stood at the return, the operand taken as the handler's own
 /// ([`exec::take_operand`]) and the frame left with it
 /// ([`returned_to_caller`]). A call of its own, so that the inline path
 /// before it keeps to the registers it needs.
@@ -25066,7 +25756,7 @@ pub(crate) fn r#return<T: Tier, A: Operand + Default>(
 /// for it; a frame it returns leaves the site to its caller's next
 /// safepoint.
 #[inline(never)]
-fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, at: u32) -> Edge {
+fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, at: u32) -> Stepped {
     if req.oom_unlocated() {
         req.locate_oom();
     }
@@ -25076,38 +25766,27 @@ fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, at:
 }
 
 /// The return safepoint of a `RETURN*` (design §5.8, `jit-design.md`
-/// §2.2), raised for every frame but the entry frame of this serving
-/// with the number the compiler wrote in `result`, before the handler
-/// reads its operand: `None` where the tier answered `Continue`, and
-/// otherwise the edge it resumed at, since a tier that recorded ran the
-/// return and the caller's landing already and nothing of the return is
-/// left to do here.
+/// §2.2), raised where the return `left` popped its frame, with the
+/// number the compiler wrote in `result` and the op array that numbers
+/// it, in the caller the frame landed in, which stands past its call:
+/// php's interpreter runs the `RETURN`'s handler once and goes on
+/// through the handler of the opline the caller lands on, which at a
+/// landing a trace armed is the return trace's
+/// (`zend_jit_trace_setup_ret_counter`, #4056). The return of the
+/// serving's entry frame pops to no caller and raises nothing, nor does
+/// one that left a throwable pending, which the caller raises at its
+/// call opline. The edge on: the popped one where the tier answered
+/// `Continue`, and otherwise the one it resumed at.
 #[inline(always)] // once per return, in the RETURN arms
-fn return_site<T: Tier>(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    op: &Opline,
-) -> Option<Edge> {
-    if req.stack_mut().entry() == frame {
-        return None;
+fn raise_return<T: Tier>(req: &mut Request, left: Stepped, code: &OpArray, op: &Opline) -> Edge {
+    if let Stepped::Popped(caller) = left {
+        let held = crate::tier::Held::of(code);
+        match T::safepoint(req, caller, Site::Return(SafepointIdx(op.out)), held) {
+            Flow::Continue => {}
+            flow => return crate::tier::resumed(req, flow, caller),
+        }
     }
-    raise_return::<T>(req, frame, code, op)
-}
-
-/// [`return_site`] over a frame that is not the serving's entry frame.
-#[inline(always)] // as `return_site`
-fn raise_return<T: Tier>(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    op: &Opline,
-) -> Option<Edge> {
-    let held = crate::tier::Held::of(code);
-    match T::safepoint(req, frame, Site::Return(SafepointIdx(op.out)), held) {
-        Flow::Continue => None,
-        flow => Some(crate::tier::resumed(req, flow, frame)),
-    }
+    Ok(left.into())
 }
 
 /// The inline path of `ZEND_RETURN` (`ZEND_RETURN_SPEC_CONST`, `_TMP`,
@@ -25120,7 +25799,9 @@ fn raise_return<T: Tier>(
 /// pending after it. `None`, with nothing touched, while an observer is
 /// declared, for a value that is a reference, or a CV's or a constant's
 /// that counts owners, and for a frame [`Request::leave_plainly`]
-/// refuses. Never asked of the serving's entry frame.
+/// refuses. Never asked of the serving's entry frame. What it answers
+/// is the edge the leave took, [`Stepped::Popped`] of the caller, or
+/// [`Stepped::Threw`] where a release it served left a throwable.
 ///
 /// A temporary string is moved into the caller's temporary, a string
 /// parameter and a local are given up with the frame, a string nothing
@@ -25152,7 +25833,7 @@ fn inline_return(
     code: &OpArray,
     op: &Opline,
     a: impl Operand,
-) -> Option<Edge> {
+) -> Option<Stepped> {
     if crate::observer::observing(req) {
         return None;
     }
@@ -25169,14 +25850,14 @@ fn inline_return(
         };
         Some((z, moved))
     };
-    Some(Ok(req.leave_plainly(frame, code.num_cvs, operand)?.into()))
+    req.leave_plainly(frame, code.num_cvs, operand)
 }
 
 /// The half of `RETURN` that leaves the frame, which `RETURN_BY_REF`
-/// shares, once its return safepoint ([`return_site`]) is behind it:
-/// the frame popped, and `returned` into the `VAR` the call opline
-/// named, or released where the caller reads nothing.
-fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Edge {
+/// shares, before its return safepoint ([`raise_return`]): the frame
+/// popped, and `returned` into the `VAR` the call opline named, or
+/// released where the caller reads nothing.
+fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Stepped {
     if req.stack_mut().entry() == frame {
         return entry_returned(req, frame, returned);
     }
@@ -25184,12 +25865,12 @@ fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Ed
     let (caller, returns_to) = req.returning(frame);
     req.leave_frame(frame);
     if handed_back(req, returns_to, returned) {
-        return Ok(Stepped::Threw(caller).into());
+        return Stepped::Threw(caller);
     }
     // The caller stands at the call opline that pushed this frame, and
     // goes on from the one after it.
     req.vm_mut().advance(caller);
-    Ok(Stepped::Popped(caller).into())
+    Stepped::Popped(caller)
 }
 
 /// [`returned_to_caller`]'s return of the serving's entry frame
@@ -25197,9 +25878,9 @@ fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Ed
 /// meets it once per serving, where every other return pops a frame.
 #[cold]
 #[inline(never)]
-fn entry_returned(req: &mut Request, frame: FrameRef, returned: Value) -> Edge {
+fn entry_returned(req: &mut Request, frame: FrameRef, returned: Value) -> Stepped {
     req.entry_returned(frame, returned);
-    Ok(Stepped::Done.into())
+    Stepped::Done
 }
 
 /// What a call returned, handed to the frame that made the call: into
@@ -25525,6 +26206,82 @@ fn inline_arith(
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Inline> {
     let computed = rule.apply(a.read(slots, code, op.op1), b.read(slots, code, op.op2))?;
+    write_owning_nothing(slots, op, computed)?;
+    Some(Inline::ADVANCE)
+}
+
+/// [`inline_arith`] fused to the `ASSIGN` of its temporary to a CV after
+/// it (`ZEND_ASSIGN_SPEC_CV_TMP_RETVAL_UNUSED`), which publication found
+/// there (`php_unit::Handler`'s `AssignCv` variants): the number written
+/// straight into a CV that holds nothing that counts owners, as
+/// `zend_assign_to_variable` copies a value over one, and on past both.
+/// The temporary is not written, since nothing reads it after the
+/// `ASSIGN` that would have moved it out, and a temporary holding a
+/// number owns nothing either way. A CV holding a reference or anything
+/// else that counts owners has the number written into the temporary
+/// as [`inline_arith`] writes it, and the loop goes on at the `ASSIGN`,
+/// whose handler serves it as it serves it unfused, a destructor or a
+/// typed reference's coercion among it. `None`, with nothing touched,
+/// where [`inline_arith`] stands aside. php fuses no such pair; it is
+/// one dispatch here and two oplines in the op array and the dump,
+/// which a stepping host and the tier's recorder serve one by one.
+/// Written as [`inline_assign`]'s path after [`inline_arith`]'s, it
+/// read 3.1 Gcyc for mandelbrot against 2.65 written as here (#3982).
+///
+/// ```php
+/// class D { function __destruct() { echo "gone\n"; } }
+/// class T { public int $p = 0; }
+/// $a = 6; $b = 7; $f = 1.5; $max = PHP_INT_MAX;
+/// $x = $a + $b; $y = $a * $f; $z = $max + 1; $w = $a / 4; $v = $a - $b; $u = $f - $f;
+/// $s = str_repeat('s', 2); $s = $a * $b;
+/// $r = 1; $ref = &$r; $r = $a - 1;
+/// $t = new T; $p = &$t->p; $p = $a * 2; $p = $f + 1;
+/// $d = new D; $d = $a + 1; echo "after\n";
+/// for ($i = 0, $n = 0; $i < 3; $i++) { $n = $n + $i; }
+/// var_dump($x, $y, $z, $w, $v, $u, $s, $ref, $t->p, $d, $n);
+/// try { $q = $a / 0; } catch (DivisionByZeroError $e) { echo $e->getMessage(), "\n"; }
+/// $o = $a + $undefined; var_dump($o, $q ?? null);
+/// ```
+/// ```expect
+/// Deprecated: Implicit conversion from float 2.5 to int loses precision in %SCRATCH%/witness.php on line 8
+/// gone
+/// after
+/// int(13)
+/// float(9)
+/// float(9.223372036854776E+18)
+/// float(1.5)
+/// int(-1)
+/// float(0)
+/// int(42)
+/// int(5)
+/// int(2)
+/// int(7)
+/// int(3)
+/// Division by zero
+///
+/// Warning: Undefined variable $undefined in %SCRATCH%/witness.php on line 13
+/// int(6)
+/// NULL
+/// ```
+#[inline(always)] // as `inline_arith`
+#[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
+fn inline_arith_assign(
+    slots: &mut [Zval],
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+    rule: impl inline::Operator,
+    kinds: (impl Operand, impl Operand),
+) -> Option<Inline> {
+    let (a, b) = kinds;
+    let computed = rule.apply(a.read(slots, code, op.op1), b.read(slots, code, op.op2))?;
+    let assign = exec::opline_at(code, exec::after(at));
+    if let Some(cv) = assign.and_then(|assign| slots.get_mut(assign.op1 as usize))
+        && !cv.is_refcounted()
+    {
+        *cv = computed;
+        return Some(Inline::On(2));
+    }
     write_owning_nothing(slots, op, computed)?;
     Some(Inline::ADVANCE)
 }
@@ -26694,9 +27451,6 @@ pub(crate) fn return_by_ref<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if let Some(edge) = return_site::<T>(req, frame, code, op) {
-        return edge;
-    }
     let by_value = match op.op1_type {
         OperandKind::Const | OperandKind::Tmp => true,
         OperandKind::Var => op.extended_value == RETURNS_VALUE,
@@ -26753,7 +27507,8 @@ pub(crate) fn return_by_ref<T: Tier>(
             "InternalError: RETURN_BY_REF over an operand that is no place",
         ));
     };
-    returned_to_caller(req, frame, returned)
+    let left = returned_to_caller(req, frame, returned);
+    raise_return::<T>(req, left, code, op)
 }
 
 /// `ZEND_GENERATOR_CREATE` (`Z/Zend/zend_vm_def.h:4653`): the frame
@@ -27100,6 +27855,10 @@ pub(crate) mod inline_path {
     use php_unit::{OpArray, Opline};
 
     use super::branch::Branch;
+    #[cfg(not(dispatch = "tailcall"))]
+    use super::inline_arith_assign;
+    #[cfg(not(dispatch = "tailcall"))]
+    use super::return_mask_holds;
     use super::{
         inline_arith, inline_assign, inline_assign_op, inline_branch, inline_compare,
         inline_fetch_dim_r, inline_identical, inline_incdec, write_owning_nothing,
@@ -27174,6 +27933,78 @@ pub(crate) mod inline_path {
     pub(crate) fn div(slots: &mut [Zval], code: &OpArray, op: &Opline, _: u32) -> Option<Inline> {
         let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
         inline_arith(slots, code, op, Binary::Div, kinds)
+    }
+
+    /// `ZEND_ADD` and the `ASSIGN` of its temporary to a CV fused to it.
+    /// The loop alone serves it: the handler serves the `ADD` alone.
+    #[inline(always)] // in the loop
+    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
+    pub(crate) fn add_assign_cv<A: Operand + Default, B: Operand + Default>(
+        slots: &mut [Zval],
+        code: &OpArray,
+        op: &Opline,
+        at: u32,
+    ) -> Option<Inline> {
+        inline_arith_assign(
+            slots,
+            code,
+            op,
+            at,
+            Arith::Add,
+            (A::default(), B::default()),
+        )
+    }
+
+    /// `ZEND_SUB` and the `ASSIGN` fused to it, as [`add_assign_cv`].
+    #[inline(always)] // in the loop
+    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
+    pub(crate) fn sub_assign_cv<A: Operand + Default, B: Operand + Default>(
+        slots: &mut [Zval],
+        code: &OpArray,
+        op: &Opline,
+        at: u32,
+    ) -> Option<Inline> {
+        inline_arith_assign(
+            slots,
+            code,
+            op,
+            at,
+            Arith::Sub,
+            (A::default(), B::default()),
+        )
+    }
+
+    /// `ZEND_MUL` and the `ASSIGN` fused to it, as [`add_assign_cv`].
+    #[inline(always)] // in the loop
+    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
+    pub(crate) fn mul_assign_cv<A: Operand + Default, B: Operand + Default>(
+        slots: &mut [Zval],
+        code: &OpArray,
+        op: &Opline,
+        at: u32,
+    ) -> Option<Inline> {
+        inline_arith_assign(
+            slots,
+            code,
+            op,
+            at,
+            Arith::Mul,
+            (A::default(), B::default()),
+        )
+    }
+
+    /// `ZEND_DIV` over the kinds its opline names and the `ASSIGN` fused
+    /// to it, as [`add_assign_cv`].
+    #[inline(always)] // in the loop
+    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
+    pub(crate) fn div_assign_cv(
+        slots: &mut [Zval],
+        code: &OpArray,
+        op: &Opline,
+        at: u32,
+    ) -> Option<Inline> {
+        let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
+        inline_arith_assign(slots, code, op, at, Binary::Div, kinds)
     }
 
     /// `ZEND_IS_SMALLER`, and the jump fused to it.
@@ -27309,6 +28140,56 @@ pub(crate) mod inline_path {
         }
         write_owning_nothing(slots, op, z)?;
         Some(Inline::ADVANCE)
+    }
+
+    /// `ZEND_VERIFY_RETURN_TYPE` of a value whose type the declared return
+    /// type names outright, php's `EXPECTED(ZEND_TYPE_CONTAINS_CODE(...))`
+    /// ([`super::return_mask_holds`]). The loop serves it in its body,
+    /// going on from a hit as from its handler's answer, and calls the
+    /// handler out of line for anything else, a `CONST`, an `UNUSED`, a
+    /// reference, an `IS_INDIRECT` and a type the mask misses, which the
+    /// handler tests again and takes past its mask: a `CV`, a
+    /// `TMP` and a `VAR` the mask holds, then an `int` widened to `float`,
+    /// a reference followed, an undefined `CV` warned of twice, here and
+    /// at the `RETURN`, and a union:
+    ///
+    /// ```php
+    /// function c(int $n): int { return $n; }
+    /// function t(int $n): int { return $n + 1; }
+    /// function v(int $n): int { return c($n); }
+    /// function f(int $n): float { return $n; }
+    /// function r(int &$n): int { return $n; }
+    /// function w(): ?int { return $x; }
+    /// function s(int|string $n): string|int { return $n; }
+    /// $k = 5;
+    /// var_dump(c(1), t(1), v(2), f(3), r($k), w(), s("a"));
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: Undefined variable $x in %s on line 7
+    ///
+    /// Warning: Undefined variable $x in %s on line 7
+    /// int(1)
+    /// int(2)
+    /// int(2)
+    /// float(3)
+    /// int(5)
+    /// NULL
+    /// string(1) "a"
+    /// ```
+    #[inline(always)] // in the loop, one test
+    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
+    pub(crate) fn verify_return_type(
+        slots: &mut [Zval],
+        code: &OpArray,
+        op: &Opline,
+        _: u32,
+    ) -> Option<Inline> {
+        if return_mask_holds(slots, code, op) {
+            return Some(Inline::ADVANCE);
+        }
+        std::hint::cold_path();
+        None
     }
 
     /// `ZEND_FETCH_DIM_R` of an element an array holds.

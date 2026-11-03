@@ -315,7 +315,7 @@ fn a_throwable_pending_at_a_fatal_is_told_uncaught_and_served_without_the_handle
         .extensions(&[
             TestExt::<0>::observing(),
             ExtensionBuilder::default()
-                .functions(vec![fatal_while_thrown::declared()])
+                .functions(&[fatal_while_thrown::DECLARED])
                 .build("pending_fatal"),
         ])
         .build();

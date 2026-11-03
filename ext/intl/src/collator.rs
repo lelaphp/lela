@@ -888,20 +888,20 @@ fn collator_get_sort_key(
 
 /// The `collator_*` block of `php_intl.stub.php`, in its order.
 pub(crate) fn functions(b: php_ext::abi::ExtensionBuilder) -> php_ext::abi::ExtensionBuilder {
-    b.functions(vec![
-        collator_create::declared(),
-        collator_compare::declared(),
-        collator_get_attribute::declared(),
-        collator_set_attribute::declared(),
-        collator_get_strength::declared(),
-        collator_set_strength::declared(),
-        collator_sort::declared(),
-        collator_sort_with_sort_keys::declared(),
-        collator_asort::declared(),
-        collator_get_locale::declared(),
-        collator_get_error_code::declared(),
-        collator_get_error_message::declared(),
-        collator_get_sort_key::declared(),
+    b.functions(&[
+        collator_create::DECLARED,
+        collator_compare::DECLARED,
+        collator_get_attribute::DECLARED,
+        collator_set_attribute::DECLARED,
+        collator_get_strength::DECLARED,
+        collator_set_strength::DECLARED,
+        collator_sort::DECLARED,
+        collator_sort_with_sort_keys::DECLARED,
+        collator_asort::DECLARED,
+        collator_get_locale::DECLARED,
+        collator_get_error_code::DECLARED,
+        collator_get_error_message::DECLARED,
+        collator_get_sort_key::DECLARED,
     ])
 }
 

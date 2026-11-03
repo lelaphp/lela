@@ -89,6 +89,55 @@ impl PropBit {
     }
 }
 
+/// Consecutive zvals in place, php's `zval *args` with its `argc`: a
+/// frame's slots from one on ([`crate::Frame::span`]), which
+/// `Z_PARAM_VARIADIC` (`Z/Zend/zend_API.h:2169`) hands a native's body
+/// as they stand. `Copy`, owning nothing, and read one zval at a time,
+/// never borrowed whole, so a write to a slot while the span is held is
+/// one the next read sees, as php's body reads `args[i]` after it.
+/// Naming the slots does not keep them, as [`ZvalRef`] does not: the
+/// frame stands on its page until it pops, and a span read past that is
+/// the same mistake as php's `args` read after the call has returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZvalSpan {
+    at: NonNull<Zval>,
+    len: usize,
+}
+
+impl ZvalSpan {
+    pub(crate) const fn new(at: NonNull<Zval>, len: usize) -> ZvalSpan {
+        ZvalSpan { at, len }
+    }
+
+    /// How many zvals the span names, php's `argc`.
+    #[must_use]
+    pub const fn len(self) -> usize {
+        self.len
+    }
+
+    /// Whether the span names none.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    /// The zval at `index` in place, copied, `ZVAL_COPY_VALUE` off
+    /// `args[index]` with no owner taken; none past the span.
+    #[must_use]
+    pub fn read(self, index: usize) -> Option<Zval> {
+        if index >= self.len {
+            return None;
+        }
+        let at = self.at.as_ptr().wrapping_add(index);
+        // SAFETY: `index` is inside the span, which `Frame::span` laid
+        // over slots of one live frame, inside the page, the block or the
+        // room off the pages it was laid in, with the frame's own
+        // provenance; a span read after its frame popped is the same
+        // mistake in php, as for `ZvalRef::read`.
+        Some(unsafe { at.read() })
+    }
+}
+
 /// A zval in place, php's `zval *` at the sites a handler keeps one from
 /// one opline to the next: a frame slot ([`crate::Frame::slot_ptr`]) or a
 /// declared property slot ([`Obj::slot_ref`]). `Copy`, owning nothing,
@@ -921,6 +970,39 @@ mod tests {
         assert_eq!(frame.slot(crate::Slot(1)), Zval::long(4));
         assert_eq!(at.read(), Zval::long(4));
         assert_eq!(frame.slot_ptr(crate::Slot(2)), None);
+        drop(stack.close(&mut heap));
+    }
+
+    #[test]
+    fn a_span_reads_a_frames_slots_as_they_stand() {
+        let _alone = crate::serial::alone();
+        let mut heap = crate::Heap::new();
+        let mut stack = crate::VmStack::<()>::new();
+        let pushed = stack
+            .push_frame(&mut heap, 3, 0, || ())
+            .expect("a frame of three slots fits the first page");
+        let frame = stack.frame_mut(pushed).expect("the frame pushed");
+        frame.set(crate::Slot(1), Zval::long(1));
+        frame.set(crate::Slot(2), Zval::long(2));
+        let span = frame
+            .span(crate::Slot(1), 2)
+            .expect("two slots from the second");
+        assert_eq!(span.len(), 2);
+        assert_eq!(span.read(0), Some(Zval::long(1)));
+        assert_eq!(span.read(1), Some(Zval::long(2)));
+        assert_eq!(span.read(2), None, "past the span");
+        frame.set(crate::Slot(2), Zval::long(5));
+        assert_eq!(
+            span.read(1),
+            Some(Zval::long(5)),
+            "a write is one the next read sees"
+        );
+        assert_eq!(frame.span(crate::Slot(2), 2), None, "past the frame");
+        assert!(
+            frame
+                .span(crate::Slot(3), 0)
+                .is_some_and(ZvalSpan::is_empty)
+        );
         drop(stack.close(&mut heap));
     }
 }

@@ -338,6 +338,13 @@ impl Emit<'_> {
             .block_params(block)
             .first()
             .ok_or_else(|| mismatch("an escape that takes no place"))?;
+        // The frame the interpreter goes on in, where `enter` reads it
+        // back, as php's stub goes on from `execute_data` in hand.
+        let cx = self
+            .cx
+            .ok_or_else(|| mismatch("an escape before the entry"))?;
+        let root = self.b.ins().ireduce(I32, place);
+        self.b.ins().store(trusted(), root, cx, ROOT_AT);
         let answer = self.b.create_block();
         self.b.set_cold_block(answer);
         if let Some(escapes) = self.joins.escapes {

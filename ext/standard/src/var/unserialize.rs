@@ -7,6 +7,7 @@
 //! order their objects were finished once the whole string is read; and
 //! php's warnings, with the byte offset where the scanner stood.
 
+use std::borrow::Cow;
 use std::ops::ControlFlow;
 
 use php_ext::abi::Passed;
@@ -131,9 +132,10 @@ struct DtorAt {
 /// `emalloc`s for each [`VAR_ENTRIES_MAX`] slots past the first, the
 /// first being the data's own; the root of each reader open over it,
 /// innermost last; the dtor list in its blocks; the owners of the keys
-/// the slots name, which php's slots, pointers into the tables, need
-/// none of; the options, which a nested `unserialize()` sets and
-/// restores.
+/// the slots name that no bucket holds, a key the string repeats or one
+/// whose value failed before it was placed, which php's slots, pointers
+/// into the tables, need none of; the options, which a nested
+/// `unserialize()` sets and restores.
 #[derive(Default)]
 pub(crate) struct VarHash {
     data: Option<Emalloc>,
@@ -449,13 +451,16 @@ fn default_depth(req: &Request) -> i64 {
 
 /// One reader over one string, php's `p` and `max` beside the var hash
 /// it reads through, which it holds as [`Holder`] says, and the depth of
-/// its root among [`VarHash::roots`].
+/// its root among [`VarHash::roots`]; and the key of the element being
+/// read where the table did not hold it, with the owner the string made,
+/// which the element's first write hands the table.
 struct State<'a> {
     buf: &'a [u8],
     p: usize,
     hash: VarHash,
     holder: Holder,
     root: usize,
+    fresh: Option<(PhpArray, Owner<Key>)>,
 }
 
 impl<'a> State<'a> {
@@ -479,6 +484,7 @@ impl<'a> State<'a> {
             hash,
             holder,
             root,
+            fresh: None,
         })
     }
 
@@ -564,8 +570,12 @@ impl<'a> State<'a> {
             mut hash,
             holder,
             root,
+            fresh,
             ..
         } = self;
+        if let Some((_, key)) = fresh {
+            hash.keys.push(key);
+        }
         if hash.roots.len() > root {
             for left in hash.roots.split_off(root) {
                 left.give_up(req);
@@ -1277,13 +1287,13 @@ fn valid_class_name(name: &[u8]) -> bool {
 }
 
 /// A scalar the key scanner read.
-enum Scalar {
+enum Scalar<'a> {
     Long(i64),
-    Str(Vec<u8>),
+    Str(Cow<'a, [u8]>),
     Other,
 }
 
-impl State<'_> {
+impl<'a> State<'a> {
     fn at(&self, at: usize) -> u8 {
         self.buf.get(at).copied().unwrap_or(0)
     }
@@ -1421,7 +1431,13 @@ impl State<'_> {
             }
             Slot::Element(array, key) => {
                 let mut array = *array;
-                let key = Owner::take(req, key.clone());
+                let key = match self.fresh.take() {
+                    Some((into, fresh)) if into.is_same(array) && *fresh == *key => fresh,
+                    other => {
+                        self.fresh = other;
+                        Owner::take(req, key.clone())
+                    }
+                };
                 array.set(req, key, value)?;
             }
             Slot::Property(object, name) => {
@@ -1583,7 +1599,7 @@ impl State<'_> {
     /// bool(false)
     /// bool(false)
     /// ```
-    fn key(&mut self, req: &mut Request) -> Option<Scalar> {
+    fn key(&mut self, req: &mut Request) -> Option<Scalar<'a>> {
         let start = self.p;
         if start >= self.buf.len() {
             return None;
@@ -1681,8 +1697,10 @@ impl State<'_> {
     }
 
     /// `"s:" uiv ":" ["]` and its `S:` twin: the bytes, `None` for the
-    /// scanner's failure with `self.p` where php leaves `*p`.
-    fn string(&mut self, req: &mut Request, start: usize, escaped: bool) -> Option<Vec<u8>> {
+    /// scanner's failure with `self.p` where php leaves `*p`. An `s:`
+    /// string is the bytes of the data where they stand, as php's
+    /// `zend_string_init` copies them out of `*p` once.
+    fn string(&mut self, req: &mut Request, start: usize, escaped: bool) -> Option<Cow<'a, [u8]>> {
         let end = self.uiv(start + 2)?;
         if self.at(end) != b':' || self.at(end + 1) != b'"' || end + 1 >= self.buf.len() {
             return None;
@@ -1713,9 +1731,10 @@ impl State<'_> {
                     at += 1;
                 }
             }
-            (out, at)
+            (Cow::Owned(out), at)
         } else {
-            (self.buf[cursor..cursor + len].to_vec(), cursor + len)
+            let buf: &'a [u8] = self.buf;
+            (Cow::Borrowed(&buf[cursor..cursor + len]), cursor + len)
         };
         if self.at(after) != b'"' || after >= self.buf.len() {
             self.p = after;
@@ -1898,6 +1917,36 @@ impl State<'_> {
     /// int(0)
     /// ```
     ///
+    /// An element is placed by its value's first write, and an `R:`
+    /// later names it by the key its bucket holds; a key the string
+    /// repeats, and one whose value fails before it is placed, are the
+    /// var hash's to free:
+    ///
+    /// ```php
+    /// var_dump(unserialize('a:3:{s:1:"x";i:1;s:1:"y";i:2;s:1:"x";R:3;}'), unserialize('a:2:{s:1:"k";a:1:{s:1:"j";i:1;}s:1:"m";R:3;}'));
+    /// var_dump(unserialize('a:2:{s:1:"k";s:2:"ab";s:1:"j";i:x;}'));
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   ["x"]=>
+    ///   &int(2)
+    ///   ["y"]=>
+    ///   &int(2)
+    /// }
+    /// array(2) {
+    ///   ["k"]=>
+    ///   array(1) {
+    ///     ["j"]=>
+    ///     &int(1)
+    ///   }
+    ///   ["m"]=>
+    ///   &int(1)
+    /// }
+    ///
+    /// Warning: unserialize(): Error at offset 30 of 35 bytes in %s on line 3
+    /// bool(false)
+    /// ```
+    ///
     /// Since 8.5.12 the elements stop once the memory limit was met, the
     /// unserialization failing there and the limit's fatal raised as the
     /// call returns:
@@ -1922,32 +1971,49 @@ impl State<'_> {
         let mut array = array;
         while elements > 0 {
             elements -= 1;
-            let key = match self.key(req) {
-                Some(Scalar::Long(n)) => Key::Int(n),
-                // A key is `zend_string_init_existing_interned`'s.
-                // The var hash keeps a string key's owner, below.
+            // A key is `zend_string_init_existing_interned`'s, and its
+            // owner the table's once the element's first write placed it,
+            // as php's `zend_hash_lookup` takes the key and
+            // `zval_ptr_dtor_str` gives the string's own up: the slots
+            // name the key the bucket holds. A key the string repeats
+            // names a bucket that keeps the key it was laid with, so the
+            // var hash keeps that owner until it is destroyed.
+            let (key, owned) = match self.key(req) {
+                Some(Scalar::Long(n)) => (Key::Int(n), None),
                 Some(Scalar::Str(bytes)) => {
                     let made = PhpString::existing_interned(req, &bytes)?;
-                    // The key's own owner is the var hash's, whose slots
-                    // name it until it is destroyed; each write takes one
-                    // of its own.
                     let owned = Key::from_string(req, made);
-                    let key = Key::clone(&owned);
-                    self.hash.keys.push(owned);
-                    key
+                    (Key::clone(&owned), Some(owned))
                 }
                 _ => return Ok(false),
             };
             // `var_push_dtor_value`: a key the string repeats leaves what
-            // it held to the var hash, which frees it with the rest.
+            // it held to the var hash, which frees it with the rest, and
+            // `ZVAL_NULL(data)`. A key the table lacks is placed by the
+            // value's own write, which every arm of the scanner makes
+            // before it reads further, so `zend_hash_lookup`'s bucket and
+            // the write it waits for are one update of the table.
             if let Some(old) = array.get(&key) {
+                if let Some(owned) = owned {
+                    self.hash.keys.push(owned);
+                }
                 let old = Owner::take(req, old);
                 self.hash.push_dtor_value(req, old)?;
                 self.repeat_place(&Slot::Element(array, key.clone()));
+                let at = Owner::take(req, key.clone());
+                array.set(req, at, Owner::null())?;
+            } else if let Some(owned) = owned
+                && let Some((_, left)) = self.fresh.replace((array, owned))
+            {
+                self.hash.keys.push(left);
             }
-            let at = Owner::take(req, key.clone());
-            array.set(req, at, Owner::null())?;
-            if !self.value(req, Some(Slot::Element(array, key)))? {
+            let read = self.value(req, Some(Slot::Element(array, key)));
+            // A value that failed before its write leaves the key unplaced,
+            // which the var hash keeps.
+            if let Some((_, owned)) = self.fresh.take() {
+                self.hash.keys.push(owned);
+            }
+            if !read? {
                 return Ok(false);
             }
             if elements > 0 && !matches!(self.at(self.p - 1), b';' | b'}') {

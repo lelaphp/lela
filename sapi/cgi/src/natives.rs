@@ -150,7 +150,7 @@ fn info(req: &mut Request) {
 pub fn declare(builder: EngineBuilder, origin: Origin) -> EngineBuilder {
     let builder = builder.additional_extension(extension());
     match origin {
-        Origin::Shell => builder.additional_functions(vec![dl::declared()]),
+        Origin::Shell => builder.additional_functions(&[dl::DECLARED]),
         Origin::Server => builder,
     }
 }
@@ -160,11 +160,11 @@ pub fn declare(builder: EngineBuilder, origin: Origin) -> EngineBuilder {
 /// and its `MINFO`.
 fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            apache_child_terminate::declared(),
-            apache_request_headers::declared(),
-            getallheaders::declared(),
-            apache_response_headers::declared(),
+        .functions(&[
+            apache_child_terminate::DECLARED,
+            apache_request_headers::DECLARED,
+            getallheaders::DECLARED,
+            apache_response_headers::DECLARED,
         ])
         .ini(INI.iter().map(Row::decl).collect())
         .info(info)

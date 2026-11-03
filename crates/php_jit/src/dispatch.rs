@@ -36,7 +36,7 @@ use std::sync::atomic::Ordering;
 
 use php_engine::tier::Flow;
 use php_engine::tier::{
-    self, Epoch, Fatal, FrameRef, FuncRef, Held, Request, SafepointIdx, Site, Stepped, Word,
+    self, Epoch, Fatal, FrameRef, FuncRef, Held, Request, SafepointIdx, Site, Word,
 };
 use php_unit::OplineIdx;
 
@@ -68,7 +68,9 @@ pub struct JitRequest {
     pub(crate) shared: Arc<Shared>,
     pub(crate) submitter: compiler::Submitter,
     pub(crate) recording: Cell<bool>,
-    pub(crate) submitted: Cell<Option<Submitted>>,
+    /// Boxed, so a visit that finds none, nearly every one, reads one
+    /// word ([`quieted`]).
+    pub(crate) submitted: Cell<Option<Box<Submitted>>>,
     /// The headers of the calls its traces push in place, the request's.
     pub(crate) headers: enter::Headers,
     /// The request's hold on the epoch it started in, taken once, which
@@ -79,6 +81,9 @@ pub struct JitRequest {
     /// The loop header whose next arrival a recording aborted in a callee
     /// owes a count, as php's handler there counts it ([`Owed`]).
     pub(crate) owed: Cell<Option<Owed>>,
+    /// The words of the oplines the request last went on at past a
+    /// return or a leave ([`enter::Landings`]).
+    pub(crate) landings: enter::Landings,
     /// How many times the crossing entered the trace compiled at a landing
     /// a trace escaped to, which the escaping trace's code enters itself
     /// once the request's row of it is laid: a test's count of the escapes
@@ -173,14 +178,66 @@ pub(crate) fn visit(
 /// ```
 #[inline(never)]
 pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: Held<'_>) -> Flow {
-    enter::lent(req, |req, lent| {
-        safepoint_lent(req, lent, (frame, site), held)
+    enter::lent(req, |req, lent| match site {
+        Site::Return(_) => match kept_return(req, lent, frame) {
+            Returning::Continue => Flow::Continue,
+            Returning::Enter(id) => run(req, lent, frame, id),
+            Returning::Ask => safepoint_lent(req, lent, (frame, site), held),
+        },
+        Site::Loop(_) | Site::Entry => safepoint_lent(req, lent, (frame, site), held),
     })
     .unwrap_or(Flow::Continue)
 }
 
-/// [`safepoint`] under what the request lends.
-#[inline]
+/// What a return's site does where the request kept the words of the
+/// opline its caller lands on ([`goes_on`]), read with nothing else
+/// looked up, as php's interpreter runs the handler a landing holds: a
+/// landing no trace armed is left alone, as one a trace is recording
+/// from or that gave up, and a trace compiled there, or at the loop
+/// rooted there, is entered in the caller the return popped to, which the
+/// `RETURN` made before it asked (#4056).
+#[derive(Debug, Clone, Copy)]
+enum Returning {
+    /// Nothing to do: the interpreter makes the return.
+    Continue,
+    /// The trace to enter in the caller, the return made.
+    Enter(TraceId),
+    /// The whole visit ([`safepoint_lent`]): a cold landing, which
+    /// counts and may claim, a count the caller is owed ([`Owed`]), or
+    /// an opline the request keeps no words of.
+    Ask,
+}
+
+/// [`Returning`] for a return that popped to `caller`, the tier's state
+/// lent: the first thing a return's site reads, at every interpreted
+/// `RETURN` but the serving's entry frame's.
+#[inline(always)] // once a return, in `safepoint`
+#[allow(clippy::inline_always)]
+fn kept_return(req: &Request, lent: Lent<'_>, caller: FrameRef) -> Returning {
+    if lent.shared().policy.mode() == Mode::Off {
+        return Returning::Continue;
+    }
+    if lent.state.owed.get().is_some() {
+        return Returning::Ask;
+    }
+    let Some(at) = landing(req, caller) else {
+        return Returning::Continue;
+    };
+    let Some(landed) = tier::frame_cache(req, caller).and_then(|func| lent.landed(func, at)) else {
+        return Returning::Ask;
+    };
+    let (goes, word) = landed.goes(at);
+    match (goes, policy::read(word)) {
+        (_, State::Compiled(id)) => Returning::Enter(id),
+        (Goes::Landing(_), State::Cold) => Returning::Ask,
+        _ => Returning::Continue,
+    }
+}
+
+/// [`safepoint`] under what the request lends: the whole visit, out of
+/// line, so a return whose landing's words the request kept
+/// ([`kept_return`]) is served with nothing of it.
+#[inline(never)]
 fn safepoint_lent(
     req: &mut Request,
     lent: Lent<'_>,
@@ -201,11 +258,11 @@ fn safepoint_lent(
                 (Rooted::Safepoint(at, Start::Enter), held.word(req, at))
             }
             Site::Return(_) => {
-                let Some((caller, at)) = landing_past(req, frame) else {
+                let Some(at) = landing(req, frame) else {
                     return Flow::Continue;
                 };
-                let (goes, word) = goes_on(req, caller, at, shared.policy.folds());
-                (Rooted::Goes(caller, goes), word)
+                let (goes, word) = goes_on(req, lent, (frame, at), shared.policy.folds());
+                (Rooted::Goes(frame, goes), word)
             }
         };
         // A table a hot root found full stopped its counters, as php's
@@ -230,15 +287,12 @@ fn safepoint_lent(
         }
     };
     match (site, decided) {
-        (Site::Return(at), Visited::Continue) if owes(req, lent.state, frame) => {
-            returned(req, lent, (frame, held), at, Visited::Continue)
-        }
+        (Site::Return(_), decided) => returned(req, lent, frame, decided),
         (Site::Loop(_), Visited::Continue) => {
             paid(lent.state, frame);
             Flow::Continue
         }
         (_, Visited::Continue) => Flow::Continue,
-        (Site::Return(at), decided) => returned(req, lent, (frame, held), at, decided),
         (Site::Loop(header), Visited::Enter(id)) => looped(req, lent, frame, header, id),
         (Site::Entry, Visited::Enter(id)) => run(req, lent, frame, id),
         (Site::Loop(_), Visited::Hot(claim)) => {
@@ -316,7 +370,11 @@ impl Goes {
 /// php counts (`record::landings`); otherwise, at a loop's root, that
 /// loop's word, as php's handler there is the loop's, whose trace is
 /// entered from there ([`Goes::visit`]); the sealed landing word anywhere
-/// else. The op array is read only past a landing no trace armed.
+/// else. The two words are read off the op array's row and its loops
+/// searched once for an opline the request goes on at, and kept for the
+/// next arrivals there, as php's interpreter reads the handler an opline
+/// holds with no search ([`enter::Landings`]): a frame that runs its op
+/// array's own cache names the op array by it with no row read.
 ///
 /// A loop's trace entered from its root's word tests the interrupt at its
 /// header, as every loop's does but one by recursive return, which takes
@@ -399,35 +457,70 @@ impl Goes {
 /// ---- TRACE 4 stop (link to 1)
 /// ---- TRACE 4 compiled
 /// ```
-fn goes_on(req: &Request, frame: FrameRef, at: OplineIdx, folds: record::Folds) -> (Goes, &Word) {
-    let landing = tier::landing(req, frame, at);
-    if policy::armed(landing) {
-        return (Goes::Landing(at), landing);
-    }
-    let header = tier::served(req, frame)
-        .and_then(|held| Some((held, record::loop_at(held.code(), at, folds)?)));
-    match header {
-        Some((held, header)) => (Goes::Header, held.word(req, header)),
-        None => (Goes::Landing(at), landing),
+#[inline(always)] // a kept opline's words read where the visit reads them; the miss is out of line
+#[allow(clippy::inline_always)]
+fn goes_on<'r>(
+    req: &'r Request,
+    lent: Lent<'r>,
+    (frame, at): (FrameRef, OplineIdx),
+    folds: record::Folds,
+) -> (Goes, &'r Word) {
+    let kept = tier::frame_cache(req, frame).and_then(|func| lent.landed(func, at));
+    let Some(landed) = kept else {
+        return goes_on_found(req, lent, (frame, at), folds);
+    };
+    landed.goes(at)
+}
+
+/// [`goes_on`] at an opline the request keeps no words of under the
+/// frame's cache: the op array's row looked up, as a frame that reads a
+/// cache no op array owns, a closure's, names its op array, and its
+/// loops searched where the request keeps none under the op array either.
+#[cold]
+#[inline(never)]
+fn goes_on_found<'r>(
+    req: &'r Request,
+    lent: Lent<'r>,
+    (frame, at): (FrameRef, OplineIdx),
+    folds: record::Folds,
+) -> (Goes, &'r Word) {
+    match tier::landing(req, frame, at) {
+        (landing, None) => (Goes::Landing(at), landing),
+        (_, Some(held)) => lent
+            .landed(held.func(), at)
+            .unwrap_or_else(|| lent.keep(held.func(), at, record::loop_at(held.code(), at, folds)))
+            .goes(at),
     }
 }
 
-/// The caller `frame` returns to and the opline it lands on there, the
-/// one past the call it stands at; none where no frame of this serving
-/// called it.
-fn landing_past(req: &Request, frame: FrameRef) -> Option<(FrameRef, OplineIdx)> {
-    let caller = tier::below(req, frame)?;
-    let call = tier::frame(req, caller)?.opline();
-    Some((caller, OplineIdx(call.0.checked_add(1)?)))
+impl<'l> enter::Landed<'l> {
+    /// The word a frame reads where it goes on at `at`, whose words these
+    /// are ([`goes_on`]): an armed landing's, the loop's rooted there, or
+    /// the landing's, sealed.
+    #[inline]
+    fn goes(self, at: OplineIdx) -> (Goes, &'l Word) {
+        match self.header {
+            Some(header) if !policy::armed(self.landing) => (Goes::Header, header),
+            _ => (Goes::Landing(at), self.landing),
+        }
+    }
 }
 
-/// A return whose landing's word was compiled or claimed: php's
-/// interpreter has returned before the landing's handler runs, so the
-/// `RETURN` the safepoint `at` numbers is stepped first, its frame stood
-/// there, which a `RETURN`'s inline path has not stood it at, then the
-/// return trace is entered, or recorded from, at the landing in the
-/// caller it popped to; a throwable the return left pending, a
-/// destructor's, resumes where it was raised, the claim released.
+/// The opline the caller a `RETURN` popped to lands on, the one past
+/// its call, where the pop stood it; none where the frame shows none.
+#[inline]
+fn landing(req: &Request, caller: FrameRef) -> Option<OplineIdx> {
+    Some(tier::frame(req, caller)?.opline())
+}
+
+/// A return, asked in the caller it popped its frame to and standing at
+/// the landing past the call (`Site::Return`, #4056): php's interpreter
+/// has returned before the landing's handler runs, so the return trace
+/// is entered, or recorded from, there, with nothing of the `RETURN`
+/// left to serve. A landing whose word asked nothing pays what a
+/// recording that aborted in a callee owes the caller's loop
+/// ([`owed`]). A throwable the return left pending, a destructor's, is
+/// the caller's to raise at its call opline, and asks no site.
 ///
 /// The entry's trace stops at the `eval`, which it hands on to the
 /// interpreter, arming `$main`'s landing past it as php's
@@ -461,49 +554,15 @@ fn landing_past(req: &Request, frame: FrameRef) -> Option<(FrameRef, OplineIdx)>
 /// ---- TRACE 3 compiled
 ///
 /// ```
-fn returned(
-    req: &mut Request,
-    lent: Lent<'_>,
-    (frame, held): (FrameRef, Held<'_>),
-    at: SafepointIdx,
-    decided: Visited,
-) -> Flow {
-    // The epoch the landing's trace is taken from, which holds the
-    // returning frame's op array for the step.
-    let stepped = match held.safepoint_at(at) {
-        Some(stands) => {
-            tier::stand(req, frame, stands);
-            tier::step_held(req, frame, held, lent.epoch)
+#[inline(never)]
+fn returned(req: &mut Request, lent: Lent<'_>, caller: FrameRef, decided: Visited) -> Flow {
+    match decided {
+        Visited::Continue if owes(lent.state, caller) => {
+            owed(req, lent.shared(), caller).unwrap_or(Flow::Continue)
         }
-        None => Err(Fatal::error(
-            "InternalError: a return site whose number names no RETURN",
-        )),
-    };
-    let caller = match stepped {
-        Ok(Stepped::Popped(caller)) => caller,
-        // Nothing was recorded: a claim is given back with nothing counted
-        // against the landing, as a recording's bailout gives one back.
-        gone => {
-            if let Visited::Hot(claim) = decided {
-                policy::settle(claim, &Outcome::Released);
-            }
-            return match gone {
-                Ok(Stepped::Threw(at)) => Flow::Resume(at),
-                Err(fatal) => Flow::Bail(fatal),
-                Ok(_) => Flow::Bail(Fatal::error(
-                    "InternalError: a return the tier stepped popped to no caller",
-                )),
-            };
-        }
-    };
-    let flow = match decided {
-        Visited::Continue => owed(req, lent.shared(), caller).unwrap_or(Flow::Continue),
+        Visited::Continue => Flow::Continue,
         Visited::Enter(id) => run(req, lent, caller, id),
         Visited::Hot(claim) => hot(req, caller, claim, lent.shared()),
-    };
-    match flow {
-        Flow::Continue => Flow::Resume(caller),
-        flow => flow,
     }
 }
 
@@ -730,7 +789,7 @@ fn followed<'t>(
             // php's escape stub: no exit, no line and no word; the
             // interpreter runs the handler of the opline the return left
             // the frame at, a landing's trace where one is compiled there.
-            Left::Escaped(frame) => match visit_landing(req, shared, frame, Came::Escaped) {
+            Left::Escaped(frame) => match visit_landing(req, lending, frame, Came::Escaped) {
                 Visited::Enter(id) => match table.get(id) {
                     Some(next) => {
                         #[cfg(test)]
@@ -798,7 +857,7 @@ fn followed<'t>(
             // Left for the interpreter, which runs the opline's handler:
             // where a return lands, the landing's.
             None if let Some(flow) = owed(req, shared, frame) => return flow,
-            None => match visit_landing(req, shared, frame, Came::Left(Some(trace.id))) {
+            None => match visit_landing(req, lending, frame, Came::Left(Some(trace.id))) {
                 Visited::Enter(id) => match table.get(id) {
                     Some(next) => next,
                     None => return Flow::Resume(frame),
@@ -843,7 +902,7 @@ enum Came {
 /// `zend_jit_trace_exit` answers 1 at its own trace's first opline and
 /// the opline's own handler runs, not the trace again; a frame at an
 /// opline with a sealed word is left as it is.
-fn visit_landing(req: &mut Request, shared: &Shared, frame: FrameRef, came: Came) -> Visited {
+fn visit_landing(req: &Request, lending: Lent<'_>, frame: FrameRef, came: Came) -> Visited {
     if came != Came::Escaped && req.limits().interrupt().raised().load(Ordering::Relaxed) {
         return Visited::Continue;
     }
@@ -851,31 +910,32 @@ fn visit_landing(req: &mut Request, shared: &Shared, frame: FrameRef, came: Came
         Came::Left(left) => left,
         Came::Escaped => None,
     };
-    let req: &Request = req;
-    let Some(state) = tier::state::<JitRequest>(req) else {
-        return Visited::Continue;
-    };
+    let (state, shared) = (lending.state, lending.shared());
     if state.recording.get() {
         return Visited::Continue;
     }
-    let claims = !quieted(state, None);
     let Some(at) = tier::frame(req, frame).map(|view| view.opline()) else {
         return Visited::Continue;
     };
-    let (goes, word) = goes_on(req, frame, at, shared.policy.folds());
-    if let Some(left) = left
-        && policy::read(word) == State::Compiled(left)
-    {
-        return Visited::Continue;
-    }
-    let holder = || {
-        let table = table::of(req, &shared.policy, &shared.perf)?;
-        if table.stopped() {
-            return None;
+    let (goes, word) = goes_on(req, lending, (frame, at), shared.policy.folds());
+    // A word that neither enters nor counts is read once and left, as
+    // php's escape runs the plain handler of an opline no trace armed.
+    match (goes, policy::read(word)) {
+        (_, State::Compiled(id)) if left == Some(id) => Visited::Continue,
+        (_, State::Compiled(id)) => Visited::Enter(id),
+        (Goes::Landing(_), State::Cold) => {
+            let claims = !quieted(state, None);
+            let holder = || {
+                let table = table::of(req, &shared.policy, &shared.perf)?;
+                if table.stopped() {
+                    return None;
+                }
+                goes.holder(req, frame)
+            };
+            goes.visit(word, &shared.policy, claims, holder)
         }
-        goes.holder(req, frame)
-    };
-    goes.visit(word, &shared.policy, claims, holder)
+        _ => Visited::Continue,
+    }
 }
 
 /// What an exit with no link goes on to (`jit-design.md` §4.9), php's
@@ -1266,13 +1326,10 @@ fn owe(
     }
 }
 
-/// Whether the return of `frame` lands in the frame a count is owed to
-/// ([`Owed`]), which [`returned`] steps the return for.
-fn owes(req: &Request, state: &JitRequest, frame: FrameRef) -> bool {
-    state
-        .owed
-        .get()
-        .is_some_and(|owed| tier::below(req, frame).is_some_and(|caller| caller == owed.frame))
+/// Whether a return landed in `caller`, the frame a count is owed to
+/// ([`Owed`]), which [`returned`] pays.
+fn owes(state: &JitRequest, caller: FrameRef) -> bool {
+    state.owed.get().is_some_and(|owed| owed.frame == caller)
 }
 
 /// A back edge in `frame` counted its loop, so what a return into
@@ -1581,7 +1638,11 @@ fn went_on(
                 None => Flow::Continue,
             }
         }
-        (None, Flow::Resume(at)) => match visit_landing(req, shared, *at, Came::Left(None)) {
+        (None, Flow::Resume(at)) => match enter::lent(req, |req, lent| {
+            visit_landing(req, lent, *at, Came::Left(None))
+        })
+        .unwrap_or(Visited::Continue)
+        {
             Visited::Continue => Flow::Continue,
             Visited::Enter(id) => run_lent(req, *at, id),
             Visited::Hot(claim) => hot(req, *at, claim, shared),
@@ -1730,7 +1791,9 @@ fn settled(req: &mut Request, shared: &Shared, job: Job, goes_on: GoesOn) -> Opt
         let state = tier::state::<JitRequest>(req);
         match state.map(|state| (state, state.submitter.submit(shared, job, &mut lines))) {
             Some((state, None)) => {
-                state.submitted.set(Some(Submitted { word, goes_on }));
+                state
+                    .submitted
+                    .set(Some(Box::new(Submitted { word, goes_on })));
                 None
             }
             Some((_, settled)) => settled,
@@ -1787,14 +1850,24 @@ fn quiet(req: &Request, site: Option<Site>) -> bool {
     tier::state::<JitRequest>(req).is_some_and(|state| quieted(state, site))
 }
 
-/// [`quiet`] over the request's state.
+/// [`quiet`] over the request's state: in line where nothing is
+/// recorded or submitted, every visit under `jit.compile=inline`.
+#[inline(always)] // jit-design.md §4.9: two loads on every visit
+#[allow(clippy::inline_always)]
 fn quieted(state: &JitRequest, site: Option<Site>) -> bool {
     if state.recording.get() {
         return true;
     }
-    let Some(submitted) = state.submitted.take() else {
-        return false;
-    };
+    match state.submitted.take() {
+        None => false,
+        Some(submitted) => submitted_quiets(state, submitted, site),
+    }
+}
+
+/// [`quieted`] where the request submitted a trace it has not reached.
+#[cold]
+#[inline(never)]
+fn submitted_quiets(state: &JitRequest, submitted: Box<Submitted>, site: Option<Site>) -> bool {
     let under_way = policy::read(submitted.word.word()) == State::Recording;
     let short = submitted.goes_on == GoesOn::Short
         && !matches!(site, Some(Site::Loop(_) | Site::Return(_)));

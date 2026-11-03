@@ -174,6 +174,30 @@ impl<T: Wire> Wire for Vec<T> {
     }
 }
 
+/// Written as the vector it reads as, laid in a block or not, so a file
+/// the cache wrote before the table was laid reads back the same.
+impl<T: Wire> Wire for php_heap::Table<T> {
+    fn put(&self, out: &mut Vec<u8>) -> Option<()> {
+        put_len(self.len(), out)?;
+        self.iter().try_for_each(|item| item.put(out))
+    }
+    fn take(r: &mut Reader<'_>) -> Option<Self> {
+        Vec::<T>::take(r).map(Self::from)
+    }
+}
+
+/// Written as the vector of slots it reads as: a unit's slots are
+/// always a program's, never a native's entries.
+impl Wire for php_unit::decl::Parameters {
+    fn put(&self, out: &mut Vec<u8>) -> Option<()> {
+        put_len(self.len(), out)?;
+        self.iter().try_for_each(|item| item.put(out))
+    }
+    fn take(r: &mut Reader<'_>) -> Option<Self> {
+        Vec::<php_unit::decl::Parameter>::take(r).map(Self::from)
+    }
+}
+
 /// Written as the vector it reads as, so a file the cache wrote before
 /// the table stood inline reads back the same.
 impl Wire for Safepoints {
@@ -224,7 +248,7 @@ impl Wire for Box<str> {
     }
     fn take(r: &mut Reader<'_>) -> Option<Self> {
         let name = Name::take(r)?;
-        String::from_utf8(name.0.into_vec())
+        String::from_utf8(Box::<[u8]>::from(name.0).into_vec())
             .ok()
             .map(String::into_boxed_str)
     }
@@ -508,6 +532,8 @@ impl Wire for Declares {
                 property,
                 kind,
             } => (4u8, (class, (property, kind))).put(out),
+            Declares::Constant { class, constant } => (5u8, (class, constant)).put(out),
+            Declares::Property { class, property } => (6u8, (class, property)).put(out),
         }
     }
     fn take(r: &mut Reader<'_>) -> Option<Self> {
@@ -523,6 +549,14 @@ impl Wire for Declares {
                 class: u32::take(r)?,
                 property: u32::take(r)?,
                 kind: HookKind::take(r)?,
+            },
+            5 => Declares::Constant {
+                class: u32::take(r)?,
+                constant: u32::take(r)?,
+            },
+            6 => Declares::Property {
+                class: u32::take(r)?,
+                property: u32::take(r)?,
             },
             _ => return None,
         })
@@ -862,7 +896,7 @@ abstract class A implements \Countable {
 }
 trait T { function t($o = new \stdClass) { return fn() => static::class; } }
 enum E: string { case X = 'x'; const Y = self::X; }
-class B extends A { function g(): static { return $this; } function __toString() { return ''; } }
+class B extends A { function g(): static { return $this; } function __toString() { return ''; } function __construct(public $b = 1) {} }
 $x = new class { public $q = [1, 2]; };
 try { echo "{$x->q[0]}", __LINE__, E::X->value; } finally { echo 1 <=> 2; }
 $d = []; foreach ([1, 2] as $k => $v) { if ($k < 1) { $d[$k] = $v; } echo $k, $v; }
@@ -885,6 +919,7 @@ __halt_compiler(); data"#;
         assert_eq!(encode(&decoded), Some(bytes.clone()));
         assert_eq!(decoded.dump(&[]), unit.dump(&[]));
         assert_eq!(decoded.classes, unit.classes);
+        assert_eq!(decoded.main.nested, unit.main.nested);
         assert!(
             decode(&bytes[..bytes.len() - 1], &mut strings).is_none(),
             "a short unit is none"

@@ -850,7 +850,7 @@ pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::
     let (function, closure) = req
         .vm()
         .at(frame)
-        .map_or((None, None), |state| (state.function, state.closure));
+        .map_or((None, None), |state| (state.function(), state.closure()));
     if let Some(extra) = req.annex_mut(frame) {
         extra.generator = Some(object);
     }
@@ -861,7 +861,7 @@ pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::
     let lent = req.vm_mut().at_mut(frame).and_then(|state| {
         state.set_returns_to(None);
         match state.receiver() {
-            Some(crate::exec::Receiver::Lent(this)) if state.closure.is_none() => {
+            Some(crate::exec::Receiver::Lent(this)) if state.closure().is_none() => {
                 state.set_receiver(Some(crate::exec::Receiver::Owned(this)));
                 Some(this)
             }
@@ -1587,7 +1587,7 @@ fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
         req.free_generator_table(table);
     }
     let unit = header
-        .function
+        .function()
         .and_then(|function| req.user_function(function))
         .map(|user| (php_unit::PublishedUnit::clone(&user.unit), user.body));
     let code = unit
@@ -2220,7 +2220,7 @@ impl ClosedGeneratorException {}
 pub(crate) fn yields_by_ref(req: &Request, frame: FrameRef) -> bool {
     req.vm()
         .at(frame)
-        .and_then(|state| state.function)
+        .and_then(crate::exec::Header::function)
         .and_then(|function| req.symbols().function_decl(function))
         .is_some_and(|decl| decl.returns_by_ref)
 }

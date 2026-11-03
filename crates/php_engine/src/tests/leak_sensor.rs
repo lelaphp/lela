@@ -34,7 +34,7 @@ fn dropped_owner(req: &mut Request) {
 
 fn faulty() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![dropped_owner::declared()])
+        .functions(&[dropped_owner::DECLARED])
         .build("leak_sensor")
 }
 

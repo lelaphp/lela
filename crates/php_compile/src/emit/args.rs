@@ -127,7 +127,7 @@ impl SendMode {
 /// has at a call site, each declared parameter's name and way of being
 /// sent, and the variadic's way where it collects the rest.
 pub(super) struct Callee {
-    parameters: Vec<(Box<[u8]>, SendMode)>,
+    parameters: Vec<(php_heap::Bytes, SendMode)>,
     variadic: Option<SendMode>,
 }
 
