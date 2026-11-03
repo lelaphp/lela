@@ -31,12 +31,12 @@ fn the_engine_s_persistent_constants_stand_for_their_values_where_they_are_writt
         persistent: crate::Persistent {
             declared: indexed(vec![
                 ConstDecl {
-                    name: Name(b"T_LNUMBER".to_vec().into_boxed_slice()),
+                    name: Name(b"T_LNUMBER".to_vec().into()),
                     value: ConstExpr::long(260),
                     attributes: Vec::new(),
                 },
                 ConstDecl {
-                    name: Name(b"PHP_OS".to_vec().into_boxed_slice()),
+                    name: Name(b"PHP_OS".to_vec().into()),
                     value: ConstExpr::Str(b"Darwin".to_vec().into_boxed_slice()),
                     attributes: Vec::new(),
                 },

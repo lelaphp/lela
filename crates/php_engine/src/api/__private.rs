@@ -4,7 +4,7 @@
 //! item and held to a cap of its own; an extension's source never names
 //! `__private` (`ext.no-private`).
 
-use php_heap::{Fatal, Heap, Obj};
+use php_heap::{Bytes, Fatal, Heap, Obj};
 /// One parameter of a [`NativeFunction`], php's `zend_internal_arg_info`,
 /// which the declaration borrows ([`Parameters::native`]).
 pub use php_unit::decl::NativeParameter;
@@ -164,10 +164,11 @@ pub struct NativeConst {
 }
 
 impl NativeConst {
-    /// The declaration model of the constant.
+    /// The declaration model of the constant, named by its entry's
+    /// bytes.
     pub(crate) fn declaration(&self) -> ConstDecl {
         ConstDecl {
-            name: Name(self.name.into()),
+            name: Name(Bytes::borrowed(self.name)),
             value: (self.value)(),
             attributes: self
                 .attributes
@@ -182,13 +183,14 @@ impl NativeClass {
     /// The declaration model of the header, its own constants and
     /// properties in it and the member impl's still to add.
     pub(crate) fn declaration(&self) -> ClassDecl {
-        let names = |names: &[&[u8]]| names.iter().map(|name| Name((*name).into())).collect();
+        let names =
+            |names: &'static [&'static [u8]]| names.iter().map(|&name| Name(Bytes::borrowed(name)));
         ClassDecl {
             flags: self.flags,
-            parent: self.parent.map(|parent| Name(parent.into())),
-            interfaces: names(self.interfaces),
-            implementors: names(self.implementors),
-            aliases: names(self.aliases),
+            parent: self.parent.map(|parent| Name(Bytes::borrowed(parent))),
+            interfaces: names(self.interfaces).collect(),
+            implementors: names(self.implementors).collect(),
+            aliases: names(self.aliases).collect(),
             backing: self.backing,
             constants: (self.constants.iter())
                 .map(NativeClassConst::declaration)
@@ -211,7 +213,7 @@ impl NativeClass {
 impl NativeClassConst {
     pub(crate) fn declaration(&self) -> ClassConstDecl {
         ClassConstDecl {
-            name: Name(self.name.into()),
+            name: Name(Bytes::borrowed(self.name)),
             visibility: self.visibility,
             is_final: self.is_final,
             is_case: self.is_case,
@@ -280,9 +282,9 @@ impl NativeMethod {
 }
 
 /// A public instance property named `name` of type `ty`, no default.
-fn property(name: &[u8], ty: Option<Type>) -> PropertyDecl {
+fn property(name: &'static [u8], ty: Option<Type>) -> PropertyDecl {
     PropertyDecl {
-        name: Name(name.into()),
+        name: Name(Bytes::borrowed(name)),
         visibility: Visibility::Public,
         set_visibility: None,
         is_instance: true,
@@ -301,9 +303,9 @@ fn property(name: &[u8], ty: Option<Type>) -> PropertyDecl {
 /// A class declaration named `name` of `kind`, the rest for its declarer
 /// to fill: a header's, and a class the engine declares by hand.
 #[must_use]
-pub(crate) fn class(name: &[u8], kind: ClassKind) -> ClassDecl {
+pub(crate) fn class(name: &'static [u8], kind: ClassKind) -> ClassDecl {
     ClassDecl {
-        name: Name(name.into()),
+        name: Name(Bytes::borrowed(name)),
         kind,
         flags: php_unit::decl::ClassFlags::default(),
         parent: None,
@@ -318,7 +320,7 @@ pub(crate) fn class(name: &[u8], kind: ClassKind) -> ClassDecl {
         methods: Vec::new(),
         attributes: Vec::new(),
         doc_comment: None,
-        file: Name(Box::new([])),
+        file: Name::default(),
         line: 0,
         end_line: 0,
         object_size: 0,
@@ -328,15 +330,18 @@ pub(crate) fn class(name: &[u8], kind: ClassKind) -> ClassDecl {
 }
 
 /// A php attribute, `#[\Deprecated(since: "8.1")]`, its arguments as
-/// written.
+/// written, named by the expansion's bytes.
 #[must_use]
-pub fn attribute(name: &[u8], arguments: Vec<(Option<&[u8]>, ConstExpr)>) -> Attribute {
+pub fn attribute(
+    name: &'static [u8],
+    arguments: Vec<(Option<&'static [u8]>, ConstExpr)>,
+) -> Attribute {
     Attribute {
-        name: Name(name.into()),
+        name: Name(Bytes::borrowed(name)),
         arguments: arguments
             .into_iter()
             .map(|(name, value)| AttributeArgument {
-                name: name.map(|name| Name(name.into())),
+                name: name.map(|name| Name(Bytes::borrowed(name))),
                 value,
             })
             .collect(),

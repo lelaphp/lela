@@ -636,7 +636,7 @@ impl Request {
                     let Some(decl) = self.symbols().class_decl(*local) else {
                         continue;
                     };
-                    let key = decl.name.0.clone();
+                    let key = Box::from(&*decl.name.0);
                     let place = self.buckets.take();
                     let class = shared(*local);
                     classes.push((key, Named { place, class }));
@@ -653,7 +653,7 @@ impl Request {
             .into_iter()
             .filter(|user| user.member.is_none())
             .filter_map(|user| {
-                let name = user_function_decl(&user)?.name.0.clone();
+                let name = Box::<[u8]>::from(&*user_function_decl(&user)?.name.0);
                 (!name.starts_with(b"{")).then_some((name, user))
             })
             .rev()

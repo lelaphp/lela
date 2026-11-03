@@ -126,8 +126,8 @@ impl CallTrampoline {
     /// method, named `__invoke`.
     pub(crate) fn invoke(function: Function, decl: &FunctionDecl) -> Self {
         let function_decl = FunctionDecl {
-            name: Name(b"__invoke".as_slice().into()),
-            file: Name(Box::new([])),
+            name: Name(php_heap::Bytes::borrowed(b"__invoke")),
+            file: Name::default(),
             line: 0,
             end_line: 0,
             doc_comment: None,
@@ -159,7 +159,8 @@ impl CallTrampoline {
             parameters: vec![variadic(b"arguments", Some(Type::Mixed))].into(),
             returns_by_ref: of.function.returns_by_ref,
             attributes: of.function.attributes.clone(),
-            ..native_function(name)
+            name: Name(name.into()),
+            ..native_function(b"")
         };
         CallTrampoline {
             via: Via::Magic(magic),
@@ -185,7 +186,10 @@ impl CallTrampoline {
         is_instance: bool,
         reserved: Option<Reserved>,
     ) -> Self {
-        let function = native_function(name);
+        let function = FunctionDecl {
+            name: Name(name.into()),
+            ..native_function(b"")
+        };
         CallTrampoline {
             via: Via::Native(entry),
             decl: public_method(function, is_instance),

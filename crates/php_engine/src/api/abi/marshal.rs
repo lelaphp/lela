@@ -16,7 +16,7 @@
 use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 
-use php_heap::{Slot, ZvalSpan};
+use php_heap::{Bytes, Slot, ZvalSpan};
 
 use php_unit::decl::{Bare, ConstExpr, Name, Type};
 
@@ -538,7 +538,7 @@ impl<C: Class> Instance<C> {
 }
 
 fn named<C: Class>() -> Type {
-    Type::Named(Name(C::NAME.into()))
+    Type::Named(Name(Bytes::borrowed(C::NAME)))
 }
 
 impl<C: Class> FromArgument for Instance<C> {
@@ -650,7 +650,7 @@ impl FromArgument for Iterable {
     const MASK: u32 = bits::ARRAY;
     fn declared() -> Option<Type> {
         Some(Type::Union(vec![
-            Type::Named(Name(b"Traversable".as_slice().into())),
+            Type::Named(Name(Bytes::borrowed(b"Traversable"))),
             Type::Array,
         ]))
     }

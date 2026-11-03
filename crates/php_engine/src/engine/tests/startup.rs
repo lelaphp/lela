@@ -387,11 +387,6 @@ fn the_tables_build_and_link_classes_lay_are_each_one_allocation_at_its_length()
         ("methods", s.methods.len(), s.methods.capacity()),
         ("trampolines", s.trampolines.len(), s.trampolines.capacity()),
         (
-            "parameter_classes",
-            s.parameter_classes.len(),
-            s.parameter_classes.capacity(),
-        ),
-        (
             "method_functions",
             s.method_functions.len(),
             s.method_functions.capacity(),
@@ -421,9 +416,65 @@ fn the_tables_build_and_link_classes_lay_are_each_one_allocation_at_its_length()
         [] as [&(&str, usize, usize); 0],
         "laid past their length"
     );
-    assert_eq!(laid.len(), 23, "the tables build and link_classes lay");
+    // `parameter_classes` is two boxes, at their length as made (#4027).
+    assert_eq!(laid.len(), 22, "the tables build and link_classes lay");
     assert!(
         laid.iter().all(|(_, len, _)| *len > 0),
         "each holds Core's rows"
     );
+}
+
+/// The bytes a hand-laid native's entries spell its names with, held in
+/// statics so each has one address to compare against.
+static NAMED: &[u8] = b"named_by_its_entry";
+static SLOT: &[u8] = b"slot";
+static MARK: &[u8] = b"Deprecated";
+static CONSTANT: &[u8] = b"NAMED_BY_ITS_ENTRY";
+
+/// A native's function, parameter, attribute and constant names point
+/// at the bytes its static entries spell them with and copy none, as
+/// php's `zend_register_functions` names a function by its
+/// `zend_function_entry`'s `const char *` and opcache re-points every
+/// other startup name at one permanent copy (#4027): startup allocates
+/// nothing per name.
+#[test]
+fn a_natives_names_are_its_entries_bytes_and_no_copy() {
+    const FUNCTIONS: &[crate::api::__private::NativeFunction] =
+        &[crate::api::__private::NativeFunction {
+            name: NAMED,
+            parameters: &[crate::api::__private::NativeParameter {
+                name: SLOT,
+                ty: || None,
+                by_ref: false,
+                prefer_ref: false,
+                variadic: false,
+                passed: false,
+                default: None,
+                attributes: &[],
+            }],
+            return_type: || None,
+            frameless: &[],
+            attributes: &[|| crate::api::__private::attribute(MARK, Vec::new())],
+            entry: crate::api::__private::abstract_entry,
+        }];
+    const CONSTANTS: &[crate::api::__private::NativeConst] =
+        &[crate::api::__private::NativeConst {
+            name: CONSTANT,
+            value: || php_unit::decl::ConstExpr::long(1),
+            attributes: &[],
+        }];
+    let extension = crate::api::abi::ExtensionBuilder::default()
+        .functions(FUNCTIONS)
+        .constants(CONSTANTS)
+        .build("named");
+    let engine = Engine::cli_builder().extensions(&[extension]).build();
+    let s = &engine.shared;
+    let function = (s.functions.iter()).find(|decl| *decl.name.0 == *NAMED);
+    let function = function.expect("the native is declared");
+    assert_eq!(function.name.0.as_ptr(), NAMED.as_ptr());
+    assert_eq!(function.parameters[0].name.0.as_ptr(), SLOT.as_ptr());
+    assert_eq!(function.attributes[0].name.0.as_ptr(), MARK.as_ptr());
+    let constant = (s.constants.iter()).find(|decl| *decl.name.0 == *CONSTANT);
+    let constant = constant.expect("the constant is declared");
+    assert_eq!(constant.name.0.as_ptr(), CONSTANT.as_ptr());
 }

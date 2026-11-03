@@ -50,6 +50,8 @@ Block::bytes
 Block::bytes_mut
 Block::is_empty
 Block::len
+Bytes
+Bytes::borrowed
 CallStack
 ChunkCache
 ChunkCache::new

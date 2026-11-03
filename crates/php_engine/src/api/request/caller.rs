@@ -565,11 +565,8 @@ impl Request {
     /// none for every other parameter and past the declared ones.
     pub(crate) fn active_parameter_class(&self, position: u32) -> Option<ClassId> {
         let function = self.active_native_function()?;
-        let classes = self
-            .shared
-            .parameter_classes
-            .get(usize::try_from(function.0).ok()?)?;
-        *classes.get(usize::try_from(position.checked_sub(1)?).ok()?)?
+        let at = usize::try_from(position.checked_sub(1)?).ok()?;
+        (self.shared.parameter_classes).of(usize::try_from(function.0).ok()?, at)
     }
 
     /// `func->common.scope` and `Z_CE(EX(This))` of the native being

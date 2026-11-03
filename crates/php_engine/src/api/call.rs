@@ -2629,7 +2629,7 @@ fn evaluate_node(
                 return Err(type_error(req, &message));
             };
             req.release(named);
-            class_constant_expr(req, class, &Name(bytes.into_boxed_slice()), scope)
+            class_constant_expr(req, class, &Name(bytes.into()), scope)
         }
         // `ZEND_AST_CONST_ENUM_INIT` read back as the case it made: the
         // enum's one instance for the case (`zend_enum_get_case`), which

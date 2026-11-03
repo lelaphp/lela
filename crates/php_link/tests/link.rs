@@ -40,7 +40,7 @@ fn class(name: &str, kind: ClassKind) -> ClassDecl {
 }
 
 /// A public instance method named `name` with a body.
-fn method(name: &[u8]) -> MethodDecl {
+fn method(name: &'static [u8]) -> MethodDecl {
     MethodDecl {
         function: native_function(name),
         visibility: Visibility::Public,

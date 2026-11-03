@@ -310,9 +310,11 @@ impl Request {
             .filter_map(|name| self.class_named(name.into()))
             .filter_map(|class| self.symbols().class_decl(class));
         for class in std::iter::once(decl).chain(used) {
-            properties
-                .extend((class.properties.iter()).map(|p| (p.name.0.clone(), p.default.clone())));
-            constants.extend((class.constants.iter()).map(|c| (c.name.0.clone(), c.value.clone())));
+            properties.extend(
+                (class.properties.iter()).map(|p| (Box::from(&*p.name.0), p.default.clone())),
+            );
+            constants
+                .extend((class.constants.iter()).map(|c| (Box::from(&*c.name.0), c.value.clone())));
         }
         // Each name declared more than once whose values are not all
         // literals has all of them evaluated, so the two sides compared
