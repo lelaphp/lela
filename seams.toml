@@ -59,7 +59,7 @@ budget = 700                               # fork, the signal pool, LC_CTYPE, th
 lock = "process.lock"
 [[crate]]
 name = "php_unit"
-budget = 3000                              # 2.5k raised to 3k for the unit format's parity growth (#3357, 2026-10-24)
+budget = 4000                              # 2.5k raised to 3k for the unit format's parity growth (#3357, 2026-10-24); 4k for the memory gate's unit persistence, declarations and the fitted view (#4018, 2026-11-03)
 lock = "unit.lock"
 [[crate]]
 name = "php_link"
