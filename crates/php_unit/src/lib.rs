@@ -20,6 +20,7 @@ mod dump;
 mod enum_methods;
 mod frameless;
 mod op;
+mod persist;
 mod types;
 mod unit;
 

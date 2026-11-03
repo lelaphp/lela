@@ -11,7 +11,11 @@
 //! no name is a `pemalloc` block of its own. A [`Bytes`] borrowed from a
 //! native's entry is that pointer: the name costs the process no
 //! allocation. One a compile made is a box, freed with whatever holds
-//! it, as a user function's name goes with its op array.
+//! it, as a user function's name goes with its op array. One a
+//! published unit names is laid in the unit's block
+//! ([`crate::Persist::bytes`]), as opcache stores a cached file's names in
+//! its memory (`zend_accel_store_interned_string`), and holds a share of
+//! the block.
 
 use std::ptr::NonNull;
 
@@ -20,19 +24,32 @@ use std::ptr::NonNull;
 /// allocation and every static.
 const BORROWED: usize = 1 << (usize::BITS - 1);
 
+/// The bit below [`BORROWED`]: set where the bytes are laid in a
+/// published unit's block, and then the length is the low half of the
+/// rest and the bytes' offset in the block the high half. No owned
+/// box's length reaches it on a 64-bit target, the only one bytes are
+/// laid on.
+const LAID: usize = 1 << (usize::BITS - 2);
+
+/// Where a laid value's offset starts in its tag, past its length.
+const OFFSET_SHIFT: u32 = usize::BITS / 2;
+
 /// Immutable bytes, either borrowed from the binary for the life of the
-/// process ([`Bytes::borrowed`]) or owned in a box of their own (`From`
-/// a box, a vector or a slice, which is copied): the size of a
-/// `Box<[u8]>`, and read, compared, hashed and printed as the slice it
-/// holds whichever it is.
+/// process ([`Bytes::borrowed`]), owned in a box of their own (`From`
+/// a box, a vector or a slice, which is copied), or laid in a published
+/// unit's block ([`crate::Persist::bytes`]): the size of a `Box<[u8]>`,
+/// and read, compared, hashed and printed as the slice it holds
+/// whichever it is.
 pub struct Bytes {
     at: NonNull<u8>,
-    /// The length, with [`BORROWED`] set where the bytes are the binary's.
+    /// The length, with [`BORROWED`] set where the bytes are the binary's,
+    /// or [`LAID`] and the offset where they are a block's.
     tagged: usize,
 }
 
-// SAFETY: the bytes are a `&'static [u8]` or a `Box<[u8]>`, each `Send`,
-// and nothing writes them once the value is made.
+// SAFETY: the bytes are a `&'static [u8]`, a `Box<[u8]>` or a share of a
+// block whose count is atomic, each `Send`, and nothing writes them once
+// the value is made.
 unsafe impl Send for Bytes {}
 // SAFETY: as for `Send`: a shared read of bytes nobody writes.
 unsafe impl Sync for Bytes {}
@@ -51,24 +68,71 @@ impl Bytes {
     fn is_borrowed(&self) -> bool {
         self.tagged & BORROWED != 0
     }
+
+    /// Whether the bytes are laid in a block, which only a 64-bit target
+    /// lays them in.
+    fn is_laid(&self) -> bool {
+        cfg!(target_pointer_width = "64") && self.tagged & (BORROWED | LAID) == LAID
+    }
+
+    /// Whether `len` bytes at `offset` in a block can be named by a laid
+    /// value: each fits its half of the tag.
+    pub(crate) fn layable(offset: usize, len: usize) -> bool {
+        cfg!(target_pointer_width = "64")
+            && len >> OFFSET_SHIFT == 0
+            && offset >> (OFFSET_SHIFT - 2) == 0
+    }
+
+    /// The `len` bytes at `at`, `offset` into a block whose share the
+    /// caller hands over, where [`Bytes::layable`] said they fit.
+    pub(crate) fn laid(at: NonNull<u8>, len: usize, offset: usize) -> Bytes {
+        Bytes {
+            at,
+            tagged: LAID | offset << OFFSET_SHIFT | len,
+        }
+    }
+
+    /// The length, whichever the bytes are.
+    fn len_of(&self) -> usize {
+        if self.is_laid() {
+            self.tagged & ((1 << OFFSET_SHIFT) - 1)
+        } else {
+            self.tagged & !BORROWED
+        }
+    }
+
+    /// The block laid bytes are in, `offset` bytes before them.
+    fn block(&self) -> Option<NonNull<u8>> {
+        if !self.is_laid() {
+            return None;
+        }
+        let offset = (self.tagged & !LAID) >> OFFSET_SHIFT;
+        NonNull::new(self.at.as_ptr().wrapping_sub(offset))
+    }
 }
 
 impl std::ops::Deref for Bytes {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
-        let len = self.tagged & !BORROWED;
-        // SAFETY: `at` holds `len` initialised bytes, the binary's or the
-        // box's this value owns, and nothing writes them while it stands.
+        let len = self.len_of();
+        // SAFETY: `at` holds `len` initialised bytes, the binary's, the
+        // box's this value owns or the block's it holds a share of, and
+        // nothing writes them while it stands.
         unsafe { std::slice::from_raw_parts(self.at.as_ptr(), len) }
     }
 }
 
 impl Drop for Bytes {
-    /// The box back to the allocator, where the bytes are owned; the
-    /// binary's stay where they are.
+    /// The box back to the allocator, where the bytes are owned, or the
+    /// block's share, where they are laid; the binary's stay where they
+    /// are.
     fn drop(&mut self) {
         if self.is_borrowed() {
+            return;
+        }
+        if let Some(block) = self.block() {
+            crate::persist::release(block);
             return;
         }
         let owned = NonNull::slice_from_raw_parts(self.at, self.tagged);
@@ -118,7 +182,7 @@ impl From<Bytes> for Box<[u8]> {
     /// The box an owned value holds, handed back whole; a copy of the
     /// binary's bytes where they are borrowed.
     fn from(bytes: Bytes) -> Box<[u8]> {
-        if bytes.is_borrowed() {
+        if bytes.is_borrowed() || bytes.is_laid() {
             return Box::from(&*bytes);
         }
         let bytes = std::mem::ManuallyDrop::new(bytes);
@@ -130,10 +194,13 @@ impl From<Bytes> for Box<[u8]> {
 }
 
 impl Clone for Bytes {
-    /// The same bytes where they are the binary's, a box of their own
-    /// where they are owned.
+    /// The same bytes where they are the binary's or a block's, a box of
+    /// their own where they are owned.
     fn clone(&self) -> Bytes {
-        if self.is_borrowed() {
+        if let Some(block) = self.block() {
+            crate::persist::retain(block);
+        }
+        if self.is_borrowed() || self.is_laid() {
             Bytes {
                 at: self.at,
                 tagged: self.tagged,

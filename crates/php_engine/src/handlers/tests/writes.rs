@@ -20,8 +20,9 @@ fn assigning() -> PublishedUnit {
                     ..Opline::default()
                 },
                 back(),
-            ],
-            literals: vec![php_heap::Zval::long(1)],
+            ]
+            .into(),
+            literals: vec![php_heap::Zval::long(1)].into(),
             num_cvs: 1,
             num_tmps: 1,
             ..OpArray::default()
@@ -113,8 +114,9 @@ fn a_write_over_a_temporary_that_still_holds_a_value_is_an_internal_error() {
                     ..Opline::default()
                 },
                 back(),
-            ],
-            literals: vec![php_heap::Zval::long(7)],
+            ]
+            .into(),
+            literals: vec![php_heap::Zval::long(7)].into(),
             num_tmps: 1,
             filename: php_unit::decl::Name::from("planted.php"),
             ..OpArray::default()

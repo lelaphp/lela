@@ -39,8 +39,9 @@ fn by_name(strings: &mut php_heap::Strings) -> PublishedUnit {
                     ..Opline::default()
                 },
                 back(),
-            ],
-            literals: vec![written, lowered, argument],
+            ]
+            .into(),
+            literals: vec![written, lowered, argument].into(),
             num_tmps: 1,
             cache_size: 8,
             ..OpArray::default()
@@ -271,12 +272,14 @@ fn a_namespaced_call_by_name_looks_the_table_up_twice_once() {
                     ..Opline::default()
                 },
                 back(),
-            ],
+            ]
+            .into(),
             literals: vec![
                 interned(&mut strings, b"Foo\\StrLen"),
                 interned(&mut strings, b"foo\\strlen"),
                 interned(&mut strings, b"strlen"),
-            ],
+            ]
+            .into(),
             cache_size: 16,
             ..OpArray::default()
         },
@@ -327,11 +330,13 @@ fn a_call_by_name_nothing_declares_primes_no_slot() {
                     ..Opline::default()
                 },
                 back(),
-            ],
+            ]
+            .into(),
             literals: vec![
                 interned(&mut strings, b"NoPe"),
                 interned(&mut strings, b"nope"),
-            ],
+            ]
+            .into(),
             cache_size: 8,
             ..OpArray::default()
         },

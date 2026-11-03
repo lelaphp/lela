@@ -6102,14 +6102,14 @@ impl<'a> Emit<'a> {
         let literals = std::mem::take(&mut self.constants);
         let cache_size = defaults_cached(&oplines, &literals, self.cache_slots);
         OpArray {
-            oplines,
-            literals,
+            oplines: oplines.into(),
+            literals: literals.into(),
             const_exprs: std::mem::take(&mut self.const_exprs),
             vars,
             num_cvs,
             num_tmps: self.temporaries,
-            try_catch: std::mem::take(&mut self.try_catch),
-            live_ranges,
+            try_catch: std::mem::take(&mut self.try_catch).into(),
+            live_ranges: live_ranges.into(),
             safepoints: std::mem::take(&mut self.safepoints),
             filename,
             line_start,
@@ -6117,15 +6117,15 @@ impl<'a> Emit<'a> {
             cache_size,
             cache_room: cache_size,
             runtime_cache: php_unit::MapPtrOffset::default(),
-            dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs),
-            nested: std::mem::take(&mut self.nested),
+            dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs).into(),
+            nested: std::mem::take(&mut self.nested).into(),
             bound_vars: std::mem::take(&mut self.static_vars),
             implicit_uses: 0,
             loops: u32::try_from(self.loops.len()).unwrap_or(u32::MAX),
             no_receiver: self.fn_flags.is_static,
             strict_types: self.typing == Typing::Strict,
             return_mask: self.return_type.as_ref().map_or(0, Type::mask),
-            numeric_dims: std::mem::take(&mut self.numeric_dims),
+            numeric_dims: std::mem::take(&mut self.numeric_dims).into(),
         }
     }
 

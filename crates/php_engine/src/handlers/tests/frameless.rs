@@ -20,8 +20,9 @@ fn jmp_frameless_over(strings: &mut php_heap::Strings, name: &[u8]) -> Published
                 Opline::default(),
                 Opline::default(),
                 back(),
-            ],
-            literals: vec![interned(strings, name)],
+            ]
+            .into(),
+            literals: vec![interned(strings, name)].into(),
             cache_size: 8,
             ..OpArray::default()
         },
@@ -149,7 +150,8 @@ fn a_nullary_frameless_call_serves_the_native_into_its_temporary() {
                     ..Opline::default()
                 },
                 back(),
-            ],
+            ]
+            .into(),
             num_tmps: 1,
             ..OpArray::default()
         },
@@ -188,7 +190,8 @@ fn a_row_the_table_has_not_is_an_internal_error() {
                     ..Opline::default()
                 },
                 back(),
-            ],
+            ]
+            .into(),
             num_tmps: 1,
             ..OpArray::default()
         },

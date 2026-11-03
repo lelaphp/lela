@@ -1071,8 +1071,8 @@ mod tests {
 
     fn body(oplines: Vec<Opline>, literals: Vec<Zval>) -> OpArray {
         OpArray {
-            oplines,
-            literals,
+            oplines: oplines.into(),
+            literals: literals.into(),
             filename: Name::from("a.php"),
             line_start: 1,
             line_end: 1,
@@ -1863,12 +1863,14 @@ mod tests {
                     range(15, LiveKind::Rope, 12, 14),
                     range(18, LiveKind::New, 17, 22),
                     range(22, LiveKind::TmpVar, 24, 25),
-                ],
+                ]
+                .into(),
                 try_catch: vec![TryCatch {
                     try_op: OplineIdx(26),
                     catch_op: OplineIdx(30),
                     ..TryCatch::default()
-                }],
+                }]
+                .into(),
                 ..body(vec![], vec![])
             },
             ..Unit::default()
@@ -1906,7 +1908,7 @@ mod tests {
         ];
         let unit = Unit {
             main: OpArray {
-                try_catch: ranges.to_vec(),
+                try_catch: ranges.to_vec().into(),
                 ..body(vec![], vec![])
             },
             ..Unit::default()

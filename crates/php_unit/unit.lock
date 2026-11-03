@@ -64,8 +64,8 @@ SsaVars::ssa_var
 TopLevel
 TryCatch
 Unit
-Unit::compact
 Unit::dump
+Unit::persist
 Unit::published
 UnitCell
 UnitCell::share

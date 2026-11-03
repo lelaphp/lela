@@ -24,8 +24,9 @@ fn catching(strings: &mut php_heap::Strings, written: &[u8], lowered: &[u8]) -> 
                 },
                 Opline::default(),
                 back(),
-            ],
-            literals: vec![interned(strings, written), interned(strings, lowered)],
+            ]
+            .into(),
+            literals: vec![interned(strings, written), interned(strings, lowered)].into(),
             cache_size: 8,
             ..OpArray::default()
         },
@@ -108,8 +109,9 @@ fn static_method_call(
                     ..Opline::default()
                 },
                 back(),
-            ],
-            literals,
+            ]
+            .into(),
+            literals: literals.into(),
             cache_size: 16,
             ..OpArray::default()
         },
@@ -218,11 +220,13 @@ fn method_call(strings: &mut php_heap::Strings) -> PublishedUnit {
                     ..Opline::default()
                 },
                 back(),
-            ],
+            ]
+            .into(),
             literals: vec![
                 interned(strings, b"GetMessage"),
                 interned(strings, b"getmessage"),
-            ],
+            ]
+            .into(),
             vars: vec![php_unit::decl::Name::from("o")],
             num_cvs: 1,
             // `zend_alloc_cache_slots(2)`: the class and the callee.
@@ -379,12 +383,14 @@ fn new_instanceof_and_a_class_constant_read_the_class_off_their_slot() {
                     ..Opline::default()
                 },
                 back(),
-            ],
+            ]
+            .into(),
             literals: vec![
                 interned(&mut strings, b"NoPe"),
                 interned(&mut strings, b"nope"),
                 interned(&mut strings, b"NOPE"),
-            ],
+            ]
+            .into(),
             num_tmps: 3,
             cache_size: 24,
             ..OpArray::default()
@@ -460,12 +466,14 @@ fn a_class_constant_over_two_constants_is_served_off_its_slot() {
                     ..Opline::default()
                 },
                 back(),
-            ],
+            ]
+            .into(),
             literals: vec![
                 interned(&mut strings, b"Attribute"),
                 interned(&mut strings, b"attribute"),
                 interned(&mut strings, b"TARGET_CLASS"),
-            ],
+            ]
+            .into(),
             num_tmps: 1,
             cache_size: 16,
             ..OpArray::default()
