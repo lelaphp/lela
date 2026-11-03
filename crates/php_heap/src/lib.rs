@@ -36,6 +36,7 @@
 
 mod array;
 mod block;
+mod bump;
 mod call_stack;
 mod collector;
 mod compare;

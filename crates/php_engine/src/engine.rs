@@ -1333,10 +1333,8 @@ fn method_functions(
     methods: &[NativeMethod],
     functions: usize,
 ) -> Vec<Box<[Option<Function>]>> {
-    let mut tables: Vec<Vec<Option<Function>>> = classes
-        .iter()
-        .map(|decl| vec![None; decl.methods.len()])
-        .collect();
+    let mut tables: Vec<Box<[Option<Function>]>> = Vec::with_capacity(classes.len());
+    tables.extend((classes.iter()).map(|decl| vec![None; decl.methods.len()].into_boxed_slice()));
     for (row, method) in (functions..).zip(methods) {
         let MethodAt::Declared { class, at } = method.at else {
             continue;
@@ -1349,7 +1347,7 @@ fn method_functions(
             *slot = Some(Function(row));
         }
     }
-    tables.into_iter().map(Vec::into_boxed_slice).collect()
+    tables
 }
 
 /// Each native class's linked record, as `zend_register_internal_class_ex`
@@ -3809,7 +3807,10 @@ impl EngineBuilder {
             &ini,
         );
         let (mut entries, frameless_entries): (Vec<Entry>, Vec<_>) = natives.into_iter().unzip();
-        let frameless_entries = frameless_entries.into_iter().flatten().copied().collect();
+        let rows = frameless_entries.iter().map(|entries| entries.len()).sum();
+        let mut laid = Vec::with_capacity(rows);
+        laid.extend(frameless_entries.into_iter().flatten().copied());
+        let frameless_entries = laid;
         let Intercepted {
             replaced,
             by: intercepted_by,
@@ -3823,7 +3824,11 @@ impl EngineBuilder {
             .iter()
             .map(|decl| crate::attributes::Flags::of(&decl.attributes))
             .collect();
-        let frameless = frameless_table(functions.iter());
+        // `frameless_table` collects through a `flat_map`, whose rows it
+        // cannot count first; the table is cut to them as it is kept.
+        let frameless = frameless_table(functions.iter())
+            .into_boxed_slice()
+            .into_vec();
         let function_names = Names::over(&functions);
         let LinkedClasses {
             classes,

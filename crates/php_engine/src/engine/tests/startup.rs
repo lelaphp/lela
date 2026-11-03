@@ -340,3 +340,90 @@ fn a_whole_number_ini_value_is_read_as_php_s_quantity_reads_it() {
     assert_eq!(read("0x"), 0, "no digits after the prefix");
     assert_eq!(read("09"), 0, "octal that holds no octal digit");
 }
+
+/// Each table `EngineBuilder::build` and `link_classes` lay themselves
+/// is one allocation at the length it ends at, as `zend_hash_init` sizes
+/// a startup table before it is filled (#3991, #4011, #4013, #4017): none
+/// keeps room it never fills. The names and rows a row owns are each
+/// their own (#4027).
+#[test]
+fn the_tables_build_and_link_classes_lay_are_each_one_allocation_at_its_length() {
+    let engine = Engine::cli_builder().build();
+    let s = &engine.shared;
+    let laid = [
+        ("extensions", s.extensions.len(), s.extensions.capacity()),
+        ("functions", s.functions.len(), s.functions.capacity()),
+        ("entries", s.entries.len(), s.entries.capacity()),
+        ("replaced", s.replaced.len(), s.replaced.capacity()),
+        (
+            "intercepted_by",
+            s.intercepted_by.len(),
+            s.intercepted_by.capacity(),
+        ),
+        (
+            "function_modules",
+            s.function_modules.len(),
+            s.function_modules.capacity(),
+        ),
+        (
+            "function_flags",
+            s.function_flags.len(),
+            s.function_flags.capacity(),
+        ),
+        ("frameless", s.frameless.len(), s.frameless.capacity()),
+        (
+            "frameless_entries",
+            s.frameless_entries.len(),
+            s.frameless_entries.capacity(),
+        ),
+        ("classes", s.classes.len(), s.classes.capacity()),
+        (
+            "class_modules",
+            s.class_modules.len(),
+            s.class_modules.capacity(),
+        ),
+        ("handlers", s.handlers.len(), s.handlers.capacity()),
+        ("natives", s.natives.len(), s.natives.capacity()),
+        ("methods", s.methods.len(), s.methods.capacity()),
+        ("trampolines", s.trampolines.len(), s.trampolines.capacity()),
+        (
+            "parameter_classes",
+            s.parameter_classes.len(),
+            s.parameter_classes.capacity(),
+        ),
+        (
+            "method_functions",
+            s.method_functions.len(),
+            s.method_functions.capacity(),
+        ),
+        (
+            "trampoline_tables",
+            s.trampoline_tables.len(),
+            s.trampoline_tables.capacity(),
+        ),
+        ("parents", s.parents.len(), s.parents.capacity()),
+        ("placed", s.placed.len(), s.placed.capacity()),
+        ("constants", s.constants.len(), s.constants.capacity()),
+        (
+            "constant_modules",
+            s.constant_modules.len(),
+            s.constant_modules.capacity(),
+        ),
+        (
+            "constant_values",
+            s.constant_values.len(),
+            s.constant_values.capacity(),
+        ),
+    ];
+    let slack: Vec<_> = (laid.iter()).filter(|(_, len, room)| len != room).collect();
+    assert_eq!(
+        slack,
+        [] as [&(&str, usize, usize); 0],
+        "laid past their length"
+    );
+    assert_eq!(laid.len(), 23, "the tables build and link_classes lay");
+    assert!(
+        laid.iter().all(|(_, len, _)| *len > 0),
+        "each holds Core's rows"
+    );
+}
