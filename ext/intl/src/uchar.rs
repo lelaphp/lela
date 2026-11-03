@@ -770,32 +770,44 @@ const TABLE: &str = "\
     FOLD_CASE_EXCLUDE_SPECIAL_I";
 
 /// `register_class_IntlChar`'s constants: `UNICODE_VERSION`, then
-/// [`TABLE`] read out, `NO_NUMERIC_VALUE` its one float.
+/// [`TABLE`] read out, `NO_NUMERIC_VALUE` its one float. The list is
+/// laid at the length it ends at, one row per word that is not a
+/// prefix, and each name at its own.
 pub(crate) fn constants() -> Vec<ClassConstDecl> {
-    let mut constants = vec![constant(b"UNICODE_VERSION", &ffi::unicode_version())];
+    let words = TABLE.split_ascii_whitespace();
+    let count = words.clone().filter(|word| !word.starts_with('@')).count();
+    let mut constants = Vec::with_capacity(1 + count);
+    constants.push(constant(
+        Name(b"UNICODE_VERSION"[..].into()),
+        &ffi::unicode_version(),
+    ));
     let (mut prefix, mut next) = ("", 0i64);
-    for word in TABLE.split_ascii_whitespace() {
+    for word in words {
         if let Some(rest) = word.strip_prefix('@') {
             prefix = rest;
             continue;
         }
         let (name, value) = word.split_once('=').unwrap_or((word, ""));
-        let name = [prefix.as_bytes(), name.as_bytes()].concat();
+        let name = Name(
+            [prefix.as_bytes(), name.as_bytes()]
+                .concat()
+                .into_boxed_slice(),
+        );
         if value.contains('.') {
-            constants.push(constant(&name, &value.parse::<f64>().unwrap_or(0.0)));
+            constants.push(constant(name, &value.parse::<f64>().unwrap_or(0.0)));
             continue;
         }
         next = value.parse().unwrap_or(next);
-        constants.push(constant(&name, &next));
+        constants.push(constant(name, &next));
         next += 1;
     }
     constants
 }
 
 /// One public typed constant.
-fn constant<T: IntoConst>(name: &[u8], value: &T) -> ClassConstDecl {
+fn constant<T: IntoConst>(name: Name, value: &T) -> ClassConstDecl {
     ClassConstDecl {
-        name: Name(name.into()),
+        name,
         visibility: Visibility::Public,
         is_final: false,
         is_case: false,
@@ -803,5 +815,24 @@ fn constant<T: IntoConst>(name: &[u8], value: &T) -> ClassConstDecl {
         value: value.value(),
         attributes: Vec::new(),
         doc_comment: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The list is laid at the length it ends at, and each name at its
+    /// own: nothing is grown and given back as it is read out.
+    #[test]
+    fn constants_are_laid_at_their_length() {
+        let constants = super::constants();
+        assert_eq!(constants.capacity(), constants.len());
+        let words = super::TABLE.split_ascii_whitespace();
+        assert_eq!(
+            constants.len(),
+            1 + words.filter(|w| !w.starts_with('@')).count()
+        );
+        let names = constants.iter().map(|c| &*c.name.0);
+        let names: Vec<&[u8]> = names.skip(3).take(2).collect();
+        assert_eq!(names, [&b"NO_NUMERIC_VALUE"[..], b"PROPERTY_ALPHABETIC"]);
     }
 }
