@@ -1843,8 +1843,10 @@ impl Shared {
         origin: Origin<'_>,
         stack: StackLimit,
     ) -> Result<PublishedUnit, CompileError> {
+        // No request asked, so no request's arena is at hand.
+        let mut arena = php_compile::syntax::Arena::default();
         (self
-            .compile_shared(source, origin, stack, CompileHeap::Engine)
+            .compile_shared(source, origin, stack, CompileHeap::Engine, &mut arena)
             .unit)
             .map(|unit| self.publish_compiled(unit))
     }
@@ -1853,19 +1855,24 @@ impl Shared {
     /// engine's table and no map-pointer offset taken, for a caller that
     /// decides afterwards whether the unit is published
     /// ([`Shared::publish_compiled`]) or the request's own, and charged
-    /// to `heap` while it runs ([`CompileHeap`]).
+    /// to `heap` while it runs ([`CompileHeap`]). The parse and the
+    /// compiler's temporaries are bumped into `arena`, the asking
+    /// request's where one asked, and it is reset as the unit is made,
+    /// as php resets `CG(ast_arena)` per file
+    /// (`Z/Zend/zend_language_scanner.l:599`, `:687`): so the compiles
+    /// of a framework's files, one after another on the thread that
+    /// asked, lay their trees in the room the last one left rather than
+    /// each in memory of its own given back to the allocator.
     fn compile_shared(
         &self,
         source: &[u8],
         origin: Origin<'_>,
         stack: StackLimit,
         heap: CompileHeap<'_>,
+        arena: &mut php_compile::syntax::Arena,
     ) -> Fresh {
         let mut strings = self.interned.strings();
         let mut home = PermanentStrings::new(&self.interned.names, &mut strings, heap);
-        // A unit for every request is compiled on the thread that asked,
-        // no request's arena at hand, so it brings its own.
-        let mut arena = php_compile::syntax::Arena::default();
         let unit = compile(
             source,
             origin,
@@ -1874,7 +1881,7 @@ impl Shared {
             stack,
             &mut home,
             Laid {
-                arena: &mut arena,
+                arena,
                 room: php_compile::Room::default(),
             },
         );
@@ -2117,7 +2124,10 @@ impl Shared {
             asked,
             |(), source, _| {
                 let request = ForRequest::none(self.unbound());
-                self.compile_file(source, path, cwd, stack, request, CompileHeap::Engine)
+                // No request asked, so no request's arena is at hand.
+                let mut arena = php_compile::syntax::Arena::default();
+                let heap = CompileHeap::Engine;
+                self.compile_file(source, path, cwd, stack, request, heap, &mut arena)
             },
             |_| None,
             |unit| self.publish_compiled(unit),
@@ -2155,7 +2165,8 @@ impl Shared {
     /// the request's `CG(rtd_key_counter)` and persists the names it made
     /// ([`Request::count_keys_made`]); a unit compiled for no request
     /// starts from none. The compile is charged to `heap` while it runs
-    /// ([`CompileHeap`]).
+    /// ([`CompileHeap`]), in `arena` ([`Shared::compile_shared`]).
+    #[allow(clippy::too_many_arguments)] // the source, where it is, what asked, and where the compile is charged and laid, each one fact
     pub(crate) fn compile_file(
         &self,
         source: &[u8],
@@ -2164,6 +2175,7 @@ impl Shared {
         stack: StackLimit,
         request: ForRequest<'_>,
         heap: CompileHeap<'_>,
+        arena: &mut php_compile::syntax::Arena,
     ) -> Fresh {
         self.compile_shared(
             source,
@@ -2175,6 +2187,7 @@ impl Shared {
             },
             stack,
             heap,
+            arena,
         )
     }
 

@@ -892,6 +892,9 @@ impl Request {
         let stack = self.stack_limit();
         let bound = crate::multibyte::bound(self, shared.compile_multibyte());
         let keys_before = self.keys_made();
+        // In the request's own arena, as its own compiles are: taken out
+        // for the compile, which runs no PHP code, and put back after.
+        let mut arena = std::mem::take(&mut self.compile_arena);
         let fresh = self.compiling_for_cache(|heap, classes, cwd| {
             // opcache compiles the file under
             // `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`, so it substitutes
@@ -909,8 +912,10 @@ impl Request {
                 stack,
                 request,
                 CompileHeap::Request(heap),
+                &mut arena,
             )
         });
+        self.compile_arena = arena;
         // What the compile laid on the heap before its persist, its
         // stacks held to the request's end; one that meets the hard
         // limit has ended the request.
@@ -1479,6 +1484,35 @@ mod tests {
         let a = "a".repeat(1_000_000);
         let x = vec!["self::A"; 16].join(" . ");
         format!("<?php\nclass C {{\n    const A = '{a}';\n    const X = {x};\n}}\n")
+    }
+
+    /// A compile bound for the cache is parsed in the arena of the request
+    /// that asked, as php's into `CG(ast_arena)`, so the request's next
+    /// such compile lays its tree in the room the last one left and the
+    /// compiles of a framework's files reuse one arena's pages: the
+    /// arena's last tree is each compile's in turn.
+    #[test]
+    fn successive_cache_bound_compiles_of_one_request_reuse_its_one_arena() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let mut compile = |name: &str, source: &str| {
+            let fresh = req.compile_for_cache(
+                source.as_bytes(),
+                name.as_bytes(),
+                crate::unit_cache::Optimizer::Off,
+            );
+            assert!(fresh.unit.is_ok(), "{name} compiles");
+            assert!(fresh.tree > 0, "{name} has a tree");
+            assert_eq!(
+                req.compile_arena.parsed(),
+                fresh.tree,
+                "{name} was parsed in the request's arena"
+            );
+            fresh.tree
+        };
+        let first = compile("/a.php", "<?php function f($a) { return \"$a and {$a}\"; }");
+        let second = compile("/b.php", "<?php class B { public $b = 'b'; }");
+        assert_ne!(first, second);
     }
 
     /// A compile bound for the cache is charged to the heap of the
