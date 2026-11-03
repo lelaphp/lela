@@ -243,10 +243,10 @@ fn a_request_claims_nothing_until_it_reaches_the_trace_it_submitted() {
     let claim = policy::claim(holder.clone(), &policy, Start::Loop);
     assert_eq!(policy::read(word), State::Recording);
     let state = crate::JitRequest::recorder(&policy);
-    state.submitted.set(Some(Submitted {
+    state.submitted.set(Some(Box::new(Submitted {
         word: holder,
         goes_on: GoesOn::Short,
-    }));
+    })));
     let at = |state: &crate::JitRequest, site| quieted(state, Some(site));
     assert!(at(&state, Site::Entry), "under way");
     assert!(at(&state, Site::Loop(SafepointIdx(1))), "under way");

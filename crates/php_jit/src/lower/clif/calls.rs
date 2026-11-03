@@ -1171,6 +1171,8 @@ impl Emit<'_> {
         self.b.ins().store(trusted(), past, back, at(L.opline()));
         // Where the interpreter stands: in the caller, the call under way
         // in it the record now on top where that is not the caller's own.
+        // Each word loaded for it alone, which no path but one that reads
+        // where the frame stands needs ([`super::unread`]).
         let under = self.b.ins().iadd_imm_s(len, -2);
         let first = self.record_word(frames, under, L.record_at());
         let built = self.b.ins().iadd_imm_s(first, -i64::from(L.room()));
@@ -1178,7 +1180,9 @@ impl Emit<'_> {
         let nothing = self.b.ins().iconst(I64, 0);
         let call = self.b.ins().select(own, nothing, built);
         let func = self.b.ins().load(I32, trusted(), back, at(L.cache()));
-        let left = self.left_past(stack, room);
+        let end = self.b.ins().load(I64, trusted(), stack, END);
+        let left = self.b.ins().isub(end, room);
+        self.stood_loads([first, func, end]);
         self.stand([back, call, func, past, left]);
         if let Some(threw) = threw {
             // php's `jit_stub_leave_throw` after `zend_jit_leave_func`: the
