@@ -21,7 +21,7 @@
 use std::num::NonZeroU32;
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::types::{I8, I32, I64};
+use cranelift_codegen::ir::types::{I8, I32, I64, I128};
 use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, MemFlagsData, Value};
 use cranelift_frontend::Variable;
 use php_engine::tier::{self, FRAME, FrameLayout, FuncRef, PLACE, PlaceLayout, PlainCall};
@@ -169,6 +169,30 @@ impl Emit<'_> {
         (slow, self.b.create_block())
     }
 
+    /// The header image at `header` copied into the room at `top`, and its
+    /// `slots` cells made `UNDEF`, two words a store: a pair where the
+    /// target has one (`ldp`, `stp`), as `undefine` clears a whole cell,
+    /// and one word where the header ends on one.
+    fn lay_frame(&mut self, header: Value, top: Value, slots: u32) {
+        let mut word = 0;
+        while word < L.header_bytes() {
+            let ty = if L.header_bytes() - word >= 16 {
+                I128
+            } else {
+                I64
+            };
+            let value = self.b.ins().load(ty, trusted(), header, at(word));
+            (self.b.ins()).store(trusted(), value, top, at(L.header() + word));
+            word += ty.bytes();
+        }
+        let zero = self.b.ins().iconst(I64, 0);
+        let undef = self.b.ins().uextend(I128, zero);
+        for slot in 0..slots {
+            let cell = L.room() + SLOT * slot;
+            self.b.ins().store(trusted(), undef, top, at(cell));
+        }
+    }
+
     /// The bytes the top page has left past `top`, `EG(vm_stack_end) - top`.
     pub(super) fn left_past(&mut self, stack: Value, top: Value) -> Value {
         let end = self.b.ins().load(I64, trusted(), stack, END);
@@ -259,6 +283,17 @@ impl Emit<'_> {
     /// full, the opline is stepped, which pushes the same call; php's own
     /// stack check, a guard before the push, leaves first where the page
     /// is short of what the trace pushes ([`crate::types::Check::Room`]).
+    /// The header is copied and the slots cleared a cell a store, so a
+    /// call pushed where the last one left its variables reads them
+    /// undefined:
+    ///
+    /// ```php
+    /// function g($set) { if ($set) { $a = "x"; $b = [1]; } return isset($a, $b) ? 1 : 0; }
+    /// $s = 0; for ($i = 0; $i < 100; $i++) { $s += g($i % 2 == 0); } echo $s, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 50
+    /// ```
     ///
     /// A method's call held by the pair its runtime-cache slot holds
     /// ([`Imm::Pair`]) is pushed where the slot holds the pair the trace
@@ -307,18 +342,7 @@ impl Emit<'_> {
         let cx = self.cx.ok_or_else(|| mismatch("a push before the entry"))?;
         let images = self.b.ins().load(I64, trusted(), cx, IMAGES_AT);
         let header = self.b.ins().load(I64, trusted(), images, header);
-        for word in (0..L.header_bytes()).step_by(8) {
-            let value = self.b.ins().load(I64, trusted(), header, at(word));
-            self.b
-                .ins()
-                .store(trusted(), value, top, at(L.header() + word));
-        }
-        let zero = self.b.ins().iconst(I64, 0);
-        for slot in 0..plain.slots() {
-            let cell = L.room() + SLOT * slot;
-            self.b.ins().store(trusted(), zero, top, at(cell));
-            self.b.ins().store(trusted(), zero, top, at(cell + 8));
-        }
+        self.lay_frame(header, top, plain.slots());
         match over.scope {
             Some(Scope::Number(class)) => {
                 // `ScopeAt`'s half-word: the class's number inverted.
