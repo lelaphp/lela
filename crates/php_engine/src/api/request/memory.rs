@@ -415,6 +415,7 @@ impl Request {
     /// makes one, what [`PhpString::fast`] is: the interned string for
     /// the empty string and one byte, as [`Request::string`] hands out,
     /// and otherwise `zend_string_finit` ([`Request::string_finit`]).
+    #[inline] // `zend_string_init_fast` is `zend_always_inline`
     pub(crate) fn string_fast(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
         if bytes.len() <= 1
             && let Some(frozen) = self.shared.permanent(bytes)
@@ -427,12 +428,14 @@ impl Request {
     /// A string of `bytes` out of this request's heap whatever their
     /// length, php-8.5.12's `zend_string_finit`
     /// ([`php_heap::Heap::string_finit`]).
+    #[inline] // as `string_fast`
     pub(crate) fn string_finit(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
         self.string_sized(bytes, Sizing::Finit)
     }
 
     /// A string of `bytes` out of this request's heap whatever their
     /// length, laid at `sizing`'s size ([`php_heap::Heap::string_sized`]).
+    #[inline] // as `string_fast`
     pub(crate) fn string_sized(
         &mut self,
         bytes: &[u8],
@@ -491,6 +494,7 @@ impl Request {
     /// What the heap answered, as the native sees it: the string, or the
     /// memory limit as php's fatal, which `zend_mm` raises where the
     /// allocation was asked for and which ends the request from there.
+    #[inline] // a test of the answer; the refusal is out of line
     fn allocated(&mut self, allocated: Result<php_heap::Str, Fatal>) -> Result<PhpString, Thrown> {
         self.fatal_of(allocated).map(PhpString::of)
     }

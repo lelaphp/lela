@@ -491,6 +491,7 @@ impl Heap {
     /// ([`Sizing::bytes`]): [`Heap::string`] is [`Sizing::Alloc`]'s and
     /// [`Heap::string_finit`] [`Sizing::Finit`]'s. A sum that overflows is
     /// php's fatal, raised before anything is asked for.
+    #[inline] // `zend_string_init_fast` is `zend_always_inline`, every native's piece goes through it
     pub fn string_sized(&mut self, bytes: &[u8], sizing: Sizing) -> Result<Str, Fatal> {
         let size = self.sized(sizing, bytes.len())?;
         let at = self.mm.alloc(size)?;
@@ -591,6 +592,7 @@ impl Heap {
     /// The bytes a string of `len` laid at `sizing` asks for
     /// ([`Sizing::bytes`]), a sum that overflows the heap's refusal or its
     /// end ([`Mm::overflow_refusal`]).
+    #[inline] // a sum and a compare; the refusal is out of line
     fn sized(&mut self, sizing: Sizing, len: usize) -> Result<usize, Fatal> {
         sizing
             .bytes(len)

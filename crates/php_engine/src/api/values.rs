@@ -159,6 +159,7 @@ impl PhpString {
     /// the request as php's fatal and ending the native as `zend_mm`
     /// bails out.
     #[cfg_attr(debug_assertions, track_caller)]
+    #[inline] // `zend_string_init` is `zend_always_inline`, and a native's string is made here
     pub fn new(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
         adopted(req.string(bytes))
     }
@@ -183,6 +184,7 @@ impl PhpString {
     /// 100 160 128
     /// ```
     #[cfg_attr(debug_assertions, track_caller)]
+    #[inline] // as `new`
     pub fn fast(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
         adopted(req.string_fast(bytes))
     }
@@ -954,6 +956,7 @@ impl PhpArray {
     /// when that is `ZEND_LONG_MAX` and taken (`zend_cannot_add_element`),
     /// `value` given up.
     #[cfg_attr(debug_assertions, track_caller)]
+    #[inline] // `zend_hash_next_index_insert` into a list with room is a store in the native's loop
     pub fn append(&mut self, req: &mut Request, value: Owner<Value>) -> Result<(), Thrown> {
         if self.try_append(req, value)? {
             return Ok(());
@@ -965,6 +968,7 @@ impl PhpArray {
     /// `nNextFreeElement` is `ZEND_LONG_MAX` and taken, which is what
     /// `add_next_index_*` answers.
     #[cfg_attr(debug_assertions, track_caller)]
+    #[inline] // as `append`
     pub fn try_append(&mut self, req: &mut Request, value: Owner<Value>) -> Result<bool, Thrown> {
         if let Err(thrown) = self.separate(req) {
             value.give_up(req);
