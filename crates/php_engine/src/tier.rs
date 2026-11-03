@@ -737,6 +737,15 @@ impl Next {
     }
 }
 
+/// What the loop takes up after an edge that let the frame's slots go
+/// (`serve_held`): the slots of the frame it goes on in, or, where the
+/// edge went into another frame, its position with them.
+#[derive(Clone, Copy)]
+enum Took {
+    Slots,
+    Standing,
+}
+
 /// What a handler's inline path answers (design §5.8): the way on in the
 /// frame and nothing else, since an inline path reads and writes the
 /// frame's slots and the op array alone, never the request. The loop,
@@ -1477,19 +1486,21 @@ fn serve_held<'u, T: Tier, D: Telling>(
             };
             #[cfg(dispatch = "tailcall")]
             let way = tail::chain::<T, D>(req, frame, body, oplines, at, &declared)?.way();
-            // Whether the edge went into another frame, where the loop
-            // takes its position up with its slots. One take-up where the
-            // arms meet: the two edges into a frame taking theirs up in
-            // their own arms and going on by `continue` measured the empty
-            // loop 72.9 -> 89.2 (#3345).
-            let into = match way {
+            // What the loop takes up for the frame it goes on in: its
+            // slots where a handler with the request in hand went on in
+            // it, its position with them where the edge went into another
+            // frame, and nothing where the edge handed them over. One
+            // take-up where the arms meet: the two edges into a frame
+            // taking theirs up in their own arms and going on by
+            // `continue` measured the empty loop 72.9 -> 89.2 (#3345).
+            let took = match way {
                 Way::On(places) => {
                     at = at.wrapping_add(places);
-                    false
+                    Took::Slots
                 }
                 Way::Jump(to) => {
                     at = to;
-                    false
+                    Took::Slots
                 }
                 // A return to a frame the loop entered: its op array as
                 // the loop left it for the call.
@@ -1500,31 +1511,45 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     frame = to;
                     body = code;
                     oplines = &*body.oplines;
-                    true
+                    Took::Standing
                 }
                 // A call to a function the loop called before: its op
-                // array as the loop entered it then.
+                // array as the loop entered it then, and the callee's
+                // frame looked at once for what the loop enters it with,
+                // php's `DO_UCALL` reading `call->func` and `ZEND_VM_ENTER`
+                // loading `opline` (`Z/Zend/zend_vm_def.h:4170`).
                 Way::Left(stepped @ Stepped::Pushed(callee)) => {
-                    let Some((function, start)) = req
-                        .vm()
-                        .at(callee)
-                        .and_then(|header| Some((header.function()?, header.opline)))
-                    else {
+                    let Some(called_frame) = req.vm_mut().stack.frame_mut(callee) else {
                         break stepped;
                     };
-                    let Some(called) = kept.called(function) else {
+                    let header = called_frame.header();
+                    let (function, start) = (header.function(), header.opline);
+                    let Some(called) = function.and_then(|function| kept.called(function)) else {
                         break stepped;
                     };
                     kept.keep(callee, called.code);
-                    let entry = (start, called.entry);
-                    if let Err(other) = entered::<T, D>(req, callee, called.code, entry, declared)?
-                    {
-                        break other;
-                    }
                     frame = callee;
                     body = called.code;
                     oplines = &*body.oplines;
-                    true
+                    let entry = (start, called.entry);
+                    // Where nothing is told of a `RECV`, no tier is bound
+                    // and no interrupt is raised, the activation is the
+                    // passing `RECV`s alone, read over the frame in hand,
+                    // whose slots the loop goes on with (#4022).
+                    #[cfg(not(dispatch = "tailcall"))]
+                    if interpreted::<T>()
+                        && !declared.tells(php_unit::Opcode::Recv)
+                        && !interrupt.raised().load(Ordering::Relaxed)
+                        && let Some((to, held)) = exec::received(called_frame, body, entry)
+                    {
+                        at = to;
+                        slots = held;
+                        continue;
+                    }
+                    if let Err(other) = entered::<T, D>(req, callee, body, entry, declared)? {
+                        break other;
+                    }
+                    Took::Standing
                 }
                 Way::Left(stepped) => break stepped,
             };
@@ -1535,13 +1560,12 @@ fn serve_held<'u, T: Tier, D: Telling>(
             // measured every dispatch of the bare loops 4% higher, by two
             // moves the allocator added at the loop's head (#3320).
             #[cfg(not(dispatch = "tailcall"))]
-            if into {
-                (at, slots) = req.standing(frame);
-            } else {
-                slots = req.slots_mut(frame);
+            match took {
+                Took::Standing => (at, slots) = req.standing(frame),
+                Took::Slots => slots = req.slots_mut(frame),
             }
             #[cfg(dispatch = "tailcall")]
-            if into {
+            if let Took::Standing = took {
                 at = req.vm().opline(frame);
             }
         };
