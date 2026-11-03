@@ -1834,15 +1834,24 @@ fn quiet(req: &Request, site: Option<Site>) -> bool {
     tier::state::<JitRequest>(req).is_some_and(|state| quieted(state, site))
 }
 
-/// [`quiet`] over the request's state.
-#[inline]
+/// [`quiet`] over the request's state: in line where nothing is
+/// recorded or submitted, every visit under `jit.compile=inline`.
+#[inline(always)] // jit-design.md §4.9: two loads on every visit
+#[allow(clippy::inline_always)]
 fn quieted(state: &JitRequest, site: Option<Site>) -> bool {
     if state.recording.get() {
         return true;
     }
-    let Some(submitted) = state.submitted.take() else {
-        return false;
-    };
+    match state.submitted.take() {
+        None => false,
+        Some(submitted) => submitted_quiets(state, submitted, site),
+    }
+}
+
+/// [`quieted`] where the request submitted a trace it has not reached.
+#[cold]
+#[inline(never)]
+fn submitted_quiets(state: &JitRequest, submitted: Box<Submitted>, site: Option<Site>) -> bool {
     let under_way = policy::read(submitted.word.word()) == State::Recording;
     let short = submitted.goes_on == GoesOn::Short
         && !matches!(site, Some(Site::Loop(_) | Site::Return(_)));
