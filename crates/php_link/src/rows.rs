@@ -234,28 +234,43 @@ impl<T: Clone> Column<T> {
         T: 'c,
     {
         let mut columns: Vec<&mut Column<T>> = columns.into_iter().collect();
-        let mut all = Vec::with_capacity(columns.iter().map(|column| column.len()).sum());
-        let mut ends = Vec::with_capacity(columns.len());
-        for column in &columns {
-            all.extend(column.iter().cloned());
-            ends.push(all.len());
-        }
-        if u32::try_from(all.len()).is_err() {
+        let len: usize = columns.iter().map(|column| column.len()).sum();
+        let Some(first) = columns.iter().find_map(|column| column.first().cloned()) else {
+            for column in &mut columns {
+                column.0 = Store::Own(Vec::new());
+            }
+            return;
+        };
+        if u32::try_from(len).is_err() {
             return;
         }
-        let table: Arc<[T]> = all.into();
+        // The table allocated once at its length, then each column copied
+        // in and its own values given up, so no second copy stands.
+        let mut table: Arc<[T]> = std::iter::repeat_n(first, len).collect();
+        let Some(cells) = Arc::get_mut(&mut table) else {
+            return;
+        };
+        let mut ends = Vec::with_capacity(columns.len());
+        let mut start = 0;
+        for column in &mut columns {
+            let end = start + column.len();
+            if let Some(cells) = cells.get_mut(start..end) {
+                cells.clone_from_slice(column);
+            }
+            column.0 = Store::Own(Vec::new());
+            ends.push(end);
+            start = end;
+        }
         let mut start = 0;
         for (column, end) in columns.iter_mut().zip(ends) {
             let end = u32::try_from(end).unwrap_or(start);
-            column.0 = if end == start {
-                Store::Own(Vec::new())
-            } else {
-                Store::Laid {
+            if end != start {
+                column.0 = Store::Laid {
                     table: Arc::clone(&table),
                     start,
                     end,
-                }
-            };
+                };
+            }
             start = end;
         }
     }
