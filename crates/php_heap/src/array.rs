@@ -2858,7 +2858,9 @@ impl crate::Heap {
     /// collector is already destroying, whose type it turned to
     /// `IS_NULL` (`rc_dtor_func`'s `zend_empty_destroy`); otherwise the
     /// table taken out of the root buffer and turned to `IS_NULL`
-    /// itself, every element released through `hooks`, in order, with
+    /// itself, every element released in order, a packed list's strings
+    /// before its first other counted value in one flat pass
+    /// ([`Heap::array_destroy_flat`]) and the rest through `hooks`, with
     /// the table standing around each, every string key given up, then
     /// the iterators unregistered and the data and the header back to
     /// the heap. A cell is `zend_reference_destroy`: the typed-property
@@ -2897,38 +2899,34 @@ impl crate::Heap {
     /// released
     /// ```
     pub(crate) fn destroy(hooks: &mut dyn HeapHooks, first: Last) {
-        if let Last::Table(a) = first
-            && hooks.heap().array_destroy_flat(a)
-        {
-            return;
-        }
+        let heap = hooks.heap();
+        let (next, from) = match first {
+            Last::Table(a) => match heap.array_destroy_flat(a) {
+                None => return,
+                Some(at) => (None, Some(Emptying::Table { a, at, key: None })),
+            },
+            Last::Cell(_) => (Some(first), None),
+        };
         // The heap's room for the walk, taken for its length and put back
         // emptied, so a walk allocates nothing after the request's first.
-        let mut walk = std::mem::take(&mut hooks.heap().destroying);
-        Heap::destroy_into(hooks, first, &mut walk);
+        let mut walk = std::mem::take(&mut heap.destroying);
+        walk.extend(from);
+        Heap::destroy_into(hooks, next, &mut walk);
         walk.clear();
         hooks.heap().destroying = walk;
     }
 
-    /// [`Heap::destroy`]'s walk over `walk`, empty on entry and on the
-    /// way out.
-    fn destroy_into(hooks: &mut dyn HeapHooks, first: Last, walk: &mut Vec<Emptying>) {
-        let mut next = Some(first);
+    /// [`Heap::destroy`]'s walk from `next`, or from the frame `walk`
+    /// holds on entry, empty on the way out. A table reached is begun by
+    /// [`Heap::array_destroy_flat`], and taken up as a frame only where
+    /// that hands back a position.
+    fn destroy_into(hooks: &mut dyn HeapHooks, mut next: Option<Last>, walk: &mut Vec<Emptying>) {
         loop {
             match next.take() {
-                // A table the cycle collector is destroying already.
-                Some(Last::Table(a)) if a.gc().kind() == ZvalType::Null as u32 => {}
                 Some(Last::Table(a)) => {
-                    hooks
-                        .heap()
-                        .gc
-                        .remove_from_buffer(crate::collector::Node::Arr(a));
-                    a.gc().set_kind(ZvalType::Null);
-                    walk.push(Emptying::Table {
-                        a,
-                        at: 0,
-                        key: None,
-                    });
+                    if let Some(at) = hooks.heap().array_destroy_flat(a) {
+                        walk.push(Emptying::Table { a, at, key: None });
+                    }
                 }
                 Some(Last::Cell(r)) => {
                     if r.sources() != 0 {
@@ -3015,12 +3013,19 @@ impl crate::Heap {
         Heap::array_free_data(hooks.heap(), a);
     }
 
-    /// [`Heap::destroy`] of a table no element of which has an owner to
-    /// give up: a packed list of uncounted values, or a table never
-    /// written. php's `zend_array_destroy` walks it and releases nothing,
-    /// so the walk is left out and the table goes as the walk would let it
-    /// go, out of the root buffer, then its data and its header. `false`,
-    /// and nothing done, for every other table, the walk's.
+    /// The start of `zend_array_destroy` over a table its last owner let
+    /// go of, and as much of its loop as serves no destructor: nothing for
+    /// a table the cycle collector is destroying already, whose type it
+    /// turned to `IS_NULL`; otherwise the table out of the root buffer and
+    /// turned to `IS_NULL`, then each slot of a packed list released in
+    /// place while it holds a string or no count, a string freed at its
+    /// last owner with no hooks, as `i_zval_ptr_dtor` reaches
+    /// `zend_string_destroy`. `None` where that was every element, and the
+    /// table goes back, its data and its header; otherwise the position
+    /// of the first other counted value, `0` of a hash, for
+    /// [`Heap::destroy`]'s walk to go on from. So `explode`'s list goes in
+    /// one pass, and a destructor still runs after the strings before it
+    /// are freed and before the ones after it, as php's one loop runs it.
     ///
     /// ```php
     /// $b = memory_get_usage();
@@ -3032,14 +3037,47 @@ impl crate::Heap {
     /// ```expect
     /// int(0)
     /// ```
-    fn array_destroy_flat(&mut self, a: Arr) -> bool {
-        if a.gc().kind() == ZvalType::Null as u32 || !a.holds_nothing_counted() {
-            return false;
+    ///
+    /// What is held at the destructor of an object between strings, and
+    /// after the list:
+    ///
+    /// ```php
+    /// class D { function __destruct() { $GLOBALS['at'] = memory_get_usage() - $GLOBALS['b']; } }
+    /// $b = $at = 0; new D;
+    /// $b = memory_get_usage();
+    /// $a = explode(',', str_repeat('piece,', 4)); $a[] = new D; $a[] = str_repeat('t', 100);
+    /// $all = memory_get_usage() - $b;
+    /// $a = null;
+    /// $l = explode(' ', 'one two three four five six'); $l = null;
+    /// echo $all, ' ', $at, ' ', memory_get_usage() - $b, "\n";
+    /// ```
+    /// ```expect
+    /// 576 416 32
+    /// ```
+    fn array_destroy_flat(&mut self, a: Arr) -> Option<u32> {
+        if a.gc().kind() == ZvalType::Null as u32 {
+            return None;
         }
         self.gc.remove_from_buffer(crate::collector::Node::Arr(a));
         a.gc().set_kind(ZvalType::Null);
+        if a.is_packed() {
+            for at in 0..a.num_used() {
+                let z = a.read_slot(at);
+                let Some(header) = z.counted() else {
+                    continue;
+                };
+                let Some(s) = z.as_str() else {
+                    return Some(at);
+                };
+                if Heap::give_up(header) == gc::Release::Last {
+                    self.free_string(s);
+                }
+            }
+        } else if !a.is_uninitialized() {
+            return Some(0);
+        }
         self.array_give_back(a);
-        true
+        None
     }
 
     /// The end of `zend_array_destroy` once every element is released:
@@ -3080,15 +3118,6 @@ pub(crate) enum Emptying {
 }
 
 impl Arr {
-    /// Whether giving the table up releases nothing: an uninitialised
-    /// table, or a packed list none of whose slots holds a counted value.
-    fn holds_nothing_counted(self) -> bool {
-        if self.is_uninitialized() {
-            return true;
-        }
-        self.is_packed() && (0..self.num_used()).all(|idx| !self.read_slot(idx).is_refcounted())
-    }
-
     /// The next element of a table being destroyed at or past `*at`,
     /// its value and its string key, and `*at` moved past it: a packed
     /// table's slots, a hash's buckets less the tombstones, and nothing
@@ -3721,6 +3750,55 @@ mod tests {
             dropped.load(std::sync::atomic::Ordering::SeqCst),
             2,
             "swept"
+        );
+    }
+
+    /// A packed list of strings, `explode`'s shape, goes in one flat
+    /// pass, the walk's room never taken up; a string another owner
+    /// holds is left to it. A list whose strings stand before a nest
+    /// hands the walk the nest's position, and everything goes with it.
+    #[test]
+    fn a_list_of_strings_goes_without_the_walk() {
+        let _alone = alone();
+        let mut nothing = Nothing::new();
+        let start = nothing.heap.memory_usage(false);
+        let kept = nothing.heap.string(b"kept").expect("the string \"kept\"");
+        let list = nothing.heap.array().expect("an array");
+        for piece in [&b"one"[..], b"two", b"three"] {
+            let s = nothing.heap.string(piece).expect("a piece");
+            assert!(matches!(
+                nothing.heap.array_append(list, Zval::string(s)),
+                Ok(true)
+            ));
+        }
+        nothing.heap.addref(Zval::string(kept));
+        assert!(matches!(
+            nothing.heap.array_append(list, Zval::string(kept)),
+            Ok(true)
+        ));
+        assert!(matches!(
+            nothing.heap.array_append(list, Zval::long(7)),
+            Ok(true)
+        ));
+        Heap::release(&mut nothing, Zval::array(list));
+        assert_eq!(nothing.heap.destroying.capacity(), 0, "no walk");
+        assert_eq!(kept.refcount(), 1, "the other owner's string stands");
+
+        let list = nothing.heap.array().expect("an array");
+        let inner = nothing.heap.array().expect("an array");
+        let nested = nothing.heap.string(b"nested").expect("a piece");
+        assert!(matches!(
+            nothing.heap.array_append(inner, Zval::string(nested)),
+            Ok(true)
+        ));
+        for z in [Zval::string(kept), Zval::array(inner), Zval::long(1)] {
+            assert!(matches!(nothing.heap.array_append(list, z), Ok(true)));
+        }
+        Heap::release(&mut nothing, Zval::array(list));
+        assert_eq!(
+            nothing.heap.memory_usage(false),
+            start,
+            "the strings before the nest, the nest and its own"
         );
     }
 
