@@ -178,13 +178,22 @@ pub trait FromArgument: Sized {
     }
     /// The absent argument: the declaration's default, `absent` as the
     /// entry lays it down, evaluated in `scope`, the declaring class, and
-    /// held to the declared type ([`Absent`]).
+    /// held to the declared type ([`Absent`]). A scalar written as itself
+    /// that the type admits is the value and nothing else, as php's C
+    /// default is a constant the body reads: the entry folds it, since
+    /// its `absent` is a constant there.
+    #[inline(always)] // every omitted argument's path in a native's entry
     fn from_default(
         req: &mut Request,
         absent: Absent,
         scope: Option<&[u8]>,
         position: u32,
     ) -> Result<Self, Thrown> {
+        if let Absent::Value(value) = absent
+            && admits(Self::MASK, &value)
+        {
+            return Self::from_value(req, value);
+        }
         let value = default_value(req, absent, scope, position, (Self::MASK, Self::declared))?;
         Self::from_value(req, value)
     }
