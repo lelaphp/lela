@@ -2070,7 +2070,10 @@ fn explode_negative_limit(
 ///
 /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 32522240 bytes) in %s on line 3
 /// ```
-#[php_function(frameless(1 = implode_frameless, 2 = implode_frameless), aliases(join))]
+#[php_function(
+    frameless(1 = implode_frameless_1, 2 = implode_frameless_2),
+    aliases(join)
+)]
 fn implode(
     req: &mut Request,
     separator: Raw<Union<PhpArray, PhpString>>,
@@ -2095,7 +2098,7 @@ fn implode(
 }
 
 /// `ZEND_FRAMELESS_FUNCTION(implode, 1)` and `(implode, 2)`
-/// (`Z/ext/standard/string.c:1077`), which parse their own arguments:
+/// (`Z/ext/standard/string.c:1120`, `:1141`), one entry each, which parse their own arguments:
 /// one is the array as it stands, never converted, and anything else
 /// php's second `TypeError` with no deprecation first; of two, the
 /// separator is a string (`Z_FLF_PARAM_STR`), so an array there is
@@ -2115,17 +2118,47 @@ fn implode(
 /// string(2) "a2"
 /// string(5) "a1.5b"
 /// ```
-fn implode_frameless(
+fn implode_frameless_1(
+    req: &mut Request,
+    separator: Raw<Union<PhpArray, PhpString>>,
+    _: Raw<Option<PhpArray>>,
+) -> Result<Owner<PhpString>, Thrown> {
+    // `zend_parse_arg_array(arg1, &pieces, false, false)`.
+    let Some(pieces) = separator.value().as_array() else {
+        return Err(not_an_array(req));
+    };
+    implode_array(req, b"", true, pieces)
+}
+
+/// `ZEND_FRAMELESS_FUNCTION(implode, 2)`: `Z_FLF_PARAM_STR` takes a
+/// separator that is a string where it stands and
+/// `Z_FLF_PARAM_ARRAY_OR_NULL` an array, so a call given both reads
+/// nothing more of its caller's frame; any other separator is coerced as
+/// the parameter declares and the array held as a `?array`
+/// ([`implode_frameless_1`] has the witness of each refusal).
+///
+/// ```php
+/// $f = ["12", "INFO", 7, "/api/v2/x", -30]; $g = "|"; $m = memory_get_usage(); $s = implode($g, $f); var_dump($s, memory_get_usage() - $m, implode($g, []), implode($g, ["only"]), implode("", $f));
+/// $r = &$f; var_dump(implode(",", $r), implode($f));
+/// ```
+/// ```expect
+/// string(23) "12|INFO|7|/api/v2/x|-30"
+/// int(56)
+/// string(0) ""
+/// string(4) "only"
+/// string(19) "12INFO7/api/v2/x-30"
+/// string(23) "12,INFO,7,/api/v2/x,-30"
+/// string(19) "12INFO7/api/v2/x-30"
+/// ```
+fn implode_frameless_2(
     req: &mut Request,
     separator: Raw<Union<PhpArray, PhpString>>,
     array: Raw<Option<PhpArray>>,
 ) -> Result<Owner<PhpString>, Thrown> {
-    if req.frames().argument_count() < 2 {
-        // `zend_parse_arg_array(arg1, &pieces, false, false)`.
-        let Some(pieces) = separator.value().as_array() else {
-            return Err(not_an_array(req));
-        };
-        return implode_array(req, b"", true, pieces);
+    if let (Some(glue), Some(pieces)) =
+        (separator.value().as_php_string(), array.value().as_array())
+    {
+        return implode_array(req, glue.as_bytes(), glue.is_valid_utf8(), pieces);
     }
     let glue = coerce_param(req, &separator.value(), &Type::String, 1)?;
     let Some(glue) = glue.as_php_string() else {
