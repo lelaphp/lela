@@ -532,6 +532,9 @@ impl std::ops::DerefMut for ExtraNamed {
 /// the opline and the flags ([`crate::readable`]), and the fields are in
 /// that order and then by size, so the header fills the seventy-two
 /// bytes php's eighty leave past the link with nothing between them.
+/// Among the half-words, the four an `INIT` writes zero, the caller,
+/// the slot it returns to, the scope and the annex, are the last
+/// sixteen bytes, which the push of [`Header::primed`] lays at once.
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub(crate) struct Header {
@@ -576,6 +579,15 @@ pub(crate) struct Header {
     /// `ZEND_CALL_NUM_ARGS`: how many arguments the call that pushed the
     /// frame placed, which the `RECV*` prologue reads.
     pub(crate) num_args: u32,
+    /// `ZEND_MAP_PTR(op_array->run_time_cache)`: which entry of the
+    /// request's map table the op array's runtime cache is (design
+    /// §5.6), what names the cache, its observer slot and, to the
+    /// compiled tier, the op array. The frame holds the pointer and never
+    /// the cache: the cache is the request's, laid down on the op array's
+    /// first activation ([`init_runtime_cache`]) and kept until request
+    /// end, so a function called twice reads on its second call what its
+    /// first primed; where it stands is [`Header::cache_base`].
+    run_time_cache: CacheAt,
     /// `EX(prev_execute_data)` as far as a diagnostic reads it
     /// ([`Caller`], [`Header::caller`]).
     caller: CallerAt,
@@ -586,15 +598,6 @@ pub(crate) struct Header {
     /// The called scope, `static`; none for the main op array or a
     /// function ([`Header::called_scope`]).
     called_scope: Option<ScopeAt>,
-    /// `ZEND_MAP_PTR(op_array->run_time_cache)`: which entry of the
-    /// request's map table the op array's runtime cache is (design
-    /// §5.6), what names the cache, its observer slot and, to the
-    /// compiled tier, the op array. The frame holds the pointer and never
-    /// the cache: the cache is the request's, laid down on the op array's
-    /// first activation ([`init_runtime_cache`]) and kept until request
-    /// end, so a function called twice reads on its second call what its
-    /// first primed; where it stands is [`Header::cache_base`].
-    run_time_cache: CacheAt,
     /// What the frame owns beyond words, where it owns anything. Written
     /// with [`CallInfo::ANNEX`] beside it ([`Header::set_annex`]).
     annex: Option<AnnexId>,
@@ -708,7 +711,7 @@ impl Header {
     pub(crate) fn primed(call: PrimedCall, count: u32) -> Header {
         let mut header = Header::call(call.function, count);
         header.callee = call.callee;
-        header.info.join(call.sent);
+        header.info = call.info;
         header.run_time_cache = call.cache;
         header.cache_base = call.base;
         header.opline = call.opline;
@@ -1237,6 +1240,12 @@ impl CallInfo {
     #[inline]
     pub(crate) fn join(&mut self, more: CallInfo) {
         self.0 |= more.0;
+    }
+
+    /// These flags on a call being built, as [`Header::call`] lays it:
+    /// what an `INIT`'s slot keeps, so its push writes the word as kept.
+    pub(crate) fn of_call_built(self) -> CallInfo {
+        CallInfo(self.0 | Self::CALL | Self::BUILDING)
     }
 }
 
@@ -2054,9 +2063,10 @@ pub(crate) enum Cached {
 /// frame and the arguments past its parameters the opline passes
 /// ([`crate::api::request::FrameShape::room`]); the record is the one a
 /// frame serving the function names ([`crate::readable::CalleeAt`]); the
-/// flags are what the push joins into the call's
-/// ([`crate::api::request::FrameShape::sent`]). A function's row never
-/// changes once declared, so the slot answers every pass of the request.
+/// flags are the call's as the push lays them, what its sends start from
+/// ([`crate::api::request::FrameShape::sent`]) on a call being built. A
+/// function's row never changes once declared, so the slot answers every
+/// pass of the request.
 ///
 /// Where the call enters plainly, the flags say its entry is laid
 /// ([`CallInfo::LAID_ENTRY`]) and the slot keeps the runtime cache and
@@ -2069,7 +2079,9 @@ pub(crate) struct PrimedCall {
     pub(crate) function: Function,
     pub(crate) room: u32,
     pub(crate) callee: crate::readable::CalleeAt,
-    pub(crate) sent: CallInfo,
+    /// The call's flags as the push lays them: a call being built
+    /// ([`Header::call`]) joined with what its sends start from.
+    pub(crate) info: CallInfo,
     pub(crate) cache: CacheAt,
     /// Where `cache` stands in the request, which the activation writes
     /// ([`Header::cache_base`]).

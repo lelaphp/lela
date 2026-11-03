@@ -571,10 +571,18 @@ impl<H> VmStack<H> {
 
     /// The slots the top page has left for frames, `EG(vm_stack_end) -
     /// EG(vm_stack_top)` over `sizeof(zval)`: none while no page stands.
+    /// The top never passes the end: a page laid down or made the top
+    /// again writes the two inside it, or both dangling where none
+    /// stands, a push or a frame's growth moves the top up by no more
+    /// than this, here and in compiled code that pushes in place
+    /// ([`VmStack::LAYOUT`]), and a pop moves it back down. So the
+    /// room is one subtraction and the push's test one compare, as php's
+    /// (`Z/Zend/zend_execute.h:350`).
     #[inline]
     fn left(&self) -> usize {
         let (top, end) = (self.top.as_ptr().addr(), self.end.as_ptr().addr());
-        end.saturating_sub(top) / SLOT
+        debug_assert!(top <= end, "a VM stack's top past its end");
+        end.wrapping_sub(top) / SLOT
     }
 
     /// The top and the end made the top page's, where its frames stood

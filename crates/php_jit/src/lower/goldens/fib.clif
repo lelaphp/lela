@@ -176,13 +176,13 @@ function u0:0(i64, i64) -> i32 tail {
 @0005                               v107 = bor v105, v106  ; v106 = 0
 @0005                               store notrap aligned v107, v85+44
 @0005                               v108 = iconst.i32 1
-@0005                               store notrap aligned v108, v85+72  ; v108 = 1
+@0005                               store notrap aligned v108, v85+60  ; v108 = 1
 @0005                               v109 = iconst.i32 4
-@0005                               store notrap aligned v109, v85+64  ; v109 = 4
+@0005                               store notrap aligned v109, v85+68  ; v109 = 4
 @0005                               v111 = ireduce.i32 v24
 @0005                               v112 = iconst.i32 1
 @0005                               v113 = iadd v111, v112  ; v112 = 1
-@0005                               store notrap aligned v113, v85+60
+@0005                               store notrap aligned v113, v85+64
 @0005                               v114 = iconst.i32 8
 @0005                               store notrap aligned v114, v86+40  ; v114 = 8
 @0005                               v115 = iconst.i32 1
@@ -370,13 +370,13 @@ function u0:0(i64, i64) -> i32 tail {
 @000c                               v224 = bor v222, v223  ; v223 = 0
 @000c                               store notrap aligned v224, v202+44
 @000c                               v225 = iconst.i32 1
-@000c                               store notrap aligned v225, v202+72  ; v225 = 1
+@000c                               store notrap aligned v225, v202+60  ; v225 = 1
 @000c                               v226 = iconst.i32 4
-@000c                               store notrap aligned v226, v202+64  ; v226 = 4
+@000c                               store notrap aligned v226, v202+68  ; v226 = 4
 @000c                               v228 = ireduce.i32 v136
 @000c                               v229 = iconst.i32 1
 @000c                               v230 = iadd v228, v229  ; v229 = 1
-@000c                               store notrap aligned v230, v202+60
+@000c                               store notrap aligned v230, v202+64
 @000c                               v231 = iconst.i32 8
 @000c                               store notrap aligned v231, v203+40  ; v231 = 8
 @000c                               v232 = iconst.i32 1

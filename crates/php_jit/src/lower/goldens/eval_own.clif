@@ -127,7 +127,7 @@ function u0:0(i64, i64) -> i32 tail {
 @0001                               store notrap aligned v81, v59+112  ; v81 = 0
 @0001                               store notrap aligned v81, v59+120  ; v81 = 0
 @0001                               v82 = bnot.i32 v55
-@0001                               store notrap aligned v82, v59+68
+@0001                               store notrap aligned v82, v59+72
 @0001                               v83 = load.i64 notrap aligned v29+80
 @0001                               store notrap aligned v83, v59+16
 @0001                               v84 = load.i32 notrap aligned v59+44

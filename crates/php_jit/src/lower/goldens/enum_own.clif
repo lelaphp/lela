@@ -171,7 +171,7 @@ function u0:0(i64, i64) -> i32 tail {
 @0001                               store notrap aligned v95, v73+96  ; v95 = 0
 @0001                               store notrap aligned v95, v73+104  ; v95 = 0
 @0001                               v96 = bnot.i32 v69
-@0001                               store notrap aligned v96, v73+68
+@0001                               store notrap aligned v96, v73+72
 @0001                               v97 = load.i64 notrap aligned v42+80
 @0001                               store notrap aligned v97, v73+16
 @0001                               v98 = load.i32 notrap aligned v73+44
@@ -274,13 +274,13 @@ function u0:0(i64, i64) -> i32 tail {
 @0004                               v165 = bor v163, v164  ; v164 = 0
 @0004                               store notrap aligned v165, v149+44
 @0004                               v166 = iconst.i32 6
-@0004                               store notrap aligned v166, v149+72  ; v166 = 6
+@0004                               store notrap aligned v166, v149+60  ; v166 = 6
 @0004                               v167 = iconst.i32 7
-@0004                               store notrap aligned v167, v149+64  ; v167 = 7
+@0004                               store notrap aligned v167, v149+68  ; v167 = 7
 @0004                               v170 = ireduce.i32 v48
 @0004                               v171 = iconst.i32 1
 @0004                               v172 = iadd v170, v171  ; v171 = 1
-@0004                               store notrap aligned v172, v149+60
+@0004                               store notrap aligned v172, v149+64
 @0004                               v174 = iconst.i32 7
 @0004                               store notrap aligned v174, v42+40  ; v174 = 7
 @0004                               v175 = iconst.i32 6
@@ -344,7 +344,7 @@ function u0:0(i64, i64) -> i32 tail {
 @0006                               brif v209, block32(v213, v202, v205), block33  ; v213 = 0
 
                                 block33:
-@0007                               v217 = load.i32 notrap aligned v202+60
+@0007                               v217 = load.i32 notrap aligned v202+64
 @0007                               v218 = uextend.i64 v217
 @0007                               v219 = iconst.i64 0x7fff_ffff
 @0007                               v220 = band v218, v219  ; v219 = 0x7fff_ffff
@@ -404,7 +404,7 @@ function u0:0(i64, i64) -> i32 tail {
 @0007                               v259 = iadd.i64 v243, v258
 @0007                               v260 = load.i64 notrap aligned v259
                                     v343 -> v260
-@0007                               v261 = load.i32 notrap aligned v202+64
+@0007                               v261 = load.i32 notrap aligned v202+68
 @0007                               v262 = uextend.i64 v261
 @0007                               v263 = iconst.i64 -1
 @0007                               v264 = iadd v262, v263  ; v263 = -1
@@ -537,7 +537,7 @@ function u0:0(i64, i64) -> i32 tail {
 @0007                               v362 = icmp eq v355, v222
 @0007                               v363 = iconst.i64 0
 @0007                               v364 = select v362, v363, v361  ; v363 = 0
-@0007                               v365 = load.i32 notrap aligned v349+72
+@0007                               v365 = load.i32 notrap aligned v349+60
 @0007                               v366 = load.i64 notrap aligned v3+64
 @0007                               v367 = isub v366, v202
 @0007                               v368 = stack_addr.i64 ss0
