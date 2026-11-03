@@ -29,8 +29,8 @@ use php_heap::{Obj, Ref, Zval, ZvalType};
 use php_unit::{Opcode, OperandKind};
 
 use super::{
-    COUNTED, Dtor, EX_OPLINE, Emit, KIND, Kernel, Refuse, STOOD_CALL, STOOD_FRAME, STOOD_FUNC,
-    STOOD_OPLINE, STOOD_ROOM, Scalar, TYPE_AT, imm, leave_of, mismatch, tag, trusted,
+    COUNTED, Dtor, EX_OPLINE, Emit, KIND, Kernel, Refuse, STOOD_CALL, Scalar, TYPE_AT, imm,
+    leave_of, mismatch, tag, trusted,
 };
 use crate::lower::{IMAGES_AT, INTERRUPT_AT, OperandKinds, READY_AT, RETURNED, THREW};
 use crate::types::{
@@ -167,19 +167,6 @@ impl Emit<'_> {
         let slow = self.b.create_block();
         self.b.set_cold_block(slow);
         (slow, self.b.create_block())
-    }
-
-    /// The `Stood` a kernel would write, written by code in place.
-    fn stand(&mut self, [frame, call, func, opline, room]: [Value; 5]) {
-        for (value, at) in [
-            (frame, STOOD_FRAME),
-            (call, STOOD_CALL),
-            (func, STOOD_FUNC),
-            (opline, STOOD_OPLINE),
-            (room, STOOD_ROOM),
-        ] {
-            self.b.ins().stack_store(I64, value, self.stood, at);
-        }
     }
 
     /// The bytes the top page has left past `top`, `EG(vm_stack_end) - top`.
@@ -381,8 +368,9 @@ impl Emit<'_> {
         self.b.seal_block(slow);
         let [room, opline] = self.served(line)?;
         let func = self.func_of(line.frame)?;
-        let stood = self.b.ins().stack_addr(I64, self.stood, 0);
+        let stood = self.stood_out();
         self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?;
+        self.stood_back();
         for guard in self.within(id) {
             match guard.check {
                 Check::Callee { func } => self.callee_guard(func, guard.exit)?,
