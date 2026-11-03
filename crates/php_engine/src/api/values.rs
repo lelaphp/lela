@@ -3113,7 +3113,7 @@ impl Value {
     /// [`Value::type_code`] of the value as it stands, a reference not
     /// followed: `IS_REFERENCE`'s own code there.
     #[inline]
-    const fn own_type_code(&self) -> u8 {
+    pub(crate) const fn own_type_code(&self) -> u8 {
         match self.zval.kind() {
             ZvalType::ConstExpr | ZvalType::Indirect | ZvalType::Ptr => ZvalType::Null as u8,
             kind => kind as u8,

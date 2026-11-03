@@ -1600,9 +1600,23 @@ impl Request {
         #[cfg(not(debug_assertions))]
         let _ = function;
         self.release_coerced(made);
+        // A throwable a stream kept is out of line, as `serve_entry` takes it.
+        if self.stream_thrown.is_some() {
+            return self.frameless_kept(served);
+        }
+        served.map(crate::api::values::Owner::hand_on)
+    }
+
+    /// [`Request::serve_frameless`] past the entry where a stream kept a
+    /// throwable while it ran: raised over what the entry answered.
+    #[cold]
+    #[inline(never)]
+    fn frameless_kept(
+        &mut self,
+        served: Result<crate::api::values::Owner<Value>, Thrown>,
+    ) -> Result<Value, Thrown> {
         let served = served.map(crate::api::values::Owner::hand_on);
-        // Taken only where kept, as `serve_entry` takes it.
-        let Some(deferred) = self.stream_thrown.take_if(|_| true) else {
+        let Some(deferred) = self.stream_thrown.take() else {
             return served;
         };
         match served {
