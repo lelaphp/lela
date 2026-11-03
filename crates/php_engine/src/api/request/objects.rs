@@ -388,7 +388,7 @@ pub(crate) fn placed_of<'d>(
             placed.push(row(at));
         }
     }
-    let rows = record.map_or_else(Box::default, |record| {
+    let rows = record.map_or_else(php_link::Column::default, |record| {
         record
             .properties
             .rows()
@@ -397,7 +397,7 @@ pub(crate) fn placed_of<'d>(
             .collect()
     });
     Placed {
-        slots: placed.into_boxed_slice(),
+        slots: placed.into(),
         rows,
         holes,
     }

@@ -58,7 +58,7 @@ mod rows;
 mod traits;
 
 pub use rows::{
-    Accessor, Accessors, Case, ClassHooks, Exact, Folded, Indexed, LinkedClass, NameHash,
+    Accessor, Accessors, Case, ClassHooks, Column, Exact, Folded, Indexed, LinkedClass, NameHash,
     NameHasher, NameMap, Named, Names, Row, Rows,
 };
 
@@ -2166,12 +2166,12 @@ impl<'a, H: Copy> Linker<'a, H> {
         &self,
         child: &'a ClassDecl,
         methods: &Rows<Row<H>, Folded>,
-    ) -> Option<Box<[Option<H>]>>
+    ) -> Option<Column<Option<H>>>
     where
         H: PartialEq,
     {
         if child.kind == ClassKind::Interface {
-            return Some(vec![None; methods.rows().len()].into_boxed_slice());
+            return Some(Column::default());
         }
         // A class held with a record, none where no class has the name.
         let held = |name: &[u8]| match (self.lookup)(name) {
@@ -2236,7 +2236,10 @@ impl<'a, H: Copy> Linker<'a, H> {
             }
             prototypes.push(prototype);
         }
-        Some(prototypes.into_boxed_slice())
+        while prototypes.last() == Some(&None) {
+            prototypes.pop();
+        }
+        Some(prototypes.into())
     }
 
     /// The row of `class`'s function table under `name`, with its
@@ -2406,7 +2409,7 @@ impl<'a, H: Copy> Linker<'a, H> {
     /// parent's reversed, then each it names with that one's own
     /// reversed after it (`zend_class_implements`). None where the
     /// parent or an interface is held with no record.
-    fn interface_list(&self, child: &'a ClassDecl) -> Option<Box<[H]>>
+    fn interface_list(&self, child: &'a ClassDecl) -> Option<Column<H>>
     where
         H: PartialEq,
     {
@@ -2448,7 +2451,7 @@ impl<'a, H: Copy> Linker<'a, H> {
         for interface in added {
             extend_new(&mut list, interface.interfaces.iter().rev());
         }
-        Some(list.into_boxed_slice())
+        Some(list.into())
     }
 
     /// `lookup_class(scope, name)` while `child` links: the class being

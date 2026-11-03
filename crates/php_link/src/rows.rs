@@ -5,6 +5,7 @@
 //! lookup is one hash lookup and a walk reads the rows in order.
 
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use hashbrown::HashTable;
 
@@ -21,8 +22,9 @@ pub struct LinkedClass<H> {
     pub methods: Rows<Row<H>, Folded>,
     /// `common.prototype`'s scope for each row of `methods`, at the
     /// row's position: the class whose method the row's prototype is,
-    /// none where the link set none.
-    pub prototypes: Box<[Option<H>]>,
+    /// none where the link set none, and none for each row past the
+    /// column's length, so a class whose rows have none holds none.
+    pub prototypes: Column<Option<H>>,
     /// `CE_CONSTANTS_TABLE` in php's order: the class's own constants, a
     /// trait's among them, then each of the parent's table it does not
     /// declare but the parent's private ones, then the interfaces'
@@ -37,7 +39,7 @@ pub struct LinkedClass<H> {
     pub properties: Rows<Row<H>, Exact>,
     /// `ce->interfaces`: every interface the class implements, each once
     /// and in php's order, so `instanceof` scans one slice.
-    pub interfaces: Box<[H]>,
+    pub interfaces: Column<H>,
     /// `ce->constructor`: the position of `__construct`'s row in
     /// `methods`, set once where the class is linked, as
     /// `zend_add_magic_method` sets it for the class's own and
@@ -116,10 +118,10 @@ impl<H> Default for LinkedClass<H> {
     fn default() -> Self {
         LinkedClass {
             methods: Rows::default(),
-            prototypes: Box::default(),
+            prototypes: Column::default(),
             constants: Rows::default(),
             properties: Rows::default(),
-            interfaces: Box::default(),
+            interfaces: Column::default(),
             constructor: None,
             destructor: None,
             accessors: Accessors::default(),
@@ -169,25 +171,213 @@ impl Case for Exact {
     const FOLDED: bool = false;
 }
 
+/// One column of a linked record: its own values, or a range of one
+/// table laid for many records ([`Column::lay`]), as opcache persists a
+/// class's tables into one buffer. It reads as the slice either way.
+#[derive(Debug, Clone)]
+pub struct Column<T>(Store<T>);
+
+/// Where a [`Column`]'s values are.
+#[derive(Debug, Clone)]
+enum Store<T> {
+    Own(Vec<T>),
+    Laid {
+        table: Arc<[T]>,
+        start: u32,
+        end: u32,
+    },
+}
+
+impl<T> Default for Column<T> {
+    fn default() -> Self {
+        Column(Store::Own(Vec::new()))
+    }
+}
+
+impl<T> From<Vec<T>> for Column<T> {
+    fn from(values: Vec<T>) -> Self {
+        Column(Store::Own(values))
+    }
+}
+
+impl<T> FromIterator<T> for Column<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(values: I) -> Self {
+        Column::from(values.into_iter().collect::<Vec<T>>())
+    }
+}
+
+impl<T> std::ops::Deref for Column<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        match &self.0 {
+            Store::Own(values) => values,
+            Store::Laid { table, start, end } => table
+                .get(wide_at(*start)..wide_at(*end))
+                .unwrap_or_default(),
+        }
+    }
+}
+
+impl<T: PartialEq> PartialEq for Column<T> {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl<T: Clone> Column<T> {
+    /// Each of `columns` that still holds its own values laid as a range
+    /// of one table, in their order, so they hold one allocation between
+    /// them rather than one each; an empty one holds none, and one laid
+    /// already stays where it is laid. So a caller that lays as it goes
+    /// gives each batch's own values up before the next batch is built,
+    /// and the next batch's are allocated where those stood. Columns past
+    /// the rows a `u32` numbers are left as they stand.
+    pub fn lay<'c>(columns: impl IntoIterator<Item = &'c mut Column<T>>)
+    where
+        T: 'c,
+    {
+        let mut own: Vec<&mut Column<T>> = Vec::new();
+        for column in columns.into_iter().filter(|column| column.owns()) {
+            if column.is_empty() {
+                column.0 = Store::Own(Vec::new());
+            } else {
+                own.push(column);
+            }
+        }
+        let mut columns = own;
+        let len: usize = columns.iter().map(|column| column.len()).sum();
+        let Some(first) = columns.iter().find_map(|column| column.first().cloned()) else {
+            return;
+        };
+        if u32::try_from(len).is_err() {
+            return;
+        }
+        // The table allocated once at its length, then each column copied
+        // in and its own values given up, so no second copy stands.
+        let mut table: Arc<[T]> = std::iter::repeat_n(first, len).collect();
+        let Some(cells) = Arc::get_mut(&mut table) else {
+            return;
+        };
+        let mut ends = Vec::with_capacity(columns.len());
+        let mut start = 0;
+        for column in &mut columns {
+            let end = start + column.len();
+            if let Some(cells) = cells.get_mut(start..end) {
+                cells.clone_from_slice(column);
+            }
+            column.0 = Store::Own(Vec::new());
+            ends.push(end);
+            start = end;
+        }
+        let mut start = 0;
+        for (column, end) in columns.iter_mut().zip(ends) {
+            let end = u32::try_from(end).unwrap_or(start);
+            if end != start {
+                column.0 = Store::Laid {
+                    table: Arc::clone(&table),
+                    start,
+                    end,
+                };
+            }
+            start = end;
+        }
+    }
+
+    /// Whether the column holds an allocation of its own, which
+    /// [`Column::lay`] lays or, where it holds no value, gives up.
+    fn owns(&self) -> bool {
+        matches!(&self.0, Store::Own(values) if values.capacity() != 0)
+    }
+
+    /// The values to change, a laid column's copied out of its table
+    /// first; none only where that copy did not take.
+    fn own(&mut self) -> Option<&mut Vec<T>> {
+        if let Store::Laid { .. } = &self.0 {
+            self.0 = Store::Own(self.to_vec());
+        }
+        match &mut self.0 {
+            Store::Own(values) => Some(values),
+            Store::Laid { .. } => None,
+        }
+    }
+}
+
+impl<H: Clone> LinkedClass<H> {
+    /// Each column of `records` laid as a range of one table of its kind:
+    /// every record's rows in one, their indexes and hashes in another,
+    /// the prototypes and the interfaces in one each, so the records hold
+    /// four allocations between them rather than about ten each, as
+    /// opcache persists a class's tables into one buffer
+    /// (`zend_persist_class_entry`). A record laid already stays where it
+    /// is ([`Column::lay`]). What a lookup reads is unchanged.
+    pub fn lay<'r>(records: impl IntoIterator<Item = &'r mut LinkedClass<H>>)
+    where
+        H: 'r,
+    {
+        let (mut rows, mut words) = (Vec::new(), Vec::new());
+        let (mut prototypes, mut interfaces) = (Vec::new(), Vec::new());
+        for record in records {
+            rows.extend(
+                [
+                    &mut record.methods.entries,
+                    &mut record.constants.entries,
+                    &mut record.properties.entries,
+                ]
+                .into_iter()
+                .filter(|column| column.owns()),
+            );
+            words.extend(
+                [
+                    &mut record.methods.words,
+                    &mut record.constants.words,
+                    &mut record.properties.words,
+                ]
+                .into_iter()
+                .filter(|column| column.owns()),
+            );
+            prototypes.extend(Some(&mut record.prototypes).filter(|column| column.owns()));
+            interfaces.extend(Some(&mut record.interfaces).filter(|column| column.owns()));
+        }
+        Column::lay(rows);
+        Column::lay(words);
+        Column::lay(prototypes);
+        Column::lay(interfaces);
+    }
+}
+
+/// A table of at most this many rows has no index: its hashes are
+/// scanned, which at that length reads no more than a lookup in an index does.
+const SCANNED: usize = 8;
+
 /// Rows in the order they were added, and an index of their positions by
 /// name: a `HashTable` php's `HashTable` is both of. The name is read
 /// through the row by the caller's `named`, so no key is held or
-/// allocated; each row's hash is kept beside it, so the index grows,
-/// and another table's rows are copied in, without reading a name.
+/// allocated; each row's hash is kept beside the index in one column, as
+/// `zend_hash` lays its hash part before its buckets in one allocation
+/// (`HT_SET_DATA_ADDR`), so the index grows, and another table's rows
+/// are copied in, without reading a name.
 #[derive(Debug, Clone)]
 pub struct Rows<R, C> {
-    entries: Vec<R>,
-    hashes: Vec<u32>,
-    index: HashTable<u32>,
+    entries: Column<R>,
+    /// The index's `slots` slots, each the position of a row plus one
+    /// or zero where none is filed, read in turn from where the hash
+    /// lands, packed into as few words as the positions fit
+    /// ([`slot_bits`]); then each row's hash, by its position.
+    words: Column<u32>,
+    /// How many slots the index has: none for a table of at most
+    /// [`SCANNED`] rows, otherwise a power of two at least twice its
+    /// rows, so a lookup ends at an empty slot.
+    slots: u32,
     case: PhantomData<C>,
 }
 
 impl<R, C> Default for Rows<R, C> {
     fn default() -> Self {
         Rows {
-            entries: Vec::new(),
-            hashes: Vec::new(),
-            index: HashTable::new(),
+            entries: Column::default(),
+            words: Column::default(),
+            slots: 0,
             case: PhantomData,
         }
     }
@@ -200,21 +390,16 @@ impl<R: PartialEq, C> PartialEq for Rows<R, C> {
 }
 
 impl<R, C: Case> Rows<R, C> {
-    /// A table laid for `rows` rows, its index among them, so filling it
-    /// that far grows nothing: what `zend_hash_extend` does to a class's
-    /// table before `zend_do_inheritance` copies the parent's in.
-    pub(crate) fn with_capacity(rows: usize) -> Self {
-        Rows {
-            entries: Vec::with_capacity(rows),
-            hashes: Vec::with_capacity(rows),
-            index: HashTable::with_capacity(rows),
-            case: PhantomData,
-        }
-    }
-
     /// The rows in order.
     pub fn rows(&self) -> &[R] {
         &self.entries
+    }
+
+    /// Each row's hash, by its position.
+    fn hashes(&self) -> &[u32] {
+        self.words
+            .get(index_words(self.slots)..)
+            .unwrap_or_default()
     }
 
     /// The row under `name`, whose own name `named` reads.
@@ -235,6 +420,44 @@ impl<R, C: Case> Rows<R, C> {
     ) -> Option<(usize, &R)> {
         let at = self.position(hash, |row| same::<C>(named(row), name))?;
         Some((at, self.entries.get(at)?))
+    }
+
+    /// The position of the first row of `hash` that `matches` takes.
+    fn position(&self, hash: u32, matches: impl Fn(&R) -> bool) -> Option<usize> {
+        let (index, hashes) = self.words.split_at_checked(index_words(self.slots))?;
+        let hit =
+            |at: usize| hashes.get(at) == Some(&hash) && self.entries.get(at).is_some_and(&matches);
+        let slots = wide_at(self.slots);
+        let Some(mask) = slots.checked_sub(1) else {
+            return (0..hashes.len()).find(|&at| hit(at));
+        };
+        let bits = slot_bits(self.slots);
+        let mut slot = landing(hash, mask);
+        for _ in 0..slots {
+            let at = wide_at(slot_in(index, bits, slot)?.checked_sub(1)?);
+            if hit(at) {
+                return Some(at);
+            }
+            slot = (slot + 1) & mask;
+        }
+        None
+    }
+}
+
+impl<R: Clone, C: Case> Rows<R, C> {
+    /// A table laid for `rows` rows, its index among them, so filling it
+    /// that far grows nothing: what `zend_hash_extend` does to a class's
+    /// table before `zend_do_inheritance` copies the parent's in.
+    pub(crate) fn with_capacity(rows: usize) -> Self {
+        let slots = slots_for(rows);
+        let mut words = Vec::with_capacity(index_words(slots).saturating_add(rows));
+        words.resize(index_words(slots), 0);
+        Rows {
+            entries: Vec::with_capacity(rows).into(),
+            words: words.into(),
+            slots,
+            case: PhantomData,
+        }
     }
 
     /// `zend_hash_add`: `row` under `name` at the end, unless a row of
@@ -262,16 +485,16 @@ impl<R, C: Case> Rows<R, C> {
     ) -> bool {
         let hash = hash::<C>(name);
         if let Some(at) = self.position(hash, |held| same::<C>(named(held), name)) {
-            self.entries.remove(at);
-            self.hashes.remove(at);
+            if let Some(entries) = self.entries.own() {
+                entries.remove(at);
+            }
+            let hashed = index_words(self.slots).saturating_add(at);
+            if let Some(words) = self.words.own() {
+                words.remove(hashed);
+            }
             // Every row past it moved down one: the index filed again
             // over the rows as they stand, in the room it has.
-            self.index.clear();
-            let hashes = &self.hashes;
-            for (at, &kept) in (0u32..).zip(hashes) {
-                self.index
-                    .insert_unique(wide(kept), at, |&at| wide(hash_at(hashes, at)));
-            }
+            self.refile(self.slots);
         }
         self.push(row, hash)
     }
@@ -288,7 +511,7 @@ impl<R, C: Case> Rows<R, C> {
         named_from: impl Fn(&S) -> &'m [u8],
     ) {
         self.reserve(from.entries.len());
-        for (row, &hash) in from.entries.iter().zip(&from.hashes) {
+        for (row, &hash) in from.entries.iter().zip(from.hashes()) {
             let name = named_from(row);
             if self
                 .position(hash, |held| same::<C>(named(held), name))
@@ -301,43 +524,134 @@ impl<R, C: Case> Rows<R, C> {
     }
 
     fn reserve(&mut self, more: usize) {
-        self.entries.reserve(more);
-        self.hashes.reserve(more);
-        let hashes = &self.hashes;
-        self.index.reserve(more, |&at| wide(hash_at(hashes, at)));
-    }
-
-    /// The position of the row of `hash` that `matches` takes.
-    fn position(&self, hash: u32, matches: impl Fn(&R) -> bool) -> Option<usize> {
-        let found = self.index.find(wide(hash), |&at| {
-            let at = usize::try_from(at).unwrap_or(usize::MAX);
-            self.hashes.get(at) == Some(&hash) && self.entries.get(at).is_some_and(&matches)
-        })?;
-        usize::try_from(*found).ok()
+        let slots = slots_for(self.entries.len().saturating_add(more));
+        if slots > self.slots {
+            self.refile(slots);
+        }
+        if let Some(entries) = self.entries.own() {
+            entries.reserve(more);
+        }
+        if let Some(words) = self.words.own() {
+            words.reserve(more);
+        }
     }
 
     /// `row` at the end, unless the table holds as many rows as a
     /// position can number. Whether it was added.
     fn push(&mut self, row: R, hash: u32) -> bool {
-        let Ok(at) = u32::try_from(self.entries.len()) else {
+        let Some(filed) = u32::try_from(self.entries.len())
+            .ok()
+            .and_then(|at| at.checked_add(1))
+        else {
             return false;
         };
-        self.entries.push(row);
-        self.hashes.push(hash);
-        let hashes = &self.hashes;
-        self.index
-            .insert_unique(wide(hash), at, |&at| wide(hash_at(hashes, at)));
+        let slots = slots_for(wide_at(filed));
+        if slots > self.slots {
+            self.refile(slots);
+        }
+        let (Some(entries), Some(words)) = (self.entries.own(), self.words.own()) else {
+            return false;
+        };
+        entries.push(row);
+        words.push(hash);
+        self.file(hash, filed);
         true
+    }
+
+    /// The index laid again at `slots` slots, every row filed in it in
+    /// order, so the first of a name is the first a lookup meets.
+    fn refile(&mut self, slots: u32) {
+        let hashes = self.hashes().to_vec();
+        let mut words = Vec::with_capacity(index_words(slots).saturating_add(hashes.len()));
+        words.resize(index_words(slots), 0);
+        words.extend_from_slice(&hashes);
+        self.words = words.into();
+        self.slots = slots;
+        for (filed, &hash) in (1u32..).zip(&hashes) {
+            self.file(hash, filed);
+        }
+    }
+
+    /// `filed`, a row's position plus one, into the first empty word of
+    /// the index from where `hash` lands.
+    fn file(&mut self, hash: u32, filed: u32) {
+        let (slots, bits) = (wide_at(self.slots), slot_bits(self.slots));
+        let Some(mask) = slots.checked_sub(1) else {
+            return;
+        };
+        let words = index_words(self.slots);
+        let Some(index) = (self.words.own()).and_then(|own| own.get_mut(..words)) else {
+            return;
+        };
+        let mut slot = landing(hash, mask);
+        for _ in 0..slots {
+            if slot_in(index, bits, slot) == Some(0) {
+                let per = 32 / bits;
+                let shift = slot % per * bits;
+                if let Some(word) = index.get_mut(slot / per) {
+                    let cleared = u64::from(*word) & !(slot_mask(bits) << shift);
+                    let set = cleared | (u64::from(filed) & slot_mask(bits)) << shift;
+                    *word = u32::try_from(set).unwrap_or(*word);
+                }
+                return;
+            }
+            slot = (slot + 1) & mask;
+        }
     }
 }
 
-/// The hash kept for the row at `at`, which the index refiles a position
-/// by as it grows.
-fn hash_at(hashes: &[u32], at: u32) -> u32 {
-    (hashes
-        .get(usize::try_from(at).unwrap_or(usize::MAX))
-        .copied())
-    .unwrap_or(0)
+/// The bits one slot of an index of `slots` slots is laid in: the
+/// fewest of 8, 16 and 32 that number its rows plus one, an index
+/// filing at most half as many rows as it has slots. php's `HT_HASH`
+/// slot is 32 bits whatever the table's size; the width is not
+/// observable, so a class's index is laid in the fewest.
+fn slot_bits(slots: u32) -> usize {
+    match slots {
+        0..=0x100 => 8,
+        0x101..=0x2_0000 => 16,
+        _ => 32,
+    }
+}
+
+/// The words an index of `slots` slots fills.
+fn index_words(slots: u32) -> usize {
+    wide_at(slots).saturating_mul(slot_bits(slots)) / 32
+}
+
+/// The low `bits` bits of a word.
+fn slot_mask(bits: usize) -> u64 {
+    (1u64 << bits) - 1
+}
+
+/// What slot `slot` of an index laid at `bits` bits a slot files: a
+/// row's position plus one, zero where it files none.
+fn slot_in(index: &[u32], bits: usize, slot: usize) -> Option<u32> {
+    let per = 32 / bits;
+    let word = u64::from(*index.get(slot / per)?);
+    u32::try_from(word >> (slot % per * bits) & slot_mask(bits)).ok()
+}
+
+/// The words of index a table of `rows` rows is laid with: none up to
+/// [`SCANNED`], then the power of two at least twice the rows.
+fn slots_for(rows: usize) -> u32 {
+    if rows <= SCANNED {
+        return 0;
+    }
+    (rows.checked_mul(2))
+        .and_then(usize::checked_next_power_of_two)
+        .and_then(|slots| u32::try_from(slots).ok())
+        .unwrap_or(0)
+}
+
+/// Where a lookup of `hash` starts in an index of `mask + 1` words: the
+/// spread hash's top half, its best mixed bits.
+fn landing(hash: u32, mask: usize) -> usize {
+    usize::try_from(wide(hash) >> 32).unwrap_or(0) & mask
+}
+
+/// A position or a length kept as a `u32`, as an index into a slice.
+fn wide_at(at: u32) -> usize {
+    usize::try_from(at).unwrap_or(usize::MAX)
 }
 
 impl<R> Rows<R, Exact> {
@@ -846,6 +1160,127 @@ mod tests {
         let found = [&b"a"[..], b"b", b"c", b"d"].map(|name| rows.find_at(name, named));
         let at = found.map(|found| found.map(|(at, _)| at));
         assert_eq!(at, [Some(2), Some(0), Some(1), Some(3)]);
+    }
+
+    #[test]
+    fn a_table_past_the_scanned_length_finds_each_row_where_it_stands() {
+        let names: Vec<&'static [u8]> = (0..40u8)
+            .map(|n| &*Box::leak(format!("m{n}").into_bytes().into_boxed_slice()))
+            .collect();
+        let mut rows: Rows<&'static [u8], Folded> = Rows::default();
+        for &name in &names {
+            assert!(rows.add(name, name, named));
+        }
+        assert!(!rows.add(b"M7", b"M7", named));
+        assert!(rows.replace(names[3], names[3], named));
+        let at = |name: &[u8], rows: &Rows<&'static [u8], Folded>| {
+            rows.find_at(name, named).map(|(at, _)| at)
+        };
+        assert_eq!(at(b"M3", &rows), Some(39));
+        assert_eq!(at(b"m4", &rows), Some(3));
+        assert_eq!(at(b"m40", &rows), None);
+        let mut child: Rows<&'static [u8], Folded> = Rows::with_capacity(2);
+        child.add(b"own", b"own", named);
+        child.inherit(&rows, |&row| row, named, named);
+        assert_eq!(child.rows().len(), 41);
+        assert_eq!(at(b"m39", &child), Some(39));
+        assert_eq!(at(b"m3", &child), Some(40));
+    }
+
+    #[test]
+    fn laid_records_read_as_their_own_columns_did() {
+        use super::{Column, LinkedClass, Row};
+        let record = |rows: u32| {
+            let mut record: LinkedClass<u32> = LinkedClass::default();
+            for at in 0..rows {
+                let name = format!("p{at}");
+                record
+                    .properties
+                    .add(Row { holder: None, at }, name.as_bytes(), |_| b"");
+            }
+            record.interfaces = Column::from(vec![rows]);
+            record
+        };
+        let named = |row: &Row<u32>| match row.at {
+            0 => &b"p0"[..],
+            1 => b"p1",
+            11 => b"p11",
+            _ => b"",
+        };
+        let mut records = vec![record(2), record(0), record(12)];
+        let own = records.clone();
+        LinkedClass::lay(&mut records);
+        assert_eq!(records, own);
+        assert_eq!(
+            records[2]
+                .properties
+                .find_at(b"p11", named)
+                .map(|(at, _)| at),
+            Some(11)
+        );
+        assert_eq!(
+            records[0]
+                .properties
+                .find_at(b"p1", named)
+                .map(|(at, _)| at),
+            Some(1)
+        );
+        assert_eq!(records[1].properties.find(b"p0", named), None);
+        assert_eq!(*records[2].interfaces, [12]);
+        let mut child: Rows<Row<u32>, super::Exact> = Rows::default();
+        child.inherit(&records[2].properties, |&row| row, named, named);
+        assert_eq!(child.find_at(b"p11", named).map(|(at, _)| at), Some(11));
+    }
+
+    #[test]
+    fn an_index_of_each_slot_width_finds_each_row_where_it_stands() {
+        // 100 rows file in 8-bit slots, 300 in 16-bit ones and 70,000 in
+        // 32-bit ones.
+        for (count, words) in [(100u32, 64), (300, 512), (70_000, 262_144)] {
+            let names: Vec<&'static [u8]> = (0..count)
+                .map(|n| &*Box::leak(format!("r{n}").into_bytes().into_boxed_slice()))
+                .collect();
+            let mut rows: Rows<&'static [u8], Exact> = Rows::default();
+            for &name in &names {
+                assert!(rows.add(name, name, named));
+            }
+            assert_eq!(super::index_words(rows.slots), words, "{count}");
+            for (at, &name) in names.iter().enumerate() {
+                assert_eq!(rows.find_at(name, named).map(|(at, _)| at), Some(at));
+            }
+            assert_eq!(rows.find(b"r-1", named), None);
+        }
+    }
+
+    #[test]
+    fn records_laid_in_batches_read_as_their_own_columns_did() {
+        use super::{Column, LinkedClass, Row};
+        let record = |rows: u32| {
+            let mut record: LinkedClass<u32> = LinkedClass::default();
+            for at in 0..rows {
+                let name = format!("c{at}");
+                record
+                    .constants
+                    .add(Row { holder: None, at }, name.as_bytes(), |_| b"");
+            }
+            record.prototypes = Column::from(vec![None, Some(rows)]);
+            record
+        };
+        let mut records: Vec<LinkedClass<u32>> = (0..5).map(|n| record(n * 4)).collect();
+        let own = records.clone();
+        let (first, last) = records.split_at_mut(2);
+        LinkedClass::lay(first.iter_mut());
+        let at = |record: &LinkedClass<u32>| record.constants.rows().as_ptr();
+        let laid = at(&first[1]);
+        LinkedClass::lay(first.iter_mut().chain(last.iter_mut()));
+        assert_eq!(records, own);
+        // The first batch stays where it was laid; the second is laid in
+        // one table of its own, each record after the one before.
+        assert_eq!(at(&records[1]), laid);
+        assert_eq!(at(&records[3]), at(&records[2]).wrapping_add(8));
+        let named = |row: &Row<u32>| if row.at == 13 { &b"c13"[..] } else { b"" };
+        let found = records[4].constants.find_at(b"c13", named);
+        assert_eq!(found.map(|(at, _)| at), Some(13));
     }
 
     #[test]
