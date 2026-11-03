@@ -549,6 +549,7 @@ double_to_string
 ecalloc
 efree
 emalloc
+equal_strings
 erealloc
 gcvt
 identical
