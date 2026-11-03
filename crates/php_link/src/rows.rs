@@ -335,13 +335,14 @@ const SCANNED: usize = 8;
 #[derive(Debug, Clone)]
 pub struct Rows<R, C> {
     entries: Column<R>,
-    /// The index's `slots` words, each the position of a row plus one or
-    /// zero where none is filed, read in turn from where the hash
-    /// lands; then each row's hash, by its position.
+    /// The index's `slots` slots, each the position of a row plus one
+    /// or zero where none is filed, read in turn from where the hash
+    /// lands, packed into as few words as the positions fit
+    /// ([`slot_bits`]); then each row's hash, by its position.
     words: Column<u32>,
-    /// How many of `words` are the index: none for a table of at most
+    /// How many slots the index has: none for a table of at most
     /// [`SCANNED`] rows, otherwise a power of two at least twice its
-    /// rows, so a lookup ends at an empty word.
+    /// rows, so a lookup ends at an empty slot.
     slots: u32,
     case: PhantomData<C>,
 }
@@ -371,7 +372,9 @@ impl<R, C: Case> Rows<R, C> {
 
     /// Each row's hash, by its position.
     fn hashes(&self) -> &[u32] {
-        self.words.get(wide_at(self.slots)..).unwrap_or_default()
+        self.words
+            .get(index_words(self.slots)..)
+            .unwrap_or_default()
     }
 
     /// The row under `name`, whose own name `named` reads.
@@ -396,15 +399,17 @@ impl<R, C: Case> Rows<R, C> {
 
     /// The position of the first row of `hash` that `matches` takes.
     fn position(&self, hash: u32, matches: impl Fn(&R) -> bool) -> Option<usize> {
-        let (index, hashes) = self.words.split_at_checked(wide_at(self.slots))?;
+        let (index, hashes) = self.words.split_at_checked(index_words(self.slots))?;
         let hit =
             |at: usize| hashes.get(at) == Some(&hash) && self.entries.get(at).is_some_and(&matches);
-        let Some(mask) = index.len().checked_sub(1) else {
+        let slots = wide_at(self.slots);
+        let Some(mask) = slots.checked_sub(1) else {
             return (0..hashes.len()).find(|&at| hit(at));
         };
+        let bits = slot_bits(self.slots);
         let mut slot = landing(hash, mask);
-        for _ in 0..index.len() {
-            let at = wide_at(index.get(slot)?.checked_sub(1)?);
+        for _ in 0..slots {
+            let at = wide_at(slot_in(index, bits, slot)?.checked_sub(1)?);
             if hit(at) {
                 return Some(at);
             }
@@ -420,8 +425,8 @@ impl<R: Clone, C: Case> Rows<R, C> {
     /// table before `zend_do_inheritance` copies the parent's in.
     pub(crate) fn with_capacity(rows: usize) -> Self {
         let slots = slots_for(rows);
-        let mut words = Vec::with_capacity(wide_at(slots).saturating_add(rows));
-        words.resize(wide_at(slots), 0);
+        let mut words = Vec::with_capacity(index_words(slots).saturating_add(rows));
+        words.resize(index_words(slots), 0);
         Rows {
             entries: Vec::with_capacity(rows).into(),
             words: words.into(),
@@ -458,7 +463,7 @@ impl<R: Clone, C: Case> Rows<R, C> {
             if let Some(entries) = self.entries.own() {
                 entries.remove(at);
             }
-            let hashed = wide_at(self.slots).saturating_add(at);
+            let hashed = index_words(self.slots).saturating_add(at);
             if let Some(words) = self.words.own() {
                 words.remove(hashed);
             }
@@ -528,12 +533,12 @@ impl<R: Clone, C: Case> Rows<R, C> {
         true
     }
 
-    /// The index laid again at `slots` words, every row filed in it in
+    /// The index laid again at `slots` slots, every row filed in it in
     /// order, so the first of a name is the first a lookup meets.
     fn refile(&mut self, slots: u32) {
         let hashes = self.hashes().to_vec();
-        let mut words = Vec::with_capacity(wide_at(slots).saturating_add(hashes.len()));
-        words.resize(wide_at(slots), 0);
+        let mut words = Vec::with_capacity(index_words(slots).saturating_add(hashes.len()));
+        words.resize(index_words(slots), 0);
         words.extend_from_slice(&hashes);
         self.words = words.into();
         self.slots = slots;
@@ -545,24 +550,60 @@ impl<R: Clone, C: Case> Rows<R, C> {
     /// `filed`, a row's position plus one, into the first empty word of
     /// the index from where `hash` lands.
     fn file(&mut self, hash: u32, filed: u32) {
-        let slots = wide_at(self.slots);
+        let (slots, bits) = (wide_at(self.slots), slot_bits(self.slots));
         let Some(mask) = slots.checked_sub(1) else {
             return;
         };
-        let Some(index) = (self.words.own()).and_then(|words| words.get_mut(..slots)) else {
+        let words = index_words(self.slots);
+        let Some(index) = (self.words.own()).and_then(|own| own.get_mut(..words)) else {
             return;
         };
         let mut slot = landing(hash, mask);
         for _ in 0..slots {
-            if let Some(word) = index.get_mut(slot)
-                && *word == 0
-            {
-                *word = filed;
+            if slot_in(index, bits, slot) == Some(0) {
+                let per = 32 / bits;
+                let shift = slot % per * bits;
+                if let Some(word) = index.get_mut(slot / per) {
+                    let cleared = u64::from(*word) & !(slot_mask(bits) << shift);
+                    let set = cleared | (u64::from(filed) & slot_mask(bits)) << shift;
+                    *word = u32::try_from(set).unwrap_or(*word);
+                }
                 return;
             }
             slot = (slot + 1) & mask;
         }
     }
+}
+
+/// The bits one slot of an index of `slots` slots is laid in: the
+/// fewest of 8, 16 and 32 that number its rows plus one, an index
+/// filing at most half as many rows as it has slots. php's `HT_HASH`
+/// slot is 32 bits whatever the table's size; the width is not
+/// observable, so a class's index is laid in the fewest.
+fn slot_bits(slots: u32) -> usize {
+    match slots {
+        0..=0x100 => 8,
+        0x101..=0x2_0000 => 16,
+        _ => 32,
+    }
+}
+
+/// The words an index of `slots` slots fills.
+fn index_words(slots: u32) -> usize {
+    wide_at(slots).saturating_mul(slot_bits(slots)) / 32
+}
+
+/// The low `bits` bits of a word.
+fn slot_mask(bits: usize) -> u64 {
+    (1u64 << bits) - 1
+}
+
+/// What slot `slot` of an index laid at `bits` bits a slot files: a
+/// row's position plus one, zero where it files none.
+fn slot_in(index: &[u32], bits: usize, slot: usize) -> Option<u32> {
+    let per = 32 / bits;
+    let word = u64::from(*index.get(slot / per)?);
+    u32::try_from(word >> (slot % per * bits) & slot_mask(bits)).ok()
 }
 
 /// The words of index a table of `rows` rows is laid with: none up to
@@ -1164,6 +1205,26 @@ mod tests {
         let mut child: Rows<Row<u32>, super::Exact> = Rows::default();
         child.inherit(&records[2].properties, |&row| row, named, named);
         assert_eq!(child.find_at(b"p11", named).map(|(at, _)| at), Some(11));
+    }
+
+    #[test]
+    fn an_index_of_each_slot_width_finds_each_row_where_it_stands() {
+        // 100 rows file in 8-bit slots, 300 in 16-bit ones and 70,000 in
+        // 32-bit ones.
+        for (count, words) in [(100u32, 64), (300, 512), (70_000, 262_144)] {
+            let names: Vec<&'static [u8]> = (0..count)
+                .map(|n| &*Box::leak(format!("r{n}").into_bytes().into_boxed_slice()))
+                .collect();
+            let mut rows: Rows<&'static [u8], Exact> = Rows::default();
+            for &name in &names {
+                assert!(rows.add(name, name, named));
+            }
+            assert_eq!(super::index_words(rows.slots), words, "{count}");
+            for (at, &name) in names.iter().enumerate() {
+                assert_eq!(rows.find_at(name, named).map(|(at, _)| at), Some(at));
+            }
+            assert_eq!(rows.find(b"r-1", named), None);
+        }
     }
 
     #[test]
