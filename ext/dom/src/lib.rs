@@ -583,6 +583,52 @@ fn table_of(req: &mut Request, object: PhpObject) -> Option<&'static [&'static [
     table(&base)
 }
 
+/// The rows `dom_get_debug_info_helper` walks: `table_of`'s rows, but
+/// `Dom\Node`'s alone for a `Dom\Notation`, so its dump keeps the oracle's
+/// rows and no id.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<!DOCTYPE r [<!NOTATION n PUBLIC "p" "s">]><r/>');
+/// var_dump($d->doctype->notations->getNamedItem('n'));
+/// ```
+/// ```expect
+/// object(Dom\Notation)#4 (13) {
+///   ["nodeType"]=>
+///   int(12)
+///   ["nodeName"]=>
+///   string(1) "n"
+///   ["baseURI"]=>
+///   string(11) "about:blank"
+///   ["isConnected"]=>
+///   bool(false)
+///   ["parentNode"]=>
+///   NULL
+///   ["parentElement"]=>
+///   NULL
+///   ["childNodes"]=>
+///   string(22) "(object value omitted)"
+///   ["firstChild"]=>
+///   NULL
+///   ["lastChild"]=>
+///   NULL
+///   ["previousSibling"]=>
+///   NULL
+///   ["nextSibling"]=>
+///   NULL
+///   ["nodeValue"]=>
+///   NULL
+///   ["textContent"]=>
+///   string(0) ""
+/// }
+/// ```
+fn dump_table_of(req: &mut Request, object: PhpObject) -> Option<&'static [&'static [Prop]]> {
+    let base = base_name(req, object.class())?;
+    if base == b"Dom\\Notation" {
+        return Some(&[crate::props::MODERN_NODE]);
+    }
+    table(&base)
+}
+
 /// `php_dom_throw_error_with_message`: a `DOMException` of `code` where
 /// errors are strict, the message raised as a warning (or onto libxml's
 /// list) where they are not; `Err` is what was thrown.
@@ -1099,7 +1145,7 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>,
             let value = Owner::take(req, value);
             out.set(req, Owner::take(req, key), value)?;
         }
-        let Some(table) = table_of(req, object) else {
+        let Some(table) = dump_table_of(req, object) else {
             return Ok(());
         };
         let omitted = string(req, b"(object value omitted)")?;
@@ -2018,6 +2064,10 @@ fn set_attribute_id(req: &mut Request, object: PhpObject, attr: Node, is_id: boo
 
 /// The table of a dom class by name, `classes`' entry; `None` for a
 /// class php registers none for (`DOMImplementation`).
+///
+/// `Dom\Notation`'s is `dom_modern_notation_prop_handlers`, its two ids
+/// before `Dom\Node`'s rows; the dump alone keeps 8.5.12's rows
+/// (`dump_table_of`).
 fn table(name: &[u8]) -> Option<&'static [&'static [Prop]]> {
     use crate::props::{
         ATTR, CHARACTER_DATA, DOCUMENT_TYPE, ELEMENT, ENTITY, ENTITY_REFERENCE, MODERN_ATTR,
@@ -2047,7 +2097,8 @@ fn table(name: &[u8]) -> Option<&'static [&'static [Prop]]> {
         b"DOMEntityReference" => &[ENTITY_REFERENCE],
         b"DOMProcessingInstruction" => &[PROCESSING_INSTRUCTION, NODE],
         b"DOMXPath" | b"Dom\\XPath" => &[crate::xpath::PROPS],
-        b"Dom\\Node" | b"Dom\\Notation" => &[MODERN_NODE],
+        b"Dom\\Node" => &[MODERN_NODE],
+        b"Dom\\Notation" => &[NOTATION, MODERN_NODE],
         b"Dom\\DocumentFragment" => &[MODERN_PARENT, MODERN_NODE_TEXT_WRITABLE],
         b"Dom\\Document" | b"Dom\\HTMLDocument" => &[crate::html_document::PROPS, MODERN_NODE],
         b"Dom\\XMLDocument" => &[
