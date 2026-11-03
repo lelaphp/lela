@@ -991,9 +991,12 @@ impl Placed {
 
     /// Each of `placed`'s columns laid as a range of one table, as
     /// [`php_link::LinkedClass::lay`] lays the native classes' records.
-    pub(crate) fn lay(placed: &mut [Placed]) {
-        php_link::Column::lay(placed.iter_mut().map(|placed| &mut placed.slots));
-        php_link::Column::lay(placed.iter_mut().map(|placed| &mut placed.rows));
+    pub(crate) fn lay<'p>(placed: impl IntoIterator<Item = &'p mut Placed>) {
+        let (slots, rows): (Vec<_>, Vec<_>) = (placed.into_iter())
+            .map(|placed| (&mut placed.slots, &mut placed.rows))
+            .unzip();
+        php_link::Column::lay(slots);
+        php_link::Column::lay(rows);
     }
 }
 

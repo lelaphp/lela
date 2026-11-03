@@ -226,20 +226,28 @@ impl<T: PartialEq> PartialEq for Column<T> {
 }
 
 impl<T: Clone> Column<T> {
-    /// Each of `columns` laid as a range of one table, in their order, so
-    /// they hold one allocation between them rather than one each; an
-    /// empty one holds none. Columns past the rows a `u32` numbers are
-    /// left as they stand.
+    /// Each of `columns` that still holds its own values laid as a range
+    /// of one table, in their order, so they hold one allocation between
+    /// them rather than one each; an empty one holds none, and one laid
+    /// already stays where it is laid. So a caller that lays as it goes
+    /// gives each batch's own values up before the next batch is built,
+    /// and the next batch's are allocated where those stood. Columns past
+    /// the rows a `u32` numbers are left as they stand.
     pub fn lay<'c>(columns: impl IntoIterator<Item = &'c mut Column<T>>)
     where
         T: 'c,
     {
-        let mut columns: Vec<&mut Column<T>> = columns.into_iter().collect();
+        let mut own: Vec<&mut Column<T>> = Vec::new();
+        for column in columns.into_iter().filter(|column| column.owns()) {
+            if column.is_empty() {
+                column.0 = Store::Own(Vec::new());
+            } else {
+                own.push(column);
+            }
+        }
+        let mut columns = own;
         let len: usize = columns.iter().map(|column| column.len()).sum();
         let Some(first) = columns.iter().find_map(|column| column.first().cloned()) else {
-            for column in &mut columns {
-                column.0 = Store::Own(Vec::new());
-            }
             return;
         };
         if u32::try_from(len).is_err() {
@@ -276,6 +284,12 @@ impl<T: Clone> Column<T> {
         }
     }
 
+    /// Whether the column holds an allocation of its own, which
+    /// [`Column::lay`] lays or, where it holds no value, gives up.
+    fn owns(&self) -> bool {
+        matches!(&self.0, Store::Own(values) if values.capacity() != 0)
+    }
+
     /// The values to change, a laid column's copied out of its table
     /// first; none only where that copy did not take.
     fn own(&mut self) -> Option<&mut Vec<T>> {
@@ -295,25 +309,35 @@ impl<H: Clone> LinkedClass<H> {
     /// the prototypes and the interfaces in one each, so the records hold
     /// four allocations between them rather than about ten each, as
     /// opcache persists a class's tables into one buffer
-    /// (`zend_persist_class_entry`). What a lookup reads is unchanged.
-    pub fn lay(records: &mut [LinkedClass<H>]) {
-        let mut rows = Vec::with_capacity(records.len().saturating_mul(3));
-        let mut words = Vec::with_capacity(records.len().saturating_mul(3));
-        let mut prototypes = Vec::with_capacity(records.len());
-        let mut interfaces = Vec::with_capacity(records.len());
+    /// (`zend_persist_class_entry`). A record laid already stays where it
+    /// is ([`Column::lay`]). What a lookup reads is unchanged.
+    pub fn lay<'r>(records: impl IntoIterator<Item = &'r mut LinkedClass<H>>)
+    where
+        H: 'r,
+    {
+        let (mut rows, mut words) = (Vec::new(), Vec::new());
+        let (mut prototypes, mut interfaces) = (Vec::new(), Vec::new());
         for record in records {
-            rows.extend([
-                &mut record.methods.entries,
-                &mut record.constants.entries,
-                &mut record.properties.entries,
-            ]);
-            words.extend([
-                &mut record.methods.words,
-                &mut record.constants.words,
-                &mut record.properties.words,
-            ]);
-            prototypes.push(&mut record.prototypes);
-            interfaces.push(&mut record.interfaces);
+            rows.extend(
+                [
+                    &mut record.methods.entries,
+                    &mut record.constants.entries,
+                    &mut record.properties.entries,
+                ]
+                .into_iter()
+                .filter(|column| column.owns()),
+            );
+            words.extend(
+                [
+                    &mut record.methods.words,
+                    &mut record.constants.words,
+                    &mut record.properties.words,
+                ]
+                .into_iter()
+                .filter(|column| column.owns()),
+            );
+            prototypes.extend(Some(&mut record.prototypes).filter(|column| column.owns()));
+            interfaces.extend(Some(&mut record.interfaces).filter(|column| column.owns()));
         }
         Column::lay(rows);
         Column::lay(words);
@@ -1226,6 +1250,37 @@ mod tests {
             }
             assert_eq!(rows.find(b"r-1", named), None);
         }
+    }
+
+    #[test]
+    fn records_laid_in_batches_read_as_their_own_columns_did() {
+        use super::{Column, LinkedClass, Row};
+        let record = |rows: u32| {
+            let mut record: LinkedClass<u32> = LinkedClass::default();
+            for at in 0..rows {
+                let name = format!("c{at}");
+                record
+                    .constants
+                    .add(Row { holder: None, at }, name.as_bytes(), |_| b"");
+            }
+            record.prototypes = Column::from(vec![None, Some(rows)]);
+            record
+        };
+        let mut records: Vec<LinkedClass<u32>> = (0..5).map(|n| record(n * 4)).collect();
+        let own = records.clone();
+        let (first, last) = records.split_at_mut(2);
+        LinkedClass::lay(first.iter_mut());
+        let at = |record: &LinkedClass<u32>| record.constants.rows().as_ptr();
+        let laid = at(&first[1]);
+        LinkedClass::lay(first.iter_mut().chain(last.iter_mut()));
+        assert_eq!(records, own);
+        // The first batch stays where it was laid; the second is laid in
+        // one table of its own, each record after the one before.
+        assert_eq!(at(&records[1]), laid);
+        assert_eq!(at(&records[3]), at(&records[2]).wrapping_add(8));
+        let named = |row: &Row<u32>| if row.at == 13 { &b"c13"[..] } else { b"" };
+        let found = records[4].constants.find_at(b"c13", named);
+        assert_eq!(found.map(|(at, _)| at), Some(13));
     }
 
     #[test]
