@@ -362,10 +362,14 @@ pub fn served(req: &Request, frame: FrameRef) -> Option<Held<'_>> {
 
 /// The landing word of opline `at` of the op array `frame` serves, what
 /// the tier reads where a return lands there ([`Epoch::landing`]): the
-/// sealed word until a tier armed it, and for an op array no epoch holds.
+/// sealed word until a tier armed it, and for an op array no epoch holds;
+/// with that op array ([`served`]), read off the one row, which the tier
+/// reads past a landing no trace armed (`jit-design.md` §4.9).
 #[must_use]
-pub fn landing(req: &Request, frame: FrameRef, at: OplineIdx) -> &Word {
-    held(req, frame).map_or(&SEALED, |func| func.landing(at))
+pub fn landing(req: &Request, frame: FrameRef, at: OplineIdx) -> (&Word, Option<Held<'_>>) {
+    held(req, frame).map_or((&SEALED, None), |func| {
+        (func.landing(at), func.op_array().map(Held))
+    })
 }
 
 /// Where a request keeps one slot of a held op array's `run_time_cache`:

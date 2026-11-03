@@ -68,7 +68,9 @@ pub struct JitRequest {
     pub(crate) shared: Arc<Shared>,
     pub(crate) submitter: compiler::Submitter,
     pub(crate) recording: Cell<bool>,
-    pub(crate) submitted: Cell<Option<Submitted>>,
+    /// Boxed, so a visit that finds none, nearly every one, reads one
+    /// word ([`quieted`]).
+    pub(crate) submitted: Cell<Option<Box<Submitted>>>,
     /// The headers of the calls its traces push in place, the request's.
     pub(crate) headers: enter::Headers,
     /// The request's hold on the epoch it started in, taken once, which
@@ -79,6 +81,9 @@ pub struct JitRequest {
     /// The loop header whose next arrival a recording aborted in a callee
     /// owes a count, as php's handler there counts it ([`Owed`]).
     pub(crate) owed: Cell<Option<Owed>>,
+    /// The loop rooted where the request last went on past a landing no
+    /// trace armed ([`RootAt`]).
+    pub(crate) root_at: Cell<Option<RootAt>>,
     /// How many times the crossing entered the trace compiled at a landing
     /// a trace escaped to, which the escaping trace's code enters itself
     /// once the request's row of it is laid: a test's count of the escapes
@@ -204,7 +209,7 @@ fn safepoint_lent(
                 let Some((caller, at)) = landing_past(req, frame) else {
                     return Flow::Continue;
                 };
-                let (goes, word) = goes_on(req, caller, at, shared.policy.folds());
+                let (goes, word) = goes_on(req, lent.state, (caller, at), shared.policy.folds());
                 (Rooted::Goes(caller, goes), word)
             }
         };
@@ -316,7 +321,10 @@ impl Goes {
 /// php counts (`record::landings`); otherwise, at a loop's root, that
 /// loop's word, as php's handler there is the loop's, whose trace is
 /// entered from there ([`Goes::visit`]); the sealed landing word anywhere
-/// else. The op array is read only past a landing no trace armed.
+/// else. The landing word and the op array are read off the op array's
+/// one row, and its loops are searched only past a landing no trace
+/// armed, once for each opline the request goes on at in turn
+/// ([`RootAt`]).
 ///
 /// A loop's trace entered from its root's word tests the interrupt at its
 /// header, as every loop's does but one by recursive return, which takes
@@ -399,16 +407,52 @@ impl Goes {
 /// ---- TRACE 4 stop (link to 1)
 /// ---- TRACE 4 compiled
 /// ```
-fn goes_on(req: &Request, frame: FrameRef, at: OplineIdx, folds: record::Folds) -> (Goes, &Word) {
-    let landing = tier::landing(req, frame, at);
+fn goes_on<'r>(
+    req: &'r Request,
+    state: &JitRequest,
+    (frame, at): (FrameRef, OplineIdx),
+    folds: record::Folds,
+) -> (Goes, &'r Word) {
+    let (landing, held) = tier::landing(req, frame, at);
     if policy::armed(landing) {
         return (Goes::Landing(at), landing);
     }
-    let header = tier::served(req, frame)
-        .and_then(|held| Some((held, record::loop_at(held.code(), at, folds)?)));
+    let header = held.and_then(|held| Some((held, state.root_at(held, at, folds)?)));
     match header {
         Some((held, header)) => (Goes::Header, held.word(req, header)),
         None => (Goes::Landing(at), landing),
+    }
+}
+
+/// The loop rooted at an opline of an op array the request last went on
+/// at past a landing no trace armed ([`goes_on`]), as php's interpreter
+/// finds the handler that opline holds with no search: a return that
+/// lands past the same call again, as a recursion's does each time it
+/// unwinds through the interpreter, reads it here instead of searching
+/// the op array's safepoints ([`record::loop_at`]) again. The op array
+/// is the epoch's, which the request holds, so its [`FuncRef`] names
+/// one op array for as long as the request.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RootAt {
+    func: FuncRef,
+    at: OplineIdx,
+    header: Option<SafepointIdx>,
+}
+
+impl JitRequest {
+    /// The loop rooted at opline `at` of `held` ([`record::loop_at`]),
+    /// kept for the next arrival there ([`RootAt`]).
+    fn root_at(&self, held: Held<'_>, at: OplineIdx, folds: record::Folds) -> Option<SafepointIdx> {
+        let func = held.func();
+        if let Some(kept) = self.root_at.get()
+            && kept.func == func
+            && kept.at == at
+        {
+            return kept.header;
+        }
+        let header = record::loop_at(held.code(), at, folds);
+        self.root_at.set(Some(RootAt { func, at, header }));
+        header
     }
 }
 
@@ -730,7 +774,7 @@ fn followed<'t>(
             // php's escape stub: no exit, no line and no word; the
             // interpreter runs the handler of the opline the return left
             // the frame at, a landing's trace where one is compiled there.
-            Left::Escaped(frame) => match visit_landing(req, shared, frame, Came::Escaped) {
+            Left::Escaped(frame) => match visit_landing(req, state, frame, Came::Escaped) {
                 Visited::Enter(id) => match table.get(id) {
                     Some(next) => {
                         #[cfg(test)]
@@ -798,7 +842,7 @@ fn followed<'t>(
             // Left for the interpreter, which runs the opline's handler:
             // where a return lands, the landing's.
             None if let Some(flow) = owed(req, shared, frame) => return flow,
-            None => match visit_landing(req, shared, frame, Came::Left(Some(trace.id))) {
+            None => match visit_landing(req, state, frame, Came::Left(Some(trace.id))) {
                 Visited::Enter(id) => match table.get(id) {
                     Some(next) => next,
                     None => return Flow::Resume(frame),
@@ -843,7 +887,7 @@ enum Came {
 /// `zend_jit_trace_exit` answers 1 at its own trace's first opline and
 /// the opline's own handler runs, not the trace again; a frame at an
 /// opline with a sealed word is left as it is.
-fn visit_landing(req: &mut Request, shared: &Shared, frame: FrameRef, came: Came) -> Visited {
+fn visit_landing(req: &Request, state: &JitRequest, frame: FrameRef, came: Came) -> Visited {
     if came != Came::Escaped && req.limits().interrupt().raised().load(Ordering::Relaxed) {
         return Visited::Continue;
     }
@@ -851,10 +895,7 @@ fn visit_landing(req: &mut Request, shared: &Shared, frame: FrameRef, came: Came
         Came::Left(left) => left,
         Came::Escaped => None,
     };
-    let req: &Request = req;
-    let Some(state) = tier::state::<JitRequest>(req) else {
-        return Visited::Continue;
-    };
+    let shared = &*state.shared;
     if state.recording.get() {
         return Visited::Continue;
     }
@@ -862,7 +903,7 @@ fn visit_landing(req: &mut Request, shared: &Shared, frame: FrameRef, came: Came
     let Some(at) = tier::frame(req, frame).map(|view| view.opline()) else {
         return Visited::Continue;
     };
-    let (goes, word) = goes_on(req, frame, at, shared.policy.folds());
+    let (goes, word) = goes_on(req, state, (frame, at), shared.policy.folds());
     if let Some(left) = left
         && policy::read(word) == State::Compiled(left)
     {
@@ -1581,7 +1622,10 @@ fn went_on(
                 None => Flow::Continue,
             }
         }
-        (None, Flow::Resume(at)) => match visit_landing(req, shared, *at, Came::Left(None)) {
+        (None, Flow::Resume(at)) => match tier::state::<JitRequest>(req)
+            .map_or(Visited::Continue, |state| {
+                visit_landing(req, state, *at, Came::Left(None))
+            }) {
             Visited::Continue => Flow::Continue,
             Visited::Enter(id) => run_lent(req, *at, id),
             Visited::Hot(claim) => hot(req, *at, claim, shared),
@@ -1730,7 +1774,9 @@ fn settled(req: &mut Request, shared: &Shared, job: Job, goes_on: GoesOn) -> Opt
         let state = tier::state::<JitRequest>(req);
         match state.map(|state| (state, state.submitter.submit(shared, job, &mut lines))) {
             Some((state, None)) => {
-                state.submitted.set(Some(Submitted { word, goes_on }));
+                state
+                    .submitted
+                    .set(Some(Box::new(Submitted { word, goes_on })));
                 None
             }
             Some((_, settled)) => settled,
@@ -1788,6 +1834,7 @@ fn quiet(req: &Request, site: Option<Site>) -> bool {
 }
 
 /// [`quiet`] over the request's state.
+#[inline]
 fn quieted(state: &JitRequest, site: Option<Site>) -> bool {
     if state.recording.get() {
         return true;
