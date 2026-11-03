@@ -238,7 +238,15 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          \x20       ))"
             .to_owned(),
     );
-    if let Some(stray) = IN_THE_LOOP.iter().find(|name| {
+    if let Some(twice) = PATH_IN_THE_LOOP
+        .iter()
+        .find(|name| IN_THE_LOOP.contains(name))
+    {
+        return Err(format!(
+            "`{twice}` is named by both `IN_THE_LOOP` and `PATH_IN_THE_LOOP`, which say where its handler is called two ways"
+        ));
+    }
+    if let Some(stray) = IN_THE_LOOP.iter().chain(PATH_IN_THE_LOOP).find(|name| {
         !calls.iter().any(|(call, variants)| {
             !call.starts_with("Err(") && variants.iter().any(|variant| variant == *name)
         })
@@ -340,7 +348,10 @@ fn arms_of(
                 .iter()
                 .filter(|variant| inlines.get(*variant) == path)
                 .collect();
-            held.push_str(&held_arm(&pattern(&served), call, path));
+            let aside = served
+                .iter()
+                .any(|variant| PATH_IN_THE_LOOP.contains(&variant.as_str()));
+            held.push_str(&held_arm(&pattern(&served), call, path, aside));
         }
     }
     (arms, held)
@@ -348,8 +359,10 @@ fn arms_of(
 
 /// One arm of [`held_macro`]'s `match`: `pattern`'s variants served by
 /// `call`, and first by the inline path `inline` where it has one, over
-/// the slots the loop holds.
-fn held_arm(pattern: &str, call: &str, inline: Option<&Inlined>) -> String {
+/// the slots the loop holds; for a variant whose path alone is in the
+/// loop's body, `aside` ([`PATH_IN_THE_LOOP`]), a hit goes on as `call`'s
+/// answer would.
+fn held_arm(pattern: &str, call: &str, inline: Option<&Inlined>, aside: bool) -> String {
     let pattern = pattern.replace("Handler::", "php_unit::Handler::");
     let cold = format!(
         "{{\n\
@@ -372,6 +385,15 @@ fn held_arm(pattern: &str, call: &str, inline: Option<&Inlined>) -> String {
         }
     };
     match inline.map(guarded) {
+        Some(inline) if aside => format!(
+            "            {pattern} => match {inline} {{\n\
+             \x20               Some(_) => {{\n\
+             \x20                   $slots = &mut [];\n\
+             \x20                   crate::tier::Dispatched::Cold(Ok(crate::tier::Next::ADVANCE))\n\
+             \x20               }}\n\
+             \x20               None => {cold},\n\
+             \x20           }},\n"
+        ),
         Some(inline) => format!(
             "            {pattern} => match {inline} {{\n\
              \x20               Some(inline) => crate::tier::Dispatched::Inline(inline),\n\
@@ -883,8 +905,21 @@ const IN_THE_LOOP: &[&str] = &[
     "SubTmpTmp",
     "SubTmpTmpAssignCv",
     "TypeCheck",
-    "VerifyReturnType",
 ];
+
+/// The variants whose arms serve their handler's inline path in the
+/// loop's body and leave it as an arm outside [`IN_THE_LOOP`] does: a
+/// miss calls the handler out of line, and a hit lets the slots go and
+/// goes on as such a call's answer does, the slots taken up again for
+/// the frame ([`held_arm`]). So the path is one test in the loop, and the
+/// loop's own way on from an inline path, which the optimiser copies
+/// into the arms that take it while few enough do, gains no arm.
+/// `VERIFY_RETURN_TYPE`'s mask test taking that way stopped those copies
+/// (48 to 7 in `serve_frame`) and read fannkuch, which serves it once,
+/// at 1.08 of the base's cycles; taking this one, 0.99 (#3978). A name
+/// here is no name of `IN_THE_LOOP`, and one that is no variant the
+/// dispatch serves is a build error.
+const PATH_IN_THE_LOOP: &[&str] = &["VerifyReturnType"];
 
 /// The handlers with an inline path, a function of
 /// `crate::handlers::inline_path` named as the handler and generic over
@@ -920,6 +955,7 @@ const INLINE_PATHS: &[&str] = &[
     "qm_assign",
     "sub",
     "sub_assign_cv",
+    "verify_return_type",
 ];
 
 /// An inline path the loop's arm serves first: the function's path, and
@@ -932,8 +968,9 @@ struct Inlined {
 
 /// The inline path the loop's arm for `variant` serves first, over the
 /// slots it holds: `handler`'s, at `generics` after the tier, where the
-/// variant is in the loop's body ([`IN_THE_LOOP`]) and the handler has
-/// one ([`INLINE_PATHS`]), and its `_assign_cv` path for a variant fused
+/// variant or its path alone is in the loop's body ([`IN_THE_LOOP`],
+/// [`PATH_IN_THE_LOOP`]) and the handler has one ([`INLINE_PATHS`]),
+/// and its `_assign_cv` path for a variant fused
 /// to the `ASSIGN` after it ([`ASSIGNED`]).
 fn inline_of(handler: &Handler, variant: &Variant, generics: &str) -> Option<Inlined> {
     let path = if variant.assigned {
@@ -941,7 +978,9 @@ fn inline_of(handler: &Handler, variant: &Variant, generics: &str) -> Option<Inl
     } else {
         handler.ident.clone()
     };
-    if !IN_THE_LOOP.contains(&variant.name.as_str()) || !INLINE_PATHS.contains(&path.as_str()) {
+    let name = variant.name.as_str();
+    let in_the_loop = IN_THE_LOOP.contains(&name) || PATH_IN_THE_LOOP.contains(&name);
+    if !in_the_loop || !INLINE_PATHS.contains(&path.as_str()) {
         return None;
     }
     let generics = generics.trim_start_matches(", ");

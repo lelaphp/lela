@@ -4988,14 +4988,16 @@ pub(crate) fn verify_return_type<T: Tier>(
     return_mask_missed(req, (frame, at), code, op)
 }
 
-/// [`verify_return_type`]'s first test, `ZEND_TYPE_CONTAINS_CODE`: the
-/// type of the value a `CV`, a `TMP` or a `VAR` holds where it stands,
-/// a reference followed, one bit tested in the op array's
-/// [`OpArray::return_mask`], over the frame's slots and the op array
-/// alone. The loop does not serve it over the slots it holds: as an
-/// inline path in its body it cut fib's cycles and raised nbody's,
-/// mandelbrot's and fannkuch's, which never serve it (#3978's closing
-/// comment). A function returning a scalar its declaration names:
+/// [`verify_return_type`]'s first test, `ZEND_TYPE_CONTAINS_CODE(ret_info->type,
+/// Z_TYPE_P(retval_ref))` (`Z/Zend/zend_vm_def.h:4458`): the type of the
+/// zval a `CV`, a `TMP` or a `VAR` holds where it stands, one bit tested
+/// in the op array's [`OpArray::return_mask`], over the frame's slots
+/// and the op array alone. As php's, it follows no reference: a
+/// reference's code and an `IS_INDIRECT`'s are no bit of `MAY_BE_ANY`,
+/// so either misses here and is the handler's past its mask
+/// ([`return_mask_missed`]). The loop serves it over the slots it holds
+/// ([`inline_path::verify_return_type`]). A function returning a scalar
+/// its declaration names:
 ///
 /// ```php
 /// function i(int $n): int { return $n < 2 ? $n : i($n - 1) + i($n - 2); }
@@ -5018,12 +5020,15 @@ pub(crate) fn verify_return_type<T: Tier>(
 /// int(3)
 /// int(4)
 /// ```
-#[inline(always)] // the handler's first test, as php's is
-fn return_mask_holds(slots: &mut [Zval], code: &OpArray, op: &Opline) -> bool {
-    if op.op1_type == OperandKind::Const {
+#[inline(always)] // in the loop and in the handler
+fn return_mask_holds(slots: &[Zval], code: &OpArray, op: &Opline) -> bool {
+    // A `CONST` and an `UNUSED` stand in no slot, and are the handler's.
+    let Some(returned) = ByKind(op.op1_type)
+        .slot(op.op1)
+        .and_then(|at| slots.get(at))
+    else {
         return false;
-    }
-    let returned = crate::operand::deref(ByKind(op.op1_type).read(slots, code, op.op1));
+    };
     // `MAY_BE_ANY` keeps the codes a value can have: an `IS_INDIRECT`
     // would test bit 12, which is `callable`'s.
     let code_bit = 1u32 << (returned.kind() as u32);
@@ -27646,6 +27651,8 @@ pub(crate) mod inline_path {
     use super::branch::Branch;
     #[cfg(not(dispatch = "tailcall"))]
     use super::inline_arith_assign;
+    #[cfg(not(dispatch = "tailcall"))]
+    use super::return_mask_holds;
     use super::{
         inline_arith, inline_assign, inline_assign_op, inline_branch, inline_compare,
         inline_fetch_dim_r, inline_identical, inline_incdec, write_owning_nothing,
@@ -27927,6 +27934,56 @@ pub(crate) mod inline_path {
         }
         write_owning_nothing(slots, op, z)?;
         Some(Inline::ADVANCE)
+    }
+
+    /// `ZEND_VERIFY_RETURN_TYPE` of a value whose type the declared return
+    /// type names outright, php's `EXPECTED(ZEND_TYPE_CONTAINS_CODE(...))`
+    /// ([`super::return_mask_holds`]). The loop serves it in its body,
+    /// going on from a hit as from its handler's answer, and calls the
+    /// handler out of line for anything else, a `CONST`, an `UNUSED`, a
+    /// reference, an `IS_INDIRECT` and a type the mask misses, which the
+    /// handler tests again and takes past its mask: a `CV`, a
+    /// `TMP` and a `VAR` the mask holds, then an `int` widened to `float`,
+    /// a reference followed, an undefined `CV` warned of twice, here and
+    /// at the `RETURN`, and a union:
+    ///
+    /// ```php
+    /// function c(int $n): int { return $n; }
+    /// function t(int $n): int { return $n + 1; }
+    /// function v(int $n): int { return c($n); }
+    /// function f(int $n): float { return $n; }
+    /// function r(int &$n): int { return $n; }
+    /// function w(): ?int { return $x; }
+    /// function s(int|string $n): string|int { return $n; }
+    /// $k = 5;
+    /// var_dump(c(1), t(1), v(2), f(3), r($k), w(), s("a"));
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: Undefined variable $x in %s on line 7
+    ///
+    /// Warning: Undefined variable $x in %s on line 7
+    /// int(1)
+    /// int(2)
+    /// int(2)
+    /// float(3)
+    /// int(5)
+    /// NULL
+    /// string(1) "a"
+    /// ```
+    #[inline(always)] // in the loop, one test
+    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
+    pub(crate) fn verify_return_type(
+        slots: &mut [Zval],
+        code: &OpArray,
+        op: &Opline,
+        _: u32,
+    ) -> Option<Inline> {
+        if return_mask_holds(slots, code, op) {
+            return Some(Inline::ADVANCE);
+        }
+        std::hint::cold_path();
+        None
     }
 
     /// `ZEND_FETCH_DIM_R` of an element an array holds.
