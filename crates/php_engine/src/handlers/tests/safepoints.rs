@@ -101,6 +101,7 @@ fn conditional(literal: php_heap::Zval) -> PublishedUnit {
                     out: 1,
                     ..Opline::default()
                 },
+                back(),
             ],
             literals: vec![literal],
             ..OpArray::default()
@@ -176,6 +177,7 @@ fn compared_loop(left: i64) -> PublishedUnit {
                     ..Opline::default()
                 },
                 Opline::default(),
+                back(),
             ],
             literals: vec![php_heap::Zval::long(left), php_heap::Zval::long(1)],
             num_tmps: 1,

@@ -419,6 +419,8 @@ Check: `serve`'s signature takes and returns an owned sink; a copied constant ar
 
 **173. Revision 173 (2026-11-02).** §9.2's paragraph under the targets states what Mitchell ruled on #3977 (2026-11-02) and #3999 built: "the `MapPtr` indirection is one load through a per-request table, which is Zend's cost too" was false, since php resolves the map pointer once per activation (`Z/Zend/zend_execute.c:4446`) and each `CACHED_PTR` is two loads off `EX(run_time_cache)` (`Z/Zend/zend_execute.h:527`), where the engine resolved it on every access, through the frame table, the table bit, the map table's bounds test, the entry and its slots' `Option`. The sentence now says php pays the map pointer once per call and the engine does too: the activation resolves the cache to a base the frame header holds, an index into one request-held slab of cache slots carved from chunks that never move, as php carves the cache from `CG(arena)`, so a slot compiled code reads in place stands for the request; `CACHED_PTR` is one bounds-checked read off it. The header keeps the map pointer beside the base, which names the cache's observer slot and, to the compiled tier, the op array. Safe Rust with no new `unsafe` home, ADR-0005 untouched; it reverses no ADR. Check: `grep -n "which is Zend's cost too" third-engine-design.md` matches this row alone; `exec::Vm::cached_in_place` reads the header's base with no map-table lookup.
 
+**174. Revision 174 (2026-11-03).** §9.2's peak-footprint rows state what Mitchell ruled on #4016 (2026-11-03, a session), landed on #4024. The footprint bar is read by the median, not the minimum: a footprint ratio is the median of at least seven interleaved rounds of each binary, over php's median under the same rounds, with the load recorded and php's own A/A spread stated beside it, and no load ceiling applies. The minimum was rejected, since a bar met only by the minimum would be met by the engine's luckiest run, and six floor kernels pass it at 0.62–0.69× while they fail by median at 0.69–0.74×. Symfony's `bin/console about` leaves the 0.67× row, which keeps the floor kernels and `-r 'echo 1;'`, and takes a row of its own at ≤ 1.0× php, reported against 0.67×, as #3973 set the data-heavy kernels: php's 21.8 MB includes 7.45 MB of opcache shared memory it touched, and 0.67× would put the engine's units under opcache's size. The `binary_trees` and `string_munge` row is unchanged. It reverses no ADR. Check: `grep -n "no load ceiling applies" third-engine-design.md` matches §9.2's sentence and this row.
+
 ## 0. The one-paragraph design
 
 Build **Zend's execution model in Rust, once, with nothing beside it, behind nine named seams.** One value representation with Zend's layouts (16-byte zval, 8-byte refcounted header, packed/hash arrays, objects with inline property slots), one Zend-shaped allocator, one single-pass compiler from the inherited syntax tree to op arrays that are **identical to php's own**, one operand-specialised interpreter whose handler bodies are written once and monomorphised over operand kinds, synchronous destructors, Bacon–Rajan GC with Zend's root-buffer placement, generators as heap frames, fibers as real coroutines. **No second executor, no MIR, no DSL; no JIT in month one, and the tier's seam, word and safepoints designed in from day one.** Correctness comes from the real `php` binary at every interface that has one: op arrays diffed against php's dump, witnesses embedded in rustdoc, php-src's `.phpt` corpus per commit, grammar fuzzing nightly. Extensions follow one rule, **write what PHP writes, link what PHP links**, and see the engine through one locked module, `php_engine::api`, whose first version is generated from what Mahout's 19 extension crates already call. Every class, function, constant and attribute, whether written in PHP or as a native, is described once in the unit format. Immutable compiled units are shared across threads through map pointers, so one process serves many requests without a fork and without recompiling. **The crates of §4.1 in `crates/`, `php_jit` among them behind a feature, one crate per extension in `ext/`, nine seams, one declaration model.** The interpreter runs op arrays through `execute::<Nop>`; the same op arrays, the same frames and the same kernels serve `execute::<Jit>` when the feature is on, and the compiled tier reaches the engine through one lock file. Budget: the line ceilings `seams.toml` carries, per crate and in total, and the new-code ceiling within them.
@@ -588,7 +590,7 @@ The crates are `seams.toml`'s `[[crate]]` rows, counted below by the directory e
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=b62afe49135991af65ff0b82c25bcef4a1ed9eddb19147cc381a1ace451eedaf out=6ba0892c9255d463a40e6c1df9a6c86358dea5a0b2a04df470497c174dc89391 -->
+<!-- /computed in=850615b82057e0479e70f3af7d34c81eb3ac2f3be593535262b9216479351776 out=6ba0892c9255d463a40e6c1df9a6c86358dea5a0b2a04df470497c174dc89391 -->
 
 | Crate | Role | Interface (what callers learn) | Origin |
 |---|---|---|---|
@@ -641,7 +643,7 @@ The permitted edges are `seams.toml`'s `[[edge]]` rows, rendered here: a crate d
 | php_engine::{executor,kernels} | php_engine::{serve,headers,gpc,output} | denied |  |
 | sapi/* | php_sapi, php_proto, php_bundle, php_ext |  | ADR-0008 |
 
-<!-- /computed in=658ef90e2fa0b2d4ff5484671c2aea5e654f38dc0674e8de765ed1082c622118 out=be6077556848e261e4fc7f724c16b65ffee7e09364bc34bd258db50b00061a6d -->
+<!-- /computed in=ae84daf50ef135e40f79b2fe04ccc477fcc15235bbb141d4f0e4d5a0b834ed73 out=be6077556848e261e4fc7f724c16b65ffee7e09364bc34bd258db50b00061a6d -->
 
 What the rows do not say. `php_heap` depends on nothing in the workspace. `php_unit` depends on `php_heap` for names interned and literals as heap values. `php_engine` depends on `php_macros` because its attributes declare Core's natives; `php_macros` depends on no workspace crate, only on `syn`, `quote` and `proc-macro2`: a macro emits paths and never links what they name (ADR-0007). `php_ext` re-exports `api` (with `api::__private`), `tier::Nop` and the attributes only. An `ext/*` crate depends on `php_ext` and on the `ext/*` crates it declares, never on `php_engine`, `php_compile`, `php_syntax` or `php_bundle`. `php_bundle` reaches `php_jit` under `jit` on the targets `php_jit`'s `[[crate]]` row names, and names `php_jit::Jit` and nothing else; nothing depends on `php_jit` but the bundle, and `php_jit` depends on nothing under `ext/`. `php_sapi` never sees `api`; `php_proto` sees nothing. `xtask` links no workspace crate: it reaches the engine through the binaries it builds and starts, `php-linked` and the hosts' own (harness revision 84). Workspace members are the directories §4.1's count names; an extension's package is `php_ext_<name>` at path `ext/<name>`, a host's `php_sapi_<name>` at `sapi/<name>` (ADR-0008).
 
@@ -723,7 +725,7 @@ The set is declared once in `seams.toml`, as its `[[seam]]` rows, and `xtask sta
 
 | seam | lock | items | ceiling |
 |---|---|---|---|
-| heap | heap.lock | 527 |  |
+| heap | heap.lock | 535 |  |
 | process | process.lock | 41 |  |
 | unit | unit.lock | 166 |  |
 | link | link.lock | 62 |  |
@@ -735,7 +737,7 @@ The set is declared once in `seams.toml`, as its `[[seam]]` rows, and `xtask sta
 | layer | layer.lock | 40 |  |
 | harness | xtask.lock | 448 |  |
 
-<!-- /computed in=f8f2967d41af2747d67257b73ef9e8e0474fdd28f84fd3050d1467221dccf4c8 out=2f8127ccee4aeddca96b0d07e4f3b497a7e0a9addf519c005b48840e829f338d -->
+<!-- /computed in=2e3cbd817ba3c72c2e97043a5d4924ac183c5bb7d725a3ccdcb630048e66c741 out=582ce12e773d5fc0255e343e780c2ae677a524e5323edbb66e4a9aef6eed5113 -->
 
 What a lock holds that its row does not say. `heap.lock` carries the VM stack's entry slot and its peers, `VmStack::entry`, `push_entry`, `current` and `MapTable::base`. `tier.lock` is the widening of `php_engine` toward the tier, in two sections: the face, a few dozen items reviewed one by one, and the kernels named by `php_jit`'s `kernels!` list, about three hundred, generated from the list and diffed as one section. `process.lock` is `php_process`'s surface, whose one consumer is `php_engine`. `link.lock` is `php_link`'s surface, the linker and the linked class record that the compiler and the engine both call (ADR-0012). Dax's `effects.lock` is retired, its content being `ops.lock`'s effects column. A lock is one of three kinds, and `xtask api-check` regenerates each from what it is a lock of: the public items of the crate the lock lives with (`heap.lock`, `process.lock`, `unit.lock`, `link.lock`, `api.lock`, and the harness's own `xtask.lock`), or of one module of its producer (`layer.lock`, where a crate outside the seam's consumers that `use`s the module fails); what the consumers import from the producer (`sapi.lock`, `tier.lock`, which is why both are headers carrying nothing until a consumer exists); or the rows of the file the seam is generated from (`ops.lock`, rendered from `ops.toml`'s `[[op]]` rows). All three fail on any difference; adding an item means committing the new lock line with the code. This is how "smallest possible codebase" is measured at the interface, where callers pay, not only in lines.
 
@@ -1264,13 +1266,16 @@ Measured under Mahout's protocol (paired reps, A/A control, load recorded), agai
 | Compute geomean, engine with `opcache.jit=tracing` ÷ php interpreter | ≤ 0.5× |
 | Process start to first byte, `-r 'echo 1;'` | ≤ 0.5× php |
 | Per-request compile on cache hit, Laravel skeleton | 0 |
-| Peak physical footprint (`ri_lifetime_max_phys_footprint`, #3368) on `fib`, `nbody`, `mandelbrot`, `spectralnorm`, `fannkuch`, `-r 'echo 1;'` and a Symfony skeleton's `bin/console about` | ≤ 0.67× php |
-| Peak physical footprint on `binary_trees` and `string_munge`, whose live request data is php's own bytes under §5.13 | ≤ 1.0× php, reported against 0.67× |
+| Peak physical footprint (`ri_lifetime_max_phys_footprint`, #3368) on `fib`, `nbody`, `mandelbrot`, `spectralnorm`, `fannkuch` and `-r 'echo 1;'` | ≤ 0.67× php |
+| Peak physical footprint on a Symfony skeleton's `bin/console about`, where php's figure carries the opcache shared memory it touched | ≤ 1.0× php, reported against 0.67× |
+| Peak physical footprint on `binary_trees` and `string_munge`, whose live request data is php's own bytes under §5.13 | ≤ 1.0× php, reported against 0.67× (unchanged) |
 | `memory_get_usage()` delta on array and string micro-tests | within 5% of php |
 | Worker throughput, FastCGI, 8 threads, one process, hello-world and Laravel skeleton | ≥ 2× php-fpm with 8 workers |
 | Parse throughput, top-1000 corpus | ≥ 25 MB/s |
 | `Cache` hit cost under thread-per-request, pcre workload | less than the compile it saves, per commit from the day pcre lands |
 | **G1, door cost**: an engine built with the `jit` feature, the tier bound and `opcache.jit_buffer_size=0`, against one built without the feature, seven kernels and the Laravel skeleton | within the A/A drift bound (Mahout used 1.813%); above 2% the seam costs too much and `jit-design.md` §3 is revisited. Per commit from the day `php_engine::tier` exists, on the kernels from day 2 and on the Laravel skeleton from the day the engine runs it |
+
+A footprint ratio is the median of at least seven interleaved rounds of each binary, divided by php's median under the same rounds, with the load recorded and php's own A/A spread stated beside it; no load ceiling applies.
 
 #3386's per-slot slope is reported beside them (#3973).
 

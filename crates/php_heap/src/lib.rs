@@ -39,6 +39,8 @@ mod block;
 mod call_stack;
 mod collector;
 mod compare;
+#[cfg(debug_assertions)]
+mod counting;
 mod fiber;
 mod gc;
 mod hooks;
@@ -75,6 +77,8 @@ pub use collector::GcStatus;
 pub use compare::{
     Scalar, compare, compare_constants, constant_truth, identical, identical_constants,
 };
+#[cfg(debug_assertions)]
+pub use counting::CountingSystem;
 pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
 pub use hooks::{Fatal, FatalReason, GcTable, HeapHooks};
 pub use lend::{ecalloc, efree, emalloc, erealloc};
@@ -98,7 +102,7 @@ pub use stack::{
 };
 pub use standalone::StandaloneHeap;
 pub use string::{FreshStr, Intern, Made, Pending, Sizing, Str, Strings};
-pub use zval::{PropBit, Zval, ZvalRef, ZvalType};
+pub use zval::{PropBit, Zval, ZvalRef, ZvalSpan, ZvalType};
 
 use gc::Counted;
 use std::ptr::NonNull;

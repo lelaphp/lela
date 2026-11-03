@@ -218,10 +218,16 @@ fn an_opcode_with_no_handler_ends_the_request_naming_it() {
     let mut req = Request::new(Arc::clone(&engine.shared), description(""));
     let unit = Unit {
         main: php_unit::OpArray {
-            oplines: vec![php_unit::Opline {
-                opcode: php_unit::Opcode::UserOpcode,
-                ..php_unit::Opline::default()
-            }],
+            oplines: vec![
+                php_unit::Opline {
+                    opcode: php_unit::Opcode::UserOpcode,
+                    ..php_unit::Opline::default()
+                },
+                php_unit::Opline {
+                    opcode: php_unit::Opcode::Return,
+                    ..php_unit::Opline::default()
+                },
+            ],
             ..php_unit::OpArray::default()
         },
         ..Unit::default()

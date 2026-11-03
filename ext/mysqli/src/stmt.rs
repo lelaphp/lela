@@ -840,6 +840,7 @@ impl mysqli_stmt {
         types: PhpString,
         vars: Variadic<Ref<Value>>,
     ) -> Answer<bool> {
+        let vars: Vec<Ref<Value>> = vars.collect();
         bind_param(req, On::method(this.object()), types, &vars)
     }
 
@@ -849,6 +850,7 @@ impl mysqli_stmt {
         this: This<Self>,
         vars: Variadic<Ref<Value>>,
     ) -> Answer<bool> {
+        let vars: Vec<Ref<Value>> = vars.collect();
         bind_result(req, On::method(this.object()), &vars)
     }
 

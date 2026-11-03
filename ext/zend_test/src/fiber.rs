@@ -167,7 +167,7 @@ impl _ZendTestFiber {
             ));
         }
         let named = args.named().to_vec();
-        lay_down(req, this, args.positional.into_iter().collect(), named)?;
+        lay_down(req, this, args.positional.collect(), named)?;
         let back = run(req, this, Owner::null());
         delegate(req, this, back)
     }
