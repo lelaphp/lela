@@ -21,7 +21,7 @@
 use std::num::NonZeroU32;
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::types::{I8, I32, I64};
+use cranelift_codegen::ir::types::{I8, I32, I64, I128};
 use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, MemFlagsData, Value};
 use cranelift_frontend::Variable;
 use php_engine::tier::{self, FRAME, FrameLayout, FuncRef, PLACE, PlaceLayout, PlainCall};
@@ -29,8 +29,8 @@ use php_heap::{Obj, Ref, Zval, ZvalType};
 use php_unit::{Opcode, OperandKind};
 
 use super::{
-    COUNTED, Dtor, EX_OPLINE, Emit, KIND, Kernel, Refuse, STOOD_CALL, STOOD_FRAME, STOOD_FUNC,
-    STOOD_OPLINE, STOOD_ROOM, Scalar, TYPE_AT, imm, leave_of, mismatch, tag, trusted,
+    COUNTED, Dtor, EX_OPLINE, Emit, KIND, Kernel, Refuse, STOOD_CALL, Scalar, TYPE_AT, imm,
+    leave_of, mismatch, tag, trusted,
 };
 use crate::lower::{IMAGES_AT, INTERRUPT_AT, OperandKinds, READY_AT, RETURNED, THREW};
 use crate::types::{
@@ -169,16 +169,27 @@ impl Emit<'_> {
         (slow, self.b.create_block())
     }
 
-    /// The `Stood` a kernel would write, written by code in place.
-    fn stand(&mut self, [frame, call, func, opline, room]: [Value; 5]) {
-        for (value, at) in [
-            (frame, STOOD_FRAME),
-            (call, STOOD_CALL),
-            (func, STOOD_FUNC),
-            (opline, STOOD_OPLINE),
-            (room, STOOD_ROOM),
-        ] {
-            self.b.ins().stack_store(I64, value, self.stood, at);
+    /// The header image at `header` copied into the room at `top`, and its
+    /// `slots` cells made `UNDEF`, two words a store: a pair where the
+    /// target has one (`ldp`, `stp`), as `undefine` clears a whole cell,
+    /// and one word where the header ends on one.
+    fn lay_frame(&mut self, header: Value, top: Value, slots: u32) {
+        let mut word = 0;
+        while word < L.header_bytes() {
+            let ty = if L.header_bytes() - word >= 16 {
+                I128
+            } else {
+                I64
+            };
+            let value = self.b.ins().load(ty, trusted(), header, at(word));
+            (self.b.ins()).store(trusted(), value, top, at(L.header() + word));
+            word += ty.bytes();
+        }
+        let zero = self.b.ins().iconst(I64, 0);
+        let undef = self.b.ins().uextend(I128, zero);
+        for slot in 0..slots {
+            let cell = L.room() + SLOT * slot;
+            self.b.ins().store(trusted(), undef, top, at(cell));
         }
     }
 
@@ -272,6 +283,17 @@ impl Emit<'_> {
     /// full, the opline is stepped, which pushes the same call; php's own
     /// stack check, a guard before the push, leaves first where the page
     /// is short of what the trace pushes ([`crate::types::Check::Room`]).
+    /// The header is copied and the slots cleared a cell a store, so a
+    /// call pushed where the last one left its variables reads them
+    /// undefined:
+    ///
+    /// ```php
+    /// function g($set) { if ($set) { $a = "x"; $b = [1]; } return isset($a, $b) ? 1 : 0; }
+    /// $s = 0; for ($i = 0; $i < 100; $i++) { $s += g($i % 2 == 0); } echo $s, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 50
+    /// ```
     ///
     /// A method's call held by the pair its runtime-cache slot holds
     /// ([`Imm::Pair`]) is pushed where the slot holds the pair the trace
@@ -320,18 +342,7 @@ impl Emit<'_> {
         let cx = self.cx.ok_or_else(|| mismatch("a push before the entry"))?;
         let images = self.b.ins().load(I64, trusted(), cx, IMAGES_AT);
         let header = self.b.ins().load(I64, trusted(), images, header);
-        for word in (0..L.header_bytes()).step_by(8) {
-            let value = self.b.ins().load(I64, trusted(), header, at(word));
-            self.b
-                .ins()
-                .store(trusted(), value, top, at(L.header() + word));
-        }
-        let zero = self.b.ins().iconst(I64, 0);
-        for slot in 0..plain.slots() {
-            let cell = L.room() + SLOT * slot;
-            self.b.ins().store(trusted(), zero, top, at(cell));
-            self.b.ins().store(trusted(), zero, top, at(cell + 8));
-        }
+        self.lay_frame(header, top, plain.slots());
         match over.scope {
             Some(Scope::Number(class)) => {
                 // `ScopeAt`'s half-word: the class's number inverted.
@@ -381,8 +392,9 @@ impl Emit<'_> {
         self.b.seal_block(slow);
         let [room, opline] = self.served(line)?;
         let func = self.func_of(line.frame)?;
-        let stood = self.b.ins().stack_addr(I64, self.stood, 0);
+        let stood = self.stood_out();
         self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?;
+        self.stood_back();
         for guard in self.within(id) {
             match guard.check {
                 Check::Callee { func } => self.callee_guard(func, guard.exit)?,
