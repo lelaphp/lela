@@ -200,6 +200,18 @@ impl<R: PartialEq, C> PartialEq for Rows<R, C> {
 }
 
 impl<R, C: Case> Rows<R, C> {
+    /// A table laid for `rows` rows, its index among them, so filling it
+    /// that far grows nothing: what `zend_hash_extend` does to a class's
+    /// table before `zend_do_inheritance` copies the parent's in.
+    pub(crate) fn with_capacity(rows: usize) -> Self {
+        Rows {
+            entries: Vec::with_capacity(rows),
+            hashes: Vec::with_capacity(rows),
+            index: HashTable::with_capacity(rows),
+            case: PhantomData,
+        }
+    }
+
     /// The rows in order.
     pub fn rows(&self) -> &[R] {
         &self.entries
@@ -250,13 +262,15 @@ impl<R, C: Case> Rows<R, C> {
     ) -> bool {
         let hash = hash::<C>(name);
         if let Some(at) = self.position(hash, |held| same::<C>(named(held), name)) {
-            let mut entries = std::mem::take(&mut self.entries);
-            let mut hashes = std::mem::take(&mut self.hashes);
-            entries.remove(at);
-            hashes.remove(at);
-            self.index = HashTable::new();
-            for (kept, kept_hash) in entries.into_iter().zip(hashes) {
-                self.push(kept, kept_hash);
+            self.entries.remove(at);
+            self.hashes.remove(at);
+            // Every row past it moved down one: the index filed again
+            // over the rows as they stand, in the room it has.
+            self.index.clear();
+            let hashes = &self.hashes;
+            for (at, &kept) in (0u32..).zip(hashes) {
+                self.index
+                    .insert_unique(wide(kept), at, |&at| wide(hash_at(hashes, at)));
             }
         }
         self.push(row, hash)
@@ -289,6 +303,8 @@ impl<R, C: Case> Rows<R, C> {
     fn reserve(&mut self, more: usize) {
         self.entries.reserve(more);
         self.hashes.reserve(more);
+        let hashes = &self.hashes;
+        self.index.reserve(more, |&at| wide(hash_at(hashes, at)));
     }
 
     /// The position of the row of `hash` that `matches` takes.
@@ -309,16 +325,19 @@ impl<R, C: Case> Rows<R, C> {
         self.entries.push(row);
         self.hashes.push(hash);
         let hashes = &self.hashes;
-        self.index.insert_unique(wide(hash), at, |&at| {
-            wide(
-                hashes
-                    .get(usize::try_from(at).unwrap_or(usize::MAX))
-                    .copied()
-                    .unwrap_or(0),
-            )
-        });
+        self.index
+            .insert_unique(wide(hash), at, |&at| wide(hash_at(hashes, at)));
         true
     }
+}
+
+/// The hash kept for the row at `at`, which the index refiles a position
+/// by as it grows.
+fn hash_at(hashes: &[u32], at: u32) -> u32 {
+    (hashes
+        .get(usize::try_from(at).unwrap_or(usize::MAX))
+        .copied())
+    .unwrap_or(0)
 }
 
 impl<R> Rows<R, Exact> {
@@ -813,6 +832,20 @@ mod tests {
         assert_eq!(map.get(&b"UTC"[..]), Some(&2));
         assert_eq!(map.get(&b"Europe/Amsterdam"[..]), Some(&1));
         assert_eq!(map.get(&b"utc"[..]), None);
+    }
+
+    #[test]
+    fn a_replaced_row_moves_to_the_end_and_each_row_is_found_where_it_stands() {
+        let mut rows: Rows<&'static [u8], Exact> = Rows::with_capacity(4);
+        for name in [&b"a"[..], b"b", b"c"] {
+            rows.add(name, name, named);
+        }
+        assert!(rows.replace(b"a", b"a", named));
+        assert!(rows.replace(b"d", b"d", named));
+        assert_eq!(rows.rows(), [&b"b"[..], b"c", b"a", b"d"]);
+        let found = [&b"a"[..], b"b", b"c", b"d"].map(|name| rows.find_at(name, named));
+        let at = found.map(|found| found.map(|(at, _)| at));
+        assert_eq!(at, [Some(2), Some(0), Some(1), Some(3)]);
     }
 
     #[test]
