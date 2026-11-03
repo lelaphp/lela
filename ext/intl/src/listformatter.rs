@@ -1,6 +1,6 @@
 //! `listformatter/`: `IntlListFormatter` over ICU's `ulistfmt_*`.
 
-use php_ext::abi::{OrFalse, Refusals, This};
+use php_ext::abi::{ObjectHandlers, OrFalse, Refusals, This};
 use php_ext::attr::php_class;
 use php_ext::coerce::with_string;
 use php_ext::raising::{Thrown, argument_error, throw_error};
@@ -30,7 +30,22 @@ impl Carrier for ListFormatterObject {
 }
 
 /// `listformatter_handlers`: `std_object_handlers` with no clone.
-pub(crate) const HANDLERS: Refusals = Refusals::NONE.cloning();
+pub(crate) static HANDLERS: Handlers = Handlers;
+
+/// The handlers of `IntlListFormatter`.
+pub(crate) struct Handlers;
+
+impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
+    }
+
+    /// `listformatter_free_obj`: the format closed and the error's
+    /// message freed before `zend_object_std_dtor`.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        error::free::<ListFormatterObject>(req, object);
+    }
+}
 
 /// `INTL_MAX_LOCALE_LEN`.
 const MAX_LOCALE_LEN: usize = 156;

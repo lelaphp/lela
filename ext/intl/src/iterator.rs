@@ -354,6 +354,12 @@ impl ObjectHandlers for Handlers {
         REFUSALS
     }
 
+    /// `IntlIterator_objects_free`: the error's message freed before
+    /// `zend_object_std_dtor`.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        error::free::<IteratorObject>(req, object);
+    }
+
     /// `IntlIterator_objects_dtor`: the cursor released, which gives up
     /// the object's owner of itself, and no `__destruct` served, as php's
     /// slot serves none, so the request's end frees an object only its

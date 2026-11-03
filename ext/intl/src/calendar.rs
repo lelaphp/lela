@@ -314,6 +314,12 @@ impl ObjectHandlers for Handlers {
         set(req, &mut table, b"fields", rows.into_value())?;
         Ok(Some(table.into()))
     }
+
+    /// `Calendar_objects_free`: the error's message freed before
+    /// `zend_object_std_dtor`.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        error::free::<CalendarObject>(req, object);
+    }
 }
 
 /// The bytes before the first NUL.

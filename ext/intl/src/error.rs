@@ -11,29 +11,51 @@ use std::any::Any;
 use std::fmt::Write as _;
 
 use php_ext::abi::OrFalse;
-use php_ext::call::write_prop;
-use php_ext::raising::{Level, Thrown, docref, throw, throw_chained, while_pending};
+use php_ext::call::new_object;
+use php_ext::raising::{Level, Thrown, docref, throw_value, while_pending};
 use php_ext::request::{Ini, Request};
-use php_ext::values::{PhpObject, PhpString};
+use php_ext::values::{Owner, PhpObject, PhpString};
 
 use crate::State;
 use crate::ffi::Code;
 
 /// `intl_error`: the last code and the message a native wrote for it,
-/// sixteen bytes as php's, the message behind one thin pointer as its
-/// `zend_string *` is, so an object's payload fits php's struct.
-#[derive(Debug, Default, Clone)]
+/// sixteen bytes as php's, the message the `zend_string` php keeps on
+/// the request's heap, so `memory_get_usage()` counts it where php's
+/// does, from the native that set it until the next one replaces it,
+/// a reset frees it, or its holder goes: the object's `free_obj`
+/// ([`free`]), the request's `RSHUTDOWN`.
+#[derive(Debug, Default)]
 pub(crate) struct IntlError {
     pub(crate) code: Code,
-    #[allow(clippy::box_collection, reason = "a thin pointer, php's zend_string *")]
-    message: Option<Box<Vec<u8>>>,
+    message: Option<Owner<PhpString>>,
+}
+
+/// A message an `intl_error` let go of, freed once the error is no longer
+/// borrowed, `zend_string_release_ex`.
+#[must_use = "the message is freed with Message::free"]
+pub(crate) struct Message(Option<Owner<PhpString>>);
+
+impl Message {
+    /// `zend_string_release_ex(msg, false)`.
+    pub(crate) fn free(self, req: &mut Request) {
+        if let Some(message) = self.0 {
+            message.give_up(req);
+        }
+    }
 }
 
 impl IntlError {
-    /// `intl_error_reset`.
-    pub(crate) fn reset(&mut self) {
+    /// `intl_error_reset`: the code zero and the message let go of.
+    pub(crate) fn reset(&mut self) -> Message {
         self.code = Code::ZERO;
-        self.message = None;
+        Message(self.message.take())
+    }
+
+    /// `intl_error_set_custom_msg`'s last two steps: the message the
+    /// error held let go of, and `text` its message.
+    fn keep(&mut self, text: Owner<PhpString>) -> Message {
+        Message(self.message.replace(text))
     }
 
     /// `intl_error_get_message`: `<message>: <code name>`, or the code's
@@ -41,7 +63,7 @@ impl IntlError {
     pub(crate) fn message(&self) -> Vec<u8> {
         let name = self.code.name().as_bytes();
         match &self.message {
-            Some(message) => [message.as_slice(), b": ", name].concat(),
+            Some(message) => [message.as_bytes(), b": ", name].concat(),
             None => name.to_vec(),
         }
     }
@@ -58,18 +80,87 @@ fn global(req: &mut Request) -> &mut IntlError {
     &mut req.state::<State>().error
 }
 
-/// `<native>(): <message>`, as `intl_error_set_custom_msg` prefixes it,
-/// and the message alone while nothing executes (`zend_is_executing`).
-fn prefixed(req: &Request, message: &[u8]) -> Vec<u8> {
+/// The string `intl_error_set_custom_msg` keeps: `<native>(): <message>`,
+/// `zend_string_concat3` over the name `get_active_function_or_method_name`
+/// answers, which `zend_create_member_string` lays for a method and
+/// `ZSTR_INIT_LITERAL` for `main` and which is given up after, and the
+/// message alone, `zend_string_init`, while nothing executes
+/// (`zend_is_executing`). The `Err` is the memory limit's fatal.
+fn prefixed(req: &mut Request, message: &[u8]) -> Result<Owner<PhpString>, Thrown> {
     if !req.frames().executing() {
-        return message.to_vec();
+        return PhpString::filled(req, message.len(), |b| b.copy_from_slice(message));
     }
-    [
-        req.frames().active_function_name().as_bytes(),
-        b"(): ",
-        message,
-    ]
-    .concat()
+    let name = req.frames().active_function_name();
+    let name = name.as_bytes();
+    let laid = if name == b"main" || name.windows(2).any(|w| w == b"::") {
+        Some(PhpString::filled(req, name.len(), |b| {
+            b.copy_from_slice(name);
+        })?)
+    } else {
+        None
+    };
+    let text = PhpString::filled(req, name.len() + 4 + message.len(), |b| {
+        let (head, rest) = b.split_at_mut(name.len());
+        head.copy_from_slice(name);
+        let (sep, tail) = rest.split_at_mut(4);
+        sep.copy_from_slice(b"(): ");
+        tail.copy_from_slice(message);
+    });
+    if let Some(laid) = laid {
+        laid.give_up(req);
+    }
+    text
+}
+
+/// `intl_error_reset(err)` over the error `at` reaches, the message
+/// freed once it is let go of.
+fn reset_at(req: &mut Request, at: impl FnOnce(&mut Request) -> Option<&mut IntlError>) {
+    if let Some(message) = at(req).map(IntlError::reset) {
+        message.free(req);
+    }
+}
+
+/// `intl_error_set_custom_msg(err, msg)` with `err` the error `at`
+/// reaches: the string made, then the error's last message freed and
+/// the string kept; nothing made where `at` reaches none.
+fn keep_at(
+    req: &mut Request,
+    message: &[u8],
+    at: impl Fn(&mut Request) -> Option<&mut IntlError>,
+) -> Result<(), Thrown> {
+    if at(req).is_none() {
+        return Ok(());
+    }
+    let text = prefixed(req, message)?;
+    match at(req) {
+        Some(error) => error.keep(text).free(req),
+        None => text.give_up(req),
+    }
+    Ok(())
+}
+
+/// `free_obj`'s `intl_error_reset(INTL_DATA_ERROR_P(obj))`: the object's
+/// message freed, where php's handler frees it before or after
+/// `zend_object_std_dtor` as each class's does. A clone starts with no
+/// message, as its `create_object`'s `intl_error_init` leaves it, so it
+/// frees only itself:
+///
+/// ```php
+/// $f = new NumberFormatter('en', NumberFormatter::DECIMAL);
+/// $f->parse('x');
+/// $m = memory_get_usage();
+/// $g = clone $f;
+/// echo memory_get_usage() - $m, ' ', $g->getErrorMessage(), "\n";
+/// $m = memory_get_usage(); unset($g); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); unset($f); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 64 U_ZERO_ERROR
+/// -64
+/// -144
+/// ```
+pub(crate) fn free<P: Carrier>(req: &mut Request, object: PhpObject) {
+    reset_at(req, |req| carried::<P>(req, object));
 }
 
 /// `intl_error_reset(NULL)`. A native whose php counterpart resets the
@@ -115,7 +206,7 @@ fn prefixed(req: &Request, message: &[u8]) -> Vec<u8> {
 /// iterator 0
 /// ```
 pub(crate) fn reset(req: &mut Request) {
-    global(req).reset();
+    reset_at(req, |req| Some(global(req)));
 }
 
 /// `intl_error_set_code(NULL, code)`.
@@ -238,18 +329,30 @@ pub(crate) fn set_custom_msg(req: &mut Request, message: impl AsRef<[u8]>) -> Re
 /// RuntimeException: IntlDateFormatter::format(): parameter array contains a non-integer element for key 'tm_year'
 /// ```
 fn custom_msg(req: &mut Request, pending: Option<Thrown>, message: &[u8]) -> Result<(), Thrown> {
-    let text = prefixed(req, message);
+    let text = match prefixed(req, message) {
+        Ok(text) => text,
+        Err(fatal) => return Err(over(req, pending, fatal)),
+    };
     let pending = match error_level(req) {
         Some(level) => raise(req, pending, level, message),
         None => pending,
     };
     let thrown = if use_exceptions(req) {
-        Some(intl_exception(req, pending, &text))
+        Some(intl_exception(req, pending, *text))
     } else {
         pending
     };
-    global(req).message = Some(Box::new(text));
+    global(req).keep(text).free(req);
     thrown.map_or(Ok(()), Err)
+}
+
+/// `later` raised while `pending` stood, chained over it as
+/// [`Thrown::chain`] chains it, or alone where nothing stood.
+fn over(req: &mut Request, pending: Option<Thrown>, later: Thrown) -> Thrown {
+    match pending {
+        Some(pending) => pending.chain(req, later),
+        None => later,
+    }
 }
 
 /// `php_error_docref(NULL, level, "%s", msg)`: the warning raised, and
@@ -271,31 +374,57 @@ fn raise(
 }
 
 /// `intl_error_set_custom_msg`'s throw, `zend_throw_error_exception`
-/// over the message it made whole (`zend_string_concat3`), so nothing
-/// printed stands across it, chained to what is pending as
-/// `zend_throw_exception_internal` chains it. The message is
-/// php's `char *`, bytes: where they are not UTF-8 they are written over
-/// the empty one the throw laid.
-fn intl_exception(req: &mut Request, pending: Option<Thrown>, text: &[u8]) -> Thrown {
+/// over the string it made (`zend_string_concat3`): an `IntlException`
+/// made, the string its message, then thrown, chained over what is
+/// pending as `zend_throw_exception_internal` chains it. The throwable
+/// shares the string the request keeps as its message, one allocation
+/// for both, as php's `ZVAL_STR` hands the property its `zend_string`;
+/// so a message's bytes that are not UTF-8 are the throwable's as they
+/// are, and the request's next message frees nothing while the
+/// throwable holds the last one:
+///
+/// ```php
+/// ini_set('intl.use_exceptions', 1);
+/// try { IntlChar::isalpha(0x110000); } catch (IntlException $e) {}
+/// ini_set('intl.use_exceptions', 0);
+/// $m = memory_get_usage();
+/// IntlChar::isalpha(0x110001);
+/// echo memory_get_usage() - $m, "\n";
+/// ini_set('intl.use_exceptions', 1);
+/// try { (new MessageFormatter('en', '{0}'))->format(["\xffk" => 1]); } catch (IntlException $e) { echo bin2hex($e->getMessage()), "\n"; }
+/// ```
+/// ```expect
+/// 80
+/// 4d657373616765466f726d61747465723a3a666f726d617428293a20496e76616c6964205554462d38206461746120696e20617267756d656e74206b65793a2027ff6b27
+/// ```
+fn intl_exception(req: &mut Request, pending: Option<Thrown>, text: PhpString) -> Thrown {
     let ce = match crate::throwables::Throwables::of(req) {
         Ok(ce) => ce,
-        Err(fatal) => return fatal,
+        Err(fatal) => return over(req, pending, fatal),
     };
-    let utf8 = std::str::from_utf8(text);
-    let message = utf8.unwrap_or_default();
-    let thrown = match pending {
-        Some(pending) => throw_chained(req, pending, ce.intl_exception, message),
-        None => throw(req, ce.intl_exception, message),
+    let object = match new_object(req, ce.intl_exception) {
+        Ok(object) => object,
+        Err(refused) => return over(req, pending, refused),
     };
-    let Some(object) = thrown.exception().copied().filter(|_| utf8.is_err()) else {
-        return thrown;
-    };
-    let written = PhpString::new(req, text)
-        .and_then(|text| write_prop(req, &object, b"message", text.into_value()));
-    match written {
-        Ok(()) => thrown,
-        Err(refused) => thrown.chain(req, refused),
+    let view = *object;
+    let written = PhpString::interned(req, b"message").and_then(|name| {
+        let (name, message) = (Owner::take(req, name), Owner::take(req, text));
+        view.set_prop(req, name, message.into_value())
+    });
+    if let Err(refused) = written {
+        object.give_up(req);
+        return over(req, pending, refused);
     }
+    let value = view.as_value();
+    let thrown = match pending {
+        None => throw_value(req, &value),
+        Some(pending) => match while_pending(req, &pending, |req| throw_value(req, &value)) {
+            Some(later) => pending.chain(req, later),
+            None => pending,
+        },
+    };
+    object.give_up(req);
+    thrown
 }
 
 /// `intl_error_set(NULL, code, msg)`.
@@ -316,9 +445,7 @@ fn carried<P: Carrier>(req: &mut Request, object: PhpObject) -> Option<&mut Intl
 
 /// `intl_error_reset(obj)`, as `INTL_METHOD_FETCH_OBJECT` resets it.
 pub(crate) fn reset_object<P: Carrier>(req: &mut Request, object: PhpObject) {
-    if let Some(error) = carried::<P>(req, object) {
-        error.reset();
-    }
+    reset_at(req, |req| carried::<P>(req, object));
 }
 
 /// `intl_errors_reset(obj)`: the object's and the request's.
@@ -346,17 +473,44 @@ pub(crate) fn errors_set_code<P: Carrier>(req: &mut Request, object: PhpObject, 
 }
 
 /// `intl_errors_set_custom_msg(obj, msg)`: the object's message, then
-/// the request's, which raises.
+/// the request's, which raises. Each is a string of the request's heap,
+/// so a warning handler counts both, the object's and the request's,
+/// with the request's last one freed only after the handler returns;
+/// the object's is freed with the object. A `UConverter` whose encoding
+/// fails while it sizes what it writes is the witness, its UTF-16 copy held
+/// across the warning as php holds it:
+///
+/// ```php
+/// @ini_set('intl.error_level', E_WARNING);
+/// class F extends UConverter {
+///     function fromUCallback($reason, $source, $codePoint, &$error): string|int|array|null {
+///         if ($reason !== self::REASON_UNASSIGNED) return null;
+///         $error = U_INVALID_CHAR_FOUND;
+///         return '?';
+///     }
+/// }
+/// set_error_handler(function () use (&$u, &$p) { $u = memory_get_usage(); $p = memory_get_peak_usage(); return true; });
+/// foreach ([10, 100000, 100000] as $n) {
+///     $c = new F('ASCII', 'UTF-8');
+///     $s = str_repeat('a', $n) . "\u{100}";
+///     memory_reset_peak_usage(); $m = memory_get_usage();
+///     $c->convert($s);
+///     echo $u - $m, ' ', $p - $m, ' ', memory_get_usage() - $m;
+///     $m = memory_get_usage(); unset($c); echo ' ', memory_get_usage() - $m, "\n";
+/// }
+/// ```
+/// ```expect
+/// 320 1168 224 -256
+/// 200992 201840 192 -256
+/// 200992 201840 192 -256
+/// ```
 pub(crate) fn errors_set_custom_msg<P: Carrier>(
     req: &mut Request,
     object: PhpObject,
     message: impl AsRef<[u8]>,
 ) -> Result<(), Thrown> {
     let message = message.as_ref();
-    let text = prefixed(req, message);
-    if let Some(error) = carried::<P>(req, object) {
-        error.message = Some(Box::new(text));
-    }
+    keep_at(req, message, |req| carried::<P>(req, object))?;
     set_custom_msg(req, message)
 }
 
@@ -477,7 +631,7 @@ impl Outside<'_> {
         code: Code,
         message: impl AsRef<[u8]>,
     ) -> Result<(), Thrown> {
-        self.keep(req, code, message.as_ref());
+        self.keep(req, code, message.as_ref())?;
         set(req, code, message)
     }
 
@@ -491,22 +645,31 @@ impl Outside<'_> {
         code: Code,
         message: impl AsRef<[u8]>,
     ) -> Result<(), Thrown> {
-        self.keep(req, code, message.as_ref());
+        if let Err(fatal) = self.keep(req, code, message.as_ref()) {
+            return Err(over(req, pending, fatal));
+        }
         set_code(req, code);
         custom_msg(req, pending, message.as_ref())
     }
 
-    /// The outside error's code and message.
-    fn keep(&mut self, req: &mut Request, code: Code, message: &[u8]) {
-        let text = prefixed(req, message);
-        let error = match self {
-            Outside::Request => None,
-            Outside::Local(error) => Some(&mut **error),
-            Outside::Object(object, carried) => carried(req, *object),
-        };
-        if let Some(error) = error {
-            error.code = code;
-            error.message = Some(Box::new(text));
+    /// The outside error's code and message, `intl_error_set_code` and
+    /// `intl_error_set_custom_msg`; the `Err` is the memory limit's fatal.
+    fn keep(&mut self, req: &mut Request, code: Code, message: &[u8]) -> Result<(), Thrown> {
+        match self {
+            Outside::Request => Ok(()),
+            Outside::Local(error) => {
+                error.code = code;
+                let text = prefixed(req, message)?;
+                error.keep(text).free(req);
+                Ok(())
+            }
+            Outside::Object(object, carried) => {
+                let (object, carried) = (*object, *carried);
+                if let Some(error) = carried(req, object) {
+                    error.code = code;
+                }
+                keep_at(req, message, |req| carried(req, object))
+            }
         }
     }
 

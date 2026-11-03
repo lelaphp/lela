@@ -8,7 +8,7 @@
 use std::cmp::Ordering;
 use std::ops::ControlFlow;
 
-use php_ext::abi::{Instance, OrFalse, Ref, Refusals, This, True};
+use php_ext::abi::{Instance, ObjectHandlers, OrFalse, Ref, Refusals, Std, This, True};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{known_method, lookup_class, new_object};
 use php_ext::coerce;
@@ -38,7 +38,23 @@ impl Carrier for CollatorObject {
 
 /// `Collator_handlers`: no clone, `ucol_cloneBinary` having nowhere to
 /// keep its buffer.
-pub(crate) const HANDLERS: Refusals = Refusals::NONE.cloning();
+pub(crate) static HANDLERS: Handlers = Handlers;
+
+/// The handlers of `Collator` and its subclasses.
+pub(crate) struct Handlers;
+
+impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
+    }
+
+    /// `Collator_objects_free`: `zend_object_std_dtor`, then
+    /// `collator_object_destroy`, which frees the error's message.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        Std.free_obj(req, object);
+        error::free::<CollatorObject>(req, object);
+    }
+}
 
 /// A `zend_long` handed to ICU's `int` or enum, C's truncation.
 fn c_int(n: i64) -> i32 {
