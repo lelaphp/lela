@@ -1321,6 +1321,7 @@ values::Owner::cursor_end
 values::Owner::cursor_next
 values::Owner::cursor_prev
 values::Owner::cursor_reset
+values::Owner::fill_packed
 values::Owner::float
 values::Owner::give_up
 values::Owner::give_up_nogc
