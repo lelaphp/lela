@@ -155,17 +155,18 @@ fn array_merge_recursive(
     req: &mut Request,
     arrays: Variadic<PhpArray>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let Some((first, rest)) = arrays.split_first() else {
+    super::merge_total(req, arrays.clone())?;
+    let mut rest = arrays;
+    let Some(first) = rest.next() else {
         return Ok(Owner::take(req, PhpArray::empty()));
     };
-    super::merge_total(req, &arrays)?;
     let mut dest = PhpArray::new(req)?;
     // `php_array_merge_wrapper`'s copy of the first array
     // (`ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(src, string_key, src_entry)`,
     // `Z/ext/standard/array.c:4364`), which no code of the program reaches:
     // the rows read under the borrowed request, each taken as php takes
     // it, a reference with one owner followed, then written.
-    let rows: Vec<(Key, Owner<Value>)> = walk::rows(req, *first)
+    let rows: Vec<(Key, Owner<Value>)> = walk::rows(req, first)
         .map(|(key, value)| (key, copied(req, value)))
         .collect();
     let mut rows = rows.into_iter();
@@ -184,7 +185,7 @@ fn array_merge_recursive(
         }
     }
     for src in rest {
-        if let Err(thrown) = merge_recursive(req, &mut dest, *src) {
+        if let Err(thrown) = merge_recursive(req, &mut dest, src) {
             dest.give_up(req);
             return Err(thrown);
         }
@@ -310,7 +311,7 @@ fn array_replace(
     array: PhpArray,
     replacements: Variadic<PhpArray>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    replace(req, array, &replacements, false)
+    replace(req, array, replacements, false)
 }
 
 /// `array_replace_recursive(array $array, array ...$replacements):
@@ -346,21 +347,21 @@ fn array_replace_recursive(
     array: PhpArray,
     replacements: Variadic<PhpArray>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    replace(req, array, &replacements, true)
+    replace(req, array, replacements, true)
 }
 
 fn replace(
     req: &mut Request,
     array: PhpArray,
-    replacements: &[PhpArray],
+    replacements: Variadic<PhpArray>,
     recursive: bool,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut dest = array.copy(req)?;
     for src in replacements {
         let replaced = if recursive {
-            replace_recursive(req, &mut dest, *src)
+            replace_recursive(req, &mut dest, src)
         } else {
-            replace_flat(req, &mut dest, *src)
+            replace_flat(req, &mut dest, src)
         };
         if let Err(thrown) = replaced {
             dest.give_up(req);

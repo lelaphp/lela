@@ -1757,6 +1757,7 @@ fn mysqli_stmt_bind_param(
     types: PhpString,
     vars: Variadic<Ref<Value>>,
 ) -> Answer<bool> {
+    let vars: Vec<Ref<Value>> = vars.collect();
     stmt::bind_param(req, on_stmt(statement), types, &vars)
 }
 
@@ -1780,6 +1781,7 @@ fn mysqli_stmt_bind_result(
     statement: Statement,
     vars: Variadic<Ref<Value>>,
 ) -> Answer<bool> {
+    let vars: Vec<Ref<Value>> = vars.collect();
     stmt::bind_result(req, on_stmt(statement), &vars)
 }
 

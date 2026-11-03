@@ -2519,10 +2519,10 @@ fn register_shutdown_function(
     args: Variadic<Value>,
 ) -> Result<(), Thrown> {
     let callback = Owner::take(req, callback);
-    for value in args.iter() {
-        req.addref(value);
+    for value in args.clone() {
+        req.addref(&value);
     }
-    let arguments = args.into_iter().collect();
+    let arguments = args.collect();
     req.code_mut()
         .register_shutdown_function(callback, arguments)
 }

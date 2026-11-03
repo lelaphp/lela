@@ -13,7 +13,10 @@
 //! `ZEND_TYPE_CONTAINS_CODE` does before anything else; any other is
 //! [`coerce::argument`] over the declaration, whose text is php's.
 
+use std::any::{Any, TypeId};
 use std::marker::PhantomData;
+
+use php_heap::{Slot, ZvalSpan};
 
 use php_unit::decl::{Bare, ConstExpr, Name, Type};
 
@@ -882,13 +885,31 @@ impl<T: FromArgument> FromArgument for Ref<T> {
 }
 
 /// The variadic tail of a native's parameters, each element held to
-/// `T`; a call that names an argument the tail cannot take is php's
-/// "does not accept unknown named parameters". It reads as the slice of
-/// its elements and iterates them by value. `Z_PARAM_VARIADIC` points
-/// into the call's frame and allocates nothing; a tail of one element,
-/// the most a frameless call's carries, is held in place here, so it
-/// allocates nothing either, and a longer one is one `Vec`, sized once
+/// `T`, php's `Z_PARAM_VARIADIC` (`Z/Zend/zend_API.h:2169`): the `zval
+/// *args` and the `argc` it hands the body, read from the front as an
+/// iterator of its elements by value, which knows how many are left
+/// ([`ExactSizeIterator`]) and reads any one of them without the ones
+/// before it ([`Iterator::nth`]). A call that names an argument the
+/// tail cannot take is php's "does not accept unknown named
+/// parameters".
+///
+/// A tail of a type that takes each argument as it stands (`mixed`, an
+/// untyped value, an `array`, an array the body holds itself) is read
+/// where the call left its arguments: over the frame's slots
+/// ([`ZvalSpan`]) on a framed call, over the operands on a frameless
+/// one, each element read back off its slot as the body reaches it, so
+/// it allocates nothing however long it is; an `array` tail is held to
+/// its type on entry, each argument left to right, before the body
+/// runs. A tail of a type that converts what it takes is held whole on
+/// entry: none or one element in place, a longer one in one `Vec` sized
 /// from the call's count.
+///
+/// The lifetime is the call's. The entry hands the body a tail of a
+/// lifetime the body cannot name, so the body keeps no tail past its
+/// return, and the slots a tail reads stand on their page until the
+/// frame pops, which is after the body returns. A slot written while
+/// the body runs, a weak coercion's string written back
+/// ([`Raw::hold`]), is read as it stands, as php's `args[i]` is.
 ///
 /// A tail passed by value and one passed by reference, one, two and
 /// three elements long:
@@ -912,54 +933,234 @@ impl<T: FromArgument> FromArgument for Ref<T> {
 /// string(1) "b"
 /// float(2.5)
 /// ```
+///
+/// A tail read in place: long ones, one unpacked, one holding a
+/// reference, which is read through, an `array` tail refused at the
+/// argument that is none before the body runs, one read out of order by
+/// position, and a frameless call's:
+///
+/// ```php
+/// echo max(4, 9, 2, 8, 1, 7, 3, 6, 5), " ", min(...[5, 3, 4]), " ";
+/// $x = 7; $r = [1, &$x]; echo max(...$r), "\n";
+/// echo json_encode(array_merge([1], [2], [3], [4, 5])), "\n";
+/// try { array_merge([1], [2], 3, [4]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// echo sprintf('%3$s-%1$s-%2$s', 'a', 'b', 'c'), " ", sprintf('%s', 'd'), "\n";
+/// echo json_encode(array_diff_key(['a' => 1, 'b' => 2, 'c' => 3], ['a' => 0], ['c' => 0])), "\n";
+/// ```
+/// ```expect
+/// 9 3 7
+/// [1,2,3,4,5]
+/// array_merge(): Argument #3 must be of type array, int given
+/// c-a-b d
+/// {"b":2}
+/// ```
 #[derive(Debug, Clone)]
-pub struct Variadic<T>(Tail<T>);
+pub struct Variadic<'c, T> {
+    tail: Tail<T>,
+    call: PhantomData<&'c ()>,
+}
 
-/// Where a [`Variadic`]'s elements stand: none or one in place, more on
-/// the heap.
+/// Where a [`Variadic`]'s elements stand: held, none or one in place
+/// and more on the heap, or left where the call put them and read back
+/// from `front` up to `back`.
 #[derive(Debug, Clone)]
 enum Tail<T> {
-    Few(Option<T>),
-    Many(Vec<T>),
+    One(std::option::IntoIter<T>),
+    Many(std::vec::IntoIter<T>),
+    InPlace {
+        slots: Slots,
+        position: u32,
+        front: u32,
+        back: u32,
+    },
 }
 
-impl<T> std::ops::Deref for Variadic<T> {
-    type Target = [T];
-    fn deref(&self) -> &[T] {
-        match &self.0 {
-            Tail::Few(one) => one.as_slice(),
-            Tail::Many(many) => many,
+/// The arguments an in-place tail reads: the frame's slots, or a
+/// frameless call's operands, of which there are at most three.
+#[derive(Debug, Clone, Copy)]
+enum Slots {
+    Frame(ZvalSpan),
+    Operands([Value; 3]),
+}
+
+impl Slots {
+    fn at(self, index: u32) -> Value {
+        match self {
+            Slots::Frame(span) => span
+                .read(index as usize)
+                .map_or_else(Value::undef, Value::of_zval),
+            Slots::Operands(given) => given
+                .get(index as usize)
+                .copied()
+                .unwrap_or_else(Value::undef),
         }
     }
 }
 
-impl<T> IntoIterator for Variadic<T> {
+/// Whether a `T` is read back off the slot it stands in, which a type
+/// that holds the argument as it is, with no conversion, is: and if so,
+/// whether its hold may refuse what it is given, so the entry holds
+/// each argument to it before the body runs. `TypeId` decides, as the
+/// four types are named here and nowhere else.
+fn in_place<T: 'static>() -> Option<bool> {
+    let id = TypeId::of::<T>();
+    if id == TypeId::of::<Value>()
+        || id == TypeId::of::<Untyped<Value>>()
+        || id == TypeId::of::<Raw<PhpArray>>()
+    {
+        return Some(false);
+    }
+    (id == TypeId::of::<PhpArray>()).then_some(true)
+}
+
+/// `slot`, the argument at `position`, read back as the `T`
+/// [`in_place`] names: as [`FromArgument::hold`] holds it, a reference
+/// followed; none for any other type.
+fn read_back<T: 'static>(slot: Value, position: u32) -> Option<T> {
+    fn cast<T: 'static, X: 'static>(held: X) -> Option<T> {
+        let mut held = Some(held);
+        (&mut held as &mut dyn Any)
+            .downcast_mut::<Option<T>>()?
+            .take()
+    }
+    let plain = slot.deref();
+    let id = TypeId::of::<T>();
+    if id == TypeId::of::<Value>() {
+        cast(plain)
+    } else if id == TypeId::of::<Untyped<Value>>() {
+        cast(Untyped(plain))
+    } else if id == TypeId::of::<Raw<PhpArray>>() {
+        cast(Raw::<PhpArray>::at(plain, position))
+    } else if id == TypeId::of::<PhpArray>() {
+        cast(plain.as_array()?)
+    } else {
+        None
+    }
+}
+
+impl<T> Variadic<'_, T> {
+    fn of(tail: Tail<T>) -> Self {
+        Variadic {
+            tail,
+            call: PhantomData,
+        }
+    }
+
+    fn none() -> Self {
+        Variadic::of(Tail::One(None.into_iter()))
+    }
+}
+
+impl<T: 'static> Iterator for Variadic<'_, T> {
     type Item = T;
-    type IntoIter = std::iter::Chain<std::option::IntoIter<T>, std::vec::IntoIter<T>>;
-    fn into_iter(self) -> Self::IntoIter {
-        match self.0 {
-            Tail::Few(one) => one.into_iter().chain(Vec::new()),
-            Tail::Many(many) => None.into_iter().chain(many),
+    fn next(&mut self) -> Option<T> {
+        match &mut self.tail {
+            Tail::One(one) => one.next(),
+            Tail::Many(many) => many.next(),
+            Tail::InPlace {
+                slots,
+                position,
+                front,
+                back,
+            } => {
+                if front >= back {
+                    return None;
+                }
+                let at = *front;
+                *front += 1;
+                read_back(slots.at(at), position.saturating_add(at))
+            }
+        }
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = match &self.tail {
+            Tail::One(one) => one.len(),
+            Tail::Many(many) => many.len(),
+            Tail::InPlace { front, back, .. } => back.saturating_sub(*front) as usize,
+        };
+        (left, Some(left))
+    }
+    /// The element `n` past the front, the ones before it passed over
+    /// unread where the tail stands in place.
+    fn nth(&mut self, n: usize) -> Option<T> {
+        if let Tail::InPlace { front, back, .. } = &mut self.tail {
+            let skip = u32::try_from(n).unwrap_or(u32::MAX);
+            *front = front.saturating_add(skip).min(*back);
+        } else {
+            for _ in 0..n {
+                self.next()?;
+            }
+        }
+        self.next()
+    }
+}
+
+impl<T: 'static> DoubleEndedIterator for Variadic<'_, T> {
+    fn next_back(&mut self) -> Option<T> {
+        match &mut self.tail {
+            Tail::One(one) => one.next_back(),
+            Tail::Many(many) => many.next_back(),
+            Tail::InPlace {
+                slots,
+                position,
+                front,
+                back,
+            } => {
+                if front >= back {
+                    return None;
+                }
+                *back -= 1;
+                read_back(slots.at(*back), position.saturating_add(*back))
+            }
         }
     }
 }
+
+impl<T: 'static> ExactSizeIterator for Variadic<'_, T> {}
 
 /// The tail read off a call of `count` arguments from `position` on,
-/// `first` the argument there as the entry read it and each later one
-/// read off the frame: none or one in place, a longer one on the heap
-/// at once. An empty tail holds nothing, so no hold sees the `UNDEF`
-/// the entry reads past the call's arguments.
-fn tail<T: FromArgument>(
+/// `first` the argument there as the entry read it: in place over the
+/// frame's slots where [`in_place`] names `T`, each held to it first
+/// where its hold may refuse; otherwise each later one read off the
+/// frame and held, none or one in place and a longer one on the heap at
+/// once. An empty tail holds nothing, so no hold sees the `UNDEF` the
+/// entry reads past the call's arguments.
+fn tail<'c, T: FromArgument + 'static>(
     req: &mut Request,
     first: Value,
     position: u32,
     count: u32,
-) -> Result<Variadic<T>, Thrown> {
+) -> Result<Variadic<'c, T>, Thrown> {
     use std::cmp::Ordering::{Equal, Greater, Less};
     let mut held = match count.cmp(&position) {
-        Less => return Ok(Variadic(Tail::Few(None))),
-        Equal => return Ok(Variadic(Tail::Few(T::hold(req, first, position)?))),
-        Greater => Vec::with_capacity((count - position + 1) as usize),
+        Less => return Ok(Variadic::none()),
+        Equal => {
+            return Ok(Variadic::of(Tail::One(
+                T::hold(req, first, position)?.into_iter(),
+            )));
+        }
+        Greater => {
+            let len = count - position + 1;
+            if let Some(checks) = in_place::<T>()
+                && let Some(span) = req
+                    .serving_call()
+                    .and_then(|call| call.frame.span(Slot(position - 1), len as usize))
+            {
+                let slots = Slots::Frame(span);
+                if checks {
+                    for at in 0..len {
+                        T::hold(req, slots.at(at), position.saturating_add(at))?;
+                    }
+                }
+                return Ok(Variadic::of(Tail::InPlace {
+                    slots,
+                    position,
+                    front: 0,
+                    back: len,
+                }));
+            }
+            Vec::with_capacity(len as usize)
+        }
     };
     held.extend(T::hold(req, first, position)?);
     for at in position + 1..=count {
@@ -968,10 +1169,10 @@ fn tail<T: FromArgument>(
             held.push(value);
         }
     }
-    Ok(Variadic(Tail::Many(held)))
+    Ok(Variadic::of(Tail::Many(held.into_iter())))
 }
 
-impl<T: FromArgument> FromArgument for Variadic<T> {
+impl<T: FromArgument + 'static> FromArgument for Variadic<'_, T> {
     const VARIADIC: bool = true;
     const BY_REF: bool = T::BY_REF;
     const MASK: u32 = T::MASK;
@@ -982,7 +1183,7 @@ impl<T: FromArgument> FromArgument for Variadic<T> {
         true
     }
     fn from_value(_: &mut Request, _: Value) -> Result<Self, Thrown> {
-        Ok(Variadic(Tail::Few(None)))
+        Ok(Variadic::none())
     }
     /// The tail is read off the call once, from `position` on, `given`
     /// standing first in it.
@@ -990,30 +1191,65 @@ impl<T: FromArgument> FromArgument for Variadic<T> {
         let count = req.variadic_count()?;
         tail(req, given, position, count).map(Some)
     }
-    /// A frameless call's operands from `position` on, none or one held
+    /// A frameless call's operands from `position` on, read in place
+    /// where a framed call's would be, and otherwise held, none or one
     /// in place and more on the heap, as a framed call's are.
     fn tail(req: &mut Request, given: &[Value], position: u32) -> Result<Self, Thrown> {
         let mut held = match given {
-            [] => return Ok(Variadic(Tail::Few(None))),
-            &[one] => return Ok(Variadic(Tail::Few(T::hold(req, one, position)?))),
-            many => Vec::with_capacity(many.len()),
+            [] => return Ok(Variadic::none()),
+            &[one] => {
+                return Ok(Variadic::of(Tail::One(
+                    T::hold(req, one, position)?.into_iter(),
+                )));
+            }
+            many => match (in_place::<T>(), many) {
+                (Some(checks), &[a, b] | &[a, b, _]) => {
+                    let operands = [a, b, many.get(2).copied().unwrap_or_else(Value::undef)];
+                    let len = u32::try_from(many.len()).unwrap_or(3);
+                    let slots = Slots::Operands(operands);
+                    if checks {
+                        for at in 0..len {
+                            T::hold(req, slots.at(at), position.saturating_add(at))?;
+                        }
+                    }
+                    return Ok(Variadic::of(Tail::InPlace {
+                        slots,
+                        position,
+                        front: 0,
+                        back: len,
+                    }));
+                }
+                _ => Vec::with_capacity(many.len()),
+            },
         };
         for (at, &value) in (position..).zip(given) {
             held.extend(T::hold(req, value, at)?);
         }
-        Ok(Variadic(Tail::Many(held)))
+        Ok(Variadic::of(Tail::Many(held.into_iter())))
     }
 }
 
 /// `Z_PARAM_VARIADIC_WITH_NAMED`: the tail, and the extra named
-/// arguments beside it, which `call_user_func` hands on.
+/// arguments beside it, which `call_user_func` hands on. The list of
+/// named ones is laid down only where the call names one, so a call
+/// that names none allocates nothing past what its tail does:
+///
+/// ```php
+/// function f(...$a) { return json_encode($a); }
+/// echo call_user_func('f'), call_user_func('f', 1), call_user_func('f', 1, 2, 3), "\n";
+/// echo call_user_func('f', 1, x: 2), call_user_func('f', x: 1, y: 2), "\n";
+/// ```
+/// ```expect
+/// [][1][1,2,3]
+/// {"0":1,"x":2}{"x":1,"y":2}
+/// ```
 #[derive(Debug, Clone)]
-pub struct NamedVariadic<T> {
-    pub positional: Variadic<T>,
+pub struct NamedVariadic<'c, T> {
+    pub positional: Variadic<'c, T>,
     named: Vec<(PhpString, T)>,
 }
 
-impl<T> NamedVariadic<T> {
+impl<T> NamedVariadic<'_, T> {
     /// The extra named arguments, name and value in the order given.
     #[must_use]
     pub fn named(&self) -> &[(PhpString, T)] {
@@ -1021,7 +1257,7 @@ impl<T> NamedVariadic<T> {
     }
 }
 
-impl<T: FromArgument> FromArgument for NamedVariadic<T> {
+impl<T: FromArgument + 'static> FromArgument for NamedVariadic<'_, T> {
     const VARIADIC: bool = true;
     const BY_REF: bool = T::BY_REF;
     const MASK: u32 = T::MASK;
@@ -1033,17 +1269,19 @@ impl<T: FromArgument> FromArgument for NamedVariadic<T> {
     }
     fn from_value(_: &mut Request, _: Value) -> Result<Self, Thrown> {
         Ok(NamedVariadic {
-            positional: Variadic(Tail::Few(None)),
+            positional: Variadic::none(),
             named: Vec::new(),
         })
     }
     /// The positional tail is read off the call from `position` on,
-    /// `given` standing first in it, and the named arguments after it.
+    /// `given` standing first in it, and the named arguments after it,
+    /// their list laid down only where there are any.
     fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
         let count = u32::try_from(req.frames().argument_count()).unwrap_or(u32::MAX);
         let positional = tail(req, given, position, count)?;
-        let mut named = Vec::new();
-        for (name, value) in req.named_arguments() {
+        let passed = req.named_arguments();
+        let mut named = Vec::with_capacity(passed.len());
+        for (name, value) in passed {
             named.push((name, held_as::<T>(req, value, count.saturating_add(1))?));
         }
         Ok(Some(NamedVariadic { positional, named }))

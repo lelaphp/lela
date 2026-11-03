@@ -101,8 +101,8 @@ const HT_MAX_SIZE: u64 = 0x4000_0000;
 /// `php_array_merge_wrapper`'s count (`Z/ext/standard/array.c:4268`):
 /// the elements of every array added up before anything is merged, and
 /// php's `Error` where they reach `HT_MAX_SIZE`.
-fn merge_total(req: &mut Request, arrays: &[PhpArray]) -> Result<(), Thrown> {
-    let count: u64 = arrays.iter().map(|array| array.len() as u64).sum();
+fn merge_total(req: &mut Request, arrays: impl Iterator<Item = PhpArray>) -> Result<(), Thrown> {
+    let count: u64 = arrays.map(|array| array.len() as u64).sum();
     if count >= HT_MAX_SIZE {
         let ce = Throwables::of(req)?;
         return Err(php_ext::raising::throw_error(
@@ -235,11 +235,12 @@ fn array_merge(
     req: &mut Request,
     arrays: Variadic<PhpArray>,
 ) -> Result<Owner<Raw<PhpArray>>, Thrown> {
-    if arrays.is_empty() {
+    if arrays.len() == 0 {
         return Ok(returned(Owner::take(req, Value::array(PhpArray::empty()))));
     }
-    merge_total(req, &arrays)?;
-    if let [first, second] = arrays[..] {
+    merge_total(req, arrays.clone())?;
+    let mut two = arrays.clone();
+    if let (2, Some(first), Some(second)) = (arrays.len(), two.next(), two.next()) {
         let kept = if first.is_empty() {
             Some(second)
         } else if second.is_empty() {

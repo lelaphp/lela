@@ -1034,7 +1034,8 @@ impl Closure {
         }
         // `fci.named_params`, placed by `zend_call_function` over the
         // closure's function.
-        let placed = crate::api::call::placed(req, info.function, &args.positional, args.named())?;
+        let positional: Vec<Value> = args.positional.clone().collect();
+        let placed = crate::api::call::placed(req, info.function, &positional, args.named())?;
         let generator = req
             .symbols()
             .function_decl(info.function)

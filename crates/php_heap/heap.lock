@@ -53,6 +53,9 @@ Block::len
 CallStack
 ChunkCache
 ChunkCache::new
+CountingSystem
+CountingSystem::allocations
+CountingSystem::watch
 DeclaredRows
 DelayedOom
 Direction
@@ -89,6 +92,7 @@ Frame::slot
 Frame::slot_ptr
 Frame::slots
 Frame::slots_mut
+Frame::span
 FrameRef
 FramesAside
 FramesLayout
@@ -499,6 +503,10 @@ ZvalRef::read
 ZvalRef::set_fe_pos
 ZvalRef::set_prop_bit
 ZvalRef::write
+ZvalSpan
+ZvalSpan::is_empty
+ZvalSpan::len
+ZvalSpan::read
 ZvalType
 call_stack_bounds
 call_stack_default_size

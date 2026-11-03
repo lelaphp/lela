@@ -570,7 +570,8 @@ fn proto_call(
     args: NamedVariadic<Value>,
 ) -> Result<Owner<Value>, Thrown> {
     let named: Vec<(PhpString, Value)> = args.named().to_vec();
-    php_ext::call::call_named(req, &callback, &args.positional, &named)
+    let positional: Vec<Value> = args.positional.collect();
+    php_ext::call::call_named(req, &callback, &positional, &named)
 }
 
 /// `proto_count(iterable $of): int`.
@@ -592,7 +593,7 @@ fn proto_manual(req: &mut Request, n: Variadic<i64>) -> Result<Owner<PhpString>,
             "exactly 0 or 2 arguments",
         ));
     }
-    let text = format!("{:?}", &n[..]);
+    let text = format!("{:?}", n.collect::<Vec<_>>());
     PhpString::new(req, text.as_bytes())
 }
 
