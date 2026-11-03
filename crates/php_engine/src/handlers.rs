@@ -13863,19 +13863,23 @@ fn frameless_call<const N: usize>(
     arguments: [(OperandKind, u32); N],
 ) -> Edge {
     // The frame stands at the call, and a `CV` is borrowed where no name
-    // reaches its variables ([`exec::frameless_named`]).
-    let header = req.vm_mut().at_mut(frame);
-    let named = exec::frameless_named(header.as_deref());
-    if let Some(header) = header {
-        header.opline = at;
-    }
-    let mut operands = [Zval::UNDEF; N];
-    let mut owned = 0u8;
-    for (at, (operand, read)) in arguments.into_iter().zip(&mut operands).enumerate() {
-        let own;
-        (*read, own) = exec::frameless_operand(req, frame, code, operand, named);
-        owned |= u8::from(own) << at;
-    }
+    // reaches its variables ([`exec::frameless_named`]): every operand
+    // read where it stands in the one look at the frame that writes the
+    // opline, and each read in turn ([`exec::frameless_operand`]) where
+    // one is `UNUSED`, `UNDEF` or a reference.
+    let (operands, owned) = if let Some(read) = frameless_read(req, frame, code, at, &arguments) {
+        read
+    } else {
+        let named = exec::frameless_named(req.vm().at(frame));
+        let mut operands = [Zval::UNDEF; N];
+        let mut owned = 0u8;
+        for (at, (operand, read)) in arguments.into_iter().zip(&mut operands).enumerate() {
+            let own;
+            (*read, own) = exec::frameless_operand(req, frame, code, operand, named);
+            owned |= u8::from(own) << at;
+        }
+        (operands, owned)
+    };
     let held = Operands {
         frame,
         zvals: &operands,
@@ -13892,6 +13896,46 @@ fn frameless_call<const N: usize>(
         return Ok(Stepped::Threw(frame).into());
     }
     jump_to(at.saturating_add(if N == 3 { 2 } else { 1 }))
+}
+
+/// [`frameless_call`]'s operands read in one look at `frame`, which is
+/// made to stand at `at`: each as [`exec::frameless_operand`] reads one
+/// that is a constant or a value in its slot, a `CV` of a frame a name
+/// reaches taking one more owner; none, with only the opline written,
+/// where any is `UNUSED`, `UNDEF` or a reference.
+#[inline(always)] // the frameless handler's hot path
+fn frameless_read<const N: usize>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    at: u32,
+    arguments: &[(OperandKind, u32); N],
+) -> Option<([Zval; N], u8)> {
+    let state = req.vm_mut().stack.frame_mut(frame)?;
+    let header = state.header_mut();
+    header.opline = at;
+    let named = header.annex().is_some();
+    let slots = state.slots_mut();
+    let mut operands = [Zval::UNDEF; N];
+    let mut owned = 0u8;
+    for (at, (&(kind, field), read)) in arguments.iter().zip(&mut operands).enumerate() {
+        let z = match kind {
+            OperandKind::Const => *code.literals.get(field as usize)?,
+            OperandKind::Unused => return None,
+            _ => *slots.get(field as usize)?,
+        };
+        if z.is_undef() || z.kind() == php_heap::ZvalType::Reference {
+            return None;
+        }
+        *read = z;
+        owned |= u8::from(kind == OperandKind::Cv && named) << at;
+    }
+    for (at, z) in operands.iter().enumerate() {
+        if owned >> at & 1 != 0 {
+            z.addref();
+        }
+    }
+    Some((operands, owned))
 }
 
 /// The native at `at` of the engine's frameless table served over the
