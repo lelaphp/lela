@@ -506,12 +506,12 @@ pub fn foreach_read<B, H: FnOnce(&Key) -> B>(
             break Ok(None);
         };
         pos = found.saturating_add(1);
+        if let Some(ControlFlow::Break(hit)) = answer {
+            break Ok(table.key_at(found).map(|key| hit(&key)));
+        }
         let Some((_, key, value, at)) = table.held_from(found, pos) else {
             break Ok(None);
         };
-        if let Some(ControlFlow::Break(hit)) = answer {
-            break Ok(Some(hit(&key)));
-        }
         let watch = if let Some(taken) = &standing {
             taken.watch()
         } else {
@@ -712,6 +712,17 @@ impl Table {
                 }
                 pos = found.saturating_add(1);
             },
+        }
+    }
+
+    /// The key of the row at `pos`, which holds a value: an array's
+    /// read off its bucket alone, `_php_search_array`'s `str_idx` or
+    /// `num_idx` on its hit.
+    #[inline]
+    fn key_at(&self, pos: u32) -> Option<Key> {
+        match self {
+            Table::Array(array) => array.heap().entry_at(pos).map(|(key, _)| Key::of(key)),
+            Table::Object(object) => object.held_from(pos, pos + 1).map(|(_, key, ..)| key),
         }
     }
 
