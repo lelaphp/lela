@@ -465,6 +465,19 @@ impl Request {
         self.allocated(allocated)
     }
 
+    /// A string of `len` bytes laid from `parts` one after the other,
+    /// each byte written once ([`php_heap::Heap::string_joined`]): what
+    /// a concatenation and a rope's end lay.
+    #[inline]
+    pub(crate) fn string_joined<'a>(
+        &mut self,
+        len: usize,
+        parts: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<PhpString, Thrown> {
+        let allocated = self.heap.string_joined(len, parts);
+        self.allocated(allocated)
+    }
+
     /// A string of `n * m + l` bytes written in place, what
     /// [`PhpString::product`] is: `zend_string_safe_alloc`.
     pub(crate) fn string_product(

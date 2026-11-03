@@ -2888,11 +2888,7 @@ pub(crate) fn join(req: &mut Request, a: PhpString, b: PhpString) -> Result<PhpS
     if a.len() > ZSTR_MAX_LEN - b.len() {
         return Err(error(req, "String size overflow"));
     }
-    let joined = req.string_with(a.len() + b.len(), |bytes| {
-        let (head, tail) = bytes.split_at_mut(a.len());
-        head.copy_from_slice(a.as_bytes());
-        tail.copy_from_slice(b.as_bytes());
-    })?;
+    let joined = req.string_joined(a.len() + b.len(), [a.as_bytes(), b.as_bytes()])?;
     // `ZSTR_COPY_CONCAT_PROPERTIES_BOTH`: valid UTF-8 where both sides
     // were known to be.
     if a.is_valid_utf8() && b.is_valid_utf8() {
