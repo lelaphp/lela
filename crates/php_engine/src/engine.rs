@@ -1342,7 +1342,7 @@ fn method_functions(
 /// `zend_class_implements` to its interfaces: each built once every
 /// class it names is, a class standing before what it names waiting a
 /// round. One whose names never resolve has its own methods alone.
-fn native_records(classes: &[ClassDecl], keys: &ClassKeys) -> Vec<LinkedClass<ClassId>> {
+fn native_records(classes: &[ClassDecl], keys: &ClassKeys) -> Arc<[LinkedClass<ClassId>]> {
     let mut records: Vec<Option<LinkedClass<ClassId>>> = vec![None; classes.len()];
     let mut progress = true;
     while progress {
@@ -1405,6 +1405,9 @@ fn native_placed(
         let decl = classes.get(at)?;
         Some(placed_of(class, decl, records.get(at), parent, decl_of))
     };
+    // A root's parent places nothing; a parent's own placing is read
+    // where it stands, not copied.
+    let root = Placed::default();
     let mut progress = true;
     while progress {
         progress = false;
@@ -1413,12 +1416,12 @@ fn native_placed(
                 continue;
             }
             let parent = match parents.get(at).copied().flatten() {
-                None => Some(Placed::default()),
+                None => Some(&root),
                 Some(parent) => usize::try_from(parent.0)
                     .ok()
-                    .and_then(|parent| placed.get(parent)?.clone()),
+                    .and_then(|parent| placed.get(parent)?.as_ref()),
             };
-            let built = parent.and_then(|parent| place(at, &parent));
+            let built = parent.and_then(|parent| place(at, parent));
             if let (Some(built), Some(slot)) = (built, placed.get_mut(at)) {
                 *slot = Some(built);
                 progress = true;
@@ -3474,8 +3477,11 @@ impl EngineBuilder {
         mut self,
         extensions: impl IntoIterator<Item = E>,
     ) -> EngineBuilder {
-        self.extensions
-            .extend(extensions.into_iter().map(Into::into));
+        let extensions = extensions.into_iter();
+        // Room for the tier's extension and the host's own, which
+        // [`EngineBuilder::build`] appends, so the list is laid once.
+        (self.extensions).reserve_exact(extensions.size_hint().0 + 2);
+        self.extensions.extend(extensions.map(Into::into));
         self
     }
 
@@ -3666,17 +3672,20 @@ impl EngineBuilder {
         }
         // The declarations apart from the rest of each entry, by
         // `ExtensionId`: Core's at 0, as `module_registry` numbers it.
+        // Each list laid at the length it ends at, the entries with
+        // room for Core's, which goes first once the tables are built.
         let Extension {
             entry: core,
             declarations: core_declared,
         } = crate::core::extension();
-        let (mut extensions, declared): (Vec<ExtensionEntry>, Vec<Declarations>) = extensions
-            .into_iter()
-            .map(|extension| (extension.entry, extension.declarations))
-            .unzip();
-        let mut declarations = Vec::with_capacity(declared.len() + 1);
+        let mut declarations = Vec::with_capacity(extensions.len() + 1);
         declarations.push(core_declared);
-        declarations.extend(declared);
+        let mut entries: Vec<ExtensionEntry> = Vec::with_capacity(extensions.len() + 1);
+        for extension in extensions {
+            entries.push(extension.entry);
+            declarations.push(extension.declarations);
+        }
+        let mut extensions = entries;
         let core_ini = (CORE_INI.iter())
             .map(|(n, v)| (n.as_bytes().to_vec(), v.map(|v| v.as_bytes().to_vec())));
         let mut ini = IniTable::register(core_ini, &extensions);
@@ -3751,7 +3760,7 @@ impl EngineBuilder {
         } = link_classes(&mut declarations);
         let class_keys = ClassKeys::over(&classes);
         let class_at = |name: &[u8]| class_keys.find(&classes, name);
-        let records: Arc<[LinkedClass<ClassId>]> = native_records(&classes, &class_keys).into();
+        let records = native_records(&classes, &class_keys);
         let method_functions = method_functions(&classes, &methods, functions.len());
         let trampoline_tables =
             trampoline_tables(classes.len(), &methods, &trampolines, functions.len());
