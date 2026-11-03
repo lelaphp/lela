@@ -2480,14 +2480,18 @@ impl Request {
         let call = self.vm.stack.current();
         // `EG(current_execute_data) = execute_data` before the arguments
         // are freed: the call is on no chain from here.
-        let Some(header) = self.vm.at_mut(call) else {
+        let Some(state) = self.vm.stack.frame_mut(call) else {
             return;
         };
+        let header = state.header_mut();
         header.info.set_leaving(true);
         if header.annex().is_some() || header.closure().is_some() || header.receiver().is_some() {
             return self.pop_carrying(call);
         }
-        self.release_arguments(call);
+        // Read in the same look where no argument counts an owner.
+        if state.slots().iter().any(|z| z.is_refcounted()) {
+            self.release_arguments(call);
+        }
         self.vm.stack.pop_frame(&mut self.heap);
     }
 
