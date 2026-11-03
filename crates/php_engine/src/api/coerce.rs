@@ -556,6 +556,15 @@ pub fn loose_eq_read(req: &Request, a: &Value, b: &Value) -> Option<bool> {
     crate::ops::loose_equal_read(req.ini().precision(), a, b)
 }
 
+/// [`loose_eq`] over two strings' bytes, `zend_fast_equal_strings`,
+/// which `fast_equal_check_string` reads before the general comparison
+/// ([`php_heap::equal_strings`]).
+#[must_use]
+#[inline]
+pub fn equal_strings(a: &[u8], b: &[u8]) -> bool {
+    php_heap::equal_strings(a, b)
+}
+
 /// [`identical`] read with no request, for a pair it answers without
 /// walking two arrays, a reference on either side followed: the same
 /// scalar, the same object, the same resource, or two values of

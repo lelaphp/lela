@@ -79,7 +79,8 @@ pub use bytes::Bytes;
 pub use call_stack::{CallStack, call_stack_bounds, call_stack_default_size, main_call_stack_size};
 pub use collector::GcStatus;
 pub use compare::{
-    Scalar, compare, compare_constants, constant_truth, identical, identical_constants,
+    Scalar, compare, compare_constants, constant_truth, equal_strings, identical,
+    identical_constants,
 };
 #[cfg(debug_assertions)]
 pub use counting::CountingSystem;

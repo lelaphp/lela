@@ -3549,12 +3549,10 @@ pub(crate) fn loose_equal(req: &mut Request, left: &Value, right: &Value) -> Res
 /// [`loose_equal`] over a pair no code of the program can answer, two
 /// scalars, read with nothing but the request's `precision`, which a
 /// double against a non-numeric string is printed at: two strings as
-/// `zend_fast_equal_strings` (`Z/Zend/zend_operators.h:919`) compares
-/// them, the same string, or either's first byte past `'9'` and then the
-/// bytes alone, or else `zendi_smart_streq`, which [`php_heap::compare`]'s
-/// numeric reading answers; any other two scalars as [`php_heap::compare`]
-/// orders them. `None` for an array, an object, a resource or a
-/// reference on either side, whose comparison is [`compare`]'s.
+/// `zend_fast_equal_strings` compares them ([`php_heap::equal_strings`]),
+/// any other two scalars as [`php_heap::compare`] orders them. `None` for
+/// an array, an object, a resource or a reference on either side, whose
+/// comparison is [`compare`]'s.
 ///
 /// `in_array` reads each scalar element through it: a null, a bool, an
 /// int, a float and a string against each other, a float against a
@@ -3583,15 +3581,7 @@ pub(crate) fn loose_equal(req: &mut Request, left: &Value, right: &Value) -> Res
 #[inline]
 pub(crate) fn loose_equal_read(precision: i32, left: &Value, right: &Value) -> Option<bool> {
     Some(match (scalar(left)?, scalar(right)?) {
-        (Scalar::Str(a), Scalar::Str(b)) => {
-            if std::ptr::eq(a, b) {
-                true
-            } else if a.first() > Some(&b'9') || b.first() > Some(&b'9') {
-                a == b
-            } else {
-                php_heap::compare(Scalar::Str(a), Scalar::Str(b), precision) == Ordering::Equal
-            }
-        }
+        (Scalar::Str(a), Scalar::Str(b)) => php_heap::equal_strings(a, b),
         (a, b) => php_heap::compare(a, b, precision) == Ordering::Equal,
     })
 }
