@@ -30,7 +30,7 @@ use php_unit::decl::{
 };
 use php_unit::{FramelessEntry, PublishedUnit, Unit, frameless_table};
 
-use crate::api::__private::NativeFunction;
+use crate::api::__private::{NativeConst, NativeFunction};
 use crate::api::abi::{
     Declarations, DependencyKind, EndFunction, Entry, Extension, ExtensionEntry, FunctionRow,
     IniHandler, IniStage, NativeNew, ObjectHandlers, Refusal, Start, StartupIni, States,
@@ -1191,35 +1191,26 @@ fn link_classes(declarations: &mut [Declarations]) -> LinkedClasses {
     // and each method's entry is numbered in the order it is met.
     // Each table laid down at the length it ends at, and each class's
     // methods at theirs, as the rows are a native's for the process.
+    // Each class's declaration is built from its row straight into the
+    // table; an enum's `cases`, `from` and `tryFrom` counted as three.
     let count = declarations
         .iter()
         .map(|declared| declared.classes.len())
         .sum();
     let entries = (declarations.iter())
         .flat_map(|declared| &declared.classes)
-        .map(|(_, entries, _, _)| entries.len())
-        .sum();
+        .map(|row| row.methods() + if row.is_enum() { 3 } else { 0 })
+        .sum::<usize>();
+    let laid = Trampolines::laid(declarations);
     let mut classes: Vec<ClassDecl> = Vec::with_capacity(count);
     let mut modules = Vec::with_capacity(count);
     let mut handlers = Vec::with_capacity(count);
     let mut natives = Vec::with_capacity(count);
-    let mut methods = Vec::with_capacity(entries);
+    let mut methods = Vec::with_capacity(entries + laid.count);
     for (at, declared) in declarations.iter_mut().enumerate() {
-        for (mut decl, entries, table, native) in std::mem::take(&mut declared.classes) {
-            // A debug build serves an extension's table as the extension
-            // (#2113); Core's runs as whatever called it, as it always
-            // has, and keeps the identity its own tests compare.
-            #[cfg(debug_assertions)]
-            let table = match at {
-                0 => table,
-                _ => table.map(|table| crate::served::served(table, ExtensionId::at(at))),
-            };
-            handlers.push(table);
-            natives.push(native);
-            modules.push(ExtensionId::at(at));
+        for row in std::mem::take(&mut declared.classes) {
             let class = ClassId(u32::try_from(classes.len()).unwrap_or(u32::MAX));
-            decl.methods.reserve_exact(entries.len());
-            for (method, entry) in entries {
+            let (mut decl, table, native) = row.declared(|decl, method, entry| {
                 // A method the declaration carries already is the one the
                 // entry serves, so the table holds the name once, as
                 // `zend_register_functions` registers each name once.
@@ -1243,14 +1234,25 @@ fn link_classes(declarations: &mut [Declarations]) -> LinkedClasses {
                     entry,
                     flags,
                 });
-            }
+            });
+            // A debug build serves an extension's table as the extension
+            // (#2113); Core's runs as whatever called it, as it always
+            // has, and keeps the identity its own tests compare.
+            #[cfg(debug_assertions)]
+            let table = match at {
+                0 => table,
+                _ => table.map(|table| crate::served::served(table, ExtensionId::at(at))),
+            };
+            handlers.push(table);
+            natives.push(native);
+            modules.push(ExtensionId::at(at));
             link_enum_methods(&mut decl, class, &mut methods);
             classes.push(decl);
         }
     }
     let bundle = declarations.get_mut(1..).unwrap_or_default();
     link_class_constants(&mut classes, bundle);
-    let trampolines = link_trampolines(&classes, bundle, &mut methods);
+    let trampolines = link_trampolines(&classes, bundle, &mut methods, laid);
     LinkedClasses {
         classes,
         modules,
@@ -1547,7 +1549,13 @@ fn link_class_constants(classes: &mut [ClassDecl], declarations: &mut [Declarati
             .iter_mut()
             .find(|decl| decl.name.0.eq_ignore_ascii_case(&class_name.0))
         {
-            decl.constants.extend(constants);
+            // A class that declares none of its own takes the list as
+            // it was laid, as IntlChar takes its ~600.
+            if decl.constants.is_empty() {
+                decl.constants = constants;
+            } else {
+                decl.constants.extend(constants);
+            }
         }
     }
 }
@@ -1563,8 +1571,9 @@ fn link_trampolines(
     classes: &[ClassDecl],
     declarations: &mut [Declarations],
     methods: &mut Vec<NativeMethod>,
+    laid: Trampolines,
 ) -> Vec<MethodDecl> {
-    let mut trampolines = Vec::new();
+    let mut trampolines = Vec::with_capacity(laid.count);
     let mut lay = |method: MethodDecl, entry, at: &dyn Fn(u32) -> MethodAt| {
         let index = u32::try_from(trampolines.len()).unwrap_or(u32::MAX);
         let flags = crate::attributes::Flags::of(&method.function.attributes);
@@ -1575,9 +1584,8 @@ fn link_trampolines(
         });
         trampolines.push(method);
     };
-    let own = crate::classes::trampolines();
-    let laid = (declarations.iter_mut()).flat_map(|d| std::mem::take(&mut d.trampolines));
-    for (class_name, method, entry) in own.into_iter().chain(laid) {
+    let declared = (declarations.iter_mut()).flat_map(|d| std::mem::take(&mut d.trampolines));
+    for (class_name, method, entry) in laid.own.into_iter().chain(declared) {
         let Some(at) = classes
             .iter()
             .position(|decl| decl.name.0.eq_ignore_ascii_case(&class_name.0))
@@ -1588,13 +1596,39 @@ fn link_trampolines(
         lay(method, entry, &|at| MethodAt::Trampoline { class, at });
     }
     // `zend_get_property_hook_trampoline`'s two, which no class holds.
-    for (kind, method, entry) in crate::api::request::parent_hook_trampolines() {
+    for (kind, method, entry) in laid.hooks {
         lay(method, entry, &|at| MethodAt::ParentHook { kind, at });
     }
-    for (method, entry) in crate::fiber::unlisted_functions() {
+    for (method, entry) in laid.unlisted {
         lay(method, entry, &|at| MethodAt::Unlisted { at });
     }
     trampolines
+}
+
+/// The engine's own trampolines beside how many [`link_trampolines`]
+/// lays with the bundle's, so the method entries are laid once with
+/// room for them.
+struct Trampolines {
+    own: Vec<(php_unit::decl::Name, MethodDecl, Entry)>,
+    hooks: Vec<(php_unit::decl::HookKind, MethodDecl, Entry)>,
+    unlisted: Vec<(MethodDecl, Entry)>,
+    count: usize,
+}
+
+impl Trampolines {
+    fn laid(declarations: &[Declarations]) -> Trampolines {
+        let own = crate::classes::trampolines();
+        let hooks = crate::api::request::parent_hook_trampolines();
+        let unlisted = crate::fiber::unlisted_functions();
+        let declared = declarations.iter().map(|d| d.trampolines.len());
+        let count = own.len() + hooks.len() + unlisted.len() + declared.sum::<usize>();
+        Trampolines {
+            own,
+            hooks,
+            unlisted,
+            count,
+        }
+    }
 }
 
 /// Where a unit is compiled from, as the request describes it: the name
@@ -2650,7 +2684,7 @@ impl Configuration {
         defaults: &[(Vec<u8>, Vec<u8>)],
         files: &mut crate::api::request::IniFiles,
         entries: &[u8],
-        constants: &[ConstDecl],
+        constants: &[&'static [NativeConst]],
     ) -> Configuration {
         let table = defaults
             .iter()
@@ -2695,7 +2729,7 @@ impl Configuration {
 /// extension's; a `${…}` reads what the text set before it, then the
 /// process's environment; and `php_ini_parser_cb` over the table.
 struct Startup<'c> {
-    constants: &'c [ConstDecl],
+    constants: &'c [&'static [NativeConst]],
     table: Vec<(Vec<u8>, Configured)>,
     /// `is_special_section`: the last section header was `[PATH…]` or
     /// `[HOST…]`, where `extension=` is an entry like any other.
@@ -2714,7 +2748,13 @@ struct Startup<'c> {
 /// string, a double as `precision` digits write it.
 fn constant_text(constants: &[ConstDecl], name: &[u8], precision: i32) -> Option<Vec<u8>> {
     let decl = constants.iter().find(|c| &*c.name.0 == name)?;
-    match &decl.value {
+    value_text(&decl.value, precision)
+}
+
+/// A constant's value as the ini grammar substitutes it, `precision`
+/// digits for a double; none for a value it does not write.
+fn value_text(value: &ConstExpr, precision: i32) -> Option<Vec<u8>> {
+    match value {
         ConstExpr::Null | ConstExpr::Bool(false) => Some(Vec::new()),
         ConstExpr::Bool(true) => Some(b"1".to_vec()),
         ConstExpr::Long { value: n, .. } => Some(n.to_string().into_bytes()),
@@ -2763,7 +2803,9 @@ impl crate::ini_syntax::Host for Startup<'_> {
     type Error = std::convert::Infallible;
 
     fn constant(&mut self, name: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
-        Ok(constant_text(self.constants, name, 1))
+        let mut entries = self.constants.iter().flat_map(|entries| entries.iter());
+        let found = entries.find(|entry| entry.name == name);
+        Ok(found.and_then(|entry| value_text(&(entry.value)(), 1)))
     }
 
     fn directive(&mut self, name: &[u8]) -> Option<Vec<u8>> {
@@ -3704,19 +3746,6 @@ impl EngineBuilder {
             suppliers = suppliers.without_shell();
         }
         let supplied = suppliers.resolved();
-        // What a `MINIT` registers into another extension's tables, as
-        // `php_image_register_handler` adds `IMAGETYPE_SVG` to
-        // `standard`'s constants: each extension's constants rewritten
-        // once with every value the bundle registered.
-        for extension in &mut extensions {
-            let declared = &mut extension.declarations;
-            if let Some(link) = declared.constants_link.take() {
-                declared.constants = link(
-                    std::mem::take(&mut declared.constants),
-                    &supplied.registered,
-                );
-            }
-        }
         // The declarations apart from the rest of each entry, by
         // `ExtensionId`: Core's at 0, as `module_registry` numbers it.
         // Each list laid at the length it ends at, the entries with
@@ -3822,19 +3851,33 @@ impl EngineBuilder {
         // so Zend's constants stand before the bundle's, as
         // `zend_register_standard_constants` runs before any `MINIT`.
         extensions.insert(0, core);
-        // Each column laid down at the length it ends at.
-        let count = declarations
-            .iter()
-            .map(|declared| declared.constants.len())
-            .sum();
+        // Each column laid down at the length it ends at: each
+        // declaration built from its static entry into the table, with
+        // room for what a `MINIT` registers into another extension's
+        // constants, one per value the bundle registered, as
+        // `php_image_register_handler` adds `IMAGETYPE_SVG` to
+        // `standard`'s: the extension's constants rewritten once with
+        // those values, and what that adds standing after its own.
+        let count = (declarations.iter())
+            .flat_map(|declared| &declared.constants)
+            .map(|entries| entries.len())
+            .sum::<usize>()
+            + supplied.registered.iter().count();
         let mut constant_modules: Vec<ExtensionId> = Vec::with_capacity(count);
         let mut constants: Vec<ConstDecl> = Vec::with_capacity(count);
         for (at, declared) in declarations.into_iter().enumerate() {
-            constant_modules.extend(std::iter::repeat_n(
-                ExtensionId::at(at),
-                declared.constants.len(),
-            ));
-            constants.extend(declared.constants);
+            let own = constants.len();
+            let entries = declared.constants.iter().flat_map(|entries| entries.iter());
+            constants.extend(entries.map(NativeConst::declaration));
+            if let Some(link) = declared.constants_link {
+                let added = link(
+                    constants.get_mut(own..).unwrap_or_default(),
+                    &supplied.registered,
+                );
+                constants.extend(added);
+            }
+            let declared_here = constants.len().saturating_sub(own);
+            constant_modules.extend(std::iter::repeat_n(ExtensionId::at(at), declared_here));
         }
         let mut names = permanent_names(&extensions, &functions, &classes, &constants, &ini);
         // What the host set for an entry its `on_modify` takes as the
