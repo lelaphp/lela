@@ -54,6 +54,7 @@ mod dims;
 mod doors;
 mod objects;
 mod strings;
+mod unread;
 use crate::record::{Began, Callee, Stop, leaves, returns};
 use crate::types::{
     Abort, BodyEntry, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home,
@@ -178,7 +179,9 @@ pub(super) fn lower(
     emit.joins = joins;
     emit.trace()?;
     let sites = emit.fuzzed_sites;
+    let stood_loads = std::mem::take(&mut emit.stood_loads);
     emit.b.finalize(config);
+    unread::unread(&mut func, &stood_loads);
     Ok((func, sites))
 }
 
@@ -820,6 +823,9 @@ struct Emit<'a> {
     answers: Vec<Option<Block>>,
     /// The number the last inline arithmetic kept for the op after it.
     kept: Option<Kept>,
+    /// The loads made for a [`Stood`] word alone, dropped where no path
+    /// reads it ([`unread::unread`]).
+    stood_loads: Vec<cranelift_codegen::ir::Inst>,
 }
 
 impl<'a> Emit<'a> {
@@ -877,6 +883,7 @@ impl<'a> Emit<'a> {
             doors: vec![None; ir.exits.len()],
             answers: vec![None; ir.exits.len()],
             kept: None,
+            stood_loads: Vec::new(),
         }
     }
 
@@ -2026,6 +2033,16 @@ impl<'a> Emit<'a> {
         self.b.def_var(vars.func, func);
         self.b.def_var(vars.opline, opline);
         self.b.def_var(vars.room, room);
+    }
+
+    /// `loads`, made for a [`Stood`] word alone, dropped where no path
+    /// reads the word ([`unread::unread`]).
+    fn stood_loads<const N: usize>(&mut self, loads: [Value; N]) {
+        for load in loads {
+            if let Some(inst) = self.b.func.dfg.value_def(load).inst() {
+                self.stood_loads.push(inst);
+            }
+        }
     }
 
     /// The address of the [`Stood`] a kernel writes, for its call.

@@ -594,15 +594,15 @@ function u0:0(i64, i64) -> i32 tail {
 @0008                               v405 = iconst.i64 32
 @0008                               v406 = imul v404, v405  ; v405 = 32
 @0008                               v407 = iadd.i64 v389, v406
-@0008                               v408 = load.i64 notrap aligned v407
+@0008                               v408 = iconst.i64 0
 @0008                               v409 = iconst.i64 -80
-@0008                               v410 = iadd v408, v409  ; v409 = -80
+@0008                               v410 = iadd v408, v409  ; v408 = 0, v409 = -80
 @0008                               v411 = icmp eq v404, v271
 @0008                               v412 = iconst.i64 0
 @0008                               v413 = select v411, v412, v410  ; v412 = 0
-@0008                               v414 = load.i32 notrap aligned v398+60
-@0008                               v415 = load.i64 notrap aligned v3+64
-@0008                               v416 = isub v415, v254
+@0008                               v414 = iconst.i32 0
+@0008                               v415 = iconst.i64 0
+@0008                               v416 = isub v415, v254  ; v415 = 0
 @0008                               brif.i32 v387, block22, block50(v398)
 
                                 block49 cold:
