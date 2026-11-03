@@ -153,6 +153,59 @@ fn the_bench_arms_leave_one_tally() {
     assert!(calls(Through::Direct, 1000).is_ok_and(|t| t != 0));
 }
 
+/// What a request keeps of the oplines it goes on at (`Landings`): the
+/// words of the epoch's rows themselves; a landing whose op array had
+/// laid no landing words down when it was kept reads sealed, and the word
+/// a trace lays down and arms there once it is, kept from then on; the
+/// loop rooted at the opline, its word; and the opline kept longest given
+/// up for a fifth.
+#[test]
+fn a_kept_landing_reads_the_epochs_word_and_one_armed_since() {
+    use std::sync::atomic::Ordering;
+
+    use php_engine::tier::{SafepointIdx, Word};
+    use php_unit::{OpArray, Opcode, Opline, Unit};
+    let mut oplines = vec![Opline::default(); 8];
+    if let Some(last) = oplines.last_mut() {
+        last.opcode = Opcode::Return;
+    }
+    let (epoch, func) = Epoch::fixture(Unit {
+        main: OpArray {
+            oplines,
+            safepoints: vec![OplineIdx(0), OplineIdx(3)].into(),
+            ..OpArray::default()
+        },
+        ..Unit::default()
+    });
+    let state = |word: &Word| word.halves()[1].load(Ordering::Relaxed);
+    let landings = Landings::default();
+    let kept = landings.keep(&epoch, func, OplineIdx(2), Some(SafepointIdx(1)));
+    assert_eq!(state(kept.landing), u32::MAX);
+    let header = epoch.word(func, SafepointIdx(1));
+    assert!(kept.header.is_some_and(|word| ptr::eq(word, header)));
+    // A trace arms the landing, laying its op array's landing words down.
+    let laid = epoch.lay_landing(func, OplineIdx(2));
+    if let Some(word) = laid {
+        word.halves()[1].store(0, Ordering::Relaxed);
+    }
+    for _ in 0..2 {
+        // SAFETY: every word `landings` keeps is of `epoch`.
+        let landed = unsafe { landings.landed(&epoch, func, OplineIdx(2)) };
+        assert!(
+            landed.is_some_and(|landed| laid.is_some_and(|laid| ptr::eq(landed.landing, laid)))
+        );
+        assert!(landed.is_some_and(|landed| state(landed.landing) == 0));
+    }
+    for at in 3..7 {
+        landings.keep(&epoch, func, OplineIdx(at), None);
+    }
+    // SAFETY: as above.
+    assert!(unsafe { landings.landed(&epoch, func, OplineIdx(2)) }.is_none());
+    // SAFETY: as above.
+    let kept = unsafe { landings.landed(&epoch, func, OplineIdx(6)) };
+    assert!(kept.is_some_and(|kept| kept.header.is_none() && state(kept.landing) == u32::MAX));
+}
+
 /// A runtime-cache slot read as compiled code reads it, by pointer casts
 /// at the offsets `tier::PLACE` names, at the address the touch answers
 /// (#3346): a primed property's place, whose tag, class, offset tag, slot
