@@ -1355,7 +1355,7 @@ fn method_functions(
 /// `zend_class_implements` to its interfaces: each built once every
 /// class it names is, a class standing before what it names waiting a
 /// round. One whose names never resolve has its own methods alone.
-fn native_records(classes: &[ClassDecl], keys: &ClassKeys) -> Vec<LinkedClass<ClassId>> {
+fn native_records(classes: &[ClassDecl], keys: &ClassKeys) -> Arc<[LinkedClass<ClassId>]> {
     let mut records: Vec<Option<LinkedClass<ClassId>>> = vec![None; classes.len()];
     let mut progress = true;
     while progress {
@@ -1418,6 +1418,9 @@ fn native_placed(
         let decl = classes.get(at)?;
         Some(placed_of(class, decl, records.get(at), parent, decl_of))
     };
+    // A root's parent places nothing; a parent's own placing is read
+    // where it stands, not copied.
+    let root = Placed::default();
     let mut progress = true;
     while progress {
         progress = false;
@@ -1426,12 +1429,12 @@ fn native_placed(
                 continue;
             }
             let parent = match parents.get(at).copied().flatten() {
-                None => Some(Placed::default()),
+                None => Some(&root),
                 Some(parent) => usize::try_from(parent.0)
                     .ok()
-                    .and_then(|parent| placed.get(parent)?.clone()),
+                    .and_then(|parent| placed.get(parent)?.as_ref()),
             };
-            let built = parent.and_then(|parent| place(at, &parent));
+            let built = parent.and_then(|parent| place(at, parent));
             if let (Some(built), Some(slot)) = (built, placed.get_mut(at)) {
                 *slot = Some(built);
                 progress = true;
@@ -3508,8 +3511,11 @@ impl EngineBuilder {
         mut self,
         extensions: impl IntoIterator<Item = E>,
     ) -> EngineBuilder {
-        self.extensions
-            .extend(extensions.into_iter().map(Into::into));
+        let extensions = extensions.into_iter();
+        // Room for the tier's extension and the host's own, which
+        // [`EngineBuilder::build`] appends, so the list is laid once.
+        (self.extensions).reserve_exact(extensions.size_hint().0 + 2);
+        self.extensions.extend(extensions.map(Into::into));
         self
     }
 
@@ -3700,17 +3706,20 @@ impl EngineBuilder {
         }
         // The declarations apart from the rest of each entry, by
         // `ExtensionId`: Core's at 0, as `module_registry` numbers it.
+        // Each list laid at the length it ends at, the entries with
+        // room for Core's, which goes first once the tables are built.
         let Extension {
             entry: core,
             declarations: core_declared,
         } = crate::core::extension();
-        let (mut extensions, declared): (Vec<ExtensionEntry>, Vec<Declarations>) = extensions
-            .into_iter()
-            .map(|extension| (extension.entry, extension.declarations))
-            .unzip();
-        let mut declarations = Vec::with_capacity(declared.len() + 1);
+        let mut declarations = Vec::with_capacity(extensions.len() + 1);
         declarations.push(core_declared);
-        declarations.extend(declared);
+        let mut entries: Vec<ExtensionEntry> = Vec::with_capacity(extensions.len() + 1);
+        for extension in extensions {
+            entries.push(extension.entry);
+            declarations.push(extension.declarations);
+        }
+        let mut extensions = entries;
         let core_ini = (CORE_INI.iter())
             .map(|(n, v)| (n.as_bytes().to_vec(), v.map(|v| v.as_bytes().to_vec())));
         let mut ini = IniTable::register(core_ini, &extensions);
@@ -3784,7 +3793,7 @@ impl EngineBuilder {
         } = link_classes(&mut declarations);
         let class_keys = ClassKeys::over(&classes);
         let class_at = |name: &[u8]| class_keys.find(&classes, name);
-        let records: Arc<[LinkedClass<ClassId>]> = native_records(&classes, &class_keys).into();
+        let records = native_records(&classes, &class_keys);
         let method_functions = method_functions(&classes, &methods, functions.len());
         let trampoline_tables =
             trampoline_tables(classes.len(), &methods, &trampolines, functions.len());
@@ -4359,17 +4368,62 @@ fn permanent_names(
     constants: &[ConstDecl],
     ini: &IniTable,
 ) -> Strings {
+    // The walk counted before it interns, so the table is laid once,
+    // with the constants' string values [`constant_values`] interns next:
+    // `Strings::with_capacity` keeps a table at most three quarters full,
+    // and about a quarter of what the walk asks for is a string it has
+    // laid already, a method's name in many classes and a property's
+    // (9,608 strings for 12,224 asks on the bundle at 00234a3d8).
+    let values = (constants.iter())
+        .filter(|decl| matches!(decl.value, ConstExpr::Str(_)))
+        .count();
+    let mut asks = classes.len() + KNOWN_STRINGS.len() + values;
+    permanent_walk(extensions, functions, classes, constants, ini, &mut |_| {
+        asks += 1;
+    });
     // Each class's name first, with the class cache
     // `zend_register_internal_class_ex` allocates on it.
-    let mut names = Strings::naming_classes(classes.iter().map(|decl| &*decl.name.0));
+    let mut names = Strings::with_capacity(asks - asks / 4)
+        .naming_classes(classes.iter().map(|decl| &*decl.name.0));
     names.intern_known(&KNOWN_STRINGS.map(str::as_bytes));
+    permanent_walk(
+        extensions,
+        functions,
+        classes,
+        constants,
+        ini,
+        &mut |bytes| {
+            names.intern(bytes).ok();
+        },
+    );
+    names
+}
+
+/// Each name [`permanent_names`] interns after the classes' names and
+/// the known strings, handed to `ask` in the order php interns them,
+/// a key that is its name as declared left out, as its name was asked
+/// for already. A key is lowercased into one buffer and a property's
+/// name mangled into another, so the walk allocates nothing per key.
+fn permanent_walk(
+    extensions: &[ExtensionEntry],
+    functions: &[FunctionDecl],
+    classes: &[ClassDecl],
+    constants: &[ConstDecl],
+    ini: &IniTable,
+    ask: &mut impl FnMut(&[u8]),
+) {
+    let mut buffer: Vec<u8> = Vec::with_capacity(256);
+    let mut lowered = |bytes: &[u8], ask: &mut dyn FnMut(&[u8])| {
+        buffer.clear();
+        buffer.extend(bytes.iter().map(u8::to_ascii_lowercase));
+        ask(&buffer);
+    };
+    let mut mangled: Vec<u8> = Vec::with_capacity(256);
     for extension in extensions {
-        names
-            .intern(&extension.name.as_bytes().to_ascii_lowercase())
-            .ok();
+        lowered(extension.name.as_bytes(), ask);
         // What its `MINIT` interns, `zend_string_init_interned(..., 1)`.
         for bytes in &extension.interned {
-            names.intern(bytes).ok();
+            ask(bytes);
         }
     }
     let declared = functions
@@ -4383,45 +4437,52 @@ fn permanent_names(
         }))
         .chain(constants.iter().map(|decl| &decl.name));
     for name in declared {
-        names.intern(&name.0).ok();
+        ask(&name.0);
     }
     // `prop_info->name`, the key a protected or a private property's
     // row is held under, mangled and interned as it is declared.
     for decl in classes {
         for property in &decl.properties {
             if let Some(prefix) = php_compile::mangling(property.visibility, &decl.name.0) {
-                names
-                    .intern(&[prefix.as_slice(), &property.name.0].concat())
-                    .ok();
+                mangled.clear();
+                mangled.extend_from_slice(&prefix);
+                mangled.extend_from_slice(&property.name.0);
+                ask(&mangled);
             }
         }
     }
     // Each auto-global is registered under `zend_string_init_interned`.
     for global in AUTO_GLOBALS {
-        names.intern(global.name()).ok();
+        ask(global.name());
     }
+    // The function table's and the class table's keys. An alias is
+    // asked for whatever its case, as nothing asked for its name.
     let keyed = functions
         .iter()
         .map(|decl| &decl.name)
         .chain(classes.iter().flat_map(|decl| {
             std::iter::once(&decl.name)
-                .chain(&decl.aliases)
                 .chain(decl.methods.iter().map(|method| &method.function.name))
         }));
     for name in keyed {
-        names.intern(&name.0.to_ascii_lowercase()).ok();
+        if name.0.iter().any(u8::is_ascii_uppercase) {
+            lowered(&name.0, ask);
+        }
+    }
+    for alias in classes.iter().flat_map(|decl| &decl.aliases) {
+        lowered(&alias.0, ask);
     }
     for decl in classes {
         for constant in &decl.constants {
             if let ConstExpr::Str(value) = &constant.value {
-                names.intern(value).ok();
+                ask(value);
             }
         }
     }
     for Directive { name, value, .. } in ini.rows() {
-        names.intern(name).ok();
+        ask(name);
         if let Some(value) = value {
-            names.intern(value).ok();
+            ask(value);
         }
     }
     // `gen_stub.php`'s attribute arguments, `zend_string_init_interned`
@@ -4444,10 +4505,9 @@ fn permanent_names(
         .chain(constants.iter().flat_map(|decl| &decl.attributes));
     for argument in attributed.flat_map(|attribute| &attribute.arguments) {
         if let ConstExpr::Str(written) = &argument.value {
-            names.intern(written).ok();
+            ask(written);
         }
     }
-    names
 }
 
 /// `zend_register_constant` at `MINIT`: each constant's value, a string
