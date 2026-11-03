@@ -771,7 +771,7 @@ fn set_list(
         return Ok(false);
     };
     let easy = easy_of(req, object)?;
-    let called = easy.set_slist(req, option, list);
+    let called = easy.set_slist(req, option, list)?;
     set(req, object, called, pending)
 }
 
@@ -1004,6 +1004,32 @@ fn setopt(
 ///
 /// Notice: curl_setopt(): CURLOPT_SSL_VERIFYHOST no longer accepts the value 1, value 2 will be used instead in %s on line 8
 /// bool(true)
+/// ```
+///
+/// What a list option and a form hold in `ch->to_free` is counted as
+/// php's is: the slist table's data laid by its first list, kept as a
+/// list replaces another or a copy sets one beside them, and the post
+/// list's element, all given back by the last share.
+///
+/// ```php
+/// $c = curl_init();
+/// $b = memory_get_usage(); curl_setopt($c, CURLOPT_HTTPHEADER, ['X: 1']); echo "first slist ", memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); curl_setopt($c, CURLOPT_HTTPHEADER, ['X: 2']); echo "replaced ", memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); curl_setopt($c, CURLOPT_QUOTE, ['NOOP']); echo "second option ", memory_get_usage() - $b, "\n";
+/// $d = curl_copy_handle($c);
+/// $b = memory_get_usage(); curl_setopt($d, CURLOPT_HTTPHEADER, ['Y: 2']); echo "on a copy ", memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); curl_setopt($c, CURLOPT_POSTFIELDS, ['a' => 'b']); echo "postfields array ", memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); unset($c); echo "unset c ", memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); unset($d); echo "unset d ", memory_get_usage() - $b, "\n";
+/// ```
+/// ```expect
+/// first slist 352
+/// replaced 0
+/// second option 0
+/// on a copy 0
+/// postfields array 32
+/// unset c -1040
+/// unset d -1600
 /// ```
 ///
 /// A callable option keeps what php's `zend_fcc_dup` keeps: a
