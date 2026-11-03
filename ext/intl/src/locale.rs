@@ -1219,30 +1219,29 @@ fn class_constants() -> Vec<ClassConstDecl> {
 /// The `locale_*` block of `php_intl.stub.php`, in its order, and
 /// `Locale`'s constants.
 pub(crate) fn functions(b: ExtensionBuilder) -> ExtensionBuilder {
-    b.class_constants(b"Locale", class_constants())
-        .functions(vec![
-            locale_get_default::declared(),
-            locale_set_default::declared(),
-            locale_get_primary_language::declared(),
-            locale_get_script::declared(),
-            locale_get_region::declared(),
-            locale_get_keywords::declared(),
-            locale_get_display_script::declared(),
-            locale_get_display_region::declared(),
-            locale_get_display_name::declared(),
-            locale_get_display_language::declared(),
-            locale_get_display_variant::declared(),
-            locale_compose::declared(),
-            locale_parse::declared(),
-            locale_get_all_variants::declared(),
-            locale_filter_matches::declared(),
-            locale_canonicalize::declared(),
-            locale_lookup::declared(),
-            locale_accept_from_http::declared(),
-            locale_is_right_to_left::declared(),
-            locale_add_likely_subtags::declared(),
-            locale_minimize_subtags::declared(),
-        ])
+    b.class_constants(b"Locale", class_constants()).functions(&[
+        locale_get_default::DECLARED,
+        locale_set_default::DECLARED,
+        locale_get_primary_language::DECLARED,
+        locale_get_script::DECLARED,
+        locale_get_region::DECLARED,
+        locale_get_keywords::DECLARED,
+        locale_get_display_script::DECLARED,
+        locale_get_display_region::DECLARED,
+        locale_get_display_name::DECLARED,
+        locale_get_display_language::DECLARED,
+        locale_get_display_variant::DECLARED,
+        locale_compose::DECLARED,
+        locale_parse::DECLARED,
+        locale_get_all_variants::DECLARED,
+        locale_filter_matches::DECLARED,
+        locale_canonicalize::DECLARED,
+        locale_lookup::DECLARED,
+        locale_accept_from_http::DECLARED,
+        locale_is_right_to_left::DECLARED,
+        locale_add_likely_subtags::DECLARED,
+        locale_minimize_subtags::DECLARED,
+    ])
 }
 
 /// `class Locale`: its constants and its static methods, each the

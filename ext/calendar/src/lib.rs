@@ -95,26 +95,26 @@ pub(crate) mod constants {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .constants(constants::declared())
-        .functions(vec![
-            cal_days_in_month::declared(),
-            cal_from_jd::declared(),
-            cal_info::declared(),
-            cal_to_jd::declared(),
-            easter::easter_date::declared(),
-            easter::easter_days::declared(),
-            frenchtojd::declared(),
-            gregoriantojd::declared(),
-            jddayofweek::declared(),
-            jdmonthname::declared(),
-            jdtofrench::declared(),
-            jdtogregorian::declared(),
-            jdtojewish::declared(),
-            jdtojulian::declared(),
-            unix::jdtounix::declared(),
-            jewishtojd::declared(),
-            juliantojd::declared(),
-            unix::unixtojd::declared(),
+        .constants(constants::DECLARED)
+        .functions(&[
+            cal_days_in_month::DECLARED,
+            cal_from_jd::DECLARED,
+            cal_info::DECLARED,
+            cal_to_jd::DECLARED,
+            easter::easter_date::DECLARED,
+            easter::easter_days::DECLARED,
+            frenchtojd::DECLARED,
+            gregoriantojd::DECLARED,
+            jddayofweek::DECLARED,
+            jdmonthname::DECLARED,
+            jdtofrench::DECLARED,
+            jdtogregorian::DECLARED,
+            jdtojewish::DECLARED,
+            jdtojulian::DECLARED,
+            unix::jdtounix::DECLARED,
+            jewishtojd::DECLARED,
+            juliantojd::DECLARED,
+            unix::unixtojd::DECLARED,
         ])
         .info(calendar_info)
         .build("calendar")

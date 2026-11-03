@@ -455,6 +455,37 @@ impl ObjectHandlers for Handlers {
     /// curl_reset(): Attempt to reset cURL handle from a callback
     /// int(3)
     /// ```
+    ///
+    /// A callable that keeps the `$ch` it is served keeps the object past
+    /// the collection, destroyed: its bytes stay while that owner names
+    /// it, its id free and its payload gone, so a native on it ends the
+    /// request with the `InternalError` of a method served on an object
+    /// without its payload, as on every destroyed object. The fence pins
+    /// this engine's side of `trace:curl-handle-kept-past-collection`:
+    ///
+    /// ```php
+    /// $m = curl_multi_init();
+    /// $h = curl_init('http://127.0.0.1:1/');
+    /// curl_setopt($h, CURLOPT_VERBOSE, 1);
+    /// curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $t, $d) use ($m) {
+    ///     if ($t == CURLINFO_TEXT && str_starts_with($d, 'closing')) { echo "debug: $d"; $GLOBALS['keep'] = $ch; }
+    /// });
+    /// curl_multi_add_handle($m, $h);
+    /// curl_multi_exec($m, $r);
+    /// unset($m, $h);
+    /// var_dump(gc_collect_cycles());
+    /// var_dump($keep);
+    /// var_dump(curl_getinfo($keep, CURLINFO_EFFECTIVE_URL));
+    /// echo "end\n";
+    /// ```
+    /// ```expect exit=255
+    /// debug: closing connection #0
+    /// int(3)
+    /// object(CurlHandle)#2 (0) {
+    /// }
+    ///
+    /// Fatal error: InternalError: a method served on an object without its payload in %s on line 13
+    /// ```
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let mut pending = Pending::default();
         verify_before_cleanup(req, object, &mut pending);

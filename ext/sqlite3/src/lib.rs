@@ -104,7 +104,7 @@ pub fn extension() -> Extension {
                 })
                 .collect(),
         )
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .class::<SQLite3Exception>()
         .class::<conn::SQLite3>()
         .class::<stmt::SQLite3Stmt>()

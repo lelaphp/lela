@@ -12,7 +12,8 @@ use std::ops::ControlFlow;
 use php_ext::abi::{OrFalse, Passed, PropertyRead, PropertyTest, Raw, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{
-    BinaryOp, binary_op, float_to_long, identical, loose_eq, numeric_string, to_string,
+    BinaryOp, binary_op, float_to_long, identical, identical_read, loose_eq, loose_eq_read,
+    numeric_string, to_string,
 };
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, deprecated, docref,
@@ -43,6 +44,19 @@ fn matches(
     loose_eq(req, needle, &element)
 }
 
+/// [`matches`] read under a borrow of the request, for an element whose
+/// comparison with the needle reaches no code of the program: two
+/// scalars under `==`, `fast_equal_check_string`'s bytes among them,
+/// and anything but two arrays under `===`. `None` where the comparison
+/// is [`matches`]'s.
+fn matches_read(req: &Request, needle: &Value, element: &Value, strict: bool) -> Option<bool> {
+    let element = element.deref();
+    if strict {
+        return identical_read(needle, &element);
+    }
+    loose_eq_read(req, needle, &element)
+}
+
 /// `_php_search_array`: the key of the first element that matches.
 fn search(
     req: &mut Request,
@@ -50,14 +64,28 @@ fn search(
     haystack: PhpArray,
     strict: bool,
 ) -> Result<Option<Key>, Thrown> {
-    // `ZEND_HASH_FOREACH_KEY_VAL`, holding nothing: `==` may serve
-    // `__toString`.
-    walk::foreach(req, haystack, Hold::None, |req, row| -> walk::Step<Key> {
-        if matches(req, needle, row.value(), strict)? {
-            return Ok(ControlFlow::Break(row.key().clone()));
-        }
-        Ok(ControlFlow::Continue(()))
-    })
+    // `ZEND_HASH_FOREACH_KEY_VAL`, holding nothing and counting nothing
+    // per element: a comparison no code answers is read under the
+    // borrow, and an element where `==` may serve `__toString` is lent.
+    let read = |req: &Request, key: &Key, value: &Value| {
+        Some(if matches_read(req, needle, value, strict)? {
+            ControlFlow::Break(key.clone())
+        } else {
+            ControlFlow::Continue(())
+        })
+    };
+    walk::foreach_read(
+        req,
+        haystack,
+        Hold::None,
+        read,
+        |req, row| -> walk::Step<Key> {
+            if matches(req, needle, row.value(), strict)? {
+                return Ok(ControlFlow::Break(row.key().clone()));
+            }
+            Ok(ControlFlow::Continue(()))
+        },
+    )
 }
 
 /// `in_array(mixed $needle, array $haystack, bool $strict = false): bool`,
@@ -75,6 +103,54 @@ fn search(
 /// bool(true)
 /// bool(false)
 /// bool(true)
+/// ```
+///
+/// `==` reads two strings as numbers only where both are numeric, so a
+/// leading-numeric string is matched by its bytes alone; under
+/// `$strict` a string matches only the same string.
+///
+/// ```php
+/// $a = ["10", "1e1x", "abc", " 5", "0x1A", "9.0"];
+/// var_dump(in_array("1e1", $a), in_array("1e1x", $a), in_array("1e1X", $a), in_array("10.0", $a), in_array("5", $a), in_array("ABC", $a), in_array("26", $a), in_array("9", $a), in_array(10, $a), in_array("1e1", $a, true), array_search("abc", $a), array_search(" 5 ", $a));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// int(2)
+/// int(3)
+/// ```
+///
+/// The walk counts nothing per element and lends an element to the
+/// comparison only where `==` may serve `__toString`. A conversion that
+/// writes the array the program holds separates it from the one the
+/// call's argument holds, and the search reads the rows that stood as
+/// it began:
+///
+/// ```php
+/// class S { function __toString(): string { echo "S\n"; global $a; $a[2] = 'w'; unset($a[3]); return 's'; } }
+/// function f() { global $a; $a = ['x', new S, 'y', 'z']; var_dump(array_search('z', $a), $a[2], count($a)); }
+/// f();
+/// $o = new S; $b = [$o, 'q', $o];
+/// var_dump(in_array('q', $b), array_search('r', $b));
+/// ```
+/// ```expect
+/// S
+/// int(3)
+/// string(1) "w"
+/// int(3)
+/// S
+/// S
+/// S
+/// bool(true)
+/// bool(false)
 /// ```
 ///
 /// `===` follows a reference inside an element as the operator does,

@@ -41,15 +41,15 @@ use crate::natives::{Unmangled, unmangle_property_name};
 /// bool(false)
 /// bool(false)
 /// ```
+///
+/// The string's class cache is read first and filled by what the lookup
+/// finds ([`crate::api::call::lookup_class_string`]).
 pub(super) fn lookup_class(
     req: &mut Request,
-    name: &[u8],
+    name: PhpString,
     autoload: bool,
 ) -> Result<Option<ClassId>, Thrown> {
-    if autoload {
-        return crate::api::call::autoload(req, name);
-    }
-    Ok(req.class_named(Bare::of(name)))
+    crate::api::call::lookup_class_string(req, name, autoload)
 }
 
 /// One `Z_PARAM_OBJ_OR_CLASS_NAME` of a native: an object's class, or
@@ -59,8 +59,7 @@ fn object_or_class_name(req: &mut Request, given: Value, position: u32) -> Resul
     match given.as_ref() {
         ValueRef::Object(object) => return Ok(object.class()),
         ValueRef::Str(name) => {
-            let name = name.as_bytes().to_vec();
-            if let Some(class) = lookup_class(req, &name, true)? {
+            if let Some(class) = lookup_class(req, name, true)? {
                 return Ok(class);
             }
         }
@@ -171,21 +170,17 @@ fn is_a_impl(
     only_subclass: bool,
 ) -> Result<bool, Thrown> {
     let instance = match object.as_ref() {
-        ValueRef::Str(name) if allow_string => {
-            let name = name.as_bytes().to_vec();
-            match lookup_class(req, &name, true)? {
-                Some(class) => class,
-                None => return Ok(false),
-            }
-        }
+        ValueRef::Str(name) if allow_string => match lookup_class(req, name, true)? {
+            Some(class) => class,
+            None => return Ok(false),
+        },
         ValueRef::Object(object) => object.class(),
         _ => return Ok(false),
     };
-    let wanted = class_name.as_bytes().to_vec();
-    if !only_subclass && req.class_name_bytes(instance) == wanted {
+    if !only_subclass && req.class_name_bytes(instance) == class_name.as_bytes() {
         return Ok(true);
     }
-    let answer = match lookup_class(req, &wanted, false)? {
+    let answer = match lookup_class(req, class_name, false)? {
         None => false,
         Some(class) if only_subclass && class == instance => false,
         Some(class) => req.symbols().instance_of(instance, class),
@@ -393,7 +388,7 @@ fn visible(
 #[php_function]
 fn get_class_vars(req: &mut Request, class: PhpString) -> Result<Owner<PhpArray>, Thrown> {
     let bytes = class.as_bytes().to_vec();
-    let Some(class) = lookup_class(req, &bytes, true)? else {
+    let Some(class) = lookup_class(req, class, true)? else {
         let tail = format!(
             "be a valid class name, {} given",
             String::from_utf8_lossy(&bytes)
@@ -952,7 +947,7 @@ fn get_class_methods(
         .methods_in_order(class)
         .into_iter()
         .filter(|(declaring, method)| visible(req, *declaring, method.visibility, scope))
-        .map(|(_, method)| method.function.name.0.clone())
+        .map(|(_, method)| Box::from(&*method.function.name.0))
         .collect();
     let mut array = PhpArray::new(req)?;
     for name in names {
@@ -970,10 +965,7 @@ fn get_class_methods(
 fn class_of_argument(req: &mut Request, given: Value) -> Result<(Option<ClassId>, bool), Thrown> {
     match given.as_ref() {
         ValueRef::Object(object) => Ok((Some(object.class()), true)),
-        ValueRef::Str(name) => {
-            let name = name.as_bytes().to_vec();
-            Ok((lookup_class(req, &name, true)?, false))
-        }
+        ValueRef::Str(name) => Ok((lookup_class(req, name, true)?, false)),
         _ => {
             let tail = bytes!(
                 "be of type object|string, ",
@@ -1149,7 +1141,7 @@ pub(super) fn exists(
     autoload: bool,
     kinds: &[ClassKind],
 ) -> Result<bool, Thrown> {
-    let found = lookup_class(req, name.as_bytes(), autoload)?;
+    let found = lookup_class(req, name, autoload)?;
     let answer = found
         .and_then(|class| req.symbols().class_decl(class))
         .is_some_and(|decl| kinds.contains(&decl.kind));
@@ -1307,7 +1299,7 @@ fn class_alias(
 ) -> Result<bool, Thrown> {
     let class_bytes = class.as_bytes().to_vec();
     let alias_bytes = alias.as_bytes().to_vec();
-    let Some(class) = lookup_class(req, &class_bytes, autoload)? else {
+    let Some(class) = lookup_class(req, class, autoload)? else {
         warning(
             req,
             &format!(

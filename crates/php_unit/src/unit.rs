@@ -217,9 +217,10 @@ pub struct Unit {
 /// What each of those is refused for, done the one way:
 ///
 /// ```
-/// use php_unit::{Handler, OpArray, Opline, Unit};
+/// use php_unit::{Handler, OpArray, Opcode, Opline, Unit};
+/// let back = Opline { opcode: Opcode::Return, ..Opline::default() };
 /// let unit = Unit {
-///     main: OpArray { oplines: vec![Opline::default()], ..OpArray::default() },
+///     main: OpArray { oplines: vec![Opline::default(), back].into(), ..OpArray::default() },
 ///     ..Unit::default()
 /// };
 /// assert_eq!(unit.main.oplines[0].handler, Handler::Unresolved);
@@ -357,6 +358,9 @@ impl Unit {
     /// afresh where there is none.
     #[must_use]
     pub fn published(mut self, room: Option<SpareUnit>) -> PublishedUnit {
+        if cfg!(debug_assertions) {
+            self.hold_ranges();
+        }
         for code in self.op_arrays_mut() {
             code.resolve();
         }
@@ -378,20 +382,40 @@ impl Unit {
         PublishedUnit(shared)
     }
 
-    /// Every op array's tables shrunk to what they hold, as opcache
-    /// copies a persisted unit into shared memory at its exact size
-    /// (`zend_persist_op_array_ex`): what a unit held for more than one
-    /// request pays once, where the engine publishes it, and a unit one
-    /// request compiles for itself, an `eval`'s, never pays.
-    pub fn compact(&mut self) {
-        for code in self.op_arrays_mut() {
-            code.compact();
+    /// The sensor #3274's ruling builds where a unit is published: in a
+    /// build with debug assertions, each op array held to its own tables
+    /// ([`OpArray::out_of_range`]), and an opline past them a compiler
+    /// bug, named with its op array. A release build holds nothing.
+    fn hold_ranges(&self) {
+        let text = |name: &Name| String::from_utf8_lossy(&name.0).into_owned();
+        let class = |at: u32| self.classes.get(at as usize);
+        let member = |at: u32, name: Option<&Name>| {
+            let class = class(at).map(|c| text(&c.name)).unwrap_or_default();
+            format!("{class}::{}", name.map(text).unwrap_or_default())
+        };
+        let hold = |owner: String, code: &OpArray| {
+            let bug = code.out_of_range();
+            let bug = bug.map(|f| format!("a compiler bug: {owner} publishes {f}"));
+            debug_assert!(bug.is_none(), "{}", bug.unwrap_or_default());
+        };
+        hold("{main}".to_owned(), &self.main);
+        for (decl, code) in self.functions.iter().chain(&self.dynamic) {
+            hold(text(&decl.name), code);
+        }
+        for m in &self.methods {
+            let decl = class(m.class).and_then(|c| c.methods.get(m.method as usize));
+            hold(member(m.class, decl.map(|d| &d.function.name)), &m.body);
+        }
+        for h in &self.hooks {
+            let decl = class(h.class).and_then(|c| c.properties.get(h.property as usize));
+            let name = member(h.class, decl.map(|p| &p.name));
+            hold(name + "::" + h.kind.name(), &h.body);
         }
     }
 
     /// Every op array of the unit: its main one, its functions', the
     /// ones no name binds, its methods' and its property hooks'.
-    fn op_arrays_mut(&mut self) -> impl Iterator<Item = &mut OpArray> {
+    pub(crate) fn op_arrays_mut(&mut self) -> impl Iterator<Item = &mut OpArray> {
         let Unit {
             main,
             functions,

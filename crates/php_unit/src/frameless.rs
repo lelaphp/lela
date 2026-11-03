@@ -41,7 +41,7 @@ mod tests {
     use super::*;
     use crate::decl::native_function;
 
-    fn declared(name: &str, frameless: &[u32]) -> FunctionDecl {
+    fn declared(name: &'static str, frameless: &[u32]) -> FunctionDecl {
         FunctionDecl {
             frameless: frameless.to_vec(),
             ..native_function(name.as_bytes())

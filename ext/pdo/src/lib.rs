@@ -63,7 +63,7 @@ use stmt::PDOStatement;
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![pdo_drivers::declared()])
+        .functions(&[pdo_drivers::DECLARED])
         .dependencies(vec![Dependency {
             name: String::from("spl"),
             kind: DependencyKind::Required,

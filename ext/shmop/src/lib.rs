@@ -46,13 +46,13 @@ use crate::throwables::Throwables;
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            shmop_open::declared(),
-            shmop_read::declared(),
-            shmop_close::declared(),
-            shmop_size::declared(),
-            shmop_write::declared(),
-            shmop_delete::declared(),
+        .functions(&[
+            shmop_open::DECLARED,
+            shmop_read::DECLARED,
+            shmop_close::DECLARED,
+            shmop_size::DECLARED,
+            shmop_write::DECLARED,
+            shmop_delete::DECLARED,
         ])
         .class::<Shmop>()
         .engine_state(Throwables::start)

@@ -37,7 +37,7 @@ fn shade_turned(#[php(default = Shade::Light)] shade: Shade) -> Shade {
 fn shades() -> Extension {
     ExtensionBuilder::default()
         .class::<Shade>()
-        .functions(vec![shade_turned::declared()])
+        .functions(&[shade_turned::DECLARED])
         .build("native_owners")
 }
 

@@ -65,9 +65,10 @@ pub(crate) use class_data::PropertyNames;
 mod classes;
 use classes::AccelServed;
 pub use classes::Symbols;
+pub(crate) use classes::ce_cache;
 mod constants;
 mod declared_bytes;
-pub(crate) use constants::{ConstantAt, halt_offset_key};
+pub(crate) use constants::{ConstantAt, ConstantCount, halt_offset_key};
 mod diagnostics;
 pub use diagnostics::Diagnostics;
 use diagnostics::{DISPLAY_ERRORS_STDERR, display_errors_mode_of, fatal_errors};
@@ -442,6 +443,11 @@ pub struct Request {
     /// in the order declared, the preload's first and then the
     /// request's, each in the bucket it stands in.
     declared: Keyed<Named>,
+    /// php's class caches in `CG(map_ptr_base)`, `ZSTR_GET_CE_CACHE`'s
+    /// slots: the class each name that carries one found last
+    /// ([`classes::ce_cache`]), laid down empty with the request, as
+    /// `zend_map_ptr_reset` lays php's table ([`Request::ce_cached`]).
+    ce_caches: php_heap::MapTable<Option<ClassId>>,
     /// The classes the units this request served declared, each the
     /// unit that holds it and the index of its declaration, in the
     /// order declared: the rows a `ClassId` of the request's own counts
@@ -828,8 +834,9 @@ pub(crate) struct FrameShape {
     /// What the `INIT` of a call to the function writes into the call's
     /// flags: php's `quick_arg_flags`, which of the first twelve
     /// arguments it takes by value, for the `SEND_*_EX` oplines to test
-    /// with no lookup ([`exec::CallInfo::sends_by_value`]); and whether
-    /// its activation is plain, no `#[\Deprecated]` or `#[\NoDiscard]`
+    /// with no lookup ([`exec::CallInfo::sends_by_value`]), and whether
+    /// it takes every one by value ([`exec::CallInfo::sends_simply`]);
+    /// and whether its activation is plain, no `#[\Deprecated]` or `#[\NoDiscard]`
     /// to raise ([`exec::CallInfo::plain_entry`]).
     pub(crate) sent: exec::CallInfo,
 }
@@ -850,6 +857,7 @@ impl FrameShape {
         observed: bool,
     ) -> FrameShape {
         let declared = decl.parameters.iter().filter(|p| !p.variadic).count();
+        let by_ref = decl.parameters.iter().any(|p| p.by_ref);
         FrameShape {
             parameters: u32::try_from(declared).unwrap_or(u32::MAX),
             typed: decl.parameters.iter().any(|p| p.ty.is_some()),
@@ -861,14 +869,15 @@ impl FrameShape {
                 exec::CacheAt::of(code.runtime_cache)
             }),
             cache_size: code.map_or_else(exec::CacheSize::default, exec::CacheSize::of),
-            by_ref: decl.parameters.iter().any(|p| p.by_ref),
+            by_ref,
             sent: exec::CallInfo::sent(|number| {
                 sent_parameter(decl, number).is_some_and(|parameter| parameter.by_ref)
             })
             .with_plain_entry({
                 let flags = crate::attributes::Flags::of(&decl.attributes);
                 !flags.deprecated && !flags.no_discard
-            }),
+            })
+            .with_by_value(!by_ref),
         }
     }
 }
@@ -954,13 +963,13 @@ pub(crate) struct Placed {
     /// The declared instance properties in slot order, each the row of
     /// the class that declared it: `ce->properties_info_table` over
     /// `ce->default_properties_table` ([`Request::placed_properties`]).
-    slots: Box<[PropertyInfo]>,
+    slots: php_link::Column<PropertyInfo>,
     /// What each row of the class's linked record's `properties`,
     /// `ce->properties_info`, places its name at, by the row's position:
     /// what `zend_get_property_offset` reads off the
     /// `zend_property_info` its one find answers. Empty for a class with
     /// no record.
-    rows: Box<[RowPlace]>,
+    rows: php_link::Column<RowPlace>,
     /// The slots `do_inherit_property` leaves `IS_UNDEF` in
     /// `default_properties_table` over the lineage, one for each property
     /// a class redeclares over its parent's: php's object keeps them
@@ -978,6 +987,16 @@ impl Placed {
     /// [`Placed::holes`].
     pub(crate) fn holes(&self) -> u32 {
         self.holes
+    }
+
+    /// Each of `placed`'s columns laid as a range of one table, as
+    /// [`php_link::LinkedClass::lay`] lays the native classes' records.
+    pub(crate) fn lay<'p>(placed: impl IntoIterator<Item = &'p mut Placed>) {
+        let (slots, rows): (Vec<_>, Vec<_>) = (placed.into_iter())
+            .map(|placed| (&mut placed.slots, &mut placed.rows))
+            .unzip();
+        php_link::Column::lay(slots);
+        php_link::Column::lay(rows);
     }
 }
 
@@ -1230,6 +1249,7 @@ impl Request {
             objects: objects::Objects::default(),
             returned: Value::null(),
             declared: tables.classes,
+            ce_caches: php_heap::MapTable::new(),
             own_classes: Vec::new(),
             arena,
             classes: classes::Classes::default(),
@@ -1841,7 +1861,7 @@ mod tests {
             }],
             attributes: Vec::new(),
             doc_comment: None,
-            file: Name(Box::new([])),
+            file: Name::default(),
             line: 0,
             end_line: 0,
             object_size: 0,

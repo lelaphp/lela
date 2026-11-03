@@ -128,6 +128,29 @@ impl ScannerHeap {
         })
     }
 
+    /// Nothing laid, the room of its buffers kept.
+    fn clear(&mut self) {
+        self.bytes.clear();
+        self.strings.clear();
+        self.nesting = 0;
+        self.states = 0;
+    }
+
+    /// Whether each buffer's room is within `bytes`.
+    pub(crate) fn within(&self, bytes: usize) -> bool {
+        self.bytes.capacity() <= bytes
+            && self.strings.capacity() * size_of::<(usize, usize)>() <= bytes
+    }
+
+    /// Where each buffer stands, and its room.
+    #[cfg(test)]
+    pub(crate) fn buffers(&self) -> Vec<(usize, usize)> {
+        vec![
+            (self.bytes.as_ptr() as usize, self.bytes.capacity()),
+            (self.strings.as_ptr() as usize, self.strings.capacity()),
+        ]
+    }
+
     /// A string of `len` bytes scanned whose value is `value`, where it
     /// lays one.
     fn string(&mut self, len: usize, value: &[u8]) {
@@ -141,11 +164,14 @@ impl ScannerHeap {
 /// What php's scanner lays scanning `source` ([`ScannerHeap`]), read
 /// off the lexer's `tokens` of it and kept in `arena` until
 /// [`take_scanner_heap`] takes it, for the request whose compile in the
-/// arena scanned it to charge. A function of the
-/// crate's, not a method of the arena, so the facade extensions build
-/// on, which names the arena, does not carry the compiler's bookkeeping.
+/// arena scanned it to charge. It is laid in the room the last one in
+/// the arena left, over the walk's stacks the arena keeps, so a compile
+/// after the first asks the allocator for nothing here. A function of
+/// the crate's, not a method of the arena, so the facade extensions
+/// build on, which names the arena, does not carry the compiler's
+/// bookkeeping.
 pub fn note_scanner_heap(arena: &crate::Arena, source: &[u8], tokens: &[Token]) {
-    arena.note_scanned(scanner_heap(source, tokens));
+    arena.lay_scanned(|heap, room| lay_scanner_heap(source, tokens, heap, room));
 }
 
 /// What [`note_scanner_heap`] kept in `arena` last, taken out.
@@ -154,25 +180,74 @@ pub fn take_scanner_heap(arena: &crate::Arena) -> ScannerHeap {
     arena.take_scanned()
 }
 
-/// [`ScannerHeap`] for `source`, read off the lexer's `tokens` of it as
-/// [`scanned`] reads php's tokens: a name, a variable's without its `$`,
-/// a quoted string's between its quotes, a stretch of string text and a
-/// stretch of inline HTML, each laid at the length scanned and holding
-/// its bytes once its escapes are read.
-fn scanner_heap(source: &[u8], tokens: &[Token]) -> ScannerHeap {
+/// [`ScannerHeap`] for `source` laid into `heap`, read off the lexer's
+/// `tokens` of it as [`scanned`] reads php's tokens: a name, a
+/// variable's without its `$`, a quoted string's between its quotes, a
+/// stretch of string text and a stretch of inline HTML, each laid at the
+/// length scanned and holding its bytes once its escapes are read. The
+/// walk's stacks are `room`'s, handed back empty.
+fn lay_scanner_heap(source: &[u8], tokens: &[Token], heap: &mut ScannerHeap, room: &mut WalkRoom) {
+    heap.clear();
+    let mut contexts = std::mem::take(&mut room.contexts);
+    contexts.push(Context::Scripting);
     let mut walk = Walk {
         source,
         tokens,
-        out: Vec::new(),
-        contexts: vec![Context::Scripting],
+        out: std::mem::take(&mut room.out),
+        contexts,
         run: None,
-        quotes: Vec::new(),
+        quotes: std::mem::take(&mut room.quotes),
         line: 1,
         counted_to: 0,
-        heap: Some(Laying::default()),
+        heap: Some(Laying {
+            heap: std::mem::take(heap),
+            ..Laying::default()
+        }),
     };
     walk.all();
-    walk.heap.map(|laying| laying.heap).unwrap_or_default()
+    if let Some(laying) = walk.heap {
+        *heap = laying.heap;
+    }
+    *room = WalkRoom {
+        out: walk.out,
+        contexts: walk.contexts,
+        quotes: walk.quotes,
+    };
+    room.clear();
+}
+
+/// The stacks a walk that lays [`ScannerHeap`] lends itself, which an
+/// arena keeps between compiles ([`crate::Arena`]) and takes back empty.
+#[derive(Default)]
+pub(crate) struct WalkRoom {
+    out: Vec<ScannedToken>,
+    contexts: Vec<Context>,
+    quotes: Vec<usize>,
+}
+
+impl WalkRoom {
+    fn clear(&mut self) {
+        self.out.clear();
+        self.contexts.clear();
+        self.quotes.clear();
+    }
+
+    /// Whether every stack's room is within `bytes`.
+    pub(crate) fn within(&self, bytes: usize) -> bool {
+        self.out.capacity() * size_of::<ScannedToken>() <= bytes
+            && self.contexts.capacity() * size_of::<Context>() <= bytes
+            && self.quotes.capacity() * size_of::<usize>() <= bytes
+    }
+
+    /// Where each stack stands, and its room.
+    #[cfg(test)]
+    pub(crate) fn buffers(&self) -> Vec<(usize, usize)> {
+        vec![
+            (self.out.as_ptr() as usize, self.out.capacity()),
+            (self.contexts.as_ptr() as usize, self.contexts.capacity()),
+            (self.quotes.as_ptr() as usize, self.quotes.capacity()),
+        ]
+    }
 }
 
 /// [`ScannerHeap`] as a walk lays it, with how deep each stack stands.
@@ -305,12 +380,24 @@ impl Walk<'_> {
             self.lay_token(name, start, end);
         }
         let line = self.line_at(start);
+        self.forget();
         self.out.push(ScannedToken {
             name,
             start,
             end,
             line,
         });
+    }
+
+    /// Where the walk lays [`ScannerHeap`], the tokens out before any
+    /// `"` still open given up: the fusion into a
+    /// `T_CONSTANT_ENCAPSED_STRING` at a close reads what stands after
+    /// its open alone, and nothing else reads them, so the walk keeps a
+    /// string's worth of tokens rather than the whole file's.
+    fn forget(&mut self) {
+        if self.heap.is_some() && self.quotes.is_empty() {
+            self.out.clear();
+        }
     }
 
     fn named(&mut self, name: &'static str, i: usize) {
@@ -337,6 +424,7 @@ impl Walk<'_> {
                 let text = self.source.get(run.start..run.end).unwrap_or(&[]);
                 laying.heap.string(text.len(), &unescape(text, quote));
             }
+            self.forget();
             self.out.push(ScannedToken {
                 name: Some("T_ENCAPSED_AND_WHITESPACE"),
                 start: run.start,

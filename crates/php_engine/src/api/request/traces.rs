@@ -614,10 +614,6 @@ impl Request {
                     call.called_scope(),
                 )
             }
-            None if call.info().frameless() => (
-                Traced::Frameless(function),
-                self.closure_scope(call.closure()),
-            ),
             None => (
                 Traced::Function(function),
                 self.closure_scope(call.closure()),
@@ -806,7 +802,7 @@ impl Request {
             None => self.innermost_frame().and_then(|state| {
                 state
                     .code()
-                    .map(|code| (code.filename.0.clone(), state.line()))
+                    .map(|code| (Box::from(&*code.filename.0), state.line()))
             }),
         };
         let Some((executing, at)) = executing else {
@@ -1058,6 +1054,7 @@ impl Request {
                 .map(|(file, line)| (rows.lay_file(file), line));
             match link {
                 Link::Frame(_, state) => {
+                    self.push_frameless_row(chain, at, *state, rows);
                     let Some(function) = state.function() else {
                         // A code frame: named by the includer's opline
                         // where that is an `INCLUDE_OR_EVAL`, and the
@@ -1144,6 +1141,75 @@ impl Request {
                 }
             }
         }
+    }
+
+    /// The row php adds for a frameless call before the row of the user
+    /// frame `state` that stands at it (`Z/Zend/zend_builtin_functions.c:2011`):
+    /// the native the opline names, sited at the frame's own file and
+    /// line, which the row before it gives up, since what that row's
+    /// link serves was called from the native; its arguments the
+    /// operands as they stand. None where an operand is `UNDEF`, a
+    /// temporary freed already or a variable the read warned of, nor
+    /// where the link above is the native's own call, an observed one's.
+    ///
+    /// ```php
+    /// class S { function __toString(): string { debug_print_backtrace(); return "abc"; } }
+    /// function f($s) { return str_contains($s, "b"); }
+    /// var_dump(f(new S));
+    /// ```
+    /// ```expect
+    /// #0 [internal function]: S->__toString()
+    /// #1 %s(3): str_contains(Object(S), 'b')
+    /// #2 %s(4): f(Object(S))
+    /// bool(true)
+    /// ```
+    fn push_frameless_row(
+        &self,
+        chain: &[Link<'_>],
+        at: usize,
+        state: exec::FrameAt<'_>,
+        rows: &mut Rows,
+    ) {
+        let Some(call) = state
+            .info()
+            .user()
+            .then(|| state.frameless_call())
+            .flatten()
+        else {
+            return;
+        };
+        let Some(row) = self.shared.frameless.get(call.row as usize) else {
+            return;
+        };
+        let function = Function(row.function);
+        let above = at.checked_sub(1).and_then(|above| chain.get(above));
+        let observed =
+            matches!(above, Some(Link::Call(above)) if above.function() == Some(function));
+        let arguments = call.arguments();
+        if observed
+            || arguments
+                .iter()
+                .any(|a| matches!(a.as_ref(), ValueRef::Undef))
+        {
+            return;
+        }
+        let site = state
+            .file()
+            .map(|file| (rows.lay_file(file), i64::from(state.line())));
+        if site.is_some()
+            && let Some(before) = rows.laid.last_mut()
+        {
+            before.5 = None;
+        }
+        let row = (
+            Traced::Frameless(function),
+            None,
+            None,
+            arguments.to_vec(),
+            Vec::new(),
+            site,
+        );
+        rows.laid.push(row);
     }
 
     /// The site a row reads off the link at `below` in `chain`: a user

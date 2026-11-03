@@ -1737,7 +1737,7 @@ fn ignore_user_abort(
 #[php_function]
 fn register_tick_function(req: &mut Request, callback: Callable, args: Variadic<Value>) -> bool {
     req.code_mut()
-        .register_tick_function(callback, args.into_iter().collect())
+        .register_tick_function(callback, args.collect())
 }
 
 /// `unregister_tick_function(callable $callback): void`: the first
@@ -2278,7 +2278,27 @@ fn call_user_func(
     callback: Callable,
     args: NamedVariadic<Value>,
 ) -> Result<Owner<Value>, Thrown> {
-    call_named(req, &callback, &args.positional, args.named())
+    let named = args.named();
+    as_params(args.positional.clone(), |params| {
+        call_named(req, &callback, params, named)
+    })
+}
+
+/// `f` over a tail as the one slice a call takes, `fci.params`: laid in
+/// a room on the machine stack where it fits, as php's names the frame's
+/// slots in place, and gathered on the heap past that.
+fn as_params<R>(tail: Variadic<Value>, f: impl FnOnce(&[Value]) -> R) -> R {
+    const ROOM: usize = 8;
+    let len = tail.len();
+    if len > ROOM {
+        let gathered: Vec<Value> = tail.collect();
+        return f(&gathered);
+    }
+    let mut room = [Value::null(); ROOM];
+    for (slot, value) in room.iter_mut().zip(tail) {
+        *slot = value;
+    }
+    f(&room[..len])
 }
 
 /// `call_user_func_array(callable $callback, array $args): mixed`, php's
@@ -2500,7 +2520,7 @@ fn forward_static_call(
         ));
     }
     let callback = forwarded(req, &callback);
-    call(req, &callback, &args)
+    as_params(args, |params| call(req, &callback, params))
 }
 
 /// `forward_static_call_array(callable $callback, array $args): mixed`,

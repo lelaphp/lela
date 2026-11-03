@@ -159,6 +159,7 @@ impl PhpString {
     /// the request as php's fatal and ending the native as `zend_mm`
     /// bails out.
     #[cfg_attr(debug_assertions, track_caller)]
+    #[inline] // `zend_string_init` is `zend_always_inline`, and a native's string is made here
     pub fn new(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
         adopted(req.string(bytes))
     }
@@ -183,6 +184,7 @@ impl PhpString {
     /// 100 160 128
     /// ```
     #[cfg_attr(debug_assertions, track_caller)]
+    #[inline] // as `new`
     pub fn fast(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
         adopted(req.string_fast(bytes))
     }
@@ -536,6 +538,12 @@ pub enum SortAlgorithm {
     Hash,
     /// `zend_array_sort`: a hold, then a release that may offer a root.
     Array,
+    /// `array_multisort`'s restructure of a table its native separated
+    /// and holds (`HT_ALLOW_COW_VIOLATION`): no copy, no hold, and under
+    /// `renumber` only the integer keys numbered again, the string keys
+    /// kept and the next free element the count; an immutable table is
+    /// left as it is.
+    Multisort,
 }
 
 /// How a table [`PhpArray::sized`] lays down is laid out: php's packed
@@ -573,6 +581,37 @@ impl PhpArray {
             Err(thrown) => {
                 table.give_up(req);
                 Err(thrown)
+            }
+        }
+    }
+
+    /// `zend_hash_real_init_packed` and `ZEND_HASH_FILL_PACKED`
+    /// (`Z/Zend/zend_hash.h:1585`): a new packed list of eight slots
+    /// whose elements `next` makes one at a time, each laid in the slot
+    /// past the last with no separation asked of a table no one else
+    /// holds, the table grown as `ZEND_HASH_FILL_GROW` grows it, until
+    /// `next` answers `None`. A step of `next` that throws gives the list
+    /// up as far as it was made and hands the throwable on, as
+    /// [`PhpArray::filled`] does. `php_explode` lays its pieces so.
+    #[cfg_attr(debug_assertions, track_caller)]
+    #[inline]
+    pub fn packed_fill(
+        req: &mut Request,
+        mut next: impl FnMut(&mut Request) -> Result<Option<Owner<Value>>, Thrown>,
+    ) -> Result<Owner<PhpArray>, Thrown> {
+        let list = PhpArray::sized(req, 8, Layout::Packed)?;
+        let a = list.0;
+        loop {
+            let laid = match next(req) {
+                Ok(None) => return Ok(list),
+                // The table is this call's own, so it has one owner, and
+                // its next element is its count, never `ZEND_LONG_MAX`.
+                Ok(Some(value)) => req.array_append(a, value.hand_on()).map(|_| ()),
+                Err(thrown) => Err(thrown),
+            };
+            if let Err(thrown) = laid {
+                list.give_up(req);
+                return Err(thrown);
             }
         }
     }
@@ -948,6 +987,7 @@ impl PhpArray {
     /// when that is `ZEND_LONG_MAX` and taken (`zend_cannot_add_element`),
     /// `value` given up.
     #[cfg_attr(debug_assertions, track_caller)]
+    #[inline] // `zend_hash_next_index_insert` into a list with room is a store in the native's loop
     pub fn append(&mut self, req: &mut Request, value: Owner<Value>) -> Result<(), Thrown> {
         if self.try_append(req, value)? {
             return Ok(());
@@ -959,6 +999,7 @@ impl PhpArray {
     /// `nNextFreeElement` is `ZEND_LONG_MAX` and taken, which is what
     /// `add_next_index_*` answers.
     #[cfg_attr(debug_assertions, track_caller)]
+    #[inline] // as `append`
     pub fn try_append(&mut self, req: &mut Request, value: Owner<Value>) -> Result<bool, Thrown> {
         if let Err(thrown) = self.separate(req) {
             value.give_up(req);
@@ -1034,6 +1075,19 @@ impl PhpArray {
         adopted(req.array_dup(self.0).map(PhpArray::of))
     }
 
+    /// `src`'s values appended in one pass where both are packed lists,
+    /// after `SEPARATE_ARRAY` ([`php_heap::Heap::array_fill_packed`]);
+    /// the face's is the owner's, [`Owner::fill_packed`].
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn fill_packed(&mut self, req: &mut Request, src: PhpArray) -> Result<bool, Thrown> {
+        if !self.is_packed() || !src.is_packed() {
+            return Ok(false);
+        }
+        self.separate(req)?;
+        let filled = req.heap_mut().array_fill_packed(self.0, src.0);
+        req.fatal_of(filled)
+    }
+
     /// The first live element at or past the bucket `position`, with
     /// the bucket it stands at: what a hash iterator's `pos` reads
     /// (`zend_hash_get_current_data_ex` after
@@ -1082,7 +1136,8 @@ impl PhpArray {
     /// takes the copy with the write, and the table sorted is given up
     /// after, destroyed where nothing else holds it and otherwise offered
     /// to the collector. Under [`SortAlgorithm::Hash`] it is sorted as it
-    /// stands, held by nothing and offered to no collector.
+    /// stands, held by nothing and offered to no collector, and under
+    /// [`SortAlgorithm::Multisort`] too, its native holding it.
     ///
     /// ```php
     /// function resize_arr() { global $arr; for ($i = 0; $i < 4; $i++) { $arr[$i] = $i; } }
@@ -1116,10 +1171,19 @@ impl PhpArray {
             (&Key, &Value),
         ) -> Result<Ordering, Thrown>,
     ) -> Result<(), Thrown> {
-        self.separate(req)?;
+        match algorithm {
+            SortAlgorithm::Multisort if self.0.is_immutable() => return Ok(()),
+            SortAlgorithm::Multisort => {}
+            _ => self.separate(req)?,
+        }
         let held = (algorithm == SortAlgorithm::Array).then(|| Owner::take(req, self.to_value()));
+        let keys = match (algorithm, renumber) {
+            (_, false) => php_heap::SortKeys::Keep,
+            (SortAlgorithm::Multisort, true) => php_heap::SortKeys::RenumberIntegers,
+            (_, true) => php_heap::SortKeys::Renumber,
+        };
         let mut pending: Option<Thrown> = None;
-        let sorted = req.array_sort(self.0, renumber, &mut |req, x, y| {
+        let sorted = req.array_sort(self.0, keys, &mut |req, x, y| {
             let ordering = if pending.is_some() {
                 Ordering::Equal
             } else {

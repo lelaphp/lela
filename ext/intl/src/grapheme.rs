@@ -19,18 +19,18 @@ use crate::utf8;
 
 /// `grapheme_*` in the stub's order.
 pub(crate) fn functions(b: ExtensionBuilder) -> ExtensionBuilder {
-    b.functions(vec![
-        grapheme_strlen::declared(),
-        grapheme_strpos::declared(),
-        grapheme_stripos::declared(),
-        grapheme_strrpos::declared(),
-        grapheme_strripos::declared(),
-        grapheme_substr::declared(),
-        grapheme_strstr::declared(),
-        grapheme_stristr::declared(),
-        grapheme_str_split::declared(),
-        grapheme_levenshtein::declared(),
-        grapheme_extract::declared(),
+    b.functions(&[
+        grapheme_strlen::DECLARED,
+        grapheme_strpos::DECLARED,
+        grapheme_stripos::DECLARED,
+        grapheme_strrpos::DECLARED,
+        grapheme_strripos::DECLARED,
+        grapheme_substr::DECLARED,
+        grapheme_strstr::DECLARED,
+        grapheme_stristr::DECLARED,
+        grapheme_str_split::DECLARED,
+        grapheme_levenshtein::DECLARED,
+        grapheme_extract::DECLARED,
     ])
 }
 

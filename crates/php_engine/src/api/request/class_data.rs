@@ -588,7 +588,7 @@ impl Request {
                 .symbols()
                 .constants_in_order(class)
                 .into_iter()
-                .map(|(declaring, constant)| (declaring, constant.name.0.clone()))
+                .map(|(declaring, constant)| (declaring, Box::from(&*constant.name.0)))
                 .collect();
             for (declaring, name) in constants {
                 let holder = constant_holder(class, declaring);

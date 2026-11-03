@@ -85,7 +85,7 @@ fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
 /// only the program that declares a `pause()` meets.
 fn traced() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![trace_num::declared(), set_trace_num::declared()])
+        .functions(&[trace_num::DECLARED, set_trace_num::DECLARED])
         .observer(init)
         .build("traced")
 }

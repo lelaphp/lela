@@ -68,10 +68,7 @@ fn pending_write(req: &mut Request, o: PhpObject) -> Result<Owner<PhpString>, Th
 
 fn pending() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            pending_conversion::declared(),
-            pending_write::declared(),
-        ])
+        .functions(&[pending_conversion::DECLARED, pending_write::DECLARED])
         .build("while_pending")
 }
 

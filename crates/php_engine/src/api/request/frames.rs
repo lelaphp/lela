@@ -250,11 +250,11 @@ impl Request {
     /// function's through the function table, which holds the unit, a
     /// file's through the frame's [`exec::Annex`].
     pub(crate) fn unit_of(&self, header: &exec::Header) -> Option<(&PublishedUnit, exec::Body)> {
-        if let Some(function) = header.function {
+        if let Some(function) = header.function() {
             let user = self.user_function(function)?;
             Some((&user.unit, user.body))
         } else {
-            let unit = self.annexes.get(header.annex?)?.unit.as_ref()?;
+            let unit = self.annexes.get(header.annex()?)?.unit.as_ref()?;
             Some((unit, exec::Body::Main))
         }
     }
@@ -284,12 +284,12 @@ impl Request {
 
     /// The [`exec::Annex`] of `frame`, made where it has none.
     pub(crate) fn annex_mut(&mut self, frame: FrameRef) -> Option<&mut exec::Annex> {
-        let id = if let Some(id) = self.vm.at(frame)?.annex {
+        let id = if let Some(id) = self.vm.at(frame)?.annex() {
             id
         } else {
             let id = self.annexes.insert(exec::Annex::default());
             if let Some(header) = self.vm.at_mut(frame) {
-                header.annex = Some(id);
+                header.set_annex(Some(id));
             }
             id
         };
@@ -298,7 +298,7 @@ impl Request {
 
     /// The [`exec::Annex`] of `frame`, where it has one.
     pub(crate) fn annex_of(&self, frame: FrameRef) -> Option<&exec::Annex> {
-        self.annexes.get(self.vm.at(frame)?.annex?)
+        self.annexes.get(self.vm.at(frame)?.annex()?)
     }
 
     /// The fast-call cell of `frame`'s temporary `var`
@@ -310,7 +310,7 @@ impl Request {
     /// A frame's [`exec::Annex`] given up with the frame: its place
     /// given back, and what it owns handed to the caller.
     pub(crate) fn take_annex(&mut self, header: &exec::Header) -> Option<exec::Annex> {
-        self.annexes.take(header.annex?)
+        self.annexes.take(header.annex()?)
     }
 
     /// A generator's frame back on the stack with the calls it was
@@ -696,7 +696,8 @@ impl Request {
                 (Some(caller), scope, table)
             }
         };
-        exec::init_runtime_cache(&mut self.map, &mut self.heap, code, exec::Body::Main)?;
+        let base = exec::init_runtime_cache(&mut self.map, &mut self.heap, code, exec::Body::Main)?;
+        header.set_cache_base(base);
         let statics = Some(self.file_statics(&unit));
         let annex = self.annexes.insert(exec::Annex {
             unit: Some(unit),
@@ -705,7 +706,7 @@ impl Request {
             statics,
             ..exec::Annex::default()
         });
-        header.annex = Some(annex);
+        header.set_annex(Some(annex));
         header.callee = self.annexes.callee(annex);
         let frame = match self.vm.push(&mut self.heap, slots, 0, header) {
             Ok(frame) => frame,
@@ -769,7 +770,7 @@ impl Request {
         frame: FrameRef,
         copy: crate::api::values::Emalloc,
     ) -> Result<(), Thrown> {
-        let annex = self.vm.at(frame).and_then(|header| header.annex);
+        let annex = self.vm.at(frame).and_then(exec::Header::annex);
         let size = (annex.and_then(|id| self.annexes.get(id)))
             .and_then(|extra| extra.unit.as_ref())
             .map_or(0, |unit| unit.main.cache_room);
@@ -807,7 +808,7 @@ impl Request {
         let code_frame = self
             .vm
             .at(frame)
-            .filter(|state| state.function.is_none())
+            .filter(|state| state.function().is_none())
             .map(|state| state.caller().frame());
         if code_frame.is_some() {
             self.detach_symbol_table(frame);
@@ -884,8 +885,72 @@ impl Request {
     /// 6 1 20001
     /// int(0)
     /// ```
+    ///
+    /// The flags alone decide which leave a frame takes: a closure's
+    /// frame gives up its closure, an owned receiver is given up and a
+    /// lent one let go after the CVs, and a file's frame, which always
+    /// has an annex, is the kernel's, its value handed to the includer:
+    ///
+    /// ```php
+    /// class D {
+    ///     function __construct(public $n) {}
+    ///     function __destruct() { echo "[{$this->n}]"; }
+    ///     function me() { return $this->n; }
+    ///     function lent() { return $this->me(); }
+    /// }
+    /// $c = function ($a) { return $a * 2; };
+    /// $t = 0;
+    /// for ($i = 0; $i < 3; $i++) { $t += $c($i); }
+    /// echo $t, "\n";
+    /// echo (new D('tmp'))->me(), "\n";
+    /// $d = new D('kept');
+    /// echo $d->lent(), "\n";
+    /// (function () { $o = new D('closure'); return 1; })();
+    /// echo "\n";
+    /// $f = tempnam(sys_get_temp_dir(), 'leave');
+    /// file_put_contents($f, '<?php $x = new D("file"); return 7;');
+    /// var_dump(include $f);
+    /// unlink($f);
+    /// unset($d);
+    /// echo "\n";
+    /// ```
+    /// ```expect
+    /// 6
+    /// [tmp]tmp
+    /// kept
+    /// [closure]
+    /// int(7)
+    /// [kept]
+    /// [file]
+    /// ```
     #[inline(always)] // once per return, in the loop's RETURN arms
     pub(crate) fn leave_plainly(
+        &mut self,
+        frame: FrameRef,
+        cvs: u32,
+        operand: impl FnOnce(&[Zval]) -> Option<(Zval, Option<usize>)>,
+    ) -> Option<Stepped> {
+        self.leave_as::<false>(frame, cvs, operand)
+    }
+
+    /// [`Request::leave_plainly`] of a frame whose call-info word says it
+    /// holds a receiver or a closure, out of the loop's RETURN arms, so
+    /// the leave of a frame that holds neither is compiled with no test
+    /// of what one holds.
+    #[inline(never)]
+    fn leave_held(
+        &mut self,
+        frame: FrameRef,
+        cvs: u32,
+        operand: impl FnOnce(&[Zval]) -> Option<(Zval, Option<usize>)>,
+    ) -> Option<Stepped> {
+        self.leave_as::<true>(frame, cvs, operand)
+    }
+
+    /// The body of [`Request::leave_plainly`], `HELD` where the frame's
+    /// word says a receiver or a closure is held ([`Request::leave_held`]).
+    #[inline(always)]
+    fn leave_as<const HELD: bool>(
         &mut self,
         frame: FrameRef,
         cvs: u32,
@@ -899,16 +964,30 @@ impl Request {
             return None;
         }
         let header = laid.header();
-        // Each test evaluated, none short of the others, so the words are
-        // read side by side and folded, as php's leave tests one word of
-        // `ZEND_CALL_INFO`: a branch apiece measured 26 instructions.
-        let held = header.this().is_some() | header.closure.is_some();
-        let plain = header.function.is_some()
-            & header.annex.is_none()
-            & (header.info.bits() & exec::CallInfo::LEAVES_BY_KERNEL == 0);
-        if !plain || held && !held_kept(header.receiver(), header.closure) {
-            return None;
-        }
+        // `zend_leave_helper`'s first test, one word of `ZEND_CALL_INFO`:
+        // no call, extra argument or annex, which a file's frame always
+        // has, and whether a receiver or a closure is given up after the
+        // CVs, which is read only where the word says one is held. A
+        // receiver held alone, a method's, is given up on the way out
+        // below, as php's `ZEND_CALL_RELEASE_THIS` test does before the
+        // frame is freed.
+        let gives = match header.info.leave() {
+            exec::Leave::Plain => Gives::Nothing,
+            exec::Leave::Held if !HELD => return self.leave_held(frame, cvs, operand),
+            exec::Leave::Held => match (header.receiver(), header.closure()) {
+                (Some(receiver), None) if receiver_kept(receiver) => Gives::Receiver,
+                (receiver, closure) if held_kept(receiver, closure) => Gives::Owning,
+                _ => return None,
+            },
+            exec::Leave::Kernel => return None,
+        };
+        let held = gives != Gives::Nothing;
+        debug_assert!(
+            header.function().is_some()
+                && header.annex().is_none()
+                && held == (header.this().is_some() || header.closure().is_some()),
+            "a frame's flags disagree with its header at a plain leave"
+        );
         let caller = header.caller().frame()?;
         let returns_to = header.returns_to();
         let slots = laid.slots();
@@ -931,26 +1010,43 @@ impl Request {
         if owners && !owners_kept(owned) {
             return None;
         }
-        if owners || held {
-            let leave = PlainLeave {
-                caller,
-                returns_to,
-                cvs: if owners { cvs } else { 0 },
-                held,
-            };
+        // A receiver held alone, read only in the held leave.
+        let receiver = match gives {
+            Gives::Receiver if HELD && !owners => laid.header().receiver(),
+            _ => None,
+        };
+        let leave = PlainLeave {
+            caller,
+            returns_to,
+            cvs: if owners { cvs } else { 0 },
+            held,
+        };
+        if owners || held && receiver.is_none() {
             return self.leave_owning(leave, returned);
         }
         let into = below.get_mut(caller.0 as usize)?;
-        match returns_to {
+        let into_slot = match returns_to {
             Some(slot) => {
                 let slot = into.slots_mut().get_mut(slot as usize)?;
                 if slot.is_refcounted() {
                     return None;
                 }
-                *slot = returned;
+                Some(slot)
             }
             None if returned.is_refcounted() => return None,
-            None => {}
+            None => None,
+        };
+        // `OBJ_RELEASE(Z_OBJ(execute_data->This))`, another owner standing,
+        // or a lent receiver's pin let go: no CV owned anything, so this is
+        // all the frame gives up. The collector's buffer, where it must be
+        // collected first, is the owning leave's.
+        if let Some(receiver) = receiver
+            && !let_go_kept(&mut self.heap, receiver)
+        {
+            return self.leave_owning(leave, returned);
+        }
+        if let Some(slot) = into_slot {
+            *slot = returned;
         }
         let header = into.header_mut();
         header.opline = header.opline.wrapping_add(1);
@@ -1054,7 +1150,7 @@ impl Request {
         };
         let receiver = header.receiver();
         header.set_receiver(None);
-        let closure = header.closure.take();
+        let closure = header.take_closure();
         match receiver {
             Some(exec::Receiver::Owned(object))
                 if self.heap.release_kept(object.as_value().to_zval()) => {}
@@ -1090,7 +1186,7 @@ impl Request {
     /// `EX(func)`: the function `frame` serves, `None` for an included,
     /// evaluated or main file's op array, which is no function.
     pub(crate) fn frame_function(&self, frame: FrameRef) -> Option<Function> {
-        self.vm.at(frame).and_then(|state| state.function)
+        self.vm.at(frame).and_then(crate::exec::Header::function)
     }
 
     /// `CACHED_PTR(num)`: what the runtime cache of the op array `frame`
@@ -1130,19 +1226,29 @@ impl Request {
         let Some(state) = self.frame_at(frame) else {
             return exec::Cached::Unprimed;
         };
-        let header = state.header();
-        let cached = self
-            .map
-            .get(header.runtime_cache())
-            .map_or(exec::Cached::Unprimed, |cache| cache.get(slot));
+        let cached = (self.map.slot(state.header().cache_base(), slot))
+            .copied()
+            .unwrap_or_default();
         let Some(primed) = cached.primed_from() else {
             return cached;
         };
-        let same = primed.function.is_some()
-            && header.closure.is_none()
-            && header.function == primed.function
-            || primed.scope == self.scope_of(state);
-        if same { cached } else { exec::Cached::Unprimed }
+        if self.reads_back(state, primed) {
+            cached
+        } else {
+            exec::Cached::Unprimed
+        }
+    }
+
+    /// Whether `state` reads back a slot written from `primed`: a frame
+    /// of the function that wrote it, no closure's, or one of the scope
+    /// it was written from.
+    #[inline(always)] // part of every scoped slot's hit path
+    fn reads_back(&self, state: exec::FrameAt<'_>, primed: exec::PrimedFrom) -> bool {
+        let header = state.header();
+        primed.function.is_some()
+            && header.closure().is_none()
+            && header.function() == primed.function
+            || primed.scope == self.scope_of(state)
     }
 
     /// `CACHE_PTR(num, ptr)` for a slot whose answer the access rule
@@ -1167,8 +1273,8 @@ impl Request {
             function: self
                 .vm
                 .at(frame)
-                .filter(|header| header.closure.is_none())
-                .and_then(|header| header.function),
+                .filter(|header| header.closure().is_none())
+                .and_then(crate::exec::Header::function),
             scope: self.frame_scope(frame),
         }
     }
@@ -1176,25 +1282,44 @@ impl Request {
     /// `CACHED_PTR(num) == ce ? CACHED_PTR(num + sizeof(void *)) : NULL`
     /// for a method call's pair (`Z/Zend/zend_vm_def.h:3671`, `:3779`):
     /// the callee [`exec::Cached::ClassAndCallee`] at `slot` holds, with
-    /// whether it takes `$this`, where it holds `class` and `frame`
-    /// reads it back ([`Request::cached_in_scope`]). None otherwise,
-    /// which is the pass that looks the method up.
-    #[inline]
+    /// whether it takes `$this`, where it holds `class`, or any class
+    /// where `class` is none, which an `INIT_STATIC_METHOD_CALL` naming
+    /// its class by a constant passes, and `frame` reads it back
+    /// ([`Request::cached_in_scope`]); and the push the slot after it
+    /// keeps for that callee, php's `fbc` slot. Both are read in place.
+    /// None otherwise, which is the pass that looks the method up.
+    #[inline(always)] // the hit path of both method INITs, which an outlined call costs a prologue
     pub(crate) fn cached_callee(
         &self,
         frame: FrameRef,
         slot: CacheSlot,
-        class: crate::api::values::ClassId,
-    ) -> Option<(Function, bool)> {
-        match self.cached_in_scope(frame, slot) {
-            exec::Cached::ClassAndCallee {
-                class: held,
-                function,
-                instance,
-                ..
-            } if held == class => Some((function, instance)),
-            _ => None,
+        class: Option<crate::api::values::ClassId>,
+    ) -> Option<exec::MethodCallee> {
+        let state = self.frame_at(frame)?;
+        let base = state.header().cache_base();
+        let &exec::Cached::ClassAndCallee {
+            class: held,
+            primed,
+            function,
+            instance,
+            ..
+        } = self.map.slot(base, slot)?
+        else {
+            return None;
+        };
+        if class.is_some_and(|class| class != held) || !self.reads_back(state, primed) {
+            return None;
         }
+        let push = match self.map.slot(base, exec::callee_slot(slot)) {
+            Some(&exec::Cached::Call(call)) if call.function == function => Some(call),
+            _ => None,
+        };
+        Some(exec::MethodCallee {
+            class: held,
+            function,
+            instance,
+            push,
+        })
     }
 
     /// `CACHE_POLYMORPHIC_PTR(num, ce, fbc)` (`Z/Zend/zend_vm_def.h:3695`,
@@ -1222,8 +1347,11 @@ impl Request {
     /// (`ZEND_FETCH_OBJ_R`, `ZEND_ASSIGN_OBJ`): where objects of `class`
     /// hold the property the fetch at `slot` placed on an earlier pass,
     /// where `frame` is one the placement holds for
-    /// ([`exec::Cached::Property`]) and no write names its own scope;
-    /// none otherwise, and the fetch places the name.
+    /// ([`exec::Cached::Property`]): a frame of the function that placed
+    /// it, no closure's, or one of the scope it was placed from, a
+    /// closure's among them, as [`Request::cached_in_scope`] reads a slot
+    /// back; and no write names its own scope. None otherwise, and the
+    /// fetch places the name.
     pub(crate) fn cached_property(
         &self,
         frame: FrameRef,
@@ -1236,15 +1364,14 @@ impl Request {
             function,
             scope,
             offset,
-        }) = self.map.get(header.runtime_cache())?.get(slot)
+        }) = self.map.slot(header.cache_base(), slot).copied()?
         else {
             return None;
         };
         let same = held == class
-            && header.closure.is_none()
-            && header.function == function
             && !self.fakes_scope()
-            && (function.is_some() || self.frame_scope(frame) == scope);
+            && (function.is_some() && header.closure().is_none() && header.function() == function
+                || self.frame_scope(frame) == scope);
         same.then_some(offset)
     }
 
@@ -1252,8 +1379,28 @@ impl Request {
     /// fetch at `slot` in `frame`: where `name` is placed on objects of
     /// `object`'s class written into the runtime cache, where
     /// [`Request::cacheable_offset`] answers and the scope it was placed
-    /// from is the frame's own. A closure's frame is never written for,
-    /// since one op array serves closures bound to many scopes.
+    /// from is the frame's own. A closure's frame is written for as php
+    /// writes into the cache `zend_create_closure` gave the closure
+    /// (`Z/Zend/zend_closures.c:794`), with no function, so the place
+    /// is read back by a frame of the scope it was placed from
+    /// ([`Request::cached_property`]), whatever the closure is bound to:
+    ///
+    /// ```php
+    /// class A { private $p = 'A'; } class A2 extends A { public $p = 'a2'; } class B { private $p = 'B'; public $q = 'q'; }
+    /// $get = function () { return $this->p; };
+    /// $put = function ($v) { $this->q = $v; return $this->q; };
+    /// $a = Closure::bind($get, new A, A::class); $b = Closure::bind($get, new B, B::class);
+    /// $c = Closure::bind($get, new A2, A::class); $d = Closure::bind($get, new A2, null);
+    /// $u = Closure::bind($get, new B, null);
+    /// for ($i = 0; $i < 2; $i++) {
+    ///     echo $a(), $b(), $c(), $d(), $a(), Closure::bind($put, new B, null)($i), "|";
+    ///     try { echo $u(); } catch (Error $e) { echo $e->getMessage(), "|"; }
+    /// }
+    /// echo "\n";
+    /// ```
+    /// ```expect
+    /// ABAa2A0|Cannot access private property B::$p|ABAa2A1|Cannot access private property B::$p|
+    /// ```
     pub(crate) fn prime_property(
         &mut self,
         frame: FrameRef,
@@ -1261,10 +1408,10 @@ impl Request {
         object: PhpObject,
         name: &[u8],
     ) {
-        let Some(header) = self.vm.at(frame).filter(|header| header.closure.is_none()) else {
+        let Some(header) = self.vm.at(frame) else {
             return;
         };
-        let function = header.function;
+        let function = header.function().filter(|_| header.closure().is_none());
         let scope = self.frame_scope(frame);
         if self.property_scope() != scope {
             return;
@@ -1381,14 +1528,19 @@ impl Request {
     /// ```
     #[inline(always)] // the push of every INIT's slow path, its header moved, not copied
     pub(crate) fn push_call(&mut self, header: exec::Header) -> Result<FrameRef, Fatal> {
-        let Some((room, header)) = self.laid_call(header) else {
+        let Some((room, mut header)) = self.laid_call(header) else {
             return Err(Fatal::error("InternalError: a call pushed with no callee"));
         };
         if header.info.building()
-            && header.closure.is_none()
-            && let Some(function) = header.function
+            && header.closure().is_none()
+            && let Some(function) = header.function()
+            && let Some(base) = self.init_func_run_time_cache(function)?
         {
-            self.init_func_run_time_cache(function)?;
+            // Where the cache it laid or found stands, which the call's
+            // activation reads again, written with the push, so the
+            // header compiled code copies for the same call is this one
+            // (`tier::call_image`).
+            header.set_cache_base(base);
         }
         self.push_room(room, header)
     }
@@ -1400,92 +1552,98 @@ impl Request {
     /// Compiled code that pushes the same call in place copies this header
     /// (`tier::call_image`).
     pub(crate) fn laid_call(&self, mut header: exec::Header) -> Option<(usize, exec::Header)> {
-        let function = header.function?;
+        let function = header.function()?;
         let (room, callee, sent) = self.call_room(function, header.num_args);
         header.callee = callee;
         header.info.join(sent);
         Some((room, header))
     }
 
-    /// The call of the frameless native `function` over `operands`,
-    /// `FRAMELESS_ICALL_*`'s, laid down being served: php's
-    /// full call where the native is observed
-    /// ([`crate::observer::frameless_observed`]), on the VM stack as
-    /// [`Request::push_call`] pushes it, and any other off the stack's
-    /// pages ([`php_heap::VmStack::push_frameless`]), since php serves it
-    /// over no frame and it takes no room php's call does not.
-    /// An observed frameless native's call takes one slot per operand
-    /// and the observer's, as [`Request::call_room`] sizes any native's
-    /// call.
-    #[inline(always)] // the one call site is the frameless handler's
-    pub(crate) fn push_frameless(
+    /// `ZEND_FRAMELESS_ICALL_*`'s call of the arity's own entry, php's
+    /// `zflf_*` handler, over `operands` as the handler read them, with
+    /// no call record: what the native reads of the call it serves is
+    /// read off the caller's opline ([`Request::frameless_serving`]), as
+    /// `zend_active_function_ex` reads it. What a coercion made beside an
+    /// operand is the call's until the entry returns, php's `str_tmp`
+    /// that `Z_FLF_PARAM_FREE_STR` frees at the body's end
+    /// ([`Request::replace_argument`]), and a throwable a stream op kept
+    /// is raised as it returns, as [`Request::serve_entry`] raises it.
+    #[inline(always)] // the frameless handler's hot path
+    pub(crate) fn serve_frameless(
+        &mut self,
+        function: Function,
+        entry: crate::api::__private::Frameless,
+        operands: &[php_heap::Zval],
+    ) -> Result<Value, Thrown> {
+        use crate::api::__private::Frameless;
+        let made = self.calls_coerced();
+        #[cfg(debug_assertions)]
+        let outer = self
+            .function_origin(function)
+            .map(|extension| self.heap.set_origin(extension.origin()));
+        let served = match (entry, operands) {
+            (Frameless::Zero(entry), &[]) => entry(self, &[]),
+            (Frameless::One(entry), &[a]) => entry(self, &[Value::of_zval(a)]),
+            (Frameless::Two(entry), &[a, b]) => entry(self, &[a, b].map(Value::of_zval)),
+            (Frameless::Three(entry), &[a, b, c]) => entry(self, &[a, b, c].map(Value::of_zval)),
+            _ => Err(crate::api::raising::fatal(
+                self,
+                "InternalError: a frameless call of another arity than its entry's",
+            )),
+        };
+        #[cfg(debug_assertions)]
+        if let Some(outer) = outer {
+            self.heap.set_origin(outer);
+        }
+        // The origin a debug build tags allocations with is all
+        // `function` names here.
+        #[cfg(not(debug_assertions))]
+        let _ = function;
+        self.release_coerced(made);
+        let served = served.map(crate::api::values::Owner::hand_on);
+        let Some(deferred) = self.stream_thrown.take() else {
+            return served;
+        };
+        match served {
+            Ok(value) => {
+                self.release(value);
+                Err(deferred)
+            }
+            Err(thrown) => Err(deferred.chain(self, thrown)),
+        }
+    }
+
+    /// `zend_frameless_observed_call` (`Z/Zend/zend_execute.c:1577-1597`):
+    /// a frameless call of a native an observer watches is the framed
+    /// entry's full call, its operands copied into a call laid down on
+    /// the VM stack as [`Request::push_call`] lays one, served as
+    /// `DO_ICALL` serves it, observer and all, and popped, which gives
+    /// the copies up. The call takes one slot per operand and the
+    /// observer's, as [`Request::call_room`] sizes any native's call.
+    pub(crate) fn serve_frameless_observed(
         &mut self,
         function: Function,
         operands: &[php_heap::Zval],
-    ) -> Result<FrameRef, Fatal> {
+    ) -> Result<Result<Value, Thrown>, Fatal> {
         let count = u32::try_from(operands.len()).unwrap_or(u32::MAX);
         let mut header = exec::Header::call(function, count);
         header.info.set_serving();
-        header.info.set_frameless(true);
-        if !crate::observer::frameless_observed(self, function) {
-            return self.vm.push_frameless(operands, header);
-        }
         let call = self.push_room(self.native_room(count) as usize, header)?;
         let slots = self
             .vm
             .stack
             .frame_mut(call)
             .map(exec::HeapFrame::slots_mut);
+        // `ZVAL_COPY_DEREF` of each operand, read through already.
         if let Some(slots) = slots.and_then(|slots| slots.get_mut(..operands.len())) {
-            slots.copy_from_slice(operands);
-        }
-        Ok(call)
-    }
-
-    /// The frameless call on top popped ([`Request::push_frameless`]),
-    /// the operands it owns, the bits of `owned`, given up as php's
-    /// `FREE_OP*` after the frameless handler frees them,
-    /// `zval_ptr_dtor_nogc`, once the call is on no chain; an operand
-    /// it borrowed is the caller's ([`exec::frameless_operand`]). A
-    /// frameless call is pushed with no receiver and no closure, and an
-    /// annex only where an argument's coercion kept a value there; a
-    /// record carrying one is popped as any call is
-    /// ([`Request::pop_call`]), its borrowed operands left out.
-    #[inline(always)] // the one call site is the frameless handler's
-    pub(crate) fn pop_frameless(&mut self, owned: u8) {
-        /// `ZEND_FRAMELESS_ICALL_3`'s, the most operands a frameless
-        /// call passes.
-        const OPERANDS: usize = 3;
-        let call = self.vm.stack.current();
-        let Some(frame) = self.vm.stack.frame_mut(call) else {
-            return;
-        };
-        let header = frame.header_mut();
-        debug_assert!(header.closure.is_none() && header.receiver().is_none());
-        header.info.set_leaving(true);
-        let carries = header.annex.is_some();
-        let slots = frame.slots_mut();
-        if carries {
-            for (at, slot) in slots.iter_mut().enumerate() {
-                if owned >> at & 1 == 0 {
-                    *slot = php_heap::Zval::UNDEF;
-                }
-            }
-            return self.pop_call();
-        }
-        if owned != 0 {
-            let mut operands = [php_heap::Zval::UNDEF; OPERANDS];
-            let count = slots.len().min(OPERANDS);
-            for (at, (operand, slot)) in operands.iter_mut().zip(slots).enumerate() {
-                if owned >> at & 1 != 0 {
-                    *operand = *slot;
-                }
-            }
-            for &operand in operands.get(..count).unwrap_or_default() {
-                self.release_zval_nogc(operand);
+            for (slot, &operand) in slots.iter_mut().zip(operands) {
+                operand.addref();
+                *slot = operand;
             }
         }
-        self.vm.stack.pop_frame(&mut self.heap);
+        let served = self.serve_native(function, crate::observer::OnThrow::ReturnValue);
+        self.pop_call();
+        Ok(served)
     }
 
     /// A call pushed with `room` slots past its header, its record named,
@@ -1521,7 +1679,7 @@ impl Request {
     #[cold]
     #[inline(never)]
     fn lay_callee(&mut self, header: &mut exec::Header) {
-        if let Some(function) = header.function {
+        if let Some(function) = header.function() {
             header.callee = self.callee_at(function);
         }
     }
@@ -1571,7 +1729,7 @@ impl Request {
     /// The [`FrameShape`](crate::api::request::FrameShape) of the user
     /// function `call` names; none for a call to anything else.
     pub(crate) fn call_shape(&self, call: FrameRef) -> Option<crate::api::request::FrameShape> {
-        Some(self.user_function(self.vm.at(call)?.function?)?.shape)
+        Some(self.user_function(self.vm.at(call)?.function()?)?.shape)
     }
 
     /// The innermost user frame of the running stack ([`Vm::innermost_at`]).
@@ -1615,7 +1773,7 @@ impl Request {
     /// The callee of the call being built, which a `SEND_*_EX` reads the
     /// parameter's by-reference bit off (`ARG_MUST_BE_SENT_BY_REF`).
     pub(crate) fn building_call_function(&self) -> Option<Function> {
-        self.vm.building()?.function
+        self.vm.building()?.function()
     }
 
     /// The call being served where it is a native's ([`Vm::serving_at`]):
@@ -1639,7 +1797,7 @@ impl Request {
         let header = self.vm.at_mut(call)?;
         header.info.set_serving();
         header.info.set_return_used(return_used);
-        Some((call, header.function?))
+        Some((call, header.function()?))
     }
 
     /// `DO_UCALL`, and `DO_FCALL` or `DO_FCALL_BY_NAME` where `flagged`,
@@ -1729,7 +1887,7 @@ impl Request {
                 laid_entry_holds(
                     header,
                     top.len(),
-                    user_in(user_functions, arena, header.function?),
+                    user_in(user_functions, arena, header.function()?),
                     map
                 ),
                 "a call whose INIT laid its entry no longer holds what the activation would write"
@@ -1751,16 +1909,17 @@ impl Request {
         if !header.info.plain_entry() {
             return self.enter_flagged(returns_to, (caller, at), flagged);
         }
-        let function = header.function?;
+        let function = header.function()?;
         let passed = header.num_args;
         let shape = user_in(user_functions, arena, function)?.shape;
         // The `INIT` found the entry plain ([`exec::CallInfo::plain_entry`]):
         // the function's own cache, and no attribute to raise.
         let cache = shape.cache;
-        if passed > shape.parameters || top.len() < shape.slots as usize || !map.laid(cache) {
+        let base = map.base(cache)?;
+        if passed > shape.parameters || top.len() < shape.slots as usize {
             return None;
         }
-        entered_words((top, from), (caller, at), returns_to, shape, cache);
+        entered_words((top, from), (caller, at), returns_to, shape, (cache, base));
         Some(self.entered_top())
     }
 
@@ -1790,7 +1949,7 @@ impl Request {
     ) -> Option<FrameRef> {
         let (call, top) = self.vm.stack.top()?;
         let header = top.header();
-        let function = header.function?;
+        let function = header.function()?;
         let passed = header.num_args;
         let len = top.len();
         let user = self.user_function(function)?;
@@ -1799,13 +1958,14 @@ impl Request {
             return None;
         }
         let cache = self
-            .closure_own_cache(header.closure)
+            .closure_own_cache(header.closure())
             .unwrap_or(shape.cache);
-        if passed > shape.parameters || len < shape.slots as usize || !self.map.laid(cache) {
+        let base = self.map.base(cache)?;
+        if passed > shape.parameters || len < shape.slots as usize {
             return None;
         }
         let frames = self.vm.stack.top_and_frame_mut(caller)?;
-        entered_words(frames, (caller, at), returns_to, shape, cache);
+        entered_words(frames, (caller, at), returns_to, shape, (cache, base));
         crate::observer::call(self, call);
         Some(call)
     }
@@ -1832,7 +1992,7 @@ impl Request {
     ) -> Result<exec::Activated, Fatal> {
         let (num_args, len, closure) = self.vm.stack.frame(call).map_or((0, 0, None), |frame| {
             let header = frame.header();
-            (header.num_args, frame.len(), header.closure)
+            (header.num_args, frame.len(), header.closure())
         });
         // A closure with a cache of its own reads it in place of its
         // function's (`zend_create_closure_ex`).
@@ -1854,9 +2014,17 @@ impl Request {
                 .stack
                 .grow_top(&mut self.heap, call, own + extra - len)?;
         }
+        // The cache laid before the header reads where it stands, as
+        // `zend_init_func_execute_data` lays it before
+        // `i_init_func_execute_data` reads it.
+        let base = if own_cache {
+            exec::lay_own_cache(&mut self.map, cache, shape.cache_size.slots)
+        } else {
+            exec::lay_runtime_cache(&mut self.map, &mut self.heap, cache, shape.cache_size)?
+        };
         if let Some(frame) = self.vm.stack.frame_mut(call) {
             let laid = frame.header_mut();
-            laid.activate(cache, opline, extra > 0);
+            laid.activate((cache, base), opline, extra > 0);
             laid.set_returns_to(returns_to);
             laid.set_caller(caller);
             let slots = frame.slots_mut();
@@ -1866,11 +2034,6 @@ impl Request {
                     left.fill(Zval::UNDEF);
                 }
             }
-        }
-        if own_cache {
-            exec::lay_own_cache(&mut self.map, cache, shape.cache_size.slots);
-        } else {
-            exec::lay_runtime_cache(&mut self.map, &mut self.heap, cache, shape.cache_size)?;
         }
         crate::observer::call(self, call);
         Ok(exec::Activated {
@@ -1951,8 +2114,8 @@ impl Request {
         // one, as `zend_leave_helper` destroys it; a top-level file's once
         // `zend_execute` has returned.
         let top = header.info.top_code();
-        let statics = (header.function.is_none())
-            .then(|| self.leaving_statics(header.annex))
+        let statics = (header.function().is_none())
+            .then(|| self.leaving_statics(header.annex()))
             .flatten();
         if let Some(of) = statics.filter(|_| !top) {
             self.destroy_file_statics(of);
@@ -1966,8 +2129,8 @@ impl Request {
         header.info.set_leaving(true);
         let receiver = header.receiver();
         header.set_receiver(None);
-        let closure = header.closure.take();
-        let (function, annex, num_args) = (header.function, header.annex, header.num_args);
+        let closure = header.take_closure();
+        let (function, annex, num_args) = (header.function(), header.annex(), header.num_args);
         if !self.bailout {
             self.release_frame(frame, function, annex, num_args, receiver, closure);
         }
@@ -2012,7 +2175,7 @@ impl Request {
     /// are none unless a serving left its frames.
     pub(crate) fn drop_frames(&mut self, dropped: Vec<exec::Header>) {
         for header in dropped {
-            if let Some(annex) = header.annex.and_then(|id| self.annexes.take(id)) {
+            if let Some(annex) = header.annex().and_then(|id| self.annexes.take(id)) {
                 self.give_up_annex(annex, false);
             }
         }
@@ -2317,14 +2480,18 @@ impl Request {
         let call = self.vm.stack.current();
         // `EG(current_execute_data) = execute_data` before the arguments
         // are freed: the call is on no chain from here.
-        let Some(header) = self.vm.at_mut(call) else {
+        let Some(state) = self.vm.stack.frame_mut(call) else {
             return;
         };
+        let header = state.header_mut();
         header.info.set_leaving(true);
-        if header.annex.is_some() || header.closure.is_some() || header.receiver().is_some() {
+        if header.annex().is_some() || header.closure().is_some() || header.receiver().is_some() {
             return self.pop_carrying(call);
         }
-        self.release_arguments(call);
+        // Read in the same look where no argument counts an owner.
+        if state.slots().iter().any(|z| z.is_refcounted()) {
+            self.release_arguments(call);
+        }
         self.vm.stack.pop_frame(&mut self.heap);
     }
 
@@ -2336,7 +2503,7 @@ impl Request {
     /// `zend_vm_stack_free_call_frame` then frees the frame alone. None
     /// for a call made through no closure.
     pub(crate) fn take_call_closure(&mut self, call: FrameRef) -> Option<PhpObject> {
-        self.vm.at_mut(call)?.closure.take()
+        self.vm.at_mut(call)?.take_closure()
     }
 
     /// [`Request::pop_call`] of a call that carries a receiver, a
@@ -2348,18 +2515,11 @@ impl Request {
         };
         let receiver = header.receiver();
         header.set_receiver(None);
-        let closure = header.closure.take();
-        let mut annex = header.annex.take().and_then(|id| self.annexes.take(id));
+        let closure = header.take_closure();
+        let mut annex = header.take_annex().and_then(|id| self.annexes.take(id));
         // `zend_vm_stack_free_args`, whose `zval_ptr_dtor_nogc` makes no
         // argument a possible root; the receiver and the closure after
         // them are `OBJ_RELEASE`, which does.
-        for value in annex
-            .as_mut()
-            .map(|annex| std::mem::take(&mut annex.coerced))
-            .unwrap_or_default()
-        {
-            self.release_nogc(value);
-        }
         self.release_arguments(call);
         if let Some(trampoline) = annex.as_mut().and_then(|annex| annex.trampoline.take()) {
             self.release(Value::string(trampoline.name));
@@ -2458,15 +2618,56 @@ fn kept_by_another(z: Zval) -> bool {
 }
 
 /// Whether a leaving frame's receiver and closure, where it has them, are
-/// given up with no destructor due: lent, or with another owner standing
-/// ([`kept_by_another`]).
+/// given up with no destructor due ([`receiver_kept`], [`kept_by_another`]).
 #[inline(never)]
 fn held_kept(receiver: Option<exec::Receiver>, closure: Option<PhpObject>) -> bool {
-    let receiver = match receiver {
-        None | Some(exec::Receiver::Lent(_)) => true,
-        Some(exec::Receiver::Owned(object)) => kept_by_another(object.as_value().to_zval()),
-    };
-    receiver && closure.is_none_or(|closure| kept_by_another(closure.as_value().to_zval()))
+    receiver.is_none_or(receiver_kept)
+        && closure.is_none_or(|closure| kept_by_another(closure.as_value().to_zval()))
+}
+
+/// Whether a leaving frame's receiver is given up with no destructor
+/// due: lent, or owned with another owner standing, read off the
+/// object's own header.
+#[inline(always)] // part of the plain leave's first test
+fn receiver_kept(receiver: exec::Receiver) -> bool {
+    match receiver {
+        exec::Receiver::Lent(_) => true,
+        exec::Receiver::Owned(object) => object.heap().refcount() > 1,
+    }
+}
+
+/// A receiver [`receiver_kept`] found given up with no destructor due,
+/// given up in `heap`: one owner, `OBJ_RELEASE` with the object a possible
+/// root as php's leaves it ([`php_heap::Heap::release_kept`]), or a lent
+/// one's pin let go. False, with nothing given up, where the collector's
+/// buffer must be collected first.
+///
+/// A method's frame that owns nothing else gives its receiver up this
+/// way, owned off a CV or lent to `$this->m()`, and the object a cycle
+/// keeps is the one possible root php's `OBJ_RELEASE` leaves it, however
+/// many calls gave it up; a receiver whose last owner the frame holds
+/// is destroyed on the owning leave, before the call's value is read:
+///
+/// ```php
+/// class N { public $self; function __construct(public $n) {} function m() { return $this->n; } function own() { return $this->m(); } function __destruct() { echo "[{$this->n}]"; } }
+/// $o = new N(1); $o->self = $o; $s = 0;
+/// for ($i = 0; $i < 3; $i++) { $s += $o->m() + $o->own(); }
+/// echo $s, " ", gc_status()['roots'], " ", (new N(2))->m(), "\n";
+/// unset($o); echo gc_collect_cycles(), "\n";
+/// ```
+/// ```expect
+/// 6 1 [2]2
+/// [1]1
+/// ```
+#[inline(always)] // part of the plain leave of a method's frame
+fn let_go_kept(heap: &mut php_heap::Heap, receiver: exec::Receiver) -> bool {
+    match receiver {
+        exec::Receiver::Owned(object) => heap.release_kept(object.as_value().to_zval()),
+        exec::Receiver::Lent(object) => {
+            heap.unpin(object.heap());
+            true
+        }
+    }
 }
 
 /// Whether every owner among `cvs` is given up with no destructor due: a
@@ -2476,6 +2677,18 @@ fn held_kept(receiver: Option<exec::Receiver>, closure: Option<PhpObject>) -> bo
 fn owners_kept(cvs: &[Zval]) -> bool {
     cvs.iter()
         .all(|z| !z.is_refcounted() || z.kind() == ZvalType::String || kept_by_another(*z))
+}
+
+/// What a frame [`Request::leave_plainly`] gives up besides its CVs,
+/// read off its call-info word and header once: nothing; a receiver
+/// held alone, lent or with another owner standing, which the held leave
+/// gives up ([`Request::leave_held`]); or a receiver and a closure the
+/// owning leave gives up.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gives {
+    Nothing,
+    Receiver,
+    Owning,
 }
 
 /// A frame [`Request::leave_plainly`] found leaves with no destructor
@@ -2546,12 +2759,20 @@ impl Request {
         self.map.laid(at)
     }
 
+    /// `RUN_TIME_CACHE(op_array)` as an activation reads it: where the
+    /// cache at `at` stands, none where it is not laid down
+    /// ([`exec::RuntimeCaches::base`]).
+    pub(crate) fn cache_base(&self, at: exec::CacheAt) -> Option<exec::CacheBase> {
+        self.map.base(at)
+    }
+
     /// `init_func_run_time_cache` (`Z/Zend/zend_execute.c:4452`): the
     /// runtime cache of `function`, where it is a user function, laid
     /// down where the request has not yet ([`exec::lay_runtime_cache`]),
     /// as php lays it at the `INIT_*` that pushes its call and at the
-    /// lookup of it by name (`zend_fetch_function`). The `Err` is the
-    /// memory limit's fatal, with nothing laid down.
+    /// lookup of it by name (`zend_fetch_function`): where the cache
+    /// stands, none for a native. The `Err` is the memory limit's fatal,
+    /// with nothing laid down.
     ///
     /// So a closure made over a function before its first call shares
     /// its cache, by `g(...)`, `Closure::fromCallable`, a reflector and
@@ -2614,11 +2835,15 @@ impl Request {
     /// 384 384 384 384 384
     /// ```
     #[inline(always)] // every INIT's push: the function's shape, then whether its cache is laid
-    pub(crate) fn init_func_run_time_cache(&mut self, function: Function) -> Result<(), Fatal> {
+    pub(crate) fn init_func_run_time_cache(
+        &mut self,
+        function: Function,
+    ) -> Result<Option<exec::CacheBase>, Fatal> {
         let Some(shape) = self.user_function(function).map(|user| user.shape) else {
-            return Ok(());
+            return Ok(None);
         };
         exec::lay_runtime_cache(&mut self.map, &mut self.heap, shape.cache, shape.cache_size)
+            .map(Some)
     }
 
     /// `zend_fetch_function` (`Z/Zend/zend_execute.c:4468`): the function
@@ -2642,7 +2867,7 @@ impl Request {
         at: exec::CacheAt,
         slot: CacheSlot,
     ) -> Option<std::ptr::NonNull<exec::Cached>> {
-        self.map.get(at).and_then(|cache| cache.place_of(slot))
+        self.map.place_of(at, slot)
     }
 
     /// The scope the cache at `at` was laid down for by the first closure
@@ -2699,7 +2924,7 @@ fn laid_entry_holds(
     shape.sent.plain_entry()
         && header.num_args <= shape.parameters
         && len >= shape.slots as usize
-        && map.laid(shape.cache)
+        && map.base(shape.cache) == Some(header.cache_base())
         && header.runtime_cache() == shape.cache
         && header.opline == opline.unwrap_or(0)
 }
@@ -2718,7 +2943,7 @@ fn entered_words(
     (caller, at): (FrameRef, u32),
     returns_to: Option<u32>,
     shape: super::FrameShape,
-    cache: exec::CacheAt,
+    cache: (exec::CacheAt, exec::CacheBase),
 ) {
     from.header_mut().opline = at;
     let laid = top.header_mut();

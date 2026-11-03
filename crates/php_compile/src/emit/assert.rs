@@ -125,7 +125,7 @@ impl Emit<'_> {
                 .functions
                 .rows()
                 .get(index)
-                .map(|decl| decl.parameters.as_slice())
+                .map(|decl| &decl.parameters[..])
                 .unwrap_or_default();
             let callee = Callee::of(parameters);
             let plan = Plan::of(self.arena, &arguments, Some(&callee));

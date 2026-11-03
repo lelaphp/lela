@@ -424,6 +424,93 @@ pub fn foreach_guarded<B>(
     walked.map(Guarded::Walked)
 }
 
+/// [`foreach`] over a table most of whose rows a native answers for
+/// without code of the program, as `_php_search_array` compares two
+/// strings: each row is read first by `read` under a borrow of the
+/// request, a view of its key and of its value as [`rows`] reads them,
+/// and `read` answers `Some` for a row it can answer, `Continue` to go
+/// on or `Break` to end the walk with what it answers, or `None` for a
+/// row whose answer can reach code of the program, which is then lent
+/// to `body` as [`foreach`] lends it. A row `read` answers is neither
+/// held nor pinned, since nothing runs while it is read, as php's
+/// `ZEND_HASH_FOREACH` holds nothing; up to the first row lent the walk
+/// takes nothing, and from there it holds the table as `hold` says, and
+/// knows it stands, as [`foreach`] does, so each step after costs the
+/// test of the walk's iterator under [`Hold::None`]. The rows are the
+/// ones that stood as the walk began, read as they stand when the walk
+/// reaches them. The answer is what `read` or `body` broke with, `None`
+/// past the last row.
+///
+/// `in_array` and `array_search` read every pair of two scalars, and
+/// lend a row where `==` may serve `__toString`, so a row before the
+/// first object is never lent and one after the match is never
+/// reached:
+///
+/// ```php
+/// class S { function __toString(): string { echo "S\n"; return 's'; } }
+/// var_dump(array_search('b', ['a', 'b', new S]), array_search('s', ['a', new S, 's']), in_array(new S, ['t', 's']));
+/// ```
+/// ```expect
+/// S
+/// S
+/// S
+/// int(1)
+/// int(1)
+/// bool(true)
+/// ```
+pub fn foreach_read<B>(
+    req: &mut Request,
+    table: impl Into<Table>,
+    hold: Hold,
+    mut read: impl FnMut(&Request, &Key, &Value) -> Option<ControlFlow<B>>,
+    mut body: impl FnMut(&mut Request, &mut Row) -> Step<B>,
+) -> Result<Option<B>, Thrown> {
+    let table = table.into();
+    let end = table.end();
+    let watched = table.array().heap();
+    let mut pos = 0;
+    // Taken at the first row lent, before its body runs anything.
+    let mut standing: Option<Standing> = None;
+    let walked = loop {
+        if let Some(taken) = &standing
+            && !taken.watch().stands(req, watched)
+        {
+            break Ok(None);
+        }
+        let Some((found, key, value, at)) = table.held_from(pos, end) else {
+            break Ok(None);
+        };
+        pos = found.saturating_add(1);
+        match read(req, &key, &Value::of_slot(value)) {
+            Some(ControlFlow::Continue(())) => continue,
+            Some(ControlFlow::Break(broke)) => break Ok(Some(broke)),
+            None => {}
+        }
+        let watch = if let Some(taken) = &standing {
+            taken.watch()
+        } else {
+            table.pin();
+            let taken = Standing::taken(req, &table, hold);
+            let watch = taken.watch();
+            standing = Some(taken);
+            watch
+        };
+        let mut row = Row::lent(req, (key, value, at), watch);
+        let step = body(req, &mut row);
+        row.let_go(req);
+        match step {
+            Ok(ControlFlow::Continue(())) => {}
+            Ok(ControlFlow::Break(broke)) => break Ok(Some(broke)),
+            Err(thrown) => break Err(thrown),
+        }
+    };
+    if let Some(taken) = standing {
+        taken.given_up(req);
+        table.unpin(req);
+    }
+    walked
+}
+
 /// php's walk over the table `zend_get_properties_for` handed a reader
 /// ([`PhpObject::properties_for`]), as `print_hash` walks it with
 /// `ZEND_HASH_FOREACH_KEY_VAL_IND`: a [`foreach`] walk, each row lent to
@@ -831,15 +918,9 @@ fn next_lent(
     };
     let (found, key, value, at, uninitialized) = found?;
     *pos = found.saturating_add(1);
-    let lent = Lent::of(watch, at);
-    Some(Row {
-        key: Keep::lent(req, key, lent),
-        value: Keep::lent(req, Value::of_slot(value), lent),
-        at,
-        watch,
-        uninitialized: uninitialized.map(String::into_boxed_str),
-        hook: None,
-    })
+    let mut row = Row::lent(req, (key, value, at), watch);
+    row.uninitialized = uninitialized.map(String::into_boxed_str);
+    Some(row)
 }
 
 /// How a callback walk keeps the rows it lends for their step: php's
@@ -1055,6 +1136,21 @@ enum At {
 }
 
 impl Row {
+    /// The row standing `at`, its key and value kept for the step as
+    /// [`Lent::of`] says for a walk that knows its table stands by
+    /// `watch`.
+    fn lent(req: &mut Request, (key, value, at): (Key, Zval, At), watch: Watch) -> Row {
+        let lent = Lent::of(watch, at);
+        Row {
+            key: Keep::lent(req, key, lent),
+            value: Keep::lent(req, Value::of_slot(value), lent),
+            at,
+            watch,
+            uninitialized: None,
+            hook: None,
+        }
+    }
+
     /// The row's key, as the table held it.
     #[must_use]
     pub fn key(&self) -> &Key {

@@ -519,13 +519,143 @@ pub struct ZendExtension {
 }
 
 pub(crate) use crate::api::__private::Entry;
+use crate::api::__private::{
+    NativeClass, NativeClassConst, NativeConst, NativeFunction, NativeMethod, NativeProperty,
+};
 /// Builds one extension's request state at request start.
 pub(crate) type StateBuilder = (TypeId, fn() -> Box<dyn Any + Send>);
 
+/// A native class's static entries, `C`'s as `#[php_class]` laid them
+/// down, which [`ExtensionBuilder::class`] hands to the one function
+/// that registers every native class.
+#[derive(Clone, Copy)]
+pub(crate) struct Natives {
+    name: &'static [u8],
+    header: Option<&'static NativeClass>,
+    constants: &'static [NativeClassConst],
+    properties: &'static [NativeProperty],
+    methods: &'static [NativeMethod],
+}
+
+impl Natives {
+    const fn of<C: Header + Members>() -> Natives {
+        Natives {
+            name: C::NAME,
+            header: C::HEADER,
+            constants: C::CONSTANTS,
+            properties: C::PROPERTIES,
+            methods: C::METHODS,
+        }
+    }
+
+    /// The declaration `header` and the member impl's constants and
+    /// properties make, each list laid at its length, as
+    /// `zend_register_internal_class_ex` and the `zend_declare_*` calls
+    /// after it make it. `reshape` sees the methods in `methods` and
+    /// reshapes them in place ([`ExtensionBuilder::class_reshaped`]).
+    fn declaration(
+        &self,
+        header: &NativeClass,
+        reshape: Option<&mut dyn FnMut(&mut ClassDecl)>,
+        methods: &mut [(MethodDecl, Entry)],
+    ) -> ClassDecl {
+        let mut class = header.declaration();
+        class.constants.reserve_exact(self.constants.len());
+        (class.constants).extend(self.constants.iter().map(NativeClassConst::declaration));
+        (class.properties).reserve_exact(self.properties.len());
+        (class.properties).extend(self.properties.iter().map(NativeProperty::declaration));
+        if let Some(reshape) = reshape {
+            let seen = methods.iter().map(|(method, _)| method.clone()).collect();
+            let header_methods = std::mem::replace(&mut class.methods, seen);
+            reshape(&mut class);
+            let reshaped = std::mem::replace(&mut class.methods, header_methods);
+            for ((method, _), reshaped) in methods.iter_mut().zip(reshaped) {
+                *method = reshaped;
+            }
+        }
+        for property in &mut class.properties {
+            declared_property(property);
+        }
+        class
+    }
+}
+
+/// One native class as an extension registers it, in the order it is
+/// registered: the static entries its attributes laid down, which the
+/// engine builds the declaration from as it links the class into its
+/// table, as a [`FunctionRow`] holds a native's, or a declaration built
+/// where it was registered.
+#[derive(Clone)]
+pub(crate) enum ClassRow {
+    /// [`ExtensionBuilder::class`]: `C`'s entries and its header.
+    Native(&'static Natives, &'static NativeClass),
+    /// [`ExtensionBuilder::classes`], [`ExtensionBuilder::class_with`]
+    /// and [`ExtensionBuilder::class_reshaped`]: built as registered.
+    Built(Box<NativeClassDecl>),
+}
+
+impl ClassRow {
+    /// How many methods the class's entries serve, what the engine lays
+    /// its table of method entries at.
+    pub(crate) fn methods(&self) -> usize {
+        match self {
+            ClassRow::Native(natives, _) => natives.methods.len(),
+            ClassRow::Built(built) => built.1.len(),
+        }
+    }
+
+    /// Whether the class is an enum, whose `cases`, `from` and `tryFrom`
+    /// the engine adds as it links it.
+    pub(crate) fn is_enum(&self) -> bool {
+        let kind = match self {
+            ClassRow::Native(_, header) => header.kind,
+            ClassRow::Built(built) => built.0.kind,
+        };
+        kind == php_unit::decl::ClassKind::Enum
+    }
+
+    /// The declaration, with each method's declaration and entry handed
+    /// to `place` in order, as `zend_register_functions` walks the
+    /// class's entries, beside the class's handler table and its
+    /// `create_object` ([`NativeClassDecl`]).
+    pub(crate) fn declared(
+        self,
+        mut place: impl FnMut(&mut ClassDecl, MethodDecl, Entry),
+    ) -> (
+        ClassDecl,
+        Option<&'static dyn ObjectHandlers>,
+        Option<NativeNew>,
+    ) {
+        match self {
+            ClassRow::Native(natives, header) => {
+                let mut class = natives.declaration(header, None, &mut []);
+                class.methods.reserve_exact(natives.methods.len());
+                for (method, entry) in natives.methods.iter().map(NativeMethod::declaration) {
+                    place(&mut class, method, entry);
+                }
+                let (handlers, new) = match header.objects {
+                    Some((handlers, new)) => (Some(handlers), new),
+                    None => (None, None),
+                };
+                (class, handlers, new)
+            }
+            ClassRow::Built(built) => {
+                let (mut class, methods, handlers, new) = *built;
+                class.methods.reserve_exact(methods.len());
+                for (method, entry) in methods {
+                    place(&mut class, method, entry);
+                }
+                (class, handlers, new)
+            }
+        }
+    }
+}
+
 /// What [`ExtensionBuilder::constants_with`] was handed: the declared
-/// constants rewritten with every value the bundle registered.
+/// constants rewritten in place with every value the bundle registered,
+/// answering the constants it adds after them.
 pub(crate) type ConstantsLink =
-    Arc<dyn Fn(Vec<ConstDecl>, &Keyed<TypeId, Registered>) -> Vec<ConstDecl> + Send + Sync>;
+    Arc<dyn Fn(&mut [ConstDecl], &Keyed<TypeId, Registered>) -> Vec<ConstDecl> + Send + Sync>;
 /// Builds one extension's process state, of the type named beside it,
 /// or refuses to: called at most once per process
 /// ([`crate::process_scope`]).
@@ -1031,15 +1161,51 @@ pub(crate) struct ExtensionEntry {
     pub(crate) info: Option<Info>,
 }
 
+/// A native's entry and its frameless arities' entries, `zif_*` and
+/// the `zflf_*` beside it.
+pub(crate) type FunctionEntries = (Entry, &'static [crate::api::__private::Frameless]);
+
+/// One native function as an extension registers it: the static entry
+/// its attribute laid down and, where [`ExtensionBuilder::function_reshaped`]
+/// registered it, what reshapes the declaration built from it. The
+/// engine builds the declaration as it registers the function.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FunctionRow {
+    pub(crate) native: &'static NativeFunction,
+    pub(crate) reshape: Option<fn(&mut FunctionDecl)>,
+}
+
+impl FunctionRow {
+    pub(crate) fn of(native: &'static NativeFunction) -> FunctionRow {
+        FunctionRow {
+            native,
+            reshape: None,
+        }
+    }
+
+    /// The declaration model, the entry and the frameless entries,
+    /// `zend_register_functions`' one step over an entry.
+    pub(crate) fn declaration(&self) -> (FunctionDecl, FunctionEntries) {
+        let mut declaration = self.native.declaration();
+        if let Some(reshape) = self.reshape {
+            reshape(&mut declaration);
+        }
+        (declaration, (self.native.entry, self.native.frameless))
+    }
+}
+
 /// What one extension declares into the engine's tables, which the
 /// engine's build moves into them row by row, so no declaration is held
 /// twice: its functions, classes and constants, and what it adds to the
 /// classes of others.
 #[derive(Clone, Default)]
 pub(crate) struct Declarations {
-    pub(crate) functions: Vec<(FunctionDecl, Entry)>,
-    pub(crate) classes: Vec<NativeClassDecl>,
-    pub(crate) constants: Vec<ConstDecl>,
+    pub(crate) functions: Vec<FunctionRow>,
+    pub(crate) classes: Vec<ClassRow>,
+    /// What [`ExtensionBuilder::constants`] was handed, each call's
+    /// static entries, which the engine builds its constants table from
+    /// at the length the entries sum to.
+    pub(crate) constants: Vec<&'static [NativeConst]>,
     /// What [`ExtensionBuilder::constants_with`] was handed.
     pub(crate) constants_link: Option<ConstantsLink>,
     /// What [`ExtensionBuilder::class_constants`] was handed: each
@@ -1135,10 +1301,31 @@ pub struct ExtensionBuilder {
 }
 
 impl ExtensionBuilder {
-    /// The natives: each declaration with its entry.
+    /// The natives, each the static entry `#[php_function]` lays down,
+    /// `&[strlen::DECLARED, ..]`, registered in the order listed, as
+    /// `zend_register_functions` walks an entry array.
     #[must_use]
-    pub fn functions(mut self, functions: Vec<(FunctionDecl, Entry)>) -> ExtensionBuilder {
-        self.declarations.functions.extend(functions);
+    pub fn functions(mut self, functions: &'static [NativeFunction]) -> ExtensionBuilder {
+        (self.declarations.functions).extend(functions.iter().map(FunctionRow::of));
+        self
+    }
+
+    /// One native registered after the declaration its entry builds is
+    /// reshaped by what the attribute cannot say and php's stub writes
+    /// by hand: another name for the same body (`ZEND_RAW_FENTRY`, the
+    /// `_` gettext's `gettext` is also registered as), a doc comment
+    /// `@genstubs-expose-comment-block` keeps, a type `gen_stub.php`
+    /// cannot write.
+    #[must_use]
+    pub fn function_reshaped(
+        mut self,
+        function: &'static NativeFunction,
+        reshape: fn(&mut FunctionDecl),
+    ) -> ExtensionBuilder {
+        (self.declarations.functions).push(FunctionRow {
+            native: function,
+            reshape: Some(reshape),
+        });
         self
     }
 
@@ -1156,7 +1343,7 @@ impl ExtensionBuilder {
         self.declarations.classes.extend(
             classes
                 .into_iter()
-                .map(|(decl, methods)| (decl, methods, None, None)),
+                .map(|(decl, methods)| ClassRow::Built(Box::new((decl, methods, None, None)))),
         );
         self
     }
@@ -1175,9 +1362,12 @@ impl ExtensionBuilder {
         methods: Vec<(MethodDecl, Entry)>,
         handlers: &'static dyn ObjectHandlers,
     ) -> ExtensionBuilder {
-        self.declarations
-            .classes
-            .push((class, methods, Some(handlers), None));
+        self.declarations.classes.push(ClassRow::Built(Box::new((
+            class,
+            methods,
+            Some(handlers),
+            None,
+        ))));
         self
     }
 
@@ -1188,7 +1378,7 @@ impl ExtensionBuilder {
     /// what makes a forgotten member impl a build error on this line.
     #[must_use]
     pub fn class<C: Header + Members>(self) -> ExtensionBuilder {
-        self.class_reshaped::<C>(|_| {})
+        self.native_class(const { &Natives::of::<C>() }, None)
     }
 
     /// [`ExtensionBuilder::class`], the declaration then reshaped by
@@ -1206,27 +1396,62 @@ impl ExtensionBuilder {
         self,
         reshape: impl FnOnce(&mut ClassDecl),
     ) -> ExtensionBuilder {
-        let mut class = C::header();
-        let (constants, properties, mut methods) = C::members();
-        class.constants.extend(constants);
-        class.properties.extend(properties);
-        let seen = methods.iter().map(|(method, _)| method.clone()).collect();
-        let header = std::mem::replace(&mut class.methods, seen);
-        reshape(&mut class);
-        let reshaped = std::mem::replace(&mut class.methods, header);
-        for ((method, _), reshaped) in methods.iter_mut().zip(reshaped) {
-            *method = reshaped;
-        }
-        class.properties = class
-            .properties
-            .into_iter()
-            .map(declared_property)
+        let mut reshape = Some(reshape);
+        let mut once = |class: &mut ClassDecl| {
+            if let Some(reshape) = reshape.take() {
+                reshape(class);
+            }
+        };
+        self.native_class(const { &Natives::of::<C>() }, Some(&mut once))
+    }
+
+    /// What [`ExtensionBuilder::class`] and
+    /// [`ExtensionBuilder::class_reshaped`] register, one function over
+    /// the static entries rather than one per class, as php's
+    /// `zend_register_internal_class_ex` is one function every
+    /// `register_class_*` calls.
+    fn native_class(
+        mut self,
+        natives: &'static Natives,
+        reshape: Option<&mut dyn FnMut(&mut ClassDecl)>,
+    ) -> ExtensionBuilder {
+        let Some(header) = natives.header else {
+            let constants = natives.constants.iter().map(NativeClassConst::declaration);
+            let builder = self.class_constants(natives.name, constants.collect());
+            return if natives.methods.is_empty() {
+                builder
+            } else {
+                let methods = natives.methods.iter().map(NativeMethod::declaration);
+                builder.trampolines(natives.name, methods.collect())
+            };
+        };
+        // The entries as they stand, the declaration built from them as
+        // the engine links the class; one reshaped is built here, where
+        // its reshape is in hand.
+        let Some(reshape) = reshape else {
+            self.declarations
+                .classes
+                .push(ClassRow::Native(natives, header));
+            return self;
+        };
+        let mut methods: Vec<(MethodDecl, Entry)> = natives
+            .methods
+            .iter()
+            .map(NativeMethod::declaration)
             .collect();
-        C::register(self, class, methods)
+        let class = natives.declaration(header, Some(reshape), &mut methods);
+        let (handlers, new) = match header.objects {
+            Some((handlers, new)) => (Some(handlers), new),
+            None => (None, None),
+        };
+        self.declarations
+            .classes
+            .push(ClassRow::Built(Box::new((class, methods, handlers, new))));
+        self
     }
 
     /// One native class with its handler table and its `create_object`,
-    /// what `__private::class_new` registers a payload class through.
+    /// what a header's `objects` with a `create_object` registers through.
     pub(crate) fn class_created(
         mut self,
         class: ClassDecl,
@@ -1234,16 +1459,23 @@ impl ExtensionBuilder {
         handlers: &'static dyn ObjectHandlers,
         new: NativeNew,
     ) -> ExtensionBuilder {
-        self.declarations
-            .classes
-            .push((class, methods, Some(handlers), Some(new)));
+        self.declarations.classes.push(ClassRow::Built(Box::new((
+            class,
+            methods,
+            Some(handlers),
+            Some(new),
+        ))));
         self
     }
 
-    /// The constants.
+    /// The constants, each the static entry `#[php_const]` lays down,
+    /// declared in order as php's `register_*_symbols` registers them.
+    /// The entries are held as they stand, and the engine builds each
+    /// declaration into its table, which it lays at the length every
+    /// extension's entries sum to.
     #[must_use]
-    pub fn constants(mut self, constants: Vec<ConstDecl>) -> ExtensionBuilder {
-        self.declarations.constants.extend(constants);
+    pub fn constants(mut self, constants: &'static [NativeConst]) -> ExtensionBuilder {
+        self.declarations.constants.push(constants);
         self
     }
 
@@ -1922,15 +2154,16 @@ impl ExtensionBuilder {
     /// This extension's constants as the engine links them: what
     /// [`ExtensionBuilder::constants`] declared, handed to `link` with
     /// every value of type `T` the bundle registered
-    /// ([`ExtensionBuilder::register`]), in bundle order, and what `link`
-    /// answers is the extension's list. php's `php_image_register_handler`,
-    /// which another extension's `MINIT` calls into `standard` to add a
-    /// constant to `standard`'s own group and raise its `IMAGETYPE_COUNT`,
-    /// is this rewrite done once, when the engine is built.
+    /// ([`ExtensionBuilder::register`]), in bundle order, to rewrite in
+    /// place, and what `link` answers is added after them. php's
+    /// `php_image_register_handler`, which another extension's `MINIT`
+    /// calls into `standard` to add a constant to `standard`'s own group
+    /// and raise its `IMAGETYPE_COUNT`, is this rewrite done once, when
+    /// the engine is built.
     #[must_use]
     pub fn constants_with<T: Send + Sync + 'static>(
         mut self,
-        link: fn(Vec<ConstDecl>, &[&T]) -> Vec<ConstDecl>,
+        link: fn(&mut [ConstDecl], &[&T]) -> Vec<ConstDecl>,
     ) -> ExtensionBuilder {
         self.declarations.constants_link = Some(Arc::new(move |declared, registered| {
             let values: Vec<&T> = registered
@@ -2035,14 +2268,13 @@ impl ExtensionBuilder {
 /// A property as `zend_declare_typed_property` declares one on an
 /// internal class (`Z/Zend/zend_API.c:4517`): a public readonly property
 /// with no set visibility of its own is `protected(set)`.
-fn declared_property(mut property: PropertyDecl) -> PropertyDecl {
+fn declared_property(property: &mut PropertyDecl) {
     if property.is_readonly
         && property.visibility == Visibility::Public
         && property.set_visibility.is_none()
     {
         property.set_visibility = Some(Visibility::Protected);
     }
-    property
 }
 
 /// A validated callable: a function name, a `[$object, 'method']` pair,

@@ -12,7 +12,7 @@
 
 use super::Request;
 use crate::api::raising::Thrown;
-use crate::api::values::{FreshString, PhpString, Value};
+use crate::api::values::{PhpString, Value};
 
 /// A rope's position among the request's, which its temporary holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,22 +227,13 @@ impl Request {
                 utf8 && piece.is_valid_utf8(),
             )
         });
-        let joined = FreshString::new(self, len).map(|mut fresh| {
-            let bytes = fresh.bytes_mut();
-            let mut at: usize = 0;
-            for piece in &pieces {
-                let end = at.saturating_add(piece.len()).min(bytes.len());
-                if let Some(target) = bytes.get_mut(at..end) {
-                    target.copy_from_slice(&piece.as_bytes()[..target.len()]);
+        let joined = self
+            .string_joined(len, pieces.iter().map(PhpString::as_bytes))
+            .inspect(|joined| {
+                if utf8 {
+                    joined.mark_valid_utf8();
                 }
-                at = end;
-            }
-            let joined = fresh.finish().hand_on();
-            if utf8 {
-                joined.mark_valid_utf8();
-            }
-            joined
-        });
+            });
         if self.rope_at(rope).is_some_and(|held| held.open) {
             self.rope_give_back(rope, pieces);
         }

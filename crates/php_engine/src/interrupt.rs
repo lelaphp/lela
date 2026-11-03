@@ -1082,7 +1082,8 @@ mod tests {
                     op1: 0,
                     out: 1,
                     ..Opline::default()
-                }],
+                }]
+                .into(),
                 safepoints: vec![OplineIdx(0), OplineIdx(0)].into(),
                 ..OpArray::default()
             },

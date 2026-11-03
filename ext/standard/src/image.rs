@@ -585,23 +585,23 @@ pub struct ImageSize {
 /// string(13) "IMAGETYPE_SVG"
 /// ```
 pub(crate) fn link_constants(
-    mut declared: Vec<ConstDecl>,
+    declared: &mut [ConstDecl],
     handlers: &[&ImageHandler],
 ) -> Vec<ConstDecl> {
     let count = TYPE_FIXED_COUNT + i64::try_from(handlers.len()).unwrap_or(0);
-    for decl in &mut declared {
+    for decl in declared {
         if &*decl.name.0 == b"IMAGETYPE_COUNT" {
             decl.value = ConstExpr::long(count);
         }
     }
-    for (at, handler) in (TYPE_FIXED_COUNT..).zip(handlers) {
-        declared.push(ConstDecl {
+    (TYPE_FIXED_COUNT..)
+        .zip(handlers)
+        .map(|(at, handler)| ConstDecl {
             name: Name(handler.const_name.as_bytes().into()),
             value: ConstExpr::long(at),
             attributes: Vec::new(),
-        });
-    }
-    declared
+        })
+        .collect()
 }
 
 /// The handler a number past the fixed types names, `zend_hash_index_find_ptr(&php_image_handlers, image_type)`.

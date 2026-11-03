@@ -1147,7 +1147,8 @@ impl Fiber {
     ) -> Result<Owner<Value>, Thrown> {
         switch_refused(req)?;
         let named: Vec<(PhpString, Value)> = args.named().to_vec();
-        let back = start(req, this.object(), &args.positional, named)?;
+        let positional: Vec<Value> = args.positional.collect();
+        let back = start(req, this.object(), &positional, named)?;
         delegate(req, back)
     }
 

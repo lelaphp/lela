@@ -9,16 +9,20 @@ use super::*;
 fn assigning() -> PublishedUnit {
     Unit {
         main: OpArray {
-            oplines: vec![Opline {
-                opcode: Opcode::Assign,
-                op1_type: OperandKind::Cv,
-                op1: 0,
-                op2_type: OperandKind::Const,
-                op2: 0,
-                out_type: OperandKind::Unused,
-                ..Opline::default()
-            }],
-            literals: vec![php_heap::Zval::long(1)],
+            oplines: vec![
+                Opline {
+                    opcode: Opcode::Assign,
+                    op1_type: OperandKind::Cv,
+                    op1: 0,
+                    op2_type: OperandKind::Const,
+                    op2: 0,
+                    out_type: OperandKind::Unused,
+                    ..Opline::default()
+                },
+                back(),
+            ]
+            .into(),
+            literals: vec![php_heap::Zval::long(1)].into(),
             num_cvs: 1,
             num_tmps: 1,
             ..OpArray::default()
@@ -99,16 +103,20 @@ fn a_write_over_a_temporary_that_still_holds_a_value_is_an_internal_error() {
     let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
     let unit = Unit {
         main: OpArray {
-            oplines: vec![Opline {
-                opcode: Opcode::QmAssign,
-                op1_type: OperandKind::Const,
-                op1: 0,
-                out_type: OperandKind::Tmp,
-                out: 0,
-                lineno: 5,
-                ..Opline::default()
-            }],
-            literals: vec![php_heap::Zval::long(7)],
+            oplines: vec![
+                Opline {
+                    opcode: Opcode::QmAssign,
+                    op1_type: OperandKind::Const,
+                    op1: 0,
+                    out_type: OperandKind::Tmp,
+                    out: 0,
+                    lineno: 5,
+                    ..Opline::default()
+                },
+                back(),
+            ]
+            .into(),
+            literals: vec![php_heap::Zval::long(7)].into(),
             num_tmps: 1,
             filename: php_unit::decl::Name::from("planted.php"),
             ..OpArray::default()

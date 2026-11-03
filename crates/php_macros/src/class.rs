@@ -9,7 +9,7 @@
 //! member impl asserts on them.
 
 use proc_macro2::{Ident, TokenStream as Tokens};
-use quote::{format_ident, quote};
+use quote::{ToTokens, format_ident, quote};
 use syn::ext::IdentExt;
 use syn::parse::{ParseStream, Parser};
 use syn::spanned::Spanned;
@@ -44,12 +44,12 @@ fn paths(tokens: Option<&Tokens>) -> syn::Result<Vec<syn::Path>> {
     }
 }
 
-/// `Name(<P as Class>::NAME)` for each class path.
+/// `<P as Class>::NAME` for each class path.
 fn class_names(paths: &[syn::Path]) -> Vec<Tokens> {
     let root = root();
     paths
         .iter()
-        .map(|path| quote!(#root::decl::Name(<#path as #root::abi::Class>::NAME.into())))
+        .map(|path| quote!(<#path as #root::abi::Class>::NAME))
         .collect()
 }
 
@@ -137,29 +137,21 @@ fn payload(
     Ok((payload, new, own))
 }
 
-/// `impl Header` for a class another extension or Core declares: its
-/// constants to `class_constants`, its methods to `trampolines`.
-fn extern_header(ident: &Ident, name: &syn::LitByteStr) -> Tokens {
+/// `impl Header` for a class another extension or Core declares: no
+/// header of its own, so its member impl's constants go to
+/// `class_constants` and its methods to `trampolines`.
+fn extern_header(ident: &Ident) -> Tokens {
     let root = root();
     quote! {
         impl #root::abi::Header for #ident {
-            fn header() -> #root::decl::ClassDecl {
-                #root::__private::class(#name, #root::decl::ClassKind::Class)
-            }
-            fn register(
-                builder: #root::abi::ExtensionBuilder,
-                class: #root::decl::ClassDecl,
-                methods: Vec<(#root::decl::MethodDecl, #root::__private::Entry)>,
-            ) -> #root::abi::ExtensionBuilder {
-                let builder = builder.class_constants(#name, class.constants);
-                if methods.is_empty() { builder } else { builder.trampolines(#name, methods) }
-            }
+            const HEADER: Option<&'static #root::__private::NativeClass> = None;
         }
     }
 }
 
-/// The header's flags and attributes, as statements over `class`.
-fn flags(keys: &Keys) -> syn::Result<Tokens> {
+/// The header's `ClassFlags` and its attributes as a static entry holds
+/// them.
+fn flags(keys: &Keys) -> syn::Result<(Tokens, Tokens)> {
     let root = root();
     let (is_abstract, is_final, readonly) = (
         keys.has("abstract"),
@@ -185,23 +177,100 @@ fn flags(keys: &Keys) -> syn::Result<Tokens> {
         let php = bytes("AllowDynamicProperties");
         attributes.insert(0, quote!(#root::__private::attribute(#php, Vec::new())));
     }
-    let size = keys
-        .eq("size")
-        .map(|size| quote!(class.object_size = #size;));
-    let beside = keys
-        .list("beside")
-        .map(|sizes| quote!(class.object_beside = ::std::vec![#sizes].into_boxed_slice();));
-    Ok(quote! {
-        #size
-        #beside
-        class.flags.is_abstract = #is_abstract;
-        class.flags.is_final = #is_final;
-        class.flags.is_readonly = #readonly;
-        class.flags.not_serializable = #not_serializable;
-        class.flags.use_guards = #use_guards;
-        class.flags.dynamic_properties = #root::decl::DynamicProperties::#variant;
-        class.attributes = vec![#(#attributes),*];
+    let flags = class_flags(
+        &[
+            ("is_abstract", is_abstract),
+            ("is_final", is_final),
+            ("is_readonly", readonly),
+            ("not_serializable", not_serializable),
+            ("use_guards", use_guards),
+        ],
+        &variant,
+    );
+    Ok((flags, expr::built(&attributes)))
+}
+
+/// `ClassFlags` with `set` true and `dynamic_properties` the variant
+/// named, every other bit false, as `ClassFlags::default()` leaves it.
+fn class_flags(set: &[(&str, bool)], dynamic: &Tokens) -> Tokens {
+    let root = root();
+    let bit = |name: &str| set.iter().any(|(bit, on)| *bit == name && *on);
+    let (is_abstract, is_final, is_readonly) =
+        (bit("is_abstract"), bit("is_final"), bit("is_readonly"));
+    let (not_serializable, use_guards) = (bit("not_serializable"), bit("use_guards"));
+    quote!(#root::decl::ClassFlags {
+        is_abstract: #is_abstract,
+        is_final: #is_final,
+        is_readonly: #is_readonly,
+        is_anonymous: false,
+        is_top_level: false,
+        not_serializable: #not_serializable,
+        dynamic_properties: #root::decl::DynamicProperties::#dynamic,
+        use_guards: #use_guards,
+        hooked_variance: false,
+        stringable_added: false,
     })
+}
+
+/// The pieces of one `NativeClass` the header and the enum header
+/// differ in.
+struct Entry {
+    name: syn::LitByteStr,
+    kind: Tokens,
+    flags: Tokens,
+    parent: Tokens,
+    interfaces: Vec<Tokens>,
+    implementors: Vec<Tokens>,
+    aliases: Vec<Tokens>,
+    backing: Tokens,
+    constants: Vec<Tokens>,
+    properties: Vec<Tokens>,
+    attributes: Tokens,
+    object_size: Tokens,
+    object_beside: Tokens,
+    objects: Tokens,
+}
+
+/// `const HEADER` of a class with a header of its own.
+fn header_impl(ident: &Ident, entry: &Entry) -> Tokens {
+    let root = root();
+    let Entry {
+        name,
+        kind,
+        flags,
+        parent,
+        interfaces,
+        implementors,
+        aliases,
+        backing,
+        constants,
+        properties,
+        attributes,
+        object_size,
+        object_beside,
+        objects,
+    } = entry;
+    quote! {
+        impl #root::abi::Header for #ident {
+            const HEADER: Option<&'static #root::__private::NativeClass> =
+                Some(&#root::__private::NativeClass {
+                    name: #name,
+                    kind: #root::decl::ClassKind::#kind,
+                    flags: #flags,
+                    parent: #parent,
+                    interfaces: &[#(#interfaces),*],
+                    implementors: &[#(#implementors),*],
+                    aliases: &[#(#aliases),*],
+                    backing: #root::decl::EnumBacking::#backing,
+                    constants: &[#(#constants),*],
+                    properties: &[#(#properties),*],
+                    attributes: #attributes,
+                    object_size: #object_size,
+                    object_beside: &[#object_beside],
+                    objects: #objects,
+                });
+        }
+    }
 }
 
 fn header(attribute: Tokens, item: &ItemStruct) -> syn::Result<Tokens> {
@@ -249,7 +318,7 @@ fn header(attribute: Tokens, item: &ItemStruct) -> syn::Result<Tokens> {
     let allow = quote!(#[allow(non_camel_case_types, clippy::upper_case_acronyms)]);
     let name = bytes(&php);
     if keys.has("extern") {
-        let header = extern_header(ident, &name);
+        let header = extern_header(ident);
         return Ok(quote!(#allow #item #class #header));
     }
     let kind = if interface {
@@ -259,7 +328,7 @@ fn header(attribute: Tokens, item: &ItemStruct) -> syn::Result<Tokens> {
     };
     let parent = parent.map_or_else(
         || quote!(None),
-        |parent| quote!(Some(#root::decl::Name(<#parent as #root::abi::Class>::NAME.into()))),
+        |parent| quote!(Some(<#parent as #root::abi::Class>::NAME)),
     );
     let mut interfaces = if interface {
         class_names(&extends)
@@ -269,43 +338,45 @@ fn header(attribute: Tokens, item: &ItemStruct) -> syn::Result<Tokens> {
     interfaces.extend(class_names(&paths(keys.list("implements"))?));
     let implementors = class_names(&paths(keys.list("implemented_by"))?);
     let aliases = match keys.eq("alias") {
-        Some(tokens) => vec![crate::name(
-            &syn::parse2::<syn::LitStr>(tokens.clone())?.value(),
-        )],
+        Some(tokens) => {
+            vec![bytes(&syn::parse2::<syn::LitStr>(tokens.clone())?.value()).into_token_stream()]
+        }
         None => Vec::new(),
     };
-    let flags = flags(&keys)?;
+    let (flags, attributes) = flags(&keys)?;
     let handlers = keys.eq("handlers").map(|handlers| quote!(&#handlers));
-    let register = match (own, handlers) {
+    let objects = match (own, handlers) {
         (true, handlers) => {
             let handlers = handlers.unwrap_or_else(|| quote!(&#root::abi::Std));
-            quote!(#root::__private::class_new::<Self>(builder, class, methods, #handlers))
+            quote!(Some((#handlers, Some(#root::__private::create_object::<Self>))))
         }
-        (false, Some(handlers)) => quote!(builder.class_with(class, methods, #handlers)),
-        (false, None) => quote!(builder.classes(vec![(class, methods)])),
+        (false, Some(handlers)) => quote!(Some((#handlers, None))),
+        (false, None) => quote!(None),
     };
+    let header = header_impl(
+        ident,
+        &Entry {
+            name,
+            kind,
+            flags,
+            parent,
+            interfaces,
+            implementors,
+            aliases,
+            backing: quote!(Pure),
+            constants: Vec::new(),
+            properties: Vec::new(),
+            attributes,
+            object_size: keys.eq("size").cloned().unwrap_or_else(|| quote!(0)),
+            object_beside: keys.list("beside").cloned().unwrap_or_default(),
+            objects,
+        },
+    );
     Ok(quote! {
         #allow
         #item
         #class
-        impl #root::abi::Header for #ident {
-            fn header() -> #root::decl::ClassDecl {
-                let mut class = #root::__private::class(#name, #root::decl::ClassKind::#kind);
-                #flags
-                class.parent = #parent;
-                class.interfaces = vec![#(#interfaces),*];
-                class.implementors = vec![#(#implementors),*];
-                class.aliases = vec![#(#aliases),*];
-                class
-            }
-            fn register(
-                builder: #root::abi::ExtensionBuilder,
-                class: #root::decl::ClassDecl,
-                methods: Vec<(#root::decl::MethodDecl, #root::__private::Entry)>,
-            ) -> #root::abi::ExtensionBuilder {
-                #register
-            }
-        }
+        #header
     })
 }
 
@@ -365,15 +436,14 @@ fn cases(
                 ));
             }
         };
-        cases.push(quote!(#root::decl::ClassConstDecl {
-            name: #root::decl::Name(#case.as_slice().into()),
+        cases.push(quote!(#root::__private::NativeClassConst {
+            name: #case,
             visibility: #root::decl::Visibility::Public,
             is_final: false,
             is_case: true,
-            ty: None,
-            value: #value,
-            attributes: Vec::new(),
-            doc_comment: None,
+            ty: || None,
+            value: || #value,
+            attributes: &[],
         }));
     }
     Ok((table, cases))
@@ -397,28 +467,59 @@ fn enumeration(attribute: Tokens, mut item: ItemEnum) -> syn::Result<Tokens> {
         Some(_) => return Err(error(keys.span("backed"), "`backed` is `string` or `int`")),
     };
     let (table, cases) = cases(&mut item, backing, &php)?;
-    let (backing, value_property, backed_interface) = match backing {
-        Backing::Pure => (quote!(#root::decl::EnumBacking::Pure), quote!(), quote!()),
+    let readonly = |name: &str, ty: Tokens| {
+        let name = bytes(name);
+        quote!(#root::__private::NativeProperty {
+            name: #name,
+            visibility: #root::decl::Visibility::Public,
+            is_instance: true,
+            is_readonly: true,
+            is_virtual: false,
+            ty: || Some(#root::decl::Type::#ty),
+            default: None,
+            attributes: &[],
+        })
+    };
+    let mut properties = vec![readonly("name", quote!(String))];
+    let mut interfaces = Vec::new();
+    let backing = match backing {
+        Backing::Pure => quote!(Pure),
         Backing::String | Backing::Int => {
             let ty = if backing == Backing::String {
                 quote!(String)
             } else {
                 quote!(Int)
             };
-            (
-                quote!(#root::decl::EnumBacking::#ty),
-                quote! {
-                    let mut value = #root::__private::property(b"value", Some(#root::decl::Type::#ty));
-                    value.is_readonly = true;
-                    properties.push(value);
-                },
-                quote!(interfaces.push(#root::decl::Name(b"BackedEnum".as_slice().into()));),
-            )
+            properties.push(readonly("value", ty.clone()));
+            interfaces.push(bytes("BackedEnum").into_token_stream());
+            ty
         }
     };
-    let implements = class_names(&paths(keys.list("implements"))?);
-    let attributes = expr::attributes(&keys)?;
+    interfaces.push(bytes("UnitEnum").into_token_stream());
+    interfaces.extend(class_names(&paths(keys.list("implements"))?));
+    let attributes = expr::built(&expr::attributes(&keys)?);
     let class = class_impl(&ident, &php, &quote!(()), &quote!(), (false, false));
+    // An enum is final and takes no dynamic property, as the compiler
+    // declares a program's.
+    let header = header_impl(
+        &ident,
+        &Entry {
+            name: class_name.clone(),
+            kind: quote!(Enum),
+            flags: class_flags(&[("is_final", true)], &quote!(Forbidden)),
+            parent: quote!(None),
+            interfaces,
+            implementors: Vec::new(),
+            aliases: Vec::new(),
+            backing,
+            constants: cases,
+            properties,
+            attributes,
+            object_size: quote!(0),
+            object_beside: Tokens::new(),
+            objects: quote!(None),
+        },
+    );
     let declared =
         quote!(Some(#root::decl::Type::Named(#root::decl::Name(#class_name.as_slice().into()))));
     Ok(quote! {
@@ -451,36 +552,7 @@ fn enumeration(attribute: Tokens, mut item: ItemEnum) -> syn::Result<Tokens> {
                 #root::__private::case_value(request, self)
             }
         }
-        impl #root::abi::Header for #ident {
-            fn header() -> #root::decl::ClassDecl {
-                let mut interfaces = Vec::new();
-                #backed_interface
-                interfaces.push(#root::decl::Name(b"UnitEnum".as_slice().into()));
-                interfaces.extend([#(#implements),*]);
-                let mut name = #root::__private::property(b"name", Some(#root::decl::Type::String));
-                name.is_readonly = true;
-                let mut properties = vec![name];
-                #value_property
-                let mut class = #root::__private::class(#class_name, #root::decl::ClassKind::Enum);
-                // An enum is final and takes no dynamic property, as the
-                // compiler declares a program's.
-                class.flags.is_final = true;
-                class.flags.dynamic_properties = #root::decl::DynamicProperties::Forbidden;
-                class.backing = #backing;
-                class.interfaces = interfaces;
-                class.constants = vec![#(#cases),*];
-                class.properties = properties;
-                class.attributes = vec![#(#attributes),*];
-                class
-            }
-            fn register(
-                builder: #root::abi::ExtensionBuilder,
-                class: #root::decl::ClassDecl,
-                methods: Vec<(#root::decl::MethodDecl, #root::__private::Entry)>,
-            ) -> #root::abi::ExtensionBuilder {
-                builder.classes(vec![(class, methods)])
-            }
-        }
+        #header
     })
 }
 
@@ -636,7 +708,7 @@ fn collect(block: &mut ItemImpl) -> syn::Result<Collected> {
                 let keys = Keys::take(&mut constant.attrs)?;
                 let cfg = cfgs(&constant.attrs);
                 if keys.has("property") {
-                    // Removed: the value is re-emitted in `members()`,
+                    // Removed: the value is re-emitted in `PROPERTIES`,
                     // checked against the property type's `Const`.
                     out.properties.push(Property {
                         ident: constant.ident.clone(),
@@ -664,22 +736,21 @@ fn collect(block: &mut ItemImpl) -> syn::Result<Collected> {
     Ok(out)
 }
 
-/// A class constant's declaration, typed and valued by `IntoConst`.
+/// A class constant's static entry, typed and valued by `IntoConst`.
 fn constant_decl(class: &Ident, (constant, ty, keys, cfg): &Constant) -> syn::Result<Tokens> {
     let root = root();
     let php = bytes(&php_name(constant));
     let visibility = visibility(keys);
     let is_final = keys.has("final");
-    let attributes = expr::attributes(keys)?;
-    Ok(quote!(#(#cfg)* #root::decl::ClassConstDecl {
-        name: #root::decl::Name(#php.as_slice().into()),
+    let attributes = expr::built(&expr::attributes(keys)?);
+    Ok(quote!(#(#cfg)* #root::__private::NativeClassConst {
+        name: #php,
         visibility: #visibility,
         is_final: #is_final,
         is_case: false,
-        ty: <#ty as #root::abi::IntoConst>::declared(),
-        value: #root::abi::IntoConst::value(&#class::#constant),
-        attributes: vec![#(#attributes),*],
-        doc_comment: None,
+        ty: <#ty as #root::abi::IntoConst>::declared,
+        value: || #root::abi::IntoConst::value(&#class::#constant),
+        attributes: #attributes,
     }))
 }
 
@@ -745,17 +816,9 @@ fn members(attribute: Tokens, mut block: ItemImpl) -> syn::Result<Tokens> {
         }
         #(#checks)*
         impl #root::abi::Members for #ident {
-            fn members() -> (
-                Vec<#root::decl::ClassConstDecl>,
-                Vec<#root::decl::PropertyDecl>,
-                Vec<(#root::decl::MethodDecl, #root::__private::Entry)>,
-            ) {
-                (
-                    vec![#(#constant_decls),*],
-                    vec![#(#property_decls),*],
-                    vec![#(#declarations),*],
-                )
-            }
+            const CONSTANTS: &'static [#root::__private::NativeClassConst] = &[#(#constant_decls),*];
+            const PROPERTIES: &'static [#root::__private::NativeProperty] = &[#(#property_decls),*];
+            const METHODS: &'static [#root::__private::NativeMethod] = &[#(#declarations),*];
         }
     })
 }
@@ -781,22 +844,22 @@ fn property_decl(
     let ty = &property.ty;
     let default = property.default.as_ref().map_or_else(
         || quote!(None),
-        |value| quote!(Some(<#ty as #root::abi::PropertyValue>::const_expr(::core::convert::Into::into(#value)))),
+        |value| quote!(Some(|| <#ty as #root::abi::PropertyValue>::const_expr(::core::convert::Into::into(#value)))),
     );
-    let attributes = expr::attributes(&property.keys)?;
+    let attributes = expr::built(&expr::attributes(&property.keys)?);
     let cfg = &property.cfg;
     let checked = unself(ty, Some(class));
     checks.push(quote!(#(#cfg)* const _: u32 = <#checked as #root::abi::FromArgument>::MASK;));
     checks.push(quote!(#(#cfg)* const _: () = assert!(!#class::__PHP_EXTERN, "a class declared elsewhere takes no property here");));
-    Ok(quote!(#(#cfg)* {
-        let mut property = #root::__private::property(#php, <#ty as #root::abi::FromArgument>::declared());
-        property.visibility = #visibility;
-        property.is_readonly = #readonly;
-        property.is_instance = #instance;
-        property.is_virtual = #is_virtual;
-        property.default = #default;
-        property.attributes = vec![#(#attributes),*];
-        property
+    Ok(quote!(#(#cfg)* #root::__private::NativeProperty {
+        name: #php,
+        visibility: #visibility,
+        is_instance: #instance,
+        is_readonly: #readonly,
+        is_virtual: #is_virtual,
+        ty: <#ty as #root::abi::FromArgument>::declared,
+        default: #default,
+        attributes: #attributes,
     }))
 }
 
@@ -896,29 +959,27 @@ fn method_pieces(
     let parameters = function::declared_parameters(&method.signature.params)?;
     let signature_output = &method.signature.output;
     let return_type = if structor {
-        quote!(None)
+        quote!(|| None)
     } else {
-        quote!(<#signature_output as #root::abi::IntoReturn>::declared())
+        quote!(<#signature_output as #root::abi::IntoReturn>::declared)
     };
     let visibility = visibility(&method.keys);
     let is_instance = method.signature.this.is_some();
-    let attributes = expr::attributes(&method.keys)?;
-    let declaration = quote!(#(#cfg)* {
-        let mut function = #root::__private::native_function(#name);
-        function.parameters = #parameters;
-        function.return_type = #return_type;
-        function.attributes = vec![#(#attributes),*];
-        (
-            #root::decl::MethodDecl {
-                function,
-                visibility: #visibility,
-                is_instance: #is_instance,
-                is_abstract: #is_abstract,
-                is_final: #is_final,
-                tentative_return: #tentative,
-            },
-            #entry_path,
-        )
+    let attributes = expr::built(&expr::attributes(&method.keys)?);
+    let declaration = quote!(#(#cfg)* #root::__private::NativeMethod {
+        function: #root::__private::NativeFunction {
+            name: #name,
+            parameters: #parameters,
+            return_type: #return_type,
+            frameless: &[],
+            attributes: #attributes,
+            entry: #entry_path,
+        },
+        visibility: #visibility,
+        is_instance: #is_instance,
+        is_abstract: #is_abstract,
+        is_final: #is_final,
+        tentative_return: #tentative,
     });
     let entry = method
         .body

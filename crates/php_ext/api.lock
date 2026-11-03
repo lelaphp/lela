@@ -2,17 +2,21 @@
 # 374 items: values 102, raising 21, coerce 23, call 29, request 112, decl 17, abi 28, syntax 28, attr 4, test 9, Nop 1 (ceiling 400); regenerated from the crate on 2026-09-17 (#271)
 Nop
 __private::Entry
+__private::Frameless
+__private::NativeClass
+__private::NativeClassConst
+__private::NativeConst
+__private::NativeFunction
+__private::NativeMethod
+__private::NativeParameter
+__private::NativeProperty
 __private::abstract_entry
 __private::arguments
 __private::attribute
 __private::case_of
 __private::case_value
-__private::class
-__private::class_new
+__private::create_object
 __private::entered
-__private::native_function
-__private::parameter
-__private::property
 abi::Absent
 abi::Admission
 abi::AfterLog
@@ -127,6 +131,7 @@ abi::ExtensionBuilder::fiber_destroy
 abi::ExtensionBuilder::fiber_init
 abi::ExtensionBuilder::fiber_switch
 abi::ExtensionBuilder::function_declared_observer
+abi::ExtensionBuilder::function_reshaped
 abi::ExtensionBuilder::functions
 abi::ExtensionBuilder::gc_collect
 abi::ExtensionBuilder::info
@@ -174,10 +179,10 @@ abi::FromArgument::declared
 abi::FromArgument::from_default
 abi::FromArgument::from_value
 abi::FromArgument::hold
+abi::FromArgument::tail
 abi::GcTable
 abi::Header
-abi::Header::header
-abi::Header::register
+abi::Header::HEADER
 abi::HoldsCoroutine
 abi::HoldsCoroutine::coroutine
 abi::IniStage
@@ -203,7 +208,9 @@ abi::Lent::hold
 abi::LongHandler
 abi::Lookup
 abi::Members
-abi::Members::members
+abi::Members::CONSTANTS
+abi::Members::METHODS
+abi::Members::PROPERTIES
 abi::Multibyte
 abi::Multibyte::char_len
 abi::Multibyte::http_input
@@ -429,12 +436,14 @@ coerce::float_format
 coerce::float_to_long
 coerce::gcvt
 coerce::identical
+coerce::identical_read
 coerce::int_to_string
 coerce::is_callable
 coerce::is_space
 coerce::is_type
 coerce::key_of
 coerce::loose_eq
+coerce::loose_eq_read
 coerce::numeric_string
 coerce::strict_types
 coerce::strtol
@@ -723,7 +732,6 @@ request::Frames::executing
 request::Frames::execution
 request::Frames::execution_trace
 request::Frames::forbid_dynamic_call
-request::Frames::frameless
 request::Frames::of
 request::Frames::op_array
 request::Frames::reserved
@@ -1313,6 +1321,7 @@ values::Owner::cursor_end
 values::Owner::cursor_next
 values::Owner::cursor_prev
 values::Owner::cursor_reset
+values::Owner::fill_packed
 values::Owner::float
 values::Owner::give_up
 values::Owner::give_up_nogc
@@ -1373,6 +1382,7 @@ values::PhpArray::len
 values::PhpArray::live_from
 values::PhpArray::new
 values::PhpArray::next_free
+values::PhpArray::packed_fill
 values::PhpArray::place
 values::PhpArray::protect
 values::PhpArray::replace
@@ -1545,6 +1555,7 @@ values::walk::Unwritten
 values::walk::detached
 values::walk::foreach
 values::walk::foreach_guarded
+values::walk::foreach_read
 values::walk::live
 values::walk::properties
 values::walk::rows

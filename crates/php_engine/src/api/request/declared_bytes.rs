@@ -1056,7 +1056,7 @@ fn init_op_array(
 /// closure written in it:
 ///
 /// ```php
-/// $f = sys_get_temp_dir() . '/w3823-' . getmypid() . '.php';
+/// $f = sys_get_temp_dir() . '/w3823-' . sprintf('%010d', getmypid()) . '.php';
 /// foreach (['', 'for (;;) { break; } ', 'foreach ([1] as $a) { for (;;) { switch ($a) { default: break 2; } } while (0) {} } ', 'for (;;) { $c = function () { while (0) {} do {} while (0); }; break; } '] as $code) {
 ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
 ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
@@ -1484,11 +1484,75 @@ impl AstCopy {
 /// ```
 ///
 /// The rows of the `bodies` methods with a body are left to the walk,
-/// which lays each as its method begins ([`Walk::method`]).
+/// which lays each as its method begins ([`Walk::method`]), and its
+/// constants and properties, each where it is written ([`Walk::member`]).
 fn class(req: &mut Request, class: &ClassDecl, bodies: usize) -> Result<ClassBlocks, Thrown> {
-    let mut compiled = Compiled::of(class);
-    compiled.written.methods = compiled.written.methods.saturating_sub(bodies);
+    let mut compiled = Compiled::default();
+    compiled.written.methods = php_unit::written_methods(class)
+        .len()
+        .saturating_sub(bodies);
     ClassBlocks::laid(req, |req, blocks| lay_class(req, blocks, class, compiled))
+}
+
+/// The constant at `at` of `class` as `zend_compile_class_const_decl`
+/// declares it: its expression copied out of the compile's arena
+/// (`zend_const_expr_to_zval`'s `zend_ast_copy`, `:9044`), a case's
+/// `ZEND_AST_CONST_ENUM_INIT` (`:9498`) and a constant's tree where the
+/// compile left one, which a value written out is not; its row; its
+/// attributes.
+fn constant(
+    req: &mut Request,
+    blocks: &mut ClassBlocks,
+    class: &ClassDecl,
+    at: usize,
+) -> Result<(), Thrown> {
+    let Some(constant) = class.constants.get(at) else {
+        return Ok(());
+    };
+    let copy = if constant.is_case {
+        Some(AstCopy::of_case(&constant.value))
+    } else {
+        (!super::linking::is_literal(&constant.value)).then(|| AstCopy::of(&constant.value))
+    };
+    if let Some(copy) = copy {
+        let copied = Copied::lay(req, CopyOf::Constant(at), &copy)?;
+        blocks.copies.push(copied);
+    }
+    add_rows(req, blocks.table(Table::Constants), 1)?;
+    let held = constant.attributes.iter();
+    attributes(req, &mut blocks.emalloced, held, false)
+}
+
+/// The property at `at` of `class` as `zend_compile_prop_decl` and
+/// `zend_compile_params` declare it: its default's tree copied where the
+/// compile left one (`:8920`); its slot of `default_properties_table`
+/// or `default_static_members_table`, one `perealloc` more, but for a
+/// virtual one; its row; its attributes.
+fn property(
+    req: &mut Request,
+    blocks: &mut ClassBlocks,
+    class: &ClassDecl,
+    at: usize,
+) -> Result<(), Thrown> {
+    let Some(property) = class.properties.get(at) else {
+        return Ok(());
+    };
+    let (of, slots) = if property.is_instance {
+        (CopyOf::Default(at), &mut blocks.defaults)
+    } else {
+        (CopyOf::Static(at), &mut blocks.statics)
+    };
+    if let Some(default) = (property.default.as_ref()).filter(|d| !super::linking::is_literal(d)) {
+        blocks
+            .copies
+            .push(Copied::lay(req, of, &AstCopy::of(default))?);
+    }
+    if !property.is_virtual {
+        slots.grow(req, 1)?;
+    }
+    add_rows(req, blocks.table(Table::Properties), 1)?;
+    let held = property.attributes.iter();
+    attributes(req, &mut blocks.emalloced, held, property.is_promoted)
 }
 
 /// `zend_lazy_class_load`'s copy of a class of a file the cache keeps,
@@ -1538,7 +1602,7 @@ fn lazy_copy(req: &mut Request, compiled: Compiled) -> Result<ClassBlocks, Throw
 /// What a class's compile fills its tables with: the rows its
 /// declarations write, an enum's `cases`, `from` and `tryFrom` being its
 /// link's, and the slots of its default tables.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct Compiled {
     written: Members,
     slots: SlotCounts,
@@ -1601,48 +1665,8 @@ fn lay_class(
     compiled: Compiled,
 ) -> Result<(), Thrown> {
     lay_tables(req, blocks, compiled)?;
-    // `ce->attributes`, and each property's and constant's own.
+    // `ce->attributes`.
     attributes(req, &mut blocks.emalloced, class.attributes.iter(), false)?;
-    let properties = class
-        .properties
-        .iter()
-        .map(|p| (&p.attributes, p.is_promoted));
-    let constants = class.constants.iter().map(|c| (&c.attributes, false));
-    for (held, again) in properties.chain(constants) {
-        attributes(req, &mut blocks.emalloced, held.iter(), again)?;
-    }
-    // Each constant expression, copied out of the compile's arena as its
-    // constant's or its property's value (`zend_const_expr_to_zval`'s
-    // `zend_ast_copy`, from `zend_compile_class_const_decl` and
-    // `zend_compile_prop_decl`): a case's `ZEND_AST_CONST_ENUM_INIT`, and
-    // a constant's or a default's tree where the compile left one, which
-    // a value written out is not.
-    for (at, constant) in class.constants.iter().enumerate() {
-        let copy = if constant.is_case {
-            AstCopy::of_case(&constant.value)
-        } else if super::linking::is_literal(&constant.value) {
-            continue;
-        } else {
-            AstCopy::of(&constant.value)
-        };
-        blocks
-            .copies
-            .push(Copied::lay(req, CopyOf::Constant(at), &copy)?);
-    }
-    for (at, property) in class.properties.iter().enumerate() {
-        let Some(default) = (property.default.as_ref()).filter(|d| !super::linking::is_literal(d))
-        else {
-            continue;
-        };
-        let of = if property.is_instance {
-            CopyOf::Default(at)
-        } else {
-            CopyOf::Static(at)
-        };
-        blocks
-            .copies
-            .push(Copied::lay(req, of, &AstCopy::of(default))?);
-    }
     // `zend_compile_use_trait`'s `trait_names`, a `zend_class_name` a
     // trait, reallocated a `use` at a time; the names themselves are the
     // unit's strings ([`Request::hold_unit_names`]).
@@ -1769,7 +1793,7 @@ pub(super) fn carve(req: &mut Request, unit: &Unit) -> Result<(), Thrown> {
 /// them:
 ///
 /// ```php
-/// $f = sys_get_temp_dir() . '/w3479-' . getmypid() . '.php';
+/// $f = sys_get_temp_dir() . '/w3479-' . sprintf('%010d', getmypid()) . '.php';
 /// $src = "<?php\n";
 /// for ($i = 0; $i < 2000; $i++) { $src .= "class C$i { public \$a; public \$b; function f() {} function g() {} }\n"; }
 /// file_put_contents($f, $src);
@@ -1852,7 +1876,7 @@ const HASH_SLOT: usize = 4;
 /// into a hash:
 ///
 /// ```php
-/// $f = sys_get_temp_dir() . '/w3793-' . getmypid() . '.php';
+/// $f = sys_get_temp_dir() . '/w3793-' . sprintf('%010d', getmypid()) . '.php';
 /// foreach (['', '$x = 5; '] as $code) {
 ///     file_put_contents($f, "<?php {$code}echo memory_get_peak_usage() - memory_get_usage(), \"\\n\";");
 ///     touch($f, time() - 10);
@@ -2052,7 +2076,7 @@ pub(crate) struct Alone {
 /// compile opcache leaves to php's own):
 ///
 /// ```php
-/// $f = sys_get_temp_dir() . '/w3805-' . getmypid() . '.php';
+/// $f = sys_get_temp_dir() . '/w3805-' . sprintf('%010d', getmypid()) . '.php';
 /// foreach (['', '$abcdef = [1, 2]; ', 'if (strlen("abc")) { $o = new stdClass; $o->p = "xyz"; } ', 'class C {} function f() {} '] as $code) {
 ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
 ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
@@ -2201,7 +2225,7 @@ fn main_op_array(
 /// `pass_two`, the compile's peak:
 ///
 /// ```php
-/// $f = sys_get_temp_dir() . '/w3836-' . getmypid() . '.php';
+/// $f = sys_get_temp_dir() . '/w3836-' . sprintf('%010d', getmypid()) . '.php';
 /// foreach (['$abcdef = [1, 2]; ', 'class C {} function f() {} $abcdef = [1, 2]; ', 'function f() {} $abcdef = "abcdefghijklmnopqrstuvwxyz" . PHP_EOL; ', 'namespace a; function f() {} ', 'namespace A; function f() {} '] as $code) {
 ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
 ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
@@ -2222,7 +2246,7 @@ fn held(
     main: &OpArray,
     scanned: &ScannerHeap,
 ) -> Vec<(u32, php_heap::Uncounted)> {
-    let body = |nested: &&php_unit::Nested| !matches!(nested.declares, Declares::Class(_));
+    let body = |nested: &&php_unit::Nested| nested.declares.is_body();
     let Some(from) = main
         .nested
         .iter()
@@ -2319,7 +2343,7 @@ fn seen_keys(unit: &Unit) -> impl Iterator<Item = usize> {
 /// returns, stand at the declaration's `pass_two`, the compile's peak:
 ///
 /// ```php
-/// $f = sys_get_temp_dir() . '/w3822-' . getmypid() . '.php';
+/// $f = sys_get_temp_dir() . '/w3822-' . sprintf('%010d', getmypid()) . '.php';
 /// foreach (['$abcdef = 1; function f() {} ', 'class C { function m() { return function () {}; } } ', '$abcdef = 1; class D { function m() { return function () {}; } } function g() {} '] as $code) {
 ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
 ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
@@ -2362,15 +2386,22 @@ fn in_order(
                 .iter()
                 .map(|h| (h.class, h.property, hook_key(h.kind))),
         ),
+        members: places(unit.classes.iter().zip(0..).flat_map(|(class, at)| {
+            let count = |members: usize| 0..u32::try_from(members).unwrap_or(u32::MAX);
+            (count(class.constants.len()).map(move |c| (at, c, 0)))
+                .chain(count(class.properties.len()).map(move |p| (at, p, 1)))
+        })),
         dynamic: vec![false; unit.dynamic.len()],
         hook_names: std::mem::take(hook_names),
         keys: main.is_some().then(Vec::new),
+        interface_names: unit.classes.iter().map(|_| None).collect(),
     };
     let made = walk
         .nested(req, &unit.main, main)
         .and_then(|()| walk.rest(req));
     *hook_names = walk.hook_names;
     hook_names.extend(walk.keys.into_iter().flatten());
+    hook_names.extend(walk.interface_names.into_iter().flatten());
     match made {
         Ok(()) => Ok(walk.laid),
         Err(thrown) => {
@@ -2407,6 +2438,8 @@ struct Walk<'u> {
     functions: Vec<bool>,
     methods: Places,
     hooks: Places,
+    /// The classes' constants, keyed 0, and properties, keyed 1.
+    members: Places,
     dynamic: Vec<bool>,
     /// The strings of the names written for the unit's hooks, where the
     /// request compiled it, one given back as each hook has compiled.
@@ -2414,6 +2447,8 @@ struct Walk<'u> {
     /// The keys of the top-level functions and the methods laid as each
     /// begins, where the request compiled the unit ([`Walk::key`]).
     keys: Option<Vec<Emalloc>>,
+    /// Each class's `ce->interface_names` ([`Walk::interfaces`]).
+    interface_names: Vec<Option<Emalloc>>,
 }
 
 /// A method's or a hook's place in its unit's table by its class, its
@@ -2490,6 +2525,14 @@ impl Walk<'_> {
                     }
                 }
                 Declares::Dynamic(at) => self.dynamic(req, at as usize, stood)?,
+                Declares::Constant {
+                    class,
+                    constant: at,
+                } => self.member(req, (class, at, 0), stood)?,
+                Declares::Property {
+                    class,
+                    property: at,
+                } => self.member(req, (class, at, 1), stood)?,
             }
         }
         Ok(())
@@ -2512,6 +2555,10 @@ impl Walk<'_> {
             if let Some(at) = unreached(&mut self.hooks, place) {
                 self.hook(req, at, None)?;
             }
+        }
+        let members: Vec<_> = self.members.iter().map(|(key, _, _)| *key).collect();
+        for key in members {
+            self.member(req, key, None)?;
         }
         for at in 0..self.unit.dynamic.len() {
             self.dynamic(req, at, None)?;
@@ -2558,8 +2605,8 @@ impl Walk<'_> {
         self.body(req, code, Some((decl, false)), stood, Holder::Dynamic(at))
     }
 
-    /// The class at `at`, once: its tables ([`class`]), the methods and
-    /// hooks its declaration compiles recorded after it.
+    /// The class at `at`, once: its tables ([`class`]), [`Walk::interfaces`],
+    /// the methods and hooks its declaration compiles recorded after it.
     fn class(&mut self, req: &mut Request, at: usize) -> Result<(), Thrown> {
         let Some(decl) = self.unit.classes.get(at) else {
             return Ok(());
@@ -2571,6 +2618,56 @@ impl Walk<'_> {
         let blocks = class(req, decl, bodies.count())?;
         if let Some(slot) = self.laid.classes.get_mut(at) {
             *slot = Some(blocks);
+        }
+        let begun = decl.interfaces.len() - usize::from(decl.flags.stringable_added);
+        self.interfaces(req, at, begun)
+    }
+
+    /// `ce->interface_names` of the class at `at` grown to its first `to`
+    /// interfaces where the request compiled the unit, and the strings made
+    /// for each: a written one's lowered name where it holds an upper-case
+    /// letter (`zend_compile_implements`, `Z/Zend/zend_compile.c:9197`), an
+    /// enum's `unitenum` and `backedenum` (`Z/Zend/zend_enum.c:184`, whose
+    /// second `erealloc` of the names no peak sees, so it is one step
+    /// here), and both of the `Stringable` a `__toString` adds as it begins
+    /// (`add_stringable_interface`, `:8242`). The link gives them back
+    /// (`Z/Zend/zend_inheritance.c:2302`), so they stand at the peak alone:
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3901-' . sprintf('%010d', getmypid()) . '.php';
+    /// foreach (['interface I {} class C implements I {} ', 'interface i {} class C implements i {} ', 'interface I {} interface J {} class C implements I, J {} ', 'enum E: int implements Countable { case A = 1; function count(): int { return 1; } } ', 'class C { function __toString(): string { return ""; } } '] as $code) {
+    ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
+    ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
+    ///     [$usage, $peak] = explode(' ', trim($fresh));
+    ///     echo $peak - $usage, "\n";
+    /// }
+    /// unlink($f);
+    /// ```
+    /// ```expect process
+    /// 35792
+    /// 35728
+    /// 35872
+    /// 37456
+    /// 37328
+    /// ```
+    fn interfaces(&mut self, req: &mut Request, at: usize, to: usize) -> Result<(), Thrown> {
+        let (Some(keys), Some(block), Some(decl)) = (
+            &mut self.keys,
+            self.interface_names.get_mut(at),
+            self.unit.classes.get(at),
+        ) else {
+            return Ok(());
+        };
+        let from = block.as_ref().map_or(0, Emalloc::len) / CLASS_NAME;
+        let to = to.min(decl.interfaces.len());
+        let named = usize::from(to == decl.interfaces.len() && decl.flags.stringable_added);
+        if to > from {
+            regrow(req, block, to * CLASS_NAME)?;
+        }
+        for name in decl.interfaces.get(from..to).unwrap_or_default() {
+            for _ in 0..named + usize::from(name.0.iter().any(u8::is_ascii_uppercase)) {
+                keys.push(Emalloc::new(req, STRING_HEADER + name.0.len() + 1)?);
+            }
         }
         Ok(())
     }
@@ -2584,7 +2681,7 @@ impl Walk<'_> {
     /// method, then after it:
     ///
     /// ```php
-    /// $f = sys_get_temp_dir() . '/w3838-' . getmypid() . '.php';
+    /// $f = sys_get_temp_dir() . '/w3838-' . sprintf('%010d', getmypid()) . '.php';
     /// foreach (['class C { public $p { set { } } function m() {} } ', 'class C { function m() {} public $p { set { } } } '] as $code) {
     ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
     ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
@@ -2617,6 +2714,9 @@ impl Walk<'_> {
         if let Some(Some(class)) = self.laid.classes.get(method.class as usize) {
             add_rows(req, class.table(Table::Methods), 1)?;
         }
+        if declared.is_some_and(|(decl, _)| decl.name.0.eq_ignore_ascii_case(b"__tostring")) {
+            self.interfaces(req, method.class as usize, usize::MAX)?;
+        }
         self.body(req, &method.body, declared, stood, Holder::Member)
     }
 
@@ -2631,7 +2731,7 @@ impl Walk<'_> {
     /// only after the compile ([`Request::hold_unit_names`]):
     ///
     /// ```php
-    /// $f = sys_get_temp_dir() . '/w3900-' . getmypid() . '.php';
+    /// $f = sys_get_temp_dir() . '/w3900-' . sprintf('%010d', getmypid()) . '.php';
     /// foreach (['function foo() {} ', 'function Foo() {} ', 'class C { function doit() {} } ', 'class C { function doIt() {} } ', 'class C { function Count() {} } ', 'interface I { function doIt(); } '] as $code) {
     ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
     ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
@@ -2685,6 +2785,58 @@ impl Walk<'_> {
         made
     }
 
+    /// The constant, keyed 0, or the property, keyed 1, at `at` of the
+    /// class at `class`, once, as php declares it where it is written, the
+    /// declarer grown to where it `stood`: its class's `constants_table`
+    /// and `properties_info` are laid at their first row
+    /// (`zend_initialize_class_data`, `Z/Zend/zend_compile.c:2050`, lays
+    /// neither's data), so a method written before them compiles without
+    /// them. A constant's, a case's and a property's place, written after
+    /// a method and before it, and an enum's:
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3907-' . sprintf('%010d', getmypid()) . '.php';
+    /// foreach (['class C { const K = 1; public $p = 1; function m() {} } ', 'class C { function m() {} const K = 1; public $p = 1; } ', 'class C { function m() {} public static $s = 1; } ', 'enum E { function m() {} case A; const K = self::A; } ', 'enum E { case A; const K = 1; function m() {} } '] as $code) {
+    ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
+    ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
+    ///     [$usage, $peak] = explode(' ', trim($fresh));
+    ///     echo $peak - $usage, "\n";
+    /// }
+    /// unlink($f);
+    /// ```
+    /// ```expect process
+    /// 37392
+    /// 36736
+    /// 37056
+    /// 36760
+    /// 37256
+    /// ```
+    fn member(
+        &mut self,
+        req: &mut Request,
+        (class, at, table): (u32, u32, u8),
+        stood: Option<(&mut Growing, Grown)>,
+    ) -> Result<(), Thrown> {
+        if reach(&mut self.members, (class, at, table)).is_none() {
+            return Ok(());
+        }
+        if let Some((declarer, grown)) = stood {
+            declarer.to(req, grown)?;
+        }
+        self.class(req, class as usize)?;
+        let unit = self.unit;
+        let (Some(decl), Some(Some(blocks))) = (
+            unit.classes.get(class as usize),
+            self.laid.classes.get_mut(class as usize),
+        ) else {
+            return Ok(());
+        };
+        match table {
+            0 => constant(req, blocks, decl, at as usize),
+            _ => property(req, blocks, decl, at as usize),
+        }
+    }
+
     /// One op array laid into `holder`: [`init_op_array`], the op array
     /// that declares it grown to where it `stood` ([`begun`]), what it
     /// declares, and [`compiled`].
@@ -2727,7 +2879,7 @@ impl Walk<'_> {
 /// (`zend_hash_destroy(&info.uses)`, `:8563`):
 ///
 /// ```php
-/// $f = sys_get_temp_dir() . '/w3837-' . getmypid() . '.php';
+/// $f = sys_get_temp_dir() . '/w3837-' . sprintf('%010d', getmypid()) . '.php';
 /// foreach (['$f = fn () => $b; ', 'function f($a) { return fn () => $a; } ', '$f = fn ($a) => $a; ', '$f = fn ($a = 5) => $b; '] as $code) {
 ///     file_put_contents($f, "<?php {$code}echo memory_get_usage(), ' ', memory_get_peak_usage(), \"\\n\";");
 ///     $fresh = shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 " . escapeshellarg($f));
@@ -2749,7 +2901,7 @@ fn begun(
     stood: Option<(&mut Growing, Grown)>,
     growing: &mut Growing,
 ) -> Result<(), Thrown> {
-    let parameters = declared.map_or(&[][..], |(decl, _)| decl.parameters.as_slice());
+    let parameters = declared.map_or(&[][..], |(decl, _)| &decl.parameters[..]);
     let mut uses = Blocks::default();
     if code.implicit_uses > 0 {
         let size = u32::try_from(parameters.len()).unwrap_or(u32::MAX);

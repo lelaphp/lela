@@ -58,7 +58,7 @@ mod rows;
 mod traits;
 
 pub use rows::{
-    Accessor, Accessors, Case, ClassHooks, Exact, Folded, Indexed, LinkedClass, NameHash,
+    Accessor, Accessors, Case, ClassHooks, Column, Exact, Folded, Indexed, LinkedClass, NameHash,
     NameHasher, NameMap, Named, Names, Row, Rows,
 };
 
@@ -2166,12 +2166,12 @@ impl<'a, H: Copy> Linker<'a, H> {
         &self,
         child: &'a ClassDecl,
         methods: &Rows<Row<H>, Folded>,
-    ) -> Option<Box<[Option<H>]>>
+    ) -> Option<Column<Option<H>>>
     where
         H: PartialEq,
     {
         if child.kind == ClassKind::Interface {
-            return Some(vec![None; methods.rows().len()].into_boxed_slice());
+            return Some(Column::default());
         }
         // A class held with a record, none where no class has the name.
         let held = |name: &[u8]| match (self.lookup)(name) {
@@ -2236,7 +2236,10 @@ impl<'a, H: Copy> Linker<'a, H> {
             }
             prototypes.push(prototype);
         }
-        Some(prototypes.into_boxed_slice())
+        while prototypes.last() == Some(&None) {
+            prototypes.pop();
+        }
+        Some(prototypes.into())
     }
 
     /// The row of `class`'s function table under `name`, with its
@@ -2273,9 +2276,14 @@ impl<'a, H: Copy> Linker<'a, H> {
         &self,
         child: &'a ClassDecl,
         own: usize,
-    ) -> Option<Rows<Row<H>, M::Case>> {
+    ) -> Option<Rows<Row<H>, M::Case>>
+    where
+        H: PartialEq,
+    {
         let named = |row: &Row<H>| self.row_member_name::<M>(child, row);
-        let mut rows = Rows::default();
+        let mut interfaces = Vec::new();
+        self.interfaces_of(&child.interfaces, &mut interfaces, 0);
+        let mut rows = Rows::with_capacity(self.member_bound::<M>(child, &interfaces));
         let declared = (0u32..).zip(M::of(child));
         let last = M::LAST_WHEN_INTERNAL && child.file.0.is_empty();
         let own = if last { 0 } else { own };
@@ -2290,8 +2298,6 @@ impl<'a, H: Copy> Linker<'a, H> {
                 rows.add(Row { holder: None, at }, member.name(), named);
             }
         }
-        let mut interfaces = Vec::new();
-        self.interfaces_of(&child.interfaces, &mut interfaces, 0);
         for interface in interfaces {
             self.inherit_rows::<M>(&mut rows, child, &interface.name.0)?;
         }
@@ -2306,6 +2312,32 @@ impl<'a, H: Copy> Linker<'a, H> {
             }
         }
         Some(rows)
+    }
+
+    /// How many rows [`Linker::member_rows`] lays `child`'s table of `M`
+    /// for: its own members, the parent's table and the table of each
+    /// interface the parent does not implement already, as
+    /// `zend_do_inheritance` extends a table by the parent's before it
+    /// copies it in. A child that redeclares a parent's member holds
+    /// fewer.
+    fn member_bound<M: ClassMember>(
+        &self,
+        child: &'a ClassDecl,
+        interfaces: &[&'a ClassDecl],
+    ) -> usize
+    where
+        H: PartialEq,
+    {
+        let record = |name: &[u8]| (self.lookup)(name).and_then(|held| held.record);
+        let parent = child.parent.as_ref().and_then(|parent| record(&parent.0));
+        let parents = parent.map_or(0, |(_, parent)| M::table(parent).rows().len());
+        let implemented =
+            |handle: &H| parent.is_some_and(|(_, parent)| parent.interfaces.contains(handle));
+        let interfaces = (interfaces.iter())
+            .filter_map(|interface| record(&interface.name.0))
+            .filter(|(handle, _)| !implemented(handle))
+            .map(|(_, interface)| M::table(interface).rows().len());
+        M::of(child).len() + parents + interfaces.sum::<usize>()
     }
 
     /// The rows of the record of the class `name` names into `child`'s,
@@ -2377,7 +2409,7 @@ impl<'a, H: Copy> Linker<'a, H> {
     /// parent's reversed, then each it names with that one's own
     /// reversed after it (`zend_class_implements`). None where the
     /// parent or an interface is held with no record.
-    fn interface_list(&self, child: &'a ClassDecl) -> Option<Box<[H]>>
+    fn interface_list(&self, child: &'a ClassDecl) -> Option<Column<H>>
     where
         H: PartialEq,
     {
@@ -2419,7 +2451,7 @@ impl<'a, H: Copy> Linker<'a, H> {
         for interface in added {
             extend_new(&mut list, interface.interfaces.iter().rev());
         }
-        Some(list.into_boxed_slice())
+        Some(list.into())
     }
 
     /// `lookup_class(scope, name)` while `child` links: the class being

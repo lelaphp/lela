@@ -2123,3 +2123,103 @@ impl Crypto for Layer {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::path::Path;
+
+    use php_ext::request::Crypto;
+
+    use super::{Layer, Phase, SSL_OP_NO_TICKET, SslOptions, TLS1_2_VERSION};
+    use crate::ffi::key::KeyContext;
+    use crate::ffi::ssl::{Ctx, Setup, Tls};
+    use crate::ffi::{Certificate, Digest, KeyKind};
+
+    /// A P-256 key and a certificate over it, signed by the key, written
+    /// into `dir` as two PEM files: the certificate's path and the key's.
+    fn credentials(dir: &Path) -> (CString, CString) {
+        let mut keys = KeyContext::of_kind(KeyKind::Ec).unwrap();
+        assert!(keys.keygen_init() > 0);
+        assert!(keys.set_ec_curve(openssl_sys::NID_X9_62_prime256v1));
+        let key = keys.keygen(true).unwrap();
+        let mut cert = Certificate::new().unwrap();
+        assert!(cert.set_version(2) && cert.set_serial(1) && cert.set_validity(3600));
+        assert!(cert.set_public_key(&key));
+        assert!(cert.sign(&key, &Digest::by_name(c"sha256").unwrap()));
+        let (cert_path, key_path) = (dir.join("cert.pem"), dir.join("key.pem"));
+        std::fs::write(&cert_path, cert.to_pem().unwrap()).unwrap();
+        std::fs::write(&key_path, key.private_pem(None).unwrap()).unwrap();
+        let c = |path: &Path| CString::new(path.to_str().unwrap()).unwrap();
+        (c(&cert_path), c(&key_path))
+    }
+
+    /// The client's TLS after a TLS 1.2 handshake under `SSL_OP_NO_TICKET`
+    /// against a server whose session cache is on or off, over a socket
+    /// pair.
+    fn client_after_handshake(credentials: &(CString, CString), cache: bool) -> Tls {
+        let server = Ctx::new(false).unwrap();
+        assert!(server.chain_file(&credentials.0) && server.private_key_file(&credentials.1));
+        server.set_options(SSL_OP_NO_TICKET);
+        server.proto_versions(TLS1_2_VERSION, TLS1_2_VERSION);
+        if !cache {
+            server.session_cache_off();
+        }
+        let client = Ctx::new(true).unwrap();
+        client.proto_versions(TLS1_2_VERSION, TLS1_2_VERSION);
+        let (server, client) = (Setup::new(server).open(), Setup::new(client).open());
+        let (server, client) = (server.unwrap(), client.unwrap());
+        let (near, far) = UnixStream::pair().unwrap();
+        near.set_nonblocking(true).unwrap();
+        far.set_nonblocking(true).unwrap();
+        assert!(client.set_fd(near.as_raw_fd()) && server.set_fd(far.as_raw_fd()));
+        let (mut connected, mut accepted) = (false, false);
+        for _ in 0..100 {
+            connected = connected || client.handshake(true).ret == 1;
+            accepted = accepted || server.handshake(false).ret == 1;
+            if connected && accepted {
+                break;
+            }
+        }
+        assert!(connected && accepted, "the handshake comes up");
+        drop(server);
+        client
+    }
+
+    /// A layer over the client's TLS, as a connect leaves it.
+    fn layer(tls: Tls) -> Layer {
+        Layer {
+            tls: Some(tls),
+            options: SslOptions::default(),
+            connect_timeout: None,
+            on_connect: None,
+            is_client: true,
+            phase: Phase::Fresh,
+            url_name: None,
+        }
+    }
+
+    /// `ftp_ssl_new_session_cb` is called for a session OpenSSL would
+    /// cache, which a TLS 1.2 server under `SSL_OP_NO_TICKET` gives only
+    /// from its session cache; ext/ftp's `data_accept` reads that as
+    /// [`Crypto::resumable`] (GH-23619).
+    #[test]
+    fn a_session_is_resumable_only_where_the_server_issued_one() {
+        let dir = std::env::temp_dir().join(format!("php_ext_openssl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let credentials = credentials(&dir);
+        let issued = layer(client_after_handshake(&credentials, true));
+        let none = layer(client_after_handshake(&credentials, false));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            issued.resumable(),
+            "a server with its cache on issues a session id"
+        );
+        assert!(
+            !none.resumable(),
+            "a server with its cache off and no ticket issues nothing"
+        );
+    }
+}

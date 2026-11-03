@@ -19,7 +19,8 @@ fn jumping(target: u32, number: u32) -> PublishedUnit {
                     out: number,
                     ..Opline::default()
                 },
-            ],
+            ]
+            .into(),
             ..OpArray::default()
         },
         ..Unit::default()
@@ -101,8 +102,10 @@ fn conditional(literal: php_heap::Zval) -> PublishedUnit {
                     out: 1,
                     ..Opline::default()
                 },
-            ],
-            literals: vec![literal],
+                back(),
+            ]
+            .into(),
+            literals: vec![literal].into(),
             ..OpArray::default()
         },
         ..Unit::default()
@@ -176,8 +179,10 @@ fn compared_loop(left: i64) -> PublishedUnit {
                     ..Opline::default()
                 },
                 Opline::default(),
-            ],
-            literals: vec![php_heap::Zval::long(left), php_heap::Zval::long(1)],
+                back(),
+            ]
+            .into(),
+            literals: vec![php_heap::Zval::long(left), php_heap::Zval::long(1)].into(),
             num_tmps: 1,
             ..OpArray::default()
         },
@@ -232,8 +237,9 @@ fn returning(number: u32) -> PublishedUnit {
                 op1: 0,
                 out: number,
                 ..Opline::default()
-            }],
-            literals: vec![php_heap::Zval::null()],
+            }]
+            .into(),
+            literals: vec![php_heap::Zval::null()].into(),
             ..OpArray::default()
         },
         ..Unit::default()

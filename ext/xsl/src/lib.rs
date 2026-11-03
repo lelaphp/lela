@@ -97,7 +97,7 @@ pub fn extension() -> Extension {
     ExtensionBuilder::default()
         .dependencies(vec![dependency("libxml"), dependency("dom")])
         .process_state(|| Ok(initialize()))
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .class::<XSLTProcessor>()
         .engine_state(Throwables::start)
         .info(xsl_info)

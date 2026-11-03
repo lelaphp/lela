@@ -14,6 +14,7 @@ use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpString, Resource, Value,
 use php_ext_uri::{Parser, ReadAs, UriStruct};
 
 use crate::streamsfuncs::{NullContext, context_of};
+use crate::string::{shortened, truncated};
 use crate::throwables::Throwables;
 
 pub(super) use constants::PHP_QUERY_RFC3986;
@@ -697,17 +698,23 @@ const HEX: &[u8; 16] = b"0123456789ABCDEF";
 /// alphanumerics and `-_.` as `%XX`, a space as `+` unless `raw`, and
 /// `~` kept when `raw`.
 pub(super) fn url_encode(s: &[u8], raw: bool, out: &mut Vec<u8>) {
+    encode_each(s, raw, |bytes| out.extend_from_slice(bytes));
+}
+
+/// [`url_encode`] handing each byte, or each `%XX`, to `emit`.
+#[inline]
+fn encode_each(s: &[u8], raw: bool, mut emit: impl FnMut(&[u8])) {
     for &c in s {
         if !raw && c == b' ' {
-            out.push(b'+');
+            emit(b"+");
         } else if (c < b'0' && c != b'-' && c != b'.')
             || (c < b'A' && c > b'9')
             || (c > b'Z' && c < b'a' && c != b'_')
             || (c > b'z' && (!raw || c != b'~'))
         {
-            out.extend_from_slice(&[b'%', HEX[usize::from(c >> 4)], HEX[usize::from(c & 15)]]);
+            emit(&[b'%', HEX[usize::from(c >> 4)], HEX[usize::from(c & 15)]]);
         } else {
-            out.push(c);
+            emit(&[c]);
         }
     }
 }
@@ -717,25 +724,32 @@ pub(super) fn url_encode(s: &[u8], raw: bool, out: &mut Vec<u8>) {
 /// raw.
 fn decode(s: &[u8], plus: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.len());
+    decode_each(s, plus, |c| out.push(c));
+    out
+}
+
+/// [`decode`] handing each decoded byte to `emit`, never more of them
+/// than `s` has bytes.
+#[inline]
+fn decode_each(s: &[u8], plus: bool, mut emit: impl FnMut(u8)) {
     let mut i = 0;
     while i < s.len() {
         let c = s[i];
         if plus && c == b'+' {
-            out.push(b' ');
+            emit(b' ');
         } else if c == b'%'
             && i + 2 < s.len()
             && s[i + 1].is_ascii_hexdigit()
             && s[i + 2].is_ascii_hexdigit()
         {
             let hex = |x: u8| (x as char).to_digit(16).unwrap_or(0);
-            out.push(u8::try_from(hex(s[i + 1]) * 16 + hex(s[i + 2])).unwrap_or(0));
+            emit(u8::try_from(hex(s[i + 1]) * 16 + hex(s[i + 2])).unwrap_or(0));
             i += 2;
         } else {
-            out.push(c);
+            emit(c);
         }
         i += 1;
     }
-    out
 }
 
 /// `php_url_decode(str, len)`.
@@ -854,6 +868,18 @@ impl UriParser {
 /// string(0) ""
 /// string(9) "#00#FF#2B"
 /// ```
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = urlencode(""); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $v1 = urlencode("a b"); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 32
+/// 40
+/// ```
 #[php_function]
 fn urlencode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     encoded(req, string, false)
@@ -869,15 +895,27 @@ fn urlencode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, T
 /// string(0) ""
 /// string(6) "#00#FF"
 /// ```
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = rawurlencode(str_repeat("a/", 20)); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 112
+/// ```
 #[php_function]
 fn rawurlencode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     encoded(req, string, true)
 }
 
 fn encoded(req: &mut Request, string: PhpString, raw: bool) -> Result<Owner<PhpString>, Thrown> {
-    let mut out = Vec::with_capacity(string.len() * 3);
-    url_encode(string.as_bytes(), raw, &mut out);
-    PhpString::new(req, &out)
+    // `php_url_encode_helper`: `zend_string_safe_alloc(3, len, 0, 0)`,
+    // then `zend_string_truncate`.
+    truncated(req, 3, string.len(), 0, |out| {
+        encode_each(string.as_bytes(), raw, |bytes| out.put(bytes));
+    })
 }
 
 /// `urldecode(string $string): string`.
@@ -890,10 +928,25 @@ fn encoded(req: &mut Request, string: PhpString, raw: bool) -> Result<Owner<PhpS
 /// string(4) "e900"
 /// string(4) "100%"
 /// ```
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = urldecode(""); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $v1 = urldecode("a%20b"); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 32
+/// 32
+/// ```
 #[php_function]
 fn urldecode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
-    let out = decode(string.as_bytes(), true);
-    PhpString::new(req, &out)
+    // `zend_string_alloc(ZSTR_LEN(in_str), false)`, decoded into and
+    // `ZSTR_LEN(out_str) = ...`, the allocation kept.
+    shortened(req, string.len(), |out| {
+        decode_each(string.as_bytes(), true, |c| out.byte(c));
+    })
 }
 
 /// `rawurldecode(string $string): string`.
@@ -906,8 +959,21 @@ fn urldecode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, T
 /// string(2) "~~"
 /// string(1) "%"
 /// ```
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = rawurldecode(str_repeat("%41", 14)); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 80
+/// ```
 #[php_function]
 fn rawurldecode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
-    let out = decode(string.as_bytes(), false);
-    PhpString::new(req, &out)
+    // `zend_string_alloc(ZSTR_LEN(in_str), false)`, decoded into and
+    // `ZSTR_LEN(out_str) = ...`, the allocation kept.
+    shortened(req, string.len(), |out| {
+        decode_each(string.as_bytes(), false, |c| out.byte(c));
+    })
 }

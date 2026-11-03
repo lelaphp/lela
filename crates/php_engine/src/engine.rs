@@ -30,9 +30,11 @@ use php_unit::decl::{
 };
 use php_unit::{FramelessEntry, PublishedUnit, Unit, frameless_table};
 
+use crate::api::__private::{NativeConst, NativeFunction};
 use crate::api::abi::{
-    Declarations, DependencyKind, EndFunction, Entry, Extension, ExtensionEntry, IniHandler,
-    IniStage, NativeNew, ObjectHandlers, Refusal, Start, StartupIni, States, Validation,
+    Declarations, DependencyKind, EndFunction, Entry, Extension, ExtensionEntry, FunctionRow,
+    IniHandler, IniStage, NativeNew, ObjectHandlers, Refusal, Start, StartupIni, States,
+    Validation,
 };
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
@@ -802,6 +804,9 @@ pub(crate) struct Shared {
     /// which a `FRAMELESS_ICALL_*`'s `extended_value` indexes. Computed
     /// from `functions` by the one function the compiler numbers by.
     pub(crate) frameless: Vec<FramelessEntry>,
+    /// `zend_flf_handlers`: the entry of each row of `frameless`, the
+    /// one `#[php_function]` generated for that arity (design §7.1).
+    pub(crate) frameless_entries: Vec<crate::api::__private::Frameless>,
     /// The classes Zend declares and then each extension's, in bundle
     /// order, each with its methods on it: what a `ClassId` below the
     /// request's own declarations indexes.
@@ -833,7 +838,7 @@ pub(crate) struct Shared {
     pub(crate) trampolines: Vec<MethodDecl>,
     /// The class each parameter of each native holds its argument to, by
     /// the native's number ([`parameter_classes`]).
-    pub(crate) parameter_classes: Vec<Box<[Option<ClassId>]>>,
+    pub(crate) parameter_classes: ParameterClasses,
     /// Each class's linked record, one row per row of `classes`
     /// ([`native_records`]): `ce->function_table` whole, in php's order.
     pub(crate) records: Arc<[LinkedClass<ClassId>]>,
@@ -867,6 +872,8 @@ pub(crate) struct Shared {
     pub(crate) state_slots: crate::api::request::StateSlots,
     /// `EG(ini_directives)`, each entry's master value ([`IniTable`]).
     pub(crate) ini: IniTable,
+    /// Where `include_path` stands in `ini`, found once.
+    pub(crate) include_path: Option<ini_table::DirectiveAt>,
     /// The typed entries `ini`'s master values give, which each request
     /// starts with ([`TypedIni`]).
     pub(crate) typed_ini: TypedIni,
@@ -888,7 +895,7 @@ pub(crate) struct Shared {
     pub(crate) shebang: php_compile::Shebang,
     /// The hooks the bound tier replaces ([`Tier::HOOKED`]), every unit
     /// compiled under them (design §4.3, revision 58).
-    hooked: php_compile::Hooked,
+    pub(crate) hooked: php_compile::Hooked,
     /// Whether every unit is compiled with extended info, which the
     /// host's `-e` asked for ([`EngineBuilder::extended_info`]).
     extended_info: bool,
@@ -1146,7 +1153,9 @@ fn link_enum_methods(decl: &mut ClassDecl, class: ClassId, methods: &mut Vec<Nat
     if decl.kind != php_unit::decl::ClassKind::Enum {
         return;
     }
-    for method in php_unit::enum_methods(decl.backing) {
+    let given = php_unit::enum_methods(decl.backing);
+    decl.methods.reserve_exact(given.len());
+    for method in given {
         let lowered = method.function.name.0.to_ascii_lowercase();
         let Some(served) = crate::enums::EnumMethod::of(&lowered, decl.backing) else {
             continue;
@@ -1180,26 +1189,28 @@ fn link_classes(declarations: &mut [Declarations]) -> LinkedClasses {
     // `zend_register_internal_class_with_flags` and `zend_register_functions`
     // over the class's methods: each declaration takes its methods,
     // and each method's entry is numbered in the order it is met.
-    let mut classes: Vec<ClassDecl> = Vec::new();
-    let mut modules = Vec::new();
-    let mut handlers = Vec::new();
-    let mut natives = Vec::new();
-    let mut methods = Vec::new();
+    // Each table laid down at the length it ends at, and each class's
+    // methods at theirs, as the rows are a native's for the process.
+    // Each class's declaration is built from its row straight into the
+    // table; an enum's `cases`, `from` and `tryFrom` counted as three.
+    let count = declarations
+        .iter()
+        .map(|declared| declared.classes.len())
+        .sum();
+    let entries = (declarations.iter())
+        .flat_map(|declared| &declared.classes)
+        .map(|row| row.methods() + if row.is_enum() { 3 } else { 0 })
+        .sum::<usize>();
+    let laid = Trampolines::laid(declarations);
+    let mut classes: Vec<ClassDecl> = Vec::with_capacity(count);
+    let mut modules = Vec::with_capacity(count);
+    let mut handlers = Vec::with_capacity(count);
+    let mut natives = Vec::with_capacity(count);
+    let mut methods = Vec::with_capacity(entries + laid.count);
     for (at, declared) in declarations.iter_mut().enumerate() {
-        for (mut decl, entries, table, native) in std::mem::take(&mut declared.classes) {
-            // A debug build serves an extension's table as the extension
-            // (#2113); Core's runs as whatever called it, as it always
-            // has, and keeps the identity its own tests compare.
-            #[cfg(debug_assertions)]
-            let table = match at {
-                0 => table,
-                _ => table.map(|table| crate::served::served(table, ExtensionId::at(at))),
-            };
-            handlers.push(table);
-            natives.push(native);
-            modules.push(ExtensionId::at(at));
+        for row in std::mem::take(&mut declared.classes) {
             let class = ClassId(u32::try_from(classes.len()).unwrap_or(u32::MAX));
-            for (method, entry) in entries {
+            let (mut decl, table, native) = row.declared(|decl, method, entry| {
                 // A method the declaration carries already is the one the
                 // entry serves, so the table holds the name once, as
                 // `zend_register_functions` registers each name once.
@@ -1223,14 +1234,25 @@ fn link_classes(declarations: &mut [Declarations]) -> LinkedClasses {
                     entry,
                     flags,
                 });
-            }
+            });
+            // A debug build serves an extension's table as the extension
+            // (#2113); Core's runs as whatever called it, as it always
+            // has, and keeps the identity its own tests compare.
+            #[cfg(debug_assertions)]
+            let table = match at {
+                0 => table,
+                _ => table.map(|table| crate::served::served(table, ExtensionId::at(at))),
+            };
+            handlers.push(table);
+            natives.push(native);
+            modules.push(ExtensionId::at(at));
             link_enum_methods(&mut decl, class, &mut methods);
             classes.push(decl);
         }
     }
     let bundle = declarations.get_mut(1..).unwrap_or_default();
     link_class_constants(&mut classes, bundle);
-    let trampolines = link_trampolines(&classes, bundle, &mut methods);
+    let trampolines = link_trampolines(&classes, bundle, &mut methods, laid);
     LinkedClasses {
         classes,
         modules,
@@ -1311,10 +1333,8 @@ fn method_functions(
     methods: &[NativeMethod],
     functions: usize,
 ) -> Vec<Box<[Option<Function>]>> {
-    let mut tables: Vec<Vec<Option<Function>>> = classes
-        .iter()
-        .map(|decl| vec![None; decl.methods.len()])
-        .collect();
+    let mut tables: Vec<Box<[Option<Function>]>> = Vec::with_capacity(classes.len());
+    tables.extend((classes.iter()).map(|decl| vec![None; decl.methods.len()].into_boxed_slice()));
     for (row, method) in (functions..).zip(methods) {
         let MethodAt::Declared { class, at } = method.at else {
             continue;
@@ -1327,7 +1347,7 @@ fn method_functions(
             *slot = Some(Function(row));
         }
     }
-    tables.into_iter().map(Vec::into_boxed_slice).collect()
+    tables
 }
 
 /// Each native class's linked record, as `zend_register_internal_class_ex`
@@ -1335,16 +1355,26 @@ fn method_functions(
 /// `zend_class_implements` to its interfaces: each built once every
 /// class it names is, a class standing before what it names waiting a
 /// round. One whose names never resolve has its own methods alone.
-fn native_records(classes: &[ClassDecl], keys: &ClassKeys) -> Vec<LinkedClass<ClassId>> {
-    let mut records: Vec<Option<LinkedClass<ClassId>>> = vec![None; classes.len()];
-    let mut progress = true;
+/// Every [`LAID`] records built are laid ([`LinkedClass::lay`]), so the
+/// next are built in the allocations those gave up; a record not yet
+/// built is the empty one, which holds none.
+fn native_records(classes: &[ClassDecl], keys: &ClassKeys) -> Arc<[LinkedClass<ClassId>]> {
+    // The table allocated once at its length and each record built in
+    // its row, so no second table of the records stands.
+    let mut table: Arc<[LinkedClass<ClassId>]> =
+        classes.iter().map(|_| LinkedClass::default()).collect();
+    let Some(records) = Arc::get_mut(&mut table) else {
+        return table;
+    };
+    let mut linked = vec![false; classes.len()];
+    let (mut progress, mut built) = (true, 0usize);
     while progress {
         progress = false;
         for (at, decl) in classes.iter().enumerate() {
-            if records.get(at).is_none_or(Option::is_some) {
+            if linked.get(at).is_none_or(|&linked| linked) {
                 continue;
             }
-            let built = {
+            let built_now = {
                 let lookup = |name: &[u8]| {
                     let class = keys.find(classes, name)?;
                     let at = usize::try_from(class.0).ok()?;
@@ -1352,35 +1382,42 @@ fn native_records(classes: &[ClassDecl], keys: &ClassKeys) -> Vec<LinkedClass<Cl
                         decl: classes.get(at)?,
                         bodies: None,
                         linked: true,
-                        record: records.get(at)?.as_ref().map(|record| (class, record)),
+                        record: (*linked.get(at)?).then_some((class, records.get(at)?)),
                     })
                 };
                 php_link::linked_class(decl, 0, &lookup, &|class| {
                     classes.get(usize::try_from(class.0).ok()?)
                 })
             };
-            if let (Some(record), Some(slot)) = (built, records.get_mut(at)) {
-                *slot = Some(record);
-                progress = true;
+            if let (Some(record), Some(slot), Some(done)) =
+                (built_now, records.get_mut(at), linked.get_mut(at))
+            {
+                (*slot, *done, progress) = (record, true, true);
+                built += 1;
+                if built.is_multiple_of(LAID) {
+                    LinkedClass::lay(records.iter_mut());
+                }
             }
         }
     }
-    records
-        .into_iter()
-        .zip(classes)
-        .map(|(record, decl)| {
-            record
-                .or_else(|| php_link::linked_class(decl, 0, &|_| None, &|_| None))
-                .unwrap_or_default()
-        })
-        .collect()
+    for ((record, decl), done) in records.iter_mut().zip(classes).zip(linked) {
+        if !done {
+            *record = php_link::linked_class(decl, 0, &|_| None, &|_| None).unwrap_or_default();
+        }
+    }
+    LinkedClass::lay(records.iter_mut());
+    table
 }
+
+/// How many native classes' records, or placed properties, are built
+/// between two lays of what was built.
+const LAID: usize = 32;
 
 /// Each native class's placed properties ([`placed_of`]), built as
 /// `zend_register_internal_class_ex` builds them when it links the
 /// class: each after its parent's, a class standing before its
 /// parent waiting a round, and one whose parent never resolves placed
-/// over none.
+/// over none. Laid as [`native_records`] lays the records.
 fn native_placed(
     classes: &[ClassDecl],
     records: &[LinkedClass<ClassId>],
@@ -1398,7 +1435,10 @@ fn native_placed(
         let decl = classes.get(at)?;
         Some(placed_of(class, decl, records.get(at), parent, decl_of))
     };
-    let mut progress = true;
+    // A root's parent places nothing; a parent's own placing is read
+    // where it stands, not copied.
+    let root = Placed::default();
+    let (mut progress, mut laid) = (true, 0usize);
     while progress {
         progress = false;
         for at in 0..classes.len() {
@@ -1406,27 +1446,31 @@ fn native_placed(
                 continue;
             }
             let parent = match parents.get(at).copied().flatten() {
-                None => Some(Placed::default()),
+                None => Some(&root),
                 Some(parent) => usize::try_from(parent.0)
                     .ok()
-                    .and_then(|parent| placed.get(parent)?.clone()),
+                    .and_then(|parent| placed.get(parent)?.as_ref()),
             };
-            let built = parent.and_then(|parent| place(at, &parent));
+            let built = parent.and_then(|parent| place(at, parent));
             if let (Some(built), Some(slot)) = (built, placed.get_mut(at)) {
                 *slot = Some(built);
                 progress = true;
+                laid += 1;
+                if laid.is_multiple_of(LAID) {
+                    Placed::lay(placed.iter_mut().flatten());
+                }
             }
         }
     }
-    placed
-        .into_iter()
-        .enumerate()
+    let mut placed: Vec<Placed> = (placed.into_iter().enumerate())
         .map(|(at, built)| {
             built
                 .or_else(|| place(at, &Placed::default()))
                 .unwrap_or_default()
         })
-        .collect()
+        .collect();
+    Placed::lay(&mut placed);
+    placed
 }
 
 /// Each native class's trampolines by name: every row of `methods` a
@@ -1454,6 +1498,29 @@ fn trampoline_tables(
     tables
 }
 
+/// Each native's row of [`parameter_classes`], laid one after another
+/// in one table, each native's row from where the one before it ends.
+pub(crate) struct ParameterClasses {
+    /// Where each native's row ends, by its number.
+    ends: Box<[u32]>,
+    classes: Box<[Option<ClassId>]>,
+}
+
+impl ParameterClasses {
+    /// The class the parameter at `at` of native `native` holds its
+    /// argument to; none past its row.
+    pub(crate) fn of(&self, native: usize, at: usize) -> Option<ClassId> {
+        let start = native
+            .checked_sub(1)
+            .map_or(Some(&0), |before| self.ends.get(before))?;
+        let end = self.ends.get(native)?;
+        let row = self
+            .classes
+            .get(usize::try_from(*start).ok()?..usize::try_from(*end).ok()?)?;
+        *row.get(at)?
+    }
+}
+
 /// `zend_parse_arg_object`'s class for each parameter of each native, by
 /// the native's number among the functions and then the methods: the
 /// class a parameter's type names where it names one, `?Class` among
@@ -1467,35 +1534,43 @@ fn parameter_classes(
     classes: &[ClassDecl],
     trampolines: &[MethodDecl],
     class_at: impl Fn(&[u8]) -> Option<ClassId>,
-) -> Vec<Box<[Option<ClassId>]>> {
-    let of = |decl: Option<&FunctionDecl>| -> Box<[Option<ClassId>]> {
-        decl.map_or_else(Box::default, |decl| {
-            decl.parameters
-                .iter()
-                .map(|parameter| {
-                    let named = match parameter.ty.as_ref()? {
-                        Type::Named(name) => name,
-                        Type::Nullable(inner) => match &**inner {
-                            Type::Named(name) => name,
-                            _ => return None,
-                        },
-                        _ => return None,
-                    };
-                    class_at(&named.0)
-                })
-                .collect()
-        })
+) -> ParameterClasses {
+    let class_of = |ty: Option<&Type>| {
+        let named = match ty? {
+            Type::Named(name) => name,
+            Type::Nullable(inner) => match &**inner {
+                Type::Named(name) => name,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        class_at(&named.0)
+    };
+    // A native's types read off its entries, its slots left unbuilt,
+    // and the row cut after its last class, so a native that names
+    // none holds nothing.
+    let mut laid: Vec<Option<ClassId>> = Vec::new();
+    let mut of = |decl: Option<&FunctionDecl>| -> u32 {
+        let start = laid.len();
+        if let Some(decl) = decl {
+            match decl.parameters.unbuilt() {
+                Some(entries) => laid.extend(entries.iter().map(|e| class_of((e.ty)().as_ref()))),
+                None => laid.extend(decl.parameters.iter().map(|p| class_of(p.ty.as_ref()))),
+            }
+        }
+        while laid.len() > start && laid.last().is_some_and(Option::is_none) {
+            laid.pop();
+        }
+        u32::try_from(laid.len()).unwrap_or(u32::MAX)
     };
     let method_decl = |method: &NativeMethod| native_method_decl(classes, trampolines, method.at);
-    functions
-        .iter()
-        .map(|decl| of(Some(decl)))
-        .chain(
-            methods
-                .iter()
-                .map(|method| of(method_decl(method).map(|decl| &decl.function))),
-        )
-        .collect()
+    let mut ends = Vec::with_capacity(functions.len() + methods.len());
+    ends.extend(functions.iter().map(|decl| of(Some(decl))));
+    ends.extend((methods.iter()).map(|method| of(method_decl(method).map(|decl| &decl.function))));
+    ParameterClasses {
+        ends: ends.into_boxed_slice(),
+        classes: laid.into_boxed_slice(),
+    }
 }
 
 /// `zend_declare_class_constant_ex` over a class another extension
@@ -1511,7 +1586,13 @@ fn link_class_constants(classes: &mut [ClassDecl], declarations: &mut [Declarati
             .iter_mut()
             .find(|decl| decl.name.0.eq_ignore_ascii_case(&class_name.0))
         {
-            decl.constants.extend(constants);
+            // A class that declares none of its own takes the list as
+            // it was laid, as IntlChar takes its ~600.
+            if decl.constants.is_empty() {
+                decl.constants = constants;
+            } else {
+                decl.constants.extend(constants);
+            }
         }
     }
 }
@@ -1527,8 +1608,9 @@ fn link_trampolines(
     classes: &[ClassDecl],
     declarations: &mut [Declarations],
     methods: &mut Vec<NativeMethod>,
+    laid: Trampolines,
 ) -> Vec<MethodDecl> {
-    let mut trampolines = Vec::new();
+    let mut trampolines = Vec::with_capacity(laid.count);
     let mut lay = |method: MethodDecl, entry, at: &dyn Fn(u32) -> MethodAt| {
         let index = u32::try_from(trampolines.len()).unwrap_or(u32::MAX);
         let flags = crate::attributes::Flags::of(&method.function.attributes);
@@ -1539,9 +1621,8 @@ fn link_trampolines(
         });
         trampolines.push(method);
     };
-    let own = crate::classes::trampolines();
-    let laid = (declarations.iter_mut()).flat_map(|d| std::mem::take(&mut d.trampolines));
-    for (class_name, method, entry) in own.into_iter().chain(laid) {
+    let declared = (declarations.iter_mut()).flat_map(|d| std::mem::take(&mut d.trampolines));
+    for (class_name, method, entry) in laid.own.into_iter().chain(declared) {
         let Some(at) = classes
             .iter()
             .position(|decl| decl.name.0.eq_ignore_ascii_case(&class_name.0))
@@ -1552,13 +1633,39 @@ fn link_trampolines(
         lay(method, entry, &|at| MethodAt::Trampoline { class, at });
     }
     // `zend_get_property_hook_trampoline`'s two, which no class holds.
-    for (kind, method, entry) in crate::api::request::parent_hook_trampolines() {
+    for (kind, method, entry) in laid.hooks {
         lay(method, entry, &|at| MethodAt::ParentHook { kind, at });
     }
-    for (method, entry) in crate::fiber::unlisted_functions() {
+    for (method, entry) in laid.unlisted {
         lay(method, entry, &|at| MethodAt::Unlisted { at });
     }
     trampolines
+}
+
+/// The engine's own trampolines beside how many [`link_trampolines`]
+/// lays with the bundle's, so the method entries are laid once with
+/// room for them.
+struct Trampolines {
+    own: Vec<(php_unit::decl::Name, MethodDecl, Entry)>,
+    hooks: Vec<(php_unit::decl::HookKind, MethodDecl, Entry)>,
+    unlisted: Vec<(MethodDecl, Entry)>,
+    count: usize,
+}
+
+impl Trampolines {
+    fn laid(declarations: &[Declarations]) -> Trampolines {
+        let own = crate::classes::trampolines();
+        let hooks = crate::api::request::parent_hook_trampolines();
+        let unlisted = crate::fiber::unlisted_functions();
+        let declared = declarations.iter().map(|d| d.trampolines.len());
+        let count = own.len() + hooks.len() + unlisted.len() + declared.sum::<usize>();
+        Trampolines {
+            own,
+            hooks,
+            unlisted,
+            count,
+        }
+    }
 }
 
 /// Where a unit is compiled from, as the request describes it: the name
@@ -1773,8 +1880,10 @@ impl Shared {
         origin: Origin<'_>,
         stack: StackLimit,
     ) -> Result<PublishedUnit, CompileError> {
+        // No request asked, so no request's arena is at hand.
+        let mut arena = php_compile::syntax::Arena::default();
         (self
-            .compile_shared(source, origin, stack, CompileHeap::Engine)
+            .compile_shared(source, origin, stack, CompileHeap::Engine, &mut arena)
             .unit)
             .map(|unit| self.publish_compiled(unit))
     }
@@ -1783,19 +1892,24 @@ impl Shared {
     /// engine's table and no map-pointer offset taken, for a caller that
     /// decides afterwards whether the unit is published
     /// ([`Shared::publish_compiled`]) or the request's own, and charged
-    /// to `heap` while it runs ([`CompileHeap`]).
+    /// to `heap` while it runs ([`CompileHeap`]). The parse and the
+    /// compiler's temporaries are bumped into `arena`, the asking
+    /// request's where one asked, and it is reset as the unit is made,
+    /// as php resets `CG(ast_arena)` per file
+    /// (`Z/Zend/zend_language_scanner.l:599`, `:687`): so the compiles
+    /// of a framework's files, one after another on the thread that
+    /// asked, lay their trees in the room the last one left rather than
+    /// each in memory of its own given back to the allocator.
     fn compile_shared(
         &self,
         source: &[u8],
         origin: Origin<'_>,
         stack: StackLimit,
         heap: CompileHeap<'_>,
+        arena: &mut php_compile::syntax::Arena,
     ) -> Fresh {
         let mut strings = self.interned.strings();
         let mut home = PermanentStrings::new(&self.interned.names, &mut strings, heap);
-        // A unit for every request is compiled on the thread that asked,
-        // no request's arena at hand, so it brings its own.
-        let mut arena = php_compile::syntax::Arena::default();
         let unit = compile(
             source,
             origin,
@@ -1804,7 +1918,7 @@ impl Shared {
             stack,
             &mut home,
             Laid {
-                arena: &mut arena,
+                arena,
                 room: php_compile::Room::default(),
             },
         );
@@ -1812,6 +1926,9 @@ impl Shared {
             !(unit.as_ref().ok()).is_some_and(php_compile::values::holds_counted_value),
             "a unit for every request holds a counted value"
         );
+        if let Ok(unit) = &unit {
+            home.name_classes(unit);
+        }
         let answers = home.settle(strings_kept(&unit));
         let tree = arena.parsed();
         Fresh {
@@ -1824,11 +1941,11 @@ impl Shared {
     /// `unit` published for every request: each op array given its
     /// map-pointer offset ([`assign_map_ptrs`]), which only a unit held
     /// for more than one request takes, as only what opcache persists
-    /// moves `CG(map_ptr_last)`, and its tables shrunk to what they hold
-    /// ([`Unit::compact`]).
+    /// moves `CG(map_ptr_last)`, and its tables laid in one block at
+    /// their length ([`Unit::persist`]).
     pub(crate) fn publish_compiled(&self, mut unit: Unit) -> PublishedUnit {
         assign_map_ptrs(&mut unit, &self.map_ptr_last);
-        unit.compact();
+        unit.persist();
         unit.published(None)
     }
 
@@ -2044,7 +2161,10 @@ impl Shared {
             asked,
             |(), source, _| {
                 let request = ForRequest::none(self.unbound());
-                self.compile_file(source, path, cwd, stack, request, CompileHeap::Engine)
+                // No request asked, so no request's arena is at hand.
+                let mut arena = php_compile::syntax::Arena::default();
+                let heap = CompileHeap::Engine;
+                self.compile_file(source, path, cwd, stack, request, heap, &mut arena)
             },
             |_| None,
             |unit| self.publish_compiled(unit),
@@ -2067,6 +2187,9 @@ impl Shared {
         let mut home =
             PermanentStrings::new(&self.interned.names, &mut strings, CompileHeap::Engine);
         let unit = crate::unit_cache::decode(body, &mut home);
+        if let Some(unit) = &unit {
+            home.name_classes(unit);
+        }
         home.settle(unit.is_some());
         unit
     }
@@ -2079,7 +2202,8 @@ impl Shared {
     /// the request's `CG(rtd_key_counter)` and persists the names it made
     /// ([`Request::count_keys_made`]); a unit compiled for no request
     /// starts from none. The compile is charged to `heap` while it runs
-    /// ([`CompileHeap`]).
+    /// ([`CompileHeap`]), in `arena` ([`Shared::compile_shared`]).
+    #[allow(clippy::too_many_arguments)] // the source, where it is, what asked, and where the compile is charged and laid, each one fact
     pub(crate) fn compile_file(
         &self,
         source: &[u8],
@@ -2088,6 +2212,7 @@ impl Shared {
         stack: StackLimit,
         request: ForRequest<'_>,
         heap: CompileHeap<'_>,
+        arena: &mut php_compile::syntax::Arena,
     ) -> Fresh {
         self.compile_shared(
             source,
@@ -2099,6 +2224,7 @@ impl Shared {
             },
             stack,
             heap,
+            arena,
         )
     }
 
@@ -2595,7 +2721,7 @@ impl Configuration {
         defaults: &[(Vec<u8>, Vec<u8>)],
         files: &mut crate::api::request::IniFiles,
         entries: &[u8],
-        constants: &[ConstDecl],
+        constants: &[&'static [NativeConst]],
     ) -> Configuration {
         let table = defaults
             .iter()
@@ -2640,7 +2766,7 @@ impl Configuration {
 /// extension's; a `${…}` reads what the text set before it, then the
 /// process's environment; and `php_ini_parser_cb` over the table.
 struct Startup<'c> {
-    constants: &'c [ConstDecl],
+    constants: &'c [&'static [NativeConst]],
     table: Vec<(Vec<u8>, Configured)>,
     /// `is_special_section`: the last section header was `[PATH…]` or
     /// `[HOST…]`, where `extension=` is an entry like any other.
@@ -2659,7 +2785,13 @@ struct Startup<'c> {
 /// string, a double as `precision` digits write it.
 fn constant_text(constants: &[ConstDecl], name: &[u8], precision: i32) -> Option<Vec<u8>> {
     let decl = constants.iter().find(|c| &*c.name.0 == name)?;
-    match &decl.value {
+    value_text(&decl.value, precision)
+}
+
+/// A constant's value as the ini grammar substitutes it, `precision`
+/// digits for a double; none for a value it does not write.
+fn value_text(value: &ConstExpr, precision: i32) -> Option<Vec<u8>> {
+    match value {
         ConstExpr::Null | ConstExpr::Bool(false) => Some(Vec::new()),
         ConstExpr::Bool(true) => Some(b"1".to_vec()),
         ConstExpr::Long { value: n, .. } => Some(n.to_string().into_bytes()),
@@ -2708,7 +2840,9 @@ impl crate::ini_syntax::Host for Startup<'_> {
     type Error = std::convert::Infallible;
 
     fn constant(&mut self, name: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
-        Ok(constant_text(self.constants, name, 1))
+        let mut entries = self.constants.iter().flat_map(|entries| entries.iter());
+        let found = entries.find(|entry| entry.name == name);
+        Ok(found.and_then(|entry| value_text(&(entry.value)(), 1)))
     }
 
     fn directive(&mut self, name: &[u8]) -> Option<Vec<u8>> {
@@ -3205,9 +3339,13 @@ fn function_table(
     extensions: &[ExtensionEntry],
     declarations: &mut [Declarations],
     registered: &[usize],
-    additional: Vec<(FunctionDecl, Entry)>,
+    additional: Vec<FunctionRow>,
     ini: &IniTable,
-) -> (Vec<Option<ExtensionId>>, Vec<(FunctionDecl, Entry)>) {
+) -> (
+    Vec<Option<ExtensionId>>,
+    Vec<FunctionDecl>,
+    Vec<crate::api::abi::FunctionEntries>,
+) {
     let list = ini.master(b"disable_functions").unwrap_or_default();
     let disabled = disabled_functions(list);
     // `module_registry` numbers Core 0 and the bundle from 1.
@@ -3223,7 +3361,7 @@ fn function_table(
             .map(|declared| std::mem::take(&mut declared.functions))
             .unwrap_or_default()
     };
-    let mut table: Vec<(Option<ExtensionId>, (FunctionDecl, Entry))> = take(0)
+    let mut table: Vec<(Option<ExtensionId>, FunctionRow)> = take(0)
         .into_iter()
         .map(|native| (Some(ExtensionId::CORE), native))
         .collect();
@@ -3258,10 +3396,20 @@ fn function_table(
     // A host's natives go under `standard` once every module has
     // started (`Z/main/main.c:2359-2366`).
     table.extend(additional.into_iter().map(|native| (standard, native)));
-    table
-        .into_iter()
-        .filter(|(_, (decl, _))| !disabled.contains(&decl.name.0.to_ascii_lowercase().as_slice()))
-        .unzip()
+    // `zend_register_functions` over each entry left: the declaration
+    // built from it, a disabled one never registered, each column laid
+    // down at the length it ends at.
+    table.retain(|(_, row)| !disabled.contains(&row.native.name.to_ascii_lowercase().as_slice()));
+    let mut modules = Vec::with_capacity(table.len());
+    let mut functions = Vec::with_capacity(table.len());
+    let mut entries = Vec::with_capacity(table.len());
+    for (module, row) in table {
+        let (decl, entry) = row.declaration();
+        modules.push(module);
+        functions.push(decl);
+        entries.push(entry);
+    }
+    (modules, functions, entries)
 }
 
 /// `ext/standard`'s natives in its own order with the engine's
@@ -3269,16 +3417,15 @@ fn function_table(
 /// function it names, whichever side declared that one, and at the end
 /// where the stub's neighbour is not in the list.
 fn at_stub_places(
-    engine: Vec<(StubPlace, (FunctionDecl, Entry))>,
-    own: impl Iterator<Item = (FunctionDecl, Entry)>,
-) -> Vec<(FunctionDecl, Entry)> {
+    engine: Vec<(StubPlace, FunctionRow)>,
+    own: impl Iterator<Item = FunctionRow>,
+) -> Vec<FunctionRow> {
     let mut waiting = engine;
-    let mut placed: Vec<(FunctionDecl, Entry)> = Vec::new();
-    let settle = |waiting: &mut Vec<(StubPlace, (FunctionDecl, Entry))>,
-                  placed: &mut Vec<(FunctionDecl, Entry)>| {
+    let mut placed: Vec<FunctionRow> = Vec::new();
+    let settle = |waiting: &mut Vec<(StubPlace, FunctionRow)>, placed: &mut Vec<FunctionRow>| {
         while let Some(at) = waiting
             .iter()
-            .position(|(place, _)| place.follows(placed.last().map(|(decl, _)| decl)))
+            .position(|(place, _)| place.follows(placed.last().map(|row| row.native.name)))
         {
             let (_, native) = waiting.remove(at);
             placed.push(native);
@@ -3354,7 +3501,7 @@ pub struct EngineBuilder {
     /// Where the engine end writes ([`EngineBuilder::ends_into`]).
     ends_into: Option<Box<dyn OutputSink + Send>>,
     additional_extension: Option<Extension>,
-    additional_functions: Vec<(FunctionDecl, Entry)>,
+    additional_functions: Vec<FunctionRow>,
     shebang: php_compile::Shebang,
     shebang_while: Option<&'static str>,
     cli_shell: bool,
@@ -3456,8 +3603,11 @@ impl EngineBuilder {
         mut self,
         extensions: impl IntoIterator<Item = E>,
     ) -> EngineBuilder {
-        self.extensions
-            .extend(extensions.into_iter().map(Into::into));
+        let extensions = extensions.into_iter();
+        // Room for the tier's extension and the host's own, which
+        // [`EngineBuilder::build`] appends, so the list is laid once.
+        (self.extensions).reserve_exact(extensions.size_hint().0 + 2);
+        self.extensions.extend(extensions.map(Into::into));
         self
     }
 
@@ -3535,8 +3685,8 @@ impl EngineBuilder {
     /// the order given (`Z/main/main.c:2359-2366`), and under no
     /// extension where the bundle has no `standard`.
     #[must_use]
-    pub fn additional_functions(mut self, natives: Vec<(FunctionDecl, Entry)>) -> EngineBuilder {
-        self.additional_functions.extend(natives);
+    pub fn additional_functions(mut self, natives: &'static [NativeFunction]) -> EngineBuilder {
+        (self.additional_functions).extend(natives.iter().map(FunctionRow::of));
         self
     }
 
@@ -3633,32 +3783,22 @@ impl EngineBuilder {
             suppliers = suppliers.without_shell();
         }
         let supplied = suppliers.resolved();
-        // What a `MINIT` registers into another extension's tables, as
-        // `php_image_register_handler` adds `IMAGETYPE_SVG` to
-        // `standard`'s constants: each extension's constants rewritten
-        // once with every value the bundle registered.
-        for extension in &mut extensions {
-            let declared = &mut extension.declarations;
-            if let Some(link) = declared.constants_link.take() {
-                declared.constants = link(
-                    std::mem::take(&mut declared.constants),
-                    &supplied.registered,
-                );
-            }
-        }
         // The declarations apart from the rest of each entry, by
         // `ExtensionId`: Core's at 0, as `module_registry` numbers it.
+        // Each list laid at the length it ends at, the entries with
+        // room for Core's, which goes first once the tables are built.
         let Extension {
             entry: core,
             declarations: core_declared,
         } = crate::core::extension();
-        let (mut extensions, declared): (Vec<ExtensionEntry>, Vec<Declarations>) = extensions
-            .into_iter()
-            .map(|extension| (extension.entry, extension.declarations))
-            .unzip();
-        let mut declarations = Vec::with_capacity(declared.len() + 1);
+        let mut declarations = Vec::with_capacity(extensions.len() + 1);
         declarations.push(core_declared);
-        declarations.extend(declared);
+        let mut entries: Vec<ExtensionEntry> = Vec::with_capacity(extensions.len() + 1);
+        for extension in extensions {
+            entries.push(extension.entry);
+            declarations.push(extension.declarations);
+        }
+        let mut extensions = entries;
         let core_ini = (CORE_INI.iter())
             .map(|(n, v)| (n.as_bytes().to_vec(), v.map(|v| v.as_bytes().to_vec())));
         let mut ini = IniTable::register(core_ini, &extensions);
@@ -3698,14 +3838,18 @@ impl EngineBuilder {
             Some(name) if on(name) => php_compile::Shebang::Skipped,
             _ => self.shebang,
         };
-        let (function_modules, natives): (_, Vec<(FunctionDecl, Entry)>) = function_table(
+        let (function_modules, functions, natives) = function_table(
             &extensions,
             &mut declarations,
             &registered,
             additional,
             &ini,
         );
-        let (functions, mut entries): (Vec<FunctionDecl>, Vec<Entry>) = natives.into_iter().unzip();
+        let (mut entries, frameless_entries): (Vec<Entry>, Vec<_>) = natives.into_iter().unzip();
+        let rows = frameless_entries.iter().map(|entries| entries.len()).sum();
+        let mut laid = Vec::with_capacity(rows);
+        laid.extend(frameless_entries.into_iter().flatten().copied());
+        let frameless_entries = laid;
         let Intercepted {
             replaced,
             by: intercepted_by,
@@ -3719,7 +3863,11 @@ impl EngineBuilder {
             .iter()
             .map(|decl| crate::attributes::Flags::of(&decl.attributes))
             .collect();
-        let frameless = frameless_table(functions.iter());
+        // `frameless_table` collects through a `flat_map`, whose rows it
+        // cannot count first; the table is cut to them as it is kept.
+        let frameless = frameless_table(functions.iter())
+            .into_boxed_slice()
+            .into_vec();
         let function_names = Names::over(&functions);
         let LinkedClasses {
             classes,
@@ -3731,7 +3879,7 @@ impl EngineBuilder {
         } = link_classes(&mut declarations);
         let class_keys = ClassKeys::over(&classes);
         let class_at = |name: &[u8]| class_keys.find(&classes, name);
-        let records: Arc<[LinkedClass<ClassId>]> = native_records(&classes, &class_keys).into();
+        let records = native_records(&classes, &class_keys);
         let method_functions = method_functions(&classes, &methods, functions.len());
         let trampoline_tables =
             trampoline_tables(classes.len(), &methods, &trampolines, functions.len());
@@ -3747,12 +3895,34 @@ impl EngineBuilder {
         // so Zend's constants stand before the bundle's, as
         // `zend_register_standard_constants` runs before any `MINIT`.
         extensions.insert(0, core);
-        let (constant_modules, constants): (Vec<ExtensionId>, Vec<ConstDecl>) =
-            (declarations.into_iter().enumerate())
-                .flat_map(|(at, declared)| {
-                    (declared.constants.into_iter()).map(move |decl| (ExtensionId::at(at), decl))
-                })
-                .unzip();
+        // Each column laid down at the length it ends at: each
+        // declaration built from its static entry into the table, with
+        // room for what a `MINIT` registers into another extension's
+        // constants, one per value the bundle registered, as
+        // `php_image_register_handler` adds `IMAGETYPE_SVG` to
+        // `standard`'s: the extension's constants rewritten once with
+        // those values, and what that adds standing after its own.
+        let count = (declarations.iter())
+            .flat_map(|declared| &declared.constants)
+            .map(|entries| entries.len())
+            .sum::<usize>()
+            + supplied.registered.iter().count();
+        let mut constant_modules: Vec<ExtensionId> = Vec::with_capacity(count);
+        let mut constants: Vec<ConstDecl> = Vec::with_capacity(count);
+        for (at, declared) in declarations.into_iter().enumerate() {
+            let own = constants.len();
+            let entries = declared.constants.iter().flat_map(|entries| entries.iter());
+            constants.extend(entries.map(NativeConst::declaration));
+            if let Some(link) = declared.constants_link {
+                let added = link(
+                    constants.get_mut(own..).unwrap_or_default(),
+                    &supplied.registered,
+                );
+                constants.extend(added);
+            }
+            let declared_here = constants.len().saturating_sub(own);
+            constant_modules.extend(std::iter::repeat_n(ExtensionId::at(at), declared_here));
+        }
         let mut names = permanent_names(&extensions, &functions, &classes, &constants, &ini);
         // What the host set for an entry its `on_modify` takes as the
         // engine starts, interned as `zend_register_ini_entries_ex`
@@ -3765,7 +3935,7 @@ impl EngineBuilder {
         let constant_values = constant_values(&constants, &mut names);
         let constant_names = Names::over(&constants);
         let default_strings = default_strings(&functions, &classes);
-        let mut strings = Strings::new();
+        let mut strings = names.beside();
         let sapi_names = crate::constants::host_names(&mut strings, self.sapi_name);
         let interned = crate::arena::Interned {
             names: Arc::new(names),
@@ -3798,6 +3968,7 @@ impl EngineBuilder {
                 function_modules,
                 function_flags,
                 frameless,
+                frameless_entries,
                 classes,
                 class_keys,
                 class_modules,
@@ -3817,6 +3988,7 @@ impl EngineBuilder {
                 engine_states: States::new(),
                 state_slots: crate::api::request::StateSlots::default(),
                 typed_ini: TypedIni::of(|name| ini.master(name)),
+                include_path: ini.at(b"include_path"),
                 ini,
                 constant_values,
                 sapi_names,
@@ -4013,10 +4185,22 @@ fn default_strings(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings
             .iter()
             .flat_map(|decl| decl.methods.iter().map(|method| &method.function)),
     );
+    // A native's defaults read off its entries, its slots left unbuilt.
     for function in declared {
-        for parameter in &function.parameters {
-            if let ParameterDefault::Expr(ConstExpr::Str(written)) = &parameter.default {
-                strings.intern(written).ok();
+        match function.parameters.unbuilt() {
+            Some(entries) => {
+                for default in entries.iter().filter_map(|entry| entry.default) {
+                    if let ConstExpr::Str(written) = default() {
+                        strings.intern(&written).ok();
+                    }
+                }
+            }
+            None => {
+                for parameter in &function.parameters {
+                    if let ParameterDefault::Expr(ConstExpr::Str(written)) = &parameter.default {
+                        strings.intern(written).ok();
+                    }
+                }
             }
         }
     }
@@ -4155,6 +4339,19 @@ impl<'a> PermanentStrings<'a> {
         }
     }
 
+    /// Each class `unit` declares by name named a class's, so the string
+    /// the compile made of it takes a class cache as it is published, as
+    /// `zend_compile_class_decl` allocates one on `ce->name`
+    /// (`Z/Zend/zend_compile.c:9305`); an anonymous class's name, which
+    /// holds a NUL, takes none.
+    fn name_classes(&mut self, unit: &Unit) {
+        for decl in &unit.classes {
+            if !decl.name.0.contains(&0) {
+                self.made.class_name(&decl.name.0);
+            }
+        }
+    }
+
     /// The compile ended: the request's copies given back, as opcache's
     /// persist frees them once the unit is in its segment; what it made
     /// put in the table where its unit stands, `kept`, and given back
@@ -4271,15 +4468,62 @@ fn permanent_names(
     constants: &[ConstDecl],
     ini: &IniTable,
 ) -> Strings {
-    let mut names = Strings::new();
+    // The walk counted before it interns, so the table is laid once,
+    // with the constants' string values [`constant_values`] interns next:
+    // `Strings::with_capacity` keeps a table at most three quarters full,
+    // and about a quarter of what the walk asks for is a string it has
+    // laid already, a method's name in many classes and a property's
+    // (9,608 strings for 12,224 asks on the bundle at 00234a3d8).
+    let values = (constants.iter())
+        .filter(|decl| matches!(decl.value, ConstExpr::Str(_)))
+        .count();
+    let mut asks = classes.len() + KNOWN_STRINGS.len() + values;
+    permanent_walk(extensions, functions, classes, constants, ini, &mut |_| {
+        asks += 1;
+    });
+    // Each class's name first, with the class cache
+    // `zend_register_internal_class_ex` allocates on it.
+    let mut names = Strings::with_capacity(asks - asks / 4)
+        .naming_classes(classes.iter().map(|decl| &*decl.name.0));
     names.intern_known(&KNOWN_STRINGS.map(str::as_bytes));
+    permanent_walk(
+        extensions,
+        functions,
+        classes,
+        constants,
+        ini,
+        &mut |bytes| {
+            names.intern(bytes).ok();
+        },
+    );
+    names
+}
+
+/// Each name [`permanent_names`] interns after the classes' names and
+/// the known strings, handed to `ask` in the order php interns them,
+/// a key that is its name as declared left out, as its name was asked
+/// for already. A key is lowercased into one buffer and a property's
+/// name mangled into another, so the walk allocates nothing per key.
+fn permanent_walk(
+    extensions: &[ExtensionEntry],
+    functions: &[FunctionDecl],
+    classes: &[ClassDecl],
+    constants: &[ConstDecl],
+    ini: &IniTable,
+    ask: &mut impl FnMut(&[u8]),
+) {
+    let mut buffer: Vec<u8> = Vec::with_capacity(256);
+    let mut lowered = |bytes: &[u8], ask: &mut dyn FnMut(&[u8])| {
+        buffer.clear();
+        buffer.extend(bytes.iter().map(u8::to_ascii_lowercase));
+        ask(&buffer);
+    };
+    let mut mangled: Vec<u8> = Vec::with_capacity(256);
     for extension in extensions {
-        names
-            .intern(&extension.name.as_bytes().to_ascii_lowercase())
-            .ok();
+        lowered(extension.name.as_bytes(), ask);
         // What its `MINIT` interns, `zend_string_init_interned(..., 1)`.
         for bytes in &extension.interned {
-            names.intern(bytes).ok();
+            ask(bytes);
         }
     }
     let declared = functions
@@ -4293,45 +4537,52 @@ fn permanent_names(
         }))
         .chain(constants.iter().map(|decl| &decl.name));
     for name in declared {
-        names.intern(&name.0).ok();
+        ask(&name.0);
     }
     // `prop_info->name`, the key a protected or a private property's
     // row is held under, mangled and interned as it is declared.
     for decl in classes {
         for property in &decl.properties {
             if let Some(prefix) = php_compile::mangling(property.visibility, &decl.name.0) {
-                names
-                    .intern(&[prefix.as_slice(), &property.name.0].concat())
-                    .ok();
+                mangled.clear();
+                mangled.extend_from_slice(&prefix);
+                mangled.extend_from_slice(&property.name.0);
+                ask(&mangled);
             }
         }
     }
     // Each auto-global is registered under `zend_string_init_interned`.
     for global in AUTO_GLOBALS {
-        names.intern(global.name()).ok();
+        ask(global.name());
     }
+    // The function table's and the class table's keys. An alias is
+    // asked for whatever its case, as nothing asked for its name.
     let keyed = functions
         .iter()
         .map(|decl| &decl.name)
         .chain(classes.iter().flat_map(|decl| {
             std::iter::once(&decl.name)
-                .chain(&decl.aliases)
                 .chain(decl.methods.iter().map(|method| &method.function.name))
         }));
     for name in keyed {
-        names.intern(&name.0.to_ascii_lowercase()).ok();
+        if name.0.iter().any(u8::is_ascii_uppercase) {
+            lowered(&name.0, ask);
+        }
+    }
+    for alias in classes.iter().flat_map(|decl| &decl.aliases) {
+        lowered(&alias.0, ask);
     }
     for decl in classes {
         for constant in &decl.constants {
             if let ConstExpr::Str(value) = &constant.value {
-                names.intern(value).ok();
+                ask(value);
             }
         }
     }
     for Directive { name, value, .. } in ini.rows() {
-        names.intern(name).ok();
+        ask(name);
         if let Some(value) = value {
-            names.intern(value).ok();
+            ask(value);
         }
     }
     // `gen_stub.php`'s attribute arguments, `zend_string_init_interned`
@@ -4354,10 +4605,9 @@ fn permanent_names(
         .chain(constants.iter().flat_map(|decl| &decl.attributes));
     for argument in attributed.flat_map(|attribute| &attribute.arguments) {
         if let ConstExpr::Str(written) = &argument.value {
-            names.intern(written).ok();
+            ask(written);
         }
     }
-    names
 }
 
 /// `zend_register_constant` at `MINIT`: each constant's value, a string
@@ -6368,7 +6618,7 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &PublishedUnit, kind: Sourc
     // only where the entry recorded them); the compile that put the
     // script in the cache raised them, and a request php serves without
     // the cache compiles and raises them each time.
-    let replayed = !req.accel_hit(unit) || req.ini_flag(b"opcache.record_warnings");
+    let replayed = !req.accel_hit(unit) || req.typed_ini().record_warnings;
     for raised in unit.diagnostics.iter().filter(|_| replayed) {
         req.note_error_in(
             raised.level,

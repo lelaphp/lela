@@ -1965,6 +1965,7 @@ impl PDOStatement {
         #[php(default = PDO::FETCH_DEFAULT)] mode: Raw<i64>,
         args: Variadic<Value>,
     ) -> Result<Owner<PhpArray>, Thrown> {
+        let args: Vec<Value> = args.collect();
         fetch::fetch_all(req, this.object(), mode, &args)
     }
 
@@ -2270,6 +2271,7 @@ impl PDOStatement {
         mode: i64,
         args: Variadic<Value>,
     ) -> Result<True, Thrown> {
+        let args: Vec<Value> = args.collect();
         fetch::set_fetch_mode(req, this.object(), mode, &args)
     }
 

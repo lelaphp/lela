@@ -730,6 +730,44 @@ impl Save {
             }
         })
     }
+
+    /// A canonical form held in memory, written to `path` opened through
+    /// `req`'s wrappers in chunks of at most `INT_MAX` bytes. What closing
+    /// the buffer answers, or [`C14nOut::Failed`] where the open, a write
+    /// or the close fails.
+    pub fn c14n_file(
+        req: &mut Request,
+        path: &[u8],
+        bytes: &[u8],
+    ) -> (C14nOut, Vec<Raised>, Option<Thrown>) {
+        let p = cstr(path);
+        let most = usize::try_from(c_int::MAX).unwrap_or(usize::MAX);
+        Raised::capture_io(req, None, || {
+            // SAFETY: a NUL-terminated path, no encoder and no compression.
+            let out = unsafe {
+                sys::xmlOutputBufferCreateFilename(p.as_ptr().cast(), ptr::null_mut(), 0)
+            };
+            if out.is_null() {
+                return C14nOut::Failed;
+            }
+            let mut wrote = true;
+            for chunk in bytes.chunks(most) {
+                let len = c_int::try_from(chunk.len()).unwrap_or(c_int::MAX);
+                // SAFETY: the live buffer and `len` readable bytes.
+                wrote = unsafe { sys::xmlOutputBufferWrite(out, len, chunk.as_ptr().cast()) } >= 0;
+                if !wrote {
+                    break;
+                }
+            }
+            // SAFETY: the buffer, closed once; it answers the bytes it wrote.
+            let closed = unsafe { sys::xmlOutputBufferClose(out) };
+            if wrote && closed >= 0 {
+                C14nOut::Written(i64::from(closed))
+            } else {
+                C14nOut::Failed
+            }
+        })
+    }
 }
 
 /// Where the canonical bytes go.

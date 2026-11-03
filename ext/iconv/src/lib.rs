@@ -156,19 +156,19 @@ pub fn extension() -> Extension {
         system: true,
     };
     ExtensionBuilder::default()
-        .functions(vec![
-            iconv_strlen::declared(),
-            iconv_substr::declared(),
-            iconv_strpos::declared(),
-            iconv_strrpos::declared(),
-            mime::iconv_mime_encode::declared(),
-            mime::iconv_mime_decode::declared(),
-            mime::iconv_mime_decode_headers::declared(),
-            iconv::declared(),
-            iconv_set_encoding::declared(),
-            iconv_get_encoding::declared(),
+        .functions(&[
+            iconv_strlen::DECLARED,
+            iconv_substr::DECLARED,
+            iconv_strpos::DECLARED,
+            iconv_strrpos::DECLARED,
+            mime::iconv_mime_encode::DECLARED,
+            mime::iconv_mime_decode::DECLARED,
+            mime::iconv_mime_decode_headers::DECLARED,
+            iconv::DECLARED,
+            iconv_set_encoding::DECLARED,
+            iconv_get_encoding::DECLARED,
         ])
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .ini(Kind::ALL.map(ini).to_vec())
         .on_modify(b"iconv.input_encoding", on_input_encoding)
         .on_modify(b"iconv.output_encoding", on_output_encoding)

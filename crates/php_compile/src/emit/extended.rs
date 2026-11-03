@@ -130,9 +130,9 @@ mod tests {
         let function = unit
             .functions
             .first()
-            .map(|(_, body)| body.oplines.clone())
+            .map(|(_, body)| body.oplines.to_vec())
             .unwrap_or_default();
-        (unit.main.oplines.clone(), function)
+        (unit.main.oplines.to_vec(), function)
     }
 
     fn opcodes(oplines: &[Opline]) -> Vec<Opcode> {

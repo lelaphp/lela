@@ -1315,7 +1315,20 @@ impl RecursiveArrayIterator {
 
     /// `RecursiveArrayIterator::getChildren(): ?RecursiveArrayIterator`: an
     /// object of this class over the element, or the element itself where
-    /// it is one already; the witness is the class's.
+    /// it is one already; the class's witness holds the first.
+    ///
+    /// Where this class is abstract, the child is refused with the `Error`
+    /// `object_init_ex` raises and no constructor is called. The fence
+    /// pins this engine's side of `trace:spl-getchildren-abstract-child`:
+    ///
+    /// ```php
+    /// abstract class RI extends RecursiveArrayIterator {}
+    /// $ri = (new ArrayObject([[1]], 0, 'RI'))->getIterator();
+    /// try { $ri->getChildren(); } catch (Error $e) { echo $e->getMessage(); }
+    /// ```
+    /// ```expect
+    /// Cannot instantiate abstract class RI
+    /// ```
     #[php(tentative)]
     fn getChildren(
         req: &mut Request,
