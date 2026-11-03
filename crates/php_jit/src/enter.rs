@@ -110,7 +110,8 @@ pub(crate) struct ExitCtx<'a, R = Request> {
     /// The request's addresses the trace's code reads, the headers of the
     /// calls it pushes in place and the cache slots it reads ([`Images`]).
     images: *const usize,
-    /// The place on the stack of the frame the trace is entered on.
+    /// The place on the stack of the frame the trace is entered on, and,
+    /// where it escapes, of the frame it escaped into.
     root: u32,
     /// Not zero where the trace pushes and makes its calls in place in
     /// this request: each one's header is the request's, and the caches of
@@ -1418,7 +1419,7 @@ pub(crate) fn enter<'t>(
     // the room of a frame on the request's stack, and the body is the
     // trace's, as the prologue asks.
     let answer = unsafe { entry(&raw mut cx, room.as_ptr(), trace.body().as_ptr()) };
-    let (pending, by) = (cx.take_pending(), cx.trace);
+    let (pending, by, escaped) = (cx.take_pending(), cx.trace, cx.root);
     tier::set_trace_num(req, before);
     match pending {
         Some(Pending::Panic(payload)) => resume_unwind(payload),
@@ -1456,9 +1457,14 @@ pub(crate) fn enter<'t>(
             tier::stand(req, frame, header);
             Left::Interrupted(frame)
         }
+        // The frame the escape returned into, which its code hands back.
         Answer::Escaped => {
-            let frame =
-                tier::current(req).ok_or_else(|| internal("a trace left no frame standing"))?;
+            let frame = FrameRef(escaped);
+            debug_assert_eq!(
+                tier::current(req),
+                Some(frame),
+                "an escape hands back the innermost frame"
+            );
             Left::Escaped(frame)
         }
         Answer::Returned => Left::Returned,
