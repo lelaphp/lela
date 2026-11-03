@@ -963,13 +963,13 @@ pub(crate) struct Placed {
     /// The declared instance properties in slot order, each the row of
     /// the class that declared it: `ce->properties_info_table` over
     /// `ce->default_properties_table` ([`Request::placed_properties`]).
-    slots: Box<[PropertyInfo]>,
+    slots: php_link::Column<PropertyInfo>,
     /// What each row of the class's linked record's `properties`,
     /// `ce->properties_info`, places its name at, by the row's position:
     /// what `zend_get_property_offset` reads off the
     /// `zend_property_info` its one find answers. Empty for a class with
     /// no record.
-    rows: Box<[RowPlace]>,
+    rows: php_link::Column<RowPlace>,
     /// The slots `do_inherit_property` leaves `IS_UNDEF` in
     /// `default_properties_table` over the lineage, one for each property
     /// a class redeclares over its parent's: php's object keeps them
@@ -987,6 +987,16 @@ impl Placed {
     /// [`Placed::holes`].
     pub(crate) fn holes(&self) -> u32 {
         self.holes
+    }
+
+    /// Each of `placed`'s columns laid as a range of one table, as
+    /// [`php_link::LinkedClass::lay`] lays the native classes' records.
+    pub(crate) fn lay<'p>(placed: impl IntoIterator<Item = &'p mut Placed>) {
+        let (slots, rows): (Vec<_>, Vec<_>) = (placed.into_iter())
+            .map(|placed| (&mut placed.slots, &mut placed.rows))
+            .unzip();
+        php_link::Column::lay(slots);
+        php_link::Column::lay(rows);
     }
 }
 

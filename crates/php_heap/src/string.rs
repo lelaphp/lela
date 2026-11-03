@@ -366,6 +366,55 @@ impl Str {
         Str(header)
     }
 
+    /// Lay a string of `len` bytes down at `at`, an allocation of
+    /// [`Str::allocation_size`] bytes, from `parts` copied one after the
+    /// other, with one owner: php's `zend_string_alloc` and a `memcpy`
+    /// per part. A part past `len` is cut where `len` ends, and bytes the
+    /// parts leave short of it are zero, so every byte is written once
+    /// whatever `parts` holds.
+    ///
+    /// # Safety
+    ///
+    /// `at` is writable for [`Str::allocation_size`] of `len` bytes and
+    /// holds nothing else.
+    pub(crate) unsafe fn init_parts<'a>(
+        at: NonNull<u8>,
+        len: usize,
+        parts: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Str {
+        let header: NonNull<StrHeader> = at.cast();
+        // SAFETY: the caller's allocation is at least the header and the
+        // bytes, and nothing else holds it.
+        unsafe {
+            header.as_ptr().write(StrHeader {
+                gc: Refcounted::new(ZvalType::String, gc::NOT_COLLECTABLE),
+                h: Cell::new(0),
+                len,
+            });
+        }
+        // SAFETY: the bytes and the NUL sit right after the header,
+        // inside the same allocation the caller gave.
+        let val = unsafe { at.as_ptr().add(HEADER) };
+        let mut written = 0;
+        for part in parts {
+            let n = part.len().min(len - written);
+            // SAFETY: `written <= len`, so the place is inside the bytes
+            // or the NUL after them.
+            let to = unsafe { val.add(written) };
+            // SAFETY: `written + n <= len`, so the copy stays inside the
+            // `len` bytes, and a fresh allocation cannot overlap a part.
+            unsafe { to.copy_from_nonoverlapping(part.as_ptr(), n) };
+            written += n;
+        }
+        // SAFETY: `written <= len`, so the place is inside the bytes or
+        // the NUL after them.
+        let rest = unsafe { val.add(written) };
+        // SAFETY: the bytes from `written` to `len` and the NUL after
+        // them are inside the allocation.
+        unsafe { rest.write_bytes(0, len - written + 1) };
+        Str(header)
+    }
+
     /// `zend_string_extend(s, ZSTR_LEN(s) + ZSTR_LEN(tail), 0)` and the
     /// `memcpy` of `tail` after the old bytes, the arm of
     /// `concat_function` (`Z/Zend/zend_operators.c:2125-2155`) that writes
@@ -840,6 +889,7 @@ impl Sizing {
     /// the `Err` carries for the heap to refuse or end on before anything
     /// is asked for. Its third number is the aligned header the product is
     /// added to, the empty string's where no `l` is left.
+    #[inline] // `_ZSTR_STRUCT_SIZE` and `ZEND_MM_SAFE_ADDRESS_GUARDED`, in the line of every ask
     pub fn bytes(self, len: usize) -> Result<usize, String> {
         let (n, m) = match self {
             Sizing::Alloc => return Ok(Str::allocation_size(len)),
@@ -850,10 +900,15 @@ impl Sizing {
         let header = Str::allocation_size(product.map_or(0, |product| len - product));
         product
             .and_then(|product| product.checked_add(header))
-            .ok_or_else(|| {
-                format!("Possible integer overflow in memory allocation ({n} * {m} + {header})")
-            })
+            .ok_or_else(|| overflowed(n, m, header))
     }
+}
+
+/// [`Sizing::bytes`]'s refusal, out of the line of every size it answers.
+#[cold]
+#[inline(never)]
+fn overflowed(n: usize, m: usize, header: usize) -> String {
+    format!("Possible integer overflow in memory allocation ({n} * {m} + {header})")
 }
 
 /// A home for interned strings: php's `zend_new_interned_string` behind

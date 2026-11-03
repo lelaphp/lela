@@ -391,10 +391,11 @@ pub(crate) const DECLINED: u32 = u32::MAX - 3;
 /// at (`types::Op::Back`'s `escapes`): php's `jit_stub_trace_escape`,
 /// which no exit point numbers, so no exit line is written and no word is
 /// bumped. Past every [`ExitId`](crate::types::ExitId), and none of
-/// [`ABANDONED`], [`UNWOUND`], [`INTERRUPTED`] and [`DECLINED`]. Nothing is
-/// stored, since the trace knows nothing of the frame it returned into;
-/// `enter` hands back the frame that stands, at the opline the return
-/// left it, whose handler `dispatch` runs as php's interpreter does: where
+/// [`ABANDONED`], [`UNWOUND`], [`INTERRUPTED`] and [`DECLINED`]. Nothing
+/// of the frame it returned into is stored but its place, at [`ROOT_AT`],
+/// since the trace knows nothing else of it; `enter` hands that frame
+/// back, at the opline the return left it, whose handler `dispatch` runs
+/// as php's interpreter does: where
 /// the code found no trace compiled there it could go on into
 /// ([`Escapes`]).
 pub(crate) const ESCAPED: u32 = u32::MAX - 4;
@@ -443,7 +444,8 @@ pub(crate) const IMAGES_AT: i32 = 64;
 
 /// Where compiled code reads, in the `ExitCtx`, the place on the stack of
 /// the frame the trace is entered on, a `u32`: the caller a call it makes
-/// in place from that frame names.
+/// in place from that frame names. An escape ([`ESCAPED`]) writes there
+/// the place of the frame it returned into, which `enter` hands back.
 pub(crate) const ROOT_AT: i32 = 72;
 
 /// Where compiled code reads, in the `ExitCtx`, whether it pushes and

@@ -1355,16 +1355,26 @@ fn method_functions(
 /// `zend_class_implements` to its interfaces: each built once every
 /// class it names is, a class standing before what it names waiting a
 /// round. One whose names never resolve has its own methods alone.
+/// Every [`LAID`] records built are laid ([`LinkedClass::lay`]), so the
+/// next are built in the allocations those gave up; a record not yet
+/// built is the empty one, which holds none.
 fn native_records(classes: &[ClassDecl], keys: &ClassKeys) -> Arc<[LinkedClass<ClassId>]> {
-    let mut records: Vec<Option<LinkedClass<ClassId>>> = vec![None; classes.len()];
-    let mut progress = true;
+    // The table allocated once at its length and each record built in
+    // its row, so no second table of the records stands.
+    let mut table: Arc<[LinkedClass<ClassId>]> =
+        classes.iter().map(|_| LinkedClass::default()).collect();
+    let Some(records) = Arc::get_mut(&mut table) else {
+        return table;
+    };
+    let mut linked = vec![false; classes.len()];
+    let (mut progress, mut built) = (true, 0usize);
     while progress {
         progress = false;
         for (at, decl) in classes.iter().enumerate() {
-            if records.get(at).is_none_or(Option::is_some) {
+            if linked.get(at).is_none_or(|&linked| linked) {
                 continue;
             }
-            let built = {
+            let built_now = {
                 let lookup = |name: &[u8]| {
                     let class = keys.find(classes, name)?;
                     let at = usize::try_from(class.0).ok()?;
@@ -1372,35 +1382,42 @@ fn native_records(classes: &[ClassDecl], keys: &ClassKeys) -> Arc<[LinkedClass<C
                         decl: classes.get(at)?,
                         bodies: None,
                         linked: true,
-                        record: records.get(at)?.as_ref().map(|record| (class, record)),
+                        record: (*linked.get(at)?).then_some((class, records.get(at)?)),
                     })
                 };
                 php_link::linked_class(decl, 0, &lookup, &|class| {
                     classes.get(usize::try_from(class.0).ok()?)
                 })
             };
-            if let (Some(record), Some(slot)) = (built, records.get_mut(at)) {
-                *slot = Some(record);
-                progress = true;
+            if let (Some(record), Some(slot), Some(done)) =
+                (built_now, records.get_mut(at), linked.get_mut(at))
+            {
+                (*slot, *done, progress) = (record, true, true);
+                built += 1;
+                if built.is_multiple_of(LAID) {
+                    LinkedClass::lay(records.iter_mut());
+                }
             }
         }
     }
-    records
-        .into_iter()
-        .zip(classes)
-        .map(|(record, decl)| {
-            record
-                .or_else(|| php_link::linked_class(decl, 0, &|_| None, &|_| None))
-                .unwrap_or_default()
-        })
-        .collect()
+    for ((record, decl), done) in records.iter_mut().zip(classes).zip(linked) {
+        if !done {
+            *record = php_link::linked_class(decl, 0, &|_| None, &|_| None).unwrap_or_default();
+        }
+    }
+    LinkedClass::lay(records.iter_mut());
+    table
 }
+
+/// How many native classes' records, or placed properties, are built
+/// between two lays of what was built.
+const LAID: usize = 32;
 
 /// Each native class's placed properties ([`placed_of`]), built as
 /// `zend_register_internal_class_ex` builds them when it links the
 /// class: each after its parent's, a class standing before its
 /// parent waiting a round, and one whose parent never resolves placed
-/// over none.
+/// over none. Laid as [`native_records`] lays the records.
 fn native_placed(
     classes: &[ClassDecl],
     records: &[LinkedClass<ClassId>],
@@ -1421,7 +1438,7 @@ fn native_placed(
     // A root's parent places nothing; a parent's own placing is read
     // where it stands, not copied.
     let root = Placed::default();
-    let mut progress = true;
+    let (mut progress, mut laid) = (true, 0usize);
     while progress {
         progress = false;
         for at in 0..classes.len() {
@@ -1438,18 +1455,22 @@ fn native_placed(
             if let (Some(built), Some(slot)) = (built, placed.get_mut(at)) {
                 *slot = Some(built);
                 progress = true;
+                laid += 1;
+                if laid.is_multiple_of(LAID) {
+                    Placed::lay(placed.iter_mut().flatten());
+                }
             }
         }
     }
-    placed
-        .into_iter()
-        .enumerate()
+    let mut placed: Vec<Placed> = (placed.into_iter().enumerate())
         .map(|(at, built)| {
             built
                 .or_else(|| place(at, &Placed::default()))
                 .unwrap_or_default()
         })
-        .collect()
+        .collect();
+    Placed::lay(&mut placed);
+    placed
 }
 
 /// Each native class's trampolines by name: every row of `methods` a
