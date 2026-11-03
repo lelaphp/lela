@@ -19,6 +19,7 @@ fn jmp_frameless_over(strings: &mut php_heap::Strings, name: &[u8]) -> Published
                 },
                 Opline::default(),
                 Opline::default(),
+                back(),
             ],
             literals: vec![interned(strings, name)],
             cache_size: 8,
@@ -139,13 +140,16 @@ fn a_nullary_frameless_call_serves_the_native_into_its_temporary() {
     let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
     let unit = Unit {
         main: OpArray {
-            oplines: vec![Opline {
-                opcode: Opcode::FramelessIcall0,
-                out_type: OperandKind::Tmp,
-                out: 0,
-                extended_value: row,
-                ..Opline::default()
-            }],
+            oplines: vec![
+                Opline {
+                    opcode: Opcode::FramelessIcall0,
+                    out_type: OperandKind::Tmp,
+                    out: 0,
+                    extended_value: row,
+                    ..Opline::default()
+                },
+                back(),
+            ],
             num_tmps: 1,
             ..OpArray::default()
         },
@@ -175,13 +179,16 @@ fn a_row_the_table_has_not_is_an_internal_error() {
     let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
     let unit = Unit {
         main: OpArray {
-            oplines: vec![Opline {
-                opcode: Opcode::FramelessIcall0,
-                out_type: OperandKind::Tmp,
-                out: 0,
-                extended_value: 1_000_000,
-                ..Opline::default()
-            }],
+            oplines: vec![
+                Opline {
+                    opcode: Opcode::FramelessIcall0,
+                    out_type: OperandKind::Tmp,
+                    out: 0,
+                    extended_value: 1_000_000,
+                    ..Opline::default()
+                },
+                back(),
+            ],
             num_tmps: 1,
             ..OpArray::default()
         },
