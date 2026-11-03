@@ -432,8 +432,10 @@ pub(crate) fn reading(
 
 /// What the reading's message says after its verdict: the witnesses that
 /// did not run for want of the oracle, the fences the engine did not
-/// serve, those skipped for a locale the host lacks, and what the oracle
-/// did on each fence a `trace:` row holds to the engine alone.
+/// serve, those skipped for a locale the host lacks, what the oracle did
+/// on each fence a `trace:` row holds to the engine alone, what each
+/// server's line that missed saw, and the server's lines whose engine's
+/// host ended only on its stop sent again ([`host::AGAIN`]).
 fn tail(tally: &Tally) -> String {
     let run = &tally.witnesses;
     // What the oracle did on each fence a `trace:` row holds to the engine
@@ -444,6 +446,10 @@ fn tail(tally: &Tally) -> String {
         .filter(|j| j.judgement == Judgement::Covered)
         .map(|j| format!("{}: {}", j.id, j.note))
         .collect();
+    // The server's lines whose engine's host ended only on its stop sent
+    // again, a loss its loop has not had since #3869 (#3879).
+    let again = run.judged.iter().filter(|j| j.note.ends_with(host::AGAIN));
+    let again: Vec<&str> = again.map(|j| j.id.as_str()).collect();
     let why = tally.oracle_absent.as_deref();
     // Each clause with its count, said where the count is not zero: what
     // did not run for want of the oracle, what the engine did not serve for
@@ -479,6 +485,15 @@ fn tail(tally: &Tally) -> String {
             "server's line",
             "s",
             format!("missed, and saw: {}", tally.saw.join("; ")),
+        ),
+        (
+            again.len() as u64,
+            "server's line",
+            "s",
+            format!(
+                "ended the engine's host only on its stop sent again: {}",
+                again.join("; ")
+            ),
         ),
     ];
     let said = clauses.into_iter().filter(|(n, ..)| *n > 0);

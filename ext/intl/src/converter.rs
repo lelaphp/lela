@@ -1031,12 +1031,10 @@ fn convert_with(
         return Ok(None);
     }
     let capacity = usize::try_from(needed).unwrap_or(0) + 1;
-    let Some(mut temp) = Block::<u16>::ask(req, capacity + 1, true)? else {
+    let Some(temp) = Block::<u16>::ask(req, capacity + 1, true)? else {
         return Ok(None);
     };
-    let answered = encoded(req, object, pending, (dest, src), &mut temp, capacity, text);
-    temp.give_back(req);
-    answered
+    encoded(req, object, pending, (dest, src), temp, capacity, text)
 }
 
 /// The UTF-16 of `text` decoded into `temp`, `capacity` units of it,
@@ -1087,12 +1085,57 @@ fn convert_with(
 /// from REASON_RESET 264
 /// from REASON_RESET 296
 /// ```
+///
+/// `temp` is given back where php frees it: after the failure of a
+/// decode or of the preflight is raised, and before the final pass's is,
+/// as `efree(temp)` precedes that `THROW_UFAILURE`
+/// (`Z/ext/intl/converter/converter.c:677-679`). A warning handler served
+/// by a final-pass failure reads the string alone, then, and a string it
+/// lays larger than the UTF-16 moves the peak by the string alone. Two
+/// lengths are read and their difference printed, so the message intl
+/// keeps falls out of it:
+///
+/// ```php
+/// @ini_set('intl.error_level', E_WARNING);
+/// class F extends UConverter {
+///   public int $calls = 0;
+///   function fromUCallback($reason, $source, $codePoint, &$error): string|int|array|null {
+///     if ($reason === self::REASON_UNASSIGNED) {
+///       $error = ++$this->calls === 1 ? U_ZERO_ERROR : U_INVALID_CHAR_FOUND;
+///       return '?';
+///     }
+///     return null;
+///   }
+/// }
+/// $n = $live = 0;
+/// set_error_handler(function () use (&$n, &$live) {
+///   $live = memory_get_usage();
+///   $pad = str_repeat('x', 4 * $n);
+///   return true;
+/// });
+/// $at = [];
+/// foreach ([100000, 200000] as $n) {
+///   $c = new F('ASCII', 'UTF-8');
+///   $s = str_repeat('a', $n) . "\u{100}";
+///   memory_reset_peak_usage();
+///   $m = memory_get_usage();
+///   $r = $c->convert($s);
+///   $at[] = [$live - $m, memory_get_peak_usage() - $m];
+///   echo $c->calls, ' ', gettype($r), "\n";
+/// }
+/// echo $at[1][0] - $at[0][0], ' ', $at[1][1] - $at[0][1], "\n";
+/// ```
+/// ```expect
+/// 2 boolean
+/// 2 boolean
+/// 98304 499712
+/// ```
 fn encoded(
     req: &mut Request,
     object: Option<PhpObject>,
     pending: &mut Pending,
     (dest, src): (&Live<'_>, &Live<'_>),
-    temp: &mut Block<u16>,
+    mut temp: Block<u16>,
     capacity: usize,
     text: &[u8],
 ) -> Answer<Option<Owner<PhpString>>> {
@@ -1100,23 +1143,30 @@ fn encoded(
     let (len, code) = lend(req, object, pending, |cb| src.decode(room, text, cb));
     if code.is_failure() {
         pending.failure(req, object, code);
+        temp.give_back(req);
         return Ok(None);
     }
     let units = &temp.as_slice()[..usize::try_from(len).unwrap_or(0).min(capacity)];
     let (needed, code) = lend(req, object, pending, |cb| dest.encode(&mut [], units, cb));
     if code.is_failure() && code != Code::BUFFER_OVERFLOW {
         pending.failure(req, object, code);
+        temp.give_back(req);
         return Ok(None);
     }
     let needed = usize::try_from(needed).unwrap_or(0);
-    let Some(mut made) = req
+    let mut made = match req
         .memory_mut()
-        .fallible(|req| FreshString::new(req, needed))?
-    else {
-        return Ok(None);
+        .fallible(|req| FreshString::new(req, needed))
+    {
+        Ok(Some(made)) => made,
+        refused => {
+            temp.give_back(req);
+            return refused.map(|_| None);
+        }
     };
     let mut out = vec![0u8; needed + 1];
     let (len, code) = lend(req, object, pending, |cb| dest.encode(&mut out, units, cb));
+    temp.give_back(req);
     if code.is_failure() {
         pending.failure(req, object, code);
         made.free(req);

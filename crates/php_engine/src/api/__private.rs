@@ -383,7 +383,7 @@ pub fn arguments<const N: usize>(
 ) -> Result<[Value; N], Thrown> {
     let (given, arguments) = req.arguments_given::<N>();
     if given < min || max.is_some_and(|max| given > max) {
-        crate::api::raising::arity_of(req, given, min, max)?;
+        return Err(crate::api::raising::arity_refused(req, given, min, max));
     }
     Ok(arguments)
 }
