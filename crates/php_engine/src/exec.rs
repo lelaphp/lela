@@ -3878,13 +3878,12 @@ pub(crate) fn recv_passed(
 }
 
 /// [`recv_passed`] over `frame`, the callee the loop holds, pushed
-/// standing at `start` in `code`: where every `RECV` up to `entry`
-/// passes, the frame stood at `entry` and its slots, which the loop goes
-/// on with, as php's `ZEND_VM_ENTER` goes on with `execute_data` in a
-/// register; none where one is left for the handlers, the frame stood
-/// past those that passed. A call to a typed function passed its
-/// argument, one passed none, one passed a string its `int` converts and
-/// one passed an array it refuses:
+/// standing at `start` in `code`: whether every `RECV` up to `entry`
+/// passes, the frame stood at `entry`, where the loop goes on in it as
+/// php's `ZEND_VM_ENTER` goes on with `execute_data`; where one is left
+/// for the handlers, the frame stood past those that passed. A call to a
+/// typed function passed its argument, one passed none, one passed a
+/// string its `int` converts and one passed an array it refuses:
 ///
 /// ```php
 /// function f(int $n, ?string $s = null) { return $n < 1 ? 0 : 1 + f($n - 1, $s); }
@@ -3899,21 +3898,16 @@ pub(crate) fn recv_passed(
 /// Too few arguments to function g(), 0 passed in %s on line 6 and exactly 1 expected
 /// ```
 #[inline(always)] // once per call edge, in the loop
-pub(crate) fn received<'f>(
-    frame: &'f mut HeapFrame,
-    code: &OpArray,
-    (start, entry): (u32, u32),
-) -> Option<(u32, &'f mut [Zval])> {
+pub(crate) fn received(frame: &mut HeapFrame, code: &OpArray, (start, entry): (u32, u32)) -> bool {
     if start < entry {
-        let prologue = code.oplines.get(start as usize..entry as usize)?;
+        let Some(prologue) = code.oplines.get(start as usize..entry as usize) else {
+            return false;
+        };
         let at = start.saturating_add(passing(prologue, frame));
         frame.header_mut().opline = at;
-        if at < entry {
-            return None;
-        }
-        return Some((at, frame.slots_mut()));
+        return at >= entry;
     }
-    Some((start, frame.slots_mut()))
+    true
 }
 
 /// How many of the `RECV` oplines of `prologue`, the first `frame`

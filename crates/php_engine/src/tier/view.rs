@@ -61,6 +61,16 @@ impl Epoch {
         self.func(f).map_or(&SEALED, |func| func.landing(at))
     }
 
+    /// [`Epoch::landing`] where the op array's landing words are laid
+    /// down, each of which stands where it is for as long as the epoch,
+    /// so a tier may keep its address from one return to the next. None
+    /// where they are not, when the landing reads sealed until a tier lays
+    /// them, and for an op array this epoch holds no row for.
+    #[must_use]
+    pub fn laid_landing(&self, f: FuncRef, at: OplineIdx) -> Option<&Word> {
+        self.func(f)?.laid_landing(at)
+    }
+
     /// The landing word of opline `at` of the op array `f` names, for a
     /// tier to arm, the op array's landing words laid down sealed the
     /// first time; none for an op array this epoch holds no row for, and
