@@ -160,7 +160,7 @@ fn a_method_of_a_namespaced_class_is_a_known_callee_in_its_namespace() {
             }],
             attributes: Vec::new(),
             doc_comment: None,
-            file: Name(Box::new([])),
+            file: Name::default(),
             line: 0,
             end_line: 0,
             object_size: 0,
@@ -352,7 +352,7 @@ B::p();
 #[test]
 fn a_public_method_of_a_declared_class_is_a_known_callee() {
     use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, EnumBacking, MethodDecl, Visibility};
-    let method = |name: &[u8], visibility| MethodDecl {
+    let method = |name: &'static [u8], visibility| MethodDecl {
         function: php_unit::decl::native_function(name),
         visibility,
         is_instance: false,
@@ -380,7 +380,7 @@ fn a_public_method_of_a_declared_class_is_a_known_callee() {
             ],
             attributes: Vec::new(),
             doc_comment: None,
-            file: Name(Box::new([])),
+            file: Name::default(),
             line: 0,
             end_line: 0,
             object_size: 0,

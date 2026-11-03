@@ -61,6 +61,7 @@ pub struct FrameLayout {
     called_scope: u32,
     leaves_by_kernel: u32,
     release_this: u32,
+    has_this: u32,
     send_by_ref: u32,
     building: u32,
     return_unused: u32,
@@ -99,6 +100,7 @@ pub const FRAME: FrameLayout = FrameLayout {
     called_scope: word(HEADER_AT + Header::SCOPE_AT),
     leaves_by_kernel: CallInfo::LEAVES_BY_KERNEL,
     release_this: CallInfo::RELEASE_THIS,
+    has_this: CallInfo::HAS_THIS,
     send_by_ref: CallInfo::SEND_BY_REF,
     building: CallInfo::BUILDING,
     return_unused: CallInfo::RETURN_UNUSED,
@@ -265,6 +267,15 @@ impl FrameLayout {
     #[must_use]
     pub const fn release_this(&self) -> u32 {
         self.release_this
+    }
+
+    /// `ZEND_CALL_HAS_THIS`: the frame holds a receiver,
+    /// [`FrameLayout::this`], owned or pinned, which compiled code that
+    /// writes one in place sets beside it, as the interpreter's leave
+    /// reads the flags alone to find it.
+    #[must_use]
+    pub const fn has_this(&self) -> u32 {
+        self.has_this
     }
 
     /// The bit of a call being built that says the argument its last
@@ -750,11 +761,11 @@ impl PlainCall {
 pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let (top, laid) = req.vm().stack.top()?;
     let header = laid.header();
-    let function = header.function?;
+    let function = header.function()?;
     let plain = top == call
         && header.info.building()
-        && header.closure.is_none()
-        && header.annex.is_none()
+        && header.closure().is_none()
+        && header.annex().is_none()
         && !crate::observer::observing(req);
     if !plain {
         return None;
@@ -833,7 +844,11 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
                 entered.info = CallInfo::of(bits);
                 entered.info.set_serving();
                 entered.info.set_return_used(used);
-                entered.activate(shape.cache, shape.entry, false);
+                entered.activate(
+                    (shape.cache, crate::exec::CacheBase::NONE),
+                    shape.entry,
+                    false,
+                );
                 entered.info.bits()
             };
             Some(Activation {
@@ -878,20 +893,27 @@ pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
         }
         None => req.function_named(Bare::resolved(&call.name))?,
     };
-    let served = if let Some(user) = req.user_function(function) {
+    let (served, base) = if let Some(user) = req.user_function(function) {
         let code = crate::exec::body_of(&user.unit, user.body)?;
-        match code.runtime_cache {
+        let served = match code.runtime_cache {
             MapPtrOffset::Engine(_) => Serves::Published(FuncRef::at(code.runtime_cache)),
             MapPtrOffset::Request(_) => Serves::Request,
-        }
+        };
+        // Where the callee's cache stands in this request, which the
+        // activation in place leaves as the image wrote it: an image is
+        // laid out once its cache is laid down, which a function's stays.
+        (served, Some(req.cache_base(user.shape.cache)?))
     } else {
         req.native_entry(function)?;
-        Serves::Native
+        (Serves::Native, None)
     };
     if served != call.serves {
         return None;
     }
     let mut header = Header::call(function, call.count);
+    if let Some(base) = base {
+        header.set_cache_base(base);
+    }
     header.set_called_scope(call.scope().filter(|class| class.is_published()));
     let (room, header) = req.laid_call(header)?;
     // The room compiled code lays is the recording's: a request's own op

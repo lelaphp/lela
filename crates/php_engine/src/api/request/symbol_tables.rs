@@ -145,7 +145,7 @@ impl Request {
     /// ([`exec::Annex::attached`]).
     fn note_attached(&mut self, frame: FrameRef, table: TableId) {
         let changes = self.tables.get(table.0 as usize).map(|table| table.changes);
-        if let Some(id) = self.vm.at(frame).and_then(|header| header.annex)
+        if let Some(id) = self.vm.at(frame).and_then(crate::exec::Header::annex)
             && let Some(annex) = self.annexes.get_mut(id)
         {
             annex.attached = changes;
@@ -181,7 +181,7 @@ impl Request {
     /// }
     /// ```
     pub(crate) fn still_attached(&self, frame: FrameRef) -> bool {
-        let Some(annex) = (self.vm.at(frame)).and_then(|header| self.annexes.get(header.annex?))
+        let Some(annex) = (self.vm.at(frame)).and_then(|header| self.annexes.get(header.annex()?))
         else {
             return false;
         };
@@ -328,10 +328,10 @@ impl Request {
     /// detaching move nothing of.
     fn cv_table(&self, frame: FrameRef) -> Option<(TableId, usize)> {
         let header = self.vm.at(frame)?;
-        let annex = self.annexes.get(header.annex?)?;
+        let annex = self.annexes.get(header.annex()?)?;
         let table = annex.symbol_table?;
         // A file's frame has its unit in the annex read already.
-        let (unit, body) = match (header.function, &annex.unit) {
+        let (unit, body) = match (header.function(), &annex.unit) {
             (None, Some(unit)) => (unit, exec::Body::Main),
             _ => self.unit_of(header)?,
         };

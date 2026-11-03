@@ -190,6 +190,14 @@ impl Ctx {
         unsafe { sys::SSL_CTX_check_private_key(self.as_ptr()) == 1 }
     }
 
+    /// `SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF)`: a server
+    /// that keeps no session, so a TLS 1.2 handshake gives no session id.
+    #[cfg(test)]
+    pub(crate) fn session_cache_off(&self) {
+        // SAFETY: the context is live; the control takes a number.
+        unsafe { sys::SSL_CTX_set_session_cache_mode(self.as_ptr(), sys::SSL_SESS_CACHE_OFF) };
+    }
+
     /// `SSL_CTX_set_min_proto_version` and `SSL_CTX_set_max_proto_version`.
     pub(crate) fn proto_versions(&self, min: c_int, max: c_int) {
         // SAFETY: the context is live.

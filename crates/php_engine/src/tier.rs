@@ -737,6 +737,15 @@ impl Next {
     }
 }
 
+/// What the loop takes up after an edge that let the frame's slots go
+/// (`serve_held`): the slots of the frame it goes on in, or, where the
+/// edge went into another frame, its position with them.
+#[derive(Clone, Copy)]
+enum Took {
+    Slots,
+    Standing,
+}
+
 /// What a handler's inline path answers (design §5.8): the way on in the
 /// frame and nothing else, since an inline path reads and writes the
 /// frame's slots and the op array alone, never the request. The loop,
@@ -1449,7 +1458,7 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     declared.before(req, frame, at, op.opcode);
                     slots = req.slots_mut(frame);
                 }
-                match dispatch::held!(req, slots, frame, body, op, at) {
+                match dispatch::held!(req, slots, frame, body, op, at, declared) {
                     Dispatched::Inline(Inline::On(places)) => {
                         at = at.wrapping_add(places);
                         continue;
@@ -1477,19 +1486,24 @@ fn serve_held<'u, T: Tier, D: Telling>(
             };
             #[cfg(dispatch = "tailcall")]
             let way = tail::chain::<T, D>(req, frame, body, oplines, at, &declared)?.way();
-            // Whether the edge went into another frame, where the loop
-            // takes its position up with its slots. One take-up where the
-            // arms meet: the two edges into a frame taking theirs up in
-            // their own arms and going on by `continue` measured the empty
-            // loop 72.9 -> 89.2 (#3345).
-            let into = match way {
+            // What the loop takes up for the frame it goes on in: its
+            // slots where a handler with the request in hand went on in
+            // it or a call's `RECV`s all passed, and its position with
+            // them where another edge went into another frame. One
+            // take-up where the arms meet: the two edges into a frame
+            // taking theirs up in their own arms and going on by
+            // `continue` measured the empty loop 72.9 -> 89.2 (#3345);
+            // the call edge going on so with its slots in hand left the
+            // loop one head the other arms branch to, and read fannkuch's
+            // cycles 9.8% higher (#4039).
+            let took = match way {
                 Way::On(places) => {
                     at = at.wrapping_add(places);
-                    false
+                    Took::Slots
                 }
                 Way::Jump(to) => {
                     at = to;
-                    false
+                    Took::Slots
                 }
                 // A return to a frame the loop entered: its op array as
                 // the loop left it for the call.
@@ -1500,31 +1514,49 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     frame = to;
                     body = code;
                     oplines = &*body.oplines;
-                    true
+                    Took::Standing
                 }
                 // A call to a function the loop called before: its op
-                // array as the loop entered it then.
+                // array as the loop entered it then, and the callee's
+                // frame looked at once for what the loop enters it with,
+                // php's `DO_UCALL` reading `call->func` and `ZEND_VM_ENTER`
+                // loading `opline` (`Z/Zend/zend_vm_def.h:4170`).
                 Way::Left(stepped @ Stepped::Pushed(callee)) => {
-                    let Some((function, start)) = req
-                        .vm()
-                        .at(callee)
-                        .and_then(|header| Some((header.function?, header.opline)))
-                    else {
+                    let Some(called_frame) = req.vm_mut().stack.frame_mut(callee) else {
                         break stepped;
                     };
-                    let Some(called) = kept.called(function) else {
+                    let header = called_frame.header();
+                    let (function, start) = (header.function(), header.opline);
+                    let Some(called) = function.and_then(|function| kept.called(function)) else {
                         break stepped;
                     };
                     kept.keep(callee, called.code);
-                    let entry = (start, called.entry);
-                    if let Err(other) = entered::<T, D>(req, callee, called.code, entry, declared)?
-                    {
-                        break other;
-                    }
                     frame = callee;
                     body = called.code;
                     oplines = &*body.oplines;
-                    true
+                    let entry = (start, called.entry);
+                    // Where nothing is told of a `RECV`, no tier is bound
+                    // and no interrupt is raised, the activation is the
+                    // passing `RECV`s alone, read over the frame in hand
+                    // (#4022), and the frame taken up where the arms meet
+                    // (#4039).
+                    #[cfg(not(dispatch = "tailcall"))]
+                    let received = interpreted::<T>()
+                        && !declared.tells(php_unit::Opcode::Recv)
+                        && !interrupt.raised().load(Ordering::Relaxed)
+                        && exec::received(called_frame, body, entry);
+                    #[cfg(dispatch = "tailcall")]
+                    let received = false;
+                    if received {
+                        // At its entry, or where it was pushed past it.
+                        at = start.max(called.entry);
+                        Took::Slots
+                    } else {
+                        if let Err(other) = entered::<T, D>(req, callee, body, entry, declared)? {
+                            break other;
+                        }
+                        Took::Standing
+                    }
                 }
                 Way::Left(stepped) => break stepped,
             };
@@ -1535,13 +1567,12 @@ fn serve_held<'u, T: Tier, D: Telling>(
             // measured every dispatch of the bare loops 4% higher, by two
             // moves the allocator added at the loop's head (#3320).
             #[cfg(not(dispatch = "tailcall"))]
-            if into {
-                (at, slots) = req.standing(frame);
-            } else {
-                slots = req.slots_mut(frame);
+            match took {
+                Took::Standing => (at, slots) = req.standing(frame),
+                Took::Slots => slots = req.slots_mut(frame),
             }
             #[cfg(dispatch = "tailcall")]
-            if into {
+            if let Took::Standing = took {
                 at = req.vm().opline(frame);
             }
         };
@@ -1847,7 +1878,7 @@ pub fn call_native(req: &mut Request, call: FrameRef) -> Result<Zval, Fatal> {
         .vm()
         .at(call)
         .filter(|header| header.info.serving_native())
-        .and_then(|header| header.function)
+        .and_then(crate::exec::Header::function)
         .ok_or_else(|| Fatal::error("InternalError: compiled code served no native's call"))?;
     match req.serve_native(function, OnThrow::Nothing) {
         Ok(value) => Ok(value.to_zval()),
@@ -1889,13 +1920,15 @@ pub struct FramelessAt(pub u32);
 /// compiled code calls the native's frameless handler with the operand
 /// zvals it addressed and the slot that takes its return
 /// (`jit_frameless_icall*`, `Z/ext/opcache/jit/zend_jit_ir.c:17868-18110`),
-/// with no opline read: each operand of the kind of its slot, as
-/// compiled code read it, neither `UNDEF`, which compiled code hands to
-/// the handler instead, nor a reference, which it reads through, a
-/// temporary moved out of
-/// its slot, and `Unused` past the native's arity. Its record is
-/// owned as [`crate::exec::frameless_owner`] says, and given up as the
-/// call ends ([`crate::handlers::frameless_served`]); compiled code
+/// each operand of the kind of its slot, as compiled code read it,
+/// neither `UNDEF`, which compiled code hands to the handler instead,
+/// nor a reference, which it reads through, and `Unused` past the
+/// native's arity. A temporary compiled code moved out of its slot is
+/// put back where the opline the frame stands at names it, so a trace
+/// taken while the native runs reads it there as the handler leaves it
+/// and php's code does, and freed there as the call ends; a variable is
+/// held as [`crate::exec::frameless_owner`] says
+/// ([`crate::handlers::frameless_served`]); compiled code
 /// makes the interrupt check after a native that returned,
 /// `jit_frameless_interrupt_check`, and this makes it after one that
 /// threw, or returned with a throwable a warning's handler threw, with
@@ -1916,7 +1949,16 @@ pub fn frameless_call(
     operands: [(Zval, OperandKind); 3],
 ) -> Result<Zval, Fatal> {
     let named = exec::frameless_named(req.vm().at(frame));
+    // The slots the opline names its operands by, `op1`, `op2` and the
+    // `OP_DATA`'s `op1`.
+    let fields = req.frame_at(frame).and_then(|state| {
+        let code = state.code()?;
+        let op = exec::opline_at(code, state.opline())?;
+        let data = exec::opline_at(code, state.opline().saturating_add(1));
+        Some([op.op1, op.op2, data.map_or(0, |data| data.op1)])
+    });
     let mut held = [Zval::UNDEF; 3];
+    let mut slots = [(OperandKind::Const, 0); 3];
     let mut owned = 0u8;
     let mut count = 0;
     for (place, (z, kind)) in operands.into_iter().enumerate() {
@@ -1924,13 +1966,28 @@ pub fn frameless_call(
             break;
         }
         debug_assert!(!z.is_undef() && z.kind() != php_heap::ZvalType::Reference);
+        let field = fields.map(|fields| fields[place]);
         let own;
-        (held[place], own) = exec::frameless_owner(z, kind, named);
+        (held[place], own) = match (kind, field) {
+            (OperandKind::Tmp | OperandKind::Var, Some(field)) => {
+                if let Some(slot) = req.slots_mut(frame).get_mut(field as usize) {
+                    *slot = z;
+                }
+                slots[place] = (kind, field);
+                (z, false)
+            }
+            _ => exec::frameless_owner(z, kind, named),
+        };
         owned |= u8::from(own) << place;
         count = place + 1;
     }
-    let operands = held.get(..count).unwrap_or_default();
-    let returned = crate::handlers::frameless_served(req, at.0, operands, owned)?;
+    let held = crate::handlers::Operands {
+        frame,
+        zvals: held.get(..count).unwrap_or_default(),
+        owned,
+        slots: slots.get(..count).unwrap_or_default(),
+    };
+    let returned = crate::handlers::frameless_served(req, at.0, held)?;
     Ok(returned.map_or_else(Zval::null, Value::to_zval))
 }
 

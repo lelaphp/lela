@@ -284,9 +284,9 @@ const _: () = {
 /// real-time range is the one php registered there.
 #[test]
 fn the_constants_are_the_linux_oracle_s_in_its_order() {
-    let declared: Vec<String> = c::declared()
+    let declared: Vec<String> = c::DECLARED
         .iter()
-        .map(|d| String::from_utf8_lossy(&d.name.0).into_owned())
+        .map(|d| String::from_utf8_lossy(d.name).into_owned())
         .collect();
     assert_eq!(declared, NAMES);
     assert_eq!((c::SIGRTMIN(), c::SIGRTMAX()), (34, 64));

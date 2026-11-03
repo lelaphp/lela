@@ -215,6 +215,7 @@ impl JitRequest {
             epoch: std::cell::OnceCell::new(),
             table: std::cell::OnceCell::new(),
             owed: Cell::new(None),
+            landings: crate::enter::Landings::default(),
             #[cfg(test)]
             escapes_crossed: Cell::new(0),
         }

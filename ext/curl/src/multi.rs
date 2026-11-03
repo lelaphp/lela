@@ -6,7 +6,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::{callable_checked, to_long};
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
+use php_ext::values::{Emalloc, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
 
 use crate::State;
 use crate::constants as c;
@@ -23,7 +23,7 @@ use crate::throwables::{Pending, Throwables};
 pub(crate) struct Mh {
     multi: Option<Multi>,
     /// `easyh`: each `CurlHandle` added, one owner of it.
-    easy: Vec<Owner<PhpObject>>,
+    easy: Vec<Added>,
     /// `handlers.server_push`.
     push: Option<Handler>,
     /// `err.no`.
@@ -31,6 +31,46 @@ pub(crate) struct Mh {
     /// Whether `curl_multi_exec` is running a transfer of this multi, so
     /// that a callback of one of its easy handles may be on the stack.
     running: bool,
+}
+
+/// `sizeof(zend_llist_element) + sizeof(zval) - 1`, what
+/// `zend_llist_add_element` `emalloc`s for one element of `easyh`.
+const ELEMENT: usize = 24 + 16 - 1;
+
+/// One element of `easyh`: the owner of the `CurlHandle` added, and the
+/// block php's element is, on the request's heap so that
+/// `memory_get_usage()` counts it as php's does.
+struct Added {
+    handle: Owner<PhpObject>,
+    element: Emalloc,
+}
+
+impl Added {
+    /// `zend_llist_add_element(&mh->easyh, z_ch)` over an owner of a
+    /// `CurlHandle` already taken; the `Err` is the memory limit's fatal,
+    /// with the owner given up.
+    fn new(req: &mut Request, handle: Owner<PhpObject>) -> Result<Added, Thrown> {
+        match Emalloc::new(req, ELEMENT) {
+            Ok(element) => Ok(Added { handle, element }),
+            Err(thrown) => {
+                handle.give_up(req);
+                Err(thrown)
+            }
+        }
+    }
+
+    /// The `CurlHandle`, a view.
+    fn object(&self) -> PhpObject {
+        *self.handle
+    }
+
+    /// The element deleted: the owner given up by
+    /// `_php_curl_multi_cleanup_list`, then the block freed, as
+    /// `zend_llist_del_element` calls the list's dtor before `efree`.
+    fn give_up(self, req: &mut Request) {
+        self.handle.give_up(req);
+        self.element.free(req);
+    }
 }
 
 /// `final class CurlMultiHandle`, `@strict-properties`,
@@ -229,7 +269,7 @@ impl ObjectHandlers for Handlers {
             push.visit(visit);
         }
         for easy in &mh.easy {
-            visit(easy.as_value());
+            visit(easy.handle.as_value());
         }
         GcTable::Properties
     }
@@ -250,7 +290,7 @@ fn mh(req: &mut Request, multi: Instance<CurlMultiHandle>) -> Result<&mut Mh, Th
 
 /// The `CurlHandle`s added, as views of the owners `easyh` holds.
 fn handles(mh: &Mh) -> Vec<PhpObject> {
-    mh.easy.iter().map(|handle| **handle).collect()
+    mh.easy.iter().map(Added::object).collect()
 }
 
 /// The `CURL *` of a `CurlHandle` by name, `None` where it has none.
@@ -316,6 +356,29 @@ fn curl_multi_init(req: &mut Request) -> Result<Owner<Instance<CurlMultiHandle>>
 /// int(7)
 /// ```
 ///
+/// Each `CurlHandle` added is an element of `easyh`, which
+/// `memory_get_usage()` counts as php's ([`Added`]) until the
+/// `CurlHandle` is removed or the multi let go of it:
+///
+/// ```php
+/// $m = curl_multi_init(); $h = curl_init(); $i = curl_init();
+/// $b = memory_get_usage(); curl_multi_add_handle($m, $h); echo memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); curl_multi_add_handle($m, $i); echo memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); curl_multi_remove_handle($m, $h); echo memory_get_usage() - $b, "\n";
+/// unset($h);
+/// $b = memory_get_usage(); unset($i); echo memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); curl_multi_close($m); echo memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); unset($m); echo memory_get_usage() - $b, "\n";
+/// ```
+/// ```expect
+/// 40
+/// 40
+/// -40
+/// 0
+/// -1288
+/// -160
+/// ```
+///
 /// What `_php_curl_verify_handlers` raised stays pending while the
 /// `CurlHandle` is added, as php goes on to `curl_multi_add_handle` with
 /// it in `EG(exception)`.
@@ -361,6 +424,7 @@ fn curl_multi_add_handle(
         mh(req, multi_handle)?.err = code;
         if code == 0 {
             let held = Owner::take(req, object);
+            let held = Added::new(req, held)?;
             match mh(req, multi_handle) {
                 Ok(mh) => mh.easy.push(held),
                 Err(thrown) => {
@@ -511,7 +575,7 @@ fn curl_multi_remove_handle(
             && let Some(at) = mh
                 .easy
                 .iter()
-                .position(|held| held.index() == object.index())
+                .position(|held| held.handle.index() == object.index())
         {
             let held = mh.easy.remove(at);
             held.give_up(req);
@@ -713,6 +777,42 @@ fn curl_multi_select(
 /// write: x
 /// exit
 /// int(0)
+/// ```
+///
+/// Called from a callable a `CurlHandle`'s own free serves during a
+/// collection, it passes over a `CurlHandle` whose free is under way, and
+/// the perform is refused `CURLM_RECURSIVE_API_CALL` from inside the
+/// callback. The fence pins this engine's side of
+/// `trace:curl-multi-exec-in-a-collection`:
+///
+/// ```php
+/// $m = curl_multi_init();
+/// $a = curl_init('http://127.0.0.1:1/');
+/// $b = curl_init('http://127.0.0.1:1/');
+/// foreach ([$a, $b] as $i => $h) {
+///     curl_setopt($h, CURLOPT_VERBOSE, 1);
+///     curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $t, $d) use ($m, $i) {
+///         if ($t == CURLINFO_TEXT && str_starts_with($d, "closing")) { echo "$i: $d"; var_dump(curl_multi_exec($m, $r2), count(curl_multi_get_handles($m))); }
+///     });
+///     curl_multi_add_handle($m, $h);
+/// }
+/// curl_multi_exec($m, $r);
+/// echo "unset\n";
+/// unset($a, $b, $h);
+/// unset($m);
+/// var_dump(gc_collect_cycles());
+/// echo "end\n";
+/// ```
+/// ```expect
+/// unset
+/// 0: closing connection #0
+/// int(8)
+/// int(2)
+/// 1: closing connection #1
+/// int(8)
+/// int(2)
+/// int(5)
+/// end
 /// ```
 #[php_function]
 fn curl_multi_exec(
@@ -1130,7 +1230,7 @@ fn curl_multi_close(
 /// The `CurlHandle` at `at` in `easyh`, read where it stands now.
 fn listed(req: &Request, multi: Instance<CurlMultiHandle>, at: usize) -> Option<PhpObject> {
     let mh = multi.object().native::<Mh>(req)?;
-    mh.easy.get(at).map(|held| **held)
+    mh.easy.get(at).map(Added::object)
 }
 
 /// `curl_multi_errno(CurlMultiHandle $multi_handle): int`.
@@ -1341,6 +1441,13 @@ pub(crate) fn push(
     if let Some(easy) = easy_id(cx.req, *pushed) {
         easy.accept(cx.req);
     }
+    let pushed = match Added::new(cx.req, pushed) {
+        Ok(pushed) => pushed,
+        Err(thrown) => {
+            cx.raise(thrown);
+            return true;
+        }
+    };
     match multi.native_mut::<Mh>(cx.req) {
         Some(mh) => mh.easy.push(pushed),
         None => pushed.give_up(cx.req),

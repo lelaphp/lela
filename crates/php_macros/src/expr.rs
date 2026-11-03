@@ -31,8 +31,9 @@ pub(crate) fn const_expr(tokens: Tokens) -> syn::Result<Tokens> {
 }
 
 /// The `Absent` an entry lays down for a parameter whose default is
-/// `tokens`: a scalar written as itself as its value and a string
-/// written as itself as its bytes, which the call takes with nothing
+/// `tokens`: a scalar written as itself, or one of php's own int
+/// constants ([`int_constant`]), as its value and a string written as
+/// itself as its bytes, which the call takes with nothing
 /// evaluated, as php's C default is a constant; anything else as the
 /// function that builds its `ConstExpr`, which the request calls once,
 /// where it evaluates the expression first.
@@ -73,6 +74,14 @@ pub(crate) fn absent(tokens: Tokens) -> syn::Result<Tokens> {
         {
             input.call(Ident::parse_any)?;
             quote!(#root::abi::Absent::Value(#root::values::Value::null()))
+        } else if let Some(value) = input
+            .fork()
+            .call(Ident::parse_any)
+            .ok()
+            .and_then(|word| int_constant(&word))
+        {
+            input.call(Ident::parse_any)?;
+            quote!(#root::abi::Absent::Value(#root::values::Value::int(#value)))
         } else {
             return Ok(None);
         };
@@ -83,6 +92,19 @@ pub(crate) fn absent(tokens: Tokens) -> syn::Result<Tokens> {
     }
     let expr = const_expr(tokens)?;
     Ok(quote!(#root::abi::Absent::Expr(|| #expr)))
+}
+
+/// The value of a constant of php's own whose value the build knows,
+/// `zend_long`'s bounds and width (`Z/Zend/zend_constants.c`'s
+/// `PHP_INT_MAX`, `PHP_INT_MIN` and `PHP_INT_SIZE`), as a C default
+/// writes `ZEND_LONG_MAX`; a default naming one costs the call nothing.
+fn int_constant(word: &Ident) -> Option<Tokens> {
+    Some(match word.to_string().as_str() {
+        "PHP_INT_MAX" => quote!(::core::primitive::i64::MAX),
+        "PHP_INT_MIN" => quote!(::core::primitive::i64::MIN),
+        "PHP_INT_SIZE" => quote!(8i64),
+        _ => return None,
+    })
 }
 
 /// php's binary operators over constant expressions, by precedence
@@ -363,6 +385,12 @@ pub(crate) fn attributes(keys: &Keys) -> syn::Result<Vec<Tokens>> {
     Ok(out)
 }
 
+/// The attributes as a static entry holds them, `&[..]` of the
+/// functions that build each.
+pub(crate) fn built(attributes: &[Tokens]) -> Tokens {
+    quote!(&[#(|| #attributes),*])
+}
+
 fn attribute(php: &str, arguments: &[Tokens]) -> Tokens {
     let root = root();
     let php = bytes(php);
@@ -410,7 +438,7 @@ fn arguments(input: ParseStream<'_>) -> syn::Result<Vec<Tokens>> {
 mod tests {
     use quote::quote;
 
-    use super::const_expr;
+    use super::{absent, const_expr};
     use crate::refused;
 
     #[test]
@@ -434,5 +462,22 @@ mod tests {
         ] {
             assert_eq!(refused(const_expr(tokens.clone())), message, "{tokens}");
         }
+    }
+
+    /// #4050: `PHP_INT_MAX` alone is the value an omitted argument takes
+    /// with no search, as php's `ZEND_LONG_MAX`; in an expression it is
+    /// still the expression the request evaluates.
+    #[test]
+    fn php_int_max_alone_is_a_value_and_in_an_expression_is_evaluated() {
+        let alone = absent(quote!(PHP_INT_MAX)).map(|t| t.to_string());
+        assert!(
+            alone
+                .as_deref()
+                .is_ok_and(|t| t.contains("Absent :: Value") && t.contains("i64 :: MAX"))
+        );
+        let min = absent(quote!(PHP_INT_MIN)).map(|t| t.to_string());
+        assert!(min.as_deref().is_ok_and(|t| t.contains("i64 :: MIN")));
+        let expr = absent(quote!(PHP_INT_MAX - 1)).map(|t| t.to_string());
+        assert!(expr.as_deref().is_ok_and(|t| t.contains("Absent :: Expr")));
     }
 }

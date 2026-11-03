@@ -144,7 +144,7 @@ fn host_module_answer() -> i64 {
 #[test]
 fn an_extension_the_host_built_starts_after_the_bundle() {
     let built = crate::api::abi::ExtensionBuilder::default()
-        .functions(vec![host_module_answer::declared()])
+        .functions(&[host_module_answer::DECLARED])
         .build("phpdbg");
     let engine = Engine::cli_builder().additional_extension(built).build();
     let (body, _) = served(

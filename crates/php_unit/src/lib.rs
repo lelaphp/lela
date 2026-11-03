@@ -20,12 +20,13 @@ mod dump;
 mod enum_methods;
 mod frameless;
 mod op;
+mod persist;
 mod types;
 mod unit;
 
 mod opcode {
     //! The generated enums and their tables (`build.rs`).
-    use crate::op::{Effects, Fused, OperandKind, Opline, data_kind};
+    use crate::op::{Assigned, Effects, Fused, OperandKind, Opline, data_kind};
     include!(concat!(env!("OUT_DIR"), "/opcode.rs"));
 }
 

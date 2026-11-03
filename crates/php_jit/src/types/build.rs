@@ -20,8 +20,8 @@ use super::opcodes::{
     Carried, Declared, Hold, ISEMPTY, MAX_ARG_FLAG_NUM, Within, arith, assigned, carried,
     check_sites, checked_order, compiled_inline, compound_in_place, constant, constant_types,
     goes_one_way, guard_sites, held_as_is, inline_may_leave, is_call, keeps_temporaries, keyed,
-    may_exit, packed_guard, param_types, params, reads, reads_by_name, recv_exits, referenced,
-    slot_of, within, written, written_through,
+    may_exit, needs_call_chain, packed_guard, param_types, params, reads, reads_by_name,
+    recv_exits, referenced, slot_of, within, written, written_through,
 };
 use super::{
     Abort, ArgChecks, BodyEntry, Check, Constant, Def, Defaults, End, Entry, ExitId, ExitSpec,
@@ -39,6 +39,7 @@ mod infer;
 use infer::{Inferred, Reads};
 use php_ssa::{Range, Types as Php};
 mod loads;
+mod ranges;
 mod stack;
 
 /// php's `ZEND_JIT_TRACE_MAX_EXITS`: the most exits one trace has.
@@ -92,12 +93,14 @@ struct Meta<'a> {
     begins: Option<OplineIdx>,
 }
 
-/// What the trace held before one op: every value of a live frame, and
-/// how many calls compiled code began are under way.
+/// What the trace held before one op: every value of a live frame, how
+/// many calls compiled code began are under way, and whether it holds one
+/// of them apart from its frame's call chain ([`Call::delayed`]).
 #[derive(Default, Clone)]
 struct Snapshot {
     values: Vec<(Slot, ValueId)>,
     calls: usize,
+    delayed: bool,
 }
 
 /// Whose state an exit's stores are read from.
@@ -142,29 +145,41 @@ enum At {
         up: bool,
         wrote: Overflow,
     },
+    /// After an increment or a decrement whose long a guard holds a
+    /// double, which did not overflow: the opline past it with the longs
+    /// it wrote in its slots ([`Within::Stayed`]).
+    Stayed {
+        op: OplineIdx,
+        wrote: Overflow,
+    },
 }
 
 impl At {
     /// Where an inline arithmetic `line` leaves whose `out` a guard
     /// holds within it, as `kind` says: at its opline, which the
-    /// interpreter serves again, or past it with what it overflowed to
-    /// in its slots.
+    /// interpreter serves again, or past it with what it overflowed to,
+    /// or the longs it wrote where it did not, in its slots.
     fn overflowing(kind: Within, line: &Line, out: ValueId) -> At {
         let op = line.opline;
-        let Within::Overflowed { up } = kind else {
-            return At::Opline(op);
-        };
         let wrote = match (line.opcode, line.op1_def) {
             (Opcode::PreInc | Opcode::PreDec, Some(var)) => Overflow::Pre { var, out: line.out },
             (Opcode::PostInc | Opcode::PostDec, Some(var)) => Overflow::Post { var, out: line.out },
             _ => Overflow::Sum { out },
         };
-        At::Overflowed { op, up, wrote }
+        match (kind, wrote) {
+            (Within::Overflowed { up }, _) => At::Overflowed { op, up, wrote },
+            (Within::Stayed, Overflow::Pre { .. } | Overflow::Post { .. }) => {
+                At::Stayed { op, wrote }
+            }
+            _ => At::Opline(op),
+        }
     }
 }
 
 /// What an op that overflowed left in its slots where it leaves past
-/// itself ([`At::Overflowed`]), each a constant php's stack map holds.
+/// itself ([`At::Overflowed`]), each a constant php's stack map holds,
+/// or what a step that did not left there ([`At::Stayed`]), each the
+/// long php's stack map holds in the step's register.
 #[derive(Clone, Copy)]
 enum Overflow {
     /// An `ADD` or a `SUB` of `1`: its `out` the double
@@ -191,6 +206,31 @@ impl Overflow {
             Overflow::Post { var, out } => [
                 Some((var, double)),
                 out.map(|out| (out, Stored::Limit { up })),
+            ],
+        }
+    }
+
+    /// The values a step that did not overflow wrote and what each is
+    /// written, its variable's or its `out`'s first: the long it went to,
+    /// and in a `POST_*`'s `out` the long the variable held
+    /// (`zend_jit_inc_dec`, `Z/ext/opcache/jit/zend_jit_ir.c:4824-4856`).
+    /// An `ADD` or a `SUB` writes none, as php's leaves at its opline.
+    fn stayed(self) -> [Option<(ValueId, Stored)>; 2] {
+        let went = |value| Stored::Stayed { value, read: false };
+        match self {
+            Overflow::Sum { .. } => [None, None],
+            Overflow::Pre { var, out } => [Some((var, went(var))), out.map(|out| (out, went(out)))],
+            Overflow::Post { var, out } => [
+                Some((var, went(var))),
+                out.map(|out| {
+                    (
+                        out,
+                        Stored::Stayed {
+                            value: out,
+                            read: true,
+                        },
+                    )
+                }),
             ],
         }
     }
@@ -255,11 +295,24 @@ struct Placed {
     exit: Draft,
 }
 
+/// Where `is_checked_guard` holds a loop phi's long guard: within the
+/// arithmetic its back edge made, or nowhere, where that arithmetic is an
+/// increment or a decrement php's `zend_may_overflow` says cannot
+/// overflow.
+enum Checked {
+    Within(Placed),
+    Nowhere,
+}
+
 /// A call an `INIT_*` began: whether compiled code began it, which may
 /// leave the interpreter's call chain behind it until the call is made,
 /// and what each argument was sent as, where the send says.
 struct Call {
     inline: bool,
+    /// Whether compiled code holds it apart from its frame's call chain
+    /// until it is made, php's `delayed_call_chain`: an inline `INIT_*`
+    /// that [`needs_call_chain`] lets delay the link.
+    delayed: bool,
     /// Per argument, what its send wrote, where it sent a value.
     args: Vec<Sent>,
     /// For a native's call, what its declaration says it returns.
@@ -419,6 +472,18 @@ struct Builder<'a> {
     /// ([`Hold::Held`]). A loop's phi and a value the trace entered with
     /// are no such value, as php's are not.
     held_references: HashSet<ValueId>,
+    /// The range php's code generator reads of a value where it is not
+    /// the value's own, read where a later opline is compiled and never
+    /// by the inference: what a comparison the trace compiled as a branch
+    /// left it holding on the way the trace went on, as the code generator
+    /// writes it over the trace SSA's range
+    /// (`zend_jit_trace_update_condition_ranges`), or the range, or none,
+    /// of what the line defines as the code generator propagates it once
+    /// it has compiled the line ([`Builder::refresh`]).
+    compiled: HashMap<ValueId, Option<Range>>,
+    /// The increments and decrements php's `zend_may_overflow` says
+    /// cannot overflow, which hold no guard on what they write.
+    bounded: HashSet<OpId>,
 }
 
 /// Where a property opline is served in place: the object it reads, the
@@ -480,6 +545,8 @@ impl<'a> Builder<'a> {
             sampled: HashMap::new(),
             classed: HashMap::new(),
             held_references: HashSet::new(),
+            compiled: HashMap::new(),
+            bounded: HashSet::new(),
         };
         let begins = rec.events.iter().find_map(|event| match event {
             Event::Op { opline, .. } => Some(*opline),
@@ -584,7 +651,7 @@ impl<'a> Builder<'a> {
                     data,
                     branch,
                 } => self.line(*func, *opline, [*op1, *op2, *data], *branch, ahead)?,
-                Event::InitCall { callee, began } => self.init_call(*callee, *began)?,
+                Event::InitCall { callee, began } => self.init_call(*callee, *began, ahead)?,
                 Event::Enter { func } => self.enter(*func)?,
                 Event::Back => self.back(ahead)?,
             }
@@ -979,6 +1046,19 @@ impl<'a> Builder<'a> {
             exit: None,
             unwind: None,
         }));
+        // php reads the range an increment's operand holds as it compiles
+        // the increment, then propagates what it wrote.
+        if matches!(
+            op.opcode,
+            Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec
+        ) && !self.may_overflow(&op, op1, written.op1)
+        {
+            self.bounded.insert(idx);
+        }
+        if let (Some(jump), Some(taken)) = (fused, branch) {
+            self.narrow_by_condition(&op, (op1, op2), jump == Fused::Jmpnz, taken);
+        }
+        self.refresh(idx, &reads);
         let fused = fused.is_some();
         let len = if fused || data_line.is_some() { 2 } else { 1 };
         let jump = if fused { after } else { Some(op) };
@@ -1420,14 +1500,26 @@ impl<'a> Builder<'a> {
     }
 
     /// A call an `INIT_*` began, here or before the trace reached the
-    /// frame, whose arguments sent before it the trace knows nothing of.
-    fn init_call(&mut self, callee: Callee, began: Began) -> Result<(), Abort> {
+    /// frame, whose arguments sent before it the trace knows nothing of;
+    /// `ahead`, the events after it, say whether compiled code links it
+    /// into the frame's call chain at once.
+    fn init_call(&mut self, callee: Callee, began: Began, ahead: &[Event]) -> Result<(), Abort> {
         let frame = self.running()?;
-        let inline = began == Began::Here
-            && matches!(
-                self.ops.last(),
-                Some(Op::Line(line)) if line.form == Form::Inline
-            );
+        let init = match self.ops.last() {
+            Some(Op::Line(line)) if began == Began::Here && line.form == Form::Inline => {
+                Some(line.opcode)
+            }
+            _ => None,
+        };
+        let inline = init.is_some();
+        let code = self.meta(frame).code;
+        let after = (ahead.iter())
+            .filter(|event| !matches!(event, Event::InitCall { .. }))
+            .map_while(|event| match event {
+                Event::Op { opline, .. } => code.oplines.get(opline.0 as usize).map(|op| op.opcode),
+                Event::InitCall { .. } | Event::Enter { .. } | Event::Back => None,
+            });
+        let delayed = init.is_some_and(|init| !needs_call_chain(init, after));
         let plain = self
             .pushing
             .take()
@@ -1450,6 +1542,7 @@ impl<'a> Builder<'a> {
         self.begin();
         self.calls.push(Call {
             inline,
+            delayed,
             args: Vec::new(),
             returns: match callee {
                 Callee::Native(returns) => Some(returns),
@@ -2289,6 +2382,7 @@ impl<'a> Builder<'a> {
         Snapshot {
             values,
             calls: self.calls.iter().filter(|call| call.inline).count(),
+            delayed: self.calls.iter().any(|call| call.delayed),
         }
     }
 
@@ -2995,6 +3089,17 @@ impl<'a> Builder<'a> {
             },
             _ => None,
         };
+        // An increment or a decrement php's `zend_may_overflow` says cannot
+        // overflow is compiled with no check: what it writes is a long the
+        // guard holds nowhere ([`Builder::may_overflow`]).
+        if let Some((def, _, _, Within::Overflowed { .. }, ..)) = computed
+            && self.bounded(def)
+        {
+            if !self.aliased(held.slot) && self.val(value).types.scalar() {
+                self.val_mut(value).home = Home::Register;
+            }
+            return;
+        }
         let mut then = None;
         let (at, exit) = match (held.def, computed) {
             (Def::Entry, _)
@@ -3015,7 +3120,7 @@ impl<'a> Builder<'a> {
                 };
                 let to = match kind {
                     Within::Fetched { .. } => fetched(Left::Copied(Read::InPlace)),
-                    Within::Rerun | Within::Overflowed { .. } => overflowing,
+                    Within::Rerun | Within::Overflowed { .. } | Within::Stayed => overflowing,
                 };
                 if let (Within::Fetched { missed }, Some(tag)) = (kind, tag) {
                     then = deref.then_some(Placed {
@@ -3622,6 +3727,7 @@ impl<'a> Builder<'a> {
         }
         let closes = self.closes();
         self.load_at_entry();
+        self.hold_in_fetch();
         let numbered = self.number(closes)?;
         let end = numbered
             .end
@@ -4321,7 +4427,9 @@ impl<'a> Builder<'a> {
                 if !self.aliased(slot) {
                     self.val_mut(back).home = Home::Register;
                 }
-                self.guards.push(held);
+                if let Checked::Within(placed) = held {
+                    self.guards.push(placed);
+                }
             }
             self.val_mut(entry).types = match narrowed {
                 Narrowed::Tag(tag) => entered.types.narrowed(tag),
@@ -4453,7 +4561,10 @@ impl<'a> Builder<'a> {
     /// `+=`, `-=` or `*=`, or an increment or a decrement made over
     /// numbers, which holds its overflow itself, so the guard the phi
     /// held at the header each turn is held within it, rerunning it where
-    /// it overflows. The guard it holds, where it is one.
+    /// it overflows. The guard it holds, where it is one, and none within
+    /// an increment or a decrement php's `zend_may_overflow` says cannot
+    /// overflow, which its code generator compiles with no check, so the
+    /// guard is held nowhere ([`Builder::may_overflow`]).
     ///
     /// The back edge brings the last value php's trace SSA numbers in the
     /// slot, and a line after `back`'s that reads it and may take a
@@ -4498,7 +4609,7 @@ impl<'a> Builder<'a> {
     /// ---- TRACE 5 stop (return)
     /// ---- TRACE 5 compiled
     /// ```
-    fn checked_guard(&self, back: ValueId) -> Option<Placed> {
+    fn checked_guard(&self, back: ValueId) -> Option<Checked> {
         let made = *self.val(back);
         if made.types.meets(Types::REF) || !made.types.meets(Types::LONG) {
             return None;
@@ -4565,7 +4676,10 @@ impl<'a> Builder<'a> {
             .filter(|kind| matches!(kind, Within::Rerun | Within::Overflowed { .. }));
         let inline = line.form == Form::Inline && !self.over_aliased(line.op1, line.op2);
         let kind = kind.filter(|_| checked && inline)?;
-        Some(Placed {
+        if step && self.bounded(def) {
+            return Some(Checked::Nowhere);
+        }
+        Some(Checked::Within(Placed {
             at: GuardAt::Within(def),
             check: Check::Type {
                 value: back,
@@ -4576,7 +4690,7 @@ impl<'a> Builder<'a> {
                 line.frame,
                 At::overflowing(kind, line, back),
             ),
-        })
+        }))
     }
 
     /// Whether a call into a frame above `value`'s stored it to its slot
@@ -4597,14 +4711,15 @@ impl<'a> Builder<'a> {
     /// fetched element leaves for the opline after it with the copy in
     /// its stack map (`zend_jit_guard_fetch_result_type`,
     /// `Z/ext/opcache/jit/zend_jit_ir.c:8067-8085`), and with a call
-    /// under way restored, as `zend_jit_trace_get_exit_point` adds
-    /// `ZEND_JIT_EXIT_RESTORE_CALL` to any exit taken while one is
+    /// compiled code holds apart restored, as
+    /// `zend_jit_trace_get_exit_point` adds `ZEND_JIT_EXIT_RESTORE_CALL`
+    /// to any exit taken while the call chain is delayed
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:144-147`).
-    fn lands(&self, draft: &Draft, calls: bool) -> (Option<OplineIdx>, Landing, Vec<Store>) {
+    fn lands(&self, draft: &Draft, delayed: bool) -> (Option<OplineIdx>, Landing, Vec<Store>) {
         let extra = || draft.extra.into_iter().collect();
         match draft.at {
-            At::Opline(at) => (Some(at), restored(calls), extra()),
-            At::Stands | At::Landed => (None, restored(calls), extra()),
+            At::Opline(at) => (Some(at), restored(delayed), extra()),
+            At::Stands | At::Landed => (None, restored(delayed), extra()),
             At::Fetched {
                 fetch,
                 frees,
@@ -4620,7 +4735,7 @@ impl<'a> Builder<'a> {
                 };
                 let landing = Landing {
                     frees,
-                    restores_call: calls,
+                    restores_call: delayed,
                 };
                 (Some(OplineIdx(fetch.0 + 1)), landing, vec![copied])
             }
@@ -4631,7 +4746,16 @@ impl<'a> Builder<'a> {
                         from,
                     })
                     .collect();
-                (Some(OplineIdx(op.0 + 1)), restored(calls), overflowed)
+                (Some(OplineIdx(op.0 + 1)), restored(delayed), overflowed)
+            }
+            At::Stayed { op, wrote } => {
+                let stayed = (wrote.stayed().into_iter().flatten())
+                    .map(|(value, from)| Store {
+                        slot: self.val(value).slot,
+                        from,
+                    })
+                    .collect();
+                (Some(OplineIdx(op.0 + 1)), restored(delayed), stayed)
             }
         }
     }
@@ -4646,8 +4770,7 @@ impl<'a> Builder<'a> {
     ) -> ExitSpec {
         let empty = Snapshot::default();
         let snapshot = self.snapshot_at(draft.point).unwrap_or(&empty);
-        let calls = snapshot.calls > 0;
-        let (opline, landing, extra) = self.lands(draft, calls);
+        let (opline, landing, extra) = self.lands(draft, snapshot.delayed);
         // A frame a return past the root landed in is one the trace
         // holds nothing of ([`At::Landed`]).
         if matches!(draft.at, At::Landed) {
@@ -4740,11 +4863,12 @@ impl<'a> Builder<'a> {
                 })
             })
             .collect();
-        // A constant an overflow left in its slot is known as what it
-        // is, as php's `zend_jit_math_long_long` and `zend_jit_inc_dec`
-        // set the slot's stack type before they take the exit.
+        // A constant an overflow left in its slot, and a long a step
+        // that did not overflow left there, is known as what it is, as
+        // php's `zend_jit_math_long_long` and `zend_jit_inc_dec` set the
+        // slot's stack type before they take the exit.
         for store in &extra {
-            if let Some(tag) = store.from.constant() {
+            if let Some(tag) = store.from.stack_type() {
                 known.retain(|known| known.slot != store.slot);
                 known.push(Known {
                     slot: store.slot,
@@ -5145,7 +5269,7 @@ impl Reused {
             spec: ExitSpec {
                 frame: Frame::ROOT,
                 stores: (spec.stores.iter())
-                    .map(|store| match store.from.constant() {
+                    .map(|store| match store.from.stack_type() {
                         Some(_) => Store {
                             slot: relative(store.slot),
                             ..*store
@@ -5341,8 +5465,8 @@ fn stack_type(check: Check) -> Option<(ValueId, ZvalType)> {
     }
 }
 
-fn restored(calls: bool) -> Landing {
-    if calls {
+fn restored(delayed: bool) -> Landing {
+    if delayed {
         Landing::RESTORE_CALL
     } else {
         Landing::PLAIN

@@ -153,8 +153,9 @@ struct State {
     set_handler: bool,
     define_sid: bool,
     send_cookie: bool,
-    /// `PS(session_vars)`: the data read, for `lazy_write`.
-    session_vars: Option<Vec<u8>>,
+    /// `PS(session_vars)`: the data read, for `lazy_write`, the string
+    /// the save handler read it into, counted as php's is.
+    session_vars: Option<Owner<PhpString>>,
     /// `PS(http_session_vars)`: the reference `$_SESSION` in
     /// `EG(symbol_table)` is bound to, one owner of it the session's, so
     /// what the program assigns through `$_SESSION` is what the session
@@ -232,31 +233,31 @@ enum Phase {
 /// ```
 pub fn extension() -> Extension {
     let builder = ExtensionBuilder::default()
-        .constants(constants::declared())
-        .functions(vec![
-            session_name::declared(),
-            session_module_name::declared(),
-            session_save_path::declared(),
-            session_id::declared(),
-            session_create_id::declared(),
-            session_regenerate_id::declared(),
-            session_decode::declared(),
-            session_encode::declared(),
-            session_destroy::declared(),
-            session_unset::declared(),
-            session_gc::declared(),
-            session_get_cookie_params::declared(),
-            session_write_close::declared(),
-            session_abort::declared(),
-            session_reset::declared(),
-            session_status::declared(),
-            session_register_shutdown::declared(),
-            session_commit::declared(),
-            session_set_save_handler::declared(),
-            session_cache_limiter::declared(),
-            session_cache_expire::declared(),
-            session_set_cookie_params::declared(),
-            session_start::declared(),
+        .constants(constants::DECLARED)
+        .functions(&[
+            session_name::DECLARED,
+            session_module_name::DECLARED,
+            session_save_path::DECLARED,
+            session_id::DECLARED,
+            session_create_id::DECLARED,
+            session_regenerate_id::DECLARED,
+            session_decode::DECLARED,
+            session_encode::DECLARED,
+            session_destroy::DECLARED,
+            session_unset::DECLARED,
+            session_gc::DECLARED,
+            session_get_cookie_params::DECLARED,
+            session_write_close::DECLARED,
+            session_abort::DECLARED,
+            session_reset::DECLARED,
+            session_status::DECLARED,
+            session_register_shutdown::DECLARED,
+            session_commit::DECLARED,
+            session_set_save_handler::DECLARED,
+            session_cache_limiter::DECLARED,
+            session_cache_expire::DECLARED,
+            session_set_cookie_params::DECLARED,
+            session_start::DECLARED,
         ])
         .ini(ini::declared())
         .dependencies(vec![Dependency {
@@ -447,6 +448,13 @@ fn bind_vars(req: &mut Request, vars: Owner<Value>) -> Result<(), Thrown> {
     req.variables_mut()
         .set_global(b"_SESSION", Some(vars.into_value()));
     Ok(())
+}
+
+/// `PS(session_vars)` given up, `zend_string_release_ex` and `NULL`.
+fn forget_read(req: &mut Request) {
+    if let Some(read) = req.state::<State>().session_vars.take() {
+        read.give_up(req);
+    }
 }
 
 /// `PS(http_session_vars)` given up, `zval_ptr_dtor` and `ZVAL_UNDEF`;

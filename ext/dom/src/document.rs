@@ -2,13 +2,16 @@
 //! switches, the node factories, loading and saving through libxml2, and
 //! validation.
 
-use php_ext::abi::{Instance, OrFalse, Passed, Path, Raw, This, True, Union, Untyped, Variadic};
+use php_ext::abi::{
+    FromArgument, Instance, OrFalse, Passed, Path, Raw, This, True, Union, Untyped, Variadic,
+};
 use php_ext::attr::php_class;
+use php_ext::decl::Type;
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, throw_error, value_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpObject, PhpString, TypeTag, Value};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi as f;
 use php_ext_libxml::ffi::{
@@ -1056,6 +1059,47 @@ fn import_node(
     object_for(req, copy, Some(this))
 }
 
+/// `Dom\Document::importNode`'s `?Dom\Node $node`: declared nullable, as
+/// the stub writes it and reflection shows it, and held as
+/// `dom_modern_document_import_node` parses it, `O` over `Dom\Node`,
+/// which refuses `null` and any other value naming the class alone.
+struct Imported(PhpObject);
+
+impl FromArgument for Imported {
+    const MASK: u32 = <Option<Instance<crate::modern::Node>> as FromArgument>::MASK;
+    fn declared() -> Option<Type> {
+        <Option<Instance<crate::modern::Node>> as FromArgument>::declared()
+    }
+    fn accepts(value: &Value) -> bool {
+        <Option<Instance<crate::modern::Node>> as FromArgument>::accepts(value)
+    }
+    fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
+        held_node(req, value, 1)
+    }
+    fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
+        if given.tag() == TypeTag::Undef {
+            return Ok(None);
+        }
+        held_node(req, given.deref(), position).map(Some)
+    }
+}
+
+/// `zend_parse_arg_object` over `Dom\Node` with no `!`: an instance, or
+/// php's `TypeError` naming the class without the `?`.
+fn held_node(req: &mut Request, value: Value, position: u32) -> Result<Imported, Thrown> {
+    if let Some(object) = value.as_object()
+        && instance_of(req, object, "Dom\\Node")
+    {
+        return Ok(Imported(object));
+    }
+    let given = php_ext::coerce::value_name(req, &value);
+    Err(arg_type_error(
+        req,
+        position,
+        &[b"be of type Dom\\Node, ".as_slice(), &given, b" given"].concat(),
+    ))
+}
+
 /// `dom_modern_document_import_node`: `Dom\Document::importNode` and
 /// `importLegacyNode`, the copy made into this document with its
 /// namespaces the mapper's; a document refused, a failed copy an
@@ -1063,14 +1107,10 @@ fn import_node(
 fn modern_import(
     req: &mut Request,
     this: PhpObject,
-    node_obj: Option<PhpObject>,
+    node_obj: PhpObject,
     deep: bool,
 ) -> Result<Owner<Value>, Thrown> {
     let doc = fetch(req, this)?;
-    let Some(node_obj) = node_obj else {
-        // `?Dom\Node $node` lets `null` through to `O`, which refuses it.
-        return Err(arg_type_error(req, 1, "be of type Dom\\Node, null given"));
-    };
     let node = fetch(req, node_obj)?;
     if node.kind().is_document() {
         return Err(crate::dom_throw(req, Code::NotSupported));
@@ -2310,13 +2350,29 @@ impl Document {
     /// bool(true)
     /// Not Supported Error
     /// ```
+    ///
+    /// The declaration admits `null` and the hold does not ([`Imported`]):
+    ///
+    /// ```php
+    /// $d = Dom\XMLDocument::createEmpty();
+    /// foreach ([fn() => $d->importNode(new DOMElement('x')), fn() => $d->importNode(null), fn() => $d->importLegacyNode(null)] as $f) {
+    ///     try { var_dump($f()); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// }
+    /// echo (new ReflectionMethod(Dom\Document::class, 'importNode'))->getParameters()[0]->getType(), "\n";
+    /// ```
+    /// ```expect
+    /// TypeError: Dom\Document::importNode(): Argument #1 ($node) must be of type Dom\Node, DOMElement given
+    /// TypeError: Dom\Document::importNode(): Argument #1 ($node) must be of type Dom\Node, null given
+    /// TypeError: Dom\Document::importLegacyNode(): Argument #1 ($node) must be of type DOMNode, null given
+    /// ?Dom\Node
+    /// ```
     fn importNode(
         req: &mut Request,
         this: This<Self>,
-        node: Option<Instance<crate::modern::Node>>,
+        node: Imported,
         #[php(default = false)] deep: bool,
     ) -> Result<Owner<Raw<Instance<crate::modern::Node>>>, Thrown> {
-        let imported = modern_import(req, this.object(), node.map(|n| n.object()), deep)?;
+        let imported = modern_import(req, this.object(), node.0, deep)?;
         returned(imported)
     }
 
@@ -2452,7 +2508,7 @@ impl Document {
         node: Instance<DOMNode>,
         #[php(default = false)] deep: bool,
     ) -> Result<Owner<Raw<Instance<crate::modern::Node>>>, Thrown> {
-        let imported = modern_import(req, this.object(), Some(node.object()), deep)?;
+        let imported = modern_import(req, this.object(), node.object(), deep)?;
         returned(imported)
     }
 

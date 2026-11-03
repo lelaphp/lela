@@ -330,6 +330,31 @@ stop = "SIGTERM"
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
 
+# A `-b` port is read into `fcgi_listen`'s `short` (`Z/main/fastcgi.c:660`,
+# #3867), and `65536`'s low 16 bits are 0, which is no port: the whole
+# address names a Unix socket in the directory the process starts in, which
+# serves.
+[[line]]
+name = "fastcgi-a-port-whose-low-16-bits-are-0-names-a-unix-socket"
+args = ["-n", "-b", "127.0.0.1:65536"]
+files = { "t.php" = "<?php echo \"served\\n\";" }
+[line.serve]
+listen = "{dir}/127.0.0.1:65536"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
+
+# A `-b` host is TCP's only while it is shorter than `MAXPATHLEN`, 1024
+# bytes on macOS, as `fcgi_listen`'s `(s-path) < MAXPATHLEN` judges it
+# (`Z/main/fastcgi.c:661`, #3882): a host of exactly 1024 bytes makes the
+# whole address a Unix socket's path, which `sun_path` refuses as too long,
+# and one of 1023 bytes stays a host, which no lookup resolves.
+[[line]]
+name = "fastcgi-a-host-of-maxpathlen-bytes-names-a-unix-socket"
+args = ["-n", "-b", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:9000"]
+[[line.then]]
+args = ["-n", "-b", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:9000"]
+
 # What php displays while it starts goes to C's `stdout`, an `fwrite`
 # (`php_output_direct`, `php_output_stdout`), fully buffered where stdout is
 # a pipe, while the head and the body go out past it with `write(2)`
@@ -548,3 +573,124 @@ files = { "a.php" = "<?php $f = fn () => $b; echo memory_get_usage(), \" \", mem
 [[line.then]]
 args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/f.php" }
+
+# A loop or `switch` of such a program (#3823): php's compile grows
+# `CG(context).brk_cont_array` an element at each, which stands through
+# the op array's `pass_two` and is freed by `zend_oparray_context_end`, so
+# the first program's peak is that block's 24 bytes above the window's.
+# The second nests a `for` and a `switch` in a `foreach`, four elements in
+# one 80-byte block; the third writes, inside a loop, a closure with two
+# of its own, whose `pass_two` stands beside the main op array's element.
+[[line]]
+name = "an-uncached-loop-lays-its-brk-cont-element"
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/a.php" }
+files = { "a.php" = "<?php for (;;) { break; } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "b.php" = "<?php foreach ([1, 2] as $a) { for ($i = 0; $i < 2; $i++) { switch ($i) { case 0: break; default: continue 2; } } while (false) {} } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "c.php" = "<?php for (;;) { $f = function () { while (false) {} do {} while (false); }; break; } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/b.php" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/c.php" }
+
+# A constant php's compile makes after a declaration of such a program
+# (#3836): the `[1, 2]` array `zend_try_ct_eval_array` makes, a call's
+# names in a namespace (`zend_add_ns_func_name_literal`) and a string
+# `zend_compile_binary_op` folds, each after the function's `pass_two`, so
+# none stands at the compile's peak; and a namespaced function's key,
+# `zend_begin_func_decl`'s `zend_string_tolower`, as the function begins.
+[[line]]
+name = "an-uncached-constant-after-a-declaration-is-made-past-its-pass-two"
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/a.php" }
+files = { "a.php" = "<?php class C {} function f() {} $abcdef = [1, 2]; echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "b.php" = "<?php namespace A; function f() {} echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "c.php" = "<?php class C {} function f() {} $abcdef = \"abcdefghijklmnopqrstuvwxyz\" . PHP_EOL; echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/b.php" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/c.php" }
+
+# A class's methods' table of such a program, laid at its first method
+# (#3838): `zend_initialize_class_data` lays no table's data, and
+# `zend_begin_method_decl` lays `ce->function_table` as it adds the first
+# method's row, so a hook written above the method compiles, its
+# `pass_two` among it, without the table standing. The second program
+# writes the method first, whose table stands under the hook.
+[[line]]
+name = "an-uncached-class-lays-its-methods-table-at-its-first-method"
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/a.php" }
+files = { "a.php" = "<?php class C { public $p { set { } } function m() {} } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "b.php" = "<?php class C { function m() {} public $p { set { } } } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/b.php" }
+
+# A method's key of such a program, laid as the method begins (#3900):
+# `zend_begin_method_decl` lowers `doIt` to `doit` (`zend_string_tolower`),
+# a string of its own where opcache's table holds no such bytes, which
+# stands through the method's `pass_two`, as a function's key does.
+[[line]]
+name = "an-uncached-method-lays-its-key-as-it-begins"
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/a.php" }
+files = { "a.php" = "<?php class C { function doIt() {} } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "b.php" = "<?php class C { function doIt() {} } function g() {} echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/b.php" }
+
+# A class of such a program that implements an interface (#3901), which
+# no top-level class early-binds: `zend_compile_implements` lays its
+# `interface_names` and lowers `I` as the class begins, both standing
+# through the compile's peak until the link gives them back, and its
+# `DECLARE_CLASS` carries the runtime definition key `zend_strpprintf`
+# prints, trimmed to `zend_string_finit`'s size. An enum is a `UnitEnum`
+# by `zend_enum_add_interfaces`.
+[[line]]
+name = "an-uncached-class-lays-its-interfaces-names-as-it-begins"
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/a.php" }
+files = { "a.php" = "<?php interface I {} class C implements I {} echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "b.php" = "<?php interface I {} class C implements I { function m() {} } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "c.php" = "<?php enum E { case A; function m() {} } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/b.php" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/c.php" }
+
+# A class of such a program that writes `implements Stringable` beside its
+# `__toString` (#3924): `zend_compile_implements` lays the name and lowers
+# it as the class begins, and `add_stringable_interface` finds it and adds
+# none, where a class that writes none has both of `Stringable`'s strings
+# laid as `__toString` begins. The unit says which (`stringable_added`).
+[[line]]
+name = "a-written-stringable-is-laid-as-the-class-begins"
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/a.php" }
+files = { "a.php" = "<?php class C implements Stringable { function __toString(): string { return \"\"; } } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "b.php" = "<?php class C { function __toString(): string { return \"\"; } } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "c.php" = "<?php interface I {} class C implements I, Stringable { function __toString(): string { return \"\"; } } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/b.php" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/c.php" }
+
+# A class's constants' and properties' tables of such a program, each laid
+# at its first row (#3907): `zend_initialize_class_data` lays neither's
+# data, and `zend_declare_typed_class_constant` and
+# `zend_declare_typed_property` lay `ce->constants_table` and
+# `ce->properties_info`, and the default slot, where the member is
+# written, so a method written above them compiles, its `pass_two` among
+# it, without them standing. The second program writes them first, the
+# third an enum's case and constant after a method.
+[[line]]
+name = "an-uncached-class-lays-its-constants-and-properties-where-written"
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/a.php" }
+files = { "a.php" = "<?php class C { function m() {} const K = 1; public $p = 1; } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "b.php" = "<?php class C { const K = 1; public $p = 1; function m() {} } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "c.php" = "<?php enum E { function m() {} case A; const K = self::A; } echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/b.php" }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=3600"]
+env = { SCRIPT_FILENAME = "{dir}/c.php" }

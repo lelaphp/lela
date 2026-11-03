@@ -515,7 +515,7 @@ impl Emit<'_> {
             if qualified == NameKind::NotFullyQualified && self.not_imported(&written) {
                 self.confusable_type(&written, &resolved);
             }
-            return Ok(Type::Named(Name(resolved.into_boxed_slice())));
+            return Ok(Type::Named(Name(resolved.into())));
         }
         self.ensure_valid_class_fetch_type(fetch)?;
         // `substitute_self_parent`: never in an anonymous class, whose
@@ -533,7 +533,7 @@ impl Emit<'_> {
             _ => self.active_name(),
         };
         Ok(match substituted {
-            Some(name) => Type::Named(Name(name.into_boxed_slice())),
+            Some(name) => Type::Named(Name(name.into())),
             None if fetch == FETCH_CLASS_SELF => Type::SelfClass,
             None => Type::ParentClass,
         })

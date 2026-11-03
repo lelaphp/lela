@@ -57,15 +57,15 @@ use crate::throwables::Throwables;
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            finfo_open::declared(),
-            finfo_close::declared(),
-            finfo_set_flags::declared(),
-            finfo_file::declared(),
-            finfo_buffer::declared(),
-            mime_content_type::declared(),
+        .functions(&[
+            finfo_open::DECLARED,
+            finfo_close::DECLARED,
+            finfo_set_flags::DECLARED,
+            finfo_file::DECLARED,
+            finfo_buffer::DECLARED,
+            mime_content_type::DECLARED,
         ])
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .class::<class::finfo>()
         .engine_state(Throwables::start)
         .info(fileinfo_info)

@@ -130,22 +130,22 @@ struct State {
 /// bool(true)
 /// ```
 pub fn extension() -> Extension {
-    let mut builder = exceptions::register(ExtensionBuilder::default().functions(vec![
-        functions::class_implements::declared(),
-        functions::class_parents::declared(),
-        functions::class_uses::declared(),
-        functions::spl_autoload::declared(),
-        functions::spl_autoload_call::declared(),
-        functions::spl_autoload_extensions::declared(),
-        functions::spl_autoload_functions::declared(),
-        functions::spl_autoload_register::declared(),
-        functions::spl_autoload_unregister::declared(),
-        functions::spl_classes::declared(),
-        functions::spl_object_hash::declared(),
-        functions::spl_object_id::declared(),
-        functions::iterator_apply::declared(),
-        functions::iterator_count::declared(),
-        functions::iterator_to_array::declared(),
+    let mut builder = exceptions::register(ExtensionBuilder::default().functions(&[
+        functions::class_implements::DECLARED,
+        functions::class_parents::DECLARED,
+        functions::class_uses::DECLARED,
+        functions::spl_autoload::DECLARED,
+        functions::spl_autoload_call::DECLARED,
+        functions::spl_autoload_extensions::DECLARED,
+        functions::spl_autoload_functions::DECLARED,
+        functions::spl_autoload_register::DECLARED,
+        functions::spl_autoload_unregister::DECLARED,
+        functions::spl_classes::DECLARED,
+        functions::spl_object_hash::DECLARED,
+        functions::spl_object_id::DECLARED,
+        functions::iterator_apply::DECLARED,
+        functions::iterator_count::DECLARED,
+        functions::iterator_to_array::DECLARED,
     ]));
     builder = iterators::register(builder);
     builder = array::register(builder);

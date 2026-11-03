@@ -880,8 +880,9 @@ pub(crate) fn parent_hook_trampolines() -> Vec<(HookKind, MethodDecl, Entry)> {
             };
             let name = format!("$::{}", kind.name());
             let function = FunctionDecl {
-                parameters,
-                ..native_function(name.as_bytes())
+                parameters: parameters.into(),
+                name: php_unit::decl::Name(name.as_bytes().into()),
+                ..native_function(b"")
             };
             let method = public_method(function, true);
             (kind, method, entry)
@@ -1071,7 +1072,7 @@ impl Request {
                     Visibility::Protected => KeyOwner::Protected,
                     Visibility::Private => KeyOwner::Private(here),
                 };
-                let row = (name.clone(), owner, here, property.visibility);
+                let row = (Box::from(&**name), owner, here, property.visibility);
                 match keys.iter().position(|k| k.0 == row.0 && k.1 == owner) {
                     Some(i) => keys[i] = row,
                     None => keys.push(row),

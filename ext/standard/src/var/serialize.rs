@@ -380,7 +380,6 @@ fn write(
     // `struc = Z_REFVAL_P(struc)`: what a reference holds is counted as
     // the reference holds it.
     let value = value.deref();
-    let refcount = value.refcount();
     match value.as_ref() {
         ValueRef::Bool(false) => out.extend_from_slice(b"b:0;"),
         ValueRef::Bool(true) => out.extend_from_slice(b"b:1;"),
@@ -394,7 +393,7 @@ fn write(
         ValueRef::Str(s) => write_string(out, s.as_bytes()),
         ValueRef::Array(array) => {
             out.extend_from_slice(b"a:");
-            let shared = !is_root && (in_rcn_array || refcount > 1);
+            let shared = !is_root && (in_rcn_array || value.refcount() > 1);
             nested(req, out, &value, array, hash, shared, false)?;
         }
         ValueRef::Object(object) => object_value(req, out, object, hash)?,

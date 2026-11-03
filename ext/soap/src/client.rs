@@ -14,7 +14,7 @@ use php_ext::values::{
 };
 use php_ext_libxml::ffi::{Library, Node, Save};
 
-use crate::classes::SoapFault;
+use crate::classes::{Lang, SoapFault};
 use crate::message::{
     function_to_string, get_function, serialize_function_call, soap_binding, soap_create_typemap,
     type_to_string,
@@ -31,10 +31,41 @@ type R<T> = Result<T, Thrown>;
 
 /// `SoapClient`'s payload: the typemap its `typemap` option made, which
 /// php keeps as pointers in the `typemap` property's array.
+///
+/// php's client is a plain `zend_object`, `zend_objects_new` with no
+/// struct of its own, so the payload is one pointer, which the bin php
+/// takes leaves room for: the header and 36 slots are 616 bytes of a
+/// 640-byte bin, and a subclass's slots, 16 bytes each, leave eight at
+/// least in each bin above, all multiples of 16. The client reads
+/// php's 640 beside the 152 of the `stream_context` its constructor
+/// allocates, where the typemap's table laid in the object took it to
+/// the 768-byte bin:
+///
+/// ```php
+/// $o = ['location' => 'http://localhost/x', 'uri' => 'urn:x'];
+/// $b = new SoapClient(null, $o); $b = null;
+/// $m = memory_get_usage(); $b = new SoapClient(null, $o); echo 'made ', memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $b = null; echo 'freed ', $m - memory_get_usage(), "\n";
+/// class C extends SoapClient { public $x, $y; }
+/// $b = new C(null, $o); $b = null;
+/// $m = memory_get_usage(); $b = new C(null, $o); echo 'made ', memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $b = null; echo 'freed ', $m - memory_get_usage(), "\n";
+/// ```
+/// ```expect
+/// made 792
+/// freed 760
+/// made 888
+/// freed 888
+/// ```
 #[derive(Default)]
 pub(crate) struct Client {
-    pub(crate) typemap: Option<crate::Typemap>,
+    pub(crate) typemap: Option<Box<crate::Typemap>>,
 }
+
+const _: () = assert!(
+    size_of::<Client>() <= 8,
+    "SoapClient's payload outgrew the room php's bin leaves past its slots"
+);
 
 /// The typemap held, given back with the object.
 pub(crate) struct Handlers;
@@ -47,7 +78,7 @@ impl php_ext::abi::ObjectHandlers for Handlers {
             .native_mut::<Client>(req)
             .and_then(|c| c.typemap.take());
         if let Some(t) = typemap {
-            t.release(req);
+            (*t).release(req);
         }
         php_ext::abi::Std.free_obj(req, object);
     }
@@ -671,7 +702,7 @@ impl SoapClient {
             let sent = crate::http::make_http_soap_request_one_way(
                 req,
                 object,
-                request.as_bytes(),
+                request,
                 location.as_bytes(),
                 action,
                 version,
@@ -686,7 +717,7 @@ impl SoapClient {
         let answered = crate::http::make_http_soap_request(
             req,
             object,
-            request.as_bytes(),
+            request,
             location.as_bytes(),
             action,
             version,
@@ -1157,7 +1188,7 @@ fn construct(
                     return Err(thrown);
                 }
                 let old = match this.native_mut::<Client>(req) {
-                    Some(c) => c.typemap.replace(t),
+                    Some(c) => c.typemap.replace(Box::new(t)).map(|old| *old),
                     None => Some(t),
                 };
                 if let Some(old) = old {
@@ -1236,7 +1267,7 @@ fn do_request(
             b"Error build soap request",
             None,
             None,
-            b"en",
+            Lang::En,
         )?;
         return Ok((false, None));
     };
@@ -1270,7 +1301,7 @@ fn do_request(
                 b"SoapClient::__doRequest() returned non string value",
                 None,
                 None,
-                b"en",
+                Lang::En,
             )?;
         }
         ret = false;
@@ -1320,7 +1351,7 @@ fn do_soap_call(
     let sdl = this_sdl(req, this);
     let typemap = this
         .native::<Client>(req)
-        .and_then(|c| c.typemap.as_ref().map(Typemap::view));
+        .and_then(|c| c.typemap.as_deref().map(Typemap::view));
     // `clear_soap_fault`.
     set_client_slot(req, this, ClientSlot::SoapFault, Owner::null())?;
     let encoding = client_slot(this, ClientSlot::Encoding)
@@ -1458,7 +1489,7 @@ fn soap_call_body(
             let mut error = b"Function (\"".to_vec();
             error.extend_from_slice(function);
             error.extend_from_slice(b"\") is not a valid method for this service");
-            add_soap_fault(req, this, b"Client", &error, None, None, b"en")?;
+            add_soap_fault(req, this, b"Client", &error, None, None, Lang::En)?;
         }
     } else {
         let uri = client_slot(this, ClientSlot::Uri);
@@ -1470,7 +1501,7 @@ fn soap_call_body(
                 b"Error finding \"uri\" property",
                 None,
                 None,
-                b"en",
+                Lang::En,
             )?;
         } else if location.is_none() {
             add_soap_fault(
@@ -1480,7 +1511,7 @@ fn soap_call_body(
                 b"Error could not find \"location\" property",
                 None,
                 None,
-                b"en",
+                Lang::En,
             )?;
         } else {
             let call_uri = call_uri
@@ -1548,7 +1579,7 @@ fn soap_call_body(
         if fault.as_object().is_some() {
             Owner::take(req, fault)
         } else {
-            add_soap_fault_ex(req, this, b"Client", b"Unknown Error", None, None, b"en")?
+            add_soap_fault_ex(req, this, b"Client", b"Unknown Error", None, None, Lang::En)?
                 .into_value()
         }
     } else {

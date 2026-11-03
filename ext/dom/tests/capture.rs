@@ -119,3 +119,106 @@ echo "end\n";
     );
     assert_eq!(served.exit_code, 0);
 }
+
+/// Serves a `wr://` wrapper whose three methods are given, as
+/// `Dom\XMLDocument::C14NFile()`'s target, then `call`.
+fn c14nfile_through_a_wrapper(methods: &str, call: &str) -> php_ext::test::Served {
+    let engine = support::engine();
+    let sink = Capture::default();
+    let source = format!(
+        r#"<?php
+class W {{
+    public $context;
+    static ?Dom\XMLDocument $doc = null;
+{methods}
+}}
+stream_wrapper_register('wr', 'W');
+W::$doc = Dom\XMLDocument::createFromString('<root xmlns="urn:a" xmlns:p="urn:p" p:x="1"><c/></root>');
+{call}
+"#
+    );
+    engine.serve_capture(&source, sink)
+}
+
+/// A wrapper's methods see the tree with its `xmlns` attributes put back,
+/// since the file is written once the tree is restored; php 8.5.12 writes
+/// while the tree is relinked and its wrapper reads 1 attribute each
+/// time, then 1 after the call, where this engine's reads 3 throughout
+/// (#3961, the difference #3959 proposes).
+#[test]
+fn a_c14nfile_wrapper_sees_the_restored_tree() {
+    let served = c14nfile_through_a_wrapper(
+        r#"    function stream_open($p, $m, $o, &$op) { echo "open: ", self::$doc->documentElement->attributes->length, "\n"; return true; }
+    function stream_write($d) { echo "write: ", strlen($d), " bytes, attributes ", self::$doc->documentElement->attributes->length, "\n"; return strlen($d); }
+    function stream_close() { echo "close: ", self::$doc->documentElement->attributes->length, "\n"; }"#,
+        r#"var_dump(W::$doc->C14NFile('wr://x'));
+echo "after: ", W::$doc->documentElement->attributes->length, "\n";"#,
+    );
+    assert_eq!(
+        served.stdout_text(),
+        "open: 3\nwrite: 58 bytes, attributes 3\nclose: 3\nint(58)\nafter: 3\n"
+    );
+    assert_eq!(served.exit_code, 0);
+}
+
+/// A wrapper that removes and frees the root element in `stream_close`:
+/// the tree was restored before the file opened, so nothing reads the
+/// freed element; php 8.5.12 prints the same and exits 0 (#3961).
+#[test]
+fn a_c14nfile_wrapper_frees_the_root_in_stream_close() {
+    let served = c14nfile_through_a_wrapper(
+        r#"    function stream_open($p, $m, $o, &$op) { return true; }
+    function stream_write($d) { return strlen($d); }
+    function stream_close() { self::$doc->documentElement->remove(); gc_collect_cycles(); echo "removed\n"; }"#,
+        r#"var_dump(W::$doc->C14NFile('wr://x'));
+echo W::$doc->saveXml(), "\n";"#,
+    );
+    assert_eq!(
+        served.stdout_text(),
+        "removed\nint(58)\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\n"
+    );
+    assert_eq!(served.exit_code, 0);
+}
+
+/// A wrapper that frees the root element in `stream_write` and throws:
+/// the file is written once the tree is restored, so the program catches
+/// what was thrown and the document is left emptied.
+#[test]
+fn a_c14nfile_wrapper_frees_the_root_in_stream_write_and_throws() {
+    let served = c14nfile_through_a_wrapper(
+        r#"    function stream_open($p, $m, $o, &$op) { return true; }
+    function stream_write($d) { self::$doc->documentElement->remove(); throw new Exception("removed in write"); }
+    function stream_close() {}"#,
+        r#"try {
+    var_dump(W::$doc->C14NFile('wr://x'));
+} catch (Exception $e) {
+    echo get_class($e), ": ", $e->getMessage(), "\n";
+}
+echo W::$doc->saveXml(), "\n";"#,
+    );
+    assert_eq!(
+        served.stdout_text(),
+        "Exception: removed in write\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\n"
+    );
+    assert_eq!(served.exit_code, 0);
+}
+
+/// A wrapper that frees the root element in `stream_write` and writes
+/// nothing: the one write the closing flush makes answers 0, so the call
+/// answers `int(0)`; php 8.5.12 flushes twice, and its second
+/// `stream_write` throws an `Error` (#3961).
+#[test]
+fn a_c14nfile_wrapper_frees_the_root_in_stream_write_and_writes_nothing() {
+    let served = c14nfile_through_a_wrapper(
+        r#"    function stream_open($p, $m, $o, &$op) { return true; }
+    function stream_write($d) { self::$doc->documentElement->remove(); echo "removed in write\n"; return 0; }
+    function stream_close() {}"#,
+        r#"var_dump(W::$doc->C14NFile('wr://x'));
+echo W::$doc->saveXml(), "\n";"#,
+    );
+    assert_eq!(
+        served.stdout_text(),
+        "removed in write\nint(0)\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\n"
+    );
+    assert_eq!(served.exit_code, 0);
+}

@@ -59,7 +59,7 @@ mod utf8;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::decl::{ConstDecl, ConstExpr, IniDecl, Name};
+use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpString};
@@ -74,12 +74,30 @@ const ERROR_LEVEL: &[u8] = b"intl.error_level";
 /// `intl.use_exceptions`.
 const USE_EXCEPTIONS: &[u8] = b"intl.use_exceptions";
 
-/// The integer constants of `php_intl.stub.php`, `collator.stub.php`'s
-/// `ULOC_*` and `common.stub.php`, in their registration order; the two
-/// version strings are laid in by [`constants`].
+/// Every global constant in `PHP_MINIT_FUNCTION(intl)`'s order, with
+/// `INTL_ICU_VERSION` and `INTL_ICU_DATA_VERSION` the linked ICU's.
+///
+/// ```php
+/// var_dump(INTL_MAX_LOCALE_LEN, INTL_ICU_VERSION === INTL_ICU_DATA_VERSION, IDNA_DEFAULT, ULOC_VALID_LOCALE, U_USING_FALLBACK_WARNING, U_ERROR_LIMIT, count(get_defined_constants(true)['intl']));
+/// ```
+/// ```expect
+/// int(156)
+/// bool(true)
+/// int(48)
+/// int(1)
+/// int(-128)
+/// int(66818)
+/// int(170)
+/// ```
 #[php_const]
 pub(crate) mod constants {
     pub(crate) const INTL_MAX_LOCALE_LEN: i64 = 156;
+    fn INTL_ICU_VERSION() -> &'static str {
+        super::ffi::icu_version()
+    }
+    fn INTL_ICU_DATA_VERSION() -> &'static str {
+        super::ffi::icu_data_version()
+    }
     pub(crate) const GRAPHEME_EXTR_COUNT: i64 = 0;
     pub(crate) const GRAPHEME_EXTR_MAXBYTES: i64 = 1;
     pub(crate) const GRAPHEME_EXTR_MAXCHARS: i64 = 2;
@@ -250,37 +268,6 @@ pub(crate) mod constants {
     pub(crate) const U_ERROR_LIMIT: i64 = 66818;
 }
 
-/// Every global constant in `PHP_MINIT_FUNCTION(intl)`'s order, with
-/// `INTL_ICU_VERSION` and `INTL_ICU_DATA_VERSION` the linked ICU's.
-///
-/// ```php
-/// var_dump(INTL_MAX_LOCALE_LEN, INTL_ICU_VERSION === INTL_ICU_DATA_VERSION, IDNA_DEFAULT, ULOC_VALID_LOCALE, U_USING_FALLBACK_WARNING, U_ERROR_LIMIT, count(get_defined_constants(true)['intl']));
-/// ```
-/// ```expect
-/// int(156)
-/// bool(true)
-/// int(48)
-/// int(1)
-/// int(-128)
-/// int(66818)
-/// int(170)
-/// ```
-fn constants() -> Vec<ConstDecl> {
-    let mut all = constants::declared();
-    for (at, name, value) in [
-        (1, &b"INTL_ICU_VERSION"[..], ffi::icu_version()),
-        (2, b"INTL_ICU_DATA_VERSION", ffi::icu_data_version()),
-    ] {
-        let constant = ConstDecl {
-            name: Name(name.into()),
-            value: ConstExpr::Str(value.as_bytes().into()),
-            attributes: Vec::new(),
-        };
-        all.insert(at.min(all.len()), constant);
-    }
-    all
-}
-
 /// `zend_intl_globals`, request-scoped (ADR-0005): the request's
 /// `intl_error`. `default_locale`, `error_level` and `use_exceptions`
 /// are the ini entries themselves, overridden while a constructor runs.
@@ -313,18 +300,18 @@ pub fn extension() -> Extension {
         ])
         .on_modify(DEFAULT_LOCALE, on_update_default_locale)
         .on_modify(ERROR_LEVEL, on_update_error_level)
-        .constants(constants());
+        .constants(constants::DECLARED);
     // `php_intl.stub.php`'s functions, block by block: intlcal_* and
     // intlgregcal_*, collator_*, intl_*, datefmt_*, numfmt_*,
     // grapheme_*, idn_*, locale_*, msgfmt_*, normalizer_*,
     // resourcebundle_*, intltz_*, transliterator_*.
     let builder = calendar::functions(builder);
     let builder = collator::functions(builder);
-    let builder = builder.functions(vec![
-        intl_get_error_code::declared(),
-        intl_get_error_message::declared(),
-        intl_is_failure::declared(),
-        intl_error_name::declared(),
+    let builder = builder.functions(&[
+        intl_get_error_code::DECLARED,
+        intl_get_error_message::DECLARED,
+        intl_is_failure::DECLARED,
+        intl_error_name::DECLARED,
     ]);
     let builder = dateformat::functions(builder);
     let builder = formatter::functions(builder);

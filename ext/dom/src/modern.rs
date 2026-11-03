@@ -6,7 +6,7 @@
 
 use php_ext::abi::{Instance, ObjectHandlers, OrFalse, PropertyTest, Raw, Std, This, Union};
 use php_ext::attr::{php_class, php_function};
-use php_ext::raising::{Thrown, arg_value_error, throw_error, throw_exception_ex};
+use php_ext::raising::{Thrown, arg_value_error, arity, throw_error, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_libxml::ffi::{ClassType, DocString, Library, Parsed, Parser, Source};
@@ -751,12 +751,43 @@ impl Node {
     /// Cannot have more than one document type
     /// Cannot have more than one element child in a document
     /// ```
+    ///
+    /// The stub declares `$child` required, as reflection shows, and
+    /// `dom_node_insert_before` parses `"O|O!"`, so a call is held to one
+    /// or two arguments and one alone inserts at the end:
+    ///
+    /// ```php
+    /// $d = Dom\XMLDocument::createFromString('<r/>');
+    /// $r = $d->documentElement;
+    /// try { var_dump($r->insertBefore($d->createElement('a'))->tagName); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// echo $d->saveXml(), "\n";
+    /// $m = new ReflectionMethod("Dom\\Node", "insertBefore");
+    /// var_dump($m->getNumberOfRequiredParameters(), $m->getParameters()[1]->isOptional());
+    /// foreach ([fn() => $r->insertBefore(), fn() => $r->insertBefore(1, 2, 3), fn() => $r->insertBefore(1), fn() => $r->insertBefore($r, 1)] as $f) {
+    ///     try { $f(); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// string(1) "a"
+    /// <?xml version="1.0" encoding="UTF-8"?>
+    /// <r><a/></r>
+    /// int(2)
+    /// bool(false)
+    /// ArgumentCountError: Dom\Node::insertBefore() expects at least 1 argument, 0 given
+    /// ArgumentCountError: Dom\Node::insertBefore() expects at most 2 arguments, 3 given
+    /// TypeError: Dom\Node::insertBefore(): Argument #1 ($node) must be of type Dom\Node, int given
+    /// TypeError: Dom\Node::insertBefore(): Argument #2 ($child) must be of type ?Dom\Node, int given
+    /// ```
+    #[php(arity = manual)]
     fn insertBefore(
         req: &mut Request,
         this: This<Self>,
-        node: Instance<Node>,
-        child: Option<Instance<Node>>,
+        node: Raw<Instance<Node>>,
+        child: Raw<Option<Instance<Node>>>,
     ) -> Result<Owner<Raw<Instance<Node>>>, Thrown> {
+        arity(req, 1, Some(2))?;
+        let node = node.hold(req)?;
+        let child = child.hold(req)?;
         let this = this.object();
         let parent = fetch(req, this)?;
         let node = fetch(req, node.object())?;

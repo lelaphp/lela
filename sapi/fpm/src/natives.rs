@@ -146,11 +146,11 @@ fn info(req: &mut Request) {
 #[must_use]
 pub(crate) fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            fastcgi_finish_request::declared(),
-            apache_request_headers::declared(),
-            getallheaders::declared(),
-            fpm_get_status::declared(),
+        .functions(&[
+            fastcgi_finish_request::DECLARED,
+            apache_request_headers::DECLARED,
+            getallheaders::DECLARED,
+            fpm_get_status::DECLARED,
         ])
         .ini(INI.iter().map(Row::decl).collect())
         .info(info)

@@ -980,7 +980,7 @@ mod tests {
 
     fn replacing() -> Extension {
         ExtensionBuilder::default()
-            .functions(vec![replace_private::declared()])
+            .functions(&[replace_private::DECLARED])
             .build("replacing")
     }
 

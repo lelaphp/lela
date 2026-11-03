@@ -179,7 +179,9 @@ impl IniState {
 /// `OnSetExceptionStringParamMaxLen`'s `ZEND_ATOL` (`Z/Zend/zend.c:177`),
 /// and what every `eval` and include compiles under: `CG(short_tags)`,
 /// `EG(assertions)` (`OnUpdateAssertions`' quantity) and
-/// `CG(multibyte)`.
+/// `CG(multibyte)`; and `ZCG(accel_directives).record_warnings`, which
+/// every hit of opcache's reads ([`crate::engine::note_compiled`]), where
+/// opcache declares it.
 /// The engine lays them from its master values and each request keeps
 /// its own, changed with the entry's value, so a read neither scans the
 /// entries nor parses one. The text is php's `ZEND_ATOL`, so a value
@@ -204,6 +206,7 @@ impl IniState {
 /// 0.33333
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // php's ini entries a hot path reads, each one fact
 pub(crate) struct TypedIni {
     pub(crate) precision: i32,
     pub(crate) serialize_precision: i32,
@@ -212,11 +215,12 @@ pub(crate) struct TypedIni {
     pub(crate) short_open_tag: bool,
     pub(crate) assertions: i64,
     pub(crate) multibyte: bool,
+    pub(crate) record_warnings: bool,
 }
 
 impl TypedIni {
     /// The entries typed here, each in [`TypedIni::update`].
-    const NAMES: [&'static [u8]; 7] = [
+    const NAMES: [&'static [u8]; 8] = [
         b"precision",
         b"serialize_precision",
         b"zend.exception_ignore_args",
@@ -224,6 +228,7 @@ impl TypedIni {
         b"short_open_tag",
         b"zend.assertions",
         b"zend.multibyte",
+        b"opcache.record_warnings",
     ];
 
     /// What `value` gives each entry, `value` answering an entry's text,
@@ -238,6 +243,7 @@ impl TypedIni {
             short_open_tag: true,
             assertions: 1,
             multibyte: false,
+            record_warnings: false,
         };
         for name in TypedIni::NAMES {
             if let Some(text) = value(name) {
@@ -265,6 +271,7 @@ impl TypedIni {
             b"short_open_tag" => self.short_open_tag = Ini::parse_bool(text),
             b"zend.assertions" => self.assertions = Ini::parse_bytes(text),
             b"zend.multibyte" => self.multibyte = Ini::parse_bool(text),
+            b"opcache.record_warnings" => self.record_warnings = Ini::parse_bool(text),
             _ => {}
         }
     }
@@ -540,12 +547,41 @@ impl Request {
     /// found by one look-up of the engine's table; nothing where php has
     /// no such entry.
     fn ini_in_force(&self, name: &[u8]) -> Option<(&Option<Vec<u8>>, Option<PhpString>)> {
-        let table = &self.shared.ini;
-        let at = table.at(name)?;
+        self.ini_in_force_at(self.shared.ini.at(name)?)
+    }
+
+    /// [`Request::ini_in_force`] of the entry at `at`, found by its place
+    /// and not by its name.
+    fn ini_in_force_at(&self, at: DirectiveAt) -> Option<(&Option<Vec<u8>>, Option<PhpString>)> {
         match self.ini.changed(at) {
             Some((_, value, string)) => Some((value, *string)),
-            None => table.row(at).map(|row| (&row.value, None)),
+            None => self.shared.ini.row(at).map(|row| (&row.value, None)),
         }
+    }
+
+    /// `PG(include_path)` in force, read by the entry's place, which the
+    /// engine found once ([`crate::engine::Shared::include_path`]), so a
+    /// relative include's key into the unit cache hashes no entry's name,
+    /// as `accel_make_persistent_key` reads `ZCG(include_path)`. A change
+    /// of the entry is a key of its own:
+    ///
+    /// ```php
+    /// $d = realpath(sys_get_temp_dir()) . '/ip' . getmypid(); @mkdir("$d/a", 0777, true); @mkdir("$d/b");
+    /// foreach (['a', 'b'] as $t) { file_put_contents("$d/$t/x.inc", "<?php return '$t';"); touch("$d/$t/x.inc", time() - 60); }
+    /// chdir('/');
+    /// set_include_path("$d/a"); echo include 'x.inc';
+    /// set_include_path("$d/b"); echo include 'x.inc';
+    /// ini_restore('include_path'); set_include_path("$d/a"); echo include 'x.inc', "\n";
+    /// exec('rm -rf ' . escapeshellarg($d));
+    /// ```
+    /// ```expect regime=jit-off
+    /// aba
+    /// ```
+    pub(crate) fn include_path(&self) -> &[u8] {
+        let value = (self.shared.include_path).and_then(|at| self.ini_in_force_at(at));
+        value
+            .and_then(|(value, _)| value.as_deref())
+            .unwrap_or_default()
     }
 
     /// `ZVAL_SET_INI_STR` over the value in force of the entry `name`,

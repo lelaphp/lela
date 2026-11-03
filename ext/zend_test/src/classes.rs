@@ -75,9 +75,9 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
                 named_union(&[b"Traversable", b"Countable"]),
             );
         })
-        .constants(constants::declared())
-        .constants(ns2_constants::declared())
-        .constants(sub_constants::declared())
+        .constants(constants::DECLARED)
+        .constants(ns2_constants::DECLARED)
+        .constants(sub_constants::DECLARED)
         .class_reshaped::<ZendTestAttribute>(|class| {
             class.attribute_validator = Some(AttributeValidator(only_classes));
         })
@@ -315,7 +315,7 @@ impl _ZendTestClass {
         elements: Variadic<Raw<Union<PhpString, Instance<Iterator>>>>,
     ) -> Result<Owner<Static>, Thrown> {
         let iterator = php_ext::call::lookup_class(req, b"Iterator")?;
-        for (at, element) in elements.iter().enumerate() {
+        for (at, element) in elements.clone().enumerate() {
             let held = match element.value().as_ref() {
                 ValueRef::Str(_) => true,
                 ValueRef::Object(object) => {

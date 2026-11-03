@@ -4,11 +4,12 @@
 //! function share one body here, handed the object and the argument
 //! position the object takes up, which a method reports one lower.
 
-use php_ext::abi::{Instance, ObjectHandlers, OrFalse, Path, Refusals, Std, This, Union};
+use php_ext::abi::{
+    ExtensionBuilder, Instance, ObjectHandlers, OrFalse, Path, Refusals, Std, This, Union,
+};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{numeric_string, to_long, to_string};
-use php_ext::decl::FunctionDecl;
 use php_ext::raising::{
     Level, Thrown, arg_null_deprecated, arg_type_error, argument_error, docref, fatal, throw_error,
     throwing_warnings, value_error,
@@ -1097,39 +1098,33 @@ fn tidy_get_body(
 }
 
 /// The functions in `tidy.stub.php`'s order.
-/// A function's declaration and its entry.
-type Entry = (
-    FunctionDecl,
-    fn(&mut Request) -> Result<Owner<Value>, Thrown>,
-);
-
-pub(crate) fn functions() -> Vec<Entry> {
-    vec![
-        tidy_parse_string::declared(),
-        tidy_get_error_buffer::declared(),
-        tidy_get_output::declared(),
-        tidy_parse_file::declared(),
-        tidy_clean_repair::declared(),
-        tidy_repair_string::declared(),
-        tidy_repair_file::declared(),
-        tidy_diagnose::declared(),
-        tidy_get_release::declared(),
-        tidy_get_opt_doc::declared(),
-        tidy_get_config::declared(),
-        tidy_get_status::declared(),
-        tidy_get_html_ver::declared(),
-        tidy_is_xhtml::declared(),
-        tidy_is_xml::declared(),
-        tidy_error_count::declared(),
-        tidy_warning_count::declared(),
-        tidy_access_count::declared(),
-        tidy_config_count::declared(),
-        tidy_getopt::declared(),
-        tidy_get_root::declared(),
-        tidy_get_html::declared(),
-        tidy_get_head::declared(),
-        tidy_get_body::declared(),
-    ]
+pub(crate) fn functions(builder: ExtensionBuilder) -> ExtensionBuilder {
+    builder.functions(&[
+        tidy_parse_string::DECLARED,
+        tidy_get_error_buffer::DECLARED,
+        tidy_get_output::DECLARED,
+        tidy_parse_file::DECLARED,
+        tidy_clean_repair::DECLARED,
+        tidy_repair_string::DECLARED,
+        tidy_repair_file::DECLARED,
+        tidy_diagnose::DECLARED,
+        tidy_get_release::DECLARED,
+        tidy_get_opt_doc::DECLARED,
+        tidy_get_config::DECLARED,
+        tidy_get_status::DECLARED,
+        tidy_get_html_ver::DECLARED,
+        tidy_is_xhtml::DECLARED,
+        tidy_is_xml::DECLARED,
+        tidy_error_count::DECLARED,
+        tidy_warning_count::DECLARED,
+        tidy_access_count::DECLARED,
+        tidy_config_count::DECLARED,
+        tidy_getopt::DECLARED,
+        tidy_get_root::DECLARED,
+        tidy_get_html::DECLARED,
+        tidy_get_head::DECLARED,
+        tidy_get_body::DECLARED,
+    ])
 }
 
 /// The `tidy` class apart, so `$tidy` can name the

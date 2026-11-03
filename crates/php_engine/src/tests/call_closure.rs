@@ -15,7 +15,7 @@ fn a_call_s_closure_taken_leaves_the_call_holding_none() {
         .function_named(Bare::resolved(b"strlen"))
         .expect("strlen is declared");
     let mut header = Header::call(function, 0);
-    header.closure = Some(closure);
+    header.set_closure(Some(closure));
     let call = req.push_call(header).expect("the call is pushed");
 
     let taken = req

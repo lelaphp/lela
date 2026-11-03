@@ -5,9 +5,10 @@
 use php_ext::abi::{Ref, Untyped};
 use php_ext::coerce::with_string;
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpObject, Value, walk};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, walk};
 use php_ext_libxml::ffi::{Kind, Node};
 
+use crate::classes::Lang;
 use crate::encoding::{Cx, encode_finish, encode_reset_ns, master_to_zval};
 use crate::message::soap_binding;
 use crate::model::{
@@ -22,7 +23,7 @@ use crate::{Res, SOAP_1_1, SOAP_1_2};
 /// is freed as it returns, after the fault, as php's `xmlFreeDoc` follows
 /// `add_soap_fault`.
 fn bad(req: &mut Request, this: PhpObject, code: &[u8], text: &[u8]) -> Res<(bool, Owner<Value>)> {
-    add_soap_fault(req, this, code, text, None, None, b"en")?;
+    add_soap_fault(req, this, code, text, None, None, Lang::En)?;
     Ok((false, Owner::null()))
 }
 
@@ -237,7 +238,32 @@ fn parse(
     r.map(|v| (true, v))
 }
 
-/// The `<Fault>` of a response kept on the client.
+/// The `<Fault>` of a response kept on the client. A SOAP 1.2
+/// `<Text>`'s `xml:lang` is a string of the request's own,
+/// `zend_string_init`, even where it is `en`, which the fault shares as
+/// its `$lang`; with none the language is `ZSTR_EMPTY_ALLOC()`. Each
+/// fault replaces the one the client kept, so each line is what its
+/// language takes past the one before:
+///
+/// ```php
+/// class C extends SoapClient { public $r = ''; function __doRequest($q, $l, $a, $v, $o = false, $u = null): ?string { return $this->r; } }
+/// $c = new C(null, ['location' => 'http://127.0.0.1/', 'uri' => 'urn:x', 'soap_version' => SOAP_1_2, 'exceptions' => false]);
+/// foreach (['-', '', 'en', '', 'fr', 'en', ''] as $l) {
+///     $a = $l === '' || $l === '-' ? '' : " xml:lang=\"$l\"";
+///     $c->r = '<env:Envelope xmlns:env="http://www.w3.org/2003/05/soap-envelope"><env:Body><env:Fault><env:Code><env:Value>env:Sender</env:Value></env:Code><env:Reason><env:Text' . $a . '>Nope Here</env:Text></env:Reason></env:Fault></env:Body></env:Envelope>';
+///     $m = memory_get_usage(); $f = $c->f(); $d = memory_get_usage() - $m;
+///     if ($l !== '-') { echo $d, ' '; debug_zval_dump($f->lang); }
+///     $f = null;
+/// }
+/// ```
+/// ```expect
+/// 0 string(0) "" interned
+/// 32 string(2) "en" refcount(2)
+/// -32 string(0) "" interned
+/// 32 string(2) "fr" refcount(2)
+/// 0 string(2) "en" refcount(2)
+/// -32 string(0) "" interned
+/// ```
 fn read_fault(
     req: &mut Request,
     cx: &mut Cx,
@@ -248,7 +274,9 @@ fn read_fault(
     let mut faultcode: Option<Vec<u8>> = None;
     let mut faultstring: Option<Vec<u8>> = None;
     let mut faultactor: Option<Vec<u8>> = None;
-    let mut lang: Vec<u8> = Vec::new();
+    // `zend_string *lang = ZSTR_EMPTY_ALLOC()`.
+    let empty = PhpString::interned(req, b"")?;
+    let mut lang: Option<Owner<PhpString>> = None;
     let mut details: Option<Owner<Value>> = None;
     if version == SOAP_1_1 {
         if let Some(t) = get_node(fault.children(), b"faultcode", None)
@@ -286,13 +314,24 @@ fn read_fault(
             if let Some(a) = get_attribute(text.properties(), b"lang", Some(XML_NAMESPACE))
                 && a.children().is_some()
             {
-                lang = attr_content(a);
+                let bytes = attr_content(a);
+                let made = PhpString::filled(req, bytes.len(), |b| b.copy_from_slice(&bytes))?;
+                lang = Some(made);
             }
         }
         if let Some(t) = get_node(fault.children(), b"Detail", None) {
-            details = Some(decode(req, cx, None, t)?);
+            match decode(req, cx, None, t) {
+                Ok(d) => details = Some(d),
+                Err(e) => {
+                    if let Some(l) = lang {
+                        l.give_up(req);
+                    }
+                    return Err(e);
+                }
+            }
         }
     }
+    let of = lang.as_ref().map_or(empty, |l| **l);
     let added = add_soap_fault(
         req,
         this,
@@ -300,8 +339,12 @@ fn read_fault(
         faultstring.as_deref().unwrap_or_default(),
         faultactor.as_deref(),
         details.as_ref().map(|d| **d),
-        &lang,
+        Lang::Of(of),
     );
+    // `zend_string_release_ex(lang, false)`.
+    if let Some(l) = lang {
+        l.give_up(req);
+    }
     if let Some(d) = details {
         d.give_up(req);
     }

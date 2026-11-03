@@ -90,6 +90,7 @@ fn shown(
                 format!("{class}: {}{trace}", String::from_utf8_lossy(&message))
             }
             Cause::Exit => String::from("exit"),
+            Cause::Taken => String::from("taken"),
             Cause::Fatal => String::from("fatal"),
         },
     }

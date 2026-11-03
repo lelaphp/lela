@@ -35,11 +35,11 @@
 
 use std::alloc::Layout;
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
 use crate::array::{Arr, Key, free_persistent_array, persistent_array};
+use crate::bump::Bump;
 use crate::gc::{self, Counted, Refcounted};
 use crate::hooks::Fatal;
 use crate::mm::Mm;
@@ -79,6 +79,12 @@ pub(crate) const INTERNED: u32 = gc::IMMUTABLE;
 /// `IS_STR_PERSISTENT`, allocated by `pemalloc`, and `IS_STR_PERMANENT`,
 /// which relives the request boundary.
 const PERMANENT: u32 = INTERNED | gc::PERSISTENT | gc::PERMANENT;
+
+/// `IS_STR_CLASS_NAME_MAP_PTR` (`Z/Zend/zend_types.h:860`), php's
+/// `GC_PROTECTED` on a string: an interned string that names a class,
+/// whose count word, which an interned string never counts with, holds
+/// the offset of its class cache in every request's map table.
+const CLASS_NAME_MAP_PTR: u32 = gc::PROTECTED;
 
 /// A request string fresh from `zend_string_alloc(len, 0)`, before it
 /// is handed out: one owner, the holder's, and nothing else naming it,
@@ -360,6 +366,55 @@ impl Str {
         Str(header)
     }
 
+    /// Lay a string of `len` bytes down at `at`, an allocation of
+    /// [`Str::allocation_size`] bytes, from `parts` copied one after the
+    /// other, with one owner: php's `zend_string_alloc` and a `memcpy`
+    /// per part. A part past `len` is cut where `len` ends, and bytes the
+    /// parts leave short of it are zero, so every byte is written once
+    /// whatever `parts` holds.
+    ///
+    /// # Safety
+    ///
+    /// `at` is writable for [`Str::allocation_size`] of `len` bytes and
+    /// holds nothing else.
+    pub(crate) unsafe fn init_parts<'a>(
+        at: NonNull<u8>,
+        len: usize,
+        parts: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Str {
+        let header: NonNull<StrHeader> = at.cast();
+        // SAFETY: the caller's allocation is at least the header and the
+        // bytes, and nothing else holds it.
+        unsafe {
+            header.as_ptr().write(StrHeader {
+                gc: Refcounted::new(ZvalType::String, gc::NOT_COLLECTABLE),
+                h: Cell::new(0),
+                len,
+            });
+        }
+        // SAFETY: the bytes and the NUL sit right after the header,
+        // inside the same allocation the caller gave.
+        let val = unsafe { at.as_ptr().add(HEADER) };
+        let mut written = 0;
+        for part in parts {
+            let n = part.len().min(len - written);
+            // SAFETY: `written <= len`, so the place is inside the bytes
+            // or the NUL after them.
+            let to = unsafe { val.add(written) };
+            // SAFETY: `written + n <= len`, so the copy stays inside the
+            // `len` bytes, and a fresh allocation cannot overlap a part.
+            unsafe { to.copy_from_nonoverlapping(part.as_ptr(), n) };
+            written += n;
+        }
+        // SAFETY: `written <= len`, so the place is inside the bytes or
+        // the NUL after them.
+        let rest = unsafe { val.add(written) };
+        // SAFETY: the bytes from `written` to `len` and the NUL after
+        // them are inside the allocation.
+        unsafe { rest.write_bytes(0, len - written + 1) };
+        Str(header)
+    }
+
     /// `zend_string_extend(s, ZSTR_LEN(s) + ZSTR_LEN(tail), 0)` and the
     /// `memcpy` of `tail` after the old bytes, the arm of
     /// `concat_function` (`Z/Zend/zend_operators.c:2125-2155`) that writes
@@ -605,6 +660,13 @@ impl Str {
         }
     }
 
+    /// The hash the header caches, zero while none was taken: a read
+    /// that writes nothing, which is how a shared table probes its
+    /// strings.
+    pub(crate) fn cached_hash(self) -> u64 {
+        self.header().h.get()
+    }
+
     /// One byte of the string written where it stands, the
     /// `Z_STRVAL_P(str)[offset] = c` of `zend_assign_to_string_offset`
     /// (`Z/Zend/zend_execute.c`): php writes a string offset into the
@@ -665,6 +727,27 @@ impl Str {
     /// this is the owner's to say, as the hash is.
     pub fn mark_valid_utf8(&self) {
         self.header().gc.add_flags(gc::VALID_UTF8);
+    }
+
+    /// `ZSTR_HAS_CE_CACHE` and the offset `GC_REFCOUNT` holds beside it
+    /// (`Z/Zend/zend_types.h:885`): where in a request's map table the
+    /// class this name last found stands, for a table's string that names
+    /// a class ([`Strings::naming_classes`], [`Pending::class_name`]),
+    /// and none for any other.
+    #[must_use]
+    pub fn ce_cache(&self) -> Option<u32> {
+        let gc = &self.header().gc;
+        (gc.flags() & CLASS_NAME_MAP_PTR != 0).then(|| gc.refcount())
+    }
+
+    /// `zend_alloc_ce_cache`'s last two lines (`Z/Zend/zend.c:2151`):
+    /// `IS_STR_CLASS_NAME_MAP_PTR` and the offset written, on a string
+    /// nothing else names yet,
+    /// so no thread reads the header while it is written.
+    fn alloc_ce_cache(self, offset: u32) {
+        let gc = &self.header().gc;
+        gc.set_refcount(offset);
+        gc.add_flags(CLASS_NAME_MAP_PTR);
     }
 
     /// `zend_string_refcount`: an interned string reads as one owner
@@ -806,6 +889,7 @@ impl Sizing {
     /// the `Err` carries for the heap to refuse or end on before anything
     /// is asked for. Its third number is the aligned header the product is
     /// added to, the empty string's where no `l` is left.
+    #[inline] // `_ZSTR_STRUCT_SIZE` and `ZEND_MM_SAFE_ADDRESS_GUARDED`, in the line of every ask
     pub fn bytes(self, len: usize) -> Result<usize, String> {
         let (n, m) = match self {
             Sizing::Alloc => return Ok(Str::allocation_size(len)),
@@ -816,10 +900,15 @@ impl Sizing {
         let header = Str::allocation_size(product.map_or(0, |product| len - product));
         product
             .and_then(|product| product.checked_add(header))
-            .ok_or_else(|| {
-                format!("Possible integer overflow in memory allocation ({n} * {m} + {header})")
-            })
+            .ok_or_else(|| overflowed(n, m, header))
     }
+}
+
+/// [`Sizing::bytes`]'s refusal, out of the line of every size it answers.
+#[cold]
+#[inline(never)]
+fn overflowed(n: usize, m: usize, header: usize) -> String {
+    format!("Possible integer overflow in memory allocation ({n} * {m} + {header})")
 }
 
 /// A home for interned strings: php's `zend_new_interned_string` behind
@@ -992,6 +1081,12 @@ impl Made {
 /// which the engine alone serialises; a request never grows it.
 pub struct Strings {
     table: Permanent,
+    /// Where the strings this table lays down itself are laid, one after
+    /// another, as opcache's `accel_copy_permanent_strings` lays php's
+    /// permanent ones in its buffer, and not one system allocation each;
+    /// a string a compile made ([`Strings::publish`]) stays where the
+    /// compile laid it.
+    bump: Bump,
     /// The constant arrays the units published into this engine hold,
     /// freed with the table.
     arrays: Vec<Arr>,
@@ -1003,6 +1098,11 @@ pub struct Strings {
     /// The strings [`Strings::intern_known`] interned, by position:
     /// php's `zend_known_strings`, which `ZSTR_KNOWN(id)` indexes.
     known: Vec<Str>,
+    /// The class caches handed out, the next one's offset: php's
+    /// `CG(map_ptr_last)` as `zend_alloc_ce_cache` moves it, counting
+    /// from where the table this one was laid beside stopped
+    /// ([`Strings::beside`]).
+    ce_caches: u32,
 }
 
 impl Default for Strings {
@@ -1015,12 +1115,60 @@ impl Strings {
     /// An empty table.
     #[must_use]
     pub fn new() -> Strings {
+        Strings::with_capacity(0)
+    }
+
+    /// An empty table with room for `strings` strings before its slots
+    /// are laid again, as `zend_hash_init` takes the size it starts at:
+    /// a table whose strings are known in number before they are
+    /// interned is laid once, and their bytes in one chunk of its bump
+    /// laid at [`BYTES_PER_STRING`] a string.
+    #[must_use]
+    pub fn with_capacity(strings: usize) -> Strings {
         Strings {
-            table: Permanent::default(),
+            table: Permanent::with_capacity(strings),
+            bump: Bump::with_capacity(strings.saturating_mul(BYTES_PER_STRING)),
             arrays: Vec::new(),
             shadows: Vec::new(),
             known: Vec::new(),
+            ce_caches: 0,
         }
+    }
+
+    /// This table, empty, holding each of `classes`, a class's name,
+    /// interned first with a class cache of its own ([`Str::ce_cache`]),
+    /// which `zend_register_internal_class_ex` allocates for each class
+    /// the engine registers at startup (`Z/Zend/zend_API.c:3543`). A name
+    /// the frozen table holds takes none, as php's one-byte names are
+    /// permanent strings no slot is allocated on once startup is done.
+    #[must_use]
+    pub fn naming_classes<'a>(self, classes: impl IntoIterator<Item = &'a [u8]>) -> Strings {
+        let mut table = self;
+        for name in classes {
+            if frozen_string(name).is_some() {
+                continue;
+            }
+            let Ok(s) = table.intern(name) else {
+                break;
+            };
+            // Every string of the table was laid down here, so nothing
+            // else names it yet.
+            if s.ce_cache().is_none() {
+                s.alloc_ce_cache(table.ce_caches);
+                table.ce_caches += 1;
+            }
+        }
+        table
+    }
+
+    /// An empty table whose class caches are numbered past this one's,
+    /// so a request's one map table holds both tables' (`CG(map_ptr_last)`
+    /// carried on from startup into what opcache persists).
+    #[must_use]
+    pub fn beside(&self) -> Strings {
+        let mut table = Strings::new();
+        table.ce_caches = self.ce_caches;
+        table
     }
 
     /// What a compile made for a unit held for every request entering
@@ -1028,10 +1176,25 @@ impl Strings {
     /// string the persisted unit holds, and its constant arrays with it.
     /// A string whose bytes the table holds already stays the unit's,
     /// with the table, uncounted.
+    ///
+    /// A string the compile named a class's ([`Pending::class_name`])
+    /// takes a class cache as it enters, `zend_alloc_ce_cache` on
+    /// `ce->name` (`Z/Zend/zend_compile.c:9305`); a shadow takes the one
+    /// the table's string of its bytes holds, or one of its own.
     pub fn publish(&mut self, mut pending: Pending) {
-        for s in pending.take_strings() {
+        for PendingString { s, class_name, .. } in pending.take_strings() {
             let hash = hash_func(s.bytes());
-            if self.table.find(hash, s.bytes()).is_some() {
+            let held = self.table.find(hash, s.bytes());
+            if class_name {
+                // `s` is the compile's alone until it enters the table
+                // below, so its header is written before anyone reads it.
+                let offset = held.and_then(|held| held.ce_cache()).unwrap_or_else(|| {
+                    self.ce_caches += 1;
+                    self.ce_caches - 1
+                });
+                s.alloc_ce_cache(offset);
+            }
+            if held.is_some() {
                 self.shadows.push(s);
             } else {
                 self.table.add(hash, s);
@@ -1085,8 +1248,10 @@ impl Strings {
 impl Intern for Strings {
     /// php's `zend_string_init_interned_permanent`
     /// (`Z/Zend/zend_string.c:267-280`): the frozen table, then this one,
-    /// then a string on the system allocator, hashed and flagged before
-    /// it is published; a string of the engine's, so no request's size.
+    /// then a string laid in this table's bump, as opcache's
+    /// `accel_new_interned_string` lays it in its buffer, hashed and
+    /// flagged before it is published; a string of the engine's, so no
+    /// request's size.
     fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool, _: Sizing) -> Result<Str, Fatal> {
         if let Some(frozen) = frozen_string(bytes) {
             return Ok(frozen);
@@ -1095,7 +1260,7 @@ impl Intern for Strings {
         if let Some(held) = self.table.find(hash, bytes) {
             return Ok(held);
         }
-        let s = persistent(bytes)?;
+        let s = laid(&mut self.bump, bytes)?;
         if valid_utf8 {
             s.mark_valid_utf8();
         }
@@ -1115,15 +1280,18 @@ impl Intern for Strings {
 
 impl Drop for Strings {
     /// `zend_hash_destroy(&interned_strings_permanent)` with `_str_dtor`
-    /// as its destructor (`Z/Zend/zend_string.c:66-70`): every string the
-    /// table laid down goes back to the allocator it came from. The
-    /// engine outlives every request that can name one.
+    /// as its destructor (`Z/Zend/zend_string.c:66-70`): every string a
+    /// compile laid down goes back to the allocator it came from, and the
+    /// table's own go with its bump after this. The engine outlives
+    /// every request that can name one.
     fn drop(&mut self) {
         for a in self.arrays.drain(..) {
             free_persistent_array(a);
         }
         for s in self.table.strings() {
-            free_persistent(s);
+            if !self.bump.holds(s.address()) {
+                free_persistent(s);
+            }
         }
         for s in self.shadows.drain(..) {
             free_persistent(s);
@@ -1143,34 +1311,90 @@ impl Drop for Strings {
 /// it is dropped unpublished.
 #[derive(Default)]
 pub struct Pending {
-    slots: HashMap<u64, Vec<PendingString>>,
+    /// The strings made, one open-addressed table as the engine's is
+    /// ([`Permanent`]), each hashed as it is made.
+    slots: Slots<PendingString>,
     /// Each constant array beside the claims on it that stand.
     arrays: Vec<(Arr, u32)>,
+    /// How many strings the set has made, the next one's place.
+    made: u64,
 }
 
 /// One string a compile made and the asks it answered that were not
 /// given back: a kept ask is never given back, and neither is a claim
 /// dropped, so either keeps it.
+#[derive(Clone, Copy)]
 struct PendingString {
     s: Str,
     asks: u32,
+    /// Whether the compile named a class by it ([`Pending::class_name`]).
+    class_name: bool,
+    /// Its place among the strings the set made, which the table takes
+    /// them in ([`Strings::publish`]).
+    at: u64,
+}
+
+impl Slotted for PendingString {
+    fn string(&self) -> Str {
+        self.s
+    }
 }
 
 impl Pending {
+    /// The slot of the string of these bytes the set made.
+    fn position(&self, hash: u64, bytes: &[u8]) -> Option<usize> {
+        (self.slots).position(hash, |held| {
+            held.s.cached_hash() == hash && held.s.bytes() == bytes
+        })
+    }
+
     /// The string for these bytes the compile made, or one made now,
     /// with one ask more on it.
     pub fn intern(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
-        let chain = self.slots.entry(hash_func(bytes)).or_default();
-        if let Some(held) = chain.iter_mut().find(|held| held.s.bytes() == bytes) {
+        let hash = hash_func(bytes);
+        if let Some(held) = (self.position(hash, bytes)).and_then(|at| self.slots.get_mut(at)) {
             held.asks = held.asks.saturating_add(1);
             return Ok(held.s);
         }
         let s = persistent(bytes)?;
+        s.cache_hash();
         if valid_utf8 {
             s.mark_valid_utf8();
         }
-        chain.push(PendingString { s, asks: 1 });
+        (self.slots).insert(
+            hash,
+            PendingString {
+                s,
+                asks: 1,
+                class_name: false,
+                at: self.made,
+            },
+        );
+        self.made += 1;
         Ok(s)
+    }
+
+    /// The string of `name` this set made, where it made one, named a
+    /// class's, `zend_alloc_ce_cache(ce->name)` of a class the compile
+    /// declared: it takes a class cache as it is published
+    /// ([`Strings::publish`]). A name the tables held already takes
+    /// none, as a string already shared is never written.
+    pub fn class_name(&mut self, name: &[u8]) {
+        let held = (self.position(hash_func(name), name)).and_then(|at| self.slots.get_mut(at));
+        if let Some(held) = held {
+            held.class_name = true;
+        }
+    }
+
+    /// The slot of `s` where this set made it.
+    fn slot_of(&self, s: Str) -> Option<usize> {
+        // A string another home made may not carry its hash, and is not
+        // written here.
+        let hash = match s.cached_hash() {
+            0 => hash_func(s.bytes()),
+            hash => hash,
+        };
+        self.slots.position(hash, |held| held.s.is_same(s))
     }
 
     /// One claim on `z` given back ([`Intern::give_back`]): a string
@@ -1201,16 +1425,15 @@ impl Pending {
             }
             return;
         };
-        let hash = hash_func(s.bytes());
-        let Some(chain) = self.slots.get_mut(&hash) else {
+        let Some(at) = self.slot_of(s) else {
             return;
         };
-        let Some(held) = chain.iter_mut().find(|held| held.s.is_same(s)) else {
+        let Some(held) = self.slots.get_mut(at) else {
             return;
         };
         held.asks = held.asks.saturating_sub(1);
         if held.asks == 0 {
-            chain.retain(|held| !held.s.is_same(s));
+            self.slots.remove(at);
             free_persistent(s);
         }
     }
@@ -1241,9 +1464,7 @@ impl Pending {
         let Some(s) = z.as_str() else {
             return;
         };
-        let chain = self.slots.get_mut(&hash_func(s.bytes()));
-        if let Some(held) = chain.and_then(|chain| chain.iter_mut().find(|held| held.s.is_same(s)))
-        {
+        if let Some(held) = (self.slot_of(s)).and_then(|at| self.slots.get_mut(at)) {
             held.asks = held.asks.saturating_add(1);
         }
     }
@@ -1251,13 +1472,17 @@ impl Pending {
     /// How many strings stand made.
     #[cfg(test)]
     fn count(&self) -> usize {
-        self.slots.values().map(Vec::len).sum()
+        self.slots.len()
     }
 
-    /// Every string, taken out of the set.
-    fn take_strings(&mut self) -> Vec<Str> {
-        let slots = std::mem::take(&mut self.slots);
-        slots.into_values().flatten().map(|held| held.s).collect()
+    /// Every string, taken out of the set in the order it made them,
+    /// beside whether it names a class, so a unit's strings take the same
+    /// class caches whichever slots the set filed them in.
+    fn take_strings(&mut self) -> Vec<PendingString> {
+        let mut held = Vec::with_capacity(self.slots.len());
+        held.extend(self.slots.take());
+        held.sort_unstable_by_key(|held| held.at);
+        held
     }
 }
 
@@ -1268,8 +1493,8 @@ impl Drop for Pending {
         for (a, _) in self.arrays.drain(..) {
             free_persistent_array(a);
         }
-        for s in self.take_strings() {
-            free_persistent(s);
+        for held in self.take_strings() {
+            free_persistent(held.s);
         }
     }
 }
@@ -1280,10 +1505,10 @@ impl Drop for Pending {
 unsafe impl Send for Strings {}
 
 // SAFETY: a shared table is only read: `find`, `count` and `known` take
-// `&self` and read the slots, the known list and the strings' bytes, each
-// string hashed before
-// `Permanent::add` published it, so no read writes; growing the table
-// takes `&mut self`, which excludes every reader.
+// `&self` and read the slots, the known list and the strings' cached
+// hashes and bytes, each string hashed before `Permanent::add` published
+// it, so no read writes; growing the table, and laying a string in its
+// bump, takes `&mut self`, which excludes every reader.
 unsafe impl Sync for Strings {}
 
 impl std::fmt::Debug for Strings {
@@ -1293,18 +1518,19 @@ impl std::fmt::Debug for Strings {
 }
 
 /// The engine's table of interned strings, php's
-/// `interned_strings_permanent` (`Z/Zend/zend_string.c:31`): a
+/// `interned_strings_permanent` (`Z/Zend/zend_string.c:31`): one
 /// `HashTable` of `zend_string *` keyed by the string itself
-/// (`zend_init_interned_strings_ht`, `Z/Zend/zend_string.c:78-84`). The
-/// key here is the hash, and the chain under it is walked comparing the
-/// bytes, which is the walk `zend_interned_string_ht_lookup_ex` makes
-/// over php's hash slots (`Z/Zend/zend_string.c:132-169`). It is the
-/// table opcache holds in shared memory, and nothing counts it, so it is
-/// a `HashMap` on the system allocator and not an [`Arr`], as the
-/// request's own [`Table`] is.
+/// (`zend_init_interned_strings_ht`, `Z/Zend/zend_string.c:78-84`). It is
+/// one open-addressed table of slots ([`Slots`]), each the string and
+/// nothing beside it, probed from the hash the string's header caches,
+/// which is the walk `zend_interned_string_ht_lookup_ex` makes over php's
+/// hash slots comparing the hash and then the bytes
+/// (`Z/Zend/zend_string.c:132-169`). It is the table opcache holds in
+/// shared memory, and nothing counts it, so its slots are on the system
+/// allocator and not an [`Arr`], as the request's own [`Table`] is.
 #[derive(Default)]
 pub(crate) struct Permanent {
-    slots: HashMap<u64, Vec<Interned>>,
+    slots: Slots<Str>,
 }
 
 impl std::fmt::Debug for Permanent {
@@ -1314,10 +1540,18 @@ impl std::fmt::Debug for Permanent {
 }
 
 impl Permanent {
+    /// A table with room for `strings` before its slots are laid again.
+    fn with_capacity(strings: usize) -> Permanent {
+        Permanent {
+            slots: Slots::with_capacity(strings),
+        }
+    }
+
     /// The string here whose bytes are `bytes`, if it is here.
     pub(crate) fn find(&self, hash: u64, bytes: &[u8]) -> Option<Str> {
-        let chain = self.slots.get(&hash)?;
-        chain.iter().map(|held| held.0).find(|s| s.bytes() == bytes)
+        (self.slots)
+            .position(hash, |s| s.cached_hash() == hash && s.bytes() == bytes)
+            .and_then(|at| self.slots.get(at))
     }
 
     /// Publish `s` under `hash`, php's `zend_add_interned_string`
@@ -1326,31 +1560,191 @@ impl Permanent {
     /// a second thread can name it; [`Str::cache_hash`] here is that act.
     pub(crate) fn add(&mut self, hash: u64, s: Str) {
         s.cache_hash();
-        self.slots.entry(hash).or_default().push(Interned(s));
+        self.slots.insert(hash, s);
     }
 
     /// How many strings are here.
     pub(crate) fn count(&self) -> usize {
-        self.slots.values().map(Vec::len).sum()
+        self.slots.len()
     }
 
     /// Every string here, for the table that frees what it laid down.
     fn strings(&self) -> impl Iterator<Item = Str> {
-        self.slots.values().flatten().map(|held| held.0)
+        self.slots.iter()
     }
 }
 
-/// A string in a table. Sharing one across threads is sound because it is
-/// immutable from the moment it is published: its bytes never change, its
-/// refcount is never touched, its hash was taken before it went in, and
-/// it is freed only with the table itself.
-struct Interned(Str);
+/// What a slot of [`Slots`] holds: a string, and whatever is kept beside
+/// it.
+trait Slotted: Copy {
+    /// The string the slot is filed under, whose header caches its hash.
+    fn string(&self) -> Str;
+}
 
-// SAFETY: see [`Interned`]: a table's string is immutable while the table
-// stands, and the table outlives every thread that can name one.
-unsafe impl Send for Interned {}
-// SAFETY: see [`Interned`].
-unsafe impl Sync for Interned {}
+impl Slotted for Str {
+    fn string(&self) -> Str {
+        *self
+    }
+}
+
+/// An open-addressed table of strings, probed linearly from the hash
+/// each string's header caches: php's `HashTable` without its buckets,
+/// as nothing here is ordered by insertion and the key is the value.
+/// The slots are one allocation, laid at the size asked for and laid
+/// again at twice it only when they would be more than three quarters
+/// full; a string leaves by moving the full slots behind it back, so a
+/// lookup stops at the first empty slot.
+struct Slots<T> {
+    slots: Vec<Option<T>>,
+    len: usize,
+}
+
+impl<T> Default for Slots<T> {
+    fn default() -> Slots<T> {
+        Slots {
+            slots: Vec::new(),
+            len: 0,
+        }
+    }
+}
+
+impl<T: Slotted> Slots<T> {
+    /// The fewest slots that hold `len` entries at most three quarters
+    /// full: a power of two, none for none.
+    fn slots_for(len: usize) -> usize {
+        if len == 0 {
+            return 0;
+        }
+        len.saturating_add(len.div_ceil(3))
+            .next_power_of_two()
+            .max(8)
+    }
+
+    /// Room for `len` entries before the slots are laid again.
+    fn with_capacity(len: usize) -> Slots<T> {
+        let mut slots = Vec::new();
+        slots.resize_with(Slots::<T>::slots_for(len), || None);
+        Slots { slots, len: 0 }
+    }
+
+    /// How many entries stand.
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    /// The first slot a hash probes from.
+    #[allow(clippy::cast_possible_truncation)] // the mask keeps fewer bits than a word
+    fn home(&self, hash: u64) -> usize {
+        // The slots are a power of two, so the mask keeps the low bits.
+        (hash as usize) & self.slots.len().wrapping_sub(1)
+    }
+
+    /// The slot of the entry under `hash` that `matches`, if one is here.
+    fn position(&self, hash: u64, matches: impl Fn(T) -> bool) -> Option<usize> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let mask = self.slots.len() - 1;
+        let mut at = self.home(hash);
+        // Never full, so the probe meets an empty slot.
+        while let Some(Some(held)) = self.slots.get(at) {
+            if matches(*held) {
+                return Some(at);
+            }
+            at = (at + 1) & mask;
+        }
+        None
+    }
+
+    /// The entry at slot `at`.
+    fn get(&self, at: usize) -> Option<T> {
+        self.slots.get(at).copied().flatten()
+    }
+
+    /// The entry at slot `at`, to change what is kept beside its string.
+    fn get_mut(&mut self, at: usize) -> Option<&mut T> {
+        self.slots.get_mut(at).and_then(Option::as_mut)
+    }
+
+    /// `entry` filed under `hash`, the slots laid again at twice their
+    /// number first where it would fill more than three quarters.
+    fn insert(&mut self, hash: u64, entry: T) {
+        if Slots::<T>::slots_for(self.len + 1) > self.slots.len() {
+            self.grow();
+        }
+        self.place(hash, entry);
+        self.len += 1;
+    }
+
+    /// `entry` into the first empty slot from its hash's.
+    fn place(&mut self, hash: u64, entry: T) {
+        let mask = self.slots.len().wrapping_sub(1);
+        let mut at = self.home(hash);
+        while let Some(slot) = self.slots.get_mut(at) {
+            if slot.is_none() {
+                *slot = Some(entry);
+                return;
+            }
+            at = (at + 1) & mask;
+        }
+    }
+
+    /// The slots laid again at twice their number, each entry filed
+    /// from its string's cached hash.
+    fn grow(&mut self) {
+        let doubled = self.slots.len().saturating_mul(2).max(8);
+        let mut slots = Vec::new();
+        slots.resize_with(doubled, || None);
+        let old = std::mem::replace(&mut self.slots, slots);
+        for entry in old.into_iter().flatten() {
+            self.place(entry.string().cached_hash(), entry);
+        }
+    }
+
+    /// The entry at slot `at` taken out, and each entry of the full
+    /// slots behind it moved back into the gap where a lookup for it
+    /// passes it, Knuth's deletion for linear probing (TAOCP 6.4
+    /// Algorithm R).
+    fn remove(&mut self, at: usize) -> Option<T> {
+        let taken = self.slots.get_mut(at)?.take()?;
+        self.len -= 1;
+        let mask = self.slots.len() - 1;
+        let mut gap = at;
+        let mut next = (gap + 1) & mask;
+        while let Some(Some(entry)) = self.slots.get(next).copied() {
+            let home = self.home(entry.string().cached_hash());
+            // The entry may fill the gap unless its home lies cyclically
+            // in (gap, next], where a probe for it never reaches the gap.
+            let stays = if gap <= next {
+                gap < home && home <= next
+            } else {
+                gap < home || home <= next
+            };
+            if !stays {
+                if let Some(slot) = self.slots.get_mut(gap) {
+                    *slot = Some(entry);
+                }
+                if let Some(slot) = self.slots.get_mut(next) {
+                    *slot = None;
+                }
+                gap = next;
+            }
+            next = (next + 1) & mask;
+        }
+        Some(taken)
+    }
+
+    /// Every entry, in slot order.
+    fn iter(&self) -> impl Iterator<Item = T> + '_ {
+        self.slots.iter().filter_map(|slot| *slot)
+    }
+
+    /// Every entry, taken out, the slots given back.
+    fn take(&mut self) -> impl Iterator<Item = T> {
+        self.len = 0;
+        std::mem::take(&mut self.slots).into_iter().flatten()
+    }
+}
 
 /// The frozen table (design §5.2): what the process knows before any
 /// engine is built, laid down once for the life of the process and
@@ -1373,6 +1767,9 @@ struct Frozen {
     empty: Option<Str>,
     /// `zend_one_char_string`, the string of each single byte.
     chars: [Option<Str>; 256],
+    /// Where the strings are laid, one chunk for the 257, never given
+    /// back.
+    _bump: Bump,
 }
 
 impl Frozen {
@@ -1380,11 +1777,13 @@ impl Frozen {
     /// `zend_interned_strings_init` lays them: the empty string, then the
     /// 256 of one byte, those below `0x80` known to be valid UTF-8.
     fn new() -> Frozen {
-        let empty = froze(b"");
+        // Each string is a header and two bytes rounded to a word.
+        let mut bump = Bump::with_capacity(257 * Str::allocation_size(1));
+        let empty = froze(&mut bump, b"");
         let mut chars = [None; 256];
         for (i, slot) in chars.iter_mut().enumerate() {
             let byte = [u8::try_from(i).unwrap_or(0)];
-            *slot = froze(&byte);
+            *slot = froze(&mut bump, &byte);
             if byte[0] >= 0x80 {
                 continue;
             }
@@ -1392,7 +1791,11 @@ impl Frozen {
                 s.mark_valid_utf8();
             }
         }
-        Frozen { empty, chars }
+        Frozen {
+            empty,
+            chars,
+            _bump: bump,
+        }
     }
 
     /// The frozen string for these bytes, php's `zend_string_init_fast`
@@ -1413,12 +1816,12 @@ unsafe impl Send for Frozen {}
 // SAFETY: see the `Send` above.
 unsafe impl Sync for Frozen {}
 
-/// One frozen string, hashed and marked valid UTF-8 as php marks the
-/// empty string, before anything can name it. Nothing frees it: the
-/// frozen table is never dropped, as php's permanent one stands for as
-/// long as a request can be served.
-fn froze(bytes: &[u8]) -> Option<Str> {
-    let s = persistent(bytes).ok()?;
+/// One frozen string, laid in the frozen table's bump, hashed and
+/// marked valid UTF-8 as php marks the empty string, before anything can
+/// name it. Nothing frees it: the frozen table is never dropped, as php's
+/// permanent one stands for as long as a request can be served.
+fn froze(bump: &mut Bump, bytes: &[u8]) -> Option<Str> {
+    let s = laid(bump, bytes).ok()?;
     s.cache_hash();
     if bytes.is_empty() {
         s.mark_valid_utf8();
@@ -1462,6 +1865,28 @@ fn persistent(bytes: &[u8]) -> Result<Str, Fatal> {
     // nothing else.
     Ok(unsafe { Str::init(at, bytes, PERMANENT) })
 }
+
+/// What a table lays a string of `bytes` at in its bump, as opcache's
+/// `accel_new_interned_string` copies one into its buffer
+/// (`Z/ext/opcache/ZendAccelerator.c:515`): interned, persistent and
+/// permanent, never freed alone, and gone with the bump.
+fn laid(bump: &mut Bump, bytes: &[u8]) -> Result<Str, Fatal> {
+    let size = Str::allocation_size(bytes.len());
+    let Some(at) = bump.alloc(size) else {
+        return Err(Fatal::out_of_memory(size));
+    };
+    // SAFETY: the bump handed out `size` bytes nobody else holds, aligned
+    // to the header's words, which is what `init` asks.
+    Ok(unsafe { Str::init(at, bytes, PERMANENT) })
+}
+
+/// What [`Strings::with_capacity`] lays its bump's first chunk at for
+/// each string it is sized for: the header's 24 bytes and the name, with
+/// room past the average for the longer ones and for a count asked short
+/// (the bundle's 9,637 startup strings take 427.7 KB at f39c7d0d5, 44
+/// bytes each on average). A page of the chunk no string reaches is
+/// never touched.
+const BYTES_PER_STRING: usize = 80;
 
 /// `pefree(s, 1)`: give a persistent string back to the system
 /// allocator. A frozen one never reaches here, because the frozen table
@@ -1508,6 +1933,39 @@ mod tests {
         refused.intern(b"refused", false).expect("a string");
         drop(refused);
         assert!(table.find(b"refused").is_none());
+    }
+
+    /// A class's name takes a class cache where the table lays its
+    /// string down, the startup table's first and a unit table's
+    /// numbered past them; a name already shared takes none, a shadow
+    /// takes its table string's, and a string named no class's none.
+    #[test]
+    fn a_class_name_takes_a_class_cache_where_its_string_is_laid_down() {
+        let names =
+            Strings::new().naming_classes([&b"stdClass"[..], b"A", b"Exception", b"stdClass"]);
+        let std_class = names.find(b"stdClass").and_then(|s| s.ce_cache());
+        assert_eq!(std_class, Some(0));
+        assert_eq!(names.find(b"A").and_then(|s| s.ce_cache()), None);
+        assert_eq!(names.find(b"Exception").and_then(|s| s.ce_cache()), Some(1));
+        let mut table = names.beside();
+        let shared = table.intern(b"Shared").expect("a table string");
+        let mut pending = Pending::default();
+        pending.intern(b"Foo", false).expect("a string");
+        pending.intern(b"echoed", false).expect("a string");
+        pending.intern(b"Shared", false).expect("a shadow");
+        pending.class_name(b"Foo");
+        pending.class_name(b"Shared");
+        pending.class_name(b"Absent");
+        table.publish(pending);
+        assert_eq!(table.find(b"Foo").and_then(|s| s.ce_cache()), Some(2));
+        assert_eq!(table.find(b"echoed").and_then(|s| s.ce_cache()), None);
+        assert!(table.find(b"Shared").is_some_and(|s| s.is_same(shared)));
+        assert_eq!(shared.ce_cache(), None);
+        let mut next = Pending::default();
+        next.intern(b"Bar", false).expect("a string");
+        next.class_name(b"Bar");
+        table.publish(next);
+        assert_eq!(table.find(b"Bar").and_then(|s| s.ce_cache()), Some(4));
     }
 
     /// A pending array takes over the asks on what it holds: given back,
@@ -1585,6 +2043,110 @@ mod tests {
         assert_eq!(heap.memory_usage(false) - base, 80);
         heap.release_string(s);
         assert_eq!(heap.memory_usage(false), base);
+    }
+
+    /// Strings whose hashes are one hash, DJBX33A's `Ez` and `FY`
+    /// written four ways, and a thousand more, each found as the one
+    /// string interned for its bytes however the table has grown.
+    #[test]
+    fn colliding_and_many_strings_are_each_found_as_the_one_interned() {
+        let colliding = [&b"EzEz"[..], b"EzFY", b"FYEz", b"FYFY"];
+        assert!(
+            colliding
+                .iter()
+                .all(|bytes| hash_func(bytes) == hash_func(b"EzEz"))
+        );
+        let mut strings = Strings::new();
+        let mut interned = Vec::new();
+        for bytes in colliding
+            .iter()
+            .map(|b| b.to_vec())
+            .chain((0..1000).map(|n| format!("name{n}").into_bytes()))
+        {
+            interned.push((strings.intern(&bytes).expect("a table string"), bytes));
+        }
+        for (s, bytes) in &interned {
+            assert!(strings.find(bytes).is_some_and(|found| found.is_same(*s)));
+            assert!(strings.intern(bytes).is_ok_and(|again| again.is_same(*s)));
+        }
+        assert_eq!(strings.count(), 1004);
+        assert!(strings.find(b"FYFZ").is_none());
+    }
+
+    /// Strings a compile made under one hash, given back out of the
+    /// middle of their slots, leave the others found as they were, and a
+    /// string given back is made anew when it is asked for again.
+    #[test]
+    fn a_pending_string_given_back_from_a_run_leaves_the_rest_found() {
+        let mut pending = Pending::default();
+        let colliding = [&b"EzEz"[..], b"EzFY", b"FYEz", b"FYFY", b"EzEzEz", b"other"];
+        let made: Vec<Str> = (colliding.iter())
+            .map(|bytes| pending.intern(bytes, false).expect("a string"))
+            .collect();
+        pending.give_back(Zval::string(made[1]));
+        pending.give_back(Zval::string(made[0]));
+        assert_eq!(pending.count(), 4);
+        for (bytes, s) in colliding.iter().zip(&made).skip(2) {
+            let again = pending.intern(bytes, false).expect("the same string");
+            assert!(again.is_same(*s));
+            pending.give_back(Zval::string(again));
+        }
+        let anew = pending.intern(b"EzFY", false).expect("a string made anew");
+        assert_eq!(anew.bytes(), b"EzFY");
+        assert_eq!(pending.count(), 5);
+        let mut table = Strings::new();
+        table.publish(pending);
+        assert_eq!(table.count(), 5);
+        assert!(table.find(b"EzEz").is_none());
+        assert!(table.find(b"FYFY").is_some_and(|s| s.is_same(made[3])));
+        let mut many = Pending::default();
+        let names: Vec<Vec<u8>> = (0..500).map(|n| format!("n{n}").into_bytes()).collect();
+        let made: Vec<Str> = (names.iter())
+            .map(|bytes| many.intern(bytes, false).expect("a string"))
+            .collect();
+        for s in made.iter().step_by(3) {
+            many.give_back(Zval::string(*s));
+        }
+        assert_eq!(many.count(), 333);
+        for (n, (bytes, s)) in names
+            .iter()
+            .zip(&made)
+            .enumerate()
+            .filter(|(n, _)| n % 3 != 0)
+        {
+            let again = many.intern(bytes, false).expect("the same string");
+            assert!(again.is_same(*s), "string {n} is found where it was made");
+        }
+    }
+
+    /// A table sized for its strings lays them in its bump, as opcache's
+    /// `accel_copy_permanent_strings` lays php's permanent ones in its
+    /// buffer: a thousand names take one allocation between them, each
+    /// laid right after the last, and a string a compile published stays
+    /// the compile's, freed alone as the table drops with the bump.
+    #[test]
+    fn a_table_s_strings_are_laid_in_one_bump_and_not_one_allocation_each() {
+        let names: Vec<Vec<u8>> = (0..1000)
+            .map(|at| format!("startup_name_{at}").into_bytes())
+            .collect();
+        let mut table = Strings::with_capacity(names.len());
+        let mut last: Option<Str> = None;
+        for name in &names {
+            let s = table.intern(name).expect("a string");
+            if let Some(last) = last {
+                let after = last.address().as_ptr().addr() + Str::allocation_size(last.len());
+                assert_eq!(s.address().as_ptr().addr(), after, "laid after the last");
+            }
+            last = Some(s);
+        }
+        assert_eq!(table.bump.chunks(), 1, "one allocation for 1000 strings");
+        let mut pending = Pending::default();
+        pending.intern(b"published", false).expect("a string");
+        table.publish(pending);
+        let published = table.find(b"published").expect("published");
+        assert!(!table.bump.holds(published.address()));
+        assert!(names.iter().all(|name| table.find(name).is_some()));
+        assert_eq!(table.count(), 1001);
     }
 
     #[test]

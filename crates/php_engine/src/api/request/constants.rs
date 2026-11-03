@@ -104,6 +104,21 @@ pub(crate) enum ConstantAt {
     Request { at: u32, generation: u32 },
 }
 
+/// `zend_hash_num_elements(EG(zend_constants))`, what a `ZEND_DEFINED`'s
+/// cache slot keeps for a name no constant answered
+/// (`ENCODE_SPECIAL_CACHE_NUM`, `Z/Zend/zend_vm_def.h:8880`), so a pass
+/// after it answers `false` with no lookup while the table holds as
+/// many: the rows this request added and the generation of their
+/// positions, since the engine's declared table is the same in every
+/// request. The table only grows but where phpdbg's `run` takes a row
+/// out, which moves the generation, so two counts are equal only where
+/// no constant came or went between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConstantCount {
+    rows: u32,
+    generation: u32,
+}
+
 pub(super) struct Constants {
     /// The rows this request added to `EG(zend_constants)`, in the order
     /// it added them, each under the extension it is registered by:
@@ -657,6 +672,16 @@ impl Request {
                 }
                 Some(self.constants.rows.get(usize::try_from(at).ok()?)?.value)
             }
+        }
+    }
+
+    /// How many constants the table holds as the request stands
+    /// ([`ConstantCount`]).
+    #[inline]
+    pub(crate) fn constant_count(&self) -> ConstantCount {
+        ConstantCount {
+            rows: u32::try_from(self.constants.rows.len()).unwrap_or(u32::MAX),
+            generation: self.constants.generation,
         }
     }
 

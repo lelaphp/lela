@@ -515,15 +515,15 @@ fn find_filter(id: i64) -> (&'static str, FilterFn) {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .constants(constants::declared())
-        .functions(vec![
-            filter_has_var::declared(),
-            filter_input::declared(),
-            filter_var::declared(),
-            filter_input_array::declared(),
-            filter_var_array::declared(),
-            filter_list::declared(),
-            filter_id::declared(),
+        .constants(constants::DECLARED)
+        .functions(&[
+            filter_has_var::DECLARED,
+            filter_input::DECLARED,
+            filter_var::DECLARED,
+            filter_input_array::DECLARED,
+            filter_var_array::DECLARED,
+            filter_list::DECLARED,
+            filter_id::DECLARED,
         ])
         .class::<FilterException>()
         .class::<FilterFailedException>()

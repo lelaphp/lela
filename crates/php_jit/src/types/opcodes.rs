@@ -68,7 +68,8 @@ pub(super) fn reads_by_name(code: &OpArray) -> bool {
 
 /// What an opline writes beside its `out` slot: a variable `op1`, an
 /// `op2`, the `OP_DATA`'s `op1` (php's `_zend_ssa_rename_op`, less the
-/// writes reference-count inference alone adds).
+/// writes reference-count inference alone adds, save one: the object an
+/// `ASSIGN_OBJ_REF` binds a property of).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Writes {
     pub(super) op1: bool,
@@ -76,6 +77,42 @@ pub(super) struct Writes {
     pub(super) data: bool,
 }
 
+/// What `op` writes ([`Writes`]).
+///
+/// php's trace SSA numbers an `ASSIGN_OBJ_REF`'s object anew under
+/// `ZEND_SSA_RC_INFERENCE` (`Z/Zend/Optimizer/zend_ssa.c:610-615`) and
+/// types it from what the trace recorded it as (`zend_update_type_info`,
+/// `Z/Zend/Optimizer/zend_inference.c:3169-3177`). A loop that binds a
+/// property of a variable it writes nowhere else then takes a phi of it,
+/// which no guard holds, and a test of the variable after the binding
+/// reads an object and holds no guard of its type at the loop's entry
+/// (#3862):
+///
+/// ```php
+/// class C { public $p; }
+/// function f($o) { $x = 0; $n = 0; for ($i = 0; $i < 100; $i++) { $o->p = &$x; if ($o) { $n += 2; } if ($i > 50) { $n++; } } return $n + $x; }
+/// echo f(new C), "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 249
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:4
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) f() %s:3
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 5 f() %s:3
+/// ---- TRACE 2 start (side trace 1/5) f() %s:3
+/// ---- TRACE 2 stop (link to 1)
+/// ---- TRACE 2 compiled
+///
+///      TRACE 1 exit 1 f() %s:3
+/// ---- TRACE 3 start (side trace 1/1) f() %s:3
+/// ---- TRACE 3 stop (return)
+/// ---- TRACE 3 compiled
+/// ```
 pub(super) fn writes(op: &Opline, data: Option<&Opline>) -> Writes {
     let cv1 = op.op1_type == OperandKind::Cv;
     let op1 = match op.opcode {
@@ -88,6 +125,7 @@ pub(super) fn writes(op: &Opline, data: Option<&Opline>) -> Writes {
         | Opcode::AssignRef
         | Opcode::AssignDim
         | Opcode::AssignObj
+        | Opcode::AssignObjRef
         | Opcode::AssignDimOp
         | Opcode::AssignObjOp
         | Opcode::AssignOp
@@ -572,6 +610,69 @@ pub(super) fn is_call(opcode: Opcode) -> bool {
         opcode,
         Opcode::DoFcall | Opcode::DoIcall | Opcode::DoUcall | Opcode::DoFcallByName
     )
+}
+
+/// Whether the call an inline `init` began is linked into its frame's
+/// call chain at once, or held apart until its call, given the oplines
+/// the trace serves after it in its frame, `after`, up to a frame
+/// change or the trace's end: php's `zend_jit_needs_call_chain` over a
+/// trace (`Z/ext/opcache/jit/zend_jit.c:259-330`). A send is passed
+/// over; a call holds it apart; another call's start, a jump or a
+/// frame change links it; any other opline links it unless `init` is
+/// an `INIT_FCALL`, since php asks `zend_may_throw` of the init's own
+/// opline there, and of the `INIT_*` oplines only `INIT_FCALL`'s cannot
+/// throw (`Z/Zend/Optimizer/zend_inference.c:5049-5051`).
+pub(super) fn needs_call_chain(init: Opcode, after: impl IntoIterator<Item = Opcode>) -> bool {
+    for opcode in after {
+        match opcode {
+            Opcode::SendArray
+            | Opcode::SendUser
+            | Opcode::SendUnpack
+            | Opcode::InitFcall
+            | Opcode::InitMethodCall
+            | Opcode::InitStaticMethodCall
+            | Opcode::InitParentPropertyHookCall
+            | Opcode::InitFcallByName
+            | Opcode::InitNsFcallByName
+            | Opcode::InitDynamicCall
+            | Opcode::New
+            | Opcode::InitUserCall
+            | Opcode::FastCall
+            | Opcode::Jmp
+            | Opcode::Jmpz
+            | Opcode::Jmpnz
+            | Opcode::JmpzEx
+            | Opcode::JmpnzEx
+            | Opcode::FeResetR
+            | Opcode::FeResetRw
+            | Opcode::JmpSet
+            | Opcode::Coalesce
+            | Opcode::JmpNull
+            | Opcode::AssertCheck
+            | Opcode::Catch
+            | Opcode::DeclareAnonClass
+            | Opcode::FeFetchR
+            | Opcode::FeFetchRw
+            | Opcode::BindInitStaticOrJmp
+            | Opcode::JmpFrameless => return true,
+            Opcode::DoIcall
+            | Opcode::DoUcall
+            | Opcode::DoFcallByName
+            | Opcode::DoFcall
+            | Opcode::CallableConvert => return false,
+            Opcode::SendVal
+            | Opcode::SendVar
+            | Opcode::SendValEx
+            | Opcode::SendVarEx
+            | Opcode::SendFuncArg
+            | Opcode::SendRef
+            | Opcode::SendVarNoRef
+            | Opcode::SendVarNoRefEx => {}
+            _ if init != Opcode::InitFcall => return true,
+            _ => {}
+        }
+    }
+    true
 }
 
 /// The inline oplines that may not finish, and leave the trace for the
@@ -1309,8 +1410,12 @@ pub(super) fn packed_guard(
 /// and so does an increment or a decrement held long, with its variable
 /// the double and its `out`, where it is used, the same double for a
 /// `PRE_*` and the long the variable held for a `POST_*`, as php's
-/// `zend_jit_inc_dec` takes that exit (`:4775-4810`); a fetch checks the
-/// element's type, leaving past itself with the element copied, and, where `missed` says, an element it does not find leaves
+/// `zend_jit_inc_dec` takes that exit (`:4775-4810`), while one held a
+/// double, since its record went past the limit, leaves past itself
+/// where it does not overflow, with the long it went to in its variable
+/// and in a `PRE_*`'s `out` and the long the variable held in a
+/// `POST_*`'s, as `zend_jit_inc_dec` takes that exit too (`:4824-4856`,
+/// [`Within::Stayed`]); a fetch checks the element's type, leaving past itself with the element copied, and, where `missed` says, an element it does not find leaves
 /// past it `null` first, `FETCH_DIM_IS`'s `not_found_exit_addr` where the
 /// type held is not `null` (`zend_jit_fetch_dim_read`,
 /// `Z/ext/opcache/jit/zend_jit_ir.c:12576-12610`).
@@ -1414,11 +1519,107 @@ pub(super) fn packed_guard(
 /// ---- TRACE 4 stop (return)
 /// ---- TRACE 4 compiled
 /// ```
+///
+/// A recursion whose second level's `$x++` overflowed as it was
+/// recorded holds that step a double, and takes that level's exit 7 at
+/// line 4, past the step where it did not overflow, as php's does
+/// ([`Within::Stayed`], #3828):
+///
+/// ```php
+/// function r($n, $x) { if ($n == 0) { return $x; }
+///   $x++;
+///   return r($n - 1, $x); }
+/// $t = 0; for ($j = 0; $j < 40; $j++) { $t = r(5, PHP_INT_MAX - 3 - ($j % 5)); }
+/// var_dump($t);
+/// ```
+/// ```expect regime=jit-inline process
+/// int(9223372036854775805)
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 1 abort (deep recursion)
+///
+/// ---- TRACE 1 start (enter) r() %SCRATCH%/witness.php:2
+/// ---- TRACE 1 stop (recursive call)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 2 r() %SCRATCH%/witness.php:3
+/// ---- TRACE 2 start (side trace 1/2) r() %SCRATCH%/witness.php:3
+/// ---- TRACE 2 stop (link to 1)
+/// ---- TRACE 2 compiled
+///
+///      TRACE 1 exit 1 r() %SCRATCH%/witness.php:2
+/// ---- TRACE 3 start (side trace 1/1) r() %SCRATCH%/witness.php:2
+/// ---- TRACE 3 stop (return)
+/// ---- TRACE 3 compiled
+///
+/// ---- TRACE 4 start (return) r() %SCRATCH%/witness.php:4
+/// ---- TRACE 4 stop (recursive return)
+/// ---- TRACE 4 compiled
+///
+/// ---- TRACE 5 start (loop) $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 5 stop (link to 1)
+/// ---- TRACE 5 compiled
+///
+///      TRACE 1 exit 7 r() %SCRATCH%/witness.php:4
+/// ---- TRACE 6 start (side trace 1/7) r() %SCRATCH%/witness.php:4
+/// ---- TRACE 6 stop (link to 1)
+/// ---- TRACE 6 compiled
+///
+///      TRACE 1 exit 3 r() %SCRATCH%/witness.php:4
+/// ---- TRACE 7 start (side trace 1/3) r() %SCRATCH%/witness.php:4
+/// ---- TRACE 7 stop (link to 1)
+/// ---- TRACE 7 compiled
+///
+/// ---- TRACE 8 start (return) $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 8 stop (link to 5)
+/// ---- TRACE 8 compiled
+///
+///      TRACE 1 exit 6 r() %SCRATCH%/witness.php:2
+/// ---- TRACE 9 start (side trace 1/6) r() %SCRATCH%/witness.php:2
+/// ---- TRACE 9 stop (return)
+/// ---- TRACE 9 compiled
+///
+///      TRACE 4 exit 0 r() %SCRATCH%/witness.php:4
+/// ---- TRACE 10 start (side trace 4/0) r() %SCRATCH%/witness.php:4
+/// ---- TRACE 10 stop (return)
+/// ---- TRACE 10 compiled
+///
+///      TRACE 8 exit 0 $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 11 start (side trace 8/0) $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 11 stop (link to 5)
+/// ---- TRACE 11 compiled
+///
+///      TRACE 11 exit 1 $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 12 start (side trace 11/1) $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 12 stop (link to 5)
+/// ---- TRACE 12 compiled
+///
+///      TRACE 8 exit 1 $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 13 start (side trace 8/1) $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 13 stop (link to 5)
+/// ---- TRACE 13 compiled
+///
+///      TRACE 5 exit 1 $main() %SCRATCH%/witness.php:6
+/// ---- TRACE 14 start (side trace 5/1) $main() %SCRATCH%/witness.php:6
+/// ---- TRACE 14 stop (return)
+/// ---- TRACE 14 compiled
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Within {
     Rerun,
-    Overflowed { up: bool },
-    Fetched { missed: bool },
+    Overflowed {
+        up: bool,
+    },
+    /// An increment or a decrement whose long a guard holds the double
+    /// its record overflowed to, which leaves past itself where it did not
+    /// overflow.
+    Stayed,
+    Fetched {
+        missed: bool,
+    },
 }
 
 /// [`Within`] of an inline op over `opcode` whose `out` a guard holds to
@@ -1438,6 +1639,11 @@ pub(super) fn within(opcode: Opcode, tag: ZvalType, op2: Operand) -> Option<With
             Some(Within::Overflowed {
                 up: matches!(opcode, Opcode::PreInc | Opcode::PostInc),
             })
+        }
+        Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec
+            if tag == ZvalType::Double =>
+        {
+            Some(Within::Stayed)
         }
         Opcode::Add
         | Opcode::Sub

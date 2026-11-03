@@ -76,3 +76,22 @@ bool(true)
     let served = engine.serve_capture(PROBE, Capture::default());
     assert_eq!(served.stdout_text(), EXPECTED);
 }
+
+/// An abstract `RecursiveArrayIterator` class refuses its child with the
+/// `Error` `object_init_ex` raises, and the request goes on to its end.
+/// This holds the engine's side of
+/// `trace:spl-getchildren-abstract-child`, as `getChildren`'s fence does.
+#[test]
+fn an_abstract_child_class_is_refused_with_the_error_and_the_request_goes_on() {
+    let engine = Engine::builder().extensions(support::extensions()).build();
+    let served = engine.serve_capture(
+        r"<?php
+abstract class RI extends RecursiveArrayIterator {}
+$ri = (new ArrayObject([[1]], 0, 'RI'))->getIterator();
+try { $ri->getChildren(); } catch (Error $e) { echo $e->getMessage(); }
+",
+        Capture::default(),
+    );
+    assert_eq!(served.stdout_text(), "Cannot instantiate abstract class RI");
+    assert_eq!(served.exit_code, 0);
+}

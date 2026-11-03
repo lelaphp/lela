@@ -10,10 +10,10 @@ use php_ext::abi::{Beneath, chain};
 use php_ext::abi::{Instance, ObjectHandlers, Refusals, Std, This, Untyped, Variadic};
 use php_ext::attr::php_class;
 use php_ext::call::{call, lookup_class, lookup_function};
-use php_ext::coerce::{callable_checked, value_name, with_string};
+use php_ext::coerce::{c_str, callable_checked, value_name, with_string};
 use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, clear, docref, exit, leave_pending, pending,
-    throw_error, throw_value,
+    throw_error, throw_value, while_pending,
 };
 use php_ext::request::{Ini, OutputOp, OwnedStream as _, Request, StartHandler, Streams as _};
 use php_ext::values::{
@@ -21,7 +21,7 @@ use php_ext::values::{
 };
 use php_ext_libxml::ffi::{Kind, NewDoc, Node, Save};
 
-use crate::classes::{Fault as FaultArgs, SoapFault, SoapHeader};
+use crate::classes::{Fault as FaultArgs, Lang, SoapFault, SoapHeader};
 use crate::encoding::{Cx, encode_finish, encode_reset_ns, master_to_zval};
 use crate::message::{
     HeaderCall, get_doc_function, get_function, serialize_response_call, soap_binding,
@@ -54,24 +54,200 @@ const PERSISTENCE_REQUEST: i64 = 2;
 /// `SOAP_FUNCTIONS_ALL`.
 const FUNCTIONS_ALL: i64 = 999;
 
-/// `soapService`.
+/// `sizeof(soapService)`: the description, `soap_functions` (16 bytes),
+/// `soap_class` (24), `soap_object` (16), the typemap, `version` and
+/// `type`, `actor`, `uri`, `encoding` and `class_map`, `features` and
+/// `send_errors`, the headers' pointer, `trace` padded to eight and the
+/// last response's body.
+const SOAP_SERVICE: usize = 144;
+
+/// `sizeof(HashTable)`, what `zend_new_array` `emalloc`s before a row is
+/// added.
+const HASH_TABLE: usize = 56;
+
+/// A `char *` php `estrndup`s or `estrdup`s: the bytes and a NUL on the
+/// request's heap, read as php reads it, up to the first NUL.
+struct CText(Emalloc);
+
+impl CText {
+    /// `estrndup(bytes, len)`; the `Err` is the memory limit's fatal.
+    fn new(req: &mut Request, bytes: &[u8]) -> R<CText> {
+        let mut block = Emalloc::new(req, bytes.len().saturating_add(1))?;
+        block.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
+        Ok(CText(block))
+    }
+
+    /// The text up to its first NUL.
+    fn bytes(&self) -> &[u8] {
+        c_str(self.0.bytes())
+    }
+
+    /// `efree`.
+    fn free(self, req: &mut Request) {
+        self.0.free(req);
+    }
+}
+
+/// `HT_MIN_SIZE`, the fewest rows `zend_hash_check_size` sizes a table
+/// for.
+const HT_MIN_SIZE: usize = 8;
+
+/// A `Bucket` and the two `uint32_t` hash slots beside it, what
+/// `HT_SIZE_EX` lays down for each row a table is sized for.
+const BUCKET: usize = 40;
+
+/// `soap_functions.ft`: the declared names by lowercased name, and what
+/// php's table holds of them on the request's heap: the `HashTable`
+/// `zend_new_array` lays down, its data laid down at the first row and
+/// doubled when full, and the key each row keeps.
+struct Functions {
+    names: Table<Vec<u8>>,
+    /// The `zend_string` each row keeps as its key, in the rows' order.
+    keys: Vec<Owner<Value>>,
+    /// `nTableSize`.
+    size: usize,
+    /// `arData`, none before the first row.
+    data: Option<Emalloc>,
+    header: Emalloc,
+}
+
+impl Functions {
+    /// `zend_new_array(rows)`: the header, sized for `rows` rounded up to
+    /// a power of two and no fewer than `HT_MIN_SIZE`, as
+    /// `zend_hash_check_size` rounds; the `Err` is the memory limit's
+    /// fatal.
+    fn new(req: &mut Request, rows: usize) -> R<Functions> {
+        Ok(Functions {
+            names: Table::new(),
+            keys: Vec::new(),
+            size: rows.next_power_of_two().max(HT_MIN_SIZE),
+            data: None,
+            header: Emalloc::new(req, HASH_TABLE)?,
+        })
+    }
+
+    /// `zend_hash_update(ft, key, name)`: the row replaced where it
+    /// stands and `key` let go, or a row added that keeps it. The `Err`
+    /// is the memory limit's fatal, `key` let go.
+    fn update(&mut self, req: &mut Request, key: Owner<Value>, name: Vec<u8>) -> R<()> {
+        let lc = key.as_str_bytes().unwrap_or_default().to_vec();
+        if self.names.get_str(&lc).is_some() {
+            self.names.update_str(&lc, name);
+            key.give_up(req);
+            return Ok(());
+        }
+        if let Err(thrown) = self.make_room(req) {
+            key.give_up(req);
+            return Err(thrown);
+        }
+        self.names.update_str(&lc, name);
+        self.keys.push(key);
+        Ok(())
+    }
+
+    /// Before a row is added: `zend_hash_real_init_mixed` at the first,
+    /// and `zend_hash_do_resize` doubling a full table, the new data laid
+    /// down before the old is freed; the `Err` is the memory limit's
+    /// fatal.
+    fn make_room(&mut self, req: &mut Request) -> R<()> {
+        if self.data.is_none() {
+            self.data = Some(Emalloc::new(req, self.size.saturating_mul(BUCKET))?);
+        } else if self.keys.len() >= self.size {
+            let size = self.size.saturating_mul(2);
+            let grown = Emalloc::new(req, size.saturating_mul(BUCKET))?;
+            self.size = size;
+            if let Some(old) = self.data.replace(grown) {
+                old.free(req);
+            }
+        }
+        Ok(())
+    }
+
+    /// `zend_hash_destroy` and `efree`: each row's key let go, the data
+    /// and the header freed.
+    fn free(self, req: &mut Request) {
+        for key in self.keys {
+            key.give_up(req);
+        }
+        if let Some(data) = self.data {
+            data.free(req);
+        }
+        self.header.free(req);
+    }
+}
+
+/// `soap_class.argv`: the `safe_emalloc(argc, sizeof(zval), 0)` `setClass`
+/// copies its arguments into, and an owner of each.
+struct Argv {
+    block: Emalloc,
+    values: Vec<Owner<Value>>,
+}
+
+impl Argv {
+    /// The table and a `ZVAL_COPY` of each argument; the `Err` is the
+    /// memory limit's fatal.
+    fn new(req: &mut Request, args: Vec<Value>) -> R<Argv> {
+        let block = Emalloc::new(req, args.len().saturating_mul(ZVAL_SIZE))?;
+        let values = args.into_iter().map(|a| Owner::take(req, a)).collect();
+        Ok(Argv { block, values })
+    }
+
+    /// `delete_argv`: each argument let go, then the table freed.
+    fn free(self, req: &mut Request) {
+        for v in self.values {
+            v.give_up(req);
+        }
+        self.block.free(req);
+    }
+}
+
+/// `zend_string_tolower(name)`: the name itself, one more owner of it,
+/// where it has no upper-case byte, else a new string of its lowered
+/// bytes; the `Err` is the memory limit's fatal.
+fn lowered(req: &mut Request, name: PhpString) -> R<Owner<Value>> {
+    if name.as_bytes().iter().any(u8::is_ascii_uppercase) {
+        let lc = name.as_bytes().to_ascii_lowercase();
+        return Ok(PhpString::new(req, &lc)?.into_value());
+    }
+    Ok(Owner::take(req, name).into_value())
+}
+
+/// `soapService`, `emalloc`'d by the constructor at php's size beside the
+/// `uri` and `actor` it `estrndup`s and the `ft` it lays down, each given
+/// back with the server, as `delete_service` frees them:
+///
+/// ```php
+/// foreach ([['uri' => 'urn:x'], ['uri' => str_repeat('u', 24), 'actor' => 'urn:me']] as $o) {
+///     $b = new SoapServer(null, $o); $b = null;
+///     $m = memory_get_usage(); $b = new SoapServer(null, $o); echo 'made ', memory_get_usage() - $m, "\n";
+///     $m = memory_get_usage(); $b = null; echo 'freed ', $m - memory_get_usage(), "\n";
+/// }
+/// ```
+/// ```expect
+/// made 328
+/// freed 296
+/// made 328
+/// freed 328
+/// ```
 pub(crate) struct Service {
+    /// The `emalloc(sizeof(soapService))` this stands in for.
+    block: Emalloc,
     pub(crate) sdl: Option<Arc<Sdl>>,
-    /// `soap_functions.ft`: the declared names by lowercased name.
-    functions: Option<Table<Vec<u8>>>,
+    /// `soap_functions.ft`.
+    functions: Option<Functions>,
     /// `soap_functions.functions_all`.
     functions_all: bool,
     class: Option<ClassId>,
-    /// `soap_class.argv`, one owner each.
-    argv: Vec<Owner<Value>>,
+    /// `soap_class.argv`, none where `argc` is 0.
+    argv: Option<Argv>,
     persistence: i64,
     /// `soap_object`, one owner.
     object: Option<Owner<Value>>,
     typemap: Option<Typemap>,
     version: i64,
     kind: ServiceKind,
-    actor: Option<Vec<u8>>,
-    uri: Option<Vec<u8>>,
+    actor: Option<CText>,
+    uri: Option<CText>,
     encoding: Option<Vec<u8>>,
     /// `class_map`, a copy with one owner.
     class_map: Option<Owner<Value>>,
@@ -85,13 +261,16 @@ pub(crate) struct Service {
 }
 
 impl Service {
-    fn new() -> Service {
-        Service {
+    /// `emalloc(sizeof(soapService))` and `memset`, `send_errors` on; the
+    /// `Err` is the memory limit's fatal.
+    fn new(req: &mut Request) -> R<Box<Service>> {
+        Ok(Box::new(Service {
+            block: Emalloc::new(req, SOAP_SERVICE)?,
             sdl: None,
             functions: None,
             functions_all: false,
             class: None,
-            argv: Vec::new(),
+            argv: None,
             persistence: 0,
             object: None,
             typemap: None,
@@ -106,13 +285,13 @@ impl Service {
             added_headers: None,
             trace: false,
             last_response_body: None,
-        }
+        }))
     }
 
     /// `delete_service`: what it owns given back.
     fn release(self, req: &mut Request) {
-        for v in self.argv {
-            v.give_up(req);
+        if let Some(argv) = self.argv {
+            argv.free(req);
         }
         if let Some(o) = self.object {
             o.give_up(req);
@@ -126,6 +305,16 @@ impl Service {
         for v in self.added_headers.into_iter().flatten() {
             v.give_up(req);
         }
+        if let Some(ft) = self.functions {
+            ft.free(req);
+        }
+        if let Some(actor) = self.actor {
+            actor.free(req);
+        }
+        if let Some(uri) = self.uri {
+            uri.free(req);
+        }
+        self.block.free(req);
     }
 }
 
@@ -134,6 +323,11 @@ impl Service {
 pub(crate) struct Server {
     pub(crate) service: Option<Box<Service>>,
 }
+
+const _: () = assert!(
+    size_of::<Server>() <= 8,
+    "SoapServer's payload outgrew the service pointer of php's soap_server_object"
+);
 
 /// `soap_server_object_handlers`: the `soapService` freed with the object, and
 /// no clone.
@@ -271,7 +465,7 @@ fn fatal_fault(
             actor: None,
             detail: detail.as_ref().map(|d| **d),
             name: None,
-            lang: b"en",
+            lang: Lang::En,
         },
     );
     if let Some(d) = detail {
@@ -405,7 +599,7 @@ pub(crate) fn soap_error_handler(req: &mut Request, beneath: Beneath<'_, chain::
                 beneath.message(),
                 None,
                 None,
-                b"en",
+                Lang::En,
             );
             let thrown = match made {
                 Ok(fault) => {
@@ -521,8 +715,8 @@ fn soap_server_fault(
     string: &[u8],
     actor: Option<&[u8]>,
     details: Option<Value>,
-    name: Option<&[u8]>,
-    lang: &[u8],
+    name: Option<PhpString>,
+    lang: Lang,
 ) -> Error {
     let made = new_fault(
         req,
@@ -558,7 +752,7 @@ fn server_fault_en(req: &mut Request, code: &str, string: &str) -> Error {
         None,
         None,
         None,
-        b"en",
+        Lang::En,
     )
 }
 
@@ -599,7 +793,7 @@ fn server_exception(
         } else {
             b"Internal Error".to_vec()
         };
-        let fault = add_soap_fault_ex(req, this, b"Server", &msg, None, None, b"en")?;
+        let fault = add_soap_fault_ex(req, this, b"Server", &msg, None, None, Lang::En)?;
         let value = fault.as_value();
         let written = soap_server_fault_ex(req, sdl, function, value, &[]);
         fault.give_up(req);
@@ -631,6 +825,34 @@ fn service_mut(req: &mut Request, this: PhpObject) -> Option<&mut Service> {
 fn service_ref(req: &Request, this: PhpObject) -> Option<&Service> {
     this.native::<Server>(req)
         .and_then(|s| s.service.as_deref())
+}
+
+/// `soap_functions.ft` laid down where none stands, sized for `rows`, as
+/// `addFunction` does with `zend_new_array` and `functions_all` off.
+fn lay_functions(req: &mut Request, this: PhpObject, rows: usize) -> R<()> {
+    if service_ref(req, this).is_some_and(|s| s.functions.is_none()) {
+        let ft = Functions::new(req, rows)?;
+        if let Some(s) = service_mut(req, this) {
+            s.functions_all = false;
+            s.functions = Some(ft);
+        }
+    }
+    Ok(())
+}
+
+/// `zend_hash_update` of `key` on the server's `soap_functions.ft`; `key`
+/// let go where no table stands. The `Err` is the memory limit's fatal.
+fn update_functions(req: &mut Request, this: PhpObject, key: Owner<Value>, name: Vec<u8>) -> R<()> {
+    let Some(mut ft) = service_mut(req, this).and_then(|s| s.functions.take()) else {
+        key.give_up(req);
+        return Ok(());
+    };
+    let updated = ft.update(req, key, name);
+    match service_mut(req, this) {
+        Some(s) => s.functions = Some(ft),
+        None => ft.free(req),
+    }
+    updated
 }
 
 /// An option of the constructor's array.
@@ -723,15 +945,15 @@ impl SoapServer {
             let old = std::mem::replace(&mut req.state::<State>().encoding, encoding);
             let details =
                 (!matches!(details.as_ref(), ValueRef::Null | ValueRef::Undef)).then_some(details);
-            let name = (!name.is_empty()).then(|| name.as_bytes().to_vec());
+            let name = (!name.is_empty()).then_some(name);
             let e = soap_server_fault(
                 req,
                 code.as_bytes(),
                 string.as_bytes(),
                 Some(actor.as_bytes()).filter(|a| !a.is_empty()),
                 details,
-                name.as_deref(),
-                lang.0.as_bytes(),
+                name,
+                Lang::Of(lang.0),
             );
             req.state::<State>().encoding = old;
             Err(e)
@@ -842,6 +1064,28 @@ impl SoapServer {
     /// }
     /// SoapServer::setClass(): Argument #1 ($class) must be a valid class name, Nope given
     /// ```
+    ///
+    /// The arguments are copied into a table of one `zval` each on the
+    /// request's heap, freed by the next `setClass()` and with the server:
+    ///
+    /// ```php
+    /// class Svc { function __construct(public $a = 0, public $b = 0) {} }
+    /// $o = ['uri' => 'urn:x'];
+    /// $b = new SoapServer(null, $o); $b->setClass('Svc', 1, 2); echo get_class($b), "\n"; $b = null;
+    /// $b = new SoapServer(null, $o);
+    /// $m = memory_get_usage(); $b->setClass('Svc', 1, 2); echo 'set ', memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $b->setClass('Svc', 1, 2, 3); echo 'again ', memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $b->setClass('Svc'); echo 'none ', memory_get_usage() - $m, "\n";
+    /// $b->setClass('Svc', 1, 2);
+    /// $m = memory_get_usage(); $b = null; echo 'freed ', $m - memory_get_usage(), "\n";
+    /// ```
+    /// ```expect
+    /// SoapServer
+    /// set 32
+    /// again 16
+    /// none -48
+    /// freed 328
+    /// ```
     #[php(tentative)]
     fn setClass(
         req: &mut Request,
@@ -861,19 +1105,30 @@ impl SoapServer {
             ));
         };
         service_of(req, object)?;
-        // `ZVAL_COPY` of each argument into `soap_class.argv`.
-        let args: Vec<Owner<Value>> = args.into_iter().map(|a| Owner::take(req, a)).collect();
-        let old = match service_mut(req, object) {
-            Some(s) => {
-                s.kind = ServiceKind::Class;
-                s.class = Some(ce);
-                s.persistence = PERSISTENCE_REQUEST;
-                std::mem::replace(&mut s.argv, args)
-            }
-            None => args,
+        let old = service_mut(req, object).and_then(|s| {
+            s.kind = ServiceKind::Class;
+            s.class = Some(ce);
+            s.argv.take()
+        });
+        if let Some(old) = old {
+            old.free(req);
+        }
+        let args: Vec<Value> = args.into_iter().collect();
+        let argv = if args.is_empty() {
+            None
+        } else {
+            Some(Argv::new(req, args)?)
         };
-        for v in old {
-            v.give_up(req);
+        match service_mut(req, object) {
+            Some(s) => {
+                s.persistence = PERSISTENCE_REQUEST;
+                s.argv = argv;
+            }
+            None => {
+                if let Some(argv) = argv {
+                    argv.free(req);
+                }
+            }
         }
         Ok(())
     }
@@ -952,7 +1207,7 @@ impl SoapServer {
             ServiceKind::Functions => s
                 .functions
                 .as_ref()
-                .map(|ft| ft.values().cloned().collect())
+                .map(|ft| ft.names.values().cloned().collect())
                 .unwrap_or_default(),
         };
         for n in names {
@@ -984,6 +1239,36 @@ impl SoapServer {
     /// Deprecated: SoapServer::addFunction(): Enabling all functions via SOAP_FUNCTIONS_ALL is deprecated since 8.4, due to possible security concerns. If all PHP functions should be enabled, the flattened return value of get_defined_functions() can be used in %s on line %d
     /// bool(true)
     /// ```
+    ///
+    /// The table's data is laid on the request's heap at its first row,
+    /// sized for the array's rows after `SOAP_FUNCTIONS_ALL` and doubled
+    /// when full, and each row keeps its key, a new lowered string where
+    /// the name has an upper-case byte; all of it freed with the server:
+    ///
+    /// ```php
+    /// function f1() {} function F2() {}
+    /// for ($i = 0; $i < 12; $i++) eval("function g$i() {}");
+    /// $o = ['uri' => 'urn:x'];
+    /// $b = new SoapServer(null, $o); $b->addFunction('f1'); $b = null;
+    /// $b = new SoapServer(null, $o);
+    /// $m = memory_get_usage(); $b->addFunction('f1'); echo 'add1 ', memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $b->addFunction(['F2']); echo 'add2 ', memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $b = null; echo 'freed ', $m - memory_get_usage(), "\n";
+    /// $b = new SoapServer(null, $o);
+    /// $m = memory_get_usage(); for ($i = 0; $i < 9; $i++) $b->addFunction("g$i"); echo 'nine ', memory_get_usage() - $m, "\n";
+    /// @$b->addFunction(SOAP_FUNCTIONS_ALL);
+    /// $names = []; for ($i = 0; $i < 12; $i++) $names[] = "G$i";
+    /// $m = memory_get_usage(); $b->addFunction($names); echo 'twelve ', memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $b = null; echo 'freed ', $m - memory_get_usage(), "\n";
+    /// ```
+    /// ```expect
+    /// add1 352
+    /// add2 32
+    /// freed 648
+    /// nine 928
+    /// twelve 1080
+    /// freed 1320
+    /// ```
     #[php(tentative)]
     fn addFunction(req: &mut Request, this: This<Self>, functions: Untyped<Value>) -> R<()> {
         let object = this.object();
@@ -995,15 +1280,13 @@ impl SoapServer {
                 if kind != Some(ServiceKind::Functions) {
                     return Ok(());
                 }
-                if let Some(s) = service_mut(req, object)
-                    && s.functions.is_none()
-                {
-                    s.functions_all = false;
-                    s.functions = Some(Table::new());
-                }
-                let names: Vec<Option<Vec<u8>>> = walk::rows(req, list)
-                    .map(|(_, f)| f.deref().as_str_bytes().map(<[u8]>::to_vec))
+                let names: Vec<Option<PhpString>> = walk::rows(req, list)
+                    .map(|(_, f)| match f.deref().as_ref() {
+                        ValueRef::Str(s) => Some(s),
+                        _ => None,
+                    })
                     .collect();
+                lay_functions(req, object, names.len())?;
                 for name in names {
                     let Some(name) = name else {
                         let ce = Throwables::of(req)?;
@@ -1014,23 +1297,24 @@ impl SoapServer {
                             "must contain only strings",
                         ));
                     };
-                    let Some(declared) = declared_function(req, &name) else {
-                        let shown = String::from_utf8_lossy(&name).into_owned();
+                    let key = lowered(req, name)?;
+                    let Some(declared) = declared_function(req, name.as_bytes()) else {
+                        key.give_up(req);
+                        let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
                         return Err(php_ext::raising::type_error(
                             req,
                             &format!("SoapServer::addFunction(): Function \"{shown}\" not found"),
                         ));
                     };
-                    if let Some(ft) = service_mut(req, object).and_then(|s| s.functions.as_mut()) {
-                        ft.update_str(&name.to_ascii_lowercase(), declared);
-                    }
+                    update_functions(req, object, key, declared)?;
                 }
                 Ok(())
             }
             ValueRef::Str(name) => {
-                let name = name.as_bytes().to_vec();
-                let Some(declared) = declared_function(req, &name) else {
-                    let shown = String::from_utf8_lossy(&name).into_owned();
+                let key = lowered(req, name)?;
+                let Some(declared) = declared_function(req, name.as_bytes()) else {
+                    key.give_up(req);
+                    let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
                     let ce = Throwables::of(req)?;
                     return Err(argument_error(
                         req,
@@ -1039,16 +1323,11 @@ impl SoapServer {
                         &format!("must be a valid function name, function \"{shown}\" not found"),
                     ));
                 };
-                if let Some(s) = service_mut(req, object) {
-                    if s.functions.is_none() {
-                        s.functions_all = false;
-                        s.functions = Some(Table::new());
-                    }
-                    if let Some(ft) = s.functions.as_mut() {
-                        ft.update_str(&name.to_ascii_lowercase(), declared);
-                    }
+                if let Err(thrown) = lay_functions(req, object, 0) {
+                    key.give_up(req);
+                    return Err(thrown);
                 }
-                Ok(())
+                update_functions(req, object, key, declared)
             }
             ValueRef::Int(n) => {
                 if n == FUNCTIONS_ALL {
@@ -1057,9 +1336,12 @@ impl SoapServer {
                         Level::Deprecated,
                         "Enabling all functions via SOAP_FUNCTIONS_ALL is deprecated since 8.4, due to possible security concerns. If all PHP functions should be enabled, the flattened return value of get_defined_functions() can be used",
                     );
-                    if let Some(s) = service_mut(req, object) {
-                        s.functions = None;
+                    let ft = service_mut(req, object).and_then(|s| {
                         s.functions_all = true;
+                        s.functions.take()
+                    });
+                    if let Some(ft) = ft {
+                        ft.free(req);
                     }
                     Ok(())
                 } else {
@@ -1246,7 +1528,7 @@ fn construct(
     wsdl: Option<PhpString>,
     options: PhpArray,
 ) -> Res<()> {
-    let mut service = Box::new(Service::new());
+    let mut service = Service::new(req)?;
     let mut cache_wsdl = crate::sdl::cache::default_cache_wsdl(req);
     let mut version = SOAP_1_1;
     let mut typemap_ht: Option<PhpArray> = None;
@@ -1263,7 +1545,7 @@ fn construct(
         }
     }
     match option(opts, b"uri").as_ref().and_then(Value::as_str_bytes) {
-        Some(uri) => service.uri = Some(uri.to_vec()),
+        Some(uri) => service.uri = Some(CText::new(req, uri)?),
         None if wsdl.is_none() => {
             return Err(docref_error(
                 req,
@@ -1276,7 +1558,7 @@ fn construct(
         .as_ref()
         .and_then(Value::as_str_bytes)
     {
-        service.actor = Some(actor.to_vec());
+        service.actor = Some(CText::new(req, actor)?);
     }
     if let Some(enc) = option(opts, b"encoding")
         .as_ref()
@@ -1332,21 +1614,21 @@ fn construct(
     service.version = version;
     service.kind = ServiceKind::Functions;
     service.functions_all = false;
-    service.functions = Some(Table::new());
+    service.functions = Some(Functions::new(req, 0)?);
     if let Some(w) = &wsdl {
         let sdl = match crate::sdl::cache::get_sdl(req, this, w.as_bytes(), cache_wsdl) {
             Ok(s) => s,
             Err(e) => {
-                Box::new(*service).release(req);
+                service.release(req);
                 return Err(e);
             }
         };
         if service.uri.is_none() {
-            service.uri = Some(
-                sdl.target_ns
-                    .clone()
-                    .unwrap_or_else(|| b"http://unknown-uri/".to_vec()),
-            );
+            let uri = sdl
+                .target_ns
+                .as_deref()
+                .unwrap_or(&b"http://unknown-uri/"[..]);
+            service.uri = Some(CText::new(req, uri)?);
         }
         service.sdl = Some(sdl);
     }
@@ -1402,6 +1684,69 @@ fn called_pending(req: &mut Request, called: R<Owner<Value>>) -> R<Owner<Value>>
     Ok(value)
 }
 
+/// `zval_ptr_dtor(soap_obj)` with what `thrown` carries in
+/// `EG(exception)`: the object a `SOAP_CLASS` call made given up while
+/// the throwable stands pending, so a destructor that throws there
+/// chains it as its `previous`, and what is pending after, as php's
+/// `EG(exception)` reads it, is answered. A `thrown` that carries a fatal
+/// or an `exit` gives the object up as it stands.
+///
+/// A header's handler that threw has the object given up after
+/// `_soap_server_exception` (`Z/ext/soap/soap.c:1583`), so past an
+/// `Exception` it left pending and after the fault it wrote for an
+/// `Error`, which it cleared; the function's own is given up straight
+/// after its call (`:1601`), with what it threw pending and before what
+/// was echoed is discarded:
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class Svc {
+///     static $throws;
+///     function h() { $c = self::$throws; throw new $c("header"); }
+///     function f() { throw new Exception("function"); }
+///     function __destruct() { echo "destructed\n"; throw new Exception("destructed"); }
+/// }
+/// $headed = '<?xml version="1.0"?><E:Envelope xmlns:E="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="u"><E:Header><ns1:h/></E:Header><E:Body><ns1:f/></E:Body></E:Envelope>';
+/// foreach ([[$headed, 'Exception'], [$headed, 'Error'], [str_replace('<ns1:h/>', '', $headed), null]] as [$request, Svc::$throws]) {
+///     $s = new SoapServer(null, ['uri' => 'u']);
+///     $s->setClass('Svc');
+///     ob_start();
+///     try { $s->handle($request); } catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()?->getMessage() ?? "nothing", "\n"; }
+///     echo preg_replace('~<\?xml.*<faultstring>(.*)</faultstring>.*\n~sU', "fault $1\n", ob_get_clean());
+/// }
+/// ```
+/// ```expect
+/// destructed
+/// destructed after header
+/// fault header
+/// destructed
+/// destructed after nothing
+/// destructed after function
+/// ```
+fn made_given_up_past(
+    req: &mut Request,
+    thrown: Thrown,
+    made: &mut Option<Owner<Value>>,
+) -> Thrown {
+    let Some(object) = made.take() else {
+        return thrown;
+    };
+    if thrown.exception().is_none() {
+        object.give_up(req);
+        return thrown;
+    }
+    while_pending(req, &thrown, |req| object.give_up(req));
+    match pending(req) {
+        Ok(()) => thrown,
+        // What the destructor threw holds `thrown`'s throwable as its
+        // `previous`; `thrown`'s own owner of it is given up.
+        Err(over) => match clear(req, thrown) {
+            Ok(()) => over,
+            Err(thrown) => thrown,
+        },
+    }
+}
+
 /// `sizeof(zval)`.
 const ZVAL_SIZE: usize = 16;
 
@@ -1450,8 +1795,8 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
             s.class_map.as_deref().copied(),
             s.features,
             s.kind,
-            s.actor.clone(),
-            s.uri.clone(),
+            s.actor.as_ref().map(|a| a.bytes().to_vec()),
+            s.uri.as_ref().map(|u| u.bytes().to_vec()),
         )
     };
     req.state::<State>().soap_version = version;
@@ -1724,7 +2069,7 @@ fn has_function(
             } else {
                 s.functions
                     .as_ref()
-                    .is_some_and(|ft| ft.get_str(&lc).is_some())
+                    .is_some_and(|ft| ft.names.get_str(&lc).is_some())
             }
         }
     }
@@ -1775,7 +2120,11 @@ fn serve(
             ServiceKind::Class => {
                 let (class, argv, persistence) = match service_ref(req, this) {
                     Some(s) => {
-                        let argv: Vec<Value> = s.argv.iter().map(|a| **a).collect();
+                        let argv: Vec<Value> = s
+                            .argv
+                            .as_ref()
+                            .map(|a| a.values.iter().map(|v| **v).collect())
+                            .unwrap_or_default();
                         (s.class, argv, s.persistence)
                     }
                     None => (None, Vec::new(), 0),
@@ -1848,9 +2197,18 @@ fn serve(
                         old.give_up(req);
                     }
                     Err(t) => {
+                        // `_soap_server_exception`, then `zval_ptr_dtor
+                        // (soap_obj)` with what it left in `EG(exception)`:
+                        // nothing past a `SoapFault` or an `Error` it
+                        // answered, the throwable past anything else.
                         discard(req);
-                        release_made(req, &mut made);
-                        return server_exception(req, this, sdl, function, t).map_err(Error::from);
+                        return match server_exception(req, this, sdl, function, t) {
+                            Ok(()) => {
+                                release_made(req, &mut made);
+                                Ok(())
+                            }
+                            Err(t) => Err(Error::from(made_given_up_past(req, t, &mut made))),
+                        };
                     }
                 }
                 let retval = parsed.headers[i].retval.deref();
@@ -1897,10 +2255,16 @@ fn serve(
             // limit's fatal, raised at the call's entry, leaves php's
             // unwind exit and no answer (8.5.12).
             let called = call(req, &callable, &params);
-            let called = called_pending(req, called);
-            if kind == ServiceKind::Class {
-                release_made(req, &mut made);
-            }
+            // `zval_ptr_dtor(soap_obj)` straight after the call, a
+            // `SOAP_CLASS`'s one owner, `made`, with what the function
+            // threw in `EG(exception)`.
+            let called = match called_pending(req, called) {
+                Ok(v) => {
+                    release_made(req, &mut made);
+                    Ok(v)
+                }
+                Err(t) => Err(made_given_up_past(req, t, &mut made)),
+            };
             match called {
                 Ok(v) => retval = v,
                 Err(t) => {

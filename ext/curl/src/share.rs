@@ -14,25 +14,42 @@ use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::State;
 use crate::constants as c;
-use crate::ffi::{Persistent, Share, ShareRef, Shared, share_strerror};
+use crate::ffi::{Persistent, Share, ShareRef, share_strerror};
 use crate::handle::made;
 use crate::throwables::Throwables;
 
-/// `php_curlsh` less its `zend_object`, which both share classes lay.
+/// `php_curlsh` less its `zend_object`, which both share classes lay:
+/// 16 bytes, the ones `zend_object_alloc(sizeof(php_curlsh), ce)` lays
+/// beside the `zend_object`.
 #[derive(Default)]
 pub(crate) struct Sh {
-    /// `share`: the request keeps a `CurlShareHandle`'s, and this is its
-    /// one owner; a persistent one is one owner of the pool's share.
-    share: Option<Shared>,
-    /// `err.no`.
-    err: i64,
+    /// `share`.
+    share: Option<Held>,
+    /// `err.no`, an `int` as php's.
+    err: i32,
+}
+
+/// What an object of either share class keeps of its `CURLSH *`.
+enum Held {
+    /// A `CurlShareHandle`'s: the request keeps the share, and this is its
+    /// one owner.
+    Request(Share),
+    /// A `CurlSharePersistentHandle`'s: the bits of the options it was
+    /// made with, under which the request holds the pool's share to its
+    /// end ([`lend`]), named rather than owned so that the payload fits.
+    Persistent(u8),
 }
 
 /// The share of an object of either share class, `None` for any other.
-pub(crate) fn share_of(req: &Request, object: PhpObject) -> Option<ShareRef> {
-    object
-        .native::<Sh>(req)
-        .and_then(|sh| sh.share.as_ref().map(Shared::as_ref))
+pub(crate) fn share_of(req: &mut Request, object: PhpObject) -> Option<ShareRef> {
+    let id = match object.native::<Sh>(req)?.share.as_ref()? {
+        Held::Request(share) => return Some(share.as_ref()),
+        Held::Persistent(id) => *id,
+    };
+    let held = &mut req.state::<State>().persistent;
+    let at = held.find(&id)?;
+    held.get_mut(at)
+        .map(|share| ShareRef::Persistent(share.clone()))
 }
 
 /// `curl_share_handlers` and `curl_share_persistent_handlers`: what each
@@ -46,8 +63,8 @@ impl ObjectHandlers for Handlers {
     }
 
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let share = object.native_mut::<Sh>(req).and_then(|sh| sh.share.take());
-        if let Some(share) = share {
+        let held = object.native_mut::<Sh>(req).and_then(|sh| sh.share.take());
+        if let Some(Held::Request(share)) = held {
             share.close(req);
         }
     }
@@ -69,9 +86,13 @@ impl ObjectHandlers for Handlers {
 /// }
 /// bool(false)
 /// ```
+///
+/// An object is `sizeof(php_curlsh)`, 72 bytes on a 64-bit build, as
+/// `curl_share_create_object` lays it for both share classes.
 #[php_class(
     final,
     not_serializable,
+    size = 72,
     payload = Sh,
     handlers = SHARE_HANDLERS,
     dynamic_properties = forbidden
@@ -106,6 +127,7 @@ impl CurlShareHandle {}
 #[php_class(
     final,
     not_serializable,
+    size = 72,
     payload = Sh,
     handlers = PERSISTENT_HANDLERS,
     dynamic_properties = forbidden
@@ -139,12 +161,30 @@ pub(crate) static PERSISTENT_HANDLERS: Handlers = Handlers(PERSISTENT);
 /// ```expect
 /// bool(true)
 /// ```
+///
+/// What `memory_get_usage()` counts of a share object is php's: the 72
+/// bytes of [`CurlShareHandle`] less the properties slot a class that
+/// declares none gives back, and that slot kept for the `options` of a
+/// `CurlSharePersistentHandle`, with the array beside it.
+///
+/// ```php
+/// $b = memory_get_usage(); $s = curl_share_init(); echo memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); $t = curl_share_init(); echo memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); unset($s); echo memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); $p = curl_share_init_persistent([CURL_LOCK_DATA_DNS]); echo memory_get_usage() - $b, "\n";
+/// ```
+/// ```expect
+/// 56
+/// 56
+/// -56
+/// 296
+/// ```
 #[php_function]
 fn curl_share_init(req: &mut Request) -> Result<Owner<Instance<CurlShareHandle>>, Thrown> {
     let object = made(req, b"CurlShareHandle")?;
     let share = Share::init(req);
     match object.native_mut::<Sh>(req) {
-        Some(sh) => sh.share = share.map(Shared::Request),
+        Some(sh) => sh.share = share.map(Held::Request),
         None => share.into_iter().for_each(|share| share.close(req)),
     }
     Ok(object.into_instance())
@@ -207,7 +247,10 @@ fn curl_share_setopt(
         }
     };
     if let Some(sh) = object.native_mut::<Sh>(req) {
-        sh.err = code;
+        // `SAVE_CURLSH_ERROR`'s `(int) __err`, of a `CURLSHcode`.
+        #[allow(clippy::cast_possible_truncation)]
+        let no = code as i32;
+        sh.err = no;
     }
     match thrown {
         Some(thrown) => Err(thrown),
@@ -228,7 +271,7 @@ fn curl_share_errno(
     req: &mut Request,
     share_handle: Instance<CurlShareHandle>,
 ) -> Result<i64, Thrown> {
-    Ok(share_handle.payload_mut(req)?.err)
+    Ok(i64::from(share_handle.payload_mut(req)?.err))
 }
 
 /// `curl_share_strerror(int $error_code): ?string`.
@@ -266,17 +309,21 @@ pub(crate) struct Pooled {
 /// bound the engine keeps for its own persistent streams.
 pub(crate) const POOLED: usize = 1024;
 
-/// The persistent share made with the options `id` names that the
-/// request holds already, or one the engine's pool kept from an earlier
-/// request, held by this one from here to its end.
-fn lend(req: &mut Request, id: u8) -> Option<Persistent> {
-    let held = &mut req.state::<State>().persistent;
-    if let Some(at) = held.find(&id) {
-        return held.get_mut(at).map(|share| share.clone());
+/// Whether the request holds a persistent share made with the options
+/// `id` names: one it holds already, or one the engine's pool kept from
+/// an earlier request, held by this one from here to its end.
+fn lend(req: &mut Request, id: u8) -> bool {
+    if req.state::<State>().persistent.find(&id).is_some() {
+        return true;
     }
-    let share = req.engine::<Pooled>()?.pool.take(&id)?;
-    req.state::<State>().persistent.hold(id, share.clone());
-    Some(share)
+    let Some(share) = req
+        .engine::<Pooled>()
+        .and_then(|pooled| pooled.pool.take(&id))
+    else {
+        return false;
+    };
+    req.state::<State>().persistent.hold(id, share);
+    true
 }
 
 /// What php's `CURL_G(persistent_curlsh)` keeps across requests, at
@@ -410,9 +457,7 @@ fn curl_share_init_persistent(
         object.give_up(req);
         return Err(thrown);
     }
-    let share = if let Some(share) = lend(req, id) {
-        share
-    } else {
+    if !lend(req, id) {
         let Some(share) = Persistent::init() else {
             object.give_up(req);
             return Err(throw(
@@ -436,11 +481,10 @@ fn curl_share_init_persistent(
                 return Err(throw_exception_ex(req, ce.exception, &text));
             }
         }
-        req.state::<State>().persistent.hold(id, share.clone());
-        share
-    };
+        req.state::<State>().persistent.hold(id, share);
+    }
     if let Some(sh) = object.native_mut::<Sh>(req) {
-        sh.share = Some(Shared::Persistent(share));
+        sh.share = Some(Held::Persistent(id));
     }
     Ok(object.into_instance())
 }

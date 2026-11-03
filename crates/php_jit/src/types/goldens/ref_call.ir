@@ -10,7 +10,7 @@ entry
   guard room 192 -> exit 0
   guard #6 long -> exit 1
   guard #4 long -> exit 2
-loop at 0, loop, interrupt exit 9
+loop at 0, loop, interrupt exit 8
   #1 f0.CV1 [ref, any] = phi(#0, #7)
   #3 f0.CV2 [ref, any] = phi(#2, #8)
   #5 f0.CV4 [long] reg = phi(#4, #17)
@@ -43,7 +43,6 @@ loop at 0, loop, interrupt exit 9
      f0 back
 0012 f0 PRE_INC #5 inline
   -> #17 f0.CV4 [long] reg
-  checks #17 long -> exit 8
 end: back to 0
 exit 0: f0 0013 plain to vm
 exit 1: f0 0013 plain
@@ -53,6 +52,5 @@ exit 4: f1 0004 plain f0.CV4=#5 f1.CV2:array f1.CV3:double
 exit 5: f1 0006 plain f0.CV4=#5 f1.CV2:array f1.CV3:double to vm
 exit 6: f1 0007 plain f0.CV4=#5 f1.T2=copied #15 f1.CV2:array f1.CV3:double
 exit 7: f1 0007 plain f0.CV4=#5 f1.T2=#15 f1.CV2:array f1.CV3:double f1.T2:double
-exit 8: f0 0013 plain f0.CV4=overflowed up f0.CV0:long f0.CV3:array f0.CV4:double
-exit 9: f0 0013 plain f0.CV4=#5 f0.CV0:long f0.CV3:array f0.CV4:long to vm
+exit 8: f0 0013 plain f0.CV4=#5 f0.CV0:long f0.CV3:array f0.CV4:long to vm
 unwind 0: f0.CV4=#5

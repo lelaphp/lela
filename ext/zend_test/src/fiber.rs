@@ -13,7 +13,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::php_class;
 use php_ext::call::{call_named, new_object};
-use php_ext::raising::{Thrown, clear, throw_error};
+use php_ext::raising::{Thrown, clear, pending, throw_error, while_pending};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject, PhpString, Value};
 
@@ -167,7 +167,7 @@ impl _ZendTestFiber {
             ));
         }
         let named = args.named().to_vec();
-        lay_down(req, this, args.positional.into_iter().collect(), named)?;
+        lay_down(req, this, args.positional.collect(), named)?;
         let back = run(req, this, Owner::null());
         delegate(req, this, back)
     }
@@ -628,11 +628,9 @@ fn lay_down(
     Coroutine::init::<ZendTestFiber>(req, object, move |req: &mut Request| {
         let outcome = call_named(req, &callable, &arguments, &named);
         let fiber = payload(req, object)?;
-        let held = fiber.callable.take().map(|(_, held)| held);
         let param = fiber.result.take();
-        for owner in [held, param].into_iter().flatten() {
-            owner.give_up(req);
-        }
+        let held = fiber.callable.take().map(|(_, held)| held);
+        let outcome = given_up_past(req, outcome, [param, held]);
         let Some(target) = payload(req, object)?.target.as_deref().copied() else {
             let value = outcome?;
             let returned = *value;
@@ -660,6 +658,55 @@ fn lay_down(
         req.state::<State>().active_fiber = Some(target);
         Ok(CoroutineEnd::Into(target))
     })
+}
+
+/// `fiber->result` and then `fiber->fci.function_name` freed after the
+/// body's call, with what the body threw in `EG(exception)`
+/// (`Z/ext/zend_test/fiber.c:107-108`): a destructor that
+/// throws there, a closure's `use` holding the last owner of its object,
+/// chains what the body threw as its `previous`, and that is what the
+/// body ended with, taken off the request as php's transfer copies
+/// `EG(exception)`. A body that answered, or ended in a fatal or an
+/// `exit`, has its owners given up as they stand.
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class D { function __destruct() { throw new Exception("destructed"); } }
+/// $d = new D;
+/// $f = new _ZendTestFiber(function () use ($d) { throw new Exception("body"); });
+/// unset($d);
+/// try { $f->start(); } catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// destructed after body
+/// ```
+fn given_up_past(
+    req: &mut Request,
+    outcome: Result<Owner<Value>, Thrown>,
+    owners: [Option<Owner<Value>>; 2],
+) -> Result<Owner<Value>, Thrown> {
+    let give_up = |req: &mut Request| {
+        for owner in owners.into_iter().flatten() {
+            owner.give_up(req);
+        }
+    };
+    let thrown = match outcome {
+        Err(thrown) if thrown.exception().is_some() => thrown,
+        outcome => {
+            give_up(req);
+            return outcome;
+        }
+    };
+    while_pending(req, &thrown, give_up);
+    match pending(req) {
+        Ok(()) => Err(thrown),
+        // What the destructor threw holds the body's throwable as its
+        // `previous`; the body's own owner of it is given up.
+        Err(over) => {
+            clear(req, thrown)?;
+            Err(over)
+        }
+    }
 }
 
 /// `zend_test_fiber_resume`, with `ZT_G(active_fiber)` the fiber for its

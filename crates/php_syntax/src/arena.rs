@@ -8,15 +8,17 @@
 //!
 //! The arena is the caller's, and nothing of it is the thread's: the
 //! engine keeps one per request and hands it to every compile the
-//! request makes, so the next compile bumps into the room the last one
-//! left and a small compile makes no allocation for its tree at all.
+//! request makes, a file's bound for the unit cache among them (#4012),
+//! so the next compile bumps into the room the last one left and a
+//! small compile makes no allocation for its tree at all.
 //! [`crate::parse`] borrows it and the [`crate::Parsed`] it hands back
 //! borrows it in turn, so a parse cannot outlive the memory it is in,
 //! and a node is still read by its index in safe code. Beside the bump
 //! the arena keeps the parse's stacks, the lexer's stream before it is
 //! laid in the arena, the significant-token table, the event stream and
-//! the builder's frames, lent to each parse and taken back empty, so
-//! their room is reused too.
+//! the builder's frames, lent to each parse and taken back empty, and
+//! the stacks and the strings of the walk that reads what php's scanner
+//! lays, so their room is reused too.
 
 use std::cell::{Cell, RefCell, RefMut};
 
@@ -59,12 +61,18 @@ pub(crate) struct Scratch {
     pub(crate) delims: Vec<(crate::SyntaxKind, crate::Span)>,
     pub(crate) significant: Vec<u32>,
     pub(crate) stacks: crate::tree::Stacks,
+    /// The stacks of the walk that lays what php's scanner lays
+    /// ([`crate::note_scanner_heap`]).
+    pub(crate) walk: crate::scanner::WalkRoom,
 }
 
 impl Scratch {
     /// The most room of one stack an arena keeps between parses: a parse
-    /// of a large file pays for its own and gives it up.
-    const KEPT: usize = 64 * 1024;
+    /// of a large file pays for its own and gives it up. It holds the
+    /// stacks of a framework's larger files, so their compiles one after
+    /// another reuse the same room rather than each growing its own and
+    /// leaving the allocator fragmented (#4012).
+    const KEPT: usize = 256 * 1024;
 
     /// The longest source whose parse grows no stack near
     /// [`Scratch::KEPT`]: every stack holds a few entries per token at
@@ -86,16 +94,19 @@ impl Scratch {
             && self.delims.capacity() * size_of::<(crate::SyntaxKind, crate::Span)>() <= bytes
             && self.significant.capacity() * size_of::<u32>() <= bytes
             && self.stacks.within(bytes)
+            && self.walk.within(bytes)
     }
 }
 
 /// The most room the arena keeps when it is reset: a compile of a large
-/// file pays for its own and gives it up.
-const KEPT: usize = 256 * 1024;
+/// file pays for its own and gives it up. A framework's larger files fit,
+/// as they fit the room php's request heap keeps of the `CG(ast_arena)`
+/// each one destroys (#4012).
+const KEPT: usize = 1024 * 1024;
 
 impl Arena {
     /// Give up everything in the arena at once, keeping the room of its
-    /// last chunk for what is bumped into it next, up to 256 KiB.
+    /// last chunk for what is bumped into it next, up to 1 MiB.
     pub fn reset(&mut self) {
         self.bump.reset();
         if self.bump.allocated_bytes() > KEPT {
@@ -118,9 +129,27 @@ impl Arena {
         self.scanned.take()
     }
 
-    /// `heap`, what php's scanner laid for the source a compile in the
-    /// arena reads, kept for [`Arena::take_scanned`].
-    pub(crate) fn note_scanned(&self, heap: crate::ScannerHeap) {
+    /// What php's scanner lays for the source a compile in the arena
+    /// reads, laid by `lay` into the room of the last one and kept for
+    /// [`Arena::take_scanned`], over the walk's stacks the arena lends.
+    pub(crate) fn lay_scanned(
+        &self,
+        lay: impl FnOnce(&mut crate::ScannerHeap, &mut crate::scanner::WalkRoom),
+    ) {
+        let mut heap = self.scanned.take();
+        if !heap.within(Scratch::KEPT) {
+            heap = crate::ScannerHeap::default();
+        }
+        let mut lent = self.scratch();
+        let mut own = None;
+        let room = match lent.as_deref_mut() {
+            Some(scratch) => &mut scratch.walk,
+            None => own.insert(crate::scanner::WalkRoom::default()),
+        };
+        lay(&mut heap, room);
+        if let Some(scratch) = lent.as_deref_mut() {
+            scratch.trim();
+        }
         self.scanned.replace(heap);
     }
 
@@ -228,5 +257,54 @@ mod tests {
         assert_eq!(arena.copy(&large).len(), large.len());
         arena.reset();
         assert_eq!(arena.bump.allocated_bytes(), 0, "a large chunk is given up");
+    }
+
+    /// One compile's scan in `arena`, as `php_compile` scans a source:
+    /// the parse and what php's scanner lays for it, which is handed
+    /// back, and the arena reset after.
+    fn scan(arena: &mut Arena, source: &[u8]) -> crate::ScannerHeap {
+        let laid = {
+            let parsed = crate::parse(arena, source, &crate::Options::default());
+            crate::note_scanner_heap(arena, parsed.source, parsed.tokens);
+            arena.scanned.borrow().clone()
+        };
+        arena.reset();
+        laid
+    }
+
+    /// Where each buffer a scan grows stands, and its room.
+    fn buffers(arena: &Arena) -> Vec<(usize, usize)> {
+        let scratch = arena.scratch.borrow();
+        let mut at = scratch.walk.buffers();
+        at.extend(arena.scanned.borrow().buffers());
+        at.push((scratch.tokens.as_ptr() as usize, scratch.tokens.capacity()));
+        at.push((0, arena.bump.allocated_bytes()));
+        at
+    }
+
+    #[test]
+    fn successive_scans_in_one_arena_reuse_its_buffers_and_lay_what_a_fresh_one_does() {
+        let first: &[u8] =
+            b"<?php\nfunction f($a, $b) { return \"{$a}x\" . 'quoted' . $b->name; }\n\
+            $html = <<<EOT\n  text {$x[1]} more\n  EOT;\nclass C { public $p = \"plain\"; }\n\
+            echo f(1, 2), \"two words\", `cmd $v`;\n?>trailing html <?php echo 3;";
+        let second: &[u8] = b"<?php\n$q = 'other'; echo \"$q and $q\"; function g() { return [1, 2]; }\n\
+            interface I { const A = 'a'; } abstract class D implements I { abstract function h(); }\n\
+            $long = 'a much longer string than any before'; echo $long, g();\n";
+        let alone = |source| scan(&mut Arena::default(), source);
+        let mut arena = Arena::default();
+        let laid = scan(&mut arena, first);
+        assert!(laid.strings().count() > 3, "{laid:?}");
+        assert_eq!(laid, alone(first));
+        assert_eq!(scan(&mut arena, second), alone(second));
+        let grown = buffers(&arena);
+        assert!(grown.iter().all(|&(_, room)| room > 0), "{grown:?}");
+        assert_eq!(scan(&mut arena, first), laid);
+        assert_eq!(scan(&mut arena, second), alone(second));
+        assert_eq!(
+            buffers(&arena),
+            grown,
+            "the scans after the first two laid nothing new"
+        );
     }
 }

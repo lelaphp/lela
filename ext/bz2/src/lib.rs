@@ -74,17 +74,17 @@ struct State {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            stream::bzopen::declared(),
-            stream::bzread::declared(),
-            stream::bzwrite::declared(),
-            stream::bzflush::declared(),
-            stream::bzclose::declared(),
-            stream::bzerrno::declared(),
-            stream::bzerrstr::declared(),
-            stream::bzerror::declared(),
-            buffer::bzcompress::declared(),
-            buffer::bzdecompress::declared(),
+        .functions(&[
+            stream::bzopen::DECLARED,
+            stream::bzread::DECLARED,
+            stream::bzwrite::DECLARED,
+            stream::bzflush::DECLARED,
+            stream::bzclose::DECLARED,
+            stream::bzerrno::DECLARED,
+            stream::bzerrstr::DECLARED,
+            stream::bzerror::DECLARED,
+            buffer::bzcompress::DECLARED,
+            buffer::bzdecompress::DECLARED,
         ])
         .request_state::<State>()
         .rinit(rinit)

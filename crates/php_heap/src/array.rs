@@ -517,6 +517,23 @@ pub enum Key {
     Str(Str),
 }
 
+/// What [`Heap::array_sort`] leaves of the keys once the buckets are
+/// ordered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortKeys {
+    /// Every key kept and the chains rebuilt, `zend_hash_sort`'s
+    /// `renumber` false (`asort()`).
+    Keep,
+    /// Every key dropped and the table packed, `renumber` true
+    /// (`sort()`).
+    Renumber,
+    /// `array_multisort`'s restructure (`Z/ext/standard/array.c:6302`):
+    /// the integer keys numbered from zero in the order found, the
+    /// string keys kept, `nNextFreeElement` the element count, and the
+    /// table packed where no string key is left (`zend_hash_to_packed`).
+    RenumberIntegers,
+}
+
 /// One element as `zend_hash_sort` hands it to the comparison: php's
 /// `Bucket`, its key and value, with `Z_EXTRA(val)` set to the position
 /// the element held before the sort, which is what the stable
@@ -975,7 +992,7 @@ impl Arr {
     }
 
     /// `HT_GET_DATA_ADDR`: the allocation, which starts at the hash slots.
-    fn data_addr(self) -> Option<NonNull<u8>> {
+    pub(crate) fn data_addr(self) -> Option<NonNull<u8>> {
         let data = NonNull::new(self.header().data.get())?;
         let hash = Arr::hash_size(self.mask());
         // SAFETY: the data pointer sits `hash` bytes into its allocation.
@@ -1740,9 +1757,29 @@ impl Arr {
         z
     }
 
+    /// `_zend_hash_index_add_or_update_i`'s `add_to_packed` arm under
+    /// `HASH_ADD_NEXT` where nothing else of it is taken: a packed list
+    /// whose next free element is the slot past its last and inside its
+    /// room, so `z` lands there with no hole to lay, no table to grow and
+    /// nothing to convert. `None` is every other table, for
+    /// [`write_long`] to take whole; nothing is written then.
+    #[inline]
+    fn append_in_room(self, z: Zval) -> Option<u32> {
+        let header = self.header();
+        let used = header.num_used.get();
+        let next = header.next_free.get();
+        let next = if next == i64::MIN { 0 } else { next };
+        if !self.is_packed() || next != i64::from(used) || used >= header.table_size.get() {
+            return None;
+        }
+        self.add_to_packed(used, z);
+        Some(used)
+    }
+
     /// The `add_to_packed` arm: the slots between `nNumUsed` and `h`
     /// become holes, and `h + 1` is both the used count and the next
     /// free element.
+    #[inline]
     fn add_to_packed(self, h: u32, z: Zval) {
         let header = self.header();
         let used = self.num_used();
@@ -1882,6 +1919,7 @@ impl crate::Heap {
     /// `zend_hash_check_size(size, heap->fallible)` over this heap: the
     /// table's size, and its overflow the heap's refusal or its end
     /// ([`Mm::overflow_refusal`]).
+    #[inline]
     fn table_size(&mut self, size: u32) -> Result<u32, Fatal> {
         check_size(size).map_err(|said| self.mm.overflow_refusal(said))
     }
@@ -1889,6 +1927,7 @@ impl crate::Heap {
     /// `zend_new_array(size)`, `array_init_size`: the header, with the
     /// first data allocation sized for `size` elements through
     /// `zend_hash_check_size`.
+    #[inline]
     pub fn array_sized(&mut self, size: u32) -> Result<Arr, Fatal> {
         let size = self.table_size(size)?;
         let at = self.mm.alloc(HEADER)?;
@@ -1963,6 +2002,52 @@ impl crate::Heap {
         Ok(())
     }
 
+    /// `ZEND_HASH_FILL_PACKED(dest)` over `ZEND_HASH_PACKED_FOREACH_VAL(src)`
+    /// after `zend_hash_extend(dest, ..., 1)`, the packed arm of
+    /// `php_array_merge` (`Z/ext/standard/array.c:4180`) and
+    /// `php_array_merge_wrapper`'s copy of a packed first argument: each
+    /// of `src`'s values, its holes stepped over, laid in the slots past
+    /// `dest`'s last, copied by [`Heap::dup_value`]'s rule with no source,
+    /// and `dest`'s counts and next free element moved past them once,
+    /// its internal pointer at its first element, as
+    /// `ZEND_HASH_FILL_FINISH` moves them. Room is made first for every
+    /// slot written, which a table sized for the merge's count already
+    /// has. Nothing is released, so nothing here reaches code of the
+    /// program. `false`, and nothing written, where either table is not a
+    /// packed list. `dest` has one owner.
+    pub fn array_fill_packed(&mut self, dest: Arr, src: Arr) -> Result<bool, Fatal> {
+        if !dest.is_packed() || !src.is_packed() {
+            return Ok(false);
+        }
+        let used = dest.num_used();
+        let src_used = src.num_used();
+        // A table holds fewer than `HT_MAX_SIZE` elements, so its count is
+        // a `u32`.
+        #[allow(clippy::cast_possible_truncation)]
+        let count = src.len() as u32;
+        let room = used.saturating_add(count);
+        if room > dest.table_size() {
+            self.array_extend(dest, room)?;
+        }
+        let mut at = used;
+        for idx in 0..src_used {
+            let z = src.read_slot(idx);
+            if z.is_undef() {
+                continue;
+            }
+            dest.write_slot(at, self.dup_value(z, None));
+            at += 1;
+        }
+        let header = dest.header();
+        header
+            .num_elements
+            .set(header.num_elements.get() + (at - used));
+        header.num_used.set(at);
+        header.next_free.set(i64::from(at));
+        header.internal_pointer.set(0);
+        Ok(true)
+    }
+
     /// `zend_new_array(size)` then `zend_hash_real_init_packed`: the
     /// header and the packed slots laid down at once, so a table php
     /// real-inits and leaves empty holds its slots and reads `packed` to
@@ -2019,8 +2104,40 @@ impl crate::Heap {
 
     /// `zend_hash_next_index_insert`, `$a[] = z`: `false`, and `z` still
     /// the caller's, when `nNextFreeElement` is `ZEND_LONG_MAX` and taken.
-    /// Nothing is replaced, so nothing here can reach user code.
+    /// Nothing is replaced, so nothing here can reach user code. A packed
+    /// list with room takes `z` here, inline in the caller
+    /// ([`Arr::append_in_room`]); every other table goes out of line: a
+    /// list whose last slots were unset, which lays its holes, a hash, a
+    /// list out of room, which grows at php's sizes, and a table never
+    /// written.
+    ///
+    /// ```php
+    /// $a = [1, 2]; $a[] = 3;
+    /// $b = [1, 2, 3]; unset($b[2]); $b[] = 4;
+    /// $c = [1, 2]; array_pop($c); $c[] = 5;
+    /// $d = [5 => 1]; $d[] = 2;
+    /// $e = []; for ($i = 0; $i < 9; $i++) { $e[] = $i; }
+    /// echo json_encode([$a, $b, $c, $d, $e]), "\n";
+    /// $n = 1; $m = memory_get_usage(); $f = [$n, 2]; $f[] = 3; $g = memory_get_usage() - $m;
+    /// for ($i = 0; $i < 6; $i++) { $f[] = $i; } $h = memory_get_usage() - $m;
+    /// var_dump($g, $h);
+    /// ```
+    /// ```expect
+    /// [[1,2,3],{"0":1,"1":2,"3":4},[1,5],{"5":1,"6":2},[0,1,2,3,4,5,6,7,8]]
+    /// int(216)
+    /// int(376)
+    /// ```
+    #[inline]
     pub fn array_append(&mut self, a: Arr, z: Zval) -> Result<bool, Fatal> {
+        if a.append_in_room(z).is_some() {
+            return Ok(true);
+        }
+        self.array_append_out_of_room(a, z)
+    }
+
+    /// [`Heap::array_append`] past the packed list with room.
+    #[inline(never)]
+    fn array_append_out_of_room(&mut self, a: Arr, z: Zval) -> Result<bool, Fatal> {
         Ok(self.array_write_long(a, a.next_free(), z, Write::Next)? != Written::Refused)
     }
 
@@ -2074,7 +2191,17 @@ impl crate::Heap {
     /// entry appended, in place, holding `null`; `None` where
     /// `nNextFreeElement` is `ZEND_LONG_MAX` and taken, which is
     /// `zend_cannot_add_element`'s `Error` at the site.
+    #[inline]
     pub fn array_next_entry(&mut self, a: Arr) -> Result<Option<ZvalRef>, Fatal> {
+        if let Some(slot) = a.append_in_room(Zval::null()) {
+            return Ok(Some(ZvalRef::new(a.value_ptr(Pos::Slot(slot)))));
+        }
+        self.array_next_entry_out_of_room(a)
+    }
+
+    /// [`Heap::array_next_entry`] past the packed list with room.
+    #[inline(never)]
+    fn array_next_entry_out_of_room(&mut self, a: Arr) -> Result<Option<ZvalRef>, Fatal> {
         let index = a.next_free();
         let index = if index == i64::MIN { 0 } else { index };
         Ok(
@@ -2551,12 +2678,15 @@ impl crate::Heap {
     /// each element handed to `compare` with the position it held, the
     /// buckets ordered as php's hybrid orders them for any comparison,
     /// the internal pointer reset, and then the chains rebuilt where the
-    /// keys are kept, or under `renumber` the keys dropped, `nNextFreeElement`
-    /// set past the last, and the table laid down packed in a fresh
-    /// allocation with the hash table's given back. Nothing here is
-    /// stable of itself: php's stable order is the caller's comparison
-    /// falling back to [`SortEntry::position`], `RETURN_STABLE_SORT`, and
-    /// a caller that wants `zend_sort`'s own order leaves it out. The
+    /// keys are kept, or under [`SortKeys::Renumber`] the keys dropped,
+    /// `nNextFreeElement` set past the last, and the table laid down packed
+    /// in a fresh allocation with the hash table's given back; under
+    /// [`SortKeys::RenumberIntegers`] only the integer keys are numbered
+    /// again, and a table left no string key is packed as a renumbered
+    /// one. Nothing here is stable of itself: php's stable order is the
+    /// caller's comparison falling back to [`SortEntry::position`],
+    /// `RETURN_STABLE_SORT`, and a caller that wants `zend_sort`'s own
+    /// order leaves it out. The
     /// hooks carry the comparison to the code it may serve, a `usort`
     /// callback, and are the heap after it. An empty table is left as it
     /// is; one element is renumbered where php renumbers it.
@@ -2603,11 +2733,11 @@ impl crate::Heap {
     pub fn array_sort<H: HeapHooks + ?Sized>(
         hooks: &mut H,
         a: Arr,
-        renumber: bool,
+        keys: SortKeys,
         compare: &mut dyn FnMut(&mut H, &SortEntry, &SortEntry) -> Ordering,
     ) -> Result<(), Fatal> {
         // `!(nNumOfElements > 1) && !(renumber && nNumOfElements > 0)`.
-        if a.len() <= 1 && (!renumber || a.is_empty()) {
+        if a.len() <= 1 && (keys == SortKeys::Keep || a.is_empty()) {
             return Ok(());
         }
         if a.is_packed() {
@@ -2633,10 +2763,15 @@ impl crate::Heap {
             })
             .collect();
         zend_sort(&mut entries, &mut |x, y| compare(hooks, x, y));
+        // php's restructure repacks a table it left no string key in.
+        let renumber = keys == SortKeys::Renumber
+            || (keys == SortKeys::RenumberIntegers
+                && entries.iter().all(|e| matches!(e.key, Key::Long(_))));
         let header = a.header();
         header.num_used.set(entries.len() as u32);
         let used = entries.len() as u32;
         let heap = hooks.heap();
+        let mut integers = 0u64;
         for (i, entry) in entries.into_iter().enumerate() {
             let (h, key) = match entry.key {
                 Key::Str(s) if renumber => {
@@ -2644,6 +2779,10 @@ impl crate::Heap {
                     (i as u64, None)
                 }
                 Key::Long(_) if renumber => (i as u64, None),
+                Key::Long(_) if keys == SortKeys::RenumberIntegers => {
+                    integers += 1;
+                    (integers - 1, None)
+                }
                 Key::Str(s) => (s.hash(), Some(s)),
                 Key::Long(n) => (n.cast_unsigned(), None),
             };
@@ -2658,6 +2797,9 @@ impl crate::Heap {
         }
         header.internal_pointer.set(0);
         if !renumber {
+            if keys == SortKeys::RenumberIntegers {
+                header.next_free.set(i64::from(used));
+            }
             a.rehash(Some(&mut hooks.heap().iterators));
             return Ok(());
         }
@@ -2716,7 +2858,9 @@ impl crate::Heap {
     /// collector is already destroying, whose type it turned to
     /// `IS_NULL` (`rc_dtor_func`'s `zend_empty_destroy`); otherwise the
     /// table taken out of the root buffer and turned to `IS_NULL`
-    /// itself, every element released through `hooks`, in order, with
+    /// itself, every element released in order, a packed list's strings
+    /// before its first other counted value in one flat pass
+    /// ([`Heap::array_destroy_flat`]) and the rest through `hooks`, with
     /// the table standing around each, every string key given up, then
     /// the iterators unregistered and the data and the header back to
     /// the heap. A cell is `zend_reference_destroy`: the typed-property
@@ -2755,33 +2899,34 @@ impl crate::Heap {
     /// released
     /// ```
     pub(crate) fn destroy(hooks: &mut dyn HeapHooks, first: Last) {
+        let heap = hooks.heap();
+        let (next, from) = match first {
+            Last::Table(a) => match heap.array_destroy_flat(a) {
+                None => return,
+                Some(at) => (None, Some(Emptying::Table { a, at, key: None })),
+            },
+            Last::Cell(_) => (Some(first), None),
+        };
         // The heap's room for the walk, taken for its length and put back
         // emptied, so a walk allocates nothing after the request's first.
-        let mut walk = std::mem::take(&mut hooks.heap().destroying);
-        Heap::destroy_into(hooks, first, &mut walk);
+        let mut walk = std::mem::take(&mut heap.destroying);
+        walk.extend(from);
+        Heap::destroy_into(hooks, next, &mut walk);
         walk.clear();
         hooks.heap().destroying = walk;
     }
 
-    /// [`Heap::destroy`]'s walk over `walk`, empty on entry and on the
-    /// way out.
-    fn destroy_into(hooks: &mut dyn HeapHooks, first: Last, walk: &mut Vec<Emptying>) {
-        let mut next = Some(first);
+    /// [`Heap::destroy`]'s walk from `next`, or from the frame `walk`
+    /// holds on entry, empty on the way out. A table reached is begun by
+    /// [`Heap::array_destroy_flat`], and taken up as a frame only where
+    /// that hands back a position.
+    fn destroy_into(hooks: &mut dyn HeapHooks, mut next: Option<Last>, walk: &mut Vec<Emptying>) {
         loop {
             match next.take() {
-                // A table the cycle collector is destroying already.
-                Some(Last::Table(a)) if a.gc().kind() == ZvalType::Null as u32 => {}
                 Some(Last::Table(a)) => {
-                    hooks
-                        .heap()
-                        .gc
-                        .remove_from_buffer(crate::collector::Node::Arr(a));
-                    a.gc().set_kind(ZvalType::Null);
-                    walk.push(Emptying::Table {
-                        a,
-                        at: 0,
-                        key: None,
-                    });
+                    if let Some(at) = hooks.heap().array_destroy_flat(a) {
+                        walk.push(Emptying::Table { a, at, key: None });
+                    }
                 }
                 Some(Last::Cell(r)) => {
                     if r.sources() != 0 {
@@ -2815,15 +2960,7 @@ impl crate::Heap {
                     let a = *a;
                     let Some((val, k)) = a.element_from(at) else {
                         walk.pop();
-                        Heap::array_free_data(hooks.heap(), a);
-                        let pinned = a.gc().pinned();
-                        if pinned {
-                            a.emptied();
-                        }
-                        // SAFETY: the header came from `array_sized`, its
-                        // last owner has given it up and its contents are
-                        // freed, so only a pin names it.
-                        unsafe { hooks.heap().give_back(a.address(), pinned) };
+                        hooks.heap().array_give_back(a);
                         continue;
                     };
                     next = Heap::release_within(hooks, val);
@@ -2874,6 +3011,87 @@ impl crate::Heap {
             }
         }
         Heap::array_free_data(hooks.heap(), a);
+    }
+
+    /// The start of `zend_array_destroy` over a table its last owner let
+    /// go of, and as much of its loop as serves no destructor: nothing for
+    /// a table the cycle collector is destroying already, whose type it
+    /// turned to `IS_NULL`; otherwise the table out of the root buffer and
+    /// turned to `IS_NULL`, then each slot of a packed list released in
+    /// place while it holds a string or no count, a string freed at its
+    /// last owner with no hooks, as `i_zval_ptr_dtor` reaches
+    /// `zend_string_destroy`. `None` where that was every element, and the
+    /// table goes back, its data and its header; otherwise the position
+    /// of the first other counted value, `0` of a hash, for
+    /// [`Heap::destroy`]'s walk to go on from. So `explode`'s list goes in
+    /// one pass, and a destructor still runs after the strings before it
+    /// are freed and before the ones after it, as php's one loop runs it.
+    ///
+    /// ```php
+    /// $b = memory_get_usage();
+    /// $a = [1, 2.5, true, null, 'interned']; $a[] = 6; $h = [3 => 1, 9 => 2];
+    /// $a = null; $h = null;
+    /// $c = [[1, 2], [3]]; $c = null;
+    /// var_dump(memory_get_usage() - $b);
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// ```
+    ///
+    /// What is held at the destructor of an object between strings, and
+    /// after the list:
+    ///
+    /// ```php
+    /// class D { function __destruct() { $GLOBALS['at'] = memory_get_usage() - $GLOBALS['b']; } }
+    /// $b = $at = 0; new D;
+    /// $b = memory_get_usage();
+    /// $a = explode(',', str_repeat('piece,', 4)); $a[] = new D; $a[] = str_repeat('t', 100);
+    /// $all = memory_get_usage() - $b;
+    /// $a = null;
+    /// $l = explode(' ', 'one two three four five six'); $l = null;
+    /// echo $all, ' ', $at, ' ', memory_get_usage() - $b, "\n";
+    /// ```
+    /// ```expect
+    /// 576 416 32
+    /// ```
+    fn array_destroy_flat(&mut self, a: Arr) -> Option<u32> {
+        if a.gc().kind() == ZvalType::Null as u32 {
+            return None;
+        }
+        self.gc.remove_from_buffer(crate::collector::Node::Arr(a));
+        a.gc().set_kind(ZvalType::Null);
+        if a.is_packed() {
+            for at in 0..a.num_used() {
+                let z = a.read_slot(at);
+                let Some(header) = z.counted() else {
+                    continue;
+                };
+                let Some(s) = z.as_str() else {
+                    return Some(at);
+                };
+                if Heap::give_up(header) == gc::Release::Last {
+                    self.free_string(s);
+                }
+            }
+        } else if !a.is_uninitialized() {
+            return Some(0);
+        }
+        self.array_give_back(a);
+        None
+    }
+
+    /// The end of `zend_array_destroy` once every element is released:
+    /// the data back to the heap, then the header, or what a pin over it
+    /// reads as an emptied table.
+    fn array_give_back(&mut self, a: Arr) {
+        Heap::array_free_data(self, a);
+        let pinned = a.gc().pinned();
+        if pinned {
+            a.emptied();
+        }
+        // SAFETY: the header came from `array_sized`, its last owner has
+        // given it up and its contents are freed, so only a pin names it.
+        unsafe { self.give_back(a.address(), pinned) };
     }
 
     /// The end of `zend_array_destroy` and `zend_hash_destroy` once
@@ -3535,6 +3753,55 @@ mod tests {
         );
     }
 
+    /// A packed list of strings, `explode`'s shape, goes in one flat
+    /// pass, the walk's room never taken up; a string another owner
+    /// holds is left to it. A list whose strings stand before a nest
+    /// hands the walk the nest's position, and everything goes with it.
+    #[test]
+    fn a_list_of_strings_goes_without_the_walk() {
+        let _alone = alone();
+        let mut nothing = Nothing::new();
+        let start = nothing.heap.memory_usage(false);
+        let kept = nothing.heap.string(b"kept").expect("the string \"kept\"");
+        let list = nothing.heap.array().expect("an array");
+        for piece in [&b"one"[..], b"two", b"three"] {
+            let s = nothing.heap.string(piece).expect("a piece");
+            assert!(matches!(
+                nothing.heap.array_append(list, Zval::string(s)),
+                Ok(true)
+            ));
+        }
+        nothing.heap.addref(Zval::string(kept));
+        assert!(matches!(
+            nothing.heap.array_append(list, Zval::string(kept)),
+            Ok(true)
+        ));
+        assert!(matches!(
+            nothing.heap.array_append(list, Zval::long(7)),
+            Ok(true)
+        ));
+        Heap::release(&mut nothing, Zval::array(list));
+        assert_eq!(nothing.heap.destroying.capacity(), 0, "no walk");
+        assert_eq!(kept.refcount(), 1, "the other owner's string stands");
+
+        let list = nothing.heap.array().expect("an array");
+        let inner = nothing.heap.array().expect("an array");
+        let nested = nothing.heap.string(b"nested").expect("a piece");
+        assert!(matches!(
+            nothing.heap.array_append(inner, Zval::string(nested)),
+            Ok(true)
+        ));
+        for z in [Zval::string(kept), Zval::array(inner), Zval::long(1)] {
+            assert!(matches!(nothing.heap.array_append(list, z), Ok(true)));
+        }
+        Heap::release(&mut nothing, Zval::array(list));
+        assert_eq!(
+            nothing.heap.memory_usage(false),
+            start,
+            "the strings before the nest, the nest and its own"
+        );
+    }
+
     /// A sort keeps the keys, compacts the holes, is stable, and leaves
     /// the internal pointer at the start.
     #[test]
@@ -3550,7 +3817,7 @@ mod tests {
         }
         assert!(Heap::array_del(&mut nothing, a, Key::Long(2)));
         a.end();
-        let sorted = Heap::array_sort(&mut nothing, a, false, &mut |_, x, y| {
+        let sorted = Heap::array_sort(&mut nothing, a, SortKeys::Keep, &mut |_, x, y| {
             x.val
                 .as_long()
                 .cmp(&y.val.as_long())
@@ -3577,7 +3844,7 @@ mod tests {
             ));
         }
         assert!(Heap::array_del(&mut nothing, a, Key::Long(1)));
-        let sorted = Heap::array_sort(&mut nothing, a, true, &mut |_, x, y| {
+        let sorted = Heap::array_sort(&mut nothing, a, SortKeys::Renumber, &mut |_, x, y| {
             x.val.as_long().cmp(&y.val.as_long())
         });
         assert!(sorted.is_ok());

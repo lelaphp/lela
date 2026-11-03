@@ -655,6 +655,27 @@ files = { "one.php" = '<?php array_keys($argv); new stdClass; /*                
 [[line.then]]
 args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=0", "-d", "opcache.jit=off", "four.php"]
 
+# A program's first line under `opcache.enable_cli` reads php's whether
+# opcache persists the program or compiles it without persisting it, as
+# it does a file written within `opcache.file_update_protection` (#3824):
+# what the CLI lays before the compile, `cli_seek_file_begin`'s `FILE *`
+# and its name, and `php_execute_script_ex`'s realpath noted in
+# `EG(included_files)`, stands below both. The program is named relative
+# to the working directory, which opcache keys with `ZCG(cwd)`, and then
+# whole. The environment is the runner's alone: a shell's `_`, the path
+# of the binary it started, is a string of `$_SERVER` and `$_ENV`, so
+# the engine started from a longer path reads that many bytes more.
+[[line]]
+name = "a-program-s-first-line-under-opcache-enable-cli-reads-php-s"
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=0", "m.php"]
+files = { "m.php" = "<?php echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n", "d.php" = "<?php class C {} function f() {} echo memory_get_usage(), \" \", memory_get_peak_usage(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=3600", "m.php"]
+[[line.then]]
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=3600", "d.php"]
+[[line.then]]
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=3600", "{dir}/m.php"]
+
 # `php_request_shutdown` sets `EG_FLAGS_IN_SHUTDOWN` before it calls the
 # shutdown functions, under `-r` as for a file, so pcre's `add_offset_pair`
 # makes an unmatched group a pair of its own there where none is cached

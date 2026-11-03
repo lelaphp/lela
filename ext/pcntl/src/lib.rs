@@ -102,47 +102,47 @@ struct State {
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
         .class::<process::QosClass>()
-        .constants(constants::declared())
-        .functions(vec![
-            process::pcntl_fork::declared(),
-            process::pcntl_waitpid::declared(),
-            process::pcntl_waitid::declared(),
-            process::pcntl_wait::declared(),
-            signals::pcntl_signal::declared(),
-            signals::pcntl_signal_get_handler::declared(),
-            signals::pcntl_signal_dispatch::declared(),
-            signals::pcntl_sigprocmask::declared(),
+        .constants(constants::DECLARED)
+        .functions(&[
+            process::pcntl_fork::DECLARED,
+            process::pcntl_waitpid::DECLARED,
+            process::pcntl_waitid::DECLARED,
+            process::pcntl_wait::DECLARED,
+            signals::pcntl_signal::DECLARED,
+            signals::pcntl_signal_get_handler::DECLARED,
+            signals::pcntl_signal_dispatch::DECLARED,
+            signals::pcntl_sigprocmask::DECLARED,
             #[cfg(target_os = "linux")]
-            signals::pcntl_sigwaitinfo::declared(),
+            signals::pcntl_sigwaitinfo::DECLARED,
             #[cfg(target_os = "linux")]
-            signals::pcntl_sigtimedwait::declared(),
-            process::pcntl_wifexited::declared(),
-            process::pcntl_wifstopped::declared(),
-            process::pcntl_wifcontinued::declared(),
-            process::pcntl_wifsignaled::declared(),
-            process::pcntl_wexitstatus::declared(),
-            process::pcntl_wtermsig::declared(),
-            process::pcntl_wstopsig::declared(),
-            process::pcntl_exec::declared(),
-            process::pcntl_alarm::declared(),
-            process::pcntl_get_last_error::declared(),
-            process::pcntl_errno::declared(),
-            process::pcntl_getpriority::declared(),
-            process::pcntl_setpriority::declared(),
-            process::pcntl_strerror::declared(),
-            signals::pcntl_async_signals::declared(),
+            signals::pcntl_sigtimedwait::DECLARED,
+            process::pcntl_wifexited::DECLARED,
+            process::pcntl_wifstopped::DECLARED,
+            process::pcntl_wifcontinued::DECLARED,
+            process::pcntl_wifsignaled::DECLARED,
+            process::pcntl_wexitstatus::DECLARED,
+            process::pcntl_wtermsig::DECLARED,
+            process::pcntl_wstopsig::DECLARED,
+            process::pcntl_exec::DECLARED,
+            process::pcntl_alarm::DECLARED,
+            process::pcntl_get_last_error::DECLARED,
+            process::pcntl_errno::DECLARED,
+            process::pcntl_getpriority::DECLARED,
+            process::pcntl_setpriority::DECLARED,
+            process::pcntl_strerror::DECLARED,
+            signals::pcntl_async_signals::DECLARED,
             #[cfg(target_os = "linux")]
-            process::pcntl_unshare::declared(),
+            process::pcntl_unshare::DECLARED,
             #[cfg(target_os = "linux")]
-            process::pcntl_getcpuaffinity::declared(),
+            process::pcntl_getcpuaffinity::DECLARED,
             #[cfg(target_os = "linux")]
-            process::pcntl_setcpuaffinity::declared(),
+            process::pcntl_setcpuaffinity::DECLARED,
             #[cfg(target_os = "linux")]
-            process::pcntl_getcpu::declared(),
+            process::pcntl_getcpu::DECLARED,
             #[cfg(target_vendor = "apple")]
-            process::pcntl_getqos_class::declared(),
+            process::pcntl_getqos_class::DECLARED,
             #[cfg(target_vendor = "apple")]
-            process::pcntl_setqos_class::declared(),
+            process::pcntl_setqos_class::DECLARED,
         ])
         .request_state::<State>()
         .engine_state(throwables::Throwables::start)

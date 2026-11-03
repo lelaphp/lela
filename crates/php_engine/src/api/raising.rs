@@ -26,11 +26,16 @@ pub use php_unit::Level;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Thrown {
     pending: Option<PhpObject>,
+    /// Whether this answers a throw the handler took, [`Cause::Taken`].
+    taken: bool,
 }
 
 impl Thrown {
     pub(crate) const fn of(pending: Option<PhpObject>) -> Thrown {
-        Thrown { pending }
+        Thrown {
+            pending,
+            taken: false,
+        }
     }
 
     /// The throwable that is pending, if one is: `None` for a fatal or
@@ -40,10 +45,12 @@ impl Thrown {
         self.pending.as_ref()
     }
 
-    /// Which of the three ways out this is: a throwable, the `exit` a
+    /// Which of the four ways out this is: a throwable, the `exit` a
     /// callback unwinds (`zend_is_unwind_exit`), which php's C code goes
-    /// on past with the unwind exit pending, or a fatal, which
-    /// `zend_bailout` leaves a native by and a `zend_catch` sees. A
+    /// on past with the unwind exit pending, a fatal, which
+    /// `zend_bailout` leaves a native by and a `zend_catch` sees, or a
+    /// throw the handler took ([`Cause::Taken`]), which nothing is
+    /// pending past. A
     /// native that cleans up after a fatal raised under it, as
     /// `php_session_decode` does in its `zend_catch`
     /// (`Z/ext/session/session.c:289-302`), matches on
@@ -55,7 +62,9 @@ impl Thrown {
     pub fn cause(&self, req: &Request) -> Cause<'_> {
         match &self.pending {
             Some(throwable) => Cause::Throwable(throwable),
-            None if req.unwind_exit() && !req.diagnostics().bailing_out() => Cause::Exit,
+            None if req.diagnostics().bailing_out() => Cause::Fatal,
+            None if req.unwind_exit() => Cause::Exit,
+            None if self.taken => Cause::Taken,
             None => Cause::Fatal,
         }
     }
@@ -70,11 +79,19 @@ impl Thrown {
     /// been raised past it and is given up. A fatal renders the throwable
     /// the slot or a stream's keeping holds as it is raised; one held
     /// apart from both is given up unrendered here, so its holder raises
-    /// the fatal with [`fatal_while_pending`]. A dump of a `DOMNode` no
-    /// constructor made is the witness, in `ext/dom`: each property's
-    /// reader fails in turn and the throwables leave as one chain.
+    /// the fatal with [`fatal_while_pending`]. A throw the handler took
+    /// ([`Cause::Taken`]) left nothing pending, so what stands past it is
+    /// the other. A dump of a `DOMNode` no constructor made is the
+    /// witness, in `ext/dom`: each property's reader fails in turn and
+    /// the throwables leave as one chain.
     #[must_use]
     pub fn chain(self, req: &mut Request, later: Thrown) -> Thrown {
+        if later.taken {
+            return self;
+        }
+        if self.taken {
+            return later;
+        }
         match (self.pending, later.pending) {
             (Some(earlier), Some(now)) => {
                 req.set_previous(now, earlier);
@@ -95,13 +112,43 @@ impl Thrown {
 }
 
 /// What a [`Thrown`] carries, [`Thrown::cause`]: the throwable pending,
-/// the unwind exit an `exit` throws, or a fatal leaving by
-/// `zend_bailout`.
+/// the unwind exit an `exit` throws, a fatal leaving by `zend_bailout`,
+/// or a throw the handler `set_exception_handler()` set took, made with
+/// no frame standing and nothing pending ([`throw_object`]), after
+/// which php's `EG(exception)` stands empty and its C goes on as though
+/// nothing were thrown (`Z/Zend/zend_exceptions.c:209-221`). A
+/// `UConverter` subclass's converters closed at the request's end are a
+/// witness: each close's failure is handed to the handler, and the
+/// close goes on to serve the other callback and the next close, with
+/// nothing chained under what it throws next.
+///
+/// ```php
+/// ini_set('intl.use_exceptions', 1);
+/// set_exception_handler(function ($e) { echo "handler: ", $e->getMessage(), ", previous ", var_export($e->getPrevious(), true), "\n"; });
+/// class C extends UConverter {
+///     function toUCallback($reason, $source, $codeUnits, &$error): string|int|array|null { echo "to $reason\n"; return -1; }
+///     function fromUCallback($reason, $source, $codePoint, &$error): string|int|array|null { echo "from $reason\n"; return -1; }
+/// }
+/// $c = new C('utf-8', 'ascii');
+/// echo "end\n";
+/// ```
+/// ```expect
+/// end
+/// to 4
+/// handler: Invalid codepoint U+ffffffffffffffff, previous NULL
+/// from 4
+/// handler: Buffer overrun 1 bytes needed, 0 available, previous NULL
+/// to 4
+/// handler: Invalid codepoint U+ffffffffffffffff, previous NULL
+/// from 4
+/// handler: Buffer overrun 1 bytes needed, 0 available, previous NULL
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Cause<'a> {
     Throwable(&'a PhpObject),
     Exit,
     Fatal,
+    Taken,
 }
 
 /// Raise a diagnostic at `level` with php's message text, its bytes as
@@ -210,9 +257,10 @@ pub fn raise_while_pending(
 /// to open stream` among what `php_stream_display_wrapper_errors` keeps
 /// quiet. Where `pending` carries the unwind exit, which stands on the
 /// request already, the step is taken as php's C code goes on past an
-/// `exit` a callback took, `zend_is_unwind_exit` in `EG(exception)`;
-/// `None`, with nothing taken, where it carries a fatal, which leaves at
-/// once. `pending` is the native's still, to hand on once the step is
+/// `exit` a callback took, `zend_is_unwind_exit` in `EG(exception)`, and
+/// where it carries a throw the handler took, [`Cause::Taken`], as php's
+/// goes on with `EG(exception)` empty; `None`, with nothing taken, where
+/// it carries a fatal, which leaves at once. `pending` is the native's still, to hand on once the step is
 /// done. `hash_update_file`, which opens and
 /// hashes its file after `zend_fetch_resource_ex` threw over its
 /// `$stream_context`, is the witness, in `ext/hash`.
@@ -247,8 +295,10 @@ pub fn while_pending<R>(
 /// what is kept stands pending ([`while_pending`]): a throwable, with
 /// what a step throws anew chained over it ([`Thrown::chain`]), or the
 /// unwind exit, which `zend_is_unwind_exit` keeps in `EG(exception)` and
-/// a throwable raised past gives itself up to. A fatal leaves at once,
-/// what was kept given up. ext/standard's `implode` is a witness: a
+/// a throwable raised past gives itself up to. A throw the handler took,
+/// [`Cause::Taken`], keeps nothing, as php's `EG(exception)` stands
+/// empty after it. A fatal leaves at once, what was kept given up.
+/// ext/standard's `implode` is a witness: a
 /// piece after one that threw is converted with no `__toString` called
 /// and its warning reaching no handler. A piece after one whose
 /// `__toString` took an `exit` is converted so too, and with no handler
@@ -323,10 +373,11 @@ impl Carrying {
             Some(kept) if kept.exception() == thrown.exception() => kept,
             Some(kept) => kept.chain(req, thrown),
         };
-        if kept.cause(req) == Cause::Fatal {
-            return Err(kept);
+        match kept.cause(req) {
+            Cause::Fatal => return Err(kept),
+            Cause::Taken => {}
+            Cause::Throwable(_) | Cause::Exit => self.kept = Some(kept),
         }
-        self.kept = Some(kept);
         Ok(())
     }
 
@@ -1515,9 +1566,72 @@ pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
 /// php chains the new one over and returns before the hook, nor where
 /// nothing executes, which php renders without it.
 ///
+/// Where nothing is pending and no frame stands, `!EG(current_execute_data)`
+/// (`Z/Zend/zend_exceptions.c:209-227`), the throw is settled at once
+/// ([`Request::thrown_without_frame`]): rendered as the uncaught fatal
+/// and left by `zend_bailout`, so nothing the native would serve after
+/// it is served, or handed to the handler `set_exception_handler()` set,
+/// after which nothing is pending, [`Cause::Taken`]. The `Thrown` names
+/// nothing then. A
+/// `ParseError` or a `CompileError` is left pending, for the compile
+/// that threw it to render. A `UConverter` subclass's callback served at
+/// the close of its converters, at the request's end, throws so where
+/// its answer cannot be appended, before what it wrote into `&$error`
+/// is given up:
+///
+/// ```php
+/// ini_set('intl.use_exceptions', 1);
+/// ini_set('zend.exception_ignore_args', 1);
+/// class D { function __destruct() { echo "dtor\n"; throw new Exception("destructed"); } }
+/// class C extends UConverter { function toUCallback($reason, $source, $codeUnits, &$error): string|int|array|null { $error = new D; return -1; } }
+/// $c = new C('utf-8', 'ascii');
+/// try { $c->convert("\x80"); } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " after ", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect exit=255
+/// dtor
+/// IntlException: UConverter::convert(): returned error 12: U_ILLEGAL_CHAR_FOUND after destructed
+///
+/// Fatal error: Uncaught IntlException: Invalid codepoint U+ffffffffffffffff in [no active file]:0
+/// Stack trace:
+/// #0 {main}
+///   thrown in [no active file] on line 0
+/// ```
+///
+/// With a handler set, each converter's close is handed to it in turn,
+/// and the native goes on:
+///
+/// ```php
+/// ini_set('intl.use_exceptions', 1);
+/// set_exception_handler(function ($e) { echo "handler: ", $e->getMessage(), "\n"; });
+/// class D { function __destruct() { echo "dtor\n"; } }
+/// class C extends UConverter { function toUCallback($reason, $source, $codeUnits, &$error): string|int|array|null { $error = new D; return -1; } }
+/// $c = new C('utf-8', 'ascii');
+/// echo "end\n";
+/// ```
+/// ```expect
+/// end
+/// handler: Invalid codepoint U+ffffffffffffffff
+/// dtor
+/// handler: Invalid codepoint U+ffffffffffffffff
+/// dtor
+/// ```
+///
 /// [`ExtensionBuilder::thrown`]: crate::api::abi::ExtensionBuilder::thrown
 pub(crate) fn throw_object(req: &mut Request, object: PhpObject) -> Thrown {
     let thrown = Thrown::of(Some(object));
+    let compiling = [ClassId::PARSE_ERROR, ClassId::COMPILE_ERROR].contains(&object.class());
+    if !req.is_pending() && !req.frames().executing() && !compiling {
+        return match req.thrown_without_frame(&thrown) {
+            Ok(undef) => {
+                req.release(undef);
+                Thrown {
+                    pending: None,
+                    taken: true,
+                }
+            }
+            Err(fatal) => fatal,
+        };
+    }
     // A bundle that set no hook pays nothing more for a throw.
     if req.shared.supplied.thrown.links().is_empty()
         || req.is_pending()
@@ -2075,9 +2189,10 @@ pub fn throwing_warnings<R>(
 
 #[cfg(test)]
 mod tests {
-    use php_unit::decl::{FunctionDecl, Parameter, Type};
+    use php_unit::decl::Type;
 
-    use crate::api::abi::{Entry, ExtensionBuilder};
+    use crate::api::__private::{Entry, NativeFunction, NativeParameter};
+    use crate::api::abi::ExtensionBuilder;
     use crate::api::request::Request;
     use crate::api::values::Value;
     use crate::engine::Engine;
@@ -2086,19 +2201,56 @@ mod tests {
     use super::{Thrown, arg_type_error, arg_value_error, throw_at};
     use crate::api::values::ClassId;
 
-    fn parameter(name: &[u8], ty: Type, variadic: bool) -> Parameter {
-        Parameter {
+    const fn parameter(
+        name: &'static [u8],
+        ty: fn() -> Option<Type>,
+        variadic: bool,
+    ) -> NativeParameter {
+        NativeParameter {
+            name,
+            ty,
+            by_ref: false,
+            prefer_ref: false,
             variadic,
-            ..php_unit::decl::parameter(name, Some(ty))
+            passed: false,
+            default: None,
+            attributes: &[],
         }
     }
 
-    fn declared(name: &[u8], parameters: Vec<Parameter>) -> FunctionDecl {
-        FunctionDecl {
+    const fn declared(
+        name: &'static [u8],
+        parameters: &'static [NativeParameter],
+        entry: Entry,
+    ) -> NativeFunction {
+        NativeFunction {
+            name,
             parameters,
-            ..php_unit::decl::native_function(name)
+            return_type: || None,
+            frameless: &[],
+            attributes: &[],
+            entry,
         }
     }
+
+    /// The natives below, declared as `#[php_function]` would lay them
+    /// down beside the core's.
+    const NATIVES: &[NativeFunction] = &[
+        declared(
+            b"str_repeat",
+            &[
+                parameter(b"string", || Some(Type::String), false),
+                parameter(b"times", || Some(Type::Int), false),
+            ],
+            str_repeat,
+        ),
+        declared(
+            b"array_merge",
+            &[parameter(b"arrays", || Some(Type::Array), true)],
+            array_merge,
+        ),
+        declared(b"refuse", &[], refuse),
+    ];
 
     /// `str_repeat(string $string, int $times)` as far as its one
     /// `ValueError` goes.
@@ -2126,26 +2278,7 @@ mod tests {
 
     fn served(source: &str) -> crate::test::Served {
         let extension = ExtensionBuilder::default()
-            .functions(vec![
-                (
-                    declared(
-                        b"str_repeat",
-                        vec![
-                            parameter(b"string", Type::String, false),
-                            parameter(b"times", Type::Int, false),
-                        ],
-                    ),
-                    str_repeat as Entry,
-                ),
-                (
-                    declared(
-                        b"array_merge",
-                        vec![parameter(b"arrays", Type::Array, true)],
-                    ),
-                    array_merge as Entry,
-                ),
-                (declared(b"refuse", Vec::new()), refuse as Entry),
-            ])
+            .functions(NATIVES)
             .build("raising");
         Engine::cli_builder()
             .extensions(&[extension])
