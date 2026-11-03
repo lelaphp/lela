@@ -2171,7 +2171,7 @@ impl<'a, H: Copy> Linker<'a, H> {
         H: PartialEq,
     {
         if child.kind == ClassKind::Interface {
-            return Some(vec![None; methods.rows().len()].into());
+            return Some(Column::default());
         }
         // A class held with a record, none where no class has the name.
         let held = |name: &[u8]| match (self.lookup)(name) {
@@ -2235,6 +2235,9 @@ impl<'a, H: Copy> Linker<'a, H> {
                 }
             }
             prototypes.push(prototype);
+        }
+        while prototypes.last() == Some(&None) {
+            prototypes.pop();
         }
         Some(prototypes.into())
     }

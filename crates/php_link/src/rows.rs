@@ -22,7 +22,8 @@ pub struct LinkedClass<H> {
     pub methods: Rows<Row<H>, Folded>,
     /// `common.prototype`'s scope for each row of `methods`, at the
     /// row's position: the class whose method the row's prototype is,
-    /// none where the link set none.
+    /// none where the link set none, and none for each row past the
+    /// column's length, so a class whose rows have none holds none.
     pub prototypes: Column<Option<H>>,
     /// `CE_CONSTANTS_TABLE` in php's order: the class's own constants, a
     /// trait's among them, then each of the parent's table it does not
