@@ -175,7 +175,7 @@ fn array_merge_recursive(
     req: &mut Request,
     arrays: Variadic<PhpArray>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    super::merge_wrapper(req, &arrays, merge_recursive)
+    super::merge_wrapper(req, arrays, merge_recursive)
 }
 
 /// `php_array_merge_recursive`: `src`'s elements into `dest`.
@@ -296,7 +296,7 @@ fn array_replace(
     array: PhpArray,
     replacements: Variadic<PhpArray>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    replace(req, array, &replacements, false)
+    replace(req, array, replacements, false)
 }
 
 /// `array_replace_recursive(array $array, array ...$replacements):
@@ -332,21 +332,21 @@ fn array_replace_recursive(
     array: PhpArray,
     replacements: Variadic<PhpArray>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    replace(req, array, &replacements, true)
+    replace(req, array, replacements, true)
 }
 
 fn replace(
     req: &mut Request,
     array: PhpArray,
-    replacements: &[PhpArray],
+    replacements: Variadic<PhpArray>,
     recursive: bool,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut dest = array.copy(req)?;
     for src in replacements {
         let replaced = if recursive {
-            replace_recursive(req, &mut dest, *src)
+            replace_recursive(req, &mut dest, src)
         } else {
-            replace_flat(req, &mut dest, *src)
+            replace_flat(req, &mut dest, src)
         };
         if let Err(thrown) = replaced {
             dest.give_up(req);

@@ -681,6 +681,18 @@ impl PartialEq for Safepoints {
 
 impl Eq for Safepoints {}
 
+/// The opcodes that never go on to the opline after them, which end a
+/// block with no fall-through in `zend_build_cfg`: a `JMP`, a `MATCH`,
+/// the returns, the throws and a `FAST_RET`.
+#[rustfmt::skip]
+const ENDS: [Opcode; 9] = [Opcode::Jmp, Opcode::Match, Opcode::Return, Opcode::ReturnByRef,
+    Opcode::GeneratorReturn, Opcode::Throw, Opcode::MatchError, Opcode::VerifyNeverType,
+    Opcode::FastRet];
+
+/// The opcodes whose `op2` is a jump table: `SWITCH_LONG`,
+/// `SWITCH_STRING` and `MATCH`.
+const SWITCHES: [Opcode; 3] = [Opcode::SwitchLong, Opcode::SwitchString, Opcode::Match];
+
 impl OpArray {
     /// Every opline's handler resolved from its opcode and the kinds of
     /// its operands, as php's `pass_two` calls `zend_vm_set_opcode_handler`
@@ -695,6 +707,53 @@ impl OpArray {
                 op.handler = handler;
             }
         }
+    }
+
+    /// The first opline that names something past the op array's tables,
+    /// as `opline <n> (<opcode>): <what>`: an operand's slot at or past
+    /// `num_cvs + num_tmps`, a `CONST`'s index at or past `literals`' length, a
+    /// jump target, a jump table's among them, or the opline after one
+    /// that goes on, at or past `oplines`. php's `pass_two` holds none of
+    /// these; the handlers' bounds compares stand behind them, and
+    /// publication holds them in a build with debug assertions, the
+    /// sensor #3274's ruling builds ([`crate::Unit::published`]).
+    pub(crate) fn out_of_range(&self) -> Option<String> {
+        let slots = self.num_cvs + self.num_tmps;
+        let (len, k) = (self.oplines.len(), self.literals.len());
+        let past = |kind, n: u32| match kind {
+            OperandKind::Unused => None,
+            OperandKind::Const => (n as usize >= k).then(|| format!("constant {n} of {k}")),
+            _ => (n >= slots).then(|| format!("slot {n} of {slots}")),
+        };
+        self.oplines.iter().enumerate().find_map(|(at, op)| {
+            let operands = [(op.op1_type, op.op1, "op1"), (op.op2_type, op.op2, "op2")];
+            let mut ops = operands
+                .into_iter()
+                .chain([(op.out_type, op.out, "result")]);
+            let fault = ops.find_map(|(kind, n, f)| Some(format!("{f} names {}", past(kind, n)?)));
+            let jump = self.jumps(op).find(|&to| to >= len);
+            let jump = jump.map(|to| format!("jumps to opline {to} of {len}"));
+            let on = at + 1 >= len && !ENDS.contains(&op.opcode);
+            let on = on.then(|| format!("goes on to opline {} of {len}", at + 1));
+            let fault = fault.or(jump).or(on)?;
+            Some(format!("opline {at} ({}): {fault}", op.opcode.name()))
+        })
+    }
+
+    /// The oplines `op` can jump to: its `JMP_ADDR` operand's and, for a
+    /// `SWITCH_*` or a `MATCH`, each of its jump table's, which a value
+    /// no opline index reads as past them all.
+    fn jumps(&self, op: &Opline) -> impl Iterator<Item = usize> {
+        let table = SWITCHES.contains(&op.opcode).then_some(op.op2 as usize);
+        let table = table.and_then(|at| self.literals.get(at)?.as_arr());
+        let to = |(_, at): (_, Zval)| at.as_long().and_then(|at| usize::try_from(at).ok());
+        let table = table.map(|t| {
+            (&t).into_iter()
+                .map(|at| to(at).unwrap_or(usize::MAX))
+                .collect::<Vec<_>>()
+        });
+        let target = op.jump_target().map(|at| at.0 as usize);
+        target.into_iter().chain(table.into_iter().flatten())
     }
 
     /// The tables shrunk to what they hold ([`crate::Unit::compact`]).
@@ -840,12 +899,104 @@ mod tests {
         }
     }
 
+    /// Publication holds every op array of a unit to its tables in a
+    /// build with debug assertions, and names the op array and the
+    /// opline of an operand past its frame: a compiler bug (#3274).
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(
+        expected = "a compiler bug: f publishes opline 0 (ZEND_ECHO): op1 names slot 2 of 2"
+    )]
+    fn an_operand_past_its_frame_is_sensed_where_the_unit_is_published() {
+        let echo = Opline {
+            opcode: Opcode::Echo,
+            op1_type: OperandKind::Cv,
+            op1: 2,
+            ..Opline::default()
+        };
+        let back = Opline {
+            opcode: Opcode::Return,
+            ..Opline::default()
+        };
+        let unit = crate::Unit {
+            functions: vec![(
+                crate::decl::native_function(b"f"),
+                OpArray {
+                    oplines: vec![echo, back],
+                    num_cvs: 1,
+                    num_tmps: 1,
+                    ..OpArray::default()
+                },
+            )],
+            ..crate::Unit::default()
+        };
+        drop(unit.published(None));
+    }
+
+    /// Each of the four ranges, held where the op array is published: a
+    /// slot, a constant's index, a jump target, a jump table's among them, and the
+    /// opline after one that goes on.
+    #[test]
+    fn an_op_array_names_the_first_opline_past_its_tables() {
+        let op = |opcode, op1_type, op1| Opline {
+            opcode,
+            op1_type,
+            op1,
+            ..Opline::default()
+        };
+        let back = op(Opcode::Return, OperandKind::Unused, 0);
+        let mut code = OpArray {
+            oplines: vec![op(Opcode::Echo, OperandKind::Tmp, 2), back],
+            literals: vec![Zval::long(7)],
+            num_cvs: 1,
+            num_tmps: 2,
+            ..OpArray::default()
+        };
+        assert_eq!(code.out_of_range(), None, "slot 2 of 3, and a return last");
+        code.num_tmps = 1;
+        let past = code.out_of_range();
+        assert_eq!(
+            past.as_deref(),
+            Some("opline 0 (ZEND_ECHO): op1 names slot 2 of 2")
+        );
+        code.oplines[0] = op(Opcode::Echo, OperandKind::Const, 1);
+        let past = code.out_of_range();
+        assert_eq!(
+            past.as_deref(),
+            Some("opline 0 (ZEND_ECHO): op1 names constant 1 of 1")
+        );
+        code.oplines[0] = op(Opcode::Jmp, OperandKind::Unused, 2);
+        let past = code.out_of_range();
+        assert_eq!(
+            past.as_deref(),
+            Some("opline 0 (ZEND_JMP): jumps to opline 2 of 2")
+        );
+        code.oplines[1] = op(Opcode::Echo, OperandKind::Const, 0);
+        code.oplines[0] = op(Opcode::Jmp, OperandKind::Unused, 1);
+        let past = code.out_of_range();
+        assert_eq!(
+            past.as_deref(),
+            Some("opline 1 (ZEND_ECHO): goes on to opline 2 of 2")
+        );
+    }
+
     /// The handlers of `oplines` as a unit of them resolves them where it
-    /// is published, none resolved before.
-    fn resolved(oplines: Vec<Opline>) -> Vec<Handler> {
+    /// is published, none resolved before: in a frame of a slot for every
+    /// operand they name, with a constant for each, and a return past
+    /// every opline they jump to.
+    fn resolved(mut oplines: Vec<Opline>) -> Vec<Handler> {
+        let written = oplines.len();
+        oplines.resize(16, Opline::default());
+        oplines.push(Opline {
+            opcode: Opcode::Return,
+            ..Opline::default()
+        });
         let unit = crate::Unit {
             main: OpArray {
                 oplines,
+                literals: vec![Zval::long(0); 8],
+                num_cvs: 8,
+                num_tmps: 8,
                 ..OpArray::default()
             },
             ..crate::Unit::default()
@@ -858,7 +1009,8 @@ mod tests {
             "the compiler leaves every opline unresolved"
         );
         let unit = unit.published(None);
-        unit.main.oplines.iter().map(|op| op.handler).collect()
+        let handlers = unit.main.oplines.iter().map(|op| op.handler);
+        handlers.take(written).collect()
     }
 
     /// The handlers publication resolves: a comparison whose line says

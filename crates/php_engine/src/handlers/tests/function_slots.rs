@@ -38,6 +38,7 @@ fn by_name(strings: &mut php_heap::Strings) -> PublishedUnit {
                     out: 0,
                     ..Opline::default()
                 },
+                back(),
             ],
             literals: vec![written, lowered, argument],
             num_tmps: 1,
@@ -128,12 +129,18 @@ fn a_call_by_name_looks_the_table_up_once_and_reads_its_slot_after() {
 }
 
 /// A unit declaring `f`, whose body is the `INIT_FCALL_BY_NAME` of
-/// [`by_name`] alone, and a main op array with a cache slot of its
-/// own, not yet shared.
+/// [`by_name`] alone and its return, and a main op array with a cache
+/// slot of its own, not yet shared.
 fn declaring_f(strings: &mut php_heap::Strings) -> Unit {
     let by_name = by_name(strings);
     let mut body = by_name.main.clone();
-    body.oplines = body.oplines.iter().take(1).copied().collect();
+    body.oplines = body
+        .oplines
+        .iter()
+        .take(1)
+        .copied()
+        .chain([back()])
+        .collect();
     let decl = php_unit::decl::native_function(b"f");
     Unit {
         main: OpArray {
@@ -254,14 +261,17 @@ fn a_namespaced_call_by_name_looks_the_table_up_twice_once() {
     let mut strings = php_heap::Strings::new();
     let unit = Unit {
         main: OpArray {
-            oplines: vec![Opline {
-                opcode: Opcode::InitNsFcallByName,
-                op2_type: OperandKind::Const,
-                op2: 0,
-                out: 8,
-                extended_value: 0,
-                ..Opline::default()
-            }],
+            oplines: vec![
+                Opline {
+                    opcode: Opcode::InitNsFcallByName,
+                    op2_type: OperandKind::Const,
+                    op2: 0,
+                    out: 8,
+                    extended_value: 0,
+                    ..Opline::default()
+                },
+                back(),
+            ],
             literals: vec![
                 interned(&mut strings, b"Foo\\StrLen"),
                 interned(&mut strings, b"foo\\strlen"),
@@ -308,13 +318,16 @@ fn a_call_by_name_nothing_declares_primes_no_slot() {
     let mut strings = php_heap::Strings::new();
     let unit = Unit {
         main: OpArray {
-            oplines: vec![Opline {
-                opcode: Opcode::InitFcallByName,
-                op2_type: OperandKind::Const,
-                op2: 0,
-                out: 0,
-                ..Opline::default()
-            }],
+            oplines: vec![
+                Opline {
+                    opcode: Opcode::InitFcallByName,
+                    op2_type: OperandKind::Const,
+                    op2: 0,
+                    out: 0,
+                    ..Opline::default()
+                },
+                back(),
+            ],
             literals: vec![
                 interned(&mut strings, b"NoPe"),
                 interned(&mut strings, b"nope"),

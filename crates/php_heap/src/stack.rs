@@ -57,7 +57,7 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering, compiler_fence};
 
 use crate::hooks::Fatal;
-use crate::{Heap, Zval, ZvalRef};
+use crate::{Heap, Zval, ZvalRef, ZvalSpan};
 
 mod frames;
 
@@ -365,6 +365,20 @@ impl<H> Frame<H> {
         self.cells_mut()
             .get_mut(slot.0 as usize)
             .map(|cell| ZvalRef::new(NonNull::from(cell)))
+    }
+
+    /// `len` slots from `from` on in place, php's
+    /// `ZEND_CALL_ARG(call, n)` with the count after it, as
+    /// `Z_PARAM_VARIADIC` reads a call's tail: none where they reach past
+    /// the frame's slots.
+    #[must_use]
+    pub fn span(&self, from: Slot, len: usize) -> Option<ZvalSpan> {
+        let from = from.0 as usize;
+        if from.checked_add(len)? > self.len {
+            return None;
+        }
+        let at = NonNull::new(self.at.as_ptr().wrapping_add(from))?;
+        Some(ZvalSpan::new(at, len))
     }
 
     /// Every slot as it stands, the CVs and then the temporaries and the

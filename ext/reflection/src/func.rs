@@ -1583,7 +1583,7 @@ impl ReflectionFunction {
     ) -> Result<Owner<Value>, Thrown> {
         let (function, _) = this_function(req, this.object())?;
         let named = args.named().to_vec();
-        let arguments = args.positional;
+        let arguments: Vec<Value> = args.positional.collect();
         invoke(req, &function, |req, callable| {
             call_named(req, callable, &arguments, &named)
         })
@@ -2607,7 +2607,7 @@ impl ReflectionMethod {
         at_least_arguments(req, 1)?;
         let this = receiver(req, &decl, scope, object)?;
         let named = args.named().to_vec();
-        let arguments = args.positional;
+        let arguments: Vec<Value> = args.positional.collect();
         invoke_method(req, class, &decl, scope, this, |req, callable| {
             call_named(req, callable, &arguments, &named)
         })

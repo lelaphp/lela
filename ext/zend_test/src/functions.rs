@@ -867,7 +867,8 @@ fn zend_object_init_with_constructor(
         );
         return Err(arg_type_error(req, 1, &text));
     };
-    Ok(instantiate(req, class, &args.positional, args.named())?.into_value())
+    let positional: Vec<Value> = args.positional.clone().collect();
+    Ok(instantiate(req, class, &positional, args.named())?.into_value())
 }
 
 /// `zend_call_method_if_exists(object $obj, string $method, mixed
@@ -895,7 +896,7 @@ fn zend_call_method_if_exists(
     pair.append(req, Owner::take(req, obj.as_value()))?;
     pair.append(req, Owner::take(req, Value::string(method)))?;
     let served = match callable_checked(req, &pair.to_value()) {
-        Ok(callable) => call(req, &callable, &args),
+        Ok(callable) => call(req, &callable, &args.collect::<Vec<_>>()),
         Err(_) => Ok(Owner::null()),
     };
     pair.give_up(req);

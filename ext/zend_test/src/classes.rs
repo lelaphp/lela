@@ -315,7 +315,7 @@ impl _ZendTestClass {
         elements: Variadic<Raw<Union<PhpString, Instance<Iterator>>>>,
     ) -> Result<Owner<Static>, Thrown> {
         let iterator = php_ext::call::lookup_class(req, b"Iterator")?;
-        for (at, element) in elements.iter().enumerate() {
+        for (at, element) in elements.clone().enumerate() {
             let held = match element.value().as_ref() {
                 ValueRef::Str(_) => true,
                 ValueRef::Object(object) => {

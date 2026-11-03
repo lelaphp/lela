@@ -356,7 +356,7 @@ fn vsprintf(
     values: PhpArray,
 ) -> Result<Owner<PhpString>, Thrown> {
     let (arguments, args) = values_of(req, values)?;
-    let formatted = formatted(req, format.as_bytes(), &arguments, None);
+    let formatted = formatted(req, format.as_bytes(), &arguments.iter().copied(), None);
     args.free(req);
     formatted
 }
@@ -401,7 +401,7 @@ fn efree(req: &mut Request, result: Owner<PhpString>) -> i64 {
 #[php_function]
 fn vprintf(req: &mut Request, format: PhpString, values: PhpArray) -> Result<i64, Thrown> {
     let (arguments, args) = values_of(req, values)?;
-    let formatted = formatted(req, format.as_bytes(), &arguments, None);
+    let formatted = formatted(req, format.as_bytes(), &arguments.iter().copied(), None);
     args.free(req);
     let formatted = formatted?;
     req.response_mut().write(formatted.as_bytes());
@@ -481,7 +481,7 @@ fn vfprintf(
     values: PhpArray,
 ) -> Result<i64, Thrown> {
     let (arguments, args) = values_of(req, values)?;
-    let formatted = formatted(req, format.as_bytes(), &arguments, None);
+    let formatted = formatted(req, format.as_bytes(), &arguments.iter().copied(), None);
     args.free(req);
     let formatted = formatted?;
     if !formatted.is_empty() {
@@ -547,6 +547,13 @@ enum Modifiers {
     Missing(usize),
 }
 
+/// The arguments a format reads, `args` and `argc`: a native's tail as
+/// it stands, or the values of `vsprintf`'s array, each read by its
+/// index without the ones before it.
+trait Arguments: ExactSizeIterator<Item = Value> + Clone {}
+
+impl<A: ExactSizeIterator<Item = Value> + Clone> Arguments for A {}
+
 /// `php_formatted_print(format, format_len, args, argc,
 /// nb_additional_parameters)`: the bytes of the format with each
 /// specifier replaced, or the `ValueError` a specifier is refused with,
@@ -558,7 +565,7 @@ enum Modifiers {
 fn formatted(
     req: &mut Request,
     format: &[u8],
-    args: &[Value],
+    args: &impl Arguments,
     additional: Option<usize>,
 ) -> Result<Owner<PhpString>, Thrown> {
     let mut out = Buffer::alloc(req)?;
@@ -578,7 +585,7 @@ fn format_into(
     req: &mut Request,
     out: &mut Buffer,
     format: &[u8],
-    args: &[Value],
+    args: &impl Arguments,
     additional: Option<usize>,
 ) -> Result<(), Thrown> {
     let mut at = 0;
@@ -616,7 +623,7 @@ fn format_into(
             Some(index) => index,
             None => next_argument(&mut currarg),
         };
-        let Some(argument) = args.get(index) else {
+        let Some(argument) = args.clone().nth(index) else {
             max_missing = max_missing.max(Some(index));
             continue;
         };
@@ -634,7 +641,7 @@ fn format_into(
                 "Missing format specifier at end of string",
             ));
         }
-        convert(req, out, &spec, conversion, argument)?;
+        convert(req, out, &spec, conversion, &argument)?;
         at += 1;
     }
     if let Some(missing) = max_missing {
@@ -675,7 +682,7 @@ fn modifiers(
     req: &mut Request,
     format: &[u8],
     at: &mut usize,
-    args: &[Value],
+    args: &impl Arguments,
     currarg: &mut usize,
 ) -> Result<Modifiers, Thrown> {
     let mut spec = Spec::reset();
@@ -703,7 +710,7 @@ fn modifiers(
             Some(index) => index,
             None => next_argument(currarg),
         };
-        let Some(argument) = args.get(index) else {
+        let Some(argument) = args.clone().nth(index) else {
             return Ok(Modifiers::Missing(index));
         };
         let Some(width) = argument.deref().as_int() else {
@@ -734,7 +741,7 @@ fn modifiers(
                 Some(index) => index,
                 None => next_argument(currarg),
             };
-            let Some(argument) = args.get(index) else {
+            let Some(argument) = args.clone().nth(index) else {
                 return Ok(Modifiers::Missing(index));
             };
             let Some(precision) = argument.deref().as_int() else {
