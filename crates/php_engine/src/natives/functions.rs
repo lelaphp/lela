@@ -732,8 +732,8 @@ fn get_extension_funcs(
     let names: Vec<Vec<u8>> =
         if name.eq_ignore_ascii_case(b"zend") || name.eq_ignore_ascii_case(b"core") {
             super::core()
-                .into_iter()
-                .map(|(decl, _)| decl.name.0.to_vec())
+                .iter()
+                .map(|native| native.name.to_vec())
                 .filter(|name| req.function_named(Bare::resolved(name)).is_some())
                 .collect()
         } else {

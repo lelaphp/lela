@@ -61,6 +61,8 @@ mod time_limit;
 mod trace_num;
 mod unit_view;
 #[cfg(debug_assertions)]
+mod variadic;
+#[cfg(debug_assertions)]
 mod walks;
 #[cfg(debug_assertions)]
 mod while_pending;

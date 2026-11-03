@@ -44,7 +44,7 @@ fn built_rows(req: &mut Request, o: PhpObject, f: Callable) -> Result<Owner<PhpS
 
 fn walks() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![built_rows::declared()])
+        .functions(&[built_rows::DECLARED])
         .build("sxe_walks")
 }
 

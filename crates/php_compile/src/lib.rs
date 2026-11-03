@@ -749,8 +749,8 @@ impl Room {
         oplines.clear();
         literals.clear();
         Room {
-            oplines: kept(oplines),
-            literals: kept(literals),
+            oplines: kept(oplines.into()),
+            literals: kept(literals.into()),
             filename: Some(std::mem::take(&mut main.filename)),
         }
     }

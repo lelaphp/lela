@@ -191,10 +191,9 @@ fn encode_through(
 /// }
 /// ```
 pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<bool, Thrown> {
-    let data = data.to_vec();
     let incomplete_only = req.state::<State>().phase == Phase::ProgressUpdate;
     if format == Format::PhpSerialize {
-        let mut reader = Unserializer::new(req, &data)?;
+        let mut reader = Unserializer::new(req, data)?;
         reader.set_incomplete_classes_only(incomplete_only);
         // The value is the var hash's until it is destroyed; the session
         // keeps an owner of its own, beside the read's outcome.
@@ -233,7 +232,7 @@ pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<b
     let Some(array) = session_array_mut(req)? else {
         return Ok(true);
     };
-    let mut reader = Unserializer::new(req, &data)?;
+    let mut reader = Unserializer::new(req, data)?;
     // `php_session_unserialize_init`.
     reader.set_incomplete_classes_only(incomplete_only);
     let mut ok = true;

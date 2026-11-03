@@ -702,7 +702,7 @@ impl SoapClient {
             let sent = crate::http::make_http_soap_request_one_way(
                 req,
                 object,
-                request.as_bytes(),
+                request,
                 location.as_bytes(),
                 action,
                 version,
@@ -717,7 +717,7 @@ impl SoapClient {
         let answered = crate::http::make_http_soap_request(
             req,
             object,
-            request.as_bytes(),
+            request,
             location.as_bytes(),
             action,
             version,

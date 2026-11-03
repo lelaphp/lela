@@ -289,16 +289,16 @@ fn object_guarded(req: &mut Request, o: Ref<PhpObject>) -> Result<Owner<PhpStrin
 
 fn walks() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            foreach_rows::declared(),
-            foreach_throws::declared(),
-            guarded_throws::declared(),
-            guarded::declared(),
-            foreach_calls::declared(),
-            foreach_takes::declared(),
-            live_reads::declared(),
-            object_rows::declared(),
-            object_guarded::declared(),
+        .functions(&[
+            foreach_rows::DECLARED,
+            foreach_throws::DECLARED,
+            guarded_throws::DECLARED,
+            guarded::DECLARED,
+            foreach_calls::DECLARED,
+            foreach_takes::DECLARED,
+            live_reads::DECLARED,
+            object_rows::DECLARED,
+            object_guarded::DECLARED,
         ])
         .build("walks")
 }

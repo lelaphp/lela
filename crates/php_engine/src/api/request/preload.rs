@@ -636,7 +636,7 @@ impl Request {
                     let Some(decl) = self.symbols().class_decl(*local) else {
                         continue;
                     };
-                    let key = decl.name.0.clone();
+                    let key = Box::from(&*decl.name.0);
                     let place = self.buckets.take();
                     let class = shared(*local);
                     classes.push((key, Named { place, class }));
@@ -653,7 +653,7 @@ impl Request {
             .into_iter()
             .filter(|user| user.member.is_none())
             .filter_map(|user| {
-                let name = user_function_decl(&user)?.name.0.clone();
+                let name = Box::<[u8]>::from(&*user_function_decl(&user)?.name.0);
                 (!name.starts_with(b"{")).then_some((name, user))
             })
             .rev()
@@ -673,6 +673,9 @@ impl Request {
         }
         self.functions.clear_own();
         self.declared.clear_own();
+        // The classes found so far are numbered as the request's own,
+        // which the preload's publication numbers again.
+        self.ce_caches = php_heap::MapTable::new();
         self.aliases.clear_own();
         self.own_classes.clear();
         self.class_natives.clear();
@@ -963,9 +966,7 @@ impl Request {
     /// may not reach is "Permission denied"), and the `require`'s fatal,
     /// at no file and no line, as php's startup raises them.
     pub(crate) fn preload_unopened(&mut self, script: &[u8]) {
-        let include_path =
-            String::from_utf8_lossy(self.ini().get(b"include_path").unwrap_or_default())
-                .into_owned();
+        let include_path = String::from_utf8_lossy(self.include_path()).into_owned();
         let path = self
             .environment()
             .cwd()

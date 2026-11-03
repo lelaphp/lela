@@ -59,6 +59,7 @@ fn shown(req: &mut Request, answered: Option<Result<Owner<Value>, Thrown>>) -> S
                     )
                 }
                 Cause::Exit => String::from("exit"),
+                Cause::Taken => String::from("taken"),
                 Cause::Fatal => String::from("fatal"),
             };
             clear(req, thrown).ok();

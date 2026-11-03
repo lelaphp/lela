@@ -37,8 +37,8 @@ mod preload_user;
 mod startup;
 
 use php_ext::abi::{
-    Admission, Extension, ExtensionBuilder, FileCache, Instance, Lookup, OrFalse, Start,
-    Validation, ZendExtension,
+    Admission, Extension, ExtensionBuilder, Instance, Lookup, OrFalse, Start, Validation,
+    ZendExtension,
 };
 use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::{atoi, to_callable};
@@ -79,11 +79,13 @@ pub(crate) enum Startup {
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005). `ZCG(accelerator_enabled)`, which
 /// `ini_set('opcache.enable', 0)` turns off for the rest of the request,
-/// beside the startup verdict it was drawn from.
+/// beside the startup verdict it was drawn from, and the directives an
+/// include reads ([`ini::Directives`]).
 #[derive(Default)]
 struct State {
     pub(crate) startup: Startup,
     pub(crate) accelerator_enabled: bool,
+    pub(crate) directives: ini::Directives,
 }
 
 /// Engine-scoped: `accel_blacklist`, loaded once from the startup ini.
@@ -120,15 +122,15 @@ impl Accelerator {
 /// ```
 pub fn extension() -> Extension {
     let builder = ExtensionBuilder::default()
-        .functions(vec![
-            opcache_reset::declared(),
-            opcache_get_status::declared(),
-            opcache_compile_file::declared(),
-            opcache_invalidate::declared(),
-            opcache_jit_blacklist::declared(),
-            opcache_get_configuration::declared(),
-            opcache_is_script_cached::declared(),
-            opcache_is_script_cached_in_file_cache::declared(),
+        .functions(&[
+            opcache_reset::DECLARED,
+            opcache_get_status::DECLARED,
+            opcache_compile_file::DECLARED,
+            opcache_invalidate::DECLARED,
+            opcache_jit_blacklist::DECLARED,
+            opcache_get_configuration::DECLARED,
+            opcache_is_script_cached::DECLARED,
+            opcache_is_script_cached_in_file_cache::DECLARED,
         ])
         .ini(ini::declared());
     let builder = ini::handlers!(builder;
@@ -175,9 +177,11 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
         let jit = req.code_mut().unit_cache().tier_setting();
         (jit.enabled, jit.on) = (false, false);
     }
+    let directives = ini::Directives::of(req, None);
     let state = req.state::<State>();
     state.startup = startup;
     state.accelerator_enabled = enabled;
+    state.directives = directives;
     Ok(())
 }
 
@@ -251,12 +255,14 @@ pub(crate) fn cli(req: &Request) -> bool {
 /// bool(false)
 /// ```
 fn admission(req: &mut Request, path: &[u8]) -> Admission {
-    let (startup, enabled) = state(req);
+    let state = req.state::<State>();
+    let set = state.directives.clone();
+    let (startup, enabled) = (state.startup, state.accelerator_enabled);
     // `persistent_compile_file` without the accelerator: php without the
     // cache, or `file_cache_compile_file` where a file cache is set, the
     // cache started and `opcache.enable` stands.
-    let started = startup == Startup::Ok && flag(req, "opcache.enable");
-    let file_cache = file_cache(req).filter(|_| enabled || started);
+    let started = startup == Startup::Ok && set.enable;
+    let file_cache = set.file_cache.filter(|_| enabled || started);
     if !enabled && file_cache.is_none() {
         return Admission::Held {
             validation: Validation::EveryHit,
@@ -268,23 +274,21 @@ fn admission(req: &mut Request, path: &[u8]) -> Admission {
     let listed = req
         .engine::<Accelerator>()
         .is_some_and(|accelerator| accelerator.blacklist.is_blacklisted(path));
-    let limit = long(req, "opcache.max_file_size");
+    let limit = set.max_file_size;
     let large = limit > 0
         && std::fs::metadata(String::from_utf8_lossy(path).as_ref())
             .is_ok_and(|meta| i64::try_from(meta.len()).unwrap_or(i64::MAX) > limit);
     if listed || large {
         return Admission::KeptOut;
     }
-    let validation = if flag(req, "opcache.validate_timestamps") {
-        let seconds = long(req, "opcache.revalidate_freq");
+    let validation = if set.validate_timestamps {
         Validation::Window {
-            seconds: u32::try_from(seconds.max(0)).unwrap_or(u32::MAX),
+            seconds: u32::try_from(set.revalidate_freq.max(0)).unwrap_or(u32::MAX),
         }
     } else {
         Validation::Never
     };
-    let protection = long(req, "opcache.file_update_protection");
-    let protection = u32::try_from(protection.max(0)).unwrap_or(u32::MAX);
+    let protection = u32::try_from(set.file_update_protection.max(0)).unwrap_or(u32::MAX);
     match file_cache {
         Some(file_cache) if !enabled => Admission::OnDisk {
             validation,
@@ -292,7 +296,7 @@ fn admission(req: &mut Request, path: &[u8]) -> Admission {
             file_cache,
         },
         file_cache => {
-            let lookup = if flag(req, "opcache.revalidate_path") {
+            let lookup = if set.revalidate_path {
                 Lookup::Resolved
             } else {
                 Lookup::AsWritten
@@ -305,19 +309,6 @@ fn admission(req: &mut Request, path: &[u8]) -> Admission {
             }
         }
     }
-}
-
-/// `opcache.file_cache`, where it names a directory, with
-/// `opcache.file_cache_read_only`.
-fn file_cache(req: &Request) -> Option<FileCache> {
-    let directory = value(req, "opcache.file_cache");
-    if directory.is_empty() {
-        return None;
-    }
-    Some(FileCache {
-        directory: std::path::PathBuf::from(String::from_utf8_lossy(directory).into_owned()),
-        read_only: flag(req, "opcache.file_cache_read_only"),
-    })
 }
 
 /// `cache_script_in_shared_memory` and `preload_script_in_shared_memory`
@@ -1220,7 +1211,7 @@ fn opcache_is_script_cached_in_file_cache(
     if !enabled && !flag(req, "opcache.file_cache_only") {
         return Ok(false);
     }
-    let Some(file_cache) = file_cache(req) else {
+    let Some(file_cache) = req.state::<State>().directives.file_cache.clone() else {
         return Ok(false);
     };
     let written = filename.as_bytes().to_vec();

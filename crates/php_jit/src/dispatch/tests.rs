@@ -243,10 +243,10 @@ fn a_request_claims_nothing_until_it_reaches_the_trace_it_submitted() {
     let claim = policy::claim(holder.clone(), &policy, Start::Loop);
     assert_eq!(policy::read(word), State::Recording);
     let state = crate::JitRequest::recorder(&policy);
-    state.submitted.set(Some(Submitted {
+    state.submitted.set(Some(Box::new(Submitted {
         word: holder,
         goes_on: GoesOn::Short,
-    }));
+    })));
     let at = |state: &crate::JitRequest, site| quieted(state, Some(site));
     assert!(at(&state, Site::Entry), "under way");
     assert!(at(&state, Site::Loop(SafepointIdx(1))), "under way");
@@ -802,9 +802,11 @@ fn a_return_roots_at_the_landing_past_the_eval_its_trace_stopped_at() {
 /// php's stack map does; the interrupt test through its own, numbered
 /// last and growing no side trace, php's `ZEND_JIT_EXIT_TO_VM`; the
 /// `+=`'s overflow guard through its own, where php holds the guards of
-/// the loop's phis (#3135), and the increment's never, since its exit
-/// lands past it, right only where it overflowed (#3720); then the loop runs
-/// compiled to its end, through php's `exit 3`, the trace starting at the
+/// the loop's phis (#3135), and the increment none, since php's
+/// `zend_may_overflow` reads `$i` below the bound the loop's `$i < $n`
+/// leaves it as the increment is compiled (#3898), as php's exit info
+/// lists `exit_5` for the interrupt test and none past the `PRE_INC`;
+/// then the loop runs compiled to its end, through php's `exit 3`, the trace starting at the
 /// loop's condition and meeting the jump's direction before the body
 /// (#3134). Each exit but the interrupt test's, taken once, grows a side
 /// trace, as php's does at its first exit under the recipe's
@@ -833,7 +835,7 @@ fn under_exit_fuzz_every_guard_fails_once_and_the_output_is_forces() {
     assert_eq!(testing::stdout(&fuzz), "45190\n");
     assert_eq!(
         exits(&fuzz),
-        [0, 1, 2, 6, 4, 3].map(|exit| format!("     TRACE 1 exit {exit} a() body.php:2"))
+        [0, 1, 2, 5, 4, 3].map(|exit| format!("     TRACE 1 exit {exit} a() body.php:2"))
     );
 }
 

@@ -858,8 +858,79 @@ pub(super) fn strtod(bytes: &[u8]) -> f64 {
 ///   string(4) "gone"
 /// }
 /// ```
+///
+/// Each table is reordered where it stands, as php restructures the
+/// table it holds (`Z/ext/standard/array.c:6302`), and the owner held
+/// since the parse is given up with `gc_check_possible_root`: the
+/// sorted table is offered to the collector and no element is touched.
+///
+/// ```php
+/// function f() { $k = []; $k['b'] = 1; $k['a'] = 2; array_multisort($k); return gc_status()['roots']; }
+/// var_dump(f());
+/// ```
+/// ```expect
+/// int(1)
+/// ```
+///
+/// A table of arrays another variable also holds is copied into the
+/// variable first and the copy reordered: the other holder keeps its
+/// order, each element is counted once more by the copy and no more,
+/// the integer keys are numbered from zero among the string keys kept,
+/// and the next append lands at the element count.
+///
+/// ```php
+/// function f() {
+///     $t = []; foreach ([3, 1, 2] as $n) { $t["k$n"] = [$n]; $t[$n * 10] = [$n]; }
+///     $u = $t; $order = [5, 4, 3, 2, 1, 0];
+///     array_multisort($order, $t);
+///     $roots = gc_status()['roots'];
+///     $t[] = "next";
+///     debug_zval_dump($t);
+///     echo json_encode($u), "\n";
+///     return $roots;
+/// }
+/// var_dump(f());
+/// ```
+/// ```expect
+/// array(7) refcount(2){
+///   [0]=>
+///   array(1) packed refcount(2){
+///     [0]=>
+///     int(2)
+///   }
+///   ["k2"]=>
+///   array(1) packed refcount(2){
+///     [0]=>
+///     int(2)
+///   }
+///   [1]=>
+///   array(1) packed refcount(2){
+///     [0]=>
+///     int(1)
+///   }
+///   ["k1"]=>
+///   array(1) packed refcount(2){
+///     [0]=>
+///     int(1)
+///   }
+///   [2]=>
+///   array(1) packed refcount(2){
+///     [0]=>
+///     int(3)
+///   }
+///   ["k3"]=>
+///   array(1) packed refcount(2){
+///     [0]=>
+///     int(3)
+///   }
+///   [6]=>
+///   string(4) "next" interned
+/// }
+/// {"k3":[3],"30":[3],"k1":[1],"10":[1],"k2":[2],"20":[2]}
+/// int(2)
+/// ```
 // php's body is one function; this one is the parse, and `multisort`
-// the sort and the rewrite.
+// the sort and the restructure.
 #[allow(clippy::too_many_lines)]
 #[php_function]
 fn array_multisort(
@@ -869,9 +940,10 @@ fn array_multisort(
 ) -> Result<True, Thrown> {
     use php_ext::raising::{arg_type_error, value_error};
     let given: Vec<Ref<Untyped<Value>>> = std::iter::once(array).chain(rest).collect();
-    // Each array with the cell it came in, and the comparison each array
-    // is sorted by, `(flags, descending)`.
-    let mut arrays: Vec<(PhpArray, Ref<Untyped<Value>>)> = Vec::new();
+    // Each array as separated in its variable, whether it came in one,
+    // and the comparison each array is sorted by, `(flags, descending)`.
+    let mut arrays: Vec<PhpArray> = Vec::new();
+    let mut written: Vec<bool> = Vec::new();
     let mut sorts: Vec<(i64, bool)> = Vec::new();
     let (mut order, mut kind) = (SORT_ASC, SORT_REGULAR);
     let (mut order_allowed, mut kind_allowed) = (false, false);
@@ -884,8 +956,9 @@ fn array_multisort(
                 order = SORT_ASC;
                 kind = SORT_REGULAR;
             }
-            let separated = argument.separated(req)?.unwrap_or(array);
-            arrays.push((separated, *argument));
+            let separated = argument.separated(req)?;
+            written.push(separated.is_some());
+            arrays.push(separated.unwrap_or(array));
             order_allowed = true;
             kind_allowed = true;
         } else if let Some(flag) = value.as_int() {
@@ -928,11 +1001,11 @@ fn array_multisort(
             return Err(arg_type_error(req, position, "be an array or a sort flag"));
         }
     }
-    let Some((first, _)) = arrays.first() else {
+    let Some(first) = arrays.first() else {
         return Ok(True);
     };
     let size = first.len();
-    if arrays.iter().any(|(array, _)| array.len() != size) {
+    if arrays.iter().any(|array| array.len() != size) {
         return Err(value_error(req, "Array sizes are inconsistent"));
     }
     if size < 1 {
@@ -941,12 +1014,13 @@ fn array_multisort(
     sorts.push((kind, order != SORT_ASC));
     // `GC_ADDREF(hashes[i])` (GH-22678): the sort holds each table while
     // it compares, so a comparison that writes a variable separates it
-    // and every element the columns name stays alive.
+    // and every element the columns name stays alive; giving each up after
+    // is `clean_up`'s `gc_check_possible_root`.
     let held: Vec<Owner<PhpArray>> = arrays
         .iter()
-        .map(|(array, _)| Owner::take(req, *array))
+        .map(|array| Owner::take(req, *array))
         .collect();
-    let sorted = multisort(req, &arrays, &sorts, size);
+    let sorted = multisort(req, &arrays, &written, &sorts, size);
     for owner in held {
         owner.give_up(req);
     }
@@ -954,12 +1028,16 @@ fn array_multisort(
 }
 
 /// `array_multisort`'s sort over the tables it holds, and each table
-/// rebuilt in the order found and written where its variable still holds
-/// it: php restructures the table it holds, so a variable the program
-/// wrote over while the sort ran keeps what the program wrote.
+/// that came in a variable restructured in the order found where it
+/// stands, held, as php's `hashes[i]` are: a variable the program wrote
+/// over while the sort ran keeps what the program wrote, and the table it
+/// let go of is the one reordered. An array passed as a value is sorted
+/// as a column and left as it is, php's copy of it in the call's slot
+/// being one no program reads.
 fn multisort(
     req: &mut Request,
-    arrays: &[(PhpArray, Ref<Untyped<Value>>)],
+    arrays: &[PhpArray],
+    written: &[bool],
     sorts: &[(i64, bool)],
     size: usize,
 ) -> Result<(), Thrown> {
@@ -970,7 +1048,7 @@ fn multisort(
     // views the arrays keep.
     let columns: Vec<Vec<(Key, Value)>> = arrays
         .iter()
-        .map(|(array, _)| walk::rows(req, *array).collect())
+        .map(|array| walk::rows(req, *array).collect())
         .collect();
     let mut rows: Vec<usize> = (0..size).collect();
     let mut pending: Option<Thrown> = None;
@@ -999,31 +1077,26 @@ fn multisort(
     if let Some(thrown) = pending {
         return Err(thrown);
     }
-    let count = i64::try_from(size).unwrap_or(i64::MAX);
-    for ((array, cell), column) in arrays.iter().zip(&columns) {
-        let holds = cell.reference().is_none_or(|reference| {
-            reference
-                .get()
-                .as_array()
-                .is_some_and(|now| now.is_same(*array))
-        });
-        if !holds {
+    // The restructure: each table's buckets laid in the order found, a key
+    // naming one bucket of its table, and a table passed twice laid once,
+    // as php's second pass lays it the same.
+    for (index, (array, column)) in arrays.iter().zip(&columns).enumerate() {
+        if !written[index]
+            || arrays[..index]
+                .iter()
+                .any(|earlier| earlier.is_same(*array))
+        {
             continue;
         }
-        let mut rebuilt = PhpArray::new(req)?;
-        for row in &rows {
-            let (key, value) = &column[*row];
-            let value = Owner::take(req, *value);
-            match key {
-                Key::Str(_) => {
-                    let key = Owner::take(req, key.clone());
-                    rebuilt.set(req, key, value)?;
-                }
-                Key::Int(_) => rebuilt.append(req, value)?,
-            }
-        }
-        rebuilt.set_next_free(req, count)?;
-        cell.set(req, Untyped(rebuilt.into_value()))?;
+        let order: std::collections::HashMap<&Key, usize> = rows
+            .iter()
+            .enumerate()
+            .map(|(sorted, row)| (&column[*row].0, sorted))
+            .collect();
+        let mut table = *array;
+        table.sort_by(req, SortAlgorithm::Multisort, true, |_, (a, _), (b, _)| {
+            Ok(order.get(a).cmp(&order.get(b)))
+        })?;
     }
     Ok(())
 }

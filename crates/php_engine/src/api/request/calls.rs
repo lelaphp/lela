@@ -51,6 +51,14 @@ pub(super) struct Calls {
     /// `None` records nothing, and is what a request holds unless its
     /// engine or its test asked (#2168).
     trace: Option<Vec<crate::trace::Entered>>,
+    /// Whether `trace` records, the byte every native's entry tests,
+    /// where the `Option`'s own test is a word compared with a constant.
+    tracing: bool,
+    /// php's `str_tmp`: what a coercion made for a frameless call's
+    /// argument, which php's `Z_FLF_PARAM_STR` never writes back into the
+    /// operand, kept until the entry returns, as `Z_FLF_PARAM_FREE_STR`
+    /// frees it at the body's end ([`Request::serve_frameless`]).
+    coerced: Vec<Value>,
 }
 
 /// What a call carries beyond its function and arguments, never two of
@@ -608,7 +616,7 @@ impl Request {
             exec::Header::call(function, u32::try_from(arguments.len()).unwrap_or(u32::MAX));
         header.set_receiver(receiver);
         header.set_called_scope(called_scope);
-        header.closure = closure;
+        header.set_closure(closure);
         header.info.set_serving();
         let call = match self.push_call(header) {
             Ok(call) => call,
@@ -1700,13 +1708,33 @@ impl Request {
         let outer = self
             .function_origin(function)
             .map(|extension| self.heap.set_origin(extension.origin()));
-        // The entry's owner is the handler layer's from here: the frame's
-        // return slot holds the count.
-        let served = entry(self).map(Owner::hand_on);
+        let served = entry(self);
         #[cfg(debug_assertions)]
         if let Some(outer) = outer {
             self.heap.set_origin(outer);
         }
+        // An observer's end and a throwable a stream kept are out of line,
+        // so the path every call takes is what the entry answered handed
+        // on, with no take of `stream_thrown` stored back.
+        if begun.is_some() || self.stream_thrown.is_some() {
+            return self.served_aside(begun, served, on_throw);
+        }
+        // The entry's owner is the handler layer's from here: the frame's
+        // return slot holds the count.
+        served.map(Owner::hand_on)
+    }
+
+    /// [`Request::serve_entry`] past the entry where an observer ended
+    /// the call or a stream kept a throwable while it ran.
+    #[cold]
+    #[inline(never)]
+    fn served_aside(
+        &mut self,
+        begun: Option<crate::observer::NativeCall>,
+        served: Result<Owner<Value>, Thrown>,
+        on_throw: OnThrow,
+    ) -> Result<Value, Thrown> {
+        let served = served.map(Owner::hand_on);
         let Some(deferred) = self.stream_thrown.take() else {
             crate::observer::native_returned(self, begun, &served, None, on_throw);
             return served;
@@ -1755,7 +1783,7 @@ impl Request {
     /// none for a closure's or a trampoline's entry that no extension
     /// declares, which allocates as its caller.
     #[cfg(debug_assertions)]
-    fn function_origin(&self, function: Function) -> Option<ExtensionId> {
+    pub(super) fn function_origin(&self, function: Function) -> Option<ExtensionId> {
         let intercepted = usize::try_from(function.0)
             .ok()
             .and_then(|at| self.shared.intercepted_by.get(at).copied().flatten());
@@ -1766,6 +1794,7 @@ impl Request {
     /// witness runner (harness §4.5 condition 2, revision 58).
     pub(crate) fn trace_natives(&mut self) {
         self.calls.trace = Some(Vec::new());
+        self.calls.tracing = true;
     }
 
     /// One native entered, where the request records them; what the
@@ -1787,12 +1816,37 @@ impl Request {
     /// ([`Request::trace_natives`]).
     #[inline]
     pub(crate) fn tracing_natives(&self) -> bool {
-        self.calls.trace.is_some()
+        self.calls.tracing
+    }
+
+    /// How many coercions a frameless call has kept so far, the mark the
+    /// one about to be served gives back to ([`Request::release_coerced`]).
+    #[inline(always)] // the frameless handler's hot path
+    pub(super) fn calls_coerced(&self) -> usize {
+        self.calls.coerced.len()
+    }
+
+    /// What a coercion made for a frameless call's argument kept to its
+    /// end ([`Request::replace_argument`]).
+    pub(super) fn keep_coerced(&mut self, value: Value) {
+        self.calls.coerced.push(value);
+    }
+
+    /// The coercions kept past `made` given up, as the frameless entry
+    /// that made them returns.
+    #[inline(always)] // the frameless handler's hot path, a length's test
+    pub(super) fn release_coerced(&mut self, made: usize) {
+        while self.calls.coerced.len() > made {
+            if let Some(value) = self.calls.coerced.pop() {
+                self.release_nogc(value);
+            }
+        }
     }
 
     /// The natives recorded, given up at the request's end; none where
     /// nothing asked for them.
     pub(crate) fn take_trace(&mut self) -> Vec<crate::trace::Entered> {
+        self.calls.tracing = false;
         self.calls.trace.take().unwrap_or_default()
     }
 

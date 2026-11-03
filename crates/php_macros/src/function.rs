@@ -151,7 +151,10 @@ pub(crate) fn unself(ty: &Type, class: Option<&Ident>) -> Tokens {
     class.map_or_else(|| quote!(#ty), |class| walk(quote!(#ty), class))
 }
 
-/// The parameters' declarations, `vec![..]` of `Parameter`s.
+/// The parameters' static entries, `&[..]` of `NativeParameter`s: each
+/// one's facts read off its Rust type's `FromArgument` consts and its
+/// declared type as that type's `declared`, shared by every native that
+/// names the type.
 pub(crate) fn declared_parameters(params: &[Param]) -> syn::Result<Tokens> {
     let root = root();
     let mut each = Vec::new();
@@ -159,33 +162,28 @@ pub(crate) fn declared_parameters(params: &[Param]) -> syn::Result<Tokens> {
         let name = bytes(&php_name(&param.ident));
         let ty = &param.ty;
         let default = param.default.as_ref().map_or_else(
-            || {
-                quote! {
-                    if <#ty as #root::abi::FromArgument>::PASSED {
-                        #root::decl::ParameterDefault::Unshown
-                    } else {
-                        #root::decl::ParameterDefault::None
-                    }
-                }
-            },
+            || quote!(None),
             |default| {
                 let expr = &default.expr;
-                quote!(#root::decl::ParameterDefault::Expr(#expr))
+                quote!(Some(|| #expr))
             },
         );
         let prefer_ref = param.keys.has("prefer_ref");
-        let attributes = expr::attributes(&param.keys)?;
-        each.push(quote! {{
-            let mut parameter = #root::__private::parameter(#name, <#ty as #root::abi::FromArgument>::declared());
-            parameter.by_ref = <#ty as #root::abi::FromArgument>::BY_REF;
-            parameter.prefer_ref = #prefer_ref;
-            parameter.variadic = <#ty as #root::abi::FromArgument>::VARIADIC;
-            parameter.default = #default;
-            parameter.attributes = vec![#(#attributes),*];
-            parameter
-        }});
+        let attributes = expr::built(&expr::attributes(&param.keys)?);
+        each.push(quote! {
+            #root::__private::NativeParameter {
+                name: #name,
+                ty: <#ty as #root::abi::FromArgument>::declared,
+                by_ref: <#ty as #root::abi::FromArgument>::BY_REF,
+                prefer_ref: #prefer_ref,
+                variadic: <#ty as #root::abi::FromArgument>::VARIADIC,
+                passed: <#ty as #root::abi::FromArgument>::PASSED,
+                default: #default,
+                attributes: #attributes,
+            }
+        });
     }
-    Ok(quote!(vec![#(#each),*]))
+    Ok(quote!(&[#(#each),*]))
 }
 
 /// The `const` assertions over a signature's types, each evaluated where
@@ -233,19 +231,7 @@ pub(crate) fn prologue(
     site: (Option<&Ident>, &Ident),
 ) -> Tokens {
     let root = root();
-    let (owner, name) = site;
-    let owner = owner.map_or_else(
-        || quote!(None),
-        |owner| {
-            let owner = owner.unraw().to_string();
-            quote!(Some(#owner))
-        },
-    );
-    let name = name.unraw().to_string();
-    let entered = quote! {
-        #root::__private::entered(__request, ::core::env!("CARGO_CRATE_NAME"), #owner, #name);
-    };
-    let before = reads.before.as_ref().map(|path| quote!(#path(__request);));
+    let entered = entered(reads, site);
     let total = params.len();
     let arguments = if reads.manual {
         quote! {
@@ -291,22 +277,130 @@ pub(crate) fn prologue(
         let ident = &param.ident;
         let ty = &param.ty;
         let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
-        let absent = param.default.as_ref().map_or_else(
-            || quote!(#root::abi::Absent::Value(#root::values::Value::null())),
-            |default| default.absent.clone(),
-        );
-        quote! {
-            let #ident: #ty = match <#ty as #root::abi::FromArgument>::hold(__request, __arguments[#at], #position)? {
-                Some(held) => held,
-                None => <#ty as #root::abi::FromArgument>::from_default(__request, #absent, #scope, #position)?,
-            };
-        }
+        let held = held(param, &quote!(__arguments[#at]), scope, position);
+        quote!(let #ident: #ty = #held;)
     });
     quote! {
         #entered
-        #before
         #arguments
         #(#holds)*
+    }
+}
+
+/// One argument held to its parameter's type at `position`, `given` as
+/// the call passed it, its default laid down where the call gave none.
+fn held(param: &Param, given: &Tokens, scope: &Tokens, position: u32) -> Tokens {
+    let (root, ty) = (root(), &param.ty);
+    let absent = param.default.as_ref().map_or_else(
+        || quote!(#root::abi::Absent::Value(#root::values::Value::null())),
+        |default| default.absent.clone(),
+    );
+    let absent = quote!(<#ty as #root::abi::FromArgument>::from_default(__request, #absent, #scope, #position)?);
+    if given.is_empty() {
+        return absent;
+    }
+    quote! {
+        match <#ty as #root::abi::FromArgument>::hold(__request, #given, #position)? {
+            Some(held) => held,
+            None => #absent,
+        }
+    }
+}
+
+/// One arity of `frameless(..)`: `n`, or `n = path` naming the function
+/// that is php's `ZEND_FRAMELESS_FUNCTION` where it answers otherwise
+/// than the framed body, called with the native's own parameters.
+struct Arity {
+    n: usize,
+    path: Option<syn::Path>,
+}
+
+fn arities(keys: &Keys) -> syn::Result<Vec<Arity>> {
+    let Some(tokens) = keys.list("frameless") else {
+        return Ok(Vec::new());
+    };
+    let arity = |input: syn::parse::ParseStream| -> syn::Result<Arity> {
+        let n: syn::LitInt = input.parse()?;
+        let path = match input.parse::<Option<syn::Token![=]>>()? {
+            Some(_) => Some(input.parse()?),
+            None => None,
+        };
+        match n.base10_parse()? {
+            n @ 0..=3 => Ok(Arity { n, path }),
+            _ => Err(error(
+                n.span(),
+                "a frameless arity is 0 to 3, as php's ZEND_FRAMELESS_ICALL_n",
+            )),
+        }
+    };
+    let list = |input: syn::parse::ParseStream| {
+        syn::punctuated::Punctuated::<Arity, syn::Token![,]>::parse_terminated_with(input, arity)
+    };
+    Ok(list.parse2(tokens.clone())?.into_iter().collect())
+}
+
+/// A frameless arity's entry, php's `zflf_*` beside its `zif_*`
+/// (design §7.1): the native's own parameters held off the arity's
+/// operands by position, no call record read and no count checked, a
+/// variadic tail of the operands past its place held where they stand
+/// (`FromArgument::tail`), and every parameter past the arity its
+/// default; then the body, or the arity's own path.
+fn frameless_entry(
+    signature: &Signature,
+    ident: &Ident,
+    arity: &Arity,
+    entered: &Tokens,
+) -> (Tokens, Tokens) {
+    let (root, n) = (root(), arity.n);
+    let last = signature.params.len().saturating_sub(1);
+    let holds = signature.params.iter().enumerate().map(|(at, param)| {
+        let (name, ty) = (&param.ident, &param.ty);
+        let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
+        let given = if at < n { quote!(__operands[#at]) } else { Tokens::new() };
+        let mut held = held(param, &given, &quote!(None), position);
+        if at == last {
+            let from = at.min(n);
+            held = quote! {
+                if <#ty as #root::abi::FromArgument>::VARIADIC {
+                    <#ty as #root::abi::FromArgument>::tail(__request, &__operands[#from..], #position)?
+                } else { #held }
+            };
+        }
+        quote!(let #name: #ty = #held;)
+    });
+    let callee = arity.path.clone().unwrap_or_else(|| ident.clone().into());
+    let request = signature.request.then(|| quote!(__request,));
+    let arguments = signature.params.iter().map(|param| &param.ident);
+    let entry = quote::format_ident!("frameless_{}", n);
+    let variant = quote::format_ident!("{}", ["Zero", "One", "Two", "Three"][n]);
+    let function = quote! {
+        fn #entry(__request: &mut #root::request::Request, __operands: &[#root::values::Value; #n]) -> Result<#root::values::Owner<#root::values::Value>, #root::raising::Thrown> {
+            #entered
+            #(#holds)*
+            #root::abi::IntoReturn::into_return(super::#callee(#request #(#arguments),*), __request)
+        }
+    };
+    (
+        quote!(#root::__private::Frameless::#variant(#entry)),
+        function,
+    )
+}
+
+/// The native recorded as entered, then what `before_args` names.
+fn entered(reads: &Reads, (owner, name): (Option<&Ident>, &Ident)) -> Tokens {
+    let root = root();
+    let before = reads.before.as_ref().map(|path| quote!(#path(__request);));
+    let owner = owner.map_or_else(
+        || quote!(None),
+        |owner| {
+            let owner = owner.unraw().to_string();
+            quote!(Some(#owner))
+        },
+    );
+    let name = name.unraw().to_string();
+    quote! {
+        #root::__private::entered(__request, ::core::env!("CARGO_CRATE_NAME"), #owner, #name);
+        #before
     }
 }
 
@@ -370,25 +464,21 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
     let output = &signature.output;
     let arguments: Vec<&Ident> = signature.params.iter().map(|param| &param.ident).collect();
     let request = signature.request.then(|| quote!(__request,));
-    let frameless: Vec<u32> = match keys.list("frameless") {
-        Some(tokens) => {
-            syn::punctuated::Punctuated::<syn::LitInt, syn::Token![,]>::parse_terminated
-                .parse2(tokens.clone())?
-                .iter()
-                .map(syn::LitInt::base10_parse)
-                .collect::<syn::Result<_>>()?
-        }
-        None => Vec::new(),
-    };
+    let entered = entered(&reads, (None, &ident));
+    let (frameless, frameless_entries): (Vec<Tokens>, Vec<Tokens>) = arities(&keys)?
+        .iter()
+        .map(|arity| frameless_entry(&signature, &ident, arity, &entered))
+        .unzip();
     let attributes = expr::attributes(&keys)?;
     let cfg = cfgs(&function.attrs);
     let checks: Vec<Tokens> = checks(&signature, None)
         .into_iter()
         .map(|check| quote!(#(#cfg)* #check))
         .collect();
+    let attributes = expr::built(&attributes);
     // php registers an alias as a `ZEND_RAW_FENTRY` with no frameless
     // infos (`join`, `strchr`), so the native's arities are its own name's.
-    let module = |module: &Ident, php: &str, frameless: &[u32]| {
+    let module = |module: &Ident, php: &str, (frameless, entries): (&[Tokens], &[Tokens])| {
         let php = bytes(php);
         quote! {
             #(#cfg)*
@@ -396,29 +486,32 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
             pub(crate) mod #module {
                 #[allow(unused_imports)]
                 use super::*;
-                /// The declaration and its entry, what
-                /// `ExtensionBuilder::functions` takes.
-                pub(crate) fn declared() -> (#root::decl::FunctionDecl, #root::__private::Entry) {
-                    let mut declaration = #root::__private::native_function(#php);
-                    declaration.parameters = #parameters;
-                    declaration.return_type = <#output as #root::abi::IntoReturn>::declared();
-                    declaration.frameless = vec![#(#frameless),*];
-                    declaration.attributes = vec![#(#attributes),*];
-                    (declaration, entry as #root::__private::Entry)
-                }
+                /// The static entry, what `ExtensionBuilder::functions`
+                /// takes.
+                pub(crate) const DECLARED: #root::__private::NativeFunction =
+                    #root::__private::NativeFunction {
+                        name: #php,
+                        parameters: #parameters,
+                        return_type: <#output as #root::abi::IntoReturn>::declared,
+                        frameless: &[#(#frameless),*],
+                        attributes: #attributes,
+                        entry,
+                    };
                 fn entry(__request: &mut #root::request::Request) -> Result<#root::values::Owner<#root::values::Value>, #root::raising::Thrown> {
                     #prologue
                     #root::abi::IntoReturn::into_return(super::#ident(#request #(#arguments),*), __request)
                 }
+                #(#entries)*
             }
         }
     };
-    let mut modules = vec![module(&ident, &expr::qualified(&keys, &ident)?, &frameless)];
+    let own = (&frameless[..], &frameless_entries[..]);
+    let mut modules = vec![module(&ident, &expr::qualified(&keys, &ident)?, own)];
     if let Some(tokens) = keys.list("aliases") {
         let aliases = syn::punctuated::Punctuated::<Ident, syn::Token![,]>::parse_terminated
             .parse2(tokens.clone())?;
         for alias in aliases {
-            modules.push(module(&alias, &expr::qualified(&keys, &alias)?, &[]));
+            modules.push(module(&alias, &expr::qualified(&keys, &alias)?, (&[], &[])));
         }
     }
     Ok(quote! {
@@ -487,6 +580,13 @@ mod tests {
                     fn f() {}
                 ),
                 "php_macros: `arity` is `arity = manual`",
+            ),
+            (
+                quote!(frameless(4)),
+                quote!(
+                    fn f() {}
+                ),
+                "php_macros: a frameless arity is 0 to 3, as php's ZEND_FRAMELESS_ICALL_n",
             ),
             (
                 quote!(tentative),

@@ -73,10 +73,10 @@ impl ProcessTitle {
 /// `builder` with the CLI's `additional_functions`.
 #[must_use]
 pub(crate) fn cli(builder: EngineBuilder) -> EngineBuilder {
-    builder.additional_functions(vec![
-        dl::declared(),
-        cli_set_process_title::declared(),
-        cli_get_process_title::declared(),
+    builder.additional_functions(&[
+        dl::DECLARED,
+        cli_set_process_title::DECLARED,
+        cli_get_process_title::DECLARED,
     ])
 }
 
@@ -86,12 +86,12 @@ pub(crate) fn cli(builder: EngineBuilder) -> EngineBuilder {
 pub(crate) fn server(builder: EngineBuilder) -> EngineBuilder {
     builder
         .additional_extension(server_extension())
-        .additional_functions(vec![
-            cli_set_process_title::declared(),
-            cli_get_process_title::declared(),
-            apache_request_headers::declared(),
-            apache_response_headers::declared(),
-            getallheaders::declared(),
+        .additional_functions(&[
+            cli_set_process_title::DECLARED,
+            cli_get_process_title::DECLARED,
+            apache_request_headers::DECLARED,
+            apache_response_headers::DECLARED,
+            getallheaders::DECLARED,
         ])
 }
 

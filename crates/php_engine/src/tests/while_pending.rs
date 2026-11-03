@@ -5,14 +5,16 @@
 //! would serve a `__toString` serves nothing and answers the pending
 //! throwable itself; and a typed property's write refused while it is
 //! pending raises nothing over it (`zend_verify_property_type_error`)
-//! and answers it the same way.
+//! and answers it the same way. A throw the handler `set_exception_handler()`
+//! set took with no frame standing leaves nothing pending, and the face goes on
+//! past it as php's C goes on with `EG(exception)` empty (#3906).
 
 use crate::api::values::ClassId;
 use php_macros::php_function;
 
 use crate::api::abi::{Extension, ExtensionBuilder};
 use crate::api::coerce::to_string;
-use crate::api::raising::{Thrown, clear, throw, while_pending};
+use crate::api::raising::{Carrying, Cause, Level, Thrown, clear, raise, throw, while_pending};
 use crate::api::request::Request;
 use crate::api::values::{Owner, PhpObject, PhpString, PropertyScope, Value};
 use crate::engine::{Engine, LeakSensor};
@@ -66,10 +68,7 @@ fn pending_write(req: &mut Request, o: PhpObject) -> Result<Owner<PhpString>, Th
 
 fn pending() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            pending_conversion::declared(),
-            pending_write::declared(),
-        ])
+        .functions(&[pending_conversion::DECLARED, pending_write::DECLARED])
         .build("while_pending")
 }
 
@@ -112,5 +111,58 @@ fn a_refused_write_inside_the_step_answers_the_pending_throwable() {
     );
     let stdout = served.stdout_text();
     assert_eq!(stdout, "caught first unset\n");
+    assert_eq!(served.exit_code, 0, "{stdout}");
+}
+
+/// A request-end function, served with no frame standing: each of
+/// `first`, `second` and `third` is handed to the program's handler as
+/// it is thrown, and the native goes on past each as php's C goes on
+/// with `EG(exception)` empty: [`while_pending`] serves its step,
+/// [`Carrying`] keeps nothing, and [`Thrown::chain`] answers what stood
+/// before the throw the handler took.
+fn taken_past(req: &mut Request) {
+    let first = throw(req, ClassId::EXCEPTION, "first");
+    let taken = first.cause(req) == Cause::Taken;
+    while_pending(req, &first, |req| {
+        raise(req, Level::Warning, &format!("stepped, taken {taken}"));
+    });
+    let mut carrying = Carrying::default();
+    let served = carrying.serve(req, |req| {
+        Err::<(), _>(throw(req, ClassId::EXCEPTION, "second"))
+    });
+    let kept = carrying.take().is_some();
+    raise(
+        req,
+        Level::Warning,
+        &format!("served {}, kept {kept}", served.is_ok()),
+    );
+    let third = throw(req, ClassId::EXCEPTION, "third");
+    let chained = first.chain(req, third).cause(req) == Cause::Taken;
+    raise(req, Level::Warning, &format!("chained taken {chained}"));
+}
+
+/// php serves `RSHUTDOWN` with `EG(current_execute_data)` empty, so
+/// `zend_throw_exception_internal` hands each throw to the handler
+/// `set_exception_handler()` set and returns with nothing pending
+/// (`Z/Zend/zend_exceptions.c:209-221`): every step after it is served.
+#[test]
+fn a_throw_the_handler_took_with_no_frame_standing_is_gone_on_past() {
+    let engine = Engine::cli_builder()
+        .extensions(&[ExtensionBuilder::default()
+            .rshutdown(taken_past)
+            .build("taken_past")])
+        .sense_leaks(LeakSensor::Armed)
+        .build();
+    let served = engine.serve_capture(
+        "<?php set_exception_handler(function ($e) { echo 'handler: ', $e->getMessage(), \"\\n\"; }); echo \"end\\n\";",
+        Capture::default(),
+    );
+    let stdout = served.stdout_text();
+    assert_eq!(
+        stdout,
+        "end\nhandler: first\n\nWarning: stepped, taken true in Unknown on line 0\n\
+         handler: second\n\nWarning: served true, kept false in Unknown on line 0\n\
+         handler: third\n\nWarning: chained taken true in Unknown on line 0\n"
+    );
     assert_eq!(served.exit_code, 0, "{stdout}");
 }

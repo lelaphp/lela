@@ -193,12 +193,13 @@ impl<T: Copy> Target<'_, T> {
 /// each with ICU's status to read and set.
 pub(crate) trait Callbacks {
     /// The source to Unicode: what is left of the source, the code units
-    /// in error and the room for their substitute.
+    /// in error and the room for their substitute; `None` where ICU hands
+    /// a null pointer in place of either, as it does at a reset or a close.
     fn decoding(
         &mut self,
         reason: Reason,
-        source: &[u8],
-        units: &[u8],
+        source: Option<&[u8]>,
+        units: Option<&[u8]>,
         status: &mut Code,
         target: &mut Target<'_, u16>,
     );
@@ -220,7 +221,7 @@ pub(crate) trait Callbacks {
     /// status, where the callbacks are not ICU's defaults.
     fn told(&mut self, reason: Reason) {
         let (mut to_u, mut from_u) = (Code::ZERO, Code::ZERO);
-        self.decoding(reason, &[], &[], &mut to_u, &mut Target::none());
+        self.decoding(reason, None, None, &mut to_u, &mut Target::none());
         self.encoding(reason, &[], 0, &mut from_u, &mut Target::none());
     }
 }
@@ -285,9 +286,11 @@ unsafe extern "C" fn to_unicode(
     let status = unsafe { &mut *status };
     // SAFETY: what is left of the source, ICU's.
     let source = unsafe { between(args.source.cast::<u8>(), args.source_limit.cast()) };
+    let source = (!args.source.is_null()).then_some(source);
     let len = usize::try_from(len).unwrap_or(0);
     // SAFETY: the code units in error, len bytes ICU holds.
-    let units = unsafe { between(units.cast::<u8>(), units.cast::<u8>().wrapping_add(len)) };
+    let in_error = unsafe { between(units.cast::<u8>(), units.cast::<u8>().wrapping_add(len)) };
+    let units = (!units.is_null()).then_some(in_error);
     // SAFETY: the target's room, ICU's until the callback returns.
     let room = unsafe { room(args.target, args.target_limit) };
     let mut target = Target { room, at: 0 };

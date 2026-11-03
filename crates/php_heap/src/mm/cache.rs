@@ -30,7 +30,7 @@
 use std::ptr::NonNull;
 use std::sync::Mutex;
 
-use super::{CHUNK_SIZE, Chunk, chunk_free};
+use super::{Chunk, chunk_free};
 
 /// The heaps the engine keeps between requests, which every heap made
 /// with [`crate::Heap::new_in`] starts from and is kept in at its end,
@@ -85,9 +85,9 @@ impl Drop for ChunkCache {
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for heap in kept.drain(..) {
-            chunk_free(heap.main, CHUNK_SIZE);
+            chunk_free(heap.main);
             for chunk in heap.cached {
-                chunk_free(chunk, CHUNK_SIZE);
+                chunk_free(chunk);
             }
         }
     }

@@ -32,7 +32,9 @@ use php_ext::raising::{
     Carrying, Level, Thrown, arg_value_error, argument_error, docref, type_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{Charset, Key, Layout, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{
+    Charset, FreshString, Key, Layout, Owner, PhpArray, PhpString, Sizing, Value,
+};
 use php_ext_random::Rng;
 
 use crate::ffi::locale::{self as c, Class};
@@ -1257,6 +1259,18 @@ fn bin2hex(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thr
 /// bool(false)
 /// bool(false)
 /// ```
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = hex2bin(""); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $v1 = hex2bin("616263"); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 32
+/// 32
+/// ```
 #[php_function]
 fn hex2bin(req: &mut Request, string: PhpString) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let input = string.as_bytes();
@@ -1269,19 +1283,27 @@ fn hex2bin(req: &mut Request, string: PhpString) -> Result<OrFalse<Owner<PhpStri
         return Ok(OrFalse::False);
     }
     let digit = |c: u8| (c as char).to_digit(16).and_then(|d| u8::try_from(d).ok());
-    let mut out = Vec::with_capacity(input.len() / 2);
-    for pair in input.chunks_exact(2) {
+    // `php_hex2bin`: `zend_string_alloc(oldlen >> 1, 0)`, written pair by
+    // pair, and `zend_string_efree` at the first byte that is no digit.
+    let mut out = FreshString::new(req, input.len() / 2)?;
+    let mut written = 0;
+    for (pair, to) in input.chunks_exact(2).zip(out.bytes_mut()) {
         let (Some(high), Some(low)) = (digit(pair[0]), digit(pair[1])) else {
-            docref(
-                req,
-                Level::Warning,
-                "Input string must be hexadecimal string",
-            );
-            return Ok(OrFalse::False);
+            break;
         };
-        out.push((high << 4) | low);
+        *to = (high << 4) | low;
+        written += 1;
     }
-    PhpString::new(req, &out).map(OrFalse::Value)
+    if written < out.len() {
+        out.free(req);
+        docref(
+            req,
+            Level::Warning,
+            "Input string must be hexadecimal string",
+        );
+        return Ok(OrFalse::False);
+    }
+    Ok(OrFalse::Value(out.finish()))
 }
 
 /// `strspn(string $string, string $characters, int $offset = 0, ?int
@@ -1530,6 +1552,18 @@ fn ltrim(
 ///
 /// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate 4294918144 bytes) in %s on line 3
 /// ```
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = wordwrap("ab cd", 3, "--", true); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $v1 = wordwrap("a", 75, "\n"); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 40
+/// 40
+/// ```
 #[php_function]
 fn wordwrap(
     req: &mut Request,
@@ -1559,7 +1593,16 @@ fn wordwrap(
     // `current - laststart` as php's signed `zend_long`s compare it.
     let gap = |a: usize, b: usize| long(a) - long(b);
     if brk.len() == 1 && !docut {
-        let mut out = text.to_vec();
+        // `zend_string_finit(..., fallible: true)` of the subject
+        // (`Z/ext/standard/string.c:726`), its breaks written in place.
+        let Some(mut out) = req
+            .memory_mut()
+            .fallible(|req| FreshString::sized(req, text.len(), Sizing::Finit))?
+        else {
+            return PhpString::new(req, b"");
+        };
+        let bytes = out.bytes_mut();
+        bytes.copy_from_slice(text);
         let (mut laststart, mut lastspace) = (0usize, 0usize);
         for (current, &c) in text.iter().enumerate() {
             if c == brk[0] {
@@ -1567,71 +1610,125 @@ fn wordwrap(
                 lastspace = current + 1;
             } else if c == b' ' {
                 if gap(current, laststart) >= linelength {
-                    out[current] = brk[0];
+                    bytes[current] = brk[0];
                     laststart = current + 1;
                 }
                 lastspace = current;
             } else if gap(current, laststart) >= linelength && laststart != lastspace {
-                out[lastspace] = brk[0];
+                bytes[lastspace] = brk[0];
                 laststart = lastspace + 1;
             }
         }
-        // `zend_string_finit(..., fallible: true)` of the subject
-        // (`Z/ext/standard/string.c:726`).
-        return fallibly(req, |req| PhpString::finit(req, &out));
+        return Ok(out.finish());
     }
+    wordwrap_breaking(req, text, brk, linelength, docut)
+}
+
+/// `wordwrap`'s "multiple character line break or forced cut", its
+/// string asked for at the longest the text can grow to and extended
+/// where its room for breaks is spent, as php builds it.
+fn wordwrap_breaking(
+    req: &mut Request,
+    text: &[u8],
+    brk: &[u8],
+    linelength: i64,
+    docut: bool,
+) -> Result<Owner<PhpString>, Thrown> {
+    // `current - laststart` as php's signed `zend_long`s compare it.
+    let gap = |a: usize, b: usize| long(a) - long(b);
     // "Multiple character line break or forced cut": php asks for the
     // longest the text can grow to, `zend_string_safe_falloc`, fallibly,
     // before a byte is scanned, so that is where the memory limit is met:
     // past it the ask is refused and `wordwrap` returns (`RETURN_OOM`).
-    let (chunks, each, over) = match usize::try_from(linelength) {
-        Ok(width) if width > 0 => (text.len() / width + 1, brk.len(), text.len()),
-        _ => (text.len(), brk.len() + 1, 0),
+    // `chk` counts the breaks the string has room for, and where they run
+    // out it is extended, `zend_string_fextend`, by what php reckons the
+    // rest of the text can take.
+    let width = usize::try_from(linelength).unwrap_or(0);
+    let (mut chk, n, m, l) = match text.len().checked_div(width) {
+        Some(lines) => (lines + 1, lines + 1, brk.len(), text.len()),
+        None => (text.len(), text.len(), brk.len() + 1, 0),
     };
-    let charged = req
-        .memory_mut()
-        .fallible(|req| PhpString::product(req, chunks, each, over, |_| {}))?;
-    let Some(charge) = charged else {
+    let mut alloced = n.saturating_mul(m).saturating_add(l).saturating_add(1);
+    let Some(mut out) = req.memory_mut().fallible(|req| {
+        let len = n.saturating_mul(m).saturating_add(l);
+        FreshString::sized(req, len, Sizing::SafeAlloc { n, m })
+    })?
+    else {
         return PhpString::new(req, b"");
     };
-    charge.give_up(req);
-    let mut out: Vec<u8> = Vec::with_capacity(text.len() + brk.len());
+    let mut newtextlen = 0usize;
+    let put = |out: &mut FreshString, at: &mut usize, bytes: &[u8]| {
+        let end = at.saturating_add(bytes.len());
+        if let Some(room) = out.bytes_mut().get_mut(*at..end) {
+            room.copy_from_slice(bytes);
+        }
+        *at = end;
+    };
     let (mut laststart, mut lastspace) = (0usize, 0usize);
     let mut current = 0usize;
     while current < text.len() {
+        if chk == 0 {
+            let step = width.max(1);
+            alloced = alloced
+                .saturating_add(((text.len() - current + 1) / step + 1).saturating_mul(brk.len()))
+                .saturating_add(1);
+            let Some(grown) = req.memory_mut().fallible(|req| out.extend(req, alloced))? else {
+                return PhpString::new(req, b"");
+            };
+            out = grown;
+            chk = (text.len() - current) / step + 1;
+        }
         let c = text[current];
         // `current + breakchar_len <= ZSTR_LEN(text)` at 8.5.12: a break
         // that ends the text is the text's own.
         if c == brk[0] && current + brk.len() <= text.len() && text[current..].starts_with(brk) {
-            out.extend_from_slice(&text[laststart..current + brk.len()]);
+            put(
+                &mut out,
+                &mut newtextlen,
+                &text[laststart..current + brk.len()],
+            );
             current += brk.len() - 1;
             laststart = current + 1;
             lastspace = current + 1;
+            chk -= 1;
         } else if c == b' ' {
             if gap(current, laststart) >= linelength {
-                out.extend_from_slice(&text[laststart..current]);
-                out.extend_from_slice(brk);
+                put(&mut out, &mut newtextlen, &text[laststart..current]);
+                put(&mut out, &mut newtextlen, brk);
                 laststart = current + 1;
+                chk -= 1;
             }
             lastspace = current;
         } else if gap(current, laststart) >= linelength && docut && laststart >= lastspace {
-            out.extend_from_slice(&text[laststart..current]);
-            out.extend_from_slice(brk);
+            put(&mut out, &mut newtextlen, &text[laststart..current]);
+            put(&mut out, &mut newtextlen, brk);
             laststart = current;
             lastspace = current;
+            chk -= 1;
         } else if gap(current, laststart) >= linelength && laststart < lastspace {
-            out.extend_from_slice(&text[laststart..lastspace]);
-            out.extend_from_slice(brk);
+            put(&mut out, &mut newtextlen, &text[laststart..lastspace]);
+            put(&mut out, &mut newtextlen, brk);
             lastspace += 1;
             laststart = lastspace;
+            chk -= 1;
         }
         current += 1;
     }
     if laststart != current {
-        out.extend_from_slice(&text[laststart.min(current)..current]);
+        put(
+            &mut out,
+            &mut newtextlen,
+            &text[laststart.min(current)..current],
+        );
     }
-    // `zend_string_ftruncate(..., fallible: true)`.
-    fallibly(req, |req| PhpString::new(req, &out))
+    // `zend_string_ftruncate(..., fallible: true)`, "free unused memory".
+    match req
+        .memory_mut()
+        .fallible(|req| out.truncate(req, newtextlen))?
+    {
+        Some(out) => Ok(out.finish()),
+        None => PhpString::new(req, b""),
+    }
 }
 
 /// A string asked for fallibly, php 8.5.12's `zend_string_finit` and its
@@ -1646,6 +1743,84 @@ fn fallibly(
         Some(made) => Ok(made),
         None => PhpString::new(req, b""),
     }
+}
+
+/// The bytes of a string asked for at the length it ends with, written
+/// front to back as php's natives write `ZSTR_VAL(str)` through a moving
+/// `char *`: what [`PhpString::filled`] and [`PhpString::product`] hand
+/// their `fill`. A byte past the end is dropped, which a length counted
+/// before the string was asked for never leaves.
+pub(crate) struct Fill<'a> {
+    out: &'a mut [u8],
+    at: usize,
+}
+
+impl<'a> Fill<'a> {
+    pub(crate) fn new(out: &'a mut [u8]) -> Fill<'a> {
+        Fill { out, at: 0 }
+    }
+
+    /// `memcpy(p, bytes, len); p += len`.
+    #[inline]
+    pub(crate) fn put(&mut self, bytes: &[u8]) {
+        let end = self.at.saturating_add(bytes.len());
+        if let Some(room) = self.out.get_mut(self.at..end) {
+            room.copy_from_slice(bytes);
+        }
+        self.at = end;
+    }
+
+    /// `*p++ = byte`.
+    #[inline]
+    pub(crate) fn byte(&mut self, byte: u8) {
+        if let Some(slot) = self.out.get_mut(self.at) {
+            *slot = byte;
+        }
+        self.at = self.at.saturating_add(1);
+    }
+
+    /// `p - ZSTR_VAL(str)`: how far the write has come.
+    pub(crate) fn written(&self) -> usize {
+        self.at
+    }
+}
+
+/// php's `zend_string_safe_alloc(n, m, l, 0)` for the longest the
+/// string can be, written by `write`, then `zend_string_truncate` to
+/// what was written: the cut stays in the allocation's bin, or moves to
+/// the smaller one it falls to, as `erealloc` cuts it, which is what
+/// `memory_get_usage()` sees after `quotemeta` or `urlencode`. A string
+/// asked for at `zend_string_alloc(len)` is `n = m = 0`, `l = len`.
+pub(crate) fn truncated(
+    req: &mut Request,
+    n: usize,
+    m: usize,
+    l: usize,
+    write: impl FnOnce(&mut Fill<'_>),
+) -> Result<Owner<PhpString>, Thrown> {
+    let len = n.saturating_mul(m).saturating_add(l);
+    let mut fresh = FreshString::sized(req, len, Sizing::SafeAlloc { n, m })?;
+    let mut out = Fill::new(fresh.bytes_mut());
+    write(&mut out);
+    let written = out.written();
+    Ok(fresh.truncate(req, written)?.finish())
+}
+
+/// php's `zend_string_alloc(len, 0)`, or `zend_string_init` of the
+/// argument decoded in place, written by `write` to no more than `len`
+/// bytes, then `ZSTR_LEN(str) = written`: the allocation kept at its
+/// size, as `stripslashes` and `urldecode` hand their strings out.
+pub(crate) fn shortened(
+    req: &mut Request,
+    len: usize,
+    write: impl FnOnce(&mut Fill<'_>),
+) -> Result<Owner<PhpString>, Thrown> {
+    let mut fresh = FreshString::new(req, len)?;
+    let mut out = Fill::new(fresh.bytes_mut());
+    write(&mut out);
+    let written = out.written();
+    fresh.set_len(written);
+    Ok(fresh.finish())
 }
 
 /// `explode(string $separator, string $string, int $limit =
@@ -1716,6 +1891,22 @@ fn fallibly(
 ///
 /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
+///
+/// Each piece is added as it is found and no offsets are kept; a string
+/// with no separator is its own one piece, `ZVAL_STR_COPY`, no copy made,
+/// and the pieces of a negative limit are counted out of the same walk.
+///
+/// ```php
+/// $s = str_repeat('a', 30);
+/// $m = memory_get_usage(); $a = explode(',', $s); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $b = explode(',', "$s,$s,$s"); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $c = explode(',', "$s,$s,$s", -1); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 216
+/// 408
+/// 328
+/// ```
 #[php_function]
 fn explode(
     req: &mut Request,
@@ -1727,65 +1918,101 @@ fn explode(
     if delim.is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
     }
-    let mut array = PhpArray::new(req)?;
     let (d, s) = (delim.as_bytes(), string.as_bytes());
-    if s.is_empty() {
-        if limit >= 0 {
-            let empty = PhpString::new(req, b"")?.into_value();
-            array.append(req, empty)?;
-        }
-        return Ok(array);
-    }
-    let mut starts = vec![0usize];
-    let mut at = 0;
-    while let Some(found) = memnstr(s, d, at) {
-        at = found + d.len();
-        starts.push(at);
-        if limit > 1 && long(starts.len()) >= limit {
-            break;
-        }
-    }
-    // `starts[i]` opens piece `i`; the piece ends before the separator
-    // that opens the next, or at the end.
-    let piece = |i: usize| -> &[u8] {
-        let from = starts[i];
-        let to = starts.get(i + 1).map_or(s.len(), |next| next - d.len());
-        &s[from..to]
-    };
-    let pieces = starts.len();
-    let take = if limit > 1 {
-        pieces
-    } else if limit < 0 {
-        if pieces == 1 {
-            0
-        } else {
-            usize::try_from(long(pieces) + limit).unwrap_or(0)
-        }
+    let p2 = if s.is_empty() || limit == 0 || limit == 1 {
+        None
     } else {
-        1
+        memnstr(s, d, 0)
     };
-    if limit == 0 || limit == 1 {
-        let whole = Owner::take(req, string).into_value();
-        array.append(req, whole)?;
+    let Some(p2) = p2 else {
+        // `array_init` and one `zend_hash_next_index_insert_new` at most:
+        // the empty string a non-negative limit gives an empty subject,
+        // and otherwise the subject itself, `ZVAL_STR_COPY`, no copy
+        // made, where a limit of 0 or 1 or no separator leaves it whole
+        // and a negative limit leaves the array empty.
+        let mut array = PhpArray::new(req)?;
+        let piece = if s.is_empty() {
+            (limit >= 0)
+                .then(|| PhpString::new(req, b"").map(Owner::into_value))
+                .transpose()?
+        } else {
+            (limit >= 0).then(|| Owner::take(req, string).into_value())
+        };
+        if let Some(piece) = piece {
+            array.append(req, piece)?;
+        }
         return Ok(array);
+    };
+    if limit < 0 {
+        let array = PhpArray::new(req)?;
+        return explode_negative_limit(req, array, d, s, limit);
     }
-    // `php_explode` makes each piece with `zend_string_init_fast`
-    // (`Z/ext/standard/string.c:868`, `:876`), and
-    // `php_explode_negative_limit` with `ZVAL_STRINGL` (`:924`).
-    for i in 0..take {
+    // `php_explode`: `zend_hash_real_init_packed` and
+    // `ZEND_HASH_FILL_PACKED`, each piece laid as it is found with
+    // `zend_string_init_fast` (`Z/ext/standard/string.c:858`, `:868`,
+    // `:876`), and no offsets kept.
+    let (mut p1, mut p2, mut limit, mut rest) = (0, Some(p2), limit, true);
+    PhpArray::packed_fill(req, |req| {
+        let Some(end) = p2 else {
+            // `if (p1 <= endp)`: the rest after the last separator taken.
+            if !std::mem::take(&mut rest) {
+                return Ok(None);
+            }
+            return PhpString::fast(req, &s[p1..]).map(|piece| Some(piece.into_value()));
+        };
         // "Each piece costs a zval plus a zend_string, so stop once over
         // the limit" (8.5.12), before each piece, the array as far as it
         // was filled returned and the limit's fatal raised after the
         // call.
         if req.memory().has_oom() {
+            return Ok(None);
+        }
+        let piece = PhpString::fast(req, &s[p1..end])?;
+        p1 = end + d.len();
+        // `while (p2 != NULL && --limit > 1)`.
+        p2 = memnstr(s, d, p1).filter(|_| {
+            limit -= 1;
+            limit > 1
+        });
+        Ok(Some(piece.into_value()))
+    })
+}
+
+/// `php_explode_negative_limit`: every piece but the last `-limit`, each
+/// made with `ZVAL_STRINGL` (`Z/ext/standard/string.c:924`). php keeps
+/// the piece's offsets in an `emalloc`'d table that is freed as it
+/// returns; here the separators are counted first and the pieces found
+/// again, so nothing is kept.
+fn explode_negative_limit(
+    req: &mut Request,
+    mut array: Owner<PhpArray>,
+    d: &[u8],
+    s: &[u8],
+    limit: i64,
+) -> Result<Owner<PhpArray>, Thrown> {
+    let mut found = 1usize;
+    let mut at = 0;
+    while let Some(next) = memnstr(s, d, at) {
+        // "One pointer per delimiter, then a zval and a zend_string per
+        // piece."
+        if req.memory().has_oom() {
             return Ok(array);
         }
-        let value = if limit < 0 {
-            PhpString::new(req, piece(i))?
-        } else {
-            PhpString::fast(req, piece(i))?
+        found += 1;
+        at = next + d.len();
+    }
+    let take = usize::try_from(long(found) + limit).unwrap_or(0);
+    let mut p1 = 0;
+    for _ in 0..take {
+        if req.memory().has_oom() {
+            break;
+        }
+        let Some(p2) = memnstr(s, d, p1) else {
+            break;
         };
+        let value = PhpString::new(req, &s[p1..p2])?;
         array.append(req, value.into_value())?;
+        p1 = p2 + d.len();
     }
     Ok(array)
 }
@@ -1843,15 +2070,15 @@ fn explode(
 ///
 /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 32522240 bytes) in %s on line 3
 /// ```
-#[php_function(frameless(1, 2), aliases(join))]
+#[php_function(
+    frameless(1 = implode_frameless_1, 2 = implode_frameless_2),
+    aliases(join)
+)]
 fn implode(
     req: &mut Request,
     separator: Raw<Union<PhpArray, PhpString>>,
     #[php(default = null)] array: Raw<Option<PhpArray>>,
 ) -> Result<Owner<PhpString>, Thrown> {
-    if req.frames().frameless() {
-        return implode_frameless(req, separator, array);
-    }
     let (separator, array) = (separator.hold(req)?, array.hold(req)?);
     let (glue, pieces) = match (separator, array) {
         (Union::A(array), None) => (None, array),
@@ -1871,7 +2098,7 @@ fn implode(
 }
 
 /// `ZEND_FRAMELESS_FUNCTION(implode, 1)` and `(implode, 2)`
-/// (`Z/ext/standard/string.c:1077`), which parse their own arguments:
+/// (`Z/ext/standard/string.c:1120`, `:1141`), one entry each, which parse their own arguments:
 /// one is the array as it stands, never converted, and anything else
 /// php's second `TypeError` with no deprecation first; of two, the
 /// separator is a string (`Z_FLF_PARAM_STR`), so an array there is
@@ -1891,17 +2118,47 @@ fn implode(
 /// string(2) "a2"
 /// string(5) "a1.5b"
 /// ```
-fn implode_frameless(
+fn implode_frameless_1(
+    req: &mut Request,
+    separator: Raw<Union<PhpArray, PhpString>>,
+    _: Raw<Option<PhpArray>>,
+) -> Result<Owner<PhpString>, Thrown> {
+    // `zend_parse_arg_array(arg1, &pieces, false, false)`.
+    let Some(pieces) = separator.value().as_array() else {
+        return Err(not_an_array(req));
+    };
+    implode_array(req, b"", true, pieces)
+}
+
+/// `ZEND_FRAMELESS_FUNCTION(implode, 2)`: `Z_FLF_PARAM_STR` takes a
+/// separator that is a string where it stands and
+/// `Z_FLF_PARAM_ARRAY_OR_NULL` an array, so a call given both reads
+/// nothing more of its caller's frame; any other separator is coerced as
+/// the parameter declares and the array held as a `?array`
+/// ([`implode_frameless_1`] has the witness of each refusal).
+///
+/// ```php
+/// $f = ["12", "INFO", 7, "/api/v2/x", -30]; $g = "|"; $m = memory_get_usage(); $s = implode($g, $f); var_dump($s, memory_get_usage() - $m, implode($g, []), implode($g, ["only"]), implode("", $f));
+/// $r = &$f; var_dump(implode(",", $r), implode($f));
+/// ```
+/// ```expect
+/// string(23) "12|INFO|7|/api/v2/x|-30"
+/// int(56)
+/// string(0) ""
+/// string(4) "only"
+/// string(19) "12INFO7/api/v2/x-30"
+/// string(23) "12,INFO,7,/api/v2/x,-30"
+/// string(19) "12INFO7/api/v2/x-30"
+/// ```
+fn implode_frameless_2(
     req: &mut Request,
     separator: Raw<Union<PhpArray, PhpString>>,
     array: Raw<Option<PhpArray>>,
 ) -> Result<Owner<PhpString>, Thrown> {
-    if req.frames().argument_count() < 2 {
-        // `zend_parse_arg_array(arg1, &pieces, false, false)`.
-        let Some(pieces) = separator.value().as_array() else {
-            return Err(not_an_array(req));
-        };
-        return implode_array(req, b"", true, pieces);
+    if let (Some(glue), Some(pieces)) =
+        (separator.value().as_php_string(), array.value().as_array())
+    {
+        return implode_array(req, glue.as_bytes(), glue.is_valid_utf8(), pieces);
     }
     let glue = coerce_param(req, &separator.value(), &Type::String, 1)?;
     let Some(glue) = glue.as_php_string() else {
@@ -1943,6 +2200,21 @@ fn not_an_array(req: &mut Request) -> Thrown {
 /// string(8) "aa,3,2.5"
 /// string(2) "aa"
 /// string(1) "7"
+/// ```
+///
+/// The lengths are summed first, an integer's digits counted, and the
+/// string asked for once at the length it ends with, where php's first
+/// pass sums them: `zend_string_safe_falloc(numelems - 1,
+/// ZSTR_LEN(glue), len, 0)`, the glue's repeats outside the aligned
+/// header, which `memory_get_usage()` sees.
+///
+/// ```php
+/// $m = memory_get_usage(); $s = implode(',', ['ab', 'c']); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $t = implode(' ', [str_repeat('x', 26), 'abc', -1234]); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 40
+/// 80
 /// ```
 ///
 /// Every piece is converted before the string is asked for, a piece
@@ -1990,37 +2262,142 @@ fn implode_array(
     glue_utf8: bool,
     pieces: PhpArray,
 ) -> Result<Owner<PhpString>, Thrown> {
-    let elements: Vec<Value> = php_ext::values::walk::rows(req, pieces)
-        .map(|(_, value)| value)
-        .collect();
-    if let [only] = elements.as_slice() {
-        return php_ext::coerce::to_string(req, only);
+    let count = pieces.len();
+    if count == 0 {
+        return PhpString::new(req, b"");
     }
-    let mut out = Vec::new();
+    if count == 1
+        && let Some((_, only)) = php_ext::values::walk::rows(req, pieces).next()
+    {
+        return php_ext::coerce::to_string(req, &only);
+    }
+    // php's first pass, which converts nothing where every piece is a
+    // string or an integer, as no code of the program runs to change
+    // the array before the second pass reads it again.
+    let mut len = 0usize;
     let mut utf8 = glue_utf8;
-    let mut thrown = Carrying::default();
-    for (i, element) in elements.iter().enumerate() {
-        if i > 0 {
-            out.extend_from_slice(glue);
-        }
-        let element = element.deref();
-        if let Some(s) = element.as_php_string() {
-            out.extend_from_slice(s.as_bytes());
-            utf8 &= s.is_valid_utf8();
-        } else if let Some(n) = element.as_int() {
-            out.extend_from_slice(Decimal::of(n).as_bytes());
-        } else if let Some(made) = piece_text(req, &element, &mut thrown)? {
-            out.extend_from_slice(made.as_bytes());
-            utf8 &= made.is_valid_utf8();
-            made.give_up(req);
-        }
+    let plain = php_ext::values::walk::rows(req, pieces).all(|(_, value)| {
+        plain_piece(&value, |bytes, valid| {
+            len = len.saturating_add(bytes.len());
+            utf8 &= valid;
+        })
+        .is_some()
+    });
+    if !plain {
+        return implode_converted(req, glue, glue_utf8, pieces);
     }
     // "The glue is repeated once per element, so the result can dwarf
     // the input": `zend_string_safe_falloc(numelems - 1, ZSTR_LEN(glue),
-    // len, 0, fallible: true)` since 8.5.12, asked whatever a piece
-    // threw, and `RETURN_OOM()` where the memory limit refused it.
-    let asked = req.memory_mut().fallible(|req| PhpString::new(req, &out));
-    let joined = match (asked, thrown.take()) {
+    // len, 0, fallible: true)` since 8.5.12, and `RETURN_OOM()` where
+    // the memory limit refused it.
+    let asked = req.memory_mut().fallible(|req| {
+        PhpString::product(req, count - 1, glue.len(), len, |out| {
+            let mut out = Fill::new(out);
+            let mut position = 0;
+            while let Some((found, _, value)) = pieces.live_from(position) {
+                // Past the first piece, whichever bucket it stood at.
+                if position > 0 {
+                    out.put(glue);
+                }
+                position = found.saturating_add(1);
+                plain_piece(&value, |bytes, _| out.put(bytes));
+            }
+        })
+    });
+    joined(req, asked, None, utf8)
+}
+
+/// `php_implode` where a piece is neither a string nor an integer: each
+/// piece converted in the first pass and its text held in php's
+/// `strings` array until the string is copied out of it.
+fn implode_converted(
+    req: &mut Request,
+    glue: &[u8],
+    glue_utf8: bool,
+    pieces: PhpArray,
+) -> Result<Owner<PhpString>, Thrown> {
+    let elements: Vec<Value> = php_ext::values::walk::rows(req, pieces)
+        .map(|(_, value)| value)
+        .collect();
+    let mut texts: Vec<Option<Owner<PhpString>>> = Vec::with_capacity(elements.len());
+    let mut len = 0usize;
+    let mut utf8 = glue_utf8;
+    let mut thrown = Carrying::default();
+    for element in &elements {
+        let counted = plain_piece(element, |bytes, valid| {
+            len = len.saturating_add(bytes.len());
+            utf8 &= valid;
+        });
+        if counted.is_some() {
+            texts.push(None);
+            continue;
+        }
+        match piece_text(req, &element.deref(), &mut thrown) {
+            Ok(made) => {
+                if let Some(made) = &made {
+                    len = len.saturating_add(made.len());
+                    utf8 &= made.is_valid_utf8();
+                }
+                texts.push(made);
+            }
+            Err(fatal) => {
+                texts
+                    .into_iter()
+                    .flatten()
+                    .for_each(|made| made.give_up(req));
+                return Err(fatal);
+            }
+        }
+    }
+    // Asked whatever a piece threw, as php asks it.
+    let asked = req.memory_mut().fallible(|req| {
+        PhpString::product(req, elements.len() - 1, glue.len(), len, |out| {
+            let mut out = Fill::new(out);
+            for (i, (element, text)) in elements.iter().zip(&texts).enumerate() {
+                if i > 0 {
+                    out.put(glue);
+                }
+                match text {
+                    Some(made) => out.put(made.as_bytes()),
+                    None => {
+                        plain_piece(element, |bytes, _| out.put(bytes));
+                    }
+                }
+            }
+        })
+    });
+    texts
+        .into_iter()
+        .flatten()
+        .for_each(|made| made.give_up(req));
+    joined(req, asked, thrown.take(), utf8)
+}
+
+/// What one piece of `php_implode`'s walk adds without converting it, a
+/// string's bytes with whether they are known valid UTF-8, or an
+/// integer's digits, `zend_print_long_to_buf`, handed to `read`; `None`
+/// for any other piece, which `zval_get_string_func` converts.
+fn plain_piece<R>(piece: &Value, read: impl FnOnce(&[u8], bool) -> R) -> Option<R> {
+    let piece = piece.deref();
+    if let Some(s) = piece.as_php_string() {
+        return Some(read(s.as_bytes(), s.is_valid_utf8()));
+    }
+    piece
+        .as_int()
+        .map(|n| read(Decimal::of(n).as_bytes(), true))
+}
+
+/// The end of `php_implode`: the string asked for, unless a piece threw,
+/// whose throwable it leaves with after the string is given up, or the
+/// memory limit refused it, `RETURN_OOM()`; valid UTF-8 where every
+/// piece and the glue were.
+fn joined(
+    req: &mut Request,
+    asked: Result<Option<Owner<PhpString>>, Thrown>,
+    thrown: Option<Thrown>,
+    utf8: bool,
+) -> Result<Owner<PhpString>, Thrown> {
+    let joined = match (asked, thrown) {
         (Ok(Some(joined)), None) => joined,
         (Ok(None), None) => return PhpString::new(req, b""),
         (Ok(joined), Some(thrown)) => {
@@ -2161,9 +2538,27 @@ fn strtok(
 /// str_increment(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters
 /// str_increment(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters
 /// ```
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = str_increment("a"); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $v1 = str_increment("zz"); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 32
+/// 32
+/// ```
 #[php_function]
 fn str_increment(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
-    let mut bytes = alphanumeric_argument(req, string)?;
+    alphanumeric_argument(req, string)?;
+    // `zend_string_init` of the argument, stepped in place, and where
+    // the carry runs off the front a `zend_string_alloc` one longer that
+    // the stepped string is copied into after its first byte.
+    let mut stepped = FreshString::new(req, string.len())?;
+    let bytes = stepped.bytes_mut();
+    bytes.copy_from_slice(string.as_bytes());
     let mut carry = true;
     for c in bytes.iter_mut().rev() {
         match *c {
@@ -2176,11 +2571,16 @@ fn str_increment(req: &mut Request, string: PhpString) -> Result<Owner<PhpString
             }
         }
     }
-    if carry {
-        let first = if bytes[0] == b'0' { b'1' } else { bytes[0] };
-        bytes.insert(0, first);
+    if !carry {
+        return Ok(stepped.finish());
     }
-    PhpString::new(req, &bytes)
+    let grown = PhpString::filled(req, stepped.len() + 1, |out| {
+        let bytes = stepped.bytes();
+        out[1..].copy_from_slice(bytes);
+        out[0] = if bytes[0] == b'0' { b'1' } else { bytes[0] };
+    });
+    stepped.free(req);
+    grown
 }
 
 /// `str_decrement(string $string): string`: the predecessor, the borrow
@@ -2205,9 +2605,21 @@ fn str_increment(req: &mut Request, string: PhpString) -> Result<Owner<PhpString
 /// str_decrement(): Argument #1 ($string) "a" is out of decrement range
 /// str_decrement(): Argument #1 ($string) "0ab" is out of decrement range
 /// ```
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = str_decrement("b"); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $v1 = str_decrement("a0"); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 32
+/// 32
+/// ```
 #[php_function]
 fn str_decrement(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
-    let mut bytes = alphanumeric_argument(req, string)?;
+    alphanumeric_argument(req, string)?;
     // `zend_argument_value_error(1, "\"%s\" is out of decrement
     // range", ...)`: a sentence without the `must` the face writes.
     let out_of_range = |req: &mut Request| {
@@ -2223,9 +2635,15 @@ fn str_decrement(req: &mut Request, string: PhpString) -> Result<Owner<PhpString
             &format!("\"{text}\" is out of decrement range"),
         )
     };
-    if bytes[0] == b'0' {
+    if string.as_bytes()[0] == b'0' {
         return Err(out_of_range(req));
     }
+    // `zend_string_init` of the argument, stepped in place, and where
+    // the borrow runs off the front or leaves a leading `0` a
+    // `zend_string_alloc` one shorter that the rest is copied into.
+    let mut stepped = FreshString::new(req, string.len())?;
+    let bytes = stepped.bytes_mut();
+    bytes.copy_from_slice(string.as_bytes());
     let mut carry = true;
     for c in bytes.iter_mut().rev() {
         match *c {
@@ -2238,18 +2656,23 @@ fn str_decrement(req: &mut Request, string: PhpString) -> Result<Owner<PhpString
             }
         }
     }
-    if carry || (bytes[0] == b'0' && bytes.len() > 1) {
-        if bytes.len() == 1 {
-            return Err(out_of_range(req));
-        }
-        bytes.remove(0);
+    if !(carry || bytes[0] == b'0' && bytes.len() > 1) {
+        return Ok(stepped.finish());
     }
-    PhpString::new(req, &bytes)
+    if stepped.len() == 1 {
+        stepped.free(req);
+        return Err(out_of_range(req));
+    }
+    let shorter = PhpString::filled(req, stepped.len() - 1, |out| {
+        out.copy_from_slice(&stepped.bytes()[1..]);
+    });
+    stepped.free(req);
+    shorter
 }
 
 /// The shared refusals of `str_increment` and `str_decrement`: the
 /// empty string and a byte that is no ASCII letter or digit.
-fn alphanumeric_argument(req: &mut Request, string: PhpString) -> Result<Vec<u8>, Thrown> {
+fn alphanumeric_argument(req: &mut Request, string: PhpString) -> Result<(), Thrown> {
     if string.is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
     }
@@ -2260,7 +2683,7 @@ fn alphanumeric_argument(req: &mut Request, string: PhpString) -> Result<Vec<u8>
             "be composed only of alphanumeric ASCII characters",
         ));
     }
-    Ok(string.as_bytes().to_vec())
+    Ok(())
 }
 
 /// `chunk_split(string $string, int $length = 76, string $separator =
@@ -2297,6 +2720,18 @@ fn alphanumeric_argument(req: &mut Request, string: PhpString) -> Result<Vec<u8>
 ///
 /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 9453568 bytes) in %s on line 4
 /// ```
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = chunk_split("abc", 4, "--"); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $v1 = chunk_split(str_repeat("x", 30), 4, "--"); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 40
+/// 80
+/// ```
 #[php_function]
 fn chunk_split(
     req: &mut Request,
@@ -2315,19 +2750,30 @@ fn chunk_split(
     // `zend_string_safe_falloc`, each the length it ends with, and
     // `RETURN_OOM()` where the memory limit refused one.
     if chunk > bytes.len() {
-        let mut out = bytes.to_vec();
-        out.extend_from_slice(sep);
-        return fallibly(req, |req| PhpString::new(req, &out));
+        // `zend_string_safe_falloc(ZSTR_LEN(str), 1, endlen, 0, true)`.
+        return fallibly(req, |req| {
+            PhpString::product(req, bytes.len(), 1, sep.len(), |out| {
+                let mut out = Fill::new(out);
+                out.put(bytes);
+                out.put(sep);
+            })
+        });
     }
     if bytes.is_empty() {
         return PhpString::new(req, b"");
     }
-    let mut out = Vec::with_capacity(bytes.len() + (bytes.len() / chunk + 1) * sep.len());
-    for piece in bytes.chunks(chunk) {
-        out.extend_from_slice(piece);
-        out.extend_from_slice(sep);
-    }
-    fallibly(req, |req| PhpString::new(req, &out))
+    // `php_chunk_split`: `zend_string_safe_falloc(chunks, endlen, srclen,
+    // 0, true)`, the chunks rounded up.
+    let chunks = bytes.len().div_ceil(chunk);
+    fallibly(req, |req| {
+        PhpString::product(req, chunks, sep.len(), bytes.len(), |out| {
+            let mut out = Fill::new(out);
+            for piece in bytes.chunks(chunk) {
+                out.put(piece);
+                out.put(sep);
+            }
+        })
+    })
 }
 
 /// `quotemeta(string $string): string`: a backslash before each of
@@ -2341,19 +2787,36 @@ fn chunk_split(
 /// string(21) "\[a\]\(b\)\^c\$\.\\\*"
 /// string(0) ""
 /// ```
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = quotemeta("a.b"); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $v1 = quotemeta(str_repeat("a+", 20)); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 40
+/// 96
+/// ```
 #[php_function]
 fn quotemeta(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
-    let mut out = Vec::with_capacity(string.len() * 2);
-    for &c in string.as_bytes() {
-        if matches!(
-            c,
-            b'.' | b'\\' | b'+' | b'*' | b'?' | b'[' | b'^' | b']' | b'$' | b'(' | b')'
-        ) {
-            out.push(b'\\');
-        }
-        out.push(c);
+    if string.is_empty() {
+        return PhpString::new(req, b"");
     }
-    PhpString::new(req, &out)
+    // `zend_string_safe_alloc(2, ZSTR_LEN(old), 0, 0)`, written, and
+    // `zend_string_truncate` to what was.
+    truncated(req, 2, string.len(), 0, |out| {
+        for &c in string.as_bytes() {
+            if matches!(
+                c,
+                b'.' | b'\\' | b'+' | b'*' | b'?' | b'[' | b'^' | b']' | b'$' | b'(' | b')'
+            ) {
+                out.byte(b'\\');
+            }
+            out.byte(c);
+        }
+    })
 }
 
 /// `ucfirst(string $string): string`: the first byte through
@@ -2368,6 +2831,18 @@ fn quotemeta(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, T
 /// string(0) ""
 /// string(6) "e974e9"
 /// string(2) "1a"
+/// ```
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = ucfirst("a"); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $v1 = ucfirst("abcdefghij"); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 32
+/// 40
 /// ```
 #[php_function]
 fn ucfirst(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
@@ -2384,6 +2859,16 @@ fn ucfirst(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thr
 /// string(3) "abc"
 /// string(0) ""
 /// string(2) "1A"
+/// ```
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = lcfirst("A"); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 32
 /// ```
 #[php_function]
 fn lcfirst(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
@@ -2403,9 +2888,11 @@ fn first_cased(
     if map(first) == *first {
         return Ok(Owner::take(req, string));
     }
-    let mut out = bytes.to_vec();
-    out[0] = map(first);
-    PhpString::new(req, &out)
+    // `zend_string_init` of the argument, its first byte mapped.
+    PhpString::filled(req, bytes.len(), |out| {
+        out.copy_from_slice(bytes);
+        out[0] = map(first);
+    })
 }
 
 /// `ucwords(string $string, string $separators = " \t\r\n\f\v"):
@@ -2422,6 +2909,16 @@ fn first_cased(
 /// string(0) ""
 /// string(3) "AbC"
 /// ```
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = ucwords("a"); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 32
+/// ```
 #[php_function]
 fn ucwords(
     req: &mut Request,
@@ -2433,14 +2930,16 @@ fn ucwords(
     }
     let set: &[u8] = separators.as_bytes();
     let mask = charmask(req, set);
-    let mut out = string.as_bytes().to_vec();
-    out[0] = out[0].to_ascii_uppercase();
-    for i in 1..out.len() {
-        if mask[usize::from(out[i - 1])] {
-            out[i] = out[i].to_ascii_uppercase();
+    // `ZVAL_STRINGL` of the argument, cased in place.
+    PhpString::filled(req, string.len(), |out| {
+        out.copy_from_slice(string.as_bytes());
+        out[0] = out[0].to_ascii_uppercase();
+        for i in 1..out.len() {
+            if mask[usize::from(out[i - 1])] {
+                out[i] = out[i].to_ascii_uppercase();
+            }
         }
-    }
-    PhpString::new(req, &out)
+    })
 }
 
 /// `strrev(string $string): string`: the bytes in reverse.
@@ -2592,14 +3091,16 @@ fn hebrev(
     if s.is_empty() {
         return PhpString::new(req, b"");
     }
-    let out = hebrev_bytes(s, max_chars);
-    PhpString::new(req, &out)
+    // `zend_string_alloc(str_len, 0)`, every byte of it written.
+    PhpString::filled(req, s.len(), |out| {
+        hebrev_bytes(s, max_chars, &mut Fill::new(out));
+    })
 }
 
 /// php's two loops of `hebrev`, a line-for-line copy; punctuation is
 /// `ispunct(3)`'s under the thread's `LC_CTYPE`.
 #[allow(clippy::too_many_lines)]
-fn hebrev_bytes(s: &[u8], max_chars: i64) -> Vec<u8> {
+fn hebrev_bytes(s: &[u8], max_chars: i64, out: &mut Fill<'_>) {
     let isheb = |c: u8| (224..=250).contains(&c);
     let isblank = |c: u8| c == b' ' || c == b'\t';
     let isnewline = |c: u8| c == b'\n' || c == b'\r';
@@ -2670,7 +3171,6 @@ fn hebrev_bytes(s: &[u8], max_chars: i64) -> Vec<u8> {
             break;
         }
     }
-    let mut out = Vec::with_capacity(len);
     let (mut begin, mut end) = (len - 1, len - 1);
     loop {
         let mut char_count = 0i64;
@@ -2706,11 +3206,11 @@ fn hebrev_bytes(s: &[u8], max_chars: i64) -> Vec<u8> {
             begin += 1;
         }
         for &c in heb.get(begin..=end).unwrap_or(&[]) {
-            out.push(c);
+            out.byte(c);
         }
         let mut i = orig_begin;
         while i <= end && isnewline(heb[i]) {
-            out.push(heb[i]);
+            out.byte(heb[i]);
             i += 1;
         }
         begin = orig_begin;
@@ -2720,7 +3220,6 @@ fn hebrev_bytes(s: &[u8], max_chars: i64) -> Vec<u8> {
         begin -= 1;
         end = begin;
     }
-    out
 }
 
 /// `nl2br(string $string, bool $use_xhtml = true): string`: `<br />`,
@@ -2765,25 +3264,41 @@ fn nl2br(
         return Ok(Owner::take(req, string));
     }
     let tag: &[u8] = if xhtml { b"<br />" } else { b"<br>" };
-    let mut out = Vec::with_capacity(s.len() * 2);
+    // php's first scan counts the breaks, a `\r\n` or `\n\r` once.
+    let pair =
+        |c: u8, next: Option<&u8>| matches!((c, next), (b'\r', Some(b'\n')) | (b'\n', Some(b'\r')));
+    let mut repl_cnt = 0;
     let mut i = 0;
     while i < s.len() {
-        let c = s[i];
-        if c == b'\r' || c == b'\n' {
-            out.extend_from_slice(tag);
-            let next = s.get(i + 1).copied().unwrap_or(0);
-            if (c == b'\r' && next == b'\n') || (c == b'\n' && next == b'\r') {
-                out.push(c);
+        if s[i] == b'\r' || s[i] == b'\n' {
+            if pair(s[i], s.get(i + 1)) {
                 i += 1;
             }
+            repl_cnt += 1;
         }
-        out.push(s[i]);
         i += 1;
     }
     // `zend_string_safe_falloc(repl_cnt, repl_len, ZSTR_LEN(str), 0,
     // fallible: true)` since 8.5.12, the length it ends with, and
     // `RETURN_OOM()` where the memory limit refused it.
-    fallibly(req, |req| PhpString::new(req, &out))
+    fallibly(req, |req| {
+        PhpString::product(req, repl_cnt, tag.len(), s.len(), |out| {
+            let mut out = Fill::new(out);
+            let mut i = 0;
+            while i < s.len() {
+                let c = s[i];
+                if c == b'\r' || c == b'\n' {
+                    out.put(tag);
+                    if pair(c, s.get(i + 1)) {
+                        out.byte(c);
+                        i += 1;
+                    }
+                }
+                out.byte(s[i]);
+                i += 1;
+            }
+        })
+    })
 }
 
 /// `count_chars(string $string, int $mode = 0): array|string`: the
@@ -2809,6 +3324,16 @@ fn nl2br(
 /// int(255)
 /// count_chars(): Argument #2 ($mode) must be between 0 and 4 (inclusive)
 /// ```
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = count_chars("ab", 3); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 32
+/// ```
 #[php_function]
 fn count_chars(
     req: &mut Request,
@@ -2824,10 +3349,17 @@ fn count_chars(
         chars[usize::from(c)] += 1;
     }
     if mode >= 3 {
-        let bytes: Vec<u8> = (0..=255u8)
-            .filter(|c| (chars[usize::from(*c)] != 0) == (mode == 3))
-            .collect();
-        return PhpString::new(req, &bytes).map(Union::B);
+        // `RETURN_STRINGL(retstr, retlen)` of the stack's `retstr[256]`.
+        let mut retstr = [0u8; 256];
+        let mut retlen = 0;
+        for c in 0..=255u8 {
+            if (chars[usize::from(c)] != 0) == (mode == 3) {
+                retstr[retlen] = c;
+                retlen += 1;
+            }
+        }
+        let bytes = &retstr[..retlen];
+        return PhpString::filled(req, retlen, |out| out.copy_from_slice(bytes)).map(Union::B);
     }
     let mut array = PhpArray::new(req)?;
     for (inx, count) in chars.iter().enumerate() {
@@ -2925,18 +3457,31 @@ fn substr_count(
 /// string(17) "Uryyb, Jbeyq! klm"
 /// string(0) ""
 /// ```
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = str_rot13("a"); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 32
+/// ```
 #[php_function]
 fn str_rot13(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
-    let out: Vec<u8> = string
-        .as_bytes()
-        .iter()
-        .map(|&c| match c {
-            b'a'..=b'z' => b'a' + (c - b'a' + 13) % 26,
-            b'A'..=b'Z' => b'A' + (c - b'A' + 13) % 26,
-            _ => c,
-        })
-        .collect();
-    PhpString::new(req, &out)
+    if string.is_empty() {
+        return PhpString::new(req, b"");
+    }
+    // `php_str_rot13`: `zend_string_alloc(ZSTR_LEN(str), 0)`.
+    PhpString::filled(req, string.len(), |out| {
+        for (to, &c) in out.iter_mut().zip(string.as_bytes()) {
+            *to = match c {
+                b'a'..=b'z' => b'a' + (c - b'a' + 13) % 26,
+                b'A'..=b'Z' => b'A' + (c - b'A' + 13) % 26,
+                _ => c,
+            };
+        }
+    })
 }
 
 /// `str_shuffle(string $string): string`, `php_binary_string_shuffle`
@@ -2958,11 +3503,26 @@ fn str_rot13(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, T
 /// string(10) "bdjhgaiefc"
 /// string(10) "9825107643"
 /// ```
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = str_shuffle(""); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 32
+/// ```
 #[php_function]
 fn str_shuffle(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
-    let mut bytes = string.as_bytes().to_vec();
-    Rng::default_engine().shuffle(req, &mut bytes)?;
-    PhpString::new(req, &bytes)
+    // `RETVAL_STRINGL` of the argument, shuffled in place.
+    let mut out = FreshString::new(req, string.len())?;
+    out.bytes_mut().copy_from_slice(string.as_bytes());
+    if let Err(thrown) = Rng::default_engine().shuffle(req, out.bytes_mut()) {
+        out.free(req);
+        return Err(thrown);
+    }
+    Ok(out.finish())
 }
 
 /// `str_word_count(string $string, int $format = 0, ?string $characters
@@ -3336,16 +3896,18 @@ fn binary_strncmp(left: &[u8], right: &[u8], length: usize, fold: bool) -> i64 {
     message = "visit the php.net documentation for various alternatives"
 ))]
 fn utf8_encode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
-    let mut out = Vec::with_capacity(string.len() * 2);
-    for &c in string.as_bytes() {
-        if c < 0x80 {
-            out.push(c);
-        } else {
-            out.push(0xc0 | (c >> 6));
-            out.push(0x80 | (c & 0x3f));
+    // `php_utf8_encode`: `zend_string_safe_alloc(len, 2, 0, 0)`, then
+    // `zend_string_truncate`.
+    truncated(req, string.len(), 2, 0, |out| {
+        for &c in string.as_bytes() {
+            if c < 0x80 {
+                out.byte(c);
+            } else {
+                out.byte(0xc0 | (c >> 6));
+                out.byte(0x80 | (c & 0x3f));
+            }
         }
-    }
-    PhpString::new(req, &out)
+    })
 }
 
 /// `utf8_decode(string $string): string`, deprecated since 8.2: each
@@ -3368,17 +3930,25 @@ fn utf8_encode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>,
 ))]
 fn utf8_decode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let s = string.as_bytes();
-    let mut out = Vec::with_capacity(s.len());
+    // `php_utf8_decode`: `zend_string_alloc(len, 0)`, then
+    // `zend_string_truncate` only where fewer bytes came out, as its
+    // realloc to the same length can take a larger bin.
+    let mut fresh = FreshString::new(req, s.len())?;
+    let mut out = Fill::new(fresh.bytes_mut());
     let mut pos = 0;
     while pos < s.len() {
         let (c, next) = next_utf8_char(s, pos);
         pos = next;
-        out.push(match c {
+        out.byte(match c {
             Some(c) if c <= 0xff => u8::try_from(c).unwrap_or(b'?'),
             _ => b'?',
         });
     }
-    PhpString::new(req, &out)
+    let written = out.written();
+    if written < s.len() {
+        fresh = fresh.truncate(req, written)?;
+    }
+    Ok(fresh.finish())
 }
 
 /// `get_next_char(cs_utf_8, ...)` (`Z/ext/standard/html.c:89`), what

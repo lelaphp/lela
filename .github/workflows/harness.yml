@@ -123,8 +123,9 @@ jobs:
       # the build that wrote them is the header line of the committed
       # file, `// Written by Claude Code <version>.`, which `cargo test -p
       # xtask --test map` reads, so no Claude Code is installed here and
-      # no pin is stated here. `tsc` holds the module to the committed
-      # file; `plugin validate --strict` ran at the same pre-commit. The
+      # no pin is stated here. `tsc` holds the modules and their tests to
+      # the committed file (#3831); `plugin validate --strict` ran at the
+      # same pre-commit. The
       # wall-clock, measured on the dev machine (2026-09-10, M-series,
       # warm npm cache): `tsc` 0.9 s; the runner's figure, with a cold npm
       # cache, is read off the first run.

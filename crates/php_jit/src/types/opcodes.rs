@@ -612,6 +612,69 @@ pub(super) fn is_call(opcode: Opcode) -> bool {
     )
 }
 
+/// Whether the call an inline `init` began is linked into its frame's
+/// call chain at once, or held apart until its call, given the oplines
+/// the trace serves after it in its frame, `after`, up to a frame
+/// change or the trace's end: php's `zend_jit_needs_call_chain` over a
+/// trace (`Z/ext/opcache/jit/zend_jit.c:259-330`). A send is passed
+/// over; a call holds it apart; another call's start, a jump or a
+/// frame change links it; any other opline links it unless `init` is
+/// an `INIT_FCALL`, since php asks `zend_may_throw` of the init's own
+/// opline there, and of the `INIT_*` oplines only `INIT_FCALL`'s cannot
+/// throw (`Z/Zend/Optimizer/zend_inference.c:5049-5051`).
+pub(super) fn needs_call_chain(init: Opcode, after: impl IntoIterator<Item = Opcode>) -> bool {
+    for opcode in after {
+        match opcode {
+            Opcode::SendArray
+            | Opcode::SendUser
+            | Opcode::SendUnpack
+            | Opcode::InitFcall
+            | Opcode::InitMethodCall
+            | Opcode::InitStaticMethodCall
+            | Opcode::InitParentPropertyHookCall
+            | Opcode::InitFcallByName
+            | Opcode::InitNsFcallByName
+            | Opcode::InitDynamicCall
+            | Opcode::New
+            | Opcode::InitUserCall
+            | Opcode::FastCall
+            | Opcode::Jmp
+            | Opcode::Jmpz
+            | Opcode::Jmpnz
+            | Opcode::JmpzEx
+            | Opcode::JmpnzEx
+            | Opcode::FeResetR
+            | Opcode::FeResetRw
+            | Opcode::JmpSet
+            | Opcode::Coalesce
+            | Opcode::JmpNull
+            | Opcode::AssertCheck
+            | Opcode::Catch
+            | Opcode::DeclareAnonClass
+            | Opcode::FeFetchR
+            | Opcode::FeFetchRw
+            | Opcode::BindInitStaticOrJmp
+            | Opcode::JmpFrameless => return true,
+            Opcode::DoIcall
+            | Opcode::DoUcall
+            | Opcode::DoFcallByName
+            | Opcode::DoFcall
+            | Opcode::CallableConvert => return false,
+            Opcode::SendVal
+            | Opcode::SendVar
+            | Opcode::SendValEx
+            | Opcode::SendVarEx
+            | Opcode::SendFuncArg
+            | Opcode::SendRef
+            | Opcode::SendVarNoRef
+            | Opcode::SendVarNoRefEx => {}
+            _ if init != Opcode::InitFcall => return true,
+            _ => {}
+        }
+    }
+    true
+}
+
 /// The inline oplines that may not finish, and leave the trace for the
 /// interpreter to serve them again: a division or a modulo by zero or a
 /// shift by a negative number throws, where no constant divisor or shift

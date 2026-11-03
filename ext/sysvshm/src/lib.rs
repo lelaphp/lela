@@ -98,14 +98,14 @@ fn leading_long(bytes: &[u8]) -> i64 {
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            shm_attach::declared(),
-            shm_detach::declared(),
-            shm_has_var::declared(),
-            shm_remove::declared(),
-            shm_put_var::declared(),
-            shm_get_var::declared(),
-            shm_remove_var::declared(),
+        .functions(&[
+            shm_attach::DECLARED,
+            shm_detach::DECLARED,
+            shm_has_var::DECLARED,
+            shm_remove::DECLARED,
+            shm_put_var::DECLARED,
+            shm_get_var::DECLARED,
+            shm_remove_var::DECLARED,
         ])
         .class::<SysvSharedMemory>()
         .engine_state(Config::start)

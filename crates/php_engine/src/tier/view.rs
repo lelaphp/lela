@@ -61,6 +61,16 @@ impl Epoch {
         self.func(f).map_or(&SEALED, |func| func.landing(at))
     }
 
+    /// [`Epoch::landing`] where the op array's landing words are laid
+    /// down, each of which stands where it is for as long as the epoch,
+    /// so a tier may keep its address from one return to the next. None
+    /// where they are not, when the landing reads sealed until a tier lays
+    /// them, and for an op array this epoch holds no row for.
+    #[must_use]
+    pub fn laid_landing(&self, f: FuncRef, at: OplineIdx) -> Option<&Word> {
+        self.func(f)?.laid_landing(at)
+    }
+
     /// The landing word of opline `at` of the op array `f` names, for a
     /// tier to arm, the op array's landing words laid down sealed the
     /// first time; none for an op array this epoch holds no row for, and
@@ -362,10 +372,14 @@ pub fn served(req: &Request, frame: FrameRef) -> Option<Held<'_>> {
 
 /// The landing word of opline `at` of the op array `frame` serves, what
 /// the tier reads where a return lands there ([`Epoch::landing`]): the
-/// sealed word until a tier armed it, and for an op array no epoch holds.
+/// sealed word until a tier armed it, and for an op array no epoch holds;
+/// with that op array ([`served`]), read off the one row, which the tier
+/// reads past a landing no trace armed (`jit-design.md` §4.9).
 #[must_use]
-pub fn landing(req: &Request, frame: FrameRef, at: OplineIdx) -> &Word {
-    held(req, frame).map_or(&SEALED, |func| func.landing(at))
+pub fn landing(req: &Request, frame: FrameRef, at: OplineIdx) -> (&Word, Option<Held<'_>>) {
+    held(req, frame).map_or((&SEALED, None), |func| {
+        (func.landing(at), func.op_array().map(Held))
+    })
 }
 
 /// Where a request keeps one slot of a held op array's `run_time_cache`:

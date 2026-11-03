@@ -160,7 +160,7 @@ pub(super) fn frameless_natives() -> Vec<FunctionDecl> {
     ]
     .into_iter()
     .map(|(name, parameters, frameless)| FunctionDecl {
-        parameters,
+        parameters: parameters.into(),
         frameless,
         ..php_unit::decl::native_function(name.as_bytes())
     })

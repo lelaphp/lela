@@ -210,6 +210,38 @@ pub fn compare(left: Scalar, right: Scalar, precision: i32) -> Ordering {
     }
 }
 
+/// `zend_fast_equal_strings` (`Z/Zend/zend_operators.h:919`), `==`
+/// over two strings without [`compare`]: the same string is equal, a
+/// first byte past `'9'` on either side compares the bytes alone, and
+/// any other pair is `zendi_smart_str_equals`, equal where
+/// `zendi_smart_strcmp` orders the two as one ([`smart_strcmp`]).
+/// `fast_equal_check_string` reads it, as `in_array` does an element
+/// that is a string.
+///
+/// ```php
+/// $h = ["abc", "1e1", " 10", "10 ", "9223372036854775809", "2e1000", "", "0x1A"];
+/// foreach (["abc", "10", "9223372036854775808", "1e1000", "0", "26"] as $n) echo $n, ": [", implode(",", array_keys(array_filter($h, fn ($v) => $v == $n))), "]\n";
+/// ```
+/// ```expect
+/// abc: [0]
+/// 10: [1,2,3]
+/// 9223372036854775808: []
+/// 1e1000: []
+/// 0: []
+/// 26: []
+/// ```
+#[must_use]
+#[inline]
+pub fn equal_strings(a: &[u8], b: &[u8]) -> bool {
+    if std::ptr::eq(a, b) {
+        true
+    } else if a.first() > Some(&b'9') || b.first() > Some(&b'9') {
+        a == b
+    } else {
+        smart_strcmp(a, b) == Ordering::Equal
+    }
+}
+
 /// `ZEND_THREEWAY_COMPARE` over two doubles, which [`Number::compare`]
 /// holds.
 fn three_way(a: f64, b: f64) -> Ordering {

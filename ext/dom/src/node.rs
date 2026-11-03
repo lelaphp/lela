@@ -962,9 +962,14 @@ fn canonicalization(
             );
         }
     }
+    // A wrapper's `stream_open`, `stream_write` and `stream_close` are PHP
+    // code that can free a relinked element before `links` puts it back, so
+    // a relinked tree is canonicalized into memory and its file written once
+    // the tree is restored.
+    let restored_first = file.filter(|_| links.is_some());
     let target = match file {
-        Some(f) => C14nTarget::File(f),
-        None => C14nTarget::Memory,
+        Some(f) if restored_first.is_none() => C14nTarget::File(f),
+        _ => C14nTarget::Memory,
     };
     let (out, raised, thrown) = Save::c14n(
         req,
@@ -977,6 +982,11 @@ fn canonicalization(
     );
     drop(query_holder);
     drop(links);
+    Errors::settle(req, raised, thrown)?;
+    let (Some(path), C14nOut::Bytes(bytes)) = (restored_first, &out) else {
+        return Ok(out);
+    };
+    let (out, raised, thrown) = Save::c14n_file(req, path, bytes);
     Errors::settle(req, raised, thrown)?;
     Ok(out)
 }
@@ -1480,18 +1490,24 @@ impl DOMNode {
         })
     }
 
-    /// `DOMNode::C14NFile(string $uri, ...): int|false`.
+    /// `DOMNode::C14NFile(string $uri, ...): int|false`, and
+    /// `Dom\Node::C14NFile`, whose file is written once the tree it
+    /// relinked is restored.
     ///
     /// ```php
     /// $d = new DOMDocument;
     /// $d->loadXML('<r/>');
     /// $f = tempnam(sys_get_temp_dir(), 'c14n');
     /// var_dump($d->C14NFile($f), file_get_contents($f));
+    /// $m = Dom\XMLDocument::createFromString('<r xmlns="urn:r" xmlns:p="urn:p" p:b="2"><p:c/></r>');
+    /// var_dump($m->documentElement->firstChild->C14NFile($f), file_get_contents($f));
     /// unlink($f);
     /// ```
     /// ```expect
     /// int(7)
     /// string(7) "<r></r>"
+    /// int(41)
+    /// string(41) "<p:c xmlns="urn:r" xmlns:p="urn:p"></p:c>"
     /// ```
     #[php(tentative)]
     fn C14NFile(

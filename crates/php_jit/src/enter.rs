@@ -45,8 +45,8 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::AtomicBool;
 
 use php_engine::tier::{
-    self, CachedSlot, Epoch, Fatal, FrameRef, FramelessAt, FuncRef, Held, Request, Stepped,
-    TraceNum,
+    self, CachedSlot, Epoch, Fatal, FrameRef, FramelessAt, FuncRef, Held, Request, SafepointIdx,
+    Stepped, TraceNum, Word,
 };
 use php_heap::{Arr, HeaderImage, Key, Scalar, Zval, ZvalRef, ZvalType};
 use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
@@ -110,7 +110,8 @@ pub(crate) struct ExitCtx<'a, R = Request> {
     /// The request's addresses the trace's code reads, the headers of the
     /// calls it pushes in place and the cache slots it reads ([`Images`]).
     images: *const usize,
-    /// The place on the stack of the frame the trace is entered on.
+    /// The place on the stack of the frame the trace is entered on, and,
+    /// where it escapes, of the frame it escaped into.
     root: u32,
     /// Not zero where the trace pushes and makes its calls in place in
     /// this request: each one's header is the request's, and the caches of
@@ -414,6 +415,8 @@ pub(crate) struct Lent<'l> {
     pub(crate) state: &'l crate::JitRequest,
     pub(crate) epoch: &'l Epoch,
     pub(crate) table: Option<&'l crate::table::Table>,
+    /// Made by [`lent`] alone, so `epoch` is the one `state` holds.
+    _made: (),
 }
 
 impl<'l> Lent<'l> {
@@ -421,6 +424,175 @@ impl<'l> Lent<'l> {
     pub(crate) fn shared(self) -> &'l crate::Shared {
         &self.state.shared
     }
+
+    /// The words the request kept for opline `at` of the op array `func`
+    /// names ([`Landings::landed`]), of the epoch the state holds.
+    #[inline]
+    pub(crate) fn landed(self, func: FuncRef, at: OplineIdx) -> Option<Landed<'l>> {
+        // SAFETY: the state's `Landings` is kept through `Lent::keep`
+        // alone, which hands it `self.epoch`, and `self.epoch` is the
+        // epoch the state holds, laid once (`lent`, which alone makes a
+        // `Lent`): every word kept there is of this epoch, which the state
+        // holds for at least `'l`.
+        unsafe { self.state.landings.landed(self.epoch, func, at) }
+    }
+
+    /// Keep the words a return or a leave reads where it goes on at
+    /// opline `at` of the op array `func` names ([`Landings::keep`]), of
+    /// the epoch the state holds.
+    pub(crate) fn keep(
+        self,
+        func: FuncRef,
+        at: OplineIdx,
+        header: Option<SafepointIdx>,
+    ) -> Landed<'l> {
+        self.state.landings.keep(self.epoch, func, at, header)
+    }
+}
+
+/// How many oplines a request keeps the words of ([`Landings`]): a
+/// recursion that returns past each of two calls in turn, as fib's and
+/// `make_tree`'s in `binary_trees` do, finds both, with room for a caller's.
+const LANDINGS: usize = 4;
+
+/// The sealed word, which a landing reads where its op array's landing
+/// words are not laid down.
+static SEALED: Word = Word::sealed();
+
+/// Where the request went on last at an opline past a return or a
+/// trace's leave (`dispatch::goes_on`), as php's interpreter finds the
+/// handler an opline holds in the opline itself with no search: for each
+/// of the last [`LANDINGS`] oplines, of an op array the epoch holds, the
+/// address of its landing word, where its op array's are laid down, and
+/// that of the word of the loop rooted there, where one is; so a return
+/// that lands there again reads its word with no row of the epoch read.
+/// Kept in the request's tier state and read and written through a lend
+/// of it alone ([`Lent::landed`], [`Lent::keep`]), so every address is of
+/// a word of the one epoch the state holds.
+#[derive(Debug, Default)]
+pub(crate) struct Landings {
+    kept: [std::cell::Cell<Kept>; LANDINGS],
+    next: std::cell::Cell<usize>,
+}
+
+/// One opline [`Landings`] keeps; its addresses zero where it keeps
+/// none, and `func` none in a place that keeps nothing.
+#[derive(Debug, Default, Clone, Copy)]
+struct Kept {
+    func: Option<FuncRef>,
+    at: OplineIdx,
+    landing: usize,
+    header: usize,
+}
+
+/// The words a return or a leave reads where it goes on at an opline
+/// ([`Landings::landed`]): its landing word, sealed until a trace armed
+/// it, and the word of the loop rooted there, where one is.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Landed<'l> {
+    pub(crate) landing: &'l Word,
+    pub(crate) header: Option<&'l Word>,
+}
+
+impl Landings {
+    /// The words kept for opline `at` of the op array `func` names; none
+    /// where none are kept. A landing word its op array had not laid down
+    /// when it was kept is read again, since a trace may have armed it
+    /// since, and kept where it is laid now.
+    ///
+    /// # Safety
+    ///
+    /// `epoch` is the one every word kept here was kept of, by
+    /// [`Landings::keep`].
+    #[inline]
+    unsafe fn landed<'e>(
+        &self,
+        epoch: &'e Epoch,
+        func: FuncRef,
+        at: OplineIdx,
+    ) -> Option<Landed<'e>> {
+        let (slot, kept) = (self.kept.iter())
+            .map(|slot| (slot, slot.get()))
+            .find(|(_, kept)| kept.func == Some(func) && kept.at == at)?;
+        let landing = match kept.landing {
+            0 => laid_since(epoch, slot, kept),
+            // SAFETY: kept by `keep` or `laid_since`, of `epoch`, as this
+            // function's contract says.
+            landing => unsafe { kept_word(epoch, landing) },
+        };
+        // SAFETY: kept by `keep`, of `epoch`, as this function's contract
+        // says.
+        let header = (kept.header != 0).then(|| unsafe { kept_word(epoch, kept.header) });
+        Some(Landed { landing, header })
+    }
+
+    /// Keep the words a return or a leave reads where it goes on at
+    /// opline `at` of the op array `func` names, of `epoch`, the one every
+    /// word kept here is of: its landing word, and the word of the loop
+    /// rooted there, `header`; in place of the opline kept longest.
+    fn keep<'e>(
+        &self,
+        epoch: &'e Epoch,
+        func: FuncRef,
+        at: OplineIdx,
+        header: Option<SafepointIdx>,
+    ) -> Landed<'e> {
+        let landing = epoch.laid_landing(func, at);
+        let header = header.map(|header| epoch.word(func, header));
+        let next = self.next.get();
+        if let Some(slot) = self.kept.get(next) {
+            slot.set(Kept {
+                func: Some(func),
+                at,
+                landing: landing.map_or(0, address),
+                header: header.map_or(0, address),
+            });
+        }
+        self.next.set((next + 1) % LANDINGS);
+        Landed {
+            landing: landing.unwrap_or(&SEALED),
+            header,
+        }
+    }
+}
+
+/// The landing word `kept` keeps none of, its op array's landing words
+/// not laid down when it was kept: the word laid since, kept in `slot`
+/// from now on, or the sealed word where none is laid yet.
+#[cold]
+#[inline(never)]
+fn laid_since<'e>(epoch: &'e Epoch, slot: &std::cell::Cell<Kept>, kept: Kept) -> &'e Word {
+    let Some(func) = kept.func else {
+        return &SEALED;
+    };
+    epoch.laid_landing(func, kept.at).map_or(&SEALED, |word| {
+        slot.set(Kept {
+            landing: address(word),
+            ..kept
+        });
+        word
+    })
+}
+
+/// The word at `address`, which [`Landings`] kept, for as long as
+/// `epoch` is borrowed.
+///
+/// # Safety
+///
+/// `address` is that of a word of `epoch`'s that [`Landings`] kept: a
+/// safepoint's word, or a landing word its op array laid down, each of
+/// which the epoch's rows keep where it was laid, written only through
+/// its atomics, until the epoch drops (`tier::published`).
+unsafe fn kept_word(_epoch: &Epoch, address: usize) -> &Word {
+    let word = ptr::with_exposed_provenance::<Word>(address);
+    // SAFETY: the function's contract: the word stands for as long as
+    // `epoch`, which the borrow keeps.
+    unsafe { &*word }
+}
+
+/// The address of `word`, its provenance exposed, as [`Landings`] keeps it.
+fn address(word: &Word) -> usize {
+    ptr::from_ref(word).expose_provenance()
 }
 
 /// `serve` given the request and what it lends of itself ([`Lent`]): the
@@ -467,6 +639,7 @@ pub(crate) fn lent<T>(
             state,
             epoch,
             table,
+            _made: (),
         },
     );
     // The state stands where it was lent: not replaced or moved while
@@ -1246,7 +1419,7 @@ pub(crate) fn enter<'t>(
     // the room of a frame on the request's stack, and the body is the
     // trace's, as the prologue asks.
     let answer = unsafe { entry(&raw mut cx, room.as_ptr(), trace.body().as_ptr()) };
-    let (pending, by) = (cx.take_pending(), cx.trace);
+    let (pending, by, escaped) = (cx.take_pending(), cx.trace, cx.root);
     tier::set_trace_num(req, before);
     match pending {
         Some(Pending::Panic(payload)) => resume_unwind(payload),
@@ -1284,9 +1457,14 @@ pub(crate) fn enter<'t>(
             tier::stand(req, frame, header);
             Left::Interrupted(frame)
         }
+        // The frame the escape returned into, which its code hands back.
         Answer::Escaped => {
-            let frame =
-                tier::current(req).ok_or_else(|| internal("a trace left no frame standing"))?;
+            let frame = FrameRef(escaped);
+            debug_assert_eq!(
+                tier::current(req),
+                Some(frame),
+                "an escape hands back the innermost frame"
+            );
             Left::Escaped(frame)
         }
         Answer::Returned => Left::Returned,

@@ -38,8 +38,10 @@ fn by_name(strings: &mut php_heap::Strings) -> PublishedUnit {
                     out: 0,
                     ..Opline::default()
                 },
-            ],
-            literals: vec![written, lowered, argument],
+                back(),
+            ]
+            .into(),
+            literals: vec![written, lowered, argument].into(),
             num_tmps: 1,
             cache_size: 8,
             ..OpArray::default()
@@ -109,8 +111,8 @@ fn a_call_by_name_looks_the_table_up_once_and_reads_its_slot_after() {
     let strlen = req.function_named(Bare::resolved(b"strlen"));
     assert!(strlen.is_some());
     assert_eq!(
-        req.cached(frame, CacheSlot(init.out)),
-        Cached::Function(strlen.unwrap_or(Function::PASS)),
+        req.cached(frame, CacheSlot(init.out)).function(),
+        strlen,
         "and primes the slot with the callee"
     );
 
@@ -128,12 +130,18 @@ fn a_call_by_name_looks_the_table_up_once_and_reads_its_slot_after() {
 }
 
 /// A unit declaring `f`, whose body is the `INIT_FCALL_BY_NAME` of
-/// [`by_name`] alone, and a main op array with a cache slot of its
-/// own, not yet shared.
+/// [`by_name`] alone and its return, and a main op array with a cache
+/// slot of its own, not yet shared.
 fn declaring_f(strings: &mut php_heap::Strings) -> Unit {
     let by_name = by_name(strings);
     let mut body = by_name.main.clone();
-    body.oplines = body.oplines.iter().take(1).copied().collect();
+    body.oplines = body
+        .oplines
+        .iter()
+        .take(1)
+        .copied()
+        .chain([back()])
+        .collect();
     let decl = php_unit::decl::native_function(b"f");
     Unit {
         main: OpArray {
@@ -220,8 +228,8 @@ fn called_twice(mut req: Box<Request>, unit: &PublishedUnit) {
             "the first call looks the table up and the second reads the slot (call {call})"
         );
         assert_eq!(
-            req.cached(frame, CacheSlot(init.out)),
-            Cached::Function(strlen.unwrap_or(Function::PASS)),
+            req.cached(frame, CacheSlot(init.out)).function(),
+            strlen,
             "the slot is primed with the callee (call {call})"
         );
         assert_eq!(popped_callee(&mut req), strlen, "call {call}");
@@ -238,7 +246,7 @@ fn called_twice(mut req: Box<Request>, unit: &PublishedUnit) {
 /// given up.
 fn popped_callee(req: &mut Request) -> Option<Function> {
     let call = req.building_call()?;
-    let callee = req.vm().at(call)?.function;
+    let callee = req.vm().at(call)?.function();
     req.pop_call();
     callee
 }
@@ -254,19 +262,24 @@ fn a_namespaced_call_by_name_looks_the_table_up_twice_once() {
     let mut strings = php_heap::Strings::new();
     let unit = Unit {
         main: OpArray {
-            oplines: vec![Opline {
-                opcode: Opcode::InitNsFcallByName,
-                op2_type: OperandKind::Const,
-                op2: 0,
-                out: 8,
-                extended_value: 0,
-                ..Opline::default()
-            }],
+            oplines: vec![
+                Opline {
+                    opcode: Opcode::InitNsFcallByName,
+                    op2_type: OperandKind::Const,
+                    op2: 0,
+                    out: 8,
+                    extended_value: 0,
+                    ..Opline::default()
+                },
+                back(),
+            ]
+            .into(),
             literals: vec![
                 interned(&mut strings, b"Foo\\StrLen"),
                 interned(&mut strings, b"foo\\strlen"),
                 interned(&mut strings, b"strlen"),
-            ],
+            ]
+            .into(),
             cache_size: 16,
             ..OpArray::default()
         },
@@ -283,10 +296,7 @@ fn a_namespaced_call_by_name_looks_the_table_up_twice_once() {
         Ok(Stepped::Same(frame))
     );
     assert_eq!(req.vm().lookups, 2, "foo\\strlen misses, strlen hits");
-    assert_eq!(
-        req.cached(frame, CacheSlot(8)),
-        Cached::Function(strlen.unwrap_or(Function::PASS))
-    );
+    assert_eq!(req.cached(frame, CacheSlot(8)).function(), strlen);
     assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
     assert_eq!(
@@ -308,17 +318,22 @@ fn a_call_by_name_nothing_declares_primes_no_slot() {
     let mut strings = php_heap::Strings::new();
     let unit = Unit {
         main: OpArray {
-            oplines: vec![Opline {
-                opcode: Opcode::InitFcallByName,
-                op2_type: OperandKind::Const,
-                op2: 0,
-                out: 0,
-                ..Opline::default()
-            }],
+            oplines: vec![
+                Opline {
+                    opcode: Opcode::InitFcallByName,
+                    op2_type: OperandKind::Const,
+                    op2: 0,
+                    out: 0,
+                    ..Opline::default()
+                },
+                back(),
+            ]
+            .into(),
             literals: vec![
                 interned(&mut strings, b"NoPe"),
                 interned(&mut strings, b"nope"),
-            ],
+            ]
+            .into(),
             cache_size: 8,
             ..OpArray::default()
         },

@@ -819,8 +819,8 @@ impl Request {
                 .filter_map(|here| self.symbols().class_decl(here))
             {
                 for p in &decl.properties {
-                    if !names.contains(&p.name.0) {
-                        names.push(p.name.0.clone());
+                    if !names.iter().any(|name| **name == *p.name.0) {
+                        names.push(Box::from(&*p.name.0));
                     }
                 }
             }

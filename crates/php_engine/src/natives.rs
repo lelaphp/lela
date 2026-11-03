@@ -31,8 +31,9 @@ use std::ops::ControlFlow;
 use php_macros::php_function;
 use php_unit::decl::ClassKind;
 
+use crate::api::__private::NativeFunction;
 use crate::api::abi::{
-    Callable, Entry, Never, OrFalse, Passed, PropertyPurpose, Raw, Union, Variadic,
+    Callable, FunctionRow, Never, OrFalse, Passed, PropertyPurpose, Raw, Union, Variadic,
 };
 use crate::api::coerce::to_string;
 use crate::api::raising::{Thrown, arg_type_error, argument_error, deprecated, error, warning};
@@ -42,7 +43,6 @@ use crate::api::values::{
     Key, Laziness, Owner, PhpArray, PhpObject, PhpString, RecursionGuard, Value, ValueRef,
 };
 use crate::c_number::c_str;
-use php_unit::decl::FunctionDecl;
 
 mod backtrace;
 mod classes;
@@ -67,10 +67,10 @@ pub(crate) enum StubPlace {
 impl StubPlace {
     /// Whether a native at this place goes right after `last`, the
     /// function placed before it so far, none at the start of the list.
-    pub(crate) fn follows(self, last: Option<&FunctionDecl>) -> bool {
+    pub(crate) fn follows(self, last: Option<&[u8]>) -> bool {
         match (self, last) {
             (Self::First, None) => true,
-            (Self::After(name), Some(decl)) => decl.name.0.eq_ignore_ascii_case(name.as_bytes()),
+            (Self::After(name), Some(last)) => last.eq_ignore_ascii_case(name.as_bytes()),
             _ => false,
         }
     }
@@ -111,28 +111,40 @@ impl StubPlace {
 /// memory_reset_peak_usage 539
 /// version_compare 540
 /// ```
-pub(crate) fn standard() -> Vec<(StubPlace, (FunctionDecl, Entry))> {
+pub(crate) fn standard() -> Vec<(StubPlace, FunctionRow)> {
     vec![
-        (StubPlace::First, set_time_limit::declared()),
+        (StubPlace::First, FunctionRow::of(&set_time_limit::DECLARED)),
         (
             StubPlace::After("forward_static_call_array"),
-            register_shutdown_function::declared(),
+            FunctionRow::of(&register_shutdown_function::DECLARED),
         ),
-        (StubPlace::After("highlight_string"), ini_get::declared()),
-        (StubPlace::After("ini_get_all"), ini_set::declared()),
-        (StubPlace::After("ini_set"), ini_alter::declared()),
-        (StubPlace::After("convert_uudecode"), var_dump::declared()),
+        (
+            StubPlace::After("highlight_string"),
+            FunctionRow::of(&ini_get::DECLARED),
+        ),
+        (
+            StubPlace::After("ini_get_all"),
+            FunctionRow::of(&ini_set::DECLARED),
+        ),
+        (
+            StubPlace::After("ini_set"),
+            FunctionRow::of(&ini_alter::DECLARED),
+        ),
+        (
+            StubPlace::After("convert_uudecode"),
+            FunctionRow::of(&var_dump::DECLARED),
+        ),
         (
             StubPlace::After("unserialize"),
-            memory_get_usage::declared(),
+            FunctionRow::of(&memory_get_usage::DECLARED),
         ),
         (
             StubPlace::After("memory_get_usage"),
-            memory_get_peak_usage::declared(),
+            FunctionRow::of(&memory_get_peak_usage::DECLARED),
         ),
         (
             StubPlace::After("memory_get_peak_usage"),
-            memory_reset_peak_usage::declared(),
+            FunctionRow::of(&memory_reset_peak_usage::DECLARED),
         ),
     ]
 }
@@ -141,70 +153,70 @@ pub(crate) fn standard() -> Vec<(StubPlace, (FunctionDecl, Entry))> {
 /// order, which is the order `get_defined_functions()` and
 /// `get_extension_funcs('Core')` list them in; `zend_thread_id`, which a
 /// build without `ZEND_DEBUG` and `ZTS` does not declare, left out.
-pub(crate) fn core() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        clone::declared(),
-        exit::declared(),
-        die::declared(),
-        functions::zend_version::declared(),
-        functions::func_num_args::declared(),
-        functions::func_get_arg::declared(),
-        functions::func_get_args::declared(),
-        strlen::declared(),
-        functions::strcmp::declared(),
-        functions::strncmp::declared(),
-        functions::strcasecmp::declared(),
-        functions::strncasecmp::declared(),
-        error_reporting::declared(),
-        define::declared(),
-        defined::declared(),
-        get_class::declared(),
-        classes::get_called_class::declared(),
-        classes::get_parent_class::declared(),
-        classes::is_subclass_of::declared(),
-        classes::is_a::declared(),
-        classes::get_class_vars::declared(),
-        classes::get_object_vars::declared(),
-        classes::get_mangled_object_vars::declared(),
-        classes::get_class_methods::declared(),
-        classes::method_exists::declared(),
-        classes::property_exists::declared(),
-        class_exists::declared(),
-        classes::interface_exists::declared(),
-        classes::trait_exists::declared(),
-        classes::enum_exists::declared(),
-        functions::function_exists::declared(),
-        classes::class_alias::declared(),
-        functions::get_included_files::declared(),
-        functions::get_required_files::declared(),
-        errors::trigger_error::declared(),
-        errors::user_error::declared(),
-        errors::set_error_handler::declared(),
-        errors::restore_error_handler::declared(),
-        errors::get_error_handler::declared(),
-        errors::set_exception_handler::declared(),
-        errors::restore_exception_handler::declared(),
-        errors::get_exception_handler::declared(),
-        classes::get_declared_classes::declared(),
-        classes::get_declared_traits::declared(),
-        classes::get_declared_interfaces::declared(),
-        functions::get_defined_functions::declared(),
-        functions::get_defined_vars::declared(),
-        functions::get_resource_type::declared(),
-        functions::get_resource_id::declared(),
-        functions::get_resources::declared(),
-        functions::get_loaded_extensions::declared(),
-        functions::get_defined_constants::declared(),
-        backtrace::debug_backtrace::declared(),
-        backtrace::debug_print_backtrace::declared(),
-        extension_loaded::declared(),
-        functions::get_extension_funcs::declared(),
-        gc_mem_caches::declared(),
-        gc_collect_cycles::declared(),
-        gc_enabled::declared(),
-        gc_enable::declared(),
-        gc_disable::declared(),
-        gc_status::declared(),
+pub(crate) fn core() -> &'static [NativeFunction] {
+    &[
+        clone::DECLARED,
+        exit::DECLARED,
+        die::DECLARED,
+        functions::zend_version::DECLARED,
+        functions::func_num_args::DECLARED,
+        functions::func_get_arg::DECLARED,
+        functions::func_get_args::DECLARED,
+        strlen::DECLARED,
+        functions::strcmp::DECLARED,
+        functions::strncmp::DECLARED,
+        functions::strcasecmp::DECLARED,
+        functions::strncasecmp::DECLARED,
+        error_reporting::DECLARED,
+        define::DECLARED,
+        defined::DECLARED,
+        get_class::DECLARED,
+        classes::get_called_class::DECLARED,
+        classes::get_parent_class::DECLARED,
+        classes::is_subclass_of::DECLARED,
+        classes::is_a::DECLARED,
+        classes::get_class_vars::DECLARED,
+        classes::get_object_vars::DECLARED,
+        classes::get_mangled_object_vars::DECLARED,
+        classes::get_class_methods::DECLARED,
+        classes::method_exists::DECLARED,
+        classes::property_exists::DECLARED,
+        class_exists::DECLARED,
+        classes::interface_exists::DECLARED,
+        classes::trait_exists::DECLARED,
+        classes::enum_exists::DECLARED,
+        functions::function_exists::DECLARED,
+        classes::class_alias::DECLARED,
+        functions::get_included_files::DECLARED,
+        functions::get_required_files::DECLARED,
+        errors::trigger_error::DECLARED,
+        errors::user_error::DECLARED,
+        errors::set_error_handler::DECLARED,
+        errors::restore_error_handler::DECLARED,
+        errors::get_error_handler::DECLARED,
+        errors::set_exception_handler::DECLARED,
+        errors::restore_exception_handler::DECLARED,
+        errors::get_exception_handler::DECLARED,
+        classes::get_declared_classes::DECLARED,
+        classes::get_declared_traits::DECLARED,
+        classes::get_declared_interfaces::DECLARED,
+        functions::get_defined_functions::DECLARED,
+        functions::get_defined_vars::DECLARED,
+        functions::get_resource_type::DECLARED,
+        functions::get_resource_id::DECLARED,
+        functions::get_resources::DECLARED,
+        functions::get_loaded_extensions::DECLARED,
+        functions::get_defined_constants::DECLARED,
+        backtrace::debug_backtrace::DECLARED,
+        backtrace::debug_print_backtrace::DECLARED,
+        extension_loaded::DECLARED,
+        functions::get_extension_funcs::DECLARED,
+        gc_mem_caches::DECLARED,
+        gc_collect_cycles::DECLARED,
+        gc_enabled::DECLARED,
+        gc_enable::DECLARED,
+        gc_disable::DECLARED,
+        gc_status::DECLARED,
     ]
 }
 
@@ -2507,10 +2519,10 @@ fn register_shutdown_function(
     args: Variadic<Value>,
 ) -> Result<(), Thrown> {
     let callback = Owner::take(req, callback);
-    for value in args.iter() {
-        req.addref(value);
+    for value in args.clone() {
+        req.addref(&value);
     }
-    let arguments = args.into_iter().collect();
+    let arguments = args.collect();
     req.code_mut()
         .register_shutdown_function(callback, arguments)
 }

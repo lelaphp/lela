@@ -58,8 +58,12 @@ fn global(req: &mut Request) -> &mut IntlError {
     &mut req.state::<State>().error
 }
 
-/// `<native>(): <message>`, as `intl_error_set_custom_msg` prefixes it.
+/// `<native>(): <message>`, as `intl_error_set_custom_msg` prefixes it,
+/// and the message alone while nothing executes (`zend_is_executing`).
 fn prefixed(req: &Request, message: &[u8]) -> Vec<u8> {
+    if !req.frames().executing() {
+        return message.to_vec();
+    }
     [
         req.frames().active_function_name().as_bytes(),
         b"(): ",

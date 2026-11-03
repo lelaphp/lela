@@ -13,7 +13,7 @@ use crate::ffi::idn::Idna;
 
 /// `idn_*` in the stub's order.
 pub(crate) fn functions(b: ExtensionBuilder) -> ExtensionBuilder {
-    b.functions(vec![idn_to_ascii::declared(), idn_to_utf8::declared()])
+    b.functions(&[idn_to_ascii::DECLARED, idn_to_utf8::DECLARED])
 }
 
 /// `idn_to_ascii(string $domain, int $flags = IDNA_DEFAULT, int $variant = INTL_IDNA_VARIANT_UTS46, &$idna_info = null): string|false`.

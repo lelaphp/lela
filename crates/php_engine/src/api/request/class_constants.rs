@@ -398,7 +398,7 @@ impl Request {
         let constants: Vec<(ClassId, Box<[u8]>)> = (self.symbols().constants_in_order(class))
             .into_iter()
             .filter(|(_, constant)| !constant.is_case)
-            .map(|(declaring, constant)| (declaring, constant.name.0.clone()))
+            .map(|(declaring, constant)| (declaring, Box::from(&*constant.name.0)))
             .collect();
         for (declaring, name) in constants {
             self.evaluated_in(declaring, declaring, &name)?;

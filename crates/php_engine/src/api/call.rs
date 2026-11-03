@@ -808,7 +808,7 @@ pub(crate) fn handle_undef_args(req: &mut Request, call: FrameRef) -> Result<(),
     let Some(header) = req.vm().at(call) else {
         return Ok(());
     };
-    let (Some(function), building) = (header.function, header.info.building()) else {
+    let (Some(function), building) = (header.function(), header.info.building()) else {
         return Ok(());
     };
     // `start_fake_frame`: the call current while its defaults are found.
@@ -1897,6 +1897,101 @@ pub fn lookup_class(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, T
     Ok(req.class_named(Bare::of(name)))
 }
 
+/// `zend_lookup_class_ex(name, NULL, flags)` (`Z/Zend/zend_execute_API.c:1201`)
+/// over a name the program holds as a string: the class cache the
+/// string carries read first (`ZSTR_GET_CE_CACHE`), and on a miss the
+/// table, then the autoloaders where `autoload` asks for them
+/// ([`autoload`], [`lookup_class`]), the class found kept in that cache
+/// for the rest of the request. A lookup that finds nothing keeps
+/// nothing, so a class declared after it, by a condition or by a loader,
+/// is found by the next:
+///
+/// ```php
+/// function probe() { return [class_exists('Later'), interface_exists('Later'), enum_exists('Later'), is_a('Later', 'Later', true), is_subclass_of('Later', 'Later')]; }
+/// echo json_encode(probe()), "\n";
+/// if (count(probe()) === 5) { class Later {} }
+/// echo json_encode(probe()), json_encode([class_exists('later'), class_exists('\Later')]), "\n";
+/// $n = 'Later'; echo get_class(new $n), "\n";
+/// spl_autoload_register(function ($c) { echo "load $c\n"; if ($c === 'Loaded') { class Loaded extends Later {} } });
+/// var_dump(class_exists('Loaded', false), class_exists('Loaded'), is_subclass_of('Loaded', 'Later'), class_exists('Loaded'));
+/// class_alias('Later', 'Aliased');
+/// var_dump(class_exists('Aliased'), get_class(new Aliased), is_a(new Loaded, 'Aliased'));
+/// ```
+/// ```expect
+/// [false,false,false,false,false]
+/// [true,false,false,true,false][true,true]
+/// Later
+/// load Loaded
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// string(5) "Later"
+/// bool(true)
+/// ```
+///
+/// While the loaders are served the lookup holds an owner of the name, as
+/// php's `zend_string_copy` of it, so a loader that gives up the
+/// variable holding it leaves the bytes the table is asked by standing:
+///
+/// ```php
+/// spl_autoload_register(function ($c) { $GLOBALS['n'] = null; echo "load $c\n"; if ($c === 'Late' . 'r') { class Later {} } });
+/// $n = str_repeat('Late', 1) . 'r';
+/// var_dump(class_exists($n), $n);
+/// $n = str_repeat('Late', 1) . 'r'; echo get_class(new $n), "\n";
+/// ```
+/// ```expect
+/// load Later
+/// bool(true)
+/// NULL
+/// Later
+/// ```
+pub(crate) fn lookup_class_string(
+    req: &mut Request,
+    name: PhpString,
+    autoload: bool,
+) -> Result<Option<ClassId>, Thrown> {
+    let slot = crate::api::request::ce_cache(name.heap());
+    if let Some(class) = slot.and_then(|at| req.ce_cached(at)) {
+        return Ok(Some(class));
+    }
+    let found = if autoload {
+        let held = Value::string(name);
+        req.addref(&held);
+        let found = self::autoload(req, name.as_bytes());
+        req.release(held);
+        found?
+    } else {
+        lookup_class(req, name.as_bytes())?
+    };
+    if let (Some(at), Some(class)) = (slot, found) {
+        req.set_ce_cache(at, class);
+    }
+    Ok(found)
+}
+
+/// [`fetch_class`] over a name the program holds as a string,
+/// `zend_fetch_class(name, ZEND_FETCH_CLASS_EXCEPTION)` as `FETCH_CLASS`
+/// calls it on a `new $name`: the class cache the string carries first,
+/// which `self`, `parent` and `static` never carry, as
+/// `zend_lookup_class_ex` reads it past `zend_get_class_fetch_type`.
+pub(crate) fn fetch_class_string(req: &mut Request, name: PhpString) -> Result<ClassId, Thrown> {
+    let slot = crate::api::request::ce_cache(name.heap());
+    if let Some(class) = slot.and_then(|at| req.ce_cached(at)) {
+        return Ok(class);
+    }
+    let held = Value::string(name);
+    req.addref(&held);
+    let class = fetch_class(req, name.as_bytes());
+    req.release(held);
+    let class = class?;
+    if let Some(at) = slot {
+        req.set_ce_cache(at, class);
+    }
+    Ok(class)
+}
+
 /// The linked function named, without autoloading: `function_exists`'s
 /// lookup, a leading `\` skipped and the case folded, as php's
 /// `zend_hash_find(EG(function_table), lcname)` past the `\`.
@@ -2534,7 +2629,7 @@ fn evaluate_node(
                 return Err(type_error(req, &message));
             };
             req.release(named);
-            class_constant_expr(req, class, &Name(bytes.into_boxed_slice()), scope)
+            class_constant_expr(req, class, &Name(bytes.into()), scope)
         }
         // `ZEND_AST_CONST_ENUM_INIT` read back as the case it made: the
         // enum's one instance for the case (`zend_enum_get_case`), which

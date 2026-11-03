@@ -266,6 +266,7 @@ impl Request {
     /// ```
     pub(crate) fn bail_out(&mut self) {
         self.bailout_marks();
+        self.caught_under_walk();
         self.leave();
     }
 

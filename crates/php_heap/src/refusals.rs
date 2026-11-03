@@ -38,7 +38,7 @@ use std::ptr::NonNull;
 use crate::serial::alone;
 use crate::{
     Arr, Block, Fatal, FatalReason, Frame, GcTable, Heap, HeapHooks, Key, Obj, Res, ResourceType,
-    VmStack, Zval, ZvalType, efree, emalloc, erealloc,
+    SortKeys, VmStack, Zval, ZvalType, efree, emalloc, erealloc,
 };
 
 /// One page of a chunk, the smallest `run` the allocator hands out.
@@ -556,7 +556,9 @@ const POINTS: &[Point] = &[
         lay: full_list,
         op: |r| {
             let a = r.arr(0);
-            Heap::array_sort(r, a, false, &mut |_, x, y| long_of(y).cmp(&long_of(x)))
+            Heap::array_sort(r, a, SortKeys::Keep, &mut |_, x, y| {
+                long_of(y).cmp(&long_of(x))
+            })
         },
     },
     Point {
@@ -564,7 +566,9 @@ const POINTS: &[Point] = &[
         lay: full_hash,
         op: |r| {
             let a = r.arr(0);
-            Heap::array_sort(r, a, true, &mut |_, x, y| long_of(x).cmp(&long_of(y)))
+            Heap::array_sort(r, a, SortKeys::Renumber, &mut |_, x, y| {
+                long_of(x).cmp(&long_of(y))
+            })
         },
     },
     Point {

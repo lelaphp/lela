@@ -93,7 +93,7 @@ fn serving_hook(req: &mut Request, beneath: Beneath<'_, chain::Interrupt>) -> Re
 fn switching_held(hooked: bool) -> Engine {
     let extension = ExtensionBuilder::default()
         .request_state::<Entered>()
-        .functions(vec![held_unit::declared()]);
+        .functions(&[held_unit::DECLARED]);
     let extension = if hooked {
         extension.interrupt(serving_hook)
     } else {

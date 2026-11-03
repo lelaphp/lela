@@ -16,11 +16,153 @@
 //! once nothing holds the unit, as its last holder gives it up, so an
 //! `eval` in a loop grows neither the engine's count nor the request's
 //! table.
+//!
+//! Either table's entry names a cache; its slots stand in one slab of
+//! the request's ([`Slab`]), and a frame reads them off the base its
+//! activation resolved the entry to ([`CacheBase`]), never through the
+//! entry again, as php's frame reads `EX(run_time_cache)` and never the
+//! map pointer.
 
 use php_heap::{MapPtr, MapTable};
 use php_unit::{MapPtrOffset, OpArray, PublishedUnit, Unit, WeakUnit};
 
-use super::RuntimeCache;
+use super::{CacheSlot, Cached, RuntimeCache, SLOT_BYTES};
+
+/// `EX(run_time_cache)` resolved: where a laid cache's first slot stands
+/// in the request's [`Slab`], which an activation reads off the cache it
+/// lays or finds laid, once, as `i_init_func_execute_data` reads
+/// `RUN_TIME_CACHE(op_array)` once into `EX(run_time_cache)`
+/// (`Z/Zend/zend_execute.c:4446`), so that `CACHED_PTR` is one read off
+/// it (`Z/Zend/zend_execute.h:527`, [`RuntimeCaches::slot`]).
+///
+/// One half-word: the chunk in the top [`CHUNK_BITS`] and the slot's
+/// place in it below. [`CacheBase::NONE`] names the last chunk, which
+/// the slab never carves, so a frame with no cache laid reads nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CacheBase(u32);
+
+/// The bits of a [`CacheBase`] that name its chunk.
+const CHUNK_BITS: u32 = 5;
+/// The bits that place a slot in its chunk.
+const PLACE_BITS: u32 = u32::BITS - CHUNK_BITS;
+/// The chunks a slab holds, the last never carved.
+const CHUNKS: usize = 1 << CHUNK_BITS;
+/// The slots the first chunk holds; each after holds twice the one
+/// before, up to what [`PLACE_BITS`] can place.
+const FIRST_CHUNK: usize = 1024;
+
+impl CacheBase {
+    /// No cache: the last place of the chunk no cache is carved from.
+    pub(crate) const NONE: CacheBase = CacheBase(u32::MAX);
+
+    fn at(chunk: usize, place: usize) -> Option<CacheBase> {
+        // The last chunk is `NONE`'s.
+        let chunk = u32::try_from(chunk).ok().filter(|_| chunk + 1 < CHUNKS)?;
+        let place = u32::try_from(place).ok().filter(|&p| p < 1 << PLACE_BITS)?;
+        Some(CacheBase(chunk << PLACE_BITS | place))
+    }
+
+    /// The chunk, below [`CHUNKS`] by construction.
+    #[inline(always)]
+    fn chunk(self) -> usize {
+        (self.0 >> PLACE_BITS) as usize
+    }
+
+    #[inline(always)]
+    fn place(self) -> usize {
+        (self.0 & ((1 << PLACE_BITS) - 1)) as usize
+    }
+}
+
+impl Default for CacheBase {
+    fn default() -> CacheBase {
+        CacheBase::NONE
+    }
+}
+
+/// Where one cache's slots were carved in the slab, and how many: what
+/// its entry keeps across a lay, so a cache laid again, a file's on each
+/// activation or a number handed out again, lays over the same slots.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Place {
+    base: CacheBase,
+    len: u32,
+}
+
+/// The slots of every cache one request lays down, carved one cache
+/// after the other from chunks that never move, as php carves each
+/// function's cache from `CG(arena)`'s blocks
+/// (`init_func_run_time_cache_i`, `Z/Zend/zend_execute.c:4455`). A chunk
+/// is filled only within the room it was made with, so a slot stands
+/// where it was carved for as long as the request runs, which compiled
+/// code that reads a slot in place relies on (`tier::touch`). The chunks
+/// stand in the slab itself, so a read finds its chunk with no bounds
+/// test, and the slot with one.
+#[derive(Debug)]
+struct Slab {
+    chunks: [Vec<Cached>; CHUNKS],
+    /// The chunk caches are carved from now.
+    open: usize,
+}
+
+impl Default for Slab {
+    fn default() -> Slab {
+        Slab {
+            chunks: std::array::from_fn(|_| Vec::new()),
+            open: 0,
+        }
+    }
+}
+
+impl Slab {
+    /// `len` slots carved, all `Unprimed`, from the open chunk, or from a
+    /// new one where it has not the room; none past what the slab can
+    /// place, which no request's caches reach.
+    fn carve(&mut self, len: usize) -> Option<CacheBase> {
+        loop {
+            let open = self.open;
+            // The last chunk is [`CacheBase::NONE`]'s, never carved.
+            let chunk = self.chunks.get_mut(open).filter(|_| open + 1 < CHUNKS)?;
+            if chunk.capacity() == 0 {
+                // Twice the chunk before, up to what a base can place.
+                let doubled = open.min((PLACE_BITS - FIRST_CHUNK.trailing_zeros()) as usize);
+                let room = (FIRST_CHUNK << doubled).max(len);
+                *chunk = Vec::with_capacity(room);
+            }
+            if chunk.capacity() - chunk.len() >= len {
+                let base = CacheBase::at(open, chunk.len())?;
+                // Within the room the chunk was made with, so it does
+                // not move.
+                chunk.resize(chunk.len() + len, Cached::Unprimed);
+                return Some(base);
+            }
+            self.open += 1;
+        }
+    }
+
+    /// The slots at `place`, every one `Unprimed` again.
+    fn clear(&mut self, place: Place) {
+        let at = place.base.place();
+        if let Some(slots) = (self.chunks.get_mut(place.base.chunk()))
+            .and_then(|chunk| chunk.get_mut(at..at + place.len as usize))
+        {
+            slots.fill(Cached::Unprimed);
+        }
+    }
+
+    #[inline(always)]
+    fn slot(&self, base: CacheBase, slot: CacheSlot) -> Option<&Cached> {
+        // The chunk is a half-word's top bits, below `CHUNKS`, so the
+        // index is never out of the array and is not tested.
+        let chunk = &self.chunks[base.chunk() % CHUNKS];
+        chunk.get(base.place() + (slot.0 / SLOT_BYTES) as usize)
+    }
+
+    fn slot_mut(&mut self, base: CacheBase, slot: CacheSlot) -> Option<&mut Cached> {
+        let chunk = &mut self.chunks[base.chunk() % CHUNKS];
+        chunk.get_mut(base.place() + (slot.0 / SLOT_BYTES) as usize)
+    }
+}
 
 /// `EX(run_time_cache)` typed, the engine's side of what an op array
 /// carries ([`MapPtrOffset`]): an entry of the request's map table at
@@ -101,6 +243,8 @@ impl Default for CacheAt {
 pub(crate) struct RuntimeCaches {
     engine: MapTable<RuntimeCache>,
     request: MapTable<RuntimeCache>,
+    /// The slots of every cache either table's entries laid down.
+    slab: Slab,
     /// How many numbers the request has handed out, the next new one.
     last: u32,
     /// The numbers of units nothing holds any longer, handed out first.
@@ -132,7 +276,80 @@ impl RuntimeCaches {
     /// finds it is after the function's first.
     #[inline]
     pub(crate) fn laid(&self, at: CacheAt) -> bool {
-        self.get(at).is_some_and(|cache| cache.slots.is_some())
+        self.get(at).is_some_and(|cache| cache.laid)
+    }
+
+    /// `RUN_TIME_CACHE(op_array)` as an activation reads it into
+    /// `EX(run_time_cache)`: where the cache at `at` stands in the slab,
+    /// none where it was not laid down.
+    #[inline]
+    pub(crate) fn base(&self, at: CacheAt) -> Option<CacheBase> {
+        let cache = self.get(at).filter(|cache| cache.laid)?;
+        Some(cache.place.map_or(CacheBase::NONE, |place| place.base))
+    }
+
+    /// `CACHED_PTR(num)` off `EX(run_time_cache)`: the slot `slot`, a
+    /// byte offset as the opline carries it, of the cache `base` names,
+    /// read in place. A slot past the slab's, or a frame with no cache,
+    /// reads none, which a kernel takes as `Unprimed`; the compiler
+    /// numbers no slot past its cache's own `cache_size`
+    /// ([`super::CacheSize::holds`]).
+    #[inline(always)]
+    pub(crate) fn slot(&self, base: CacheBase, slot: CacheSlot) -> Option<&Cached> {
+        self.slab.slot(base, slot)
+    }
+
+    /// `CACHE_PTR(num, ptr)` off `EX(run_time_cache)`: `value` into the
+    /// slot [`RuntimeCaches::slot`] reads. A frame with no cache takes
+    /// nothing.
+    pub(crate) fn set_slot(&mut self, base: CacheBase, slot: CacheSlot, value: Cached) {
+        if let Some(cell) = self.slab.slot_mut(base, slot) {
+            *cell = value;
+        }
+    }
+
+    /// Where slot `slot` of the cache at `at` stands, which compiled code
+    /// reads in place (`tier::touch`): none for a cache not laid down and
+    /// a slot past it. A function's cache stands where it was carved for
+    /// as long as the request runs.
+    pub(crate) fn place_of(
+        &self,
+        at: CacheAt,
+        slot: CacheSlot,
+    ) -> Option<std::ptr::NonNull<Cached>> {
+        let place = self.get(at).filter(|cache| cache.laid)?.place?;
+        if slot.0 / SLOT_BYTES >= place.len {
+            return None;
+        }
+        self.slab
+            .slot(place.base, slot)
+            .map(std::ptr::NonNull::from)
+    }
+
+    /// `zend_arena_alloc(&CG(arena), cache_size)` and the `memset` after
+    /// it: the cache at `at` laid down with `cache_size / sizeof(void *)`
+    /// slots, all `Unprimed`, and its observer slot unresolved, over the
+    /// slots it was carved before where they are room enough; where it
+    /// stands. A cache past what the slab can place is laid with no
+    /// slot, which reads `Unprimed` every pass.
+    pub(crate) fn lay_down(&mut self, at: CacheAt, cache_size: u32) -> CacheBase {
+        let len = cache_size / SLOT_BYTES;
+        let cache = match at.table() {
+            Table::Engine(ptr) => self.engine.map(ptr),
+            Table::Request(ptr) => self.request.map(ptr),
+        };
+        let place = match cache.place {
+            Some(place) if place.len >= len => {
+                self.slab.clear(place);
+                Some(place)
+            }
+            _ => self
+                .slab
+                .carve(len as usize)
+                .map(|base| Place { base, len }),
+        };
+        cache.lay(place);
+        place.map_or(CacheBase::NONE, |place| place.base)
     }
 
     /// The cache at `at`, an empty one laid in where the request had
@@ -166,8 +383,7 @@ impl RuntimeCaches {
     /// out again. A pointer of the engine's is never given back.
     pub(crate) fn give_back(&mut self, heap: &mut php_heap::Heap, at: CacheAt) {
         if let Table::Request(ptr) = at.table() {
-            let cache = std::mem::take(self.request.map(ptr));
-            if let Some(room) = cache.room {
+            if let Some(room) = self.request.map(ptr).empty() {
                 heap.free_block(room);
             }
             self.free.push(ptr.offset());
@@ -217,7 +433,7 @@ impl RuntimeCaches {
         // One push a number: an `eval`'s unit has one or a few, which a
         // push writes in place where `append` copies through `memcpy`.
         for &number in &numbers {
-            *self.request.map(MapPtr::new(number)) = RuntimeCache::default();
+            self.request.map(MapPtr::new(number)).empty();
             self.free.push(number);
         }
         numbers.clear();

@@ -36,9 +36,13 @@
 
 mod array;
 mod block;
+mod bump;
+mod bytes;
 mod call_stack;
 mod collector;
 mod compare;
+#[cfg(debug_assertions)]
+mod counting;
 mod fiber;
 mod gc;
 mod hooks;
@@ -52,6 +56,7 @@ mod observe;
 #[cfg(debug_assertions)]
 pub mod owners;
 mod payload;
+mod persist;
 mod property_table;
 mod reference;
 #[cfg(test)]
@@ -68,13 +73,17 @@ mod zend_arena;
 mod zval;
 
 pub use array::DeclaredRows;
-pub use array::{Arr, ArrIter, EmbeddedArr, Key, SortEntry, canonical_int};
+pub use array::{Arr, ArrIter, EmbeddedArr, Key, SortEntry, SortKeys, canonical_int};
 pub use block::Block;
+pub use bytes::Bytes;
 pub use call_stack::{CallStack, call_stack_bounds, call_stack_default_size, main_call_stack_size};
 pub use collector::GcStatus;
 pub use compare::{
-    Scalar, compare, compare_constants, constant_truth, identical, identical_constants,
+    Scalar, compare, compare_constants, constant_truth, equal_strings, identical,
+    identical_constants,
 };
+#[cfg(debug_assertions)]
+pub use counting::CountingSystem;
 pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
 pub use hooks::{Fatal, FatalReason, GcTable, HeapHooks};
 pub use lend::{ecalloc, efree, emalloc, erealloc};
@@ -86,6 +95,7 @@ pub use numeric::{
 };
 pub use object::{Laziness, Obj, ObjectId};
 pub use observe::{Allocation, AllocationObserverId, ObserveAllocations};
+pub use persist::{Persist, PersistSize, Table, TableVec};
 pub use property_table::{Direction, PropertyTable, TableRow};
 pub use reference::Ref;
 pub use resource::{Res, ResourceType};
@@ -98,10 +108,16 @@ pub use stack::{
 };
 pub use standalone::StandaloneHeap;
 pub use string::{FreshStr, Intern, Made, Pending, Sizing, Str, Strings};
-pub use zval::{PropBit, Zval, ZvalRef, ZvalType};
+pub use zval::{PropBit, Zval, ZvalRef, ZvalSpan, ZvalType};
 
 use gc::Counted;
 use std::ptr::NonNull;
+
+/// The bytes [`Heap::uncount`] left out of `memory_get_usage()`, owed
+/// back by [`Heap::recount`].
+#[must_use]
+#[derive(Debug)]
+pub struct Uncounted(usize);
 
 /// The per-request heap (design §5.13): the allocator every string,
 /// array, object and frame passes through, and the only accountant of
@@ -294,6 +310,27 @@ impl Heap {
         self.mm.reset_peak();
     }
 
+    /// `value`'s own blocks, a string's or an array's header and its
+    /// data, left out of `memory_get_usage()` while they stand, for a
+    /// value made before the moment php makes it: an uncached compile's
+    /// constant made ahead of the op arrays php lays before it. Nothing
+    /// of a value this heap holds no block of.
+    pub fn uncount(&mut self, value: Zval) -> Uncounted {
+        let array = value.as_arr();
+        let blocks = [
+            value.as_str().map(Str::address),
+            array.map(Arr::address),
+            array.and_then(Arr::data_addr),
+        ];
+        Uncounted(self.mm.uncount(blocks.into_iter().flatten()))
+    }
+
+    /// What [`Heap::uncount`] left out counted again, at the moment php
+    /// makes the value, the peak raised to it as an allocation's is.
+    pub fn recount(&mut self, Uncounted(bytes): Uncounted) {
+        self.mm.recount(bytes);
+    }
+
     /// The `memory_limit` this request is held to, in bytes.
     #[must_use]
     pub fn memory_limit(&self) -> usize {
@@ -457,6 +494,7 @@ impl Heap {
     /// ([`Sizing::bytes`]): [`Heap::string`] is [`Sizing::Alloc`]'s and
     /// [`Heap::string_finit`] [`Sizing::Finit`]'s. A sum that overflows is
     /// php's fatal, raised before anything is asked for.
+    #[inline] // `zend_string_init_fast` is `zend_always_inline`, every native's piece goes through it
     pub fn string_sized(&mut self, bytes: &[u8], sizing: Sizing) -> Result<Str, Fatal> {
         let size = self.sized(sizing, bytes.len())?;
         let at = self.mm.alloc(size)?;
@@ -478,6 +516,23 @@ impl Heap {
         // SAFETY: the allocation is exactly the size `init_with` asks for
         // and nothing else holds it.
         Ok(unsafe { Str::init_with(at, len, 0, fill) })
+    }
+
+    /// `zend_string_alloc(len, 0)` and the `memcpy` of each of `parts`
+    /// after the last, what `concat_function`, `ZEND_CONCAT` and
+    /// `ZEND_ROPE_END` lay a joined string with: each byte written once,
+    /// none zeroed first. `len` is the parts' sum; bytes past what they
+    /// cover are zero, and a part past `len` is cut.
+    #[inline]
+    pub fn string_joined<'a>(
+        &mut self,
+        len: usize,
+        parts: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<Str, Fatal> {
+        let at = self.mm.alloc(Str::allocation_size(len))?;
+        // SAFETY: the allocation is exactly the size `init_parts` asks
+        // for and nothing else holds it.
+        Ok(unsafe { Str::init_parts(at, len, parts) })
     }
 
     /// `zend_string_alloc(len, 0)` at [`Sizing::Alloc`], or the
@@ -557,6 +612,7 @@ impl Heap {
     /// The bytes a string of `len` laid at `sizing` asks for
     /// ([`Sizing::bytes`]), a sum that overflows the heap's refusal or its
     /// end ([`Mm::overflow_refusal`]).
+    #[inline] // a sum and a compare; the refusal is out of line
     fn sized(&mut self, sizing: Sizing, len: usize) -> Result<usize, Fatal> {
         sizing
             .bytes(len)
@@ -1046,6 +1102,36 @@ mod tests {
             heap.memory_real_peak(),
             real + 3_000_000usize.next_multiple_of(mm::real_page_size())
         );
+    }
+
+    /// A joined string is its parts one after the other with php's NUL
+    /// after them, at `zend_string_alloc`'s size: a part past the length
+    /// is cut where it ends, and what the parts leave short is zero.
+    #[test]
+    fn a_joined_string_is_its_parts_at_the_size_one_allocation_takes() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let start = heap.memory_usage(false);
+        let joined = heap.string_joined(7, [&b"abc"[..], b"", b"defg"]);
+        let joined = joined.unwrap_or_else(|e| panic!("abcdefg: {e:?}"));
+        assert_eq!(joined.bytes(), b"abcdefg");
+        let plain = heap
+            .string(b"abcdefg")
+            .unwrap_or_else(|e| panic!("abcdefg: {e:?}"));
+        assert_eq!(
+            heap.memory_usage(false) - start,
+            2 * Str::allocation_size(7).next_multiple_of(8)
+        );
+        let cut = heap.string_joined(4, [&b"abc"[..], b"defg"]);
+        let cut = cut.unwrap_or_else(|e| panic!("abcd: {e:?}"));
+        assert_eq!(cut.bytes(), b"abcd");
+        let short = heap.string_joined(5, [&b"ab"[..]]);
+        let short = short.unwrap_or_else(|e| panic!("ab: {e:?}"));
+        assert_eq!(short.bytes(), b"ab\0\0\0");
+        for s in [joined, plain, cut, short] {
+            heap.release_string(s);
+        }
+        assert_eq!(heap.memory_usage(false), start);
     }
 
     /// What a request interns is the request's own memory (design §5.2):

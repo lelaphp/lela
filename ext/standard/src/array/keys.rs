@@ -12,7 +12,8 @@ use std::ops::ControlFlow;
 use php_ext::abi::{OrFalse, Passed, PropertyRead, PropertyTest, Raw, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{
-    BinaryOp, binary_op, float_to_long, identical, loose_eq, numeric_string, to_string,
+    BinaryOp, binary_op, equal_strings, float_to_long, identical, identical_read, loose_eq,
+    loose_eq_read, numeric_string, to_string,
 };
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, deprecated, docref,
@@ -43,21 +44,82 @@ fn matches(
     loose_eq(req, needle, &element)
 }
 
-/// `_php_search_array`: the key of the first element that matches.
-fn search(
+/// [`matches`] read under a borrow of the request, for an element whose
+/// comparison with the needle reaches no code of the program: two
+/// scalars under `==`, `fast_equal_check_string`'s bytes among them,
+/// and anything but two arrays under `===`. `None` where the comparison
+/// is [`matches`]'s.
+fn matches_read(req: &Request, needle: &Value, element: &Value, strict: bool) -> Option<bool> {
+    let element = element.deref();
+    if strict {
+        return identical_read(needle, &element);
+    }
+    loose_eq_read(req, needle, &element)
+}
+
+/// `_php_search_array`: what `hit` makes of the key of the first element
+/// that matches. php's loops by the needle: an int under `===` matches
+/// an int alone, the element's reference followed; under `==` an int or
+/// a string decides an element of its own type inline,
+/// `fast_equal_check_long` and `fast_equal_check_string`, and leaves any
+/// other to [`matches`]; any other needle is [`matches`]'s throughout.
+fn search<B>(
     req: &mut Request,
     needle: &Value,
     haystack: PhpArray,
     strict: bool,
-) -> Result<Option<Key>, Thrown> {
-    // `ZEND_HASH_FOREACH_KEY_VAL`, holding nothing: `==` may serve
-    // `__toString`.
-    walk::foreach(req, haystack, Hold::None, |req, row| -> walk::Step<Key> {
-        if matches(req, needle, row.value(), strict)? {
-            return Ok(ControlFlow::Break(row.key().clone()));
+    hit: impl Fn(&Key) -> B,
+) -> Result<Option<B>, Thrown> {
+    if let Some(n) = needle.as_int() {
+        if strict {
+            let same = |e: &Value| Some(e.deref().as_int() == Some(n));
+            return search_by(req, needle, haystack, strict, hit, same);
         }
-        Ok(ControlFlow::Continue(()))
-    })
+        let same = |e: &Value| Some(e.as_int()? == n);
+        return search_by(req, needle, haystack, strict, hit, same);
+    }
+    if !strict && let Some(s) = needle.as_str_bytes() {
+        let same = |e: &Value| Some(equal_strings(s, e.as_str_bytes()?));
+        return search_by(req, needle, haystack, strict, hit, same);
+    }
+    search_by(req, needle, haystack, strict, hit, |_| None)
+}
+
+/// One of [`search`]'s loops, `ZEND_HASH_FOREACH_KEY_VAL`, holding
+/// nothing and counting nothing per element: an element `same` decides
+/// is answered first, then a comparison no code answers is read under
+/// the borrow, and an element where `==` may serve `__toString` is lent.
+fn search_by<B>(
+    req: &mut Request,
+    needle: &Value,
+    haystack: PhpArray,
+    strict: bool,
+    hit: impl Fn(&Key) -> B,
+    same: impl Fn(&Value) -> Option<bool>,
+) -> Result<Option<B>, Thrown> {
+    let read = |req: &Request, key: &Key, value: &Value| {
+        let found = match same(value) {
+            Some(found) => found,
+            None => matches_read(req, needle, value, strict)?,
+        };
+        Some(if found {
+            ControlFlow::Break(hit(key))
+        } else {
+            ControlFlow::Continue(())
+        })
+    };
+    walk::foreach_read(
+        req,
+        haystack,
+        Hold::None,
+        read,
+        |req, row| -> walk::Step<B> {
+            if matches(req, needle, row.value(), strict)? {
+                return Ok(ControlFlow::Break(hit(row.key())));
+            }
+            Ok(ControlFlow::Continue(()))
+        },
+    )
 }
 
 /// `in_array(mixed $needle, array $haystack, bool $strict = false): bool`,
@@ -75,6 +137,85 @@ fn search(
 /// bool(true)
 /// bool(false)
 /// bool(true)
+/// ```
+///
+/// `==` reads two strings as numbers only where both are numeric, so a
+/// leading-numeric string is matched by its bytes alone; under
+/// `$strict` a string matches only the same string.
+///
+/// ```php
+/// $a = ["10", "1e1x", "abc", " 5", "0x1A", "9.0"];
+/// var_dump(in_array("1e1", $a), in_array("1e1x", $a), in_array("1e1X", $a), in_array("10.0", $a), in_array("5", $a), in_array("ABC", $a), in_array("26", $a), in_array("9", $a), in_array(10, $a), in_array("1e1", $a, true), array_search("abc", $a), array_search(" 5 ", $a));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// int(2)
+/// int(3)
+/// ```
+///
+/// An int or a string needle decides an element of its own type inline
+/// and any other as `==` does, a float, a numeric string and a
+/// reference among them; under `===` an int needle matches an int
+/// alone, through a reference, and two numeric strings that overflow
+/// alike are compared by their bytes.
+///
+/// ```php
+/// $x = 2; $a = [1.0, "1", &$x, "02", 3];
+/// var_dump(in_array(1, [1.0]), in_array(1, ["1"]), in_array(2, [&$x]), in_array(2, [&$x], true), in_array(1, ["1", 1.0], true), array_search(3, $a), array_search(2, ["a" => "02"]), array_search(4, $a));
+/// var_dump(in_array("1e1", [10]), in_array("10", ["1e1"]), in_array("b", ["a", "b"]), in_array("9223372036854775808", ["9223372036854775809"]), in_array("1e1000", ["2e1000"]), in_array("", [null]), in_array("0", [false]), in_array("2", [&$x]), array_search("x", ["k" => "x"]));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// int(4)
+/// string(1) "a"
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// string(1) "k"
+/// ```
+///
+/// The walk counts nothing per element and lends an element to the
+/// comparison only where `==` may serve `__toString`. A conversion that
+/// writes the array the program holds separates it from the one the
+/// call's argument holds, and the search reads the rows that stood as
+/// it began:
+///
+/// ```php
+/// class S { function __toString(): string { echo "S\n"; global $a; $a[2] = 'w'; unset($a[3]); return 's'; } }
+/// function f() { global $a; $a = ['x', new S, 'y', 'z']; var_dump(array_search('z', $a), $a[2], count($a)); }
+/// f();
+/// $o = new S; $b = [$o, 'q', $o];
+/// var_dump(in_array('q', $b), array_search('r', $b));
+/// ```
+/// ```expect
+/// S
+/// int(3)
+/// string(1) "w"
+/// int(3)
+/// S
+/// S
+/// S
+/// bool(true)
+/// bool(false)
 /// ```
 ///
 /// `===` follows a reference inside an element as the operator does,
@@ -175,7 +316,7 @@ fn in_array(
     haystack: PhpArray,
     #[php(default = false)] strict: bool,
 ) -> Result<bool, Thrown> {
-    Ok(search(req, &needle, haystack, strict)?.is_some())
+    Ok(search(req, &needle, haystack, strict, |_| ())?.is_some())
 }
 
 /// `array_search(mixed $needle, array $haystack, bool $strict = false):
@@ -200,7 +341,7 @@ fn array_search(
     haystack: PhpArray,
     #[php(default = false)] strict: bool,
 ) -> Result<OrFalse<Union<Owner<PhpString>, i64>>, Thrown> {
-    match search(req, &needle, haystack, strict)? {
+    match search(req, &needle, haystack, strict, Key::clone)? {
         Some(key) => Ok(OrFalse::Value(key_return(req, &key))),
         None => Ok(OrFalse::False),
     }
