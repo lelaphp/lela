@@ -313,7 +313,8 @@ fn new_instance(
     };
     let served = match arguments {
         ConstructorArguments::Variadic(args) => {
-            call_named(req, &callable, &args.positional, args.named())
+            let positional: Vec<Value> = args.positional.clone().collect();
+            call_named(req, &callable, &positional, args.named())
         }
         ConstructorArguments::Array(args) => Unpacked::of(req, args)
             .and_then(|unpacked| call_named(req, &callable, &unpacked.positional, &unpacked.named)),
@@ -344,7 +345,7 @@ fn new_instance(
 /// string keys are named.
 #[derive(Clone, Copy)]
 enum ConstructorArguments<'a> {
-    Variadic(&'a NamedVariadic<Value>),
+    Variadic(&'a NamedVariadic<'a, Value>),
     Array(PhpArray),
 }
 

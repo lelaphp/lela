@@ -1702,6 +1702,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
+        let nodes: Vec<Untyped<Value>> = nodes.collect();
         crate::parent::before(req, this.object(), &nodes)
     }
 
@@ -1711,6 +1712,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
+        let nodes: Vec<Untyped<Value>> = nodes.collect();
         crate::parent::after(req, this.object(), &nodes)
     }
 
@@ -1720,6 +1722,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
+        let nodes: Vec<Untyped<Value>> = nodes.collect();
         crate::parent::replace_with(req, this.object(), &nodes)
     }
 
@@ -1729,6 +1732,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
+        let nodes: Vec<Untyped<Value>> = nodes.collect();
         crate::parent::append(req, this.object(), &nodes)
     }
 
@@ -1738,6 +1742,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
+        let nodes: Vec<Untyped<Value>> = nodes.collect();
         crate::parent::prepend(req, this.object(), &nodes)
     }
 
@@ -1747,6 +1752,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
+        let nodes: Vec<Untyped<Value>> = nodes.collect();
         crate::parent::replace_children(req, this.object(), &nodes)
     }
 

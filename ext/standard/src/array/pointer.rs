@@ -535,7 +535,7 @@ fn min_frameless(
     value: Value,
     values: Variadic<Value>,
 ) -> Result<Value, Thrown> {
-    let other = values.first().copied().unwrap_or_else(Value::null);
+    let other = values.clone().next().unwrap_or_else(Value::null);
     frameless_extreme(req, value, other, Ordering::Less)
 }
 
@@ -643,7 +643,7 @@ fn max_frameless(
     value: Value,
     values: Variadic<Value>,
 ) -> Result<Value, Thrown> {
-    let other = values.first().copied().unwrap_or_else(Value::null);
+    let other = values.clone().next().unwrap_or_else(Value::null);
     frameless_extreme(req, value, other, Ordering::Greater)
 }
 
@@ -655,7 +655,7 @@ fn extreme(
     values: Variadic<Value>,
     wanted: Ordering,
 ) -> Result<Value, Thrown> {
-    if values.is_empty() {
+    if values.len() == 0 {
         // One argument is the array to walk, held to `array` as php's
         // `IS_ARRAY` check past `Z_PARAM_VARIADIC` refuses it, where the
         // stub declares `mixed $value`.

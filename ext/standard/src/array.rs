@@ -101,8 +101,8 @@ const HT_MAX_SIZE: u64 = 0x4000_0000;
 /// `php_array_merge_wrapper`'s count (`Z/ext/standard/array.c:4325`):
 /// the elements of every array added up before anything is merged, and
 /// php's `Error` where they reach `HT_MAX_SIZE`; below it, the count.
-fn merge_total(req: &mut Request, arrays: &[PhpArray]) -> Result<u32, Thrown> {
-    let count: u64 = arrays.iter().map(|array| array.len() as u64).sum();
+fn merge_total(req: &mut Request, arrays: impl Iterator<Item = PhpArray>) -> Result<u32, Thrown> {
+    let count: u64 = arrays.map(|array| array.len() as u64).sum();
     match u32::try_from(count) {
         Ok(count) if u64::from(count) < HT_MAX_SIZE => Ok(count),
         _ => {
@@ -127,18 +127,20 @@ fn merge_total(req: &mut Request, arrays: &[PhpArray]) -> Result<u32, Thrown> {
 /// `php_array_merge_recursive`.
 fn merge_wrapper(
     req: &mut Request,
-    arrays: &[PhpArray],
+    arrays: Variadic<PhpArray>,
     mut merge: impl FnMut(&mut Request, &mut Owner<PhpArray>, PhpArray) -> Result<(), Thrown>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let Some((first, rest)) = arrays.split_first() else {
+    let count = merge_total(req, arrays.clone())?;
+    let two = arrays.len() == 2;
+    let mut rest = arrays;
+    let Some(first) = rest.next() else {
         return Ok(Owner::take(req, PhpArray::empty()));
     };
-    let count = merge_total(req, arrays)?;
-    if let [first, second] = arrays {
+    if two && let Some(second) = rest.clone().next() {
         let kept = if first.is_empty() {
-            Some(*second)
+            Some(second)
         } else if second.is_empty() {
-            Some(*first)
+            Some(first)
         } else {
             None
         };
@@ -154,9 +156,9 @@ fn merge_wrapper(
             return Ok(Owner::take(req, kept));
         }
     }
-    let mut dest = merge_first(req, *first, count)?;
+    let mut dest = merge_first(req, first, count)?;
     for src in rest {
-        if let Err(thrown) = merge(req, &mut dest, *src) {
+        if let Err(thrown) = merge(req, &mut dest, src) {
             dest.give_up(req);
             return Err(thrown);
         }
@@ -374,7 +376,7 @@ fn array_merge(
     req: &mut Request,
     arrays: Variadic<PhpArray>,
 ) -> Result<Owner<Raw<PhpArray>>, Thrown> {
-    let merged = merge_wrapper(req, &arrays, merge_into)?;
+    let merged = merge_wrapper(req, arrays, merge_into)?;
     Ok(returned(merged.into_value()))
 }
 
