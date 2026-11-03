@@ -1091,6 +1091,16 @@ impl CallInfo {
         self.set(Self::LEAVING, on);
     }
 
+    /// Whether the call carries what its pop gives up past its
+    /// arguments, a receiver, a closure or an annex
+    /// ([`Header::set_receiver`], [`Header::set_closure`],
+    /// [`Header::set_annex`]), read off the one word as
+    /// [`CallInfo::leave`] reads a frame's.
+    #[inline(always)] // every native call's pop
+    pub(crate) fn carries(self) -> bool {
+        self.0 & (Self::HELD | Self::ANNEX) != 0
+    }
+
     pub(crate) fn at_exception_op(self) -> bool {
         self.has(Self::AT_EXCEPTION_OP)
     }

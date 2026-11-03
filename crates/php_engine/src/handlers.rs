@@ -13210,9 +13210,10 @@ impl DoCall {
 }
 
 /// The body the `DO_*CALL` handlers share, `opcode` naming the one that
-/// found no call frame under it: the `ZEND_USER_FUNCTION` arm enters
-/// the callee's op array ([`enter`]), the `ZEND_INTERNAL_FUNCTION` arm
-/// serves the native on the call frame.
+/// found no call frame under it: the `ZEND_INTERNAL_FUNCTION` arm
+/// serves the native on the call frame ([`native_served`]), and every
+/// other callee is [`do_call_entered`]'s, out of line, so the native's
+/// path keeps to the registers it needs.
 fn do_call(req: &mut Request, frame: FrameRef, says: DoCall, opcode: &str) -> Edge {
     if says.flagged
         && let Err(thrown) = flagged_call(req, says)
@@ -13226,28 +13227,56 @@ fn do_call(req: &mut Request, frame: FrameRef, says: DoCall, opcode: &str) -> Ed
         )));
     };
     // A native function is served through the entry the engine's table
-    // holds, as `DO_ICALL` calls `fbc->internal_function.handler`; a
-    // user function is entered, and a trampoline is handed to its magic
-    // method first.
-    let served = if let Some(entry) = req.native_entry(function) {
-        req.serve_entry(function, entry, OnThrow::Nothing)
-    } else if let Some(user) = req.user_function(function) {
+    // holds, as `DO_ICALL` calls `fbc->internal_function.handler`.
+    if let Some(entry) = req.native_entry(function) {
+        let served = req.serve_entry(function, entry, OnThrow::Nothing);
+        return native_served(req, frame, says, served);
+    }
+    do_call_entered(req, frame, says, (call, function))
+}
+
+/// [`do_call`] over a callee that is no native function: a user
+/// function is entered, and a trampoline is handed to its magic method
+/// first, which is entered where it is a user method and served where it
+/// is a native one.
+#[inline(never)]
+fn do_call_entered(
+    req: &mut Request,
+    frame: FrameRef,
+    says: DoCall,
+    (call, function): (FrameRef, Function),
+) -> Edge {
+    if let Some(user) = req.user_function(function) {
         let shape = user.shape;
         return enter(req, frame, says, call, shape);
-    } else {
-        let function = match crate::trampoline::hand_to_magic(req, function) {
-            Ok(function) => function,
-            Err(thrown) => {
-                req.pop_call();
-                return threw(req, frame, &thrown);
-            }
-        };
-        if let Some(user) = req.user_function(function) {
-            let shape = user.shape;
-            return enter(req, frame, says, call, shape);
+    }
+    let function = match crate::trampoline::hand_to_magic(req, function) {
+        Ok(function) => function,
+        Err(thrown) => {
+            req.pop_call();
+            return threw(req, frame, &thrown);
         }
-        req.serve_native(function, OnThrow::Nothing)
     };
+    if let Some(user) = req.user_function(function) {
+        let shape = user.shape;
+        return enter(req, frame, says, call, shape);
+    }
+    let served = req.serve_native(function, OnThrow::Nothing);
+    native_served(req, frame, says, served)
+}
+
+/// What a native served on the call on top of the stack answered,
+/// handed back: the call popped and the value written into the
+/// temporary the call opline names, or given up where it names none
+/// ([`Request::pop_call_into`]); where the interrupt is raised,
+/// [`native_interrupted`] takes it out of line.
+#[inline(always)] // `do_call`'s native arm
+fn native_served(
+    req: &mut Request,
+    frame: FrameRef,
+    says: DoCall,
+    served: Result<Value, Thrown>,
+) -> Edge {
     let value = match served {
         Ok(value) => value,
         Err(thrown) => {
@@ -13255,21 +13284,35 @@ fn do_call(req: &mut Request, frame: FrameRef, says: DoCall, opcode: &str) -> Ed
             return Ok(Stepped::Threw(frame).into());
         }
     };
-    // `ZEND_VM_FCALL_INTERRUPT_CHECK(call)`: the check php makes after a
-    // native returns, with the call still on the stack, which is where
-    // a signal the native delivered to its own process is dispatched
-    // under `pcntl_async_signals(true)`.
-    let interrupted = crate::interrupt::check(req);
-    req.pop_call();
-    let threw = match interrupted {
+    if crate::interrupt::raised(req) {
+        return native_interrupted(req, frame, says, value);
+    }
+    req.pop_call_into(says.into.map(|slot| (frame, slot)), value);
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame).into());
+    }
+    Ok(advance(req, frame))
+}
+
+/// [`native_served`] where the interrupt is raised as the native
+/// returns: `ZEND_VM_FCALL_INTERRUPT_CHECK(call)`, the check php makes
+/// with the call still on the stack, which is where a signal the native
+/// delivered to its own process is dispatched under
+/// `pcntl_async_signals(true)`; then the call popped and its value handed
+/// back, or given up where the check raised a fatal.
+#[cold]
+#[inline(never)]
+fn native_interrupted(req: &mut Request, frame: FrameRef, says: DoCall, value: Value) -> Edge {
+    let threw = match crate::interrupt::check(req) {
         Ok(threw) => threw,
         Err(fatal) => {
+            req.pop_call();
             req.release(value);
             return Err(fatal);
         }
     };
-    let into = says.into.map(|slot| (frame, slot));
-    if handed_back(req, into, value) || threw {
+    req.pop_call_into(says.into.map(|slot| (frame, slot)), value);
+    if threw || req.is_pending() {
         return Ok(Stepped::Threw(frame).into());
     }
     Ok(advance(req, frame))

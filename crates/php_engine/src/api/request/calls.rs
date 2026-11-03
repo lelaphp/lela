@@ -1712,7 +1712,9 @@ impl Request {
         if let Some(outer) = outer {
             self.heap.set_origin(outer);
         }
-        let Some(deferred) = self.stream_thrown.take() else {
+        // Taken only where kept: a plain `take` stores `None` back on
+        // every call's path, where this is a load and a branch.
+        let Some(deferred) = self.stream_thrown.take_if(|_| true) else {
             crate::observer::native_returned(self, begun, &served, None, on_throw);
             return served;
         };

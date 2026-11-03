@@ -1601,7 +1601,8 @@ impl Request {
         let _ = function;
         self.release_coerced(made);
         let served = served.map(crate::api::values::Owner::hand_on);
-        let Some(deferred) = self.stream_thrown.take() else {
+        // Taken only where kept, as `serve_entry` takes it.
+        let Some(deferred) = self.stream_thrown.take_if(|_| true) else {
             return served;
         };
         match served {
@@ -1792,9 +1793,15 @@ impl Request {
     /// `EG(current_execute_data) = call`: the call and its callee, with
     /// whether the opline's `result` operand is read. Nothing under a
     /// `DO_*CALL` is none.
+    #[inline]
     pub(crate) fn activate_call(&mut self, return_used: bool) -> Option<(FrameRef, Function)> {
-        let call = self.building_call()?;
-        let header = self.vm.at_mut(call)?;
+        // The call being built is the top of the stack
+        // ([`Vm::building_at`]), read and written in one look.
+        let (call, frame) = self.vm.stack.top_mut()?;
+        let header = frame.header_mut();
+        if !header.info.building() {
+            return None;
+        }
         header.info.set_serving();
         header.info.set_return_used(return_used);
         Some((call, header.function()?))
@@ -2477,21 +2484,91 @@ impl Request {
     /// ```
     #[inline(always)] // every native call's pop, the carrying case out of line
     pub(crate) fn pop_call(&mut self) {
-        let call = self.vm.stack.current();
         // `EG(current_execute_data) = execute_data` before the arguments
         // are freed: the call is on no chain from here.
-        let Some(state) = self.vm.stack.frame_mut(call) else {
+        let Some((call, state)) = self.vm.stack.top_mut() else {
             return;
         };
-        let header = state.header_mut();
+        if !Request::leaves_plainly(state) {
+            return self.pop_owning(call);
+        }
+        self.vm.stack.pop_frame(&mut self.heap);
+    }
+
+    /// [`Request::pop_call`] and what the call returned handed to the
+    /// frame that made it, `DO_*CALL`'s tail over a native: `value`
+    /// written into the temporary `into` names where the call opline
+    /// reads it, as php's handler points `ret` at
+    /// `EX_VAR(opline->result.var)` before the native writes it, and
+    /// given up after the pop where it does not, `i_zval_ptr_dtor(ret)`.
+    /// The call and the caller's slot are found in one look at the
+    /// stack; what the slot held before is given up after the pop, as
+    /// [`Request::replace_slot`] gives it up.
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d\n"; } }
+    /// function made() { return new D; }
+    /// echo max(sqrt(16), abs(-5)), "\n";
+    /// $r = gettype(made()); echo $r, "\n";
+    /// gettype(made()); echo "unused\n";
+    /// $s = array_pop(...[[made()]]); echo "popped\n"; unset($s);
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// 5
+    /// d
+    /// object
+    /// d
+    /// unused
+    /// popped
+    /// d
+    /// end
+    /// ```
+    #[inline(always)] // every native call's pop and hand-back
+    pub(crate) fn pop_call_into(&mut self, into: Option<(FrameRef, u32)>, value: Value) {
+        let written = into.and_then(|(caller, slot)| {
+            let (at, top, below) = self.vm.stack.top_over_mut()?;
+            let cell = below
+                .get_mut(caller.0 as usize)?
+                .slots_mut()
+                .get_mut(slot as usize)?;
+            let old = std::mem::replace(cell, value.to_zval());
+            Some((at, Request::leaves_plainly(top), old, (caller, slot)))
+        });
+        let Some((at, plainly, old, (caller, slot))) = written else {
+            self.pop_call();
+            return self.release(value);
+        };
+        if plainly {
+            self.vm.stack.pop_frame(&mut self.heap);
+        } else {
+            self.pop_owning(at);
+        }
+        if old.is_refcounted() {
+            self.release_replaced(caller, slot, old);
+        }
+    }
+
+    /// The call on top of the stack marked as leaving, php's
+    /// `EG(current_execute_data) = execute_data`, and whether its pop
+    /// gives up nothing but its room, read in the same look: no receiver,
+    /// closure or annex its flags name ([`exec::CallInfo::carries`]), and
+    /// no argument that counts an owner.
+    #[inline(always)] // as `pop_call`
+    fn leaves_plainly(call: &mut php_heap::Frame<exec::Header>) -> bool {
+        let header = call.header_mut();
         header.info.set_leaving(true);
-        if header.annex().is_some() || header.closure().is_some() || header.receiver().is_some() {
+        !header.info.carries() && !call.slots().iter().any(|z| z.is_refcounted())
+    }
+
+    /// The call `call`, the top of the stack, popped where it gives up
+    /// more than its room: what it carries out of line, or its
+    /// arguments that count an owner.
+    fn pop_owning(&mut self, call: FrameRef) {
+        if self.vm.at(call).is_some_and(|header| header.info.carries()) {
             return self.pop_carrying(call);
         }
-        // Read in the same look where no argument counts an owner.
-        if state.slots().iter().any(|z| z.is_refcounted()) {
-            self.release_arguments(call);
-        }
+        self.release_arguments(call);
         self.vm.stack.pop_frame(&mut self.heap);
     }
 
