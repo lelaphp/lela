@@ -55,6 +55,12 @@ impl Engine {
         );
         let failed = self.show_startup_raised(&mut req);
         let sink = req.take_sink();
+        // The display's request ends before the chain's starts, so the
+        // chain's heap is the one this request kept, and then the first
+        // request's: php's process holds one heap from its start, and a
+        // request that stood beside the chain's would leave a second kept
+        // that no request takes (#3984).
+        drop(req);
         if failed {
             return (Some(1), sink);
         }

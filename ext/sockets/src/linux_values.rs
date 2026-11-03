@@ -265,9 +265,9 @@ const _: () = {
 /// The declared names, in order, are the Linux oracle's.
 #[test]
 fn the_constants_are_the_linux_oracle_s_in_its_order() {
-    let declared: Vec<String> = c::declared()
+    let declared: Vec<String> = c::DECLARED
         .iter()
-        .map(|d| String::from_utf8_lossy(&d.name.0).into_owned())
+        .map(|d| String::from_utf8_lossy(d.name).into_owned())
         .collect();
     let want: Vec<&str> = LINUX.iter().map(|row| row.0).collect();
     assert_eq!(declared, want);

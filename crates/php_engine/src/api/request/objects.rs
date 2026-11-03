@@ -39,6 +39,9 @@ pub(super) struct Objects {
     /// table stops, and the objects then standing are marked destructed
     /// in the heap, `zend_objects_store_mark_destructed`.
     shutdown_walk_ended: bool,
+    /// Whether the walks of `zend_call_destructors` are under way, inside
+    /// the `zend_try` whose `zend_catch` ends them.
+    walking: bool,
 }
 
 impl Request {
@@ -385,7 +388,7 @@ pub(crate) fn placed_of<'d>(
             placed.push(row(at));
         }
     }
-    let rows = record.map_or_else(Box::default, |record| {
+    let rows = record.map_or_else(php_link::Column::default, |record| {
         record
             .properties
             .rows()
@@ -394,7 +397,7 @@ pub(crate) fn placed_of<'d>(
             .collect()
     });
     Placed {
-        slots: placed.into_boxed_slice(),
+        slots: placed.into(),
         rows,
         holes,
     }
@@ -697,10 +700,29 @@ impl Request {
     /// #1 {main}
     ///   thrown in %s on line 5
     /// ```
+    ///
+    /// Where `set_exception_handler()` set a handler, the throwable is
+    /// handed to it and `zend_throw_exception_internal` returns with no
+    /// `zend_bailout`, so the walk goes on to the next destructor:
+    ///
+    /// ```php
+    /// class A { function __destruct() { echo "a\n"; throw new Exception("from a"); } }
+    /// class B { function __destruct() { echo "b\n"; } }
+    /// set_exception_handler(function ($e) { echo "handler: ", $e->getMessage(), "\n"; });
+    /// $b = new B;
+    /// $a = new A;
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// end
+    /// a
+    /// handler: from a
+    /// b
+    /// ```
     fn end_the_walk(&mut self) {
-        self.objects.shutdown_walk_ended = true;
-        self.heap.mark_destructed();
         if self.uncaught().is_err() {
+            self.objects.shutdown_walk_ended = true;
+            self.heap.mark_destructed();
             self.bail_out();
         }
     }
@@ -836,6 +858,7 @@ impl Request {
     /// d3
     /// ```
     pub(crate) fn shutdown_destructors(&mut self) {
+        self.objects.walking = true;
         let Some(arr) = self.symbol_arr(crate::exec::TableId::GLOBAL) else {
             return;
         };
@@ -898,6 +921,19 @@ impl Request {
     pub(crate) fn call_destructors(&mut self) {
         Heap::call_destructors(&mut Hooks(self));
         self.uncaught().ok();
+        self.objects.walking = false;
+    }
+
+    /// `shutdown_destructors`'s `zend_catch` over a `zend_bailout` under
+    /// either walk: the walks end and every object standing is marked
+    /// destructed, `zend_objects_store_mark_destructed`, so what the
+    /// native that left by it gives up after it serves no destructor, as
+    /// php's `longjmp` left it never given up.
+    pub(super) fn caught_under_walk(&mut self) {
+        if self.objects.walking {
+            self.objects.shutdown_walk_ended = true;
+            self.heap.mark_destructed();
+        }
     }
 
     /// `zend_objects_store_free_object_storage`, in `shutdown_executor`
@@ -1459,7 +1495,7 @@ impl Request {
             Cause::Throwable(_) => {
                 crate::api::raising::fatal_while_pending(self, thrown, NOT_AN_ARRAY)
             }
-            Cause::Exit => crate::api::raising::fatal(self, NOT_AN_ARRAY),
+            Cause::Exit | Cause::Taken => crate::api::raising::fatal(self, NOT_AN_ARRAY),
         }
     }
 

@@ -1685,3 +1685,20 @@ fn a_reading_keeps_what_a_server_s_line_that_missed_saw() {
     let said = super::tail(&tally);
     assert_eq!(said, format!("; 1 server's line missed, and saw: {saw}"));
 }
+
+/// A server's line that passed with the engine's host ended only on its
+/// stop sent again is named in its crate's reading (#3879), so a stop the
+/// engine's loop loses, which #3869 made a loss it should not have, is
+/// read there rather than absorbed by the resend.
+#[test]
+fn a_reading_names_a_line_whose_engine_s_host_was_sent_its_stop_again() {
+    let mut tally = Tally::default();
+    let note = "the engine's host ended only on its stop sent again";
+    for (id, note) in [("lines.toml#one", note), ("lines.toml#two", "")] {
+        let judged = crate::tally::Judged::new(id, id, Judgement::Pass, note);
+        tally.witnesses.judged.push(judged);
+    }
+    let said = super::tail(&tally);
+    let named = "; 1 server's line ended the engine's host only on its stop sent again";
+    assert_eq!(said, format!("{named}: lines.toml#one"));
+}

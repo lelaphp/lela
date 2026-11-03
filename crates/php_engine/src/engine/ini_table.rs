@@ -59,15 +59,20 @@ impl IniTable {
                 (decl.name.0.to_vec(), value, Some((extension, at)))
             })
         });
-        let rows: Vec<Directive> = (core.map(|(name, value)| (name, value, None)))
-            .chain(declared)
-            .map(|(name, value, declared)| Directive {
-                name,
-                value,
-                declared,
-                on_modify: None,
-            })
-            .collect();
+        // Laid at the length it ends at: Core's rows, then each
+        // extension's.
+        let count = core.size_hint().0 + extensions.iter().map(|e| e.ini.len()).sum::<usize>();
+        let mut rows: Vec<Directive> = Vec::with_capacity(count);
+        rows.extend(
+            (core.map(|(name, value)| (name, value, None)))
+                .chain(declared)
+                .map(|(name, value, declared)| Directive {
+                    name,
+                    value,
+                    declared,
+                    on_modify: None,
+                }),
+        );
         let mut table = IniTable {
             names: Names::over(&rows),
             rows,

@@ -842,7 +842,10 @@ fn a_body_entry_reads_where_the_frame_stands() -> Result<(), String> {
         .display()
         .to_string();
     let lines: Vec<&str> = clif.lines().map(instruction).collect();
-    let stood = format!("load.i64 notrap aligned v0+{}", super::STOOD_AT);
+    let stood = format!(
+        "load.i64 notrap aligned readonly can_move v0+{}",
+        super::STOOD_AT
+    );
     let read = lines.iter().position(|line| line.ends_with(&stood));
     let branch = lines.iter().position(|line| line.starts_with("brif "));
     assert!(

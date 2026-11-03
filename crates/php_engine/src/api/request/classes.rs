@@ -295,10 +295,12 @@ impl Request {
     /// over `unit`'s classes, for [`Request::declare_classes_through`]
     /// and [`Request::declare_delayed`].
     pub(crate) fn class_load(&mut self, unit: &PublishedUnit) -> ClassLoad {
-        let delayed: Vec<Vec<u8>> = unit
-            .main
-            .oplines
-            .iter()
+        // Only a class under a runtime definition key reads `delayed`
+        // ([`Request::declare_class_at`]), so a unit with none, most of
+        // them, walks no opline of its main op array for it.
+        let keyed = !unit.runtime_keys.is_empty();
+        let delayed: Vec<Vec<u8>> = (unit.main.oplines.iter())
+            .take_while(|_| keyed)
             .filter(|op| op.opcode == Opcode::DeclareClassDelayed)
             .filter_map(|op| {
                 let key = usize::try_from(op.op1).ok()?.checked_add(1)?;
@@ -402,7 +404,8 @@ impl Request {
         if let Some(existing) = self.class_named((&decl.name).into()) {
             let message = self.redeclaration(existing);
             let file = decl.file.0.to_vec();
-            self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
+            let level = self.redeclared_at(unit);
+            self.end_in_compile_time(level, &message, &file, decl.line);
             return None;
         }
         let published = load.early.as_ref().and_then(|early| *early.get(at)?);
@@ -1923,6 +1926,54 @@ impl Request {
         (0..unit.functions.len()).all(|at| self.declare_function(unit, at).is_some())
     }
 
+    /// The level a name `unit`'s load declares again is refused at:
+    /// `E_ERROR` where opcache serves the unit from what it holds, as
+    /// `zend_accel_load_script` copies a held unit's functions and
+    /// then its classes into the request's tables, one pass over each
+    /// with one lookup per name
+    /// (`Z/ext/opcache/zend_accelerator_util_funcs.c:146-172`,
+    /// `:208-216`); `E_COMPILE_ERROR` where php's compile meets the name
+    /// (`do_bind_function_error`, `zend_class_redeclaration_error`).
+    /// Served by the built-in server, whose requests share the cache, so
+    /// the second file of each pair is a hit:
+    ///
+    /// ```php
+    /// $dir = realpath(sys_get_temp_dir()) . '/redeclared' . bin2hex(random_bytes(8)); mkdir($dir);
+    /// foreach (['f' => 'function twice() {}', 'c' => 'class Twice {}'] as $k => $decl) { file_put_contents("$dir/{$k}a.inc", "<?php\n$decl\n"); file_put_contents("$dir/{$k}b.inc", "<?php\n\n$decl\n"); }
+    /// file_put_contents("$dir/index.php", '<?php register_shutdown_function(fn () => print("type " . (error_get_last()["type"] ?? 0) . "\n")); foreach (explode(",", $_GET["f"]) as $f) { include __DIR__ . "/$f.inc"; }');
+    /// foreach (glob("$dir/*") as $f) { touch($f, time() - 60); }
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable=1', '-d', 'opcache.jit=off', '-d', 'html_errors=0', '-S', '127.0.0.1:0', '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// $ready = [$pipes[2]]; $none = null;
+    /// $line = stream_select($ready, $none, $none, 30) ? fgets($pipes[2]) : '';
+    /// $port = preg_match('/:(\d+)\) started$/', rtrim($line), $m) ? $m[1] : 0;
+    /// foreach (['fa', 'fb', 'ca', 'cb', 'fa,fb', 'ca,cb'] as $f) { echo file_get_contents("http://127.0.0.1:$port/?f=$f"); }
+    /// proc_terminate($p); proc_close($p);
+    /// exec('rm -rf ' . escapeshellarg($dir));
+    /// ```
+    /// ```expect process
+    /// type 0
+    /// type 0
+    /// type 0
+    /// type 0
+    ///
+    /// Fatal error: Cannot redeclare function twice() (previously declared in %s/fa.inc:2) in %s/fb.inc on line 3
+    /// Stack trace:
+    /// #0 {main}
+    /// type 1
+    ///
+    /// Fatal error: Cannot redeclare class Twice (previously declared in %s/ca.inc:2) in %s/cb.inc on line 3
+    /// Stack trace:
+    /// #0 {main}
+    /// type 1
+    /// ```
+    fn redeclared_at(&self, unit: &PublishedUnit) -> Level {
+        if self.accel_hit(unit) {
+            Level::Error
+        } else {
+            Level::CompileError
+        }
+    }
+
     /// `do_bind_function`'s and `zend_begin_func_decl`'s redeclaration
     /// text: the function `name` redeclared over `earlier`, and the
     /// earlier one's site where it is a user function.
@@ -1964,7 +2015,8 @@ impl Request {
         if let Some(earlier) = self.function_named((&decl.name).into()) {
             let message = self.function_redeclaration(earlier, &decl.name.0);
             let file = decl.file.0.to_vec();
-            self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
+            let level = self.redeclared_at(unit);
+            self.end_in_compile_time(level, &message, &file, decl.line);
             return None;
         }
         let Some(declared) = Function::local(self.user_functions.len()) else {
@@ -1986,6 +2038,21 @@ impl Request {
     /// holds under `name`, whatever its case ([`class_in`]).
     pub(crate) fn class_named(&self, name: Bare<'_>) -> Option<ClassId> {
         class_in(&self.shared, &self.declared, &self.aliases, name.bytes())
+    }
+
+    /// `GET_CE_CACHE` (`Z/Zend/zend_types.h:901`): the class a lookup by
+    /// the name whose slot is `at` found last in this request, read with
+    /// no table probed; none where no lookup has found one yet.
+    #[inline]
+    pub(crate) fn ce_cached(&self, at: CeCache) -> Option<ClassId> {
+        self.ce_caches.get(at).copied().flatten()
+    }
+
+    /// `SET_CE_CACHE` (`Z/Zend/zend_types.h:904`): `class` kept at the
+    /// slot `at`, which a lookup that found it fills, as
+    /// `zend_lookup_class_ex` fills it.
+    pub(crate) fn set_ce_cache(&mut self, at: CeCache, class: ClassId) {
+        *self.ce_caches.map(at) = Some(class);
     }
 
     /// The home the units it compiles for itself make their constant
@@ -2128,14 +2195,18 @@ impl Request {
 
     /// `ZEND_FLF_FUNC(opline)` and `ZEND_FLF_HANDLER(opline)`: the native
     /// the engine's frameless table holds at `at`, a `FRAMELESS_ICALL_*`'s
-    /// `extended_value`, and its entry, the interception's where an
-    /// extension intercepts it: a frameless row names a native function,
-    /// never a method, a trampoline or an enum's, so its entry is its own
-    /// row of the entries, as [`Request::serve_native`] finds it; none
-    /// past the table, which a unit this engine compiled never carries.
-    pub(crate) fn frameless_entry(&self, at: u32) -> Option<(Function, crate::api::abi::Entry)> {
+    /// `extended_value`, and the entry `#[php_function]` generated for
+    /// that arity, php's `zflf_*`, which an interception of the native's
+    /// framed entry leaves as it is, as php's `zend_flf_handlers` keeps
+    /// the handler registered; none past the table, which a unit this
+    /// engine compiled never carries.
+    #[inline(always)] // the frameless handler's hot path
+    pub(crate) fn frameless_entry(
+        &self,
+        at: u32,
+    ) -> Option<(Function, crate::api::__private::Frameless)> {
         let row = self.shared.frameless.get(at as usize)?;
-        let entry = self.shared.entries.get(row.function as usize)?;
+        let entry = self.shared.frameless_entries.get(at as usize)?;
         Some((Function(row.function), *entry))
     }
 
@@ -2650,6 +2721,18 @@ pub(super) fn mutable(class: ClassId) -> bool {
 /// lowered name is, the case folded by the table and nothing lowered: a
 /// class declared at `at` of the request's rows is the `ClassId` past
 /// the engine's classes.
+/// One name's class cache in a request's map table, the offset php
+/// keeps in an interned class name's `GC_REFCOUNT`.
+pub(crate) type CeCache = php_heap::MapPtr<Option<ClassId>>;
+
+/// `ZSTR_HAS_CE_CACHE(name)` (`Z/Zend/zend_types.h:885`) and the slot:
+/// the class cache an interned string that names a class carries, and
+/// none for any other string ([`php_heap::Str::ce_cache`]).
+#[inline]
+pub(crate) fn ce_cache(name: php_heap::Str) -> Option<CeCache> {
+    name.ce_cache().map(php_heap::MapPtr::new)
+}
+
 fn class_in(
     shared: &Shared,
     declared: &Keyed<Named>,

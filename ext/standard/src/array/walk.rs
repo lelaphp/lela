@@ -949,7 +949,7 @@ fn mapped(
     array: PhpArray,
     arrays: Variadic<PhpArray>,
 ) -> Result<Option<Owner<PhpArray>>, Thrown> {
-    if !arrays.is_empty() {
+    if arrays.len() != 0 {
         let arrays: Vec<PhpArray> = std::iter::once(array).chain(arrays).collect();
         return mapped_together(req, callback.as_ref(), &arrays);
     }

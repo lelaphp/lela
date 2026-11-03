@@ -2,7 +2,7 @@
 //! `zend_compile.c` and `pass_two` leave it, with the `safepoints` table
 //! the compiler numbers beside the line table.
 
-use php_heap::Zval;
+use php_heap::{Table, Zval};
 
 use crate::decl::{ConstExpr, Name};
 use crate::opcode;
@@ -243,6 +243,27 @@ impl Fused {
     }
 }
 
+/// Whether an arithmetic opline is fused to the opline after it, the
+/// `ASSIGN` of its temporary to a CV whose `out` nothing reads
+/// ([`Opline::assigned_by`]): the handler of the arithmetic serves both
+/// oplines where the loop dispatches it, as a comparison's serves the
+/// jump fused to it (design §5.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Assigned {
+    No,
+    Cv,
+}
+
+impl Assigned {
+    /// What `op` is fused to, `next` the opline after it.
+    pub(crate) fn of(op: &Opline, next: Option<&Opline>) -> Assigned {
+        match next {
+            Some(assign) if op.assigned_by(assign) => Assigned::Cv,
+            _ => Assigned::No,
+        }
+    }
+}
+
 /// The kind of the value an assignment's `OP_DATA` carries, `next` the
 /// opline after the assignment; none where `next` is no `OP_DATA`.
 pub(crate) fn data_kind(next: Option<&Opline>) -> Option<OperandKind> {
@@ -264,6 +285,20 @@ impl Opline {
             && self.out_type == OperandKind::Tmp
             && jump.op1_type == OperandKind::Tmp
             && jump.op1 == self.out
+    }
+
+    /// Whether `assign`, the opline after this one, is the `ASSIGN` of
+    /// this opline's temporary to a CV with its `out` unread
+    /// (`ZEND_ASSIGN_SPEC_CV_TMP_RETVAL_UNUSED`), which is what
+    /// `$x = $a + $b;` compiles to.
+    #[must_use]
+    pub(crate) fn assigned_by(&self, assign: &Opline) -> bool {
+        assign.opcode == Opcode::Assign
+            && self.out_type == OperandKind::Tmp
+            && assign.op1_type == OperandKind::Cv
+            && assign.op2_type == OperandKind::Tmp
+            && assign.op2 == self.out
+            && assign.out_type == OperandKind::Unused
     }
     /// The opline the jump lands on, read from the one field whose shape
     /// is `JMP_ADDR` in `zend_vm_opcodes_flags`: `op1` for a `JMP`, `op2`
@@ -358,10 +393,17 @@ pub struct BoundVar {
 /// `foreach` and the body's first opline of a `for` or a `while`, never
 /// the jump's own opline; two backward jumps to one header carry one
 /// number. A return's entry holds the `RETURN*` itself.
+///
+/// Each table of plain values is a [`Table`]: the compiler's vector while
+/// it writes one, laid in the unit's one block once the unit is
+/// persisted for the cache ([`crate::Unit::persist`]), as opcache copies
+/// `opcodes`, `literals`, `try_catch_array`, `live_range` and
+/// `dynamic_func_defs` into a cached file's memory
+/// (`zend_persist_op_array_ex`, `Z/ext/opcache/zend_persist.c:478`).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct OpArray {
-    pub oplines: Vec<Opline>,
-    pub literals: Vec<Zval>,
+    pub oplines: Table<Opline>,
+    pub literals: Table<Zval>,
     /// The constant expressions a constant of kind `IS_CONSTANT_AST`
     /// indexes, php's `zend_ast_ref` behind such a zval: what
     /// `zend_compile_params` leaves in a `RECV_INIT`'s `op2` for a
@@ -371,8 +413,8 @@ pub struct OpArray {
     pub vars: Vec<Name>,
     pub num_cvs: u32,
     pub num_tmps: u32,
-    pub try_catch: Vec<TryCatch>,
-    pub live_ranges: Vec<LiveRange>,
+    pub try_catch: Table<TryCatch>,
+    pub live_ranges: Table<LiveRange>,
     pub safepoints: Safepoints,
     pub filename: Name,
     pub line_start: u32,
@@ -400,11 +442,11 @@ pub struct OpArray {
     /// per entry; a unit holds every such op array once, in
     /// [`crate::Unit::dynamic`], and the entry is its index there, so
     /// no part of a unit points into another.
-    pub dynamic_func_defs: Vec<u32>,
+    pub dynamic_func_defs: Table<u32>,
     /// The functions, closures and classes php compiles while this op
     /// array is `CG(active_op_array)`, in the order it began them, each
     /// with how far this op array had grown by then ([`Nested`]).
-    pub nested: Vec<Nested>,
+    pub nested: Table<Nested>,
     /// `op_array->static_variables` (`Z/Zend/zend_compile.h:534`): the
     /// variables the op array binds through `BIND_STATIC`, in the order
     /// `zend_compile_static_var_common` added them to the table, which
@@ -458,7 +500,7 @@ pub struct OpArray {
     /// `Z/Zend/zend_vm_def.h:6827`), so `$o['10']` hands `offsetGet` the
     /// string `"10"` where `$a['10']` is the key `10` (bug #63217). The
     /// slots are ascending, as the compiler lays them down.
-    pub numeric_dims: Vec<ConstIdx>,
+    pub numeric_dims: Table<ConstIdx>,
 }
 
 /// A declaration php compiles at its place in another op array's
@@ -483,7 +525,7 @@ pub enum Declares {
     /// A top-level function of [`crate::Unit::functions`].
     Function(u32),
     /// A class of [`crate::Unit::classes`], its tables, before the
-    /// methods and hooks its declaration compiles.
+    /// members its declaration compiles.
     Class(u32),
     /// The method at `method` of the class at `class`, its body in
     /// [`crate::Unit::methods`].
@@ -497,6 +539,31 @@ pub enum Declares {
     },
     /// A function of [`crate::Unit::dynamic`], a closure among them.
     Dynamic(u32),
+    /// The constant or case at `constant` of the class at `class`, which
+    /// `zend_declare_typed_class_constant` and, for a case,
+    /// `zend_declare_class_constant_ex` add to `ce->constants_table`
+    /// where the member is written (`Z/Zend/zend_compile.c:9053`,
+    /// `:9507`), after the closures its value declares.
+    Constant { class: u32, constant: u32 },
+    /// The property at `property` of the class at `class`, which
+    /// `zend_declare_typed_property` adds to `ce->properties_info`, with
+    /// its default slot, where the member is written (`:8967`), before
+    /// its hooks: a promoted one's among its constructor's parameters
+    /// (`:7985`), an enum's `name` and `value` as its declaration begins
+    /// (`zend_enum_register_props`, `:9348`).
+    Property { class: u32, property: u32 },
+}
+
+impl Declares {
+    /// Whether it declares an op array: a function, a method, a hook or
+    /// a dynamic definition, and not a class or one of its members.
+    #[must_use]
+    pub const fn is_body(self) -> bool {
+        !matches!(
+            self,
+            Declares::Class(_) | Declares::Constant { .. } | Declares::Property { .. }
+        )
+    }
 }
 
 /// How many oplines, constants, variables, `dynamic_func_defs` and
@@ -563,7 +630,7 @@ impl Safepoints {
 
     /// The heap's room shrunk to what is held, inline again where that
     /// fits.
-    fn shrink_to_fit(&mut self) {
+    pub(crate) fn shrink_to_fit(&mut self) {
         if let Sites::Spilled(spilled) = &mut self.0 {
             if spilled.len() <= Safepoints::INLINE {
                 *self = Safepoints::from(std::mem::take(spilled));
@@ -621,35 +688,83 @@ impl PartialEq for Safepoints {
 
 impl Eq for Safepoints {}
 
+/// The opcodes that never go on to the opline after them, which end a
+/// block with no fall-through in `zend_build_cfg`: a `JMP`, a `MATCH`,
+/// the returns, the throws and a `FAST_RET`.
+#[rustfmt::skip]
+const ENDS: [Opcode; 9] = [Opcode::Jmp, Opcode::Match, Opcode::Return, Opcode::ReturnByRef,
+    Opcode::GeneratorReturn, Opcode::Throw, Opcode::MatchError, Opcode::VerifyNeverType,
+    Opcode::FastRet];
+
+/// The opcodes whose `op2` is a jump table: `SWITCH_LONG`,
+/// `SWITCH_STRING` and `MATCH`.
+const SWITCHES: [Opcode; 3] = [Opcode::SwitchLong, Opcode::SwitchString, Opcode::Match];
+
 impl OpArray {
     /// Every opline's handler resolved from its opcode and the kinds of
     /// its operands, as php's `pass_two` calls `zend_vm_set_opcode_handler`
-    /// on every opline it finishes ([`crate::Unit::published`]).
+    /// on every opline it finishes ([`crate::Unit::published`]). An opline
+    /// already resolved is not written, so a table laid in a unit's block
+    /// stays there ([`crate::Unit::persist`]).
     pub(crate) fn resolve(&mut self) {
         for at in 0..self.oplines.len() {
             let handler = match self.oplines.get(at) {
                 Some(op) => Handler::of(op, self.oplines.get(at + 1), at),
                 None => continue,
             };
-            if let Some(op) = self.oplines.get_mut(at) {
+            if self.oplines.get(at).is_some_and(|op| op.handler != handler)
+                && let Some(op) = self.oplines.get_mut(at)
+            {
                 op.handler = handler;
             }
         }
     }
 
-    /// The tables shrunk to what they hold ([`crate::Unit::compact`]).
-    pub(crate) fn compact(&mut self) {
-        self.oplines.shrink_to_fit();
-        self.literals.shrink_to_fit();
-        self.const_exprs.shrink_to_fit();
-        self.vars.shrink_to_fit();
-        self.try_catch.shrink_to_fit();
-        self.live_ranges.shrink_to_fit();
-        self.safepoints.shrink_to_fit();
-        self.dynamic_func_defs.shrink_to_fit();
-        self.nested.shrink_to_fit();
-        self.bound_vars.shrink_to_fit();
-        self.numeric_dims.shrink_to_fit();
+    /// The first opline that names something past the op array's tables,
+    /// as `opline <n> (<opcode>): <what>`: an operand's slot at or past
+    /// `num_cvs + num_tmps`, a `CONST`'s index at or past `literals`' length, a
+    /// jump target, a jump table's among them, or the opline after one
+    /// that goes on, at or past `oplines`. php's `pass_two` holds none of
+    /// these; the handlers' bounds compares stand behind them, and
+    /// publication holds them in a build with debug assertions, the
+    /// sensor #3274's ruling builds ([`crate::Unit::published`]).
+    pub(crate) fn out_of_range(&self) -> Option<String> {
+        let slots = self.num_cvs + self.num_tmps;
+        let (len, k) = (self.oplines.len(), self.literals.len());
+        let past = |kind, n: u32| match kind {
+            OperandKind::Unused => None,
+            OperandKind::Const => (n as usize >= k).then(|| format!("constant {n} of {k}")),
+            _ => (n >= slots).then(|| format!("slot {n} of {slots}")),
+        };
+        self.oplines.iter().enumerate().find_map(|(at, op)| {
+            let operands = [(op.op1_type, op.op1, "op1"), (op.op2_type, op.op2, "op2")];
+            let mut ops = operands
+                .into_iter()
+                .chain([(op.out_type, op.out, "result")]);
+            let fault = ops.find_map(|(kind, n, f)| Some(format!("{f} names {}", past(kind, n)?)));
+            let jump = self.jumps(op).find(|&to| to >= len);
+            let jump = jump.map(|to| format!("jumps to opline {to} of {len}"));
+            let on = at + 1 >= len && !ENDS.contains(&op.opcode);
+            let on = on.then(|| format!("goes on to opline {} of {len}", at + 1));
+            let fault = fault.or(jump).or(on)?;
+            Some(format!("opline {at} ({}): {fault}", op.opcode.name()))
+        })
+    }
+
+    /// The oplines `op` can jump to: its `JMP_ADDR` operand's and, for a
+    /// `SWITCH_*` or a `MATCH`, each of its jump table's, which a value
+    /// no opline index reads as past them all.
+    fn jumps(&self, op: &Opline) -> impl Iterator<Item = usize> {
+        let table = SWITCHES.contains(&op.opcode).then_some(op.op2 as usize);
+        let table = table.and_then(|at| self.literals.get(at)?.as_arr());
+        let to = |(_, at): (_, Zval)| at.as_long().and_then(|at| usize::try_from(at).ok());
+        let table = table.map(|t| {
+            (&t).into_iter()
+                .map(|at| to(at).unwrap_or(usize::MAX))
+                .collect::<Vec<_>>()
+        });
+        let target = op.jump_target().map(|at| at.0 as usize);
+        target.into_iter().chain(table.into_iter().flatten())
     }
 
     /// `Z_EXTRA_P(dim) == ZEND_EXTRA_VALUE ? dim + 1 : dim`: the
@@ -670,41 +785,6 @@ impl OpArray {
 
 #[cfg(test)]
 mod tests {
-    /// A unit held for more than one request keeps no table's slack: the
-    /// emitter's vectors grow as they are written and stay so for an
-    /// `eval`'s unit, and [`crate::Unit::compact`] shrinks every op
-    /// array's, a method's among them, to what it holds.
-    #[test]
-    fn a_compacted_unit_holds_no_more_than_its_tables_hold() {
-        let grown = || {
-            let mut oplines = Vec::with_capacity(16);
-            oplines.push(Opline::default());
-            let mut literals = Vec::with_capacity(16);
-            literals.push(Zval::long(1));
-            OpArray {
-                oplines,
-                literals,
-                safepoints: (0..9).map(OplineIdx).collect::<Vec<_>>().into(),
-                ..OpArray::default()
-            }
-        };
-        let mut unit = crate::Unit {
-            main: grown(),
-            methods: vec![crate::unit::MethodBody {
-                class: 0,
-                method: 0,
-                body: grown(),
-            }],
-            ..crate::Unit::default()
-        };
-        unit.compact();
-        for body in [&unit.main, &unit.methods[0].body] {
-            assert_eq!(body.oplines.capacity(), 1);
-            assert_eq!(body.literals.capacity(), 1);
-            assert!(matches!(body.safepoints.0, Sites::Spilled(ref s) if s.capacity() == 9));
-        }
-    }
-
     use super::*;
 
     /// The table stands inline to [`Safepoints::INLINE`], spills past it
@@ -780,12 +860,104 @@ mod tests {
         }
     }
 
+    /// Publication holds every op array of a unit to its tables in a
+    /// build with debug assertions, and names the op array and the
+    /// opline of an operand past its frame: a compiler bug (#3274).
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(
+        expected = "a compiler bug: f publishes opline 0 (ZEND_ECHO): op1 names slot 2 of 2"
+    )]
+    fn an_operand_past_its_frame_is_sensed_where_the_unit_is_published() {
+        let echo = Opline {
+            opcode: Opcode::Echo,
+            op1_type: OperandKind::Cv,
+            op1: 2,
+            ..Opline::default()
+        };
+        let back = Opline {
+            opcode: Opcode::Return,
+            ..Opline::default()
+        };
+        let unit = crate::Unit {
+            functions: vec![(
+                crate::decl::native_function(b"f"),
+                OpArray {
+                    oplines: vec![echo, back].into(),
+                    num_cvs: 1,
+                    num_tmps: 1,
+                    ..OpArray::default()
+                },
+            )],
+            ..crate::Unit::default()
+        };
+        drop(unit.published(None));
+    }
+
+    /// Each of the four ranges, held where the op array is published: a
+    /// slot, a constant's index, a jump target, a jump table's among them, and the
+    /// opline after one that goes on.
+    #[test]
+    fn an_op_array_names_the_first_opline_past_its_tables() {
+        let op = |opcode, op1_type, op1| Opline {
+            opcode,
+            op1_type,
+            op1,
+            ..Opline::default()
+        };
+        let back = op(Opcode::Return, OperandKind::Unused, 0);
+        let mut code = OpArray {
+            oplines: vec![op(Opcode::Echo, OperandKind::Tmp, 2), back].into(),
+            literals: vec![Zval::long(7)].into(),
+            num_cvs: 1,
+            num_tmps: 2,
+            ..OpArray::default()
+        };
+        assert_eq!(code.out_of_range(), None, "slot 2 of 3, and a return last");
+        code.num_tmps = 1;
+        let past = code.out_of_range();
+        assert_eq!(
+            past.as_deref(),
+            Some("opline 0 (ZEND_ECHO): op1 names slot 2 of 2")
+        );
+        code.oplines[0] = op(Opcode::Echo, OperandKind::Const, 1);
+        let past = code.out_of_range();
+        assert_eq!(
+            past.as_deref(),
+            Some("opline 0 (ZEND_ECHO): op1 names constant 1 of 1")
+        );
+        code.oplines[0] = op(Opcode::Jmp, OperandKind::Unused, 2);
+        let past = code.out_of_range();
+        assert_eq!(
+            past.as_deref(),
+            Some("opline 0 (ZEND_JMP): jumps to opline 2 of 2")
+        );
+        code.oplines[1] = op(Opcode::Echo, OperandKind::Const, 0);
+        code.oplines[0] = op(Opcode::Jmp, OperandKind::Unused, 1);
+        let past = code.out_of_range();
+        assert_eq!(
+            past.as_deref(),
+            Some("opline 1 (ZEND_ECHO): goes on to opline 2 of 2")
+        );
+    }
+
     /// The handlers of `oplines` as a unit of them resolves them where it
-    /// is published, none resolved before.
-    fn resolved(oplines: Vec<Opline>) -> Vec<Handler> {
+    /// is published, none resolved before: in a frame of a slot for every
+    /// operand they name, with a constant for each, and a return past
+    /// every opline they jump to.
+    fn resolved(mut oplines: Vec<Opline>) -> Vec<Handler> {
+        let written = oplines.len();
+        oplines.resize(16, Opline::default());
+        oplines.push(Opline {
+            opcode: Opcode::Return,
+            ..Opline::default()
+        });
         let unit = crate::Unit {
             main: OpArray {
-                oplines,
+                oplines: oplines.into(),
+                literals: vec![Zval::long(0); 8].into(),
+                num_cvs: 8,
+                num_tmps: 8,
                 ..OpArray::default()
             },
             ..crate::Unit::default()
@@ -798,7 +970,8 @@ mod tests {
             "the compiler leaves every opline unresolved"
         );
         let unit = unit.published(None);
-        unit.main.oplines.iter().map(|op| op.handler).collect()
+        let handlers = unit.main.oplines.iter().map(|op| op.handler);
+        handlers.take(written).collect()
     }
 
     /// The handlers publication resolves: a comparison whose line says
@@ -876,6 +1049,71 @@ mod tests {
         assert_eq!(
             resolved(vec![over(Opcode::Add, OperandKind::Unused, cv)]),
             [Handler::AddUnlisted]
+        );
+    }
+
+    /// `ADD`, `SUB`, `MUL` and `DIV` are resolved over whether the
+    /// opline after them assigns their temporary to a CV and leaves its
+    /// `out` unread, and the `ASSIGN` keeps its own handler, which a jump
+    /// to it serves.
+    #[test]
+    fn publication_resolves_arithmetic_over_the_assign_of_its_temporary_after_it() {
+        let (cv, konst, tmp, unused) = (
+            OperandKind::Cv,
+            OperandKind::Const,
+            OperandKind::Tmp,
+            OperandKind::Unused,
+        );
+        let assign = |op2, out_type| Opline {
+            opcode: Opcode::Assign,
+            op1_type: cv,
+            op1: 0,
+            op2_type: tmp,
+            op2,
+            out_type,
+            ..Opline::default()
+        };
+        assert_eq!(
+            resolved(vec![over(Opcode::Add, tmp, cv), assign(3, unused)]),
+            [Handler::AddTmpCvAssignCv, Handler::AssignCvTmpRetvalUnused]
+        );
+        assert_eq!(
+            resolved(vec![over(Opcode::Mul, cv, cv), assign(3, unused)]),
+            [Handler::MulCvCvAssignCv, Handler::AssignCvTmpRetvalUnused]
+        );
+        assert_eq!(
+            resolved(vec![over(Opcode::Sub, tmp, konst), assign(3, unused)]),
+            [
+                Handler::SubTmpConstAssignCv,
+                Handler::AssignCvTmpRetvalUnused
+            ]
+        );
+        assert_eq!(
+            resolved(vec![over(Opcode::Div, cv, tmp), assign(3, unused)]),
+            [Handler::DivAssignCv, Handler::AssignCvTmpRetvalUnused]
+        );
+        assert_eq!(
+            resolved(vec![over(Opcode::Add, tmp, cv), assign(4, unused)]),
+            [Handler::AddTmpCv, Handler::AssignCvTmpRetvalUnused],
+            "an assignment of another temporary is no fused assignment"
+        );
+        assert_eq!(
+            resolved(vec![over(Opcode::Add, tmp, cv), assign(3, tmp)]),
+            [Handler::AddTmpCv, Handler::AssignCvTmpRetvalUsed],
+            "nor is one whose `out` is read"
+        );
+        assert_eq!(
+            resolved(vec![over(Opcode::Mod, cv, cv), assign(3, unused)]),
+            [Handler::Mod, Handler::AssignCvTmpRetvalUnused],
+            "nor one after an opcode the list does not name"
+        );
+        assert_eq!(
+            resolved(vec![
+                over(Opcode::Add, OperandKind::Unused, cv),
+                assign(3, unused)
+            ]),
+            [Handler::AddUnlisted, Handler::AssignCvTmpRetvalUnused],
+            "and the kinds a row does not list keep their one variant"
         );
     }
 

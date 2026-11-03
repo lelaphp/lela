@@ -59,21 +59,21 @@ const INT_MAX: usize = i32::MAX as usize;
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            bcadd::declared(),
-            bcsub::declared(),
-            bcmul::declared(),
-            bcdiv::declared(),
-            bcmod::declared(),
-            bcdivmod::declared(),
-            bcpowmod::declared(),
-            bcpow::declared(),
-            bcsqrt::declared(),
-            bccomp::declared(),
-            bcscale::declared(),
-            bcfloor::declared(),
-            bcceil::declared(),
-            bcround::declared(),
+        .functions(&[
+            bcadd::DECLARED,
+            bcsub::DECLARED,
+            bcmul::DECLARED,
+            bcdiv::DECLARED,
+            bcmod::DECLARED,
+            bcdivmod::DECLARED,
+            bcpowmod::DECLARED,
+            bcpow::DECLARED,
+            bcsqrt::DECLARED,
+            bccomp::DECLARED,
+            bcscale::DECLARED,
+            bcfloor::DECLARED,
+            bcceil::DECLARED,
+            bcround::DECLARED,
         ])
         .class::<number::Number>()
         .request_state::<number::Shared>()

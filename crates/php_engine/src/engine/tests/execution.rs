@@ -218,10 +218,17 @@ fn an_opcode_with_no_handler_ends_the_request_naming_it() {
     let mut req = Request::new(Arc::clone(&engine.shared), description(""));
     let unit = Unit {
         main: php_unit::OpArray {
-            oplines: vec![php_unit::Opline {
-                opcode: php_unit::Opcode::UserOpcode,
-                ..php_unit::Opline::default()
-            }],
+            oplines: vec![
+                php_unit::Opline {
+                    opcode: php_unit::Opcode::UserOpcode,
+                    ..php_unit::Opline::default()
+                },
+                php_unit::Opline {
+                    opcode: php_unit::Opcode::Return,
+                    ..php_unit::Opline::default()
+                },
+            ]
+            .into(),
             ..php_unit::OpArray::default()
         },
         ..Unit::default()
@@ -259,7 +266,8 @@ fn the_loop_asks_the_tier_at_the_entry_and_at_no_entry_frames_return() {
 
 /// Design §5.6, §8: a user frame is activated after its `RECV*`
 /// prologue, so `Probe` sees `(Entry, callee)` once per call and
-/// `Return` once per callee frame; a call whose `RECV` throws is
+/// `Return` once per callee frame, in the caller it returned to
+/// (#4056); a call whose `RECV` throws is
 /// reported `Threw` before the activation, so no `Entry` is raised
 /// for it (#309).
 #[test]
@@ -285,9 +293,9 @@ fn a_call_activates_its_frame_once_and_a_recv_that_throws_never_does() {
         vec![
             (Site::Entry, frame),
             (Site::Entry, callee),
-            (Site::Return(crate::tier::SafepointIdx(1)), callee),
+            (Site::Return(crate::tier::SafepointIdx(1)), frame),
             (Site::Entry, callee),
-            (Site::Return(crate::tier::SafepointIdx(1)), callee),
+            (Site::Return(crate::tier::SafepointIdx(1)), frame),
         ],
         "two calls activated and returned, the third never activated"
     );
@@ -325,7 +333,7 @@ fn an_unbounded_recursion_through_array_map_is_refused_not_overflowed() {
     let engine = Engine::cli_builder()
         .additional_extension(
             crate::api::abi::ExtensionBuilder::default()
-                .functions(vec![array_map::declared()])
+                .functions(&[array_map::DECLARED])
                 .build("standard"),
         )
         .build();

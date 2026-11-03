@@ -78,7 +78,7 @@ pub(crate) fn extension() -> Extension {
         .class::<Fiber>()
         .class::<FiberError>()
         .class::<stdClass>()
-        .constants(crate::constants::startup::declared())
+        .constants(crate::constants::startup::DECLARED)
         .info(info)
         .build("Core")
 }

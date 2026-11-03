@@ -234,9 +234,9 @@ fn plain_user(
 /// values are compared, in the first array's order, a reference with one
 /// owner followed.
 /// The arrays of an `array $array, array ...$arrays` native as they came.
-fn listed(array: Raw<PhpArray>, arrays: &Variadic<Raw<PhpArray>>) -> Vec<Value> {
+fn listed(array: Raw<PhpArray>, arrays: Variadic<Raw<PhpArray>>) -> Vec<Value> {
     std::iter::once(array.value())
-        .chain(arrays.iter().map(Raw::value))
+        .chain(arrays.map(|array| array.value()))
         .collect()
 }
 
@@ -244,7 +244,7 @@ fn listed(array: Raw<PhpArray>, arrays: &Variadic<Raw<PhpArray>>) -> Vec<Value> 
 /// `$rest` ending in its callbacks.
 fn rested(array: Raw<PhpArray>, rest: Variadic<Untyped<Value>>) -> Vec<Value> {
     std::iter::once(array.value())
-        .chain(rest.into_iter().map(|value| value.0))
+        .chain(rest.map(|value| value.0))
         .collect()
 }
 
@@ -688,7 +688,7 @@ fn array_diff(
     array: Raw<PhpArray>,
     arrays: Variadic<Raw<PhpArray>>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let parsed = parse(req, &listed(array, &arrays), 0)?;
+    let parsed = parse(req, &listed(array, arrays), 0)?;
     let values = parsed.arrays;
     let first = array_at(req, 1, &values[0])?;
     let check_rest = |req: &mut Request| -> Result<Vec<PhpArray>, Thrown> {
@@ -786,7 +786,7 @@ fn array_diff_key(
     array: Raw<PhpArray>,
     arrays: Variadic<Raw<PhpArray>>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    by_key(req, &listed(array, &arrays), Data::None, true)
+    by_key(req, &listed(array, arrays), Data::None, true)
 }
 
 /// `array_diff_assoc(array $array, array ...$arrays): array`, php's
@@ -819,7 +819,7 @@ fn array_diff_assoc(
     array: Raw<PhpArray>,
     arrays: Variadic<Raw<PhpArray>>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    by_key(req, &listed(array, &arrays), Data::Internal, true)
+    by_key(req, &listed(array, arrays), Data::Internal, true)
 }
 
 /// `array_udiff_assoc(array $array, ...$rest): array`, php's
@@ -885,7 +885,7 @@ fn array_intersect_key(
     array: Raw<PhpArray>,
     arrays: Variadic<Raw<PhpArray>>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    by_key(req, &listed(array, &arrays), Data::None, false)
+    by_key(req, &listed(array, arrays), Data::None, false)
 }
 
 /// `array_intersect_assoc(array $array, array ...$arrays): array`, php's
@@ -907,7 +907,7 @@ fn array_intersect_assoc(
     array: Raw<PhpArray>,
     arrays: Variadic<Raw<PhpArray>>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    by_key(req, &listed(array, &arrays), Data::Internal, false)
+    by_key(req, &listed(array, arrays), Data::Internal, false)
 }
 
 /// `array_uintersect_assoc(array $array, ...$rest): array`, php's
@@ -1104,7 +1104,7 @@ fn array_intersect(
 ) -> Result<Owner<PhpArray>, Thrown> {
     intersect_sorted(
         req,
-        &listed(array, &arrays),
+        &listed(array, arrays),
         Behavior::Normal,
         Data::Internal,
         Keys::Internal,

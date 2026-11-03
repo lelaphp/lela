@@ -52,18 +52,18 @@ struct State {}
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            ctype_alnum::declared(),
-            ctype_alpha::declared(),
-            ctype_cntrl::declared(),
-            ctype_digit::declared(),
-            ctype_lower::declared(),
-            ctype_graph::declared(),
-            ctype_print::declared(),
-            ctype_punct::declared(),
-            ctype_space::declared(),
-            ctype_upper::declared(),
-            ctype_xdigit::declared(),
+        .functions(&[
+            ctype_alnum::DECLARED,
+            ctype_alpha::DECLARED,
+            ctype_cntrl::DECLARED,
+            ctype_digit::DECLARED,
+            ctype_lower::DECLARED,
+            ctype_graph::DECLARED,
+            ctype_print::DECLARED,
+            ctype_punct::DECLARED,
+            ctype_space::DECLARED,
+            ctype_upper::DECLARED,
+            ctype_xdigit::DECLARED,
         ])
         .request_state::<State>()
         .info(ctype_info)

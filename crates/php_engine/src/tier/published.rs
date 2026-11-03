@@ -143,9 +143,13 @@ impl Func {
     /// The landing word of opline `at`: sealed until a tier armed it, and
     /// past the last opline.
     pub(crate) fn landing(&self, at: OplineIdx) -> &Word {
-        (self.landings.get())
-            .and_then(|words| words.get(usize::try_from(at.0).ok()?))
-            .unwrap_or(&SEALED)
+        self.laid_landing(at).unwrap_or(&SEALED)
+    }
+
+    /// The landing word of opline `at` where the op array's landing words
+    /// are laid down; none where they are not, and past the last opline.
+    pub(crate) fn laid_landing(&self, at: OplineIdx) -> Option<&Word> {
+        self.landings.get()?.get(usize::try_from(at.0).ok()?)
     }
 
     /// The landing word of opline `at`, for a tier to arm: the op array's
@@ -503,18 +507,26 @@ fn dynamic_scope(unit: &php_unit::Unit, at: u32) -> Option<&Name> {
 pub(crate) mod tests {
     use std::sync::atomic::Ordering;
 
-    use php_unit::{OpArray, Opline, OplineIdx, Unit};
+    use php_unit::{OpArray, Opcode, Opline, OplineIdx, Unit};
 
     use super::{Funcs, Laid, SEALED};
     use crate::tier::SafepointIdx;
 
     /// A unit whose main op array has `safepoints` safepoints and as many
-    /// oplines, published at offset `first`.
+    /// oplines, the last a `RETURN`, published at offset `first`.
     pub(crate) fn published(first: u32, safepoints: u32) -> php_unit::PublishedUnit {
+        let opline = |at| Opline {
+            opcode: if at + 1 == safepoints {
+                Opcode::Return
+            } else {
+                Opcode::Nop
+            },
+            ..Opline::default()
+        };
         let mut unit = Unit {
             main: OpArray {
                 safepoints: (0..safepoints).map(OplineIdx).collect::<Vec<_>>().into(),
-                oplines: (0..safepoints).map(|_| Opline::default()).collect(),
+                oplines: (0..safepoints).map(opline).collect(),
                 ..OpArray::default()
             },
             ..Unit::default()

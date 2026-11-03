@@ -194,15 +194,15 @@ fn string_refused(req: &mut Request, len: i64, to: i64) -> Result<(), Thrown> {
 
 fn storage() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            block_held::declared(),
-            block_resized::declared(),
-            block_kept::declared(),
-            block_refused::declared(),
-            string_grown::declared(),
-            string_cut::declared(),
-            string_short::declared(),
-            string_refused::declared(),
+        .functions(&[
+            block_held::DECLARED,
+            block_resized::DECLARED,
+            block_kept::DECLARED,
+            block_refused::DECLARED,
+            string_grown::DECLARED,
+            string_cut::DECLARED,
+            string_short::DECLARED,
+            string_refused::DECLARED,
         ])
         .request_state::<Kept>()
         .rshutdown(kept_freed)

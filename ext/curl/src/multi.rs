@@ -778,6 +778,42 @@ fn curl_multi_select(
 /// exit
 /// int(0)
 /// ```
+///
+/// Called from a callable a `CurlHandle`'s own free serves during a
+/// collection, it passes over a `CurlHandle` whose free is under way, and
+/// the perform is refused `CURLM_RECURSIVE_API_CALL` from inside the
+/// callback. The fence pins this engine's side of
+/// `trace:curl-multi-exec-in-a-collection`:
+///
+/// ```php
+/// $m = curl_multi_init();
+/// $a = curl_init('http://127.0.0.1:1/');
+/// $b = curl_init('http://127.0.0.1:1/');
+/// foreach ([$a, $b] as $i => $h) {
+///     curl_setopt($h, CURLOPT_VERBOSE, 1);
+///     curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $t, $d) use ($m, $i) {
+///         if ($t == CURLINFO_TEXT && str_starts_with($d, "closing")) { echo "$i: $d"; var_dump(curl_multi_exec($m, $r2), count(curl_multi_get_handles($m))); }
+///     });
+///     curl_multi_add_handle($m, $h);
+/// }
+/// curl_multi_exec($m, $r);
+/// echo "unset\n";
+/// unset($a, $b, $h);
+/// unset($m);
+/// var_dump(gc_collect_cycles());
+/// echo "end\n";
+/// ```
+/// ```expect
+/// unset
+/// 0: closing connection #0
+/// int(8)
+/// int(2)
+/// 1: closing connection #1
+/// int(8)
+/// int(2)
+/// int(5)
+/// end
+/// ```
 #[php_function]
 fn curl_multi_exec(
     req: &mut Request,

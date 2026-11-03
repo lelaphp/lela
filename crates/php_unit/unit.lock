@@ -6,6 +6,7 @@ BoundVar
 CacheSlot
 ConstIdx
 Declares
+Declares::is_body
 Diagnostic
 Effects
 Effects::ALLOC
@@ -63,8 +64,8 @@ SsaVars::ssa_var
 TopLevel
 TryCatch
 Unit
-Unit::compact
 Unit::dump
+Unit::persist
 Unit::published
 UnitCell
 UnitCell::share
@@ -102,10 +103,14 @@ decl::IniDecl
 decl::MethodDecl
 decl::Name
 decl::NameKind
+decl::NativeParameter
 decl::Parameter
 decl::Parameter::is_required
 decl::ParameterDefault
 decl::ParameterDefault::expr
+decl::Parameters
+decl::Parameters::native
+decl::Parameters::unbuilt
 decl::PropertyDecl
 decl::PropertyHooks
 decl::PropertyHooks::of

@@ -288,8 +288,8 @@ fn regenerate(req: &mut Request, delete: bool) -> Result<bool, Thrown> {
         }
     }
     session::close(req)?;
+    crate::forget_read(req);
     let state = req.state::<State>();
-    state.session_vars = None;
     state.id = None;
     let opened = session::open(req, module);
     if !crate::absorb(req, opened)?.unwrap_or(false) {

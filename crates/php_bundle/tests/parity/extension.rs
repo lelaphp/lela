@@ -570,7 +570,8 @@ fn proto_call(
     args: NamedVariadic<Value>,
 ) -> Result<Owner<Value>, Thrown> {
     let named: Vec<(PhpString, Value)> = args.named().to_vec();
-    php_ext::call::call_named(req, &callback, &args.positional, &named)
+    let positional: Vec<Value> = args.positional.collect();
+    php_ext::call::call_named(req, &callback, &positional, &named)
 }
 
 /// `proto_count(iterable $of): int`.
@@ -592,7 +593,7 @@ fn proto_manual(req: &mut Request, n: Variadic<i64>) -> Result<Owner<PhpString>,
             "exactly 0 or 2 arguments",
         ));
     }
-    let text = format!("{:?}", &n[..]);
+    let text = format!("{:?}", n.collect::<Vec<_>>());
     PhpString::new(req, text.as_bytes())
 }
 
@@ -766,41 +767,40 @@ impl ProtoLaid {
 }
 
 pub(crate) fn extension() -> php_ext::abi::Extension {
-    let mut constants = constants::declared();
-    constants.push(INSIDE::declared());
     ExtensionBuilder::default()
-        .functions(vec![
-            strspn::declared(),
-            explode::declared(),
-            htmlspecialchars::declared(),
-            round::declared(),
-            trim::declared(),
-            mkdir::declared(),
-            str_replace::declared(),
-            in_array::declared(),
-            array_keys::declared(),
-            array_push::declared(),
-            sscanf::declared(),
-            array_multisort::declared(),
-            preg_match::declared(),
-            wordwrap::declared(),
-            implode::declared(),
-            join::declared(),
-            utf8_encode::declared(),
-            password_verify::declared(),
-            proto_raw::declared(),
-            proto_seen::declared(),
-            proto_call::declared(),
-            proto_count::declared(),
-            proto_manual::declared(),
-            proto_describe::declared(),
-            proto_never::declared(),
-            proto_false::declared(),
+        .functions(&[
+            strspn::DECLARED,
+            explode::DECLARED,
+            htmlspecialchars::DECLARED,
+            round::DECLARED,
+            trim::DECLARED,
+            mkdir::DECLARED,
+            str_replace::DECLARED,
+            in_array::DECLARED,
+            array_keys::DECLARED,
+            array_push::DECLARED,
+            sscanf::DECLARED,
+            array_multisort::DECLARED,
+            preg_match::DECLARED,
+            wordwrap::DECLARED,
+            implode::DECLARED,
+            join::DECLARED,
+            utf8_encode::DECLARED,
+            password_verify::DECLARED,
+            proto_raw::DECLARED,
+            proto_seen::DECLARED,
+            proto_call::DECLARED,
+            proto_count::DECLARED,
+            proto_manual::DECLARED,
+            proto_describe::DECLARED,
+            proto_never::DECLARED,
+            proto_false::DECLARED,
             // The stub's `#if`: the line carries the native's own `#[cfg]`.
             #[cfg(windows)]
-            sapi_windows_vt100_support::declared(),
+            sapi_windows_vt100_support::DECLARED,
         ])
-        .constants(constants)
+        .constants(constants::DECLARED)
+        .constants(&[INSIDE::DECLARED])
         .class::<RoundingMode>()
         .class::<php_user_filter>()
         .class::<SplFileInfo>()

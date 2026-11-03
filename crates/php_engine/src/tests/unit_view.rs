@@ -90,10 +90,10 @@ fn admitted(_: &mut Request, _: &[u8]) -> Admission {
 fn viewing() -> Extension {
     ExtensionBuilder::default()
         .admission(admitted)
-        .functions(vec![
-            hold_caller::declared(),
-            hold_class_named::declared(),
-            bump_entry::declared(),
+        .functions(&[
+            hold_caller::DECLARED,
+            hold_class_named::DECLARED,
+            bump_entry::DECLARED,
         ])
         .request_state::<Views>()
         .build("viewing")

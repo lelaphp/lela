@@ -1,10 +1,11 @@
 //! `#[php_const]` (design §7.1): one `const`, which gains a sibling `mod`
-//! of its name whose `declared()` answers its declaration, or an inline
-//! `mod` whose every `const` is declared in order, gaining `declared()`
-//! for the list. A `fn NAME() -> T` in the `mod` is a constant computed
-//! once, when the builder runs. Each is declared by value, as php
-//! declares an extension's constants, typed through `IntoConst`, so a
-//! body reads the value the declaration holds.
+//! of its name whose `const DECLARED` is its static entry, or an inline
+//! `mod` whose every `const` is an entry in order, gaining `const
+//! DECLARED` for the list, as php's `register_*_symbols` lists them. A
+//! `fn NAME() -> T` in the `mod` is a constant computed once, as the
+//! extension declares it. Each is declared by value, as php declares an
+//! extension's constants, typed through `IntoConst`, so a body reads the
+//! value the declaration holds.
 
 use proc_macro2::{Ident, TokenStream as Tokens};
 use quote::quote;
@@ -23,7 +24,8 @@ const HEADER_KEYS: &[(&str, Form)] = &[
 
 const ITEM_KEYS: &[(&str, Form)] = &[("deprecated", Form::FlagOrList), ("attribute", Form::List)];
 
-/// `ConstDecl { name, value, attributes }` of one constant.
+/// The static entry of one constant: its name, the function that
+/// builds its value and its attributes'.
 fn declaration(
     ident: &Ident,
     keys: &Keys,
@@ -34,11 +36,11 @@ fn declaration(
     let mut path = namespace.to_vec();
     path.push(php_name(ident));
     let php = bytes(&path.join("\\"));
-    let attributes = expr::attributes(keys)?;
-    Ok(quote!(#root::decl::ConstDecl {
-        name: #root::decl::Name(#php.as_slice().into()),
-        value: #value,
-        attributes: vec![#(#attributes),*],
+    let attributes = expr::built(&expr::attributes(keys)?);
+    Ok(quote!(#root::__private::NativeConst {
+        name: #php,
+        value: || #value,
+        attributes: #attributes,
     }))
 }
 
@@ -64,10 +66,8 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
                 #(#cfg)*
                 #[allow(non_snake_case)]
                 pub(crate) mod #ident {
-                    /// The constant's declaration, for `ExtensionBuilder::constants`.
-                    pub(crate) fn declared() -> #root::decl::ConstDecl {
-                        #declaration
-                    }
+                    /// The constant's static entry, for `ExtensionBuilder::constants`.
+                    pub(crate) const DECLARED: #root::__private::NativeConst = #declaration;
                 }
             })
         }
@@ -94,7 +94,7 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
                         let cfg = cfgs(&constant.attrs);
                         let value = quote!(<#ty as #root::abi::IntoConst>::value(&#ident));
                         let declaration = declaration(ident, &keys, &namespace, &value)?;
-                        declarations.push(quote!(#(#cfg)* out.push(#declaration);));
+                        declarations.push(quote!(#(#cfg)* #declaration));
                     }
                     Item::Fn(function) => {
                         let keys = Keys::take(&mut function.attrs)?;
@@ -109,7 +109,7 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
                         let cfg = cfgs(&function.attrs);
                         let value = quote!(#root::abi::IntoConst::value(&#ident()));
                         let declaration = declaration(ident, &keys, &namespace, &value)?;
-                        declarations.push(quote!(#(#cfg)* out.push(#declaration);));
+                        declarations.push(quote!(#(#cfg)* #declaration));
                     }
                     Item::Use(_) => {}
                     other => {
@@ -121,13 +121,10 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
                 }
             }
             items.push(syn::parse_quote! {
-                /// The constants' declarations in order, for
+                /// The constants' static entries in order, for
                 /// `ExtensionBuilder::constants`.
-                pub(crate) fn declared() -> Vec<#root::decl::ConstDecl> {
-                    let mut out = Vec::new();
-                    #(#declarations)*
-                    out
-                }
+                pub(crate) const DECLARED: &[#root::__private::NativeConst] =
+                    &[#(#declarations),*];
             });
             module
                 .attrs

@@ -335,7 +335,7 @@ pub fn extension() -> Extension {
         .on_update_long(b"mysqli.max_links", LongHandler::Any)
         .on_update_long(b"mysqli.max_persistent", LongHandler::Any)
         .on_update_long(b"mysqli.default_port", LongHandler::Any)
-        .constants(constants::declared())
+        .constants(constants::DECLARED)
         .class::<extras::mysqli_sql_exception>()
         .class::<extras::mysqli_driver>()
         .class::<link::mysqli>()

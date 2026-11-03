@@ -23,8 +23,10 @@ fn catching(strings: &mut php_heap::Strings, written: &[u8], lowered: &[u8]) -> 
                     ..Opline::default()
                 },
                 Opline::default(),
-            ],
-            literals: vec![interned(strings, written), interned(strings, lowered)],
+                back(),
+            ]
+            .into(),
+            literals: vec![interned(strings, written), interned(strings, lowered)].into(),
             cache_size: 8,
             ..OpArray::default()
         },
@@ -96,16 +98,20 @@ fn static_method_call(
     }
     Unit {
         main: OpArray {
-            oplines: vec![Opline {
-                opcode: Opcode::InitStaticMethodCall,
-                op1_type: OperandKind::Const,
-                op1: 0,
-                op2_type,
-                op2,
-                out: 0,
-                ..Opline::default()
-            }],
-            literals,
+            oplines: vec![
+                Opline {
+                    opcode: Opcode::InitStaticMethodCall,
+                    op1_type: OperandKind::Const,
+                    op1: 0,
+                    op2_type,
+                    op2,
+                    out: 0,
+                    ..Opline::default()
+                },
+                back(),
+            ]
+            .into(),
+            literals: literals.into(),
             cache_size: 16,
             ..OpArray::default()
         },
@@ -203,19 +209,24 @@ fn a_static_call_naming_no_method_primes_the_class_alone() {
 fn method_call(strings: &mut php_heap::Strings) -> PublishedUnit {
     Unit {
         main: OpArray {
-            oplines: vec![Opline {
-                opcode: Opcode::InitMethodCall,
-                op1_type: OperandKind::Cv,
-                op1: 0,
-                op2_type: OperandKind::Const,
-                op2: 0,
-                out: 0,
-                ..Opline::default()
-            }],
+            oplines: vec![
+                Opline {
+                    opcode: Opcode::InitMethodCall,
+                    op1_type: OperandKind::Cv,
+                    op1: 0,
+                    op2_type: OperandKind::Const,
+                    op2: 0,
+                    out: 0,
+                    ..Opline::default()
+                },
+                back(),
+            ]
+            .into(),
             literals: vec![
                 interned(strings, b"GetMessage"),
                 interned(strings, b"getmessage"),
-            ],
+            ]
+            .into(),
             vars: vec![php_unit::decl::Name::from("o")],
             num_cvs: 1,
             // `zend_alloc_cache_slots(2)`: the class and the callee.
@@ -371,12 +382,15 @@ fn new_instanceof_and_a_class_constant_read_the_class_off_their_slot() {
                     extended_value: 16,
                     ..Opline::default()
                 },
-            ],
+                back(),
+            ]
+            .into(),
             literals: vec![
                 interned(&mut strings, b"NoPe"),
                 interned(&mut strings, b"nope"),
                 interned(&mut strings, b"NOPE"),
-            ],
+            ]
+            .into(),
             num_tmps: 3,
             cache_size: 24,
             ..OpArray::default()
@@ -440,21 +454,26 @@ fn a_class_constant_over_two_constants_is_served_off_its_slot() {
     let mut strings = php_heap::Strings::new();
     let unit = Unit {
         main: OpArray {
-            oplines: vec![Opline {
-                opcode: Opcode::FetchClassConstant,
-                op1_type: OperandKind::Const,
-                op1: 0,
-                op2_type: OperandKind::Const,
-                op2: 2,
-                out_type: OperandKind::Tmp,
-                out: 0,
-                ..Opline::default()
-            }],
+            oplines: vec![
+                Opline {
+                    opcode: Opcode::FetchClassConstant,
+                    op1_type: OperandKind::Const,
+                    op1: 0,
+                    op2_type: OperandKind::Const,
+                    op2: 2,
+                    out_type: OperandKind::Tmp,
+                    out: 0,
+                    ..Opline::default()
+                },
+                back(),
+            ]
+            .into(),
             literals: vec![
                 interned(&mut strings, b"Attribute"),
                 interned(&mut strings, b"attribute"),
                 interned(&mut strings, b"TARGET_CLASS"),
-            ],
+            ]
+            .into(),
             num_tmps: 1,
             cache_size: 16,
             ..OpArray::default()

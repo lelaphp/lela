@@ -4270,7 +4270,7 @@ impl Request {
                         "InternalError: an object walk's slot with no declaration",
                     ));
                 };
-                let key = WalkKey::Declared(p.name.0.clone(), p.visibility);
+                let key = WalkKey::Declared(Box::from(&*p.name.0), p.visibility);
                 Ok(Some((key, Walked::Slot(slot))))
             }
             Some((_, TableRow::Entry(key), _)) => Ok(Some((
@@ -4755,7 +4755,7 @@ impl Request {
         let declared: Vec<Box<[u8]>> = match o.declared_rows() {
             php_heap::DeclaredRows::Slots => self
                 .placed(ClassId(o.class()))
-                .map(|(_, _, p)| p.name.0.clone())
+                .map(|(_, _, p)| Box::from(&*p.name.0))
                 .collect(),
             php_heap::DeclaredRows::Copied => Vec::new(),
         };

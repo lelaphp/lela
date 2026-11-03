@@ -126,17 +126,17 @@ const COUNTED: &str = "function s($c) { return $c . PHP_INT_MAX; }";
 
 fn owners() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![
-            drop_owner::declared(),
-            give_up_owner::declared(),
-            owned_first::declared(),
-            first::declared(),
-            fresh::declared(),
-            appended::declared(),
-            held_past_the_limit::declared(),
-            held_past_a_throw::declared(),
-            as_object::declared(),
-            filled_past_a_throw::declared(),
+        .functions(&[
+            drop_owner::DECLARED,
+            give_up_owner::DECLARED,
+            owned_first::DECLARED,
+            first::DECLARED,
+            fresh::DECLARED,
+            appended::DECLARED,
+            held_past_the_limit::DECLARED,
+            held_past_a_throw::DECLARED,
+            as_object::DECLARED,
+            filled_past_a_throw::DECLARED,
         ])
         .build("owners")
 }

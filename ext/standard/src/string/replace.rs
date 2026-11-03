@@ -6,14 +6,14 @@ use std::ops::ControlFlow;
 
 use php_ext::abi::{Raw, Ref, Union, Untyped};
 use php_ext::attr::php_function;
-use php_ext::coerce::{coerce_param, to_long, to_string, with_string};
+use php_ext::coerce::{coerce_param, to_long, to_string};
 use php_ext::decl::Type;
 use php_ext::raising::{Level, Thrown, arg_type_error, argument_error, arity, docref};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, SmartStr, Value};
 
-use super::{KeyBytes, long, lower, memnstr};
+use super::{Fill, KeyBytes, long, lower, memnstr};
 use crate::ffi::memchr;
 use crate::throwables::Throwables;
 
@@ -741,6 +741,16 @@ impl Pen<'_> {
 ///
 /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16793600 bytes) in %s on line 3
 /// ```
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = strtr("a", "a", "b"); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 32
+/// ```
 #[php_function(arity = manual, frameless(2, 3))]
 pub(super) fn strtr(
     req: &mut Request,
@@ -789,8 +799,13 @@ pub(super) fn strtr(
     if bytes.iter().all(|c| xlat[usize::from(*c)] == *c) {
         return Ok(Owner::take(req, string));
     }
-    let out: Vec<u8> = bytes.iter().map(|c| xlat[usize::from(*c)]).collect();
-    PhpString::new(req, &out)
+    // `php_strtr_ex`: `zend_string_alloc(ZSTR_LEN(str), 0)` once the
+    // first byte that changes is met.
+    PhpString::filled(req, bytes.len(), |out| {
+        for (to, c) in out.iter_mut().zip(bytes) {
+            *to = xlat[usize::from(*c)];
+        }
+    })
 }
 
 /// `php_strtr_array` (`Z/ext/standard/string.c:3398`): no pair is the string as it stands, one pair is
@@ -1017,6 +1032,18 @@ impl Bits {
 /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2113536 bytes) in %s on line 3
 /// ```
 #[allow(clippy::too_many_lines)]
+///
+/// Its string is asked for as php asks for it, so `memory_get_usage()`
+/// moves by php's bin:
+///
+/// ```php
+/// $m = memory_get_usage(); $v0 = substr_replace("", "XYZW", 1, 1); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $v1 = substr_replace(["abc"], "XYZW", 1, 1); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 40
+/// 256
+/// ```
 #[php_function]
 pub(super) fn substr_replace(
     req: &mut Request,
@@ -1072,24 +1099,21 @@ pub(super) fn substr_replace(
                 usize::try_from(f).unwrap_or(0),
                 usize::try_from(l).unwrap_or(0),
             );
-            let splice = |with: &[u8]| {
-                let mut out = Vec::with_capacity(s.len() - l + with.len());
-                out.extend_from_slice(&s[..f]);
-                out.extend_from_slice(with);
-                out.extend_from_slice(&s[f + l..]);
-                out
-            };
-            let out = match replace {
-                Union::B(r) => splice(r.as_bytes()),
+            let with = match replace {
+                Union::B(r) => Some(Owner::take(req, r)),
                 Union::A(array) => {
                     let first = walk::rows(req, array).next();
                     match first {
-                        Some((_, value)) => with_string(req, &value, splice)?,
-                        None => splice(b""),
+                        Some((_, value)) => Some(to_string(req, &value)?),
+                        None => None,
                     }
                 }
             };
-            PhpString::new(req, &out).map(Union::B)
+            let spliced = splice(req, s, f, l, with.as_ref().map_or(b"", |w| w.as_bytes()));
+            if let Some(with) = with {
+                with.give_up(req);
+            }
+            spliced.map(Union::B)
         }
         Union::A(strings) => {
             let mut out = PhpArray::new(req)?;
@@ -1115,55 +1139,59 @@ pub(super) fn substr_replace(
                     refused = true;
                     return Ok(ControlFlow::Break(()));
                 }
-                let s = with_string(req, row.value(), <[u8]>::to_vec)?;
-                let slen = long(s.len());
-                let clamp_from = |f: i64| {
-                    if f < 0 {
-                        (slen + f).max(0)
-                    } else {
-                        f.min(slen)
-                    }
-                };
-                let f = match from {
-                    Union::A(all) => match next(all, &mut from_at) {
-                        Some(value) => clamp_from(to_long(req, &value)?),
-                        None => 0,
-                    },
-                    Union::B(f) => clamp_from(f),
-                };
-                let mut l = match length {
-                    Some(Union::A(all)) => match next(all, &mut length_at) {
-                        Some(value) => to_long(req, &value)?,
+                // `zval_get_tmp_string(tmp_str, &tmp_orig_str)`, released
+                // whichever way the element ends.
+                let held = to_string(req, row.value())?;
+                let spliced = (|req: &mut Request| -> Result<Owner<PhpString>, Thrown> {
+                    let s = held.as_bytes();
+                    let slen = long(s.len());
+                    let clamp_from = |f: i64| {
+                        if f < 0 {
+                            (slen + f).max(0)
+                        } else {
+                            f.min(slen)
+                        }
+                    };
+                    let f = match from {
+                        Union::A(all) => match next(all, &mut from_at) {
+                            Some(value) => clamp_from(to_long(req, &value)?),
+                            None => 0,
+                        },
+                        Union::B(f) => clamp_from(f),
+                    };
+                    let mut l = match length {
+                        Some(Union::A(all)) => match next(all, &mut length_at) {
+                            Some(value) => to_long(req, &value)?,
+                            None => slen,
+                        },
+                        Some(Union::B(l)) => l,
                         None => slen,
-                    },
-                    Some(Union::B(l)) => l,
-                    None => slen,
-                };
-                if l < 0 {
-                    l = ((slen - f) + l).max(0);
-                }
-                if f.saturating_add(l) > slen {
-                    l = slen - f;
-                }
-                let (f, l) = (
-                    usize::try_from(f).unwrap_or(0),
-                    usize::try_from(l).unwrap_or(0),
-                );
-                let splice = |with: &[u8]| {
-                    let mut bytes = Vec::with_capacity(s.len() - l + with.len());
-                    bytes.extend_from_slice(&s[..f]);
-                    bytes.extend_from_slice(with);
-                    bytes.extend_from_slice(&s[f + l..]);
-                    bytes
-                };
-                let bytes = match replace {
-                    Union::A(all) => match next(all, &mut replace_at) {
-                        Some(value) => with_string(req, &value, splice)?,
-                        None => splice(b""),
-                    },
-                    Union::B(r) => splice(r.as_bytes()),
-                };
-                let value = PhpString::new(req, &bytes)?.into_value();
+                    };
+                    if l < 0 {
+                        l = ((slen - f) + l).max(0);
+                    }
+                    if f.saturating_add(l) > slen {
+                        l = slen - f;
+                    }
+                    let (f, l) = (
+                        usize::try_from(f).unwrap_or(0),
+                        usize::try_from(l).unwrap_or(0),
+                    );
+                    let with = match replace {
+                        Union::A(all) => match next(all, &mut replace_at) {
+                            Some(value) => Some(to_string(req, &value)?),
+                            None => None,
+                        },
+                        Union::B(r) => Some(Owner::take(req, r)),
+                    };
+                    let spliced = splice(req, s, f, l, with.as_ref().map_or(b"", |w| w.as_bytes()));
+                    if let Some(with) = with {
+                        with.give_up(req);
+                    }
+                    spliced
+                })(req);
+                held.give_up(req);
+                let value = spliced?.into_value();
                 let key = Owner::take(req, row.key().clone());
                 out.set(req, key, value)?;
                 Ok(ControlFlow::Continue(()))
@@ -1176,4 +1204,23 @@ pub(super) fn substr_replace(
             Ok(Union::A(out))
         }
     }
+}
+
+/// `substr_replace`'s string: `zend_string_safe_alloc(1, ZSTR_LEN(str) -
+/// l + ZSTR_LEN(repl_str), 0, 0)`, the bytes before `f`, `with`, and the
+/// bytes after the `l` it replaces.
+fn splice(
+    req: &mut Request,
+    s: &[u8],
+    f: usize,
+    l: usize,
+    with: &[u8],
+) -> Result<Owner<PhpString>, Thrown> {
+    let len = s.len() - l + with.len();
+    PhpString::product(req, 1, len, 0, |out| {
+        let mut out = Fill::new(out);
+        out.put(&s[..f]);
+        out.put(with);
+        out.put(&s[f + l..]);
+    })
 }

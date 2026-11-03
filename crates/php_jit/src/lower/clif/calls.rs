@@ -21,7 +21,7 @@
 use std::num::NonZeroU32;
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::types::{I8, I32, I64};
+use cranelift_codegen::ir::types::{I8, I32, I64, I128};
 use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, MemFlagsData, Value};
 use cranelift_frontend::Variable;
 use php_engine::tier::{self, FRAME, FrameLayout, FuncRef, PLACE, PlaceLayout, PlainCall};
@@ -29,8 +29,8 @@ use php_heap::{Obj, Ref, Zval, ZvalType};
 use php_unit::{Opcode, OperandKind};
 
 use super::{
-    COUNTED, Dtor, EX_OPLINE, Emit, KIND, Kernel, Refuse, STOOD_CALL, STOOD_FRAME, STOOD_FUNC,
-    STOOD_OPLINE, STOOD_ROOM, Scalar, TYPE_AT, imm, leave_of, mismatch, tag, trusted,
+    COUNTED, Dtor, EX_OPLINE, Emit, KIND, Kernel, Refuse, STOOD_CALL, Scalar, TYPE_AT, imm,
+    leave_of, mismatch, tag, trusted,
 };
 use crate::lower::{IMAGES_AT, INTERRUPT_AT, OperandKinds, READY_AT, RETURNED, THREW};
 use crate::types::{
@@ -169,16 +169,27 @@ impl Emit<'_> {
         (slow, self.b.create_block())
     }
 
-    /// The `Stood` a kernel would write, written by code in place.
-    fn stand(&mut self, [frame, call, func, opline, room]: [Value; 5]) {
-        for (value, at) in [
-            (frame, STOOD_FRAME),
-            (call, STOOD_CALL),
-            (func, STOOD_FUNC),
-            (opline, STOOD_OPLINE),
-            (room, STOOD_ROOM),
-        ] {
-            self.b.ins().stack_store(I64, value, self.stood, at);
+    /// The header image at `header` copied into the room at `top`, and its
+    /// `slots` cells made `UNDEF`, two words a store: a pair where the
+    /// target has one (`ldp`, `stp`), as `undefine` clears a whole cell,
+    /// and one word where the header ends on one.
+    fn lay_frame(&mut self, header: Value, top: Value, slots: u32) {
+        let mut word = 0;
+        while word < L.header_bytes() {
+            let ty = if L.header_bytes() - word >= 16 {
+                I128
+            } else {
+                I64
+            };
+            let value = self.b.ins().load(ty, trusted(), header, at(word));
+            (self.b.ins()).store(trusted(), value, top, at(L.header() + word));
+            word += ty.bytes();
+        }
+        let zero = self.b.ins().iconst(I64, 0);
+        let undef = self.b.ins().uextend(I128, zero);
+        for slot in 0..slots {
+            let cell = L.room() + SLOT * slot;
+            self.b.ins().store(trusted(), undef, top, at(cell));
         }
     }
 
@@ -272,6 +283,17 @@ impl Emit<'_> {
     /// full, the opline is stepped, which pushes the same call; php's own
     /// stack check, a guard before the push, leaves first where the page
     /// is short of what the trace pushes ([`crate::types::Check::Room`]).
+    /// The header is copied and the slots cleared a cell a store, so a
+    /// call pushed where the last one left its variables reads them
+    /// undefined:
+    ///
+    /// ```php
+    /// function g($set) { if ($set) { $a = "x"; $b = [1]; } return isset($a, $b) ? 1 : 0; }
+    /// $s = 0; for ($i = 0; $i < 100; $i++) { $s += g($i % 2 == 0); } echo $s, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 50
+    /// ```
     ///
     /// A method's call held by the pair its runtime-cache slot holds
     /// ([`Imm::Pair`]) is pushed where the slot holds the pair the trace
@@ -320,18 +342,7 @@ impl Emit<'_> {
         let cx = self.cx.ok_or_else(|| mismatch("a push before the entry"))?;
         let images = self.b.ins().load(I64, trusted(), cx, IMAGES_AT);
         let header = self.b.ins().load(I64, trusted(), images, header);
-        for word in (0..L.header_bytes()).step_by(8) {
-            let value = self.b.ins().load(I64, trusted(), header, at(word));
-            self.b
-                .ins()
-                .store(trusted(), value, top, at(L.header() + word));
-        }
-        let zero = self.b.ins().iconst(I64, 0);
-        for slot in 0..plain.slots() {
-            let cell = L.room() + SLOT * slot;
-            self.b.ins().store(trusted(), zero, top, at(cell));
-            self.b.ins().store(trusted(), zero, top, at(cell + 8));
-        }
+        self.lay_frame(header, top, plain.slots());
         match over.scope {
             Some(Scope::Number(class)) => {
                 // `ScopeAt`'s half-word: the class's number inverted.
@@ -381,8 +392,9 @@ impl Emit<'_> {
         self.b.seal_block(slow);
         let [room, opline] = self.served(line)?;
         let func = self.func_of(line.frame)?;
-        let stood = self.b.ins().stack_addr(I64, self.stood, 0);
+        let stood = self.stood_out();
         self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?;
+        self.stood_back();
         for guard in self.within(id) {
             match guard.check {
                 Check::Callee { func } => self.callee_guard(func, guard.exit)?,
@@ -727,32 +739,39 @@ impl Emit<'_> {
     /// ```
     fn receive(&mut self, this: Value, taken: Taken, top: Value) {
         self.b.ins().store(trusted(), this, top, at(L.this()));
-        if let Taken::Moved = taken {
-            let info = self.b.ins().load(I32, trusted(), top, at(L.info()));
-            let info = self.b.ins().bor_imm_u(info, i64::from(L.release_this()));
-            self.b.ins().store(trusted(), info, top, at(L.info()));
-        } else if let Taken::Shared = taken {
+        // `ZEND_CALL_HAS_THIS` beside it, and `ZEND_CALL_RELEASE_THIS`
+        // where the frame owns it.
+        let flags = match taken {
+            Taken::Moved | Taken::Shared => L.has_this() | L.release_this(),
+            Taken::Lent => L.has_this(),
+        };
+        let info = self.b.ins().load(I32, trusted(), top, at(L.info()));
+        let info = self.b.ins().bor_imm_u(info, i64::from(flags));
+        self.b.ins().store(trusted(), info, top, at(L.info()));
+        match taken {
+            // The temporary's owner moved, its slot left undefined.
+            Taken::Moved => {}
             // `GC_ADDREF`, the count kept below the bit above it.
-            let count = self.b.ins().load(I32, trusted(), this, COUNT_AT);
-            let bits = self.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
-            let room =
-                (self.b.ins()).icmp_imm_u(IntCC::NotEqual, bits, i64::from(Zval::COUNT_BITS));
-            let room = self.b.ins().uextend(I32, room);
-            let more = self.b.ins().iadd(count, room);
-            self.b.ins().store(trusted(), more, this, COUNT_AT);
-            let info = self.b.ins().load(I32, trusted(), top, at(L.info()));
-            let info = self.b.ins().bor_imm_u(info, i64::from(L.release_this()));
-            self.b.ins().store(trusted(), info, top, at(L.info()));
-        } else {
-            let word = self.b.ins().load(I32, trusted(), this, PINS_AT);
-            let pins = self.b.ins().band_imm_u(word, i64::from(Obj::PINS));
-            let room = self
-                .b
-                .ins()
-                .icmp_imm_u(IntCC::NotEqual, pins, i64::from(Obj::PINS));
-            let room = self.b.ins().uextend(I32, room);
-            let word = self.b.ins().iadd(word, room);
-            self.b.ins().store(trusted(), word, this, PINS_AT);
+            Taken::Shared => {
+                let count = self.b.ins().load(I32, trusted(), this, COUNT_AT);
+                let bits = self.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
+                let room =
+                    (self.b.ins()).icmp_imm_u(IntCC::NotEqual, bits, i64::from(Zval::COUNT_BITS));
+                let room = self.b.ins().uextend(I32, room);
+                let more = self.b.ins().iadd(count, room);
+                self.b.ins().store(trusted(), more, this, COUNT_AT);
+            }
+            Taken::Lent => {
+                let word = self.b.ins().load(I32, trusted(), this, PINS_AT);
+                let pins = self.b.ins().band_imm_u(word, i64::from(Obj::PINS));
+                let room = self
+                    .b
+                    .ins()
+                    .icmp_imm_u(IntCC::NotEqual, pins, i64::from(Obj::PINS));
+                let room = self.b.ins().uextend(I32, room);
+                let word = self.b.ins().iadd(word, room);
+                self.b.ins().store(trusted(), word, this, PINS_AT);
+            }
         }
     }
 
@@ -1152,6 +1171,8 @@ impl Emit<'_> {
         self.b.ins().store(trusted(), past, back, at(L.opline()));
         // Where the interpreter stands: in the caller, the call under way
         // in it the record now on top where that is not the caller's own.
+        // Each word loaded for it alone, which no path but one that reads
+        // where the frame stands needs ([`super::unread`]).
         let under = self.b.ins().iadd_imm_s(len, -2);
         let first = self.record_word(frames, under, L.record_at());
         let built = self.b.ins().iadd_imm_s(first, -i64::from(L.room()));
@@ -1159,7 +1180,9 @@ impl Emit<'_> {
         let nothing = self.b.ins().iconst(I64, 0);
         let call = self.b.ins().select(own, nothing, built);
         let func = self.b.ins().load(I32, trusted(), back, at(L.cache()));
-        let left = self.left_past(stack, room);
+        let end = self.b.ins().load(I64, trusted(), stack, END);
+        let left = self.b.ins().isub(end, room);
+        self.stood_loads([first, func, end]);
         self.stand([back, call, func, past, left]);
         if let Some(threw) = threw {
             // php's `jit_stub_leave_throw` after `zend_jit_leave_func`: the

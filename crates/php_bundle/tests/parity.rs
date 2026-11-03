@@ -205,8 +205,12 @@ fn an_extern_class_takes_the_constants_of_its_impl() {
 /// and none for `join`, and a call of `join` is `INIT_FCALL`.
 #[test]
 fn an_alias_declares_no_frameless_entry() {
-    assert_eq!(extension::implode::declared().0.frameless, vec![1, 2]);
-    assert!(extension::join::declared().0.frameless.is_empty());
+    use php_ext::__private::Frameless;
+    assert!(matches!(
+        extension::implode::DECLARED.frameless,
+        [Frameless::One(_), Frameless::Two(_)]
+    ));
+    assert!(extension::join::DECLARED.frameless.is_empty());
 }
 
 /// This crate's directory as cargo sets `CARGO_MANIFEST_DIR` when it runs
