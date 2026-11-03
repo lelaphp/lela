@@ -15,12 +15,10 @@ use php_ext::raising::Thrown;
 use php_ext::request::{Input, Request, Upload};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, walk};
 
-use crate::{
-    Phase, State, Status, absorb, ini, ini_bool, session, session_array_mut, string_value,
-};
+use crate::{Phase, State, Status, absorb, ini, ini_bool, session, session_array_mut};
 
 /// `php_session_rfc1867_progress`: what one body's reading keeps.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct Progress {
     content_length: i64,
     /// The id the form, the cookie or the query string named.
@@ -36,26 +34,73 @@ pub(crate) struct Progress {
     cancel_upload: bool,
 }
 
-/// The progress array's fields, in php's order.
-#[derive(Debug, Default)]
+impl Progress {
+    /// The owners the progress holds given up, `zval_ptr_dtor(&progress->data)`.
+    pub(crate) fn give_up(self, req: &mut Request) {
+        if let Some(data) = self.data {
+            data.give_up(req);
+        }
+    }
+}
+
+/// `progress->data`: the progress array's fields, in php's order, and
+/// `progress->files`, the files' list, which php keeps as one array and
+/// writes in place at every event. The list stands from the first file
+/// to the body's end, each file written into it as an update reaches it,
+/// so an update writes what changed since the last and not the list
+/// again; the array around it is laid down for each update, five rows.
+/// What an event changes waits for the update, which writes it once the
+/// session it started has given up the array the last update handed it,
+/// so the list is the progress's alone and written where it stands.
 struct Data {
     start_time: i64,
     content_length: i64,
     bytes_processed: i64,
     done: bool,
-    files: Vec<File>,
+    files: Owner<PhpArray>,
+    /// The files before the current one an update has not yet written
+    /// as they ended.
+    ended: Vec<File>,
+    /// `progress->current_file`.
+    current: Option<File>,
+    /// The files begun: the current one's place in the list is one less.
+    begun: usize,
 }
 
-/// One file's array, in php's order.
-#[derive(Debug, Default)]
+impl Data {
+    fn give_up(self, req: &mut Request) {
+        self.files.give_up(req);
+        for file in self.ended {
+            file.give_up(req);
+        }
+        if let Some(file) = self.current {
+            file.give_up(req);
+        }
+    }
+}
+
+/// One file's array, in php's order, and its place in the list; its
+/// names are the strings php copies in at `MULTIPART_EVENT_FILE_START`,
+/// which each writing of the file shares.
 struct File {
-    field_name: Vec<u8>,
-    name: Vec<u8>,
-    tmp_name: Option<Vec<u8>>,
+    at: usize,
+    field_name: Owner<PhpString>,
+    name: Owner<PhpString>,
+    tmp_name: Option<Owner<PhpString>>,
     error: i64,
     done: bool,
     start_time: i64,
     bytes_processed: i64,
+}
+
+impl File {
+    fn give_up(self, req: &mut Request) {
+        self.field_name.give_up(req);
+        self.name.give_up(req);
+        if let Some(tmp) = self.tmp_name {
+            tmp.give_up(req);
+        }
+    }
 }
 
 /// The upload hook: `php_session_rfc1867_callback` over one step, which
@@ -165,7 +210,7 @@ fn step(req: &mut Request, event: &Upload<'_>) -> Result<bool, Thrown> {
             if tracking(req) {
                 with(req, |progress| {
                     if let Some(data) = progress.data.as_mut() {
-                        if let Some(file) = data.files.last_mut() {
+                        if let Some(file) = data.current.as_mut() {
                             file.bytes_processed = offset + length;
                         }
                         data.bytes_processed = read;
@@ -176,18 +221,29 @@ fn step(req: &mut Request, event: &Upload<'_>) -> Result<bool, Thrown> {
         }
         Upload::FileEnd { read, temp, error } => {
             if tracking(req) {
-                with(req, |progress| {
-                    if let Some(data) = progress.data.as_mut() {
-                        if let Some(file) = data.files.last_mut() {
+                let temp = match temp {
+                    Some(temp) => Some(PhpString::new(req, temp)?),
+                    None => None,
+                };
+                let mut left = None;
+                with(req, |progress| match progress.data.as_mut() {
+                    Some(data) => {
+                        if let Some(file) = data.current.as_mut() {
                             if let Some(temp) = temp {
-                                file.tmp_name = Some(temp.to_vec());
+                                left = file.tmp_name.replace(temp);
                             }
                             file.error = error;
                             file.done = true;
+                        } else {
+                            left = temp;
                         }
                         data.bytes_processed = read;
                     }
+                    None => left = temp,
                 });
+                if let Some(left) = left {
+                    left.give_up(req);
+                }
                 update(req, false)?;
             }
         }
@@ -287,6 +343,7 @@ fn file_start(req: &mut Request, read: i64, name: &[u8], filename: &[u8]) -> Res
     if first {
         let freq = freq(req);
         let start_time = req.environment().request_time();
+        let files = PhpArray::new(req)?;
         with(req, |progress| {
             progress.update_step = if freq >= 0 {
                 freq
@@ -300,7 +357,10 @@ fn file_start(req: &mut Request, read: i64, name: &[u8], filename: &[u8]) -> Res
                 content_length: progress.content_length,
                 bytes_processed: read,
                 done: false,
-                files: Vec::new(),
+                files,
+                ended: Vec::new(),
+                current: None,
+                begun: 0,
             });
         });
         session::rinit_without_start(req);
@@ -316,17 +376,36 @@ fn file_start(req: &mut Request, read: i64, name: &[u8], filename: &[u8]) -> Res
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(0));
+    let field_name = PhpString::new(req, name)?;
+    let name = match PhpString::new(req, filename) {
+        Ok(name) => name,
+        Err(thrown) => {
+            field_name.give_up(req);
+            return Err(thrown);
+        }
+    };
+    let mut file = Some(File {
+        at: 0,
+        field_name,
+        name,
+        tmp_name: None,
+        error: 0,
+        done: false,
+        start_time: now,
+        bytes_processed: read,
+    });
     with(req, |progress| {
-        if let Some(data) = progress.data.as_mut() {
-            data.files.push(File {
-                field_name: name.to_vec(),
-                name: filename.to_vec(),
-                start_time: now,
-                bytes_processed: read,
-                ..File::default()
-            });
+        if let (Some(data), Some(mut begun)) = (progress.data.as_mut(), file.take()) {
+            begun.at = data.begun;
+            data.begun += 1;
+            if let Some(before) = data.current.replace(begun) {
+                data.ended.push(before);
+            }
         }
     });
+    if let Some(file) = file {
+        file.give_up(req);
+    }
     update(req, false)
 }
 
@@ -482,16 +561,65 @@ fn cancelled(req: &Request, vars: PhpArray, key: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-/// The progress as the array php keeps it.
+/// The progress as the array php keeps it: what changed since the last
+/// update written into the list, the files that ended before it and the
+/// current one, and the array around the list laid down. An update at
+/// every step and one only at the first file and the body's end write
+/// the same record:
+///
+/// ```php
+/// $d = __DIR__; $f = "$d/sess_listwitness";
+/// file_put_contents("$d/w.php", '<?php');
+/// $b = "XYZ";
+/// $body = "--$b\r\nContent-Disposition: form-data; name=\"PHPSESSID\"\r\n\r\nlistwitness\r\n"
+///     . "--$b\r\nContent-Disposition: form-data; name=\"PHP_SESSION_UPLOAD_PROGRESS\"\r\n\r\nk\r\n";
+/// foreach (["a", "b", "c"] as $i => $n) { $body .= "--$b\r\nContent-Disposition: form-data; name=\"$n\"; filename=\"$n.txt\"\r\n\r\n" . str_repeat($n, $i) . "\r\n"; }
+/// $body .= "--$b--\r\n";
+/// foreach (["1", "100000"] as $freq) {
+///     $cmd = [dirname(PHP_BINARY) . "/php-cgi", "-n", "-q", "-d", "session.save_path=$d", "-d", "session.use_cookies=0",
+///         "-d", "session.cache_limiter=", "-d", "session.upload_progress.enabled=1", "-d", "session.upload_progress.cleanup=0",
+///         "-d", "session.upload_progress.freq=$freq", "-d", "session.upload_progress.min_freq=0", "-d", "upload_tmp_dir=$d", "-f", "$d/w.php"];
+///     $env = ["REDIRECT_STATUS" => "1", "REQUEST_METHOD" => "POST", "CONTENT_TYPE" => "multipart/form-data; boundary=$b",
+///         "CONTENT_LENGTH" => (string) strlen($body), "SCRIPT_FILENAME" => "$d/w.php", "PATH_TRANSLATED" => "$d/w.php", "QUERY_STRING" => ""];
+///     $p = proc_open($cmd, [0 => ["pipe", "r"], 1 => ["pipe", "w"], 2 => ["pipe", "w"]], $pipes, $d, $env);
+///     fwrite($pipes[0], $body); fclose($pipes[0]);
+///     stream_get_contents($pipes[1]); stream_get_contents($pipes[2]); proc_close($p);
+///     echo preg_replace(['/i:\d{10};/', '/s:\d+:"[^"]*php[^"]*";/'], ['T;', 'TMP;'], file_get_contents($f)), "\n";
+///     unlink($f);
+/// }
+/// unlink("$d/w.php");
+/// ```
+/// ```expect
+/// upload_progress_k|a:5:{s:10:"start_time";T;s:14:"content_length";i:377;s:15:"bytes_processed";i:377;s:4:"done";b:1;s:5:"files";a:3:{i:0;a:7:{s:10:"field_name";s:1:"a";s:4:"name";s:5:"a.txt";s:8:"tmp_name";TMP;s:5:"error";i:0;s:4:"done";b:1;s:10:"start_time";T;s:15:"bytes_processed";i:377;}i:1;a:7:{s:10:"field_name";s:1:"b";s:4:"name";s:5:"b.txt";s:8:"tmp_name";TMP;s:5:"error";i:0;s:4:"done";b:1;s:10:"start_time";T;s:15:"bytes_processed";i:1;}i:2;a:7:{s:10:"field_name";s:1:"c";s:4:"name";s:5:"c.txt";s:8:"tmp_name";TMP;s:5:"error";i:0;s:4:"done";b:1;s:10:"start_time";T;s:15:"bytes_processed";i:2;}}}
+/// upload_progress_k|a:5:{s:10:"start_time";T;s:14:"content_length";i:377;s:15:"bytes_processed";i:377;s:4:"done";b:1;s:5:"files";a:3:{i:0;a:7:{s:10:"field_name";s:1:"a";s:4:"name";s:5:"a.txt";s:8:"tmp_name";TMP;s:5:"error";i:0;s:4:"done";b:1;s:10:"start_time";T;s:15:"bytes_processed";i:377;}i:1;a:7:{s:10:"field_name";s:1:"b";s:4:"name";s:5:"b.txt";s:8:"tmp_name";TMP;s:5:"error";i:0;s:4:"done";b:1;s:10:"start_time";T;s:15:"bytes_processed";i:1;}i:2;a:7:{s:10:"field_name";s:1:"c";s:4:"name";s:5:"c.txt";s:8:"tmp_name";TMP;s:5:"error";i:0;s:4:"done";b:1;s:10:"start_time";T;s:15:"bytes_processed";i:2;}}}
+/// ```
 fn rendered(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let taken = req
         .state::<State>()
         .progress
         .as_mut()
         .and_then(|progress| progress.data.take());
-    let Some(data) = taken else {
+    let Some(mut data) = taken else {
         return Ok(Owner::null());
     };
+    let array = written(req, &mut data);
+    with(req, |progress| progress.data = Some(data));
+    array
+}
+
+/// [`rendered`] over the data taken out of the progress.
+fn written(req: &mut Request, data: &mut Data) -> Result<Owner<Value>, Thrown> {
+    for file in std::mem::take(&mut data.ended) {
+        let at = file.at;
+        let entry = entry(req, &file);
+        file.give_up(req);
+        place(req, &mut data.files, at, entry?)?;
+    }
+    if let Some(file) = &data.current {
+        let at = file.at;
+        let entry = entry(req, file)?;
+        place(req, &mut data.files, at, entry)?;
+    }
     let mut array = PhpArray::new(req)?;
     set(req, &mut array, b"start_time", Owner::int(data.start_time))?;
     set(
@@ -507,32 +635,48 @@ fn rendered(req: &mut Request) -> Result<Owner<Value>, Thrown> {
         Owner::int(data.bytes_processed),
     )?;
     set(req, &mut array, b"done", Owner::bool(data.done))?;
-    let mut files = PhpArray::new(req)?;
-    for file in &data.files {
-        let mut entry = PhpArray::new(req)?;
-        let field_name = string_value(req, &file.field_name)?;
-        set(req, &mut entry, b"field_name", field_name)?;
-        let name = string_value(req, &file.name)?;
-        set(req, &mut entry, b"name", name)?;
-        let tmp_name = match &file.tmp_name {
-            Some(tmp) => string_value(req, tmp)?,
-            None => Owner::null(),
-        };
-        set(req, &mut entry, b"tmp_name", tmp_name)?;
-        set(req, &mut entry, b"error", Owner::int(file.error))?;
-        set(req, &mut entry, b"done", Owner::bool(file.done))?;
-        set(req, &mut entry, b"start_time", Owner::int(file.start_time))?;
-        set(
-            req,
-            &mut entry,
-            b"bytes_processed",
-            Owner::int(file.bytes_processed),
-        )?;
-        files.append(req, entry.into_value())?;
-    }
+    let files = Owner::take(req, *data.files);
     set(req, &mut array, b"files", files.into_value())?;
-    with(req, |progress| progress.data = Some(data));
     Ok(array.into_value())
+}
+
+/// One file's array as php's `current_file` holds it, its names shared.
+fn entry(req: &mut Request, file: &File) -> Result<Owner<PhpArray>, Thrown> {
+    let mut entry = PhpArray::new(req)?;
+    let field_name = Owner::take(req, *file.field_name);
+    set(req, &mut entry, b"field_name", field_name.into_value())?;
+    let name = Owner::take(req, *file.name);
+    set(req, &mut entry, b"name", name.into_value())?;
+    let tmp_name = match &file.tmp_name {
+        Some(tmp) => Owner::take(req, **tmp).into_value(),
+        None => Owner::null(),
+    };
+    set(req, &mut entry, b"tmp_name", tmp_name)?;
+    set(req, &mut entry, b"error", Owner::int(file.error))?;
+    set(req, &mut entry, b"done", Owner::bool(file.done))?;
+    set(req, &mut entry, b"start_time", Owner::int(file.start_time))?;
+    set(
+        req,
+        &mut entry,
+        b"bytes_processed",
+        Owner::int(file.bytes_processed),
+    )?;
+    Ok(entry)
+}
+
+/// The file's array at its place in the list, `add_next_index_zval` for
+/// one the list does not hold yet.
+fn place(
+    req: &mut Request,
+    files: &mut Owner<PhpArray>,
+    at: usize,
+    entry: Owner<PhpArray>,
+) -> Result<(), Thrown> {
+    if at >= files.len() {
+        return files.append(req, entry.into_value());
+    }
+    let key = Owner::index(i64::try_from(at).unwrap_or(i64::MAX));
+    files.set(req, key, entry.into_value())
 }
 
 /// `add_assoc_*_ex`.
@@ -570,7 +714,9 @@ fn end(req: &mut Request, read: i64) -> Result<(), Thrown> {
         }
         session::rshutdown_globals(req)?;
     }
-    req.state::<State>().progress = None;
+    if let Some(progress) = req.state::<State>().progress.take() {
+        progress.give_up(req);
+    }
     // "$_SESSION was populated in incomplete_classes_only mode", so it
     // is no global the program sees (8.5.12).
     req.variables_mut().set_global(b"_SESSION", None);

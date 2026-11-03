@@ -153,8 +153,9 @@ struct State {
     set_handler: bool,
     define_sid: bool,
     send_cookie: bool,
-    /// `PS(session_vars)`: the data read, for `lazy_write`.
-    session_vars: Option<Vec<u8>>,
+    /// `PS(session_vars)`: the data read, for `lazy_write`, the string
+    /// the save handler read it into, counted as php's is.
+    session_vars: Option<Owner<PhpString>>,
     /// `PS(http_session_vars)`: the reference `$_SESSION` in
     /// `EG(symbol_table)` is bound to, one owner of it the session's, so
     /// what the program assigns through `$_SESSION` is what the session
@@ -447,6 +448,13 @@ fn bind_vars(req: &mut Request, vars: Owner<Value>) -> Result<(), Thrown> {
     req.variables_mut()
         .set_global(b"_SESSION", Some(vars.into_value()));
     Ok(())
+}
+
+/// `PS(session_vars)` given up, `zend_string_release_ex` and `NULL`.
+fn forget_read(req: &mut Request) {
+    if let Some(read) = req.state::<State>().session_vars.take() {
+        read.give_up(req);
+    }
 }
 
 /// `PS(http_session_vars)` given up, `zval_ptr_dtor` and `ZVAL_UNDEF`;
