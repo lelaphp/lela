@@ -1951,7 +1951,7 @@ fn this(req: &Request, frame: FrameRef) -> Option<Sample> {
 /// this recorder writes down for a property opline and a method's call,
 /// php records only in a closure, so it is counted for no operand php
 /// samples no slot of.
-fn classes(op: &Opline, op1: Option<Sample>, op2: Option<Sample>) -> u32 {
+pub(crate) fn classes(op: &Opline, op1: Option<Sample>, op2: Option<Sample>) -> u32 {
     let slotted = |kind: OperandKind| !matches!(kind, OperandKind::Unused | OperandKind::Const);
     u32::from(slotted(op.op1_type) && op1.is_some_and(|s| s.class.is_some()))
         + u32::from(op2.is_some_and(|s| s.class.is_some()))
