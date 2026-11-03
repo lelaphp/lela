@@ -405,6 +405,10 @@ pub(super) fn rshutdown(req: &mut Request) {
         flush(req, true).ok();
     }
     rshutdown_globals(req).ok();
+    // A body whose reading never reached `MULTIPART_EVENT_END`.
+    if let Some(progress) = req.state::<State>().progress.take() {
+        progress.give_up(req);
+    }
     let handlers = std::mem::take(&mut req.state::<State>().handlers);
     handlers.release(req);
     for first in std::mem::take(&mut req.state::<State>().overwritten) {
