@@ -427,16 +427,21 @@ pub fn foreach_guarded<B>(
 /// [`foreach`] over a table most of whose rows a native answers for
 /// without code of the program, as `_php_search_array` compares two
 /// strings: each row is read first by `read` under a borrow of the
-/// request, a view of its key and of its value as [`rows`] reads them,
-/// and `read` answers `Some` for a row it can answer, `Continue` to go
-/// on or `Break` to end the walk with what it answers, or `None` for a
-/// row whose answer can reach code of the program, which is then lent
-/// to `body` as [`foreach`] lends it. A row `read` answers is neither
+/// request, a view of its value as [`rows`] reads it, and `read`
+/// answers `Some` for a row it can answer, `Continue` to go on or
+/// `Break` with what makes the walk's answer of the row's key, or
+/// `None` for a row whose answer can reach code of the program, which
+/// is then lent to `body` as [`foreach`] lends it. Over an array the
+/// walk steps its positions as `_ZEND_HASH_FOREACH_VAL` steps its
+/// elements, testing each for `UNDEF`, and reads a row's key only for
+/// the row `read` breaks on or lends, as `_php_search_array` reads
+/// `num_idx` or `str_idx` only on its hit. A row `read` answers is neither
 /// held nor pinned, since nothing runs while it is read, as php's
 /// `ZEND_HASH_FOREACH` holds nothing; up to the first row lent the walk
 /// takes nothing, and from there it holds the table as `hold` says, and
-/// knows it stands, as [`foreach`] does, so each step after costs the
-/// test of the walk's iterator under [`Hold::None`]. The rows are the
+/// knows it stands, as [`foreach`] does, so the walk on from each row
+/// lent costs the test of the walk's iterator under [`Hold::None`],
+/// once and not per row read. The rows are the
 /// ones that stood as the walk began, read as they stand when the walk
 /// reaches them. The answer is what `read` or `body` broke with, `None`
 /// past the last row.
@@ -458,11 +463,27 @@ pub fn foreach_guarded<B>(
 /// int(1)
 /// bool(true)
 /// ```
-pub fn foreach_read<B>(
+///
+/// A row unset before the walk is a hole the step passes over, in a
+/// list as in a hash, and the key the hit answers is its own row's:
+///
+/// ```php
+/// $h = ['x' => 'a', 'y' => 'b', 'z' => 'c']; unset($h['y']);
+/// $p = [10, 20, 30, 40]; unset($p[1]);
+/// var_dump(array_search('c', $h), array_search(30, $p), array_search('40', $p), in_array(20, $p), array_search('b', $h));
+/// ```
+/// ```expect
+/// string(1) "z"
+/// int(2)
+/// int(3)
+/// bool(false)
+/// bool(false)
+/// ```
+pub fn foreach_read<B, H: FnOnce(&Key) -> B>(
     req: &mut Request,
     table: impl Into<Table>,
     hold: Hold,
-    mut read: impl FnMut(&Request, &Key, &Value) -> Option<ControlFlow<B>>,
+    mut read: impl FnMut(&Request, &Value) -> Option<ControlFlow<H>>,
     mut body: impl FnMut(&mut Request, &mut Row) -> Step<B>,
 ) -> Result<Option<B>, Thrown> {
     let table = table.into();
@@ -477,14 +498,19 @@ pub fn foreach_read<B>(
         {
             break Ok(None);
         }
-        let Some((found, key, value, at)) = table.held_from(pos, end) else {
+        let answered = table.read_from(pos, end, |value| match read(req, &Value::of_slot(value)) {
+            Some(ControlFlow::Continue(())) => ControlFlow::Continue(()),
+            answer => ControlFlow::Break(answer),
+        });
+        let Some((found, answer)) = answered else {
             break Ok(None);
         };
         pos = found.saturating_add(1);
-        match read(req, &key, &Value::of_slot(value)) {
-            Some(ControlFlow::Continue(())) => continue,
-            Some(ControlFlow::Break(broke)) => break Ok(Some(broke)),
-            None => {}
+        let Some((_, key, value, at)) = table.held_from(found, pos) else {
+            break Ok(None);
+        };
+        if let Some(ControlFlow::Break(hit)) = answer {
+            break Ok(Some(hit(&key)));
         }
         let watch = if let Some(taken) = &standing {
             taken.watch()
@@ -665,6 +691,30 @@ impl Table {
         }
     }
 
+    /// The values of the rows from `pos` below `end`, without their
+    /// keys or where they stand, handed to `each` until it breaks, with
+    /// the position it broke at: over an array php's
+    /// `_ZEND_HASH_FOREACH_VAL` ([`php_heap::Arr::foreach_val_from`]),
+    /// and over an object [`ObjectTable::value_from`] row by row.
+    #[inline]
+    fn read_from<A>(
+        &self,
+        mut pos: u32,
+        end: u32,
+        mut each: impl FnMut(Zval) -> ControlFlow<A>,
+    ) -> Option<(u32, A)> {
+        match self {
+            Table::Array(array) => array.heap().foreach_val_from(pos, end, each),
+            Table::Object(object) => loop {
+                let (found, value) = object.value_from(pos, end)?;
+                if let ControlFlow::Break(broke) = each(value) {
+                    return Some((found, broke));
+                }
+                pos = found.saturating_add(1);
+            },
+        }
+    }
+
     /// The first row at or after `pos` below `end` that holds a value:
     /// its position, its key, its value and where it stands.
     fn held_from(&self, pos: u32, end: u32) -> Option<(u32, Key, Zval, At)> {
@@ -758,6 +808,14 @@ impl ObjectTable {
                 (found, Key::of(key), value, at)
             }
         })
+    }
+
+    /// [`Table::value_from`] over the object's positions, out of the
+    /// array's line.
+    #[inline(never)]
+    fn value_from(&self, pos: u32, end: u32) -> Option<(u32, Zval)> {
+        let (found, _, value, _) = self.held_from(pos, end)?;
+        Some((found, value))
     }
 
     /// [`ObjectTable::held_from`] as php's dumpers read the positions

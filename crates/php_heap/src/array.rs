@@ -1395,6 +1395,37 @@ impl Arr {
         None
     }
 
+    /// `_ZEND_HASH_FOREACH_VAL` from `pos`: each element below `end` in
+    /// order, `UNDEF` stepped over, handed to `each` until it breaks,
+    /// with the position it broke at. The element's size and the address
+    /// to start at are read once, as php's macro reads them into `_size`
+    /// and `_z`, and the walk stops at `end` or at `nNumUsed` as it began,
+    /// whichever is lower; a write by `each` that moves the table's data
+    /// is the mistake [`ZvalRef::read`] names, a read past a resize.
+    #[inline]
+    pub fn foreach_val_from<B>(
+        &self,
+        pos: u32,
+        end: u32,
+        mut each: impl FnMut(Zval) -> std::ops::ControlFlow<B>,
+    ) -> Option<(u32, B)> {
+        let size = if self.is_packed() { SLOT } else { BUCKET };
+        let mut at = self.header().data.get().wrapping_add(pos as usize * size);
+        for found in pos..end.min(self.num_used()) {
+            // SAFETY: `found` is below `nNumUsed`, so `at` is its slot or
+            // the bucket whose first field is its value (`Bucket` is
+            // `repr(C)`), inside the data allocation.
+            let value = unsafe { at.cast::<Zval>().read() };
+            if !value.is_undef()
+                && let std::ops::ControlFlow::Break(broke) = each(value)
+            {
+                return Some((found, broke));
+            }
+            at = at.wrapping_add(size);
+        }
+        None
+    }
+
     /// `zend_hash_internal_pointer_reset`, `reset()`.
     pub fn reset(&self) {
         self.header().internal_pointer.set(self.valid_pos(0));
@@ -3923,6 +3954,45 @@ mod tests {
             Heap::array_update(nothing, a, Key::Str(key), Zval::long(i)).expect("an update");
         }
         a
+    }
+
+    /// `_ZEND_HASH_FOREACH_VAL` over a list's slots and a hash's
+    /// buckets: a hole stepped over, the walk begun at `pos` and ended at
+    /// `end`, and the position it broke at answered.
+    #[test]
+    fn foreach_val_from_steps_over_holes_in_a_list_and_a_hash() {
+        use std::ops::ControlFlow;
+        let _alone = alone();
+        let mut nothing = Nothing::new();
+        let start = nothing.heap.memory_usage(false);
+        let list = nothing.heap.array().expect("an array");
+        for i in 0..4 {
+            assert!(nothing.heap.array_append(list, Zval::long(i)).is_ok());
+        }
+        assert!(Heap::array_del(&mut nothing, list, Key::Long(1)));
+        let hash = hash_of(&mut nothing, 4);
+        let k1 = nothing.strings.intern(b"k1").expect("the key k1");
+        assert!(Heap::array_del(&mut nothing, hash, Key::Str(k1)));
+        for (a, packed) in [(list, true), (hash, false)] {
+            assert_eq!(a.is_packed(), packed);
+            let mut seen = Vec::new();
+            let walked = a.foreach_val_from(0, a.num_used(), |z| {
+                seen.extend(z.as_long());
+                ControlFlow::<()>::Continue(())
+            });
+            assert_eq!((walked, seen), (None, vec![0, 2, 3]));
+            let broke = a.foreach_val_from(1, 4, |z| match z.as_long() {
+                Some(3) => ControlFlow::Break('b'),
+                _ => ControlFlow::Continue(()),
+            });
+            assert_eq!(broke, Some((3, 'b')));
+            let first = a.foreach_val_from(1, 3, |z| ControlFlow::Break(z.as_long()));
+            assert_eq!(first, Some((2, Some(2))));
+            let past = a.foreach_val_from(3, 9, |_| ControlFlow::<()>::Continue(()));
+            assert_eq!(past, None);
+            Heap::release(&mut nothing, Zval::array(a));
+        }
+        assert_eq!(nothing.heap.memory_usage(false), start);
     }
 
     /// `zend_hash_rehash` with iterators (`Z/Zend/zend_hash.c:1395-1434`):

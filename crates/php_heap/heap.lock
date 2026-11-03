@@ -15,6 +15,7 @@ Arr::declared_rows
 Arr::empty
 Arr::end
 Arr::entry_at
+Arr::foreach_val_from
 Arr::forward
 Arr::get
 Arr::has_empty_ind
