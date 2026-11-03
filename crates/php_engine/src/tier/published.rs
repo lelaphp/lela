@@ -143,9 +143,13 @@ impl Func {
     /// The landing word of opline `at`: sealed until a tier armed it, and
     /// past the last opline.
     pub(crate) fn landing(&self, at: OplineIdx) -> &Word {
-        (self.landings.get())
-            .and_then(|words| words.get(usize::try_from(at.0).ok()?))
-            .unwrap_or(&SEALED)
+        self.laid_landing(at).unwrap_or(&SEALED)
+    }
+
+    /// The landing word of opline `at` where the op array's landing words
+    /// are laid down; none where they are not, and past the last opline.
+    pub(crate) fn laid_landing(&self, at: OplineIdx) -> Option<&Word> {
+        self.landings.get()?.get(usize::try_from(at.0).ok()?)
     }
 
     /// The landing word of opline `at`, for a tier to arm: the op array's
