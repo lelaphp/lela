@@ -10,10 +10,13 @@
 /// A name as declared: resolved, as `zend_resolve_class_name` leaves a
 /// written one, so fully qualified with no leading `\`, and in the case
 /// it was declared in. The compiler resolves a name the source wrote
-/// before it makes one of it; a native's is spelled in its crate. What a
-/// table by name files the declaration under ([`Bare`]).
+/// before it makes one of it; a native's is spelled in its crate, and
+/// the name points at its entry's bytes rather than a copy
+/// ([`php_heap::Bytes::borrowed`]), as php's `zend_function_entry` names
+/// a function by its `const char *`. What a table by name files the
+/// declaration under ([`Bare`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
-pub struct Name(pub Box<[u8]>);
+pub struct Name(pub php_heap::Bytes);
 
 /// A name to look up a class or a function by: past the one leading
 /// `\` that marks a written name fully qualified, which
@@ -958,7 +961,7 @@ pub struct NativeParameter {
 }
 
 impl NativeParameter {
-    /// The slot the entry declares.
+    /// The slot the entry declares, named by the entry's bytes.
     fn declaration(&self) -> Parameter {
         let default = match self.default {
             Some(expr) => ParameterDefault::Expr(expr()),
@@ -966,14 +969,16 @@ impl NativeParameter {
             None => ParameterDefault::None,
         };
         Parameter {
+            name: Name(php_heap::Bytes::borrowed(self.name)),
+            ty: (self.ty)(),
             by_ref: self.by_ref,
             prefer_ref: self.prefer_ref,
+            promoted: false,
             variadic: self.variadic,
             default,
             attributes: (self.attributes.iter())
                 .map(|attribute| attribute())
                 .collect(),
-            ..parameter(self.name, (self.ty)())
         }
     }
 }
@@ -1153,15 +1158,15 @@ pub struct FunctionDecl {
     pub frameless: Vec<u32>,
 }
 
-/// A native's declaration named `name`: no parameter, no return type,
-/// the empty file and line zero, for its declarer to fill. A free
-/// function rather than an associated one, since `api` re-exports
-/// [`FunctionDecl`] and each of its methods would be an item of the
-/// extension face.
+/// A native's declaration named `name`, its entry's bytes and no copy:
+/// no parameter, no return type, the empty file and line zero, for its
+/// declarer to fill. A free function rather than an associated one,
+/// since `api` re-exports [`FunctionDecl`] and each of its methods would
+/// be an item of the extension face.
 #[must_use]
-pub fn native_function(name: &[u8]) -> FunctionDecl {
+pub fn native_function(name: &'static [u8]) -> FunctionDecl {
     FunctionDecl {
-        name: Name(name.into()),
+        name: Name(php_heap::Bytes::borrowed(name)),
         parameters: Parameters::default(),
         return_type: None,
         returns_by_ref: false,

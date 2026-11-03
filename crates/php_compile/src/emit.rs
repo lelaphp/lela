@@ -4751,7 +4751,7 @@ impl<'a> Emit<'a> {
             earlier,
         )?;
         let declared = PropertyDecl {
-            name: Name(parameter.name.clone().into_boxed_slice()),
+            name: Name(parameter.name.clone().into()),
             visibility: promoted.visibility,
             set_visibility,
             is_instance: true,
@@ -5472,7 +5472,7 @@ impl<'a> Emit<'a> {
                 self.promoted_property(parameter, promoted, ty.as_ref(), &attrs)?;
             }
             parameters.push(Parameter {
-                name: Name(parameter.name.clone().into_boxed_slice()),
+                name: Name(parameter.name.clone().into()),
                 ty,
                 by_ref: parameter.by_ref,
                 prefer_ref: false,
@@ -6038,9 +6038,10 @@ impl<'a> Emit<'a> {
     /// an `eval` of one line in a loop always is, else made.
     fn file_name(&mut self) -> Name {
         match self.room_filename.take() {
-            Some(mut name) if name.0.len() == self.filename.len() => {
-                name.0.copy_from_slice(self.filename);
-                name
+            Some(name) if name.0.len() == self.filename.len() => {
+                let mut room = Box::<[u8]>::from(name.0);
+                room.copy_from_slice(self.filename);
+                Name(room.into())
             }
             _ => Name(self.filename.into()),
         }
@@ -6398,16 +6399,11 @@ impl<'a> Emit<'a> {
         let (attributes, dynamic_properties) = attributes?;
         let is_enum = class.kind == ClassKind::Enum;
         let decl = ClassDecl {
-            name: Name(name.clone().into_boxed_slice()),
+            name: Name(name.clone().into()),
             kind: class.kind,
             flags: class_flags(class, dynamic_properties, anonymous),
-            parent: parent
-                .as_ref()
-                .map(|parent| Name(parent.clone().into_boxed_slice())),
-            interfaces: interfaces
-                .iter()
-                .map(|i| Name(i.clone().into_boxed_slice()))
-                .collect(),
+            parent: parent.as_ref().map(|parent| Name(parent.clone().into())),
+            interfaces: interfaces.iter().map(|i| Name(i.clone().into())).collect(),
             implementors: Vec::new(),
             aliases: Vec::new(),
             traits,
@@ -6435,7 +6431,7 @@ impl<'a> Emit<'a> {
         self.class_pushed(at, decl);
         if anonymous {
             self.runtime_keys.push((
-                Name(name.to_ascii_lowercase().into_boxed_slice()),
+                Name(name.to_ascii_lowercase().into()),
                 u32::try_from(at).unwrap_or(u32::MAX),
             ));
         }
@@ -6787,7 +6783,7 @@ impl<'a> Emit<'a> {
     ) -> Result<(Vec<Name>, Vec<TraitAdaptation>), CompileError> {
         let mut traits = Vec::new();
         let mut adaptations = Vec::new();
-        let as_name = |bytes: Vec<u8>| Name(bytes.into_boxed_slice());
+        let as_name = |bytes: Vec<u8>| Name(bytes.into());
         for used in &class.traits {
             self.line = used.line;
             for written in &used.names {
@@ -7055,7 +7051,7 @@ impl<'a> Emit<'a> {
             return Err(self.internal("a constant of a class the unit has not"));
         };
         decl.constants.push(ClassConstDecl {
-            name: Name(constant.name.clone().into_boxed_slice()),
+            name: Name(constant.name.clone().into()),
             visibility: constant.visibility,
             is_final: constant.is_final,
             is_case: constant.is_case,
@@ -7383,7 +7379,7 @@ impl<'a> Emit<'a> {
                             ),
                         ));
                     }
-                    (Some(Name(named.clone().into_boxed_slice())), *expr)
+                    (Some(Name(named.clone().into())), *expr)
                 }
                 walk::AttrArgument::Positional(expr) => {
                     if arguments.iter().any(|earlier| earlier.name.is_some()) {
@@ -7403,7 +7399,7 @@ impl<'a> Emit<'a> {
             });
         }
         Ok(Attribute {
-            name: Name(name.into_boxed_slice()),
+            name: Name(name.into()),
             arguments,
             line: attribute.line,
             strict: self.typing == Typing::Strict,
@@ -7765,7 +7761,7 @@ impl<'a> Emit<'a> {
         self.active_property = None;
         let attributes = attributes?;
         let declared = PropertyDecl {
-            name: Name(property.name.clone().into_boxed_slice()),
+            name: Name(property.name.clone().into()),
             visibility: property.visibility,
             set_visibility,
             is_instance: !property.is_static,
@@ -8484,10 +8480,8 @@ impl<'a> Emit<'a> {
         let op1 = self.literal(lowered);
         let filed = self.own_string(&key, Sizing::Finit)?;
         self.literal(filed);
-        self.runtime_keys.push((
-            Name(key.into_boxed_slice()),
-            u32::try_from(at).unwrap_or(u32::MAX),
-        ));
+        self.runtime_keys
+            .push((Name(key.into()), u32::try_from(at).unwrap_or(u32::MAX)));
         if !delayed {
             self.push(Opline {
                 opcode: Opcode::DeclareClass,
@@ -8731,7 +8725,7 @@ impl<'a> Emit<'a> {
                             return Err(self.fatal("a written name that folded to nothing"));
                         };
                         return Ok(ConstExpr::DynamicClassConstant {
-                            class: Name(class.into_boxed_slice()),
+                            class: Name(class.into()),
                             class_kind,
                             name: Box::new(self.const_expr(expr)?),
                             line,
@@ -8746,7 +8740,7 @@ impl<'a> Emit<'a> {
                         return self.folded(value.kept());
                     }
                     Ok(ConstExpr::ClassConstant {
-                        class: Name(class.into_boxed_slice()),
+                        class: Name(class.into()),
                         class_kind,
                         name: Name(name.into()),
                         line,
@@ -9386,7 +9380,7 @@ impl<'a> Emit<'a> {
         }
         Ok(ConstExpr::Closure {
             at,
-            name: Name(name.into_boxed_slice()),
+            name: Name(name.into()),
             unit: self.cell.share(),
         })
     }
@@ -9483,7 +9477,7 @@ impl<'a> Emit<'a> {
         let at = self.function_callables;
         self.function_callables = self.function_callables.saturating_add(1);
         ConstExpr::FunctionCallable {
-            name: Name(name.into_boxed_slice()),
+            name: Name(name.into()),
             name_kind,
             line,
             at,
@@ -9547,8 +9541,8 @@ impl<'a> Emit<'a> {
             }
         };
         Ok(ConstExpr::MethodCallable {
-            class: Name(class.into_boxed_slice()),
-            method: Name(method.into_boxed_slice()),
+            class: Name(class.into()),
+            method: Name(method.into()),
             line,
         })
     }
@@ -9782,7 +9776,7 @@ impl<'a> Emit<'a> {
         };
         let at = u32::try_from(self.attributed_constants.len()).unwrap_or(u32::MAX);
         self.attributed_constants.push(ConstDecl {
-            name: Name(name.into_boxed_slice()),
+            name: Name(name.into()),
             value,
             attributes,
         });

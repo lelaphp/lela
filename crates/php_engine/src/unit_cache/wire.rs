@@ -236,7 +236,7 @@ impl Wire for Box<str> {
     }
     fn take(r: &mut Reader<'_>) -> Option<Self> {
         let name = Name::take(r)?;
-        String::from_utf8(name.0.into_vec())
+        String::from_utf8(Box::<[u8]>::from(name.0).into_vec())
             .ok()
             .map(String::into_boxed_str)
     }

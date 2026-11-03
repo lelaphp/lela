@@ -37,6 +37,7 @@
 mod array;
 mod block;
 mod bump;
+mod bytes;
 mod call_stack;
 mod collector;
 mod compare;
@@ -73,6 +74,7 @@ mod zval;
 pub use array::DeclaredRows;
 pub use array::{Arr, ArrIter, EmbeddedArr, Key, SortEntry, SortKeys, canonical_int};
 pub use block::Block;
+pub use bytes::Bytes;
 pub use call_stack::{CallStack, call_stack_bounds, call_stack_default_size, main_call_stack_size};
 pub use collector::GcStatus;
 pub use compare::{

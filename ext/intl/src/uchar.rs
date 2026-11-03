@@ -788,11 +788,7 @@ pub(crate) fn constants() -> Vec<ClassConstDecl> {
             continue;
         }
         let (name, value) = word.split_once('=').unwrap_or((word, ""));
-        let name = Name(
-            [prefix.as_bytes(), name.as_bytes()]
-                .concat()
-                .into_boxed_slice(),
-        );
+        let name = Name([prefix.as_bytes(), name.as_bytes()].concat().into());
         if value.contains('.') {
             constants.push(constant(name, &value.parse::<f64>().unwrap_or(0.0)));
             continue;

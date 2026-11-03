@@ -53,7 +53,7 @@ pub fn written_methods(class: &ClassDecl) -> &[MethodDecl] {
     class.methods.get(..written).unwrap_or_default()
 }
 
-fn method(name: &[u8], parameters: Vec<Parameter>, returns: Type) -> MethodDecl {
+fn method(name: &'static [u8], parameters: Vec<Parameter>, returns: Type) -> MethodDecl {
     MethodDecl {
         function: FunctionDecl {
             parameters: parameters.into(),

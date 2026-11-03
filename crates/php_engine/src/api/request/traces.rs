@@ -802,7 +802,7 @@ impl Request {
             None => self.innermost_frame().and_then(|state| {
                 state
                     .code()
-                    .map(|code| (code.filename.0.clone(), state.line()))
+                    .map(|code| (Box::from(&*code.filename.0), state.line()))
             }),
         };
         let Some((executing, at)) = executing else {

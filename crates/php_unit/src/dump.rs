@@ -1171,13 +1171,13 @@ mod tests {
     /// not is nobody's and prints nothing.
     #[test]
     fn a_method_prints_after_the_functions_under_its_class_s_name() {
-        let function = |name: &str, parameters: usize| FunctionDecl {
+        let function = |name: &'static str, parameters: usize| FunctionDecl {
             parameters: (0..parameters).map(|_| parameter(b"x", None)).collect(),
             file: Name::from("a.php"),
             line: 4,
             ..native_function(name.as_bytes())
         };
-        let method = |name: &str, parameters: usize| MethodDecl {
+        let method = |name: &'static str, parameters: usize| MethodDecl {
             function: function(name, parameters),
             visibility: Visibility::Public,
             is_instance: true,

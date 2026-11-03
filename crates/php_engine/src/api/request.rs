@@ -1851,7 +1851,7 @@ mod tests {
             }],
             attributes: Vec::new(),
             doc_comment: None,
-            file: Name(Box::new([])),
+            file: Name::default(),
             line: 0,
             end_line: 0,
             object_size: 0,

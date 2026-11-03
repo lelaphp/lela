@@ -947,7 +947,7 @@ fn get_class_methods(
         .methods_in_order(class)
         .into_iter()
         .filter(|(declaring, method)| visible(req, *declaring, method.visibility, scope))
-        .map(|(_, method)| method.function.name.0.clone())
+        .map(|(_, method)| Box::from(&*method.function.name.0))
         .collect();
     let mut array = PhpArray::new(req)?;
     for name in names {
