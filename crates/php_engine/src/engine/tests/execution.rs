@@ -227,7 +227,8 @@ fn an_opcode_with_no_handler_ends_the_request_naming_it() {
                     opcode: php_unit::Opcode::Return,
                     ..php_unit::Opline::default()
                 },
-            ],
+            ]
+            .into(),
             ..php_unit::OpArray::default()
         },
         ..Unit::default()

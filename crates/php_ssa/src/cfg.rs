@@ -375,7 +375,7 @@ fn split(body: &OpArray, named: bool) -> Cfg {
         blocks,
         map,
         features,
-        try_catch: body.try_catch.clone(),
+        try_catch: body.try_catch.to_vec(),
     };
     mark_reachable_blocks(&mut cfg, body);
     cfg

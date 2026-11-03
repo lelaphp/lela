@@ -220,7 +220,7 @@ pub struct Unit {
 /// use php_unit::{Handler, OpArray, Opcode, Opline, Unit};
 /// let back = Opline { opcode: Opcode::Return, ..Opline::default() };
 /// let unit = Unit {
-///     main: OpArray { oplines: vec![Opline::default(), back], ..OpArray::default() },
+///     main: OpArray { oplines: vec![Opline::default(), back].into(), ..OpArray::default() },
 ///     ..Unit::default()
 /// };
 /// assert_eq!(unit.main.oplines[0].handler, Handler::Unresolved);
@@ -413,20 +413,9 @@ impl Unit {
         }
     }
 
-    /// Every op array's tables shrunk to what they hold, as opcache
-    /// copies a persisted unit into shared memory at its exact size
-    /// (`zend_persist_op_array_ex`): what a unit held for more than one
-    /// request pays once, where the engine publishes it, and a unit one
-    /// request compiles for itself, an `eval`'s, never pays.
-    pub fn compact(&mut self) {
-        for code in self.op_arrays_mut() {
-            code.compact();
-        }
-    }
-
     /// Every op array of the unit: its main one, its functions', the
     /// ones no name binds, its methods' and its property hooks'.
-    fn op_arrays_mut(&mut self) -> impl Iterator<Item = &mut OpArray> {
+    pub(crate) fn op_arrays_mut(&mut self) -> impl Iterator<Item = &mut OpArray> {
         let Unit {
             main,
             functions,

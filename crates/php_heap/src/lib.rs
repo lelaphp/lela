@@ -56,6 +56,7 @@ mod observe;
 #[cfg(debug_assertions)]
 pub mod owners;
 mod payload;
+mod persist;
 mod property_table;
 mod reference;
 #[cfg(test)]
@@ -93,6 +94,7 @@ pub use numeric::{
 };
 pub use object::{Laziness, Obj, ObjectId};
 pub use observe::{Allocation, AllocationObserverId, ObserveAllocations};
+pub use persist::{Persist, PersistSize, Table, TableVec};
 pub use property_table::{Direction, PropertyTable, TableRow};
 pub use reference::Ref;
 pub use resource::{Res, ResourceType};

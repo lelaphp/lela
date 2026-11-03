@@ -1920,11 +1920,11 @@ impl Shared {
     /// `unit` published for every request: each op array given its
     /// map-pointer offset ([`assign_map_ptrs`]), which only a unit held
     /// for more than one request takes, as only what opcache persists
-    /// moves `CG(map_ptr_last)`, and its tables shrunk to what they hold
-    /// ([`Unit::compact`]).
+    /// moves `CG(map_ptr_last)`, and its tables laid in one block at
+    /// their length ([`Unit::persist`]).
     pub(crate) fn publish_compiled(&self, mut unit: Unit) -> PublishedUnit {
         assign_map_ptrs(&mut unit, &self.map_ptr_last);
-        unit.compact();
+        unit.persist();
         unit.published(None)
     }
 

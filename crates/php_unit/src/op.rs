@@ -2,7 +2,7 @@
 //! `zend_compile.c` and `pass_two` leave it, with the `safepoints` table
 //! the compiler numbers beside the line table.
 
-use php_heap::Zval;
+use php_heap::{Table, Zval};
 
 use crate::decl::{ConstExpr, Name};
 use crate::opcode;
@@ -393,10 +393,17 @@ pub struct BoundVar {
 /// `foreach` and the body's first opline of a `for` or a `while`, never
 /// the jump's own opline; two backward jumps to one header carry one
 /// number. A return's entry holds the `RETURN*` itself.
+///
+/// Each table of plain values is a [`Table`]: the compiler's vector while
+/// it writes one, laid in the unit's one block once the unit is
+/// persisted for the cache ([`crate::Unit::persist`]), as opcache copies
+/// `opcodes`, `literals`, `try_catch_array`, `live_range` and
+/// `dynamic_func_defs` into a cached file's memory
+/// (`zend_persist_op_array_ex`, `Z/ext/opcache/zend_persist.c:478`).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct OpArray {
-    pub oplines: Vec<Opline>,
-    pub literals: Vec<Zval>,
+    pub oplines: Table<Opline>,
+    pub literals: Table<Zval>,
     /// The constant expressions a constant of kind `IS_CONSTANT_AST`
     /// indexes, php's `zend_ast_ref` behind such a zval: what
     /// `zend_compile_params` leaves in a `RECV_INIT`'s `op2` for a
@@ -406,8 +413,8 @@ pub struct OpArray {
     pub vars: Vec<Name>,
     pub num_cvs: u32,
     pub num_tmps: u32,
-    pub try_catch: Vec<TryCatch>,
-    pub live_ranges: Vec<LiveRange>,
+    pub try_catch: Table<TryCatch>,
+    pub live_ranges: Table<LiveRange>,
     pub safepoints: Safepoints,
     pub filename: Name,
     pub line_start: u32,
@@ -435,11 +442,11 @@ pub struct OpArray {
     /// per entry; a unit holds every such op array once, in
     /// [`crate::Unit::dynamic`], and the entry is its index there, so
     /// no part of a unit points into another.
-    pub dynamic_func_defs: Vec<u32>,
+    pub dynamic_func_defs: Table<u32>,
     /// The functions, closures and classes php compiles while this op
     /// array is `CG(active_op_array)`, in the order it began them, each
     /// with how far this op array had grown by then ([`Nested`]).
-    pub nested: Vec<Nested>,
+    pub nested: Table<Nested>,
     /// `op_array->static_variables` (`Z/Zend/zend_compile.h:534`): the
     /// variables the op array binds through `BIND_STATIC`, in the order
     /// `zend_compile_static_var_common` added them to the table, which
@@ -493,7 +500,7 @@ pub struct OpArray {
     /// `Z/Zend/zend_vm_def.h:6827`), so `$o['10']` hands `offsetGet` the
     /// string `"10"` where `$a['10']` is the key `10` (bug #63217). The
     /// slots are ascending, as the compiler lays them down.
-    pub numeric_dims: Vec<ConstIdx>,
+    pub numeric_dims: Table<ConstIdx>,
 }
 
 /// A declaration php compiles at its place in another op array's
@@ -623,7 +630,7 @@ impl Safepoints {
 
     /// The heap's room shrunk to what is held, inline again where that
     /// fits.
-    fn shrink_to_fit(&mut self) {
+    pub(crate) fn shrink_to_fit(&mut self) {
         if let Sites::Spilled(spilled) = &mut self.0 {
             if spilled.len() <= Safepoints::INLINE {
                 *self = Safepoints::from(std::mem::take(spilled));
@@ -696,14 +703,18 @@ const SWITCHES: [Opcode; 3] = [Opcode::SwitchLong, Opcode::SwitchString, Opcode:
 impl OpArray {
     /// Every opline's handler resolved from its opcode and the kinds of
     /// its operands, as php's `pass_two` calls `zend_vm_set_opcode_handler`
-    /// on every opline it finishes ([`crate::Unit::published`]).
+    /// on every opline it finishes ([`crate::Unit::published`]). An opline
+    /// already resolved is not written, so a table laid in a unit's block
+    /// stays there ([`crate::Unit::persist`]).
     pub(crate) fn resolve(&mut self) {
         for at in 0..self.oplines.len() {
             let handler = match self.oplines.get(at) {
                 Some(op) => Handler::of(op, self.oplines.get(at + 1), at),
                 None => continue,
             };
-            if let Some(op) = self.oplines.get_mut(at) {
+            if self.oplines.get(at).is_some_and(|op| op.handler != handler)
+                && let Some(op) = self.oplines.get_mut(at)
+            {
                 op.handler = handler;
             }
         }
@@ -756,21 +767,6 @@ impl OpArray {
         target.into_iter().chain(table.into_iter().flatten())
     }
 
-    /// The tables shrunk to what they hold ([`crate::Unit::compact`]).
-    pub(crate) fn compact(&mut self) {
-        self.oplines.shrink_to_fit();
-        self.literals.shrink_to_fit();
-        self.const_exprs.shrink_to_fit();
-        self.vars.shrink_to_fit();
-        self.try_catch.shrink_to_fit();
-        self.live_ranges.shrink_to_fit();
-        self.safepoints.shrink_to_fit();
-        self.dynamic_func_defs.shrink_to_fit();
-        self.nested.shrink_to_fit();
-        self.bound_vars.shrink_to_fit();
-        self.numeric_dims.shrink_to_fit();
-    }
-
     /// `Z_EXTRA_P(dim) == ZEND_EXTRA_VALUE ? dim + 1 : dim`: the
     /// dimension a handler over an object reads for the `CONST` operand
     /// at `at`, which is the string as written where
@@ -789,41 +785,6 @@ impl OpArray {
 
 #[cfg(test)]
 mod tests {
-    /// A unit held for more than one request keeps no table's slack: the
-    /// emitter's vectors grow as they are written and stay so for an
-    /// `eval`'s unit, and [`crate::Unit::compact`] shrinks every op
-    /// array's, a method's among them, to what it holds.
-    #[test]
-    fn a_compacted_unit_holds_no_more_than_its_tables_hold() {
-        let grown = || {
-            let mut oplines = Vec::with_capacity(16);
-            oplines.push(Opline::default());
-            let mut literals = Vec::with_capacity(16);
-            literals.push(Zval::long(1));
-            OpArray {
-                oplines,
-                literals,
-                safepoints: (0..9).map(OplineIdx).collect::<Vec<_>>().into(),
-                ..OpArray::default()
-            }
-        };
-        let mut unit = crate::Unit {
-            main: grown(),
-            methods: vec![crate::unit::MethodBody {
-                class: 0,
-                method: 0,
-                body: grown(),
-            }],
-            ..crate::Unit::default()
-        };
-        unit.compact();
-        for body in [&unit.main, &unit.methods[0].body] {
-            assert_eq!(body.oplines.capacity(), 1);
-            assert_eq!(body.literals.capacity(), 1);
-            assert!(matches!(body.safepoints.0, Sites::Spilled(ref s) if s.capacity() == 9));
-        }
-    }
-
     use super::*;
 
     /// The table stands inline to [`Safepoints::INLINE`], spills past it
@@ -922,7 +883,7 @@ mod tests {
             functions: vec![(
                 crate::decl::native_function(b"f"),
                 OpArray {
-                    oplines: vec![echo, back],
+                    oplines: vec![echo, back].into(),
                     num_cvs: 1,
                     num_tmps: 1,
                     ..OpArray::default()
@@ -946,8 +907,8 @@ mod tests {
         };
         let back = op(Opcode::Return, OperandKind::Unused, 0);
         let mut code = OpArray {
-            oplines: vec![op(Opcode::Echo, OperandKind::Tmp, 2), back],
-            literals: vec![Zval::long(7)],
+            oplines: vec![op(Opcode::Echo, OperandKind::Tmp, 2), back].into(),
+            literals: vec![Zval::long(7)].into(),
             num_cvs: 1,
             num_tmps: 2,
             ..OpArray::default()
@@ -993,8 +954,8 @@ mod tests {
         });
         let unit = crate::Unit {
             main: OpArray {
-                oplines,
-                literals: vec![Zval::long(0); 8],
+                oplines: oplines.into(),
+                literals: vec![Zval::long(0); 8].into(),
                 num_cvs: 8,
                 num_tmps: 8,
                 ..OpArray::default()
