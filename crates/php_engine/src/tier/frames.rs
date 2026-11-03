@@ -24,8 +24,8 @@ pub fn frame(req: &Request, frame: FrameRef) -> Option<FrameView<'_>> {
 }
 
 /// The entry frame of the innermost serving: the frame whose return
-/// ends the `execute` a tier was asked in, as `Site::Return` is never
-/// raised for it.
+/// ends the `execute` a tier was asked in, which pops to no caller, so
+/// `Site::Return` is never raised for its return.
 #[must_use]
 pub fn entry(req: &Request) -> FrameRef {
     req.stack().entry()

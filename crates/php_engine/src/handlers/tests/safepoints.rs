@@ -247,9 +247,11 @@ fn returning(number: u32) -> PublishedUnit {
     .published(None)
 }
 
-/// Design §4.3 seam 8: `RETURN` raises the return safepoint, with the
-/// number the compiler wrote, for a frame that is not the entry frame
-/// of this serving, and pops it to its caller.
+/// Design §4.3 seam 8: `RETURN` pops a frame that is not the entry
+/// frame of this serving to its caller, and raises the return safepoint,
+/// with the number the compiler wrote, in the caller it landed in, as
+/// php's interpreter runs the landing's handler past the return
+/// (`jit-design.md` §2.2, #4056).
 #[test]
 fn a_return_in_no_entry_frame_raises_the_return_safepoint_and_pops() {
     let engine = Engine::cli_builder().tier::<Probe>().build();
@@ -267,7 +269,7 @@ fn a_return_in_no_entry_frame_raises_the_return_safepoint_and_pops() {
     );
     assert_eq!(
         req.state::<Asked>().sites,
-        vec![(Site::Return(SafepointIdx(1)), inner)]
+        vec![(Site::Return(SafepointIdx(1)), outer)]
     );
 
     // The entry frame's own return raises nothing and ends the loop.

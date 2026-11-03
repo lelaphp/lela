@@ -36,7 +36,7 @@ use std::sync::atomic::Ordering;
 
 use php_engine::tier::Flow;
 use php_engine::tier::{
-    self, Epoch, Fatal, FrameRef, FuncRef, Held, Request, SafepointIdx, Site, Stepped, Word,
+    self, Epoch, Fatal, FrameRef, FuncRef, Held, Request, SafepointIdx, Site, Word,
 };
 use php_unit::OplineIdx;
 
@@ -179,9 +179,9 @@ pub(crate) fn visit(
 #[inline(never)]
 pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: Held<'_>) -> Flow {
     enter::lent(req, |req, lent| match site {
-        Site::Return(at) => match kept_return(req, lent, frame) {
+        Site::Return(_) => match kept_return(req, lent, frame) {
             Returning::Continue => Flow::Continue,
-            Returning::Enter(id) => returned(req, lent, (frame, held), at, Visited::Enter(id)),
+            Returning::Enter(id) => run(req, lent, frame, id),
             Returning::Ask => safepoint_lent(req, lent, (frame, site), held),
         },
         Site::Loop(_) | Site::Entry => safepoint_lent(req, lent, (frame, site), held),
@@ -194,12 +194,13 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: He
 /// looked up, as php's interpreter runs the handler a landing holds: a
 /// landing no trace armed is left alone, as one a trace is recording
 /// from or that gave up, and a trace compiled there, or at the loop
-/// rooted there, is entered once the return is made ([`returned`]).
+/// rooted there, is entered in the caller the return popped to, which the
+/// `RETURN` made before it asked (#4056).
 #[derive(Debug, Clone, Copy)]
 enum Returning {
     /// Nothing to do: the interpreter makes the return.
     Continue,
-    /// The trace to enter in the caller, past the return.
+    /// The trace to enter in the caller, the return made.
     Enter(TraceId),
     /// The whole visit ([`safepoint_lent`]): a cold landing, which
     /// counts and may claim, a count the caller is owed ([`Owed`]), or
@@ -207,19 +208,19 @@ enum Returning {
     Ask,
 }
 
-/// [`Returning`] for a return of `frame`, the tier's state lent: the first
-/// thing a return's site reads, at every interpreted `RETURN` but the
-/// serving's entry frame's.
+/// [`Returning`] for a return that popped to `caller`, the tier's state
+/// lent: the first thing a return's site reads, at every interpreted
+/// `RETURN` but the serving's entry frame's.
 #[inline(always)] // once a return, in `safepoint`
 #[allow(clippy::inline_always)]
-fn kept_return(req: &Request, lent: Lent<'_>, frame: FrameRef) -> Returning {
+fn kept_return(req: &Request, lent: Lent<'_>, caller: FrameRef) -> Returning {
     if lent.shared().policy.mode() == Mode::Off {
         return Returning::Continue;
     }
     if lent.state.owed.get().is_some() {
         return Returning::Ask;
     }
-    let Some((caller, at)) = landing_past(req, frame) else {
+    let Some(at) = landing(req, caller) else {
         return Returning::Continue;
     };
     let Some(landed) = tier::frame_cache(req, caller).and_then(|func| lent.landed(func, at)) else {
@@ -257,11 +258,11 @@ fn safepoint_lent(
                 (Rooted::Safepoint(at, Start::Enter), held.word(req, at))
             }
             Site::Return(_) => {
-                let Some((caller, at)) = landing_past(req, frame) else {
+                let Some(at) = landing(req, frame) else {
                     return Flow::Continue;
                 };
-                let (goes, word) = goes_on(req, lent, (caller, at), shared.policy.folds());
-                (Rooted::Goes(caller, goes), word)
+                let (goes, word) = goes_on(req, lent, (frame, at), shared.policy.folds());
+                (Rooted::Goes(frame, goes), word)
             }
         };
         // A table a hot root found full stopped its counters, as php's
@@ -286,15 +287,12 @@ fn safepoint_lent(
         }
     };
     match (site, decided) {
-        (Site::Return(at), Visited::Continue) if owes(req, lent.state, frame) => {
-            returned(req, lent, (frame, held), at, Visited::Continue)
-        }
+        (Site::Return(_), decided) => returned(req, lent, frame, decided),
         (Site::Loop(_), Visited::Continue) => {
             paid(lent.state, frame);
             Flow::Continue
         }
         (_, Visited::Continue) => Flow::Continue,
-        (Site::Return(at), decided) => returned(req, lent, (frame, held), at, decided),
         (Site::Loop(header), Visited::Enter(id)) => looped(req, lent, frame, header, id),
         (Site::Entry, Visited::Enter(id)) => run(req, lent, frame, id),
         (Site::Loop(_), Visited::Hot(claim)) => {
@@ -508,23 +506,21 @@ impl<'l> enter::Landed<'l> {
     }
 }
 
-/// The caller `frame` returns to and the opline it lands on there, the
-/// one past the call it stands at; none where no frame of this serving
-/// called it.
+/// The opline the caller a `RETURN` popped to lands on, the one past
+/// its call, where the pop stood it; none where the frame shows none.
 #[inline]
-fn landing_past(req: &Request, frame: FrameRef) -> Option<(FrameRef, OplineIdx)> {
-    let caller = tier::below(req, frame)?;
-    let call = tier::frame(req, caller)?.opline();
-    Some((caller, OplineIdx(call.0.checked_add(1)?)))
+fn landing(req: &Request, caller: FrameRef) -> Option<OplineIdx> {
+    Some(tier::frame(req, caller)?.opline())
 }
 
-/// A return whose landing's word was compiled or claimed: php's
-/// interpreter has returned before the landing's handler runs, so the
-/// `RETURN` the safepoint `at` numbers is stepped first, its frame stood
-/// there, which a `RETURN`'s inline path has not stood it at, then the
-/// return trace is entered, or recorded from, at the landing in the
-/// caller it popped to; a throwable the return left pending, a
-/// destructor's, resumes where it was raised, the claim released.
+/// A return, asked in the caller it popped its frame to and standing at
+/// the landing past the call (`Site::Return`, #4056): php's interpreter
+/// has returned before the landing's handler runs, so the return trace
+/// is entered, or recorded from, there, with nothing of the `RETURN`
+/// left to serve. A landing whose word asked nothing pays what a
+/// recording that aborted in a callee owes the caller's loop
+/// ([`owed`]). A throwable the return left pending, a destructor's, is
+/// the caller's to raise at its call opline, and asks no site.
 ///
 /// The entry's trace stops at the `eval`, which it hands on to the
 /// interpreter, arming `$main`'s landing past it as php's
@@ -559,49 +555,14 @@ fn landing_past(req: &Request, frame: FrameRef) -> Option<(FrameRef, OplineIdx)>
 ///
 /// ```
 #[inline(never)]
-fn returned(
-    req: &mut Request,
-    lent: Lent<'_>,
-    (frame, held): (FrameRef, Held<'_>),
-    at: SafepointIdx,
-    decided: Visited,
-) -> Flow {
-    // The epoch the landing's trace is taken from, which holds the
-    // returning frame's op array for the step.
-    let stepped = match held.safepoint_at(at) {
-        Some(stands) => {
-            tier::stand(req, frame, stands);
-            tier::step_held(req, frame, held, lent.epoch)
+fn returned(req: &mut Request, lent: Lent<'_>, caller: FrameRef, decided: Visited) -> Flow {
+    match decided {
+        Visited::Continue if owes(lent.state, caller) => {
+            owed(req, lent.shared(), caller).unwrap_or(Flow::Continue)
         }
-        None => Err(Fatal::error(
-            "InternalError: a return site whose number names no RETURN",
-        )),
-    };
-    let caller = match stepped {
-        Ok(Stepped::Popped(caller)) => caller,
-        // Nothing was recorded: a claim is given back with nothing counted
-        // against the landing, as a recording's bailout gives one back.
-        gone => {
-            if let Visited::Hot(claim) = decided {
-                policy::settle(claim, &Outcome::Released);
-            }
-            return match gone {
-                Ok(Stepped::Threw(at)) => Flow::Resume(at),
-                Err(fatal) => Flow::Bail(fatal),
-                Ok(_) => Flow::Bail(Fatal::error(
-                    "InternalError: a return the tier stepped popped to no caller",
-                )),
-            };
-        }
-    };
-    let flow = match decided {
-        Visited::Continue => owed(req, lent.shared(), caller).unwrap_or(Flow::Continue),
+        Visited::Continue => Flow::Continue,
         Visited::Enter(id) => run(req, lent, caller, id),
         Visited::Hot(claim) => hot(req, caller, claim, lent.shared()),
-    };
-    match flow {
-        Flow::Continue => Flow::Resume(caller),
-        flow => flow,
     }
 }
 
@@ -1365,13 +1326,10 @@ fn owe(
     }
 }
 
-/// Whether the return of `frame` lands in the frame a count is owed to
-/// ([`Owed`]), which [`returned`] steps the return for.
-fn owes(req: &Request, state: &JitRequest, frame: FrameRef) -> bool {
-    state
-        .owed
-        .get()
-        .is_some_and(|owed| tier::below(req, frame).is_some_and(|caller| caller == owed.frame))
+/// Whether a return landed in `caller`, the frame a count is owed to
+/// ([`Owed`]), which [`returned`] pays.
+fn owes(state: &JitRequest, caller: FrameRef) -> bool {
+    state.owed.get().is_some_and(|owed| owed.frame == caller)
 }
 
 /// A back edge in `frame` counted its loop, so what a return into

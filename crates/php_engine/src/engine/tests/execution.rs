@@ -266,7 +266,8 @@ fn the_loop_asks_the_tier_at_the_entry_and_at_no_entry_frames_return() {
 
 /// Design §5.6, §8: a user frame is activated after its `RECV*`
 /// prologue, so `Probe` sees `(Entry, callee)` once per call and
-/// `Return` once per callee frame; a call whose `RECV` throws is
+/// `Return` once per callee frame, in the caller it returned to
+/// (#4056); a call whose `RECV` throws is
 /// reported `Threw` before the activation, so no `Entry` is raised
 /// for it (#309).
 #[test]
@@ -292,9 +293,9 @@ fn a_call_activates_its_frame_once_and_a_recv_that_throws_never_does() {
         vec![
             (Site::Entry, frame),
             (Site::Entry, callee),
-            (Site::Return(crate::tier::SafepointIdx(1)), callee),
+            (Site::Return(crate::tier::SafepointIdx(1)), frame),
             (Site::Entry, callee),
-            (Site::Return(crate::tier::SafepointIdx(1)), callee),
+            (Site::Return(crate::tier::SafepointIdx(1)), frame),
         ],
         "two calls activated and returned, the third never activated"
     );

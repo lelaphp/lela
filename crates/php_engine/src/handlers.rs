@@ -25645,15 +25645,15 @@ pub(crate) fn copy_tmp<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_RETURN`: the return safepoint, then the operand taken as the
-/// caller's (`ZVAL_COPY` of a CV or a constant, a temporary moved), then
-/// the frame popped (design §4.3 seam 8, §5.8), its CVs, temporaries
-/// and receiver given up with it (`zend_leave_helper`), and the value
-/// written into the caller's slot where the call wanted it and given up
-/// where it did not (`RETURN_VALUE_USED`). The caller goes on after its
-/// call opline. The safepoint carries the number the compiler wrote in
-/// `result`, and is raised for every frame but the entry frame of this
-/// serving, which the stack's entry slot says.
+/// `ZEND_RETURN`: the operand taken as the caller's (`ZVAL_COPY` of a
+/// CV or a constant, a temporary moved), then the frame popped (design
+/// §4.3 seam 8, §5.8), its CVs, temporaries and receiver given up with
+/// it (`zend_leave_helper`), and the value written into the caller's
+/// slot where the call wanted it and given up where it did not
+/// (`RETURN_VALUE_USED`), then the return safepoint in the caller, which
+/// goes on after its call opline. The safepoint carries the number the
+/// compiler wrote in `result`, and is raised for every frame but the
+/// entry frame of this serving, which pops to no caller.
 ///
 /// ```php
 /// function f() { return; }
@@ -25680,19 +25680,16 @@ pub(crate) fn r#return<T: Tier, A: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if req.stack_mut().entry() != frame {
-        if let Some(edge) = raise_return::<T>(req, frame, code, op) {
-            return edge;
-        }
-        if let Some(edge) = inline_return(req, frame, code, op, A::default()) {
-            return edge;
-        }
+    if req.stack_mut().entry() != frame
+        && let Some(left) = inline_return(req, frame, code, op, A::default())
+    {
+        return raise_return::<T>(req, left, code, op);
     }
-    returned(req, frame, code, op, at)
+    let left = returned(req, frame, code, op, at);
+    raise_return::<T>(req, left, code, op)
 }
 
-/// `RETURN` past its return safepoint and its inline path: the frame
-/// stood at the return, the operand taken as the handler's own
+/// `RETURN` past its inline path: the frame stood at the return, the operand taken as the handler's own
 /// ([`exec::take_operand`]) and the frame left with it
 /// ([`returned_to_caller`]). A call of its own, so that the inline path
 /// before it keeps to the registers it needs.
@@ -25704,7 +25701,7 @@ pub(crate) fn r#return<T: Tier, A: Operand + Default>(
 /// for it; a frame it returns leaves the site to its caller's next
 /// safepoint.
 #[inline(never)]
-fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, at: u32) -> Edge {
+fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, at: u32) -> Stepped {
     if req.oom_unlocated() {
         req.locate_oom();
     }
@@ -25714,38 +25711,27 @@ fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, at:
 }
 
 /// The return safepoint of a `RETURN*` (design §5.8, `jit-design.md`
-/// §2.2), raised for every frame but the entry frame of this serving
-/// with the number the compiler wrote in `result`, before the handler
-/// reads its operand: `None` where the tier answered `Continue`, and
-/// otherwise the edge it resumed at, since a tier that recorded ran the
-/// return and the caller's landing already and nothing of the return is
-/// left to do here.
+/// §2.2), raised where the return `left` popped its frame, with the
+/// number the compiler wrote in `result` and the op array that numbers
+/// it, in the caller the frame landed in, which stands past its call:
+/// php's interpreter runs the `RETURN`'s handler once and goes on
+/// through the handler of the opline the caller lands on, which at a
+/// landing a trace armed is the return trace's
+/// (`zend_jit_trace_setup_ret_counter`, #4056). The return of the
+/// serving's entry frame pops to no caller and raises nothing, nor does
+/// one that left a throwable pending, which the caller raises at its
+/// call opline. The edge on: the popped one where the tier answered
+/// `Continue`, and otherwise the one it resumed at.
 #[inline(always)] // once per return, in the RETURN arms
-fn return_site<T: Tier>(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    op: &Opline,
-) -> Option<Edge> {
-    if req.stack_mut().entry() == frame {
-        return None;
+fn raise_return<T: Tier>(req: &mut Request, left: Stepped, code: &OpArray, op: &Opline) -> Edge {
+    if let Stepped::Popped(caller) = left {
+        let held = crate::tier::Held::of(code);
+        match T::safepoint(req, caller, Site::Return(SafepointIdx(op.out)), held) {
+            Flow::Continue => {}
+            flow => return crate::tier::resumed(req, flow, caller),
+        }
     }
-    raise_return::<T>(req, frame, code, op)
-}
-
-/// [`return_site`] over a frame that is not the serving's entry frame.
-#[inline(always)] // as `return_site`
-fn raise_return<T: Tier>(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    op: &Opline,
-) -> Option<Edge> {
-    let held = crate::tier::Held::of(code);
-    match T::safepoint(req, frame, Site::Return(SafepointIdx(op.out)), held) {
-        Flow::Continue => None,
-        flow => Some(crate::tier::resumed(req, flow, frame)),
-    }
+    Ok(left.into())
 }
 
 /// The inline path of `ZEND_RETURN` (`ZEND_RETURN_SPEC_CONST`, `_TMP`,
@@ -25758,7 +25744,9 @@ fn raise_return<T: Tier>(
 /// pending after it. `None`, with nothing touched, while an observer is
 /// declared, for a value that is a reference, or a CV's or a constant's
 /// that counts owners, and for a frame [`Request::leave_plainly`]
-/// refuses. Never asked of the serving's entry frame.
+/// refuses. Never asked of the serving's entry frame. What it answers
+/// is the edge the leave took, [`Stepped::Popped`] of the caller, or
+/// [`Stepped::Threw`] where a release it served left a throwable.
 ///
 /// A temporary string is moved into the caller's temporary, a string
 /// parameter and a local are given up with the frame, a string nothing
@@ -25790,7 +25778,7 @@ fn inline_return(
     code: &OpArray,
     op: &Opline,
     a: impl Operand,
-) -> Option<Edge> {
+) -> Option<Stepped> {
     if crate::observer::observing(req) {
         return None;
     }
@@ -25807,14 +25795,14 @@ fn inline_return(
         };
         Some((z, moved))
     };
-    Some(Ok(req.leave_plainly(frame, code.num_cvs, operand)?.into()))
+    req.leave_plainly(frame, code.num_cvs, operand)
 }
 
 /// The half of `RETURN` that leaves the frame, which `RETURN_BY_REF`
-/// shares, once its return safepoint ([`return_site`]) is behind it:
-/// the frame popped, and `returned` into the `VAR` the call opline
-/// named, or released where the caller reads nothing.
-fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Edge {
+/// shares, before its return safepoint ([`raise_return`]): the frame
+/// popped, and `returned` into the `VAR` the call opline named, or
+/// released where the caller reads nothing.
+fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Stepped {
     if req.stack_mut().entry() == frame {
         return entry_returned(req, frame, returned);
     }
@@ -25822,12 +25810,12 @@ fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Ed
     let (caller, returns_to) = req.returning(frame);
     req.leave_frame(frame);
     if handed_back(req, returns_to, returned) {
-        return Ok(Stepped::Threw(caller).into());
+        return Stepped::Threw(caller);
     }
     // The caller stands at the call opline that pushed this frame, and
     // goes on from the one after it.
     req.vm_mut().advance(caller);
-    Ok(Stepped::Popped(caller).into())
+    Stepped::Popped(caller)
 }
 
 /// [`returned_to_caller`]'s return of the serving's entry frame
@@ -25835,9 +25823,9 @@ fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Ed
 /// meets it once per serving, where every other return pops a frame.
 #[cold]
 #[inline(never)]
-fn entry_returned(req: &mut Request, frame: FrameRef, returned: Value) -> Edge {
+fn entry_returned(req: &mut Request, frame: FrameRef, returned: Value) -> Stepped {
     req.entry_returned(frame, returned);
-    Ok(Stepped::Done.into())
+    Stepped::Done
 }
 
 /// What a call returned, handed to the frame that made the call: into
@@ -27408,9 +27396,6 @@ pub(crate) fn return_by_ref<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if let Some(edge) = return_site::<T>(req, frame, code, op) {
-        return edge;
-    }
     let by_value = match op.op1_type {
         OperandKind::Const | OperandKind::Tmp => true,
         OperandKind::Var => op.extended_value == RETURNS_VALUE,
@@ -27467,7 +27452,8 @@ pub(crate) fn return_by_ref<T: Tier>(
             "InternalError: RETURN_BY_REF over an operand that is no place",
         ));
     };
-    returned_to_caller(req, frame, returned)
+    let left = returned_to_caller(req, frame, returned);
+    raise_return::<T>(req, left, code, op)
 }
 
 /// `ZEND_GENERATOR_CREATE` (`Z/Zend/zend_vm_def.h:4653`): the frame
