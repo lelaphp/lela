@@ -51,6 +51,9 @@ pub(super) struct Calls {
     /// `None` records nothing, and is what a request holds unless its
     /// engine or its test asked (#2168).
     trace: Option<Vec<crate::trace::Entered>>,
+    /// Whether `trace` records, the byte every native's entry tests,
+    /// where the `Option`'s own test is a word compared with a constant.
+    tracing: bool,
     /// php's `str_tmp`: what a coercion made for a frameless call's
     /// argument, which php's `Z_FLF_PARAM_STR` never writes back into the
     /// operand, kept until the entry returns, as `Z_FLF_PARAM_FREE_STR`
@@ -1705,16 +1708,34 @@ impl Request {
         let outer = self
             .function_origin(function)
             .map(|extension| self.heap.set_origin(extension.origin()));
-        // The entry's owner is the handler layer's from here: the frame's
-        // return slot holds the count.
-        let served = entry(self).map(Owner::hand_on);
+        let served = entry(self);
         #[cfg(debug_assertions)]
         if let Some(outer) = outer {
             self.heap.set_origin(outer);
         }
-        // Taken only where kept: a plain `take` stores `None` back on
-        // every call's path, where this is a load and a branch.
-        let Some(deferred) = self.stream_thrown.take_if(|_| true) else {
+        // An observer's end and a throwable a stream kept are out of line,
+        // so the path every call takes is what the entry answered handed
+        // on, with no take of `stream_thrown` stored back.
+        if begun.is_some() || self.stream_thrown.is_some() {
+            return self.served_aside(begun, served, on_throw);
+        }
+        // The entry's owner is the handler layer's from here: the frame's
+        // return slot holds the count.
+        served.map(Owner::hand_on)
+    }
+
+    /// [`Request::serve_entry`] past the entry where an observer ended
+    /// the call or a stream kept a throwable while it ran.
+    #[cold]
+    #[inline(never)]
+    fn served_aside(
+        &mut self,
+        begun: Option<crate::observer::NativeCall>,
+        served: Result<Owner<Value>, Thrown>,
+        on_throw: OnThrow,
+    ) -> Result<Value, Thrown> {
+        let served = served.map(Owner::hand_on);
+        let Some(deferred) = self.stream_thrown.take() else {
             crate::observer::native_returned(self, begun, &served, None, on_throw);
             return served;
         };
@@ -1773,6 +1794,7 @@ impl Request {
     /// witness runner (harness §4.5 condition 2, revision 58).
     pub(crate) fn trace_natives(&mut self) {
         self.calls.trace = Some(Vec::new());
+        self.calls.tracing = true;
     }
 
     /// One native entered, where the request records them; what the
@@ -1794,7 +1816,7 @@ impl Request {
     /// ([`Request::trace_natives`]).
     #[inline]
     pub(crate) fn tracing_natives(&self) -> bool {
-        self.calls.trace.is_some()
+        self.calls.tracing
     }
 
     /// How many coercions a frameless call has kept so far, the mark the
@@ -1824,6 +1846,7 @@ impl Request {
     /// The natives recorded, given up at the request's end; none where
     /// nothing asked for them.
     pub(crate) fn take_trace(&mut self) -> Vec<crate::trace::Entered> {
+        self.calls.tracing = false;
         self.calls.trace.take().unwrap_or_default()
     }
 

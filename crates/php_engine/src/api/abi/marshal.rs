@@ -16,7 +16,7 @@
 use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 
-use php_heap::{Bytes, Slot, ZvalSpan};
+use php_heap::{Bytes, Slot, ZvalSpan, ZvalType};
 
 use php_unit::decl::{Bare, ConstExpr, Name, Type};
 
@@ -93,6 +93,15 @@ fn admits(mask: u32, value: &Value) -> bool {
     mask & (1u32 << u32::from(value.type_code())) != 0
 }
 
+/// [`admits`] of `value` as it stands, a reference not followed:
+/// `UNDEF`'s code and `IS_REFERENCE`'s are taken out of `mask`, so what
+/// it admits is a value of the type itself.
+#[inline]
+fn admits_own(mask: u32, value: &Value) -> bool {
+    const UNDEF_OR_REFERENCE: u32 = 1 | 1 << ZvalType::Reference as u32;
+    mask & !UNDEF_OR_REFERENCE & (1u32 << u32::from(value.own_type_code())) != 0
+}
+
 /// `value` held to what `T` declares, the text of a refusal naming
 /// `position`: what a by-reference referent and a body's own `Raw` hold
 /// are held to.
@@ -155,6 +164,12 @@ pub trait FromArgument: Sized {
     /// `TypeError`; `None` where the call gave none.
     #[inline(always)] // a type byte's test in every native's entry; the coercion is out of line
     fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
+        // The declared type as the call passed it, neither absent nor a
+        // reference, which no mask admits: one test of the type byte, as
+        // `Z_PARAM_*`'s first.
+        if admits_own(Self::MASK, &given) {
+            return Self::from_value(req, given).map(Some);
+        }
         let Some(given) = self::given(given) else {
             return Ok(None);
         };
