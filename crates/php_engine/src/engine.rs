@@ -1385,15 +1385,15 @@ fn native_records(classes: &[ClassDecl], keys: &ClassKeys) -> Arc<[LinkedClass<C
             }
         }
     }
-    records
-        .into_iter()
-        .zip(classes)
+    let mut records: Vec<LinkedClass<ClassId>> = (records.into_iter().zip(classes))
         .map(|(record, decl)| {
             record
                 .or_else(|| php_link::linked_class(decl, 0, &|_| None, &|_| None))
                 .unwrap_or_default()
         })
-        .collect()
+        .collect();
+    LinkedClass::lay(&mut records);
+    records.into()
 }
 
 /// Each native class's placed properties ([`placed_of`]), built as
@@ -1441,15 +1441,15 @@ fn native_placed(
             }
         }
     }
-    placed
-        .into_iter()
-        .enumerate()
+    let mut placed: Vec<Placed> = (placed.into_iter().enumerate())
         .map(|(at, built)| {
             built
                 .or_else(|| place(at, &Placed::default()))
                 .unwrap_or_default()
         })
-        .collect()
+        .collect();
+    Placed::lay(&mut placed);
+    placed
 }
 
 /// Each native class's trampolines by name: every row of `methods` a
