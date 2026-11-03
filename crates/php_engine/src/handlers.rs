@@ -1792,6 +1792,34 @@ pub(crate) fn init_fcall<T: Tier, A: Operand + Default>(
 /// [`Request::call_room`] sizes otherwise. `INIT_FCALL_BY_NAME` and
 /// `INIT_NS_FCALL_BY_NAME` read their callee off the same slot once a
 /// first pass primed it, and take it too.
+///
+/// The push is php's: one compare of the room the top page has left
+/// and the top moved past the frame (`Z/Zend/zend_execute.h:350`), and
+/// the header laid as the slot keeps it, its flags word whole
+/// ([`exec::PrimedCall::info`]) and the half-words a call writes zero
+/// last ([`exec::Header`]), then its slots `UNDEF`. A call passed fewer
+/// arguments than it declares and one passed more, a variadic, a
+/// recursion across the stack's first page, a scope the frame keeps and
+/// a callee named before its declaration, `INIT_FCALL_BY_NAME`, read
+/// over every pass after the first:
+///
+/// ```php
+/// function a($x, $y = 2) { return func_num_args() . ':' . $x . $y; }
+/// function b() { return func_get_args(); }
+/// function d($n) { return $n ? d($n - 1) : count(debug_backtrace()); }
+/// class K { static function m() { return static::class; } }
+/// class L extends K { static function n() { return parent::m(); } }
+/// a(0);
+/// echo a(1), ' ', a(1, 3), ' ', implode(',', b(4, 5, 6)), ' ', d(2000), ' ', L::n(), "\n";
+/// $o = [];
+/// for ($i = 0; $i < 3; $i++) { $o[] = late($i); }
+/// echo implode(' ', $o), "\n";
+/// function late($v) { return $v * 2; }
+/// ```
+/// ```expect
+/// 1:12 2:13 4,5,6 2001 L
+/// 0 2 4
+/// ```
 #[inline(always)] // as `inline_send`
 fn inline_init_fcall(req: &mut Request, frame: FrameRef, op: &Opline, at: u32) -> Option<Edge> {
     // Read off the slot in place, so only the fields the push lays are
@@ -1987,7 +2015,7 @@ fn primed_call(req: &Request, function: Function, count: u32) -> Cached {
         function,
         room: shape.room(count),
         callee: user.callee_at(),
-        sent: shape.sent.with_laid_entry(laid),
+        info: shape.sent.with_laid_entry(laid).of_call_built(),
         cache,
         base,
         opline,
