@@ -1092,9 +1092,10 @@ fn convert_with(
 /// as `efree(temp)` precedes that `THROW_UFAILURE`
 /// (`Z/ext/intl/converter/converter.c:677-679`). A warning handler served
 /// by a final-pass failure reads the string alone, then, and a string it
-/// lays larger than the UTF-16 moves the peak by the string alone. Two
-/// lengths are read and their difference printed, so the message intl
-/// keeps falls out of it:
+/// lays larger than the UTF-16 moves the peak by the string alone. Each
+/// length's readings are printed whole, the message intl keeps on the
+/// request's heap through the handler among them (`error.rs`), and the
+/// difference of two lengths is the string's share alone:
 ///
 /// ```php
 /// @ini_set('intl.error_level', E_WARNING);
@@ -1122,13 +1123,13 @@ fn convert_with(
 ///   $m = memory_get_usage();
 ///   $r = $c->convert($s);
 ///   $at[] = [$live - $m, memory_get_peak_usage() - $m];
-///   echo $c->calls, ' ', gettype($r), "\n";
+///   echo $c->calls, ' ', gettype($r), ' ', implode(' ', end($at)), "\n";
 /// }
 /// echo $at[1][0] - $at[0][0], ' ', $at[1][1] - $at[0][1], "\n";
 /// ```
 /// ```expect
-/// 2 boolean
-/// 2 boolean
+/// 2 boolean 102688 504096
+/// 2 boolean 200992 1003808
 /// 98304 499712
 /// ```
 fn encoded(
