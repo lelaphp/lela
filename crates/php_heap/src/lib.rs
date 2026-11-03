@@ -493,6 +493,7 @@ impl Heap {
     /// ([`Sizing::bytes`]): [`Heap::string`] is [`Sizing::Alloc`]'s and
     /// [`Heap::string_finit`] [`Sizing::Finit`]'s. A sum that overflows is
     /// php's fatal, raised before anything is asked for.
+    #[inline] // `zend_string_init_fast` is `zend_always_inline`, every native's piece goes through it
     pub fn string_sized(&mut self, bytes: &[u8], sizing: Sizing) -> Result<Str, Fatal> {
         let size = self.sized(sizing, bytes.len())?;
         let at = self.mm.alloc(size)?;
@@ -514,6 +515,23 @@ impl Heap {
         // SAFETY: the allocation is exactly the size `init_with` asks for
         // and nothing else holds it.
         Ok(unsafe { Str::init_with(at, len, 0, fill) })
+    }
+
+    /// `zend_string_alloc(len, 0)` and the `memcpy` of each of `parts`
+    /// after the last, what `concat_function`, `ZEND_CONCAT` and
+    /// `ZEND_ROPE_END` lay a joined string with: each byte written once,
+    /// none zeroed first. `len` is the parts' sum; bytes past what they
+    /// cover are zero, and a part past `len` is cut.
+    #[inline]
+    pub fn string_joined<'a>(
+        &mut self,
+        len: usize,
+        parts: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<Str, Fatal> {
+        let at = self.mm.alloc(Str::allocation_size(len))?;
+        // SAFETY: the allocation is exactly the size `init_parts` asks
+        // for and nothing else holds it.
+        Ok(unsafe { Str::init_parts(at, len, parts) })
     }
 
     /// `zend_string_alloc(len, 0)` at [`Sizing::Alloc`], or the
@@ -593,6 +611,7 @@ impl Heap {
     /// The bytes a string of `len` laid at `sizing` asks for
     /// ([`Sizing::bytes`]), a sum that overflows the heap's refusal or its
     /// end ([`Mm::overflow_refusal`]).
+    #[inline] // a sum and a compare; the refusal is out of line
     fn sized(&mut self, sizing: Sizing, len: usize) -> Result<usize, Fatal> {
         sizing
             .bytes(len)
@@ -1082,6 +1101,36 @@ mod tests {
             heap.memory_real_peak(),
             real + 3_000_000usize.next_multiple_of(mm::real_page_size())
         );
+    }
+
+    /// A joined string is its parts one after the other with php's NUL
+    /// after them, at `zend_string_alloc`'s size: a part past the length
+    /// is cut where it ends, and what the parts leave short is zero.
+    #[test]
+    fn a_joined_string_is_its_parts_at_the_size_one_allocation_takes() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let start = heap.memory_usage(false);
+        let joined = heap.string_joined(7, [&b"abc"[..], b"", b"defg"]);
+        let joined = joined.unwrap_or_else(|e| panic!("abcdefg: {e:?}"));
+        assert_eq!(joined.bytes(), b"abcdefg");
+        let plain = heap
+            .string(b"abcdefg")
+            .unwrap_or_else(|e| panic!("abcdefg: {e:?}"));
+        assert_eq!(
+            heap.memory_usage(false) - start,
+            2 * Str::allocation_size(7).next_multiple_of(8)
+        );
+        let cut = heap.string_joined(4, [&b"abc"[..], b"defg"]);
+        let cut = cut.unwrap_or_else(|e| panic!("abcd: {e:?}"));
+        assert_eq!(cut.bytes(), b"abcd");
+        let short = heap.string_joined(5, [&b"ab"[..]]);
+        let short = short.unwrap_or_else(|e| panic!("ab: {e:?}"));
+        assert_eq!(short.bytes(), b"ab\0\0\0");
+        for s in [joined, plain, cut, short] {
+            heap.release_string(s);
+        }
+        assert_eq!(heap.memory_usage(false), start);
     }
 
     /// What a request interns is the request's own memory (design §5.2):

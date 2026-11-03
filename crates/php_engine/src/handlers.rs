@@ -22837,10 +22837,15 @@ fn inline_concat(
 /// ```
 #[inline(never)]
 fn concat_into(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
-    // Each operand is read once: a `CV` that is undefined warns where
-    // it is read.
-    let left = exec::operand(req, frame, code, op.op1_type, op.op1);
-    let right = exec::operand(req, frame, code, op.op2_type, op.op2);
+    // Each operand is read once, both off one lookup of the frame where
+    // both are defined; a `CV` that is undefined warns where it is read.
+    let (left, right) = match defined_pair(req, frame, code, op) {
+        Some(both) => both,
+        None => (
+            exec::operand(req, frame, code, op.op1_type, op.op1),
+            exec::operand(req, frame, code, op.op2_type, op.op2),
+        ),
+    };
     let computed = if let (Some(a), Some(b)) = (left.as_php_string(), right.as_php_string()) {
         if matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var) {
             // The temporary's owner is the join's now, and nothing
@@ -22855,6 +22860,28 @@ fn concat_into(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     };
     exec::free_operand(req, frame, op.op2_type, op.op2);
     computed_into(req, frame, op, computed)
+}
+
+/// Both operands of `op` as [`exec::operand`] reads them, off one lookup
+/// of the frame's slots, where neither is `UNDEF`; `None` otherwise, for
+/// the read that warns of an undefined `CV`.
+#[inline]
+fn defined_pair(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Option<(Value, Value)> {
+    let slots = req.slots_mut(frame);
+    let read = |kind, field: u32| match kind {
+        OperandKind::Const => code.literals.get(field as usize).copied(),
+        OperandKind::Cv | OperandKind::Tmp | OperandKind::Var => {
+            slots.get(field as usize).copied().filter(|z| !z.is_undef())
+        }
+        OperandKind::Unused => None,
+    };
+    let (left, right) = (read(op.op1_type, op.op1)?, read(op.op2_type, op.op2)?);
+    Some((Value::of_slot(left), Value::of_slot(right)))
 }
 
 /// `ZEND_FAST_CONCAT` (`Z/Zend/zend_vm_def.h:3285`): what an
