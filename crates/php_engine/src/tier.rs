@@ -8,9 +8,9 @@
 //! `php_unit::Opcode` (design §5.8), generated from `ops.toml` in this
 //! crate's `build.rs` and generic over the tier, so `Nop` folds the
 //! safepoint away. `execute` raises `Site::Entry` for the frame it is
-//! given, after that frame's prologue; `RETURN` raises `Site::Return` for
-//! every other frame and for no entry frame, which the stack's entry slot
-//! says.
+//! given, after that frame's prologue; `RETURN` raises `Site::Return` in
+//! the caller every other frame pops to, past the pop, and for no entry
+//! frame, which pops to no caller.
 //!
 //! The debugging host is a `Tier` too (`jit-design.md` §2.4, revision 8;
 //! design §5.8, revision 51): its `safepoint` is where it stops the
@@ -153,8 +153,13 @@ pub trait Tier: 'static {
     type State: Send + 'static;
 
     /// Asked at the three sites and nowhere else, with `held`, the op
-    /// array the loop holds for `frame` (`jit-design.md` §2.2, #3144), so
-    /// the tier reads the site's word from what the loop has in hand.
+    /// array the loop holds for the site's opline (`jit-design.md` §2.2,
+    /// #3144), so the tier reads the site's word from what the loop has
+    /// in hand. At a loop's back edge and an activation `frame` is the
+    /// frame the site is in; at a return it is the caller the `RETURN`
+    /// popped its frame to, standing at its landing past the call, and
+    /// `held` the returning op array, which the site's number numbers
+    /// (#4056).
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: Held<'_>) -> Flow;
 
     /// The tier's [`State`](Tier::State) for a request of the engine
@@ -866,11 +871,12 @@ mod dispatch {
 /// What a handler's site, a backward `JMP*` or a `RETURN*`, does with a
 /// flow the tier answered other than `Continue`, which the handler goes
 /// on past itself, the hot path: what the loop's own site does
-/// ([`answered`]), as an edge. The tier stepped past the site's opline
-/// before it answered (`jit-design.md` §2.2), the jump taken or the frame
-/// popped and its caller landed, so the handler does neither: a `Resume`
-/// goes on in the frame it names, after the interrupt check and the
-/// pending test, and `Returned` is the serving's end.
+/// ([`answered`]), as an edge. The tier stepped past a back edge's opline
+/// before it answered (`jit-design.md` §2.2), the jump taken, and a
+/// `RETURN*` asks it with its frame popped and its caller landed already,
+/// so the handler does neither again: a `Resume` goes on in the frame it
+/// names, after the interrupt check and the pending test, and `Returned`
+/// is the serving's end.
 #[cold]
 #[inline(never)]
 pub(crate) fn resumed(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Next, Fatal> {
