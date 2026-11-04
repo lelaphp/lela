@@ -512,6 +512,22 @@ pub fn setting(req: &Request) -> &TierStatus {
     req.tier_setting_held()
 }
 
+/// Where `frame` stands, read off its header once: the opline, as
+/// [`FrameView::opline`] reads it, and the op array its cache names, as
+/// [`frame_cache`] names it, none for a frame that is no activated user
+/// frame; none at all for a frame that does not stand. What a return's
+/// site and a trace's exit read of the frame they leave the loop in
+/// (#4100), where the two reads looked the frame up twice.
+#[must_use]
+#[inline]
+pub fn standing_at(
+    req: &Request,
+    frame: FrameRef,
+) -> Option<(Option<FuncRef>, php_unit::OplineIdx)> {
+    let opline = req.vm().at(frame)?.opline;
+    Some((frame_cache(req, frame), php_unit::OplineIdx(opline)))
+}
+
 /// The tier's state the request was laid with, where it is an `S`
 /// ([`Tier::State`]): one check of its type, and no lookup. None where
 /// the engine binds a loop that lays none, `Nop`'s.
@@ -1514,7 +1530,10 @@ fn serve_held<'u, T: Tier, D: Telling>(
                 // A return to a frame the loop entered: its op array as
                 // the loop left it for the call.
                 Way::Left(stepped @ (Stepped::Popped(to) | Stepped::Moved(to))) => {
-                    let Some(code) = kept.returned(to) else {
+                    let Some(code) = kept
+                        .returned(to)
+                        .or_else(|| held::taken_up(req, &mut kept, scope, to))
+                    else {
                         break stepped;
                     };
                     frame = to;
@@ -1563,6 +1582,28 @@ fn serve_held<'u, T: Tier, D: Telling>(
                         }
                         Took::Standing
                     }
+                }
+                // An edge that goes on in a frame the loop did not step to
+                // itself: a tier's `Resume` (`jit-design.md` §2.2), past
+                // the interrupt check and the pending test ([`resumed`]),
+                // and every other handler's `Same`, a settled step or a
+                // fiber's switch among them. The frame it names may be one
+                // a trace entered where the loop did not, so every frame
+                // the loop entered is forgotten ([`Kept::forget`]), as the
+                // outer loop forgets them on this edge, and a frame of a
+                // function the loop called before is taken up here, as
+                // php's `zend_jit_trace_exit` hands `EX(opline)` back to
+                // the VM loop already running, with no restart of the loop
+                // (#4100); any other breaks to the outer loop, as before.
+                Way::Left(stepped @ Stepped::Same(to)) => {
+                    kept.forget();
+                    let Some(code) = held::taken_up(req, &mut kept, scope, to) else {
+                        break stepped;
+                    };
+                    frame = to;
+                    body = code;
+                    oplines = &*body.oplines;
+                    Took::Standing
                 }
                 Way::Left(stepped) => break stepped,
             };
