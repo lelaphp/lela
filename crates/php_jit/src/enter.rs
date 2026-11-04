@@ -1466,11 +1466,9 @@ pub(crate) fn enter<'t>(
     // last answer left through written where this trace is the one it
     // leads to.
     let stack = tier::stack(req).as_ptr();
-    let (images, rows) = Images::of(req, state, (epoch, trace));
+    let (images, rows, escaped) = Images::of(req, state, (epoch, trace));
     if let Some(state) = state {
-        let by = (state.headers)
-            .escaped_by(trace)
-            .and_then(|by| crate::table::of_epoch(epoch)?.get(by));
+        let by = escaped.and_then(|by| crate::table::of_epoch(epoch)?.get(by));
         state.headers.open_door((trace, at, &images), by);
     }
     let word = lower::EntryWord {
@@ -1702,22 +1700,24 @@ impl Images {
     /// What `trace`'s code reads in `req`, the touched cache slots beside
     /// the headers ([`touched`]) and its doors' words past them, and the
     /// request's rows with the trace's laid down as they say, which an
-    /// escape's way past its door reads ([`Rows`]); a request that keeps no
+    /// escape's way past its door reads ([`Rows`]), and the note of the
+    /// trace whose escape entered this one through the landing's word,
+    /// taken off the row ([`Rows::settled`]); a request that keeps no
     /// state of the tier's keeps no rows, and its rows are [`NO_ROWS`].
     fn of(
         req: &Request,
         state: Option<&crate::JitRequest>,
         (epoch, trace): (&Epoch, &Trace),
-    ) -> (Images, *const usize) {
+    ) -> (Images, *const usize, Option<crate::table::TraceId>) {
         let reads_none =
             trace.calls.is_empty() && trace.map_ptrs.is_empty() && trace.doors.is_empty();
         if let Some(state) = state {
             let rows = (state.headers).rows(|| {
                 crate::table::of_epoch(epoch).map_or(0, crate::table::TraceTable::segments)
             });
-            if let Some(at) = rows.settled(trace.id) {
+            if let Some((at, escaped)) = rows.settled(trace.id) {
                 let laid = Readiness::Settled;
-                return (Images::Kept { at, laid }, rows.base());
+                return (Images::Kept { at, laid }, rows.base(), escaped);
             }
             let images = if reads_none {
                 Images::None
@@ -1728,12 +1728,12 @@ impl Images {
                 )
             };
             rows.lay(trace.id, images.addresses(), images.row());
-            return (images, rows.base());
+            return (images, rows.base(), rows.escaped_by(trace.id));
         }
         if reads_none {
-            return (Images::None, NO_ROWS.as_ptr());
+            return (Images::None, NO_ROWS.as_ptr(), None);
         }
-        (Images::own(req, (epoch, trace)), NO_ROWS.as_ptr())
+        (Images::own(req, (epoch, trace)), NO_ROWS.as_ptr(), None)
     }
 
     /// What `trace`'s code reads laid out for one entry, by a request that
@@ -2007,15 +2007,6 @@ impl Headers {
         }));
     }
 
-    /// The trace whose escape entered the return root `trace` through the
-    /// landing's word since the crossing last asked ([`Rows::escaped_by`]).
-    fn escaped_by(&self, trace: &Trace) -> Option<crate::table::TraceId> {
-        if trace.start != crate::record::Start::Return {
-            return None;
-        }
-        self.rows.get()?.escaped_by(trace.id)
-    }
-
     /// The words of the door of `trace` that `door` names, as the request
     /// holds them; `elsewhere`, an open one made to name no landing a
     /// frame stands at.
@@ -2203,17 +2194,25 @@ impl Rows {
     }
 
     /// Where the addresses the code of the trace `id` names reads are, in
-    /// a row an entry laid settled ([`Rows::lay`]): what each entry after
-    /// it reads and nothing else, as php's enters a trace through the
-    /// handler its op array holds with nothing looked up. None for a row
-    /// not laid or not settled yet.
+    /// a row an entry laid settled ([`Rows::lay`]), and the row's note of
+    /// the escape that entered it, taken ([`Rows::escaped_by`]): what each
+    /// entry after it reads and nothing else, as php's enters a trace
+    /// through the handler its op array holds with nothing looked up. None
+    /// for a row not laid or not settled yet.
     #[inline]
-    fn settled(&self, id: crate::table::TraceId) -> Option<*const usize> {
+    fn settled(
+        &self,
+        id: crate::table::TraceId,
+    ) -> Option<(*const usize, Option<crate::table::TraceId>)> {
         let (segment, at) = id.slot();
         let row = self.segments.get(segment)?.get()?.get(at)?;
-        row.settled
-            .get()
-            .then(|| ptr::with_exposed_provenance(row.images.get()))
+        row.settled.get().then(|| {
+            let images = ptr::with_exposed_provenance(row.images.get());
+            (
+                images,
+                crate::table::TraceId::new(row.escaped_by.replace(0)),
+            )
+        })
     }
 
     /// The trace whose escape entered the trace `id` names through the
