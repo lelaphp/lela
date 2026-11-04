@@ -382,6 +382,35 @@ pub fn landing(req: &Request, frame: FrameRef, at: OplineIdx) -> (&Word, Option<
     })
 }
 
+/// The landing word of the opline `frame` stands at, in the op array it
+/// serves: what a tier's inlined test of a return reads in the caller it
+/// popped to (`jit-design.md` §2.2), its position and its op array's row
+/// and nothing else, the row read off the frame's
+/// `EX(run_time_cache)`, and looked up only where that is no
+/// op array's own cache, a closure's or a trait method's copy's. Sealed
+/// where the frame stands nowhere, as [`landing`] reads it.
+#[must_use]
+#[inline]
+pub fn landing_stood(req: &Request, frame: FrameRef) -> &Word {
+    let Some(header) = req.vm().at(frame) else {
+        return &SEALED;
+    };
+    let at = OplineIdx(header.opline);
+    match own_row(req, header) {
+        Some(func) => func.landing(at),
+        None => landing_looked_up(req, frame, at),
+    }
+}
+
+/// [`landing_stood`] for a frame that reads no op array's own cache: its
+/// op array looked up. Out of line, so the test in the `RETURN*` arms
+/// keeps to what it reads there.
+#[cold]
+#[inline(never)]
+fn landing_looked_up(req: &Request, frame: FrameRef, at: OplineIdx) -> &Word {
+    landing(req, frame, at).0
+}
+
 /// Where a request keeps one slot of a held op array's `run_time_cache`:
 /// the engine's map-pointer offset every request lays that cache at, and
 /// the slot in it, which compiled code reads past the request's map

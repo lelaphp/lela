@@ -416,13 +416,6 @@ impl<'l> Lent<'l> {
     ) -> Landed<'l> {
         self.state.landings.keep(self.epoch, func, at, header)
     }
-
-    /// Keep `trace`, of the table the lend holds, as the one entered
-    /// where the request goes on at opline `at` of the op array `func`
-    /// names ([`Landings::entered`]).
-    pub(crate) fn entered(self, func: FuncRef, at: OplineIdx, trace: &'l Trace) {
-        self.state.landings.entered(self.epoch, func, at, trace);
-    }
 }
 
 /// How many oplines a request keeps the words of ([`Landings`]): a
@@ -451,31 +444,22 @@ pub(crate) struct Landings {
 }
 
 /// One opline [`Landings`] keeps; its addresses zero where it keeps
-/// none, and `func` none in a place that keeps nothing. `trace` is the
-/// address of the trace the request last entered there, of the epoch's
-/// table, and `id` its number, zero where it entered none
-/// ([`Landings::entered`]).
+/// none, and `func` none in a place that keeps nothing.
 #[derive(Debug, Default, Clone, Copy)]
 struct Kept {
     func: Option<FuncRef>,
     at: OplineIdx,
     landing: usize,
     header: usize,
-    trace: usize,
-    id: u32,
 }
 
 /// The words a return or a leave reads where it goes on at an opline
 /// ([`Landings::landed`]): its landing word, sealed until a trace armed
-/// it, and the word of the loop rooted there, where one is; and the
-/// trace the request entered there last, with its number, which one of
-/// the words names while it reads compiled, as php's handler there is
-/// the trace itself (#4100).
+/// it, and the word of the loop rooted there, where one is.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Landed<'l> {
     pub(crate) landing: &'l Word,
     pub(crate) header: Option<&'l Word>,
-    pub(crate) entered: Option<(u32, &'l Trace)>,
 }
 
 impl Landings {
@@ -507,36 +491,7 @@ impl Landings {
         // SAFETY: kept by `keep`, of `epoch`, as this function's contract
         // says.
         let header = (kept.header != 0).then(|| unsafe { kept_word(epoch, kept.header) });
-        // SAFETY: kept by `entered`, of `epoch`'s table, as this
-        // function's contract says.
-        let entered =
-            (kept.trace != 0).then(|| (kept.id, unsafe { kept_trace(epoch, kept.trace) }));
-        Some(Landed {
-            landing,
-            header,
-            entered,
-        })
-    }
-
-    /// `trace`, of the table of `epoch`, the one every word kept here is
-    /// of, entered where the request goes on at opline `at` of the op
-    /// array `func` names: kept beside the words kept there, so the next
-    /// entry there reads it with no row of the table read; nothing where
-    /// the request keeps no words there. `trace` is borrowed for as long
-    /// as `epoch` is, as [`Landings::keep`]'s words are, the proof
-    /// [`Landings::landed`]'s read of it stands on.
-    fn entered<'e>(&self, _epoch: &'e Epoch, func: FuncRef, at: OplineIdx, trace: &'e Trace) {
-        let Some(slot) = (self.kept.iter()).find(|slot| {
-            let kept = slot.get();
-            kept.func == Some(func) && kept.at == at
-        }) else {
-            return;
-        };
-        slot.set(Kept {
-            trace: ptr::from_ref(trace).expose_provenance(),
-            id: trace.id.get(),
-            ..slot.get()
-        });
+        Some(Landed { landing, header })
     }
 
     /// Keep the words a return or a leave reads where it goes on at
@@ -559,15 +514,12 @@ impl Landings {
                 at,
                 landing: landing.map_or(0, address),
                 header: header.map_or(0, address),
-                trace: 0,
-                id: 0,
             });
         }
         self.next.set((next + 1) % LANDINGS);
         Landed {
             landing: landing.unwrap_or(&SEALED),
             header,
-            entered: None,
         }
     }
 }
@@ -604,21 +556,6 @@ unsafe fn kept_word(_epoch: &Epoch, address: usize) -> &Word {
     // SAFETY: the function's contract: the word stands for as long as
     // `epoch`, which the borrow keeps.
     unsafe { &*word }
-}
-
-/// The trace at `address`, which [`Landings`] kept, for as long as
-/// `epoch` is borrowed.
-///
-/// # Safety
-///
-/// `address` is that of a trace of `epoch`'s table that
-/// [`Landings::entered`] kept, which the table holds in place, never
-/// written again, until the epoch drops (`crate::table`).
-unsafe fn kept_trace(_epoch: &Epoch, address: usize) -> &Trace {
-    let trace = ptr::with_exposed_provenance::<Trace>(address);
-    // SAFETY: the function's contract: the trace stands for as long as
-    // `epoch`, which the borrow keeps.
-    unsafe { &*trace }
 }
 
 /// The address of `word`, its provenance exposed, as [`Landings`] keeps it.

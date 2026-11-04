@@ -89,7 +89,7 @@ pub use strings::{assign_concat, concat, rope_end, rope_open, rope_push, string_
 pub use view::{
     Bindings, CachedSlot, CallSite, CalledFunction, CalledMethod, CalleeSlot, Declaration, Epoch,
     FuncRef, Held, MapPtrRaw, PropertySlot, UnitView, epoch, epoch_state, frame_cache, func,
-    jump_targets, landing, running_func, served, touch, touchable,
+    jump_targets, landing, landing_stood, running_func, served, touch, touchable,
 };
 
 pub use crate::api::values::ClassId;
@@ -350,6 +350,8 @@ pub(crate) struct TierState {
     pub(crate) loops: Loops,
     switch: std::cell::Cell<Switch>,
     state: Option<Box<dyn Any + Send>>,
+    /// The frame a count is owed to ([`owed_frame`]).
+    owed: std::cell::Cell<Option<FrameRef>>,
     /// How many [`Lending`]s stand, counted under `debug_assertions`
     /// alone.
     #[cfg(debug_assertions)]
@@ -437,6 +439,7 @@ impl TierState {
         TierState {
             loops,
             switch: std::cell::Cell::new(switch),
+            owed: std::cell::Cell::new(None),
             state: (loops.lay)(Started { shared }),
             #[cfg(debug_assertions)]
             lends: std::sync::Arc::default(),
@@ -534,6 +537,22 @@ pub fn standing_at(
 #[must_use]
 pub fn state<S: Any>(req: &Request) -> Option<&S> {
     req.tier_state().state.as_deref()?.downcast_ref()
+}
+
+/// The frame the tier owes a count to, which a return into it visits
+/// [`Site::Return`] for, whatever its landing's word reads
+/// (`jit-design.md` §2.2, #4105): the one fact of the tier's a `RETURN*`
+/// reads at a sealed landing, so kept beside its state, whose type a read
+/// of the state checks, and written into no word every thread reads.
+#[must_use]
+#[inline(always)] // jit-design.md §2.2: read in the `RETURN*` arms
+pub fn owed_frame(req: &Request) -> Option<FrameRef> {
+    req.tier_state().owed.get()
+}
+
+/// Name the frame the tier owes a count to ([`owed_frame`]), or none.
+pub fn set_owed_frame(req: &Request, frame: Option<FrameRef>) {
+    req.tier_state().owed.set(frame);
 }
 
 /// One safepoint's word (`jit-design.md` §3.2): two atomics, zero at

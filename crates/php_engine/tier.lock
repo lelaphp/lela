@@ -181,11 +181,13 @@ tier::interrupted
 tier::jump_targets
 tier::laid
 tier::landing
+tier::landing_stood
 tier::lending
 tier::native_returns
 tier::numbered_class
 tier::observes
 tier::on_heap
+tier::owed_frame
 tier::plain_call
 tier::primed
 tier::restore
@@ -196,6 +198,7 @@ tier::serve_kept
 tier::served
 tier::set_argv
 tier::set_aside
+tier::set_owed_frame
 tier::set_stdin
 tier::set_trace_num
 tier::setting
