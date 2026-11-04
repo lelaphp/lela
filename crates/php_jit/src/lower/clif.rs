@@ -59,8 +59,8 @@ mod unread;
 use crate::record::{Began, Callee, Stop, leaves, returns};
 use crate::types::{
     Abort, BodyEntry, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home,
-    Imm, Interrupt, Layout, Leave, Line, Op, OpId, Operand, Place, Pointee, Read, Repeat, Slot,
-    Store, Stored, TraceIr, Types, UnwindId, ValueId, cannot_raise,
+    Imm, Interrupt, Layout, Leave, Line, Op, OpId, Operand, Place, Pointee, PushRoom, Read, Repeat,
+    Slot, Store, Stored, TraceIr, Types, UnwindId, ValueId, cannot_raise,
 };
 
 /// Where an inline arithmetic that would raise goes instead
@@ -138,8 +138,14 @@ const HELD_IMAGES: i32 = imm(size_of::<Stood>());
 /// Whether the request is not ready, an `i8` past [`HELD_IMAGES`].
 const HELD_UNREADY: i32 = HELD_IMAGES + imm(size_of::<usize>());
 
-/// The bytes of the frame's slot of the [`Stood`] and [`EntryHeld::Frame`].
-const STOOD_SLOT: i32 = HELD_UNREADY + imm(size_of::<usize>());
+/// The [`Stood`]'s own address, which a loop's trace keeps in its frame past
+/// [`HELD_UNREADY`] and loads for the kernel that takes it. An address the
+/// body makes anywhere is hoisted out of the loop and holds a register
+/// across every turn, for calls a turn may never make.
+const HELD_STOOD: i32 = HELD_UNREADY + imm(size_of::<usize>());
+
+/// The bytes of the frame's slot of the [`Stood`] and what is held past it.
+const STOOD_SLOT: i32 = HELD_STOOD + imm(size_of::<usize>());
 
 /// The variables [`Emit`] holds the [`Stood`] in, one per field.
 #[derive(Debug, Clone, Copy)]
@@ -807,6 +813,9 @@ struct Emit<'a> {
     /// calls' headers, its cache slots and its doors' words; and whether
     /// the request makes the trace's calls in place, from the entry word
     /// ([`ENTRY_UNREADY`]): an `i8` that is zero where it does.
+    /// Whether the body keeps the [`Stood`]'s address in its frame
+    /// ([`HELD_STOOD`]).
+    stood_held: bool,
     entry_held: Option<EntryHeld>,
     /// The address of the request's interrupt byte, read once as a
     /// looping trace whose header tests it enters.
@@ -829,8 +838,12 @@ struct Emit<'a> {
     /// Per value the trace keeps in a register, its variable.
     regs: Vec<Option<Variable>>,
     /// The rooms of the calls under way, the innermost last, each with
-    /// the plain call it is where compiled code pushed it in place.
-    calls: Vec<(CallRoom, Option<&'a PlainCall>)>,
+    /// the plain call it is where compiled code pushed it in place and
+    /// what held the page at that push.
+    calls: Vec<(CallRoom, Option<(&'a PlainCall, PushRoom)>)>,
+    /// Per frame of the trace, what the call made in place that entered
+    /// it fixes of it.
+    held_calls: Vec<Option<calls::Made>>,
     /// Per kernel, its signature once imported.
     sigs: [Option<SigRef>; Kernel::ALL.len()],
     /// Per exit, its block once a site branches to it.
@@ -901,6 +914,7 @@ impl<'a> Emit<'a> {
             returned_to: None,
             cx: None,
             entry_held: None,
+            stood_held: false,
             interrupt: None,
             stood,
             stood_vars,
@@ -908,6 +922,7 @@ impl<'a> Emit<'a> {
             rooms,
             regs: vec![None; ir.values.len()],
             calls: Vec::new(),
+            held_calls: vec![None; ir.frames.len()],
             sigs: [None; Kernel::ALL.len()],
             exits: vec![None; ir.exits.len()],
             unwinds: vec![None; ir.unwinds.len()],
@@ -1368,12 +1383,14 @@ impl<'a> Emit<'a> {
             Op::InitCall {
                 began: Began::Here,
                 plain,
+                room,
                 ..
             } => {
                 let call = self.stood_word(I64, STOOD_CALL);
                 let var = self.b.declare_var(I64);
                 self.b.def_var(var, call);
-                self.calls.push((CallRoom::Held(var), plain.as_ref()));
+                let plain = plain.as_ref().map(|plain| (plain, *room));
+                self.calls.push((CallRoom::Held(var), plain));
                 Ok(())
             }
             Op::InitCall {
@@ -2156,10 +2173,18 @@ impl<'a> Emit<'a> {
     fn hold_entry(&mut self, images: Value, word: Value, loops: bool) {
         let unready = self.b.ins().band_imm_u(word, ENTRY_UNREADY);
         let unready = self.b.ins().icmp_imm_s(IntCC::NotEqual, unready, 0);
+        if loops {
+            let stood = self.b.ins().stack_addr(I64, self.stood, 0);
+            self.b.ins().stack_store(I64, stood, self.stood, HELD_STOOD);
+            self.stood_held = true;
+        }
         self.entry_held = Some(if loops && !self.held.is_empty() {
-            let slot = self.stood_out();
-            self.b.ins().store(trusted(), images, slot, HELD_IMAGES);
-            self.b.ins().store(trusted(), unready, slot, HELD_UNREADY);
+            self.b
+                .ins()
+                .stack_store(I64, images, self.stood, HELD_IMAGES);
+            self.b
+                .ins()
+                .stack_store(I64, unready, self.stood, HELD_UNREADY);
             EntryHeld::Frame
         } else {
             EntryHeld::Registers { images, unready }
@@ -2205,10 +2230,13 @@ impl<'a> Emit<'a> {
         }
     }
 
-    /// The address of the [`Stood`] a kernel writes, for its call, and of
-    /// what a loop's trace holds past it ([`EntryHeld::Frame`]).
+    /// The address of the [`Stood`] a kernel writes, for its call.
     fn stood_out(&mut self) -> Value {
-        self.b.ins().stack_addr(I64, self.stood, 0)
+        if self.stood_held {
+            self.b.ins().stack_load(I64, I64, self.stood, HELD_STOOD)
+        } else {
+            self.b.ins().stack_addr(I64, self.stood, 0)
+        }
     }
 
     /// Where the kernel just called stood the interpreter, read back from
@@ -3208,22 +3236,29 @@ impl<'a> Emit<'a> {
             }
             Opcode::SendValEx | Opcode::Return => self.stepped(at, line),
             Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName => {
-                match self.ir.ops.get(at.index() + 1) {
-                    Some(Op::InitCall {
-                        plain: Some(plain), ..
-                    }) => self.push_in_place(at, line, plain),
-                    _ => self.push_call(at, line),
+                match self.pushed_by(at) {
+                    Some((plain, room)) => self.push_in_place(at, line, plain, room),
+                    None => self.push_call(at, line),
                 }
             }
-            Opcode::InitMethodCall | Opcode::InitStaticMethodCall => {
-                match self.ir.ops.get(at.index() + 1) {
-                    Some(Op::InitCall {
-                        plain: Some(plain), ..
-                    }) => self.push_in_place(at, line, plain),
-                    _ => Err(mismatch("a method's call in place with no call held")),
-                }
-            }
+            Opcode::InitMethodCall | Opcode::InitStaticMethodCall => match self.pushed_by(at) {
+                Some((plain, room)) => self.push_in_place(at, line, plain, room),
+                None => Err(mismatch("a method's call in place with no call held")),
+            },
             _ => Err(mismatch("an inline opline the lowering does not serve")),
+        }
+    }
+
+    /// The plain call the `INIT_*` at `at` pushes in place, and what holds
+    /// its page.
+    fn pushed_by(&self, at: OpId) -> Option<(&'a PlainCall, PushRoom)> {
+        match self.ir.ops.get(at.index() + 1) {
+            Some(Op::InitCall {
+                plain: Some(plain),
+                room,
+                ..
+            }) => Some((plain, *room)),
+            _ => None,
         }
     }
 

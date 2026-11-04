@@ -994,9 +994,7 @@ impl Request {
         // the frame table for both, as php's `zend_leave_helper` reaches
         // `execute_data` and `EX(prev_execute_data)` off two registers.
         let (top, laid, below) = self.vm.stack.top_over_mut()?;
-        if top != frame {
-            return None;
-        }
+        debug_assert!(top == frame, "a `RETURN` with a call under way above it");
         let header = laid.header();
         // `zend_leave_helper`'s first test, one word of `ZEND_CALL_INFO`:
         // no call, extra argument or annex, which a file's frame always

@@ -244,6 +244,19 @@ pub(crate) enum Home {
     Register,
 }
 
+/// What holds the VM stack's top page to the room an `INIT_*` pushed in
+/// place takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PushRoom {
+    /// A stack check, the push's own or one before it that covers it
+    /// ([`Check::Room`]), as `zend_jit_push_call_frame` trusts php's
+    /// `checked_stack`: the push tests nothing.
+    Checked,
+    /// No stack check holds this push, a method's or one whose callee the
+    /// record names no size of, so it tests the page itself.
+    Unchecked,
+}
+
 /// One thing the trace does, in the order the trace does it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Op {
@@ -257,12 +270,14 @@ pub(crate) enum Op {
     /// recorded `func` it needs no guard on: an `INIT_FCALL` of a user
     /// function of the engine's arena, or a recursive call
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:8790-8906`), whose push, the
-    /// `DO_*CALL` that makes it and the callee's `RETURN` take no exit.
+    /// `DO_*CALL` that makes it and the callee's `RETURN` take no exit;
+    /// `room` says what holds its page to the room it takes.
     InitCall {
         frame: Frame,
         callee: Callee,
         began: Began,
         plain: Option<PlainCall>,
+        room: PushRoom,
     },
     /// The frame a call pushed runs. `stores` are the values the caller
     /// holds in registers, written to their slots as the call enters, so
