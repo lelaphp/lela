@@ -223,14 +223,15 @@ pub(crate) fn extract_to(
         .map(|a| a.fname.clone())
         .unwrap_or_default();
     let shown = lossy(&fname).into_owned();
-    if crate::archive::read_file(req, &fname, false)?.is_none() {
+    let Some(archive_file) = crate::archive::open_rb(req, &fname, false)? else {
         let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
             ce.invalid_argument_exception,
             &format!("Invalid argument, {shown} cannot be found"),
         ));
-    }
+    };
+    archive_file.free(req);
     if dest.is_empty() {
         let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(

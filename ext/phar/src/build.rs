@@ -282,10 +282,6 @@ pub(crate) fn stub_of(req: &mut Request, id: ArchiveId) -> Result<Vec<u8>, Throw
         return Ok(Vec::new());
     };
     let fname = a.fname.clone();
-    let shared =
-        a.fp.as_ref()
-            .map(|fp| Arc::clone(&fp.bytes))
-            .filter(|_| !a.is_brandnew);
     if a.is_tar() || a.is_zip() {
         let Some(stub) = a.manifest.get(b".phar/stub.php") else {
             return Ok(Vec::new());
@@ -297,28 +293,26 @@ pub(crate) fn stub_of(req: &mut Request, id: ArchiveId) -> Result<Vec<u8>, Throw
             stub.flags,
         );
         let compressed = flags & ENT_COMPRESSION_MASK != 0;
-        let (bytes, csize) = if let Some(bytes) = shared.filter(|_| !compressed) {
-            (bytes, len)
+        let raw = if compressed {
+            archive::read_range(req, &fname, false, at, Some(csize))?
         } else {
-            let Some(bytes) = archive::read_file(req, &fname, false)? else {
-                let ce = Throwables::of(req)?;
-                return Err(throw_exception_ex(
-                    req,
-                    ce.unexpected_value_exception,
-                    &format!("phar error: unable to open phar \"{}\"", lossy(&fname)),
-                ));
-            };
-            (Arc::new(bytes), csize)
+            archive::read_old(req, id, at, Some(len))?
         };
-        let start = usize::try_from(at).unwrap_or(usize::MAX).min(bytes.len());
-        let raw = &bytes[start..(start + csize).min(bytes.len())];
+        let Some(raw) = raw else {
+            let ce = Throwables::of(req)?;
+            return Err(throw_exception_ex(
+                req,
+                ce.unexpected_value_exception,
+                &format!("phar error: unable to open phar \"{}\"", lossy(&fname)),
+            ));
+        };
         let out = if compressed {
             let filter: &[u8] = if flags & ENT_COMPRESSED_GZ != 0 {
                 b"zlib.inflate"
             } else {
                 b"bzip2.decompress"
             };
-            let Some(out) = archive::filter_bytes(req, filter, None, raw)? else {
+            let Some(out) = archive::filter_bytes(req, filter, None, &raw)? else {
                 let kind = if flags & ENT_COMPRESSED_BZ2 != 0 {
                     "bzip2"
                 } else {
@@ -336,7 +330,7 @@ pub(crate) fn stub_of(req: &mut Request, id: ArchiveId) -> Result<Vec<u8>, Throw
             };
             out
         } else {
-            raw.to_vec()
+            raw
         };
         if out.len() < len {
             let ce = Throwables::of(req)?;
@@ -349,28 +343,16 @@ pub(crate) fn stub_of(req: &mut Request, id: ArchiveId) -> Result<Vec<u8>, Throw
         return Ok(out[..len].to_vec());
     }
     let len = a.halt_offset;
-    let bytes = if let Some(bytes) = shared {
-        bytes
-    } else {
-        let Some(bytes) = archive::read_file(req, &fname, false)? else {
+    match archive::read_old(req, id, 0, Some(len))? {
+        Some(stub) if stub.len() == len => Ok(stub),
+        _ => {
             let ce = Throwables::of(req)?;
-            return Err(throw_exception_ex(
+            Err(throw_exception_ex(
                 req,
                 ce.runtime_exception,
                 "Unable to read stub",
-            ));
-        };
-        Arc::new(bytes)
-    };
-    if let Some(stub) = bytes.get(..len) {
-        Ok(stub.to_vec())
-    } else {
-        let ce = Throwables::of(req)?;
-        Err(throw_exception_ex(
-            req,
-            ce.runtime_exception,
-            "Unable to read stub",
-        ))
+            ))
+        }
     }
 }
 

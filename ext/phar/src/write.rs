@@ -8,13 +8,13 @@
 use std::sync::Arc;
 
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{Opening, OwnedStream as _, Request, Streams as _};
+use php_ext::request::{Opening, OwnedStream as _, Request, Streams as _, Whence};
 
 use crate::archive::{
     self, API_VERSION_NODIR, API_VERSION_NUM, ArchiveId, Content, ENT_COMPRESSED_GZ,
     ENT_COMPRESSION_MASK, ENT_PERM_DEF_DIR, ENT_PERM_DEF_FILE, Entry, FILE_COMPRESSED_BZ2,
     FILE_COMPRESSED_GZ, Format, Fp, HDR_SIGNATURE, Metadata, SIG_OPENSSL, SIG_OPENSSL_SHA256,
-    SIG_OPENSSL_SHA512, TAR_DIR, TAR_FILE, Through, archives, lossy,
+    SIG_OPENSSL_SHA512, TAR_DIR, TAR_FILE, archives, lossy,
 };
 use crate::entry::{self, Dir, EntryData, Target};
 use crate::open::{Failed, readonly};
@@ -106,20 +106,8 @@ pub(crate) fn flush_ex(
     };
     let fname = a.fname.clone();
     let name = lossy(&fname).into_owned();
-    // What the stub and the unchanged entries are copied from: through
-    // the file opened `rb`, the file as it stands now, rewritten under the
-    // archive or not, and what was read where it is gone (php's stream
-    // reads the unlinked file on); through a stream php wrote, its bytes.
-    let held = a.fp.clone().filter(|_| !a.is_brandnew);
-    let oldfile: Option<Arc<Vec<u8>>> = match held {
-        Some(Fp {
-            bytes,
-            through: Through::Written,
-        }) => Some(bytes),
-        held => archive::read_file(req, &fname, false)?
-            .map(Arc::new)
-            .or(held.map(|fp| fp.bytes)),
-    };
+    // What the stub and the unchanged entries are copied from.
+    let oldfile = archive::read_old(req, id, 0, None)?;
     let mut newfile: Vec<u8> = Vec::new();
     let Some(a) = archives(req).get_mut(id) else {
         return Ok(None);
@@ -134,7 +122,7 @@ pub(crate) fn flush_ex(
         newfile.extend_from_slice(b" ?>\r\n");
         a.halt_offset = newfile.len();
     } else if a.halt_offset != 0 && !a.is_brandnew && oldfile.is_some() {
-        let old = oldfile.as_deref().map_or(&[][..], Vec::as_slice);
+        let old = oldfile.as_deref().unwrap_or_default();
         let written = a.halt_offset.min(old.len());
         newfile.extend_from_slice(&old[..written]);
         if written != a.halt_offset {
@@ -411,7 +399,7 @@ pub(crate) fn write_out(
     };
     let (fname, flags, deferred) = (a.fname.clone(), a.flags, a.donotflush);
     let newfile = Arc::new(newfile);
-    a.fp = Some(Fp::written(Arc::clone(&newfile)));
+    a.set_fp(Fp::Written(Arc::clone(&newfile)));
     if deferred {
         return Ok(None);
     }
@@ -652,25 +640,15 @@ pub(crate) fn stream_write(req: &mut Request, data: &mut EntryData, buf: &[u8]) 
     let e = manifest.at_mut(slot)?;
     let end = match (&mut e.content, fp, ufp) {
         (Content::Mod(own), _, _) => splice(own, at, buf),
-        (
-            Content::Fp,
-            Some(Fp {
-                bytes,
-                through: Through::Written,
-            }),
-            _,
-        )
-        | (Content::Ufp, _, Some(bytes)) => {
+        (Content::Fp, Some(Fp::Written(bytes)), _) | (Content::Ufp, _, Some(bytes)) => {
             let end = splice(Arc::make_mut(bytes), at, buf);
             data.fp = Some(entry::Efp::Shared(Arc::clone(bytes)));
             end
         }
-        (Content::Fp, Some(_), _) => {
-            let failed = format!(
-                "Write of {} bytes failed with errno=9 Bad file descriptor",
-                buf.len()
-            );
-            docref(req, Level::Notice, &failed);
+        (Content::Fp, Some(Fp::File(stream)), _) => {
+            let stream = **stream;
+            stream.seek(req, i64::try_from(at).ok()?, Whence::Set);
+            stream.write(req, buf);
             return None;
         }
         _ => return None,
