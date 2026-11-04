@@ -1066,11 +1066,9 @@ impl Request {
             .and_then(|(of, at)| self.extension_of(of)?.ini.get(at));
         let decl = declared.cloned().unwrap_or_else(|| {
             let (user, per_dir, system) = Request::ini_modifiable(&row.name);
-            let default = row.value.as_deref().map(Into::into);
-            let name = Name(row.name.clone());
             IniDecl {
-                name,
-                default,
+                name: Name(row.name.clone()),
+                default: row.value.clone(),
                 user,
                 per_dir,
                 system,

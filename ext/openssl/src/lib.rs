@@ -55,7 +55,7 @@ use std::ffi::{c_int, c_ulong};
 
 use php_ext::abi::{Extension, ExtensionBuilder, IniStage, OrFalse, Refusals};
 use php_ext::attr::{php_const, php_function};
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::{Bytes, IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
@@ -335,9 +335,9 @@ fn openssl_error_string(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, 
 /// string(0) ""
 /// ```
 pub fn extension() -> Extension {
-    let ini = |name: &str, default: Option<&str>| IniDecl {
-        name: Name(name.as_bytes().into()),
-        default: default.map(|default| default.as_bytes().into()),
+    let ini = |name: &'static str, default: Option<&'static str>| IniDecl {
+        name: Name(Bytes::borrowed(name.as_bytes())),
+        default: default.map(|default| Bytes::borrowed(default.as_bytes())),
         user: false,
         per_dir: true,
         system: false,

@@ -49,7 +49,7 @@ use std::sync::Arc;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_const;
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::{Bytes, IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject};
@@ -292,8 +292,8 @@ const INI: [(&str, &str); 5] = [
 fn ini() -> Vec<IniDecl> {
     INI.into_iter()
         .map(|(name, default)| IniDecl {
-            name: Name(name.as_bytes().into()),
-            default: Some(default.as_bytes().into()),
+            name: Name(Bytes::borrowed(name.as_bytes())),
+            default: Some(Bytes::borrowed(default.as_bytes())),
             user: true,
             per_dir: true,
             system: true,

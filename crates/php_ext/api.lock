@@ -464,6 +464,8 @@ decl::Attribute
 decl::AttributeArgument
 decl::AttributeTarget
 decl::AttributeValidator
+decl::Bytes
+decl::Bytes::borrowed
 decl::ClassConstDecl
 decl::ClassDecl
 decl::ClassFlags

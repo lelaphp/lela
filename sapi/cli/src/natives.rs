@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_function;
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::{Bytes, IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpArray, PhpString};
@@ -99,8 +99,8 @@ pub(crate) fn server(builder: EngineBuilder) -> EngineBuilder {
 fn server_extension() -> Extension {
     ExtensionBuilder::default()
         .ini(vec![IniDecl {
-            name: Name(COLOR.as_bytes().into()),
-            default: Some(b"0".as_slice().into()),
+            name: Name(Bytes::borrowed(COLOR.as_bytes())),
+            default: Some(Bytes::borrowed(b"0")),
             user: true,
             per_dir: true,
             system: true,

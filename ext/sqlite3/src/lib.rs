@@ -45,7 +45,7 @@ mod throwables;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::{php_class, php_const};
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::{Bytes, IniDecl, Name};
 use php_ext::request::{Ini, Request};
 use php_ext_pdo_sqlite::ffi;
 
@@ -96,8 +96,8 @@ pub fn extension() -> Extension {
         .ini(
             INI.iter()
                 .map(|(name, default, user)| IniDecl {
-                    name: Name(name.as_bytes().into()),
-                    default: default.map(|d| d.as_bytes().into()),
+                    name: Name(Bytes::borrowed(name.as_bytes())),
+                    default: default.map(|d| Bytes::borrowed(d.as_bytes())),
                     user: *user,
                     per_dir: false,
                     system: !*user,

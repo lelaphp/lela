@@ -59,7 +59,7 @@ mod utf8;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::{Bytes, IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpString};
@@ -377,10 +377,10 @@ fn post_deactivate(req: &mut Request) {
 }
 
 /// One `PHP_INI_ALL` entry.
-fn ini(name: &[u8], default: Option<&[u8]>) -> IniDecl {
+fn ini(name: &'static [u8], default: Option<&'static [u8]>) -> IniDecl {
     IniDecl {
-        name: Name(name.into()),
-        default: default.map(Into::into),
+        name: Name(Bytes::borrowed(name)),
+        default: default.map(Bytes::borrowed),
         user: true,
         per_dir: true,
         system: true,

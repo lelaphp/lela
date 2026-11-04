@@ -522,7 +522,10 @@ impl<const N: u8> TestExt<N> {
     /// its handlers (`Z/ext/zend_test/zend_mm_custom_handlers.c`); its
     /// request state is where the observer stands.
     pub(crate) fn observing_allocations() -> Extension {
-        let name = format!("test_ext_{N}.observe_allocations");
+        // The name an `on_modify` is given lasts the process, as an
+        // extension spells it in its source; a test's is made once per
+        // engine and kept.
+        let name: &'static str = format!("test_ext_{N}.observe_allocations").leak();
         Self::builder()
             .request_state::<AllocationSlot<N>>()
             .ini(vec![IniDecl {

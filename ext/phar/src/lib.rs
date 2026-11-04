@@ -53,7 +53,7 @@ mod write;
 mod zip;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, IniStage};
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::{Bytes, IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::{InfoRow, Ini, Request, Streams as _};
 
@@ -101,9 +101,9 @@ const CACHE_LIST: &str = "phar.cache_list";
 /// bool(false)
 /// ```
 pub fn extension() -> Extension {
-    let ini = |name: &str, default: &str, user: bool| IniDecl {
-        name: Name(name.as_bytes().into()),
-        default: Some(default.as_bytes().into()),
+    let ini = |name: &'static str, default: &'static str, user: bool| IniDecl {
+        name: Name(Bytes::borrowed(name.as_bytes())),
+        default: Some(Bytes::borrowed(default.as_bytes())),
         user,
         per_dir: user,
         system: true,

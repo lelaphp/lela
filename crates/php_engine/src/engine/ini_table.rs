@@ -17,8 +17,10 @@ use crate::api::request::ExtensionId;
 /// A core entry's name and default are the core table's, borrowed and
 /// not copied, as `zend_register_ini_entries_ex` interns a `const char *`
 /// of a static `zend_ini_entry_def`, which opcache then moves into the
-/// one buffer every interned string shares; an extension's are copied
-/// from its declaration, and a value the host set is the host's.
+/// one buffer every interned string shares; an extension's are its
+/// declaration's, cloned, which copies nothing where the declaration
+/// borrowed them from its source ([`php_unit::decl::IniDecl`]), and a
+/// value the host set is the host's.
 pub(crate) struct Directive {
     pub(crate) name: Bytes,
     /// The master value, `None` where it has none (php's `NULL`).
@@ -63,8 +65,11 @@ impl IniTable {
         let core = (core.iter()).map(|&(name, value)| (borrowed(name), value.map(borrowed), None));
         let declared = numbered().flat_map(|(extension, entry)| {
             (entry.ini.iter().enumerate()).map(move |(at, decl)| {
-                let value = decl.default.as_deref().map(Bytes::from);
-                (decl.name.0.clone(), value, Some((extension, at)))
+                (
+                    decl.name.0.clone(),
+                    decl.default.clone(),
+                    Some((extension, at)),
+                )
             })
         });
         // Laid at the length it ends at: Core's rows, then each

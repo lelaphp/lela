@@ -81,6 +81,39 @@ fn a_startup_handler_sees_the_entries_before_it_and_its_stderr_is_kept() {
     assert!(engine.startup_errors().ends_with(b"1 then 2\n"));
 }
 
+/// An extension's entry in the engine's table is its declaration's
+/// bytes, as `zend_register_ini_entries_ex` points a `zend_ini_entry`
+/// at its `zend_ini_entry_def`: a name and default the declaration
+/// borrowed from its source are the table's without a copy, and a
+/// value the host set is the host's own.
+#[test]
+fn an_extensions_entry_is_the_bytes_its_declaration_borrowed() {
+    // Read where they lie, so each use is the one address.
+    static NAMES: [&[u8]; 2] = [b"t.kept", b"t.set"];
+    static DEFAULT: &[u8] = b"declared";
+    let names = NAMES;
+    let entry = |name: &'static [u8]| php_unit::decl::IniDecl {
+        name: Name(php_heap::Bytes::borrowed(name)),
+        default: Some(php_heap::Bytes::borrowed(DEFAULT)),
+        user: true,
+        per_dir: true,
+        system: true,
+    };
+    let extension = crate::api::abi::ExtensionBuilder::default()
+        .ini(names.map(entry).to_vec())
+        .build("t");
+    let engine = Engine::cli_builder()
+        .extensions(&[extension])
+        .ini("t.set", "host")
+        .build();
+    let row = |name: &[u8]| engine.shared.ini.find(name);
+    let kept =
+        row(names[0]).map(|row| (row.name.as_ptr(), row.value.as_deref().map(<[u8]>::as_ptr)));
+    assert_eq!(kept, Some((names[0].as_ptr(), Some(DEFAULT.as_ptr()))));
+    let set = row(names[1]).map(|row| (row.name.as_ptr(), row.value.as_deref()));
+    assert_eq!(set, Some((names[1].as_ptr(), Some(&b"host"[..]))));
+}
+
 /// Two extensions that intercept one native stack in bundle order,
 /// each at its `MINIT`: the later serves
 /// first and passes through to the earlier, the earlier to the

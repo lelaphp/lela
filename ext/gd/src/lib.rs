@@ -34,7 +34,7 @@ mod transform;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::{php_const, php_function};
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::{Bytes, IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
@@ -177,8 +177,8 @@ pub(crate) mod constants {
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
         .ini(vec![IniDecl {
-            name: Name(JPEG_IGNORE_WARNING.as_bytes().into()),
-            default: Some(b"1".as_slice().into()),
+            name: Name(Bytes::borrowed(JPEG_IGNORE_WARNING.as_bytes())),
+            default: Some(Bytes::borrowed(b"1")),
             user: true,
             per_dir: true,
             system: true,

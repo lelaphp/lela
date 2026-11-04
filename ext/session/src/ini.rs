@@ -8,7 +8,7 @@
 
 use php_ext::abi::{ExtensionBuilder, IniStage, OnModify};
 use php_ext::coerce::{atoi, numeric_string, strtol};
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::{Bytes, IniDecl, Name};
 use php_ext::raising::{self, Level, Thrown, docref};
 use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpString};
@@ -103,8 +103,8 @@ pub(super) fn declared() -> Vec<IniDecl> {
         .map(|(name, default, kind)| {
             let per_dir = matches!(kind, Kind::PerDir | Kind::PerDirBool);
             IniDecl {
-                name: Name(name.as_bytes().into()),
-                default: Some(default.as_bytes().into()),
+                name: Name(Bytes::borrowed(name.as_bytes())),
+                default: Some(Bytes::borrowed(default.as_bytes())),
                 user: !per_dir,
                 per_dir: true,
                 // `ZEND_INI_PERDIR` alone, which `php --re` shows as

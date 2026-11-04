@@ -10,7 +10,7 @@
 
 use php_ext::abi::{Extension, ExtensionBuilder, OrFalse};
 use php_ext::attr::php_function;
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::{Bytes, IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpArray};
@@ -68,8 +68,10 @@ impl Row {
     /// The row as the engine declares it.
     fn decl(&self) -> IniDecl {
         IniDecl {
-            name: Name(self.name.as_bytes().into()),
-            default: self.default.map(|default| default.as_bytes().into()),
+            name: Name(Bytes::borrowed(self.name.as_bytes())),
+            default: self
+                .default
+                .map(|default| Bytes::borrowed(default.as_bytes())),
             user: self.user,
             per_dir: self.user,
             system: true,

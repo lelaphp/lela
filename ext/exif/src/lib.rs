@@ -34,7 +34,7 @@ use php_ext::abi::{
 use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::c_str;
 use php_ext::coerce::to_string;
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::{Bytes, IniDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, type_error};
 use php_ext::request::{Opening, OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
@@ -109,8 +109,8 @@ pub fn extension() -> Extension {
         .ini(
             INI.iter()
                 .map(|(name, default)| IniDecl {
-                    name: Name((*name).into()),
-                    default: Some((*default).into()),
+                    name: Name(Bytes::borrowed(name)),
+                    default: Some(Bytes::borrowed(default)),
                     user: true,
                     per_dir: true,
                     system: true,

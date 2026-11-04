@@ -9,3 +9,8 @@ pub use php_unit::decl::{
     PropertyDecl, PropertyHooks, Radix, TraitAdaptation, Type, Visibility, class_attribute_refusal,
     hook_attribute_refusal,
 };
+
+/// The bytes a [`Name`] and an [`IniDecl`]'s default hold, borrowed from
+/// the binary where the declaration spells them ([`Bytes::borrowed`]),
+/// as php's `zend_ini_entry_def` points at its `const char *`s.
+pub use php_heap::Bytes;

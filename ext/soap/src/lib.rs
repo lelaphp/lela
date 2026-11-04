@@ -44,7 +44,7 @@ use php_ext::abi::{
     Dependency, DependencyKind, Extension, ExtensionBuilder, IniStage, LongHandler,
 };
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::{Bytes, IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::{Ini, Request};
 use php_ext::values::{Value, ValueRef};
@@ -173,10 +173,10 @@ pub(crate) mod ini {
     pub(crate) const CACHE_LIMIT: &[u8] = b"soap.wsdl_cache_limit";
 }
 
-fn ini_entry(name: &[u8], default: &[u8]) -> IniDecl {
+fn ini_entry(name: &'static [u8], default: &'static [u8]) -> IniDecl {
     IniDecl {
-        name: Name(name.into()),
-        default: Some(default.into()),
+        name: Name(Bytes::borrowed(name)),
+        default: Some(Bytes::borrowed(default)),
         user: true,
         per_dir: true,
         system: true,

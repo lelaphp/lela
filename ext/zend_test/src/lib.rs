@@ -45,7 +45,7 @@ mod weakmap;
 use std::io::Write as _;
 
 use php_ext::abi::{Extension, ExtensionBuilder, LongHandler};
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::{Bytes, IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::{Ini, Request};
 use php_ext::values::{Emalloc, Owner, PhpObject, ResourceType, Value};
@@ -153,8 +153,8 @@ impl Entry {
             Modifiable::User => (true, false, false),
         };
         IniDecl {
-            name: Name(self.name.into()),
-            default: Some(self.default.into()),
+            name: Name(Bytes::borrowed(self.name)),
+            default: Some(Bytes::borrowed(self.default)),
             user,
             per_dir,
             system,

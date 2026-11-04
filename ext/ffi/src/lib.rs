@@ -46,7 +46,7 @@ use std::collections::HashMap;
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_class;
 use php_ext::call::lookup_class;
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::{Bytes, IniDecl, Name};
 use php_ext::raising::{Thrown, fatal, throw, throw_error};
 use php_ext::request::{Ini, Request};
 use php_ext::values::{ClassId, Emalloc};
@@ -231,14 +231,14 @@ pub fn extension() -> Extension {
     ExtensionBuilder::default()
         .ini(vec![
             IniDecl {
-                name: Name(ENABLE.as_bytes().into()),
-                default: Some(b"preload".as_slice().into()),
+                name: Name(Bytes::borrowed(ENABLE.as_bytes())),
+                default: Some(Bytes::borrowed(b"preload")),
                 user: false,
                 per_dir: false,
                 system: true,
             },
             IniDecl {
-                name: Name(PRELOAD.as_bytes().into()),
+                name: Name(Bytes::borrowed(PRELOAD.as_bytes())),
                 default: None,
                 user: false,
                 per_dir: false,
