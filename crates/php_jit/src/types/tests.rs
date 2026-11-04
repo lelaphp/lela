@@ -240,6 +240,42 @@ fn a_loop_by_recursive_return_takes_no_interrupt_test() -> Result<(), String> {
 /// as php's trace takes `exit_0` to `exit_2` at `0003`, `exit_3` at
 /// `0007` and `exit_4` at `0005` (#3203).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+/// A `JMPZ_EX` writes its boolean before it guards the way it went, over
+/// the temporary it reads here, so the guard's exit leaves past the write
+/// with the boolean in its slot, of no type it knows there, as php sets
+/// `IS_UNKNOWN` for it (`Z/ext/opcache/jit/zend_jit_trace.c:5707-5712`).
+#[test]
+fn a_jump_that_writes_a_boolean_leaves_past_it_and_knows_no_type_of_it() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($n) { $s = 0; for ($i = 1; $i < $n; $i++) { $x = ($i + 1) && $i; $s += $x ? 1 : 2; } return $s; }
+        echo f(9), \"\\n\";",
+    )?;
+    let at = (ir.ops.iter())
+        .position(|op| matches!(op, Op::Line(line) if line.opcode == Opcode::JmpzEx))
+        .ok_or("no JMPZ_EX")?;
+    let Some(Op::Line(line)) = ir.ops.get(at) else {
+        return Err("no line".to_owned());
+    };
+    let out = line.out.ok_or("JMPZ_EX writes no boolean")?;
+    let slot = ir.values[out.0 as usize].slot;
+    let at = OpId(u32::try_from(at).map_err(|_| "too many ops")?);
+    let guard = (ir.guards.iter())
+        .find(|guard| guard.at == GuardAt::Within(at))
+        .ok_or("no direction guard")?;
+    assert!(matches!(guard.check, Check::Direction { .. }));
+    let exit = &ir.exits[usize::from(guard.exit.0)];
+    let stored =
+        (exit.stores.iter()).any(|store| store.slot == slot && store.from == Stored::Value(out));
+    assert!(stored, "{}", dump::render(&ir));
+    assert!(
+        !exit.known.iter().any(|known| known.slot == slot),
+        "{}",
+        dump::render(&ir)
+    );
+    Ok(())
+}
+
 #[test]
 fn a_packed_arrays_key_is_a_long_no_guard_holds() -> Result<(), String> {
     let ir = built(

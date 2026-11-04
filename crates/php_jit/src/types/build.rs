@@ -1351,7 +1351,7 @@ impl<'a> Builder<'a> {
     }
 
     /// The direction guard of a conditional jump, leaving where the jump
-    /// goes the way it did not go.
+    /// goes the way it did not go, past what the jump wrote before it.
     fn direction(
         &mut self,
         idx: OpId,
@@ -1388,10 +1388,20 @@ impl<'a> Builder<'a> {
             target
         };
         let to = other.map_or(At::Stands, At::Opline);
-        let exit = match form {
-            Form::Inline => draft(Point::Before(idx), frame, to),
-            Form::Step => draft(Point::After(idx), frame, to),
-        };
+        // php writes a `JMPZ_EX`'s boolean before it guards the way it
+        // went, whichever target reads it (`zend_jit_bool_jmpznz`,
+        // `Z/ext/opcache/jit/zend_jit_ir.c:7778-7783`), and an inline
+        // `FE_FETCH_R` guards before it writes.
+        let written = form == Form::Step || matches!(opcode, Opcode::JmpzEx | Opcode::JmpnzEx);
+        let exit = draft(
+            if written {
+                Point::After(idx)
+            } else {
+                Point::Before(idx)
+            },
+            frame,
+            to,
+        );
         self.guards.push(Placed {
             at: GuardAt::Within(idx),
             check: Check::Direction { taken },
@@ -4871,23 +4881,14 @@ impl<'a> Builder<'a> {
             .map(|value| (self.val(value).slot, value))
             .filter(|(slot, _)| !read.contains(slot))
             .collect::<BTreeMap<Slot, ValueId>>();
-        // Past an op, a slot it wrote is known as it was before it, as
-        // php's code generator sets the type of what an op writes only
-        // once the op's code, and the exits it takes, are done
-        // (`zend_jit_trace`'s `SET_STACK_TYPE` after each op).
-        let before = match draft.point {
-            Point::After(at) => self.snapshots.get(at.index()),
-            _ => None,
-        };
-        let as_before = |(slot, value): (Slot, ValueId)| match (before, self.val(value).def) {
-            (Some(before), Def::Op(def)) if Point::After(def) == draft.point => (before.values)
-                .iter()
-                .find(|(held, _)| *held == slot)
-                .copied(),
-            _ => Some((slot, value)),
-        };
+        // Past an op, a slot it wrote is known as nothing, which of the
+        // ways it went it wrote it on or not, as php sets `IS_UNKNOWN` for
+        // what an exit past a handler or a `JMPZ_EX` leaves there
+        // (`zend_jit_trace_handler`, `Z/ext/opcache/jit/zend_jit_ir.c:17267-17285`;
+        // `Z/ext/opcache/jit/zend_jit_trace.c:5707-5712`).
+        let wrote = |value: ValueId| matches!(self.val(value).def, Def::Op(def) if Point::After(def) == draft.point);
         let mut known: Vec<Known> = (snapshot.values.iter().copied())
-            .filter_map(as_before)
+            .filter(|(_, value)| !wrote(*value))
             .chain(entered)
             .filter(|(slot, _)| slot.frame == draft.frame)
             .filter_map(|(slot, value)| {
