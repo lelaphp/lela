@@ -392,6 +392,7 @@ mod touched {
 pub(crate) mod entered {
     use std::marker::PhantomData;
     use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     use php_engine::tier::{
         self, Extension, ExtensionBuilder, Fatal, Flow, FrameRef, Request, Site, Tier, Under,
@@ -521,22 +522,33 @@ pub(crate) mod entered {
 
     impl Plan for Stepping {
         fn body(req: &mut Request, frame: FrameRef, function: &[u8]) -> Option<Compiled> {
-            let func = tier::func(req, frame).and_then(super::super::engine_offset)?;
-            (function == b"f").then(|| {
-                let mut words = calling((wrapped::step as *const ()).addr(), 0, &[func], true);
-                words.extend([
-                    a64::unless_zero(2),
-                    a64::load_w0(STOOD_OPLINE),
-                    a64::over(1),
-                    a64::ABANDONED,
-                ]);
-                words.extend(a64::EPILOGUE);
-                compiled(
-                    &words,
-                    vec![landing(1, Landing::PLAIN), landing(2, Landing::PLAIN)],
-                )
-            })
+            stepping_through((wrapped::step as *const ()).addr(), req, frame, function)
         }
+    }
+
+    /// [`Stepping`]'s body for `f`, its step through the wrapper at
+    /// `wrapper`.
+    fn stepping_through(
+        wrapper: usize,
+        req: &mut Request,
+        frame: FrameRef,
+        function: &[u8],
+    ) -> Option<Compiled> {
+        let func = tier::func(req, frame).and_then(super::super::engine_offset)?;
+        (function == b"f").then(|| {
+            let mut words = calling(wrapper, 0, &[func], true);
+            words.extend([
+                a64::unless_zero(2),
+                a64::load_w0(STOOD_OPLINE),
+                a64::over(1),
+                a64::ABANDONED,
+            ]);
+            words.extend(a64::EPILOGUE);
+            compiled(
+                &words,
+                vec![landing(1, Landing::PLAIN), landing(2, Landing::PLAIN)],
+            )
+        })
     }
 
     #[test]
@@ -576,6 +588,29 @@ pub(crate) mod entered {
 
     kernels! { Request => mod numbered { number() -> Stood; } }
 
+    /// The `step` kernels the panic tests below crossed: counted where an
+    /// unwind leaves it, so a test can tell a panic that reached its
+    /// boundary across the `step` wrapper from one that reached it with no
+    /// such wrapper on the stack.
+    static STEPPED: AtomicU32 = AtomicU32::new(0);
+
+    /// As [`STEPPED`], the `handle` kernels.
+    static HANDLED: AtomicU32 = AtomicU32::new(0);
+
+    /// The `step` kernel, counted in [`STEPPED`].
+    fn counted_step(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<Stood, Fatal> {
+        STEPPED.fetch_add(1, Ordering::Relaxed);
+        super::super::step(req, on, func)
+    }
+
+    /// The `handle` kernel, counted in [`HANDLED`].
+    fn counted_handle(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<(), Fatal> {
+        HANDLED.fetch_add(1, Ordering::Relaxed);
+        super::super::handle(req, on, func)
+    }
+
+    kernels! { Request => mod counted { counted_step(func: u32) -> Stood; counted_handle(func: u32); } }
+
     /// `f`'s body, and `inner`'s, call the panicking kernel; `outer`'s
     /// calls the one that re-enters PHP into `inner`.
     struct Panicking;
@@ -592,10 +627,56 @@ pub(crate) mod entered {
         }
     }
 
+    /// `f`'s body steps its first opline, `echo $u` of a variable never
+    /// set, through a `step` wrapper as [`Stepping`]'s does, the one
+    /// [`STEPPED`] counts; the warning its handler raises calls the error
+    /// handler `h`, whose body calls the panicking kernel.
+    struct SteppingIntoAPanic;
+
+    impl Plan for SteppingIntoAPanic {
+        fn body(req: &mut Request, frame: FrameRef, function: &[u8]) -> Option<Compiled> {
+            match function {
+                b"f" => stepping_through(
+                    (counted::counted_step as *const ()).addr(),
+                    req,
+                    frame,
+                    function,
+                ),
+                b"h" => Panicking::body(req, frame, b"inner"),
+                _ => None,
+            }
+        }
+    }
+
+    /// As [`SteppingIntoAPanic`], with `f`'s first opline served through
+    /// a `handle` wrapper, the one [`HANDLED`] counts, its handler alone, and the body leaving
+    /// past it through exit 0.
+    struct HandlingIntoAPanic;
+
+    impl Plan for HandlingIntoAPanic {
+        fn body(req: &mut Request, frame: FrameRef, function: &[u8]) -> Option<Compiled> {
+            match function {
+                b"f" => {
+                    let func = tier::func(req, frame).and_then(super::super::engine_offset)?;
+                    let kernel = (counted::counted_handle as *const ()).addr();
+                    let words = answering(calling(kernel, 0, &[func], false), 0);
+                    Some(compiled(&words, vec![landing(1, Landing::PLAIN)]))
+                }
+                b"h" => Panicking::body(req, frame, b"inner"),
+                _ => None,
+            }
+        }
+    }
+
     /// What reached the request's boundary: the payload of the one panic
     /// that did, or what it wrote where none did.
     fn boundary(program: &str) -> Result<String, String> {
-        catch_unwind(AssertUnwindSafe(|| served::<Panicking>(program).0)).map_err(|payload| {
+        boundary_of::<Panicking>(program)
+    }
+
+    /// [`boundary`] under `P`'s bodies.
+    fn boundary_of<P: Plan>(program: &str) -> Result<String, String> {
+        catch_unwind(AssertUnwindSafe(|| served::<P>(program).0)).map_err(|payload| {
             payload
                 .downcast_ref::<&str>()
                 .map_or_else(|| "another payload".to_owned(), |s| (*s).to_owned())
@@ -625,6 +706,46 @@ pub(crate) mod entered {
             Err("the kernel panicked".to_owned())
         );
     }
+
+    /// The `step` kernel's crossing (#4087): a panic under the handler a
+    /// step serves, here in a trace of the error handler its warning
+    /// calls, is kept by that trace's wrapper, resumed by its `enter`
+    /// through the handler, caught at the `step` wrapper, and resumed by
+    /// `f`'s `enter`: one panic, the inner payload, at the boundary, and
+    /// the `step` wrapper crossed once on its way. A `step_held` reached
+    /// from `push_call` or from `call_held`'s fallbacks runs inside the
+    /// same wrapper's guard and is not crossed here.
+    #[test]
+    fn a_panic_under_a_stepped_handler_reaches_the_boundary_once() {
+        assert_eq!(
+            boundary_of::<SteppingIntoAPanic>(UNDEFINED_ECHO),
+            Err("the kernel panicked".to_owned())
+        );
+        assert_eq!(
+            STEPPED.load(Ordering::Relaxed),
+            1,
+            "the panic crossed the step wrapper"
+        );
+    }
+
+    /// The `handle` kernel's crossing, as the `step` kernel's above.
+    #[test]
+    fn a_panic_under_a_handled_opline_reaches_the_boundary_once() {
+        assert_eq!(
+            boundary_of::<HandlingIntoAPanic>(UNDEFINED_ECHO),
+            Err("the kernel panicked".to_owned())
+        );
+        assert_eq!(
+            HANDLED.load(Ordering::Relaxed),
+            1,
+            "the panic crossed the handle wrapper"
+        );
+    }
+
+    /// `f`, whose first opline echoes a variable never set, under the
+    /// error handler `h`.
+    const UNDEFINED_ECHO: &str = r#"function h() { echo "h"; return true; } set_error_handler('h');
+        function f() { echo $u; echo "after"; } f(); echo "end";"#;
 
     /// `f` stepped by the plan to its `FETCH_DIM_R` over a temporary
     /// array holding the one `D`, and a body that leaves at once through a

@@ -40,7 +40,7 @@ pub use crate::api::raising::Thrown;
 use crate::api::values::Value;
 use crate::observer::{Declared, ObservedOpcodes, OnThrow, Telling, Untold};
 use crate::{exec, interrupt};
-use php_unit::{OpArray, OperandKind};
+use php_unit::{OpArray, OperandKind, OplineIdx};
 
 pub use crate::api::request::Request;
 use crate::api::request::TierStatus;
@@ -1836,7 +1836,8 @@ fn unwind_frame<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, 
 pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     let serving = exec::standing(req, frame)?;
     let code = exec::serving_code(&serving, frame)?;
-    match stepped_over(req, frame, code)? {
+    let at = req.vm().opline(frame);
+    match stepped_over(req, frame, code, at)? {
         Stepped::Pushed(callee) => {
             let serving = exec::standing(req, callee)?;
             let code = exec::serving_code(&serving, callee)?;
@@ -1846,45 +1847,63 @@ pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     }
 }
 
-/// [`step`] over `held`, the op array a holder holds for `frame`, as
-/// compiled code steps an opline of the op array its trace recorded: no
-/// share of a unit is taken and the frame's function is not looked up
-/// (`jit-design.md` §5.2, #3147). A frame the handler pushed is activated
-/// over the op array `epoch`, the epoch the holder holds `held` in,
-/// holds for it, and over a share of its unit where the epoch holds none,
-/// a request's.
+/// [`step`] of the opline at `at` over `held`, the op array a holder
+/// holds for `frame`, as compiled code steps an opline of the op array
+/// its trace recorded: `frame` stood at `at` first, php's
+/// `SAVE_OPLINE()`, and the handler handed `at` as compiled code holds
+/// it, with no read of it back; no share of a unit is taken and the
+/// frame's function is not looked up (`jit-design.md` §5.2, #3147). A
+/// frame the handler pushed is activated over the op array `epoch`, the
+/// epoch the holder holds `held` in, holds for it, and over a share of
+/// its unit where the epoch holds none, a request's. Inlined into the
+/// kernel that calls it, so a crossing makes one call, the handler's
+/// (#4087).
+#[inline]
 pub fn step_held(
     req: &mut Request,
     frame: FrameRef,
+    at: OplineIdx,
     held: Held<'_>,
     epoch: &Epoch,
 ) -> Result<Stepped, Fatal> {
-    match stepped_over(req, frame, held.code())? {
-        Stepped::Pushed(callee) => {
-            if let Some(code) = func(req, callee).and_then(|f| epoch.held(f)) {
-                return activated_over(req, callee, code.code());
-            }
-            let serving = exec::standing(req, callee)?;
-            let code = exec::serving_code(&serving, callee)?;
-            activated_over(req, callee, code)
-        }
+    req.vm_mut().stand(frame, at.0);
+    match stepped_over(req, frame, held.code(), at.0)? {
+        Stepped::Pushed(callee) => pushed_over(req, callee, epoch),
         stepped => Ok(stepped),
     }
 }
 
-/// The handler of the opline `frame` stands at in `held`, one that goes
-/// on at an opline of its own frame or throws there, served as php's
-/// compiled code calls such an opline's handler directly
-/// (`zend_jit_handler`, `Z/ext/opcache/jit/zend_jit_ir.c:4120-4157`):
+/// A callee [`step_held`]'s handler pushed, activated over the op array
+/// `epoch` holds for it, or over a share of its unit where it holds
+/// none: out of line, as a step that pushes a frame is the rare one.
+#[inline(never)]
+fn pushed_over(req: &mut Request, callee: FrameRef, epoch: &Epoch) -> Result<Stepped, Fatal> {
+    if let Some(code) = func(req, callee).and_then(|f| epoch.held(f)) {
+        return activated_over(req, callee, code.code());
+    }
+    let serving = exec::standing(req, callee)?;
+    let code = exec::serving_code(&serving, callee)?;
+    activated_over(req, callee, code)
+}
+
+/// The handler of the opline at `at` in `held`, one that goes on at an
+/// opline of its own frame or throws there, served as php's compiled
+/// code calls such an opline's handler directly (`zend_jit_handler`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:4120-4157`): `frame` stood at `at`,
 /// one dispatch, the frame stood where the handler went on, and nothing
 /// [`step_held`] reads past it. No observer is told: a tier runs only
 /// where no opcode but `BEGIN_SILENCE` and `END_SILENCE` is observed
 /// (`jit-design.md` §4.3), and compiled code steps those. A handler that
 /// went anywhere else, a frame it pushed or popped, is an internal error,
 /// which no opline compiled code hands here reaches.
-pub fn dispatch_held(req: &mut Request, frame: FrameRef, held: Held<'_>) -> Result<(), Fatal> {
-    let code = held.code();
-    let at = req.vm().opline(frame);
+pub fn dispatch_held(
+    req: &mut Request,
+    frame: FrameRef,
+    at: OplineIdx,
+    held: Held<'_>,
+) -> Result<(), Fatal> {
+    let (code, at) = (held.code(), at.0);
+    req.vm_mut().stand(frame, at);
     let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
     let next = dispatch::dispatch::<Nop>(req, frame, code, op, at)?;
     #[cfg(debug_assertions)]
@@ -2104,14 +2123,14 @@ pub fn call_held(
     let flagged = match op.opcode {
         php_unit::Opcode::DoUcall => false,
         php_unit::Opcode::DoFcall | php_unit::Opcode::DoFcallByName => true,
-        _ => return step_held(req, frame, held, epoch),
+        _ => return step_held(req, frame, OplineIdx(at), held, epoch),
     };
     if Declared::of(req).tells(op.opcode) {
-        return step_held(req, frame, held, epoch);
+        return step_held(req, frame, OplineIdx(at), held, epoch);
     }
     let returns_to = (op.out_type != php_unit::OperandKind::Unused).then_some(op.out);
     let Some(pushed) = req.enter_call(returns_to, (frame, at), flagged) else {
-        return step_held(req, frame, held, epoch);
+        return step_held(req, frame, OplineIdx(at), held, epoch);
     };
     // The callee the trace recorded, as its `INIT_*` guarded it; any
     // other is served from its unit.
@@ -2123,11 +2142,18 @@ pub fn call_held(
     activated_over(req, pushed, code)
 }
 
-/// The one handler at `frame`'s opline over `code`, with `Nop` at the
-/// safepoints, the observers told as the loop tells them ([`step`]).
-#[inline]
-fn stepped_over(req: &mut Request, frame: FrameRef, code: &OpArray) -> Result<Stepped, Fatal> {
-    let at = req.vm().opline(frame);
+/// The one handler at `frame`'s opline, `at`, over `code`, with `Nop`
+/// at the safepoints, the observers told as the loop tells them
+/// ([`step`]). Out of line, one copy of the dispatch for every caller:
+/// [`step_held`] is inlined into the tier's kernels, and this with it
+/// would be a second copy of the whole `match` in theirs (#4087).
+#[inline(never)]
+fn stepped_over(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    at: u32,
+) -> Result<Stepped, Fatal> {
     let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
     crate::observer::tell_before(req, frame, op.opcode);
     let next = dispatch::dispatch::<Nop>(req, frame, code, op, at)?;

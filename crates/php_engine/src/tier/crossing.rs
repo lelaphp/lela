@@ -57,11 +57,22 @@ pub fn laid(req: &Request, f: FuncRef) -> bool {
 }
 
 /// The frame whose room is at `room` ([`room`]), looked for from the
-/// innermost down, where the frames compiled code runs in stand.
+/// innermost down, where the frames compiled code runs in stand. The
+/// top is asked first, where a kernel's frame stands unless a call is
+/// under way over it, with no bounds check or index conversion of the
+/// walk's (#4087); the walk visits the same frames in the same order,
+/// so what is found is what it found, and it costs the frames above the
+/// one found, not the stack's depth.
 #[must_use]
+#[inline]
 pub fn at_room(req: &Request, room: NonNull<u8>) -> Option<FrameRef> {
     let stack = &req.vm().stack;
     let slots = room.addr().get().checked_add(ROOM_BYTES)?;
+    if let Some((top, frame)) = stack.top()
+        && frame.slots().as_ptr().addr() == slots
+    {
+        return Some(top);
+    }
     (0..stack.len())
         .rev()
         .find(|&at| {
