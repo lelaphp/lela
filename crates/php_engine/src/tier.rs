@@ -2155,7 +2155,7 @@ fn stepped_over(
     at: u32,
 ) -> Result<Stepped, Fatal> {
     let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
-    crate::observer::tell_before(req, frame, op.opcode);
+    crate::observer::tell_before(req, frame, at, op.opcode);
     let next = dispatch::dispatch::<Nop>(req, frame, code, op, at)?;
     #[cfg(debug_assertions)]
     req.sensed_after(code, op)?;
