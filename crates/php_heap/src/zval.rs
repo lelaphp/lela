@@ -269,45 +269,70 @@ pub(crate) struct WeakMarks {
 /// pointer to a refcounted value or to a slot in place. A pointer is kept
 /// as a pointer, its provenance with it, so a value read back out of a
 /// zval reaches its block through the pointer that was stored and never
-/// through an integer (#2528, #2441). Which of the two a word holds is
-/// the zval's type byte's to say; the word itself does not know.
+/// through an integer (#2528, #2441); bits are kept as a pointer with no
+/// provenance, `ptr::without_provenance_mut`, and read back as its
+/// address. Which of the two a word holds is the zval's type byte's to
+/// say; the word itself does not know.
+///
+/// One pointer and not a union of a `u64` and a pointer: a union is an
+/// aggregate to rustc, so a [`Zval`] over one was passed by a pointer to
+/// a copy and returned through memory, where a zval over a scalar word is
+/// a pair of scalars, passed and returned in two registers (#4084).
+///
+/// Every bit pattern is a word, the ones no allocation could be at among
+/// them: a long whose top bit is set, and a double's sign, infinity and
+/// NaN, each kept and read back by its bits.
+///
+/// ```php
+/// $a = [PHP_INT_MIN => -0.0, -1 => NAN, 2 => -INF];
+/// var_dump($a, PHP_INT_MIN === array_key_first($a));
+/// ```
+/// ```expect
+/// array(3) {
+///   [-9223372036854775808]=>
+///   float(-0)
+///   [-1]=>
+///   float(NAN)
+///   [2]=>
+///   float(-INF)
+/// }
+/// bool(true)
+/// ```
 #[derive(Clone, Copy)]
-#[repr(C)]
-pub(crate) union Word {
-    bits: u64,
-    pointer: *mut u8,
-}
+#[repr(transparent)]
+pub(crate) struct Word(*mut u8);
+
+// The word is one pointer-sized scalar on the 64-bit targets the design
+// names, so its bits are a `u64` and an address both.
+const _: () = assert!(std::mem::size_of::<usize>() == std::mem::size_of::<u64>());
 
 impl Word {
     /// A word of `bits`, no pointer among them.
     pub(crate) const fn bits(bits: u64) -> Word {
-        Word { bits }
+        #[allow(clippy::cast_possible_truncation)] // a `usize` is a `u64`'s width, asserted above
+        Word(std::ptr::without_provenance_mut(bits as usize))
     }
 
     /// A word holding `at`, provenance and all.
     pub(crate) const fn pointer<T>(at: NonNull<T>) -> Word {
-        Word {
-            pointer: at.as_ptr().cast(),
-        }
+        Word(at.as_ptr().cast())
     }
 
     /// The word's bits: a scalar's payload, or a pointer's address with
     /// its provenance left behind.
-    pub(crate) const fn as_bits(self) -> u64 {
-        // SAFETY: every bit pattern of the eight bytes is a `u64`, and a
-        // pointer's bytes read as one are its address alone, as `addr`
-        // reads it.
-        unsafe { self.bits }
+    pub(crate) fn as_bits(self) -> u64 {
+        self.0.addr() as u64
     }
 
     /// The pointer [`Word::pointer`] stored, none for a null word.
     ///
     /// # Safety
     ///
-    /// The word was made by [`Word::pointer`] from a pointer to a `T`.
+    /// The word was made by [`Word::pointer`] from a pointer to a `T`:
+    /// the pointer is handed back as a `T`'s on the caller's word, which
+    /// the word itself cannot check.
     pub(crate) unsafe fn as_pointer<T>(self) -> Option<NonNull<T>> {
-        // SAFETY: the word holds a pointer, by the contract.
-        NonNull::new(unsafe { self.pointer }.cast())
+        NonNull::new(self.0.cast())
     }
 }
 
@@ -700,7 +725,7 @@ impl Zval {
 
     /// The payload of a `Long`, else `None`.
     #[must_use]
-    pub const fn as_long(self) -> Option<i64> {
+    pub fn as_long(self) -> Option<i64> {
         match self.kind() {
             ZvalType::Long => Some(self.value.as_bits().cast_signed()),
             _ => None,
@@ -709,7 +734,7 @@ impl Zval {
 
     /// The payload of a `Double`, else `None`.
     #[must_use]
-    pub const fn as_double(self) -> Option<f64> {
+    pub fn as_double(self) -> Option<f64> {
         match self.kind() {
             ZvalType::Double => Some(f64::from_bits(self.value.as_bits())),
             _ => None,

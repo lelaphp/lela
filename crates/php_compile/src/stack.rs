@@ -90,6 +90,18 @@ enum Allowed {
     Detected { span: usize },
 }
 
+/// What [`StackLimit::passed`] found the calling frame had come down
+/// to: the limit, php's own refusal, or the floor alone, below a limit
+/// that stands deeper or is not set, where php would go on to the
+/// thread's end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Passed {
+    /// The limit, `zend_call_stack_overflowed(EG(stack_limit))`.
+    Limit,
+    /// The floor, the limit not.
+    Floor,
+}
+
 /// Where [`StackLimit::reentered`] or [`StackLimit::nested`] found the
 /// limit, which [`StackLimit::left`] puts back once the serving or the
 /// scope it began is over.
@@ -411,7 +423,27 @@ impl StackLimit {
     /// never runs a walk to the thread's end. `var_dump()`'s rows ask it.
     #[must_use]
     pub fn refuses_a_level(&self) -> bool {
-        self.overflowed() || self.exhausted()
+        self.passed().is_some()
+    }
+
+    /// Which of the two the calling frame has come down to, the limit
+    /// before the floor, both read against one position. Asked as
+    /// [`overflowed`](Self::overflowed) and then
+    /// [`exhausted`](Self::exhausted) from two frames, the second deeper,
+    /// a frame that stands above the limit and below the floor where the
+    /// two are one address (under detect) would be the floor's, by as
+    /// much as the second frame is deeper; read once, a frame past them
+    /// is the limit's wherever its frames reach (#4084).
+    #[must_use]
+    pub fn passed(&self) -> Option<Passed> {
+        let here = position();
+        if here <= self.limit {
+            Some(Passed::Limit)
+        } else if here <= self.floor {
+            Some(Passed::Floor)
+        } else {
+            None
+        }
     }
 
     /// The stack's base less its floor, the size a walk held to the
@@ -498,6 +530,24 @@ mod tests {
         assert!(small.floor < small.limit);
         assert!(!small.exhausted());
         assert_eq!(small.floor_size(), detect.max_stack_size());
+    }
+
+    /// A frame past a limit and a floor that are one address is the
+    /// limit's, and past a floor above a limit that stands deeper, or
+    /// is not set, the floor's.
+    #[test]
+    fn a_frame_past_both_is_the_limits() {
+        let past = |limit, floor| StackLimit {
+            base: usize::MAX,
+            limit,
+            floor,
+            allowed: Allowed::Fixed,
+        };
+        assert_eq!(past(usize::MAX, usize::MAX).passed(), Some(Passed::Limit));
+        assert_eq!(past(0, usize::MAX).passed(), Some(Passed::Floor));
+        assert_eq!(past(0, 0).passed(), None);
+        assert_eq!(StackLimit::UNCHECKED.passed(), None);
+        assert!(past(0, usize::MAX).refuses_a_level());
     }
 
     /// Detect on a test thread leaves room for a frame, and a size a

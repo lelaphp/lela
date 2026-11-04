@@ -13,6 +13,7 @@ use crate::api::abi::{Beneath, chain};
 use crate::api::call::write_prop;
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Value, adopted};
+use php_compile::Passed;
 
 /// php's error levels, `E_*`: the unit's, since a compile-time
 /// diagnostic is recorded on the unit at one of them and raised here
@@ -906,6 +907,24 @@ pub fn call_stack_end(req: &mut Request) -> Result<(), Thrown> {
         return Ok(());
     }
     Err(call_stack_size_error(req, stack.floor_size()))
+}
+
+/// What a walk php guards with a refusal of its own asks at each level,
+/// where that refusal is not an `Error` (`debug_zval_dump()`'s `nesting
+/// level too deep`): `true` past the limit, where the walk's refusal
+/// stands in for the level, and [`call_stack_end`]'s `Error` past the
+/// floor alone. The two are read against one position
+/// (`php_compile::StackLimit::passed`), so where they stand together,
+/// under detect, a level past them is php's refusal and never the
+/// floor's `Error`, however the frames between two questions would have
+/// fallen (#4084).
+pub fn call_stack_refuses(req: &mut Request) -> Result<bool, Thrown> {
+    let stack = req.stack_limit();
+    match stack.passed() {
+        None => Ok(false),
+        Some(Passed::Limit) => Ok(true),
+        Some(Passed::Floor) => Err(call_stack_size_error(req, stack.floor_size())),
+    }
 }
 
 /// `execute_ex`'s own check at the loop's entry, the one a native's call
