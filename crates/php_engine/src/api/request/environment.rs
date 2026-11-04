@@ -61,6 +61,8 @@ pub(super) struct EnvironmentState {
     /// `LC_CTYPE` name while it is not `C` (revision 56).
     locale_names: Vec<(usize, Vec<u8>)>,
     ctype_locale: Option<Vec<u8>>,
+    /// `BG(putenv_ht)`: each name `putenv()` set and what it held before.
+    putenv_ht: Vec<(Vec<u8>, Option<Vec<u8>>)>,
     /// `sapi_get_request_time`: when the request started, since the
     /// epoch. The host keeps no time of its own, so it is the moment the
     /// request is made, as `php_time()` makes it.
@@ -75,6 +77,7 @@ impl EnvironmentState {
             umask: 0o022,
             locale_names: Vec::new(),
             ctype_locale: None,
+            putenv_ht: Vec::new(),
             started: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default(),
@@ -338,13 +341,34 @@ impl<'r> Environment<&'r Request> {
     }
 }
 
+/// `putenv(3)` and `unsetenv(3)` over the environment: a name set keeps
+/// its slot, and a new one goes last.
+fn put_env(env: &mut Vec<(Vec<u8>, Vec<u8>)>, name: &[u8], value: Option<&[u8]>) {
+    let at = env.iter().position(|(n, _)| n == name);
+    match (at, value) {
+        (Some(at), Some(value)) => value.clone_into(&mut env[at].1),
+        (None, Some(value)) => env.push((name.to_vec(), value.to_vec())),
+        (_, None) => env.retain(|(n, _)| n != name),
+    }
+}
+
 impl Environment<&mut Request> {
-    /// `putenv()`: set, or unset with `None`.
+    /// `PHP_FUNCTION(putenv)`: set, or unset with `None`, as php does it
+    /// (`Z/ext/standard/basic_functions.c:758`): a name `putenv()` set
+    /// before gets back what it held first, `php_putenv_destructor`, and
+    /// what it holds then is kept for the next time. So a name the process
+    /// started with keeps its place in `environ` and one `putenv()` made
+    /// goes last again, which `getenv()` and a child's `envp` show.
     pub fn set_env(self, name: &[u8], value: Option<&[u8]>) -> bool {
-        self.0.description.env.retain(|(n, _)| n.as_slice() != name);
-        if let Some(value) = value {
-            self.0.description.env.push((name.to_vec(), value.to_vec()));
+        let env = &mut self.0.description.env;
+        let putenv_ht = &mut self.0.environment.putenv_ht;
+        if let Some(at) = putenv_ht.iter().position(|(n, _)| n == name) {
+            let (_, previous) = putenv_ht.remove(at);
+            put_env(env, name, previous.as_deref());
         }
+        let previous = env.iter().find(|(n, _)| n == name);
+        putenv_ht.push((name.to_vec(), previous.map(|(_, v)| v.clone())));
+        put_env(env, name, value);
         true
     }
 
