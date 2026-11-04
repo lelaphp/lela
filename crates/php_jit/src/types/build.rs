@@ -1529,7 +1529,14 @@ impl<'a> Builder<'a> {
             Form::Step => may_throw,
         };
         if throws {
-            let unwind = draft(Point::After(idx), frame, At::Opline(at));
+            // A NAN's warning leaves at its call, before the op writes its
+            // boolean; every other throw an inline op has is past its write.
+            let point = if form == Form::Inline && takes_truth(op.opcode) {
+                Point::Before(idx)
+            } else {
+                Point::After(idx)
+            };
+            let unwind = draft(point, frame, At::Opline(at));
             self.leaves.push((idx, Leaves::Thrown, unwind));
         }
     }

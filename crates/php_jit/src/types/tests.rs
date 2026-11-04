@@ -268,6 +268,36 @@ fn a_jump_that_writes_a_boolean_leaves_past_it_and_knows_no_type_of_it() -> Resu
     Ok(())
 }
 
+/// A NAN's warning runs the error handler, and what it throws leaves the
+/// compiled code at that call, before the op writes its boolean, so the
+/// unwind stores the slots as they stood before the op and no boolean
+/// reaches a temporary that is not live at that opline.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_nans_warning_unwinds_before_the_boolean_is_written() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($n) { $s = 0; for ($i = 1; $i < $n; $i++) { $f = $i * 1.5; $b = (bool)$f; $s += $b ? 1 : 2; } return $s; }
+        echo f(9), \"\\n\";",
+    )?;
+    let line = (ir.ops.iter())
+        .find_map(|op| match op {
+            Op::Line(line) if line.opcode == Opcode::Bool => Some(line),
+            _ => None,
+        })
+        .ok_or("no BOOL")?;
+    let out = line.out.ok_or("BOOL writes no boolean")?;
+    let slot = ir.values[out.0 as usize].slot;
+    let unwind = line.unwind.ok_or("a double's truth may warn")?;
+    let stores = &ir.unwinds[usize::from(unwind.0)].stores;
+    assert!(
+        !stores.iter().any(|store| store.slot == slot),
+        "{}",
+        dump::render(&ir)
+    );
+    Ok(())
+}
+
 /// A `foreach` over a packed array is fetched inline, as php's
 /// `zend_jit_fe_fetch` compiles it, and writes its key as a long, as php's
 /// inference types what `FE_FETCH_R` writes from the array's layout, so
