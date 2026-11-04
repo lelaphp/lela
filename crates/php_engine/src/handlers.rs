@@ -6264,23 +6264,13 @@ fn static_method(
     }
     let function = match req.symbols().method_named(class, lowered) {
         Some(function) if req.method_accessible(function) => function,
-        Some(function) => {
-            if let Some(trampoline) = req.static_trampoline(class, name, this) {
-                trampoline
-            } else {
+        found => match (req.static_trampoline(class, name, this), found) {
+            (Some(trampoline), _) => trampoline,
+            (None, Some(function)) => {
                 req.check_method_access(function, name)?;
                 function
             }
-        }
-        None => match req.static_trampoline(class, name, this) {
-            Some(trampoline) => trampoline,
-            None => {
-                return Err(undefined_method(
-                    req,
-                    class,
-                    written.as_str_bytes().unwrap_or_default(),
-                ));
-            }
+            (None, None) => return Err(undefined_method(req, class, name)),
         },
     };
     let never_cached = req.never_cached(function);
@@ -13249,6 +13239,43 @@ fn nulled_out(req: &mut Request, frame: FrameRef, op: &Opline, thrown: Thrown) -
     thrown
 }
 
+/// A throwable over what `ran_on` left pending, `FREE_OP_DATA` and the
+/// `null` of the temporary served under it, as `zend_throw_error` from
+/// the middle of an assignment leaves them.
+fn data_thrown(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    data: Opline,
+    (thrown, ran_on): (Thrown, Option<PhpObject>),
+) -> Thrown {
+    let thrown = req.raised_over(thrown, ran_on);
+    req.free_pending(thrown, |req| {
+        exec::free_operand(req, frame, data.op1_type, data.op1);
+        write_out(req, frame, op, &Value::null());
+    })
+}
+
+/// The end of `ASSIGN_DIM` and `ASSIGN_DIM_OP`: both operands freed, and
+/// on past the `OP_DATA`, or [`data_thrown`] and the [`threw`] edge.
+fn dim_written(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    data: Opline,
+    (written, ran_on): (Result<(), Thrown>, Option<PhpObject>),
+) -> Edge {
+    exec::free_operand(req, frame, op.op2_type, op.op2);
+    exec::free_operand(req, frame, op.op1_type, op.op1);
+    match written {
+        Ok(()) => Ok(advance_over_data(req, frame)),
+        Err(thrown) => {
+            let thrown = data_thrown(req, frame, op, data, (thrown, ran_on));
+            threw(req, frame, &thrown)
+        }
+    }
+}
+
 /// `assign_dim_error` past a place that is gone: `FREE_OP_DATA` and `null`
 /// in the temporary.
 fn data_gone(req: &mut Request, frame: FrameRef, op: &Opline, data: Opline) -> Result<(), Thrown> {
@@ -15720,22 +15747,16 @@ fn assign_property(
     // place only through `zend_std_write_property`'s cache.
     let lazy = object.heap().laziness() != php_heap::Laziness::Eager;
     let place = if lazy || object.handlers(req).write_overloaded() {
-        PropertyPlace::Handlers
+        Ok(PropertyPlace::Handlers)
     } else {
-        match place_of(req, object, bytes) {
-            Ok(place) => place,
-            Err(thrown) => {
-                req.release(value);
-                return Ok(Err(thrown));
-            }
-        }
+        place_of(req, object, bytes)
     };
-    let placed = match place {
+    let placed = place.and_then(|place| match place {
         // `zobj->handlers->write_property`: the class serves the name,
         // declared or not, so the write is its handler's, as a name no
         // class declared is; php's `ASSIGN_OBJ` asks no place, so one the
         // class keeps apart is its `write_property`'s too.
-        PropertyPlace::Handlers | PropertyPlace::Apart => None,
+        PropertyPlace::Handlers | PropertyPlace::Apart => Ok(None),
         // `zend_get_property_offset(ce, name, ce->__set != NULL, ...)`:
         // a class with a `__set` places the name quietly, so a property
         // the scope may not reach reaches `write_property` and the
@@ -15743,13 +15764,14 @@ fn assign_property(
         // guard stands.
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), crate::api::request::Accessor::Set);
-            match req.declared_slot_for_write(object, bytes, "modify", silent) {
-                Ok(placed) => placed,
-                Err(thrown) => {
-                    req.release(value);
-                    return Ok(Err(thrown));
-                }
-            }
+            req.declared_slot_for_write(object, bytes, "modify", silent)
+        }
+    });
+    let placed = match placed {
+        Ok(placed) => placed,
+        Err(thrown) => {
+            req.release(value);
+            return Ok(Err(thrown));
         }
     };
     match placed {
@@ -17587,19 +17609,7 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
         Ok(Container::Gone) => data_gone(req, frame, op, data),
         Err(thrown) => Err(thrown),
     };
-    if op.op2_type != OperandKind::Unused {
-        exec::free_operand(req, frame, op.op2_type, op.op2);
-    }
-    exec::free_operand(req, frame, op.op1_type, op.op1);
-    if let Err(thrown) = written {
-        let thrown = req.raised_over(thrown, ran_on);
-        let thrown = req.free_pending(thrown, |req| {
-            exec::free_operand(req, frame, data.op1_type, data.op1);
-            write_out(req, frame, op, &Value::null());
-        });
-        return threw(req, frame, &thrown);
-    }
-    Ok(advance_over_data(req, frame))
+    dim_written(req, frame, op, data, (written, ran_on))
 }
 
 /// The value `$a[] = $v` appends, read as `ZEND_ASSIGN_DIM` reads it
@@ -18181,19 +18191,7 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
         Ok(Container::Gone) => data_gone(req, frame, op, data),
         Err(thrown) => Err(thrown),
     };
-    if op.op2_type != OperandKind::Unused {
-        exec::free_operand(req, frame, op.op2_type, op.op2);
-    }
-    exec::free_operand(req, frame, op.op1_type, op.op1);
-    if let Err(thrown) = written {
-        let thrown = req.raised_over(thrown, ran_on);
-        let thrown = req.free_pending(thrown, |req| {
-            exec::free_operand(req, frame, data.op1_type, data.op1);
-            write_out(req, frame, op, &Value::null());
-        });
-        return threw(req, frame, &thrown);
-    }
-    Ok(advance_over_data(req, frame))
+    dim_written(req, frame, op, data, (written, ran_on))
 }
 
 /// The kernel over what one place holds and the `OP_DATA`'s value, and
@@ -18609,12 +18607,7 @@ pub(crate) fn assign_obj_op<T: Tier>(
             let ran_on = req.pending();
             let name = name.as_str_bytes().unwrap_or_default();
             let thrown = crate::api::raising::non_object_error(req, "assign", name, &container);
-            let thrown = req.raised_over(thrown, ran_on);
-            let thrown = req.free_pending(thrown, |req| {
-                exec::free_operand(req, frame, data.op1_type, data.op1);
-                write_out(req, frame, op, &Value::null());
-            });
-            Err(thrown)
+            Err(data_thrown(req, frame, op, data, (thrown, ran_on)))
         }
         (Err(thrown), _) => {
             exec::free_operand(req, frame, data.op1_type, data.op1);
