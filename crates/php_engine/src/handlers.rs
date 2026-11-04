@@ -6415,7 +6415,32 @@ fn static_call_named(
 /// whether it takes `$this`, which the cache slot holds beside it and
 /// a pass that looked it up read once ([`Request::takes_this`]), and the
 /// push the slot after it keeps, which the frame is pushed with where
-/// there is one ([`push_method_call`]).
+/// there is one ([`push_method_call`]). The calling frame's `$this` is
+/// read in those two arms alone, as php tests `Z_TYPE(EX(This))` nowhere
+/// else: a static callee named through its class takes neither it nor
+/// the caller's called scope, in a method or out of one, and only `self`
+/// and `parent` forward them.
+///
+/// ```php
+/// class P { static function who() { return static::class; }
+///     function viaName() { return P::who(); }
+///     function viaSelf() { return self::who(); }
+///     function inst() { return get_class($this); }
+///     function viaInstance() { return P::inst(); } }
+/// class C extends P {
+///     function up() { return parent::who(); }
+///     static function st() { return self::who() . P::who(); } }
+/// class Other { function call() { return P::inst(); } }
+/// $c = new C;
+/// echo P::who(), $c->viaName(), $c->viaSelf(), $c->up(), C::st(), $c->viaInstance(), "\n";
+/// try { (new Other)->call(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { P::inst(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// PPCCCPC
+/// Non-static method P::inst() cannot be called statically
+/// Non-static method P::inst() cannot be called statically
+/// ```
 fn static_call_frame(
     req: &mut Request,
     frame: FrameRef,
@@ -6433,9 +6458,11 @@ fn static_call_frame(
     // of the class, and is php's `Error` otherwise; a static one called
     // through `self` or `parent` forwards the calling frame's called
     // scope, `Z_OBJCE(EX(This))` or `Z_CE(EX(This))`.
-    let receiver = req.vm().this(frame);
     let (this, called) = if instance {
-        let Some(this) = receiver.filter(|this| req.symbols().instance_of(this.class(), class))
+        let Some(this) = req
+            .vm()
+            .this(frame)
+            .filter(|this| req.symbols().instance_of(this.class(), class))
         else {
             let thrown = non_static_method_call(req, function);
             return threw(req, frame, &thrown);
@@ -6449,9 +6476,12 @@ fn static_call_frame(
             FETCH_CLASS_SELF | FETCH_CLASS_PARENT
         )
     {
-        let forwarded = receiver
-            .map(|this| this.class())
-            .or_else(|| req.vm().at(frame).and_then(exec::Header::called_scope));
+        let forwarded = req.vm().at(frame).and_then(|caller| {
+            caller
+                .this()
+                .map(|this| this.class())
+                .or_else(|| caller.called_scope())
+        });
         (None, forwarded.unwrap_or(class))
     } else {
         (None, class)
