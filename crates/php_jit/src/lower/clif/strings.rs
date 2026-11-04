@@ -258,7 +258,7 @@ impl Emit<'_> {
 
     /// `EX(opline) = opline`, php's `SAVE_OPLINE()`, written in place
     /// before a kernel that may raise reads where the frame stands.
-    fn save_opline(&mut self, line: &Line) -> Result<(), Abort> {
+    pub(super) fn save_opline(&mut self, line: &Line) -> Result<(), Abort> {
         let room = self.room(line.frame)?;
         let opline = self.b.ins().iconst(I32, i64::from(line.opline.0));
         self.b.ins().store(trusted(), opline, room, EX_OPLINE);

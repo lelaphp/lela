@@ -592,6 +592,15 @@ impl Emit<'_> {
         })
     }
 
+    /// The two words of the key `line`'s `op2` names, as a kernel that
+    /// reads it as a zval takes them.
+    pub(super) fn key_words(&mut self, at: OpId, line: &Line) -> Result<(Value, Value), Abort> {
+        Ok(match self.key_of(at, line)? {
+            Key::Long { word, .. } => (word, self.b.ins().iconst(I32, tag(ZvalType::Long))),
+            Key::Zval { word, info, .. } => (word, info),
+        })
+    }
+
     /// A read of an array's element by a long or a string key, php's
     /// `zend_jit_fetch_dim_read` under `BP_VAR_R` as its tracing tier takes it
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:12513-12700`): a key the array has

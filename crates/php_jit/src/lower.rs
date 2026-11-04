@@ -796,11 +796,18 @@ pub(crate) enum Kernel {
     /// error handler throws is the status's
     /// (`php_engine::tier::nan_to_bool`).
     NanToBool,
+    /// `str_offset(cx, frame, opline: u32, text: u64, key: u64, key_info:
+    /// u32, read: *mut Zval)`: the byte of the string at `text` the zval
+    /// `key` names, php's `zend_jit_fetch_dim_str_offset_r_helper` and
+    /// `zend_jit_fetch_dim_str_r_helper`
+    /// (`php_engine::tier::string_offset`); a key refused is a throwable
+    /// pending, answered as one.
+    StrOffset,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 22] = [
+    pub(crate) const ALL: [Kernel; 23] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
@@ -823,6 +830,7 @@ impl Kernel {
         Kernel::PopCall,
         Kernel::Interrupt,
         Kernel::NanToBool,
+        Kernel::StrOffset,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

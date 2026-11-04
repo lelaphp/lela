@@ -231,3 +231,4 @@ tier::rope_end
 tier::rope_open
 tier::rope_push
 tier::step_held
+tier::string_offset

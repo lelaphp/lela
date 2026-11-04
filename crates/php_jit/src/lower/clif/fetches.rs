@@ -1,13 +1,15 @@
 //! The reads php's trace compiles in line that the step served here: a
 //! double's truth with the warning of a NAN in a cold arm
-//! (`zend_jit_bool_jmpznz`, `Z/ext/opcache/jit/zend_jit_ir.c:7750-7768`)
-//! and an array's count (`zend_jit_count`, `:11671-11713`).
+//! (`zend_jit_bool_jmpznz`, `Z/ext/opcache/jit/zend_jit_ir.c:7750-7768`),
+//! an array's count (`zend_jit_count`, `:11671-11713`) and a string's
+//! offset (`zend_jit_fetch_dim_read`, `:12720-12755`).
 
 use cranelift_codegen::ir::condcodes::FloatCC;
+use cranelift_codegen::ir::types::{I32, I64};
 use cranelift_codegen::ir::{InstBuilder, Value};
 use php_heap::Arr;
 
-use super::{Emit, Kernel, Scalar, imm, trusted};
+use super::{Emit, Kernel, Scalar, TYPE_AT, imm, mismatch, trusted};
 use crate::types::{Abort, Leave, Line, OpId, Operand};
 
 impl Emit<'_> {
@@ -241,6 +243,136 @@ impl Emit<'_> {
         if let Some(out) = line.out {
             self.define(out, Scalar::Long(count))?;
         }
+        Ok(())
+    }
+
+    /// A string's offset, as php's `zend_jit_fetch_dim_read` reads one
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:12720-12755`): the frame stood at
+    /// the opline and [`Kernel::StrOffset`], php's two functions; the key
+    /// then the string given up where a temporary held them, a throw
+    /// tested after, and the byte into what the opline writes.
+    ///
+    /// By a long, from the end, by a constant and a variable numeric
+    /// string, through a reference, of a temporary and of an element:
+    ///
+    ///
+    /// ```php
+    /// function f($s, $n) {
+    ///     $r = &$s; $t = ""; $d = ["ab", "cd"]; $k = ["0", "1"];
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $t .= $s[$i] . $s[-1 - $i] . $s["1"] . $r[$i] . ($s . $i)[$i];
+    ///         $t .= $d[$i & 1][$i & 1] . $s[$k[$i & 1]] . $s[$k[$i & 1] . ""];
+    ///     }
+    ///     return $t;
+    /// }
+    /// echo f("abcd", 4), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// adbaaaaabcbbbdbbcbbccaaadabdddbb
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    ///
+    /// ```php
+    /// function f($s, $n) {
+    ///     $r = &$s; $t = ""; $d = ["ab", "cd"]; $k = ["0", "1"];
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $t .= $s[$i] . $s[-1 - $i] . $s["1"] . $r[$i] . ($s . $i)[$i];
+    ///         $t .= $d[$i & 1][$i & 1] . $s[$k[$i & 1]] . $s[$k[$i & 1] . ""];
+    ///     }
+    ///     return $t;
+    /// }
+    /// echo f("abcd", 4), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// adbaaaaabcbbbdbbcbbccaaadabdddbb
+    /// ```
+    ///
+    /// The loop php's trace reads a byte a pass in, its exits php's:
+    ///
+    /// ```php
+    /// function k($n, $s) {
+    ///     $c = 0;
+    ///     for ($i = 1; $i < $n; $i++) { if ($s[$i & 7] === 'a') { $c++; } }
+    ///     return $c;
+    /// }
+    /// echo k(200, str_repeat('abcdefgh', 2)), "\n";
+    /// ```
+    /// ```expect regime=jit-inline
+    /// 24
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:7
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) k() %s:4
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 4 k() %s:4
+    /// ---- TRACE 2 start (side trace 1/4) k() %s:4
+    /// ---- TRACE 2 stop (link to 1)
+    /// ---- TRACE 2 compiled
+    ///
+    ///      TRACE 1 exit 3 k() %s:5
+    /// ---- TRACE 3 start (side trace 1/3) k() %s:5
+    /// ---- TRACE 3 stop (return)
+    /// ---- TRACE 3 compiled
+    /// ```
+    ///
+    /// Past the end, an offset's warning at its opline, a handler of it
+    /// that throws, and a key refused, each caught where it was read:
+    ///
+    /// ```php
+    /// function f($s, $n) {
+    ///     $o = "";
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         try { $o .= "[" . $s[$i] . "]"; } catch (Exception $e) { $o .= $e->getMessage(); }
+    ///     }
+    ///     return $o;
+    /// }
+    /// function g($s, $k, $n) {
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         try { echo $s[$k], "\n"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    ///     }
+    /// }
+    /// echo f("ab", 4), "\n";
+    /// set_error_handler(function ($n, $m) { throw new Exception($m); });
+    /// echo f("ab", 4), "\n";
+    /// g("ab", "x", 3);
+    /// ```
+    /// ```expect regime=jit-force process
+    /// Warning: Uninitialized string offset 2 in %s on line 5
+    ///
+    /// Warning: Uninitialized string offset 3 in %s on line 5
+    /// [a][b][][]
+    /// [a][b]Uninitialized string offset 2Uninitialized string offset 3
+    /// Cannot access offset of type string on string
+    /// Cannot access offset of type string on string
+    /// Cannot access offset of type string on string
+    /// ```
+    pub(super) fn str_offset(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        let text = self.held_word(at, line)?;
+        let (key, key_info) = self.key_words(at, line)?;
+        self.save_opline(line)?;
+        let [room, opline] = self.served(line)?;
+        let slot = self.answer();
+        let answer = self.b.ins().stack_addr(I64, slot, 0);
+        let status = self.call_status(
+            Kernel::StrOffset,
+            &[room, opline, text, key, key_info, answer],
+        )?;
+        self.free_temp(line, line.op2)?;
+        self.free_temp(line, line.op1)?;
+        self.left_unless(status, line.unwind.map(Leave::Unwind))?;
+        let out = line
+            .out
+            .ok_or_else(|| mismatch("a string's offset that writes nothing"))?;
+        let (base, at) = self.place(self.value(out)?.slot)?;
+        let byte = self.b.ins().stack_load(I64, I64, slot, 0);
+        let info = self.b.ins().stack_load(I64, I32, slot, TYPE_AT);
+        self.b.ins().store(trusted(), byte, base, at);
+        self.b.ins().store(trusted(), info, base, at + TYPE_AT);
         Ok(())
     }
 }

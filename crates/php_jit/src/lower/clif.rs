@@ -1959,7 +1959,7 @@ impl<'a> Emit<'a> {
             Kernel::Identical => &[I64, I64, I32, I64, I32, I64, I32, I64],
             Kernel::RopeInit | Kernel::Leave => &[I64, I64, I32, I64, I32, I64],
             Kernel::RopeAdd | Kernel::AssignConcat => &[I64, I64, I32, I64, I64, I32],
-            Kernel::RopeEnd => &[I64, I64, I32, I64, I64, I32, I64],
+            Kernel::RopeEnd | Kernel::StrOffset => &[I64, I64, I32, I64, I64, I32, I64],
             Kernel::Concat => &[I64, I64, I32, I64, I32, I64, I32, I32, I64],
             Kernel::Find | Kernel::Lookup => &[I64, I64, I32, I64, I64, I32, I32, I64],
             Kernel::MakeRef => &[I64, I64, I32, I64, I64],
@@ -3006,6 +3006,7 @@ impl<'a> Emit<'a> {
             Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec => {
                 self.increment(at, line)
             }
+            Opcode::FetchDimR if line.imm == Imm::StrOffset => self.str_offset(at, line),
             Opcode::FetchDimR => self.fetch(at, line),
             Opcode::IssetIsemptyDimObj => self.isset_dim(at, line),
             Opcode::FetchDimIs => self.fetch_is(at, line),

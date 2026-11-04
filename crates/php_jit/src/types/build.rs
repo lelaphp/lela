@@ -1028,6 +1028,12 @@ impl<'a> Builder<'a> {
                         .map_or(PairCallee::Record, PairCallee::Number),
                     class,
                 },
+                _ if form == Form::Inline
+                    && op.opcode == Opcode::FetchDimR
+                    && t1 == Types::STRING =>
+                {
+                    Imm::StrOffset
+                }
                 _ if let Some(property) = property.filter(|_| form == Form::Inline) => {
                     Imm::Property {
                         slot: match property.slot.cached() {
@@ -1491,8 +1497,9 @@ impl<'a> Builder<'a> {
                         && (!self.uncounted(frame) || self.receives(frame)))
                     // A call pushed under its slot's pair goes to its
                     // handler where the slot holds another, which looks
-                    // the class and the method up and may throw.
-                    || matches!(line.imm, Imm::Pair { .. })
+                    // the class and the method up and may throw; an
+                    // offset's read warns, and may refuse the key.
+                    || matches!(line.imm, Imm::Pair { .. } | Imm::StrOffset)
             }
             // php checks for a throwable after a handler where
             // `zend_may_throw_ex` says it may leave one
@@ -3067,7 +3074,7 @@ impl<'a> Builder<'a> {
         let held = *self.val(value);
         let computed = match (held.def, tag) {
             (Def::Op(def), Some(tag)) => match self.ops.get(def.index()) {
-                Some(Op::Line(line)) if line.form == Form::Inline => {
+                Some(Op::Line(line)) if line.form == Form::Inline && line.imm != Imm::StrOffset => {
                     within(line.opcode, tag, line.op2)
                         .filter(|kind| {
                             matches!(kind, Within::Fetched { .. })
@@ -4958,6 +4965,13 @@ fn strung(op: &Opline, seen: Seen) -> Option<Form> {
                 || (t1.scalar() && string(t2, 1))
         }
         Opcode::Strlen => string(t1, 0),
+        // php's `zend_jit_fetch_dim_read` over a string
+        // (`Z/ext/opcache/jit/zend_jit_ir.c:12720-12755`): by a long or a
+        // string, what a key of any other kind warns of being the
+        // handler's.
+        Opcode::FetchDimR if t1 == Types::STRING => {
+            (t2 == Types::LONG || t2 == Types::STRING) && seen.read[1] == Read::InPlace
+        }
         Opcode::Bool | Opcode::BoolNot => t1.scalar(),
         Opcode::FeFree => t1.tag() == Some(ZvalType::Array),
         Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => string(t2, 1),
