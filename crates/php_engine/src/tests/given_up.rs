@@ -121,3 +121,15 @@ fn a_test_past_the_table_a_handler_gave_up_finds_nothing() {
     );
     assert_eq!(stdout, "not set\nempty\n");
 }
+
+#[test]
+fn a_typed_cell_a_conversion_gave_up_takes_nothing() {
+    let stdout = served(
+        "<?php\n\
+         class P { public string $s = 'a'; }\n\
+         class T { function __toString(): string { $GLOBALS['a'] = 1; $GLOBALS['p'] = null; return 'conv'; } }\n\
+         $p = new P; $a = [0]; $a[0] = &$p->s;\n\
+         echo $a[0] = new T, '|', $a, '|', $p === null ? 'gone' : 'here', \"\\n\";\n",
+    );
+    assert_eq!(stdout, "conv|1|gone\n");
+}

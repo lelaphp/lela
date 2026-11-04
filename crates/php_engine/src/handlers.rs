@@ -17331,8 +17331,24 @@ fn assign_to_place(
         if !req.ref_type_sources(cell.heap()).is_empty() {
             // The frame's regime, read only where a type is held to it.
             let strict = req.frame_strict_types(frame);
+            // A conversion can reach `__toString`, which can give up every
+            // name of the cell: php's `zend_assign_to_typed_ref_ex` then
+            // writes through a freed one. Held here, and where the hold
+            // was the last owner the value lands nowhere and is the
+            // caller's to give up.
+            let kept = Owner::take(req, cell.as_value());
             let verdict = crate::ops::verify_ref_assignable(req, cell.heap(), &value, strict);
-            value = crate::ops::landed(req, value, verdict)?;
+            value = match crate::ops::landed(req, value, verdict) {
+                Ok(landed) => landed,
+                Err(thrown) => {
+                    return Err(req.free_pending(thrown, |req| {
+                        kept.let_go(req);
+                    }));
+                }
+            };
+            if kept.let_go(req).freed() {
+                return Ok((value, value));
+            }
             // `zend_assign_to_typed_ref_ex`'s `i_zval_ptr_dtor_noref` of a
             // `Tmp` or `Var` operand after its copy landed
             // ([`Request::assign_to_reference`]).
