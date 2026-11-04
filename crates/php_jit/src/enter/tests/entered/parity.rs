@@ -26,7 +26,7 @@ use crate::table::{self, Outputs, TraceName};
 use crate::testing::{self, Scratch, function_of, stdout};
 use crate::types::{
     Constant, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo, Grows, Imm, Landing, Line, Op,
-    Operand, Owners, Place, Returned, TraceIr, Unwind, UnwindId, Vars,
+    Operand, Owners, Place, PushRoom, Returned, TraceIr, Unwind, UnwindId, Vars,
 };
 
 /// What a read of the stack holds: the room of the frame read, its link,
@@ -349,6 +349,7 @@ fn push_in_place(req: &mut Request, f: FrameRef) -> Option<Read> {
             callee: Callee::User(callee),
             began: Began::Here,
             plain: Some(plain),
+            room: PushRoom::Unchecked,
         },
     ];
     let ir = trace(frames(me, callee), ops, (Frame::ROOT, init + 1));
@@ -399,6 +400,7 @@ fn make_in_place(req: &mut Request, f: FrameRef) -> Option<Read> {
             callee: Callee::User(callee),
             began: Began::Here,
             plain: Some(plain),
+            room: PushRoom::Unchecked,
         },
         send(init + 1, 1),
         send(init + 2, 2),
@@ -459,6 +461,7 @@ fn make_over_handled_push(req: &mut Request, f: FrameRef) -> Option<Read> {
             callee: Callee::User(callee),
             began: Began::Here,
             plain: Some(plain),
+            room: PushRoom::Unchecked,
         },
         send(init + 1, 1),
         send(init + 2, 2),

@@ -193,6 +193,7 @@ impl<'a> Dump<'a> {
                 callee,
                 began,
                 plain,
+                ..
             } => {
                 let target = match callee {
                     Callee::User(f) => func(*f),

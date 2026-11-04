@@ -27,8 +27,8 @@ use super::{
     Abort, ArgChecks, BodyEntry, Check, Constant, Def, Defaults, End, Entry, ExitId, ExitSpec,
     Form, Frame, FrameInfo, Frees, Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known,
     Landing, Layout, Leave, Line, LoopHeader, Object, Op, OpId, Operand, Owners, PairCallee,
-    PairClass, Place, Read, Repeat, Returned, Slot, Slotted, Store, Stored, TraceIr, Unwind,
-    UnwindId, Value, ValueId, Vars, on_declared_slot,
+    PairClass, Place, PushRoom, Read, Repeat, Returned, Slot, Slotted, Store, Stored, TraceIr,
+    Unwind, UnwindId, Value, ValueId, Vars, on_declared_slot,
 };
 use crate::analysis::{Analysed, Inference};
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
@@ -1595,6 +1595,7 @@ impl<'a> Builder<'a> {
             callee,
             began,
             plain,
+            room: PushRoom::Unchecked,
         });
         Ok(())
     }

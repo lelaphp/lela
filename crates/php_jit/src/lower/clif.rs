@@ -59,8 +59,8 @@ mod unread;
 use crate::record::{Began, Callee, Stop, leaves, returns};
 use crate::types::{
     Abort, BodyEntry, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home,
-    Imm, Interrupt, Layout, Leave, Line, Op, OpId, Operand, Place, Pointee, Read, Repeat, Slot,
-    Store, Stored, TraceIr, Types, UnwindId, ValueId, cannot_raise,
+    Imm, Interrupt, Layout, Leave, Line, Op, OpId, Operand, Place, Pointee, PushRoom, Read, Repeat,
+    Slot, Store, Stored, TraceIr, Types, UnwindId, ValueId, cannot_raise,
 };
 
 /// Where an inline arithmetic that would raise goes instead
@@ -3153,22 +3153,29 @@ impl<'a> Emit<'a> {
             }
             Opcode::SendValEx | Opcode::Return => self.stepped(at, line),
             Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName => {
-                match self.ir.ops.get(at.index() + 1) {
-                    Some(Op::InitCall {
-                        plain: Some(plain), ..
-                    }) => self.push_in_place(at, line, plain),
-                    _ => self.push_call(at, line),
+                match self.pushed_by(at) {
+                    Some((plain, room)) => self.push_in_place(at, line, plain, room),
+                    None => self.push_call(at, line),
                 }
             }
-            Opcode::InitMethodCall | Opcode::InitStaticMethodCall => {
-                match self.ir.ops.get(at.index() + 1) {
-                    Some(Op::InitCall {
-                        plain: Some(plain), ..
-                    }) => self.push_in_place(at, line, plain),
-                    _ => Err(mismatch("a method's call in place with no call held")),
-                }
-            }
+            Opcode::InitMethodCall | Opcode::InitStaticMethodCall => match self.pushed_by(at) {
+                Some((plain, room)) => self.push_in_place(at, line, plain, room),
+                None => Err(mismatch("a method's call in place with no call held")),
+            },
             _ => Err(mismatch("an inline opline the lowering does not serve")),
+        }
+    }
+
+    /// The plain call the `INIT_*` at `at` pushes in place, and what holds
+    /// its page.
+    fn pushed_by(&self, at: OpId) -> Option<(&'a PlainCall, PushRoom)> {
+        match self.ir.ops.get(at.index() + 1) {
+            Some(Op::InitCall {
+                plain: Some(plain),
+                room,
+                ..
+            }) => Some((plain, *room)),
+            _ => None,
         }
     }
 

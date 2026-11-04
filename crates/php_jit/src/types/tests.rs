@@ -20,8 +20,8 @@ use php_unit::{Opcode, OplineIdx};
 
 use super::{
     Check, Def, End, ExitId, Form, Frame, Frees, Grows, GuardAt, Home, Imm, Interrupt, Landing,
-    Line, Op, OpId, Operand, Pointee, Repeat, Slot, Slotted, Store, Stored, TraceIr, Types,
-    ValueId, build, on_declared_slot,
+    Line, Op, OpId, Operand, Pointee, PushRoom, Repeat, Slot, Slotted, Store, Stored, TraceIr,
+    Types, ValueId, build, on_declared_slot,
 };
 use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
@@ -723,6 +723,24 @@ fn a_trace_holds_the_stacks_room_where_php_does() -> Result<(), String> {
     assert_eq!(
         rooms(&looping),
         [(GuardAt::Entry, 0)],
+        "{}",
+        dump::render(&looping)
+    );
+    let pushes = |ir: &TraceIr| -> Vec<PushRoom> {
+        (ir.ops.iter())
+            .filter_map(|op| match op {
+                Op::InitCall {
+                    plain: Some(_),
+                    room,
+                    ..
+                } => Some(*room),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        pushes(&looping),
+        [PushRoom::Checked],
         "{}",
         dump::render(&looping)
     );
@@ -3365,6 +3383,20 @@ fn a_methods_call_on_an_object_takes_no_stack_check_at_entry() -> Result<(), Str
     for fixture in [METHOD_CALL, TEMP_CALL, METHOD_OWN, ENUM_OWN, METHOD_SCOPED] {
         let ir = golden(fixture)?;
         assert_eq!(rooms(&ir), 0, "{}\n{}", fixture.name, dump::render(&ir));
+        // No stack check holds such a push, so it tests the page itself.
+        assert!(
+            (ir.ops.iter()).all(|op| !matches!(
+                op,
+                Op::InitCall {
+                    plain: Some(_),
+                    room: PushRoom::Checked,
+                    ..
+                }
+            )),
+            "{}\n{}",
+            fixture.name,
+            dump::render(&ir)
+        );
     }
     let ir = golden(METHOD_CALL)?;
     let rendered = dump::render(&ir);

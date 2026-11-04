@@ -18,7 +18,7 @@ use php_unit::{OpArray, Opcode, Opline};
 
 use super::{At, Builder, Draft, Placed, Point, draft};
 use crate::record::{Began, Callee, Stop, classes};
-use crate::types::{Check, Frame, Grows, GuardAt, Op, OpId, Place};
+use crate::types::{Check, Frame, Grows, GuardAt, Op, OpId, Place, PushRoom};
 
 /// `ZEND_CALL_FRAME_SLOT`: the slots of a frame's header,
 /// `sizeof(zend_execute_data)` in zvals.
@@ -253,9 +253,15 @@ impl Builder<'_> {
     /// php's stack checks, placed: one at entry for what a loop's calls
     /// push, and one before each `INIT_*` that pushes past what the checks
     /// before it cover, each leaving for the interpreter at the opline it
-    /// holds.
+    /// holds; and each push that holds or covers says so
+    /// ([`PushRoom::Checked`]), so it tests the page no more, as
+    /// `zend_jit_push_call_frame` sets `stack_check` aside where
+    /// `used_stack <= checked_stack` (`Z/ext/opcache/jit/zend_jit_ir.c:8487`).
+    /// The bytes held are the record's, and the frame in place is held to
+    /// them: a push whose frame takes more tests the page itself.
     pub(super) fn stack_checks(&mut self) {
         let mut placed = Vec::new();
+        let mut checked = Vec::new();
         let mut covered = Covered::default();
         if let Some(used) = self.used_stack() {
             covered.peek = used;
@@ -290,6 +296,11 @@ impl Builder<'_> {
                         continue;
                     };
                     let pushed = callee.and_then(|callee| self.pushed(&op, callee));
+                    if let Some(bytes) = pushed
+                        && self.takes_at_most(at + 1, bytes)
+                    {
+                        checked.push(at + 1);
+                    }
                     if pushed.is_none_or(|bytes| covered.misses(bytes)) {
                         let bytes = pushed.unwrap_or_else(|| used(op.extended_value, None));
                         let idx = OpId(u32::try_from(at).unwrap_or(u32::MAX));
@@ -337,5 +348,22 @@ impl Builder<'_> {
             }
         }
         self.guards.extend(placed);
+        for at in checked {
+            if let Some(Op::InitCall { room, .. }) = self.ops.get_mut(at) {
+                *room = PushRoom::Checked;
+            }
+        }
+    }
+
+    /// Whether the call the `Op::InitCall` at `at` pushes in place takes no
+    /// more than `bytes`.
+    fn takes_at_most(&self, at: usize, bytes: i64) -> bool {
+        let Some(Op::InitCall {
+            plain: Some(plain), ..
+        }) = self.ops.get(at)
+        else {
+            return false;
+        };
+        i64::from(FRAME_SLOT + plain.slots()) * i64::from(SLOT) <= bytes
     }
 }

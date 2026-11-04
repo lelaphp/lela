@@ -214,9 +214,9 @@ function u0:0(i64, i64, i64, i64, i64, i64) -> i32 tail {
 @0005                               v105 = iconst.i32 2
 @0005                               store notrap aligned v105, v61+40  ; v105 = 2
 @0005                               v106 = iconst.i64 0
-@0005                               v107 = load.i64 notrap aligned v7+56
-@0005                               v108 = load.i64 notrap aligned v7+64
-@0005                               v109 = isub v108, v107
+@0005                               v107 = iconst.i64 0
+@0005                               v108 = iconst.i64 0
+@0005                               v109 = isub v108, v107  ; v108 = 0, v107 = 0
 @0005                               v110 = uextend.i64 v104  ; v104 = 6
 @0005                               v111 = uextend.i64 v105  ; v105 = 2
 @0005                               jump block21(v110, v111, v61)

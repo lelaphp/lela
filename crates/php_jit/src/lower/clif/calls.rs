@@ -11,9 +11,9 @@
 //! kernel it stands in for would have written, so the code after it reads
 //! where the interpreter stands as it reads it after a kernel. Each falls
 //! back to that kernel where the engine's own path would refuse the plain
-//! case: the page's end or a full frame table at the push; the interrupt
-//! raised, or a callee's cache not yet laid down, at the call; and at the
-//! leave a frame that holds a receiver, a closure, an annex or arguments
+//! case: the page's end, where no stack check holds it, or a full frame
+//! table at the push; the interrupt raised, or a callee's cache not yet
+//! laid down, at the call; and at the leave a frame that holds a receiver, a closure, an annex or arguments
 //! past its parameters, one a native's call made, one off the top page,
 //! or a caller's slot that holds a counted value. None takes an exit of
 //! its own: php's code takes none there.
@@ -21,7 +21,7 @@
 use std::num::NonZeroU32;
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::types::{I8, I32, I64, I128};
+use cranelift_codegen::ir::types::{I8, I32, I64, I64X2, I128};
 use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, MemFlagsData, Value};
 use cranelift_frontend::Variable;
 use php_engine::tier::{self, FRAME, FrameLayout, FuncRef, PLACE, PlaceLayout, PlainCall};
@@ -35,7 +35,7 @@ use super::{
 use crate::lower::{INTERRUPT_AT, OperandFields, OperandKinds, RETURNED, THREW};
 use crate::types::{
     Abort, ArgChecks, Check, Constant, Defaults, End, ExitId, Frame, Home, Imm, Line, Object, OpId,
-    Operand, Owners, PairCallee, PairClass, Returned, Types, Vars,
+    Operand, Owners, PairCallee, PairClass, PushRoom, Returned, Types, Vars,
 };
 
 /// The receiver a method's call `line` pushes in place.
@@ -172,7 +172,14 @@ impl Emit<'_> {
     /// The header image at `header` copied into the room at `top`, and its
     /// `slots` cells made `UNDEF`, two words a store: a pair where the
     /// target has one (`ldp`, `stp`), as `undefine` clears a whole cell,
-    /// and one word where the header ends on one.
+    /// and one word where the header ends on one. Every cell, the
+    /// temporaries' with the variables', where php's `zend_jit_do_fcall`
+    /// clears the variables past the arguments alone: a frame's owning
+    /// leave walks its temporaries (`Request::release_frame`), and the
+    /// interpreter's write of one hands back what the slot held
+    /// (`Request::set_slot`), so a word from an older frame reads as an
+    /// owner. The zero is one vector value, which holds no integer
+    /// register across a loop that pushes.
     fn lay_frame(&mut self, header: Value, top: Value, slots: u32) {
         let mut word = 0;
         while word < L.header_bytes() {
@@ -185,8 +192,8 @@ impl Emit<'_> {
             (self.b.ins()).store(trusted(), value, top, at(L.header() + word));
             word += ty.bytes();
         }
-        let zero = self.b.ins().iconst(I64, 0);
-        let undef = self.b.ins().uextend(I128, zero);
+        let zero = self.b.func.dfg.constants.insert(vec![0; 16].into());
+        let undef = self.b.ins().vconst(I64X2, zero);
         for slot in 0..slots {
             let cell = L.room() + SLOT * slot;
             self.b.ins().store(trusted(), undef, top, at(cell));
@@ -194,8 +201,17 @@ impl Emit<'_> {
     }
 
     /// The bytes the top page has left past `top`, `EG(vm_stack_end) - top`.
-    pub(super) fn left_past(&mut self, stack: Value, top: Value) -> Value {
+    fn left_past(&mut self, stack: Value, top: Value) -> Value {
         let end = self.b.ins().load(I64, trusted(), stack, END);
+        self.b.ins().isub(end, top)
+    }
+
+    /// [`Emit::left_past`] for the [`super::Stood`] alone, which reads the
+    /// stack's end only where a stack check comes before the next stand
+    /// ([`super::unread`]).
+    fn left_stood(&mut self, stack: Value, top: Value) -> Value {
+        let end = self.b.ins().load(I64, trusted(), stack, END);
+        self.stood_loads([end]);
         self.b.ins().isub(end, top)
     }
 
@@ -294,10 +310,12 @@ impl Emit<'_> {
     /// the room taken off the top of the stack's top page, its link the
     /// innermost room and the word moved to it, the header the push wrote
     /// copied whole, every slot `UNDEF`, and its record on the frame table.
-    /// Where the page has less room than the frame takes or the table is
-    /// full, the opline is stepped, which pushes the same call; php's own
-    /// stack check, a guard before the push, leaves first where the page
-    /// is short of what the trace pushes ([`crate::types::Check::Room`]).
+    /// Where the table is full, or no stack check holds the page and it
+    /// has less room than the frame takes, the opline is stepped, which
+    /// pushes the same call; php's own stack check, a guard before the
+    /// push, leaves first where the page is short of what the trace pushes
+    /// ([`crate::types::Check::Room`]), and a push it holds tests the page
+    /// no more ([`PushRoom::Checked`]).
     /// The header is copied and the slots cleared a cell a store, so a
     /// call pushed where the last one left its variables reads them
     /// undefined:
@@ -308,6 +326,28 @@ impl Emit<'_> {
     /// ```
     /// ```expect regime=jit-force process
     /// 50
+    /// ```
+    ///
+    /// A push a stack check holds where the page ends: recursion over a
+    /// callee of many variables, past pages and past the frame table's
+    /// room, under force and where every guard fails once:
+    ///
+    /// ```php
+    /// function big($a) { $b = $a; $c = $b; $d = $c; $e = $d; $f = $e; $g = $f; return $g + 1; }
+    /// function d($n) { return $n == 0 ? 0 : big($n) + d($n - 1); }
+    /// $t = 0; for ($i = 0; $i < 30; $i++) { $t += d(12000 + $i); } echo $t, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 2165764930
+    /// ```
+    ///
+    /// ```php
+    /// function big($a) { $b = $a; $c = $b; $d = $c; $e = $d; $f = $e; $g = $f; return $g + 1; }
+    /// function d($n) { return $n == 0 ? 0 : big($n) + d($n - 1); }
+    /// $t = 0; for ($i = 0; $i < 30; $i++) { $t += d(12000 + $i); } echo $t, "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 2165764930
     /// ```
     ///
     /// A method's call held by the pair its runtime-cache slot holds
@@ -327,6 +367,7 @@ impl Emit<'_> {
         id: OpId,
         line: &Line,
         plain: &PlainCall,
+        room: PushRoom,
     ) -> Result<(), Abort> {
         let (slow, join) = self.split();
         let over = match line.imm {
@@ -337,20 +378,22 @@ impl Emit<'_> {
         };
         let stack = self.stack()?;
         let header = self.header_of(plain)?;
-        let unready = self.unready()?;
         let used = i64::from(L.room() + SLOT * plain.slots());
         let top = self.b.ins().load(I64, trusted(), stack, TOP);
-        let left = self.left_past(stack, top);
-        let short = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThan, left, used);
+        if room == PushRoom::Unchecked {
+            let left = self.left_past(stack, top);
+            let short = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThan, left, used);
+            self.divert_if(short, slow);
+        }
         let len = self.b.ins().load(I64, trusted(), stack, FRAMES_LEN);
         let cap = self.b.ins().load(I64, trusted(), stack, FRAMES_CAP);
         let full = self
             .b
             .ins()
             .icmp(IntCC::UnsignedGreaterThanOrEqual, len, cap);
-        let refused = self.b.ins().bor(short, full);
-        let refused = self.b.ins().bor(refused, unready);
-        self.divert_if(refused, slow);
+        self.divert_if(full, slow);
+        let unready = self.unready()?;
+        self.divert_if(unready, slow);
         // The link, the room linked before this one, and the header.
         let below = self.b.ins().load(I64, trusted(), stack, INNERMOST);
         self.b.ins().store(trusted(), below, top, at(L.link()));
@@ -378,14 +421,11 @@ impl Emit<'_> {
         let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
         let offset = self.b.ins().imul_imm_s(len, i64::from(L.record()));
         let record = self.b.ins().iadd(frames, offset);
+        const { assert!(L.record_len() == L.record_at() + 8) };
         let first = self.b.ins().iadd_imm_s(top, i64::from(L.room()));
-        self.b
-            .ins()
-            .store(trusted(), first, record, at(L.record_at()));
         let slots = self.b.ins().iconst(I64, i64::from(plain.slots()));
-        self.b
-            .ins()
-            .store(trusted(), slots, record, at(L.record_len()));
+        let words = self.b.ins().iconcat(first, slots);
+        (self.b.ins()).store(trusted(), words, record, at(L.record_at()));
         let tag = self.b.ins().iconst(I8, i64::from(L.on_page()));
         self.b
             .ins()
@@ -396,11 +436,11 @@ impl Emit<'_> {
         self.b.ins().store(trusted(), past, stack, TOP);
         // Where the interpreter stands after the `INIT_*`: on past it in
         // the frame, the call pushed under way.
-        let room = self.room(line.frame)?;
+        let frame = self.room(line.frame)?;
         let func = self.func_of(line.frame)?;
         let next = self.b.ins().iconst(I32, i64::from(line.opline.0 + 1));
-        let left = self.left_past(stack, past);
-        self.stand([room, top, func, next, left]);
+        let left = self.left_stood(stack, past);
+        self.stand([frame, top, func, next, left]);
         self.b.ins().jump(join, &[]);
         self.b.switch_to_block(slow);
         self.b.seal_block(slow);
@@ -925,7 +965,8 @@ impl Emit<'_> {
         // Where the interpreter stands: in the callee, at its entry.
         let none = self.b.ins().iconst(I64, 0);
         let top = self.b.ins().load(I64, trusted(), stack, TOP);
-        let left = self.left_past(stack, top);
+        self.stood_loads([top]);
+        let left = self.left_stood(stack, top);
         self.stand([room, none, func, entry, left]);
         self.b.ins().jump(join, &[]);
         self.b.switch_to_block(slow);
