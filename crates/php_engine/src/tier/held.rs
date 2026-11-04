@@ -450,6 +450,28 @@ impl Units {
     }
 }
 
+/// The op array of `frame`, which the loop goes on in along an edge it
+/// kept nothing of, a return to a frame whose place another took since,
+/// or a tier's `Resume`: a frame of a function the loop called before
+/// within `scope` takes the op array kept for its calls, as
+/// [`Units::enter`] takes it first, and is kept for the return to it;
+/// none for any other, which the loop enters afresh, with nothing done.
+/// Out of line, so the loop's return arm keeps to the registers it holds.
+#[inline(never)]
+pub(super) fn taken_up<'u>(
+    req: &Request,
+    kept: &mut Kept<'u>,
+    scope: Scope<'u>,
+    frame: FrameRef,
+) -> Option<&'u OpArray> {
+    if scope.left(frame) {
+        return None;
+    }
+    let called = kept.called(req.vm().at(frame)?.function()?)?;
+    kept.keep(frame, called.code);
+    Some(called.code)
+}
+
 impl<'u> Kept<'u> {
     /// The op array of a callee of `function`, and its entry, pushed by
     /// a call to a function the loop has called before; none otherwise,

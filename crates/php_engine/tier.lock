@@ -203,6 +203,7 @@ tier::sink
 tier::stack
 tier::stack_room
 tier::stand
+tier::standing_at
 tier::state
 tier::step
 tier::this_class
