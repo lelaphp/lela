@@ -120,38 +120,44 @@ pub(super) const FRAMES_LEN: i32 = at(L.frames_len());
 const FRAMES_CAP: i32 = at(L.frames_cap());
 const INNERMOST: i32 = at(L.innermost());
 
-/// What a leave in place reads of the frame table before it frees its
-/// variables, held in variables a kernel call among the frees reads again:
-/// the table, the caller's slots and the slot taking the value.
-struct Reread {
-    /// The stack, the caller's place and the slot the call returns into.
-    from: (Value, Value, Value),
-    /// The frame table, the caller's slots and the slot taking the value.
-    vars: [Variable; 3],
+/// What a call made in place fixes of the frame it enters, which the
+/// frame's leave knows as php's trace knows its frame's `prev` and its
+/// `RETURN`'s `TRACE_FRAME_IS_RETURN_VALUE_USED`, and reads back from no
+/// header ([`Emit::leave_in_place`]).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Made {
+    /// The frame that made the call.
+    caller: Frame,
+    /// The slot of the caller's that takes the return, where it reads one.
+    returns: Option<u32>,
+    /// The opline of the caller's that made the call.
+    at: u32,
+    /// What held the page at the push.
+    room: PushRoom,
 }
 
-impl Reread {
-    /// The reads `values` held in variables of `emit`'s function.
-    fn new(emit: &mut Emit<'_>, from: (Value, Value, Value), values: [Value; 3]) -> Reread {
-        let vars = values.map(|value| {
-            let var = emit.b.declare_var(I64);
-            emit.b.def_var(var, value);
-            var
-        });
-        Reread { from, vars }
-    }
+/// Who a leave in place leaves to.
+#[derive(Clone, Copy)]
+enum LeavesTo {
+    /// A frame of the trace, whose call it made in place.
+    Made(Made),
+    /// Whoever the header's half-word names, read here.
+    Named(Value),
+}
 
-    /// The frame table, the caller's record and the slot read again, after
-    /// a kernel that may have served PHP code.
-    fn again(&self, emit: &mut Emit<'_>) {
-        let (stack, place, returns) = self.from;
-        let frames = emit.b.ins().load(I64, trusted(), stack, FRAMES);
-        let callers = emit.record_word(frames, place, L.record_at());
-        let target = emit.taken_at(callers, returns);
-        for (var, value) in self.vars.iter().zip([frames, callers, target]) {
-            emit.b.def_var(*var, value);
-        }
-    }
+/// Where a leave in place writes what it hands its caller.
+#[derive(Clone, Copy)]
+enum Handed {
+    /// The slot a call made in place named.
+    Slot(Value),
+    /// Nowhere: the call made in place reads nothing.
+    Nothing,
+    /// Where the header says: `slot`, where `reads`, from `returns`.
+    Named {
+        slot: Value,
+        returns: Value,
+        reads: Value,
+    },
 }
 
 impl Emit<'_> {
@@ -918,11 +924,20 @@ impl Emit<'_> {
         let callee = self
             .entered_by(id, line)
             .ok_or_else(|| mismatch("a call made in place the trace does not follow"))?;
-        let (Some(activation), super::CallRoom::Held(var)) =
-            (plain.and_then(PlainCall::activation), call)
-        else {
+        let (Some((plain, pushed)), super::CallRoom::Held(var)) = (plain, call) else {
             return self.stepped(id, line);
         };
+        let Some(activation) = plain.activation() else {
+            return self.stepped(id, line);
+        };
+        if let Some(made) = self.held_calls.get_mut(usize::from(callee.0)) {
+            *made = Some(Made {
+                caller: line.frame,
+                returns,
+                at: line.opline.0,
+                room: pushed,
+            });
+        }
         let stack = self.stack()?;
         let unready = self.unready()?;
         let room = self.b.use_var(var);
@@ -1071,7 +1086,9 @@ impl Emit<'_> {
     /// moved back to its link and the top back to its room, and the caller
     /// on past its call. `types` holds its value a scalar, a constant no
     /// reference counts or a temporary ([`Imm::Leave`], [`Returned`]);
-    /// the frame's header and the caller's slot are read here, and where
+    /// the frame's header and the caller's slot are read here, the
+    /// caller's word, its slots and the slot that takes the value known
+    /// where the trace made the call ([`Made`]), and where
     /// the leave kernel would serve the frame, the opline is stepped.
     /// Once nothing refuses it, the variables `types` does not hold
     /// uncounted are given up in place ([`Owners`], `Emit::free_cvs`)
@@ -1129,68 +1146,31 @@ impl Emit<'_> {
         };
         let returned = self.returned(id, line)?;
         let stack = self.stack()?;
-        let (caller, place) = self
-            .returns_to(line)?
-            .ok_or_else(|| mismatch("a leave in place with no caller read"))?;
+        let (to, place) = self.leaves_to(id, line)?;
         let room = self.room(line.frame)?;
         let (slow, join) = self.split();
-        self.leave_refused(room, caller, line, slow)?;
-        // The frame is the table's last record, as a `RETURN` runs with no
-        // call under way, on the top page.
+        self.leave_refused(room, to, line, slow)?;
         let len = self.b.ins().load(I64, trusted(), stack, FRAMES_LEN);
-        let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
         let last = self.b.ins().iadd_imm_s(len, -1);
-        let off_page = self.off_page(frames, last);
-        self.divert_if(off_page, slow);
-        // The caller's place, and the slot of its that takes the return,
-        // which holds nothing counted.
-        let callers = self.record_word(frames, place, L.record_at());
-        let named = self.b.ins().load(I32, trusted(), room, at(L.returns_to()));
-        let returns = self.b.ins().uextend(I64, named);
-        let target = self.taken_at(callers, returns);
-        let reads = self.b.ins().icmp_imm_s(IntCC::NotEqual, returns, 0);
-        let kind = self.b.ins().load(I32, trusted(), target, super::TYPE_AT);
-        let counted = self.b.ins().band_imm_u(kind, COUNTED);
-        self.divert_where(counted, named, slow);
-        if let Out::Moved(_, info) = returned {
-            // What the caller does not read is given up, which the leave
-            // kernel does.
-            let owned = self.b.ins().band_imm_u(info, COUNTED);
-            let unread = self.b.ins().icmp_imm_s(IntCC::Equal, returns, 0);
-            self.divert_where(owned, unread, slow);
-        }
+        let callers = self.callers_of(stack, last, (to, place), slow)?;
+        let handed = self.handed(room, to, callers);
+        self.handed_refused(handed, returned, slow);
         // What a variable holds the caller takes an owner of before the
         // variables are given up, which may give up the last other, as
         // php's `zend_jit_return` copies it before `zend_jit_free_cv`.
         if let Out::Shared(word, info) = returned {
-            self.when(reads, |emit| emit.addref(word, info))?;
+            self.write_handed(handed, |emit, _| emit.addref(word, info))?;
         }
         // Nothing refuses the leave from here: what the variables own is
-        // given up, and a destructor the kernel served may have grown the
-        // frame table, whose records are read again after each kernel
-        // call alone ([`Reread`]), so a leave that calls none reads them
-        // once.
-        let read = Reread::new(self, (stack, place, returns), [frames, callers, target]);
-        let freed = match owners {
-            Owners::Each(vars) => Some(self.free_cvs(room, line, vars, &read)?),
-            Owners::Uncounted | Owners::Kernel => None,
-        };
-        let let_go = if receives {
-            Some(self.free_this(room, line, &read)?)
-        } else {
-            None
-        };
-        let threw = match (freed, let_go) {
-            (Some(freed), Some(let_go)) => Some(self.b.ins().bor(freed, let_go)),
-            (threw, None) | (None, threw) => threw,
-        };
-        let [frames, callers, target] = read.vars.map(|var| self.b.use_var(var));
-        self.when(reads, |emit| {
+        // given up, and a destructor the kernel served may grow the frame
+        // table, which is read past them, but moves no frame.
+        let threw = self.frees_of_leave(room, line, owners, receives)?;
+        self.write_handed(handed, |emit, slot| {
             match returned {
-                Out::Scalar(scalar) => emit.write(target, 0, scalar),
+                Out::Scalar(scalar) => emit.write(slot, 0, scalar),
                 Out::Copied(word, info) | Out::Moved(word, info) | Out::Shared(word, info) => {
-                    emit.b.ins().store(trusted(), word, target, 0);
-                    emit.b.ins().store(trusted(), info, target, super::TYPE_AT);
+                    emit.b.ins().store(trusted(), word, slot, 0);
+                    emit.b.ins().store(trusted(), info, slot, super::TYPE_AT);
                 }
             }
             Ok(())
@@ -1204,27 +1184,16 @@ impl Emit<'_> {
         // destructor threw, at its call, where the throwable is raised,
         // `zend_rethrow_exception` with the return written, which
         // `HANDLE_EXCEPTION` frees as the call's result.
-        let back = self.b.ins().iadd_imm_s(callers, -i64::from(L.room()));
-        let at_call = self.b.ins().uload32(trusted(), back, at(L.opline()));
-        let mut past = self.b.ins().iadd_imm_s(at_call, 1);
-        if let Some(threw) = threw {
-            past = self.b.ins().select(threw, at_call, past);
-        }
-        self.b.ins().istore32(trusted(), past, back, at(L.opline()));
+        let (back, past) = self.on_past_the_call(to, callers, threw)?;
         // Where the interpreter stands: in the caller, the call under way
         // in it the record now on top where that is not the caller's own.
         // Each word loaded for it alone, which no path but one that reads
-        // where the frame stands needs ([`super::unread`]).
-        let under = self.b.ins().iadd_imm_s(len, -2);
-        let first = self.record_word(frames, under, L.record_at());
-        let built = self.b.ins().iadd_imm_s(first, -i64::from(L.room()));
-        let own = self.b.ins().icmp(IntCC::Equal, under, place);
-        let nothing = self.b.ins().iconst(I64, 0);
-        let call = self.b.ins().select(own, nothing, built);
+        // where the frame stands needs.
+        let call = self.under_way_past((stack, len), place);
         let func = self.b.ins().uload32(trusted(), back, at(L.cache()));
         let end = self.b.ins().load(I64, trusted(), stack, END);
         let left = self.b.ins().isub(end, room);
-        self.stood_loads([first, func, end]);
+        self.stood_loads([func, end]);
         self.stand([back, call, func, past, left]);
         if let Some(threw) = threw {
             // php's `jit_stub_leave_throw` after `zend_jit_leave_func`: the
@@ -1237,7 +1206,237 @@ impl Emit<'_> {
         } else {
             self.b.ins().jump(join, &[]);
         }
-        self.left_or_not(id, line, (caller, returned), (slow, join))
+        self.left_or_not(id, line, (to, returned), (slow, join))
+    }
+
+    /// The caller's slots, for a leave of the frame on record `last`, the
+    /// table's last, as a `RETURN` runs with no call under way: on to
+    /// `slow` where that record stands off the top page, which a push a
+    /// stack check held stands on already.
+    fn callers_of(
+        &mut self,
+        stack: Value,
+        last: Value,
+        (to, place): (LeavesTo, Value),
+        slow: Block,
+    ) -> Result<Value, Abort> {
+        let read = match to {
+            LeavesTo::Made(Made {
+                room: PushRoom::Checked,
+                ..
+            }) => None,
+            LeavesTo::Made(_) | LeavesTo::Named(_) => {
+                let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
+                let off_page = self.off_page(frames, last);
+                self.divert_if(off_page, slow);
+                Some(frames)
+            }
+        };
+        match (to, read) {
+            (LeavesTo::Made(made), _) => {
+                let caller = self.room(made.caller)?;
+                Ok(self.b.ins().iadd_imm_s(caller, i64::from(L.room())))
+            }
+            (LeavesTo::Named(_), Some(frames)) => {
+                Ok(self.record_word(frames, place, L.record_at()))
+            }
+            (LeavesTo::Named(_), None) => Err(mismatch("a caller read off no table")),
+        }
+    }
+
+    /// On to `refused` where the slot `handed` names holds something
+    /// counted, and where nothing reads `returned` and it owns something,
+    /// which the leave kernel gives up.
+    fn handed_refused(&mut self, handed: Handed, returned: Out, refused: Block) {
+        let owned = match returned {
+            Out::Moved(_, info) => Some(self.b.ins().band_imm_u(info, COUNTED)),
+            Out::Scalar(_) | Out::Copied(..) | Out::Shared(..) => None,
+        };
+        match handed {
+            Handed::Slot(slot) => {
+                let counted = self.slot_counted(slot);
+                self.divert_if(counted, refused);
+            }
+            Handed::Nothing => {
+                if let Some(owned) = owned {
+                    self.divert_if(owned, refused);
+                }
+            }
+            Handed::Named { slot, returns, .. } => {
+                let counted = self.slot_counted(slot);
+                self.divert_where(counted, returns, refused);
+                if let Some(owned) = owned {
+                    let unread = self.b.ins().icmp_imm_s(IntCC::Equal, returns, 0);
+                    self.divert_where(owned, unread, refused);
+                }
+            }
+        }
+    }
+
+    /// What the frame in `room` gives up as it leaves: its variables, and
+    /// its receiver where it takes one; not zero where a destructor threw.
+    fn frees_of_leave(
+        &mut self,
+        room: Value,
+        line: &Line,
+        owners: Owners,
+        receives: bool,
+    ) -> Result<Option<Value>, Abort> {
+        let freed = match owners {
+            Owners::Each(vars) => Some(self.free_cvs(room, line, vars)?),
+            Owners::Uncounted | Owners::Kernel => None,
+        };
+        let let_go = if receives {
+            Some(self.free_this(room, line)?)
+        } else {
+            None
+        };
+        Ok(match (freed, let_go) {
+            (Some(freed), Some(let_go)) => Some(self.b.ins().bor(freed, let_go)),
+            (threw, None) | (None, threw) => threw,
+        })
+    }
+
+    /// The caller of a leave to `to`, its slots at `callers`, stood past
+    /// its call: its room, and the opline it goes on at. A destructor that
+    /// threw stands it at its call.
+    fn on_past_the_call(
+        &mut self,
+        to: LeavesTo,
+        callers: Value,
+        threw: Option<Value>,
+    ) -> Result<(Value, Value), Abort> {
+        let (back, at_call) = match to {
+            LeavesTo::Made(made) => {
+                let back = self.room(made.caller)?;
+                (back, self.b.ins().iconst(I64, i64::from(made.at)))
+            }
+            LeavesTo::Named(_) => {
+                let back = self.b.ins().iadd_imm_s(callers, -i64::from(L.room()));
+                (back, self.b.ins().uload32(trusted(), back, at(L.opline())))
+            }
+        };
+        let mut past = self.b.ins().iadd_imm_s(at_call, 1);
+        if let Some(threw) = threw {
+            past = self.b.ins().select(threw, at_call, past);
+        }
+        self.b.ins().istore32(trusted(), past, back, at(L.opline()));
+        Ok((back, past))
+    }
+
+    /// Who `line`'s leave leaves to, and its place: the frame whose call
+    /// the trace made in place, or, at the trace's last `RETURN` and for a
+    /// frame the trace did not push, whoever the header names.
+    ///
+    /// A return nothing reads, one a call under way in the caller takes as
+    /// its argument, and a method's frames past a page, each left from a
+    /// frame the trace pushed, under force and where every guard fails
+    /// once:
+    ///
+    /// ```php
+    /// class P { function up($n) { return $n == 0 ? 0 : $this->up($n - 1) + 1; } }
+    /// function keep($a, $b) { return $a + $b; }
+    /// function id($x) { return $x; }
+    /// function gone($x) { return "x$x"; }
+    /// $p = new P; $t = 0;
+    /// for ($i = 0; $i < 40; $i++) { gone($i); $t += keep(id($i), id($i + 1)); $t += $p->up(15000); }
+    /// echo $t, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 601600
+    /// ```
+    ///
+    /// ```php
+    /// class P { function up($n) { return $n == 0 ? 0 : $this->up($n - 1) + 1; } }
+    /// function keep($a, $b) { return $a + $b; }
+    /// function id($x) { return $x; }
+    /// function gone($x) { return "x$x"; }
+    /// $p = new P; $t = 0;
+    /// for ($i = 0; $i < 40; $i++) { gone($i); $t += keep(id($i), id($i + 1)); $t += $p->up(15000); }
+    /// echo $t, "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 601600
+    /// ```
+    fn leaves_to(&mut self, id: OpId, line: &Line) -> Result<(LeavesTo, Value), Abort> {
+        let made = self
+            .held_calls
+            .get(usize::from(line.frame.0))
+            .copied()
+            .flatten();
+        if let (Some(made), None) = (made, self.returns_at_end(id)) {
+            let place = self.frame_ref(made.caller)?;
+            let var = self.b.declare_var(I64);
+            self.b.def_var(var, place);
+            self.returned_to = Some(var);
+            return Ok((LeavesTo::Made(made), place));
+        }
+        let (caller, place) = self
+            .returns_to(line)?
+            .ok_or_else(|| mismatch("a leave in place with no caller read"))?;
+        Ok((LeavesTo::Named(caller), place))
+    }
+
+    /// Where a leave to `to` from the frame in `room` writes, the caller's
+    /// slots at `callers`.
+    fn handed(&mut self, room: Value, to: LeavesTo, callers: Value) -> Handed {
+        match to {
+            LeavesTo::Made(Made { returns: None, .. }) => Handed::Nothing,
+            LeavesTo::Made(Made {
+                returns: Some(slot),
+                ..
+            }) => {
+                let slot = i64::from(slot) * i64::from(SLOT);
+                Handed::Slot(self.b.ins().iadd_imm_s(callers, slot))
+            }
+            LeavesTo::Named(_) => {
+                let named = self.b.ins().load(I32, trusted(), room, at(L.returns_to()));
+                let returns = self.b.ins().uextend(I64, named);
+                let slot = self.taken_at(callers, returns);
+                let reads = self.b.ins().icmp_imm_s(IntCC::NotEqual, returns, 0);
+                Handed::Named {
+                    slot,
+                    returns,
+                    reads,
+                }
+            }
+        }
+    }
+
+    /// Whether the slot at `slot` holds something counted, not zero where
+    /// it does.
+    fn slot_counted(&mut self, slot: Value) -> Value {
+        let kind = self.b.ins().load(I32, trusted(), slot, super::TYPE_AT);
+        self.b.ins().band_imm_u(kind, COUNTED)
+    }
+
+    /// `write` over the slot `handed` names, where the caller reads one.
+    fn write_handed(
+        &mut self,
+        handed: Handed,
+        write: impl FnOnce(&mut Emit<'_>, Value) -> Result<(), Abort>,
+    ) -> Result<(), Abort> {
+        match handed {
+            Handed::Slot(slot) => write(self, slot),
+            Handed::Nothing => Ok(()),
+            Handed::Named { slot, reads, .. } => self.when(reads, |emit| write(emit, slot)),
+        }
+    }
+
+    /// The call under way in the caller past a leave, `len` records
+    /// standing on the table as it left: the record on top where that is
+    /// not the caller's own, at `place`, none where it is. Each word loaded
+    /// for it alone, which no path but one that reads where the frame
+    /// stands needs ([`super::unread`]).
+    fn under_way_past(&mut self, (stack, len): (Value, Value), place: Value) -> Value {
+        let under = self.b.ins().iadd_imm_s(len, -2);
+        let own = self.b.ins().icmp(IntCC::Equal, under, place);
+        let nothing = self.b.ins().iconst(I64, 0);
+        let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
+        let first = self.record_word(frames, under, L.record_at());
+        let built = self.b.ins().iadd_imm_s(first, -i64::from(L.room()));
+        self.stood_loads([frames, first]);
+        self.b.ins().select(own, nothing, built)
     }
 
     /// The slot of the caller's slots at `callers` that a call returning
@@ -1386,13 +1585,7 @@ impl Emit<'_> {
     /// ```expect regime=jit-exit-fuzz process
     /// 1225 100 100
     /// ```
-    fn free_cvs(
-        &mut self,
-        room: Value,
-        line: &Line,
-        vars: Vars,
-        read: &Reread,
-    ) -> Result<Value, Abort> {
+    fn free_cvs(&mut self, room: Value, line: &Line, vars: Vars) -> Result<Value, Abort> {
         let unwind = line
             .unwind
             .ok_or_else(|| mismatch("a leave that frees with no unwind"))?;
@@ -1450,7 +1643,6 @@ impl Emit<'_> {
             let before = self.b.use_var(threw);
             let now = self.b.ins().bor(before, thrown);
             self.b.def_var(threw, now);
-            read.again(self);
             self.b.ins().jump(next, &[]);
             self.b.switch_to_block(next);
             self.b.seal_block(next);
@@ -1493,7 +1685,7 @@ impl Emit<'_> {
     /// ```expect regime=jit-exit-fuzz process
     /// d0 d1 d2 d3 10| 500
     /// ```
-    fn free_this(&mut self, room: Value, line: &Line, read: &Reread) -> Result<Value, Abort> {
+    fn free_this(&mut self, room: Value, line: &Line) -> Result<Value, Abort> {
         let unwind = line
             .unwind
             .ok_or_else(|| mismatch("a leave that frees with no unwind"))?;
@@ -1575,7 +1767,6 @@ impl Emit<'_> {
             .icmp_imm_u(IntCC::Equal, status, i64::from(THREW));
         let thrown = self.b.ins().uextend(I32, thrown);
         self.b.def_var(threw, thrown);
-        read.again(self);
         self.b.ins().jump(next, &[]);
         self.b.switch_to_block(next);
         self.b.seal_block(next);
@@ -1734,7 +1925,7 @@ impl Emit<'_> {
     fn leave_refused(
         &mut self,
         room: Value,
-        caller: Value,
+        to: LeavesTo,
         line: &Line,
         slow: Block,
     ) -> Result<(), Abort> {
@@ -1747,10 +1938,15 @@ impl Emit<'_> {
         let info = self.b.ins().load(I32, trusted(), room, at(L.info()));
         let flagged = self.b.ins().band_imm_u(info, i64::from(refusing));
         self.divert_if(flagged, slow);
-        let closure = self.b.ins().load(I64, trusted(), room, at(L.closure()));
-        self.divert_if(closure, slow);
-        let outside = self.outside(caller);
-        self.divert_if(outside, slow);
+        // The word stays for a frame of the trace: an annex comes as the
+        // frame runs. No closure comes to one, and its caller is the frame
+        // that made the call.
+        if let LeavesTo::Named(caller) = to {
+            let closure = self.b.ins().load(I64, trusted(), room, at(L.closure()));
+            self.divert_if(closure, slow);
+            let outside = self.outside(caller);
+            self.divert_if(outside, slow);
+        }
         if let Imm::Leave {
             owners: Owners::Kernel,
             ..
@@ -1855,13 +2051,16 @@ impl Emit<'_> {
         &mut self,
         id: OpId,
         line: &Line,
-        (caller, returned): (Value, Out),
+        (to, returned): (LeavesTo, Out),
         (slow, join): (Block, Block),
     ) -> Result<(), Abort> {
         self.b.switch_to_block(slow);
         self.b.seal_block(slow);
         let at_end = self.returns_at_end(id);
         if let Some(exit) = at_end {
+            let LeavesTo::Named(caller) = to else {
+                return Err(mismatch("a trace's last return with its caller known"));
+            };
             self.leave_top(line, (caller, returned), exit)?;
         } else {
             self.step_kernel(id, line)?;
@@ -2121,7 +2320,7 @@ impl Emit<'_> {
             .calls
             .last()
             .ok_or_else(|| mismatch("a native's call with no call under way"))?;
-        let count = plain.map(PlainCall::count);
+        let count = plain.map(|(plain, _)| plain.count());
         let call = self.call_room()?;
         self.b.ins().store(trusted(), opline, room, EX_OPLINE);
         let flags = self.b.ins().load(I32, trusted(), call, at(L.info()));

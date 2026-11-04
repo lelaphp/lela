@@ -829,8 +829,12 @@ struct Emit<'a> {
     /// Per value the trace keeps in a register, its variable.
     regs: Vec<Option<Variable>>,
     /// The rooms of the calls under way, the innermost last, each with
-    /// the plain call it is where compiled code pushed it in place.
-    calls: Vec<(CallRoom, Option<&'a PlainCall>)>,
+    /// the plain call it is where compiled code pushed it in place and
+    /// what held the page at that push.
+    calls: Vec<(CallRoom, Option<(&'a PlainCall, PushRoom)>)>,
+    /// Per frame of the trace, what the call made in place that entered
+    /// it fixes of it.
+    held_calls: Vec<Option<calls::Made>>,
     /// Per kernel, its signature once imported.
     sigs: [Option<SigRef>; Kernel::ALL.len()],
     /// Per exit, its block once a site branches to it.
@@ -908,6 +912,7 @@ impl<'a> Emit<'a> {
             rooms,
             regs: vec![None; ir.values.len()],
             calls: Vec::new(),
+            held_calls: vec![None; ir.frames.len()],
             sigs: [None; Kernel::ALL.len()],
             exits: vec![None; ir.exits.len()],
             unwinds: vec![None; ir.unwinds.len()],
@@ -1313,12 +1318,14 @@ impl<'a> Emit<'a> {
             Op::InitCall {
                 began: Began::Here,
                 plain,
+                room,
                 ..
             } => {
                 let call = self.stood_word(I64, STOOD_CALL);
                 let var = self.b.declare_var(I64);
                 self.b.def_var(var, call);
-                self.calls.push((CallRoom::Held(var), plain.as_ref()));
+                let plain = plain.as_ref().map(|plain| (plain, *room));
+                self.calls.push((CallRoom::Held(var), plain));
                 Ok(())
             }
             Op::InitCall {
