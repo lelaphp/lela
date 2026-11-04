@@ -2217,13 +2217,14 @@ fn inline_send(
     let (call, from) = req.vm_mut().stack.top_and_frame_mut(frame)?;
     let header = call.header();
     // php's `_SIMPLE` specialisations (`Z/Zend/zend_vm_def.h:10403-10453`):
-    // a send the compiler knows goes by value, or a `_EX` to a callee its
-    // `INIT` found taking nothing by reference, writes the slot with no
-    // parameter read, one test of the call's flags.
+    // a send the compiler knows goes by value, a `_EX` to a callee its
+    // `INIT` found taking nothing by reference, or a `SEND_FUNC_ARG`
+    // whose `CHECK_FUNC_ARG` cleared `ZEND_CALL_SEND_ARG_BY_REF`, writes
+    // the slot with no parameter read, one test of the call's flags.
     let simple = match sending {
         Sending::Value => header.info.building(),
         Sending::Declared => header.info.sends_simply(),
-        Sending::Checked => false,
+        Sending::Checked => header.info.building() && !header.info.send_by_ref(),
     };
     if simple {
         debug_assert!(
@@ -2771,6 +2772,40 @@ fn send_returned(
 /// string(1) "q"
 /// Unknown named parameter $nope
 /// ```
+///
+/// By number, where the `INIT` found the callee taking nothing by
+/// reference or wrote the parameter's by-value bit, the call being built
+/// is read once and written once in the loop's body, php's
+/// `QUICK_ARG_SHOULD_BE_SENT_BY_REF` test, and the `_FUNC_ARG` fetch and
+/// the send after it serve the read and `SEND_VAR`'s body on the word it
+/// cleared ([`fetch_dim_func_arg`], [`send_func_arg`]). Everything else
+/// is asked of the declaration out of line: a name, a native's call,
+/// whose `INIT` wrote nothing, and a number past the twelve the bits
+/// cover where the callee takes something by reference. Each callee
+/// below is unknown where the call is compiled, an unqualified name in a
+/// namespace or a callable:
+///
+/// ```php
+/// namespace N;
+/// function k(array $a, string $f) {
+///     $r = [v($a[0]), v(b: $a[1], a: $a['s']), $f($a[1]), strlen($a['s'])];
+///     $r[] = many(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, $a[0]);
+///     $r[] = mix(1, $a[0], 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, $a[1]);
+///     r($a['new']); r($a[0]); sort($a['l']);
+///     $r[] = v($a['none']);
+///     return [$r, $a];
+/// }
+/// function v($a, $b = 0) { return $a; }
+/// function r(&$a) { $a .= '!'; }
+/// function many($a1, $a2, $a3, $a4, $a5, $a6, $a7, $a8, $a9, $a10, $a11, $a12, $a13) { return $a13; }
+/// function mix($a1, &$a2, $a3, $a4, $a5, $a6, $a7, $a8, $a9, $a10, $a11, $a12, $a13) { $a2 = 'm'; return $a13; }
+/// echo json_encode(k([1.5, 'b', 's' => 'str', 'l' => [3, 1, 2]], 'N\v')), "\n";
+/// ```
+/// ```expect
+/// Warning: Undefined array key "none" in %SCRATCH%/witness.php on line 8
+/// [[1.5,"str","b",3,1.5,"b",null],{"0":"m!","1":"b","s":"str","l":[1,2,3],"new":"!"}]
+/// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
 pub(crate) fn check_func_arg<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -2778,15 +2813,28 @@ pub(crate) fn check_func_arg<T: Tier>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    // By number, where the `INIT` wrote the parameter's by-value bit, the
-    // call being built read once and written once.
     if let ArgAt::Number(number) = ArgAt::of(op)
         && let Some(call) = req.vm_mut().building_mut()
-        && call.info.sends_by_value(number)
+        && (call.info.sends_simply() || call.info.sends_by_value(number))
     {
         call.info.set_send_by_ref(false);
         return Ok(advanced());
     }
+    checked_func_arg(req, frame, code, op, at)
+}
+
+/// `CHECK_FUNC_ARG` past the bits its `INIT` wrote: the parameter's
+/// by-reference bit asked of the declaration, by number or by name, and
+/// written on the call being built. A call of its own, so that the
+/// loop's arm holds no more than [`check_func_arg`]'s one test.
+#[inline(never)]
+fn checked_func_arg(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+) -> Edge {
     req.vm_mut().stand(frame, at);
     let number = match ArgAt::of(op) {
         ArgAt::Number(number) => Some(number),
@@ -2884,6 +2932,7 @@ pub(crate) fn check_func_arg<T: Tier>(
 /// }
 /// Cannot use [] for reading
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
 pub(crate) fn send_func_arg<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -2891,10 +2940,22 @@ pub(crate) fn send_func_arg<T: Tier>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    // By value, `SEND_VAR`'s body (`ZEND_VM_C_GOTO(send_var)`).
-    if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), Sending::Checked) {
+    // By value, `SEND_VAR`'s body (`ZEND_VM_C_GOTO(send_var)`), on the
+    // word `CHECK_FUNC_ARG` cleared, as `SEND_VAR_EX_SIMPLE` is on the
+    // word its `INIT` wrote. php specialises the operand to a `VAR`
+    // alone, what the `_FUNC_ARG` fetch before it left.
+    if let Some(edge) = inline_send(req, frame, code, op, Var, Sending::Checked) {
         return edge;
     }
+    sent_func_arg(req, frame, code, op, at)
+}
+
+/// `SEND_FUNC_ARG` past its inline path: the slot [`reserve_arg`] gives
+/// the argument, by number or by name, and the place bound or the value
+/// sent as `CHECK_FUNC_ARG` read the parameter. A call of its own, as
+/// [`sent`] is for `SEND_VAR`.
+#[inline(never)]
+fn sent_func_arg(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, at: u32) -> Edge {
     req.vm_mut().stand(frame, at);
     let reserved = match reserve_arg(req, frame, code, op) {
         Ok(reserved) => reserved,
@@ -10019,8 +10080,11 @@ pub(crate) fn fetch_obj_func_arg<T: Tier>(
 /// ```
 ///
 /// By value it is the read's own inline path over an element the array
-/// has, the warning of one it has not got the kernel's; by reference
-/// the element is laid down:
+/// has ([`inline_path::fetch_dim_r`]), over the frame's slots lent with
+/// the call being built from one look at the frame table, whose
+/// `ZEND_CALL_SEND_ARG_BY_REF` is read first; the warning of a key the
+/// array has not got is the kernel's, out of line. By reference the
+/// element is laid down:
 ///
 /// ```php
 /// function k(array $a, array &$b, $j, $s) { return [g($a[$j]), g($a[$s]), g($b[$j]), r($b[$j]), r($b[5]), g($a[9])]; }
@@ -10043,8 +10107,32 @@ pub(crate) fn fetch_dim_func_arg<T: Tier, A: Operand + Default, B: Operand + Def
     op: &Opline,
     at: u32,
 ) -> Edge {
+    // By value, `ZEND_VM_DISPATCH_TO_HANDLER(ZEND_FETCH_DIM_R)`: the
+    // read's inline path, the call's bit read before the array is.
+    if B::default().kind() != OperandKind::Unused
+        && let Some((call, caller)) = req.vm_mut().stack.top_and_frame_mut(frame)
+        && !call.header().info.send_by_ref()
+        && let Some(inline) = inline_path::fetch_dim_r::<A, B>(caller.slots_mut(), code, op, at)
+    {
+        return inlined::<T>(req, frame, code, at, inline);
+    }
+    fetched_dim_func_arg::<A, B>(req, frame, code, op, at)
+}
+
+/// `FETCH_DIM_FUNC_ARG` past its inline path: the write fetch where the
+/// parameter takes its argument by reference, `[]` read, and the read's
+/// kernel ([`fetched_dim`]). A call of its own, as [`fetched_dim`] is
+/// for `FETCH_DIM_R`, so the loop's arm holds no more than the path.
+#[inline(never)]
+fn fetched_dim_func_arg<A: Operand + Default, B: Operand + Default>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+) -> Edge {
+    req.vm_mut().stand(frame, at);
     if sends_arg_by_ref(req) {
-        req.vm_mut().stand(frame, at);
         if matches!(A::default().kind(), OperandKind::Const | OperandKind::Tmp) {
             return use_tmp_in_write_context(req, frame, op);
         }
@@ -10052,14 +10140,12 @@ pub(crate) fn fetch_dim_func_arg<T: Tier, A: Operand + Default, B: Operand + Def
     }
     if B::default().kind() == OperandKind::Unused {
         // `zend_use_undef_in_read_context_helper`.
-        req.vm_mut().stand(frame, at);
         let thrown =
             crate::api::raising::throw_error(req, ClassId::ERROR, "Cannot use [] for reading");
         exec::free_operand(req, frame, op.op1_type, op.op1);
         return threw(req, frame, &thrown);
     }
-    // `ZEND_VM_DISPATCH_TO_HANDLER(ZEND_FETCH_DIM_R)`: the read's body.
-    fetch_dim_r::<T, A, B>(req, frame, code, op, at)
+    fetched_dim(req, frame, code, op)
 }
 
 /// `ZEND_FETCH_STATIC_PROP_FUNC_ARG` (`Z/Zend/zend_vm_def.h:1912`), a
@@ -23782,8 +23868,8 @@ pub(crate) fn type_check<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let at = req.vm().opline(frame);
-    if let Some(edge) = inline_type_check::<T>(req, frame, code, op, at, ByKind(op.op1_type)) {
-        return edge;
+    if let Some(inline) = inline_path::type_check(req.slots_mut(frame), code, op, at) {
+        return inlined::<T>(req, frame, code, at, inline);
     }
     let mask = op.extended_value;
     let computed = unary_kernel(req, frame, code, op, |_, value| {
@@ -23801,17 +23887,18 @@ pub(crate) fn type_check<T: Tier>(
 /// over a node built as the program goes gives up its element's copy; its last
 /// owner, whose release frees it, is the kernel's. `None`, with nothing
 /// touched, for everything the rule leaves to the kernel and a
-/// temporary for the answer holding an owner of something else.
+/// temporary for the answer holding an owner of something else. The
+/// frame's slots are all it reads and writes, and a jump back fused to
+/// it is answered as one ([`fused_way`]), so the loop serves it over the
+/// slots it holds ([`inline_path::type_check`]).
 #[inline(always)] // as `inline_arith`
-fn inline_type_check<T: Tier>(
-    req: &mut Request,
-    frame: FrameRef,
+fn inline_type_check(
+    slots: &mut [Zval],
     code: &OpArray,
     op: &Opline,
     at: u32,
     a: impl Operand,
-) -> Option<Edge> {
-    let slots = req.slots_mut(frame);
+) -> Option<Inline> {
     let z = a.read(slots, code, op.op1);
     let answer = inline::type_check(z, op.extended_value)?;
     let fused = branch::Peeked::fused(code, op, at);
@@ -23828,10 +23915,10 @@ fn inline_type_check<T: Tier>(
         *slots.get_mut(operand)? = Zval::UNDEF;
     }
     if let Some(jump) = fused {
-        return Some(branch_fused::<T>(req, frame, code, at, jump, answer));
+        return Some(fused_way(at, jump, answer));
     }
     write_owning_nothing(slots, op, Zval::bool(answer))?;
-    Some(Ok(advanced()))
+    Some(Inline::ADVANCE)
 }
 
 /// `ZEND_CAST`: [`crate::ops::cast`] over the operand to the type
@@ -27896,7 +27983,8 @@ pub(crate) mod inline_path {
     use super::branch::Branch;
     use super::{
         inline_arith, inline_assign, inline_assign_dim_op, inline_assign_op, inline_branch,
-        inline_compare, inline_fetch_dim_r, inline_identical, inline_incdec, write_owning_nothing,
+        inline_compare, inline_fetch_dim_r, inline_identical, inline_incdec, inline_type_check,
+        write_owning_nothing,
     };
     #[cfg(not(dispatch = "tailcall"))]
     use super::{inline_arith_assign, return_mask_holds};
@@ -28230,6 +28318,41 @@ pub(crate) mod inline_path {
         }
         std::hint::cold_path();
         None
+    }
+
+    /// `ZEND_TYPE_CHECK` over the operand as it stands, and the jump
+    /// fused to it ([`super::inline_type_check`]): `$node[0] === null`
+    /// over an element another owner holds, as `binary_trees`' kernel
+    /// asks it, given up here; a value's last owner, which its release
+    /// frees, is the kernel's.
+    ///
+    /// ```php
+    /// function f() { return [1]; }
+    /// $a = [[1], null, "s"]; $n = 0;
+    /// for ($i = 0; $i < 3; $i++) { if ($a[$i] === null) { $n++; } if (is_array($a[$i])) { echo "a"; } }
+    /// $b = [1, 2, null]; $j = 0; do { $j++; } while ($b[$j] !== null);
+    /// $t = $a[0] === null; $u = is_string($a[2]);
+    /// var_dump($n, $j, $t, $u, f() === null, is_array(f()), $undef === null);
+    /// ```
+    /// ```expect
+    /// a
+    /// Warning: Undefined variable $undef in %SCRATCH%/witness.php on line 7
+    /// int(1)
+    /// int(2)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    #[inline(always)] // in the loop and in the handler
+    pub(crate) fn type_check(
+        slots: &mut [Zval],
+        code: &OpArray,
+        op: &Opline,
+        at: u32,
+    ) -> Option<Inline> {
+        inline_type_check(slots, code, op, at, ByKind(op.op1_type))
     }
 
     /// `ZEND_FETCH_DIM_R` of an element an array holds.
