@@ -401,6 +401,28 @@ impl Scanner<'_> {
     }
 
     /// The token at the cursor, `ini_lex`.
+    ///
+    /// A single quote nothing closes ends the input where it stands, and
+    /// the empty quotes that do close read as nothing at all:
+    ///
+    /// ```php
+    /// var_dump(@parse_ini_string("foo = '\nbar = bar\n"), error_get_last()['message'], parse_ini_string("foo = ''"), parse_ini_string("foo = 'a\nb'\nbar = 1", false, INI_SCANNER_RAW));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// string(58) "syntax error, unexpected end of file in Unknown on line 1
+    /// "
+    /// array(1) {
+    ///   ["foo"]=>
+    ///   string(0) ""
+    /// }
+    /// array(2) {
+    ///   ["foo"]=>
+    ///   string(2) "'a"
+    ///   ["bar"]=>
+    ///   string(1) "1"
+    /// }
+    /// ```
     #[allow(clippy::too_many_lines)]
     fn lex(&mut self) -> (Tok, Val) {
         use State as S;
@@ -435,6 +457,12 @@ impl Scanner<'_> {
             }
             // 2: raw single-quoted string.
             if matches!(st, S::Value | S::SectionValue | S::Offset) {
+                // `YYFILL`: the rule's lookahead ran off the buffer with
+                // no closing quote, and the scanner `return 0`s from
+                // there, whatever a shorter rule would have matched.
+                if self.byte(p) == b'\'' && !self.buf[p + 1..].contains(&b'\'') {
+                    return (Tok::End, none);
+                }
                 offer(self.single_quoted(p), 2);
             }
             // 3: "]"{TABS}*{NEWLINE}? ending a section.
