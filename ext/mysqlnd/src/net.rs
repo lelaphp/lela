@@ -201,6 +201,7 @@ impl Net {
             Xport::Client {
                 timeout,
                 connect: true,
+                asynchronous: false,
                 persistent: self.persistent_id.clone(),
                 // `post_connect_set_opt`'s `mysqlnd_set_sock_no_delay`
                 // on a TCP stream, set as the socket connects.

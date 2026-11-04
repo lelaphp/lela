@@ -842,6 +842,7 @@ fn wrap_http_ex(
     let xport = Xport::Client {
         timeout,
         connect: true,
+        asynchronous: false,
         persistent: None,
         socket: SocketOptions::default(),
         context: chain.ctx,

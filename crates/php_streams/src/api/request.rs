@@ -224,6 +224,9 @@ pub enum Xport {
     Client {
         timeout: Option<std::time::Duration>,
         connect: bool,
+        /// `STREAM_XPORT_CONNECT_ASYNC`: `connect(2)` is begun and not
+        /// waited for, which `stream_select` then reports.
+        asynchronous: bool,
         persistent: Option<Vec<u8>>,
         socket: SocketOptions,
         context: Option<StreamCtx>,

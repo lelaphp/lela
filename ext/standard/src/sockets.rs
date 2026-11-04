@@ -399,6 +399,7 @@ fn fsockopen_stream(
     let xport = Xport::Client {
         timeout,
         connect: true,
+        asynchronous: false,
         persistent,
         socket: SocketOptions::default(),
         context: None,
@@ -540,6 +541,39 @@ fn fsockopen_stream(
 /// bool(false)
 /// bool(true)
 /// ```
+///
+/// `STREAM_CLIENT_ASYNC_CONNECT` begins the connect and does not wait for
+/// it: a refused connection is no failure here, `stream_select` reports the
+/// socket writable once the connect ended either way, and the stream
+/// reads as blocking though its socket is not until it is told so.
+///
+/// ```php
+/// $srv = stream_socket_server('tcp://127.0.0.1:0'); $n = stream_socket_get_name($srv, false); fclose($srv);
+/// var_dump(@stream_socket_client("tcp://$n", $c, $m, 1), $c > 0);
+/// $s = stream_socket_client("tcp://$n", $c, $m, 1, STREAM_CLIENT_CONNECT | STREAM_CLIENT_ASYNC_CONNECT);
+/// var_dump($c, $m, stream_get_meta_data($s)['blocked']);
+/// $r = $e = null; $w = [$s];
+/// var_dump(stream_select($r, $w, $e, 1), stream_socket_get_name($s, true));
+/// fclose($s);
+/// $srv = stream_socket_server('tcp://127.0.0.1:0'); $n = stream_socket_get_name($srv, false);
+/// $s = stream_socket_client("tcp://$n", $c, $m, 1, STREAM_CLIENT_ASYNC_CONNECT);
+/// $w = [$s]; var_dump(stream_select($r, $w, $e, 1), fwrite($s, "hi"));
+/// $a = stream_socket_accept($srv, 1); var_dump(fread($a, 2));
+/// fwrite($a, "yo"); stream_set_blocking($s, true); var_dump(fread($s, 2));
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(true)
+/// int(0)
+/// string(0) ""
+/// bool(true)
+/// int(1)
+/// bool(false)
+/// int(1)
+/// int(2)
+/// string(2) "hi"
+/// string(2) "yo"
+/// ```
 #[php_function]
 fn stream_socket_client(
     req: &mut Request,
@@ -565,6 +599,7 @@ fn stream_socket_client(
         Xport::Client {
             timeout: timeval(timeout),
             connect: flags & (STREAM_CLIENT_CONNECT | STREAM_CLIENT_ASYNC_CONNECT) != 0,
+            asynchronous: flags & STREAM_CLIENT_ASYNC_CONNECT != 0,
             // `stream_socket_client__%s`, the address escaped.
             persistent: (flags & STREAM_CLIENT_PERSISTENT != 0).then(|| {
                 let mut key = b"stream_socket_client__".to_vec();
