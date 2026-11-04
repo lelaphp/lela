@@ -2127,13 +2127,15 @@ impl ExtensionBuilder {
     /// its `MINIT` in bundle order, then each Zend extension's, so
     /// opcache's handler is saved over phar's whatever their bundle
     /// order. A name no extension declares, or one `disable_functions`
-    /// took out, is intercepted by nothing.
+    /// took out, is intercepted by nothing. `name` is the binary's,
+    /// pointed at and not copied, as phar spells the natives it replaces
+    /// in its own source.
     #[must_use]
-    pub fn intercept(mut self, name: &[u8], entry: Entry) -> ExtensionBuilder {
+    pub fn intercept(mut self, name: &'static [u8], entry: Entry) -> ExtensionBuilder {
         self.entry
             .supplies
             .intercepts
-            .push((Name(name.into()), entry));
+            .push((Name(php_heap::Bytes::borrowed(name)), entry));
         self
     }
 
