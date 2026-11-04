@@ -25,7 +25,8 @@ use php_macros::php_class;
 
 use crate::api::abi::{
     Callable, CloneObj, ConstArray, Core, CoreTable, DebugInfo, Entry, FromArgument, GcTable,
-    Instance, NamedVariadic, ObjectHandlers, Passed, Raw, Refusals, Static, This, Union, Untyped,
+    Instance, NamedVariadic, ObjectHandlers, Passed, PropertyRead, Raw, Refusals, Static, This,
+    Union, Untyped,
 };
 use crate::api::call::{Function, Target, write_prop};
 use crate::api::raising::{Printing, Thrown, error, throw, throw_over_pending, warning};
@@ -1631,22 +1632,56 @@ impl Exception {
         let _ = this;
     }
 
-    /// `ZEND_METHOD(Exception, getMessage)`: the `message` property. The
-    /// witness is the class's.
+    /// `ZEND_METHOD(Exception, getMessage)`: `zval_get_string` over the
+    /// `message` property, which declares no type, so whatever a subclass
+    /// wrote there is converted here, a `Stringable` object through its
+    /// `__toString` and an array with php's warning. An unset one is
+    /// asked of `__get`, as `GET_PROPERTY` reads it.
+    ///
+    /// ```php
+    /// class S { function __toString() { return "lazy"; } }
+    /// class E extends Exception { function __construct($m) { $this->message = $m; } }
+    /// class U extends Exception { function __construct() { unset($this->message); } function __get($n) { return "magic $n"; } }
+    /// var_dump((new E(new S))->getMessage(), (new E(3.5))->getMessage(), (new E(null))->getMessage(), (new E([]))->getMessage(), (new U)->getMessage());
+    /// try { (new E(new stdClass))->getMessage(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Warning: Array to string conversion in %s on line 5
+    /// string(4) "lazy"
+    /// string(3) "3.5"
+    /// string(0) ""
+    /// string(5) "Array"
+    /// string(13) "magic message"
+    /// Object of class stdClass could not be converted to string
+    /// ```
     #[php(final)]
-    fn getMessage(req: &mut Request, this: This<Self>) -> Result<Raw<PhpString>, Thrown> {
-        throwable_property(req, this.object(), b"message")
+    fn getMessage(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
+        throwable_string(req, this.object(), b"message")
     }
 
-    /// `ZEND_METHOD(Exception, getCode)`: the `code` property. The witness
-    /// is the class's.
+    /// `ZEND_METHOD(Exception, getCode)`: the `code` property, which
+    /// declares no type and is handed back as it stands.
+    ///
+    /// ```php
+    /// class E extends Exception { function __construct($c) { $this->code = $c; } }
+    /// var_dump((new E('x'))->getCode(), (new E([1]))->getCode());
+    /// ```
+    /// ```expect
+    /// string(1) "x"
+    /// array(1) {
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// ```
     #[php(final)]
-    fn getCode(req: &mut Request, this: This<Self>) -> Result<Untyped<Value>, Thrown> {
-        throwable_property::<Value>(req, this.object(), b"code").map(|code| Untyped(code.value()))
+    fn getCode(req: &mut Request, this: This<Self>) -> Result<Untyped<Owner<Value>>, Thrown> {
+        req.read_property(this.object(), b"code", PropertyRead::Warning)
+            .map(Untyped)
     }
 
     /// `ZEND_METHOD(Exception, getFile)` and `getLine`: the site
-    /// `zend_default_exception_new` recorded, which is where `new` ran.
+    /// `zend_default_exception_new` recorded, which is where `new` ran,
+    /// read through `zval_get_string` and `zval_get_long`.
     ///
     /// ```php
     /// $e = new Exception; var_dump($e->getLine(), $e->getFile());
@@ -1656,15 +1691,18 @@ impl Exception {
     /// string(%d) "%s.php"
     /// ```
     #[php(final)]
-    fn getFile(req: &mut Request, this: This<Self>) -> Result<Raw<PhpString>, Thrown> {
-        throwable_property(req, this.object(), b"file")
+    fn getFile(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
+        throwable_string(req, this.object(), b"file")
     }
 
     /// `ZEND_METHOD(Exception, getLine)`: the `line` property. The witness
     /// is `getFile`'s.
     #[php(final)]
-    fn getLine(req: &mut Request, this: This<Self>) -> Result<Raw<i64>, Thrown> {
-        throwable_property(req, this.object(), b"line")
+    fn getLine(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let line = req.read_property(this.object(), b"line", PropertyRead::Warning)?;
+        let long = crate::ops::get_long(req, &line);
+        line.give_up(req);
+        Ok(long)
     }
 
     /// `ZEND_METHOD(Exception, getTrace)`: the `trace` property, the frames
@@ -2106,13 +2144,13 @@ impl Error {
     #[php(tentative, implementation = Exception::__wakeup)]
     fn __wakeup(this: This<Self>);
     #[php(final, implementation = Exception::getMessage)]
-    fn getMessage(this: This<Self>) -> Raw<PhpString>;
+    fn getMessage(this: This<Self>) -> PhpString;
     #[php(final, implementation = Exception::getCode)]
     fn getCode(this: This<Self>) -> Untyped<Value>;
     #[php(final, implementation = Exception::getFile)]
-    fn getFile(this: This<Self>) -> Raw<PhpString>;
+    fn getFile(this: This<Self>) -> PhpString;
     #[php(final, implementation = Exception::getLine)]
-    fn getLine(this: This<Self>) -> Raw<i64>;
+    fn getLine(this: This<Self>) -> i64;
     #[php(final, implementation = Exception::getTrace)]
     fn getTrace(this: This<Self>) -> Raw<PhpArray>;
     #[php(final, implementation = Exception::getPrevious)]
@@ -2215,10 +2253,23 @@ fn update_exception_properties(
     Ok(())
 }
 
-/// `GET_PROPERTY(ZEND_THIS, name)`: the getter's property read off the
-/// receiver, `null` where the slot was never written, with one more
-/// owner for the return, handed back as the slot holds it whatever the
-/// getter declares, as `ZVAL_COPY` hands it back.
+/// `zval_get_string(GET_PROPERTY(ZEND_THIS, name))`, what the getters of
+/// `message` and `file` return.
+fn throwable_string(
+    req: &mut Request,
+    this: PhpObject,
+    name: &[u8],
+) -> Result<Owner<PhpString>, Thrown> {
+    let property = req.read_property(this, name, PropertyRead::Warning)?;
+    let string = crate::api::coerce::to_string(req, &property);
+    property.give_up(req);
+    string
+}
+
+/// `GET_PROPERTY_SILENT(ZEND_THIS, name)`: the getter's property read off
+/// the receiver, `null` where the slot was never written, with one more
+/// owner for the return, handed back as the slot holds it, as
+/// `ZVAL_COPY_DEREF` hands it back.
 fn throwable_property<T: FromArgument>(
     req: &mut Request,
     this: PhpObject,
