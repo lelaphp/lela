@@ -289,8 +289,10 @@ impl Emit<'_> {
         match self.entry_held {
             Some(super::EntryHeld::Registers { unready, .. }) => Ok(unready),
             Some(super::EntryHeld::Frame) => {
-                let slot = self.stood_out();
-                let load = self.b.ins().load(I8, trusted(), slot, super::HELD_UNREADY);
+                let load = self
+                    .b
+                    .ins()
+                    .stack_load(I64, I8, self.stood, super::HELD_UNREADY);
                 Ok(load)
             }
             None => Err(mismatch("a call in place before the entry")),
@@ -303,8 +305,10 @@ impl Emit<'_> {
         match self.entry_held {
             Some(super::EntryHeld::Registers { images, .. }) => Ok(images),
             Some(super::EntryHeld::Frame) => {
-                let slot = self.stood_out();
-                let load = self.b.ins().load(I64, trusted(), slot, super::HELD_IMAGES);
+                let load = self
+                    .b
+                    .ins()
+                    .stack_load(I64, I64, self.stood, super::HELD_IMAGES);
                 Ok(load)
             }
             None => Err(mismatch("the request's addresses read before the entry")),
