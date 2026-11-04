@@ -782,18 +782,33 @@ impl Mm {
     }
 
     /// `_emalloc_56` and its like (`ZEND_MM_BINS_INFO`): [`Mm::alloc`] of
-    /// a size the caller names as a constant, its bin read once and its
-    /// large and huge arms folded away, so an allocation php makes
-    /// through a specialised entry takes no call here either.
+    /// a small size the caller names as a constant, its bin read once and
+    /// no call taken, so an allocation php makes through a specialised
+    /// entry takes none here either. [`Mm::alloc`] stays a call: its
+    /// fast path in line would put every caller that makes a string past
+    /// the size its own caller inlines.
     #[inline(always)] // the point: `size` a constant where it is read
     #[allow(clippy::inline_always)]
     pub(crate) fn alloc_bin(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
-        self.alloc_as(size).map_err(|refused| self.refusal(refused))
+        #[cfg(test)]
+        if self.counted_out() {
+            return Err(self.refusal(Refused::Fatal(Fatal::hard_limit(self.hard_limit, size))));
+        }
+        if self.entries != Entries::Zend {
+            return self
+                .alloc_custom(size)
+                .map_err(|refused| self.refusal(refused));
+        }
+        let at = self
+            .alloc_small(size_to_bin(size))
+            .map_err(|refused| self.refusal(refused))?;
+        #[cfg(debug_assertions)]
+        self.trace(None, at);
+        Ok(at)
     }
 
     /// [`Mm::alloc`] as the heap's fallibility stands.
-    #[inline(always)] // so [`Mm::alloc_bin`] folds over its constant
-    #[allow(clippy::inline_always)]
+    #[inline]
     fn alloc_as(&mut self, size: usize) -> Result<NonNull<u8>, Refused> {
         #[cfg(test)]
         if self.counted_out() {
@@ -1211,8 +1226,7 @@ impl Mm {
     /// `zend_mm_alloc_heap`: `size` usable bytes, from the bin its size
     /// falls in, sixteen at least as it raises it, from a `run` of pages,
     /// or from a huge block of its own.
-    #[inline(always)] // `zend_always_inline`, its large and huge arms kept out of line
-    #[allow(clippy::inline_always)]
+    #[inline] // `zend_always_inline`, its large and huge arms kept out of line
     fn alloc_heap(&mut self, size: usize) -> Result<NonNull<u8>, Refused> {
         let size = size.max(MIN_USEABLE_BIN_SIZE);
         if size <= MAX_SMALL_SIZE {
