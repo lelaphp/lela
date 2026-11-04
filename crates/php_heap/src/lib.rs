@@ -896,9 +896,18 @@ impl Heap {
     #[inline(always)] // the tests of every release that leaves owners
     #[allow(clippy::inline_always)]
     pub(crate) fn owners_left(hooks: &mut dyn HeapHooks, z: Zval, header: Counted) {
-        if z.is_collectable() && (z.kind() == ZvalType::Reference || header.may_leak()) {
+        if Heap::may_be_root(z, header) {
             Heap::gc_check_possible_root(hooks, z);
         }
+    }
+
+    /// `gc_check_possible_root`'s tests, `GC_TYPE_INFO(ref) ==
+    /// GC_REFERENCE` and `GC_MAY_LEAK(ref)`, off the zval and the header
+    /// in hand: false for what no root buffer takes, or holds already.
+    #[inline(always)] // the tests of every release that leaves owners
+    #[allow(clippy::inline_always)]
+    pub(crate) fn may_be_root(z: Zval, header: Counted) -> bool {
+        z.is_collectable() && (z.kind() == ZvalType::Reference || header.may_leak())
     }
 
     /// `rc_dtor_func`: the value whose last owner went destroyed, a
@@ -1474,6 +1483,9 @@ mod tests {
         let len = 3_000_000;
         let mut block = heap.block(len).expect("a huge block");
         block.bytes_mut().fill(0x5a);
+        // One slice compare, which Miri runs natively; a closure per byte
+        // cost it 18M interpreted calls over the six refusals (#4116).
+        let filled = vec![0x5a; len];
         let at = block.bytes().as_ptr().addr();
         let counted = (heap.memory_usage(false), heap.memory_usage(true));
         for asked in [usize::MAX - 15, usize::MAX - page + 2, usize::MAX] {
@@ -1504,10 +1516,7 @@ mod tests {
                     heap.holds(at) && heap.holds(at + len - 1),
                     "{asked}: mapped"
                 );
-                assert!(
-                    kept.bytes().iter().all(|b| *b == 0x5a),
-                    "{asked}: its bytes"
-                );
+                assert!(kept.bytes() == filled.as_slice(), "{asked}: its bytes");
                 assert_eq!(
                     (heap.memory_usage(false), heap.memory_usage(true)),
                     counted,
@@ -1517,7 +1526,7 @@ mod tests {
             }
         }
         let grown = heap.block_resize(block, 2 * len).expect("still resizable");
-        assert!(grown.bytes()[..len].iter().all(|b| *b == 0x5a));
+        assert!(&grown.bytes()[..len] == filled.as_slice());
         heap.free_block(grown);
     }
 

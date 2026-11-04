@@ -236,7 +236,8 @@ impl CallerAt {
         let Some(packed) = self.0 else {
             return Caller::Outside;
         };
-        let frame = FrameRef((packed.get() & !CallerAt::LOOP).saturating_sub(1));
+        // `of` numbers a frame from one.
+        let frame = FrameRef((packed.get() & !CallerAt::LOOP).wrapping_sub(1));
         if packed.get() & CallerAt::LOOP == 0 {
             Caller::Opline(frame)
         } else {
@@ -895,18 +896,6 @@ impl Header {
     pub(crate) const CALLER_LOOP: u32 = CallerAt::LOOP;
 }
 
-/// How a frame's leave goes, as its flags decide it ([`CallInfo::leave`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Leave {
-    /// A user function's frame holding nothing past its slots.
-    Plain,
-    /// A user function's frame holding a receiver or a closure, which
-    /// the leave gives up after the CVs.
-    Held,
-    /// Any other: a call, extra arguments, an annex.
-    Kernel,
-}
-
 /// `ZEND_CALL_INFO`'s flags as this engine's frame has them, one bit
 /// each behind a name.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1042,17 +1031,19 @@ impl CallInfo {
     /// or a closure, `ZEND_CALL_RELEASE_THIS` and `ZEND_CALL_CLOSURE`.
     const HELD: u32 = Self::HAS_THIS | Self::CLOSURE;
 
-    /// How `zend_leave_helper` leaves a frame with these flags, read off
-    /// the one word ([`Leave`]).
+    /// Whether `zend_leave_helper`'s first arm refuses the frame: it was
+    /// no call a user function took, or holds extra arguments or an
+    /// annex.
     #[inline(always)] // once per return, in the loop's RETURN arms
-    pub(crate) fn leave(self) -> Leave {
-        if self.0 & Self::LEAVES_BY_KERNEL != 0 {
-            Leave::Kernel
-        } else if self.0 & Self::HELD != 0 {
-            Leave::Held
-        } else {
-            Leave::Plain
-        }
+    pub(crate) fn leaves_by_kernel(self) -> bool {
+        self.0 & Self::LEAVES_BY_KERNEL != 0
+    }
+
+    /// Whether the frame holds a receiver or a closure, which its leave
+    /// gives up after the CVs.
+    #[inline(always)] // once per return, in the loop's RETURN arms
+    pub(crate) fn holds(self) -> bool {
+        self.0 & Self::HELD != 0
     }
 
     pub(crate) fn top_code(self) -> bool {
@@ -1095,7 +1086,7 @@ impl CallInfo {
     /// arguments, a receiver, a closure or an annex
     /// ([`Header::set_receiver`], [`Header::set_closure`],
     /// [`Header::set_annex`]), read off the one word as
-    /// [`CallInfo::leave`] reads a frame's.
+    /// [`CallInfo::holds`] reads a frame's.
     #[inline(always)] // every native call's pop
     pub(crate) fn carries(self) -> bool {
         self.0 & (Self::HELD | Self::ANNEX) != 0

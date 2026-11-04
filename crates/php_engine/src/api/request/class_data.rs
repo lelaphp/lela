@@ -63,6 +63,7 @@ pub(super) struct ClassData {
 struct Laid {
     custom: usize,
     rows: Box<[php_heap::Zval]>,
+    destructs: bool,
 }
 
 /// Where a class's constants table stands against the request's
@@ -1020,7 +1021,10 @@ impl Request {
         class: ClassId,
     ) -> Option<Result<php_heap::Obj, php_heap::Fatal>> {
         let laid = self.class_data.rows.get(class)?.laid.as_ref()?;
-        Some(self.heap.object_laid(class.0, laid.custom, &laid.rows))
+        Some(
+            self.heap
+                .object_laid(class.0, laid.custom, &laid.rows, laid.destructs),
+        )
     }
 
     /// The row of `class` laid for [`Request::laid_object`] after its
@@ -1047,6 +1051,7 @@ impl Request {
         data.laid = Some(Laid {
             custom: made.custom,
             rows,
+            destructs: made.destructs,
         });
     }
 
