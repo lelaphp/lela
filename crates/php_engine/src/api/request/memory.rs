@@ -641,12 +641,11 @@ impl Request {
         adopted(self.fatal_of(allocated).map(PhpArray::of))
     }
 
-    /// `zend_new_array(size)`, what `INIT_ARRAY` lays down for the
-    /// elements it was told to expect, and `zend_hash_real_init_mixed`
+    /// `zend_new_array(size)`, `INIT_ARRAY`'s, and `zend_hash_real_init_mixed`
     /// over it where the opline says the array cannot be packed
     /// (`ZEND_ARRAY_NOT_PACKED`); the memory limit as the fatal that ends
     /// the request.
-    #[inline]
+    #[inline(always)] // `INIT_ARRAY`'s, `packed` tested there
     pub(crate) fn array_sized(&mut self, size: u32, packed: bool) -> Result<PhpArray, Thrown> {
         let allocated = if packed {
             self.heap.array_sized(size)
@@ -699,7 +698,7 @@ impl Request {
 
     /// `zend_hash_next_index_insert` over `a`, which has one owner:
     /// `false`, and `value` given up, when the next element is taken.
-    #[inline]
+    #[inline(always)] // `ADD_ARRAY_ELEMENT`'s, the answer no value through memory
     pub(crate) fn array_append(&mut self, a: Arr, value: Value) -> Result<bool, Thrown> {
         let z = value.into_zval();
         match self.heap.array_append(a, z) {

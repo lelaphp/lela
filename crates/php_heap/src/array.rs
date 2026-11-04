@@ -1497,15 +1497,22 @@ impl Arr {
 
     /// `zend_hash_real_init_packed_ex`.
     fn real_init_packed(self, mm: &mut dyn Allocate) -> Result<(), Fatal> {
-        let at = mm.alloc(Arr::packed_size(self.table_size()))?;
+        self.lay_packed(mm.alloc(Arr::packed_size(self.table_size()))?);
+        Ok(())
+    }
+
+    /// The end of `zend_hash_real_init_packed_ex`: the allocation `at`
+    /// the table's data, its two hash slots `HT_HASH_RESET_PACKED`.
+    #[inline]
+    fn lay_packed(self, at: NonNull<u8>) {
         self.header().table_mask.set(MIN_MASK);
+        // SAFETY: a packed table's allocation starts with two hash words.
+        unsafe { at.cast::<[u32; 2]>().write([INVALID; 2]) };
         self.set_data_addr(at);
         // php real-inits an object's table where it rebuilds it, before
         // it sets the flag; this table is initialised at its first
         // dynamic property, so the flag a rebuild set stands.
         self.set_flag_byte(PACKED | STATIC_KEYS | (self.flags() & HAS_EMPTY_IND));
-        self.hash_reset();
-        Ok(())
     }
 
     /// `zend_hash_real_init_mixed_ex`.
@@ -1807,6 +1814,17 @@ impl Arr {
         Some(used)
     }
 
+    /// `_zend_hash_index_add_or_update_i`'s `HASH_FLAG_UNINITIALIZED` arm
+    /// over the next index of a table never written, at `HT_MIN_SIZE`:
+    /// `zend_hash_real_init_packed_ex`'s specialised allocation, then
+    /// `add_to_packed` at zero.
+    #[inline]
+    fn is_unwritten_list(self) -> bool {
+        self.is_uninitialized()
+            && self.table_size() == MIN_SIZE
+            && self.header().next_free.get() == i64::MIN
+    }
+
     /// The `add_to_packed` arm: the slots between `nNumUsed` and `h`
     /// become holes, and `h + 1` is both the used count and the next
     /// free element.
@@ -1941,7 +1959,7 @@ impl crate::Heap {
     /// slots in 40, and each growth doubles from there. php-8.5.12 makes
     /// the arrays of the request's input with it.
     pub fn array_singleton(&mut self) -> Result<Arr, Fatal> {
-        let at = self.mm.alloc(HEADER)?;
+        let at = self.mm.alloc_bin(HEADER)?;
         // SAFETY: the allocation is the header's size and nothing else
         // holds it.
         Ok(unsafe { Arr::init(at, 1) })
@@ -1950,7 +1968,6 @@ impl crate::Heap {
     /// `zend_hash_check_size(size, heap->fallible)` over this heap: the
     /// table's size, and its overflow the heap's refusal or its end
     /// ([`Mm::overflow_refusal`]).
-    #[inline]
     fn table_size(&mut self, size: u32) -> Result<u32, Fatal> {
         check_size(size).map_err(|said| self.mm.overflow_refusal(said))
     }
@@ -1960,8 +1977,12 @@ impl crate::Heap {
     /// `zend_hash_check_size`.
     #[inline]
     pub fn array_sized(&mut self, size: u32) -> Result<Arr, Fatal> {
-        let size = self.table_size(size)?;
-        let at = self.mm.alloc(HEADER)?;
+        let size = if size <= MIN_SIZE {
+            MIN_SIZE
+        } else {
+            self.table_size(size)?
+        };
+        let at = self.mm.alloc_bin(HEADER)?;
         // SAFETY: the allocation is the header's size and nothing else
         // holds it.
         Ok(unsafe { Arr::init(at, size) })
@@ -2158,9 +2179,15 @@ impl crate::Heap {
     /// int(216)
     /// int(376)
     /// ```
-    #[inline]
+    #[allow(clippy::inline_always)] // `ADD_ARRAY_ELEMENT`'s, its answer no value through memory
+    #[inline(always)]
     pub fn array_append(&mut self, a: Arr, z: Zval) -> Result<bool, Fatal> {
         if a.append_in_room(z).is_some() {
+            return Ok(true);
+        }
+        if a.is_unwritten_list() {
+            a.lay_packed(self.mm.alloc_bin(Arr::packed_size(MIN_SIZE))?);
+            a.add_to_packed(0, z);
             return Ok(true);
         }
         self.array_append_out_of_room(a, z)
@@ -2598,7 +2625,7 @@ impl crate::Heap {
     /// ```
     pub fn array_dup(&mut self, a: Arr) -> Result<Arr, Fatal> {
         let source = a.header();
-        let at = self.mm.alloc(HEADER)?;
+        let at = self.mm.alloc_bin(HEADER)?;
         // SAFETY: the allocation is the header's size and nothing else
         // holds it.
         let target = unsafe { Arr::init(at, MIN_SIZE) };
@@ -2920,12 +2947,11 @@ impl crate::Heap {
     /// collector is already destroying, whose type it turned to
     /// `IS_NULL` (`rc_dtor_func`'s `zend_empty_destroy`); otherwise the
     /// table taken out of the root buffer and turned to `IS_NULL`
-    /// itself, every element released in order, a table's strings and
-    /// keys before its first other counted value in one flat pass
-    /// ([`Heap::array_destroy_flat`]) and the rest through `hooks`, with
-    /// the table standing around each, every string key given up, then
-    /// the iterators unregistered and the data and the header back to
-    /// the heap. A cell is `zend_reference_destroy`: the typed-property
+    /// itself, every element released in order by one loop
+    /// ([`Heap::array_empty_from`]) that hands the walk what needs `hooks`
+    /// and goes on past it, the table standing around each, every string
+    /// key given up, then the iterators unregistered and the data and the
+    /// header back to the heap. A cell is `zend_reference_destroy`: the typed-property
     /// sources given up first, as `zend_free_source_list` does, then the
     /// value held released and the cell's bytes given back after it.
     ///
@@ -2965,30 +2991,35 @@ impl crate::Heap {
         let (next, from) = match first {
             Last::Table(a) => match heap.array_destroy_flat(a) {
                 None => return,
-                Some(at) => (None, Some(Emptying::Table { a, at, key: None })),
+                Some(stopped) => {
+                    let next = Heap::release_within(hooks, stopped.val);
+                    (next, Some(stopped.frame(a)))
+                }
             },
             Last::Cell(_) => (Some(first), None),
         };
         // The heap's room for the walk, taken for its length and put back
         // emptied, so a walk allocates nothing after the request's first.
-        let mut walk = std::mem::take(&mut heap.destroying);
+        let mut walk = std::mem::take(&mut hooks.heap().destroying);
         walk.extend(from);
         Heap::destroy_into(hooks, next, &mut walk);
         walk.clear();
         hooks.heap().destroying = walk;
     }
 
-    /// [`Heap::destroy`]'s walk from `next`, or from the frame `walk`
-    /// holds on entry, empty on the way out. A table reached is begun by
-    /// [`Heap::array_destroy_flat`], and taken up as a frame only where
-    /// that hands back a position.
+    /// [`Heap::destroy`]'s walk from `next`, over the frame `walk` holds
+    /// on entry, empty on the way out. A table reached is begun by
+    /// [`Heap::array_destroy_begin`] and stands as a frame, which
+    /// [`Heap::array_empty_from`] goes on with, in one place of the loop.
     fn destroy_into(hooks: &mut dyn HeapHooks, mut next: Option<Last>, walk: &mut Vec<Emptying>) {
         loop {
             match next.take() {
-                Some(Last::Table(a)) => {
-                    if let Some(at) = hooks.heap().array_destroy_flat(a) {
-                        walk.push(Emptying::Table { a, at, key: None });
-                    }
+                Some(Last::Table(a)) if hooks.heap().array_destroy_begin(a) => {
+                    walk.push(Emptying::Table {
+                        a,
+                        at: 0,
+                        key: None,
+                    });
                 }
                 Some(Last::Cell(r)) => {
                     if r.sources() != 0 {
@@ -3001,7 +3032,7 @@ impl crate::Heap {
                     next = Heap::release_within(hooks, held);
                     continue;
                 }
-                None => {}
+                Some(Last::Table(_)) | None => {}
             }
             let Some(top) = walk.last_mut() else {
                 return;
@@ -3016,20 +3047,19 @@ impl crate::Heap {
                     unsafe { hooks.heap().give_back(r.address(), r.gc().pinned()) };
                 }
                 Emptying::Table { a, at, key } => {
+                    let heap = hooks.heap();
                     if let Some(k) = key.take() {
-                        hooks.heap().release_string(k);
+                        heap.release_string(k);
                     }
-                    let a = *a;
-                    let Some((val, k)) = a.element_from(at) else {
-                        walk.pop();
-                        hooks.heap().array_give_back(a);
-                        continue;
-                    };
-                    next = Heap::release_within(hooks, val);
-                    match (next.is_some(), k) {
-                        (true, Some(k)) => *key = Some(k),
-                        (false, Some(k)) => hooks.heap().release_string(k),
-                        (_, None) => {}
+                    match heap.array_empty_from(*a, *at) {
+                        None => {
+                            walk.pop();
+                        }
+                        Some(stopped) => {
+                            *at = stopped.at;
+                            *key = stopped.key;
+                            next = Heap::release_within(hooks, stopped.val);
+                        }
                     }
                 }
             }
@@ -3038,6 +3068,7 @@ impl crate::Heap {
 
     /// [`Heap::release`] of one element inside [`Heap::destroy`]: what it
     /// would destroy is handed back for the walk to take next.
+    #[inline]
     fn release_within(hooks: &mut dyn HeapHooks, z: Zval) -> Option<Last> {
         let header = z.counted()?;
         match Heap::give_up(header) {
@@ -3076,20 +3107,13 @@ impl crate::Heap {
     }
 
     /// The start of `zend_array_destroy` over a table its last owner let
-    /// go of, and as much of its loop as serves no destructor: nothing for
-    /// a table the cycle collector is destroying already, whose type it
+    /// go of, and as much of its loop as needs no walk: nothing for a
+    /// table the cycle collector is destroying already, whose type it
     /// turned to `IS_NULL`; otherwise the table out of the root buffer and
-    /// turned to `IS_NULL`, then each slot of a packed list, or each
-    /// bucket of a hash that is not a tombstone, released in place while
-    /// it holds a string or no count, a string freed at its last owner
-    /// with no hooks, as `i_zval_ptr_dtor` reaches `zend_string_destroy`,
-    /// and a bucket's string key given up after its value. `None` where
-    /// that was every element, and the table goes back, its data and its
-    /// header; otherwise the position of the first other counted value,
-    /// its key not yet given up, for [`Heap::destroy`]'s walk to go on
-    /// from. So `explode`'s list and `preg_match`'s named groups go in one
-    /// pass, and a destructor still runs after the strings before it are
-    /// freed and before the ones after it, as php's one loop runs it.
+    /// turned to `IS_NULL`, then [`Heap::array_empty_from`] from its first
+    /// position. So `explode`'s list and `preg_match`'s named groups go in
+    /// one pass, and a destructor still runs after the strings before it
+    /// are freed and before the ones after it, as php's one loop runs it.
     ///
     /// ```php
     /// $b = memory_get_usage();
@@ -3139,26 +3163,71 @@ impl crate::Heap {
     /// ```expect
     /// 1088 576 32 32
     /// ```
-    fn array_destroy_flat(&mut self, a: Arr) -> Option<u32> {
-        if a.gc().kind() == ZvalType::Null as u32 {
+    fn array_destroy_flat(&mut self, a: Arr) -> Option<Stopped> {
+        if !self.array_destroy_begin(a) {
             return None;
+        }
+        self.array_empty_from(a, 0)
+    }
+
+    /// What `zend_array_destroy` does before its loop: the table out of
+    /// the root buffer and turned to `IS_NULL`; `false`, and nothing
+    /// done, for one the cycle collector is destroying already.
+    #[inline]
+    fn array_destroy_begin(&mut self, a: Arr) -> bool {
+        if a.gc().kind() == ZvalType::Null as u32 {
+            return false;
         }
         self.gc.remove_from_buffer(crate::collector::Node::Arr(a));
         a.gc().set_kind(ZvalType::Null);
+        true
+    }
+
+    /// `zend_array_destroy`'s one loop from position `from`: each slot of
+    /// a packed list, or each bucket of a hash that is not a tombstone,
+    /// released in place, then the table given back. `None` where that
+    /// was every element; otherwise the first element it cannot release
+    /// here, and where to go on from once the walk has. A value another
+    /// owner holds is offered to the root buffer here, at its place in the
+    /// loop, as `i_zval_ptr_dtor` offers it:
+    ///
+    /// ```php
+    /// $s = [1]; $s[] = 2; $o = new stdClass; $n = [$o];
+    /// $h = [$o, 'k' => $s, [$s, $o], 'n' => $s, 7 => $n];
+    /// $h = null;
+    /// var_dump(gc_status()['roots'], count($s), count($n));
+    /// ```
+    /// ```expect
+    /// int(3)
+    /// int(2)
+    /// int(1)
+    /// ```
+    #[allow(clippy::inline_always)] // the walk's one loop, in the walk, its answer no value through memory
+    #[inline(always)]
+    fn array_empty_from(&mut self, a: Arr, from: u32) -> Option<Stopped> {
         if a.is_packed() {
-            for at in 0..a.num_used() {
-                if !self.release_flat(a.read_slot(at)) {
-                    return Some(at);
+            for at in from..a.num_used() {
+                let val = a.read_slot(at);
+                if !self.release_flat(val) {
+                    return Some(Stopped {
+                        val,
+                        key: None,
+                        at: at + 1,
+                    });
                 }
             }
         } else if !a.is_uninitialized() {
-            for at in 0..a.num_used() {
+            for at in from..a.num_used() {
                 let b = a.read_bucket(at);
                 if b.val.is_undef() {
                     continue;
                 }
                 if !self.release_flat(b.val) {
-                    return Some(at);
+                    return Some(Stopped {
+                        val: b.val,
+                        key: b.key,
+                        at: at + 1,
+                    });
                 }
                 if let Some(k) = b.key {
                     self.release_string(k);
@@ -3169,16 +3238,19 @@ impl crate::Heap {
         None
     }
 
-    /// `i_zval_ptr_dtor` of an element whose release serves no
-    /// destructor: nothing for a value with no count, and a string given
-    /// up, freed at its last owner with no hooks. `false`, and nothing
-    /// done, for every other counted value, the walk's.
+    /// `i_zval_ptr_dtor` of an element where it serves no destructor and
+    /// collects nothing: nothing for a value with no count, a string
+    /// given up, freed at its last owner with no hooks, and any other
+    /// value's owner given up where others stand and the root buffer
+    /// has room ([`Heap::release_kept`]). `false`, and nothing done, for
+    /// a last owner of anything else, the walk's.
+    #[inline]
     fn release_flat(&mut self, z: Zval) -> bool {
         let Some(header) = z.counted() else {
             return true;
         };
         let Some(s) = z.as_str() else {
-            return false;
+            return self.release_kept(z);
         };
         if Heap::give_up(header) == gc::Release::Last {
             self.free_string(s);
@@ -3189,20 +3261,26 @@ impl crate::Heap {
     /// The end of `zend_array_destroy` once every element is released:
     /// the data back to the heap, then the header, or what a pin over it
     /// reads as an emptied table.
+    #[inline]
     fn array_give_back(&mut self, a: Arr) {
         Heap::array_free_data(self, a);
         let pinned = a.gc().pinned();
         if pinned {
             a.emptied();
         }
-        // SAFETY: the header came from `array_sized`, its last owner has
-        // given it up and its contents are freed, so only a pin names it.
-        unsafe { self.give_back(a.address(), pinned) };
+        if !self.retiring(a.address(), pinned) {
+            // SAFETY: the header came from `array_sized`, its last owner
+            // has given it up and its contents are freed, so nothing names
+            // it, and an allocation of `HEADER` is what `array_sized` made.
+            unsafe { self.mm.free_bin(a.address(), HEADER) };
+        }
     }
 
     /// The end of `zend_array_destroy` and `zend_hash_destroy` once
     /// every element is released: the iterators unregistered and the
     /// data back to the heap.
+    #[allow(clippy::inline_always)] // in `array_give_back`'s frame, as `zend_array_destroy` frees
+    #[inline(always)]
     fn array_free_data(heap: &mut Heap, a: Arr) {
         heap.iterators.remove(a);
         if let Some(data) = a.data_addr() {
@@ -3221,6 +3299,27 @@ impl crate::Heap {
 pub(crate) enum Emptying {
     Table { a: Arr, at: u32, key: Option<Str> },
     Cell(Ref),
+}
+
+/// Where [`Heap::array_empty_from`] stopped: the element it left for
+/// [`Heap::destroy`]'s walk, its string key not yet given up, and the
+/// position past it.
+struct Stopped {
+    val: Zval,
+    key: Option<Str>,
+    at: u32,
+}
+
+impl Stopped {
+    /// The frame that goes on with `a` once the walk has released the
+    /// element.
+    fn frame(self, a: Arr) -> Emptying {
+        Emptying::Table {
+            a,
+            at: self.at,
+            key: self.key,
+        }
+    }
 }
 
 impl Arr {

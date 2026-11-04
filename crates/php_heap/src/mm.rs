@@ -781,6 +781,32 @@ impl Mm {
         Refused::fallible(answered)
     }
 
+    /// `_emalloc_56` and its like (`ZEND_MM_BINS_INFO`): [`Mm::alloc`] of
+    /// a small size the caller names as a constant, its bin read once and
+    /// no call taken, so an allocation php makes through a specialised
+    /// entry takes none here either. [`Mm::alloc`] stays a call: its
+    /// fast path in line would put every caller that makes a string past
+    /// the size its own caller inlines.
+    #[inline(always)] // the point: `size` a constant where it is read
+    #[allow(clippy::inline_always)]
+    pub(crate) fn alloc_bin(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
+        #[cfg(test)]
+        if self.counted_out() {
+            return Err(self.refusal(Refused::Fatal(Fatal::hard_limit(self.hard_limit, size))));
+        }
+        if self.entries != Entries::Zend {
+            return self
+                .alloc_custom(size)
+                .map_err(|refused| self.refusal(refused));
+        }
+        let at = self
+            .alloc_small(size_to_bin(size))
+            .map_err(|refused| self.refusal(refused))?;
+        #[cfg(debug_assertions)]
+        self.trace(None, at);
+        Ok(at)
+    }
+
     /// [`Mm::alloc`] as the heap's fallibility stands.
     #[inline]
     fn alloc_as(&mut self, size: usize) -> Result<NonNull<u8>, Refused> {
@@ -929,6 +955,30 @@ impl Mm {
         }
         // SAFETY: the caller's contract, handed on.
         unsafe { self.free_heap(at) };
+        #[cfg(debug_assertions)]
+        if let Some(traces) = &mut self.traces {
+            traces.remove(&at.as_ptr().addr());
+        }
+    }
+
+    /// `_efree_56` and its like (`efree_size`): [`Mm::free`] of a block of
+    /// a size the caller names as a constant, its bin read off that and
+    /// not off the page map.
+    ///
+    /// # Safety
+    ///
+    /// As [`Mm::free_heap`]'s, and `at` came from an allocation of `size`.
+    #[inline(always)] // the point: `size` a constant where it is read
+    #[allow(clippy::inline_always)]
+    pub(crate) unsafe fn free_bin(&mut self, at: NonNull<u8>, size: usize) {
+        if self.entries != Entries::Zend {
+            // SAFETY: the caller's contract, handed on.
+            unsafe { self.free_custom(at) };
+            return;
+        }
+        // SAFETY: the caller's contract: an allocation of `size` is a slot
+        // of the bin `size` falls in.
+        unsafe { self.free_small(at, size_to_bin(size)) };
         #[cfg(debug_assertions)]
         if let Some(traces) = &mut self.traces {
             traces.remove(&at.as_ptr().addr());
@@ -1537,6 +1587,7 @@ impl Mm {
     /// # Safety
     ///
     /// `at` is a live slot of bin `bin_num` in this heap.
+    #[inline] // `zend_always_inline`
     unsafe fn free_small(&mut self, at: NonNull<u8>, bin_num: usize) {
         #[cfg(debug_assertions)]
         if self.quarantine[bin_num].holds(at.cast()) {

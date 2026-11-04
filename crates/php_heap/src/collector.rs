@@ -477,11 +477,17 @@ impl Collector {
     /// its address names is put back on the unused list. What
     /// `zend_array_destroy` and `zend_objects_store_del` do before the
     /// value's memory goes, so the buffer never names freed memory.
+    #[inline]
     pub(crate) fn remove_from_buffer(&mut self, node: Node) {
-        let header = node.gc();
-        if header.is_unplaced() {
-            return;
+        if !node.gc().is_unplaced() {
+            self.remove_placed(node);
         }
+    }
+
+    /// [`Collector::remove_from_buffer`] past `GC_REMOVE_FROM_BUFFER`'s
+    /// inline test: a call of its own, as php's `gc_remove_from_buffer` is.
+    fn remove_placed(&mut self, node: Node) {
+        let header = node.gc();
         let address = header.address();
         header.set_place(None, Colour::Black);
         let (Some(address), Some(buf)) = (address, self.buf.as_mut()) else {
