@@ -1474,6 +1474,9 @@ mod tests {
         let len = 3_000_000;
         let mut block = heap.block(len).expect("a huge block");
         block.bytes_mut().fill(0x5a);
+        // One slice compare, which Miri runs natively; a closure per byte
+        // cost it 18M interpreted calls over the six refusals (#4116).
+        let filled = vec![0x5a; len];
         let at = block.bytes().as_ptr().addr();
         let counted = (heap.memory_usage(false), heap.memory_usage(true));
         for asked in [usize::MAX - 15, usize::MAX - page + 2, usize::MAX] {
@@ -1504,10 +1507,7 @@ mod tests {
                     heap.holds(at) && heap.holds(at + len - 1),
                     "{asked}: mapped"
                 );
-                assert!(
-                    kept.bytes().iter().all(|b| *b == 0x5a),
-                    "{asked}: its bytes"
-                );
+                assert!(kept.bytes() == filled.as_slice(), "{asked}: its bytes");
                 assert_eq!(
                     (heap.memory_usage(false), heap.memory_usage(true)),
                     counted,
@@ -1517,7 +1517,7 @@ mod tests {
             }
         }
         let grown = heap.block_resize(block, 2 * len).expect("still resizable");
-        assert!(grown.bytes()[..len].iter().all(|b| *b == 0x5a));
+        assert!(&grown.bytes()[..len] == filled.as_slice());
         heap.free_block(grown);
     }
 
