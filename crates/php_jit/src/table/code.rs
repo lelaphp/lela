@@ -25,17 +25,19 @@
 //! Beside the arena, the system's page its size is rounded to, and the
 //! three calls the `PERF_DUMP` record needs that only `unsafe` reaches:
 //! the jitdump's one mapping, the monotonic clock its records are
-//! stamped with, and the thread that wrote them.
+//! stamped with, and the thread that wrote them. And [`NullTable`], a
+//! table nothing writes until a slot is.
 #![deny(
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block
 )]
 
 use std::io;
-use std::ops::Range;
+use std::marker::PhantomData;
+use std::ops::{Deref, Range};
 use std::ptr::NonNull;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 /// The size of one chunk, the unit the arena hands out and takes back.
 pub(crate) const CHUNK: usize = 64 * 1024;
@@ -569,6 +571,50 @@ impl Drop for Mapping {
     }
 }
 
+/// A table of pointers, each null until it is written, in an anonymous
+/// mapping of its own: php's `zend_jit_traces`, untouched shared memory
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:57`), so a slot costs a page only
+/// once one in that page is written, however long the bound that sized
+/// it. A mapping, not `calloc`: the allocator clears a block it reuses,
+/// which writes each of its pages.
+#[cfg(unix)]
+pub(crate) struct NullTable<T> {
+    /// None where the system refused the mapping or `len` was zero.
+    map: Option<Mapping>,
+    of: PhantomData<AtomicPtr<T>>,
+}
+
+#[cfg(unix)]
+impl<T> NullTable<T> {
+    /// `len` null slots; none where the system refuses the mapping, so a
+    /// read past the table's length answers as a null slot would.
+    pub(crate) fn new(len: usize) -> NullTable<T> {
+        let bytes = len.saturating_mul(size_of::<AtomicPtr<T>>());
+        let flags = libc::MAP_PRIVATE | libc::MAP_ANON;
+        let prot = libc::PROT_READ | libc::PROT_WRITE;
+        NullTable {
+            map: Mapping::new(bytes, prot, flags, None).ok(),
+            of: PhantomData,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl<T> Deref for NullTable<T> {
+    type Target = [AtomicPtr<T>];
+
+    fn deref(&self) -> &[AtomicPtr<T>] {
+        let Some(map) = &self.map else {
+            return &[];
+        };
+        let len = map.len / size_of::<AtomicPtr<T>>();
+        // SAFETY: `map` is `len` slots, page-aligned, readable and writable
+        // while `self` lives. A fresh anonymous mapping reads zero, which
+        // is a null `AtomicPtr`, and every write is through these atomics.
+        unsafe { std::slice::from_raw_parts(map.base.as_ptr().cast(), len) }
+    }
+}
+
 /// `file` mapped once, readable and executable, and unmapped: the
 /// `mmap` event `perf inject` finds a jitdump by, which php's
 /// `ir_perf_jitdump_open` makes.
@@ -974,9 +1020,58 @@ mod linux {
     }
 }
 
+#[cfg(all(test, unix))]
+impl<T> NullTable<T> {
+    /// How many of the table's pages are in memory, as `mincore` reads
+    /// them: none before a first write.
+    pub(crate) fn resident_pages(&self) -> usize {
+        let Some(map) = &self.map else {
+            return 0;
+        };
+        let mut seen = vec![0; map.len.div_ceil(page_size())];
+        // SAFETY: `map` is mapped for `map.len` bytes, of which `seen` has
+        // a byte per page for the call to write.
+        let read = unsafe {
+            libc::mincore(
+                map.base.as_ptr().cast::<libc::c_void>(),
+                map.len,
+                seen.as_mut_ptr(),
+            )
+        };
+        assert_eq!(read, 0, "mincore: {}", io::Error::last_os_error());
+        // The low bit is "in core" on macOS and on Linux.
+        seen.iter().filter(|page| **page & 1 != 0).count()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A table takes no page until a slot is written, and then that
+    /// slot's alone; and the reading sees a page that is written, so a
+    /// table laid by writing every slot would fail it.
+    #[test]
+    #[cfg_attr(miri, ignore = "mincore is no call Miri has")]
+    fn a_null_table_takes_a_page_only_for_a_slot_written() {
+        let table = NullTable::<u8>::new(100_000);
+        assert_eq!(table.len(), 100_000);
+        assert_eq!(table.resident_pages(), 0);
+        table[0].store(NonNull::dangling().as_ptr(), Ordering::Release);
+        assert_eq!(table.resident_pages(), 1);
+        for slot in table.iter() {
+            slot.store(NonNull::dangling().as_ptr(), Ordering::Release);
+        }
+        let pages = (100_000 * size_of::<usize>()).div_ceil(page_size());
+        assert_eq!(table.resident_pages(), pages);
+    }
+
+    /// No slots, and a table that reads as a table of none, where the
+    /// mapping has no length to be made at.
+    #[test]
+    fn a_null_table_of_no_slots_is_empty() {
+        assert!(NullTable::<u8>::new(0).is_empty());
+    }
 
     fn arena(chunks: usize) -> Result<Arena<HeapPages>, String> {
         Arena::new(chunks * CHUNK).map_err(|e| e.to_string())
