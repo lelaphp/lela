@@ -34,7 +34,7 @@ mod stack;
 pub mod values;
 
 pub use emit::is_reserved_class_name;
-pub use stack::{Reentered, StackLimit};
+pub use stack::{Passed, Reentered, StackLimit};
 
 /// `MAXPATHLEN` (`Z/Zend/zend_virtual_cwd.h:39`), the host's
 /// `PATH_MAX`: 4096 on Linux, 1024 on macOS and the BSDs. The room

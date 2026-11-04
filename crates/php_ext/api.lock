@@ -527,6 +527,7 @@ raising::argument_error
 raising::arity
 raising::call_stack_end
 raising::call_stack_limit
+raising::call_stack_refuses
 raising::catch_fatal
 raising::clear
 raising::deprecated

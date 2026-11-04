@@ -7,7 +7,7 @@
 use php_ext::abi::{PropertyPurpose, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{Exponent, float_format};
-use php_ext::raising::{Thrown, call_stack_end};
+use php_ext::raising::{Thrown, call_stack_refuses};
 use php_ext::request::Request;
 use std::ops::ControlFlow;
 
@@ -193,10 +193,11 @@ fn indented(req: &mut Request, width: usize, rest: &[u8]) {
 /// `:288`): where the stack has passed `zend.max_allowed_stack_size`, the
 /// row is `nesting level too deep` after its indent, with no newline, in
 /// place of its key and value, and the walk goes on to the next row.
-/// The thread's floor, which php leaves unguarded, is asked at the same
-/// place after the limit, so where the two stand together (under detect)
-/// the row is php's text whatever depth its frames reach, and the row's
-/// value is dumped with no floor asked again ([`dumped`]).
+/// The thread's floor, which php leaves unguarded, is asked with the
+/// limit against one position ([`call_stack_refuses`]), so where the two
+/// stand together (under detect) the row is php's text whatever depth
+/// its frames reach, and the row's value is dumped with no floor asked
+/// again ([`dumped`]).
 ///
 /// `var_dump_stack_limit.phpt`'s shape under the small-stack regime,
 /// the dump handed to an `ob_start` callback that answers only whether
@@ -219,9 +220,7 @@ fn indented(req: &mut Request, width: usize, rest: &[u8]) {
 /// guarded
 /// ```
 fn too_deep(req: &mut Request, level: usize) -> Result<bool, Thrown> {
-    if !req.limits().stack_overflowed() {
-        // Unguarded in php, held to the thread's floor here.
-        call_stack_end(req)?;
+    if !call_stack_refuses(req)? {
         return Ok(false);
     }
     indented(req, level + 1, b"nesting level too deep");
@@ -309,8 +308,9 @@ fn dump_row(req: &mut Request, row: &Row, level: usize) -> Result<(), Thrown> {
 /// float(2)
 /// ```
 fn dump(req: &mut Request, value: &Value, level: usize) -> Result<(), Thrown> {
-    // Unguarded in php, held to the thread's floor here.
-    call_stack_end(req)?;
+    // Unguarded in php, held to the thread's floor here; past the limit
+    // too, the value's next row refuses in php's words.
+    call_stack_refuses(req)?;
     dumped(req, value, level)
 }
 
