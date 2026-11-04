@@ -173,7 +173,7 @@ pub(crate) fn declared_parameters(params: &[Param]) -> syn::Result<Tokens> {
         each.push(quote! {
             #root::__private::NativeParameter {
                 name: #name,
-                ty: <#ty as #root::abi::FromArgument>::declared,
+                ty: || <#ty as #root::abi::FromArgument>::DECLARED,
                 by_ref: <#ty as #root::abi::FromArgument>::BY_REF,
                 prefer_ref: #prefer_ref,
                 variadic: <#ty as #root::abi::FromArgument>::VARIADIC,
@@ -492,7 +492,7 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
                     #root::__private::NativeFunction {
                         name: #php,
                         parameters: #parameters,
-                        return_type: <#output as #root::abi::IntoReturn>::declared,
+                        return_type: || <#output as #root::abi::IntoReturn>::DECLARED,
                         frameless: &[#(#frameless),*],
                         attributes: #attributes,
                         entry,

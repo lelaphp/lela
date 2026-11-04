@@ -14,8 +14,8 @@
 
 use super::{Body, Collision, Held, Raised, Refusal, Refused, Site, at_class, text};
 use php_unit::decl::{
-    AliasModifier, ClassConstDecl, ClassDecl, ClassKind, ConstExpr, MethodDecl, Name, PropertyDecl,
-    TraitAdaptation, TraitMethodRef, Visibility,
+    AliasModifier, ClassConstDecl, ClassDecl, ClassKind, ConstExpr, List, MethodDecl, Name,
+    PropertyDecl, TraitAdaptation, TraitMethodRef, Visibility,
 };
 
 /// One method copied from a trait as `zend_traits_copy_functions` copies
@@ -688,7 +688,7 @@ impl<'a> Composer<'a, '_> {
     /// ```expect exit=255
     /// Fatal error: C and A define the same property ($x) in the composition of C. However, the definition differs and is considered incompatible. Class was composed in %s on line 3
     /// ```
-    fn bind_properties(&self) -> Result<Vec<PropertyDecl>, Refusal> {
+    fn bind_properties(&self) -> Result<List<PropertyDecl>, Refusal> {
         let mut table = self.child.properties.clone();
         for (at, used) in self.traits.iter().enumerate() {
             let Some(used) = used else {
@@ -878,8 +878,12 @@ fn unlined(expr: &ConstExpr) -> ConstExpr {
                 *line = 0;
                 clear(operand);
             }
-            E::Binary { lhs, rhs, line, .. }
-            | E::Dim {
+            E::Binary { lhs, rhs, line, .. } => {
+                *line = 0;
+                clear(lhs);
+                clear(rhs);
+            }
+            E::Dim {
                 container: lhs,
                 dim: rhs,
                 line,
@@ -964,7 +968,7 @@ mod tests {
             is_virtual: false,
             ty: None,
             default: None,
-            attributes: Vec::new(),
+            attributes: Vec::new().into(),
             doc_comment: None,
             hooks: None,
         };

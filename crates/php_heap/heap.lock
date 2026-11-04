@@ -52,6 +52,7 @@ Block::bytes_mut
 Block::is_empty
 Block::len
 Bytes
+Bytes::as_borrowed
 Bytes::borrowed
 CallStack
 ChunkCache

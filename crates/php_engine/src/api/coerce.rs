@@ -1429,7 +1429,7 @@ fn resolve_named(ty: &Type, own: &str, parent: Option<&str>) -> Type {
     match ty {
         Type::SelfClass => named(own),
         Type::ParentClass => parent.map_or(Type::ParentClass, named),
-        Type::Nullable(inner) => Type::Nullable(Box::new(resolve_named(inner, own, parent))),
+        Type::Nullable(inner) => Type::Nullable(Box::new(resolve_named(inner, own, parent)).into()),
         Type::Union(members) => Type::Union(
             members
                 .iter()

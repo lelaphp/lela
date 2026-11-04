@@ -911,7 +911,7 @@ pub(super) fn reset_id(req: &mut Request) -> Result<bool, Thrown> {
     match req.extensions().named(b"session") {
         Some(session) => {
             req.symbols_mut()
-                .register_constant(session, b"SID", sid, sid_attributes());
+                .register_constant(session, b"SID", sid, sid_attributes().into());
         }
         None => sid.give_up(req),
     }
@@ -946,7 +946,8 @@ fn sid_attributes() -> Vec<Attribute> {
         arguments: vec![
             argument(b"since", b"8.4"),
             argument(b"message", b"as GET/POST sessions were deprecated"),
-        ],
+        ]
+        .into(),
         line: 0,
         strict: false,
         own_name: true,

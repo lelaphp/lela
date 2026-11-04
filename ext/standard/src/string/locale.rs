@@ -314,11 +314,14 @@ pub(super) fn setlocale(
         // Each one an array, or `zend_parse_arg_str`'s string or null, past
         // `Z_PARAM_VARIADIC('+')`, where the stub declares `$locales,
         // ...$rest` untyped.
-        let ty = php_ext::decl::Type::Union(vec![
-            php_ext::decl::Type::Array,
-            php_ext::decl::Type::String,
-            php_ext::decl::Type::Null,
-        ]);
+        let ty = php_ext::decl::Type::Union(
+            vec![
+                php_ext::decl::Type::Array,
+                php_ext::decl::Type::String,
+                php_ext::decl::Type::Null,
+            ]
+            .into(),
+        );
         candidates.push(php_ext::coerce::coerce_param(req, &value, &ty, position)?);
     }
     for candidate in candidates {

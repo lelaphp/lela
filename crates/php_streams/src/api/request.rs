@@ -1204,9 +1204,7 @@ pub type FilterFactory =
 /// php's "must be an open stream resource".
 impl FromArgument for Stream {
     const MASK: u32 = <Resource as FromArgument>::MASK;
-    fn declared() -> Option<Type> {
-        None
-    }
+    const DECLARED: Option<Type> = None;
     fn accepts(value: &Value) -> bool {
         Resource::accepts(value)
     }
