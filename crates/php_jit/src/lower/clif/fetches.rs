@@ -12,6 +12,7 @@ use cranelift_codegen::ir::{InstBuilder, Value};
 use php_engine::tier::{PLACE, PlaceLayout};
 use php_heap::{Arr, ZvalType};
 
+use super::dims::Held;
 use super::{Emit, KIND, Kernel, Refuse, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
 use crate::types::{Abort, Leave, Line, OpId, Operand};
 
@@ -513,7 +514,7 @@ impl Emit<'_> {
         self.b.seal_block(read);
         match self.within(at).as_slice() {
             [] => self.copied_element(element, out),
-            [held] => self.held_element(*held, None, element, out),
+            [held] => self.held_element(*held, None, Held::Set(element), out),
             _ => Err(mismatch("a constant's fetch holds guards of another kind")),
         }
     }

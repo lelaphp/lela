@@ -24,9 +24,20 @@ use crate::types::{
 /// opline's exit, for the interpreter to serve it again and warn, or a
 /// block of the caller's with its arguments.
 #[derive(Clone, Copy)]
-enum Missing<'a> {
+pub(super) enum Missing<'a> {
     Exit(ExitId),
     To(Block, &'a [BlockArg]),
+}
+
+/// A fetched zval a guard holds to its type ([`Emit::held_element`]), by
+/// its address.
+#[derive(Clone, Copy)]
+pub(super) enum Held<'a> {
+    /// One that holds a value.
+    Set(Value),
+    /// One that may be `UNDEF`, a packed array's hole or a property nothing
+    /// has written, which goes on as [`Missing`] says.
+    MaybeUndef(Value, Missing<'a>),
 }
 
 /// An element's key, read once for the slot and the lookup kernels
@@ -198,11 +209,35 @@ impl Emit<'_> {
     }
 
     /// The element `line`'s key names in the array its variable holds,
-    /// for a read, a test or a read that finds nothing silently: a packed
-    /// array's slot below `nNumUsed` that holds a value, where a layout
-    /// guard held the array packed and the key is a long, or the place
-    /// [`Kernel::Find`] answers; where there is none, on as `missing` says.
+    /// for a read, a test or a read that finds nothing silently, as
+    /// [`Emit::held_place`] reaches it and holding a value; where there is
+    /// none, on as `missing` says.
     fn reached(&mut self, at: OpId, line: &Line, missing: Missing<'_>) -> Result<Value, Abort> {
+        match self.held_place(at, line, missing)? {
+            Held::Set(element) => Ok(element),
+            Held::MaybeUndef(element, missing) => {
+                let kind = self.b.ins().load(I8, trusted(), element, TYPE_AT);
+                let hole = self
+                    .b
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Undef));
+                self.missing_if(hole, missing)?;
+                Ok(element)
+            }
+        }
+    }
+
+    /// The place of the element `line`'s key names in the array its
+    /// variable holds: a packed array's slot below `nNumUsed`, which may be
+    /// a hole, where a layout guard held the array packed and the key is
+    /// a long, or the place [`Kernel::Find`] answers; where there is none,
+    /// on as `missing` says.
+    fn held_place<'a>(
+        &mut self,
+        at: OpId,
+        line: &Line,
+        missing: Missing<'a>,
+    ) -> Result<Held<'a>, Abort> {
         let Operand::Value(array) = line.op1 else {
             return Err(mismatch("an element of no array"));
         };
@@ -214,20 +249,13 @@ impl Emit<'_> {
             };
             let past = self.past_used(arr, key);
             self.missing_if(past, missing)?;
-            let element = self.slot_at(arr, key);
-            let kind = self.b.ins().load(I8, trusted(), element, TYPE_AT);
-            let hole = self
-                .b
-                .ins()
-                .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Undef));
-            self.missing_if(hole, missing)?;
-            return Ok(element);
+            return Ok(Held::MaybeUndef(self.slot_at(arr, key), missing));
         }
         let key = self.key_of(at, line)?;
         let place = self.looked_up(line, (arr, Kernel::Find), key)?;
         let unplaced = self.unplaced(place);
         self.missing_if(unplaced, missing)?;
-        Ok(self.placed_at(place))
+        Ok(Held::Set(self.placed_at(place)))
     }
 
     /// On as `missing` says where `cond` is not zero, a key the array has
@@ -242,6 +270,17 @@ impl Emit<'_> {
                 self.b.seal_block(on);
                 Ok(())
             }
+        }
+    }
+
+    /// [`Emit::missing_if`] on the cold way past a guard, which fails no
+    /// guard of its own under exit-fuzz: the guard it sits behind and the
+    /// one before it, on the same exit, are what the lane fails, and a
+    /// byte here would leave before the guard's own exit was ever taken.
+    pub(super) fn unset_if(&mut self, cond: Value, missing: Missing<'_>) -> Result<(), Abort> {
+        match missing {
+            Missing::Exit(exit) => self.leave_where(cond, exit),
+            Missing::To(..) => self.missing_if(cond, missing),
         }
     }
 
@@ -411,11 +450,19 @@ impl Emit<'_> {
         let out = line
             .out
             .ok_or_else(|| mismatch("a fetch that writes nothing"))?;
-        let element = self.reached(at, line, missing)?;
         match self.within(at).as_slice() {
-            [] => self.copied_element(element, out)?,
-            [in_place] => self.held_element(*in_place, None, element, out)?,
-            [in_place, through] => self.held_element(*in_place, Some(*through), element, out)?,
+            [] => {
+                let element = self.reached(at, line, missing)?;
+                self.copied_element(element, out)?;
+            }
+            [in_place] => {
+                let element = self.held_place(at, line, missing)?;
+                self.held_element(*in_place, None, element, out)?;
+            }
+            [in_place, through] => {
+                let element = self.held_place(at, line, missing)?;
+                self.held_element(*in_place, Some(*through), element, out)?;
+            }
             _ => {
                 return Err(mismatch(
                     "a fetch holds other guards than its element's one or two",

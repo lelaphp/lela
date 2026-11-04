@@ -17,6 +17,7 @@ use php_engine::tier::{self, ClassId, FRAME, PLACE, PlaceLayout};
 use php_heap::{Obj, ZvalType};
 use php_unit::Opcode;
 
+use super::dims::{Held, Missing};
 use super::{Emit, KIND, Kind, Refuse, SLOT, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
 use crate::types::{Abort, ExitId, Home, Imm, Line, Object, OpId, Operand, Slotted, ValueId};
 
@@ -361,15 +362,20 @@ impl Emit<'_> {
             .out
             .ok_or_else(|| mismatch("a property fetch that writes nothing"))?;
         let zval = self.property(line, None, Refuse::Exit(exit))?;
-        let byte = self.b.ins().load(I8, trusted(), zval, TYPE_AT);
-        let undef = self
-            .b
-            .ins()
-            .icmp_imm_s(IntCC::Equal, byte, tag(ZvalType::Undef));
-        self.leave_if(undef, exit)?;
         match self.within(at).as_slice() {
-            [] => self.copy_deref(zval, out),
-            [in_place, through] => self.held_element(*in_place, Some(*through), zval, out),
+            [] => {
+                let byte = self.b.ins().load(I8, trusted(), zval, TYPE_AT);
+                let undef = self
+                    .b
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, byte, tag(ZvalType::Undef));
+                self.leave_if(undef, exit)?;
+                self.copy_deref(zval, out)
+            }
+            [in_place, through] => {
+                let property = Held::MaybeUndef(zval, Missing::Exit(exit));
+                self.held_element(*in_place, Some(*through), property, out)
+            }
             _ => Err(mismatch(
                 "a property fetch holds other guards than its value's two",
             )),
