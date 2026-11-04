@@ -1240,9 +1240,11 @@ fn a_body_that_leaves_on_the_way_to_the_condition_goes_on_where_it_went() {
 }
 
 /// How many escapes the crossing went on from into a landing's trace
-/// in the request ([`crate::JitRequest`]'s count), as [`Escaping`] keeps it.
+/// in the request, and how many times an exit or an escape visited the
+/// opline it left a frame at ([`crate::JitRequest`]'s counts), as
+/// [`Escaping`] keeps them.
 #[derive(Debug, Default)]
-struct Crossed(u32);
+struct Crossed(u32, u32);
 
 /// `Lane`, which keeps the request's count of escapes the crossing went
 /// on from in [`Crossed`] after each site.
@@ -1257,9 +1259,10 @@ impl Tier for Escaping {
 
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
         let flow = super::safepoint(req, frame, site, held);
-        let crossed =
-            tier::state::<crate::JitRequest>(req).map_or(0, |state| state.escapes_crossed.get());
-        req.state::<Crossed>().0 = crossed;
+        let (crossed, visited) = tier::state::<crate::JitRequest>(req).map_or((0, 0), |state| {
+            (state.escapes_crossed.get(), state.landings_visited.get())
+        });
+        *req.state::<Crossed>() = Crossed(crossed, visited);
         flow
     }
 
@@ -1322,6 +1325,29 @@ fn an_escape_enters_the_trace_compiled_at_its_landing_in_code() {
     assert!(
         crossed.is_some_and(|crossed| (1..=4).contains(&crossed)),
         "the crossing went on from {crossed:?} escapes"
+    );
+}
+
+/// An escape to a landing no trace armed, fib's past its second call,
+/// where php's interpreter goes on through the opline's own handler,
+/// is handed back to the loop with no visit of the landing
+/// ([`super::unarmed`], #4100): of the thousands of escapes there in
+/// fib(20), only those before the request kept the landing's words
+/// visit it. With [`super::unarmed`] fib(20) visits 8, without it 41;
+/// the bound of 16 is twice the 8, room for the order the traces are
+/// compiled in, and well short of the 41.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_escape_to_an_unarmed_landing_visits_nothing() {
+    let ini = [("opcache.jit", "tracing"), ("jit.compile", "inline")];
+    let engine = testing::engine::<Escaping>(&ini);
+    let program = "function fib($n) { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }\necho fib(20), \"\\n\";";
+    let (served, kept) = testing::Scratch::new().serve_kept::<Crossed>(&engine, program);
+    assert_eq!(testing::stdout(&served), "6765\n");
+    let visited = kept.map(|kept| kept.1);
+    assert!(
+        visited.is_some_and(|visited| visited <= 16),
+        "exits and escapes visited {visited:?} landings"
     );
 }
 

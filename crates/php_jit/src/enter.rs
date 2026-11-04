@@ -51,7 +51,7 @@ use php_engine::tier::{
 use php_heap::{Arr, HeaderImage, Key, Scalar, Zval, ZvalRef, ZvalType};
 use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
 
-use crate::lower::{self, OperandKinds, Stood, engine_offset};
+use crate::lower::{self, OperandFields, OperandKinds, Stood, engine_offset};
 use crate::table::{Exit, Trace};
 use crate::types::ExitId;
 
@@ -448,6 +448,13 @@ impl<'l> Lent<'l> {
     ) -> Landed<'l> {
         self.state.landings.keep(self.epoch, func, at, header)
     }
+
+    /// Keep `trace`, of the table the lend holds, as the one entered
+    /// where the request goes on at opline `at` of the op array `func`
+    /// names ([`Landings::entered`]).
+    pub(crate) fn entered(self, func: FuncRef, at: OplineIdx, trace: &'l Trace) {
+        self.state.landings.entered(self.epoch, func, at, trace);
+    }
 }
 
 /// How many oplines a request keeps the words of ([`Landings`]): a
@@ -476,22 +483,31 @@ pub(crate) struct Landings {
 }
 
 /// One opline [`Landings`] keeps; its addresses zero where it keeps
-/// none, and `func` none in a place that keeps nothing.
+/// none, and `func` none in a place that keeps nothing. `trace` is the
+/// address of the trace the request last entered there, of the epoch's
+/// table, and `id` its number, zero where it entered none
+/// ([`Landings::entered`]).
 #[derive(Debug, Default, Clone, Copy)]
 struct Kept {
     func: Option<FuncRef>,
     at: OplineIdx,
     landing: usize,
     header: usize,
+    trace: usize,
+    id: u32,
 }
 
 /// The words a return or a leave reads where it goes on at an opline
 /// ([`Landings::landed`]): its landing word, sealed until a trace armed
-/// it, and the word of the loop rooted there, where one is.
+/// it, and the word of the loop rooted there, where one is; and the
+/// trace the request entered there last, with its number, which one of
+/// the words names while it reads compiled, as php's handler there is
+/// the trace itself (#4100).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Landed<'l> {
     pub(crate) landing: &'l Word,
     pub(crate) header: Option<&'l Word>,
+    pub(crate) entered: Option<(u32, &'l Trace)>,
 }
 
 impl Landings {
@@ -523,7 +539,36 @@ impl Landings {
         // SAFETY: kept by `keep`, of `epoch`, as this function's contract
         // says.
         let header = (kept.header != 0).then(|| unsafe { kept_word(epoch, kept.header) });
-        Some(Landed { landing, header })
+        // SAFETY: kept by `entered`, of `epoch`'s table, as this
+        // function's contract says.
+        let entered =
+            (kept.trace != 0).then(|| (kept.id, unsafe { kept_trace(epoch, kept.trace) }));
+        Some(Landed {
+            landing,
+            header,
+            entered,
+        })
+    }
+
+    /// `trace`, of the table of `epoch`, the one every word kept here is
+    /// of, entered where the request goes on at opline `at` of the op
+    /// array `func` names: kept beside the words kept there, so the next
+    /// entry there reads it with no row of the table read; nothing where
+    /// the request keeps no words there. `trace` is borrowed for as long
+    /// as `epoch` is, as [`Landings::keep`]'s words are, the proof
+    /// [`Landings::landed`]'s read of it stands on.
+    fn entered<'e>(&self, _epoch: &'e Epoch, func: FuncRef, at: OplineIdx, trace: &'e Trace) {
+        let Some(slot) = (self.kept.iter()).find(|slot| {
+            let kept = slot.get();
+            kept.func == Some(func) && kept.at == at
+        }) else {
+            return;
+        };
+        slot.set(Kept {
+            trace: ptr::from_ref(trace).expose_provenance(),
+            id: trace.id.get(),
+            ..slot.get()
+        });
     }
 
     /// Keep the words a return or a leave reads where it goes on at
@@ -546,12 +591,15 @@ impl Landings {
                 at,
                 landing: landing.map_or(0, address),
                 header: header.map_or(0, address),
+                trace: 0,
+                id: 0,
             });
         }
         self.next.set((next + 1) % LANDINGS);
         Landed {
             landing: landing.unwrap_or(&SEALED),
             header,
+            entered: None,
         }
     }
 }
@@ -588,6 +636,21 @@ unsafe fn kept_word(_epoch: &Epoch, address: usize) -> &Word {
     // SAFETY: the function's contract: the word stands for as long as
     // `epoch`, which the borrow keeps.
     unsafe { &*word }
+}
+
+/// The trace at `address`, which [`Landings`] kept, for as long as
+/// `epoch` is borrowed.
+///
+/// # Safety
+///
+/// `address` is that of a trace of `epoch`'s table that
+/// [`Landings::entered`] kept, which the table holds in place, never
+/// written again, until the epoch drops (`crate::table`).
+unsafe fn kept_trace(_epoch: &Epoch, address: usize) -> &Trace {
+    let trace = ptr::with_exposed_provenance::<Trace>(address);
+    // SAFETY: the function's contract: the trace stands for as long as
+    // `epoch`, which the borrow keeps.
+    unsafe { &*trace }
 }
 
 /// The address of `word`, its provenance exposed, as [`Landings`] keeps it.
@@ -744,7 +807,7 @@ kernels! {
         Find => find(array: u64, key: u64, key_info: u32, constant: u32) -> Zval;
         Lookup => lookup(array: u64, key: u64, key_info: u32, constant: u32) -> Zval = tier::lookup_element;
         Leave => leave(word: u64, type_info: u32) -> u64 = tier::return_entry;
-        Frameless => frameless(place: u32, at: FramelessAt, kinds: OperandKinds, a: u64, a_info: u32, b: u64, b_info: u32, c: u64, c_info: u32) -> Zval = tier::frameless_call;
+        Frameless => frameless(place: u32, at: FramelessAt, kinds: OperandKinds, fields: OperandFields, a: u64, a_info: u32, b: u64, b_info: u32, c: u64, c_info: u32) -> Zval = tier::frameless_call;
         FreeThis => free_this() = tier::free_this;
         MakeRef => make_ref(place: u64) -> u64 = tier::make_ref;
         CallNative => call_native(call: u32) -> Zval = tier::call_native;
@@ -792,8 +855,9 @@ fn handle(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<(), Fatal> {
 /// The `frameless` kernel: the native at `at` of the engine's
 /// frameless table, the `FRAMELESS_ICALL_*` at `on.at` of the frame at
 /// `place`, served over the three operand zvals compiled code read, each
-/// of the kind `kinds` names for it ([`OperandKinds`]), with no
-/// opline read ([`tier::frameless_call`]), as php's code calls the
+/// of the kind `kinds` names for it ([`OperandKinds`]), a temporary
+/// standing in the slot `fields` names for it ([`OperandFields`]), with
+/// no opline read ([`tier::frameless_call`]), as php's code calls the
 /// native's frameless handler; where the interpreter stands after it is
 /// compiled code's, and a throw is the request's pending throwable.
 #[allow(
@@ -806,6 +870,7 @@ fn frameless(
     place: u32,
     at: FramelessAt,
     kinds: OperandKinds,
+    fields: OperandFields,
     a: u64,
     a_info: u32,
     b: u64,
@@ -815,10 +880,11 @@ fn frameless(
 ) -> Result<Zval, Fatal> {
     let frame = at_place(req, on.room, place);
     let [a_kind, b_kind, c_kind] = operand_kinds(kinds)?;
+    let [a_field, b_field, c_field] = fields.fields();
     let operands = [
-        (zval(a, a_info), a_kind),
-        (zval(b, b_info), b_kind),
-        (zval(c, c_info), c_kind),
+        (zval(a, a_info), a_kind, a_field),
+        (zval(b, b_info), b_kind, b_field),
+        (zval(c, c_info), c_kind, c_field),
     ];
     tier::frameless_call(req, frame, at, operands)
 }
@@ -1231,27 +1297,41 @@ fn where_stood(
     func: Option<u32>,
     holding: Option<&Holding<'_>>,
 ) -> Result<Stood, Fatal> {
+    let room =
+        tier::room(req, frame).ok_or_else(|| internal("a step went on in a frame with no room"))?;
+    Ok(stood_in(req, (frame, room), func, holding))
+}
+
+/// [`where_stood`] of `frame`, whose room the caller has in hand, so an
+/// entry that lays the frame's room for the trace looks it up once.
+#[inline]
+fn stood_in(
+    req: &mut Request,
+    (frame, room): (FrameRef, NonNull<u8>),
+    func: Option<u32>,
+    holding: Option<&Holding<'_>>,
+) -> Stood {
     let call = match tier::building_call(req).filter(|call| *call != frame) {
         Some(call) => tier::room(req, call).map_or(ptr::null_mut(), NonNull::as_ptr),
         None => ptr::null_mut(),
     };
-    let room =
-        tier::room(req, frame).ok_or_else(|| internal("a step went on in a frame with no room"))?;
     // A cache the hold served the op array of last is that op array's own.
-    let func = match (func, tier::frame_cache(req, frame).and_then(engine_offset)) {
-        (Some(func), _) => func,
-        (None, Some(cache)) if holding.is_some_and(|holding| holding.served(cache)) => cache,
-        (None, _) => tier::running_func(req, frame)
-            .and_then(engine_offset)
-            .unwrap_or(u32::MAX),
-    };
-    Ok(Stood {
+    let func =
+        func.unwrap_or_else(
+            || match tier::frame_cache(req, frame).and_then(engine_offset) {
+                Some(cache) if holding.is_some_and(|holding| holding.served(cache)) => cache,
+                _ => tier::running_func(req, frame)
+                    .and_then(engine_offset)
+                    .unwrap_or(u32::MAX),
+            },
+        );
+    Stood {
         frame: room.as_ptr(),
         call,
         func,
         opline: tier::frame(req, frame).map_or(0, |view| view.opline().0),
         room: tier::stack_room(req),
-    })
+    }
 }
 
 /// The zval compiled code hands a kernel as its two words, its value, a
@@ -1393,7 +1473,7 @@ pub(crate) fn enter<'t>(
         let own = (trace.opens)
             .and_then(|(func, _)| engine_offset(func))
             .filter(|func| tier::frame_cache(req, frame).and_then(engine_offset) == Some(*func));
-        Some(where_stood(req, frame, own, None)?)
+        Some(stood_in(req, (frame, room), own, None))
     } else {
         None
     };

@@ -113,8 +113,8 @@ pub fn unit_values(expr: &ConstExpr, found: &mut dyn FnMut(Zval)) {
         | ConstExpr::Unpack(operand)
         | ConstExpr::Cast { operand, .. }
         | ConstExpr::DynamicClassConstant { name: operand, .. } => each(operand),
-        ConstExpr::Binary { lhs: a, rhs: b, .. }
-        | ConstExpr::Dim {
+        ConstExpr::Binary { lhs, rhs, .. } => [lhs, rhs].into_iter().for_each(|e| each(e)),
+        ConstExpr::Dim {
             container: a,
             dim: b,
             ..

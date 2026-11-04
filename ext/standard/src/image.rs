@@ -599,7 +599,7 @@ pub(crate) fn link_constants(
         .map(|(at, handler)| ConstDecl {
             name: Name(handler.const_name.as_bytes().into()),
             value: ConstExpr::long(at),
-            attributes: Vec::new(),
+            attributes: Vec::new().into(),
         })
         .collect()
 }

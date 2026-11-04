@@ -400,7 +400,7 @@ class C {
         vec![
             (Some(Type::Int), false, false, false),
             (
-                Some(Type::Nullable(Box::new(Type::String))),
+                Some(Type::Nullable(Box::new(Type::String).into())),
                 false,
                 false,
                 true

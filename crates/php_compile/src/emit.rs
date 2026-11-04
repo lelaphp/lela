@@ -4761,7 +4761,7 @@ impl<'a> Emit<'a> {
             is_virtual,
             ty: ty.cloned(),
             default,
-            attributes,
+            attributes: attributes.into(),
             doc_comment: parameter.doc_comment.clone().map(Vec::into_boxed_slice),
             hooks,
         };
@@ -5283,12 +5283,12 @@ impl<'a> Emit<'a> {
                 return_type: self.return_type.clone(),
                 returns_by_ref: function.by_ref,
                 is_generator: function.generator,
-                attributes,
+                attributes: attributes.into(),
                 doc_comment: function.doc_comment.clone().map(Vec::into_boxed_slice),
                 file: Name(self.filename.into()),
                 line,
                 end_line: function.end_line,
-                frameless: Vec::new(),
+                frameless: Vec::new().into(),
             },
             body,
         ))
@@ -5479,7 +5479,7 @@ impl<'a> Emit<'a> {
                 promoted: parameter.promote.is_some(),
                 variadic: parameter.variadic,
                 default: default.map_or(ParameterDefault::None, ParameterDefault::Expr),
-                attributes: attrs,
+                attributes: attrs.into(),
             });
         }
         Ok(parameters)
@@ -5540,7 +5540,7 @@ impl<'a> Emit<'a> {
                 String::from_utf8_lossy(&parameter.name)
             ),
         );
-        Ok((Some(Type::Nullable(Box::new(ty))), true))
+        Ok((Some(Type::Nullable(Box::new(ty).into())), true))
     }
 
     /// The default a parameter's declaration keeps beside its
@@ -6404,21 +6404,21 @@ impl<'a> Emit<'a> {
             flags: class_flags(class, dynamic_properties, anonymous),
             parent: parent.as_ref().map(|parent| Name(parent.clone().into())),
             interfaces: interfaces.iter().map(|i| Name(i.clone().into())).collect(),
-            implementors: Vec::new(),
-            aliases: Vec::new(),
+            implementors: Vec::new().into(),
+            aliases: Vec::new().into(),
             traits,
             adaptations,
             backing,
             constants: Vec::new(),
-            properties: enum_properties(class.kind, backing),
+            properties: enum_properties(class.kind, backing).into(),
             methods: Vec::new(),
-            attributes,
+            attributes: attributes.into(),
             doc_comment: class.doc_comment.clone().map(Vec::into_boxed_slice),
             file: Name(self.filename.into()),
             line,
             end_line: class.end_line,
             object_size: 0,
-            object_beside: Box::default(),
+            object_beside: Vec::new().into(),
             attribute_validator: None,
         };
         let own = self.own_string(&name, class_sizing(anonymous))?.as_str();
@@ -7057,7 +7057,7 @@ impl<'a> Emit<'a> {
             is_case: constant.is_case,
             ty,
             value,
-            attributes,
+            attributes: attributes.into(),
             doc_comment: constant.doc_comment.clone().map(Vec::into_boxed_slice),
         });
         Ok(())
@@ -7400,7 +7400,7 @@ impl<'a> Emit<'a> {
         }
         Ok(Attribute {
             name: Name(name.into()),
-            arguments,
+            arguments: arguments.into(),
             line: attribute.line,
             strict: self.typing == Typing::Strict,
             own_name,
@@ -7773,7 +7773,7 @@ impl<'a> Emit<'a> {
             is_virtual,
             ty,
             default,
-            attributes,
+            attributes: attributes.into(),
             hooks,
             doc_comment: property.doc_comment.clone().map(Vec::into_boxed_slice),
         };
@@ -8005,7 +8005,7 @@ impl<'a> Emit<'a> {
         };
         let text = php_unit::type_to_string(ty);
         if kind == ZvalType::Null && !matches!(ty, Type::Intersection(_)) {
-            let nullable = Type::Union(vec![ty.clone(), Type::Null]);
+            let nullable = Type::Union(vec![ty.clone(), Type::Null].into());
             return Err(self.compile_error(format!(
                 "Default value for property of type {text} may not be null. Use the nullable type {} to allow null default value",
                 php_unit::type_to_string(&nullable)
@@ -8890,8 +8890,8 @@ impl<'a> Emit<'a> {
                 };
                 Ok(ConstExpr::Binary {
                     op: Name(op.into()),
-                    lhs: Box::new(self.const_expr(left)?),
-                    rhs: Box::new(self.const_expr(right)?),
+                    lhs: Box::new(self.const_expr(left)?).into(),
+                    rhs: Box::new(self.const_expr(right)?).into(),
                     line,
                 })
             }
@@ -9778,7 +9778,7 @@ impl<'a> Emit<'a> {
         self.attributed_constants.push(ConstDecl {
             name: Name(name.into()),
             value,
-            attributes,
+            attributes: attributes.into(),
         });
         if let Some(last) = self.oplines.last_mut() {
             last.opcode = Opcode::DeclareAttributedConst;
@@ -22720,7 +22720,7 @@ fn enum_properties(kind: ClassKind, backing: EnumBacking) -> Vec<PropertyDecl> {
         ty: Some(ty),
         default: None,
         hooks: None,
-        attributes: Vec::new(),
+        attributes: Vec::new().into(),
         doc_comment: None,
     };
     let mut out = vec![property("name", Type::String)];

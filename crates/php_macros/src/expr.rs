@@ -154,8 +154,8 @@ fn binary(input: ParseStream<'_>, min: u8) -> syn::Result<Tokens> {
             input.parse::<proc_macro2::Punct>()?;
         }
         let rhs = binary(input, precedence + 1)?;
-        let op = name(op);
-        lhs = quote!(#root::decl::ConstExpr::Binary { op: #op, lhs: Box::new(#lhs), rhs: Box::new(#rhs), line: 0 });
+        let op = bytes(op);
+        lhs = quote!(#root::decl::ConstExpr::binary(#op, const { &#lhs }, const { &#rhs }));
     }
     Ok(lhs)
 }
@@ -238,11 +238,11 @@ fn primary(input: ParseStream<'_>) -> syn::Result<Tokens> {
     if input.peek(syn::LitStr) {
         let literal: syn::LitStr = input.parse()?;
         let value = bytes(&literal.value());
-        return Ok(quote!(#root::decl::ConstExpr::Str(#value.as_slice().into())));
+        return Ok(quote!(#root::decl::ConstExpr::string(#value)));
     }
     if input.peek(syn::LitByteStr) {
         let literal: syn::LitByteStr = input.parse()?;
-        return Ok(quote!(#root::decl::ConstExpr::Str(#literal.as_slice().into())));
+        return Ok(quote!(#root::decl::ConstExpr::string(#literal)));
     }
     if input.peek(syn::LitBool) {
         let value = input.parse::<syn::LitBool>()?.value;
@@ -385,16 +385,16 @@ pub(crate) fn attributes(keys: &Keys) -> syn::Result<Vec<Tokens>> {
     Ok(out)
 }
 
-/// The attributes as a static entry holds them, `&[..]` of the
-/// functions that build each.
+/// The attributes as a static entry holds them, `&[..]` of each laid
+/// whole, which the declaration borrows.
 pub(crate) fn built(attributes: &[Tokens]) -> Tokens {
-    quote!(&[#(|| #attributes),*])
+    quote!(&[#(#attributes),*])
 }
 
 fn attribute(php: &str, arguments: &[Tokens]) -> Tokens {
     let root = root();
     let php = bytes(php);
-    quote!(#root::__private::attribute(#php, vec![#(#arguments),*]))
+    quote!(#root::__private::attribute(#php, const { &[#(#arguments),*] }))
 }
 
 /// `Path(args)` of a generic `attribute(..)` key.
@@ -412,6 +412,7 @@ fn one_attribute(input: ParseStream<'_>) -> syn::Result<Tokens> {
 
 /// An attribute's arguments, each `name = value` or `value`.
 fn arguments(input: ParseStream<'_>) -> syn::Result<Vec<Tokens>> {
+    let root = root();
     let mut out = Vec::new();
     while !input.is_empty() {
         let named = if (input.peek(Ident::peek_any) && input.peek2(Token![=]))
@@ -421,12 +422,12 @@ fn arguments(input: ParseStream<'_>) -> syn::Result<Vec<Tokens>> {
             let argument = php_name(&Ident::parse_any(input)?);
             input.parse::<Token![=]>()?;
             let argument = bytes(&argument);
-            quote!(Some(#argument.as_slice()))
+            quote!(Some(#root::decl::Name::borrowed(#argument)))
         } else {
             quote!(None)
         };
         let value = binary(input, 0)?;
-        out.push(quote!((#named, #value)));
+        out.push(quote!(#root::decl::AttributeArgument { name: #named, value: #value }));
         if !input.is_empty() {
             input.parse::<Token![,]>()?;
         }

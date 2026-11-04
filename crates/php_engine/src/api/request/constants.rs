@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use php_link::NameHasher;
-use php_unit::decl::Attribute;
+use php_unit::decl::{Attribute, List};
 
 use crate::api::raising::Thrown;
 use crate::api::values::{Emalloc, Owner, PhpArray, PhpString, Value, adopted};
@@ -84,7 +84,7 @@ struct ConstantRow {
     /// `c->name`, the name as it was given, which a listing shows.
     given: Vec<u8>,
     value: Value,
-    attributes: Vec<Attribute>,
+    attributes: List<Attribute>,
     deprecated: bool,
 }
 
@@ -327,7 +327,7 @@ impl Request {
     /// dtor 3
     /// ```
     pub(crate) fn define_constant(&mut self, name: &[u8], value: Owner<Value>) -> bool {
-        self.define_attributed_constant(name, value, Vec::new())
+        self.define_attributed_constant(name, value, List::new())
     }
 
     /// The name and the file a constant the program defines is kept
@@ -403,7 +403,7 @@ impl Request {
         &mut self,
         name: &[u8],
         value: Owner<Value>,
-        attributes: Vec<Attribute>,
+        attributes: List<Attribute>,
     ) -> bool {
         // The row keeps the name as given.
         let given = name;
@@ -474,7 +474,7 @@ impl Request {
     /// `Core`'s group and before what the program defines. A sink: the
     /// row takes the value's owner.
     pub(crate) fn register_host_constant(&mut self, name: &'static [u8], value: Owner<Value>) {
-        self.push_native_constant(ConstantOwner::Core, name, value, Vec::new());
+        self.push_native_constant(ConstantOwner::Core, name, value, Vec::new().into());
     }
 
     /// A row of a native constant pushed, its key the name it was given,
@@ -484,7 +484,7 @@ impl Request {
         owner: ConstantOwner,
         name: &[u8],
         value: Owner<Value>,
-        attributes: Vec<Attribute>,
+        attributes: List<Attribute>,
     ) {
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
         let named = self.constant_name(name);
@@ -883,7 +883,7 @@ impl Symbols<&mut Request> {
         extension: ExtensionId,
         name: &[u8],
         value: Owner<Value>,
-        attributes: Vec<Attribute>,
+        attributes: List<Attribute>,
     ) -> bool {
         if let Some(row) = self
             .0

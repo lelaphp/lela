@@ -957,6 +957,7 @@ const INLINE_PATHS: &[&str] = &[
     "qm_assign",
     "sub",
     "sub_assign_cv",
+    "type_check",
     "verify_return_type",
 ];
 

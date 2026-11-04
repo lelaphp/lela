@@ -191,9 +191,7 @@ impl<T> AsIs<T> {
 
 impl<T: IntoReturn> IntoReturn for AsIs<T> {
     const MASK: u32 = T::MASK;
-    fn declared() -> Option<Type> {
-        T::declared()
-    }
+    const DECLARED: Option<Type> = T::DECLARED;
     fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         self.0.into_return(req)
     }

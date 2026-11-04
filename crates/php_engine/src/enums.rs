@@ -184,7 +184,7 @@ fn backing_key(req: &mut Request, given: &Value, backing: EnumBacking) -> Result
             coerce_param(req, given, &Type::Int, 1)?.as_int()
         }
         _ => {
-            let either = Type::Union(vec![Type::String, Type::Int]);
+            let either = Type::Union(vec![Type::String, Type::Int].into());
             let key = coerce_param(req, given, &either, 1)?;
             req.addref(&key);
             return Ok(key);

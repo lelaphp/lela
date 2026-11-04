@@ -512,6 +512,22 @@ pub fn setting(req: &Request) -> &TierStatus {
     req.tier_setting_held()
 }
 
+/// Where `frame` stands, read off its header once: the opline, as
+/// [`FrameView::opline`] reads it, and the op array its cache names, as
+/// [`frame_cache`] names it, none for a frame that is no activated user
+/// frame; none at all for a frame that does not stand. What a return's
+/// site and a trace's exit read of the frame they leave the loop in
+/// (#4100), where the two reads looked the frame up twice.
+#[must_use]
+#[inline]
+pub fn standing_at(
+    req: &Request,
+    frame: FrameRef,
+) -> Option<(Option<FuncRef>, php_unit::OplineIdx)> {
+    let opline = req.vm().at(frame)?.opline;
+    Some((frame_cache(req, frame), php_unit::OplineIdx(opline)))
+}
+
 /// The tier's state the request was laid with, where it is an `S`
 /// ([`Tier::State`]): one check of its type, and no lookup. None where
 /// the engine binds a loop that lays none, `Nop`'s.
@@ -1514,7 +1530,10 @@ fn serve_held<'u, T: Tier, D: Telling>(
                 // A return to a frame the loop entered: its op array as
                 // the loop left it for the call.
                 Way::Left(stepped @ (Stepped::Popped(to) | Stepped::Moved(to))) => {
-                    let Some(code) = kept.returned(to) else {
+                    let Some(code) = kept
+                        .returned(to)
+                        .or_else(|| held::taken_up(req, &mut kept, scope, to))
+                    else {
                         break stepped;
                     };
                     frame = to;
@@ -1563,6 +1582,28 @@ fn serve_held<'u, T: Tier, D: Telling>(
                         }
                         Took::Standing
                     }
+                }
+                // An edge that goes on in a frame the loop did not step to
+                // itself: a tier's `Resume` (`jit-design.md` §2.2), past
+                // the interrupt check and the pending test ([`resumed`]),
+                // and every other handler's `Same`, a settled step or a
+                // fiber's switch among them. The frame it names may be one
+                // a trace entered where the loop did not, so every frame
+                // the loop entered is forgotten ([`Kept::forget`]), as the
+                // outer loop forgets them on this edge, and a frame of a
+                // function the loop called before is taken up here, as
+                // php's `zend_jit_trace_exit` hands `EX(opline)` back to
+                // the VM loop already running, with no restart of the loop
+                // (#4100); any other breaks to the outer loop, as before.
+                Way::Left(stepped @ Stepped::Same(to)) => {
+                    kept.forget();
+                    let Some(code) = held::taken_up(req, &mut kept, scope, to) else {
+                        break stepped;
+                    };
+                    frame = to;
+                    body = code;
+                    oplines = &*body.oplines;
+                    Took::Standing
                 }
                 Way::Left(stepped) => break stepped,
             };
@@ -1868,7 +1909,49 @@ pub fn dispatch_held(req: &mut Request, frame: FrameRef, held: Held<'_>) -> Resu
 /// owner, the call still on the stack; `null`, as php's `ZVAL_NULL`
 /// before the handler leaves it, where it threw, the call then popped
 /// and the throwable left pending, as `DO_ICALL`'s handler leaves it
-/// ([`crate::handlers::thrown_on_call`]).
+/// ([`crate::handlers::thrown_on_call`]). A native function's entry is
+/// read off the engine's table by its number, as php's code reads
+/// `fbc->internal_function.handler`, with no class native or trampoline
+/// looked up for it.
+///
+/// A native that throws, caught in the loop that calls it, and one that
+/// calls back into PHP code:
+///
+/// ```php
+/// function g($n) {
+///     $t = 0;
+///     for ($i = 0; $i < $n; $i++) {
+///         try { $t += strlen(str_repeat("ab", 2 - $i)); } catch (ValueError $e) { echo $e->getMessage(), " at ", $e->getLine(), "\n"; }
+///         $t += array_sum(array_map(fn ($x) => $x * $i, [1, 2]));
+///     }
+///     return $t;
+/// }
+/// echo g(5), "\n";
+/// ```
+/// ```expect regime=jit-force process
+/// str_repeat(): Argument #2 ($times) must be greater than or equal to 0 at 5
+/// str_repeat(): Argument #2 ($times) must be greater than or equal to 0 at 5
+/// 36
+/// ```
+///
+/// The same where every guard fails once:
+///
+/// ```php
+/// function g($n) {
+///     $t = 0;
+///     for ($i = 0; $i < $n; $i++) {
+///         try { $t += strlen(str_repeat("ab", 2 - $i)); } catch (ValueError $e) { echo $e->getMessage(), " at ", $e->getLine(), "\n"; }
+///         $t += array_sum(array_map(fn ($x) => $x * $i, [1, 2]));
+///     }
+///     return $t;
+/// }
+/// echo g(5), "\n";
+/// ```
+/// ```expect regime=jit-exit-fuzz process
+/// str_repeat(): Argument #2 ($times) must be greater than or equal to 0 at 5
+/// str_repeat(): Argument #2 ($times) must be greater than or equal to 0 at 5
+/// 36
+/// ```
 ///
 /// # Errors
 ///
@@ -1886,7 +1969,14 @@ pub fn call_native(req: &mut Request, call: FrameRef) -> Result<Zval, Fatal> {
         .filter(|header| header.info.serving_native())
         .and_then(crate::exec::Header::function)
         .ok_or_else(|| Fatal::error("InternalError: compiled code served no native's call"))?;
-    match req.serve_native(function, OnThrow::Nothing) {
+    // A native function's entry is one read of the engine's table,
+    // `fbc->internal_function.handler`; a native method, a class's native
+    // and a trampoline are found as the handler finds them.
+    let served = match req.native_entry(function) {
+        Some(entry) => req.serve_entry(function, entry, OnThrow::Nothing),
+        None => req.serve_native(function, OnThrow::Nothing),
+    };
+    match served {
         Ok(value) => Ok(value.to_zval()),
         Err(thrown) => {
             native_threw(req, &thrown)?;
@@ -1929,12 +2019,16 @@ pub struct FramelessAt(pub u32);
 /// each operand of the kind of its slot, as compiled code read it,
 /// neither `UNDEF`, which compiled code hands to the handler instead,
 /// nor a reference, which it reads through, and `Unused` past the
-/// native's arity. A temporary compiled code moved out of its slot is
-/// put back where the opline the frame stands at names it, so a trace
-/// taken while the native runs reads it there as the handler leaves it
-/// and php's code does, and freed there as the call ends; a variable is
-/// held as [`crate::exec::frameless_owner`] says
-/// ([`crate::handlers::frameless_served`]); compiled code
+/// native's arity. A temporary stands in its slot through the call,
+/// where compiled code left it and the operand's field names it, so a
+/// trace taken while the native runs reads it there as the handler
+/// leaves it and php's code does, and is freed there as the call ends;
+/// a variable is held as [`crate::exec::frameless_owner`] says
+/// ([`crate::handlers::frameless_served`]). Nothing is read of the
+/// opline or of the op array the frame serves: the native's place in the
+/// table, each operand's kind and its field are compiled code's
+/// constants, as php's `jit_frameless_icall*` holds `ZEND_FLF_HANDLER`
+/// and the operands' addresses as its own; compiled code
 /// makes the interrupt check after a native that returned,
 /// `jit_frameless_interrupt_check`, and this makes it after one that
 /// threw, or returned with a throwable a warning's handler threw, with
@@ -1948,37 +2042,29 @@ pub struct FramelessAt(pub u32);
 /// interrupt check's fatal after a native that threw or left a handler's
 /// throwable pending, and an internal error where `at` names no entry of
 /// the table.
+#[inline]
 pub fn frameless_call(
     req: &mut Request,
     frame: FrameRef,
     at: FramelessAt,
-    operands: [(Zval, OperandKind); 3],
+    operands: [(Zval, OperandKind, u32); 3],
 ) -> Result<Zval, Fatal> {
-    let named = exec::frameless_named(req.vm().at(frame));
-    // The slots the opline names its operands by, `op1`, `op2` and the
-    // `OP_DATA`'s `op1`.
-    let fields = req.frame_at(frame).and_then(|state| {
-        let code = state.code()?;
-        let op = exec::opline_at(code, state.opline())?;
-        let data = exec::opline_at(code, state.opline().saturating_add(1));
-        Some([op.op1, op.op2, data.map_or(0, |data| data.op1)])
-    });
+    // Whether a name reaches the frame's variables is read once, and only
+    // for a call that holds one.
+    let named = operands.iter().any(|&(_, kind, _)| kind == OperandKind::Cv)
+        && exec::frameless_named(req.vm().at(frame));
     let mut held = [Zval::UNDEF; 3];
     let mut slots = [(OperandKind::Const, 0); 3];
     let mut owned = 0u8;
     let mut count = 0;
-    for (place, (z, kind)) in operands.into_iter().enumerate() {
+    for (place, (z, kind, field)) in operands.into_iter().enumerate() {
         if kind == OperandKind::Unused {
             break;
         }
         debug_assert!(!z.is_undef() && z.kind() != php_heap::ZvalType::Reference);
-        let field = fields.map(|fields| fields[place]);
         let own;
-        (held[place], own) = match (kind, field) {
-            (OperandKind::Tmp | OperandKind::Var, Some(field)) => {
-                if let Some(slot) = req.slots_mut(frame).get_mut(field as usize) {
-                    *slot = z;
-                }
+        (held[place], own) = match kind {
+            OperandKind::Tmp | OperandKind::Var => {
                 slots[place] = (kind, field);
                 (z, false)
             }

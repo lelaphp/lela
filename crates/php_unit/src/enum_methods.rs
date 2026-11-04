@@ -17,14 +17,19 @@ use crate::decl::{
 /// `null`, each over `int|string $value`, where the enum is backed.
 #[must_use]
 pub fn enum_methods(backing: EnumBacking) -> Vec<MethodDecl> {
-    let value = || parameter(b"value", Some(Type::Union(vec![Type::Int, Type::String])));
+    let value = || {
+        parameter(
+            b"value",
+            Some(Type::Union(vec![Type::Int, Type::String].into())),
+        )
+    };
     let mut out = vec![method(b"cases", Vec::new(), Type::Array)];
     if backing != EnumBacking::Pure {
         out.push(method(b"from", vec![value()], Type::CalledClass));
         out.push(method(
             b"tryFrom",
             vec![value()],
-            Type::Nullable(Box::new(Type::CalledClass)),
+            Type::Nullable(Box::new(Type::CalledClass).into()),
         ));
     }
     out
