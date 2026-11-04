@@ -2,16 +2,17 @@
 //! double's truth with the warning of a NAN in a cold arm
 //! (`zend_jit_bool_jmpznz`, `Z/ext/opcache/jit/zend_jit_ir.c:7750-7768`),
 //! an array's count (`zend_jit_count`, `:11671-11713`), a string's offset
-//! (`zend_jit_fetch_dim_read`, `:12720-12755`) and a constant
-//! (`zend_jit_fetch_constant`, `:8109-8177`).
+//! (`zend_jit_fetch_dim_read`, `:12720-12755`), a constant
+//! (`zend_jit_fetch_constant`, `:8109-8177`) and a `static` property
+//! (`zend_jit_fetch_static_prop`, `:16080-16225`).
 
-use cranelift_codegen::ir::condcodes::FloatCC;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::{I32, I64};
 use cranelift_codegen::ir::{InstBuilder, Value};
 use php_engine::tier::{PLACE, PlaceLayout};
-use php_heap::Arr;
+use php_heap::{Arr, ZvalType};
 
-use super::{Emit, Kernel, Refuse, Scalar, TYPE_AT, imm, mismatch, trusted};
+use super::{Emit, KIND, Kernel, Refuse, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
 use crate::types::{Abort, Leave, Line, OpId, Operand};
 
 /// The runtime-cache slots' layout, as the fetches read them.
@@ -515,5 +516,153 @@ impl Emit<'_> {
             [held] => self.held_element(*held, None, element, out),
             _ => Err(mismatch("a constant's fetch holds guards of another kind")),
         }
+    }
+
+    /// A `static` property's read, as php's `zend_jit_fetch_static_prop`
+    /// under `BP_VAR_R` (`Z/ext/opcache/jit/zend_jit_ir.c:16080-16225`):
+    /// the place the slot of the request's runtime cache keeps, and what
+    /// it holds copied through the reference it may be, `ZVAL_COPY_DEREF`;
+    /// a slot that keeps no place, and a place nothing has written, cold,
+    /// to the handler, which looks the name up, primes the slot and throws
+    /// where php's `zend_fetch_static_property` and
+    /// `zend_jit_uninit_static_prop` do.
+    ///
+    /// By `self`, `parent` and a name, untyped and typed, counted and not,
+    /// and one bound by reference:
+    ///
+    ///
+    /// ```php
+    /// class P { static $p = 10; protected static $q = [1]; }
+    /// class C extends P {
+    ///     static $a = 0; static int $t = 3; static ?string $s = null; static $r = 1;
+    ///     static function f($n) {
+    ///         $x = &self::$r; $o = [];
+    ///         for ($i = 0; $i < $n; $i++) {
+    ///             self::$a += 2; $x++;
+    ///             $o[] = [self::$a, self::$t, self::$s, self::$r, parent::$p, P::$p, count(self::$q), C::$t];
+    ///             self::$s = "s" . $i;
+    ///         }
+    ///         return $o[$n - 1];
+    ///     }
+    /// }
+    /// echo json_encode(C::f(4)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [8,3,"s2",5,10,10,1,3]
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    ///
+    /// ```php
+    /// class P { static $p = 10; protected static $q = [1]; }
+    /// class C extends P {
+    ///     static $a = 0; static int $t = 3; static ?string $s = null; static $r = 1;
+    ///     static function f($n) {
+    ///         $x = &self::$r; $o = [];
+    ///         for ($i = 0; $i < $n; $i++) {
+    ///             self::$a += 2; $x++;
+    ///             $o[] = [self::$a, self::$t, self::$s, self::$r, parent::$p, P::$p, count(self::$q), C::$t];
+    ///             self::$s = "s" . $i;
+    ///         }
+    ///         return $o[$n - 1];
+    ///     }
+    /// }
+    /// echo json_encode(C::f(4)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [8,3,"s2",5,10,10,1,3]
+    /// ```
+    ///
+    /// The loop php's trace reads a property a pass in, its exits php's:
+    ///
+    /// ```php
+    /// class Foo {
+    ///     static $a = 0;
+    ///     static function k($n) { for ($i = 0; $i < $n; ++$i) { $x = self::$a; } return $i; }
+    /// }
+    /// echo Foo::k(200), "\n";
+    /// ```
+    /// ```expect regime=jit-inline
+    /// 200
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:6
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) Foo::k() %s:4
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 2 Foo::k() %s:4
+    /// ---- TRACE 2 start (side trace 1/2) Foo::k() %s:4
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    /// ```
+    ///
+    /// A typed property read before it is written, php's `Error` at the
+    /// opline, a closure's read in the scope it was bound to and a trait's
+    /// method, which reads its class's:
+    ///
+    /// ```php
+    /// class U { static int $t; static function f($n) {
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         try { echo self::$t, "\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    ///         if ($i == 1) { self::$t = 7; }
+    ///     }
+    /// } }
+    /// U::f(4);
+    /// trait R { static $v = 1; static function f($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += self::$v; } return $t; } }
+    /// class A { use R; } class B { use R; }
+    /// B::$v = 5;
+    /// echo A::f(3), " ", B::f(3), "\n";
+    /// class X { private static $w = 2; } class Y { private static $w = 3; }
+    /// $c = function ($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += self::$w; } return $t; };
+    /// echo Closure::bind($c, null, X::class)(3), " ", Closure::bind($c, null, Y::class)(3), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// Typed static property U::$t must not be accessed before initialization
+    /// Typed static property U::$t must not be accessed before initialization
+    /// 7
+    /// 7
+    /// 3 15
+    /// 6 9
+    /// ```
+    pub(super) fn fetch_static(&mut self, line: &Line) -> Result<(), Abort> {
+        let out = line
+            .out
+            .ok_or_else(|| mismatch("a static property's fetch that writes nothing"))?;
+        let slot = self.value(out)?.slot;
+        let handled = self.b.create_block();
+        self.b.set_cold_block(handled);
+        let done = self.b.create_block();
+        let cached = self.cached_slot(line, P.static_property(), Refuse::To(handled))?;
+        let place = self
+            .b
+            .ins()
+            .load(I64, trusted(), cached, imm(P.static_place() as usize));
+        let info = self.b.ins().load(I32, trusted(), place, TYPE_AT);
+        let kind = self.b.ins().band_imm_u(info, KIND);
+        let unwritten = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Undef));
+        self.divert_if(unwritten, handled);
+        let held = self.deref(place);
+        let info = self.b.ins().load(I32, trusted(), held, TYPE_AT);
+        self.copy(held, info, slot)?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(handled);
+        self.b.seal_block(handled);
+        let func = self.func_of(line.frame)?;
+        let [room, opline] = self.served(line)?;
+        self.call(
+            Kernel::Handle,
+            &[room, opline, func],
+            line.unwind.map(Leave::Unwind),
+        )?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+        Ok(())
     }
 }

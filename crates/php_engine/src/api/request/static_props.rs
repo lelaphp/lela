@@ -27,8 +27,10 @@ pub(super) struct StaticProps {
     /// laid down on first use from the default the declaration carries,
     /// `zend_class_init_statics`, and a typed property with no default
     /// is laid down `IS_UNDEF`. php's table hangs off a map pointer and
-    /// is the request's; so is this one.
-    slots: WordMap<PropertyInfo, Value>,
+    /// is the request's; so is this one. A slot is boxed so it stands
+    /// where it was laid for the request, as a zval of php's table does,
+    /// and compiled code reads it in place ([`Request::static_place`]).
+    slots: WordMap<PropertyInfo, Box<Value>>,
     /// The table itself, by the class it is laid for: the block
     /// `zend_class_init_statics` `emalloc`s, a zval for each of the
     /// class's `default_static_members_count` slots, an inherited one
@@ -40,6 +42,13 @@ pub(super) struct StaticProps {
     /// build's teardown gives them up in.
     #[cfg(debug_assertions)]
     laid: Vec<PropertyInfo>,
+}
+
+impl StaticProps {
+    /// The slot `info` names, to write.
+    fn slot_mut(&mut self, info: PropertyInfo) -> Option<&mut Value> {
+        self.slots.get_mut(&info).map(|slot| &mut **slot)
+    }
 }
 
 impl Request {
@@ -56,7 +65,7 @@ impl Request {
             laid,
         } = std::mem::take(&mut self.static_props);
         for value in laid.iter().filter_map(|info| slots.remove(info)) {
-            self.release(value);
+            self.release(*value);
         }
         for table in tables.into_values().flatten() {
             table.free(self);
@@ -257,7 +266,7 @@ impl Request {
             None if typed => Value::undef(),
             None => Value::null(),
         };
-        self.static_props.slots.insert(info, value);
+        self.static_props.slots.insert(info, Box::new(value));
         #[cfg(debug_assertions)]
         self.static_props.laid.push(info);
         Ok(())
@@ -270,7 +279,18 @@ impl Request {
         self.static_props
             .slots
             .get(&info)
-            .map_or_else(Value::undef, |value| *value)
+            .map_or_else(Value::undef, |value| **value)
+    }
+
+    /// Where the slot of the `static` property `info` names stands, an
+    /// exposed address, which is the same for the life of the request:
+    /// what compiled code reads the slot by, as php's code reads the
+    /// `result` a cache slot keeps (`zend_jit_fetch_static_prop`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:16080-16225`); none where the slot
+    /// is not laid down.
+    pub(crate) fn static_place(&self, info: PropertyInfo) -> Option<usize> {
+        let slot = self.static_props.slots.get(&info)?;
+        Some(std::ptr::from_ref::<Value>(slot).expose_provenance())
     }
 
     /// `zend_read_static_property_ex` (`Z/Zend/zend_API.c`): the value
@@ -462,7 +482,7 @@ impl Request {
             req.static_props
                 .slots
                 .get(&info)
-                .map_or(Value::null(), Value::deref)
+                .map_or(Value::null(), |slot| (**slot).deref())
         };
         let garbage = held(self);
         self.addref(&garbage);
@@ -525,7 +545,7 @@ impl Request {
     /// up the value it wrote over; `null` where the slot is gone, the
     /// value given up.
     pub(crate) fn replace_static_property(&mut self, info: PropertyInfo, value: Value) -> Value {
-        let Some(slot) = self.static_props.slots.get_mut(&info) else {
+        let Some(slot) = self.static_props.slot_mut(info) else {
             self.release(value);
             return Value::null();
         };
@@ -573,7 +593,7 @@ impl Request {
         // The row owns what it holds and the cell takes that owner, so
         // the row's value is replaced and never released.
         let cell = self.reference(held)?;
-        if let Some(slot) = self.static_props.slots.get_mut(&info) {
+        if let Some(slot) = self.static_props.slot_mut(info) {
             *slot = Value::reference(cell);
         }
         Ok(cell.heap().val_ref())
@@ -587,7 +607,7 @@ impl Request {
         self.static_props
             .slots
             .get(&info)
-            .and_then(super::super::values::Value::as_php_ref)
+            .and_then(|slot| slot.as_php_ref())
     }
 
     /// `zend_assign_to_variable_reference` over the slot of the `static`
@@ -599,7 +619,7 @@ impl Request {
     /// which writes *through* a reference standing there; a bind
     /// replaces it.
     pub(crate) fn bind_static_property(&mut self, info: PropertyInfo, bound: Value) {
-        let Some(slot) = self.static_props.slots.get_mut(&info) else {
+        let Some(slot) = self.static_props.slot_mut(info) else {
             self.release(bound);
             return;
         };

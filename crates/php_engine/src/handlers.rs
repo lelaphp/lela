@@ -8076,11 +8076,15 @@ fn static_slot_at<'c>(
         .symbols()
         .class_decl(info.declaring)
         .is_some_and(|decl| decl.kind == php_unit::decl::ClassKind::Trait);
-    if named && !on_trait {
+    if named
+        && !on_trait
+        && let Some(place) = req.static_place(info)
+    {
         req.prime_scoped(frame, slot, |primed| Cached::StaticProperty {
             class,
             primed,
             info,
+            place,
         });
     }
     Ok(Some(StaticSlot { info, name }))
@@ -8639,6 +8643,11 @@ pub(crate) mod fetched {
             req.prime(frame, slot, exec::Cached::Constant(value));
         }
         Ok(value)
+    }
+
+    /// The cache slot a `FETCH_STATIC_PROP_R` keeps its property in.
+    pub(crate) fn static_slot(op: &Opline) -> CacheSlot {
+        super::property_cache_slot(op)
     }
 }
 

@@ -1201,6 +1201,13 @@ impl<'a> Builder<'a> {
         let out = match (slot, inferred.out) {
             (Some(slot), Some(held)) if !pushes && !fused => {
                 let types = returns.map_or(held.types, |returns| held.types.and(returns));
+                // php's `zend_jit_fetch_static_prop` writes the slot
+                // whatever the property's type, in the arm its handler
+                // serves too, and keeps no register.
+                let form = match op.opcode {
+                    Opcode::FetchStaticPropR => Form::Step,
+                    _ => form,
+                };
                 Some(self.define(slot, (types, held.range), idx, form))
             }
             _ => None,
@@ -1469,13 +1476,15 @@ impl<'a> Builder<'a> {
                     // The join may refuse, the memory limit or the string's
                     // size, and leave it pending; a constant's name may
                     // answer nothing, or a deprecation run the error
-                    // handler.
+                    // handler, and a `static` property's handler serves
+                    // what no slot answers and may refuse it.
                     || matches!(
                         op.opcode,
                         Opcode::RopeEnd
                             | Opcode::Concat
                             | Opcode::FastConcat
                             | Opcode::FetchConstant
+                            | Opcode::FetchStaticPropR
                     )
                     || (op.opcode == Opcode::AssignOp
                         && lattice::binary_of(op.extended_value) == Some(Opcode::Concat))

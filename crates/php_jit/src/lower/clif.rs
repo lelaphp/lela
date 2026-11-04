@@ -3026,6 +3026,7 @@ impl<'a> Emit<'a> {
             Opcode::Strlen => self.strlen(line),
             Opcode::Count => self.count(at, line),
             Opcode::FetchConstant => self.fetch_constant(at, line),
+            Opcode::FetchStaticPropR => self.fetch_static(line),
             Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => self.rope(line),
             Opcode::Concat | Opcode::FastConcat => self.concat(line),
             Opcode::Bool | Opcode::BoolNot => self.bool(at, line),
