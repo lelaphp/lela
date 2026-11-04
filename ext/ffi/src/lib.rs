@@ -46,7 +46,7 @@ use std::collections::HashMap;
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_class;
 use php_ext::call::lookup_class;
-use php_ext::decl::{Bytes, IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::{Thrown, fatal, throw, throw_error};
 use php_ext::request::{Ini, Request};
 use php_ext::values::{ClassId, Emalloc};
@@ -231,14 +231,14 @@ pub fn extension() -> Extension {
     ExtensionBuilder::default()
         .ini(vec![
             IniDecl {
-                name: Name(Bytes::borrowed(ENABLE.as_bytes())),
-                default: Some(Bytes::borrowed(b"preload")),
+                name: ENABLE.as_bytes(),
+                default: Some(b"preload"),
                 user: false,
                 per_dir: false,
                 system: true,
             },
             IniDecl {
-                name: Name(Bytes::borrowed(PRELOAD.as_bytes())),
+                name: PRELOAD.as_bytes(),
                 default: None,
                 user: false,
                 per_dir: false,
@@ -295,9 +295,7 @@ fn info(req: &mut Request) {
     let rows: Vec<[String; 3]> = [ENABLE, PRELOAD]
         .iter()
         .map(|name| {
-            let entry = entries
-                .iter()
-                .find(|e| e.decl.name.0.as_ref() == name.as_bytes());
+            let entry = entries.iter().find(|e| e.decl.name == name.as_bytes());
             let local = entry.and_then(|e| e.value.as_deref());
             let master = entry.and_then(|e| e.master.as_deref());
             [(*name).to_string(), shown(name, local), shown(name, master)]

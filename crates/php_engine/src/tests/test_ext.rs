@@ -35,7 +35,7 @@ use super::api::abi::{
     ObservedFiber, ObserverHandlers, Refusal, Start, Statement, ZendExtension, chain,
 };
 use super::api::call::Function;
-use super::api::decl::{IniDecl, Name};
+use super::api::decl::IniDecl;
 use super::api::raising::{Level, Thrown};
 use super::api::request::{Allocation, AllocationObserverId, ObserveAllocations, Request};
 use super::api::values::{ClassId, Owner, PhpObject, Resource, Value};
@@ -529,8 +529,8 @@ impl<const N: u8> TestExt<N> {
         Self::builder()
             .request_state::<AllocationSlot<N>>()
             .ini(vec![IniDecl {
-                name: Name(name.as_bytes().into()),
-                default: Some(b"0".as_slice().into()),
+                name: name.as_bytes(),
+                default: Some(b"0"),
                 user: true,
                 per_dir: true,
                 system: true,

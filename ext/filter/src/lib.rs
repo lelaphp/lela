@@ -54,7 +54,7 @@ use constants::{
 use php_ext::abi::{Extension, ExtensionBuilder, OrFalse, Union};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::coerce::{atoi, to_long, value_name, with_string};
-use php_ext::decl::{Bytes, IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, call_stack_end, docref, new_throwable,
     throw_value,
@@ -616,8 +616,8 @@ fn filter_info(req: &mut Request) {
 /// default `None` for php's `NULL`.
 fn ini_entry(name: &'static [u8], default: Option<&'static [u8]>) -> IniDecl {
     IniDecl {
-        name: Name(Bytes::borrowed(name)),
-        default: default.map(Bytes::borrowed),
+        name,
+        default,
         user: false,
         per_dir: true,
         system: true,

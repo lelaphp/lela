@@ -7,7 +7,7 @@
 
 use php_ext::abi::{ExtensionBuilder, FileCache, IniStage, LongHandler};
 use php_ext::coerce::atoi;
-use php_ext::decl::{Bytes, IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::{Thrown, warning};
 use php_ext::request::{Ini, Request, TierStatus, Zone};
 
@@ -199,10 +199,8 @@ pub(crate) fn declared() -> Vec<IniDecl> {
     ENTRIES
         .iter()
         .map(|entry| IniDecl {
-            name: Name(Bytes::borrowed(entry.name.as_bytes())),
-            default: entry
-                .default
-                .map(|default| Bytes::borrowed(default.as_bytes())),
+            name: entry.name.as_bytes(),
+            default: entry.default.map(str::as_bytes),
             user: entry.all,
             per_dir: entry.all,
             system: true,
@@ -795,7 +793,7 @@ fn master(req: &mut Request, name: &str) -> Vec<u8> {
     req.ini()
         .extension_ini(me)
         .into_iter()
-        .find(|held| held.decl.name.0.as_ref() == name.as_bytes())
+        .find(|held| held.decl.name == name.as_bytes())
         .and_then(|held| held.master)
         .map(<[u8]>::into_vec)
         .unwrap_or_default()
@@ -939,27 +937,21 @@ mod tests {
 
     /// Each declaration names its entry and holds its default by the
     /// bytes [`ENTRIES`] spells them with, as php's `zend_ini_entry_def`
-    /// points at its `const char *`s: the engine's table clones them and
-    /// none is a copy.
+    /// points at its `const char *`s: none is a copy, and the engine's
+    /// table borrows them as they stand.
     #[test]
     fn a_declaration_is_the_bytes_its_entry_spells() {
         let declared = declared();
         assert_eq!(declared.len(), ENTRIES.len());
         for (decl, entry) in declared.iter().zip(&ENTRIES) {
-            assert_eq!(decl.name.0.as_ptr(), entry.name.as_ptr(), "{}", entry.name);
+            assert_eq!(decl.name.as_ptr(), entry.name.as_ptr(), "{}", entry.name);
             assert_eq!(
-                decl.default.as_deref().map(<[u8]>::as_ptr),
+                decl.default.map(<[u8]>::as_ptr),
                 entry.default.map(str::as_ptr),
                 "{}",
                 entry.name
             );
         }
-        let cloned = declared.iter().map(|decl| decl.name.0.clone());
-        assert!(
-            cloned
-                .zip(&ENTRIES)
-                .all(|(name, entry)| name.as_ptr() == entry.name.as_ptr())
-        );
     }
 
     #[test]

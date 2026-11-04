@@ -56,7 +56,7 @@ use php_ext::abi::{
     Dependency, DependencyKind, Extension, ExtensionBuilder, Lent, LongHandler, Pool,
 };
 use php_ext::attr::php_const;
-use php_ext::decl::{Bytes, IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::{Level, Thrown, docref, new_throwable, throw_error, throw_value};
 use php_ext::request::{Ini, Request};
 use php_ext::values::{ClassId, Emalloc, Owner, PhpObject, PhpString, Value};
@@ -324,8 +324,8 @@ pub fn extension() -> Extension {
         .ini(
             INI.iter()
                 .map(|(name, default, user)| IniDecl {
-                    name: Name(Bytes::borrowed(name.as_bytes())),
-                    default: default.map(|d| Bytes::borrowed(d.as_bytes())),
+                    name: name.as_bytes(),
+                    default: default.map(str::as_bytes),
                     user: *user,
                     per_dir: *user,
                     system: true,
@@ -426,7 +426,7 @@ fn mysqli_info(req: &mut Request) {
         .filter_map(|(name, _, _)| {
             let entry = entries
                 .iter()
-                .find(|entry| entry.decl.name.0.as_ref() == name.as_bytes())?;
+                .find(|entry| entry.decl.name == name.as_bytes())?;
             Some([
                 (*name).to_owned(),
                 shown(name, entry.value.as_deref().unwrap_or_default()),

@@ -1459,14 +1459,14 @@ pub struct ConstDecl {
 /// `on_modify` is handed apart from it.
 ///
 /// php's `zend_ini_entry_def`, which an extension spells as data in its
-/// binary (`PHP_INI_BEGIN()`) and `zend_register_ini_entries_ex` points
-/// at: an extension's name and default are [`php_heap::Bytes::borrowed`]
-/// from the bytes its source spells, so the engine's table clones them
-/// and copies none.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// binary (`PHP_INI_BEGIN()`) and whose `const char *`s
+/// `zend_register_ini_entries_ex` points at: the name and the default
+/// are the bytes the extension's source spells, and the engine's table
+/// borrows them and copies none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IniDecl {
-    pub name: Name,
-    pub default: Option<php_heap::Bytes>,
+    pub name: &'static [u8],
+    pub default: Option<&'static [u8]>,
     pub user: bool,
     pub per_dir: bool,
     pub system: bool,

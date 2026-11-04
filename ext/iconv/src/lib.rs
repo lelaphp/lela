@@ -31,7 +31,7 @@ mod mime;
 use ffi::{Cd, Errno};
 use php_ext::abi::{Extension, ExtensionBuilder, IniStage, OrFalse, Union};
 use php_ext::attr::{php_const, php_function};
-use php_ext::decl::{Bytes, IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::{
     BufferHandler, ContentType, HandlerCall, HandlerStatus, Request, Streams as _,
@@ -153,8 +153,8 @@ impl Kind {
 /// ```
 pub fn extension() -> Extension {
     let ini = |kind: Kind| IniDecl {
-        name: Name(Bytes::borrowed(kind.entry().as_bytes())),
-        default: Some(Bytes::borrowed(b"")),
+        name: kind.entry().as_bytes(),
+        default: Some(b""),
         user: true,
         per_dir: true,
         system: true,

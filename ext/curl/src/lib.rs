@@ -36,7 +36,7 @@ mod version;
 
 use php_ext::abi::{Extension, ExtensionBuilder, Lent, Pool, Refusal};
 use php_ext::attr::php_const;
-use php_ext::decl::{Bytes, IniDecl, Name};
+use php_ext::decl::IniDecl;
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or
@@ -826,8 +826,8 @@ pub fn extension() -> Extension {
         .class::<file::CURLFile>()
         .class::<file::CURLStringFile>()
         .ini(vec![IniDecl {
-            name: Name(Bytes::borrowed(CAINFO)),
-            default: Some(Bytes::borrowed(b"")),
+            name: CAINFO,
+            default: Some(b""),
             user: false,
             per_dir: false,
             system: true,

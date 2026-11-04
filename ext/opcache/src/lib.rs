@@ -1423,7 +1423,7 @@ fn display_ini_entries(req: &mut Request) {
         .extension_ini(me)
         .into_iter()
         .filter_map(|held| {
-            let name = String::from_utf8_lossy(&held.decl.name.0).into_owned();
+            let name = String::from_utf8_lossy(held.decl.name).into_owned();
             let entry = ini::named(&name)?;
             let local = held.value.as_deref().unwrap_or_default();
             let master = held.master.as_deref().unwrap_or_default();

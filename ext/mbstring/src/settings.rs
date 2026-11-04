@@ -27,7 +27,7 @@ use crate::tables::{
 use crate::text::value_error;
 use php_ext::abi::IniStage;
 use php_ext::coerce::is_space;
-use php_ext::decl::{Bytes, IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Ini, Request};
 use php_ext::values::walk::{self, Hold};
@@ -691,8 +691,8 @@ pub(crate) fn text_encodings(list: &mut Vec<Encoding>) {
 /// php registers the entry with no value.
 pub(crate) fn entries() -> Vec<IniDecl> {
     let entry = |name: &'static str, default: Option<&'static str>, user: bool| IniDecl {
-        name: Name(Bytes::borrowed(name.as_bytes())),
-        default: default.map(|default| Bytes::borrowed(default.as_bytes())),
+        name: name.as_bytes(),
+        default: default.map(str::as_bytes),
         user,
         per_dir: true,
         system: true,

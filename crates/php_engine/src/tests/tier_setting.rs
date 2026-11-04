@@ -8,7 +8,7 @@
 //! [`UnitCache::tier_setting`]: crate::api::request::UnitCache::tier_setting
 
 use crate::api::abi::ExtensionBuilder;
-use crate::api::decl::{IniDecl, Name};
+use crate::api::decl::IniDecl;
 use crate::api::request::Request;
 use crate::engine::Engine;
 use crate::tier;
@@ -21,8 +21,8 @@ struct Seen(bool);
 /// `JIT_G(on)` on for `tracing` and off otherwise, started with `start`.
 fn engine(start: &str) -> Engine {
     let declared = IniDecl {
-        name: Name::from("opcache.jit"),
-        default: Some(b"disable".as_slice().into()),
+        name: "opcache.jit".as_bytes(),
+        default: Some(b"disable"),
         user: true,
         per_dir: false,
         system: true,

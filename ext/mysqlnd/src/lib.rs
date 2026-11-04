@@ -42,7 +42,7 @@ mod stats;
 mod wire;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, LongHandler};
-use php_ext::decl::{Bytes, IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::Thrown;
 use php_ext::request::{Ini, Request};
 
@@ -129,8 +129,8 @@ pub fn extension() -> Extension {
         .ini(
             INI.iter()
                 .map(|(name, default, scope)| IniDecl {
-                    name: Name(Bytes::borrowed(name.as_bytes())),
-                    default: default.map(|d| Bytes::borrowed(d.as_bytes())),
+                    name: name.as_bytes(),
+                    default: default.map(str::as_bytes),
                     user: matches!(scope, Scope::All),
                     per_dir: matches!(scope, Scope::All | Scope::PerDir),
                     system: !matches!(scope, Scope::PerDir),

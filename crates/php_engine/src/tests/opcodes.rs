@@ -8,7 +8,7 @@
 //! `<!-- init … -->` lines left out, since these extensions declare no
 //! call observer.
 
-use php_unit::decl::{IniDecl, Name};
+use php_unit::decl::IniDecl;
 
 use super::observer::serve_main;
 use super::stepped::Stepper;
@@ -33,8 +33,8 @@ impl<const N: u8> Shows<N> {
 
     fn extension() -> Extension {
         let entry = IniDecl {
-            name: Name(Self::ini_name().into_bytes().into()),
-            default: Some(b""[..].into()),
+            name: Self::ini_name().leak().as_bytes(),
+            default: Some(b""),
             user: false,
             per_dir: false,
             system: true,

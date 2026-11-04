@@ -61,9 +61,9 @@ fn a_startup_handler_sees_the_entries_before_it_and_its_stderr_is_kept() {
         Ok(true)
     };
     let first: OnModify = |_, _| Ok(true);
-    let entry = |name: &str| php_unit::decl::IniDecl {
-        name: Name(name.as_bytes().into()),
-        default: Some(b"0"[..].into()),
+    let entry = |name: &'static str| php_unit::decl::IniDecl {
+        name: name.as_bytes(),
+        default: Some(b"0"),
         user: true,
         per_dir: true,
         system: true,
@@ -93,8 +93,8 @@ fn an_extensions_entry_is_the_bytes_its_declaration_borrowed() {
     static DEFAULT: &[u8] = b"declared";
     let names = NAMES;
     let entry = |name: &'static [u8]| php_unit::decl::IniDecl {
-        name: Name(php_heap::Bytes::borrowed(name)),
-        default: Some(php_heap::Bytes::borrowed(DEFAULT)),
+        name,
+        default: Some(DEFAULT),
         user: true,
         per_dir: true,
         system: true,

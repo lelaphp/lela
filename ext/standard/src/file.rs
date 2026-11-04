@@ -147,7 +147,7 @@ use php_ext::abi::{OrFalse, Passed, Path, Ref, Union, Untyped, Variadic};
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::lookup_class;
 use php_ext::coerce::{to_string, with_string};
-use php_ext::decl::{Bytes, IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, raise, type_error};
 use php_ext::request::{
     Ini, MAXPATHLEN, OptionAnswer, OwnedStream as _, Request, Resolve, Stream, StreamOption,
@@ -161,8 +161,8 @@ use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Resource, Value, Va
 /// with (the engine's `_php_stream_alloc`).
 pub(crate) fn ini() -> Vec<IniDecl> {
     vec![IniDecl {
-        name: Name(Bytes::borrowed(b"auto_detect_line_endings")),
-        default: Some(Bytes::borrowed(b"0")),
+        name: b"auto_detect_line_endings",
+        default: Some(b"0"),
         user: true,
         per_dir: true,
         system: true,

@@ -744,10 +744,7 @@ fn the_dump_writes_phps_trace_lines_under_their_bits() {
 #[test]
 fn the_tier_declares_jit_mode_and_jit_compile_as_system_ini() {
     let declared = super::ini();
-    let names: Vec<_> = declared
-        .iter()
-        .map(|decl| decl.name.0.as_ref().to_vec())
-        .collect();
+    let names: Vec<_> = declared.iter().map(|decl| decl.name.to_vec()).collect();
     assert_eq!(names, [b"jit.mode".to_vec(), b"jit.compile".to_vec()]);
     assert!(
         declared

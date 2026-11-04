@@ -29,7 +29,7 @@ mod statement;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, This};
 use php_ext::attr::php_class;
-use php_ext::decl::{Bytes, IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext_mysqlnd::client::ReverseApi;
@@ -76,8 +76,8 @@ pub fn extension() -> Extension {
             },
         ])
         .ini(vec![IniDecl {
-            name: Name(Bytes::borrowed(b"pdo_mysql.default_socket")),
-            default: Some(Bytes::borrowed(DEFAULT_SOCKET.as_bytes())),
+            name: b"pdo_mysql.default_socket",
+            default: Some(DEFAULT_SOCKET.as_bytes()),
             user: false,
             per_dir: false,
             system: true,

@@ -5147,7 +5147,7 @@ fn extension_ini_string(req: &Request, extension: ExtensionId, indent: &str) -> 
         writeln!(
             out,
             "    {indent}Entry [ {} <{modifiable}> ]",
-            String::from_utf8_lossy(&decl.name.0)
+            String::from_utf8_lossy(decl.name)
         )
         .ok();
         writeln!(
@@ -8232,7 +8232,7 @@ impl ReflectionExtension {
                 Some(value) => PhpString::new(req, &value)?.into_value(),
                 None => Owner::null(),
             };
-            entries.set_str(req, &entry.decl.name.0, value)?;
+            entries.set_str(req, entry.decl.name, value)?;
         }
         Ok(entries)
     }

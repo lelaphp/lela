@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use php_unit::decl::{IniDecl, Name};
+use php_unit::decl::IniDecl;
 
 use super::Environment;
 use super::{
@@ -677,7 +677,7 @@ impl Request {
             let Some(row) = shared.ini.row(at) else {
                 continue;
             };
-            let (name, original) = (&*row.name, row.value.as_deref());
+            let (name, original) = (row.name, row.value.as_deref());
             // A core handler that reads a quantity reads its startup
             // value again, and warns again where the rule interprets it.
             if let Some(reading) = CoreQuantity::of(name) {
@@ -885,7 +885,7 @@ impl Request {
     fn in_table_order(&self, mut entries: Vec<IniEntry>) -> Vec<IniEntry> {
         self.ini
             .order
-            .arrange(&mut entries, |entry| &entry.decl.name.0);
+            .arrange(&mut entries, |entry| entry.decl.name);
         entries
     }
 
@@ -1064,18 +1064,18 @@ impl Request {
         let declared = row
             .declared
             .and_then(|(of, at)| self.extension_of(of)?.ini.get(at));
-        let decl = declared.cloned().unwrap_or_else(|| {
-            let (user, per_dir, system) = Request::ini_modifiable(&row.name);
+        let decl = declared.copied().unwrap_or_else(|| {
+            let (user, per_dir, system) = Request::ini_modifiable(row.name);
             IniDecl {
-                name: Name(row.name.clone()),
-                default: row.value.clone(),
+                name: row.name,
+                default: row.default,
                 user,
                 per_dir,
                 system,
             }
         });
         let master: Option<Box<[u8]>> = row.value.as_deref().map(Into::into);
-        let changed = self.ini_changed(&row.name);
+        let changed = self.ini_changed(row.name);
         IniEntry {
             value: changed.map_or_else(|| master.clone(), |(_, v, _)| v.as_deref().map(Into::into)),
             master,
@@ -2265,8 +2265,8 @@ mod tests {
         }
         let extension = crate::api::abi::ExtensionBuilder::default()
             .ini(vec![php_unit::decl::IniDecl {
-                name: php_unit::decl::Name(b"t.flag".as_slice().into()),
-                default: Some(b"1".as_slice().into()),
+                name: b"t.flag",
+                default: Some(b"1"),
                 user: true,
                 per_dir: true,
                 system: true,
@@ -2311,8 +2311,8 @@ mod tests {
         let extension = || {
             crate::api::abi::ExtensionBuilder::default()
                 .ini(vec![php_unit::decl::IniDecl {
-                    name: php_unit::decl::Name(b"t.flag".as_slice().into()),
-                    default: Some(b"1".as_slice().into()),
+                    name: b"t.flag",
+                    default: Some(b"1"),
                     user: true,
                     per_dir: true,
                     system: true,
@@ -2350,9 +2350,9 @@ mod tests {
     #[test]
     fn an_extension_entry_declared_on_update_long_is_read_by_the_quantity_rule() {
         use crate::api::abi::LongHandler;
-        let entry = |name: &[u8], default: &[u8]| php_unit::decl::IniDecl {
-            name: php_unit::decl::Name(name.into()),
-            default: Some(default.into()),
+        let entry = |name: &'static [u8], default: &'static [u8]| php_unit::decl::IniDecl {
+            name,
+            default: Some(default),
             user: true,
             per_dir: true,
             system: true,

@@ -49,7 +49,7 @@ use std::sync::Arc;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_const;
-use php_ext::decl::{Bytes, IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject};
@@ -292,8 +292,8 @@ const INI: [(&str, &str); 5] = [
 fn ini() -> Vec<IniDecl> {
     INI.into_iter()
         .map(|(name, default)| IniDecl {
-            name: Name(Bytes::borrowed(name.as_bytes())),
-            default: Some(Bytes::borrowed(default.as_bytes())),
+            name: name.as_bytes(),
+            default: Some(default.as_bytes()),
             user: true,
             per_dir: true,
             system: true,
@@ -345,11 +345,11 @@ fn date_info(req: &mut Request) {
         .filter_map(|(name, _)| {
             entries
                 .iter()
-                .find(|entry| entry.decl.name.0.as_ref() == name.as_bytes())
+                .find(|entry| entry.decl.name == name.as_bytes())
         })
         .map(|entry| {
             [
-                String::from_utf8_lossy(&entry.decl.name.0).into_owned(),
+                String::from_utf8_lossy(entry.decl.name).into_owned(),
                 shown(entry.value.as_deref().unwrap_or_default()),
                 shown(entry.master.as_deref().unwrap_or_default()),
             ]

@@ -24,7 +24,7 @@ use php_ext::abi::{IniStage, Instance, Passed, Raw, Union};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::call;
 use php_ext::coerce::{to_callable, to_string, truthy};
-use php_ext::decl::{Bytes, IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::{
     Level, Thrown, arg_value_error, arity, docref, new_throwable, throw_chained, throw_value,
     uncaught_at, while_pending,
@@ -94,8 +94,8 @@ pub(crate) fn ini() -> Vec<IniDecl> {
     ]
     .into_iter()
     .map(|(name, default)| IniDecl {
-        name: Name(Bytes::borrowed(name.as_bytes())),
-        default: default.map(|default| Bytes::borrowed(default.as_bytes())),
+        name: name.as_bytes(),
+        default: default.map(str::as_bytes),
         user: true,
         per_dir: true,
         system: true,

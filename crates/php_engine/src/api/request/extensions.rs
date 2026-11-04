@@ -349,7 +349,7 @@ impl Extensions<&mut Request> {
         self.0
             .extensions_mut()
             .info_table(&[&["Version", module.version]]);
-        let names: Vec<&[u8]> = module.ini.iter().map(|entry| &*entry.name.0).collect();
+        let names: Vec<&[u8]> = module.ini.iter().map(|entry| entry.name).collect();
         self.0.ini_mut().info_ini_entries(&names);
     }
 

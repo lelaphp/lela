@@ -44,7 +44,7 @@ use php_ext::abi::{
     Dependency, DependencyKind, Extension, ExtensionBuilder, IniStage, LongHandler,
 };
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::decl::{Bytes, IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::Thrown;
 use php_ext::request::{Ini, Request};
 use php_ext::values::{Value, ValueRef};
@@ -175,8 +175,8 @@ pub(crate) mod ini {
 
 fn ini_entry(name: &'static [u8], default: &'static [u8]) -> IniDecl {
     IniDecl {
-        name: Name(Bytes::borrowed(name)),
-        default: Some(Bytes::borrowed(default)),
+        name,
+        default: Some(default),
         user: true,
         per_dir: true,
         system: true,
@@ -348,7 +348,7 @@ fn soap_info(req: &mut Request) {
         .extension_ini(me)
         .into_iter()
         .map(|held| {
-            let name = held.decl.name.0.to_vec();
+            let name = held.decl.name.to_vec();
             let shown = |value: Option<&[u8]>| {
                 let value = value.unwrap_or_default();
                 if name.as_slice() == ini::CACHE_ENABLED {

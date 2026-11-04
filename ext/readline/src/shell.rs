@@ -357,8 +357,8 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
         }
     } else if let Some(name) = text.strip_prefix(b"#").filter(|n| n.first() != Some(&b'[')) {
         for entry in req.ini().entries() {
-            if entry.decl.name.0.starts_with(name) {
-                found.push([b"#".as_slice(), &entry.decl.name.0].concat());
+            if entry.decl.name.starts_with(name) {
+                found.push([b"#".as_slice(), entry.decl.name].concat());
                 append = Some(b'=');
             }
         }

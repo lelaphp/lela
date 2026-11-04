@@ -59,7 +59,7 @@ mod utf8;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::decl::{Bytes, IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpString};
@@ -379,8 +379,8 @@ fn post_deactivate(req: &mut Request) {
 /// One `PHP_INI_ALL` entry.
 fn ini(name: &'static [u8], default: Option<&'static [u8]>) -> IniDecl {
     IniDecl {
-        name: Name(Bytes::borrowed(name)),
-        default: default.map(Bytes::borrowed),
+        name,
+        default,
         user: true,
         per_dir: true,
         system: true,
@@ -485,11 +485,9 @@ fn intl_info(req: &mut Request) {
         .ini()
         .entries()
         .iter()
-        .filter(|entry| {
-            [DEFAULT_LOCALE, ERROR_LEVEL, USE_EXCEPTIONS].contains(&entry.decl.name.0.as_ref())
-        })
+        .filter(|entry| [DEFAULT_LOCALE, ERROR_LEVEL, USE_EXCEPTIONS].contains(&entry.decl.name))
         .map(|entry| {
-            let boolean = entry.decl.name.0.as_ref() == USE_EXCEPTIONS;
+            let boolean = entry.decl.name == USE_EXCEPTIONS;
             let shown = |value: Option<&[u8]>| {
                 let value = value.unwrap_or_default();
                 match (boolean, Ini::parse_bool(value)) {
@@ -499,7 +497,7 @@ fn intl_info(req: &mut Request) {
                 }
             };
             [
-                String::from_utf8_lossy(&entry.decl.name.0).into_owned(),
+                String::from_utf8_lossy(entry.decl.name).into_owned(),
                 shown(entry.value.as_deref()),
                 shown(entry.master.as_deref()),
             ]

@@ -15,7 +15,7 @@
 
 use php_ext::coerce::c_str;
 use php_ext::coerce::{atoi, to_double, to_long, truthy};
-use php_ext::decl::{Bytes, IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::{Level, Thrown, docref, value_error};
 use php_ext::request::{
     Handshake, Notification, NotifyCode, Opening, OptionAnswer, OwnedStream as _, Request,
@@ -61,7 +61,7 @@ pub(crate) fn ini() -> Vec<IniDecl> {
     [&b"user_agent"[..], b"from"]
         .into_iter()
         .map(|name| IniDecl {
-            name: Name(Bytes::borrowed(name)),
+            name,
             default: None,
             user: true,
             per_dir: true,

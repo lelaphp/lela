@@ -277,7 +277,7 @@ mod tests {
     use std::sync::Mutex;
     use std::thread::ThreadId;
 
-    use php_unit::decl::{IniDecl, Name};
+    use php_unit::decl::IniDecl;
 
     use crate::api::abi::{
         Admission, Extension, ExtensionBuilder, Lookup, PostStartup, PreloadThread, Validation,
@@ -309,8 +309,8 @@ mod tests {
     /// took it and where each diagnostic was raised.
     fn preloading_on_a_thread(tag: &str) -> Extension {
         let entry = |name: &'static [u8]| IniDecl {
-            name: Name(name.into()),
-            default: Some(b""[..].into()),
+            name,
+            default: Some(b""),
             user: false,
             per_dir: false,
             system: true,

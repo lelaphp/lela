@@ -25,8 +25,8 @@ use php_engine::tier::{Bound, Epoch, FuncRef, Laid, SafepointIdx, StartupIni, Wo
 use php_unit::{Opcode, OplineIdx};
 
 use crate::types::ExitId;
-use php_heap::Bytes;
-use php_unit::decl::{IniDecl, Name};
+
+use php_unit::decl::IniDecl;
 
 use crate::record::{Start, Stop};
 use crate::table::{TraceId, code};
@@ -481,8 +481,8 @@ pub(crate) const INI: [(&str, &str); 2] = [("jit.mode", ""), ("jit.compile", "th
 pub(crate) fn ini() -> Vec<IniDecl> {
     INI.iter()
         .map(|(name, default)| IniDecl {
-            name: Name(Bytes::borrowed(name.as_bytes())),
-            default: Some(Bytes::borrowed(default.as_bytes())),
+            name: name.as_bytes(),
+            default: Some(default.as_bytes()),
             user: false,
             per_dir: false,
             system: true,
