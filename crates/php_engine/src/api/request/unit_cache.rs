@@ -253,8 +253,10 @@ impl Request {
     /// the `include_path` and the including file's directory that resolve
     /// it; none for an empty path or one a stream wrapper opens. A
     /// relative path's key asks for the working directory, which lays
-    /// `ZCG(cwd)` down the first time ([`Request::accel_cwd`]).
-    fn written_key(&mut self, written: &[u8]) -> Option<UnitKey> {
+    /// `ZCG(cwd)` down the first time ([`Request::accel_cwd`]). An
+    /// absolute path's is `written` itself, borrowed, as php's is the
+    /// include's own string.
+    fn written_key<'w>(&mut self, written: &'w [u8]) -> Option<UnitKey<'w>> {
         if written.starts_with(b"/") || is_cacheable_stream_path(written) {
             return Some(UnitKey::full(written));
         }
@@ -328,8 +330,7 @@ impl Request {
     /// ```
     pub(crate) fn held_as_written(&mut self, written: &[u8]) -> Option<(Arc<Held>, Validation)> {
         let key = self.written_key(written)?;
-        let shared = Arc::clone(&self.shared);
-        let held = shared.units.find(&self.arena.files, &key)?;
+        let held = self.shared.units.find(&self.arena.files, &key)?;
         let Admission::Held {
             validation,
             lookup: Lookup::AsWritten,

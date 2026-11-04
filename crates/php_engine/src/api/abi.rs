@@ -278,8 +278,14 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
     }
 
     /// The value held for `key`, built by nothing: what the unit cache
-    /// asks before it compiles, so a hit and a miss are told apart.
-    pub(crate) fn get(&self, key: &K) -> Option<Arc<V>> {
+    /// asks before it compiles, so a hit and a miss are told apart. The
+    /// key is borrowed as the keys held lend themselves, so a lookup by
+    /// the bytes of a path copies none of them.
+    pub(crate) fn get<Q>(&self, key: &Q) -> Option<Arc<V>>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.entries().get(key).map(Arc::clone)
     }
 

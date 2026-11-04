@@ -6,6 +6,7 @@
 //! include is being opened, php's construct on the frame's opline, is
 //! [`Include`]'s, whose field no file but this one reads.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use php_compile::SourceKind;
@@ -19,7 +20,7 @@ use crate::api::values::{ClassId, Owner, PhpString, Value};
 use crate::exec::IncludeKind;
 use crate::layer::{IncludeFile, IncludeReadHook};
 use crate::supplied::chain::{FileArgs, StringArgs};
-use crate::unit_cache::CompileRefused;
+use crate::unit_cache::{self, CompileRefused};
 
 use super::{HandlePath, Opened, Request, Unresolved, is_wrapper_url};
 
@@ -658,6 +659,28 @@ impl Request {
     /// Warning: require(%s/locked.inc): Failed to open stream: %s in %s on line 5
     /// Error
     /// ```
+    ///
+    /// A file the cache holds is at its full path wherever the key or the
+    /// path a once form resolves found it, so a once form through a
+    /// symbolic link, a relative path or a `..` segment finds it included,
+    /// and the table lists each file once, by its full path:
+    ///
+    /// ```php
+    /// $d = realpath(__DIR__) . '/o'; @mkdir("$d/x/y", 0777, true); @symlink("$d/x", "$d/l"); chdir($d);
+    /// foreach (['a', 'b'] as $n) { file_put_contents("$d/x/$n.inc", "<?php echo '$n';"); touch("$d/x/$n.inc", time() - 60); }
+    /// var_dump(opcache_compile_file("$d/x/b.inc"));
+    /// include "$d/x/a.inc"; include_once "$d/l/a.inc"; require_once "x/y/../a.inc"; include_once './x/a.inc';
+    /// require_once "$d/l/b.inc"; include_once "x/b.inc"; include "$d/x/y/../b.inc"; require_once "$d/x/b.inc";
+    /// echo "\n", implode("\n", array_map(fn ($f) => str_replace($d, 'D', $f), get_included_files())), "\n";
+    /// exec('rm -rf ' . escapeshellarg($d));
+    /// ```
+    /// ```expect regime=jit-off
+    /// bool(true)
+    /// abb
+    /// %s
+    /// D/x/a.inc
+    /// D/x/b.inc
+    /// ```
     fn include_through(
         &mut self,
         kind: IncludeKind,
@@ -667,40 +690,41 @@ impl Request {
         if written.contains(&0) {
             return self.failed_opening(kind, written);
         }
-        let mut held = self.held_as_written(written);
-        let resolved = match &held {
-            Some((held, _)) => Ok(held.path.clone()),
-            None => self.code_mut().resolve_path(written),
+        let as_written = self.held_as_written(written);
+        // A file the lookup by the key found is at its own full path,
+        // read where the cache holds it and copied nowhere.
+        let path = match &as_written {
+            Some((held, _)) => Cow::Borrowed(&held.path[..]),
+            None => match self.code_mut().resolve_path(written) {
+                Ok(path) => Cow::Owned(path),
+                Err(Unresolved::Threw(thrown)) => return Err(thrown),
+                Err(_) if is_wrapper_url(written) => {
+                    return self.include_stream(kind, written, written);
+                }
+                Err(Unresolved::Missing(reason)) => {
+                    // The plain files wrapper is handed the path as written,
+                    // and asks the guard of it before it opens.
+                    let refused = self.include_guard(kind, written, written);
+                    return refused
+                        .unwrap_or_else(|| self.not_opened(kind, written, &reason, written));
+                }
+            },
         };
-        if kind.once()
-            && held.is_none()
-            && let Ok(path) = &resolved
-        {
-            held = self.file_once_key(written, path);
-        }
-        if kind.once()
-            && let Ok(path) = &resolved
-            && self.included_files.contains(path)
-        {
+        let by_path = match as_written {
+            None if kind.once() => self.file_once_key(written, &path),
+            _ => None,
+        };
+        let held = as_written.as_ref().or(by_path.as_ref());
+        let cached = held.map(|(held, _)| &**held);
+        if kind.once() && self.included_files.contains_held(&path, cached) {
             return Ok(Opened::Already);
         }
-        let path = match resolved {
-            // A stream the cache holds is served as a file it holds is.
-            Ok(path) if held.is_some() || !is_wrapper_url(&path) => path,
-            // php's `resolved_path = zend_string_copy(inc_filename)` for a
-            // path it could not resolve, which a stream wrapper opens.
-            Ok(path) => return self.include_stream(kind, written, &path),
-            Err(Unresolved::Threw(thrown)) => return Err(thrown),
-            Err(_) if is_wrapper_url(written) => {
-                return self.include_stream(kind, written, written);
-            }
-            Err(Unresolved::Missing(reason)) => {
-                // The plain files wrapper is handed the path as written,
-                // and asks the guard of it before it opens.
-                let refused = self.include_guard(kind, written, written);
-                return refused.unwrap_or_else(|| self.not_opened(kind, written, &reason, written));
-            }
-        };
+        // A stream the cache holds is served as a file it holds is; php's
+        // `resolved_path = zend_string_copy(inc_filename)` for a path it
+        // could not resolve otherwise, which a stream wrapper opens.
+        if held.is_none() && is_wrapper_url(&path) {
+            return self.include_stream(kind, written, &path);
+        }
         // A file the lookup by the key found is opened by nothing here.
         if held.is_none()
             && let Some(failed) = self.include_guard(kind, &path, written)
@@ -717,7 +741,7 @@ impl Request {
             {
                 return self.not_opened(kind, written, &reason, written);
             }
-            self.note_included(&path)?;
+            self.note_included_from(&path, cached)?;
         }
         // A unit the lookup by the key found, fresh, is opcache's answer
         // above every link; any other file is compiled through them all,
@@ -725,8 +749,9 @@ impl Request {
         // `zend_compile_file`. A stale one, discarded, is opened as a miss
         // opens it: an include's through the path as written again, a once
         // form's at the path it put in the table.
-        let served = held.map(|(held, how)| self.held_answer(&held, how, written, handle));
+        let served = held.map(|(held, how)| self.held_answer(held, *how, written, handle));
         let served = served.transpose()?;
+        let hit = matches!(served, Some(Some(_)));
         // What the opening names where it fails, `file_handle->filename`:
         // a once form's stale file's the path it put in the table.
         let named = if matches!(served, Some(None)) {
@@ -734,7 +759,7 @@ impl Request {
         } else {
             written
         };
-        let cached = match served {
+        let answer = match served {
             Some(Some(answer)) => Some(answer),
             Some(None) if !kind.once() => return self.include_through(kind, written, handle),
             stale => {
@@ -749,7 +774,13 @@ impl Request {
                 compiled?
             }
         };
-        match cached {
+        match answer {
+            // A hit is filed by its interned name, `script.filename`, as
+            // `persistent_compile_file`'s hit files it.
+            Some(Ok(unit)) if hit => {
+                self.note_included_from(&path, cached)?;
+                Ok(Opened::Unit(unit))
+            }
             Some(Ok(unit)) => {
                 self.note_compiled_file(&path, &unit)?;
                 Ok(Opened::Unit(unit))
@@ -1792,6 +1823,18 @@ impl IncludedFiles {
         self.0.arr().str_find(path).is_some()
     }
 
+    /// [`IncludedFiles::contains`] of the file at `path` that the unit
+    /// cache holds as `held`, where it does: asked by its interned name,
+    /// whose hash is cached, as `zend_include_or_eval` asks by the
+    /// `resolved_path` `persistent_zend_resolve_path` handed it,
+    /// `script.filename`.
+    fn contains_held(&self, path: &[u8], held: Option<&unit_cache::Held>) -> bool {
+        match held.and_then(unit_cache::Held::name) {
+            Some(name) => self.0.arr().contains(php_heap::Key::Str(name)),
+            None => self.contains(path),
+        }
+    }
+
     /// The table's string for `path`, `zend_string_copy`'d by the
     /// caller, as an op array's `filename` is the string its file was
     /// compiled under; `None` for a path the request did not open.
@@ -1843,6 +1886,43 @@ impl Request {
         self.note_included_held(held)
     }
 
+    /// [`Request::note_included`] of the file at `path` that the unit
+    /// cache holds as `held`, where it does: its interned name put in the
+    /// table, `script.filename`, as `persistent_compile_file` puts it for
+    /// a hit and `persistent_stream_open_function` hands it to a once
+    /// form as its `opened_path`, so the path is hashed by nothing and
+    /// copied by nothing. The first include of a file the cache held
+    /// before the request asked for it keeps no string, where one the
+    /// request compiles keeps its own, and a once form's as an
+    /// include's:
+    ///
+    /// ```php
+    /// $d = realpath(__DIR__) . '/'; $d .= str_repeat('f', 120 - strlen($d));
+    /// foreach (['a', 'b', 'c', 'e'] as $n) { file_put_contents("$d$n.inc", '<?php $x = 1;'); touch("$d$n.inc", time() - 60); }
+    /// var_dump(opcache_compile_file("{$d}a.inc"), opcache_compile_file("{$d}e.inc"));
+    /// $m = memory_get_usage(); include "{$d}a.inc"; echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); include "{$d}b.inc"; echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); include_once "{$d}c.inc"; echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); include_once "{$d}e.inc"; echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); include "{$d}e.inc"; include "{$d}a.inc"; echo memory_get_usage() - $m, "\n";
+    /// foreach (['a', 'b', 'c', 'e'] as $n) { unlink("$d$n.inc"); }
+    /// ```
+    /// ```expect regime=jit-off
+    /// bool(true)
+    /// bool(true)
+    /// 0 160 160 0 0
+    /// ```
+    fn note_included_from(
+        &mut self,
+        path: &[u8],
+        held: Option<&unit_cache::Held>,
+    ) -> Result<(), Thrown> {
+        match held.and_then(unit_cache::Held::name) {
+            Some(name) => self.note_included_held(PhpString::of(name)),
+            None => self.note_included(path),
+        }
+    }
+
     /// `zend_hash_str_del(&EG(included_files), path)`: `path` taken out
     /// of the table and its string given up, as `phar_file_action` takes
     /// out the file whose compile made no op array. The row's value is
@@ -1883,7 +1963,7 @@ impl Request {
     /// made; given up where the table has its path.
     pub(crate) fn note_included_held(&mut self, held: PhpString) -> Result<(), Thrown> {
         let rows = self.included_files.0.arr();
-        let added = if rows.str_find(held.as_bytes()).is_some() {
+        let added = if rows.contains(php_heap::Key::Str(held.heap())) {
             Ok(())
         } else {
             let key = php_heap::Key::Str(held.heap());
