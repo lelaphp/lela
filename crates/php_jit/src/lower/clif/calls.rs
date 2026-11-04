@@ -1189,7 +1189,7 @@ impl Emit<'_> {
         // in it the record now on top where that is not the caller's own.
         // Each word loaded for it alone, which no path but one that reads
         // where the frame stands needs.
-        let call = self.under_way_past((stack, len), place);
+        let call = self.under_way_past(to, (stack, len), place);
         let func = self.b.ins().uload32(trusted(), back, at(L.cache()));
         let end = self.b.ins().load(I64, trusted(), stack, END);
         let left = self.b.ins().isub(end, room);
@@ -1427,16 +1427,39 @@ impl Emit<'_> {
     /// standing on the table as it left: the record on top where that is
     /// not the caller's own, at `place`, none where it is. Each word loaded
     /// for it alone, which no path but one that reads where the frame
-    /// stands needs ([`super::unread`]).
-    fn under_way_past(&mut self, (stack, len): (Value, Value), place: Value) -> Value {
+    /// stands needs ([`super::unread`]). A return to a frame the trace did
+    /// not push goes on through a door, which takes the word, so there the
+    /// common case costs one branch, and the record is read cold.
+    fn under_way_past(
+        &mut self,
+        to: LeavesTo,
+        (stack, len): (Value, Value),
+        place: Value,
+    ) -> Value {
         let under = self.b.ins().iadd_imm_s(len, -2);
         let own = self.b.ins().icmp(IntCC::Equal, under, place);
         let nothing = self.b.ins().iconst(I64, 0);
+        if let LeavesTo::Made(_) = to {
+            let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
+            let first = self.record_word(frames, under, L.record_at());
+            let built = self.b.ins().iadd_imm_s(first, -i64::from(L.room()));
+            self.stood_loads([frames, first]);
+            return self.b.ins().select(own, nothing, built);
+        }
+        let var = self.b.declare_var(I64);
+        self.b.def_var(var, nothing);
+        let (read, on) = self.split();
+        self.b.ins().brif(own, on, &[], read, &[]);
+        self.b.switch_to_block(read);
+        self.b.seal_block(read);
         let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
         let first = self.record_word(frames, under, L.record_at());
         let built = self.b.ins().iadd_imm_s(first, -i64::from(L.room()));
-        self.stood_loads([frames, first]);
-        self.b.ins().select(own, nothing, built)
+        self.b.def_var(var, built);
+        self.b.ins().jump(on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
+        self.b.use_var(var)
     }
 
     /// The slot of the caller's slots at `callers` that a call returning
