@@ -17255,6 +17255,26 @@ pub(crate) fn assign_dim<
     op: &Opline,
     at: u32,
 ) -> Edge {
+    if let Some(inline) = inline_path::assign_dim::<A, B, D>(req.slots_mut(frame), code, op, at) {
+        return inlined::<T>(req, frame, code, at, inline);
+    }
+    assigned_dim_placed::<A, B, D>(req, frame, code, op, at)
+}
+
+/// `ASSIGN_DIM` past the inline path over the slots
+/// ([`inline_path::assign_dim`]): the path with the request in hand
+/// ([`inline_assign_dim`]), which lays an element down and frees what
+/// it gives up, and the kernel past it. A call of its own, as
+/// [`fetched_dim`] is, so the loop's arm holds no more than the path
+/// over the slots.
+#[inline(never)]
+fn assigned_dim_placed<A: Operand + Default, B: Operand + Default, D: Operand + Default>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+) -> Edge {
     if let Some(edge) = inline_assign_dim(
         req,
         frame,
@@ -17887,9 +17907,8 @@ pub(crate) fn assign_dim_op<T: Tier, A: Operand + Default, B: Operand + Default>
     op: &Opline,
     at: u32,
 ) -> Edge {
-    let kinds = (A::default(), B::default());
-    if let Some(edge) = inline_assign_dim_op(req, frame, (code, op, at), kinds) {
-        return edge;
+    if let Some(inline) = inline_path::assign_dim_op::<A, B>(req.slots_mut(frame), code, op, at) {
+        return inlined::<T>(req, frame, code, at, inline);
     }
     req.vm_mut().stand(frame, at);
     assigned_dim_op(req, frame, code, op)
@@ -17903,13 +17922,16 @@ pub(crate) fn assign_dim_op<T: Tier, A: Operand + Default, B: Operand + Default>
 /// that is a number as it stands, under an operator
 /// [`inline::compound`] names, computed by [`inline::binary`] as the
 /// binary opcode's own inline pair computes it, and written in place and,
-/// under `RETURN_VALUE_USED`, into the temporary. Nothing is converted,
-/// warned of or given up, so nothing runs. `None`, with nothing touched,
-/// for everything else, which is the kernel's: a key the array has not
-/// got and its `Undefined array key` warning, an append, an element that
-/// is a reference or no number, a value that is no number, another
-/// operator, `.=` among them, and a shared array, which the kernel
-/// separates.
+/// under `RETURN_VALUE_USED`, into the temporary. Nothing is converted
+/// or warned of, and the one owner given up, a temporary string the
+/// dimension was (`FREE_OP2`), is given up only where another owner
+/// holds it too, so nothing runs and the frame's slots are all it reads
+/// and writes. `None`, with nothing touched, for everything else, which
+/// is the kernel's: a key the array has not got and its `Undefined
+/// array key` warning, an append, an element that is a reference or no
+/// number, a value that is no number, another operator, `.=` among
+/// them, a shared array, which the kernel separates, and a temporary
+/// string dimension's last owner, which is the request's to free.
 ///
 /// ```php
 /// function f(array &$v) { $v[0] += 0.5; $v[1] -= 1; $v["k"] *= 3; return $v; }
@@ -17988,32 +18010,50 @@ pub(crate) fn assign_dim_op<T: Tier, A: Operand + Default, B: Operand + Default>
 /// ```
 #[inline(always)] // as `inline_fetch_dim_r`
 fn inline_assign_dim_op(
-    req: &mut Request,
-    frame: FrameRef,
+    slots: &mut [Zval],
     (code, op, at): (&OpArray, &Opline, u32),
     (a, b): (impl Operand, impl Operand),
-) -> Option<Edge> {
-    let rule = inline::compound(op.extended_value)?;
+) -> Option<Inline> {
     if a.kind() != OperandKind::Cv {
         return None;
     }
-    let data =
-        *exec::opline_at(code, exec::after(at)).filter(|data| data.opcode == Opcode::OpData)?;
-    let slots = req.slots_mut(frame);
     let array = owned_array(slots, code, op, a)?;
     let (key, free_dim) = inline_key(slots, code, op, b)?;
     let entry = array.value_ref(key)?;
+    // The operator and the `OP_DATA` read after the lookup, so the
+    // lookup's values and theirs are never held together.
+    let rule = inline::compound(op.extended_value)?;
+    let data =
+        exec::opline_at(code, exec::after(at)).filter(|data| data.opcode == Opcode::OpData)?;
     // `get_op_data_zval_ptr_r`: php specialises no `OP_DATA` kind here.
     let value = ByKind(data.op1_type).read(slots, code, data.op1);
     let z = inline::binary(rule, entry.read(), value)?;
-    if op.out_type != OperandKind::Unused {
-        write_owning_nothing(slots, op, z)?;
+    let out = (op.out_type != OperandKind::Unused).then_some(op.out as usize);
+    if let Some(out) = out
+        && slots.get(out)?.is_refcounted()
+    {
+        return None;
+    }
+    // The dimension a temporary string held, given up as `FREE_OP2`
+    // gives it up where another owner holds it too, the first write;
+    // the last owner's is the request's to free, past this path.
+    let freed = if free_dim {
+        let at = b.slot(op.op2)?;
+        if !php_heap::Heap::release_nogc_kept(*slots.get(at)?) {
+            return None;
+        }
+        Some(at)
+    } else {
+        None
+    };
+    if let Some(out) = out.and_then(|out| slots.get_mut(out)) {
+        *out = z;
     }
     entry.write(z);
-    if free_dim {
-        exec::free_operand(req, frame, op.op2_type, op.op2);
+    if let Some(dim) = freed.and_then(|at| slots.get_mut(at)) {
+        *dim = Zval::UNDEF;
     }
-    Some(Ok(Next::by(2)))
+    Some(Inline::On(2))
 }
 
 /// `ASSIGN_DIM_OP` past its inline path: the container walked, the
@@ -27855,20 +27895,21 @@ pub(crate) mod inline_path {
     use php_unit::{OpArray, Opline};
 
     use super::branch::Branch;
-    #[cfg(not(dispatch = "tailcall"))]
-    use super::inline_arith_assign;
-    #[cfg(not(dispatch = "tailcall"))]
-    use super::return_mask_holds;
     use super::{
-        inline_arith, inline_assign, inline_assign_op, inline_branch, inline_compare,
-        inline_fetch_dim_r, inline_identical, inline_incdec, write_owning_nothing,
+        inline_arith, inline_assign, inline_assign_dim_op, inline_assign_op, inline_branch,
+        inline_compare, inline_fetch_dim_r, inline_identical, inline_incdec, write_owning_nothing,
     };
     #[cfg(not(dispatch = "tailcall"))]
+    use super::{inline_arith_assign, return_mask_holds};
+    use super::{inline_key, owned_array, taking};
+    #[cfg(not(dispatch = "tailcall"))]
     use php_heap::FrameRef;
+    use php_heap::{Heap, ZvalType};
+    use php_unit::OperandKind;
 
     #[cfg(not(dispatch = "tailcall"))]
     use crate::api::request::Request;
-    use crate::operand::{ByKind, Operand, Retval};
+    use crate::operand::{ByKind, Operand, Retval, RetvalByte};
     use crate::ops::inline::Arith;
     #[cfg(not(dispatch = "tailcall"))]
     use crate::ops::inline::Binary;
@@ -28201,6 +28242,172 @@ pub(crate) mod inline_path {
         _: u32,
     ) -> Option<Inline> {
         inline_fetch_dim_r(slots, code, op, (A::default(), B::default()))
+    }
+
+    /// `ZEND_ASSIGN_DIM` over an element an array holds
+    /// (`ZEND_ASSIGN_DIM_SPEC_CV_*_OP_DATA_*`, `Z/Zend/zend_vm_def.h:2657`):
+    /// `zend_fetch_dimension_address_inner_W` finding the element at a
+    /// long or string key ([`super::inline_key`]) in the array the CV
+    /// alone owns ([`super::owned_array`]), so `SEPARATE_ARRAY` copies
+    /// nothing, and `zend_assign_to_variable` writing the `OP_DATA` value
+    /// over it as [`super::taking`] takes it. What the element held is
+    /// given up as `GC_DTOR_NO_REF(garbage)` gives it up only where that
+    /// runs nothing and frees nothing: a value that counts no owner, or a
+    /// string another owner holds too. `None`, with nothing touched, for
+    /// everything else, which the handler serves past it with the request
+    /// in hand ([`super::assigned_dim_placed`]): a key the array has not
+    /// got, which lays an element down, an append, a shared array, which
+    /// is separated, an element that is a reference, an array or an
+    /// object given up, a string's last owner, which is the request's to
+    /// free, and a value [`super::taking`] refuses.
+    ///
+    /// ```php
+    /// $p = [1, 2, 3]; $h = ["x" => 1, "y" => 2]; $k = "x"; $y = "y";
+    /// for ($i = 0; $i < 3; $i++) { $v = $i * 2; $p[$i] = $v; $h[$k] = $i; $p[$i] = $p[$i] - 0.5; }
+    /// $q = $p; $j = 1; $p[$j] = 9;
+    /// $p[] = 7;
+    /// $s = str_repeat("s", 2); $h[$y] = $s; $h[$y] = $i; debug_zval_dump($s);
+    /// $h[$y] = $s . "t"; $h[$y] = $j; $h[$k] = $s; unset($s); $h[$k] = $j;
+    /// var_dump($p, $q, $h);
+    /// ```
+    /// ```expect
+    /// string(2) "ss" refcount(2)
+    /// array(4) {
+    ///   [0]=>
+    ///   float(-0.5)
+    ///   [1]=>
+    ///   int(9)
+    ///   [2]=>
+    ///   float(3.5)
+    ///   [3]=>
+    ///   int(7)
+    /// }
+    /// array(3) {
+    ///   [0]=>
+    ///   float(-0.5)
+    ///   [1]=>
+    ///   float(1.5)
+    ///   [2]=>
+    ///   float(3.5)
+    /// }
+    /// array(2) {
+    ///   ["x"]=>
+    ///   int(1)
+    ///   ["y"]=>
+    ///   int(1)
+    /// }
+    /// ```
+    #[inline(always)] // in the loop and in the handler
+    pub(crate) fn assign_dim<A: Operand + Default, B: Operand + Default, D: Operand + Default>(
+        slots: &mut [Zval],
+        code: &OpArray,
+        op: &Opline,
+        at: u32,
+    ) -> Option<Inline> {
+        let (a, b, data) = (A::default(), B::default(), D::default());
+        let array = owned_array(slots, code, op, a)?;
+        let (key, free_dim) = inline_key(slots, code, op, b)?;
+        let entry = array.value_ref(key)?;
+        // What the element held, read as the value is taken after it, so
+        // the lookup's values and the value's are never held together.
+        let garbage = entry.read();
+        let string_given_up = garbage.is_refcounted();
+        if (string_given_up && (free_dim || garbage.as_str().is_none()))
+            || matches!(garbage.kind(), ZvalType::Undef | ZvalType::Indirect)
+        {
+            return None;
+        }
+        let field = crate::exec::opline_at(code, crate::exec::after(at))?.op1;
+        let taking = taking::<RetvalByte>(slots, code, op, data, field)?;
+        // One owner at most is given up here, and the first write is its
+        // release: what the element held, a string another owner holds
+        // too, or the dimension a temporary string was (`FREE_OP2`), the
+        // two never together, so neither release reads a count the other
+        // lowered. A last owner is the request's to free.
+        let freed = if string_given_up {
+            if !Heap::release_nogc_kept(garbage) {
+                return None;
+            }
+            None
+        } else if free_dim {
+            let at = b.slot(op.op2)?;
+            if !Heap::release_nogc_kept(*slots.get(at)?) {
+                return None;
+            }
+            Some(at)
+        } else {
+            None
+        };
+        let z = taking.take(slots)?;
+        entry.write(z);
+        // `FREE_OP1_VAR_PTR()`: the `IS_INDIRECT` a `VAR` container was
+        // named through owns nothing.
+        if a.kind() == OperandKind::Var
+            && let Some(var) = a.slot(op.op1).and_then(|at| slots.get_mut(at))
+        {
+            *var = Zval::UNDEF;
+        }
+        if let Some(dim) = freed.and_then(|at| slots.get_mut(at)) {
+            *dim = Zval::UNDEF;
+        }
+        // The opline and its `OP_DATA`.
+        Some(Inline::On(2))
+    }
+
+    /// `ZEND_ASSIGN_DIM_OP` over a number an array holds
+    /// (`ZEND_ASSIGN_DIM_OP_SPEC_CV_*`, `Z/Zend/zend_vm_def.h:1156`):
+    /// `zend_fetch_dimension_address_inner_RW` finding the element and
+    /// `zend_binary_op` over it and a number, as
+    /// [`super::inline_assign_dim_op`] computes it.
+    ///
+    /// ```php
+    /// $v = [1.5, 2.5]; $h = ["x" => 0.5, "y" => 1]; $k = "x"; $y = "y";
+    /// for ($i = 0; $i < 2; $i++) { $v[$i] -= 0.25; $h[$k] -= $v[$i]; $h[$y] -= $i; }
+    /// $w = $v; $j = 0; $v[$j] -= 1;
+    /// $v[] -= 1;
+    /// $t = ["ab" => 1]; $a = "a"; $t[$a . "b"] -= 0.5; $s = ["3", "x"]; $s[$j] -= 1; $j = 1; $s[$j] .= "y";
+    /// var_dump($v, $w, $h, $t, $s);
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   [0]=>
+    ///   float(0.25)
+    ///   [1]=>
+    ///   float(2.25)
+    ///   [2]=>
+    ///   int(-1)
+    /// }
+    /// array(2) {
+    ///   [0]=>
+    ///   float(1.25)
+    ///   [1]=>
+    ///   float(2.25)
+    /// }
+    /// array(2) {
+    ///   ["x"]=>
+    ///   float(-3)
+    ///   ["y"]=>
+    ///   int(0)
+    /// }
+    /// array(1) {
+    ///   ["ab"]=>
+    ///   float(0.5)
+    /// }
+    /// array(2) {
+    ///   [0]=>
+    ///   int(2)
+    ///   [1]=>
+    ///   string(2) "xy"
+    /// }
+    /// ```
+    #[inline(always)] // in the loop and in the handler
+    pub(crate) fn assign_dim_op<A: Operand + Default, B: Operand + Default>(
+        slots: &mut [Zval],
+        code: &OpArray,
+        op: &Opline,
+        at: u32,
+    ) -> Option<Inline> {
+        inline_assign_dim_op(slots, (code, op, at), (A::default(), B::default()))
     }
 
     /// `ZEND_JMP` to the opline in `op1`, a back-edge where it is at the
