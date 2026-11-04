@@ -27,8 +27,8 @@ use super::{
     Abort, ArgChecks, BodyEntry, Check, Constant, Def, Defaults, End, Entry, ExitId, ExitSpec,
     Form, Frame, FrameInfo, Frees, Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known,
     Landing, Layout, Leave, Line, LoopHeader, Object, Op, OpId, Operand, Owners, PairCallee,
-    PairClass, Place, Read, Repeat, Returned, Slot, Slotted, Store, Stored, TraceIr, Unwind,
-    UnwindId, Value, ValueId, Vars, on_declared_slot,
+    PairClass, Place, Read, Repeat, Returned, Slot, Slotted, Store, Stored, TraceIr, Unguarded,
+    Unwind, UnwindId, Value, ValueId, Vars, on_declared_slot,
 };
 use crate::analysis::{Analysed, Inference};
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
@@ -2431,6 +2431,7 @@ impl<'a> Builder<'a> {
             range: None,
             def,
             home,
+            unguarded: None,
         });
         id
     }
@@ -3759,6 +3760,7 @@ impl<'a> Builder<'a> {
         self.hold_in_fetch();
         self.hold_checks();
         let numbered = self.number(closes)?;
+        self.mark_unguarded(&numbered.guards);
         let end = numbered
             .end
             .ok_or_else(|| mismatch("a trace with no end"))?;
@@ -3779,6 +3781,22 @@ impl<'a> Builder<'a> {
             end,
             body,
         })
+    }
+
+    /// Each value a guard held after an op narrowed, what it held before
+    /// that guard ([`Unguarded`]), `guards` in the order they are held.
+    fn mark_unguarded(&mut self, guards: &[Guard]) {
+        for guard in guards {
+            if let (GuardAt::Before(until), Some((value, _))) =
+                (guard.at, Narrowed::of(guard.check))
+            {
+                let types = self.born[value.0 as usize];
+                let held = self.val_mut(value);
+                if held.types != types && held.unguarded.is_none() {
+                    held.unguarded = Some(Unguarded { until, types });
+                }
+            }
+        }
     }
 
     /// php's `CHECK_OP_TRACE_TYPE` over what the walk marked: a value a

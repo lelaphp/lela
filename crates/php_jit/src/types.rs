@@ -216,6 +216,18 @@ pub(crate) struct Value {
     pub(crate) range: Option<Range>,
     pub(crate) def: Def,
     pub(crate) home: Home,
+    /// What it holds before the guard that narrowed `types`, where that
+    /// guard is held after the op that made it.
+    pub(crate) unguarded: Option<Unguarded>,
+}
+
+/// A value as the ops before the first guard on it read it: `types` from
+/// where it was made, which a guard held before `until` goes on to narrow.
+/// `until`, not `types`, says where the narrowing comes true.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Unguarded {
+    pub(crate) until: OpId,
+    pub(crate) types: Types,
 }
 
 /// Where a value comes from.
