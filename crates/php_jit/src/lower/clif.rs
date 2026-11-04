@@ -45,8 +45,8 @@ use php_heap::{Arr, ROOM_BYTES, Ref, Str, Zval, ZvalType};
 use php_unit::{ConstIdx, Opcode, OplineIdx};
 
 use super::{
-    ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, RETURNED, ROOT_AT, STACK_AT,
-    STOOD_AT, Stood, Symbols, UNWOUND, located,
+    ABANDONED, DECLINED, Door, ENTRY_BODY, ENTRY_PLACE, ENTRY_UNREADY, INTERRUPT_AT, INTERRUPTED,
+    Kernel, RETURNED, STACK_AT, Stood, Symbols, TRACE_AT, UNWOUND, located,
 };
 
 mod calls;
@@ -163,14 +163,15 @@ fn mismatch(why: &'static str) -> Abort {
 
 /// The body `ir` lowers to on the target `config` describes, calling
 /// the kernels at `symbols`, and, under exit-fuzz, failing each guard
-/// once by its byte of `fuzz`; jumping through its entry slots and its
-/// link as `joins` says; with how many such guards it holds.
+/// once by its byte of `fuzz`; answering with its number and jumping
+/// through its link as `joins` says; with how many such guards it holds
+/// and the doors it jumps through, in the order their words stand.
 pub(super) fn lower(
     ir: &TraceIr,
     config: TargetFrontendConfig,
     (symbols, held): (&Symbols, &[PlainCall]),
     (fuzz, joins): (Option<Fuzz>, Joins),
-) -> Result<(Function, usize), Abort> {
+) -> Result<(Function, usize, Box<[Door]>), Abort> {
     let mut func = Function::with_name_signature(UserFuncName::user(0, 0), body_signature());
     let mut context = FunctionBuilderContext::new();
     let builder = FunctionBuilder::new(&mut func, &mut context);
@@ -179,28 +180,36 @@ pub(super) fn lower(
     emit.joins = joins;
     emit.trace()?;
     let sites = emit.fuzzed_sites;
+    let doors = std::mem::take(&mut emit.made).into_boxed_slice();
     let stood_loads = std::mem::take(&mut emit.stood_loads);
     emit.b.finalize(config);
     unread::unread(&mut func, &stood_loads);
-    Ok((func, sites))
+    Ok((func, sites, doors))
 }
 
-/// A trace's body's signature: the `ExitCtx` and the room of the frame
-/// it enters on, the exit or the answer it leaves with, on Cranelift's
-/// tail convention, so a body hands on to another by a tail call.
+/// How many parameters a body takes (`super`'s *The entry*): the
+/// `ExitCtx`, the room of the frame it enters on, the entry word, the
+/// request's addresses of the trace, the call under way and where the
+/// frame stands.
+const ENTRY_PARAMS: usize = 6;
+
+/// A trace's body's signature: its entry, [`ENTRY_PARAMS`] words, and the
+/// exit or the answer it leaves with, on Cranelift's tail convention, so
+/// a body hands on to another by a tail call with the entry in registers.
 fn body_signature() -> Signature {
     let mut sig = Signature::new(CallConv::Tail);
-    sig.params.extend([AbiParam::new(I64), AbiParam::new(I64)]);
+    sig.params.extend([AbiParam::new(I64); ENTRY_PARAMS]);
     sig.returns.push(AbiParam::new(I32));
     sig
 }
 
 /// The trace prologue (`super::Backend`): on the host's convention, the
-/// `ExitCtx`, the room and the body's address, the body called on the
-/// tail convention and its answer answered.
+/// `ExitCtx`, the room, the body's address and the rest of the entry, the
+/// body called on the tail convention with the entry and its answer
+/// answered.
 pub(super) fn prologue(config: TargetFrontendConfig) -> Function {
     let mut sig = Signature::new(config.default_call_conv);
-    sig.params.extend([AbiParam::new(I64); 3]);
+    sig.params.extend([AbiParam::new(I64); ENTRY_PARAMS + 1]);
     sig.returns.push(AbiParam::new(I32));
     let mut func = Function::with_name_signature(UserFuncName::user(0, 1), sig);
     let mut context = FunctionBuilderContext::new();
@@ -211,20 +220,22 @@ pub(super) fn prologue(config: TargetFrontendConfig) -> Function {
     b.seal_block(entry);
     let params = b.block_params(entry).to_vec();
     let body = b.import_signature(body_signature());
-    let call = b.ins().call_indirect(body, params[2], &params[..2]);
+    let mut handed = params[..2].to_vec();
+    handed.extend_from_slice(&params[3..]);
+    let call = b.ins().call_indirect(body, params[2], &handed);
     let answer = b.inst_results(call).to_vec();
     b.ins().return_(&answer);
     b.finalize(config);
     func
 }
 
-/// Where a body jumps besides its exits (#3229's ruling): the address of
-/// its first entry slot, one per exit, where its escape reads the trace
-/// compiled at the landing, and the trace its link jumps to, where it
-/// links to one with code.
+/// What a body joins besides its exits (#3229's ruling): the address of
+/// its number, which its answers write at [`TRACE_AT`], where its escape
+/// reads the trace compiled at the landing, and the trace its link jumps
+/// to, where it links to one with code.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Joins {
-    pub(super) slots: usize,
+    pub(super) number: usize,
     pub(super) escapes: Option<super::Escapes>,
     pub(super) linked: Option<super::Linked>,
 }
@@ -769,6 +780,12 @@ struct Emit<'a> {
     returned_to: Option<Variable>,
     /// The `ExitCtx`, the function's first parameter.
     cx: Option<Value>,
+    /// The request's addresses of the trace, its fourth: its calls'
+    /// headers, its cache slots and its doors' words.
+    images: Option<Value>,
+    /// Whether the request makes the trace's calls in place, from the
+    /// entry word ([`ENTRY_UNREADY`]): an `i8` that is zero where it does.
+    unready: Option<Value>,
     /// The address of the request's interrupt byte, read once as a
     /// looping trace whose header tests it enters.
     interrupt: Option<Value>,
@@ -813,11 +830,14 @@ struct Emit<'a> {
     fuzz: Option<Fuzz>,
     /// How many of them the guards met so far took.
     fuzzed_sites: usize,
-    /// Its entry slots and its link (`doors`).
+    /// Its number's address and its link (`doors`).
     joins: Joins,
     /// Per exit, the block a failed guard leaves it through where the
     /// exit may jump to its side trace, taking the call under way there.
     doors: Vec<Option<Block>>,
+    /// The doors the code jumps through, in the order it made them,
+    /// which is the order their words stand in ([`Door`]).
+    made: Vec<Door>,
     /// Per exit, the block that answers its number and stores nothing,
     /// where a jump finds no trace to enter.
     answers: Vec<Option<Block>>,
@@ -839,8 +859,8 @@ impl<'a> Emit<'a> {
         let stood_vars = StoodVars {
             frame: b.declare_var(I64),
             call: b.declare_var(I64),
-            func: b.declare_var(I32),
-            opline: b.declare_var(I32),
+            func: b.declare_var(I64),
+            opline: b.declare_var(I64),
             room: b.declare_var(I64),
         };
         let stood = b.create_sized_stack_slot(StackSlotData::new(
@@ -858,6 +878,8 @@ impl<'a> Emit<'a> {
             refs: vec![None; ir.frames.len()],
             returned_to: None,
             cx: None,
+            images: None,
+            unready: None,
             interrupt: None,
             stood,
             stood_vars,
@@ -876,11 +898,12 @@ impl<'a> Emit<'a> {
             fuzz: None,
             fuzzed_sites: 0,
             joins: Joins {
-                slots: 0,
+                number: 0,
                 escapes: None,
                 linked: None,
             },
             doors: vec![None; ir.exits.len()],
+            made: Vec::new(),
             answers: vec![None; ir.exits.len()],
             kept: None,
             stood_loads: Vec::new(),
@@ -898,10 +921,13 @@ impl<'a> Emit<'a> {
         self.b.append_block_params_for_function_params(entry);
         self.b.switch_to_block(entry);
         self.b.seal_block(entry);
-        let [cx, room] = *self.b.block_params(entry) else {
-            return Err(mismatch("a trace's function takes two parameters"));
+        let [cx, room, word, images, call, stands] = *self.b.block_params(entry) else {
+            return Err(mismatch(
+                "a trace's function takes its entry's six parameters",
+            ));
         };
         self.cx = Some(cx);
+        self.images = Some(images);
         self.b.def_var(self.room_var(Frame::ROOT)?, room);
         let header = match self.ir.end {
             End::Loop(header) => Some(header),
@@ -913,18 +939,19 @@ impl<'a> Emit<'a> {
         // The stack and the entered frame's place on it, which calls made
         // in place read, and a jump to another trace hands it.
         self.stack = Some(self.b.ins().load(I64, trusted(), cx, STACK_AT));
-        let place = self.b.ins().load(I32, trusted(), cx, ROOT_AT);
-        let place = self.b.ins().uextend(I64, place);
+        let place = self.b.ins().band_imm_u(word, ENTRY_PLACE);
         self.place_frame(Frame::ROOT, place)?;
+        let unready = self.b.ins().band_imm_u(word, ENTRY_UNREADY);
+        self.unready = Some(self.b.ins().icmp_imm_s(IntCC::NotEqual, unready, 0));
         // Laid down before either way in: a guard at the body's entry
         // reads it too.
-        self.stood_at_entry(cx);
+        self.stood_at_entry([room, call, stands])?;
         // A trace entered at its loop's body goes there; at its first op,
         // on.
         let body = match &self.ir.body {
             Some(body) => {
                 let (into, first) = (self.b.create_block(), self.b.create_block());
-                let at_body = self.b.ins().load(I32, trusted(), cx, ENTRY_AT);
+                let at_body = self.b.ins().band_imm_u(word, ENTRY_BODY);
                 self.b.ins().brif(at_body, into, &[], first, &[]);
                 self.b.switch_to_block(first);
                 self.b.seal_block(first);
@@ -998,25 +1025,47 @@ impl<'a> Emit<'a> {
         self.exit_blocks()
     }
 
-    /// Where the frame stands as the trace enters, which `enter` laid
-    /// down in `cx`, held as where the last kernel left it, for a trace
-    /// whose code reads it ([`super::stood_at_entry`]): its frame, its
-    /// call, in one word its op array and opline, and the stack's room,
-    /// laid out alike in both. Nothing writes those words while the code
-    /// runs but a jump's last stores before it hands on, so they are read
-    /// as memory that does not change, and a word no path reads before a
-    /// kernel stands the frame anew is not read at all.
-    fn stood_at_entry(&mut self, cx: Value) {
+    /// Where the frame stands as the trace enters, from its entry, held
+    /// as where the last kernel left it, for a trace whose code reads it
+    /// ([`super::stood_at_entry`]): the frame it is entered on, the call
+    /// under way in it, its op array and opline from the one word, and the
+    /// room the stack's top page has left, read where the code reads it.
+    fn stood_at_entry(&mut self, [room, call, stands]: [Value; 3]) -> Result<(), Abort> {
         if !super::stood_at_entry(self.ir) {
-            return;
+            return Ok(());
         }
-        let fixed = trusted().with_readonly().with_can_move();
-        let frame = self.b.ins().load(I64, fixed, cx, STOOD_AT + STOOD_FRAME);
-        let call = self.b.ins().load(I64, fixed, cx, STOOD_AT + STOOD_CALL);
-        let func = self.b.ins().load(I32, fixed, cx, STOOD_AT + STOOD_FUNC);
-        let opline = self.b.ins().load(I32, fixed, cx, STOOD_AT + STOOD_OPLINE);
-        let room = self.b.ins().load(I64, fixed, cx, STOOD_AT + STOOD_ROOM);
-        self.stand([frame, call, func, opline, room]);
+        let func = self.b.ins().ireduce(I32, stands);
+        let opline = self.b.ins().ushr_imm_u(stands, 32);
+        let opline = self.b.ins().ireduce(I32, opline);
+        let stack = self.stack()?;
+        let top = self.b.ins().load(I64, trusted(), stack, calls::TOP);
+        let end = self.b.ins().load(I64, trusted(), stack, calls::END);
+        self.stood_loads([top, end]);
+        let left = self.b.ins().isub(end, top);
+        self.stand([room, call, func, opline, left]);
+        Ok(())
+    }
+
+    /// Answer `answer`, the trace's number written in the `ExitCtx` first
+    /// ([`TRACE_AT`]), so `enter` reads it against this trace however it
+    /// was entered.
+    fn answer_with(&mut self, answer: Value) -> Result<(), Abort> {
+        let cx = self
+            .cx
+            .ok_or_else(|| mismatch("an answer before the entry"))?;
+        let number = self.number()?;
+        self.b.ins().store(trusted(), number, cx, TRACE_AT);
+        self.b.ins().return_(&[answer]);
+        Ok(())
+    }
+
+    /// The trace's number, an `i32` read where the publish wrote it
+    /// (`super::Numbered`).
+    fn number(&mut self) -> Result<Value, Abort> {
+        let at = i64::try_from(self.joins.number)
+            .map_err(|_| mismatch("a trace's number past the host's addresses"))?;
+        let at = self.b.ins().iconst(I64, at);
+        Ok(self.b.ins().load(I32, trusted(), at, 0))
     }
 
     /// The ops of `range`, the way in at the body (`body`: the entry, its
@@ -1811,7 +1860,7 @@ impl<'a> Emit<'a> {
             self.stores(&spec.stores)?;
             let number = u32::try_from(at).map_err(|_| mismatch("too many exits"))?;
             let number = self.b.ins().iconst(I32, i64::from(number));
-            self.b.ins().return_(&[number]);
+            self.answer_with(number)?;
         }
         self.door_blocks()?;
         for at in 0..self.answers.len() {
@@ -1822,7 +1871,7 @@ impl<'a> Emit<'a> {
             self.b.seal_block(block);
             let number = u32::try_from(at).map_err(|_| mismatch("too many exits"))?;
             let number = self.b.ins().iconst(I32, i64::from(number));
-            self.b.ins().return_(&[number]);
+            self.answer_with(number)?;
         }
         for at in 0..self.unwinds.len() {
             let Some(block) = self.unwinds[at] else {
@@ -1836,13 +1885,13 @@ impl<'a> Emit<'a> {
                 .ok_or_else(|| mismatch("an unwind past the trace's"))?;
             self.stores(&unwind.stores)?;
             let answer = self.b.ins().iconst(I32, i64::from(UNWOUND));
-            self.b.ins().return_(&[answer]);
+            self.answer_with(answer)?;
         }
         if let Some(block) = self.abandon {
             self.b.switch_to_block(block);
             self.b.seal_block(block);
             let answer = self.b.ins().iconst(I32, i64::from(ABANDONED));
-            self.b.ins().return_(&[answer]);
+            self.answer_with(answer)?;
         }
         if let Some(block) = self.escape {
             self.escaped(block)?;
@@ -1851,13 +1900,13 @@ impl<'a> Emit<'a> {
             self.b.switch_to_block(block);
             self.b.seal_block(block);
             let answer = self.b.ins().iconst(I32, i64::from(INTERRUPTED));
-            self.b.ins().return_(&[answer]);
+            self.answer_with(answer)?;
         }
         if let Some(block) = self.declined {
             self.b.switch_to_block(block);
             self.b.seal_block(block);
             let answer = self.b.ins().iconst(I32, i64::from(DECLINED));
-            self.b.ins().return_(&[answer]);
+            self.answer_with(answer)?;
         }
         Ok(())
     }
@@ -2007,15 +2056,19 @@ impl<'a> Emit<'a> {
     fn stood_word(&mut self, ty: Type, at: i32) -> Value {
         let vars = self.stood_vars;
         match (at, ty == I32) {
-            (STOOD_FUNC, true) => self.b.use_var(vars.func),
-            (STOOD_OPLINE, true) => self.b.use_var(vars.opline),
+            (STOOD_FUNC, true) => {
+                let func = self.b.use_var(vars.func);
+                self.b.ins().ireduce(I32, func)
+            }
+            (STOOD_OPLINE, true) => {
+                let opline = self.b.use_var(vars.opline);
+                self.b.ins().ireduce(I32, opline)
+            }
             (STOOD_FUNC, false) => {
                 let func = self.b.use_var(vars.func);
                 let opline = self.b.use_var(vars.opline);
-                let low = self.b.ins().uextend(I64, func);
-                let high = self.b.ins().uextend(I64, opline);
-                let high = self.b.ins().ishl_imm_u(high, 32);
-                self.b.ins().bor(low, high)
+                let high = self.b.ins().ishl_imm_u(opline, 32);
+                self.b.ins().bor(func, high)
             }
             (STOOD_FRAME, _) => self.b.use_var(vars.frame),
             (STOOD_CALL, _) => self.b.use_var(vars.call),
@@ -2025,14 +2078,31 @@ impl<'a> Emit<'a> {
 
     /// Where the interpreter stands as code in place left it: the frame,
     /// the call under way in it, its op array and opline, and the room
-    /// the stack's top page has left.
+    /// the stack's top page has left. The op array and the opline are held
+    /// zero-extended, each an `I32` or an `I64` already wide, so the word
+    /// a jump passes and an escape's door is held to is one `orr` of what
+    /// a leave read wide.
     fn stand(&mut self, [frame, call, func, opline, room]: [Value; 5]) {
         let vars = self.stood_vars;
         self.b.def_var(vars.frame, frame);
         self.b.def_var(vars.call, call);
+        self.stand_at(func, opline);
+        self.b.def_var(vars.room, room);
+    }
+
+    /// The op array and the opline of [`Emit::stand`] alone, for a frame
+    /// that goes on where it was.
+    fn stand_at(&mut self, func: Value, opline: Value) {
+        let vars = self.stood_vars;
+        let [func, opline] = [func, opline].map(|half| {
+            if self.b.func.dfg.value_type(half) == I32 {
+                self.b.ins().uextend(I64, half)
+            } else {
+                half
+            }
+        });
         self.b.def_var(vars.func, func);
         self.b.def_var(vars.opline, opline);
-        self.b.def_var(vars.room, room);
     }
 
     /// `loads`, made for a [`Stood`] word alone, dropped where no path
@@ -2313,7 +2383,7 @@ impl<'a> Emit<'a> {
                 self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?;
                 self.stood_back();
                 if leaves(line.opcode) && self.may_be_top(line.frame)? {
-                    self.halts();
+                    self.halts()?;
                 }
             }
         }
@@ -2487,8 +2557,7 @@ impl<'a> Emit<'a> {
             Onward::Past(places) => self.b.ins().iconst(I32, i64::from(line.opline.0 + places)),
             Onward::Went => self.b.ins().load(I32, trusted(), room, EX_OPLINE),
         };
-        self.b.def_var(self.stood_vars.func, func);
-        self.b.def_var(self.stood_vars.opline, next);
+        self.stand_at(func, next);
         if line.opcode == Opcode::DoIcall {
             let call = self.call_left(line.frame)?;
             self.b.def_var(self.stood_vars.call, call);
@@ -2830,7 +2899,7 @@ impl<'a> Emit<'a> {
     /// 0,0
     /// done
     /// ```
-    fn halts(&mut self) {
+    fn halts(&mut self) -> Result<(), Abort> {
         let frame = self.stood_word(I64, STOOD_FRAME);
         let ended = self.b.ins().icmp_imm_s(IntCC::Equal, frame, 0);
         let (halt, on) = (self.b.create_block(), self.b.create_block());
@@ -2839,9 +2908,10 @@ impl<'a> Emit<'a> {
         self.b.switch_to_block(halt);
         self.b.seal_block(halt);
         let answer = self.b.ins().iconst(I32, i64::from(RETURNED));
-        self.b.ins().return_(&[answer]);
+        self.answer_with(answer)?;
         self.b.switch_to_block(on);
         self.b.seal_block(on);
+        Ok(())
     }
 
     /// The frame a `DO_*CALL` at `at` enters, where the trace follows the

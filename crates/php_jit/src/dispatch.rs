@@ -835,6 +835,7 @@ fn followed<'t>(
                         state
                             .escapes_crossed
                             .set(state.escapes_crossed.get().saturating_add(1));
+                        state.headers.escaped_on(trace);
                         trace = next;
                         entered = enter::enter(req, Some(state), frame, (epoch, trace), At::First);
                         continue;

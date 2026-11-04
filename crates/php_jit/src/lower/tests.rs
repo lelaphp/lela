@@ -809,9 +809,9 @@ fn a_side_trace_returning_an_array_its_parent_knew_compiles() -> Result<(), Stri
 /// the body's entry on the stack's room, php's stack check before the
 /// calls the trace pushes, read it from a `Stood` no one had written, and
 /// took its exit at random (`binary_trees`' `TRACE 9 exit 2` at `0037`,
-/// which the pinned php does not take). The words are copied from the
-/// `ExitCtx` before the entry block branches to the body; here a loop
-/// with a way in at its body, held to the room a call would take.
+/// which the pinned php does not take). The room is worked out from the
+/// stack before the entry block branches to the body; here a loop with a
+/// way in at its body, held to the room a call would take.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_body_entry_reads_where_the_frame_stands() -> Result<(), String> {
@@ -842,11 +842,7 @@ fn a_body_entry_reads_where_the_frame_stands() -> Result<(), String> {
         .display()
         .to_string();
     let lines: Vec<&str> = clif.lines().map(instruction).collect();
-    let stood = format!(
-        "load.i64 notrap aligned readonly can_move v0+{}",
-        super::STOOD_AT
-    );
-    let read = lines.iter().position(|line| line.ends_with(&stood));
+    let read = lines.iter().position(|line| line.contains(" = isub "));
     let branch = lines.iter().position(|line| line.starts_with("brif "));
     assert!(
         matches!((read, branch), (Some(read), Some(branch)) if read < branch),
@@ -856,10 +852,10 @@ fn a_body_entry_reads_where_the_frame_stands() -> Result<(), String> {
 }
 
 /// A link the trace was compiled against is a jump in its own bytes
-/// (#3229's ruling): its stores, the request's row of the linked trace,
-/// and a tail call to the linked body's address, a constant, with php's
-/// interrupt test before it where the trace is a side linking to its own
-/// looping root; with none to link to, its last exit as before.
+/// (#3229's ruling): its stores, the words of its door in the request,
+/// and a tail call to the body the door names with the entry in registers,
+/// with php's interrupt test before it where the trace is a side linking
+/// to its own looping root; with none to link to, its last exit as before.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_link_jumps_to_the_trace_it_links_to() -> Result<(), String> {
@@ -896,20 +892,22 @@ fn a_link_jumps_to_the_trace_it_links_to() -> Result<(), String> {
             php_unit::MapPtrOffset::Request(_) => None,
         })
         .ok_or("g's op array")?;
-    let body = 0x5000_0000_usize;
     let linked = |interrupt| super::Linked {
-        body,
         trace: link.get(),
         interrupt,
         opens: Some(super::Stands { func: g, opline: 1 }),
     };
+    let jumps = |clif: &str| {
+        (clif.lines().map(instruction))
+            .filter(|line| line.starts_with("return_call_indirect"))
+            .count()
+    };
     let plain = lowered(None)?;
-    assert!(!plain.contains("return_call_indirect"), "{plain}");
     let clif = lowered(Some(linked(false)))?;
-    let constant = format!("iconst.i64 {body:#x}").replace("0x5000", "0x5000_");
-    assert!(
-        clif.contains("return_call_indirect") && clif.contains(&constant),
-        "the link jumps to the linked body:\n{clif}"
+    assert_eq!(
+        jumps(&clif),
+        jumps(&plain) + 1,
+        "the link jumps with the entry in registers:\n{clif}"
     );
     // A call made in place reads the interrupt too; the link's test is
     // one read more.

@@ -56,7 +56,7 @@ use php_engine::tier::{self, Epoch, FuncRef, MapPtrRaw, PlainCall, Request, Word
 use php_unit::OplineIdx;
 
 use crate::lower::{
-    Compiled, Entrance, EntrySlots, Escapes, Fuzzed, Linked, Mark, Stands, engine_offset,
+    Compiled, Door, Entrance, Escapes, Fuzzed, Linked, Mark, Numbered, Stands, engine_offset,
 };
 use crate::policy::{Place, Policy};
 use crate::record::{Entered, Start, Stop};
@@ -169,13 +169,19 @@ pub(crate) struct Trace<P: Pages = Native> {
     pub(crate) code: Code<P>,
     entry_offset: usize,
     body_offset: usize,
-    /// How a jump from another trace enters it: its body and its number,
-    /// which an entry slot of the exit it grew from names once it is
-    /// published (`lower::EntrySlots`).
+    /// How an escape enters it where the request's door does not lead
+    /// here: its body and its number (`lower::Escapes`).
     pub(crate) entrance: Entrance,
-    /// One entry slot per exit, which its code reads where the exit jumps
-    /// to its side trace, and which the publish of that side writes.
-    pub(crate) slots: EntrySlots,
+    /// The ways its code hands on to another trace, whose words stand in
+    /// the request's addresses of it (`lower::Door`).
+    pub(crate) doors: Box<[Door]>,
+    /// Its number as its answers write it, which the publish writes once
+    /// and its code reads (`lower::Numbered`).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the trace's code alone")
+    )]
+    pub(crate) number: Numbered,
     pub(crate) id: TraceId,
     #[cfg_attr(
         not(test),
@@ -248,8 +254,18 @@ impl<P: Pages> Trace<P> {
             .map_addr(|addr| addr.saturating_add(self.body_offset))
     }
 
+    /// Where the words of `door` stand among the request's addresses of
+    /// the trace, past its calls' headers and its cache slots; none for a
+    /// door its code does not hold.
+    pub(crate) fn door_words(&self, door: Door) -> Option<usize> {
+        let at = self.doors.iter().position(|made| *made == door)?;
+        (at.checked_mul(crate::lower::DOOR_WORDS)?)
+            .checked_add(self.calls.len())?
+            .checked_add(self.map_ptrs.len())
+    }
+
     /// What a link to it jumps to (`lower::Linked`), from a trace that
-    /// `start` grew: its entrance, and whether the jump tests the
+    /// `start` grew: its number, and whether the jump tests the
     /// interrupt first, which php's does where a side trace links to its
     /// own root and the root loops other than by recursive returns
     /// (`zend_jit_trace.c:7209-7212`, `:7285-7303`).
@@ -261,8 +277,7 @@ impl<P: Pages> Trace<P> {
             })
         });
         Linked {
-            body: self.entrance.body,
-            trace: self.entrance.trace,
+            trace: self.id.get(),
             interrupt: from_root == Some(self.id) && self.checks_interrupt,
             opens,
         }
@@ -437,9 +452,10 @@ struct Writer<P: Pages> {
 pub(crate) struct TraceTable<P: Pages = Native> {
     segments: Box<[OnceLock<Segment<P>>]>,
     /// The entrance of each trace by its number, php's `zend_jit_traces`
-    /// as a trace's escape reads it (`lower::Escapes`): null until the
-    /// publish that numbered the trace placed it, then the trace's
-    /// [`Entrance`], written once with release.
+    /// as a trace's escape reads it where its door does not lead to the
+    /// landing it reached (`lower::Escapes`): null until the publish that
+    /// numbered the trace placed it, then the trace's [`Entrance`], written
+    /// once with release.
     entrances: Box<[AtomicPtr<Entrance>]>,
     /// The id the next trace takes, php's `ZEND_JIT_TRACE_NUM`: written
     /// under the mutex after the trace's slot, read with nothing taken.
@@ -772,6 +788,9 @@ impl<P: Pages> TraceTable<P> {
             .as_ptr()
             .expose_provenance()
             .saturating_add(compiled.body_offset);
+        // The number its answers write, written before anything can enter
+        // it: the slot below is what makes it enterable.
+        compiled.number.number(id.get());
         let trace = Box::new(Trace {
             code,
             entry_offset: compiled.entry_offset,
@@ -780,7 +799,8 @@ impl<P: Pages> TraceTable<P> {
                 body,
                 trace: id.get(),
             },
-            slots: compiled.slots,
+            doors: compiled.doors,
+            number: compiled.number,
             id,
             kind: Kind::Trace,
             start,
@@ -801,7 +821,6 @@ impl<P: Pages> TraceTable<P> {
         });
         self.fill(id, trace)?;
         self.enterable(id);
-        self.open(start, id);
         writer.counts.count(admitted, exits);
         writer.perf.counted(bytes, oplines);
         self.next
@@ -834,21 +853,6 @@ impl<P: Pages> TraceTable<P> {
             landings: epoch.landing_index(),
             entrances: self.entrances.as_ptr().expose_provenance(),
             traces: u32::try_from(self.entrances.len()).unwrap_or(u32::MAX),
-        }
-    }
-
-    /// The entry slot of the exit `start` grew the trace `id` from set to
-    /// the trace's entrance, with release, once the trace is in its slot
-    /// (#3229's ruling, `jit-design.md` §4.5): its parent's code jumps to
-    /// it from then on. The parent is this table's, so the slot and the
-    /// entrance it names are dropped together, with the table. A root
-    /// grows from no exit, and a slot set already is left as it is.
-    fn open(&self, start: Start, id: TraceId) {
-        let Some((parent, exit)) = start.grew() else {
-            return;
-        };
-        if let (Some(parent), Some(side)) = (self.get(parent), self.get(id)) {
-            parent.slots.open(exit, &side.entrance);
         }
     }
 

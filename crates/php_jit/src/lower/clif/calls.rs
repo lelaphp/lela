@@ -32,9 +32,7 @@ use super::{
     COUNTED, Dtor, EX_OPLINE, Emit, KIND, Kernel, Refuse, STOOD_CALL, Scalar, TYPE_AT, imm,
     leave_of, mismatch, tag, trusted,
 };
-use crate::lower::{
-    IMAGES_AT, INTERRUPT_AT, OperandFields, OperandKinds, READY_AT, RETURNED, THREW,
-};
+use crate::lower::{INTERRUPT_AT, OperandFields, OperandKinds, RETURNED, THREW};
 use crate::types::{
     Abort, ArgChecks, Check, Constant, Defaults, End, ExitId, Frame, Home, Imm, Line, Object, OpId,
     Operand, Owners, PairCallee, PairClass, Returned, Types, Vars,
@@ -116,7 +114,7 @@ const _: () = assert!(L.header_bytes().is_multiple_of(8));
 
 /// Where the stack keeps its words.
 pub(super) const TOP: i32 = at(L.top());
-const END: i32 = at(L.end());
+pub(super) const END: i32 = at(L.end());
 const FRAMES: i32 = at(L.frames());
 pub(super) const FRAMES_LEN: i32 = at(L.frames_len());
 const FRAMES_CAP: i32 = at(L.frames_cap());
@@ -202,13 +200,13 @@ impl Emit<'_> {
     }
 
     /// Where the request's header for `plain` is read from: its place
-    /// among the trace's calls in place, in bytes past [`IMAGES_AT`]'s
-    /// address.
+    /// among the trace's calls in place, in bytes past the request's
+    /// addresses of the trace.
     fn header_of(&self, plain: &PlainCall) -> Result<i32, Abort> {
         let at = (self.held.iter())
             .position(|held| held == plain)
             .ok_or_else(|| mismatch("a call in place the trace does not hold"))?;
-        // One address a call, `IMAGES_AT`'s table.
+        // One address a call, first among the request's addresses.
         i32::try_from(at * size_of::<usize>()).map_err(|_| mismatch("too many calls in place"))
     }
 
@@ -252,10 +250,7 @@ impl Emit<'_> {
         let unready = self.unready()?;
         let refused = self.b.ins().bor(none, unready);
         self.leave_if(refused, exit)?;
-        let cx = self
-            .cx
-            .ok_or_else(|| mismatch("a callee guard before the entry"))?;
-        let images = self.b.ins().load(I64, trusted(), cx, IMAGES_AT);
+        let images = self.images()?;
         let image = self.b.ins().load(I64, trusted(), images, header);
         let expected = self
             .b
@@ -267,13 +262,17 @@ impl Emit<'_> {
     }
 
     /// Whether the request is not ready for the trace's calls in place,
-    /// an `i8` ([`READY_AT`]).
+    /// an `i8`, from the entry word ([`crate::lower::ENTRY_UNREADY`]).
     fn unready(&mut self) -> Result<Value, Abort> {
-        let cx = self
-            .cx
-            .ok_or_else(|| mismatch("a call in place before the entry"))?;
-        let ready = self.b.ins().load(I32, trusted(), cx, READY_AT);
-        Ok(self.b.ins().icmp_imm_s(IntCC::Equal, ready, 0))
+        self.unready
+            .ok_or_else(|| mismatch("a call in place before the entry"))
+    }
+
+    /// The request's addresses of the trace, its entry's: its calls'
+    /// headers, its cache slots and its doors' words (`enter::Images`).
+    pub(super) fn images(&mut self) -> Result<Value, Abort> {
+        self.images
+            .ok_or_else(|| mismatch("the request's addresses read before the entry"))
     }
 
     /// An inline `INIT_*` whose callee needs no guard pushed in place, as
@@ -341,8 +340,7 @@ impl Emit<'_> {
         // The link, the room linked before this one, and the header.
         let below = self.b.ins().load(I64, trusted(), stack, INNERMOST);
         self.b.ins().store(trusted(), below, top, at(L.link()));
-        let cx = self.cx.ok_or_else(|| mismatch("a push before the entry"))?;
-        let images = self.b.ins().load(I64, trusted(), cx, IMAGES_AT);
+        let images = self.images()?;
         let header = self.b.ins().load(I64, trusted(), images, header);
         self.lay_frame(header, top, plain.slots());
         match over.scope {
@@ -612,10 +610,7 @@ impl Emit<'_> {
                 let unready = self.unready()?;
                 self.refuse_if(unready, refuse)?;
                 let header = self.header_of(plain)?;
-                let cx = self
-                    .cx
-                    .ok_or_else(|| mismatch("a pair's record read before the entry"))?;
-                let images = self.b.ins().load(I64, trusted(), cx, IMAGES_AT);
+                let images = self.images()?;
                 let image = self.b.ins().load(I64, trusted(), images, header);
                 let laid = (self.b.ins()).load(I64, trusted(), image, at(L.callee() - L.header()));
                 let record = (self.b.ins()).load(I64, trusted(), place, at(P.pair_record()));
@@ -1165,12 +1160,12 @@ impl Emit<'_> {
         // `zend_rethrow_exception` with the return written, which
         // `HANDLE_EXCEPTION` frees as the call's result.
         let back = self.b.ins().iadd_imm_s(callers, -i64::from(L.room()));
-        let at_call = self.b.ins().load(I32, trusted(), back, at(L.opline()));
+        let at_call = self.b.ins().uload32(trusted(), back, at(L.opline()));
         let mut past = self.b.ins().iadd_imm_s(at_call, 1);
         if let Some(threw) = threw {
             past = self.b.ins().select(threw, at_call, past);
         }
-        self.b.ins().store(trusted(), past, back, at(L.opline()));
+        self.b.ins().istore32(trusted(), past, back, at(L.opline()));
         // Where the interpreter stands: in the caller, the call under way
         // in it the record now on top where that is not the caller's own.
         // Each word loaded for it alone, which no path but one that reads
@@ -1181,7 +1176,7 @@ impl Emit<'_> {
         let own = self.b.ins().icmp(IntCC::Equal, under, place);
         let nothing = self.b.ins().iconst(I64, 0);
         let call = self.b.ins().select(own, nothing, built);
-        let func = self.b.ins().load(I32, trusted(), back, at(L.cache()));
+        let func = self.b.ins().uload32(trusted(), back, at(L.cache()));
         let end = self.b.ins().load(I64, trusted(), stack, END);
         let left = self.b.ins().isub(end, room);
         self.stood_loads([first, func, end]);
@@ -1865,7 +1860,7 @@ impl Emit<'_> {
                 .store(trusted(), undef, room, at + super::TYPE_AT);
         }
         let answer = self.b.ins().iconst(I32, i64::from(RETURNED));
-        self.b.ins().return_(&[answer]);
+        self.answer_with(answer)?;
         self.b.switch_to_block(other);
         self.b.seal_block(other);
         self.b.ins().jump(block, &[]);
