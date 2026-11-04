@@ -17,18 +17,18 @@ use php_unit::{Effects, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::lattice::{self, Types};
 use super::opcodes::{
-    Carried, Declared, Hold, ISEMPTY, MAX_ARG_FLAG_NUM, Within, arith, assigned, carried,
-    check_sites, checked_order, compiled_inline, compound_in_place, constant, constant_types,
-    goes_one_way, guard_sites, held_as_is, inline_may_leave, is_call, keeps_temporaries, keyed,
-    may_exit, needs_call_chain, packed_guard, param_types, params, reads, reads_by_name,
-    recv_exits, referenced, slot_of, within, written, written_through,
+    Carried, Declared, Hold, ISEMPTY, MAX_ARG_FLAG_NUM, MAY_BE_RESOURCE, Within, arith, assigned,
+    carried, check_sites, checked_order, compiled_inline, compound_in_place, constant,
+    constant_types, goes_one_way, guard_sites, held_as_is, inline_may_leave, is_call,
+    keeps_temporaries, keyed, may_exit, needs_call_chain, packed_guard, param_types, params, reads,
+    reads_by_name, recv_exits, referenced, slot_of, within, written, written_through,
 };
 use super::{
     Abort, ArgChecks, BodyEntry, Check, Constant, Def, Defaults, End, Entry, ExitId, ExitSpec,
     Form, Frame, FrameInfo, Frees, Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known,
     Landing, Layout, Leave, Line, LoopHeader, Object, Op, OpId, Operand, Owners, PairCallee,
     PairClass, Place, PushRoom, Read, Repeat, Returned, Slot, Slotted, Store, Stored, TraceIr,
-    Unwind, UnwindId, Value, ValueId, Vars, on_declared_slot,
+    Unguarded, Unwind, UnwindId, Value, ValueId, Vars, on_declared_slot,
 };
 use crate::analysis::{Analysed, Inference};
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
@@ -253,7 +253,6 @@ struct Draft {
     point: Point,
     frame: Frame,
     at: At,
-    extra: Option<Store>,
     grows: Grows,
     link: Option<TraceId>,
 }
@@ -416,10 +415,10 @@ struct Builder<'a> {
     ops: Vec<Op>,
     snapshots: Vec<Snapshot>,
     guards: Vec<Placed>,
-    /// php's code generator's guards on a value a symbol table reaches at
-    /// an opline its inference guards nowhere (`CHECK_OP_TRACE_TYPE`), held
-    /// once a guard of its inference holds the same value anywhere in the
-    /// trace, which is what marks it `MAY_BE_GUARD`.
+    /// php's code generator's guards at an opline its inference guards
+    /// nowhere (`CHECK_OP_TRACE_TYPE`), which [`Builder::hold_checks`]
+    /// settles once the walk has seen what marks each value
+    /// `MAY_BE_GUARD`.
     checks: Vec<Placed>,
     leaves: Vec<(OpId, Leaves, Draft)>,
     calls: Vec<Call>,
@@ -495,10 +494,6 @@ struct PropertyAt {
     class: ClassId,
     slot: PropertySlot,
 }
-
-/// php's `MAY_BE_RESOURCE`, `1 << IS_RESOURCE`, the mask a `TYPE_CHECK`
-/// for `is_resource()` names.
-const MAY_BE_RESOURCE: u32 = 1 << ZvalType::Resource as u32;
 
 impl<'a> Builder<'a> {
     fn new(
@@ -1534,7 +1529,14 @@ impl<'a> Builder<'a> {
             Form::Step => may_throw,
         };
         if throws {
-            let unwind = draft(Point::After(idx), frame, At::Opline(at));
+            // A NAN's warning leaves at its call, before the op writes its
+            // boolean; every other throw an inline op has is past its write.
+            let point = if form == Form::Inline && takes_truth(op.opcode) {
+                Point::Before(idx)
+            } else {
+                Point::After(idx)
+            };
+            let unwind = draft(point, frame, At::Opline(at));
             self.leaves.push((idx, Leaves::Thrown, unwind));
         }
     }
@@ -2436,6 +2438,7 @@ impl<'a> Builder<'a> {
             range: None,
             def,
             home,
+            unguarded: None,
         });
         id
     }
@@ -3046,19 +3049,18 @@ impl<'a> Builder<'a> {
     }
 
     /// php's code generator's guard on an operand its inference does not
-    /// guard at this opline (`CHECK_OP_TRACE_TYPE` over an operand marked
-    /// `MAY_BE_GUARD` elsewhere): only on a value a symbol table reaches,
-    /// whose mark no guard clears, held before the opline where the
-    /// recording saw a type, and kept once a guard of php's inference
-    /// holds the same value ([`Builder::checks`]). It narrows nothing the
-    /// opline sees: the oplines it is held at are stepped, or read the
-    /// operand as the inference's guard held it.
+    /// guard at this opline (`CHECK_OP_TRACE_TYPE`, which holds an operand
+    /// marked `MAY_BE_GUARD` anywhere in the trace): held before the opline
+    /// where the recording saw a type, and settled once the walk is done
+    /// ([`Builder::hold_checks`]). It narrows nothing the opline sees as
+    /// the walk reads it: the oplines it is held at are stepped, or read
+    /// the operand as the inference's guard held it.
     fn check_use(&mut self, idx: OpId, here: OplineIdx, operand: Operand, sample: Option<Sample>) {
         let (Operand::Value(value), Some(sample)) = (operand, sample) else {
             return;
         };
         let slot = self.val(value).slot;
-        if sample.indirect || sample.reference || !self.aliased(slot) {
+        if sample.indirect || sample.reference {
             return;
         }
         self.checks.push(Placed {
@@ -3246,7 +3248,6 @@ impl<'a> Builder<'a> {
             point: Point::Start,
             frame: Frame::ROOT,
             at: first.map_or(At::Stands, At::Opline),
-            extra: None,
             grows: Grows::Side,
             link: None,
         }
@@ -3746,7 +3747,6 @@ impl<'a> Builder<'a> {
             point: Point::End,
             frame,
             at,
-            extra: None,
             grows: Grows::Side,
             link,
         });
@@ -3756,16 +3756,6 @@ impl<'a> Builder<'a> {
     }
 
     fn finish(mut self) -> Result<TraceIr, Abort> {
-        let marked: HashSet<ValueId> = (self.guards.iter())
-            .filter_map(|placed| match placed.check {
-                Check::Type { value, .. } => Some(value),
-                _ => None,
-            })
-            .collect();
-        let checks = std::mem::take(&mut self.checks);
-        self.guards.extend(checks.into_iter().filter(
-            |placed| matches!(placed.check, Check::Type { value, .. } if marked.contains(&value)),
-        ));
         let repeat = self.repeat;
         if repeat.is_some() {
             self.close_phis()?;
@@ -3773,7 +3763,9 @@ impl<'a> Builder<'a> {
         let closes = self.closes();
         self.load_at_entry();
         self.hold_in_fetch();
+        self.hold_checks();
         let numbered = self.number(closes)?;
+        self.mark_unguarded(&numbered.guards);
         let end = numbered
             .end
             .ok_or_else(|| mismatch("a trace with no end"))?;
@@ -3794,6 +3786,143 @@ impl<'a> Builder<'a> {
             end,
             body,
         })
+    }
+
+    /// Each value a guard held after an op narrowed, what it held before
+    /// that guard ([`Unguarded`]), `guards` in the order they are held.
+    fn mark_unguarded(&mut self, guards: &[Guard]) {
+        for guard in guards {
+            if let (GuardAt::Before(until), Some((value, _))) =
+                (guard.at, Narrowed::of(guard.check))
+            {
+                let types = self.born[value.0 as usize];
+                let held = self.val_mut(value);
+                if held.types != types && held.unguarded.is_none() {
+                    held.unguarded = Some(Unguarded { until, types });
+                }
+            }
+        }
+    }
+
+    /// php's `CHECK_OP_TRACE_TYPE` over what the walk marked: a value a
+    /// type guard holds anywhere in the trace is `MAY_BE_GUARD` at every
+    /// opline that reads it, those before the guard's among them, since a
+    /// guard narrows php's SSA variable and not a copy of it. So php holds
+    /// the type where the code generator first reads the value, and an
+    /// opline before that guard does not trust a type no guard yet read
+    /// (`zend_jit_trace_add_op_guard` and `CHECK_OP_TRACE_TYPE`,
+    /// `Z/ext/opcache/jit/zend_jit_trace.c:393-427`): a value no symbol
+    /// table reaches has its one guard moved up to the first such opline,
+    /// which clears its mark, so no guard before that opline or at it
+    /// leaves one to take; one a symbol table reaches keeps its mark, and
+    /// each such opline holds it again.
+    ///
+    /// A `TYPE_CHECK` that asks for another type than the recording saw
+    /// over what an inline `FE_FETCH_R` wrote, the `ASSIGN` after it the
+    /// inference's guard: fused to a `JMPZ`, a `JMPNZ`, unfused, of a mask
+    /// of two types and of all but one, and an exact one beside them. The
+    /// foreach that ran off its end comes back over an array one element
+    /// longer whose last is another type, which reads wrong if the check
+    /// trusts the element it was recorded on:
+    ///
+    /// ```php
+    /// function jz($v, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $l = $v[$i % 2]; foreach ($l as $e) { if (is_int($e)) { $t += 1; } else { $t += 2; } $w = $e; } } return $t; }
+    /// function jnz($v, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $l = $v[$i % 2]; foreach ($l as $e) { if (!is_int($e)) { $t += 2; } else { $t += 1; } $w = $e; } } return $t; }
+    /// function out($v, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $l = $v[$i % 2]; foreach ($l as $e) { $b = is_int($e); $t += $b ? 1 : 2; $w = $e; } } return $t; }
+    /// function both($v, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $l = $v[$i % 2]; foreach ($l as $e) { $t += is_bool($e) ? 1 : 2; $w = $e; } } return $t; }
+    /// function not($v, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $l = $v[$i % 2]; foreach ($l as $e) { $t += $e !== null ? 1 : 2; $w = $e; } } return $t; }
+    /// function same($v, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $l = $v[$i % 2]; foreach ($l as $e) { $t += is_float($e) ? 1 : 2; $w = $e; } } return $t; }
+    /// $d = [[1.5, 2.5], [1.5, 2.5, 3]];
+    /// echo jz($d, 6), " ", jnz($d, 6), " ", out($d, 6), " ", both($d, 6), " ", same($d, 6), " ";
+    /// echo both([[1, 2], [1, 2, true]], 6), " ", not([[1, 2], [1, 2, null]], 6), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 27 27 27 30 18 27 18
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function jz($v, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $l = $v[$i % 2]; foreach ($l as $e) { if (is_int($e)) { $t += 1; } else { $t += 2; } $w = $e; } } return $t; }
+    /// function jnz($v, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $l = $v[$i % 2]; foreach ($l as $e) { if (!is_int($e)) { $t += 2; } else { $t += 1; } $w = $e; } } return $t; }
+    /// function out($v, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $l = $v[$i % 2]; foreach ($l as $e) { $b = is_int($e); $t += $b ? 1 : 2; $w = $e; } } return $t; }
+    /// function both($v, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $l = $v[$i % 2]; foreach ($l as $e) { $t += is_bool($e) ? 1 : 2; $w = $e; } } return $t; }
+    /// function not($v, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $l = $v[$i % 2]; foreach ($l as $e) { $t += $e !== null ? 1 : 2; $w = $e; } } return $t; }
+    /// function same($v, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $l = $v[$i % 2]; foreach ($l as $e) { $t += is_float($e) ? 1 : 2; $w = $e; } } return $t; }
+    /// $d = [[1.5, 2.5], [1.5, 2.5, 3]];
+    /// echo jz($d, 6), " ", jnz($d, 6), " ", out($d, 6), " ", both($d, 6), " ", same($d, 6), " ";
+    /// echo both([[1, 2], [1, 2, true]], 6), " ", not([[1, 2], [1, 2, null]], 6), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 27 27 27 30 18 27 18
+    /// ```
+    ///
+    /// php's exits: the guard at the `TYPE_CHECK`, exit 4, knows nothing of
+    /// the element, and its side grows from there:
+    ///
+    /// ```php
+    /// function f($v, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $l = $v[$i % 2]; foreach ($l as $e) { $t += is_int($e) ? 1 : 2; $w = $e; } } return $t; }
+    /// echo f([[1.5, 2.5], [1.5, 2.5, 3]], 300), "\n";
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 1350
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:3
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 3 f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 2 start (side trace 1/3) f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 2 stop (link to 1)
+    /// ---- TRACE 2 compiled
+    ///
+    ///      TRACE 1 exit 4 f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 3 start (side trace 1/4) f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 3 stop (link to 1)
+    /// ---- TRACE 3 compiled
+    ///
+    ///      TRACE 2 exit 3 f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 4 start (side trace 2/3) f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 4 stop (return)
+    /// ---- TRACE 4 compiled
+    /// ```
+    fn hold_checks(&mut self) {
+        for check in std::mem::take(&mut self.checks) {
+            let (GuardAt::Before(reader), Check::Type { value, .. }) = (check.at, check.check)
+            else {
+                continue;
+            };
+            let on_value = |placed: &Placed| matches!(placed.check, Check::Type { value: v, .. } if v == value);
+            if self.aliased(self.val(value).slot) {
+                if self.guards.iter().any(on_value) {
+                    self.guards.push(check);
+                }
+                continue;
+            }
+            let first = (self.guards.iter().enumerate())
+                .filter(|(_, placed)| on_value(placed))
+                .min_by_key(|(_, placed)| match placed.at {
+                    GuardAt::Before(op) | GuardAt::Within(op) => Some(op),
+                    GuardAt::Entry => None,
+                });
+            if let Some((
+                at,
+                Placed {
+                    at: GuardAt::Before(op),
+                    ..
+                },
+            )) = first
+                && *op > reader
+            {
+                self.guards.remove(at);
+                self.guards.push(check);
+            }
+        }
     }
 
     /// Where a loop's trace is entered from its back edge past its
@@ -4761,10 +4890,9 @@ impl<'a> Builder<'a> {
     /// to any exit taken while the call chain is delayed
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:144-147`).
     fn lands(&self, draft: &Draft, delayed: bool) -> (Option<OplineIdx>, Landing, Vec<Store>) {
-        let extra = || draft.extra.into_iter().collect();
         match draft.at {
-            At::Opline(at) => (Some(at), restored(delayed), extra()),
-            At::Stands | At::Landed => (None, restored(delayed), extra()),
+            At::Opline(at) => (Some(at), restored(delayed), Vec::new()),
+            At::Stands | At::Landed => (None, restored(delayed), Vec::new()),
             At::Fetched {
                 fetch,
                 frees,
@@ -5272,7 +5400,6 @@ fn draft(point: Point, frame: Frame, at: At) -> Draft {
         point,
         frame,
         at,
-        extra: None,
         grows: Grows::Side,
         link: None,
     }

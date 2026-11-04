@@ -859,6 +859,9 @@ struct Emit<'a> {
     stub: Option<Block>,
     /// The block a body entry that declines answers [`DECLINED`] from.
     declined: Option<Block>,
+    /// The op being lowered, which reads a value as a guard before it
+    /// left it ([`Emit::value`]).
+    reading: Option<OpId>,
     /// The frame the trace runs in now.
     running: Frame,
     /// Under `jit.mode=exit-fuzz`, the bytes each guard fails once by.
@@ -930,6 +933,7 @@ impl<'a> Emit<'a> {
             escape: None,
             stub: None,
             declined: None,
+            reading: None,
             running: Frame::ROOT,
             fuzz: None,
             fuzzed_sites: 0,
@@ -1349,7 +1353,9 @@ impl<'a> Emit<'a> {
         if self.kept.is_some_and(|kept| kept.reader != id) {
             self.write_kept()?;
         }
+        self.reading = Some(id);
         let done = self.op_at(id, at);
+        self.reading = None;
         if self.kept.is_some_and(|kept| kept.reader == id) {
             self.kept = None;
         }
@@ -5095,12 +5101,49 @@ impl<'a> Emit<'a> {
 
     // ------------------------------------------------------------ values
 
+    /// A value as the op being lowered reads it: its types from where it
+    /// was made until a guard before this op or at it read them
+    /// ([`Unguarded`](crate::types::Unguarded)). php's trace SSA numbers a
+    /// variable anew where a line reads it and may take an owner of it, so
+    /// a guard after that line marks the new number and the line reads the
+    /// old one, unmarked, as anything; the trace holds one value in the
+    /// slot, so it is this that reads it so. A frameless call before the
+    /// `$w = $e` that holds a string warns of what it finds unset, where a
+    /// side trace unset it and linked back:
+    ///
+    /// ```php
+    /// set_error_handler(function ($no, $msg) { global $seen; $seen[$msg] = ($seen[$msg] ?? 0) + 1; return true; });
+    /// function f($n, $l) { $e = "a"; $c = 0; for ($i = 0; $i < $n; $i++) { $c += (int)str_contains($e, "a"); $w = $e; if ($i % 90 == 89) { unset($e); } else { $e = current($l); } } return $c; }
+    /// echo f(200, ["abc"]), " ", json_encode($seen), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 198 {"Undefined variable $e":4,"str_contains(): Passing null to parameter #1 ($haystack) of type string is deprecated":2}
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// set_error_handler(function ($no, $msg) { global $seen; $seen[$msg] = ($seen[$msg] ?? 0) + 1; return true; });
+    /// function f($n, $l) { $e = "a"; $c = 0; for ($i = 0; $i < $n; $i++) { $c += (int)str_contains($e, "a"); $w = $e; if ($i % 90 == 89) { unset($e); } else { $e = current($l); } } return $c; }
+    /// echo f(200, ["abc"]), " ", json_encode($seen), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 198 {"Undefined variable $e":4,"str_contains(): Passing null to parameter #1 ($haystack) of type string is deprecated":2}
+    /// ```
     fn value(&self, value: ValueId) -> Result<crate::types::Value, Abort> {
-        self.ir
+        let held = self
+            .ir
             .values
             .get(value.0 as usize)
             .copied()
-            .ok_or_else(|| mismatch("a value past the trace's"))
+            .ok_or_else(|| mismatch("a value past the trace's"))?;
+        Ok(match (held.unguarded, self.reading) {
+            (Some(unguarded), Some(at)) if at < unguarded.until => crate::types::Value {
+                types: unguarded.types,
+                ..held
+            },
+            _ => held,
+        })
     }
 
     /// The variables of `frame`, past which its slots are temporaries.
