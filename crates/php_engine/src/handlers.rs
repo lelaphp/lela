@@ -11091,7 +11091,16 @@ fn read_dimension(
         return Ok(Ok(array_entry(req, array, key, mode)));
     }
     if let Some(text) = container.as_php_string() {
-        let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
+        let mut dim = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
+        // `case IS_UNDEF`: `ZVAL_UNDEFINED_OP2` with the string held, a
+        // handler's taking its last owner answering `null`.
+        if matches!(dim.as_ref(), ValueRef::Undef) {
+            let held = Owner::take(req, text);
+            dim = exec::operand(req, frame, code, op.op2_type, op.op2);
+            if held.let_go(req).freed() {
+                return Ok(Ok(Value::null()));
+            }
+        }
         return Ok(string_offset(req, text, &dim, mode));
     }
     if let Some(object) = container.as_object() {
@@ -20542,6 +20551,14 @@ pub(crate) fn unset_dim<T: Tier>(
         } else {
             exec::operand(req, frame, code, op.op2_type, op.op2)
         };
+        // A handler of `ZVAL_UNDEFINED_OP2` can have written a `CV`,
+        // which php reads through its zval after it.
+        let container = match op.op1_type {
+            OperandKind::Cv if !matches!(container.as_ref(), ValueRef::Null) => {
+                exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref()
+            }
+            _ => container,
+        };
         unset_container(req, &container, &offset)
     };
     exec::free_operand(req, frame, op.op2_type, op.op2);
@@ -24313,9 +24330,19 @@ fn inline_isset_dim<T: Tier>(
 #[inline(never)]
 fn tested_dim<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let empty = op.extended_value & ISEMPTY != 0;
+    let held = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
+    // `if (OP2_TYPE == IS_CONST && Z_EXTRA_P(offset) ==
+    // ZEND_EXTRA_VALUE) offset++`: an object is handed the dimension as
+    // it was written, which is the arm that reads it at all.
+    let offset = if held.as_object().is_some() {
+        object_dim(req, frame, code, op).unwrap_or_else(Value::null)
+    } else {
+        exec::operand(req, frame, code, op.op2_type, op.op2)
+    };
+    // A handler of `ZVAL_UNDEFINED_OP2` can have written the container,
+    // which php reads through its zval after it.
     let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
     let answer = if let Some(array) = container.as_array() {
-        let offset = exec::operand(req, frame, code, op.op2_type, op.op2);
         crate::ops::isset_dim(
             req,
             array,
@@ -24324,15 +24351,7 @@ fn tested_dim<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &
             empty,
         )
     } else {
-        // `if (OP2_TYPE == IS_CONST && Z_EXTRA_P(offset) ==
-        // ZEND_EXTRA_VALUE) offset++`: an object is handed the dimension
-        // as it was written, which is the arm that reads it at all.
-        let offset = if container.as_object().is_some() {
-            object_dim(req, frame, code, op).unwrap_or_else(Value::null)
-        } else {
-            exec::operand(req, frame, code, op.op2_type, op.op2)
-        };
-        isset_container(req, &container, &offset, empty)
+        isset_container(req, (frame, code, op), &container, &offset, empty)
     };
     exec::free_operand(req, frame, op.op2_type, op.op2);
     exec::free_operand(req, frame, op.op1_type, op.op1);
@@ -24432,8 +24451,35 @@ pub(crate) fn isset_isempty_prop_obj<T: Tier>(
 /// bool(true)
 /// bool(false)
 /// ```
+///
+/// The offset is read before the string is: `zval_get_long_ex` warns of
+/// a float, and a handler can have written the variable, whose string
+/// php reads through its zval after it.
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS['s'] = "x"; return true; });
+/// $s = str_repeat("ab", 64); var_dump(isset($s[1.5]));
+/// $s = str_repeat("ab", 64); var_dump(empty($s[1.5]));
+/// $s = str_repeat("ab", 64); var_dump(isset($s[1e42]));
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS['s'] = 1; return true; });
+/// $s = str_repeat("ab", 64); var_dump(isset($s[$undefined]), empty($s[$undefined]));
+/// ```
+/// ```expect
+/// [Implicit conversion from float 1.5 to int loses precision]
+/// bool(false)
+/// [Implicit conversion from float 1.5 to int loses precision]
+/// bool(true)
+/// [The float 1.0E+42 is not representable as an int, cast occurred]
+/// [Implicit conversion from float 1.0E+42 to int loses precision]
+/// bool(true)
+/// [Undefined variable $undefined]
+/// [Undefined variable $undefined]
+/// bool(false)
+/// bool(true)
+/// ```
 fn isset_container(
     req: &mut Request,
+    (frame, code, op): (FrameRef, &OpArray, &Opline),
     container: &Value,
     offset: &Value,
     empty: bool,
@@ -24444,8 +24490,12 @@ fn isset_container(
             let held = table.has_dimension(req, object, offset, empty)?;
             Ok(held != empty)
         }
-        ValueRef::Str(text) => {
+        ValueRef::Str(_) => {
             let Some(at) = string_isset_offset(req, offset) else {
+                return Ok(empty);
+            };
+            let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
+            let Some(text) = container.as_php_string() else {
                 return Ok(empty);
             };
             let len = i64::try_from(text.len()).unwrap_or(i64::MAX);

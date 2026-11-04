@@ -5159,36 +5159,115 @@ pub(crate) fn string_dim_offset(
 /// #0 {main}
 ///   thrown in %s on line 3
 /// ```
+///
+/// A warning over an offset that is no long can reach a handler that
+/// gives the string up, so the read holds it across the warning, as
+/// `zend_jit_fetch_dim_str_r_helper` does (`GC_ADDREF(str)`): the byte
+/// of what `$s` held.
+///
+/// ```php
+/// $s = str_repeat("abcdefgh", 64);
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS['s'] = 1; return true; });
+/// function f($n) { global $s; $t = ""; for ($i = 0; $i < $n; $i++) { try { $t .= "<" . $s["1x"] . ">"; } catch (Throwable $e) { $t .= get_class($e); } $s = str_repeat("abcdefgh", 64); } return $t; }
+/// echo f(6), "\n";
+/// ```
+/// ```expect
+/// [Illegal string offset "1x"]
+/// [Illegal string offset "1x"]
+/// [Illegal string offset "1x"]
+/// [Illegal string offset "1x"]
+/// [Illegal string offset "1x"]
+/// [Illegal string offset "1x"]
+/// <b><b><b><b><b><b>
+/// ```
+///
+/// Where the warning is `String offset cast occurred`, or the undefined
+/// variable before it, and the hold was the string's last owner, php's
+/// read answers `null` and warns of nothing more; a string someone else
+/// owns is read as it stands.
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS['s'] = 1; return true; });
+/// $s = str_repeat("ab", 64); var_dump($s[1.5], $s);
+/// $s = str_repeat("ab", 64); var_dump($s[true]);
+/// $s = str_repeat("ab", 64); var_dump($s[$undefined]);
+/// $s = str_repeat("ab", 64); var_dump($s[$undefined] ?? "default");
+/// $s = str_repeat("ab", 64); $kept = $s; var_dump($s[1.5]);
+/// ```
+/// ```expect
+/// [String offset cast occurred]
+/// NULL
+/// int(1)
+/// [String offset cast occurred]
+/// NULL
+/// [Undefined variable $undefined]
+/// NULL
+/// [Undefined variable $undefined]
+/// string(7) "default"
+/// [String offset cast occurred]
+/// string(1) "b"
+/// ```
 pub(crate) fn string_offset(
     req: &mut Request,
     text: PhpString,
     dim: &Value,
     mode: DimRead,
 ) -> Result<Value, Thrown> {
-    let Some(offset) = string_dim_offset(req, dim, mode)? else {
+    let dim = dim.deref();
+    if let ValueRef::Int(offset) = dim.as_ref() {
+        return read_byte(req, byte_at(text, offset), offset, mode);
+    }
+    let held = Owner::take(req, text);
+    let offset = string_dim_offset(req, &dim, mode);
+    let byte = offset
+        .as_ref()
+        .ok()
+        .copied()
+        .flatten()
+        .and_then(|offset| byte_at(text, offset));
+    let left = held.let_go(req);
+    let Some(offset) = offset? else {
         return Ok(Value::null());
     };
+    // `GC_DELREF(str) == 0` after `String offset cast occurred`; php's
+    // leading-numeric arm takes no owner, and reads the byte it freed.
+    if left.freed() && !matches!(dim.as_ref(), ValueRef::Str(_)) {
+        return Ok(Value::null());
+    }
+    read_byte(req, byte, offset, mode)
+}
+
+/// The byte of `text` at `offset`, a negative one counted from the end;
+/// none where the string is not long enough for it.
+fn byte_at(text: PhpString, offset: i64) -> Option<u8> {
     let len = i64::try_from(text.len()).unwrap_or(i64::MAX);
     let at = if offset < 0 {
         len.saturating_add(offset)
     } else {
         offset
     };
-    if at < 0 || at >= len {
-        // `if (type != BP_VAR_IS)`: the warning and the empty string are
-        // the read's, and `null` with nothing raised is the other's.
-        if mode == DimRead::Silent {
-            return Ok(Value::null());
+    text.as_bytes().get(usize::try_from(at).ok()?).copied()
+}
+
+/// What [`string_offset`] answers for the byte it read at `offset`, which
+/// is read before a warning here can reach a handler: the byte as a
+/// string of one byte, and none being the warning and the empty string
+/// the read's (`if (type != BP_VAR_IS)`), `null` with nothing raised the
+/// other's.
+fn read_byte(
+    req: &mut Request,
+    byte: Option<u8>,
+    offset: i64,
+    mode: DimRead,
+) -> Result<Value, Thrown> {
+    match byte {
+        Some(byte) => Ok(Value::string(req.string(&[byte])?)),
+        None if mode == DimRead::Silent => Ok(Value::null()),
+        None => {
+            warning(req, &format!("Uninitialized string offset {offset}"));
+            Ok(Value::string(req.string(b"")?))
         }
-        warning(req, &format!("Uninitialized string offset {offset}"));
-        return Ok(Value::string(req.string(b"")?));
     }
-    let byte = text
-        .as_bytes()
-        .get(usize::try_from(at).unwrap_or(0))
-        .copied()
-        .unwrap_or(0);
-    Ok(Value::string(req.string(&[byte])?))
 }
 
 /// The key an array offset makes, the `add_again` ladder of

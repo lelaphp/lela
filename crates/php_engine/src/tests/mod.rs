@@ -32,6 +32,7 @@ mod frame_writes;
 mod frames;
 #[cfg(debug_assertions)]
 mod freed_use;
+mod given_up;
 mod hand_off;
 #[cfg(debug_assertions)]
 mod leak_causes;

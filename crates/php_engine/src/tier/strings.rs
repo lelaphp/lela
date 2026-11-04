@@ -19,7 +19,7 @@ use php_unit::OperandKind;
 
 use crate::api::request::Request;
 use crate::api::request::ropes::RopeAt;
-use crate::api::values::{PhpString, Value};
+use crate::api::values::{Owner, PhpString, Value, ValueRef};
 
 /// The string `piece` holds, which compiled code handed with its owner.
 fn piece_of(piece: Zval) -> Result<PhpString, Fatal> {
@@ -126,6 +126,28 @@ pub fn assign_concat(req: &mut Request, place: ZvalRef, right: Zval) {
 /// stood at the opline; none where the key was refused, or a handler of
 /// the warning threw, which is left pending as the handler leaves it.
 ///
+/// `zend_jit_fetch_dim_str_r_helper` holds the string across the
+/// warnings of a key that is no long and reads the byte whatever became
+/// of the string, whose offset compiled code has inferred to be a
+/// string: the kernel's `null` for a string its warning freed is the
+/// interpreter's, and this owner keeps it from a trace.
+///
+/// ```php
+/// $s = str_repeat("abcdefgh", 64);
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS['s'] = 1; return true; });
+/// function f($n) { global $s; $t = ""; for ($i = 0; $i < $n; $i++) { try { $t .= "<" . $s["1x"] . ">"; } catch (Throwable $e) { $t .= get_class($e); } $s = str_repeat("abcdefgh", 64); } return $t; }
+/// echo f(6), "\n";
+/// ```
+/// ```expect regime=jit-force process
+/// [Illegal string offset "1x"]
+/// [Illegal string offset "1x"]
+/// [Illegal string offset "1x"]
+/// [Illegal string offset "1x"]
+/// [Illegal string offset "1x"]
+/// [Illegal string offset "1x"]
+/// <b><b><b><b><b><b>
+/// ```
+///
 /// # Errors
 ///
 /// A `text` that is no string, which no compiled code hands.
@@ -133,12 +155,13 @@ pub fn string_offset(req: &mut Request, text: Zval, key: Zval) -> Result<Option<
     let text = text
         .as_str()
         .ok_or_else(|| Fatal::error("InternalError: compiled code read an offset of no string"))?;
-    let read = crate::ops::string_offset(
-        req,
-        PhpString::of(text),
-        &Value::of_slot(key),
-        crate::ops::DimRead::Warning,
-    );
+    let text = PhpString::of(text);
+    let key = Value::of_slot(key);
+    let held = (!matches!(key.as_ref(), ValueRef::Int(_))).then(|| Owner::take(req, text));
+    let read = crate::ops::string_offset(req, text, &key, crate::ops::DimRead::Warning);
+    if let Some(held) = held {
+        held.let_go(req);
+    }
     Ok(match read {
         Ok(byte) => Some(byte.to_zval()),
         Err(thrown) => {
