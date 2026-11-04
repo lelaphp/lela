@@ -1,6 +1,7 @@
 function u0:0(i64, i64, i64, i64, i64, i64) -> i32 tail {
     ss0 = explicit_slot 56, align = 8
-    ss1 = explicit_slot 16, align = 8
+    ss1 = explicit_slot 0, align = 8
+    ss2 = explicit_slot 16, align = 8
     sig0 = (i64, i64, i32, i64, i32) -> i32 system_v
     sig1 = (i64, i64, i32, i64, i32, i64, i32, i64) -> i32 system_v
     sig2 = (i64, i64, i32, i32, i64) -> i32 system_v
@@ -384,14 +385,14 @@ function u0:0(i64, i64, i64, i64, i64, i64) -> i32 tail {
 
                                 block61:
 @0004                               v197 = iconst.i32 8
-@0004                               v198 = stack_addr.i64 ss1
+@0004                               v198 = stack_addr.i64 ss2
 @0004                               v199 = iconst.i32 6
 @0004                               v200 = iconst.i64 0x7000_0600
 @0004                               v201 = call_indirect sig1, v200(v0, v184, v197, v187, v199, v189, v199, v198)  ; v200 = 0x7000_0600, v197 = 8, v199 = 6, v199 = 6
 @0004                               brif v201, block62, block63
 
                                 block63:
-@0004                               v202 = stack_addr.i64 ss1
+@0004                               v202 = stack_addr.i64 ss2
 @0004                               v203 = load.i64 notrap v202
 @0004                               v204 = iconst.i64 0
 @0004                               v205 = icmp ne v203, v204  ; v204 = 0
@@ -425,14 +426,14 @@ function u0:0(i64, i64, i64, i64, i64, i64) -> i32 tail {
 
                                 block69:
 @0005                               v232 = iconst.i32 11
-@0005                               v233 = stack_addr.i64 ss1
+@0005                               v233 = stack_addr.i64 ss2
 @0005                               v234 = iconst.i32 6
 @0005                               v235 = iconst.i64 0x7000_0600
 @0005                               v236 = call_indirect sig1, v235(v0, v211, v232, v222, v234, v224, v234, v233)  ; v235 = 0x7000_0600, v232 = 11, v234 = 6, v234 = 6
 @0005                               brif v236, block62, block70
 
                                 block70:
-@0005                               v237 = stack_addr.i64 ss1
+@0005                               v237 = stack_addr.i64 ss2
 @0005                               v238 = load.i64 notrap v237
 @0005                               v239 = iconst.i64 0
 @0005                               v240 = icmp ne v238, v239  ; v239 = 0

@@ -1,6 +1,7 @@
 function u0:0(i64, i64, i64, i64, i64, i64) -> i32 tail {
     ss0 = explicit_slot 56, align = 8
-    ss1 = explicit_slot 16, align = 8
+    ss1 = explicit_slot 0, align = 8
+    ss2 = explicit_slot 16, align = 8
     sig0 = (i64, i64, i32, i32, i64) -> i32 system_v
     sig1 = (i64, i64, i32, i64, i64, i32, i32, i64) -> i32 system_v
     sig2 = (i64, i64, i32, i32) -> i32 system_v
@@ -125,20 +126,20 @@ function u0:0(i64, i64, i64, i64, i64, i64) -> i32 tail {
                                 block22:
 @0003                               v81 = iconst.i32 1
 @0003                               v82 = iconst.i32 6
-@0003                               v83 = stack_addr.i64 ss1
+@0003                               v83 = stack_addr.i64 ss2
 @0003                               v84 = iconst.i64 0x7000_0c00
 @0003                               v85 = call_indirect sig1, v84(v0, v48, v82, v77, v70, v71, v81, v83)  ; v84 = 0x7000_0c00, v82 = 6, v81 = 1
 @0003                               brif v85, block23, block24
 
                                 block24:
-@0003                               v86 = stack_addr.i64 ss1+8
+@0003                               v86 = stack_addr.i64 ss2+8
 @0003                               v87 = load.i8 notrap v86
 @0003                               v88 = iconst.i8 12
 @0003                               v89 = icmp ne v87, v88  ; v88 = 12
 @0003                               brif v89, block19, block25
 
                                 block25:
-@0003                               v90 = stack_addr.i64 ss1
+@0003                               v90 = stack_addr.i64 ss2
 @0003                               v91 = load.i64 notrap v90
 @0003                               v92 = load.i32 notrap aligned v91+8
 @0003                               v93 = iconst.i32 255

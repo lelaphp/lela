@@ -437,7 +437,8 @@ fn calls_of(clif: &str, kernel: Kernel) -> Vec<String> {
         .filter(|(_, line)| line.contains("call_indirect") && line.contains(&address))
         .filter_map(|(at, line)| {
             let status = line.split_once(" = ")?.0;
-            let branch = lines.get(at + 1)?;
+            // Past the doubles read back after the call.
+            let branch = (lines.get(at + 1..)?.iter()).find(|line| line.starts_with("brif "))?;
             let to = branch.strip_prefix(&format!("brif {status}, "))?;
             Some(to.split(',').next()?.trim().to_owned())
         })

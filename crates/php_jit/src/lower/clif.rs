@@ -871,6 +871,12 @@ struct Emit<'a> {
     fuzz: Option<Fuzz>,
     /// How many of them the guards met so far took.
     fuzzed_sites: usize,
+    /// The room [`Emit::carrying`] made.
+    carrying: Option<StackSlot>,
+    /// What the last call carried ([`Emit::doubles_held`]).
+    carried_last: Vec<Variable>,
+    /// What the guards of the op being lowered read of its array.
+    guards_read: GuardsRead,
     /// The registers a memory phi's back edge brings that their op writes
     /// to their slot as it defines them, php's `ZREG_STORE`, so they need
     /// live no further than their last read ([`stored_at_def`]).
@@ -944,6 +950,9 @@ impl<'a> Emit<'a> {
             running: Frame::ROOT,
             fuzz: None,
             fuzzed_sites: 0,
+            carrying: None,
+            carried_last: Vec::new(),
+            guards_read: GuardsRead::default(),
             stored_at_def: stored_at_def(ir),
             joins: Joins {
                 number: 0,
@@ -1365,6 +1374,7 @@ impl<'a> Emit<'a> {
             self.write_kept()?;
         }
         self.reading = Some(id);
+        self.guards_read = GuardsRead::default();
         let done = self.op_at(id, at);
         self.reading = None;
         if self.kept.is_some_and(|kept| kept.reader == id) {
@@ -1503,6 +1513,7 @@ impl<'a> Emit<'a> {
                 self.leave_if(other, guard.exit)?;
                 if let Check::Deref { tag: t, .. } = guard.check {
                     let reference = self.b.ins().load(I64, trusted(), room, at);
+                    self.guards_read.reference = Some((held.slot, reference));
                     let inner = imm(Ref::VALUE_AT) + TYPE_AT;
                     let inner = self.b.ins().load(I8, trusted(), reference, inner);
                     let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, inner, tag(t));
@@ -1540,18 +1551,7 @@ impl<'a> Emit<'a> {
                 value,
                 layout,
                 read,
-            } => {
-                let held = self.value(value)?;
-                let array = self.array_of(held.slot, read)?;
-                let flags = self.b.ins().load(I32, trusted(), array, imm(Arr::FLAGS_AT));
-                let packed = self.b.ins().band_imm_u(flags, i64::from(Arr::PACKED));
-                let cc = match layout {
-                    Layout::Packed => IntCC::Equal,
-                    Layout::Hash => IntCC::NotEqual,
-                };
-                let other = self.b.ins().icmp_imm_s(cc, packed, 0);
-                self.leave_if(other, guard.exit)?;
-            }
+            } => self.layout_guard(value, layout, read, guard.exit)?,
             // A side trace's IP guard, where its parent's exit left the
             // frame where it stood: `trace` laid down where the frame
             // stands as the last kernel's.
@@ -1689,6 +1689,27 @@ impl<'a> Emit<'a> {
             };
         }
         Ok(num)
+    }
+
+    /// The array `value` holds, read so, held to `layout` through `exit`.
+    fn layout_guard(
+        &mut self,
+        value: ValueId,
+        layout: Layout,
+        read: Read,
+        exit: ExitId,
+    ) -> Result<(), Abort> {
+        let slot = self.value(value)?.slot;
+        let array = self.array_of(slot, read)?;
+        self.guards_read.array = Some((slot, read, array));
+        let flags = self.b.ins().load(I32, trusted(), array, imm(Arr::FLAGS_AT));
+        let packed = self.b.ins().band_imm_u(flags, i64::from(Arr::PACKED));
+        let cc = match layout {
+            Layout::Packed => IntCC::Equal,
+            Layout::Hash => IntCC::NotEqual,
+        };
+        let other = self.b.ins().icmp_imm_s(cc, packed, 0);
+        self.leave_if(other, exit)
     }
 
     /// `cond`, a guard's failure, or under exit-fuzz that or the guard's
@@ -2046,8 +2067,61 @@ impl<'a> Emit<'a> {
     /// status word tested, leaving as `leave` says where it is not zero, or
     /// answering [`ABANDONED`] where the opline names no way to leave.
     fn call(&mut self, kernel: Kernel, args: &[Value], leave: Option<Leave>) -> Result<(), Abort> {
-        let status = self.call_status(kernel, args)?;
+        let status = self.call_status(kernel, args, leave)?;
         self.left_unless(status, leave)
+    }
+
+    /// The variables of the doubles in registers that `leave` stores, or,
+    /// an op that has no way to leave naming none, those the last call
+    /// carried, a list the code is right with whichever it holds: what a
+    /// double not on it costs is a spill, and one that is dead a store.
+    fn doubles_held(&mut self, leave: Option<Leave>) -> Vec<Variable> {
+        let stores = match leave {
+            Some(Leave::Exit(exit)) => {
+                (self.ir.exits.get(usize::from(exit.0))).map(|spec| spec.stores.as_slice())
+            }
+            Some(Leave::Unwind(unwind)) => {
+                (self.ir.unwinds.get(usize::from(unwind.0))).map(|spec| spec.stores.as_slice())
+            }
+            None => return self.carried_last.clone(),
+        };
+        let mut carried = Vec::new();
+        for store in stores.unwrap_or_default() {
+            let Stored::Value(value) = store.from else {
+                continue;
+            };
+            let at = value.0 as usize;
+            if let (Some(held), Some(Some(var))) = (self.ir.values.get(at), self.regs.get(at))
+                && held.home == Home::Register
+                && Kind::of(held.types) == Some(Kind::Double)
+                && !carried.contains(var)
+            {
+                carried.push(*var);
+            }
+        }
+        self.carried_last.clone_from(&carried);
+        carried
+    }
+
+    /// The trace's room for the doubles a call carries ([`Emit::call`]), a
+    /// word for every one it keeps in a register.
+    fn carrying(&mut self) -> StackSlot {
+        if let Some(room) = self.carrying {
+            return room;
+        }
+        let doubles = (self.ir.values.iter())
+            .filter(|value| {
+                value.home == Home::Register && Kind::of(value.types) == Some(Kind::Double)
+            })
+            .count();
+        let size = u32::try_from(doubles.saturating_mul(8)).unwrap_or(u32::MAX);
+        let room = self.b.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            size,
+            3,
+        ));
+        self.carrying = Some(room);
+        room
     }
 
     /// A kernel's `status` tested: on where it is `Continue`, leaving as
@@ -2062,8 +2136,36 @@ impl<'a> Emit<'a> {
     }
 
     /// `kernel`'s wrapper called at its address with the `ExitCtx` and
-    /// `args`, and its status word, an `i32`, for the caller to test.
-    fn call_status(&mut self, kernel: Kernel, args: &[Value]) -> Result<Value, Abort> {
+    /// `args`, and its status word, an `i32`, for the caller to test on
+    /// to `leave`.
+    ///
+    /// Cranelift keeps no vector register across a call, so a double the
+    /// trace holds would live on the stack from its definition on, where
+    /// php's allocator keeps one in `d8` to `d15`. The doubles `leave`
+    /// stores are written out and read back around the call instead, on
+    /// the way that makes it, and leave the code that makes none alone.
+    fn call_status(
+        &mut self,
+        kernel: Kernel,
+        args: &[Value],
+        leave: Option<Leave>,
+    ) -> Result<Value, Abort> {
+        let carried = self.doubles_held(leave);
+        let room = self.carrying();
+        for (held, &var) in (0..).step_by(8).zip(&carried) {
+            let double = self.b.use_var(var);
+            self.b.ins().stack_store(I64, double, room, held);
+        }
+        let status = self.kernel_status(kernel, args)?;
+        for (held, &var) in (0..).step_by(8).zip(&carried) {
+            let double = self.b.ins().stack_load(I64, F64, room, held);
+            self.b.def_var(var, double);
+        }
+        Ok(status)
+    }
+
+    /// [`Emit::call_status`]'s call.
+    fn kernel_status(&mut self, kernel: Kernel, args: &[Value]) -> Result<Value, Abort> {
         let sig = self.signature(kernel);
         let address = i64::try_from(self.symbols.address(kernel))
             .map_err(|_| mismatch("a kernel address past the host's"))?;
@@ -4317,7 +4419,18 @@ impl<'a> Emit<'a> {
     /// 187 [7,8,100]
     /// ```
     fn array_of(&mut self, slot: Slot, read: Read) -> Result<Value, Abort> {
-        let (base, at) = self.zval_of(slot, read)?;
+        if let Some((guarded, how, array)) = self.guards_read.array
+            && guarded == slot
+            && how == read
+        {
+            return Ok(array);
+        }
+        let (base, at) = match self.guards_read.reference {
+            Some((guarded, reference)) if guarded == slot && read == Read::Through => {
+                (reference, imm(Ref::VALUE_AT))
+            }
+            _ => self.zval_of(slot, read)?,
+        };
         Ok(self.b.ins().load(I64, trusted(), base, at))
     }
 
@@ -5668,6 +5781,19 @@ impl<'a> Emit<'a> {
             }
         }
     }
+}
+
+/// What the guards of an op read of its array, which the op's own read goes
+/// on from: Cranelift forgets a load at every block of a loop that stores,
+/// and each guard ends a block. Nothing writes either word between a
+/// guard and the op it stands before, the guards of one op running in
+/// a line, and an op starts with none.
+#[derive(Clone, Copy, Default)]
+struct GuardsRead {
+    /// The reference a variable holds, by its slot.
+    reference: Option<(Slot, Value)>,
+    /// The array a variable holds, by its slot and the way it is read.
+    array: Option<(Slot, Read, Value)>,
 }
 
 /// The values [`Emit::define`] writes to their slot as it defines them:

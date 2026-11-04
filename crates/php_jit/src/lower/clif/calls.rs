@@ -34,8 +34,8 @@ use super::{
 };
 use crate::lower::{INTERRUPT_AT, OperandFields, OperandKinds, RETURNED, THREW};
 use crate::types::{
-    Abort, ArgChecks, Check, Constant, Defaults, End, ExitId, Frame, Home, Imm, Line, Object, OpId,
-    Operand, Owners, PairCallee, PairClass, PushRoom, Returned, Types, Vars,
+    Abort, ArgChecks, Check, Constant, Defaults, End, ExitId, Frame, Home, Imm, Leave, Line,
+    Object, OpId, Operand, Owners, PairCallee, PairClass, PushRoom, Returned, Types, Vars,
 };
 
 /// The receiver a method's call `line` pushes in place.
@@ -1652,7 +1652,11 @@ impl Emit<'_> {
             self.b.ins().jump(next, &[]);
             self.b.switch_to_block(kernel);
             self.b.seal_block(kernel);
-            let status = self.call_status(Kernel::FreeCv, &[room, opline, word, info])?;
+            let status = self.call_status(
+                Kernel::FreeCv,
+                &[room, opline, word, info],
+                Some(Leave::Unwind(unwind)),
+            )?;
             let unwinds =
                 self.b
                     .ins()
@@ -1778,7 +1782,11 @@ impl Emit<'_> {
         self.b.ins().jump(next, &[]);
         self.b.switch_to_block(kernel);
         self.b.seal_block(kernel);
-        let status = self.call_status(Kernel::FreeThis, &[room, opline])?;
+        let status = self.call_status(
+            Kernel::FreeThis,
+            &[room, opline],
+            Some(Leave::Unwind(unwind)),
+        )?;
         let unwinds = self
             .b
             .ins()
@@ -2408,7 +2416,7 @@ impl Emit<'_> {
         self.b.ins().brif(raised, checked, &[], on, &[]);
         self.b.switch_to_block(checked);
         self.b.seal_block(checked);
-        let status = self.call_status(Kernel::Interrupt, &[room, opline])?;
+        let status = self.call_status(Kernel::Interrupt, &[room, opline], leave_of(line))?;
         self.thrown_into(line, status, threw)?;
         self.b.ins().jump(on, &[]);
         self.b.switch_to_block(on);
@@ -2521,7 +2529,7 @@ impl Emit<'_> {
     ) -> Result<(), Abort> {
         self.b.switch_to_block(slow);
         self.b.seal_block(slow);
-        let status = self.call_status(Kernel::PopCall, &[room, opline])?;
+        let status = self.call_status(Kernel::PopCall, &[room, opline], leave_of(line))?;
         self.thrown_into(line, status, threw)?;
         self.b.ins().jump(join, &[]);
         self.b.switch_to_block(join);

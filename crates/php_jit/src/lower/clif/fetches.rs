@@ -368,6 +368,7 @@ impl Emit<'_> {
         let status = self.call_status(
             Kernel::StrOffset,
             &[room, opline, text, key, key_info, answer],
+            line.unwind.map(Leave::Unwind),
         )?;
         self.free_temp(line, line.op2)?;
         self.free_temp(line, line.op1)?;
