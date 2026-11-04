@@ -174,11 +174,13 @@ impl Queue {
     }
 
     /// `job` through the pipeline off any request, counted as served
-    /// until it is done however it ends. No line is written: a request
-    /// whose `opcache.jit_debug` asks for one compiles inline.
+    /// until it is done however it ends, and the pages the compile freed
+    /// given back. No line is written: a request whose
+    /// `opcache.jit_debug` asks for one compiles inline.
     fn serve(&self, job: Job) {
         let _done = Served(self);
         pipeline(&self.shared, job, &mut Lines::default());
+        table::code::give_back_freed_pages();
     }
 
     /// Every job served on this thread, and those under way elsewhere

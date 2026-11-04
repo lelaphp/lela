@@ -146,6 +146,28 @@ fn a_publish_names_the_traces_entrance_at_its_number() -> Result<(), String> {
     Ok(())
 }
 
+/// A table sized by the recipe's bound takes no page of its entrances
+/// until a publish names one, and then the one that holds the name: php's
+/// table is untouched memory (`Z/ext/opcache/jit/zend_jit_trace.c:57`). A
+/// number past the root still reads null, which is the slot an escape
+/// that finds no entrance reads (`lower::Escapes`).
+#[test]
+#[cfg_attr(miri, ignore = "mincore is no call Miri has")]
+fn the_entrances_are_unwritten_until_a_publish_names_one() -> Result<(), String> {
+    let table = table(&[("opcache.jit_max_root_traces", "100000")]);
+    assert_eq!(table.entrances.len(), 100_000);
+    assert_eq!(table.entrances.resident_pages(), 0);
+    let root = (table.publish(compiled(&[0; 8], vec![exit(None)]), Start::Loop))
+        .map_err(|e| format!("{e:?}"))?;
+    assert_eq!(table.entrances.resident_pages(), 1);
+    let slot = |at: usize| table.entrances[at].load(Ordering::Acquire).addr();
+    let at = usize::try_from(root.get()).map_err(|e| e.to_string())?;
+    assert_ne!(slot(at), 0);
+    assert_eq!(slot(at + 1), 0);
+    assert_eq!(slot(99_999), 0);
+    Ok(())
+}
+
 /// Two traces published and read back: numbered from one, each exit
 /// built with a zero word and its link, the links listed, the bytes
 /// where the code says; an id not yet published reads as none.

@@ -49,7 +49,7 @@
 //! The copy is the asking process's to pay, at each fork, for the chunks
 //! in use alone.
 
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use php_engine::tier::{self, Epoch, FuncRef, MapPtrRaw, PlainCall, Request, Word};
@@ -71,7 +71,7 @@ mod perf;
 #[cfg(test)]
 mod tests;
 
-use code::{Arena, Code, Pages};
+use code::{Arena, Code, NullTable, Pages};
 pub(crate) use perf::{Outputs, Perf, Usage, Used};
 
 /// The `Pages` adapter a trace's code is mapped through on this target
@@ -455,8 +455,8 @@ pub(crate) struct TraceTable<P: Pages = Native> {
     /// as a trace's escape reads it where its door does not lead to the
     /// landing it reached (`lower::Escapes`): null until the publish that
     /// numbered the trace placed it, then the trace's [`Entrance`], written
-    /// once with release.
-    entrances: Box<[AtomicPtr<Entrance>]>,
+    /// once with release. Unwritten at its length, as php's table is.
+    entrances: NullTable<Entrance>,
     /// The id the next trace takes, php's `ZEND_JIT_TRACE_NUM`: written
     /// under the mutex after the trace's slot, read with nothing taken.
     next: AtomicU32,
@@ -623,9 +623,7 @@ impl<P: Pages> TraceTable<P> {
         let used = perf.used();
         TraceTable {
             segments: (0..segments).map(|_| OnceLock::new()).collect(),
-            entrances: (0..bounds.traces)
-                .map(|_| AtomicPtr::new(std::ptr::null_mut()))
-                .collect(),
+            entrances: NullTable::new(bounds.traces as usize),
             next: AtomicU32::new(1),
             stopped: AtomicBool::new(false),
             bounds,
