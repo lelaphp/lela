@@ -87,3 +87,37 @@ fn a_property_step_stands_past_the_object_a_handler_gave_up() {
     );
     assert_eq!(stdout, "31\n31\n");
 }
+
+#[test]
+fn an_unset_past_the_table_a_handler_gave_up_deletes_nothing() {
+    let stdout = served(
+        "<?php\n\
+         set_error_handler(function () { $GLOBALS['a'] = 1; return true; });\n\
+         function tbl() { $x = []; for ($i = 0; $i < 40; $i++) { $x[] = 'x' . $i; } return $x; }\n\
+         $a = tbl(); unset($a[$u]); echo $a, \"\\n\";\n",
+    );
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn an_unset_under_a_table_a_handler_gave_up_reads_no_entry_of_it() {
+    let stdout = served(
+        "<?php\n\
+         set_error_handler(function () { $GLOBALS['a'] = 1; return true; });\n\
+         function row() { $x = []; for ($i = 0; $i < 40; $i++) { $x[] = 'x' . $i; } return $x; }\n\
+         $a = row(); $a[1] = row(); unset($a[1][$u]); echo $a, \"\\n\";\n",
+    );
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn a_test_past_the_table_a_handler_gave_up_finds_nothing() {
+    let stdout = served(
+        "<?php\n\
+         set_error_handler(function () { $GLOBALS['a'] = 1; return true; });\n\
+         function tbl() { $x = ['' => 'e']; for ($i = 0; $i < 40; $i++) { $x[] = 'x' . $i; } return $x; }\n\
+         $a = tbl(); echo isset($a[$u]) ? 'set' : 'not set', \"\\n\";\n\
+         $a = tbl(); echo empty($a[$u]) ? 'empty' : 'not empty', \"\\n\";\n",
+    );
+    assert_eq!(stdout, "not set\nempty\n");
+}

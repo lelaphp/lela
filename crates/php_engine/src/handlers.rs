@@ -11086,12 +11086,17 @@ fn read_dimension(
     mode: DimRead,
 ) -> Result<Result<Value, Thrown>, Fatal> {
     if let Some(array) = container.as_array() {
-        let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
-        let key = match crate::ops::array_offset(req, &dim, op.op2_type == OperandKind::Const) {
+        let dim = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
+        let constant = op.op2_type == OperandKind::Const;
+        let refused = DimensionRead::Warning;
+        let undefined = undefined_op2(frame, code, op);
+        let key = match crate::ops::read_offset(req, array, &dim, constant, refused, undefined) {
             Ok(key) => key,
             Err(thrown) => return Ok(Err(thrown)),
         };
-        return Ok(Ok(array_entry(req, array, key, mode)));
+        return Ok(Ok(key.map_or_else(Value::null, |key| {
+            array_entry(req, array, key, mode)
+        })));
     }
     if let Some(text) = container.as_php_string() {
         let mut dim = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
@@ -11139,6 +11144,18 @@ fn read_dimension(
     let _dim = exec::operand(req, frame, code, op.op2_type, op.op2);
     crate::api::raising::warning(req, &bytes!(b"Trying to access array offset on ", named));
     Ok(Ok(Value::null()))
+}
+
+/// `ZVAL_UNDEFINED_OP2()`: the warning a dimension nothing wrote raises,
+/// for a kernel to raise where php's ladder does, the array held.
+fn undefined_op2<'a>(
+    frame: FrameRef,
+    code: &'a OpArray,
+    op: &'a Opline,
+) -> impl FnOnce(&mut Request) + 'a {
+    move |req| {
+        let _dim = exec::operand(req, frame, code, op.op2_type, op.op2);
+    }
 }
 
 /// An object a dimension opline works on, held across `step`: php's
@@ -12070,11 +12087,7 @@ fn held_alone<T>(
     array: PhpArray,
     step: impl FnOnce(&mut Request) -> Result<T, Thrown>,
 ) -> Result<Option<T>, Thrown> {
-    let held = Owner::take(req, Value::array(array));
-    let stepped = step(req);
-    let left = held.let_go(req);
-    let stepped = stepped?;
-    none_pending(req)?;
+    let (stepped, left) = crate::ops::array_held(req, array, step)?;
     Ok((!left.not_alone()).then_some(stepped))
 }
 
@@ -20569,11 +20582,13 @@ fn unset_entry(
     op: &Opline,
     array: PhpArray,
 ) -> Result<php_heap::Zval, Thrown> {
-    let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
-    let key = crate::ops::array_offset(req, &dim, op.op2_type == OperandKind::Const)?;
-    Ok(array
-        .heap()
-        .value_ref(key)
+    let dim = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
+    let constant = op.op2_type == OperandKind::Const;
+    let refused = DimensionRead::Warning;
+    let undefined = undefined_op2(frame, code, op);
+    let key = crate::ops::read_offset(req, array, &dim, constant, refused, undefined)?;
+    Ok(key
+        .and_then(|key| array.heap().value_ref(key))
         .map_or_else(php_heap::Zval::null, php_heap::Zval::indirect))
 }
 
@@ -20788,7 +20803,15 @@ pub(crate) fn unset_dim<T: Tier>(
     };
     let unset = if let (_, Some(array)) = found {
         let constant = op.op2_type == OperandKind::Const;
-        crate::ops::unset_dim(req, array, &offset, constant)
+        let undefined = undefined_op2(frame, code, op);
+        // A `CV`'s slot stands; a `VAR`'s `IS_INDIRECT` is an entry of a
+        // table the handler may have freed with the array, and no read.
+        let again = |req: &mut Request| {
+            let stands = op.op1_type == OperandKind::Cv;
+            let found = stands.then(|| separated_array(req, place).ok());
+            found.flatten().and_then(|(_, now)| now)
+        };
+        crate::ops::unset_dim(req, array, &offset, constant, undefined, again)
     } else {
         // The two reads php raises a warning for stand here, after the
         // array arm and before the rest (`ZVAL_UNDEFINED_OP1`,
@@ -24586,26 +24609,28 @@ fn inline_isset_dim<T: Tier>(
 fn tested_dim<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let empty = op.extended_value & ISEMPTY != 0;
     let held = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
-    // `if (OP2_TYPE == IS_CONST && Z_EXTRA_P(offset) ==
-    // ZEND_EXTRA_VALUE) offset++`: an object is handed the dimension as
-    // it was written, which is the arm that reads it at all.
-    let offset = if held.as_object().is_some() {
-        object_dim(req, frame, code, op).unwrap_or_else(Value::null)
+    let answer = if let Some(array) = held.as_array() {
+        let offset = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
+        let constant = op.op2_type == OperandKind::Const;
+        let undefined = undefined_op2(frame, code, op);
+        let again = |req: &mut Request| {
+            let held = exec::operand_undef(req, frame, code, op.op1_type, op.op1);
+            held.deref().as_array()
+        };
+        crate::ops::isset_dim(req, array, &offset, (constant, empty), undefined, again)
     } else {
-        exec::operand(req, frame, code, op.op2_type, op.op2)
-    };
-    // A handler of `ZVAL_UNDEFINED_OP2` can have written the container,
-    // which php reads through its zval after it.
-    let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
-    let answer = if let Some(array) = container.as_array() {
-        crate::ops::isset_dim(
-            req,
-            array,
-            &offset,
-            op.op2_type == OperandKind::Const,
-            empty,
-        )
-    } else {
+        // `if (OP2_TYPE == IS_CONST && Z_EXTRA_P(offset) ==
+        // ZEND_EXTRA_VALUE) offset++`: an object is handed the dimension
+        // as it was written, which is the arm that reads it at all.
+        let offset = if held.as_object().is_some() {
+            object_dim(req, frame, code, op).unwrap_or_else(Value::null)
+        } else {
+            exec::operand(req, frame, code, op.op2_type, op.op2)
+        };
+        // A handler of `ZVAL_UNDEFINED_OP2` can have written the
+        // container, which `zend_isset_dim_slow` reads through its zval
+        // after it, and an array there is neither of its two arms.
+        let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
         isset_container(req, (frame, code, op), &container, &offset, empty)
     };
     exec::free_operand(req, frame, op.op2_type, op.op2);

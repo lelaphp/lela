@@ -30,7 +30,7 @@ use crate::api::raising::{
 use crate::api::request::{HookedTable, Request};
 use crate::api::values::walk::{self, Table};
 use crate::api::values::{
-    Key, Layout, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef,
+    Key, Layout, Left, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef,
 };
 use crate::c_number::c_str;
 
@@ -4949,8 +4949,8 @@ pub(crate) fn dimension_const(
 ) -> Result<Value, Thrown> {
     let container = container.deref();
     if let Some(array) = container.as_array() {
-        let key = array_offset(req, dim, false)?;
-        return Ok(array_entry(req, array, key, mode));
+        let key = read_offset(req, array, dim, false, DimensionRead::Warning, |_| {})?;
+        return Ok(key.map_or_else(Value::null, |key| array_entry(req, array, key, mode)));
     }
     if let Some(text) = container.as_php_string() {
         return string_offset(req, text, dim, mode);
@@ -5342,6 +5342,143 @@ pub(crate) fn array_offset(
     }
 }
 
+/// The key a dimension makes over `array` for a read, php's
+/// `slow_index_convert` (`Z/Zend/zend_execute.c:2636`) behind the long
+/// and string arms, which raise nothing and take no owner. A CV nothing
+/// wrote raises `undefined`, the caller's `ZVAL_UNDEFINED_OP2`, and goes
+/// on as `null`; `null`, a float and a resource raise their diagnostic
+/// through [`array_offset`]. Each runs with the array held
+/// ([`array_held`]), since it can reach a handler that gives the array
+/// up: `None` is the table freed as the hold let go, whose read is
+/// `null`, and a throw the handler left answers before the table is
+/// read. `reading` is the sentence an offset no key can be made of is
+/// refused in, a read's or `isset`'s.
+///
+/// ```php
+/// function tbl() { return array_fill(0, 9, str_repeat("x", 90)); }
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["a"] = 1; return true; });
+/// $a = tbl(); var_dump($a[1.5]);
+/// $a = tbl(); var_dump($a[$u]);
+/// $a = tbl(); var_dump($a[null]);
+/// $a = tbl(); var_dump($a[STDIN]);
+/// $a = tbl(); var_dump($a[1.5] ?? "d");
+/// $a = tbl(); [1.5 => $b] = $a; var_dump($b);
+/// ```
+/// ```expect
+/// [Implicit conversion from float 1.5 to int loses precision]
+/// NULL
+/// [Undefined variable $u]
+/// NULL
+/// [Using null as an array offset is deprecated, use an empty string instead]
+/// NULL
+/// [Resource ID#1 used as offset, casting to integer (1)]
+/// NULL
+/// [Implicit conversion from float 1.5 to int loses precision]
+/// string(1) "d"
+/// [Implicit conversion from float 1.5 to int loses precision]
+/// string(90) "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+/// ```
+///
+/// A table with an owner left is read as the handler left it, and a
+/// throw stops the read before the key is looked for:
+///
+/// ```php
+/// function tbl() { return [1 => str_repeat("x", 90), "" => "e"]; }
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["c"] = $GLOBALS["a"]; $GLOBALS["a"] = 1; return true; });
+/// $a = tbl(); var_dump(strlen($a[1.5]), $a); unset($c);
+/// $a = tbl(); var_dump($a[$u], $a);
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; throw new Exception("out"); });
+/// $a = [];
+/// try { $a[1.5]; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// try { $a[$u]; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// [Implicit conversion from float 1.5 to int loses precision]
+/// int(90)
+/// int(1)
+/// [Undefined variable $u]
+/// [Using null as an array offset is deprecated, use an empty string instead]
+/// NULL
+/// int(1)
+/// [Implicit conversion from float 1.5 to int loses precision]
+/// out
+/// [Undefined variable $u]
+/// out
+/// ```
+pub(crate) fn read_offset(
+    req: &mut Request,
+    array: PhpArray,
+    offset: &Value,
+    constant: bool,
+    reading: DimensionRead,
+    undefined: impl FnOnce(&mut Request),
+) -> Result<Option<php_heap::Key>, Thrown> {
+    let offset = offset.deref();
+    let held = |req: &mut Request, offset: &Value| {
+        let (key, left) = array_held(req, array, |req| array_offset(req, offset, constant))?;
+        Ok((!left.freed()).then_some(key))
+    };
+    match offset.as_ref() {
+        ValueRef::Undef => {
+            let raised = |req: &mut Request| {
+                undefined(req);
+                Ok(())
+            };
+            let ((), left) = array_held(req, array, raised)?;
+            if left.freed() {
+                return Ok(None);
+            }
+            held(req, &Value::null())
+        }
+        ValueRef::Null | ValueRef::Float(_) | ValueRef::Resource(_) => held(req, &offset),
+        ValueRef::Array(_) | ValueRef::Object(_) => {
+            Err(illegal_container_offset(req, "array", &offset, reading))
+        }
+        _ => array_offset(req, &offset, constant).map(Some),
+    }
+}
+
+/// `step` with `array` held across it, php's `GC_ADDREF(ht)` before a
+/// diagnostic and `GC_DELREF(ht)` after it: what `step` answered and
+/// what is left of the array, for a read's `!GC_DELREF(ht)` and a
+/// write's `GC_DELREF(ht) != 1` to test, and the throw where one is
+/// pending, `if (EG(exception)) return IS_NULL`. An immutable array is
+/// never held, as php's `IS_ARRAY_IMMUTABLE` test says ([`Left`]).
+pub(crate) fn array_held<T>(
+    req: &mut Request,
+    array: PhpArray,
+    step: impl FnOnce(&mut Request) -> Result<T, Thrown>,
+) -> Result<(T, Left), Thrown> {
+    let held = Owner::take(req, array.to_value());
+    let stepped = step(req);
+    let left = held.let_go(req);
+    let stepped = stepped?;
+    none_pending(req)?;
+    Ok((stepped, left))
+}
+
+/// `step` over a diagnostic of `isset` and `unset`, the undefined
+/// variable and the resource, with an owner of `array` held across it.
+/// The owner keeps the table, and makes a handler's write to it
+/// separate, so where that owner was the last the array to go on with
+/// is `again`'s, what the variable holds now: the copy that write left,
+/// or `None`.
+fn array_past<T>(
+    req: &mut Request,
+    array: PhpArray,
+    step: impl FnOnce(&mut Request) -> T,
+    again: impl FnOnce(&mut Request) -> Option<PhpArray>,
+) -> (T, Option<PhpArray>) {
+    let held = Owner::take(req, array.to_value());
+    let stepped = step(req);
+    let array = if held.let_go(req).freed() {
+        again(req)
+    } else {
+        Some(array)
+    };
+    (stepped, array)
+}
+
 /// `zend_array_key_exists_fast` (`Z/Zend/zend_execute.c:3372`), what
 /// `ZEND_ARRAY_KEY_EXISTS` asks of an array: whether the key the value
 /// makes is in it. A string is read as `ZEND_HANDLE_NUMERIC` reads it
@@ -5492,9 +5629,41 @@ pub(crate) fn legacy_type(value: &Value) -> &'static [u8] {
 /// bool(true)
 /// ```
 ///
+/// An offset no key can be made of is refused in
+/// `zend_illegal_array_offset_isset`'s sentence, `Cannot access offset
+/// of type %s in isset or empty`, the one arm of
+/// `zend_find_array_dim_slow` that differs from a read's:
+///
+/// ```php
+/// $a = [1];
+/// try { var_dump(isset($a[[]])); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { var_dump(empty($a[new stdClass])); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Cannot access offset of type array in isset or empty
+/// Cannot access offset of type stdClass in isset or empty
+/// ```
+///
+/// php holds nothing across the undefined variable and the resource, so
+/// a handler's write lands in the table the test goes on to read
+/// ([`array_past`]):
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["a"]["k"] = 1; return true; });
+/// $a = [1 => str_repeat("x", 90), "" => "e"]; var_dump(isset($a[$u]), empty($a[STDIN]), count($a));
+/// ```
+/// ```expect
+/// [Undefined variable $u]
+/// [Using null as an array offset is deprecated, use an empty string instead]
+/// [Resource ID#1 used as offset, casting to integer (1)]
+/// bool(false)
+/// bool(false)
+/// int(3)
+/// ```
+///
 /// A float offset's warning may reach a handler that takes the
 /// container's last owner; the table is destroyed and the entry is not
-/// found:
+/// found, as [`read_offset`] holds it:
 ///
 /// ```php
 /// set_error_handler(function ($no, $str) { global $a; $a = null; echo $str, "\n"; });
@@ -5509,21 +5678,38 @@ pub(crate) fn isset_dim(
     req: &mut Request,
     array: PhpArray,
     offset: &Value,
-    constant: bool,
-    empty: bool,
+    (constant, empty): (bool, bool),
+    undefined: impl FnOnce(&mut Request),
+    again: impl FnOnce(&mut Request) -> Option<PhpArray>,
 ) -> Result<bool, Thrown> {
-    // `GC_TRY_ADDREF(ht)` around a float's warning in
-    // `zend_find_array_dim_slow`: a handler that took the container's
-    // last owner destroys the table, and the entry is then not found.
-    let key = if offset.deref().as_float().is_some() {
-        let held = Owner::take(req, array.to_value());
-        let key = isset_offset(req, offset, constant);
-        if held.let_go(req).freed() {
-            return key.map(|_| empty);
+    let reading = DimensionRead::Silent;
+    let offset = offset.deref();
+    let (array, key) = match offset.as_ref() {
+        // `ZVAL_UNDEFINED_OP2`, and then the `null` arm over what stands.
+        ValueRef::Undef => {
+            let ((), now) = array_past(req, array, undefined, again);
+            none_pending(req)?;
+            let Some(now) = now else {
+                return Ok(empty);
+            };
+            let key = read_offset(req, now, &Value::null(), false, reading, |_| {})?;
+            (now, key)
         }
-        key?
-    } else {
-        isset_offset(req, offset, constant)?
+        ValueRef::Resource(r) => {
+            let (id, now) = array_past(req, array, |req| resource_offset(req, r.id()), again);
+            none_pending(req)?;
+            let Some(now) = now else {
+                return Ok(empty);
+            };
+            (now, Some(php_heap::Key::Long(id)))
+        }
+        _ => {
+            let key = read_offset(req, array, &offset, constant, reading, |_| {})?;
+            (array, key)
+        }
+    };
+    let Some(key) = key else {
+        return Ok(empty);
     };
     let found = array.heap().get(key).map(Value::of_slot);
     if empty {
@@ -5533,41 +5719,6 @@ pub(crate) fn isset_dim(
         });
     }
     Ok(found.is_some_and(|value| !matches!(value.deref().as_ref(), ValueRef::Null)))
-}
-
-/// `zend_find_array_dim_slow` (`Z/Zend/zend_execute.c:3247`), the key
-/// `zend_find_array_dim_slow` (`Z/Zend/zend_execute.c:3247`), the key
-/// ladder `ZEND_ISSET_ISEMPTY_DIM_OBJ` walks over an array: the same one
-/// [`array_offset`] walks, with `zend_illegal_array_offset_isset`'s
-/// sentence in place of the read's, `Cannot access offset of type %s in
-/// isset or empty`, which is the one arm of the two that differs.
-///
-/// ```php
-/// $a = [1];
-/// try { var_dump(isset($a[[]])); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// try { var_dump(empty($a[new stdClass])); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// Cannot access offset of type array in isset or empty
-/// Cannot access offset of type stdClass in isset or empty
-/// ```
-pub(crate) fn isset_offset(
-    req: &mut Request,
-    offset: &Value,
-    constant: bool,
-) -> Result<php_heap::Key, Thrown> {
-    // `zend_zval_type_name`, which is the class's name for an object
-    // and the type's for everything else.
-    let held = offset.deref();
-    match held.as_ref() {
-        ValueRef::Array(_) | ValueRef::Object(_) => Err(illegal_container_offset(
-            req,
-            "array",
-            &held,
-            DimensionRead::Silent,
-        )),
-        _ => array_offset(req, &held, constant),
-    }
 }
 
 /// `ZEND_UNSET_DIM`'s body over an array (`Z/Zend/zend_vm_def.h:6740`,
@@ -5621,6 +5772,27 @@ pub(crate) fn isset_offset(
 /// }
 /// ```
 ///
+/// A dimension nothing wrote warns and deletes the empty key, and php
+/// holds nothing across the warning, so a handler's write lands in the
+/// table the delete goes on to ([`array_past`]):
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; return true; });
+/// $a = [1, "" => 2]; unset($a[$u]); var_dump($a);
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["a"]["k"] = 1; return true; });
+/// $a = [str_repeat("x", 90), "" => 2]; unset($a[$u]); var_dump(count($a), isset($a[""]));
+/// ```
+/// ```expect
+/// [Undefined variable $u]
+/// array(1) {
+///   [0]=>
+///   int(1)
+/// }
+/// [Undefined variable $u]
+/// int(2)
+/// bool(false)
+/// ```
+///
 /// An array or an object as the offset is php's `TypeError`, whose words
 /// are the unset's own and not a read's.
 ///
@@ -5639,7 +5811,15 @@ pub(crate) fn unset_dim(
     array: PhpArray,
     offset: &Value,
     constant: bool,
+    undefined: impl FnOnce(&mut Request),
+    again: impl FnOnce(&mut Request) -> Option<PhpArray>,
 ) -> Result<(), Thrown> {
+    let del_empty = |req: &mut Request, array: PhpArray| {
+        let empty = req.string(b"")?;
+        req.array_del(array.heap(), php_heap::Key::Str(empty.heap()));
+        req.release(Value::string(empty));
+        Ok(())
+    };
     let a = array.heap();
     let key = match offset.deref().as_ref() {
         ValueRef::Str(s) if constant => php_heap::Key::Str(s.heap()),
@@ -5658,15 +5838,20 @@ pub(crate) fn unset_dim(
             }
             php_heap::Key::Long(n)
         }
-        ValueRef::Resource(r) => php_heap::Key::Long(resource_offset(req, r.id())),
+        ValueRef::Resource(r) => {
+            let (id, now) = array_past(req, array, |req| resource_offset(req, r.id()), again);
+            if let Some(now) = now {
+                req.array_del(now.heap(), php_heap::Key::Long(id));
+            }
+            return Ok(());
+        }
         // `ZSTR_EMPTY_ALLOC()`, the key a `null` offset and a slot
         // nothing wrote both delete; the string is this function's to
         // give back, since `zend_hash_del` takes no owner of its key.
-        ValueRef::Null | ValueRef::Undef => {
-            let empty = req.string(b"")?;
-            req.array_del(a, php_heap::Key::Str(empty.heap()));
-            req.release(Value::string(empty));
-            return Ok(());
+        ValueRef::Null => return del_empty(req, array),
+        ValueRef::Undef => {
+            let ((), now) = array_past(req, array, undefined, again);
+            return now.map_or(Ok(()), |now| del_empty(req, now));
         }
         ValueRef::Array(_) | ValueRef::Object(_) => {
             return Err(illegal_container_offset(

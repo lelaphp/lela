@@ -65,8 +65,8 @@ pub use charset::Charset;
 pub use emalloc::{Emalloc, Pemalloc};
 pub use fresh::FreshString;
 pub use identity::Identity;
+pub(crate) use owner::{Left, adopted, adopted_some};
 pub use owner::{Owner, ResourceView, View};
-pub(crate) use owner::{adopted, adopted_some};
 pub use smart_str::SmartStr;
 
 /// The type of a value, php's `zend_zval_type_name` set, and the one
