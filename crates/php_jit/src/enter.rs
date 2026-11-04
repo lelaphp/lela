@@ -51,7 +51,7 @@ use php_engine::tier::{
 use php_heap::{Arr, HeaderImage, Key, Scalar, Zval, ZvalRef, ZvalType};
 use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
 
-use crate::lower::{self, OperandKinds, Stood, engine_offset};
+use crate::lower::{self, OperandFields, OperandKinds, Stood, engine_offset};
 use crate::table::{Exit, Trace};
 use crate::types::ExitId;
 
@@ -807,7 +807,7 @@ kernels! {
         Find => find(array: u64, key: u64, key_info: u32, constant: u32) -> Zval;
         Lookup => lookup(array: u64, key: u64, key_info: u32, constant: u32) -> Zval = tier::lookup_element;
         Leave => leave(word: u64, type_info: u32) -> u64 = tier::return_entry;
-        Frameless => frameless(place: u32, at: FramelessAt, kinds: OperandKinds, a: u64, a_info: u32, b: u64, b_info: u32, c: u64, c_info: u32) -> Zval = tier::frameless_call;
+        Frameless => frameless(place: u32, at: FramelessAt, kinds: OperandKinds, fields: OperandFields, a: u64, a_info: u32, b: u64, b_info: u32, c: u64, c_info: u32) -> Zval = tier::frameless_call;
         FreeThis => free_this() = tier::free_this;
         MakeRef => make_ref(place: u64) -> u64 = tier::make_ref;
         CallNative => call_native(call: u32) -> Zval = tier::call_native;
@@ -855,8 +855,9 @@ fn handle(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<(), Fatal> {
 /// The `frameless` kernel: the native at `at` of the engine's
 /// frameless table, the `FRAMELESS_ICALL_*` at `on.at` of the frame at
 /// `place`, served over the three operand zvals compiled code read, each
-/// of the kind `kinds` names for it ([`OperandKinds`]), with no
-/// opline read ([`tier::frameless_call`]), as php's code calls the
+/// of the kind `kinds` names for it ([`OperandKinds`]), a temporary
+/// standing in the slot `fields` names for it ([`OperandFields`]), with
+/// no opline read ([`tier::frameless_call`]), as php's code calls the
 /// native's frameless handler; where the interpreter stands after it is
 /// compiled code's, and a throw is the request's pending throwable.
 #[allow(
@@ -869,6 +870,7 @@ fn frameless(
     place: u32,
     at: FramelessAt,
     kinds: OperandKinds,
+    fields: OperandFields,
     a: u64,
     a_info: u32,
     b: u64,
@@ -878,10 +880,11 @@ fn frameless(
 ) -> Result<Zval, Fatal> {
     let frame = at_place(req, on.room, place);
     let [a_kind, b_kind, c_kind] = operand_kinds(kinds)?;
+    let [a_field, b_field, c_field] = fields.fields();
     let operands = [
-        (zval(a, a_info), a_kind),
-        (zval(b, b_info), b_kind),
-        (zval(c, c_info), c_kind),
+        (zval(a, a_info), a_kind, a_field),
+        (zval(b, b_info), b_kind, b_field),
+        (zval(c, c_info), c_kind, c_field),
     ];
     tier::frameless_call(req, frame, at, operands)
 }

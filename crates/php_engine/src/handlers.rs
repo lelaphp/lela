@@ -14159,6 +14159,7 @@ fn frameless_read<const N: usize>(
 ///
 /// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 6
 /// ```
+#[inline] // the handler's and the tier's `frameless` kernel's hot path, each its own copy
 pub(super) fn frameless_served(
     req: &mut Request,
     at: u32,

@@ -1947,7 +1947,7 @@ impl<'a> Emit<'a> {
         let params: &[Type] = match kernel {
             Kernel::Handle => &[I64, I64, I32, I32],
             Kernel::Frameless => &[
-                I64, I64, I32, I32, I32, I32, I64, I32, I64, I32, I64, I32, I64,
+                I64, I64, I32, I32, I32, I32, I64, I64, I32, I64, I32, I64, I32, I64,
             ],
             Kernel::Step | Kernel::CallNative => &[I64, I64, I32, I32, I64],
             Kernel::FreeThis | Kernel::PopCall | Kernel::Interrupt => &[I64, I64, I32],
