@@ -2210,50 +2210,77 @@ fn inline_send(
     a: impl Operand,
     sending: Sending,
 ) -> Option<Edge> {
+    let (call, from) = req.vm_mut().stack.top_and_frame_mut(frame)?;
+    // A send's path goes on to the next opline, the one way it answers.
+    if held_send(from.slots_mut(), call, code, op, a, sending).is_some() {
+        return Some(Ok(advanced()));
+    }
+    // Past the bits the `INIT` wrote, a `_EX`'s parameter is asked of the
+    // declaration, which the request reads: asked with the two frames
+    // given back, and the two lent again only where it says by value.
+    // Everything else [`held_send`] stood aside for stands aside here.
+    let header = call.header();
+    let (info, num_args, function) = (header.info, header.num_args, header.function());
+    let to = (op.op2 as usize).checked_sub(1)?;
+    if sending != Sending::Declared
+        || op.op2_type == OperandKind::Const
+        || !info.building()
+        || to >= num_args as usize
+        || info.sends_simply()
+        || info.sends_by_value(op.op2)
+    {
+        return None;
+    }
+    if req.arg_send_mode(function?, op.op2).0 {
+        return None;
+    }
+    let (call, from) = req.vm_mut().stack.top_and_frame_mut(frame)?;
+    sent_into(from.slots_mut(), call.slots_mut().get_mut(to)?, code, op, a).map(|_| Ok(advanced()))
+}
+
+/// [`inline_send`] over the caller's `slots` and the call being built,
+/// `call`, as the loop holds them ([`inline_path::send_var`] and the
+/// other sends): php's `_SIMPLE` specialisations
+/// (`Z/Zend/zend_vm_def.h:10403-10453`), where a send the compiler
+/// knows goes by value, a `_EX` to a callee its `INIT` found taking
+/// nothing by reference, or a `SEND_FUNC_ARG` whose `CHECK_FUNC_ARG`
+/// cleared `ZEND_CALL_SEND_ARG_BY_REF`, writes the slot with no
+/// parameter read, one test of the call's flags; and a `_EX` by number
+/// whose parameter's by-value bit the `INIT` wrote. `None`, with
+/// nothing touched, for everything else, which the handler serves.
+#[inline(always)] // the handler's fast half, as php's is in the handler
+fn held_send(
+    slots: &mut [Zval],
+    call: &mut exec::HeapFrame,
+    code: &OpArray,
+    op: &Opline,
+    a: impl Operand,
+    sending: Sending,
+) -> Option<Inline> {
     if op.op2_type == OperandKind::Const {
         return None;
     }
     let to = (op.op2 as usize).checked_sub(1)?;
-    let (call, from) = req.vm_mut().stack.top_and_frame_mut(frame)?;
     let header = call.header();
-    // php's `_SIMPLE` specialisations (`Z/Zend/zend_vm_def.h:10403-10453`):
-    // a send the compiler knows goes by value, a `_EX` to a callee its
-    // `INIT` found taking nothing by reference, or a `SEND_FUNC_ARG`
-    // whose `CHECK_FUNC_ARG` cleared `ZEND_CALL_SEND_ARG_BY_REF`, writes
-    // the slot with no parameter read, one test of the call's flags.
+    let info = header.info;
     let simple = match sending {
-        Sending::Value => header.info.building(),
-        Sending::Declared => header.info.sends_simply(),
-        Sending::Checked => header.info.building() && !header.info.send_by_ref(),
+        Sending::Value => info.building(),
+        Sending::Declared => info.sends_simply(),
+        Sending::Checked => info.building() && !info.send_by_ref(),
     };
     if simple {
         debug_assert!(
             to < header.num_args as usize,
             "an argument sent by number past the count its INIT wrote"
         );
-        return sent_into(from.slots_mut(), call.slots_mut().get_mut(to)?, code, op, a);
-    }
-    let (info, num_args, function) = (header.info, header.num_args, header.function());
-    if !info.building() || to >= num_args as usize {
+    } else if sending != Sending::Declared
+        || !info.building()
+        || to >= header.num_args as usize
+        || !info.sends_by_value(op.op2)
+    {
         return None;
     }
-    let asks_declaration = match sending {
-        Sending::Checked if info.send_by_ref() => return None,
-        Sending::Value | Sending::Checked => false,
-        Sending::Declared => !info.sends_by_value(op.op2),
-    };
-    let (call, from) = if asks_declaration {
-        // Past the bits the `INIT` wrote, the declaration says, which the
-        // request reads: asked with the two frames given back, and the
-        // two lent again only where it says by value.
-        if req.arg_send_mode(function?, op.op2).0 {
-            return None;
-        }
-        req.vm_mut().stack.top_and_frame_mut(frame)?
-    } else {
-        (call, from)
-    };
-    sent_into(from.slots_mut(), call.slots_mut().get_mut(to)?, code, op, a)
+    sent_into(slots, call.slots_mut().get_mut(to)?, code, op, a)
 }
 
 /// [`inline_send`]'s write: the operand read off the caller's `slots`
@@ -2266,7 +2293,7 @@ fn sent_into(
     code: &OpArray,
     op: &Opline,
     a: impl Operand,
-) -> Option<Edge> {
+) -> Option<Inline> {
     if !into.is_undef() {
         return None;
     }
@@ -2280,7 +2307,7 @@ fn sent_into(
         _ => return None,
     }
     *into = z;
-    Some(Ok(advanced()))
+    Some(Inline::ADVANCE)
 }
 
 /// Who says an argument [`inline_send`] places goes by value: the
@@ -2813,11 +2840,9 @@ pub(crate) fn check_func_arg<T: Tier>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let ArgAt::Number(number) = ArgAt::of(op)
-        && let Some(call) = req.vm_mut().building_mut()
-        && (call.info.sends_simply() || call.info.sends_by_value(number))
+    if let Some((_, call)) = req.vm_mut().stack.top_mut()
+        && inline_path::check_func_arg(&mut [], call, code, op, at).is_some()
     {
-        call.info.set_send_by_ref(false);
         return Ok(advanced());
     }
     checked_func_arg(req, frame, code, op, at)
@@ -10107,12 +10132,9 @@ pub(crate) fn fetch_dim_func_arg<T: Tier, A: Operand + Default, B: Operand + Def
     op: &Opline,
     at: u32,
 ) -> Edge {
-    // By value, `ZEND_VM_DISPATCH_TO_HANDLER(ZEND_FETCH_DIM_R)`: the
-    // read's inline path, the call's bit read before the array is.
-    if B::default().kind() != OperandKind::Unused
-        && let Some((call, caller)) = req.vm_mut().stack.top_and_frame_mut(frame)
-        && !call.header().info.send_by_ref()
-        && let Some(inline) = inline_path::fetch_dim_r::<A, B>(caller.slots_mut(), code, op, at)
+    if let Some((call, caller)) = req.vm_mut().stack.top_and_frame_mut(frame)
+        && let Some(inline) =
+            inline_path::fetch_dim_func_arg::<A, B>(caller.slots_mut(), call, code, op, at)
     {
         return inlined::<T>(req, frame, code, at, inline);
     }
@@ -27982,6 +28004,7 @@ pub(crate) mod inline_path {
     use php_unit::{OpArray, Opline};
 
     use super::branch::Branch;
+    use super::{ArgAt, Sending, held_send};
     use super::{
         inline_arith, inline_assign, inline_assign_dim_op, inline_assign_op, inline_branch,
         inline_compare, inline_fetch_dim_r, inline_identical, inline_incdec, inline_type_check,
@@ -27997,7 +28020,8 @@ pub(crate) mod inline_path {
 
     #[cfg(not(dispatch = "tailcall"))]
     use crate::api::request::Request;
-    use crate::operand::{ByKind, Operand, Retval, RetvalByte};
+    use crate::exec::HeapFrame;
+    use crate::operand::{ByKind, Operand, Retval, RetvalByte, Var};
     use crate::ops::inline::Arith;
     #[cfg(not(dispatch = "tailcall"))]
     use crate::ops::inline::Binary;
@@ -28354,6 +28378,128 @@ pub(crate) mod inline_path {
         at: u32,
     ) -> Option<Inline> {
         inline_type_check(slots, code, op, at, ByKind(op.op1_type))
+    }
+
+    /// `ZEND_CHECK_FUNC_ARG` by number over the call being built, `call`
+    /// ([`super::check_func_arg`]): where its `INIT` found the callee
+    /// taking nothing by reference or wrote the parameter's by-value
+    /// bit, `ZEND_CALL_SEND_ARG_BY_REF` cleared, php's
+    /// `QUICK_ARG_SHOULD_BE_SENT_BY_REF` test. The frame's slots are not
+    /// read. `None`, with nothing touched, for a name, a call no `INIT`
+    /// wrote the bits of and a number past them.
+    #[inline(always)] // in the loop and in the handler
+    pub(crate) fn check_func_arg(
+        _: &mut [Zval],
+        call: &mut HeapFrame,
+        _: &OpArray,
+        op: &Opline,
+        _: u32,
+    ) -> Option<Inline> {
+        let ArgAt::Number(number) = ArgAt::of(op) else {
+            return None;
+        };
+        let info = &mut call.header_mut().info;
+        if !info.building() || !(info.sends_simply() || info.sends_by_value(number)) {
+            return None;
+        }
+        info.set_send_by_ref(false);
+        Some(Inline::ADVANCE)
+    }
+
+    /// `ZEND_FETCH_DIM_FUNC_ARG` where `CHECK_FUNC_ARG` left the call
+    /// being built, `call`, sending by value
+    /// ([`super::fetch_dim_func_arg`]): `ZEND_FETCH_DIM_R`'s path over
+    /// the frame's slots, the call's bit read before the array is
+    /// (`ZEND_VM_DISPATCH_TO_HANDLER(ZEND_FETCH_DIM_R)`). `None`, with
+    /// nothing touched, by reference, for `[]`, and where the read's
+    /// path stands aside.
+    #[inline(always)] // in the loop and in the handler
+    pub(crate) fn fetch_dim_func_arg<A: Operand + Default, B: Operand + Default>(
+        slots: &mut [Zval],
+        call: &mut HeapFrame,
+        code: &OpArray,
+        op: &Opline,
+        at: u32,
+    ) -> Option<Inline> {
+        if B::default().kind() == OperandKind::Unused || call.header().info.send_by_ref() {
+            return None;
+        }
+        fetch_dim_r::<A, B>(slots, code, op, at)
+    }
+
+    /// `ZEND_SEND_FUNC_ARG` where `CHECK_FUNC_ARG` left the call being
+    /// built, `call`, sending by value: `SEND_VAR`'s body over a `VAR`
+    /// ([`super::send_func_arg`], [`super::held_send`]).
+    #[inline(always)] // in the loop and in the handler
+    pub(crate) fn send_func_arg(
+        slots: &mut [Zval],
+        call: &mut HeapFrame,
+        code: &OpArray,
+        op: &Opline,
+        _: u32,
+    ) -> Option<Inline> {
+        held_send(slots, call, code, op, Var, Sending::Checked)
+    }
+
+    /// `ZEND_SEND_VAL` by number into the call being built, `call`
+    /// ([`super::send_val`], [`super::held_send`]).
+    #[inline(always)] // in the loop and in the handler
+    pub(crate) fn send_val<A: Operand + Default>(
+        slots: &mut [Zval],
+        call: &mut HeapFrame,
+        code: &OpArray,
+        op: &Opline,
+        _: u32,
+    ) -> Option<Inline> {
+        held_send(slots, call, code, op, A::default(), Sending::Value)
+    }
+
+    /// `ZEND_SEND_VAR` by number into the call being built, `call`
+    /// ([`super::send_var`], [`super::held_send`]).
+    #[inline(always)] // in the loop and in the handler
+    pub(crate) fn send_var<A: Operand + Default>(
+        slots: &mut [Zval],
+        call: &mut HeapFrame,
+        code: &OpArray,
+        op: &Opline,
+        _: u32,
+    ) -> Option<Inline> {
+        held_send(slots, call, code, op, A::default(), Sending::Value)
+    }
+
+    /// `ZEND_SEND_VAL_EX` by number into the call being built, `call`,
+    /// where its `INIT` wrote that the parameter takes its argument by
+    /// value ([`super::send_val_ex`], [`super::held_send`]).
+    #[inline(always)] // in the loop and in the handler
+    pub(crate) fn send_val_ex<A: Operand + Default>(
+        slots: &mut [Zval],
+        call: &mut HeapFrame,
+        code: &OpArray,
+        op: &Opline,
+        _: u32,
+    ) -> Option<Inline> {
+        held_send(slots, call, code, op, A::default(), Sending::Declared)
+    }
+
+    /// `ZEND_SEND_VAR_EX` by number into the call being built, `call`,
+    /// where its `INIT` wrote that the parameter takes its argument by
+    /// value ([`super::send_var_ex`], [`super::held_send`]).
+    #[inline(always)] // in the loop and in the handler
+    pub(crate) fn send_var_ex(
+        slots: &mut [Zval],
+        call: &mut HeapFrame,
+        code: &OpArray,
+        op: &Opline,
+        _: u32,
+    ) -> Option<Inline> {
+        held_send(
+            slots,
+            call,
+            code,
+            op,
+            ByKind(op.op1_type),
+            Sending::Declared,
+        )
     }
 
     /// `ZEND_FETCH_DIM_R` of an element an array holds.

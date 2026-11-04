@@ -2391,6 +2391,60 @@ impl Request {
         }
     }
 
+    /// The slots of `frame` and the call being built right above it,
+    /// php's `EX(call)`, from one look at the frame table
+    /// ([`php_heap::VmStack::top_over_mut`]): what the loop's arm takes
+    /// up for an inline path that reads the call, a `SEND_*` that writes
+    /// its argument into the call's slot or a `CHECK_FUNC_ARG` that
+    /// writes `ZEND_CALL_SEND_ARG_BY_REF` on it. No call, and no slots,
+    /// where `frame` is the top itself, stands nowhere, or stands below
+    /// another call still being built, the call built inside another's
+    /// arguments: the path stands aside, and the handler serves the
+    /// opline. The frame is the one below the top, compared as the loop
+    /// holds its number, 32 bits: indexed by it as `usize`, the loop kept
+    /// the widened number in memory across every arm, and `DO_UCALL`
+    /// single-stepped 103 to 108 instructions (#4099).
+    ///
+    /// The sends into a call built inside another's arguments are the
+    /// handler's, and the outer call is taken up again by the first send
+    /// after the inner `DO_*CALL` popped it: the `_FUNC_ARG` trio and the
+    /// `_EX` sends to a callee unknown where the call is compiled
+    /// (declared under a condition), `SEND_VAR` and `SEND_VAL` to one
+    /// known there; a by-reference parameter is bound by the handler:
+    ///
+    /// ```php
+    /// namespace N;
+    /// if (true) {
+    ///     function v($x, $y = 0) { return [$x, $y]; }
+    ///     function r(&$x) { $x .= '!'; }
+    /// }
+    /// function w($x, $y, $z) { return "$x|$y|$z"; }
+    /// function k(array $a, array $b, string $s) {
+    ///     $r = [v(v($a[0]), $a[1]), v($a[1], v($b[0], $a[0])), v($s, $a[0] . 'x')];
+    ///     sort($b['l']); r($a[0]);
+    ///     $r[] = w($s, w(1, $s, $s . 't'), 2.5);
+    ///     return [$r, $a, $b];
+    /// }
+    /// echo json_encode(k(['a', 'b'], ['c', 'l' => [2, 1]], 'q')), "\n";
+    /// ```
+    /// ```expect
+    /// [[[["a",0],"b"],["b",["c","a"]],["q","ax"],"q|1|q|qt|2.5"],["a!","b"],{"0":"c","l":[1,2]}]
+    /// ```
+    #[inline(always)] // in the loop's arms that read the call being built
+    #[cfg(not(dispatch = "tailcall"))]
+    pub(crate) fn slots_and_call(
+        &mut self,
+        frame: FrameRef,
+    ) -> (&mut [Zval], Option<&mut crate::exec::HeapFrame>) {
+        if let Some((top, call, below)) = self.vm.stack.top_over_mut()
+            && top.0.wrapping_sub(1) == frame.0
+            && let Some(caller) = below.last_mut()
+        {
+            return (caller.slots_mut(), Some(call));
+        }
+        (&mut [], None)
+    }
+
     /// The value out of a slot, the slot left `UNDEF`: what the slot
     /// owned is the caller's now, which is how a temporary is consumed.
     pub(crate) fn take_slot(&mut self, frame: FrameRef, at: u32) -> Value {
