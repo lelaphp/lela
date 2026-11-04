@@ -25792,21 +25792,20 @@ fn raise_return<T: Tier>(req: &mut Request, left: Stepped, code: &OpArray, op: &
 /// The inline path of `ZEND_RETURN` (`ZEND_RETURN_SPEC_CONST`, `_TMP`,
 /// `_CV`, `Z/Zend/zend_vm_def.h:4599`, into `zend_leave_helper`'s first
 /// arm), past the return safepoint: the value copied into the caller's
-/// temporary, a temporary's moved, and a frame whose leave destroys
-/// nothing popped, the caller going on past its call
-/// ([`Request::leave_plainly`]). php's arm frees the CVs, which here
-/// gives up strings at most; so no destructor runs and nothing can be
-/// pending after it. `None`, with nothing touched, while an observer is
-/// declared, for a value that is a reference, or a CV's or a constant's
-/// that counts owners, and for a frame [`Request::leave_plainly`]
-/// refuses. Never asked of the serving's entry frame. What it answers
-/// is the edge the leave took, [`Stepped::Popped`] of the caller, or
-/// [`Stepped::Threw`] where a release it served left a throwable.
+/// temporary, a temporary's moved, and the frame popped, its CVs given
+/// up in one pass as php's arm frees them, the caller going on past its
+/// call ([`Request::leave_plainly`]). `None`, with nothing touched,
+/// while an observer is declared, for a value that is a reference, or a
+/// CV's or a constant's that counts owners, and for a frame
+/// [`Request::leave_plainly`] refuses. Never asked of the serving's
+/// entry frame. What it answers is the edge the leave took,
+/// [`Stepped::Popped`] of the caller, or [`Stepped::Threw`] where a
+/// release it served left a throwable.
 ///
 /// A temporary string is moved into the caller's temporary, a string
 /// parameter and a local are given up with the frame, a string nothing
-/// reads and an object a local holds leave by the kernel, the object's
-/// destructor served before the caller goes on:
+/// reads leaves by the kernel, and an object a local holds is destructed
+/// as the frame is left, before the caller goes on:
 ///
 /// ```php
 /// class D { function __destruct() { echo "d\n"; } }
