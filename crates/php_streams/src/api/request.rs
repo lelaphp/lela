@@ -651,15 +651,14 @@ impl Stream {
         req.stream_ref(self)?.wrapper_data()
     }
 
-    /// `stream->wrapper->is_url`: the wrapper that opened the stream is a
-    /// URL wrapper, `http`, `ftp`, `data` or one a program registered
-    /// with `STREAM_IS_URL`, read without asking the stream anything;
-    /// `false` for a stream no wrapper opened, a closed one and one
-    /// inside a call.
+    /// `stream->wrapper->is_url`: whether the wrapper that opened the
+    /// stream is a URL wrapper, `http`, `ftp`, `data` or one a program
+    /// registered with `STREAM_IS_URL`, read without asking the stream
+    /// anything; `None` for a stream no wrapper opened, a closed one and
+    /// one inside a call.
     #[must_use]
-    pub fn is_url(self, req: &Request) -> bool {
-        req.stream_ref(self)
-            .is_some_and(|stream| stream.wrapper.is_url)
+    pub fn is_url(self, req: &Request) -> Option<bool> {
+        req.stream_ref(self)?.wrapper.as_ref().map(|w| w.is_url)
     }
 
     /// `stream->orig_path = estrdup(path)` over a stream an extension
@@ -1423,6 +1422,13 @@ pub trait Streams {
     /// another wrapper's or none's, after the warnings the locate raises.
     fn plain_path(&mut self, path: &[u8]) -> Option<Vec<u8>>;
 
+    /// `php_stream_locate_url_wrapper(path, NULL, 0)->is_url`: whether
+    /// the path's wrapper is a URL wrapper, read after the warning the
+    /// locate raises for a scheme nobody registered; `None` where no
+    /// wrapper serves the path, a URL wrapper under `allow_url_fopen=0`
+    /// among them.
+    fn path_is_url(&mut self, path: &[u8]) -> Option<bool>;
+
     /// One [`WrapperOp`] at `path`, as `unlink`, `rename`, `mkdir`,
     /// `rmdir`, and `touch`, `chmod`, `chown` and `chgrp` over a wrapper
     /// reach it: the wrapper located, php's warning where there is none
@@ -1915,6 +1921,16 @@ impl Streams for Request {
 
     fn plain_path(&mut self, path: &[u8]) -> Option<Vec<u8>> {
         self.plain_local(path)
+    }
+
+    fn path_is_url(&mut self, path: &[u8]) -> Option<bool> {
+        match self
+            .locate_for(path, crate::streams::OpenOptions::default())
+            .0
+        {
+            crate::streams::Located::Nothing => None,
+            found => Some(found.is_url(self)),
+        }
     }
 
     fn wrapper_op(&mut self, path: &[u8], op: WrapperOp<'_>) -> Result<bool, Thrown> {

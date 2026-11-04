@@ -395,8 +395,8 @@ pub(crate) enum MetaData {
 /// prints.
 pub(crate) struct PhpStream {
     ops: Kind,
-    /// `stream->wrapper`.
-    pub(crate) wrapper: OpenedBy,
+    /// `stream->wrapper`: `None` for a stream no wrapper opened.
+    pub(crate) wrapper: Option<OpenedBy>,
     /// `stream->mode`.
     pub(crate) mode: Mode,
     /// `stream->orig_path`: the path `php_stream_open_wrapper_ex` opened,
@@ -434,11 +434,9 @@ pub(crate) struct PhpStream {
     wrapped: Option<Box<Wrapped>>,
 }
 
-/// `stream->wrapper`, the wrapper that opened the stream, as the stream
-/// reads it: nothing for a stream no wrapper opened.
-#[derive(Default)]
+/// The wrapper that opened a stream, as the stream reads it.
 pub(crate) struct OpenedBy {
-    /// `wrapper->wops->label`, empty where no wrapper opened the stream.
+    /// `wrapper->wops->label`.
     label: &'static str,
     /// `wrapper->is_url`.
     pub(crate) is_url: bool,
@@ -670,7 +668,7 @@ impl PhpStream {
     fn new(ops: Box<dyn Ops>, mode: &[u8]) -> PhpStream {
         PhpStream {
             ops: Kind::In(ops),
-            wrapper: OpenedBy::default(),
+            wrapper: None,
             mode: Mode::of(mode),
             orig_path: None,
             position: 0,
@@ -815,7 +813,10 @@ impl PhpStream {
     /// caller's buffer is full: `php_plain_files_wrapper`,
     /// `php_stream_memory_ops` and `php_stream_temp_ops`.
     fn greedy(&self) -> bool {
-        self.wrapper.label == PLAIN_FILES || matches!(self.ops.label(), "MEMORY" | "TEMP")
+        self.wrapper
+            .as_ref()
+            .is_some_and(|w| w.label == PLAIN_FILES)
+            || matches!(self.ops.label(), "MEMORY" | "TEMP")
     }
 
     /// `_php_stream_search_delim` (`Z/main/streams/streams.c:1036`): where
@@ -2671,7 +2672,10 @@ pub(crate) fn temporary_file(
         }),
         b"r+b",
     );
-    stream.wrapper.label = PLAIN_FILES;
+    stream.wrapper = Some(OpenedBy {
+        label: PLAIN_FILES,
+        is_url: false,
+    });
     let stream = req.stream_alloc(stream)?;
     Ok(Some(orig_path_set(req, stream, &orig_path)?))
 }
@@ -4249,7 +4253,24 @@ impl StreamLayer for Request {
     /// that, php's `file:// wrapper is disabled`. A URL wrapper is refused
     /// under `allow_url_fopen=0`, and under `allow_url_include=0` for an
     /// include. Under `REPORT_ERRORS` alone is a refusal a warning; the
-    /// wrapper nobody registered is warned of always.
+    /// wrapper nobody registered is warned of always, as `include` over
+    /// one shows, the path resolved and then opened.
+    ///
+    /// ```php
+    /// var_dump(@include 'nobody://x');
+    /// include 'nobody://x';
+    /// ```
+    /// ```expect
+    /// bool(false)
+    ///
+    /// Warning: include(): Unable to find the wrapper "nobody" - did you forget to enable it when you configured PHP? in %s on line 3
+    ///
+    /// Warning: include(): Unable to find the wrapper "nobody" - did you forget to enable it when you configured PHP? in %s on line 3
+    ///
+    /// Warning: include(nobody://x): Failed to open stream: No such file or directory in %s on line 3
+    ///
+    /// Warning: include(): Failed opening 'nobody://x' for inclusion (include_path='%s') in %s on line 3
+    /// ```
     fn locate_wrapper(&mut self, path: &[u8]) -> (Located, Vec<u8>) {
         self.locate(path, OpenOptions::REPORT)
     }
@@ -4280,9 +4301,7 @@ impl StreamLayer for Request {
                     self.frames().active_function_name(),
                     String::from_utf8_lossy(&scheme[..scheme.len().min(31)])
                 );
-                if options.report {
-                    warning(self, &text);
-                }
+                warning(self, &text);
                 protocol = None;
             }
         }
@@ -4587,7 +4606,7 @@ impl StreamLayer for Request {
             Ok(stream) => {
                 let labelled = self
                     .stream_op(*stream, |op| {
-                        op.with(|s| s.wrapper = OpenedBy { label, is_url });
+                        op.with(|s| s.wrapper = Some(OpenedBy { label, is_url }));
                         op.set_orig_path(to_open)
                     })
                     .transpose();
@@ -4805,6 +4824,7 @@ impl StreamLayer for Request {
             return Ok(None);
         }
         let (wrapper, path_to_open) = self.locate_wrapper(path);
+        let is_url = wrapper.is_url(self);
         let (label, opened) = match wrapper {
             // `php_plain_files_dir_opener` (`Z/main/streams/plain_wrapper.c:1114`):
             // the guard, which warns, then `opendir(3)`.
@@ -4863,7 +4883,7 @@ impl StreamLayer for Request {
         match opened {
             Ok(stream) => {
                 self.stream_with(*stream, |s| {
-                    s.wrapper.label = label;
+                    s.wrapper = Some(OpenedBy { label, is_url });
                     s.flags.no_buffer = true;
                     s.flags.is_dir = true;
                 });
@@ -4911,9 +4931,11 @@ impl StreamLayer for Request {
             if let Some(data) = s.wrapper_data() {
                 entries.push((b"wrapper_data".to_vec(), MetaValue::Value(data)));
             }
-            let label = s.wrapper.label;
-            if !label.is_empty() {
-                entries.push((b"wrapper_type".to_vec(), MetaValue::Str(label.into())));
+            if let Some(wrapper) = &s.wrapper {
+                entries.push((
+                    b"wrapper_type".to_vec(),
+                    MetaValue::Str(wrapper.label.into()),
+                ));
             }
             let unread = i64::try_from(s.writepos - s.readpos).unwrap_or(i64::MAX);
             let seekable = s.ops.seekable() && !s.flags.no_seek;
