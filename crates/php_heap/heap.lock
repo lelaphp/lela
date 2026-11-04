@@ -186,6 +186,7 @@ Heap::object
 Heap::object_clone
 Heap::object_clone_members_into
 Heap::object_clone_with
+Heap::object_laid
 Heap::object_properties
 Heap::object_properties_copy
 Heap::object_properties_extend

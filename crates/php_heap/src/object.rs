@@ -228,6 +228,28 @@ impl Obj {
         slots: u32,
         payload: Option<&'static Payload>,
     ) -> Obj {
+        // SAFETY: the caller's contract.
+        let o = unsafe { Obj::init_header(at, class, slots, payload) };
+        for i in 0..slots {
+            o.write_slot(i, Zval::UNDEF);
+        }
+        o
+    }
+
+    /// The header [`Obj::init`] writes, the slots left as the
+    /// allocation holds them, for the caller to write each before
+    /// anything reads it, as `zend_objects_new` leaves them to
+    /// `object_properties_init`.
+    ///
+    /// # Safety
+    ///
+    /// As [`Obj::init`].
+    unsafe fn init_header(
+        at: NonNull<u8>,
+        class: u32,
+        slots: u32,
+        payload: Option<&'static Payload>,
+    ) -> Obj {
         let header: NonNull<ObjHeader> = at.cast();
         // SAFETY: the caller's allocation is the header and the slots and
         // nothing else holds it.
@@ -242,11 +264,7 @@ impl Obj {
                 properties: Cell::new(None),
             });
         }
-        let o = Obj(header);
-        for i in 0..slots {
-            o.write_slot(i, Zval::UNDEF);
-        }
-        o
+        Obj(header)
     }
 
     /// `spl_object_id()`: the index the store gave.
@@ -827,6 +845,46 @@ impl Heap {
         Ok(o)
     }
 
+    /// `zend_objects_new` and `_object_properties_init` over a class
+    /// whose objects are made of nothing else (`Z/Zend/zend_API.c:1853`):
+    /// an object of `class` with one owner, in the store under its id,
+    /// `custom` bytes beside its slots, and a slot per row of `defaults`,
+    /// the class's `default_properties_table`, each row copied with one
+    /// more owner of what it holds (`ZVAL_COPY_PROP`); an `IS_UNDEF` row,
+    /// a typed property with no default, lays its slot `IS_UNDEF` and
+    /// `IS_PROP_UNINIT`, the bit php's table carries in the row
+    /// (`zend_declare_typed_property`). No slot is written twice.
+    pub fn object_laid(
+        &mut self,
+        class: u32,
+        custom: usize,
+        defaults: &[Zval],
+    ) -> Result<Obj, Fatal> {
+        let slots = u32::try_from(defaults.len()).map_err(|_| {
+            Fatal::error("InternalError: a class of more slots than an object holds")
+        })?;
+        let size = Obj::allocation_size(slots, None, custom)?;
+        let at = self.mm.alloc(size)?;
+        // SAFETY: the allocation is exactly the size `init_header` lays
+        // out and nothing else holds it; every slot is written below
+        // before the object is handed out.
+        let o = unsafe { Obj::init_header(at, class, slots, None) };
+        if let Err(fatal) = self.store.put(&mut self.mm, o) {
+            // SAFETY: the object was allocated just above and is in no
+            // bucket, so nothing names it.
+            unsafe { self.mm.free(at) };
+            return Err(fatal);
+        }
+        for (i, &z) in (0u32..).zip(defaults) {
+            z.addref();
+            o.write_slot(i, z);
+            if z.is_undef() {
+                o.set_slot_bit(i, PropBit::Uninit, true);
+            }
+        }
+        Ok(o)
+    }
+
     /// The object under `id`, while it is live: what the seam is handed
     /// and what `spl_object_id()`'s inverse, a weak reference, reads.
     #[must_use]
@@ -1024,7 +1082,9 @@ impl Heap {
     /// `zend_objects_store_del` (`Z/Zend/zend_objects_API.c:162`):
     /// nothing for an object the cycle collector is already freeing,
     /// whose type it turned to `IS_NULL`; otherwise the destructor
-    /// served once with the count held at one, and, when nothing took an
+    /// served once with the count held at one where the object has one
+    /// to serve ([`HeapHooks::has_destructor`], php's `dtor_obj !=
+    /// zend_objects_destroy_object || ce->destructor`), and, when nothing took an
     /// owner meanwhile, the bucket invalidated, the members and the
     /// payload freed, the object taken out of the root buffer, the id put
     /// on the free list and the bytes given back, all at php's moment
@@ -1033,27 +1093,53 @@ impl Heap {
     /// since, by what its pin let name it, gives its bytes back alone.
     /// The heap is reached through `hooks` across each call up, since
     /// the destructor may grow the store.
+    ///
+    /// An object of a class with no destructor is freed with no call
+    /// up, what it holds released in slot order, a destructor it reaches
+    /// served there, a weak reference told, its id the next object's and
+    /// its bytes and its root entry given back:
+    ///
+    /// ```php
+    /// class D { public $n; function __construct($n) { $this->n = $n; } function __destruct() { echo "d{$this->n},"; } }
+    /// class E extends D {}
+    /// class N { public $in; function __construct($in) { $this->in = $in; } }
+    /// $o = new N(new D(1)); $o = new N(new E(2)); echo "|"; $o = null; echo "\n";
+    /// $w = WeakReference::create($o = new N(3)); $o = null; var_dump($w->get());
+    /// gc_collect_cycles();
+    /// $m = memory_get_usage(); $s = gc_status()['roots'];
+    /// for ($i = 0; $i < 5; $i++) { $x = new N($i); }
+    /// echo spl_object_id($x), " ", memory_get_usage() - $m, " ", gc_status()['roots'] - $s, "\n";
+    /// $x = new N(null); $x->in = new N($x); $x = null; echo gc_collect_cycles(), "\n";
+    /// ```
+    /// ```expect
+    /// d1,|d2,
+    /// NULL
+    /// 3 56 1
+    /// 2
+    /// ```
     pub(crate) fn store_del(hooks: &mut dyn HeapHooks, o: Obj) {
         if o.gc().kind() == ZvalType::Null as u32 {
             return;
         }
         if !o.has_flag(gc::OBJ_DESTRUCTOR_CALLED) {
             o.add_flag(gc::OBJ_DESTRUCTOR_CALLED);
-            o.header().gc.set_refcount(1);
-            hooks.destruct(o);
-            o.delref();
+            if hooks.has_destructor(o) {
+                o.header().gc.set_refcount(1);
+                hooks.destruct(o);
+                o.delref();
+            }
         }
         if o.refcount() != 0 {
             return;
         }
-        if !o.has_flag(gc::OBJ_FREE_CALLED) {
-            let handle = o.id().0;
+        let handle = o.id().0;
+        let freeing = !o.has_flag(gc::OBJ_FREE_CALLED);
+        if freeing {
             hooks.heap().store.invalidate(handle);
             o.add_flag(gc::OBJ_FREE_CALLED);
             o.header().gc.set_refcount(1);
             Heap::object_free(hooks, o);
             o.header().gc.set_refcount(0);
-            hooks.heap().store.add_to_free_list(handle);
         }
         // One freed already and owned since, as the cycle collector
         // leaves an object a callable of its free kept, may have been
@@ -1061,10 +1147,15 @@ impl Heap {
         // `GC_REMOVE_FROM_BUFFER` before every `efree` takes it.
         let heap = hooks.heap();
         heap.gc.remove_from_buffer(crate::collector::Node::Obj(o));
-        // SAFETY: the object came from `object_alloc`, its bucket is
-        // invalid, its members are freed, its id is free and the root
+        // SAFETY: the object came from `object_alloc` or `object_laid`,
+        // its bucket is invalid, its members are freed and the root
         // buffer names it no more, so only a pin names it.
         unsafe { heap.give_back(o.address(), o.pins() > 0) };
+        // `ZEND_OBJECTS_STORE_ADD_TO_FREE_LIST` after the `efree`, as
+        // php's order is; the id of one freed already is on the list.
+        if freeing {
+            heap.store.add_to_free_list(handle);
+        }
     }
 
     /// One pin [`Obj::pin`] took let go. The last one over an object
