@@ -10,8 +10,8 @@ use php_heap::{Bytes, Fatal, Heap, Obj};
 pub use php_unit::decl::NativeParameter;
 use php_unit::decl::{
     Attribute, AttributeArgument, Bare, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
-    ConstDecl, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name, Parameters, PropertyDecl,
-    Type, Visibility,
+    ConstDecl, ConstExpr, EnumBacking, FunctionDecl, List, MethodDecl, Name, Parameters,
+    PropertyDecl, Type, Visibility,
 };
 
 use crate::api::abi::{Cases, Class, ClassRef, NativeNew, ObjectHandlers};
@@ -39,7 +39,26 @@ pub enum Frameless {
     Three(fn(&mut Request, &[Value; 3]) -> Result<Owner<Value>, Thrown>),
 }
 
+/// Every arity a frameless entry serves, in order: what a native's
+/// consecutive arities borrow.
+const ARITIES: &[u32] = &[0, 1, 2, 3];
+
 impl Frameless {
+    /// The arities `entries` serve, in their order, as the declaration
+    /// lists them: consecutive ones, `trim`'s `1, 2`, borrowed
+    /// from [`ARITIES`], so registering the native lays no list; any
+    /// other order a list of its own.
+    fn arities(entries: &[Frameless]) -> List<u32> {
+        let arity = |entry: &Frameless| entry.arity() as usize;
+        if let Some(first) = entries.first().map(arity)
+            && let Some(run) = ARITIES.get(first..first + entries.len())
+            && entries.iter().map(arity).eq(first..first + entries.len())
+        {
+            return List::borrowed(run);
+        }
+        entries.iter().map(|entry| entry.arity()).collect()
+    }
+
     /// The number of operands the entry takes,
     /// `zend_frameless_function_info.num_args`.
     pub(crate) fn arity(self) -> u32 {
@@ -73,7 +92,7 @@ pub struct NativeFunction {
     /// `zend_frameless_function_info`: one entry per arity, whose
     /// arities the declaration lists ([`FunctionDecl::frameless`]).
     pub frameless: &'static [Frameless],
-    pub attributes: &'static [fn() -> Attribute],
+    pub attributes: &'static [Attribute],
     pub entry: Entry,
 }
 
@@ -95,9 +114,10 @@ pub struct NativeMethod {
 /// or enum: static data, php's `zend_class_entry` as `INIT_CLASS_ENTRY`
 /// and a `register_class_*` function fill it, which the engine builds
 /// the declaration model from as the class registers
-/// ([`NativeClass::declaration`]). An enum's cases and its `name` and
-/// `value` properties are its header's, every other member its member
-/// impl's (`abi::Members`).
+/// ([`NativeClass::declaration`]). An enum's cases are its header's, and
+/// its `name` and `value` properties the engine's rows its backing names
+/// ([`enum_properties`]); every other member is its member impl's
+/// (`abi::Members`).
 #[derive(Clone, Copy)]
 pub struct NativeClass {
     /// The PHP name, namespace included.
@@ -105,13 +125,12 @@ pub struct NativeClass {
     pub kind: ClassKind,
     pub flags: ClassFlags,
     pub parent: Option<&'static [u8]>,
-    pub interfaces: &'static [&'static [u8]],
-    pub implementors: &'static [&'static [u8]],
-    pub aliases: &'static [&'static [u8]],
+    pub interfaces: &'static [Name],
+    pub implementors: &'static [Name],
+    pub aliases: &'static [Name],
     pub backing: EnumBacking,
     pub constants: &'static [NativeClassConst],
-    pub properties: &'static [NativeProperty],
-    pub attributes: &'static [fn() -> Attribute],
+    pub attributes: &'static [Attribute],
     /// `size = N` ([`ClassDecl::object_size`]).
     pub object_size: u32,
     /// `beside(..)` ([`ClassDecl::object_beside`]).
@@ -135,7 +154,7 @@ pub struct NativeClassConst {
     pub is_case: bool,
     pub ty: fn() -> Option<Type>,
     pub value: fn() -> ConstExpr,
-    pub attributes: &'static [fn() -> Attribute],
+    pub attributes: &'static [Attribute],
 }
 
 /// A property as the attribute lays it down, php's
@@ -149,7 +168,7 @@ pub struct NativeProperty {
     pub is_virtual: bool,
     pub ty: fn() -> Option<Type>,
     pub default: Option<fn() -> ConstExpr>,
-    pub attributes: &'static [fn() -> Attribute],
+    pub attributes: &'static [Attribute],
 }
 
 /// A constant as `#[php_const]` lays it down, php's
@@ -160,7 +179,7 @@ pub struct NativeConst {
     /// The PHP name, namespace included.
     pub name: &'static [u8],
     pub value: fn() -> ConstExpr,
-    pub attributes: &'static [fn() -> Attribute],
+    pub attributes: &'static [Attribute],
 }
 
 impl NativeConst {
@@ -170,41 +189,32 @@ impl NativeConst {
         ConstDecl {
             name: Name(Bytes::borrowed(self.name)),
             value: (self.value)(),
-            attributes: self
-                .attributes
-                .iter()
-                .map(|attribute| attribute())
-                .collect(),
+            attributes: List::borrowed(self.attributes),
         }
     }
 }
 
 impl NativeClass {
-    /// The declaration model of the header, its own constants and
-    /// properties in it and the member impl's still to add.
+    /// The declaration model of the header, its own constants and an
+    /// enum's properties in it and the member impl's still to add.
     pub(crate) fn declaration(&self) -> ClassDecl {
-        let names =
-            |names: &'static [&'static [u8]]| names.iter().map(|&name| Name(Bytes::borrowed(name)));
         ClassDecl {
             flags: self.flags,
             parent: self.parent.map(|parent| Name(Bytes::borrowed(parent))),
-            interfaces: names(self.interfaces).collect(),
-            implementors: names(self.implementors).collect(),
-            aliases: names(self.aliases).collect(),
+            interfaces: List::borrowed(self.interfaces),
+            implementors: List::borrowed(self.implementors),
+            aliases: List::borrowed(self.aliases),
             backing: self.backing,
             constants: (self.constants.iter())
                 .map(NativeClassConst::declaration)
                 .collect(),
-            properties: (self.properties.iter())
-                .map(NativeProperty::declaration)
-                .collect(),
-            attributes: self
-                .attributes
-                .iter()
-                .map(|attribute| attribute())
-                .collect(),
+            properties: match self.kind {
+                ClassKind::Enum => List::borrowed(enum_properties(self.backing)),
+                _ => List::new(),
+            },
+            attributes: List::borrowed(self.attributes),
             object_size: self.object_size,
-            object_beside: self.object_beside.into(),
+            object_beside: List::borrowed(self.object_beside),
             ..class(self.name, self.kind)
         }
     }
@@ -219,11 +229,7 @@ impl NativeClassConst {
             is_case: self.is_case,
             ty: (self.ty)(),
             value: (self.value)(),
-            attributes: self
-                .attributes
-                .iter()
-                .map(|attribute| attribute())
-                .collect(),
+            attributes: List::borrowed(self.attributes),
             doc_comment: None,
         }
     }
@@ -237,11 +243,7 @@ impl NativeProperty {
             is_readonly: self.is_readonly,
             is_virtual: self.is_virtual,
             default: self.default.map(|default| default()),
-            attributes: self
-                .attributes
-                .iter()
-                .map(|attribute| attribute())
-                .collect(),
+            attributes: List::borrowed(self.attributes),
             ..property(self.name, (self.ty)())
         }
     }
@@ -255,12 +257,8 @@ impl NativeFunction {
         FunctionDecl {
             parameters: Parameters::native(self.parameters),
             return_type: (self.return_type)(),
-            attributes: self
-                .attributes
-                .iter()
-                .map(|attribute| attribute())
-                .collect(),
-            frameless: self.frameless.iter().map(|entry| entry.arity()).collect(),
+            attributes: List::borrowed(self.attributes),
+            frameless: Frameless::arities(self.frameless),
             ..php_unit::decl::native_function(self.name)
         }
     }
@@ -281,6 +279,41 @@ impl NativeMethod {
     }
 }
 
+/// An enum's own properties, as `zend_enum_register_props` declares
+/// them: a pure enum's `name`, a backed one's `name` and `value` of its
+/// backing type, each public, readonly and protected to set
+/// (`Z/Zend/zend_enum.c`). Rows of the binary every enum of the backing
+/// borrows, as php's are one `zend_property_info` per class built from
+/// the same arguments.
+const fn enum_properties(backing: EnumBacking) -> &'static [PropertyDecl] {
+    const fn readonly(name: &'static [u8], ty: Type) -> PropertyDecl {
+        PropertyDecl {
+            name: Name::borrowed(name),
+            visibility: Visibility::Public,
+            set_visibility: Some(Visibility::Protected),
+            is_instance: true,
+            is_readonly: true,
+            is_final: false,
+            is_promoted: false,
+            is_virtual: false,
+            ty: Some(ty),
+            default: None,
+            attributes: List::new(),
+            doc_comment: None,
+            hooks: None,
+        }
+    }
+    const NAME: PropertyDecl = readonly(b"name", Type::String);
+    const PURE: &[PropertyDecl] = &[NAME];
+    const INT: &[PropertyDecl] = &[NAME, readonly(b"value", Type::Int)];
+    const STRING: &[PropertyDecl] = &[NAME, readonly(b"value", Type::String)];
+    match backing {
+        EnumBacking::Pure => PURE,
+        EnumBacking::Int => INT,
+        EnumBacking::String => STRING,
+    }
+}
+
 /// A public instance property named `name` of type `ty`, no default.
 fn property(name: &'static [u8], ty: Option<Type>) -> PropertyDecl {
     PropertyDecl {
@@ -294,7 +327,7 @@ fn property(name: &'static [u8], ty: Option<Type>) -> PropertyDecl {
         is_virtual: false,
         ty,
         default: None,
-        attributes: Vec::new(),
+        attributes: List::new(),
         doc_comment: None,
         hooks: None,
     }
@@ -309,42 +342,34 @@ pub(crate) fn class(name: &'static [u8], kind: ClassKind) -> ClassDecl {
         kind,
         flags: php_unit::decl::ClassFlags::default(),
         parent: None,
-        interfaces: Vec::new(),
-        implementors: Vec::new(),
-        aliases: Vec::new(),
+        interfaces: Vec::new().into(),
+        implementors: Vec::new().into(),
+        aliases: Vec::new().into(),
         traits: Vec::new(),
         adaptations: Vec::new(),
         backing: php_unit::decl::EnumBacking::default(),
         constants: Vec::new(),
-        properties: Vec::new(),
+        properties: List::new(),
         methods: Vec::new(),
-        attributes: Vec::new(),
+        attributes: List::new(),
         doc_comment: None,
         file: Name::default(),
         line: 0,
         end_line: 0,
         object_size: 0,
-        object_beside: Box::default(),
+        object_beside: List::new(),
         attribute_validator: None,
     }
 }
 
 /// A php attribute, `#[\Deprecated(since: "8.1")]`, its arguments as
-/// written, named by the expansion's bytes.
+/// written, laid in the binary whole: named by the expansion's bytes,
+/// its arguments the expansion's own, so the declaration borrows it.
 #[must_use]
-pub fn attribute(
-    name: &'static [u8],
-    arguments: Vec<(Option<&'static [u8]>, ConstExpr)>,
-) -> Attribute {
+pub const fn attribute(name: &'static [u8], arguments: &'static [AttributeArgument]) -> Attribute {
     Attribute {
         name: Name(Bytes::borrowed(name)),
-        arguments: arguments
-            .into_iter()
-            .map(|(name, value)| AttributeArgument {
-                name: name.map(|name| Name(Bytes::borrowed(name))),
-                value,
-            })
-            .collect(),
+        arguments: List::borrowed(arguments),
         line: 0,
         strict: false,
         own_name: true,

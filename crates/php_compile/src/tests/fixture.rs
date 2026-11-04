@@ -87,8 +87,20 @@ pub(super) fn parameter(name: &str, ty: Type, default: Option<ConstExpr>) -> Par
 /// and `join` and `strchr`, aliases php registers with none.
 pub(super) fn frameless_natives() -> Vec<FunctionDecl> {
     let string = |name| parameter(name, Type::String, None);
-    let either = |name| parameter(name, Type::Union(vec![Type::Array, Type::String]), None);
-    let nullable = |name, ty| parameter(name, Type::Nullable(Box::new(ty)), Some(ConstExpr::Null));
+    let either = |name| {
+        parameter(
+            name,
+            Type::Union(vec![Type::Array, Type::String].into()),
+            None,
+        )
+    };
+    let nullable = |name, ty: Type| {
+        parameter(
+            name,
+            Type::Nullable(Box::new(ty).into()),
+            Some(ConstExpr::Null),
+        )
+    };
     let long = |name, value| {
         let radix = php_unit::decl::Radix::Decimal;
         parameter(name, Type::Int, Some(ConstExpr::Long { value, radix }))
@@ -161,7 +173,7 @@ pub(super) fn frameless_natives() -> Vec<FunctionDecl> {
     .into_iter()
     .map(|(name, parameters, frameless)| FunctionDecl {
         parameters: parameters.into(),
-        frameless,
+        frameless: frameless.into(),
         ..php_unit::decl::native_function(name.as_bytes())
     })
     .collect()
@@ -195,7 +207,7 @@ pub(super) fn bundled() -> Options<'static> {
             .map(|(name, value)| ConstDecl {
                 name: Name(name.into()),
                 value: php_unit::decl::ConstExpr::Double(value),
-                attributes: Vec::new(),
+                attributes: Vec::new().into(),
             })
             .collect()
     });

@@ -1221,7 +1221,7 @@ fn resolved(ty: &Type, scope: &Scope<'_>) -> Type {
             Some(parent) => Type::Named(Name(parent.into())),
             None => Type::ParentClass,
         },
-        Type::Nullable(inner) => Type::Nullable(Box::new(resolved(inner, scope))),
+        Type::Nullable(inner) => Type::Nullable(Box::new(resolved(inner, scope)).into()),
         Type::Union(members) => Type::Union(members.iter().map(|m| resolved(m, scope)).collect()),
         Type::Intersection(members) => {
             Type::Intersection(members.iter().map(|m| resolved(m, scope)).collect())

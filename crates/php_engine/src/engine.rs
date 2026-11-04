@@ -778,11 +778,9 @@ pub(crate) struct Shared {
     /// Each native's entry, one row per row of `functions`, the
     /// interception's where an extension intercepts it.
     pub(crate) entries: Vec<Entry>,
-    /// The entries the extensions' interceptions replaced, one row per
-    /// row of `functions`, the nearest first and the native's own last,
-    /// empty where nothing intercepts the native
+    /// The entries the extensions' interceptions replaced
     /// ([`crate::api::abi::ExtensionBuilder::intercept`]).
-    pub(crate) replaced: Vec<Vec<(Option<ExtensionId>, Entry)>>,
+    pub(crate) replaced: Replaced,
     /// The extension whose interception serves each row of `functions`,
     /// the last to intercept it, as which the native's call is served;
     /// none for a native nothing intercepts (#2627). Read where a debug
@@ -845,12 +843,12 @@ pub(crate) struct Shared {
     /// The function each class's own methods are, one row per row of
     /// `classes` ([`method_functions`]), by their index among its
     /// declaration.
-    pub(crate) method_functions: Vec<Box<[Option<Function>]>>,
+    pub(crate) method_functions: LaidRows<Option<Function>>,
     /// Each class's trampolines, one row per row of `classes`
     /// ([`trampoline_tables`]): what its `get_method` synthesises under
-    /// a name its function table has no row for, each under its name,
-    /// found in any case.
-    pub(crate) trampoline_tables: Vec<FunctionTable>,
+    /// a name its function table has no row for, each beside its row of
+    /// `trampolines`, whose name it is found under in any case.
+    pub(crate) trampoline_tables: LaidRows<(Function, u32)>,
     /// Each class's `ce->parent`, one row per row of `classes`, resolved
     /// once as `zend_register_internal_class_ex` links it: a native
     /// class's parent is a native class.
@@ -1320,10 +1318,6 @@ impl std::fmt::Debug for ClassTable<'_> {
     }
 }
 
-/// A class's trampolines by name, any case, which its `get_method`
-/// answers past its function table ([`trampoline_tables`]): one lookup.
-pub(crate) type FunctionTable = NameMap<Folded, Function>;
-
 /// The function each native class's own methods are, by their index
 /// among its declaration: every row of `methods` a class declares,
 /// numbered past the `functions` natives, which a row of a record
@@ -1332,16 +1326,15 @@ fn method_functions(
     classes: &[ClassDecl],
     methods: &[NativeMethod],
     functions: usize,
-) -> Vec<Box<[Option<Function>]>> {
-    let mut tables: Vec<Box<[Option<Function>]>> = Vec::with_capacity(classes.len());
-    tables.extend((classes.iter()).map(|decl| vec![None; decl.methods.len()].into_boxed_slice()));
+) -> LaidRows<Option<Function>> {
+    let mut tables = LaidRows::of_lens(classes.iter().map(|decl| decl.methods.len()), None);
     for (row, method) in (functions..).zip(methods) {
         let MethodAt::Declared { class, at } = method.at else {
             continue;
         };
         let slot = usize::try_from(class.0)
             .ok()
-            .and_then(|class| tables.get_mut(class))
+            .and_then(|class| tables.row_mut(class))
             .and_then(|table| table.get_mut(usize::try_from(at).ok()?));
         if let (Some(slot), Ok(row)) = (slot, u32::try_from(row)) {
             *slot = Some(Function(row));
@@ -1473,51 +1466,104 @@ fn native_placed(
     placed
 }
 
-/// Each native class's trampolines by name: every row of `methods` a
-/// class's `get_method` answers ([`MethodAt::Trampoline`]), under the
-/// name of its row of `trampolines`, the first of a name kept.
+/// Each native class's trampolines: every row of `methods` a class's
+/// `get_method` answers ([`MethodAt::Trampoline`]), in their order,
+/// beside its row of `trampolines`, so the first of a name is the one
+/// found. A class's `get_method` compares the name it is asked for with
+/// each it serves, as `zend_closure_get_method` compares `__invoke`
+/// (`Z/Zend/zend_closures.c:528-535`), and php keeps no table of them.
 fn trampoline_tables(
     classes: usize,
     methods: &[NativeMethod],
     trampolines: &[MethodDecl],
     functions: usize,
-) -> Vec<FunctionTable> {
-    let mut tables = vec![FunctionTable::new(); classes];
-    for (row, method) in (functions..).zip(methods) {
-        let MethodAt::Trampoline { class, at } = method.at else {
-            continue;
-        };
-        let table = tables.get_mut(class.0 as usize);
-        let (Some(decl), Some(table), Ok(row)) =
-            (trampolines.get(at as usize), table, u32::try_from(row))
-        else {
-            continue;
-        };
-        table.add(&decl.function.name.0, Function(row));
+) -> LaidRows<(Function, u32)> {
+    let served = || {
+        (functions..).zip(methods).filter_map(|(row, method)| {
+            let MethodAt::Trampoline { class, at } = method.at else {
+                return None;
+            };
+            trampolines.get(usize::try_from(at).ok()?)?;
+            let row = Function(u32::try_from(row).ok()?);
+            Some((usize::try_from(class.0).ok()?, row, at))
+        })
+    };
+    let mut filled = vec![0usize; classes];
+    for (class, ..) in served() {
+        if let Some(len) = filled.get_mut(class) {
+            *len += 1;
+        }
+    }
+    // Every cell is written below: the rows are as long as what fills them.
+    let mut tables = LaidRows::of_lens(filled.iter().copied(), (Function(0), 0));
+    filled.fill(0);
+    for (class, row, at) in served() {
+        if let Some(next) = filled.get_mut(class)
+            && let Some(cell) = tables.row_mut(class).and_then(|cells| cells.get_mut(*next))
+        {
+            *cell = (row, at);
+            *next += 1;
+        }
     }
     tables
 }
 
-/// Each native's row of [`parameter_classes`], laid one after another
-/// in one table, each native's row from where the one before it ends.
-pub(crate) struct ParameterClasses {
-    /// Where each native's row ends, by its number.
+/// Rows laid one after another in one table, each row from where the
+/// one before it ends: two allocations for the whole table rather than
+/// one per row, as a startup table that php keeps no allocation per row
+/// of is laid.
+pub(crate) struct LaidRows<T> {
+    /// Where each row ends, by its number.
     ends: Box<[u32]>,
-    classes: Box<[Option<ClassId>]>,
+    cells: Box<[T]>,
 }
+
+impl<T> LaidRows<T> {
+    /// The rows of `lens` laid end to end, each cell `cell`.
+    fn of_lens(lens: impl ExactSizeIterator<Item = usize>, cell: T) -> LaidRows<T>
+    where
+        T: Clone,
+    {
+        let mut end = 0usize;
+        let mut ends = Vec::with_capacity(lens.len());
+        ends.extend(lens.map(|len| {
+            end = end.saturating_add(len);
+            u32::try_from(end).unwrap_or(u32::MAX)
+        }));
+        LaidRows {
+            ends: ends.into_boxed_slice(),
+            cells: vec![cell; end].into_boxed_slice(),
+        }
+    }
+
+    /// Where row `at` starts and ends among the cells.
+    fn span(&self, at: usize) -> Option<std::ops::Range<usize>> {
+        let start = at
+            .checked_sub(1)
+            .map_or(Some(&0), |before| self.ends.get(before))?;
+        let end = self.ends.get(at)?;
+        Some(usize::try_from(*start).ok()?..usize::try_from(*end).ok()?)
+    }
+
+    /// Row `at`; none past the last.
+    pub(crate) fn row(&self, at: usize) -> Option<&[T]> {
+        self.cells.get(self.span(at)?)
+    }
+
+    fn row_mut(&mut self, at: usize) -> Option<&mut [T]> {
+        let span = self.span(at)?;
+        self.cells.get_mut(span)
+    }
+}
+
+/// Each native's row of [`parameter_classes`], by its number.
+pub(crate) type ParameterClasses = LaidRows<Option<ClassId>>;
 
 impl ParameterClasses {
     /// The class the parameter at `at` of native `native` holds its
     /// argument to; none past its row.
     pub(crate) fn of(&self, native: usize, at: usize) -> Option<ClassId> {
-        let start = native
-            .checked_sub(1)
-            .map_or(Some(&0), |before| self.ends.get(before))?;
-        let end = self.ends.get(native)?;
-        let row = self
-            .classes
-            .get(usize::try_from(*start).ok()?..usize::try_from(*end).ok()?)?;
-        *row.get(at)?
+        *self.row(native)?.get(at)?
     }
 }
 
@@ -1569,7 +1615,7 @@ fn parameter_classes(
     ends.extend((methods.iter()).map(|method| of(method_decl(method).map(|decl| &decl.function))));
     ParameterClasses {
         ends: ends.into_boxed_slice(),
-        classes: laid.into_boxed_slice(),
+        cells: laid.into_boxed_slice(),
     }
 }
 
@@ -2454,7 +2500,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: &[(&str, Option<&str>)] = &[
+static CORE_INI: &[(&str, Option<&str>)] = &[
     // `main.c`'s table (`Z/main/main.c:792-892`).
     // `highlight.*`, `php_get_highlight_struct`'s colours, which
     // `highlight_string()`, `highlight_file()` and `php -s` read
@@ -3453,26 +3499,31 @@ fn intercept(
     entries: &mut [Entry],
     intercepts: &Keyed<Name, Entry>,
 ) -> Intercepted {
-    let mut replaced = vec![Vec::new(); functions.len()];
+    let mut replaced = Vec::with_capacity(intercepts.iter().count());
     let mut by_row: Vec<Option<ExtensionId>> = vec![None; functions.len()];
     for &(by, ref name, entry) in intercepts.iter() {
         let found = functions
             .iter()
             .position(|decl| decl.name.0.eq_ignore_ascii_case(&name.0));
         if let Some(at) = found
+            && let Ok(function) = u32::try_from(at)
             && let Some(row) = entries.get_mut(at)
-            && let Some(chain) = replaced.get_mut(at)
             && let Some(top) = by_row.get_mut(at)
         {
             // What it replaced is served as the one that supplied it: the
             // interception before, or the native's own extension.
             let beneath = top.or_else(|| modules.get(at).copied().flatten());
-            chain.insert(0, (beneath, std::mem::replace(row, entry)));
+            replaced.push((function, beneath, std::mem::replace(row, entry)));
             *top = Some(by);
         }
     }
+    // Each native's chain together, the last replaced, the nearest,
+    // first: a stable sort keeps the order replaced within a row, which
+    // the reverse then turns.
+    replaced.reverse();
+    replaced.sort_by_key(|&(function, ..)| function);
     Intercepted {
-        replaced,
+        replaced: Replaced(replaced.into_boxed_slice()),
         by: by_row,
     }
 }
@@ -3481,8 +3532,31 @@ fn intercept(
 /// nearest first, each beside the extension it is served as, and the
 /// extension whose interception stands over each.
 struct Intercepted {
-    replaced: Vec<Vec<(Option<ExtensionId>, Entry)>>,
+    replaced: Replaced,
     by: Vec<Option<ExtensionId>>,
+}
+
+/// The entries the extensions' interceptions replaced, in one table:
+/// each intercepted native's chain, the nearest first and the native's
+/// own last, beside the row of `functions` it is of, the rows in order,
+/// as phar and opcache keep each handler they replaced in a static of
+/// their own (`PHAR_G(orig_fopen)`, `orig_file_exists`) and allocate
+/// none; no row for a native nothing intercepts.
+pub(crate) struct Replaced(Box<[(u32, Option<ExtensionId>, Entry)]>);
+
+impl Replaced {
+    /// The entry `beneath` links down the chain of the native at row
+    /// `function`, and the extension it is served as.
+    pub(crate) fn get(
+        &self,
+        function: usize,
+        beneath: usize,
+    ) -> Option<(Option<ExtensionId>, Entry)> {
+        let function = u32::try_from(function).ok()?;
+        let first = self.0.partition_point(|&(row, ..)| row < function);
+        let &(row, by, entry) = self.0.get(first.checked_add(beneath)?)?;
+        (row == function).then_some((by, entry))
+    }
 }
 
 /// Builds an [`Engine`]: the bundle, the tier and the startup ini.
@@ -3799,9 +3873,7 @@ impl EngineBuilder {
             declarations.push(extension.declarations);
         }
         let mut extensions = entries;
-        let core_ini = (CORE_INI.iter())
-            .map(|(n, v)| (n.as_bytes().to_vec(), v.map(|v| v.as_bytes().to_vec())));
-        let mut ini = IniTable::register(core_ini, &extensions);
+        let mut ini = IniTable::register(CORE_INI, &extensions);
         let mut ini_files = self.ini_files;
         let configuration = Configuration::read(
             &self.ini_defaults,
@@ -5064,7 +5136,7 @@ impl Engine {
         let mut start = Start {
             ini: StartupIni {
                 entries: (shared.ini.rows().iter())
-                    .map(|row| (row.name.clone(), row.value.clone()))
+                    .map(|row| (row.name.to_vec(), row.value.as_deref().map(<[u8]>::to_vec)))
                     .collect(),
             },
             host: sapi_name,

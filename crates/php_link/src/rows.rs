@@ -1072,7 +1072,7 @@ mod tests {
         let constant = |name: &str, value| ConstDecl {
             name: Name(name.as_bytes().into()),
             value: ConstExpr::long(value),
-            attributes: Vec::new(),
+            attributes: Vec::new().into(),
         };
         let rows = [
             constant("A", 1),
@@ -1097,7 +1097,7 @@ mod tests {
         let constant = |name: &str| ConstDecl {
             name: Name(name.as_bytes().into()),
             value: ConstExpr::long(0),
-            attributes: Vec::new(),
+            attributes: Vec::new().into(),
         };
         let rows = [constant("a"), constant("B")];
         let mut names: Names<Folded> = Names::over(&rows);

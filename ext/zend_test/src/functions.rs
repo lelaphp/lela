@@ -145,7 +145,7 @@ fn deprecated_alias(function: &mut FunctionDecl, name: &str) {
     alias(function, name);
     function.attributes.push(Attribute {
         name: Name(b"Deprecated".as_slice().into()),
-        arguments: Vec::new(),
+        arguments: Vec::new().into(),
         line: 0,
         strict: false,
         own_name: true,
@@ -168,10 +168,13 @@ pub(crate) fn lorem_ipsum(indent: usize, since: &str) -> Box<[u8]> {
 /// `gen_stub.php` cannot write, laid on by hand.
 pub(crate) fn dnf_type() -> Type {
     let named = |name: &[u8]| Type::Named(Name(name.into()));
-    Type::Union(vec![
-        named(b"Iterator"),
-        Type::Intersection(vec![named(b"Traversable"), named(b"Countable")]),
-    ])
+    Type::Union(
+        vec![
+            named(b"Iterator"),
+            Type::Intersection(vec![named(b"Traversable"), named(b"Countable")].into()),
+        ]
+        .into(),
+    )
 }
 
 fn dnf(function: &mut FunctionDecl) {

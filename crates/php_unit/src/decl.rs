@@ -18,6 +18,18 @@
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
 pub struct Name(pub php_heap::Bytes);
 
+impl Name {
+    /// `bytes`, the binary's, named without a copy: what a native's
+    /// entry, a `const`, spells a name with.
+    #[must_use]
+    pub const fn borrowed(bytes: &'static [u8]) -> Name {
+        Name(php_heap::Bytes::borrowed(bytes))
+    }
+}
+
+mod list;
+pub use list::{Boxed, List};
+
 /// A name to look up a class or a function by: past the one leading
 /// `\` that marks a written name fully qualified, which
 /// `zend_lookup_class_ex` and `zend_init_dynamic_call_string` drop, and
@@ -293,7 +305,10 @@ pub enum EnumBacking {
 
 /// A declared type: scalar names, class names, `?T`, unions,
 /// intersections and DNF, as `zend_type` holds them. The tentative bit of
-/// a native method's return lives on the method (design §4.7).
+/// a native method's return lives on the method (design §4.7). A
+/// native's is laid in its binary whole, its members and its `?T`'s
+/// inner type borrowed ([`List::borrowed`], [`Boxed::borrowed`]), as
+/// php's `zend_internal_arg_info` points a `zend_type` at static data.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Mixed,
@@ -316,9 +331,9 @@ pub enum Type {
     SelfClass,
     ParentClass,
     Named(Name),
-    Nullable(Box<Type>),
-    Union(Vec<Type>),
-    Intersection(Vec<Type>),
+    Nullable(Boxed<Type>),
+    Union(List<Type>),
+    Intersection(List<Type>),
 }
 
 impl Type {
@@ -498,7 +513,9 @@ pub enum ConstExpr {
         radix: Radix,
     },
     Double(f64),
-    Str(Box<[u8]>),
+    /// A string, its bytes borrowed from a native's entry where the
+    /// entry spells it ([`ConstExpr::string`]).
+    Str(php_heap::Bytes),
     /// A constant by its name, php's `ZEND_AST_CONSTANT`.
     Constant {
         name: ConstantName,
@@ -548,8 +565,8 @@ pub enum ConstExpr {
     /// whose right side is evaluated only where the left leaves it to.
     Binary {
         op: Name,
-        lhs: Box<ConstExpr>,
-        rhs: Box<ConstExpr>,
+        lhs: Boxed<ConstExpr>,
+        rhs: Boxed<ConstExpr>,
         line: u32,
     },
     /// `[key => value, ...]`, php's `ZEND_AST_ARRAY`, whose line is its
@@ -658,6 +675,30 @@ pub enum ConstExpr {
 }
 
 impl ConstExpr {
+    /// A string a native's entry spells, its bytes the binary's and no
+    /// copy: what an attribute's argument and a string case's value
+    /// are laid with.
+    #[must_use]
+    pub const fn string(bytes: &'static [u8]) -> ConstExpr {
+        ConstExpr::Str(php_heap::Bytes::borrowed(bytes))
+    }
+
+    /// `lhs op rhs` a native's entry spells, `Attribute::TARGET_METHOD |
+    /// Attribute::TARGET_FUNCTION`, laid in the binary whole.
+    #[must_use]
+    pub const fn binary(
+        op: &'static [u8],
+        lhs: &'static ConstExpr,
+        rhs: &'static ConstExpr,
+    ) -> ConstExpr {
+        ConstExpr::Binary {
+            op: Name::borrowed(op),
+            lhs: Boxed::borrowed(lhs),
+            rhs: Boxed::borrowed(rhs),
+            line: 0,
+        }
+    }
+
     /// An integer written in decimal, as a program's integers are
     /// folded and as most of the stubs write them.
     #[must_use]
@@ -866,7 +907,7 @@ pub struct AttributeArgument {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attribute {
     pub name: Name,
-    pub arguments: Vec<AttributeArgument>,
+    pub arguments: List<AttributeArgument>,
     pub line: u32,
     pub strict: bool,
     pub own_name: bool,
@@ -927,7 +968,7 @@ pub struct Parameter {
     pub promoted: bool,
     pub variadic: bool,
     pub default: ParameterDefault,
-    pub attributes: Vec<Attribute>,
+    pub attributes: List<Attribute>,
 }
 
 impl Parameter {
@@ -957,7 +998,7 @@ pub struct NativeParameter {
     pub passed: bool,
     /// The `#[php(default = ..)]` expression.
     pub default: Option<fn() -> ConstExpr>,
-    pub attributes: &'static [fn() -> Attribute],
+    pub attributes: &'static [Attribute],
 }
 
 impl NativeParameter {
@@ -976,9 +1017,7 @@ impl NativeParameter {
             promoted: false,
             variadic: self.variadic,
             default,
-            attributes: (self.attributes.iter())
-                .map(|attribute| attribute())
-                .collect(),
+            attributes: List::borrowed(self.attributes),
         }
     }
 }
@@ -1150,12 +1189,12 @@ pub struct FunctionDecl {
     pub return_type: Option<Type>,
     pub returns_by_ref: bool,
     pub is_generator: bool,
-    pub attributes: Vec<Attribute>,
+    pub attributes: List<Attribute>,
     pub doc_comment: Option<Box<[u8]>>,
     pub file: Name,
     pub line: u32,
     pub end_line: u32,
-    pub frameless: Vec<u32>,
+    pub frameless: List<u32>,
 }
 
 /// A native's declaration named `name`, its entry's bytes and no copy:
@@ -1171,12 +1210,12 @@ pub fn native_function(name: &'static [u8]) -> FunctionDecl {
         return_type: None,
         returns_by_ref: false,
         is_generator: false,
-        attributes: Vec::new(),
+        attributes: List::new(),
         doc_comment: None,
         file: Name::default(),
         line: 0,
         end_line: 0,
-        frameless: Vec::new(),
+        frameless: List::new(),
     }
 }
 
@@ -1191,7 +1230,7 @@ pub fn parameter(name: &[u8], ty: Option<Type>) -> Parameter {
         promoted: false,
         variadic: false,
         default: ParameterDefault::None,
-        attributes: Vec::new(),
+        attributes: List::new(),
     }
 }
 
@@ -1260,7 +1299,7 @@ pub struct PropertyDecl {
     pub is_virtual: bool,
     pub ty: Option<Type>,
     pub default: Option<ConstExpr>,
-    pub attributes: Vec<Attribute>,
+    pub attributes: List<Attribute>,
     pub doc_comment: Option<Box<[u8]>>,
     pub hooks: Option<Box<PropertyHooks>>,
 }
@@ -1328,7 +1367,7 @@ pub struct ClassConstDecl {
     pub is_case: bool,
     pub ty: Option<Type>,
     pub value: ConstExpr,
-    pub attributes: Vec<Attribute>,
+    pub attributes: List<Attribute>,
     pub doc_comment: Option<Box<[u8]>>,
 }
 
@@ -1398,16 +1437,16 @@ pub struct ClassDecl {
     pub kind: ClassKind,
     pub flags: ClassFlags,
     pub parent: Option<Name>,
-    pub interfaces: Vec<Name>,
-    pub implementors: Vec<Name>,
-    pub aliases: Vec<Name>,
+    pub interfaces: List<Name>,
+    pub implementors: List<Name>,
+    pub aliases: List<Name>,
     pub traits: Vec<Name>,
     pub adaptations: Vec<TraitAdaptation>,
     pub backing: EnumBacking,
     pub constants: Vec<ClassConstDecl>,
-    pub properties: Vec<PropertyDecl>,
+    pub properties: List<PropertyDecl>,
     pub methods: Vec<MethodDecl>,
-    pub attributes: Vec<Attribute>,
+    pub attributes: List<Attribute>,
     pub doc_comment: Option<Box<[u8]>>,
     pub file: Name,
     pub line: u32,
@@ -1426,7 +1465,7 @@ pub struct ClassDecl {
     /// each the size php asks for (a random engine's state, a
     /// connection's `pdo_dbh_t`), given back as the object is freed
     /// (design §5.13). Empty where it makes none.
-    pub object_beside: Box<[u32]>,
+    pub object_beside: List<u32>,
     /// The validator an extension's attribute class declares,
     /// `zend_internal_attribute.validator` as its `MINIT` sets it after
     /// `zend_mark_internal_attribute`; none on every other class, a
@@ -1449,7 +1488,7 @@ pub struct ClassDecl {
 pub struct ConstDecl {
     pub name: Name,
     pub value: ConstExpr,
-    pub attributes: Vec<Attribute>,
+    pub attributes: List<Attribute>,
 }
 
 /// An ini entry an extension declares: its default and where it may be

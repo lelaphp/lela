@@ -562,8 +562,10 @@ impl Natives {
         let mut class = header.declaration();
         class.constants.reserve_exact(self.constants.len());
         (class.constants).extend(self.constants.iter().map(NativeClassConst::declaration));
-        (class.properties).reserve_exact(self.properties.len());
-        (class.properties).extend(self.properties.iter().map(NativeProperty::declaration));
+        if !self.properties.is_empty() {
+            (class.properties).reserve_exact(self.properties.len());
+            (class.properties).extend(self.properties.iter().map(NativeProperty::declaration));
+        }
         if let Some(reshape) = reshape {
             let seen = methods.iter().map(|(method, _)| method.clone()).collect();
             let header_methods = std::mem::replace(&mut class.methods, seen);
@@ -573,8 +575,10 @@ impl Natives {
                 *method = reshaped;
             }
         }
-        for property in &mut class.properties {
-            declared_property(property);
+        if class.properties.iter().any(protected_to_set) {
+            for property in &mut class.properties {
+                declared_property(property);
+            }
         }
         class
     }
@@ -2127,13 +2131,15 @@ impl ExtensionBuilder {
     /// its `MINIT` in bundle order, then each Zend extension's, so
     /// opcache's handler is saved over phar's whatever their bundle
     /// order. A name no extension declares, or one `disable_functions`
-    /// took out, is intercepted by nothing.
+    /// took out, is intercepted by nothing. `name` is the binary's,
+    /// pointed at and not copied, as phar spells the natives it replaces
+    /// in its own source.
     #[must_use]
-    pub fn intercept(mut self, name: &[u8], entry: Entry) -> ExtensionBuilder {
+    pub fn intercept(mut self, name: &'static [u8], entry: Entry) -> ExtensionBuilder {
         self.entry
             .supplies
             .intercepts
-            .push((Name(name.into()), entry));
+            .push((Name(php_heap::Bytes::borrowed(name)), entry));
         self
     }
 
@@ -2269,12 +2275,18 @@ impl ExtensionBuilder {
 /// internal class (`Z/Zend/zend_API.c:4517`): a public readonly property
 /// with no set visibility of its own is `protected(set)`.
 fn declared_property(property: &mut PropertyDecl) {
-    if property.is_readonly
-        && property.visibility == Visibility::Public
-        && property.set_visibility.is_none()
-    {
+    if protected_to_set(property) {
         property.set_visibility = Some(Visibility::Protected);
     }
+}
+
+/// Whether [`declared_property`] changes `property`: a public readonly
+/// one with no set visibility of its own, which a borrowed list is
+/// copied for and no other.
+fn protected_to_set(property: &PropertyDecl) -> bool {
+    property.is_readonly
+        && property.visibility == Visibility::Public
+        && property.set_visibility.is_none()
 }
 
 /// A validated callable: a function name, a `[$object, 'method']` pair,

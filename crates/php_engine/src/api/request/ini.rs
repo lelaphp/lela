@@ -546,16 +546,20 @@ impl Request {
     /// the request's where it changed the entry, else the master value,
     /// found by one look-up of the engine's table; nothing where php has
     /// no such entry.
-    fn ini_in_force(&self, name: &[u8]) -> Option<(&Option<Vec<u8>>, Option<PhpString>)> {
+    fn ini_in_force(&self, name: &[u8]) -> Option<(Option<&[u8]>, Option<PhpString>)> {
         self.ini_in_force_at(self.shared.ini.at(name)?)
     }
 
     /// [`Request::ini_in_force`] of the entry at `at`, found by its place
     /// and not by its name.
-    fn ini_in_force_at(&self, at: DirectiveAt) -> Option<(&Option<Vec<u8>>, Option<PhpString>)> {
+    fn ini_in_force_at(&self, at: DirectiveAt) -> Option<(Option<&[u8]>, Option<PhpString>)> {
         match self.ini.changed(at) {
-            Some((_, value, string)) => Some((value, *string)),
-            None => self.shared.ini.row(at).map(|row| (&row.value, None)),
+            Some((_, value, string)) => Some((value.as_deref(), *string)),
+            None => self
+                .shared
+                .ini
+                .row(at)
+                .map(|row| (row.value.as_deref(), None)),
         }
     }
 
@@ -579,9 +583,7 @@ impl Request {
     /// ```
     pub(crate) fn include_path(&self) -> &[u8] {
         let value = (self.shared.include_path).and_then(|at| self.ini_in_force_at(at));
-        value
-            .and_then(|(value, _)| value.as_deref())
-            .unwrap_or_default()
+        value.and_then(|(value, _)| value).unwrap_or_default()
     }
 
     /// `ZVAL_SET_INI_STR` over the value in force of the entry `name`,
@@ -594,7 +596,7 @@ impl Request {
         let Some((value, string)) = self.ini_in_force(name) else {
             return Ok(None);
         };
-        let bytes = value.as_deref().unwrap_or_default();
+        let bytes = value.unwrap_or_default();
         if let Some(string) = string.or_else(|| self.held_name(bytes)) {
             return Ok(Some(Owner::take(self, string)));
         }
@@ -675,7 +677,7 @@ impl Request {
             let Some(row) = shared.ini.row(at) else {
                 continue;
             };
-            let (name, original) = (row.name.as_slice(), row.value.as_deref());
+            let (name, original) = (&*row.name, row.value.as_deref());
             // A core handler that reads a quantity reads its startup
             // value again, and warns again where the rule interprets it.
             if let Some(reading) = CoreQuantity::of(name) {
@@ -1065,7 +1067,7 @@ impl Request {
         let decl = declared.cloned().unwrap_or_else(|| {
             let (user, per_dir, system) = Request::ini_modifiable(&row.name);
             let default = row.value.as_deref().map(Into::into);
-            let name = Name(row.name.as_slice().into());
+            let name = Name(row.name.clone());
             IniDecl {
                 name,
                 default,
@@ -1347,7 +1349,7 @@ impl<'r> Ini<&'r Request> {
     #[must_use]
     pub fn get(self, name: &[u8]) -> Option<&'r [u8]> {
         let (value, _) = self.0.ini_in_force(name)?;
-        Some(value.as_deref().unwrap_or_default())
+        Some(value.unwrap_or_default())
     }
 
     /// `INI_STR`, `zend_ini_string_ex`: the entry's value in force as php
@@ -1368,7 +1370,7 @@ impl<'r> Ini<&'r Request> {
     /// ```
     #[must_use]
     pub fn value(self, name: &[u8]) -> Option<&'r [u8]> {
-        self.0.ini_in_force(name)?.0.as_deref()
+        self.0.ini_in_force(name)?.0
     }
 
     /// `EG(ini_directives)`, what `ini_get_all()` walks: the engine's

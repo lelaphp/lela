@@ -807,9 +807,9 @@ fn constant<T: IntoConst>(name: Name, value: &T) -> ClassConstDecl {
         visibility: Visibility::Public,
         is_final: false,
         is_case: false,
-        ty: T::declared(),
+        ty: T::DECLARED,
         value: value.value(),
-        attributes: Vec::new(),
+        attributes: Vec::new().into(),
         doc_comment: None,
     }
 }

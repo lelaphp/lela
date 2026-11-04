@@ -7,16 +7,22 @@
 //! ([`crate::engine::Engine::alter_master_ini`]); immutable and shared
 //! by every request after (design §3.4).
 
+use php_heap::Bytes;
 use php_link::{Exact, Named, Names};
 
 use crate::api::abi::{ExtensionEntry, IniHandler};
 use crate::api::request::ExtensionId;
 
 /// One entry, php's `zend_ini_entry` as every request starts with it.
+/// A core entry's name and default are the core table's, borrowed and
+/// not copied, as `zend_register_ini_entries_ex` interns a `const char *`
+/// of a static `zend_ini_entry_def`, which opcache then moves into the
+/// one buffer every interned string shares; an extension's are copied
+/// from its declaration, and a value the host set is the host's.
 pub(crate) struct Directive {
-    pub(crate) name: Vec<u8>,
+    pub(crate) name: Bytes,
     /// The master value, `None` where it has none (php's `NULL`).
-    pub(crate) value: Option<Vec<u8>>,
+    pub(crate) value: Option<Bytes>,
     /// The declaration of an extension's entry: the extension,
     /// `module_number`, and the entry's place among its declarations;
     /// `None` for an entry of the core table.
@@ -49,23 +55,24 @@ impl IniTable {
     /// `Core`, each entry's `on_modify` the first extension's that gave
     /// one.
     pub(crate) fn register(
-        core: impl Iterator<Item = (Vec<u8>, Option<Vec<u8>>)>,
+        core: &'static [(&'static str, Option<&'static str>)],
         extensions: &[ExtensionEntry],
     ) -> IniTable {
         let numbered = || (1..).map(ExtensionId::at).zip(extensions);
+        let borrowed = |text: &'static str| Bytes::borrowed(text.as_bytes());
+        let core = (core.iter()).map(|&(name, value)| (borrowed(name), value.map(borrowed), None));
         let declared = numbered().flat_map(|(extension, entry)| {
             (entry.ini.iter().enumerate()).map(move |(at, decl)| {
-                let value = decl.default.as_deref().map(<[u8]>::to_vec);
-                (decl.name.0.to_vec(), value, Some((extension, at)))
+                let value = decl.default.as_deref().map(Bytes::from);
+                (decl.name.0.clone(), value, Some((extension, at)))
             })
         });
         // Laid at the length it ends at: Core's rows, then each
         // extension's.
-        let count = core.size_hint().0 + extensions.iter().map(|e| e.ini.len()).sum::<usize>();
+        let count = core.len() + extensions.iter().map(|e| e.ini.len()).sum::<usize>();
         let mut rows: Vec<Directive> = Vec::with_capacity(count);
         rows.extend(
-            (core.map(|(name, value)| (name, value, None)))
-                .chain(declared)
+            core.chain(declared)
                 .map(|(name, value, declared)| Directive {
                     name,
                     value,
@@ -125,7 +132,7 @@ impl IniTable {
     /// `zend_alter_ini_entry` finds none, so the names are filed once.
     pub(crate) fn set(&mut self, name: &[u8], value: Option<Vec<u8>>) {
         if let Some(row) = self.find_mut(name) {
-            row.value = value;
+            row.value = value.map(Bytes::from);
         }
     }
 }

@@ -124,7 +124,7 @@ impl Emit<'_> {
             return Err(self.compile_error("never can only be used as a standalone type"));
         }
         let ty = if marked_nullable {
-            Type::Nullable(Box::new(ty))
+            Type::Nullable(Box::new(ty).into())
         } else {
             ty
         };
@@ -293,7 +293,7 @@ impl Emit<'_> {
             }
             out.push(single);
         }
-        let ty = Type::Union(out);
+        let ty = Type::Union(out.into());
         if mask & MAY_BE_OBJECT != 0
             && ((!has_only_iterable_class && is_complex(&ty)) || mask & MAY_BE_STATIC != 0)
         {
@@ -369,7 +369,7 @@ impl Emit<'_> {
             self.list_redundant_by_single(&out, &single)?;
             out.push(single);
         }
-        Ok(Type::Intersection(out))
+        Ok(Type::Intersection(out.into()))
     }
 
     /// `zend_compile_single_typename`: `static`, `array` and `callable`,
@@ -734,7 +734,7 @@ pub(super) fn of_mask(mask: u32) -> Type {
     }
     match <[Type; 1]>::try_from(members) {
         Ok([single]) => single,
-        Err(members) => Type::Union(members),
+        Err(members) => Type::Union(members.into()),
     }
 }
 

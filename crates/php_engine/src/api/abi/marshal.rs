@@ -18,7 +18,7 @@ use std::marker::PhantomData;
 
 use php_heap::{Bytes, Slot, ZvalSpan, ZvalType};
 
-use php_unit::decl::{Bare, ConstExpr, Name, Type};
+use php_unit::decl::{Bare, Boxed, ConstExpr, List, Name, Type};
 
 use crate::api::abi::Callable;
 use crate::api::abi::class::Class;
@@ -110,9 +110,9 @@ fn held_as<T: FromArgument>(req: &mut Request, value: Value, position: u32) -> R
     if admits(T::MASK, &value) {
         return T::from_value(req, value);
     }
-    // The type the declaration carries, `T::declared()`, which the
+    // The type the declaration carries, `T::DECLARED`, which the
     // native's arginfo is built from: not a type spelled again.
-    let held = match T::declared() {
+    let held = match T::DECLARED {
         Some(ty) => coerce::coerce_param(req, &value, &ty, position)?,
         None => value,
     };
@@ -150,7 +150,7 @@ pub trait FromArgument: Sized {
     /// nullable read; zero for a class and for no type.
     const MASK: u32;
     /// The declared type; `None` declares no type.
-    fn declared() -> Option<Type>;
+    const DECLARED: Option<Type>;
     /// Whether a held value is this type, which picks a union's arm.
     fn accepts(value: &Value) -> bool;
     /// The value the engine held to the declaration, as `Self`.
@@ -209,7 +209,13 @@ pub trait FromArgument: Sized {
         {
             return Self::from_value(req, value);
         }
-        let value = default_value(req, absent, scope, position, (Self::MASK, Self::declared))?;
+        let value = default_value(
+            req,
+            absent,
+            scope,
+            position,
+            (Self::MASK, || Self::DECLARED),
+        )?;
         Self::from_value(req, value)
     }
 }
@@ -321,9 +327,7 @@ fn held_default(
 /// `mixed`: the value as passed.
 impl FromArgument for Value {
     const MASK: u32 = bits::ANY;
-    fn declared() -> Option<Type> {
-        Some(Type::Mixed)
-    }
+    const DECLARED: Option<Type> = Some(Type::Mixed);
     fn accepts(_: &Value) -> bool {
         true
     }
@@ -336,9 +340,7 @@ macro_rules! scalar {
     ($t:ty, $ty:expr, $mask:expr, $read:ident, $what:literal) => {
         impl FromArgument for $t {
             const MASK: u32 = $mask;
-            fn declared() -> Option<Type> {
-                Some($ty)
-            }
+            const DECLARED: Option<Type> = Some($ty);
             fn accepts(value: &Value) -> bool {
                 value.$read().is_some()
             }
@@ -369,9 +371,7 @@ scalar!(PhpObject, Type::Object, bits::OBJECT, as_object, "object");
 /// type resource, X given".
 impl FromArgument for Resource {
     const MASK: u32 = bits::RESOURCE;
-    fn declared() -> Option<Type> {
-        None
-    }
+    const DECLARED: Option<Type> = None;
     fn accepts(value: &Value) -> bool {
         matches!(value.as_ref(), ValueRef::Resource(_))
     }
@@ -405,9 +405,7 @@ pub struct Path(pub PhpString);
 
 impl FromArgument for Path {
     const MASK: u32 = bits::STRING;
-    fn declared() -> Option<Type> {
-        Some(Type::String)
-    }
+    const DECLARED: Option<Type> = Some(Type::String);
     fn accepts(value: &Value) -> bool {
         PhpString::accepts(value)
     }
@@ -428,9 +426,7 @@ impl FromArgument for Path {
 /// `callable`, held as `Z_PARAM_FUNC` holds it.
 impl FromArgument for Callable {
     const MASK: u32 = bits::CALLABLE;
-    fn declared() -> Option<Type> {
-        Some(Type::Callable)
-    }
+    const DECLARED: Option<Type> = Some(Type::Callable);
     fn accepts(_: &Value) -> bool {
         true
     }
@@ -442,24 +438,162 @@ impl FromArgument for Callable {
     }
 }
 
-/// `inner` with `null` beside it: `T|null` over a union, `?T` else.
-fn or_null(inner: Type) -> Type {
-    match inner {
-        Type::Union(mut members) => {
-            members.push(Type::Null);
-            Type::Union(members)
-        }
-        other => Type::Nullable(Box::new(other)),
+/// A native's declared type as a `const` reads it: a parameter's, a
+/// return's, or a union's `false` or `null` arm, as php's
+/// `zend_internal_arg_info` holds a `zend_type` in static data.
+trait Declared {
+    const DECLARED: Option<Type>;
+}
+
+/// A parameter type's declaration.
+struct Argument<T>(PhantomData<fn() -> T>);
+
+impl<T: FromArgument> Declared for Argument<T> {
+    const DECLARED: Option<Type> = T::DECLARED;
+}
+
+/// A return type's declaration.
+struct Returned<T>(PhantomData<fn() -> T>);
+
+impl<T: IntoReturn> Declared for Returned<T> {
+    const DECLARED: Option<Type> = T::DECLARED;
+}
+
+/// `false`, the arm [`OrFalse`] adds.
+struct FalseArm;
+
+impl Declared for FalseArm {
+    const DECLARED: Option<Type> = Some(Type::False);
+}
+
+/// `null`, the arm a nullable union adds.
+struct NullArm;
+
+impl Declared for NullArm {
+    const DECLARED: Option<Type> = Some(Type::Null);
+}
+
+/// The widest union a native declares, `array|string|int|float|bool|null`
+/// and a class or two beside it; a wider one is refused as the binary is
+/// built.
+const WIDEST: usize = 8;
+
+/// `ty` again, over the same borrowed parts: what a `const` copies a
+/// member by, as no `Clone` runs in one. A `const` lays no owned part,
+/// so the arms that would copy one, `mixed` in its place, are never
+/// taken.
+const fn again(ty: &Type) -> Type {
+    match ty {
+        Type::Mixed => Type::Mixed,
+        Type::Void => Type::Void,
+        Type::Never => Type::Never,
+        Type::Null => Type::Null,
+        Type::Bool => Type::Bool,
+        Type::False => Type::False,
+        Type::True => Type::True,
+        Type::Int => Type::Int,
+        Type::Float => Type::Float,
+        Type::String => Type::String,
+        Type::Array => Type::Array,
+        Type::Object => Type::Object,
+        Type::Iterable => Type::Iterable,
+        Type::Callable => Type::Callable,
+        Type::CalledClass => Type::CalledClass,
+        Type::SelfClass => Type::SelfClass,
+        Type::ParentClass => Type::ParentClass,
+        Type::Named(Name(bytes)) => match bytes.as_borrowed() {
+            Some(bytes) => Type::Named(Name(Bytes::borrowed(bytes))),
+            None => Type::Mixed,
+        },
+        Type::Nullable(inner) => match inner.as_borrowed() {
+            Some(inner) => Type::Nullable(Boxed::borrowed(inner)),
+            None => Type::Mixed,
+        },
+        Type::Union(members) => match members.as_borrowed() {
+            Some(members) => Type::Union(List::borrowed(members)),
+            None => Type::Mixed,
+        },
+        Type::Intersection(members) => match members.as_borrowed() {
+            Some(members) => Type::Intersection(List::borrowed(members)),
+            None => Type::Mixed,
+        },
     }
+}
+
+/// The members a union's arm adds: a union's own, flattened, the one
+/// type of any other, and none for no type.
+const fn members(declared: Option<&'static Type>) -> &'static [Type] {
+    match declared {
+        Some(Type::Union(members)) => match members.as_borrowed() {
+            Some(members) => members,
+            None => &[],
+        },
+        Some(one) => std::slice::from_ref(one),
+        None => &[],
+    }
+}
+
+/// The member at `at` of `a`'s and then `b`'s, `mixed` past both.
+const fn member(a: &[Type], b: &[Type], at: usize) -> Type {
+    if at < a.len() {
+        again(&a[at])
+    } else if at - a.len() < b.len() {
+        again(&b[at - a.len()])
+    } else {
+        Type::Mixed
+    }
+}
+
+/// `a`'s members and then `b`'s, laid in [`WIDEST`] slots.
+const fn laid(a: &[Type], b: &[Type]) -> [Type; WIDEST] {
+    assert!(
+        a.len() + b.len() <= WIDEST,
+        "a native's union is wider than WIDEST"
+    );
+    [
+        member(a, b, 0),
+        member(a, b, 1),
+        member(a, b, 2),
+        member(a, b, 3),
+        member(a, b, 4),
+        member(a, b, 5),
+        member(a, b, 6),
+        member(a, b, 7),
+    ]
+}
+
+/// `A|B`, flattened as php's stub lays `A|B|C` for `Union<A, Union<B,
+/// C>>`, and `?A`, laid in the binary whole: the entry's type points at
+/// it, so registering the native builds nothing.
+struct Joined<A, B>(PhantomData<fn() -> (A, B)>);
+
+impl<A: Declared, B: Declared> Joined<A, B> {
+    const A: &'static Option<Type> = &A::DECLARED;
+    const B: &'static Option<Type> = &B::DECLARED;
+    const LAID: &'static [Type; WIDEST] =
+        &laid(members(Self::A.as_ref()), members(Self::B.as_ref()));
+    const MEMBERS: &'static [Type] = Self::LAID
+        .split_at(members(Self::A.as_ref()).len() + members(Self::B.as_ref()).len())
+        .0;
+    /// `A|B`, each arm's members in its place.
+    const UNION: Option<Type> = Some(Type::Union(List::borrowed(Self::MEMBERS)));
+}
+
+impl<A: Declared> Joined<A, NullArm> {
+    /// `A` with `null` beside it: `A|null` over a union, `?A` over any
+    /// other type, and no type over none.
+    const OR_NULL: Option<Type> = match Self::A {
+        Some(Type::Union(_)) => Self::UNION,
+        Some(inner) => Some(Type::Nullable(Boxed::borrowed(inner))),
+        None => None,
+    };
 }
 
 /// `?T`, or `T|null` over a union.
 impl<T: FromArgument> FromArgument for Option<T> {
     const BY_REF: bool = T::BY_REF;
     const MASK: u32 = nullable_mask(T::MASK);
-    fn declared() -> Option<Type> {
-        T::declared().map(or_null)
-    }
+    const DECLARED: Option<Type> = Joined::<Argument<T>, NullArm>::OR_NULL;
     fn accepts(value: &Value) -> bool {
         matches!(value.as_ref(), ValueRef::Null) || T::accepts(value)
     }
@@ -480,7 +614,7 @@ impl<T: FromArgument> FromArgument for Option<T> {
         }
         // `Z_PARAM_RESOURCE_OR_NULL`: an untyped resource's refusal
         // names the `null` it also takes.
-        if T::MASK == bits::RESOURCE && T::declared().is_none() && plain.as_resource().is_none() {
+        if T::MASK == bits::RESOURCE && T::DECLARED.is_none() && plain.as_resource().is_none() {
             return Err(resource_or_null(req, &plain, position));
         }
         T::hold(req, given, position).map(|held| held.map(Some))
@@ -507,9 +641,7 @@ pub struct Untyped<T>(pub T);
 impl<T: FromArgument> FromArgument for Untyped<T> {
     const BY_REF: bool = T::BY_REF;
     const MASK: u32 = 0;
-    fn declared() -> Option<Type> {
-        None
-    }
+    const DECLARED: Option<Type> = None;
     fn accepts(value: &Value) -> bool {
         T::accepts(value)
     }
@@ -561,15 +693,13 @@ impl<C: Class> Instance<C> {
     }
 }
 
-fn named<C: Class>() -> Type {
+const fn named<C: Class>() -> Type {
     Type::Named(Name(Bytes::borrowed(C::NAME)))
 }
 
 impl<C: Class> FromArgument for Instance<C> {
     const MASK: u32 = 0;
-    fn declared() -> Option<Type> {
-        Some(named::<C>())
-    }
+    const DECLARED: Option<Type> = Some(named::<C>());
     fn accepts(value: &Value) -> bool {
         matches!(value.as_ref(), ValueRef::Object(_))
     }
@@ -634,22 +764,9 @@ pub enum Union<A, B> {
     B(B),
 }
 
-fn flatten(parts: [Option<Type>; 2]) -> Type {
-    let mut members = Vec::new();
-    for member in parts.into_iter().flatten() {
-        match member {
-            Type::Union(inner) => members.extend(inner),
-            other => members.push(other),
-        }
-    }
-    Type::Union(members)
-}
-
 impl<A: FromArgument, B: FromArgument> FromArgument for Union<A, B> {
     const MASK: u32 = union_mask(A::MASK, B::MASK);
-    fn declared() -> Option<Type> {
-        Some(flatten([A::declared(), B::declared()]))
-    }
+    const DECLARED: Option<Type> = Joined::<Argument<A>, Argument<B>>::UNION;
     fn accepts(value: &Value) -> bool {
         A::accepts(value) || B::accepts(value)
     }
@@ -670,14 +787,15 @@ pub enum Iterable {
     Traversable(PhpObject),
 }
 
+/// `Traversable|array`, laid in the binary.
+const ITERABLE: &[Type] = &[
+    Type::Named(Name(Bytes::borrowed(b"Traversable"))),
+    Type::Array,
+];
+
 impl FromArgument for Iterable {
     const MASK: u32 = bits::ARRAY;
-    fn declared() -> Option<Type> {
-        Some(Type::Union(vec![
-            Type::Named(Name(Bytes::borrowed(b"Traversable"))),
-            Type::Array,
-        ]))
-    }
+    const DECLARED: Option<Type> = Some(Type::Union(List::borrowed(ITERABLE)));
     fn accepts(value: &Value) -> bool {
         matches!(value.as_ref(), ValueRef::Array(_) | ValueRef::Object(_))
     }
@@ -704,9 +822,7 @@ impl<T: FromArgument> FromArgument for Passed<T> {
     const PASSED: bool = true;
     const BY_REF: bool = T::BY_REF;
     const MASK: u32 = T::MASK;
-    fn declared() -> Option<Type> {
-        T::declared()
-    }
+    const DECLARED: Option<Type> = T::DECLARED;
     fn accepts(value: &Value) -> bool {
         T::accepts(value)
     }
@@ -785,9 +901,7 @@ impl<T: FromArgument> Raw<T> {
 
 impl<T: FromArgument> FromArgument for Raw<T> {
     const MASK: u32 = bits::ANY;
-    fn declared() -> Option<Type> {
-        T::declared()
-    }
+    const DECLARED: Option<Type> = T::DECLARED;
     fn accepts(_: &Value) -> bool {
         true
     }
@@ -875,9 +989,7 @@ impl<T> Ref<T> {
 impl<T: FromArgument> FromArgument for Ref<T> {
     const BY_REF: bool = true;
     const MASK: u32 = T::MASK;
-    fn declared() -> Option<Type> {
-        T::declared()
-    }
+    const DECLARED: Option<Type> = T::DECLARED;
     fn accepts(_: &Value) -> bool {
         true
     }
@@ -1200,9 +1312,7 @@ impl<T: FromArgument + 'static> FromArgument for Variadic<'_, T> {
     const VARIADIC: bool = true;
     const BY_REF: bool = T::BY_REF;
     const MASK: u32 = T::MASK;
-    fn declared() -> Option<Type> {
-        T::declared()
-    }
+    const DECLARED: Option<Type> = T::DECLARED;
     fn accepts(_: &Value) -> bool {
         true
     }
@@ -1285,9 +1395,7 @@ impl<T: FromArgument + 'static> FromArgument for NamedVariadic<'_, T> {
     const VARIADIC: bool = true;
     const BY_REF: bool = T::BY_REF;
     const MASK: u32 = T::MASK;
-    fn declared() -> Option<Type> {
-        T::declared()
-    }
+    const DECLARED: Option<Type> = T::DECLARED;
     fn accepts(_: &Value) -> bool {
         true
     }
@@ -1341,7 +1449,7 @@ pub trait IntoReturn: Sized {
     /// The declared type's pure mask, as [`FromArgument::MASK`].
     const MASK: u32;
     /// The declared return type; `None` declares none.
-    fn declared() -> Option<Type>;
+    const DECLARED: Option<Type>;
     /// The value the engine is handed, its owner the engine's: a view's
     /// taken, `RETURN_COPY`, and an owner's moved; an `Err` passes
     /// through.
@@ -1351,9 +1459,7 @@ pub trait IntoReturn: Sized {
 /// `void`, and nothing on `__construct` and `__destruct`.
 impl IntoReturn for () {
     const MASK: u32 = bits::VOID;
-    fn declared() -> Option<Type> {
-        Some(Type::Void)
-    }
+    const DECLARED: Option<Type> = Some(Type::Void);
     fn into_return(self, _: &mut Request) -> Result<Owner<Value>, Thrown> {
         Ok(Owner::null())
     }
@@ -1361,9 +1467,7 @@ impl IntoReturn for () {
 
 impl IntoReturn for Value {
     const MASK: u32 = bits::ANY;
-    fn declared() -> Option<Type> {
-        Some(Type::Mixed)
-    }
+    const DECLARED: Option<Type> = Some(Type::Mixed);
     fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         Ok(Owner::take(req, self))
     }
@@ -1372,9 +1476,7 @@ impl IntoReturn for Value {
 impl<T: IntoReturn> IntoReturn for Untyped<T> {
     const UNDECLARED: bool = true;
     const MASK: u32 = 0;
-    fn declared() -> Option<Type> {
-        None
-    }
+    const DECLARED: Option<Type> = None;
     fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         self.0.into_return(req)
     }
@@ -1385,9 +1487,7 @@ impl<T: IntoReturn> IntoReturn for Untyped<T> {
 /// an owner of.
 impl<T: FromArgument> IntoReturn for Raw<T> {
     const MASK: u32 = T::MASK;
-    fn declared() -> Option<Type> {
-        T::declared()
-    }
+    const DECLARED: Option<Type> = T::DECLARED;
     fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         Ok(Owner::take(req, self.value))
     }
@@ -1399,9 +1499,7 @@ macro_rules! plain_return {
     ($t:ty, $ty:expr, $mask:expr, $make:expr) => {
         impl IntoReturn for $t {
             const MASK: u32 = $mask;
-            fn declared() -> Option<Type> {
-                Some($ty)
-            }
+            const DECLARED: Option<Type> = Some($ty);
             fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
                 Ok(Owner::take(req, ($make)(self)))
             }
@@ -1429,9 +1527,7 @@ plain_return!(False, Type::False, bits::FALSE, |_| Value::bool(false));
 /// `string|false|null $key`: held only by `false` itself.
 impl FromArgument for False {
     const MASK: u32 = bits::FALSE;
-    fn declared() -> Option<Type> {
-        Some(Type::False)
-    }
+    const DECLARED: Option<Type> = Some(Type::False);
     fn accepts(value: &Value) -> bool {
         matches!(value.as_ref(), ValueRef::Bool(false))
     }
@@ -1461,9 +1557,7 @@ pub enum Never {}
 
 impl IntoReturn for Never {
     const MASK: u32 = bits::NEVER;
-    fn declared() -> Option<Type> {
-        Some(Type::Never)
-    }
+    const DECLARED: Option<Type> = Some(Type::Never);
     fn into_return(self, _: &mut Request) -> Result<Owner<Value>, Thrown> {
         match self {}
     }
@@ -1472,9 +1566,7 @@ impl IntoReturn for Never {
 impl IntoReturn for Resource {
     const UNDECLARED: bool = true;
     const MASK: u32 = bits::RESOURCE;
-    fn declared() -> Option<Type> {
-        None
-    }
+    const DECLARED: Option<Type> = None;
     fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         Ok(Owner::take(req, Value::resource(self)))
     }
@@ -1484,9 +1576,7 @@ impl IntoReturn for Resource {
 /// from: the callable holds it as a view, so the return takes an owner.
 impl IntoReturn for Callable {
     const MASK: u32 = bits::CALLABLE;
-    fn declared() -> Option<Type> {
-        Some(Type::Callable)
-    }
+    const DECLARED: Option<Type> = Some(Type::Callable);
     fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         Ok(Owner::take(req, self.value()))
     }
@@ -1494,9 +1584,7 @@ impl IntoReturn for Callable {
 
 impl<C: Class> IntoReturn for Instance<C> {
     const MASK: u32 = 0;
-    fn declared() -> Option<Type> {
-        Some(named::<C>())
-    }
+    const DECLARED: Option<Type> = Some(named::<C>());
     fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         Ok(Owner::take(req, self.object.as_value()))
     }
@@ -1504,9 +1592,7 @@ impl<C: Class> IntoReturn for Instance<C> {
 
 impl<T: IntoReturn> IntoReturn for Option<T> {
     const MASK: u32 = nullable_mask(T::MASK);
-    fn declared() -> Option<Type> {
-        T::declared().map(or_null)
-    }
+    const DECLARED: Option<Type> = Joined::<Returned<T>, NullArm>::OR_NULL;
     fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         match self {
             Some(value) => value.into_return(req),
@@ -1524,9 +1610,7 @@ pub enum OrFalse<T> {
 
 impl<T: IntoReturn> IntoReturn for OrFalse<T> {
     const MASK: u32 = union_mask(T::MASK, bits::FALSE);
-    fn declared() -> Option<Type> {
-        Some(flatten([T::declared(), Some(Type::False)]))
-    }
+    const DECLARED: Option<Type> = Joined::<Returned<T>, FalseArm>::UNION;
     fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         match self {
             OrFalse::Value(value) => value.into_return(req),
@@ -1537,9 +1621,7 @@ impl<T: IntoReturn> IntoReturn for OrFalse<T> {
 
 impl<A: IntoReturn, B: IntoReturn> IntoReturn for Union<A, B> {
     const MASK: u32 = union_mask(A::MASK, B::MASK);
-    fn declared() -> Option<Type> {
-        Some(flatten([A::declared(), B::declared()]))
-    }
+    const DECLARED: Option<Type> = Joined::<Returned<A>, Returned<B>>::UNION;
     fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         match self {
             Union::A(a) => a.into_return(req),
@@ -1552,9 +1634,7 @@ impl<A: IntoReturn, B: IntoReturn> IntoReturn for Union<A, B> {
 impl<T: IntoReturn> IntoReturn for Result<T, Thrown> {
     const UNDECLARED: bool = T::UNDECLARED;
     const MASK: u32 = T::MASK;
-    fn declared() -> Option<Type> {
-        T::declared()
-    }
+    const DECLARED: Option<Type> = T::DECLARED;
     fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         self?.into_return(req)
     }

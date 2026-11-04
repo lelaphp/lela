@@ -354,7 +354,6 @@ fn the_tables_build_and_link_classes_lay_are_each_one_allocation_at_its_length()
         ("extensions", s.extensions.len(), s.extensions.capacity()),
         ("functions", s.functions.len(), s.functions.capacity()),
         ("entries", s.entries.len(), s.entries.capacity()),
-        ("replaced", s.replaced.len(), s.replaced.capacity()),
         (
             "intercepted_by",
             s.intercepted_by.len(),
@@ -386,16 +385,6 @@ fn the_tables_build_and_link_classes_lay_are_each_one_allocation_at_its_length()
         ("natives", s.natives.len(), s.natives.capacity()),
         ("methods", s.methods.len(), s.methods.capacity()),
         ("trampolines", s.trampolines.len(), s.trampolines.capacity()),
-        (
-            "method_functions",
-            s.method_functions.len(),
-            s.method_functions.capacity(),
-        ),
-        (
-            "trampoline_tables",
-            s.trampoline_tables.len(),
-            s.trampoline_tables.capacity(),
-        ),
         ("parents", s.parents.len(), s.parents.capacity()),
         ("placed", s.placed.len(), s.placed.capacity()),
         ("constants", s.constants.len(), s.constants.capacity()),
@@ -416,8 +405,10 @@ fn the_tables_build_and_link_classes_lay_are_each_one_allocation_at_its_length()
         [] as [&(&str, usize, usize); 0],
         "laid past their length"
     );
-    // `parameter_classes` is two boxes, at their length as made (#4027).
-    assert_eq!(laid.len(), 22, "the tables build and link_classes lay");
+    // `parameter_classes`, `method_functions` and `trampoline_tables` are
+    // two boxes each and `replaced` one, at their length as made (#4027,
+    // #4098).
+    assert_eq!(laid.len(), 19, "the tables build and link_classes lay");
     assert!(
         laid.iter().all(|(_, len, _)| *len > 0),
         "each holds Core's rows"
@@ -454,7 +445,7 @@ fn a_natives_names_are_its_entries_bytes_and_no_copy() {
             }],
             return_type: || None,
             frameless: &[],
-            attributes: &[|| crate::api::__private::attribute(MARK, Vec::new())],
+            attributes: &[crate::api::__private::attribute(MARK, &[])],
             entry: crate::api::__private::abstract_entry,
         }];
     const CONSTANTS: &[crate::api::__private::NativeConst] =
@@ -477,4 +468,43 @@ fn a_natives_names_are_its_entries_bytes_and_no_copy() {
     let constant = (s.constants.iter()).find(|decl| *decl.name.0 == *CONSTANT);
     let constant = constant.expect("the constant is declared");
     assert_eq!(constant.name.0.as_ptr(), CONSTANT.as_ptr());
+}
+
+/// The bytes an interception names the native it replaces with, held in
+/// a static so it has one address to compare against.
+static INTERCEPTED: &[u8] = b"strlen";
+
+/// A core ini entry's name and default are the core table's bytes, as
+/// `zend_register_ini_entries_ex` interns a static `zend_ini_entry_def`'s
+/// `const char *` that opcache moves into its one buffer, and an
+/// interception's name is the bytes its extension spells it with,
+/// as phar's `PHAR_G(orig_fopen)` names nothing it allocates: neither
+/// the table nor the supplies resolved from the builders copy them
+/// (#4098).
+#[test]
+fn a_core_entry_and_an_interception_are_named_by_the_binarys_bytes() {
+    let extension = crate::api::abi::ExtensionBuilder::default()
+        .intercept(INTERCEPTED, crate::api::__private::abstract_entry)
+        .build("intercepting");
+    let engine = Engine::cli_builder().extensions(&[extension]).build();
+    let s = &engine.shared;
+    for &(name, _) in CORE_INI {
+        let row = s
+            .ini
+            .find(name.as_bytes())
+            .expect("a core entry is registered");
+        assert_eq!(row.name.as_ptr(), name.as_ptr(), "{name}");
+    }
+    let precision = s
+        .ini
+        .find(b"precision")
+        .and_then(|row| row.value.as_deref());
+    let declared = CORE_INI.iter().find(|(name, _)| *name == "precision");
+    let declared = declared
+        .and_then(|(_, value)| *value)
+        .expect("precision has a default");
+    assert_eq!(precision.map(<[u8]>::as_ptr), Some(declared.as_ptr()));
+    let intercepted = (s.supplied.intercepts.iter()).find(|(_, name, _)| *name.0 == *INTERCEPTED);
+    let intercepted = intercepted.expect("the interception is supplied");
+    assert_eq!(intercepted.1.0.as_ptr(), INTERCEPTED.as_ptr());
 }

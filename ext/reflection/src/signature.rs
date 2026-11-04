@@ -118,7 +118,7 @@ fn parts(ty: &Type) -> Parts {
             intersection: false,
         },
         Type::Intersection(members) => Parts {
-            members: members.clone(),
+            members: members.to_vec(),
             nullable: false,
             intersection: true,
         },
@@ -218,7 +218,7 @@ fn type_text_without_null(ty: &Type) -> String {
     match parts.members.len() {
         0 => String::from("null"),
         1 => parts.members.first().map_or_else(String::new, type_text),
-        _ => type_text(&Type::Union(parts.members)),
+        _ => type_text(&Type::Union(parts.members.into())),
     }
 }
 

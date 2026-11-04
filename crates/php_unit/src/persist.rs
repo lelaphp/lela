@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use php_heap::{Persist, PersistSize};
 
-use crate::decl::{ClassDecl, FunctionDecl, MethodDecl, Name};
+use crate::decl::{ClassDecl, FunctionDecl, List, MethodDecl, Name};
 use crate::op::OpArray;
 use crate::unit::Unit;
 
@@ -126,23 +126,25 @@ impl Unit {
             exact_function(decl);
         }
         for class in &mut self.classes {
-            exact(&mut class.interfaces);
-            exact(&mut class.implementors);
-            exact(&mut class.aliases);
+            exact_list(&mut class.interfaces);
+            exact_list(&mut class.implementors);
+            exact_list(&mut class.aliases);
             exact(&mut class.traits);
             exact(&mut class.adaptations);
             exact(&mut class.constants);
-            exact(&mut class.properties);
+            exact_list(&mut class.properties);
             exact(&mut class.methods);
-            exact(&mut class.attributes);
+            exact_list(&mut class.attributes);
             for method in &mut class.methods {
                 exact_function(&mut method.function);
             }
-            for property in &mut class.properties {
-                exact(&mut property.attributes);
+            if class.properties.as_borrowed().is_none() {
+                for property in &mut class.properties {
+                    exact_list(&mut property.attributes);
+                }
             }
             for constant in &mut class.constants {
-                exact(&mut constant.attributes);
+                exact_list(&mut constant.attributes);
             }
         }
         exact(&mut self.classes);
@@ -161,10 +163,22 @@ fn exact<T>(table: &mut Vec<T>) {
     *table = at_length;
 }
 
+/// A list a compile made at its length; a native's, which borrows its
+/// entry, has no room past it.
+fn exact_list<T: Clone>(list: &mut List<T>) {
+    if list
+        .as_borrowed()
+        .is_some_and(|entries| !entries.is_empty())
+    {
+        return;
+    }
+    exact(list.to_mut());
+}
+
 /// A function's tables at their length.
 fn exact_function(decl: &mut FunctionDecl) {
-    exact(&mut decl.attributes);
-    exact(&mut decl.frameless);
+    exact_list(&mut decl.attributes);
+    exact_list(&mut decl.frameless);
 }
 
 /// A function's names: its own, its file's and its parameters'.

@@ -163,6 +163,29 @@ impl<T: Wire> Wire for Box<T> {
     }
 }
 
+/// Written as the box it reads as, borrowed from a native's entry or
+/// not; read back owned.
+impl<T: Wire> Wire for php_unit::decl::Boxed<T> {
+    fn put(&self, out: &mut Vec<u8>) -> Option<()> {
+        (**self).put(out)
+    }
+    fn take(r: &mut Reader<'_>) -> Option<Self> {
+        T::take(r).map(Self::from)
+    }
+}
+
+/// Written as the vector it reads as, borrowed from a native's entry or
+/// not; read back owned.
+impl<T: Wire + Clone> Wire for php_unit::decl::List<T> {
+    fn put(&self, out: &mut Vec<u8>) -> Option<()> {
+        put_len(self.len(), out)?;
+        self.iter().try_for_each(|item| item.put(out))
+    }
+    fn take(r: &mut Reader<'_>) -> Option<Self> {
+        Vec::<T>::take(r).map(Self::from)
+    }
+}
+
 impl<T: Wire> Wire for Vec<T> {
     fn put(&self, out: &mut Vec<u8>) -> Option<()> {
         put_len(self.len(), out)?;
@@ -239,6 +262,20 @@ impl Wire for Name {
     fn take(r: &mut Reader<'_>) -> Option<Self> {
         let n = r.len()?;
         r.take_bytes(n).map(|bytes| Name(bytes.into()))
+    }
+}
+
+/// Written as the bytes they read as, borrowed from a native's entry or
+/// not; read back owned.
+impl Wire for php_heap::Bytes {
+    fn put(&self, out: &mut Vec<u8>) -> Option<()> {
+        put_len(self.len(), out)?;
+        out.extend_from_slice(self);
+        Some(())
+    }
+    fn take(r: &mut Reader<'_>) -> Option<Self> {
+        let n = r.len()?;
+        r.take_bytes(n).map(Self::from)
     }
 }
 

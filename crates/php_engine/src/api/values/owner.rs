@@ -873,9 +873,7 @@ impl<T: View> Drop for Owner<T> {
 impl<T: View + sealed::One + IntoReturn> IntoReturn for Owner<T> {
     const UNDECLARED: bool = T::UNDECLARED;
     const MASK: u32 = T::MASK;
-    fn declared() -> Option<Type> {
-        T::declared()
-    }
+    const DECLARED: Option<Type> = T::DECLARED;
     fn into_return(self, _: &mut Request) -> Result<Owner<Value>, Thrown> {
         Ok(self.into_value())
     }

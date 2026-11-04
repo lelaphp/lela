@@ -256,7 +256,7 @@ pub(crate) fn convert_to_datetimezone(
 /// The time zone argument as `Z_PARAM_OBJ_OR_STR_OR_NULL` holds it:
 /// any object, a string or null, a scalar read as a string.
 pub(crate) fn zone_held(req: &mut Request, value: Value, position: u32) -> Result<Value, Thrown> {
-    let ty = Type::Union(vec![Type::Object, Type::String, Type::Null]);
+    let ty = Type::Union(vec![Type::Object, Type::String, Type::Null].into());
     coerce_param(req, &value, &ty, position)
 }
 

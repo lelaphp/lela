@@ -118,7 +118,7 @@ fn bytes(text: &str) -> syn::LitByteStr {
 fn name(text: &str) -> Tokens {
     let root = root();
     let text = bytes(text);
-    quote!(#root::decl::Name(#text.as_slice().into()))
+    quote!(#root::decl::Name::borrowed(#text))
 }
 
 /// The item's `#[cfg(..)]`s, which every generated piece carries.

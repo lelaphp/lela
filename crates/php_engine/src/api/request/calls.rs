@@ -1344,7 +1344,7 @@ impl Request {
         let call = self.serving_call()?;
         let at = usize::try_from(call.function()?.0).ok()?;
         let beneath = call.annex().map_or(0, |annex| annex.beneath);
-        let &(by, entry) = self.shared.replaced.get(at)?.get(beneath)?;
+        let (by, entry) = self.shared.replaced.get(at, beneath)?;
         Some((entry, beneath.saturating_add(1), by))
     }
 
@@ -1605,11 +1605,15 @@ impl Request {
     /// rendering lists it. `zend_get_closure_invoke_method` is the one
     /// the engine makes, `Closure::__invoke`.
     pub(crate) fn trampoline_named(&self, class: ClassId, name: &[u8]) -> Option<Function> {
-        let table = self
-            .shared
-            .trampoline_tables
-            .get(self.native_class_at(class)?)?;
-        table.find(name).copied()
+        let shared = &self.shared;
+        let row = (shared.trampoline_tables).row(self.native_class_at(class)?)?;
+        let named = |at: u32| {
+            let decl = shared.trampolines.get(usize::try_from(at).ok()?)?;
+            Some(decl.function.name.0.eq_ignore_ascii_case(name))
+        };
+        row.iter()
+            .find(|&&(_, at)| named(at) == Some(true))
+            .map(|&(function, _)| function)
     }
 
     /// Serve the native the call frame on top of [`Vm`] names: its entry

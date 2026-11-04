@@ -1210,7 +1210,7 @@ fn class_constants() -> Vec<ClassConstDecl> {
         is_case: false,
         ty: Some(ty),
         value,
-        attributes: Vec::new(),
+        attributes: Vec::new().into(),
         doc_comment: None,
     })
     .collect()
