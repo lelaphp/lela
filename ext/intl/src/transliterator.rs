@@ -3,7 +3,7 @@
 //! share a body with (`transliterator_methods.c`,
 //! `transliterator_class.c`).
 
-use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, This, Union};
+use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Std, This, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{clone_with, lookup_class, new_object, write_prop};
 use php_ext::coerce::c_str;
@@ -44,6 +44,13 @@ pub(crate) struct Handlers;
 impl ObjectHandlers for Handlers {
     fn clone_obj(&self) -> Option<CloneObj> {
         Some(clone_trans)
+    }
+
+    /// `Transliterator_objects_free`: `zend_object_std_dtor`, then
+    /// `transliterator_object_destroy`, which frees the error's message.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        Std.free_obj(req, object);
+        error::free::<TransObject>(req, object);
     }
 }
 

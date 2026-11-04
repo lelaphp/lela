@@ -356,9 +356,24 @@ pub fn extension() -> Extension {
         .class_constants(b"IntlChar", uchar::constants());
     builder
         .request_state::<State>()
+        .rshutdown(rshutdown)
+        .post_deactivate(post_deactivate)
         .engine_state(throwables::Throwables::start)
         .info(intl_info)
         .build("intl")
+}
+
+/// `PHP_RSHUTDOWN_FUNCTION(intl)`'s `intl_error_reset(NULL)`: the
+/// request's code zero and its message freed.
+fn rshutdown(req: &mut Request) {
+    error::reset(req);
+}
+
+/// The request's message an object freed after `RSHUTDOWN` set, as a
+/// `UConverter`'s close callbacks may, freed with the request's heap,
+/// where php leaves it to `zend_mm`'s shutdown.
+fn post_deactivate(req: &mut Request) {
+    error::reset(req);
 }
 
 /// One `PHP_INI_ALL` entry.

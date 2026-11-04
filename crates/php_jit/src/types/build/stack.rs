@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use php_unit::{OpArray, Opcode, Opline};
 
 use super::{At, Builder, Draft, Placed, Point, draft};
-use crate::record::{Began, Callee, Stop};
+use crate::record::{Began, Callee, Stop, classes};
 use crate::types::{Check, Frame, Grows, GuardAt, Op, OpId, Place};
 
 /// `ZEND_CALL_FRAME_SLOT`: the slots of a frame's header,
@@ -133,6 +133,18 @@ impl Builder<'_> {
         Some((op, callee))
     }
 
+    /// Whether php's record carries a class between the `INIT_*` `op` at
+    /// `at` and the call it begins, the `ZEND_JIT_TRACE_OP1_TYPE` or
+    /// `_OP2_TYPE` its recorder writes after the opline for an object
+    /// operand (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:920-928`,
+    /// [`classes`]): the `(p-1)->op != ZEND_JIT_TRACE_VM` on which
+    /// `zend_jit_trace_build_tssa` gives a loop's `used_stack` up
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:2629-2630`).
+    fn classed(&self, at: usize, op: &Opline) -> bool {
+        let id = OpId(u32::try_from(at).unwrap_or(u32::MAX));
+        (self.sampled.get(&id)).is_some_and(|[op1, op2, _]| classes(op, *op1, *op2) > 0)
+    }
+
     /// The bytes the call the `INIT_*` `op` begins to `callee` takes, php's
     /// `zend_vm_calc_used_stack` over the `func` the trace recorded; none
     /// for a user function whose op array the view does not hold.
@@ -172,7 +184,9 @@ impl Builder<'_> {
     /// php's `used_stack`: what a loop's calls push at most, the frame of
     /// each `INIT_*` its frame makes added and taken off again as the
     /// frame returns; none where it cannot say, for a trace that does
-    /// not loop by its own loop among them.
+    /// not loop by its own loop among them, or for an `INIT_*` whose
+    /// record carries its operand's class ([`Builder::classed`]), a
+    /// method's call on an object a variable holds among them.
     fn used_stack(&self) -> Option<i64> {
         let mut counted = (self.rec.stop == Stop::Loop).then_some(Counted { used: 0, max: 0 });
         let mut by_frame: HashMap<Frame, i64> = HashMap::new();
@@ -198,9 +212,11 @@ impl Builder<'_> {
                     began: Began::Here,
                     ..
                 } => {
-                    let init = at.checked_sub(1).and_then(|before| self.init_at(before));
+                    let before = at.checked_sub(1);
+                    let init = before.and_then(|before| self.init_at(before));
                     let pushed = init.and_then(|(op, callee)| {
-                        counted_by_tssa(op.opcode)
+                        let classed = before.is_some_and(|before| self.classed(before, &op));
+                        (counted_by_tssa(op.opcode) && !classed)
                             .then(|| self.pushed(&op, callee?))
                             .flatten()
                     });

@@ -962,7 +962,9 @@ impl ObjectHandlers for Handlers {
         Ok(Some(DebugInfo::from(table)))
     }
 
-    /// `BreakIterator_objects_free`.
+    /// `BreakIterator_objects_free`: the iterator deleted and what it
+    /// read given up, then the error's message freed, before
+    /// `zend_object_std_dtor`.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let biter = object
             .native_mut::<BreakObject>(req)
@@ -970,6 +972,7 @@ impl ObjectHandlers for Handlers {
         if let Some(biter) = biter {
             biter.close(req);
         }
+        error::free::<BreakObject>(req, object);
     }
 
     /// `_breakiterator_get_iterator`.

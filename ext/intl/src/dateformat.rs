@@ -7,7 +7,8 @@
 use std::ffi::CString;
 
 use php_ext::abi::{
-    CloneObj, ExtensionBuilder, Instance, ObjectHandlers, OrFalse, Raw, Ref, This, Union, Untyped,
+    CloneObj, ExtensionBuilder, Instance, ObjectHandlers, OrFalse, Raw, Ref, Std, This, Union,
+    Untyped,
 };
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{clone_with, lookup_class, new_object};
@@ -84,6 +85,13 @@ pub(crate) static HANDLERS: Handlers = Handlers;
 impl ObjectHandlers for Handlers {
     fn clone_obj(&self) -> Option<CloneObj> {
         Some(clone_formatter)
+    }
+
+    /// `IntlDateFormatter_object_free`: `zend_object_std_dtor`, then
+    /// `dateformat_data_free`, which frees the error's message.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        Std.free_obj(req, object);
+        error::free::<DateFormatObject>(req, object);
     }
 }
 

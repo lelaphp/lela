@@ -143,8 +143,9 @@ struct Kept {
     /// kept file names until its write ends, given up by
     /// [`Session::close_kept`].
     streams: Vec<Owner<Value>>,
-    /// The `to_free` and `clone` blocks of lists whose last share was
-    /// dropped with no request at hand, freed by [`Session::close_kept`].
+    /// The `to_free` and `clone` blocks, with what their lists laid
+    /// down, of lists whose last share was dropped with no request at
+    /// hand, freed by [`Session::close_kept`].
     counted: Vec<easy::Counted>,
 }
 

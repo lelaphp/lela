@@ -350,6 +350,32 @@ fn keep_postfields(req: &mut Request, object: PhpObject, array: PhpArray) {
 /// then `CURLOPT_MIMEPOST`. The tree is set or freed as the walk ends,
 /// whichever way it ends ([`EasyId::post_form`]).
 ///
+/// Each `CURLFile` part counts its `mime_data_cb_arg` and its
+/// `to_free->stream` element as php's does, both held to the last share
+/// whatever became of the form, and each form set counts its
+/// `to_free->post` element:
+///
+/// ```php
+/// $f = tempnam(sys_get_temp_dir(), 'curl');
+/// file_put_contents($f, "data");
+/// $c = curl_init();
+/// curl_setopt($c, CURLOPT_POSTFIELDS, ['a' => 'b']);
+/// $b = memory_get_usage(); curl_setopt($c, CURLOPT_POSTFIELDS, ['a' => new CURLFile($f), 'b' => new CURLFile($f)]); echo "two file parts ", memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); curl_setopt($c, CURLOPT_POSTFIELDS, ['a' => 'b']); echo "no file part ", memory_get_usage() - $b, "\n";
+/// $d = curl_copy_handle($c);
+/// $b = memory_get_usage(); curl_setopt($d, CURLOPT_POSTFIELDS, ['a' => new CURLFile($f)]); echo "on a copy ", memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); unset($c); echo "unset c ", memory_get_usage() - $b, "\n";
+/// $b = memory_get_usage(); unset($d); echo "unset d ", memory_get_usage() - $b, "\n";
+/// unlink($f);
+/// ```
+/// ```expect
+/// two file parts 1816
+/// no file part -1120
+/// on a copy 1112
+/// unset c -1608
+/// unset d -3736
+/// ```
+///
 /// A throw while an element is read does not end the walk: php's
 /// `zval_get_tmp_string` answers the empty string with the throwable
 /// left in `EG(exception)`, and the walk goes on with it pending, so a
@@ -635,8 +661,14 @@ impl Form<'_> {
             };
             let kind = kind.unwrap_or_else(|| b"application/octet-stream".to_vec());
             let filename = postname.unwrap_or_else(|| path.clone());
-            let code = mime.add_file(req, name, source, size, &filename, &kind);
-            Ok((code, thrown))
+            match mime.add_file(req, name, source, size, &filename, &kind) {
+                Ok(code) => Ok((code, thrown)),
+                // The memory limit's fatal leaves past the wrapper's throw.
+                Err(fatal) => Err(match thrown {
+                    Some(thrown) => thrown.chain(req, fatal),
+                    None => fatal,
+                }),
+            }
         });
         let Some((code, thrown)) = added else {
             return self.flow(req);
