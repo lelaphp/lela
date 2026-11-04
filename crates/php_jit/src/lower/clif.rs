@@ -1012,6 +1012,7 @@ impl<'a> Emit<'a> {
                 for (phi, value) in brought {
                     self.define(phi, value)?;
                 }
+                self.store_brought()?;
                 if matches!(header.repeat, Repeat::Call | Repeat::Return) {
                     // A recursion's next turn runs one frame on, where
                     // its last call or return reached, in the frame its
@@ -1258,6 +1259,60 @@ impl<'a> Emit<'a> {
                 _ => None,
             })
             .collect()
+    }
+
+    /// What the back edge brings to a phi that stays in its slot, where a
+    /// register holds it, written to the slot the next turn reads it from,
+    /// as php stores a phi's source that has a register where the phi has
+    /// none (`ZREG_STORE`, `Z/ext/opcache/jit/zend_jit_trace.c:3335-3337`).
+    ///
+    /// A variable that enters its loop as one type and turns another in
+    /// it, read past the loop, in a loop on its own and in one a side
+    /// trace links to from a pass of the loop around it, and the boolean
+    /// of an `&&` in the loop:
+    ///
+    /// ```php
+    /// function show($x) { return var_export($x, true); }
+    /// function one($n) { $x = 7; for ($j = 0; $j < $n; $j++) { $x = $j * 1.5; } return $x; }
+    /// function two($n) { $x = 7; for ($j = 0; $j < $n; $j++) { $x = $j == 3; } return show($x); }
+    /// function inner($n) { $o = []; for ($i = 0; $i < $n; $i++) { $x = 7; for ($j = 0; $j < 3; $j++) { $x = $j * 1.5; } $o[] = show($x); } return implode(" ", $o); }
+    /// function andor($v, $n) { $o = []; for ($i = 0; $i < $n; $i++) { $d = $v[$i % 2]; $x = 7; for ($j = 0; $j < 3; $j++) { $x = $d && $j; } $o[] = show($x); } return implode(" ", $o); }
+    /// echo one(6), " ", two(6), " ", two(4), "\n", inner(5), "\n", andor([0.0, 2.5], 6), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 7.5 false true
+    /// 3.0 3.0 3.0 3.0 3.0
+    /// false true false true false true
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function show($x) { return var_export($x, true); }
+    /// function one($n) { $x = 7; for ($j = 0; $j < $n; $j++) { $x = $j * 1.5; } return $x; }
+    /// function two($n) { $x = 7; for ($j = 0; $j < $n; $j++) { $x = $j == 3; } return show($x); }
+    /// function inner($n) { $o = []; for ($i = 0; $i < $n; $i++) { $x = 7; for ($j = 0; $j < 3; $j++) { $x = $j * 1.5; } $o[] = show($x); } return implode(" ", array_slice($o, -2)); }
+    /// function andor($v, $n) { $o = []; for ($i = 0; $i < $n; $i++) { $d = $v[$i % 2]; $x = 7; for ($j = 0; $j < 3; $j++) { $x = $d && $j; } $o[] = show($x); } return implode(" ", array_slice($o, -2)); }
+    /// echo one(40), " ", two(40), " ", two(4), "\n", inner(40), "\n", andor([0.0, 2.5], 40), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 58.5 false true
+    /// 3.0 3.0
+    /// false true
+    /// ```
+    fn store_brought(&mut self) -> Result<(), Abort> {
+        let ir = self.ir;
+        for value in &ir.values {
+            let Def::Phi { back, .. } = value.def else {
+                continue;
+            };
+            let brought = self.value(back)?;
+            if value.home == Home::Memory && brought.home == Home::Register {
+                let held = self.register(back)?;
+                self.store(brought.slot, held)?;
+            }
+        }
+        Ok(())
     }
 
     /// What the phi `phi` enters its loop with, its entry value read as
