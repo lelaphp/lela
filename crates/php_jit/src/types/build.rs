@@ -253,7 +253,6 @@ struct Draft {
     point: Point,
     frame: Frame,
     at: At,
-    extra: Option<Store>,
     grows: Grows,
     link: Option<TraceId>,
 }
@@ -3241,7 +3240,6 @@ impl<'a> Builder<'a> {
             point: Point::Start,
             frame: Frame::ROOT,
             at: first.map_or(At::Stands, At::Opline),
-            extra: None,
             grows: Grows::Side,
             link: None,
         }
@@ -3741,7 +3739,6 @@ impl<'a> Builder<'a> {
             point: Point::End,
             frame,
             at,
-            extra: None,
             grows: Grows::Side,
             link,
         });
@@ -4885,10 +4882,9 @@ impl<'a> Builder<'a> {
     /// to any exit taken while the call chain is delayed
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:144-147`).
     fn lands(&self, draft: &Draft, delayed: bool) -> (Option<OplineIdx>, Landing, Vec<Store>) {
-        let extra = || draft.extra.into_iter().collect();
         match draft.at {
-            At::Opline(at) => (Some(at), restored(delayed), extra()),
-            At::Stands | At::Landed => (None, restored(delayed), extra()),
+            At::Opline(at) => (Some(at), restored(delayed), Vec::new()),
+            At::Stands | At::Landed => (None, restored(delayed), Vec::new()),
             At::Fetched {
                 fetch,
                 frees,
@@ -5396,7 +5392,6 @@ fn draft(point: Point, frame: Frame, at: At) -> Draft {
         point,
         frame,
         at,
-        extra: None,
         grows: Grows::Side,
         link: None,
     }
