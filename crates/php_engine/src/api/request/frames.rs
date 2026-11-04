@@ -827,19 +827,19 @@ impl Request {
     /// function's frame its caller pushed, with no annex and no argument
     /// past its parameters, returning into a caller's slot that owns
     /// nothing, or, where the call reads no value, returning a value that
-    /// owns nothing; whose first `cvs` slots, `i_free_compiled_variables`'
-    /// range, own nothing but strings and values another owner of stands,
-    /// and whose receiver and closure, where it has them, are lent or have
-    /// another owner standing. So no destructor is due from its leave. A
-    /// frame that owns nothing at all, nearly every one, is left with one
-    /// look at the frame table for it and its caller: the value into the
-    /// caller's slot, the caller on past its call, `LOAD_NEXT_OPLINE()`,
-    /// then the pop. One that owns something gives it up first
-    /// ([`Request::leave_owning`]); a root buffer at its threshold is the
-    /// one release of it that can serve PHP code, a collection, and that
-    /// release is served there as [`Request::pop_frame`] serves it.
-    /// [`Stepped::Popped`] of the caller, or `Threw` of it where that
-    /// release left a throwable pending; none, with nothing touched, for
+    /// owns nothing; and whose receiver and closure, where it has them,
+    /// are lent or have another owner standing. Its first `cvs` slots,
+    /// `i_free_compiled_variables`' range, are given up in one pass in
+    /// the same look at the frame table that finds it and its caller
+    /// ([`Request::leave_as`]): the value into the caller's slot, the
+    /// caller on past its call, `LOAD_NEXT_OPLINE()`, then the pop. A CV
+    /// that holds the last owner of an array, an object or a reference,
+    /// or a possible root with the buffer at its threshold, is where a
+    /// release may serve PHP code, a destructor or a collection, and the
+    /// leave goes on from it out of line as [`Request::pop_frame`] serves
+    /// one ([`Request::leave_owning`]). [`Stepped::Popped`] of the
+    /// caller, or `Threw` of it where a release left a throwable pending;
+    /// none, with nothing touched, for
     /// every other frame and where `operand` refuses the value. No
     /// temporary but the one `operand` names as moved, which the caller
     /// takes the value out of, owns anything at a return, since the
@@ -949,6 +949,67 @@ impl Request {
 
     /// The body of [`Request::leave_plainly`], `HELD` where the frame's
     /// word says a receiver or a closure is held ([`Request::leave_held`]).
+    ///
+    /// `i_free_compiled_variables` as `zend_leave_helper` calls it: one
+    /// pass over the CVs in slot order, `i_zval_ptr_dtor` over each that
+    /// counts an owner. A string is given up whole there, freed where its
+    /// count reaches zero; an array, an object or a reference with another
+    /// owner standing is `GC_DELREF` and `gc_check_possible_root` under
+    /// the buffer's threshold ([`php_heap::Heap::release_kept`]). The
+    /// first that is the last owner of its value, or a possible root
+    /// with the buffer at its threshold, is where `rc_dtor_func` or a
+    /// collection may serve PHP code, and the pass goes on from it out of
+    /// line ([`Request::leave_owning`]); everything before it is given up
+    /// already, so the order is php's. The caller's slot is read before
+    /// the pass, in the same look at the frame table, and refused there,
+    /// so nothing is given up for a leave that answers none.
+    ///
+    /// Objects two CVs hold last are destructed in slot order, an array
+    /// argument whose count falls to zero is destroyed with what it holds
+    /// between the CVs before it and after it, one the caller still holds
+    /// is a possible root, a string argument is given up, and a throwing
+    /// destructor leaves the CVs after it given up before the caller
+    /// raises it, a method's receiver, owned or lent, is given up after a
+    /// local it destructs; the counts and the heap after the return stand
+    /// as php's:
+    ///
+    /// ```php
+    /// class D {
+    ///     function __construct(public $n) {}
+    ///     function __destruct() { echo "[{$this->n}]"; }
+    ///     function m() { $x = new D("{$this->n}x"); return 1; }
+    ///     function lent() { return $this->m(); }
+    /// }
+    /// class T { function __destruct() { throw new Exception('t'); } }
+    /// function two($a, $b) { $c = new D('c'); return 1; }
+    /// function mid($keep, $str, $gone, $arr, $keep2) { $z = new D('z'); return 2; }
+    /// function len($a) { return count($a); }
+    /// function str($s) { return strlen($s); }
+    /// function thr($a) { $t = new T; $d = new D('after'); return 3; }
+    /// echo two(new D('a'), new D('b')), "\n";
+    /// $k = new D('k');
+    /// echo mid($k, str_repeat('s', 3), new D('g'), [new D('arr')], $k), "\n";
+    /// unset($k); echo "\n";
+    /// try { thr(new D('arg')); } catch (Exception $e) { echo " caught ", $e->getMessage(), "\n"; }
+    /// $r = new D('r'); $r->m(); echo "|"; $r->lent(); echo "|"; unset($r); echo "\n";
+    /// gc_collect_cycles();
+    /// $held = [1, 2, 3]; $held[] = 4;
+    /// $s = gc_status()['roots'];
+    /// echo len($held), str(str_repeat('ab', 50)), ' ', gc_status()['roots'] - $s, "\n";
+    /// $m = memory_get_usage();
+    /// for ($i = 0; $i < 100; $i++) { len([$i, [$i]]); str(str_repeat('ab', 50)); len($held); }
+    /// var_dump(memory_get_usage() - $m, gc_status()['roots'] - $s);
+    /// ```
+    /// ```expect
+    /// [a][b][c]1
+    /// [g][arr][z]2
+    /// [k]
+    /// [arg][after] caught t
+    /// [rx]|[rx]|[r]
+    /// 4100 1
+    /// int(0)
+    /// int(1)
+    /// ```
     #[inline(always)]
     fn leave_as<const HELD: bool>(
         &mut self,
@@ -981,72 +1042,83 @@ impl Request {
             },
             exec::Leave::Kernel => return None,
         };
-        let held = gives != Gives::Nothing;
         debug_assert!(
             header.function().is_some()
                 && header.annex().is_none()
-                && held == (header.this().is_some() || header.closure().is_some()),
+                && (gives != Gives::Nothing)
+                    == (header.this().is_some() || header.closure().is_some()),
             "a frame's flags disagree with its header at a plain leave"
         );
         let caller = header.caller().frame()?;
         let returns_to = header.returns_to();
-        let slots = laid.slots();
-        let (returned, moved) = operand(slots)?;
+        // A receiver held alone, read only in the held leave.
+        let receiver = match gives {
+            Gives::Receiver if HELD => header.receiver(),
+            _ => None,
+        };
+        let (returned, moved) = operand(laid.slots())?;
         debug_assert!(
-            slots
+            laid.slots()
                 .iter()
                 .enumerate()
                 .skip(cvs as usize)
                 .all(|(at, z)| !z.is_refcounted() || Some(at) == moved),
             "a temporary owns a value at a return"
         );
-        // Every CV's refcounted bit tested in turn, as php's
-        // `i_free_compiled_variables` tests each: a frame none of whose
-        // CVs owns anything, nearly every one, is answered there, and only
-        // one that owns something is walked for what. A fold over the
-        // slots' type words is vectorised.
-        let owned = slots.get(..cvs as usize)?;
-        let owners = owned.iter().any(|z| z.is_refcounted());
-        if owners && !owners_kept(owned) {
-            return None;
-        }
-        // A receiver held alone, read only in the held leave.
-        let receiver = match gives {
-            Gives::Receiver if HELD && !owners => laid.header().receiver(),
-            _ => None,
-        };
-        let leave = PlainLeave {
-            caller,
-            returns_to,
-            cvs: if owners { cvs } else { 0 },
-            held,
-        };
-        if owners || held && receiver.is_none() {
-            return self.leave_owning(leave, returned);
-        }
+        let owned = laid.slots_mut().get_mut(..cvs as usize)?;
+        // The value into the caller's slot before anything of the frame is
+        // given up, as `RETURN` writes `EX(return_value)` before
+        // `zend_leave_helper`; a slot that owns something refuses the
+        // leave there, with nothing touched.
         let into = below.get_mut(caller.0 as usize)?;
-        let into_slot = match returns_to {
+        match returns_to {
             Some(slot) => {
                 let slot = into.slots_mut().get_mut(slot as usize)?;
                 if slot.is_refcounted() {
                     return None;
                 }
-                Some(slot)
+                *slot = returned;
             }
             None if returned.is_refcounted() => return None,
-            None => None,
-        };
-        // `OBJ_RELEASE(Z_OBJ(execute_data->This))`, another owner standing,
-        // or a lent receiver's pin let go: no CV owned anything, so this is
-        // all the frame gives up. The collector's buffer, where it must be
-        // collected first, is the owning leave's.
-        if let Some(receiver) = receiver
-            && !let_go_kept(&mut self.heap, receiver)
-        {
-            return self.leave_owning(leave, returned);
+            None => {}
         }
-        if let Some(slot) = into_slot {
-            *slot = returned;
+        let leave = PlainLeave {
+            caller,
+            held: gives != Gives::Nothing,
+        };
+        // Every CV's refcounted bit tested in turn, as php's
+        // `i_free_compiled_variables` tests each, and what one owns given
+        // up where it stands; nothing past here refuses the leave. A
+        // frame none of whose CVs owns anything, nearly every one, is
+        // answered by one fold over their type words, which is vectorised.
+        let heap = &mut self.heap;
+        if owned.iter().any(|z| z.is_refcounted()) {
+            for (at, cell) in owned.iter_mut().enumerate() {
+                let z = *cell;
+                if !z.is_refcounted() {
+                    continue;
+                }
+                match z.as_str() {
+                    Some(s) => heap.release_string(s),
+                    None if heap.release_kept(z) => {}
+                    None => return Some(self.leave_owning(leave, at, cvs)),
+                }
+                *cell = Zval::UNDEF;
+            }
+        }
+        // `OBJ_RELEASE(Z_OBJ(execute_data->This))`, another owner standing,
+        // or a lent receiver's pin let go; the collector's buffer, where it
+        // must be collected first, and a closure are the owning leave's.
+        match gives {
+            Gives::Nothing => {}
+            Gives::Receiver => {
+                if let Some(receiver) = receiver
+                    && !let_go_kept(heap, receiver)
+                {
+                    return Some(self.leave_owning(leave, cvs as usize, cvs));
+                }
+            }
+            Gives::Owning => return Some(self.leave_owning(leave, cvs as usize, cvs)),
         }
         let header = into.header_mut();
         header.opline = header.opline.wrapping_add(1);
@@ -1054,83 +1126,48 @@ impl Request {
         Some(Stepped::Popped(caller))
     }
 
-    /// The top frame left by [`Request::leave_plainly`] where it owns
-    /// something: what its CVs own given up in slot order as
-    /// `i_free_compiled_variables` gives it up, then the receiver
-    /// (`OBJ_RELEASE` under `ZEND_CALL_RELEASE_THIS`, a lent one's pin let
-    /// go) and the closure (`OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)))`
-    /// under `ZEND_CALL_CLOSURE`), each with no PHP code served
+    /// The top frame's leave from its CV `from` on, where
+    /// [`Request::leave_as`]'s pass met the last owner of a value or a
+    /// buffer to collect: what its CVs own from there given up in slot
+    /// order as `i_free_compiled_variables` gives it up, then, where the
+    /// leave says it holds them, the receiver (`OBJ_RELEASE` under
+    /// `ZEND_CALL_RELEASE_THIS`, a lent one's pin let go) and the closure
+    /// (`OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)))` under
+    /// `ZEND_CALL_CLOSURE`), each with no PHP code served
     /// ([`php_heap::Heap::release_kept`]) or, where it would be, served
     /// as [`Request::pop_frame`] serves it, the frame off the chain a
     /// backtrace reads from then on; then `zend_vm_stack_free_call_frame`.
-    /// `returned` written into the caller's slot where the call reads it,
-    /// and the caller on past its call opline, `LOAD_NEXT_OPLINE()`:
-    /// [`Stepped::Popped`] of the caller; or, where a release that served
-    /// PHP code left a throwable pending, the caller standing at its call
-    /// opline, which raises it there (`zend_rethrow_exception`):
-    /// [`Stepped::Threw`] of the caller. None, with nothing touched, where
-    /// the caller's slot owns something or a value nothing reads does.
+    /// The caller, whose slot took the value before the pass began, on
+    /// past its call opline, `LOAD_NEXT_OPLINE()`: [`Stepped::Popped`] of
+    /// the caller; or, where a release that served PHP code left a
+    /// throwable pending, the caller standing at its call opline, which
+    /// raises it there (`zend_rethrow_exception`): [`Stepped::Threw`] of
+    /// the caller.
     #[inline(never)]
-    fn leave_owning(&mut self, leave: PlainLeave, returned: Zval) -> Option<Stepped> {
-        let taken = match leave.returns_to {
-            Some(slot) => self
-                .vm
-                .stack
-                .frame(leave.caller)?
-                .slots()
-                .get(slot as usize)?
-                .is_refcounted(),
-            None => returned.is_refcounted(),
-        };
-        if taken {
-            return None;
-        }
-        let served = self.give_up_owned(leave.cvs, leave.held);
+    fn leave_owning(&mut self, leave: PlainLeave, from: usize, cvs: u32) -> Stepped {
+        let served = self.give_up_owned(from, cvs, leave.held);
         self.vm.stack.pop_frame(&mut self.heap);
         if served && self.is_pending() {
-            return Some(self.returned_raising(leave, returned));
+            return Stepped::Threw(leave.caller);
         }
-        if let Some(caller) = self.vm.stack.frame_mut(leave.caller) {
-            if let Some(slot) = leave.returns_to
-                && let Some(into) = caller.slots_mut().get_mut(slot as usize)
-            {
-                *into = returned;
-            }
-            let header = caller.header_mut();
-            header.opline = header.opline.saturating_add(1);
+        if let Some(caller) = self.vm.at_mut(leave.caller) {
+            caller.opline = caller.opline.saturating_add(1);
         }
-        Some(Stepped::Popped(leave.caller))
-    }
-
-    /// [`Request::leave_owning`]'s end where a release served PHP code
-    /// that left a throwable pending: `returned` into the caller's slot,
-    /// the caller left at its call opline.
-    #[cold]
-    fn returned_raising(&mut self, leave: PlainLeave, returned: Zval) -> Stepped {
-        if let Some(slot) = leave.returns_to
-            && let Some(into) = self
-                .vm
-                .stack
-                .frame_mut(leave.caller)
-                .and_then(|caller| caller.slots_mut().get_mut(slot as usize))
-        {
-            *into = returned;
-        }
-        Stepped::Threw(leave.caller)
+        Stepped::Popped(leave.caller)
     }
 
     /// What the top frame owns given up ([`Request::leave_owning`]):
-    /// what its first `cvs` slots own in slot order, a string with
-    /// `zval_ptr_dtor_nogc`, which serves no PHP code, and anything else
-    /// with [`php_heap::Heap::release_kept`], or with [`Request::release`]
-    /// where that would serve PHP code; then, where it `held` them, its
-    /// receiver and its closure the same way. Whether any release served
-    /// PHP code.
-    #[inline(never)]
-    fn give_up_owned(&mut self, cvs: u32, held: bool) -> bool {
+    /// what its slots from `from` up to `cvs` own in slot order, a string
+    /// with `zval_ptr_dtor_nogc`, which serves no PHP code, and anything
+    /// else with [`php_heap::Heap::release_kept`], or with
+    /// [`Request::release`] where that would serve PHP code, the frame
+    /// looked up again after each since it may have; then, where it
+    /// `held` them, its receiver and its closure the same way. Whether
+    /// any release served PHP code.
+    #[inline] // the owning leave's only call
+    fn give_up_owned(&mut self, mut from: usize, cvs: u32, held: bool) -> bool {
         let frame = self.vm.stack.current();
         let mut served = false;
-        let mut from = 0;
         while let Some((at, value)) = self.take_next_owner(frame, from, cvs as usize) {
             let z = value.to_zval();
             if z.kind() == ZvalType::String {
@@ -2702,8 +2739,8 @@ impl Frames<&Request> {
 
 /// Whether `z`, which a leaving frame owns, has another owner standing,
 /// so giving it up destroys nothing and serves no destructor: what
-/// [`Request::leave_plainly`] asks of the frame's receiver, its closure
-/// and each CV that owns anything but a string.
+/// [`Request::leave_plainly`] asks of the frame's receiver and its
+/// closure.
 fn kept_by_another(z: Zval) -> bool {
     Value::of_slot(z).refcount() > 1
 }
@@ -2761,15 +2798,6 @@ fn let_go_kept(heap: &mut php_heap::Heap, receiver: exec::Receiver) -> bool {
     }
 }
 
-/// Whether every owner among `cvs` is given up with no destructor due: a
-/// string, which serves none, or a value another owner of stands
-/// ([`kept_by_another`]).
-#[inline(never)]
-fn owners_kept(cvs: &[Zval]) -> bool {
-    cvs.iter()
-        .all(|z| !z.is_refcounted() || z.kind() == ZvalType::String || kept_by_another(*z))
-}
-
 /// What a frame [`Request::leave_plainly`] gives up besides its CVs,
 /// read off its call-info word and header once: nothing; a receiver
 /// held alone, lent or with another owner standing, which the held leave
@@ -2782,16 +2810,12 @@ enum Gives {
     Owning,
 }
 
-/// A frame [`Request::leave_plainly`] found leaves with no destructor
-/// due: the frame it returns into and the slot of it that takes the
-/// value, where the call reads one, how many CVs to walk for owners, none
-/// where none owns anything, and whether the frame holds a receiver or a
-/// closure to give up.
+/// A frame [`Request::leave_plainly`] leaves, as its owning leave
+/// ([`Request::leave_owning`]) takes it up: the frame it returns into,
+/// and whether the frame's receiver and closure are still to give up.
 #[derive(Clone, Copy)]
 struct PlainLeave {
     caller: FrameRef,
-    returns_to: Option<u32>,
-    cvs: u32,
     held: bool,
 }
 

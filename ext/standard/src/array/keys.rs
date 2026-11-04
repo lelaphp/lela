@@ -97,13 +97,13 @@ fn search_by<B>(
     hit: impl Fn(&Key) -> B,
     same: impl Fn(&Value) -> Option<bool>,
 ) -> Result<Option<B>, Thrown> {
-    let read = |req: &Request, key: &Key, value: &Value| {
+    let read = |req: &Request, value: &Value| {
         let found = match same(value) {
             Some(found) => found,
             None => matches_read(req, needle, value, strict)?,
         };
         Some(if found {
-            ControlFlow::Break(hit(key))
+            ControlFlow::Break(&hit)
         } else {
             ControlFlow::Continue(())
         })
