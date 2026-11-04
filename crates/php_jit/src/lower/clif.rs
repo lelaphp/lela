@@ -118,6 +118,28 @@ enum CallRoom {
     Stood,
 }
 
+/// Where a body holds what it reads of its entry for as long as it runs.
+/// A trace keeps both in registers. A loop's trace that pushes calls in
+/// place keeps them in its frame, past the [`Stood`], whose address it holds
+/// already, and reads them where its code does: its pushes hold registers
+/// across the loop already, and two more put the loop's own values in its
+/// frame, reloaded every turn (spectralnorm's room and place).
+#[derive(Debug, Clone, Copy)]
+enum EntryHeld {
+    Registers { images: Value, unready: Value },
+    Frame,
+}
+
+/// The request's addresses of a loop's trace ([`EntryHeld::Frame`]), past
+/// the [`Stood`].
+const HELD_IMAGES: i32 = imm(size_of::<Stood>());
+
+/// Whether the request is not ready, an `i8` past [`HELD_IMAGES`].
+const HELD_UNREADY: i32 = HELD_IMAGES + imm(size_of::<usize>());
+
+/// The bytes of the frame's slot of the [`Stood`] and [`EntryHeld::Frame`].
+const STOOD_SLOT: i32 = HELD_UNREADY + imm(size_of::<usize>());
+
 /// The variables [`Emit`] holds the [`Stood`] in, one per field.
 #[derive(Debug, Clone, Copy)]
 struct StoodVars {
@@ -780,12 +802,11 @@ struct Emit<'a> {
     returned_to: Option<Variable>,
     /// The `ExitCtx`, the function's first parameter.
     cx: Option<Value>,
-    /// The request's addresses of the trace, its fourth: its calls'
-    /// headers, its cache slots and its doors' words.
-    images: Option<Value>,
-    /// Whether the request makes the trace's calls in place, from the
-    /// entry word ([`ENTRY_UNREADY`]): an `i8` that is zero where it does.
-    unready: Option<Value>,
+    /// The request's addresses of the trace, its fourth parameter: its
+    /// calls' headers, its cache slots and its doors' words; and whether
+    /// the request makes the trace's calls in place, from the entry word
+    /// ([`ENTRY_UNREADY`]): an `i8` that is zero where it does.
+    entry_held: Option<EntryHeld>,
     /// The address of the request's interrupt byte, read once as a
     /// looping trace whose header tests it enters.
     interrupt: Option<Value>,
@@ -865,7 +886,7 @@ impl<'a> Emit<'a> {
         };
         let stood = b.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
-            u32::try_from(size_of::<Stood>()).unwrap_or(u32::MAX),
+            STOOD_SLOT.unsigned_abs(),
             3,
         ));
         Emit {
@@ -878,8 +899,7 @@ impl<'a> Emit<'a> {
             refs: vec![None; ir.frames.len()],
             returned_to: None,
             cx: None,
-            images: None,
-            unready: None,
+            entry_held: None,
             interrupt: None,
             stood,
             stood_vars,
@@ -927,7 +947,6 @@ impl<'a> Emit<'a> {
             ));
         };
         self.cx = Some(cx);
-        self.images = Some(images);
         self.b.def_var(self.room_var(Frame::ROOT)?, room);
         let header = match self.ir.end {
             End::Loop(header) => Some(header),
@@ -941,8 +960,7 @@ impl<'a> Emit<'a> {
         self.stack = Some(self.b.ins().load(I64, trusted(), cx, STACK_AT));
         let place = self.b.ins().band_imm_u(word, ENTRY_PLACE);
         self.place_frame(Frame::ROOT, place)?;
-        let unready = self.b.ins().band_imm_u(word, ENTRY_UNREADY);
-        self.unready = Some(self.b.ins().icmp_imm_s(IntCC::NotEqual, unready, 0));
+        self.hold_entry(images, word, header.is_some());
         // Laid down before either way in: a guard at the body's entry
         // reads it too.
         self.stood_at_entry([room, call, stands])?;
@@ -2076,6 +2094,20 @@ impl<'a> Emit<'a> {
         }
     }
 
+    /// Hold what the body reads of its entry as it runs ([`EntryHeld`]).
+    fn hold_entry(&mut self, images: Value, word: Value, loops: bool) {
+        let unready = self.b.ins().band_imm_u(word, ENTRY_UNREADY);
+        let unready = self.b.ins().icmp_imm_s(IntCC::NotEqual, unready, 0);
+        self.entry_held = Some(if loops && !self.held.is_empty() {
+            let slot = self.stood_out();
+            self.b.ins().store(trusted(), images, slot, HELD_IMAGES);
+            self.b.ins().store(trusted(), unready, slot, HELD_UNREADY);
+            EntryHeld::Frame
+        } else {
+            EntryHeld::Registers { images, unready }
+        });
+    }
+
     /// Where the interpreter stands as code in place left it: the frame,
     /// the call under way in it, its op array and opline, and the room
     /// the stack's top page has left. The op array and the opline are held
@@ -2115,7 +2147,8 @@ impl<'a> Emit<'a> {
         }
     }
 
-    /// The address of the [`Stood`] a kernel writes, for its call.
+    /// The address of the [`Stood`] a kernel writes, for its call, and of
+    /// what a loop's trace holds past it ([`EntryHeld::Frame`]).
     fn stood_out(&mut self) -> Value {
         self.b.ins().stack_addr(I64, self.stood, 0)
     }

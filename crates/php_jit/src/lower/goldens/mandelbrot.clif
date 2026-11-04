@@ -1,5 +1,5 @@
 function u0:0(i64, i64, i64, i64, i64, i64) -> i32 tail {
-    ss0 = explicit_slot 32, align = 8
+    ss0 = explicit_slot 48, align = 8
     sig0 = (i64, i64, i64, i64, i64, i64) -> i32 tail
     sig1 = (i64, i64, i64, i64, i64, i64) -> i32 tail
     sig2 = (i64, i64, i64, i64, i64, i64) -> i32 tail

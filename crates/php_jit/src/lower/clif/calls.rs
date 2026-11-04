@@ -264,15 +264,29 @@ impl Emit<'_> {
     /// Whether the request is not ready for the trace's calls in place,
     /// an `i8`, from the entry word ([`crate::lower::ENTRY_UNREADY`]).
     fn unready(&mut self) -> Result<Value, Abort> {
-        self.unready
-            .ok_or_else(|| mismatch("a call in place before the entry"))
+        match self.entry_held {
+            Some(super::EntryHeld::Registers { unready, .. }) => Ok(unready),
+            Some(super::EntryHeld::Frame) => {
+                let slot = self.stood_out();
+                let load = self.b.ins().load(I8, trusted(), slot, super::HELD_UNREADY);
+                Ok(load)
+            }
+            None => Err(mismatch("a call in place before the entry")),
+        }
     }
 
     /// The request's addresses of the trace, its entry's: its calls'
     /// headers, its cache slots and its doors' words (`enter::Images`).
     pub(super) fn images(&mut self) -> Result<Value, Abort> {
-        self.images
-            .ok_or_else(|| mismatch("the request's addresses read before the entry"))
+        match self.entry_held {
+            Some(super::EntryHeld::Registers { images, .. }) => Ok(images),
+            Some(super::EntryHeld::Frame) => {
+                let slot = self.stood_out();
+                let load = self.b.ins().load(I64, trusted(), slot, super::HELD_IMAGES);
+                Ok(load)
+            }
+            None => Err(mismatch("the request's addresses read before the entry")),
+        }
     }
 
     /// An inline `INIT_*` whose callee needs no guard pushed in place, as
