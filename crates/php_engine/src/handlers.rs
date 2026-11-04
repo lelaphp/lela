@@ -2117,8 +2117,9 @@ pub(crate) fn send_var<T: Tier, A: Operand + Default>(
 /// inline path before it keeps to the registers it needs.
 #[inline(never)]
 fn sent(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
-    let Some(reserved) = reserve_arg(req, frame, code, op)? else {
-        return Ok(Stepped::Threw(frame).into());
+    let reserved = match reserve_arg(req, frame, code, op) {
+        Ok(reserved) => reserved,
+        Err(edge) => return edge,
     };
     send(req, frame, code, op, reserved.slot)
 }
@@ -2351,8 +2352,9 @@ pub(crate) fn send_ref<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(reserved) = reserve_arg(req, frame, code, op)? else {
-        return Ok(Stepped::Threw(frame).into());
+    let reserved = match reserve_arg(req, frame, code, op) {
+        Ok(reserved) => reserved,
+        Err(edge) => return edge,
     };
     send_by_ref(req, frame, op, reserved.slot)
 }
@@ -2563,8 +2565,9 @@ pub(crate) fn send_val_ex<T: Tier, A: Operand + Default>(
 /// loop holds one copy of it for both operand kinds.
 #[inline(never)]
 fn sent_declared(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
-    let Some(reserved) = reserve_arg(req, frame, code, op)? else {
-        return Ok(Stepped::Threw(frame).into());
+    let reserved = match reserve_arg(req, frame, code, op) {
+        Ok(reserved) => reserved,
+        Err(edge) => return edge,
     };
     if must_be_sent_by_ref(req, reserved.number) {
         let thrown = cannot_pass_by_reference(req, reserved.number);
@@ -2632,8 +2635,9 @@ pub(crate) fn send_var_ex<T: Tier>(
         return edge;
     }
     req.vm_mut().stand(frame, at);
-    let Some(reserved) = reserve_arg(req, frame, code, op)? else {
-        return Ok(Stepped::Threw(frame).into());
+    let reserved = match reserve_arg(req, frame, code, op) {
+        Ok(reserved) => reserved,
+        Err(edge) => return edge,
     };
     if should_be_sent_by_ref(req, reserved.number) {
         return send_by_ref(req, frame, op, reserved.slot);
@@ -2682,8 +2686,9 @@ pub(crate) fn send_var_no_ref_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(reserved) = reserve_arg(req, frame, code, op)? else {
-        return Ok(Stepped::Threw(frame).into());
+    let reserved = match reserve_arg(req, frame, code, op) {
+        Ok(reserved) => reserved,
+        Err(edge) => return edge,
     };
     let (by_ref, prefer) = send_mode(req, reserved.number);
     if !by_ref {
@@ -2713,8 +2718,9 @@ pub(crate) fn send_var_no_ref<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(reserved) = reserve_arg(req, frame, code, op)? else {
-        return Ok(Stepped::Threw(frame).into());
+    let reserved = match reserve_arg(req, frame, code, op) {
+        Ok(reserved) => reserved,
+        Err(edge) => return edge,
     };
     send_returned(req, frame, op, reserved.slot, false)
 }
@@ -2960,8 +2966,9 @@ pub(crate) fn send_func_arg<T: Tier>(
 #[inline(never)]
 fn sent_func_arg(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, at: u32) -> Edge {
     req.vm_mut().stand(frame, at);
-    let Some(reserved) = reserve_arg(req, frame, code, op)? else {
-        return Ok(Stepped::Threw(frame).into());
+    let reserved = match reserve_arg(req, frame, code, op) {
+        Ok(reserved) => reserved,
+        Err(edge) => return edge,
     };
     if sends_arg_by_ref(req) {
         return send_by_ref(req, frame, op, reserved.slot);
@@ -3214,8 +3221,9 @@ pub(crate) fn send_user<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(reserved) = reserve_arg(req, frame, code, op)? else {
-        return Ok(Stepped::Threw(frame).into());
+    let reserved = match reserve_arg(req, frame, code, op) {
+        Ok(reserved) => reserved,
+        Err(edge) => return edge,
     };
     let value = exec::take_operand(req, frame, code, op.op1_type, op.op1);
     let value = if must_be_sent_by_ref(req, reserved.number) {
@@ -3570,15 +3578,19 @@ impl Reserved {
 /// ([`crate::api::call::handle_named_arg`], the one placement
 /// `zend_call_function`'s named arguments take too), whose extra named
 /// entry holds one owner of the name. What it refuses is php's `Error`,
-/// the operand given up (`FREE_OP1`) and the throwable left pending,
-/// and nothing is answered, which is the handler's `Threw` edge.
+/// the operand given up (`FREE_OP1`), and the `Err` is the edge the
+/// handler returns.
 fn reserve_arg(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
-) -> Result<Option<Reserved>, Fatal> {
-    let no_call = || Fatal::error("InternalError: a SEND_* opline with no call frame under it");
+) -> Result<Reserved, Edge> {
+    let no_call = || -> Result<Reserved, Edge> {
+        Err(Err(Fatal::error(
+            "InternalError: a SEND_* opline with no call frame under it",
+        )))
+    };
     match ArgAt::of(op) {
         ArgAt::Number(number) => {
             let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
@@ -3587,27 +3599,28 @@ fn reserve_arg(
                 .building_at()
                 .and_then(|call| Some((call, req.vm().at(call)?.num_args as usize)))
             else {
-                return Err(no_call());
+                return no_call();
             };
             // The `INIT_*` said how many arguments the call has in
             // order, so a number past that is a compiler bug and not an
             // allocation.
             if at >= passed {
-                return Err(Fatal::error(format!(
+                return Err(Err(Fatal::error(format!(
                     "InternalError: a SEND_* opline places argument {number} of a call of {passed}"
-                )));
+                ))));
             }
-            Ok(Some(Reserved::of(call, ArgTo::Positional(at), number)))
+            Ok(Reserved::of(call, ArgTo::Positional(at), number))
         }
         ArgAt::Name(at) => {
             let Some(name) = exec::constant(code, at).as_php_string() else {
-                return Err(Fatal::error(
+                return Err(Err(Fatal::error(
                     "InternalError: a SEND_* opline names its argument by what is no string",
-                ));
+                )));
             };
-            match reserve_named(req, name)? {
-                Ok(reserved) => Ok(Some(reserved)),
-                Err(thrown) => threw_freeing(req, frame, op, &thrown).map(|_| None),
+            match reserve_named(req, name) {
+                Ok(Ok(reserved)) => Ok(reserved),
+                Ok(Err(thrown)) => Err(threw_freeing(req, frame, op, &thrown)),
+                Err(fatal) => Err(Err(fatal)),
             }
         }
     }
@@ -13207,23 +13220,25 @@ fn data_thrown(
     req: &mut Request,
     frame: FrameRef,
     op: &Opline,
-    data: Opline,
+    (kind, at): (OperandKind, u32),
     (thrown, ran_on): (Thrown, Option<PhpObject>),
 ) -> Thrown {
     let thrown = req.raised_over(thrown, ran_on);
     req.free_pending(thrown, |req| {
-        exec::free_operand(req, frame, data.op1_type, data.op1);
+        exec::free_operand(req, frame, kind, at);
         write_out(req, frame, op, &Value::null());
     })
 }
 
 /// The end of `ASSIGN_DIM` and `ASSIGN_DIM_OP`: both operands freed, and
-/// on past the `OP_DATA`, or [`data_thrown`] and the [`threw`] edge.
+/// on past the `OP_DATA`, or [`data_thrown`] and the [`threw`] edge. Both
+/// callers stand on the path a shared table's write takes, so it is theirs.
+#[inline(always)]
 fn dim_written(
     req: &mut Request,
     frame: FrameRef,
     op: &Opline,
-    data: Opline,
+    data: (OperandKind, u32),
     (written, ran_on): (Result<(), Thrown>, Option<PhpObject>),
 ) -> Edge {
     exec::free_operand(req, frame, op.op2_type, op.op2);
@@ -13246,8 +13261,13 @@ fn false_to_array(req: &mut Request) -> Result<(), Thrown> {
 
 /// `assign_dim_error` past a place that is gone: `FREE_OP_DATA` and `null`
 /// in the temporary.
-fn data_gone(req: &mut Request, frame: FrameRef, op: &Opline, data: Opline) -> Result<(), Thrown> {
-    exec::free_operand(req, frame, data.op1_type, data.op1);
+fn data_gone(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    (kind, at): (OperandKind, u32),
+) -> Result<(), Thrown> {
+    exec::free_operand(req, frame, kind, at);
     write_out(req, frame, op, &Value::null());
     Ok(())
 }
@@ -17555,11 +17575,17 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
             match landing {
                 Ok(Landing::Entry(entry)) => {
                     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
-                    assign_to_place(req, frame, entry, (value, data.op1_type))
-                        .map(|pair| landed_out(req, frame, op, pair))
+                    match assign_to_place(req, frame, entry, (value, data.op1_type)) {
+                        Ok((landed, garbage)) => {
+                            write_out(req, frame, op, &landed);
+                            req.release(garbage);
+                            Ok(())
+                        }
+                        Err(thrown) => Err(thrown),
+                    }
                 }
                 // `assign_dim_error`: `FREE_OP_DATA` and a `null` result.
-                Ok(Landing::Gone) => data_gone(req, frame, op, data),
+                Ok(Landing::Gone) => data_gone(req, frame, op, (data.op1_type, data.op1)),
                 Ok(Landing::Occupied) => Err(crate::api::raising::cannot_add_element(req)),
                 Err(thrown) => Err(thrown),
             }
@@ -17574,10 +17600,11 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
             written
         }
         // `assign_dim_error`: `FREE_OP_DATA` and a `null` result.
-        Ok(Container::Gone) => data_gone(req, frame, op, data),
+        Ok(Container::Gone) => data_gone(req, frame, op, (data.op1_type, data.op1)),
         Err(thrown) => Err(thrown),
     };
-    dim_written(req, frame, op, data, (written, ran_on))
+    let freed = (data.op1_type, data.op1);
+    dim_written(req, frame, op, freed, (written, ran_on))
 }
 
 /// The value `$a[] = $v` appends, read as `ZEND_ASSIGN_DIM` reads it
@@ -18129,7 +18156,7 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
                 Ok(Landing::Entry(entry)) => stepped_entry(req, frame, code, step, entry),
                 // `assign_dim_op_ret_null`: `FREE_OP_DATA` and a `null`
                 // result.
-                Ok(Landing::Gone) => data_gone(req, frame, op, data),
+                Ok(Landing::Gone) => data_gone(req, frame, op, (data.op1_type, data.op1)),
                 Ok(Landing::Occupied) => Err(crate::api::raising::cannot_add_element(req)),
                 Err(thrown) => Err(thrown),
             }
@@ -18156,10 +18183,11 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
             }
         }
         // `assign_dim_op_ret_null`.
-        Ok(Container::Gone) => data_gone(req, frame, op, data),
+        Ok(Container::Gone) => data_gone(req, frame, op, (data.op1_type, data.op1)),
         Err(thrown) => Err(thrown),
     };
-    dim_written(req, frame, op, data, (written, ran_on))
+    let freed = (data.op1_type, data.op1);
+    dim_written(req, frame, op, freed, (written, ran_on))
 }
 
 /// The kernel over what one place holds and the `OP_DATA`'s value, and
@@ -18569,7 +18597,8 @@ pub(crate) fn assign_obj_op<T: Tier>(
             let ran_on = req.pending();
             let name = name.as_str_bytes().unwrap_or_default();
             let thrown = crate::api::raising::non_object_error(req, "assign", name, &container);
-            Err(data_thrown(req, frame, op, data, (thrown, ran_on)))
+            let freed = (data.op1_type, data.op1);
+            Err(data_thrown(req, frame, op, freed, (thrown, ran_on)))
         }
         (Err(thrown), _) => {
             exec::free_operand(req, frame, data.op1_type, data.op1);
@@ -23049,8 +23078,7 @@ pub(crate) fn rope_init<T: Tier, A: Operand + Default, B: Operand + Default>(
         return Ok(advanced());
     }
     req.vm_mut().stand(frame, at);
-    let added = rope_piece(req, frame, code, op, rope);
-    settled(req, frame, added)
+    rope_piece(req, frame, code, op, rope)
 }
 
 /// `ZEND_ROPE_ADD` (`Z/Zend/zend_vm_def.h:3445`): one more piece,
@@ -23098,8 +23126,7 @@ pub(crate) fn rope_add<T: Tier, A: Operand + Default, B: Operand + Default>(
         return Ok(advanced());
     }
     req.vm_mut().stand(frame, at);
-    let added = rope_piece(req, frame, code, op, rope);
-    settled(req, frame, added)
+    rope_piece(req, frame, code, op, rope)
 }
 
 /// `ZEND_ROPE_END` (`Z/Zend/zend_vm_def.h:3480`): the last piece into
@@ -23144,7 +23171,12 @@ pub(crate) fn rope_end<T: Tier, A: Operand + Default, B: Operand + Default>(
     let converted = if inline_rope_piece(req, frame, code, op, rope, B::default()) {
         Ok(())
     } else {
-        rope_piece(req, frame, code, op, rope)
+        let piece = exec::operand(req, frame, code, op.op2_type, op.op2);
+        let converted = crate::ops::to_string(req, &piece);
+        exec::free_operand(req, frame, op.op2_type, op.op2);
+        converted.map(|text| {
+            req.rope_push(rope, text);
+        })
     };
     let joined = match converted {
         Ok(()) => req.rope_end(rope),
@@ -23154,7 +23186,13 @@ pub(crate) fn rope_end<T: Tier, A: Operand + Default, B: Operand + Default>(
         }
     };
     req.take_slot(frame, rope_slot);
-    computed_into(req, frame, op, joined.map(Value::string))
+    match joined {
+        Ok(joined) => {
+            set_out(req, frame, op, Value::string(joined));
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => threw(req, frame, &thrown),
+    }
 }
 
 /// The rope the opline's `op1` temporary names, the position
@@ -23214,13 +23252,17 @@ fn rope_piece(
     code: &OpArray,
     op: &Opline,
     rope: RopeAt,
-) -> Result<(), Thrown> {
+) -> Edge {
     let piece = exec::operand(req, frame, code, op.op2_type, op.op2);
     let converted = crate::ops::to_string(req, &piece);
     exec::free_operand(req, frame, op.op2_type, op.op2);
-    converted.map(|text| {
-        req.rope_push(rope, text);
-    })
+    match converted {
+        Ok(text) => {
+            req.rope_push(rope, text);
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => threw(req, frame, &thrown),
+    }
 }
 
 /// `ZEND_IS_SMALLER`: [`crate::ops::is_smaller`] over the two operands,
