@@ -84,10 +84,10 @@ impl Node {
         if !z.is_collectable() {
             return None;
         }
-        if let Some(a) = z.as_arr() {
-            Some(Node::Arr(a))
-        } else if let Some(o) = z.as_obj() {
+        if let Some(o) = z.as_obj() {
             Some(Node::Obj(o))
+        } else if let Some(a) = z.as_arr() {
+            Some(Node::Arr(a))
         } else {
             z.as_reference().map(Node::Ref)
         }
@@ -155,7 +155,11 @@ impl Buffer {
 
     /// `first_unused`: the first index never written.
     fn first_unused(&self) -> u32 {
-        FIRST_ROOT + u32::try_from(self.entries.len()).unwrap_or(u32::MAX - FIRST_ROOT)
+        // `MAX_BUF_SIZE` is under `u32::MAX`, and nothing lays an entry
+        // past the buffer's size.
+        #[allow(clippy::cast_possible_truncation)]
+        let written = self.entries.len() as u32;
+        FIRST_ROOT + written
     }
 
     fn entry(&self, idx: u32) -> Option<Entry> {
@@ -163,11 +167,13 @@ impl Buffer {
         self.entries.get(at).copied()
     }
 
+    fn at_mut(&mut self, idx: u32) -> Option<&mut Entry> {
+        let at = idx.checked_sub(FIRST_ROOT)? as usize;
+        self.entries.get_mut(at)
+    }
+
     fn set(&mut self, idx: u32, entry: Entry) {
-        if let Some(at) = idx
-            .checked_sub(FIRST_ROOT)
-            .and_then(|at| self.entries.get_mut(at as usize))
-        {
+        if let Some(at) = self.at_mut(idx) {
             *at = entry;
         }
     }
@@ -362,16 +368,36 @@ impl Collector {
         self.num_roots = self.num_roots.saturating_sub(1);
     }
 
-    /// A free index for a root php adds under its threshold
-    /// (`gc_possible_root`'s ladder): an unused entry, or the next one
-    /// while it is under the threshold; none at the threshold, which is
+    /// `gc_possible_root`'s ladder under its threshold: `node` in an
+    /// unused entry or the next one, purple, in one look at the buffer.
+    /// False, with nothing touched, at the threshold, which is
     /// `gc_possible_root_when_full`'s.
-    fn fetch_under_threshold(&mut self) -> Option<u32> {
-        let buf = self.buf.as_mut()?;
-        if let Some(idx) = buf.fetch_unused() {
-            return Some(idx);
-        }
-        (buf.first_unused() < buf.threshold).then(|| buf.fetch_next_unused())
+    #[inline]
+    fn root_under_threshold(&mut self, node: Node) -> bool {
+        let Some(buf) = self.buf.as_mut() else {
+            return false;
+        };
+        let idx = if let Some(idx) = buf.unused {
+            let Some(entry) = buf.at_mut(idx) else {
+                return false;
+            };
+            let Entry::Unused(next) = *entry else {
+                return false;
+            };
+            *entry = Entry::Root(node);
+            buf.unused = next;
+            idx
+        } else {
+            let idx = buf.first_unused();
+            if idx >= buf.threshold {
+                return false;
+            }
+            buf.entries.push(Entry::Root(node));
+            idx
+        };
+        node.gc().set_place(Some(compress(idx)), Colour::Purple);
+        self.num_roots += 1;
+        true
     }
 
     /// A free index for a root past the threshold, a garbage entry or an
@@ -458,16 +484,17 @@ impl Collector {
         }
         let address = header.address();
         header.set_place(None, Colour::Black);
-        let Some(address) = address else { return };
-        let idx = if self.first_unused() >= MAX_UNCOMPRESSED {
-            self.buf
-                .as_ref()
-                .and_then(|buf| buf.decompress(node, address))
+        let (Some(address), Some(buf)) = (address, self.buf.as_mut()) else {
+            return;
+        };
+        let idx = if buf.entries.len() >= MAX_UNCOMPRESSED as usize - FIRST_ROOT as usize {
+            buf.decompress(node, address)
         } else {
             Some(address)
         };
         if let Some(idx) = idx {
-            self.remove_from_roots(idx);
+            buf.link_unused(idx);
+            self.num_roots = self.num_roots.saturating_sub(1);
         }
     }
 
@@ -789,24 +816,36 @@ impl Heap {
     /// object its variables own with, as `i_free_compiled_variables`
     /// gives them up with no destructor served and nothing collected.
     #[must_use]
+    #[inline(always)] // the tests of a frame's leave, `OBJ_RELEASE` inline there
+    #[allow(clippy::inline_always)]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn release_kept(&mut self, z: Zval) -> bool {
         let Some(header) = z.counted().filter(|header| header.refcount() > 1) else {
             return false;
         };
-        let gc = &mut self.gc;
-        match possible_root(z) {
-            Some(node) if !gc.protected && gc.buf.is_some() => {
-                let Some(idx) = gc.fetch_under_threshold() else {
-                    return false;
-                };
-                let _owners_left = Heap::give_up(header);
-                gc.place(idx, node, Colour::Purple);
-            }
-            _ => {
-                let _owners_left = Heap::give_up(header);
-            }
+        if Heap::may_be_root(z, header) {
+            return self.release_possible_root(z, header);
         }
+        let _owners_left = Heap::give_up(header);
+        true
+    }
+
+    /// [`Heap::release_kept`] of a value [`Heap::may_be_root`] says the
+    /// buffer may take, `gc_possible_root`'s ladder after the decrement:
+    /// a call of its own, as php's is. False, with nothing touched, at
+    /// the threshold.
+    #[inline(never)]
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn release_possible_root(&mut self, z: Zval, header: Counted) -> bool {
+        let gc = &mut self.gc;
+        if let Some(node) = possible_root(z)
+            && !gc.protected
+            && gc.buf.is_some()
+            && !gc.root_under_threshold(node)
+        {
+            return false;
+        }
+        let _owners_left = Heap::give_up(header);
         true
     }
 
@@ -818,9 +857,8 @@ impl Heap {
         if gc.protected || gc.buf.is_none() {
             return;
         }
-        match gc.fetch_under_threshold() {
-            Some(idx) => gc.place(idx, node, Colour::Purple),
-            None => Heap::gc_possible_root_when_full(hooks, node),
+        if !gc.root_under_threshold(node) {
+            Heap::gc_possible_root_when_full(hooks, node);
         }
     }
 

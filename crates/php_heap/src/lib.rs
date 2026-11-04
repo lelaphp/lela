@@ -896,9 +896,18 @@ impl Heap {
     #[inline(always)] // the tests of every release that leaves owners
     #[allow(clippy::inline_always)]
     pub(crate) fn owners_left(hooks: &mut dyn HeapHooks, z: Zval, header: Counted) {
-        if z.is_collectable() && (z.kind() == ZvalType::Reference || header.may_leak()) {
+        if Heap::may_be_root(z, header) {
             Heap::gc_check_possible_root(hooks, z);
         }
+    }
+
+    /// `gc_check_possible_root`'s tests, `GC_TYPE_INFO(ref) ==
+    /// GC_REFERENCE` and `GC_MAY_LEAK(ref)`, off the zval and the header
+    /// in hand: false for what no root buffer takes, or holds already.
+    #[inline(always)] // the tests of every release that leaves owners
+    #[allow(clippy::inline_always)]
+    pub(crate) fn may_be_root(z: Zval, header: Counted) -> bool {
+        z.is_collectable() && (z.kind() == ZvalType::Reference || header.may_leak())
     }
 
     /// `rc_dtor_func`: the value whose last owner went destroyed, a
