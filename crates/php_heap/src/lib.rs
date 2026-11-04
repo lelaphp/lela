@@ -665,15 +665,27 @@ impl Heap {
     #[allow(clippy::inline_always)] // measured on #3448: a plain `#[inline]` left it a call at every free
     #[inline(always)]
     pub(crate) unsafe fn give_back(&mut self, at: NonNull<u8>, pinned: bool) {
-        if pinned {
-            self.mm.retire(at);
-        } else if self.mm.is_retired(at) {
-            // SAFETY: the caller's contract: no pin and no owner names it.
-            unsafe { self.mm.free_retired(at) };
-        } else {
+        if !self.retiring(at, pinned) {
             // SAFETY: the caller's contract.
             unsafe { self.mm.free(at) };
         }
+    }
+
+    /// The arms of [`Heap::give_back`] that are no plain free: the block's
+    /// free counted under a pin, or the bytes of a block counted already
+    /// handed back. Whether it was one of those.
+    #[allow(clippy::inline_always)] // as `give_back`
+    #[inline(always)]
+    fn retiring(&mut self, at: NonNull<u8>, pinned: bool) -> bool {
+        if pinned {
+            self.mm.retire(at);
+        } else if self.mm.is_retired(at) {
+            // SAFETY: `give_back`'s contract: no pin and no owner names it.
+            unsafe { self.mm.free_retired(at) };
+        } else {
+            return false;
+        }
+        true
     }
 
     /// What a debug build's sensors found in this heap since the
