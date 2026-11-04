@@ -1345,20 +1345,16 @@ impl Request {
         class: crate::api::values::ClassId,
     ) -> Option<exec::PropertyOffset> {
         let header = self.vm.at(frame)?;
-        let exec::Cached::Property(exec::PropertyPlace {
-            class: held,
-            function,
-            scope,
-            offset,
-        }) = self.map.slot(header.cache_base(), slot).copied()?
-        else {
+        let exec::Cached::Property(place) = self.map.slot(header.cache_base(), slot)? else {
             return None;
         };
-        let same = held == class
+        let same = place.class == class
             && !self.fakes_scope()
-            && (function.is_some() && header.closure().is_none() && header.function() == function
-                || self.frame_scope(frame) == scope);
-        same.then_some(offset)
+            && (place.function.is_some()
+                && header.closure().is_none()
+                && header.function() == place.function
+                || self.frame_scope(frame) == place.scope);
+        same.then_some(place.offset)
     }
 
     /// `zend_get_property_offset`'s `CACHE_POLYMORPHIC_PTR_EX` for the
