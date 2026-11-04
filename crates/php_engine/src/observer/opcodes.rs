@@ -264,13 +264,17 @@ impl Telling for Declared {
 /// [`Telling::before`] where one opline is dispatched outside the loop,
 /// by a stepping host's [`crate::tier::step`], which is not generic over
 /// the loop's choice and so pays one test of the set, a word that is zero
-/// while none is declared. A parameter prologue served outside the loop
-/// reads the set the same way, through [`Declared`]
+/// while none is declared, made on the engine's set where it stands, as
+/// php's test of an opline's handler is one compare (#4111). `at` is the
+/// opline the step stood `frame` at, which its caller holds. A parameter
+/// prologue served outside the loop reads the set through [`Declared`]
 /// ([`crate::exec::parameter_prologue`]).
 #[inline(always)] // as `Telling::before`
-pub(crate) fn tell_before(req: &mut Request, frame: FrameRef, opcode: Opcode) {
-    let at = req.vm().opline(frame);
-    Declared::of(req).before(req, frame, at, opcode);
+pub(crate) fn tell_before(req: &mut Request, frame: FrameRef, at: u32, opcode: Opcode) {
+    if req.shared.opcodes.any.contains(opcode) {
+        req.vm_mut().stand(frame, at);
+        tell(req, frame, opcode);
+    }
 }
 
 /// php's `ZEND_USER_OPCODE` handler up to its dispatch: the chain of
