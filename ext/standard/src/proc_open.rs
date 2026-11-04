@@ -76,6 +76,7 @@ use std::ffi::OsStr;
 use std::ops::ControlFlow;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
+use std::path::{Path as HostPath, PathBuf};
 use std::process::{Command, Stdio};
 
 use php_ext::abi::{OrFalse, Path, Ref, Union, Untyped};
@@ -762,6 +763,56 @@ fn environment(req: &mut Request, env: PhpArray) -> Result<Env, Thrown> {
 /// parent end, under its key, and the `process` resource. A spawn that
 /// fails is php's `posix_spawn() failed: %s`.
 ///
+/// An array command's program is found on the parent's `PATH`, a
+/// `putenv` of it included, whatever `PATH` `$env_vars` hands the child,
+/// as `posix_spawnp` finds it (`Z/ext/standard/proc_open.c:1420`), with
+/// libc's default where the parent has none.
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/proc_open_path_' . getmypid();
+/// mkdir($dir);
+/// file_put_contents("$dir/dax_shim", "#!/bin/sh\necho \"shim \$DAX_SEEN \$PATH\"\n");
+/// chmod("$dir/dax_shim", 0755);
+/// file_put_contents("$dir/dax_plain", "#!/bin/sh\necho plain\n");
+/// function run($program, $cwd = null, $env = null) {
+///     $p = proc_open([$program], [1 => ['pipe', 'w']], $pipes, $cwd, $env);
+///     if ($p === false) { return; }
+///     echo stream_get_contents($pipes[1]);
+///     proc_close($p);
+/// }
+/// $original = getenv('PATH');
+/// putenv("PATH=$dir:$original");
+/// run('dax_shim', null, ['DAX_SEEN' => 'named', 'PATH' => '/nowhere']);
+/// putenv("PATH=/nowhere:$dir");
+/// putenv('DAX_SEEN=plain');
+/// $p = proc_open(['dax_shim'], [1 => ['pipe', 'w']], $pipes);
+/// echo str_replace($dir, 'DIR', stream_get_contents($pipes[1]));
+/// proc_close($p);
+/// putenv("PATH=$original");
+/// run('dax_shim', null, ['DAX_SEEN' => 'named', 'PATH' => $dir]);
+/// chdir($dir);
+/// putenv('PATH=:/nowhere');
+/// run('dax_shim', null, ['DAX_SEEN' => 'in cwd', 'PATH' => '/nowhere']);
+/// putenv("PATH=$dir");
+/// run('dax_plain');
+/// putenv('PATH');
+/// $p = proc_open(['sh', '-c', 'echo "$0"'], [1 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]);
+/// proc_close($p);
+/// putenv("PATH=$original");
+/// unlink("$dir/dax_shim"); unlink("$dir/dax_plain"); rmdir($dir);
+/// ```
+/// ```expect
+/// shim named /nowhere
+/// shim plain /nowhere:DIR
+///
+/// Warning: proc_open(): posix_spawn() failed: No such file or directory in %SCRATCH%/witness.php on line 8
+/// shim in cwd /nowhere
+///
+/// Warning: proc_open(): posix_spawn() failed: Permission denied in %SCRATCH%/witness.php on line 8
+/// sh
+/// ```
+///
 /// ```php
 /// $p = proc_open('cat', [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['redirect', 1]], $pipes);
 /// var_dump($p, array_keys($pipes));
@@ -1016,9 +1067,51 @@ fn command_of(req: &mut Request, command: Union<PhpArray, PhpString>) -> Result<
     }
 }
 
+/// `_PATH_DEFPATH`, what `posix_spawnp` searches where `PATH` is not set.
+#[cfg(target_os = "macos")]
+const DEFAULT_PATH: &[u8] = b"/usr/bin:/bin";
+#[cfg(not(target_os = "macos"))]
+const DEFAULT_PATH: &[u8] = b"/bin:/usr/bin";
+
+/// `posix_spawnp`'s search, made in the parent: `file` on the `PATH` of
+/// the request making the spawn, whatever `$env_vars` hands the child, an
+/// empty entry the directory the child starts in. libc asks `posix_spawn`
+/// of each entry in turn and goes on past one that will not start; here
+/// `stat(2)` says which that is, and where none is found the answer is the
+/// last refused, or else the last looked at, so the spawn fails with what
+/// php reports. A `file` holding a slash is searched for nowhere.
+fn on_path(req: &Request, file: &[u8], cwd: Option<&[u8]>) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let bare = PathBuf::from(OsStr::from_bytes(file));
+    if file.is_empty() || file.contains(&b'/') {
+        return bare;
+    }
+    let mut dir = req.environment().cwd();
+    if let Some(cwd) = cwd {
+        dir.push(OsStr::from_bytes(cwd));
+    }
+    let env = req.environment().env_pairs();
+    let path = env.iter().find(|(name, _)| name == b"PATH");
+    let path = path.map_or(DEFAULT_PATH, |(_, value)| value);
+    let (mut refused, mut looked_at) = (None, bare);
+    for entry in path.split(|byte| *byte == b':') {
+        let entry: &[u8] = if entry.is_empty() { b"." } else { entry };
+        let candidate = HostPath::new(OsStr::from_bytes(entry)).join(OsStr::from_bytes(file));
+        match std::fs::metadata(dir.join(&candidate)) {
+            Ok(found) if found.is_file() && found.permissions().mode() & 0o111 != 0 => {
+                return candidate;
+            }
+            Ok(_) => refused = Some(candidate),
+            Err(_) => looked_at = candidate,
+        }
+    }
+    refused.unwrap_or(looked_at)
+}
+
 /// The child as `posix_spawnp` of `argv` or `/bin/sh -c` of the string
 /// would start it: in `$cwd` or the request's working directory, with
-/// `$env_vars` or the request's environment.
+/// `$env_vars` or the request's environment, an array command's program
+/// found by [`on_path`] and named `argv[0]` as the caller spelled it.
 fn child_command(
     req: &Request,
     command_str: &[u8],
@@ -1028,7 +1121,9 @@ fn child_command(
 ) -> Command {
     let mut child = match argv {
         Some(argv) => {
-            let mut child = Command::new(OsStr::from_bytes(&argv[0]));
+            use std::os::unix::process::CommandExt as _;
+            let mut child = Command::new(on_path(req, &argv[0], cwd));
+            child.arg0(OsStr::from_bytes(&argv[0]));
             child.args(argv[1..].iter().map(|arg| OsStr::from_bytes(arg)));
             in_request(req, &mut child);
             child
