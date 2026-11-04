@@ -375,10 +375,28 @@ fn held_arm(pattern: &str, call: &str, inline: Option<&Inlined>, aside: bool) ->
     // A fused path serves the `ASSIGN` after its opline unseen, so the
     // loop of an engine whose observers declared `ASSIGN` serves the
     // opline alone, through its handler, and tells them of the `ASSIGN`.
-    let guarded = |Inlined { path, assigned }: &Inlined| {
+    // A path over the call being built ([`CALL_PATHS`]) is handed it
+    // with the slots, both taken up from one look at the frame table in
+    // the arm, and stands aside where no call is being built.
+    let guarded = |Inlined {
+                       path,
+                       assigned,
+                       call,
+                   }: &Inlined| {
         if *assigned {
             format!(
                 "if $declared.tells(php_unit::Opcode::Assign) {{ None }} else {{ {path}(&mut *$slots, code, op, at) }}"
+            )
+        } else if *call {
+            format!(
+                "{{\n\
+                 \x20                   let (slots, call) = $req.slots_and_call(frame);\n\
+                 \x20                   $slots = slots;\n\
+                 \x20                   match call {{\n\
+                 \x20                       Some(call) => {path}(&mut *$slots, call, code, op, at),\n\
+                 \x20                       None => None,\n\
+                 \x20                   }}\n\
+                 \x20               }}"
             )
         } else {
             format!("{path}(&mut *$slots, code, op, at)")
@@ -413,9 +431,11 @@ fn held_macro(held: &str) -> String {
          /// `match` written into the loop's own body, where the borrow\n\
          /// checker reads every arm with the loop. The arm of a handler\n\
          /// with an inline path (`crate::handlers::inline_path`) serves it\n\
-         /// over `slots`, with no request in hand; every other arm, and one\n\
-         /// whose inline path stands aside, lets the slots go, an empty\n\
-         /// frame left in their place, and calls the handler as\n\
+         /// over `slots`, with no request in hand, and the arm of one whose\n\
+         /// path reads the call being built takes the slots up again with\n\
+         /// that call from one look at the frame table; every other arm,\n\
+         /// and one whose inline path stands aside, lets the slots go, an\n\
+         /// empty frame left in their place, and calls the handler as\n\
          /// [`dispatch`] calls it, and the loop takes them up again for the\n\
          /// frame it goes on in. The borrow checker refuses any other order:\n\
          /// no arm reads the slots after a handler that can move them.\n\
@@ -936,8 +956,10 @@ const INLINE_PATHS: &[&str] = &[
     "assign_dim",
     "assign_dim_op",
     "assign_op",
+    "check_func_arg",
     "div",
     "div_assign_cv",
+    "fetch_dim_func_arg",
     "fetch_dim_r",
     "is_equal",
     "is_identical",
@@ -955,10 +977,37 @@ const INLINE_PATHS: &[&str] = &[
     "pre_dec",
     "pre_inc",
     "qm_assign",
+    "send_func_arg",
+    "send_val",
+    "send_val_ex",
+    "send_var",
+    "send_var_ex",
     "sub",
     "sub_assign_cv",
     "type_check",
     "verify_return_type",
+];
+
+/// The inline paths of [`INLINE_PATHS`] that read and write the call
+/// being built as well as the frame's slots, php's `EX(call)`: each takes
+/// the call after the slots (`&mut crate::exec::HeapFrame`), which its
+/// arm takes up with the slots from one look at the frame table
+/// (`Request::slots_and_call`) and lets go at the arm's end, so the call
+/// an arm is handed is the one on top of the stack whatever `INIT_*`
+/// pushed or `DO_*CALL` popped before it. Held across the loop's arms
+/// instead, refreshed where an arm took the request, it put the frame's
+/// number out of its register: single-stepped, `DO_UCALL` 103 to 111,
+/// `RETURN` 128 to 133 and `INIT_FCALL` 101 to 105 instructions (#4099).
+/// A name here that is not in [`INLINE_PATHS`] is served by its handler
+/// alone.
+const CALL_PATHS: &[&str] = &[
+    "check_func_arg",
+    "fetch_dim_func_arg",
+    "send_func_arg",
+    "send_val",
+    "send_val_ex",
+    "send_var",
+    "send_var_ex",
 ];
 
 /// An inline path the loop's arm serves first: the function's path, and
@@ -967,6 +1016,8 @@ const INLINE_PATHS: &[&str] = &[
 struct Inlined {
     path: String,
     assigned: bool,
+    /// Whether the path reads the call being built too ([`CALL_PATHS`]).
+    call: bool,
 }
 
 /// The inline path the loop's arm for `variant` serves first, over the
@@ -992,9 +1043,11 @@ fn inline_of(handler: &Handler, variant: &Variant, generics: &str) -> Option<Inl
     } else {
         format!("::<{generics}>")
     };
+    let call = CALL_PATHS.contains(&path.as_str());
     Some(Inlined {
         path: format!("crate::handlers::inline_path::{path}{turbofish}"),
         assigned: variant.assigned,
+        call,
     })
 }
 
