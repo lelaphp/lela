@@ -133,3 +133,16 @@ fn a_typed_cell_a_conversion_gave_up_takes_nothing() {
     );
     assert_eq!(stdout, "conv|1|gone\n");
 }
+
+#[test]
+fn a_write_goes_with_the_table_a_handler_gave_up() {
+    let stdout = served(
+        "<?php\n\
+         set_error_handler(function () { $GLOBALS['a'] = 1; return true; });\n\
+         function tbl() { $x = []; for ($i = 0; $i < 40; $i++) { $x[] = 'x' . $i; } return $x; }\n\
+         $a = tbl(); echo $a[0] = $u, '|', $a, \"\\n\";\n\
+         $a = tbl(); echo $a[0] .= [], '|', $a, \"\\n\";\n\
+         $a = tbl(); $a[5] = ['q' . 'r']; $a[5][0] .= []; echo $a, \"\\n\";\n",
+    );
+    assert_eq!(stdout, "|1\nx0Array|1\n1\n");
+}

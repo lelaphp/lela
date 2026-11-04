@@ -17862,15 +17862,22 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
                 write_at(req, frame, code, op, array).and_then(|at| write_entry(req, array, at));
             match landing {
                 Ok(Landing::Entry(entry)) => {
+                    let undefined = data.op1_type == OperandKind::Cv
+                        && req.slot(frame, data.op1).tag() == TypeTag::Undef;
+                    let kept = undefined.then(|| Owner::take(req, Value::array(array)));
                     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
-                    match assign_to_place(req, frame, entry, (value, data.op1_type)) {
+                    let written = match assign_to_place(req, frame, entry, (value, data.op1_type)) {
                         Ok((landed, garbage)) => {
                             write_out(req, frame, op, &landed);
                             req.release(garbage);
                             Ok(())
                         }
                         Err(thrown) => Err(thrown),
+                    };
+                    if let Some(kept) = kept {
+                        kept.let_go(req);
                     }
+                    written
                 }
                 // `assign_dim_error`: `FREE_OP_DATA` and a `null` result.
                 Ok(Landing::Gone) => data_gone(req, frame, op, (data.op1_type, data.op1)),
@@ -18022,6 +18029,54 @@ impl From<Option<php_heap::ZvalRef>> for Landing {
     fn from(entry: Option<php_heap::ZvalRef>) -> Landing {
         entry.map_or(Landing::Occupied, Landing::Entry)
     }
+}
+
+/// Whether a compound assignment over `entry` raises nothing a handler
+/// could use to give the table up: a `.=` of a string or a long over
+/// one, which is the step a program repeats. php holds nothing across
+/// any step and writes through the entry after it, so every other step
+/// takes an owner of the table, and the entry goes with the table where
+/// that owner was the last.
+///
+/// A table a handler took an owner of is written as php writes it:
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["c"] = $GLOBALS["a"]; return true; });
+/// $a = [str_repeat("x", 3)]; $a[0] .= []; var_dump($a, $c);
+/// $a = [str_repeat("x", 3)]; $a[0] = $u; var_dump($a, $c);
+/// ```
+/// ```expect
+/// [Array to string conversion]
+/// array(1) {
+///   [0]=>
+///   string(8) "xxxArray"
+/// }
+/// array(1) {
+///   [0]=>
+///   string(8) "xxxArray"
+/// }
+/// [Undefined variable $u]
+/// array(1) {
+///   [0]=>
+///   NULL
+/// }
+/// array(1) {
+///   [0]=>
+///   NULL
+/// }
+/// ```
+fn step_is_silent(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    step: Compound<'_>,
+    entry: php_heap::ZvalRef,
+) -> bool {
+    let plain = |value: Value| matches!(value.as_ref(), ValueRef::Str(_) | ValueRef::Int(_));
+    let Opline { op1_type, op1, .. } = step.data;
+    operator(step.op.extended_value) == Some(Opcode::Concat)
+        && plain(Value::of_slot(entry.read()))
+        && plain(exec::operand_undef(req, frame, code, op1_type, op1))
 }
 
 /// The entry a compound assignment to a dimension lands in, php's
@@ -18441,7 +18496,21 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
             let landing =
                 write_at(req, frame, code, op, array).and_then(|at| rw_entry(req, array, at));
             match landing {
-                Ok(Landing::Entry(entry)) => stepped_entry(req, frame, code, step, entry),
+                Ok(Landing::Entry(entry)) => {
+                    let kept = (!step_is_silent(req, frame, code, step, entry))
+                        .then(|| Owner::take(req, Value::array(array)));
+                    let stepped = stepped_entry(req, frame, code, step, entry);
+                    match (kept, stepped) {
+                        (Some(kept), Err(thrown)) => Err(req.free_pending(thrown, |req| {
+                            kept.let_go(req);
+                        })),
+                        (Some(kept), stepped) => {
+                            kept.let_go(req);
+                            stepped
+                        }
+                        (None, stepped) => stepped,
+                    }
+                }
                 // `assign_dim_op_ret_null`: `FREE_OP_DATA` and a `null`
                 // result.
                 Ok(Landing::Gone) => data_gone(req, frame, op, (data.op1_type, data.op1)),
