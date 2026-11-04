@@ -933,6 +933,8 @@ const INLINE_PATHS: &[&str] = &[
     "add",
     "add_assign_cv",
     "assign",
+    "assign_dim",
+    "assign_dim_op",
     "assign_op",
     "div",
     "div_assign_cv",
