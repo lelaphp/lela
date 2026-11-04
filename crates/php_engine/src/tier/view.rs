@@ -291,6 +291,7 @@ pub fn frame_cache(req: &Request, frame: FrameRef) -> Option<FuncRef> {
 /// activated user frame's, where the epoch holds one at that offset: none
 /// for a cache that is no op array's own (a closure's, a trait method's
 /// copy's), for a request's, and for any other frame.
+#[inline]
 fn own_row<'r>(
     req: &'r Request,
     header: &crate::exec::Header,

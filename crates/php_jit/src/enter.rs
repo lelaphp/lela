@@ -481,7 +481,7 @@ impl Landings {
     ) -> Option<Landed<'e>> {
         let (slot, kept) = (self.kept.iter())
             .map(|slot| (slot, slot.get()))
-            .find(|(_, kept)| kept.func == Some(func) && kept.at == at)?;
+            .find(|(_, kept)| kept.at == at && kept.func == Some(func))?;
         let landing = match kept.landing {
             0 => laid_since(epoch, slot, kept),
             // SAFETY: kept by `keep` or `laid_since`, of `epoch`, as this
