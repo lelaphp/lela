@@ -2569,6 +2569,33 @@ impl crate::Heap {
     /// holds, every refcounted element one more owner and every string
     /// key too, the tombstones left behind and the internal pointer
     /// moved with the element it stood on.
+    ///
+    /// A hash whose every position is counted, `HT_IS_WITHOUT_HOLES`,
+    /// is copied position for position, an `UNDEF` value written in
+    /// place without `zend_hash_del` kept where it stands under its key
+    /// (`zend_array_dup_elements` with `with_holes` false); only a table
+    /// with tombstones is compacted. A closure's `static` table is one:
+    /// an arrow function's capture of a variable its scope has not
+    /// binds `UNDEF` into its slot, and `bindTo` and `Closure::bind`
+    /// copy the table, whose positions each `BIND_STATIC` of the body
+    /// names.
+    ///
+    /// ```php
+    /// $a = 1; $c = 3;
+    /// $f = fn () => [$u ?? 'u', $a, $v ?? 'v', $c, $w ?? 'w'];
+    /// $g = function () use ($a) { static $s = 's'; return fn () => [$x ?? 'x', $a, $s]; };
+    /// class D {}
+    /// echo json_encode($f->bindTo(null)()), "\n";
+    /// echo json_encode(Closure::bind($f, new D, D::class)()), "\n";
+    /// echo json_encode(Closure::bind($f->bindTo(new D), null, null)()), "\n";
+    /// echo json_encode($g()->bindTo(new D)()), "\n";
+    /// ```
+    /// ```expect
+    /// ["u",1,"v",3,"w"]
+    /// ["u",1,"v",3,"w"]
+    /// ["u",1,"v",3,"w"]
+    /// ["x",1,"s"]
+    /// ```
     pub fn array_dup(&mut self, a: Arr) -> Result<Arr, Fatal> {
         let source = a.header();
         let at = self.mm.alloc(HEADER)?;
@@ -2615,10 +2642,14 @@ impl crate::Heap {
         header
             .internal_pointer
             .set(if pointer < used { pointer } else { 0 });
+        // `with_holes`, `!HT_IS_WITHOUT_HOLES(source)`: only a table whose
+        // tombstones are uncounted leaves its `UNDEF`s out, and one
+        // without keeps each where it stands, under its key.
+        let with_holes = used != source.num_elements.get();
         let mut idx = 0;
         for i in 0..used {
             let b = a.read_bucket(i);
-            if b.val.is_undef() {
+            if with_holes && b.val.is_undef() {
                 if walked && iter_pos.is_none() {
                     iter_pos = Some(self.iterators.lower_pos(target, i + 1));
                 }
@@ -3730,6 +3761,48 @@ mod tests {
         assert!(!a.is_packed());
         assert_eq!(keys(a), vec![0, 4, 2]);
         Heap::release(&mut nothing, Zval::array(a));
+    }
+
+    /// `zend_array_dup` over a hash without holes, its `UNDEF`s written
+    /// in place and still counted, as `zend_closure_bind_var_ex` leaves
+    /// a closure's `static` table: the copy keeps every position, each
+    /// `UNDEF` under its key. Once a tombstone stands in it the table
+    /// has holes and the copy is compacted, the `UNDEF`s left out too.
+    #[test]
+    fn a_copy_keeps_an_undef_written_in_place_and_compacts_a_tombstone() {
+        let _alone = alone();
+        let mut nothing = Nothing::new();
+        let names =
+            [b"u", b"a", b"v", b"c"].map(|name| nothing.strings.intern(name).expect("a name"));
+        let t = nothing.heap.array().expect("an array");
+        for (n, name) in (0..).zip(names) {
+            assert!(Heap::array_update(&mut nothing, t, Key::Str(name), Zval::long(n)).is_ok());
+        }
+        for at in [0, 2] {
+            t.value_ref_at(at).expect("a position").write(Zval::UNDEF);
+        }
+        let read = |a: Arr, at: u32| a.value_ref_at(at).map(ZvalRef::read);
+        let copy = nothing.heap.array_dup(t).expect("a copy");
+        assert_eq!((copy.num_used(), copy.len()), (4, 4));
+        assert!(read(copy, 0).is_some_and(Zval::is_undef));
+        assert_eq!(read(copy, 1).and_then(Zval::as_long), Some(1));
+        assert!(read(copy, 2).is_some_and(Zval::is_undef));
+        assert_eq!(read(copy, 3).and_then(Zval::as_long), Some(3));
+        assert_eq!(
+            copy.get(Key::Str(names[3])).and_then(Zval::as_long),
+            Some(3)
+        );
+        assert!(Heap::array_del(&mut nothing, t, Key::Str(names[1])));
+        let compacted = nothing.heap.array_dup(t).expect("a copy");
+        assert_eq!((compacted.num_used(), compacted.len()), (1, 1));
+        assert_eq!(read(compacted, 0).and_then(Zval::as_long), Some(3));
+        assert_eq!(
+            compacted.get(Key::Str(names[3])).and_then(Zval::as_long),
+            Some(3)
+        );
+        for a in [t, copy, compacted] {
+            Heap::release(&mut nothing, Zval::array(a));
+        }
     }
 
     /// `zend_array_dup` is `SEPARATE_ARRAY`'s copy: the elements one
