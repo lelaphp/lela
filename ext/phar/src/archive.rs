@@ -6,18 +6,21 @@
 //! and so whether `unlinkArchive()` refuses and whether a second open
 //! reads the file again.
 //!
-//! php keeps an archive's bytes behind a stream; here the bytes an entry
-//! is read from are the archive's own buffer (`fp`), the buffer entries
-//! are decompressed into (`ufp`), a buffer of the entry's own once it is
-//! written (`PHAR_MOD`), or the stream of a mounted file (`PHAR_TMP`),
-//! the four `phar_fp_type`s.
+//! An entry is read from one of the four `phar_fp_type`s: `fp`, the
+//! archive's file as a live stream, seeked and read per read as php's is,
+//! or the bytes php wrote into a stream it holds; the buffer entries are
+//! decompressed into (`ufp`); a buffer of the entry's own once it is
+//! written (`PHAR_MOD`); or the stream of a mounted file (`PHAR_TMP`).
 
 use std::sync::Arc;
 
 use php_ext::raising::Thrown;
-use php_ext::request::{MAXPATHLEN, OwnedStream as _, Request, Stream, Streams as _, Whence};
+use php_ext::request::{
+    MAXPATHLEN, Opening, OwnedStream as _, Request, Stream, Streams as _, Whence,
+};
 use php_ext::values::{Owner, PhpString, Value};
 
+use crate::entry::Efp;
 use crate::table::Table;
 
 pub(crate) const API_VERSION: &str = "1.1.1";
@@ -69,7 +72,7 @@ pub(crate) enum Format {
 /// Where an entry's contents are read from, `phar_fp_type` with the
 /// stream it names.
 pub(crate) enum Content {
-    /// `PHAR_FP`: the archive's bytes, at the entry's `offset`.
+    /// `PHAR_FP`: `phar->fp`, at the entry's `offset`.
     Fp,
     /// `PHAR_UFP`: the archive's decompressed buffer, at `offset`.
     Ufp,
@@ -80,48 +83,27 @@ pub(crate) enum Content {
     Tmp(Option<Owner<Stream>>),
 }
 
-/// `phar->fp`: the archive's bytes, shared with each entry stream opened
-/// on them, which reads them on after a write replaces them, as a php
-/// stream keeps its own `fp`; and which stream php holds them through.
-#[derive(Clone)]
-pub(crate) struct Fp {
-    pub(crate) bytes: Arc<Vec<u8>>,
-    pub(crate) through: Through,
-}
-
-/// The stream `phar->fp` is in php.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Through {
-    /// The file opened `rb`: what is read through it is the file as it
-    /// stands, rewritten since or not, and a write through it fails.
-    File,
-    /// A stream php wrote the bytes into, the file the flush opened
-    /// `w+b` or a temporary one (a whole-file compressed archive's
-    /// decompressed copy, a deferred flush's): a write through it lands.
-    Written,
+/// `phar->fp`, the stream an uncompressed entry is read from.
+pub(crate) enum Fp {
+    /// The file opened `rb`, as an open keeps it and
+    /// `phar_open_archive_fp` opens it again: what is read through it is
+    /// the file as it stands, rewritten since or unlinked, and a write
+    /// through it fails.
+    File(Owner<Stream>),
+    /// A stream php wrote the bytes into, the file the flush opened `w+b`
+    /// or a temporary one (a whole-file compressed archive's decompressed
+    /// copy, a deferred flush's): a write through it lands. Shared with
+    /// each entry stream opened on them, which reads them on after a write
+    /// replaces them, as a php stream keeps its own `fp`.
+    Written(Arc<Vec<u8>>),
 }
 
 impl Fp {
-    /// The bytes an open read: the file itself, or where the whole file
-    /// is compressed (`flags`), the temporary stream it was decompressed
-    /// into.
-    pub(crate) fn opened(bytes: Vec<u8>, flags: u32) -> Fp {
-        let through = if flags & FILE_COMPRESSION_MASK == 0 {
-            Through::File
-        } else {
-            Through::Written
-        };
-        Fp {
-            bytes: Arc::new(bytes),
-            through,
-        }
-    }
-
-    /// Bytes php wrote into a stream it holds.
-    pub(crate) fn written(bytes: Arc<Vec<u8>>) -> Fp {
-        Fp {
-            bytes,
-            through: Through::Written,
+    /// What an entry reads through this `fp`.
+    pub(crate) fn efp(&self) -> Efp {
+        match self {
+            Fp::File(stream) => Efp::Stream(**stream),
+            Fp::Written(bytes) => Efp::Shared(Arc::clone(bytes)),
         }
     }
 }
@@ -316,6 +298,10 @@ pub(crate) struct Archive {
     /// The archive's bytes, decompressed where the whole file is, and the
     /// stream php holds them through.
     pub(crate) fp: Option<Fp>,
+    /// File streams a flush replaced in `fp`, which an entry stream open
+    /// then reads on, closed at the archive's last reference; php keeps
+    /// such a stream too (`free_fp`, `Z/ext/phar/phar.c:2695`).
+    pub(crate) retired: Vec<Owner<Stream>>,
     /// Where compressed entries are decompressed to, shared the same way.
     pub(crate) ufp: Option<Arc<Vec<u8>>>,
     pub(crate) refcount: i32,
@@ -348,6 +334,7 @@ impl Archive {
             min_timestamp: 0,
             max_timestamp: 0,
             fp: None,
+            retired: Vec::new(),
             ufp: None,
             refcount: 0,
             sig_flags: 0,
@@ -399,10 +386,24 @@ impl Archive {
         }
     }
 
+    /// `phar->fp` set to `fp`, a file stream it held kept for the entry
+    /// streams that read it.
+    pub(crate) fn set_fp(&mut self, fp: Fp) {
+        if let Some(Fp::File(stream)) = self.fp.replace(fp) {
+            self.retired.push(stream);
+        }
+    }
+
     /// What `phar_destroy_phar_data` frees that the request holds: the
-    /// `metadata` values and the mounted files' streams.
+    /// `metadata` values, the archive's streams and the mounted files'.
     pub(crate) fn release_all(&mut self, req: &mut Request) {
         self.metadata.free(req);
+        if let Some(Fp::File(stream)) = self.fp.take() {
+            stream.free(req);
+        }
+        for stream in std::mem::take(&mut self.retired) {
+            stream.free(req);
+        }
         for entry in self.manifest.clear() {
             entry.free(req);
         }
@@ -525,12 +526,18 @@ pub(crate) fn delref(req: &mut Request, id: ArchiveId) -> bool {
     if archive.refcount == 0 {
         let mut remove = archive.manifest.is_empty();
         let compressed = archive.flags & FILE_COMPRESSION_MASK != 0;
+        let mut closing = std::mem::take(&mut archive.retired);
         if archive.fp.is_some() && (!compressed || archive.alias.is_none()) {
-            archive.fp = None;
+            if let Some(Fp::File(stream)) = archive.fp.take() {
+                closing.push(stream);
+            }
             remove |= compressed;
         }
         let fname = archive.fname.clone();
         archives(req).last = None;
+        for stream in closing {
+            stream.free(req);
+        }
         if remove {
             if !fname_map_del(req, &fname) {
                 destroy(req, id);
@@ -710,16 +717,62 @@ pub(crate) fn read_file(
     path: &[u8],
     warn: bool,
 ) -> Result<Option<Vec<u8>>, Thrown> {
-    let opening = php_ext::request::Opening {
+    read_range(req, path, warn, 0, None)
+}
+
+/// `php_stream_open_wrapper(path, "rb", STREAM_MUST_SEEK, NULL)`.
+pub(crate) fn open_rb(
+    req: &mut Request,
+    path: &[u8],
+    warn: bool,
+) -> Result<Option<Owner<Stream>>, Thrown> {
+    let opening = Opening {
         warn,
-        ..php_ext::request::Opening::default()
+        must_seek: true,
+        ..Opening::default()
     };
-    let Some(stream) = req.open_stream_with(path, b"rb", opening)? else {
+    req.open_stream_with(path, b"rb", opening)
+}
+
+/// [`read_at`] of the file at `path`, opened for the one read.
+pub(crate) fn read_range(
+    req: &mut Request,
+    path: &[u8],
+    warn: bool,
+    at: i64,
+    len: Option<usize>,
+) -> Result<Option<Vec<u8>>, Thrown> {
+    let Some(stream) = open_rb(req, path, warn)? else {
         return Ok(None);
     };
-    let bytes = copy_all(req, *stream);
+    let bytes = read_at(req, *stream, at, len);
     stream.free(req);
     Ok(Some(bytes?))
+}
+
+/// `len` bytes from `at`, or the rest, of what a flush and `getStub()`
+/// read the old archive from: `phar->fp`, or for an archive new to this
+/// request the file opened for the read; `None` where it will not open.
+pub(crate) fn read_old(
+    req: &mut Request,
+    id: ArchiveId,
+    at: i64,
+    len: Option<usize>,
+) -> Result<Option<Vec<u8>>, Thrown> {
+    let Some(a) = archives(req).get(id) else {
+        return Ok(None);
+    };
+    let fp = a.fp.as_ref().filter(|_| !a.is_brandnew).map(Fp::efp);
+    let fname = a.fname.clone();
+    match fp {
+        Some(Efp::Stream(stream)) => read_at(req, stream, at, len).map(Some),
+        Some(Efp::Shared(bytes)) => {
+            let from = usize::try_from(at).unwrap_or(usize::MAX).min(bytes.len());
+            let to = len.map_or(bytes.len(), |len| from.saturating_add(len).min(bytes.len()));
+            Ok(Some(bytes[from..to].to_vec()))
+        }
+        _ => read_range(req, &fname, false, at, len),
+    }
 }
 
 /// The rest of a stream as bytes.
@@ -730,15 +783,16 @@ pub(crate) fn copy_all(req: &mut Request, stream: Stream) -> Result<Vec<u8>, Thr
     Ok(bytes)
 }
 
-/// `len` bytes of a stream from `at`, fewer at its end.
+/// `len` bytes of a stream from `at`, fewer at its end, or the rest of
+/// it.
 pub(crate) fn read_at(
     req: &mut Request,
     stream: Stream,
     at: i64,
-    len: usize,
+    len: Option<usize>,
 ) -> Result<Vec<u8>, Thrown> {
     stream.seek(req, at, Whence::Set);
-    let s = stream.copy_to_mem(req, Some(len))?;
+    let s = stream.copy_to_mem(req, len)?;
     let bytes = s.as_bytes().to_vec();
     s.give_up(req);
     Ok(bytes)

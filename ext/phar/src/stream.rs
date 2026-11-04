@@ -364,9 +364,7 @@ fn stub_data(req: &mut Request, id: ArchiveId) -> Result<Result<EntryData, Strin
     stub.compressed_filesize = stub.uncompressed_filesize;
     stub.is_crc_checked = true;
     a.refcount += 1;
-    let fp =
-        a.fp.as_ref()
-            .map(|fp| entry::Efp::Shared(std::sync::Arc::clone(&fp.bytes)));
+    let fp = a.fp.as_ref().map(archive::Fp::efp);
     Ok(Ok(EntryData {
         archive: id,
         target: Target::Temp(Box::new(stub)),

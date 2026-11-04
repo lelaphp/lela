@@ -237,7 +237,7 @@ pub(crate) fn to_other(
         }
         phar.add_virtual_dirs(&filename);
     }
-    phar.fp = Some(archive::Fp::written(Arc::new(fp)));
+    phar.fp = Some(archive::Fp::Written(Arc::new(fp)));
     let new = archives(req).insert(phar);
     let made = rename(req, new, ext);
     match made {
@@ -359,7 +359,9 @@ fn rename(
             pphar.format = phar.format;
             pphar.is_data = phar.is_data;
             pphar.flags = phar.flags;
-            pphar.fp = phar.fp.take();
+            if let Some(fp) = phar.fp.take() {
+                pphar.set_fp(fp);
+            }
             pphar.refcount += 1;
         }
         phar.alias = None;

@@ -283,8 +283,40 @@ pub(crate) fn link_source(req: &mut Request, id: ArchiveId, slot: usize) -> Opti
     }
 }
 
-/// `phar_open_archive_fp`: the archive's file read again where its bytes
-/// were let go; `false` where it will not open.
+/// `phar_open_archive_fp`: the archive's file opened again where its
+/// stream was let go, which no read of it pays for; `false` where it will
+/// not open. A read goes through that stream, so it sees the file as it
+/// stands, an unlinked one read on by an entry stream open on it, and at
+/// the last reference the stream is closed, as `phar_archive_delref`
+/// closes it.
+///
+/// ```php
+/// $f = __DIR__ . '/reopen.phar';
+/// $p = new Phar($f);
+/// $p['a'] = 'one'; $p['b'] = 'two'; $p['c'] = 'three';
+/// unset($p);
+/// var_dump(file_get_contents("phar://$f/a"), file_get_contents("phar://$f/b"));
+/// file_put_contents($f, str_replace('one', 'ONE', file_get_contents($f)));
+/// var_dump(file_get_contents("phar://$f/a"));
+/// $h = fopen("phar://$f/c", 'r');
+/// $p = new Phar($f);
+/// file_put_contents($f, str_replace('ONE', 'oNe', file_get_contents($f)));
+/// var_dump($p['a']->getContent());
+/// unlink($f);
+/// var_dump($p['b']->getContent(), fread($h, 10));
+/// unset($p);
+/// fclose($h);
+/// var_dump(@file_get_contents("phar://$f/b"));
+/// ```
+/// ```expect regime=phar-writable
+/// string(3) "one"
+/// string(3) "two"
+/// string(3) "ONE"
+/// string(3) "oNe"
+/// string(3) "two"
+/// string(5) "three"
+/// bool(false)
+/// ```
 pub(crate) fn open_archive_fp(req: &mut Request, id: ArchiveId) -> Result<bool, Thrown> {
     let Some(archive) = archives(req).get(id) else {
         return Ok(false);
@@ -300,31 +332,31 @@ pub(crate) fn open_archive_fp(req: &mut Request, id: ArchiveId) -> Result<bool, 
     {
         return Ok(false);
     }
-    let bytes = archive::read_file(req, &fname, false)?;
-    let Some(archive) = archives(req).get_mut(id) else {
+    let stream = archive::open_rb(req, &fname, false)?;
+    let Some(stream) = stream else {
         return Ok(false);
     };
-    archive.fp = bytes.map(|bytes| archive::Fp {
-        bytes: Arc::new(bytes),
-        through: archive::Through::File,
-    });
-    Ok(archive.fp.is_some())
+    match archives(req).get_mut(id) {
+        Some(archive) => archive.fp = Some(archive::Fp::File(stream)),
+        None => stream.free(req),
+    }
+    Ok(true)
 }
 
-/// The stream an entry's contents are read from, `phar_get_efp`: the
-/// archive's bytes or its decompressed buffer, shared, which an entry
-/// stream keeps as php's keeps `idata->fp`; the entry's own buffer, read
-/// where it stands; or a mounted file's stream.
+/// The stream an entry's contents are read from, `phar_get_efp`, which an
+/// entry stream keeps as php's keeps `idata->fp`: bytes php wrote, or the
+/// decompressed buffer, shared; the entry's own buffer, read where it
+/// stands; or a stream of the archive's file or a mounted one.
 #[derive(Clone)]
 pub(crate) enum Efp {
     Shared(Arc<Vec<u8>>),
     Own,
-    Mounted(Stream),
+    Stream(Stream),
 }
 
 /// `phar_get_efp`: the stream the entry at `target` is read from, the
-/// archive's file read again and a mounted file opened where they must
-/// be; `None` where there is none.
+/// archive's file and a mounted file opened where they must be; `None`
+/// where there is none.
 pub(crate) fn efp(
     req: &mut Request,
     id: ArchiveId,
@@ -343,7 +375,7 @@ pub(crate) fn efp(
             archives(req)
                 .get(id)
                 .and_then(|a| a.fp.as_ref())
-                .map(|fp| Efp::Shared(Arc::clone(&fp.bytes)))
+                .map(archive::Fp::efp)
         }
         Kind::Ufp => archives(req)
             .get(id)
@@ -351,7 +383,7 @@ pub(crate) fn efp(
             .map(Efp::Shared),
         Kind::Mod => Some(Efp::Own),
         Kind::Tmp => match target {
-            Target::Slot(slot) => tmp_stream(req, id, *slot)?.map(Efp::Mounted),
+            Target::Slot(slot) => tmp_stream(req, id, *slot)?.map(Efp::Stream),
             Target::Temp(_) => None,
         },
     })
@@ -388,7 +420,7 @@ pub(crate) fn read_efp(
                 _ => Vec::new(),
             }
         }
-        Efp::Mounted(stream) => archive::read_at(req, *stream, from, len)?,
+        Efp::Stream(stream) => archive::read_at(req, *stream, from, Some(len))?,
     })
 }
 

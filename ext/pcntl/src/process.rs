@@ -440,6 +440,28 @@ pub(crate) fn pcntl_wstopsig(status: i64) -> OrFalse<i64> {
 /// warning. The program here runs in a forked child, whose status the
 /// parent reads.
 ///
+/// Without `$env_vars` the program has the environment php's `execv` has,
+/// `environ` with every `putenv` in it, and it starts in the directory
+/// `chdir` left php in; here both are the request's and not the process's
+/// (ADR-0005), so the one is handed over and the process moves to the other.
+///
+/// ```php
+/// putenv('DAX_CODE=9');
+/// chdir('/');
+/// $pid = pcntl_fork();
+/// if ($pid === 0) { pcntl_exec('/bin/sh', ['-c', 'test "$(/bin/pwd)" = / && exit $DAX_CODE']); exit(1); }
+/// pcntl_waitpid($pid, $status);
+/// var_dump(pcntl_wexitstatus($status));
+/// $pid = pcntl_fork();
+/// if ($pid === 0) { pcntl_exec('/bin/sh', ['-c', 'exit ${DAX_CODE:-5}'], []); exit(1); }
+/// pcntl_waitpid($pid, $status);
+/// var_dump(pcntl_wexitstatus($status));
+/// ```
+/// ```expect process
+/// int(9)
+/// int(5)
+/// ```
+///
 /// ```php
 /// $pid = pcntl_fork();
 /// if ($pid === 0) { pcntl_exec('/bin/sh', ['-c', 'exit $CODE'], ['CODE' => 7]); exit(1); }
@@ -485,7 +507,7 @@ pub(crate) fn pcntl_exec(
         arguments.push(argument);
         Ok(ControlFlow::Continue(()))
     })?;
-    let executed = match env_vars {
+    let envp = match env_vars {
         Passed::Given(env_vars) => {
             let mut envp = Vec::new();
             walk::foreach(req, env_vars, Hold::None, |req, row| -> walk::Step {
@@ -515,11 +537,17 @@ pub(crate) fn pcntl_exec(
                 envp.push(CString::new(pair).unwrap_or_default());
                 Ok(ControlFlow::Continue(()))
             })?;
-            nix::unistd::execve(&program, &arguments, &envp)
+            envp
         }
-        Passed::Omitted => nix::unistd::execv(&program, &arguments),
+        Passed::Omitted => (req.environment().env_pairs().iter())
+            .filter_map(|(name, value)| CString::new([&name[..], b"=", value].concat()).ok())
+            .collect(),
     };
-    let Err(errno) = executed;
+    let cwd = req.environment().cwd();
+    if !cwd.as_os_str().is_empty() {
+        std::env::set_current_dir(&cwd).ok();
+    }
+    let Err(errno) = nix::unistd::execve(&program, &arguments, &envp);
     failed(req, errno);
     let n = errno as i32;
     docref(

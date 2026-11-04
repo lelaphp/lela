@@ -326,7 +326,28 @@ pub(crate) fn minfo(req: &mut Request) {
 }
 
 /// `putenv(string $assignment): bool`: `NAME=value` sets the variable
-/// and `NAME` alone unsets it.
+/// and `NAME` alone unsets it. A name the process started with keeps its
+/// place in `environ`, which `getenv()` and a child's environment show,
+/// and one `putenv` made goes last each time it is set.
+///
+/// ```php
+/// $first = array_key_first(getenv());
+/// putenv("DAX_ORDER_A=1"); putenv("DAX_ORDER_B=2"); putenv("DAX_ORDER_C=3");
+/// putenv("DAX_ORDER_A=4"); putenv("DAX_ORDER_B"); putenv("DAX_ORDER_B=5");
+/// putenv("$first=x"); putenv("$first=y");
+/// var_dump(array_key_first(getenv()) === $first, array_slice(getenv(), -3));
+/// ```
+/// ```expect
+/// bool(true)
+/// array(3) {
+///   ["DAX_ORDER_C"]=>
+///   string(1) "3"
+///   ["DAX_ORDER_A"]=>
+///   string(1) "4"
+///   ["DAX_ORDER_B"]=>
+///   string(1) "5"
+/// }
+/// ```
 ///
 /// ```php
 /// var_dump(putenv("DAX_A=one"), getenv("DAX_A"), putenv("DAX_A=two=2"), getenv("DAX_A"), putenv("DAX_A"), getenv("DAX_A"), putenv("DAX_B="), getenv("DAX_B"));

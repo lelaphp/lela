@@ -6,6 +6,8 @@
 //! (`phar_create_or_parse_filename`, `phar_open_or_create_filename`).
 //! An error is php's message, `None` where php sets none.
 
+use std::sync::Arc;
+
 use php_ext::abi::{Beneath, Compiled, chain};
 use php_ext::raising::Thrown;
 use php_ext::request::{Ini, OwnedStream as _, Request, Streams as _};
@@ -25,9 +27,6 @@ pub(crate) type Failed = Option<String>;
 
 /// What an open answers: the archive, or the failure.
 pub(crate) type Opened = Result<ArchiveId, Failed>;
-
-/// A file read whole: the name it opened under and its bytes.
-type Read = Option<(Vec<u8>, Vec<u8>)>;
 
 /// A verified signature: its type and its hex, or php's message.
 type Verified = Result<(u32, Option<Vec<u8>>), String>;
@@ -105,23 +104,41 @@ pub(crate) fn open_from_filename(
     {
         return Ok(Err(None));
     }
-    let Some((actual, bytes)) = open_file(req, fname)? else {
+    let Some(opened) = open_file(req, fname, alias, false)? else {
         return Ok(Err(report.then(|| {
             format!("unable to open phar for reading \"{}\"", lossy(fname))
         })));
     };
-    open_from_fp(req, bytes, &actual, alias)
+    Ok(opened)
 }
 
 /// `php_stream_open_wrapper(fname, "rb", IGNORE_URL|STREAM_MUST_SEEK,
-/// &actual)`: the file's bytes and the name it opened under, the plain
-/// files wrapper's `expand_filepath`.
-pub(crate) fn open_file(req: &mut Request, fname: &[u8]) -> Result<Read, Thrown> {
-    let Some(bytes) = archive::read_file(req, fname, false)? else {
+/// &actual)` and [`open_from_fp`] over what it reads, under the name it
+/// opened under, the plain files wrapper's `expand_filepath`: an archive
+/// the parse took keeps the stream as its `fp`, unless the whole file is
+/// compressed and its `fp` is the decompressed copy. `None` where the
+/// file will not open.
+fn open_file(
+    req: &mut Request,
+    fname: &[u8],
+    alias: Option<&[u8]>,
+    warn: bool,
+) -> Result<Option<Opened>, Thrown> {
+    let Some(stream) = archive::open_rb(req, fname, warn)? else {
         return Ok(None);
     };
     let actual = archive::expand_filepath(req, fname).unwrap_or_else(|| fname.to_vec());
-    Ok(Some((actual, bytes)))
+    let opened =
+        archive::copy_all(req, *stream).and_then(|bytes| open_from_fp(req, bytes, &actual, alias));
+    let Ok(Ok(id)) = opened else {
+        stream.free(req);
+        return opened.map(Some);
+    };
+    match archives(req).get_mut(id) {
+        Some(a) if a.flags & FILE_COMPRESSION_MASK == 0 => a.fp = Some(archive::Fp::File(stream)),
+        _ => stream.free(req),
+    }
+    Ok(Some(Ok(id)))
 }
 
 const TOKEN: &[u8] = b"__HALT_COMPILER();";
@@ -438,7 +455,7 @@ fn parse_pharfile(
     data.alias = Some(alias.clone().unwrap_or_else(|| fname.to_vec()));
     data.sig_flags = sig_flags;
     data.signature = signature;
-    data.fp = Some(archive::Fp::opened(fp, data.flags));
+    data.fp = Some(archive::Fp::Written(Arc::new(fp)));
     data.is_temporary_alias = !register_alias || temp_alias;
     if register_alias {
         let alias = alias.unwrap_or_default();
@@ -536,8 +553,7 @@ pub(crate) fn create_or_parse(
     {
         return Ok(Err(None));
     }
-    if let Some((actual, bytes)) = open_file(req, fname)? {
-        let opened = open_from_fp(req, bytes, &actual, alias)?;
+    if let Some(opened) = open_file(req, fname, alias, false)? {
         if let Ok(id) = opened {
             let ro = readonly(req);
             if let Some(a) = archives(req).get_mut(id)
@@ -706,14 +722,13 @@ pub(crate) fn open_executed(
     {
         return Ok(Err(None));
     }
-    let Some(bytes) = archive::read_file(req, &fname, true)? else {
+    let Some(opened) = open_file(req, &fname, alias, true)? else {
         return Ok(Err(Some(format!(
             "unable to open phar for reading \"{}\"",
             lossy(&fname)
         ))));
     };
-    let actual = archive::expand_filepath(req, &fname).unwrap_or_else(|| fname.clone());
-    Ok(open_from_fp(req, bytes, &actual, alias)?.map(|_| ()))
+    Ok(opened.map(|_| ()))
 }
 
 /// `phar_compile_file`, phar's `zend_compile_file`: a file whose name
@@ -803,7 +818,10 @@ fn archive_source(req: &mut Request, path: &[u8]) -> Result<Option<Stub>, Thrown
         }));
     }
     if compressed {
-        let source = a.fp.as_ref().map(|fp| fp.bytes.to_vec());
+        let source = a.fp.as_ref().and_then(|fp| match fp {
+            archive::Fp::Written(bytes) => Some(bytes.to_vec()),
+            archive::Fp::File(_) => None,
+        });
         return Ok(source.map(|source| Stub {
             source,
             over_archive: false,

@@ -535,7 +535,7 @@ pub(crate) fn parse(
     if !phar.is_data && require_hash(req) && phar.signature.is_none() {
         return fail(&mut phar, req, "signature is missing");
     }
-    phar.fp = Some(archive::Fp::opened(bytes, phar.flags));
+    phar.fp = Some(archive::Fp::Written(Arc::new(bytes)));
     let id = archives(req).insert(phar);
     archives(req).fname_map.add(fname, id).ok();
     let refuse = |req: &mut Request, text: String| {
@@ -849,15 +849,8 @@ pub(crate) fn flush(
     }
     let signing = a.sig_flags != 0;
     let count = a.manifest.len() + usize::from(signing);
-    let old =
-        a.fp.as_ref()
-            .map(|fp| Arc::clone(&fp.bytes))
-            .filter(|_| !a.is_brandnew);
     let fname = a.fname.clone();
-    let old = match old {
-        Some(old) => Some(old),
-        None => archive::read_file(req, &fname, false)?.map(Arc::new),
-    };
+    let old = archive::read_old(req, id, 0, None)?;
     let mut pass = Pass {
         files: Vec::new(),
         central: Vec::new(),
@@ -1034,7 +1027,7 @@ pub(crate) fn flush(
 }
 
 /// The compressed bytes of an unchanged entry, read from the old archive.
-fn kept_bytes(old: Option<&Vec<u8>>, offset_abs: i64, csize: u32) -> Vec<u8> {
+fn kept_bytes(old: Option<&[u8]>, offset_abs: i64, csize: u32) -> Vec<u8> {
     let Some(old) = old else {
         return Vec::new();
     };
