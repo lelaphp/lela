@@ -50,7 +50,46 @@ impl Request {
     /// owner, a slot per declared instance property, as
     /// `zend_object_properties_size` counts them, and the memory limit
     /// as the fatal that ends the request.
+    ///
+    /// The class's update and what its objects are made of are asked on
+    /// its first object in the request; every object after it of a class
+    /// made of its slots alone is `zend_objects_new` and
+    /// `object_properties_init` over the row laid then
+    /// ([`Request::laid_object`]), each default copied with one more
+    /// owner, a typed property with none uninitialised, the ids and the
+    /// memory php's:
+    ///
+    /// ```php
+    /// class P { const C = 5; public $a = [1, 2]; public int $t; public $c = self::C; public ?P $n = null; }
+    /// for ($i = 0; $i < 3; $i++) {
+    ///     $p = new P;
+    ///     $p->a[] = $i;
+    ///     try { echo $p->t; } catch (Error $e) { echo $e->getMessage(), " "; }
+    ///     echo count($p->a), $p->c, var_export($p->n, true), " ", spl_object_id($p), "\n";
+    /// }
+    /// $keep = new P; var_dump($keep->a === [1, 2]);
+    /// $m = memory_get_usage(); $q = new P; echo memory_get_usage() - $m, " "; $q = null; echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// Typed property P::$t must not be accessed before initialization 35NULL 1
+    /// Typed property P::$t must not be accessed before initialization 35NULL 3
+    /// Typed property P::$t must not be accessed before initialization 35NULL 2
+    /// bool(true)
+    /// 112 0
+    /// ```
     pub(crate) fn new_object(&mut self, class: ClassId) -> Result<PhpObject, Thrown> {
+        if let Some(allocated) = self.laid_object(class) {
+            return self.fatal_of(allocated).map(PhpObject::of);
+        }
+        self.new_object_first(class)
+    }
+
+    /// [`Request::new_object`] the long way: the class updated, its
+    /// [`Made`](super::class_data::Made) read, and what the class lays
+    /// down beside the object served; the class's row laid for the next
+    /// ([`Request::lay_class`]) where nothing but the slots is.
+    #[inline(never)]
+    fn new_object_first(&mut self, class: ClassId) -> Result<PhpObject, Thrown> {
         self.update_class_constants(class)?;
         let made = self.made(class);
         // `ce->create_object`: a class that declares a native payload
@@ -64,6 +103,7 @@ impl Request {
         let object = self.fatal_of(allocated).map(PhpObject::of)?;
         self.init_properties(object);
         self.object_made(object, made)?;
+        self.lay_class(class, made);
         Ok(object)
     }
 
@@ -629,6 +669,17 @@ impl Request {
     /// What `zend_objects_store_del`, the cycle collector and a lazy
     /// object's reset ask before they serve `dtor_obj`.
     pub(crate) fn has_destructor(&self, object: PhpObject) -> bool {
+        match self.made_ref(object.class()) {
+            Some(made) => made.destructs,
+            None => self.has_destructor_unmade(object),
+        }
+    }
+
+    /// [`Request::has_destructor`] for an object of a class the request
+    /// has not read a [`Made`](super::class_data::Made) of, asked of the
+    /// table and the class.
+    #[cold]
+    fn has_destructor_unmade(&self, object: PhpObject) -> bool {
         matches!(
             self.object_handlers(object.heap()).dtor_obj(),
             DtorObj::Own(_)

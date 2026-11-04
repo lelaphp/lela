@@ -5806,6 +5806,16 @@ pub(crate) fn new<T: Tier>(
     {
         return constructed(req, frame, op, class, call);
     }
+    new_unprimed::<T>(req, frame, code, op)
+}
+
+/// [`new`] where its slot holds no push: the class looked up through
+/// the slot, refused where it cannot be instantiated, the constructor
+/// asked of the handler table, and the push kept where it can be
+/// ([`prime_constructed`]). A call of its own, so that the slot's path
+/// keeps to the registers it needs.
+#[inline(never)]
+fn new_unprimed<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let class = match class_operand(
         req,
         frame,
@@ -5876,6 +5886,7 @@ pub(crate) fn new<T: Tier>(
 /// Call to private R::__construct() from global scope
 /// d2|end
 /// ```
+#[inline(always)] // `new`'s path off its slot, with no frame of its own
 fn constructed(
     req: &mut Request,
     frame: FrameRef,

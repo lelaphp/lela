@@ -48,6 +48,21 @@ pub(super) struct ClassData {
     /// What `new` reads of the class ([`Made`]), resolved on its first
     /// object in the request.
     made: Option<Made>,
+    /// What `object_init_ex` copies onto each object of a class whose
+    /// objects are `zend_objects_new` and `object_properties_init` and
+    /// nothing else, once the class is updated ([`Laid`]); none for any
+    /// other class, whose objects are made the long way.
+    laid: Option<Laid>,
+}
+
+/// The tests `object_init_ex` makes of a class once per object
+/// (`ZEND_ACC_CONSTANTS_UPDATED`, `ce->create_object == NULL`) passed
+/// once per request, and what is left of making one of its objects:
+/// the bytes beside the slots and `default_properties_table`, each row
+/// a view of the default [`ClassData::defaults`] owns.
+struct Laid {
+    custom: usize,
+    rows: Box<[php_heap::Zval]>,
 }
 
 /// Where a class's constants table stands against the request's
@@ -103,6 +118,11 @@ pub(crate) struct Made {
     /// Whether `create_object` is `zend_default_exception_new`'s
     /// ([`Request::records_throw_site`]).
     throw_site: bool,
+    /// php's `dtor_obj != zend_objects_destroy_object || ce->destructor`,
+    /// read once per class: the table serves a destructor of its own, or
+    /// the class declares or inherits `__destruct`
+    /// ([`Request::has_destructor`]).
+    pub(crate) destructs: bool,
 }
 
 /// How the objects of a class serve the name of a property
@@ -292,12 +312,15 @@ impl Request {
             .find(|&(_, size)| size != 0)
             .map_or((0, None), |(at, size)| (size as usize, Some(at)));
         let guards = if self.uses_guards(class) { 16 } else { 0 };
+        let handlers = self.handlers_of(class);
+        let destructs = matches!(handlers.dtor_obj(), crate::api::abi::DtorObj::Own(_))
+            || self.destructor(class).is_some();
         let made = Made {
             slots: self.class_slots(class),
             custom: size.saturating_sub(ZEND_OBJECT) + guards + ZVAL * self.redeclared_slots(class),
             declared_by,
             create: self.native_new_of(class),
-            handlers: self.handlers_of(class),
+            handlers,
             names: if self.own_handlers(class).is_some() {
                 PropertyNames::Own
             } else if self.declares_properties(class) {
@@ -306,6 +329,7 @@ impl Request {
                 PropertyNames::Dynamic
             },
             throw_site: self.records_throw_site(class),
+            destructs,
         };
         self.class_data.rows.row(class).made = Some(made);
         made
@@ -984,6 +1008,46 @@ impl Request {
             self.addref(value);
         }
         Ok(defaults)
+    }
+
+    /// `object_init_ex` over a class whose row holds its objects laid
+    /// ([`Laid`]): the object php's `zend_objects_new` makes and
+    /// `_object_properties_init` fills, with no test of the class's
+    /// update and no table read. None for any other class.
+    #[inline]
+    pub(super) fn laid_object(
+        &mut self,
+        class: ClassId,
+    ) -> Option<Result<php_heap::Obj, php_heap::Fatal>> {
+        let laid = self.class_data.rows.get(class)?.laid.as_ref()?;
+        Some(self.heap.object_laid(class.0, laid.custom, &laid.rows))
+    }
+
+    /// The row of `class` laid for [`Request::laid_object`] after its
+    /// first object was made the long way, where its objects are
+    /// `zend_objects_new` and `object_properties_init` alone: no native
+    /// payload, nothing allocated beside them, no throw site written and
+    /// the standard handler table, whose `create_object` does nothing.
+    pub(super) fn lay_class(&mut self, class: ClassId, made: Made) {
+        let plain = made.create.is_none()
+            && made.declared_by.is_none()
+            && !made.throw_site
+            && self.own_handlers(class).is_none();
+        let Some(data) = self.class_data.rows.get_mut(class) else {
+            return;
+        };
+        if !plain || !data.updated || data.laid.is_some() {
+            return;
+        }
+        let rows = data
+            .defaults
+            .iter()
+            .map(|value| value.map_or(php_heap::Zval::UNDEF, Value::to_zval))
+            .collect();
+        data.laid = Some(Laid {
+            custom: made.custom,
+            rows,
+        });
     }
 
     /// `object_properties_init` over a new `object` of a class
