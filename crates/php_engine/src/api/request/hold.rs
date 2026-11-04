@@ -1,5 +1,5 @@
-//! The owner an `ASSIGN_DIM` takes of the table the `FETCH_DIM_W` before
-//! it walked to: the one hold of the engine that spans two oplines.
+//! The owner the write after a `FETCH_DIM_W` takes of the table the
+//! fetch walked to: the one hold of the engine that spans two oplines.
 //! Every other is an [`Owner`] taken and given back around the call it
 //! spans.
 
@@ -13,8 +13,9 @@ use crate::api::values::{Owner, Value};
 /// is owned by whatever held the container when the fetch walked it,
 /// and no PHP code may be reached between the fetch and the one read
 /// of it: [`Request::hold_walk`] turns it into an owner or into
-/// nothing, and the `ASSIGN_DIM` it is read by stands next after the
-/// fetch that wrote it, as php's delayed fetch compiles them.
+/// nothing, and the `ASSIGN_DIM`, `ASSIGN_REF` or step it is read by
+/// stands next after the fetch that wrote it, as php's delayed fetch
+/// compiles them.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Walk {
     place: ZvalRef,
@@ -26,7 +27,7 @@ pub(crate) struct Walk {
 #[derive(Default)]
 pub(super) struct Holding {
     /// The table the last `FETCH_DIM_W` laid its `IS_INDIRECT` into,
-    /// for the `ASSIGN_DIM` after it to hold ([`Request::hold_walk`]).
+    /// for the write after it to hold ([`Request::hold_walk`]).
     walk: Option<Walk>,
 }
 

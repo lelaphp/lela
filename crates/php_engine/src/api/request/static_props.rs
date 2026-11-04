@@ -475,9 +475,20 @@ impl Request {
                 crate::ops::verify_property_type(self, &value, &ty, declaring, name, strict);
             value = crate::ops::landed(self, value, verdict)?;
         }
-        // `zend_assign_to_variable` over a slot bound by reference: the
-        // cell is held to every property it is typed by, which may be
-        // another `static` than this one (`Test::$x =& Test::$y`).
+        self.assign_static_slot(info, value, (strict, handed))
+    }
+
+    /// [`Request::set_static_slot`] past the declared type, which
+    /// `zend_wrong_assign_to_variable_reference` never reads:
+    /// `zend_assign_to_variable` over a slot bound by reference, the
+    /// cell held to every property it is typed by, which may be another
+    /// `static` than this one (`Test::$x =& Test::$y`).
+    pub(crate) fn assign_static_slot(
+        &mut self,
+        info: PropertyInfo,
+        value: Value,
+        (strict, handed): (bool, php_unit::OperandKind),
+    ) -> Result<(Value, Value), Thrown> {
         let held = |req: &Request| {
             req.static_props
                 .slots
