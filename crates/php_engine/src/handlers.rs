@@ -19912,7 +19912,12 @@ fn stepped_obj(
     let stepped = match (member.name(req, frame, code, op), container.as_object()) {
         (Ok(name), Some(object)) => {
             prime_constant(req, frame, op, property_cache_slot(op), object, &name);
-            incdec_property(req, frame, op, step, object, &name)?
+            // A step's diagnostic can reach a handler that gives the
+            // object up.
+            let kept = Owner::take(req, object.as_value());
+            let stepped = incdec_property(req, frame, op, step, object, &name);
+            kept.let_go(req);
+            stepped?
         }
         (Ok(name), None) => {
             let name = name.as_str_bytes().unwrap_or_default();
@@ -26769,9 +26774,13 @@ fn incdec_typed_ref(
     cell: PhpRef,
     held: Value,
 ) -> Edge {
+    let stepping = step_hold(req, held, Some(cell), None);
     let stepped = match kernel(req, &held) {
         Ok(stepped) => stepped,
-        Err(thrown) => return threw(req, frame, &thrown),
+        Err(thrown) => {
+            let thrown = req.free_pending(thrown, |req| give_back(req, stepping));
+            return threw_freeing(req, frame, op, &thrown);
+        }
     };
     let increment = matches!(op.opcode, Opcode::PreInc | Opcode::PostInc);
     let strict = req.frame_strict_types(frame);
@@ -26781,11 +26790,13 @@ fn incdec_typed_ref(
             RefStep::Clamped(stored, thrown) => (stored, Some(thrown)),
             RefStep::Refused(thrown) => {
                 write_out(req, frame, op, &Value::null());
+                let thrown = req.free_pending(thrown, |req| give_back(req, stepping));
                 return threw_freeing(req, frame, op, &thrown);
             }
         };
     write_out(req, frame, op, if post { &held } else { &stored });
     req.reference_set(cell.heap(), stored);
+    give_back(req, stepping);
     exec::free_operand(req, frame, op.op1_type, op.op1);
     if let Some(thrown) = raised {
         return threw(req, frame, &thrown);
@@ -26793,7 +26804,28 @@ fn incdec_typed_ref(
     Ok(advance(req, frame))
 }
 
-/// What a step through a reference typed properties hold comes to
+/// What a step holds across a diagnostic that can reach a handler: the
+/// value stepped, which `ZVAL_COPY(result, var_ptr)` has an owner of
+/// before php's `POST_*` steps it, the reference it stands in and the
+/// table the `FETCH_DIM_RW` before walked to `place` in. A number raises
+/// nothing and takes none of the three.
+fn step_hold(
+    req: &mut Request,
+    held: Value,
+    cell: Option<PhpRef>,
+    place: Option<php_heap::ZvalRef>,
+) -> [Option<Owner<Value>>; 3] {
+    if matches!(held.as_ref(), ValueRef::Int(_) | ValueRef::Float(_)) {
+        return [None, None, None];
+    }
+    [
+        Some(Owner::take(req, held)),
+        cell.map(|cell| Owner::take(req, cell.as_value())),
+        place.and_then(|place| req.hold_walk(place)),
+    ]
+}
+
+/// What a step through a reference typed properties stepping comes to
 /// ([`step_through_typed_ref`]).
 enum RefStep {
     /// The value to store in the cell: the step, or the conversion the
@@ -26859,6 +26891,45 @@ fn step_through_typed_ref(
 ///
 /// A call of its own, so that an inline path before it keeps to the
 /// registers it needs.
+///
+/// What is no number raises a diagnostic, and a handler of it can give
+/// the variable up; the step holds what it reads ([`step_hold`]), and
+/// the string goes back into the variable as php's does.
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["s"] = 1; return true; });
+/// $s = str_repeat("a", 30) . "!"; $x = $s++; var_dump(strlen($x), $s);
+/// $s = str_repeat("a", 30) . "!"; $x = $s--; var_dump(strlen($x), $s);
+/// $s = str_repeat("a", 30) . "!"; $x = ++$s; var_dump($x);
+/// ```
+/// ```expect
+/// [Increment on non-numeric string is deprecated, use str_increment() instead]
+/// int(31)
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// [Decrement on non-numeric string has no effect and is deprecated]
+/// int(31)
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// [Increment on non-numeric string is deprecated, use str_increment() instead]
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// ```
+///
+/// ```php
+/// class P { public array $held = [1]; }
+/// class A implements ArrayAccess {
+///     public $v;
+///     function __construct() { $this->v = new P; }
+///     function &offsetGet($k): mixed { return $this->v->held; }
+///     function offsetSet($k, $v): void {}
+///     function offsetExists($k): bool { return true; }
+///     function offsetUnset($k): void {}
+/// }
+/// function t() { $a = new A; try { $a[0]++; } catch (TypeError $e) { echo $e->getMessage(), "\n"; } return 1; }
+/// var_dump(t());
+/// ```
+/// ```expect
+/// Cannot increment array
+/// int(1)
+/// ```
 #[inline(never)]
 fn incdec(
     req: &mut Request,
@@ -26886,6 +26957,7 @@ fn incdec(
     if let Some(cell) = cell.filter(|cell| cell.heap().sources() != 0) {
         return incdec_typed_ref(req, frame, op, post, kernel, cell, held);
     }
+    let stepping = step_hold(req, held, cell, place);
     match kernel(req, &held) {
         Ok(stepped) => {
             // `ZVAL_COPY(EX_VAR(opline->result.var), var_ptr)`, before
@@ -26904,13 +26976,17 @@ fn incdec(
             } else {
                 req.replace_slot(frame, op.op1, stepped);
             }
+            give_back(req, stepping);
             // `FREE_OP1()`: a `VAR` holding an `IS_INDIRECT` owns
             // nothing, and one holding what `offsetGet` answered gives
             // it up.
             exec::free_operand(req, frame, op.op1_type, op.op1);
             Ok(advance(req, frame))
         }
-        Err(thrown) => threw_freeing(req, frame, op, &thrown),
+        Err(thrown) => {
+            let thrown = req.free_pending(thrown, |req| give_back(req, stepping));
+            threw_freeing(req, frame, op, &thrown)
+        }
     }
 }
 

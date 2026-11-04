@@ -74,3 +74,16 @@ fn a_string_a_float_offset_gave_up_answers_as_no_string() {
     );
     assert_eq!(stdout, "not set\nempty\n");
 }
+
+#[test]
+fn a_property_step_stands_past_the_object_a_handler_gave_up() {
+    let stdout = served(
+        "<?php\n\
+         #[AllowDynamicProperties] class C { public $s; }\n\
+         set_error_handler(function () { $GLOBALS['o'] = null; return true; });\n\
+         $p = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';\n\
+         $o = new C; $o->s = $p . '!'; $x = $o->s++; echo strlen($x), \"\\n\";\n\
+         $o = new C; $o->d = $p . '!'; $x = ++$o->d; echo strlen($x), \"\\n\";\n",
+    );
+    assert_eq!(stdout, "31\n31\n");
+}

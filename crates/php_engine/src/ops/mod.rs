@@ -4261,7 +4261,7 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
             // is not a number here.
             match numeric_prefix(s.as_bytes()) {
                 Some((n, false)) => Ok(stepped(Arith::Add, n)),
-                _ => Ok(Value::string(increment_string(req, s.as_bytes())?)),
+                _ => Ok(Value::string(increment_string(req, s)?)),
             }
         }
         ValueRef::Bool(_) => {
@@ -4362,16 +4362,19 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
             if let Some((n, false)) = numeric_prefix(s.as_bytes()) {
                 return Ok(stepped(Arith::Sub, n));
             }
+            // `zend_string_addref(zstr)`, since a handler can unset the
+            // variable: nothing is stepped, and the owner is the value
+            // handed back, the string the variable holds after it.
+            let held = Owner::take(req, *value);
             deprecated(
                 req,
                 "Decrement on non-numeric string has no effect and is deprecated",
             );
-            none_pending(req)?;
-            // As [`increment`]'s bool arm: nothing is stepped, and the
-            // value handed back is a second owner of the string the
-            // variable holds.
-            req.addref(value);
-            Ok(*value)
+            if let Err(thrown) = none_pending(req) {
+                held.let_go(req);
+                return Err(thrown);
+            }
+            Ok(held.hand_on())
         }
         // php's `IS_NULL` arm; an uninitialised zval reads as null here.
         ValueRef::Undef | ValueRef::Null => {
@@ -4462,12 +4465,20 @@ fn stepped_other(
 /// int(1)
 /// int(0)
 /// ```
-fn increment_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
+fn increment_string(req: &mut Request, text: PhpString) -> Result<PhpString, Thrown> {
+    // `zend_string_addref(zstr)`: a handler can change the variable.
+    let held = Owner::take(req, text);
     deprecated(
         req,
         "Increment on non-numeric string is deprecated, use str_increment() instead",
     );
-    none_pending(req)?;
+    let stepped = none_pending(req).and_then(|()| stepped_string(req, text.as_bytes()));
+    held.let_go(req);
+    stepped
+}
+
+/// The bytes [`increment_string`] steps, as a new string.
+fn stepped_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
     if bytes.is_empty() {
         return req.string(b"1");
     }
