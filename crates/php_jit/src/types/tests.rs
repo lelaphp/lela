@@ -231,19 +231,11 @@ fn a_loop_by_recursive_return_takes_no_interrupt_test() -> Result<(), String> {
     Ok(())
 }
 
-/// A `foreach` over a packed array is fetched inline, as php's
-/// `zend_jit_fe_fetch` compiles it, and writes its key as a long, as php's
-/// inference types what `FE_FETCH_R` writes from the array's layout, so
-/// no guard holds it; the exit its end takes knows nothing of it, as
-/// php's stack map types what an op writes only once the op's exits are
-/// taken; and the `+=` that reads it leaves through exit 4 at `0005`,
-/// as php's trace takes `exit_0` to `exit_2` at `0003`, `exit_3` at
-/// `0007` and `exit_4` at `0005` (#3203).
-#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 /// A `JMPZ_EX` writes its boolean before it guards the way it went, over
 /// the temporary it reads here, so the guard's exit leaves past the write
 /// with the boolean in its slot, of no type it knows there, as php sets
 /// `IS_UNKNOWN` for it (`Z/ext/opcache/jit/zend_jit_trace.c:5707-5712`).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_jump_that_writes_a_boolean_leaves_past_it_and_knows_no_type_of_it() -> Result<(), String> {
     let ir = built(
@@ -276,6 +268,15 @@ fn a_jump_that_writes_a_boolean_leaves_past_it_and_knows_no_type_of_it() -> Resu
     Ok(())
 }
 
+/// A `foreach` over a packed array is fetched inline, as php's
+/// `zend_jit_fe_fetch` compiles it, and writes its key as a long, as php's
+/// inference types what `FE_FETCH_R` writes from the array's layout, so
+/// no guard holds it; the exit its end takes knows nothing of it, as
+/// php's stack map types what an op writes only once the op's exits are
+/// taken; and the `+=` that reads it leaves through exit 4 at `0005`,
+/// as php's trace takes `exit_0` to `exit_2` at `0003`, `exit_3` at
+/// `0007` and `exit_4` at `0005` (#3203).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_packed_arrays_key_is_a_long_no_guard_holds() -> Result<(), String> {
     let ir = built(
