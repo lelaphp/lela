@@ -1659,7 +1659,9 @@ pub(super) fn within(opcode: Opcode, tag: ZvalType, op2: Operand) -> Option<With
         {
             Some(Within::Rerun)
         }
-        Opcode::FetchDimR | Opcode::FetchObjR => Some(Within::Fetched { missed: false }),
+        Opcode::FetchDimR | Opcode::FetchObjR | Opcode::FetchConstant => {
+            Some(Within::Fetched { missed: false })
+        }
         Opcode::FetchDimIs => Some(Within::Fetched {
             missed: tag != ZvalType::Null,
         }),

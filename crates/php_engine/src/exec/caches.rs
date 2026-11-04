@@ -140,6 +140,15 @@ impl Slab {
         }
     }
 
+    /// Every slot that keeps a constant's value `Unprimed` again.
+    fn forget_constants(&mut self) {
+        for slot in self.chunks.iter_mut().flatten() {
+            if matches!(slot, Cached::Constant(_)) {
+                *slot = Cached::Unprimed;
+            }
+        }
+    }
+
     /// The slots at `place`, every one `Unprimed` again.
     fn clear(&mut self, place: Place) {
         let at = place.base.place();
@@ -306,6 +315,13 @@ impl RuntimeCaches {
         if let Some(cell) = self.slab.slot_mut(base, slot) {
             *cell = value;
         }
+    }
+
+    /// Every slot that keeps a constant's value `Unprimed` again, where
+    /// the request's rows were taken out from under them
+    /// ([`Cached::Constant`]).
+    pub(crate) fn forget_constants(&mut self) {
+        self.slab.forget_constants();
     }
 
     /// Where slot `slot` of the cache at `at` stands, which compiled code

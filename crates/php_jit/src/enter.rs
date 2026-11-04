@@ -815,6 +815,7 @@ kernels! {
         Interrupt => interrupt() = tier::interrupted;
         NanToBool => nan_to_bool() = tier::nan_to_bool;
         StrOffset => str_offset(text: u64, key: u64, key_info: u32) -> Zval = tier::string_offset;
+        GetConstant => get_constant(func: u32) -> Zval = tier::get_constant;
     }
 }
 
@@ -1143,6 +1144,16 @@ fn concat(
     let left = (zval(a, a_info), a_kind);
     let right = (zval(b, b_info), b_kind);
     Ok(tier::concat(req, left, right)?.unwrap_or(Zval::UNDEF))
+}
+
+/// The `get_constant` kernel: the value of the constant the
+/// `FETCH_CONSTANT` at `on.at` of the op array the engine numbers `func`
+/// names, where its slot did not answer ([`tier::get_constant`]); `UNDEF`
+/// where a throwable was left pending, which the wrapper answers as one.
+fn get_constant(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<Zval, Fatal> {
+    let (frame, _) = found(req, on.room)?;
+    let (held, _) = held(on, func)?;
+    tier::get_constant(req, frame, on.at, held)
 }
 
 /// The `str_offset` kernel: the byte of the string at `text` the zval

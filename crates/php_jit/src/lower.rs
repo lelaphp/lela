@@ -803,11 +803,17 @@ pub(crate) enum Kernel {
     /// (`php_engine::tier::string_offset`); a key refused is a throwable
     /// pending, answered as one.
     StrOffset,
+    /// `get_constant(cx, frame, opline: u32, func: u32, value: *mut
+    /// Zval)`: the value of the constant the opline names, where its slot
+    /// did not answer, php's `zend_jit_get_constant`
+    /// (`php_engine::tier::get_constant`); an undefined one is a
+    /// throwable pending, answered as one.
+    GetConstant,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 23] = [
+    pub(crate) const ALL: [Kernel; 24] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
@@ -831,6 +837,7 @@ impl Kernel {
         Kernel::Interrupt,
         Kernel::NanToBool,
         Kernel::StrOffset,
+        Kernel::GetConstant,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

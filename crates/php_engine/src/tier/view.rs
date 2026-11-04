@@ -1263,6 +1263,18 @@ impl UnitView {
             .copied()
     }
 
+    /// The runtime-cache slot compiled code reads what the fetch `op` of
+    /// the op array `f` fetches from, as php's code reads
+    /// `CACHED_PTR(opline->extended_value)`: a `FETCH_CONSTANT`'s; none
+    /// for any other opline and for a slot past its cache.
+    #[must_use]
+    pub fn fetched_slot(&self, f: FuncRef, op: &Opline) -> Option<MapPtrRaw> {
+        match op.opcode {
+            Opcode::FetchConstant => self.cache_slot(f, CacheSlot(op.extended_value)),
+            _ => None,
+        }
+    }
+
     /// The declared slot the property opline at `at` of the op array `f`
     /// names on an object of `class`; none unless
     /// [`UnitView::hold_place`] took it.

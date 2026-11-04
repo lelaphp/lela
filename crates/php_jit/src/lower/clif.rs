@@ -1950,7 +1950,7 @@ impl<'a> Emit<'a> {
             Kernel::Frameless => &[
                 I64, I64, I32, I32, I32, I32, I64, I64, I32, I64, I32, I64, I32, I64,
             ],
-            Kernel::Step | Kernel::CallNative => &[I64, I64, I32, I32, I64],
+            Kernel::Step | Kernel::CallNative | Kernel::GetConstant => &[I64, I64, I32, I32, I64],
             Kernel::FreeThis | Kernel::PopCall | Kernel::Interrupt | Kernel::NanToBool => {
                 &[I64, I64, I32]
             }
@@ -3025,6 +3025,7 @@ impl<'a> Emit<'a> {
             Opcode::AssignDimOp => self.assign_dim_op(at, line),
             Opcode::Strlen => self.strlen(line),
             Opcode::Count => self.count(at, line),
+            Opcode::FetchConstant => self.fetch_constant(at, line),
             Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => self.rope(line),
             Opcode::Concat | Opcode::FastConcat => self.concat(line),
             Opcode::Bool | Opcode::BoolNot => self.bool(at, line),

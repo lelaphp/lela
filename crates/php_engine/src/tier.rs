@@ -1950,6 +1950,36 @@ pub fn dispatch_held(
     }
 }
 
+/// The value of the constant the `FETCH_CONSTANT` at `at` in `held`
+/// names, nobody's to release, for compiled code to copy where its slot
+/// did not answer, as php's code calls `zend_jit_get_constant`
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:8150-8156`): `frame` stood at `at`;
+/// `UNDEF` where the name answers nothing or a handler of its deprecation
+/// threw, which is left pending.
+///
+/// # Errors
+///
+/// An opline past the op array, which no compiled code hands.
+pub fn get_constant(
+    req: &mut Request,
+    frame: FrameRef,
+    at: OplineIdx,
+    held: Held<'_>,
+) -> Result<Zval, Fatal> {
+    let (code, at) = (held.code(), at.0);
+    req.vm_mut().stand(frame, at);
+    let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
+    Ok(
+        match crate::handlers::fetched::get_constant(req, frame, code, op) {
+            Ok(value) => value.to_zval(),
+            Err(thrown) => {
+                req.leave_pending(&thrown);
+                Zval::UNDEF
+            }
+        },
+    )
+}
+
 /// The native the call on top of the stack, `call`, is to, served from
 /// compiled code as php's `zend_jit_do_fcall` calls an internal
 /// function's handler with the call and the address of the slot that

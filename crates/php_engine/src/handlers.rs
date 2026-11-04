@@ -8537,9 +8537,7 @@ pub(crate) fn fetch_constant<T: Tier>(
 ) -> Edge {
     // `CACHED_PTR(opline->extended_value)`: the constant a pass before
     // found, read without a lookup.
-    if let exec::Cached::Constant(at) = req.cached(frame, CacheSlot(op.extended_value))
-        && let Some(value) = req.constant_at(at)
-    {
+    if let exec::Cached::Constant(value) = req.cached(frame, CacheSlot(op.extended_value)) {
         req.addref(&value);
         set_out(req, frame, op, value);
         return Ok(advance(req, frame));
@@ -8565,21 +8563,15 @@ fn fetch_constant_found(req: &mut Request, frame: FrameRef, code: &OpArray, op: 
             "InternalError: ZEND_FETCH_CONSTANT over a name no literal carries",
         ));
     }
-    let slot = CacheSlot(op.extended_value);
-    let mut key = named(code, op.op2.saturating_add(1));
-    let mut found = req.constant_found(&key);
-    if found.is_none() && op.op1 & UNQUALIFIED_IN_NAMESPACE != 0 {
-        key = named(code, op.op2.saturating_add(2));
-        found = req.constant_found(&key);
-    }
-    let Some((at, value, deprecated)) = found else {
-        let thrown = crate::api::raising::undefined_constant(req, &named(code, op.op2));
-        return threw(req, frame, &thrown);
+    let (value, deprecated, key) = match constant_named(req, code, op) {
+        Ok(found) => found,
+        Err(thrown) => return threw(req, frame, &thrown),
     };
     req.addref(&value);
     set_out(req, frame, op, value);
     if !deprecated {
-        req.prime(frame, slot, exec::Cached::Constant(at));
+        let slot = CacheSlot(op.extended_value);
+        req.prime(frame, slot, exec::Cached::Constant(value));
         return Ok(advance(req, frame));
     }
     // `if (ZEND_CONSTANT_FLAGS(c) & CONST_DEPRECATED)`
@@ -8593,6 +8585,61 @@ fn fetch_constant_found(req: &mut Request, frame: FrameRef, code: &OpArray, op: 
         req.leave_pending(&thrown);
     }
     Ok(advance(req, frame))
+}
+
+/// The lookup of the constant a `FETCH_CONSTANT` names: its value,
+/// whether it is deprecated and the name the table holds it by, or php's
+/// `Undefined constant "%s"`.
+fn constant_named(
+    req: &mut Request,
+    code: &OpArray,
+    op: &Opline,
+) -> Result<(Value, bool, Vec<u8>), Thrown> {
+    let mut key = named(code, op.op2.saturating_add(1));
+    let mut found = req.constant_found(&key);
+    if found.is_none() && op.op1 & UNQUALIFIED_IN_NAMESPACE != 0 {
+        key = named(code, op.op2.saturating_add(2));
+        found = req.constant_found(&key);
+    }
+    match found {
+        Some((value, deprecated)) => Ok((value, deprecated, key)),
+        None => Err(crate::api::raising::undefined_constant(
+            req,
+            &named(code, op.op2),
+        )),
+    }
+}
+
+/// What compiled code reaches of a fetch's handler past the slot it reads
+/// in place.
+pub(crate) mod fetched {
+    use super::{
+        CacheSlot, FrameRef, OpArray, Opline, Request, Thrown, Value, constant_named, exec,
+    };
+
+    /// The value of the constant a `FETCH_CONSTANT` names, nobody's to
+    /// release, for compiled code to copy where its slot did not answer,
+    /// as php's `zend_jit_get_constant` answers the `zend_constant`: the
+    /// slot read, or the lookup, the slot written for a constant that is
+    /// not deprecated and the deprecation of one raised.
+    pub(crate) fn get_constant(
+        req: &mut Request,
+        frame: FrameRef,
+        code: &OpArray,
+        op: &Opline,
+    ) -> Result<Value, Thrown> {
+        let slot = CacheSlot(op.extended_value);
+        if let exec::Cached::Constant(value) = req.cached(frame, slot) {
+            return Ok(value);
+        }
+        let (value, deprecated, key) = constant_named(req, code, op)?;
+        if deprecated {
+            crate::api::raising::deprecated_constant(req, &key)?;
+        } else {
+            req.prime(frame, slot, exec::Cached::Constant(value));
+        }
+        Ok(value)
+    }
 }
 
 /// The bytes of the constant at `at`, which is a name where the opline
@@ -24761,7 +24808,7 @@ pub(crate) fn defined<T: Tier>(
 #[inline]
 fn defined_cached(req: &Request, frame: FrameRef, slot: CacheSlot) -> Option<bool> {
     match req.cached(frame, slot) {
-        Cached::Constant(at) if req.constant_at(at).is_some() => Some(true),
+        Cached::Constant(_) => Some(true),
         Cached::Undefined(count) if count == req.constant_count() => Some(false),
         _ => None,
     }
@@ -24775,7 +24822,7 @@ fn defined_cached(req: &Request, frame: FrameRef, slot: CacheSlot) -> Option<boo
 fn defined_looked_up(req: &mut Request, frame: FrameRef, slot: CacheSlot, name: &Value) -> bool {
     let name = name.as_str_bytes().unwrap_or_default();
     let primed = match req.constant_found(name) {
-        Some((at, _, _)) => Cached::Constant(at),
+        Some((value, _)) => Cached::Constant(value),
         None if crate::ops::defined(req, name) => return true,
         None => Cached::Undefined(req.constant_count()),
     };

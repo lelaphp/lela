@@ -2972,6 +2972,7 @@ pub enum ValueRef {
 /// ([`Value::as_ref`] and the `as_*` readers) are read off the type
 /// byte.
 #[derive(Clone, Copy)]
+#[repr(transparent)]
 pub struct Value {
     zval: Zval,
 }

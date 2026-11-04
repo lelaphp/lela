@@ -915,12 +915,14 @@ impl<'a> Builder<'a> {
             Opcode::InitStaticMethodCall => self.static_at((func, at), &op, next),
             _ => None,
         };
+        let fetched = self.view.fetched_slot(func, &op);
         let form = match (op.opcode, property) {
             (opcode, Some(_)) if on_declared_slot(opcode) => Form::Inline,
             (opcode, None) if on_declared_slot(opcode) => Form::Step,
             (Opcode::InitMethodCall | Opcode::InitStaticMethodCall, _) if pushed.is_some() => {
                 Form::Inline
             }
+            _ if fetched.is_some() => Form::Inline,
             _ => form,
         };
         let pair = match pushed.as_ref().map(|pushed| &pushed.held) {
@@ -945,7 +947,8 @@ impl<'a> Builder<'a> {
         };
         self.sampled.insert(idx, samples);
         let cached = (property.and_then(|property| property.slot.cached()))
-            .or_else(|| pair.map(|(slot, _)| slot.cached()));
+            .or_else(|| pair.map(|(slot, _)| slot.cached()))
+            .or(fetched);
         let map_ptr = match cached {
             Some(raw) if form == Form::Inline => Some(self.map_ptr_of(raw)),
             _ => None,
@@ -1464,10 +1467,15 @@ impl<'a> Builder<'a> {
                     // the memory limit.
                     || op.opcode == Opcode::SendRef
                     // The join may refuse, the memory limit or the string's
-                    // size, and leave it pending.
+                    // size, and leave it pending; a constant's name may
+                    // answer nothing, or a deprecation run the error
+                    // handler.
                     || matches!(
                         op.opcode,
-                        Opcode::RopeEnd | Opcode::Concat | Opcode::FastConcat
+                        Opcode::RopeEnd
+                            | Opcode::Concat
+                            | Opcode::FastConcat
+                            | Opcode::FetchConstant
                     )
                     || (op.opcode == Opcode::AssignOp
                         && lattice::binary_of(op.extended_value) == Some(Opcode::Concat))

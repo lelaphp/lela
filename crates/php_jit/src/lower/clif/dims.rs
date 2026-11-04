@@ -495,7 +495,7 @@ impl Emit<'_> {
     /// ```expect regime=jit-tracing process
     /// 0
     /// ```
-    fn copied_element(&mut self, element: Value, out: ValueId) -> Result<(), Abort> {
+    pub(super) fn copied_element(&mut self, element: Value, out: ValueId) -> Result<(), Abort> {
         let held = self.value(out)?;
         if held.home == Home::Register && Kind::of(held.types).is_some_and(Kind::carries) {
             return Err(mismatch(

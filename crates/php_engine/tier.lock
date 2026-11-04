@@ -221,6 +221,7 @@ tier::dispatch_held
 tier::frameless_call
 tier::free_cv
 tier::free_this
+tier::get_constant
 tier::lookup_element
 tier::make_ref
 tier::nan_to_bool

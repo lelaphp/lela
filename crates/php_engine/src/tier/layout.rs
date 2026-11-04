@@ -417,6 +417,8 @@ pub struct PlaceLayout {
     ty: u32,
     slot: u32,
     untyped: u32,
+    constant: u32,
+    constant_value: u32,
 }
 
 /// The engine's runtime-cache slot layout.
@@ -437,6 +439,8 @@ pub const PLACE: PlaceLayout = {
         ty: word(offset + PropertyOffset::TY_AT),
         slot: word(offset + PropertyOffset::SLOT_AT),
         untyped: SlotType::NO_TYPE as u32,
+        constant: crate::exec::CONSTANT,
+        constant_value: word(Cached::CONSTANT_AT),
     }
 };
 
@@ -537,6 +541,18 @@ impl PlaceLayout {
     #[must_use]
     pub const fn untyped(&self) -> u32 {
         self.untyped
+    }
+
+    /// The tag of a slot that holds a constant's value.
+    #[must_use]
+    pub const fn constant(&self) -> u32 {
+        self.constant
+    }
+
+    /// Where a constant's value is, a zval.
+    #[must_use]
+    pub const fn constant_value(&self) -> u32 {
+        self.constant_value
     }
 }
 

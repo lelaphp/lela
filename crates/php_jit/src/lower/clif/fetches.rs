@@ -1,16 +1,21 @@
 //! The reads php's trace compiles in line that the step served here: a
 //! double's truth with the warning of a NAN in a cold arm
 //! (`zend_jit_bool_jmpznz`, `Z/ext/opcache/jit/zend_jit_ir.c:7750-7768`),
-//! an array's count (`zend_jit_count`, `:11671-11713`) and a string's
-//! offset (`zend_jit_fetch_dim_read`, `:12720-12755`).
+//! an array's count (`zend_jit_count`, `:11671-11713`), a string's offset
+//! (`zend_jit_fetch_dim_read`, `:12720-12755`) and a constant
+//! (`zend_jit_fetch_constant`, `:8109-8177`).
 
 use cranelift_codegen::ir::condcodes::FloatCC;
 use cranelift_codegen::ir::types::{I32, I64};
 use cranelift_codegen::ir::{InstBuilder, Value};
+use php_engine::tier::{PLACE, PlaceLayout};
 use php_heap::Arr;
 
-use super::{Emit, Kernel, Scalar, TYPE_AT, imm, mismatch, trusted};
+use super::{Emit, Kernel, Refuse, Scalar, TYPE_AT, imm, mismatch, trusted};
 use crate::types::{Abort, Leave, Line, OpId, Operand};
+
+/// The runtime-cache slots' layout, as the fetches read them.
+const P: PlaceLayout = PLACE;
 
 impl Emit<'_> {
     /// The truth of `held`, as php's `zend_jit_bool_jmpznz` reads it: a
@@ -374,5 +379,141 @@ impl Emit<'_> {
         self.b.ins().store(trusted(), byte, base, at);
         self.b.ins().store(trusted(), info, base, at + TYPE_AT);
         Ok(())
+    }
+
+    /// A constant, as php's `zend_jit_fetch_constant`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:8109-8177`): its value read off
+    /// the slot of the request's runtime cache where the slot holds one,
+    /// through [`Kernel::GetConstant`] in a cold arm where it does not,
+    /// the look-up php's `zend_jit_get_constant` makes; either way held
+    /// to the type a guard within the fetch holds it to, and copied.
+    ///
+    /// Of each kind, counted and not, php's, the host's and the program's,
+    /// by a namespaced name and one that falls back, and in a closure,
+    /// whose frame reads a cache of its own:
+    ///
+    ///
+    /// ```php
+    /// namespace N { const OWN = "own"; function f($n) {
+    ///     define("LATE", [1, 2]); define("S", str_repeat("s", 3));
+    ///     $o = []; $c = function () { return OWN . PHP_INT_SIZE; };
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $x = E_ALL; $y = OWN; $z = LATE; $z[] = $i; $w = S . "!"; $v = PHP_SAPI === "cli";
+    ///         $o[] = [$x, $y, count($z), $w, $v, \strlen(PHP_EOL), $c()];
+    ///     }
+    ///     return $o[$n - 1];
+    /// } echo json_encode(f(4)), "\n"; }
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [30719,"own",3,"sss!",true,1,"own8"]
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    ///
+    /// ```php
+    /// namespace N { const OWN = "own"; function f($n) {
+    ///     define("LATE", [1, 2]); define("S", str_repeat("s", 3));
+    ///     $o = []; $c = function () { return OWN . PHP_INT_SIZE; };
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $x = E_ALL; $y = OWN; $z = LATE; $z[] = $i; $w = S . "!"; $v = PHP_SAPI === "cli";
+    ///         $o[] = [$x, $y, count($z), $w, $v, \strlen(PHP_EOL), $c()];
+    ///     }
+    ///     return $o[$n - 1];
+    /// } echo json_encode(f(4)), "\n"; }
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [30719,"own",3,"sss!",true,1,"own8"]
+    /// ```
+    ///
+    /// The loop php's trace reads a constant a pass in, its exits php's:
+    ///
+    /// ```php
+    /// define('TEST', null);
+    /// function k($n) { for ($i = 0; $i < $n; ++$i) { $x = TEST; } return $i; }
+    /// echo k(200), "\n";
+    /// ```
+    /// ```expect regime=jit-inline
+    /// 200
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:2
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) k() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 2 k() %s:3
+    /// ---- TRACE 2 start (side trace 1/2) k() %s:3
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    /// ```
+    ///
+    /// A name undefined until a pass defines it, whose `Error` leaves
+    /// through the opline's unwind, and a deprecated constant, which no
+    /// slot keeps, its deprecation raised every pass and a handler's throw
+    /// caught where it was read:
+    ///
+    /// ```php
+    /// #[\Deprecated] const OLD = 1;
+    /// function f($n) {
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         try { echo NOPE, "\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    ///         if ($i == 1) { define("NOPE", "now"); }
+    ///     }
+    /// }
+    /// function g($n) {
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         try { echo OLD, "\n"; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    ///     }
+    /// }
+    /// f(4); g(2);
+    /// set_error_handler(function ($n, $m) { throw new Exception($m); });
+    /// g(2);
+    /// ```
+    /// ```expect regime=jit-force process
+    /// Undefined constant "NOPE"
+    /// Undefined constant "NOPE"
+    /// now
+    /// now
+    ///
+    /// Deprecated: Constant OLD is deprecated in %s on line 11
+    /// 1
+    ///
+    /// Deprecated: Constant OLD is deprecated in %s on line 11
+    /// 1
+    /// Constant OLD is deprecated
+    /// Constant OLD is deprecated
+    /// ```
+    pub(super) fn fetch_constant(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        let out = line
+            .out
+            .ok_or_else(|| mismatch("a constant's fetch that writes nothing"))?;
+        let missed = self.b.create_block();
+        self.b.set_cold_block(missed);
+        let read = self.b.create_block();
+        let element = self.b.append_block_param(read, I64);
+        let place = self.cached_slot(line, P.constant(), Refuse::To(missed))?;
+        let value = (self.b.ins()).iadd_imm_s(place, i64::from(P.constant_value()));
+        self.b.ins().jump(read, &[value.into()]);
+        self.b.switch_to_block(missed);
+        self.b.seal_block(missed);
+        let func = self.func_of(line.frame)?;
+        let [room, opline] = self.served(line)?;
+        let slot = self.answer();
+        let answer = self.b.ins().stack_addr(I64, slot, 0);
+        self.call(
+            Kernel::GetConstant,
+            &[room, opline, func, answer],
+            line.unwind.map(Leave::Unwind),
+        )?;
+        self.b.ins().jump(read, &[answer.into()]);
+        self.b.switch_to_block(read);
+        self.b.seal_block(read);
+        match self.within(at).as_slice() {
+            [] => self.copied_element(element, out),
+            [held] => self.held_element(*held, None, element, out),
+            _ => Err(mismatch("a constant's fetch holds guards of another kind")),
+        }
     }
 }
