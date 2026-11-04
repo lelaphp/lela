@@ -1099,14 +1099,14 @@ impl Emit<'_> {
             .ok_or_else(|| mismatch("a leave in place with no caller read"))?;
         let room = self.room(line.frame)?;
         let (slow, join) = self.split();
-        let refused = self.leave_refused(room, caller, line)?;
-        self.divert_if(refused, slow);
-        // The frame is the table's last record, on the top page.
+        self.leave_refused(room, caller, line, slow)?;
+        // The frame is the table's last record, as a `RETURN` runs with no
+        // call under way, on the top page.
         let len = self.b.ins().load(I64, trusted(), stack, FRAMES_LEN);
         let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
         let last = self.b.ins().iadd_imm_s(len, -1);
-        let refused = self.not_on_top(frames, last, room);
-        self.divert_if(refused, slow);
+        let off_page = self.off_page(frames, last);
+        self.divert_if(off_page, slow);
         // The caller's place, and the slot of its that takes the return,
         // which holds nothing counted.
         let callers = self.record_word(frames, place, L.record_at());
@@ -1116,17 +1116,13 @@ impl Emit<'_> {
         let reads = self.b.ins().icmp_imm_s(IntCC::NotEqual, returns, 0);
         let kind = self.b.ins().load(I32, trusted(), target, super::TYPE_AT);
         let counted = self.b.ins().band_imm_u(kind, COUNTED);
-        let counted = self.b.ins().icmp_imm_s(IntCC::NotEqual, counted, 0);
-        let counted = self.b.ins().band(reads, counted);
-        self.divert_if(counted, slow);
+        self.divert_where(counted, named, slow);
         if let Out::Moved(_, info) = returned {
             // What the caller does not read is given up, which the leave
             // kernel does.
             let owned = self.b.ins().band_imm_u(info, COUNTED);
-            let owned = self.b.ins().icmp_imm_s(IntCC::NotEqual, owned, 0);
             let unread = self.b.ins().icmp_imm_s(IntCC::Equal, returns, 0);
-            let dropped = self.b.ins().band(owned, unread);
-            self.divert_if(dropped, slow);
+            self.divert_where(owned, unread, slow);
         }
         // What a variable holds the caller takes an owner of before the
         // variables are given up, which may give up the last other, as
@@ -1650,74 +1646,144 @@ impl Emit<'_> {
         Ok(out(word, info))
     }
 
-    /// What the header of the frame in `room`, which leaves to `caller`,
-    /// says the leave kernel serves: a receiver of a frame the trace takes
-    /// to have none ([`Imm::Leave`]'s `receives`), a closure, an annex, a
-    /// call not made a frame or arguments past the parameters, a caller
-    /// that is none or the loop's, and, where the frame has more variables
-    /// than the leave frees one by one ([`Owners::Kernel`]), a variable
-    /// that owns something, every variable's type word tested at once.
-    /// The interpreter's owning leave gives up the receiver or the
-    /// closure after the variables; a frame that holds a closure is the
-    /// leave kernel's, and a receiver is the last of what a leave in
-    /// place gives up ([`Emit::free_this`]).
-    fn leave_refused(&mut self, room: Value, caller: Value, line: &Line) -> Result<Value, Abort> {
+    /// On to `slow` where the header of the frame in `room`, which leaves
+    /// to `caller`, says the leave kernel serves it, one word read as
+    /// `zend_jit_leave_func` reads `ZEND_CALL_INFO` and
+    /// `Request::leave_plainly` reads the flags: a receiver of a frame the
+    /// trace takes to have none ([`Imm::Leave`]'s `receives`), a call not
+    /// made a frame, arguments past the parameters or an annex; then a
+    /// closure, a caller that is none or the loop's, and, where the frame
+    /// has more variables than the leave frees one by one
+    /// ([`Owners::Kernel`]), a variable that owns something, every
+    /// variable's type word tested at once. The interpreter's owning leave
+    /// gives up the receiver or the closure after the variables; a frame
+    /// that holds a closure is the leave kernel's, and a receiver is the
+    /// last of what a leave in place gives up ([`Emit::free_this`]).
+    ///
+    /// A frame that took an annex as it ran, a `finally`'s, a `static`'s
+    /// and a symbol table's, one passed more than it declares, a closure's
+    /// and one with a receiver, each left under force and where every
+    /// guard fails once:
+    ///
+    /// ```php
+    /// class K { public $v = 1; function m($x) { return $x + $this->v; } static function s($x) { return $x + 1; } }
+    /// function f($x) { try { return $x + 1; } finally { $x = 0; } }
+    /// function st($x) { static $n = 0; $n++; return $x + $n; }
+    /// function ex($x) { $a = 1; extract(['b' => $x]); return $a + $b; }
+    /// function cp($x) { $y = $x + 1; return compact('y')['y']; }
+    /// function more($a) { return func_num_args() + $a; }
+    /// $c = function ($x) { return $x + 2; };
+    /// $t = 0; $k = new K;
+    /// for ($i = 0; $i < 60; $i++) { $t += f($i) + st($i) + ex($i) + cp($i) + more($i, 9, 9) + $c($i) + $k->m($i) + K::s($i); }
+    /// echo $t, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 16590
+    /// ```
+    ///
+    /// ```php
+    /// class K { public $v = 1; function m($x) { return $x + $this->v; } static function s($x) { return $x + 1; } }
+    /// function f($x) { try { return $x + 1; } finally { $x = 0; } }
+    /// function st($x) { static $n = 0; $n++; return $x + $n; }
+    /// function ex($x) { $a = 1; extract(['b' => $x]); return $a + $b; }
+    /// function cp($x) { $y = $x + 1; return compact('y')['y']; }
+    /// function more($a) { return func_num_args() + $a; }
+    /// $c = function ($x) { return $x + 2; };
+    /// $t = 0; $k = new K;
+    /// for ($i = 0; $i < 60; $i++) { $t += f($i) + st($i) + ex($i) + cp($i) + more($i, 9, 9) + $c($i) + $k->m($i) + K::s($i); }
+    /// echo $t, "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 16590
+    /// ```
+    fn leave_refused(
+        &mut self,
+        room: Value,
+        caller: Value,
+        line: &Line,
+        slow: Block,
+    ) -> Result<(), Abort> {
         let receives = matches!(line.imm, Imm::Leave { receives: true, .. });
-        let this = (!receives).then(|| self.b.ins().load(I64, trusted(), room, at(L.this())));
-        let closure = self.b.ins().load(I64, trusted(), room, at(L.closure()));
-        let held = match this {
-            Some(this) => self.b.ins().bor(this, closure),
-            None => closure,
+        let refusing = if receives {
+            L.leaves_by_kernel()
+        } else {
+            L.leaves_by_kernel() | L.has_this()
         };
-        let mut refused = self.b.ins().icmp_imm_s(IntCC::NotEqual, held, 0);
-        let annex = self.b.ins().load(I32, trusted(), room, at(L.annex()));
         let info = self.b.ins().load(I32, trusted(), room, at(L.info()));
-        let flagged = self
-            .b
-            .ins()
-            .band_imm_u(info, i64::from(L.leaves_by_kernel()));
-        let owns = self.b.ins().bor(annex, flagged);
-        let owns = self.b.ins().icmp_imm_s(IntCC::NotEqual, owns, 0);
-        refused = self.b.ins().bor(refused, owns);
+        let flagged = self.b.ins().band_imm_u(info, i64::from(refusing));
+        self.divert_if(flagged, slow);
+        let closure = self.b.ins().load(I64, trusted(), room, at(L.closure()));
+        self.divert_if(closure, slow);
         let outside = self.outside(caller);
-        refused = self.b.ins().bor(refused, outside);
+        self.divert_if(outside, slow);
         if let Imm::Leave {
             owners: Owners::Kernel,
             ..
         } = line.imm
         {
             let owners = self.owners(room, line.frame)?;
-            refused = self.b.ins().bor(refused, owners);
+            self.divert_if(owners, slow);
         }
-        Ok(refused)
+        Ok(())
+    }
+
+    /// On to `to` where `rare` and `then` are both not zero, the first
+    /// tested alone on the way past: a test of two conditions, the first
+    /// of which is hardly ever met, that takes one branch.
+    fn divert_where(&mut self, rare: Value, then: Value, to: Block) {
+        let on = self.b.create_block();
+        let met = self.b.create_block();
+        self.b.set_cold_block(met);
+        self.b.ins().brif(rare, met, &[], on, &[]);
+        self.b.switch_to_block(met);
+        self.b.seal_block(met);
+        self.b.ins().brif(then, to, &[], on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
     }
 
     /// Whether the frame whose header names `caller` was served from outside
     /// the loop: none, or the loop's (`exec::Caller::Outside`, `Loop`).
+    ///
+    /// One test: taken one from, a word that names no frame wraps to the
+    /// top half-word, and the loop's bit is the top bit of one that does
+    /// and is left there, the place below it staying clear of it.
     fn outside(&mut self, caller: Value) -> Value {
-        let none = self.b.ins().icmp_imm_s(IntCC::Equal, caller, 0);
-        let looped = self.b.ins().band_imm_u(caller, i64::from(L.caller_loop()));
-        let looped = self.b.ins().icmp_imm_s(IntCC::NotEqual, looped, 0);
-        self.b.ins().bor(none, looped)
+        const { assert!(L.caller_loop() == 1 << 31 && L.numbered_from() == 1) };
+        let word = self.b.ins().ireduce(I32, caller);
+        let less = self.b.ins().iadd_imm_s(word, -1);
+        self.b.ins().icmp_imm_s(IntCC::SignedLessThan, less, 0)
     }
 
-    /// Whether the record `last` of the frame table at `frames` is not the
-    /// frame in `room`, or not on the top page.
-    fn not_on_top(&mut self, frames: Value, last: Value, room: Value) -> Value {
+    /// Whether the frame of record `last` of the frame table at `frames`
+    /// stands off the top page. Recursion past a page, each frame that
+    /// opened one left under force and where every guard fails once:
+    ///
+    /// ```php
+    /// function d($n) { $a = $n; $b = $a; return $n == 0 ? 0 : $b + d($n - 1) - $a + 1; }
+    /// $t = 0; for ($i = 0; $i < 30; $i++) { $t += d(20000 + $i); } echo $t, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 600435
+    /// ```
+    ///
+    /// ```php
+    /// function d($n) { $a = $n; $b = $a; return $n == 0 ? 0 : $b + d($n - 1) - $a + 1; }
+    /// $t = 0; for ($i = 0; $i < 30; $i++) { $t += d(20000 + $i); } echo $t, "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 600435
+    /// ```
+    fn off_page(&mut self, frames: Value, last: Value) -> Value {
         let offset = self.b.ins().imul_imm_s(last, i64::from(L.record()));
         let record = self.b.ins().iadd(frames, offset);
-        let first = self.b.ins().load(I64, trusted(), record, at(L.record_at()));
-        let own = self.b.ins().iadd_imm_s(room, i64::from(L.room()));
-        let elsewhere = self.b.ins().icmp(IntCC::NotEqual, first, own);
         let tag = self
             .b
             .ins()
             .load(I8, trusted(), record, at(L.record_placed()));
-        let off_page = self
-            .b
+        self.b
             .ins()
-            .icmp_imm_s(IntCC::NotEqual, tag, i64::from(L.on_page()));
-        self.b.ins().bor(elsewhere, off_page)
+            .icmp_imm_s(IntCC::NotEqual, tag, i64::from(L.on_page()))
     }
 
     /// The room of the call under way in `frame` as the frame table has
@@ -2117,8 +2183,8 @@ impl Emit<'_> {
     /// `zend_vm_stack_free_args` and `zend_vm_stack_free_call_frame` as
     /// php's `zend_jit_do_fcall` writes them inline (`:10592-10640`):
     /// where the push was compiled code's, of `count` arguments, the
-    /// call is the frame table's last record on the top page and carries
-    /// no annex (an `INIT_FCALL`'s call carries no receiver and no
+    /// call, the frame table's last record as a native leaves nothing over
+    /// it, stands on the top page and carries no annex (an `INIT_FCALL`'s call carries no receiver and no
     /// closure), and no argument's release can be the last of its value,
     /// each counted argument's owner given up by a `GC_DELREF` inline,
     /// the record off the table and the top back; through
@@ -2142,8 +2208,8 @@ impl Emit<'_> {
         let len = self.b.ins().load(I64, trusted(), stack, FRAMES_LEN);
         let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
         let last = self.b.ins().iadd_imm_s(len, -1);
-        let refused = self.not_on_top(frames, last, call);
-        self.divert_if(refused, by_kernel);
+        let off_page = self.off_page(frames, last);
+        self.divert_if(off_page, by_kernel);
         let annex = self.b.ins().load(I32, trusted(), call, at(L.annex()));
         self.divert_if(annex, by_kernel);
         for arg in 0..count {
