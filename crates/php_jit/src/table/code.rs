@@ -25,8 +25,9 @@
 //! Beside the arena, the system's page its size is rounded to, and the
 //! three calls the `PERF_DUMP` record needs that only `unsafe` reaches:
 //! the jitdump's one mapping, the monotonic clock its records are
-//! stamped with, and the thread that wrote them. And [`NullTable`], a
-//! table nothing writes until a slot is.
+//! stamped with, and the thread that wrote them. And the two ways the
+//! tier keeps its footprint: [`NullTable`], a table nothing writes until
+//! a slot is, and [`give_back_freed_pages`], what a compile's job ends on.
 #![deny(
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block
@@ -613,6 +614,31 @@ impl<T> Deref for NullTable<T> {
         // is a null `AtomicPtr`, and every write is through these atomics.
         unsafe { std::slice::from_raw_parts(map.base.as_ptr().cast(), len) }
     }
+}
+
+/// The pages this process's allocator holds freed given back to the
+/// system, all it can give: what a compile's job ends on, whose bytes are
+/// freed and whose pages would stay (#4121). Off a request, as the call
+/// walks every zone, and an allocation in one waits for it.
+///
+/// macOS alone. Linux's `malloc_trim(0)` is the nearest call and is not
+/// made here: the `libc` crate declares it for glibc alone, its manual
+/// has it walk every arena, and no reading of it stands, so there as on
+/// any other target this does nothing.
+pub(crate) fn give_back_freed_pages() {
+    #[cfg(all(target_os = "macos", not(miri)))]
+    {
+        // SAFETY: a null zone asks it of every zone and a goal of zero asks
+        // for all it can give; the call takes each zone's own lock, and
+        // frees only pages no allocation stands on.
+        unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+    }
+}
+
+#[cfg(all(target_os = "macos", not(miri)))]
+unsafe extern "C" {
+    /// libSystem's relief of a malloc zone: `<malloc/malloc.h>`.
+    fn malloc_zone_pressure_relief(zone: *mut libc::c_void, goal: libc::size_t) -> libc::size_t;
 }
 
 /// `file` mapped once, readable and executable, and unmapped: the
