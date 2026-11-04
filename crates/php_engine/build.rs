@@ -246,6 +246,7 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
             "`{twice}` is named by both `IN_THE_LOOP` and `PATH_IN_THE_LOOP`, which say where its handler is called two ways"
         ));
     }
+    edges_in_the_loop()?;
     if let Some(stray) = IN_THE_LOOP.iter().chain(PATH_IN_THE_LOOP).find(|name| {
         !calls.iter().any(|(call, variants)| {
             !call.starts_with("Err(") && variants.iter().any(|variant| variant == *name)
@@ -315,6 +316,40 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     ))
 }
 
+/// The call edges' lists held to the loop's: a name of [`ENTERS`] is one
+/// of [`WAY_IN_THE_ARM`], and a name of that one of [`IN_THE_LOOP`].
+fn edges_in_the_loop() -> Result<(), String> {
+    if let Some((stray, ..)) = ENTERS
+        .iter()
+        .find(|(name, ..)| !WAY_IN_THE_ARM.contains(name))
+    {
+        return Err(format!(
+            "`{stray}` is named by `ENTERS` and not by `WAY_IN_THE_ARM`, whose arms alone read the push"
+        ));
+    }
+    if let Some(stray) = WAY_IN_THE_ARM
+        .iter()
+        .find(|name| !IN_THE_LOOP.contains(name))
+    {
+        return Err(format!(
+            "`{stray}` is named by `WAY_IN_THE_ARM` and not by `IN_THE_LOOP`, whose arms alone are in the loop's body"
+        ));
+    }
+    Ok(())
+}
+
+/// How an arm that calls its handler reads the answer ([`held_arm`]).
+#[derive(Clone, Copy)]
+enum Answer {
+    /// As the loop reads every arm's, where the arms meet.
+    Cold,
+    /// As a way, in the arm: a call edge's ([`WAY_IN_THE_ARM`]).
+    Way,
+    /// The push first, whether the handler's `INIT` flags the callee and
+    /// php's name of the opcode, then as a way ([`ENTERS`]).
+    Pushed { flagged: bool, opcode: &'static str },
+}
+
 /// The arms of `dispatch`'s `match`, one per call, and of `held!`'s, one
 /// per call and inline path among its variants (`inlines`, by the
 /// variant), so that an arithmetic alone and fused to the `ASSIGN` after
@@ -351,7 +386,20 @@ fn arms_of(
             let aside = served
                 .iter()
                 .any(|variant| PATH_IN_THE_LOOP.contains(&variant.as_str()));
-            held.push_str(&held_arm(&pattern(&served), call, path, aside));
+            let entered = ENTERS
+                .iter()
+                .find(|(name, ..)| served.iter().any(|variant| variant == name));
+            let answer = match entered {
+                Some(&(_, flagged, opcode)) => Answer::Pushed { flagged, opcode },
+                None if served
+                    .iter()
+                    .any(|variant| WAY_IN_THE_ARM.contains(&variant.as_str())) =>
+                {
+                    Answer::Way
+                }
+                None => Answer::Cold,
+            };
+            held.push_str(&held_arm(&pattern(&served), call, path, aside, answer));
         }
     }
     (arms, held)
@@ -361,15 +409,44 @@ fn arms_of(
 /// `call`, and first by the inline path `inline` where it has one, over
 /// the slots the loop holds; for a variant whose path alone is in the
 /// loop's body, `aside` ([`PATH_IN_THE_LOOP`]), a hit goes on as `call`'s
-/// answer would.
-fn held_arm(pattern: &str, call: &str, inline: Option<&Inlined>, aside: bool) -> String {
+/// answer would; the handler's answer read as `answer` says.
+fn held_arm(
+    pattern: &str,
+    call: &str,
+    inline: Option<&Inlined>,
+    aside: bool,
+    answer: Answer,
+) -> String {
     let pattern = pattern.replace("Handler::", "php_unit::Handler::");
+    let read = |call: &str| {
+        format!(
+            "match {call} {{\n\
+             \x20                   Ok(next) => crate::tier::Dispatched::Way(next.way()),\n\
+             \x20                   Err(fatal) => crate::tier::Dispatched::Cold(Err(fatal)),\n\
+             \x20               }}"
+        )
+    };
+    let answer = match answer {
+        Answer::Pushed { flagged, opcode } => format!(
+            "match crate::handlers::inline_path::enter(req, frame, op, at, {flagged}) {{\n\
+             \x20                   Some(callee) => crate::tier::Dispatched::Way(crate::tier::Way::Left(\n\
+             \x20                       crate::tier::Stepped::Pushed(callee),\n\
+             \x20                   )),\n\
+             \x20                   None => {},\n\
+             \x20               }}",
+            read(&format!(
+                "crate::handlers::inline_path::past_the_push(req, (frame, at), op, \"{opcode}\")"
+            ))
+        ),
+        Answer::Way => read(call),
+        Answer::Cold => format!("crate::tier::Dispatched::Cold({call})"),
+    };
     let cold = format!(
         "{{\n\
          \x20               $slots = &mut [];\n\
          \x20               #[allow(unused_variables)]\n\
          \x20               let req: &mut crate::api::request::Request = &mut *$req;\n\
-         \x20               crate::tier::Dispatched::Cold({call})\n\
+         \x20               {answer}\n\
          \x20           }}"
     );
     // A fused path serves the `ASSIGN` after its opline unseen, so the
@@ -940,6 +1017,38 @@ const IN_THE_LOOP: &[&str] = &[
 /// here is no name of `IN_THE_LOOP`, and one that is no variant the
 /// dispatch serves is a build error.
 const PATH_IN_THE_LOOP: &[&str] = &["VerifyReturnType"];
+
+/// The variants of the call edges, whose arms read their handler's answer
+/// as a way in the arm ([`held_arm`]): a call's push and a return's pop,
+/// php's `ZEND_VM_ENTER` and `ZEND_VM_LEAVE`. The way is a constant of
+/// each path through the handler, so the loop goes from the push or the
+/// pop straight to its take-up of the callee or the caller, as php's
+/// handler goes straight to the callee's or the caller's next opline;
+/// read where the arms meet, the answer was one word of every arm, made
+/// and searched again (#3995). A name here is a name of [`IN_THE_LOOP`],
+/// and one that is not is a build error.
+const WAY_IN_THE_ARM: &[&str] = &[
+    "DoFcall",
+    "DoFcallByName",
+    "DoUcall",
+    "ReturnConst",
+    "ReturnCv",
+    "ReturnTmp",
+];
+
+/// The calls of [`WAY_IN_THE_ARM`] whose arm serves the push first,
+/// `crate::handlers::inline_path::enter`, each with whether its handler
+/// enters a callee whose `INIT` flagged it and php's name of its opcode:
+/// a handler that answers the push or another edge on its two paths makes
+/// one answer of them where it returns, so its arm reads the push apart,
+/// as an inline path, and serves what the push stands aside for past it
+/// (`crate::handlers::inline_path::past_the_push`), the handler's own two
+/// halves, so no call is pushed twice.
+const ENTERS: &[(&str, bool, &str)] = &[
+    ("DoFcall", true, "ZEND_DO_FCALL"),
+    ("DoFcallByName", true, "ZEND_DO_FCALL_BY_NAME"),
+    ("DoUcall", false, "ZEND_DO_UCALL"),
+];
 
 /// The handlers with an inline path, a function of
 /// `crate::handlers::inline_path` named as the handler and generic over
