@@ -678,8 +678,8 @@ impl Store {
     /// head of the free list unless the shutdown walk forbids reuse,
     /// else `top`, and the table doubled by `erealloc` when `top` is at
     /// its size (`zend_objects_store_put_cold`).
-    pub(crate) fn put(&mut self, mm: &mut Mm, o: Obj) -> Result<u32, Fatal> {
-        self.lay_down(mm)?;
+    #[inline]
+    pub(crate) fn put(&mut self, mm: &mut Mm, o: Obj) -> Result<(), Fatal> {
         let handle = match self.free_list_head {
             Some(handle) if !self.no_reuse => {
                 let word = self.read(handle).map_or(BUCKET_INVALID, Bucket::addr);
@@ -687,10 +687,8 @@ impl Store {
                 self.free_list_head = if next == u32::MAX { None } else { Some(next) };
                 handle
             }
+            _ if self.top >= self.size => return self.put_grown(mm, o),
             _ => {
-                if self.top == self.size {
-                    self.grow(mm)?;
-                }
                 let handle = self.top;
                 self.top += 1;
                 handle
@@ -698,7 +696,20 @@ impl Store {
         };
         o.header().handle.set(handle);
         self.write(handle, o.0.as_ptr());
-        Ok(handle)
+        Ok(())
+    }
+
+    /// `zend_objects_store_put_cold`: `put` with the table at its size,
+    /// or laid down for the first time.
+    #[cold]
+    #[inline(never)]
+    fn put_grown(&mut self, mm: &mut Mm, o: Obj) -> Result<(), Fatal> {
+        self.grow(mm)?;
+        let handle = self.top;
+        self.top += 1;
+        o.header().handle.set(handle);
+        self.write(handle, o.0.as_ptr());
+        Ok(())
     }
 
     /// `erealloc(object_buckets, 2 * size * sizeof(zend_object *))`:
@@ -853,12 +864,17 @@ impl Heap {
     /// more owner of what it holds (`ZVAL_COPY_PROP`); an `IS_UNDEF` row,
     /// a typed property with no default, lays its slot `IS_UNDEF` and
     /// `IS_PROP_UNINIT`, the bit php's table carries in the row
-    /// (`zend_declare_typed_property`). No slot is written twice.
+    /// (`zend_declare_typed_property`). No slot is written twice. An
+    /// object of a class with no destructor to serve, `destructs` false,
+    /// carries `IS_OBJ_DESTRUCTOR_CALLED` from here: every reader of that
+    /// bit then passes it by as it would pass a class that answers no to
+    /// [`HeapHooks::has_destructor`], with that call not made.
     pub fn object_laid(
         &mut self,
         class: u32,
         custom: usize,
         defaults: &[Zval],
+        destructs: bool,
     ) -> Result<Obj, Fatal> {
         let slots = u32::try_from(defaults.len()).map_err(|_| {
             Fatal::error("InternalError: a class of more slots than an object holds")
@@ -869,6 +885,9 @@ impl Heap {
         // out and nothing else holds it; every slot is written below
         // before the object is handed out.
         let o = unsafe { Obj::init_header(at, class, slots, None) };
+        if !destructs {
+            o.add_flag(gc::OBJ_DESTRUCTOR_CALLED);
+        }
         if let Err(fatal) = self.store.put(&mut self.mm, o) {
             // SAFETY: the object was allocated just above and is in no
             // bucket, so nothing names it.
@@ -1137,9 +1156,9 @@ impl Heap {
         if freeing {
             hooks.heap().store.invalidate(handle);
             o.add_flag(gc::OBJ_FREE_CALLED);
-            o.header().gc.set_refcount(1);
+            o.addref();
             Heap::object_free(hooks, o);
-            o.header().gc.set_refcount(0);
+            o.delref();
         }
         // One freed already and owned since, as the cycle collector
         // leaves an object a callable of its free kept, may have been
@@ -1243,8 +1262,8 @@ impl Heap {
     /// [`HeapHooks::weakrefs_notify`]), then what the engine keeps aside
     /// for a lazy object ([`HeapHooks::forget_lazy`]), then the dynamic
     /// table and the slots. Once is all it does: a second call over the
-    /// same object finds the table gone, each slot `UNDEF`, the object
-    /// eager and no weak reference left to tell, which is what lets a
+    /// same object finds the table gone, no slot owning anything, the
+    /// object eager and no weak reference left to tell, which is what lets a
     /// class's `free_obj` free the members where php's handler calls it
     /// and [`Heap::object_free`] call it after regardless.
     ///
@@ -1264,7 +1283,7 @@ impl Heap {
         }
         for i in 0..o.slots() {
             let z = o.slot(i);
-            if z.is_undef() {
+            if !z.is_refcounted() {
                 continue;
             }
             o.write_slot(i, Zval::UNDEF);
