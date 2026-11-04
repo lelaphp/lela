@@ -26884,7 +26884,8 @@ fn incdec_typed_ref(
     cell: PhpRef,
     held: Value,
 ) -> Edge {
-    let stepping = step_hold(req, held, Some(cell), None);
+    // `ZVAL_COPY(copy, var_ptr)`, under a `PRE_*` as under a `POST_*`.
+    let stepping = step_hold(req, held, true, Some(cell), None);
     let stepped = match kernel(req, &held) {
         Ok(stepped) => stepped,
         Err(thrown) => {
@@ -26915,13 +26916,30 @@ fn incdec_typed_ref(
 }
 
 /// What a step holds across a diagnostic that can reach a handler: the
-/// value stepped, which `ZVAL_COPY(result, var_ptr)` has an owner of
-/// before php's `POST_*` steps it, the reference it stands in and the
-/// table the `FETCH_DIM_RW` before walked to `place` in. A number raises
-/// nothing and takes none of the three.
+/// value stepped under `copied`, which `ZVAL_COPY(result, var_ptr)` has
+/// an owner of before php's `POST_*` steps it and a `PRE_*` has not, the
+/// kernel taking its own, the reference it stands in and the table the
+/// `FETCH_DIM_RW` before walked to `place` in. A number raises nothing
+/// and takes none of the three.
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { debug_zval_dump($GLOBALS["s"]); $GLOBALS["s"] = 1; return true; });
+/// $s = str_repeat("a", 30) . "!"; $x = --$s; var_dump($x);
+/// $s = str_repeat("a", 30) . "z"; $x = ++$s; var_dump($x);
+/// $s = str_repeat("a", 30) . "!"; $x = $s--; var_dump($x);
+/// ```
+/// ```expect
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!" refcount(3)
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaz" refcount(3)
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaba"
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!" refcount(4)
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// ```
 fn step_hold(
     req: &mut Request,
     held: Value,
+    copied: bool,
     cell: Option<PhpRef>,
     place: Option<php_heap::ZvalRef>,
 ) -> [Option<Owner<Value>>; 3] {
@@ -26929,7 +26947,7 @@ fn step_hold(
         return [None, None, None];
     }
     [
-        Some(Owner::take(req, held)),
+        copied.then(|| Owner::take(req, held)),
         cell.map(|cell| Owner::take(req, cell.as_value())),
         place.and_then(|place| req.hold_walk(place)),
     ]
@@ -27067,7 +27085,7 @@ fn incdec(
     if let Some(cell) = cell.filter(|cell| cell.heap().sources() != 0) {
         return incdec_typed_ref(req, frame, op, post, kernel, cell, held);
     }
-    let stepping = step_hold(req, held, cell, place);
+    let stepping = step_hold(req, held, post, cell, place);
     match kernel(req, &held) {
         Ok(stepped) => {
             // `ZVAL_COPY(EX_VAR(opline->result.var), var_ptr)`, before
