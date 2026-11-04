@@ -601,6 +601,44 @@ impl OperandKinds {
     }
 }
 
+/// The slots three operands stand in, one word: the `frameless` kernel's,
+/// whose temporaries stay in their slots through the call and are freed
+/// there after it, so the kernel reads no opline to find them. `lower`
+/// makes it and `enter` reads it back, so the encoding is this type's
+/// alone: each field in [`OperandFields::BITS`] bits, in operand order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub(crate) struct OperandFields(u64);
+
+impl OperandFields {
+    /// The bits each field takes.
+    const BITS: u32 = 21;
+
+    /// `fields` in operand order; none where one is past what
+    /// [`OperandFields::BITS`] bits hold, which compiled code then leaves
+    /// to the opline's handler.
+    pub(crate) fn of(fields: [u32; 3]) -> Option<OperandFields> {
+        fields
+            .iter()
+            .rev()
+            .try_fold(0u64, |word, &field| {
+                (field >> Self::BITS == 0).then_some(word << Self::BITS | u64::from(field))
+            })
+            .map(OperandFields)
+    }
+
+    /// The word compiled code passes.
+    pub(crate) fn word(self) -> i64 {
+        i64::from_ne_bytes(self.0.to_ne_bytes())
+    }
+
+    /// The fields in operand order.
+    pub(crate) fn fields(self) -> [u32; 3] {
+        let mask = (1u64 << Self::BITS) - 1;
+        [0, 1, 2].map(|at| u32::try_from(self.0 >> (Self::BITS * at) & mask).unwrap_or(0))
+    }
+}
+
 /// A kernel compiled code calls (`jit-design.md` §4.6, §5.2), by the
 /// wrapper `enter`'s `kernels!` list makes of it. Every wrapper is
 /// `extern "C"` on the host's convention, takes the `ExitCtx`, the room
@@ -705,12 +743,13 @@ pub(crate) enum Kernel {
     /// nothing done, for any other frame.
     Leave,
     /// `frameless(cx, frame, opline: u32, place: u32, at: u32, kinds:
-    /// u32, a: u64, a_info: u32, b: u64, b_info: u32, c: u64, c_info: u32,
-    /// out: *mut Zval)`: the native at `at` of the engine's frameless
-    /// table, a `FRAMELESS_ICALL_*`'s of the frame at `place` on the
-    /// stack, served over the operand zvals compiled code read, each of
-    /// the `OperandKind` its byte of `kinds` names, `Unused` past the
-    /// native's arity, with no opline read
+    /// u32, fields: u64, a: u64, a_info: u32, b: u64, b_info: u32, c: u64,
+    /// c_info: u32, out: *mut Zval)`: the native at `at` of the engine's
+    /// frameless table, a `FRAMELESS_ICALL_*`'s of the frame at `place`
+    /// on the stack, served over the operand zvals compiled code read,
+    /// each of the `OperandKind` its byte of `kinds` names, `Unused` past
+    /// the native's arity, a temporary standing in the slot its field of
+    /// `fields` names ([`OperandFields`]), with no opline read
     /// (`php_engine::tier::frameless_call`), as php's `jit_frameless_icall*`
     /// calls the native's frameless handler with the operands' addresses;
     /// what it returned written to `out`, `null` where it threw, its

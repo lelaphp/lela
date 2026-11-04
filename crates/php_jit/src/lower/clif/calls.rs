@@ -32,7 +32,9 @@ use super::{
     COUNTED, Dtor, EX_OPLINE, Emit, KIND, Kernel, Refuse, STOOD_CALL, Scalar, TYPE_AT, imm,
     leave_of, mismatch, tag, trusted,
 };
-use crate::lower::{IMAGES_AT, INTERRUPT_AT, OperandKinds, READY_AT, RETURNED, THREW};
+use crate::lower::{
+    IMAGES_AT, INTERRUPT_AT, OperandFields, OperandKinds, READY_AT, RETURNED, THREW,
+};
 use crate::types::{
     Abort, ArgChecks, Check, Constant, Defaults, End, ExitId, Frame, Home, Imm, Line, Object, OpId,
     Operand, Owners, PairCallee, PairClass, Returned, Types, Vars,
@@ -2250,6 +2252,69 @@ impl Emit<'_> {
     /// 0abxyz1u,1bcyz11u,2cd1xyz21,3abyz3u,4bcxyz4u
     /// substr(): Argument #1 ($string) must be of type string, array given
     /// ```
+    ///
+    /// A temporary stands in its slot through the call, where a backtrace
+    /// a callback takes reads the native's arguments, one held in a
+    /// register stored there first, and is freed there after it, a
+    /// destructor called as it is; and a native that warns goes on:
+    ///
+    /// ```php
+    /// class S { function __toString(): string { $f = debug_backtrace()[1]; echo $f['function'], " ", json_encode($f['args']), "\n"; return "c1"; } }
+    /// class D { function __construct(public $n) {} function __destruct() { echo "d", $this->n, "\n"; } }
+    /// function f($n) {
+    ///     $t = [];
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $t[] = str_contains("abc" . $i, new S) . substr("xyz", $i + 1) . in_array($i, [new D($i)], true) . implode(",", [[$i]]);
+    ///     }
+    ///     return implode("|", $t);
+    /// }
+    /// echo f(3), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// str_contains ["abc0",{}]
+    /// d0
+    ///
+    /// Warning: Array to string conversion in %SCRATCH%/witness.php on line 7
+    /// str_contains ["abc1",{}]
+    /// d1
+    ///
+    /// Warning: Array to string conversion in %SCRATCH%/witness.php on line 7
+    /// str_contains ["abc2",{}]
+    /// d2
+    ///
+    /// Warning: Array to string conversion in %SCRATCH%/witness.php on line 7
+    /// yzArray|1zArray|Array
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// class S { function __toString(): string { $f = debug_backtrace()[1]; echo $f['function'], " ", json_encode($f['args']), "\n"; return "c1"; } }
+    /// class D { function __construct(public $n) {} function __destruct() { echo "d", $this->n, "\n"; } }
+    /// function f($n) {
+    ///     $t = [];
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $t[] = str_contains("abc" . $i, new S) . substr("xyz", $i + 1) . in_array($i, [new D($i)], true) . implode(",", [[$i]]);
+    ///     }
+    ///     return implode("|", $t);
+    /// }
+    /// echo f(3), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// str_contains ["abc0",{}]
+    /// d0
+    ///
+    /// Warning: Array to string conversion in %SCRATCH%/witness.php on line 7
+    /// str_contains ["abc1",{}]
+    /// d1
+    ///
+    /// Warning: Array to string conversion in %SCRATCH%/witness.php on line 7
+    /// str_contains ["abc2",{}]
+    /// d2
+    ///
+    /// Warning: Array to string conversion in %SCRATCH%/witness.php on line 7
+    /// yzArray|1zArray|Array
+    /// ```
     pub(super) fn frameless_call(
         &mut self,
         line: &Line,
@@ -2267,6 +2332,11 @@ impl Emit<'_> {
         };
         let operands = [line.op1, line.op2, line.data];
         let (handler, join) = self.split();
+        // A field past what the word holds leaves the call to the handler.
+        let Some(fields) = self.operand_fields(&operands, arity)? else {
+            self.b.ins().jump(handler, &[]);
+            return self.frameless_handled(line, [room, opline, func], (handler, join));
+        };
         for operand in operands.iter().take(arity) {
             let Operand::Value(value) = *operand else {
                 continue;
@@ -2324,11 +2394,15 @@ impl Emit<'_> {
                 }
                 _ => self.operand_words(line.frame, operand)?,
             };
-            if let (OperandKind::Tmp, Operand::Value(value)) = (kind, operand) {
-                // The temporary's owner is the native's record's now.
+            if let (OperandKind::Tmp | OperandKind::Var, Operand::Value(value)) = (kind, operand)
+                && self.value(value)?.home == Home::Register
+            {
+                // A temporary stands in its slot through the call, where a
+                // backtrace the native takes reads it and the kernel frees
+                // it after, as php's handler leaves it there.
                 let (base, slot) = self.place(self.value(value)?.slot)?;
-                let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
-                self.b.ins().store(trusted(), undef, base, slot + TYPE_AT);
+                self.b.ins().store(trusted(), word, base, slot);
+                self.b.ins().store(trusted(), info, base, slot + TYPE_AT);
             }
             kinds[place] = kind;
             words.extend([word, info]);
@@ -2339,7 +2413,8 @@ impl Emit<'_> {
         let place = self.b.ins().ireduce(I32, place);
         let native = self.b.ins().iconst(I32, i64::from(native.0));
         let kinds = self.b.ins().iconst(I32, OperandKinds::of(kinds).word());
-        let mut args = vec![room, opline, place, native, kinds];
+        let fields = self.b.ins().iconst(I64, fields.word());
+        let mut args = vec![room, opline, place, native, kinds, fields];
         args.extend(words);
         args.push(out);
         self.call(Kernel::Frameless, &args, leave_of(line))?;
@@ -2348,6 +2423,34 @@ impl Emit<'_> {
         let threw = self.b.use_var(threw);
         let to = self.left_by(leave_of(line))?;
         self.b.ins().brif(threw, to, &[], join, &[]);
+        self.frameless_handled(line, [room, opline, func], (handler, join))
+    }
+
+    /// The slot each of a frameless call's `arity` operands stands in,
+    /// which the kernel frees a temporary's at after the call, packed as
+    /// one word; `None` where a field is past what the word holds.
+    fn operand_fields(
+        &mut self,
+        operands: &[Operand; 3],
+        arity: usize,
+    ) -> Result<Option<OperandFields>, Abort> {
+        let mut slots = [0; 3];
+        for (place, operand) in operands.iter().enumerate().take(arity) {
+            if let Operand::Value(value) = *operand {
+                slots[place] = self.value(value)?.slot.var;
+            }
+        }
+        Ok(OperandFields::of(slots))
+    }
+
+    /// A `FRAMELESS_ICALL_*`'s way through its handler, `handler`, joined
+    /// at `join` ([`Emit::frameless_call`]).
+    fn frameless_handled(
+        &mut self,
+        line: &Line,
+        [room, opline, func]: [Value; 3],
+        (handler, join): (Block, Block),
+    ) -> Result<(), Abort> {
         self.b.switch_to_block(handler);
         self.b.seal_block(handler);
         self.call(Kernel::Handle, &[room, opline, func], leave_of(line))?;
