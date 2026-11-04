@@ -3023,6 +3023,7 @@ impl<'a> Emit<'a> {
             Opcode::FetchDimW | Opcode::FetchDimRw => self.fetch_dim_w(at, line),
             Opcode::AssignDimOp => self.assign_dim_op(at, line),
             Opcode::Strlen => self.strlen(line),
+            Opcode::Count => self.count(at, line),
             Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => self.rope(line),
             Opcode::Concat | Opcode::FastConcat => self.concat(line),
             Opcode::Bool | Opcode::BoolNot => self.bool(at, line),

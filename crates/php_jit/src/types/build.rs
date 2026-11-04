@@ -1446,7 +1446,10 @@ impl<'a> Builder<'a> {
                     // A temporary string or array it reads is given up.
                     || (matches!(
                         op.opcode,
-                        Opcode::IsIdentical | Opcode::IsNotIdentical | Opcode::Strlen
+                        Opcode::IsIdentical
+                            | Opcode::IsNotIdentical
+                            | Opcode::Strlen
+                            | Opcode::Count
                     ) && [op1, op2].into_iter().any(|operand| {
                         self.is_temp(operand) && !self.types_of(frame, operand).within(UNCOUNTED)
                     }))
@@ -3293,6 +3296,9 @@ impl<'a> Builder<'a> {
                     && (scalar(t1) || copied(op.op1_type, op.op1, t1))
             }
             Opcode::TypeCheck => type_checked(op, t1, seen.read[0]),
+            // php's `zend_jit_count`, over an array in place or through
+            // the reference a guard held (`:11671-11713`).
+            Opcode::Count => t1.tag() == Some(ZvalType::Array),
             // php's `zend_jit_send_ref` of a variable (`:9792-9860`): the
             // reference it holds sent with an owner more, or made first.
             Opcode::SendRef => op.op1_type == OperandKind::Cv && op.op2_type == OperandKind::Unused,
