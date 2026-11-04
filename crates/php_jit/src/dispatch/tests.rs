@@ -1240,17 +1240,20 @@ fn a_body_that_leaves_on_the_way_to_the_condition_goes_on_where_it_went() {
 }
 
 /// How many escapes the crossing went on from into a landing's trace
-/// in the request, and how many times an exit or an escape visited the
-/// opline it left a frame at ([`crate::JitRequest`]'s counts), as
-/// [`Escaping`] keeps them.
+/// in the request, how many times an exit or an escape visited the
+/// opline it left a frame at ([`crate::JitRequest`]'s counts), and the
+/// landings the request's open escape doors name, with the return root
+/// compiled at each, as [`Escaping`] keeps them.
 #[derive(Debug, Default)]
-struct Crossed(u32, u32);
+struct Crossed(u32, u32, Vec<(usize, bool)>);
 
 /// `Lane`, which keeps the request's count of escapes the crossing went
-/// on from in [`Crossed`] after each site.
-struct Escaping;
+/// on from in [`Crossed`] after each site; with `ELSEWHERE`, each escape's
+/// open door made to name a landing no escape reaches, so every escape
+/// takes the way past its door.
+struct Escaping<const ELSEWHERE: bool = false>;
 
-impl Tier for Escaping {
+impl<const ELSEWHERE: bool> Tier for Escaping<ELSEWHERE> {
     type State = crate::JitRequest;
 
     fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
@@ -1262,7 +1265,8 @@ impl Tier for Escaping {
         let (crossed, visited) = tier::state::<crate::JitRequest>(req).map_or((0, 0), |state| {
             (state.escapes_crossed.get(), state.landings_visited.get())
         });
-        *req.state::<Crossed>() = Crossed(crossed, visited);
+        let doors = escape_doors(req, ELSEWHERE);
+        *req.state::<Crossed>() = Crossed(crossed, visited, doors);
         flow
     }
 
@@ -1300,6 +1304,106 @@ impl Tier for Escaping {
                 .build("jit"),
         )
     }
+}
+
+/// The landing each of the request's open escape doors names, and
+/// whether the body it enters is that of a return root compiled there;
+/// `elsewhere`, each made to name a landing no escape reaches.
+fn escape_doors(req: &mut Request, elsewhere: bool) -> Vec<(usize, bool)> {
+    let doors = crate::enter::lent(req, |_, lent| {
+        let Some(table) = crate::table::of_epoch(lent.epoch) else {
+            return Vec::new();
+        };
+        let traces = || (1..).map_while(|id| table.get(TraceId::new(id)?));
+        let doors = traces().filter_map(|trace| {
+            let door = crate::lower::Door::Escape;
+            lent.state.headers.door(trace, door, elsewhere)
+        });
+        doors
+            .filter(|[_, body, _]| *body != 0)
+            .map(|[key, body, _]| {
+                let enters = traces().any(|trace| {
+                    let opens = trace.opens.and_then(|(func, opline)| {
+                        let func = crate::lower::engine_offset(func)?;
+                        let stands = crate::lower::Stands {
+                            func,
+                            opline: opline.0,
+                        };
+                        usize::try_from(stands.word()).ok()
+                    });
+                    trace.start == Start::Return
+                        && trace.body().as_ptr().addr() == body
+                        && opens == Some(key)
+                });
+                (key, enters)
+            })
+            .collect()
+    });
+    doors.unwrap_or_default()
+}
+
+/// fib's side traces escape past fib's first call before a trace is
+/// compiled at that landing, and that trace is first entered from the
+/// interpreter's return, not from an escape: the entry through `enter`
+/// that follows the escape's opens the escape's door, which names the
+/// landing that trace was compiled at (#4108's ruling, `jit-design.md`
+/// §4.9), so from there on the escape enters it through the door. Nothing
+/// opens a door to a landing no escape reached.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_escapes_door_names_the_landing_it_reached() {
+    let ini = [("opcache.jit", "tracing"), ("jit.compile", "inline")];
+    let engine = testing::engine::<Escaping>(&ini);
+    let program = "function fib($n) { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }\necho fib(20), \"\\n\";";
+    let (served, kept) = testing::Scratch::new().serve_kept::<Crossed>(&engine, program);
+    assert_eq!(testing::stdout(&served), "6765\n");
+    let doors = kept.map(|kept| kept.2).unwrap_or_default();
+    assert!(!doors.is_empty(), "no escape's door opened");
+    assert!(doors.iter().all(|(_, enters)| *enters), "{doors:?}");
+}
+
+/// [`an_escapes_door_names_the_landing_it_reached`] where every count is
+/// one, so the trace at the landing is compiled, and entered from the
+/// interpreter's return, before the first escape that reaches it: that
+/// escape's code enters it through the landing's word, with no crossing
+/// to open the door, and leaves its number in the trace's row, so the
+/// next entry through `enter` opens the door.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_escape_that_found_its_landing_compiled_has_its_door_opened() {
+    let ini = [
+        ("opcache.jit", "tracing"),
+        ("jit.compile", "inline"),
+        ("opcache.jit_hot_func", "1"),
+        ("opcache.jit_hot_return", "1"),
+        ("opcache.jit_hot_side_exit", "1"),
+    ];
+    let engine = testing::engine::<Escaping>(&ini);
+    let program = "function fib($n) { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }\necho fib(20), \"\\n\";";
+    let (served, kept) = testing::Scratch::new().serve_kept::<Crossed>(&engine, program);
+    assert_eq!(testing::stdout(&served), "6765\n");
+    let doors = kept.map(|kept| kept.2).unwrap_or_default();
+    assert!(!doors.is_empty(), "no escape's door opened");
+    assert!(doors.iter().all(|(_, enters)| *enters), "{doors:?}");
+}
+
+/// A door that names another landing is not a way out: the escape reads
+/// the landing's word, and a trace compiled there is entered in code,
+/// never answered `ESCAPED` (#4108's ruling, `jit-design.md` §4.9), so the
+/// crossing goes on from no more escapes than where the door leads there.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_escape_whose_door_names_another_landing_reads_the_landings_word() {
+    let ini = [("opcache.jit", "tracing"), ("jit.compile", "inline")];
+    let engine = testing::engine::<Escaping<true>>(&ini);
+    let program = "function fib($n) { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }\necho fib(20), \"\\n\";";
+    let (served, kept) = testing::Scratch::new().serve_kept::<Crossed>(&engine, program);
+    assert_eq!(testing::stdout(&served), "6765\n");
+    let crossed = kept.map(|kept| kept.0);
+    assert!(
+        crossed.is_some_and(|crossed| (1..=4).contains(&crossed)),
+        "the crossing went on from {crossed:?} escapes"
+    );
 }
 
 /// Where a trace escapes to a landing whose word reads compiled, its own

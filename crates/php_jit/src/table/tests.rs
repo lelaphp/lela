@@ -60,7 +60,6 @@ fn exit(link: Option<TraceId>) -> ExitSpec {
 
 /// `bytes` with `exits`, entered at their start, named `f` at line 3.
 fn compiled(bytes: &[u8], exits: Vec<ExitSpec>) -> Compiled {
-    let slots = crate::lower::EntrySlots::new(exits.len());
     Compiled {
         bytes: bytes.to_vec(),
         entry_offset: 0,
@@ -74,7 +73,8 @@ fn compiled(bytes: &[u8], exits: Vec<ExitSpec>) -> Compiled {
         entry_stood: false,
         body: None,
         fuzzed: crate::lower::Fuzzed::default(),
-        slots,
+        doors: Box::new([]),
+        number: crate::lower::Numbered::default(),
         calls: Box::new([]),
         callee_caches: Box::new([]),
         map_ptrs: Box::new([]),
@@ -93,17 +93,16 @@ fn side(parent: u32) -> Start {
     }
 }
 
-/// A side trace's publish writes the entry slot of the exit it grew
-/// from, once, to its entrance, its body and its number (#3229's ruling):
-/// the parent's other slots stay unset, a root sets none, and a second
-/// trace grown from the same exit leaves the slot naming the first.
+/// A trace's publish lays its entrance, its body and its number, in the
+/// table's row an escape reads it at (`lower::Escapes`, #4108's ruling),
+/// and writes its number where its answers read it (`lower::Numbered`).
+/// Nothing of it is written in the trace it grew from: a side is reached
+/// through the request's door of the exit (`jit-design.md` §4.4).
 #[test]
-fn a_sides_publish_writes_its_exits_entry_slot_once() -> Result<(), String> {
+fn a_publish_lays_the_traces_entrance_and_no_word_of_its_parent() -> Result<(), String> {
     let table = table(&[]);
     let root = (table.publish(compiled(&[0; 8], vec![exit(None), exit(None)]), Start::Loop))
         .map_err(|e| format!("{e:?}"))?;
-    let parent = table.get(root).ok_or("the root")?;
-    assert_eq!(parent.slots.opened(ExitId(0)), Some(0));
     let grown = Start::Side {
         parent: root,
         exit: ExitId(1),
@@ -111,15 +110,15 @@ fn a_sides_publish_writes_its_exits_entry_slot_once() -> Result<(), String> {
     let first = (table.publish(compiled(&[0; 8], vec![exit(None)]), grown))
         .map_err(|e| format!("{e:?}"))?;
     let side = table.get(first).ok_or("the side")?;
-    let entrance = std::ptr::from_ref(&side.entrance).addr();
-    assert_eq!(parent.slots.opened(ExitId(1)), Some(entrance));
-    assert_eq!(parent.slots.opened(ExitId(0)), Some(0));
     assert_eq!(side.entrance.trace, first.get());
     assert_eq!(side.entrance.body, side.body().as_ptr().addr());
-    let second = (table.publish(compiled(&[0; 8], vec![exit(None)]), grown))
-        .map_err(|e| format!("{e:?}"))?;
-    assert_ne!(second, first);
-    assert_eq!(parent.slots.opened(ExitId(1)), Some(entrance));
+    assert_eq!(side.number.read(), first.get());
+    let row = usize::try_from(first.get()).map_err(|e| e.to_string())?;
+    let laid = table.entrances.get(row).ok_or("no row of the entrances")?;
+    assert_eq!(
+        laid.load(Ordering::Acquire).cast_const(),
+        std::ptr::from_ref(&side.entrance)
+    );
     Ok(())
 }
 

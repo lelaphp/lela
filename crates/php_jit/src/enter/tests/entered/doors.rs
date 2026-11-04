@@ -1,13 +1,13 @@
-//! An exit's entry slot under a publish on another thread (#3231, #3229's
+//! An exit's door under a publish on another thread (#3231, #4108's
 //! ruling, `jit-design.md` §4.4): a root whose entry guard always fails
 //! leaves through exit 0 on every turn of one thread, while a second
 //! thread compiles the side trace grown from that exit and publishes it,
-//! which writes the exit's slot with release. Every turn's answer is the
-//! root's exit, the frame stood at its opline, until the root's code reads
-//! the slot set with acquire; from that turn on it is the side's end, the
-//! side entered by the root's own jump with no crossing between. The
-//! request's row of the side is laid before the side exists, so the slot
-//! alone decides.
+//! which writes nothing the root reads: no published word is written after
+//! its publish. Every turn's answer is the root's exit, the frame stood at
+//! its opline, until the request enters the side through the crossing from
+//! that exit's answer, which opens the exit's door in the request; from
+//! the next turn on it is the side's end, the side entered by the root's
+//! own jump with no crossing between.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -16,7 +16,7 @@ use php_engine::tier::{
 };
 use php_unit::OplineIdx;
 
-use crate::enter::{Answered, At, Exited, Left, Readiness};
+use crate::enter::{Answered, At, Exited, Left};
 use crate::record::{Start, Stop};
 use crate::table::{self, TraceId, TraceName};
 use crate::testing::{self, Scratch, function_of, stdout};
@@ -166,13 +166,6 @@ fn raced(req: &mut Request, frame: FrameRef) -> Result<Turns, String> {
         .publish(root, Start::Enter)
         .map_err(|full| format!("{full:?}"))?;
     let side_id = table.next().ok_or("no number for the side")?;
-    // The side's row, ready, as the crossing lays one for a trace with no
-    // calls in place: from here only the slot keeps the jump closed.
-    let state = tier::state::<crate::JitRequest>(req).ok_or("no request state")?;
-    state
-        .headers
-        .rows(|| table.segments())
-        .lay(side_id, std::ptr::null(), Readiness::Settled);
     let grown = Start::Side {
         parent: root,
         exit: ExitId(0),
@@ -199,7 +192,15 @@ fn raced(req: &mut Request, frame: FrameRef) -> Result<Turns, String> {
                     .map_err(|fatal| format!("{fatal:?}"))?;
                 let at = tier::frame(req, frame).map(|view| view.opline());
                 match turned(&answered, (root, side_id), at) {
-                    Ok(false) if seen.after == 0 => seen.before += 1,
+                    Ok(false) if seen.after == 0 => {
+                        seen.before += 1;
+                        // The crossing dispatch makes once the exit's word
+                        // names the side: its first entry opens the door.
+                        if let Some(side) = table.get(side_id) {
+                            super::crossed(req, frame, (&epoch, side), At::First)
+                                .map_err(|fatal| format!("{fatal:?}"))?;
+                        }
+                    }
                     Ok(true) => seen.after += 1,
                     Ok(false) => {
                         seen.wrong = Some(format!("turn {turn}: the root's exit after the side's"));
@@ -274,11 +275,11 @@ impl Tier for Racing {
 }
 
 /// The root answers its exit on every turn before the side is published
-/// and the side's end on every turn after its slot is read set, never
-/// anything else and never the root's exit again; `f` then runs as the
-/// interpreter runs it.
+/// and the side's end on every turn after the crossing entered it from
+/// that exit, never anything else and never the root's exit again; `f`
+/// then runs as the interpreter runs it.
 #[test]
-fn a_side_published_on_another_thread_is_entered_through_its_slot() {
+fn a_side_published_on_another_thread_is_entered_through_its_door() {
     let engine =
         testing::engine::<Racing>(&[("jit.mode", "force"), ("opcache.jit_buffer_size", "64K")]);
     let (served, turns) = Scratch::new().serve_kept::<Turns>(

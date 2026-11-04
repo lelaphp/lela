@@ -2,27 +2,33 @@
 //! §4.6): a link, a jump in the body's own bytes to the trace it links
 //! to, written before the body is published, as php's
 //! `zend_jit_trace_link_to_root` writes it
-//! (`Z/ext/opcache/jit/zend_jit_ir.c:17418-17432`); and an exit's jump to
-//! the side trace grown from it, through the exit's entry slot, which the
-//! table writes once as the side publishes, where php patches the exit's
-//! jump (`zend_jit_link_side_trace`, `:17413`); and an escape's jump to
-//! the trace compiled at the landing it escaped to, read through the
-//! landing's word, as php's escape stub runs that opline's handler
-//! (`jit-design.md` §4.9).
+//! (`Z/ext/opcache/jit/zend_jit_ir.c:17418-17432`); an exit's jump to the
+//! side trace grown from it, where php patches the exit's jump
+//! (`zend_jit_link_side_trace`, `:17413`); and an escape's jump to the
+//! return root compiled at the landing it escaped to, as php's escape
+//! stub runs that opline's handler (`jit-design.md` §4.9).
 //!
-//! Each is one tail call, made by [`Emit::hand_on`] alone: the trace it
-//! enters found, its row in the request found ready, and the entry laid
-//! down in the `ExitCtx` as `enter` lays it, where the exit leaves the
-//! frame, with the frame stood at the exit's opline as `enter`'s landing
-//! stands it. Where any of it is not there the exit's number is answered,
-//! with nothing stored twice, and `dispatch` goes on from there as it did
-//! before a jump existed: the exit is landed, and the side trace, or the
-//! trace the link names, entered through the crossing, which lays the
-//! row down for the next jump.
+//! Each is one tail call through its [`Door`], made by [`Emit::hand_on`]
+//! alone: the door's words read in the request's addresses of the trace,
+//! which name the body of the trace it enters and the request's addresses
+//! of that trace, written by the crossing once it entered that trace from
+//! the door's answer with its calls ready, and, for an escape, the landing
+//! they were written for, held to where the frame stands; then the entry
+//! passed in registers, where the exit leaves the frame, with the frame
+//! stood at the exit's opline as `enter`'s landing stands it. Where an
+//! exit's door is not written, the exit's number is answered, with nothing
+//! stored twice, and `dispatch` goes on from there as it did before a jump
+//! existed: the exit is landed, and the side trace, or the trace the link
+//! names, entered through the crossing, which writes the door for the next
+//! jump. Where an escape's door is not written, or names another landing,
+//! the escape reads the landing's word ([`Emit::landed`]), enters a trace
+//! compiled there through its entrance, and leaves its number in that
+//! trace's row, from which the next entry through `enter` writes the door;
+//! a word that reads anything else answers [`ESCAPED`].
 //!
-//! An exit jumps only where its entry can be laid in code: an exit that
-//! grows side traces, names its opline and lands plainly or with a call
-//! under way, which frees nothing, and is not the trace's end. Every
+//! An exit jumps only where its entry can be passed from code: an exit
+//! that grows side traces, names its opline and lands plainly or with a
+//! call under way, which frees nothing, and is not the trace's end. Every
 //! other is answered as before.
 
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -30,43 +36,29 @@ use cranelift_codegen::ir::types::{I32, I64};
 use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, Value};
 use php_engine::tier::{LANDING_CHUNK_BITS, LandingIndex, LandingRows, Word};
 
-use super::calls::TOP;
 use super::{
     CallRoom, EX_OPLINE, Emit, Raised, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE,
-    STOOD_ROOM, body_signature, engine_offset, imm, mismatch, trusted,
+    body_signature, engine_offset, imm, mismatch, trusted,
 };
 use crate::lower::{
-    ENTRANCE_BODY, ENTRANCE_TRACE, ENTRY_AT, ESCAPED, Escapes, IMAGES_AT, Linked, READY_AT,
-    ROOT_AT, ROW_BYTES, ROW_IMAGES, ROW_READY, ROW_SEGMENT, ROWS_AT, STOOD_AT, Stands, TRACE_AT,
+    DOOR_BODY, DOOR_IMAGES, DOOR_KEY, DOOR_WORDS, Door, ENTRANCE_BODY, ENTRANCE_TRACE, ESCAPED,
+    Escapes, Linked, ROOT_AT, ROW_BYTES, ROW_ESCAPED_BY, ROW_IMAGES, ROW_READY, ROW_SEGMENT,
+    ROWS_AT, Stands,
 };
 use crate::policy::{COMPILED, ID_SHIFT, STATE};
 use crate::types::{Abort, End, ExitId, Grows};
 
-/// Where a jump finds the trace it enters.
-#[derive(Debug, Clone, Copy)]
-enum Target {
-    /// Through the entry slot at this address, set or not.
-    Slot(usize),
-    /// At this entrance, read from the table where the landing's word
-    /// names its trace.
-    Entrance(Value),
-    /// The trace a link names, whose entrance is known as the body is
-    /// compiled.
-    Linked(Linked),
-}
-
 /// Where the frame a jump enters on stands as the trace leaves it, which
-/// the jump lays down as the entry: its room and place, the call under
-/// way in it, its op array and opline as one word, as a `Stood` holds them,
-/// the stack's room, and the opline to stand the frame at where the jump
-/// leaves through an exit, which the frame does not stand at yet.
+/// the jump passes as the entry: its room and place, the call under way
+/// in it, its op array and opline as one word, as a `Stood` holds them,
+/// and the opline to stand the frame at where the jump leaves through an
+/// exit, which the frame does not stand at yet.
 #[derive(Debug, Clone, Copy)]
 struct Leaving {
     room: Value,
     place: Value,
     call: Value,
-    at: Value,
-    left: Value,
+    stands: Value,
     stand: Option<Value>,
 }
 
@@ -90,7 +82,7 @@ const LANDING_COUNT_AT: i32 = imm(size_of::<usize>());
 impl Emit<'_> {
     /// Where the frame goes on as a trace is entered from `exit`, its op
     /// array by the engine's number and its opline, where the entry can be
-    /// laid in code: the opline the exit names, or, where it names none, the
+    /// passed from code: the opline the exit names, or, where it names none, the
     /// opline a link's trace opens at, `linked`'s, where the link's frame
     /// stands already, in a frame of that op array; and a landing that
     /// frees nothing, as `enter`'s
@@ -112,22 +104,21 @@ impl Emit<'_> {
         (engine_offset(running.func).ok()? == opens.func).then_some(opens)
     }
 
-    /// Whether the entry of a trace entered from `exit` can be laid in
+    /// Whether the entry of a trace entered from `exit` can be passed from
     /// code ([`Emit::goes_on_at`]).
     fn jumps(&self, exit: ExitId) -> bool {
         self.goes_on_at(exit, None).is_some()
     }
 
-    /// Whether a guard that fails into `exit` jumps through its entry
-    /// slot: the body has slots, the exit jumps, and it grows side traces
-    /// and is not the trace's end, which `dispatch` follows no side from.
+    /// Whether a guard that fails into `exit` jumps through its door: the
+    /// exit jumps, and it grows side traces and is not the trace's end,
+    /// which `dispatch` follows no side from.
     fn opens(&self, exit: ExitId) -> bool {
         let leaves = match self.ir.end {
             End::Leave(exit) | End::Return(exit) => Some(exit),
             End::Loop(_) => None,
         };
-        self.joins.slots != 0
-            && leaves != Some(exit)
+        leaves != Some(exit)
             && (self.ir.exits.get(usize::from(exit.0)))
                 .is_some_and(|spec| spec.grows == Grows::Side)
             && self.jumps(exit)
@@ -212,7 +203,7 @@ impl Emit<'_> {
     }
 
     /// Every door a guard branched to: the exit's stores, then the jump
-    /// through its entry slot.
+    /// through its [`Door`].
     pub(super) fn door_blocks(&mut self) -> Result<(), Abort> {
         let ir = self.ir;
         for at in 0..self.doors.len() {
@@ -229,16 +220,12 @@ impl Emit<'_> {
                 .get(at)
                 .ok_or_else(|| mismatch("an exit past the trace's"))?;
             self.stores(&spec.stores)?;
-            let slot = at
-                .checked_mul(size_of::<usize>())
-                .and_then(|past| self.joins.slots.checked_add(past))
-                .ok_or_else(|| mismatch("an entry slot past the host's addresses"))?;
             let exit = ExitId(u16::try_from(at).map_err(|_| mismatch("too many exits"))?);
             let closed = self.answer_block(exit)?;
             let at = (self.goes_on_at(exit, None))
                 .ok_or_else(|| mismatch("a door from an exit that names no opline"))?;
-            let leaving = self.exit_leaving(at, [call, room, place])?;
-            self.hand_on(leaving, Target::Slot(slot), closed)?;
+            let leaving = self.exit_leaving(at, [call, room, place]);
+            self.hand_on(leaving, Door::Exit(exit), false, closed)?;
         }
         Ok(())
     }
@@ -295,8 +282,8 @@ impl Emit<'_> {
                 let site = self.site()?;
                 self.stores(&spec.stores)?;
                 let closed = self.answer_block(exit)?;
-                let leaving = self.exit_leaving(at, site)?;
-                self.hand_on(leaving, Target::Linked(linked), closed)
+                let leaving = self.exit_leaving(at, site);
+                self.hand_on(leaving, Door::Exit(exit), linked.interrupt, closed)
             }
             _ => {
                 let block = self.exit_block(exit)?;
@@ -325,11 +312,49 @@ impl Emit<'_> {
 
     /// The escape `block`, which takes the place of the frame the return
     /// left: php's escape stub, which runs the handler of the opline the
-    /// frame stands at (`zend_jit_trace_escape_stub`), so the jump to the
-    /// trace compiled at the landing where its word reads compiled
-    /// ([`Emit::landed`]), from where the last `Stood` says the frame
-    /// stands; [`ESCAPED`] answered where none is or the jump finds the
-    /// trace's row unready.
+    /// frame stands at (`zend_jit_trace_escape_stub`), so the jump through
+    /// the escape's [`Door`] where it names the landing the last `Stood`
+    /// says the frame stands at; anywhere else, or where the door is
+    /// closed, the landing's word read as php's stub reads the opline's
+    /// handler ([`Emit::landed`]), and a trace compiled there entered
+    /// through its entrance where the request's row of it is ready;
+    /// [`ESCAPED`] answered where none is. No interrupt is tested, as
+    /// php's escape stub tests none before the handler it jumps to; the
+    /// trace entered tests it where php's does.
+    ///
+    /// One escape reaches two landings, the opline past each of `f`'s two
+    /// calls: its door names one and the other's word is read, and each
+    /// lands where the frame stands:
+    ///
+    /// ```php
+    /// function f(int $n): int { if ($n < 2) { return $n; } return f($n - 1) + f($n - 2); }
+    /// echo f(20), "\n";
+    /// ```
+    /// ```expect regime=jit-inline process capture
+    /// 6765
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:3
+    /// ---- TRACE 1 abort (deep recursion)
+    ///
+    /// ---- TRACE 1 start (enter) f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 1 stop (recursive call)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 1 f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 2 start (side trace 1/1) f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    ///
+    /// ---- TRACE 3 start (return) f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 3 stop (recursive return)
+    /// ---- TRACE 3 compiled
+    ///
+    ///      TRACE 3 exit 2 f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 4 start (side trace 3/2) f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 4 stop (link to 1)
+    /// ---- TRACE 4 compiled
+    /// ```
     pub(super) fn escaped(&mut self, block: Block) -> Result<(), Abort> {
         self.b.switch_to_block(block);
         self.b.seal_block(block);
@@ -338,6 +363,27 @@ impl Emit<'_> {
             .block_params(block)
             .first()
             .ok_or_else(|| mismatch("an escape that takes no place"))?;
+        let (read, answer) = (self.b.create_block(), self.b.create_block());
+        self.b.set_cold_block(read);
+        self.b.set_cold_block(answer);
+        let leaving = Leaving {
+            room: self.stood_word(I64, STOOD_FRAME),
+            place,
+            call: self.stood_word(I64, STOOD_CALL),
+            stands: self.stood_word(I64, STOOD_FUNC),
+            stand: None,
+        };
+        self.hand_on(leaving, Door::Escape, false, read)?;
+        self.b.switch_to_block(read);
+        self.b.seal_block(read);
+        if let Some(escapes) = self.joins.escapes {
+            let entrance = self.landed(escapes, answer)?;
+            self.enter_entrance(leaving, entrance, answer)?;
+        } else {
+            self.b.ins().jump(answer, &[]);
+        }
+        self.b.switch_to_block(answer);
+        self.b.seal_block(answer);
         // The frame the interpreter goes on in, where `enter` reads it
         // back, as php's stub goes on from `execute_data` in hand.
         let cx = self
@@ -345,27 +391,8 @@ impl Emit<'_> {
             .ok_or_else(|| mismatch("an escape before the entry"))?;
         let root = self.b.ins().ireduce(I32, place);
         self.b.ins().store(trusted(), root, cx, ROOT_AT);
-        let answer = self.b.create_block();
-        self.b.set_cold_block(answer);
-        if let Some(escapes) = self.joins.escapes {
-            let entrance = self.landed(escapes, answer)?;
-            let leaving = Leaving {
-                room: self.stood_word(I64, STOOD_FRAME),
-                place,
-                call: self.stood_word(I64, STOOD_CALL),
-                at: self.stood_word(I64, STOOD_FUNC),
-                left: self.stood_word(I64, STOOD_ROOM),
-                stand: None,
-            };
-            self.hand_on(leaving, Target::Entrance(entrance), answer)?;
-        } else {
-            self.b.ins().jump(answer, &[]);
-        }
-        self.b.switch_to_block(answer);
-        self.b.seal_block(answer);
         let escaped = self.b.ins().iconst(I32, i64::from(ESCAPED));
-        self.b.ins().return_(&[escaped]);
-        Ok(())
+        self.answer_with(escaped)
     }
 
     /// The entrance of the trace compiled at the landing the last `Stood`
@@ -377,10 +404,7 @@ impl Emit<'_> {
     /// trace it names read from the table's; `answer` where the op array
     /// is past the index or its words are not laid, where the opline is
     /// past them, where the word reads anything else, and where the table
-    /// holds no entrance for it yet. No interrupt is tested, as php's
-    /// escape stub tests none before the handler it jumps to
-    /// (`zend_jit_trace_escape_stub`); the trace entered tests it where
-    /// php's does.
+    /// holds no entrance for it yet.
     fn landed(&mut self, escapes: Escapes, answer: Block) -> Result<Value, Abort> {
         let Escapes {
             landings,
@@ -490,13 +514,73 @@ impl Emit<'_> {
     }
 
     /// Go to `to` where `cond` holds, and on in a cold block otherwise:
-    /// a test on the escape's way, which is cold as a whole.
+    /// a test on the way past the escape's door, which is cold as a whole.
     fn cold_if(&mut self, cond: Value, to: Block) {
         let on = self.b.create_block();
         self.b.set_cold_block(on);
         self.b.ins().brif(cond, to, &[], on, &[]);
         self.b.switch_to_block(on);
         self.b.seal_block(on);
+    }
+
+    /// Enter the trace `entrance` names (`lower::Entrance`) from where
+    /// `leaving` says the frame stands: its body, with the request's
+    /// addresses of it from its row (`enter::Rows`), which is told this
+    /// trace came by for the crossing to open the escape's door; `answer`
+    /// where the crossing has not entered it in the request with its calls
+    /// ready.
+    fn enter_entrance(
+        &mut self,
+        leaving: Leaving,
+        entrance: Value,
+        answer: Block,
+    ) -> Result<(), Abort> {
+        let cx = self.cx.ok_or_else(|| mismatch("a jump before the entry"))?;
+        let body = self.b.ins().load(I64, trusted(), entrance, ENTRANCE_BODY);
+        let trace = self.b.ins().load(I32, trusted(), entrance, ENTRANCE_TRACE);
+        // The request's row of the trace: its segment, then the row in it.
+        let rows = self.b.ins().load(I64, trusted(), cx, ROWS_AT);
+        let number = self.b.ins().uextend(I64, trace);
+        let segment = (self.b.ins()).ushr_imm_u(number, i64::from(ROW_SEGMENT.trailing_zeros()));
+        let segment = self.address_at_plain(rows, segment);
+        self.closed_unless(segment, answer);
+        let within = self.b.ins().band_imm_u(number, i64::from(ROW_MASK));
+        let within = self.b.ins().imul_imm_u(within, ROW_BYTES);
+        let row = self.b.ins().iadd(segment, within);
+        let ready = self.b.ins().uload8(I32, trusted(), row, ROW_READY);
+        self.closed_unless(ready, answer);
+        let images = self.b.ins().load(I64, trusted(), row, ROW_IMAGES);
+        let number = self.number()?;
+        self.b.ins().store(trusted(), number, row, ROW_ESCAPED_BY);
+        self.tail_call(leaving, body, images)
+    }
+
+    /// The address written `at` addresses past `base`, in the request's
+    /// own memory, so a plain load.
+    fn address_at_plain(&mut self, base: Value, at: Value) -> Value {
+        let at = self.b.ins().ishl_imm_u(at, ADDRESS_SHIFT);
+        let at = self.b.ins().iadd(base, at);
+        self.b.ins().load(I64, trusted(), at, 0)
+    }
+
+    /// Where `door`'s words stand in the request's addresses of the
+    /// trace, in bytes: past its calls' headers and its cache slots, and
+    /// past the doors made before it, the door numbered the first time it
+    /// is asked.
+    fn door_words(&mut self, door: Door) -> Result<i32, Abort> {
+        let index = if let Some(index) = self.made.iter().position(|made| *made == door) {
+            index
+        } else {
+            self.made.push(door);
+            self.made.len() - 1
+        };
+        index
+            .checked_mul(DOOR_WORDS)
+            .and_then(|words| words.checked_add(self.held.len()))
+            .and_then(|words| words.checked_add(self.ir.map_ptrs.len()))
+            .and_then(|words| words.checked_mul(size_of::<usize>()))
+            .and_then(|bytes| i32::try_from(bytes).ok())
+            .ok_or_else(|| mismatch("a door past an immediate"))
     }
 
     /// Go to `closed` where `value` is zero; go on otherwise.
@@ -507,119 +591,136 @@ impl Emit<'_> {
 
     /// Where an exit leaves the frame (`enter::land`), from the `site` it
     /// leaves at: the call under way there, the room and the place of the
-    /// frame the code runs in, the op array and opline it goes on at, the
-    /// stack's room, and the frame to be stood at that opline.
-    fn exit_leaving(
-        &mut self,
-        stands: Stands,
-        [call, room, place]: [Value; 3],
-    ) -> Result<Leaving, Abort> {
-        let at = stands.word();
-        let at = self.b.ins().iconst(I64, at.cast_signed());
-        let stack = self.stack()?;
-        let top = self.b.ins().load(I64, trusted(), stack, TOP);
-        Ok(Leaving {
+    /// frame the code runs in, the op array and opline it goes on at, and
+    /// the frame to be stood at that opline.
+    fn exit_leaving(&mut self, stands: Stands, [call, room, place]: [Value; 3]) -> Leaving {
+        Leaving {
             room,
             place,
             call,
-            at,
-            left: self.left_past(stack, top),
+            stands: self.b.ins().iconst(I64, stands.word().cast_signed()),
             stand: Some(self.b.ins().iconst(I32, i64::from(stands.opline))),
-        })
+        }
     }
 
-    /// Hand on, from where `leaving` says the frame stands, to the trace
-    /// `target` finds: the jump (`jit-design.md` §4.6). Where the slot is
-    /// unset, a link's interrupt is raised, or the request's row of the
-    /// trace is not ready, the code goes to `closed`, which answers what
-    /// the trace answers without the jump. Otherwise the entry is laid
-    /// down as `enter` lays it, at the trace's first op: where the frame
-    /// stands as a kernel would say, its op array and opline, the call
-    /// under way and the stack's room; the frame's place; the trace's
-    /// calls' headers in the request, ready; and its number. The frame is
-    /// stood at the opline an exit names, as `enter`'s landing stands it,
-    /// and the trace's body is called in tail position with the `ExitCtx`
-    /// and the frame's room.
-    fn hand_on(&mut self, leaving: Leaving, target: Target, closed: Block) -> Result<(), Abort> {
+    /// Hand on, from where `leaving` says the frame stands, through
+    /// `door` (`jit-design.md` §4.6), the interrupt tested first where
+    /// `interrupt` says, as a link to a looping root tests it. Where the
+    /// interrupt is raised, the door is not written, or an escape's door
+    /// names another landing, the code goes to `closed`. Otherwise the
+    /// jump to the body the door names ([`Emit::tail_call`]).
+    ///
+    /// A loop that closes through its sides, each entered through its exit's
+    /// door and each linking to the root through its own, the exit's stores
+    /// made before the jump:
+    ///
+    /// ```php
+    /// function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { if ($i % 3 == 0) { $s += 5; } else { $s -= 1; } } return $s; }
+    /// echo f(3000), "\n";
+    /// ```
+    /// ```expect regime=jit-inline process capture
+    /// 3000
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:3
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 4 f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 2 start (side trace 1/4) f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 2 stop (link to 1)
+    /// ---- TRACE 2 compiled
+    ///
+    ///      TRACE 1 exit 3 f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 3 start (side trace 1/3) f() %SCRATCH%/witness.php:2
+    /// ---- TRACE 3 stop (return)
+    /// ---- TRACE 3 compiled
+    /// ```
+    fn hand_on(
+        &mut self,
+        leaving: Leaving,
+        door: Door,
+        interrupt: bool,
+        closed: Block,
+    ) -> Result<(), Abort> {
+        if interrupt {
+            self.interrupt_test(Raised::Answer(closed))?;
+        }
+        let images = self.images()?;
+        let words = self.door_words(door)?;
+        let body = match door {
+            // Written for this landing, or for none, whose key no `Stood`
+            // holds; and with it, the body.
+            Door::Escape => {
+                let key = self.b.ins().load(I64, trusted(), images, words + DOOR_KEY);
+                let other = self.b.ins().icmp(IntCC::NotEqual, key, leaving.stands);
+                self.divert_if(other, closed);
+                self.b.ins().load(I64, trusted(), images, words + DOOR_BODY)
+            }
+            Door::Exit(_) => {
+                let body = self.b.ins().load(I64, trusted(), images, words + DOOR_BODY);
+                self.closed_unless(body, closed);
+                body
+            }
+        };
+        let entered = (self.b.ins()).load(I64, trusted(), images, words + DOOR_IMAGES);
+        self.tail_call(leaving, body, entered)
+    }
+
+    /// The tail call: the frame stood at the opline an exit names, as
+    /// `enter`'s landing stands it, and `body` called with the entry: the
+    /// `ExitCtx`, the frame's room, its place as the entry word of calls
+    /// ready, the request's addresses of the trace entered, `images`, the
+    /// call under way and where the frame stands.
+    ///
+    /// An exit taken with a call under way: the side entered through the
+    /// door makes that call, its header and its room the source pushed:
+    ///
+    /// ```php
+    /// function h($x) { return $x + 1; }
+    /// function g($a, $b) { return $a + $b; }
+    /// function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += g($i, $i % 2 ? h($i) : 0); } return $s; }
+    /// echo f(1000), "\n";
+    /// ```
+    /// ```expect regime=jit-inline process capture
+    /// 750000
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:5
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) f() %SCRATCH%/witness.php:4
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 5 f() %SCRATCH%/witness.php:4
+    /// ---- TRACE 2 start (side trace 1/5) f() %SCRATCH%/witness.php:4
+    /// ---- TRACE 2 stop (link to 1)
+    /// ---- TRACE 2 compiled
+    ///
+    ///      TRACE 1 exit 4 f() %SCRATCH%/witness.php:4
+    /// ---- TRACE 3 start (side trace 1/4) f() %SCRATCH%/witness.php:4
+    /// ---- TRACE 3 stop (return)
+    /// ---- TRACE 3 compiled
+    /// ```
+    fn tail_call(&mut self, leaving: Leaving, body: Value, images: Value) -> Result<(), Abort> {
         let cx = self.cx.ok_or_else(|| mismatch("a jump before the entry"))?;
-        let entrance = match target {
-            Target::Slot(slot) => {
-                let slot = i64::try_from(slot)
-                    .map_err(|_| mismatch("an entry slot past the host's addresses"))?;
-                let slot = self.b.ins().iconst(I64, slot);
-                let entrance = self.b.ins().atomic_load(I64, trusted(), slot);
-                self.closed_unless(entrance, closed);
-                Some(entrance)
-            }
-            Target::Entrance(entrance) => Some(entrance),
-            Target::Linked(_) => None,
-        };
-        let (body, trace) = match (entrance, target) {
-            (Some(entrance), _) => (
-                self.b.ins().load(I64, trusted(), entrance, ENTRANCE_BODY),
-                self.b.ins().load(I32, trusted(), entrance, ENTRANCE_TRACE),
-            ),
-            (None, Target::Linked(linked)) => {
-                if linked.interrupt {
-                    self.interrupt_test(Raised::Answer(closed))?;
-                }
-                let body = i64::try_from(linked.body)
-                    .map_err(|_| mismatch("a linked body past the host's addresses"))?;
-                (
-                    self.b.ins().iconst(I64, body),
-                    self.b.ins().iconst(I32, i64::from(linked.trace)),
-                )
-            }
-            (None, _) => return Err(mismatch("a jump with no trace to enter")),
-        };
-        // The request's row of the trace: its segment, then the row in it.
-        let rows = self.b.ins().load(I64, trusted(), cx, ROWS_AT);
-        let number = self.b.ins().uextend(I64, trace);
-        let segment = self
-            .b
-            .ins()
-            .ushr_imm_u(number, i64::from(ROW_SEGMENT.trailing_zeros()));
-        let segment = self.b.ins().ishl_imm_u(segment, 3);
-        let segment = self.b.ins().iadd(rows, segment);
-        let first = self.b.ins().load(I64, trusted(), segment, 0);
-        self.closed_unless(first, closed);
-        let within = self.b.ins().band_imm_u(number, i64::from(ROW_MASK));
-        let within = self.b.ins().imul_imm_u(within, ROW_BYTES);
-        let row = self.b.ins().iadd(first, within);
-        let ready = self.b.ins().load(I32, trusted(), row, ROW_READY);
-        self.closed_unless(ready, closed);
-        let images = self.b.ins().load(I64, trusted(), row, ROW_IMAGES);
-        // The entry, as `enter` lays it.
         let Leaving {
             room,
             place,
             call,
-            at,
-            left,
+            stands,
             stand,
         } = leaving;
-        let place = self.b.ins().ireduce(I32, place);
-        let first_op = self.b.ins().iconst(I32, 0);
-        let one = self.b.ins().iconst(I32, 1);
-        for (value, field) in [
-            (first_op, ENTRY_AT),
-            (images, IMAGES_AT),
-            (one, READY_AT),
-            (place, ROOT_AT),
-            (trace, TRACE_AT),
-            (room, STOOD_AT + STOOD_FRAME),
-            (call, STOOD_AT + STOOD_CALL),
-            (at, STOOD_AT + STOOD_FUNC),
-            (left, STOOD_AT + STOOD_ROOM),
-        ] {
-            self.b.ins().store(trusted(), value, cx, field);
-        }
         // The frame stood where the exit lands it.
         if let Some(opline) = stand {
             self.b.ins().store(trusted(), opline, room, EX_OPLINE);
         }
         let sig = self.b.import_signature(body_signature());
-        self.b.ins().return_call_indirect(sig, body, &[cx, room]);
+        self.b
+            .ins()
+            .return_call_indirect(sig, body, &[cx, room, place, images, call, stands]);
         Ok(())
     }
 }

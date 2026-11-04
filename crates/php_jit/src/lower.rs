@@ -6,30 +6,33 @@
 //! change here alone.
 //!
 //! **What compiled code is.** A trace is one function, its body,
-//! `fn(cx: *mut ExitCtx, frame: *mut u8) -> u32` on Cranelift's tail
-//! convention, entered with the crossing's `ExitCtx` and the room of the
-//! frame it runs in, php's `execute_data`, and answering the [`ExitId`]
-//! it left through. Its bytes begin with the prologue,
-//! `extern "C" fn(cx, frame, body) -> u32` on the host's convention,
-//! which `enter` calls and which calls the body: php's trace prologue,
-//! which a jump from another trace passes over
+//! `fn(cx: *mut ExitCtx, frame: *mut u8, entry: u64, images: *const usize,
+//! call: *mut u8, stands: u64) -> u32` on Cranelift's tail convention,
+//! entered with the crossing's `ExitCtx`, the room of the frame it runs in,
+//! php's `execute_data`, and the rest of its entry, and answering the
+//! [`ExitId`] it left through. Its bytes begin with the prologue,
+//! `extern "C" fn(cx, frame, body, entry, images, call, stands) -> u32` on
+//! the host's convention, which `enter` calls and which calls the body:
+//! php's trace prologue, which a jump from another trace passes over
 //! (`Z/ext/opcache/jit/zend_jit_ir.c:17418-17432`). A body hands on to
 //! another trace by a tail call, which gives its own machine frame up
 //! where php's jump keeps the one frame every trace shares: a link jumps
-//! to the trace it links to, and an exit whose side trace is published
-//! jumps to it through the exit's [entry slot](EntrySlots), each laying
-//! down the entry the trace it enters reads.
+//! to the trace it links to, an exit to the side trace grown from it and
+//! an escape to the return root at its landing, each through its
+//! [`Door`] in the request, with the entry of the trace it enters in
+//! registers.
 //!
 //! **The entry** (`jit-design.md` §4.6). What a body reads as it enters
-//! is the room it was handed and the `ExitCtx`'s entry fields: where it
-//! is entered ([`ENTRY_AT`]), where the frame stands as a kernel would
-//! say ([`STOOD_AT`]), the frame's place on the stack
-//! ([`ROOT_AT`]), its calls' headers in this request and whether they
-//! are ready ([`IMAGES_AT`], [`READY_AT`]), and its own number
-//! ([`TRACE_AT`]), by which `enter` reads the exit it answers. `enter`
-//! lays them down as it calls the prologue, and a jump lays them down as
-//! the exit it leaves through would have left the frame, so a trace is
-//! entered alike whichever way it is reached.
+//! is its parameters: the room it was handed; the entry word, the
+//! frame's place on the stack and whether it is entered at its loop's
+//! body and makes its calls in place ([`ENTRY_PLACE`], [`ENTRY_BODY`],
+//! [`ENTRY_UNREADY`]); the request's addresses of the trace, its calls'
+//! headers, its cache slots and its doors' words; and where the frame
+//! stands as a kernel would say, the call under way in it and its op
+//! array and opline in one [`Stands`] word. `enter` hands them to the
+//! prologue, and a jump passes them as the exit it leaves through would
+//! have left the frame, so a trace is entered alike whichever way it is
+//! reached, and the `ExitCtx` carries none of it.
 //! It runs on the interpreter's frames: a slot is a load and a store at
 //! `room + ROOM_BYTES + 16 * var` with the zval layout `php_heap` defines,
 //! so an exit leaves every frame as the interpreter reads it once it has
@@ -67,7 +70,7 @@ pub(crate) mod dump;
 mod tests;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::ir::SourceLoc;
@@ -117,7 +120,7 @@ pub(crate) struct Compiled {
     /// at, where a frame entering it stands.
     pub(crate) opens: Option<(FuncRef, OplineIdx)>,
     /// Whether its code reads where the frame stands as it enters, which
-    /// `enter` hands it at [`STOOD_AT`] as a kernel reports it: for php's
+    /// `enter` hands it as a kernel reports it: for php's
     /// IP guard of a side trace whose parent's exit named no opline
     /// (`record::Landed::Stood`), and for a call its frame began before
     /// the trace, php's fake init, whose room it reads there
@@ -137,12 +140,14 @@ pub(crate) struct Compiled {
     /// the guard fails once, once per trace and so per process; the code
     /// holds their address, so they live as long as it. Empty otherwise.
     pub(crate) fuzzed: Fuzzed,
-    /// One entry slot per exit, which the code reads where the exit may
-    /// jump to its side trace; the code holds their address, so they live
-    /// as long as it.
-    pub(crate) slots: EntrySlots,
+    /// Its doors, in the order their words stand in the request's
+    /// addresses of the trace, past its headers and its cache slots.
+    pub(crate) doors: Box<[Door]>,
+    /// Its number as its answers write it, which the code holds the
+    /// address of, so it lives as long as the code.
+    pub(crate) number: Numbered,
     /// The plain calls the code pushes in place, in the order it reads
-    /// their headers in, the request's, at [`IMAGES_AT`].
+    /// their headers in, the request's, among its addresses (`enter::Images`).
     pub(crate) calls: Box<[PlainCall]>,
     /// The op arrays a call the code makes in place enters whose caches
     /// `enter` asks are laid down in the request, as php's
@@ -212,6 +217,11 @@ impl Stands {
     pub(crate) fn word(self) -> u64 {
         u64::from(self.func) | u64::from(self.opline) << 32
     }
+
+    /// The word as a door's key holds it ([`DOOR_KEY`]).
+    pub(crate) fn key(self) -> usize {
+        usize::try_from(self.word()).unwrap_or(DOOR_NO_LANDING)
+    }
 }
 
 const _: () = assert!(
@@ -219,11 +229,94 @@ const _: () = assert!(
         && cfg!(target_endian = "little")
 );
 
-/// How a trace is entered by a jump from another (`jit-design.md` §4.6):
-/// the address of its body and its number, which the jump writes at
-/// [`TRACE_AT`] and finds the request's row of the trace by. The table
-/// lays one down in each trace it publishes, which never moves while the
-/// table stands, and an exit's [entry slot](EntrySlots) names it.
+/// A way a trace's code hands on to another trace by a jump
+/// (`jit-design.md` §4.6), whose words in the request name the trace it
+/// enters: an exit that may enter its side trace or the trace its link
+/// names, or the escape, which may enter the return root compiled at the
+/// landing it escaped to. The lowering numbers them as it makes them, so a
+/// trace has one per such way and none it does not take.
+///
+/// Each has [`DOOR_WORDS`] words in the request's addresses of the trace
+/// (`enter::Images`), past its calls' headers and its cache slots: the
+/// landing an escape's door was written for ([`DOOR_KEY`], all ones for
+/// none), and the body and the request's addresses of the trace it enters
+/// ([`DOOR_BODY`], [`DOOR_IMAGES`]), zero until the crossing writes them,
+/// once a request, as it enters that trace through `enter` with its calls
+/// ready: from the answer the door's way gave, or, for an escape, from the
+/// number the escape left in that trace's row where it entered it through
+/// the landing's word and answered nothing. The code reads them and
+/// nothing published: php patches the exit's jump
+/// (`zend_jit_link_side_trace`, `Z/ext/opcache/jit/zend_jit_ir.c:17413`),
+/// and here no published byte is written again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Door {
+    /// The exit with this number: one that grows a side, or the end a link
+    /// leaves through.
+    Exit(ExitId),
+    /// The trace's escape, past its lowest frame.
+    Escape,
+}
+
+/// How many words a [`Door`] takes in the request's addresses.
+pub(crate) const DOOR_WORDS: usize = 3;
+
+/// Where in a door's words the landing an escape's door was written for
+/// is, a [`Stands`] word; [`DOOR_NO_LANDING`] in any other door's and in
+/// a closed one.
+pub(crate) const DOOR_KEY: i32 = 0;
+
+/// Where in a door's words the body of the trace it enters is, zero where
+/// the door is not written.
+pub(crate) const DOOR_BODY: i32 = 8;
+
+/// Where in a door's words the request's addresses of the trace it enters
+/// are, null where that trace reads none.
+pub(crate) const DOOR_IMAGES: i32 = 16;
+
+/// The landing a door that names none holds: a [`Stands`] word no frame
+/// stands at, its opline past any op array's.
+pub(crate) const DOOR_NO_LANDING: usize = usize::MAX;
+
+/// A door's words before the crossing writes them, so its jump is not
+/// taken: no landing, no body and no addresses.
+pub(crate) const DOOR_CLOSED: [usize; DOOR_WORDS] = [DOOR_NO_LANDING, 0, 0];
+const _: () = assert!(
+    DOOR_KEY == 0
+        && DOOR_BODY as usize == size_of::<usize>()
+        && DOOR_IMAGES as usize == 2 * size_of::<usize>()
+);
+
+/// The trace's number as its answers write it at [`TRACE_AT`]
+/// (`jit-design.md` §4.6): a word the code reads at an address it holds
+/// as a constant, written once, by the publish that numbers the trace,
+/// before anything can enter it, so `enter` reads the answer against the
+/// trace that gave it, which a jump may have entered.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Numbered(Arc<AtomicU32>);
+
+impl Numbered {
+    /// The address the code reads the number at.
+    fn address(&self) -> usize {
+        std::ptr::from_ref(&*self.0).addr()
+    }
+
+    /// The number the table gave the trace, written as it publishes it.
+    pub(crate) fn number(&self, id: u32) {
+        self.0.store(id, Ordering::Relaxed);
+    }
+
+    /// The number as the code reads it.
+    #[cfg(test)]
+    pub(crate) fn read(&self) -> u32 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// How a trace is entered from an escape that reads the landing's word
+/// (`jit-design.md` §4.9): the address of its body and its number, which
+/// the jump finds the request's row of the trace by. The table lays one
+/// down in each trace it publishes, which never moves while the table
+/// stands, and names it in [`Escapes::entrances`].
 #[repr(C)]
 #[derive(Debug)]
 pub(crate) struct Entrance {
@@ -239,77 +332,19 @@ const _: () = assert!(
         && std::mem::offset_of!(Entrance, trace) == ENTRANCE_TRACE.unsigned_abs() as usize
 );
 
-/// One entry slot per exit of a trace (#3229's ruling, `jit-design.md`
-/// §4.4, §4.6): null until the side trace grown from the exit is
-/// published, then the side's [`Entrance`], written once, with release,
-/// by the publish that placed it. The exit's code loads its slot with
-/// acquire and jumps to the side where it is set, and answers its
-/// [`ExitId`](crate::types::ExitId) as before where it is not; no
-/// published byte is written again, which is what php's patch of the
-/// exit's jump (`zend_jit_link_side_trace`,
-/// `Z/ext/opcache/jit/zend_jit_ir.c:17413`) would have done.
-///
-/// A slot never names code that outlives the code that reads it: a side
-/// is published only into the table its parent stands in
-/// ([`crate::table::TraceTable::publish`]), the parent's trace holds its
-/// slots and the side's trace its `Entrance`, and the table drops every
-/// trace together, with its epoch, once no request, job or claim holds
-/// it, so a trace running in a request whose epoch holds the table runs
-/// beside every trace a slot of it names.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct EntrySlots(Arc<[AtomicPtr<Entrance>]>);
-
-impl EntrySlots {
-    /// `n` slots, none set.
-    pub(crate) fn new(n: usize) -> EntrySlots {
-        EntrySlots(
-            (0..n)
-                .map(|_| AtomicPtr::new(std::ptr::null_mut()))
-                .collect(),
-        )
-    }
-
-    /// The address of the first slot, which the code reads past.
-    fn base(&self) -> usize {
-        self.0.as_ptr().addr()
-    }
-
-    /// `side` written to the slot of `exit`, once: false where the slot
-    /// is set already or the trace has no such exit, which writes
-    /// nothing.
-    pub(crate) fn open(&self, exit: ExitId, side: &Entrance) -> bool {
-        let entrance = std::ptr::from_ref(side).cast_mut();
-        self.0.get(usize::from(exit.0)).is_some_and(|slot| {
-            slot.compare_exchange(
-                std::ptr::null_mut(),
-                entrance,
-                Ordering::Release,
-                Ordering::Relaxed,
-            )
-            .is_ok()
-        })
-    }
-
-    /// The address the slot of `exit` holds, null where it is unset.
-    #[cfg(test)]
-    pub(crate) fn opened(&self, exit: ExitId) -> Option<usize> {
-        let slot = self.0.get(usize::from(exit.0))?;
-        Some(slot.load(Ordering::Acquire).addr())
-    }
-}
-
-/// Where a trace's escape reads the landing it escaped to
-/// (`jit-design.md` §4.9, #3299's ruling): a return that leaves its
-/// lowest frame at an opline the trace does not go on at runs, as php's
-/// escape stub runs the handler of the opline the frame stands at
-/// (`zend_jit_trace_escape_stub`, `Z/ext/opcache/jit/zend_jit_ir.c:2488-2497`),
-/// which the root's publish wrote (`zend_jit_trace.c:7595`), the trace
-/// compiled there: its code reads the landing's word through the
-/// epoch's `landings` index, and where the word reads compiled, enters
-/// the trace it names through `entrances`, the table's entrance of each
-/// trace number below `traces`; it answers [`ESCAPED`] where either is
-/// not there. Both stand as long as the table, so a trace keeps no state
-/// of the landings it escapes to.
+/// Where a trace's escape reads the landing it reached where its [`Door`]
+/// is closed or names another (`jit-design.md` §4.9, #3299's and #4108's
+/// rulings): a return that leaves its lowest frame at an opline the trace
+/// does not go on at runs, as php's escape stub runs the handler of the
+/// opline the frame stands at (`zend_jit_trace_escape_stub`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:2488-2497`), which the root's publish
+/// wrote (`zend_jit_trace.c:7595`), the trace compiled there: its code
+/// reads the landing's word through the epoch's `landings` index, and
+/// where the word reads compiled, enters the trace it names through
+/// `entrances`, the table's entrance of each trace number below `traces`;
+/// it answers [`ESCAPED`] where either is not there. Both stand as long as
+/// the table, so no published trace keeps state of the landings it escapes
+/// to; what the request keeps of one is the escape's door.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Escapes {
     pub(crate) landings: LandingIndex,
@@ -320,13 +355,12 @@ pub(crate) struct Escapes {
 /// The trace a link jumps to (`jit-design.md` §4.3), published before the
 /// trace that links to it is compiled, so the jump is in that trace's
 /// bytes before they are published, as php's `zend_jit_trace_link_to_root`
-/// writes it (`Z/ext/opcache/jit/zend_jit_ir.c:17418-17432`): its
-/// [`Entrance`], and whether the jump tests the interrupt first, which
-/// php's does where a side trace links to its own root and the root loops
-/// (`Z/ext/opcache/jit/zend_jit_trace.c:7285-7303`).
+/// writes it (`Z/ext/opcache/jit/zend_jit_ir.c:17418-17432`), through the
+/// link's [`Door`]: its number, and whether the jump tests the interrupt
+/// first, which php's does where a side trace links to its own root and
+/// the root loops (`Z/ext/opcache/jit/zend_jit_trace.c:7285-7303`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Linked {
-    pub(crate) body: usize,
     pub(crate) trace: u32,
     pub(crate) interrupt: bool,
     /// Where the trace opens, where a link that names no opline leaves the
@@ -395,9 +429,8 @@ pub(crate) const DECLINED: u32 = u32::MAX - 3;
 /// of the frame it returned into is stored but its place, at [`ROOT_AT`],
 /// since the trace knows nothing else of it; `enter` hands that frame
 /// back, at the opline the return left it, whose handler `dispatch` runs
-/// as php's interpreter does: where
-/// the code found no trace compiled there it could go on into
-/// ([`Escapes`]).
+/// as php's interpreter does: where neither the escape's [`Door`] nor the
+/// landing's word finds a trace the request can enter there ([`Escapes`]).
 pub(crate) const ESCAPED: u32 = u32::MAX - 4;
 
 /// What compiled code answers where the `RETURN` its trace ends at left
@@ -409,65 +442,38 @@ pub(crate) const ESCAPED: u32 = u32::MAX - 4;
 /// above; nothing is stored, and `enter` hands back no frame.
 pub(crate) const RETURNED: u32 = u32::MAX - 5;
 
-/// Where compiled code reads, in the `ExitCtx`, where it is entered
-/// (`enter::At`), a `u32` that is not zero at a loop's body
-/// (`types::BodyEntry`): the field `enter` lays down past the interrupt
-/// pointer.
-pub(crate) const ENTRY_AT: i32 = 16;
-
 /// Where compiled code reads the interrupt pointer in the `ExitCtx`
 /// (`jit-design.md` §4.6): the request at offset zero, the pointer to its
 /// interrupt byte at offset eight, the field `enter` lays down with the
 /// first trace it enters (#2957).
 pub(crate) const INTERRUPT_AT: i32 = 8;
 
-/// Where compiled code reads, in the `ExitCtx`, where the frame stands
-/// as the trace enters, a [`Stood`] as a kernel writes one, which `enter`
-/// lays down past where it is entered for a trace whose code reads it
-/// there ([`Compiled::entry_stood`]).
-pub(crate) const STOOD_AT: i32 = 24;
-
 /// Where compiled code reads, in the `ExitCtx`, the address of the
 /// request's VM stack (`php_engine::tier::stack`), which it pushes and
-/// pops a plain call's frame on in place: past the `Stood`.
-pub(crate) const STACK_AT: i32 = 56;
+/// pops a plain call's frame on in place: past the interrupt pointer.
+pub(crate) const STACK_AT: i32 = 16;
 
-/// Where compiled code reads, in the `ExitCtx`, the address of the
-/// request's addresses its code reads: the headers for the calls it pushes
-/// in place, one address a call in [`Compiled::calls`]' order, each
-/// `php_engine::tier::FRAME`'s `header_bytes` long
-/// (`php_engine::tier::call_image`), then the runtime-cache slots it reads,
-/// one a slot of [`Compiled::map_ptrs`], each laid down by the touch on the
-/// request's first entry of the trace (`jit-design.md` §4.6,
-/// `php_engine::tier::touch`).
-pub(crate) const IMAGES_AT: i32 = 64;
+/// Where an escape ([`ESCAPED`]) writes, in the `ExitCtx`, the place on
+/// the stack of the frame it returned into, a `u32`, which `enter` hands
+/// back.
+pub(crate) const ROOT_AT: i32 = 24;
 
-/// Where compiled code reads, in the `ExitCtx`, the place on the stack of
-/// the frame the trace is entered on, a `u32`: the caller a call it makes
-/// in place from that frame names. An escape ([`ESCAPED`]) writes there
-/// the place of the frame it returned into, which `enter` hands back.
-pub(crate) const ROOT_AT: i32 = 72;
-
-/// Where compiled code reads, in the `ExitCtx`, whether it pushes and
-/// makes its calls in place in this request, a `u32` that is zero where a
-/// call's header is not the request's yet, its function not declared, or
-/// the cache of a callee it enters ([`Compiled::laid`]) is not laid down,
-/// so that it serves them through the kernels instead.
-pub(crate) const READY_AT: i32 = 76;
+/// Where an answer writes, in the `ExitCtx`, the number of the trace that
+/// gives it ([`Numbered`]), which `enter` reads the exit against: the one
+/// it called, or one a jump entered.
+pub(crate) const TRACE_AT: i32 = 28;
 
 /// Where compiled code reads, in the `ExitCtx`, the address of the
 /// request's rows (`enter::Rows`): one address per segment of
 /// [`ROW_SEGMENT`] rows, zero for a segment no trace of it was entered
-/// in, and in a row, at [`ROW_IMAGES`], the address of the trace's calls'
-/// headers in the request and, at [`ROW_READY`], a `u32` that is not
-/// zero once the crossing has entered the trace in the request with its
-/// calls ready. A jump enters a trace only where its row is ready.
-pub(crate) const ROWS_AT: i32 = 80;
-
-/// Where compiled code writes, in the `ExitCtx`, the number of the trace
-/// it enters by a jump, which `enter` reads the exit it answers against:
-/// `enter` writes the number of the trace it calls.
-pub(crate) const TRACE_AT: i32 = 88;
+/// in, and in a row, at [`ROW_IMAGES`], the request's addresses of the
+/// trace and, at [`ROW_READY`], a byte that is not zero once the crossing
+/// has entered the trace in the request with its calls ready. An escape
+/// that reads the landing's word enters a trace only where its row is
+/// ready ([`Escapes`]), and writes its own number at [`ROW_ESCAPED_BY`],
+/// by which the crossing's next entry of that trace opens the escape's
+/// door.
+pub(crate) const ROWS_AT: i32 = 32;
 
 /// The rows a segment of a request's rows holds, as many as a segment of
 /// the trace table holds slots, so a trace's number names its row.
@@ -477,7 +483,52 @@ const _: () = assert!(ROW_SEGMENT.is_power_of_two());
 /// A row's bytes, and where in it its fields are (`enter::Row`).
 pub(crate) const ROW_BYTES: i64 = 16;
 pub(crate) const ROW_IMAGES: i32 = 0;
-pub(crate) const ROW_READY: i32 = 8;
+pub(crate) const ROW_ESCAPED_BY: i32 = 8;
+pub(crate) const ROW_READY: i32 = 12;
+
+/// The entry word a body takes as its third parameter (`jit-design.md`
+/// §4.6), decoded where the body enters and made here alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EntryWord {
+    /// The place on the stack of the frame the trace is entered on: the
+    /// caller a call it makes in place from that frame names.
+    pub(crate) place: u32,
+    /// Whether it is entered at its loop's body (`types::BodyEntry`), as
+    /// `enter::At::Body` enters it; a jump enters at the first op.
+    pub(crate) at_body: bool,
+    /// Whether it pushes and makes its calls in place in this request: not
+    /// where a call's header is not the request's yet, its function not
+    /// declared, or the cache of a callee it enters
+    /// ([`Compiled::callee_caches`]) is not laid down, so that it serves
+    /// them through the kernels instead. A jump enters only a trace whose
+    /// calls are ready.
+    pub(crate) ready: bool,
+}
+
+impl EntryWord {
+    /// The word: the place in its low half, and past it a bit each.
+    pub(crate) fn word(self) -> u64 {
+        let mut word = u64::from(self.place);
+        if self.at_body {
+            word |= ENTRY_BODY.unsigned_abs();
+        }
+        if !self.ready {
+            word |= ENTRY_UNREADY.unsigned_abs();
+        }
+        word
+    }
+}
+
+/// The entry word's place.
+pub(crate) const ENTRY_PLACE: i64 = 0xffff_ffff;
+
+/// The entry word's bit for [`EntryWord::at_body`].
+pub(crate) const ENTRY_BODY: i64 = 1 << 32;
+
+/// The entry word's bit where [`EntryWord::ready`] does not hold, so a
+/// jump, whose door was written with the calls ready, passes the bare
+/// place.
+pub(crate) const ENTRY_UNREADY: i64 = 1 << 33;
 
 /// Whether `ir`'s code reads where the frame stands as it enters: its
 /// first op holds it, php's IP guard; a call its frame began before
@@ -979,11 +1030,13 @@ impl Backend {
     /// `ir` in final bytes, named `name`: the prologue, then the body
     /// [`clif::lower`] builds, compiled for the host, with a [`Mark`] per
     /// recorded opline, its link a jump to `linked` where it links to a
-    /// trace with code, and its escape a jump to the trace compiled at
-    /// the landing, read through `escapes`, where it has them. Bytes that would need relocating are php's
-    /// `COMPILER_ERROR`, as is any refusal of Cranelift's: kernel
-    /// addresses, the entry slots' and a link's are constants, so a trace's
-    /// bytes work wherever the arena places them.
+    /// trace with code, its exits and its escape jumps through their
+    /// [`Door`]s, and its escape a jump to the trace compiled at the
+    /// landing, read through `escapes`, where its door does not lead there.
+    /// Bytes that would need relocating are php's `COMPILER_ERROR`, as is
+    /// any refusal of Cranelift's: kernel addresses, the table's and the
+    /// trace's number's are constants, so a trace's bytes work wherever the
+    /// arena places them.
     pub(crate) fn compile(
         &self,
         ir: &TraceIr,
@@ -993,15 +1046,15 @@ impl Backend {
     ) -> Result<Compiled, Abort> {
         let config = self.isa.frontend_config();
         let (calls, callee_caches) = in_place(ir);
-        let slots = EntrySlots::new(ir.exits.len());
+        let number = Numbered::default();
         let joins = clif::Joins {
-            slots: slots.base(),
+            number: number.address(),
             escapes,
             linked,
         };
         // Under exit-fuzz a first pass counts the guards, one byte each.
         let fuzzed = if self.fuzz {
-            let (_, sites) = clif::lower(
+            let (_, sites, _) = clif::lower(
                 ir,
                 config,
                 (&self.symbols, &calls),
@@ -1012,7 +1065,7 @@ impl Backend {
             Fuzzed::default()
         };
         let fuzz = self.fuzz.then(|| fuzzed.fuzz());
-        let (func, _) = clif::lower(ir, config, (&self.symbols, &calls), (fuzz, joins))?;
+        let (func, _, doors) = clif::lower(ir, config, (&self.symbols, &calls), (fuzz, joins))?;
         let body = machine(&*self.isa, func)?;
         let (prologue, prologue_align) = (&self.prologue.0, self.prologue.1);
         let body_offset = prologue.len().next_multiple_of(body.align);
@@ -1040,15 +1093,16 @@ impl Backend {
             marks,
             name,
             fuzzed,
-            slots,
+            doors,
+            number,
             callee_caches,
             calls,
         })
     }
 
     /// The body `ir` lowers to, before Cranelift's passes: the CLIF the
-    /// goldens hold, its entry slots at a made-up address so the text is
-    /// one on every machine.
+    /// goldens hold, its number at a made-up address so the text is one
+    /// on every machine.
     #[cfg(test)]
     fn clif(
         &self,
@@ -1057,7 +1111,7 @@ impl Backend {
     ) -> Result<cranelift_codegen::ir::Function, Abort> {
         let (calls, _) = in_place(ir);
         let joins = clif::Joins {
-            slots: 0x6000_0000,
+            number: 0x6000_0000,
             escapes: Some(Escapes {
                 landings: LandingIndex {
                     chunks: 0x6100_0000,
@@ -1079,7 +1133,7 @@ impl Backend {
             (&self.symbols, &calls),
             (None, joins),
         )
-        .map(|(func, _)| func)
+        .map(|(func, _, _)| func)
     }
 }
 
