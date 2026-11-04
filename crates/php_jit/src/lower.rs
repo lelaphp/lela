@@ -790,11 +790,17 @@ pub(crate) enum Kernel {
     /// (`php_engine::tier::interrupted`); a hook's throw is the status's,
     /// and the timeout's fatal an exit.
     Interrupt,
+    /// `nan_to_bool(cx, frame, opline: u32)`: php's
+    /// `zend_jit_nan_coerced_to_type_warning`, the warning of a NAN whose
+    /// truth compiled code reads, the frame stood at the opline; what an
+    /// error handler throws is the status's
+    /// (`php_engine::tier::nan_to_bool`).
+    NanToBool,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 21] = [
+    pub(crate) const ALL: [Kernel; 22] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
@@ -816,6 +822,7 @@ impl Kernel {
         Kernel::CallNative,
         Kernel::PopCall,
         Kernel::Interrupt,
+        Kernel::NanToBool,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

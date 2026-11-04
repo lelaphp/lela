@@ -813,6 +813,7 @@ kernels! {
         CallNative => call_native(call: u32) -> Zval = tier::call_native;
         PopCall => pop_call() = tier::pop_call;
         Interrupt => interrupt() = tier::interrupted;
+        NanToBool => nan_to_bool() = tier::nan_to_bool;
     }
 }
 
@@ -1028,6 +1029,17 @@ fn free_cv(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Resu
 fn free_this(req: &mut Request, on: On<'_, '_>) -> Result<(), Fatal> {
     let frame = standing(req, on.room, on.at)?;
     tier::free_this(req, frame);
+    Ok(())
+}
+
+/// The `nan_to_bool` kernel: the warning of a NAN whose truth compiled
+/// code reads, the frame stood at the opline first ([`tier::nan_to_bool`]),
+/// as php's cold arm saves the opline and calls
+/// `zend_jit_nan_coerced_to_type_warning`; what an error handler throws
+/// is left pending, which the wrapper answers as one.
+fn nan_to_bool(req: &mut Request, on: On<'_, '_>) -> Result<(), Fatal> {
+    standing(req, on.room, on.at)?;
+    tier::nan_to_bool(req);
     Ok(())
 }
 

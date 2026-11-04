@@ -1431,6 +1431,9 @@ impl<'a> Builder<'a> {
         let throws = match form {
             Form::Inline => {
                 (op.opcode == Opcode::Assign && !old.within(UNCOUNTED))
+                    // A NAN's warning runs the error handler, which may
+                    // throw, where the handler would leave it pending.
+                    || (takes_truth(op.opcode) && old == Types::DOUBLE)
                     || (matches!(
                         op.opcode,
                         Opcode::FetchDimR | Opcode::FetchDimIs | Opcode::IssetIsemptyDimObj
@@ -3236,12 +3239,13 @@ impl<'a> Builder<'a> {
         }
         let inline = match op.opcode {
             Opcode::Jmp => true,
-            // A double's truth is the handler's, which warns of a NAN as
-            // php 8.5 coerces it (`ZEND_JMPZ`, `Z/Zend/zend_vm_def.h`).
-            Opcode::Jmpz | Opcode::Jmpnz | Opcode::JmpzEx | Opcode::JmpnzEx => {
-                scalar(t1) && t1 != Types::DOUBLE
+            // A scalar's truth, as php's `zend_jit_bool_jmpznz` compiles
+            // it, a double's with the warning of a NAN in a cold arm
+            // (`Z/ext/opcache/jit/zend_jit_ir.c:7750-7768`), and a scalar
+            // moved.
+            Opcode::Jmpz | Opcode::Jmpnz | Opcode::JmpzEx | Opcode::JmpnzEx | Opcode::QmAssign => {
+                scalar(t1)
             }
-            Opcode::QmAssign => scalar(t1),
             Opcode::IsSmaller | Opcode::IsSmallerOrEqual | Opcode::IsEqual | Opcode::IsNotEqual => {
                 number(t1) && number(t2)
             }
@@ -4929,7 +4933,7 @@ struct Branched {
 /// `zend_jit_identical` compares them inline or calls `zend_is_identical`
 /// (`Z/ext/opcache/jit/zend_jit_ir.c:7292-7532`); a string's length read
 /// in place, php's `zend_jit_strlen` (`:11623-11660`); a scalar's truth,
-/// php's `zend_jit_bool_jmpznz`, a double's the handler's as a jump's is;
+/// php's `zend_jit_bool_jmpznz`;
 /// an array, which holds no iterator to delete, given up as php's
 /// `zend_jit_free` gives it up (`:11543-11580`); a rope's piece that is a
 /// string, which php's `zend_jit_rope` stores inline and joins through
@@ -4948,7 +4952,7 @@ fn strung(op: &Opline, seen: Seen) -> Option<Form> {
                 || (t1.scalar() && string(t2, 1))
         }
         Opcode::Strlen => string(t1, 0),
-        Opcode::Bool | Opcode::BoolNot => t1.scalar() && t1 != Types::DOUBLE,
+        Opcode::Bool | Opcode::BoolNot => t1.scalar(),
         Opcode::FeFree => t1.tag() == Some(ZvalType::Array),
         Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => string(t2, 1),
         Opcode::Concat | Opcode::FastConcat => string(t1, 0) && string(t2, 1),
@@ -4961,6 +4965,20 @@ fn strung(op: &Opline, seen: Seen) -> Option<Form> {
         _ => return None,
     };
     Some(if inline { Form::Inline } else { Form::Step })
+}
+
+/// Whether `opcode` reads its operand's truth, php's
+/// `zend_jit_bool_jmpznz`'s oplines.
+fn takes_truth(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::Jmpz
+            | Opcode::Jmpnz
+            | Opcode::JmpzEx
+            | Opcode::JmpnzEx
+            | Opcode::Bool
+            | Opcode::BoolNot
+    )
 }
 
 /// The jump after `op` it is fused to, where it is a comparison whose

@@ -52,6 +52,7 @@ use super::{
 mod calls;
 mod dims;
 mod doors;
+mod fetches;
 mod objects;
 mod strings;
 mod unread;
@@ -1950,7 +1951,9 @@ impl<'a> Emit<'a> {
                 I64, I64, I32, I32, I32, I32, I64, I64, I32, I64, I32, I64, I32, I64,
             ],
             Kernel::Step | Kernel::CallNative => &[I64, I64, I32, I32, I64],
-            Kernel::FreeThis | Kernel::PopCall | Kernel::Interrupt => &[I64, I64, I32],
+            Kernel::FreeThis | Kernel::PopCall | Kernel::Interrupt | Kernel::NanToBool => {
+                &[I64, I64, I32]
+            }
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release | Kernel::FreeCv => &[I64, I64, I32, I64, I32],
             Kernel::Identical => &[I64, I64, I32, I64, I32, I64, I32, I64],
@@ -3066,7 +3069,7 @@ impl<'a> Emit<'a> {
     /// boolean a `JMPZ_EX` or `JMPNZ_EX` writes.
     fn jump(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let held = self.scalar(at, line.op1)?;
-        let truth = self.truth(held);
+        let truth = self.warned_truth(line, held)?;
         if let Some(out) = line.out {
             self.define(out, Scalar::Bool(truth))?;
         }
@@ -4162,7 +4165,7 @@ impl<'a> Emit<'a> {
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:7533-7800`).
     fn bool(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let held = self.scalar(at, line.op1)?;
-        let truth = self.truth(held);
+        let truth = self.warned_truth(line, held)?;
         let truth = match line.opcode {
             Opcode::BoolNot => self.b.ins().icmp_imm_s(IntCC::Equal, truth, 0),
             _ => truth,

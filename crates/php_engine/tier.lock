@@ -223,6 +223,7 @@ tier::free_cv
 tier::free_this
 tier::lookup_element
 tier::make_ref
+tier::nan_to_bool
 tier::pop_call
 tier::release
 tier::return_entry
