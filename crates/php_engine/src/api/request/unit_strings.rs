@@ -36,8 +36,8 @@ use php_link::NameHasher;
 use php_unit::decl::TraitAdaptation;
 use php_unit::{OperandKind, PublishedUnit, Unit, WeakUnit};
 
-use super::Request;
 use super::declared_bytes::{self, Alone, Blocks, ClassBlocks, Declared, Gone, MainOpArray};
+use super::{Request, WordMap};
 use crate::api::raising::Thrown;
 use crate::api::values::{Emalloc, PhpString, Value};
 
@@ -56,6 +56,10 @@ const BIND_EXPLICIT: u32 = 4;
 #[derive(Default)]
 pub(crate) struct UnitStrings {
     units: Vec<Held>,
+    /// Where each entry of `units` stands, by its unit's address: a
+    /// closure's every creation and free asks, whether its unit is among
+    /// them or not. An entry's weak share keeps the address its unit's.
+    places: WordMap<usize, usize>,
     by_bytes: HashMap<Box<[u8]>, Option<PhpString>, NameHasher>,
     spare: Vec<Spare>,
     dead: Vec<PhpString>,
@@ -597,6 +601,7 @@ impl UnitStrings {
         let spare = &mut self.spare;
         let gone = &mut self.gone;
         let dead_blocks = &mut self.dead_blocks;
+        let held = self.units.len();
         self.units.retain_mut(|held| {
             let alive = held.unit.strong_count() > 0;
             let ends = ended == Some(held.unit.as_ptr());
@@ -629,6 +634,12 @@ impl UnitStrings {
             });
             false
         });
+        if self.units.len() != held {
+            let places = self.units.iter().enumerate();
+            self.places = places
+                .map(|(at, held)| (held.unit.as_ptr().addr(), at))
+                .collect();
+        }
         // What the op arrays that are over owned: their blocks, given
         // back by the caller, and their strings.
         for Gone { blocks, strings } in self.gone.drain(..) {
@@ -718,7 +729,7 @@ impl UnitStrings {
     /// The place of the entry for the unit at `unit`, where the request
     /// holds one.
     fn position(&self, unit: *const Unit) -> Option<usize> {
-        (self.units.iter()).position(|held| std::ptr::eq(held.unit.as_ptr(), unit))
+        self.places.get(&unit.addr()).copied()
     }
 
     /// The entry for `unit`, laid down where there is none.
@@ -727,6 +738,7 @@ impl UnitStrings {
             return at;
         }
         let spare = self.spare.pop().unwrap_or_default();
+        (self.places).insert(PublishedUnit::as_ptr(unit).addr(), self.units.len());
         self.units.push(Held {
             unit: PublishedUnit::downgrade(unit),
             declares: !(unit.functions.is_empty()

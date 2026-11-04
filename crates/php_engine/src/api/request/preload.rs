@@ -650,6 +650,7 @@ impl Request {
                 Row::Unlinked(_) => {}
             }
         }
+        self.closure_rows.clear();
         let functions: Vec<(Box<[u8]>, UserFunction)> = std::mem::take(&mut self.user_functions)
             .into_iter()
             .filter(|user| user.member.is_none())
