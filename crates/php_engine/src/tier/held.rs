@@ -24,22 +24,24 @@
 //! the op arrays it kept, as php's `zend_leave_helper` goes on in the
 //! caller's `EX(func)`.
 
-use std::cell::{Cell, OnceCell};
+use std::cell::{Cell, OnceCell, RefCell};
 
 use php_compile::Reentered;
 use php_heap::FrameRef;
 use php_unit::{OpArray, PublishedUnit};
 
 use crate::api::call::Function;
-use crate::api::request::Request;
+use crate::api::request::{Request, WordMap};
 use crate::exec;
 
-/// How many units one block of [`Units`] holds a share of.
+/// How many units the first block of [`Units`] holds a share of; each
+/// block after it holds twice what the one before it holds.
 const BLOCK: usize = 16;
 
-/// How many blocks [`Units`] grows to: a serving whose frames enter more
-/// units than all of them hold lets every share go and takes the units
-/// up afresh ([`Entered::Full`]), so what it holds stays bounded.
+/// How many blocks [`Units`] grows to, about a million units: a serving
+/// whose frames enter more than all of them hold lets every share go and
+/// takes the units up afresh ([`Entered::Full`]), so what it holds stays
+/// bounded.
 const BLOCKS: usize = 16;
 
 /// What the first [`Scope`] of a request is charged of the thread's
@@ -70,16 +72,20 @@ const KEPT: usize = 16;
 /// the first frame that entered it until the loop lets them all go:
 /// added to and never changed while a serving borrows them, so what is
 /// borrowed from one stands as long as the loop holds it. A block is
-/// laid down where the one before it is full. A file's unit the request
-/// compiled for itself ([`Request::took_unit`]) is held by the [`Scope`]
+/// laid down where the one before it is full, and a unit is found among
+/// them by its address, in one lookup however many are held. A file's
+/// unit the request compiled for itself ([`Request::took_unit`]) is held by the [`Scope`]
 /// its frame is served in, not here, unless the machine stack has no
 /// room for one more scope: then at most one such unit is held here, a
 /// frame of a second lets them all go ([`Entered::Full`]), and each is
 /// given back to the request ([`Units::give_back`]).
 #[derive(Default)]
 pub(super) struct Units {
-    blocks: [OnceCell<Box<[OnceCell<PublishedUnit>; BLOCK]>>; BLOCKS],
+    blocks: [OnceCell<Box<[OnceCell<PublishedUnit>]>>; BLOCKS],
     len: Cell<usize>,
+    /// Where each unit held stands among them, by its address: a share
+    /// held is what keeps the address that unit's.
+    places: RefCell<WordMap<usize, usize>>,
     /// Whether a unit the request compiled for itself is among them.
     took: Cell<bool>,
 }
@@ -247,6 +253,10 @@ impl<'u> Scope<'u> {
 pub(super) struct Kept<'u> {
     frames: Places<&'u OpArray>,
     functions: Places<Called<'u>>,
+    /// The functions whose place another took since, by number, laid
+    /// down by the first that lost one, so a call in a program of more
+    /// functions than [`KEPT`] asks one lookup and enters nothing again.
+    displaced: WordMap<u32, Called<'u>>,
 }
 
 /// What the loop keeps of a function it called: the op array it serves
@@ -290,14 +300,14 @@ impl<T: Copy> Places<T> {
         }
     }
 
-    /// `value` kept for `number`, in the place of whatever its place kept.
+    /// `value` kept for `number`, in the place of whatever its place
+    /// kept, which is handed back with its number.
     #[inline]
-    fn set(&mut self, number: u32, value: T) {
+    fn set(&mut self, number: u32, value: T) -> Option<(u32, T)> {
         let at = number as usize % KEPT;
-        if let (Some(kept), Some(place)) = (self.numbers.get_mut(at), self.kept.get_mut(at)) {
-            *kept = number;
-            *place = Some(value);
-        }
+        let (kept, place) = (self.numbers.get_mut(at)?, self.kept.get_mut(at)?);
+        let before = std::mem::replace(kept, number);
+        place.replace(value).map(|taken| (before, taken))
     }
 }
 
@@ -383,25 +393,22 @@ impl Units {
     /// none where every place is taken, or where `unit` is a second one
     /// the request compiled for itself (`took`).
     fn hold(&self, unit: &PublishedUnit, took: bool) -> Option<&PublishedUnit> {
-        let len = self.len.get();
-        // The unit entered last first: a program's frames mostly enter
-        // the units they entered lately.
-        let found = (0..len)
-            .rev()
-            .find_map(|at| self.at(at).filter(|held| PublishedUnit::ptr_eq(held, unit)));
-        if found.is_some() {
-            return found;
+        let address = PublishedUnit::as_ptr(unit).addr();
+        if let Some(at) = self.places.borrow().get(&address) {
+            return self.at(*at);
         }
         if took && self.took.get() {
             return None;
         }
-        let block = self
-            .blocks
-            .get(len / BLOCK)?
-            .get_or_init(|| Box::new(std::array::from_fn(|_| OnceCell::new())));
-        let held = block
-            .get(len % BLOCK)?
-            .get_or_init(|| PublishedUnit::clone(unit));
+        let len = self.len.get();
+        let (at_block, place) = locate(len);
+        let block = self.blocks.get(at_block)?.get_or_init(|| {
+            std::iter::repeat_with(OnceCell::new)
+                .take(BLOCK << at_block)
+                .collect()
+        });
+        let held = block.get(place)?.get_or_init(|| PublishedUnit::clone(unit));
+        self.places.borrow_mut().insert(address, len);
         self.len.set(len + 1);
         self.took.set(self.took.get() || took);
         Some(held)
@@ -419,35 +426,44 @@ impl Units {
     /// a `Kept` of its own.
     pub(super) fn give_back(&mut self, req: &mut Request) {
         for at in 0..self.len.replace(0) {
-            let share = (self.blocks.get_mut(at / BLOCK))
+            let (at_block, place) = locate(at);
+            let share = (self.blocks.get_mut(at_block))
                 .and_then(OnceCell::get_mut)
-                .and_then(|block| block.get_mut(at % BLOCK))
+                .and_then(|block| block.get_mut(place))
                 .and_then(OnceCell::take);
             if let Some(share) = share {
                 req.give_back(share);
             }
         }
+        self.places.get_mut().clear();
         self.took.set(false);
     }
 
     /// The serving over: where a unit the request compiled for itself is
-    /// among the units held, or more than one block of them, every share
-    /// given back ([`Units::give_back`]); otherwise each share kept for
-    /// the next serving, since a function's unit and a cached file's are
-    /// held by the request as long as it runs, so the next callback a
-    /// native serves finds its unit held and takes no share of it, and
-    /// [`Units::hold`]'s search of the units held walks one block at
-    /// most.
+    /// among the units held, every share given back
+    /// ([`Units::give_back`]); otherwise each share kept for the next
+    /// serving, since a function's unit and a cached file's are held by
+    /// the request as long as it runs, so the next callback a native
+    /// serves finds its unit held and takes no share of it.
     pub(super) fn leave(&mut self, req: &mut Request) {
-        if self.took.get() || self.len.get() > BLOCK {
+        if self.took.get() {
             self.give_back(req);
         }
     }
 
     /// The unit held at `at`.
     fn at(&self, at: usize) -> Option<&PublishedUnit> {
-        self.blocks.get(at / BLOCK)?.get()?.get(at % BLOCK)?.get()
+        let (block, place) = locate(at);
+        self.blocks.get(block)?.get()?.get(place)?.get()
     }
+}
+
+/// The block of [`Units`] the unit held at `at` stands in, and its place
+/// in that block.
+fn locate(at: usize) -> (usize, usize) {
+    let biased = at + BLOCK;
+    let block = (biased.ilog2() - BLOCK.ilog2()) as usize;
+    (block, biased - (BLOCK << block))
 }
 
 /// The op array of `frame`, which the loop goes on in along an edge it
@@ -478,7 +494,17 @@ impl<'u> Kept<'u> {
     /// and the loop enters it.
     #[inline]
     pub(super) fn called(&self, function: Function) -> Option<Called<'u>> {
-        self.functions.get(function.0)
+        match self.functions.get(function.0) {
+            Some(called) => Some(called),
+            None => self.called_displaced(function),
+        }
+    }
+
+    /// [`Kept::called`] for a function no place keeps.
+    #[cold]
+    #[inline(never)]
+    fn called_displaced(&self, function: Function) -> Option<Called<'u>> {
+        self.displaced.get(&function.0).copied()
     }
 
     /// The op array of `frame`, returned to from a callee, as the loop
@@ -496,13 +522,15 @@ impl<'u> Kept<'u> {
     /// to its number reads.
     #[inline]
     pub(super) fn keep(&mut self, frame: FrameRef, code: &'u OpArray) {
-        self.frames.set(frame.0, code);
+        let _ = self.frames.set(frame.0, code);
     }
 
     /// `function`, called and serving `code`: kept for the next call.
     fn keep_called(&mut self, function: Function, code: &'u OpArray) {
         let entry = exec::entry_of(code);
-        self.functions.set(function.0, Called { code, entry });
+        if let Some((number, called)) = self.functions.set(function.0, Called { code, entry }) {
+            self.displaced.insert(number, called);
+        }
     }
 
     /// Every frame the loop entered forgotten, where it goes on along an
